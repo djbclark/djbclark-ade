@@ -17,21 +17,21 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 | aiuse provider | CLI / TUI on this machine | Plan | Billing | Windows |
 |---|---|---|---|---|
 | `claude` (gmail) | `claude` (Claude Code; cswap acct 2; Orca/ralph-tui drive it) | Max-class | monthly sub | 5h + weekly + **separate Fable weekly** |
-| `claude` (mit) | cswap acct 1 | **expired** — needs re-login + `cswap add` | — | — |
+| `claude` (mit) | **permanently gone** (operator, 2026-08-23) — removed from cswap | — | — | — |
 | `codex` | `codex` (v0.149) | ChatGPT Plus | monthly sub | weekly |
 | `antigravity` | `agy` (v1.1.18; ralph-tui-antigravity-plugin exists) | Google AI Pro | monthly sub | Gemini 5h/weekly **plus Claude/GPT 5h/weekly** |
 | `copilot` | `copilot` (v1.0.77; broke 2026-08-23 on stale pkg cache — fix: `rm -rf ~/Library/Caches/copilot/pkg`) | Individual Pro | monthly sub | premium requests (monthly) |
 | `cursor` | `cursor` (v3.17.8) | Cursor Pro | monthly sub | included / Auto / other-models (monthly) |
 | `grok` | `grok` (v1.0.5; ralph-tui-grok-plugin exists) | SuperGrok | monthly sub | usage limit |
-| `zai` | **unidentified TUI** (no `zai` binary; GLM models also appear in opencode catalogs) — ask operator | lite | monthly sub | 5h + weekly |
+| `zai` | `crush` TUI (Charm Crush, in Orca's roster) | lite | monthly sub | 5h + weekly |
 | `clinepass` | Cline TUI (Orca agent `cline`) + LiteLLM proxy `localhost:4000` (`clinepass-deepseek`, `clinepass-minimax-m3`, `clinepass-kimi-k3`) consumed by Hindsight + hermes | Cline API key | subscription windows | 5h + weekly + monthly |
 | `opencode-go` | `opencode` bundled free tier (`opencode-go/*`: kimi-k3, minimax-m3, qwen3.x, mimo, ox-alpha-free…); `opencode-ralph-tui` wrapper | go (free) | free | 5h + weekly + monthly |
 | `opencode-zen` | `opencode` provider `opencode` (`opencode/*`: claude, gpt, gemini, deepseek, glm catalogs) via gated `opencode-ralph-tui-zen` | prepaid | **prepaid balance** | balance |
 | `openrouter` | gated `opencode-ralph-tui-openrouter` | prepaid | **prepaid balance** | balance |
 | `deepseek` | gated `opencode-ralph-tui-deepseek` | prepaid | **prepaid balance** | balance |
 | `devin` | `devin` (v3000.5.20) — **disabled in Orca's TUI roster**, so its 100%-unused windows are deliberate dormancy | ? | sub (ACUs) | daily + weekly |
-| `alibaba` / `alibabatokenplan` / `qwencloud` | `bl` (Bailian, v1.17.1; bailian-* skills) | ? — no usage rows | token plan + PAYG | ? |
-| `muse` | **unidentified** (gmail acct; `opencode-go/muse-spark-1.2-contributor` exists) — ask operator | ? | ? | ? |
+| `alibaba` / `alibabatokenplan` / `qwencloud` | `bl` (Bailian, v1.17.1; bailian-* skills) | **ID verification pending, expected live ~2026-08-26** | token plan + PAYG | — until verified |
+| `muse` | the Muse service (own account via gmail; `opencode-go/muse-spark-1.2-contributor` surfaces its models) | ? | ? | ? |
 | (not in aiuse) | `opencode` provider `sipb` — MIT SIPB-hosted models (ollama-style: qwen3-coder:30b, deepseek-r1:32b, gemma…) | MIT affiliation | free | none |
 
 Monthly-subscription pools: claude, codex, antigravity, copilot, cursor,
@@ -40,7 +40,8 @@ Prepaid real money: opencode-zen, openrouter, deepseek — all three
 **effectively empty on 2026-08-23** (Zen -$0.04, DeepSeek $0.00,
 OpenRouter $1.13), and gated anyway by the wrapper scripts, which require
 an explicit fresh human decision per run (keys come from
-`~/.config/codexbar/config.json`).
+`~/.config/codexbar/config.json`). **Operator decision 2026-08-23: the
+prepaid tier is retired for now** — revisit only on an explicit top-up.
 
 ## Orca is the fleet registry
 
@@ -100,8 +101,8 @@ Claude 5h is the binding constraint on the core pool as usual.
   cheap interactive edits.
 - **Grok (SuperGrok, 45% left)** — realtime X/news/web angle, quick
   standalone questions.
-- **z.ai GLM (lite)** — budget bulk coding once its consuming TUI is
-  identified.
+- **z.ai GLM (lite) via crush** — budget bulk coding on its own 5h/weekly
+  windows.
 - **opencode-go free models** (kimi-k3, minimax-m3, qwen3.x) — zero-cost
   experimental fan-out and ralph-tui default via the ungated wrapper;
   burn freely.
@@ -132,11 +133,11 @@ Claude 5h is the binding constraint on the core pool as usual.
    `bl quota list`, `curl localhost:4000/v1/models` (LiteLLM),
    `agy --version`, `devin --version`, `copilot --version`.
 
-## Open questions (operator input needed)
+## Formerly open questions — resolved by operator, 2026-08-23
 
-- Which TUI consumes the `zai` GLM lite plan? What is `muse`?
-- Devin: dormant deliberately, or worth wiring into the Orca/ralph fleet?
-- Bailian: is the Token Plan active (aiuse shows no usage rows)?
-- Prepaid balances: top up any of them, or treat the prepaid tier as
-  retired?
-- Re-add the MIT Claude account (`cswap add` after login)?
+- zai GLM lite is consumed by the `crush` TUI.
+- `muse` is the Muse service itself (own account).
+- Devin is dormant deliberately (also disabled in Orca's roster).
+- Bailian is awaiting ID verification, expected live ~2026-08-26.
+- Prepaid tier retired until an explicit top-up.
+- MIT Claude account is gone forever; removed from cswap 2026-08-23.
