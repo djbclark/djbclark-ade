@@ -61,6 +61,40 @@ orca orchestration worker-release --dispatch <dispatch_id> --json
   to another machine with `--on <environment>` uses that machine's
   logged-in credentials — check them before remote dispatch.
 
+## Live-run lessons (2026-08-23, mixed claude + codex fleet)
+
+A real two-worker heterogeneous dispatch (run_e36379cdc849: one claude
+worker, one codex worker, child worktrees under
+`~/orca/workspaces/djbclark-ade/`) settled both tasks `completed`. What
+the receipts taught:
+
+- **`agent_prompt_stalled` can be a false death.** The codex worker was
+  marked failed ~18s after dispatch (cold CLI boot took ~17s to accept the
+  prompt) — but `worker-read --dispatch <id>` showed the prompt had landed
+  and codex was working. Check the transcript before treating a stalled
+  dispatch as a dead worker.
+- **Late `worker_done` from a revoked dispatch is rejected but not lost.**
+  Orca forwarded it to the coordinator as a high-priority message with the
+  original body embedded (`_orcaLifecycleRejection`), and the preamble's
+  taskId+dispatchId payload rule is exactly what prevents it from settling
+  the current dispatch. You get the work's content; the task still needs a
+  proper retry to settle.
+- **The retry that works:** `worker-start --task <t> --retry-of
+  <failed_ctx> --worktree <same child worktree path> --terminal <same
+  handle>` — the warm terminal accepted input instantly and its
+  `worker_done` was accepted. `--terminal` *without* `--worktree` fails
+  with `terminal_worktree_mismatch` (the worktree defaults to the
+  coordinator's).
+- **Follow release receipts literally.** One `worker-release` returned
+  `release_unknown` / `tab_not_found`; the receipt's own recovery
+  (worker-show, then repeat worker-release) settled it as `retained` with
+  no process action. Don't substitute `terminal close`.
+- **Task specs are edge contracts.** The codex worker ran the literal
+  `git ls-files *.md` from its spec — a top-level glob that misses
+  `docs/*.md`. It did exactly what the contract said; the contract was the
+  bug. Spec precision is the coordinator's job (the article's steps 3-4,
+  proven at the macro altitude).
+
 ## Orca-shipped skills
 
 The stubs from the Orca repo's `skill-stubs/` are installed at

@@ -65,6 +65,18 @@ model account per node, cross-machine placement, or human-in-the-loop
 monitoring from the phone. Use the micro graph for everything inside one
 node's boundary — it's cheaper and has no worktree/process overhead.
 
+**Heterogeneous fleets are a requirement here, not an option.** The micro
+graph is Claude-only by construction — Workflow subagents are always
+Claude. The macro graph is the heterogeneity layer: Orca's orchestration
+lifecycle (`worker_done`, `ask`/`reply`, escalation, heartbeats) is
+CLI-agnostic, so one DAG can dispatch Tasks to claude, codex, opencode,
+grok, or cursor workers (all installed on this machine) and they
+interoperate through the same structured mailbox instead of sharing a
+context window. Group addresses (`@claude`, `@codex`, `@opencode`, …)
+exist for genuine fan-out messages. Route each Task to whichever agent is
+best or cheapest for it — the article's model-tiering move (step 12),
+generalized across vendors.
+
 **A third altitude already exists on this machine and isn't duplicated
 here:** `ralph-tui` + beads runs a continuous, scheduled controller loop
 over the `ops-djbclark` suite (stayturgid / site-djbclark / site-private /
@@ -79,6 +91,9 @@ orthogonal to this repo, which is a generic template for other projects.
   schema-validated nodes, adversarial verify, synthesis).
 - `docs/orca-integration.md` — exact, runnable Orca commands for dispatching
   a macro-graph fleet, plus what to check before running one live.
+- `docs/model-routing.md` — which models are reachable via which service
+  on this machine, and the vendor × model × effort routing policy that
+  keeps tokens spent on judgment, not plumbing.
 
 ## Status (2026-08-23)
 
