@@ -99,9 +99,11 @@ orthogonal to this repo, which is a generic template for other projects.
 
 `graph-audit` has run twice for real, pointed at this repo itself:
 
-1. First run (pre-edit script): Audit and Verify executed; five findings,
-   two confirmed, one refuted, and two left unadjudicated because the run
-   was cut short mid-Verify. Confirmed findings fixed.
+1. First run (pre-edit script): slow but complete (7 agents, ~33 min,
+   finishing in the background long after its findings were read from the
+   journal mid-run). Final tally: five findings, four confirmed, one
+   refuted — all four confirmed ones were independently identified and
+   fixed before the run even finished.
 2. Second run (17 agents): the full Audit → Verify → Synthesize graph
    completed, confirming 9 findings — including two prompt-injection
    channels in the workflow's own prompts and a missing-`--ack` deadlock
