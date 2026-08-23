@@ -101,6 +101,24 @@ tools Hermes already has (file/bash), a live probe showed it idling in
 nested contexts, and Hermes's own skills forbid recursive coordinator
 loops.
 
+### Two messaging bridges — which one to use
+
+Both `beeper` and `hermes` can reach the operator's conversations, and
+overlapping use risks two agents answering the same message. Division of
+labor:
+
+| Need | Use | Why |
+|---|---|---|
+| Find/read messages across the operator's 11 networks | **beeper** (`search`, `search_chats`, `list_messages`) | It indexes everything Beeper Desktop bridges; read-heavy and safe |
+| Send *as the operator* in an existing chat | **beeper** (`send_message`) | Goes out over the operator's own account |
+| Send *as the agent* / gateway-native traffic | **hermes** (`messages_send`, `channels_list`) | Hermes's own bot identity + its platform bindings |
+| React to inbound events, answer Hermes approvals | **hermes** (`events_wait`, `permissions_respond`) | Only Hermes carries the agent's event stream and approval queue |
+| Email | Neither — see the Gmail index below | Local FTS5 for search; claude.ai Gmail connector to act |
+
+Rule: **never send the same message through both.** When in doubt about
+who owns a conversation, read with beeper and let Hermes do the sending —
+Hermes is the one whose gateway state tracks what it has already replied to.
+
 ### Not on the MCP bridge: the local Gmail index
 
 Hermes also built a high-speed local Gmail search (FTS5 SQLite index of the

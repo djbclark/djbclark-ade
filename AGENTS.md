@@ -33,6 +33,14 @@ altitudes compose (a macro node can run a micro graph as its body).
   deaths, rejected-late `worker_done` semantics, the retry recipe, the
   ack loop). The authoritative command reference is served by the binary:
   `orca skills get orchestration` — never trust a cached copy.
+- [docs/ai-memory-landscape.md](docs/ai-memory-landscape.md) — the six
+  levels of AI memory this machine is building toward, their source, live
+  per-area status, and how they map onto the published CoALA/7-type
+  taxonomies and the 2026 cross-vendor portability work. The plans
+  themselves live in the ops repos; this is the orientation layer.
+- [docs/upstream-issues.md](docs/upstream-issues.md) — filed-nowhere-yet
+  bug drafts for third-party projects (graft statusline, hindsight config
+  docs), written from problems verified here.
 - [docs/mcp-servers.md](docs/mcp-servers.md) — the MCP server roster for
   Claude Code sessions on this machine: what each server is, where it's
   configured, the Hermes Agent MCP registration, the Beeper re-auth recipe,

@@ -67,6 +67,26 @@ suggestion is "burn Gemini weekly"), **devin** (100%), **opencode-go**
 left, and Hindsight/hermes depend on it — never route bulk work there).
 Claude 5h is the binding constraint on the core pool as usual.
 
+### Live re-probe, 2026-08-23T23:30Z (`aiuse --json`)
+
+Confirms the waste pattern above and refines it. Idle or near-idle —
+route bulk work here first: **antigravity** (Gemini 5h 0%, weekly 3.5%;
+Claude/GPT lanes both 0%), **opencode-go** (5h 0%, weekly 7%, monthly
+3%), **zai** (5h 0%, weekly 30%), **devin** (daily and weekly both 0%).
+Mid-use: copilot 30%, codex weekly 21%, cursor 15-44% across its three
+lanes, grok 55%.
+
+Core pool at probe time: **claude** 5h 4%, weekly 33%, and the separate
+**Fable weekly lane at 50%** — Fable has its own budget, so spending it
+does not eat the Sonnet/Opus weekly. **clinepass** 5h 15% / weekly 3% /
+monthly 42% — monthly is the real constraint; still never bulk-route
+there (Hindsight + hermes lifeline). **deepseek** prepaid $0.00 (retired,
+as policy says); openrouter $1.13 remaining.
+
+Parsing gotcha: `aiuse --json` prints two preamble lines *and* the JSON's
+opening `{` is part of what a naive `tail -n +3` strips. Take everything
+from the first `{` instead, or the parse fails with "Extra data".
+
 ## Effort levers per service
 
 - **claude**: session effort low→max; per-node `model`/`effort` in
