@@ -46,6 +46,10 @@ altitudes compose (a macro node can run a micro graph as its body).
 - [skills/model-routing/SKILL.md](skills/model-routing/SKILL.md) —
   canonical source of the machine-wide model-routing skill (Claude Code's
   live copy is deployed at `~/.claude/skills/model-routing/`).
+- [skills/gmail-search/SKILL.md](skills/gmail-search/SKILL.md) —
+  canonical source of the gmail-search skill: the Hermes-built local
+  Gmail FTS5 index (~192k messages, ~100ms queries), searched via CLI,
+  not MCP (live copy at `~/.claude/skills/gmail-search/`).
 - [vendor/README.md](vendor/README.md) — sidecar index of everything this
   repo references that lives elsewhere on the system: vendored copies
   (prepaid gate scripts, a dated Orca orchestration guide snapshot) and

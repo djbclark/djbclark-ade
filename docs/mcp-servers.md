@@ -66,6 +66,15 @@ Verified via `get_accounts`: 11 networks bridged (Beeper/Matrix, Discord,
 Facebook, Google Messages, Google Chat, Instagram, LinkedIn, Signal, Slack,
 Telegram, WhatsApp).
 
+### Not on the MCP bridge: the local Gmail index
+
+Hermes also built a high-speed local Gmail search (FTS5 SQLite index of the
+complete mailbox at `~/.hermes/gmail_index_v2.db`, ~100ms queries, kept fresh
+by a Hermes cron job every 5m). It is **not** exposed through `hermes mcp
+serve` — access is the plain CLI, documented in the
+[gmail-search skill](../skills/gmail-search/SKILL.md) (deployed at
+`~/.claude/skills/gmail-search/`).
+
 ## Graft statusline: "graft · not built" in this repo is cosmetic
 
 The statusline segment (this repo's `.claude/settings.json` →
