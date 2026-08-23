@@ -66,6 +66,31 @@ Verified via `get_accounts`: 11 networks bridged (Beeper/Matrix, Discord,
 Facebook, Google Messages, Google Chat, Instagram, LinkedIn, Signal, Slack,
 Telegram, WhatsApp).
 
+### The reverse direction: Hermes → Claude already exists (don't add MCP for it)
+
+Hermes reaching Claude needs no new wiring — it already carries a full
+delegation stack (verified live 2026-08-23):
+
+- `delegate_task` + the `intelligent-delegation` Hermes skill route
+  token-heavy research/reasoning to Claude Code with leaf-role recursion
+  prevention and ≤8k-token context injection.
+- The `headless-agent-orchestration` Hermes skill defines a complete Claude
+  worker protocol on `claude-sub` (`~/.local/bin/claude-sub` — refuses
+  API-key billing, verifies claude.ai OAuth; `--check` passes) and
+  `agent-coord run` (workspace claims, stdin prompts, stream-json
+  supervision, `--resume` on max-turns). Smoke-tested end-to-end:
+  `claude-sub "<prompt>" -p --model haiku` → correct reply, ~39s
+  (mostly CLI startup).
+
+So the two agents are bidirectional: **Hermes → Claude** via headless
+delegation, **Claude → Hermes** via the MCP bridge above (including
+`permissions_respond` — Claude can answer Hermes's approval queue — and
+`events_wait` for long-poll coordination). Deliberately NOT done:
+registering `claude mcp serve` inside Hermes — it would only duplicate
+tools Hermes already has (file/bash), a live probe showed it idling in
+nested contexts, and Hermes's own skills forbid recursive coordinator
+loops.
+
 ### Not on the MCP bridge: the local Gmail index
 
 Hermes also built a high-speed local Gmail search (FTS5 SQLite index of the
