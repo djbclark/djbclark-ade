@@ -97,11 +97,19 @@ orthogonal to this repo, which is a generic template for other projects.
 
 ## Status (2026-08-23)
 
-`graph-audit` has been run for real, pointed at this repo itself: the
-Audit and Verify phases executed end-to-end (schema-validated fan-out,
-adversarial verification), found five defects in this repo's own files,
-confirmed two, refuted one — and the confirmed findings were then fixed.
-The Synthesize phase has not yet been exercised by a completed run. The
-Orca orchestration surface was probe-verified live (commands answer with
-protocol errors, not "feature disabled"), but a full macro-graph dispatch
-has not been run yet.
+`graph-audit` has run twice for real, pointed at this repo itself:
+
+1. First run (pre-edit script): Audit and Verify executed; five findings,
+   two confirmed, one refuted, and two left unadjudicated because the run
+   was cut short mid-Verify. Confirmed findings fixed.
+2. Second run (17 agents): the full Audit → Verify → Synthesize graph
+   completed, confirming 9 findings — including two prompt-injection
+   channels in the workflow's own prompts and a missing-`--ack` deadlock
+   in the Orca doc's fan-out loop. All nine are fixed as of this commit,
+   and the workflow now accounts for confirmed vs refuted vs
+   unadjudicated outcomes explicitly.
+
+A live heterogeneous macro-graph dispatch has also completed: one claude
+worker plus one codex worker under a single Run, both tasks settled
+`completed`, with failure/recovery lessons recorded in
+[`docs/orca-integration.md`](docs/orca-integration.md).

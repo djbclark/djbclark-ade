@@ -22,19 +22,29 @@ warns it changes between releases.
 orca orchestration run-create --objective "Audit N services with graph-audit" --json
 # capture the returned run id
 
-orca orchestration task-create --spec "In <repo-a>, run the /workflow graph-audit and report findings" --json
-orca orchestration task-create --spec "In <repo-b>, run the /workflow graph-audit and report findings" --json
+# --worktree new-child makes child worktrees of the COORDINATOR's repo, so
+# this example fans out over slices of this repo. The graph-audit workflow
+# works here because its script ships in this repo's .claude/workflows/ —
+# a worker in a different repo would not have it. For cross-repo dispatch,
+# use an exact worktree selector (or new-top-level --repo <selector>) and
+# make sure the target repo carries the workflow script first.
+orca orchestration task-create --spec "In your worktree, run the graph-audit workflow (script: .claude/workflows/graph-audit.js) on docs/ and report findings" --json
+orca orchestration task-create --spec "In your worktree, run the graph-audit workflow (script: .claude/workflows/graph-audit.js) on .claude/ and report findings" --json
 # capture each returned task id
 
-orca orchestration worker-start --task <task_a> --worktree new-child --name repo-a --agent claude --setup run --json
-orca orchestration worker-start --task <task_b> --worktree new-child --name repo-b --agent claude --setup run --json
+orca orchestration worker-start --task <task_a> --worktree new-child --name slice-docs --agent claude --setup run --json
+orca orchestration worker-start --task <task_b> --worktree new-child --name slice-claude --agent codex --setup run --json
 
-# Block until every worker reports done or escalates. Long tasks routinely
-# run 15-60 minutes — a timeout or {count:0} is a checkpoint, not a failure.
+# One check --wait returns ONE bounded Delivery (up to 50 messages), and an
+# un-acked check replays that same batch — so loop: wait, process every
+# message, release or reuse each settled worker, then acknowledge and wait
+# again, until every expected Dispatch settles. Timeouts and {count:0} are
+# checkpoints, not failures (tasks routinely run 15-60 minutes).
 orca orchestration check --wait --types worker_done,escalation,question --timeout-ms 900000 --json
-
-# For each accepted worker_done with no immediate follow-up task:
+# ...process the messages; for each accepted worker_done with no follow-up:
 orca orchestration worker-release --dispatch <dispatch_id> --json
+# acknowledge the processed Delivery and keep waiting, in one call:
+orca orchestration check --ack <delivery_id> --wait --types worker_done,escalation,question --timeout-ms 900000 --json
 ```
 
 ## What NOT to do
