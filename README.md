@@ -94,6 +94,10 @@ orthogonal to this repo, which is a generic template for other projects.
 - `docs/model-routing.md` — which models are reachable via which service
   on this machine, and the vendor × model × effort routing policy that
   keeps tokens spent on judgment, not plumbing.
+- `skills/model-routing/SKILL.md` — canonical source of the machine-wide
+  model-routing skill (live copy deployed at `~/.claude/skills/`).
+- `AGENTS.md` — the entry point for any AI agent working here: pointers,
+  standing orders, machine context. `CLAUDE.md` includes it.
 
 ## Status (2026-08-23)
 
