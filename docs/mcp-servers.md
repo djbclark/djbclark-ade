@@ -85,7 +85,17 @@ delegation stack (verified live 2026-08-23):
 So the two agents are bidirectional: **Hermes → Claude** via headless
 delegation, **Claude → Hermes** via the MCP bridge above (including
 `permissions_respond` — Claude can answer Hermes's approval queue — and
-`events_wait` for long-poll coordination). Deliberately NOT done:
+`events_wait` for long-poll coordination).
+
+Hermes was **taught all of this** on 2026-08-23, in three layers: a new
+local Hermes skill `autonomous-ai-agents/claude-collaboration` (vendored
+copy: [vendor/hermes/claude-collaboration.SKILL.md](../vendor/hermes/claude-collaboration.SKILL.md))
+that tells Hermes to proactively *offer* Claude delegation when it detects a
+task is hard for it (deep reasoning, subtle debugging, judgment — once per
+task, quota-aware, without overriding its no-bulk-farming rule); a `§` block
+in its built-in `~/.hermes/memories/MEMORY.md`; and a retained memory in the
+shared Hindsight bank (`hermes-shared`), which is Hermes's active external
+memory provider — that shared bank is the durable Claude↔Hermes fact channel. Deliberately NOT done:
 registering `claude mcp serve` inside Hermes — it would only duplicate
 tools Hermes already has (file/bash), a live probe showed it idling in
 nested contexts, and Hermes's own skills forbid recursive coordinator
