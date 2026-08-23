@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Wrapper for ralph-tui's opencode plugin. ralph-tui's own `defaultFlags`
+# config mechanism always prepends flags BEFORE the 'run' subcommand
+# (base.ts: `[...defaultFlags, ...args]`, and buildArgs()'s args[0] is
+# always 'run') — but --auto is scoped to `opencode run`, not the bare
+# `opencode` command, so a plain defaultFlags = ["--auto"] produces the
+# invalid `opencode --auto run ...` and opencode falls back to printing
+# help instead of running. Confirmed 2026-08-02 against opencode 1.18.10.
+#
+# This wrapper inserts --auto right after 'run' instead, wherever ralph-tui
+# actually puts it in the arg list.
+set -euo pipefail
+real_opencode="/Users/djbclark/.opencode/bin/opencode"
+args=("$@")
+if [ "${1:-}" = "run" ]; then
+  shift
+  exec "$real_opencode" run --auto "$@"
+else
+  exec "$real_opencode" "${args[@]}"
+fi

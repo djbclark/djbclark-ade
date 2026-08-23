@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# ABOUTME: Gated opencode launcher for prepaid-balance providers used by ralph-tui.
+#
+# Real-money prepaid accounts (DeepSeek API balance, OpenCode Zen prepaid, OpenRouter
+# balance) must never be reachable from ralph-tui without an explicit, fresh human
+# authorization for this process. A normal [[agents]] config entry has no native
+# confirmation gate (confirmed against ralph-tui agent plugin lifecycle 2026-08-02),
+# so this wrapper is the gate:
+#
+#   1. Refuse to run unless RALPH_TUI_ALLOW_PREPAID=1 is set in the environment
+#      of the ralph-tui / controller process that spawns this agent.
+#   2. Only then invoke the real opencode CLI (with the same --auto-after-run
+#      fix as opencode-ralph-tui — see that wrapper for the flag-position bug).
+#
+# Vendor-specific key injection (deepseek / openrouter):
+#   Keys are loaded at runtime from ~/.config/codexbar/config.json (already
+#   present for aiuse/codexbar balance tracking). They are NOT required to be
+#   in ~/.local/share/opencode/auth.json, and they are NOT taken from the parent
+#   process env — ralph-tui's BaseAgentPlugin strips *_API_KEY by default.
+#
+# Usage (operator, every time — never persist this in a profile):
+#   export RALPH_TUI_ALLOW_PREPAID=1
+#   # then start ralph-tui / the controller that selects a prepaid agent
+#   unset RALPH_TUI_ALLOW_PREPAID   # when done
+#
+# Vendor is selected by the basename of this script when invoked via the
+# vendor-specific symlinks (opencode-ralph-tui-deepseek, -zen, -openrouter),
+# or by RALPH_TUI_PREPAID_VENDOR={deepseek|zen|openrouter}.
+
+set -euo pipefail
+
+REAL_OPENCODE="${RALPH_TUI_OPENCODE_BIN:-/Users/djbclark/.opencode/bin/opencode}"
+CODEXBAR_CONFIG="${CODEXBAR_CONFIG:-$HOME/.config/codexbar/config.json}"
+GATE_VAR="RALPH_TUI_ALLOW_PREPAID"
+
+resolve_vendor() {
+  if [ -n "${RALPH_TUI_PREPAID_VENDOR:-}" ]; then
+    printf '%s\n' "$RALPH_TUI_PREPAID_VENDOR"
+    return
+  fi
+  case "$(basename "$0")" in
+    *deepseek*) printf 'deepseek\n' ;;
+    *openrouter*) printf 'openrouter\n' ;;
+    *zen*) printf 'zen\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+VENDOR="$(resolve_vendor)"
+
+gate_fail() {
+  cat >&2 <<EOF
+ERROR: prepaid agent blocked by gate (vendor=${VENDOR}).
+
+These agents spend real prepaid balance, not subscription quota. Standing policy
+on this machine: never route work to a prepaid account without explicit, fresh
+human authorization for this process. Prior approvals do not carry over.
+
+To authorize for this shell / controller process only:
+  export ${GATE_VAR}=1
+
+Then re-run the ralph-tui / controller command that selects this agent.
+When finished, unset the flag so a later accidental selection cannot spend:
+  unset ${GATE_VAR}
+
+Vendor notes:
+  deepseek   — standalone DeepSeek API prepaid (codexbar balance; not the
+               opencode/opencode-go bundled deepseek-* models).
+  zen        — OpenCode Zen prepaid (opencode provider id "opencode"; distinct
+               from the opencode-go monthly subscription entry).
+  openrouter — OpenRouter prepaid balance.
+
+This wrapper is the only gate. Config comments alone are not a gate.
+EOF
+  exit 99
+}
+
+if [ "${!GATE_VAR:-}" != "1" ]; then
+  gate_fail
+fi
+
+load_key_from_codexbar() {
+  # $1 = codexbar provider id, $2 = env var name to export
+  local provider_id="$1"
+  local env_name="$2"
+  if [ -n "${!env_name:-}" ]; then
+    return 0
+  fi
+  if [ ! -f "$CODEXBAR_CONFIG" ]; then
+    echo "ERROR: ${env_name} unset and codexbar config missing: $CODEXBAR_CONFIG" >&2
+    exit 98
+  fi
+  local key
+  key="$(
+    python3 - "$CODEXBAR_CONFIG" "$provider_id" <<'PY'
+import json, sys
+path, pid = sys.argv[1], sys.argv[2]
+cfg = json.loads(open(path).read())
+for p in cfg.get("providers") or []:
+    if p.get("id") != pid:
+        continue
+    if p.get("apiKey"):
+        print(p["apiKey"], end="")
+        sys.exit(0)
+    ta = p.get("tokenAccounts") or {}
+    accounts = ta.get("accounts") or []
+    if accounts and isinstance(accounts[0], dict) and accounts[0].get("token"):
+        print(accounts[0]["token"], end="")
+        sys.exit(0)
+sys.exit(1)
+PY
+  )" || {
+    echo "ERROR: no API key for provider '${provider_id}' in $CODEXBAR_CONFIG" >&2
+    exit 98
+  }
+  export "${env_name}=${key}"
+}
+
+case "$VENDOR" in
+  deepseek)
+    load_key_from_codexbar deepseek DEEPSEEK_API_KEY
+    ;;
+  openrouter)
+    load_key_from_codexbar openrouter OPENROUTER_API_KEY
+    ;;
+  zen)
+    # OpenCode Zen uses auth.json entry id "opencode" (already configured).
+    # No key injection. Paid Zen models will fail if the prepaid balance is
+    # empty/negative — prefer free * -free models in agent config.
+    ;;
+  *)
+    echo "ERROR: unknown prepaid vendor '${VENDOR}'." >&2
+    echo "Invoke via opencode-ralph-tui-{deepseek,zen,openrouter} or set RALPH_TUI_PREPAID_VENDOR." >&2
+    exit 97
+    ;;
+esac
+
+if [ ! -x "$REAL_OPENCODE" ]; then
+  echo "ERROR: real opencode binary not found/executable: $REAL_OPENCODE" >&2
+  exit 96
+fi
+
+# Same --auto placement fix as ~/.local/bin/opencode-ralph-tui (flag must follow 'run').
+if [ "${1:-}" = "run" ]; then
+  shift
+  exec "$REAL_OPENCODE" run --auto "$@"
+else
+  exec "$REAL_OPENCODE" "$@"
+fi

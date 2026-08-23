@@ -41,6 +41,11 @@ altitudes compose (a macro node can run a micro graph as its body).
 - [skills/model-routing/SKILL.md](skills/model-routing/SKILL.md) —
   canonical source of the machine-wide model-routing skill (Claude Code's
   live copy is deployed at `~/.claude/skills/model-routing/`).
+- [vendor/README.md](vendor/README.md) — sidecar index of everything this
+  repo references that lives elsewhere on the system: vendored copies
+  (prepaid gate scripts, a dated Orca orchestration guide snapshot) and
+  pointers to things with their own homes (aiuse, cswap, the Orca fork,
+  hooks, the LiteLLM proxy).
 
 ## Standing orders (operator-issued; they bind every agent here)
 
