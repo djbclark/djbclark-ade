@@ -1,81 +1,142 @@
 # Model and effort routing
 
 Goal: know exactly which models are reachable through which service on this
-machine, and route every graph node by vendor × model × effort so tokens
-are spent where judgment lives and nowhere else. Facts below are a
-**snapshot dated 2026-08-23**; each service lists its refresh probe —
-re-probe rather than trusting this file for balances and windows.
+machine, which budget each spends, and route every graph node by vendor ×
+model × effort so tokens are spent where judgment lives. Facts are a
+**snapshot dated 2026-08-23**, verified against `aiuse --json` (the
+operator's own tool, github.com/djbclark/aiuse — allow ~1 min) and direct
+CLI probes. Percentages drift constantly — re-probe, don't trust this file
+for balances.
 
-## Inventory
+## The service matrix: aiuse line ↔ TUI/CLI ↔ billing
 
-### Claude (Anthropic subscription, cswap-managed) — probe: `cswap list`
+`aiuse --json` (JSON starts after two preamble lines) reports one
+`snapshot.accounts[]` entry per provider; `alerts[]`/`suggestion` rank
+where quota is going to waste. Mapping, verified 2026-08-23:
 
-- Accounts: `djbclark@gmail.com` active; `djbclark@mit.edu` needs re-login
-  (`cswap add` after a Claude Code login). `cswap switch <n>` moves *new*
-  sessions only.
-- Models: Fable 5, Opus 5, Sonnet 5, Haiku 4.5; effort low→max. Every
-  Workflow `agent()` call accepts per-node `model`/`effort`.
-- Quota shape: 5h window (usually the binding constraint), 7d window, and
-  a **separate Fable bucket** — heavy Fable use doesn't drain the shared
-  7d the same way (visible as its own line in `cswap list`).
-- Do **not** use `aiuse --json` "conserve" alerts for go/no-go decisions —
-  they're pace projections that fire on a fast hour even when the window
-  is nearly untouched.
+| aiuse provider | CLI / TUI on this machine | Plan | Billing | Windows |
+|---|---|---|---|---|
+| `claude` (gmail) | `claude` (Claude Code; cswap acct 2; Orca/ralph-tui drive it) | Max-class | monthly sub | 5h + weekly + **separate Fable weekly** |
+| `claude` (mit) | cswap acct 1 | **expired** — needs re-login + `cswap add` | — | — |
+| `codex` | `codex` (v0.149) | ChatGPT Plus | monthly sub | weekly |
+| `antigravity` | `agy` (v1.1.18; ralph-tui-antigravity-plugin exists) | Google AI Pro | monthly sub | Gemini 5h/weekly **plus Claude/GPT 5h/weekly** |
+| `copilot` | `copilot` (v1.0.77; broke 2026-08-23 on stale pkg cache — fix: `rm -rf ~/Library/Caches/copilot/pkg`) | Individual Pro | monthly sub | premium requests (monthly) |
+| `cursor` | `cursor` (v3.17.8) | Cursor Pro | monthly sub | included / Auto / other-models (monthly) |
+| `grok` | `grok` (v1.0.5; ralph-tui-grok-plugin exists) | SuperGrok | monthly sub | usage limit |
+| `zai` | **unidentified TUI** (no `zai` binary; GLM models also appear in opencode catalogs) — ask operator | lite | monthly sub | 5h + weekly |
+| `clinepass` | Cline TUI (Orca agent `cline`) + LiteLLM proxy `localhost:4000` (`clinepass-deepseek`, `clinepass-minimax-m3`, `clinepass-kimi-k3`) consumed by Hindsight + hermes | Cline API key | subscription windows | 5h + weekly + monthly |
+| `opencode-go` | `opencode` bundled free tier (`opencode-go/*`: kimi-k3, minimax-m3, qwen3.x, mimo, ox-alpha-free…); `opencode-ralph-tui` wrapper | go (free) | free | 5h + weekly + monthly |
+| `opencode-zen` | `opencode` provider `opencode` (`opencode/*`: claude, gpt, gemini, deepseek, glm catalogs) via gated `opencode-ralph-tui-zen` | prepaid | **prepaid balance** | balance |
+| `openrouter` | gated `opencode-ralph-tui-openrouter` | prepaid | **prepaid balance** | balance |
+| `deepseek` | gated `opencode-ralph-tui-deepseek` | prepaid | **prepaid balance** | balance |
+| `devin` | `devin` (v3000.5.20) — **disabled in Orca's TUI roster**, so its 100%-unused windows are deliberate dormancy | ? | sub (ACUs) | daily + weekly |
+| `alibaba` / `alibabatokenplan` / `qwencloud` | `bl` (Bailian, v1.17.1; bailian-* skills) | ? — no usage rows | token plan + PAYG | ? |
+| `muse` | **unidentified** (gmail acct; `opencode-go/muse-spark-1.2-contributor` exists) — ask operator | ? | ? | ? |
+| (not in aiuse) | `opencode` provider `sipb` — MIT SIPB-hosted models (ollama-style: qwen3-coder:30b, deepseek-r1:32b, gemma…) | MIT affiliation | free | none |
 
-### Codex (OpenAI subscription) — probe: `codex --version`, `~/.codex/config.toml`
+Monthly-subscription pools: claude, codex, antigravity, copilot, cursor,
+grok, zai, clinepass (window-shaped), devin. Free: opencode-go, sipb.
+Prepaid real money: opencode-zen, openrouter, deepseek — all three
+**effectively empty on 2026-08-23** (Zen -$0.04, DeepSeek $0.00,
+OpenRouter $1.13), and gated anyway by the wrapper scripts, which require
+an explicit fresh human decision per run (keys come from
+`~/.config/codexbar/config.json`).
 
-- codex-cli 0.149.0; configured default `gpt-5.6-sol` at
-  `model_reasoning_effort = "high"`. Config is ignored-local state
-  (symlinked into site-private), editable in place.
-- A separate subscription pool from Claude — the cheapest way to add
-  fan-out capacity when the Claude 5h window is tight. Orca tracks codex
-  usage/reset credits.
+## Orca is the fleet registry
 
-### OpenCode (multi-provider frontend) — probe: `opencode models`
+Nearly every TUI above is configured *inside Orca*
+(`~/Library/Application Support/orca/profiles/local-default/orca-data.json`
+→ `settings`): `agentDefaultArgs` lists ~25 launchable agents — claude,
+claude-agent-teams, openclaude, codex, gemini, antigravity, aider, amp,
+kiro, crush, autohand, cline, command-code, continue, cursor, kimi,
+mistral-vibe, qwen-code, rovo, hermes, copilot, grok, devin, ante, trae
+(+ goose via env) — each preconfigured with its auto-approve/yolo flag for
+worktree use. `disabledTuiAgents` = gemini, goose, devin. Orca also holds
+the claude and codex managed-account switchers and per-provider usage
+tracking. Practical upshot: the macro graph can dispatch to any enabled
+agent in this roster via `worker-start --agent <name>`, far beyond the
+seven group-address CLIs.
 
-- Configured provider `sipb` in `~/.config/opencode/opencode.json`
-  (JSONC; enumerate with the probe, not by parsing the file).
-- Gated prepaid launchers exist deliberately:
-  `opencode-ralph-tui-{deepseek,zen,openrouter,prepaid}` — these spend
-  **real prepaid balances** (DeepSeek models, OpenCode Zen, OpenRouter).
+## What's going to waste (aiuse history, 76 snapshots)
 
-### Grok CLI — grok 1.0.5, authenticated (`~/.grok/auth.json`)
+Chronically unused, i.e. already paid for — route suitable work here
+first: **antigravity** (~96-100% left every cycle; aiuse's own top
+suggestion is "burn Gemini weekly"), **devin** (100%), **opencode-go**
+(93-100%), **copilot** (~70%). Hottest window: **clinepass weekly** (23%
+left, and Hindsight/hermes depend on it — never route bulk work there).
+Claude 5h is the binding constraint on the core pool as usual.
 
-### Cursor CLI — cursor-agent 3.17.8
+## Effort levers per service
 
-### LiteLLM local proxy (ClinePass only)
+- **claude**: session effort low→max; per-node `model`/`effort` in
+  Workflow `agent()`; per-worker `--model`/`--effort` in Orca
+  `worker-start`.
+- **codex**: `model_reasoning_effort` minimal→xhigh in
+  `~/.codex/config.toml` (currently `gpt-5.6-sol` @ high); per-worker via
+  Orca launch prefs.
+- **grok/cursor/copilot/agy/opencode**: model choice is the lever
+  (`-m`/`--model`/per-invocation); no separate effort knob confirmed.
+- **bl**: model choice per call; Token Plan vs PAYG routing per
+  bailian-web-search skill.
 
-- Serves exactly two models by design: `clinepass-minimax-m3` and
-  `clinepass-kimi-k3` — single provider, no fallback chain, specifically
-  to prevent accidental vendor routing and prepaid burn. API-shaped
-  (Hindsight uses it for structured output); not an interactive agent CLI.
+## Which AI for which work (judgment snapshot, 2026-08-23)
 
-### Bailian / DashScope (`bl` CLI)
-
-- Qwen-family text models plus generation/finetune services; skills
-  installed. Probe: `bl usage` / `bl quota`.
+- **Claude Fable 5 @ xhigh** — hardest single-shot adjudications,
+  architecture, whole-corpus analysis. Has its **own weekly bucket**, so
+  it doesn't drain the Sonnet/Opus pool.
+- **Claude Sonnet 5** — default agentic-coding workhorse; best harness
+  integration (workflows, skills, Orca, this repo).
+- **Claude Haiku 4.5 @ low** — mechanical fan-out nodes: extract,
+  classify, reformat.
+- **Codex (gpt-5.6-sol @ high)** — strong second coding vendor: parallel
+  breadth, second opinions, porting; a separate weekly pool, first
+  overflow target for real coding.
+- **Gemini via agy** — big-context reading, summarization, multimodal,
+  bulk research; the most-wasted subscription → default overflow for
+  non-critical bulk. Its Claude/GPT windows are unexplored.
+- **Copilot** — GitHub-shaped work (PR review, inline suggestions, repo
+  Q&A) on the premium-request pool.
+- **Cursor Pro** — IDE-centric composer sessions; its "Auto" pool for
+  cheap interactive edits.
+- **Grok (SuperGrok, 45% left)** — realtime X/news/web angle, quick
+  standalone questions.
+- **z.ai GLM (lite)** — budget bulk coding once its consuming TUI is
+  identified.
+- **opencode-go free models** (kimi-k3, minimax-m3, qwen3.x) — zero-cost
+  experimental fan-out and ralph-tui default via the ungated wrapper;
+  burn freely.
+- **sipb (MIT)** — free, no-cost, non-Big-Tech option for light tasks and
+  experiments where a 30B-class local model suffices.
+- **ClinePass via LiteLLM** — reserved plumbing for Hindsight/hermes;
+  not a general routing target.
+- **Devin** — autonomous end-to-end PR-shaped tasks; currently 100%
+  unused, activation is an open operator question.
 
 ## Routing policy
 
-1. **Subscriptions before prepaid.** Burn the Claude and Codex
-   subscription windows first; anything prepaid (DeepSeek, Zen,
-   OpenRouter, ClinePass balance) requires an explicit per-run decision,
-   never a default route. The gated launchers and the one-model LiteLLM
-   proxy exist to enforce exactly this.
-2. **Tier inside the micro graph.** Workflow nodes default to inheriting
-   the session model — correct for judgment nodes. Route bounded,
-   repetitive nodes (extract, classify, reformat) down to `haiku` /
-   `effort: 'low'` explicitly. Reserve Fable at xhigh for the hardest
-   single-shot adjudications (it has its own quota bucket).
-3. **Tier across vendors in the macro graph.** Orca
-   `worker-start --model <id> --effort <level>` sets both per Task for
-   claude/codex/cursor workers. Send breadth work (many bounded Tasks) to
-   whichever subscription window currently has room; keep the merge and
-   adjudication nodes on the strongest available model.
-4. **Check before big runs.** `cswap list` for Claude windows, Orca's
-   account switcher/usage tracker for claude+codex+opencode. If the
-   Claude 5h window is hot, shift fan-out to Codex or schedule after the
-   reset rather than downgrading judgment nodes.
-5. **Keep this file honest.** Every service entry carries its probe;
-   update the snapshot date when re-verified. Model names and CLI flags
-   drift — the probes are the source of truth, this file is the map.
+1. **Free and already-wasted pools first** for suitable bulk work:
+   opencode-go and sipb cost nothing; antigravity/devin/copilot/cursor
+   are use-it-or-lose-it monthly quota that history shows expiring
+   unused.
+2. **Core pools (claude, codex) for judgment and agentic work**; tier
+   inside them (Haiku/low for mechanical, Fable/xhigh for adjudication).
+   Check `cswap list` before big runs; shift breadth to codex or the
+   wasted pools when the Claude 5h window is hot.
+3. **Prepaid requires an explicit fresh human decision** — enforced by
+   the gated wrappers, currently moot since all three balances are empty.
+4. **Never bulk-route to clinepass** (Hindsight/hermes lifeline, hottest
+   weekly window).
+5. **Probes over memory**: `aiuse --json` (~1 min, authoritative across
+   all services; ignore its `kind:"conserve"` pace alerts for go/no-go),
+   `cswap list` (Claude), `codex login status`, `opencode models`,
+   `bl quota list`, `curl localhost:4000/v1/models` (LiteLLM),
+   `agy --version`, `devin --version`, `copilot --version`.
+
+## Open questions (operator input needed)
+
+- Which TUI consumes the `zai` GLM lite plan? What is `muse`?
+- Devin: dormant deliberately, or worth wiring into the Orca/ralph fleet?
+- Bailian: is the Token Plan active (aiuse shows no usage rows)?
+- Prepaid balances: top up any of them, or treat the prepaid tier as
+  retired?
+- Re-add the MIT Claude account (`cswap add` after login)?
