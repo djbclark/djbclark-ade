@@ -36,6 +36,12 @@ the whole system without leaving it.
   site-djbclark `roles/litellm`; serves `localhost:4000`.
 - **codexbar config** (`~/.config/codexbar/config.json`) — holds real API
   keys; deliberately never vendored or committed anywhere.
+- **Graft** (graft.nanonets.ai, github.com/NanoNets/Graft) — repo context
+  graph for coding agents; npm global `@nanonets/graft` (v0.12.0,
+  telemetry disabled 2026-08-23). Repo wiring is committed here (fenced
+  AGENTS.md section, `.mcp.json`, per-agent configs); machine-global
+  wiring landed in `~/.codex/hooks.json` + `~/.gemini/`. The graph cache
+  `graft/` is gitignored — regenerate with `graft build`.
 - **Standing-orders memory** — canonical in site-private `memory/`
   (`feedback_continuous_operation_over_handoff.md`,
   `feedback_flag_best_practice_deviations.md`,
