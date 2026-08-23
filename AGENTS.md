@@ -33,6 +33,10 @@ altitudes compose (a macro node can run a micro graph as its body).
   deaths, rejected-late `worker_done` semantics, the retry recipe, the
   ack loop). The authoritative command reference is served by the binary:
   `orca skills get orchestration` — never trust a cached copy.
+- [docs/queue.md](docs/queue.md) — work the operator has explicitly
+  queued but not started, plus outstanding blockers. Check it before
+  proposing new work; add to it rather than starting something big
+  unasked.
 - [docs/ai-memory-landscape.md](docs/ai-memory-landscape.md) — the six
   levels of AI memory this machine is building toward, their source, live
   per-area status, and how they map onto the published CoALA/7-type

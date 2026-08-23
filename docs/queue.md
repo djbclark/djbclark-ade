@@ -1,0 +1,81 @@
+# Queue — accepted, not started
+
+Work the operator has explicitly queued. Newest first. Items leave this file
+when they ship (into the relevant doc) or when they're dropped (say why).
+
+## Quota-aware automatic cross-vendor subagent routing
+
+**Queued 2026-08-23. Not started.** Hindsight initiative page
+`kp-2e1513989ca5483ea8709dab2ce6a7f3`.
+
+Automatically choose which vendor's agent runs a given piece of subagent work,
+instead of the operator or the orchestrating session hand-picking it. Two
+inputs:
+
+1. **Ability/strength profile per service** — what each agent is actually good
+   at, which is the judgment half of [model-routing.md](model-routing.md)'s
+   "Which AI for which work" section, made machine-readable.
+2. **Live quota headroom** — from `aiuse --json`, polled periodically. The
+   operator explicitly left room for **faster methods** than polling: a cached
+   snapshot with a TTL, a local daemon holding state, or a push/event signal
+   if any service offers one. A full `aiuse --json` takes ~1 min, which is far
+   too slow to sit in the path of a routing decision.
+
+**Why it's worth doing** (measured 2026-08-23T23:30Z): antigravity, opencode-go,
+zai, and devin were all at ~0% used while claude carried the session. That is
+paid capacity expiring unused every cycle, and the only reason is that routing
+is manual and the human defaults to what's familiar.
+
+**Constraints it must respect** — the standing orders in
+[AGENTS.md](../AGENTS.md): free and chronically-unused pools first for bulk;
+claude/codex for judgment; **never** bulk-route to clinepass (it is the
+Hindsight/hermes lifeline); prepaid tier retired until an operator top-up.
+
+**Open design questions** (not yet decided):
+
+- Where does the router live — a Claude Code workflow, an Orca dispatch layer,
+  a standalone binary, or inside `aiuse` itself?
+- Does it route *nodes within* a graph (per-subagent) or whole tasks?
+- What happens on a wrong call — is there a fallback/retry ladder, and who
+  notices the output was worse?
+- How does ability-profiling stay honest as models change? (Snapshot dates,
+  like everything else here.)
+- Does it also decide **effort level**, not just vendor?
+
+## Dynamic self-adjustment of model version and effort by token efficiency
+
+**Queued 2026-08-23. Not started.** Sibling to the routing item above — that
+one picks *which vendor* runs work; this one picks *how much thinking* the
+current session spends on it.
+
+The session should raise and lower its own model tier and effort level based
+on observed **token-use efficiency** — dropping to a cheaper tier or lower
+effort for mechanical stretches (file edits, doc writing, command running) and
+climbing back for genuine judgment. Today this is manual (`/model`, per-agent
+`model`/`effort` overrides) and therefore usually left wherever it was last
+set — typically too high, which is exactly the waste this is meant to catch.
+
+**Open questions:**
+
+- What is the efficiency signal? Output tokens per useful action, revision/
+  retry rate, tool-calls-per-turn, or something learned?
+- Can a session change its *own* model mid-flight, or must this be expressed
+  as dispatch to subagents at chosen tiers (which works today)?
+- What prevents oscillation, and what prevents a cheap tier from silently
+  degrading a task the operator cared about?
+- Should it be advisory (tell the operator "this stretch is mechanical, drop
+  to sonnet") before it is ever automatic? The operator's instinct on the
+  Hermes side was stop-and-prompt first, automate later — same shape here.
+
+## Also outstanding (raised, not formally queued)
+
+- **Rotate three leaked API keys** — OpenRouter, DeepSeek, ClinePass keys
+  leaked into a 2026-08-21 transcript that auto-retained into the shared
+  Hindsight bank. Operator-only (provider dashboards). This blocks the memory
+  restructure; see [ai-memory-landscape.md](ai-memory-landscape.md).
+- **`just ops-memory-sync` is failing for site-djbclark** —
+  `docs/plans/memory-architecture-v2.md` is unreleased past ops-v1.3.26.
+  Needs a release cut or a revert.
+- **File the two upstream issue drafts** in
+  [upstream-issues.md](upstream-issues.md) — operator decision, they go to
+  third-party trackers.
