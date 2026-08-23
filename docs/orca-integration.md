@@ -82,7 +82,12 @@ the receipts taught:
   marked failed ~18s after dispatch (cold CLI boot took ~17s to accept the
   prompt) — but `worker-read --dispatch <id>` showed the prompt had landed
   and codex was working. Check the transcript before treating a stalled
-  dispatch as a dead worker.
+  dispatch as a dead worker. Root cause located via graft on the fork
+  (2026-08-23): `verifyAgentPromptSubmission` polls for agent lifecycle
+  change against a hard 5s deadline — `AGENT_PROMPT_EFFECT_TIMEOUT_MS =
+  5_000`, `src/main/runtime/agent-prompt-submission-verification.ts:1,17-41`
+  — which a cold codex boot cannot beat. An agent-boot-aware timeout is a
+  concrete upstream-contribution candidate for the djbclark/orca fork.
 - **Late `worker_done` from a revoked dispatch is rejected but not lost.**
   Orca forwarded it to the coordinator as a high-priority message with the
   original body embedded (`_orcaLifecycleRejection`), and the preamble's
