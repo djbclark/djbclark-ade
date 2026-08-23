@@ -69,10 +69,20 @@ set — typically too high, which is exactly the waste this is meant to catch.
 
 ## Also outstanding (raised, not formally queued)
 
-- **Rotate three leaked API keys** — OpenRouter, DeepSeek, ClinePass keys
-  leaked into a 2026-08-21 transcript that auto-retained into the shared
-  Hindsight bank. Operator-only (provider dashboards). This blocks the memory
-  restructure; see [ai-memory-landscape.md](ai-memory-landscape.md).
+- **⚠ Rotate three leaked API keys — OpenRouter, DeepSeek, ClinePass.**
+  Operator-only (provider dashboards). Rotation, not the bank purge, is what
+  actually closes the incident: the **full** keys live in on-disk session
+  transcripts under `~/.claude/projects/`, while Hindsight holds only
+  truncated fragments. One caveat: an 18-char `sk-lit…` token may be
+  complete. An auto-refreshing mental model is still re-spreading it into
+  LLM logs on every refresh. Blocks the restructure — full detail and the
+  purge surface in
+  [hindsight-restructure-execution.md](hindsight-restructure-execution.md).
+- **⚠ Execute the Hindsight restructure — it is losing data while it waits.**
+  Adjudicated, config staged and validated, checklist written. Session→repo
+  attribution has decayed from 94% to **79.5%** because Claude Code
+  garbage-collects old session JSONLs; every week of delay permanently
+  un-attributes more history.
 - **`just ops-memory-sync` is failing for site-djbclark** —
   `docs/plans/memory-architecture-v2.md` is unreleased past ops-v1.3.26.
   Needs a release cut or a revert.
