@@ -33,6 +33,11 @@ altitudes compose (a macro node can run a micro graph as its body).
   deaths, rejected-late `worker_done` semantics, the retry recipe, the
   ack loop). The authoritative command reference is served by the binary:
   `orca skills get orchestration` — never trust a cached copy.
+- [docs/mcp-servers.md](docs/mcp-servers.md) — the MCP server roster for
+  Claude Code sessions on this machine: what each server is, where it's
+  configured, the Hermes Agent MCP registration, the Beeper re-auth recipe,
+  and why this repo's graft statusline says "not built" (cosmetic).
+  Re-probe with `claude mcp list`.
 - [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) —
   runnable micro-graph example (schema-validated fan-out → adversarial
   verify → synthesize). Claude Code sessions in this repo can invoke it
