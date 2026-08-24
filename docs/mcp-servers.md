@@ -101,23 +101,22 @@ tools Hermes already has (file/bash), a live probe showed it idling in
 nested contexts, and Hermes's own skills forbid recursive coordinator
 loops.
 
-### Two messaging bridges — which one to use
+### Messaging: use Hermes (operator decision, 2026-08-23)
 
-Both `beeper` and `hermes` can reach the operator's conversations, and
-overlapping use risks two agents answering the same message. Division of
-labor:
+**Default to `hermes` for all messaging.** Beeper Desktop is often not
+running, and the operator uses it only occasionally — so it is not a
+dependable path for an agent. Reach for it only when the operator explicitly
+asks, or when you need cross-network *search* that Hermes cannot do and you
+have confirmed Beeper is up (`claude mcp list` shows it Connected, not
+"Needs authentication").
 
-| Need | Use | Why |
-|---|---|---|
-| Find/read messages across the operator's 11 networks | **beeper** (`search`, `search_chats`, `list_messages`) | It indexes everything Beeper Desktop bridges; read-heavy and safe |
-| Send *as the operator* in an existing chat | **beeper** (`send_message`) | Goes out over the operator's own account |
-| Send *as the agent* / gateway-native traffic | **hermes** (`messages_send`, `channels_list`) | Hermes's own bot identity + its platform bindings |
-| React to inbound events, answer Hermes approvals | **hermes** (`events_wait`, `permissions_respond`) | Only Hermes carries the agent's event stream and approval queue |
-| Email | Neither — see the Gmail index below | Local FTS5 for search; claude.ai Gmail connector to act |
+Hermes covers the agent-facing cases: `messages_send` / `channels_list` to
+send, `conversations_list` / `messages_read` to read, `events_wait` to react
+to inbound traffic, and `permissions_list_open` / `permissions_respond` to
+clear its approval queue — none of which Beeper can do.
 
-Rule: **never send the same message through both.** When in doubt about
-who owns a conversation, read with beeper and let Hermes do the sending —
-Hermes is the one whose gateway state tracks what it has already replied to.
+Email is separate from both: local FTS5 index for search (below), claude.ai
+Gmail connector to act.
 
 ### Not on the MCP bridge: the local Gmail index
 

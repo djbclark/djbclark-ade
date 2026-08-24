@@ -1,4 +1,48 @@
-# Hindsight restructure — execution plan (adjudicated 2026-08-23)
+# Hindsight restructure — EXECUTED 2026-08-23
+
+> **Status: done.** Everything below was carried out on 2026-08-23 except key
+> rotation (operator deferred ~2 days) and the Postgres LLM-log purge.
+> Results:
+>
+> - **Purge verified clean.** 2 leak documents deleted, contaminated "Core
+>   concepts" knowledge page deleted (its mental model went with it), **1,341
+>   observations cleared**, 2 secondary facts redacted in place. A full
+>   re-scan of every document and fact found zero remaining key material. One
+>   flagged hit was inspected and kept: `CADDY_ADMIN_TOKEN=sk-live-…` inside a
+>   code block discussing schema validation — an illustrative example, not a
+>   credential, and its document carries 12 real facts.
+> - **New topology live.** Config applied; backup at
+>   `~/.hindsight/coding-agent.json.bak-2026-08-24`.
+> - **78 documents / ~801 facts migrated** into 11 per-repo banks, every
+>   transfer count verified before any source was deleted: `::tendcf` 22/363,
+>   `::site-private` 15/218, `::sudo-secretspec` 5/157, `::home-ops` 5/137,
+>   `::unattributed-2026-08` 15/141, `::djbclark-ade` 4/41, `::one-offs` 4/44,
+>   `::KIRA` 2/45, `::claude-config` 1/16, `::autonomy-research` 1/11,
+>   `::aiuse` 1/1.
+> - **hermes-shared curated down to 17 documents**, renamed "Curated
+>   cross-project memory (Hermes ↔ Claude)" with a new mission and retain
+>   mission that say what belongs there and what does not. 20 zero-fact
+>   `survey-baseline` markers and the dead `test-bank` /
+>   `hermes-default-hermes` banks deleted.
+>
+> **Three corrections to the plan, found while executing:**
+>
+> 1. Attribution had already decayed from 94% to **79.5%** — 15 documents
+>    could not be attributed and went to the archive bank rather than being
+>    guessed at. Further delay would have cost more.
+> 2. The document listing endpoint **caps at 100**, so the first migration
+>    pass silently missed everything beyond it. A second pass caught 14 more.
+>    Anyone repeating this must paginate or re-run until the remainder is
+>    empty.
+> 3. **"No restart needed" holds only for the hooks.** A long-running
+>    `hindsight` MCP server caches the bank it started with — the executing
+>    session still reported `hermes-shared` afterwards. New sessions get the
+>    new topology; existing ones need the MCP server restarted.
+>
+> **Left deliberately:** `hermes-telegram` and `herdr-shared` banks (tiny, but
+> a running gateway may still write to them — confirm dead first).
+
+# Original adjudication (2026-08-23)
 
 This repo is **private**; this file records operational detail that should not
 go in a public repo. It still contains **no secret values** — only document
