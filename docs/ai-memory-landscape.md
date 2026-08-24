@@ -41,15 +41,16 @@ Wiki into "interlinked knowledge base".
 |---|---|---|
 | 1 Native instructions | **done** | AGENTS.md/CLAUDE.md across `~` and the three ops repos |
 | 2 Structured files / SQLite (S1) | **Phase B: both adapters live 2026-08-23** | Phase A capacity journal, plus the new evidence store: `site-djbclark/bin/hindsight_s1.py` adds event/conversation/raw_object/attachment/checkpoint/gap tables to the same database, content-addressed raw bytes under `~/.hindsight/cas/`, and event IDs derived from source coordinates. 20 tests cover the exit-gate properties. Hermes event sink added too (`hindsight_s1_hermes.py`, reads `state.db` read-only). Remaining: attachments, trigram/neighbour retrieval, Arq backup coverage |
-| 3 Semantic recall (Hindsight) | **partial** | Service live; model switch done (~$0.47/mo). Per-repo bank restructure **planned, not executed**. 25% reflect-failure at the 25s cap |
+| 3 Semantic recall (Hindsight) | **restructured 2026-08-23** | Service live; model switch done (~$0.47/mo). Per-repo bank restructure **executed**: 78 docs / ~801 facts moved into 11 `coding-agent::<repo>` banks, `hermes-shared` curated to the cross-project channel, stray banks removed. Known issue remaining: 25% reflect-failure at the 25s cap |
 | 4 Verbatim recall | **foundation in place 2026-08-23** | Backfill complete: **210,824 events / 916MB** of exact producer bytes in the CAS, from all 532 Claude transcripts (208,534 records, 0 skipped). `verify` passes: integrity ok, 3,000-sample hash check clean. Repo attribution now captured at ingest — tendcf 36k, stayturgid 28.5k, site-private 15.5k, site-djbclark 15.5k, sudo-secretspec 15.5k events. Remaining: expose verbatim spans through recall |
 | 5 Linked knowledge (Link) | **early** | Viability spike done, 6 preview notes in `site-private/memory/link/`. No canonical repo, no shadow comparison |
 | 6 Cross-tool sharing | **working, after a real fix** | Hermes↔Claude bridged over MCP 2026-08-23. The memory half was silently broken: Hermes's provider config (`~/.hermes/hindsight/config.json`) templated its bank as `hermes-{profile}-{workspace}`, so it never read `hermes-shared` — retained facts were committed and API-recallable yet invisible to it, and it answered confidently wrong. Both keys now pinned to `hermes-shared`; verified Hermes recall returns the shared facts |
 | 0 Capacity guard | **done** | 75/85/70 thresholds + supervised writer in the Hermes bootstrap store |
 
-**Critical path**: rotate three leaked API keys (they auto-retained into the
-shared bank) → execute the bank restructure → S1 Phase B. Areas 4 and 5 queue
-behind those.
+**Where the effort now goes**: areas 2 and 4 have their foundation and need
+retrieval surfaced; area 5 (Link) is the largest untouched piece — still just
+a viability spike and six preview notes, with no canonical repo and no shadow
+comparison running. That is the next real build.
 
 ## How the plan handles cross-vendor memory
 
