@@ -183,12 +183,26 @@ component and said *"do not adopt Basic Memory alongside Link unless it
 demonstrates a unique capability."* The unique capability is simply that it
 works without a reviewer.
 
-**But timing still stands: not yet.** The argument from the previous
-assessment is unchanged — our curated layer is about a dozen documents, and
-agents read `AGENTS.md` pointers directly. Retrieval is not the bottleneck at
-this size; Basic Memory earns its place when `docs/` outgrows reading, or
-when an agent demonstrably fails to find something a pointer should have
-surfaced.
+**Correction: install it now.** My "not yet" argument rested on the claim
+that the curated layer is *about a dozen documents*. That was wrong, and
+wrong in the way standing order 4 warns about — I counted a proxy
+(`djbclark-ade/docs`, 7 files) and called it the curated layer. Measured
+across all three doc roots:
+
+| Root | Pages | Size | Changed in 14d |
+|---|---|---|---|
+| `djbclark-ade/docs` | 7 | 81KB | 7 |
+| `ops/site-private/memory` | **176** | 1.3MB | 53 |
+| `ops/site-djbclark/research` | 11 | 112KB | 11 |
+| **Total** | **194** | **1.5MB** | **71** |
+
+194 pages, not twelve — a 15× undercount. And `site-private/memory` is
+already one-fact-per-file markdown, which is *precisely* the corpus shape
+Basic Memory is built for. The readiness check crosses every threshold on its
+first run.
+
+So the timing argument is withdrawn. The size objection was never true; it
+was an artifact of looking at one directory.
 
 ### Reconsidering what was built today — what would I change?
 
