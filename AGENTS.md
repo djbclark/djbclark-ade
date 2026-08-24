@@ -98,11 +98,18 @@ altitudes compose (a macro node can run a micro graph as its body).
    filenames, `gh pr view` over memory. When you do get one wrong, say so
    plainly and correct the record in the same breath; a retraction
    written down is worth more than the original claim.
-5. **Flag best-practice deviations.** If a request or existing config
+5. **Number every set of options you present.** When you offer choices,
+   next steps, or findings the operator might act on selectively, label
+   them `1.`/`2.`/`3.` (or `A`/`B`/`C` for nested sets) so they can reply
+   "do 3, then 1, then 2" without ambiguity. Keep the labels stable
+   within a conversation — if you re-present a list, renumbering it
+   silently invalidates any instruction already given against the old
+   numbers. This binds every agent here.
+6. **Flag best-practice deviations.** If a request or existing config
    conflicts with current best practices, say so and propose the
    improvement — but don't relitigate decisions the operator made
    knowingly.
-6. **Routing discipline**: free and chronically-unused pools first for
+7. **Routing discipline**: free and chronically-unused pools first for
    bulk work; claude/codex for judgment (tier inside them); **never**
    bulk-route to clinepass (infrastructure lifeline); the prepaid tier is
    retired until an explicit operator top-up.
