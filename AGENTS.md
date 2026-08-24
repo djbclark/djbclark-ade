@@ -119,9 +119,13 @@ altitudes compose (a macro node can run a micro graph as its body).
    improvement — but don't relitigate decisions the operator made
    knowingly.
 7. **Routing discipline**: free and chronically-unused pools first for
-   bulk work; claude/codex for judgment (tier inside them); **never**
-   bulk-route to clinepass (infrastructure lifeline); the prepaid tier is
-   retired until an explicit operator top-up.
+   bulk work; claude/codex for judgment (tier inside them); the prepaid
+   tier is retired until an explicit operator top-up. The old blanket
+   "never bulk-route to clinepass" rule was **retired 2026-08-24** — it
+   was a standing guess replacing a measurement. Hermes now runs
+   free-first with a paid fallback chain, and a burn-rate alert
+   (`agent_stats.py burn`, every 6h) warns when any Hermes-usable pool is
+   projected to run out within 48h. Watch the alert, not the rule.
 
 ## Machine context you should know
 
