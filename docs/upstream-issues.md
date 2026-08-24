@@ -29,6 +29,21 @@ successfully run*, and keeps telling them after every rebuild. It reads as a
 broken install. `graft ask` / `graft grep` still work fine, so the message is
 actively misleading.
 
+**Second, more common trigger found 2026-08-23** — this is not limited to
+empty graphs. `graft check` reported `not built` for two repos with large,
+fully working graphs (`~/ops/site-djbclark`, `~/ops/site-private`), where
+`graft ask` returns correct symbol hits with file:line. The cause is that
+`resolveStats()` reads `graft/.cache/stats.json`, which is written by the
+**Claude Code hooks** — so any repo where the graph was built with a plain
+`graft build`, without `graft init` having installed the hooks, has a
+complete graph and no stats cache, and is reported as unbuilt.
+
+That makes the failure mode much broader than "docs-only repo": it hits
+every CLI-only user, every CI checkout, and every repo using graft without
+the Claude integration. Worth fixing at the same place — persist a build
+stamp from `graft build` itself rather than depending on a hook-written
+cache, and distinguish "no graph" from "no stats".
+
 **Suggested fix:** distinguish the two states. The build already knows whether
 it ran, so persist that (a `builtAt` in `graft/.cache/stats.json`, or simply
 the existence of the cache/stamp) and render empty-but-built differently, e.g.
