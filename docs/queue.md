@@ -89,9 +89,36 @@ the schema is live on `~/.hindsight/candidates.sqlite3` alongside Phase A
    `VACUUM INTO`; confirm Arq picks up snapshots and CAS objects rather than
    a live WAL.
 
-## Pick a copy-on-write workspace approach (for agents especially)
+## Implement cow
 
-**Queued 2026-08-23, broadened from an earlier rift-only entry. Not started.**
+**Decided 2026-08-23 by the operator — `cow` is the choice; the comparison
+below is kept as the rationale, not an open question.** Not started.
+
+<https://github.com/joeinnes/cow> · `brew install cow` (or
+`cargo install cow-cli`).
+
+Scope of the work:
+
+1. Install and verify CoW actually engages on this machine's APFS volume —
+   confirm a clone is near-instant and near-zero-cost on a real repo, not
+   silently falling back to a full copy.
+2. Wire the agents, which is the point: `cow` ships an **MCP server** and
+   Claude integration via environment variables, so start there rather than
+   writing an adapter. Register it the way `hermes` was registered
+   (`claude mcp add --scope user`), then teach Hermes about it — its
+   `headless-agent-orchestration` skill currently creates worker workspaces
+   the old way.
+3. Point Orca macro-graph dispatch at it (`worker-start --worktree` is the
+   highest-volume workspace creator here, so it is both the best payoff and
+   the safest place for a first failure).
+4. Decide what happens to `~/src/ops-worktrees/` — now that the
+   worktree/PR/release regime is retired, that layout has much less reason to
+   exist, and cow workspaces may replace it outright.
+5. Keep the plain-git baseline (`git worktree add --no-checkout` +
+   `cp -c -R`) documented as the fallback, so nothing hard-depends on a tool
+   we can drop.
+
+### Rationale — the options that were considered
 
 Every parallel-agent workflow here creates workspaces — Orca macro-graph
 dispatch (`worker-start --worktree`), Hermes's `headless-agent-orchestration`
@@ -111,15 +138,14 @@ at once. Candidates, with what actually distinguishes them:
 Background reading: [Git without the clone — durable versioned workspaces for
 AI agents](https://pub.towardsai.net/git-without-the-clone-durable-versioned-workspaces-for-ai-agents-b280241fe5ca).
 
-**How to decide:** benchmark the plain-git baseline first on a real repo, then
-only adopt a tool if it beats it on something that matters (agent integration,
-artifact exclusion, cleanup/GC). On current evidence `cow` is the strongest
-candidate purely because its MCP server means Hermes and Claude could drive it
-without us writing an adapter — but that is a README claim, not a measurement.
-`jj` is a separate, larger decision and shouldn't be bundled into this one.
+**Why cow won:** its MCP server means Hermes and Claude can drive it without
+us writing an adapter, and it is the only candidate built explicitly for
+running coding agents in parallel. Caveat carried into implementation: that
+is a README claim, not yet a measurement — step 1 above exists to check it.
 
-Trial on Orca fan-out first: it creates the most worktrees, and a bad result
-there is contained.
+**`jj` remains open and separate.** It is a different and larger bet (a whole
+VCS), it solves more than the workspace problem, and choosing cow does not
+foreclose it. Worth its own evaluation another time.
 
 ## Also outstanding (raised, not formally queued)
 
