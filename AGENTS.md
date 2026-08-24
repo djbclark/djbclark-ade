@@ -98,13 +98,16 @@ altitudes compose (a macro node can run a micro graph as its body).
    filenames, `gh pr view` over memory. When you do get one wrong, say so
    plainly and correct the record in the same breath; a retraction
    written down is worth more than the original claim.
-5. **Number every set of options you present.** When you offer choices,
-   next steps, or findings the operator might act on selectively, label
-   them `1.`/`2.`/`3.` (or `A`/`B`/`C` for nested sets) so they can reply
-   "do 3, then 1, then 2" without ambiguity. Keep the labels stable
-   within a conversation — if you re-present a list, renumbering it
-   silently invalidates any instruction already given against the old
-   numbers. This binds every agent here.
+5. **Number every set of options, hierarchically and uniquely.** When
+   you offer choices, next steps, or findings the operator might act on
+   selectively, number them — and if a single reply contains more than
+   one list, **never restart at 1**. Number the sets and use dotted
+   labels: the first set is `1.1`, `1.2`, …, the second `2.1`, `2.2`, …
+   Two bare `3.`s in one message is ambiguous and wastes a round trip
+   asking which was meant. Keep labels stable within a conversation — if
+   you re-present a list, silently renumbering invalidates any
+   instruction already given against the old numbers. This binds every
+   agent here.
 6. **Flag best-practice deviations.** If a request or existing config
    conflicts with current best practices, say so and propose the
    improvement — but don't relitigate decisions the operator made

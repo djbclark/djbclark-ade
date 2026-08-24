@@ -31,10 +31,17 @@ class TestStandingRules(unittest.TestCase):
                 c = r.route(kind, quota=IDLE)
                 self.assertNotEqual(c.service.name, "clinepass")
 
-    def test_clinepass_excluded_even_when_everything_else_is_exhausted(self):
+    def test_clinepass_never_wins_even_when_it_is_the_only_pool_with_room(self):
+        """The rule that matters: starving Hindsight/hermes is never the answer.
+
+        Other agents may still be reachable as unmeasured fallbacks — that is
+        intended — but clinepass specifically must not be chosen.
+        """
         tight = {name: {"remaining": 0.0} for name in IDLE}
         tight["clinepass"] = {"remaining": 100.0}
-        self.assertIsNone(r.route("bulk", quota=tight))
+        choice = r.route("bulk", quota=tight)
+        if choice is not None:
+            self.assertNotEqual(choice.service.name, "clinepass")
 
     def test_prepaid_tier_is_retired(self):
         for name in ("opencode-zen", "openrouter", "deepseek"):
@@ -99,3 +106,44 @@ class TestDegradation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDiscovery(unittest.TestCase):
+    """Services are discovered, so the roster tracks reality over time."""
+
+    def test_discovery_includes_curated_services(self):
+        names = {s.name for s in r.discover(IDLE)}
+        for curated in ("claude", "codex", "antigravity", "copilot"):
+            self.assertIn(curated, names)
+
+    def test_unknown_provider_becomes_routable_conservatively(self):
+        found = r.discover({**IDLE, "brand-new-vendor": {"remaining": 80.0}})
+        svc = next(s for s in found if s.name == "brand-new-vendor")
+        self.assertEqual(set(svc.good_at), {"bulk", "mechanical"})
+        self.assertFalse(svc.judgment_tier, "unprofiled services must not take judgment")
+
+    def test_aliases_do_not_become_second_services(self):
+        """`cline` is clinepass's TUI; a duplicate entry would dodge never-bulk."""
+        names = {s.name for s in r.discover(IDLE)}
+        for alias in ("cline", "crush", "claude-agent-teams"):
+            self.assertNotIn(alias, names)
+
+    def test_alias_cannot_smuggle_bulk_to_clinepass(self):
+        quota = {name: {"remaining": 0.0} for name in IDLE}
+        quota["clinepass"] = {"remaining": 100.0}
+        quota["cline"] = {"remaining": 100.0}
+        choice = r.route("bulk", quota=quota)
+        if choice is not None:
+            self.assertNotIn(choice.service.name, {"clinepass", "cline"})
+
+    def test_measured_idle_capacity_beats_unmeasured(self):
+        """A pool we can see is idle should win over one we cannot measure."""
+        q = {**{k: {"remaining": 5.0} for k in IDLE}, "fresh-pool": {"remaining": 99.0}}
+        self.assertEqual(r.route("bulk", quota=q).service.name, "fresh-pool")
+
+    def test_unmeasured_agents_remain_reachable_as_fallback(self):
+        """All available agents should stay routable, just ranked last."""
+        drained = {k: {"remaining": 0.0} for k in IDLE}
+        choice = r.route("bulk", quota=drained)
+        self.assertIsNotNone(choice, "roster agents should still provide a fallback")
+        self.assertNotEqual(choice.service.name, "clinepass")
