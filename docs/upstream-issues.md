@@ -29,20 +29,23 @@ successfully run*, and keeps telling them after every rebuild. It reads as a
 broken install. `graft ask` / `graft grep` still work fine, so the message is
 actively misleading.
 
-**Second, more common trigger found 2026-08-23** — this is not limited to
-empty graphs. `graft check` reported `not built` for two repos with large,
-fully working graphs (`~/ops/site-djbclark`, `~/ops/site-private`), where
-`graft ask` returns correct symbol hits with file:line. The cause is that
-`resolveStats()` reads `graft/.cache/stats.json`, which is written by the
-**Claude Code hooks** — so any repo where the graph was built with a plain
-`graft build`, without `graft init` having installed the hooks, has a
-complete graph and no stats cache, and is reported as unbuilt.
+**Correction (2026-08-23):** an earlier revision of this file claimed a
+second, broader trigger — that repos with working graphs also report
+"not built". **That was wrong**, and it is retracted. It came from grepping
+`graft check` output for the string "not built", which matched the unrelated
+*deep layer* line (`deep layer: not built (run graft build --deep …)`) — an
+optional LLM-built layer, not the wiring graph. Checked properly,
+`~/ops/site-djbclark` reports `graph check: OK — the wiring graph is in sync
+with the code` with 502 nodes. Two lessons, both ours not graft's: grep for a
+substring is not a status check, and the deep-layer line is noise unless you
+are actually using `--deep`.
 
-That makes the failure mode much broader than "docs-only repo": it hits
-every CLI-only user, every CI checkout, and every repo using graft without
-the Claude integration. Worth fixing at the same place — persist a build
-stamp from `graft build` itself rather than depending on a hook-written
-cache, and distinguish "no graph" from "no stats".
+**Why this repo is genuinely empty**, for the record: its only code is three
+JS files under `.claude/` (`workflows/graph-audit.js`, two helper `.cjs`).
+Graft's walker skips dot-directories, and unlike ordinary skipped dirs this
+is not overridable — `graft build --include-dir .claude` refuses with
+"dot-directories are never overridable". So the 0-node graph is correct, and
+the only wrong thing is the *wording* of the statusline.
 
 **Suggested fix:** distinguish the two states. The build already knows whether
 it ran, so persist that (a `builtAt` in `graft/.cache/stats.json`, or simply
