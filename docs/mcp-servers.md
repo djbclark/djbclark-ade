@@ -187,3 +187,33 @@ every edit (detached `sync-run.js`, the "syncing…" state). The real fix is
 upstream (render empty ≠ missing); until then, ignore the segment here.
 `graft ask`/`graft grep` still work — they answer from `graft/INDEX.md` and
 the extract cache, not the wiring node count.
+
+
+## Hindsight is automatic in Hermes (2026-08-24)
+
+`~/.hermes/hindsight/config.json` now sets **`auto_recall: true` and
+`auto_retain: true`** against bank `hermes-shared`, retaining every 10 turns
+asynchronously. Hermes reads and writes shared memory with no manual step.
+
+**The manual review-before-promote pipeline is retired.** It was a
+propose/promote candidate ledger gated on operator review, and the ledger is
+the evidence it failed: nothing captured after **2026-08-11**, with two
+candidates sitting `pending` for 13 days (both rescued into `hermes-shared`
+before removal). A review gate whose reviewer does not review is a queue that
+never drains — the same objection that ruled out Link.
+
+Removed: the `Hindsight retention 30-day promotion gate` and
+`Hindsight pilot inactivity nudge` cron jobs, the `hindsight-retention-pilot`
+Hermes plugin, and its skill. `~/.hindsight/bin/hindsight_memory_z.py` (the
+`/z` propose/promote CLI) is now redundant and left in place, unused. The
+`candidates` table stays in `candidates.sqlite3` — it is Phase A history, and
+that database is also S1's home, so it must not be dropped.
+
+**One hazard found while removing this.** The
+`Hindsight shared-bank policy watchdog` did not merely alert on mission
+drift — it **overwrote** the bank mission with a hardcoded string via
+`hindsight bank update`. It ran after the mission was deliberately rewritten
+earlier the same day and silently reverted it; the change was only noticed
+because a later read showed the old text. Job and script retired, mission
+restored. The general lesson: a watchdog that auto-corrects instead of
+reporting will fight intentional change and lose work quietly.
