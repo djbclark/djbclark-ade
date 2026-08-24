@@ -399,6 +399,55 @@ Not adopted: the output-token scaffolds (ponytail, caveman, "be brief" one
 liners). The video rates them least effective, and output tokens are the
 smaller half of the problem.
 
+## Review the Copilot subscription ($29/mo)
+
+**Queued 2026-08-24. After the current loose ends.** Corrected from an
+inferred $10 — it is the **$29/month** tier, which makes it the third most
+expensive plan on the fleet after claude ($100) and grok ($30).
+
+What makes it worth a deliberate look rather than a reflex cut:
+
+- Its measured peak draw is ~30%, so it is genuinely used, unlike the
+  never-drawn plans.
+- But it is **`access: forbidden`** for everything except GitHub's own
+  clients — it cannot be routed to by Hermes or used as a general model
+  provider, so it contributes nothing to the shared pool.
+- The question is therefore narrow: is GitHub-native PR review and repo Q&A
+  worth $29/mo *on its own*, given `gh` CLI plus any routable model can do
+  much of the same work at no marginal cost?
+
+Do this once the plan ranking has ~14 days of history, so the utilisation
+figure means something.
+
+## Monthly plans that work with Hermes — researched 2026-08-24
+
+**Short answer: ClinePass is unusual, and that is why it works.** The
+industry pattern is that a flat monthly subscription buys access through the
+vendor's *own clients*, while programmatic access is a separate pay-per-token
+API. ClinePass is a flat-rate **API-key bundle**, which is exactly what an
+agent like Hermes needs.
+
+Checked:
+
+| Plan | Monthly? | Usable by Hermes? |
+|---|---|---|
+| **ClinePass** ~$9.99 | yes | **Yes** — flat-rate API key bundle. Currently our only paid Hermes pool |
+| **z.ai GLM Coding** $18 / $72 / $160 | yes | **No, as written.** Ships an OpenAI- *and* Anthropic-compatible endpoint (the only drop-in Claude Code replacement besides Anthropic), but the plan is explicitly *"limited to officially supported coding tools and is not a general API subscription"*. Hermes is not one of the 20+ supported tools |
+| **Kimi / Moonshot** $19 Moderato, $99 Allegro | yes | **No** — consumer plans cover chat plus Kimi Code credits; the Moonshot API is separate pay-per-token (~$0.60–0.95/M in) |
+| Google AI Pro $19.99 | yes | **No** — chat interface only, API bills separately |
+| ChatGPT Plus $20 | yes | Tolerated but not committed; reserved for coding anyway |
+| GitHub Copilot $29 | yes | **Forbidden** for third-party clients |
+
+**Implication.** There is no obvious second flat-rate pool to add. The
+realistic ways to widen Hermes's supply are: a second ClinePass-style bundle
+if one appears, pay-per-token API credit (openrouter/deepseek — the retired
+prepaid tier), or **upgrading the z.ai plan only if their terms change**.
+Worth re-checking periodically; this category moved fast in 2026.
+
+Also noted for the plan review: z.ai's tiers are **Lite $18 / Pro $72 /
+Max $160**, so there is headroom to buy more of a pool we already use — via
+the crush TUI, not Hermes.
+
 ## Also outstanding (raised, not formally queued)
 
 - **⚠ Rotate three API keys — OpenRouter, DeepSeek, ClinePass.** Operator
