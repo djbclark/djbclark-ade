@@ -80,9 +80,22 @@ class Service:
     never_bulk: bool = False        # infrastructure lifeline
     retired: bool = False           # excluded until an operator decision
     judgment_tier: bool = False     # trusted for high-stakes calls
+    # How this service may LEGITIMATELY be reached. Researched 2026-08-24;
+    # this is a licensing constraint, not a preference, so it gates hard.
+    #   "api"      - we hold credentials whose terms permit programmatic use,
+    #                so Hermes may call it directly as a provider.
+    #   "cli-only" - the subscription covers use through the vendor's OWN
+    #                client. Shelling out to that CLI is fine; wiring the
+    #                endpoint into Hermes as a generic provider is not.
+    #   "forbidden"- third-party clients explicitly violate the terms.
+    access: str = "cli-only"
+    # True when the only way to reach this is as a Hermes provider — there is
+    # no command Claude Code can invoke. Such a service belongs in the Hermes
+    # chain but must never win a Claude-side routing decision.
+    hermes_only: bool = False
 
     def eligible(self, kind: str) -> bool:
-        if self.retired:
+        if self.retired or self.hermes_only:
             return False
         if kind in ("bulk", "mechanical") and self.never_bulk:
             return False
@@ -99,14 +112,32 @@ SERVICES: tuple[Service, ...] = (
     Service("claude", "claude (Fable @ xhigh)",
             {"judgment": 1, "code": 10, "research": 30},
             "subscription", "hardest adjudications; separate Fable weekly lane",
-            judgment_tier=True),
+            judgment_tier=True, access="cli-only"),
     Service("codex", "codex (gpt-5.6-sol @ high)",
             {"judgment": 5, "code": 12, "research": 30},
             "subscription", "second coding vendor; own weekly pool",
-            judgment_tier=True),
+            judgment_tier=True,
+            # Tolerated rather than committed: OpenAI neither permits nor
+            # prohibits subscription use inside a non-OpenAI tool, and
+            # tolerated is fine. The real reason to keep it out of Hermes's
+            # chain is capability, not licensing — these are among the
+            # strongest coding models available here, so the weekly pool is
+            # worth reserving for coding judgment rather than spending on
+            # background agent turns.
+            access="cli-only"),
     Service("antigravity", "agy",
             {"bulk": 1, "research": 1, "mechanical": 2, "code": 40},
-            "subscription", "big context, summarisation, multimodal; most-wasted pool"),
+            "subscription",
+            # Google AI Pro does NOT include API access — subscriptions are chat
+            # -interface only, and a Gemini API key bills separately. Reaching
+            # it via the agy CLI spends the subscription; wiring Hermes to a
+            # GEMINI_API_KEY would spend real money.
+            "big context, summarisation, multimodal; most-wasted pool",
+            access="cli-only"),
+    Service("opencode-zen-free", "opencode-zen-free (Hermes provider)",
+            {"bulk": 5, "mechanical": 5, "code": 45}, "free",
+            "free Zen tier; legitimate for direct API use by Hermes",
+            access="api", hermes_only=True),
     Service("opencode-go", "opencode (go tier)",
             {"bulk": 2, "mechanical": 1, "code": 35},
             "free", "kimi/minimax/qwen catalogs"),
@@ -115,12 +146,19 @@ SERVICES: tuple[Service, ...] = (
     Service("devin", "devin", {"bulk": 20, "code": 45}, "subscription",
             "disabled in Orca's roster — dormant by choice"),
     Service("copilot", "copilot", {"github": 1, "code": 20}, "subscription",
-            "PR review, repo Q&A"),
+            # GitHub: the Copilot endpoint is for officially supported clients
+            # only. Using it as a generic model provider violates the ToS and
+            # risks account suspension. CLI only, never a Hermes provider.
+            "PR review, repo Q&A (official client only)", access="forbidden"),
     Service("cursor", "cursor", {"code": 25, "mechanical": 10}, "subscription",
             "IDE-centric composer"),
     Service("grok", "grok", {"research": 10, "bulk": 15}, "subscription", ""),
-    Service("clinepass", "cline", {"bulk": 90, "code": 90, "mechanical": 90},
-            "subscription", "Hindsight + hermes inference lifeline", never_bulk=True),
+    Service("clinepass", "cline", {"bulk": 40, "code": 40, "mechanical": 40},
+            "subscription",
+            # An API-key bundle we hold, so Hermes may call it directly. The
+            # old blanket never_bulk rule was retired 2026-08-24 in favour of
+            # the measured burn-rate alert (agent_stats.py burn).
+            "Hermes-usable API pool; watch the burn alert", access="api"),
     Service("opencode-zen", "opencode-ralph-tui-zen", {"code": 50, "bulk": 50},
             "prepaid", "prepaid retired 2026-08-23", retired=True),
     Service("openrouter", "opencode-ralph-tui-openrouter", {"code": 50, "bulk": 50},
@@ -285,6 +323,77 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
                   [s.name for _, s, _ in scored[1:4]])
 
 
+# Concrete models per Hermes-usable provider, cheapest-capable first within
+# each. Only providers with access == "api" may appear: everything else is
+# reachable solely through its own vendor CLI.
+HERMES_MODELS: dict[str, list[str]] = {
+    "opencode-zen-free": ["deepseek-v4-flash-free", "hy3-free",
+                          "nemotron-3.5-lightning-free"],
+    "clinepass": ["cline-pass/deepseek-v4-flash", "cline-pass/minimax-m3"],
+}
+# Hermes names the provider differently from aiuse for the paid pool.
+HERMES_PROVIDER_NAME = {"clinepass": "cline"}
+
+
+def hermes_chain(quota: dict[str, Any] | None = None) -> list[dict[str, str]]:
+    """Build Hermes's provider chain: free-first, then paid, headroom-ordered.
+
+    Hermes's own `fallback_providers` only reacts to *failure* — it has no
+    notion of cost or headroom, and cannot see pools Hermes has no provider
+    for. This generates it from the same capability + headroom model the
+    router uses, restricted to what we may legitimately call as an API.
+    """
+    quota = quota or {}
+    eligible = [s for s in SERVICES if s.access == "api" and not s.retired]
+    # Free before paid; within a tier, more headroom first. A pool we cannot
+    # measure sorts last rather than being dropped.
+    def key(s: Service) -> tuple[int, float]:
+        rem = (quota.get(s.name) or {}).get("remaining")
+        return (0 if s.billing == "free" else 1,
+                -(rem if rem is not None else -1.0))
+    chain = []
+    for svc in sorted(eligible, key=key):
+        for model in HERMES_MODELS.get(svc.name, []):
+            chain.append({"provider": HERMES_PROVIDER_NAME.get(svc.name, svc.name),
+                          "model": model,
+                          "_pool": svc.name,
+                          "_billing": svc.billing})
+    return chain
+
+
+def apply_hermes_chain(chain: list[dict[str, str]]) -> str:
+    """Write the chain into Hermes's config.
+
+    `hermes fallback add` is an interactive picker, so a generated chain has
+    to be written to config.yaml directly. The primary is the chain head; the
+    remainder becomes fallback_providers.
+    """
+    import re
+    cfg = Path.home()/".hermes/config.yaml"
+    text = cfg.read_text()
+    backup = cfg.with_suffix(f".yaml.bak-generated-{datetime.now():%Y%m%d%H%M%S}")
+    backup.write_text(text)
+
+    head, *rest = chain
+    text = re.sub(r"(?m)^model:\n(?:  .*\n)+",
+                  "model:\n"
+                  "  # GENERATED by bin/route_agent.py hermes-chain --apply.\n"
+                  "  # Edit the model table there, not here.\n"
+                  f"  provider: {head['provider']}\n"
+                  f"  default: {head['model']}\n"
+                  "  allow_paid_opencode_zen: false\n", text, count=1)
+    body = "".join(f"  - provider: {e['provider']}\n    model: {e['model']}\n"
+                   for e in rest)
+    text = re.sub(r"(?m)^fallback_providers:\n(?:(?:  #.*|  - .*|    .*)\n)*",
+                  "fallback_providers:\n"
+                  "  # GENERATED — free tiers first, paid pools last. Only\n"
+                  "  # providers whose terms permit direct API use appear here;\n"
+                  "  # everything else is reachable only via its vendor CLI.\n"
+                  + body, text, count=1)
+    cfg.write_text(text)
+    return str(backup)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Route work to a vendor")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -294,6 +403,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--min-headroom", type=float, default=15.0)
     sub.add_parser("show", help="snapshot age and per-service headroom")
     sub.add_parser("services", help="every service discovered right now")
+    hc = sub.add_parser("hermes-chain", help="generate Hermes's provider chain")
+    hc.add_argument("--apply", action="store_true", help="write it to config.yaml")
 
     args = parser.parse_args(argv)
     quota, age = load_snapshot()
@@ -309,6 +420,20 @@ def main(argv: list[str] | None = None) -> int:
             flag = "" if not svc else ("  [retired]" if svc.retired else
                                        "  [never-bulk]" if svc.never_bulk else "")
             print(f"  {name:16} {str(info.get('remaining')):>6}% remaining{flag}")
+        return 0
+
+    if args.command == "hermes-chain":
+        chain = hermes_chain(quota)
+        for i, e in enumerate(chain):
+            role = "primary" if i == 0 else f"fallback {i}"
+            rem = (quota.get(e["_pool"]) or {}).get("remaining")
+            print(f"  {role:11} {e['provider']}/{e['model']:32} "
+                  f"{e['_billing']:12} {'' if rem is None else f'{rem:.0f}% left'}")
+        excluded = [s for s in SERVICES if s.access != "api" and not s.retired]
+        print(f"\n  excluded ({len(excluded)}): "
+              + ", ".join(f"{s.name}[{s.access}]" for s in excluded))
+        if args.apply:
+            print("\n  backup:", apply_hermes_chain(chain))
         return 0
 
     if args.command == "services":

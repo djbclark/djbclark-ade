@@ -25,23 +25,25 @@ IDLE = {
 
 
 class TestStandingRules(unittest.TestCase):
-    def test_clinepass_never_gets_bulk_or_mechanical(self):
+    def test_clinepass_is_not_preferred_while_others_have_headroom(self):
+        """The blanket never-bulk rule was retired 2026-08-24 in favour of a
+        measured burn alert, so clinepass is now eligible — but it should
+        still lose to genuinely idle pools rather than being picked first."""
         for kind in ("bulk", "mechanical"):
-            for _ in range(3):
-                c = r.route(kind, quota=IDLE)
-                self.assertNotEqual(c.service.name, "clinepass")
+            self.assertNotEqual(r.route(kind, quota=IDLE).service.name, "clinepass")
 
-    def test_clinepass_never_wins_even_when_it_is_the_only_pool_with_room(self):
-        """The rule that matters: starving Hindsight/hermes is never the answer.
+    def test_clinepass_is_usable_when_it_is_the_pool_with_room(self):
+        """Retired rule, deliberately inverted.
 
-        Other agents may still be reachable as unmeasured fallbacks — that is
-        intended — but clinepass specifically must not be chosen.
-        """
+        Until 2026-08-24 a standing order forbade bulk on clinepass outright.
+        That was a guess standing in for a measurement; it is now replaced by
+        `agent_stats.py burn`, which projects hours-to-empty. So when clinepass
+        is the pool with headroom, using it is correct."""
         tight = {name: {"remaining": 0.0} for name in IDLE}
         tight["clinepass"] = {"remaining": 100.0}
         choice = r.route("bulk", quota=tight)
-        if choice is not None:
-            self.assertNotEqual(choice.service.name, "clinepass")
+        self.assertIsNotNone(choice)
+        self.assertEqual(choice.service.name, "clinepass")
 
     def test_prepaid_tier_is_retired(self):
         for name in ("opencode-zen", "openrouter", "deepseek"):
@@ -128,18 +130,36 @@ class TestDiscovery(unittest.TestCase):
         for alias in ("cline", "crush", "claude-agent-teams"):
             self.assertNotIn(alias, names)
 
-    def test_alias_cannot_smuggle_bulk_to_clinepass(self):
+    def test_alias_does_not_create_a_second_clinepass(self):
+        """`cline` is clinepass's TUI. It must fold onto the curated service
+        rather than appearing as an extra pool, or headroom gets double
+        counted and constraints are evaluated twice."""
         quota = {name: {"remaining": 0.0} for name in IDLE}
         quota["clinepass"] = {"remaining": 100.0}
         quota["cline"] = {"remaining": 100.0}
-        choice = r.route("bulk", quota=quota)
-        if choice is not None:
-            self.assertNotIn(choice.service.name, {"clinepass", "cline"})
+        names = {s.name for s in r.discover(quota)}
+        self.assertIn("clinepass", names)
+        self.assertNotIn("cline", names)
 
     def test_measured_idle_capacity_beats_unmeasured(self):
-        """A pool we can see is idle should win over one we cannot measure."""
-        q = {**{k: {"remaining": 5.0} for k in IDLE}, "fresh-pool": {"remaining": 99.0}}
+        """Between two unprofiled pools, the one we can see is idle should win."""
+        q = {**{k: {"remaining": 5.0} for k in IDLE},
+             "fresh-pool": {"remaining": 99.0}, "murky-pool": {}}
         self.assertEqual(r.route("bulk", quota=q).service.name, "fresh-pool")
+
+    def test_hermes_only_providers_never_win_claude_side_routing(self):
+        """opencode-zen-free is reachable only as a Hermes provider.
+
+        There is no command Claude Code can run for it, so however idle it
+        looks it must not be handed work here — it belongs in the Hermes
+        chain instead.
+        """
+        q = {**{k: {"remaining": 1.0} for k in IDLE},
+             "opencode-zen-free": {"remaining": 100.0}}
+        for kind in r.KINDS:
+            c = r.route(kind, quota=q)
+            if c:
+                self.assertNotEqual(c.service.name, "opencode-zen-free", kind)
 
     def test_unmeasured_agents_remain_reachable_as_fallback(self):
         """All available agents should stay routable, just ranked last."""
