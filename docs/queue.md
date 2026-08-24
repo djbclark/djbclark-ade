@@ -292,11 +292,49 @@ Scope both directions:
 - **Backfill** what already exists in those accounts.
 - **Ongoing capture** so future web conversations flow in without ceremony.
 
-Known starting point: prior work with the **vesti Chrome extension** already
-retrieves some of this. Worth assessing before building anything — what it
-covers, what format it emits, whether it can run unattended. Other routes to
-compare: each vendor's official export (Google Takeout for Gemini, X/Grok
-export), and browser automation against a logged-in session.
+### VESTI assessed 2026-08-23 — right tool for most of it, one real gap
+
+[abraxas914/vesti](https://github.com/abraxas914/vesti) (心迹, TypeScript,
+public, local checkout at `~/src/vesti`, also an Orca project) describes
+itself as a *"local-first AI conversation memory hub to capture, search,
+summarize, and export chats across major AI platforms"* — which is exactly
+this problem, already built.
+
+**What it covers.** A Chrome extension silently captures conversations on
+**ChatGPT, Claude, Gemini, DeepSeek, Qwen and Doubao**, extracting full
+multi-turn content with timestamps and platform metadata, deduplicating, and
+persisting to local IndexedDB. No manual export step, no tagging.
+
+**The gap: Grok is not supported.** The platform list above is exhaustive, so
+half of what was asked for needs a new capture adapter. That is the honest
+cost of choosing VESTI — everything else it gives us free.
+
+**How the integration would work.** The extension exposes a clean
+`StorageApi` contract (`packages/vesti-ui/src/types.ts:412`) —
+`getConversations`, `getMessages`, `getTopics` — and supports
+`ExportFormat = "json" | "txt" | "md"`. So the data is reachable; the only
+question is transport out of IndexedDB, which a browser extension cannot
+write to arbitrary paths from. Options, cheapest first:
+
+1. **Manual JSON export → S1 adapter.** Fine for the *backfill* half. A
+   `vesti` producer adapter is the same shape as the Claude and Hermes ones
+   (~150 lines): one S1 event per message, `source_locator` = conversation +
+   message id, resuming by id.
+2. **A localhost receiver.** Implement an alternate `StorageApi` backend, or
+   a small mirror hook, that POSTs each captured conversation to a tiny local
+   endpoint which appends to a file S1 tails. This is the clean answer for
+   *ongoing* capture and keeps the extension's local-first property.
+3. **Read the extension's IndexedDB from the Chrome profile directly.**
+   Works without touching VESTI, but couples us to LevelDB internals and
+   breaks whenever the schema moves. Fallback only.
+
+**Recommendation:** option 1 to backfill, option 2 for ongoing, and treat
+Grok as separate work — likely its own capture adapter in VESTI (upstreamable)
+rather than a bespoke scraper here.
+
+Still worth comparing for the backfill: each vendor's official export (Google
+Takeout for Gemini, X/Grok export) is bulk one-shot — useless for ongoing
+capture, but it needs no extension and no browser session.
 
 Where it lands: **S1** is the right home for the raw conversations (it already
 holds 448k events and is producer-agnostic — a `gemini` / `grok` adapter is
