@@ -306,3 +306,49 @@ the Hindsight export has not been backfilled into S1.
    unique" objection and makes Hindsight disposable later.
 3. **Keep curating `docs/`** as the human-readable layer.
 4. **Revisit Link** at ~50 pages or on a demonstrated retrieval failure.
+
+
+## Basic Memory: installed, but it must own its own directory (2026-08-23)
+
+Installed `basic-memory` 0.22.1 via `uv tool install`, registered as an MCP
+server pointing at the **installed binary** (`~/.local/bin/basic-memory mcp`)
+rather than `uvx basic-memory mcp` — uvx re-resolves the package on each
+launch, which is slower and can fail offline. Being stdio, it needs no daemon
+and survives restarts by construction. Verified ✔ Connected.
+
+**It rewrites source files. Do not point it at an existing repo.**
+
+Registering `~/ops/site-private/memory`, `djbclark-ade/docs` and
+`site-djbclark/research` as projects caused it to prepend YAML frontmatter to
+every file it synced:
+
+```yaml
+---
+title: mcp-servers
+type: note
+permalink: ade-docs/mcp-servers
+---
+```
+
+18 tracked files across two repos were modified before it was stopped —
+including files in the **public** site-djbclark. No content was lost (7 lines
+added, 1 rewritten trailing newline per file) and all 18 were reverted with
+`git checkout`. `site-private/memory` was untouched only because sync had not
+reached it yet.
+
+This is documented behaviour, not a bug — Basic Memory's format *is* markdown
+with frontmatter, and it needs `permalink` to address notes. The mistake was
+mine: I tested with `basic-memory status`, which only reports, on a project
+that had not begun syncing, and concluded "no file mutation". A report is not
+the artifact. (Standing order 4, learned again the hard way.)
+
+**Correct adoption shape:** Basic Memory owns `~/basic-memory` and nothing
+else. If existing material should live in it, *copy* it in and let the
+originals stay canonical in git — do not hand it a repo. Current state: one
+project, `main` → `~/basic-memory`, no repo registered.
+
+Open question before it earns real use: with the curated corpus staying in
+git, what does Basic Memory actually hold? The honest candidate is
+cross-session agent notes that have nowhere else to live — not a mirror of
+`docs/`, which would create the two-canons problem the plan explicitly warns
+about.
