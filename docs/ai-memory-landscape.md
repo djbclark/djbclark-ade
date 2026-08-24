@@ -43,7 +43,7 @@ Wiki into "interlinked knowledge base".
 | 2 Structured files / SQLite (S1) | **Phase B: both adapters live 2026-08-23** | Phase A capacity journal, plus the new evidence store: `site-djbclark/bin/hindsight_s1.py` adds event/conversation/raw_object/attachment/checkpoint/gap tables to the same database, content-addressed raw bytes under `~/.hindsight/cas/`, and event IDs derived from source coordinates. 20 tests cover the exit-gate properties. Hermes event sink added too (`hindsight_s1_hermes.py`, reads `state.db` read-only). Remaining: attachments, trigram/neighbour retrieval, Arq backup coverage |
 | 3 Semantic recall (Hindsight) | **restructured 2026-08-23** | Service live; model switch done (~$0.47/mo). Per-repo bank restructure **executed**: 78 docs / ~801 facts moved into 11 `coding-agent::<repo>` banks, `hermes-shared` curated to the cross-project channel, stray banks removed. Known issue remaining: 25% reflect-failure at the 25s cap |
 | 4 Verbatim recall | **foundation in place 2026-08-23** | Backfill complete: **210,824 events / 916MB** of exact producer bytes in the CAS, from all 532 Claude transcripts (208,534 records, 0 skipped). `verify` passes: integrity ok, 3,000-sample hash check clean. Repo attribution now captured at ingest — tendcf 36k, stayturgid 28.5k, site-private 15.5k, site-djbclark 15.5k, sudo-secretspec 15.5k events. Remaining: expose verbatim spans through recall |
-| 5 Linked knowledge (Link) | **early** | Viability spike done, 6 preview notes in `site-private/memory/link/`. No canonical repo, no shadow comparison |
+| 5 Linked knowledge (Link) | **ready to start; re-check on v2.3.0** | Viability spike done 2026-08-13 against Link 2.2.1, 6 preview notes in `site-private/memory/link/`. No shadow comparison running yet. **v2.3.0 shipped 2026-08-15, two days after the spike, and fixes its #1 blocker** — see below |
 | 6 Cross-tool sharing | **working, after a real fix** | Hermes↔Claude bridged over MCP 2026-08-23. The memory half was silently broken: Hermes's provider config (`~/.hermes/hindsight/config.json`) templated its bank as `hermes-{profile}-{workspace}`, so it never read `hermes-shared` — retained facts were committed and API-recallable yet invisible to it, and it answered confidently wrong. Both keys now pinned to `hermes-shared`; verified Hermes recall returns the shared facts |
 | 0 Capacity guard | **done** | 75/85/70 thresholds + supervised writer in the Hermes bootstrap store |
 
@@ -102,3 +102,50 @@ Implication for us: the plan's "never copy canonical memory into
 client-private stores" rule is the right instinct and matches where the
 standards are heading. If PAM stabilizes, it is the natural wire format for
 the S1 event envelope rather than something to invent.
+
+
+## Link — research refresh, 2026-08-23
+
+Link is an external tool (<https://github.com/gowtham0992/link>, MIT, actively
+maintained, `brew install gowtham0992/link/link`): local memory for AI agents
+stored as **plain Markdown** in a wiki, with review-gated writes and no LLM in
+the memory layer. The plan pins it at 2.2.1 / `643e208` as the presumptive
+Level 2/3/5/6 component.
+
+**The spike is thorough and recent — don't redo it.** Dated 2026-08-13, it
+scored Link per level (Strong at 2 and 3, Very Strong at 5 and 6, **No** at
+4), passed 202 focused tests, a 19-agent cross-agent proof, and a
+10,082-page / 30,000-edge FTS scale smoke. Verdict: PARTIAL — adopt as the
+reviewed-memory/wiki layer, *not* as a Level 4 archive.
+
+**What changed since:** Link **v2.3.0** was released 2026-08-15, two days
+after the spike, and it directly addresses the spike's number-one gap. The
+first tool response of a session used to carry the whole memory brief
+(~16.5k characters); v2.3.0 replaces it with a compact digest under a hard
+4,000-character budget. Measured on their benchmark corpus, first-recall cost
+drops from **11,269 tokens to 2,313** against a 1,954 steady state. That was
+the gap flagged as "explicitly tracked work", and it is the one that would
+have made Link expensive to sit in front of every session.
+
+v2.3.0 also improves contradiction detection (spike gap 5), incrementally.
+Still unaddressed: non-immutable captures (gap 2) and no atomic multi-file
+proposals (gap 3).
+
+**Why gap 2 no longer matters to us.** The spike's objection was that Link's
+captures are truncated, omit tool results, and are proposal-oriented — not
+lossless. That is precisely the role **S1 now fills** (area 2/4, built
+2026-08-23). The intended stack is already what we have:
+
+```
+S1 evidence archive (Level 4) — authoritative, immutable, exact bytes   ← built
+        ↑ source-backed processing
+Link (Levels 2,3,5,6) — reviewed Markdown memories, wiki, recall, MCP   ← next
+        ↑ approved bounded projection
+Git AGENTS.md/CLAUDE.md + bootstrap (Levels 0,1)                        ← done
+```
+
+**So the next step is not more evaluation.** It is: install v2.3.0, re-run the
+spike's own token measurement to confirm the improvement holds on *our*
+corpus rather than their benchmark, then stand Link up in shadow mode against
+the existing `hermes-shared` corpus and run the Phase C micro-suite and
+adoption comparison before promoting it to canonical.
