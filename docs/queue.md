@@ -89,13 +89,39 @@ the schema is live on `~/.hindsight/candidates.sqlite3` alongside Phase A
    `VACUUM INTO`; confirm Arq picks up snapshots and CAS objects rather than
    a live WAL.
 
-## Implement cow
+## Implement cow — DONE 2026-08-23 (first pass)
 
-**Decided 2026-08-23 by the operator — `cow` is the choice; the comparison
-below is kept as the rationale, not an open question.** Not started.
+Installed (`cow 0.1.10`), configured, and in use.
 
-<https://github.com/joeinnes/cow> · `brew install cow` (or
-`cargo install cow-cli`).
+- **Install:** `brew trust joeinnes/tap` first, then `brew install cow` — the
+  plain `brew install cow` in the README fails, there is no homebrew-core
+  formula. (Operator did the trust step.)
+- **Shell integration:** `cow install` → `cowcd` function + completion in
+  `~/.bashrc`.
+- **MCP:** registered user-scope, `claude mcp add --scope user cow -- cow mcp`,
+  verified ✔ Connected. Being stdio, it needs no daemon and survives reboots
+  by construction — Claude Code spawns it per session from `~/.claude.json`,
+  and the binary lives in `/opt/homebrew/bin`.
+- **Retroactive migration:** `cow migrate --all` in `~/.hermes/hermes-agent`
+  converted **8 worktrees** into pastures. `cow stats`: **3.7 GB on disk for
+  29.2 GB of logical content.** Two worktrees with uncommitted work
+  (`memory-capacity-guard-v2`, `upstream-merge`) were skipped by design —
+  migrating them needs `--force` and an operator decision.
+
+**Gotcha worth remembering:** the first migration run failed on every
+candidate and rolled each one back cleanly. Cause was an uncommitted
+`.gitignore` edit in the source repo (left by an earlier `graft build`),
+which blocks branch checkout. Fix was to keep the tracked `.gitignore`
+pristine and put graft's ignore rules in `.git/info/exclude` instead — the
+right place for tool-local cache rules in a fork that tracks upstream.
+
+Still to do: point Orca `worker-start` at cow, teach Hermes's
+`headless-agent-orchestration` skill to use it, and decide the fate of
+`~/src/ops-worktrees/` (13 dirs, 492MB) now that the release regime is gone.
+
+### Original decision record
+
+<https://github.com/joeinnes/cow> · `brew trust joeinnes/tap && brew install cow`.
 
 ### Baseline measured 2026-08-23 (step 1 partly done)
 

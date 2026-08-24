@@ -42,7 +42,7 @@ Wiki into "interlinked knowledge base".
 | 1 Native instructions | **done** | AGENTS.md/CLAUDE.md across `~` and the three ops repos |
 | 2 Structured files / SQLite (S1) | **Phase B started 2026-08-23** | Phase A capacity journal, plus the new evidence store: `site-djbclark/bin/hindsight_s1.py` adds event/conversation/raw_object/attachment/checkpoint/gap tables to the same database, content-addressed raw bytes under `~/.hindsight/cas/`, and event IDs derived from source coordinates. 20 tests cover the exit-gate properties. Remaining: the Claude tail adapter, live Hermes sink, backfill |
 | 3 Semantic recall (Hindsight) | **partial** | Service live; model switch done (~$0.47/mo). Per-repo bank restructure **planned, not executed**. 25% reflect-failure at the 25s cap |
-| 4 Verbatim recall | **not started** | 53 raw transcripts exist but injection strips them; rides on S1 Phase B |
+| 4 Verbatim recall | **foundation in place 2026-08-23** | Backfill complete: **210,824 events / 916MB** of exact producer bytes in the CAS, from all 532 Claude transcripts (208,534 records, 0 skipped). `verify` passes: integrity ok, 3,000-sample hash check clean. Repo attribution now captured at ingest — tendcf 36k, stayturgid 28.5k, site-private 15.5k, site-djbclark 15.5k, sudo-secretspec 15.5k events. Remaining: expose verbatim spans through recall |
 | 5 Linked knowledge (Link) | **early** | Viability spike done, 6 preview notes in `site-private/memory/link/`. No canonical repo, no shadow comparison |
 | 6 Cross-tool sharing | **partial** | Hermes↔Hindsight and Claude↔Hindsight both live; Hermes↔Claude bridged 2026-08-23 (see [mcp-servers.md](mcp-servers.md)) |
 | 0 Capacity guard | **done** | 75/85/70 thresholds + supervised writer in the Hermes bootstrap store |
