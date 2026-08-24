@@ -119,7 +119,51 @@ the running binary serves; `orca skills get <name>` prints its
 version-matched guide. Install more as needed — the currently-installed
 set is not a boundary.
 
-## Composing Orca dispatch with cow pastures (2026-08-23)
+## Orca dispatch and cow pastures do NOT compose (tested 2026-08-23)
+
+An earlier revision of this file documented dispatching a worker into a cow
+pasture via the `path:` selector:
+
+```bash
+WS=$(cow create "$TASK" --source "$REPO" --branch "$BRANCH" --print-path)
+orca orchestration worker-start --task "$TASK_ID" --agent claude --worktree "path:$WS"
+```
+
+**That does not work.** It was written from `worker-start --help` without a
+live dispatch, and a live dispatch fails:
+
+```
+{"ok": false, "error": {"code": "selector_not_found"}}
+```
+
+Every worktree selector — `path:`, `name:`, `branch:`, `issue:` — resolves
+against Orca's own registry of **Orca-managed** worktrees, not the filesystem.
+A cow pasture is an ordinary clone Orca has never heard of:
+
+```
+$ cd ~/.cow/pastures/djbclark-ade/probe && orca worktree current
+No Orca-managed worktree contains the current directory
+```
+
+There is no adopt/register path either: `orca worktree set` updates metadata
+on a worktree Orca already knows, and `orca worktree create` makes its own.
+
+**So today the choice is either/or.** Use `orca worktree create` and let Orca
+own the workspace, or use cow pastures and drive the agent yourself
+(`cow run`, or `claude-sub` per the Hermes orchestration skill). Cow's space
+win — 36.5GB of logical content in 3.7GB across 10 pastures — applies to the
+second path only.
+
+**If we want both**, the fix is upstream in the Orca fork
+(github.com/djbclark/orca): a command to register an existing directory as a
+managed worktree, which the selectors would then resolve normally. Worth
+filing before building around it.
+
+One incidental gotcha found on the way: `task-create --json` returns a
+`taskId` UUID, but `worker-start --task` expects the `task_<hex>` id shown by
+`task-list`. Passing the UUID fails with `task_not_found`.
+
+
 
 Orca creates worktrees itself (`--worktree new-child|new-top-level`, with
 `--repo` / `--base-branch`); there is no flag that swaps in a different
@@ -143,8 +187,6 @@ Verify on a throwaway task before relying on it — in particular that Orca is
 content with a directory it did not create, and that `--setup` behaves as
 expected (creation flags are rejected for existing worktrees).
 
-Vendored copy of the Hermes-side guidance: Hermes's
-`headless-agent-orchestration` skill now tells it to prefer
-`cow create` over `git worktree add` for worker workspaces, with the two
-operational rules that bit us: the source tree must be clean, and a pasture
-carries `.env` and other secrets.
+Hermes-side guidance: its `headless-agent-orchestration` skill tells it to
+prefer `cow create` for worker workspaces — correct, because Hermes drives
+agents directly rather than through Orca dispatch.
