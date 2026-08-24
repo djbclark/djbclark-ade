@@ -42,7 +42,7 @@ Wiki into "interlinked knowledge base".
 | 1 Native instructions | **done** | AGENTS.md/CLAUDE.md across `~` and the three ops repos |
 | 2 Structured files / SQLite (S1) | **Phase B: both adapters live 2026-08-23** | Phase A capacity journal, plus the new evidence store: `site-djbclark/bin/hindsight_s1.py` adds event/conversation/raw_object/attachment/checkpoint/gap tables to the same database, content-addressed raw bytes under `~/.hindsight/cas/`, and event IDs derived from source coordinates. 20 tests cover the exit-gate properties. Hermes event sink added too (`hindsight_s1_hermes.py`, reads `state.db` read-only) and backfilled: **237,831 rows, 0 skipped**, resuming correctly on re-run. Arq coverage confirmed by the operator. Remaining: attachments, trigram/neighbour retrieval |
 | 3 Semantic recall (Hindsight) | **restructured 2026-08-23** | Service live; model switch done (~$0.47/mo). Per-repo bank restructure **executed**: 78 docs / ~801 facts moved into 11 `coding-agent::<repo>` banks, `hermes-shared` curated to the cross-project channel, stray banks removed. Known issue remaining: 25% reflect-failure at the 25s cap |
-| 4 Verbatim recall | **foundation in place 2026-08-23** | Backfill complete across both producers: **448,655 events / 2.1GB** — 210,824 from of exact producer bytes in the CAS, 532 Claude transcripts plus 237,831 Hermes message/tool events across 675 sessions. `verify` passes: integrity ok, no foreign-key violations, 4,000-sample hash check clean (0 missing, 0 mismatched). Repo attribution now captured at ingest — tendcf 36k, stayturgid 28.5k, site-private 15.5k, site-djbclark 15.5k, sudo-secretspec 15.5k events. Remaining: expose verbatim spans through recall |
+| 4 Verbatim recall | **done for now 2026-08-23** | Backfill complete across all three producers: **448,655 events / 2.1GB** — 210,824 from of exact producer bytes in the CAS, 532 Claude transcripts plus 237,831 Hermes message/tool events across 675 sessions. `verify` passes: integrity ok, no foreign-key violations, 4,000-sample hash check clean (0 missing, 0 mismatched). Repo attribution now captured at ingest — tendcf 36k, stayturgid 28.5k, site-private 15.5k, site-djbclark 15.5k, sudo-secretspec 15.5k events. Hindsight's own corpus backfilled too (98 documents, all 12 banks), closing the plan's retirement prerequisite. Indexed retrieval live: fts, trigram, exact, neighbours over all 448,755 events. Remaining: attachments |
 | 5 Linked knowledge (Link) | **ready to start; re-check on v2.3.0** | Viability spike done 2026-08-13 against Link 2.2.1, 6 preview notes in `site-private/memory/link/`. No shadow comparison running yet. **v2.3.0 shipped 2026-08-15, two days after the spike, and fixes its #1 blocker** — see below |
 | 6 Cross-tool sharing | **working, after a real fix** | Hermes↔Claude bridged over MCP 2026-08-23. The memory half was silently broken: Hermes's provider config (`~/.hermes/hindsight/config.json`) templated its bank as `hermes-{profile}-{workspace}`, so it never read `hermes-shared` — retained facts were committed and API-recallable yet invisible to it, and it answered confidently wrong. Both keys now pinned to `hermes-shared`; verified Hermes recall returns the shared facts |
 | 0 Capacity guard | **done** | 75/85/70 thresholds + supervised writer in the Hermes bootstrap store |
@@ -352,3 +352,23 @@ git, what does Basic Memory actually hold? The honest candidate is
 cross-session agent notes that have nowhere else to live — not a mirror of
 `docs/`, which would create the two-canons problem the plan explicitly warns
 about.
+
+
+## S1 status, end of 2026-08-23
+
+**448,755 events / 2.1GB**, verified healthy (integrity ok, no foreign-key
+violations, 5,000-sample hash check clean), fully indexed for retrieval.
+
+| Producer | Events | Source |
+|---|---|---|
+| `hermes` | 237,833 | `~/.hermes/state.db`, read-only, resumes by row id |
+| `claude-code` | 210,824 | 532 transcripts, resumes by byte offset |
+| `hindsight` | 98 | all 12 banks, paginated |
+
+All three adapters are idempotent and resumable, verified by re-running each
+against live data. One honest `ingest_gap` recorded: Claude Code
+garbage-collected transcripts from 2026-08-15..19.
+
+The plan's prerequisite for ever retiring Hindsight — *"export and backfill
+them to S1"* — is now met. That does not argue for retiring it; it makes the
+choice free.
