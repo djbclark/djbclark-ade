@@ -89,6 +89,29 @@ the schema is live on `~/.hindsight/candidates.sqlite3` alongside Phase A
    `VACUUM INTO`; confirm Arq picks up snapshots and CAS objects rather than
    a live WAL.
 
+## Adopt rift for workspace creation, across agents too
+
+**Queued 2026-08-23. Not started.** <https://github.com/anomalyco/rift>
+(`npm install -g rift-snapshot`).
+
+Copy-on-write workspaces as an alternative to git worktrees: filesystem-level
+cloning (APFS `clonefile` on macOS, btrfs snapshots / reflinks on Linux), so a
+new workspace is near-instant and near-free instead of a full copy — the
+project claims <0.1s on a 10GB folder. It also excludes build artifacts and
+dependencies by default, and has `.rift.toml` precreate/postcreate hooks plus
+a JS/Bun FFI library for programmatic use.
+
+Use it everywhere workspaces get created, and teach the agents to use it too —
+Hermes (`headless-agent-orchestration` creates isolated workspaces per worker),
+Orca macro-graph dispatch (`worker-start --worktree`), and Claude Code's own
+worktree isolation.
+
+**Worth knowing before adopting:** the project marks itself **experimental and
+not production-ready**, and it has no built-in AI-agent integration — the
+agent side is wiring we would write. Sensible first step is a side-by-side
+trial on one real workflow (Orca fan-out is the natural candidate, since it
+creates the most worktrees) before touching anything load-bearing.
+
 ## Also outstanding (raised, not formally queued)
 
 - **⚠ Rotate three API keys — OpenRouter, DeepSeek, ClinePass.** Operator
