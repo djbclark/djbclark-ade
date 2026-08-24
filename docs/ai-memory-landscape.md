@@ -152,67 +152,87 @@ adoption comparison before promoting it to canonical.
 
 ## Is Link the right move? Assessment 2026-08-23
 
-**Short answer: yes, but for a different reason than the plan gives, and with
-one premise that changed today.**
+**Independent read, not bound by the plan: I would not adopt Link yet.** Not
+because it is bad — it is MIT, actively maintained, and v2.3.0 fixed the
+token blocker that mattered. Because the problem it solves is not the problem
+we have.
 
-### The alternatives were already surveyed — and the plan is explicit
+### What today actually demonstrated
 
-The plan (§ adoption gates) does not treat this as open: *"Do not adopt
-**Basic Memory** alongside Link unless it demonstrates a unique capability"*;
-Graphiti is gated behind Link failing controlled temporal tests; MemPalace
-behind SQLite retrieval failing acceptance tests. Those are quantitative
-gates (≥10 points multi-hop gain, ≤50% token overhead, ≤300ms warm-p95), not
-preferences. Re-litigating them would be waste.
+Every memory channel that worked was **markdown that gets injected**:
+`AGENTS.md`, the Hermes skill files, `~/.hermes/memories/MEMORY.md`. Every
+time something was written there, the agent knew it. Every channel that
+depended on **retrieval** failed at least once: Hindsight recall pointed at
+the wrong bank for hours while reporting success, and Hermes answered a
+question about `cow` by confidently describing `cowsay`.
 
-For the record, the field as of 2026 splits three ways:
+That is the opposite of the usual assumption. Retrieval was the fragile part;
+deterministic injection was the reliable part.
 
-| Approach | Examples | Fit here |
+### We already have a markdown wiki, and it is this repo
+
+`docs/` in djbclark-ade is git-backed, human-editable, diffable, reviewed at
+commit time, readable by every agent, and pointed at from `AGENTS.md`. That
+is substantially what Link provides as a substrate. What Link adds on top is
+FTS/semantic retrieval over the wiki, a propose/review lifecycle, backlinks
+and an entity graph, and MCP access.
+
+Those additions pay off at scale — Link's own smoke test is 10,082 pages.
+**We have about a dozen curated documents.** At this size, agents read the
+`AGENTS.md` pointers directly and retrieval is not the bottleneck. Adopting
+Link now buys machinery for a problem we do not yet have, and adds a second
+memory system to operate.
+
+### The gap that is actually worth effort
+
+S1 holds **448,655 events / 2.1GB** and exposes only exact-substring search
+that scans the CAS. Nothing turns that corpus into anything usable. That is a
+real, unarguable gap, and it is ours to close — no tool decision required.
+
+Second: today's recurring failure was not storage, it was **stale or wrong
+facts asserted confidently** — a claim of mine that had to be retracted, the
+`cowsay` answer, a knowledge page still saying PRs await merge that had
+merged. More retrieval surface makes that worse unless correction is cheap.
+Link's review-gating genuinely helps there; so does having *fewer* sources of
+truth, which is free.
+
+### When I would revisit
+
+Adopt Link when the curated layer outgrows reading: when `docs/` passes
+roughly 50 pages, or when an agent demonstrably fails to find something a
+pointer should have surfaced. At that point its differentiators are real and
+map onto today's pain — no LLM in the memory layer (Hindsight's extraction
+takes ~40s a retain, produced an 83%-episodic corpus, and fails reflect 25%
+of the time at the 25s cap); plain markdown in git (a Hindsight bank can only
+be inspected via API and, as `hermes-default-hermes` proved, is
+unrecoverable without a Postgres restore); and review-gated writes (Hindsight
+auto-retained a transcript containing API-key fragments).
+
+And the decision stays cheap because the substrate is markdown: if Link is
+abandoned, the memory is still files in git.
+
+### Alternatives, for the record
+
+| Approach | Examples | Verdict |
 |---|---|---|
-| Markdown + MCP, local-first | **Link**, [Basic Memory](https://github.com/basicmachines-co/basic-memory) | Matches this machine: git-backed, human-editable, no cloud |
-| Cloud-routed fact stores | Mem0, Zep | Route through cloud APIs — wrong for a self-hosted, private setup |
-| Temporal knowledge graphs | Zep/[Graphiti](https://neo4j.com/blog/developer/graphiti-knowledge-graph-memory/) | Wins temporal queries (63.8% vs 49.0% on LongMemEval) but has **no native human-review workflow** and ingests markdown poorly |
+| Markdown + MCP, local-first | **Link**, [Basic Memory](https://github.com/basicmachines-co/basic-memory) (3.7k stars, AGPL-3.0, writes not review-gated) | The right family if/when we adopt one |
+| Cloud-routed fact stores | Mem0, Zep | Wrong for a self-hosted private setup |
+| Temporal knowledge graphs | Zep/[Graphiti](https://neo4j.com/blog/developer/graphiti-knowledge-graph-memory/) | Wins temporal queries (63.8% vs 49.0% LongMemEval) but no human-review workflow and ingests markdown poorly |
 
-Basic Memory is the closest architectural twin and is far more popular
-(3.7k stars vs Link's 170) — worth noting as a longevity signal. It is
-AGPL-3.0 where Link is MIT, and its writes are not review-gated.
+### One correction to the plan worth carrying forward
 
-### The real argument for Link is lock-in, not features
-
-Its differentiators map exactly onto the three failures we hit **today**,
-which is better evidence than any benchmark:
-
-1. **No LLM in the memory layer.** Hindsight's extraction takes ~40s per
-   retain, produced an 83%-episodic corpus of session narration rather than
-   usable facts, and has a known 25% reflect-failure rate at the 25s cap.
-2. **Plain markdown in git.** Inspecting a Hindsight bank means API calls;
-   deleting one is unrecoverable without a Postgres restore — which is
-   precisely how `hermes-default-hermes` was lost. Markdown is diffable,
-   greppable, and already covered by our backups.
-3. **Review-gated writes.** Hindsight auto-retained a transcript containing
-   API-key fragments. Link proposes; the operator approves.
-
-And the decision is *cheap to reverse*: if Link is abandoned upstream, the
-memory is still markdown in git. That matters more than its 170 stars.
-
-### The premise that changed today
-
-The plan says retire Hindsight only if Link proves *"equal or better"*, with
-**"no critical retrieval subset more than two percentage points worse than
-Hindsight"**. That baseline just moved: the Hindsight those judgements were
-formed against was **misconfigured** — one shared bank giving ~1-in-17
-relevance, and a provider pointed at a bank it never read. Both are fixed.
-
-So: **start Link in shadow, but do not plan on retiring Hindsight.** Two
-reasons. The bar is now genuinely higher, and the plan's own prerequisite is
-unmet — *"Hindsight is not yet rebuildable: existing records may be unique.
-Export and backfill them to S1 before … considering retirement."* Claude and
-Hermes are backfilled into S1; the **Hindsight export is not**.
+The plan sets Hindsight as the bar Link must beat. That bar moved today: the
+Hindsight it was measured against was **misconfigured** — a single shared bank
+giving ~1-in-17 relevance, and a provider reading a bank that was never
+written. Both fixed. Any future comparison must be against the fixed
+configuration, and the plan's own retirement prerequisite is still unmet —
+the Hindsight export has not been backfilled into S1.
 
 ### Recommended order
 
-1. Backfill the Hindsight export into S1 — a retirement prerequisite, and it
-   removes the "records may be unique" objection either way.
-2. Install Link v2.3.0; re-run the spike's token measurement on *our* corpus
-   to confirm 11,269 → 2,313 holds outside their benchmark.
-3. Shadow mode against `hermes-shared`, scored against **fixed** Hindsight.
-4. Only then judge retirement, on the plan's written gates.
+1. **Retrieval over S1** — trigram/neighbour search alongside exact. Closes a
+   real gap, no dependency.
+2. **Backfill the Hindsight export into S1** — removes the "records may be
+   unique" objection and makes Hindsight disposable later.
+3. **Keep curating `docs/`** as the human-readable layer.
+4. **Revisit Link** at ~50 pages or on a demonstrated retrieval failure.
