@@ -87,6 +87,23 @@ delegation, **Claude → Hermes** via the MCP bridge above (including
 `permissions_respond` — Claude can answer Hermes's approval queue — and
 `events_wait` for long-poll coordination).
 
+### Keeping Hermes current is automatic — use the shared bank
+
+Hermes's external memory provider **is** Hindsight, pointed at the
+`hermes-shared` bank (that is why the MCP URL path reads
+`/mcp/hermes-shared/`). So anything retained there via
+`mcp__hindsight-shared__retain` reaches Hermes on its next recall — there is
+no separate "notify Hermes" step to perform, and messaging it is not the way
+to share state.
+
+The practice that follows: when a piece of work produces a fact both agents
+should hold — a project milestone, an architecture decision, a correction —
+**retain it to `hermes-shared`**, not only to the per-repo bank. Per-repo
+banks (`coding-agent::<repo>`) are deliberately invisible to Hermes since the
+2026-08-23 restructure; the shared bank is the cross-agent channel. Keep such
+entries curated and durable — the bank's mission now says raw session
+narration does not belong there.
+
 Hermes was **taught all of this** on 2026-08-23, in three layers: a new
 local Hermes skill `autonomous-ai-agents/claude-collaboration` (vendored
 copy: [vendor/hermes/claude-collaboration.SKILL.md](../vendor/hermes/claude-collaboration.SKILL.md))
