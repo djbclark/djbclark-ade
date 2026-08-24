@@ -86,3 +86,32 @@ the home directory itself).
 
 **Evidence:** measured on this machine and written up in
 `~/ops/site-private/memory/project_hindsight_memory_restructure.md`.
+
+## Not filed — a papercut worth knowing: `graft build` edits tracked `.gitignore`
+
+Every `graft build` appends `/graft/` to the repo's **tracked** `.gitignore`
+and drops an untracked `.ignore` file, so a repo that was clean before the
+build is dirty after it. It's a helpful default, but it has a real cost:
+
+- It leaks tool-local cache config into shared repos (including public ones).
+- In a fork that tracks upstream, it puts a permanent local modification on a
+  tracked file.
+- **It breaks other tooling.** An uncommitted `.gitignore` blocks git branch
+  checkout, which made `cow migrate --all` fail on every candidate in
+  `~/.hermes/hermes-agent` (each rolled back cleanly, but nothing migrated
+  until the tree was clean).
+
+**What we do instead** — keep the tracked file pristine and put the rules in
+the repo's local excludes:
+
+```bash
+git checkout -- .gitignore
+printf '\n/graft/\n/.ignore\n' >> .git/info/exclude
+```
+
+Applied to `~/.hermes/hermes-agent` and all three `~/ops` repos. Re-apply
+after any `graft build` in a new repo — or check `git status` afterwards,
+which is the cheap habit.
+
+A `--no-gitignore` flag (or writing to `.git/info/exclude` by default) would
+remove the papercut; worth raising upstream if it recurs.
