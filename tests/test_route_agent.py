@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Tests for vendor routing.
+
+The rules under test are the operator's standing orders, which exist because
+they encode consequences a score cannot see — routing bulk work at clinepass
+would starve Hindsight and hermes of inference.
+"""
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
+
+import route_agent as r  # noqa: E402
+
+IDLE = {
+    "antigravity": {"remaining": 96.5}, "opencode-go": {"remaining": 97.0},
+    "claude": {"remaining": 47.0}, "codex": {"remaining": 100.0},
+    "clinepass": {"remaining": 48.0}, "copilot": {"remaining": 69.8},
+    "zai": {"remaining": 70.3}, "grok": {"remaining": 45.0},
+    "cursor": {"remaining": 56.0}, "devin": {"remaining": 100.0},
+}
+
+
+class TestStandingRules(unittest.TestCase):
+    def test_clinepass_never_gets_bulk_or_mechanical(self):
+        for kind in ("bulk", "mechanical"):
+            for _ in range(3):
+                c = r.route(kind, quota=IDLE)
+                self.assertNotEqual(c.service.name, "clinepass")
+
+    def test_clinepass_excluded_even_when_everything_else_is_exhausted(self):
+        tight = {name: {"remaining": 0.0} for name in IDLE}
+        tight["clinepass"] = {"remaining": 100.0}
+        self.assertIsNone(r.route("bulk", quota=tight))
+
+    def test_prepaid_tier_is_retired(self):
+        for name in ("opencode-zen", "openrouter", "deepseek"):
+            self.assertTrue(r.BY_NAME[name].retired)
+            for kind in r.KINDS:
+                c = r.route(kind, quota=IDLE)
+                if c:
+                    self.assertNotEqual(c.service.name, name)
+
+    def test_judgment_only_goes_to_judgment_tier(self):
+        c = r.route("judgment", quota=IDLE)
+        self.assertTrue(c.service.judgment_tier)
+        self.assertIn(c.service.name, {"claude", "codex"})
+
+    def test_judgment_prefers_claude_even_when_idle_pools_are_emptier(self):
+        # antigravity at 100% must not win judgment work
+        q = dict(IDLE, antigravity={"remaining": 100.0}, claude={"remaining": 20.0})
+        self.assertEqual(r.route("judgment", quota=q).service.name, "claude")
+
+
+class TestWasteBurning(unittest.TestCase):
+    def test_bulk_goes_to_idle_capacity(self):
+        c = r.route("bulk", quota=IDLE)
+        self.assertIn(c.service.name, {"antigravity", "opencode-go"})
+        self.assertGreater(c.remaining, 90)
+
+    def test_mechanical_prefers_the_free_tier(self):
+        self.assertEqual(r.route("mechanical", quota=IDLE).service.name, "opencode-go")
+
+    def test_headroom_shifts_bulk_away_from_a_drained_pool(self):
+        drained = dict(IDLE, antigravity={"remaining": 5.0})
+        self.assertNotEqual(r.route("bulk", quota=drained).service.name, "antigravity")
+
+    def test_min_headroom_excludes_tight_services(self):
+        q = dict(IDLE, antigravity={"remaining": 10.0})
+        c = r.route("bulk", quota=q, min_headroom=15.0)
+        self.assertNotEqual(c.service.name, "antigravity")
+
+    def test_github_work_routes_to_copilot(self):
+        self.assertEqual(r.route("github", quota=IDLE).service.name, "copilot")
+
+
+class TestDegradation(unittest.TestCase):
+    def test_works_with_no_quota_at_all(self):
+        """A stale or missing cache must degrade to capability-only routing."""
+        for kind in r.KINDS:
+            c = r.route(kind, quota={})
+            self.assertIsNotNone(c, f"{kind} should still route without quota")
+
+    def test_unknown_kind_rejected(self):
+        with self.assertRaises(ValueError):
+            r.route("vibes", quota=IDLE)
+
+    def test_every_kind_is_servable(self):
+        for kind in r.KINDS:
+            self.assertIsNotNone(r.route(kind, quota=IDLE), kind)
+
+    def test_alternatives_exclude_the_winner(self):
+        c = r.route("bulk", quota=IDLE)
+        self.assertNotIn(c.service.name, c.alternatives)
+
+
+if __name__ == "__main__":
+    unittest.main()
