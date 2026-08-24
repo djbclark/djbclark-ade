@@ -277,6 +277,36 @@ foreclose it. Worth its own evaluation another time.
 - **S1 Hermes event sink** built and backfilled (`bin/hindsight_s1_hermes.py`,
   13 tests).
 
+## Ingest web-interface AI conversations into the memory system
+
+**Queued 2026-08-23. Not started.**
+
+Conversations held through AI *web* interfaces — especially Gemini and Grok —
+are currently invisible to the memory system. S1 ingests Claude Code
+transcripts and Hermes's `state.db`; anything typed into a browser is lost to
+it. That is a real hole: web sessions are where a lot of exploratory thinking
+happens, and they are exactly the "disjoint conversations with no repo" shape.
+
+Scope both directions:
+
+- **Backfill** what already exists in those accounts.
+- **Ongoing capture** so future web conversations flow in without ceremony.
+
+Known starting point: prior work with the **vesti Chrome extension** already
+retrieves some of this. Worth assessing before building anything — what it
+covers, what format it emits, whether it can run unattended. Other routes to
+compare: each vendor's official export (Google Takeout for Gemini, X/Grok
+export), and browser automation against a logged-in session.
+
+Where it lands: **S1** is the right home for the raw conversations (it already
+holds 448k events and is producer-agnostic — a `gemini` / `grok` adapter is
+the same shape as the Claude and Hermes ones). Curated takeaways belong
+wherever curated memory ends up, not in the transcript store.
+
+Watch for: exports are bulk one-shot (fine for backfill, useless for ongoing),
+and anything scraping a logged-in session needs care with credentials and
+terms of service.
+
 ## Also outstanding (raised, not formally queued)
 
 - **⚠ Rotate three API keys — OpenRouter, DeepSeek, ClinePass.** Operator
