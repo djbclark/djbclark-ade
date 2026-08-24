@@ -149,3 +149,70 @@ spike's own token measurement to confirm the improvement holds on *our*
 corpus rather than their benchmark, then stand Link up in shadow mode against
 the existing `hermes-shared` corpus and run the Phase C micro-suite and
 adoption comparison before promoting it to canonical.
+
+## Is Link the right move? Assessment 2026-08-23
+
+**Short answer: yes, but for a different reason than the plan gives, and with
+one premise that changed today.**
+
+### The alternatives were already surveyed — and the plan is explicit
+
+The plan (§ adoption gates) does not treat this as open: *"Do not adopt
+**Basic Memory** alongside Link unless it demonstrates a unique capability"*;
+Graphiti is gated behind Link failing controlled temporal tests; MemPalace
+behind SQLite retrieval failing acceptance tests. Those are quantitative
+gates (≥10 points multi-hop gain, ≤50% token overhead, ≤300ms warm-p95), not
+preferences. Re-litigating them would be waste.
+
+For the record, the field as of 2026 splits three ways:
+
+| Approach | Examples | Fit here |
+|---|---|---|
+| Markdown + MCP, local-first | **Link**, [Basic Memory](https://github.com/basicmachines-co/basic-memory) | Matches this machine: git-backed, human-editable, no cloud |
+| Cloud-routed fact stores | Mem0, Zep | Route through cloud APIs — wrong for a self-hosted, private setup |
+| Temporal knowledge graphs | Zep/[Graphiti](https://neo4j.com/blog/developer/graphiti-knowledge-graph-memory/) | Wins temporal queries (63.8% vs 49.0% on LongMemEval) but has **no native human-review workflow** and ingests markdown poorly |
+
+Basic Memory is the closest architectural twin and is far more popular
+(3.7k stars vs Link's 170) — worth noting as a longevity signal. It is
+AGPL-3.0 where Link is MIT, and its writes are not review-gated.
+
+### The real argument for Link is lock-in, not features
+
+Its differentiators map exactly onto the three failures we hit **today**,
+which is better evidence than any benchmark:
+
+1. **No LLM in the memory layer.** Hindsight's extraction takes ~40s per
+   retain, produced an 83%-episodic corpus of session narration rather than
+   usable facts, and has a known 25% reflect-failure rate at the 25s cap.
+2. **Plain markdown in git.** Inspecting a Hindsight bank means API calls;
+   deleting one is unrecoverable without a Postgres restore — which is
+   precisely how `hermes-default-hermes` was lost. Markdown is diffable,
+   greppable, and already covered by our backups.
+3. **Review-gated writes.** Hindsight auto-retained a transcript containing
+   API-key fragments. Link proposes; the operator approves.
+
+And the decision is *cheap to reverse*: if Link is abandoned upstream, the
+memory is still markdown in git. That matters more than its 170 stars.
+
+### The premise that changed today
+
+The plan says retire Hindsight only if Link proves *"equal or better"*, with
+**"no critical retrieval subset more than two percentage points worse than
+Hindsight"**. That baseline just moved: the Hindsight those judgements were
+formed against was **misconfigured** — one shared bank giving ~1-in-17
+relevance, and a provider pointed at a bank it never read. Both are fixed.
+
+So: **start Link in shadow, but do not plan on retiring Hindsight.** Two
+reasons. The bar is now genuinely higher, and the plan's own prerequisite is
+unmet — *"Hindsight is not yet rebuildable: existing records may be unique.
+Export and backfill them to S1 before … considering retirement."* Claude and
+Hermes are backfilled into S1; the **Hindsight export is not**.
+
+### Recommended order
+
+1. Backfill the Hindsight export into S1 — a retirement prerequisite, and it
+   removes the "records may be unique" objection either way.
+2. Install Link v2.3.0; re-run the spike's token measurement on *our* corpus
+   to confirm 11,269 → 2,313 holds outside their benchmark.
+3. Shadow mode against `hermes-shared`, scored against **fixed** Hindsight.
+4. Only then judge retirement, on the plan's written gates.
