@@ -141,6 +141,29 @@ live work**:
 `secretspec-drift-hardening` (61 uncommitted files across three repos) and
 `stayturgid-2.0` (4 unmerged commits) are the ones with real work at risk.
 
+**Migration attempted 2026-08-23 and BLOCKED — cow cannot do it.** These are
+worktrees of bare stores under `~/src/ops-worktrees/.store/*.git`, and cow
+refuses both ends: from a worktree it errors *"is a git worktree, not a
+primary repository"*, and from the bare store *"No VCS found at source"*
+(also via `cow create --source`). There is no primary working checkout in
+that layout for cow to clone, so `cow migrate` is not a path here. Nothing
+was moved or deleted.
+
+**Safety net in place** (`~/ops-worktrees-preserved-2026-08-23/`, 1.3MB,
+durable — not in `/tmp`): per workspace, the branch name, `git diff HEAD` as
+a patch, `status.txt`, the unmerged-commit list, and a `format-patch` series.
+**9 of 10 uncommitted patches verified applicable** via
+`git apply --check --reverse`; the tenth had no diff, only an unmerged commit
+(exported). A full CoW copy also exists in the session scratchpad, but that
+lives under `/private/tmp` and should not be relied on.
+
+**Recommended endgame** (operator decision — do not bulk-delete unasked):
+the worktree regime is retired, so the goal is not to move these into cow but
+to *land or archive* the outstanding work and reclaim 492MB. Per workspace:
+apply the patch onto the matching repo in `~/ops`, commit and push, then drop
+the workspace. `secretspec-drift-hardening` is the one that needs real review
+rather than a mechanical replay.
+
 ### Original decision record
 
 <https://github.com/joeinnes/cow> · `brew trust joeinnes/tap && brew install cow`.
