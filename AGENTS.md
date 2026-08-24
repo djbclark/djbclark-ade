@@ -58,6 +58,12 @@ altitudes compose (a macro node can run a micro graph as its body).
 - [skills/model-routing/SKILL.md](skills/model-routing/SKILL.md) —
   canonical source of the machine-wide model-routing skill (Claude Code's
   live copy is deployed at `~/.claude/skills/model-routing/`).
+- [skills/effort-routing/SKILL.md](skills/effort-routing/SKILL.md) —
+  how much thinking *this* session should spend, as distinct from which
+  vendor runs work. A running session cannot re-tier itself, so the real
+  levers are subagent dispatch and telling the operator; the skill says
+  which stretches deserve which tier (live copy at
+  `~/.claude/skills/effort-routing/`).
 - [skills/gmail-search/SKILL.md](skills/gmail-search/SKILL.md) —
   canonical source of the gmail-search skill: the Hermes-built local
   Gmail FTS5 index (~192k messages, ~100ms queries), searched via CLI,
