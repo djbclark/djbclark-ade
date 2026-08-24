@@ -40,7 +40,7 @@ Wiki into "interlinked knowledge base".
 | Area | Status | Today |
 |---|---|---|
 | 1 Native instructions | **done** | AGENTS.md/CLAUDE.md across `~` and the three ops repos |
-| 2 Structured files / SQLite (S1) | **in progress** | Phase A only: `~/.hindsight/candidates.sqlite3` capacity journal. Phase B (raw bytes, deterministic event IDs) unbuilt |
+| 2 Structured files / SQLite (S1) | **Phase B started 2026-08-23** | Phase A capacity journal, plus the new evidence store: `site-djbclark/bin/hindsight_s1.py` adds event/conversation/raw_object/attachment/checkpoint/gap tables to the same database, content-addressed raw bytes under `~/.hindsight/cas/`, and event IDs derived from source coordinates. 20 tests cover the exit-gate properties. Remaining: the Claude tail adapter, live Hermes sink, backfill |
 | 3 Semantic recall (Hindsight) | **partial** | Service live; model switch done (~$0.47/mo). Per-repo bank restructure **planned, not executed**. 25% reflect-failure at the 25s cap |
 | 4 Verbatim recall | **not started** | 53 raw transcripts exist but injection strips them; rides on S1 Phase B |
 | 5 Linked knowledge (Link) | **early** | Viability spike done, 6 preview notes in `site-private/memory/link/`. No canonical repo, no shadow comparison |

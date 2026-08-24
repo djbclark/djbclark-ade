@@ -67,6 +67,28 @@ set — typically too high, which is exactly the waste this is meant to catch.
   to sonnet") before it is ever automatic? The operator's instinct on the
   Hermes side was stop-and-prompt first, automate later — same shape here.
 
+## S1 Phase B — foundation landed, adapters next
+
+**Started 2026-08-23.** `site-djbclark/bin/hindsight_s1.py` is in and tested;
+the schema is live on `~/.hindsight/candidates.sqlite3` alongside Phase A
+(14 candidate rows verified intact). What remains, in order:
+
+1. **Claude tail/checkpoint adapter** — read `~/.claude/projects/*/*.jsonl`,
+   one event per record, `source_locator` = byte range + record index,
+   resuming from `ingest_checkpoint`. This is the piece that stops the
+   ongoing evidence loss: Claude Code garbage-collects those transcripts,
+   which already cost us attribution for 15 documents (recorded as the
+   store's first `ingest_gap`).
+2. **Live Hermes sink** — every committed message/tool event into S1
+   idempotently, `state.db` staying source-compatible during migration.
+3. **Backfill** — surviving transcripts, MEMORY/USER, candidate store,
+   Hindsight export; record historical gaps rather than claiming coverage.
+4. **Attachments/tool events**, then trigram/neighbor retrieval alongside the
+   exact search that exists.
+5. **Backup coverage check** — `snapshot` produces a consistent file via
+   `VACUUM INTO`; confirm Arq picks up snapshots and CAS objects rather than
+   a live WAL.
+
 ## Also outstanding (raised, not formally queued)
 
 - **⚠ Rotate three API keys — OpenRouter, DeepSeek, ClinePass.** Operator
