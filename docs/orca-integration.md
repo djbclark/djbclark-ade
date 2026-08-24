@@ -118,3 +118,33 @@ orca-per-workspace-env). `orca skills list --json` enumerates every topic
 the running binary serves; `orca skills get <name>` prints its
 version-matched guide. Install more as needed — the currently-installed
 set is not a boundary.
+
+## Composing Orca dispatch with cow pastures (2026-08-23)
+
+Orca creates worktrees itself (`--worktree new-child|new-top-level`, with
+`--repo` / `--base-branch`); there is no flag that swaps in a different
+workspace mechanism. But `worker-start` also accepts an existing directory via
+the `path:` selector, so the two compose without touching the fork:
+
+```bash
+WS=$(cow create "$TASK" --source "$REPO" --branch "$BRANCH" --print-path)
+orca orchestration worker-start --task "$TASK_ID" --agent claude \
+  --worktree "path:$WS"
+```
+
+`cow create --print-path` emits only the path, which is what makes this a
+one-liner. On release, `cow remove "$TASK"` (or `cow gc` for merged branches)
+reclaims it.
+
+**Status: pattern documented, not yet exercised in a live run.** The `path:`
+selector is documented by `worker-start --help`, but this specific
+cow-pasture-as-worktree composition has not been dispatched end to end here.
+Verify on a throwaway task before relying on it — in particular that Orca is
+content with a directory it did not create, and that `--setup` behaves as
+expected (creation flags are rejected for existing worktrees).
+
+Vendored copy of the Hermes-side guidance: Hermes's
+`headless-agent-orchestration` skill now tells it to prefer
+`cow create` over `git worktree add` for worker workspaces, with the two
+operational rules that bit us: the source tree must be clean, and a pasture
+carries `.env` and other secrets.
