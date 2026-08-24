@@ -345,6 +345,60 @@ Watch for: exports are bulk one-shot (fine for backfill, useless for ongoing),
 and anything scraping a logged-in session needs care with credentials and
 terms of service.
 
+## Token-cost hygiene (from video analysis, 2026-08-24)
+
+Analysed <https://youtu.be/V0XbuApxlhg> ("You're Paying Anthropic 20x MORE
+Than You Need To") against
+[code.claude.com/docs/en/costs](https://code.claude.com/docs/en/costs).
+Transcript pulled with `yt-dlp --write-auto-subs` — a YouTube page fetch
+returns only the title.
+
+**Its central claim holds and the docs confirm it:** the full conversation is
+re-sent on every request, prompt caching re-reads that history at the cached
+rate, and the cache lifetime is **one hour on a subscription** (five minutes
+on usage credits or API keys). A one-line question in an all-day session
+still draws usage for the whole conversation.
+
+**One claim is unverified.** The video lists actions that supposedly reset the
+cache outright — switching model, changing effort, fast mode, connecting an
+MCP server, plugins, denying a tool, upgrading Claude Code. **None of that
+appears in the docs**, which describe cache misses purely in time terms. Do
+not repeat it as fact; it matters because it would make mid-session
+`/model` switching costly, which is advice we give.
+
+Actionable here, in order of expected value:
+
+1. **Run `/usage` and `/context`.** `/usage` attributes recent usage to
+   individual skills, subagents, plugins and MCP servers. That measures our
+   31 skills and 7 MCP servers instead of guessing at them, and flags
+   behaviours (long context, cache misses) accounting for >10% of usage.
+2. **Run `/insights`.** Not previously known here: it analyses recent
+   sessions and writes `~/.claude/usage-data/report.html` covering friction
+   points — misunderstood requests, buggy code — rather than token counts.
+3. **Keep instruction files lean.** Docs say aim for **under 200 lines** and
+   move specialised instructions into skills, which load on demand.
+   `djbclark-ade/AGENTS.md` is **180 lines** and grew substantially on
+   2026-08-23; `site-private/home-agents.md` is 135. Both load in an ops
+   session. Trim before adding more.
+4. **Consider `ENABLE_PROMPT_CACHING_1H=1`** — preserves the one-hour cache
+   lifetime while drawing on usage credits. Currently unset.
+5. **Prefer `/clear` over `/compact`** between unrelated tasks: clearing
+   costs nothing, while compaction reads the conversation it summarises and
+   is itself a large request.
+
+**Good news the video implies otherwise about:** MCP tool definitions are
+*deferred by default* — only names and server instructions enter context
+until a tool is used — so our seven servers cost far less than the video's
+framing suggests. Verify with `/context` rather than pruning on instinct.
+
+**Also worth knowing:** agent teams use roughly **7x** the tokens of a normal
+session, and scheduled tasks send full context on every fire even while the
+session is idle.
+
+Not adopted: the output-token scaffolds (ponytail, caveman, "be brief" one
+liners). The video rates them least effective, and output tokens are the
+smaller half of the problem.
+
 ## Also outstanding (raised, not formally queued)
 
 - **⚠ Rotate three API keys — OpenRouter, DeepSeek, ClinePass.** Operator

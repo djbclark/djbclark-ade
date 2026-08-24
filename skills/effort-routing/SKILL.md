@@ -62,6 +62,43 @@ about which side you are on, stay high and say so.
 - **Switching** — always name the switch and why. An unexplained tier change
   reads as inconsistency.
 
+## What actually dominates cost: prompt caching
+
+Effort tiering is a real lever, but a smaller one than the thing underneath
+it. Verified against
+[code.claude.com/docs/en/costs](https://code.claude.com/docs/en/costs):
+
+- **The whole conversation is re-sent on every request**, including each
+  batch of tool results. Prompt caching means that history is re-read at the
+  cached rate rather than full price — so a one-line question in a session
+  that has been open all day still draws usage for the entire conversation.
+- **Cache lifetime is one hour on a subscription**, dropping to five minutes
+  once you are drawing on usage credits (and five minutes on API keys). The
+  first message after a longer break misses the cache and reprocesses
+  everything. `ENABLE_PROMPT_CACHING_1H=1` keeps the one-hour lifetime while
+  on usage credits.
+- **`/clear` costs nothing; `/compact` is itself a large request**, because
+  it reads the conversation it summarises. When you want a fresh start rather
+  than continuity, clear — do not compact out of habit.
+- **Subagents isolate verbose work.** Test runs, log processing and doc
+  fetches keep their output in the subagent's context and return only a
+  summary. This is why dispatch beats doing rote work inline, independent of
+  tier.
+
+Practical consequence for the rules above: the cheapest thing you can do is
+usually not a lower tier, it is a **shorter conversation**. Clear between
+unrelated tasks; a stale 400k-token context taxes every subsequent message
+regardless of model.
+
+One caveat, deliberately flagged: a widely-shared video claims that switching
+model, changing effort, toggling fast mode, connecting an MCP server,
+installing plugins, denying a tool, or upgrading Claude Code each invalidate
+the cache outright. **That list is not in the official docs**, which describe
+cache misses only in terms of the time-based lifetime. Treat it as unverified
+— if it is true, mid-session switching is more expensive than it looks, so
+prefer dispatching a subagent over re-tiering a long session, which is the
+better move anyway.
+
 ## Related
 
 Vendor choice, quota headroom, and which pools are idle:
