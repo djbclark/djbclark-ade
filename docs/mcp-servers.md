@@ -87,22 +87,52 @@ delegation, **Claude → Hermes** via the MCP bridge above (including
 `permissions_respond` — Claude can answer Hermes's approval queue — and
 `events_wait` for long-poll coordination).
 
-### Keeping Hermes current is automatic — use the shared bank
+### Keeping Hermes current — fixed 2026-08-23, was silently broken
 
-Hermes's external memory provider **is** Hindsight, pointed at the
-`hermes-shared` bank (that is why the MCP URL path reads
-`/mcp/hermes-shared/`). So anything retained there via
-`mcp__hindsight-shared__retain` reaches Hermes on its next recall — there is
-no separate "notify Hermes" step to perform, and messaging it is not the way
-to share state.
+Hermes's external memory provider is Hindsight (`provider: hindsight` in
+`~/.hermes/config.yaml`), and it is now genuinely automatic: retain a fact to
+`hermes-shared` and Hermes finds it. That was **not** true earlier the same
+day, and the failure was invisible.
 
-The practice that follows: when a piece of work produces a fact both agents
-should hold — a project milestone, an architecture decision, a correction —
-**retain it to `hermes-shared`**, not only to the per-repo bank. Per-repo
-banks (`coding-agent::<repo>`) are deliberately invisible to Hermes since the
-2026-08-23 restructure; the shared bank is the cross-agent channel. Keep such
-entries curated and durable — the bank's mission now says raw session
-narration does not belong there.
+**The bug.** The provider's own config lives at
+`~/.hermes/hindsight/config.json` — separate from `config.yaml` — and read:
+
+```json
+"bank_id": "hermes",
+"bank_id_template": "hermes-{profile}-{workspace}"
+```
+
+The template wins, so Hermes was reading a per-workspace bank
+(`hermes-default-hermes`), never `hermes-shared`. Facts retained to the
+shared bank were committed and recallable through the API, yet Hermes
+answered "not in memory" — and when asked about `cow`, confidently described
+**`cowsay`** instead. That is the failure mode to watch for: not an error,
+just a confident wrong answer sourced from general knowledge.
+
+**The fix**: point both keys at the shared bank (backup at
+`config.json.bak-2026-08-23`):
+
+```json
+"bank_id": "hermes-shared",
+"bank_id_template": "hermes-shared"
+```
+
+`auto_recall` was already `true`, so no restart or further wiring was needed.
+Verified: Hermes's own recall now returns the CoW benchmark, the cow install
+gotcha, the migration numbers, and the full S1 backfill figures.
+
+**Consequence to know about:** during the bank restructure earlier that day,
+`hermes-default-hermes` was deleted as an apparently-dead stray bank. It was
+in fact Hermes's live bank under the old template — 1 document, 5 facts,
+which is small only because `auto_retain` is `false`. Deleting it was a
+mistake; the lesson is that a bank matching an agent's `bank_id_template` is
+never "stray", and provider config must be read before any bank cleanup.
+
+**Practice:** retain cross-project facts to `hermes-shared` and Hermes gets
+them. For things Hermes must know even if recall misses — policy, standing
+rules — also append a `§` block to `~/.hermes/memories/MEMORY.md`, which is
+injected directly rather than retrieved. Per-repo banks
+(`coding-agent::<repo>`) remain invisible to Hermes by design.
 
 Hermes was **taught all of this** on 2026-08-23, in three layers: a new
 local Hermes skill `autonomous-ai-agents/claude-collaboration` (vendored

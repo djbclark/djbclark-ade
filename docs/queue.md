@@ -116,8 +116,30 @@ pristine and put graft's ignore rules in `.git/info/exclude` instead — the
 right place for tool-local cache rules in a fork that tracks upstream.
 
 Still to do: point Orca `worker-start` at cow, teach Hermes's
-`headless-agent-orchestration` skill to use it, and decide the fate of
-`~/src/ops-worktrees/` (13 dirs, 492MB) now that the release regime is gone.
+`headless-agent-orchestration` skill to use it.
+
+**`~/src/ops-worktrees/` (13 dirs, 492MB) — surveyed, needs an operator
+decision, do not bulk-delete.** These belong to the retired regime and sit on
+their own bare store (`~/src/ops-worktrees/.store/*.git`), so `cow migrate`
+from `~/ops/*` finds nothing — they would have to be migrated from the store.
+Before anything is deleted or migrated, note that **10 workspaces still hold
+live work**:
+
+| workspace / repo | dirty | unmerged commits |
+|---|---|---|
+| `secretspec-drift-hardening/stayturgid` | 30 | 0 |
+| `secretspec-drift-hardening/site-djbclark` | 24 | 0 |
+| `secretspec-drift-hardening/site-private` | 7 | 0 |
+| `stayturgid-2.0/stayturgid` | 1 | **4** |
+| `archive-maynarddaycare-pages/site-private` | 1 | 1 |
+| `cloudflare-operator-token-declaration/site-private` | 1 | 1 |
+| `find-hub-integration-plan/site-private` | 1 | 1 |
+| `coderabbit-feeder-workspace/Shizuku` | 0 | 1 |
+| `coderabbit-feeder-workspace/RevengeQuickSwitcher` | 1 | 0 |
+| `agent-communication-harness/ops-djbclark` | 2 | 0 |
+
+`secretspec-drift-hardening` (61 uncommitted files across three repos) and
+`stayturgid-2.0` (4 unmerged commits) are the ones with real work at risk.
 
 ### Original decision record
 
