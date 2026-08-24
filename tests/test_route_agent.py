@@ -21,6 +21,9 @@ IDLE = {
     "clinepass": {"remaining": 48.0}, "copilot": {"remaining": 69.8},
     "zai": {"remaining": 70.3}, "grok": {"remaining": 45.0},
     "cursor": {"remaining": 56.0}, "devin": {"remaining": 100.0},
+    # The free half of opencode-zen. Present in the fixture because it is a
+    # strong default for bulk, so leaving it out let it win tests by accident.
+    "opencode-zen-free": {"remaining": 100.0},
 }
 
 
@@ -143,23 +146,28 @@ class TestDiscovery(unittest.TestCase):
 
     def test_measured_idle_capacity_beats_unmeasured(self):
         """Between two unprofiled pools, the one we can see is idle should win."""
-        q = {**{k: {"remaining": 5.0} for k in IDLE},
+        # Drain every curated pool so the comparison is strictly between two
+        # discovered ones: measured-idle vs unmeasurable.
+        q = {**{k: {"remaining": 0.0} for k in IDLE},
              "fresh-pool": {"remaining": 99.0}, "murky-pool": {}}
         self.assertEqual(r.route("bulk", quota=q).service.name, "fresh-pool")
 
     def test_hermes_only_providers_never_win_claude_side_routing(self):
-        """opencode-zen-free is reachable only as a Hermes provider.
+        """A provider with no Claude-invocable CLI must not win here.
 
-        There is no command Claude Code can run for it, so however idle it
-        looks it must not be handed work here — it belongs in the Hermes
-        chain instead.
+        Nothing sets this today — opencode-zen's free models are reachable
+        from Claude via the `opencode` TUI — so this guards the mechanism
+        against a future provider that genuinely is Hermes-only.
         """
-        q = {**{k: {"remaining": 1.0} for k in IDLE},
-             "opencode-zen-free": {"remaining": 100.0}}
-        for kind in r.KINDS:
-            c = r.route(kind, quota=q)
-            if c:
-                self.assertNotEqual(c.service.name, "opencode-zen-free", kind)
+        ghost = r.Service("ghost-pool", "n/a", {"bulk": 1}, "free",
+                          "", access="api", hermes_only=True)
+        self.assertFalse(ghost.eligible("bulk"))
+
+    def test_opencode_zen_free_is_claude_routable(self):
+        """It is the free half of opencode-zen, not a Hermes-only provider."""
+        svc = r.BY_NAME["opencode-zen-free"]
+        self.assertFalse(svc.hermes_only)
+        self.assertTrue(svc.eligible("bulk"))
 
     def test_unmeasured_agents_remain_reachable_as_fallback(self):
         """All available agents should stay routable, just ranked last."""

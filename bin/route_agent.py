@@ -89,9 +89,12 @@ class Service:
     #                endpoint into Hermes as a generic provider is not.
     #   "forbidden"- third-party clients explicitly violate the terms.
     access: str = "cli-only"
-    # True when the only way to reach this is as a Hermes provider — there is
-    # no command Claude Code can invoke. Such a service belongs in the Hermes
-    # chain but must never win a Claude-side routing decision.
+    # True when the only way to reach this is as a Hermes provider, with no
+    # command Claude Code can invoke. Nothing currently sets it: opencode-zen
+    # (free and paid) is reachable from Claude through the `opencode` TUI, so
+    # the earlier assumption that it was Hermes-only was wrong. Kept because
+    # a genuinely Hermes-only provider would otherwise silently win Claude
+    # routing decisions it cannot serve.
     hermes_only: bool = False
 
     def eligible(self, kind: str) -> bool:
@@ -134,10 +137,16 @@ SERVICES: tuple[Service, ...] = (
             # GEMINI_API_KEY would spend real money.
             "big context, summarisation, multimodal; most-wasted pool",
             access="cli-only"),
-    Service("opencode-zen-free", "opencode-zen-free (Hermes provider)",
+    # opencode-zen-free is NOT a separate provider — it is the free subset of
+    # opencode-zen's models. Kept as its own row because the free and paid
+    # halves have different billing and different eligibility, which is the
+    # distinction that actually drives routing. Claude reaches both through
+    # the `opencode` TUI; Hermes reaches the free half as an API provider.
+    Service("opencode-zen-free", "opencode (zen free models)",
             {"bulk": 5, "mechanical": 5, "code": 45}, "free",
-            "free Zen tier; legitimate for direct API use by Hermes",
-            access="api", hermes_only=True),
+            "free half of opencode-zen; usable by Claude via the opencode TUI "
+            "and by Hermes as a direct API provider",
+            access="api"),
     Service("opencode-go", "opencode (go tier)",
             {"bulk": 2, "mechanical": 1, "code": 35},
             "free", "kimi/minimax/qwen catalogs"),
@@ -159,8 +168,11 @@ SERVICES: tuple[Service, ...] = (
             # old blanket never_bulk rule was retired 2026-08-24 in favour of
             # the measured burn-rate alert (agent_stats.py burn).
             "Hermes-usable API pool; watch the burn alert", access="api"),
-    Service("opencode-zen", "opencode-ralph-tui-zen", {"code": 50, "bulk": 50},
-            "prepaid", "prepaid retired 2026-08-23", retired=True),
+    # The paid half of the same provider. Retired with the prepaid tier, not
+    # because the provider is unusable — restoring it is a top-up decision.
+    Service("opencode-zen", "opencode (zen paid models)", {"code": 50, "bulk": 50},
+            "prepaid", "paid half of opencode-zen; prepaid tier retired 2026-08-23",
+            retired=True),
     Service("openrouter", "opencode-ralph-tui-openrouter", {"code": 50, "bulk": 50},
             "prepaid", "prepaid retired 2026-08-23", retired=True),
     Service("deepseek", "opencode-ralph-tui-deepseek", {"code": 50, "bulk": 50},
