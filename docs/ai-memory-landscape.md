@@ -150,6 +150,62 @@ corpus rather than their benchmark, then stand Link up in shadow mode against
 the existing `hermes-shared` corpus and run the Phase C micro-suite and
 adoption comparison before promoting it to canonical.
 
+## Which curated-memory tool? Reassessed 2026-08-23 (supersedes the plan)
+
+Two operator facts settle this, and neither was in the plan:
+
+- **AGPL is a positive**, not a licence to work around.
+- **The operator will never do reviews.**
+
+The second is decisive. Link's headline differentiator is *review-gated
+writes*: agents propose, a human approves. With no reviewer, that is not a
+safety feature — it is a queue that never drains, and memory silently stops
+accumulating. Link is well-built (MIT, active, and v2.3.0 fixed its
+11,269→2,313-token first-response problem), but it is designed around a
+workflow that will not happen here.
+
+**[Basic Memory](https://github.com/basicmachines-co/basic-memory) is the
+better fit**, on the constraints that actually apply:
+
+| | Basic Memory | Link |
+|---|---|---|
+| Licence | **AGPL-3.0** | MIT |
+| Agent writes | **Direct, no approval** | Proposal + human review |
+| Search | Full-text **and semantic** (FastEmbed, optional reranker) | FTS5 + optional embeddings |
+| Storage | Markdown + YAML frontmatter; observations and `[[wikilink]]` relations | Markdown wiki |
+| Local | Yes, no cloud account (`uv tool install basic-memory`) | Yes |
+| Activity | 3.7k stars, pushed 2026-08-24 | 170 stars |
+
+Both keep the substrate as plain markdown, so either stays cheap to abandon.
+
+**This supersedes the plan**, which named Link the presumptive Level 2/3/5/6
+component and said *"do not adopt Basic Memory alongside Link unless it
+demonstrates a unique capability."* The unique capability is simply that it
+works without a reviewer.
+
+**But timing still stands: not yet.** The argument from the previous
+assessment is unchanged — our curated layer is about a dozen documents, and
+agents read `AGENTS.md` pointers directly. Retrieval is not the bottleneck at
+this size; Basic Memory earns its place when `docs/` outgrows reading, or
+when an agent demonstrably fails to find something a pointer should have
+surfaced.
+
+### Reconsidering what was built today — what would I change?
+
+| Decision | Verdict |
+|---|---|
+| **S1 evidence store** | Keep. Nothing else does immutable exact-byte archival; both Link and Basic Memory explicitly do not. Now has indexed retrieval. |
+| **Hindsight restructure** | Keep, but expect its role to shrink. Basic Memory is a credible eventual replacement for the semantic layer — markdown beats an opaque Postgres bank you can only inspect through an API and cannot recover from a mistaken delete. Today's work was not wasted: it fixed real breakage and made the corpus attributable, which is exactly what a future migration would need. |
+| **cow** | Keep. Measured, working, 29.2GB logical in 3.7GB. |
+| **`docs/` as the wiki** | Keep as repo-owned canon (policy, architecture, decisions). If Basic Memory is adopted it takes the *other* role — cross-session agent notes — rather than replacing this. |
+| **Link** | **Drop from the plan.** Not on quality; on workflow fit. |
+| **semgrep removal, release-regime retirement** | Keep. Both evidence-based. |
+
+The one thing I would genuinely do differently: **the plan's tool choice was
+made on architecture, and the deciding factor turned out to be operator
+workflow.** Worth asking "who actually operates this?" before scoring
+features next time.
+
 ## Is Link the right move? Assessment 2026-08-23
 
 **Independent read, not bound by the plan: I would not adopt Link yet.** Not

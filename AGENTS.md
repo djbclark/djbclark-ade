@@ -87,11 +87,22 @@ altitudes compose (a macro node can run a micro graph as its body).
    different databases, different repos — and say what you started. The
    only reasons not to: the next step genuinely depends on the running
    result, or the parallel work would touch the same resource.
-4. **Flag best-practice deviations.** If a request or existing config
+4. **Verify against the artifact, not a proxy — and retract loudly.**
+   Every wrong claim made here on 2026-08-23 came from trusting a proxy:
+   grepping output for a substring and calling it a status check (the
+   "graft not built" retraction), reading a bank's *name* instead of an
+   agent's provider config (deleting a live bank), and repeating an
+   auto-generated page that said PRs awaited merge weeks after they
+   merged. Before asserting a fact, check the thing itself — exit codes
+   and structured output over string matching, config files over
+   filenames, `gh pr view` over memory. When you do get one wrong, say so
+   plainly and correct the record in the same breath; a retraction
+   written down is worth more than the original claim.
+5. **Flag best-practice deviations.** If a request or existing config
    conflicts with current best practices, say so and propose the
    improvement — but don't relitigate decisions the operator made
    knowingly.
-5. **Routing discipline**: free and chronically-unused pools first for
+6. **Routing discipline**: free and chronically-unused pools first for
    bulk work; claude/codex for judgment (tier inside them); **never**
    bulk-route to clinepass (infrastructure lifeline); the prepaid tier is
    retired until an explicit operator top-up.
