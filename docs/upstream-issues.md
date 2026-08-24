@@ -1,8 +1,13 @@
 # Upstream issues worth filing
 
-Drafts written 2026-08-23 from problems verified on this machine. Not yet
-filed — filing is an operator decision (they go to third-party trackers under
-the operator's account).
+Written 2026-08-23 from problems verified on this machine. **Both are now
+filed** — kept here because the write-ups carry evidence and measurements the
+issue text summarises:
+
+- #1 → [NanoNets/Graft#185](https://github.com/NanoNets/Graft/issues/185)
+- #2 → [vectorize-io/hindsight#3735](https://github.com/vectorize-io/hindsight/issues/3735)
+  (the package `@vectorize-io/hindsight-coding-agents` lives in the
+  `vectorize-io/hindsight` repo)
 
 ## 1. graft — statusline conflates "built but empty" with "not built"
 
