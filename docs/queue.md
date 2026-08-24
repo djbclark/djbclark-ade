@@ -89,28 +89,37 @@ the schema is live on `~/.hindsight/candidates.sqlite3` alongside Phase A
    `VACUUM INTO`; confirm Arq picks up snapshots and CAS objects rather than
    a live WAL.
 
-## Adopt rift for workspace creation, across agents too
+## Pick a copy-on-write workspace approach (for agents especially)
 
-**Queued 2026-08-23. Not started.** <https://github.com/anomalyco/rift>
-(`npm install -g rift-snapshot`).
+**Queued 2026-08-23, broadened from an earlier rift-only entry. Not started.**
 
-Copy-on-write workspaces as an alternative to git worktrees: filesystem-level
-cloning (APFS `clonefile` on macOS, btrfs snapshots / reflinks on Linux), so a
-new workspace is near-instant and near-free instead of a full copy — the
-project claims <0.1s on a 10GB folder. It also excludes build artifacts and
-dependencies by default, and has `.rift.toml` precreate/postcreate hooks plus
-a JS/Bun FFI library for programmatic use.
+Every parallel-agent workflow here creates workspaces — Orca macro-graph
+dispatch (`worker-start --worktree`), Hermes's `headless-agent-orchestration`
+(one isolated workspace per worker), Claude Code's own worktree isolation.
+`git worktree` pays a full checkout each time and gives you none of the
+untracked state (`node_modules`, build output), so every new workspace needs a
+reinstall before an agent can do anything. Filesystem copy-on-write fixes both
+at once. Candidates, with what actually distinguishes them:
 
-Use it everywhere workspaces get created, and teach the agents to use it too —
-Hermes (`headless-agent-orchestration` creates isolated workspaces per worker),
-Orca macro-graph dispatch (`worker-start --worktree`), and Claude Code's own
-worktree isolation.
+| Option | Shape | Notes |
+|---|---|---|
+| **Plain git + CoW copy** | no new dependency | `git worktree add --no-checkout ../ws` then `cp -c -R . ../ws` (macOS APFS) or `cp --reflink=always -R . ../ws` (btrfs/XFS). **This is the control** — any tool has to beat it to earn its install. |
+| [cow](https://github.com/joeinnes/cow) | `brew install cow` / `cargo install cow-cli` | **Explicitly built for running multiple coding agents in parallel.** APFS `clonefile`, reflinks on btrfs/XFS, falls back elsewhere. Ships an **MCP server** and Claude integration via env vars, plus create/list/remove/sync/extract and run-inside-workspace commands. The only candidate where the agent wiring already exists. |
+| [rift](https://github.com/anomalyco/rift) | `npm i -g rift-snapshot` | Same CoW idea; claims <0.1s on a 10GB folder, excludes build artifacts by default, `.rift.toml` pre/post-create hooks, JS/Bun FFI. **Experimental, no agent integration** — that wiring would be ours. |
+| [jj (Jujutsu)](https://github.com/jj-vcs/jj) | different VCS, Git-compatible | Not a CoW-workspace tool — a broader bet: no staging area, first-class conflicts, operation log with undo, working-copy-as-commit, and good multi-workspace ergonomics. Git-backed so existing tooling keeps working. Still pre-1.0 with breaking changes possible. Solves more than the workspace problem, and costs more to adopt. |
 
-**Worth knowing before adopting:** the project marks itself **experimental and
-not production-ready**, and it has no built-in AI-agent integration — the
-agent side is wiring we would write. Sensible first step is a side-by-side
-trial on one real workflow (Orca fan-out is the natural candidate, since it
-creates the most worktrees) before touching anything load-bearing.
+Background reading: [Git without the clone — durable versioned workspaces for
+AI agents](https://pub.towardsai.net/git-without-the-clone-durable-versioned-workspaces-for-ai-agents-b280241fe5ca).
+
+**How to decide:** benchmark the plain-git baseline first on a real repo, then
+only adopt a tool if it beats it on something that matters (agent integration,
+artifact exclusion, cleanup/GC). On current evidence `cow` is the strongest
+candidate purely because its MCP server means Hermes and Claude could drive it
+without us writing an adapter — but that is a README claim, not a measurement.
+`jj` is a separate, larger decision and shouldn't be bundled into this one.
+
+Trial on Orca fan-out first: it creates the most worktrees, and a bad result
+there is contained.
 
 ## Also outstanding (raised, not formally queued)
 
