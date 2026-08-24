@@ -97,11 +97,39 @@ below is kept as the rationale, not an open question.** Not started.
 <https://github.com/joeinnes/cow> · `brew install cow` (or
 `cargo install cow-cli`).
 
-Scope of the work:
+### Baseline measured 2026-08-23 (step 1 partly done)
 
-1. Install and verify CoW actually engages on this machine's APFS volume —
-   confirm a clone is near-instant and near-zero-cost on a real repo, not
-   silently falling back to a full copy.
+Benchmarked `cp -c -R` against `cp -R` on `~/ops/stayturgid` (677MB) on this
+machine's APFS root volume. **CoW engages, and the win is space, not speed:**
+
+| | wall clock | disk actually consumed |
+|---|---|---|
+| plain `cp -R` | 43.8s | 677 MB |
+| CoW `cp -c -R` | 10.7s | **~10 MB** |
+
+So ~4× faster but ~67× cheaper on disk. Note the gap with rift's marketing
+claim of "<0.1s on a 10GB folder" — 10.7s for 677MB is nowhere near that, so
+treat any tool's speed claim as unverified until measured here. Whatever we
+adopt, the reason is space and dependency reuse.
+
+**Two caveats found while measuring, both of which argue for a tool over the
+raw baseline:**
+
+- `cp -c -R` copies **everything**, including `.env`. An agent workspace made
+  this way inherits real secrets. This is exactly what cow's/rift's
+  "excludes artifacts and dependencies by default" is for — but confirm cow
+  excludes *secrets*, not just `node_modules`.
+- The copied `.env` carried the `uchg` (user-immutable) flag, so the test
+  clone refused to delete until `chflags -R nouchg`. Any cleanup/GC path
+  needs to handle immutable flags or it will strand workspaces.
+
+Remaining for step 1:
+
+1. **Install cow — the documented path does not work.** `brew install cow`
+   fails (no such formula in homebrew-core; brew suggests `crow`/`cot`/`cog`).
+   Find the real install route — a custom tap, `cargo install cow-cli`, or a
+   GitHub release — and confirm the MCP server actually ships with it before
+   committing to the tool.
 2. Wire the agents, which is the point: `cow` ships an **MCP server** and
    Claude integration via environment variables, so start there rather than
    writing an adapter. Register it the way `hermes` was registered

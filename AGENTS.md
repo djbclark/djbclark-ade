@@ -79,11 +79,19 @@ altitudes compose (a macro node can run a micro graph as its body).
 2. **Commit AND push at opportune moments.** After each coherent unit of
    work. On a sweep, also catch artifacts living outside any repo that
    should be tracked. Never push secrets or ignored local state.
-3. **Flag best-practice deviations.** If a request or existing config
+3. **Never idle on a long-running process — start parallel work by
+   default.** When something is backgrounded (a backfill, a build, a
+   fleet dispatch, a subagent), immediately pick up the next
+   parallelizable task rather than waiting or asking whether to. Choose
+   work that cannot contend with what is running — different files,
+   different databases, different repos — and say what you started. The
+   only reasons not to: the next step genuinely depends on the running
+   result, or the parallel work would touch the same resource.
+4. **Flag best-practice deviations.** If a request or existing config
    conflicts with current best practices, say so and propose the
    improvement — but don't relitigate decisions the operator made
    knowingly.
-4. **Routing discipline**: free and chronically-unused pools first for
+5. **Routing discipline**: free and chronically-unused pools first for
    bulk work; claude/codex for judgment (tier inside them); **never**
    bulk-route to clinepass (infrastructure lifeline); the prepaid tier is
    retired until an explicit operator top-up.
