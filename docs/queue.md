@@ -246,6 +246,37 @@ is a README claim, not yet a measurement — step 1 above exists to check it.
 VCS), it solves more than the workspace problem, and choosing cow does not
 foreclose it. Worth its own evaluation another time.
 
+## Completed 2026-08-23 (kept briefly for reference)
+
+- **`~/src/ops-worktrees/` retired and deleted** (491MB reclaimed). Before
+  deleting, every branch was verified present on a remote and all
+  uncommitted + untracked work preserved *in git*, not as loose patches:
+  `feature/agent-communication-harness` (a 14.6KB untracked
+  `agent_communicate.py` that `git diff HEAD` had missed entirely),
+  `feature/secretspec-drift-hardening` across all three repos (18 untracked
+  files — the sudo-secretspec broker, installer, drift-check, audit lib and 8
+  test files, **none of which existed in master**), and three unpushed
+  branches now on origin. The *tracked* edits in secretspec-drift-hardening
+  were confirmed superseded — they modify files the merged PRs deleted — and
+  were discarded deliberately. Backups deleted afterwards.
+- **Upstream issues filed**: [NanoNets/Graft#185](https://github.com/NanoNets/Graft/issues/185)
+  (statusline says "not built" for a built-but-empty graph) and
+  [vectorize-io/hindsight#3735](https://github.com/vectorize-io/hindsight/issues/3735)
+  (config keys read but undocumented).
+- **Stray banks removed**: `hermes-telegram` and `herdr-shared`, both last
+  written 2026-08-11 and holding only retention-pilot `candidate-*` docs, with
+  no live config referencing them. Exported to `~/hindsight-backups/` first —
+  the discipline the earlier `hermes-default-hermes` mistake earned. Bank
+  topology is now exactly 11 per-repo banks plus `hermes-shared`.
+- **cow rolled into the agent stack**: Hermes's `headless-agent-orchestration`
+  skill now says to use `cow create --print-path` for worker workspaces,
+  with the two rules that bit us (source tree must be clean; a pasture carries
+  `.env`). The Orca composition (`--worktree path:$(cow create … --print-path)`)
+  is documented in [orca-integration.md](orca-integration.md) but **not yet
+  exercised in a live dispatch**.
+- **S1 Hermes event sink** built and backfilled (`bin/hindsight_s1_hermes.py`,
+  13 tests).
+
 ## Also outstanding (raised, not formally queued)
 
 - **⚠ Rotate three API keys — OpenRouter, DeepSeek, ClinePass.** Operator
