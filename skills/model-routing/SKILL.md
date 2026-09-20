@@ -50,6 +50,29 @@ method, not the volatile numbers.
 - **Prepaid real money, gated**: opencode-zen, openrouter, deepseek —
   only via the `opencode-ralph-tui-*` gate scripts, never by default.
 
+## Headless invocation recipes (learned 2026-09-20, two hangs in one run)
+
+Every one of these must run with **stdin closed** (`< /dev/null`) and its
+output redirected to a file. Backgrounding a TUI with `&` inherits the
+harness's stdin, and at least codex then blocks forever on it.
+
+| TUI | Working headless form | Failure mode without it |
+| --- | --- | --- |
+| codex (GPT-6 Astra by default) | `codex exec -s read-only -C <dir> "<prompt>" < /dev/null > out.txt 2>&1` | prints `Reading additional input from stdin...` and hangs; no timeout, no output. Kill it and rerun with stdin closed. |
+| agy (Antigravity) | `agy -p --dangerously-skip-permissions "<prompt>" < /dev/null > out.txt 2>&1` | `-p` alone exits 0 with a one-line "tool required the command permission ... auto-denied" note and **no review**. Exit 0 is not success — check the output length. |
+| copilot | `copilot -p "<prompt>" --allow-all-tools --allow-all-paths --silent < /dev/null > out.txt 2>&1` | works as-is; `--silent` drops the progress chatter. |
+
+Rules that fall out of this:
+
+- Never `wait` on a batch of TUIs blind. Append `echo "<tool> exit=$?"` to
+  each output file and treat a file with only a preamble line as a
+  failed run, whatever the exit code.
+- For read-only review work prefer the read-only sandbox where the TUI
+  has one (codex `-s read-only`). Where it does not (agy), verify
+  `git status --porcelain` is clean after the run.
+- Run them from a background Bash call with a long timeout, one call per
+  batch, never chained `sleep`s.
+
 ## Routing method
 
 1. Free and chronically-unused subscription pools first for bulk work —
