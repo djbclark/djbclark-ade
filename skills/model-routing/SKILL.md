@@ -50,28 +50,39 @@ method, not the volatile numbers.
 - **Prepaid real money, gated**: opencode-zen, openrouter, deepseek —
   only via the `opencode-ralph-tui-*` gate scripts, never by default.
 
-## Headless invocation recipes (learned 2026-09-20, two hangs in one run)
+## Headless invocation (one-shot prompts to other TUIs)
 
-Every one of these must run with **stdin closed** (`< /dev/null`) and its
-output redirected to a file. Backgrounding a TUI with `&` inherits the
-harness's stdin, and at least codex then blocks forever on it.
+**Authority for launch flags:** Orca's roster,
+`~/Library/Application Support/orca/profiles/local-default/orca-data.json`
+→ `settings.agentDefaultArgs`. That map is what actually works on this
+machine for every enabled TUI (codex `--dangerously-bypass-approvals-and-sandbox`,
+antigravity `--dangerously-skip-permissions`, copilot/cursor/crush `--yolo`,
+grok `--permission-mode bypassPermissions`, …). Read it instead of guessing
+flags. Standing rule (frontier-ai-review-stack memory): prefer a TUI's
+official headless mode, or a maintained orchestrator (Orca
+`worker-start --agent <name>`, see the `orchestration` skill), over a
+hand-rolled subprocess wrapper.
 
-| TUI | Working headless form | Failure mode without it |
+When a direct one-shot call is still the right tool (a single review of a
+diff), these forms are verified 2026-09-20. Every one runs with **stdin
+closed** (`< /dev/null`) and output redirected to a file; backgrounding a
+TUI with `&` inherits the harness's stdin and codex blocks on it forever.
+
+| TUI | Verified headless form | Failure mode seen |
 | --- | --- | --- |
-| codex (GPT-6 Astra by default) | `codex exec -s read-only -C <dir> "<prompt>" < /dev/null > out.txt 2>&1` | prints `Reading additional input from stdin...` and hangs; no timeout, no output. Kill it and rerun with stdin closed. |
-| agy (Antigravity) | `agy -p --dangerously-skip-permissions "<prompt>" < /dev/null > out.txt 2>&1` | `-p` alone exits 0 with a one-line "tool required the command permission ... auto-denied" note and **no review**. Exit 0 is not success — check the output length. |
-| copilot | `copilot -p "<prompt>" --allow-all-tools --allow-all-paths --silent < /dev/null > out.txt 2>&1` | works as-is; `--silent` drops the progress chatter. |
+| codex (GPT-6 Astra default) | `codex exec -s read-only -C <dir> "<prompt>" < /dev/null > out 2>&1` | without `< /dev/null`: prints `Reading additional input from stdin...` and hangs with no timeout. |
+| agy (Antigravity) | `agy --dangerously-skip-permissions -p "<prompt>" < /dev/null > out 2>&1` — **flag before `-p`**; `-p` swallows the next argument as the prompt. | `agy -p` alone: exits 0 with a one-line "permission auto-denied" note and no review. `agy -p --dangerously-skip-permissions "…"`: exits 2, prompt ignored. |
+| copilot | `copilot -p "<prompt>" --allow-all-tools --allow-all-paths --silent < /dev/null > out 2>&1` | fine as-is. |
 
 Rules that fall out of this:
 
-- Never `wait` on a batch of TUIs blind. Append `echo "<tool> exit=$?"` to
-  each output file and treat a file with only a preamble line as a
-  failed run, whatever the exit code.
-- For read-only review work prefer the read-only sandbox where the TUI
-  has one (codex `-s read-only`). Where it does not (agy), verify
-  `git status --porcelain` is clean after the run.
-- Run them from a background Bash call with a long timeout, one call per
-  batch, never chained `sleep`s.
+- Exit 0 is not success. Append `echo "<tool> exit=$?"` to each output
+  file and treat a file holding only a preamble line as a failed run.
+- Prefer the read-only sandbox where one exists (codex `-s read-only`).
+  Where it does not (agy), check `git status --porcelain` afterwards;
+  agy left an empty `graft/` directory in the repo on one run.
+- One background Bash call per batch with a long timeout, never chained
+  `sleep`s; read each output file when the batch notification arrives.
 
 ## Routing method
 
