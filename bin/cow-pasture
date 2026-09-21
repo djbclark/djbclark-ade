@@ -8,9 +8,16 @@
 #             optionally register the pasture with Orca (`--orca`, needed for
 #             `orca orchestration worker-start --worktree path:<pasture>`
 #             until stablyai/orca#16226 lands).
-#   remove  → clear the macOS uchg flag (copied .env files often carry it,
-#             which makes `cow remove` fail), then cow remove. Warns that an
-#             Orca registration cannot be removed from the CLI.
+#             Also pre-trusts the folder for Claude Code (default on, `--no-trust`
+#             to skip): without it `worker-start --agent claude` stalls at the
+#             "Quick safety check" dialog and fails `agent_readiness`. And it
+#             excludes graft/.cache in the pasture so graft's session files do
+#             not make a fresh pasture look dirty.
+#   remove  → drop graft's untracked session cache, clear the macOS uchg flag
+#             (copied .env files often carry it, which makes `cow remove`
+#             fail), cow remove, then unregister the pasture from Orca
+#             (`orca project setup-delete`, verified 2026-09-20). Accepts the
+#             short name (`foo`) or the full `<source>/<name>`.
 #
 # Never touches the source repo. Never runs in ~/ops/* (deployment checkouts;
 # operator decision 2026-09-20).
@@ -19,13 +26,13 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 usage: cow-pasture create <name> --source <repo> [--branch <b>] [--orca]
-                          [--keep-secrets] [--dry-run]
+                          [--no-trust] [--keep-secrets] [--dry-run]
        cow-pasture remove <name> [--force]
        cow-pasture scrub <pasture-path> [--dry-run]
 
 create: cow create --print-path, then scrub gitignored secrets.
 scrub : delete gitignored files matching SECRET_PATTERNS inside <pasture-path>.
-remove: chflags -R nouchg, then cow remove.
+remove: drop graft cache, chflags -R nouchg, cow remove, unregister from Orca.
 EOF
   exit 2
 }
@@ -72,6 +79,80 @@ scrub() { # $1 = pasture path, $2 = dry-run flag (0/1)
   log "scrub: $n gitignored secret-like file(s) $( [ "$dry" = 1 ] && echo would-be-removed || echo removed )"
 }
 
+# Claude Code keeps per-folder trust in ~/.claude.json (projects[<path>]).
+# Pre-seeding it is the only mechanism: the binary has no trust flag or env
+# var for local use (verified 2026-09-20). Atomic replace with a backup, since
+# running sessions also write this file.
+trust_claude() { # $1 = pasture path
+  python3 - "$1" <<'PY' && log "pre-trusted for Claude Code: $1" || log "WARNING: could not pre-trust $1 for Claude Code"
+import json, os, sys, shutil
+path = os.path.realpath(sys.argv[1])
+f = os.path.expanduser('~/.claude.json')
+d = json.load(open(f))
+proj = d.setdefault('projects', {}).setdefault(path, {
+    'allowedTools': [], 'mcpContextUris': [], 'mcpServers': {},
+    'enabledMcpjsonServers': [], 'disabledMcpjsonServers': [],
+    'hasTrustDialogAccepted': False,
+    'hasClaudeMdExternalIncludesApproved': False,
+    'hasClaudeMdExternalIncludesWarningShown': False})
+if proj.get('hasTrustDialogAccepted') is True:
+    sys.exit(0)
+proj['hasTrustDialogAccepted'] = True
+shutil.copy2(f, f + '.bak.cow-pasture')
+tmp = f + '.tmp.cow-pasture'
+with open(tmp, 'w') as fh:
+    json.dump(d, fh, indent=2)
+os.chmod(tmp, 0o600)
+os.replace(tmp, f)
+PY
+}
+
+# graft writes graft/.cache/session/*.json into every workspace an agent
+# opens. Keep it out of `git status` so the pasture is not "dirty".
+exclude_graft_cache() { # $1 = pasture path
+  local ex="$1/.git/info/exclude"
+  mkdir -p "$1/.git/info"
+  grep -qxF 'graft/.cache/' "$ex" 2>/dev/null || printf 'graft/.cache/\n' >> "$ex"
+}
+
+# Delete graft's untracked session cache (and graft/ itself if that is all it
+# holds). Never touches tracked graft content.
+clean_graft_cache() { # $1 = pasture path
+  local p=$1
+  [ -d "$p/graft" ] || return 0
+  if ! git -C "$p" ls-files --error-unmatch graft >/dev/null 2>&1; then
+    if [ -z "$(find "$p/graft" -mindepth 1 -not -path "$p/graft/.cache" -not -path "$p/graft/.cache/*" -print -quit)" ]; then
+      rm -rf -- "$p/graft"; log "removed untracked graft/ cache"
+    fi
+  elif [ -d "$p/graft/.cache" ] && [ -z "$(git -C "$p" ls-files graft/.cache)" ]; then
+    rm -rf -- "$p/graft/.cache"; log "removed untracked graft/.cache"
+  fi
+}
+
+# Orca keeps a registration after the directory is gone; setup-delete is the
+# only CLI unregister (setup id == repo id for a registered pasture).
+orca_unregister() { # $1 = pasture path
+  local id
+  id=$(orca repo list --json 2>/dev/null | python3 -c '
+import sys, json
+p = sys.argv[1]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+r = d.get("result", d)
+repos = r.get("repos", r) if isinstance(r, dict) else r
+for x in repos or []:
+    if isinstance(x, dict) and x.get("path") == p:
+        print(x["id"]); break' "$1" || true)
+  [ -n "$id" ] || return 0
+  if orca project setup-delete --setup "$id" --json >/dev/null 2>&1; then
+    log "unregistered from Orca: $1"
+  else
+    log "WARNING: could not unregister $1 from Orca (orca project setup-delete --setup $id)"
+  fi
+}
+
 refuse_ops() {
   case "$(cd "$1" 2>/dev/null && pwd -P)" in
     "$HOME"/ops/*|"$HOME"/ops) log "refusing: $1 is a deployment checkout under ~/ops"; exit 3 ;;
@@ -82,13 +163,14 @@ cmd=${1:-}; shift || usage
 case "$cmd" in
   create)
     name=${1:-}; [ -n "$name" ] || usage; shift
-    source=. branch='' orca=0 keep=0 dry=0
+    source=. branch='' orca=0 keep=0 dry=0 trust=1
     while [ $# -gt 0 ]; do
       case "$1" in
         --source) source=$2; shift 2 ;;
         --branch) branch=$2; shift 2 ;;
         --orca) orca=1; shift ;;
         --keep-secrets) keep=1; shift ;;
+        --no-trust) trust=0; shift ;;
         --dry-run) dry=1; shift ;;
         *) usage ;;
       esac
@@ -101,6 +183,8 @@ case "$cmd" in
     path=$(cow "${args[@]}" | tail -n 1)
     [ -d "$path" ] || { log "cow create did not yield a directory: $path"; exit 1; }
     if [ "$keep" = 1 ]; then log "--keep-secrets: skipping scrub"; else scrub "$path" 0; fi
+    exclude_graft_cache "$path"
+    [ "$trust" = 1 ] && trust_claude "$path"
     if [ "$orca" = 1 ]; then
       if orca repo add --path "$path" --json >/dev/null; then
         log "registered with Orca: $path"
@@ -119,13 +203,24 @@ case "$cmd" in
     name=${1:-}; [ -n "$name" ] || usage; shift
     force=(); [ "${1:-}" = --force ] && force=(--force)
     path=$(cow path "$name" 2>/dev/null || true)
+    if [ -z "$path" ]; then # short name: match `<source>/<name>`
+      full=$(cow list --json 2>/dev/null | python3 -c '
+import sys, json
+n = sys.argv[1]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+m = [x["name"] for x in d if x.get("name", "").endswith("/" + n)]
+print(m[0] if len(m) == 1 else "")' "$name" || true)
+      if [ -n "$full" ]; then name=$full; path=$(cow path "$name" 2>/dev/null || true); fi
+    fi
     if [ -n "$path" ] && [ -d "$path" ]; then
+      clean_graft_cache "$path"
       chflags -R nouchg "$path" 2>/dev/null || true
     fi
-    cow remove "$name" "${force[@]}"
-    if [ -n "$path" ] && orca repo list --json 2>/dev/null | grep -q "\"path\": \"$path\""; then
-      log "NOTE: Orca still lists $path — no CLI unregister exists (stablyai/orca#16226)"
-    fi
+    cow remove "$name" ${force[@]+"${force[@]}"}
+    if [ -n "$path" ] && [ ! -e "$path" ]; then orca_unregister "$path"; fi
     ;;
   *) usage ;;
 esac
