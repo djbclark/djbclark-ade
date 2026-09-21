@@ -154,10 +154,20 @@ own the workspace, or use cow pastures and drive the agent yourself
 win — 36.5GB of logical content in 3.7GB across 10 pastures — applies to the
 second path only.
 
-**If we want both**, the fix is upstream in the Orca fork
-(github.com/djbclark/orca): a command to register an existing directory as a
-managed worktree, which the selectors would then resolve normally. Worth
-filing before building around it.
+**If we want both**, the fix is upstream, and it is already filed (2026-09):
+
+- stablyai/orca#16226 — dispatch workers into an external checkout Orca did not
+  create (the cow case; open, no PR yet). Commented there 2026-09-20.
+- stablyai/orca#20560 — pluggable external worktree lifecycle provider.
+- NOT #10671 / PR #13733 (`worktree import`): it only reveals worktrees git
+  already lists under a registered repo. A cow pasture has its own `.git`, so it
+  still returns `selector_not_found`.
+
+**Workaround today:** `orca repo add --path <pasture>`. Afterwards `path:`
+selectors, `orca worktree current` and `terminal create` resolve, and the
+pasture groups under the source's project. Costs: one registered repo per
+pasture, no CLI unregister, and `cow remove` leaves a dangling registration.
+`bin/orca_upstream_watch.py` (site-djbclark) watches #16226/#20560.
 
 One incidental gotcha found on the way: `task-create --json` returns a
 `taskId` UUID, but `worker-start --task` expects the `task_<hex>` id shown by
@@ -168,7 +178,9 @@ One incidental gotcha found on the way: `task-create --json` returns a
 Orca creates worktrees itself (`--worktree new-child|new-top-level`, with
 `--repo` / `--base-branch`); there is no flag that swaps in a different
 workspace mechanism. But `worker-start` also accepts an existing directory via
-the `path:` selector, so the two compose without touching the fork:
+the `path:` selector, so the two compose without touching the fork —
+**but only after the pasture is registered (`orca repo add --path`); see the
+tested-failure section above.** Untested sketch:
 
 ```bash
 WS=$(cow create "$TASK" --source "$REPO" --branch "$BRANCH" --print-path)
