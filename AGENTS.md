@@ -42,6 +42,12 @@ altitudes compose (a macro node can run a micro graph as its body).
   per-area status, and how they map onto the published CoALA/7-type
   taxonomies and the 2026 cross-vendor portability work. The plans
   themselves live in the ops repos; this is the orientation layer.
+- [docs/coding-factory.md](docs/coding-factory.md) — the unattended
+  issue→PR→auto-merge "coding factory" question, answered 2026-09-21:
+  what this machine already has (Hermes front door, nine coders, Orca;
+  no trigger, no merge gate, Ralph dormant), OpenHands and twenty
+  alternatives checked against live docs, GitHub's auto-merge 422
+  regression, a recommendation, and a coder-agnostic prompt to run it.
 - [docs/upstream-issues.md](docs/upstream-issues.md) — filed-nowhere-yet
   bug drafts for third-party projects (graft statusline, hindsight config
   docs), written from problems verified here.

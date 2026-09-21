@@ -84,6 +84,10 @@ Shizuku) — the article's pattern 11 (loop-until-dry) applied at the
 repo-controller level, converting a PRD into beads issues that agents work
 continuously. See the `ralph-tui-orchestration` skill for that system; it's
 orthogonal to this repo, which is a generic template for other projects.
+**Status 2026-09-21: dormant** — the `ralph-tui` binary is gone from PATH
+and its controller workspaces were deleted with `~/src/ops-worktrees/` on
+2026-08-23; only `~/.config/ralph-tui/` survives. See
+[`docs/coding-factory.md`](docs/coding-factory.md).
 
 ## Layout
 
