@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# cow-pasture — create/remove `cow` pastures safely for agent workspaces.
+#
+# `cow create` clones the whole directory via APFS clonefile, so a pasture
+# inherits every untracked file of the source, including gitignored secrets
+# such as .env (verified 2026-09-20). This wrapper:
+#   create  → cow create, then delete gitignored secret-like files (default on),
+#             optionally register the pasture with Orca (`--orca`, needed for
+#             `orca orchestration worker-start --worktree path:<pasture>`
+#             until stablyai/orca#16226 lands).
+#   remove  → clear the macOS uchg flag (copied .env files often carry it,
+#             which makes `cow remove` fail), then cow remove. Warns that an
+#             Orca registration cannot be removed from the CLI.
+#
+# Never touches the source repo. Never runs in ~/ops/* (deployment checkouts;
+# operator decision 2026-09-20).
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: cow-pasture create <name> --source <repo> [--branch <b>] [--orca]
+                          [--keep-secrets] [--dry-run]
+       cow-pasture remove <name> [--force]
+       cow-pasture scrub <pasture-path> [--dry-run]
+
+create: cow create --print-path, then scrub gitignored secrets.
+scrub : delete gitignored files matching SECRET_PATTERNS inside <pasture-path>.
+remove: chflags -R nouchg, then cow remove.
+EOF
+  exit 2
+}
+
+# Gitignored files that should never be handed to an agent workspace.
+# Dependency and build dirs are deliberately NOT listed: keeping them is the
+# point of cow. Add patterns here, not per-invocation.
+SECRET_PATTERNS=(
+  '.env' '.env.*' '*.pem' '*.key' '*.p12' '*.pfx' 'id_rsa*' 'id_ed25519*'
+  '.netrc' '.npmrc' '.pypirc' 'credentials' 'credentials.*' '*.secret'
+  'secrets.*' '*.tfvars' 'service-account*.json'
+)
+
+log() { printf 'cow-pasture: %s\n' "$*" >&2; }
+
+matches_secret() { # $1 = path relative to pasture
+  local base; base=$(basename "$1")
+  local pat
+  for pat in "${SECRET_PATTERNS[@]}"; do
+    # shellcheck disable=SC2254
+    case "$base" in $pat) return 0 ;; esac
+  done
+  return 1
+}
+
+scrub() { # $1 = pasture path, $2 = dry-run flag (0/1)
+  local p=$1 dry=$2 n=0 f
+  [ -d "$p/.git" ] || { log "not a primary git repo: $p"; return 1; }
+  # -o -i --exclude-standard: untracked AND ignored only — tracked files are
+  # never candidates, so a repo that (wrongly) commits .env is left alone
+  # and reported instead.
+  while IFS= read -r -d '' f; do
+    matches_secret "$f" || continue
+    n=$((n+1))
+    if [ "$dry" = 1 ]; then log "would remove $f"; continue; fi
+    chflags nouchg "$p/$f" 2>/dev/null || true
+    rm -f -- "$p/$f"
+    log "removed $f"
+  done < <(git -C "$p" ls-files -o -i --exclude-standard -z)
+  # Tracked secrets are a source-repo problem; say so loudly, don't fix here.
+  while IFS= read -r -d '' f; do
+    matches_secret "$f" && log "WARNING: tracked secret-like file left in place: $f"
+  done < <(git -C "$p" ls-files -z)
+  log "scrub: $n gitignored secret-like file(s) $( [ "$dry" = 1 ] && echo would-be-removed || echo removed )"
+}
+
+refuse_ops() {
+  case "$(cd "$1" 2>/dev/null && pwd -P)" in
+    "$HOME"/ops/*|"$HOME"/ops) log "refusing: $1 is a deployment checkout under ~/ops"; exit 3 ;;
+  esac
+}
+
+cmd=${1:-}; shift || usage
+case "$cmd" in
+  create)
+    name=${1:-}; [ -n "$name" ] || usage; shift
+    source=. branch='' orca=0 keep=0 dry=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --source) source=$2; shift 2 ;;
+        --branch) branch=$2; shift 2 ;;
+        --orca) orca=1; shift ;;
+        --keep-secrets) keep=1; shift ;;
+        --dry-run) dry=1; shift ;;
+        *) usage ;;
+      esac
+    done
+    refuse_ops "$source"
+    [ "$dry" = 1 ] && { log "dry-run: would cow create $name --source $source ${branch:+--branch $branch}"; exit 0; }
+    args=(create "$name" --source "$source" --print-path)
+    [ -n "$branch" ] && args+=(--branch "$branch")
+    # cow prints "Switched to a new branch" on stdout before the path; keep the last line.
+    path=$(cow "${args[@]}" | tail -n 1)
+    [ -d "$path" ] || { log "cow create did not yield a directory: $path"; exit 1; }
+    if [ "$keep" = 1 ]; then log "--keep-secrets: skipping scrub"; else scrub "$path" 0; fi
+    if [ "$orca" = 1 ]; then
+      if orca repo add --path "$path" --json >/dev/null; then
+        log "registered with Orca: $path"
+      else
+        log "WARNING: orca repo add failed; worker-start path: selectors will not resolve"
+      fi
+    fi
+    printf '%s\n' "$path"
+    ;;
+  scrub)
+    p=${1:-}; [ -d "$p" ] || usage; shift; dry=0
+    [ "${1:-}" = --dry-run ] && dry=1
+    scrub "$p" "$dry"
+    ;;
+  remove)
+    name=${1:-}; [ -n "$name" ] || usage; shift
+    force=(); [ "${1:-}" = --force ] && force=(--force)
+    path=$(cow path "$name" 2>/dev/null || true)
+    if [ -n "$path" ] && [ -d "$path" ]; then
+      chflags -R nouchg "$path" 2>/dev/null || true
+    fi
+    cow remove "$name" "${force[@]}"
+    if [ -n "$path" ] && orca repo list --json 2>/dev/null | grep -q "\"path\": \"$path\""; then
+      log "NOTE: Orca still lists $path — no CLI unregister exists (stablyai/orca#16226)"
+    fi
+    ;;
+  *) usage ;;
+esac
