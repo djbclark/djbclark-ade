@@ -169,6 +169,21 @@ pasture groups under the source's project. Costs: one registered repo per
 pasture, no CLI unregister, and `cow remove` leaves a dangling registration.
 `bin/orca_upstream_watch.py` (site-djbclark) watches #16226/#20560.
 
+**`worker-start` against a registered pasture, tested 2026-09-20 (Orca
+1.4.205):** the selector resolves (`effects: worktree reused`, agent terminal
+created, `setup: not_applicable/existing_worktree`), then `--agent claude`
+fails at `stage: agent_readiness, lastError: timeout`. `worker-read` shows
+why: Claude Code's folder-trust "Quick safety check" dialog, cursor on
+"No, exit". Orca pre-trusts Codex, Cursor and Copilot before launch
+(`src/main/agent-trust-presets.ts`, `ipc/agent-trust.ts`) but has **no Claude
+preset**, and its readiness watcher only *recognises* the prompt
+(`terminal-wait-detection.ts` regex includes "do you trust"). This bites any
+new-directory dispatch, cow or not. Options: pre-seed
+`projects["<realpath>"].hasTrustDialogAccepted: true` in `~/.claude.json`
+(same pattern as Orca's presets), accept by hand in the Orca tab, or dispatch
+`--agent codex`. Recovery for the failed start is exactly what the receipt
+says: `worker-release --dispatch <id>`, then `worker-start --retry-of`.
+
 One incidental gotcha found on the way: `task-create --json` returns a
 `taskId` UUID, but `worker-start --task` expects the `task_<hex>` id shown by
 `task-list`. Passing the UUID fails with `task_not_found`.
@@ -180,13 +195,16 @@ Orca creates worktrees itself (`--worktree new-child|new-top-level`, with
 workspace mechanism. But `worker-start` also accepts an existing directory via
 the `path:` selector, so the two compose without touching the fork —
 **but only after the pasture is registered (`orca repo add --path`); see the
-tested-failure section above.** Untested sketch:
+tested-failure section above.** Use the wrapper, which clones, scrubs copied
+secrets and registers in one step:
 
 ```bash
-WS=$(cow create "$TASK" --source "$REPO" --branch "$BRANCH" --print-path)
-orca orchestration worker-start --task "$TASK_ID" --agent claude \
+WS=$(bin/cow-pasture create "$TASK" --source "$REPO" --branch "$BRANCH" --orca)
+orca orchestration worker-start --task "$TASK_ID" --agent codex \
   --worktree "path:$WS"
 ```
+
+`--agent claude` additionally needs the trust dialog handled (above).
 
 `cow create --print-path` emits only the path, which is what makes this a
 one-liner. On release, `cow remove "$TASK"` (or `cow gc` for merged branches)

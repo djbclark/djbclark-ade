@@ -64,6 +64,11 @@ altitudes compose (a macro node can run a micro graph as its body).
   levers are subagent dispatch and telling the operator; the skill says
   which stretches deserve which tier (live copy at
   `~/.claude/skills/effort-routing/`).
+- [skills/cow-workspaces/SKILL.md](skills/cow-workspaces/SKILL.md) —
+  how agent workspaces are made here: `bin/cow-pasture` (APFS `cow` clone,
+  secrets scrubbed, optional Orca registration) instead of `git worktree`
+  or plain clones; never from `~/ops/*`. Live copy at
+  `~/.claude/skills/cow-workspaces/`.
 - [skills/gmail-search/SKILL.md](skills/gmail-search/SKILL.md) —
   canonical source of the gmail-search skill: the Hermes-built local
   Gmail FTS5 index (~192k messages, ~100ms queries), searched via CLI,

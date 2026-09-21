@@ -115,8 +115,33 @@ which blocks branch checkout. Fix was to keep the tracked `.gitignore`
 pristine and put graft's ignore rules in `.git/info/exclude` instead — the
 right place for tool-local cache rules in a fork that tracks upstream.
 
-Still to do: point Orca `worker-start` at cow, teach Hermes's
-`headless-agent-orchestration` skill to use it.
+**Status 2026-09-20 — proactive use built, Orca half-verified.** The
+"automatic cow for all repos" the operator remembered did not exist: nothing
+in hooks, settings, cron, LaunchAgents or the ops repos invoked cow. Now:
+
+- `bin/cow-pasture` (this repo) + `skills/cow-workspaces` (live copy in
+  `~/.claude/skills/`) are the mechanism: `cow-pasture create <name> --source
+  <repo> [--orca]`. Nothing runs unprompted; turning it off = delete the skill.
+- **Secrets, verified:** `cow create` copies gitignored `.env` (and its `uchg`
+  flag) into the pasture — tested on a throwaway repo and on `~/src/aiuse`.
+  The wrapper scrubs gitignored secret-like files by default.
+- **Scope decided:** primary checkouts under `~/src`, `~/orca/projects`,
+  `~/.hermes`; never `~/ops/*` (wrapper refuses). Linked worktrees
+  (`core-*`, `libntech-*`, `ss-*`, `ralph-tui-*-plugin`) are ineligible.
+- **Orca:** `orca repo add --path` makes `worker-start --worktree path:` resolve
+  (verified: worktree reused, terminal created). The dispatch then stalled at
+  `agent_readiness` because **Claude Code's folder-trust dialog fires in any
+  new directory** and Orca has no Claude trust preset (it has Codex/Cursor/
+  Copilot ones). Operator decision pending on the mechanism; end-to-end
+  `worker_done` not yet observed. See `docs/orca-integration.md`.
+- "Compact into cow" = reclaim disk by migrating (operator, 2026-09-20);
+  the dirty Hermes worktrees stay un-migrated until their changes are
+  committed or discarded (no `--force`).
+
+Still to do: finish the Orca end-to-end test once the trust mechanism is
+chosen; teach Hermes's `headless-agent-orchestration` skill to call
+`cow-pasture` instead of bare `cow create`; `cow gc --merged` pass on the
+Hermes pastures with the operator's go.
 
 **`~/src/ops-worktrees/` (13 dirs, 492MB) — surveyed, needs an operator
 decision, do not bulk-delete.** These belong to the retired regime and sit on
