@@ -1,12 +1,4 @@
 {
-  "statusLine": {
-    "type": "command",
-    "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-statusline.cjs\""
-  },
-  "subagentStatusLine": {
-    "type": "command",
-    "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-statusline.cjs\""
-  },
   "hooks": {
     "PostToolUse": [
       {
@@ -20,11 +12,22 @@
         ]
       },
       {
-        "matcher": "Bash|mcp__graft__|Read|Grep|Glob",
+        "matcher": "Bash|mcp__graft__",
         "hooks": [
           {
             "type": "command",
             "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-hooks.cjs\" tool-savings",
+            "timeout": 8000
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-hooks.cjs\" session-start",
             "timeout": 8000
           }
         ]
@@ -41,17 +44,6 @@
         ]
       }
     ],
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/graft-hooks.cjs\" session-start",
-            "timeout": 8000
-          }
-        ]
-      }
-    ],
     "Stop": [
       {
         "hooks": [
@@ -62,17 +54,6 @@
           }
         ]
       }
-    ]
-  },
-  "footerLinksRegexes": [
-    "graft/[\\w./-]+\\.md"
-  ],
-  "permissions": {
-    "allow": [
-      "Bash(graft:*)",
-      "Bash(npx graft:*)",
-      "Bash(graft-dev:*)",
-      "Bash(node dist/cli.js:*)"
     ]
   }
 }

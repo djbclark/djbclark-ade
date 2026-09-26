@@ -4,7 +4,8 @@
       "command": "graft",
       "args": [
         "mcp"
-      ]
+      ],
+      "alwaysLoad": true
     }
   }
 }
