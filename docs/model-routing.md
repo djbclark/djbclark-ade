@@ -23,8 +23,8 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 | `copilot` | `copilot` (v1.0.77; broke 2026-08-23 on stale pkg cache — fix: `rm -rf ~/Library/Caches/copilot/pkg`) | Individual Pro | monthly sub | premium requests (monthly) |
 | `cursor` | `cursor` (v3.17.8) | Cursor Pro | monthly sub | included / Auto / other-models (monthly) |
 | `grok` | `grok` (v1.0.5; ralph-tui-grok-plugin exists) | SuperGrok | monthly sub | usage limit |
-| `zai` | `crush` TUI (Charm Crush, in Orca's roster) **and** `zcode` TUI (Z.ai's own, v0.16.9; `zcode -p`; GLM-5.3 / GLM-5.3-Flash × low/high/max; not in Orca's roster) — one shared pool | lite | monthly sub | 5h + weekly |
-| `clinepass` | Cline TUI (Orca agent `cline`) + LiteLLM proxy `localhost:4000` (`clinepass-deepseek`, `clinepass-minimax-m3`, `clinepass-kimi-k3`) consumed by Hindsight + hermes | Cline API key | subscription windows | 5h + weekly + monthly |
+| `zai` | `zcode` TUI (Z.ai's own, v0.16.9; `zcode -p`; GLM-5.3 / GLM-5.3-Flash × low/high/max; not in Orca's roster or herdr's agent kinds) | lite | monthly sub | 5h + weekly |
+| `clinepass` | Cline TUI (Orca agent `cline`) and `crush` TUI (Orca agent `crush`) + LiteLLM proxy `localhost:4000` (`clinepass-deepseek`, `clinepass-minimax-m3`, `clinepass-kimi-k3`) consumed by Hindsight + hermes | Cline API key | subscription windows | 5h + weekly + monthly |
 | `opencode-go` | `opencode` bundled free tier (`opencode-go/*`: kimi-k3, minimax-m3, qwen3.x, mimo, ox-alpha-free…); `opencode-ralph-tui` wrapper | go (free) | free | 5h + weekly + monthly |
 | `opencode-zen` | `opencode` provider `opencode` (`opencode/*`: claude, gpt, gemini, deepseek, glm catalogs) via gated `opencode-ralph-tui-zen` | prepaid | **prepaid balance** | balance |
 | `openrouter` | gated `opencode-ralph-tui-openrouter` | prepaid | **prepaid balance** | balance |
@@ -121,9 +121,9 @@ from the first `{` instead, or the parse fails with "Extra data".
   cheap interactive edits.
 - **Grok (SuperGrok, 45% left)** — realtime X/news/web angle, quick
   standalone questions.
-- **z.ai GLM (lite) via crush or zcode** — budget bulk coding on its own
-  5h/weekly windows (one pool shared by both TUIs). zcode headless has no
-  model/effort flag: it runs GLM-5.3 at max.
+- **z.ai GLM (lite) via zcode** — budget bulk coding on its own
+  5h/weekly windows. zcode headless has no model/effort flag: it runs
+  GLM-5.3 at max.
 - **opencode-go free models** (kimi-k3, minimax-m3, qwen3.x) — zero-cost
   experimental fan-out and ralph-tui default via the ungated wrapper;
   burn freely.
@@ -156,7 +156,7 @@ from the first `{` instead, or the parse fails with "Extra data".
 
 ## Formerly open questions — resolved by operator, 2026-08-23
 
-- zai GLM lite is consumed by the `crush` TUI (and, since 2026-09-26, the `zcode` TUI — same pool).
+- zai GLM lite is consumed by the `zcode` TUI. (Corrected 2026-09-26: the 2026-08-23 note said `crush`; the operator says crush runs against clinepass, not z.ai.)
 - `muse` is the Muse service itself (own account).
 - Devin is dormant deliberately (also disabled in Orca's roster).
 - Bailian is awaiting ID verification, expected live ~2026-08-26.

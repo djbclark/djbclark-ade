@@ -471,7 +471,7 @@ Worth re-checking periodically; this category moved fast in 2026.
 
 Also noted for the plan review: z.ai's tiers are **Lite $18 / Pro $72 /
 Max $160**, so there is headroom to buy more of a pool we already use — via
-the crush TUI, not Hermes.
+the zcode TUI, not Hermes.
 
 ## Also outstanding (raised, not formally queued)
 

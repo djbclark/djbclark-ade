@@ -150,11 +150,12 @@ SERVICES: tuple[Service, ...] = (
     Service("opencode-go", "opencode (go tier)",
             {"bulk": 2, "mechanical": 1, "code": 35},
             "free", "kimi/minimax/qwen catalogs"),
-    Service("zai", "crush", {"bulk": 3, "mechanical": 3, "code": 38},
+    Service("zai", "zcode", {"bulk": 3, "mechanical": 3, "code": 38},
             "subscription",
-            # crush and zcode (Z.ai's own TUI, GLM-5.3 / GLM-5.3-Flash x
-            # low/high/max, `zcode -p`) both draw on this one Coding Plan pool.
-            "lite plan; reached via crush or zcode"),
+            # zcode (Z.ai's own TUI, GLM-5.3 / GLM-5.3-Flash x low/high/max,
+            # `zcode -p`) is the zai Coding Plan's TUI. crush is NOT zai: it is
+            # clinepass's (operator correction 2026-09-26).
+            "lite plan; reached via zcode"),
     Service("devin", "devin", {"bulk": 20, "code": 45}, "subscription",
             "disabled in Orca's roster — dormant by choice"),
     Service("copilot", "copilot", {"github": 1, "code": 20}, "subscription",
@@ -252,8 +253,7 @@ DEFAULT_PROFILE = {"bulk": 60, "mechanical": 60}
 # curated service's constraints rather than becoming a second entry.
 ALIASES = {
     "cline": "clinepass",
-    "crush": "zai",
-    "zcode": "zai",
+    "crush": "clinepass",
     "agy": "antigravity",
     "claude-agent-teams": "claude",
     "openclaude": "claude",
