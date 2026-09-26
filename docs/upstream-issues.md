@@ -120,3 +120,28 @@ which is the cheap habit.
 
 A `--no-gitignore` flag (or writing to `.git/info/exclude` by default) would
 remove the papercut; worth raising upstream if it recurs.
+
+## 3. orca — CLI parity for structural reorg (filed 2026-09-26)
+
+**Filed:** [stablyai/orca#23272](https://github.com/stablyai/orca/issues/23272)
+(umbrella). Comments added to [#9632](https://github.com/stablyai/orca/issues/9632#issuecomment-5849981913)
+(terminal move), [#12306](https://github.com/stablyai/orca/issues/12306#issuecomment-5849982200)
+(worktree ordering, suggested `--before/--after`) and
+[#8766](https://github.com/stablyai/orca/issues/8766#issuecomment-5849982407)
+(project-group CLI). The full gap map vs herdr is in #23272; its body is the
+source of truth.
+
+**Still-open gaps as of 2026-09-26** (Orca 1.4.212; herdr comparison from the
+installed `herdr` CLI):
+
+1. `terminal move` across worktrees: PR #15108 open, unmerged (herdr: `pane move --tab`).
+2. Move a pane/tab into a split or another tab in the same workspace (herdr: `pane move --tab --split`); #12083 covers it as a GUI command only.
+3. Swap panes (herdr: `pane swap`): no issue existed.
+4. Resize an existing split (herdr: `pane resize`): #15771 is creation-time only; no issue for post-hoc.
+5. Layout introspection (herdr: `pane layout`): no issue existed.
+6. Reorder tabs / worktrees: #20515, #12306.
+7. `repo rm`: #22433. Project-group CLI: #8766.
+
+**Retraction:** an earlier answer said Orca had no project rename. Wrong:
+`orca project setup-update --display-name` renames it. Older issues (before
+~#10900) were checked by title-biased search only.
