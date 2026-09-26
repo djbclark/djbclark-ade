@@ -60,29 +60,52 @@ forwarded args. That is everything a sleeper needs; the missing piece is
 timestamps (Herdr exposes only a `state_change_seq` counter), which we get
 from Claude's transcript mtime instead.
 
-`bin/herdr-sleeper` (Python, stdlib only, drives the `herdr` CLI):
+`bin/herdr-sleeper` (Python 3.11+, stdlib only, drives the `herdr` CLI):
 
 | command | does |
 |---|---|
-| `herdr-sleeper scan [--idle-hours 12] [--dry-run] [--only PANE…]` | sleep every eligible agent |
+| `herdr-sleeper scan [--dry-run] [--only PANE…] [--exclude …]` | sleep every eligible agent; dry-run prints each pane's verdict and reason |
 | `herdr-sleeper wake <name\|pane> \| --all` | `herdr agent start … -- <orig argv> --resume <uuid>` |
 | `herdr-sleeper list` | journal of sleeping panes |
+| `herdr-sleeper log [-n N]` | what was slept / woken / refused, newest last (`events.jsonl`) |
+| `herdr-sleeper config` | effective settings and where each came from |
+| `herdr-sleeper install` / `uninstall` | launchd job `dev.herdr.sleeper` generated from the config (cron line on non-macOS) |
+
+Config precedence: defaults → `~/.config/herdr-sleeper/config.toml` →
+`HERDR_SLEEPER_IDLE_HOURS` / `_EXCLUDE` / `_INTERVAL_MINUTES` → CLI flags.
+This machine (2026-09-26): `idle_hours = 12`, `exclude = ["orc",
+"orc-meta"]` (Herdr orchestrators idle at the prompt by design),
+`interval_minutes = 30`, installed via `herdr-sleeper install`. State and
+logs in `~/.local/state/herdr-sleeper/` (`sleeping.json` journal,
+`panes.json` crash-recovery snapshot, `events.jsonl`, `sleeper.log`).
 
 Mechanics, verified 2026-09-26 on a throwaway workspace: `/exit` returns
 the pane to its shell in ~1 s and the PID dies; wake restores the **same
 UUID** and the agent answered a question about pre-sleep context correctly.
 The pane is kept (it is the restart slot — `herdr agent start` needs a pane
-at a shell prompt), a `💤 … wake: herdr-sleeper wake <name>` line is printed
-into it, and the sidebar label gets a `💤` prefix until wake.
+at a shell prompt), terminal modes are reset, a `💤 … wake: herdr-sleeper
+wake <name>` line is printed into it, and the sidebar label gets a `💤`
+prefix until wake.
 
-Eligibility: kind `claude`; status `idle`/`done`; pane not focused; has a
-session UUID *and* an on-disk transcript; UUID not open in another pane;
-transcript mtime older than the window; not already journaled. The script's
-docstring is the full rationale.
+Eligibility and failure handling were taken from Orca's hibernation
+implementation and its bug history (#22657, #16279, #15625, #18731):
 
-Schedule: `launchd/com.djbclark.herdr-sleeper.plist` (every 30 min, 12 h
-window), installed as a symlink in `~/Library/LaunchAgents/`. State and logs
-in `~/.local/state/herdr-sleeper/`.
+1. kind `claude`; status `idle`/`done`; pane not focused; not excluded; has
+   a session UUID *and* an on-disk transcript; UUID not open in another
+   pane; transcript mtime older than the window; no draft in the composer.
+2. Everything re-checked immediately before `/exit` (the scan is minutes
+   old by then), including that `state_change_seq` has not moved.
+3. Record written before `/exit`, rolled back if the process survives.
+4. Wake refuses if the UUID is live in any pane or `claude` process (fork
+   risk) or the transcript is gone; a record is never deleted because its
+   pane vanished — the manual resume command is printed instead.
+5. Every scan snapshots pane→UUID→argv, so `wake` works after a crash that
+   lost the journal (exercised: it did).
+
+Known limits: Claude only (the idle clock is Claude's transcript); a
+`blocked` pane is skipped by status, but a permission prompt that Herdr's
+screen detection misses would look idle by mtime — the draft check and
+`state_change_seq` recheck are the backstops.
 
 Cost to know: `claude --resume` replays the transcript, so each wake is a
 full prompt-cache write — hence 12 h, not 30 min.
@@ -91,8 +114,13 @@ full prompt-cache write — hence 12 h, not 30 min.
 
 1. **Herdr** does not accept unsolicited PRs (`CONTRIBUTING.md`: auto-closed
    unless on `.github/APPROVED_CONTRIBUTORS`); feature ideas go to GitHub
-   Discussions. The fork at `djbclark/herdr` → `~/src/herdr` (upstream remote
-   set) exists for reading source, not for a PR. Draft discussion post in
-   [upstream-issues.md](upstream-issues.md).
+   Discussions. The fork `djbclark/herdr` → `~/src/herdr` (upstream remote
+   set) carries the reference implementation on branch **`herdr-sleeper`**
+   (`scripts/herdr-sleeper/`: script, tests, README) — byte-identical to
+   `bin/herdr-sleeper` here; re-copy after changes. Draft discussion post in
+   [upstream-issues.md](upstream-issues.md). While reading Herdr's source for
+   the draft: `agent_resume::plan()` rebuilds `["claude","--resume",<id>]`
+   from the session ref alone, so Herdr's own restart-restore drops flags
+   like `--dangerously-skip-permissions`.
 2. **Orca**: add our evidence to #22571 rather than open a duplicate. Draft in
    [upstream-issues.md](upstream-issues.md).

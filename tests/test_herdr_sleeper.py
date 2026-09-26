@@ -99,6 +99,73 @@ def test_assess_rejects_already_journaled(transcripts: Callable[[str, float], Pa
     assert not ok and "journal" in reason
 
 
+def test_assess_rejects_excluded(transcripts: Callable[[str, float], Path]) -> None:
+    transcripts("u-1", 30)
+    a = agent(name="orc")
+    assert sleeper.assess(a, [a], 12, {}, {"orc"})[1] == "excluded"
+    assert sleeper.assess(a, [a], 12, {}, {"w1:p1"})[1] == "excluded"
+    assert sleeper.assess(a, [a], 12, {}, {"other"})[0]
+
+
+CLAUDE_SCREEN = """
+❯ earlier question
+⏺ pong
+✻ Worked for 1s · done 5:23 PM
+────────
+❯ {composer}
+────────
+  ◤ graft · 40 nodes / 63 edges · ✓ synced
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+"""
+
+
+def test_draft_input_detects_unsent_text() -> None:
+    assert sleeper.draft_input(CLAUDE_SCREEN.format(composer="half-typed thought")) == "half-typed thought"
+    assert sleeper.draft_input(CLAUDE_SCREEN.format(composer="")) is None
+    assert sleeper.draft_input("djbclark@mac:~$ \n") is None  # bare shell, no composer
+
+
+def test_load_config_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = tmp_path / "config.toml"
+    monkeypatch.setattr(sleeper, "CONFIG_FILE", cfg)
+    monkeypatch.delenv("HERDR_SLEEPER_IDLE_HOURS", raising=False)
+    monkeypatch.delenv("HERDR_SLEEPER_EXCLUDE", raising=False)
+    values, source = sleeper.load_config()
+    assert values == {"idle_hours": 12.0, "exclude": [], "interval_minutes": 30}
+    assert set(source.values()) == {"default"}
+
+    cfg.write_text('idle_hours = 6\nexclude = ["orc"]\n')
+    values, source = sleeper.load_config()
+    assert values["idle_hours"] == 6.0 and values["exclude"] == ["orc"]
+    assert source["idle_hours"] == str(cfg) and source["interval_minutes"] == "default"
+
+    monkeypatch.setenv("HERDR_SLEEPER_IDLE_HOURS", "1.5")
+    monkeypatch.setenv("HERDR_SLEEPER_EXCLUDE", "a b")
+    values, source = sleeper.load_config()
+    assert values["idle_hours"] == 1.5 and values["exclude"] == ["a", "b"]
+    assert source["idle_hours"] == "$HERDR_SLEEPER_IDLE_HOURS"
+
+
+def test_load_config_ignores_bad_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("idle_hours = = 3\n")
+    monkeypatch.setattr(sleeper, "CONFIG_FILE", cfg)
+    monkeypatch.setattr(sleeper, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(sleeper, "LOG", tmp_path / "state" / "sleeper.log")
+    values, _ = sleeper.load_config()
+    assert values["idle_hours"] == 12.0
+
+
+def test_launchd_plist_is_valid_xml(tmp_path: Path) -> None:
+    import xml.etree.ElementTree as ET
+
+    text = sleeper.launchd_plist(Path("/x/herdr-sleeper"), {"interval_minutes": 15})
+    root = ET.fromstring(text)
+    strings = [e.text for e in root.iter("string")]
+    ints = [e.text for e in root.iter("integer")]
+    assert "/x/herdr-sleeper" in strings and "scan" in strings and ints == ["900"]
+
+
 def test_wake_name_falls_back_to_pane() -> None:
     assert sleeper.wake_name({"name": None, "pane_id": "w26:p2"}) == "wake-w26-p2"
     assert sleeper.wake_name({"name": "lichess", "pane_id": "w24:p1"}) == "lichess"

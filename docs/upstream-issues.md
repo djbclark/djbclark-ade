@@ -213,10 +213,20 @@ Discussions** — so this is a Discussion post, not an issue or PR.
 >    the pane and its session ref, relaunch later — would be a small
 >    surface over existing machinery, and would work for every
 >    integration that reports session refs, not just Claude.
+>    One thing to carry over from the pane's live process when doing so:
+>    the original argv. `agent_resume::plan()` builds the restore command
+>    from `(source, agent, session_ref)` alone — `["claude", "--resume",
+>    <id>]` — so a pane launched as `claude --dangerously-skip-permissions`
+>    (or with `--model`, `--add-dir`, …) comes back after a server restart
+>    without those flags. `pane.process_info` already exposes the running
+>    argv; persisting it next to the session ref would fix both restore and
+>    an on-demand wake.
 > 3. **Optional policy:** `[session] sleep_idle_after = "12h"` (off by
 >    default), using the same eligibility Orca's hibernation uses: state
 >    `done`/`idle`, pane not focused, no keystrokes since, session ref
 >    present, no other pane sharing the session.
 >
-> Happy to share the external script as a reference for the semantics; not
-> asking to submit a PR.
+> Reference implementation (script, tests, README — usable as-is, no
+> changes to Herdr):
+> https://github.com/djbclark/herdr/tree/herdr-sleeper/scripts/herdr-sleeper
+> Sharing it for the semantics; not asking to submit a PR.
