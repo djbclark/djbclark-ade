@@ -93,12 +93,11 @@ gets a `💤` prefix until wake.
 
 ### Safety rules, and where each came from
 
-The first version was reviewed by four models (codex/GPT-6 Astra xhigh,
-Antigravity/Gemini 3.1 Pro high, Copilot, and — after fixing the
-invocation — opencode-go/DeepSeek V4 Pro and cursor-agent). Two rounds of
-findings, all adopted except two that a CLI-driven tool cannot fix (see
-below); the rest of the rules come from Orca's hibernation implementation
-and its bug history (#22657, #16279, #15625, #18731).
+Reviewed in three rounds by five models (codex/GPT-6 Astra xhigh,
+Antigravity/Gemini 3.1 Pro high, Copilot, cursor-agent, opencode-go/DeepSeek
+V4 Pro) — 60 findings, all adopted except the two a CLI-driven tool cannot
+fix (see below); the rest of the rules come from Orca's hibernation
+implementation and its bug history (#22657, #16279, #15625, #18731).
 
 1. **Eligibility (all must hold):** kind `claude`; Herdr status `idle` or
    `done`; pane not focused; not excluded; has a session UUID *and* an
@@ -109,32 +108,44 @@ and its bug history (#22657, #16279, #15625, #18731).
    nothing rendered under the glyph all refuse); original argv safely
    replayable (`--fork-session`, `--print`, `--session-id`, a positional
    prompt or anything after `--` refuse).
-2. **Act on live state:** everything is re-checked immediately before
-   `/exit`, including that `state_change_seq` and the session UUID have
-   not moved since the scan.
+2. **Act on live state:** everything is re-checked *after* the journal
+   write and immediately before `/exit`, including that `state_change_seq`
+   and the session UUID have not moved since the scan; `/exit` is sent to
+   the **pane id**, never the agent name (names were observed being
+   reassigned wholesale between two listings on 2026-09-26); "exited"
+   requires Herdr to drop the agent *and* `process-info` to show no
+   `claude` process — an unreadable process-info is unknown, not gone.
 3. **Never lose the handle:** the journal entry is written before `/exit`;
    if the agent is still there after the wait it stays as
-   `exit-requested` and the next scan reconciles it (dropped only if the
-   process is really present; `asleep` if it left). A record is never
+   `exit-requested` and later scans reconcile it (dropped only after being
+   seen running with a real process on two consecutive scans, or when the
+   pane runs a different session; `asleep` once it is verifiably gone). A record is never
    deleted because its pane vanished — the manual resume command is
    printed. Every scan merges pane→UUID→argv into `panes.json`; `wake`
    recovers from it and persists the recovered entry *before* trying.
 4. **Never fork a session:** wake refuses if the UUID is live in any pane
-   or any real `claude` process (`--resume <id>` or `--resume=<id>`,
-   direct or node-launched), and refuses when that cannot be verified
-   (Herdr or `ps` failing). Snapshot-recovered argv goes through the same
-   replay filter as journaled argv.
+   or any process that selects it (`--resume <id>`/`--resume=<id>`, direct
+   or via `node …/cli.js`), if a `claude --continue` runs in the same cwd,
+   or when that cannot be verified (Herdr or `ps` failing); it also refuses
+   when the pane's cwd no longer matches the journal (recycled pane id) or
+   the pane cannot be confirmed to be at a bare shell. Snapshot-recovered
+   argv goes through the same replay filter, and recovery requires the
+   pane to exist, hold no agent, and match the snapshot's cwd.
 5. **Fail closed on state and config:** a state file whose root is not a
-   JSON object aborts; malformed TOML, unknown keys, string-vs-list
-   confusion, `nan`/negative/`inf` windows (config, env *and* CLI) abort
+   JSON object aborts; malformed TOML, unknown keys, booleans where numbers
+   go, string-vs-list confusion, conflicting env aliases, `nan`/negative/
+   `inf` windows (config, env *and* CLI) abort
    `scan`/`install` while `wake`/`list`/`log` keep working. A file lock
    serialises overlapping runs (launchd + manual) and the journal is
    re-read under it before every write.
 6. **Install faithfully:** the launchd plist is built with `plistlib`
-   (paths with `&`/`<` stay valid), runs the same interpreter, and carries
-   the `HERDR_SLEEPER_*`/`XDG_CONFIG_HOME` env present at install time; the
-   cron fallback prefixes the same env and refuses intervals cron cannot
-   express exactly.
+   (paths with `&`/`<` stay valid), runs the same interpreter, pins the
+   absolute `herdr` binary it resolved (`HERDR_SLEEPER_HERDR_BIN`) and puts
+   its directory first on PATH, carries the `HERDR_SLEEPER_*`/
+   `XDG_CONFIG_HOME` env present at install time, and restores the previous
+   job if bootstrap fails; the cron fallback prefixes the same env and
+   refuses intervals cron cannot express exactly. CLI `--exclude` adds to
+   the config's excludes rather than replacing them.
 
 **Known limits, deliberately not "fixed":** (a) there is still a window
 between the final recheck and Claude consuming `/exit` — only a native

@@ -74,6 +74,7 @@ class FakeHerdr:
         self.calls: list[tuple[str, ...]] = []
         self.exit_leaves_agent = True     # /exit removes the agent from its pane
         self.start_uuid: str | None = None  # what agent start reports; None → the requested --resume uuid
+        self.process_info_broken = False    # process-info returns an error envelope
 
     def __call__(self, *args: str, check: bool = True, timeout: float = 0) -> dict[str, Any]:
         self.calls.append(args)
@@ -86,14 +87,18 @@ class FakeHerdr:
                 if check:
                     raise sleeper.SleeperError("no such pane")
                 return {}
-            pane = {"pane_id": args[2], "label": a.get("label")}
+            pane = {"pane_id": args[2], "label": a.get("label"), "cwd": a.get("cwd")}
             if a.get("agent"):
                 pane["agent"] = a["agent"]
                 pane["agent_session"] = a.get("agent_session")
             return {"pane": pane}
         if args[:2] == ("pane", "process-info"):
-            return {"process_info": {"foreground_processes": [{"argv0": "claude", "name": "claude",
-                                                                "argv": ["claude", *self.argv], "pid": 1}]}}
+            pane = args[args.index("--pane") + 1]
+            a = by_pane.get(pane)
+            if self.process_info_broken:
+                return {}
+            procs = [{"argv0": "claude", "name": "claude", "argv": ["claude", *self.argv], "pid": 1}] if a and a.get("agent") else []
+            return {"process_info": {"foreground_processes": procs}}
         if args[:2] == ("agent", "prompt") and args[3] == "/exit":
             if self.exit_leaves_agent:
                 for a in self.agents:
@@ -109,7 +114,8 @@ class FakeHerdr:
             return {"agent": {"agent_session": {"value": uuid}}}
         if args[:2] in (("pane", "run"), ("pane", "rename")):
             if args[:2] == ("pane", "rename"):
-                by_pane[args[2]]["label"] = args[3] if len(args) > 3 else None
+                assert len(args) > 3, "bare `pane rename <pane>` is a usage error in real herdr"
+                by_pane[args[2]]["label"] = None if args[3] == "--clear" else args[3]
             return {}
         raise AssertionError(f"unexpected herdr call {args}")
 
@@ -119,7 +125,7 @@ def fake(state: Path, monkeypatch: pytest.MonkeyPatch) -> FakeHerdr:
     f = FakeHerdr([agent()])
     monkeypatch.setattr(sleeper, "herdr", f)
     monkeypatch.setattr(sleeper, "herdr_screen", lambda pane: f.screen)
-    monkeypatch.setattr(sleeper, "uuid_live_elsewhere", lambda uuid, except_pane=None: None)
+    monkeypatch.setattr(sleeper, "uuid_live_elsewhere", lambda uuid, except_pane=None, cwd=None: None)
     monkeypatch.setattr(sleeper.time, "sleep", lambda s: None)
     monkeypatch.setattr(sleeper, "EXIT_WAIT_SECONDS", 2)
     transcript(state, UUID, 30)
@@ -145,7 +151,8 @@ def test_replayable_argv_strips_session_selectors() -> None:
     assert ok(["--resume", "--model", "opus"]) == (["--model", "opus"], None)  # bare --resume opens a picker
     assert ok([]) == ([], None)
     assert ok(["--add-dir", "/x", "--verbose"]) == (["--add-dir", "/x", "--verbose"], None)
-    assert ok(["--unknown-flag", "value"]) == (["--unknown-flag", "value"], None)
+    assert ok(["--unknown-flag", "value"])[0] is None and "unrecognised" in ok(["--unknown-flag", "value"])[1]
+    assert ok(["--model"])[0] is None  # value option missing its value
 
 
 @pytest.mark.parametrize(
@@ -196,6 +203,8 @@ def test_composer_state_fails_closed() -> None:
     assert cs(None)[0] == "unknown"                       # unreadable screen
     assert cs("djbclark@mac:~$ \n")[0] == "unknown"       # bare shell: no composer to vouch for
     assert cs("⏺ done\n✻ Worked\n")[0] == "unknown"       # transcript visible, composer scrolled off
+    assert cs("⏺ done\n> quoted line\n")[0] == "unknown"  # a bare ">" is not the composer
+    assert cs("❯ \n─── a rule I am drafting\n────────\n  ⏵⏵ bypass\n")[0] == "draft"
 
 
 def test_manual_command_is_shell_safe() -> None:
@@ -234,7 +243,7 @@ def test_load_config_precedence(state: Path, monkeypatch: pytest.MonkeyPatch) ->
 @pytest.mark.parametrize(
     "text",
     ["idle_hours = = 3\n", "idle_hours = nan\n", "idle_hours = -1\n", "exclude = [1, 2]\n", "interval_minutes = 0\n",
-     "bogus = 1\n"],
+     "bogus = 1\n", "idle_hours = false\n", "interval_minutes = true\n"],
 )
 def test_load_config_rejects_bad_values(state: Path, monkeypatch: pytest.MonkeyPatch, text: str) -> None:
     cfg = state / "config.toml"
@@ -242,6 +251,26 @@ def test_load_config_rejects_bad_values(state: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(sleeper, "CONFIG_FILE", cfg)
     with pytest.raises(sleeper.ConfigError):
         sleeper.load_config()
+
+
+def test_env_alias_conflict_and_units(state: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sleeper, "CONFIG_FILE", state / "absent.toml")
+    monkeypatch.setenv("HERDR_SLEEPER_IDLE_HOURS", "90m")
+    monkeypatch.delenv("HERDR_SLEEPER_IDLE", raising=False)
+    assert sleeper.load_config()[0]["idle_hours"] == 1.5
+    monkeypatch.setenv("HERDR_SLEEPER_IDLE", "2h")
+    with pytest.raises(sleeper.ConfigError):
+        sleeper.load_config()
+
+
+def test_cli_exclude_adds_to_config_exclude(fake: FakeHerdr, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    cfg = sleeper.STATE_DIR.parent / "config.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text('exclude = ["a"]\n')
+    monkeypatch.setattr(sleeper, "CONFIG_FILE", cfg)
+    monkeypatch.setattr(sleeper, "list_agents", lambda: fake.agents)
+    assert sleeper.main(["scan", "--idle", "0s", "--exclude", "zzz"]) == 0
+    assert "excluded" in capsys.readouterr().out and journal() == {}
 
 
 def test_scan_refuses_with_broken_config(state: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -273,6 +302,7 @@ def test_assess_uses_newest_transcript_copy(state: Path) -> None:
         ({"status": "working"}, "status working"),
         ({"status": "blocked"}, "status blocked"),
         ({"focused": True}, "focused"),
+        ({"focused": None}, "focus unknown"),
         ({"uuid": None}, "no session uuid"),
         ({"kind": "codex"}, "not supported"),
     ],
@@ -301,7 +331,7 @@ def test_sleep_happy_path(fake: FakeHerdr) -> None:
     assert slept and outcome == "slept"
     j = journal()["w1:p1"]
     assert j["uuid"] == UUID and j["argv"] == ["--dangerously-skip-permissions"] and j["phase"] == "asleep"
-    assert ("agent", "prompt", "a", "/exit") in fake.calls
+    assert ("agent", "prompt", "w1:p1", "/exit") in fake.calls  # by pane id, never by (reassignable) name
     assert any(c[:2] == ("pane", "rename") and c[3].startswith("💤") for c in fake.calls)
     assert events() == ["slept"]
 
@@ -349,10 +379,19 @@ def test_exit_timeout_keeps_handle_as_exit_requested(fake: FakeHerdr) -> None:
     assert events() == ["exit-uncertain"]
 
 
+def test_exit_with_unreadable_process_info_stays_uncertain(fake: FakeHerdr) -> None:
+    fake.process_info_broken = True  # Herdr drops the agent but we cannot see the process go
+    fake.argv_cache = fake.argv
+    slept, outcome = sleeper.sleep_agent(agent(), 12, set(), dry_run=False)
+    assert not slept and "could not read claude argv" in outcome  # refused before acting, since argv is unknown
+
+
 def test_reconcile_settles_exit_requested(fake: FakeHerdr) -> None:
     fake.exit_leaves_agent = False
     sleeper.sleep_agent(agent(), 12, set(), dry_run=False)
-    # case 1: the agent is still there next scan → the entry was a no-op, drop it
+    # case 1: the agent is still there next scan → first sighting only counts, second drops
+    sleeper.reconcile(fake.agents)
+    assert journal()["w1:p1"]["seen_running"] == 1
     sleeper.reconcile(fake.agents)
     assert journal() == {}
     # case 2: it did leave after the timeout → becomes asleep
@@ -365,6 +404,13 @@ def test_reconcile_settles_exit_requested(fake: FakeHerdr) -> None:
 
 
 # ------------------------------------------------------- wake state machine
+
+def test_reconcile_drops_entry_when_pane_runs_another_session(fake: FakeHerdr) -> None:
+    sleeper.sleep_agent(agent(), 12, set(), dry_run=False)
+    fake.agents[0].update(agent="claude", agent_session={"value": "other"})
+    sleeper.reconcile(fake.agents)
+    assert journal() == {} and events()[-1] == "reconciled"
+
 
 def slept_entry(fake: FakeHerdr) -> dict[str, Any]:
     sleeper.sleep_agent(agent(), 12, set(), dry_run=False)
@@ -419,6 +465,18 @@ def test_reconcile_needs_a_real_process_before_dropping(fake: FakeHerdr, monkeyp
     assert journal()["w1:p1"]["phase"] == "exit-requested"
 
 
+def test_wake_refuses_recycled_pane_by_cwd(fake: FakeHerdr) -> None:
+    entry = slept_entry(fake)
+    fake.agents[0]["cwd"] = "/somewhere/else"
+    assert not sleeper.wake_entry(entry) and "w1:p1" in journal()
+    assert not any(c[:2] == ("agent", "start") for c in fake.calls)
+
+
+def test_manual_command_never_prints_refused_argv() -> None:
+    cmd = sleeper.manual_command({"cwd": "/p", "argv": ["--fork-session", "--model", "x"], "uuid": "u"})
+    assert cmd == "cd /p && claude --resume u"
+
+
 def test_wake_refuses_when_pane_gone_and_keeps_entry(fake: FakeHerdr) -> None:
     entry = slept_entry(fake)
     fake.agents = []
@@ -434,14 +492,14 @@ def test_wake_refuses_when_argv_unknown(fake: FakeHerdr) -> None:
 
 def test_wake_refuses_when_session_live_elsewhere(fake: FakeHerdr, monkeypatch: pytest.MonkeyPatch) -> None:
     entry = slept_entry(fake)
-    monkeypatch.setattr(sleeper, "uuid_live_elsewhere", lambda uuid, except_pane=None: "pid 42")
+    monkeypatch.setattr(sleeper, "uuid_live_elsewhere", lambda uuid, except_pane=None, cwd=None: "pid 42")
     assert not sleeper.wake_entry(entry) and "w1:p1" in journal()
 
 
 def test_wake_refuses_when_liveness_unknown(fake: FakeHerdr, monkeypatch: pytest.MonkeyPatch) -> None:
     entry = slept_entry(fake)
 
-    def boom(uuid: str, except_pane: str | None = None) -> None:
+    def boom(uuid: str, except_pane: str | None = None, cwd: str | None = None) -> None:
         raise sleeper.SleeperError("ps failed")
 
     monkeypatch.setattr(sleeper, "uuid_live_elsewhere", boom)
@@ -454,6 +512,13 @@ def test_wake_clears_entry_when_same_session_already_running(fake: FakeHerdr) ->
     entry = slept_entry(fake)
     fake.agents[0].update(agent="claude", agent_session={"value": UUID})  # came back by other means
     assert sleeper.wake_entry(entry) and journal() == {}
+
+
+def test_wake_keeps_entry_when_agent_shown_but_no_process(fake: FakeHerdr) -> None:
+    entry = slept_entry(fake)
+    fake.agents[0].update(agent="claude", agent_session={"value": UUID})
+    fake.process_info_broken = True
+    assert not sleeper.wake_entry(entry) and "w1:p1" in journal()
 
 
 def test_wake_keeps_entry_on_session_mismatch(fake: FakeHerdr) -> None:
@@ -489,6 +554,7 @@ def test_uuid_live_elsewhere_parses_ps(fake: FakeHerdr, monkeypatch: pytest.Monk
         f"  12 node /opt/homebrew/bin/claude --resume={UUID}": "pid 12",
         f"  13 /bin/bash -c 'echo claude {UUID}'": None,       # a shell mentioning both is not a session
         f"  14 /usr/local/bin/claude --resume other": None,
+        f"  15 node /opt/lib/node_modules/@anthropic-ai/claude-code/cli.js --resume {UUID}": "pid 15",
     }
     for line, expect in lines.items():
         monkeypatch.setattr(sleeper.subprocess, "run",

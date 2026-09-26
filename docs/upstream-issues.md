@@ -206,7 +206,7 @@ Discussions** — so this is a Discussion post, not an issue or PR.
 > unreplayable argv (`--fork-session`, positional prompts), session forks
 > (id live elsewhere), damaged state and config, and overlapping runs.
 >
-> Reference implementation (script, 51 tests, README — usable as-is, no
+> Reference implementation (script, 61 tests, README — usable as-is, no
 > changes to Herdr):
 > https://github.com/djbclark/herdr/tree/herdr-sleeper/scripts/herdr-sleeper
 >
