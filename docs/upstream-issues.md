@@ -138,7 +138,7 @@ installed `herdr` CLI):
 2. Move a pane/tab into a split or another tab in the same workspace (herdr: `pane move --tab --split`); #12083 and #10055 cover it as a command/shortcut only.
 3. Swap panes (herdr: `pane swap`): no issue anywhere in the full corpus.
 4. Resize an existing split (herdr: `pane resize`): #15771 is creation-time only; no issue for post-hoc.
-5. Split ratios missing from `terminal list --include-visual-layouts` output (needed to plan a resize): no issue.
+5. Split ratios missing from `terminal list --include-visual-layouts` output (needed to plan a resize): no issue. Verified live on 1.4.212: a `pane-split` node has only `type`, `direction`, `first`, `second`, while `orca-data.json` stores the ratio (e.g. `0.304`). The tab-group-level split node was not tested.
 6. Reorder tabs / worktrees: #20515, #12306.
 7. `repo rm`: #22433. Project-group CLI: #8766. Declarative layout: #1499 / PR #1548.
 

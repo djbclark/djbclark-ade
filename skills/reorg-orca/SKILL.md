@@ -26,7 +26,7 @@ If `cli` shows `terminal move`, `repo rm`, etc. as `true`, read that verb's
 orca project list --json
 orca repo list --json
 orca worktree list --json            # add --repo <sel> to narrow
-orca terminal list --include-visual-layouts --json   # group > tab > pane tree, handles, split direction (no ratios)
+orca terminal list --include-visual-layouts --json   # group > tab > pane tree, handles, split direction; no split ratios (verified 1.4.212; nodes are `group` and `pane-split`)
 orca worktree ps --json
 ```
 
