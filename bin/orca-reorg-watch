@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Watch upstream Orca for movement on the structural-reorg gaps.
+
+Tracks the issues/PRs behind stablyai/orca#23272 and probes the installed
+`orca` CLI for the verbs those issues ask for. Exit codes follow the
+orca_upstream_watch.py convention: 0 = no change, 10 = something moved,
+2 = could not probe. State lives in ~/.local/state/orca-reorg-watch.json.
+
+  orca-reorg-watch          # compare against last snapshot, print changes
+  orca-reorg-watch --show   # print current state without comparing/saving
+  orca-reorg-watch --reset  # overwrite the snapshot with current state
+"""
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = "stablyai/orca"
+# number -> why we care (herdr analog in parentheses)
+TRACKED = {
+    23272: "umbrella: structural reorg parity (filed by us)",
+    9632: "terminal move across worktrees (herdr pane move --tab)",
+    15108: "PR: orca terminal move",
+    12083: "Move Tab to Split as a command (herdr pane move --split)",
+    15771: "terminal split --ratio (herdr pane resize)",
+    12306: "worktree ordering / --place (sidebar order)",
+    8766: "project-group CLI",
+    22433: "orca repo rm",
+    20515: "tab reorder shortcut",
+    10055: "Move Tab to Split shortcut",
+    1548: "PR: declarative layout rules in orca.yaml",
+    22759: "open tab in chosen editor group from CLI",
+}
+# (label, argv, substring that means the verb now exists)
+CLI_PROBES = [
+    ("terminal move", ["terminal", "--help"], "move "),
+    ("terminal swap", ["terminal", "--help"], "swap "),
+    ("terminal resize", ["terminal", "--help"], "resize "),
+    ("terminal layout", ["terminal", "--help"], "layout "),
+    ("repo rm", ["repo", "--help"], "  rm "),
+    ("worktree set --sort-order", ["worktree", "set", "--help"], "--sort-order"),
+    ("worktree set --before", ["worktree", "set", "--help"], "--before"),
+]
+STATE = Path.home() / ".local/state/orca-reorg-watch.json"
+
+
+def gh_issue(n):
+    out = subprocess.run(
+        ["gh", "api", f"repos/{REPO}/issues/{n}"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    d = json.loads(out)
+    merged = (d.get("pull_request") or {}).get("merged_at")
+    return {
+        "state": d["state"],
+        "merged": bool(merged),
+        "comments": d["comments"],
+        "updated": d["updated_at"],
+        "title": d["title"],
+    }
+
+
+def probe(argv, needle):
+    r = subprocess.run(["orca", *argv], capture_output=True, text=True)
+    return needle in (r.stdout + r.stderr)
+
+
+def snapshot():
+    snap = {"issues": {}, "cli": {}}
+    for n in TRACKED:
+        snap["issues"][str(n)] = gh_issue(n)
+    for label, argv, needle in CLI_PROBES:
+        snap["cli"][label] = probe(argv, needle)
+    v = subprocess.run(["orca", "--version"], capture_output=True, text=True)
+    snap["orca_version"] = v.stdout.strip()
+    return snap
+
+
+def diff(old, new):
+    msgs = []
+    for n, cur in new["issues"].items():
+        prev = old.get("issues", {}).get(n)
+        why = TRACKED[int(n)]
+        if prev is None:
+            msgs.append(f"#{n} newly tracked ({why})")
+            continue
+        for k in ("state", "merged", "comments"):
+            if prev[k] != cur[k]:
+                msgs.append(f"#{n} {k}: {prev[k]} -> {cur[k]}  [{why}]")
+    for label, has in new["cli"].items():
+        if has and not old.get("cli", {}).get(label):
+            msgs.append(f"CLI now has: orca {label}")
+    if old.get("orca_version") != new["orca_version"]:
+        msgs.append(f"orca version {old.get('orca_version')} -> {new['orca_version']}")
+    return msgs
+
+
+def main():
+    args = sys.argv[1:]
+    try:
+        new = snapshot()
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"probe failed: {e}", file=sys.stderr)
+        return 2
+    if "--show" in args:
+        print(json.dumps(new, indent=2))
+        return 0
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    if "--reset" in args or not STATE.exists():
+        STATE.write_text(json.dumps(new, indent=2))
+        print("snapshot saved")
+        return 0
+    msgs = diff(json.loads(STATE.read_text()), new)
+    if not msgs:
+        print("no change")
+        return 0
+    print("\n".join(msgs))
+    STATE.write_text(json.dumps(new, indent=2))
+    return 10
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -3,6 +3,19 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Watch Orca upstream for structural-reorg verbs
+
+**Queued 2026-09-26. Watcher built; waiting on upstream.** We filed
+[stablyai/orca#23272](https://github.com/stablyai/orca/issues/23272) (CLI
+parity with herdr for move/swap/resize/reorder) and commented on #9632, #12306
+and #8766. Run `bin/orca-reorg-watch` periodically (exit 10 = something moved:
+an issue/PR changed state or comment count, or the installed `orca` gained a
+verb). When it fires: read the change, re-probe `orca terminal --help`, update
+`skills/reorg-orca/SKILL.md` §3/§4 (move gaps from "cannot" to "can"), and
+refresh the gap list in [upstream-issues.md](upstream-issues.md) §3. Gate to
+watch first: PR #15108 (`orca terminal move`). Drop this item when the verbs
+in the skill's §4 table have shipped or upstream declines them.
+
 ## Quota-aware automatic cross-vendor subagent routing
 
 **Queued 2026-08-23. Not started.** Hindsight initiative page

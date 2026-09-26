@@ -135,16 +135,20 @@ source of truth.
 installed `herdr` CLI):
 
 1. `terminal move` across worktrees: PR #15108 open, unmerged (herdr: `pane move --tab`).
-2. Move a pane/tab into a split or another tab in the same workspace (herdr: `pane move --tab --split`); #12083 covers it as a GUI command only.
-3. Swap panes (herdr: `pane swap`): no issue existed.
+2. Move a pane/tab into a split or another tab in the same workspace (herdr: `pane move --tab --split`); #12083 and #10055 cover it as a command/shortcut only.
+3. Swap panes (herdr: `pane swap`): no issue anywhere in the full corpus.
 4. Resize an existing split (herdr: `pane resize`): #15771 is creation-time only; no issue for post-hoc.
-5. Layout introspection (herdr: `pane layout`): no issue existed.
+5. Split ratios missing from `terminal list --include-visual-layouts` output (needed to plan a resize): no issue.
 6. Reorder tabs / worktrees: #20515, #12306.
-7. `repo rm`: #22433. Project-group CLI: #8766.
+7. `repo rm`: #22433. Project-group CLI: #8766. Declarative layout: #1499 / PR #1548.
 
-**Retraction:** an earlier answer said Orca had no project rename. Wrong:
-`orca project setup-update --display-name` renames it. Older issues (before
-~#10900) were checked by title-biased search only.
+**Retractions:** (1) an earlier answer said Orca had no project rename; wrong,
+`orca project setup-update --display-name` renames it. (2) The umbrella's first
+draft said there was no layout introspection; wrong, `orca terminal list
+--include-visual-layouts --json` returns the group/tab/pane tree (split
+direction, no ratios). Corrected in #23272's body and a comment. The gap
+search now covers the title and body of all ~23,000 issues and PRs, not just a
+partial window.
 
 ## 4. orca — evidence for #22571 "Expose worktree sleep as a CLI command" (draft comment, 2026-09-26)
 

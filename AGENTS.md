@@ -84,6 +84,12 @@ altitudes compose (a macro node can run a micro graph as its body).
   canonical source of the gmail-search skill: the Hermes-built local
   Gmail FTS5 index (~192k messages, ~100ms queries), searched via CLI,
   not MCP (live copy at `~/.claude/skills/gmail-search/`).
+- [skills/reorg-orca/SKILL.md](skills/reorg-orca/SKILL.md) —
+  herdr-style reorganization of Orca workspaces from the CLI: snapshot,
+  numbered plan, apply only verbs Orca has, and name the moves it can't do
+  yet (terminal move, swap, resize, reorder, `repo rm`; umbrella
+  stablyai/orca#23272). Re-probe with `bin/orca-reorg-watch --show`. Live
+  copy at `~/.claude/skills/reorg-orca/`.
 - [vendor/README.md](vendor/README.md) — sidecar index of everything this
   repo references that lives elsewhere on the system: vendored copies
   (prepaid gate scripts, a dated Orca orchestration guide snapshot) and
