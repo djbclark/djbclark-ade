@@ -151,7 +151,10 @@ SERVICES: tuple[Service, ...] = (
             {"bulk": 2, "mechanical": 1, "code": 35},
             "free", "kimi/minimax/qwen catalogs"),
     Service("zai", "crush", {"bulk": 3, "mechanical": 3, "code": 38},
-            "subscription", "lite plan"),
+            "subscription",
+            # crush and zcode (Z.ai's own TUI, GLM-5.3 / GLM-5.3-Flash x
+            # low/high/max, `zcode -p`) both draw on this one Coding Plan pool.
+            "lite plan; reached via crush or zcode"),
     Service("devin", "devin", {"bulk": 20, "code": 45}, "subscription",
             "disabled in Orca's roster — dormant by choice"),
     Service("copilot", "copilot", {"github": 1, "code": 20}, "subscription",
@@ -250,6 +253,7 @@ DEFAULT_PROFILE = {"bulk": 60, "mechanical": 60}
 ALIASES = {
     "cline": "clinepass",
     "crush": "zai",
+    "zcode": "zai",
     "agy": "antigravity",
     "claude-agent-teams": "claude",
     "openclaude": "claude",

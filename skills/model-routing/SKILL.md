@@ -42,7 +42,7 @@ method, not the volatile numbers.
 - **Monthly subscription windows**: claude (5h/weekly/+Fable bucket),
   codex (ChatGPT Plus weekly), antigravity/agy (Google AI Pro — also
   exposes Claude/GPT windows), copilot (premium requests), cursor Pro,
-  grok (SuperGrok), zai GLM lite (via the crush TUI), clinepass (Cline windows; feeds
+  grok (SuperGrok), zai GLM lite (via the crush or zcode TUI — one pool), clinepass (Cline windows; feeds
   Hindsight+hermes via LiteLLM :4000), devin (disabled in Orca on
   purpose).
 - **Free**: opencode-go bundled models; sipb (MIT-hosted, `opencode`

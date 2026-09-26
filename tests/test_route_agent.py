@@ -130,7 +130,7 @@ class TestDiscovery(unittest.TestCase):
     def test_aliases_do_not_become_second_services(self):
         """`cline` is clinepass's TUI; a duplicate entry would dodge never-bulk."""
         names = {s.name for s in r.discover(IDLE)}
-        for alias in ("cline", "crush", "claude-agent-teams"):
+        for alias in ("cline", "crush", "zcode", "claude-agent-teams"):
             self.assertNotIn(alias, names)
 
     def test_alias_does_not_create_a_second_clinepass(self):
