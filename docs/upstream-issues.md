@@ -145,3 +145,74 @@ installed `herdr` CLI):
 **Retraction:** an earlier answer said Orca had no project rename. Wrong:
 `orca project setup-update --display-name` renames it. Older issues (before
 ~#10900) were checked by title-biased search only.
+
+## 4. orca — evidence for #22571 "Expose worktree sleep as a CLI command" (draft comment, 2026-09-26)
+
+**Not a new issue.** [stablyai/orca#22571](https://github.com/stablyai/orca/issues/22571)
+(opened 2026-09-23) already asks for exactly this and names the runtime
+methods. Add evidence as a comment instead of a duplicate:
+
+> Adding a data point and a related ask.
+>
+> **Why the CLI matters beyond housekeeping scripts.** On a 16 GB Mac
+> (Orca 1.4.2xx, macOS 27) I had 15 idle `claude` processes summing to
+> 2.0 GB RSS with 6.5 of 8 GB swap in use. Agent hibernation was already on
+> (2 h window) — but it can only see Orca's own terminals, and 14 of those
+> 15 agents were running in another multiplexer. I ended up writing an
+> external policy (transcript-mtime idle clock → `/exit` → later
+> `claude --resume <id>`). A `orca worktree sleep` / `orca worktree wake`
+> pair would let that same policy cover Orca worktrees without
+> reimplementing hibernation's eligibility rules outside Orca.
+>
+> **Smaller related ask:** expose the hibernation clock. `orca terminal
+> list --json` / `worktree show --json` could carry `idleSince` (or
+> `lastAgentDoneAt`) per terminal, which is what an external policy needs
+> to decide *whether* to sleep. Today the only way to get it from outside
+> is the agent's transcript mtime.
+>
+> Also: #3693 ("Auto-Sleep inactive workspaces") looks fully answered by
+> the shipped Agent hibernation setting and could be closed with a link to
+> the docs page.
+
+## 5. herdr — Discussion: sleep/wake for idle resumable agents (draft, 2026-09-26)
+
+**Repo:** `herdrdev/herdr` (Rust, Apache-2.0). Per its `CONTRIBUTING.md`
+unsolicited PRs are auto-closed and feature ideas go to **GitHub
+Discussions** — so this is a Discussion post, not an issue or PR.
+
+**Version seen:** `herdr 0.7.5-preview.2026-07-29-44b3adb12552`, macOS 27.
+
+> **Problem.** Every idle agent pane keeps a live model-CLI process. With
+> 14 Claude panes idle for 5–6 h I measured 2.0 GB RSS of `claude` on a
+> 16 GB machine already deep into swap. Herdr already has the two things a
+> sleeper needs — the native session reference per pane
+> (`agent_session.value`, from the official integration) and a way to start
+> an agent into an existing shell pane with forwarded args — so I built the
+> policy outside Herdr: after 12 h idle, submit `/exit`, keep the pane,
+> print a wake hint into it, prefix the label with 💤; wake with
+> `herdr agent start <name> --kind claude --pane <id> -- <orig argv>
+> --resume <uuid>`. Verified round-trip: same session id, prior context
+> intact.
+>
+> **What was missing / would make this native:**
+>
+> 1. **A timestamp on agent state.** `agent list` exposes only
+>    `state_change_seq`. A `state_changed_at` (ms since epoch) on
+>    `agent.list` / `agent.get` / `pane.get` would let any external policy
+>    compute idle time without reading the agent's transcript mtime
+>    (which is what I do now — Claude-only, and fragile).
+> 2. **`herdr agent sleep <target>` / `herdr agent wake <target>`.** The
+>    restore path already builds an `AgentResumePlan` from the stored
+>    session ref (`src/app/agent_resume.rs`) and `[session]
+>    resume_agents_on_restore` relaunches with resume flags after a server
+>    restart. Exposing that same plan on demand — stop the process, keep
+>    the pane and its session ref, relaunch later — would be a small
+>    surface over existing machinery, and would work for every
+>    integration that reports session refs, not just Claude.
+> 3. **Optional policy:** `[session] sleep_idle_after = "12h"` (off by
+>    default), using the same eligibility Orca's hibernation uses: state
+>    `done`/`idle`, pane not focused, no keystrokes since, session ref
+>    present, no other pane sharing the session.
+>
+> Happy to share the external script as a reference for the semantics; not
+> asking to submit a PR.

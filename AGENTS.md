@@ -48,6 +48,11 @@ altitudes compose (a macro node can run a micro graph as its body).
   no trigger, no merge gate, Ralph dormant), OpenHands and twenty
   alternatives checked against live docs, GitHub's auto-merge 422
   regression, a recommendation, and a coder-agnostic prompt to run it.
+- [docs/agent-sleep.md](docs/agent-sleep.md) — idle agents eating RAM:
+  Orca's built-in Agent hibernation (GUI-only, how to use it), and
+  `bin/herdr-sleeper`, which gives Herdr panes the same sleep/`--resume`
+  wake policy on a 12 h window via launchd. Check `herdr-sleeper list`
+  before assuming a Herdr pane with a bare shell is dead.
 - [docs/upstream-issues.md](docs/upstream-issues.md) — filed-nowhere-yet
   bug drafts for third-party projects (graft statusline, hindsight config
   docs), written from problems verified here.
