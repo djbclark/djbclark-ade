@@ -29,8 +29,10 @@ usage: cow-pasture create <name> --source <repo> [--branch <b>] [--orca]
                           [--no-trust] [--keep-secrets] [--dry-run]
        cow-pasture remove <name> [--force]
        cow-pasture scrub <pasture-path> [--dry-run]
+       cow-pasture trust <pasture-path>
 
 create: cow create --print-path, then scrub gitignored secrets.
+trust : pre-trust an existing pasture for Claude Code (create does this by default).
 scrub : delete gitignored files matching SECRET_PATTERNS inside <pasture-path>.
 remove: drop graft cache, chflags -R nouchg, cow remove, unregister from Orca.
 EOF
@@ -193,6 +195,10 @@ case "$cmd" in
       fi
     fi
     printf '%s\n' "$path"
+    ;;
+  trust)
+    p=${1:-}; [ -d "$p" ] || usage
+    trust_claude "$p"
     ;;
   scrub)
     p=${1:-}; [ -d "$p" ] || usage; shift; dry=0
