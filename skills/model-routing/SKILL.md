@@ -24,10 +24,13 @@ method, not the volatile numbers.
 
 ## Probes (always prefer these over any cached snapshot)
 
-- `aiuse --json` — authoritative cross-service usage (operator's own
-  tool, github.com/djbclark/aiuse; takes ~1 min; JSON starts after two
-  preamble lines; `snapshot.accounts[]` has provider/plan/windows/
-  balances). Ignore its `kind:"conserve"` pace alerts for go/no-go calls.
+- `aiuse --json 2>/dev/null` — authoritative cross-service usage
+  (operator's own tool, github.com/djbclark/aiuse; takes ~1 min). **Stdout
+  is the JSON document from line 1** (verified 2026-09-26); the preamble
+  goes to stderr, so `tail -n +3` now eats the opening brace — parse stdout
+  as-is, or `sed -n '/^{/,$p'` if unsure. `snapshot.accounts[].windows[]`
+  carries `label`, `used_percent`, `remaining_percent`, `resets_at`. Ignore
+  its `kind:"conserve"` pace alerts for go/no-go calls.
 - `cswap list` — Claude accounts + 5h/weekly/Fable windows.
 - `codex login status`; `opencode models`; `bl quota list`;
   `curl -s localhost:4000/v1/models` (LiteLLM/ClinePass);
@@ -72,7 +75,16 @@ TUI with `&` inherits the harness's stdin and codex blocks on it forever.
 | --- | --- | --- |
 | codex (GPT-6 Astra default) | `codex exec -s read-only -C <dir> "<prompt>" < /dev/null > out 2>&1` | without `< /dev/null`: prints `Reading additional input from stdin...` and hangs with no timeout. |
 | agy (Antigravity) | `agy --dangerously-skip-permissions -p "<prompt>" < /dev/null > out 2>&1` — **flag before `-p`**; `-p` swallows the next argument as the prompt. | `agy -p` alone: exits 0 with a one-line "permission auto-denied" note and no review. `agy -p --dangerously-skip-permissions "…"`: exits 2, prompt ignored. |
-| copilot | `copilot -p "<prompt>" --allow-all-tools --allow-all-paths --silent < /dev/null > out 2>&1` | fine as-is. |
+| copilot | `copilot -p "<prompt>" --model auto --allow-all-tools --allow-all-paths --silent < /dev/null > out 2>&1` | fine as-is. **Do not add `--reasoning-effort` with `--model auto`**: exits 1, `Model "auto" does not support reasoning effort configuration` (2026-09-26). Name a concrete model if you want an effort level. |
+| opencode (free Go bundle) | `opencode run -m opencode-go/<model> "<prompt>" < /dev/null > out 2>&1` — e.g. `opencode-go/deepseek-v4-pro`, `opencode-go/gpt-6-luna`, `opencode-go/kimi-k3` (all answered 2026-09-26; `opencode models \| grep ^opencode-go/` lists 33). | **`opencode/<model>` is the prepaid Zen catalogue, not Go**: every `opencode/*` model except `big-pickle` fails with `Upstream request failed: Insufficient account funds`. `big-pickle` answers but on a review prompt spent its run trying to install pytest and returned nothing — steer it with "do not run tests or install anything". **Side effect:** every `opencode run` rewrites `./opencode.json` in the cwd (adds a `$schema` key) — `git checkout -- opencode.json` afterwards in repos that track it. |
+| cursor-agent | `cursor-agent -p --trust --output-format text "<prompt>" < /dev/null > out 2>&1` | without `--trust` (or `--yolo`/`-f`) in a directory Cursor hasn't trusted: exits 1 with a "Workspace Trust Required" prompt and no review. |
+
+Where DeepSeek lives on this machine (probed 2026-09-26): free —
+`opencode-go/deepseek-v4-pro` / `-v4-flash` / `-v4.1-flash` (Go bundle)
+and `sipb/deepseek-r1:{8b,14b,32b}` (MIT-hosted); paid/exhausted —
+`opencode/deepseek-*` (Zen prepaid, balance empty), `clinepass-deepseek`
+via LiteLLM :4000 (ClinePass weekly at 100%), the `deepseek` prepaid
+account (100% used). z.ai serves GLM, not DeepSeek.
 
 Rules that fall out of this:
 
@@ -83,6 +95,24 @@ Rules that fall out of this:
   agy left an empty `graft/` directory in the repo on one run.
 - One background Bash call per batch with a long timeout, never chained
   `sleep`s; read each output file when the batch notification arrives.
+- A reviewer that returns exit 0 with no findings is a failed run, not a
+  clean bill: check the file has an actual review before counting it.
+- Run reviewers against a stable tree: don't edit the file under review
+  while they read it. For a second round after fixes, tell them what the
+  first round found and fixed, so they verify rather than repeat.
+
+Herdr-hosted TUIs (driving agents in Herdr panes; verified 2026-09-26):
+
+- `herdr workspace create` returns before the pane's shell is up;
+  `herdr agent start` a moment later fails `agent_pane_busy: … is not an
+  available shell`. Poll `herdr pane read <pane>` for a shell prompt (`$`)
+  first — ~2 s.
+- Key names are `ctrl+c`, `enter`, `esc` (`ctrl-c` → `invalid_key`).
+- `herdr pane read` prints plain text; every other command prints one JSON
+  envelope, `{"error":…}` **with exit 0** on failure — parse the envelope.
+- `herdr agent prompt <target> "/exit"` cleanly ends a Claude session and
+  returns the pane to its shell; `bin/herdr-sleeper` in djbclark-ade
+  builds on this (see docs/agent-sleep.md).
 
 ## Routing method
 
