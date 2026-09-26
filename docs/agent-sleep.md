@@ -64,51 +64,88 @@ from Claude's transcript mtime instead.
 
 | command | does |
 |---|---|
-| `herdr-sleeper scan [--dry-run] [--only PANE…] [--exclude …]` | sleep every eligible agent; dry-run prints each pane's verdict and reason |
-| `herdr-sleeper wake <name\|pane> \| --all` | `herdr agent start … -- <orig argv> --resume <uuid>` |
-| `herdr-sleeper list` | journal of sleeping panes |
-| `herdr-sleeper log [-n N]` | what was slept / woken / refused, newest last (`events.jsonl`) |
+| `herdr-sleeper scan [--idle 12h] [--dry-run] [--only PANE…] [--exclude …] [--json]` | sleep every eligible agent; dry-run runs every check (composer included) and acts on nothing |
+| `herdr-sleeper wake <name\|pane> \| --all` | `herdr agent start … -- <orig argv> --resume <uuid>`; falls back to the `panes.json` snapshot if the journal was lost |
+| `herdr-sleeper list` | journal of sleeping panes with phase (`asleep`, `exit-requested`, `recovered`) |
+| `herdr-sleeper log [-n N]` | slept / woke / refused / reconciled, newest last (`events.jsonl`) |
 | `herdr-sleeper config` | effective settings and where each came from |
-| `herdr-sleeper install` / `uninstall` | launchd job `dev.herdr.sleeper` generated from the config (cron line on non-macOS) |
+| `herdr-sleeper install [--interval-minutes M]` / `uninstall` | launchd job `dev.herdr.sleeper` generated from the config (cron line on non-macOS) |
 
-Config precedence: defaults → `~/.config/herdr-sleeper/config.toml` →
-`HERDR_SLEEPER_IDLE_HOURS` / `_EXCLUDE` / `_INTERVAL_MINUTES` → CLI flags.
-This machine (2026-09-26): `idle_hours = 12`, `exclude = ["orc",
-"orc-meta"]` (Herdr orchestrators idle at the prompt by design),
-`interval_minutes = 30`, installed via `herdr-sleeper install`. State and
-logs in `~/.local/state/herdr-sleeper/` (`sleeping.json` journal,
-`panes.json` crash-recovery snapshot, `events.jsonl`, `sleeper.log`).
+**The idle window is the user's choice**, not a property of the tool:
+`idle = "12h"` / `"90m"` / `"1d"` or `idle_hours = 12` in
+`~/.config/herdr-sleeper/config.toml`, `HERDR_SLEEPER_IDLE`, or `--idle`
+per run (precedence: defaults → config → env → CLI). The shipped default
+is 12 h. This operator uses 12 h with `exclude = ["orc", "orc-meta"]`
+(Herdr orchestrators idle at the prompt by design), scanning every 30 min.
+State and logs: `~/.local/state/herdr-sleeper/` (`sleeping.json` journal,
+`panes.json` crash-recovery snapshot, `events.jsonl`, `sleeper.log`,
+`lock`).
 
-Mechanics, verified 2026-09-26 on a throwaway workspace: `/exit` returns
-the pane to its shell in ~1 s and the PID dies; wake restores the **same
-UUID** and the agent answered a question about pre-sleep context correctly.
-The pane is kept (it is the restart slot — `herdr agent start` needs a pane
-at a shell prompt), terminal modes are reset, a `💤 … wake: herdr-sleeper
-wake <name>` line is printed into it, and the sidebar label gets a `💤`
-prefix until wake.
+Mechanics, verified 2026-09-26 on throwaway workspaces (three rounds):
+`/exit` returns the pane to its shell in ~1 s and the PID dies; wake
+restores the **same UUID** and the agent answered a question about
+pre-sleep context correctly; a draft in the composer is refused; a lost
+journal is recovered from the snapshot; `--json` stdout is one document.
+The pane is kept (it is the restart slot — `herdr agent start` needs a
+pane at a shell prompt), terminal modes are reset, a `💤 … wake:
+herdr-sleeper wake <name>` line is printed into it, and the sidebar label
+gets a `💤` prefix until wake.
 
-Eligibility and failure handling were taken from Orca's hibernation
-implementation and its bug history (#22657, #16279, #15625, #18731):
+### Safety rules, and where each came from
 
-1. kind `claude`; status `idle`/`done`; pane not focused; not excluded; has
-   a session UUID *and* an on-disk transcript; UUID not open in another
-   pane; transcript mtime older than the window; no draft in the composer.
-2. Everything re-checked immediately before `/exit` (the scan is minutes
-   old by then), including that `state_change_seq` has not moved.
-3. Record written before `/exit`, rolled back if the process survives.
-4. Wake refuses if the UUID is live in any pane or `claude` process (fork
-   risk) or the transcript is gone; a record is never deleted because its
-   pane vanished — the manual resume command is printed instead.
-5. Every scan snapshots pane→UUID→argv, so `wake` works after a crash that
-   lost the journal (exercised: it did).
+The first version was reviewed by four models (codex/GPT-6 Astra xhigh,
+Antigravity/Gemini 3.1 Pro high, Copilot, and — after fixing the
+invocation — opencode-go/DeepSeek V4 Pro and cursor-agent). Two rounds of
+findings, all adopted except two that a CLI-driven tool cannot fix (see
+below); the rest of the rules come from Orca's hibernation implementation
+and its bug history (#22657, #16279, #15625, #18731).
 
-Known limits: Claude only (the idle clock is Claude's transcript); a
-`blocked` pane is skipped by status, but a permission prompt that Herdr's
-screen detection misses would look idle by mtime — the draft check and
-`state_change_seq` recheck are the backstops.
+1. **Eligibility (all must hold):** kind `claude`; Herdr status `idle` or
+   `done`; pane not focused; not excluded; has a session UUID *and* an
+   on-disk transcript (newest copy wins when several match — a stale copy
+   can never make a busy session look idle); UUID not open in another
+   pane; transcript mtime older than the window; composer *positively*
+   empty (a draft, an unreadable screen, a missing prompt glyph, or
+   nothing rendered under the glyph all refuse); original argv safely
+   replayable (`--fork-session`, `--print`, `--session-id`, a positional
+   prompt or anything after `--` refuse).
+2. **Act on live state:** everything is re-checked immediately before
+   `/exit`, including that `state_change_seq` and the session UUID have
+   not moved since the scan.
+3. **Never lose the handle:** the journal entry is written before `/exit`;
+   if the agent is still there after the wait it stays as
+   `exit-requested` and the next scan reconciles it (dropped only if the
+   process is really present; `asleep` if it left). A record is never
+   deleted because its pane vanished — the manual resume command is
+   printed. Every scan merges pane→UUID→argv into `panes.json`; `wake`
+   recovers from it and persists the recovered entry *before* trying.
+4. **Never fork a session:** wake refuses if the UUID is live in any pane
+   or any real `claude` process (`--resume <id>` or `--resume=<id>`,
+   direct or node-launched), and refuses when that cannot be verified
+   (Herdr or `ps` failing). Snapshot-recovered argv goes through the same
+   replay filter as journaled argv.
+5. **Fail closed on state and config:** a state file whose root is not a
+   JSON object aborts; malformed TOML, unknown keys, string-vs-list
+   confusion, `nan`/negative/`inf` windows (config, env *and* CLI) abort
+   `scan`/`install` while `wake`/`list`/`log` keep working. A file lock
+   serialises overlapping runs (launchd + manual) and the journal is
+   re-read under it before every write.
+6. **Install faithfully:** the launchd plist is built with `plistlib`
+   (paths with `&`/`<` stay valid), runs the same interpreter, and carries
+   the `HERDR_SLEEPER_*`/`XDG_CONFIG_HOME` env present at install time; the
+   cron fallback prefixes the same env and refuses intervals cron cannot
+   express exactly.
+
+**Known limits, deliberately not "fixed":** (a) there is still a window
+between the final recheck and Claude consuming `/exit` — only a native
+Herdr operation could close it, which is the Discussion ask upstream;
+(b) Claude only, because the idle clock is Claude's transcript — other
+agents with session refs need their own idle signal (or a Herdr
+timestamp).
 
 Cost to know: `claude --resume` replays the transcript, so each wake is a
-full prompt-cache write — hence 12 h, not 30 min.
+full prompt-cache write — the reason for a long window rather than
+minutes.
 
 ## Upstream
 

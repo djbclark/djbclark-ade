@@ -160,17 +160,18 @@ methods. Add evidence as a comment instead of a duplicate:
 >
 > **Why the CLI matters beyond housekeeping scripts.** On a 16 GB Mac
 > (Orca 1.4.2xx, macOS 27) I had 15 idle `claude` processes summing to
-> 2.0 GB RSS with 6.5 of 8 GB swap in use. Agent hibernation was already on
-> (2 h window) — but it can only see Orca's own terminals, and 14 of those
-> 15 agents were running in another multiplexer. I ended up writing an
-> external policy (transcript-mtime idle clock → `/exit` → later
-> `claude --resume <id>`). A `orca worktree sleep` / `orca worktree wake`
-> pair would let that same policy cover Orca worktrees without
-> reimplementing hibernation's eligibility rules outside Orca.
+> 2.0 GB RSS with 6.5 of 8 GB swap in use. Agent hibernation was already
+> on — but it can only see Orca's own terminals, and 14 of those 15 agents
+> were running in another multiplexer. I ended up writing an external
+> policy for that side (transcript-mtime idle clock → `/exit` → later
+> `claude --resume <id>`, with Orca's hibernation eligibility rules
+> re-implemented on top). A `orca worktree sleep` / `orca worktree wake`
+> pair would let one such policy cover Orca worktrees too, instead of
+> re-implementing hibernation outside Orca.
 >
 > **Smaller related ask:** expose the hibernation clock. `orca terminal
 > list --json` / `worktree show --json` could carry `idleSince` (or
-> `lastAgentDoneAt`) per terminal, which is what an external policy needs
+> `lastAgentDoneAt`) per terminal — that is what an external policy needs
 > to decide *whether* to sleep. Today the only way to get it from outside
 > is the agent's transcript mtime.
 >
@@ -186,47 +187,56 @@ Discussions** — so this is a Discussion post, not an issue or PR.
 
 **Version seen:** `herdr 0.7.5-preview.2026-07-29-44b3adb12552`, macOS 27.
 
+> **Title:** Sleep/wake for idle resumable agents (a reference implementation, and three small things that would make it native)
+>
 > **Problem.** Every idle agent pane keeps a live model-CLI process. With
 > 14 Claude panes idle for 5–6 h I measured 2.0 GB RSS of `claude` on a
-> 16 GB machine already deep into swap. Herdr already has the two things a
-> sleeper needs — the native session reference per pane
-> (`agent_session.value`, from the official integration) and a way to start
-> an agent into an existing shell pane with forwarded args — so I built the
-> policy outside Herdr: after 12 h idle, submit `/exit`, keep the pane,
-> print a wake hint into it, prefix the label with 💤; wake with
-> `herdr agent start <name> --kind claude --pane <id> -- <orig argv>
-> --resume <uuid>`. Verified round-trip: same session id, prior context
-> intact.
+> 16 GB machine already deep into swap. Orca solves this for its own
+> terminals with "Agent hibernation"; Herdr has nothing equivalent.
 >
-> **What was missing / would make this native:**
+> **What Herdr already has.** The two things a sleeper needs: the native
+> session reference per pane (`agent_session.value`, from the official
+> integration) and a way to start an agent into an existing shell pane
+> with forwarded args. So I built the policy outside Herdr, on the public
+> CLI: after a user-chosen idle window (`idle = "12h"`, `"90m"`, …) it
+> submits `/exit`, keeps the pane, prints a wake hint into it, prefixes the
+> label with 💤; `wake` runs `herdr agent start <name> --kind claude --pane
+> <id> -- <orig argv> --resume <uuid>`. Verified round-trip: same session
+> id, prior context intact. It fails closed on drafts in the composer,
+> unreplayable argv (`--fork-session`, positional prompts), session forks
+> (id live elsewhere), damaged state and config, and overlapping runs.
+>
+> Reference implementation (script, 51 tests, README — usable as-is, no
+> changes to Herdr):
+> https://github.com/djbclark/herdr/tree/herdr-sleeper/scripts/herdr-sleeper
+>
+> **What would make this native, smallest first:**
 >
 > 1. **A timestamp on agent state.** `agent list` exposes only
 >    `state_change_seq`. A `state_changed_at` (ms since epoch) on
 >    `agent.list` / `agent.get` / `pane.get` would let any external policy
->    compute idle time without reading the agent's transcript mtime
->    (which is what I do now — Claude-only, and fragile).
+>    compute idle time without reading the agent's transcript mtime —
+>    which is what I do now, and it is why the script is Claude-only.
 > 2. **`herdr agent sleep <target>` / `herdr agent wake <target>`.** The
 >    restore path already builds an `AgentResumePlan` from the stored
->    session ref (`src/app/agent_resume.rs`) and `[session]
+>    session ref (`src/agent_resume.rs`) and `[session]
 >    resume_agents_on_restore` relaunches with resume flags after a server
->    restart. Exposing that same plan on demand — stop the process, keep
->    the pane and its session ref, relaunch later — would be a small
->    surface over existing machinery, and would work for every
->    integration that reports session refs, not just Claude.
->    One thing to carry over from the pane's live process when doing so:
->    the original argv. `agent_resume::plan()` builds the restore command
->    from `(source, agent, session_ref)` alone — `["claude", "--resume",
->    <id>]` — so a pane launched as `claude --dangerously-skip-permissions`
->    (or with `--model`, `--add-dir`, …) comes back after a server restart
+>    restart. Exposing that plan on demand — stop the process, keep the
+>    pane and its session ref, relaunch later — would be a small surface
+>    over existing machinery, work for every integration that reports
+>    session refs, and close the one race an external tool cannot: the gap
+>    between its last eligibility check and the agent consuming `/exit`.
+>    One thing to carry over from the live process when doing so: the
+>    original argv. `agent_resume::plan()` builds the restore command from
+>    `(source, agent, session_ref)` alone — `["claude", "--resume", <id>]`
+>    — so a pane launched as `claude --dangerously-skip-permissions` (or
+>    with `--model`, `--add-dir`, …) comes back after a server restart
 >    without those flags. `pane.process_info` already exposes the running
->    argv; persisting it next to the session ref would fix both restore and
->    an on-demand wake.
+>    argv; persisting it next to the session ref would fix both restore
+>    and an on-demand wake.
 > 3. **Optional policy:** `[session] sleep_idle_after = "12h"` (off by
->    default), using the same eligibility Orca's hibernation uses: state
+>    default), with the eligibility Orca's hibernation uses: state
 >    `done`/`idle`, pane not focused, no keystrokes since, session ref
 >    present, no other pane sharing the session.
 >
-> Reference implementation (script, tests, README — usable as-is, no
-> changes to Herdr):
-> https://github.com/djbclark/herdr/tree/herdr-sleeper/scripts/herdr-sleeper
-> Sharing it for the semantics; not asking to submit a PR.
+> Sharing the script for the semantics; not asking to submit a PR.
