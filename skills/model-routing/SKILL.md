@@ -232,6 +232,9 @@ Herdr-hosted TUIs (driving agents in Herdr panes; verified 2026-09-26):
    that TUI's pool instead. Claude gets the same care:
    use it, but orchestration runs from it, so an empty Claude window stops
    every other agent too. Detail: the `bigteam` skill's *Reserve pools*.
+   **Copilot** is a lighter case: it shares a subscription with GitHub-side
+   Copilot features (code review on `master`), so spend it modestly, small
+   slices, GitHub-shaped work only; much less caution than grok.
    Never prepaid without an explicit fresh operator decision.
 4. Levers: `acp-run <agent> --model <m> [--mode <m>]` for one-shot calls
    to ACP-capable agents (`--info` lists the values); Claude workflows
