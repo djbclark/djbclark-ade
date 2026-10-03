@@ -22,7 +22,7 @@ The canonical, dated matrix lives at
 djbclark/djbclark-ade). Read it first; this skill carries the stable
 method, not the volatile numbers.
 
-## Probes (always prefer these over any cached snapshot)
+## Probes (prefer these over a hand-kept snapshot; aiuse's own cache is fine while fresh)
 
 - `aiuse --json 2>/dev/null` — authoritative cross-service usage
   (operator's own tool, github.com/djbclark/aiuse; takes ~1 min). **Stdout
@@ -30,7 +30,20 @@ method, not the volatile numbers.
   goes to stderr, so `tail -n +3` now eats the opening brace — parse stdout
   as-is, or `sed -n '/^{/,$p'` if unsure. `snapshot.accounts[].windows[]`
   carries `label`, `used_percent`, `remaining_percent`, `resets_at`. Ignore
-  its `kind:"conserve"` pace alerts for go/no-go calls.
+  its `kind:"conserve"` pace alerts for go/no-go calls. **Read it with the
+  rules in *Reading quota numbers* below.**
+  **Fast path: `~/ops/site-private/bin/aiuse-pools`** prints every window as
+  "X% USED / Y% LEFT" (so it cannot be misread) plus the age of the data, from the
+  newest cached snapshot in 0.4 s instead of the ~30-60 s live collect. The cache
+  is `~/.cache/aiuse/snapshots/latest.json` (flat shape: `.accounts[]`, no
+  `.snapshot` envelope; `completed_at` gives its age). It stays fresh because the
+  operator often runs `aiuse watch` (a refresh every 10-20 min, each one written
+  to history) and a launchd job snapshots hourly. `aiuse-pools` exits 3 when the
+  data is older than 25 min, incomplete, or had collector failures; then run
+  `aiuse-pools --live`. A cached read is fine for classifying pools; it cannot see
+  a pool drained in the last few minutes, so still preflight each target (item 5
+  below). `aiuse serve` is not running here (port 8787 belongs to another
+  service), so do not rely on its HTTP API.
 - `cswap list` — Claude accounts + 5h/weekly/Fable windows.
 - `codex login status`; `opencode models`; `bl quota list`;
   `curl -s localhost:4000/v1/models` (LiteLLM/ClinePass);
@@ -39,6 +52,31 @@ method, not the volatile numbers.
   `~/Library/Application Support/orca/profiles/local-default/orca-data.json`
   → `settings.agentDefaultArgs` / `disabledTuiAgents`. Nearly every TUI
   is configured inside Orca; macro-graph dispatch reaches any enabled one.
+
+## Reading quota numbers (a misreading here already cost a dispatch round)
+
+1. **`used_percent` is the share CONSUMED; 100 means empty.** `remaining_percent`
+   is the headroom. Decide from `remaining_percent` and never quote a bare
+   percentage: write "100% used / 0% left". On 2026-10-03 `Codex 5-hour quota:
+   100` was read as "100% free" and a review was sent to an exhausted codex.
+2. **An account is usable only if every one of its windows has headroom.** The
+   fullest window binds: codex at 100% used on its 5-hour window is unusable for
+   ~5 hours even with its weekly window at 35% used.
+3. **One TUI can hold several independent pools, one per model family.** agy:
+   Gemini and Claude/GPT are separate pools (`agy models`); Claude: ordinary vs
+   Fable bucket; Cursor: Auto/included vs "other models". A 429 or
+   `RESOURCE_EXHAUSTED` describes the pool the chosen model draws on, not the
+   vendor. Retry on a model from the vendor's other pool before declaring the
+   vendor spent (agy: a `gemini-*` model when a `claude-*`/`gpt-*` one is
+   exhausted, and vice versa), and pick the model by which pool is fresh, not
+   only by which is strongest.
+4. **State moves within a session.** agy's Claude/GPT 5-hour window read 0% used
+   at probe time and was exhausted ~35 minutes later after one Opus-high review.
+   Re-probe before each batch.
+5. **Preflight** each target with one trivial call through the exact invocation
+   and model about to be used (`"Reply with exactly: OK"`); `usage limit`,
+   `RESOURCE_EXHAUSTED` or 429 means that pool is spent. Note the reset time the
+   error prints.
 
 ## Billing classes (2026-08-23 shape; membership drifts)
 
@@ -98,6 +136,16 @@ acp-run <agent> --info      # its models, modes and auth methods
   (generic form: `--set <config-id>=<value>`, ids from `--info`).
 - cline bills ClinePass and claude bills the orchestrator's own pool: see
   *Reserve pools* below before sending either bulk work.
+
+### Knowing when a delegated call finished
+
+Run each delegation (`acp-run ...` or a per-CLI form below) as a **foreground
+command in its own Bash call with `run_in_background: true`**, with no trailing
+`&`. The harness then re-invokes you when it exits. A shell-`&` job is not
+tracked and finishes silently (tested 2026-10-03); a wait loop built on
+`pgrep -f '<pattern>'` matches itself and never ends. ACP does not change this:
+`acp-run` is an ordinary command, and ACP only makes its exit code (0, 1, 124)
+and stop reason reliable. Full recipe: `bigteam` Step 4.
 
 ### Per-CLI headless forms (no ACP mode, or fallback)
 
