@@ -24,26 +24,26 @@ method, not the volatile numbers.
 
 ## Probes (prefer these over a hand-kept snapshot; aiuse's own cache is fine while fresh)
 
-- `aiuse --json 2>/dev/null` — authoritative cross-service usage
-  (operator's own tool, github.com/djbclark/aiuse; takes ~1 min). **Stdout
-  is the JSON document from line 1** (verified 2026-09-26); the preamble
-  goes to stderr, so `tail -n +3` now eats the opening brace — parse stdout
-  as-is, or `sed -n '/^{/,$p'` if unsure. `snapshot.accounts[].windows[]`
-  carries `label`, `used_percent`, `remaining_percent`, `resets_at`. Ignore
-  its `kind:"conserve"` pace alerts for go/no-go calls. **Read it with the
-  rules in *Reading quota numbers* below.**
-  **Fast path: `~/ops/site-private/bin/aiuse-pools`** prints every window as
-  "X% USED / Y% LEFT" (so it cannot be misread) plus the age of the data, from the
-  newest cached snapshot in 0.4 s instead of the ~30-60 s live collect. The cache
-  is `~/.cache/aiuse/snapshots/latest.json` (flat shape: `.accounts[]`, no
-  `.snapshot` envelope; `completed_at` gives its age). It stays fresh because the
-  operator often runs `aiuse watch` (a refresh every 10-20 min, each one written
-  to history) and a launchd job snapshots hourly. `aiuse-pools` exits 3 when the
-  data is older than 25 min, incomplete, or had collector failures; then run
-  `aiuse-pools --live`. A cached read is fine for classifying pools; it cannot see
-  a pool drained in the last few minutes, so still preflight each target (item 5
-  below). `aiuse serve` is not running here (port 8787 belongs to another
-  service), so do not rely on its HTTP API.
+- **`aiuse --available`** (aiuse 3.1.4+, github.com/djbclark/aiuse) — the routing
+  shortlist: only usable pools, one line per vendor AND model family, sorted by
+  headroom, every window as "X% used / Y% left". Reads the snapshot cache (<1 s,
+  age on the first line); `--live` forces a ~30-60 s collect; `--json` is the
+  machine form. Exit 0 = pools exist, **3 = nothing usable**, 1 = error. The
+  cache (`~/.cache/aiuse/snapshots/latest.json`) stays fresh because the operator
+  often runs `aiuse watch` and a launchd job snapshots hourly; treat it as good
+  while it says `fresh`, and still preflight each target (item 5 below), since no
+  snapshot sees a pool drained in the last few minutes. `aiuse serve` defaults to
+  port 28787 and is not running here.
+- `aiuse --json -q` — everything, including exhausted pools. Schema 1.1 is
+  self-describing: per window `state` (`exhausted` <=1% left, `tight` <15%, `ok`,
+  `unknown`), `headroom_percent`, and `pool_family` + `models_hint` on split
+  vendors; per account `usable_now`, `binding_window`, `available_at`,
+  `age_seconds`; top level `summary_lines`, `semantics`, `agent_notes`, `fresh`.
+  Ignore its `kind:"conserve"` pace alerts for go/no-go calls.
+- `aiuse note-exhausted <provider> [--family F] --resets-in 4h53m [--reason T]` —
+  after a 429 you actually saw, record it so the next agent skips that pool until
+  its reset (advisory, expires, shown as `source: agent-reported`).
+  `~/ops/site-private/bin/aiuse-pools` is a thin wrapper around `--available`.
 - `cswap list` — Claude accounts + 5h/weekly/Fable windows.
 - `codex login status`; `opencode models`; `bl quota list`;
   `curl -s localhost:4000/v1/models` (LiteLLM/ClinePass);
@@ -54,6 +54,9 @@ method, not the volatile numbers.
   is configured inside Orca; macro-graph dispatch reaches any enabled one.
 
 ## Reading quota numbers (a misreading here already cost a dispatch round)
+
+`aiuse --available` / `--json` now bake these rules into their output; use them for
+any raw number from another source.
 
 1. **`used_percent` is the share CONSUMED; 100 means empty.** `remaining_percent`
    is the headroom. Decide from `remaining_percent` and never quote a bare
