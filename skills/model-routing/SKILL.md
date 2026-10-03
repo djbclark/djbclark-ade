@@ -111,8 +111,10 @@ acp-run <agent> --info      # its models, modes and auth methods
 ```
 
 - **Agents** (`--list`): claude (via the `claude-agent-acp` adapter), codex
-  (via `codex-acp`), copilot, opencode, cursor, qwen, devin, cline, goose,
-  hermes. Which ones currently work end to end, and what the others need, is
+  (via `codex-acp`), copilot, opencode, cursor, qwen, devin, cline,
+  hermes, grok (`grok agent stdio`; a reserve pool, keep it small), agy
+  (Google's signed `agy_acp_server.par`; needs its own login before it works).
+  Which ones currently work end to end, and what the others need, is
   in `site-private/memory/feedback_prefer_acp_for_delegation.md`; check
   there, not here.
 - **Output:** final message on stdout; one summary line on stderr (stop
@@ -150,9 +152,11 @@ and stop reason reliable. Full recipe: `bigteam` Step 4.
 
 ### Per-CLI headless forms (no ACP mode, or fallback)
 
-agy, zcode, crush, muse and the grok TUI have no ACP server mode, so they
-keep these forms. The rows for ACP-capable CLIs stay as a fallback for when
+zcode, crush and muse have no usable ACP route yet, and agy's ACP server
+needs a login first, so they keep these forms. The rows for ACP-capable CLIs stay as a fallback for when
 an ACP route is broken.
+
+**Default permission mode: yolo or its equivalent, for every agent however launched** (standing rule 2026-10-03, `home-agents.md`). Gate only for a review-only slice or bigteam's `--perm scoped:` check, and say so. Use `-s read-only` on codex only for review-only calls; work slices use `--dangerously-bypass-approvals-and-sandbox`.
 
 **Authority for launch flags:** Orca's roster,
 `~/Library/Application Support/orca/profiles/local-default/orca-data.json`
@@ -176,7 +180,7 @@ TUI with `&` inherits the harness's stdin and codex blocks on it forever.
 | agy (Antigravity) | `agy --dangerously-skip-permissions -p='<prompt>' < /dev/null > out 2>&1` — **attach the prompt with `-p=`**, which is order-independent and cannot be confused with a flag. `-p`/`--print`/`--prompt` is a *required-value string flag*, not a boolean. | `agy -p` with no value: exits 2, `flag needs an argument: -p`. `agy -p --effort high` (value-less `-p` before another flag): **since 1.1.18 this is a clean exit 2** naming the mistake — *"-p took \"--effort\" as its prompt…"* — and before 1.1.18 it silently ran with `--effort` as the prompt. Verified on 1.2.16, 2026-10-03. Headless still needs `--dangerously-skip-permissions` or tool permissions auto-deny (by design, hardened in 1.2.15). |
 | copilot | `copilot -p "<prompt>" --model auto --allow-all-tools --allow-all-paths --silent < /dev/null > out 2>&1` | fine as-is. **Do not add `--reasoning-effort` with `--model auto`**: exits 1, `Model "auto" does not support reasoning effort configuration` (2026-09-26). Name a concrete model if you want an effort level. |
 | opencode (free Go bundle) | `opencode run -m opencode-go/<model> "<prompt>" < /dev/null > out 2>&1` — e.g. `opencode-go/deepseek-v4-pro`, `opencode-go/gpt-6-luna`, `opencode-go/kimi-k3` (all answered 2026-09-26; `opencode models \| grep ^opencode-go/` lists 33). | **`opencode/<model>` is the prepaid Zen catalogue, not Go**: every `opencode/*` model except `big-pickle` fails with `Upstream request failed: Insufficient account funds`. `big-pickle` answers but on a review prompt spent its run trying to install pytest and returned nothing — steer it with "do not run tests or install anything". **Side effect:** every `opencode run` rewrites `./opencode.json` in the cwd (adds a `$schema` key) — `git checkout -- opencode.json` afterwards in repos that track it. |
-| cursor-agent | `cursor-agent -p --trust --output-format text "<prompt>" < /dev/null > out 2>&1` | without `--trust` (or `--yolo`/`-f`) in a directory Cursor hasn't trusted: exits 1 with a "Workspace Trust Required" prompt and no review. |
+| cursor-agent | `cursor-agent -p --yolo --output-format text "<prompt>" < /dev/null > out 2>&1` | without `--trust` (or `--yolo`/`-f`) in a directory Cursor hasn't trusted: exits 1 with a "Workspace Trust Required" prompt and no review. |
 | zai (zcode) | `zcode -p "<prompt>" < /dev/null > out 2>&1` — `-p` already defaults to `--mode yolo`; `--attach <file>` works (verified 2026-09-30). Inlining the file into the prompt is equally fine. | **Never pass `--mode build` (or `--mode edit`) headless**: it gates every tool behind an approval no one can give, so the run hangs indefinitely — process alive, ~0 CPU, no `zcode-cli` worker doing work, zero output — until it's killed (seen 2026-09-30, `--mode build --attach`). The default yolo mode auto-approves. The `ZCode Built-in skipped (not-due)` lines on stderr are a benign memory-heartbeat, not an error. |
 
 Where DeepSeek lives on this machine (probed 2026-09-26): free —
