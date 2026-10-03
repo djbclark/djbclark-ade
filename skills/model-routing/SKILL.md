@@ -71,8 +71,9 @@ method, not the volatile numbers.
    exhausted, and vice versa), and pick the model by which pool is fresh, not
    only by which is strongest.
 4. **State moves within a session.** agy's Claude/GPT 5-hour window read 0% used
-   at probe time and was exhausted ~35 minutes later after one Opus-high review.
-   Re-probe before each batch.
+   at probe time and was exhausted ~35 minutes later (weekly 0% to ~51%), around
+   the time one Opus-high review ran on it; other sessions use agy too, so the
+   cause is inferred. Re-probe before each batch.
 5. **Preflight** each target with one trivial call through the exact invocation
    and model about to be used (`"Reply with exactly: OK"`); `usage limit`,
    `RESOURCE_EXHAUSTED` or 429 means that pool is spent. Note the reset time the
