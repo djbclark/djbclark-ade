@@ -93,6 +93,9 @@ acp-run <agent> --info      # its models, modes and auth methods
 - **Exit 0 is still not success.** An agent can end its turn normally with a
   provider error as its reply. Verify the outcome (tests, diff, a real
   review in the output) exactly as for the headless forms.
+- cline's ACP mode defaults to its paid `cline` provider and ignores the
+  TUI's ClinePass setting, so acp-run always sets `provider=cline-pass`
+  (generic form: `--set <config-id>=<value>`, ids from `--info`).
 - cline bills ClinePass and claude bills the orchestrator's own pool: see
   *Reserve pools* below before sending either bulk work.
 
