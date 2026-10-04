@@ -82,6 +82,47 @@ any raw number from another source.
    `RESOURCE_EXHAUSTED` or 429 means that pool is spent. Note the reset time the
    error prints.
 
+### agy has a burst limit that `aiuse` cannot see (incident 2026-10-03)
+
+**`aiuse` headroom does not mean agy can generate, and agy's two clients fail
+independently.** From 15:42 local on 2026-10-03 every `agy` **CLI** generation
+request (Gemini 3.8/3.7 Flash, 3.1 Pro, Claude Sonnet 5.5) got an instant
+`RESOURCE_EXHAUSTED (code 429)`, while `agy -p /usage` and `aiuse --json` showed
+Gemini 5h 100% left / weekly 71% left and Claude+GPT 5h 100% left / weekly 49%
+left. At 22:54, on the same account, `acp-run agy --model gemini-3.8-flash-medium`
+answered in 6.5 s. The CLI login (`~/.gemini/antigravity-cli`) was locked out,
+not the account; the ACP server (`agy_acp_server` 1.3.0, shadow GEMINI_HOME
+`~/.local/share/agy-acp-home`) is a separate client. A probe at 23:50 still got
+`attempt 1..5 failed (RESOURCE_EXHAUSTED` in 60 s, then `--print-timeout` cut it.
+
+**Likely cause (inferred, not published by Google): a per-client burst limit.**
+Between 12:00 and 14:59 the agy CLI made about **304 generation requests**; the
+busiest earlier hour had 68. One bigteam `claude-opus-5-5-high` review alone was
+47 requests, and two sessions looped skill-detection `agy -p` probes. Count
+**requests, not calls**: a tool-using agy turn is many requests. Treat roughly
+**60 requests/hour per CLI login** as the budget, i.e. about one review an hour.
+`aiuse`/CodexBar launching `agy -p /usage` every few minutes adds CLI launches
+but no generation requests.
+
+Rules for any agent that dispatches to agy:
+
+1. **Cap the calls.** No probe loops, no per-skill or per-TUI "do you see X"
+   loops. One probe, then reuse the answer. Sequential `agy -p` calls count the
+   same as concurrent ones against the hourly budget.
+2. **Always pass `--print-timeout`** (for example `--print-timeout 120s`). agy
+   retries a 429 in-process 8 times with backoff (~2m20s), so an exhausted CLI
+   looks like a hang. A log line `Run: attempt N failed (RESOURCE_EXHAUSTED` in
+   `~/.gemini/antigravity-cli/log/cli-*.log` is a **fast fail**: stop, do not
+   wait out the retries or retry the call.
+3. **Prefer `acp-run agy` over `agy -p`** for delegated work, and when one client
+   returns 429 while `aiuse` shows headroom, **try the other client** before
+   moving the slice to another vendor. Preflight the exact client you will use.
+4. **Send Opus-high work to agy sparingly.** The Claude/GPT pool is small (5h
+   window, ~35 minutes to drain on 2026-10-03). Prefer a `gemini-*` model for bulk
+   work, and spend `claude-*` on agy only where nothing else fits.
+5. A `--print-timeout` cut prints `[agy] print timeout ... returning partial
+   output` and **exits 0**; exit 0 is not success, read the output and the log.
+
 ## Billing classes (2026-08-23 shape; membership drifts)
 
 - **Monthly subscription windows**: claude (5h/weekly/+Fable bucket),
@@ -116,7 +157,8 @@ acp-run <agent> --info      # its models, modes and auth methods
 - **Agents** (`--list`): claude (via the `claude-agent-acp` adapter), codex
   (via `codex-acp`), copilot, opencode, cursor, qwen, devin, cline,
   hermes, grok (`grok agent stdio`; a reserve pool, keep it small), agy
-  (Google's signed `agy_acp_server.par`; needs its own login before it works).
+  (Google's signed `agy_acp_server.par`; verified 2026-10-03 22:54, 6.5 s; fails
+  independently of the `agy` CLI, see "agy has a burst limit" above).
   Which ones currently work end to end, and what the others need, is
   in `site-private/memory/feedback_prefer_acp_for_delegation.md`; check
   there, not here.
@@ -155,9 +197,10 @@ and stop reason reliable. Full recipe: `bigteam` Step 4.
 
 ### Per-CLI headless forms (no ACP mode, or fallback)
 
-zcode, crush and muse have no usable ACP route yet, and agy's ACP server
-needs a login first, so they keep these forms. The rows for ACP-capable CLIs stay as a fallback for when
-an ACP route is broken.
+zcode, crush and muse have no usable ACP route yet, so they keep these forms.
+The rows for ACP-capable CLIs stay as a fallback for when an ACP route is
+broken. **agy:** prefer `acp-run agy`; the `agy -p` form below is the fallback and
+is subject to the burst budget in "agy has a burst limit" above.
 
 **Default permission mode: yolo or its equivalent, for every agent however launched** (standing rule 2026-10-03, `home-agents.md`). Gate only for a review-only slice or bigteam's `--perm scoped:` check, and say so. Use `-s read-only` on codex only for review-only calls; work slices use `--dangerously-bypass-approvals-and-sandbox`.
 
@@ -180,7 +223,7 @@ TUI with `&` inherits the harness's stdin and codex blocks on it forever.
 | TUI | Verified headless form | Failure mode seen |
 | --- | --- | --- |
 | codex (GPT-6 Astra default) | `codex exec -s read-only -C <dir> "<prompt>" < /dev/null > out 2>&1` | without `< /dev/null`: prints `Reading additional input from stdin...` and hangs with no timeout. |
-| agy (Antigravity) | `agy --dangerously-skip-permissions -p='<prompt>' < /dev/null > out 2>&1` — **attach the prompt with `-p=`**, which is order-independent and cannot be confused with a flag. `-p`/`--print`/`--prompt` is a *required-value string flag*, not a boolean. | `agy -p` with no value: exits 2, `flag needs an argument: -p`. `agy -p --effort high` (value-less `-p` before another flag): **since 1.1.18 this is a clean exit 2** naming the mistake — *"-p took \"--effort\" as its prompt…"* — and before 1.1.18 it silently ran with `--effort` as the prompt. Verified on 1.2.16, 2026-10-03. Headless still needs `--dangerously-skip-permissions` or tool permissions auto-deny (by design, hardened in 1.2.15). |
+| agy (Antigravity) | `agy --dangerously-skip-permissions --print-timeout 120s -p='<prompt>' < /dev/null > out 2>&1` — **attach the prompt with `-p=`**, which is order-independent and cannot be confused with a flag. `-p`/`--print`/`--prompt` is a *required-value string flag*, not a boolean. | `agy -p` with no value: exits 2, `flag needs an argument: -p`. `agy -p --effort high` (value-less `-p` before another flag): **since 1.1.18 this is a clean exit 2** naming the mistake — *"-p took \"--effort\" as its prompt…"* — and before 1.1.18 it silently ran with `--effort` as the prompt. Verified on 1.2.16, 2026-10-03. Headless still needs `--dangerously-skip-permissions` or tool permissions auto-deny (by design, hardened in 1.2.15). **`RESOURCE_EXHAUSTED (code 429)` with `aiuse` showing headroom** (2026-10-03: every CLI model, 15:42 to 23:50+, while ACP worked): a CLI burst lockout, not an empty pool; the CLI retries 8 times (~2m20s) so it looks like a hang, and `--print-timeout` cuts it with exit 0 and partial output. Check `grep 'attempt [0-9]* failed' ~/.gemini/antigravity-cli/log/cli-*.log` and switch to `acp-run agy`. |
 | copilot | `copilot -p "<prompt>" --model auto --allow-all-tools --allow-all-paths --silent < /dev/null > out 2>&1` | fine as-is. **Do not add `--reasoning-effort` with `--model auto`**: exits 1, `Model "auto" does not support reasoning effort configuration` (2026-09-26). Name a concrete model if you want an effort level. |
 | opencode (free Go bundle) | `opencode run -m opencode-go/<model> "<prompt>" < /dev/null > out 2>&1` — e.g. `opencode-go/deepseek-v4-pro`, `opencode-go/gpt-6-luna`, `opencode-go/kimi-k3` (all answered 2026-09-26; `opencode models \| grep ^opencode-go/` lists 33). | **`opencode/<model>` is the prepaid Zen catalogue, not Go**: every `opencode/*` model except `big-pickle` fails with `Upstream request failed: Insufficient account funds`. `big-pickle` answers but on a review prompt spent its run trying to install pytest and returned nothing — steer it with "do not run tests or install anything". **Side effect:** every `opencode run` rewrites `./opencode.json` in the cwd (adds a `$schema` key) — `git checkout -- opencode.json` afterwards in repos that track it. |
 | cursor-agent | `cursor-agent -p --yolo --output-format text "<prompt>" < /dev/null > out 2>&1` | without `--trust` (or `--yolo`/`-f`) in a directory Cursor hasn't trusted: exits 1 with a "Workspace Trust Required" prompt and no review. |

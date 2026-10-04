@@ -8,6 +8,23 @@ operator's own tool, github.com/djbclark/aiuse — allow ~1 min) and direct
 CLI probes. Percentages drift constantly — re-probe, don't trust this file
 for balances.
 
+> **Correction 2026-10-03: "route bulk work to antigravity first" has a limit
+> that `aiuse` cannot see.** The agy CLI has a per-login burst limit, roughly
+> **60 generation requests an hour** (inferred; Google publishes none). On
+> 2026-10-03 about 304 CLI requests in 12:00 to 14:59 (the busiest earlier hour
+> was 68; one Opus-high review alone was 47) were followed from 15:42 by an instant
+> `RESOURCE_EXHAUSTED (code 429)` on every model, for 8+ hours, while `aiuse`
+> showed Gemini 5h 100% left / weekly 71% left and Claude+GPT 5h 100% left /
+> weekly 49% left. **The agy CLI and its ACP server fail independently**:
+> `acp-run agy --model gemini-3.8-flash-medium` answered in 6.5 s at 22:54 on the
+> same account. Headroom in `aiuse` does not guarantee the CLI can generate.
+> So for agy: use `acp-run agy` rather than `agy -p`; always pass
+> `--print-timeout`, and read a log line `attempt N failed (RESOURCE_EXHAUSTED` as
+> a fast fail; no probe loops (one probe, reuse the answer); send Opus-high
+> work sparingly (small Claude/GPT pool); and if one client 429s while `aiuse`
+> shows headroom, try the other. Detail and the source skill:
+> `skills/model-routing/SKILL.md` ("agy has a burst limit").
+
 ## The service matrix: aiuse line ↔ TUI/CLI ↔ billing
 
 `aiuse --json` (JSON starts after two preamble lines) reports one
@@ -62,7 +79,8 @@ seven group-address CLIs.
 
 Chronically unused, i.e. already paid for — route suitable work here
 first: **antigravity** (~96-100% left every cycle; aiuse's own top
-suggestion is "burn Gemini weekly"), **devin** (100%), **opencode-go**
+suggestion is "burn Gemini weekly"; **qualified 2026-10-03: capped at roughly 60
+CLI requests an hour per login, so "burn" means a steady trickle, not a burst**), **devin** (100%), **opencode-go**
 (93-100%), **copilot** (~70%). Hottest window: **clinepass weekly** (23%
 left, and Hindsight/hermes depend on it — never route bulk work there).
 Claude 5h is the binding constraint on the core pool as usual.
@@ -70,7 +88,8 @@ Claude 5h is the binding constraint on the core pool as usual.
 ### Live re-probe, 2026-08-23T23:30Z (`aiuse --json`)
 
 Confirms the waste pattern above and refines it. Idle or near-idle —
-route bulk work here first: **antigravity** (Gemini 5h 0%, weekly 3.5%;
+route bulk work here first (antigravity only within its ~60 requests/hour
+burst limit, see the 2026-10-03 correction): **antigravity** (Gemini 5h 0%, weekly 3.5%;
 Claude/GPT lanes both 0%), **opencode-go** (5h 0%, weekly 7%, monthly
 3%), **zai** (5h 0%, weekly 30%), **devin** (daily and weekly both 0%).
 Mid-use: copilot 30%, codex weekly 21%, cursor 15-44% across its three
@@ -140,6 +159,9 @@ from the first `{` instead, or the parse fails with "Extra data".
    opencode-go and sipb cost nothing; antigravity/devin/copilot/cursor
    are use-it-or-lose-it monthly quota that history shows expiring
    unused.
+   **Exception, 2026-10-03:** antigravity's CLI has a burst limit (roughly 60
+   generation requests an hour per login) that `aiuse` cannot see, so spread its
+   work over hours, prefer `acp-run agy`, and never fan out a batch at it.
 2. **Core pools (claude, codex) for judgment and agentic work**; tier
    inside them (Haiku/low for mechanical, Fable/xhigh for adjudication).
    Check `cswap list` before big runs; shift breadth to codex or the
@@ -153,6 +175,8 @@ from the first `{` instead, or the parse fails with "Extra data".
    `cswap list` (Claude), `codex login status`, `opencode models`,
    `bl quota list`, `curl localhost:4000/v1/models` (LiteLLM),
    `agy --version`, `devin --version`, `copilot --version`.
+   Probe agy **once** and reuse the answer: every `agy -p` is a generation request
+   against its hourly burst budget (see the 2026-10-03 correction).
 
 ## Formerly open questions — resolved by operator, 2026-08-23
 
