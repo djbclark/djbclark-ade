@@ -13,6 +13,8 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SLEEPER="$REPO/bin/herdr-sleeper"
 export HERDR_SESSION=sleeper-lab
+unset HERDR_SOCKET_PATH HERDR_CLIENT_SOCKET_PATH   # a pane shell exports these and they beat HERDR_SESSION:
+                                                   # without this the soak silently runs against the caller's live session
 export HERDR_SLEEPER_STATE="${SOAK_DIR:=/tmp/herdr-sleeper-soak}/state"
 # The sleeper's config is left at the operator's real one on purpose: every scenario passes --idle
 # explicitly, and exporting XDG_CONFIG_HOME here would leak into the panes Herdr launches for us.
