@@ -95,6 +95,14 @@ not the account; the ACP server (`agy_acp_server` 1.3.0, shadow GEMINI_HOME
 `~/.local/share/agy-acp-home`) is a separate client. A probe at 23:50 still got
 `attempt 1..5 failed (RESOURCE_EXHAUSTED` in 60 s, then `--print-timeout` cut it.
 
+**Update 2026-10-04: the CLI lockout persisted 18+ hours and re-login cannot
+clear it.** The throttle keys on persistent client state
+(`~/.gemini/antigravity-cli/installation_id` survives logout/login), and it held
+while a working quota probe showed Gemini 5h **1% used**. `acp-run agy` answered
+in 15.8 s the same minute the CLI 429'd a flash model. So the CLI surface can be
+dead for a day with a full quota and nothing an agent does locally will revive
+it — route around it, don't retry it.
+
 **Likely cause (inferred, not published by Google): a per-client burst limit.**
 Between 12:00 and 14:59 the agy CLI made about **304 generation requests**; the
 busiest earlier hour had 68. One bigteam `claude-opus-5-5-high` review alone was
@@ -114,9 +122,15 @@ Rules for any agent that dispatches to agy:
    looks like a hang. A log line `Run: attempt N failed (RESOURCE_EXHAUSTED` in
    `~/.gemini/antigravity-cli/log/cli-*.log` is a **fast fail**: stop, do not
    wait out the retries or retry the call.
-3. **Prefer `acp-run agy` over `agy -p`** for delegated work, and when one client
-   returns 429 while `aiuse` shows headroom, **try the other client** before
-   moving the slice to another vendor. Preflight the exact client you will use.
+3. **Delegate only via `acp-run agy` — never `agy -p`** (standing rule
+   2026-10-04). The CLI surface throttles independently of quota and of the ACP
+   client, and its lockouts are client-keyed and survive re-login, so a CLI
+   dispatch can silently hit a dead client for hours. `agy -p` is not a
+   fallback; the interactive TUI is for the operator. If a CLI call is truly
+   unavoidable (e.g. probing CLI-local state the ACP shadow home cannot see),
+   run exactly one with `--print-timeout`. When one client returns 429 while
+   `aiuse` shows headroom, **try the other client** before moving the slice to
+   another vendor. Preflight the exact client you will use.
 4. **Send Opus-high work to agy sparingly.** The Claude/GPT pool is small (5h
    window, ~35 minutes to drain on 2026-10-03). Prefer a `gemini-*` model for bulk
    work, and spend `claude-*` on agy only where nothing else fits.
