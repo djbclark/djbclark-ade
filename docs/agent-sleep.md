@@ -50,7 +50,46 @@ Orca ships exactly this feature; docs at
    **#3693** "Auto-Sleep inactive workspaces" (open since 2026-05-30; the
    hibernation feature answers it).
 
-## Herdr: no sleep — `bin/herdr-sleeper` supplies the policy
+## Herdr: no sleep — the `djbclark.herdr-sleeper` plugin supplies the policy
+
+**2026-10-04: the sleeper is now a Herdr plugin** (`plugins/herdr-sleeper/`,
+linked with `herdr plugin link`), and it owns sleeping duty; the launchd job
+is retired (`launchctl bootstrap gui/501 ~/Library/LaunchAgents/dev.herdr.sleeper.plist`
+restores it). The standalone `bin/herdr-sleeper` remains as the reference
+implementation (byte-identical to the fork branch's `scripts/herdr-sleeper/`)
+and its legacy journal was adopted once, on first startup.
+
+The plugin keeps every fail-closed rule of the standalone script (77 unit
+tests ported and extended) and adds what only a plugin can do, adopting the
+good parts of both community plugins studied (`dalogax/herdr-agent-hibernate`,
+`prabhatgmp/herdr-park`):
+
+- **in-process idle watcher** started by the `startup` hook — no launchd; the
+  idle clock is `state_change_seq` movement over `agent list` polling, so the
+  transcript-mtime dependency (and the Claude-only limit it caused) is gone;
+  claude + opencode supported (claude argv replayed on wake)
+- **SIGTERM exit** (claude/opencode shut down cleanly; a composer draft is
+  discarded, never submitted — the old composer-empty check still guards any
+  kind exited by typing)
+- **wake on focus** (`pane.focused` hook, per-pane debounce lock), **wake by
+  pressing Enter in the pane** (a wake stub is exec'd into the pane's shell
+  carrying its socket/session/state routing), and wake by action
+- **slept panes keep their sidebar row** (`pane report-agent` claim showing
+  `<kind> · sleeping`) and get a `notification show` with freed MB
+- `terminal_id` as the pane identity that survives pane-id reuse
+
+Live soak (`tests/soak_plugin_herdr.sh`, isolated named session, real Claude
+processes): 15/15 — SIGTERM sleep + stub + claim, focus-wake and Enter-wake
+both restore the exact session id, watcher tick sleeps, recycled-pane and
+session-live-elsewhere refusals keep the handle, corrupt journal quarantined
+with snapshot recovery, ~0.4 GB freed per sleep. Two live catches worth
+remembering: the focus-wake refused a migrated entry whose pane now hosts a
+different program (cwd check — the handle stayed printable), and the first
+soak runs routed to the operator's session because a pane shell exports
+`HERDR_SOCKET_PATH`, which beats `HERDR_SESSION` — the soak now unsets it
+(this also explains September's leftover `focus-holder` workspace).
+
+## History: the standalone `bin/herdr-sleeper`
 
 Herdr (0.7.5-preview) has no sleep/suspend. It does track, per pane, the
 Claude **session UUID** (`agent_session.value`, from the official Claude

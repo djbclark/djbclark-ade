@@ -201,7 +201,15 @@ draft was written:**
   No maintainer reply there either.
 
 So Herdr now has a plugin system and two community plugins doing the
-automatic half. The differentiators our post still adds: the fail-closed
+automatic half. **Our sleeper became a plugin too (2026-10-04,
+`plugins/herdr-sleeper/` in this repo):** it adopts their good parts (SIGTERM
+exit, seq-based idle clock, wake-on-focus, Enter-stub, sidebar claim) and adds
+what neither has — the fail-closed journal state machine, argv replay safety,
+session-live-elsewhere refusal, config validation, damaged-state quarantine.
+Soaking it for a day or two before posting; when posted, the reference
+implementation link should point at the plugin (published repo TBD) with the
+standalone script as the pre-plugin history. The differentiators our post
+still adds: the fail-closed
 eligibility rules (drafts, session forks, argv replay safety), the
 `state_changed_at` timestamp ask, argv preservation in `AgentResumePlan`
 (a native bug too: restart-restore drops `--dangerously-skip-permissions`
