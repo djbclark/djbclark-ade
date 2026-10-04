@@ -14,9 +14,9 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SLEEPER="$REPO/bin/herdr-sleeper"
 export HERDR_SESSION=sleeper-lab
 export HERDR_SLEEPER_STATE="${SOAK_DIR:=/tmp/herdr-sleeper-soak}/state"
-export XDG_CONFIG_HOME="$SOAK_DIR/config"
-mkdir -p "$HERDR_SLEEPER_STATE" "$XDG_CONFIG_HOME/herdr-sleeper"
-: > "$XDG_CONFIG_HOME/herdr-sleeper/config.toml"   # defaults: 12h, no excludes
+# The sleeper's config is left at the operator's real one on purpose: every scenario passes --idle
+# explicitly, and exporting XDG_CONFIG_HOME here would leak into the panes Herdr launches for us.
+mkdir -p "$HERDR_SLEEPER_STATE"
 LOG="$SOAK_DIR/soak.log"; : > "$LOG"
 PASS=0; FAIL=0
 CLAUDE_ARGS=(--dangerously-skip-permissions)

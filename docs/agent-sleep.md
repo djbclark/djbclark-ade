@@ -88,7 +88,10 @@ pre-sleep context correctly; a draft in the composer is refused; a lost
 journal is recovered from the snapshot; `--json` stdout is one document.
 The pane is kept (it is the restart slot — `herdr agent start` needs a
 pane at a shell prompt), terminal modes are reset, a `💤 … wake:
-herdr-sleeper wake <name>` line is printed into it, and the sidebar label
+`<absolute script path>` `wake <name>` line is printed into it (the
+running script's own path, since the bare name is not on PATH — the
+launchd copy lives in this project's `bin/`; fixed 2026-10-04 after a
+slept pane's hint was unrunnable as pasted), and the sidebar label
 gets a `💤` prefix until wake.
 
 ### Safety rules, and where each came from
@@ -98,6 +101,9 @@ Antigravity/Gemini 3.1 Pro high, Copilot, cursor-agent, opencode-go/DeepSeek
 V4 Pro) — 60 findings, all adopted except the two a CLI-driven tool cannot
 fix (see below); the rest of the rules come from Orca's hibernation
 implementation and its bug history (#22657, #16279, #15625, #18731).
+A fourth hardening iteration ran from a week of live deployment
+(2026-10-03): damaged-state quarantine, displaced-session handling,
+consecutive-sighting streaks, staged plist install — 65 tests.
 
 1. **Eligibility (all must hold):** kind `claude`; Herdr status `idle` or
    `done`; pane not focused; not excluded; has a session UUID *and* an

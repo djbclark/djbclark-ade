@@ -185,6 +185,30 @@ methods. Add evidence as a comment instead of a duplicate:
 unsolicited PRs are auto-closed and feature ideas go to **GitHub
 Discussions** — so this is a Discussion post, not an issue or PR.
 
+**Not posted yet** (checked 2026-10-04; nothing by djbclark in
+herdrdev/herdr discussions or issues). **The landscape moved after this
+draft was written:**
+
+- [#4724](https://github.com/herdrdev/herdr/discussions/4724) (2026-09-28,
+  show-and-tell): `herdr-agent-hibernate` — a Herdr *plugin* by dalogax
+  that auto-sleeps idle OpenCode/Claude/Codex panes and resumes on focus
+  (`herdr plugin install dalogax/herdr-agent-hibernate`). No comments, no
+  maintainer reply yet.
+- [#631](https://github.com/herdrdev/herdr/discussions/631) (older idea
+  thread, "Auto-hibernate idle off-screen agents"): prabhatgmp's
+  `herdr-park` plugin is pointed to there, and gentoosys posted a
+  correction that `pane release-agent` does not stop the agent process.
+  No maintainer reply there either.
+
+So Herdr now has a plugin system and two community plugins doing the
+automatic half. The differentiators our post still adds: the fail-closed
+eligibility rules (drafts, session forks, argv replay safety), the
+`state_changed_at` timestamp ask, argv preservation in `AgentResumePlan`
+(a native bug too: restart-restore drops `--dangerously-skip-permissions`
+etc.), and a race-free native sleep. **Posting plan should probably become
+a comment on #631 cross-linking #4724 and the reference implementation,
+rather than a cold new Discussion** — decide before posting.
+
 **Version seen:** `herdr 0.7.5-preview.2026-07-29-44b3adb12552`, macOS 27.
 
 > **Title:** Sleep/wake for idle resumable agents (a reference implementation, and three small things that would make it native)
@@ -199,14 +223,16 @@ Discussions** — so this is a Discussion post, not an issue or PR.
 > integration) and a way to start an agent into an existing shell pane
 > with forwarded args. So I built the policy outside Herdr, on the public
 > CLI: after a user-chosen idle window (`idle = "12h"`, `"90m"`, …) it
-> submits `/exit`, keeps the pane, prints a wake hint into it, prefixes the
+> submits `/exit`, keeps the pane, prints a wake hint into it (carrying
+> the script's absolute path, so it runs as pasted without a PATH
+> install), prefixes the
 > label with 💤; `wake` runs `herdr agent start <name> --kind claude --pane
 > <id> -- <orig argv> --resume <uuid>`. Verified round-trip: same session
 > id, prior context intact. It fails closed on drafts in the composer,
 > unreplayable argv (`--fork-session`, positional prompts), session forks
 > (id live elsewhere), damaged state and config, and overlapping runs.
 >
-> Reference implementation (script, 61 tests, README — usable as-is, no
+> Reference implementation (script, 65 tests, README — usable as-is, no
 > changes to Herdr):
 > https://github.com/djbclark/herdr/tree/herdr-sleeper/scripts/herdr-sleeper
 >

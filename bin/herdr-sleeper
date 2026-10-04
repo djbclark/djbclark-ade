@@ -54,8 +54,9 @@ What "sleep" means here, and why it is safe:
    live in any pane or `claude` process, or if that cannot be determined.
 6. **The pane advertises how to wake itself.** After exit we reset terminal
    modes (a dead TUI can leave the shell receiving mouse packets), print a
-   `💤 … wake: herdr-sleeper wake <name>` line into the pane and prefix the
-   pane label with 💤.
+   `💤 … wake: <running script's absolute path> wake <name>` line into the
+   pane (a bare `herdr-sleeper` would only work when installed on PATH,
+   which the launchd copy is not) and prefix the pane label with 💤.
 
 Trade-off to know: `claude --resume` replays the whole transcript, so every
 wake costs a full prompt-cache write. Pick the window accordingly — the
@@ -214,16 +215,31 @@ def write_json(path: Path, data: object) -> None:
     os.replace(tmp, path)
 
 
+class DamagedState(SleeperError):
+    """The file exists but is not a JSON object — as opposed to an I/O failure reading it."""
+
+
 def read_json(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SleeperError(f"{path} is unreadable ({exc}); refusing to act on a damaged state file")
+        text = path.read_text()
+    except OSError as exc:
+        raise SleeperError(f"{path} could not be read ({exc}); refusing to act without it")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise DamagedState(f"{path} is not valid JSON ({exc}); refusing to act on a damaged state file")
     if not isinstance(data, dict):
-        raise SleeperError(f"{path} does not hold a JSON object; refusing to act on a damaged state file")
+        raise DamagedState(f"{path} does not hold a JSON object; refusing to act on a damaged state file")
     return data
+
+
+def quarantine(path: Path) -> Path:
+    """Move a damaged state file aside (never overwrite evidence) and return where it went."""
+    aside = path.with_name(f"{path.name}.damaged-{dt.datetime.now().strftime('%Y%m%dT%H%M%S')}")
+    os.replace(path, aside)
+    return aside
 
 
 class locked:
@@ -493,21 +509,29 @@ def uuid_live_elsewhere(uuid: str, except_pane: str | None = None, cwd: str | No
         selects = any(p == uuid or p.endswith("=" + uuid) for p in parts[2:])
         if selects:
             return f"pid {parts[0]}"
-        if not any(os.path.basename(p) == "claude" for p in parts[1:3]):
+        if not any(os.path.basename(p) == "claude" or p.endswith("claude-code/cli.js") for p in parts[1:3]):
             continue
         # `claude --continue` picks up the newest session in its cwd, which may be this one
-        if cwd and any(p in ("--continue", "-c") for p in parts[2:]) and process_cwd(parts[0]) == cwd:
-            return f"pid {parts[0]} (claude --continue in {cwd})"
+        if cwd and any(p in ("--continue", "-c") for p in parts[2:]):
+            where = process_cwd(parts[0])
+            if where is None:
+                raise SleeperError(f"cannot verify session liveness: pid {parts[0]} runs `claude --continue` "
+                                   "and its cwd could not be inspected (lsof)")
+            if where == cwd:
+                return f"pid {parts[0]} (claude --continue in {cwd})"
     return None
 
 
 def process_cwd(pid: str) -> str | None:
+    """The process's cwd via lsof, or None when that could not be established (callers treat None as unknown)."""
     try:
-        out = subprocess.run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"], capture_output=True, text=True, timeout=10).stdout
+        proc = subprocess.run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return None
-    for line in out.splitlines():
-        if line.startswith("n"):
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
+        if line.startswith("n") and len(line) > 1:
             return line[1:]
     return None
 
@@ -674,7 +698,10 @@ def sleep_agent(agent: dict, idle_hours: float, exclude: set[str], dry_run: bool
         write_json(JOURNAL, journal)
 
     # 3. reset terminal modes, then advertise the wake path in the pane and the sidebar label.
-    hint = f"{SLEEP_MARK}slept by herdr-sleeper {entry['slept_at']} — wake: " + shlex.join(["herdr-sleeper", "wake", name])
+    #    The hint must run wherever it is pasted: use this script's absolute path, since the
+    #    bare name is only on PATH when someone installed it there (launchd runs a private path).
+    hint_cmd = shlex.join([str(Path(__file__).resolve()), "wake", name])
+    hint = f"{SLEEP_MARK}slept by herdr-sleeper {entry['slept_at']} — wake: {hint_cmd}"
     herdr("pane", "run", pane, f"printf '{MODE_RESET}'; clear; printf '%s\\n' {shlex.quote(hint)}", check=False)
     herdr("pane", "rename", pane, SLEEP_MARK + (label or entry["title"] or name), check=False)
     event("slept", pane=pane, name=name, uuid=uuid, title=entry["title"], cwd=entry["cwd"])
@@ -692,7 +719,11 @@ def reconcile(agents: list[dict]) -> None:
         if not valid_entry(entry):
             say(f"reconcile {pane}: malformed journal entry left untouched")
             continue
-        if live and live_uuid == entry["uuid"] and claude_process(pane)[0] is True:
+        confirmed_running = bool(live and live_uuid == entry["uuid"] and claude_process(pane)[0] is True)
+        if not confirmed_running and entry.get("seen_running"):
+            entry.pop("seen_running")  # the streak must be consecutive; anything unconfirmed resets it
+            changed = True
+        if confirmed_running:
             # seen running with a real process. Once could be Herdr lagging a slow exit; twice in a row is not.
             seen = int(entry.get("seen_running", 0)) + 1
             if seen < 2:
@@ -703,6 +734,12 @@ def reconcile(agents: list[dict]) -> None:
             event("reconciled", pane=pane, name=wake_name(entry), uuid=entry["uuid"], outcome="running")
             journal.pop(pane)
             changed = True
+        elif live and live_uuid and live_uuid != entry["uuid"] and entry.get("wake_got"):
+            if entry.get("phase") != "displaced":
+                entry["phase"] = "displaced"  # our own wake put another session here; keep the handle, by hand only
+                changed = True
+                say(f"reconcile {pane}: session {entry['uuid']} displaced by {live_uuid}; entry kept for manual "
+                    f"recovery: {manual_command(entry)}")
         elif live and live_uuid and live_uuid != entry["uuid"]:
             say(f"reconcile {pane}: now runs session {live_uuid}, not {entry['uuid']}; dropping journal entry")
             event("reconciled", pane=pane, name=wake_name(entry), uuid=entry["uuid"], outcome="replaced", by=live_uuid)
@@ -768,6 +805,9 @@ def wake_entry(entry: dict) -> bool:
     uuid = entry["uuid"]
     if entry.get("argv") is None:
         say(f"cannot wake {name}: original argv unknown; refusing to invent one. Manual: {manual_command(entry)}")
+        return False
+    if entry.get("phase") == "displaced":
+        say(f"cannot wake {name}: its pane now holds session {entry.get('wake_got')}; recover by hand: {manual_command(entry)}")
         return False
     argv, why = replayable_argv(entry["argv"])
     if argv is None:  # snapshot entries hold the raw argv; journal entries were filtered at sleep, harmless to repeat
@@ -836,10 +876,11 @@ def cmd_wake(args: argparse.Namespace) -> int:
     with locked():
         try:
             journal = read_json(JOURNAL)
-        except SleeperError as exc:
+        except DamagedState as exc:
             if args.all:
                 raise
-            say(f"WARN {exc}; continuing with snapshot recovery only")
+            aside = quarantine(JOURNAL)  # keep the damaged bytes; recovery below writes a fresh journal
+            say(f"WARN {exc}; damaged journal moved to {aside}; continuing with snapshot recovery only")
             journal = {}
         if args.all:
             targets = list(journal.values())
@@ -962,7 +1003,7 @@ def sleeper_env() -> dict[str, str]:
     keep = ("HERDR_SLEEPER_IDLE_HOURS", "HERDR_SLEEPER_IDLE", "HERDR_SLEEPER_EXCLUDE", "HERDR_SLEEPER_INTERVAL_MINUTES",
             "HERDR_SLEEPER_STATE", "HERDR_SLEEPER_LAUNCHD_LABEL", "XDG_CONFIG_HOME")
     env = {k: os.environ[k] for k in keep if k in os.environ}
-    herdr_path = shutil.which("herdr") or (HERDR_BIN if os.path.isabs(HERDR_BIN) else None)
+    herdr_path = HERDR_BIN if os.path.isabs(HERDR_BIN) and os.access(HERDR_BIN, os.X_OK) else shutil.which("herdr")
     if herdr_path:  # the scheduler's PATH is not the shell's: pin the binary we resolved here
         env["HERDR_SLEEPER_HERDR_BIN"] = herdr_path
     return env
@@ -1005,19 +1046,26 @@ def cmd_install(args: argparse.Namespace) -> int:
         print("cannot find the `herdr` binary to pin for the scheduled job; set HERDR_SLEEPER_HERDR_BIN")
         return 1
     new_plist = launchd_plist(script, values, env)
-    previous = LAUNCHD_PLIST.read_bytes() if LAUNCHD_PLIST.exists() and not LAUNCHD_PLIST.is_symlink() else None
-    if LAUNCHD_PLIST.is_symlink():
-        LAUNCHD_PLIST.unlink()  # replace a repo-symlinked plist with the generated one
+    staged = LAUNCHD_PLIST.with_suffix(".plist.new")
+    staged.write_bytes(new_plist)  # stage first: a write failure must not have unloaded anything
+    previous_link = os.readlink(LAUNCHD_PLIST) if LAUNCHD_PLIST.is_symlink() else None
+    previous = LAUNCHD_PLIST.read_bytes() if LAUNCHD_PLIST.exists() else None
     uid = os.getuid()
     subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LAUNCHD_LABEL}"], capture_output=True)
-    LAUNCHD_PLIST.write_bytes(new_plist)
+    if LAUNCHD_PLIST.is_symlink():
+        LAUNCHD_PLIST.unlink()  # replace a repo-symlinked plist with the generated one
+    os.replace(staged, LAUNCHD_PLIST)
     proc = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(LAUNCHD_PLIST)], capture_output=True, text=True)
     if proc.returncode:
         print(f"launchctl bootstrap failed: {proc.stderr.strip()}")
-        if previous is not None:  # put the job that was working back
-            LAUNCHD_PLIST.write_bytes(previous)
-            subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(LAUNCHD_PLIST)], capture_output=True)
-            print("previous job restored")
+        if previous is not None or previous_link:  # put the job that was working back, and say whether it took
+            LAUNCHD_PLIST.unlink(missing_ok=True)
+            if previous_link:
+                os.symlink(previous_link, LAUNCHD_PLIST)
+            else:
+                LAUNCHD_PLIST.write_bytes(previous or b"")
+            back = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(LAUNCHD_PLIST)], capture_output=True, text=True)
+            print("previous job restored" if back.returncode == 0 else f"previous job NOT restored: {back.stderr.strip()}")
         return 1
     say(f"installed {LAUNCHD_LABEL}: scan every {values['interval_minutes']} min, idle {values['idle_hours']:g}h, "
         f"exclude {values['exclude']}" + (f", env {sorted(env)}" if env else ""))
