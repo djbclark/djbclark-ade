@@ -206,16 +206,55 @@ automatic half. **Our sleeper became a plugin too (2026-10-04,
 exit, seq-based idle clock, wake-on-focus, Enter-stub, sidebar claim) and adds
 what neither has — the fail-closed journal state machine, argv replay safety,
 session-live-elsewhere refusal, config validation, damaged-state quarantine.
-Soaking it for a day or two before posting; when posted, the reference
-implementation link should point at the plugin (published repo TBD) with the
-standalone script as the pre-plugin history. The differentiators our post
-still adds: the fail-closed
+Soaking it for a day or two before posting. **Published 2026-10-05: the
+reference implementation is now the plugin repo
+[djbclark/herdr-sleeper](https://github.com/djbclark/herdr-sleeper)**
+(`herdr plugin install djbclark/herdr-sleeper`; Python 3.9+ stdlib-only,
+77 tests, MIT), with the standalone script as the pre-plugin history. The
+differentiators our post still adds: the fail-closed
 eligibility rules (drafts, session forks, argv replay safety), the
 `state_changed_at` timestamp ask, argv preservation in `AgentResumePlan`
 (a native bug too: restart-restore drops `--dangerously-skip-permissions`
-etc.), and a race-free native sleep. **Posting plan should probably become
-a comment on #631 cross-linking #4724 and the reference implementation,
-rather than a cold new Discussion** — decide before posting.
+etc.), and a race-free native sleep. **Decision (2026-10-05): post as a
+comment on #631 cross-linking #4724 and the plugin repo, not a cold new
+Discussion — after the soak (started 2026-10-04 evening; post on/after
+2026-10-06).**
+
+**Ready-to-post comment on
+[#631](https://github.com/herdrdev/herdr/discussions/631)** (after soak):
+
+> Adding a third data point to this thread — I ended up building this as a
+> plugin too, and it has been running clean here: **[djbclark/herdr-sleeper](https://github.com/djbclark/herdr-sleeper)**
+> (`herdr plugin install djbclark/herdr-sleeper`). It shares the good bones
+> of #4724's `herdr-agent-hibernate` and the `herdr-park` plugin pointed to
+> above (SIGTERM exit, seq-based idle clock, wake-on-focus, in-pane Enter
+> stub, sidebar claim), and adds a fail-closed safety layer: a journaled
+> sleep/wake state machine (records written before the exit, reconciled on
+> every tick, never dropped because a pane vanished), argv-replay safety
+> (refuses `--fork-session`, positional prompts, unknown-arity options),
+> session-live-elsewhere refusals on wake, config validation, and
+> damaged-state quarantine. Stdlib-only Python 3.9+, no launchd.
+>
+> Three small things that would make this native, smallest first:
+>
+> 1. **A timestamp on agent state.** `agent list` exposes only
+>    `state_change_seq`; a `state_changed_at` (ms since epoch) on
+>    `agent.list`/`agent.get`/`pane.get` would let any external policy
+>    compute idle time without polling deltas.
+> 2. **`herdr agent sleep <target>` / `herdr agent wake <target>`.** The
+>    restore path already builds an `AgentResumePlan` from the stored
+>    session ref; exposing it on demand would close the one race an
+>    external tool cannot — between its final eligibility check and the
+>    agent consuming the exit. One thing to carry over from the live
+>    process when doing so: the original argv. `agent_resume::plan()`
+>    rebuilds `["claude", "--resume", <id>]` from `(source, agent,
+>    session_ref)` alone, so a pane launched with
+>    `--dangerously-skip-permissions` (or `--model`, `--add-dir`, …) comes
+>    back after a server restart without those flags — a native bug
+>    independent of sleeping. `pane.process_info` already exposes the
+>    running argv; persisting it next to the session ref would fix both.
+> 3. **Optional policy:** `[session] sleep_idle_after = "12h"` (off by
+>    default), with the eligibility Orca's hibernation uses.
 
 **Version seen:** `herdr 0.7.5-preview.2026-07-29-44b3adb12552`, macOS 27.
 
