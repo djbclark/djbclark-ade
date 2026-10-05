@@ -14,6 +14,9 @@ PLUGIN_DIR="$REPO/plugins/herdr-sleeper"
 SLEEPER="$PLUGIN_DIR/herdr-sleeper"
 export HERDR_SESSION=sleeper-plugin-lab
 unset HERDR_SOCKET_PATH HERDR_CLIENT_SOCKET_PATH   # or the CLI silently routes to the caller's session
+# Run from inside a Claude Code session, the lab server would hand its markers to every lab claude:
+# CLAUDE_CODE_CHILD_SESSION turns transcript saving off, so nothing is resumable and every sleep refuses.
+unset CLAUDECODE CLAUDE_PID CLAUDE_EFFORT $(compgen -v CLAUDE_CODE_)
 SOAK_DIR="${SOAK_DIR:=/tmp/herdr-sleeper-plugin-soak}"
 LOG="$SOAK_DIR/soak.log"; mkdir -p "$SOAK_DIR"; : > "$LOG"
 PASS=0; FAIL=0
@@ -88,7 +91,8 @@ say "== P2 Enter-stub wake: the pane's own stub execs the agent back (no agent s
 P=$(new_pane p2); U=$(start_claude "$P" p2) || setup_failed p2; [ -n "$U" ] && {
   S scan --exclude nosuch >/dev/null 2>&1
   pane_asleep "$P" || bad "setup sleep failed"
-  herdr pane send-keys "$P" enter >/dev/null; sleep 8
+  herdr pane send-keys "$P" enter >/dev/null
+  for _ in $(seq 1 30); do [ "$(pane_uuid "$P")" = "$U" ] && break; sleep 1; done
   [ "$(pane_uuid "$P")" = "$U" ] && ok "stub exec restored $U" || bad "stub wake: pane uuid=$(pane_uuid "$P")"
   herdr agent prompt "$P" "/exit" >/dev/null 2>&1; sleep 2
 }; close_ws "$P"
