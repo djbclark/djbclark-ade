@@ -394,11 +394,7 @@ def load_config() -> tuple[dict, dict[str, str]]:
     if CONFIG_FILE.exists():
         try:
             raw = tomllib.loads(CONFIG_FILE.read_text()) if tomllib else _toml_subset(CONFIG_FILE)
-        except tomllib.TOMLDecodeError as exc:  # type: ignore[union-attr]  # guarded by the `if tomllib`
-            raise ConfigError(f"{CONFIG_FILE}: {exc}")
-        except OSError as exc:
-            raise ConfigError(f"{CONFIG_FILE}: {exc}")
-        except ConfigError as exc:
+        except Exception as exc:  # TOMLDecodeError, OSError, or the subset parser's ConfigError
             raise ConfigError(f"{CONFIG_FILE}: {exc}")
         for k, v in raw.items():
             if k == "idle":
