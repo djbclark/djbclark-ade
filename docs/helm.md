@@ -95,9 +95,11 @@ On a scratch Haiku session in a herdr pane, through `helm.py`:
    command.
 4. A Claude session outside herdr, Orca and tmux is listed but cannot be
    answered by keys.
-5. On Telegram the command is `/skill helm`: Hermes's `skill-slash` plugin
-   registers only `/steps` as a bare command, and that plugin is Hermes's to
-   change.
+5. On Telegram the command is `/helm`. Hermes added it to its own
+   `skill-slash` plugin on 2026-10-06 (live `reload-plugins`, no gateway
+   restart; registered commands: helm, skill, steps). The Telegram menu shows
+   60 commands at most, so `/helm` may sit under the hidden `/commands` list.
+   The `clarify` button walk itself has not been run yet.
 
 6. A session that is idle only because it waits on its own background task
    still gets `/loose` after three minutes; the audit reports the running
@@ -110,5 +112,5 @@ On a scratch Haiku session in a herdr pane, through `helm.py`:
    Hermes skill plus Collie for now.
 2. A no-model notifier (`fleet-watch` style) that sends one Hermes line when
    the queue gains an item, so Telegram does not have to be asked.
-3. A bare `/helm` on Telegram.
-4. Exercise the Orca and tmux channels.
+3. Exercise the Orca and tmux channels.
+4. Run the `clarify` button walk once on Telegram.
