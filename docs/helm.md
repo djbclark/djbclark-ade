@@ -85,6 +85,14 @@ On a scratch Haiku session in a herdr pane, through `helm.py`:
    prompt, so "audited" is read from the transcript (the last prompt there is
    `/loose`), not from a pane-state edge.
 
+## Notices
+
+`fleet-watch` (site-private `bin/`, launchd every 5 minutes, no model) carries a
+`helm=` field from `helm.py brief`: the sessions blocked on the operator, each
+with a mark that changes per prompt. It sends one Hermes line when a session
+starts waiting or asks a new question, and nothing when one is answered.
+Verified 2026-10-06 with one real check in a launchd-like environment.
+
 ## Limits
 
 1. The Orca and tmux channels are written but not exercised: no Claude
@@ -110,7 +118,5 @@ On a scratch Haiku session in a herdr pane, through `helm.py`:
 1. Trial ccgram as a no-model Telegram front end for the same herdr panes
    (second bot token, new daemon). Deferred by the operator's choice of the
    Hermes skill plus Collie for now.
-2. A no-model notifier (`fleet-watch` style) that sends one Hermes line when
-   the queue gains an item, so Telegram does not have to be asked.
-3. Exercise the Orca and tmux channels.
-4. Run the `clarify` button walk once on Telegram.
+2. Exercise the Orca and tmux channels.
+3. Run the `clarify` button walk once on Telegram.
