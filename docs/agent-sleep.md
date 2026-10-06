@@ -54,8 +54,10 @@ Orca ships exactly this feature; docs at
 
 **2026-10-04: the sleeper is now a Herdr plugin** (`plugins/herdr-sleeper/`,
 linked with `herdr plugin link`), and it owns sleeping duty; the launchd job
-is retired (`launchctl bootstrap gui/501 ~/Library/LaunchAgents/dev.herdr.sleeper.plist`
-restores it). The standalone `bin/herdr-sleeper` remains as the reference
+is retired: booted out, and its plist moved to `~/Library/LaunchAgents/disabled/` on 2026-10-05
+after it had reloaded itself at a login and run alongside the plugin (bootout alone does not stick).
+Restore with `mv ~/Library/LaunchAgents/disabled/dev.herdr.sleeper.plist ~/Library/LaunchAgents/ &&
+launchctl bootstrap gui/501 ~/Library/LaunchAgents/dev.herdr.sleeper.plist`. The standalone `bin/herdr-sleeper` remains as the reference
 implementation (byte-identical to the fork branch's `scripts/herdr-sleeper/`)
 and its legacy journal was adopted once, on first startup.
 
@@ -88,6 +90,25 @@ different program (cwd check — the handle stayed printable), and the first
 soak runs routed to the operator's session because a pane shell exports
 `HERDR_SOCKET_PATH`, which beats `HERDR_SESSION` — the soak now unsets it
 (this also explains September's leftover `focus-holder` workspace).
+
+**2026-10-05: v0.1.1** (`ca929d7`; public `djbclark/herdr-sleeper` `ec9e92c`, byte-identical
+script/manifest/tests). After two adversarial review rounds (Fable, Grok 4.7) found that v0.1.0
+could silently lose its watcher, refused every slept pane after a Herdr restart (restore
+re-allocates terminal ids), and could drop the only handle to a session when a pane id was reused.
+v0.1.1: restored panes recognised by their 💤 label; reused ids orphan the entry (`orphan:<uuid8>`,
+manual resume only) instead of dropping it; the in-pane stub marks its row `waking` instead of
+popping it; the watcher never exits, holds `watcher.lock`, and is healed by any plugin activity;
+idle clocks persist in `idle.json`. 156 unit tests (Python 3.9 + 3.14), branch coverage 84%, soak
+27/27 (P8 server restart, P9 reused pane id, P10 focused sleep-pane added). Live since 22:29.
+
+- **Config path:** the watcher reads `~/.config/herdr/plugins/config/djbclark.herdr-sleeper/config.toml`
+  (`HERDR_PLUGIN_CONFIG_DIR`), which holds `exclude = ["orc", "orc-meta"]`. v0.1.1 refuses to sleep
+  if that file lacks `exclude` while an older config still has one.
+- **Soak:** run through `bin/bg`; to test code other than the installed checkout, give the lab its
+  own `XDG_CONFIG_HOME` with a `herdr/plugins.json` pointing at that code.
+- **For other implementers:** [LESSONS.md](https://github.com/djbclark/herdr-sleeper/blob/main/LESSONS.md)
+  (41 traps with Herdr file:line evidence); upstream asks posted on
+  [#631](https://github.com/herdrdev/herdr/discussions/631#discussioncomment-18769271).
 
 ## History: the standalone `bin/herdr-sleeper`
 
