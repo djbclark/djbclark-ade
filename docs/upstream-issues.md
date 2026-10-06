@@ -220,8 +220,10 @@ comment on #631 cross-linking #4724 and the plugin repo, not a cold new
 Discussion — after the soak (started 2026-10-04 evening; post on/after
 2026-10-06).**
 
-**Ready-to-post comment on
-[#631](https://github.com/herdrdev/herdr/discussions/631)** (after soak):
+**Posted 2026-10-05:** [#631 comment](https://github.com/herdrdev/herdr/discussions/631#discussioncomment-18769271), rewritten for v0.1.1 and linking [LESSONS.md](https://github.com/djbclark/herdr-sleeper/blob/main/LESSONS.md); asks re-ranked to match its "Asks for Herdr upstream". The draft below is the superseded pre-v0.1.1 version, kept for history.
+
+**Superseded draft of the comment on
+[#631](https://github.com/herdrdev/herdr/discussions/631)**:
 
 > Adding a third data point to this thread — I ended up building this as a
 > plugin too, and it has been running clean here: **[djbclark/herdr-sleeper](https://github.com/djbclark/herdr-sleeper)**
