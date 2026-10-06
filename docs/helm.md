@@ -71,13 +71,19 @@ On a scratch Haiku session in a herdr pane, through `helm.py`:
    the time, word for word.
 2. `answer <id> 3` selected the third option; the transcript recorded it.
 3. `answer <id> --text "…"` used "Type something"; the transcript recorded it.
-4. A two-question prompt: one digit per question, then Enter on the review
-   tab (by hand with `herdr agent send-keys`; `answer <id> n1 n2` does the
-   same and checks for the review tab first).
+4. A two-question prompt: `answer <id> 2 1` sent one digit per question,
+   saw the review tab, pressed Enter, and the transcript recorded both.
 5. Refusals: option out of range, and no pending question, both exit 1 and
-   send nothing.
+   send nothing. A session is matched by its exact id or name
+   only: in testing, an unquoted empty variable turned `answer 2 1` into a
+   prefix match on another session (it was not blocked, so nothing was sent).
 6. A key sent when no prompt is on screen lands in the session's input box.
    That is why `answer` checks the screen before it sends anything.
+7. `helm.py audit` sent `/loose`; its `/steps` prompts came back through the
+   queue and were answered from there. herdr reported the session idle for a
+   moment between the `/steps` summary and the closing handoff-or-quit
+   prompt, so "audited" is read from the transcript (the last prompt there is
+   `/loose`), not from a pane-state edge.
 
 ## Limits
 

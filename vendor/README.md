@@ -28,6 +28,9 @@ the whole system without leaving it.
 - **model-routing skill** — canonical HERE at
   `../skills/model-routing/SKILL.md`; deployed live copy at
   `~/.claude/skills/model-routing/`.
+- **helm skill** (`/helm`, `helm.py`) — canonical in site-djbclark
+  `skills/helm/`, reached at `~/ops/site-private/skills/helm`; design record
+  HERE at `../docs/helm.md`.
 - **graph-audit workflow** — canonical HERE at
   `../.claude/workflows/graph-audit.js`.
 - **Session hooks** (`context_size_nudge.py`, `precompact_handoff.py`) —
