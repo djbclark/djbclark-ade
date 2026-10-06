@@ -53,6 +53,12 @@ altitudes compose (a macro node can run a micro graph as its body).
   `bin/herdr-sleeper`, which gives Herdr panes the same sleep/`--resume`
   wake policy on a 12 h window via launchd. Check `herdr-sleeper list`
   before assuming a Herdr pane with a bare shell is dead.
+- [docs/helm.md](docs/helm.md) — `/helm`: answer every waiting agent
+  session from one window. A no-model collector (`helm.py`, in
+  `~/ops/site-djbclark/skills/helm/`) reads each blocked session's pending
+  question from herdr and its transcript; the skill relays it and sends the
+  pick back as keys; idle sessions get `/loose`. Prior art, what was
+  verified, limits.
 - [docs/upstream-issues.md](docs/upstream-issues.md) — filed-nowhere-yet
   bug drafts for third-party projects (graft statusline, hindsight config
   docs), written from problems verified here.
