@@ -120,3 +120,35 @@ Verified 2026-10-06 with one real check in a launchd-like environment.
    Hermes skill plus Collie for now.
 2. Exercise the Orca and tmux channels.
 3. Run the `clarify` button walk once on Telegram.
+
+## 2026-10-08 — every TUI, ranked walk, ended sessions, ACP launches
+
+Operator asks: control the whole fleet, including stopped sessions, from Claude;
+keep as many agents working as possible at every moment; start new sessions over
+ACP because key presses have proven fragile; never collide with other sessions.
+
+1. Sessions now come from `session-finder/fleet.py`: herdr `agent list` (any agent
+   kind), the Claude registry, a `ps` scan for TUIs outside herdr, Hermes gateway
+   chats from `~/.hermes/state.db`, and `launches.jsonl`. Each record carries how
+   to reach it and whether it finished with `/handoff` (never continued; a fresh
+   `/baton` session is started instead).
+2. Walk order = estimated minutes of unattended work an answer unlocks: plan 45,
+   finished-session restart 25, permission 20, ACP reply 15, a question = that
+   session's measured work stretch (median minutes from an operator prompt to its
+   next stop, `fleet.parse`) times the `/steps` items still to come, idle audits 8
+   warm / 3 cold. One session's items stay adjacent. `--order attention` is the old
+   order. Prior art checked: GitKraken's agent sessions view, Calyx's approval inbox
+   and repomon's needs-you triage sort by state only; nobody weighs by expected run.
+3. `scan --ended` (the `helm-all` skill) adds handoff chains with next steps and no
+   live session in their repo, and transcripts that ended on a question.
+4. `session-finder/launch.py` starts sessions over ACP (`acp-run`) inside an Orca
+   terminal or a herdr tab, reported to herdr with `pane report-agent`; `--baton`
+   hands the session its Tier 1 chain path; a bigteam-style `CLAIM` is written and
+   the launch refuses when another session is working in that repo. One acp-run is
+   one turn; `launch.py reply` starts the next. `session/load` is not wired yet.
+5. Verified 2026-10-08 on herdr 0.9.1: a `--baton --pane` launch into a free pane,
+   herdr listing the pane as a working claude agent, fleet/helm listing it as an
+   ACP session, and the ended scan finding nine handoff chains.
+
+Open: wire `session/load` into acp-run for multi-turn ACP sessions; exercise the
+Orca host; agy live detection once agy works (todo note in Basic Memory).
