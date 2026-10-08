@@ -33,7 +33,7 @@ below is written that way: vendor-selected in Phase 0, not baked in.
 | Workspaces | `bin/cow-pasture` (APFS CoW, secrets scrubbed) | Live. |
 | CI | stayturgid: `collection-build`; Shizuku fork: Android CI + Build App; site-djbclark: monitor-only workflows, **no test CI**; djbclark-ade: none | Partial. |
 | AI review | Copilot code review runs on stayturgid PRs (dynamic workflow, last runs 2026-07-30); `coderabbit-feeder` for CodeRabbit | Live but advisory: nothing is a *required* check. |
-| Merge gate | branch protection / rulesets / `allow_auto_merge` | **Absent on every repo.** djbclark-ade is private on a free plan, so rulesets and branch protection are unavailable there without Pro or going public. |
+| Merge gate | branch protection / rulesets / `allow_auto_merge` | **Absent on every repo.** djbclark-ade has been public since 2026-10-08 (was private on a free plan when this was written), so rulesets and branch protection are unavailable there without Pro or going public. |
 | Kill switch | none | **Gap.** |
 | Cost policy | model-routing: free and wasted pools first, claude/codex for judgment, **prepaid API spend retired** | Binding constraint on any BYOK option. |
 
