@@ -120,6 +120,14 @@ Verified 2026-10-06 with one real check in a launchd-like environment.
    Hermes skill plus Collie for now.
 2. Exercise the Orca and tmux channels.
 3. Run the `clarify` button walk once on Telegram.
+4. **Telegram regression (2026-10-08):** after the Hermes upgrade to
+   `ad9678e6`, user-plugin commands need the `tools.override` capability
+   (`hermes_cli/plugin_capabilities.py`); `skill-slash` declares none, so
+   `/helm`, `/steps` and `/skill` are gone from Telegram (`agent.log`:
+   `decision=deny … not granted`). The new core also auto-registers skills as
+   `/<name>`. Handed to the session doing the gateway reboot
+   (`hermes-worktrees-e5`); fix = grant the capability or retire the plugin,
+   then restart the gateway, then send `/helm` on Telegram to verify.
 
 ## 2026-10-08 — every TUI, ranked walk, ended sessions, ACP launches
 
