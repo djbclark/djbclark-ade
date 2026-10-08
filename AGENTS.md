@@ -8,8 +8,13 @@ the one that wrote it.
 
 ## What this repo is
 
-A reference architecture plus live operating knowledge for two altitudes
-of agent-graph work, verified by real runs on 2026-08-23:
+The agentic development environment (ADE) for this machine: one
+operator, many agent TUIs, herdr/Orca as the terminal fabric, ACP for
+agent-to-agent control. Since 2026-10-08 it is the git home of the
+orchestration and session-hygiene skills and tools (see
+[README.md](README.md) for the loop and a table of every skill). It began
+as a reference architecture plus live operating knowledge for two
+altitudes of agent-graph work, verified by real runs on 2026-08-23:
 
 - **Micro graph** — Claude Code dynamic workflows: in-process subagent
   fan-out coordinated by plain JavaScript, zero-token orchestration.
@@ -55,7 +60,7 @@ altitudes compose (a macro node can run a micro graph as its body).
   before assuming a Herdr pane with a bare shell is dead.
 - [docs/helm.md](docs/helm.md) — `/helm`: answer every waiting agent
   session from one window. A no-model collector (`helm.py`, in
-  `~/ops/site-djbclark/skills/helm/`) reads each blocked session's pending
+  [skills/helm/](skills/helm/)) reads each blocked session's pending
   question from herdr and its transcript; the skill relays it and sends the
   pick back as keys; idle sessions get `/loose`. Prior art, what was
   verified, limits.
@@ -72,30 +77,23 @@ altitudes compose (a macro node can run a micro graph as its body).
   verify → synthesize). Claude Code sessions in this repo can invoke it
   as `/graph-audit`. It has audited this repo itself, twice; its
   confirmed findings are fixed.
-- [skills/model-routing/SKILL.md](skills/model-routing/SKILL.md) —
-  canonical source of the machine-wide model-routing skill (Claude Code's
-  live copy is deployed at `~/.claude/skills/model-routing/`).
-- [skills/effort-routing/SKILL.md](skills/effort-routing/SKILL.md) —
-  how much thinking *this* session should spend, as distinct from which
-  vendor runs work. A running session cannot re-tier itself, so the real
-  levers are subagent dispatch and telling the operator; the skill says
-  which stretches deserve which tier (live copy at
-  `~/.claude/skills/effort-routing/`).
-- [skills/cow-workspaces/SKILL.md](skills/cow-workspaces/SKILL.md) —
-  how agent workspaces are made here: `bin/cow-pasture` (APFS `cow` clone,
-  secrets scrubbed, optional Orca registration) instead of `git worktree`
-  or plain clones; never from `~/ops/*`. Live copy at
-  `~/.claude/skills/cow-workspaces/`.
-- [skills/gmail-search/SKILL.md](skills/gmail-search/SKILL.md) —
-  canonical source of the gmail-search skill: the Hermes-built local
-  Gmail FTS5 index (~192k messages, ~100ms queries), searched via CLI,
-  not MCP (live copy at `~/.claude/skills/gmail-search/`).
-- [skills/reorg-orca/SKILL.md](skills/reorg-orca/SKILL.md) —
-  herdr-style reorganization of Orca workspaces from the CLI: snapshot,
-  numbered plan, apply only verbs Orca has, and name the moves it can't do
-  yet (terminal move, swap, resize, reorder, `repo rm`; umbrella
-  stablyai/orca#23272). Re-probe with `bin/orca-reorg-watch --show`. Live
-  copy at `~/.claude/skills/reorg-orca/`.
+- [skills/](skills/) — **the canonical git copies** (since 2026-10-08)
+  of the orchestration and session-hygiene skills: `bigteam`,
+  `model-routing`, `effort-routing`, `helm`, `helm-all`, `session-finder`,
+  `session-finder-all`, `herdr-orchestration`, `ralph-tui-orchestration`,
+  `cow-workspaces`, `handoff`, `baton`, `resume`, `session-handoff`,
+  `steps`, `loose`, `skill-everywhere` (README.md has a one-line table).
+  Every TUI reaches them as `~/ops/site-private/skills/<name>` →
+  `~/ops/site-djbclark/skills/<name>` (an absolute symlink into this
+  checkout), so **edit them here**, never through a TUI path. The other
+  local skills (`gmail-search`, `reorg-orca`, `book-to-kb`, `graft`,
+  `todo`, `autorename`, …) live in `~/ops/site-djbclark/skills/`.
+- [tools/acp-run/](tools/acp-run/README.md) — the ACP client every
+  launcher uses (`~/.local/bin/acp-run` resolves here).
+  [bin/fleet-watch](bin/fleet-watch) — launchd fleet change notices to
+  Hermes (its plist runs `~/ops/site-private/bin/fleet-watch`, which
+  resolves here). [claude/commands/](claude/commands/) — `/orc` and
+  `/orc-meta`, reached through `~/ops/site-private/claude/commands/`.
 - [vendor/README.md](vendor/README.md) — sidecar index of everything this
   repo references that lives elsewhere on the system: vendored copies
   (prepaid gate scripts, a dated Orca orchestration guide snapshot) and

@@ -1,7 +1,8 @@
 # helm — every waiting agent session, answered from one window
 
-**Built 2026-10-06.** Skill and script: `~/ops/site-djbclark/skills/helm/`
-(`SKILL.md`, `helm.py`), linked into every TUI by `skill-everywhere`. This page
+**Built 2026-10-06.** Skill and script: [`skills/helm/`](../skills/helm/) in
+this repo (`SKILL.md`, `helm.py`; moved here from `~/ops/site-djbclark/skills/helm/`,
+now a symlink, on 2026-10-08), linked into every TUI by `skill-everywhere`. This page
 is the design record: what was asked, the prior art checked first, how it
 works, what was verified, and what is still open.
 

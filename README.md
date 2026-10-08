@@ -1,15 +1,146 @@
-# djbclark-ade
+# djbclark-ade — an agentic development environment
 
-Reference architecture for running Claude as a **graph of agents**, at two
-altitudes, using tools already installed on this machine. Prompted by
+One operator, many agent TUIs. This repo is the operating kit for running a
+fleet of coding agents on one Mac as a single environment: the skills every
+agent loads, the tools that start and steer them, and the docs that record
+what was verified. It is the canonical git home for the orchestration and
+session-hygiene pieces (moved here from `~/ops/site-djbclark` on 2026-10-08;
+their old paths are symlinks into this checkout).
+
+## The pieces
+
+1. **Many TUIs.** Claude Code, Codex, Hermes, Cursor, opencode, crush, Cline,
+   Copilot, Qwen, muse, zcode, Antigravity (`agy`) and others, each on its own
+   subscription or quota pool. [`skills/model-routing`](skills/model-routing/SKILL.md)
+   and [`docs/model-routing.md`](docs/model-routing.md) say which one gets
+   which work.
+2. **herdr and Orca as the terminal fabric.** Every session lives in a herdr
+   pane (workspace / tab / pane) or an Orca terminal, so it is visible,
+   addressable and can be typed into by another session.
+   [`docs/orca-integration.md`](docs/orca-integration.md) covers Orca's task DAG.
+3. **ACP for agent-to-agent control.** [`tools/acp-run`](tools/acp-run/README.md)
+   drives any agent that speaks the Agent Client Protocol: one-shot, an
+   `--interactive` loop in a visible pane, `--resume`, scoped permissions.
+4. **Skills, linked everywhere.** Each skill is one directory in
+   [`skills/`](skills/); [`skill-everywhere`](skills/skill-everywhere/SKILL.md)
+   symlinks it into every TUI's skills dir, so one edit here reaches all of
+   them.
+
+## The loop
+
+1. **Find and decide** — [`session-finder`](skills/session-finder/SKILL.md)
+   (`fleet.py`) lists every live session of every TUI, says where it lives
+   and which repos it is touching, and decides how work on a topic
+   continues: message the running session, `/baton` from its handoff, resume
+   a stopped one, or start a clean agent. `fleet.py conflicts` refuses
+   overlap.
+2. **Start** — `session-finder/launch.py` starts a session over ACP
+   (`acp-run --interactive`) in a visible herdr tab or Orca terminal, with a
+   claim on the files it will touch, and can `reply` to it later through its
+   inbox.
+3. **Answer everything from one window** — [`helm`](skills/helm/SKILL.md)
+   (`helm.py scan`, no model tokens) collects every session waiting on the
+   operator, reads its pending question verbatim, ranks the walk by how much
+   unattended work each answer unlocks, and relays one item per prompt;
+   idle sessions are told to audit themselves with `/loose`. Design record:
+   [`docs/helm.md`](docs/helm.md). [`bin/fleet-watch`](bin/fleet-watch)
+   (launchd, every 5 min) pings Hermes only when the picture changes.
+4. **Carry work across sessions** — [`loose`](skills/loose/SKILL.md) finds
+   what is unfinished and walks it with [`steps`](skills/steps/SKILL.md);
+   [`handoff`](skills/handoff/SKILL.md) writes the deep Tier 2 document,
+   [`session-handoff`](skills/session-handoff/SKILL.md) the Tier 1 pointer,
+   and [`baton`](skills/baton/SKILL.md) / [`resume`](skills/resume/SKILL.md)
+   pick it up in a fresh session.
+5. **Fan out** — [`bigteam`](skills/bigteam/SKILL.md) slices a job into
+   disjoint, file-scoped assignments and dispatches them across vendors by
+   quota pool, then integrates the results.
+
+## Layout
+
+| Path | What |
+|---|---|
+| [`skills/`](skills/) | The skills (table below). |
+| [`tools/acp-run/`](tools/acp-run/) | `acp-run`, the ACP client every launcher uses. |
+| [`bin/`](bin/) | `fleet-watch` (fleet change notices), `cow-pasture` (APFS copy-on-write workspaces), `herdr-sleeper` (idle-pane sleep), `orca-reorg-watch`, `route_agent.py`. |
+| [`claude/commands/`](claude/commands/) | Claude Code slash commands `/orc` (the primary herdr orchestrator) and `/orc-meta` (its watchdog). |
+| [`docs/`](docs/) | Design records and dated operating knowledge (list below). |
+| [`plugins/`](plugins/) | `herdr-sleeper` herdr plugin (dev source of djbclark/herdr-sleeper). |
+| [`.claude/workflows/graph-audit.js`](.claude/workflows/graph-audit.js) | Micro-graph example workflow (`/graph-audit`). |
+| [`vendor/`](vendor/README.md) | Vendored snapshots and pointers to things with their own homes. |
+| [`AGENTS.md`](AGENTS.md) | Entry point for any agent working here (`CLAUDE.md` links to it). |
+
+## Skills
+
+| Skill | One line |
+|---|---|
+| [`bigteam`](skills/bigteam/SKILL.md) | Run a prompt as a multi-vendor fan-out: probe every quota pool, slice into file-scoped assignments, dispatch, integrate. |
+| [`model-routing`](skills/model-routing/SKILL.md) | Which vendor × model × effort for which work; reading `aiuse` pools. |
+| [`effort-routing`](skills/effort-routing/SKILL.md) | Match this session's own reasoning effort to the stretch of work in front of it. |
+| [`session-finder`](skills/session-finder/SKILL.md) | Which live session is on a topic, where it lives, and how the work continues (`fleet.py`, `launch.py`). |
+| [`session-finder-all`](skills/session-finder-all/SKILL.md) | The same, including ended sessions, handoff chains and memory. |
+| [`helm`](skills/helm/SKILL.md) | Answer every waiting session of every TUI from one window, ranked by work unlocked (`helm.py`). |
+| [`helm-all`](skills/helm-all/SKILL.md) | helm plus ended sessions that still hold open work. |
+| [`herdr-orchestration`](skills/herdr-orchestration/SKILL.md) | Drive a multi-agent handoff chain through herdr panes instead of clipboard relays. |
+| [`ralph-tui-orchestration`](skills/ralph-tui-orchestration/SKILL.md) | The Ralph TUI + Beads multi-repo controller (dormant since 2026-08-23). |
+| [`cow-workspaces`](skills/cow-workspaces/SKILL.md) | Isolated agent workspaces as APFS `cow` pastures (`bin/cow-pasture`), not worktrees. |
+| [`handoff`](skills/handoff/SKILL.md) | Deep Tier 2 handoff document, chain-tagged and mined from the whole conversation. |
+| [`session-handoff`](skills/session-handoff/SKILL.md) | Read/write the out-of-tree Tier 1 session pointer for any git repo. |
+| [`resume`](skills/resume/SKILL.md) | Start-of-session resume from the Tier 1 pointer. |
+| [`baton`](skills/baton/SKILL.md) | Alias for `/resume`. |
+| [`loose`](skills/loose/SKILL.md) | Audit the session for loose ends, step through them, then offer `/handoff` or quit. |
+| [`steps`](skills/steps/SKILL.md) | Walk open items one multiple-choice prompt at a time, recommendation first. |
+| [`skill-everywhere`](skills/skill-everywhere/SKILL.md) | Link a skill into every agent TUI and prove each one loads it. |
+
+## Install (this machine)
+
+Skills are reached through one hub, `~/ops/site-private/skills/<name>`, which
+every TUI's skills dir links to. For a skill that lives here the chain is
+`~/.claude/skills/<name>` → `~/ops/site-private/skills/<name>` →
+`~/ops/site-djbclark/skills/<name>` → `~/src/djbclark-ade/skills/<name>`. To
+add one:
+
+```sh
+ln -s /Users/djbclark/src/djbclark-ade/skills/<name> ~/ops/site-djbclark/skills/<name>
+ln -s ../../site-djbclark/skills/<name> ~/ops/site-private/skills/<name>
+~/ops/site-private/bin/skill-everywhere <name>          # link into every TUI
+~/ops/site-private/bin/skill-everywhere --check <name>  # verify
+```
+
+`acp-run` is on PATH as `~/.local/bin/acp-run` → `~/ops/site-private/bin/acp-run`
+→ `~/ops/site-djbclark/tools/acp-run/acp-run` → here; `fleet-watch`'s launchd
+job runs `~/ops/site-private/bin/fleet-watch`, which resolves here the same
+way. `helm.py` imports `fleet` from the sibling `skills/session-finder/`.
+
+## Docs
+
+1. [`docs/model-routing.md`](docs/model-routing.md) — every service on this
+   machine mapped to its TUI, subscription vs prepaid vs free, effort levers.
+2. [`docs/orca-integration.md`](docs/orca-integration.md) — runnable Orca
+   macro-graph sequences and live-run lessons.
+3. [`docs/helm.md`](docs/helm.md) — helm's design record and what was verified.
+4. [`docs/agent-sleep.md`](docs/agent-sleep.md) — idle agents and RAM: Orca
+   hibernation and `herdr-sleeper`.
+5. [`docs/coding-factory.md`](docs/coding-factory.md) — the unattended
+   issue → PR → merge question, answered.
+6. [`docs/queue.md`](docs/queue.md) — work queued by the operator, and blockers.
+7. [`docs/ai-memory-landscape.md`](docs/ai-memory-landscape.md) — the levels
+   of AI memory this machine is building toward.
+8. [`docs/mcp-servers.md`](docs/mcp-servers.md) — the MCP server roster.
+9. [`docs/upstream-issues.md`](docs/upstream-issues.md) — bug drafts for
+   third-party projects.
+
+## Architecture: agent graphs at two altitudes
+
+The repo began (2026-08-23) as a reference architecture for running Claude as
+a **graph of agents**, prompted by
 [Graph Engineering with Claude](https://x.com/0xCodez/article/2079141496981184512)
-(@0xCodez, 2026-07-20), which is a tutorial for Claude Code's built-in
-*dynamic workflows* feature — not a new product. This repo adds the second
-altitude the article doesn't cover: [Orca](https://github.com/stablyai/orca)
-(forked to [djbclark/orca](https://github.com/djbclark/orca)), which
-orchestrates whole agent *processes* rather than in-process subagents.
+(@0xCodez, 2026-07-20), a tutorial for Claude Code's built-in *dynamic
+workflows*. It adds the second altitude the article doesn't cover:
+[Orca](https://github.com/stablyai/orca) (forked to
+[djbclark/orca](https://github.com/djbclark/orca)), which orchestrates whole
+agent *processes* rather than in-process subagents.
 
-## Two graphs, two altitudes
+### Two graphs, two altitudes
 
 **Micro graph — Claude Code dynamic workflows (in-process).**
 Inside a single Claude Code session, the `Workflow` tool runs a plain
@@ -44,7 +175,7 @@ Full command reference: `orca skills get orchestration` (version-matched to
 the running Orca build, currently 1.4.188 — don't rely on a cached copy of
 this doc, the binary is the source of truth).
 
-## How they compose
+### How they compose
 
 A macro-graph node (an Orca Task dispatched to a Claude Code worker) can
 itself run a micro-graph (a dynamic workflow) as its job body. Concretely:
@@ -82,28 +213,14 @@ here:** `ralph-tui` + beads runs a continuous, scheduled controller loop
 over the `ops-djbclark` suite (stayturgid / site-djbclark / site-private /
 Shizuku) — the article's pattern 11 (loop-until-dry) applied at the
 repo-controller level, converting a PRD into beads issues that agents work
-continuously. See the `ralph-tui-orchestration` skill for that system; it's
-orthogonal to this repo, which is a generic template for other projects.
+continuously. See the [`ralph-tui-orchestration`](skills/ralph-tui-orchestration/SKILL.md)
+skill (in this repo since 2026-10-08) for that system.
 **Status 2026-09-21: dormant** — the `ralph-tui` binary is gone from PATH
 and its controller workspaces were deleted with `~/src/ops-worktrees/` on
 2026-08-23; only `~/.config/ralph-tui/` survives. See
 [`docs/coding-factory.md`](docs/coding-factory.md).
 
-## Layout
-
-- `.claude/workflows/graph-audit.js` — the micro-graph example (pipeline,
-  schema-validated nodes, adversarial verify, synthesis).
-- `docs/orca-integration.md` — exact, runnable Orca commands for dispatching
-  a macro-graph fleet, plus what to check before running one live.
-- `docs/model-routing.md` — which models are reachable via which service
-  on this machine, and the vendor × model × effort routing policy that
-  keeps tokens spent on judgment, not plumbing.
-- `skills/model-routing/SKILL.md` — canonical source of the machine-wide
-  model-routing skill (live copy deployed at `~/.claude/skills/`).
-- `AGENTS.md` — the entry point for any AI agent working here: pointers,
-  standing orders, machine context. `CLAUDE.md` includes it.
-
-## Status (2026-08-23)
+### graph-audit and macro-graph status (2026-08-23)
 
 `graph-audit` has run twice for real, pointed at this repo itself:
 
