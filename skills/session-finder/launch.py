@@ -192,6 +192,23 @@ def pick_workspace(cwd):
     return wid, True
 
 
+def first_pane(wid, name):
+    """A workspace `workspace create` just opened already has one tab with a shell in the right
+    cwd: use it (labelled), rather than adding a second tab and leaving the first one empty."""
+    for _ in range(10):
+        panes = fleet.herdr_json("pane", "list", "--workspace", wid).get("panes") or []
+        if panes:
+            break
+        time.sleep(0.5)
+    if len(panes) != 1:
+        return None
+    pane, tab = panes[0]["pane_id"], panes[0]["tab_id"]
+    if not pane_shell_ready(pane):
+        return None
+    fleet.run(HERDR, "tab", "rename", tab, name[:24])
+    return pane, tab
+
+
 def new_herdr_pane(cwd, name, wid):
     r = fleet.herdr_json("tab", "create", "--workspace", wid, "--cwd", cwd, "--label", name[:24], "--no-focus")
     tab = (r.get("tab") or {}).get("tab_id") or r.get("tab_id")
@@ -338,7 +355,7 @@ def start(a, brief_text, parent=None):
             pane, tab = "(new pane)", "(new tab)"
         else:
             wid, created = pick_workspace(cwd)
-            pane, tab = new_herdr_pane(cwd, d["name"], wid)
+            pane, tab = (first_pane(wid, d["name"]) if created else None) or new_herdr_pane(cwd, d["name"], wid)
         d["host"] = {"kind": "herdr", "pane": pane, "tab": tab, "workspace": wid}
     elif host == "orca":
         d["host"] = {"kind": "orca"}
