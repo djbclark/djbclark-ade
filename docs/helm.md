@@ -150,5 +150,11 @@ ACP because key presses have proven fragile; never collide with other sessions.
    herdr listing the pane as a working claude agent, fleet/helm listing it as an
    ACP session, and the ended scan finding nine handoff chains.
 
-Open: wire `session/load` into acp-run for multi-turn ACP sessions; exercise the
-Orca host; agy live detection once agy works (todo note in Basic Memory).
+Open (2026-10-08, including the items handed over by the session that built the
+first helm): 1. `acp-run --interactive` lands (in progress, launch 20261008-093852);
+2. exercise the Orca host and the Orca/tmux key channels (still relevant for TUI
+sessions, moot for ACP launches); 3. run the Telegram `clarify` button walk of /helm
+once; 4. observe `wait --auto-audit` firing unattended, for a Claude TUI session and
+for an ACP launch (audit then close); 5. agy live detection once agy works (todo
+note in Basic Memory). `helm.py brief` keeps its token format for fleet-watch; it
+now excludes handed-off (`finished`) sessions and includes ACP `done`/`reply` items.
