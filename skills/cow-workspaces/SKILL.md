@@ -38,13 +38,14 @@ Verified 2026-09-20:
    warns about *tracked* ones, keeps dependency dirs. `--keep-secrets` opts
    out. Credentials a task really needs go through `sudo-secretspec`.
 2. **`uchg` strands pastures.** Copied `.env` files are often user-immutable,
-   so `cow remove` fails. `cow-pasture remove <name>` runs
-   `chflags -R nouchg` first.
+   so `cow remove` fails. `cow-pasture remove <name>` (short name or
+   `<source>/<name>`) runs `chflags -R nouchg` first.
 3. **Orca can't see pastures** (own `.git` ⇒ absent from `git worktree
    list`). `--orca` runs `orca repo add --path <pasture>` so `worker-start
    --worktree path:<pasture>` resolves and the pasture groups under the
-   source's project. Cost: no CLI unregister exists; `cow remove` leaves a
-   dangling registration. Real fix: stablyai/orca#16226.
+   source's project. Removal: `cow-pasture remove <name>` unregisters it via
+   `orca project setup-delete --setup <repo-id>` (plain `cow remove` leaves a
+   dangling registration that Orca still resolves). Real fix: stablyai/orca#16226.
 
 ## Orca dispatch recipe
 
@@ -53,15 +54,27 @@ P=$(cow-pasture create task-foo --source ~/src/aiuse --orca)
 orca orchestration worker-start --spec "<task>" --worktree "path:$P" --agent codex --json
 ```
 
-**Claude workers stall on first launch.** Claude Code shows a folder-trust
-"Quick safety check" in any directory it has never seen (cursor on "No,
-exit"); `worker-start --agent claude` then fails at `agent_readiness`. Orca
-pre-trusts Codex, Cursor and Copilot (`src/main/agent-trust-presets.ts`) but
-has no Claude preset. Until the operator picks a mechanism (pre-seed
-`hasTrustDialogAccepted` in `~/.claude.json`, or an upstream preset), accept
-the dialog by hand in the Orca tab `worker-task_<id>` (Down, Enter), or
-dispatch `--agent codex`. Not cow-specific — cow just makes every dispatch a
-new directory.
+`worker-start` must run from a coordinator terminal: run
+`orca orchestration run-create --objective "<text>"` once first, or it fails
+with `consumer_fenced`.
+
+**Claude workers and folder trust.** Claude Code shows a folder-trust "Quick
+safety check" in any directory it has never seen, so `worker-start --agent
+claude` fails at `agent_readiness` (reproduced 2026-09-20). There is no flag
+or env var for it (the binary's only trust env vars are for Anthropic's cloud
+runner); the mechanism is `~/.claude.json` → `projects[<path>].
+hasTrustDialogAccepted = true`. `cow-pasture create` now pre-seeds that
+(atomic write, backup at `~/.claude.json.bak.cow-pasture`; `--no-trust` to
+skip), and a Claude worker then dispatches and completes normally. Tradeoff:
+the pasture's own `.claude/` settings, hooks and MCP config run without the
+prompt — acceptable for a clone of your own repo with secrets scrubbed, not
+for untrusted code. Codex, Cursor and Copilot are pre-trusted by Orca itself
+(`src/main/agent-trust-presets.ts`); Claude has no preset upstream.
+
+**graft.** Agent sessions write `graft/.cache/session/*.json` into the
+workspace. `create` adds `graft/.cache/` to the pasture's `.git/info/exclude`
+so the pasture is not "dirty", and `remove` deletes that untracked cache first
+so no `--force` is needed. Tracked `graft/` content is never touched.
 
 ## Limits
 

@@ -15,7 +15,8 @@ Sibling to [model-routing](../model-routing/SKILL.md), which decides *which
 vendor* runs work. This one decides *how much thinking* the current session
 spends. They are different problems and get confused constantly.
 
-Canonical source: `skills/effort-routing/SKILL.md` in djbclark-ade. Snapshot
+Canonical source: `skills/effort-routing/SKILL.md` in djbclark-ade
+(`~/src/djbclark-ade`; every TUI links to it through the skill-everywhere hub). Snapshot
 **2026-08-23**.
 
 ## The honest constraint
