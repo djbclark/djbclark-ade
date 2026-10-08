@@ -79,10 +79,11 @@ altitudes compose (a macro node can run a micro graph as its body).
   confirmed findings are fixed.
 - [skills/](skills/) — **the canonical git copies** (since 2026-10-08)
   of the orchestration and session-hygiene skills: `bigteam`,
-  `model-routing`, `effort-routing`, `helm`, `helm-all`, `session-finder`,
-  `session-finder-all`, `herdr-orchestration`, `ralph-tui-orchestration`,
-  `cow-workspaces`, `handoff`, `baton`, `resume`, `session-handoff`,
-  `steps`, `loose`, `skill-everywhere` (README.md has a one-line table).
+  `model-routing`, `effort-routing`, `helm`, `session-finder`,
+  `herdr-orchestration`, `ralph-tui-orchestration`, `cow-workspaces`,
+  `handoff`, `baton`, `session-handoff`, `steps`, `loose` (README.md has a
+  one-line table; `/helm-all`, `/session-finder-all` and `/resume` are thin
+  command wrappers in [claude/commands/](claude/commands/) since 2026-10-08).
   Every TUI reaches them as `~/ops/site-private/skills/<name>` →
   `~/ops/site-djbclark/skills/<name>` (an absolute symlink into this
   checkout), so **edit them here**, never through a TUI path. The other

@@ -150,7 +150,7 @@ ACP because key presses have proven fragile; never collide with other sessions.
    warm / 3 cold. One session's items stay adjacent. `--order attention` is the old
    order. Prior art checked: GitKraken's agent sessions view, Calyx's approval inbox
    and repomon's needs-you triage sort by state only; nobody weighs by expected run.
-3. `scan --ended` (the `helm-all` skill) adds handoff chains with next steps and no
+3. `scan --ended` (helm's ended mode, `/helm-all`; a separate `helm-all` skill until 2026-10-08) adds handoff chains with next steps and no
    live session in their repo, and transcripts that ended on a question.
 4. `session-finder/launch.py` starts sessions over ACP (`acp-run`) inside an Orca
    terminal or a herdr tab, reported to herdr with `pane report-agent`; `--baton`

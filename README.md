@@ -22,8 +22,8 @@ their old paths are symlinks into this checkout).
    drives any agent that speaks the Agent Client Protocol: one-shot, an
    `--interactive` loop in a visible pane, `--resume`, scoped permissions.
 4. **Skills, linked everywhere.** Each skill is one directory in
-   [`skills/`](skills/); [`skill-everywhere`](skills/skill-everywhere/SKILL.md)
-   symlinks it into every TUI's skills dir, so one edit here reaches all of
+   [`skills/`](skills/); the [`skill-everywhere`](https://github.com/djbclark/site-djbclark/blob/master/bin/skill-everywhere.md) script
+   (`~/ops/site-private/bin/skill-everywhere`, README beside it) symlinks it into every TUI's skills dir, so one edit here reaches all of
    them.
 
 ## The loop
@@ -49,8 +49,7 @@ their old paths are symlinks into this checkout).
    what is unfinished and walks it with [`steps`](skills/steps/SKILL.md);
    [`handoff`](skills/handoff/SKILL.md) writes the deep Tier 2 document,
    [`session-handoff`](skills/session-handoff/SKILL.md) the Tier 1 pointer,
-   and [`baton`](skills/baton/SKILL.md) / [`resume`](skills/resume/SKILL.md)
-   pick it up in a fresh session.
+   and [`baton`](skills/baton/SKILL.md) (also `/resume`) picks it up in a fresh session.
 5. **Fan out** — [`bigteam`](skills/bigteam/SKILL.md) slices a job into
    disjoint, file-scoped assignments and dispatches them across vendors by
    quota pool, then integrates the results.
@@ -76,20 +75,16 @@ their old paths are symlinks into this checkout).
 | [`bigteam`](skills/bigteam/SKILL.md) | Run a prompt as a multi-vendor fan-out: probe every quota pool, slice into file-scoped assignments, dispatch, integrate. |
 | [`model-routing`](skills/model-routing/SKILL.md) | Which vendor × model × effort for which work; reading `aiuse` pools. |
 | [`effort-routing`](skills/effort-routing/SKILL.md) | Match this session's own reasoning effort to the stretch of work in front of it. |
-| [`session-finder`](skills/session-finder/SKILL.md) | Which live session is on a topic, where it lives, and how the work continues (`fleet.py`, `launch.py`). |
-| [`session-finder-all`](skills/session-finder-all/SKILL.md) | The same, including ended sessions, handoff chains and memory. |
-| [`helm`](skills/helm/SKILL.md) | Answer every waiting session of every TUI from one window, ranked by work unlocked (`helm.py`). |
-| [`helm-all`](skills/helm-all/SKILL.md) | helm plus ended sessions that still hold open work. |
+| [`session-finder`](skills/session-finder/SKILL.md) | Which session is or ever was on a topic (live or ended, handoff chains, memory; `/session-finder-all` searches everything), where it lives, and how the work continues (`fleet.py`, `launch.py`). |
+| [`helm`](skills/helm/SKILL.md) | Answer every waiting session of every TUI from one window, ranked by work unlocked (`helm.py`); `/helm-all` adds ended sessions that still hold open work. |
 | [`herdr-orchestration`](skills/herdr-orchestration/SKILL.md) | Drive a multi-agent handoff chain through herdr panes instead of clipboard relays. |
 | [`ralph-tui-orchestration`](skills/ralph-tui-orchestration/SKILL.md) | The Ralph TUI + Beads multi-repo controller (dormant since 2026-08-23). |
 | [`cow-workspaces`](skills/cow-workspaces/SKILL.md) | Isolated agent workspaces as APFS `cow` pastures (`bin/cow-pasture`), not worktrees. |
 | [`handoff`](skills/handoff/SKILL.md) | Deep Tier 2 handoff document, chain-tagged and mined from the whole conversation. |
 | [`session-handoff`](skills/session-handoff/SKILL.md) | Read/write the out-of-tree Tier 1 session pointer for any git repo. |
-| [`resume`](skills/resume/SKILL.md) | Start-of-session resume from the Tier 1 pointer. |
-| [`baton`](skills/baton/SKILL.md) | Alias for `/resume`. |
+| [`baton`](skills/baton/SKILL.md) | Start-of-session resume from the Tier 1 pointer (`/baton`, `/resume`). |
 | [`loose`](skills/loose/SKILL.md) | Audit the session for loose ends, step through them, then offer `/handoff` or quit. |
 | [`steps`](skills/steps/SKILL.md) | Walk open items one multiple-choice prompt at a time, recommendation first. |
-| [`skill-everywhere`](skills/skill-everywhere/SKILL.md) | Link a skill into every agent TUI and prove each one loads it. |
 
 ## Install (this machine)
 
@@ -105,6 +100,9 @@ ln -s ../../site-djbclark/skills/<name> ~/ops/site-private/skills/<name>
 ~/ops/site-private/bin/skill-everywhere <name>          # link into every TUI
 ~/ops/site-private/bin/skill-everywhere --check <name>  # verify
 ```
+
+How each TUI finds skills, and how to prove one loaded: the script's
+[README](https://github.com/djbclark/site-djbclark/blob/master/bin/skill-everywhere.md).
 
 `acp-run` is on PATH as `~/.local/bin/acp-run` → `~/ops/site-private/bin/acp-run`
 → `~/ops/site-djbclark/tools/acp-run/acp-run` → here; `fleet-watch`'s launchd
