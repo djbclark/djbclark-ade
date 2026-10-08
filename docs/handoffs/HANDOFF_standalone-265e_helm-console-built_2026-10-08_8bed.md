@@ -68,10 +68,14 @@ token-efficiently. Built 2026-10-06 as the `helm` skill; design record `docs/hel
 3. The `sk-…` string in a 2026-07-22 opencode transcript: "already rotated, ignore".
 
 ## Where We're Going
-1. **Telegram `/helm` regression** — find Hermes CLI session `20261008_100648` with
-   `python3 -I ~/ops/site-private/skills/session-finder/session-history.py --agent hermes skill-slash`
-   and read what it changed in `~/.hermes/plugins/skill-slash/`; then send `/helm` and `/steps`
-   on Telegram to verify. Do not grant `tools.override` or restart the gateway for this.
+1. **Telegram `/helm` regression** — djbclark restarted the gateway at 11:27 on 2026-10-08
+   and `/helm`, `/steps`, `/skill` still fail. agent.log 11:27:58: "Telegram menu: 60
+   commands registered, 100 hidden (over 60 limit)" — the 60-command cap or a collision
+   with the core's per-skill auto-registration is the lead, not `tools.override`. A
+   detached Hermes one-shot (`hermes --yolo -z`, pid 59939, log
+   `~/.local/state/helm/telegram-commands-fix.log`, prompt beside it) owns the fix and
+   reports to the Telegram Inbox. Check that log first; if it failed, rerun the prompt file
+   with `hermes --yolo -z "$(cat ~/.local/state/helm/telegram-commands-prompt.txt)"`.
 2. site-djbclark: nothing pending; the handoff-skill commit reached origin as `c692119`
    (a peer rebased the shared checkout).
 3. Run the Telegram `clarify` walk of `/helm` once it works (`docs/helm.md` Open #3).
