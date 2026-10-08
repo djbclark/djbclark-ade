@@ -171,7 +171,7 @@ Hermes also built a high-speed local Gmail search (FTS5 SQLite index of the
 complete mailbox at `~/.hermes/gmail_index_v2.db`, ~100ms queries, kept fresh
 by a Hermes cron job every 5m). It is **not** exposed through `hermes mcp
 serve` — access is the plain CLI, documented in the
-[gmail-search skill](../skills/gmail-search/SKILL.md) (deployed at
+gmail-search skill, `~/ops/site-djbclark/skills/gmail-search/SKILL.md` (deployed at
 `~/.claude/skills/gmail-search/`).
 
 ## Graft statusline: "graft · not built" in this repo is cosmetic
