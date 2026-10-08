@@ -2,6 +2,10 @@
 
 Operator preference, set 2026-07-28.
 
+This file covers geometry inside a tab. Which workspace and tab a pane
+lives in, and what workspaces, tabs, panes and agents are called, is in
+[workspace-layout.md](workspace-layout.md).
+
 - Never close a pane/tab. Minimize/shrink instead. The
   `~/.herdr-wrapper/bin/herdr` wrapper (see "Orchestrator tab identity and
   self-closure defense" in [SKILL.md](../SKILL.md#orchestrator-tab-identity-and-self-closure-defense))
