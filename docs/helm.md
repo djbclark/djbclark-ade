@@ -120,14 +120,16 @@ Verified 2026-10-06 with one real check in a launchd-like environment.
    Hermes skill plus Collie for now.
 2. Exercise the Orca and tmux channels.
 3. Run the `clarify` button walk once on Telegram.
-4. **Telegram regression (2026-10-08):** after the Hermes upgrade to
-   `ad9678e6`, user-plugin commands need the `tools.override` capability
-   (`hermes_cli/plugin_capabilities.py`); `skill-slash` declares none, so
-   `/helm`, `/steps` and `/skill` are gone from Telegram (`agent.log`:
-   `decision=deny … not granted`). The new core also auto-registers skills as
-   `/<name>`. Handed to the session doing the gateway reboot
-   (`hermes-worktrees-e5`); fix = grant the capability or retire the plugin,
-   then restart the gateway, then send `/helm` on Telegram to verify.
+4. **Telegram regression (2026-10-08):** `/helm`, `/steps` and `/skill` stopped
+   working on Telegram. My first diagnosis (a `tools.override` capability gate
+   after the Hermes upgrade) was **wrong**: `hermes-worktrees-e5` verified
+   read-only that the `decision=deny` lines are a discovery-pass log written
+   for every user plugin, that `register_command` is not gated by it, and
+   that neither the gateway code nor `plugins:` config changed. What is true:
+   a Hermes CLI session `20261008_100648` was editing
+   `~/.hermes/plugins/skill-slash/__init__.py` at 10:06, so the plugin is
+   mid-edit by another session. Next step: find that session
+   (session-finder), not a capability grant or a gateway restart.
 
 ## 2026-10-08 — every TUI, ranked walk, ended sessions, ACP launches
 
