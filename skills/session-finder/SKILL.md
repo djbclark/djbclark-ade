@@ -2,14 +2,15 @@
 name: session-finder
 description: >-
   Find which agent session (Claude Code, Codex, Hermes, Cursor, opencode, crush,
-  Cline, Copilot, Qwen, muse, zcode, agy, or one started over ACP) is on a topic,
-  say where it lives (herdr workspace/tab/pane, Orca terminal, tmux, Ghostty),
-  and decide how work on that topic continues: message the running session,
-  start a fresh /baton session from its handoff, resume a stopped one, or start
-  a clean agent on the right vendor, model and effort — without colliding with
-  what other sessions are doing. Use when the operator says "tell the agent
-  doing X ...", "which session is on X", "continue the X work", "find the
-  session where we did X", or any relay to a session whose name you do not know.
+  Cline, Copilot, Qwen, muse, zcode, agy, ACP launches) is or ever was on a
+  topic, running or ended, plus handoff chains and memory; say where it lives
+  (herdr/Orca/tmux/Ghostty) and how the work continues: message it, start a
+  /baton session from its handoff, resume it, or brief a clean agent on the
+  right vendor, model and effort, without colliding with other sessions. Use
+  when the operator says "tell the agent doing X ...", "which session is on X",
+  "which session did X", "did we ever look at X", "continue the X work", "find
+  the session where we did X", "what happened to the X work", types
+  /session-finder-all, or any relay to a session whose name you do not know.
 ---
 
 # session-finder — which session, where, and how the work continues
@@ -26,9 +27,10 @@ python3 -I $S/fleet.py [list|show <id>|ended|conflicts --cwd DIR]   # the fleet 
 python3 -I $S/launch.py --agent A --cwd DIR --model M [--baton] -p "..."   # start a session (ACP-first)
 ```
 
-Sibling skills: `session-finder-all` (search everything that ever ran, including
-ended sessions and handoffs), `helm` / `helm-all` (answer every waiting session
-from one window), `bigteam` (fan a task out), `model-routing` (which vendor).
+Sibling skills: `helm` (answer every waiting session from one window; `/helm-all`
+adds ended sessions), `bigteam` (fan a task out), `model-routing` (which vendor).
+Searching everything that ever ran, not only what is running, is section 1.6
+here (`/session-finder-all` loads this skill for it).
 
 ## 1. Search
 
@@ -50,6 +52,29 @@ from one window), `bigteam` (fan a task out), `model-routing` (which vendor).
    project `main`; a semantic hit is not a match — confirm with `find` or an exact
    `read_note`).
 5. This session is tagged `(this session)`; never message it.
+6. **Everything that ever ran** (`/session-finder-all`, "which session did X",
+   "did we ever look at X", "what happened to the X work", or when step 1 found
+   no running session on the topic): cast the net widest first, then narrow.
+   a. `session-history.py` with 1–3 distinctive words (prefix matching and
+      stemming are on); `--agent <a> --limit 20` to narrow. Raise `--limit`
+      before loosening the words.
+   b. `fleet.py ended --days 30`: open items the transcripts do not show (a
+      handoff chain whose next steps nobody took, a session that ended on a
+      question).
+   c. `launch.py list` (ACP sessions this tooling started) and `ls -t
+      ~/.local/state/handoffs/chains/ | head` (chains, newest first).
+   d. Basic Memory as in step 4: handoff notes under `memory/handoffs/<repo>/`,
+      project notes, todos.
+   e. `~/ops/site-djbclark/bin/s1_search.py search '<phrase>' --mode trigram`
+      for a verbatim line you remember (session-handoff skill, reader step 4).
+
+   Prefer the session whose **latest** prompt is about the topic over one that
+   only mentioned it; two close candidates: name both and ask. Then section 3
+   as usual: a live hit is rung a/b, a handoff chain rung c (name it with
+   `--chain` when `fleet.py ended` shows more than one for that repo), and an
+   old transcript is evidence for a rung-e brief, not something to replay.
+   This finds sessions and says how to continue them; walking open items and
+   sending answers is `helm` (`/helm-all`).
 
 ## 2. Say where it lives (always, when you report)
 
@@ -62,6 +87,9 @@ finders call it and cache the result an hour (`locations` table in the history D
 **Give three things:** the session name, its title, and the `where:` line with the
 `focus:` command. `one-offs-91 "CCC slow performance" — herdr ws shells#6 · tab
 11#78 · pane claude (focus: herdr tab focus w27:t2E)`.
+For an **ended** session give agent + session id, title, its last activity time
+and transcript size (they decide rung 3d versus 3e), and end with the command
+you recommend, ready to run.
 
 ## 3. Decide how the work continues — cheapest adequate first
 

@@ -1,17 +1,17 @@
 ---
 name: helm
 description: >-
-  Run every agent session from one window. A no-model collector finds each
-  running session of every TUI (herdr panes of any agent, Orca terminals, tmux,
-  the Claude Code registry, Hermes chats, sessions started over ACP) that is
-  waiting on the operator, reads its pending question verbatim, orders the walk
-  so each answer frees the most unattended work, and this skill relays one
-  item per prompt titled with the project and where it lives, sends the answer
-  back, and has idle sessions audit themselves with /loose. Use when the
-  operator types /helm, says "take the helm", "run the fleet from here", "what
-  needs me", "what is waiting on me", or asks to answer other sessions' prompts
-  from this window (AskUserQuestion on Claude-class agents; clarify / Telegram
-  buttons on Hermes). /helm-all adds ended sessions with open work.
+  Answer every agent session that is waiting on the operator from one window: a
+  no-model collector finds each waiting session of every TUI (herdr, Orca, tmux,
+  Claude registry, Hermes, ACP launches), and this skill relays one item per
+  prompt (AskUserQuestion; clarify on Hermes), sends the answer back, and has
+  idle sessions audit themselves with /loose; with "all" it adds ended sessions
+  that still hold open work (handoffs nobody picked up, unanswered last
+  questions). Use when the operator types /helm or /helm-all, says "take the
+  helm", "run the fleet from here", "what needs me", "what is waiting on me",
+  "what is open anywhere", "including stopped sessions", "what did we leave
+  hanging", or wants to answer other sessions' prompts or restart handed-off
+  work from one window.
 ---
 
 # helm — every waiting session, one prompt at a time
@@ -27,7 +27,7 @@ windows only when an item needs more depth than a prompt can carry.
 ```bash
 H="python3 -I $HOME/ops/site-private/skills/helm/helm.py"
 L="python3 -I $HOME/ops/site-private/skills/session-finder/launch.py"
-$H scan                      # open items, every TUI, ranked (--all: every session; --ended: helm-all; --order attention: old order)
+$H scan                      # open items, every TUI, ranked (--all: every session; --ended: section 7; --order attention: old order)
 $H wait --auto-audit         # block until something new needs him
 $H answer <id> <n>           # pick option n; one number per question
 $H answer <id> --text "..."  # free-text answer to a single question
@@ -98,7 +98,7 @@ Hermes; never numbered prose). One item per call.
    or `/quit`. It is not audited and not messaged. Offer: Start a /baton session
    in its repo now (`$L --baton --cwd <dir> --agent claude --model <M> --pane
    <its pane> -p "<next step he names>"`), Skip, or Leave it. Ended sessions
-   with open work are `helm-all`'s job (`scan --ended`).
+   with open work come only with `scan --ended` (section 7).
 
 **Never choose for him.** Not the recommended option, not an obvious one.
 Helm relays; the answer is his. Never relay around a permission denial.
@@ -160,8 +160,42 @@ notification arrives, relay them (section 2) and start it again.
 4. Sessions come from `session-finder/fleet.py` (2026-10-08): herdr, the Claude
    registry, a process scan, Hermes `state.db`, `launches.jsonl`. agy is
    history-only until it works again (todo note).
-4. Keys sent when no prompt is on screen land in the input box. `answer`
+5. Keys sent when no prompt is on screen land in the input box. `answer`
    checks the screen first; `keys` checks only that the session is blocked.
+
+## 7. Ended sessions (`/helm all`, `/helm-all`, `--ended`)
+
+Ended mode is this skill with ended sessions added to the queue. Use it when he
+types `/helm-all` (a Claude command and a Hermes command, both loading this
+skill), `/helm all`, passes `--ended`, or asks what is open anywhere,
+including stopped sessions. Everything above applies unchanged; only the
+collector call and two item kinds differ.
+
+1. **Start** with `$H scan --ended [--days 14]` instead of `$H scan`, shown the
+   same way (project, kind, where or "ended", `~N min unlocked`). Ended items
+   appear only when they hold open work (`helm.py` → `fleet.ended_open`): a
+   `handoff` whose Next steps are non-empty and whose repo has no live session,
+   or an `ended-question`. Walk them in the order printed, then `$H wait
+   --auto-audit` (section 3); ended items do not change on their own, so rerun
+   `scan --ended` when he asks what else is open, not on a timer.
+2. **`handoff`** — a chain with next steps and nobody live in its directory.
+   Offer exactly: **Start a /baton session now** (first; say the agent and model
+   you would pick per session-finder's vendor rules), **Skip** (`$H skip <id>`),
+   or **Leave it**. On start: `$L --baton --cwd <dir> --agent <A> --model <M>
+   --name "<project>: <active work>" -p "<the next steps, verbatim from the item,
+   plus anything he adds>"`. Run `fleet.py conflicts --cwd <dir>` first;
+   launch.py refuses when another session is working there — relay that instead.
+3. **`ended-question`** — a session that stopped on a question nobody answered.
+   Relay the question as the prompt text with options **Answer in a fresh
+   session** (`$L --agent claude --cwd <dir> --model <M> -p "<the question> —
+   operator's answer: <his text>; continue from there"`), **Resume it** (only
+   when the item's transcript size is under 2 MB, see session-finder 3d; give
+   the `claude --resume` command for him to run in the pane he picks), **Skip**.
+4. Started sessions come back through the queue as `done` or `reply` items
+   (section 2.5), so the walk continues without you watching them.
+5. Ended items are read from logs and transcripts only; nothing is re-opened
+   until he says so. Do not summarise a handoff beyond its Active-work line and
+   next steps as printed.
 
 ## What this is not
 

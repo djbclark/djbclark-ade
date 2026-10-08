@@ -70,63 +70,18 @@ only when it is older than that, or when the choice hinges on a pool that is nea
 empty or past its reset time since the snapshot. History: every collect is kept in
 `~/.cache/aiuse/snapshots/` (and `ledger/`), so trends need no live call either. A pool missing from the list is exhausted or
 suppressed: `aiuse --json -q | jq -r '.summary_lines[]'` shows every pool,
-including the exhausted ones. Either way, preflight each target (item 5 below),
+including the exhausted ones. Either way, preflight each target (*Reading the numbers* below),
 because no snapshot sees a pool drained in the last few minutes.
 (`~/ops/site-private/bin/aiuse-pools` is a thin wrapper for the same command.)
 
 ### Reading the numbers — a misreading here already cost a dispatch round
 
-`aiuse --available` and `aiuse --json` now encode items 1-3 in their output
-(`state`, `usable_now`, `binding_window`, `pool_family`, "used / left" pairs), so
-read those rather than re-deriving; the rules stay here for raw numbers from any
-other source.
-
-1. **`used_percent` is the share CONSUMED; 100 means empty.** Decide from
-   `remaining_percent`, and never print or quote a bare percentage. On
-   2026-10-03 `Codex 5-hour quota: 100` was read as "100% free" and a review was
-   dispatched to an exhausted codex.
-2. **An account is usable only if EVERY one of its windows has headroom** — the
-   fullest window binds. Codex at 100% used on its 5-hour window and 35% on its
-   weekly is unusable for the next ~5 hours, however healthy the weekly looks.
-3. **One TUI can hold several independent pools, one per model family.** agy has
-   a Gemini pool and a separate Claude/GPT pool; Claude has the ordinary and the
-   Fable buckets; Cursor has Auto/included and "other models". A 429 is a
-   statement about the pool that model draws on, not about the vendor. **Before
-   reassigning a slice away from a vendor, retry it on a model from that
-   vendor's other pool** (agy: a `gemini-*` model when a `claude-*` or `gpt-*`
-   one returns `RESOURCE_EXHAUSTED`; `agy models` lists both). On 2026-10-03 the
-   agy Claude/GPT pool was depleted while its Gemini pool had plenty left, and
-   the slice was wrongly moved to another vendor. Pick the model by which pool
-   is fresh, not only by which is strongest.
-4. **Pool state moves within a session.** agy's Claude/GPT 5-hour window read
-   0% used at probe time and was exhausted about 35 minutes later (weekly went
-   0% to ~51%). That coincided with one Opus-high review dispatched to it, but
-   other sessions also use agy, so the cause is inferred, not verified. Re-probe
-   before every batch, not once per session, and treat a small pool as one that a
-   single heavy slice may be able to spend.
-5. **Preflight each target** before a batch: one trivial call through the exact
-   invocation and model you will use (`... "Reply with exactly: OK"`). Any
-   `usage limit`, `RESOURCE_EXHAUSTED` or 429 in the reply means that pool is
-   spent: note the reset time it prints, then use the sibling pool or reassign.
-6. **agy has a burst limit that `aiuse` cannot see, and its CLI and ACP clients
-   fail independently** (incident 2026-10-03). Every `agy` CLI request got an
-   instant 429 from 15:42 to past 23:50 while `aiuse` showed Gemini 5h 100% left
-   and Claude+GPT 5h 100% left, and `acp-run agy` on the same account answered in
-   6.5 s. Cause (inferred): about 304 CLI generation requests in 12:00 to 14:59
-   against a prior busiest hour of 68; one `claude-opus-5-5-high` review was 47
-   requests alone. So for an agy slice: **a)** budget roughly **60 requests an hour
-   per login** (a tool-using turn is many requests), so one review an hour, not a
-   fan-out; **b)** dispatch **only via `acp-run agy` — `agy -p` is not a
-   fallback** (2026-10-04: the CLI surface stayed 429-locked 18+ hours with the
-   Gemini 5h window 99% unused, through repeated re-logins — the throttle is
-   client-keyed and survives login — while ACP worked throughout); **c)** send
-   **no probe loops**, preflight
-   once per batch and reuse the answer; **d)** keep Opus-high off agy except where
-   nothing else fits (the Claude/GPT pool is small); **e)** if one client 429s while
-   `aiuse` shows headroom, try the other client before reassigning; **f)** a log
-   line `attempt N failed (RESOURCE_EXHAUSTED` in
-   `~/.gemini/antigravity-cli/log/cli-*.log` is a fast fail, not a hang, so stop
-   and reassign. Detail: `model-routing` ("agy has a burst limit").
+Read every number per `model-routing`'s *Reading quota numbers* and *agy has a
+burst limit* (the one copy of those rules): used is consumed, the fullest window
+binds, one TUI can hold several model-family pools (retry the vendor's other
+pool before reassigning), re-probe before each batch, preflight each target
+with `"Reply with exactly: OK"`, and agy only via `acp-run agy`, no probe loops.
+`aiuse --available` already encodes the first three in its output.
 
 Classify every pool before assigning anything:
 

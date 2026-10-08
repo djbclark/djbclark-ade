@@ -2,7 +2,7 @@
 """Find which live Claude Code session is working on a topic.
 
     session-find.py ccc slowness            # rank live sessions by keyword match
-    session-find.py --all ccc               # include ended sessions (for /resume)
+    session-find.py --all ccc               # include ended sessions (for /baton or a resume)
     session-find.py --json ccc              # machine-readable
     session-find.py --list                  # every live session, no query
     session-find.py --reindex               # rebuild every index from scratch

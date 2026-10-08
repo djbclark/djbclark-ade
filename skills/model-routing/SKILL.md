@@ -73,15 +73,22 @@ any raw number from another source.
    vendor. Retry on a model from the vendor's other pool before declaring the
    vendor spent (agy: a `gemini-*` model when a `claude-*`/`gpt-*` one is
    exhausted, and vice versa), and pick the model by which pool is fresh, not
-   only by which is strongest.
+   only by which is strongest. On 2026-10-03 the agy Claude/GPT pool was
+   depleted while its Gemini pool had plenty left, and a bigteam slice was
+   wrongly moved to another vendor.
 4. **State moves within a session.** agy's Claude/GPT 5-hour window read 0% used
    at probe time and was exhausted ~35 minutes later (weekly 0% to ~51%), around
    the time one Opus-high review ran on it; other sessions use agy too, so the
-   cause is inferred. Re-probe before each batch.
+   cause is inferred. Re-probe before each batch, not once per session, and
+   treat a small pool as one that a single heavy slice may be able to spend.
 5. **Preflight** each target with one trivial call through the exact invocation
    and model about to be used (`"Reply with exactly: OK"`); `usage limit`,
    `RESOURCE_EXHAUSTED` or 429 means that pool is spent. Note the reset time the
-   error prints.
+   error prints, then use the sibling pool or reassign.
+
+This section and *agy has a burst limit* below are the one copy of these rules;
+`bigteam` Step 1 points here. bigteam keeps the pool classes, *Reserve pools*
+and *Current exclusions*.
 
 ### agy has a burst limit that `aiuse` cannot see (incident 2026-10-03)
 
@@ -293,18 +300,11 @@ Herdr-hosted TUIs (driving agents in Herdr panes; verified 2026-09-26):
 2. Claude/codex for judgment and agentic work; tier inside them (haiku/
    low for mechanical, fable/xhigh for hardest adjudication — Fable has
    its own weekly bucket).
-3. **Reserve pools: never run them out.** clinepass (Hermes runs on it
-   via LiteLLM :4000), used carefully, and the `grok` TUI's SuperGrok pool
-   (GrokBot runs on it), which is **excluded for now** (operator, 2026-10-06:
-   no `grok` TUI, `acp-run grok` or LiteLLM `grok-sub`; see bigteam's *Current
-   exclusions*). Grok *models* through another TUI bill that TUI's pool
-   instead and stay allowed. Claude gets the same care:
-   use it, but orchestration runs from it, so an empty Claude window stops
-   every other agent too. Detail: the `bigteam` skill's *Reserve pools*.
-   **Copilot** is a lighter case: it shares a subscription with GitHub-side
-   Copilot features (code review on `master`), so spend it modestly, small
-   slices, GitHub-shaped work only; much less caution than clinepass.
-   Never prepaid without an explicit fresh operator decision.
+3. **Reserve pools and exclusions:** clinepass (Hermes runs on it), Claude
+   itself (orchestration runs from it), Copilot's shared allowance, and the
+   grok-vendor exclusion — the one copy is `bigteam`'s *Reserve pools* and
+   *Current exclusions*. Never prepaid without an explicit fresh operator
+   decision.
 4. Levers: `acp-run <agent> --model <m> [--mode <m>]` for one-shot calls
    to ACP-capable agents (`--info` lists the values); Claude workflows
    `agent(..., {model, effort})`; Orca
