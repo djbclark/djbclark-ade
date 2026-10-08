@@ -488,15 +488,6 @@ the zcode TUI, not Hermes.
 
 ## Also outstanding (raised, not formally queued)
 
-- **⚠ Rotate three API keys — OpenRouter, DeepSeek, ClinePass.** Operator
-  deferred this ~2 days on 2026-08-23. The bank purge is **done**, but
-  rotation is what actually closes the incident: the full keys live in
-  on-disk session transcripts under `~/.claude/projects/`, which the purge
-  does not touch. The auto-refreshing mental model that was re-spreading the
-  token has been cleared, so it is no longer getting worse.
-- **Purge the Postgres LLM-request log** — 11 `refresh_mental_model` rows
-  hold the token. No API endpoint exists; direct SQL against the `hindsight`
-  database. Left for the same window as rotation.
 - **Restart the `hindsight` MCP server** in any long-running session started
   before 2026-08-23 20:00 — it caches the bank it launched with and will keep
   writing to `hermes-shared`. New sessions are fine.
