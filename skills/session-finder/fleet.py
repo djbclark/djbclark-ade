@@ -450,14 +450,35 @@ def launches():
     return list(out.values())
 
 
+POST_TURN_QUIET = 600   # seconds of no agent activity before post-turn text counts as idle
+_ACTIVITY = {"agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan"}
+
+
+def _post_turn_quiet(d, last_act):
+    """True when an interactive launch's post-turn output has stopped: no agent activity for
+    POST_TURN_QUIET seconds and herdr (when it hosts the pane) does not show a new turn running."""
+    if not last_act or time.time() - last_act < POST_TURN_QUIET:
+        return False
+    host = d.get("host") or {}
+    if host.get("kind") in ("herdr", "herdr-tui") and host.get("pane"):
+        ag = herdr_json("agent", "get", host["pane"]).get("agent") or {}
+        if ag.get("agent_status") == "working":
+            return False
+    return True
+
+
 def launch_state(d):
     """State of an ACP session launch.py started, from its acp-run log. Non-interactive: working
     until the result record, then idle (exited) with the final text. Interactive (acp-run
     --interactive): a `turn` record ends each turn; after one the process waits for input, so
-    the session is idle-and-alive until the runner appends its exit line. Text ending in a
+    the session is idle-and-alive until the runner appends its exit line. An agent can keep
+    going after its turn ends with no new prompt (a background task's notification, a /loose
+    it runs on itself): that text gets no closing `turn` record, so it counts as idle once the
+    agent has been quiet for POST_TURN_QUIET seconds, unless herdr shows the pane working (a
+    new prompt; acp-run reports working only at a turn's start). Text ending in a
     question -> blocked (needs an answer). Returns (status, last turn's text, result or None)."""
     log = Path(d.get("log") or "")
-    cur, turns, result = [], [], None
+    cur, turns, result, last_act = [], [], None, 0.0
     if log.exists():
         for line in log.read_text(errors="replace").splitlines():
             try:
@@ -465,6 +486,8 @@ def launch_state(d):
             except ValueError:
                 continue
             k, data = r.get("kind"), r.get("data") or {}
+            if k == "update" and data.get("sessionUpdate") in _ACTIVITY:
+                last_act = r.get("t") or last_act
             if k == "update" and data.get("sessionUpdate") == "agent_message_chunk":
                 cur.append((data.get("content") or {}).get("text") or "")
             elif k == "new_session" and data.get("sessionId"):
@@ -486,6 +509,8 @@ def launch_state(d):
         result = result or {"exit": d.get("exit")}
     elif turns and not "".join(cur).strip():
         status = "blocked" if final.rstrip().endswith("?") else "idle"   # between turns, waiting for input
+    elif turns and d.get("interactive") and _post_turn_quiet(d, last_act):
+        status = "blocked" if final.rstrip().endswith("?") else "idle"   # unprompted post-turn text, now quiet
     else:
         status = "working"
     d["turns"] = len(turns)

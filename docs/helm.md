@@ -171,13 +171,13 @@ SIGINT; a separate group was stopped by SIGTTIN/SIGTTOU in reused panes) — ver
 sessions, moot for ACP launches); 3. run the Telegram `clarify` button walk of /helm
 once; 4. observe `wait --auto-audit` firing unattended, for a Claude TUI session and
 for an ACP launch (audit then close); 5. agy live detection once agy works (todo
-note in Basic Memory); 6. **`fleet.launch_state` misreports an idle interactive
-launch as `working` forever** (found 2026-10-08 on launch
-`20261008-120402-claude-0610`): after its `turn` record the agent kept going
-unprompted (background notifications, `/loose`, final report: 454 more `update`
-records, no new prompt and no closing `turn`), so `cur` is non-empty and status
-stays `working` though herdr shows the pane `idle`. `list`, `close` (needed
-`--force`) and helm all read it. Proposed fix, not yet approved: text after the
-last `turn` with no new prompt counts as idle when herdr reports the pane idle.
-`helm.py brief` keeps its token format for fleet-watch; it
+note in Basic Memory); 6. ~~**`fleet.launch_state` misreported an idle interactive launch as `working`
+forever**~~ fixed 2026-10-08: after its `turn` record an agent can keep going
+unprompted (launch `20261008-120402-claude-0610`: background notifications, `/loose`,
+final report, 454 more `update` records, no closing `turn`). Post-turn text now
+counts as idle after `POST_TURN_QUIET` (600 s) with no agent activity, unless herdr
+shows the pane working (acp-run reports working only at a turn's start, idle at its
+end, so herdr idle alone does not prove quiet). Checked on every launch in
+`launches.jsonl`: only `20261008-144706-claude-8286` changed (working → idle; quiet
+17 min, herdr `done`). `helm.py brief` keeps its token format for fleet-watch; it
 now excludes handed-off (`finished`) sessions and includes ACP `done`/`reply` items.
