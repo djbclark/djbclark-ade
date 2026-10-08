@@ -20,6 +20,7 @@ layer on top of that.
 - [references/orc-restart-watchdog.md](references/orc-restart-watchdog.md) — read when orc's context is growing large, or when setting up or running the orc-meta watchdog.
 - [references/quota-pacing.md](references/quota-pacing.md) — read before routing work to a model or account, before any Fable launch, and before any `cswap` switch.
 - [references/pane-layout.md](references/pane-layout.md) — read before arranging, resizing, swapping or reading panes (Workflow per unit step 3).
+- [references/workspace-layout.md](references/workspace-layout.md) — read before renaming workspaces, moving panes between workspaces, or relabelling tabs/panes/agents in bulk (the first-principles re-arrangement; `relocate-pane.sh` cycles a sleeping pane).
 - [references/yolo-mode-by-tool.md](references/yolo-mode-by-tool.md) — read when starting a sub-agent (Workflow per unit step 4), and when one looks stalled rather than slow.
 - [references/herdr-cli-gotchas.md](references/herdr-cli-gotchas.md) — read when scripting herdr calls headlessly (new workspaces, `send-keys`, parsing output, `/exit` and resume).
 - [references/anti-patterns.md](references/anti-patterns.md) — read before writing a sub-agent prompt, trusting its report, merging its PR, or bulk-closing panes.
