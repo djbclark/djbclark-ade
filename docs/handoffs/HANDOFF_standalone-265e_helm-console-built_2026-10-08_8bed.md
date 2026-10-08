@@ -72,10 +72,8 @@ token-efficiently. Built 2026-10-06 as the `helm` skill; design record `docs/hel
    `python3 -I ~/ops/site-private/skills/session-finder/session-history.py --agent hermes skill-slash`
    and read what it changed in `~/.hermes/plugins/skill-slash/`; then send `/helm` and `/steps`
    on Telegram to verify. Do not grant `tools.override` or restart the gateway for this.
-2. **site-djbclark push blocked** — commit `cfa9f45` (handoff Step 0 + loose silent mode)
-   is local only: origin moved and `git pull --rebase` refuses because coord has unstaged
-   edits in `skills/session-finder/`. When `git -C ~/ops/site-djbclark status` shows those
-   committed, run `git -C ~/ops/site-djbclark pull --rebase && git push`.
+2. site-djbclark: nothing pending; the handoff-skill commit reached origin as `c692119`
+   (a peer rebased the shared checkout).
 3. Run the Telegram `clarify` walk of `/helm` once it works (`docs/helm.md` Open #3).
 4. Coord owns: Orca/tmux key channels, `wait --auto-audit` live, helm-all. Nothing here.
 5. Not mine, left alone: `~/ops/site-private/memory/memory/` (stray untracked dir),
