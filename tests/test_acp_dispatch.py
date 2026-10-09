@@ -43,14 +43,20 @@ FAKE = textwrap.dedent("""\
     """)
 
 
-def run(args, env=None, cwd=None):
+def run(args: list[str], env: dict[str, str] | None = None,
+        cwd: str | None = None) -> subprocess.CompletedProcess[str]:
     e = dict(os.environ)
     e.update(env or {})
     return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, env=e, cwd=cwd)
 
 
 class Base(unittest.TestCase):
-    def setUp(self):
+    tmp: Path
+    fake: Path
+    out: Path
+    repo: Path
+
+    def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="acpd-"))
         self.fake = self.tmp / "acp-run"
         self.fake.write_text(FAKE)
