@@ -254,7 +254,27 @@ until the work is committed or recorded in a repo.
    one-line summary: stop reason, tool calls, permissions allowed/denied,
    tokens, cost.
 4. Exit 124 is a timeout (acp-run cancels the session first); exit 1 is an
-   agent error or other stop reason.
+   agent error or other stop reason (`stop=cancelled` in `sum-<name>.txt` with
+   exit 1 is the same timeout, reported by the adapter).
+5. **Budget the timeout from the work, and put the report before optional
+   checks.** A slice that runs the test suite N times under load needs
+   N × (suite time + `bg`'s load wait, minutes when load is high) on top of the
+   edits; 1500 s does not cover a six-finding fix plus a per-finding mutation
+   check (2026-10-08: the D-fix slice on herdr-sleeper was cancelled at 1704 s
+   in its mutation check, after 683 tests had passed, and the report, the last
+   step of the brief, was never written). So: order every brief **edits →
+   tests → write the report → optional verification (mutation checks, extra
+   ruff passes) → update the report**, and give expensive verification its own
+   slice when the count of suite runs is more than two. Prefer `--timeout 2400`
+   over a tight one for an edit-and-test slice; the cost of a cancel is the
+   whole report.
+6. **A cancelled slice is resumed, not re-tasked.** The session id is in the
+   `--log` file (`"sessionId"` in the result event). `acp-run <agent> -C <repo>
+   --resume <id> --model <m> --perm deny --timeout 600 -p "write your report
+   now from what you already did; edit nothing"` gets the real report from the
+   agent's own context (the claude adapter resumes; other adapters: check
+   `--info`). Only if that fails, reconstruct from the diff with a fresh
+   read-only slice.
 
 For agents with no working ACP route (zcode, crush, muse), and as a fallback for
 agy when its ACP client fails (it fails independently of the CLI), use the
