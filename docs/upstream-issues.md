@@ -355,3 +355,30 @@ entry for the same reason.
 
 **Local workaround:** `git checkout -- .claude/helpers .cursor` before
 deleting the worktree.
+
+## 7. zcode-acp — `$/zcode/turnState` uses a non-ACP extension prefix; turn stats arrive as agent text (draft, 2026-10-09, issue search not yet done)
+
+Repo: william0wang/zcode-acp (npm `zcode-acp-server` 0.65.1), the bridge that
+wraps `zcode app-server --stdio` as an ACP agent. Seen here with `acp-run zcode`
+(ACP Python library `agent-client-protocol`), both reproduced twice with the
+prompt "Reply with exactly: OK".
+
+1. **Notification method `$/zcode/turnState`.** ACP reserves the `_` prefix for
+   extension methods and notifications; the `$/` prefix is LSP's convention.
+   Clients built on the ACP Python library route only `_`-prefixed names to
+   `ext_notification` and raise `method_not_found` for anything else, so every
+   turn logs a traceback (`ERROR:root:Unhandled error while handling
+   notification method=$/zcode/turnState ... RequestError: Method not found`).
+   Fix on their side: rename to `_zcode/turnState` (or `_zcode.turnState`).
+   Our workaround: `tools/acp-run/acp-run` folds `$/` into `_` before routing.
+2. **Per-turn stats as an `agent_message_chunk`.** After the answer, the bridge
+   sends a text chunk `✓ completed · cache 6/7 messages · 3.0k cache-read tokens`
+   with `messageId: "turninfo_<uuid>"`. A client that concatenates agent text
+   (every headless one) returns `OK✓ completed · …` as the answer. It belongs in
+   `_meta` / a usage notification, or behind an option. Our workaround: drop
+   chunks whose `messageId` starts with `turninfo_`.
+
+Evidence: `~/.local/state/acp-run/20261009-000130-zcode-5906.jsonl` (before the
+workaround) and `20261009-000400-zcode-12981.jsonl` (after). Before filing,
+search the repo's issues and PRs for `turnState`, `$/`, `turninfo`,
+`agent_message_chunk` — the client-side handling may already be discussed.
