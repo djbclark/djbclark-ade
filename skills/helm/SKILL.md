@@ -11,7 +11,9 @@ description: >-
   helm", "run the fleet from here", "what needs me", "what is waiting on me",
   "what is open anywhere", "including stopped sessions", "what did we leave
   hanging", or wants to answer other sessions' prompts or restart handed-off
-  work from one window.
+  work from one window. With "auto" (`/helm auto`, "run the fleet unattended
+  until <time>") it works the open backlog itself while the operator is away,
+  per auto.md.
 ---
 
 # helm — every waiting session, one prompt at a time
@@ -222,9 +224,24 @@ collector call and two item kinds differ.
    until he says so. Do not summarise a handoff beyond its Active-work line and
    next steps as printed. Closing panes is `herdr-tidy`'s job, never helm's.
 
+## 8. Auto mode (`/helm auto`)
+
+Relay mode with nobody to relay to: for an unattended stretch the operator has
+explicitly granted (stop time, repos in scope, quota ceilings) the helm session
+becomes the lead: it surveys the open work (issues, beads, todo notes), runs it
+as waves of briefed workers in their own worktrees, integrates from their
+messages, and ends with one numbered doc the operator can undo item by item, a
+Hermes ping and an autorename. The spec, from the first run on 2026-10-09, is
+[auto.md](auto.md); read it whole first. Invariants: nothing irreversible; one
+wave at a time, quota re-probed before each; integrate from messages, `STATE.md`
+always current; never publish for a live worker; compact only via `self-slash`
+after `STATE.md` is written. The queue's own items stay parked for the operator.
+
 ## What this is not
 
-1. Not an orchestrator: it starts no work (`orc`, `bigteam` do).
+1. Not an orchestrator in relay mode: it starts no work (`orc`, `bigteam`
+   do). Auto mode (section 8) is the one exception, and only on the
+   operator's explicit go.
 2. Not an auto-responder. agent-deck's conductor answers routine questions
    itself; helm deliberately does not.
 3. Not a status feed. Periodic status is `fleet-watch`, which also sends the
