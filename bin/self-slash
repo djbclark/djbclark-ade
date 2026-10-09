@@ -1,48 +1,84 @@
 #!/usr/bin/env bash
 # self-slash — queue a built-in slash command (/compact, /context, ...) into THIS
-# session's own herdr pane, so an agent can compact itself instead of asking the
+# session's own terminal, so an agent can compact itself instead of asking the
 # operator to type it.  Claude Code cannot run built-ins from the Skill tool
 # (memory/reference_claude_code_model_cannot_run_builtin_slash_commands.md).
 #
 #   self-slash [--delay S] [--dry-run] "/compact <focus>"   (--dry-run: validate only, never test against a live pane without it)
 #
-# Rules: refuses outside herdr; only ever targets $HERDR_PANE_ID (never another
-# pane); waits --delay seconds (default 6) so the current turn can end, then
-# refuses if the operator has an unsent draft in the input box (a line starting
-# with ❯ that is not empty), and otherwise sends the text + Enter.  Runs
-# detached (nohup) so it survives the Bash tool returning; the log is
-# ~/.local/state/self-slash.log.  First verified 2026-10-09 (ClaudeHelm).
+# Hosts: a herdr pane ($HERDR_PANE_ID, via `herdr agent read` / `herdr pane run`)
+# or an Orca terminal ($ORCA_TERMINAL_HANDLE, via `orca terminal read --screen` /
+# `orca terminal send --enter`).  herdr wins when both are set (a herdr pane
+# inside an Orca tab).  Anywhere else it refuses.
+#
+# Rules: only ever targets this session's own pane/terminal (never another);
+# waits --delay seconds (default 6) so the current turn can end, then refuses if
+# the operator has an unsent draft in the input box (a line starting with ❯ that
+# is not empty), and otherwise sends the text +
+# Enter.  Runs detached (nohup) so it survives the Bash tool returning; the log
+# is ~/.local/state/self-slash.log.  First verified 2026-10-09 (ClaudeHelm, herdr);
+# Orca backend verified 2026-10-09.
 set -u
 delay=6; dry=0
 while :; do case "${1:-}" in --delay) delay="$2"; shift 2;; --dry-run) dry=1; shift;; *) break;; esac; done
 text="${1:-}"
-[ -n "$text" ] || { echo "usage: self-slash [--delay S] \"/command args\"" >&2; exit 2; }
-[ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] || { echo "self-slash: not inside a herdr pane (HERDR_PANE_ID unset); ask the operator to type: $text" >&2; exit 3; }
-case "$text" in /*) ;; *) echo "self-slash: only slash commands are sent (got: $text)" >&2; exit 2;; esac
-# herdr sends a long argument as a bracketed paste and Claude Code then treats it
-# as pasted content, not a command (seen 2026-10-09 with ~900 chars): keep it short.
-if [ "${#text}" -gt "${SELF_SLASH_MAX:-300}" ]; then
-  echo "self-slash: argument is ${#text} chars; herdr pastes anything over ~300 and the command is not run. Shorten it (or SELF_SLASH_MAX=N)." >&2; exit 2
+[ -n "$text" ] || { echo "usage: self-slash [--delay S] [--dry-run] \"/command args\"" >&2; exit 2; }
+if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
+  host=herdr; pane="$HERDR_PANE_ID"
+elif [ -n "${ORCA_TERMINAL_HANDLE:-}" ] && command -v orca >/dev/null 2>&1; then
+  host=orca; pane="$ORCA_TERMINAL_HANDLE"
+else
+  echo "self-slash: not inside a herdr pane or an Orca terminal (HERDR_PANE_ID and ORCA_TERMINAL_HANDLE unset); ask the operator to type: $text" >&2; exit 3
 fi
-pane="$HERDR_PANE_ID"
-[ "$dry" = 1 ] && { echo "self-slash: dry run, would send to pane $pane after ${delay}s: ${text:0:80}"; exit 0; }
+case "$text" in /*) ;; *) echo "self-slash: only slash commands are sent (got: $text)" >&2; exit 2;; esac
+# herdr and Orca both send a long argument as a bracketed paste and Claude Code then
+# treats it as pasted content, not a command (seen 2026-10-09 with ~900 chars): keep it short.
+if [ "${#text}" -gt "${SELF_SLASH_MAX:-300}" ]; then
+  echo "self-slash: argument is ${#text} chars; anything over ~300 is pasted and the command is not run. Shorten it (or SELF_SLASH_MAX=N)." >&2; exit 2
+fi
+[ "$dry" = 1 ] && { echo "self-slash: dry run, would send to $host $pane after ${delay}s: ${text:0:80}"; exit 0; }
 log="$HOME/.local/state/self-slash.log"; mkdir -p "$(dirname "$log")"
 if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   SELF_SLASH_CHILD=1 nohup "$0" --delay "$delay" "$text" >>"$log" 2>&1 </dev/null &
-  echo "self-slash: queued for pane $pane in ${delay}s (log: $log)"
+  echo "self-slash: queued for $host $pane in ${delay}s (log: $log)"
   exit 0
 fi
+
+# read_screen: print the visible screen lines.  Orca's JSON also has a `draft`
+# field, but it is not used: on 2026-10-09 it held Claude Code's dim hint text
+# ("Press up to edit queued messages") while the rendered ❯ line was empty.
+read_screen() {
+  if [ "$host" = herdr ]; then
+    herdr agent read "$pane" --source visible --lines 12 2>/dev/null
+  else
+    orca terminal read --terminal "$pane" --screen --limit 12 --json 2>/dev/null | python3 -c '
+import json, sys
+t = json.load(sys.stdin).get("result", {}).get("terminal", {})
+print("\n".join(t.get("tail") or []))'
+  fi
+}
+send_text() {
+  if [ "$host" = herdr ]; then
+    herdr pane run "$pane" "$text"
+  else
+    orca terminal send --terminal "$pane" --text "$text" --enter --wait-submit 10 --json
+  fi
+}
+
 sleep "$delay"
 for attempt in 1 2 3 4 5 6; do
-  screen=$(herdr agent read "$pane" --source visible --lines 12 2>/dev/null)
+  screen=$(read_screen)
   prompt=$(printf '%s\n' "$screen" | grep -E '^[[:space:]]*❯' | tail -1 | sed -E 's/^[[:space:]]*❯[[:space:]]*//')
+  # Claude Code's dim hint text reads as plain text on screen; treat it as empty
+  # (same rule as Orca's isStockPlaceholder, src/shared/terminal-composer-draft.ts).
+  case "$prompt" in 'Try "'*|'Try “'*|'Press up to edit queued messages'*) prompt="";; esac
   if ! printf '%s\n' "$screen" | grep -qE '^[[:space:]]*❯'; then
-    echo "$(date '+%F %T') pane $pane: no input prompt on screen yet (attempt $attempt), waiting"; sleep 5; continue
+    echo "$(date '+%F %T') $host $pane: no input prompt on screen yet (attempt $attempt), waiting"; sleep 5; continue
   fi
   if [ -n "$prompt" ]; then
-    echo "$(date '+%F %T') pane $pane: REFUSED, unsent draft in input box: ${prompt:0:60}"; exit 4
+    echo "$(date '+%F %T') $host $pane: REFUSED, unsent draft in input box: ${prompt:0:60}"; exit 4
   fi
-  herdr pane run "$pane" "$text" && { echo "$(date '+%F %T') pane $pane: sent ${text:0:80}"; exit 0; }
-  echo "$(date '+%F %T') pane $pane: herdr pane run failed (attempt $attempt)"; sleep 5
+  send_text && { echo "$(date '+%F %T') $host $pane: sent ${text:0:80}"; exit 0; }
+  echo "$(date '+%F %T') $host $pane: send failed (attempt $attempt)"; sleep 5
 done
-echo "$(date '+%F %T') pane $pane: gave up, no empty input prompt seen"; exit 5
+echo "$(date '+%F %T') $host $pane: gave up, no empty input prompt seen"; exit 5

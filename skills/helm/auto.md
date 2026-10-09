@@ -153,7 +153,8 @@ Invariants, in force for the whole run:
    <focus: read STATE.md first>"`, and **end the turn at once**. Nothing else
    may queue `/compact`: a bare `herdr pane run` appended to the operator's
    draft on 2026-10-09 and ran it as a prompt; `self-slash` refuses when the
-   input box is not empty and targets only its own pane.
+   input box is not empty and targets only its own pane (herdr) or terminal
+   (Orca).
 3. A compact loses nothing a worker holds: workers are sub-agents of the
    session and their messages still arrive. It does lose the lead's memory of
    what it promised, which is why STATE.md is written first.
