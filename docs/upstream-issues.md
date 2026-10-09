@@ -680,7 +680,9 @@ applying to `build`, `restart` and `uninstall`.
 session transcript for 07:4x EDT; `~/.collie/logs/stdout.log` around
 2026-10-09T11:4xZ shows only the later, intended update.
 
-## 13. Collie — after the 1.18 upgrade an unpaired phone lands on `/auth/`, a dead-end 404 with no hint to pair (draft, 2026-10-09)
+## 13. Collie — after the 1.18 upgrade an unpaired phone lands on `/auth/`, a dead-end 404 with no hint to pair (filed 2026-10-09)
+
+**Status: filed as [AltanS/collie#393](https://github.com/AltanS/collie/issues/393), stale-shell cause labelled a hypothesis.**
 
 **Searched first** (gh, AltanS/collie, open and closed issues and PRs, 2026-10-09
 19:20 EDT; terms: `auth`, `sign in`, `Sign in link`, `not paired banner`,
@@ -739,6 +741,6 @@ once the new shell is active.
    shell until the service worker updates, and that the old shell's "Sign in"
    leads nowhere on a bridge without a proxy.
 
-Not filed. If filing, first confirm on a phone that an installed 1.17.x PWA
+Filed as #393 (operator decision 2026-10-09 19:30 EDT). To confirm the cause on a phone that an installed 1.17.x PWA
 shows "Sign in" → `/auth/` against a 1.18.x bridge; this machine's phone is now
 paired (device `t2e`, 17:37 EDT) and the evidence above is host-side only.
