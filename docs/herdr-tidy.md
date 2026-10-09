@@ -112,19 +112,20 @@ Issue djbclark/djbclark-ade#1; feasibility report
 | herdr-tidy need | Orca source (verified live 2026-10-08) |
 |---|---|
 | panes, tabs, leaf counts | `orca terminal list --json --include-visual-layouts`: `result.terminals[{handle, tabId, leafId, worktreeId, worktreePath, title, orphaned, connected, preview}]`, `result.visualLayouts[{worktreeId, root:{type:group, activeTabId, tabs:[{tabId, title, activeLeafId, panes}]}}]`; titles carry a leading state glyph (✳ ◐ 💤), stripped |
-| agent kind and status | `orca worktree ps --json`: `result.worktrees[{worktreeId, path, isActive, liveTerminalCount, agents:[{paneKey, state, agentType, lastAssistantMessage}]}]`, joined on pane key `tabId:leafId`; rows persist for worktrees with no live terminal (join on a live terminal only); no `agentWait` (#23921) |
-| pending prompt | `orca terminal show --terminal H --json` → `result.terminal.agentWait` (null when none) |
-| screen, draft | `orca terminal read --terminal H --screen --json` → `result.terminal.{tail[], source: screen|stream|screen-unavailable, draft?}`; `draft` only when Orca's detector finds text after a ❯ › » prompt |
+| agent kind and status | `orca worktree ps --json`: `result.worktrees[{worktreeId, path, isActive, liveTerminalCount, agents:[{paneKey, state, agentType, lastAssistantMessage}]}]`, joined on pane key `tabId:leafId`; rows persist for worktrees with no live terminal (join on a live terminal only); no `agentWait` (#23921); two rows for one paneKey (agent teams) keep the busiest state (working > waiting/blocked > done) |
+| pending prompt | `orca terminal show --terminal H --json` → `result.terminal.agentWait` (null when none; a reply with no `terminal` object or no `agentWait` key is read as unknown → leave) |
+| screen, draft | `orca terminal read --terminal H --screen --json` → `result.terminal.{tail[], source: screen|stream|screen-unavailable, draft?}`; `draft` only when Orca's detector finds text after a ❯ › » prompt; a missing `draft` key is read as "no draft detected" because Orca omits it when the detector finds nothing |
 | submit a prompt | `orca terminal send --terminal H --text T --enter --wait-submit N --json` → `result.send.{accepted, prompt.stages:[input_accepted, turn_started]}`, exit 1 when not accepted |
 | close | `orca terminal close --terminal H [--tab] --json`; may report ok and leave the terminal (#14719) → re-list |
-| processes | `ps eww -ax -o pid=,command=`, the only macOS `ps` spelling that prints other processes' environments; each Orca terminal's shell (`bash --rcfile …`) and its descendants carry `ORCA_PANE_KEY=tabId:leafId` |
+| processes | `ps eww -ax -o pid=,command=`, the only macOS `ps` spelling that prints other processes' environments; each Orca terminal's shell (`bash --rcfile …`) and its descendants carry `ORCA_PANE_KEY=tabId:leafId`; argv precedes the environment on a line, so the LAST `ORCA_PANE_KEY=` match is the environment's; a pane key claimed by two unrelated process roots is unreadable |
 | session id, transcript | fleet first; then `~/Library/Application Support/orca/agent-hooks/last-status.json` → `entries{paneKey:{source, providerSession:{id, transcriptPath}, payload:{state}}}`, entries outlive the agent so they attach only when an agent row exists |
 | focus the terminal | `orca terminal switch --terminal H` |
 
 ### Hazards designed around (all open upstream)
 
 1. stablyai/orca#14719: `close --tab` may report ok and leave the TUI → re-list after
-   every close; a surviving handle is exit 1 with the ledger written.
+   every close (orphaned terminals still count as existing) and `kill -0` the session pid
+   and the pane's shell pid; a surviving handle or pid is exit 1 with the ledger written.
 2. stablyai/orca#23865: close skips Claude Code's SessionEnd hooks → idle Claude gets
    `/exit` first, then the close, after the pid is gone.
 3. stablyai/orca#23833: closing a Codex terminal can kill a shared `codex app-server`
@@ -141,13 +142,22 @@ Issue djbclark/djbclark-ade#1; feasibility report
 2. No pid carries the pane key → leave.
 3. Non-Claude TUI with no ❯ › » prompt line on screen → leave (Orca cannot read a draft).
 4. ACP launch in an Orca terminal → leave (`launch.py close` only closes herdr panes).
-5. Codex terminal with a `codex app-server` descendant → leave (#23833).
+5. Codex terminal with a `codex app-server` descendant, or whose processes cannot be
+   read → leave (#23833).
 6. Idle Claude is sent `/exit` before the terminal is closed (#23865).
 7. `wait --for tui-idle` is never used (#14561).
-8. `--tab` only when the layouts and the terminal list agree the tab holds one terminal.
-9. An agent `worktree ps` reports with no fleet session matched → leave.
+8. `--tab` only when the layout leaf count and the live-terminal count for the tab are
+   both 1; otherwise `tab_panes` is max(leaves, terminals, 2) and only the terminal closes.
+9. An agent `worktree ps` reports with no fleet session matched → leave (cls = that kind).
 10. No sleeper stubs or popups exist in Orca (it hibernates whole worktrees, which then
     have no live terminal): those classes never fire.
+11. A pane key carried by two unrelated process roots → processes unreadable → leave.
+12. `terminal show` without a `terminal` object or `agentWait` key → unknown → leave.
+13. Two fleet sessions mapped to one handle (a stale handle plus a live one) keep the
+    busiest status; two `worktree ps` rows for one pane key keep the busiest state.
+14. Malformed JSON (non-dict terminals, layouts, agent rows, hook-ledger entries or
+    `providerSession`) is skipped, never raised on; a corrupt ledger file reads as empty.
+15. After a close, the session pid and the shell pid are checked alive; survivors → exit 1.
 
 ### First live scan (read-only, 2026-10-08)
 
@@ -168,7 +178,10 @@ Issue djbclark/djbclark-ade#1; feasibility report
 Verified on 2026-10-08: the `terminal list`, `worktree ps`, `terminal show`,
 `terminal read` and `terminal send` receipt schemas (from `~/src/orca` source and live
 JSON), the read-only scan above, and the unit tests (`tests/test_tidy_orca.py`,
-`tests/test_fleet_tidy.py`, stubs at the fleet/tidy boundary, no live Orca).
+`tests/test_fleet_tidy.py`, stubs at the fleet/tidy boundary, no live Orca; 95 tests, including
+the hardening after the adversary review of 2026-10-08: focus unknown, tab-pane agreement,
+last-match pane key, single-root processes, post-close pid check, agentWait shapes, duplicate
+rows, malformed input).
 
 Also verified live on 2026-10-08: one real close. The worker created a throwaway
 terminal in its own worktree (`orca terminal create --title tidy-selftest`), `scan`

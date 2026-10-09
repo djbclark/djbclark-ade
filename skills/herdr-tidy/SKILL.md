@@ -228,11 +228,11 @@ report are shared; only inventory, screen read, send and close change.
 | Need | Orca source |
 |---|---|
 | Terminals, tabs, split counts | `orca terminal list --json --include-visual-layouts` (`terminals[]`, `visualLayouts[]`; orphaned terminals skipped) |
-| Agent kind and state per pane key `tabId:leafId` | `orca worktree ps --json` (`agents[]`: `agentType`, `state` working/done/waiting/…), joined on a live terminal only: rows outlive hibernated worktrees |
-| Pending prompt | `orca terminal show --terminal H --json` → `agentWait` (null when none; absent from `worktree ps`, #23921) |
-| Screen and unsent draft | `orca terminal read --terminal H --screen --json` → `tail[]`, `draft` (Orca's own detector, prompts ❯ › ») and `source` (`screen-unavailable` → leave) |
+| Agent kind and state per pane key `tabId:leafId` | `orca worktree ps --json` (`agents[]`: `agentType`, `state` working/done/waiting/…), joined on a live terminal only: rows outlive hibernated worktrees. Two rows for one pane key (teammates) keep the busiest state (working > waiting/blocked > done); two fleet sessions on one handle keep the busiest status. Malformed terminals, layouts, agent rows or ledger entries are skipped, never raised on |
+| Pending prompt | `orca terminal show --terminal H --json` → `agentWait` (null when none; absent from `worktree ps`, #23921). No `terminal` object or no `agentWait` key reads as unknown → leave |
+| Screen and unsent draft | `orca terminal read --terminal H --screen --json` → `tail[]`, `draft` (Orca's own detector, prompts ❯ › »; the key is omitted when it finds nothing, read as no draft) and `source` (`screen-unavailable` → leave) |
 | Session id, transcript | fleet (registry, process scan) first, then `~/Library/Application Support/orca/agent-hooks/last-status.json` per pane key, read only when `worktree ps` has an agent row for it |
-| Processes | one `ps eww -ax -o pid=,command=` (the only macOS `ps` spelling that prints other processes' environments): the shell whose environment carries `ORCA_PANE_KEY=<pane key>` and everything under it |
+| Processes | one `ps eww -ax -o pid=,command=` (the only macOS `ps` spelling that prints other processes' environments): the shell whose environment carries `ORCA_PANE_KEY=<pane key>` and everything under it. The last `ORCA_PANE_KEY=` on a line is the environment's (argv comes first); a key claimed by two unrelated process trees is unreadable → leave |
 | Submit `/handoff`, `/exit` | `orca terminal send --terminal H --text T --enter --wait-submit N --json` → `send.accepted` (exit 1 when not accepted) |
 | Close | `orca terminal close --terminal H [--tab] --json`; `--tab` only when the layouts and the list agree the tab holds one terminal; the list is re-read afterwards |
 | Focus a terminal | `orca terminal switch --terminal H` |
@@ -258,7 +258,7 @@ Per class, what differs from sections 1 and 2:
    not accepted or the pid surviving leaves the terminal open (exit 1).
 2. Non-Claude TUIs: `TUI_WAITING` as in 2.2, then a ❯ › » line is required in the last six rows
    (otherwise Orca cannot read a draft → leave); resume forms unchanged (grok → leave). A Codex
-   terminal with a `codex app-server` descendant → leave (#23833).
+   terminal with a `codex app-server` descendant, or whose processes cannot be read → leave (#23833).
 3. An agent `worktree ps` reports but fleet matched no session to (an agent-teams terminal, a TUI
    fleet does not detect, a stale row) → leave, decide by hand.
 4. Shells: read through the ps tree under the pane-key shell; no pid carries the key → leave.
@@ -269,7 +269,9 @@ Per class, what differs from sections 1 and 2:
 Hazards, all open upstream on 2026-10-08, and the mitigation built in:
 
 1. #14719 `terminal close --tab` can report ok and leave the TUI running → the list is re-read
-   after every close; a surviving handle is exit 1 with the ledger already written.
+   after every close (an orphaned terminal still counts as existing), and the session pid and the
+   pane's shell pid are checked with `kill -0`; a surviving handle or pid is exit 1 with the ledger
+   already written.
 2. #23865 closing a terminal skips Claude Code's SessionEnd hooks → `/exit` first (above).
 3. #23833 closing a Codex terminal can kill a shared `codex app-server` → such a terminal is left.
 4. #14561 `terminal wait --for tui-idle` reports idle while the agent runs → never used; idle is

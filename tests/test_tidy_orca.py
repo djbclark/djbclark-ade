@@ -109,9 +109,11 @@ class OrcaBase(unittest.TestCase):
                       300: (1, "bash --rcfile /x/rc"), 400: (1, "bash --rcfile /x/rc"), 401: (400, "codex")}
         self.sessions, self.claims, self.kids, self.alive_seq = [], [], [], []
         self.tx = {"size": 1200000, "finished": "", "asks": False, "last_text": "done.", "last_prompt": "x"}
-        self.reads, self.waits, self.show_fail = {}, {}, set()
+        self.reads, self.waits, self.show_fail, self.show_bare = {}, {}, set(), set()
+        self.alive_pids = set()
         self.list_fail = self.ps_fail = self.wps_fail = self.close_survives = False
         self.send_accept = True
+        self.show_bare_result = {}
         self.calls, self.sent, self.closed = [], [], []
 
     def tearDown(self):
@@ -157,6 +159,8 @@ class OrcaBase(unittest.TestCase):
         if args[:2] == ["terminal", "show"]:
             if h in self.show_fail:
                 return err("terminal_not_found")
+            if h in self.show_bare:
+                return ok(self.show_bare_result)
             return ok({"terminal": {"handle": h, "agentWait": self.waits.get(h), "agentIdentity": {}}})
         if args[:2] == ["terminal", "read"]:
             self.assertIn("--screen", args)
@@ -245,6 +249,12 @@ class TestOrcaEnvMap(OrcaBase):
         self.ps_fail = True
         self.assertEqual(tidy.orca_env_map(), {})
 
+    def test_last_match_on_a_line_wins(self):
+        # argv precedes the environment in `ps eww` output: a process whose argv mentions ORCA_PANE_KEY= (an echo, an
+        # impostor) is still keyed by its real environment, the last match
+        self.ps_text = "  777 bash -c 'echo ORCA_PANE_KEY=tabA:leaf1' HOME=/u ORCA_PANE_KEY=tabB:leaf1 TERM=x\n"
+        self.assertEqual(tidy.orca_env_map(), {"tabB:leaf1": [777]})
+
 
 class TestOrcaRead(OrcaBase):
     def test_rows_and_draft(self):
@@ -258,6 +268,23 @@ class TestOrcaRead(OrcaBase):
         self.list_fail = True
         self.patch(tidy, "run", lambda *a, **k: (1, "not json"))
         self.assertEqual(tidy.orca_read(H1), (None, None))
+
+
+class TestOrcaAgentWait(OrcaBase):
+    def test_null_none_and_unknown_shapes(self):
+        self.assertIsNone(tidy.orca_agent_wait(H1))                    # agentWait: null → nothing pending
+        self.waits[H1] = {"kind": "permission"}
+        self.assertEqual(tidy.orca_agent_wait(H1), {"kind": "permission"})
+        self.show_fail.add(H1)
+        self.assertEqual(tidy.orca_agent_wait(H1), "unknown")         # the call failed
+        self.show_fail.clear()
+        self.show_bare.add(H1)
+        self.show_bare_result = {}                                     # no `terminal` object
+        self.assertEqual(tidy.orca_agent_wait(H1), "unknown")
+        self.show_bare_result = {"terminal": {"handle": H1}}           # no `agentWait` key
+        self.assertEqual(tidy.orca_agent_wait(H1), "unknown")
+        self.show_bare_result = {"terminal": "not a dict"}
+        self.assertEqual(tidy.orca_agent_wait(H1), "unknown")
 
 
 class TestOrcaStatusMerge(OrcaBase):
@@ -320,6 +347,35 @@ class TestOrcaTerminals(OrcaBase):
         terms = tidy.orca_terminals()
         self.assertEqual((terms[H1]["tab_panes"], terms[H2]["tab_panes"], terms[H5]["tab_panes"], terms[H4]["tab_panes"]),
                          (3, 2, 2, 1))
+
+    def test_duplicate_agent_rows_keep_the_busiest_state(self):
+        rows = self.worktrees[0]["agents"]
+        rows[0]["state"] = "done"
+        rows.append({"paneKey": "tabA:leaf1", "state": "working", "agentType": "claude"})     # a teammate row
+        self.assertEqual(tidy.orca_terminals()[H1]["agent_status"], "working")
+        rows.reverse()                                                 # order must not matter
+        self.assertEqual(tidy.orca_terminals()[H1]["agent_status"], "working")
+        rows[:] = [{"paneKey": "tabA:leaf1", "state": "done", "agentType": "claude"},
+                   {"paneKey": "tabA:leaf1", "state": "waiting", "agentType": "claude"},
+                   {"paneKey": "tabA:leaf1", "state": "done", "agentType": "claude"}]
+        self.assertEqual(tidy.orca_terminals()[H1]["agent_status"], "blocked")
+
+    def test_malformed_input_is_skipped_not_raised(self):
+        self.terminals += ["not a dict", None, {"tabId": "tabQ", "leafId": "l"}]      # no handle
+        self.layouts += ["garbage", None, {"worktreeId": "wtX"}]
+        self.worktrees += ["garbage", {"worktreeId": "wtY", "agents": ["row", None, {"state": "working"}]}]
+        self.last_status["entries"]["tabA:leaf1"] = "corrupt"
+        self.last_status["entries"]["tabC:leafX"] = {"providerSession": "corrupt"}
+        self.write_status()
+        terms = tidy.orca_terminals()
+        self.assertEqual(set(terms), {H1, H2, H4})
+        self.assertEqual((terms[H1]["agent_session"], terms[H1]["transcript"]), (None, None))
+        self.assertEqual((terms[H4]["agent_session"], terms[H4]["transcript"]), (None, None))
+        self.assertEqual(tidy.orca_live_handles(), {H1, H2, H3, H4})
+        tidy.ORCA_LAST_STATUS.write_text("{not json")
+        self.assertEqual(tidy.orca_last_status(), {})
+        tidy.ORCA_LAST_STATUS.write_text(json.dumps({"entries": []}))
+        self.assertEqual(tidy.orca_last_status(), {})
 
     def test_list_failure_is_none(self):
         self.list_fail = True
@@ -503,6 +559,32 @@ class TestClassifyOrca(OrcaBase):
         self.assertIn("foreground process", it["reason"])
         self.assertIn("vim", it["reason"])
 
+    def test_two_unrelated_trees_on_one_pane_key_are_unreadable(self):
+        p = self.pane(H2, "tabB:leaf1", pids=[300, 400])                # two roots claim the key: an impostor argv?
+        self.reads[H2] = (["djbclark@mac:~$"], None)
+        self.assertEqual(tidy.procs_of(p, self.table), (None, None))
+        it = self.classify(p)
+        self.assertEqual(it["verdict"], "leave")
+        self.assertIn("no process carrying", it["reason"])
+        procs, shell = tidy.procs_of(self.pane(pids=[100, 101]), self.table)
+        self.assertEqual((shell, [pr["name"] for pr in procs]), (100, ["bash", "claude"]))
+
+    def test_codex_with_unreadable_processes_is_left(self):
+        p = self.pane(H4, "tabC:leafX", agent="codex", agent_status="idle", pids=[])
+        self.reads[H4] = (["done.", "› "], None)
+        it = self.classify(p, self.sess(H4, agent="codex", sid="c-1", pid=401, argv=[]))
+        self.assertEqual((it["cls"], it["verdict"]), ("codex", "leave"))
+        self.assertIn("23833", it["reason"])
+
+    def test_prompt_glyph_must_be_in_the_last_six_nonblank_rows(self):
+        self.table[401] = (400, "cursor-agent")
+        p = self.pane(H4, "tabC:leafX", agent="cursor", agent_status="idle", pids=[400, 401], cwd="/a")
+        sess = self.sess(H4, agent="cursor", sid="091d", cwd="/a", pid=401, argv=[])
+        self.reads[H4] = (["› old prompt"] + [f"output line {i}" for i in range(6)], None)
+        self.assertIn("no ❯ › » prompt line", self.classify(p, sess)["reason"])
+        self.reads[H4] = (["› "] + ["", "   "] * 5 + ["output 1", "output 2"], None)   # blank rows do not count
+        self.assertEqual(self.classify(p, sess)["verdict"], "close")
+
     def test_no_pids_for_the_pane_key_is_left(self):
         it = self.classify(self.pane(H2, "tabB:leaf1", pids=[]))
         self.assertEqual(it["verdict"], "leave")
@@ -563,6 +645,17 @@ class TestInventoryOrca(OrcaBase):
         self.assertIs(sess[H4], stale)
         self.assertEqual(journal, {})                                  # no sleeper journal in Orca
         self.assertIs(table[101][0], 100)
+
+    def test_two_sessions_on_one_handle_keep_the_busiest(self):
+        idle = {"id": "a", "agent": "claude", "status": "idle", "chan": ("orca", H1), "pid": 101, "host": "orca"}
+        working = {"id": "b", "agent": "claude", "status": "working", "chan": None, "pid": 100, "host": "orca"}
+        self.sessions = [idle, working]
+        self.assertIs(tidy.inventory()[1][H1], working)
+        self.sessions = [working, idle]
+        self.assertIs(tidy.inventory()[1][H1], working)
+        blocked = {**idle, "id": "c", "status": "blocked"}
+        self.sessions = [blocked, idle]
+        self.assertIs(tidy.inventory()[1][H1], blocked)
 
     def test_list_failure_exits(self):
         self.list_fail = True
@@ -689,6 +782,45 @@ class TestCmdCloseDryRun(OrcaBase):
         self.assertEqual(entry["id"], f"{entry['id'].rsplit('-', 1)[0]}-{H1[:18]}")
         self.assertEqual(tail, f"dry run: would close pane {H1} (after /exit)")   # tabA has 3 panes
         self.assertEqual(self.sent, [])
+
+
+class TestCmdCloseLive(OrcaBase):
+    """cmd_close without --dry-run against the dispatcher: the ledger line, the close call, the survivor checks."""
+
+    def setUp(self):
+        super().setUp()
+        self.layouts[0]["root"]["activeTabId"] = "tabA"
+        self.reads[H2] = (["$ ls", "djbclark@mac:~/src/core-simjson$"], None)
+        self.patch(fleet, "alive", lambda pid: pid in self.alive_pids)
+
+    def close(self, pane=H2):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = tidy.cmd_close(argparse.Namespace(pane=pane, why="", resume="", dry_run=False))
+        return rc, buf.getvalue()
+
+    def test_closed_and_gone(self):
+        rc, out = self.close()
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith(f"closed {H2} (shell, tab Terminal 1)"))
+        self.assertEqual(self.closed, [("--terminal", H2, "--tab")])
+        rows = fleet.closed_ledger()
+        self.assertEqual((len(rows), rows[0]["host"], rows[0]["pane_key"], rows[0]["cls"]), (1, "orca", "tabB:leaf1", "shell"))
+        self.assertEqual(rows[0]["screen"], ["$ ls", "djbclark@mac:~/src/core-simjson$"])
+
+    def test_terminal_survives_the_close(self):
+        self.close_survives = True                                     # stablyai/orca#14719 shape
+        rc, out = self.close()
+        self.assertEqual(rc, 1)
+        self.assertIn("still exists", out)
+        self.assertIn("14719", out)
+        self.assertEqual(len(fleet.closed_ledger()), 1)                # ledger written before the close
+
+    def test_shell_pid_survives_the_close(self):
+        self.alive_pids = {300}
+        rc, out = self.close()
+        self.assertEqual(rc, 1)
+        self.assertIn("pids alive: 300", out)
 
 
 if __name__ == "__main__":
