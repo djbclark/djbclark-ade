@@ -150,19 +150,24 @@ while :; do
   if [ "$prompt" != EMPTY ]; then
     # Operator text on the ❯ line: an unsent draft, a message QUEUED mid-turn
     # (shown until the turn ends), or the operator typing right now.  Never
-    # send over it (the command would be appended to it).  Wait for it to be
-    # sent, re-wait for idle, then send.  Failsafe (operator, 2026-10-09): text
-    # unchanged for SELF_SLASH_GHOST seconds (default 20) while the session is
-    # idle is taken for an unstyled ghost suggestion and sent over, since typing
-    # replaces a suggestion.  Give up only when SELF_SLASH_WAIT runs out.
+    # send over it (the command would be appended to it and submitted with it).
+    # Wait for it to be sent, re-wait for idle, then send; give up (exit 4) when
+    # SELF_SLASH_WAIT runs out.  There is NO "unchanged for N seconds, so it must
+    # be a ghost suggestion" failsafe by default: on 2026-10-09 19:06 that rule
+    # (20 s) submitted the operator's finished, unsent question together with the
+    # /compact.  A finished draft he is re-reading is indistinguishable from a
+    # ghost by stillness; styled ghosts are already classified EMPTY above.
+    # SELF_SLASH_GHOST=<seconds> re-enables the old behaviour explicitly, at the
+    # caller's risk; unset or 0 means never.
     if [ "$prompt" = "$last_prompt" ]; then same=$((same+5)); else same=0; last_prompt="$prompt"
-      echo "$(date '+%F %T') $host $pane: text on input line (draft, queued message or suggestion), waiting: ${prompt:0:60}"; fi
+      echo "$(date '+%F %T') $host $pane: text on input line (draft or queued message), waiting: ${prompt:0:60}"; fi
     drafted=$((drafted+5))
     if [ "$drafted" -ge "${SELF_SLASH_WAIT:-900}" ]; then
-      echo "$(date '+%F %T') $host $pane: REFUSED after ${drafted}s, text still in input box: ${prompt:0:60}"; exit 4
+      echo "$(date '+%F %T') $host $pane: REFUSED after ${drafted}s, text still in input box; NOT sent: ${prompt:0:60}"; exit 4
     fi
-    if [ "$same" -lt "${SELF_SLASH_GHOST:-20}" ]; then sleep 5; wait_idle; continue; fi
-    echo "$(date '+%F %T') $host $pane: unchanged for ${same}s while idle; treating as a suggestion and sending over it"
+    ghost="${SELF_SLASH_GHOST:-0}"
+    if [ "$ghost" -le 0 ] || [ "$same" -lt "$ghost" ]; then sleep 5; wait_idle; continue; fi
+    echo "$(date '+%F %T') $host $pane: unchanged for ${same}s while idle and SELF_SLASH_GHOST=$ghost set by caller; sending over it"
   fi
   send_text && { echo "$(date '+%F %T') $host $pane: sent ${text:0:80}"; exit 0; }
   sendfail=$((sendfail+1)); [ "$sendfail" -le 6 ] || break
