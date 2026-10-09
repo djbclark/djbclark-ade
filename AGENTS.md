@@ -166,10 +166,12 @@ altitudes compose (a macro node can run a micro graph as its body).
 
 ## Machine context you should know
 
-- **Orca is the fleet registry**: ~25 TUI agents preconfigured (see
-  docs/model-routing.md, "Orca is the fleet registry"); macro-graph
-  dispatch reaches any enabled one via
-  `orca orchestration worker-start --agent <name>`.
+- **`acp-run --list` is the agent registry** (since 2026-10-08):
+  `bin/route_agent.py` discovers agents from it plus installed headless
+  TUIs. Orca's roster (~28 names, 12 not installed here) is a GUI list
+  for `orca orchestration worker-start --agent <name>` only, opt-in via
+  `ROUTE_AGENT_INCLUDE_ORCA=1` (see docs/model-routing.md, "Orca's roster
+  is a GUI list, not the registry").
 - The broader ops-suite conventions (worktree/PR/release flow, memory
   rules) live in `~/CLAUDE.md` and the site-private repo — they govern
   `~/ops` and are not duplicated here. This repo itself is an ordinary

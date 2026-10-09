@@ -60,7 +60,14 @@ an explicit fresh human decision per run (keys come from
 `~/.config/codexbar/config.json`). **Operator decision 2026-08-23: the
 prepaid tier is retired for now** — revisit only on an explicit top-up.
 
-## Orca is the fleet registry
+## Orca's roster is a GUI list, not the registry
+
+**Since 2026-10-08 the registry is `acp-run --list`** (plus the installed
+non-ACP headless TUIs, now only muse); `bin/route_agent.py` reads Orca's
+roster only with `ROUTE_AGENT_INCLUDE_ORCA=1`, and even then intersected
+with installed binaries, because 12 of its 28 enabled names were not
+installed here. The roster still matters for Orca's own macro-graph
+dispatch, described below as it stood on 2026-08-23.
 
 Nearly every TUI above is configured *inside Orca*
 (`~/Library/Application Support/orca/profiles/local-default/orca-data.json`
