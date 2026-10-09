@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# herdr-jump — move to a Herdr address typed from the keyboard (tmux `prefix+:`).
+#
+#   herdr-jump              prompt for an address (how the popup keybind runs it)
+#   herdr-jump w22:t4       focus tab 4 of workspace 22 (switches workspace too)
+#   herdr-jump w23:p7       focus pane 7 of workspace 23 (any pane, agent or shell)
+#   herdr-jump w22          focus workspace 22
+#
+# Wired as a popup custom command in ~/.config/herdr/config.toml:
+#
+#   [[keys.command]]
+#   key = "prefix+colon"
+#   type = "popup"
+#   command = "~/src/djbclark-ade/bin/herdr-jump"
+#   description = "jump to a w / w:t / w:p address"
+#
+# Herdr has no action that takes an address (docs/herdr-jump.md), so this
+# wraps the three server-side focus calls that do: `herdr tab focus <id>`,
+# `herdr workspace focus <id>`, and the socket method `pane.focus`, which
+# the CLI does not expose (`herdr pane focus` is direction-only and
+# `herdr agent focus` covers agent panes only). Popup commands get
+# HERDR_BIN_PATH and HERDR_SOCKET_PATH; from a plain shell the defaults
+# below apply.
+set -u
+
+HB=${HERDR_BIN_PATH:-herdr}
+SOCK=${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}
+
+fail() {
+    printf '%s\n' "$*" >&2
+    # Give a popup pane a moment to show the message before Herdr closes it.
+    [ -t 0 ] && sleep 1.5
+    exit 1
+}
+
+if [ $# -gt 0 ]; then
+    addr=$1
+else
+    IFS= read -r -p 'go to (w22 / w22:t4 / w23:p7): ' addr || exit 1
+fi
+
+# Normalise: trim, accept "22:t4" / "22" without the w, and any letter case.
+# Workspace ids are uppercase hex (w2E); the w/t/p markers are lowercase.
+addr=$(printf '%s' "$addr" | tr -d '[:space:]')
+[ -n "$addr" ] || exit 0
+case "$addr" in [wW]*) addr=${addr#?} ;; esac
+ws=${addr%%:*}; rest=${addr#"$ws"}
+ws=$(printf '%s' "$ws" | tr 'a-f' 'A-F'); rest=$(printf '%s' "$rest" | tr 'TP' 'tp')
+addr="w$ws$rest"
+case "$addr" in
+    w[0-9A-F]*) ;;
+    *) fail "bad address: $addr (want w22, w22:t4 or w23:p7)" ;;
+esac
+
+case "$addr" in
+    w*:p*)
+        case "$addr" in *[!0-9A-Fwp:]*|*:*:*) fail "bad pane id: $addr" ;; esac
+        [ -S "$SOCK" ] || fail "no herdr socket at $SOCK"
+        req=$(printf '{"id":"jump","method":"pane.focus","params":{"pane_id":"%s"}}\n' "$addr")
+        resp=$(printf '%s\n' "$req" | nc -U -w 2 "$SOCK") || fail "socket call failed"
+        case "$resp" in
+            *'"error"'*) fail "herdr: $(printf '%s' "$resp" | sed -E 's/.*"message":"([^"]*)".*/\1/')" ;;
+            *'"result"'*) exit 0 ;;
+            *) fail "no reply from herdr" ;;
+        esac
+        ;;
+    w*:t*)
+        out=$("$HB" tab focus "$addr" 2>&1) || fail "$(printf '%s' "$out" | sed -E 's/.*"message":"([^"]*)".*/\1/')"
+        ;;
+    w*)
+        out=$("$HB" workspace focus "$addr" 2>&1) || fail "$(printf '%s' "$out" | sed -E 's/.*"message":"([^"]*)".*/\1/')"
+        ;;
+esac

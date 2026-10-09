@@ -60,7 +60,7 @@ their old paths are symlinks into this checkout).
 |---|---|
 | [`skills/`](skills/) | The skills (table below). |
 | [`tools/acp-run/`](tools/acp-run/) | `acp-run`, the ACP client every launcher uses. |
-| [`bin/`](bin/) | `fleet-watch` (fleet change notices), `cow-pasture` (APFS copy-on-write workspaces), `herdr-sleeper` (idle-pane sleep), `orca-reorg-watch`, `route_agent.py`. |
+| [`bin/`](bin/) | `fleet-watch` (fleet change notices), `cow-pasture` (APFS copy-on-write workspaces), `herdr-sleeper` (idle-pane sleep), `herdr-jump` (focus a `w22:t4` address from a `prefix+:` popup), `orca-reorg-watch`, `route_agent.py`. |
 | [`claude/commands/`](claude/commands/) | Claude Code slash commands `/orc` (the primary herdr orchestrator) and `/orc-meta` (its watchdog). |
 | [`docs/`](docs/) | Design records and dated operating knowledge (list below). |
 | [`plugins/`](plugins/) | `herdr-sleeper` herdr plugin (dev source of djbclark/herdr-sleeper). |
@@ -126,6 +126,9 @@ way. `helm.py` imports `fleet` from the sibling `skills/session-finder/`.
 8. [`docs/mcp-servers.md`](docs/mcp-servers.md) — the MCP server roster.
 9. [`docs/upstream-issues.md`](docs/upstream-issues.md) — bug drafts for
    third-party projects.
+10. [`docs/herdr-jump.md`](docs/herdr-jump.md) — jump to a Herdr address
+    (`w22:t4`) from the keyboard: why Herdr has no such action, the
+    `bin/herdr-jump` popup, and the third-party navigator evaluation.
 
 ## Architecture: agent graphs at two altitudes
 
