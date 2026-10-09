@@ -54,7 +54,7 @@ Herdr is still the right tool when:
 1. the operator wants to **watch** the agent work, or step in mid-run;
 2. the unit is **interactive or long-lived**: several prompts, corrections in
    the moment, a session handoff (the next section);
-3. the target has **no working ACP route** (zcode, crush, muse; agy until its ACP server is logged in) and
+3. the target has **no working ACP route** (zcode, muse; agy until its ACP server is logged in) and
    needs an interactive pane rather than its headless recipe;
 4. it is **Hermes's live TUI pane**, i.e. you want the conversation Hermes is
    already having. For a fresh one-shot request to Hermes, `acp-run hermes`

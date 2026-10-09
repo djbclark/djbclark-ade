@@ -232,7 +232,7 @@ class TestTidyScreens(unittest.TestCase):
         self.assertEqual(tidy.claude_composer(['❯ Try "fix typecheck errors"', "  ⏵⏵"]), ("empty", ""))
 
     def test_shell_prompt(self):
-        self.assertTrue(tidy.SHELL_PROMPT.search("djbclark@mac:~/src/crush$"))
+        self.assertTrue(tidy.SHELL_PROMPT.search("djbclark@mac:~/src/stayturgid$"))
         self.assertTrue(tidy.SHELL_PROMPT.search("djbclark@mac:~$ "))
         self.assertFalse(tidy.SHELL_PROMPT.search("djbclark@mac:~/src/herdr$ claude"))
 
@@ -345,7 +345,7 @@ class TestTidyClassify(Patched):
     def test_shells(self):
         bash = [{"pid": 7, "name": "bash", "argv0": "bash", "argv": ["-bash"], "cwd": ""}]
         self.procs["w7:p1"] = (bash, 7)
-        self.screens["w7:p1"] = ["djbclark@mac:~/src/crush$"]
+        self.screens["w7:p1"] = ["djbclark@mac:~/src/stayturgid$"]
         self.assertEqual(self.classify(self.pane("w7:p1"))["verdict"], "close")
         self.screens["w7:p1"] = ["djbclark@mac:~/src/herdr$ claude"]
         self.assertIn("not a bare prompt", self.classify(self.pane("w7:p1"))["reason"])

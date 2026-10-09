@@ -105,7 +105,7 @@ process tree (section 1.4), and the visible screen for the composer line `❯`.
    <id>` (it sends `/exit`, records `closed`, closes the tab). Working → leave. Resume: `launch.py
    reply <id> "<text>"` reopens it with `session/load`.
 
-### 2.2 Non-Claude TUIs (codex, cursor-agent, cline, copilot, opencode, crush, zcode, muse, agy, qwen, grok)
+### 2.2 Non-Claude TUIs (codex, cursor-agent, cline, copilot, opencode, zcode, muse, agy, qwen, grok)
 
 Checked: herdr `agent get` (status, `agent_session.value`), `pane process-info` (the TUI's argv,
 for a `--resume`/`-s`/`--session`/`--conversation`/`--id` value when herdr reports no session), the
@@ -123,7 +123,6 @@ herdr-sleeper's KINDS table agrees); a kind not in the table gets **leave**, nev
 | cline | `cline --id <session-id>` | `cline history` lists; the CLI's `--id` is the only resume form |
 | copilot | `copilot --resume=<id>` (name or 7+ hex prefix also) | `--continue` = latest; `--session-id <id>` also attaches |
 | opencode | `opencode -s <id>` | `-c` = latest; `opencode session list` |
-| crush | `crush --session <id>` (`-s`) | `--continue`; `crush session list --json` |
 | zcode | `cd <cwd> && zcode --resume <sess_…>` | `-c` = latest for cwd; the TUI's `/resume` |
 | muse | `muse resume <uuid-or-name>` | `muse resume --last`; sessions are per workspace |
 | agy | `agy --conversation <id>` | `-c` = latest; agy is history-only in fleet until it works (todo note) |

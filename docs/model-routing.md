@@ -41,7 +41,7 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 | `cursor` | `cursor` (v3.17.8) | Cursor Pro | monthly sub | included / Auto / other-models (monthly) |
 | `grok` | `grok` (v1.0.5; ralph-tui-grok-plugin exists) | SuperGrok | monthly sub | usage limit |
 | `zai` | `zcode` TUI (Z.ai's own, v0.16.9; `zcode -p`; GLM-5.3 / GLM-5.3-Flash × low/high/max; not in Orca's roster or herdr's agent kinds) | lite | monthly sub | 5h + weekly |
-| `clinepass` | Cline TUI (Orca agent `cline`) and `crush` TUI (Orca agent `crush`) + LiteLLM proxy `localhost:4000` (`clinepass-deepseek`, `clinepass-minimax-m3`, `clinepass-kimi-k3`) consumed by Hindsight + hermes | Cline API key | subscription windows | 5h + weekly + monthly |
+| `clinepass` | Cline TUI (Orca agent `cline`) + LiteLLM proxy `localhost:4000` (`clinepass-deepseek`, `clinepass-minimax-m3`, `clinepass-kimi-k3`) consumed by Hindsight + hermes | Cline API key | subscription windows | 5h + weekly + monthly |
 | `opencode-go` | `opencode` bundled free tier (`opencode-go/*`: kimi-k3, minimax-m3, qwen3.x, mimo, ox-alpha-free…); `opencode-ralph-tui` wrapper | go (free) | free | 5h + weekly + monthly |
 | `opencode-zen` | `opencode` provider `opencode` (`opencode/*`: claude, gpt, gemini, deepseek, glm catalogs) via gated `opencode-ralph-tui-zen` | prepaid | **prepaid balance** | balance |
 | `openrouter` | gated `opencode-ralph-tui-openrouter` | prepaid | **prepaid balance** | balance |
@@ -66,7 +66,7 @@ Nearly every TUI above is configured *inside Orca*
 (`~/Library/Application Support/orca/profiles/local-default/orca-data.json`
 → `settings`): `agentDefaultArgs` lists ~25 launchable agents — claude,
 claude-agent-teams, openclaude, codex, gemini, antigravity, aider, amp,
-kiro, crush, autohand, cline, command-code, continue, cursor, kimi,
+kiro, autohand, cline, command-code, continue, cursor, kimi,
 mistral-vibe, qwen-code, rovo, hermes, copilot, grok, devin, ante, trae
 (+ goose via env) — each preconfigured with its auto-approve/yolo flag for
 worktree use. `disabledTuiAgents` = gemini, goose, devin. Orca also holds
@@ -180,7 +180,7 @@ from the first `{` instead, or the parse fails with "Extra data".
 
 ## Formerly open questions — resolved by operator, 2026-08-23
 
-- zai GLM lite is consumed by the `zcode` TUI. (Corrected 2026-09-26: the 2026-08-23 note said `crush`; the operator says crush runs against clinepass, not z.ai.)
+- zai GLM lite is consumed by the `zcode` TUI.
 - `muse` is the Muse service itself (own account).
 - Devin is dormant deliberately (also disabled in Orca's roster).
 - Bailian is awaiting ID verification, expected live ~2026-08-26.

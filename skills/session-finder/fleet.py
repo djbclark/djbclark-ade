@@ -65,7 +65,7 @@ RESUME_FORMS = {"claude": "claude{flags} --resume {sid}", "opencode": "opencode{
                 "copilot": "copilot{flags} --resume={sid}", "hermes": "hermes{flags} --resume {sid}",
                 "qwen": "qwen{flags} --resume {sid}", "agy": "agy{flags} --conversation {sid}",
                 "omp": "omp{flags} --resume={sid}", "zcode": "zcode{flags} --resume {sid}",
-                "crush": "crush{flags} --session {sid}", "muse": "muse resume {sid}", "cline": "cline --id {sid}"}
+                "muse": "muse resume {sid}", "cline": "cline --id {sid}"}
 # claude launch flags a resume may replay (the allow-list herdr-sleeper uses); everything else is dropped
 REPLAY_BOOL = {"--dangerously-skip-permissions", "--verbose"}
 REPLAY_VALUE = {"--model", "--permission-mode", "--add-dir", "--effort"}
@@ -74,7 +74,7 @@ HERMES_ACTIVE = 24 * 3600
 REG_STATUS = {"busy": "working", "shell": "working", "waiting": "blocked", "idle": "idle"}
 # binary name -> agent label, for TUIs running outside herdr (herdr panes are taken from herdr itself)
 PROC_AGENTS = {"claude": "claude", "codex": "codex", "cursor-agent": "cursor", "opencode": "opencode",
-               "zcode": "zcode", "crush": "crush", "copilot": "copilot", "qwen": "qwen", "agy": "agy",
+               "zcode": "zcode", "copilot": "copilot", "qwen": "qwen", "agy": "agy",
                "muse": "muse", "cline": "cline", "hermes": "hermes", "grok": "grok", "devin": "devin"}
 PROC_SKIP = re.compile(r"(acp|mcp|--acp|gateway|dashboard|language-server|lsp|sleeper|serve\b|Helper|node_modules|"
                        r"claude-agent-acp|codex-acp| -p |--print|exec |run |\bresume-globally\b)")

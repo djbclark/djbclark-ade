@@ -1,7 +1,7 @@
 ---
 name: session-finder
 description: >-
-  Find which agent session (Claude Code, Codex, Hermes, Cursor, opencode, crush,
+  Find which agent session (Claude Code, Codex, Hermes, Cursor, opencode,
   Cline, Copilot, Qwen, muse, zcode, agy, ACP launches) is or ever was on a
   topic, running or ended, plus handoff chains and memory; say where it lives
   (herdr/Orca/tmux/Ghostty) and how the work continues: message it, start a
@@ -176,8 +176,8 @@ proven fragile (operator, 2026-10-08). The call runs inside a terminal the
 operator can watch: an Orca terminal when launched from Orca (`orca terminal
 create --command`), otherwise a herdr tab in the workspace that already holds that
 repo (a new workspace when none fits), reported to herdr as an agent so `helm`
-and `fleet.py` list it like any other. Agents with no ACP route (zcode, crush,
-muse) get `herdr agent start --kind` plus `agent prompt` — the fragile way; say so.
+and `fleet.py` list it like any other. Agents with no ACP route (zcode, muse)
+get `herdr agent start --kind` plus `agent prompt` — the fragile way; say so.
 
 1. **The pane shows the agent and takes input** (`acp-run --interactive`,
    2026-10-08): output streams into the pane as it happens; when a turn ends the
@@ -215,7 +215,7 @@ muse) get `herdr agent start --kind` plus `agent prompt` — the fragile way; sa
 | hermes (Telegram/desktop chat, `hermes-gw`) | `ask_hermes` (MCP) to prompt it; `messages_send` with `target="telegram:<chat>[:<thread>]"` posts as Hermes; approvals: `permissions_list_open` / `permissions_respond` | `hermes --resume <id>` |
 | hermes (CLI in a pane) | `helm.py send <pane> "<text>"` | same |
 | muse | `muse session-message send --target <uuid|name>`, body on stdin | `muse resume <id>` |
-| codex, cursor, opencode, crush, cline, copilot, qwen, zcode, agy (TUIs in herdr/Orca/tmux) | `helm.py send <id> "<text>"` when idle (keys into the pane; verify on screen), else its `focus:` | the `resume:` line session-history prints |
+| codex, cursor, opencode, cline, copilot, qwen, zcode, agy (TUIs in herdr/Orca/tmux) | `helm.py send <id> "<text>"` when idle (keys into the pane; verify on screen), else its `focus:` | the `resume:` line session-history prints |
 | a TUI herdr does not detect (`zcode`, `muse`, …; listed from `pane process-info`, status `unknown`) | `helm.py send <pane> "<text>"` only after reading its screen | the `resume:` line session-history prints |
 | anything in Ghostty/iTerm/ssh with no channel | tell the operator the `where:` line | — |
 | a pane `herdr-tidy` closed, or a sleeping pane that is gone | — | `fleet.py ended` / `helm.py scan --ended`: the `closed` / `sleeping` item's `resume:` line (ledger `~/.local/state/session-finder/closed.jsonl`; herdr-sleeper journal) |
