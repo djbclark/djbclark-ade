@@ -63,7 +63,7 @@ their old paths are symlinks into this checkout).
 |---|---|
 | [`skills/`](skills/) | The skills (table below). |
 | [`tools/acp-run/`](tools/acp-run/) | `acp-run`, the ACP client every launcher uses. |
-| [`bin/`](bin/) | `fleet-watch` (fleet change notices), `cow-pasture` (APFS copy-on-write workspaces), `herdr-sleeper` (idle-pane sleep), `herdr-jump` (focus a `w22:t4` address from a `prefix+:` popup), `orca-reorg-watch`, `route_agent.py`. |
+| [`bin/`](bin/) | `fleet-watch` (fleet change notices), `cow-pasture` (APFS copy-on-write workspaces), `herdr-sleeper` (idle-pane sleep), `herdr-jump` (focus a `w22:t4` address from a `prefix+:` popup), `herdr-ai` (natural language to Herdr commands from a `prefix+alt+i` popup), `orca-reorg-watch`, `route_agent.py`. |
 | [`claude/commands/`](claude/commands/) | Claude Code slash commands `/orc` (the primary herdr orchestrator), `/orc-meta` (its watchdog), and the thin wrappers `/helm-all`, `/session-finder-all`, `/resume`, `/herdr-tidy`. |
 | [`docs/`](docs/) | Design records and dated operating knowledge (list below). |
 | [`plugins/`](plugins/) | `herdr-sleeper` herdr plugin (dev source of djbclark/herdr-sleeper). |
@@ -138,6 +138,10 @@ way. `helm.py` imports `fleet` from the sibling `skills/session-finder/`.
     safely: the pane classes, the close ledger, the cracks closed in
     `fleet.py`/`helm.py` (busy-background, undetected TUIs, closed and sleeping
     items), the first pass (2026-10-08) and the requests left for herdr-sleeper.
+12. [`docs/herdr-ai.md`](docs/herdr-ai.md) — `bin/herdr-ai`: type "move to the
+    sleeper tab" or "rename this workspace ops" in a popup; a fast free model
+    plans Herdr commands from a snapshot index, the script validates every id
+    against the snapshot and asks for a `y` before anything destructive.
 
 ## Architecture: agent graphs at two altitudes
 
