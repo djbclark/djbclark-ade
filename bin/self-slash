@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# self-slash — queue a built-in slash command (/compact, /context, ...) into THIS
+# session's own herdr pane, so an agent can compact itself instead of asking the
+# operator to type it.  Claude Code cannot run built-ins from the Skill tool
+# (memory/reference_claude_code_model_cannot_run_builtin_slash_commands.md).
+#
+#   self-slash [--delay S] "/compact <focus>"
+#
+# Rules: refuses outside herdr; only ever targets $HERDR_PANE_ID (never another
+# pane); waits --delay seconds (default 6) so the current turn can end, then
+# refuses if the operator has an unsent draft in the input box (a line starting
+# with ❯ that is not empty), and otherwise sends the text + Enter.  Runs
+# detached (nohup) so it survives the Bash tool returning; the log is
+# ~/.local/state/self-slash.log.  First verified 2026-10-09 (ClaudeHelm).
+set -u
+delay=6
+if [ "${1:-}" = "--delay" ]; then delay="$2"; shift 2; fi
+text="${1:-}"
+[ -n "$text" ] || { echo "usage: self-slash [--delay S] \"/command args\"" >&2; exit 2; }
+[ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] || { echo "self-slash: not inside a herdr pane (HERDR_PANE_ID unset); ask the operator to type: $text" >&2; exit 3; }
+case "$text" in /*) ;; *) echo "self-slash: only slash commands are sent (got: $text)" >&2; exit 2;; esac
+pane="$HERDR_PANE_ID"
+log="$HOME/.local/state/self-slash.log"; mkdir -p "$(dirname "$log")"
+if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
+  SELF_SLASH_CHILD=1 nohup "$0" --delay "$delay" "$text" >>"$log" 2>&1 </dev/null &
+  echo "self-slash: queued for pane $pane in ${delay}s (log: $log)"
+  exit 0
+fi
+sleep "$delay"
+for attempt in 1 2 3 4 5 6; do
+  screen=$(herdr agent read "$pane" --source visible --lines 12 2>/dev/null)
+  prompt=$(printf '%s\n' "$screen" | grep -E '^[[:space:]]*❯' | tail -1 | sed -E 's/^[[:space:]]*❯[[:space:]]*//')
+  if ! printf '%s\n' "$screen" | grep -qE '^[[:space:]]*❯'; then
+    echo "$(date '+%F %T') pane $pane: no input prompt on screen yet (attempt $attempt), waiting"; sleep 5; continue
+  fi
+  if [ -n "$prompt" ]; then
+    echo "$(date '+%F %T') pane $pane: REFUSED, unsent draft in input box: ${prompt:0:60}"; exit 4
+  fi
+  herdr pane run "$pane" "$text" && { echo "$(date '+%F %T') pane $pane: sent ${text:0:80}"; exit 0; }
+  echo "$(date '+%F %T') pane $pane: herdr pane run failed (attempt $attempt)"; sleep 5
+done
+echo "$(date '+%F %T') pane $pane: gave up, no empty input prompt seen"; exit 5
