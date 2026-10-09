@@ -60,7 +60,23 @@ on PATH and `~/.config/herdr/herdr.sock`.
 
 ## Third-party pickers
 
-Fuzzy navigators exist as plugins (`thanhdat77/herdr-navigator`,
-`mr04vv/herdr-pane-navigator`, `beyondlex/herdr-recent-navigator`,
-`JanTvrdik/herdr-command-palette`); the 2026-10-08 evaluation of which one
-ranks an exact `w22:t4` first is recorded below this line when done.
+Evaluated 2026-10-08 (sources read, ranking simulated on live data) for
+"type `w22:t4`, the exact address is first, Enter focuses it":
+
+1. **`thanhdat77/herdr-navigator`** (Rust, nucleo fuzzy, 178 stars) is the
+   closest and is installed, bound to `prefix+t` (`ctrl+a t`). Its haystack
+   has workspace ids, agent pane ids and the tab id of each *agent* pane, so
+   an exact address ranks first whenever the target holds a detected agent.
+   It cannot see tabs or panes with no agent (6 of 22 panes at the time), and
+   a miss shows confident wrong rows (`w22:t4` offered `w24:t4`). The v0.3.6
+   release does not move the view on Herdr 0.9.x (its issue #41); the fix is
+   only on main, so it is pinned: `herdr plugin install thanhdat77/herdr-navigator
+   --ref 313b753b1f98f802b7d861430a13cb95a86e8dd3 --yes` (cargo build).
+2. `mr04vv/herdr-pane-navigator` (fzf) and `beyondlex/herdr-recent-navigator`
+   exclude ids from matching (labels and MRU only). `JanTvrdik/herdr-command-palette`
+   and `cloudmanic/herdr-plus` are not navigators.
+3. The built-in Goto picker (`prefix+g`, `/`) matches pane ids for every pane,
+   no install needed, but not tab or workspace ids.
+
+So: `herdr-jump` for an exact address on any tab or pane; the navigator for
+fuzzy jumps between agents; the Goto picker for a pane id with no plugin.
