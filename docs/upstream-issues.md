@@ -356,7 +356,7 @@ entry for the same reason.
 **Local workaround:** `git checkout -- .claude/helpers .cursor` before
 deleting the worktree.
 
-## 7. zcode-acp — `$/zcode/turnState` uses a non-ACP extension prefix; turn stats arrive as agent text (draft, 2026-10-09, issue search not yet done)
+## 7. zcode-acp — `$/zcode/turnState` uses a non-ACP extension prefix; turn stats arrive as agent text (filed 2026-10-09)
 
 Repo: william0wang/zcode-acp (npm `zcode-acp-server` 0.65.1), the bridge that
 wraps `zcode app-server --stdio` as an ACP agent. Seen here with `acp-run zcode`
@@ -379,6 +379,24 @@ prompt "Reply with exactly: OK".
    chunks whose `messageId` starts with `turninfo_`.
 
 Evidence: `~/.local/state/acp-run/20261009-000130-zcode-5906.jsonl` (before the
-workaround) and `20261009-000400-zcode-12981.jsonl` (after). Before filing,
-search the repo's issues and PRs for `turnState`, `$/`, `turninfo`,
-`agent_message_chunk` — the client-side handling may already be discussed.
+workaround) and `20261009-000400-zcode-12981.jsonl` (after). Note the JSONL
+holds the `turninfo_` chunk but not the `$/zcode/turnState` traceback, which
+went to the client's own stderr; the prefix claim was re-verified instead
+against the ACP spec (Extensibility: custom notifications start with `_`;
+clients SHOULD ignore unrecognized ones) and against `agent-client-protocol`
+0.12.1 (`acp/router.py` routes only `_`-prefixed names to `ext_notification`
+and raises `method_not_found` for everything else).
+
+Filed / found (2026-10-09):
+
+1. Issue search (`gh issue list`/`gh pr list --state all`, terms `turnState`,
+   `$/`, `turninfo`, `agent_message_chunk`, "method not found", `usage`,
+   `cache-read`, `stats`): no prior thread on either defect. PR #54 added the
+   `$/zcode/turnState` notification, PR #221 the turn-end stats line; neither
+   discusses the prefix or a switch. The README's config file (`debug`,
+   `session`, `autoCompact`, `goal`, `interaction`, `sandbox`, `remote`,
+   `quota`) and the `ZCODE_ACP_*` table have no field that hides the line, and
+   `dispatchTurnInfo` in `src/handlers/dispatch.ts` is unconditional, so it is
+   a bug/feature request, not a defaults question.
+2. Filed: https://github.com/william0wang/zcode-acp/issues/311 (prefix).
+3. Filed: https://github.com/william0wang/zcode-acp/issues/312 (stats chunk).
