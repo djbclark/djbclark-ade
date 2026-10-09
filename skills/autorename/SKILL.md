@@ -60,13 +60,18 @@ it (operator, 2026-10-09, after three renames changed nothing he could see). Ins
 herdr, right after step 2 (and whenever the operator has typed `/rename` by hand), run:
 
 ```bash
-python3 ~/ops/site-private/skills/autorename/herdr_place.py label --from-title   # <kebab-title>-t, generic labels only
-python3 ~/ops/site-private/skills/autorename/herdr_place.py label <label>-t      # your own label
-python3 ~/ops/site-private/skills/autorename/herdr_place.py label --force ...    # replace a real label too
+python3 ~/ops/site-private/skills/autorename/herdr_place.py label --force --from-title   # operator asked: always relabel
+python3 ~/ops/site-private/skills/autorename/herdr_place.py label --from-title           # --auto / hook: generic labels only
+python3 ~/ops/site-private/skills/autorename/herdr_place.py label [--force] <label>-t    # your own label
 ```
 
 It prints `labelled:`, `unchanged:`, `kept:` (the tab already had a real label) or
-`skipped:` (not in herdr). Step 3 then decides whether the tab also moves.
+`skipped:` (not in herdr). **A direct `/autorename` uses `--force`**: the tab's
+old label is usually left over from whatever ran in the tab before (2026-10-09:
+"monorepo setup" survived a rename and the operator saw no change), and the
+operator asking is the signal that the current name is wrong. Only the `--auto`
+path keeps a real label, so a hook never overwrites a name he typed. Step 3 then
+decides whether the tab also moves.
 
 ## 3. herdr placement (only when `HERDR_ENV=1`)
 
