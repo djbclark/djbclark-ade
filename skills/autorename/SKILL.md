@@ -64,8 +64,14 @@ python3 ~/ops/site-private/skills/autorename/herdr_place.py check --auto   # the
 ```
 
 It prints JSON: this tab, its workspace (with `generic` and `reason`), the other
-workspaces with their tab labels, and `ask`. If `in_herdr` is false or `ask` is
-false, stop. (`--auto` gives `ask: false` once the operator answered this session.)
+workspaces with their tab labels, and `ask`. If `in_herdr` is false, stop.
+
+**Whenever the tab stays put** (`ask` false, or the operator says "leave it"),
+still label it: if `tab.label` is a bare number or otherwise generic, run
+`herdr tab rename <tab.tab_id> <label>-t` (label as below). Only `move` sets a
+label, so skipping this leaves the tab showing "3" (operator, 2026-10-09).
+If `ask` is false, stop after that. (`--auto` gives `ask: false` once the
+operator answered this session.)
 Skip the question too if you are a dispatched worker no human is watching.
 
 Otherwise ask with **one** AskUserQuestion, recommended option first:
