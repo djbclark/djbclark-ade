@@ -25,8 +25,12 @@ Invariants, in force for the whole run:
    unattended until 05:45", "keep the fleet busy while I sleep". Silence is not
    a go: an operator who is merely away gets relay mode and `wait`.
 2. Write the parameters as the first lines of `STATE.md` (section 5) before
-   anything else: stop time for the lead, a worker hard stop about 45 minutes
-   earlier (integration and the final doc need that time), the repos in scope,
+   anything else: the stop time and what it means (operator, 2026-10-09 07:05:
+   the stop time bounds the *expiring* quota, not the doc; spend as much of the
+   expiring pool as possible before its reset rather than stopping exactly on
+   time, and do the wrap-up and the final doc afterwards on quota that does not
+   expire, keeping that part small), a worker hard stop near the expiring
+   pool's reset, the repos in scope,
    the quota ceilings (section 3.5), the agents allowed (tonight: Claude only;
    Fable where judgement matters), and anything the operator ruled out.
 3. A hint that arrives mid-run ("also look at X") is a new source, not a
@@ -191,8 +195,13 @@ handled once, in this order, and not repaired:
 
 ## 8. Finish
 
-1. Stop starting work at the lead's stop time minus the longest slice you
-   would still start; let running workers finish to their own hard stop.
+1. Keep dispatching while the expiring pool has quota and the queue has
+   unattended-safe work: a wave that ends after the stop time is fine when its
+   spend lands before the reset. Stop starting work when the pool is nearly
+   spent or the reset is closer than the shortest slice. Let running workers
+   finish to their own hard stop. The doc and the wrap-up may run later, on a
+   non-expiring pool, kept small. (On 2026-10-09 the lead stopped at 04:50 with
+   Claude weekly 37 percent left and Fable 28 percent of its cap: too early.)
 2. Write the final doc to `<scratchpad>/ClaudeHelm-<date>.md`, numbered so
    every item can be referred to: one `## N.` per item with Done, Commits,
    **Undo** (one exact command), Verified, Queued; then the `MERGE ORDER`
