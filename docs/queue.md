@@ -505,3 +505,7 @@ the zcode TUI, not Hermes.
   (untyped launch-record dicts, Optional access in the helm-reply path); the
   tests pass and both test files are clean. A separate typing pass, not a
   blocker.
+- **`cow-pasture remove A B --force` ignores `--force` with several names**
+  (seen 2026-10-09): the first dirty pasture prints "Not a TTY — defaulting
+  to no" and nothing is removed; one name per call works. Fix the flag
+  handling in `bin/cow-pasture`.
