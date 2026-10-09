@@ -7,9 +7,12 @@ would starve Hindsight and hermes of inference.
 """
 from __future__ import annotations
 
+import contextlib
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 
@@ -177,3 +180,93 @@ class TestDiscovery(unittest.TestCase):
         choice = r.route("bulk", quota=drained)
         self.assertIsNotNone(choice, "roster agents should still provide a fallback")
         self.assertNotEqual(choice.service.name, "clinepass")
+
+
+ACP_LIST = """ok claude    claude-agent-acp
+ok codex     codex-acp
+ok cline     cline --acp
+ok agy       /Users/x/.local/share/agy-acp-server/1.3.0/agy_acp_server.par
+ok fresh-acp-agent  fresh-acp-agent acp
+-- devin     devin acp
+-- phantom-acp  phantom-acp acp
+"""
+
+
+@contextlib.contextmanager
+def sources(acp: str = "", installed=(), orca=(), include_orca: bool = False):
+    """Pin every discovery source so a test sees only what it declares."""
+    env = dict(os.environ, ROUTE_AGENT_INCLUDE_ORCA="1" if include_orca else "")
+    which = lambda name, *a, **k: f"/fake/bin/{name}" if name in installed else None
+    with mock.patch.object(r, "acp_list_output", return_value=acp), \
+            mock.patch.object(r.shutil, "which", side_effect=which), \
+            mock.patch.object(r, "orca_roster", return_value=set(orca)), \
+            mock.patch.dict(os.environ, env, clear=True):
+        yield
+
+
+class TestDiscoverySources(unittest.TestCase):
+    """Discovery reflects what this machine can dispatch, not Orca's stock list.
+
+    Orca's roster is its stock TUI list: on 2026-10-08, 12 of 28 enabled names
+    were not installed here (amp, droid, kiro, ...). acp-run's table is what
+    every launcher uses, so it is the authority; the non-ACP headless TUIs
+    join only while installed; Orca is opt-in and intersected with PATH."""
+
+    def names(self):
+        return {s.name for s in r.discover(IDLE)}
+
+    def test_only_ok_rows_of_acp_run_are_routable(self):
+        with sources(acp=ACP_LIST):
+            names = self.names()
+        self.assertIn("fresh-acp-agent", names)
+        self.assertNotIn("phantom-acp", names, "`--` rows have no binary")
+
+    def test_acp_rows_pass_through_aliases(self):
+        """`cline`/`agy` are TUIs of curated services; a second entry would
+        dodge the constraints that protect clinepass."""
+        with sources(acp=ACP_LIST):
+            names = self.names()
+        for alias in ("cline", "agy"):
+            self.assertNotIn(alias, names)
+        self.assertIn("clinepass", names)
+        self.assertIn("antigravity", names)
+
+    def test_non_acp_headless_tuis_count_only_while_installed(self):
+        self.assertEqual(r.NON_ACP_HEADLESS, {"crush", "muse", "zcode"})
+        with sources(installed=()):
+            self.assertNotIn("muse", self.names())
+        with sources(installed=("muse",)):
+            self.assertIn("muse", self.names())
+
+    def test_headless_tuis_pass_through_aliases(self):
+        """crush is clinepass's TUI, zcode is zai's: they fold, not duplicate."""
+        with sources(installed=("crush", "zcode", "muse")):
+            names = self.names()
+        self.assertNotIn("crush", names)
+        self.assertNotIn("zcode", names)
+        self.assertIn("clinepass", names)
+        self.assertIn("zai", names)
+
+    def test_phantom_orca_names_are_not_routable_by_default(self):
+        phantoms = {"amp", "ante", "autohand", "droid", "kiro", "trae"}
+        with sources(orca=phantoms | {"claude"}, installed=phantoms):
+            names = self.names()
+        self.assertFalse(phantoms & names, phantoms & names)
+
+    def test_orca_source_when_enabled_is_intersected_with_installed(self):
+        with sources(orca={"aider", "amp"}, installed=("aider",), include_orca=True):
+            names = self.names()
+        self.assertIn("aider", names)
+        self.assertNotIn("amp", names, "enabled in Orca but not installed")
+
+    def test_acp_run_failure_degrades_to_no_acp_agents(self):
+        with mock.patch.object(r.subprocess, "run", side_effect=OSError("gone")):
+            self.assertEqual(r.acp_agents(), set())
+        with mock.patch.object(r.subprocess, "run",
+                               side_effect=r.subprocess.TimeoutExpired("acp-run", 15)):
+            self.assertEqual(r.acp_agents(), set())
+
+    def test_acp_agents_parses_live_format(self):
+        with mock.patch.object(r, "acp_list_output", return_value=ACP_LIST):
+            self.assertEqual(r.acp_agents(),
+                             {"claude", "codex", "cline", "agy", "fresh-acp-agent"})

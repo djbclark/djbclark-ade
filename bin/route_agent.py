@@ -20,12 +20,23 @@ launchd job (`com.djbclark.aiuse`, StartInterval 900) refreshes it every 15
 minutes. Routing reads that file. A routing call is a file read, and a stale
 or missing snapshot degrades to capability-only routing rather than hanging.
 
-**Services are discovered, not hardcoded.** The roster changes — agents get
-added to Orca, providers appear in aiuse, plans lapse. So the service list is
-built at call time from Orca's enabled agent roster and whatever providers the
-snapshot reports, with the curated capability profiles below applied as an
-*overlay*. An agent nobody has profiled still routes (conservatively) instead
-of being invisible.
+**Services are discovered, not hardcoded.** The roster changes — agents gain
+an ACP mode, providers appear in aiuse, plans lapse. So the service list is
+built at call time from what this machine can actually dispatch, in this order:
+
+1. `acp-run --list` — the agent table every launcher uses; only `ok` rows
+   (binary present) count.
+2. the non-ACP headless TUIs (`NON_ACP_HEADLESS`, from model-routing's
+   per-CLI headless table), each only if its binary is on PATH.
+3. Orca's enabled agent roster — **off by default** (`ROUTE_AGENT_INCLUDE_ORCA=1`
+   turns it on), and even then intersected with installed binaries. Orca's
+   roster is its stock TUI list: on 2026-10-08, 12 of its 28 enabled names
+   were not installed here at all, so it is no longer an authority.
+4. whatever providers the aiuse snapshot reports.
+
+Every name passes through `ALIASES` before it becomes a service, and the
+curated capability profiles below are applied as an *overlay*. An agent nobody
+has profiled still routes (conservatively) instead of being invisible.
 
 The operator's standing routing rules are encoded as hard constraints, not
 preferences, because they encode consequences a score cannot see:
@@ -47,6 +58,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -59,6 +71,18 @@ SNAPSHOT = Path(os.environ.get("AIUSE_SNAPSHOT") or
                 (Path.home() / ".cache" / "aiuse" / "snapshots" / "latest.json"))
 ORCA_DATA = Path.home() / ("Library/Application Support/orca/profiles/"
                            "local-default/orca-data.json")
+# The ACP client every launcher uses; its agent table is the primary source of
+# dispatchable agents. The sibling checkout copy wins over PATH so the table
+# and this script move together; ACP_RUN overrides both.
+ACP_RUN = (os.environ.get("ACP_RUN")
+           or next((str(c) for c in (Path(__file__).resolve().parent.parent
+                                      / "tools" / "acp-run" / "acp-run",)
+                    if c.is_file()), None)
+           or shutil.which("acp-run") or "acp-run")
+# TUIs with a verified headless form but no usable ACP route, so acp-run does
+# not list them: skills/model-routing/SKILL.md, "Per-CLI headless forms (no ACP
+# mode, or fallback)". Each counts only while its binary is on PATH.
+NON_ACP_HEADLESS = frozenset({"crush", "muse", "zcode"})
 STALE_HARD = 6 * 3600      # beyond this, treat headroom as unknown
 
 # Kinds of work. Deliberately few — a taxonomy nobody can apply is worse than
@@ -231,8 +255,37 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
     return providers, age
 
 
+def acp_list_output() -> str:
+    """`acp-run --list`, or "" when it cannot run. Never raises; never hangs."""
+    try:
+        proc = subprocess.run([ACP_RUN, "--list"], capture_output=True,
+                              text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def acp_agents() -> set[str]:
+    """Agents acp-run can launch right now: the `ok <name> <cmd>` rows only.
+
+    `-- <name>` rows are in the table but their binary is absent."""
+    found = set()
+    for line in acp_list_output().splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "ok":
+            found.add(parts[1])
+    return found
+
+
+def headless_agents() -> set[str]:
+    """Non-ACP TUIs with a headless recipe, only while installed."""
+    return {name for name in NON_ACP_HEADLESS if shutil.which(name)}
+
+
 def orca_roster() -> set[str]:
-    """Agents Orca can actually dispatch to right now, minus disabled ones."""
+    """Orca's enabled TUI roster. Its stock list, not what is installed here —
+    so `installed_roster` only consults it when asked, and intersects it with
+    binaries on PATH."""
     try:
         data = json.loads(ORCA_DATA.read_text())
     except (OSError, ValueError):
@@ -242,11 +295,23 @@ def orca_roster() -> set[str]:
     return agents - set(settings.get("disabledTuiAgents") or [])
 
 
+def include_orca() -> bool:
+    return os.environ.get("ROUTE_AGENT_INCLUDE_ORCA", "").lower() in ("1", "true", "yes")
+
+
+def installed_roster() -> set[str]:
+    """Every agent this machine can dispatch to, in the module docstring's order."""
+    names = acp_agents() | headless_agents()
+    if include_orca():
+        names |= {name for name in orca_roster() if shutil.which(name)}
+    return names
+
+
 # Curated profiles overlay discovery; anything discovered without one gets
 # DEFAULT_PROFILE so a newly-added agent is routable rather than invisible.
 DEFAULT_PROFILE = {"bulk": 60, "mechanical": 60}
 
-# Orca's roster names the TUI; aiuse names the account behind it. Without this
+# Discovery names the TUI; aiuse names the account behind it. Without this
 # map, discovery would surface `cline` as a brand-new service and hand it bulk
 # work — silently defeating the never-bulk rule that protects clinepass, which
 # is Hindsight's and hermes's inference lifeline. Any alias inherits the
@@ -259,6 +324,7 @@ ALIASES = {
     "openclaude": "claude",
     "opencode": "opencode-go",
     "kimi": "opencode-go",
+    "zcode": "zai",
 }
 
 
@@ -268,11 +334,12 @@ def discover(quota: dict[str, Any] | None = None) -> list[Service]:
     services = {s.name: s for s in SERVICES}
     known_clis = {s.cli.split()[0] for s in SERVICES} | set(services)
 
-    for name in sorted(set(quota) | orca_roster()):
+    for name in sorted(set(quota) | installed_roster()):
         canonical = ALIASES.get(name, name)
-        if canonical in services:
+        if canonical in services or canonical in known_clis:
             continue                                # same account, already profiled
-        if name in ("codexbar-query-errors",):      # diagnostics, not a service
+        if name in ("codexbar-query-errors",       # diagnostics, not a service
+                    "hermes"):                     # the operator's assistant, never a bulk worker
             continue
         services[name] = Service(
             name=name, cli=name, good_at=dict(DEFAULT_PROFILE),
