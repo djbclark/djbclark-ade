@@ -627,3 +627,55 @@ and the operator disabled the provider in aiuse on 2026-10-08 (`daf9eec`).
 **Evidence:** `aiuse-bugs-report.md` item 1 (ClaudeHelm scratchpad,
 2026-10-09); aiuse bead `aiuse-e9d`; aiuse `docs/collector-concurrency.md`
 ("Hang backoff").
+
+## 12. Collie — `collie update --help` starts a live update instead of printing usage (draft, 2026-10-09)
+
+**Status: draft, not filed.**
+
+**Repo:** [AltanS/collie](https://github.com/AltanS/collie).
+
+**Versions:** Collie 1.17.2+3d562ae5 (the `collie` on PATH when it happened),
+macOS 27, Apple silicon, bun 1.4.2, downloaded install under `~/.collie`.
+
+**Searched first (2026-10-09, `gh search issues --repo AltanS/collie`, open and
+closed):** `update --help`, `help flag`. Nothing found.
+
+**Draft title:** `collie update --help` begins the staged update instead of showing usage
+
+**Reproduction:**
+
+```
+collie update --help
+```
+
+Expected: usage for `update` (the flags `collie help` lists: `--check`,
+`--check --local`, `--major`, `--rollback`, `--status`).
+
+Actual: the command starts the update at once:
+
+```
+updating Collie (staged checkout: building v1.18.1 beside the running version)…
+From https::https://github.com/AltanS/collie
+ * [new tag]           v1.18.1    -> v1.18.1
+Preparing worktree (detached HEAD cfaf95a9)
+bun install v1.4.2 ...
+```
+
+Interrupting it (the output was piped through `head`, so the process got
+SIGPIPE during `bun install`) left a registered-but-missing git worktree in
+`~/.collie` until `git -C ~/.collie worktree prune`. The running version was
+not touched, which is the staged design working as intended.
+
+**Why it matters:** `--help` is the one flag every user tries first, and here
+it is the one subcommand where trying it changes the machine (a build, then a
+detached swap and restart). `collie help` is fine; it is the per-subcommand
+form that bites.
+
+**Suggested fix:** treat `-h`/`--help` (and any unknown flag) on `update` as
+usage, exit 2 before `cmdUpdate` touches the checkout. The same check is worth
+applying to `build`, `restart` and `uninstall`.
+
+**Evidence:** Claude memory note
+`feedback_collie_update_help_runs_the_update.md` (2026-10-09); the ClaudeHelm
+session transcript for 07:4x EDT; `~/.collie/logs/stdout.log` around
+2026-10-09T11:4xZ shows only the later, intended update.
