@@ -64,7 +64,9 @@ fi
 # herdr is read with ANSI codes: Claude Code paints its hint text and its suggested
 # next prompt (ghost text, accepted with Tab) in grey (38;2;153;153;153, the ❯'s own
 # colour) or dim; the operator's typed text is in the default colour.  Seen
-# 2026-10-09 17:00: a waiter sat for minutes on a ghost suggestion.
+# 2026-10-09 17:00: a waiter sat for minutes on a ghost suggestion.  Verified
+# 17:03: the suggestion ("did the compact fire this time?") arrived as plain dim
+# (ESC[2m, no RGB grey), was classified EMPTY, and the /compact was sent over it.
 classify_prompt() {
   if [ "$host" = herdr ]; then
     herdr agent read "$pane" --source visible --lines 12 --format ansi 2>/dev/null | python3 -c '
