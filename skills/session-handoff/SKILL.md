@@ -176,7 +176,8 @@ Canonical log (`chains/<chain-key>/SESSION_LOG.md`):
 
     ## Current State
     - Active work: <bead ID + description, or free text>
-    - Blockers: <list or "None">
+    - Blockers: <list or "None"; include each sub-agent `BLOCKED: <question>` line
+      and each dispatched slice with no report, from `acp-dispatch check`>
     - Next steps: <bullets per the Writer protocol's Composition rule>
 
     ## Recent History

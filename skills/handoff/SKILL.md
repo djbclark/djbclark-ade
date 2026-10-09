@@ -169,7 +169,10 @@ next `/baton` re-arms from these entries.
 - [ ] Tests run + results (or explicit "none run")
 - [ ] Decisions + rejected alternatives
 - [ ] Failed approaches + why
-- [ ] Blockers / open questions
+- [ ] Blockers / open questions, including every sub-agent report whose
+      first line is `BLOCKED: <question>` and every dispatched slice with no
+      report (`acp-dispatch check <out dir | report paths>`): an unanswered
+      sub-agent question does not survive a compaction unless it is written here
 - [ ] ONE explicit next action at the top of Where We're Going
 - [ ] Every open job record of this session is listed under Detached jobs
       (or the section says "none"), and nothing in the doc assumes a
