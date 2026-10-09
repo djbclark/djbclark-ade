@@ -325,6 +325,7 @@ Discussion — after the soak (started 2026-10-04 evening; post on/after
 > no other match. What this write-up adds, usable as a comment there: the
 > per-worktree consequence below (stamp lives in the ignored cache, so each new
 > worktree replays init once) and that a git clean filter cannot mask it.
+> **Posted 2026-10-08:** https://github.com/trailhq/Graft/issues/309#issuecomment-6073784254
 
 **Repo:** `@nanonets/graft` (`src/claude/shim-template.ts`, `src/hosts` Cursor hooks).
 
