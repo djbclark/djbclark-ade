@@ -500,3 +500,8 @@ the zcode TUI, not Hermes.
 - **File the two upstream issue drafts** in
   [upstream-issues.md](upstream-issues.md) — operator decision, they go to
   third-party trackers.
+- **Type `skills/session-finder/launch.py`** (decided 2026-10-09: leave for
+  now): basedpyright with default rules reports 52 pre-existing errors there
+  (untyped launch-record dicts, Optional access in the helm-reply path); the
+  tests pass and both test files are clean. A separate typing pass, not a
+  blocker.
