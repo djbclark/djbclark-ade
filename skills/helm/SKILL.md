@@ -99,6 +99,9 @@ Hermes; never numbered prose). One item per call.
    in its repo now (`$L --baton --cwd <dir> --agent claude --model <M> --pane
    <its pane> -p "<next step he names>"`), Skip, or Leave it. Ended sessions
    with open work come only with `scan --ended` (section 7).
+8. **`busy-background`** — looks idle to herdr but a child process that is not
+   one of its servers still runs (a backgrounded Bash, an acp-run, a build).
+   Not an item and never audited; `scan --all` shows the processes. Leave it.
 
 **Never choose for him.** Not the recommended option, not an obvious one.
 Helm relays; the answer is his. Never relay around a permission denial.
@@ -162,6 +165,9 @@ notification arrives, relay them (section 2) and start it again.
    history-only until it works again (todo note).
 5. Keys sent when no prompt is on screen land in the input box. `answer`
    checks the screen first; `keys` checks only that the session is blocked.
+6. Since 2026-10-08 a session whose own background task is still running is
+   `busy-background` (fleet), not idle: it is never audited. A session waiting
+   on an in-process sub-agent is `working` in the registry and never was.
 
 ## 7. Ended sessions (`/helm all`, `/helm-all`, `--ended`)
 
@@ -191,11 +197,25 @@ collector call and two item kinds differ.
    operator's answer: <his text>; continue from there"`), **Resume it** (only
    when the item's transcript size is under 2 MB, see session-finder 3d; give
    the `claude --resume` command for him to run in the pane he picks), **Skip**.
-4. Started sessions come back through the queue as `done` or `reply` items
+4. **`closed`** — a pane `herdr-tidy` closed (any TUI, Hermes CLI, a shell, a
+   sleeping stub); the ledger `~/.local/state/session-finder/closed.jsonl`
+   holds its exact resume command, why it was closed and its last screen rows.
+   Offer exactly: **Resume it** (first; give the item's `resume:` line to run in
+   a free pane, or `herdr agent start <name> --kind <kind> --pane <free pane> --
+   <its resume tokens>`; `fleet.py conflicts --sid <sid>` first; then
+   `tidy.py resumed <id>`), **Start fresh** (`$L --agent <A> --cwd <dir> --model
+   <M> -p "<brief from the item's title and why>"`), **Skip** (`$H skip <id>`).
+   Hidden by itself once the session is live again or its handoff chain is listed.
+5. **`sleeping`** — a herdr-sleeper journal entry whose pane no longer exists
+   (closed by hand, lost in a restart, re-keyed as an orphan): auto-wake cannot
+   reach it; only the manual line can. Same three offers as `closed`, with the
+   item's `resume:` line (the sleeper's own `manual:` form). A `--days` window
+   applies to both kinds (slept/closed within N days, default 14).
+6. Started sessions come back through the queue as `done` or `reply` items
    (section 2.5), so the walk continues without you watching them.
-5. Ended items are read from logs and transcripts only; nothing is re-opened
+7. Ended items are read from logs and transcripts only; nothing is re-opened
    until he says so. Do not summarise a handoff beyond its Active-work line and
-   next steps as printed.
+   next steps as printed. Closing panes is `herdr-tidy`'s job, never helm's.
 
 ## What this is not
 

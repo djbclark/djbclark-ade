@@ -4,7 +4,9 @@
     fleet.py [--all] [--json]        running sessions (--all: sleeper and plain shell panes too)
     fleet.py ended [--days N] [--json]
                                      ended sessions that still hold open items: a handoff whose
-                                     next steps nobody picked up, or a last reply that asked a question
+                                     next steps nobody picked up, a last reply that asked a question,
+                                     a pane herdr-tidy closed (its ledger carries the resume command),
+                                     or a herdr-sleeper journal entry whose pane is gone
     fleet.py show <id> [--json]      one session with its transcript tail
     fleet.py conflicts --cwd DIR [--sid ID]
                                      who else works in that repo: working sessions (exit 1: do not start
@@ -14,9 +16,11 @@
 Sources, merged by pane and session id: herdr `agent list` (any agent kind), the Claude Code
 registry (~/.claude/sessions), a process scan for TUIs running outside herdr, Hermes gateway
 sessions active in the last day (~/.hermes/state.db, read-only), and the sessions launch.py
-started over ACP (~/.local/state/session-finder/launches.jsonl). Each record says how to reach
-the session (`reach`) and whether it already finished with /handoff or /quit (`finished`), so a
-caller never continues a session that handed off.
+started over ACP (~/.local/state/session-finder/launches.jsonl), plus herdr panes whose TUI herdr
+did not detect (`pane process-info`). Each record says how to reach the session (`reach`), whether
+it already finished with /handoff or /quit (`finished`), and whether an idle-looking session still
+has work in flight (`busy`: live child processes that are not its MCP/LSP servers -> status
+`busy-background`, never audited, never closed).
 
 Shared by session-find.py, helm.py and launch.py. Exit 0 = something listed, 1 = nothing, 2 = usage.
 """
@@ -24,6 +28,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -34,8 +39,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 try:
-    import where as _where  # noqa: E402
-except ImportError:
+    import where as _where
+except (ImportError, SyntaxError):   # SyntaxError: an older python (3.9) that cannot parse it; locate nothing
     _where = None
 
 HOME = str(Path.home())
@@ -43,8 +48,27 @@ CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
 HERDR = os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr") or str(Path.home() / ".local/bin/herdr")
 STATE_DIR = Path(os.environ.get("SESSION_FINDER_STATE", Path.home() / ".local/state/session-finder"))
 LAUNCHES = STATE_DIR / "launches.jsonl"
+CLOSED = STATE_DIR / "closed.jsonl"      # herdr-tidy's close ledger (skills/herdr-tidy/tidy.py appends, this reads)
 HANDOFFS = Path.home() / ".local/state/handoffs"
 HERMES_DB = Path.home() / ".hermes" / "state.db"
+_XDG_STATE = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+# herdr-sleeper's journal (pane -> entry), read-only: the plugin's state dir first, the legacy standalone dir second
+SLEEPER_JOURNALS = [Path(os.environ.get("HERDR_PLUGIN_STATE_DIR") or _XDG_STATE / "herdr/plugins/djbclark.herdr-sleeper") / "sleeping.json",
+                    Path(os.environ.get("HERDR_SLEEPER_STATE") or _XDG_STATE / "herdr-sleeper") / "sleeping.json"]
+# a session's own servers: children that are not work in flight (MCP servers, language servers, keep-awake)
+SERVER_PROCS = re.compile(r"(\bmcp\b|-mcp\b|langserver|language-server|\blsp\b|marksman|token-savior|caffeinate|"
+                          r"maestro\.cli|1password|extrabar|zcode-node-repl|zcode-cli)", re.IGNORECASE)
+# how each TUI resumes a session by id (verified against `<tui> --help` on this machine, 2026-10-08; herdr-sleeper's
+# KINDS table agrees). {flags} are the launch flags worth replaying, {sid} the session id.
+RESUME_FORMS = {"claude": "claude{flags} --resume {sid}", "opencode": "opencode{flags} -s {sid}",
+                "codex": "codex{flags} resume {sid}", "cursor": "cursor-agent{flags} --resume {sid}",
+                "copilot": "copilot{flags} --resume={sid}", "hermes": "hermes{flags} --resume {sid}",
+                "qwen": "qwen{flags} --resume {sid}", "agy": "agy{flags} --conversation {sid}",
+                "omp": "omp{flags} --resume={sid}", "zcode": "zcode{flags} --resume {sid}",
+                "crush": "crush{flags} --session {sid}", "muse": "muse resume {sid}", "cline": "cline --id {sid}"}
+# claude launch flags a resume may replay (the allow-list herdr-sleeper uses); everything else is dropped
+REPLAY_BOOL = {"--dangerously-skip-permissions", "--verbose"}
+REPLAY_VALUE = {"--model", "--permission-mode", "--add-dir", "--effort"}
 TAIL = 600_000          # bytes read from the end of a Claude transcript
 HERMES_ACTIVE = 24 * 3600
 REG_STATUS = {"busy": "working", "shell": "working", "waiting": "blocked", "idle": "idle"}
@@ -54,7 +78,7 @@ PROC_AGENTS = {"claude": "claude", "codex": "codex", "cursor-agent": "cursor", "
                "muse": "muse", "cline": "cline", "hermes": "hermes", "grok": "grok", "devin": "devin"}
 PROC_SKIP = re.compile(r"(acp|mcp|--acp|gateway|dashboard|language-server|lsp|sleeper|serve\b|Helper|node_modules|"
                        r"claude-agent-acp|codex-acp| -p |--print|exec |run |\bresume-globally\b)")
-STRIP = re.compile(r"<(system-reminder|local-command-[a-z]+|command-[a-z]+|pasted_content)\b.*?</\1>", re.S)
+STRIP = re.compile(r"<(system-reminder|local-command-[a-z]+|command-[a-z]+|pasted_content)\b.*?</\1>", re.DOTALL)
 CMD = re.compile(r"<command-name>\s*(/\S+)")
 FINISHERS = ("/handoff", "/quit", "/exit")
 
@@ -63,7 +87,7 @@ FINISHERS = ("/handoff", "/quit", "/exit")
 
 def run(*cmd, timeout=10):
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
         return p.returncode, p.stdout
     except (OSError, subprocess.TimeoutExpired):
         return 127, ""
@@ -144,7 +168,7 @@ def _ts(rec):
     if not t:
         return None
     try:
-        return time.mktime(time.strptime(t[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone + (0 if t.endswith("Z") else 0)
+        return time.mktime(time.strptime(t[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
     except ValueError:
         return None
 
@@ -269,6 +293,8 @@ def _from_herdr(s, a):
              title=a.get("terminal_title_stripped") or s.get("title") or "",
              focus=f"herdr tab focus {a['tab_id']}", cwd=s.get("cwd") or a.get("cwd") or "",
              where=f"herdr · ws {herdr_label('workspace', a['workspace_id'])} · tab {herdr_label('tab', a['tab_id'])}")
+    s.update(pane=a["pane_id"], tab=a["tab_id"], workspace=a["workspace_id"], label=a.get("label") or "",
+             herdr_status=a.get("agent_status") or "unknown")
     if a["pane_id"] == os.environ.get("HERDR_PANE_ID"):
         s["self"] = True
     if a.get("agent_status") in ("idle", "working", "blocked", "done"):
@@ -278,7 +304,7 @@ def _from_herdr(s, a):
 def _acp_pane_of(pid):
     """Walk up from PID to an acp-run process and return the HERDR_PANE_ID it inherited, if any."""
     for _ in range(5):
-        rc, out = run("ps", "-o", "ppid=,command=", "-p", str(pid))
+        _rc, out = run("ps", "-o", "ppid=,command=", "-p", str(pid))
         parts = out.split(None, 1)
         if len(parts) < 2:
             return None
@@ -359,23 +385,70 @@ def _other_herdr(agents, used):
     return out
 
 
-def _shell_panes(agents, used):
-    out = []
-    for a in agents:
-        if a["pane_id"] in used:
+def pane_procs(pane):
+    """Foreground processes of a herdr pane (`pane process-info`): [{pid, name, argv, cwd}], shell pid.
+    None when herdr could not read them (unknown is not empty)."""
+    info = herdr_json("pane", "process-info", "--pane", pane).get("process_info")
+    if not isinstance(info, dict):
+        return None, None
+    procs = []
+    for pr in info.get("foreground_processes") or []:
+        argv = pr.get("argv") or ([pr["cmdline"]] if pr.get("cmdline") else [])
+        procs.append({"pid": pr.get("pid"), "name": pr.get("name") or pr.get("argv0") or "", "argv": argv,
+                      "argv0": pr.get("argv0") or "", "cwd": pr.get("cwd") or ""})
+    return procs, info.get("shell_pid")
+
+
+SID_IN_ARGV = re.compile(r"(?:--resume|--session|--conversation|--id|-s|-r)(?:=|$)")
+
+
+def _tui_of(procs):
+    """(agent label, pid, session id, argv) of the TUI running in a pane, from its foreground processes."""
+    for pr in procs or []:
+        argv = pr["argv"]
+        names = [os.path.basename(pr["argv0"] or "")] + [os.path.basename(a) for a in argv[:2]]
+        agent = next((PROC_AGENTS[n] for n in names if n in PROC_AGENTS), None)
+        if not agent or "stub" in argv[:4] and "herdr-sleeper" in " ".join(argv):
             continue
-        s = _rec(id=a["pane_id"], agent=a.get("agent") or "shell", cwd=a.get("cwd") or "", status="unknown",
-                 reach="free pane: launch.py --pane " + a["pane_id"])
-        _from_herdr(s, a)
-        s["status"] = "shell"
-        out.append(s)
-    return out
+        sid = None
+        for i, tok in enumerate(argv):
+            if SID_IN_ARGV.match(tok):
+                val = tok.split("=", 1)[1] if "=" in tok else (argv[i + 1] if i + 1 < len(argv) else "")
+                if re.fullmatch(r"[0-9A-Za-z_.-]{6,}", val or ""):
+                    sid = val
+        return agent, pr["pid"], sid, argv
+    return None, None, None, None
+
+
+def _pane_only(panes, used):
+    """Panes herdr lists but did not classify as an agent: a TUI it does not detect (zcode, muse, a TUI started
+    oddly) becomes a session with status unknown; the rest are plain shells (status `shell`)."""
+    tuis, shells = [], []
+    for a in panes:
+        if a["pane_id"] in used or a.get("agent"):
+            continue
+        procs, shell_pid = pane_procs(a["pane_id"])
+        agent, pid, sid, argv = _tui_of(procs)
+        if agent:
+            s = _rec(id=a["pane_id"], agent=agent, sid=sid, pid=pid, cwd=a.get("cwd") or "", status="unknown",
+                     reach=f"helm.py send {a['pane_id']} (keys into the pane; herdr does not detect this TUI)")
+            _from_herdr(s, a)
+            s.update(argv=argv, status="unknown", undetected=True)
+            tuis.append(s)
+        else:
+            s = _rec(id=a["pane_id"], agent="shell", cwd=a.get("cwd") or "", status="shell", pid=shell_pid,
+                     reach="free pane: launch.py --pane " + a["pane_id"])
+            _from_herdr(s, a)
+            s.update(status="shell", procs=procs)
+            shells.append(s)
+        used.add(a["pane_id"])
+    return tuis, shells
 
 
 def _proc_scan(known_pids, known_panes, anc):
     """TUIs running outside herdr (Ghostty, Orca, tmux, ssh). Only the user's own processes."""
     out = []
-    rc, text = run("ps", "-axo", "pid=,ppid=,lstart=,command=", timeout=5)
+    _rc, text = run("ps", "-axo", "pid=,ppid=,lstart=,command=", timeout=5)
     for line in text.splitlines():
         parts = line.split(None, 7)
         if len(parts) < 8:
@@ -550,6 +623,7 @@ def _launched(used_panes):
 def sessions(include_shell=False):
     anc = ancestors()
     agents = herdr_json("agent", "list").get("agents") or []
+    panes = herdr_json("pane", "list").get("panes") or []
     by_sid = {(a.get("agent_session") or {}).get("value"): a for a in agents if a.get("agent_session")}
     used = set()
     launched = _launched(used)
@@ -557,12 +631,70 @@ def sessions(include_shell=False):
     out = _claude_sessions(by_sid, used, anc, launch_panes)
     out += _other_herdr(agents, used)
     out += launched
+    tuis, shells = _pane_only(panes, used)
+    out += tuis
     known_pids = {s["pid"] for s in out if s.get("pid")}
-    out += _proc_scan(known_pids, used | {a["pane_id"] for a in agents}, anc)
+    out += _proc_scan(known_pids, used | {a["pane_id"] for a in panes}, anc)
     out += _hermes_gateway()
     if include_shell:
-        out += _shell_panes(agents, used)
+        out += shells
+    table = proc_table()
+    for s in out:
+        mark_busy(s, table)
     return out
+
+
+# ---- work in flight behind an idle-looking session ----------------------------------------------
+
+def proc_table():
+    """pid -> (ppid, command) for every process of this user, one `ps` call."""
+    table = {}
+    for line in run("ps", "-axo", "pid=,ppid=,command=", timeout=5)[1].splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            table[int(parts[0])] = (int(parts[1]), parts[2] if len(parts) > 2 else "")
+    return table
+
+
+def descendants(pid, table):
+    """Every process below PID, depth first."""
+    kids = {}
+    for p, (pp, _) in table.items():
+        kids.setdefault(pp, []).append(p)
+    out, stack = [], list(kids.get(int(pid), []))
+    while stack:
+        p = stack.pop()
+        out.append(p)
+        stack += kids.get(p, [])
+    return out
+
+
+def background_work(pid, table=None):
+    """Child processes of PID that are work, not its servers: a Bash tool run in the background, an acp-run or
+    Workflow a session started, a build. Claude Code's background tasks live under
+    /private/tmp/claude-<uid>/<project>/<session>/tasks/*.output and run as children of the session's process,
+    so a live descendant is the test; an .output file alone is history. Empty list = nothing in flight; None =
+    could not tell (no pid)."""
+    if not pid:
+        return None
+    table = table if table is not None else proc_table()
+    work = []
+    for p in descendants(pid, table):
+        cmd = table[p][1]
+        if cmd and not SERVER_PROCS.search(cmd):
+            work.append(f"{p} {clip(cmd, 90)}")
+    return work
+
+
+def mark_busy(s, table):
+    """Set `busy` and, for a session that looks idle, status `busy-background` (helm never audits it, herdr-tidy
+    never closes it). Shells, sleeper stubs and ACP launches are judged elsewhere."""
+    if s.get("host") in ("acp", "hermes-gw") or s.get("status") in ("shell", "working"):
+        s.setdefault("busy", [])
+        return
+    s["busy"] = background_work(s.get("pid"), table) or []
+    if s["busy"] and s.get("status") in ("idle", "unknown", "blocked"):
+        s["status"] = "busy-background"
 
 
 # ---- ended sessions with open items ---------------------------------------------------------
@@ -577,9 +709,9 @@ def _chain_logs(days):
         if time.time() - log.stat().st_mtime > days * 86400:
             continue
         fm = text.split("---", 2)[1] if text.startswith("---") else ""
-        dirs = re.findall(r"^\s+dir:\s*(\S+)", fm, re.M)
+        dirs = re.findall(r"^\s+dir:\s*(\S+)", fm, re.MULTILINE)
         active = re.search(r"Active work:\s*(.+)", text)
-        nxt = re.search(r"Next steps:\s*(.*?)(?:\n##|\Z)", text, re.S)
+        nxt = re.search(r"Next steps:\s*(.*?)(?:\n##|\Z)", text, re.DOTALL)
         steps = [ln.strip(" -*") for ln in (nxt.group(1) if nxt else "").splitlines() if ln.strip(" -*")]
         if not steps or all(s.lower() in ("none", "none.") for s in steps):
             continue
@@ -588,10 +720,125 @@ def _chain_logs(days):
     return out
 
 
+def replay_flags(argv, kind="claude"):
+    """Launch flags worth replaying on a resume: claude's allow-list (herdr-sleeper's); nothing for other kinds,
+    whose resume tokens carry everything we can vouch for."""
+    if kind != "claude":
+        return []
+    out, it = [], iter(argv or [])
+    for tok in it:
+        if tok in REPLAY_BOOL:
+            out.append(tok)
+        elif tok in REPLAY_VALUE:
+            val = next(it, None)
+            if val is not None:
+                out += [tok, val]
+        elif "=" in tok and tok.split("=", 1)[0] in REPLAY_VALUE:
+            out.append(tok)
+    return out
+
+
+def resume_command(kind, sid, cwd="", argv=None):
+    """`cd <cwd> && <tui> <flags> <resume form>` for a kind with a verified resume form; None otherwise."""
+    form = RESUME_FORMS.get(kind)
+    if not form or not sid:
+        return None
+    flags = replay_flags(argv, kind)
+    cmd = form.format(flags=(" " + shlex.join(flags)) if flags else "", sid=shlex.quote(str(sid)))
+    return f"cd {shlex.quote(cwd)} && {cmd}" if cwd else cmd
+
+
+def sleeper_journal():
+    """herdr-sleeper's journal entries, read-only, newest state dir first: {key: entry} with `journal` set to
+    the file each came from. A malformed file is skipped (never repaired here)."""
+    out = {}
+    for path in SLEEPER_JOURNALS:
+        try:
+            d = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(d, dict):
+            continue
+        for key, e in d.items():
+            if isinstance(e, dict) and e.get("uuid") and e["uuid"] not in {x.get("uuid") for x in out.values()}:
+                out[key] = {**e, "journal": str(path), "key": key}
+    return out
+
+
+def sleeper_resume(entry):
+    """The by-hand resume line for a journal entry, the way herdr-sleeper's manual_command spells it."""
+    return resume_command(entry.get("kind") or "claude", entry.get("uuid"), entry.get("cwd") or "", entry.get("argv"))
+
+
+def closed_ledger(days=None):
+    """herdr-tidy's close ledger (closed.jsonl): one record per closed pane; a later line with the same `id`
+    updates it (`resumed`: true hides it). Newest first."""
+    if not CLOSED.exists():
+        return []
+    out = {}
+    for line in CLOSED.read_text(errors="replace").splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("id"):
+            out[d["id"]] = {**out.get(d["id"], {}), **d}
+    cutoff = time.time() - days * 86400 if days else 0
+    return sorted((d for d in out.values() if (d.get("t") or 0) >= cutoff), key=lambda d: -(d.get("t") or 0))
+
+
+def _closed_items(days, live_sids, live_dirs, chain_dirs):
+    """Ledger entries as ended items: `closed` (a pane herdr-tidy closed; resume from the ledger). Hidden once
+    its session is live again, marked resumed, or its handoff chain is already listed for that directory."""
+    items = []
+    for d in closed_ledger(days):
+        if d.get("resumed") or (d.get("sid") and d["sid"] in live_sids):
+            continue
+        top = toplevel(d.get("cwd") or "") if d.get("cwd") else ""
+        if d.get("handoff") and top and top in chain_dirs:
+            continue   # the chain item carries this work
+        items.append({"kind": "closed", "id": d["id"], "agent": d.get("agent", "?"), "sid": d.get("sid"),
+                      "cwd": d.get("cwd", ""), "title": d.get("title") or d.get("label") or "", "updated": d.get("t") or 0,
+                      "resume": d.get("resume") or "", "why": d.get("why", ""), "pane": d.get("pane", ""),
+                      "handoff": d.get("handoff"), "mb": d.get("mb"), "ledger": str(CLOSED),
+                      "action": d.get("resume") or f"(no resume recipe recorded; see {CLOSED})"})
+    return items
+
+
+def _sleeping_items(days, live_sids, ledger_uuids):
+    """Journal entries whose pane no longer exists (or that herdr-sleeper re-keyed as orphans): auto-wake can
+    never reach them, only the manual resume line can. Entries already in the close ledger are listed there."""
+    panes = {p["pane_id"] for p in herdr_json("pane", "list").get("panes") or []}
+    cutoff = time.time() - days * 86400
+    items = []
+    for key, e in sleeper_journal().items():
+        uuid = e["uuid"]
+        gone = key.startswith("orphan:") or e.get("phase") == "orphaned" or (e.get("pane_id") or key) not in panes
+        if not gone or uuid in live_sids or uuid in ledger_uuids:
+            continue
+        try:
+            slept = time.mktime(time.strptime((e.get("slept_at") or "")[:19], "%Y-%m-%dT%H:%M:%S"))
+        except ValueError:
+            slept = 0
+        if slept < cutoff:
+            continue
+        cmd = sleeper_resume(e)
+        tx = transcript(uuid) if (e.get("kind") or "claude") == "claude" else None
+        items.append({"kind": "sleeping", "id": f"sleep:{uuid[:8]}", "agent": e.get("kind") or "claude", "sid": uuid,
+                      "cwd": e.get("cwd", ""), "title": e.get("title") or e.get("name") or "", "updated": slept,
+                      "resume": cmd or "", "pane": e.get("pane_id") or key, "journal": e.get("journal"),
+                      "mb": round(tx.stat().st_size / 1e6, 1) if tx else None,
+                      "action": cmd or f"(no resume recipe for {e.get('kind')}; journal {e.get('journal')})"})
+    return items
+
+
 def ended_open(days=14, live=None):
     """Ended sessions that still need someone: handoff chains with next steps and no live session
-    in their directory (-> start a /baton session there), and Claude transcripts whose last reply
-    was a question nobody answered (-> resume, or answer in a fresh session)."""
+    in their directory (-> start a /baton session there), Claude transcripts whose last reply
+    was a question nobody answered (-> resume, or answer in a fresh session), panes herdr-tidy
+    closed (-> resume with the ledger's command), and herdr-sleeper entries whose pane is gone
+    (-> the manual resume line). Closed Claude sessions with no handoff and no question are listed
+    only when the ledger says the recipe closed them: every old transcript would otherwise qualify."""
     live = sessions() if live is None else live
     live_dirs = {toplevel(s["cwd"]) for s in live if s.get("cwd")}
     live_sids = {s["sid"] for s in live if s.get("sid")}
@@ -622,7 +869,12 @@ def ended_open(days=14, live=None):
                       "updated": st.st_mtime, "question": clip(tx["last_text"], 300), "mb": round(st.st_size / 1e6, 1),
                       "action": f"claude --resume {path.stem} (transcript {round(st.st_size / 1e6, 1)} MB) "
                                 f"or launch.py --agent claude --cwd <dir> with the answer"})
-    items.sort(key=lambda it: -it["updated"])
+    chain_dirs = {toplevel(it["cwd"]) for it in items if it["kind"] == "handoff" and it["cwd"]}
+    closed = _closed_items(days, live_sids, live_dirs, chain_dirs)
+    items += closed
+    items += _sleeping_items(days, live_sids, {d.get("sid") for d in closed})
+    # handoffs and unanswered questions first (open work), then what was merely closed, newest first within each
+    items.sort(key=lambda it: (it["kind"] in ("closed", "sleeping"), -it["updated"]))
     return items
 
 
@@ -643,13 +895,13 @@ def claims():
             st, text = c.stat(), c.read_text(errors="replace")
         except OSError:
             continue
-        if time.time() - st.st_mtime > CLAIM_LIVE or re.search(r"^\s*DONE\b", text, re.M | re.I):
+        if time.time() - st.st_mtime > CLAIM_LIVE or re.search(r"^\s*DONE\b", text, re.MULTILINE | re.IGNORECASE):
             continue
         files = []
-        for m in re.finditer(r"^\s*(?:files|owned|owns|paths)\s*:\s*(.+)$", text, re.M | re.I):
+        for m in re.finditer(r"^\s*(?:files|owned|owns|paths)\s*:\s*(.+)$", text, re.MULTILINE | re.IGNORECASE):
             files += [f.strip() for f in re.split(r"[,\s]+", m.group(1)) if f.strip()]
-        repo = re.search(r"^\s*repo\s*:\s*(\S+)", text, re.M | re.I)
-        sess = re.search(r"^\s*session\s*:\s*(.+)$", text, re.M | re.I)
+        repo = re.search(r"^\s*repo\s*:\s*(\S+)", text, re.MULTILINE | re.IGNORECASE)
+        sess = re.search(r"^\s*session\s*:\s*(.+)$", text, re.MULTILINE | re.IGNORECASE)
         out.append({"task": c.parent.name, "path": str(c), "repo": repo.group(1) if repo else "", "files": files,
                     "session": sess.group(1).strip() if sess else "", "age": time.time() - st.st_mtime})
     return out
@@ -724,6 +976,8 @@ def render(s):
     if s["finished"]:
         head += f"  FINISHED ({s['finished']})"
     lines = [head]
+    if s.get("busy"):
+        lines.append(f"    busy: {len(s['busy'])} child process(es) in flight: {'; '.join(s['busy'][:3])}")
     if s["title"]:
         lines.append(f"    title: {s['title']}")
     if s["where"]:
@@ -742,6 +996,10 @@ def render_ended(it):
         lines.append(f"    - {s}")
     if it.get("question"):
         lines.append(f"    asked: {it['question']}")
+    if it["kind"] == "closed":
+        lines.append(f"    closed pane {it.get('pane')}: {it.get('why') or '?'}" + (f"  (handoff: {it['handoff']})" if it.get("handoff") else ""))
+    if it["kind"] == "sleeping":
+        lines.append(f"    sleeping pane {it.get('pane')} is gone (journal {short(it.get('journal') or '')})")
     lines.append(f"    next: {it['action']}")
     return "\n".join(lines)
 

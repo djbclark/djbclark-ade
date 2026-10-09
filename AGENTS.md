@@ -64,6 +64,12 @@ altitudes compose (a macro node can run a micro graph as its body).
   question from herdr and its transcript; the skill relays it and sends the
   pick back as keys; idle sessions get `/loose`. Prior art, what was
   verified, limits.
+- [docs/herdr-tidy.md](docs/herdr-tidy.md) — `/herdr-tidy`: close idle
+  herdr panes without losing anything (every TUI, Hermes, shells, sleeping
+  stubs). `tidy.py` classifies, performs the `/handoff` precondition, writes
+  the close ledger `~/.local/state/session-finder/closed.jsonl`, closes the
+  tab; `/helm-all` lists what was closed with its resume command. Never
+  closes the helm/`coord` panes, claimed or `busy-background` sessions.
 - [docs/upstream-issues.md](docs/upstream-issues.md) — filed-nowhere-yet
   bug drafts for third-party projects (graft statusline, hindsight config
   docs), written from problems verified here.
@@ -81,14 +87,18 @@ altitudes compose (a macro node can run a micro graph as its body).
   of the orchestration and session-hygiene skills: `bigteam`,
   `model-routing`, `effort-routing`, `helm`, `session-finder`,
   `herdr-orchestration`, `ralph-tui-orchestration`, `cow-workspaces`,
-  `handoff`, `baton`, `session-handoff`, `steps`, `loose` (README.md has a
-  one-line table; `/helm-all`, `/session-finder-all` and `/resume` are thin
-  command wrappers in [claude/commands/](claude/commands/) since 2026-10-08).
+  `handoff`, `baton`, `session-handoff`, `steps`, `loose`, and since
+  2026-10-08 `herdr-tidy` (safe pane close) and `autorename` (session title
+  and herdr placement; its nudge hook in `~/.claude/settings.json` reaches it
+  through the old `~/ops/site-djbclark/skills/autorename` path, now a symlink)
+  (README.md has a one-line table; `/helm-all`, `/session-finder-all`,
+  `/resume` and `/herdr-tidy` are thin command wrappers in
+  [claude/commands/](claude/commands/)).
   Every TUI reaches them as `~/ops/site-private/skills/<name>` →
   `~/ops/site-djbclark/skills/<name>` (an absolute symlink into this
   checkout), so **edit them here**, never through a TUI path. The other
   local skills (`gmail-search`, `reorg-orca`, `book-to-kb`, `graft`,
-  `todo`, `autorename`, …) live in `~/ops/site-djbclark/skills/`.
+  `todo`, …) live in `~/ops/site-djbclark/skills/`.
 - [tools/acp-run/](tools/acp-run/README.md) — the ACP client every
   launcher uses (`~/.local/bin/acp-run` resolves here).
   [bin/fleet-watch](bin/fleet-watch) — launchd fleet change notices to

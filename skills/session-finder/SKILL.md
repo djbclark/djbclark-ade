@@ -216,7 +216,9 @@ muse) get `herdr agent start --kind` plus `agent prompt` — the fragile way; sa
 | hermes (CLI in a pane) | `helm.py send <pane> "<text>"` | same |
 | muse | `muse session-message send --target <uuid|name>`, body on stdin | `muse resume <id>` |
 | codex, cursor, opencode, crush, cline, copilot, qwen, zcode, agy (TUIs in herdr/Orca/tmux) | `helm.py send <id> "<text>"` when idle (keys into the pane; verify on screen), else its `focus:` | the `resume:` line session-history prints |
+| a TUI herdr does not detect (`zcode`, `muse`, …; listed from `pane process-info`, status `unknown`) | `helm.py send <pane> "<text>"` only after reading its screen | the `resume:` line session-history prints |
 | anything in Ghostty/iTerm/ssh with no channel | tell the operator the `where:` line | — |
+| a pane `herdr-tidy` closed, or a sleeping pane that is gone | — | `fleet.py ended` / `helm.py scan --ended`: the `closed` / `sleeping` item's `resume:` line (ledger `~/.local/state/session-finder/closed.jsonl`; herdr-sleeper journal) |
 
 Rules that still apply: a peer's claims are authoritative; check it is not
 mid-flight on something contradictory before relaying; never relay a request to
@@ -224,11 +226,20 @@ bypass a permission denial; grok is excluded (2026-10-06).
 
 ## 7. How it works (nothing for sessions to do)
 
-1. Running sessions (`fleet.py`): herdr `agent list` (any agent kind), the Claude
-   registry `~/.claude/sessions/*.json` (live pids), a `ps` scan for TUIs outside
-   herdr (located by `where.py`), Hermes gateway sessions active in the last day
-   (`~/.hermes/state.db`, read-only), and `launches.jsonl`. A Claude session is
-   `finished` when its last real prompt was `/handoff`, `/quit` or `/exit`.
+1. Running sessions (`fleet.py`): herdr `agent list` (any agent kind), herdr
+   `pane list` + `pane process-info` for panes herdr did not classify (an
+   undetected TUI such as zcode becomes a session with status `unknown`; the rest
+   are shells, shown with `--all`), the Claude registry `~/.claude/sessions/*.json`
+   (live pids), a `ps` scan for TUIs outside herdr (located by `where.py`), Hermes
+   gateway sessions active in the last day (`~/.hermes/state.db`, read-only), and
+   `launches.jsonl`. A Claude session is `finished` when its last real prompt was
+   `/handoff`, `/quit` or `/exit`. A session with child processes that are not its
+   MCP/LSP servers is `busy-background` (`busy:` lists them): helm never audits
+   it, `herdr-tidy` never closes it.
+   Ended work (`fleet.py ended`): handoff chains, transcripts that ended on a
+   question, the `herdr-tidy` close ledger (`~/.local/state/session-finder/closed.jsonl`,
+   `closed` items with resume commands) and herdr-sleeper journal entries whose
+   pane is gone (`sleeping` items with the manual resume line).
 2. Claude keyword index: `~/.local/state/session-index/<sessionId>.json`, extended
    from the byte offset last read. History: one adapter per agent in
    `adapters/*.py` (contract in `adapters/README.md`), FTS5 at

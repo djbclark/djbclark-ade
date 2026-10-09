@@ -3,8 +3,9 @@
 
     helm.py scan [--all] [--ended] [--order unlock|attention] [--json]
                                         open items (--all: every session, working ones too; --ended: helm-all,
-                                        ended sessions whose handoff or last question is still open). Default
-                                        order: the answer that unlocks the most unattended work first.
+                                        ended sessions whose handoff or last question is still open, panes
+                                        herdr-tidy closed, sleeping panes that are gone). Default order: the
+                                        answer that unlocks the most unattended work first.
     helm.py wait [--auto-audit] [--settle S] [--timeout S] [--json]
                                         block until an item appears or changes; print only those
     helm.py show <id>                   one session in full: question, last reply, screen
@@ -19,7 +20,8 @@
 Sessions come from herdr (`herdr agent list`: state, pane, title), the Claude Code session
 registry (~/.claude/sessions) and each Claude transcript's tail, where a pending
 AskUserQuestion is read verbatim. Answers go back as key presses (herdr, Orca or tmux) and
-are confirmed against the transcript, never assumed. State: ~/.local/state/helm (0700).
+are confirmed against the transcript, never assumed. A session that looks idle but has child
+processes in flight (fleet `busy-background`) is never audited. State: ~/.local/state/helm (0700).
 Exit: 0 ok, 1 refused or unverified, 2 usage, 3 wait timed out with nothing new.
 """
 import argparse
@@ -33,7 +35,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "session-finder"))
-import fleet  # noqa: E402  (every TUI's sessions, transcripts, conflicts, launches)
+import fleet
 
 CLAUDE = fleet.CLAUDE
 STATE_DIR = Path(os.environ.get("HELM_STATE_DIR", Path.home() / ".local/state/helm"))
@@ -143,6 +145,10 @@ def classify(s, st):
         it.update(kind="remote", fp="")
     elif s.get("finished") and s["status"] != "working":
         it.update(kind="finished", fp="finished:" + str(s.get("sid") or s["id"]))
+    elif s["status"] == "busy-background":
+        # looks idle to herdr and the registry, but a background Bash/acp-run/build still runs under it:
+        # not open, not audited (its /loose would report the running work), never closed by herdr-tidy
+        it.update(kind="busy-background", fp="", busy=s.get("busy") or [])
     elif s["status"] == "blocked":
         pend = tx["pending"] if tx else []
         asked = [p for p in pend if p[1] == "AskUserQuestion"]
@@ -208,15 +214,22 @@ def rank(items, order="unlock"):
     return items
 
 
+ENDED_UNLOCK = {"handoff": 25, "ended-question": 10, "closed": 8, "sleeping": 8}
+
+
 def ended_items(days):
-    """helm-all: ended sessions that still hold open items (fleet.ended_open), as queue items."""
+    """helm-all: ended sessions that still hold open items (fleet.ended_open), as queue items. `closed`
+    (a pane herdr-tidy closed; the ledger holds its resume command) and `sleeping` (a herdr-sleeper
+    entry whose pane is gone) rank below handoffs and unanswered questions."""
     out = []
     for e in fleet.ended_open(days):
         it = {"id": e["id"], "agent": e["agent"], "name": "", "title": e.get("title", ""), "where": "ended", "focus": "",
               "status": "ended", "project": os.path.basename(e["cwd"].rstrip("/")) or "?", "cwd": short(e["cwd"]),
               "reachable": False, "kind": e["kind"], "fp": e["id"], "open": True, "detail": e.get("question", ""),
-              "steps": e.get("steps", []), "action": e["action"], "updated": e["updated"]}
-        it["unlock"] = 25 if e["kind"] == "handoff" else 10
+              "steps": e.get("steps", []), "action": e["action"], "updated": e["updated"],
+              "resume": e.get("resume", ""), "why": e.get("why", ""), "pane": e.get("pane", ""), "mb": e.get("mb"),
+              "handoff": e.get("handoff"), "sid": e.get("sid")}
+        it["unlock"] = ENDED_UNLOCK.get(e["kind"], 10)
         out.append(it)
     return out
 
@@ -293,6 +306,18 @@ def render(it, full=False):
     elif k == "ended-question":
         out.append(f"  ENDED ON A QUESTION: {it.get('detail', '')}")
         out.append(f"  next: {it['action']}")
+    elif k == "closed":
+        size = f" · transcript {it['mb']} MB" if it.get("mb") else ""
+        hand = f" · handoff {it['handoff']}" if it.get("handoff") else ""
+        out.append(f"  CLOSED BY herdr-tidy (pane {it.get('pane')}: {it.get('why') or '?'}{size}{hand})")
+        out.append(f"  resume: {it.get('resume') or '(no resume command recorded; read the ledger)'}   |  skip: helm.py skip {it['id']}")
+    elif k == "sleeping":
+        size = f" · transcript {it['mb']} MB" if it.get("mb") else ""
+        out.append(f"  SLEEPING PANE GONE (herdr-sleeper journal, pane {it.get('pane')}{size}): auto-wake cannot reach it")
+        out.append(f"  resume: {it.get('resume') or '(no resume recipe for this kind)'}   |  skip: helm.py skip {it['id']}")
+    elif k == "busy-background":
+        out.append(f"  BUSY IN THE BACKGROUND: {len(it.get('busy') or [])} child process(es) still running; not audited, not closed")
+        out += [f"    - {b}" for b in (it.get("busy") or [])[:4]]
     elif k == "question":
         for qi, q in enumerate(it["questions"], 1):
             tag = f"QUESTION {qi}/{len(it['questions'])}" if len(it["questions"]) > 1 else "QUESTION"
@@ -360,8 +385,8 @@ def cmd_scan(a, state):
     rank(shown, a.order)
     emit(shown, a.json)
     if not a.json:
-        n = lambda k: sum(1 for it in items if it["kind"] == k)  # noqa: E731
-        print(f"\n{sum(it['open'] for it in items)} open · {n('working')} working · "
+        n = lambda k: sum(1 for it in items if it["kind"] == k)
+        print(f"\n{sum(it['open'] for it in items)} open · {n('working')} working · {n('busy-background')} busy-background · "
               f"{sum(1 for it in items if it['kind'] == 'idle' and it.get('audited'))} idle+audited · "
               f"{n('finished')} finished · {len(items)} sessions · order: {a.order}")
 
@@ -378,19 +403,18 @@ def cmd_wait(a, state):
             if a.auto_audit and s.get("host") == "acp" and it["kind"] in ("done", "reply"):
                 # operator 2026-10-08: /loose on the ACP window when done, then close it
                 la = s.get("launch") or {}
-                if it["kind"] == "done" and not it.get("audited") and not la.get("audit_sent") and not la.get("closed"):
-                    if run(sys.executable, "-I", str(LAUNCH), "audit", s["id"], timeout=60)[0] == 0:
-                        started.append(s["id"] + " (acp)")
-                        continue
+                if (it["kind"] == "done" and not it.get("audited") and not la.get("audit_sent") and not la.get("closed")
+                        and run(sys.executable, "-I", str(LAUNCH), "audit", s["id"], timeout=60)[0] == 0):
+                    started.append(s["id"] + " (acp)")
+                    continue
                 if it.get("audited") and st.get("seen") == it["fp"] and not la.get("closed"):
-                    rc, out = run(sys.executable, "-I", str(LAUNCH), "close", s["id"], timeout=90)
+                    _rc, out = run(sys.executable, "-I", str(LAUNCH), "close", s["id"], timeout=90)
                     print(f"helm: {out.strip() or 'close failed for ' + s['id']}", file=sys.stderr)
                     continue
-            if a.auto_audit and can_audit(s, it, a.settle):
-                if not draft(s) and submit(s, audit_text(s)):
-                    st["audit_sent"] = time.time()
-                    started.append(it["id"])
-                    continue
+            if a.auto_audit and can_audit(s, it, a.settle) and not draft(s) and submit(s, audit_text(s)):
+                st["audit_sent"] = time.time()
+                started.append(it["id"])
+                continue
             if a.auto_audit and it["kind"] == "idle" and not it["audited"] and (it["idle_for"] or 0) < a.settle:
                 continue  # not settled yet; the next pass decides
             if it["open"] and st.get("seen") != it["fp"]:
@@ -411,7 +435,7 @@ def cmd_brief(a, state):
     """Sessions blocked on the operator, as one space-free token. The mark changes with each
     new prompt, so a watcher can tell a new question from one it has already reported."""
     _, items = snapshot(state)
-    safe = lambda t: "".join(c if c.isalnum() or c in "._-" else "_" for c in t)  # noqa: E731
+    safe = lambda t: "".join(c if c.isalnum() or c in "._-" else "_" for c in t)
     # only items that wait on him: not idle audits, not a handed-off session (fleet-watch parses this)
     waiting = [f"{safe(it['project'])}@{safe(it['id'])}/{it['fp'][-6:]}"
                for it in items if it["open"] and it["kind"] not in ("idle", "finished")]

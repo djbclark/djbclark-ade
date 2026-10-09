@@ -110,9 +110,11 @@ Verified 2026-10-06 with one real check in a launchd-like environment.
    60 commands at most, so `/helm` may sit under the hidden `/commands` list.
    The `clarify` button walk itself has not been run yet.
 
-6. A session that is idle only because it waits on its own background task
-   still gets `/loose` after three minutes; the audit reports the running
-   work and nothing is lost, but it is a turn that could have waited.
+6. ~~A session that is idle only because it waits on its own background task
+   still gets `/loose` after three minutes~~ — closed 2026-10-08: `fleet.py`
+   marks such a session `busy-background` (a child process that is not one of
+   its servers is still running) and helm never audits it; see the evening entry
+   below and [herdr-tidy.md](herdr-tidy.md).
 
 ## Open
 
@@ -131,6 +133,25 @@ Verified 2026-10-06 with one real check in a launchd-like environment.
    `~/.hermes/plugins/skill-slash/__init__.py` at 10:06, so the plugin is
    mid-edit by another session. Next step: find that session
    (session-finder), not a capability grant or a gateway restart.
+
+## 2026-10-08 (evening) — busy-background, undetected TUIs, closed and sleeping items
+
+Operator asks: is it safe to close idle panes and let helm get to them later?
+It was not: see [herdr-tidy.md](herdr-tidy.md) for the cracks and the recipe.
+What changed in helm's collector:
+
+1. `fleet.sessions` marks a session `busy-background` when a child process that
+   is not one of its servers is still running (`fleet.background_work`); helm
+   shows it as `BUSY IN THE BACKGROUND`, never opens or audits it (limit 6 is
+   closed), and `herdr-tidy` never closes it.
+2. Panes herdr lists but does not classify are read with `pane process-info`: a
+   TUI herdr cannot detect (zcode, muse) is a session with status `unknown`
+   (verified live: the zcode pane `w27:p43` running `bg just ci` showed as
+   busy-background); the rest are shells (`fleet.py --all`).
+3. `scan --ended` adds `closed` items from the herdr-tidy ledger and `sleeping`
+   items from the herdr-sleeper journal (entries whose pane is gone), each with
+   a `resume:` line, ranked below handoffs and unanswered questions (SKILL.md
+   section 7.4-7.5). Tests: `tests/test_fleet_tidy.py`.
 
 ## 2026-10-08 — every TUI, ranked walk, ended sessions, ACP launches
 

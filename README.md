@@ -45,6 +45,9 @@ their old paths are symlinks into this checkout).
    idle sessions are told to audit themselves with `/loose`. Design record:
    [`docs/helm.md`](docs/helm.md). [`bin/fleet-watch`](bin/fleet-watch)
    (launchd, every 5 min) pings Hermes only when the picture changes.
+   [`herdr-tidy`](skills/herdr-tidy/SKILL.md) then closes the panes that are
+   safely idle and writes the ledger `/helm-all` reads them back from
+   ([`docs/herdr-tidy.md`](docs/herdr-tidy.md)).
 4. **Carry work across sessions** — [`loose`](skills/loose/SKILL.md) finds
    what is unfinished and walks it with [`steps`](skills/steps/SKILL.md);
    [`handoff`](skills/handoff/SKILL.md) writes the deep Tier 2 document,
@@ -61,7 +64,7 @@ their old paths are symlinks into this checkout).
 | [`skills/`](skills/) | The skills (table below). |
 | [`tools/acp-run/`](tools/acp-run/) | `acp-run`, the ACP client every launcher uses. |
 | [`bin/`](bin/) | `fleet-watch` (fleet change notices), `cow-pasture` (APFS copy-on-write workspaces), `herdr-sleeper` (idle-pane sleep), `herdr-jump` (focus a `w22:t4` address from a `prefix+:` popup), `orca-reorg-watch`, `route_agent.py`. |
-| [`claude/commands/`](claude/commands/) | Claude Code slash commands `/orc` (the primary herdr orchestrator) and `/orc-meta` (its watchdog). |
+| [`claude/commands/`](claude/commands/) | Claude Code slash commands `/orc` (the primary herdr orchestrator), `/orc-meta` (its watchdog), and the thin wrappers `/helm-all`, `/session-finder-all`, `/resume`, `/herdr-tidy`. |
 | [`docs/`](docs/) | Design records and dated operating knowledge (list below). |
 | [`plugins/`](plugins/) | `herdr-sleeper` herdr plugin (dev source of djbclark/herdr-sleeper). |
 | [`.claude/workflows/graph-audit.js`](.claude/workflows/graph-audit.js) | Micro-graph example workflow (`/graph-audit`). |
@@ -76,7 +79,9 @@ their old paths are symlinks into this checkout).
 | [`model-routing`](skills/model-routing/SKILL.md) | Which vendor × model × effort for which work; reading `aiuse` pools. |
 | [`effort-routing`](skills/effort-routing/SKILL.md) | Match this session's own reasoning effort to the stretch of work in front of it. |
 | [`session-finder`](skills/session-finder/SKILL.md) | Which session is or ever was on a topic (live or ended, handoff chains, memory; `/session-finder-all` searches everything), where it lives, and how the work continues (`fleet.py`, `launch.py`). |
-| [`helm`](skills/helm/SKILL.md) | Answer every waiting session of every TUI from one window, ranked by work unlocked (`helm.py`); `/helm-all` adds ended sessions that still hold open work. |
+| [`helm`](skills/helm/SKILL.md) | Answer every waiting session of every TUI from one window, ranked by work unlocked (`helm.py`); `/helm-all` adds ended sessions that still hold open work, panes `herdr-tidy` closed and sleeping panes that are gone. |
+| [`herdr-tidy`](skills/herdr-tidy/SKILL.md) | Close idle herdr panes safely, every TUI, Hermes, shells and herdr-sleeper stubs: `tidy.py` classifies each pane, performs the precondition (`/handoff`), writes a close ledger with the exact resume command, closes the tab; fails closed. `/herdr-tidy`. |
+| [`autorename`](skills/autorename/SKILL.md) | Title the current Claude session the way `/rename` does and offer to move its tab out of a generic herdr workspace (`autorename.py`, `herdr_place.py`; nudge hook `autorename_nudge.py`). |
 | [`herdr-orchestration`](skills/herdr-orchestration/SKILL.md) | Drive a multi-agent handoff chain through herdr panes instead of clipboard relays; `references/workspace-layout.md` is the workspace/tab/pane naming and re-arrangement procedure. |
 | [`ralph-tui-orchestration`](skills/ralph-tui-orchestration/SKILL.md) | The Ralph TUI + Beads multi-repo controller (dormant since 2026-08-23). |
 | [`cow-workspaces`](skills/cow-workspaces/SKILL.md) | Isolated agent workspaces as APFS `cow` pastures (`bin/cow-pasture`), not worktrees. |
@@ -129,6 +134,10 @@ way. `helm.py` imports `fleet` from the sibling `skills/session-finder/`.
 10. [`docs/herdr-jump.md`](docs/herdr-jump.md) — jump to a Herdr address
     (`w22:t4`) from the keyboard: why Herdr has no such action, the
     `bin/herdr-jump` popup, and the third-party navigator evaluation.
+11. [`docs/herdr-tidy.md`](docs/herdr-tidy.md) — closing idle herdr panes
+    safely: the pane classes, the close ledger, the cracks closed in
+    `fleet.py`/`helm.py` (busy-background, undetected TUIs, closed and sleeping
+    items), the first pass (2026-10-08) and the requests left for herdr-sleeper.
 
 ## Architecture: agent graphs at two altitudes
 

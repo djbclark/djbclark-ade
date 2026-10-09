@@ -23,7 +23,7 @@ KEYS = ("HERDR_ENV", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "HER
 
 def run(*cmd):
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=3).stdout
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=3, check=False).stdout
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
@@ -134,7 +134,8 @@ def main():
     if "--json" in sys.argv:
         print(json.dumps(w))
     else:
-        print(f"{w['where']}{' · \"' + w['title'] + '\"' if w['title'] else ''} · {w['cwd']}")
+        title = f' · "{w["title"]}"' if w["title"] else ""
+        print(f"{w['where']}{title} · {w['cwd']}")
         if w["focus"]:
             print(f"focus: {w['focus']}")
     return 0
