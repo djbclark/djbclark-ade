@@ -316,7 +316,15 @@ Discussion — after the soak (started 2026-10-04 evening; post on/after
 >
 > Sharing the script for the semantics; not asking to submit a PR.
 
-## 6. graft — `init` bakes machine/worktree-specific absolute paths into tracked hook files (draft, 2026-10-08)
+## 6. graft — `init` bakes machine/worktree-specific absolute paths into tracked hook files (not filed — already NanoNets/Graft#309, checked 2026-10-08)
+
+> **Already reported:** [NanoNets/Graft#309](https://github.com/NanoNets/Graft/issues/309)
+> (open) describes the same root cause — `.cursor/hooks.json` with an absolute
+> checkout path and `BAKED` with the generating machine's `node_modules` — and
+> asks for a repo-relative `init` mode. Searched issues and the web 2026-10-08;
+> no other match. What this write-up adds, usable as a comment there: the
+> per-worktree consequence below (stamp lives in the ignored cache, so each new
+> worktree replays init once) and that a git clean filter cannot mask it.
 
 **Repo:** `@nanonets/graft` (`src/claude/shim-template.ts`, `src/hosts` Cursor hooks).
 
