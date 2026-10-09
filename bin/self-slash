@@ -97,31 +97,34 @@ for p in json.load(sys.stdin).get("result", {}).get("panes", []):
   done
 }
 wait_idle
-for attempt in 1 2 3 4 5 6 7 8 9; do
+noprompt=0; sendfail=0
+while :; do
   screen=$(read_screen)
   prompt=$(printf '%s\n' "$screen" | grep -E '^[[:space:]]*❯' | tail -1 | sed -E 's/^[[:space:]]*❯[[:space:]]*//')
   # Claude Code's dim hint text reads as plain text on screen; treat it as empty
   # (same rule as Orca's isStockPlaceholder, src/shared/terminal-composer-draft.ts).
   case "$prompt" in 'Try "'*|'Try “'*|'Press up to edit queued messages'*) prompt="";; esac
   if ! printf '%s\n' "$screen" | grep -qE '^[[:space:]]*❯'; then
-    echo "$(date '+%F %T') $host $pane: no input prompt on screen yet (attempt $attempt), waiting"; sleep 5; continue
+    noprompt=$((noprompt+1)); [ "$noprompt" -le 9 ] || break
+    echo "$(date '+%F %T') $host $pane: no input prompt on screen yet (attempt $noprompt), waiting"; sleep 5; continue
   fi
   if [ -n "$prompt" ]; then
-    # Text on the ❯ line is either the operator's unsent draft or a message the
-    # operator QUEUED mid-turn, which Claude Code shows there (as the text, or as
-    # "[Pasted text #1 +9 lines]") until the turn ends and it is consumed.  Seen
-    # 2026-10-09: three compacts refused on queued messages.  A queued message
-    # vanishes within seconds of idle (and the session goes back to working); a
-    # real draft stays.  So re-read: gone -> wait for idle again and send after
-    # the operator's turn; unchanged three times (~10 s) -> a real draft, refuse.
-    if [ "$prompt" = "${last_prompt:-}" ]; then same=$((${same:-0}+1)); else same=1; last_prompt="$prompt"; fi
-    if [ "$same" -ge 3 ]; then
-      echo "$(date '+%F %T') $host $pane: REFUSED, unsent draft in input box: ${prompt:0:60}"; exit 4
+    # Text on the ❯ line is the operator's unsent draft, or a message QUEUED
+    # mid-turn (shown as the text or "[Pasted text #1 +9 lines]" until the turn
+    # ends), or the operator typing right now.  Sending would append to it, so
+    # never send over it; refusing is no better (2026-10-09: four compacts lost
+    # that way, the text was always sent within a minute).  So keep waiting,
+    # bounded by the SELF_SLASH_WAIT budget, re-wait for idle after it is sent,
+    # and send once the line is empty; refuse only when the budget runs out.
+    drafted=$(( ${drafted:-0} + 5 ))
+    if [ "$drafted" -ge "${SELF_SLASH_WAIT:-900}" ]; then
+      echo "$(date '+%F %T') $host $pane: REFUSED after ${drafted}s, text still in input box: ${prompt:0:60}"; exit 4
     fi
-    echo "$(date '+%F %T') $host $pane: text on input line (queued message or draft), re-checking: ${prompt:0:60}"
-    sleep 4; wait_idle; continue
+    [ "$prompt" = "${last_prompt:-}" ] || { last_prompt="$prompt"; echo "$(date '+%F %T') $host $pane: text on input line (queued message or draft), waiting for it to be sent: ${prompt:0:60}"; }
+    sleep 5; wait_idle; continue
   fi
   send_text && { echo "$(date '+%F %T') $host $pane: sent ${text:0:80}"; exit 0; }
-  echo "$(date '+%F %T') $host $pane: send failed (attempt $attempt)"; sleep 5
+  sendfail=$((sendfail+1)); [ "$sendfail" -le 6 ] || break
+  echo "$(date '+%F %T') $host $pane: send failed (attempt $sendfail)"; sleep 5
 done
 echo "$(date '+%F %T') $host $pane: gave up, no empty input prompt seen"; exit 5
