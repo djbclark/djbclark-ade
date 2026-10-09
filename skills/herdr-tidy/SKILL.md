@@ -5,10 +5,12 @@ description: >-
   no-model classifier (tidy.py) says per pane what it is, whether it may be
   closed and why not, performs the precondition (/handoff for an idle Claude
   session), writes a close ledger with the exact resume command, and closes the
-  tab; closed panes resurface through /helm-all with their resume command. Use
-  when the operator types /herdr-tidy, says "clean up my herdr", "close the idle
-  panes", "which panes can I close", "tidy the tabs", or asks whether a pane is
-  safe to close. Fails closed on anything it cannot verify.
+  tab; closed panes resurface through /helm-all with their resume command. The
+  same pass runs over Orca terminals with `--host orca` (/orca-tidy). Use when the
+  operator types /herdr-tidy or /orca-tidy, says "clean up my herdr", "tidy my
+  Orca", "close the idle panes", "close idle Orca terminals", "which panes can I
+  close", "tidy the tabs", or asks whether a pane or terminal is safe to close.
+  Fails closed on anything it cannot verify.
 ---
 
 # herdr-tidy — close idle panes without losing anything helm cannot find again
@@ -24,7 +26,8 @@ enforces it; the agent only decides the few things the script hands back as "dec
 
 ```bash
 T="python3 -I $HOME/ops/site-private/skills/herdr-tidy/tidy.py"
-$T scan                        # every pane: class, verdict, reason, the resume command the ledger would hold
+$T [--host herdr|orca|auto] scan   # every pane: class, verdict, reason, the resume command the ledger would hold
+                               # (auto = orca inside an Orca terminal, else herdr; section 6 for Orca)
 $T handoff <pane>              # idle Claude pane: send /handoff, wait until the transcript says it finished
 $T close <pane> [--why "…"]    # re-check every precondition, write the ledger, close tab (or pane)
 $T close <pane> --dry-run      # the ledger entry it would write, nothing closed
@@ -213,3 +216,81 @@ collie, drovr, herdr-jump, herdr-navigator: **never**. They are closed by their 
    request to the herdr-sleeper owner: a `list` line for an asleep entry whose pane is gone, and a
    `herdr-sleeper forget <key>` for entries the operator resumed by hand (docs/herdr-tidy.md).
 3. Not a cron: run it when the operator asks or at the end of a /helm walk.
+
+## 6. Orca host (`/orca-tidy`)
+
+`$T --host orca scan|handoff|close|ledger` runs the same classifier over Orca terminals
+(stablyai/orca 1.4.219, 2026-10-08). `--host auto` (the default) picks orca when this process runs
+inside an Orca terminal (`ORCA_PANE_KEY`), `TIDY_HOST` overrides. One adapter, not a fork: the
+verdicts, the composer and transcript logic, the resume forms, `chain_for`, the ledger and the
+report are shared; only inventory, screen read, send and close change.
+
+| Need | Orca source |
+|---|---|
+| Terminals, tabs, split counts | `orca terminal list --json --include-visual-layouts` (`terminals[]`, `visualLayouts[]`; orphaned terminals skipped) |
+| Agent kind and state per pane key `tabId:leafId` | `orca worktree ps --json` (`agents[]`: `agentType`, `state` working/done/waiting/…), joined on a live terminal only: rows outlive hibernated worktrees. Two rows for one pane key (teammates) keep the busiest state (working > waiting/blocked > done); two fleet sessions on one handle keep the busiest status. Malformed terminals, layouts, agent rows or ledger entries are skipped, never raised on |
+| Pending prompt | `orca terminal show --terminal H --json` → `agentWait` (null when none; absent from `worktree ps`, #23921). No `terminal` object or no `agentWait` key reads as unknown → leave |
+| Screen and unsent draft | `orca terminal read --terminal H --screen --json` → `tail[]`, `draft` (Orca's own detector, prompts ❯ › »; the key is omitted when it finds nothing, read as no draft) and `source` (`screen-unavailable` → leave) |
+| Session id, transcript | fleet (registry, process scan) first, then `~/Library/Application Support/orca/agent-hooks/last-status.json` per pane key, read only when `worktree ps` has an agent row for it |
+| Processes | one `ps eww -ax -o pid=,command=` (the only macOS `ps` spelling that prints other processes' environments): the shell whose environment carries `ORCA_PANE_KEY=<pane key>` and everything under it. The last `ORCA_PANE_KEY=` on a line is the environment's (argv comes first); a key claimed by two unrelated process trees is unreadable → leave |
+| Submit `/handoff`, `/exit` | `orca terminal send --terminal H --text T --enter --wait-submit N --json` → `send.accepted` (exit 1 when not accepted) |
+| Close | `orca terminal close --terminal H [--tab] --json`; `--tab` only when the layouts and the list agree the tab holds one terminal; the list is re-read afterwards |
+| Focus a terminal | `orca terminal switch --terminal H` |
+
+Focused, self, protected:
+
+1. Orca has no focused flag. **Focused** is the active leaf of the active tab of the single
+   `isActive` worktree. When `worktree ps` failed, zero or several worktrees are active, or the
+   tab is missing from the layouts, focus is unknown and every terminal is **never**.
+2. **Self** is the terminal whose pane key equals this process's `ORCA_PANE_KEY`.
+3. **Protected**: a tab or terminal title that starts with `helm` or `coord` once Orca's state
+   glyph (✳ ◐ 💤 …) is stripped, and a live bigteam claim naming the handle, the pane key or the
+   session id.
+
+Per class, what differs from sections 1 and 2:
+
+1. Claude: Orca's hook state is merged with fleet's (`working`, `busy-background` or `blocked` from
+   either side wins; `idle` needs the other side idle or silent). Then Orca's `draft` must be empty
+   (the `Try "…"` placeholder counts as empty), `agentWait` null (`terminal show` failing → leave),
+   and the `❯` composer line on screen; the transcript rules of 2.1 follow. `close` of a
+   `claude-finished` or `claude-question` terminal sends `/exit` first and waits up to 30 s for the
+   pid to go, because closing the terminal skips Claude Code's SessionEnd hooks (#23865); `/exit`
+   not accepted or the pid surviving leaves the terminal open (exit 1).
+2. Non-Claude TUIs: `TUI_WAITING` as in 2.2, then a ❯ › » line is required in the last six rows
+   (otherwise Orca cannot read a draft → leave); resume forms unchanged (grok → leave). A Codex
+   terminal with a `codex app-server` descendant, or whose processes cannot be read → leave (#23833).
+3. An agent `worktree ps` reports but fleet matched no session to (an agent-teams terminal, a TUI
+   fleet does not detect, a stale row) → leave, decide by hand.
+4. Shells: read through the ps tree under the pane-key shell; no pid carries the key → leave.
+5. No sleeper stubs and no popup classes exist in Orca (it hibernates whole worktrees, which then
+   have no live terminal). An ACP launch in an Orca terminal → leave: `launch.py close` only
+   closes herdr panes; the reason prints the two manual commands.
+
+Hazards, all open upstream on 2026-10-08, and the mitigation built in:
+
+1. #14719 `terminal close --tab` can report ok and leave the TUI running → the list is re-read
+   after every close (an orphaned terminal still counts as existing), and the session pid and the
+   pane's shell pid are checked with `kill -0`; a surviving handle or pid is exit 1 with the ledger
+   already written.
+2. #23865 closing a terminal skips Claude Code's SessionEnd hooks → `/exit` first (above).
+3. #23833 closing a Codex terminal can kill a shared `codex app-server` → such a terminal is left.
+4. #14561 `terminal wait --for tui-idle` reports idle while the agent runs → never used; idle is
+   hook state plus fleet plus the screen.
+5. #23921 `worktree ps` rows carry no `agentWait` → `terminal show` per candidate terminal.
+
+Ledger extras: `host: "orca"` and `pane_key`; `id` is `closed:<stamp>-<first 18 chars of the
+handle>`; `$T ledger` tags the line `[orca]`. The `<pane>` argument is the full handle, the pane
+key `tabId:leafId`, or a unique handle prefix of six or more characters (an ambiguous prefix exits
+with the count; give the full handle).
+
+A pass, mirroring section 3:
+
+1. `T="python3 -I $HOME/ops/site-private/skills/herdr-tidy/tidy.py --host orca"`; `$T scan`
+   (`cswap list` first: each `handoff-then-close` is one Claude turn).
+2. `$T handoff <pane>` per `handoff-then-close` terminal, one at a time, in the background; the
+   receipt is Orca's `send.accepted`, the finish is the transcript plus `worktree ps` idle.
+3. `$T close <pane>` per `close` verdict. Exit 1 after "ledger written" means the terminal
+   survived the close (#14719 shape): say so, never retry blind.
+4. Report, numbered: handle prefix, tab title, agent, class, action or the verbatim `reason`, the
+   ledger ids. Then `~/.local/bin/hermes-ping "<repo>: orca-tidy pass done: N closed, M decisions"`.
+5. Budget as in 3.5. Never run `orca terminal wait --for tui-idle` as the idle test.

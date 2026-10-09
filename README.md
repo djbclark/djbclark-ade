@@ -64,7 +64,7 @@ their old paths are symlinks into this checkout).
 | [`skills/`](skills/) | The skills (table below). |
 | [`tools/acp-run/`](tools/acp-run/) | `acp-run`, the ACP client every launcher uses. |
 | [`bin/`](bin/) | `fleet-watch` (fleet change notices), `cow-pasture` (APFS copy-on-write workspaces), `herdr-sleeper` (idle-pane sleep), `herdr-jump` (focus a `w22:t4` address from a `prefix+:` popup), `herdr-ai` (natural language to Herdr commands from a `prefix+alt+i` popup), `orca-reorg-watch`, `route_agent.py`. |
-| [`claude/commands/`](claude/commands/) | Claude Code slash commands `/orc` (the primary herdr orchestrator), `/orc-meta` (its watchdog), and the thin wrappers `/helm-all`, `/session-finder-all`, `/resume`, `/herdr-tidy`. |
+| [`claude/commands/`](claude/commands/) | Claude Code slash commands `/orc` (the primary herdr orchestrator), `/orc-meta` (its watchdog), and the thin wrappers `/helm-all`, `/session-finder-all`, `/resume`, `/herdr-tidy`, `/orca-tidy` (herdr-tidy over Orca terminals). |
 | [`docs/`](docs/) | Design records and dated operating knowledge (list below). |
 | [`plugins/`](plugins/) | `herdr-sleeper` herdr plugin (dev source of djbclark/herdr-sleeper). |
 | [`.claude/workflows/graph-audit.js`](.claude/workflows/graph-audit.js) | Micro-graph example workflow (`/graph-audit`). |
@@ -80,7 +80,7 @@ their old paths are symlinks into this checkout).
 | [`effort-routing`](skills/effort-routing/SKILL.md) | Match this session's own reasoning effort to the stretch of work in front of it. |
 | [`session-finder`](skills/session-finder/SKILL.md) | Which session is or ever was on a topic (live or ended, handoff chains, memory; `/session-finder-all` searches everything), where it lives, and how the work continues (`fleet.py`, `launch.py`). |
 | [`helm`](skills/helm/SKILL.md) | Answer every waiting session of every TUI from one window, ranked by work unlocked (`helm.py`); `/helm-all` adds ended sessions that still hold open work, panes `herdr-tidy` closed and sleeping panes that are gone. |
-| [`herdr-tidy`](skills/herdr-tidy/SKILL.md) | Close idle herdr panes safely, every TUI, Hermes, shells and herdr-sleeper stubs: `tidy.py` classifies each pane, performs the precondition (`/handoff`), writes a close ledger with the exact resume command, closes the tab; fails closed. `/herdr-tidy`. |
+| [`herdr-tidy`](skills/herdr-tidy/SKILL.md) | Close idle herdr panes safely, every TUI, Hermes, shells and herdr-sleeper stubs: `tidy.py` classifies each pane, performs the precondition (`/handoff`), writes a close ledger with the exact resume command, closes the tab; fails closed. `/herdr-tidy`; `--host orca` does the same for Orca terminals (`/orca-tidy`). |
 | [`autorename`](skills/autorename/SKILL.md) | Title the current Claude session the way `/rename` does and offer to move its tab out of a generic herdr workspace (`autorename.py`, `herdr_place.py`; nudge hook `autorename_nudge.py`). |
 | [`herdr-orchestration`](skills/herdr-orchestration/SKILL.md) | Drive a multi-agent handoff chain through herdr panes instead of clipboard relays; `references/workspace-layout.md` is the workspace/tab/pane naming and re-arrangement procedure. |
 | [`ralph-tui-orchestration`](skills/ralph-tui-orchestration/SKILL.md) | The Ralph TUI + Beads multi-repo controller (dormant since 2026-08-23). |
