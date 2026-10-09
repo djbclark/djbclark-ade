@@ -337,10 +337,18 @@ def dispatch(a: argparse.Namespace) -> int:
         rc = rec.get("exit")
     else:
         with open(str(final) + ".tmp", "w") as fo, open(stderr, "w") as fe:
-            proc = subprocess.Popen(acp_cmd, stdout=fo, stderr=fe, stdin=subprocess.DEVNULL)
+            proc = subprocess.Popen(acp_cmd, stdout=subprocess.PIPE if a.tee else fo, stderr=fe,
+                                    stdin=subprocess.DEVNULL, text=bool(a.tee))
             rec["pid"] = proc.pid
             write_record(record, rec)
             try:
+                if a.tee and proc.stdout is not None:
+                    # a visible host (herdr pane, Orca terminal) wants to see the agent as it streams
+                    for line in proc.stdout:
+                        fo.write(line)
+                        fo.flush()
+                        sys.stdout.write(line)
+                        sys.stdout.flush()
                 rc = proc.wait()
             except KeyboardInterrupt:
                 proc.terminate()
@@ -410,8 +418,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-wait", action="store_true", help="with --detach: return at once with the rearm command")
     ap.add_argument("--wait-timeout", type=int, help="with --detach: seconds to wait for .done (default timeout+300)")
     ap.add_argument("--force", action="store_true", help="redo a slice whose .done or live record exists")
-    ap.add_argument("--dry-run", action="store_true", help="write nothing, print the command and paths")
+    ap.add_argument("--dry-run", action="store_true", help="compose the brief copy, print the command and paths, run nothing")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--tee", action="store_true", help="also stream the agent's output to stdout (for a visible pane)")
     ap.add_argument("--acp-run", help="path to acp-run (default: PATH)")
     ap.add_argument("--acp-arg", action="append", help="extra argument passed through to acp-run (repeatable)")
     a = ap.parse_args(argv)

@@ -185,10 +185,19 @@ get `herdr agent start --kind` plus `agent prompt` — the fragile way; say so.
    pane *or* from its inbox (`launch-<id>/inbox/*.txt`), which is what
    `launch.py reply <id> "<text>"` writes — no keys, no screen scraping. `helm`
    shows a `done` item per finished turn (or `reply` when the text asks a
-   question). `--no-interactive` keeps the old one-turn-and-exit form, and a
-   `reply` to an exited session starts a new acp-run with the brief and last
-   reply as context. acp-run reports `working`/`idle`/`blocked` to herdr with its
-   resume command, so `herdr agent prompt` and a herdr restart both work.
+   question). `--no-interactive` is the one-turn-and-exit form, and a `reply`
+   to an exited session starts a new turn with the brief and last reply as
+   context. **Headless turns go through `acp-dispatch`** (2026-10-08; `bin/` in
+   djbclark-ade): `--model` is mandatory, the shared delivery footer
+   (`docs/dispatch-footer.md`) is appended to a copy of the brief, and the turn
+   leaves `launch-<id>/<id>-report.md`, its `.done` marker and
+   `launch-<id>/jobs/<id>.json`; the launch's recorded exit is acp-dispatch's
+   (0 done, 1 unfinished, 3 no report, 4 `BLOCKED:`, 124 timeout), and
+   `acp-dispatch check ~/.local/state/session-finder/launch-<id>` classifies it.
+   An interactive session is not a report-producing sub-agent, so it keeps
+   plain acp-run and no footer. acp-run reports `working`/`idle`/`blocked` to
+   herdr with its resume command, so `herdr agent prompt` and a herdr restart
+   both work.
 2. **Finished sessions are audited, then closed** (operator, 2026-10-08):
    `launch.py audit <id>` sends `/loose` as the next turn; `launch.py close <id>`
    sends `/exit`, marks the launch closed and closes its herdr tab (or pane) so
@@ -202,8 +211,9 @@ get `herdr agent start --kind` plus `agent prompt` — the fragile way; say so.
    reported itself (Claude Code's own hook owns the pane), so text goes through
    the inbox (`launch.py reply`) or `herdr pane run`, never `agent prompt`.
 4. Everything about a launch lives under `~/.local/state/session-finder/launch-<id>/`
-   (brief, acp log, out, err, runner, inbox) and `launches.jsonl`; `launch.py
-   list` shows state.
+   (brief, acp log, out, err, runner, inbox; for a headless turn also the
+   acp-dispatch brief copy, report, `.done` and `jobs/` record) and
+   `launches.jsonl`; `launch.py list` shows state.
 5. Exit 0 is not success: read the `done` text and the diff, as for any delegation.
 
 ## 6. Reach each agent

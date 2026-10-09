@@ -39,6 +39,9 @@ sys.path.insert(0, str(HERE))
 import fleet  # noqa: E402
 
 ACP_RUN = os.environ.get("ACP_RUN") or shutil.which("acp-run") or str(Path.home() / "ops/site-private/bin/acp-run")
+# The headless (one turn and exit) path goes through acp-dispatch (bin/acp-dispatch, 2026-10-08): the
+# shared delivery footer, <id>-report.md + .done + jobs record, and exit 3 "no report" / 4 "BLOCKED:".
+ACP_DISPATCH = os.environ.get("ACP_DISPATCH") or shutil.which("acp-dispatch") or str(HERE.parent.parent / "bin" / "acp-dispatch")
 ACP_AGENTS = {"claude", "codex", "copilot", "opencode", "cursor", "qwen", "cline", "hermes", "agy", "devin"}
 HERDR_KINDS = {"claude", "codex", "cursor", "opencode", "copilot", "qwen", "cline", "hermes", "agy", "muse", "grok", "devin"}
 EXCLUDED = {"grok"}   # operator exclusion 2026-10-06 (bigteam: Current exclusions)
@@ -322,24 +325,45 @@ def start(a, brief_text, parent=None):
     if agent not in ACP_AGENTS:
         return start_tui(a, d, brief_text, host)
 
-    acp_cmd = [ACP_RUN, agent, "-C", cwd, "-f", d["brief"], "--timeout", str(a.timeout), "--log", d["log"]]
-    if getattr(a, "resume", None):
-        acp_cmd += ["--resume", a.resume]   # session/load: the agent replays its own history
-        d["resumed"] = a.resume
-    if getattr(a, "interactive", True) and acp_interactive():
-        # the pane shows the agent live and takes the next prompt from the keyboard or the inbox
+    interactive = bool(getattr(a, "interactive", True) and acp_interactive())
+    if interactive:
+        # A live session the operator talks to: acp-run directly. The pane shows the agent and takes
+        # the next prompt from the keyboard or the inbox. It is not a report-producing sub-agent, so
+        # the delivery footer and report machinery do not apply.
+        acp_cmd = [ACP_RUN, agent, "-C", cwd, "-f", d["brief"], "--timeout", str(a.timeout), "--log", d["log"]]
+        if getattr(a, "resume", None):
+            acp_cmd += ["--resume", a.resume]   # session/load: the agent replays its own history
+            d["resumed"] = a.resume
         d["interactive"], d["inbox"] = True, str(ldir / "inbox")
         Path(d["inbox"]).mkdir(exist_ok=True)
         acp_cmd += ["--interactive", "--inbox", d["inbox"]]
-    if a.model:
-        acp_cmd += ["--model", a.model]
-    if a.perm:
-        acp_cmd += ["--perm", a.perm]
-    for kv in a.set or []:
-        acp_cmd += ["--set", kv]
-    if not a.model:
-        print("launch: no --model; acp-run will use the agent's default (for claude that is the expensive settings model)",
-              file=sys.stderr)
+        if a.model:
+            acp_cmd += ["--model", a.model]
+        if a.perm:
+            acp_cmd += ["--perm", a.perm]
+        for kv in a.set or []:
+            acp_cmd += ["--set", kv]
+        if not a.model:
+            print("launch: no --model; acp-run will use the agent's default (for claude that is the expensive settings model)",
+                  file=sys.stderr)
+    else:
+        # One turn and exit: a headless slice, so it is dispatched like any other. acp-dispatch appends
+        # docs/dispatch-footer.md to its own copy of the brief, writes <id>-report.md, its .done marker and
+        # jobs/<id>.json under this launch's dir, and exits 3 when the turn ended with no report, 4 when
+        # the report starts "BLOCKED:" (launches.jsonl records that exit). --tee keeps the pane live.
+        if not a.model:
+            die("--model is required for a headless launch (acp-dispatch refuses to run without it)")
+        acp_cmd = [ACP_DISPATCH, agent, "--model", a.model, "--name", lid, "--out", str(ldir), "-C", cwd,
+                   "-f", d["brief"], "--timeout", str(a.timeout), "--tee", "--acp-run", ACP_RUN, "--force"]
+        if a.perm:
+            acp_cmd += ["--perm", a.perm]
+        if getattr(a, "resume", None):
+            acp_cmd += ["--acp-arg=--resume", f"--acp-arg={a.resume}"]
+            d["resumed"] = a.resume
+        for kv in a.set or []:
+            acp_cmd += ["--acp-arg=--set", f"--acp-arg={kv}"]
+        d.update(dispatch=True, report=str(ldir / f"{lid}-report.md"), done=str(ldir / f"{lid}-report.md.done"),
+                 job=str(ldir / "jobs" / f"{lid}.json"), log=str(ldir / f"{lid}.jsonl"))
 
     pane = tab = None
     if host == "herdr":

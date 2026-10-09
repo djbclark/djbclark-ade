@@ -19,6 +19,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from typing import override
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "bin" / "acp-dispatch"
@@ -56,20 +57,21 @@ class Base(unittest.TestCase):
     out: Path
     repo: Path
 
+    @override
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp(prefix="acpd-"))
         self.fake = self.tmp / "acp-run"
-        self.fake.write_text(FAKE)
+        _ = self.fake.write_text(FAKE)
         self.fake.chmod(0o755)
         self.out = self.tmp / "out"
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
 
-    def dispatch(self, *extra, mode="writes", name="s1"):
+    def dispatch(self, *extra: str, mode: str = "writes", name: str = "s1") -> subprocess.CompletedProcess[str]:
         return run(["codex", "--model", "m1", "--name", name, "-p", "do the thing", "-C", str(self.repo),
                     "--out", str(self.out), "--acp-run", str(self.fake), *extra], env={"FAKE_MODE": mode})
 
-    def record(self, name="s1"):
+    def record(self, name: str = "s1") -> dict[str, object]:
         return json.loads((self.out / "jobs" / f"{name}.json").read_text())
 
 
