@@ -18,6 +18,7 @@
 # Enter.  On herdr it also waits (up to SELF_SLASH_WAIT, default 900 s) while the
 # pane's agent_status is "working": a command sent mid-turn is swallowed, never run
 # (seen 2026-10-09: a /rename sent while the session worked left no trace).
+# A stale $HERDR_PANE_ID (pane moved between workspaces) is resolved via `herdr pane get`.
 # Runs detached (nohup) so it survives the Bash tool returning; the log
 # is ~/.local/state/self-slash.log.  First verified 2026-10-09 (ClaudeHelm, herdr);
 # Orca backend verified 2026-10-09.
@@ -28,6 +29,15 @@ text="${1:-}"
 [ -n "$text" ] || { echo "usage: self-slash [--delay S] [--dry-run] \"/command args\"" >&2; exit 2; }
 if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
   host=herdr; pane="$HERDR_PANE_ID"
+  # $HERDR_PANE_ID is fixed at launch; after the tab is moved to another workspace
+  # the pane is renumbered (w2G:p1 -> w2H:p1, seen 2026-10-09). `pane get` resolves
+  # the old id, but `agent read`/`pane list`/`pane run` do not, so resolve first.
+  cur=$(herdr pane get "$pane" 2>/dev/null | python3 -c '
+import json, sys
+print(json.load(sys.stdin).get("result", {}).get("pane", {}).get("pane_id", ""))' 2>/dev/null)
+  if [ -n "$cur" ] && [ "$cur" != "$pane" ]; then
+    echo "self-slash: HERDR_PANE_ID=$pane is stale (pane moved); using $cur" >&2; pane="$cur"
+  fi
 elif [ -n "${ORCA_TERMINAL_HANDLE:-}" ] && command -v orca >/dev/null 2>&1; then
   host=orca; pane="$ORCA_TERMINAL_HANDLE"
 else
