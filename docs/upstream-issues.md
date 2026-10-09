@@ -679,3 +679,66 @@ applying to `build`, `restart` and `uninstall`.
 `feedback_collie_update_help_runs_the_update.md` (2026-10-09); the ClaudeHelm
 session transcript for 07:4x EDT; `~/.collie/logs/stdout.log` around
 2026-10-09T11:4xZ shows only the later, intended update.
+
+## 13. Collie — after the 1.18 upgrade an unpaired phone lands on `/auth/`, a dead-end 404 with no hint to pair (draft, 2026-10-09)
+
+**Searched first** (gh, AltanS/collie, open and closed issues and PRs, 2026-10-09
+19:20 EDT; terms: `auth`, `sign in`, `Sign in link`, `not paired banner`,
+`device not paired`, `reverse proxy auth`, `Nothing configured here`, `pair
+screen 404`). Nearest threads, none of which covers this:
+
+- #31 (closed 2026-08-13) "An installed PWA has no reachable path to a fronting
+  proxy's sign-in page" — the reason the auth banner links to `/auth/` at all.
+- PR #30 (merged) "tell an access refusal apart from an outage" — the banner's
+  401/403 branch.
+- #2 (closed) per-device auth via an identity header; #159 (closed) pairing
+  lastSeenAt ENOENT; #341 (closed) Cloudflare Access JWT. Not this.
+- ADR 0086 / 1.18.0 changelog: "Unpaired browsers see the pair screen." That is
+  the intended behaviour; what follows is the case where they do not.
+
+**Seen.** Mac host, Collie 1.17.2 → 1.18.1 via `collie update` at 07:44 EDT,
+phone (Android, installed PWA over `tailscale serve`) never paired on 1.17.x
+(state dir had no `paired-devices.json`, only an expired `pairing-pending.json`).
+After the update the phone showed "Not Paired" and a page at `/auth/` reading
+"Nothing configured here — Collie reserves /auth/ for a reverse proxy sitting in
+front of it … Collie itself serves nothing here". The operator did not know
+pairing was the remedy; it was found by reading the changelog on the host.
+
+**Reproduce on the host** (what the phone hit):
+
+```
+$ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/api/panes
+403
+$ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/auth/
+404
+$ collie devices list
+no devices paired — Collie answers no phone or browser until one is …
+```
+
+**Where the link comes from.** `web/src/components/connection-banner.tsx`
+(1.18.1): `ConnectionBanner` returns `null` when `usePairing().refused` is set
+and leaves the remedy to the pairing strip on the route; the `AuthErrorBanner`
+with the "Sign in" `<a href="/auth/">` is shown only for an `authError` the
+pairing check did not claim. So a 1.18.1 app shell should not have offered
+`/auth/` for a `device not paired` 403. The likely path (not captured on the
+phone, so a hypothesis): the installed PWA was still running the 1.17.2 app
+shell from its service worker precache when the bridge went to 1.18.1; that
+shell's auth banner treats every 403 as a proxy refusal and offers "Sign in" →
+`/auth/`, the 1.18.1 bridge answers its reserved-path 404, and nothing on that
+page says "pair". 1.18.0's "Unpaired browsers see the pair screen" holds only
+once the new shell is active.
+
+**Asks**, smallest first:
+
+1. The `/auth/` 404 page could name the other cause: "If you came here from a
+   Not Paired or Sign in banner and no proxy fronts this Collie, open Settings
+   and pair (`collie pair` on the host)", with a link to `/settings`.
+2. When no proxy is configured (the bridge knows: no forward-auth or identity
+   header settings), `/auth/` could redirect to `/settings` instead of 404.
+3. The upgrade note for 1.18.0 could say that an installed PWA keeps the old
+   shell until the service worker updates, and that the old shell's "Sign in"
+   leads nowhere on a bridge without a proxy.
+
+Not filed. If filing, first confirm on a phone that an installed 1.17.x PWA
+shows "Sign in" → `/auth/` against a 1.18.x bridge; this machine's phone is now
+paired (device `t2e`, 17:37 EDT) and the evidence above is host-side only.
