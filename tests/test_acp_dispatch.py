@@ -19,7 +19,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
-from typing import override
+from typing import Any, override
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "bin" / "acp-dispatch"
@@ -52,10 +52,11 @@ def run(args: list[str], env: dict[str, str] | None = None,
 
 
 class Base(unittest.TestCase):
-    tmp: Path
-    fake: Path
-    out: Path
-    repo: Path
+    # class-level placeholders: unittest sets the real values in setUp, not __init__
+    tmp: Path = Path()
+    fake: Path = Path()
+    out: Path = Path()
+    repo: Path = Path()
 
     @override
     def setUp(self) -> None:
@@ -71,7 +72,7 @@ class Base(unittest.TestCase):
         return run(["codex", "--model", "m1", "--name", name, "-p", "do the thing", "-C", str(self.repo),
                     "--out", str(self.out), "--acp-run", str(self.fake), *extra], env={"FAKE_MODE": mode})
 
-    def record(self, name: str = "s1") -> dict[str, object]:
+    def record(self, name: str = "s1") -> dict[str, Any]:
         return json.loads((self.out / "jobs" / f"{name}.json").read_text())
 
 

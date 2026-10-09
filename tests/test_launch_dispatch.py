@@ -15,7 +15,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from typing import override
+from typing import Any, override
 
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCH = ROOT / "skills" / "session-finder" / "launch.py"
@@ -23,9 +23,10 @@ DISPATCH = ROOT / "bin" / "acp-dispatch"
 
 
 class TestLaunchDispatch(unittest.TestCase):
-    tmp: Path
-    repo: Path
-    acp_run: Path
+    # class-level placeholders: unittest sets the real values in setUp, not __init__
+    tmp: Path = Path()
+    repo: Path = Path()
+    acp_run: Path = Path()
 
     @override
     def setUp(self) -> None:
@@ -38,7 +39,7 @@ class TestLaunchDispatch(unittest.TestCase):
         _ = self.acp_run.write_text("#!/bin/bash\n# fake acp-run: supports --interactive\nexit 0\n")
         self.acp_run.chmod(0o755)
 
-    def launch(self, *extra: str) -> dict[str, object]:
+    def launch(self, *extra: str) -> dict[str, Any]:
         env = dict(os.environ, SESSION_FINDER_STATE=str(self.tmp / "state"), ACP_RUN=str(self.acp_run),
                    ACP_DISPATCH=str(DISPATCH), HERDR_BIN_PATH=str(self.tmp / "no-herdr"))
         r = subprocess.run([sys.executable, "-I", str(LAUNCH), "start", "--agent", "codex", "--cwd", str(self.repo),
