@@ -509,3 +509,16 @@ the zcode TUI, not Hermes.
   (seen 2026-10-09): the first dirty pasture prints "Not a TTY — defaulting
   to no" and nothing is removed; one name per call works. Fix the flag
   handling in `bin/cow-pasture`.
+- **Herdr-only ADE capabilities, Orca parity gaps** (surveyed 2026-10-09,
+  after `bin/self-slash` gained its Orca backend). Refuse in Orca: `/orc`,
+  `/orc-meta` + `orc_watchdog.py`, herdr-orchestration's pane path and
+  `relocate-pane.sh`, `launch.py start_tui` (zcode/muse). Silent skips:
+  autorename placement (`herdr_place.py`), the herdr SessionStart hook
+  (Orca's own hook covers it). Degraded: `launch.py close` leaves Orca
+  terminals open; acp-run reports agent state only to herdr; helm/fleet mark
+  non-Claude Orca TUIs `unknown` (tidy.py's Orca status merge could be
+  reused); bigteam Step 0 and session-finder rung d describe only herdr;
+  `where.py` uses a possibly stale `$ORCA_TERMINAL_HANDLE`. Easy wins:
+  `orca terminal close/rename/create --command/send`. No Orca equivalent:
+  moving a terminal between worktrees, reporting agent state into an Orca
+  terminal. herdr-sleeper needs no port (Orca Agent hibernation).
