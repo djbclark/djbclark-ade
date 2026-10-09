@@ -43,7 +43,11 @@ here (`/session-finder-all` loads this skill for it).
 2. `session-history.py` searches the full text of every agent's sessions (SQLite
    FTS5; first run indexes everything, 1–2 minutes, start it with
    `run_in_background`). Ended hits print a `resume:` command. `--agent hermes`
-   narrows to one agent.
+   narrows to one agent. The same index holds every Basic Memory project's
+   `todo/` notes (the `todo` skill's items): a hit prints as agent `todo`,
+   `OPEN`/`closed`, `title: [open] main: <title>` and the note path; `--agent todo`
+   lists only todos. "Is there a todo for X" is this search, not a semantic one.
+   `--check` proves FTS5 works (integrity check plus a probe MATCH; exit 2 if not).
 3. `fleet.py ended` lists ended work that still needs someone: handoff chains with
    next steps and nobody live in that repo, and transcripts whose last reply was an
    unanswered question. `fleet.py show <id>` prints one session's last prompt, last
@@ -254,7 +258,12 @@ bypass a permission denial; grok is excluded (2026-10-06).
    from the byte offset last read. History: one adapter per agent in
    `adapters/*.py` (contract in `adapters/README.md`), FTS5 at
    `~/.local/state/session-index/history.v2.sqlite`; a broken adapter is skipped.
-   `session-history.py --agents` lists counts; `--rebuild` starts over.
+   `adapters/todo.py` is a document adapter: one entry per note under
+   `<project>/todo/*.md` for every project in `~/.basic-memory/config.json`,
+   split into one FTS row per `##` section, `live()` = `status: open`. A full
+   update drops entries of agents whose adapter is gone (crush, 2026-10-08).
+   `session-history.py --agents` lists counts; `--check` tests FTS5; `--rebuild`
+   starts over.
 3. `fleet.parse` also measures each Claude session's **work stretch** (median
    minutes between an operator prompt and the next stop), which `helm` uses to
    order its walk.

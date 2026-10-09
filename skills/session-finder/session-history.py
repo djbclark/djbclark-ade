@@ -8,10 +8,12 @@
     session-history.py --update-only        # just bring the index up to date
     session-history.py --rebuild            # drop and rebuild (slow)
     session-history.py --agents             # which adapters loaded, session counts
+    session-history.py --check              # prove the FTS5 index works (integrity + a MATCH)
 
 One adapter per agent in adapters/*.py (contract in adapters/README.md). SQLite FTS5
 index at ~/.local/state/session-index/history.v2.sqlite: a session is re-read only
 when its fingerprint changed. User and assistant text only (no tool output).
+Document adapters (todo notes, `--agent todo`) index each note as one entry.
 The index holds prompt text: private, never copy it into a repo. No model tokens.
 Exit 0 = hits, 1 = none, 2 = cannot run.
 """
@@ -26,7 +28,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 INDEX_DIR = Path.home() / ".local/state/session-index"
 DB = INDEX_DIR / "history.v2.sqlite"
-CAP = {"user": 4000, "assistant": 2000}
+CAP = {"user": 4000, "assistant": 2000, "note": 4000}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS files(key TEXT PRIMARY KEY, agent TEXT, sid TEXT, fp TEXT, cwd TEXT, title TEXT, mtime REAL);
 CREATE VIRTUAL TABLE IF NOT EXISTS msgs USING fts5(key UNINDEXED, role UNINDEXED, text, tokenize='porter unicode61');
@@ -48,7 +50,7 @@ def load_adapters(only):
     return mods
 
 
-def update(db, mods):
+def update(db, mods, only=()):
     stats = {}
     for m in mods:
         added = seen = 0
@@ -77,7 +79,34 @@ def update(db, mods):
             db.commit()
             added += 1
         stats[m.AGENT] = (seen, added)
+    if not only:  # a full pass: drop entries of agents whose adapter is gone (e.g. a removed TUI)
+        known = [m.AGENT for m in mods]
+        gone = [r[0] for r in db.execute("SELECT DISTINCT agent FROM files") if r[0] not in known]
+        for agent in gone:
+            db.execute("DELETE FROM msgs WHERE key IN (SELECT key FROM files WHERE agent=?)", (agent,))
+            n = db.execute("DELETE FROM files WHERE agent=?", (agent,)).rowcount
+            db.commit()
+            stats[agent] = (0, -n)
     return stats
+
+
+def check(db) -> bool:
+    """Prove FTS5 is usable: compiled in, the virtual table is intact, a MATCH returns rows."""
+    try:
+        fts = any("FTS5" in r[0] for r in db.execute("PRAGMA compile_options"))
+        db.execute("INSERT INTO msgs(msgs) VALUES('integrity-check')")  # raises SQLITE_CORRUPT_VTAB if broken
+        n_files, n_msgs = db.execute("SELECT (SELECT count(*) FROM files), (SELECT count(*) FROM msgs)").fetchone()
+        sample = db.execute("SELECT text FROM msgs LIMIT 1").fetchone()
+        word = next((w for w in (sample[0].split() if sample else []) if w.isalpha() and len(w) > 3), "")
+        hits = db.execute("SELECT count(*) FROM msgs WHERE msgs MATCH ?", ('"' + word + '"',)).fetchone()[0] if word else 0
+        agents = ", ".join(f"{a}={n}" for a, n in db.execute("SELECT agent, count(*) FROM files GROUP BY agent"))
+        ok = fts and n_msgs > 0 and hits > 0
+        print(f"fts5 {'ok' if ok else 'BROKEN'}: compiled={fts} integrity=ok entries={n_files} rows={n_msgs} "
+              f"probe MATCH {word!r} -> {hits} rows\n  {agents}", file=sys.stderr)
+        return ok
+    except sqlite3.Error as e:
+        print(f"fts5 BROKEN: {e} (try --rebuild)", file=sys.stderr)
+        return False
 
 
 def main() -> int:
@@ -89,8 +118,9 @@ def main() -> int:
     ap.add_argument("--update-only", action="store_true")
     ap.add_argument("--rebuild", action="store_true")
     ap.add_argument("--agents", action="store_true")
+    ap.add_argument("--check", action="store_true", help="FTS5 integrity check and a probe MATCH; exit 2 on failure")
     a = ap.parse_args()
-    if not (a.keywords or a.update_only or a.rebuild or a.agents):
+    if not (a.keywords or a.update_only or a.rebuild or a.agents or a.check):
         ap.print_usage(sys.stderr)
         return 2
 
@@ -102,10 +132,14 @@ def main() -> int:
     db.executescript(SCHEMA)
     mods = load_adapters(set(a.agent))
     t0 = time.time()
-    stats = update(db, mods)
+    stats = update(db, mods, set(a.agent))
+    if a.check:
+        ok = check(db)
+        if not a.keywords:
+            return 0 if ok else 2
     if a.agents or a.update_only or a.rebuild:
         for name, (seen, added) in stats.items():
-            print(f"{name:10} sessions={seen:5} reindexed={added}", file=sys.stderr)
+            print(f"{name:10} sessions={seen:5} {'dropped=' + str(-added) + ' (no adapter)' if added < 0 else 'reindexed=' + str(added)}", file=sys.stderr)
         print(f"{time.time() - t0:.1f}s", file=sys.stderr)
         if not a.keywords:
             return 0
@@ -130,13 +164,16 @@ def main() -> int:
         else:
             best[key] = (prev[0], prev[1], prev[2], count)
     live = {m.AGENT: (m.live() if hasattr(m, "live") else set()) for m in mods}
+    labels = {m.AGENT: (getattr(m, "LIVE_LABEL", "LIVE"), getattr(m, "ENDED_LABEL", "ended")) for m in mods}
     info = {m.AGENT: (m.live_info() if hasattr(m, "live_info") else {}) for m in mods}
     resume = {m.AGENT: getattr(m, "RESUME", "") for m in mods}
     out = []
     for key, (rank, role, snip, count) in sorted(best.items(), key=lambda kv: kv[1][0])[: a.limit]:
         agent, sid, cwd, title, mtime = db.execute(
             "SELECT agent, sid, cwd, title, mtime FROM files WHERE key=?", (key,)).fetchone()
-        out.append({"agent": agent, "sessionId": sid, "live": sid in live.get(agent, set()), "cwd": cwd,
+        is_live = sid in live.get(agent, set())
+        out.append({"agent": agent, "sessionId": sid, "live": is_live,
+                    "state": labels.get(agent, ("LIVE", "ended"))[0 if is_live else 1], "cwd": cwd,
                     "title": title, "lastActive": time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime)),
                     "hits": count, "role": role, "snippet": " ".join(snip.split()),
                     "resume": resume.get(agent, "").format(sid=sid, cwd=cwd) if resume.get(agent) else ""})
@@ -152,7 +189,7 @@ def main() -> int:
         print(json.dumps(out, indent=1))
     else:
         for r in out:
-            print(f"{r['agent']}  {r['sessionId']}  {'LIVE' if r['live'] else 'ended'}  {r['lastActive']}  hits={r['hits']}  cwd={r['cwd']}")
+            print(f"{r['agent']}  {r['sessionId']}  {r['state']}  {r['lastActive']}  hits={r['hits']}  cwd={r['cwd']}")
             print(f"    title: {r['title'] or '(untitled)'}")
             if r.get("name"):
                 print(f"    send to: {r['name']}")
