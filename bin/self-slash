@@ -4,7 +4,7 @@
 # operator to type it.  Claude Code cannot run built-ins from the Skill tool
 # (memory/reference_claude_code_model_cannot_run_builtin_slash_commands.md).
 #
-#   self-slash [--delay S] "/compact <focus>"
+#   self-slash [--delay S] [--dry-run] "/compact <focus>"   (--dry-run: validate only, never test against a live pane without it)
 #
 # Rules: refuses outside herdr; only ever targets $HERDR_PANE_ID (never another
 # pane); waits --delay seconds (default 6) so the current turn can end, then
@@ -13,13 +13,19 @@
 # detached (nohup) so it survives the Bash tool returning; the log is
 # ~/.local/state/self-slash.log.  First verified 2026-10-09 (ClaudeHelm).
 set -u
-delay=6
-if [ "${1:-}" = "--delay" ]; then delay="$2"; shift 2; fi
+delay=6; dry=0
+while :; do case "${1:-}" in --delay) delay="$2"; shift 2;; --dry-run) dry=1; shift;; *) break;; esac; done
 text="${1:-}"
 [ -n "$text" ] || { echo "usage: self-slash [--delay S] \"/command args\"" >&2; exit 2; }
 [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] || { echo "self-slash: not inside a herdr pane (HERDR_PANE_ID unset); ask the operator to type: $text" >&2; exit 3; }
 case "$text" in /*) ;; *) echo "self-slash: only slash commands are sent (got: $text)" >&2; exit 2;; esac
+# herdr sends a long argument as a bracketed paste and Claude Code then treats it
+# as pasted content, not a command (seen 2026-10-09 with ~900 chars): keep it short.
+if [ "${#text}" -gt "${SELF_SLASH_MAX:-300}" ]; then
+  echo "self-slash: argument is ${#text} chars; herdr pastes anything over ~300 and the command is not run. Shorten it (or SELF_SLASH_MAX=N)." >&2; exit 2
+fi
 pane="$HERDR_PANE_ID"
+[ "$dry" = 1 ] && { echo "self-slash: dry run, would send to pane $pane after ${delay}s: ${text:0:80}"; exit 0; }
 log="$HOME/.local/state/self-slash.log"; mkdir -p "$(dirname "$log")"
 if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   SELF_SLASH_CHILD=1 nohup "$0" --delay "$delay" "$text" >>"$log" 2>&1 </dev/null &
