@@ -61,7 +61,10 @@ Work the list; each line is a command, not a memory.
 7. **Upstream bugs found and not reported.** Any third-party defect you hit with
    a clean reproduction. **Search existing issues and PRs first** (open and
    closed, several terms) — the existing thread often explains the behaviour or
-   even hands you the fix.
+   even hands you the fix. **Say in the audit, and in the draft, that you
+   searched: which repo, which terms, and the nearest threads found** (operator,
+   2026-10-09: "always search for and mention searching for existing issues
+   first"); a bare "no upstream issue exists" is not evidence.
 8. **Deviations from his decisions.** Anything you did that cut against a choice
    he had already made, even reversibly. Disclose it in the audit if you have not
    already; do not let it surface later.
