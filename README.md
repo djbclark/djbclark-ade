@@ -89,6 +89,17 @@ their old paths are symlinks into this checkout).
 | [`baton`](skills/baton/SKILL.md) | Start-of-session resume from the Tier 1 pointer (`/baton`, `/resume`). |
 | [`loose`](skills/loose/SKILL.md) | Audit the session for loose ends, step through them, then offer `/handoff` or quit. |
 | [`steps`](skills/steps/SKILL.md) | Walk open items one multiple-choice prompt at a time, recommendation first. |
+| [`research`](skills/research/SKILL.md) | Evidence-grounded research: verbatim-quote claim log, counter-evidence pass, `research_check.py` verifies quotes and citations. |
+| [`book-to-kb`](skills/book-to-kb/SKILL.md) | Add a book to the local `~/kb` knowledge base so any session can query it cheaply. |
+| [`gmail-search`](skills/gmail-search/SKILL.md) | Local full-text search of the whole mailbox in ~100 ms; read-only. |
+| [`graft`](skills/graft/SKILL.md) | Use the graft code graph before grepping or reading source. |
+| [`todo`](skills/todo/SKILL.md) | Optional do-whenever tasks, kept as Basic Memory notes. |
+| [`terminus-kira`](skills/terminus-kira/SKILL.md) | Delegate a task to a sandboxed coding agent in an Apple Container VM. |
+| [`coderabbit-feeder`](skills/coderabbit-feeder/SKILL.md) | Queue a CodeRabbit review for a PR where CodeRabbit is not installed. |
+| [`reorg-orca`](skills/reorg-orca/SKILL.md) | Reorganize an Orca setup from the CLI; says which moves Orca cannot do yet. |
+
+Every skill with its trigger phrases and how to use it: [`docs/skills.md`](docs/skills.md).
+Two skills, `1password` and `tell-chief-of-staff`, are private and stay in `site-private`.
 
 ## Install (this machine)
 

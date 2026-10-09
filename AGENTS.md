@@ -96,9 +96,12 @@ altitudes compose (a macro node can run a micro graph as its body).
   [claude/commands/](claude/commands/)).
   Every TUI reaches them as `~/ops/site-private/skills/<name>` →
   `~/ops/site-djbclark/skills/<name>` (an absolute symlink into this
-  checkout), so **edit them here**, never through a TUI path. The other
-  local skills (`gmail-search`, `reorg-orca`, `book-to-kb`, `graft`,
-  `todo`, …) live in `~/ops/site-djbclark/skills/`.
+  checkout), so **edit them here**, never through a TUI path. Since 2026-10-09
+  **every** hand-written skill lives here, including `gmail-search`, `reorg-orca`,
+  `book-to-kb`, `graft`, `todo`, `research`, `terminus-kira` and
+  `coderabbit-feeder` ([docs/skills.md](docs/skills.md) lists all of them);
+  **a new skill always goes here** (operator standing rule, 2026-10-09), except
+  the private `1password` and `tell-chief-of-staff`, which stay in `site-private`.
 - [tools/acp-run/](tools/acp-run/README.md) — the ACP client every
   launcher uses (`~/.local/bin/acp-run` resolves here).
   [bin/fleet-watch](bin/fleet-watch) — launchd fleet change notices to
