@@ -315,3 +315,34 @@ Discussion — after the soak (started 2026-10-04 evening; post on/after
 >    present, no other pane sharing the session.
 >
 > Sharing the script for the semantics; not asking to submit a PR.
+
+## 6. graft — `init` bakes machine/worktree-specific absolute paths into tracked hook files (draft, 2026-10-08)
+
+**Repo:** `@nanonets/graft` (`src/claude/shim-template.ts`, `src/hosts` Cursor hooks).
+
+**What happens:** `graft init` (and the version-stamp upkeep that replays it
+at session start, `src/upkeep.ts`) writes four files meant to be committed
+(`.claude/helpers/graft-hooks.cjs`, `.claude/helpers/graft-statusline.cjs`,
+`.cursor/hooks/graft-hooks.cjs`, `.cursor/hooks.json`) with absolute paths
+of the machine and checkout that ran it: `const BAKED = "<this install's
+dist/claude>"` and, in `.cursor/hooks.json`, `node "<this worktree>/.cursor/hooks/graft-hooks.cjs"`.
+The stamp lives in the untracked graph cache, so every fresh git worktree
+replays init once and shows four modified files. Orca then refuses to delete
+the worktree ("uncommitted or untracked changes"). Seen on a worktree whose
+branch was already merged.
+
+**Why we can't fix it locally:** a clean filter that restores the committed
+paths does not help — `git status` treats a size change as modified without
+running the filter. Untracking the files breaks a fresh worktree, because the
+tracked `.claude/settings.json` calls the helper that upkeep itself runs from.
+
+**Suggested fix:** emit portable content. `BAKED` is only the first
+candidate in a resolution chain that already falls back to `npm root -g`, so
+it can be dropped from committed shims (or init can leave a file alone when
+only `BAKED` differs). `.cursor/hooks.json` could use a repo-relative command
+the way `.claude/settings.json` already uses `${CLAUDE_PROJECT_DIR:-.}`;
+`src/hosts/mcp-config.ts` already avoids baking a home directory into the MCP
+entry for the same reason.
+
+**Local workaround:** `git checkout -- .claude/helpers .cursor` before
+deleting the worktree.
