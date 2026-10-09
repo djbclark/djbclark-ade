@@ -9,6 +9,7 @@ does the move.
     herdr_place.py check [--auto]                 # JSON facts for the agent
     herdr_place.py move --workspace W --tab-label L
     herdr_place.py move --new-workspace NAME --tab-label L
+    herdr_place.py label [L | --from-title] [--force]   # label THIS tab (a bare number otherwise)
     HERDR_PANE_ID=<other pane> CLAUDE_CODE_SESSION_ID=<its session> \
         herdr_place.py move ... --no-focus        # sort another session's tab
     herdr_place.py decline                        # remember "leave it", no re-ask
@@ -142,6 +143,56 @@ def move(workspace: str | None, new_workspace: str | None, tab_label: str, focus
     return 0
 
 
+def slug_from_title(title: str, max_len: int = 28) -> str:
+    """'ClaudeHelm night run 2026-10-09 + Collie 1.18.1' -> 'claudehelm-night-run-collie-t'."""
+    import re
+    words = [w for w in re.sub(r"[^a-z0-9]+", " ", title.lower()).split() if not re.fullmatch(r"[0-9.-]+", w)]
+    out = ""
+    for w in words:
+        cand = f"{out}-{w}" if out else w
+        if len(cand) > max_len:
+            break
+        out = cand
+    return (out or "session") + "-t"
+
+
+def label(text: str | None, from_title: bool, force: bool) -> int:
+    """Rename this pane's herdr tab. /rename and autorename.py set the session title and the
+    terminal title only; the sidebar tab keeps its default number until this runs."""
+    pane_id = os.environ.get("HERDR_PANE_ID")
+    if os.environ.get("HERDR_ENV") != "1" or not pane_id:
+        print("skipped: not in a herdr pane")
+        return 0
+    if from_title:
+        from autorename import current_title, find_transcript  # same directory
+        sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+        transcript = find_transcript(sid) if sid else None
+        title = current_title(transcript) if transcript else None
+        if not title:
+            print("skipped: the session has no custom title yet (run autorename.py first)", file=sys.stderr)
+            return 2
+        text = slug_from_title(title)
+    if not text:
+        print("a label or --from-title is required", file=sys.stderr)
+        return 2
+    try:
+        pane = herdr("pane", "get", pane_id)["pane"]
+        tabs = herdr("tab", "list", "--workspace", pane["workspace_id"])["tabs"]
+        tab = next(t for t in tabs if t["tab_id"] == pane["tab_id"])
+        if tab["label"] == text:
+            print(f"unchanged: tab {tab['tab_id']} already {text!r}")
+            return 0
+        if not force and generic_reason(tab["label"]) is None:
+            print(f"kept: tab {tab['tab_id']} already has a real label {tab['label']!r} (--force to replace)")
+            return 0
+        herdr("tab", "rename", tab["tab_id"], text)
+    except (RuntimeError, StopIteration, KeyError, subprocess.TimeoutExpired) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"labelled: tab {tab['tab_id']} {tab['label']!r} -> {text!r}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -154,11 +205,17 @@ def main() -> int:
     m.add_argument("--tab-label", required=True)
     m.add_argument("--no-focus", action="store_true",
                    help="don't follow the tab (moving another session's pane via HERDR_PANE_ID=...)")
+    lb = sub.add_parser("label", help="label this pane's tab (sidebar); generic labels only unless --force")
+    lb.add_argument("text", nargs="?", help="the label, kebab-case with a -t suffix")
+    lb.add_argument("--from-title", action="store_true", help="derive it from the session's custom title")
+    lb.add_argument("--force", action="store_true", help="replace a non-generic label too")
     sub.add_parser("decline")
     args = ap.parse_args()
 
     if args.cmd == "check":
         return check(args.auto)
+    if args.cmd == "label":
+        return label(args.text, args.from_title, args.force)
     if args.cmd == "move":
         return move(args.workspace, args.new_workspace, args.tab_label, not args.no_focus)
     remember("declined")

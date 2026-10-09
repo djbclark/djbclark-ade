@@ -54,6 +54,20 @@ anthropics/claude-code#91468). Say so in the report when it renamed.
 
 `autorename.py --show` prints the current title.
 
+**The herdr tab label is a separate thing.** Neither `/rename` nor `autorename.py`
+touches the sidebar tab: it keeps its default number ("2") until something labels
+it (operator, 2026-10-09, after three renames changed nothing he could see). Inside
+herdr, right after step 2 (and whenever the operator has typed `/rename` by hand), run:
+
+```bash
+python3 ~/ops/site-private/skills/autorename/herdr_place.py label --from-title   # <kebab-title>-t, generic labels only
+python3 ~/ops/site-private/skills/autorename/herdr_place.py label <label>-t      # your own label
+python3 ~/ops/site-private/skills/autorename/herdr_place.py label --force ...    # replace a real label too
+```
+
+It prints `labelled:`, `unchanged:`, `kept:` (the tab already had a real label) or
+`skipped:` (not in herdr). Step 3 then decides whether the tab also moves.
+
 ## 3. herdr placement (only when `HERDR_ENV=1`)
 
 Orca needs no step here (checked 2026-10-09, read-only): its terminal title is the one Claude sets
