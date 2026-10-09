@@ -63,6 +63,20 @@ Project-scope-resolved output directory for this target repo (e.g. `ls
 ~/ops/site-private/memory/handoffs/<repo>/` or `ls
 <repo-root>/docs/handoffs/`).
 
+**Also list this session's open background jobs** (bigteam's job records,
+Step 4 there). A record is open when it has no `"closed"` key and its `owner` is
+this session (`$CLAUDE_CODE_SESSION_ID`):
+
+```bash
+for f in ~/.local/state/bigteam/*/jobs/*.json; do [ -e "$f" ] || continue
+  jq -r --arg me "${CLAUDE_CODE_SESSION_ID:-}" 'select(.owner==$me and (has("closed")|not))
+    | [input_filename, .report, .done, .rearm, .cmd] | @tsv' "$f"; done
+```
+
+For each row note whether the `done` path exists yet (finished but unread, or
+still running). A `run_in_background` task or waiter of this session is **not**
+a job record: it is a child of the session and is not promised to outlive it.
+
 ## Step 2 — Chain tag and lineage
 
 Chain tag, first match: (1) Beads epic ID; (2) 1–4 bead IDs (list);
@@ -139,7 +153,13 @@ the ops-djbclark suite or `<repo-root>/docs/handoffs/` otherwise (slug:
     ## Evidence & Data          <- real numbers, file paths
     ## Operator Feedback
     ## Where We're Going        <- ordered; item 1 is THE next action
+    ## Detached jobs            <- one entry per open job record, or "none"
     ## Quick Start              <- exact commands for the next session
+
+Each `## Detached jobs` entry gives: the job file (`.../jobs/<name>.json`), the
+report path, the `.done` path (and whether it exists now), the exact `rearm`
+command, and one line on what the job is and what to do with its report. The
+next `/baton` re-arms from these entries.
 
 ## Step 5 — Validation gate (all required; line count is NOT the gate)
 
@@ -151,6 +171,9 @@ the ops-djbclark suite or `<repo-root>/docs/handoffs/` otherwise (slug:
 - [ ] Failed approaches + why
 - [ ] Blockers / open questions
 - [ ] ONE explicit next action at the top of Where We're Going
+- [ ] Every open job record of this session is listed under Detached jobs
+      (or the section says "none"), and nothing in the doc assumes a
+      `run_in_background` task or waiter survives the session
 - [ ] Parent linkage (ids, or explicit none)
 - [ ] Redaction: no credentials, tokens, .env values, key material,
       anywhere in the doc

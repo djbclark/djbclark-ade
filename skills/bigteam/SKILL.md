@@ -217,6 +217,13 @@ no notification at all, and the batch sat finished for over an hour until it was
 next checked. `acp-run` does not change this; it is an ordinary command, and ACP
 only makes its own exit code and stop reason trustworthy.
 
+**A `run_in_background` slice or waiter dies with the session.** It is a direct
+child of the Claude process (verified 2026-10-08: task pid 21672, ppid 58204,
+the session's `claude`) and Claude Code cleans it up when it exits (docs,
+*Background Bash commands*). It does not come back on `claude --resume`.
+Everything below about notifications holds only while the session lives; for
+work that must outlive it, see *Jobs and records* after the waiter paragraph.
+
 Send every slice in **one message as parallel Bash calls**, each
 `run_in_background: true`, so each reports as it finishes and the first results
 arrive first. **For every agent that speaks ACP, dispatch through `acp-run`**
@@ -268,7 +275,11 @@ immediately (false-early) or, without `run_in_background`, never reports it.
 another process will write) — run the wait as a `run_in_background` call and
 bound it, so a file that never appears cannot hang forever:
 
-    timeout 1800 bash -c 'until [ -s "$OUT/report-x.md" ]; do sleep 10; done'
+    timeout 1800 bash -c 'until [ -e /abs/path/to/report-x.done ]; do sleep 10; done'
+
+(Write the path out in full, or `export OUT` first: a `$OUT` inside the single
+quotes is empty in the inner `bash -c`, so the loop would wait on `/report-x.md`
+forever. Wait on a `.done` marker, not on the report: see *Jobs and records*.)
 
 **Never write the wait as `until ! pgrep -f '<pattern>'`.** `pgrep -f` matches
 the waiting shell's own command line, which contains `<pattern>`, so it always
@@ -276,6 +287,111 @@ finds itself and the loop never exits. On 2026-10-03 two such waiters ran for
 1.5 hours and the only notification was the one produced by killing them. For
 liveness use the PID (`kill -0 $pid`) or `wait`; for completion, wait on the
 report file or the `---<name> exit=` line.
+
+### Jobs and records — work that must outlive the session
+
+What survives a session is a file, not a process. Every slice and every
+detached job follows the same contract (2026-10-08).
+
+1. **Report through a temp file, `.done` last.** The slice writes its report to
+   `$OUT/<name>.report.tmp`, `mv -f`s it to `$OUT/<name>.report.md`, then
+   `touch "$OUT/<name>.done"` as its very last act. Waiters wait on `.done`,
+   never on the report, so a half-written file is never read.
+2. **A job record per slice that may outlive its launcher:**
+   `~/.local/state/bigteam/<task>/jobs/<name>.json`, written the same way
+   (temp + `mv -f`):
+
+       {"owner": "<CLAUDE_CODE_SESSION_ID>", "started": <epoch>,
+        "report": "<abs>/<name>.report.md", "done": "<abs>/<name>.done",
+        "rearm": "timeout 1800 bash -c 'until [ -e <abs>/<name>.done ]; do sleep 10; done'",
+        "cmd": "<what was launched, one line>"}
+
+   `owner` is the id of the Claude session that launched it. Claude Code sets
+   `CLAUDE_CODE_SESSION_ID` in every Bash call (checked 2026-10-08 with
+   `env | grep -i session`; there is no `CLAUDE_SESSION_ID`). Use
+   `${CLAUDE_CODE_SESSION_ID:-unknown}`. `rearm` is the exact bounded waiter
+   with absolute paths inlined. A record is **open** until it carries a
+   `"closed": <epoch>` key; `/handoff` lists open records of its session and
+   `/baton` re-arms and closes them. Records are closed, never deleted.
+3. **Work expected to outlive the session is launched detached, not as a child
+   of it:** multi-hour runs, anything that must survive a `/new` or the TUI
+   quitting. `bg` does not do this: `~/ops/site-private/bin/bg` only waits for
+   load and then `exec`s `taskpolicy -c utility "$@"`, so the command stays a
+   child of whoever ran it. The verified detached form is `launchctl submit`
+   (flags checked against `man launchctl`, macOS 27, and run: the job's parent
+   is launchd, pid 1). Put the whole job in a small script so it reports the
+   way item 1 says and removes its own label:
+
+       # $OUT/run-<name>.sh   (chmod +x)
+       #!/bin/bash
+       export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+       OUT=<abs OUT>; N=<name>; L=bigteam.<task>.<name>
+       [ -e "$OUT/$N.done" ] && { launchctl remove "$L"; exit 0; }
+       <command> > "$OUT/$N.report.tmp" 2> "$OUT/$N.stderr"; rc=$?
+       echo "exit=$rc" >> "$OUT/$N.report.tmp"
+       mv -f "$OUT/$N.report.tmp" "$OUT/$N.report.md"
+       touch "$OUT/$N.done"
+       launchctl remove "$L"
+
+       launchctl submit -l bigteam.<task>.<name> \
+           -o "$OUT/<name>.out" -e "$OUT/<name>.err" -- "$OUT/run-<name>.sh"
+
+   Three facts verified 2026-10-08 that the script above is built around:
+   **launchd restarts a submitted job every time it exits** (a bare job reran
+   every ~20 s), so the script must `launchctl remove` its own label as its last
+   line, and the first-line `.done` check stops a restart after a crash from
+   redoing finished work; the job's environment is bare (`PATH=/usr/bin:/bin:
+   /usr/sbin:/sbin`, `HOME` set, nothing else), so export what the command
+   needs inside the script; and a submitted job does not survive a reboot. Not
+   tested: an agent CLI under launchd (keychain and login state), and
+   `claude --bg --exec '<cmd>'` (the background-session supervisor; per the docs
+   its output is held in memory and cleaned about five minutes after the job
+   exits, so it would still need the report-file contract above).
+4. **What is and is not promised.** Only detached jobs that have a record are
+   promised to outlive the session. Whether an ordinary `run_in_background`
+   task survives a `/new` is NOT established as a guarantee: the test result
+   below saw it survive in one Claude Code version and one case, and saw it die
+   on quit. Do
+   not hand work to the next session on the assumption that a background task or
+   waiter will still be there.
+
+**Why jobs are records on disk (investigation, 2026-10-08).** A Claude Code
+docs and local-process investigation found: background Bash tasks are
+children of the `claude` process and "automatically cleaned up when Claude Code
+exits" (https://code.claude.com/docs/en/interactive-mode, *Background Bash
+commands*), including anything under `setsid` or `timeout`; `claude --resume`
+does not restore them (https://code.claude.com/docs/en/sessions); no flag,
+hook or environment variable lets a new session list or adopt another
+session's tasks. Named pipes were rejected: a pipe buffers about 64 KiB, a
+writer blocks or fails with no reader, and the reader would itself be a
+background process with the same exit problem. So the result is a file, the
+completion signal is a `.done` marker written last, and a small record names the
+owner, the paths and the exact waiter to re-arm; the cost is one wake turn per
+completion and one re-arm turn per new session. Backgrounding the whole session
+(`/background`) also keeps its tasks; `claude --bg --exec` was not tested.
+
+**Test result (2026-10-08, Claude Code 2.1.295, a throwaway interactive
+`claude --model haiku` session in a herdr pane, since closed).** Three
+observations, all in one case:
+
+1. `/new` is an alias of `/clear` in this version (the transcript echoes
+   `/clear`). It starts a new transcript in the **same** `claude` process. A
+   `run_in_background` `sleep 311` started before it kept running (still a child
+   of the same `claude`), the footer of the new session showed it as a running
+   shell, and when it finished the completion notification woke the **new**
+   session (which did not recognize it as its own).
+2. Quitting the TUI stops background tasks: `/exit` raises a prompt "Background
+   work is running / The following will stop when you exit" with *Exit and stop
+   tasks*, *Move to background and exit*, *Stay*. Choosing the first killed the
+   `sleep 313` (verified with `ps`). So `/handoff` then `/new` in the same TUI
+   keeps tasks; `/handoff` then quit, or a crash, or a new terminal tab does not.
+3. A `launchctl submit` job is parented by launchd (pid 1), not by any Claude
+   session, so it is independent of all of the above.
+
+This is one version and one path. It does not make a background task a safe
+carrier for work: the next session may be a different process, and it did not
+recognize the inherited task as its own. Records and detached jobs stay the
+contract.
 
 **A slice that fails on quota** (429, `usage limit`, `RESOURCE_EXHAUSTED`) is
 Step 1 item 3: try the same vendor's other model-family pool before reassigning.
