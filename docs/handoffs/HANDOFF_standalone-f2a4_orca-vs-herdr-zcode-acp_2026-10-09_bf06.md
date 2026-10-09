@@ -115,12 +115,11 @@ site-private and the Claude auto-memory note of the same name.
 
 ## Where We're Going
 
-1. **Read the sub-agent report** at the scratchpad path below (or, if the
-   scratchpad is gone, check `docs/upstream-issues.md` §7's heading: it is
-   updated by the agent on completion). If the first line is `BLOCKED:` or the
-   file is still `STATUS: working` with no agent alive, re-run the search-then-
-   file task for william0wang/zcode-acp (defects: `$/zcode/turnState` prefix;
-   `turninfo_*` stats chunk as agent text). Operator approved filing 2026-10-09.
+1. **Nothing in flight.** The zcode-acp upstream sub-agent finished at 00:26:
+   filed william0wang/zcode-acp#311 (`$/zcode/turnState` prefix) and #312
+   (`turninfo_*` stats chunk); `docs/upstream-issues.md` §7 carries the links.
+   Watch those issues; when fixed upstream, the two acp-run workarounds
+   (72c797d) can go.
 2. Todo "Orchestration task DAG: Orca vs ralph-tui vs beans vs herdr-native
    options" (Basic Memory project `main`, `todo/`): non-coding research; result
    goes under `~/ops/site-djbclark/research/orca-vs-herdr/`, then `/steps`.
@@ -139,12 +138,8 @@ site-private and the Claude auto-memory note of the same name.
 
 ## Detached jobs
 
-none (no bigteam job records owned by this session). The zcode-acp upstream
-sub-agent is a Claude Agent-tool child: its report path is
-`/private/tmp/claude-501/-Users-djbclark-orca-workspaces-djbclark-ade-orca-vs-herdr-with-djbclark-ade-and-acp/c735ee28-8a0d-44fa-aeb3-8c7d242889b8/scratchpad/zcode-acp-upstream-report.md`
-(16 bytes, `STATUS: working`, at 00:24). It also commits to
-`docs/upstream-issues.md`, so the repo shows its outcome even if the
-scratchpad is cleaned.
+none. (The zcode-acp upstream sub-agent, an Agent-tool child, completed
+before this handoff was committed: `DONE: 2 filed, 0 already existed`.)
 
 ## Quick Start
 
