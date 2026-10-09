@@ -81,7 +81,8 @@ send_text() {
 sleep "$delay"
 # herdr: never send while the session is mid-turn (status "working"); the input is
 # accepted but Claude Code never runs it.  Wait for idle, bounded by SELF_SLASH_WAIT.
-if [ "$host" = herdr ]; then
+wait_idle() {
+  [ "$host" = herdr ] || return 0
   waited=0; said=0
   while :; do
     st=$(herdr pane list 2>/dev/null | python3 -c '
@@ -89,13 +90,14 @@ import json, sys
 pane = sys.argv[1]
 for p in json.load(sys.stdin).get("result", {}).get("panes", []):
     if p.get("pane_id") == pane: print(p.get("agent_status", "")); break' "$pane" 2>/dev/null)
-    [ "$st" = working ] || break
+    [ "$st" = working ] || return 0
     [ "$said" = 1 ] || { echo "$(date '+%F %T') $host $pane: session is working, waiting for idle before sending"; said=1; }
     [ "$waited" -lt "${SELF_SLASH_WAIT:-900}" ] || { echo "$(date '+%F %T') $host $pane: gave up after ${waited}s, session still working; NOT sent: ${text:0:80}"; exit 6; }
     sleep 5; waited=$((waited+5))
   done
-fi
-for attempt in 1 2 3 4 5 6; do
+}
+wait_idle
+for attempt in 1 2 3 4 5 6 7 8 9; do
   screen=$(read_screen)
   prompt=$(printf '%s\n' "$screen" | grep -E '^[[:space:]]*❯' | tail -1 | sed -E 's/^[[:space:]]*❯[[:space:]]*//')
   # Claude Code's dim hint text reads as plain text on screen; treat it as empty
@@ -105,7 +107,19 @@ for attempt in 1 2 3 4 5 6; do
     echo "$(date '+%F %T') $host $pane: no input prompt on screen yet (attempt $attempt), waiting"; sleep 5; continue
   fi
   if [ -n "$prompt" ]; then
-    echo "$(date '+%F %T') $host $pane: REFUSED, unsent draft in input box: ${prompt:0:60}"; exit 4
+    # Text on the ❯ line is either the operator's unsent draft or a message the
+    # operator QUEUED mid-turn, which Claude Code shows there (as the text, or as
+    # "[Pasted text #1 +9 lines]") until the turn ends and it is consumed.  Seen
+    # 2026-10-09: three compacts refused on queued messages.  A queued message
+    # vanishes within seconds of idle (and the session goes back to working); a
+    # real draft stays.  So re-read: gone -> wait for idle again and send after
+    # the operator's turn; unchanged three times (~10 s) -> a real draft, refuse.
+    if [ "$prompt" = "${last_prompt:-}" ]; then same=$((${same:-0}+1)); else same=1; last_prompt="$prompt"; fi
+    if [ "$same" -ge 3 ]; then
+      echo "$(date '+%F %T') $host $pane: REFUSED, unsent draft in input box: ${prompt:0:60}"; exit 4
+    fi
+    echo "$(date '+%F %T') $host $pane: text on input line (queued message or draft), re-checking: ${prompt:0:60}"
+    sleep 4; wait_idle; continue
   fi
   send_text && { echo "$(date '+%F %T') $host $pane: sent ${text:0:80}"; exit 0; }
   echo "$(date '+%F %T') $host $pane: send failed (attempt $attempt)"; sleep 5
