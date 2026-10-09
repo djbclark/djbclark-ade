@@ -400,3 +400,230 @@ Filed / found (2026-10-09):
    a bug/feature request, not a defaults question.
 2. Filed: https://github.com/william0wang/zcode-acp/issues/311 (prefix).
 3. Filed: https://github.com/william0wang/zcode-acp/issues/312 (stats chunk).
+
+## 8. ralph-orchestrator — a timed-out lifecycle hook is killed, its children keep running (draft, 2026-10-09)
+
+**Status: draft, not filed.**
+
+**Repo:** [mikeyobrien/ralph-orchestrator](https://github.com/mikeyobrien/ralph-orchestrator)
+(Homebrew `ralph-orchestrator`, release binary `ralph-cli`).
+
+**Versions:** ralph v2.10.1 (latest release, 2026-06-22), aarch64-apple-darwin,
+macOS 27. The code below is unchanged on `main` at `edc2b3268c9b` (2026-10-09).
+
+**Searched first (2026-10-09, issues and PRs, open and closed):** `hook
+timeout`, `timed out`, `process group`, `children`, `orphan`, `kill hook`,
+`timeout_seconds`, `zombie`, `lifecycle hook`, `setsid`, `killpg`, and PRs
+matching `hook executor`. None found. Nearest: #204 / PR #207 (orphaned ACP
+*agent* processes, fixed), #76 (Ctrl+C race), PR #215 (lifecycle hooks v1,
+which added the executor).
+
+**Draft title:** Lifecycle hook timeout kills only the hook process; its child processes keep running after ralph exits
+
+**Reproduction:**
+
+1. A hook whose command runs a child that outlives the timeout, e.g.
+   `command: ["bash", "./check.sh"]` with `check.sh` running `sleep 60`, and
+   `timeout_seconds: 5`, `on_error: block`, on `pre.loop.complete`.
+2. Run a loop that reaches `pre.loop.complete`.
+3. ralph logs `disposition=Block exit_code=None timed_out=true failure=hook
+   timed out`, then `Error: Lifecycle hook 'judge' blocked orchestration at
+   'pre.loop.complete': hook timed out`, and exits 1. That part is as
+   documented.
+4. After ralph has exited, `pgrep -fl 'check.sh|sleep 60'` still lists the
+   hung `bash ./check.sh` and its `sleep 60`.
+
+**Expected:** a hook timeout ends everything the hook started.
+**Actual:** only the direct child is killed. Anything it spawned is orphaned
+and keeps running, holding whatever it held (here a machine-wide test slot).
+
+**Cause (from source):** `crates/ralph-core/src/hooks/executor.rs` spawns the
+hook with `Command::new(..).spawn()` and no process group, and
+`terminate_for_timeout` calls `child.kill()` (SIGKILL to that one PID). A
+shell or wrapper hook's children are never signalled.
+
+**Suggested fix:** on Unix, start the hook in its own process group
+(`std::os::unix::process::CommandExt::process_group(0)`) and on timeout
+signal the group: `killpg(pgid, SIGTERM)`, a short grace, then
+`killpg(pgid, SIGKILL)`. Windows would need a job object for the same effect.
+
+**Our workaround:** the judge hook bounds its own test run
+(`timeout -k 30 $JUDGE_TEST_TIMEOUT`, default 3300 s, below the hook's
+3600 s) and refuses on exit 124/137, so a hung check ends before ralph's
+timeout fires.
+
+**Evidence:** aiuse branch `claudehelm/ralph-pilot`, commit `d7725d2`
+(mutation scenario `slow` in `orchestration/mutation-test.sh`, judge bound in
+`orchestration/judge.sh`, notes in `docs/orchestration/README.md`); session
+report `ralph-nits-report.md` item 1d (ClaudeHelm scratchpad, 2026-10-09).
+
+## 9. Claude Code — a long slash command sent with `herdr pane run` arrives as a collapsed paste and never runs (not filed — already anthropics/claude-code#85654, checked 2026-10-09)
+
+**Status: draft, not filed.** No new issue: the defect is Claude Code's and
+is already reported, reproduced and labelled there.
+
+**Repos:** [anthropics/claude-code](https://github.com/anthropics/claude-code)
+(where the defect is) and [herdrdev/herdr](https://github.com/herdrdev/herdr)
+(the delivery path, working as designed).
+
+**Versions:** Claude Code 2.1.295, herdr
+`0.9.1-preview.2026-09-21-0ff0f27e2226`, macOS 27.
+
+**What happened:** `bin/self-slash` sent a `/compact <focus>` of about 900
+characters with `herdr pane run <pane> <text>`. Claude Code received it as
+pasted content, so it went to the model as a message and `/compact` did not
+run. The same path with about 330 characters (01:01) ran the command.
+
+**Why, from both sides:**
+
+1. herdr wraps every API text in `ESC[200~ … ESC[201~` whenever the pane app
+   has enabled bracketed paste (`encode_api_text` in `src/app/api_helpers.rs`,
+   pinned by the test `api_pane_send_input_brackets_text_and_enter_atomically`).
+   Length does not matter there, so the 330-character send was a bracketed
+   paste too.
+2. Claude Code collapses a paste over about 800 characters (or more than 3
+   lines) into `[Pasted text #N]`, and a collapsed paste never dispatches a
+   slash command. That is exactly
+   [anthropics/claude-code#85654](https://github.com/anthropics/claude-code/issues/85654)
+   (open; labels `bug`, `has repro`, `regression`, `reproduced`; reproduced
+   through `tmux paste-buffer -p` on 2.1.233, 2.1.252 and 2.1.263).
+
+**Searched first (2026-10-09):** claude-code for `pasted slash`, `paste
+slash`, `bracketed paste`, `paste threshold`, `slash command paste`; herdr
+for `bracketed paste`, `pasted text`, `slash command`, `paste mode`, `pane
+run long`. Related but different: claude-code #98126 and #60673 (desktop
+app), herdr #4990 (`agent prompt` into Devin CLI leaves a collapsed paste
+unsubmitted).
+
+**Optional comment for #85654** (adds only a newer version and a multiplexer
+API path; a thumbs-up does the same job unless the thread goes quiet):
+
+> Still reproduces on 2.1.295 (macOS 27), through a terminal multiplexer's
+> API rather than a human paste: `herdr pane run <pane> "/compact <~900
+> chars, one line>"` sends a bracketed paste plus Enter, Claude Code
+> collapses it, and the text reaches the model as a message. The same call
+> with ~330 characters runs `/compact`. So any tool that drives Claude Code
+> through a multiplexer (herdr, tmux `paste-buffer -p`) hits the collapse
+> threshold, not just people pasting.
+
+**Our workaround:** `bin/self-slash` refuses arguments over 300 characters
+(`SELF_SLASH_MAX` overrides) and has `--dry-run` (commit `bfd7a83`). Keep the
+focus text in a state file and reference it from a short command.
+
+**Evidence:** `~/.local/state/self-slash.log` lines at 03:50:37 and 03:51:12
+on 2026-10-09 (pane `w2F:p8`), the 01:01:35 line for the working short send,
+and the helm-auto learnings note in the ClaudeHelm scratchpad
+(`helm-auto-learnings.md`, 03:52 entry).
+
+## 10. herdr — session refs from an ACP launcher: comment-sized addendum for herdrdev/herdr#3184 (draft, 2026-10-09)
+
+**Status: draft, not filed.** Post only after the acp-run change below has
+been tested on a live pane; until then the addendum's claim is from source,
+not from a run.
+
+**Repo:** [herdrdev/herdr](https://github.com/herdrdev/herdr). Collie
+([AltanS/collie](https://github.com/AltanS/collie), 1.17.2) only shows the
+symptom: `collie doctor` fails `agent-sessions` on a Claude pane that has no
+stored `agent_session`.
+
+**Versions:** herdr `0.9.1-preview.2026-09-21-0ff0f27e2226`, Collie 1.17.2,
+macOS 27.
+
+**Existing thread:** [herdrdev/herdr#3184](https://github.com/herdrdev/herdr/issues/3184)
+(open). It already establishes that herdr stores a session ref only from an
+official source (`herdr:pi`, `herdr:claude`, …) and silently drops one from
+a custom source, with four independent reproductions through 0.9.3. Its
+2026-09-24 comment also names the workaround (report as the official source)
+and its cost (that opts the pane into the official native restore, which is
+wrong for a different agent). Collie: searched `agent-sessions`, `doctor`,
+`acp`, `agent_session`, `session`, `herdr session` (this session) plus nine
+terms earlier tonight; none found.
+
+**What our case adds:** the agent behind the launcher *is* an official one.
+acp-run starts Claude Code through its ACP adapter, and the ACP `sessionId`
+equals the Claude transcript uuid (checked on launch
+`20261008-161855-claude-8159`). acp-run strips `HERDR_PANE_ID`/`HERDR_ENV`
+from the agent with `--interactive`, so Claude's own herdr hook never
+reports, and acp-run's reports under source `acp-run` are dropped. Here
+reporting the session as `herdr:claude` is the true identity, and the native
+restore (`claude --resume <uuid>`) is the right one. So the fix for us is in
+our launcher, not in herdr.
+
+**Draft comment for #3184:**
+
+> One more shape of this, with a fix on the launcher side: an official agent
+> started through a wrapper. We launch Claude Code through an ACP client
+> that owns the pane's state reports (source `acp-run`) and keeps Claude's
+> own herdr hook from reporting the same pane. The session ref it reports is
+> dropped, as described here, so tools that read `agent_session` (Collie's
+> history and `collie doctor`) treat the pane as sessionless. Because the
+> ACP session id is the Claude transcript uuid, the launcher can report the
+> session as the official agent: one `pane report-agent-session <pane>
+> --source herdr:claude --agent claude --agent-session-id <uuid>
+> --agent-session-path <transcript> --session-start-source startup --seq
+> <ms>` after `session/new`, keeping state reports under its own source. A
+> documented way for a launcher to say "this pane runs agent X, session Y"
+> without taking over X's state source would cover this case and the
+> pi-family harnesses above.
+
+**Open question to settle in the live test first:** two herdr guards might
+still refuse the report, an owner conflict with acp-run's state authority and
+a detected-agent conflict. If they do, the comment changes to report that, and
+the fallback is a Collie request for a Claude `discover(cwd)` like its muse
+adapter has.
+
+**Evidence:** `todo-close-report.md` item 2 (ClaudeHelm scratchpad,
+2026-10-09); the Diagnosis section of the Collie todo note; acp-run's `Herdr`
+class in `tools/acp-run/acp-run`; herdr `session_ref_from_report` in
+`src/agent_resume.rs`.
+
+## 11. CodexBar — `codexbar usage --provider alibabatokenplan` hangs with no output (draft, 2026-10-09)
+
+**Status: draft, not filed.**
+
+**Repo:** [steipete/CodexBar](https://github.com/steipete/CodexBar).
+
+**Versions:** CodexBar 0.73.0 (latest release, 2026-10-07), its bundled CLI,
+macOS 27, Apple silicon. Alibaba account region INTL `ap-southeast-1`.
+
+**Searched first (2026-10-09, issues and PRs, open and closed):** `alibaba`,
+`alibabatokenplan`, `token plan`, `hang`, `hangs`, `timeout`, `cookies found`,
+`cookie hang`, `usage hangs`, `CLI hangs`, `never returns`, `Token Plan
+timeout`, `alibaba cookie`, `devin`. None found for this hang. Related, all
+closed: #1731 (`--source auto` hung on a stale web source), #474 / PR #481
+(an unbounded `waitUntilExit` in a CLI probe), PR #1748 (`serve` bounds
+`/usage` per provider, which the plain CLI does not get), and #2891 / #2349
+(Alibaba Token Plan failures after the cookie step, same INTL region).
+
+**Draft title:** `codexbar usage --provider alibabatokenplan` hangs indefinitely when no browser session cookie is found
+
+**Reproduction:**
+
+1. A Mac with no readable Alibaba Token Plan session cookie in any browser
+   (earlier versions reported "No Alibaba Token Plan session cookies found in
+   browsers" for this account).
+2. `time codexbar usage --provider alibabatokenplan --format json`
+
+**Expected:** a prompt error, like `--provider alibaba` on the same machine,
+which fails in about 1 s.
+**Actual:** no output and no exit after 60 s; the caller has to kill it. On
+the same run `--provider devin` answers in about 20 s. The provider is not
+enabled in CodexBar's own config, so this is the explicit CLI query.
+
+**Impact:** any script polling every provider pays its full timeout on each
+run. aiuse had to add per-provider timeouts and a hang backoff for it.
+
+**Suggested fix:** treat "no session cookie" as a terminal error before any
+network call, and put a deadline on the provider's fetch in the CLI the way
+PR #1748 did for `serve`.
+
+**Not yet known:** where it blocks. No stack was taken. A `sample` of the
+hung process would settle it and should go in the issue before filing.
+
+**Our workaround:** aiuse commit `16472cf` (per-provider
+`[collectors.codexbar] provider_timeouts` and a cross-process hang backoff),
+and the operator disabled the provider in aiuse on 2026-10-08 (`daf9eec`).
+
+**Evidence:** `aiuse-bugs-report.md` item 1 (ClaudeHelm scratchpad,
+2026-10-09); aiuse bead `aiuse-e9d`; aiuse `docs/collector-concurrency.md`
+("Hang backoff").
