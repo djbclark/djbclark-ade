@@ -628,9 +628,9 @@ and the operator disabled the provider in aiuse on 2026-10-08 (`daf9eec`).
 2026-10-09); aiuse bead `aiuse-e9d`; aiuse `docs/collector-concurrency.md`
 ("Hang backoff").
 
-## 12. Collie — `collie update --help` starts a live update instead of printing usage (draft, 2026-10-09)
+## 12. Collie — `collie update --help` starts a live update instead of printing usage (filed 2026-10-09)
 
-**Status: draft, not filed.**
+**Status: filed as [AltanS/collie#392](https://github.com/AltanS/collie/issues/392).**
 
 **Repo:** [AltanS/collie](https://github.com/AltanS/collie).
 
