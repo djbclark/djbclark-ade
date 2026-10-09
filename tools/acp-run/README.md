@@ -4,7 +4,9 @@ Run one prompt through a coding agent over the
 [Agent Client Protocol](https://agentclientprotocol.com) (ACP), headless, and get
 the agent's final message on stdout. It is how one agent on this machine hands a
 self-contained task to another vendor's agent: Claude Code, Codex, Copilot,
-opencode, Cursor, Qwen Code, Devin, Cline, Hermes, Antigravity (`agy`) and Grok.
+opencode, Cursor, Qwen Code, Devin, Cline, Hermes, Antigravity (`agy`), Grok and
+zcode (through the third-party `zcode-acp-server`, which offers no model option,
+so it is the one agent run without `--model`; `--set thought=low|high|max`).
 
 A single-file [uv script](https://docs.astral.sh/uv/guides/scripts/) on the
 official Python SDK (`agent-client-protocol`); no daemon, no state beyond its

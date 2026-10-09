@@ -141,8 +141,10 @@ from the first `{` instead, or the parse fails with "Extra data".
 - **Grok (SuperGrok, 45% left)** — realtime X/news/web angle, quick
   standalone questions.
 - **z.ai GLM (lite) via zcode** — budget bulk coding on its own
-  5h/weekly windows. zcode headless has no model/effort flag: it runs
-  GLM-5.3 at max.
+  5h/weekly windows. Since 2026-10-08 `acp-run zcode` (third-party
+  `zcode-acp-server`) drives it; it offers no model option, so run it
+  without `--model`; effort is `--set thought=low|high|max` (default max).
+  Headless `zcode -p` stays as the fallback and runs GLM-5.3 at max.
 - **opencode-go free models** (kimi-k3, minimax-m3, qwen3.x) — zero-cost
   experimental fan-out and ralph-tui default via the ungated wrapper;
   burn freely.

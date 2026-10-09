@@ -232,7 +232,7 @@ class TestDiscoverySources(unittest.TestCase):
         self.assertIn("antigravity", names)
 
     def test_non_acp_headless_tuis_count_only_while_installed(self):
-        self.assertEqual(r.NON_ACP_HEADLESS, {"muse", "zcode"})
+        self.assertEqual(r.NON_ACP_HEADLESS, {"muse"})
         with sources(installed=()):
             self.assertNotIn("muse", self.names())
         with sources(installed=("muse",)):

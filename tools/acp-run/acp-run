@@ -124,6 +124,23 @@ from acp.schema import (
     TextContentBlock,
 )
 
+# zcode-acp-server sends its turn-state notification as "$/zcode/turnState". The
+# ACP Python library only knows "_" as the extension prefix and raises
+# method_not_found (a logged traceback per notification) for the JSON-RPC
+# reserved "$/" prefix, so fold "$/" into "_" and let ext_notification ignore it.
+import acp.router as _acp_router
+
+_acp_route = _acp_router.MessageRouter.__call__
+
+
+async def _route_dollar_as_extension(self, method, params, is_notification):
+    if isinstance(method, str) and method.startswith("$/"):
+        method = "_" + method[2:]
+    return await _acp_route(self, method, params, is_notification)
+
+
+_acp_router.MessageRouter.__call__ = _route_dollar_as_extension
+
 # name: (command, auth method id or None). DEFAULT_SET holds ACP session config
 # options always applied for an agent (before --set): its ACP mode can ignore
 # the TUI's own settings. Verified 2026-10-03 unless noted;
@@ -140,6 +157,12 @@ AGENTS = {
     "devin": (["devin", "acp"], None),
     "cline": (["cline", "--acp"], None),
     "hermes": (["hermes", "acp"], None),
+    # zcode has no ACP mode of its own; william0wang/zcode-acp (npm -g
+    # zcode-acp-server, 0.65.1) wraps `zcode app-server --stdio`. Verified
+    # 2026-10-08: initialize ok, preflight "Reply with exactly: OK" passed.
+    # It exposes no model option: run it WITHOUT --model (zcode's own settings
+    # pick GLM-5.3 vs Flash); `--set thought=low|high|max` is its effort lever.
+    "zcode": (["zcode-acp-server"], None),
     # Google LLC signed; registry antigravity-acp (dl.google.com)
     "agy": (
         [os.path.expanduser("~/.local/share/agy-acp-server/1.3.0/agy_acp_server.par")],
@@ -169,6 +192,7 @@ YOLO_SET = {
     "qwen": {"mode": "yolo"},
     "devin": {"mode": "bypass"},
     "agy": {"mode": "yolo"},
+    "zcode": {"mode": "yolo"},  # zcode-acp-server: edit | yolo | auto
 }
 # Launch-command variants for agents whose ACP session has no auto-approve mode
 # but whose CLI takes a flag (audited 2026-10-03: cline --auto-approve true is
@@ -544,6 +568,11 @@ class RunClient(Client):
         if isinstance(update, AgentMessageChunk) and isinstance(
             update.content, TextContentBlock
         ):
+            # zcode-acp-server appends a per-turn stats chunk ("\u2713 completed
+            # \u00b7 cache 6/7 messages ...") with messageId "turninfo_<uuid>";
+            # it is UI chrome, not the answer.
+            if str(dump(update).get("messageId") or "").startswith("turninfo_"):
+                return
             self.text.append(update.content.text)
             if self.live:
                 self.write(update.content.text)

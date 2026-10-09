@@ -237,7 +237,10 @@ and stop reason reliable. Full recipe: `bigteam` Step 4.
 
 ### Per-CLI headless forms (no ACP mode, or fallback)
 
-zcode and muse have no usable ACP route yet, so they keep these forms.
+muse has no usable ACP route yet, so it keeps its form. zcode gained one on
+2026-10-08 (`acp-run zcode`, via the third-party `zcode-acp-server`; no model
+option, so no `--model`; `--set thought=low|high|max`), and its row below is
+now the fallback.
 The rows for ACP-capable CLIs stay as a fallback for when an ACP route is
 broken. **agy:** prefer `acp-run agy`; the `agy -p` form below is the fallback and
 is subject to the burst budget in "agy has a burst limit" above.

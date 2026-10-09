@@ -27,7 +27,8 @@ built at call time from what this machine can actually dispatch, in this order:
 1. `acp-run --list` — the agent table every launcher uses; only `ok` rows
    (binary present) count.
 2. the non-ACP headless TUIs (`NON_ACP_HEADLESS`, from model-routing's
-   per-CLI headless table), each only if its binary is on PATH.
+   per-CLI headless table; since 2026-10-08 only muse, zcode now rides
+   `acp-run` through `zcode-acp-server`), each only if its binary is on PATH.
 3. Orca's enabled agent roster — **off by default** (`ROUTE_AGENT_INCLUDE_ORCA=1`
    turns it on), and even then intersected with installed binaries. Orca's
    roster is its stock TUI list: on 2026-10-08, 12 of its 28 enabled names
@@ -82,7 +83,7 @@ ACP_RUN = (os.environ.get("ACP_RUN")
 # TUIs with a verified headless form but no usable ACP route, so acp-run does
 # not list them: skills/model-routing/SKILL.md, "Per-CLI headless forms (no ACP
 # mode, or fallback)". Each counts only while its binary is on PATH.
-NON_ACP_HEADLESS = frozenset({"muse", "zcode"})
+NON_ACP_HEADLESS = frozenset({"muse"})  # zcode joined acp-run 2026-10-08 (zcode-acp-server)
 STALE_HARD = 6 * 3600      # beyond this, treat headroom as unknown
 
 # Kinds of work. Deliberately few — a taxonomy nobody can apply is worse than
