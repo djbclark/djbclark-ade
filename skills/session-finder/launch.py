@@ -16,7 +16,7 @@ Route (djbclark 2026-10-08: "use ACP if possible … other methods have proven t
      runs from Orca, else a herdr tab in the workspace that already holds that repo (a new workspace
      when none fits), else detached with no terminal. The pane is reported to herdr as an agent
      (`pane report-agent`, source session-finder) so helm and fleet list it like any other.
-  2. Agents with no ACP route (zcode, crush, muse) get `herdr agent start --kind` + `agent prompt`.
+  2. Agents with no ACP route (zcode, muse) get `herdr agent start --kind` + `agent prompt`.
   --pane: host in that herdr pane. If a finished Claude session still sits there idle, it is sent /exit
   first (what herdr-sleeper does); a pane with a draft in its input box is refused.
   --baton: the brief tells the session to follow the baton skill from the named Tier 1 chain

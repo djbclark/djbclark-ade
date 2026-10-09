@@ -276,7 +276,7 @@ until the work is committed or recorded in a repo.
    `--info`). Only if that fails, reconstruct from the diff with a fresh
    read-only slice.
 
-For agents with no working ACP route (zcode, crush, muse), and as a fallback for
+For agents with no working ACP route (zcode, muse), and as a fallback for
 agy when its ACP client fails (it fails independently of the CLI), use the
 per-CLI form from `model-routing`, with **stdin closed** and a `timeout` guard:
 

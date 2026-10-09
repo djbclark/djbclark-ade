@@ -156,7 +156,7 @@ Rules for any agent that dispatches to agy:
 - **Monthly subscription windows**: claude (5h/weekly/+Fable bucket),
   codex (ChatGPT Plus weekly), antigravity/agy (Google AI Pro — also
   exposes Claude/GPT windows), copilot (premium requests), cursor Pro,
-  grok (SuperGrok; reserve for GrokBot; **excluded from delegation since 2026-10-06**, see bigteam's *Current exclusions*), zai GLM lite (via the zcode TUI), clinepass (Cline windows, also the crush TUI; feeds
+  grok (SuperGrok; reserve for GrokBot; **excluded from delegation since 2026-10-06**, see bigteam's *Current exclusions*), zai GLM lite (via the zcode TUI), clinepass (Cline windows; feeds
   hermes via LiteLLM :4000; reserve, never run out), devin (disabled in Orca on
   purpose).
 - **Free**: opencode-go bundled models; sipb (MIT-hosted, `opencode`
@@ -225,7 +225,7 @@ and stop reason reliable. Full recipe: `bigteam` Step 4.
 
 ### Per-CLI headless forms (no ACP mode, or fallback)
 
-zcode, crush and muse have no usable ACP route yet, so they keep these forms.
+zcode and muse have no usable ACP route yet, so they keep these forms.
 The rows for ACP-capable CLIs stay as a fallback for when an ACP route is
 broken. **agy:** prefer `acp-run agy`; the `agy -p` form below is the fallback and
 is subject to the burst budget in "agy has a burst limit" above.
@@ -236,7 +236,7 @@ is subject to the burst budget in "agy has a burst limit" above.
 `~/Library/Application Support/orca/profiles/local-default/orca-data.json`
 → `settings.agentDefaultArgs`. That map is what actually works on this
 machine for every enabled TUI (codex `--dangerously-bypass-approvals-and-sandbox`,
-antigravity `--dangerously-skip-permissions`, copilot/cursor/crush `--yolo`,
+antigravity `--dangerously-skip-permissions`, copilot/cursor `--yolo`,
 grok `--permission-mode bypassPermissions`, …). Read it instead of guessing
 flags. Standing rule (frontier-ai-review-stack memory): prefer a TUI's
 official headless mode, or a maintained orchestrator (Orca

@@ -82,7 +82,7 @@ ACP_RUN = (os.environ.get("ACP_RUN")
 # TUIs with a verified headless form but no usable ACP route, so acp-run does
 # not list them: skills/model-routing/SKILL.md, "Per-CLI headless forms (no ACP
 # mode, or fallback)". Each counts only while its binary is on PATH.
-NON_ACP_HEADLESS = frozenset({"crush", "muse", "zcode"})
+NON_ACP_HEADLESS = frozenset({"muse", "zcode"})
 STALE_HARD = 6 * 3600      # beyond this, treat headroom as unknown
 
 # Kinds of work. Deliberately few — a taxonomy nobody can apply is worse than
@@ -177,8 +177,7 @@ SERVICES: tuple[Service, ...] = (
     Service("zai", "zcode", {"bulk": 3, "mechanical": 3, "code": 38},
             "subscription",
             # zcode (Z.ai's own TUI, GLM-5.3 / GLM-5.3-Flash x low/high/max,
-            # `zcode -p`) is the zai Coding Plan's TUI. crush is NOT zai: it is
-            # clinepass's (operator correction 2026-09-26).
+            # `zcode -p`) is the zai Coding Plan's TUI.
             "lite plan; reached via zcode"),
     Service("devin", "devin", {"bulk": 20, "code": 45}, "subscription",
             "disabled in Orca's roster — dormant by choice"),
@@ -318,7 +317,6 @@ DEFAULT_PROFILE = {"bulk": 60, "mechanical": 60}
 # curated service's constraints rather than becoming a second entry.
 ALIASES = {
     "cline": "clinepass",
-    "crush": "clinepass",
     "agy": "antigravity",
     "claude-agent-teams": "claude",
     "openclaude": "claude",

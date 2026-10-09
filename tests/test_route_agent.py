@@ -133,10 +133,10 @@ class TestDiscovery(unittest.TestCase):
     def test_aliases_do_not_become_second_services(self):
         """`cline` is clinepass's TUI; a duplicate entry would dodge never-bulk."""
         names = {s.name for s in r.discover(IDLE)}
-        for alias in ("cline", "crush", "claude-agent-teams"):
+        for alias in ("cline", "claude-agent-teams"):
             self.assertNotIn(alias, names)
         self.assertIn("zcode", {s.cli for s in r.discover(IDLE) if s.name == "zai"})
-        self.assertEqual(r.ALIASES["crush"], "clinepass")
+        self.assertEqual(r.ALIASES["cline"], "clinepass")
 
     def test_alias_does_not_create_a_second_clinepass(self):
         """`cline` is clinepass's TUI. It must fold onto the curated service
@@ -232,20 +232,19 @@ class TestDiscoverySources(unittest.TestCase):
         self.assertIn("antigravity", names)
 
     def test_non_acp_headless_tuis_count_only_while_installed(self):
-        self.assertEqual(r.NON_ACP_HEADLESS, {"crush", "muse", "zcode"})
+        self.assertEqual(r.NON_ACP_HEADLESS, {"muse", "zcode"})
         with sources(installed=()):
             self.assertNotIn("muse", self.names())
         with sources(installed=("muse",)):
             self.assertIn("muse", self.names())
 
     def test_headless_tuis_pass_through_aliases(self):
-        """crush is clinepass's TUI, zcode is zai's: they fold, not duplicate."""
-        with sources(installed=("crush", "zcode", "muse")):
+        """zcode is zai's TUI: it folds onto zai, not a duplicate; muse has none."""
+        with sources(installed=("zcode", "muse")):
             names = self.names()
-        self.assertNotIn("crush", names)
         self.assertNotIn("zcode", names)
-        self.assertIn("clinepass", names)
         self.assertIn("zai", names)
+        self.assertIn("muse", names)
 
     def test_phantom_orca_names_are_not_routable_by_default(self):
         phantoms = {"amp", "ante", "autohand", "droid", "kiro", "trae"}

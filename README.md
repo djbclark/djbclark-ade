@@ -9,7 +9,7 @@ their old paths are symlinks into this checkout).
 
 ## The pieces
 
-1. **Many TUIs.** Claude Code, Codex, Hermes, Cursor, opencode, crush, Cline,
+1. **Many TUIs.** Claude Code, Codex, Hermes, Cursor, opencode, Cline,
    Copilot, Qwen, muse, zcode, Antigravity (`agy`) and others, each on its own
    subscription or quota pool. [`skills/model-routing`](skills/model-routing/SKILL.md)
    and [`docs/model-routing.md`](docs/model-routing.md) say which one gets

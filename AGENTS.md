@@ -3,7 +3,7 @@
 You are an AI agent working on djbclark's machine. This repo is the
 operating guide for running AI agents as **graphs** here — read this file,
 then follow the pointers. Everything in it applies to any agent (Claude
-Code, Codex, OpenCode, Crush, Cline, Copilot, Grok, Cursor, …), not just
+Code, Codex, OpenCode, Cline, Copilot, Grok, Cursor, …), not just
 the one that wrote it.
 
 ## What this repo is
