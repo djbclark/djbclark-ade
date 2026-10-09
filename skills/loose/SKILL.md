@@ -107,6 +107,13 @@ Then act on the answer. For `/handoff`, invoke the `handoff` skill. You cannot r
 to type it. If the handoff was chosen, offer the same quit prompt again once it is
 written.
 
+`/compact` is the one built-in you may queue yourself. When the context prompt
+fires (or he picked compact) and you are a Claude session in a herdr pane, with
+nobody at the keyboard or his say-so in advance, write down what the next turn
+needs, run `~/src/djbclark-ade/bin/self-slash "/compact <focus>"` and end the turn
+at once. It refuses outside herdr or when his input box holds a draft; then ask
+him to type it. `/quit` stays his to type.
+
 ## Silent mode, before a handoff
 
 The `handoff` skill runs Rule 2 by itself first (its Step 0): sweep for your

@@ -107,6 +107,12 @@ strings **are** the Telegram button labels.
    options or drop it, and say so in a line. Don't ask a question an earlier
    answer has already settled.
 4. On `stop`, stop. Report what was decided and what is still open.
+5. **If he picks `/compact`** (or the context prompt fires mid-walk with nobody at
+   the keyboard, or he pre-approved it), a Claude session in a herdr pane queues
+   it itself: note the remaining queue, run
+   `~/src/djbclark-ade/bin/self-slash "/compact <focus: the open items>"`, and
+   end the turn at once. Outside herdr, or if it refuses (a draft in his input
+   box), ask him to type it.
 
 ## 4. Keep going until nothing is left
 
