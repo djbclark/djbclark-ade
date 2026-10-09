@@ -239,8 +239,10 @@ and stop reason reliable. Full recipe: `bigteam` Step 4.
 
 muse has no usable ACP route yet, so it keeps its form. zcode gained one on
 2026-10-08 (`acp-run zcode`, via the third-party `zcode-acp-server`; no model
-option, so no `--model`; `--set thought=low|high|max`), and its row below is
-now the fallback.
+option, so no `--model`: its server fails the session with `unsupported config
+option or switch failed: model` if one is passed, and since 2026-10-09
+`acp-dispatch zcode` takes no `--model` either; `--set thought=low|high|max`),
+and its row below is now the fallback.
 The rows for ACP-capable CLIs stay as a fallback for when an ACP route is
 broken. **agy:** prefer `acp-run agy`; the `agy -p` form below is the fallback and
 is subject to the burst budget in "agy has a burst limit" above.

@@ -2,6 +2,7 @@
 """acp-dispatch — one consistent way to hand a slice to an agent and get its report back.
 
     acp-dispatch <agent> --model M --name NAME (-p PROMPT | -f BRIEF) [-C DIR]
+                 (--model is not accepted by zcode, whose ACP server has no model option: omit it)
                  [--task TASK | --out DIR] [--perm all|deny|scoped:P1,P2] [--timeout S]
                  [--lead NAME] [--detach [--no-wait] [--wait-timeout S]] [--dry-run] [--json]
     acp-dispatch footer --report PATH [--lead NAME]      the shared footer, filled in, for an
@@ -34,7 +35,7 @@ acp-run is never truncated, so nothing is lost; the warning tells you the brief 
 Exit codes (dispatch and check):
     0    report delivered and ends in DONE (dispatch: and acp-run exited 0)
     1    report present but unfinished (no DONE), or delivered with a non-zero acp-run exit
-    2    usage (missing --model, bad name, report basename Claude Code would refuse, ...)
+    2    usage (missing --model for an agent that takes one, bad name, report basename Claude Code would refuse, ...)
     3    delivery failure: the agent finished (or died) and there is no report
     4    BLOCKED: the report's first line is a question for the lead; answer it, then resume
     124  timed out waiting for the .done marker (--detach without --no-wait)
@@ -60,6 +61,8 @@ STATE_ROOT = Path(os.environ.get("ACP_DISPATCH_STATE", str(Path.home() / ".local
 DEFAULT_LEAD = "team-lead"
 DEFAULT_TIMEOUT = 2400           # bigteam Step 4 item 5: a tight timeout costs the whole report
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# Agents whose ACP server has no model option (zcode-acp-server: "unsupported config option or switch failed: model").
+NO_MODEL_AGENTS = {"zcode"}
 # Claude Code 2.1.295 refuses a sub-agent's Write for this basename (tengu_subagent_md_report_blocked).
 CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.I)
 PERM_RE = re.compile(r"^(all|deny|scoped:.+)$")
@@ -255,8 +258,10 @@ launchctl remove {q(label)}
 
 
 def dispatch(a: argparse.Namespace) -> int:
-    if not a.model:
+    if not a.model and a.agent not in NO_MODEL_AGENTS:
         die("--model is required (an agent's own default is the expensive one; `acp-run <agent> --info` lists values)")
+    if a.model and a.agent in NO_MODEL_AGENTS:
+        die(f"{a.agent} has no model option: its ACP server rejects --model (2026-10-09); drop it")
     if not NAME_RE.match(a.name or ""):
         die("--name must be 1-64 chars of letters, digits, . _ - (it names every output file)")
     if a.perm and not PERM_RE.match(a.perm):
@@ -293,7 +298,8 @@ def dispatch(a: argparse.Namespace) -> int:
     if perm.startswith("scoped:"):
         perm = f"{perm},{out}"          # the agent must be allowed to write its report
     acp_cmd = [acp_run, a.agent, "-C", str(Path(a.dir).resolve()), "-f", str(brief),
-               "--model", a.model, "--perm", perm, "--timeout", str(a.timeout), "--log", str(log)]
+               *(["--model", a.model] if a.model else []),
+               "--perm", perm, "--timeout", str(a.timeout), "--log", str(log)]
     acp_cmd += a.acp_arg or []
 
     rec = {
@@ -404,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="acp-dispatch", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("agent", help="an acp-run agent (acp-run --list)")
-    ap.add_argument("--model", help="required; acp-run <agent> --info lists values")
+    ap.add_argument("--model", help="required except for zcode (no model option); acp-run <agent> --info lists values")
     ap.add_argument("--name", required=True, help="slice name; names every output file")
     ap.add_argument("-p", "--prompt")
     ap.add_argument("-f", "--prompt-file", help="the brief (a file); the footer is appended to a copy")

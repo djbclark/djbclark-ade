@@ -260,7 +260,8 @@ until the work is committed or recorded in a repo.
    cline do; claude, cursor and opencode mostly auto-allow by their own
    settings, so give those a stricter `--mode` where `--info` offers one, and
    still check the diff). Use `--perm deny` for review-only slices.
-2. **Always `--model`.** acp-dispatch refuses to run without it. The default is
+2. **Always `--model`** (except `zcode`, whose ACP server has no model option
+   and rejects one; acp-dispatch knows). Otherwise acp-dispatch refuses to run without it. The default is
    the agent's own, which for the claude adapter is the expensive settings model.
 3. **Per-slice files, all under `$OUT`:** `<name>.jsonl` is the acp-run event
    log (every tool call and permission decision, for when a slice goes wrong);
