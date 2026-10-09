@@ -109,7 +109,7 @@ written.
 
 `/compact` is the one built-in you may queue yourself. When the context prompt
 fires (or he picked compact) and you are a Claude session in a herdr pane or an
-Orca terminal, with nobody at the keyboard or his say-so in advance, write down
+Orca terminal (his standing say-so since 2026-10-09, `memory/feedback_self_compact.md`), write down
 what the next turn needs, run `~/src/djbclark-ade/bin/self-slash "/compact <focus>"`
 and end the turn at once. It refuses outside herdr and Orca, or when his input
 box holds a draft; then ask him to type it. `/quit` stays his to type.
