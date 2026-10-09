@@ -134,6 +134,17 @@ pane = sys.argv[1]
 for p in json.load(sys.stdin).get("result", {}).get("panes", []):
     if p.get("pane_id") == pane: print(p.get("agent_status", "")); break' "$pane" 2>/dev/null)
     [ "$st" = working ] || return 0
+    # herdr says "working" whenever Claude Code's title glyph is busy, which it
+    # also is while only a BACKGROUND sub-agent runs and the main turn is over
+    # (2026-10-09 19:25: a /compact waited 15 min beside an idle prompt because a
+    # writer sub-agent was running, then gave up).  The main turn's own marker is
+    # the spinner line above the input box ("✻ Cultivating… (1m 4s · ↓ 2.8k
+    # tokens)", or "esc to interrupt"); no such line means the turn has ended and
+    # the command will run, so treat that as idle.
+    if ! herdr agent read "$pane" --source visible --lines 60 2>/dev/null | grep -qE '…[[:space:]]*\([0-9]+[smh]|esc to interrupt'; then
+      [ "$said" = 2 ] || { echo "$(date '+%F %T') $host $pane: status working but no main-turn spinner on screen (background sub-agent only); treating as idle"; said=2; }
+      return 0
+    fi
     [ "$said" = 1 ] || { echo "$(date '+%F %T') $host $pane: session is working, waiting for idle before sending"; said=1; }
     [ "$waited" -lt "${SELF_SLASH_WAIT:-900}" ] || { echo "$(date '+%F %T') $host $pane: gave up after ${waited}s, session still working; NOT sent: ${text:0:80}"; exit 6; }
     sleep 5; waited=$((waited+5))
