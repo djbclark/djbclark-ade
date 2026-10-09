@@ -522,3 +522,13 @@ the zcode TUI, not Hermes.
   `orca terminal close/rename/create --command/send`. No Orca equivalent:
   moving a terminal between worktrees, reporting agent state into an Orca
   terminal. herdr-sleeper needs no port (Orca Agent hibernation).
+  **Done 2026-10-09 (easy wins):** `launch.py close` now closes the Orca
+  terminal a launch was hosted in (`orca terminal close --terminal`, skipped
+  for the caller's own terminal and for handles Orca no longer lists; test
+  `tests/test_launch_orca_close.py`); autorename needs no Orca step (Orca's
+  terminal title already follows the session's `custom-title` record; noted in
+  its SKILL.md); bigteam Step 0 and session-finder rung d now give the Orca
+  commands. **Still queued:** `/orc`, `/orc-meta`, herdr-orchestration's pane
+  path, `launch.py start_tui`, acp-run agent-state reporting into Orca,
+  helm/fleet `unknown` status for non-Claude Orca TUIs, `where.py` stale
+  handle, `terminal create --command/send` as a herdr-pane substitute.

@@ -38,7 +38,10 @@ before slicing:
 
 1. **Look.** `herdr tab list` (a `coord` tab, or any tab whose agent is
    `working` on a fan-out) and `ls -lt ~/.local/state/bigteam/` (task dirs
-   touched in the last hour). Read each live dir's `CLAIM`.
+   touched in the last hour). Read each live dir's `CLAIM`. In Orca (no
+   `HERDR_ENV`), `orca terminal list --json` gives every live terminal's
+   `title` (a `coord` one, or a title naming a fan-out) and `preview`;
+   `orca terminal read --terminal <handle>` shows what it is doing.
 2. **Claim.** Use a task name no live run uses, and write
    `~/.local/state/bigteam/<task>/CLAIM` before dispatching: session (herdr
    pane or Claude session id), repo, owned files, start time. Append `DONE`
@@ -51,7 +54,7 @@ before slicing:
    (the other run drains the same windows), leave headroom, and don't put both
    runs on a burst-limited pool at once (agy's ~60 requests/hour is machine-wide).
 5. **Hands off its panes.** Never reuse, close or message the other run's
-   tabs, panes or agents. To coordinate, tell its session (`session-finder`).
+   tabs, panes, Orca terminals or agents. To coordinate, tell its session (`session-finder`).
 
 ## Step 1 — probe, never assume
 

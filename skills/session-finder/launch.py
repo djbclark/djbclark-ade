@@ -8,7 +8,7 @@
                                       brief and the last reply as context
     launch.py audit <id>              send /loose (or the loose-skill text) as the session's next turn
     launch.py list [--json]           every launch and its state
-    launch.py close <id> [--keep-pane] /exit a live session, mark it closed, close its herdr tab or pane
+    launch.py close <id> [--keep-pane] /exit a live session, mark it closed, close its herdr tab or pane, or its Orca terminal
 
 Route (djbclark 2026-10-08: "use ACP if possible … other methods have proven to be fragile"):
   1. The agent is driven over ACP by acp-run (typed permissions, exit codes, JSONL log). The call runs
@@ -546,8 +546,28 @@ def cmd_audit(a):
     return cmd_reply(ns)
 
 
+def close_orca_terminal(handle):
+    """Close an Orca terminal a launch was hosted in. Returns a message for the operator.
+
+    Never closes the caller's own terminal (ORCA_TERMINAL_HANDLE, or the live handle its stable
+    ORCA_PANE_KEY resolves to), and skips a handle Orca no longer lists (restarted runtime, closed by hand)."""
+    _, live = fleet._orca_terminals()
+    own = {os.environ.get("ORCA_TERMINAL_HANDLE")}
+    chan = fleet._orca_chan(dict(os.environ))
+    if chan:
+        own.add(chan[1])
+    if handle in own:
+        return f"left Orca terminal {handle} open: it is this session's own terminal"
+    if handle not in live:
+        return f"Orca terminal {handle} is already gone"
+    rc, out = fleet.run("orca", "terminal", "close", "--terminal", handle, "--json", timeout=20)
+    if rc != 0:
+        return f"orca terminal close {handle} failed: {out[:200]}"
+    return f"closed its Orca terminal {handle}"
+
+
 def cmd_close(a):
-    """Mark closed and, by default, close the herdr tab that hosted it so tabs do not pile up.
+    """Mark closed and, by default, close the herdr tab or Orca terminal that hosted it so tabs do not pile up.
     A live interactive session is asked to /exit first; a working one is refused unless --force."""
     d = next((x for x in fleet.launches() if x["id"] == a.id), None)
     if not d:
@@ -576,6 +596,9 @@ def cmd_close(a):
                 fleet.run(HERDR, "pane", "close", host["pane"])
             print(f"closed {a.id} and its herdr {'tab ' + tab if tab and len(panes) == 1 else 'pane ' + host['pane']}")
             return 0
+    if host.get("kind") == "orca" and host.get("terminal") and not a.keep_pane:
+        print(f"closed {a.id}; {close_orca_terminal(host['terminal'])}")
+        return 0
     print(f"closed {a.id}")
     return 0
 
@@ -622,7 +645,7 @@ def main():
     p.set_defaults(fn=cmd_audit)
     p = sub.add_parser("close")
     p.add_argument("id")
-    p.add_argument("--keep-pane", action="store_true", help="mark closed but leave the herdr tab/pane")
+    p.add_argument("--keep-pane", action="store_true", help="mark closed but leave the herdr tab/pane or Orca terminal")
     p.add_argument("--force", action="store_true")
     p.set_defaults(fn=cmd_close)
     argv = sys.argv[1:]

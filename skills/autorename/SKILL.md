@@ -56,6 +56,11 @@ anthropics/claude-code#91468). Say so in the report when it renamed.
 
 ## 3. herdr placement (only when `HERDR_ENV=1`)
 
+Orca needs no step here (checked 2026-10-09, read-only): its terminal title is the one Claude sets
+itself, and in a titled session `orca terminal list --json` showed exactly `autorename.py --show`
+(behind Claude's status glyph). An `orca terminal rename` would pin the title and hide that glyph.
+Re-check if the live label ever lags the rename in Orca.
+
 Run this after step 2 whatever it printed (renamed, unchanged or skipped). /handoff\nStep 8 skips it: a session being handed off is about to end.
 
 ```bash

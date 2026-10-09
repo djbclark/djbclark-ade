@@ -123,7 +123,9 @@ d. **Ended, no handoff, and the task needs that exact context** (a debugging sta
    over 8 MB never — write a brief from `session-history.py`/`fleet.py show` and use
    rung e. Resume form: `cd <cwd> && claude --resume <sid> [--model sonnet]` (other
    agents: the `resume:` line session-history prints). Host it visibly with
-   `herdr agent start <name> --kind claude --pane <free pane> -- --resume <sid>`.
+   `herdr agent start <name> --kind claude --pane <free pane> -- --resume <sid>`;
+   in Orca, `orca terminal create --worktree path:<cwd> --title <name> --command
+   "claude --resume <sid>"` (a fresh terminal; there is no "free pane" to reuse).
    Never resume a session id that is live anywhere (`fleet.py conflicts --sid <sid>`
    says `SESSION ALREADY LIVE`): two instances share one transcript.
 e. **Otherwise a clean session**: `launch.py --agent <A> --cwd <dir> --model <M>
@@ -204,8 +206,8 @@ get `herdr agent start --kind` plus `agent prompt` — the fragile way; say so.
    both work.
 2. **Finished sessions are audited, then closed** (operator, 2026-10-08):
    `launch.py audit <id>` sends `/loose` as the next turn; `launch.py close <id>`
-   sends `/exit`, marks the launch closed and closes its herdr tab (or pane) so
-   tabs do not accumulate. `helm.py wait --auto-audit` does both without asking:
+   sends `/exit`, marks the launch closed and closes its herdr tab (or pane), or its Orca
+   terminal (`orca terminal close`, never the caller's own), so tabs do not accumulate. `helm.py wait --auto-audit` does both without asking:
    audit when a launch goes `done`, close once the audited result has been shown.
 3. Always `--model`. Default `--timeout` is four hours per turn (an hour cut a
    real deploy short); `--perm scoped:<paths>` for review-style gating, `--perm
