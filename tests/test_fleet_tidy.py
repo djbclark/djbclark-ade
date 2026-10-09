@@ -229,6 +229,7 @@ class TestTidyScreens(unittest.TestCase):
         self.assertEqual(tidy.claude_composer(["x", "❯ ", "  ⏵⏵ bypass"]), ("empty", ""))
         self.assertEqual(tidy.claude_composer(["x", "❯ close the two panes", "  ⏵⏵"]), ("draft", "close the two panes"))
         self.assertEqual(tidy.claude_composer(["✻ Churned for 1d", "※ recap: …"]), ("unknown", ""))
+        self.assertEqual(tidy.claude_composer(['❯ Try "fix typecheck errors"', "  ⏵⏵"]), ("empty", ""))
 
     def test_shell_prompt(self):
         self.assertTrue(tidy.SHELL_PROMPT.search("djbclark@mac:~/src/crush$"))
@@ -323,6 +324,8 @@ class TestTidyClassify(Patched):
         self.assertEqual(it["resume"], "cd /w && claude --dangerously-skip-permissions --resume s-1")
         self.tx.update(finished="", asks=True, last_text="Want me to look at the diff?")
         self.assertEqual(self.classify(p, self.claude("w5:p1"))["cls"], "claude-question")
+        self.tx.update(asks=False, last_text="", last_prompt="")
+        self.assertIn("fresh session", self.classify(p, self.claude("w5:p1"))["reason"])
 
     def test_other_tuis(self):
         p = self.pane("w6:p1", agent="cursor")

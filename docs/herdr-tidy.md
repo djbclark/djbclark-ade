@@ -61,13 +61,26 @@ started or ended; the handoff state root stays the handoff skills'.
    line; today the fact is only discovered at wake time ("pane no longer exists;
    entry kept").
 
-## The first pass (2026-10-08, from the helm session)
+## The first pass (2026-10-08 21:19, from the helm session)
 
-Recorded in the report returned to the helm session and in the ledger
-(`tidy.py ledger`). Summary at the time of writing: 12 sleeping stubs and 4 bare
-shells closable; one idle Claude pane could not be handed off because its
-composer line was not on screen; two Claude panes held unsent drafts (one a
-staged `/quit`); one cursor-agent pane was waiting on a question (helm's); one
-zcode pane was `busy-background` (`bg just ci`), later focused; one shell had
-typed-but-unsent text. The helm pane and the one live claim were never
-candidates.
+`tidy.py scan` classified 24 panes; 16 closed, 6 left with a reason, 2 never.
+Ledger ids `closed:20261008-2119*` (`tidy.py ledger`); `helm.py scan --ended`
+listed all 16 as `closed` items with their resume lines right after, plus 3
+`sleeping` items from the legacy journal (`~/.local/state/herdr-sleeper/`).
+
+| Pane | Tab | Agent | Class | Outcome |
+|---|---|---|---|---|
+| w22:p2, w22:p3, w22:p7, w23:p3, w23:p9, w23:pA, w24:p1, w24:p3, w24:p4, w2A:p8, w2A:p9, w2A:pA | grok-bridge, saner-opencli, gateway-restart, crash-recovery, lockup, memory-reboot, lichess-handoff, phone-breaking, physiboard-3, zcode-setup, hindsight-alt, agent-teams-setup | claude (asleep) | sleeping | closed; journal entry + `cd … && claude --dangerously-skip-permissions --resume <uuid>` in the ledger; `herdr-sleeper list` still shows all 12 `asleep` (request 1 above) |
+| w23:p8, w27:pT, w2A:p5, w2A:p7 | extrabar-shell, home-shell, aiuse-watch, crush-shell | shell | shell | closed; last 60 screen rows in the ledger |
+| w22:p6 | cline2-watchdogd | claude | claude-idle | left: an unsent draft appeared in its composer mid-pass (earlier the composer line was not on screen at all) |
+| w23:p7 | collie-doctor | claude | claude-idle | left: unsent draft `close the two finished panes now` |
+| w25:p1 | cfengine-tracker | claude | claude-idle | left: staged `/quit` (orc's quit-no-Enter convention; /loose was clean) |
+| w27:p44 | jobtest | claude | claude | left: a fresh session (composer placeholder `Try "…"` read as a draft at the time; now recognised as empty, and a session with no prompt yet is "nothing to hand off") |
+| w2A:p4 | qwen-cloud | cursor-agent | cursor | left: a question on screen (helm's item) |
+| w2A:p6 | sleeper-review | shell | shell | left: `claude` typed at the prompt, unsent |
+| w27:p43 | 2 | zcode | busy-background, then focused | never (ran `bg just ci`; the operator moved into it) |
+| w2E:p1 | helm-relay | claude | self | never |
+
+Not touched: the sleeper-restore-flags claim's SDK session in `~/src/herdr-sleeper`
+(not in a pane of its own; its pane alias is the helm pane), the three Hermes
+chats (not panes), and `~/src/herdr-sleeper` itself.

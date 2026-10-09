@@ -40,6 +40,7 @@ POPUP_PROCS = re.compile(r"(collie|drovr|herdr-jump|herdr-navigator)", re.IGNORE
 SHELLS = {"bash", "zsh", "fish", "sh", "-bash", "-zsh", "-fish", "-sh"}
 SHELL_PROMPT = re.compile(r"[$%#>]\s*$")                  # bash/zsh/fish prompt with nothing typed after it
 STUB_PROMPT = "press Enter to resume"                     # herdr-sleeper's in-pane stub
+PLACEHOLDER = re.compile(r'^Try "[^"]*"$')                # Claude Code's dim hint in an empty composer, not a draft
 TUI_WAITING = re.compile(r"(\[y/N\]|\[Y/n\]|Enter to (select|submit|confirm)|Question \d+ of \d+|\(y/n\)|to select)", re.IGNORECASE)
 VERIFIED_RESUME = set(fleet.RESUME_FORMS)                 # kinds whose resume form was read from `<tui> --help`
 
@@ -62,6 +63,8 @@ def claude_composer(rows):
     for ln in reversed(rows):
         if ln.lstrip().startswith("❯"):
             text = ln.lstrip()[1:].strip()
+            if PLACEHOLDER.match(text):
+                return "empty", ""
             return ("draft" if text else "empty"), text
     return "unknown", ""
 
@@ -174,6 +177,8 @@ def classify(p, sess, journal, claims, table):
                 return leave(kind, "no transcript on disk for this session")
             it["mb"] = round(tx["size"] / 1e6, 1)
             it["resume"] = fleet.resume_command("claude", sid, s.get("cwd") or "", s.get("argv"))
+            if not tx["last_prompt"].strip():
+                return leave(kind, "fresh session, no prompt yet: nothing to hand off (close it by hand if unwanted)")
             if tx["finished"]:
                 it.update(cls="claude-finished", handoff=chain_for(s.get("cwd") or ""))
                 it.update(verdict="close", reason=f"finished with {tx['finished']}; chain log {short(it['handoff'] or '') or 'not found'}")
