@@ -92,7 +92,7 @@ altitudes compose (a macro node can run a micro graph as its body).
   and herdr placement; its nudge hook in `~/.claude/settings.json` reaches it
   through the old `~/ops/site-djbclark/skills/autorename` path, now a symlink)
   (README.md has a one-line table; `/helm-all`, `/session-finder-all`,
-  `/resume` and `/herdr-tidy` are thin command wrappers in
+  `/resume`, `/herdr-tidy` and `/orca-tidy` are thin command wrappers in
   [claude/commands/](claude/commands/)).
   Every TUI reaches them as `~/ops/site-private/skills/<name>` →
   `~/ops/site-djbclark/skills/<name>` (an absolute symlink into this
