@@ -33,8 +33,8 @@ with its pane.
 
 What still relies on judgement (the script fails closed and prints the reason):
 a Claude pane whose composer line is not on screen (cannot prove the input box
-is empty), a draft in any input box (including a staged `/quit`, which orc
-leaves for the operator), a TUI with status `unknown`, anything herdr cannot
+is empty), a draft in any input box (including a staged `/quit`, which an
+orchestrator leaves for the operator), a TUI with status `unknown`, anything herdr cannot
 read.
 
 ## The ledger

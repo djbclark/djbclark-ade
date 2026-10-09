@@ -187,6 +187,8 @@ Keep for **yourself** (the orchestrator), never delegate:
   verify anyway
 - the final integration, every diff review, all tests, and all commits
 - any decision that removes a feature the operator deliberately built
+- in a Hermes-owned repo, integration, release and live activation: Hermes
+  stays the authority there; report worktree, commit and test evidence to it
 
 ## Step 3 — the concurrency contract
 
@@ -201,6 +203,9 @@ has already been violated by a real agent on this machine:
 - Leave changes **uncommitted**. The orchestrator commits, staged **by path** —
   `git add -A` in a shared checkout stages other sessions' in-flight work.
 - No package installs, no new directories, no scratch files inside the repo.
+- **Launch no agents.** No herdr panes, `acp-run`/`acp-dispatch` or Agent
+  calls of its own: only the orchestrator decides and dispatches what comes
+  next. ("Hand off the way this was handed to you" was once read as that.)
 - **Verify before acting.** Findings handed to an agent were written by another
   AI. Tell it so, and tell it that reporting a finding as wrong is a better
   outcome than a confident wrong edit.
@@ -467,6 +472,20 @@ returned; do not guess a reset time.
 - Read every diff yourself before committing. Agents are good and still get
   ordering, alphabetisation and scope wrong.
 - Run the tests centrally, once, after the batch settles.
+- **A green local check can be hollow.** A checkout missing `node_modules`, a
+  venv or Ansible collections makes check scripts skip lint and tests
+  silently, so "passes locally" was true of nothing. Rerun with the full
+  toolchain, or grep the output for `skip`/`not installed`.
+- Read new code meant to run unattended (notifications, checks) line by line:
+  its own tests were written by the same pass that missed its bugs.
+- **Done means the real artifact.** A plan, an analysis or a turn-cap exit
+  is not completion; a committed change plus rerun checks is. Re-read the
+  request for words like "workstation", "install", "running", "deployed":
+  a repo or CI pin and the running install are separate things (2026-08-05:
+  a Collie bump merged the CI pin and left `~/.collie` on the old version).
+  Work with a PR is done when it is merged, or when why it stays open is
+  written down; before starting a new phase, `gh pr list --state open` on
+  every repo the work touched.
 - When an agent refutes part of its own brief, that is the system working —
   prefer its evidence over your assumption, and say so.
 - A slice that fails on tooling (not on the work) gets **reassigned to a

@@ -86,7 +86,7 @@ altitudes compose (a macro node can run a micro graph as its body).
 - [skills/](skills/) — **the canonical git copies** (since 2026-10-08)
   of the orchestration and session-hygiene skills: `bigteam`,
   `model-routing`, `effort-routing`, `helm`, `session-finder`,
-  `herdr-orchestration`, `ralph-tui-orchestration`, `cow-workspaces`,
+  `ralph-tui-orchestration`, `cow-workspaces`,
   `handoff`, `baton`, `session-handoff`, `steps`, `loose`, and since
   2026-10-08 `herdr-tidy` (safe pane close) and `autorename` (session title
   and herdr placement; its nudge hook in `~/.claude/settings.json` reaches it
@@ -103,8 +103,7 @@ altitudes compose (a macro node can run a micro graph as its body).
   launcher uses (`~/.local/bin/acp-run` resolves here).
   [bin/fleet-watch](bin/fleet-watch) — launchd fleet change notices to
   Hermes (its plist runs `~/ops/site-private/bin/fleet-watch`, which
-  resolves here). [claude/commands/](claude/commands/) — `/orc` and
-  `/orc-meta`, reached through `~/ops/site-private/claude/commands/`.
+  resolves here).
 - [vendor/README.md](vendor/README.md) — sidecar index of everything this
   repo references that lives elsewhere on the system: vendored copies
   (prepaid gate scripts, a dated Orca orchestration guide snapshot) and

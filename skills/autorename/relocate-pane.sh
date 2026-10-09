@@ -7,7 +7,7 @@
 # Pane label becomes "<topic>-p", agent name "<topic>"; the sleeper records
 # the new label and the terminal_id so the record follows later moves.
 # Live (non-sleeping) panes: skip the wake/sleep steps by hand; this script
-# is for panes in the sleeper journal. See references/workspace-layout.md.
+# is for panes in the sleeper journal. See workspace-layout.md beside it.
 set -u
 S=${HERDR_SLEEPER:-$HOME/src/djbclark-ade/plugins/herdr-sleeper/herdr-sleeper}
 pane=$1 ws=$2 tab=$3 base=$4

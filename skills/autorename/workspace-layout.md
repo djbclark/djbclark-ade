@@ -3,9 +3,9 @@
 Operator request, 2026-10-08: "a one-time from-first-principles re-arrangement
 and re-name of all herdr workspaces, tabs, and panes". This file is the
 procedure so it can be repeated (a full pass, or one workspace) without
-rediscovering the gotchas. Read [pane-layout.md](pane-layout.md) first: it
-owns the "never close" rule and the geometry inside a tab; this file owns
-which workspace and tab a pane lives in and what everything is called.
+rediscovering the gotchas. It owns which workspace and tab a pane lives in,
+what everything is called, and (last section) the geometry inside a tab.
+Moved here from the retired `herdr-orchestration` skill on 2026-10-09.
 
 ## Principles
 
@@ -34,12 +34,13 @@ which workspace and tab a pane lives in and what everything is called.
 5. **Sleeping panes keep the `💤 ` prefix** on the pane label (the
    herdr-sleeper plugin's identity mark for legacy records). The tab label
    has no prefix.
-6. **Nothing is closed, ever** (pane-layout.md). Empty tabs are moved out of,
-   not deleted; `pane move --new-tab` closes the *source* tab for you, which
+6. **This procedure closes nothing.** Closing idle panes is `herdr-tidy`'s
+   job (it checks preconditions and writes a resume ledger). Empty tabs are
+   moved out of, not deleted; `pane move --new-tab` closes the *source* tab for you, which
    is the only closure this procedure performs.
 7. **Do not move your own pane.** Moving the pane you run in gives it a new
-   pane id mid-session and is the documented risk in pane-layout.md; leave
-   it where it is and say so in the report.
+   pane id mid-session and can cut your own control channel; leave it where
+   it is and say so in the report.
 8. **Workspace order cannot be changed** (no reorder command; order is
    creation order). Rename in place rather than recreating to reorder.
 
@@ -127,7 +128,7 @@ sleep 2
 $S sleep-pane "$new"                             # records the new label + terminal_id
 ```
 
-[relocate-pane.sh](../relocate-pane.sh) does exactly this cycle for one pane
+[relocate-pane.sh](relocate-pane.sh) does exactly this cycle for one pane
 (`relocate-pane.sh <pane> <workspace|-> <tab-label> <topic>`; `-` relabels
 in place). Run the batch in the background and log to a file; each cycle
 takes 20–40 s because wake resumes the Claude session. After the batch,
@@ -158,3 +159,14 @@ typed text that must not receive keys, agents that were `blocked`).
    focus.
 5. `herdr_place.py check --auto` returns `ask: false` once the workspace is
    not generic, so the autorename hook does not fight the new names.
+
+## Geometry inside a tab (from the retired pane-layout notes, 2026-07-28)
+
+1. `herdr pane resize --direction` is inconsistent across a nested split: if
+   a call returns `"changed": false` or grows the wrong pane, try the same
+   direction on the *other* pane sharing that boundary, and check the rect.
+2. `herdr pane swap --source-pane <id> --target-pane <id>` repositions panes
+   without closing or recreating them.
+3. A pane shrunk to a few rows returns only 1-2 lines from `agent read`, even
+   at `--lines 150`. If `herdr pane get <id>` shows single-digit
+   `viewport_rows`, `herdr pane zoom <id> --on`, read, then `--off`.

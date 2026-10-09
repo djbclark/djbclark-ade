@@ -42,10 +42,9 @@ Currently configured:
   reporting the gate message instead of a real request). **Never set that
   flag on the operator's behalf** — ask first, every time, no matter how
   routine the task seems; prior approval for one task does not carry over
-  to the next. This mirrors the existing "never select a usage-credits-
-  backed model without asking" rule in the `herdr-orchestration` skill —
-  same principle, applied to Ralph TUI's own agent selection instead of
-  Herdr's.
+  to the next. This mirrors the "never pick a usage-credits-backed model without
+  asking" rule in `model-routing` (*Routing method*), applied to Ralph
+  TUI's own agent selection.
 
 ## The one rule everything else follows from
 
@@ -229,14 +228,7 @@ here.
 ## Orchestrating a controller through Herdr
 
 If you're driving a controller from a separate orchestrator session via
-Herdr (see the `herdr-orchestration` skill for the general mechanics),
-expect `herdr agent prompt` to intermittently leave text sitting
-unsubmitted in the composer (`agent_prompt_stalled`, or the text visibly
-sitting after a `[Pasted text #N]` placeholder) — this is a confirmed
-upstream Herdr bug
-([herdrdev/herdr#1878](https://github.com/herdrdev/herdr/issues/1878),
-fixed on the preview channel, not yet in a stable release as of
-2026-08-02). Workaround: `herdr agent send-keys <name> enter` immediately
-after a stall, then re-check status. Don't mistake old unsubmitted
-composer text for something mysterious — check `herdr agent read` before
-assuming anything more concerning is going on.
+Herdr (the `herdr` skill for the CLI), expect `herdr agent prompt` to
+intermittently leave text unsubmitted in the composer. The check and the
+`send-keys enter` workaround, with the other pane gotchas, are in
+`model-routing`'s *Herdr-hosted TUIs* list.

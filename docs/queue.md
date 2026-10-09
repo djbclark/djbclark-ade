@@ -510,9 +510,10 @@ the zcode TUI, not Hermes.
   to no" and nothing is removed; one name per call works. Fix the flag
   handling in `bin/cow-pasture`.
 - **Herdr-only ADE capabilities, Orca parity gaps** (surveyed 2026-10-09,
-  after `bin/self-slash` gained its Orca backend). Refuse in Orca: `/orc`,
-  `/orc-meta` + `orc_watchdog.py`, herdr-orchestration's pane path and
-  `relocate-pane.sh`, `launch.py start_tui` (zcode/muse). Silent skips:
+  after `bin/self-slash` gained its Orca backend). Refuse in Orca:
+  autorename's `relocate-pane.sh`, `launch.py start_tui` (zcode/muse).
+  (`/orc`, `/orc-meta` + `orc_watchdog.py` and herdr-orchestration were
+  retired 2026-10-09 instead.) Silent skips:
   autorename placement (`herdr_place.py`), the herdr SessionStart hook
   (Orca's own hook covers it). Degraded: `launch.py close` leaves Orca
   terminals open; acp-run reports agent state only to herdr; helm/fleet mark
@@ -528,7 +529,6 @@ the zcode TUI, not Hermes.
   `tests/test_launch_orca_close.py`); autorename needs no Orca step (Orca's
   terminal title already follows the session's `custom-title` record; noted in
   its SKILL.md); bigteam Step 0 and session-finder rung d now give the Orca
-  commands. **Still queued:** `/orc`, `/orc-meta`, herdr-orchestration's pane
-  path, `launch.py start_tui`, acp-run agent-state reporting into Orca,
+  commands. **Still queued:** `launch.py start_tui`, acp-run agent-state reporting into Orca,
   helm/fleet `unknown` status for non-Claude Orca TUIs, `where.py` stale
   handle, `terminal create --command/send` as a herdr-pane substitute.

@@ -63,6 +63,11 @@ acting, and prints the ledger id it wrote.
    not on screen, a TUI herdr cannot tell idle from working (status `unknown`). Fail closed and
    put it on the decision list with the reason the script printed.
 
+Backstop for hand-run closes: `~/.herdr-wrapper/bin/herdr` (first in `which -a herdr`, ahead of
+the real `~/.local/bin/herdr`) refuses `pane`/`tab`/`workspace close` on this process's own
+`HERDR_PANE_ID`/`HERDR_TAB_ID`/`HERDR_WORKSPACE_ID` (2026-08-01: a cleanup loop closed its own
+tab); `HERDR_WRAPPER_FORCE=1` bypasses it. Check it is first on PATH before any bulk close.
+
 ## 2. Per class: what is checked, the precondition, how it is closed
 
 Every close appends one line to the **ledger**, `~/.local/state/session-finder/closed.jsonl`
@@ -86,7 +91,7 @@ transcript tail (`fleet.parse`: finished with `/handoff`/`/quit`, last reply a q
 process tree (section 1.4), and the visible screen for the composer line `❯`.
 
 1. Composer shows a draft (`❯ text`) → **leave**: "unsent draft". Includes a staged `/quit` that
-   orc leaves for the operator's review (memory rule "quit-no-Enter"): his to submit.
+   an orchestrator leaves for the operator's review (memory rule "quit-no-Enter"): his to submit.
 2. Composer not visible → **leave**: focus the tab so it redraws, rerun.
 3. Finished (`/handoff` or `/quit` was the last real prompt) → **close**. Ledger: resume
    `cd <cwd> && claude [replayed flags] --resume <sid>` plus the newest chain log whose

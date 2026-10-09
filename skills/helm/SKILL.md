@@ -239,7 +239,7 @@ after `STATE.md` is written. The queue's own items stay parked for the operator.
 
 ## What this is not
 
-1. Not an orchestrator in relay mode: it starts no work (`orc`, `bigteam`
+1. Not an orchestrator in relay mode: it starts no work (`bigteam`, `launch.py`
    do). Auto mode (section 8) is the one exception, and only on the
    operator's explicit go.
 2. Not an auto-responder. agent-deck's conductor answers routine questions

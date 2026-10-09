@@ -243,5 +243,5 @@ handled once, in this order, and not repaired:
 2. Not `bigteam`: that fans one prompt out across vendors for the operator's
    own task; auto mode works a backlog across repos with Claude workers it
    briefs itself. It borrows bigteam's quota reading and claims.
-3. Not `orc`: no herdr panes are started or closed; workers are Agent-tool
+3. Not a pane orchestrator: no herdr panes are started or closed; workers are Agent-tool
    sub-agents (or `acp-dispatch` slices) that end with a report.

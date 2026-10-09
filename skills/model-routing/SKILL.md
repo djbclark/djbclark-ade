@@ -76,6 +76,13 @@ any raw number from another source.
    only by which is strongest. On 2026-10-03 the agy Claude/GPT pool was
    depleted while its Gemini pool had plenty left, and a bigteam slice was
    wrongly moved to another vendor.
+   **Fable is an extra gate, not a separate allowance:** a Fable run bills the
+   Claude 5-hour window too, and that window binds first (2026-08-15: a
+   211k-token `fable-deep` run moved the 5h 56% → 87% used, Fable 5% → 10%).
+   Check the 5h and `Fable:` lines of `cswap list` together; an account with no
+   `Fable:` line cannot run Fable at all and a launch silently gets another
+   model. Check what a sub-agent actually ran from harness records, never by
+   asking it.
 4. **State moves within a session.** agy's Claude/GPT 5-hour window read 0% used
    at probe time and was exhausted ~35 minutes later (weekly 0% to ~51%), around
    the time one Opus-high review ran on it; other sessions use agy too, so the
@@ -307,7 +314,23 @@ Herdr-hosted TUIs (driving agents in Herdr panes; verified 2026-09-26):
   envelope, `{"error":…}` **with exit 0** on failure — parse the envelope.
 - `herdr agent prompt <target> "/exit"` cleanly ends a Claude session and
   returns the pane to its shell; `bin/herdr-sleeper` in djbclark-ade
-  builds on this (see docs/agent-sleep.md).
+  builds on this (see docs/agent-sleep.md). Never `/exit` a pane whose
+  composer holds unsent text: the draft dies with the process.
+- A prompt can land unsubmitted (`agent_prompt_stalled`, or the text sits on
+  the prompt line, maybe as `[Pasted text #1]`; herdr #1878/#2063, a
+  text-vs-Enter race). Check `herdr agent read <t> --source visible`, then
+  `herdr agent send-keys <t> enter`. It can recur on every prompt.
+- Keys sent before a prompt is on screen land in the input box as type-ahead
+  (2026-10-06). Read the screen first, send when the prompt is there.
+- A finished turn nobody has looked at is `done`, not `idle`: wait with
+  `--until idle --until done` (or no `--until`).
+- A `timeout` from `agent prompt --wait` on a long task is normal. Stalled
+  means `state_change_seq` from `herdr agent get` stays flat across checks
+  minutes apart while still `working`: read the screen, then nudge, restart
+  or reassign.
+- Backticks inside a double-quoted `herdr agent prompt "…"` run in your own
+  shell first (command substitution) and the agent gets their output.
+  Single-quote the prompt or escape each backtick.
 
 ## Routing method
 
@@ -321,13 +344,19 @@ Herdr-hosted TUIs (driving agents in Herdr panes; verified 2026-09-26):
    itself (orchestration runs from it), Copilot's shared allowance, and the
    grok-vendor exclusion — the one copy is `bigteam`'s *Reserve pools* and
    *Current exclusions*. Never prepaid without an explicit fresh operator
-   decision.
+   decision. Usage credits and overage toggles (Claude usage credits, Codex
+   credits, OpenCode Go "Use balance") are real money too: never pick a
+   credits-backed model without asking, and never re-enable a disabled
+   toggle to reach a better model.
 4. Levers: `acp-run <agent> --model <m> [--mode <m>]` for one-shot calls
    to ACP-capable agents (`--info` lists the values); Claude workflows
    `agent(..., {model, effort})`; Orca
    `worker-start --agent <any enabled TUI> --model --effort`; codex
    `model_reasoning_effort`; the per-CLI flags in the headless table for
    non-ACP CLIs.
+5. Model names get renamed and retired: a name from an old plan or roster is
+   a hint. Check the live list (`acp-run <agent> --info`, the TUI's picker)
+   before committing to it.
 
 Standing orders that pair with this: continuous operation over handoff
 rituals; flag best-practice deviations to the operator (site-private

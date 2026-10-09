@@ -131,7 +131,9 @@ d. **Ended, no handoff, and the task needs that exact context** (a debugging sta
 e. **Otherwise a clean session**: `launch.py --agent <A> --cwd <dir> --model <M>
    -p "<self-contained brief>"`. Write the brief the way the `todo` skill's
    *Prompt* rules say (absolute paths, goal, evidence, rules that bite, done
-   condition). Three or more independent slices → `bigteam` instead.
+   condition). For harness-internal state (task ids, memory notes, session
+   ids) name the tool that reads it and paste a snapshot: a fresh session
+   that cannot find a bare id guesses. Three or more independent slices → `bigteam` instead.
 
 ### Vendor × model × effort (b–e)
 

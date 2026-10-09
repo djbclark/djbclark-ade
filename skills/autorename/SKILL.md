@@ -106,3 +106,8 @@ To sort **another** session's tab (one the hook missed, say), title it with
 `HERDR_PANE_ID=<its pane> CLAUDE_CODE_SESSION_ID=<sid> herdr_place.py move ... --no-focus`
 so the operator's view doesn't jump; `herdr pane list --workspace <id>` maps
 `agent_session.value` to pane ids.
+
+To re-arrange and rename **many** workspaces, tabs and panes at once (a full
+pass or one workspace; sleeping panes included), follow
+[workspace-layout.md](workspace-layout.md); `relocate-pane.sh` beside it cycles
+one sleeping pane through wake → move/relabel → sleep.
