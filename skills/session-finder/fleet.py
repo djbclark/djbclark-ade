@@ -100,6 +100,48 @@ def herdr_json(*args):
         return {}
 
 
+_ORCA = None
+ORCA_STALE = "Orca terminal handle stale: use its focus command"
+
+
+def _orca_terminals():
+    """(pane key -> live handle, set of live handles) from one `orca terminal list`, memoised for the process.
+
+    Orca re-issues terminal handles when its runtime restarts, and a process started before the restart keeps
+    the old ORCA_TERMINAL_HANDLE in its environment; ORCA_PANE_KEY (tabId:leafId) is stable. Any failure
+    (orca missing, runtime down, bad JSON) gives empty results, so no channel is built from a guess."""
+    global _ORCA
+    if _ORCA is None:
+        by_key, live = {}, set()
+        rc, out = run("orca", "terminal", "list", "--json", "--include-visual-layouts", timeout=10)
+        try:
+            terms = json.loads(out)["result"]["terminals"] if rc == 0 else []
+            for t in terms:
+                handle = t.get("handle")
+                if not handle or t.get("orphaned"):
+                    continue
+                live.add(handle)
+                if t.get("tabId") and t.get("leafId"):
+                    by_key[f"{t['tabId']}:{t['leafId']}"] = handle
+        except (ValueError, KeyError, TypeError, AttributeError):
+            by_key, live = {}, set()
+        _ORCA = (by_key, live)
+    return _ORCA
+
+
+def _orca_chan(env):
+    """('orca', live handle) for a process's Orca env, or None when neither its pane key nor its handle is live."""
+    by_key, live = _orca_terminals()
+    handle = by_key.get(env.get("ORCA_PANE_KEY") or "")
+    if not handle and env.get("ORCA_TERMINAL_HANDLE") in live:
+        handle = env["ORCA_TERMINAL_HANDLE"]
+    return ("orca", handle) if handle else None
+
+
+def _in_orca(env):
+    return bool(env.get("ORCA_PANE_KEY") or env.get("ORCA_TERMINAL_HANDLE"))
+
+
 _LABELS = {}
 
 
@@ -354,8 +396,9 @@ def _claude_sessions(agents_by_sid, used, anc, launch_panes=None):
         elif _where:
             w = _where.lookup(pid, d.get("procStart", "")) or {}
             s.update(where=w.get("where", ""), focus=w.get("focus", ""), title=w.get("title", ""), host="terminal")
-            if env.get("ORCA_TERMINAL_HANDLE"):
-                s.update(chan=("orca", env["ORCA_TERMINAL_HANDLE"]), host="orca")
+            if _in_orca(env):
+                chan = _orca_chan(env)
+                s.update(host="orca", **({"chan": chan} if chan else {"reach": ORCA_STALE}))
             elif env.get("TMUX_PANE"):
                 s.update(chan=("tmux", env["TMUX_PANE"]), host="tmux")
         path = transcript(sid)
@@ -475,8 +518,10 @@ def _proc_scan(known_pids, known_panes, anc):
         s = _rec(id=f"pid{pid}", agent=agent, sid=sid, pid=pid, cwd=w.get("cwd", ""), where=w.get("where", ""),
                  focus=w.get("focus", ""), title=w.get("title", ""), self=pid in anc, host="terminal",
                  reach="no channel: use its focus command", status="unknown")
-        if env.get("ORCA_TERMINAL_HANDLE"):
-            s.update(chan=("orca", env["ORCA_TERMINAL_HANDLE"]), host="orca", reach=f"helm.py send pid{pid} (Orca terminal)")
+        if _in_orca(env):
+            chan = _orca_chan(env)
+            s.update(host="orca", **({"chan": chan, "reach": f"helm.py send pid{pid} (Orca terminal)"} if chan
+                                     else {"reach": ORCA_STALE}))
         elif env.get("TMUX_PANE"):
             s.update(chan=("tmux", env["TMUX_PANE"]), host="tmux", reach=f"helm.py send pid{pid} (tmux)")
         out.append(s)
@@ -608,8 +653,12 @@ def _launched(used_panes):
                      where=f"herdr · ws {herdr_label('workspace', host.get('workspace', ''))} · tab {herdr_label('tab', host.get('tab', ''))} (acp)")
             used_panes.add(host["pane"])
         elif host.get("kind") == "orca":
-            s.update(chan=("orca", host.get("terminal")), where=f"Orca · terminal {host.get('terminal')} (acp)",
-                     focus=f"orca terminal switch --terminal {host.get('terminal')}")
+            term = host.get("terminal")
+            if term and term in _orca_terminals()[1]:
+                s.update(chan=("orca", term), where=f"Orca · terminal {term} (acp)",
+                         focus=f"orca terminal switch --terminal {term}")
+            else:
+                s["where"] = f"Orca · terminal {term} (acp, handle stale)"
         else:
             s["where"] = "acp (no terminal)"
         if result is not None and status == "idle":
