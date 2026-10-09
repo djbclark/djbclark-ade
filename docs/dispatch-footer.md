@@ -1,0 +1,9 @@
+## Delivery contract (shared footer; `acp-dispatch` appends it, Agent-tool prompts paste it)
+
+1. Write the full deliverable to `{report}`. Create it early with `STATUS: working` as its first line and update it as you go; finish it **before** any optional verification. Nothing else counts as delivered.
+2. Your final message is only `written: {report}` plus one sentence. The harness cuts a sub-agent's final message at 4,000 characters and the parent never sees the rest, so never put the deliverable there.
+3. If the parent must read more than about 2,000 characters of it, also send the text to `{lead}` with SendMessage, in ordered chunks under 3,500 characters each (`1/3`, `2/3`, ...). That path arrives whole.
+4. Keep the report path exactly as given. Claude Code refuses a sub-agent's Write when the basename starts with `report`, `summary`, `findings` or `analysis` and ends in `.md`.
+5. Never end your turn waiting for a background task's completion notice: it does not wake a sub-agent (it is delivered only with the next inbound message, so you stall until someone writes to you). Wait inside a bounded foreground command (`timeout 1800 bash -c 'until [ -s <file> ]; do sleep 10; done'`, `while kill -0 <pid>`), or do independent work and check again before you end.
+6. Never end your turn on a question. If you are blocked, make the first line of `{report}` `BLOCKED: <the question, one line>`, SendMessage that same line to `{lead}`, then stop. A decision you can make conservatively, make it, and record it in the report under `DECIDED:`.
+7. The last line of the report is `DONE` (or it starts with `BLOCKED:` as above), then `touch {done}` as your very last act. Waiters watch `{done}`, not the report, so a half-written file is never read.

@@ -182,6 +182,18 @@ acp-run --list              # agents and the command each runs
 acp-run <agent> --info      # its models, modes and auth methods
 ```
 
+**For a slice that must deliver a report, call `acp-dispatch` instead of
+`acp-run` directly** (`bin/acp-dispatch` in djbclark-ade, on PATH; 2026-10-08):
+`acp-dispatch <agent> --model M --name N --task T -C <dir> -f <brief> [--perm P]
+[--timeout S]`. It makes `--model` mandatory, appends the shared delivery footer
+(`docs/dispatch-footer.md`: report file, pointer-only final message, `BLOCKED:`
+protocol, no waiting by ending the turn), writes the report, `.done` marker, log
+and `jobs/<name>.json` record under `~/.local/state/bigteam/<task>/`, and exits
+0 done / 1 unfinished / 3 no report / 4 BLOCKED / 124 timeout. `acp-dispatch
+check <dir|report>...` classifies later; `acp-dispatch footer --report <path>`
+prints the footer for a Claude Code Agent-tool prompt, which no script can
+drive. Everything below about acp-run's flags still applies underneath it.
+
 - **Agents** (`--list`): claude (via the `claude-agent-acp` adapter), codex
   (via `codex-acp`), copilot, opencode, cursor, qwen, devin, cline,
   hermes, grok (`grok agent stdio`; **excluded since 2026-10-06** — bigteam's *Current exclusions*), agy

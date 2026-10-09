@@ -1,0 +1,422 @@
+#!/usr/bin/env python3
+"""acp-dispatch — one consistent way to hand a slice to an agent and get its report back.
+
+    acp-dispatch <agent> --model M --name NAME (-p PROMPT | -f BRIEF) [-C DIR]
+                 [--task TASK | --out DIR] [--perm all|deny|scoped:P1,P2] [--timeout S]
+                 [--lead NAME] [--detach [--no-wait] [--wait-timeout S]] [--dry-run] [--json]
+    acp-dispatch footer --report PATH [--lead NAME]      the shared footer, filled in, for an
+                                                         Agent-tool prompt (paste it verbatim)
+    acp-dispatch check (PATH)...                         classify reports: PATH is a report file,
+                                                         a jobs/<name>.json record, or an out dir
+    acp-dispatch finalize RECORD --exit RC               (internal) what the detached runner calls
+
+What it replaces: the dispatch recipe that bigteam, model-routing and home-agents.md used to
+spell out in prose and every dispatcher retyped — the report-file naming, "write the full
+report there, then reply with only a pointer", the `.done` marker, the jobs record, the bounded
+`until [ -s ]` waiter, `--model`/`--perm`/`--timeout`, and (since 2026-10-08) the 4,000-character
+cap on a sub-agent's final message and the never-end-on-a-question rule. The rules live once, in
+docs/dispatch-footer.md, and are appended to every brief.
+
+Contract (the same for ACP agents run here and for Claude Code Agent-tool sub-agents, which
+get the footer pasted into their prompt because the Agent tool cannot be driven from a script):
+    report   $OUT/<name>-report.md     the deliverable; first line `STATUS: working` or
+                                        `BLOCKED: <question>`; last line `DONE`
+    done     <report>.done              touched last; waiters watch this, never the report
+    record   $OUT/jobs/<name>.json      who launched it, every path, the exact waiter to re-arm
+    $OUT     ~/.local/state/bigteam/<task>/ (default) or --out; never the session scratchpad,
+             which is wiped when the session restarts (2026-10-05)
+
+For an ACP agent the final message (acp-run's stdout) is saved to $OUT/<name>-final.txt. If
+the agent did not write the report file but its final message carries the content, the report
+is recovered from it and the record says so (`report_source: final-message`) — stdout from
+acp-run is never truncated, so nothing is lost; the warning tells you the brief was not followed.
+
+Exit codes (dispatch and check):
+    0    report delivered and ends in DONE (dispatch: and acp-run exited 0)
+    1    report present but unfinished (no DONE), or delivered with a non-zero acp-run exit
+    2    usage (missing --model, bad name, report basename Claude Code would refuse, ...)
+    3    delivery failure: the agent finished (or died) and there is no report
+    4    BLOCKED: the report's first line is a question for the lead; answer it, then resume
+    124  timed out waiting for the .done marker (--detach without --no-wait)
+Exit 0 is still not success: verify the outcome (diff, tests, the report's content).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from datetime import date
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+FOOTER_FILE = HERE.parent / "docs" / "dispatch-footer.md"
+STATE_ROOT = Path(os.environ.get("ACP_DISPATCH_STATE", str(Path.home() / ".local/state/bigteam")))
+DEFAULT_LEAD = "team-lead"
+DEFAULT_TIMEOUT = 2400           # bigteam Step 4 item 5: a tight timeout costs the whole report
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# Claude Code 2.1.295 refuses a sub-agent's Write for this basename (tengu_subagent_md_report_blocked).
+CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.I)
+PERM_RE = re.compile(r"^(all|deny|scoped:.+)$")
+
+STATUS_EXIT = {"done": 0, "partial": 1, "no-report": 3, "blocked": 4, "running": 1, "pending": 1}
+
+
+# ---------------------------------------------------------------- helpers
+
+def die(msg: str, code: int = 2) -> "NoReturn":  # type: ignore[name-defined]
+    print(f"acp-dispatch: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def write_atomic(path: Path, text: str, mode: int | None = None) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    if mode is not None:
+        os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def write_record(path: Path, rec: dict) -> None:
+    write_atomic(path, json.dumps(rec, indent=1, sort_keys=True) + "\n")
+
+
+def load_footer() -> str:
+    try:
+        return FOOTER_FILE.read_text()
+    except OSError as e:
+        die(f"footer missing: {FOOTER_FILE} ({e})")
+
+
+def footer_text(report: Path, lead: str) -> str:
+    return (load_footer()
+            .replace("{report}", str(report))
+            .replace("{done}", str(done_path(report)))
+            .replace("{lead}", lead))
+
+
+def done_path(report: Path) -> Path:
+    return report.with_name(report.name + ".done")
+
+
+def check_report_name(report: Path) -> None:
+    if CLAUDE_REFUSED_BASENAME.match(report.name):
+        die(f"report basename {report.name!r} starts with report/summary/findings/analysis and ends "
+            "in .md: Claude Code refuses a sub-agent's Write there. Use <name>-report.md.")
+
+
+def pid_alive(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def rearm_cmd(done: Path, seconds: int = 1800) -> str:
+    return f"timeout {seconds} bash -c 'until [ -e {shlex.quote(str(done))} ]; do sleep 10; done'"
+
+
+# ---------------------------------------------------------------- classify
+
+def classify(report: Path, done: Path | None = None, finished: bool | None = None,
+             pid: int | None = None) -> tuple[str, str]:
+    """Return (status, detail) for one report.
+
+    finished: what the launcher knows (record says finished, or .done exists); None = unknown.
+    """
+    done = done or done_path(report)
+    is_done = finished if finished is not None else done.exists()
+    try:
+        text = report.read_text()
+    except OSError:
+        text = ""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        if is_done:
+            return "no-report", "finished with no report: delivery failure, re-task it"
+        if pid is not None:
+            return ("running" if pid_alive(pid) else "no-report",
+                    f"pid {pid} " + ("alive" if pid_alive(pid) else "gone, no report"))
+        return "pending", "no report yet (not finished, or stalled: check the agent)"
+    first, last = lines[0].strip(), lines[-1].strip()
+    if first.upper().startswith("BLOCKED:"):
+        return "blocked", first
+    if last == "DONE":
+        return "done", first if first.upper().startswith("STATUS:") else f"{len(text)} chars"
+    return "partial", f"no DONE line yet; first line: {first[:120]}"
+
+
+def check_items(items: list[str]) -> int:
+    rows: list[tuple[str, str, str, str]] = []
+    for item in items:
+        p = Path(item).expanduser()
+        if p.is_dir():
+            recs = sorted((p / "jobs").glob("*.json")) if (p / "jobs").is_dir() else []
+            if not recs:
+                recs = sorted(p.glob("jobs/*.json"))
+            if not recs:
+                for rep in sorted(p.glob("*-report.md")):
+                    st, det = classify(rep)
+                    rows.append((st, rep.stem.removesuffix("-report"), str(rep), det))
+                continue
+            for r in recs:
+                rows.append(check_record(r))
+        elif p.suffix == ".json":
+            rows.append(check_record(p))
+        else:
+            st, det = classify(p)
+            rows.append((st, p.stem.removesuffix("-report"), str(p), det))
+    worst = 0
+    for st, name, path, det in rows:
+        print(f"{st}\t{name}\t{path}\t{det}")
+        worst = max(worst, STATUS_EXIT.get(st, 1))
+    if not rows:
+        print("check: nothing to check", file=sys.stderr)
+        return 2
+    return worst
+
+
+def check_record(path: Path) -> tuple[str, str, str, str]:
+    try:
+        rec = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        return ("no-report", path.stem, str(path), f"unreadable record: {e}")
+    report = Path(rec["report"])
+    finished = bool(rec.get("finished")) or Path(rec.get("done", str(done_path(report)))).exists()
+    st, det = classify(report, Path(rec.get("done", str(done_path(report)))),
+                       finished=finished or None, pid=rec.get("pid"))
+    if rec.get("exit") not in (None, 0) and st == "done":
+        det += f"; acp-run exit={rec['exit']}"
+    return (st, rec.get("name", path.stem), str(report), det)
+
+
+# ---------------------------------------------------------------- finalize
+
+def finalize(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
+    rec = json.loads(record_path.read_text())
+    report, final, done = Path(rec["report"]), Path(rec["final"]), Path(rec["done"])
+    final_text = final.read_text() if final.exists() else ""
+    has_report = report.exists() and report.read_text().strip() != ""
+    body = final_text.strip()
+    if not has_report and body and body.lower() not in ("written", "done"):
+        # The agent answered in its final message instead of the file. acp-run's stdout is
+        # complete, so keep it, but say so: the brief was not followed.
+        lines = body.splitlines()
+        if not (lines and lines[0].upper().startswith("BLOCKED:")):
+            lines.insert(0, "STATUS: recovered by acp-dispatch from the agent's final message "
+                            "(the agent did not write the report file)")
+        if lines[-1].strip() != "DONE" and not lines[0].upper().startswith("BLOCKED:"):
+            lines.append("DONE")
+        write_atomic(report, "\n".join(lines) + "\n")
+        rec["report_source"] = "final-message"
+    elif has_report:
+        rec["report_source"] = "agent"
+    rec.update(finished=time.time(), exit=rc, pid=None)
+    done.touch()
+    st, det = classify(report, done, finished=True)
+    rec["status"] = st
+    write_record(record_path, rec)
+    return st, det, rec
+
+
+def exit_for(st: str, rc: int | None) -> int:
+    code = STATUS_EXIT.get(st, 1)
+    if st == "done" and rc not in (None, 0):
+        return 1
+    if st == "no-report" and rc == 124:
+        return 124
+    return code
+
+
+# ---------------------------------------------------------------- dispatch
+
+def runner_script(rec: dict, acp_cmd: list[str], label: str, self_path: Path) -> str:
+    q = shlex.quote
+    return f"""#!/bin/bash
+# written by acp-dispatch; launchd restarts a submitted job on exit, so this removes its own label
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export CLAUDE_CODE_SESSION_ID={q(rec.get("owner") or "")}
+[ -e {q(rec["done"])} ] && {{ launchctl remove {q(label)}; exit 0; }}
+{" ".join(q(c) for c in acp_cmd)} > {q(rec["final"] + ".tmp")} 2> {q(rec["stderr"])}; rc=$?
+mv -f {q(rec["final"] + ".tmp")} {q(rec["final"])}
+python3 {q(str(self_path))} finalize {q(rec["record"])} --exit "$rc"
+launchctl remove {q(label)}
+"""
+
+
+def dispatch(a: argparse.Namespace) -> int:
+    if not a.model:
+        die("--model is required (an agent's own default is the expensive one; `acp-run <agent> --info` lists values)")
+    if not NAME_RE.match(a.name or ""):
+        die("--name must be 1-64 chars of letters, digits, . _ - (it names every output file)")
+    if a.perm and not PERM_RE.match(a.perm):
+        die("--perm must be all, deny or scoped:PATH[,PATH...]")
+    if bool(a.prompt) == bool(a.prompt_file):
+        die("give exactly one of -p PROMPT or -f BRIEF")
+    acp_run = a.acp_run or shutil.which("acp-run")
+    if not acp_run:
+        die("acp-run not on PATH (and no --acp-run given)")
+    out = Path(a.out).expanduser().resolve() if a.out else STATE_ROOT / (a.task or f"adhoc-{date.today().isoformat()}")
+    (out / "jobs").mkdir(parents=True, exist_ok=True)
+    report = out / f"{a.name}-report.md"
+    check_report_name(report)
+    done, final = done_path(report), out / f"{a.name}-final.txt"
+    brief, log, stderr = out / f"{a.name}-brief.md", out / f"{a.name}.jsonl", out / f"{a.name}-stderr.txt"
+    record = out / "jobs" / f"{a.name}.json"
+    if done.exists() and not a.force:
+        die(f"{done} exists: this slice already finished. Use a new --name or --force to redo it.")
+    if record.exists() and not a.force:
+        try:
+            old = json.loads(record.read_text())
+            if pid_alive(old.get("pid")):
+                die(f"{record} says pid {old['pid']} is still running this slice (--force to ignore)")
+        except (OSError, ValueError):
+            pass
+    for p in (done, final, stderr):
+        if p.exists():
+            p.unlink()
+
+    prompt = Path(a.prompt_file).read_text() if a.prompt_file else a.prompt
+    write_atomic(brief, prompt.rstrip() + "\n\n" + footer_text(report, a.lead))
+
+    perm = a.perm or "all"
+    if perm.startswith("scoped:"):
+        perm = f"{perm},{out}"          # the agent must be allowed to write its report
+    acp_cmd = [acp_run, a.agent, "-C", str(Path(a.dir).resolve()), "-f", str(brief),
+               "--model", a.model, "--perm", perm, "--timeout", str(a.timeout), "--log", str(log)]
+    acp_cmd += a.acp_arg or []
+
+    rec = {
+        "name": a.name, "agent": a.agent, "model": a.model, "dir": str(Path(a.dir).resolve()),
+        "task": a.task, "out": str(out), "brief": str(brief), "report": str(report), "done": str(done),
+        "final": str(final), "stderr": str(stderr), "log": str(log), "record": str(record),
+        "owner": os.environ.get("CLAUDE_CODE_SESSION_ID", ""), "started": time.time(),
+        "cmd": " ".join(shlex.quote(c) for c in acp_cmd), "rearm": rearm_cmd(done),
+        "detached": bool(a.detach), "status": "running", "pid": None, "exit": None, "finished": None,
+        "report_source": None, "lead": a.lead,
+    }
+    if a.dry_run:
+        rec["status"] = "dry-run"
+        print(json.dumps(rec, indent=1, sort_keys=True) if a.json else
+              f"dry-run\t{a.name}\t{report}\nbrief: {brief}\ncmd: {rec['cmd']}")
+        return 0
+    write_record(record, rec)
+
+    if a.detach:
+        label = f"acp-dispatch.{(a.task or out.name)}.{a.name}"
+        runner = out / f"{a.name}-run.sh"
+        write_atomic(runner, runner_script(rec, acp_cmd, label, Path(__file__).resolve()), mode=0o700)
+        sub = ["launchctl", "submit", "-l", label, "-o", str(out / f"{a.name}.out"),
+               "-e", str(out / f"{a.name}.err"), "--", "/bin/bash", str(runner)]
+        r = subprocess.run(sub, capture_output=True, text=True)
+        if r.returncode != 0:
+            die(f"launchctl submit failed ({r.returncode}): {r.stderr.strip()}", 1)
+        rec.update(label=label, runner=str(runner))
+        write_record(record, rec)
+        if a.no_wait:
+            print(f"detached\t{a.name}\t{report}\nrecord: {record}\nrearm: {rec['rearm']}")
+            return 0
+        deadline = time.time() + (a.wait_timeout or a.timeout + 300)
+        while not done.exists():
+            if time.time() > deadline:
+                print(f"timeout\t{a.name}\t{report}\nstill running under launchd; rearm: {rec['rearm']}")
+                return 124
+            time.sleep(5)
+        rec = json.loads(record.read_text())
+        st, det = classify(report, done, finished=True)
+        rc = rec.get("exit")
+    else:
+        with open(str(final) + ".tmp", "w") as fo, open(stderr, "w") as fe:
+            proc = subprocess.Popen(acp_cmd, stdout=fo, stderr=fe, stdin=subprocess.DEVNULL)
+            rec["pid"] = proc.pid
+            write_record(record, rec)
+            try:
+                rc = proc.wait()
+            except KeyboardInterrupt:
+                proc.terminate()
+                rc = proc.wait()
+        os.replace(str(final) + ".tmp", final)
+        st, det, rec = finalize(record, rc)
+
+    tail = ""
+    try:
+        err_lines = [ln for ln in stderr.read_text().splitlines() if ln.strip()]
+        tail = err_lines[-1][:200] if err_lines else ""
+    except OSError:
+        pass
+    if a.json:
+        print(json.dumps({**rec, "detail": det, "summary": tail}, indent=1, sort_keys=True))
+    else:
+        print(f"{st}\t{a.name}\t{report}\t{det}")
+        if rec.get("report_source") == "final-message":
+            print("warning: the agent did not write the report file; recovered from its final message",
+                  file=sys.stderr)
+        if tail:
+            print(f"acp-run: {tail}", file=sys.stderr)
+    return exit_for(st, rc)
+
+
+# ---------------------------------------------------------------- main
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] in ("footer", "check", "finalize"):
+        sub = argparse.ArgumentParser(prog=f"acp-dispatch {argv[0]}")
+        if argv[0] == "footer":
+            sub.add_argument("--report", required=True)
+            sub.add_argument("--lead", default=DEFAULT_LEAD)
+            s = sub.parse_args(argv[1:])
+            report = Path(s.report).expanduser()
+            if not report.is_absolute():
+                die("--report must be an absolute path (the sub-agent has no idea what your cwd is)")
+            check_report_name(report)
+            sys.stdout.write(footer_text(report, s.lead))
+            return 0
+        if argv[0] == "check":
+            sub.add_argument("items", nargs="+", metavar="PATH")
+            s = sub.parse_args(argv[1:])
+            return check_items(s.items)
+        sub.add_argument("record")
+        sub.add_argument("--exit", type=int, default=None)
+        s = sub.parse_args(argv[1:])
+        st, det, _ = finalize(Path(s.record), s.exit)
+        print(f"{st}\t{det}")
+        return exit_for(st, s.exit)
+
+    ap = argparse.ArgumentParser(prog="acp-dispatch", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("agent", help="an acp-run agent (acp-run --list)")
+    ap.add_argument("--model", help="required; acp-run <agent> --info lists values")
+    ap.add_argument("--name", required=True, help="slice name; names every output file")
+    ap.add_argument("-p", "--prompt")
+    ap.add_argument("-f", "--prompt-file", help="the brief (a file); the footer is appended to a copy")
+    ap.add_argument("-C", "--dir", default=".", help="repo the agent works in (default: cwd)")
+    ap.add_argument("--task", help="out dir is ~/.local/state/bigteam/<task>/ (default adhoc-<date>)")
+    ap.add_argument("--out", help="explicit out dir instead of --task")
+    ap.add_argument("--perm", default="all", help="all | deny | scoped:P1,P2 (the out dir is added)")
+    ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"acp-run --timeout (default {DEFAULT_TIMEOUT})")
+    ap.add_argument("--lead", default=DEFAULT_LEAD, help="SendMessage address in the footer")
+    ap.add_argument("--detach", action="store_true", help="run under launchd so it outlives this session")
+    ap.add_argument("--no-wait", action="store_true", help="with --detach: return at once with the rearm command")
+    ap.add_argument("--wait-timeout", type=int, help="with --detach: seconds to wait for .done (default timeout+300)")
+    ap.add_argument("--force", action="store_true", help="redo a slice whose .done or live record exists")
+    ap.add_argument("--dry-run", action="store_true", help="write nothing, print the command and paths")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--acp-run", help="path to acp-run (default: PATH)")
+    ap.add_argument("--acp-arg", action="append", help="extra argument passed through to acp-run (repeatable)")
+    a = ap.parse_args(argv)
+    return dispatch(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

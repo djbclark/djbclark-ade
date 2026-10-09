@@ -226,14 +226,27 @@ work that must outlive it, see *Jobs and records* after the waiter paragraph.
 
 Send every slice in **one message as parallel Bash calls**, each
 `run_in_background: true`, so each reports as it finishes and the first results
-arrive first. **For every agent that speaks ACP, dispatch through `acp-run`**
-(`~/ops/site-private/bin/acp-run`; agent list, flags and current status in
-`model-routing`):
+arrive first. **For every agent that speaks ACP, dispatch through
+`acp-dispatch`** (`bin/acp-dispatch` in djbclark-ade, on PATH; it wraps
+`acp-run`, whose agent list, flags and current status are in `model-routing`):
 
-    acp-run <agent> -C <repo> -f "$OUT/brief-<name>.md" --model <m> \
-        --perm scoped:<owned file>,<owned file> --timeout 1500 \
-        --log "$OUT/<name>.jsonl" > "$OUT/out-<name>.txt" 2> "$OUT/sum-<name>.txt"
+    acp-dispatch <agent> --model <m> --name <name> --task <task> -C <repo> \
+        -f "$OUT/brief-<name>.md" --perm scoped:<owned file>,<owned file> [--timeout 2400]
 
+It enforces what this step used to spell out in prose (2026-10-08): `--model`
+is mandatory; the brief gets `docs/dispatch-footer.md` appended (report file
+`$OUT/<name>-report.md`, final message is a pointer only, the `BLOCKED:`
+protocol, never end a turn waiting on a background notification); the report,
+its `.done` marker, the acp-run log, the stderr summary and the
+`$OUT/jobs/<name>.json` record are written for you; the out dir is added to a
+`scoped:` perm so the agent can write its report. Exit 0 = report ends in
+`DONE`; 1 = report present but unfinished, or acp-run failed; 3 = finished with
+no report (a delivery failure: re-task it, never reconstruct); 4 = the report
+starts `BLOCKED: <question>` (answer it, then resume the slice); 124 = timeout.
+`acp-dispatch check $OUT` classifies every slice the same way later. **A Claude
+Code Agent-tool sub-agent cannot be driven by a script**: paste
+`acp-dispatch footer --report <scratchpad>/<name>-report.md` into its prompt
+verbatim and check it with `acp-dispatch check <report>`.
 (`$OUT` is `~/.local/state/bigteam/<task>/`, outside the repo; owned paths are
 relative to `-C`. No trailing `&`: the Bash call itself is the background job.)
 **Not the session scratchpad:** it is wiped when the session restarts, and on
@@ -247,15 +260,19 @@ until the work is committed or recorded in a repo.
    cline do; claude, cursor and opencode mostly auto-allow by their own
    settings, so give those a stricter `--mode` where `--info` offers one, and
    still check the diff). Use `--perm deny` for review-only slices.
-2. **Always `--model`.** The default is the agent's own, which for the claude
-   adapter is the expensive settings model.
-3. **One `--log` per slice**, so the event log (every tool call and permission
-   decision) can be read when a slice goes wrong. `sum-<name>.txt` gets the
-   one-line summary: stop reason, tool calls, permissions allowed/denied,
-   tokens, cost.
-4. Exit 124 is a timeout (acp-run cancels the session first); exit 1 is an
-   agent error or other stop reason (`stop=cancelled` in `sum-<name>.txt` with
-   exit 1 is the same timeout, reported by the adapter).
+2. **Always `--model`.** acp-dispatch refuses to run without it. The default is
+   the agent's own, which for the claude adapter is the expensive settings model.
+3. **Per-slice files, all under `$OUT`:** `<name>.jsonl` is the acp-run event
+   log (every tool call and permission decision, for when a slice goes wrong);
+   `<name>-stderr.txt` holds the one-line summary (stop reason, tool calls,
+   permissions allowed/denied, tokens, cost); `<name>-final.txt` is the agent's
+   final message. When an agent answers there instead of in the report file,
+   acp-dispatch recovers the report from it and warns (`report_source:
+   final-message` in the record): nothing is lost, but the brief was not followed.
+4. acp-run's exit 124 is a timeout (it cancels the session first); exit 1 is an
+   agent error or other stop reason (`stop=cancelled` in `<name>-stderr.txt` with
+   exit 1 is the same timeout, reported by the adapter). acp-dispatch keeps
+   acp-run's exit in the record and exits 124 only when the timeout left no report.
 5. **Budget the timeout from the work, and put the report before optional
    checks.** A slice that runs the test suite N times under load needs
    N × (suite time + `bg`'s load wait, minutes when load is high) on top of the
@@ -265,9 +282,8 @@ until the work is committed or recorded in a repo.
    step of the brief, was never written). So: order every brief **edits →
    tests → write the report → optional verification (mutation checks, extra
    ruff passes) → update the report**, and give expensive verification its own
-   slice when the count of suite runs is more than two. Prefer `--timeout 2400`
-   over a tight one for an edit-and-test slice; the cost of a cancel is the
-   whole report.
+   slice when the count of suite runs is more than two. acp-dispatch's default
+   `--timeout` is 2400 for this reason; the cost of a cancel is the whole report.
 6. **A cancelled slice is resumed, not re-tasked.** The session id is in the
    `--log` file (`"sessionId"` in the result event). `acp-run <agent> -C <repo>
    --resume <id> --model <m> --perm deny --timeout 600 -p "write your report
@@ -295,11 +311,18 @@ immediately (false-early) or, without `run_in_background`, never reports it.
 another process will write) — run the wait as a `run_in_background` call and
 bound it, so a file that never appears cannot hang forever:
 
-    timeout 1800 bash -c 'until [ -e /abs/path/to/report-x.done ]; do sleep 10; done'
+    timeout 1800 bash -c 'until [ -e /abs/path/to/x-report.md.done ]; do sleep 10; done'
 
 (Write the path out in full, or `export OUT` first: a `$OUT` inside the single
-quotes is empty in the inner `bash -c`, so the loop would wait on `/report-x.md`
-forever. Wait on a `.done` marker, not on the report: see *Jobs and records*.)
+quotes is empty in the inner `bash -c`, so the loop would wait on `/x-report.md`
+forever. Wait on the `.done` marker, not on the report: see *Jobs and records*.
+A foreground `acp-dispatch` call is itself the tracked wait, and its record's
+`rearm` field is this exact line with the paths inlined.) **A sub-agent must
+never do its waiting by ending its turn:** a `run_in_background` completion
+notice does not wake an Agent-tool teammate, it arrives only with the next
+inbound message, so the agent stalls until someone writes to it (three of four
+implementers on 2026-10-08). The footer says so; inside a sub-agent the wait is
+a bounded foreground `until` or a Monitor.
 
 **Never write the wait as `until ! pgrep -f '<pattern>'`.** `pgrep -f` matches
 the waiting shell's own command line, which contains `<pattern>`, so it always
@@ -313,17 +336,23 @@ report file or the `---<name> exit=` line.
 What survives a session is a file, not a process. Every slice and every
 detached job follows the same contract (2026-10-08).
 
-1. **Report through a temp file, `.done` last.** The slice writes its report to
-   `$OUT/<name>.report.tmp`, `mv -f`s it to `$OUT/<name>.report.md`, then
-   `touch "$OUT/<name>.done"` as its very last act. Waiters wait on `.done`,
-   never on the report, so a half-written file is never read.
+1. **Report through a temp file, `.done` last.** The report is
+   `$OUT/<name>-report.md` (a basename starting `report`/`summary`/`findings`/
+   `analysis` is refused by Claude Code for sub-agents); its first line is
+   `STATUS: working` or `BLOCKED: <question>`, its last line `DONE`; then
+   `$OUT/<name>-report.md.done` is touched as the very last act. Waiters wait on
+   `.done`, never on the report, so a half-written file is never read.
+   `acp-dispatch` does all of this; a hand-run command writes the file itself.
 2. **A job record per slice that may outlive its launcher:**
    `~/.local/state/bigteam/<task>/jobs/<name>.json`, written the same way
-   (temp + `mv -f`):
+   (temp + `mv -f`). `acp-dispatch` writes it with `name`, `agent`, `model`,
+   every path (`brief`, `report`, `done`, `final`, `stderr`, `log`), `owner`,
+   `started`/`finished`, `exit`, `status`, `report_source`, `cmd` and `rearm`;
+   a hand-written one needs at least:
 
        {"owner": "<CLAUDE_CODE_SESSION_ID>", "started": <epoch>,
-        "report": "<abs>/<name>.report.md", "done": "<abs>/<name>.done",
-        "rearm": "timeout 1800 bash -c 'until [ -e <abs>/<name>.done ]; do sleep 10; done'",
+        "report": "<abs>/<name>-report.md", "done": "<abs>/<name>-report.md.done",
+        "rearm": "timeout 1800 bash -c 'until [ -e <abs>/<name>-report.md.done ]; do sleep 10; done'",
         "cmd": "<what was launched, one line>"}
 
    `owner` is the id of the Claude session that launched it. Claude Code sets
@@ -339,18 +368,20 @@ detached job follows the same contract (2026-10-08).
    load and then `exec`s `taskpolicy -c utility "$@"`, so the command stays a
    child of whoever ran it. The verified detached form is `launchctl submit`
    (flags checked against `man launchctl`, macOS 27, and run: the job's parent
-   is launchd, pid 1). Put the whole job in a small script so it reports the
-   way item 1 says and removes its own label:
+   is launchd, pid 1). `acp-dispatch --detach` writes and submits exactly this
+   kind of script (`--no-wait` returns at once with the rearm line; otherwise it
+   waits on `.done`, bounded). For a non-ACP command, put the whole job in a
+   small script so it reports the way item 1 says and removes its own label:
 
        # $OUT/run-<name>.sh   (chmod +x)
        #!/bin/bash
        export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
        OUT=<abs OUT>; N=<name>; L=bigteam.<task>.<name>
-       [ -e "$OUT/$N.done" ] && { launchctl remove "$L"; exit 0; }
-       <command> > "$OUT/$N.report.tmp" 2> "$OUT/$N.stderr"; rc=$?
-       echo "exit=$rc" >> "$OUT/$N.report.tmp"
-       mv -f "$OUT/$N.report.tmp" "$OUT/$N.report.md"
-       touch "$OUT/$N.done"
+       [ -e "$OUT/$N-report.md.done" ] && { launchctl remove "$L"; exit 0; }
+       <command> > "$OUT/$N-report.md.tmp" 2> "$OUT/$N-stderr.txt"; rc=$?
+       printf 'exit=%s\nDONE\n' "$rc" >> "$OUT/$N-report.md.tmp"
+       mv -f "$OUT/$N-report.md.tmp" "$OUT/$N-report.md"
+       touch "$OUT/$N-report.md.done"
        launchctl remove "$L"
 
        launchctl submit -l bigteam.<task>.<name> \
