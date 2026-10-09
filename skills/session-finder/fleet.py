@@ -622,6 +622,26 @@ def launch_state(d):
                 result = data
     final = turns[-1]["text"] if turns and not "".join(cur).strip() else "".join(cur)
     exited = result is not None or d.get("exit") is not None
+    if d.get("dispatch"):
+        # A headless launch dispatched through acp-dispatch (2026-10-08): the turn is over once the
+        # .done marker exists, the recorded exit is acp-dispatch's (3 = no report, 4 = BLOCKED), and
+        # the deliverable is the report file, not the stream. Its first line decides what helm shows.
+        report, done = Path(d.get("report") or ""), Path(d.get("done") or "")
+        exited = exited or done.exists()
+        head = report.read_text(errors="replace").strip() if report.exists() else ""
+        first = head.splitlines()[0].strip() if head else ""
+        if exited:
+            result = {**(result or {}), "exit": d.get("exit", (result or {}).get("exit"))}
+            if first.upper().startswith("BLOCKED:"):
+                d["turns"] = len(turns)
+                return "blocked", first, result       # helm: a `reply` item carrying the question
+            if not head or result.get("exit") == 3:
+                final = (f"DELIVERY FAILURE: launch {d.get('id')} finished with no report "
+                         f"(acp-dispatch exit {result.get('exit')}); re-task it, never reconstruct")
+            else:
+                final = head
+            d["turns"] = len(turns)
+            return "idle", final, result
     if exited:
         status = "blocked" if final.rstrip().endswith("?") else "idle"
         result = result or {"exit": d.get("exit")}

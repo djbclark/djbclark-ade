@@ -89,8 +89,13 @@ Hermes; never numbered prose). One item per call.
 5. **`reply`** — a session started over ACP (`launch.py`) ended its turn with a
    question. Relay the question text with options he can answer in a line;
    send with `$L reply <id> "<his text>"` (into the live session's inbox; a new
-   acp-run turn if it already exited). **`done`** — a turn finished: show its
-   final line once. `wait --auto-audit` then sends `/loose` as its next turn
+   acp-run turn if it already exited). A headless launch (one turn, through
+   `acp-dispatch`, 2026-10-08) whose report starts `BLOCKED: <question>`
+   (acp-dispatch exit 4) is the same `reply` item with that line as its text;
+   `$L reply` starts the next turn with the brief and that line as context.
+   **`done`** — a turn finished: show its final line once; a headless launch's
+   text is its report's head, or `DELIVERY FAILURE: launch <id> finished with no
+   report` (exit 3), which is re-tasked, never reconstructed. `wait --auto-audit` then sends `/loose` as its next turn
    (`$L audit`) and, once that audited result has been shown, closes the
    session and its herdr tab (`$L close`) so tabs do not pile up (operator,
    2026-10-08). Offer `$L reply` for a follow-up before the close happens.
