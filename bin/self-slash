@@ -15,7 +15,10 @@
 # waits --delay seconds (default 6) so the current turn can end, then refuses if
 # the operator has an unsent draft in the input box (a line starting with ❯ that
 # is not empty), and otherwise sends the text +
-# Enter.  Runs detached (nohup) so it survives the Bash tool returning; the log
+# Enter.  On herdr it also waits (up to SELF_SLASH_WAIT, default 900 s) while the
+# pane's agent_status is "working": a command sent mid-turn is swallowed, never run
+# (seen 2026-10-09: a /rename sent while the session worked left no trace).
+# Runs detached (nohup) so it survives the Bash tool returning; the log
 # is ~/.local/state/self-slash.log.  First verified 2026-10-09 (ClaudeHelm, herdr);
 # Orca backend verified 2026-10-09.
 set -u
@@ -66,6 +69,22 @@ send_text() {
 }
 
 sleep "$delay"
+# herdr: never send while the session is mid-turn (status "working"); the input is
+# accepted but Claude Code never runs it.  Wait for idle, bounded by SELF_SLASH_WAIT.
+if [ "$host" = herdr ]; then
+  waited=0; said=0
+  while :; do
+    st=$(herdr pane list 2>/dev/null | python3 -c '
+import json, sys
+pane = sys.argv[1]
+for p in json.load(sys.stdin).get("result", {}).get("panes", []):
+    if p.get("pane_id") == pane: print(p.get("agent_status", "")); break' "$pane" 2>/dev/null)
+    [ "$st" = working ] || break
+    [ "$said" = 1 ] || { echo "$(date '+%F %T') $host $pane: session is working, waiting for idle before sending"; said=1; }
+    [ "$waited" -lt "${SELF_SLASH_WAIT:-900}" ] || { echo "$(date '+%F %T') $host $pane: gave up after ${waited}s, session still working; NOT sent: ${text:0:80}"; exit 6; }
+    sleep 5; waited=$((waited+5))
+  done
+fi
 for attempt in 1 2 3 4 5 6; do
   screen=$(read_screen)
   prompt=$(printf '%s\n' "$screen" | grep -E '^[[:space:]]*❯' | tail -1 | sed -E 's/^[[:space:]]*❯[[:space:]]*//')
