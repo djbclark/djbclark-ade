@@ -1,6 +1,6 @@
 ---
 name: autorename
-description: Rename the current Claude Code session (what /rename does) to a short title you derive from what you know about the session, then, inside herdr, offer to move its tab out of a generic workspace (a number, "shells", "src", "~") into a fitting existing or new one. Use when the operator types /autorename, says "name this session", "rename this session", "give this session a title", when the autorename_nudge hook says the session is untitled, and automatically as the last step of /handoff. Also the owner of the full herdr layout pass: use it when asked to reorganize, rearrange, re-name or clean up all herdr workspaces, tabs and panes ("from-first-principles reorg", "my herdr layout got grotty"), or to create workspaces and move tabs and panes between them; the procedure is `workspace-layout.md` beside this file.
+description: Rename the current Claude Code session (what /rename does) to a short title you derive from what you know about the session, then, inside herdr, offer to move its tab out of a generic workspace (a number, "shells", "src", "~") into a fitting existing or new one. Use when the operator types /autorename, says "name this session", "rename this session", "give this session a title", when the autorename_nudge hook says the session is untitled, and automatically as the last step of /handoff. Also the owner of the full herdr layout pass: use it when asked to reorganize, rearrange, re-name or clean up all herdr workspaces, tabs and panes ("from-first-principles reorg", "my herdr layout got grotty"), or to create workspaces and move tabs and panes between them; the procedure is `workspace-layout.md` beside this file. `/autorename all` (or `reorg`, `layout`) runs that full pass directly.
 ---
 
 # autorename — title the session from what you know
@@ -18,6 +18,32 @@ It runs three ways: the operator asks (`/autorename`), `/handoff` Step 8 calls i
 with `--auto`, and the `autorename_nudge.py` UserPromptSubmit hook (next to this
 file, registered in `~/.claude/settings.json`) asks for an `--auto` run at the end
 of the first substantive turn of an untitled interactive session.
+
+## Arguments: `/autorename all` is the full herdr reorganization
+
+The skill receives whatever follows the command. With no argument it titles this
+session and places its tab (steps 1 to 3 below). With **`all`** (synonyms `reorg`,
+`layout`; optionally followed by one workspace name or id to limit the pass to it)
+it does the whole from-first-principles layout pass over herdr instead:
+create, rename and renumber workspaces, relabel tabs and panes, and move tabs and
+panes between workspaces. Only inside herdr (`HERDR_ENV=1`); elsewhere say so and stop.
+
+1. Follow [workspace-layout.md](workspace-layout.md) end to end: principles, inventory
+   (read-only), decide the target layout, rename workspaces, relabel panes, move panes,
+   sleeping panes through `relocate-pane.sh`, verify and report.
+2. **Show the plan before touching anything**: one numbered list of every change
+   (`1.` create workspace X, `2.` move tab T from A to X as `<label>-t`, `3.` rename ...).
+   Apply it straight away unless a placement is genuinely ambiguous; then ask **one**
+   AskUserQuestion covering all the ambiguous ones, recommended option first. The plan
+   never closes a pane or tab, and never touches the `coord` or helm panes (herdr-tidy
+   owns closing).
+3. Title this session and label its own tab last, as steps 1 and 2 below (a full pass
+   moves this tab too, so do not run step 3's placement question).
+4. Report: the final workspace, tab and pane tree as one numbered list, and anything
+   left alone with the reason.
+
+Without `all`, never start the full pass unprompted; the nudge hook and `/handoff`
+only ever run the single-session path.
 
 ## 1. Pick the title
 

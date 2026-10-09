@@ -27,7 +27,7 @@ sudo-secretspec, ralph-tui-create-*, ...) stay where their installer put them.
 
 | Skill | What it does | How to use |
 |---|---|---|
-| `autorename` | Titles the current session like `/rename`, then offers to move its tab out of a generic herdr workspace. Also owns the full herdr layout pass (`workspace-layout.md`). | `/autorename`; "name this session"; "reorganize all my herdr workspaces, tabs and panes". Runs by itself as the last step of `/handoff`. |
+| `autorename` | Titles the current session like `/rename`, then offers to move its tab out of a generic herdr workspace. Also owns the full herdr layout pass (`workspace-layout.md`). | `/autorename`; `/autorename all` runs the full herdr reorg (workspaces, tabs, panes: create, rename, move); "name this session". Runs by itself as the last step of `/handoff`. |
 | `handoff` | Deep Tier 2 handoff document, chain-tagged and mined from the whole conversation. | `/handoff`; "do a handoff"; before ending a long session. |
 | `session-handoff` | Reads and writes the Tier 1 pointer (`SESSION_LOG.md`) for any git repo. | Runs at session start and end; "update session log". |
 | `baton` | Resumes a workspace from its Tier 1 pointer. | `/baton` or `/resume` at the start of a session. |
