@@ -60,6 +60,29 @@ def generic_reason(label: str) -> str | None:
     return None
 
 
+def config_path() -> Path:
+    return Path(os.environ.get("AUTORENAME_WORKSPACES") or Path.home() / ".config/autorename/workspaces.conf")
+
+
+def configured_workspaces() -> list[dict[str, str]]:
+    """Special workspaces from the config file, in file order: `name # hint`.
+
+    `#` starts a comment; whitespace around the name and the hint is ignored. The
+    hint says what belongs in the workspace and is for the agent, not for naming.
+    """
+    try:
+        lines = config_path().read_text().splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        name, _, hint = line.partition("#")
+        name = name.strip()
+        if name:
+            out.append({"name": name, "hint": hint.strip()})
+    return out
+
+
 def state_path(sid: str) -> Path:
     return Path.home() / ".local/state/autorename" / f"{sid}.placement"
 
@@ -97,6 +120,7 @@ def check(auto: bool) -> int:
         "workspace": {"workspace_id": here["workspace_id"], "label": here["label"],
                       "generic": reason is not None, "reason": reason},
         "other_workspaces": others,
+        "configured_workspaces": configured_workspaces(),
         "already_answered": answered,
         "ask": reason is not None and not (auto and answered),
     }, indent=1))
@@ -210,10 +234,14 @@ def main() -> int:
     lb.add_argument("--from-title", action="store_true", help="derive it from the session's custom title")
     lb.add_argument("--force", action="store_true", help="replace a non-generic label too")
     sub.add_parser("decline")
+    sub.add_parser("config", help="print the configured special workspaces (workspaces.conf) as JSON")
     args = ap.parse_args()
 
     if args.cmd == "check":
         return check(args.auto)
+    if args.cmd == "config":
+        print(json.dumps({"path": str(config_path()), "workspaces": configured_workspaces()}, indent=1))
+        return 0
     if args.cmd == "label":
         return label(args.text, args.from_title, args.force)
     if args.cmd == "move":

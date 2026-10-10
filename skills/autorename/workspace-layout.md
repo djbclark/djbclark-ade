@@ -13,11 +13,14 @@ Moved here from the retired `herdr-orchestration` skill on 2026-10-09.
    tree** (`~/s/ai/hermes` → `hermes`, `~/s/android` → `android`,
    `~/s/cm` → `cm`, `~/s/ai/litellm` → `litellm`). A pane goes in the
    workspace of the thing it is *about*, not the directory it happens to be
-   in (a Mac lockup investigation running in `~` belongs in `mac`). Two
-   fixed workspaces are not topics: `ade` for work on the agent toolkit
-   itself (this repo) and `helm` for the orchestrator/relay sessions that
-   watch everything else. One-tab workspaces are fine when the project is
-   distinct; do not merge projects to save sidebar rows.
+   in (a Mac lockup investigation running in `~` belongs in `mac`). The
+   operator's special workspaces (`aiuse+ade` for the agent toolkit, `helm`
+   for the orchestrator/relay sessions that watch everything else, `one-offs`,
+   ...) come from the config file, see
+   [Configured workspaces](#configured-workspaces-and-their-order). A project
+   that is not configured gets its own workspace only when it has two or more
+   tabs or a tab with several panes (subagents); a lone single-pane tab goes
+   in the configured catch-all (`one-offs`) instead.
 2. **Tab = one unit of work, labelled `<topic>-t`; its pane `<topic>-p`;
    the agent in it bare `<topic>`** (the convention in
    `memory/feedback_herdr_tab_pane_naming_convention.md`). `<topic>` is the
@@ -36,13 +39,42 @@ Moved here from the retired `herdr-orchestration` skill on 2026-10-09.
    has no prefix.
 6. **This procedure closes nothing.** Closing idle panes is `herdr-tidy`'s
    job (it checks preconditions and writes a resume ledger). Empty tabs are
-   moved out of, not deleted; `pane move --new-tab` closes the *source* tab for you, which
-   is the only closure this procedure performs.
+   moved out of, not deleted; `pane move --new-tab` closes the *source* tab for you
+   (and a workspace closes itself once its last tab is gone). The one closure
+   the pass adds: the default shell tab that `workspace create` makes in a
+   workspace the pass itself just created, when `pane read` shows it untouched
+   (a bare prompt); a shell with any history is relabelled and kept.
 7. **Do not move your own pane.** Moving the pane you run in gives it a new
    pane id mid-session and can cut your own control channel; leave it where
    it is and say so in the report.
-8. **Workspace order cannot be changed** (no reorder command; order is
-   creation order). Rename in place rather than recreating to reorder.
+8. **There is no reorder command; order is creation order.** Rename in place
+   when the order is already right; otherwise follow the ordering method below.
+9. **Helm tabs are placed, not left alone** (operator, 2026-10-09): they go to
+   the `helm` workspace like any other topic, moved with `--no-focus`; the agent
+   survives the move. Only the `coord` panes (bigteam's) are never touched.
+
+## Configured workspaces and their order
+
+`~/.config/autorename/workspaces.conf` (override with `AUTORENAME_WORKSPACES`; read
+it with `herdr_place.py config`) lists the operator's special workspaces, one per
+line as `name # hint`. `#` starts a comment, whitespace around the name and the hint
+is ignored, and the hint says what belongs there (use it to decide where a tab
+goes; it is never part of the name). Names may contain `+` and `-`.
+
+1. A configured workspace exists as soon as one tab belongs in it, even a lone
+   tab, and is not created while it would be empty.
+2. Configured workspaces sit at the top of herdr in file order; the others follow.
+3. A tab matching no hint stays in (or goes to) a non-configured workspace named
+   for its topic; a lone single-pane tab in such a workspace goes to the
+   configured catch-all (`one-offs`), which is just the last entry of the file.
+4. **Ordering method.** herdr cannot reorder, so order by creation: walk the
+   target list top to bottom; keep every workspace that is already in the right
+   relative place (rename it in place, which is how your own pane's workspace
+   gets its configured name); for each one that is not, rename the old one out of
+   the way (`<name>-old`), create the new one, move its tabs in with `pane move
+   --new-tab`, and let the old one close when it empties. Create the missing
+   workspaces in file order so they land in file order. Panes get new ids on
+   move, so use the id from `move_result` for the renames that follow.
 
 ## Procedure
 
@@ -69,6 +101,8 @@ holds the session id), the pane's last screen lines (`herdr pane read <pane>
 the cwd. Do not trust the existing label.
 
 ### 2. Decide the target layout before touching anything
+
+Read `herdr_place.py config` first and apply the section above.
 
 Write the whole target table (pane → workspace, tab label, pane label, agent
 name) to a scratch file and check it against the principles: every

@@ -28,15 +28,18 @@ it does the whole from-first-principles layout pass over herdr instead:
 create, rename and renumber workspaces, relabel tabs and panes, and move tabs and
 panes between workspaces. Only inside herdr (`HERDR_ENV=1`); elsewhere say so and stop.
 
-1. Follow [workspace-layout.md](workspace-layout.md) end to end: principles, inventory
+1. Read the operator's special-workspace list (`herdr_place.py config`, file
+   `~/.config/autorename/workspaces.conf`: names, hints, top-of-herdr order) and follow
+   [workspace-layout.md](workspace-layout.md) end to end: principles, inventory
    (read-only), decide the target layout, rename workspaces, relabel panes, move panes,
    sleeping panes through `relocate-pane.sh`, verify and report.
 2. **Show the plan before touching anything**: one numbered list of every change
    (`1.` create workspace X, `2.` move tab T from A to X as `<label>-t`, `3.` rename ...).
    Apply it straight away unless a placement is genuinely ambiguous; then ask **one**
    AskUserQuestion covering all the ambiguous ones, recommended option first. The plan
-   never closes a pane or tab, and never touches the `coord` or helm panes (herdr-tidy
-   owns closing).
+   never closes a pane or tab (herdr-tidy owns closing; the one exception is the
+   untouched default shell of a workspace the pass just created) and never touches the
+   `coord` panes. Helm tabs are placed in the `helm` workspace like any other.
 3. Title this session and label its own tab last, as steps 1 and 2 below (a full pass
    moves this tab too, so do not run step 3's placement question).
 4. Report: the final workspace, tab and pane tree as one numbered list, and anything
@@ -129,9 +132,14 @@ Otherwise ask with **one** AskUserQuestion, recommended option first:
 1. Each existing workspace (at most two) whose label or tab labels plainly match
    the session's project or topic: "Move to `<label>`". Never offer another
    generic workspace.
-2. "New workspace `<name>`": a plain, short, lowercase name for the project or
+2. A **configured** workspace (`configured_workspaces` in the check output, from
+   `~/.config/autorename/workspaces.conf`) whose name or hint matches the topic: offer
+   "Move to `<name>`" first (a new workspace if it does not exist yet, created with
+   `--new-workspace <name>`; configured names are fixed, never reworded). A lone
+   session that matches nothing goes to `one-offs`.
+3. "New workspace `<name>`": a plain, short, lowercase name for the project or
    area (`herdr`, `mac`, `hermes`), the kind the existing workspaces use; no `-t`.
-3. "Leave it in `<current>`".
+4. "Leave it in `<current>`".
 
 The tab label for a move is a short kebab-case form of the title with the `-t`
 suffix (`autorename-hook-t`), per the herdr naming convention. Then:
