@@ -294,6 +294,13 @@ handled once, in this order, and not repaired:
     `ansible/` (`playbooks/ ../ansible_collections/stayturgid/`), a bare role
     directory reports pre-existing findings.
 
+20. **Condense briefs, 2026-10-10.** `cursor/home-agents.mdc` is a reworded
+    subset of home-agents.md, not a mirror: brief "sync rule changes", never
+    "apply the identical change". Require the before/after `rg -o` diff of
+    dates, memory pointers and `[[links]]` (it caught a dropped pointer).
+    common-rules item 5 (never push an `~/ops` master) needs an explicit
+    exception for `site-private/memory/` notes, or the brief must grant it.
+
 ## 10. What this is not
 
 1. Not relay mode with the answers filled in: the queue's items are still the
