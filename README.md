@@ -152,6 +152,11 @@ way. `helm.py` imports `fleet` from the sibling `skills/session-finder/`.
     sleeper tab" or "rename this workspace ops" in a popup; a fast free model
     plans Herdr commands from a snapshot index, the script validates every id
     against the snapshot and asks for a `y` before anything destructive.
+13. [`docs/apply-toolchain-prompt.md`](docs/apply-toolchain-prompt.md) — a
+    drop-in prompt (v5.1) that has a Claude Code orchestrator apply the
+    stayturgid/aiuse/Graft toolchain, subagents, skills/plugins, tests, CI and
+    CodeRabbit to another repo, with backups and restore recipes; its preamble
+    says how to run it or cut it to a budget.
 
 ## Architecture: agent graphs at two altitudes
 
