@@ -1240,6 +1240,22 @@ async def run(a, log, err, log_path):
     env = dict(os.environ)
     if a.agent == "agy":
         env["GEMINI_HOME"] = ensure_agy_home()
+        # Claude Code's settings point HTTPS_PROXY at the opencodex intercept
+        # proxy, which answers agy with 407 (2026-10-09).
+        for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+            env.pop(k, None)
+        # agy lists its skills dirs as workspaces too and runs commands in
+        # whichever sorts first ("Command Working Directory"), often
+        # ~/.local/share/agy-acp-home/antigravity-cli/skills, not the session
+        # cwd: verified 2026-10-09 (`pwd` printed the skills dir; agy
+        # recreates that dir if the shadow omits it). Naming the dir in the
+        # prompt fixed it; the refined-antigravity-acp wrapper does not.
+        if a.prompt_text:
+            a.prompt_text = (
+                f"Your working directory for this task is {root}: run every"
+                " shell command there and create files there unless told"
+                " otherwise.\n\n" + a.prompt_text
+            )
     if a.interactive:
         # acp-run reports this pane to herdr itself; the agent's own herdr
         # hooks (Claude Code's report as herdr:claude) would compete for it.

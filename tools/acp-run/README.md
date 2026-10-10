@@ -174,6 +174,17 @@ pinned to the `cline-pass` provider, and `agy` runs Google's first-party ACP
 server from `~/.local/share/agy-acp-server/`); edit `AGENTS`, `DEFAULT_SET` and
 `YOLO_SET` at the top of the script for yours.
 
+`agy` notes (verified 2026-10-09): YOLO is the session config option
+`mode=yolo` (`default | auto_edit | yolo`), set automatically. agy runs
+commands in whichever of its workspaces sorts first, often its own skills
+dir rather than `-C`, so acp-run names the working directory at the top of
+the prompt. It also drops `HTTPS_PROXY` for agy (Claude Code's opencodex
+proxy answers it with 407). simonepri/refined-antigravity-acp was tried and
+not adopted: it fixes neither problem, removes the `mode` config option
+(YOLO only through `--mode yolo`) and renames the models (`gemini-3.8-flash`
+plus `thought_level`); its hang and loop fixes are worth another look if
+those show up in agy runs.
+
 ## Why not acpx?
 
 [acpx](https://github.com/openclaw/acpx) is the maintained general-purpose ACP CLI
