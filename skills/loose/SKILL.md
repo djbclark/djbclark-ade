@@ -105,17 +105,19 @@ the audit found nothing:
 Put the recommended one first with `(Recommended)` and give the reason in its
 description, e.g. "2 items deferred; a handoff keeps them findable".
 
-Then act on the answer. For `/handoff`, invoke the `handoff` skill. You cannot run
-`/quit` yourself, since it is a built-in CLI command and not a skill, so tell him
-to type it. If the handoff was chosen, offer the same quit prompt again once it is
-written.
+Then act on the answer. For `/handoff`, invoke the `handoff` skill. A built-in
+like `/quit` is not a skill, but you can queue it yourself (operator, 2026-10-09:
+"you should actually be able to run /quit yourself"): when he picks `/quit`, finish
+everything first (commits pushed, no pending reads), then run
+`~/src/djbclark-ade/bin/self-slash "/quit"` as the last action and end the turn at
+once. If the handoff was chosen, offer the same quit prompt again once it is written.
 
-`/compact` is the one built-in you may queue yourself. When the context prompt
+`/compact` works the same way. When the context prompt
 fires (or he picked compact) and you are a Claude session in a herdr pane or an
 Orca terminal (his standing say-so since 2026-10-09, `memory/feedback_self_compact.md`), write down
 what the next turn needs, run `~/src/djbclark-ade/bin/self-slash "/compact <focus>"`
-and end the turn at once. It refuses outside herdr and Orca, or when his input
-box holds a draft; then ask him to type it. `/quit` stays his to type.
+and end the turn at once. `self-slash` refuses outside herdr and Orca, or when his
+input box holds a draft; then ask him to type it.
 
 ## Silent mode, before a handoff
 
