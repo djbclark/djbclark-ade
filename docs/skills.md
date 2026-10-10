@@ -45,6 +45,7 @@ sudo-secretspec, ralph-tui-create-*, ...) stay where their installer put them.
 | `model-routing` | Picks vendor x model x effort for a kind of work and reads `aiuse` pools. | Load before big multi-agent runs or when a quota window is tight. |
 | `effort-routing` | Matches this session's own reasoning effort to the stretch of work. | Load when starting rote edits or dispatching subagents. |
 | `cow-workspaces` | Isolated workspaces as APFS copy-on-write pastures (`bin/cow-pasture`). | "give this agent its own workspace"; parallel work on a checkout under `~/src`. |
+| `dialogue` | Runs a multi-model dialogue (for example Grok, Fable, Astra) that produces one artifact with a final-word model: fixed rounds through pinned routes, footers with point ids and dissent, a final-word state-file gate, noise strip and protocol lint. | "have the models chat about it and write X"; "three-model dialogue". Script: `skills/dialogue/scripts/dialogue.py`. |
 | `ralph-tui-orchestration` | Operates the Ralph TUI + Beads multi-repo controller (dormant since 2026-08-23). | Only when seeding or checking a Ralph controller. |
 | `terminus-kira` | Delegates a coding or shell task to a sandboxed agent in an Apple Container VM with one host directory mounted. | Risky or long tasks you want contained and reviewable. |
 

@@ -1,0 +1,60 @@
+{
+  "_comment": "Example dialogue.json: three models, four phases, routes pinned per run. Paths are relative to the run folder (the folder holding this file). Shaped on the hiwymi ai-heaven run (2026-10-09/10); probe every route with `dialogue.py probe` before turn 1.",
+  "title": "AI Heaven spec",
+  "cwd": "../..",
+  "transcript": "dialogue/transcript.md",
+  "turns_dir": "dialogue",
+  "prompts_dir": "tools/prompts",
+  "phases_dir": "tools/phases",
+  "prompt_out": "tools/.prompts",
+  "word_budget": 40000,
+  "final_word": "grok",
+  "order": ["grok", "fable", "astra"],
+  "opening_line": "AGREEMENTS:",
+  "state_file": "notes/grok-phase4-verdicts.md",
+  "artifacts": ["SPEC.md"],
+  "context_docs": [],
+  "protected_files": ["../../research/ai-heaven/evidence.jsonl"],
+  "evidence_file": "../../research/ai-heaven/evidence.jsonl",
+  "sources_file": "sources.md",
+  "trial_from_phase": "3-sections",
+  "phases": [
+    {"name": "0-opening", "independent": true},
+    {"name": "1-chat", "max_rounds": 3},
+    {"name": "2-outline", "max_rounds": 2},
+    {"name": "3-sections", "max_rounds": 3, "budget_words": 600000},
+    {"name": "4-final", "final_word_only": true}
+  ],
+  "models": {
+    "grok": {
+      "label": "Grok 4.7",
+      "pool_label": "Grok",
+      "routes": [
+        {"kind": "acp", "agent": "grok", "model": "grok-4.7", "set": ["reasoning_effort=high"]},
+        {"kind": "acp", "agent": "cursor", "model": "grok-4.7"}
+      ]
+    },
+    "fable": {
+      "label": "Claude Fable 5.1",
+      "pool_label": "Claude Code 5-hour",
+      "routes": [
+        {"kind": "claude", "model": "claude-fable-5-1", "effort": "high"},
+        {"kind": "acp", "agent": "claude", "model": "claude-fable-5-1"}
+      ]
+    },
+    "astra": {
+      "label": "GPT-6 Astra",
+      "pool_label": "Codex 5-hour",
+      "routes": [
+        {"kind": "acp", "agent": "codex", "model": "gpt-6-astra", "set": ["reasoning_effort=xhigh"]}
+      ]
+    }
+  },
+  "optional": {
+    "stall_stop": false,
+    "phase_budget_stop": false,
+    "anonymised_cross_review": false,
+    "state_driven_speaker": false,
+    "fresh_judge": null
+  }
+}
