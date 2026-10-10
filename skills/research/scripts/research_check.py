@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 USER_AGENT = "research-skill-check/1.0 (+https://github.com/djbclark/site-djbclark)"
-ID_RE = re.compile(r"\[(E\d{4,})\]")
+ID_RE = re.compile(r"\[\^?(E\d{4,})\]")  # [E0001] inline or [^E0001] footnote-style citation
 NUM_RE = re.compile(r"(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?%?")
 MIN_ROWS_DEFAULT = 6
 MIN_FAMILIES_DEFAULT = 2
@@ -316,6 +316,9 @@ def report_body_lines(report: str) -> list[str]:
         if s.startswith("```"):
             in_fence = not in_fence
             continue
+        if s == "## Citation footnotes":
+            break
+
         if in_fence or s.startswith("|") or s.startswith("#"):
             continue
         s = re.sub(r"^\s*(\d+[.)]|[-*+])\s+", "", s)  # list markers
