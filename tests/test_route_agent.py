@@ -269,3 +269,63 @@ class TestDiscoverySources(unittest.TestCase):
         with mock.patch.object(r, "acp_list_output", return_value=ACP_LIST):
             self.assertEqual(r.acp_agents(),
                              {"claude", "codex", "cline", "agy", "fresh-acp-agent"})
+
+
+class TestAgyClaudeGptPool(unittest.TestCase):
+    """agy's Claude/GPT window is its own service (operator, 2026-10-10)."""
+
+    def snapshot(self, tmp, claude_gpt_left, gemini_left=100.0):
+        path = Path(tmp) / "latest.json"
+        path.write_text(r.json.dumps({"snapshot": {"accounts": [{
+            "provider": "antigravity", "billing_kind": "subscription_window",
+            "windows": [
+                {"label": "Gemini 5-hour", "remaining_percent": gemini_left,
+                 "pool_family": "gemini"},
+                {"label": "Claude/GPT weekly", "remaining_percent": claude_gpt_left,
+                 "pool_family": "claude_gpt"},
+            ]}]}, "collected_at": r.datetime.now(r.timezone.utc).isoformat()}))
+        return path
+
+    def load(self, **kw):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(r, "SNAPSHOT", self.snapshot(tmp, **kw)):
+                return r.load_snapshot()[0]
+
+    def test_pools_are_split_so_neither_drags_the_other(self):
+        q = self.load(claude_gpt_left=3.0)
+        self.assertEqual(q["antigravity"]["remaining"], 100.0)
+        self.assertEqual(q["antigravity-claude"]["remaining"], 3.0)
+
+    def test_code_routes_to_the_claude_pool_while_it_has_headroom(self):
+        q = {**IDLE, "antigravity-claude": {"remaining": 49.0}}
+        self.assertEqual(r.route("code", quota=q).service.name, "antigravity-claude")
+
+    def test_drained_claude_pool_is_skipped_but_gemini_pool_is_not(self):
+        q = {**IDLE, "antigravity-claude": {"remaining": 5.0}}
+        self.assertNotEqual(r.route("code", quota=q).service.name, "antigravity-claude")
+        self.assertEqual(r.route("bulk", quota=q).service.name, "antigravity")
+
+    def test_never_judgment_tier(self):
+        q = {**IDLE, "antigravity-claude": {"remaining": 100.0}}
+        self.assertNotEqual(r.route("judgment", quota=q).service.name, "antigravity-claude")
+
+    def test_alias_agy_does_not_create_a_second_service(self):
+        names = [s.name for s in r.discover({**IDLE, "antigravity-claude": {"remaining": 90.0}})]
+        self.assertEqual(names.count("antigravity-claude"), 1)
+        self.assertNotIn("agy", names)
+
+
+class TestPoolSplitIsGeneral(unittest.TestCase):
+    """Any service can claim one pool family of its provider via `pool=`."""
+
+    def test_any_declared_pool_is_split_and_undeclared_families_stay_home(self):
+        svc = r.Service("copilot-premium", "copilot", {"code": 20}, "subscription",
+                        pool=("copilot", "premium"))
+        with mock.patch.object(r, "SERVICES", r.SERVICES + (svc,)):
+            self.assertEqual(r.pool_service("copilot", "premium"), "copilot-premium")
+            self.assertEqual(r.pool_service("copilot", "chat"), "copilot")
+            self.assertEqual(r.pool_service("copilot", None), "copilot")
+
+    def test_claude_fable_sublimit_is_not_split(self):
+        self.assertEqual(r.pool_service("claude", "fable"), "claude")

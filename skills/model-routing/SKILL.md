@@ -152,9 +152,30 @@ Rules for any agent that dispatches to agy:
    timeout). `acp-run` retries handshake twice (40s each) then falls back to
    `claude -p --model … --dangerously-skip-permissions` unless `--no-fallback`.
    Do not wait out a hung ACP process.
-4. **Send Opus-high work to agy sparingly.** The Claude/GPT pool is small (5h
-   window, ~35 minutes to drain on 2026-10-03). Prefer a `gemini-*` model for bulk
-   work, and spend `claude-*` on agy only where nothing else fits.
+4. **Burn the agy Claude/GPT pool while it has headroom** (operator,
+   2026-10-10: "via agy acp as much as possible ... at the moment it has a lot of
+   headroom"; this replaces the old "send Opus-high to agy sparingly"). It is
+   Claude Opus/Sonnet 5.5 and GPT on the Google AI Pro plan, a separate window
+   from Gemini that resets and is lost: on 2026-10-10 `aiuse` raised a
+   *critical* burn alert (5h 100% left, weekly 49% left, weekly resets in ~5 h).
+   Gate on `aiuse --available`, not on a standing rule: **at >= 40% left on both
+   Claude/GPT windows, prefer it** over claude's own window and codex for code,
+   review, research and second opinions, via `acp-run agy --model
+   claude-opus-5-5-high` (hard calls) or `claude-sonnet-5-5-high` (volume);
+   `agy models` lists `gpt-oss-120b-medium` too. Between 15% and 40% give it one
+   slice at a time; under 15% (or a 429) it is spent, use the Gemini pool or
+   another vendor. **Cap concurrency at 2-3 agy slices at once** (the ACP
+   client's own limit is not published, and the pool drained in ~35 minutes
+   under a heavy Opus-high run on 2026-10-03) and re-probe before each batch.
+   It is not judgment-tier: final calls on contract decisions stay with claude
+   or codex, but agy-Claude is a good independent reviewer of them.
+   `bin/route_agent.py` encodes this as the `antigravity-claude` service
+   (`burn_first`, `pool=("antigravity", "claude_gpt")`): `route_agent.py route
+   --kind code` picks it while it holds >= 40% headroom. The same `pool=`
+   field splits **any** provider that reports several independent model-family
+   pools (aiuse `pool_family`; copilot and cursor when re-enabled in aiuse): add
+   one `Service` row per extra pool and burn the one with idle headroom first.
+   A model sublimit of a shared pool (Claude's `fable`) is not a pool.
 5. A `--print-timeout` cut prints `[agy] print timeout ... returning partial
    output` and **exits 0**; exit 0 is not success, read the output and the log.
 

@@ -94,9 +94,40 @@ Classify every pool before assigning anything:
 | **tight** | >40% of the binding window burned | one slice at most, or skip |
 | **exhausted** | `remaining_percent` ≈ 0 on ANY window of that pool | skip that pool entirely (the same vendor's other model-family pool may be fine) |
 | **lifeline** | another agent runs on it | use with care and never let it run out; see *Reserve pools* below (clinepass and Claude itself) |
+| **burn-first** | a pool whose window resets and the allowance is lost, with >= 40% left on every window (`aiuse` raises a `kind:"burn"` alert). Today: **agy's Claude/GPT pool** (`acp-run agy --model claude-opus-5-5-high` / `claude-sonnet-5-5-high`), and any provider's idle second pool | assign it first for code, review, research and second opinions, 2-3 slices at once; see *agy Claude/GPT pool* below |
 | **shared allowance** | a GitHub-side feature draws on the same subscription | usable, but spend modestly and keep a margin; see *Copilot* under *Reserve pools* below |
 | **prepaid** | real money | never without a fresh explicit operator decision |
 | **excluded** | operator has ruled it out | respect it, with its end condition (below) |
+
+### agy Claude/GPT pool — assign it first while it has headroom (operator, 2026-10-10)
+
+The operator wants agy's Claude/GPT pool used heavily whenever it has room
+(`aiuse` read 5h 100% left, weekly 49% left and a *critical* burn alert on
+2026-10-10). It is a **separate pool from agy's Gemini** and from Claude's own
+window, so spending it costs nothing that orchestration needs.
+
+1. **Probe it as its own pool.** `aiuse --available` lists it as `antigravity
+   claude_gpt`, apart from `antigravity gemini`. Decide from its two windows'
+   `remaining_percent`; either one under 15% means skip it this batch.
+2. **Assignment order for a slice that needs Claude-class judgment of code or
+   prose** (implementation, reviews, research synthesis, a second opinion on a
+   contract decision): the agy Claude/GPT pool first, then codex, then claude's
+   own window. `claude-opus-5-5-high` for the hard slices, `claude-sonnet-5-5-high`
+   for volume. Mechanical edits and bulk reading still go to the free and Gemini
+   pools first; do not spend Opus on them just because it is idle.
+3. **Only through ACP:** `acp-run agy -C <dir> -p '<prompt>' --model <m>` with the
+   usual `acp-dispatch` wrapper, never `agy -p`. Run **2-3 agy slices at a time**
+   and re-probe between batches; a heavy Opus-high run drained it in ~35 minutes on
+   2026-10-03. A 429 or `RESOURCE_EXHAUSTED` on a `claude-*` model means that pool
+   is spent; try a `gemini-*` model before leaving agy.
+4. **Not a replacement for the judgment tier:** use it as the independent reviewer
+   of a decision claude or codex makes (Step 6), not as the one deciding.
+5. **`bin/route_agent.py route --kind code`** applies the same rule (the
+   `antigravity-claude` service, `burn_first` at >= 40% headroom). Any other
+   provider that reports an independent second pool (copilot, cursor, once
+   re-enabled in `aiuse`) gets the same treatment by adding a `Service` with
+   `pool=(provider, pool_family)` there; classify it as burn-first here whenever
+   its idle window will reset unused.
 
 ### Vendors come back on their own
 

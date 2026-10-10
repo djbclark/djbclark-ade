@@ -88,6 +88,10 @@ STALE_HARD = 6 * 3600      # beyond this, treat headroom as unknown
 
 # Kinds of work. Deliberately few — a taxonomy nobody can apply is worse than
 # a coarse one that gets used.
+# burn_first services (use-it-or-lose-it pools) win a tie-sized margin while
+# they hold at least this much headroom.
+BURN_FIRST_MIN = 40.0
+BURN_FIRST_BONUS = 4.0
 KINDS = ("judgment", "code", "bulk", "research", "mechanical", "github")
 
 
@@ -121,6 +125,19 @@ class Service:
     # a genuinely Hermes-only provider would otherwise silently win Claude
     # routing decisions it cannot serve.
     hermes_only: bool = False
+    # A pool whose window resets and its allowance is lost: while it has real
+    # headroom it outranks pools that carry the same kind of work but keep
+    # their balance. `route` applies BURN_FIRST_BONUS above BURN_FIRST_MIN.
+    burn_first: bool = False
+    # Set when this service is ONE of several independent model-family pools
+    # that a single aiuse provider reports: (aiuse provider, window
+    # `pool_family`). Windows of that family are measured for this service
+    # alone; the provider's other windows stay with the provider's own
+    # service. Add a row with `pool=` to give any provider's second pool its
+    # own routing entry (copilot, cursor, ...) once aiuse reports it. Do NOT
+    # use it for a model sublimit of a shared pool (Claude's `fable`): that
+    # one is bounded by the parent windows and must stay with them.
+    pool: tuple[str, str] | None = None
 
     def eligible(self, kind: str) -> bool:
         if self.retired or self.hermes_only:
@@ -152,6 +169,20 @@ SERVICES: tuple[Service, ...] = (
             # strongest coding models available here, so the weekly pool is
             # worth reserving for coding judgment rather than spending on
             # background agent turns.
+            access="cli-only"),
+    # agy's second pool: Claude Opus/Sonnet 5.5 and GPT via the same Google AI
+    # Pro subscription, a separate 5h/weekly window from Gemini. Operator
+    # 2026-10-10: it has a lot of headroom, so use it. Real Claude-class
+    # coding and review capacity that is otherwise wasted at each reset.
+    # Reach it ONLY through `acp-run agy --model claude-opus-5-5-high` (or
+    # claude-sonnet-5-5-high), never `agy -p`; see model-routing's agy rules.
+    Service("antigravity-claude",
+            "agy (acp-run agy --model claude-opus-5-5-high | claude-sonnet-5-5-high)",
+            {"code": 11, "research": 3, "mechanical": 6},
+            "subscription",
+            "Claude/GPT pool on the Google AI Pro plan; use-it-or-lose-it, "
+            "ACP client only",
+            burn_first=True, pool=("antigravity", "claude_gpt"),
             access="cli-only"),
     Service("antigravity", "agy",
             {"bulk": 1, "research": 1, "mechanical": 2, "code": 40},
@@ -211,6 +242,14 @@ BY_NAME = {s.name: s for s in SERVICES}
 
 # -- quota snapshot + service discovery ----------------------------------
 
+def pool_service(provider: str, family: str | None) -> str:
+    """Routing service that an aiuse window of `family` belongs to."""
+    for svc in SERVICES:
+        if svc.pool == (provider, family):
+            return svc.name
+    return provider
+
+
 def load_snapshot() -> tuple[dict[str, Any], float | None]:
     """Read aiuse's own latest snapshot. Never probes; never blocks."""
     path = SNAPSHOT
@@ -238,18 +277,26 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
         name = acct.get("provider")
         if not name or acct.get("error"):
             continue
-        worst, detail = None, {}
+        # One account can hold several independent model-family pools; agy's
+        # Claude/GPT pool is its own service, so its windows must not drag
+        # the Gemini pool's headroom down (or the reverse).
+        per_key: dict[str, tuple[Any, dict[str, float]]] = {}
         for w in acct.get("windows") or []:
             remaining = w.get("remaining_percent")
             if remaining is None:
                 continue
+            key = pool_service(name, w.get("pool_family"))
+            worst, detail = per_key.get(key, (None, {}))
             detail[w.get("label") or "?"] = round(float(remaining), 1)
-            worst = remaining if worst is None else min(worst, remaining)
-        prior = providers.get(name, {}).get("remaining")
-        if prior is not None and worst is not None:
-            worst = min(worst, prior)      # several accounts: the tightest wins
-        providers[name] = {"remaining": None if worst is None else round(float(worst), 1),
-                           "windows": detail, "billing_kind": acct.get("billing_kind")}
+            per_key[key] = (remaining if worst is None else min(worst, remaining), detail)
+        if not per_key:
+            per_key[name] = (None, {})
+        for key, (worst, detail) in per_key.items():
+            prior = providers.get(key, {}).get("remaining")
+            if prior is not None and worst is not None:
+                worst = min(worst, prior)      # several accounts: the tightest wins
+            providers[key] = {"remaining": None if worst is None else round(float(worst), 1),
+                              "windows": detail, "billing_kind": acct.get("billing_kind")}
     if age is not None and age > STALE_HARD:
         return {}, age
     return providers, age
@@ -386,7 +433,10 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
             pressure = 5.0
         else:
             pressure = (100.0 - remaining) * weight / 10.0
-        scored.append((svc.rank_for(kind) + pressure, svc, remaining))
+        rank = svc.rank_for(kind) + pressure
+        if svc.burn_first and remaining is not None and remaining >= BURN_FIRST_MIN:
+            rank -= BURN_FIRST_BONUS
+        scored.append((rank, svc, remaining))
 
     if not scored:
         return None

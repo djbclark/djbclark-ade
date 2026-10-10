@@ -158,8 +158,9 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    the refuter and the writer are dispatched in parallel to Astra
    (`acp-dispatch codex --model gpt-6-astra`), Fable (`acp-dispatch claude
    --model claude-fable-5-1`, or an Agent-tool sub-agent), Grok and agy
-   (`acp-dispatch agy --model <m>`, only ever via ACP, never `agy -p`; it
-   has plenty of headroom and `aiuse` shows no pool for it). The lead merges
+   (`acp-dispatch agy --model <m>`, only ever via ACP, never `agy -p`; use
+   `--model claude-opus-5-5-high`; `aiuse` lists its Claude/GPT pool as
+   `antigravity claude_gpt`, burn-first while >= 40% left, see bigteam). The lead merges
    the four evidence files for a slice (dedupe by source and quote, keep
    every family's unique rows) and the Grok lead picks among the four
    writer drafts or merges them into one `report.md`; the counter files

@@ -8,6 +8,13 @@ operator's own tool, github.com/djbclark/aiuse — allow ~1 min) and direct
 CLI probes. Percentages drift constantly — re-probe, don't trust this file
 for balances.
 
+> **Update 2026-10-10 (operator): use agy's Claude/GPT pool heavily while it has
+> headroom** (5h 100% left, weekly 49% left, critical burn alert). Via
+> `acp-run agy --model claude-opus-5-5-high` / `claude-sonnet-5-5-high`, 2-3 slices
+> at a time, gated on `aiuse --available`; `skills/model-routing/SKILL.md`
+> (*Reading quota numbers* item 4) and `skills/bigteam/SKILL.md` (*agy Claude/GPT
+> pool*) carry the rule, `bin/route_agent.py` the `antigravity-claude` service.
+>
 > **Correction 2026-10-03: "route bulk work to antigravity first" has a limit
 > that `aiuse` cannot see.** The agy CLI has a per-login burst limit, roughly
 > **60 generation requests an hour** (inferred; Google publishes none). On
@@ -20,8 +27,8 @@ for balances.
 > same account. Headroom in `aiuse` does not guarantee the CLI can generate.
 > So for agy: use `acp-run agy` rather than `agy -p`; always pass
 > `--print-timeout`, and read a log line `attempt N failed (RESOURCE_EXHAUSTED` as
-> a fast fail; no probe loops (one probe, reuse the answer); send Opus-high
-> work sparingly (small Claude/GPT pool); and if one client 429s while `aiuse`
+> a fast fail; no probe loops (one probe, reuse the answer); burn the
+> Claude/GPT pool while `aiuse` shows headroom (2026-10-10 update above); and if one client 429s while `aiuse`
 > shows headroom, try the other. Detail and the source skill:
 > `skills/model-routing/SKILL.md` ("agy has a burst limit").
 
