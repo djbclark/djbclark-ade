@@ -12,9 +12,12 @@ session's life, closing idle herdr panes safely, is the `herdr-tidy` skill.
 
 `/rename` is a built-in command a skill cannot call, so this skill writes the
 same records `/rename` writes, through `autorename.py` next to this file.
-It works in Claude Code, zcode, and Grok, auto-detected (`GROK_SESSION_ID` when
-`GROK_AGENT=1`, else `CLAUDE_CODE_SESSION_ID`, else zcode's exec-log fds); in
-any other TUI say so and stop.
+It works in Claude Code, zcode, Grok, and cursor-agent, auto-detected
+(`CURSOR_CONVERSATION_ID` when `CURSOR_AGENT=1` and cursor-agent is the nearest
+agent process above the shell, else `GROK_SESSION_ID` when `GROK_AGENT=1`, else
+`CLAUDE_CODE_SESSION_ID`, else zcode's exec-log fds); in any other TUI say so and
+stop. The nudge hook below is not wired for cursor-agent yet, so there it runs
+only when asked or from `/handoff`.
 
 It runs three ways: the operator asks (`/autorename`), `/handoff` Step 8 calls it
 with `--auto`, and `autorename_nudge.py` (next to this file) asks for an `--auto`
@@ -111,6 +114,26 @@ the db row every picker reads. zcode sets no session-id env var: the script read
 it from this shell's own fd paths (zcode's exec log), which fails only if both
 stdout and stderr are piped away (`2>&1 |`); `--session-id sess_…` names a
 session explicitly. `--show` there prints `title (source)`.
+
+**cursor-agent.** The same script detects it from `CURSOR_CONVERSATION_ID`
+(override the base dir with `AUTORENAME_CURSOR_HOME`; default `~/.cursor`). A
+chat lives in `~/.cursor/chats/<md5(cwd)>/<id>/`: the title is `name` in
+`store.db` (meta row `0`, hex of a JSON object), mirrored to `title` in the
+`meta.json` sidecar the resume picker reads. A running cursor-agent keeps that
+object in memory and rewrites the whole row on every turn, so a disk write to a
+live chat would be reverted. For a live chat (some process holds `store.db`) the
+script therefore uses cursor-agent's own `/rename`: inside herdr it queues
+`/rename <title>` into this pane through `bin/self-slash`, which waits for the
+turn to end and for an empty input line (verified live 2026-10-10). It also
+starts a detached waiter that writes both stores once the process exits, unless
+the title changed in the meantime (log:
+`~/.local/state/autorename/cursor-waiter.log`). Outside herdr only the waiter
+runs, so the new title appears after the session ends. A closed chat is
+written directly. The report line says which path ran. cursor-agent has no
+"manual title" flag, so `--auto` counts a title as the operator's when a
+matching `/rename <title>` is in the chat's `prompt_history.json` (built-ins
+are recorded there). `--show` prints `title (manual|auto)`. Its herdr tab label
+is set as below.
 
 **Grok.** The same script detects this process when `GROK_AGENT=1` and
 `GROK_SESSION_ID` is set (override the base dir with `GROK_HOME`; default
@@ -215,8 +238,8 @@ focus, the others split into it) because herdr has no tab-to-workspace move; the
 old pane id stays valid as an alias. Report its one line.
 
 To sort **another** session's tab (one the hook missed, say), title it with
-`autorename.py --session-id <sid> "<title>"` (a Claude uuid, a Grok session id,
-or a zcode `sess_…` id) and move it with
+`autorename.py --session-id <sid> "<title>"` (a Claude uuid, a cursor-agent
+chat id, a Grok session id, or a zcode `sess_…` id) and move it with
 `HERDR_PANE_ID=<its pane> herdr_place.py move ... --no-focus`
 so the operator's view doesn't jump; `herdr pane list --workspace <id>` maps
 `agent_session.value` to pane ids.

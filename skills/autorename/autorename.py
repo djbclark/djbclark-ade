@@ -18,11 +18,21 @@ A skill cannot invoke the built-in /rename, so this writes what it writes:
   `/resume` and `grok sessions list` see the title at once. The running TUI
   does not get the in-process notification `/rename` sends, so its prompt
   border keeps the old caption until the session is resumed.
+- cursor-agent: `name` in the chat's store.db (meta row '0', hex of a JSON
+  object) plus the `title` in its meta.json sidecar, which the resume picker
+  reads. A running cursor-agent holds that object in memory and rewrites the
+  whole row on every metadata change (each turn), so a live chat is renamed
+  through its own `/rename`: queued into this herdr pane with self-slash, and
+  re-applied to disk after the process exits if that never landed. A title is
+  manual when a `/rename <title>` entry in prompt_history.json matches it.
 
 The session id comes from GROK_SESSION_ID when this process is a Grok agent
 (`GROK_AGENT=1`), else CLAUDE_CODE_SESSION_ID, else this process's own file
 descriptors, which zcode points at its exec-log path
 ~/.zcode/cli/exec/<sess-id>/call-*.log (zcode sets no session id env var).
+CURSOR_CONVERSATION_ID (with `CURSOR_AGENT=1`) wins when cursor-agent is the
+nearest agent process above this one; agent env vars are inherited by any agent
+started from another's shell, so the process tree breaks the tie.
 In any other TUI none of those exist and the script exits 2.
 
     autorename.py "Title words here"            # always rename
@@ -39,6 +49,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -212,12 +223,206 @@ def grok_set_title(summary: Path, title: str) -> None:
         os.close(fd)
 
 
+# --------------------------------------------------------------- cursor-agent
+# Layout (cursor-agent 2026.10.01): ~/.cursor/chats/<md5(cwd)>/<uuid>/ holds
+# store.db (tables blobs, meta), meta.json and prompt_history.json.
+
+STATE_DIR = Path.home() / ".local/state/autorename"
+AGENT_COMMS = {"cursor-agent": "cursor", "claude": "claude", "grok": "grok"}
+
+
+def cursor_home() -> Path:
+    return Path(os.environ.get("AUTORENAME_CURSOR_HOME", Path.home() / ".cursor"))
+
+
+def find_cursor_chat(sid: str) -> Path | None:
+    root = cursor_home() / "chats"
+    if not _sid_is_path_safe(sid) or not root.is_dir():
+        return None
+    try:
+        hits = [g / sid for g in root.iterdir()
+                if (g / sid / "store.db").is_file() or (g / sid / "meta.json").is_file()]
+    except OSError:
+        return None
+    if not hits:
+        return None
+    hits.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return hits[0]
+
+
+def _cursor_meta_row(conn: sqlite3.Connection) -> dict:
+    row = conn.execute("SELECT value FROM meta WHERE key = '0'").fetchone()
+    if not row or not row[0]:
+        raise ValueError("cursor store.db has no meta row")
+    data = json.loads(bytes.fromhex(row[0]).decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("cursor store.db meta row is not a JSON object")
+    return data
+
+
+def _cursor_manual_titles(chat: Path) -> set[str]:
+    """Titles set with the TUI's own /rename (built-ins land in prompt history)."""
+    try:
+        history = json.loads((chat / "prompt_history.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {" ".join(e.split()[1:]) for e in history
+            if isinstance(e, str) and e.split()[:1] == ["/rename"]}
+
+
+def cursor_read(chat: Path) -> tuple[str | None, str]:
+    """(title, 'manual'|'auto'). store.db is the truth; meta.json is a sidecar."""
+    title = None
+    db = chat / "store.db"
+    if db.is_file():
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        try:
+            title = str(_cursor_meta_row(conn).get("name") or "").strip() or None
+        finally:
+            conn.close()
+    else:
+        meta = json.loads((chat / "meta.json").read_text(encoding="utf-8"))
+        title = str(meta.get("title") or "").strip() or None
+    manual = title is not None and " ".join(title.split()) in _cursor_manual_titles(chat)
+    return title, "manual" if manual else "auto"
+
+
+def cursor_live_pid(chat: Path) -> int | None:
+    """Pid of a cursor-agent process that has this chat open, if any."""
+    db = chat / "store.db"
+    if not db.is_file():
+        return None
+    try:
+        out = subprocess.run(["lsof", "-t", str(db)], capture_output=True, text=True,
+                             timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    pids = [int(p) for p in out.split() if p.isdigit()]
+    return pids[0] if pids else None
+
+
+def cursor_set_title(chat: Path, title: str) -> None:
+    """Write the title the way /rename persists it. Only safe when no process has the chat open."""
+    db = chat / "store.db"
+    if db.is_file():
+        conn = sqlite3.connect(db, timeout=5, isolation_level=None)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            data = _cursor_meta_row(conn)
+            data["name"] = title
+            blob = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('0', ?)", (blob.hex(),))
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+    meta_path = chat / "meta.json"
+    if meta_path.is_file():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta["title"] = title
+        meta["updatedAtMs"] = int(time.time() * 1000)
+        tmp = meta_path.with_name(f".meta.json.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(meta, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp, meta_path)
+
+
+def _self_slash() -> str | None:
+    here = Path(__file__).resolve().parents[2] / "bin" / "self-slash"
+    return str(here) if here.is_file() else shutil.which("self-slash")
+
+
+def cursor_rename_live(sid: str, pid: int, title: str, current: str | None) -> str:
+    """Rename an open chat: /rename in its own herdr pane, else after the process exits."""
+    how = []
+    own = (os.environ.get("CURSOR_AGENT") == "1"
+           and os.environ.get("CURSOR_CONVERSATION_ID") == sid)
+    tool = _self_slash()
+    if own and tool and os.environ.get("HERDR_ENV") == "1":
+        try:
+            r = subprocess.run([tool, f"/rename {title}"], capture_output=True, text=True,
+                               timeout=30)
+            if r.returncode == 0:
+                how.append("/rename queued in this herdr pane")
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with (STATE_DIR / "cursor-waiter.log").open("a", encoding="utf-8") as log:
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "--session-id", sid,
+             "--cursor-after-exit", str(pid), "--cursor-expect", current or "", title],
+            stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+    how.append(f"written to disk when pid {pid} exits, unless renamed by then")
+    return "; ".join(how)
+
+
+def cursor_apply_after_exit(sid: str, pid: int, expect: str, title: str) -> int:
+    """Detached waiter: once no process has the chat open, write the title if still unchanged."""
+    stamp = lambda: datetime.now().strftime("%F %T")  # noqa: E731
+    while True:
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            except PermissionError:
+                pass
+            time.sleep(10)
+        time.sleep(3)
+        chat = find_cursor_chat(sid)
+        if chat is None:
+            print(f"{stamp()} {sid}: chat gone; not renamed", flush=True)
+            return 0
+        nxt = cursor_live_pid(chat)
+        if nxt is None:
+            break
+        pid = nxt
+    current, _source = cursor_read(chat)
+    if current == title:
+        print(f"{stamp()} {sid}: already {title!r}", flush=True)
+    elif (current or "") != expect:
+        print(f"{stamp()} {sid}: renamed to {current!r} meanwhile; left alone", flush=True)
+    else:
+        cursor_set_title(chat, title)
+        print(f"{stamp()} {sid}: renamed to {title!r}", flush=True)
+    return 0
+
+
+def nearest_agent() -> str | None:
+    """'cursor', 'claude' or 'grok': the closest agent process above this one."""
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,comm="], capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    procs = {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            procs[int(parts[0])] = (int(parts[1]), Path(parts[2].strip()).name)
+    pid = os.getppid()
+    for _ in range(64):
+        if pid not in procs or pid <= 1:
+            return None
+        ppid, comm = procs[pid]
+        if comm in AGENT_COMMS:
+            return AGENT_COMMS[comm]
+        pid = ppid
+    return None
+
+
 # ----------------------------------------------------------------- all backs
 
 def session_id() -> str | None:
-    """This session's id: Grok when this process is one, else Claude Code, else zcode."""
+    """This session's id: cursor-agent or Grok when this process is one, else Claude Code, else zcode."""
     grok = os.environ.get("GROK_SESSION_ID")
     claude = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    cursor = (os.environ.get("CURSOR_CONVERSATION_ID")
+              if os.environ.get("CURSOR_AGENT") == "1" else None)
+    if cursor and (not (grok or claude) or nearest_agent() == "cursor"):
+        return cursor
     if grok and (os.environ.get("GROK_AGENT") == "1" or not claude):
         return grok
     if claude:
@@ -228,9 +433,11 @@ def session_id() -> str | None:
 
 
 def backend_for(sid: str) -> str:
-    """Which store owns this id: 'zcode', 'grok', or 'claude'."""
+    """Which store owns this id: 'zcode', 'cursor', 'grok', or 'claude'."""
     if sid.startswith("sess_"):
         return "zcode"
+    if find_cursor_chat(sid) is not None:
+        return "cursor"
     grok_hit = find_grok_summary(sid) is not None
     claude_hit = find_transcript(sid) is not None
     if grok_hit and not claude_hit:
@@ -256,6 +463,9 @@ def read_title(sid: str) -> str | None:
     if kind == "zcode":
         row = zcode_current_title(sid)
         return row[0] if row else None
+    if kind == "cursor":
+        chat = find_cursor_chat(sid)
+        return cursor_read(chat)[0] if chat else None
     if kind == "grok":
         summary = find_grok_summary(sid)
         if summary is None:
@@ -276,20 +486,32 @@ def main() -> int:
     ap.add_argument("--auto", action="store_true", help="do not overwrite a title the operator set")
     ap.add_argument("--show", action="store_true", help="print the current title and exit")
     ap.add_argument("--session-id", default=None,
-                    help="session id (Claude Code uuid, Grok session id, or zcode sess_…); default: this session")
+                    help="session id (Claude Code uuid, cursor-agent chat id, Grok session id,"
+                         " or zcode sess_…); default: this session")
+    ap.add_argument("--cursor-after-exit", type=int, default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--cursor-expect", default="", help=argparse.SUPPRESS)
     args = ap.parse_args()
+
+    if args.cursor_after_exit is not None:
+        return cursor_apply_after_exit(args.session_id, args.cursor_after_exit,
+                                       args.cursor_expect, args.title)
 
     sid = args.session_id or session_id()
     if not sid:
-        print("autorename: no GROK_SESSION_ID, CLAUDE_CODE_SESSION_ID, or zcode exec-log fd found"
-              " (not a Grok, Claude Code, or zcode session); nothing renamed", file=sys.stderr)
+        print("autorename: no CURSOR_CONVERSATION_ID, GROK_SESSION_ID, CLAUDE_CODE_SESSION_ID,"
+              " or zcode exec-log fd found (not a cursor-agent, Grok, Claude Code, or zcode"
+              " session); nothing renamed", file=sys.stderr)
         return 2
 
     kind = backend_for(sid)
     transcript = None
     summary = None
+    chat = None
     try:
-        if kind == "zcode":
+        if kind == "cursor":
+            chat = find_cursor_chat(sid)
+            current, source = cursor_read(chat)
+        elif kind == "zcode":
             row = zcode_current_title(sid)
             if row is None:
                 print(f"autorename: no session {sid} in {zcode_db()}", file=sys.stderr)
@@ -322,20 +544,28 @@ def main() -> int:
     if not args.title or not (title := clean(args.title)):
         ap.error("a non-empty title is required")
 
-    state = Path.home() / ".local/state/autorename" / f"{sid}.txt"
+    state = STATE_DIR / f"{sid}.txt"
     last_written = state.read_text(encoding="utf-8").strip() if state.exists() else None
 
     # An auto title whose text already matches still gets pinned, so a later
     # Grok title refresh cannot replace it. A manual pin of the same text does not.
-    if current == title and _operator_pinned(source):
+    # cursor-agent auto-names only an unnamed chat, so a match there needs no pin.
+    if current == title and (_operator_pinned(source) or kind == "cursor"):
         print(f"unchanged: {title}")
         return 0
     if args.auto and _operator_pinned(source) and current != last_written:
         print(f"skipped: operator-set title kept ({current!r})")
         return 0
 
+    live = ""
     try:
-        if kind == "zcode":
+        if kind == "cursor":
+            pid = cursor_live_pid(chat)
+            if pid is None:
+                cursor_set_title(chat, title)
+            else:
+                live = f" (live session: {cursor_rename_live(sid, pid, title, current)})"
+        elif kind == "zcode":
             if not zcode_set_title(sid, title):
                 print(f"autorename: session {sid} vanished from {zcode_db()}", file=sys.stderr)
                 return 2
@@ -360,7 +590,7 @@ def main() -> int:
 
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text(title + "\n", encoding="utf-8")
-    print(f"renamed: {title}")
+    print(f"renamed: {title}{live}")
     return 0
 
 
