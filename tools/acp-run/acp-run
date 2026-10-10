@@ -625,8 +625,28 @@ def pick_config(options, want, category):
         for v in values:
             if want in (v.get("value"), v.get("name")):
                 return o["id"], v["value"]
+        # No exact match. The claude ACP server's model list varies between
+        # launches ("fable" one time, "claude-fable-5-1[1m]" the next;
+        # 2026-10-10), so fall back to a unique token match: strip a trailing
+        # "[...]" from both sides and accept a value whose dash-separated
+        # tokens contain the wanted name's tokens as a contiguous run.
+        def toks(x):
+            return re.sub(r"\[[^\]]*\]$", "", str(x or "")).lower().split("-")
+
+        wt = toks(want)
+        cands = []
+        for v in values:
+            for cand in (v.get("value"), v.get("name")):
+                ct = toks(cand)
+                if any(ct[i : i + len(wt)] == wt for i in range(len(ct) - len(wt) + 1)):
+                    cands.append(v)
+                    break
+        if len(cands) == 1:
+            return o["id"], cands[0]["value"]
         raise SystemExit(
-            f"acp-run: no {category} '{want}'; have: "
+            f"acp-run: no {category} '{want}'"
+            + (f" (ambiguous: {', '.join(str(c.get('value')) for c in cands)})" if cands else "")
+            + "; have: "
             + ", ".join(str(v.get("value")) for v in values)
         )
     raise SystemExit(
