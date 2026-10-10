@@ -115,6 +115,7 @@ window, so spending it costs nothing that orchestration needs.
    own window. `claude-opus-5-5-high` for the hard slices, `claude-sonnet-5-5-high`
    for volume. Mechanical edits and bulk reading still go to the free and Gemini
    pools first; do not spend Opus on them just because it is idle.
+3. **Check the model list first (2026-10-10):** `acp-run agy ... --model nonexistent` prints `have: ...`. That day the server listed only `gemini-*` models, so `claude-opus-5-5-high` failed with `no model` (exit 1, no report) even though `aiuse` showed the pool at 100% left. When no `claude-*` is listed, treat the pool as unreachable and route to codex (`gpt-6-astra`) or claude instead.
 3. **Only through ACP:** `acp-run agy -C <dir> -p '<prompt>' --model <m>` with the
    usual `acp-dispatch` wrapper, never `agy -p`. Run **2-3 agy slices at a time**
    and re-probe between batches; a heavy Opus-high run drained it in ~35 minutes on
