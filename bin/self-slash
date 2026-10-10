@@ -24,8 +24,9 @@
 # Orca backend verified 2026-10-09.
 # cursor-agent (herdr only; the pane's `agent` is "cursor"): its input line starts
 # with → instead of ❯, a turn shows "ctrl+c to stop", and the first Enter after a
-# slash command only accepts the autocomplete, so a second Enter is sent when the
-# text is still on the line (verified 2026-10-10 with /rename, cursor-agent 2026.10.01).
+# slash command only accepts the autocomplete, so up to two more Enters are sent
+# while the text (or its menu row) is still on screen (verified 2026-10-10 with
+# /rename; /quit left its menu row open, cursor-agent 2026.10.01).
 set -u
 delay=6; dry=0
 while :; do case "${1:-}" in --delay) delay="$2"; shift 2;; --dry-run) dry=1; shift;; *) break;; esac; done
@@ -141,9 +142,13 @@ print("\n".join(t.get("tail") or []))'
 send_text() {
   if [ "$host" = herdr ]; then
     herdr pane run "$pane" "$text" || return 1
+    # The last → line may be the still-open autocomplete row ("→ /quit   Exit",
+    # seen 2026-10-10) rather than the input line, so match the text as a prefix.
     if [ "$tui" = cursor ]; then
-      sleep 2
-      [ "$(classify_prompt)" = "$text" ] && herdr agent send-keys "$pane" enter >/dev/null
+      for _ in 1 2; do
+        sleep 2
+        case "$(classify_prompt)" in "$text"*) herdr agent send-keys "$pane" enter >/dev/null ;; *) break ;; esac
+      done
     fi
     return 0
   else
