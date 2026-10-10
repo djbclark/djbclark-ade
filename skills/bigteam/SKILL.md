@@ -1,16 +1,12 @@
 ---
 name: bigteam
 description: >-
-  Run the prompt that follows as a multi-vendor fan-out instead of doing it
-  single-threaded: probe every quota pool, slice the work into disjoint
-  file-scoped assignments, dispatch them in parallel across the non-Claude TUIs
-  with fresh monthly subscription windows, and integrate the results yourself.
-  Use when the operator types /bigteam, says "bigteam", "parallelize this",
-  "orchestrate this across agents/vendors", or "use the other agents too". Also
-  the default, unprompted, for any discrete, separable task whose work would
-  otherwise pull heavy context into the session (operator ruling 2026-10-08),
-  and whenever the context-size hook says to delegate. Another bigteam run may
-  be live (herdr tab `coord`): Step 0 keeps the two apart.
+  Run the prompt as a multi-vendor fan-out: probe quota pools, slice the work
+  into disjoint file-scoped assignments, dispatch them in parallel across the
+  non-Claude TUIs, integrate the results. Use for /bigteam, "bigteam",
+  "parallelize this", "use the other agents too", any discrete separable task
+  that would pull heavy context into the session, and when the context-size hook
+  says to delegate.
 ---
 
 # bigteam — multi-vendor fan-out for one prompt

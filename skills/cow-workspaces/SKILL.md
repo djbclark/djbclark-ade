@@ -1,6 +1,12 @@
 ---
 name: cow-workspaces
-description: Give an agent its own workspace with `cow` (APFS copy-on-write pastures) instead of a plain clone or `git worktree` — via the `cow-pasture` wrapper that scrubs copied secrets and can register the pasture with Orca. Use when starting parallel or isolated work on any primary checkout under ~/src, ~/orca/projects or ~/.hermes, when dispatching an Orca or Hermes worker into its own directory, or when asked about cow, pastures, `cow migrate`, or why an Orca worker in a pasture stalled.
+description: >-
+  Give an agent its own workspace with `cow` (APFS copy-on-write pastures) via
+  the `cow-pasture` wrapper, instead of a plain clone or `git worktree`. Use
+  when starting parallel or isolated work on a checkout under ~/src,
+  ~/orca/projects or ~/.hermes, dispatching an Orca or Hermes worker into its
+  own directory, or asked about cow, pastures, `cow migrate`, or a stalled Orca
+  worker in a pasture.
 ---
 
 # cow workspaces

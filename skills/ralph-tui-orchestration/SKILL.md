@@ -1,6 +1,11 @@
 ---
 name: ralph-tui-orchestration
-description: Operate the Ralph TUI + Beads multi-repo controller system (djbclark/ops-djbclark umbrella) — seeding tasks, going live with a controller for the first time, and the safety discipline that caught a real near-miss. Use when asked to run/seed/check a Ralph controller for stayturgid, site-djbclark, site-private, or Shizuku, or when setting up Ralph TUI for a new project.
+description: >-
+  Operate the Ralph TUI + Beads multi-repo controller system
+  (djbclark/ops-djbclark umbrella): seeding tasks, going live with a controller,
+  the safety discipline. Use when asked to run/seed/check a Ralph controller for
+  stayturgid, site-djbclark, site-private or Shizuku, or to set up Ralph TUI for
+  a new project.
 ---
 
 # Ralph TUI orchestration

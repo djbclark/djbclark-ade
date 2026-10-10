@@ -1,16 +1,11 @@
 ---
 name: herdr-tidy
 description: >-
-  Close idle herdr panes and tabs safely, every TUI and Hermes included: a
-  no-model classifier (tidy.py) says per pane what it is, whether it may be
-  closed and why not, performs the precondition (/handoff for an idle Claude
-  session), writes a close ledger with the exact resume command, and closes the
-  tab; closed panes resurface through /helm-all with their resume command. The
-  same pass runs over Orca terminals with `--host orca` (/orca-tidy). Use when the
-  operator types /herdr-tidy or /orca-tidy, says "clean up my herdr", "tidy my
-  Orca", "close the idle panes", "close idle Orca terminals", "which panes can I
-  close", "tidy the tabs", or asks whether a pane or terminal is safe to close.
-  Fails closed on anything it cannot verify.
+  Close idle herdr panes and tabs safely, every TUI and Hermes included, via a
+  no-model classifier that writes a close ledger with the resume command; the
+  same pass runs over Orca terminals (/orca-tidy). Use for /herdr-tidy,
+  /orca-tidy, "clean up my herdr", "tidy my Orca", "close the idle panes", or
+  whether a pane or terminal is safe to close. Fails closed.
 ---
 
 # herdr-tidy — close idle panes without losing anything helm cannot find again

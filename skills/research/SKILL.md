@@ -1,14 +1,12 @@
 ---
 name: research
 description: >-
-  Evidence-grounded research with a verifiable paper trail: deep research,
+  Evidence-grounded research with a verifiable paper trail: planned searches,
+  every claim logged with a verbatim quote from an opened source, a
+  counter-evidence pass, script-checked synthesis. Use for deep research,
   literature or systematic reviews, "what does the evidence say", comparing
-  options with sources, verifying a set of claims. Plans, fans out bounded
-  searches (subagents if the host has them, sequential slices otherwise),
-  logs every claim with a verbatim quote from an opened source, runs a
-  counter-evidence pass, then one writer synthesises and a script checks
-  quotes, numbers, references and citations. Not for a single quick lookup,
-  debugging, or tutoring (use `learn` for that).
+  options with sources, verifying claims. Not for a quick lookup, debugging, or
+  tutoring (use `learn`).
 ---
 
 # research

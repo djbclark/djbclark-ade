@@ -1,19 +1,12 @@
 ---
 name: helm
 description: >-
-  Answer every agent session that is waiting on the operator from one window: a
-  no-model collector finds each waiting session of every TUI (herdr, Orca, tmux,
-  Claude registry, Hermes, ACP launches), and this skill relays one item per
-  prompt (AskUserQuestion; clarify on Hermes), sends the answer back, and has
-  idle sessions audit themselves with /loose; with "all" it adds ended sessions
-  that still hold open work (handoffs nobody picked up, unanswered last
-  questions). Use when the operator types /helm or /helm-all, says "take the
-  helm", "run the fleet from here", "what needs me", "what is waiting on me",
-  "what is open anywhere", "including stopped sessions", "what did we leave
-  hanging", or wants to answer other sessions' prompts or restart handed-off
-  work from one window. With "auto" (`/helm auto`, "run the fleet unattended
-  until <time>") it works the open backlog itself while the operator is away,
-  per auto.md.
+  Answer every agent session waiting on the operator from one window: a no-model
+  collector finds waiting sessions across all TUIs, this skill relays one prompt
+  at a time and sends the answer back; "all" adds ended sessions with open work.
+  Use for /helm, /helm-all, "take the helm", "what needs me", "what is open
+  anywhere", "what did we leave hanging". `/helm auto` works the backlog
+  unattended while the operator is away.
 ---
 
 # helm — every waiting session, one prompt at a time

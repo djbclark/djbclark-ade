@@ -1,12 +1,11 @@
 ---
 name: effort-routing
 description: >-
-  Match your own reasoning effort to the work in front of you, within a
-  single session — drop to a cheaper tier for mechanical stretches, climb
-  back for judgment, and say when you switch. Use when starting a long
-  stretch of file edits, doc writing, or command running; when a session
-  set to high effort is doing rote work; when dispatching subagents; or
-  when asked "should we drop the thinking level for this".
+  Match your own reasoning effort to the work within a session: drop to a
+  cheaper tier for mechanical stretches, climb back for judgment, and say when
+  you switch. Use for long stretches of file edits, doc writing or command
+  running, when a high-effort session does rote work, when dispatching
+  subagents, or on "should we drop the thinking level for this".
 ---
 
 # Effort routing — your own tier, not other vendors'

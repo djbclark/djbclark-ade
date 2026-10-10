@@ -1,6 +1,9 @@
 ---
 name: handoff
-description: Create a deep Tier 2 handoff document — chain-tagged, DAG-linked, mined from the full conversation. Lands in site-private/memory/handoffs/ for the ops-djbclark suite, or inside the current project's own repo otherwise. Use when pausing substantial work, before ending a long session, or when the operator says "do a handoff", "create a handoff", "save session context".
+description: >-
+  Create a deep Tier 2 handoff document, chain-tagged, DAG-linked, mined from
+  the full conversation. Use when pausing substantial work, before ending a long
+  session, or on "do a handoff", "create a handoff", "save session context".
 ---
 
 # Handoff — Tier 2 deep recovery document

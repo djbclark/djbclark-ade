@@ -1,6 +1,12 @@
 ---
 name: dialogue
-description: Run a multi-model dialogue that produces one artifact (a spec, a report, a design) with a final-word model: fixed speaking rounds through pinned headless routes, a machine-read footer per turn (point ids, status, dissent), a transcript that is the record, and script checks for the failures the hiwymi ai-heaven run measured. Use when the operator asks to "have the models chat about it", "three-model dialogue", "let Grok/Fable/Astra argue it out and write X", "dialogue skill", or wants several vendors to settle points of contention before one of them has the final word. Not for a quick second opinion (one `acp-run` call) or for fan-out work with no argument between models (use `bigteam`).
+description: >-
+  Run a multi-model dialogue that produces one artifact (spec, report, design)
+  with a final-word model: fixed speaking rounds through pinned headless routes,
+  a machine-read footer per turn, the transcript as the record. Use for "have
+  the models chat about it", "three-model dialogue", "let Grok/Fable/Astra argue
+  it out and write X". Not for a quick second opinion (one `acp-run` call) or
+  fan-out without argument (use `bigteam`).
 ---
 
 # dialogue — several models argue, one artifact, one final word

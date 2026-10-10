@@ -1,13 +1,11 @@
 ---
 name: steps
 description: >-
-  Step the operator through the open items one at a time, each as its own
-  multiple-choice prompt (AskUserQuestion on Claude-class agents; clarify on
-  Hermes, which is Telegram buttons whose labels are the choice text) with the
-  recommended option first, acting on each answer before asking the next. Use
-  when the operator types /steps (optionally with item numbers or a topic),
-  says "step me through it", "one at a time", or "walk me through" a list of
-  open items, options or pending decisions.
+  Step the operator through open items one at a time, each as its own
+  multiple-choice prompt (AskUserQuestion; clarify on Hermes) with the
+  recommended option first, acting on each answer before the next. Use for
+  /steps (optionally with item numbers or a topic), "step me through it", "one
+  at a time", "walk me through" a list of items or pending decisions.
 ---
 
 # steps — one open item at a time, recommendation first

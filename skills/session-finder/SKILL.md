@@ -1,16 +1,12 @@
 ---
 name: session-finder
 description: >-
-  Find which agent session (Claude Code, Codex, Hermes, Cursor, opencode,
-  Cline, Copilot, Qwen, muse, zcode, agy, ACP launches) is or ever was on a
-  topic, running or ended, plus handoff chains and memory; say where it lives
-  (herdr/Orca/tmux/Ghostty) and how the work continues: message it, start a
-  /baton session from its handoff, resume it, or brief a clean agent on the
-  right vendor, model and effort, without colliding with other sessions. Use
-  when the operator says "tell the agent doing X ...", "which session is on X",
-  "which session did X", "did we ever look at X", "continue the X work", "find
-  the session where we did X", "what happened to the X work", types
-  /session-finder-all, or any relay to a session whose name you do not know.
+  Find which agent session (any TUI, running or ended) is or was on a topic,
+  with its handoff chains, where it lives (herdr/Orca/tmux/Ghostty) and how to
+  continue: message it, /baton from its handoff, resume it, or brief a clean
+  agent. Use for "tell the agent doing X ...", "which session is on X", "did we
+  ever look at X", "find the session where we did X", /session-finder-all, or
+  any relay to a session whose name you don't know.
 ---
 
 # session-finder — which session, where, and how the work continues

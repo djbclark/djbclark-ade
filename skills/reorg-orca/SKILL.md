@@ -1,6 +1,11 @@
 ---
 name: reorg-orca
-description: Reorganize a cluttered Orca setup from the CLI — rename worktrees/projects/tabs, reparent worktrees, split and close terminals — the way herdr lets an AI restructure workspaces. Snapshots current structure, proposes a numbered plan, applies only verbs Orca actually has, and says plainly which requested moves it cannot do yet (move terminal, swap, resize, reorder, repo rm). Use when asked to tidy, clean up, reorganize or restructure Orca workspaces, worktrees, projects or tabs.
+description: >-
+  Reorganize a cluttered Orca setup from the CLI: rename
+  worktrees/projects/tabs, reparent worktrees, split and close terminals,
+  applying only verbs Orca has and saying which requested moves it cannot do.
+  Use when asked to tidy, clean up, reorganize or restructure Orca workspaces,
+  worktrees, projects or tabs.
 ---
 
 # reorg-orca

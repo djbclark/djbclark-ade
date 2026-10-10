@@ -1,14 +1,11 @@
 ---
 name: loose
 description: >-
-  Audit the current session for loose ends — unfinished work, unverified claims,
-  leftover test artifacts, undocumented findings, unreported upstream bugs,
-  deviations from the operator's own decisions — then step him through each one
-  with /steps (one multiple-choice prompt at a time), and finally ask whether to
-  /handoff or /quit. Use when the operator types /loose, asks "any loose ends?",
-  "anything outstanding?", "did we finish everything?", or asks to be walked
-  through what is left. Also use unprompted before a handoff or at the end of a
-  long working session.
+  Audit the current session for loose ends (unfinished work, unverified claims,
+  leftover test artifacts, unreported upstream bugs), step the operator through
+  each with /steps, then ask whether to /handoff or /quit. Use for /loose, "any
+  loose ends?", "did we finish everything?", or unprompted before a handoff or
+  at the end of a long session.
 ---
 
 # loose — find what is unfinished, then make it decidable

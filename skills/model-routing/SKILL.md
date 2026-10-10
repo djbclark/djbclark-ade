@@ -1,13 +1,11 @@
 ---
 name: model-routing
 description: >-
-  Route AI work by vendor × model × effort across every service on this
-  machine: map aiuse --json lines to their TUIs, know which pools are
-  monthly subscription vs prepaid vs free, spot chronically-unused quota
-  worth burning, and pick the right AI for the kind of work. Use when
-  choosing which agent/model/service should run a task, before big
-  multi-agent runs, when a quota window is tight, or when asked "which AI
-  should do X", "what models do we have", or about aiuse output.
+  Route AI work by vendor × model × effort across every service on this machine:
+  map aiuse --json lines to their TUIs, tell subscription from prepaid from free
+  pools, spot unused quota worth burning. Use when choosing which agent/model
+  should run a task, before big multi-agent runs, when a quota window is tight,
+  or on "which AI should do X", "what models do we have", aiuse output.
 ---
 
 # Model routing on this machine
