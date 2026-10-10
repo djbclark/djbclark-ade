@@ -16,8 +16,7 @@ It works in Claude Code, zcode, Grok, and cursor-agent, auto-detected
 (`CURSOR_CONVERSATION_ID` when `CURSOR_AGENT=1` and cursor-agent is the nearest
 agent process above the shell, else `GROK_SESSION_ID` when `GROK_AGENT=1`, else
 `CLAUDE_CODE_SESSION_ID`, else zcode's exec-log fds); in any other TUI say so and
-stop. The nudge hook below is not wired for cursor-agent yet, so there it runs
-only when asked or from `/handoff`.
+stop.
 
 It runs three ways: the operator asks (`/autorename`), `/handoff` Step 8 calls it
 with `--auto`, and `autorename_nudge.py` (next to this file) asks for an `--auto`
@@ -31,7 +30,14 @@ current zcode docs name `config.json`, so newer builds are covered too; the
 nudge's once-per-session state file absorbs a double fire. zcode stdout is JSON
 `additionalContext`. Grok registers it as a
 Stop hook in `~/.grok/hooks/autorename.json`, because Grok discards
-UserPromptSubmit stdout; the Grok section below has the rest.
+UserPromptSubmit stdout; the Grok section below has the rest. cursor-agent
+needs no registration of its own: it also loads `~/.claude/settings.json` hooks
+and runs UserPromptSubmit as `beforeSubmitPrompt`. It ignores stdout that is not
+JSON, so the script recognises cursor input (`cursor_version`) and prints
+`{"additional_context": …}`. It skips headless runs (the parent cursor-agent was
+started with `acp`, `-p` or `--print`) and chats titled with `/rename` (verified
+live 2026-10-10). Before that fix, the Claude-format output was silently
+dropped in cursor sessions and the once-per-session marker was used up.
 
 ## Arguments: `/autorename all` is the full herdr reorganization
 

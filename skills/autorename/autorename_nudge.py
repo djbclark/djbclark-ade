@@ -28,6 +28,13 @@ The backend is chosen by the hook event, then by session-id shape: a Grok
   (`title_is_manual`) is left alone. `stopHookActive`, a subagent stop, and any
   Stop whose reason is not `end_turn` produce no output, so the continuation
   and session teardown are allowed to finish.
+- cursor-agent: no registration of its own. cursor-agent also loads the hooks
+  in ~/.claude/settings.json, runs UserPromptSubmit as beforeSubmitPrompt, and
+  ignores stdout that is not JSON, so the note goes out as top-level
+  `additional_context` (it does not unwrap hookSpecificOutput by default). Input
+  carries `cursor_version`/`generation_id`; the id is `conversation_id`. Headless
+  runs (the parent cursor-agent was started with `acp`, `-p` or `--print`) are
+  skipped, as is a chat whose title was set with /rename.
 
 Fires at most once per session (state in ~/.local/state/autorename/), skips
 slash commands and very short prompts, skips Claude non-interactive entrypoints
@@ -79,6 +86,42 @@ def grok_is_manual(sid: str) -> bool:
     return source == "manual"
 
 
+def cursor_is_manual(sid: str) -> bool:
+    sys.path.insert(0, str(SKILL_DIR))
+    from autorename import cursor_read, find_cursor_chat  # noqa: E402  (sibling script)
+    chat = find_cursor_chat(sid)
+    if chat is None:
+        return False  # a brand-new chat may not be on disk yet
+    try:
+        return cursor_read(chat)[1] == "manual"
+    except (OSError, ValueError):
+        return True
+
+
+def cursor_headless() -> bool:
+    """True when the cursor-agent above this hook runs headless (ACP or --print)."""
+    import subprocess
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,args="], capture_output=True,
+                             text=True, timeout=1).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    procs = {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            procs[int(parts[0])] = (int(parts[1]), parts[2].split())
+    pid = os.getppid()
+    for _ in range(64):
+        if pid not in procs or pid <= 1:
+            return False
+        ppid, argv = procs[pid]
+        if argv and Path(argv[0]).name == "cursor-agent":
+            return bool({"acp", "-p", "--print"} & set(argv[1:]))
+        pid = ppid
+    return False
+
+
 def note_text() -> str:
     py = PY if Path(PY).is_file() else "python3"
     return (
@@ -98,6 +141,9 @@ def emit(kind: str) -> None:
     if kind == "claude":
         print(note_text())
         return
+    if kind == "cursor":
+        print(json.dumps({"additional_context": note_text()}, ensure_ascii=False))
+        return
     event = "Stop" if kind == "grok" else "UserPromptSubmit"
     print(json.dumps({
         "hookSpecificOutput": {
@@ -114,11 +160,17 @@ def main() -> None:
     data = json.load(sys.stdin)
     event = data.get("hook_event_name") or ""
     event_snake = data.get("hookEventName") or ""
-    grok = event == "Stop" or event_snake == "stop"
-    sid = data.get("session_id") or data.get("sessionId") or ""
-    zcode = (not grok) and sid.startswith("sess_")
+    cursor = bool(data.get("cursor_version") or data.get("generation_id")
+                  or event == "beforeSubmitPrompt")
+    grok = not cursor and (event == "Stop" or event_snake == "stop")
+    sid = (data.get("conversation_id") if cursor else None) \
+        or data.get("session_id") or data.get("sessionId") or ""
+    zcode = not (grok or cursor) and sid.startswith("sess_")
 
-    if grok:
+    if cursor:
+        if event not in ("", "beforeSubmitPrompt", "UserPromptSubmit") or cursor_headless():
+            return
+    elif grok:
         # A continuation, a subagent, or session teardown must be allowed to stop.
         if data.get("stopHookActive") or data.get("subagentType"):
             return
@@ -152,7 +204,11 @@ def main() -> None:
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text("1\n", encoding="utf-8")
 
-    if grok:
+    if cursor:
+        if cursor_is_manual(sid):
+            return
+        emit("cursor")
+    elif grok:
         if grok_is_manual(sid):
             return
         emit("grok")
