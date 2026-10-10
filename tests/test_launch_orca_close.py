@@ -98,5 +98,55 @@ class OrcaClose(unittest.TestCase):
         self.assertEqual(self.closes(), [])
 
 
+
+class OrcaCreatedHandle(unittest.TestCase):
+    """`orca terminal create --json` output, as the live CLI returned it on 2026-10-10."""
+
+    def test_live_shape(self):
+        out = json.dumps({"id": "x", "ok": True, "result": {"terminal": {
+            "handle": "term_new", "tabId": "tab-9", "paneKey": "tab-9:leaf-9"}}})
+        self.assertEqual(launch.orca_created_handle(out), "term_new")
+
+    def test_bare_shapes_and_garbage(self):
+        self.assertEqual(launch.orca_created_handle(json.dumps({"terminal": {"handle": "t1"}})), "t1")
+        self.assertEqual(launch.orca_created_handle(json.dumps({"handle": "t2"})), "t2")
+        self.assertIsNone(launch.orca_created_handle(json.dumps({"ok": False, "error": "nope"})))
+        self.assertIsNone(launch.orca_created_handle("not json"))
+        self.assertIsNone(launch.orca_created_handle("[]"))
+
+
+class LaunchClaimRelease(unittest.TestCase):
+    """A closed or failed launch must not leave its bigteam claim blocking the repo (seen live 2026-10-10)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="claim-"))
+        self.claim = self.tmp / "CLAIM"
+        self.claim.write_text("session: launch x\nrepo: r\nfiles: (whole repo, unspecified)\nstart: now\n\n")
+        self.log = self.tmp / "launches.jsonl"
+        for p in (mock.patch.object(launch, "STATE", self.tmp), mock.patch.object(fleet, "LAUNCHES", self.log)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def dones(self):
+        return [ln for ln in self.claim.read_text().splitlines() if ln.startswith("DONE ")]
+
+    def test_release_is_idempotent(self):
+        d = {"id": "x", "claim": str(self.claim)}
+        launch.release_launch_claim(d)
+        launch.release_launch_claim(d)
+        self.assertEqual(len(self.dones()), 1)
+
+    def test_no_claim_is_a_noop(self):
+        launch.release_launch_claim({"id": "x", "claim": None})
+        launch.release_launch_claim({"id": "x", "claim": str(self.tmp / "missing")})
+
+    def test_abort_start_closes_record_and_releases(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            launch.abort_start({"id": "x", "claim": str(self.claim)}, "orca terminal create failed: boom")
+        self.assertEqual(len(self.dones()), 1)
+        rec = [json.loads(ln) for ln in self.log.read_text().splitlines()]
+        self.assertTrue(rec[-1]["closed"])
+        self.assertIn("boom", rec[-1]["error"])
+
 if __name__ == "__main__":
     unittest.main()

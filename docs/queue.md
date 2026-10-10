@@ -526,7 +526,8 @@ the zcode TUI, not Hermes.
   **Done 2026-10-09 (easy wins):** `launch.py close` now closes the Orca
   terminal a launch was hosted in (`orca terminal close --terminal`, skipped
   for the caller's own terminal and for handles Orca no longer lists; test
-  `tests/test_launch_orca_close.py`); autorename needs no Orca step (Orca's
+  `tests/test_launch_orca_close.py`; verified live 2026-10-10, which found and fixed a
+  `terminal create` handle-parse bug and failed starts and closes leaving their claim blocking the repo); autorename needs no Orca step (Orca's
   terminal title already follows the session's `custom-title` record; noted in
   its SKILL.md); bigteam Step 0 and session-finder rung d now give the Orca
   commands. **Still queued:** `launch.py start_tui`, acp-run agent-state reporting into Orca,

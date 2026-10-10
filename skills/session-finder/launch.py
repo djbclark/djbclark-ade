@@ -269,6 +269,37 @@ def runner_script(d, acp_cmd, pane=None):
     return "\n".join(lines) + "\n"
 
 
+def release_launch_claim(d):
+    """Append DONE to a launch's bigteam claim unless the runner already did, so it stops blocking the repo."""
+    c = Path(d.get("claim") or "")
+    if d.get("claim") and c.is_file() and "\nDONE " not in "\n" + c.read_text():
+        with c.open("a") as fh:
+            fh.write(f"DONE {time.strftime('%Y-%m-%dT%H:%M:%S%z')}\n")
+
+
+def abort_start(d, msg):
+    """A start that failed after its record and claim were written: close both, then exit."""
+    record({"id": d["id"], "closed": True, "closed_at": time.time(), "error": msg[:300]})
+    release_launch_claim(d)
+    die(msg)
+
+
+def orca_created_handle(out):
+    """The new terminal's handle from `orca terminal create --json`, or None.
+
+    The live CLI nests it as result.terminal.handle (verified 2026-10-10); the bare shapes are kept as fallbacks."""
+    try:
+        j = json.loads(out)
+    except ValueError:
+        return None
+    if not isinstance(j, dict):
+        return None
+    for t in ((j.get("result") or {}).get("terminal"), j.get("terminal"), j):
+        if isinstance(t, dict) and t.get("handle"):
+            return t["handle"]
+    return None
+
+
 def start(a, brief_text, parent=None):
     agent = a.agent
     if agent in EXCLUDED:
@@ -396,16 +427,13 @@ def start(a, brief_text, parent=None):
         report(pane, agent, "working", lid, d["name"])
         rc, out = fleet.run(HERDR, "pane", "run", pane, "bash", d["runner"], timeout=20)
         if rc != 0 or '"error"' in out:
-            die(f"herdr pane run failed: {out[:300]}")
+            abort_start(d, f"herdr pane run failed: {out[:300]}")
     elif host == "orca":
         rc, out = fleet.run("orca", "terminal", "create", "--worktree", f"path:{cwd}", "--title", d["name"][:40],
                             "--command", f"bash {d['runner']}", "--json", timeout=30)
-        try:
-            handle = json.loads(out).get("terminal", {}).get("handle") or json.loads(out).get("handle")
-        except ValueError:
-            handle = None
+        handle = orca_created_handle(out)
         if rc != 0 or not handle:
-            die(f"orca terminal create failed: {out[:300]}")
+            abort_start(d, f"orca terminal create failed: {out[:300]}")
         d["host"]["terminal"] = handle
         record({"id": lid, "host": d["host"]})
     else:
@@ -583,6 +611,7 @@ def cmd_close(a):
             if any(x.get("exit") is not None for x in fleet.launches() if x["id"] == a.id):
                 break
     record({"id": a.id, "closed": True, "closed_at": time.time()})
+    release_launch_claim(d)
     if host.get("kind") in ("herdr", "herdr-tui") and host.get("pane") and not a.keep_pane:
         if pane_exists(host["pane"]):
             ag = fleet.herdr_json("agent", "get", host["pane"]).get("agent") or {}
