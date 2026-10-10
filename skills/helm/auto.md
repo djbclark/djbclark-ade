@@ -308,6 +308,11 @@ handled once, in this order, and not repaired:
     clean in the morning and had five conflicts once the stack landed.
     `/opt/homebrew/bin/python3` does not exist here; use the repo venv.
 
+22. **Brief numbers as of a sha, sizes in bytes.** "23,824 bytes" was stale by
+    the time the cursor worker started (master had moved); say "as of <sha>" and
+    give targets in bytes, not "19 KB". The condense extraction check should
+    also flag any wrapped line that now starts with `>`, `-` or `1.`.
+
 ## 10. What this is not
 
 1. Not relay mode with the answers filled in: the queue's items are still the
