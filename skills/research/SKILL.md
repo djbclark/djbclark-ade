@@ -158,9 +158,17 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    the refuter and the writer are dispatched in parallel to Astra
    (`acp-dispatch codex --model gpt-6-astra`), Fable (`acp-dispatch claude
    --model claude-fable-5-1`, or an Agent-tool sub-agent), Grok and agy
-   (`acp-dispatch agy --model <m>`, only ever via ACP, never `agy -p`; use
-   `--model claude-opus-5-5-high`; `aiuse` lists its Claude/GPT pool as
-   `antigravity claude_gpt`, burn-first while >= 40% left, see bigteam). The lead merges
+   (`acp-dispatch agy --model <m>`, only ever via ACP, never `agy -p`;
+   `--model claude-opus-5-5-high` draws its Claude/GPT pool, which `aiuse`
+   lists as `antigravity claude_gpt`, burn-first while >= 40% left, see
+   bigteam, **but only when the live session offers that id**: the model
+   list comes from the agent at session start, and on 2026-10-10 11:06 it
+   offered only `gemini-*` ids, so the dispatch failed with "acp-run: no
+   model 'claude-opus-5-5-high'; have: gemini-3.8-flash-high, ...". Check
+   with `acp-run agy --info` (the `model` config option) before the first
+   agy dispatch of a run; when no `claude-*`/`gpt-*` id is listed, use
+   `gemini-3.8-flash-high` and note in `plan.md` that the Claude/GPT pool
+   was unreachable). The lead merges
    the four evidence files for a slice (dedupe by source and quote, keep
    every family's unique rows) and the Grok lead picks among the four
    writer drafts or merges them into one `report.md`; the counter files
