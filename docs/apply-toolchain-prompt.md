@@ -313,6 +313,15 @@ directory and registering in `settings.json` (read its README); do that only
 with the user's approval and a backup. Do not install `herdr-orchestration`
 or `ralph-tui-orchestration`; they need tools this setup does not use.
 
+**From djbclark's `djbclark-ade` repo** (public, MIT;
+https://github.com/djbclark/djbclark-ade, skills under `skills/`, each
+described in `docs/skills.md`). Install project-scoped by copying or
+symlinking the skill directory into `.claude/skills/<name>/`:
+
+| Skill | Install? | What it gives this repo |
+|---|---|---|
+| `report` | yes | `/report`: formats a long Markdown deliverable (research report, spec, review) so it reads well in a Markdown previewer such as Marked 2: numbered superscript citations linked to an anchored list, an evidence table whose ids link to the source (no URL column), descriptive file names with a symlink at any generic name a tool expects, paragraphs under ~180 words, and a render check that captures only the previewer's window. Its two stdlib scripts (`scripts/reformat_citations.py`, `scripts/cite_sup.py`) are idempotent. Apply it before the first `open` of any long document the user will read, not after a formatting complaint. |
+
 **From Matt Pocock's skills marketplace** (public):
 
 ```text
