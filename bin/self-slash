@@ -19,6 +19,8 @@
 # pane's agent_status is "working": a command sent mid-turn is swallowed, never run
 # (seen 2026-10-09: a /rename sent while the session worked left no trace).
 # A stale $HERDR_PANE_ID (pane moved between workspaces) is resolved via `herdr pane get`.
+# Refuses (exit 7) while another command is queued for the same pane, and a
+# /compact within SELF_SLASH_COMPACT_GAP (default 1800 s) of the last one sent there.
 # Runs detached (nohup) so it survives the Bash tool returning; the log
 # is ~/.local/state/self-slash.log.  First verified 2026-10-09 (ClaudeHelm, herdr);
 # Orca backend verified 2026-10-09.
@@ -62,6 +64,27 @@ if [ "${#text}" -gt "${SELF_SLASH_MAX:-300}" ]; then
 fi
 [ "$dry" = 1 ] && { echo "self-slash: dry run, would send to $host $pane after ${delay}s: ${text:0:80}"; exit 0; }
 log="$HOME/.local/state/self-slash.log"; mkdir -p "$(dirname "$log")"
+# One waiter per pane, and no second /compact soon after one: on 2026-10-10 the
+# log showed five pairs sent to one pane within 1-3 minutes, and one compacted a
+# freshly compacted 37k context into 126k (the queued second /compact ran after
+# the first, and each one costs ~150k+ base-input-equivalent tokens).
+lockdir="$HOME/.local/state/self-slash"; mkdir -p "$lockdir"
+lock="$lockdir/$(printf '%s' "$pane" | tr -c 'A-Za-z0-9_.-' '_').pid"
+if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
+  if [ -s "$lock" ] && kill -0 "$(cat "$lock")" 2>/dev/null; then
+    echo "self-slash: a command is already queued for $host $pane (pid $(cat "$lock")); not queuing another. See $log." >&2; exit 7
+  fi
+  case "$text" in /compact*)
+    gap="${SELF_SLASH_COMPACT_GAP:-1800}"
+    last=$(grep -F " $host $pane: sent /compact" "$log" 2>/dev/null | tail -1 | cut -c1-19)
+    if [ -n "$last" ]; then
+      ago=$(( $(date +%s) - $(date -j -f '%Y-%m-%d %H:%M:%S' "$last" +%s 2>/dev/null || echo 0) ))
+      if [ "$ago" -lt "$gap" ]; then
+        echo "self-slash: /compact was already sent to $host $pane ${ago}s ago (< ${gap}s); not compacting again. Compaction is not free; keep working (SELF_SLASH_COMPACT_GAP=N to override)." >&2; exit 7
+      fi
+    fi;;
+  esac
+fi
 if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   SELF_SLASH_CHILD=1 nohup "$0" --delay "$delay" "$text" >>"$log" 2>&1 </dev/null &
   echo "self-slash: queued for $host $pane in ${delay}s (log: $log)"
@@ -156,6 +179,11 @@ send_text() {
   fi
 }
 
+# Two parents can pass the check above before either child writes the lock.
+if [ -s "$lock" ] && [ "$(cat "$lock")" != "$$" ] && kill -0 "$(cat "$lock")" 2>/dev/null; then
+  echo "$(date '+%F %T') $host $pane: another waiter (pid $(cat "$lock")) already queued; NOT sent: ${text:0:80}"; exit 7
+fi
+echo $$ > "$lock"; trap 'rm -f "$lock"' EXIT
 sleep "$delay"
 # herdr: never send while the session is mid-turn (status "working"); the input is
 # accepted but Claude Code never runs it.  Wait for idle, bounded by SELF_SLASH_WAIT.

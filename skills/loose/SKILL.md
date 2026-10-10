@@ -112,8 +112,10 @@ everything first (commits pushed, no pending reads), then run
 `~/src/djbclark-ade/bin/self-slash "/quit"` as the last action and end the turn at
 once. If the handoff was chosen, offer the same quit prompt again once it is written.
 
-`/compact` works the same way. When the context prompt
-fires (or he picked compact) and you are a Claude session in a herdr pane or an
+`/compact` works the same way, but only when the context prompt's compact tier
+fires (+200k since the start or last compaction) or he picked it, never just
+because context looks large: each compaction costs ~150k+ token-equivalents
+(`memory/feedback_self_compact.md` item 7). Then, if you are a Claude session in a herdr pane or an
 Orca terminal (his standing say-so since 2026-10-09, `memory/feedback_self_compact.md`), write down
 what the next turn needs, run `~/src/djbclark-ade/bin/self-slash "/compact <focus>"`
 and end the turn at once. `self-slash` refuses outside herdr and Orca, or when his

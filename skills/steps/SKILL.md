@@ -107,8 +107,10 @@ strings **are** the Telegram button labels.
    options or drop it, and say so in a line. Don't ask a question an earlier
    answer has already settled.
 4. On `stop`, stop. Report what was decided and what is still open.
-5. **If he picks `/compact`** (or the context prompt fires mid-walk with nobody at
-   the keyboard; he pre-approved it standing, 2026-10-09), a Claude session in a herdr pane or an
+5. **If he picks `/compact`** (or the context prompt's compact tier, +200k since
+   the start or last compaction, fires mid-walk with nobody at the keyboard; he
+   pre-approved it standing, 2026-10-09; never compact earlier, it costs more
+   than it saves, 2026-10-10), a Claude session in a herdr pane or an
    Orca terminal queues it itself: note the remaining queue, run
    `~/src/djbclark-ade/bin/self-slash "/compact <focus: the open items>"`, and
    end the turn at once. Outside herdr and Orca, or if it refuses (a draft in

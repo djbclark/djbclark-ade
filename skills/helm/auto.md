@@ -152,8 +152,10 @@ Invariants, in force for the whole run:
    the scratchpad file list, every worker with its slot, worktree and branch,
    the wave-2 candidates, the integration checklist, and an `## Update` block
    per event. The post-compact turn reads it first, before any message.
-2. The context hook fires at +40k and again at +70k (home-agents.md). In auto
-   mode the second one is the compact point. Before compacting: finish the
+2. The context hook fires at +40k (delegate) and again at +200k since the
+   start or last compaction (home-agents.md). In auto mode the second one is
+   the compact point; never earlier (2026-10-10: each compaction costs ~150k+
+   token-equivalents, and compacting at +70k looped every ~25 min). Before compacting: finish the
    STATE.md edit, then `~/src/djbclark-ade/bin/self-slash --delay 10 "/compact
    <focus: read STATE.md first>"`, and **end the turn at once**. Nothing else
    may queue `/compact`: a bare `herdr pane run` appended to the operator's
