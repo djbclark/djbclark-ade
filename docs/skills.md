@@ -67,6 +67,12 @@ sudo-secretspec, ralph-tui-create-*, ...) stay where their installer put them.
 | `coderabbit-feeder` | Queues a CodeRabbit review request (attach mode for your repos, crossfork mode for others). | "queue a coderabbit review". |
 | `reorg-orca` | Reorganizes a cluttered Orca setup from the CLI and says which moves Orca cannot do yet. | "tidy my Orca workspaces". For herdr use `autorename`. |
 
+## Disabled skills
+
+Skills, plugins and MCP servers switched off in Claude Code on 2026-10-10 to
+shrink every session's context, each with what it does and how to turn it back
+on: [disabled-skills.md](disabled-skills.md).
+
 ## Adding or moving a skill
 
 1. Put the directory in `skills/<name>/` here with a `SKILL.md` (front matter `name` and `description`).

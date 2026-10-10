@@ -1,0 +1,159 @@
+# Disabled skills, plugins and MCP servers
+
+What was switched off in Claude Code on 2026-10-10 to shrink the context every
+session carries, what each item does, and how to turn any of it back on. Nothing
+was uninstalled: every item below re-enables with one setting or one `mv`.
+
+## Why
+
+Claude Code loads every connected MCP server's instructions and tool names, and
+every skill's description, into every session, and loads them again after every
+`/compact`. A compacted session still held ~104k tokens, re-written at the
+1-hour cache's 2x rate. Measured with `claude -p "/context"`:
+
+| | Before | After |
+|---|---|---|
+| Fresh session total | 37.5k | 31.8k |
+| MCP server instructions | 9.2k | 3.8k |
+| Deferred MCP tool schemas (loaded only on ToolSearch, but their names are always listed) | 751k | 107k |
+
+That trims every request of every session, not just compacted ones. Background:
+`~/ops/site-private/memory/feedback_self_compact.md` item 7. Re-add anything
+you actually use; each item costs only a few hundred tokens per session.
+
+Same day, same file (`~/.claude/settings.json`): `"promptCacheTtl": "1h"`
+pins the 1-hour prompt cache for main conversations even when a session draws
+on extra-usage credits, where Claude Code would otherwise drop to 5 minutes and
+re-write the whole context after every 5-minute wait
+(code.claude.com/docs/en/prompt-caching, "Which TTL each request gets").
+
+## MCP servers blocked in Claude Code (`deniedMcpServers`)
+
+They stay available on claude.ai web and desktop; only Claude Code skips them.
+Re-enable one: delete its `{"serverName": ...}` entry from `deniedMcpServers`
+in `~/.claude/settings.json` (takes effect at once, even mid-session).
+
+| Server | Tools | What it is |
+|---|---|---|
+| `claude.ai ElevenLabs` | 158 | Speech, voice design, image/video generation, ElevenLabs agents. The largest single item (~2.7k tokens). |
+| `claude.ai Canva` | 41 | Create and edit Canva designs. |
+| `claude.ai Figma` | 41 | Read and write Figma/FigJam designs, design-to-code. |
+| `claude.ai Cloudflare Developer Platform` | 23 | D1, KV, R2, Workers, Hyperdrive. |
+| `claude.ai Hugging Face` | 5 | Hub search, models, datasets, Spaces. |
+| `claude.ai Slack` | 27 | Read and post Slack messages, canvases, lists. |
+| `claude.ai Wolfram` | 3 | Wolfram Alpha / Wolfram Language. |
+| `claude.ai Have I Been Pwned` | 2 | Breach lookups. |
+| `cua-driver` (local, `~/.claude.json`) | 56 | Background computer-use driver; overlaps ghost-os, claude-in-chrome and bezalel `computer__*`. |
+| `ghost-os` (local, `~/.claude.json`) | 29 | macOS accessibility-tree + vision computer use; overlaps cua-driver. |
+
+Still on: Gmail, Google Calendar, Google Drive, Claude Docs, Context7, Firecrawl,
+claude-in-chrome, basic-memory, bezalel, paper-search, arxiv, token-savior,
+graft, hermes, cow, beeper.
+
+## Plugins disabled
+
+| Plugin | How it was disabled | Re-enable |
+|---|---|---|
+| `adhd@adhd` | `enabledPlugins: false` | set it to `true` |
+| `mattpocock-skills@mattpocock` | `enabledPlugins: false` | set it to `true` |
+| `engineering`, `cowork-plugin-management` (synced from the claude.ai organization) | `"syncClaudeAiPlugins": false` (stops all claude.ai plugin sync; these were the only two) | remove the key or set it `true` |
+
+## Skill folders moved aside
+
+Moved from `~/.claude/skills/` to `~/.claude/skills-disabled/` (symlinks and
+the `superset` folder, untouched otherwise). The targets under
+`~/.agents/skills/` and `~/.bailian/skills/` stay, so Codex and zcode still see
+the bailian and caveman skills; cursor-agent and muse, which read
+`~/.claude/skills`, no longer do. Re-enable one:
+`mv ~/.claude/skills-disabled/<name> ~/.claude/skills/` (new sessions pick it
+up). The bailian skills are Aliyun Bailian/DashScope `bl` CLI wrappers (model
+calls, image/video/speech generation, fine-tuning, managed agents, web search,
+docs wiki); their descriptions are in Chinese. `cavecrew` (the caveman
+sub-agent guide) was left on.
+
+## Every disabled skill
+
+| Skill | Source | Description (from its SKILL.md, truncated) |
+|---|---|---|
+| `bailian-cli` | bailian (Aliyun `bl`) | 阿里云百炼 / Aliyun Bailian / DashScope 资源管理与 `bl` CLI hub： 应用调用（bl app）、应用记忆、知识库检索、模型目录/模型列表、用量/额度/配额、免费额度、 工作空间、MCP 市场、pipeline、文件上传、console API、登录鉴权与配置、 Agent skill 安装/列表/更新/卸载（bl skill add/list/update/remove，百炼 skill registry）。 用户点名百炼 / DashScope / `bl`，或继续既有 `… |
+| `bailian-docs-llm-wiki` | bailian (Aliyun `bl`) | 阿里云百炼平台技术文档知识库（LLM Wiki）。当用户查询百炼模型列表、API 参数、错误码、 应用开发（智能体/RAG/知识库/记忆/插件）、模型对比与定价、SDK/OpenAI 兼容接口、 多模态能力（语音/图片/视频）、Token 计费等百炼相关问题时激活。 包含 models 结构化模型市场数据（含 contextWindow/QPM/价格/sample code）、 wiki 合成层（主题页/概念页/对比页）和 raw 原始文档层； 模型规格类问题先查 models/index.md，文档类问题先查 w… |
+| `bailian-finetune` | bailian (Aliyun `bl`) | 阿里云百炼模型精调训练入口：用户要精调、微调、训练自己的模型（fine-tune，支持 SFT / SFT-LoRA / DPO / DPO-LoRA / CPT， 覆盖文本、语音、图像）、校验或上传训练数据集、看训练进度和日志、挑 checkpoint、导出精调产物、 把专属模型部署成服务时使用 `bl dataset` / `bl finetune` / `bl deploy`。链路是 validate 校验数据 → upload 拿 file-id → finetune create 建任务 → watch … |
+| `bailian-gen` | bailian (Aliyun `bl`) | 阿里云百炼图片/视频/语音生成与理解入口：用户要生图、画图、生成照片、生成图片、AI 绘画、海报、头像、插画、 文生图（text-to-image）、图生图、改图、修图、多图合成、生成视频、文生视频、图生视频、参考生视频、视频编辑、风格转换、 配音、语音合成（TTS）、朗读、转写、语音识别（ASR），或图片理解、看图问答、视频理解、读视频、多模态理解时使用 `bl image` / `bl video` / `bl speech` / `bl vision describe` / `bl omni`。 **默认行为… |
+| `bailian-managed-agent` | bailian (Aliyun `bl`) | 阿里云百炼托管 Agent 声明式基础设施入口：用户要创建agent、初始化 agents.yaml、校验或预览 agent 配置变更、 创建/更新/销毁百炼托管 Agent 或 Deployment、和托管 agent 对话、查会话事件历史、导入或取消跟踪远端资源时使用 `bl managed-agent`。以 agents.yaml 为唯一事实源做 IaC：init 建脚手架、validate 离线校验、plan 预览 diff、 apply / destroy 变更远端资源且必须带 `--yes`，务必先 p… |
+| `bailian-model-recommend` | bailian (Aliyun `bl`) | 阿里云百炼模型选型与推荐。当用户需要"选择、推荐、对比"模型，或描述一个 AI 场景/功能需求（隐含需要帮其决策用哪个模型）时激活。核心意图是帮用户做决策， 不是单纯查资料。触发词：推荐模型、选哪个、哪个适合、对比、做一个XX、实现XX 功能、用什么模型好、XX场景方案。当用户同时涉及模型查询和模型选择时，优先 使用本 skill（本 skill 内部会读取模型数据完成推荐）。 |
+| `bailian-protocol` | bailian (Aliyun `bl`) | 阿里云百炼 `bl` 家族共享执行协议（consent 确认、版本预检、鉴权/安装、错误上报、本地文件与输出约定）。 不是面向用户意图的业务入口；当任一 bailian-* 业务 skill（bailian-cli / bailian-gen / bailian-finetune / bailian-managed-agent / bailian-web-search）执行前需要公共上下文，或用户首次安装/鉴权/`bl` 报错需上报时读取本 skill。 官方安装为整包：`bl skill init`（与业务 sk… |
+| `bailian-train-deploy` | bailian (Aliyun `bl`) | 用百炼 CLI (`bl`) 走完"数据→微调训练→导出→部署→调用"的完整闭环，或跳过训练直接部署基座模型。支持文本模型（SFT/DPO/CPT）、音频 TTS 模型（CosyVoice）、图像生成模型（Wan2.7）和视频生成模型（Wan i2v/kf2v）微调。涵盖数据集校验/上传、创建微调任务、等待训练、导出最佳 checkpoint、创建推理部署、等待就绪、给出调用示例。当用户提到在百炼 / DashScope / 阿里云模型工作室上"训练模型""微调""fine-tune""finetune""部署模型… |
+| `bailian-web-search` | bailian (Aliyun `bl`) | 阿里云百炼联网搜索（web search）入口：为联网搜索 / 网页搜索 / 查最新资讯做路径分发。 先识别当前连接身份：Token Plan（profile `token-plan` 或 base_url host 为 `token-plan.<region>.maas.aliyuncs.com`）→ 模型自带搜索 （`bl text chat --api responses --tool '{"type":"web_search"}'`）；其他 / 默认 → Bailian MCP（`bl search web… |
+| `caveman` | caveman | Terse caveman voice: answer first, fluff gone, every technical fact kept. Use for /caveman, "caveman mode", "talk like caveman", "be brief", "less tokens". Stays on until "stop caveman" or "normal mode". |
+| `caveman-commit` | caveman | Write a Conventional Commits message compressed to intent only. Use for "write a commit", "commit message", /commit or /caveman-commit. |
+| `caveman-compress` | caveman | Compress a memory file such as CLAUDE.md or a todo list into caveman format to save input tokens, keeping a readable backup. Trigger: /caveman-compress. |
+| `caveman-discover` | caveman | Find and label every LLM workflow in the repository so Caveman Cloud groups spend by workflow instead of one bucket. Use for "discover workflows" or breaking LLM spend down by workflow. |
+| `caveman-evidence-review` | caveman | Read-only review of Caveman Cloud evidence: cost, Cave Score, workflows, traces, latency, errors, routing, savings. Use when asked what Caveman found or where LLM spend goes. |
+| `caveman-explore` | caveman | Read-only repository explorer for cold-start orientation, broad cross-file localization, or when a direct search failed. Skip it when the exact file or symbol is already named. Returns path:line citations only; its reads stay out of main context. |
+| `caveman-help` | caveman | Quick-reference card for the three caveman skills and their commands. Trigger: /caveman-help or "caveman help". |
+| `caveman-learn` | caveman | Act on a Caveman learn report - review the ranked token sinks, apply cost-lowering fixes with per-edit consent, and report what those fixes returned. Use when asked to lower an agent's token cost, what caveman has saved, to trim a heavy CLAUDE.md, or to offloa… |
+| `caveman-manage` | caveman | Inspect Caveman Cloud's experiment lifecycle and block unsafe execution. Use when asked to start, approve, cancel, promote or roll back a Caveman experiment. |
+| `caveman-optimize` | caveman | Turn a Caveman optimization observation into an operator-chosen candidate with a paired baseline evaluation. Use when asked to inspect or evaluate a Caveman optimization report. Needs explicit approval. |
+| `caveman-review` | caveman | Compressed code review - one line per finding with location, problem and fix. Use for /caveman-review, "review this PR", or "review the diff". |
+| `caveman-setup` | caveman | Wire a repository through the Caveman Cloud gateway so every LLM request is measured, with no behavior change. Use for "set up caveman" or adding LLM spend observability. |
+| `caveman-stats` | caveman | Show recorded output and cache-read token usage and mode attribution for the current Claude Code session, or locate the host's native usage report. Trigger: /caveman-stats. |
+| `superset:10x` | superset bundle | Personalized audit that teaches advanced Superset features the user isn't using yet — automations, parallel agents, tasks, multi-host, terminals, custom commands, MCP. Use when the user wants to get more out of Superset, learn advanced Superset features, or 10… |
+| `superset:automate` | superset bundle | Turn a recurring chore into a Superset automation — drafts the agent prompt, confirms schedule and target, creates it with the CLI, and reviews the first run together. Use when the user wants a scheduled or recurring agent, a daily/weekly job, or to automate a… |
+| `superset:browser` | superset bundle | Drive web pages with one of two engines: a workspace's in-app browser panes via the Superset CLI (list, open, navigate, screenshot, read console, eval, raw Chrome DevTools Protocol — the default), or Browser Use 3.0 for a system browser or standalone automatio… |
+| `superset:computer` | superset bundle | Drive native desktop apps and system browser windows on macOS, Windows, or Linux through an accessibility-first driver (Cua Driver by default; Peekaboo supported on macOS). Use when asked to open or operate a real app, click or type in a desktop UI, inspect a … |
+| `superset:contribute` | superset bundle | Set up a Superset open-source contribution — fork and clone superset-sh/superset, run local dev setup, and follow the repo's contribution rules through to a merge-ready PR. Use when the user wants to contribute to Superset, fix a Superset bug themselves, or pr… |
+| `superset:doctor` | superset bundle | Diagnose and fix Superset problems — connection failures, offline hosts, terminals not attaching, auth or update issues. Use when the user reports something broken or misbehaving in Superset itself, before filing feedback. |
+| `superset:feedback` | superset bundle | Collect and submit feedback about Superset — bug reports, feature requests, or general feedback — privately to the Superset team or as a public GitHub issue. Use when the user wants to report a Superset bug, request a feature, or send feedback about Superset. |
+| `superset:orchestrate` | superset bundle | Coordinate multiple terminal coding agents through the Superset CLI by creating isolated workspaces, launching workers, sending follow-ups, reading terminal output, tracking dependencies, and collecting structured results. Use when asked to delegate or paralle… |
+| `superset:setup` | superset bundle | Make a repository Superset-ready — author .superset/config.json with setup/teardown/run scripts so every new workspace boots configured, then verify with a real workspace. Use when the user wants to set up a project or repo for Superset, configure workspace se… |
+| `superset:standup` | superset bundle | Digest of what your Superset agents did — sweeps workspaces, tasks, and agent terminals, then reports what finished, what needs review, and what's blocked. Use when the user asks what their agents did, wants a standup or summary of agent work, or returns after… |
+| `superset /superset-automation` | superset bundle (command) | Manage a single Superset automation — edit its prompt in $EDITOR, view recent runs, or trigger a one-off run. |
+| `adhd` | plugin adhd@adhd | Parallel divergent ideation for coding agents. Spawns N isolated branches under different cognitive frames (regulator, biology, speedrunner, 10-year-old, $0 budget), scores, clusters, prunes traps, and deepens top survivors. Use on /adhd, "ADHD mode", brainsto… |
+| `engineering:architecture` | claude.ai synced plugin engineering | Create or evaluate an architecture decision record (ADR). Use when choosing between technologies (e.g., Kafka vs SQS), documenting a design decision with trade-offs and consequences, reviewing a system design proposal, or designing a new component from require… |
+| `engineering:code-review` | claude.ai synced plugin engineering | Review code changes for security, performance, and correctness. Trigger with a PR URL or diff, "review this before I merge", "is this code safe?", or when checking a change for N+1 queries, injection risks, missing edge cases, or error handling gaps. |
+| `engineering:debug` | claude.ai synced plugin engineering | Structured debugging session — reproduce, isolate, diagnose, and fix. Trigger with an error message or stack trace, "this works in staging but not prod", "something broke after the deploy", or when behavior diverges from expected and the cause isn't obvious. |
+| `engineering:deploy-checklist` | claude.ai synced plugin engineering | Pre-deployment verification checklist. Use when about to ship a release, deploying a change with database migrations or feature flags, verifying CI status and approvals before going to production, or documenting rollback triggers ahead of time. |
+| `engineering:documentation` | claude.ai synced plugin engineering | Write and maintain technical documentation. Trigger with "write docs for", "document this", "create a README", "write a runbook", "onboarding guide", or when the user needs help with any form of technical writing — API docs, architecture docs, or operational r… |
+| `engineering:incident-response` | claude.ai synced plugin engineering | Run an incident response workflow — triage, communicate, and write postmortem. Trigger with "we have an incident", "production is down", an alert that needs severity assessment, a status update mid-incident, or when writing a blameless postmortem after resolut… |
+| `engineering:standup` | claude.ai synced plugin engineering | Generate a standup update from recent activity. Use when preparing for daily standup, summarizing yesterday's commits and PRs and ticket moves, formatting work into yesterday/today/blockers, or structuring a few rough notes into a shareable update. |
+| `engineering:system-design` | claude.ai synced plugin engineering | Design systems, services, and architectures. Trigger with "design a system for", "how should we architect", "system design for", "what's the right architecture for", or when the user needs help with API design, data modeling, or service boundaries. |
+| `engineering:tech-debt` | claude.ai synced plugin engineering | Identify, categorize, and prioritize technical debt. Trigger with "tech debt", "technical debt audit", "what should we refactor", "code health", or when the user asks about code quality, refactoring priorities, or maintenance backlog. |
+| `engineering:testing-strategy` | claude.ai synced plugin engineering | Design test strategies and test plans. Trigger with "how should we test", "test strategy for", "write tests for", "test plan", "what tests do we need", or when the user needs help with testing approaches, coverage, or test architecture. |
+| `cowork-plugin-management:cowork-plugin-customizer` | claude.ai synced plugin cowork-plugin-management | Customize a Claude Code plugin for a specific organization's tools and workflows. Use when: customize plugin, set up plugin, configure plugin, tailor plugin, adjust plugin settings, customize plugin connectors, customize plugin skill, tweak plugin, modify plug… |
+| `cowork-plugin-management:create-cowork-plugin` | claude.ai synced plugin cowork-plugin-management | Guide users through creating a new plugin from scratch in a cowork session. Use when users want to create a plugin, build a plugin, make a new plugin, develop a plugin, scaffold a plugin, start a plugin from scratch, or design a plugin. This skill requires Cow… |
+| `mattpocock-skills:ask-matt` | plugin mattpocock-skills@mattpocock (engineering) | Ask which skill or flow fits your situation. A router over the skills in this repo. |
+| `mattpocock-skills:code-review` | plugin mattpocock-skills@mattpocock (engineering) | Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes: Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match what the originating issue/spec asked for?). Runs both reviews i… |
+| `mattpocock-skills:codebase-design` | plugin mattpocock-skills@mattpocock (engineering) | Shared vocabulary for designing deep modules. Use when the user wants to design or improve a module's interface, find deepening opportunities, decide where a seam goes, make code more testable or AI-navigable, or when another skill needs the deep-module vocabu… |
+| `mattpocock-skills:diagnosing-bugs` | plugin mattpocock-skills@mattpocock (engineering) | Diagnosis loop for hard bugs and performance regressions. Use when the user says "diagnose"/"debug this", or reports something broken/throwing/failing/slow. |
+| `mattpocock-skills:domain-modeling` | plugin mattpocock-skills@mattpocock (engineering) | Build and sharpen a project's domain model. Use when discussing codebase terminology, writing or editing a CONTEXT.md, or recording or editing an ADR. |
+| `mattpocock-skills:grill-with-docs` | plugin mattpocock-skills@mattpocock (engineering) | A relentless interview to sharpen a plan or design, which also creates docs (ADR's and glossary) as we go. |
+| `mattpocock-skills:implement` | plugin mattpocock-skills@mattpocock (engineering) | Implement a piece of work based on a spec or set of tickets. |
+| `mattpocock-skills:improve-codebase-architecture` | plugin mattpocock-skills@mattpocock (engineering) | Scan a codebase for deepening opportunities, present them as a visual HTML report, then grill through whichever one you pick. |
+| `mattpocock-skills:prototype` | plugin mattpocock-skills@mattpocock (engineering) | Build a throwaway prototype to answer a design question. Use when the user wants to sanity-check whether a state model or logic feels right, or explore what a UI should look like. |
+| `mattpocock-skills:research` | plugin mattpocock-skills@mattpocock (engineering) | Investigate a question against high-trust primary sources and capture the findings as a Markdown file in the repo. Use when the user wants a topic researched, docs or API facts gathered, or reading legwork delegated to a background agent. |
+| `mattpocock-skills:resolving-merge-conflicts` | plugin mattpocock-skills@mattpocock (engineering) | Use when you need to resolve an in-progress git merge/rebase conflict. |
+| `mattpocock-skills:setup-matt-pocock-skills` | plugin mattpocock-skills@mattpocock (engineering) | Configure this repo for the engineering skills: set up its issue tracker, triage label vocabulary, and domain doc layout. Run once before first use of the other engineering skills. |
+| `mattpocock-skills:tdd` | plugin mattpocock-skills@mattpocock (engineering) | Test-driven development. Use when the user wants to build features or fix bugs test-first, mentions "red-green-refactor", or wants integration tests. |
+| `mattpocock-skills:to-spec` | plugin mattpocock-skills@mattpocock (engineering) | Turn the current conversation into a spec and publish it to the project issue tracker: no interview, just synthesis of what you've already discussed. |
+| `mattpocock-skills:to-tickets` | plugin mattpocock-skills@mattpocock (engineering) | Break a plan, spec, or the current conversation into a set of tracer-bullet tickets, each declaring its blocking edges, published to the configured tracker (edges as text in one file per ticket locally, or native blocking links on a real tracker). |
+| `mattpocock-skills:triage` | plugin mattpocock-skills@mattpocock (engineering) | Move issues and external PRs through a state machine of triage roles, categorise, verify, grill if needed, and write agent-ready briefs. |
+| `mattpocock-skills:wayfinder` | plugin mattpocock-skills@mattpocock (engineering) | Plan a huge chunk of work (more than one agent session can hold) as a shared map of decision tickets on your issue tracker, and resolve them one at a time until the way to the destination is clear. |
+| `mattpocock-skills:wizard` | plugin mattpocock-skills@mattpocock (engineering) | Generate an interactive bash wizard that walks a human through steps only they can perform. Use when provisioning infrastructure, setting up credentials or CI secrets, walking an unfamiliar third-party dashboard, or running a one-off migration or cutover. Don'… |
+| `mattpocock-skills:claude-handoff` | plugin mattpocock-skills@mattpocock (in-progress) | Hand the current conversation off to a fresh background agent that picks up the work immediately. |
+| `mattpocock-skills:implement-spec` | plugin mattpocock-skills@mattpocock (in-progress) | Implement a specification in code. |
+| `mattpocock-skills:loop-me` | plugin mattpocock-skills@mattpocock (in-progress) | Grill me about specs for the workflows I want to build, within this workspace. |
+| `mattpocock-skills:setup-ts-deep-modules` | plugin mattpocock-skills@mattpocock (in-progress) | Wire dependency-cruiser into a TypeScript repo so each package is a deep module, with implementation hidden in subfolders and reachable only through its entry-point files. User-invoked. |
+| `mattpocock-skills:writing-beats` | plugin mattpocock-skills@mattpocock (in-progress) | Writing, exploit; assemble raw material into a journey of beats, grounding each term before a beat leans on it. |
+| `mattpocock-skills:writing-fragments` | plugin mattpocock-skills@mattpocock (in-progress) | Writing, explore: mine raw fragments, no structure yet. |
+| `mattpocock-skills:writing-shape` | plugin mattpocock-skills@mattpocock (in-progress) | Writing, exploit: shape raw material into an article, paragraph by paragraph. |
+| `mattpocock-skills:git-guardrails-claude-code` | plugin mattpocock-skills@mattpocock (misc) | Set up Claude Code hooks to block dangerous git commands (push, reset --hard, clean, branch -D, etc.) before they execute. Use when user wants to prevent destructive git operations, add git safety hooks, or block git push/reset in Claude Code. |
+| `mattpocock-skills:migrate-to-shoehorn` | plugin mattpocock-skills@mattpocock (misc) | Migrate test files from `as` type assertions to @total-typescript/shoehorn. Use when user mentions shoehorn, wants to replace `as` in tests, or needs partial test data. |
+| `mattpocock-skills:scaffold-exercises` | plugin mattpocock-skills@mattpocock (misc) | Create exercise directory structures with sections, problems, solutions, and explainers that pass linting. Use when user wants to scaffold exercises, create exercise stubs, or set up a new course section. |
+| `mattpocock-skills:setup-pre-commit` | plugin mattpocock-skills@mattpocock (misc) | Set up Husky pre-commit hooks with lint-staged (Prettier), type checking, and tests in the current repo. Use when user wants to add pre-commit hooks, set up Husky, configure lint-staged, or add commit-time formatting/typechecking/testing. |
+| `mattpocock-skills:grill-me` | plugin mattpocock-skills@mattpocock (productivity) | A relentless interview to sharpen a plan or design. |
+| `mattpocock-skills:grilling` | plugin mattpocock-skills@mattpocock (productivity) | Grill the user relentlessly about a plan, decision, or idea. Use when the user wants to stress-test their thinking, or uses any 'grill' trigger phrases. |
+| `mattpocock-skills:handoff` | plugin mattpocock-skills@mattpocock (productivity) | Compact the current conversation into a handoff document for another agent to pick up. |
+| `mattpocock-skills:teach` | plugin mattpocock-skills@mattpocock (productivity) | Teach the user a new skill or concept, within this workspace. |
+| `mattpocock-skills:to-questionnaire` | plugin mattpocock-skills@mattpocock (productivity) | Turn a decision you can't fully answer into a questionnaire for someone else to fill in. |
+| `mattpocock-skills:wait-what` | plugin mattpocock-skills@mattpocock (productivity) | Stop. That last message did not land: re-pitch it. |
+| `mattpocock-skills:writing-for-agents` | plugin mattpocock-skills@mattpocock (productivity) | Writing documents for agents. Use when creating or editing skills, or modifying AGENTS.md or CLAUDE.md. |
