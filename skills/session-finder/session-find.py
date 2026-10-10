@@ -12,6 +12,8 @@ keeps a small per-session keyword index in ~/.local/state/session-index/ that is
 extended incrementally from the byte offset it last read. Exit 0 = hits,
 1 = no hits, 2 = cannot run.
 """
+
+from __future__ import annotations
 import argparse
 import json
 import os

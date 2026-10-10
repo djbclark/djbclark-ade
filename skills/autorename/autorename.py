@@ -11,6 +11,8 @@ process watches the transcript for these) plus the `custom-title.json` sidecar.
 
 Exit 0 = renamed or deliberately skipped (stdout says which); 2 = cannot run.
 """
+
+from __future__ import annotations
 import argparse
 import json
 import os

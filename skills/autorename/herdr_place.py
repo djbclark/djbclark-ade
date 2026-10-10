@@ -24,6 +24,8 @@ running session's HERDR_PANE_ID keeps working.
 the operator already answered for this session. Exit 0 always for `check`
 (`"in_herdr": false` outside herdr); `move` exits 1 on a herdr error.
 """
+
+from __future__ import annotations
 import argparse
 import json
 import os

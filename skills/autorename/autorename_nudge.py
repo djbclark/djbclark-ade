@@ -13,6 +13,8 @@ slash commands and very short prompts, skips non-interactive entrypoints (SDK,
 `claude -p`, acp-run) where nobody can answer the placement question, and
 skips when a title is already set. MUST always exit 0 quickly; stdlib only.
 """
+
+from __future__ import annotations
 import json
 import os
 import signal
