@@ -90,7 +90,8 @@ altitudes compose (a macro node can run a micro graph as its body).
   `handoff`, `baton`, `session-handoff`, `steps`, `loose`, and since
   2026-10-08 `herdr-tidy` (safe pane close) and `autorename` (session title
   and herdr placement; its nudge hooks are Claude `UserPromptSubmit` in
-  `~/.claude/settings.json` and Grok `Stop` in `~/.grok/hooks/autorename.json`
+  `~/.claude/settings.json` (cursor-agent runs that one too, as
+  `beforeSubmitPrompt`) and Grok `Stop` in `~/.grok/hooks/autorename.json`
   (Grok discards UserPromptSubmit context), both reaching it through the old
   `~/ops/site-djbclark/skills/autorename` path, now a symlink)
   (README.md has a one-line table; `/helm-all`, `/session-finder-all`,
