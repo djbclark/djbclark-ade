@@ -1,8 +1,8 @@
 # Fallback-chain snapshot
 
-Verified 2026-10-10 by reading the live sources in `SKILL.md`. Re-read those sources before using this file. If they differ, update this file in the same turn.
+Verified 2026-10-10 against the live sources in SKILL.md, including the safe pass later that day. Re-read those sources before using this file. If they differ, update this file in the same turn.
 
-No hop has a separate version field. The model id is the version. Effort and thinking are listed only where a config or source field sets them. Hermes global effort is `agent.reasoning_effort: medium`.
+No hop has a separate version field. The model id is the version. Effort and thinking are listed only where a config or source field sets them. The only global effort knob is `agent.reasoning_effort: medium`.
 
 ## a. Hermes interactive failure chain
 
@@ -44,44 +44,53 @@ Fleet default, used only by unpinned agent jobs: vendor `xai-oauth`, model `grok
 | c5. Memory architecture research status watchdog | disabled, unpinned | would have been c1's chain |
 | c6. Memory architecture v2 and Link spike status | disabled, unpinned | would have been c1's chain |
 
-c7. The other 30 cron jobs are `no_agent` scripts. They do not call a model. Seventeen enabled ones still store an unused `xai-oauth` / `grok-4.6` pin, one paused job stores the same unused pin, and the rest store nothing.
+The other 30 cron jobs are `no_agent` scripts. They do not call a model. On 2026-10-10 the 18 that stored an unused `xai-oauth` / `grok-4.6` pin were cleared with `hermes cron edit --unpin`. The keys remain and the values are null. A null is not a pin. The two agent jobs above were not touched.
 
 ## d. Side routes that are not the main chain
 
 d1. Compression is pinned to `cline2` / `cline2-pass/deepseek-v4-flash`, timeout 300. There is no `auxiliary.compression.fallback_chain`. A stall skips the model and uses the deterministic summary. No other auxiliary task is configured.
 
-d2. MoA is `enabled: true`, but `default_preset: free-advice` does not exist. The only preset is `default`, with references `openai-codex` / `gpt-5.5` and `opencode-go` / `deepseek-v4-pro`, and the top-level aggregator is `opencode-go` / `kimi-k3`. Interactive `model.provider` is `cline2`, not `moa`, so this is not on the request path.
+d2. MoA is off the picker. `moa.presets.default.enabled` is false, which is the flag Hermes reads. The unrecognized top-level `moa.enabled` key was removed on 2026-10-10. `default_preset` is still `free-advice`, and that preset does not exist. That is harmless while no preset is enabled. Interactive `model.provider` is `cline2`, not `moa`. An explicit `/moa` still runs the saved aggregator (`opencode-go` / `kimi-k3`) and skips reference models.
 
 d3. There is no `delegation` block. An unpinned `delegate_task` child inherits the parent's chain. A child given its own provider or model does not. Source: `scoped_fallback_chain`.
 
 ## e. LiteLLM proxy
 
-Live under launchd `com.djbclark.litellm`. These are the proxy's own `router_settings.fallbacks`. Only one hop sets effort: `go-glm-flash` sends `reasoning_effort: none`. `grok-sub`'s model id is `grok-4.20-0309-non-reasoning`, so thinking is off by the model name. Nothing else sets thinking.
+Live under launchd `com.djbclark.litellm`. Re-read 2026-10-10. The earlier rows in this section listed gemini self-loops and `grok-4.6` hops. Those hops are not in the live file. Do not put them back without reading the file again.
 
-| Alias | Hops |
-|---|---|
-| e1. `gemini-free-lite` | `gemini` / `gemini-3.1-flash-lite` → `gemini` / `gemini-3.7-flash` → `gemini` / `gemini-3.1-flash-lite` |
-| e2. `gemini-free` | `gemini` / `gemini-3.7-flash` → `gemini` / `gemini-3.1-flash-lite` |
-| e3. `gemini-flash-lite` | `gemini` / `gemini-3.1-flash-lite` → `gemini` / `gemini-3.7-flash` |
-| e4. `gemini-pro` | `gemini` / `gemini-3.1-pro-preview` → `gemini` / `gemini-3.7-flash` |
-| e5. `go-glm-flash` | `opencode-go` / `glm-5.2` (effort none) → `opencode-go` / `kimi-k3` |
-| e6. `go-kimi` | `opencode-go` / `kimi-k3` → `opencode-go` / `glm-5.2` |
-| e7. `grok-sub` | `xai-oauth` / `grok-4.20-0309-non-reasoning` → `xai-oauth` / `grok-4.6` → `xai-oauth` / `grok-4.20-0309-non-reasoning` |
-| e8. `grok-4.6` | `xai-oauth` / `grok-4.6` → `xai-oauth` / `grok-4.20-0309-non-reasoning` |
-| e9. `grok-4.7` | `xai-oauth` / `grok-4.7` → `xai-oauth` / `grok-4.6` |
-| e10. `grok-4.5` | `xai-oauth` / `grok-4.5` → `xai-oauth` / `grok-4.6` |
-| e11. `grok-sub-reasoning` | `xai-oauth` / `grok-4.6` → `xai-oauth` / `grok-4.20-0309-non-reasoning` |
+Alias to model. Vendor is the model prefix or the API host. No secrets. Only `go-glm-flash` sets effort (`reasoning_effort: none`). `grok-4.20-0309-non-reasoning` is non-thinking by the model id.
 
-e12. `watchdogd-mock` is defined and is not in any chain.
+| Alias | Vendor | Model |
+|---|---|---|
+| clinepass-deepseek | clinepass | `deepseek-v4-flash` |
+| clinepass-minimax-m3 | clinepass | `minimax-m3` |
+| clinepass-kimi-k3 | clinepass | `kimi-k3` |
+| grok-sub | xai-oauth, via the local proxy | `grok-4.20-0309-non-reasoning` |
+| go-kimi | opencode-go | `kimi-k3` |
+| go-deepseek-pro | opencode-go | `deepseek-v4-pro` |
+| go-deepseek-flash | opencode-go | `deepseek-v4-flash` |
+| go-glm-flash | opencode-go | `glm-5.3-flash` |
+| gemini-free | gemini | `gemini-3.7-flash` |
+| gemini-free-lite | gemini | `gemini-3.1-flash-lite` |
+
+`watchdogd-mock` is defined and is not in any chain. `gemini-free` and `gemini-free-lite` have no fallback entry.
+
+Each listed alias except those two falls back to the other real aliases, never to itself. The graph is still cyclic, because those lists point at each other. Consecutive hops often share a vendor. `scripts/check.py` exits non-zero on that. Those chains were not changed in the safe pass.
 
 ## f. Other agents
 
-f1. `herdr-ai` falls back only for its default model, and only on a hard failure. The chain is `gemini-free-lite` → `gemini-free` → `gemini-free-lite`. An explicit model does not fall back. No effort or thinking is set. Each hop then walks the matching LiteLLM chain in section e. `clinepass-*` is refused.
+f1. `herdr-ai` falls back only for its default model, and only on a hard failure. The chain is `gemini-free-lite` → `gemini-free` → `gemini-free-lite`. That is a cycle. An explicit model does not fall back. No effort or thinking is set. Those two aliases have no LiteLLM fallback entry, so a LiteLLM failure of either alias stops there. `clinepass-*` is refused.
 
 f2. `acp-run` has one transport fallback, not a model chain. A Claude ACP handshake failure retries as `claude -p`, keeping the requested model, or `sonnet` if none was requested. `--no-fallback` disables it. Every other agent has no CLI fallback.
 
 ## g. Looked at, not a live chain
 
-g1. `ai-model-switch.py` is not running. Its plist is `com.djbclark.ai-model-switch.plist.disabled` and launchd does not have it loaded. Its candidate order is dormant code, not the live Hermes chain. Re-enabling that plist would make it a live writer of `fallback_providers`.
+g1. `ai-model-switch.py` is not a live chain. Its plist is `com.djbclark.ai-model-switch.plist.disabled` and launchd does not have it loaded. As of 2026-10-10 the script refuses to write `model` or `fallback_providers` even if the plist is loaded again. It can still print the pick it would have made.
 
 g2. `route_agent.py` scores which agent to dispatch. It is not a failure chain, and it is not currently rewriting `fallback_providers`.
+
+## h. Checker
+
+`python3 ~/src/djbclark-ade/skills/fallback-chains/scripts/check.py` prints the live layers and exits non-zero on a cycle, a same-vendor pair, a missing MoA preset while MoA is on, a `no_agent` job that still stores a model id, or `ai-model-switch` being able to write the chain.
+
+On 2026-10-10, after the safe pass, it exits 1. The remaining failures are the chains that were not changed: the Hermes `cline2` pair, LiteLLM same-vendor runs and a cycle, and the `herdr-ai` cycle. MoA and the second writer are clean.

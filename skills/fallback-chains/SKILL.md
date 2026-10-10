@@ -21,6 +21,7 @@ Before answering a fallback question, or after changing any chain:
 1. Re-read the live sources in Quick Reference. Do not answer from the snapshot alone.
 2. If a live source differs from `references/inventory.md`, update that file in the same turn and set its date.
 3. If the change is a step toward the single-system goal, record it in `references/integration.md` (done, dropped, or still open). Do not start that work unless asked.
+4. After a chain change, run `python3 scripts/check.py` from this skill directory. It prints the live layers and exits non-zero on a cycle, a same-vendor pair, a missing MoA preset while MoA is on, or a second writer. A non-zero exit is the remaining traffic-chain debt until that pass is asked for.
 
 A chain change means any of: Hermes `model`, `fallback_providers`, `auxiliary`, `cron`, or `moa`; a cron job pin; LiteLLM `router_settings.fallbacks`; `herdr-ai`'s default-model fallback; `acp-run`'s transport fallback; enabling or disabling `ai-model-switch`.
 
@@ -33,8 +34,9 @@ Re-read these. Extract provider, model, effort, and thinking only. Do not copy s
 3. `~/.litellm/config.yaml` — `router_settings.fallbacks` and any per-hop `reasoning_effort`.
 4. `~/src/djbclark-ade/bin/herdr-ai` — `fallbacks` / `ask_model`. Default model only; an explicit model does not fall back.
 5. `~/src/djbclark-ade/tools/acp-run/acp-run` — `fallback_cli`. Transport retry, not a model chain. `--no-fallback` disables it.
-6. `launchctl list | rg 'ai-model-switch|litellm'` — the switcher is a chain only if its plist is loaded. A `.disabled` plist is dormant code.
-7. Hermes gateway session pins, when the question is about live chats: `~/.hermes/state.db` table `sessions`, column `model_override`. Counts only. A session pin changes the primary; it does not drop `fallback_providers` (that drop is the cron and `delegate_task` rule in `scoped_fallback_chain`).
+6. `launchctl list | rg 'ai-model-switch|litellm'` — the switcher is a chain only if its plist is loaded. A `.disabled` plist is dormant. As of 2026-10-10 the script also refuses to write `model` or `fallback_providers`.
+7. `python3 ~/src/djbclark-ade/skills/fallback-chains/scripts/check.py` — query command. Exit 0 is clean. Exit 1 is a cycle, a same-vendor pair, MoA on with a missing preset, or a second writer.
+8. Hermes gateway session pins, when the question is about live chats: `~/.hermes/state.db` table `sessions`, column `model_override`. Counts only. A session pin changes the primary; it does not drop `fallback_providers` (that drop is the cron and `delegate_task` rule in `scoped_fallback_chain`).
 
 There is no separate version field. The model id is the version. List effort and thinking only where a config or source field sets them. `agent.reasoning_effort` is global, not per hop.
 
@@ -53,4 +55,4 @@ Six live layers, not one system. The dated tables are in `references/inventory.m
 
 ## Integration goal
 
-Not built. The operator wants one fallback system that is easy to query, easy to change, robust, and documented here so a later request can find it. The backlog of observed gaps is `references/integration.md`. Do not implement it from this skill unless asked.
+The single system is not built. The 2026-10-10 safe pass turned MoA off, stopped `ai-model-switch` from writing the chain, cleared unused script-job pins, and added `scripts/check.py`. It did not change which model answers live traffic. The backlog is `references/integration.md`. Do not implement the traffic pass from this skill unless asked.
