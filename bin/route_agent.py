@@ -181,6 +181,11 @@ SERVICES: tuple[Service, ...] = (
     # coding and review capacity that is otherwise wasted at each reset.
     # Reach it ONLY through `acp-run agy --model claude-opus-5-5-high` (or
     # claude-sonnet-5-5-high), never `agy -p`; see model-routing's agy rules.
+    # Over ACP these ids exist only because acp-run sends clientInfo.name
+    # "zed": agy_acp_server 1.3.0 gives non-Gemini models only to zed, xcode
+    # and JetBrains.* clients (supports_third_party_models(), deliberate, so a
+    # client-name workaround a later .par may close; antigravity-cli#1168).
+    # acp-dispatch checks --model against `acp-run agy --info` before running.
     Service("antigravity-claude",
             "agy (acp-run agy --model claude-opus-5-5-high | claude-sonnet-5-5-high)",
             {"code": 11, "research": 3, "mechanical": 6},

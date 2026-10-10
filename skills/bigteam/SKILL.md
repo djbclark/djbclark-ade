@@ -115,15 +115,24 @@ window, so spending it costs nothing that orchestration needs.
    own window. `claude-opus-5-5-high` for the hard slices, `claude-sonnet-5-5-high`
    for volume. Mechanical edits and bulk reading still go to the free and Gemini
    pools first; do not spend Opus on them just because it is idle.
-3. **Check the model list first (2026-10-10):** `acp-run agy ... --model nonexistent` prints `have: ...`. That day the server listed only `gemini-*` models, so `claude-opus-5-5-high` failed with `no model` (exit 1, no report) even though `aiuse` showed the pool at 100% left. When no `claude-*` is listed, treat the pool as unreachable and route to codex (`gpt-6-astra`) or claude instead.
-3. **Only through ACP:** `acp-run agy -C <dir> -p '<prompt>' --model <m>` with the
+3. **The ACP route reaches it through a client-name workaround (2026-10-10).** agy_acp_server 1.3.0 offers non-Gemini models only to clients whose ACP `clientInfo.name` is `zed`, `xcode` or `JetBrains.*` (`supports_third_party_models()` in its `model_selection.py`), so `acp-run` identifies itself to agy as `zed` (0b56897).
+   Before that, the server listed only `gemini-*` models and `claude-opus-5-5-high` failed with
+   `no model` (google-antigravity/antigravity-cli#1168, pingdotgg/t3code#16489). The gate is
+   deliberate in Google's code, so this is a client-name workaround, not a bug fix, and a later
+   `.par` release could close it. `acp-run agy --info` lists the ids (today
+   `claude-opus-5-5-{low,medium,high}`, `claude-sonnet-5-5-{low,medium,high}`,
+   `gpt-oss-120b-medium`, plus `gemini-*` and `gemini-pro-agent`, the ACP id of Gemini 3.1 Pro
+   High). `acp-dispatch` now checks `--model` against that list before it detaches and exits 2
+   with `have:`. If no `claude-*` id is listed, the workaround has stopped working: route to
+   codex (`gpt-6-astra`) or claude.
+4. **Only through ACP:** `acp-run agy -C <dir> -p '<prompt>' --model <m>` with the
    usual `acp-dispatch` wrapper, never `agy -p`. Run **2-3 agy slices at a time**
    and re-probe between batches; a heavy Opus-high run drained it in ~35 minutes on
    2026-10-03. A 429 or `RESOURCE_EXHAUSTED` on a `claude-*` model means that pool
    is spent; try a `gemini-*` model before leaving agy.
-4. **Not a replacement for the judgment tier:** use it as the independent reviewer
+5. **Not a replacement for the judgment tier:** use it as the independent reviewer
    of a decision claude or codex makes (Step 6), not as the one deciding.
-5. **`bin/route_agent.py route --kind code`** applies the same rule (the
+6. **`bin/route_agent.py route --kind code`** applies the same rule (the
    `antigravity-claude` service, `burn_first` at >= 40% headroom). Any other
    provider that reports an independent second pool (copilot, cursor, once
    re-enabled in `aiuse`) gets the same treatment by adding a `Service` with
@@ -405,8 +414,13 @@ bound it, so a file that never appears cannot hang forever:
 (Write the path out in full, or `export OUT` first: a `$OUT` inside the single
 quotes is empty in the inner `bash -c`, so the loop would wait on `/x-report.md`
 forever. Wait on the `.done` marker, not on the report: see *Jobs and records*.
-A foreground `acp-dispatch` call is itself the tracked wait, and its record's
-`rearm` field is this exact line with the paths inlined.) **A sub-agent must
+A foreground `acp-dispatch` call is itself the tracked wait. Its record's
+`rearm` field is this line with the paths inlined, followed by `&& acp-dispatch check
+<record>` (2026-10-10), so the waiter exits 1 (partial), 3 (no-report) or 4 (BLOCKED) and
+prints the verdict instead of exiting 0 whenever `.done` appears. A codex quota death had
+left only `STATUS: working` behind a waiter that exited 0. When acp-run fails before
+`DONE`, the report's last line is now `NO-REPORT: <class> (<agent>, <model>[, retry at
+<time>]) ...`.) **A sub-agent must
 never do its waiting by ending its turn:** a `run_in_background` completion
 notice does not wake an Agent-tool teammate, it arrives only with the next
 inbound message, so the agent stalls until someone writes to it (three of four

@@ -46,7 +46,11 @@ under the task directory the Tier 1 pointer names; never adopt a record whose
 4. When the waiter returns, read the report, act on it, then **close the
    record** by appending `"closed": <epoch seconds>` with the same
    temp-file-and-`mv -f` form (`.closed=(now|floor)`). Records are closed, never
-   deleted.
+   deleted. A rearm written by `acp-dispatch` since 2026-10-10 ends in
+   `acp-dispatch check <record>`: exit 1 means partial, 3 means no-report (a
+   last line `NO-REPORT: ...` says why, e.g. a quota refusal), and 4 means
+   BLOCKED. An older rearm exits 0 on any `.done`, so run `acp-dispatch check`
+   on its record yourself.
 
 If a waiter times out (it is bounded) with no `.done`, check the detached job
 is still alive (`launchctl list | grep <label>`) before re-arming once more or

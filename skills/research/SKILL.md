@@ -165,14 +165,15 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    (`acp-dispatch agy --model <m>`, only ever via ACP, never `agy -p`;
    `--model claude-opus-5-5-high` draws its Claude/GPT pool, which `aiuse`
    lists as `antigravity claude_gpt`, burn-first while >= 40% left, see
-   bigteam, **but only when the live session offers that id**: the model
-   list comes from the agent at session start, and on 2026-10-10 11:06 it
-   offered only `gemini-*` ids, so the dispatch failed with "acp-run: no
-   model 'claude-opus-5-5-high'; have: gemini-3.8-flash-high, ...". Check
-   with `acp-run agy --info` (the `model` config option) before the first
-   agy dispatch of a run; when no `claude-*`/`gpt-*` id is listed, use
-   `gemini-3.8-flash-high` and note in `plan.md` that the Claude/GPT pool
-   was unreachable). The lead merges
+   bigteam. Over ACP the `claude-*`/`gpt-*` ids appear only because
+   acp-run identifies itself to agy as `zed`: agy_acp_server 1.3.0 hides
+   non-Gemini models from other clients (deliberate in Google's
+   `supports_third_party_models()`), which is why a dispatch on 2026-10-10
+   failed with "no model 'claude-opus-5-5-high'; have: gemini-...".
+   `acp-dispatch` checks `--model` against `acp-run agy --info` before it
+   starts. If no `claude-*` id is listed, the workaround has stopped working:
+   use `gemini-3.8-flash-high` and note in `plan.md` that the Claude/GPT
+   pool was unreachable). The lead merges
    the four evidence files for a slice (dedupe by source and quote, keep
    every family's unique rows) and the Grok lead picks among the four
    writer drafts or merges them into one `report.md`; the counter files

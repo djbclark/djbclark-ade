@@ -162,7 +162,11 @@ Rules for any agent that dispatches to agy:
    Claude/GPT windows, prefer it** over claude's own window and codex for code,
    review, research and second opinions, via `acp-run agy --model
    claude-opus-5-5-high` (hard calls) or `claude-sonnet-5-5-high` (volume);
-   `agy models` lists `gpt-oss-120b-medium` too. Between 15% and 40% give it one
+   `gpt-oss-120b-medium` is offered too. Over ACP these ids exist only because
+   agy_acp_server 1.3.0 offers non-Gemini models only to clients whose ACP `clientInfo.name` is `zed`, `xcode` or `JetBrains.*` (`supports_third_party_models()` in its `model_selection.py`), so `acp-run` identifies itself to agy as `zed` (0b56897); the gate is deliberate in Google's code, so this is a
+   client-name workaround that a later `.par` could close. Check with
+   `acp-run agy --info` (`acp-dispatch` checks `--model` itself before it
+   detaches). Between 15% and 40% give it one
    slice at a time; under 15% (or a 429) it is spent, use the Gemini pool or
    another vendor. **Cap concurrency at 2-3 agy slices at once** (the ACP
    client's own limit is not published, and the pool drained in ~35 minutes
