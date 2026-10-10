@@ -53,6 +53,7 @@ sudo-secretspec, ralph-tui-create-*, ...) stay where their installer put them.
 | Skill | What it does | How to use |
 |---|---|---|
 | `research` | Evidence-grounded research: every claim logged with a verbatim quote, a counter-evidence pass, then a script checks quotes and citations. | "deep research on X"; "what does the evidence say". Script: `skills/research/scripts/research_check.py`. |
+| `report` | Formats a long Markdown deliverable for Marked 2: numbered superscript citations, linked evidence table, descriptive file names, short paragraphs, render check by window capture. | `/report`; before the first `open -a "Marked 2"` of a research report, spec or review. Scripts: `skills/report/scripts/{reformat_citations,cite_sup}.py`. |
 | `book-to-kb` | Adds a book (EPUB, PDF, DOCX, ...) to the local knowledge base at `~/kb` so any session can query it cheaply. | Give it a book path; query later with `book-kb query '<regex>' <slug>`. |
 | `gmail-search` | Searches the local full-text index of the whole mailbox in about 100 ms; read-only. | "search my email", "find that message from X". |
 | `graft` | Tells an agent to use the graft code graph before grepping or reading source. | Loads on its own in any graft-indexed repo. |

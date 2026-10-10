@@ -95,6 +95,10 @@ Scientific or medical topics: also follow `references/literature.md`
    "only adding citations": the citation pass changes nothing else.
 8. **Deliver.** Report path, a 3-5 sentence summary with confidence, the
    unresolved flags, and what was not searched. Keep the run folder.
+   Before opening the report for the operator, apply the `report` skill
+   (descriptive file name with a `report.md` symlink, superscript citations,
+   linked evidence table, short paragraphs); its scripts convert the writer's
+   `[E####]` markers and the checker accepts the result.
 
 ## Model and effort map
 
