@@ -175,6 +175,10 @@ Rules for any agent that dispatches to agy:
    field splits **any** provider that reports several independent model-family
    pools (aiuse `pool_family`; copilot and cursor when re-enabled in aiuse): add
    one `Service` row per extra pool and burn the one with idle headroom first.
+   **For a multi-slice run use `route_agent.py plan --kinds ...`** (a wave spread
+   over pools by each service's `max_parallel`, `--exclude` for a pool that just
+   failed) and re-run it at every slice boundary; bigteam's *Dynamic routing*
+   section says when.
    A model sublimit of a shared pool (Claude's `fable`) is not a pool.
 5. A `--print-timeout` cut prints `[agy] print timeout ... returning partial
    output` and **exits 0**; exit 0 is not success, read the output and the log.

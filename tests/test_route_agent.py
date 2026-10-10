@@ -329,3 +329,41 @@ class TestPoolSplitIsGeneral(unittest.TestCase):
 
     def test_claude_fable_sublimit_is_not_split(self):
         self.assertEqual(r.pool_service("claude", "fable"), "claude")
+
+
+class TestPlanWave(unittest.TestCase):
+    """`plan` spreads one wave over pools and re-plans from live headroom."""
+
+    Q = {**IDLE, "antigravity-claude": {"remaining": 90.0}}
+
+    def test_wave_respects_max_parallel_then_spills_to_the_next_pool(self):
+        rows = r.plan(["code"] * 5, quota=self.Q)
+        names = [c.service.name for _, c in rows]
+        cap = next(s for s in r.SERVICES if s.name == "antigravity-claude").max_parallel
+        self.assertEqual(names[:cap], ["antigravity-claude"] * cap)
+        self.assertNotEqual(names[cap], "antigravity-claude")
+
+    def test_replan_follows_a_pool_that_just_drained(self):
+        before = r.plan(["code"], quota=self.Q)[0][1].service.name
+        after = r.plan(["code"], quota={**self.Q, "antigravity-claude": {"remaining": 4.0}})[0][1].service.name
+        self.assertEqual(before, "antigravity-claude")
+        self.assertNotEqual(after, "antigravity-claude")
+
+    def test_exclude_skips_a_service_that_just_failed(self):
+        c = r.plan(["code"], quota=self.Q, exclude={"antigravity-claude"})[0][1]
+        self.assertNotEqual(c.service.name, "antigravity-claude")
+
+    def test_no_room_comes_back_as_none_not_an_error(self):
+        drained = {k: {"remaining": 1.0} for k in {*IDLE, "antigravity-claude"}}
+        rows = r.plan(["code"], quota=drained)
+        self.assertIsNone(rows[0][1])
+
+    def test_cli_plan_prints_one_numbered_line_per_slice(self):
+        import io, contextlib
+        buf = io.StringIO()
+        with mock.patch.object(r, "load_snapshot", return_value=(self.Q, 60.0)), \
+             contextlib.redirect_stdout(buf):
+            self.assertEqual(r.main(["plan", "--kinds", "code,bulk"]), 0)
+        lines = buf.getvalue().strip().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("1. code"))

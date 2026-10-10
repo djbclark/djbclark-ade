@@ -195,6 +195,48 @@ small slice at most, never a whole batch.
 Ignore `aiuse`'s `kind:"conserve"` pace alerts for go/no-go; they fire on a fast
 hour even when the window is nearly untouched.
 
+### Dynamic routing — plan a wave, re-plan at every boundary (operator, 2026-10-10)
+
+Pools drain and refill while a run is live (agy's Claude/GPT pool went from 0% to
+exhausted in ~35 minutes), so **a vendor chosen at the start goes stale.** Don't
+bind every slice to a vendor up front:
+
+1. **Queue slices by kind, not vendor.** Step 2 tags each slice `judgment`,
+   `code`, `research`, `bulk`, `mechanical` or `github` (the router's kinds).
+2. **Plan a wave:** `~/src/djbclark-ade/bin/route_agent.py plan --kinds
+   code,code,research,bulk` (hardest first; `--json` for scripts). It reads the
+   aiuse snapshot (instant, no tokens), ranks by fitness and headroom, applies
+   the burn-first rule, and **spreads the wave** with each service's
+   `max_parallel` (agy Claude/GPT 3, agy Gemini 2, grok 1). Dispatch only the
+   slices it gives a pool; a slice with `none` stays queued. A `WARNING:
+   snapshot empty/old` means run `aiuse --available --live` (in the background)
+   first.
+3. **Re-plan at every boundary, before dispatching the next queued slice:**
+   a. **a slice finishes** (the notification re-invokes you anyway): probe, then
+      plan the queue again;
+   b. **a slice fails on quota or plan** (acp-run exit 1 `FAILED quota/plan`, a
+      429, `RESOURCE_EXHAUSTED`): `aiuse note-exhausted` with the reset time if
+      the error printed one, then `plan --exclude <service>` and re-route that
+      slice, trying the same vendor's other model-family pool first (item 3 of
+      *Reading the numbers*);
+   c. **a quiet stretch:** while a wave runs, keep one background timer going,
+      `sleep 1500; echo recheck` as its own `run_in_background: true` call (no
+      model tokens until it fires; never CronCreate or `/loop`, per the standing
+      rule on periodic updates). When it fires, run `aiuse --available`,
+      `cswap list` and `plan` for the queue; start the timer again only if slices
+      are still running or queued;
+   d. **a pool newly comes back or turns burn-first** (reset passed, a `burn`
+      alert): the next re-plan picks it up by itself, no exclusion list to edit.
+4. **Re-route only queued or failed slices.** Never kill or move a slice that is
+   running and healthy (work already paid for), and never move a slice that
+   failed on the work rather than on tooling.
+5. **`plan` is advice, not authority.** Still apply *Reserve pools*, *Current
+   exclusions*, the judgment-tier rule and the preflight call; `plan` knows
+   capability and headroom, not a vendor's burst limit or a file-ownership claim.
+6. **Say what moved:** one line per re-route in the batch log and the handoff
+   ("slice 3: agy Claude/GPT 12% left, moved to claude"), so the final report
+   shows which vendor ran which slice and why.
+
 ## Step 2 — slice by file, not by topic
 
 A fan-out only works if slices cannot collide. The partition rule:
@@ -209,6 +251,11 @@ Prefer one shared checkout with strict file ownership over a worktree per agent:
 disjoint files in one tree need no merge, and merging five branches costs more
 than it saves at this granularity. Reach for `cow-workspaces` or
 `git worktree` only when slices genuinely must touch the same file.
+
+**Tag each slice with a kind** (`judgment`, `code`, `research`, `bulk`,
+`mechanical`, `github`) next to its owned paths, and leave the vendor open: the
+vendor is chosen at dispatch time by *Dynamic routing* (end of Step 1), because
+the pools will have moved by the time a queued slice is reached.
 
 Keep for **yourself** (the orchestrator), never delegate:
 
@@ -260,6 +307,9 @@ the session's `claude`) and Claude Code cleans it up when it exits (docs,
 *Background Bash commands*). It does not come back on `claude --resume`.
 Everything below about notifications holds only while the session lives; for
 work that must outlive it, see *Jobs and records* after the waiter paragraph.
+
+**Dispatch a wave, not the whole queue:** the slices *Dynamic routing* (end of Step
+1) assigns a pool right now. As each one finishes, re-plan and dispatch the next.
 
 Send every slice in **one message as parallel Bash calls**, each
 `run_in_background: true`, so each reports as it finishes and the first results
@@ -518,7 +568,8 @@ returned; do not guess a reset time.
 - When an agent refutes part of its own brief, that is the system working —
   prefer its evidence over your assumption, and say so.
 - A slice that fails on tooling (not on the work) gets **reassigned to a
-  different vendor**, not retried on the same one. The exception is a quota
+  different vendor** (`route_agent.py plan --exclude <service>`, *Dynamic
+  routing*), not retried on the same one. The exception is a quota
   failure on one model-family pool: retry on the same vendor's other pool first
   (Step 1 item 3), because the vendor itself is not spent.
 

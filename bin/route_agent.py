@@ -85,6 +85,7 @@ ACP_RUN = (os.environ.get("ACP_RUN")
 # mode, or fallback)". Each counts only while its binary is on PATH.
 NON_ACP_HEADLESS = frozenset({"muse"})  # zcode joined acp-run 2026-10-08 (zcode-acp-server)
 STALE_HARD = 6 * 3600      # beyond this, treat headroom as unknown
+STALE_SOFT = 25 * 60       # aiuse's own `fresh` threshold; older = re-collect before a wave
 
 # Kinds of work. Deliberately few — a taxonomy nobody can apply is worse than
 # a coarse one that gets used.
@@ -138,6 +139,10 @@ class Service:
     # use it for a model sublimit of a shared pool (Claude's `fable`): that
     # one is bounded by the parent windows and must stay with them.
     pool: tuple[str, str] | None = None
+    # Most slices one bigteam wave should put on this service at once. Pools
+    # with a burst limit or a dependant get a low cap so `plan` spreads a wave
+    # over several pools instead of drowning the best-ranked one.
+    max_parallel: int = 4
 
     def eligible(self, kind: str) -> bool:
         if self.retired or self.hermes_only:
@@ -183,7 +188,7 @@ SERVICES: tuple[Service, ...] = (
             "Claude/GPT pool on the Google AI Pro plan; use-it-or-lose-it, "
             "ACP client only",
             burn_first=True, pool=("antigravity", "claude_gpt"),
-            access="cli-only"),
+            max_parallel=3, access="cli-only"),
     Service("antigravity", "agy",
             {"bulk": 1, "research": 1, "mechanical": 2, "code": 40},
             "subscription",
@@ -192,7 +197,7 @@ SERVICES: tuple[Service, ...] = (
             # it via the agy CLI spends the subscription; wiring Hermes to a
             # GEMINI_API_KEY would spend real money.
             "big context, summarisation, multimodal; most-wasted pool",
-            access="cli-only"),
+            max_parallel=2, access="cli-only"),
     # opencode-zen-free is NOT a separate provider — it is the free subset of
     # opencode-zen's models. Kept as its own row because the free and paid
     # halves have different billing and different eligibility, which is the
@@ -220,7 +225,8 @@ SERVICES: tuple[Service, ...] = (
             "PR review, repo Q&A (official client only)", access="forbidden"),
     Service("cursor", "cursor", {"code": 25, "mechanical": 10}, "subscription",
             "IDE-centric composer"),
-    Service("grok", "grok", {"research": 10, "bulk": 15}, "subscription", ""),
+    Service("grok", "grok", {"research": 10, "bulk": 15}, "subscription", "",
+            max_parallel=1),     # GrokBot shares the window; small slices only
     Service("clinepass", "cline", {"bulk": 40, "code": 40, "mechanical": 40},
             "subscription",
             # An API-key bundle we hold, so Hermes may call it directly. The
@@ -407,15 +413,18 @@ class Choice:
 
 
 def route(kind: str, *, quota: dict[str, Any] | None = None,
-          min_headroom: float = 15.0) -> Choice | None:
-    """Choose a service for `kind`, preferring idle paid capacity for bulk."""
+          min_headroom: float = 15.0,
+          exclude: frozenset[str] | set[str] = frozenset()) -> Choice | None:
+    """Choose a service for `kind`, preferring idle paid capacity for bulk.
+
+    `exclude` names services to skip (full for this wave, or just failed)."""
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}")
     quota = {} if quota is None else quota
 
     scored: list[tuple[float, Service, float | None]] = []
     for svc in discover(quota):
-        if not svc.eligible(kind):
+        if not svc.eligible(kind) or svc.name in exclude:
             continue
         info = quota.get(svc.name) or {}
         remaining = info.get("remaining")
@@ -453,6 +462,31 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         why.append(best.note)
     return Choice(best, remaining, best_score, "; ".join(why),
                   [s.name for _, s, _ in scored[1:4]])
+
+
+def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
+         min_headroom: float = 15.0,
+         exclude: frozenset[str] | set[str] = frozenset()
+         ) -> list[tuple[str, Choice | None]]:
+    """Assign each slice kind to a service for ONE wave, right now.
+
+    Greedy in the given order (put the hardest first), honouring each
+    service's `max_parallel` so a wave spreads over pools. Slices that
+    find no room come back as None: leave them queued and re-plan when a
+    slice finishes. Re-run it at every wave boundary; it is a snapshot-file
+    read, so it is instant and costs no tokens."""
+    load: dict[str, int] = {}
+    full = set(exclude)
+    out: list[tuple[str, Choice | None]] = []
+    for kind in kinds:
+        choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=full)
+        if choice is not None:
+            name = choice.service.name
+            load[name] = load.get(name, 0) + 1
+            if load[name] >= choice.service.max_parallel:
+                full.add(name)
+        out.append((kind, choice))
+    return out
 
 
 # Concrete models per Hermes-usable provider, cheapest-capable first within
@@ -533,6 +567,13 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--kind", required=True, choices=KINDS)
     r.add_argument("--json", action="store_true")
     r.add_argument("--min-headroom", type=float, default=15.0)
+    pl = sub.add_parser("plan", help="assign a wave of slice kinds to services now")
+    pl.add_argument("--kinds", required=True,
+                    help="comma list, hardest first, e.g. code,code,research,bulk")
+    pl.add_argument("--exclude", default="",
+                    help="comma list of services to skip (just failed or spent)")
+    pl.add_argument("--min-headroom", type=float, default=15.0)
+    pl.add_argument("--json", action="store_true")
     sub.add_parser("show", help="snapshot age and per-service headroom")
     sub.add_parser("services", help="every service discovered right now")
     hc = sub.add_parser("hermes-chain", help="generate Hermes's provider chain")
@@ -540,6 +581,36 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     quota, age = load_snapshot()
+
+    if args.command == "plan":
+        kinds = [k.strip() for k in args.kinds.split(",") if k.strip()]
+        bad = [k for k in kinds if k not in KINDS]
+        if bad:
+            parser.error(f"unknown kind(s) {bad}; choose from {KINDS}")
+        skip = {x.strip() for x in args.exclude.split(",") if x.strip()}
+        rows = plan(kinds, quota=quota, min_headroom=args.min_headroom, exclude=skip)
+        stale = (not quota) or age is None or age > STALE_SOFT
+        if args.json:
+            print(json.dumps({
+                "snapshot_age_s": age, "stale": stale,
+                "slices": [{"kind": k, "service": c.service.name if c else None,
+                            "cli": c.service.cli if c else None,
+                            "remaining": c.remaining if c else None,
+                            "why": c.why if c else "no pool has room: keep queued"}
+                           for k, c in rows]}, indent=1))
+        else:
+            if stale:
+                print("WARNING: quota snapshot "
+                      + ("empty" if not quota else f"{(age or 0) / 60:.0f} min old")
+                      + " -> run `aiuse --available --live` first; routing below "
+                      "is capability-only for unmeasured pools", file=sys.stderr)
+            for i, (k, c) in enumerate(rows, 1):
+                if c is None:
+                    print(f"{i}. {k:10} -> (none: keep queued, re-plan at the next boundary)")
+                else:
+                    rem = "" if c.remaining is None else f" {c.remaining:.0f}% left"
+                    print(f"{i}. {k:10} -> {c.service.name}{rem}  [{c.service.cli}]")
+        return 0
 
     if args.command == "show":
         print(f"snapshot: {SNAPSHOT}")
