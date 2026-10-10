@@ -14,6 +14,10 @@ for balances.
 > at a time, gated on `aiuse --available`; `skills/model-routing/SKILL.md`
 > (*Reading quota numbers* item 4) and `skills/bigteam/SKILL.md` (*agy Claude/GPT
 > pool*) carry the rule, `bin/route_agent.py` the `antigravity-claude` service.
+> **Check the model list first:** later on 2026-10-10 the agy ACP server listed only
+> `gemini-*` models, so `claude-opus-5-5-high` failed with `no model` (exit 1, no report)
+> while `aiuse` showed the pool at 100% left. Use `gemini-pro-agent` there, or
+> codex/claude; detail in `skills/bigteam/SKILL.md` (*agy Claude/GPT pool*, item 3).
 >
 > **Correction 2026-10-03: "route bulk work to antigravity first" has a limit
 > that `aiuse` cannot see.** The agy CLI has a per-login burst limit, roughly
