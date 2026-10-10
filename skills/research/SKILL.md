@@ -124,7 +124,9 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    text over abstracts; say which is which.
 6. Record every query verbatim with its source and date. "Found nothing"
    names what was searched; it is not "does not exist".
-7. One writer. Parallel writers produce disjoint reports.
+7. One writer. Parallel writers produce disjoint reports. (On this machine,
+   item 1b: four family drafts, but one merged `report.md` chosen by the
+   Grok lead, so the delivered report still has one voice.)
 8. Budgets are caps. Stop at diminishing returns even with budget left.
 9. Workers do not spawn workers.
 
@@ -151,15 +153,21 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    names it (check its model list before the first call; never guess the
    id). When a Claude Code session is the one running `/research`, it still
    plans and dispatches, but the adjudication and the final refute-mode read
-   go to a Grok slice and its verdict is applied as given. **Workers,
-   refuter and writer rotate across Astra (`acp-dispatch codex --model
-   gpt-6-astra`), Fable (`acp-dispatch claude --model claude-fable-5-1`, or
-   an Agent-tool sub-agent), Grok and agy (`acp-dispatch agy --model <m>`,
-   only ever via ACP, never `agy -p`; it has plenty of headroom and `aiuse`
-   shows no pool for it)**, chosen per slice by capability; a
-   cheaper model (Sonnet, `grok-4.7-build-fast`, zcode) is fine for a slice
-   where it would change research quality little, such as a narrow fetch
-   or a search log. **No weekly quota floor**: dispatch to the most capable
+   go to a Grok slice and its verdict is applied as given. **Every worker
+   role runs on all four families at once, not in rotation**: each slice,
+   the refuter and the writer are dispatched in parallel to Astra
+   (`acp-dispatch codex --model gpt-6-astra`), Fable (`acp-dispatch claude
+   --model claude-fable-5-1`, or an Agent-tool sub-agent), Grok and agy
+   (`acp-dispatch agy --model <m>`, only ever via ACP, never `agy -p`; it
+   has plenty of headroom and `aiuse` shows no pool for it). The lead merges
+   the four evidence files for a slice (dedupe by source and quote, keep
+   every family's unique rows) and the Grok lead picks among the four
+   writer drafts or merges them into one `report.md`; the counter files
+   merge the same way. Codex may be used sparingly when its pools are tight
+   (skip it for a slice rather than wait), the other three always run. A
+   cheaper model (Sonnet, `grok-4.7-build-fast`, zcode) may stand in for a
+   family on a slice where it would change research quality little, such
+   as a narrow fetch or a search log. **No weekly quota floor**: dispatch to the most capable
    agent until `aiuse --available` drops its pool; an exhausted pool waits
    for its reset and the same step resumes (the slice writes incrementally,
    per `feedback_quota_wait_dont_lose_work`). Grok's window is invisible to
