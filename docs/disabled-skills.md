@@ -46,9 +46,11 @@ in `~/.claude/settings.json` (takes effect at once, even mid-session).
 | `cua-driver` (local, `~/.claude.json`) | 56 | Background computer-use driver; overlaps ghost-os, claude-in-chrome and bezalel `computer__*`. |
 | `ghost-os` (local, `~/.claude.json`) | 29 | macOS accessibility-tree + vision computer use; overlaps cua-driver. |
 
+| `beeper` (local, `~/.claude.json`) | 2 | Beeper chat bridge; only an unauthenticated auth stub showed in sessions. |
+
 Still on: Gmail, Google Calendar, Google Drive, Claude Docs, Context7, Firecrawl,
 claude-in-chrome, basic-memory, bezalel, paper-search, arxiv, token-savior,
-graft, hermes, cow, beeper.
+graft, hermes, cow.
 
 ## Plugins disabled
 
@@ -57,6 +59,17 @@ graft, hermes, cow, beeper.
 | `adhd@adhd` | `enabledPlugins: false` | set it to `true` |
 | `mattpocock-skills@mattpocock` | `enabledPlugins: false` | set it to `true` |
 | `engineering`, `cowork-plugin-management` (synced from the claude.ai organization) | `"syncClaudeAiPlugins": false` (stops all claude.ai plugin sync; these were the only two) | remove the key or set it `true` |
+
+## Hooks removed or narrowed (`~/.claude/settings.json` `hooks`)
+
+Backups of the settings file before each change: none are kept in the repo; the
+old entries are quoted here so they can be pasted back.
+
+| Hook | Change | Re-enable |
+|---|---|---|
+| Superset notify (8 entries: SessionStart, UserPromptSubmit, PostToolUse, Stop) | removed; Superset's skills are off too | re-add `[ -n "$SUPERSET_HOME_DIR" ] && [ -x "$SUPERSET_HOME_DIR/hooks/notify.sh" ] && SUPERSET_AGENT_ID=claude "$SUPERSET_HOME_DIR/hooks/notify.sh"`-style entries (Superset's installer writes them) |
+| graft per-prompt pack (UserPromptSubmit `node ~/.claude/helpers/graft-hooks.cjs prompt`) | removed: ~150-300 tokens on every prompt, kept in history, often unrelated to the prompt | add `{"type":"command","command":"node \"/Users/djbclark/.claude/helpers/graft-hooks.cjs\" prompt"}` back under UserPromptSubmit |
+| cswap quota table (SessionStart `~/.claude/hooks/cswap_quota_context.sh`, ~950 tokens) | now `matcher: "^(startup|resume|clear)$"`: no longer re-injected after each compaction | drop the matcher |
 
 ## Skill folders moved aside
 
@@ -68,8 +81,8 @@ the bailian and caveman skills; cursor-agent and muse, which read
 `mv ~/.claude/skills-disabled/<name> ~/.claude/skills/` (new sessions pick it
 up). The bailian skills are Aliyun Bailian/DashScope `bl` CLI wrappers (model
 calls, image/video/speech generation, fine-tuning, managed agents, web search,
-docs wiki); their descriptions are in Chinese. `cavecrew` (the caveman
-sub-agent guide) was left on.
+docs wiki); their descriptions are in Chinese. A second batch (caveman leftovers, a generic coding-discipline pack, the
+ln-* reviewers, book-to-skill) followed the same day.
 
 ## Every disabled skill
 
@@ -157,3 +170,15 @@ sub-agent guide) was left on.
 | `mattpocock-skills:to-questionnaire` | plugin mattpocock-skills@mattpocock (productivity) | Turn a decision you can't fully answer into a questionnaire for someone else to fill in. |
 | `mattpocock-skills:wait-what` | plugin mattpocock-skills@mattpocock (productivity) | Stop. That last message did not land: re-pitch it. |
 | `mattpocock-skills:writing-for-agents` | plugin mattpocock-skills@mattpocock (productivity) | Writing documents for agents. Use when creating or editing skills, or modifying AGENTS.md or CLAUDE.md. |
+| `cavecrew` | caveman | When to delegate to `cavecrew-investigator` (locate code), `cavecrew-builder` (1-2 file edit) or `cavecrew-reviewer` (diff review) instead of working inline or using `Explore`. Their output is compressed, so main context lasts longer. |
+| `megacave` | caveman | Caveman in Classical Chinese: 文言文 register, far fewer characters, technical terms verbatim. Invoke only with /megacave or /caveman wenyan. Stays on until "stop caveman" or "normal mode". |
+| `ultracave` | caveman | Caveman at maximum compression: fragments, one word when one word is enough, each fact once. Invoke only with /ultracave or /caveman ultra. Stays on until "stop caveman" or "normal mode". |
+| `investigate-first` | third-party (discipline pack) | Diagnose ambiguous failures before editing. Use for unknown causes, intermittent behavior, performance regressions, or investigations needing evidence-ranked hypotheses. |
+| `lean-build` | third-party (discipline pack) | Build feature work with high overbuilding risk. Use for new behavior, product slices, or integrations where repository reuse, strict scope, and an explicit stop condition matter. |
+| `safe-refactor` | third-party (discipline pack) | Restructure code while preserving behavior. Use for extraction, consolidation, ownership moves, or cleanup where verification must bracket structural edits. |
+| `surgical-patch` | third-party (discipline pack) | Fix bugs and small behavior changes at the narrowest responsible layer. Use when regression proof, preserved surrounding behavior, and task-relevant tests matter. |
+| `verify-and-stop` | third-party (discipline pack) | Prove existing work meets acceptance conditions without expanding scope. Use for validation-only tasks, completion checks, focused gate runs, and last-mile proof. |
+| `migration` | third-party (discipline pack) | Implement reversible compatibility-safe transitions. Use for schema, data, API, protocol, configuration, or dependency migrations requiring rollback and preservation proof. |
+| `ln-11-plan-reviewer` | third-party (ln-* pack) | Reviews implementation plans against repository evidence and current authoritative guidance. Use before execution to expose gaps and risks; not for completed delivery review. |
+| `ln-21-documentation-auditor` | third-party (ln-* pack) | Audits documentation and code comments for structure, coverage, factual accuracy, and maintainability. Use for documentation trust reviews; not code, test, or architecture audits. |
+| `book-to-skill` | third-party | Converts books and documents (PDF, EPUB, DOCX, HTML, Markdown, plain text, RTF, MOBI/AZW with Calibre) into structured agent skills, extracting frameworks, mental models, principles, techniques, and anti-patterns. Use when the user wants to study a document th… |
