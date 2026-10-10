@@ -94,7 +94,8 @@ def check(auto: bool) -> int:
     if os.environ.get("HERDR_ENV") != "1" or not pane_id:
         print(json.dumps({"in_herdr": False}))
         return 0
-    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    from autorename import session_id  # same directory
+    sid = session_id() or ""
     try:
         pane = herdr("pane", "get", pane_id)["pane"]
         workspaces = herdr("workspace", "list")["workspaces"]
@@ -130,7 +131,8 @@ def check(auto: bool) -> int:
 
 
 def remember(answer: str) -> None:
-    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    from autorename import session_id  # same directory
+    sid = session_id()
     if sid:
         path = state_path(sid)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -190,10 +192,9 @@ def label(text: str | None, from_title: bool, force: bool) -> int:
         print("skipped: not in a herdr pane")
         return 0
     if from_title:
-        from autorename import current_title, find_transcript  # same directory
-        sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
-        transcript = find_transcript(sid) if sid else None
-        title = current_title(transcript) if transcript else None
+        from autorename import read_title, session_id  # same directory
+        sid = session_id()
+        title = read_title(sid) if sid else None
         if not title:
             print("skipped: the session has no custom title yet (run autorename.py first)", file=sys.stderr)
             return 2
