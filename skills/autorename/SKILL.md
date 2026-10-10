@@ -65,6 +65,11 @@ or took the most effort.
 
 ## 2. Apply it
 
+Both scripts need Python 3.10 or newer (`str | None` annotations). In an agent
+shell `python3` can resolve to the 3.9 system build (`BASH_ENV` reorders PATH;
+seen 2026-10-09), so call one by full path:
+`/opt/homebrew/opt/python@3.14/bin/python3.14` in place of `python3` below.
+
 ```bash
 python3 ~/ops/site-private/skills/autorename/autorename.py "<title>"          # operator asked
 python3 ~/ops/site-private/skills/autorename/autorename.py --auto "<title>"   # called from /handoff
