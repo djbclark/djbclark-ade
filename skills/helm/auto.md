@@ -301,6 +301,13 @@ handled once, in this order, and not repaired:
     common-rules item 5 (never push an `~/ops` master) needs an explicit
     exception for `site-private/memory/` notes, or the brief must grant it.
 
+21. **Merge commits and hooks, 2026-10-10.** Pre-commit on a merge commit
+    checks only the conflicted files, so a merge that brings in a new
+    whole-tree gate (the secretspec drift check) must run that gate by hand.
+    Re-run `merge-tree` for every still-open PR after each merge: #319 was
+    clean in the morning and had five conflicts once the stack landed.
+    `/opt/homebrew/bin/python3` does not exist here; use the repo venv.
+
 ## 10. What this is not
 
 1. Not relay mode with the answers filled in: the queue's items are still the
