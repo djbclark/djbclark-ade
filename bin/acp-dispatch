@@ -27,6 +27,20 @@ get the footer pasted into their prompt because the Agent tool cannot be driven 
     $OUT     ~/.local/state/bigteam/<task>/ (default) or --out; never the session scratchpad,
              which is wiped when the session restarts (2026-10-05)
 
+--model is checked before anything is written or detached (2026-10-10: a bad agy model used to
+detach, fail inside the launchd job and surface only as `no-report` from the waiter). The
+agent's model list comes from `acp-run <agent> --info` (its ACP session/new list, which is what
+acp-run itself matches against), cached per agent for 6 h under ~/.cache/acp-dispatch and
+re-read once on a miss; a miss exits 2 with the `have:` list. If the probe itself fails the
+dispatch goes ahead with a warning. --no-model-check skips it.
+
+When the agent stops without a DONE or BLOCKED report and acp-run failed (a quota or plan
+refusal, a crash, a timeout), finalize appends a last line `NO-REPORT: <class> (<agent>,
+<model>[, retry at <time>]) ...` to the report, so the report itself says it is not a
+deliverable, and the slice classifies as no-report (exit 3). The `rearm` waiter runs
+`acp-dispatch check <record>` once `.done` appears, so it exits non-zero (1 partial,
+3 no-report, 4 BLOCKED) and prints the verdict instead of exiting 0 on any finish.
+
 For an ACP agent the final message (acp-run's stdout) is saved to $OUT/<name>-final.txt. If
 the agent did not write the report file but its final message carries the content, the report
 is recovered from it and the record says so (`report_source: final-message`) — stdout from
@@ -35,8 +49,9 @@ acp-run is never truncated, so nothing is lost; the warning tells you the brief 
 Exit codes (dispatch and check):
     0    report delivered and ends in DONE (dispatch: and acp-run exited 0)
     1    report present but unfinished (no DONE), or delivered with a non-zero acp-run exit
-    2    usage (missing --model for an agent that takes one, bad name, report basename Claude Code would refuse, ...)
-    3    delivery failure: the agent finished (or died) and there is no report
+    2    usage (missing or unknown --model, bad name, report basename Claude Code would refuse, ...)
+    3    delivery failure: the agent finished (or died) and there is no report, or its report
+         ends in a NO-REPORT: line (acp-run failed before the agent wrote DONE)
     4    BLOCKED: the report's first line is a question for the lead; answer it, then resume
     124  timed out waiting for the .done marker (--detach without --no-wait)
 Exit 0 is still not success: verify the outcome (diff, tests, the report's content).
@@ -54,6 +69,7 @@ import sys
 import time
 from datetime import date
 from pathlib import Path
+from typing import NoReturn
 
 HERE = Path(__file__).resolve().parent
 FOOTER_FILE = HERE.parent / "docs" / "dispatch-footer.md"
@@ -64,15 +80,22 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # Agents whose ACP server has no model option (zcode-acp-server: "unsupported config option or switch failed: model").
 NO_MODEL_AGENTS = {"zcode"}
 # Claude Code 2.1.295 refuses a sub-agent's Write for this basename (tengu_subagent_md_report_blocked).
-CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.I)
+CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.IGNORECASE)
 PERM_RE = re.compile(r"^(all|deny|scoped:.+)$")
 
 STATUS_EXIT = {"done": 0, "partial": 1, "no-report": 3, "blocked": 4, "running": 1, "pending": 1}
+MODEL_CACHE = Path(os.environ.get("ACP_DISPATCH_MODEL_CACHE", str(Path.home() / ".cache/acp-dispatch")))
+MODEL_CACHE_TTL = 6 * 3600
+INFO_TIMEOUT = 150               # claude's session/new alone takes 13-24 s (acp-run HANDSHAKE_TIMEOUT)
+# Agents whose model list depends on another config option set first (cline: provider, from
+# acp-run's DEFAULT_SET), so --info's list may not be the one acp-run matches against.
+MODEL_CHECK_SKIP = {"cline"}
+NO_REPORT_PREFIX = "NO-REPORT:"
 
 
 # ---------------------------------------------------------------- helpers
 
-def die(msg: str, code: int = 2) -> "NoReturn":  # type: ignore[name-defined]
+def die(msg: str, code: int = 2) -> NoReturn:
     print(f"acp-dispatch: {msg}", file=sys.stderr)
     sys.exit(code)
 
@@ -125,8 +148,122 @@ def pid_alive(pid: int | None) -> bool:
     return True
 
 
-def rearm_cmd(done: Path, seconds: int = 1800) -> str:
-    return f"timeout {seconds} bash -c 'until [ -e {shlex.quote(str(done))} ]; do sleep 10; done'"
+def rearm_cmd(done: Path, record: Path | None = None, seconds: int = 1800) -> str:
+    """The waiter a lead runs (in the background) for a detached slice. It exits 124 on timeout;
+    once .done appears it runs `check` on the record, so a partial, no-report or BLOCKED slice
+    exits non-zero and prints its verdict (2026-10-10: a quota death exited the old waiter 0)."""
+    wait = f"timeout {seconds} bash -c 'until [ -e {shlex.quote(str(done))} ]; do sleep 10; done'"
+    if record is None:
+        return wait
+    return f"{wait} && {shlex.quote(str(Path(__file__).resolve()))} check {shlex.quote(str(record))}"
+
+
+# ---------------------------------------------------------------- model check
+
+def model_values(info: dict) -> list[dict] | None:
+    """The values of the agent's 'model' select option from `acp-run --info` JSON (None: no such
+    option). Grouped options are flattened the way acp-run's pick_config does."""
+    for o in info.get("config_options") or []:
+        if o.get("id") != "model" and o.get("category") != "model":
+            continue
+        values: list[dict] = []
+        for v in o.get("options") or []:
+            values += v.get("options", [v]) if "options" in v else [v]
+        return [{"value": v.get("value"), "name": v.get("name")} for v in values]
+    return None
+
+
+def match_model(values: list[dict], want: str) -> tuple[bool, str]:
+    """Mirror of acp-run pick_config: an exact value or name, else a unique run of
+    dash-separated tokens (a trailing "[...]" ignored on both sides). (ok, why-not)."""
+    if any(want in (v.get("value"), v.get("name")) for v in values):
+        return True, ""
+
+    def toks(x: object) -> list[str]:
+        return re.sub(r"\[[^\]]*\]$", "", str(x or "")).lower().split("-")
+
+    wt = toks(want)
+    cands = [v for v in values
+             if any(any(ct[i:i + len(wt)] == wt for i in range(len(ct) - len(wt) + 1))
+                    for ct in (toks(v.get("value")), toks(v.get("name"))))]
+    if len(cands) == 1:
+        return True, ""
+    amb = f" (ambiguous: {', '.join(str(c.get('value')) for c in cands)})" if cands else ""
+    return False, amb + "; have: " + ", ".join(str(v.get("value")) for v in values)
+
+
+def probe_models(acp_run: str, agent: str, cwd: str) -> tuple[list[dict] | None, str]:
+    """Run `acp-run <agent> --info` (initialize + session/new, no prompt) and cache its model
+    list. Returns (values or None, error)."""
+    try:
+        r = subprocess.run([acp_run, agent, "--info", "-C", cwd], check=False, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=INFO_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"acp-run --info failed: {e}"
+    start = r.stdout.find("{")
+    if r.returncode != 0 or start < 0:
+        err = (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1]
+        return None, f"acp-run --info exit {r.returncode}: {err[:200]}"
+    try:
+        info = json.loads(r.stdout[start:])
+    except ValueError as e:
+        return None, f"acp-run --info printed no JSON ({e})"
+    values = model_values(info)
+    if values is not None:
+        try:
+            MODEL_CACHE.mkdir(parents=True, exist_ok=True)
+            write_atomic(MODEL_CACHE / f"{agent}.json",
+                         json.dumps({"t": time.time(), "acp_run": acp_run, "values": values}) + "\n")
+        except OSError:
+            pass
+    return values, ""
+
+
+def cached_models(acp_run: str, agent: str) -> list[dict] | None:
+    try:
+        c = json.loads((MODEL_CACHE / f"{agent}.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if c.get("acp_run") != acp_run or time.time() - c.get("t", 0) > MODEL_CACHE_TTL:
+        return None
+    return c.get("values")
+
+
+def check_model(acp_run: str, agent: str, model: str, cwd: str) -> str | None:
+    """None when `model` is one the agent offers (or the check cannot run: then a warning);
+    otherwise the usage error to die with."""
+    values = cached_models(acp_run, agent)
+    if values is not None and match_model(values, model)[0]:
+        return None
+    values, err = probe_models(acp_run, agent, cwd)   # a miss re-reads: the list can change
+    if values is None:
+        if err:
+            print(f"acp-dispatch: warning: could not check --model {model!r} ({err}); dispatching anyway",
+                  file=sys.stderr)
+            return None
+        return f"{agent} offers no model option (acp-run {agent} --info): drop --model"
+    ok, why = match_model(values, model)
+    return None if ok else f"no model '{model}' for {agent}{why}"
+
+
+# ---------------------------------------------------------------- failure note
+
+def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None) -> str | None:
+    """The NO-REPORT line for an agent that stopped without DONE/BLOCKED because acp-run failed,
+    from acp-run's stderr (`FAILED <class>: ...`, `fail=<class> error='...'`). None when acp-run
+    exited 0 and printed no FAILED line (an ordinary partial report)."""
+    try:
+        text = stderr.read_text()
+    except OSError:
+        text = ""
+    m = re.search(r"\bfail=(\S+)", text) or re.search(r"FAILED (\S+?):?(?:\s|$)", text)
+    if not m and rc in (None, 0):
+        return None
+    cls = m.group(1) if m else ("timeout" if rc == 124 else f"exit {rc}")
+    when = re.search(r"(?:try again|resets?|retry) (?:at|in|after) ([^.\"'\\]{1,40})", text, re.IGNORECASE)
+    bits = [agent] + ([model] if model else []) + ([f"retry at {when.group(1).strip()}"] if when else [])
+    return (f"{NO_REPORT_PREFIX} {cls} ({', '.join(bits)}): acp-run exit {rc}; the agent stopped "
+            "before writing DONE, so nothing above is a deliverable (appended by acp-dispatch)")
 
 
 # ---------------------------------------------------------------- classify
@@ -154,6 +291,8 @@ def classify(report: Path, done: Path | None = None, finished: bool | None = Non
     first, last = lines[0].strip(), lines[-1].strip()
     if first.upper().startswith("BLOCKED:"):
         return "blocked", first
+    if last.startswith(NO_REPORT_PREFIX):
+        return "no-report", last
     if last == "DONE":
         return "done", first if first.upper().startswith("STATUS:") else f"{len(text)} chars"
     return "partial", f"no DONE line yet; first line: {first[:120]}"
@@ -225,8 +364,15 @@ def finalize(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
     elif has_report:
         rec["report_source"] = "agent"
     rec.update(finished=time.time(), exit=rc, pid=None)
-    done.touch()
     st, det = classify(report, done, finished=True)
+    if st in ("partial", "no-report") and not det.startswith(NO_REPORT_PREFIX):
+        note = failure_note(Path(rec.get("stderr", "")), rc, rec.get("agent", "?"), rec.get("model"))
+        if note:
+            old = report.read_text() if report.exists() else ""
+            write_atomic(report, old + ("" if not old or old.endswith("\n") else "\n") + note + "\n")
+            rec["failure"] = note
+            st, det = classify(report, done, finished=True)
+    done.touch()
     rec["status"] = st
     write_record(record_path, rec)
     return st, det, rec
@@ -271,6 +417,12 @@ def dispatch(a: argparse.Namespace) -> int:
     acp_run = a.acp_run or shutil.which("acp-run")
     if not acp_run:
         die("acp-run not on PATH (and no --acp-run given)")
+    if (a.model and not a.no_model_check and a.agent not in MODEL_CHECK_SKIP
+            and not any(x.startswith("--set") for x in a.acp_arg or [])):
+        # Synchronously, before anything is written or detached (2026-10-10).
+        bad = check_model(acp_run, a.agent, a.model, str(Path(a.dir).resolve()))
+        if bad:
+            die(bad)
     out = Path(a.out).expanduser().resolve() if a.out else STATE_ROOT / (a.task or f"adhoc-{date.today().isoformat()}")
     (out / "jobs").mkdir(parents=True, exist_ok=True)
     report = out / f"{a.name}-report.md"
@@ -307,7 +459,7 @@ def dispatch(a: argparse.Namespace) -> int:
         "task": a.task, "out": str(out), "brief": str(brief), "report": str(report), "done": str(done),
         "final": str(final), "stderr": str(stderr), "log": str(log), "record": str(record),
         "owner": os.environ.get("CLAUDE_CODE_SESSION_ID", ""), "started": time.time(),
-        "cmd": " ".join(shlex.quote(c) for c in acp_cmd), "rearm": rearm_cmd(done),
+        "cmd": " ".join(shlex.quote(c) for c in acp_cmd), "rearm": rearm_cmd(done, record),
         "detached": bool(a.detach), "status": "running", "pid": None, "exit": None, "finished": None,
         "report_source": None, "lead": a.lead,
     }
@@ -324,7 +476,7 @@ def dispatch(a: argparse.Namespace) -> int:
         write_atomic(runner, runner_script(rec, acp_cmd, label, Path(__file__).resolve()), mode=0o700)
         sub = ["launchctl", "submit", "-l", label, "-o", str(out / f"{a.name}.out"),
                "-e", str(out / f"{a.name}.err"), "--", "/bin/bash", str(runner)]
-        r = subprocess.run(sub, capture_output=True, text=True)
+        r = subprocess.run(sub, check=False, capture_output=True, text=True)
         if r.returncode != 0:
             die(f"launchctl submit failed ({r.returncode}): {r.stderr.strip()}", 1)
         rec.update(label=label, runner=str(runner))
@@ -427,6 +579,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="compose the brief copy, print the command and paths, run nothing")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--tee", action="store_true", help="also stream the agent's output to stdout (for a visible pane)")
+    ap.add_argument("--no-model-check", action="store_true",
+                    help="skip checking --model against `acp-run <agent> --info` before dispatch")
     ap.add_argument("--acp-run", help="path to acp-run (default: PATH)")
     ap.add_argument("--acp-arg", action="append", help="extra argument passed through to acp-run (repeatable)")
     a = ap.parse_args(argv)

@@ -22,12 +22,22 @@ from pathlib import Path
 from typing import Any, override
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "bin" / "acp-dispatch"
+# ACP_DISPATCH_SCRIPT: test a candidate copy (in a tree whose docs/ links here) before it replaces the live one
+SCRIPT = Path(os.environ.get("ACP_DISPATCH_SCRIPT", str(ROOT / "bin" / "acp-dispatch")))
 FOOTER = ROOT / "docs" / "dispatch-footer.md"
 
 FAKE = textwrap.dedent("""\
     #!/bin/bash
     # fake acp-run: args are <agent> -C DIR -f BRIEF --model M --perm P --timeout S --log LOG
+    for x in "$@"; do
+      if [ "$x" = --info ]; then
+        [ -n "$INFO_COUNT" ] && echo probe >> "$INFO_COUNT"
+        [ -n "$FAKE_INFO_FAIL" ] && { echo "acp-run: agent down" >&2; exit 1; }
+        echo '{"agent": {"name": "fake"}, "config_options": [{"id": "model", "category": "model",'
+        echo ' "options": [{"value": "m1", "name": "Model One"}, {"value": "claude-fable-5-1[1m]", "name": "Fable"}]}]}'
+        exit 0
+      fi
+    done
     brief=""; while [ $# -gt 0 ]; do case "$1" in -f) brief="$2"; shift;; esac; shift; done
     echo "$@" > /dev/null
     report=$(grep -o 'deliverable to `[^`]*`' "$brief" | head -1 | sed 's/.*`\\(.*\\)`/\\1/')
@@ -38,6 +48,11 @@ FAKE = textwrap.dedent("""\
       partial)  printf 'STATUS: working\\nhalf\\n' > "$report"; echo "written: $report"; exit 0;;
       nothing)  exit 0;;
       quota)    echo "FAILED quota" >&2; exit 1;;
+      quota_partial)
+                printf 'STATUS: working\\n' > "$report"
+                echo "acp-run: FAILED quota: RequestError: Internal error {\\"message\\": \\"You hit your usage limit. Upgrade to Pro or try again at 8:51 PM.\\"}" >&2
+                echo "acp-run: agent=codex stop=error secs=102.3 tools=21 fail=quota error='usageLimitExceeded'" >&2
+                exit 1;;
       timeout)  exit 124;;
       echoargs) echo "$ARGS_SINK" > /dev/null; printf 'STATUS: working\\nDONE\\n' > "$report"; exit 0;;
     esac
@@ -48,7 +63,7 @@ def run(args: list[str], env: dict[str, str] | None = None,
         cwd: str | None = None) -> subprocess.CompletedProcess[str]:
     e = dict(os.environ)
     e.update(env or {})
-    return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, env=e, cwd=cwd)
+    return subprocess.run([sys.executable, str(SCRIPT), *args], check=False, capture_output=True, text=True, env=e, cwd=cwd)
 
 
 class Base(unittest.TestCase):
@@ -69,8 +84,18 @@ class Base(unittest.TestCase):
         self.repo.mkdir()
 
     def dispatch(self, *extra: str, mode: str = "writes", name: str = "s1") -> subprocess.CompletedProcess[str]:
-        return run(["codex", "--model", "m1", "--name", name, "-p", "do the thing", "-C", str(self.repo),
-                    "--out", str(self.out), "--acp-run", str(self.fake), *extra], env={"FAKE_MODE": mode})
+        return self.dispatch_model("m1", *extra, mode=mode, name=name)
+
+    def dispatch_model(self, model: str, *extra: str, mode: str = "writes", name: str = "s1",
+                       env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        e = {"FAKE_MODE": mode, "ACP_DISPATCH_MODEL_CACHE": str(self.tmp / "cache"),
+             "INFO_COUNT": str(self.tmp / "info-count"), **(env or {})}
+        return run(["codex", "--model", model, "--name", name, "-p", "do the thing", "-C", str(self.repo),
+                    "--out", str(self.out), "--acp-run", str(self.fake), *extra], env=e)
+
+    def probes(self) -> int:
+        f = self.tmp / "info-count"
+        return len(f.read_text().splitlines()) if f.exists() else 0
 
     def record(self, name: str = "s1") -> dict[str, Any]:
         return json.loads((self.out / "jobs" / f"{name}.json").read_text())
@@ -187,6 +212,82 @@ class TestDispatch(Base):
         self.assertEqual(self.dispatch("--force").returncode, 0)
 
 
+class TestModelCheck(Base):
+    """2026-10-10: a bad agy model detached, failed inside launchd, and surfaced only as no-report."""
+
+    def test_unknown_model_is_refused_before_anything_is_written_or_detached(self):
+        for extra in ((), ("--dry-run",), ("--detach", "--no-wait")):
+            r = self.dispatch_model("claude-opus-5-5-high", *extra)
+            self.assertEqual(r.returncode, 2, (extra, r.stdout, r.stderr))
+            self.assertIn("no model 'claude-opus-5-5-high' for codex; have: m1, claude-fable-5-1[1m]", r.stderr)
+            self.assertFalse((self.out / "jobs" / "s1.json").exists(), extra)
+            self.assertFalse((self.out / "s1-run.sh").exists(), extra)
+
+    def test_token_match_like_acp_run(self):
+        r = self.dispatch_model("fable-5-1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_list_is_cached_and_a_miss_reprobes_once(self):
+        self.assertEqual(self.dispatch_model("m1", name="a").returncode, 0)
+        self.assertEqual(self.dispatch_model("m1", name="b").returncode, 0)
+        self.assertEqual(self.probes(), 1, "the second dispatch used the cache")
+        self.assertEqual(self.dispatch_model("nope", name="c").returncode, 2)
+        self.assertEqual(self.probes(), 2, "a miss re-reads the live list before refusing")
+
+    def test_probe_failure_warns_and_dispatches(self):
+        r = self.dispatch_model("m1", env={"FAKE_INFO_FAIL": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("could not check --model", r.stderr)
+
+    def test_no_model_check_skips_the_probe(self):
+        r = self.dispatch_model("whatever", "--no-model-check")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.probes(), 0)
+
+
+class TestFailureNote(Base):
+    """2026-10-10: codex died of quota after writing only `STATUS: working`; the waiter exited 0."""
+
+    def test_quota_death_after_status_working_is_no_report_with_a_reason(self):
+        r = self.dispatch(mode="quota_partial")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertTrue(r.stdout.startswith("no-report\t"), r.stdout)
+        rec = self.record()
+        self.assertEqual(rec["status"], "no-report")
+        last = Path(rec["report"]).read_text().splitlines()[-1]
+        self.assertTrue(last.startswith("NO-REPORT: quota (codex, m1, retry at 8:51 PM)"), last)
+        self.assertEqual(rec["failure"], last)
+        c = run(["check", str(self.out / "jobs" / "s1.json")])
+        self.assertEqual(c.returncode, 3)
+        self.assertIn("NO-REPORT: quota", c.stdout)
+
+    def test_note_is_written_into_an_empty_report_too(self):
+        r = self.dispatch(mode="quota")
+        self.assertEqual(r.returncode, 3)
+        text = Path(self.record()["report"]).read_text()
+        self.assertTrue(text.startswith("NO-REPORT: quota (codex, m1)"), text)
+
+    def test_clean_exit_partial_gets_no_note(self):
+        self.dispatch(mode="partial")
+        self.assertNotIn("NO-REPORT", Path(self.record()["report"]).read_text())
+
+    def test_finalize_twice_does_not_append_twice(self):
+        self.dispatch(mode="quota_partial")
+        rec = self.out / "jobs" / "s1.json"
+        r = run(["finalize", str(rec), "--exit", "1"])
+        self.assertEqual(r.returncode, 3)
+        text = Path(self.record()["report"]).read_text()
+        self.assertEqual(text.count("NO-REPORT:"), 1, text)
+
+    def test_rearm_waiter_exits_with_the_check_verdict(self):
+        for mode, want in (("writes", 0), ("partial", 1), ("quota_partial", 3), ("blocked", 4)):
+            self.dispatch(mode=mode, name=mode.replace("_", "-"))
+            rearm = self.record(mode.replace("_", "-"))["rearm"]
+            self.assertIn(" check ", rearm)
+            r = subprocess.run(["bash", "-c", rearm], check=False, capture_output=True, text=True)
+            self.assertEqual(r.returncode, want, (mode, r.stdout, r.stderr))
+
+
 class TestCheck(Base):
     def test_check_classifies_records_and_reports_worst_exit(self):
         self.dispatch(mode="writes", name="ok")
@@ -194,7 +295,7 @@ class TestCheck(Base):
         self.dispatch(mode="nothing", name="gone")
         r = run(["check", str(self.out)])
         self.assertEqual(r.returncode, 4, r.stdout)       # blocked outranks no-report
-        lines = dict((ln.split("\t")[1], ln.split("\t")[0]) for ln in r.stdout.splitlines())
+        lines = {ln.split("\t")[1]: ln.split("\t")[0] for ln in r.stdout.splitlines()}
         self.assertEqual(lines, {"ok": "done", "blk": "blocked", "gone": "no-report"})
 
     def test_check_bare_report_paths_for_agent_tool_subagents(self):
