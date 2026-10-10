@@ -597,7 +597,7 @@ def launch_state(d):
     question -> blocked (needs an answer). Returns (status, last turn's text, result or None)."""
     log = Path(d.get("log") or "")
     cur, turns, result, last_act = [], [], None, 0.0
-    if log.exists():
+    if d.get("log") and log.is_file():
         for line in log.read_text(errors="replace").splitlines():
             try:
                 r = json.loads(line)

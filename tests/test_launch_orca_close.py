@@ -34,6 +34,7 @@ class OrcaClose(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="orcaclose-")
         for p in (mock.patch.object(fleet, "_ORCA", None), mock.patch.object(fleet, "run", self.fake_run),
                   mock.patch.object(launch, "STATE", Path(self.tmp)),
+                  mock.patch.object(fleet, "LAUNCHES", Path(self.tmp) / "launches.jsonl"),
                   mock.patch.dict(os.environ, {"ORCA_TERMINAL_HANDLE": OWN, "ORCA_PANE_KEY": f"{TAB}:{LEAF}"})):
             p.start()
             self.addCleanup(p.stop)
