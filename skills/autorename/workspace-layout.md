@@ -56,7 +56,7 @@ Moved here from the retired `herdr-orchestration` skill on 2026-10-09.
 ## Configured workspaces and their order
 
 `~/.config/autorename/workspaces.conf` (override with `AUTORENAME_WORKSPACES`; read
-it with `herdr_place.py config`) lists the operator's special workspaces, one per
+it with `herdr_place.py config`; the real file is `~/ops/site-djbclark/config/autorename-workspaces.conf`, symlinked there) lists the operator's special workspaces, one per
 line as `name # hint`. `#` starts a comment, whitespace around the name and the hint
 is ignored, and the hint says what belongs there (use it to decide where a tab
 goes; it is never part of the name). Names may contain `+` and `-`.
