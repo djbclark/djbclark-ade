@@ -12,8 +12,11 @@ The backend is chosen by the hook event, then by session-id shape: a Grok
 - Claude Code (registered in ~/.claude/settings.json): UserPromptSubmit stdout is
   surfaced to the model, so the note is printed as plain text; the title check
   reads custom-title records off the session transcript.
-- zcode (registered in ~/.zcode/cli/config.json → hooks.events.UserPromptSubmit;
-  config-file hooks need `hooks.enabled: true` there): stdout must be exactly one
+- zcode (registered as UserPromptSubmit in BOTH ~/.zcode/cli/setting.json and
+  ~/.zcode/cli/config.json → hooks.events.UserPromptSubmit, with
+  `hooks.enabled: true` in each): the installed build (3.14.4-32) fires hooks
+  only from setting.json (verified live 2026-10-10), current zcode docs name
+  config.json for newer builds. stdout must be exactly one
   JSON object, so the same note goes out as hookSpecificOutput.additionalContext;
   the title check is a session-db lookup, since zcode keeps no transcript
   sidecar. `default` and `first_input` titles (placeholder / raw prompt echo)

@@ -20,8 +20,13 @@ It runs three ways: the operator asks (`/autorename`), `/handoff` Step 8 calls i
 with `--auto`, and `autorename_nudge.py` (next to this file) asks for an `--auto`
 run once per untitled interactive session. Claude Code registers that script as
 a UserPromptSubmit hook in `~/.claude/settings.json` (stdout is plain text).
-zcode registers it as UserPromptSubmit in `~/.zcode/cli/config.json` (stdout is
-JSON `additionalContext`; `hooks.enabled` must be true). Grok registers it as a
+zcode registers it as UserPromptSubmit in **both** `~/.zcode/cli/setting.json`
+and `~/.zcode/cli/config.json`, with `hooks.enabled: true` beside it (both files
+have it): the installed build (3.14.4-32) fires hooks only from `setting.json`
+(verified live 2026-10-10 — a config.json-only registration never ran), while
+current zcode docs name `config.json`, so newer builds are covered too; the
+nudge's once-per-session state file absorbs a double fire. zcode stdout is JSON
+`additionalContext`. Grok registers it as a
 Stop hook in `~/.grok/hooks/autorename.json`, because Grok discards
 UserPromptSubmit stdout; the Grok section below has the rest.
 
