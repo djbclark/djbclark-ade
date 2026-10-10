@@ -463,6 +463,11 @@ class RunClient(Client):
         # the last delivery-check failure of this prompt (kept when a retry
         # dies), and an operator cancel that stops further retries
         self.last_failure, self.cancelled, self.prompt_task = None, False, None
+        # copilot's autopilot mode ends a task with a `task_complete` tool call
+        # whose rawInput.summary is the answer, and sends no agent_message_chunk
+        # at all (seen 2026-10-10, gpt-6-astra, 38 tool calls, 0 message
+        # chunks): keep that summary as the fallback text.
+        self.task_summary = ""
         self.color = live and sys.stdout.isatty()
 
     def rec(self, kind, data):
@@ -578,6 +583,11 @@ class RunClient(Client):
                 self.write(update.content.text)
         elif kind == "tool_call":
             self.tools += 1
+            if getattr(update, "title", None) == "task_complete":
+                raw = dump(update).get("rawInput") or {}
+                summary = raw.get("summary") if isinstance(raw, dict) else None
+                if isinstance(summary, str) and summary.strip():
+                    self.task_summary = summary
             if self.live:
                 title = getattr(update, "title", None) or "tool call"
                 self.titles[getattr(update, "tool_call_id", None)] = title
@@ -1484,6 +1494,9 @@ async def run(a, log, err, log_path):
     else:
         tools, allowed, denied = client.tools, client.allowed, client.denied
         text = "".join(client.text)
+        if not text.strip() and client.task_summary:
+            text = client.task_summary  # copilot task_complete summary (see RunClient)
+            out["text_source"] = "task_complete"
         code, label = verdict(a, out, finished, failure, code, client)
         out["turns"] = 1 if client.prompt_task is not None else 0
         if out["turns"]:
