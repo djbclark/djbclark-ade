@@ -278,6 +278,13 @@ handled once, in this order, and not repaired:
     upstream without his direct approval, per PR; forks only. Saved to memory
     as `feedback_no_upstream_cfengine_libntech_without_approval.md`.
 
+17. **Merge-clean worker on branches checked out elsewhere.** When the branch
+    is already checked out in another worktree, `switch` fails: brief "detached
+    worktree, push `HEAD:refs/heads/<branch>`" (a fast-forward, no force).
+18. **Stacked PRs and master merges.** After merging master into a parent and a
+    child separately, their shared append-only files (MEMORY.md, home-agents.md)
+    conflict again; also merge the updated parent head into the child.
+
 ## 10. What this is not
 
 1. Not relay mode with the answers filled in: the queue's items are still the
