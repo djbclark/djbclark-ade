@@ -133,9 +133,9 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
 1. **Workers, refuter, writer and reviewer are `/bigteam` slices, not only
    Claude sub-agents.** Dispatch each brief with `acp-dispatch <agent> --model M
    --name N --task research-<slug> -C <run-folder-parent> -f <brief-file>`
-   (codex, zcode, opencode, cursor-agent, copilot, agy via `acp-run`; pick the
-   agent and model with the `model-routing` skill and the `aiuse` quota rules
-   in `~/CLAUDE.md`). Reasons: the reads stay out of the lead's context, the
+   (codex, zcode, opencode, cursor-agent, copilot, agy via `acp-run`; the
+   `model-routing` skill and the `aiuse` rules in `~/CLAUDE.md` give the
+   mechanics). Reasons: the reads stay out of the lead's context, the
    quota spreads across vendors, and the reviewer gets a genuinely different
    model family (an Agent-tool `ocx-gpt-6-*` sub-agent also counts, with
    the condition in item 1a). A Claude Agent-tool sub-agent is the fallback
@@ -143,6 +143,28 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    carries the footer in item 2. Both routes are exercised: `grok-brain-loop`
    (2026-10-09) used Agent-tool sub-agents; `ai-heaven` (2026-10-09) ran all
    seven slices through `acp-dispatch` (codex, zcode, agy all delivered).
+   1b. **Role-to-model map, operator ruling 2026-10-10** (research skill
+   only; the `model-routing` skill is unchanged until a run has exercised
+   this): **lead and reviewer are the latest Grok**, reached through the
+   `grok` TUI (`acp-dispatch grok --model grok-4.7`, or newer when `grok`
+   lists one) or through `cursor-agent` with the same Grok model as Cursor
+   names it (check its model list before the first call; never guess the
+   id). When a Claude Code session is the one running `/research`, it still
+   plans and dispatches, but the adjudication and the final refute-mode read
+   go to a Grok slice and its verdict is applied as given. **Workers,
+   refuter and writer rotate across Astra (`acp-dispatch codex --model
+   gpt-6-astra`), Fable (`acp-dispatch claude --model claude-fable-5-1`, or
+   an Agent-tool sub-agent), Grok and agy (`acp-dispatch agy --model <m>`,
+   only ever via ACP, never `agy -p`; it has plenty of headroom and `aiuse`
+   shows no pool for it)**, chosen per slice by capability; a
+   cheaper model (Sonnet, `grok-4.7-build-fast`, zcode) is fine for a slice
+   where it would change research quality little, such as a narrow fetch
+   or a search log. **No weekly quota floor**: dispatch to the most capable
+   agent until `aiuse --available` drops its pool; an exhausted pool waits
+   for its reset and the same step resumes (the slice writes incrementally,
+   per `feedback_quota_wait_dont_lose_work`). Grok's window is invisible to
+   `aiuse` and shared with GrokBot, so a Grok slice that stalls or returns
+   a rate-limit line is re-run after the next hour, not re-routed.
    1a. **`ocx-gpt-6-*` sub-agents only work when this Claude Code process
    routes through the opencodex intercept.** That is true when the session
    was launched with `ocx claude`, or when CLI first-party routing is on
