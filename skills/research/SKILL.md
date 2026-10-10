@@ -157,7 +157,11 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    role runs on all four families at once, not in rotation**: each slice,
    the refuter and the writer are dispatched in parallel to Astra
    (`acp-dispatch codex --model gpt-6-astra`), Fable (`acp-dispatch claude
-   --model claude-fable-5-1`, or an Agent-tool sub-agent), Grok and agy
+   --model 'claude-fable-5-1[1m]'`, quoted, the id exactly as `acp-run claude
+   --info` lists it: on 2026-10-10 11:19 a dispatch with `claude-fable-5-1`
+   failed with "acp-run: no model 'claude-fable-5-1'; have: default, opus,
+   claude-fable-5-1[1m], sonnet, haiku, ..."; or an Agent-tool sub-agent),
+   Grok and agy
    (`acp-dispatch agy --model <m>`, only ever via ACP, never `agy -p`;
    `--model claude-opus-5-5-high` draws its Claude/GPT pool, which `aiuse`
    lists as `antigravity claude_gpt`, burn-first while >= 40% left, see
