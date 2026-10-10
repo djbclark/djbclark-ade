@@ -54,6 +54,11 @@ Invariants, in force for the whole run:
    c. Todo notes: `status: open` in `~/ops/site-private/memory/todo/`. The file
       names hold spaces, so walk them with a `for f in …` loop, never
       `$(grep -l …)`.
+   d. Earlier runs' branches: per repo, `git fetch` then `git branch -r | rg
+      claudehelm` and `git log --oneline origin/<default>..origin/claudehelm/<b>`;
+      and `gh issue view <n> --comments` for every issue in the table (a
+      ClaudeHelm comment means the work exists). The brief names the base
+      branch and that comment, or says "no prior branch".
 3. `fleet.py conflicts --cwd <repo>` for every repo in the table, before any
    dispatch. A `working` session means skip the repo. An idle session means
    commit by exact path only, with `git status` showing nothing else of yours.
@@ -235,6 +240,43 @@ handled once, in this order, and not repaired:
    anything a worker runs non-interactively.
 6. **Guessed timestamps** (section 1.4) and **pasted briefs** (section 3.1).
 7. **Repairing the outage** instead of routing around it (section 6).
+
+8. **Unmerged `claudehelm/*` branches** (2026-10-09 evening run). The survey
+   listed issues but not the morning run's unmerged branches, so four
+   stayturgid workers re-discovered `origin/claudehelm/stayturgid` (18 commits,
+   every issue they were briefed on) ten to twenty minutes each. Section 2 now
+   requires, per repo, `git branch -r | rg claudehelm` and `git log
+   origin/<default>..origin/claudehelm/<b> --oneline`, and each brief names the
+   base branch and the earlier ClaudeHelm comment on the issue.
+9. **Read the issue's latest comments before briefing.** sd-herdr was briefed
+   from issue titles; the live Collie was already at the version the issues
+   asked for. One `gh issue view --comments` per issue in the survey.
+10. **`--help` on a live-service CLI subcommand.** `collie update --help`
+    ignores `--help` and starts a real staged update. Workers treat such CLIs
+    as read-only (version, `help`, docs only); the rule is in home-agents.md.
+11. **`bg`'s load gate holds small tests for up to 15 minutes** when ten
+    workers compile at once. Briefs allow `BG_LOAD_WAIT=0` for a single test
+    file under ~30 s of CPU, tell workers to start builds before reading, and
+    set a pytest timeout of 1500 s or more when they wait on the gate.
+12. **Worktree tooling.** A fresh worktree has no `node_modules` (prettier
+    hook fails; symlink `~/ops/stayturgid/node_modules` into it, the gitignore
+    pattern misses a symlink), no `.venv-test` (point at the main checkout's),
+    and `BASH_ENV` reorders PATH inside hooks (`env -u BASH_ENV
+    PATH=$HOME/ops/stayturgid/.venv-test/bin:$PATH git commit`). The bare-test
+    hook rejects `bin/bg $VAR` holding a pytest path: spell it literally.
+13. **Scripted branch creation prints its log.** `cherry-pick` has no `-q`;
+    a worker's script hid a failed pick. Print `git log --oneline -5` after
+    any scripted branch build.
+14. **Tests that spawn ansible need a UTF-8 locale** (agent shells export
+    none); tests that touch a Hermes home run with `HOME=$(mktemp -d)` or the
+    suite provisions ~2 GB into the real `~/.hermes`.
+15. **Operator pause.** "Pause everything at an opportune moment" means: cancel
+    the next wave, let running workers finish (never waste spent tokens),
+    then the doc. Put a "What to finish now" section at the top of the final
+    doc and open it the way he asked (Marked 2 on 2026-10-09).
+16. **Upstream rule for cfengine/libntech** (operator, mid-run): nothing goes
+    upstream without his direct approval, per PR; forks only. Saved to memory
+    as `feedback_no_upstream_cfengine_libntech_without_approval.md`.
 
 ## 10. What this is not
 
