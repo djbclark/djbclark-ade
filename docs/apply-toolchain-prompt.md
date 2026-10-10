@@ -321,6 +321,7 @@ symlinking the skill directory into `.claude/skills/<name>/`:
 | Skill | Install? | What it gives this repo |
 |---|---|---|
 | `report` | yes | `/report`: formats a long Markdown deliverable (research report, spec, review) so it reads well in a Markdown previewer such as Marked 2: numbered superscript citations linked to an anchored list, an evidence table whose ids link to the source (no URL column), descriptive file names with a symlink at any generic name a tool expects, paragraphs under ~180 words, and a render check that captures only the previewer's window. Its two stdlib scripts (`scripts/reformat_citations.py`, `scripts/cite_sup.py`) are idempotent. Apply it before the first `open` of any long document the user will read, not after a formatting complaint. |
+| `dialogue` | yes | Runs a multi-model dialogue that produces one artifact (a spec, a report, a design) with a final-word model: fixed speaking rounds through pinned headless routes (for example Grok, Claude and GPT via `acp-run`), a machine-read footer per turn with point ids, status and dissent, a transcript that is the record, and `scripts/dialogue.py` checks for the failures the first run measured (noise strip, protocol lint, final-word gate). Use when several vendors should argue the points of contention before one writes the deliverable; not for a quick second opinion or for fan-out work with no argument between models. |
 
 **From Matt Pocock's skills marketplace** (public):
 
