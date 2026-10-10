@@ -532,3 +532,12 @@ the zcode TUI, not Hermes.
   commands. **Still queued:** `launch.py start_tui`, acp-run agent-state reporting into Orca,
   helm/fleet `unknown` status for non-Claude Orca TUIs, `where.py` stale
   handle, `terminal create --command/send` as a herdr-pane substitute.
+
+## Re-check Context7 use (on or after 2026-10-24)
+
+Added to Claude Code 2026-10-09; kept on 2026-10-10 (~0.2k tokens/session) while
+Claude Docs and other connectors were cut (docs/disabled-skills.md). Count
+`mcp__claude_ai_Context7__` calls in `~/.claude/projects/*/*.jsonl` since
+2026-10-10; if still ~0, ask djbclark whether to block it too. Firecrawl
+(~5.6k/session, ~250 calls/week) is the costly one; see the same doc.
+

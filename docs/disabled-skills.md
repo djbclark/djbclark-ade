@@ -46,9 +46,10 @@ in `~/.claude/settings.json` (takes effect at once, even mid-session).
 | `cua-driver` (local, `~/.claude.json`) | 56 | Background computer-use driver; overlaps ghost-os, claude-in-chrome and bezalel `computer__*`. |
 | `ghost-os` (local, `~/.claude.json`) | 29 | macOS accessibility-tree + vision computer use; overlaps cua-driver. |
 
+| `claude.ai Claude Docs` | 8 | Anthropic's doc-authoring connector ("living docs you create and edit"), not API-doc lookup; 0 calls in all transcripts since 2026-08-03, ~1.3k tokens/session. Blocked 2026-10-10. |
 | `beeper` (local, `~/.claude.json`) | 2 | Beeper chat bridge; only an unauthenticated auth stub showed in sessions. |
 
-Still on: Gmail, Google Calendar, Google Drive, Claude Docs, Context7, Firecrawl,
+Still on: Gmail, Google Calendar, Google Drive, Context7, Firecrawl,
 claude-in-chrome, basic-memory, bezalel, paper-search, arxiv, token-savior,
 graft, hermes, cow.
 
@@ -69,6 +70,7 @@ old entries are quoted here so they can be pasted back.
 |---|---|---|
 | Superset notify (8 entries: SessionStart, UserPromptSubmit, PostToolUse, Stop) | removed; Superset's skills are off too | re-add `[ -n "$SUPERSET_HOME_DIR" ] && [ -x "$SUPERSET_HOME_DIR/hooks/notify.sh" ] && SUPERSET_AGENT_ID=claude "$SUPERSET_HOME_DIR/hooks/notify.sh"`-style entries (Superset's installer writes them) |
 | graft per-prompt pack (UserPromptSubmit `node ~/.claude/helpers/graft-hooks.cjs prompt`) | removed: ~150-300 tokens on every prompt, kept in history, often unrelated to the prompt | add `{"type":"command","command":"node \"/Users/djbclark/.claude/helpers/graft-hooks.cjs\" prompt"}` back under UserPromptSubmit |
+| graft alwaysLoad keeper (SessionStart `python3 ~/.claude/hooks/graft_mcp_alwaysload.py`) | removed, and `"alwaysLoad": true` dropped from the graft entry in `.mcp.json` of aiuse, djbclark-ade and tendcf: graft's 6 tool schemas (~880 tokens) now load on demand via ToolSearch. Measured: graft called in 6% of sessions, 64% of its answers followed by a read of the same file anyway | re-add the hook and the flag |
 | cswap quota table (SessionStart `~/.claude/hooks/cswap_quota_context.sh`, ~950 tokens) | now `matcher: "^(startup|resume|clear)$"`: no longer re-injected after each compaction | drop the matcher |
 
 ## Skill folders moved aside
