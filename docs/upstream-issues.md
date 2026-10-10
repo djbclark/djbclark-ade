@@ -744,3 +744,38 @@ once the new shell is active.
 Filed as #393 (operator decision 2026-10-09 19:30 EDT). To confirm the cause on a phone that an installed 1.17.x PWA
 shows "Sign in" → `/auth/` against a 1.18.x bridge; this machine's phone is now
 paired (device `t2e`, 17:37 EDT) and the evidence above is host-side only.
+
+## 12. Claude Code — post-compact hook lines print the full hook command into context (filed 2026-10-10: anthropics/claude-code#101139)
+
+Found because Orca's ~3 KB `PostCompact` wrapper shows after every `/compact`
+(Orca side: stablyai/orca#25209 / PR #25211, docs/queue.md). Filed text:
+
+### What happens
+
+After every `/compact`, Claude Code prints one line per `PreCompact` / `PostCompact` hook:
+
+```
+PreCompact [<full command>] completed successfully
+PostCompact [<full command>] completed successfully: <output>
+```
+
+The bracketed part is the hook's **entire `command` string**. The same text is also stored in the transcript as `local-command-stdout`, so the model reads it as context right after the compaction that was meant to free context.
+
+This gets expensive when the command is long. Orca (stablyai/orca) registers a ~3 KB portable shell wrapper for `PostCompact`, with Windows Git Bash, PowerShell, missing-`HOME` and missing-script branches, so every `/compact` puts about 1k tokens of shell code back into context. Orca is shortening its own command (stablyai/orca#25209, PR #25211), but any tool that installs a long hook command hits the same problem.
+
+### Repro
+
+1. Add a `PostCompact` hook whose `command` is long (several hundred characters or more).
+2. Run `/compact`.
+3. The full command is printed after compaction, and the next turn's context contains it.
+
+Observed on Claude Code 2.1.296, macOS. The display name comes from the function that renders a hook (`type === "command"` → `command`, joined with `args`). It never uses the hook's `statusMessage`, although `statusMessage` is already accepted and shown in the spinner while the hook runs.
+
+### Request
+
+1. In the post-compact lines, show `statusMessage` when the hook has one, and otherwise truncate the command (for example to its first ~80 characters plus `…`).
+2. Optionally, leave successful hook lines with empty or `{}` output out of the model-visible context entirely. They carry no information for the model.
+
+### Searched first
+
+I searched anthropics/claude-code issues for "PostCompact", "PreCompact completed successfully", "hook command shown transcript" and "alwaysLoad". The nearest threads are #89622 (PostCompact stdin JSON escaping), #91910 (compact hooks firing for sub-agent compaction) and #101070 (an "idle" trigger value). None covers how the hook is displayed or what it costs in context.
