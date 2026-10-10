@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# agy-linux: run the Linux build of the Antigravity CLI (agy) in an Apple
+# `container` on this Mac, with the current directory as its working dir.
+#
+# Why: since 2026-10-03 Google refuses the macOS agy CLI for djbclark's account
+# (429 RESOURCE_EXHAUSTED on every request, every network, after a fresh
+# install), while the Linux build on the same Mac, account and network works
+# (verified 2026-10-09; site-private memory
+# project_agy_cli_burst_lockout_2026-10-03.md).
+#
+# Usage: agy-linux [agy args...]   e.g. agy-linux, agy-linux -p 'say OK'
+#        agy-linux stop            stop the container (state is kept)
+#
+# The container mounts $HOME at the same path, so any directory under $HOME is
+# usable; agy's own state (binary, login, logs) lives on the host in
+# ~/.local/share/agy-linux/root, mounted as the container's /root. The first
+# run creates the container and installs agy with Google's installer; sign-in
+# is interactive on the first `agy-linux` run.
+#
+# AGY_CLI_MODEL_API_MAX_RETRIES defaults to 0: agy's default of 8 retries per
+# failed request is what turned a burst into a lockout. Agents still use
+# `acp-run agy`, never this.
+set -euo pipefail
+
+NAME=${AGY_LINUX_CONTAINER:-agy-linux}
+IMAGE=docker.io/library/ubuntu:24.04
+STATE="$HOME/.local/share/agy-linux/root"
+AGY=/root/.local/bin/agy
+
+if [ "${1:-}" = stop ]; then
+  container stop "$NAME" >/dev/null 2>&1 || true
+  exit 0
+fi
+
+status() {
+  container list --all --format json 2>/dev/null |
+    jq -r --arg n "$NAME" '.[] | select(.configuration.id == $n) | .status.state? // .status' 2>/dev/null
+}
+
+st=$(status)
+if [ -z "$st" ]; then
+  echo "agy-linux: creating container $NAME (one-time, about a minute)" >&2
+  mkdir -p "$STATE"
+  container run -d --name "$NAME" -v "$STATE:/root" -v "$HOME:$HOME" "$IMAGE" sleep infinity >/dev/null
+  container exec "$NAME" sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates >/dev/null 2>&1' >&2
+elif [ "$st" != running ]; then
+  container start "$NAME" >/dev/null
+fi
+
+if ! container exec "$NAME" test -x "$AGY"; then
+  echo "agy-linux: installing agy with Google's installer" >&2
+  container exec "$NAME" bash -c 'curl -fsSL https://antigravity.google/cli/install.sh | bash' >&2
+fi
+
+case "$PWD/" in
+  "$HOME"/*) wd=$PWD ;;
+  *) wd=/root; echo "agy-linux: $PWD is outside \$HOME (not mounted); using /root" >&2 ;;
+esac
+
+flags=(-i)
+[ -t 0 ] && [ -t 1 ] && flags=(-it)
+envs=(-e "TERM=${TERM:-xterm-256color}" -e "AGY_CLI_MODEL_API_MAX_RETRIES=${AGY_CLI_MODEL_API_MAX_RETRIES:-0}")
+while IFS='=' read -r k _; do
+  [ "$k" = AGY_CLI_MODEL_API_MAX_RETRIES ] && continue
+  envs+=(-e "$k=${!k}")
+done < <(env | grep -E '^(AGY_[A-Z0-9_]*|CLOUD_CODE_URL)=' || true)
+
+exec container exec "${flags[@]}" "${envs[@]}" -w "$wd" "$NAME" "$AGY" "$@"
