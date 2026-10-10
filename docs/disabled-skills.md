@@ -11,11 +11,36 @@ every skill's description, into every session, and loads them again after every
 `/compact`. A compacted session still held ~104k tokens, re-written at the
 1-hour cache's 2x rate. Measured with `claude -p "/context"`:
 
-| | Before | After |
-|---|---|---|
-| Fresh session total | 37.5k | 31.8k |
-| MCP server instructions | 9.2k | 3.8k |
-| Deferred MCP tool schemas (loaded only on ToolSearch, but their names are always listed) | 751k | 107k |
+| | Before | First pass | Final (end of 2026-10-10) |
+|---|---|---|---|
+| Fresh session total | 37.5k | 31.8k | 26.7k |
+| MCP server instructions | 9.2k | 3.8k | 3.1k |
+| MCP tools loaded up front | 5.7k | | 4.8k |
+| Memory files (`~/.claude/CLAUDE.md` condensed 20.4 → 12.6 KB) | 8.6k | | 5.5k |
+| Skills listing | 10k | | 10k |
+| Deferred MCP tool schemas (loaded only on ToolSearch, but their names are always listed) | 751k | 107k | 105.5k |
+
+The skills listing did not move although ~40 skill folders were moved out and 19
+descriptions were shortened (10,958 → 6,706 chars): it looks like a fixed
+budget that Claude Code fills and truncates (assumed, not confirmed).
+
+### Kept on purpose (2026-10-10)
+
+1. **Firecrawl** (~5.6k tokens/session, the most expensive item left): ~250
+   calls a week, the most-used web tool. Its two always-loaded tools
+   (`firecrawl_search`, `firecrawl_scrape`) cannot be deferred from our side:
+   `ENABLE_TOOL_SEARCH=true` was tested and changed nothing (the server most
+   likely marks them `alwaysLoad` in `_meta`). The only untried route is a local
+   http server entry with `"alwaysLoad": false` shadowing the claude.ai
+   connector, which needs its own API key and sign-in.
+2. **Context7** (~0.2k): agent-friendly library docs; re-check its use on or
+   after 2026-10-24 (docs/queue.md).
+3. **token-savior**: djbclark kept it although transcripts show 0 calls ever.
+4. **graft**: kept, but its tools now load on demand (`alwaysLoad` dropped from
+   `.mcp.json`) and its per-prompt hook is gone. Measured over the week to
+   2026-10-10: used in ~6% of sessions, and 64% of its answers were followed by
+   a re-read of the same file; its "tokens saved" banner claimed 1.95M against
+   ~71k tokens of actual output.
 
 That trims every request of every session, not just compacted ones. Background:
 `~/ops/site-private/memory/feedback_self_compact.md` item 7. Re-add anything
