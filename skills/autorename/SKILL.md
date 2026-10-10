@@ -1,6 +1,6 @@
 ---
 name: autorename
-description: Rename the current Claude Code or zcode session (what /rename does) to a short title you derive from what you know about the session, then, inside herdr, offer to move its tab out of a generic workspace (a number, "shells", "src", "~") into a fitting existing or new one. Use when the operator types /autorename, says "name this session", "rename this session", "give this session a title", when the autorename_nudge hook says the session is untitled (Claude Code), and automatically as the last step of /handoff. Also the owner of the full herdr layout pass; use it when asked to reorganize, rearrange, re-name or clean up all herdr workspaces, tabs and panes ("from-first-principles reorg", "my herdr layout got grotty"), or to create workspaces and move tabs and panes between them; the procedure is `workspace-layout.md` beside this file. `/autorename all` (or `reorg`, `layout`) runs that full pass directly.
+description: Rename the current Claude Code, zcode, or Grok session (what /rename does) to a short title you derive from what you know about the session, then, inside herdr, offer to move its tab out of a generic workspace (a number, "shells", "src", "~") into a fitting existing or new one. Use when the operator types /autorename, says "name this session", "rename this session", "give this session a title", when the autorename_nudge hook says the session is untitled (Claude Code), and automatically as the last step of /handoff. Also the owner of the full herdr layout pass; use it when asked to reorganize, rearrange, re-name or clean up all herdr workspaces, tabs and panes ("from-first-principles reorg", "my herdr layout got grotty"), or to create workspaces and move tabs and panes between them; the procedure is `workspace-layout.md` beside this file. `/autorename all` (or `reorg`, `layout`) runs that full pass directly.
 ---
 
 # autorename — title the session from what you know
@@ -12,8 +12,9 @@ session's life, closing idle herdr panes safely, is the `herdr-tidy` skill.
 
 `/rename` is a built-in command a skill cannot call, so this skill writes the
 same records `/rename` writes, through `autorename.py` next to this file.
-It works in Claude Code and zcode, auto-detected (`CLAUDE_CODE_SESSION_ID`, else
-zcode's exec-log fds); in any other TUI say so and stop.
+It works in Claude Code, zcode, and Grok, auto-detected (`GROK_SESSION_ID` when
+`GROK_AGENT=1`, else `CLAUDE_CODE_SESSION_ID`, else zcode's exec-log fds); in
+any other TUI say so and stop.
 
 It runs three ways: the operator asks (`/autorename`), `/handoff` Step 8 calls it
 with `--auto`, and — Claude Code only — the `autorename_nudge.py`
@@ -103,6 +104,23 @@ it from this shell's own fd paths (zcode's exec log), which fails only if both
 stdout and stderr are piped away (`2>&1 |`); `--session-id sess_…` names a
 session explicitly. `--show` there prints `title (source)`.
 
+**Grok.** The same script detects this process when `GROK_AGENT=1` and
+`GROK_SESSION_ID` is set (override the base dir with `GROK_HOME`; default
+`~/.grok`). It writes what `/rename` writes: `generated_title` and
+`title_is_manual: true` in
+`~/.grok/sessions/<encoded-cwd>/<id>/summary.json`, under an exclusive lock on
+the sibling `summary.json.lock`, so a racing auto-title refresh cannot drop
+the pin. A non-empty `session_summary` is left as it is (that field is the
+auto summary; the picker prefers `generated_title`). An automatic title whose
+text already matches is still pinned, so the next refresh cannot replace it.
+`--auto` will not replace a title the operator pinned with `/rename` unless
+this script wrote that text. `--show` prints `title (manual)` or `title (auto)`.
+`/resume`, `grok sessions list`, and `grok --resume <title>` see the new title
+at once. The running TUI never receives the in-process notification `/rename`
+sends, so the prompt border keeps its old caption until the session is resumed.
+The herdr tab label below is the name on the sidebar. There is no Grok nudge
+hook; the Claude Code hook stays Claude-only.
+
 **The herdr tab label is a separate thing.** Neither `/rename` nor `autorename.py`
 touches the sidebar tab: it keeps its default number ("2") until something labels
 it (operator, 2026-10-09, after three renames changed nothing he could see). Inside
@@ -177,8 +195,8 @@ focus, the others split into it) because herdr has no tab-to-workspace move; the
 old pane id stays valid as an alias. Report its one line.
 
 To sort **another** session's tab (one the hook missed, say), title it with
-`autorename.py --session-id <sid> "<title>"` (a Claude uuid or a zcode `sess_…`
-id) and move it with
+`autorename.py --session-id <sid> "<title>"` (a Claude uuid, a Grok session id,
+or a zcode `sess_…` id) and move it with
 `HERDR_PANE_ID=<its pane> herdr_place.py move ... --no-focus`
 so the operator's view doesn't jump; `herdr pane list --workspace <id>` maps
 `agent_session.value` to pane ids.

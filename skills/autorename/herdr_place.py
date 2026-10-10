@@ -12,6 +12,7 @@ does the move.
     herdr_place.py label [L | --from-title] [--force]   # label THIS tab (a bare number otherwise)
     HERDR_PANE_ID=<other pane> CLAUDE_CODE_SESSION_ID=<its session> \
         herdr_place.py move ... --no-focus        # sort another session's tab
+    GROK_SESSION_ID=<id> GROK_AGENT=1 herdr_place.py label --from-title   # a Grok session
     herdr_place.py decline                        # remember "leave it", no re-ask
 
 herdr has no tab-to-workspace move, so `move` moves every pane of the current
