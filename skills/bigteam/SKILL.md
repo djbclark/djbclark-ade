@@ -115,23 +115,20 @@ sure vendors are automatically used again when more tokens become available"):
 
 **Current exclusions** (keep this list short; delete an entry when it lapses):
 
-1. **The grok vendor (xAI's SuperGrok subscription)** — excluded 2026-10-06,
-   operator: "Stop using grok (the vendor) in /bigteams etc. for now. You can
-   still use grok models via several other vendors." End condition: none —
-   permanent until the operator explicitly lifts it (confirmed 2026-10-06); don't
-   ask for an end date or re-check it per batch. Covers every route that bills SuperGrok: the `grok`
-   TUI/CLI, `acp-run grok`, Ralph's `grok` plugin, and LiteLLM's `grok-sub`
-   model (the `xai_oauth_bridge`). Grok *models* through another vendor's pool
-   (opencode, cursor, copilot, …) stay allowed, under that pool's own rules
-   (prepaid ones like openrouter still need a fresh operator decision).
-   **Enforcement (2026-10-06):** `aiuse --available` omits it via
-   `[analysis.excluded_pools] "grok"` in `~/.config/aiuse/config.toml` and
-   lists it under `excluded` (aiuse a540f15); Hermes's `fallback_providers`
-   no longer name `grok-sub` or `xai-oauth` (`~/.hermes/config.yaml`).
-   Still open by choice: `acp-run --list` shows `grok`, and LiteLLM keeps
-   `grok-sub` in other models' fallback chains (`roles/litellm`,
-   `litellm_xai_bridge_enabled`). Lifting the exclusion means undoing the
-   aiuse and Hermes entries too.
+1. (none)
+
+Lapsed: **the grok vendor (xAI's SuperGrok subscription)** was excluded
+2026-10-06 ("Stop using grok (the vendor) in /bigteams etc. for now") and
+**lifted 2026-10-09** by the operator ("grok is working again, so include it
+as well as claude and codex", during the `ai-heaven` research run). Route:
+`acp-run grok -C <dir> -p '<prompt>' --model grok-4.7` (`grok models` lists
+grok-4.7 default, grok-4.7-build-fast, grok-4.6, grok-4.5; the CLI also
+takes `--reasoning-effort`, `--prompt-file`, `--permission-mode`); probe
+answered in 4 s on 2026-10-09. `aiuse` shows no grok pool (its collector is
+off), so check the window in the `grok` TUI before a bulk batch, and keep the
+*Reserve pools* note below (GrokBot runs on it). Still true: the `grok` entry
+in `~/.config/aiuse/config.toml` `[disabled_services]` is commented out, and
+Hermes's `fallback_providers` do not name `grok-sub` (operator's call).
 
 ### Reserve pools — never run them out
 
@@ -141,9 +138,10 @@ dependant, which costs more than any slice saves:
 1. **clinepass** — Hermes runs on it, through the LiteLLM gateway on `:4000`.
    Never bulk-route to it.
 2. **The grok TUI** (`grok`, the SuperGrok subscription) — GrokBot, the cloud
-   "Chief of Staff", runs on it. **Currently excluded entirely** (see *Current
-   exclusions* above); when that lapses, small slices only, window checked
-   first. Grok *models* reached through another TUI (opencode, cursor,
+   "Chief of Staff", runs on it. Delegation allowed again since 2026-10-09
+   (see *Current exclusions* above): small slices, or a run the operator asked
+   for by name, window checked first in the `grok` TUI (`aiuse` cannot see
+   it). Grok *models* reached through another TUI (opencode, cursor,
    copilot, …) bill that TUI's pool instead and are fine.
 3. **Claude** — do use it; it does the judgment, integration and review. But
    orchestration runs from Claude, so if its 5-hour or weekly window runs out,

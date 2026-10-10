@@ -163,7 +163,7 @@ Rules for any agent that dispatches to agy:
 - **Monthly subscription windows**: claude (5h/weekly/+Fable bucket),
   codex (ChatGPT Plus weekly), antigravity/agy (Google AI Pro — also
   exposes Claude/GPT windows), copilot (premium requests), cursor Pro,
-  grok (SuperGrok; reserve for GrokBot; **excluded from delegation since 2026-10-06**, see bigteam's *Current exclusions*), zai GLM lite (via the zcode TUI), clinepass (Cline windows; feeds
+  grok (SuperGrok; GrokBot runs on it, so small slices; delegation re-allowed 2026-10-09, `acp-run grok --model grok-4.7`; `aiuse` cannot see its window), zai GLM lite (via the zcode TUI), clinepass (Cline windows; feeds
   hermes via LiteLLM :4000; reserve, never run out), devin (disabled in Orca on
   purpose).
 - **Free**: opencode-go bundled models; sipb (MIT-hosted, `opencode`
@@ -203,7 +203,7 @@ drive. Everything below about acp-run's flags still applies underneath it.
 
 - **Agents** (`--list`): claude (via the `claude-agent-acp` adapter), codex
   (via `codex-acp`), copilot, opencode, cursor, qwen, devin, cline,
-  hermes, grok (`grok agent stdio`; **excluded since 2026-10-06** — bigteam's *Current exclusions*), agy
+  hermes, grok (`grok agent --always-approve stdio`; `--model grok-4.7`; exclusion lifted 2026-10-09, probe 4 s), agy
   (Google's signed `agy_acp_server.par`; verified 2026-10-03 22:54, 6.5 s; fails
   independently of the `agy` CLI, see "agy has a burst limit" above).
   Which ones currently work end to end, and what the others need, is
@@ -342,8 +342,8 @@ Herdr-hosted TUIs (driving agents in Herdr panes; verified 2026-09-26):
    its own weekly bucket).
 3. **Reserve pools and exclusions:** clinepass (Hermes runs on it), Claude
    itself (orchestration runs from it), Copilot's shared allowance, and the
-   grok-vendor exclusion — the one copy is `bigteam`'s *Reserve pools* and
-   *Current exclusions*. Never prepaid without an explicit fresh operator
+   grok TUI (GrokBot) — the one copy is `bigteam`'s *Reserve pools* and
+   *Current exclusions* (the grok-vendor exclusion lapsed 2026-10-09). Never prepaid without an explicit fresh operator
    decision. Usage credits and overage toggles (Claude usage credits, Codex
    credits, OpenCode Go "Use balance") are real money too: never pick a
    credits-backed model without asking, and never re-enable a disabled
