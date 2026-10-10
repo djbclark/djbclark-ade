@@ -43,6 +43,7 @@ sudo-secretspec, ralph-tui-create-*, ...) stay where their installer put them.
 |---|---|---|
 | `bigteam` | Fans a prompt out across the agent TUIs with free quota: probes pools, slices the work, dispatches, integrates. | `/bigteam <prompt>`; "parallelize this". |
 | `model-routing` | Picks vendor x model x effort for a kind of work and reads `aiuse` pools. | Load before big multi-agent runs or when a quota window is tight. |
+| `fallback-chains` | Dated inventory of every failure chain (Hermes, cron, LiteLLM, herdr-ai, acp-run) plus the not-started single-system backlog. | Load when asked about fallback chains; re-read live config and update the snapshot if it drifted. |
 | `effort-routing` | Matches this session's own reasoning effort to the stretch of work. | Load when starting rote edits or dispatching subagents. |
 | `cow-workspaces` | Isolated workspaces as APFS copy-on-write pastures (`bin/cow-pasture`). | "give this agent its own workspace"; parallel work on a checkout under `~/src`. |
 | `dialogue` | Runs a multi-model dialogue (for example Grok, Fable, Astra) that produces one artifact with a final-word model: fixed rounds through pinned routes, footers with point ids and dissent, a final-word state-file gate, noise strip and protocol lint. | "have the models chat about it and write X"; "three-model dialogue". Script: `skills/dialogue/scripts/dialogue.py`. |

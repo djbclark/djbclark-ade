@@ -21,6 +21,10 @@ The canonical, dated matrix lives at
 djbclark/djbclark-ade). Read it first; this skill carries the stable
 method, not the volatile numbers.
 
+Failure chains (what runs when the chosen model fails) are not here.
+Load `fallback-chains` and, if this change touches a chain, update that
+skill's snapshot in the same turn.
+
 ## Probes (prefer these over a hand-kept snapshot; aiuse's own cache is fine while fresh)
 
 - **`aiuse --available`** (aiuse 3.1.4+, github.com/djbclark/aiuse) — the routing

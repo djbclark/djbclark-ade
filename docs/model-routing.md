@@ -8,6 +8,10 @@ operator's own tool, github.com/djbclark/aiuse — allow ~1 min) and direct
 CLI probes. Percentages drift constantly — re-probe, don't trust this file
 for balances.
 
+Failure chains (what runs when a chosen model fails) are a different
+document: `skills/fallback-chains/`. Re-read its live sources before
+quoting a chain, and update its snapshot if you change one.
+
 > **Update 2026-10-10 (operator): use agy's Claude/GPT pool heavily while it has
 > headroom** (5h 100% left, weekly 49% left, critical burn alert). Via
 > `acp-run agy --model claude-opus-5-5-high` / `claude-sonnet-5-5-high`, 2-3 slices

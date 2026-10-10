@@ -1,0 +1,56 @@
+---
+name: fallback-chains
+description: >-
+  Use when asked about fallback chains. Update snapshot.
+---
+
+# Fallback chains on this machine
+
+Canonical source: `skills/fallback-chains/` in `~/src/djbclark-ade`.
+Every TUI copy is a symlink through `skill-everywhere`. Edit only here.
+
+`model-routing` chooses who runs a task. This skill is what runs when that
+choice fails, plus every other chain that is not the Hermes request path.
+Load both when a change touches either.
+
+## Update rule
+
+The files under `references/` are a dated snapshot, not the live chain.
+Before answering a fallback question, or after changing any chain:
+
+1. Re-read the live sources in Quick Reference. Do not answer from the snapshot alone.
+2. If a live source differs from `references/inventory.md`, update that file in the same turn and set its date.
+3. If the change is a step toward the single-system goal, record it in `references/integration.md` (done, dropped, or still open). Do not start that work unless asked.
+
+A chain change means any of: Hermes `model`, `fallback_providers`, `auxiliary`, `cron`, or `moa`; a cron job pin; LiteLLM `router_settings.fallbacks`; `herdr-ai`'s default-model fallback; `acp-run`'s transport fallback; enabling or disabling `ai-model-switch`.
+
+## Quick reference
+
+Re-read these. Extract provider, model, effort, and thinking only. Do not copy secrets, keys, or URLs that embed credentials.
+
+1. `~/.hermes/config.yaml` — `model`, `fallback_providers`, `agent.reasoning_effort`, `auxiliary`, `cron`, `moa`.
+2. `~/.hermes/cron/jobs.json` — agent jobs: `provider`, `model`, `no_agent`, enabled. A pinned job does not walk `fallback_providers` (`cron/scheduler.py`).
+3. `~/.litellm/config.yaml` — `router_settings.fallbacks` and any per-hop `reasoning_effort`.
+4. `~/src/djbclark-ade/bin/herdr-ai` — `fallbacks` / `ask_model`. Default model only; an explicit model does not fall back.
+5. `~/src/djbclark-ade/tools/acp-run/acp-run` — `fallback_cli`. Transport retry, not a model chain. `--no-fallback` disables it.
+6. `launchctl list | rg 'ai-model-switch|litellm'` — the switcher is a chain only if its plist is loaded. A `.disabled` plist is dormant code.
+7. Hermes gateway session pins, when the question is about live chats: `~/.hermes/state.db` table `sessions`, column `model_override`. Counts only. A session pin changes the primary; it does not drop `fallback_providers` (that drop is the cron and `delegate_task` rule in `scoped_fallback_chain`).
+
+There is no separate version field. The model id is the version. List effort and thinking only where a config or source field sets them. `agent.reasoning_effort` is global, not per hop.
+
+## Current shape
+
+Six live layers, not one system. The dated tables are in `references/inventory.md`.
+
+1. Hermes interactive failure chain, plus gateway session pins that change only the primary.
+2. Hermes cron: unpinned agent jobs walk the fleet default then `fallback_providers`; a pin does not.
+3. Side routes: compression pin, MoA (configured, not the request path), unpinned `delegate_task`.
+4. LiteLLM `router_settings.fallbacks`, its own chains.
+5. `herdr-ai` default-model fallback, which then walks the matching LiteLLM chain.
+6. `acp-run` Claude transport fallback only.
+
+`route_agent.py` scores which agent to dispatch. It is not a failure chain.
+
+## Integration goal
+
+Not built. The operator wants one fallback system that is easy to query, easy to change, robust, and documented here so a later request can find it. The backlog of observed gaps is `references/integration.md`. Do not implement it from this skill unless asked.
