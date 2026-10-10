@@ -1,6 +1,6 @@
 ---
 name: autorename
-description: Rename the current Claude Code, zcode, or Grok session (what /rename does) to a short title you derive from what you know about the session, then, inside herdr, offer to move its tab out of a generic workspace (a number, "shells", "src", "~") into a fitting existing or new one. Use when the operator types /autorename, says "name this session", "rename this session", "give this session a title", when the autorename_nudge hook asks for a title (Claude Code or zcode UserPromptSubmit, or a Grok Stop), and automatically as the last step of /handoff. Also the owner of the full herdr layout pass; use it when asked to reorganize, rearrange, re-name or clean up all herdr workspaces, tabs and panes ("from-first-principles reorg", "my herdr layout got grotty"), or to create workspaces and move tabs and panes between them; the procedure is `workspace-layout.md` beside this file. `/autorename all` (or `reorg`, `layout`) runs that full pass directly.
+description: Rename the current Claude Code, zcode, Grok, cursor-agent, or OpenCode session (what /rename does) to a short title you derive from what you know about the session, then, inside herdr, offer to move its tab out of a generic workspace (a number, "shells", "src", "~") into a fitting existing or new one. Use when the operator types /autorename, says "name this session", "rename this session", "give this session a title", when the autorename_nudge hook asks for a title (Claude Code or zcode UserPromptSubmit, or a Grok Stop), and automatically as the last step of /handoff. Also the owner of the full herdr layout pass; use it when asked to reorganize, rearrange, re-name or clean up all herdr workspaces, tabs and panes ("from-first-principles reorg", "my herdr layout got grotty"), or to create workspaces and move tabs and panes between them; the procedure is `workspace-layout.md` beside this file. `/autorename all` (or `reorg`, `layout`) runs that full pass directly.
 ---
 
 # autorename — title the session from what you know
@@ -12,11 +12,11 @@ session's life, closing idle herdr panes safely, is the `herdr-tidy` skill.
 
 `/rename` is a built-in command a skill cannot call, so this skill writes the
 same records `/rename` writes, through `autorename.py` next to this file.
-It works in Claude Code, zcode, Grok, and cursor-agent, auto-detected
-(`CURSOR_CONVERSATION_ID` when `CURSOR_AGENT=1` and cursor-agent is the nearest
-agent process above the shell, else `GROK_SESSION_ID` when `GROK_AGENT=1`, else
-`CLAUDE_CODE_SESSION_ID`, else zcode's exec-log fds); in any other TUI say so and
-stop.
+It works in Claude Code, zcode, Grok, cursor-agent, and OpenCode, auto-detected
+(`OPENCODE_SESSION_ID` for OpenCode, `CURSOR_CONVERSATION_ID` when
+`CURSOR_AGENT=1` and cursor-agent is the nearest agent process above the shell,
+else `GROK_SESSION_ID` when `GROK_AGENT=1`, else `CLAUDE_CODE_SESSION_ID`, else
+zcode's exec-log fds); in any other TUI say so and stop.
 
 It runs three ways: the operator asks (`/autorename`), `/handoff` Step 8 calls it
 with `--auto`, and `autorename_nudge.py` (next to this file) asks for an `--auto`
@@ -156,6 +156,17 @@ this script wrote that text. `--show` prints `title (manual)` or `title (auto)`.
 at once. The running TUI never receives the in-process notification `/rename`
 sends, so the prompt border keeps its old caption until the session is resumed.
 The herdr tab label below is the name on the sidebar.
+
+**OpenCode.** The same script detects OpenCode from `OPENCODE_SESSION_ID`
+(`ses_…`) and writes `title` where the TUI's own rename writes it: through the
+running server's `session.update` API
+(`opencode api session.update --param sessionID=… --data '{"title":"…"}'`), which
+updates both `~/.local/share/opencode/opencode.db` (`session_v2`, falling back to
+`session`) and the live server's in-memory state, so the running TUI picks it up
+at once. It reads the current title from that db (`AUTORENAME_OPENCODE_DB`
+overrides the path). OpenCode has no manual/auto title marker, so `--auto`
+treats every title as auto and never skips, and `--show` prints the bare title.
+The herdr tab label below is set as usual.
 
 **Grok nudge.** The same `autorename_nudge.py` is a Grok `Stop` hook, in
 `~/.grok/hooks/autorename.json` (machine-local, same as the Claude registration;

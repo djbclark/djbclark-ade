@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rename the current Claude Code, zcode, or Grok session, the way /rename does.
+"""Rename the current Claude Code, zcode, Grok, cursor-agent, or OpenCode session, the way /rename does.
 
 A skill cannot invoke the built-in /rename, so this writes what it writes:
 
@@ -25,14 +25,20 @@ A skill cannot invoke the built-in /rename, so this writes what it writes:
   through its own `/rename`: queued into this herdr pane with self-slash, and
   re-applied to disk after the process exits if that never landed. A title is
   manual when a `/rename <title>` entry in prompt_history.json matches it.
+- OpenCode: `title` in the session store (`~/.local/share/opencode/opencode.db`,
+  table `session_v2`, falling back to `session`) written through the running
+  server's `session.update` API — the same path the TUI's own rename uses, so a
+  live session sees it at once. There is no manual/auto marker, so every title
+  is treated as auto and `--auto` never skips.
 
-The session id comes from GROK_SESSION_ID when this process is a Grok agent
-(`GROK_AGENT=1`), else CLAUDE_CODE_SESSION_ID, else this process's own file
-descriptors, which zcode points at its exec-log path
-~/.zcode/cli/exec/<sess-id>/call-*.log (zcode sets no session id env var).
-CURSOR_CONVERSATION_ID (with `CURSOR_AGENT=1`) wins when cursor-agent is the
-nearest agent process above this one; agent env vars are inherited by any agent
-started from another's shell, so the process tree breaks the tie.
+The session id comes from OPENCODE_SESSION_ID when this process is OpenCode,
+GROK_SESSION_ID when it is a Grok agent (`GROK_AGENT=1`), else
+CLAUDE_CODE_SESSION_ID, else this process's own file descriptors, which zcode
+points at its exec-log path ~/.zcode/cli/exec/<sess-id>/call-*.log (zcode sets
+no session id env var). CURSOR_CONVERSATION_ID (with `CURSOR_AGENT=1`) wins
+when cursor-agent is the nearest agent process above this one; agent env vars
+are inherited by any agent started from another's shell, so the process tree
+breaks the tie.
 In any other TUI none of those exist and the script exits 2.
 
     autorename.py "Title words here"            # always rename
@@ -228,7 +234,7 @@ def grok_set_title(summary: Path, title: str) -> None:
 # store.db (tables blobs, meta), meta.json and prompt_history.json.
 
 STATE_DIR = Path.home() / ".local/state/autorename"
-AGENT_COMMS = {"cursor-agent": "cursor", "claude": "claude", "grok": "grok"}
+AGENT_COMMS = {"cursor-agent": "cursor", "claude": "claude", "grok": "grok", "opencode": "opencode"}
 
 
 def cursor_home() -> Path:
@@ -413,29 +419,94 @@ def nearest_agent() -> str | None:
     return None
 
 
+# ------------------------------------------------------------------ opencode
+# Layout (OpenCode V2): ~/.local/share/opencode/opencode.db (SQLite). New
+# sessions live in session_v2, pre-v2 ones in session; `title` is the only name
+# field and there is no manual/auto marker, so every title is "auto". The
+# running server is the one writer, so a rename goes through
+# `opencode api session.update` (the path the TUI's own rename and the
+# session_rename tool use) rather than a direct DB write the server would not
+# notice until it restarts.
+
+OPENCODE_DB = Path.home() / ".local/share/opencode/opencode.db"
+
+
+def opencode_bin() -> str | None:
+    return shutil.which("opencode") or (
+        str(Path.home() / ".local/bin/opencode")
+        if (Path.home() / ".local/bin/opencode").is_file() else None)
+
+
+def opencode_current_title(sid: str) -> str | None:
+    db = Path(os.environ.get("AUTORENAME_OPENCODE_DB", OPENCODE_DB))
+    if not db.is_file():
+        return None
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+    try:
+        for table in ("session_v2", "session"):
+            try:
+                row = conn.execute(
+                    f"SELECT title FROM {table} WHERE id = ?", (sid,)).fetchone()
+            except sqlite3.OperationalError:
+                continue
+            if row is not None:
+                return str(row[0] or "").strip() or None
+    finally:
+        conn.close()
+    return None
+
+
+def opencode_set_title(sid: str, title: str) -> bool:
+    bin_ = opencode_bin()
+    if bin_ is None:
+        print("autorename: opencode binary not found (expected ~/.local/bin/opencode)",
+              file=sys.stderr)
+        return False
+    try:
+        r = subprocess.run(
+            [bin_, "api", "session.update", "--param", f"sessionID={sid}",
+             "--data", json.dumps({"title": title})],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"autorename: opencode session.update failed: {exc}", file=sys.stderr)
+        return False
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout or "").strip().replace("\n", " ")
+        print(f"autorename: opencode session.update failed: {detail}", file=sys.stderr)
+        return False
+    return True
+
+
 # ----------------------------------------------------------------- all backs
 
 def session_id() -> str | None:
-    """This session's id: cursor-agent or Grok when this process is one, else Claude Code, else zcode."""
+    """This session's id: cursor-agent, OpenCode, or Grok when this process is one, else Claude Code, else zcode."""
     grok = os.environ.get("GROK_SESSION_ID")
     claude = os.environ.get("CLAUDE_CODE_SESSION_ID")
     cursor = (os.environ.get("CURSOR_CONVERSATION_ID")
               if os.environ.get("CURSOR_AGENT") == "1" else None)
-    if cursor and (not (grok or claude) or nearest_agent() == "cursor"):
+    opencode = os.environ.get("OPENCODE_SESSION_ID")
+    if cursor and (not (grok or claude or opencode) or nearest_agent() == "cursor"):
         return cursor
+    if opencode and (not (grok or claude or cursor) or nearest_agent() == "opencode"):
+        return opencode
     if grok and (os.environ.get("GROK_AGENT") == "1" or not claude):
         return grok
     if claude:
         return claude
+    if opencode:
+        return opencode
     if grok:
         return grok
     return discover_session_id()
 
 
 def backend_for(sid: str) -> str:
-    """Which store owns this id: 'zcode', 'cursor', 'grok', or 'claude'."""
+    """Which store owns this id: 'zcode', 'opencode', 'cursor', 'grok', or 'claude'."""
     if sid.startswith("sess_"):
         return "zcode"
+    if sid.startswith("ses_"):
+        return "opencode"
     if find_cursor_chat(sid) is not None:
         return "cursor"
     grok_hit = find_grok_summary(sid) is not None
@@ -472,6 +543,8 @@ def read_title(sid: str) -> str | None:
             return None
         _data, title, _source = grok_read(summary)
         return title
+    if kind == "opencode":
+        return opencode_current_title(sid)
     transcript = find_transcript(sid)
     return current_title(transcript) if transcript else None
 
@@ -487,7 +560,7 @@ def main() -> int:
     ap.add_argument("--show", action="store_true", help="print the current title and exit")
     ap.add_argument("--session-id", default=None,
                     help="session id (Claude Code uuid, cursor-agent chat id, Grok session id,"
-                         " or zcode sess_…); default: this session")
+                         " OpenCode ses_…, or zcode sess_…); default: this session")
     ap.add_argument("--cursor-after-exit", type=int, default=None, help=argparse.SUPPRESS)
     ap.add_argument("--cursor-expect", default="", help=argparse.SUPPRESS)
     args = ap.parse_args()
@@ -498,9 +571,9 @@ def main() -> int:
 
     sid = args.session_id or session_id()
     if not sid:
-        print("autorename: no CURSOR_CONVERSATION_ID, GROK_SESSION_ID, CLAUDE_CODE_SESSION_ID,"
-              " or zcode exec-log fd found (not a cursor-agent, Grok, Claude Code, or zcode"
-              " session); nothing renamed", file=sys.stderr)
+        print("autorename: no CURSOR_CONVERSATION_ID, OPENCODE_SESSION_ID, GROK_SESSION_ID,"
+              " CLAUDE_CODE_SESSION_ID, or zcode exec-log fd found (not a cursor-agent,"
+              " OpenCode, Grok, Claude Code, or zcode session); nothing renamed", file=sys.stderr)
         return 2
 
     kind = backend_for(sid)
@@ -524,6 +597,9 @@ def main() -> int:
                       file=sys.stderr)
                 return 2
             _data, current, source = grok_read(summary)
+        elif kind == "opencode":
+            current = opencode_current_title(sid)
+            source = "auto"
         else:
             transcript = find_transcript(sid)
             if transcript is None:
@@ -538,6 +614,8 @@ def main() -> int:
     if args.show:
         if kind == "claude":
             print(current or "(no custom title)")
+        elif kind == "opencode":
+            print(current or "(no title)")
         else:
             print(f"{current or '(no custom title)'} ({source})")
         return 0
@@ -571,6 +649,9 @@ def main() -> int:
                 return 2
         elif kind == "grok":
             grok_set_title(summary, title)
+        elif kind == "opencode":
+            if not opencode_set_title(sid, title):
+                return 2
         else:
             record = json.dumps(
                 {"type": "custom-title", "customTitle": title, "sessionId": sid},
