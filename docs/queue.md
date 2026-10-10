@@ -541,3 +541,13 @@ Claude Docs and other connectors were cut (docs/disabled-skills.md). Count
 2026-10-10; if still ~0, ask djbclark whether to block it too. Firecrawl
 (~5.6k/session, ~250 calls/week) is the costly one; see the same doc.
 
+
+## Orca's short PostCompact hook (watch stablyai/orca#25211)
+
+Orca adds a ~3 KB shell wrapper as Claude Code's `PostCompact` hook. Claude Code
+prints it after every `/compact` and keeps it in context (~1k tokens). Orca rewrites
+`~/.claude/settings.json` on each start, so a local edit does not stick. Upstream:
+issue stablyai/orca#25209 (we +1'd and commented, 2026-10-10) and fix PR #25211.
+The fork carries the fix as branch `djbclark/short-postcompact-hook` (upstream
+`main` + the PR commit, rebased 2026-10-10, **not built**). Build it only if
+djbclark asks; once a release ships #25211, delete that branch.
