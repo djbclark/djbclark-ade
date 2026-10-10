@@ -89,8 +89,10 @@ altitudes compose (a macro node can run a micro graph as its body).
   `ralph-tui-orchestration`, `cow-workspaces`,
   `handoff`, `baton`, `session-handoff`, `steps`, `loose`, and since
   2026-10-08 `herdr-tidy` (safe pane close) and `autorename` (session title
-  and herdr placement; its nudge hook in `~/.claude/settings.json` reaches it
-  through the old `~/ops/site-djbclark/skills/autorename` path, now a symlink)
+  and herdr placement; its nudge hooks are Claude `UserPromptSubmit` in
+  `~/.claude/settings.json` and Grok `Stop` in `~/.grok/hooks/autorename.json`
+  (Grok discards UserPromptSubmit context), both reaching it through the old
+  `~/ops/site-djbclark/skills/autorename` path, now a symlink)
   (README.md has a one-line table; `/helm-all`, `/session-finder-all`,
   `/resume`, `/herdr-tidy` and `/orca-tidy` are thin command wrappers in
   [claude/commands/](claude/commands/)).
