@@ -45,12 +45,12 @@ in `~/.claude/settings.json` (takes effect at once, even mid-session).
 | `claude.ai Have I Been Pwned` | 2 | Breach lookups. |
 | `cua-driver` (local, `~/.claude.json`) | 56 | Background computer-use driver; overlaps ghost-os, claude-in-chrome and bezalel `computer__*`. |
 | `ghost-os` (local, `~/.claude.json`) | 29 | macOS accessibility-tree + vision computer use; overlaps cua-driver. |
-
 | `claude.ai Claude Docs` | 8 | Anthropic's doc-authoring connector ("living docs you create and edit"), not API-doc lookup; 0 calls in all transcripts since 2026-08-03, ~1.3k tokens/session. Blocked 2026-10-10. |
 | `beeper` (local, `~/.claude.json`) | 2 | Beeper chat bridge; only an unauthenticated auth stub showed in sessions. |
+| `paper-search` (local) | 57 | Academic search/download across arXiv, PubMed, SSRN, Semantic Scholar, OpenAlex and more; ~0.65k tokens/session, 3 calls in the week to 2026-10-10, all doable with the `arxiv` MCP, Firecrawl `firecrawl_research_*` or an OpenAlex `curl`. Blocked 2026-10-10. |
 
 Still on: Gmail, Google Calendar, Google Drive, Context7, Firecrawl,
-claude-in-chrome, basic-memory, bezalel, paper-search, arxiv, token-savior,
+claude-in-chrome, basic-memory, bezalel, arxiv, token-savior,
 graft, hermes, cow.
 
 ## Plugins disabled
