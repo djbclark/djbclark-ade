@@ -278,12 +278,21 @@ handled once, in this order, and not repaired:
     upstream without his direct approval, per PR; forks only. Saved to memory
     as `feedback_no_upstream_cfengine_libntech_without_approval.md`.
 
-17. **Merge-clean worker on branches checked out elsewhere.** When the branch
-    is already checked out in another worktree, `switch` fails: brief "detached
-    worktree, push `HEAD:refs/heads/<branch>`" (a fast-forward, no force).
+17. **Branches checked out elsewhere.** When the branch is already checked out
+    in another worktree (a merge-clean or fix-up worker both hit this), `switch`
+    fails: brief "commit detached, `merge-base --is-ancestor` first, then push
+    `HEAD:refs/heads/<branch>`" (a fast-forward, no force). Note in the report
+    that the other worktree's local branch is now behind origin.
 18. **Stacked PRs and master merges.** After merging master into a parent and a
     child separately, their shared append-only files (MEMORY.md, home-agents.md)
     conflict again; also merge the updated parent head into the child.
+
+19. **stayturgid worker briefs, verified 2026-10-10.** `ansible-test units
+    --local` needs `--python 3.14` (bare, it picks a 3.11 with no pytest); run
+    `ruff format <files>` before the first commit (the hook reformats new tests
+    and costs a round); run ansible-lint with the project invocation from
+    `ansible/` (`playbooks/ ../ansible_collections/stayturgid/`), a bare role
+    directory reports pre-existing findings.
 
 ## 10. What this is not
 
