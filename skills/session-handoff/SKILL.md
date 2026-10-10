@@ -128,7 +128,7 @@ and pointer bookkeeping so you don't have to get them right by hand:
 
 with the JSON payload on stdin (`session_id`, `writer`, `chain`,
 `latest_handoff`, `active_work`, `blockers`, `next_steps`,
-`history_bullets` — max 3; `blockers`, `next_steps` and `history_bullets` are JSON lists of strings, never a bare string; and `workspaces`: a list of
+`history_bullets` — max 3; `active_work` is one string; `blockers`, `next_steps` and `history_bullets` are JSON lists of strings, never a bare string; and `workspaces`: a list of
 `{"repo": ..., "task": ..., "dir": <absolute path>}`, one entry per
 location this session is touching — list every location still active,
 since `workspaces` is replaced wholesale each write same as Current
