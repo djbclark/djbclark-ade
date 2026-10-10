@@ -97,8 +97,9 @@ TAIL_RE = re.compile(r"^## Citation footnotes\s*$", re.M)
 HDR_FIELD_RE = re.compile(r"^(recovered_from|protocol_failure|route):\s*(.*)$")
 LABEL_RE = re.compile(r"^(REFUSED|SETTLED|OPEN POINTS|DISSENT|NEXT):\s*(.*)$")
 LEGACY_FOOTER_RE = re.compile(r"^(SETTLED|OPEN POINTS|NEXT):", re.M)
-ITEM_RE = re.compile(r"^(?P<id>[A-Za-z][\w.-]*)\s+(?P<status>decided|tested|carried|refused)\b"
-                     r"(?:\s+closed_by\s*[=:]\s*(?P<by>[^\s:]+))?\s*[:—–-]?\s*(?P<text>.*)$")
+ITEM_RE = re.compile(
+    r"^(?P<id>[A-Za-z][\w.-]*)\s+(?P<status>decided|tested|carried|refused)\b(?:\s+closed_by\s*[=:]\s*(?P<by>[^\s:]+))?\s*[:—–-]?\s*(?P<text>.*)$"
+)
 REFUSED_RE = re.compile(r"^(?P<id>[A-Za-z][\w.-]*)\s+(?P<cls>[\w-]+)\s*:\s*(?P<text>.*)$")
 NEEDS_RE = re.compile(r"\[needs:\s*([^\]]+)\]")
 CONF_RE = re.compile(r"\[conf:\s*([0-9.]+)\]")
@@ -137,10 +138,13 @@ def words(s: str) -> int:
 
 class Run:
     def __init__(self, root: Path, cfg: dict[str, Any], has_config: bool):
-        self.root = root
-        self.cfg = cfg
-        self.has_config = has_config
-        p = lambda k, d: (root / cfg.get(k, d)).resolve()  # noqa: E731
+        self.root: Path = root
+        self.cfg: dict[str, Any] = cfg
+        self.has_config: bool = has_config
+
+        def p(key: str, default: str) -> Path:
+            return (root / str(cfg.get(key, default))).resolve()
+
         self.cwd = p("cwd", ".")
         self.transcript = p("transcript", "dialogue/transcript.md")
         self.turns_dir = p("turns_dir", "dialogue")
@@ -202,7 +206,7 @@ def load_run(run_dir: str | None, config: str | None) -> Run:
         return Run(root, {}, False)
     if cfg_path.suffix == ".toml":
         try:
-            import tomllib  # Python 3.11+
+            import tomllib  # pyright: ignore[reportMissingImports]  # Python 3.11+
         except ImportError:
             sys.exit(f"{cfg_path}: TOML needs Python 3.11+; use dialogue.json")
         cfg = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
@@ -677,6 +681,7 @@ def call_model(run: Run, model: str, pf: Path, timeout: int, n: int, phase: str)
         return "", "", f"no routes pinned for {model} in the config"
     errors = []
     for route in routes[:2]:
+        err = "route not tried"  # bound even if the loop body never runs (basedpyright)
         for attempt in range(MAX_QUOTA_WAITS + 1):
             reply, err = run_route(run, route, pf, timeout)
             if not err:
