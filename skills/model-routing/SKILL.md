@@ -401,7 +401,7 @@ not send those to a frontier model at high effort. Cheapest rung first:
 1. **Code**: `route_agent.py`, exit codes, `aiuse --available`, a table.
 2. **A typed decision model** that returns a probability per option (TypeSafe
    Jev; `typesafe-ai` skill). Not wired into any harness here yet: it needs a
-   TypeSafe API key through `sudo-secretspec` and a shadow-mode trial first.
+   TypeSafe API key (`bin/typesafe-key-add` stores it in `sudo-secretspec`) and a shadow-mode trial first.
 3. **A cheap text model** at low effort, with a closed option list and a
    parser that rejects anything off the list.
 4. **The judgment tier**, when the question is not really multiple choice.

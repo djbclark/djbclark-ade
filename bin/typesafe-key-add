@@ -1,0 +1,37 @@
+#!/bin/bash
+# Store the TypeSafe (Jev) API key in the sudo-secretspec boundary.
+#
+# Declares TYPESAFE_API_KEY (optional: only this host needs it) if it is not
+# declared yet, then runs `sudo-secretspec set`, which asks for the value. The
+# value never enters argv, a file or shell history. Ends by printing the key's
+# length, never the key.
+#
+# Consumers read it with:
+#   sudo-secretspec run --reason "jev decision" -- <command>
+# (the TypeSafe SDKs and the API's Bearer header use TYPESAFE_API_KEY).
+#
+# The declaration is a runtime `add`, so `sudo-secretspec template-check`
+# reports drift until it is mirrored into the tracked declarations through
+# review and release. Undo: `sudo-secretspec delete TYPESAFE_API_KEY --reason R`
+# then `sudo-secretspec undeclare TYPESAFE_API_KEY --reason R`.
+set -euo pipefail
+
+NAME=TYPESAFE_API_KEY
+REASON="TypeSafe Jev decision-layer trial (orchestration-practices.md)"
+
+command -v sudo-secretspec >/dev/null || { echo "sudo-secretspec not on PATH" >&2; exit 1; }
+
+if sudo-secretspec schema --reason "$REASON" | grep -q "\"$NAME\""; then
+    echo "$NAME already declared."
+else
+    sudo-secretspec add "$NAME" --optional \
+        --description "TypeSafe API key for Jev typed decisions (https://typesafe.ai)" \
+        --reason "$REASON"
+    echo "Declared $NAME (optional)."
+fi
+
+echo "Paste the TypeSafe API key when asked."
+sudo-secretspec set "$NAME" --reason "$REASON"
+
+sudo-secretspec run --reason "verify $NAME resolves" -- \
+    bash -c 'v="${TYPESAFE_API_KEY:-}"; [ -n "$v" ] && echo "TYPESAFE_API_KEY PRESENT (len=${#v})" || { echo "TYPESAFE_API_KEY EMPTY" >&2; exit 1; }'
