@@ -1,6 +1,6 @@
 # Prompt: apply the djbclark / frdminc / Graft development toolchain to a repo
 
-Version 5.2 (2026-10-11). Supersedes 5.1 (2026-10-09) and Version 5
+Version 5.3 (2026-10-11). Supersedes 5.2 and 5.1 (2026-10-09) and Version 5
 (2026-10-01, which superseded
 `CLAUDE_APPLY_DJBCLARK_TOOLING_Version4.md`). Lived at
 `site-djbclark/research/apply-dev-toolchain/CLAUDE_APPLY_DJBCLARK_TOOLING.md`
@@ -81,6 +81,12 @@ pages that need JavaScript (added to §1.2, with the third-party
 point that walks the providers in turn. With it comes a rule for agents: when
 the whole ladder fails for a page or search the task needs, pause that work
 and report, never continue without the source.
+
+What changed in 5.3 (2026-10-11): a **search policy** paragraph in §1.3
+(default `rg`, with the opt-in indexed `ig` as a first line for one known
+literal, and when to fall back), and `setup-modern-cli` joins the
+`djbclark-ade` skills table in §0.6. The measured numbers and the caveats that
+justify the policy live in `djbclark-ade/skills/setup-modern-cli/SKILL.md`.
 
 ---
 
@@ -333,6 +339,7 @@ symlinking the skill directory into `.claude/skills/<name>/`:
 |---|---|---|
 | `report` | yes | `/report`: formats a long Markdown deliverable (research report, spec, review) so it reads well in a Markdown previewer such as Marked 2: numbered superscript citations linked to an anchored list, an evidence table whose ids link to the source (no URL column), descriptive file names with a symlink at any generic name a tool expects, paragraphs under ~180 words, and a render check that captures only the previewer's window. Its two stdlib scripts (`scripts/reformat_citations.py`, `scripts/cite_sup.py`) are idempotent. Apply it before the first `open` of any long document the user will read, not after a formatting complaint. |
 | `dialogue` | yes | Runs a multi-model dialogue that produces one artifact (a spec, a report, a design) with a final-word model: fixed speaking rounds through pinned headless routes (for example Grok, Claude and GPT via `acp-run`), a machine-read footer per turn with point ids, status and dissent, a transcript that is the record, and `scripts/dialogue.py` checks for the failures the first run measured (noise strip, protocol lint, final-word gate). Use when several vendors should argue the points of contention before one writes the deliverable; not for a quick second opinion or for fan-out work with no argument between models. |
+| `setup-modern-cli` | yes | The standing instruction to prefer modern tools over the classic ones: the replacement table (`rg`←`grep`, `fd`←`find`, `bat`←`cat`, `srgn`←`sed`, `eza`←`ls`, `hck`←`cut`/`awk`, `jq`/`yq`, `xh`, `ast-grep`, `dust`/`gdu`, `rtk`) with the exact command patterns, the footguns (`rg -rln` is `--replace`; a pathless `rg` over-searches; `sd` is retired), and the measured search policy from §1.3 (`rg` by default, opt-in indexed `ig` as a first line for one known literal, never `ayg`). Load it before shell searches; it is the long form of the §1.3 table. |
 
 **From Matt Pocock's skills marketplace** (public):
 
@@ -509,6 +516,24 @@ These govern shell use. Claude Code's own `Read`/`Grep`/`Glob`/`Edit` tools
 stay preferred over shelling out when an equivalent exists (site-djbclark
 `docs/tooling-policy.md`).
 
+**Search policy (added 2026-10-11).** Default to **`rg`**: it is exhaustive,
+always correct, and already replaces a `find … | grep …` pipeline in one
+command (`rg -n -g '*.py' PAT PATH`; `-l` for files, `-c` for counts). The
+indexed **`ig`** (instant-grep) is an opt-in **first line for one thing you
+already know** — an exact literal (symbol, string, filename fragment) you
+expect in few files, in a repo whose index is current; it answered about 13x
+faster than `rg` on a 3.3k-file tree. Fall back to `rg` as soon as any of these
+holds: the search must be exhaustive; the pattern is a regex, multiline or
+PCRE2; you need filters beyond `ig -g`/`ig -t`; `ig` returns nothing (it missed
+6 of `rg`'s files in the same test, `vendor/` among them); or the tree changed
+since the last index — `ig` silently returns nothing until `ig index` is re-run,
+which is the normal case mid-edit. Do not adopt **`ayg`** (aygrep): it indexes
+only git-tracked files, so untracked work is invisible even after a rebuild,
+and it writes its index inside the repo. Tables, measured numbers and the
+`rg` flag results (no flag helps; `--sort path` costs 5x) are in
+`djbclark-ade/skills/setup-modern-cli/SKILL.md`. Record any deviation in
+`AGENTS.md`.
+
 Do not change global git config (e.g. making delta the pager) without asking.
 If the user agrees, back up `~/.gitconfig` first (§15).
 
@@ -547,7 +572,7 @@ config and hooks; `--agents claude` does not, and `--no-global` skips them.
 | Jina MCP (remote) and Reader | https://jina.ai/ | MCP at `https://mcp.jina.ai/v1` with header `Authorization: Bearer $JINA_API_KEY`. Keep the key in the user's secret store (on djbclark's machine `sudo-secretspec`, entry `JINA_API_KEY`) and pass it through the client's headers helper where it has one (Claude Code `headersHelper`, Codex `http_headers_helper`); a client without one needs the literal header in a mode-0600 config outside git. Reader `https://r.jina.ai/<url>` also works keyless at a lower rate limit; Search `https://s.jina.ai/?q=` needs the key | `read_url`, `search_web`, `search_arxiv`, `extract_pdf` and more; Reader turns any URL into markdown |
 | Crawl4AI | https://github.com/unclecode/crawl4ai | `uv tool install --python 3.13 'crawl4ai==0.9.4'`, then `crawl4ai-setup` (§1.2); `crawl4ai-doctor` checks it | Local headless-browser crawl: `crwl <url> -o markdown` renders JavaScript-heavy pages that plain fetches return empty. The package ships no MCP server; use the wrapper in the next row. A cold start under load takes 30-120 s |
 | Crawl4AI MCP (`mcp-crawl4ai`, third-party wrapper) | https://pypi.org/project/mcp-crawl4ai/ | `uv tool install --python 3.13 'mcp-crawl4ai==0.3.1' --with crawl4ai==0.9.4 --with fastmcp==4.0.10 --with mcp==2.2.0 --with playwright==1.63.0`, then register the stdio command `~/.local/bin/crawl4ai-mcp` as server `crawl4ai` (`claude mcp add --scope user crawl4ai -- ~/.local/bin/crawl4ai-mcp`; Codex `startup_timeout_sec = 120`, `tool_timeout_sec = 180`) | MCP tools `scrape {targets}` (a URL or a list; not `url`), `crawl`; reuses the Playwright Chromium; first start about 26 s |
-| `web-get` | https://github.com/djbclark/djbclark-ade (`bin/web-get`) | Symlink it into `~/.local/bin` (`ln -s ~/src/djbclark-ade/bin/web-get ~/.local/bin/web-get`, as for `acp-dispatch`) so the bare name resolves | Shell failover ladder: `web-get search '<query>'` (exa, parallel, jina-mcp, jina-search, composio), `web-get fetch '<url>'` (exa, parallel, jina-reader, crawl4ai, wayback), `web-get check` (which providers work now). Wall-clock timeouts per attempt (45 s; crawl4ai 150 s; wayback 120 s). A Parallel soft-404 or redirect page fails its rung; Exa and `--max-bytes` cuts are flagged `truncated`. Exit 5 means every provider failed |
+| `web-get` | https://github.com/djbclark/djbclark-ade (`bin/web-get`) | Symlink it into `~/.local/bin` (`ln -s ~/src/djbclark-ade/bin/web-get ~/.local/bin/web-get`, as for `acp-dispatch`) so the bare name resolves | Shell failover ladder: `web-get search '<query>'` (exa-api, exa-mcp, parallel, jina-mcp, jina-search, composio), `web-get fetch '<url>'` (exa-api, exa-mcp, parallel, jina-reader, pdf, crawl4ai, wayback), `web-get check` (which providers work now). exa-api is the Exa REST API with the user's `EXA_API_KEY` from the secret store (header only, never argv); without it the keyless Exa MCP answers. PDF URLs get a local rung (curl into a fresh temp dir, then `pdftotext`; crawl4ai skips them). Wall-clock timeouts per attempt (45 s; crawl4ai 150 s; wayback and pdf 120 s). A soft-404 or redirect page fails its rung on every rung that reports a URL or title (`--no-page-check` for a page checked by hand). A body cut at a provider's cap is not success: the ladder walks on for a fuller copy and flags `truncated` only if none is found; a `--max-bytes` cut is the caller's choice. Exit 5 means every provider failed |
 
 Register the MCP servers in user scope (back up `~/.claude.json` and the other
 clients' configs first, §15), never in a committed `.mcp.json` when a key is
