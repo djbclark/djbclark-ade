@@ -574,21 +574,12 @@ The fork carries the fix as branch `djbclark/short-postcompact-hook` (upstream
 `main` + the PR commit, rebased 2026-10-10, **not built**). Build it only if
 djbclark asks; once a release ships #25211, delete that branch.
 
-## Test Jev against our usual work types (queued 2026-10-11)
+## Review Jev prompt-effort shadow log (due 2026-10-18)
 
-After `bin/jev` and its two shadow sites land (`docs/jev.md`), djbclark wants to see
-how Jev does on the work this machine actually runs, before any site moves to `act`.
-Plan, not started:
-
-1. **Datasets from history, no new traffic needed:** (a) dispatch outcomes: every
-   `~/.local/state/bigteam/*/jobs/*.json` record with its report tail and final
-   status; (b) slice kinds: briefs under `~/.local/state/bigteam/*/brief-*.md` with
-   the kind the orchestrator gave them (`judgment`, `code`, `research`, `bulk`,
-   `mechanical`, `github`); (c) prompt effort: a sample of ~100 user prompts from
-   `~/.claude/projects/*/*.jsonl`, hand- or Opus-labelled mechanical/normal/hard.
-2. **Offline replay:** a `jev replay --site S --dataset F` that scores each row and
-   reports accuracy, calibration (accuracy per probability bucket), latency and cost.
-3. **Baseline:** the same rows through haiku at low effort with a closed option list,
-   to answer "why not just a cheap text model".
-4. **Decision per site** by the promotion rule in `docs/jev.md`; record the numbers
-   in that doc. Then let the live shadow logs confirm for a week.
+The offline test is done (2026-10-11; `bin/jev-eval`, results in `docs/jev.md`
+"Offline evaluation"): Jev beat Haiku on slice-kind and prompt-effort, and matched
+the always-`done` baseline on dispatch-verdict, which djbclark retired the same day.
+prompt-effort stays shadow. On 2026-10-18 run `bin/jev report --site prompt-effort`
+and `bin/jev disagreements --site prompt-effort --limit 20`, then ask djbclark: act
+at 0.9, keep shadow, or off. A self-removing launchd job
+(`com.djbclark.jev-remind-2026-10-18`) pings Hermes that morning.
