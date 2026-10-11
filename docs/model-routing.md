@@ -175,7 +175,9 @@ from the first `{` instead, or the parse fails with "Extra data".
   `zcode-acp-server`) drives it; its advertised `model` option refuses
   every switch (rechecked on 0.67.0, 2026-10-11), so run it without
   `--model` (the bridge pins a model only at startup, via the env pair
-  `ZCODE_PROVIDER` + `ZCODE_MODEL`); effort is `--set thought=low|high|max` (default max).
+  `ZCODE_PROVIDER` + `ZCODE_MODEL`, and that pin was refused too, even for
+  GLM-5.3; both checks ran while the z.ai weekly limit was exhausted, error
+  1310, so recheck after the 2026-10-14 reset); effort is `--set thought=low|high|max` (default max).
   Headless `zcode -p` stays as the fallback and runs GLM-5.3 at max.
 - **opencode-go free models** (kimi-k3, minimax-m3, qwen3.x) — zero-cost
   experimental fan-out and ralph-tui default via the ungated wrapper;

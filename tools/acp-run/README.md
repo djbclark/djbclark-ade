@@ -7,8 +7,9 @@ self-contained task to another vendor's agent: Claude Code, Codex, Copilot,
 opencode, Cursor, Qwen Code, Devin, Cline, Hermes, Antigravity (`agy`), Grok and
 zcode (through the third-party `zcode-acp-server`, whose `model` option refuses
 every switch, so it is the one agent run without `--model`; its README pins a
-model only at startup with the env pair `ZCODE_PROVIDER` + `ZCODE_MODEL`;
-`--set thought=low|high|max`).
+model only at startup with the env pair `ZCODE_PROVIDER` + `ZCODE_MODEL`, which
+was refused as well; both checked 2026-10-11 while the z.ai weekly limit was
+exhausted, so recheck after it resets; `--set thought=low|high|max`).
 
 A single-file [uv script](https://docs.astral.sh/uv/guides/scripts/) on the
 official Python SDK (`agent-client-protocol`); no daemon, no state beyond its

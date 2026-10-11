@@ -280,7 +280,9 @@ muse has no usable ACP route yet, so it keeps its form. zcode gained one on
 `--model`: on 0.67.0 it advertises a `model` option but refuses every switch,
 failing the session with `unsupported config option or switch failed: model`
 (rechecked 2026-10-11; its README pins a model only at startup, via the env pair
-`ZCODE_PROVIDER` + `ZCODE_MODEL`), and since 2026-10-09
+`ZCODE_PROVIDER` + `ZCODE_MODEL`, which was refused too, even for GLM-5.3; both
+checks ran while the z.ai weekly limit was exhausted, so recheck after it
+resets), and since 2026-10-09
 `acp-dispatch zcode` takes no `--model` either; `--set thought=low|high|max`),
 and its row below is now the fallback.
 The rows for ACP-capable CLIs stay as a fallback for when an ACP route is

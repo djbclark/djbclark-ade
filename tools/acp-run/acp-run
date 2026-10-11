@@ -175,7 +175,10 @@ AGENTS = {
     # (GLM-5.3 / GLM-5.3-Flash) but refuses every switch, even to the current
     # value ("unsupported config option or switch failed: model", rechecked
     # 2026-10-11). Its README pins a model only at startup via the env pair
-    # ZCODE_PROVIDER + ZCODE_MODEL. `--set thought=low|high|max` is its effort lever.
+    # ZCODE_PROVIDER + ZCODE_MODEL, but that was refused too, even for GLM-5.3
+    # ("zcode refused configured model ..."). Caveat: both checks ran while the
+    # z.ai weekly limit was exhausted (1310, resets 2026-10-14 22:56); recheck
+    # after the reset. `--set thought=low|high|max` is its effort lever.
     "zcode": (["zcode-acp-server"], None),
     # Google LLC signed; registry antigravity-acp (dl.google.com)
     "agy": (

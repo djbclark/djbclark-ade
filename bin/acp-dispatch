@@ -123,7 +123,8 @@ WRAPUP_TEXT = (
 )
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # Agents whose ACP server refuses a model switch (zcode-acp-server 0.67.0 advertises `model` but every
-# set fails: "unsupported config option or switch failed: model"; it pins one only via ZCODE_PROVIDER+ZCODE_MODEL env).
+# set fails: "unsupported config option or switch failed: model"; its ZCODE_PROVIDER+ZCODE_MODEL env pin was refused
+# too. Checked 2026-10-11 with the z.ai weekly limit exhausted: recheck after it resets).
 NO_MODEL_AGENTS = {"zcode"}
 # Claude Code 2.1.295 refuses a sub-agent's Write for this basename (tengu_subagent_md_report_blocked).
 CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.IGNORECASE)
