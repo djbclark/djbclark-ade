@@ -555,12 +555,24 @@ idempotent, and has `--dry-run`, `--agents claude`, `--no-hooks` and
 is not used. The hosted side (`graft trail ...`, `graft init --trail`, and the
 Graft GitHub App) sends code to a third party and is **opt-in only** (§12).
 `graft uninstall` (dry-run without `-y`) is the inverse of `init`. Graft
-sends one anonymous, batched usage ping and a daily npm version check by
-default (buckets and fixed labels only, never code, paths or repo names;
-`TELEMETRY.md` upstream, and `graft telemetry debug` prints the payload); it
-is off in CI and in builds from source. Tell the user, and turn it off on
-request with `graft telemetry disable`, `DO_NOT_TRACK=1`, or the checkbox in
-`graft init`. Selecting the `agents` host also writes user-level `~/.codex/`
+sends anonymous usage events (buckets and fixed labels only, never code,
+paths, queries or repo names; `TELEMETRY.md` upstream, and `graft telemetry
+debug` prints the payload) and runs a daily npm version check. Events are
+appended to `~/.graft/telemetry-queue.ndjson` and a detached child posts
+one batch at most once a day, so no command waits on the network.
+**Telemetry is on by design; leave it on** (djbclark, 2026-10-11): measured
+cost is about 1.7 ms of local file writes per command (a graft command takes
+0.5-1.5 s), one detached send a day, and no tokens in agent output beyond a
+one-time two-line stderr notice per machine, while the data helps a tool we
+depend on and contribute to. Keep the "anonymous usage stats" checkbox
+ticked in `graft init`, and do not run `graft telemetry disable` or set
+`DO_NOT_TRACK` unless the user asks for that (those are the opt-outs). It is
+inert in CI and in builds from source, which have no ingestion key, so
+`graft telemetry status` on djbclark's `~/src/Graft` checkout reports "no
+telemetry key". That is expected, not a fault. The `[graft] tokens saved ≈
+N` line in tool output is graft's savings report, not telemetry, and
+`DO_NOT_TRACK` does not remove it or stop the version check (upstream
+#580). Selecting the `agents` host also writes user-level `~/.codex/`
 config and hooks; `--agents claude` does not, and `--no-global` skips them.
 
 **Agent web access** (search and page fetch for every agent; added 2026-10-11)
