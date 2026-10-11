@@ -71,6 +71,11 @@ line ~123), the route that trips agy's hidden burst limit.
    every agent in `acp-run --list`; prefer it over any per-CLI plugin. Config:
    `plugin = "acp"`, `agent` and `model` under `[agents.options]` (a top-level
    `model` is not forwarded), top-level `timeout` in seconds.
+   **Smoke-tested end to end 2026-10-11:** `bun run build` in the fork, then
+   `bun ~/src/vendor/ralph-tui/dist/cli.js run --agent antigravity --prd ./prd.json
+   --no-tui --no-setup --iterations 1 --cwd "$PWD" </dev/null` completed a one-story
+   PRD through `acp-run agy` in 2 min (`~/.local/state/bigteam/ralph-acp-smoke/`).
+   acp-run's summary line shows in Ralph's log as `[WARN]` (cosmetic).
 3. The `antigravity` agent in `~/.config/ralph-tui/config.toml` now uses it
    (`agent = "agy"`, `model = "gemini-pro-agent"`); the custom
    `plugins/agents/antigravity.ts` (`agy --print`) is unused. Never point an
