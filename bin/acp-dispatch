@@ -396,53 +396,6 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
 
 # ---------------------------------------------------------------- finalize
 
-def jev_shadow(rec: dict) -> None:
-    """Best-effort detached observation; never alters dispatch's verdict or artifacts."""
-    try:
-        mode = os.environ.get("JEV_MODE")
-        if mode is None:
-            try:
-                mode = (Path.home() / ".config/jev/mode").read_text().split()[0]
-            except (OSError, IndexError):
-                mode = "off"
-        if mode not in ("shadow", "act"):
-            return
-        import tempfile
-
-        def tail(path, size):
-            try:
-                with Path(path).open("rb") as stream:
-                    stream.seek(0, os.SEEK_END)
-                    stream.seek(max(0, stream.tell() - size))
-                    return stream.read(size).decode("utf-8", errors="replace")
-            except (OSError, TypeError):
-                return ""
-
-        summary = (tail(rec.get("stderr"), 8192).strip().splitlines() or [""])[-1]
-        state = tail(rec.get("report"), 16000) or tail(rec.get("final"), 16000)
-        incumbent = rec["status"].replace("-", "_")
-        if incumbent == "done" and rec.get("exit") not in (None, 0):
-            incumbent = "partial"
-        if incumbent == "no_report" and rec.get("failure"):
-            incumbent = "refused" if rec["failure"].startswith("NO-REPORT: refused ") else "provider_error"
-        args = [str(HERE / "jev"), "decide", "--site", "dispatch-verdict",
-                "--question", "What is the outcome of this delegated coding-agent task?",
-                "--incumbent", incumbent]
-        for option in ("done", "partial", "blocked", "refused", "provider_error", "no_report"):
-            args += ["--option", option]
-        for key in ("agent", "model", "task", "name"):
-            args += ["--meta", key + "=" + str(rec.get(key) or "")]
-        # A file descriptor avoids both state in argv and a pipe write delaying dispatch.
-        with tempfile.TemporaryFile() as stream:
-            stream.write((summary + "\n" + state[-4000:]).encode())
-            stream.seek(0)
-            subprocess.Popen(args, stdin=stream, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True,
-                             env=dict(os.environ, JEV_MODE="shadow"))
-    except Exception:
-        pass
-
-
 def finalize(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
     rec = json.loads(record_path.read_text())
     report, final, done = Path(rec["report"]), Path(rec["final"]), Path(rec["done"])
@@ -487,7 +440,6 @@ def finalize(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
     rec["status"] = st
     write_record(record_path, rec)      # before .done: the rearm waiter's check reads the exit code
     done.touch()
-    jev_shadow(rec)
     return st, det, rec
 
 

@@ -229,13 +229,11 @@ def test_hook_off_and_whole_deadline(hook, monkeypatch, capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_dispatch_off_and_detached_failure(jev, monkeypatch, tmp_path):
+def test_dispatch_never_calls_jev(jev, monkeypatch, tmp_path):
+    # dispatch-verdict was retired 2026-10-11 (docs/jev.md): finalize must not launch anything.
     dispatch = load("jev_dispatch_test", "bin/acp-dispatch")
-    popen = Mock(side_effect=OSError("missing binary"))
+    popen = Mock()
     monkeypatch.setattr(dispatch.subprocess, "Popen", popen)
-    monkeypatch.setenv("JEV_MODE", "off")
-    dispatch.jev_shadow({})
-    popen.assert_not_called()
     report = tmp_path / "task-report.md"
     report.write_text("STATUS: complete\nDONE\n")
     final = tmp_path / "final"
@@ -246,28 +244,5 @@ def test_dispatch_off_and_detached_failure(jev, monkeypatch, tmp_path):
         monkeypatch.setenv("JEV_MODE", mode)
         record.write_text(json.dumps(rec))
         st, _, saved = dispatch.finalize(record, 0)
-        assert dispatch.exit_for(st, 0) == 0
-        assert saved["status"] == "done"
-        assert report.read_text() == "STATUS: complete\nDONE\n"
-    assert popen.call_count == 2
-    assert popen.call_args.kwargs["start_new_session"] is True
-    assert popen.call_args.kwargs["env"]["JEV_MODE"] == "shadow"
-
-
-@pytest.mark.parametrize("status,rc,failure,expected", [("done", 0, "", "done"), ("done", 124, "", "partial"),
-    ("blocked", 0, "", "blocked"), ("partial", 0, "", "partial"), ("no-report", 0, "", "no_report"),
-    ("no-report", 1, "NO-REPORT: refused (agy)", "refused"), ("no-report", 1, "NO-REPORT: quota", "provider_error")])
-def test_dispatch_mapping_and_state(jev, monkeypatch, tmp_path, status, rc, failure, expected):
-    dispatch = load("jev_dispatch_mapping", "bin/acp-dispatch")
-    final = tmp_path / "final.txt"
-    final.write_text("x" * 5000)
-    err = tmp_path / "stderr.txt"
-    err.write_text("old line\nsummary line\n")
-    captured = {}
-    def launch(args, **kwargs):
-        captured.update(args=args, state=kwargs["stdin"].read().decode())
-        return Mock()
-    monkeypatch.setattr(dispatch.subprocess, "Popen", launch)
-    dispatch.jev_shadow(dict(status=status, exit=rc, failure=failure, final=str(final), stderr=str(err)))
-    assert captured["args"][captured["args"].index("--incumbent")+1] == expected
-    assert captured["state"] == "summary line\n" + "x" * 4000
+        assert dispatch.exit_for(st, 0) == 0 and saved["status"] == "done"
+    popen.assert_not_called()

@@ -79,7 +79,7 @@ def tail(path, size):
 
 
 def dispatch_truth(rec):
-    """Same mapping as jev_shadow() in bin/acp-dispatch; None when not final."""
+    """Same mapping the retired jev_shadow() in bin/acp-dispatch used; None when not final."""
     status = rec.get("status", "")
     if status == "running":
         return None

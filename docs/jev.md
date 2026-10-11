@@ -47,7 +47,7 @@ probability against `--threshold` (default 0.8).
 JEV_MODE=shadow bin/jev decide --site smoke --state 'The deploy failed twice and customers see 500s.' --question 'Is this urgent?' --option urgent --option not_urgent --incumbent urgent
 bin/jev report --site smoke
 bin/jev report --since 7d --json
-bin/jev disagreements --site dispatch-verdict --limit 20
+bin/jev disagreements --site prompt-effort --limit 20
 bin/jev label UUID done
 ```
 
@@ -89,23 +89,16 @@ for review and labelling.
 
 ## Sites
 
-### dispatch-verdict
+### dispatch-verdict (retired 2026-10-11)
 
-`acp-dispatch.finalize()` calls the isolated `jev_shadow(rec)` function after
-writing the final job record and touching `.done`. With a non-off mode it
-launches `jev decide` in a new session with all output discarded and stdin
-from a temporary anonymous file. It does not wait, modify a report/record,
-or change dispatch's exit code. Launch errors are swallowed. This site stays
-shadow even when the global mode is act.
-
-State contains the last stderr summary line and final 4000 report characters,
-falling back to the final message when the report is absent. Options are
-`done`, `partial`, `blocked`, `refused`, `provider_error`, `no_report`.
-Incumbents map `no-report` to `no_report`, a refusal failure to `refused`,
-other recorded failures to `provider_error`, and DONE with a nonzero agent
-exit to `partial`. Metadata carries agent, model, task and name. A removed
-Jev executable is harmless to dispatch. Future edits to live `acp-dispatch`
-must use a temporary candidate and an atomic rename.
+`acp-dispatch` used to launch a detached shadow `jev decide` after each slice,
+asking whether it was done, partial, blocked, refused, a provider error or had
+no report. The offline evaluation below scored it 74.7%, equal to always
+answering `done`, while `classify()` already gives the exact answer for free.
+djbclark retired it the same day: `jev_shadow()` is gone from `bin/acp-dispatch`
+and `tests/test_jev.py` checks `finalize()` launches nothing. Earlier rows stay
+in `decisions.jsonl`. A dispatch site only returns for a question the rule
+cannot answer, such as whether a report did what its brief asked.
 
 ### prompt-effort
 
@@ -155,7 +148,7 @@ reviewed code change. Turning off immediately stops new observations.
 
 1. Set mode off and remove only this hook's `UserPromptSubmit` settings entry.
 2. Delete `bin/jev`, `claude/hooks/jev_effort_hook.py`, `tests/test_jev.py`, and `docs/jev.md`.
-3. Remove `jev_shadow()` and its one call from `bin/acp-dispatch`, using an atomic replacement; do not delete dispatch itself.
+3. Delete `bin/jev-eval` and `tests/test_jev_eval.py` (`acp-dispatch` no longer calls Jev: removed 2026-10-11).
 4. Archive or delete `~/.local/state/jev/` and remove `~/.config/jev/mode` (and its empty directory).
 5. Unset `JEV_MODE` and any test-only `JEV_REEXEC`/`JEV_RETURN_RECORD` variables.
 
