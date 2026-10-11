@@ -93,8 +93,8 @@ authoritative; this is its contract as of 2026-10-11.
    (`api.exa.ai/contents`, key, full text up to 1000000 characters) → exa-mcp
    (keyless `web_fetch_exa`, 200000-character cap) → parallel (`web_fetch`) →
    jina-reader (`r.jina.ai`, key if available) → pdf (PDF URLs only, 2.9) →
-   crawl4ai (`crwl`, renders JavaScript; skips PDFs) → wayback (snapshot via
-   `r.jina.ai`, then direct). With no Exa key the exa-api rung fails at once
+   crawl4ai (`crwl`, renders JavaScript; skips PDFs) → wayback (the newest
+   capture, read raw from `web.archive.org`; 2.11). With no Exa key the exa-api rung fails at once
    (`no Exa key`) and exa-mcp answers. stderr and `--json` name the rung that
    served the page (`provider=exa-api` or `provider=exa-mcp`). The URL is
    normalised once (IDNA host, percent-encoded path), so IRIs such as
@@ -111,8 +111,8 @@ authoritative; this is its contract as of 2026-10-11.
    HTTP rungs, `--crwl-timeout` (default 150 s, or `$WEB_GET_CRWL_TIMEOUT`) for
    crawl4ai, whose cold Chromium start took 30-120 s at load 30-38, and
    `--wayback-timeout` (default 120 s, or `$WEB_GET_WAYBACK_TIMEOUT`) for
-   wayback, whose availability lookup plus snapshot read took 54-57 s for one
-   dewiki page (6.8), and `--pdf-timeout` (default 120 s, or
+   wayback, whose capture read plus a CDX lookup and re-read take 15-60 s
+   (2.11, 6.8), and `--pdf-timeout` (default 120 s, or
    `$WEB_GET_PDF_TIMEOUT`) for the pdf rung's download and extraction (a
    16 MB, 212-page system card took 7.4 s). Unless set by flag or environment,
    the crawl4ai, wayback and pdf budgets are never below `--timeout`. All four
@@ -229,6 +229,25 @@ authoritative; this is its contract as of 2026-10-11.
    exa-mcp was capped at 200000 and parallel then served the full 371489. A
    `--max-bytes` cut is the caller's choice and never makes the ladder walk
    on.
+2.11. **The wayback rung** (fixed 2026-10-11; 6.9 has the evidence). It reads
+   straight from `web.archive.org`, in up to three steps:
+   2.11a `/web/<now>id_/<url>`. Wayback redirects this to the nearest
+         capture, and `id_` returns the page as archived, with no replay
+         toolbar. One read, about 1-3 s.
+   2.11b If that capture is missing (404), a block page, or near-empty, the
+         CDX API is asked for the newest three captures that answered 200, and
+         each one not yet tried is read. A 5xx from CDX is retried once.
+   2.11c Only with a Jina key, and only when some capture exists: r.jina.ai on
+         the replay URL, which renders JavaScript. Keyless calls get 403
+         there, so this step is skipped without a key.
+   The result's `url` is the replay URL (`/web/<ts>/<url>`). The content
+   starts `[web-get: Wayback Machine snapshot <ts> of <url>]`, `--json` marks
+   it `"snapshot": true`, and stderr says it is not the live page. `check`
+   probes wayback with `https://www.iana.org/help/example-domains`
+   (`$WEB_GET_CHECK_WAYBACK_URL`), because a raw example.com capture is
+   shorter than the 200-character floor. A failure lists every step, e.g.
+   `latest: no capture (HTTP 404: page 'Wayback Machine'); CDX: no 200
+   capture: not archived`.
 
 Firecrawl is not on the shell ladder: there is no API key on the machine, only
 the claude.ai connector.
@@ -254,9 +273,12 @@ a page that is clearly not the content (login wall, bot check, cookie page).
 built-in tools, then `web-get`.
 
 3i. Last-resort recovery for a dead or blocked page, on every client: the
-Wayback Machine (`https://archive.org/wayback/available?url=<url>`, then
-`https://web.archive.org/web/2026/<url>`) and archive.today. Say in the notes
-that the copy is an archive snapshot and give its date.
+Wayback Machine. Fetch `https://web.archive.org/web/<YYYYMMDDhhmmss>id_/<url>`
+directly, which redirects to the nearest capture, or run `web-get fetch --only
+wayback '<url>'` (2.11). Not the availability API, and not through r.jina.ai
+without a key (6.9). archive.today was unreachable from this machine on
+2026-10-11 (6.9). Say in the notes that the copy is an archive snapshot and
+give its date.
 
 ## 4. Providers
 
@@ -409,6 +431,28 @@ Names and paths only. Never print or copy a key.
    (`--wayback-timeout`, `$WEB_GET_WAYBACK_TIMEOUT`; 2.4). If it still times
    out on an archive-only page, retry with `--only wayback --wayback-timeout
    300` before pausing.
+6.9. Archive routes found dead on 2026-10-11 (live probes; 2.11 has the fix):
+   6.9a `archive.org/wayback/available` answers `{"archived_snapshots": {}}`
+        for every URL, example.com included, with or without `timestamp=`.
+        The CDX API (`web.archive.org/cdx/search/cdx`) and the `/web/<ts>id_/`
+        redirect still work.
+   6.9b r.jina.ai refuses web.archive.org to keyless callers: 403
+        `AbuseAlleviationError`, "Anonymous access to domain web.archive.org
+        blocked until Sun Sep 30 2035".
+   6.9c An `id_` capture is served exactly as archived, gzip included, even to
+        a client that sent no Accept-Encoding. `web-get` decodes gzip and
+        deflate since 2026-10-11. Before that, every direct read came back as
+        mojibake.
+   6.9d Wayback rate-limits. After about 30 requests in five minutes, TCP
+        connections to web.archive.org were refused for several minutes, and
+        once the CDX API answered 503 "Temporarily Offline". Do not loop
+        `--only wayback` over many URLs back to back.
+   6.9e archive.today (`archive.ph`, `.today`, `.is`): the local proxy answers
+        CONNECT 408, and a direct TCP connection to 107.189.8.227 times out. So
+        `web-get` has no archive.today rung.
+   6.9f A Wayback 404 is usually true. The g10 Reddit thread and the tailnet
+        URLs have no capture: CDX lists none. The rung now says `no capture`
+        and `not archived`.
 
 ## 7. Updating this file
 

@@ -9,7 +9,7 @@ Common flags: --only <p[,p]>, --skip <p[,p]>, --timeout <s per provider> (defaul
 wall-clock limit on each attempt), --crwl-timeout <s> (crawl4ai's own budget, default
 max(150, --timeout) or $WEB_GET_CRWL_TIMEOUT: a cold Chromium start under load takes 30-120 s),
 --wayback-timeout <s> (the wayback rung's own budget, default max(120, --timeout) or
-$WEB_GET_WAYBACK_TIMEOUT: the availability API plus a snapshot read took 54 s at load 18),
+$WEB_GET_WAYBACK_TIMEOUT: a missed latest capture plus a CDX lookup and a re-read take 15-60 s),
 --pdf-timeout <s> (the pdf rung's download + extract budget, default max(120, --timeout) or
 $WEB_GET_PDF_TIMEOUT), --walk-budget <s> (fetch: how long the ladder may keep walking after a
 provider-capped copy, default 300 or $WEB_GET_WALK_BUDGET), --verbose (log each attempt to stderr). URLs are normalised once (IDNA
@@ -24,7 +24,8 @@ Ladders (first provider that returns usable content wins):
           (web_fetch_exa, 200000-character cap) -> parallel (web_fetch, full_content)
           -> jina-reader (r.jina.ai, key if available, else keyless) -> pdf (PDF URLs only:
           curl into a fresh temp dir, then pdftotext) -> crawl4ai (crwl, renders JavaScript;
-          skips PDFs) -> wayback (Wayback Machine snapshot, read via r.jina.ai, then direct)
+          skips PDFs) -> wayback (newest Wayback Machine capture, read raw (id_) from
+          web.archive.org; CDX API if missing; r.jina.ai only with a Jina key)
 "exa" in --only/--skip means both exa-* rungs, "jina" every jina-* rung. With no Exa key the
 exa-api rung fails at once ("no Exa key") and the keyless MCP answers; provenance and --json
 name the rung that served the page (provider=exa-api or provider=exa-mcp).
@@ -89,11 +90,11 @@ environment. WEB_GET_NO_SECRETSPEC=1 skips the vault and uses the keyless routes
 the Exa MCP only). A Jina key that r.jina.ai rejects (401/403) is retried once keyless.
 
 Test hooks (env): WEB_GET_EXA_API_URL, WEB_GET_EXA_URL, WEB_GET_PARALLEL_URL,
-WEB_GET_JINA_MCP_URL, WEB_GET_JINA_READER_URL, WEB_GET_JINA_SEARCH_URL, WEB_GET_WAYBACK_API_URL,
-WEB_GET_WAYBACK_WEB_URL, WEB_GET_CRWL, WEB_GET_CRWL_DELAY (s, default 3), WEB_GET_CRWL_TIMEOUT,
-WEB_GET_WAYBACK_TIMEOUT, WEB_GET_PDF_TIMEOUT, WEB_GET_PDF_VIA, WEB_GET_CURL, WEB_GET_PDFTOTEXT,
-WEB_GET_COMPOSIO, WEB_GET_CHECK_URL, WEB_GET_CHECK_PDF_URL, WEB_GET_SECRETSPEC,
-WEB_GET_SECRETSPEC_TIMEOUT, WEB_GET_WALK_BUDGET.
+WEB_GET_JINA_MCP_URL, WEB_GET_JINA_READER_URL, WEB_GET_JINA_SEARCH_URL,
+WEB_GET_WAYBACK_WEB_URL (captures and the CDX API), WEB_GET_CRWL, WEB_GET_CRWL_DELAY (s,
+default 3), WEB_GET_CRWL_TIMEOUT, WEB_GET_WAYBACK_TIMEOUT, WEB_GET_PDF_TIMEOUT, WEB_GET_PDF_VIA,
+WEB_GET_CURL, WEB_GET_PDFTOTEXT, WEB_GET_COMPOSIO, WEB_GET_CHECK_URL, WEB_GET_CHECK_PDF_URL,
+WEB_GET_CHECK_WAYBACK_URL, WEB_GET_SECRETSPEC, WEB_GET_SECRETSPEC_TIMEOUT, WEB_GET_WALK_BUDGET.
 """
 from __future__ import annotations
 
@@ -115,6 +116,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 
 EXIT_OK, EXIT_USAGE, EXIT_ALL_FAILED, EXIT_TRUNCATED = 0, 2, 5, 6
 DEFAULT_TIMEOUT = 45.0
@@ -133,7 +135,7 @@ MIN_SEARCH_CHARS = 40
 UA = "web-get/1.0 (+djbclark-ade)"
 PAUSE_MSG = "ALL PROVIDERS FAILED — pause dependent work (operator rule 2026-10-11)"
 CAPPED_PROVIDERS = ("exa-api", "exa-mcp")
-# Rungs that can use a key (wayback reads its snapshot through r.jina.ai).
+# Rungs that can use a key (wayback falls back to r.jina.ai, which needs one for web.archive.org).
 KEYED_RUNGS = {"exa-api", "jina-mcp", "jina-search", "jina-reader", "wayback"}
 
 
@@ -147,8 +149,6 @@ def parallel_url() -> str: return env("WEB_GET_PARALLEL_URL", "https://search.pa
 def jina_mcp_url() -> str: return env("WEB_GET_JINA_MCP_URL", "https://mcp.jina.ai/v1")
 def jina_reader_url() -> str: return env("WEB_GET_JINA_READER_URL", "https://r.jina.ai").rstrip("/")
 def jina_search_url() -> str: return env("WEB_GET_JINA_SEARCH_URL", "https://s.jina.ai").rstrip("/")
-def wayback_api_url() -> str:
-    return env("WEB_GET_WAYBACK_API_URL", "https://archive.org/wayback/available")
 def wayback_web_url() -> str: return env("WEB_GET_WAYBACK_WEB_URL", "https://web.archive.org").rstrip("/")
 
 
@@ -274,9 +274,32 @@ def _set_sock_timeout(r, seconds: float) -> None:
         pass
 
 
+def _inflate(raw: bytes) -> bytes:
+    try:
+        return zlib.decompress(raw, 15)
+    except zlib.error:
+        return zlib.decompress(raw, -15)
+
+
+def _decode_body(raw: bytes, encoding: str) -> str:
+    """Undo a Content-Encoding urllib does not: a Wayback id_ capture is served exactly as
+    archived, gzip included, even though we never sent Accept-Encoding."""
+    enc = encoding.strip().lower()
+    if enc in ("gzip", "x-gzip", "deflate"):
+        try:  # 47: gzip or zlib header; deflate is zlib-wrapped, or raw (-15) from some servers
+            raw = zlib.decompress(raw, 47) if enc != "deflate" else _inflate(raw)
+        except zlib.error as e:
+            raise ProviderError(f"bad {enc} body: {e}")
+    elif enc not in ("", "identity"):
+        raise ProviderError(f"unsupported content-encoding {enc}")
+    return raw.decode("utf-8", "replace")
+
+
 def http(method: str, url: str, dl: Deadline, data: bytes | None = None,
-         headers: dict | None = None, stop=None) -> tuple[int, dict, str]:
+         headers: dict | None = None, stop=None, info: dict | None = None) -> tuple[int, dict, str]:
     """Return (status, lower-cased headers, body text). Raises ProviderError on failure/>=400.
+
+    `info`, when given, receives info["url"]: the final URL after redirects.
 
     The deadline is wall-clock: the body is read in chunks and the deadline is checked before
     each one, so a server that keeps a stream open (SSE pings) cannot hold the attempt past it.
@@ -287,6 +310,8 @@ def http(method: str, url: str, dl: Deadline, data: bytes | None = None,
     req = urllib.request.Request(url, data=data, method=method, headers=h)
     try:
         with urllib.request.urlopen(req, timeout=dl.left()) as r:
+            if info is not None:
+                info["url"] = r.geturl()
             hdrs = {k.lower(): v for k, v in r.headers.items()}
             buf = bytearray()
             while True:
@@ -297,7 +322,7 @@ def http(method: str, url: str, dl: Deadline, data: bytes | None = None,
                 buf += chunk
                 if stop and b"\n" in chunk and stop(buf.decode("utf-8", "replace")):
                     break
-            return r.status, hdrs, buf.decode("utf-8", "replace")
+            return r.status, hdrs, _decode_body(bytes(buf), hdrs.get("content-encoding", ""))
     except urllib.error.HTTPError as e:
         try:
             snippet = e.read(2000).decode("utf-8", "replace").strip()
@@ -1099,33 +1124,109 @@ def fetch_crawl4ai(url: str, dl: Deadline, max_chars: int) -> tuple[str, str]:
     return check_fetch_content(out), url
 
 
+WAYBACK_TS_RE = re.compile(r"/web/(\d{4,14})(?:[a-z]{2}_)?/")
+
+
+def _wayback_replay(raw_url: str) -> tuple[str, str]:
+    """(human replay URL without id_, its 14-digit timestamp) for a /web/<ts>id_/ URL."""
+    m = WAYBACK_TS_RE.search(urllib.parse.urlsplit(raw_url).path + "/")
+    ts = m.group(1) if m else ""
+    return re.sub(r"(/web/\d+)id_/", r"\1/", raw_url, count=1), ts
+
+
+def _wayback_read(url: str, ts: str, dl: Deadline, seen: dict) -> tuple[str, str, str]:
+    """Read the capture of `url` closest to `ts` in raw form (id_: the page as archived, no
+    replay toolbar or rewritten links). Wayback redirects to the real capture; returns
+    (text, replay URL, capture timestamp) and records the capture in `seen` before the content
+    check, so a block-page capture is not read twice. An uncaptured URL is HTTP 404."""
+    info: dict = {}
+    try:
+        _, hdrs, body = http("GET", f"{wayback_web_url()}/web/{ts}id_/{url}", dl, info=info)
+    except ProviderError as e:
+        if str(e).startswith("HTTP 404"):
+            raise ProviderError(f"no capture ({e})")
+        raise
+    replay, got_ts = _wayback_replay(info.get("url") or f"{wayback_web_url()}/web/{ts}/{url}")
+    seen["replay"] = replay
+    seen.setdefault("stamps", set()).add(got_ts)
+    ctype = hdrs.get("content-type", "text/html").lower()
+    if body.count("\ufffd") > len(body) // 20 + 5:
+        raise ProviderError(f"capture {got_ts} is undecodable bytes ({ctype.split(';')[0]})")
+    if "html" in ctype:
+        text = html_to_text(body)
+    elif ctype.startswith("text/") or "json" in ctype or "xml" in ctype:
+        text = body
+    else:
+        raise ProviderError(f"capture {got_ts} is {ctype.split(';')[0]}, not text")
+    return check_fetch_content(text), replay, got_ts
+
+
+def _wayback_cdx(url: str, dl: Deadline) -> list[str]:
+    """Timestamps of the newest captures that answered 200, newest first (CDX API, ~10 s)."""
+    q = urllib.parse.urlencode({"url": url, "output": "json", "limit": "-3", "fastLatest": "true",
+                                "filter": "statuscode:200", "fl": "timestamp"})
+    cdx = f"{wayback_web_url()}/cdx/search/cdx?{q}"
+    try:
+        _, _, body = http("GET", cdx, dl)
+    except ProviderError as e:  # live 2026-10-11: a 503 'Temporarily Offline' that clears in seconds
+        if not re.match(r"HTTP 5\d\d\b", str(e)) or dl.left() < 15:
+            raise
+        time.sleep(3)
+        _, _, body = http("GET", cdx, dl)
+    try:
+        rows = json.loads(body or "[]")
+    except json.JSONDecodeError:
+        raise ProviderError("CDX: not JSON")
+    stamps = [r[0] for r in rows[1:] if isinstance(r, list) and r and str(r[0]).isdigit()]
+    return sorted(set(stamps), reverse=True)
+
+
 def fetch_wayback(url: str, dl: Deadline, max_chars: int) -> tuple[str, str]:
-    snap, ts = None, ""
+    """The newest usable Wayback Machine capture, read straight from web.archive.org.
+
+    Root cause of the 2026-10 failures: archive.org/wayback/available answers
+    {"archived_snapshots": {}} even for example.com, and r.jina.ai refuses web.archive.org to
+    keyless callers (403 AbuseAlleviationError), so the old rung fell back to a guessed URL read
+    through a blocked reader. Now: (1) /web/<now>id_/<url>, which Wayback redirects to the
+    nearest capture; (2) if that is missing or a block page, the CDX API's newest 200 captures;
+    (3) with a Jina key only, r.jina.ai on the replay URL (it renders JavaScript)."""
+    errors: list[str] = []
+    seen: dict = {"stamps": set()}
+
+    def done(text: str, snap: str, ts: str):
+        note = f"[web-get: Wayback Machine snapshot {ts or '(timestamp unknown)'} of {url}]\n\n"
+        return note + text, snap, {"snapshot": True}
+
+    now = time.strftime("%Y%m%d%H%M%S", time.gmtime())
     try:
-        _, _, body = http("GET", f"{wayback_api_url()}?url={urllib.parse.quote(url, safe='')}", dl)
-        closest = (json.loads(body).get("archived_snapshots") or {}).get("closest") or {}
-        if closest.get("available") and closest.get("url"):
-            snap, ts = closest["url"], closest.get("timestamp", "")
-            if snap.startswith("http://web.archive.org/"):
-                snap = "https://" + snap[len("http://"):]
-            snap = normalize_url(snap)
-    except (ProviderError, json.JSONDecodeError, AttributeError):
-        pass
-    if not snap:
-        snap = f"{wayback_web_url()}/web/2026/{url}"
-    note = f"[web-get: Wayback Machine snapshot {ts or '(closest to 2026)'} of {url}]\n\n"
-    errors = []
-    try:
-        return note + check_fetch_content(_jina_read(snap, dl)), snap, {"snapshot": True}
+        return done(*_wayback_read(url, now, dl, seen))
     except ProviderError as e:
-        errors.append(f"via r.jina.ai: {e}")
-    raw = re.sub(r"(/web/\d+)(/)", r"\1id_\2", snap, count=1)
+        errors.append(f"latest: {e}")
+        if str(e) == "timeout":
+            raise ProviderError("wayback: " + "; ".join(errors))
     try:
-        _, hdrs, body = http("GET", raw, dl)
-        text = html_to_text(body) if "html" in hdrs.get("content-type", "html") else body
-        return note + check_fetch_content(text), snap, {"snapshot": True}
+        stamps = _wayback_cdx(url, dl)
     except ProviderError as e:
-        errors.append(f"direct: {e}")
+        stamps = []
+        errors.append(f"CDX: {e}")
+    else:
+        if not stamps:
+            errors.append("CDX: no 200 capture: not archived")
+    for ts in stamps:
+        if ts in seen["stamps"]:
+            continue
+        try:
+            return done(*_wayback_read(url, ts, dl, seen))
+        except ProviderError as e:
+            errors.append(f"{ts}: {e}")
+            if str(e) == "timeout":
+                break
+    snap = seen.get("replay") or (f"{wayback_web_url()}/web/{stamps[0]}/{url}" if stamps else "")
+    if snap and jina_key():  # keyless r.jina.ai answers 403 for web.archive.org: not worth a call
+        try:
+            return done(check_fetch_content(_jina_read(snap, dl)), snap, _wayback_replay(snap)[1])
+        except ProviderError as e:
+            errors.append(f"via r.jina.ai: {e}")
     raise ProviderError("wayback: " + "; ".join(errors))
 
 
@@ -1354,12 +1455,15 @@ def cmd_check(only, skip, timeout, as_json, verbose, crwl_timeout=DEFAULT_CRWL_T
     threshold (>= 3 healthy, one search and one fetch among them)."""
     probe_url = env("WEB_GET_CHECK_URL", "https://example.com/")
     pdf_url = env("WEB_GET_CHECK_PDF_URL", "https://www.irs.gov/pub/irs-pdf/fw9.pdf")
+    # A raw example.com capture is ~130 chars, so wayback would walk every capture and the
+    # CDX API to prove itself; a longer, often-captured page answers in one read.
+    wayback_url = env("WEB_GET_CHECK_WAYBACK_URL", "https://www.iana.org/help/example-domains")
     jobs = []
     for name, fn in select(SEARCH, only, skip):
         jobs.append(("search", name, lambda fn=fn: fn("web-get health check", 1, Deadline(timeout))))
     for name, fn in select(FETCH, only, skip):
         t = provider_timeout(name, timeout, crwl_timeout, wayback_timeout, pdf_timeout)
-        u = pdf_url if name == "pdf" else probe_url
+        u = {"pdf": pdf_url, "wayback": wayback_url}.get(name, probe_url)
         jobs.append(("fetch", name, lambda fn=fn, t=t, u=u: _probe_fetch(fn, u, t)))
     if not jobs:
         print("web-get: no providers selected", file=sys.stderr)
@@ -1429,7 +1533,7 @@ def _probe_fetch(fn, url, timeout):
     try:
         return fn(url, Deadline(timeout), 20000)
     except ProviderError as e:
-        m = re.match(r"near-empty content \((\d+) chars\)", str(e))
+        m = re.search(r"near-empty content \((\d+) chars\)", str(e))
         if m and int(m.group(1)) >= 50:
             return "", url
         raise

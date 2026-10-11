@@ -6,11 +6,13 @@ scripts stand in for the CLIs (curl is the real one). No network."""
 
 from __future__ import annotations
 
+import gzip
 import http.server
 import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -49,6 +51,8 @@ HITS: list[str] = []
 PATHS: list[str] = []
 AUTH_SEEN: list[str] = []
 EXA_SEEN: list[dict] = []  # Exa REST requests: {path, x-api-key, body}
+WAYBACK_CDX: list[dict] = []  # CDX API queries seen
+WAYBACK_CDX_STAMPS: list[str] = []  # captures the fake CDX lists (newest first); "" = none
 
 
 def make_pdf(pages: list[list[str]]) -> bytes:
@@ -201,6 +205,47 @@ class Stub(http.server.BaseHTTPRequestHandler):
             {"id": url, "url": url, "title": title, "text": text}],
             "statuses": [{"id": url, "status": "success", "source": "cached"}]}))
 
+    def _wayback(self, u, rest, mode):
+        """Live behaviour 2026-10-11: /web/<any ts>id_/<url> redirects to the nearest capture,
+        served as archived (gzip included); an uncaptured URL is 404 'Wayback Machine'."""
+        if rest.startswith("cdx/"):
+            q = urllib.parse.parse_qs(u.query)
+            WAYBACK_CDX.append(q)
+            if mode == "cdx503" and len(WAYBACK_CDX) == 1:  # live 2026-10-11, clears on retry
+                return self._send(503, "<html><title>Internet Archive: Temporarily Offline</title></html>", "text/html")
+            rows = [["timestamp"]] + [[t] for t in WAYBACK_CDX_STAMPS]
+            return self._send(200, json.dumps(rows if WAYBACK_CDX_STAMPS else []), "application/json")
+        m = re.match(r"web/(\d+)id_/(.*)", rest)
+        if not m:
+            return self._send(404, "<html><head><title>Wayback Machine</title></head></html>", "text/html")
+        ts, target = m.groups()
+        if mode in ("cdxonly", "cdx503") and ts not in WAYBACK_CDX_STAMPS:  # newest capture an archived 404
+            return self._send(404, "<html><head><title>Wayback Machine</title></head></html>", "text/html")
+        if mode == "blocklatest" and ts not in WAYBACK_CDX_STAMPS:
+            ts = "20260301000000"
+            if not self.path.startswith(f"/wayback-web/web/{ts}id_/"):
+                return self._redirect(f"/wayback-web/web/{ts}id_/{target}")
+            return self._send(200, BLOCK, "text/html")
+        cap = ts if ts in WAYBACK_CDX_STAMPS else "20260101000000"
+        if ts != cap:
+            return self._redirect(f"/wayback-web/web/{cap}id_/{target}")
+        page = f"<html><body><p>wayback-direct {cap} {ARTICLE}</p></body></html>".encode()
+        if mode == "gzip":
+            page = gzip.compress(page)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        if mode == "gzip":
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Content-Length", str(len(page)))
+        self.end_headers()
+        self.wfile.write(page)
+
+    def _redirect(self, path):
+        self.send_response(302)
+        self.send_header("Location", path)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _trickle(self, msg, reply_first):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -270,12 +315,8 @@ class Stub(http.server.BaseHTTPRequestHandler):
                 return self._send(401, '{"code":401}')
             return self._send(200, json.dumps({"code": 200, "data": [
                 {"title": f"sj {i}", "url": f"https://sj.example/{i}", "description": "d"} for i in range(4)]}))
-        if prov == "wayback":
-            q = urllib.parse.parse_qs(u.query).get("url", [""])[0]
-            port = self.server.server_address[1]
-            return self._send(200, json.dumps({"archived_snapshots": {"closest": {
-                "available": True, "timestamp": "20260101000000",
-                "url": f"http://127.0.0.1:{port}/wayback-web/web/20260101000000/{q}"}}}))
+        if prov == "wayback":  # the retired availability API: it must not be called
+            return self._send(200, json.dumps({"archived_snapshots": {}}))
         if prov == "pdfsrv":  # /pdfsrv/<target url, query included>
             target = self.path.split("/pdfsrv/", 1)[-1]
             if "loginwall" in target:
@@ -289,8 +330,8 @@ class Stub(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(data)
                 return
             return self._send(200, f"<html><body><p>an html page {ARTICLE}</p></body></html>", "text/html")
-        if prov == "wayback-web":
-            return self._send(200, f"<html><body><p>wayback-direct {ARTICLE}</p></body></html>", "text/html")
+        if prov == "wayback-web":  # web.archive.org: /web/<ts>id_/<url> and /cdx/search/cdx
+            return self._wayback(u, parts[1] if len(parts) > 1 else "", mode)
         self._send(404, "not found", "text/plain")
 
 
@@ -365,6 +406,8 @@ def reset():
     AUTH_SEEN.clear()
     ARGS.clear()
     EXA_SEEN.clear()
+    WAYBACK_CDX.clear()
+    WAYBACK_CDX_STAMPS.clear()
 
 
 def _env(server, fakes, key=True, extra=None, exa_key=False):
@@ -375,7 +418,7 @@ def _env(server, fakes, key=True, extra=None, exa_key=False):
         "TMPDIR": str(fakes["tmp"]),
         "WEB_GET_EXA_URL": f"{server}/exa/mcp", "WEB_GET_PARALLEL_URL": f"{server}/parallel/mcp",
         "WEB_GET_JINA_MCP_URL": f"{server}/jinamcp/v1", "WEB_GET_JINA_READER_URL": f"{server}/r",
-        "WEB_GET_JINA_SEARCH_URL": f"{server}/s", "WEB_GET_WAYBACK_API_URL": f"{server}/wayback/available",
+        "WEB_GET_JINA_SEARCH_URL": f"{server}/s",
         "WEB_GET_WAYBACK_WEB_URL": f"{server}/wayback-web", "WEB_GET_CRWL": fakes["crwl"],
         "WEB_GET_COMPOSIO": fakes["composio"], "WEB_GET_CHECK_URL": "https://example.com/",
         "WEB_GET_NO_SECRETSPEC": "1",
@@ -433,9 +476,9 @@ def test_fetch_full_order_to_wayback(server, fakes):
                                                        "pdf", "crawl4ai", "wayback"]
     assert "not a PDF" in out["attempts"][4]["error"]
     assert out["provider"] == "wayback"
-    # r.jina.ai is in block mode, so the direct id_ snapshot is used
-    assert "wayback-direct" in out["content"] and "Wayback Machine snapshot" in out["content"]
-    assert "/wayback-web/web/20260101000000id_/" not in out["url"]  # provenance is the snapshot
+    # the raw id_ capture is read straight from the archive, not through r.jina.ai
+    assert "wayback-direct" in out["content"] and "Wayback Machine snapshot 20260101000000" in out["content"]
+    assert "/wayback-web/web/20260101000000/" in out["url"]  # provenance: the replay URL, no id_
     assert out["snapshot"] is True and "Wayback Machine snapshot, not the live page" in p.stderr
     assert "try exa-mcp: FAIL" in p.stderr and "try wayback: ok" in p.stderr
 
@@ -540,6 +583,91 @@ def test_http_error_html_body_reduced_to_title(server, fakes):
     p = run(server, fakes, "fetch", "https://site.example/a", "--only", "wayback")
     assert p.returncode == 5
     assert "HTTP 404: page 'Wayback Machine'" in p.stderr and "<script" not in p.stderr
+
+
+def _no_reader_calls():
+    return not any(h.startswith(("r:", "wayback:")) for h in HITS)  # no r.jina.ai, no availability API
+
+
+def test_wayback_reads_capture_directly_keyless(server, fakes):
+    # Live 2026-10-11: archive.org/wayback/available answers {} for everything, and keyless
+    # r.jina.ai gets 403 AbuseAlleviationError for web.archive.org. Neither may be needed.
+    p = run(server, fakes, "fetch", "https://site.example/a", "--only", "wayback", "--json", key=False)
+    assert p.returncode == 0, p.stderr
+    out = json.loads(p.stdout)
+    assert out["snapshot"] is True and "wayback-direct 20260101000000" in out["content"]
+    assert out["url"].endswith("/wayback-web/web/20260101000000/https://site.example/a")
+    assert _no_reader_calls() and not WAYBACK_CDX, HITS
+    assert any(re.search(r"/web/\d{14}id_/https://site.example/a$", x) for x in PATHS), PATHS
+
+
+def test_wayback_gzip_capture_is_decoded(server, fakes):
+    MODES["wayback-web"] = "gzip"  # an id_ capture comes back as archived, gzip included
+    p = run(server, fakes, "fetch", "https://site.example/a", "--only", "wayback", key=False)
+    assert p.returncode == 0, p.stderr
+    assert "wayback-direct" in p.stdout and "\ufffd" not in p.stdout
+
+
+def test_wayback_falls_back_to_cdx_capture(server, fakes):
+    MODES["wayback-web"] = "cdxonly"  # the newest capture is an archived 404
+    WAYBACK_CDX_STAMPS.append("20250101000000")
+    p = run(server, fakes, "fetch", "https://site.example/a", "--only", "wayback", "--json", key=False)
+    assert p.returncode == 0, p.stderr
+    out = json.loads(p.stdout)
+    assert "wayback-direct 20250101000000" in out["content"]
+    assert "/web/20250101000000/" in out["url"]
+    assert WAYBACK_CDX and WAYBACK_CDX[0]["filter"] == ["statuscode:200"]
+    assert WAYBACK_CDX[0]["url"] == ["https://site.example/a"]
+
+
+def test_wayback_cdx_503_is_retried_once(server, fakes):
+    MODES["wayback-web"] = "cdx503"
+    WAYBACK_CDX_STAMPS.append("20250101000000")
+    p = run(server, fakes, "fetch", "https://site.example/a", "--only", "wayback", key=False)
+    assert p.returncode == 0, p.stderr
+    assert "wayback-direct 20250101000000" in p.stdout and len(WAYBACK_CDX) == 2
+
+
+def test_wayback_skips_block_page_capture(server, fakes):
+    MODES["wayback-web"] = "blocklatest"  # the newest capture is a verification wall
+    WAYBACK_CDX_STAMPS.append("20250101000000")
+    p = run(server, fakes, "fetch", "https://site.example/a", "--only", "wayback", key=False)
+    assert p.returncode == 0, p.stderr
+    assert "wayback-direct 20250101000000" in p.stdout
+
+
+def test_wayback_not_archived_says_so(server, fakes):
+    MODES["wayback-web"] = "cdxonly"  # and the CDX lists nothing
+    p = run(server, fakes, "fetch", "https://site.example/a", "--only", "wayback")
+    assert p.returncode == 5
+    assert "no capture" in p.stderr and "not archived" in p.stderr
+    assert _no_reader_calls(), HITS  # with nothing captured, r.jina.ai is not asked even with a key
+
+
+def test_wayback_jina_fallback_needs_a_key(server, fakes):
+    MODES["wayback-web"] = "blocklatest"  # a capture exists but reads as a block page
+    p = run(server, fakes, "fetch", "https://site.example/a", "--only", "wayback", key=False)
+    assert p.returncode == 5 and "block page" in p.stderr and _no_reader_calls(), HITS
+    HITS.clear()
+    p = run(server, fakes, "fetch", "https://site.example/a", "--only", "wayback", "--json")
+    assert p.returncode == 0, p.stderr
+    out = json.loads(p.stdout)
+    assert "wayback-via-jina" in out["content"] and out["snapshot"] is True
+    assert "/web/20260301000000/" in out["url"] and "r:GET" in HITS
+
+
+def test_decode_body_content_encodings():
+    import zlib
+    page = "caf\u00e9 page"
+    assert wg._decode_body(page.encode(), "") == page
+    assert wg._decode_body(gzip.compress(page.encode()), "gzip") == page
+    assert wg._decode_body(zlib.compress(page.encode()), "deflate") == page
+    c = zlib.compressobj(wbits=-15)
+    assert wg._decode_body(c.compress(page.encode()) + c.flush(), "deflate") == page
+    with pytest.raises(wg.ProviderError, match="unsupported content-encoding br"):
+        wg._decode_body(b"x", "br")
+    with pytest.raises(wg.ProviderError, match="bad gzip body"):
+        wg._decode_body(b"not gzip", "gzip")
 
 
 def test_crwl_gets_js_delay(server, fakes, tmp_path):
@@ -908,6 +1036,17 @@ def test_rung_budgets_never_below_timeout():
     assert wg.rung_budget(2.0, "WEB_GET_NO_SUCH_VAR", 120.0, 300.0) == 2.0
 
 
+def test_check_wayback_probes_its_own_page(server, fakes):
+    p = run(server, fakes, "check", "--only", "wayback", "--json", key=False)
+    out = json.loads(p.stdout)
+    assert p.returncode == 0 and out["ok"] is True, p.stderr
+    assert any("/web/" in x and "id_/https://www.iana.org/help/example-domains" in x for x in PATHS), PATHS
+    PATHS.clear()
+    p = run(server, fakes, "check", "--only", "wayback", "--json", key=False,
+            extra={"WEB_GET_CHECK_WAYBACK_URL": "https://probe.example/w"})
+    assert p.returncode == 0 and any(x.endswith("id_/https://probe.example/w") for x in PATHS), PATHS
+
+
 def test_check_narrowed_to_one_provider(server, fakes):
     p = run(server, fakes, "check", "--only", "jina-reader", "--json")
     out = json.loads(p.stdout)
@@ -918,12 +1057,11 @@ def test_check_narrowed_to_one_provider(server, fakes):
 
 
 def test_wayback_has_its_own_longer_timeout(server, fakes):
-    MODES.update(wayback="slow", r="http500")  # the availability API answers after 3 s
+    MODES.update(r="http500", **{"wayback-web": "slow"})  # each archive request takes 3 s
     p = run(server, fakes, "fetch", "https://site.example/a", "--only", "wayback", "--timeout", "1",
             extra={"WEB_GET_WAYBACK_TIMEOUT": "20"})
     assert p.returncode == 0, p.stderr
     assert "wayback-direct" in p.stdout
-    MODES.update(wayback="slow", **{"wayback-web": "slow"})
     t0 = time.monotonic()
     p = run(server, fakes, "fetch", "https://site.example/a", "--only", "wayback",
             "--wayback-timeout", "1")
