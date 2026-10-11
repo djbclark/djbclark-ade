@@ -518,15 +518,25 @@ If the user agrees, back up `~/.gitconfig` first (§15).
 |---|---|---|---|
 | Graft | https://github.com/trailhq/Graft (npm package `@nanonets/graft`) | `npm install -g @nanonets/graft`, or `npx @nanonets/graft init` without a global install. **Re-read the upstream README's Quick start and use its exact command; do not invent a package name.** | Builds a local, regenerable code-context graph under `graft/` (tree-sitter only; no model or key needed) and exposes it as an MCP server plus CLI (`graft init/build/map/ask/skeleton/callers/grep`), so agents read far less source. `graft init` wires hooks and a statusline into `.claude/`; see §6 for the policy |
 
-Graft facts to respect (from the upstream README, 2026-09): `graft build`
-adds `graft/` to `.gitignore` itself; the graph is a local cache like
-`node_modules`, and what gets committed is the wiring under `.claude/`.
+Graft facts to respect (from the upstream README, re-read 2026-10-11): `graft
+build` adds `graft/` to `.gitignore` itself; the graph is a local cache like
+`node_modules`, and what gets committed is the wiring `graft init` drops in:
+`.claude/` (hooks, statusline, `.claude/skills/graft/SKILL.md`), the project
+`.mcp.json` entry for the Graft MCP server (`graft mcp`; skip with
+`--no-mcp`), and `AGENTS.md` only if the `agents` host is selected.
 `graft init` merges into `.claude/settings.json` without clobbering, is
 idempotent, and has `--dry-run`, `--agents claude`, `--no-hooks` and
 `--no-statusline`. `graft build --deep` (LLM summaries) needs an API key and
 is not used. The hosted side (`graft trail ...`, `graft init --trail`, and the
 Graft GitHub App) sends code to a third party and is **opt-in only** (§12).
-`graft uninstall` (dry-run without `-y`) is the inverse of `init`.
+`graft uninstall` (dry-run without `-y`) is the inverse of `init`. Graft
+sends one anonymous, batched usage ping and a daily npm version check by
+default (buckets and fixed labels only, never code, paths or repo names;
+`TELEMETRY.md` upstream, and `graft telemetry debug` prints the payload); it
+is off in CI and in builds from source. Tell the user, and turn it off on
+request with `graft telemetry disable`, `DO_NOT_TRACK=1`, or the checkbox in
+`graft init`. Selecting the `agents` host also writes user-level `~/.codex/`
+config and hooks; `--agents claude` does not, and `--no-global` skips them.
 
 **Agent web access** (search and page fetch for every agent; added 2026-10-11)
 
@@ -761,8 +771,8 @@ Follow stayturgid's **N+1 pattern**: every tool appears consistently in the
   (§15), then run `graft init --dry-run` and show the file list in
   `HANDOFF.md`. If it is acceptable, run `graft init --agents claude` and
   `graft build`. Follow upstream: `graft/` stays git-ignored (it is a local
-  cache), the `.claude/` wiring is committed, and `just graft-build` wraps
-  `graft build`. Keep the hooks only if a trial session shows they are not
+  cache), the `.claude/` and `.mcp.json` wiring is committed, and
+  `just graft-build` wraps `graft build`. Keep the hooks only if a trial session shows they are not
   noisy; otherwise re-run `graft init --no-hooks`. If `init` fails, needs
   credentials, or the graph adds noise, document that it was declined and
   run `graft uninstall` (dry-run first).
