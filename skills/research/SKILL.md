@@ -52,6 +52,40 @@ Scientific or medical topics: also follow `references/literature.md`
 
 ## Steps
 
+P. **Search preflight (nothing else starts until it passes).** Research
+   without live web search is recall from memory with citations bolted on.
+   Before intake, prove the search path works: the lead runs one live search
+   (`RFC 9110 HTTP Semantics`) and opens the first rfc-editor.org / ietf.org
+   hit with its own search and fetch tools, and every route that will carry a
+   slice, the refuter, the writer or the reviewer is probed the same way (on
+   this machine, "On this machine" item 6). A route passes only with a
+   `PROBE-OK <url> | <title>` line; `NO-SEARCH: <error>`, no report, a
+   memory-only answer or a hit count that is not a number all fail. Record the
+   result in `plan.md`. If the lead has no search path, or no probed route
+   can search, **stop: do not plan, slice, dispatch or write**. Then:
+   1. **Diagnose** the failing provider from its verbatim error (auth
+      expired, MCP server down, proxy env, pool exhausted, model id gone,
+      tool not granted to the sub-agent).
+   2. **Try to fix it**, at most two attempts per provider, only changes that
+      are easy and safe: reconnect an MCP server, restart a local service,
+      refresh a login that needs no human, switch to another model id or
+      tool the same provider offers, correct an env var. Quota or rate-limit
+      exhaustion is not a search failure: wait for the reset and resume the
+      same step (`feedback_quota_wait_dont_lose_work`). Re-probe after each
+      attempt.
+   3. **Not easy** (needs a login or secret only the operator has, a paid
+      plan, a change in a repo you do not own, or two attempts failed):
+      prompt the operator with one AskUserQuestion naming the provider, the
+      verbatim error, what you tried and the options (fix together now, use a
+      different provider, proceed without that family, stop). Work through
+      the answer with them.
+   4. **Restart** `/research` at this step once the fix lands, reusing the
+      same run folder: slices that already passed and rows already saved stay
+      (rule 8); only the failed routes re-probe and re-run.
+   A provider that fails *after* the preflight (a worker returns `BLOCKED:
+   no web search` or only tool errors) is the same event: stop dispatching,
+   run items 1-4 for it, never fill its slice from memory.
+
 0. **Intake.** Restate the question, deliverable, audience, freshness need
    and stakes in `plan.md`. Ask at most one clarifying question, only if the
    answer would change the slices (ambiguous term, entity, jurisdiction).
@@ -127,6 +161,9 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    Grok lead, so the delivered report still has one voice.)
 8. Budgets are caps. Stop at diminishing returns even with budget left.
 9. Workers do not spawn workers.
+10. No live web search, no research: a failed search or fetch path stops the
+    run (step P). Never substitute recall, training data or an earlier
+    answer for a search that could not run.
 
 ## On this machine (skip elsewhere)
 
@@ -214,3 +251,15 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    in `references/literature.md`. Institutional full text: `RESEARCH_PROXY_URL`
    (the operator's value is in site-private memory, never here).
 5. Lists in the reply are numbered.
+6. **Preflight mechanics.** Print the probe brief with `python3 -I
+   scripts/research_check.py probe --brief`, save it to `<run>/.probe.md`
+   and dispatch it to each planned route in parallel, e.g. `acp-dispatch
+   <agent> --model M --name probe-<agent> --task research-<slug> -C <run
+   parent> -f <run>/.probe.md` (same agents, models and quoting as item
+   1b; an Agent-tool sub-agent gets the brief plus the item 2 footer).
+   Then `python3 -I scripts/research_check.py probe <each report file>`:
+   exit 0 means every probed route can search, exit 1 lists the ones that
+   cannot. The lead's own probe uses its own tools (WebSearch/WebFetch,
+   Firecrawl, `paper-search`; try the others before declaring it dead).
+   Fix a harness failure at the root in `~/src/djbclark-ade` (code, not only
+   docs); do not just route around it, then say what you changed.

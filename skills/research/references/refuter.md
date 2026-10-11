@@ -11,6 +11,9 @@ high-impact claims with their `[E####]` IDs, and the same tools and budget as
 a worker. Output: `research/<slug>/counter.md` and evidence rows in your
 assigned ID range, same schema as `references/worker.md`.
 
+0. Same rule as workers: if web search or page fetch is missing or errors,
+   stop and write `BLOCKED: no web search: <exact error>`; never counter from
+   memory.
 1. For each hypothesis and each high-impact claim, search for evidence that
    would contradict it, limit its scope, or show it failed to replicate:
    failures, retractions, corrections, critiques, replications, deprecations,

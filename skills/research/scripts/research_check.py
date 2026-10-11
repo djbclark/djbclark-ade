@@ -13,6 +13,9 @@
                                                        "search-result excerpt") are leads and do not count
     research_check.py claims <run>                      every [E####] in report.md exists; ids unique; cited excerpt rows noted
     research_check.py all    <run> [--offline]          quotes, numbers, claims, gate, refs
+    research_check.py probe  --brief                    print the search-preflight brief to dispatch to a route
+    research_check.py probe  <report-file>...           each route's reply proves a live web search and page open
+                                                       (exit 1 if any route has no working search)
 
 <run> is the run folder (research/<slug>). Exit 0 when every check passes,
 1 when a check fails, 2 on usage or I/O errors. `numbers` is an existence
@@ -504,6 +507,47 @@ def cmd_claims(run: Path) -> int:
     return 0 if problems == 0 else 1
 
 
+# ---------- probe (search preflight) ----------
+
+PROBE_QUERY = "RFC 9110 HTTP Semantics"
+PROBE_BRIEF = f"""Search preflight. Do exactly this and nothing else.
+1. Run one live web search for: {PROBE_QUERY}
+2. Open (fetch) the first result whose host is rfc-editor.org, datatracker.ietf.org or ietf.org.
+3. Write your report with exactly one line:
+   PROBE-OK <the url you opened> | <the page title as shown on the page>
+If you have no web search tool, no page-fetch tool, either one errored, or you
+could only answer from memory, write exactly one line instead:
+   NO-SEARCH: <the exact error text, or "no web search tool">
+Never answer from memory. Do not retry more than once.
+"""
+PROBE_OK_RE = re.compile(r"^PROBE-OK\s+(https?://\S+)\s*\|\s*(.+)$", re.M)
+PROBE_HOSTS = ("rfc-editor.org", "ietf.org")
+
+
+def cmd_probe(files: list[str]) -> int:
+    bad = 0
+    for f in files:
+        path = Path(f)
+        if not path.is_file():
+            print(f"NO-SEARCH {f}: no report file (route never answered)")
+            bad += 1
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        m = PROBE_OK_RE.search(text)
+        if m:
+            host = urllib.parse.urlparse(m.group(1)).hostname or ""
+            if any(host == h or host.endswith("." + h) for h in PROBE_HOSTS) and "semantics" in m.group(2).lower():
+                print(f"ok {f}: {m.group(1)}")
+                continue
+            print(f"NO-SEARCH {f}: PROBE-OK line does not match the probe page: {m.group(0)[:120]}")
+        else:
+            line = next((ln for ln in text.splitlines() if ln.startswith("NO-SEARCH")), None)
+            print(f"NO-SEARCH {f}: {line or 'no PROBE-OK line in the report'}")
+        bad += 1
+    print(f"probe: {len(files) - bad} of {len(files)} routes can search")
+    return 1 if bad else 0
+
+
 # ---------- main ----------
 
 def main(argv: list[str]) -> int:
@@ -525,6 +569,13 @@ def main(argv: list[str]) -> int:
         if len(pos) != 3:
             die("usage: fetch <source_id> <url> <run> [--via-proxy]")
         return cmd_fetch(pos[0], pos[1], Path(pos[2]), via_proxy="--via-proxy" in flags)
+    if sub == "probe":
+        if "--brief" in flags:
+            print(PROBE_BRIEF, end="")
+            return 0
+        if not pos:
+            die("usage: probe --brief | probe <report-file>...")
+        return cmd_probe(pos)
     if len(pos) != 1:
         die(f"usage: {sub} <run>")
     run = Path(pos[0])

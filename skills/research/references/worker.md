@@ -39,6 +39,13 @@ report.
 4. A search log block in the notes: one line per query with source, verbatim
    query, date, hit count. Never estimate a hit count.
 
+## No search, no work
+
+If your web search or page-fetch tool is missing, denied or errors, **stop at
+once**: write `BLOCKED: no web search: <exact error>` as your report and
+return. Do not log rows, write notes or answer from memory, and do not retry
+more than once. The lead fixes the provider and re-dispatches you.
+
 ## How to search
 
 1. Start with two or three short, broad queries; narrow only after you see
