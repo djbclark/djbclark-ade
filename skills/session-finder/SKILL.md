@@ -171,6 +171,10 @@ Before relaying work into a repo, resuming, or launching:
 5. Prior art checked 2026-10-08: lease/lock daemons (dos-kernel lanes, Wit symbol
    locks, decapod `todo claim`) and agent-deck's refusal to read a transcript two
    live instances share. The claim files above are the local form of the same idea.
+   [hcom](https://github.com/aannoo/hcom) (MIT; read 2026-10-11) does it with hooks
+   into a shared SQLite db: agents launched as `hcom <tool>` (or that run `hcom
+   start`) message, watch, spawn, fork, resume and kill each other, herdr panes
+   included, and can subscribe to file-edit `collision` events.
 
 ## 5. Start sessions over ACP, visibly
 
