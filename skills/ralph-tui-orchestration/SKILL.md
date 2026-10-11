@@ -62,14 +62,21 @@ line ~123), the route that trips agy's hidden burst limit.
 
 1. **Status 2026-10-11:** `ralph-tui` is not on PATH, and
    `docs/coding-factory.md` lists Ralph as dormant. Nothing runs today.
-2. **Before any controller goes live again:** disable the `antigravity`
-   agent, or replace it with an ACP-backed plugin. The target is one generic
-   custom plugin that runs `acp-run <agent> -C <repo> -f <prompt> --model <m>
-   --perm scoped:<paths>` and maps acp-run's exit codes (0 done, 1 failed,
-   124 timeout) to Ralph's task result. One plugin then reaches every agent in
-   `acp-run --list`. Not built; ask the operator before building it.
-3. Until then, route multi-vendor work through `bigteam` (`acp-dispatch`),
-   not Ralph.
+2. **Built 2026-10-11:** the built-in `acp` agent plugin (branch
+   `feat-acp-plugin` of djbclark/ralph-tui, merged into
+   `integration-2026-08-02`, the branch to build Ralph from; docs page
+   `website/content/docs/plugins/agents/acp.mdx`). It sends the prompt on
+   stdin to `acp-run <agent> -C <cwd> --perm <all|deny|scoped:…> --model <m>`
+   and maps exit 0/124/other to success/timeout/failure. One plugin reaches
+   every agent in `acp-run --list`; prefer it over any per-CLI plugin. Config:
+   `plugin = "acp"`, `agent` and `model` under `[agents.options]` (a top-level
+   `model` is not forwarded), top-level `timeout` in seconds.
+3. The `antigravity` agent in `~/.config/ralph-tui/config.toml` now uses it
+   (`agent = "agy"`, `model = "gemini-pro-agent"`); the custom
+   `plugins/agents/antigravity.ts` (`agy --print`) is unused. Never point an
+   agent back at it.
+4. A stock (non-fork) ralph-tui has no `acp` plugin: install from the fork's
+   integration branch, or route multi-vendor work through `bigteam`.
 
 ## The one rule everything else follows from
 
