@@ -1,6 +1,6 @@
 # Prompt: apply the djbclark / frdminc / Graft development toolchain to a repo
 
-Version 5.3 (2026-10-11). Supersedes 5.2 and 5.1 (2026-10-09) and Version 5
+Version 5.4 (2026-10-11). Supersedes 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
 (2026-10-01, which superseded
 `CLAUDE_APPLY_DJBCLARK_TOOLING_Version4.md`). Lived at
 `site-djbclark/research/apply-dev-toolchain/CLAUDE_APPLY_DJBCLARK_TOOLING.md`
@@ -90,6 +90,15 @@ install commands and is now labelled correctly: it is a performance knob (no
 slow implicit `brew update` mid-setup), not an update switch — it does not stop
 tools updating. The measured numbers and the caveats that justify the policy
 live in `djbclark-ade/skills/setup-modern-cli/SKILL.md`.
+
+What changed in 5.4 (2026-10-11): the rest of the modern toolchain is registered
+here, not only in the skill — `miller` (awk/sed/sort/join over CSV/TSV/JSON),
+`gnu-sed`/`gawk` plus `uutils-coreutils` for GNU-vs-BSD flag drift, `dust`/`gdu`/
+`duf`/`procs`/`difftastic`/`hyperfine`/`tldr`, and `hexyl`/`ouch`/`glow`/`doggo`/
+`ripgrep-all`/`rargs`/`entr`/`csvlens`/`qsv`/`dasel`/`b3sum`/`watchexec` are in
+the §1.2 install line and the §1.3 utilities table; `runiq` is noted as
+crates-only (`cargo install runiq`). Rationale and the per-tool verdicts live in
+`djbclark-ade/skills/setup-modern-cli/` (`SKILL.md` + `references/`).
 
 ---
 
@@ -419,7 +428,13 @@ HOMEBREW_NO_AUTO_UPDATE=1 brew install \
   ruff pre-commit gitleaks typos-cli semgrep \
   shellcheck shfmt biome lychee dotenv-linter actionlint \
   openjdk coreutils caddy \
-  ripgrep fd bat srgn eza hck git-delta jq yq xh ast-grep
+  ripgrep fd bat srgn eza hck git-delta jq yq xh ast-grep \
+  miller gnu-sed gawk uutils-coreutils dasel qsv b3sum \
+  dust gdu duf procs difftastic hyperfine tldr \
+  hexyl ouch glow doggo ripgrep-all rargs entr csvlens watchexec
+
+# `runiq` (uniq on unsorted input) is not in Homebrew:
+cargo install runiq
 
 # Lighthouse and Puppeteer need a Chrome-family browser:
 ls "/Applications/Google Chrome.app" >/dev/null 2>&1 || brew install --cask google-chrome
@@ -523,6 +538,26 @@ it on automated install lines.
 | yq | https://mikefarah.gitbook.io/yq/ | `brew install yq` | Hand-parsing YAML |
 | xh | https://github.com/ducaale/xh | `brew install xh` | `curl` for JSON APIs |
 | ast-grep | https://ast-grep.github.io/ | `brew install ast-grep` | `rg` for code-shape queries |
+| `mlr` (Miller) | https://miller.readthedocs.io/ | `brew install miller` | `awk`/`sed`/`cut`/`join`/`sort` over CSV/TSV/JSON with named fields: `mlr --csv sort -f col f.csv` |
+| GNU `gsort`/`gsed`/`gawk`/`gdate` | https://www.gnu.org/software/coreutils/ | `brew install coreutils gnu-sed gawk` | BSD-vs-GNU flag drift (`sort -h`, `sed -i`, `date -d`): call the `g`-prefixed binary in scripts |
+| `uu-*` (uutils) | https://uutils.github.io/coreutils/ | `brew install uutils-coreutils` | portable GNU-compatible coreutils (`uu-sort`, `uu-cut`, …); its `sed`/`awk` are still in progress |
+| `dust`, `gdu` | https://github.com/bootandy/dust | `brew install dust gdu` | `du` — and never `du`/`find` over `~/.cache` (they time out) |
+| `duf` | https://github.com/muesli/duf | `brew install duf` | `df` |
+| `procs` | https://github.com/dalance/procs | `brew install procs` | `ps` (`procs --json` for scripts) |
+| `difft` (difftastic) | https://difftastic.wilfred.me.uk/ | `brew install difftastic` | `diff` for syntax-aware comparisons |
+| `hyperfine` | https://github.com/sharkdp/hyperfine | `brew install hyperfine` | `time` for real numbers |
+| `tldr` | https://tldr.sh/ | `brew install tldr` | `man`, when you only need the flags |
+| `b3sum` | https://github.com/BLAKE3-team/BLAKE3 | `brew install b3sum` | checksums (macOS ships `sha256sum` now) |
+| `hexyl` | https://github.com/sharkdp/hexyl | `brew install hexyl` | `xxd` / `hexdump` |
+| `rga` (ripgrep-all) | https://github.com/phiresky/ripgrep-all | `brew install ripgrep-all` | searching inside PDFs, Office files and archives |
+| `ouch` | https://github.com/ouch-org/ouch | `brew install ouch` | one command for `tar`/`zip`/`7z`/`gz` |
+| `glow` | https://github.com/charmbracelet/glow | `brew install glow` | rendering markdown to read |
+| `doggo` | https://github.com/mr-karan/doggo | `brew install doggo` | `dig` |
+| `dasel` | https://github.com/tomwright/dasel | `brew install dasel` | JSON/YAML/TOML/XML in one tool (`dasel query -i json X < f` in v3) |
+| `qsv`, `csvlens` | https://github.com/dathere/qsv | `brew install qsv csvlens` | CSV stats/query and browsing instead of eyeballing |
+| `watchexec`, `entr` | https://github.com/watchexec/watchexec | `brew install watchexec entr` | `watch` (non-interactive, safe for agents) |
+| `runiq` | https://github.com/whitfin/runiq | `cargo install runiq` (not in Homebrew) | `uniq` on unsorted input |
+| `rargs` | https://github.com/lotabout/rargs | `brew install rargs` | `xargs -I` plus `awk`-style conditions |
 
 These govern shell use. Claude Code's own `Read`/`Grep`/`Glob`/`Edit` tools
 stay preferred over shelling out when an equivalent exists (site-djbclark
