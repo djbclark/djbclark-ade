@@ -41,8 +41,9 @@ altitudes compose (a macro node can run a micro graph as its body).
   orchestration skill reach several TUIs through ACP.
 - [docs/jev.md](docs/jev.md) — `bin/jev`, the TypeSafe Jev decision layer:
   off/shadow/act switch (`~/.config/jev/mode`), the call log, `jev report`, the
-  two shadow sites (acp-dispatch verdicts, the prompt-effort hook) and how to
-  remove it all. Shadow since 2026-10-11.
+  one shadow site (the prompt-effort hook; acp-dispatch verdicts retired), the
+  offline Jev-vs-Haiku evaluation and how to remove it all. Shadow since
+  2026-10-11; review due 2026-10-18.
 - [docs/orca-integration.md](docs/orca-integration.md) — runnable macro-
   graph command sequences plus hard-won live-run lessons (stall false
   deaths, rejected-late `worker_done` semantics, the retry recipe, the
