@@ -3,6 +3,27 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Research checker: namespace-aware citations across runs
+
+**Queued 2026-10-10 (operator, hiwymi `/loose`). Not started.** Research runs
+in one project reuse evidence ids (`E0949` is one row in
+`hiwymi/research/ai-heaven/evidence.jsonl` and a different row in
+`research/soul-md-autonomy/`). `skills/research/scripts/research_check.py
+claims` only checks that a cited id exists in the run's own ledger, so a
+finding from another run cited as a bare id passes while pointing at the wrong
+source. GPT-6 Astra proposed the fix in the ai-heaven spec dialogue (turn 20,
+amendment A8); Grok 4.7 accepted it as rule R-src-5 but did not claim a checker
+run (`spec/ai-heaven/notes/grok-phase4-verdicts.md`, Phase 5 rulings, A-8).
+Build: a `research_check.py` subcommand (or a spec-side checker) that (1)
+resolves every relative link into another run's report by file **and**
+fragment, (2) lists every superscript id that also exists in a sibling run's
+ledger and shows the cited row's title beside the sentence for review, and (3)
+flags any sentence that names another run's report and carries a local
+superscript. Lead's hand check of the phase-5 spec (a28fa05, 2026-10-10): no
+links into other runs; 5 of 48 cited ids also exist in the soul-md ledger and
+all 5 resolve to the intended ai-heaven rows; nothing to fix. Drop this item
+when the subcommand ships and the research skill's SKILL.md names it.
+
 ## Watch Orca upstream for structural-reorg verbs
 
 **Queued 2026-09-26. Watcher built; waiting on upstream.** We filed
