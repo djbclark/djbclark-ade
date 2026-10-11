@@ -35,8 +35,12 @@ EXA_RATE_LIMIT = ("You've hit Exa's free MCP rate limit. To continue using witho
 
 # provider -> mode; reset per test. Modes: ok, http500, iserror, rpcerror, empty, block, slow,
 # ratelimit (Exa's verbatim notice as content), trickle (SSE pings, never a reply), sse-open
-# (the reply, then the stream stays open with pings).
+# (the reply, then the stream stays open with pings), capped (exa: a body of exactly
+# maxCharacters), and for parallel's web_fetch: crosshost, rootredirect, soft404, wrongtitle
+# (a missing zillow listing answered with the site's city page), samehost (a legit redirect).
+# do_GET also has slow (sleep 3 s).
 MODES: dict[str, str] = {}
+ARGS: list[dict] = []
 HITS: list[str] = []
 PATHS: list[str] = []
 AUTH_SEEN: list[str] = []
@@ -91,6 +95,12 @@ class Stub(http.server.BaseHTTPRequestHandler):
             return self._rpc(msg["id"], {"content": [{"type": "text", "text": "Error fetching URL(s): CRAWL_UNKNOWN_ERROR"}],
                                          "isError": True}, sse)
         tool, args = msg["params"]["name"], msg["params"]["arguments"]
+        ARGS.append({"prov": prov, "tool": tool, **args})
+        if prov == "parallel" and tool == "web_fetch" and mode in PARALLEL_PAGES:
+            got, title = PARALLEL_PAGES[mode](args["urls"][0])
+            text = json.dumps({"results": [{"url": got, "title": title,
+                                            "full_content": "parallel-fetch " + ARTICLE}]})
+            return self._rpc(msg["id"], {"content": [{"type": "text", "text": text}]}, sse)
         if mode == "empty":
             text = "" if prov != "parallel" else json.dumps({"results": [], "errors": [
                 {"url": "x", "error_type": "connect_error", "http_status_code": None}]})
@@ -103,6 +113,9 @@ class Stub(http.server.BaseHTTPRequestHandler):
                                      for i in range(args.get("numResults", 3)))
         elif tool == "web_search":
             text = json.dumps({"results": _search_rows("parallel")})
+        elif tool == "web_fetch_exa" and mode == "capped":
+            n = args["maxCharacters"]
+            text = f"# page\nURL: {args['urls'][0]}\nPublished: 2026-10-11\n\n" + (ARTICLE * (n // len(ARTICLE) + 1))[:n]
         elif tool == "web_fetch_exa":
             text = f"Title: page\nURL: {args['urls'][0]}\n\nexa-fetch {ARTICLE}"
         elif tool == "web_fetch":
@@ -154,6 +167,8 @@ class Stub(http.server.BaseHTTPRequestHandler):
         HITS.append(f"{prov}:GET")
         PATHS.append(self.path)
         mode = MODES.get(prov, "ok")
+        if mode == "slow":
+            time.sleep(3)
         if mode == "http500":
             return self._send(500, "nope", "text/plain")
         if mode == "block":
@@ -184,6 +199,16 @@ class Stub(http.server.BaseHTTPRequestHandler):
         if prov == "wayback-web":
             return self._send(200, f"<html><body><p>wayback-direct {ARTICLE}</p></body></html>", "text/html")
         self._send(404, "not found", "text/plain")
+
+
+PARALLEL_PAGES = {
+    "crosshost": lambda u: ("https://elsewhere.example/landing", "Landing"),
+    "rootredirect": lambda u: (urllib.parse.urljoin(u, "/"), "Site home"),
+    "soft404": lambda u: (u, "Page Not Found | Site"),
+    "wrongtitle": lambda u: (u, "Anchorage AK Real Estate - Anchorage AK Homes For Sale | Zillow"),
+    "samehost": lambda u: (urllib.parse.urljoin(u.replace("http://", "https://www.", 1), "/new/listing-moved"),
+                           "Main Street listing (moved)"),
+}
 
 
 class StubServer(http.server.ThreadingHTTPServer):
@@ -224,6 +249,7 @@ def reset():
     HITS.clear()
     PATHS.clear()
     AUTH_SEEN.clear()
+    ARGS.clear()
 
 
 def _env(server, fakes, key=True, extra=None):
@@ -641,3 +667,176 @@ def test_html_to_text():
 
 def test_truncate_bytes_utf8_safe():
     assert wg.truncate_bytes("héllo", 2) == "h"
+
+
+# ------------------------------------------------------------------ 2026-10-11 gap fixes
+
+
+@pytest.mark.parametrize("mode,why", [
+    ("crosshost", "redirected to another host: elsewhere.example"),
+    ("rootredirect", "redirected to the site root"),
+    ("soft404", "soft-404 title"),
+    ("wrongtitle", "shares no word with the URL path"),
+])
+def test_parallel_wrong_page_falls_through(server, fakes, mode, why):
+    MODES.update(exa="iserror", parallel=mode)
+    out = json.loads(run(server, fakes, "fetch", "https://www.zillow.example/homedetails/1-Main-St/1_zpid/",
+                         "--json").stdout)
+    assert out["provider"] == "jina-reader"
+    par = out["attempts"][1]
+    assert par["provider"] == "parallel" and par["ok"] is False
+    assert "wrong page" in par["error"] and why in par["error"]
+
+
+def test_parallel_same_host_redirect_passes(server, fakes):
+    MODES.update(exa="iserror", parallel="samehost")
+    p = run(server, fakes, "fetch", "http://site.example/homedetails/1-Main-St/1_zpid/", "--json")
+    out = json.loads(p.stdout)
+    assert p.returncode == 0 and out["provider"] == "parallel"
+    assert out["url"] == "https://www.site.example/new/listing-moved"
+    assert "parallel-fetch" in out["content"]
+
+
+@pytest.mark.parametrize("req,got,title,bad", [
+    ("https://www.zillow.com/homedetails/1-Main-St/1_zpid/", None,
+     "Anchorage AK Real Estate - Anchorage AK Homes For Sale | Zillow", "shares no word"),
+    ("https://www.zillow.com/homedetails/1-Main-St/1_zpid/", None,
+     "1 Main St, Anchorage, AK 99501 | Zillow", None),
+    ("http://github.com/djbclark", "https://github.com/djbclark/", "djbclark · GitHub", None),
+    ("http://www.python.org/doc", "https://python.org/doc/", "Our Documentation | Python.org", None),
+    ("https://de.wikipedia.org/wiki/K%C3%B6ln", None, "Köln – Wikipedia", None),
+    ("https://en.wikipedia.org/wiki/Moltbook", "https://en.m.wikipedia.org/wiki/Moltbook",
+     "Moltbook - Wikipedia", None),
+    ("https://ex.org/docs/getting-started", "https://ex.org/docs/quickstart", "Quickstart", None),
+    ("https://ex.org/docs/getting-started", None, "Getting started with Ex", None),
+    ("https://ex.org/a/old-name", "https://other.org/x", "x", "another host"),
+    ("https://ex.org/blog/some-post", "https://ex.org/", "Ex", "site root"),
+    ("https://ex.org/", "https://ex.org", "Ex", None),
+    ("https://ex.org/x", None, "404", "soft-404"),
+    ("https://ex.org/x", None, "Oops! That page can't be found.", "soft-404"),
+    ("https://ex.org/x", None, "", None),
+    # verifier 2026-10-11: correct pages the first title rule rejected
+    ("https://docs.python.org/3/library/stdtypes.html", None,
+     "Built-in Types — Python 3.13.0 documentation", None),
+    ("https://en.wikipedia.org/wiki/Samuel_Clemens", None, "Mark Twain - Wikipedia", None),
+    ("https://proceedings.neurips.cc/paper_files/paper/2023/hash/"
+     "d842425e4bf79ba039352da0f658a906-Abstract-Conference.html", None,
+     "Toolformer: Language Models Can Teach Themselves to Use Tools", None),
+    # soft-404 only in page-chrome forms, and not when the path is about 404s
+    ("https://en.wikipedia.org/wiki/HTTP_404", None, "HTTP 404 - Wikipedia", None),
+    ("https://ex.org/x", None, "Why Free Will Does Not Exist", None),
+    ("https://ex.org/x", None, "Error 404", "soft-404"),
+    ("https://ex.org/x", None, "404 Not Found", "soft-404"),
+    # redirectors, aliases, index pages, shared hosting
+    ("https://doi.org/10.1038/nature14539", "https://www.nature.com/articles/nature14539",
+     "Deep learning | Nature", None),
+    ("https://youtu.be/abc", "https://www.youtube.com/watch?v=abc", "x - YouTube", None),
+    ("https://twitter.com/karpathy", "https://x.com/karpathy", "Andrej Karpathy (@karpathy) / X", None),
+    ("https://ex.org/index.html", "https://ex.org/", "Ex", None),
+    ("https://ex.org/blog/some-post", "https://ex.org/en/", "Ex", "site root"),
+    ("https://alice.github.io/notes", "https://bob.github.io/notes", "Notes", "another host"),
+])
+def test_page_mismatch(req, got, title, bad):
+    body = {"https://en.wikipedia.org/wiki/Samuel_Clemens":
+            "Samuel Langhorne Clemens (November 30, 1835 - April 21, 1910), known by the pen "
+            "name Mark Twain, was an American writer.",
+            "https://proceedings.neurips.cc/paper_files/paper/2023/hash/"
+            "d842425e4bf79ba039352da0f658a906-Abstract-Conference.html":
+            "Toolformer\n\nPart of Advances in Neural Information Processing Systems 36 "
+            "(NeurIPS 2023) Main Conference Track\n\nAbstract\n\nLanguage models ..."}.get(req)
+    why = wg.page_mismatch(req, got, title, body)
+    if bad is None:
+        assert why is None, why
+    else:
+        assert why and bad in why
+
+
+def test_page_mismatch_body_echo_does_not_vouch():
+    # the zillow city page with the requested URL echoed in a link and as a bare URL
+    req = "https://www.zillow.com/homedetails/1-Main-St/1_zpid/"
+    body = f"Homes for sale [Main listing]({req}) see {req} and www.zillow.com/homedetails/2"
+    why = wg.page_mismatch(req, None, "Anchorage AK Real Estate - Anchorage AK Homes For Sale | Zillow",
+                           body)
+    assert why and "shares no word" in why
+
+
+@pytest.mark.parametrize("args,extra", [
+    (["--wayback-timeout", "nan"], {}),
+    (["--timeout", "inf"], {}),
+    ([], {"WEB_GET_WAYBACK_TIMEOUT": "abc"}),
+    ([], {"WEB_GET_CRWL_TIMEOUT": "nan"}),
+])
+def test_bad_budgets_are_usage_errors(server, fakes, args, extra):
+    p = run(server, fakes, "fetch", "https://site.example/a", "--only", "wayback", *args, extra=extra)
+    assert p.returncode == 2, p.stderr
+    assert "Traceback" not in p.stderr and "ALL PROVIDERS FAILED" not in p.stderr
+
+
+def test_rung_budgets_never_below_timeout():
+    assert wg.rung_budget(None, "WEB_GET_NO_SUCH_VAR", 120.0, 300.0) == 300.0
+    assert wg.rung_budget(None, "WEB_GET_NO_SUCH_VAR", 120.0, 45.0) == 120.0
+    assert wg.rung_budget(2.0, "WEB_GET_NO_SUCH_VAR", 120.0, 300.0) == 2.0
+
+
+def test_check_narrowed_to_one_provider(server, fakes):
+    p = run(server, fakes, "check", "--only", "jina-reader", "--json")
+    out = json.loads(p.stdout)
+    assert p.returncode == 0 and out["ok"] is True and out["healthy"] == 1, p.stderr
+    p = run(server, fakes, "check", "--only", "jina-reader", "--json",
+            extra={"WEB_GET_JINA_READER_URL": "http://127.0.0.1:9/x"})
+    assert p.returncode == 5 and "ALL PROVIDERS FAILED" not in p.stderr
+
+
+def test_wayback_has_its_own_longer_timeout(server, fakes):
+    MODES.update(wayback="slow", r="http500")  # the availability API answers after 3 s
+    p = run(server, fakes, "fetch", "https://site.example/a", "--only", "wayback", "--timeout", "1",
+            extra={"WEB_GET_WAYBACK_TIMEOUT": "20"})
+    assert p.returncode == 0, p.stderr
+    assert "wayback-direct" in p.stdout
+    MODES.update(wayback="slow", **{"wayback-web": "slow"})
+    t0 = time.monotonic()
+    p = run(server, fakes, "fetch", "https://site.example/a", "--only", "wayback",
+            "--wayback-timeout", "1")
+    assert p.returncode == 5 and "timeout" in p.stderr
+    assert time.monotonic() - t0 < 15
+
+
+def test_provider_timeout_budgets():
+    assert wg.provider_timeout("exa", 45, 150, 120) == 45
+    assert wg.provider_timeout("crawl4ai", 45, 150, 120) == 150
+    assert wg.provider_timeout("wayback", 45, 150, 120) == 120
+    assert wg.provider_timeout("wayback", 45, 150) == wg.DEFAULT_WAYBACK_TIMEOUT == 120
+
+
+def test_exa_cap_is_flagged_truncated(server, fakes):
+    MODES["exa"] = "capped"
+    p = run(server, fakes, "fetch", "https://site.example/a", "--json")
+    out = json.loads(p.stdout)
+    assert p.returncode == 0 and out["provider"] == "exa"
+    assert out["truncated"] is True and out["truncated_by"] == "exa"
+    assert out["truncated_to"] == wg.EXA_MAX_CHARS == 200000
+    assert "exa returned its 200000-character cap" in p.stderr
+    p = run(server, fakes, "fetch", "https://site.example/a")
+    assert "exa returned its 200000-character cap" in p.stderr
+
+
+def test_exa_below_cap_not_truncated(server, fakes):
+    out = json.loads(run(server, fakes, "fetch", "https://site.example/a", "--json").stdout)
+    assert out["provider"] == "exa" and out["truncated"] is False and "truncated_by" not in out
+
+
+def test_max_bytes_does_not_shrink_exa_request(server, fakes):
+    # Exa always gets its full cap: a small --max-bytes must not make Exa's reply near-empty.
+    p = run(server, fakes, "fetch", "https://site.example/a", "--max-bytes", "100", "--json")
+    out = json.loads(p.stdout)
+    assert out["provider"] == "exa" and out["truncated_by"] == "max-bytes"
+    assert [a["maxCharacters"] for a in ARGS if a["tool"] == "web_fetch_exa"] == [200000]
+
+
+def test_exa_body_chars():
+    assert wg.exa_body_chars("# t\nURL: u\nPublished: d\n\n" + "x" * 50) == 50
+    assert wg.exa_body_chars("no header " * 3) == 30
+
+
+def test_wayback_timeout_usage_error(server, fakes):
+    assert run(server, fakes, "fetch", "https://a.example", "--wayback-timeout", "0").returncode == 2

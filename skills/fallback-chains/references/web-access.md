@@ -65,28 +65,61 @@ authoritative; this is its contract as of 2026-10-11.
    then direct). The URL is normalised once (IDNA host, percent-encoded path),
    so IRIs such as `https://de.wikipedia.org/wiki/Köln` work. A `--max-bytes`
    cut prints `web-get: truncated to N bytes` on stderr and sets
-   `"truncated": true` in `--json`: quote such a page as an excerpt.
+   `"truncated": true` in `--json`: quote such a page as an excerpt. Exa cuts
+   silently at its 200000-character `maxCharacters` cap (a War and Peace fetch
+   came back with exactly 200000 body characters and no marker), so a reply at
+   the cap is flagged the same way (`truncated: exa returned its
+   200000-character cap` on stderr, `"truncated_by": "exa"`).
 2.3. A rung fails on a network error, HTTP ≥ 400, an MCP or JSON-RPC error, a
    timeout, near-empty content, a block page, or a rate-limit or quota notice
    returned as content (Exa's free tier answers "You've hit Exa's free MCP rate
-   limit" with a normal reply). The next rung is then tried.
+   limit" with a normal reply). A Parallel fetch also fails when it returns the
+   wrong page (2.8). The next rung is then tried.
 2.4. Timeouts are wall-clock per attempt: `--timeout` (default 45 s) for the
    HTTP rungs, `--crwl-timeout` (default 150 s, or `$WEB_GET_CRWL_TIMEOUT`) for
-   crawl4ai, whose cold Chromium start took 30-120 s at load 30-38. Worst case a
-   fetch walks for about 5.5 minutes before exit 5.
+   crawl4ai, whose cold Chromium start took 30-120 s at load 30-38, and
+   `--wayback-timeout` (default 120 s, or `$WEB_GET_WAYBACK_TIMEOUT`) for
+   wayback, whose availability lookup plus snapshot read took 54-57 s for one
+   dewiki page (6.8). Unless set by flag or environment, the crawl4ai and
+   wayback budgets are never below `--timeout`. All three must be finite and
+   > 0; a bad value (`nan`, a non-number in the environment) is a usage error,
+   exit 2. `check` uses the same budgets. Worst case a fetch walks for about 7
+   minutes before exit 5.
 2.5. `web-get check`: probes every provider once, in parallel, and exits 0
    when at least 3 are healthy with one search and one fetch provider among
-   them, else 5. It makes real calls, including Parallel's (billed per request
+   them, else 5. Narrowed with `--only`/`--skip`, it exits 0 only when every
+   selected provider is healthy, else 5 without the pause message (one sick
+   provider is not an outage). It makes real calls, including Parallel's (billed per request
    on their side, free to us today) and a crawl4ai launch.
 2.6. `--only`/`--skip` take provider names (`jina` means every jina-* rung,
    `crwl` is crawl4ai). `--json` prints `{ok, provider, url, attempts,
-   content, truncated}`.
+   content, truncated}`, plus `truncated_by` (`max-bytes` or `exa`) and
+   `truncated_to` when `truncated` is true.
 2.7. Exit 0: a provider answered (stderr names it: `web-get:
    provider=<p> url=<u>`). Exit 2: usage error. **Exit 5: every provider
    failed. Pause (section 1).** SIGTERM, SIGINT or SIGHUP kill any running
    crwl and its Chromium before web-get exits 128+n.
-2.8. A success can still be the wrong page: Parallel has returned a site's
-   search page for a missing listing. Check that the title matches the page you
+2.8. Parallel returns soft-404 and redirect pages as ordinary results (a
+   missing zillow listing came back as the site's "Anchorage AK Real Estate"
+   page, under the requested URL). `web-get` checks Parallel's page and fails
+   the rung (`parallel: wrong page (<reason>)`) on a redirect to another site
+   or to the site root, a soft-404 title in page-chrome form ("Page not
+   found", "404", "Error 404", "404 Not Found", "That page can't be found";
+   skipped when the path itself mentions 404 or "not found"), or a title
+   sharing no word with a URL path of two or more words when the body's first
+   5000 characters (URLs removed) do not name the path either. A title
+   matches when a path word's first five letters are in it or a title word is
+   in the path ("Built-in Types" for `stdtypes.html`); the body vouches for a
+   Wikipedia redirect (`/wiki/Samuel_Clemens`, titled "Mark Twain").
+   http→https, `www.`, a trailing slash, `/index.html`, same-site redirects
+   (another path, or another host of the same domain such as
+   `en.m.wikipedia.org`), redirector links (`doi.org`, `youtu.be`, `t.co`,
+   `bit.ly`) and twitter.com↔x.com pass; on `github.io`, `pages.dev` and
+   similar shared hosts each subdomain is its own site. This is a heuristic,
+   for Parallel only, and it misses cases: a realistic zillow path naming the
+   city (`1-Main-St-Anchorage-AK/`) matches the city page's title, and the
+   other rungs are not checked at all (Jina Reader gave the same zillow city
+   page with an empty title). So still check the title matches the page you
    asked for before quoting it.
 
 Firecrawl is not on the shell ladder: there is no API key on the machine, only
@@ -167,8 +200,16 @@ Names and paths only. Never print or copy a key.
    server, including ones that predate this chain. This is a pre-existing
    listing bug; `opencode debug config` does resolve them. Not verified live.
 6.4. Cursor and agy: configured but not verified live. Codex lists `exa` as
-   "Not logged in" (`parallel-search` "Unsupported", `jina` "Unknown"); a live
-   `codex exec` call to `web_search_exa` has not been made yet.
+   "Not logged in" (`parallel-search` "Unsupported", `jina` "Unknown"). That is
+   cosmetic: Exa publishes OAuth protected-resource metadata
+   (`https://mcp.exa.ai/.well-known/oauth-protected-resource`, optional
+   sign-in through `auth.exa.ai`), so Codex reports a missing token, but the
+   keyless endpoint answers. On 2026-10-11 Codex 0.162.1's own MCP client
+   (`codex app-server`, `mcpServerStatus/list`) connected to `exa` with no
+   login and listed `web_fetch_exa` and `web_search_exa`. A model-driven
+   `codex exec` tool call was not made: the Codex 5-hour pool was exhausted.
+   No config change is needed; `codex mcp login exa` would only attach an Exa
+   account.
 6.5. Hermes: needs a restart to load `JINA_API_KEY` from `~/.hermes/.env`. Its
    `jina_reader` plugin sends no key, so only `recover_page.py` uses it.
 6.6. reddit.com refused both WebFetch and Firecrawl scrape on 2026-10-09. Try
@@ -176,9 +217,11 @@ Names and paths only. Never print or copy a key.
 6.7. Exa's keyless tier rate-limits (twice on 2026-10-11). Its notice arrives
    as normal content; `web-get` treats it as a failed rung, and an MCP client
    should do the same and move on.
-6.8. The Wayback rung can be slow (54 s for one dewiki page at load 18 on
-   2026-10-11, over the 45 s default). Retry it with `--only wayback
-   --timeout 120` before pausing on an archive-only page.
+6.8. The Wayback rung can be slow (54 s, then 57 s, for one dewiki page on
+   2026-10-11, over the 45 s HTTP default), so it has its own 120 s budget
+   (`--wayback-timeout`, `$WEB_GET_WAYBACK_TIMEOUT`; 2.4). If it still times
+   out on an archive-only page, retry with `--only wayback --wayback-timeout
+   300` before pausing.
 
 ## 7. Updating this file
 
