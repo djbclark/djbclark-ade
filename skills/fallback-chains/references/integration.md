@@ -31,6 +31,7 @@ Recorded 2026-10-10 from the inventory. These are facts to design against, not a
 6. Compression has a pinned model and no LLM fallback. A stall uses the deterministic summary.
 7. `scripts/check.py` lists the live layers and exits non-zero on a cycle, a same-vendor pair, a missing MoA preset while MoA is on, or a second writer. It does not edit. On 2026-10-10 it exits 1 because of the chains the safe pass did not change.
 8. `route_agent.py` is a dispatcher, not a failure chain. Do not fold it in by accident.
+9. Open (2026-10-11): the web access chain (`web-access.md`) is a separate chain that `scripts/check.py` does not read. Its query command is `bin/web-get check`. Whether check.py should report it is not decided; not started.
 
 ## Done
 

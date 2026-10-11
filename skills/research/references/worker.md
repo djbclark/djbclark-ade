@@ -41,10 +41,19 @@ report.
 
 ## No search, no work
 
-If your web search or page-fetch tool is missing, denied or errors, **stop at
-once**: write `BLOCKED: no web search: <exact error>` as your report and
-return. Do not log rows, write notes or answer from memory, and do not retry
-more than once. The lead fixes the provider and re-dispatches you.
+If you have no working search or fetch tool at all (the tool is missing or
+denied, or every call to it errors), **stop at once**: write `BLOCKED: no web
+search: <exact error>` as your report and return. Do not log rows, write notes
+or answer from memory, and do not retry more than once. The lead fixes the
+provider and re-dispatches you.
+
+An error on one page or one query is not that case: walk the ladder before
+giving up (your
+other search/fetch tools, then `~/src/djbclark-ade/bin/web-get search|fetch`
+if you have a shell; `fallback-chains/references/web-access.md`). If a source
+the slice needs still fails on every rung (`web-get` exit 5), stop with
+`BLOCKED: web access: <url or query>: <each rung's error>` instead of writing
+findings without it (operator rule, 2026-10-11).
 
 ## How to search
 

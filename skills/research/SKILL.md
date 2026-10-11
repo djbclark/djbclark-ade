@@ -163,7 +163,8 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
 9. Workers do not spawn workers.
 10. No live web search, no research: a failed search or fetch path stops the
     run (step P). Never substitute recall, training data or an earlier
-    answer for a search that could not run.
+    answer for a search that could not run. On this machine one needed page
+    failing the whole ladder pauses its slice too ("On this machine" item 7).
 
 ## On this machine (skip elsewhere)
 
@@ -259,7 +260,21 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    1b; an Agent-tool sub-agent gets the brief plus the item 2 footer).
    Then `python3 -I scripts/research_check.py probe <each report file>`:
    exit 0 means every probed route can search, exit 1 lists the ones that
-   cannot. The lead's own probe uses its own tools (WebSearch/WebFetch,
-   Firecrawl, `paper-search`; try the others before declaring it dead).
+   cannot. The lead's own probe uses its own tools and walks the full web
+   ladder before declaring a route dead: the client's MCP rungs (Firecrawl,
+   `exa`, `parallel-search`, `jina`), built-in WebSearch/WebFetch, Composio,
+   then `~/src/djbclark-ade/bin/web-get search|fetch` (Crawl4AI and the
+   archives are its last rungs; `paper-search` for papers). The ladder per
+   client is `fallback-chains/references/web-access.md`.
    Fix a harness failure at the root in `~/src/djbclark-ade` (code, not only
    docs); do not just route around it, then say what you changed.
+7. **Pause on missing sources (operator, 2026-10-11).** A page or search a
+   slice needs that fails on every rung (`web-get` exit 5) is not a Gap to
+   write around: the slice stops with `BLOCKED: web access: <url or query>:
+   <each rung's error>` (the `acp-dispatch` exit 4 convention) instead of
+   writing findings without the source. The lead then stops dispatching
+   dependent slices, checkpoints the run folder, reports the failed URLs and
+   queries to the operator, and waits. **No synthesis, writer or gate step
+   runs while a needed source is missing**; resume the same slice once the
+   provider recovers. A page that a later rung did return is fine; note the
+   rung. Detail: `web-access.md` section 1.

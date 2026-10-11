@@ -13,7 +13,9 @@ assigned ID range, same schema as `references/worker.md`.
 
 0. Same rule as workers: if web search or page fetch is missing or errors,
    stop and write `BLOCKED: no web search: <exact error>`; never counter from
-   memory.
+   memory. A needed page that fails every rung of the web ladder
+   (`fallback-chains/references/web-access.md`, `web-get` exit 5) is the
+   same stop: `BLOCKED: web access: <url>: <errors>` (2026-10-11).
 1. For each hypothesis and each high-impact claim, search for evidence that
    would contradict it, limit its scope, or show it failed to replicate:
    failures, retractions, corrections, critiques, replications, deprecations,

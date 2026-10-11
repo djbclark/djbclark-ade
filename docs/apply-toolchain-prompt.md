@@ -1,6 +1,7 @@
 # Prompt: apply the djbclark / frdminc / Graft development toolchain to a repo
 
-Version 5.1 (2026-10-09). Supersedes Version 5 (2026-10-01, which superseded
+Version 5.2 (2026-10-11). Supersedes 5.1 (2026-10-09) and Version 5
+(2026-10-01, which superseded
 `CLAUDE_APPLY_DJBCLARK_TOOLING_Version4.md`). Lived at
 `site-djbclark/research/apply-dev-toolchain/CLAUDE_APPLY_DJBCLARK_TOOLING.md`
 until 2026-10-09; that path now points here.
@@ -70,6 +71,16 @@ mistyped or multi-line FIND silently changes nothing; it lost an edit on
 2026-10-09. `srgn` replaces it in §1.2, §1.3 and §8: it matches across lines
 as typed and with `--fail-none` exits 1 when nothing matched. The file also
 moved from `site-djbclark/research/apply-dev-toolchain/` to `djbclark-ade/docs/`.
+
+What changed in 5.2 (2026-10-11): a new "Agent web access" table in §1.3
+adds web search and fetch for agents with a failover ladder: the keyless Exa
+and Parallel Search remote MCP servers, Jina (remote MCP and Reader; the key
+lives in the user's secret store, never in a committed file), Crawl4AI for
+pages that need JavaScript (added to §1.2, with the third-party
+`mcp-crawl4ai` wrapper as its MCP server), and `web-get`, a shell entry
+point that walks the providers in turn. With it comes a rule for agents: when
+the whole ladder fails for a page or search the task needs, pause that work
+and report, never continue without the source.
 
 ---
 
@@ -355,7 +366,8 @@ code handles. Other agents: `npx skills add typesafe-ai/skills --skill
 typesafe-ai` (use one install method, not both).
 
 **Graft's own wiring** (hooks, statusline and MCP server) is installed by
-`graft init` in §6, not here.
+`graft init` in §6, not here. The web-access MCP servers (Exa, Parallel
+Search, Jina, Crawl4AI) are installed with the §1.3 "Agent web access" table.
 
 **Explain each one to the user.** In the interactive phase (§12, step 2)
 walk through the installed set one item at a time: what it is, the command
@@ -405,6 +417,11 @@ ls "/Applications/Google Chrome.app" >/dev/null 2>&1 || brew install --cask goog
 # Python CLIs installed as isolated global tools:
 uv tool install ansible-lint
 uv tool install pyinilint
+# Crawl4AI (JavaScript-rendering page fetch for agents, §1.3 "Agent web access");
+# pinned Python because 0.9.4 supports up to 3.13; crawl4ai-setup downloads
+# Playwright browsers (~0.6 GB in ~/Library/Caches/ms-playwright):
+uv tool install --python 3.13 'crawl4ai==0.9.4'
+crawl4ai-setup
 
 # Graft (agent context graph); confirm the package name against the upstream README first (§1.3):
 npm install -g @nanonets/graft
@@ -510,6 +527,26 @@ idempotent, and has `--dry-run`, `--agents claude`, `--no-hooks` and
 is not used. The hosted side (`graft trail ...`, `graft init --trail`, and the
 Graft GitHub App) sends code to a third party and is **opt-in only** (§12).
 `graft uninstall` (dry-run without `-y`) is the inverse of `init`.
+
+**Agent web access** (search and page fetch for every agent; added 2026-10-11)
+
+| Tool | Website | Install | What it does |
+|---|---|---|---|
+| Exa MCP (remote) | https://exa.ai/ | `claude mcp add --transport http --scope user exa https://mcp.exa.ai/mcp`; the same URL in other clients' MCP configs. No key | Web search (`web_search_exa`) and page fetch (`web_fetch_exa`) |
+| Parallel Search MCP (remote) | https://parallel.ai/ | `claude mcp add --transport http --scope user parallel-search https://search.parallel.ai/mcp`. No key | Web search by objective plus queries (`web_search`) and page fetch (`web_fetch`) |
+| Jina MCP (remote) and Reader | https://jina.ai/ | MCP at `https://mcp.jina.ai/v1` with header `Authorization: Bearer $JINA_API_KEY`. Keep the key in the user's secret store (on djbclark's machine `sudo-secretspec`, entry `JINA_API_KEY`) and pass it through the client's headers helper where it has one (Claude Code `headersHelper`, Codex `http_headers_helper`); a client without one needs the literal header in a mode-0600 config outside git. Reader `https://r.jina.ai/<url>` also works keyless at a lower rate limit; Search `https://s.jina.ai/?q=` needs the key | `read_url`, `search_web`, `search_arxiv`, `extract_pdf` and more; Reader turns any URL into markdown |
+| Crawl4AI | https://github.com/unclecode/crawl4ai | `uv tool install --python 3.13 'crawl4ai==0.9.4'`, then `crawl4ai-setup` (§1.2); `crawl4ai-doctor` checks it | Local headless-browser crawl: `crwl <url> -o markdown` renders JavaScript-heavy pages that plain fetches return empty. The package ships no MCP server; use the wrapper in the next row. A cold start under load takes 30-120 s |
+| Crawl4AI MCP (`mcp-crawl4ai`, third-party wrapper) | https://pypi.org/project/mcp-crawl4ai/ | `uv tool install --python 3.13 'mcp-crawl4ai==0.3.1' --with crawl4ai==0.9.4 --with fastmcp==4.0.10 --with mcp==2.2.0 --with playwright==1.63.0`, then register the stdio command `~/.local/bin/crawl4ai-mcp` as server `crawl4ai` (`claude mcp add --scope user crawl4ai -- ~/.local/bin/crawl4ai-mcp`; Codex `startup_timeout_sec = 120`, `tool_timeout_sec = 180`) | MCP tools `scrape {targets}` (a URL or a list; not `url`), `crawl`; reuses the Playwright Chromium; first start about 26 s |
+| `web-get` | https://github.com/djbclark/djbclark-ade (`bin/web-get`) | Symlink it into `~/.local/bin` (`ln -s ~/src/djbclark-ade/bin/web-get ~/.local/bin/web-get`, as for `acp-dispatch`) so the bare name resolves | Shell failover ladder: `web-get search '<query>'` (exa, parallel, jina-mcp, jina-search, composio), `web-get fetch '<url>'` (exa, parallel, jina-reader, crawl4ai, wayback), `web-get check` (which providers work now). Wall-clock timeouts per attempt (45 s; crawl4ai 150 s). Exit 5 means every provider failed |
+
+Register the MCP servers in user scope (back up `~/.claude.json` and the other
+clients' configs first, §15), never in a committed `.mcp.json` when a key is
+involved. The failover order per client, and the pause rule, are in
+`djbclark-ade/skills/fallback-chains/references/web-access.md`. Put the rule
+into the target's `AGENTS.md` (§8): an agent tries every rung; when the whole
+ladder fails for a page or search the task needs, it pauses that work,
+reports the failed URLs or queries with each error, and waits. It never
+continues without the source or fills it in from memory.
 
 **GitHub-side services** (accounts and app installs happen in the interactive phase)
 
