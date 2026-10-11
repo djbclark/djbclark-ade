@@ -21,6 +21,8 @@ python3 -I $S/session-find.py <keyword>...       # running sessions, every TUI, 
 python3 -I $S/session-history.py <keyword>...    # every session of every agent, live or ended, full text
 python3 -I $S/fleet.py [list|show <id>|ended|conflicts --cwd DIR]   # the fleet itself
 python3 -I $S/launch.py --agent A --cwd DIR --model M [--baton] -p "..."   # start a session (ACP-first)
+python3 -I $S/launch.py wait <id> [--timeout S]  # block until THAT launch's turn ends
+python3 -I $S/relay.py <id|name> "<one line>"    # type into a running session's pane (SendMessage fallback)
 ```
 
 Sibling skills: `helm` (answer every waiting session from one window; `/helm-all`
@@ -101,7 +103,11 @@ the Tier 2 handoff (a few thousand tokens); a clean session reads only its brief
 
 a. **Running and not finished → message it.** Read its latest prompt line first;
    if it is mid-task on something else, say so to the operator instead of
-   interrupting. Reach by the table in section 6.
+   interrupting. Reach by the table in section 6. **SendMessage fails** ("No agent
+   named … is reachable": a workflow sub-agent's `ListAgents` often lists only its
+   teammates, 2026-10-11) → `relay.py <id> "<one line>"`, which types it into the
+   session's own pane; a working Claude queues it for its next tool round. Put a
+   long brief in a file and relay one line naming its absolute path.
 b. **Running but finished** (`finished: /handoff` or `/quit`: its last prompt was a
    handoff or it is sitting at "Bye!") → **never continue there** (operator rule,
    2026-10-08: "it ends with a /handoff; a new session should be opened in its CWD
@@ -211,6 +217,12 @@ get `herdr agent start --kind` plus `agent prompt` — the fragile way; say so.
    sends `/exit`, marks the launch closed and closes its herdr tab (or pane), or its Orca
    terminal (`orca terminal close`, never the caller's own), so tabs do not accumulate. `helm.py wait --auto-audit` does both without asking:
    audit when a launch goes `done`, close once the audited result has been shown.
+   **A test or trial launch you drive yourself: `--mark <label>`** (or
+   `SESSION_FINDER_MARK=<label>` for a whole script). The mark is recorded and
+   inherited by every later turn; `launch.py audit` refuses it (`--force` to
+   override), so the operator's standing auto-audit cannot take it over (hcom
+   trial, 2026-10-11), and `fleet.sessions(include_marked=False)` leaves it out.
+   You audit and close it.
 3. Always `--model`. Default `--timeout` is four hours per turn (an hour cut a
    real deploy short); `--perm scoped:<paths>` for review-style gating, `--perm
    ask` to answer permissions in the pane (on claude add `--set mode=default`,
@@ -218,18 +230,37 @@ get `herdr agent start --kind` plus `agent prompt` — the fragile way; say so.
    claim owns. On herdr 0.9.1 `herdr agent prompt` does not reach a session that
    reported itself (Claude Code's own hook owns the pane), so text goes through
    the inbox (`launch.py reply`) or `herdr pane run`, never `agent prompt`.
-4. Everything about a launch lives under `~/.local/state/session-finder/launch-<id>/`
+4. **Next turns and waiting** (2026-10-11 fixes). `launch.py reply <id>` keeps
+   the original host (`--host none` stays detached), mode (headless stays
+   acp-dispatch) and mark unless you pass them. It is **refused** when `<id>` was
+   already continued (`superseded_by`; the message names the newest turn to reply
+   to) or another open launch holds its ACP session: two `session/load`s of one
+   session are the shared-transcript case section 4 forbids. `reply` and `audit`
+   check and start under one lock. `launch.py wait <id> [--timeout S] [--json]`
+   blocks until that launch's turn ends, including a prompt still queued in its
+   inbox, and follows `superseded_by` to the newest turn (exit 0 ended, 3 timed
+   out). Use it instead of `helm.py wait`, which returns the first fresh item of
+   any session. A detached interactive launch (`--host none`) now stays alive
+   between turns (it reads a FIFO, so stdin never hits EOF), so replies go to its
+   inbox in the same process. `--dry-run` writes nothing and touches no pane; it
+   prints the record, the command and the runner script.
+   Claude session ids: over ACP, claude-agent-acp picks the id, logs it as
+   `new_session` and passes it to Claude as `--session-id`, so the logged id is the
+   exact conversation (`claude --resume <it>` or `launch.py reply`). A headless
+   Claude launch also seeds `acp-run --session-id` (`session_seed`), the id
+   acp-run's `claude -p` fallback runs as after an ACP handshake hang.
+5. Everything about a launch lives under `~/.local/state/session-finder/launch-<id>/`
    (brief, acp log, out, err, runner, inbox; for a headless turn also the
    acp-dispatch brief copy, report, `.done` and `jobs/` record) and
    `launches.jsonl`; `launch.py list` shows state.
-5. Exit 0 is not success: read the `done` text and the diff, as for any delegation.
+6. Exit 0 is not success: read the `done` text and the diff, as for any delegation.
 
 ## 6. Reach each agent
 
 | Agent / host | Running session | Ended session |
 |---|---|---|
-| claude (TUI) | `SendMessage({to: "<name>"})`; read its latest prompt line first. Finished (`/handoff`) → rung 3b, never SendMessage | `claude --resume <id>` (rung 3d) or `launch.py --baton` |
-| any ACP launch (`host acp`, id `YYYYMMDD-…`) | `launch.py reply <id> "<text>"` | `launch.py list`; its log under `~/.local/state/session-finder/` |
+| claude (TUI) | `SendMessage({to: "<name>"})`; read its latest prompt line first. Not in your `ListAgents`, or no messaging socket (`fleet.py` then says so in `reach:`) → `relay.py <id> "<one line>"` (keys into its herdr/Orca/tmux pane; queued while it works; refused on a draft or an open question). Finished (`/handoff`) → rung 3b, never SendMessage | `claude --resume <id>` (rung 3d) or `launch.py --baton` |
+| any ACP launch (`host acp`, id `YYYYMMDD-…`) | `launch.py reply <id> "<text>"`, then `launch.py wait <id>` | `launch.py list`; its log under `~/.local/state/session-finder/` |
 | hermes (Telegram/desktop chat, `hermes-gw`) | `ask_hermes` (MCP) to prompt it; `messages_send` with `target="telegram:<chat>[:<thread>]"` posts as Hermes; approvals: `permissions_list_open` / `permissions_respond` | `hermes --resume <id>` |
 | hermes (CLI in a pane) | `helm.py send <pane> "<text>"` | same |
 | muse | `muse session-message send --target <uuid|name>`, body on stdin | `muse resume <id>` |

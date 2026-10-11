@@ -44,6 +44,11 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
 5. **Timeouts that cancel the turn** (`session/cancel`), and a bounded handshake
    with retries (`--handshake-tries`), falling back to `claude -p` for the
    `claude` agent when its ACP session never starts (`--no-fallback` to disable).
+   The fallback runs as a known conversation (`claude -p --session-id`: the
+   `--session-id UUID` you pass, else a fresh one) and logs it as `new_session`,
+   so a later `--resume` reaches exactly that conversation. Over ACP,
+   claude-agent-acp chooses the id and gives it to Claude as `--session-id`, so
+   the logged `new_session` id is already Claude's own.
    `--handshake-timeout` (env `ACP_RUN_HANDSHAKE_TIMEOUT`) bounds `initialize`
    and `session/new` each: 40 s by default, 90 s for `claude`, whose
    `session/new` takes 13 s on an idle machine and 17-24 s under heavy load.

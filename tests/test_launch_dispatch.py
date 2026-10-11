@@ -84,11 +84,15 @@ class TestLaunchDispatch(unittest.TestCase):
         self.assertNotIn(str(DISPATCH), cmd)
         self.assertTrue(d.get("interactive"))
         self.assertNotIn("dispatch", d)
-        self.assertNotIn("Delivery contract", Path(d["brief"]).read_text())
+        self.assertNotIn("Delivery contract", " ".join(cmd))
+        self.assertFalse(Path(d["brief"]).exists(), "a dry run writes nothing (hcom trial 6d)")
 
     def test_dispatch_dry_run_of_the_composed_command_appends_the_footer(self) -> None:
         """The command launch.py composes is accepted by acp-dispatch and yields a footer-bearing brief."""
         d = self.launch("--model", "m1", "--no-interactive", "-p", "fix it")
+        # launch.py's dry run writes nothing (hcom trial 6d), so lay down the brief a real start would write
+        Path(d["brief"]).parent.mkdir(parents=True)
+        _ = Path(d["brief"]).write_text("fix it")
         cmd: list[str] = [sys.executable, *d["acp_cmd"], "--dry-run"]
         r = subprocess.run(cmd, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)

@@ -362,9 +362,32 @@ def _acp_pane_of(pid):
     return None
 
 
-def _claude_sessions(agents_by_sid, used, anc, launch_panes=None):
+RELAY = 'relay.py {id} "<text>" (types it into its pane; queued if it is working)'
+
+
+def claude_reach(d, sid):
+    """How to message a running Claude TUI. SendMessage needs the session's messaging socket (the
+    registry's messagingSocketPath) and a caller whose ListAgents lists it: a workflow sub-agent's often
+    does not (2026-10-11, q-shizuku relay), so the pane relay is named as the fallback."""
+    name = d.get("name") or sid[:8]
+    sock = d.get("messagingSocketPath")
+    if sock and os.path.exists(sock):
+        return f"SendMessage to {name}; not in your ListAgents: " + RELAY.format(id=sid[:8])
+    return RELAY.format(id=sid[:8]) + " (no messaging socket: SendMessage cannot reach it)"
+
+
+def _merge_inner(launch, d, sid, pid):
+    """The Claude Code that claude-agent-acp runs inside one of our ACP launches: one session, not two."""
+    launch["sid"], launch["transcript"], launch["pid"] = sid, str(transcript(sid) or ""), pid
+    launch["underlying"] = {"name": d.get("name") or "", "status": REG_STATUS.get(d.get("status"), "unknown")}
+    if launch["status"] == "working" and REG_STATUS.get(d.get("status")) == "blocked":
+        launch["status"] = "blocked"    # e.g. an AskUserQuestion inside the ACP session
+
+
+def _claude_sessions(agents_by_sid, used, anc, launch_panes=None, launch_sids=None):
     me = os.environ.get("CLAUDE_CODE_SESSION_ID")
     launch_panes = launch_panes or {}
+    launch_sids = launch_sids or {}
     out = []
     for f in sorted((CLAUDE / "sessions").glob("*.json")):
         try:
@@ -376,19 +399,19 @@ def _claude_sessions(agents_by_sid, used, anc, launch_panes=None):
             continue
         s = _rec(id=sid[:8], agent="claude", sid=sid, name=d.get("name") or "", cwd=d.get("cwd") or "",
                  status=REG_STATUS.get(d.get("status"), "unknown"), self=(pid in anc or sid == me), pid=pid,
-                 reach=f"SendMessage to {d.get('name') or sid[:8]}")
+                 reach=claude_reach(d, sid))
+        if sid in launch_sids:
+            # a launch's ACP session id is Claude's own id (claude-agent-acp passes it as --session-id), so a
+            # detached (--host none) launch, which has no pane to match on, is still recognised
+            _merge_inner(launch_sids[sid], d, sid, pid)
+            continue
         a = agents_by_sid.get(sid)
         env = _where.env_of(pid) if (_where and not a) else {}
         pane = a["pane_id"] if a else env.get("HERDR_PANE_ID")   # the sdk-ts entrypoint has no herdr hook: use its env
         if not pane and not a and launch_panes:
             pane = _acp_pane_of(pid)   # claude-agent-acp scrubs the env; the acp-run ancestor still has the pane id
         if pane in launch_panes:
-            # the Claude Code that claude-agent-acp runs inside one of our ACP launches: one session, not two
-            launch = launch_panes[pane]
-            launch["sid"], launch["transcript"], launch["pid"] = sid, str(transcript(sid) or ""), pid
-            launch["underlying"] = {"name": d.get("name") or "", "status": REG_STATUS.get(d.get("status"), "unknown")}
-            if launch["status"] == "working" and REG_STATUS.get(d.get("status")) == "blocked":
-                launch["status"] = "blocked"    # e.g. an AskUserQuestion inside the ACP session
+            _merge_inner(launch_panes[pane], d, sid, pid)
             continue
         if a:
             used.add(a["pane_id"])
@@ -610,9 +633,10 @@ def launch_state(d):
                 cur.append((data.get("content") or {}).get("text") or "")
             elif k == "new_session" and data.get("sessionId"):
                 d["acp_session"] = data["sessionId"]
-            elif k == "load_session":
+            elif k in ("load_session", "resume_session"):
                 d["acp_session"] = data.get("sessionId") or d.get("resumed") or d.get("acp_session")
                 d["load_session"] = True   # it loaded once, so it can load again
+                cur = []   # acp-run logs the replayed history before this record: not this launch's text
             elif k == "initialize":
                 d["load_session"] = bool((data.get("agentCapabilities") or {}).get("loadSession"))
             elif k == "turn":
@@ -666,6 +690,7 @@ def _launched(used_panes):
         s = _rec(id=d["id"], agent=d.get("agent", "?"), host="acp", sid=d.get("acp_session") or d["id"], name=d.get("name", ""),
                  title=d.get("name") or clip(d.get("prompt_head", ""), 60), cwd=d.get("cwd", ""), status=status,
                  launch={**d, "final": clip(final, 600), "result": result, "alive": result is None}, pid=d.get("pid"),
+                 mark=d.get("mark"),
                  reach=(f"launch.py reply {d['id']} \"<text>\" (next turn in the live ACP session, via its inbox)"
                         if alive_interactive else f"launch.py reply {d['id']} \"<text>\" (new ACP turn, same cwd and brief)"))
         if host.get("kind") == "herdr" and host.get("pane"):
@@ -689,7 +714,9 @@ def _launched(used_panes):
     return out
 
 
-def sessions(include_shell=False):
+def sessions(include_shell=False, include_marked=True):
+    """Every running session. include_marked=False leaves out launches started with `launch.py --mark`
+    (test/trial launches their starter drives; helm should ignore them, hcom trial 6g)."""
     anc = ancestors()
     agents = herdr_json("agent", "list").get("agents") or []
     panes = herdr_json("pane", "list").get("panes") or []
@@ -697,7 +724,8 @@ def sessions(include_shell=False):
     used = set()
     launched = _launched(used)
     launch_panes = {s["chan"][1]: s for s in launched if s.get("chan") and s["chan"][0] == "herdr"}
-    out = _claude_sessions(by_sid, used, anc, launch_panes)
+    launch_sids = {s["launch"]["acp_session"]: s for s in launched if (s.get("launch") or {}).get("acp_session")}
+    out = _claude_sessions(by_sid, used, anc, launch_panes, launch_sids)
     out += _other_herdr(agents, used)
     out += launched
     tuis, shells = _pane_only(panes, used)
@@ -707,6 +735,8 @@ def sessions(include_shell=False):
     out += _hermes_gateway()
     if include_shell:
         out += shells
+    if not include_marked:
+        out = [s for s in out if not s.get("mark")]
     table = proc_table()
     for s in out:
         mark_busy(s, table)
@@ -949,7 +979,7 @@ def ended_open(days=14, live=None):
 
 # ---- conflicts: who else works where I am about to work --------------------------------------
 
-BIGTEAM = Path.home() / ".local/state/bigteam"
+BIGTEAM = Path(os.environ.get("BIGTEAM_STATE") or Path.home() / ".local/state/bigteam")   # env: tests
 CLAIM_LIVE = 6 * 3600
 
 
@@ -1044,6 +1074,8 @@ def render(s):
         head += "  (this session)"
     if s["finished"]:
         head += f"  FINISHED ({s['finished']})"
+    if s.get("mark"):
+        head += f"  mark={s['mark']}"
     lines = [head]
     if s.get("busy"):
         lines.append(f"    busy: {len(s['busy'])} child process(es) in flight: {'; '.join(s['busy'][:3])}")

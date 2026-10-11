@@ -11,6 +11,7 @@
             [--no-fallback] [--prompt-retries N] [--max-load L] [--load-wait S]
             [--wrapup-grace S [--wrapup TEXT]]
             [-i | --interactive [--inbox DIR] [--show-thinking]] [--resume ID]
+            [--session-id UUID]
     acp-run --list            agents and the command each one runs
     acp-run <agent> --info    initialize + session/new only; print modes,
                               config options (models), auth methods and
@@ -99,6 +100,13 @@ HERDR_PANE_ID/HERDR_ENV, so its own herdr hooks do not report the pane too.
 --resume ID reopens an ACP session with session/load (history replayed to the
 log only) or session/resume, whichever the agent advertises; exit 2 if it
 advertises neither.
+--session-id UUID (claude): the conversation id the claude CLI runs as when
+acp-run falls back to it after an ACP handshake hang (`claude -p
+--session-id`); without it the fallback picks a fresh UUID. Either way the
+log gets a new_session record with that id (via "claude-cli"), so a later
+--resume lands in exactly that conversation. Over ACP claude-agent-acp picks
+the id itself and hands it to Claude as its --session-id, so the new_session
+record is already Claude's own id.
 
 Exit codes: 0 end_turn with some output; 1 other stop reason, agent error,
 an empty reply (no text, no tool calls; or no text under --perm deny or after
@@ -122,6 +130,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -789,15 +798,19 @@ def stderr_tail(path, n=2000):
         return ""
 
 
-def fallback_cli(a) -> int:
-    """Headless CLI when ACP handshake hangs (claude-agent-acp session/new)."""
+def fallback_cli(a, client=None) -> int:
+    """Headless CLI when ACP handshake hangs (claude-agent-acp session/new). It runs as a known
+    conversation id (--session-id, else a fresh UUID), logged as new_session, so it can be resumed."""
     if a.agent != "claude":
         return 1
     model = a.model or "sonnet"
-    cmd = ["claude", "-p", a.prompt_text, "--model", model]
+    sid = getattr(a, "session_id", None) or str(uuid.uuid4())
+    cmd = ["claude", "-p", a.prompt_text, "--model", model, "--session-id", sid]
     if a.perm == "all":
         cmd.append("--dangerously-skip-permissions")
-    print("acp-run: ACP handshake failed; fallback to claude CLI", file=sys.stderr)
+    if client is not None:
+        client.rec("new_session", {"sessionId": sid, "via": "claude-cli"})
+    print(f"acp-run: ACP handshake failed; fallback to claude CLI (session {sid})", file=sys.stderr)
     return subprocess.run(cmd, cwd=str(Path(a.dir).resolve()), check=False).returncode
 
 
@@ -1529,7 +1542,7 @@ async def run(a, log, err, log_path):
                 and a.agent == "claude"
                 and not (a.info or a.interactive or a.resume)
             ):
-                return fallback_cli(a)
+                return fallback_cli(a, client)
             code = 124
         if proc is None:
             pass
@@ -1772,6 +1785,11 @@ def main():
         " claude 90; env ACP_RUN_HANDSHAKE_TIMEOUT)",
     )
     ap.add_argument(
+        "--session-id",
+        metavar="UUID",
+        help="claude: the conversation id the CLI fallback runs as (see above)",
+    )
+    ap.add_argument(
         "--no-fallback",
         action="store_true",
         help="do not fall back to the agent's CLI if ACP handshake hangs",
@@ -1845,6 +1863,13 @@ def main():
         ap.error("--wrapup-grace must be 0 or more")
     if a.wrapup and not a.wrapup_grace:
         ap.error("--wrapup needs --wrapup-grace")
+    if a.session_id is not None:
+        if a.agent != "claude":
+            ap.error("--session-id is for claude only")
+        try:
+            a.session_id = str(uuid.UUID(a.session_id))
+        except ValueError:
+            ap.error("--session-id must be a UUID")
     a.prompt_text = None
     if not a.info:
         if a.prompt_file:

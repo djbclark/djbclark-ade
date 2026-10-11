@@ -2,13 +2,27 @@
 """launch — start an agent session over ACP, hosted where the operator can see it. No model.
 
     launch.py --agent A --cwd DIR (-p TEXT | -f FILE) [--model M] [--name NAME] [--baton [--chain ID|PATH]]
-              [--pane PANE] [--host auto|herdr|orca|none] [--timeout S] [--perm P] [--set K=V]... [--dry-run] [--json]
+              [--pane PANE] [--host auto|herdr|orca|none] [--timeout S] [--perm P] [--set K=V]... [--mark LABEL]
+              [--dry-run] [--json]
     launch.py reply <id> "<text>"     next prompt: into the live session's inbox when it is interactive (acp-run
                                       --interactive keeps the ACP session open), else a new acp-run turn with the
-                                      brief and the last reply as context
-    launch.py audit <id>              send /loose (or the loose-skill text) as the session's next turn
+                                      brief and the last reply as context. Refused when <id> was already continued
+                                      (superseded) or another live launch holds its ACP session. The new turn keeps
+                                      the original host (--host none stays detached), mode and mark.
+    launch.py wait <id> [--timeout S] [--json]
+                                      block until THAT launch's current or queued turn ends (follows superseded_by
+                                      to the newest turn); exit 0 ended, 3 timed out, 1 no such launch
+    launch.py audit <id> [--force]    send /loose (or the loose-skill text) as the session's next turn; a --mark'ed
+                                      launch is refused (its owner audits it; `helm.py wait --auto-audit` skips it)
     launch.py list [--json]           every launch and its state
     launch.py close <id> [--keep-pane] /exit a live session, mark it closed, close its herdr tab or pane, or its Orca terminal
+
+--mark LABEL (or SESSION_FINDER_MARK=LABEL): a test/trial launch its starter drives itself. Recorded on the launch and
+  every later turn; `launch.py audit` refuses it, and fleet.sessions(include_marked=False) leaves it out.
+--dry-run prints the record, the acp-run command and the runner script; it writes nothing and touches no pane.
+Headless Claude launches get a seeded session id (acp-run --session-id, recorded as session_seed): the id the
+  claude CLI runs as if acp-run falls back to it. Over ACP claude-agent-acp picks the id, logs it (new_session),
+  and passes it to Claude as its own --session-id, so the logged id already is the exact conversation.
 
 Route (djbclark 2026-10-08: "use ACP if possible … other methods have proven to be fragile"):
   1. The agent is driven over ACP by acp-run (typed permissions, exit codes, JSONL log). The call runs
@@ -22,9 +36,11 @@ Route (djbclark 2026-10-08: "use ACP if possible … other methods have proven t
   --baton: the brief tells the session to follow the baton skill from the named Tier 1 chain
   (resolved from --chain, else the chain whose workspace is DIR), then do the instruction.
 State: ~/.local/state/session-finder/launches.jsonl and launch-<id>/ (brief, log, out, runner).
-Exit: 0 started, 1 refused or failed, 2 usage.
+Exit: 0 started, 1 refused or failed, 2 usage, 3 `wait` timed out.
 """
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -32,6 +48,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -68,6 +85,16 @@ def acp_interactive():
     return _ACP_I["v"]
 
 
+def acp_session_id_flag():
+    """Does the installed acp-run take --session-id (claude CLI fallback seed, added 2026-10-11)?"""
+    if "s" not in _ACP_I:
+        try:
+            _ACP_I["s"] = "--session-id" in Path(ACP_RUN).read_text(errors="replace")[:8000]
+        except OSError:
+            _ACP_I["s"] = False
+    return _ACP_I["s"]
+
+
 def inbox_send(d, text):
     """Hand TEXT to a live interactive session as its next prompt (no keys, no new process)."""
     inbox = Path(d.get("inbox") or "")
@@ -92,6 +119,67 @@ def record(d):
     os.chmod(STATE, 0o700)
     with fleet.LAUNCHES.open("a") as fh:
         fh.write(json.dumps(d, ensure_ascii=False) + "\n")
+
+
+@contextlib.contextmanager
+def turn_lock(timeout=120):
+    """Serialise the check-then-start of a next turn (reply, audit) across processes, so two callers
+    (helm's auto-audit and an agent's reply, 2026-10-11 hcom trial) cannot both continue one launch."""
+    STATE.mkdir(parents=True, exist_ok=True)
+    os.chmod(STATE, 0o700)
+    with (STATE / ".turn.lock").open("a") as fh:
+        deadline = time.time() + timeout
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.time() > deadline:
+                    die("another reply/audit holds the launch turn lock; try again")
+                time.sleep(0.5)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def newest(lid, by_id):
+    """Follow superseded_by from LID to the newest turn: (that launch, [ids walked])."""
+    walked, d = [lid], by_id.get(lid)
+    while d and d.get("superseded_by") and d["superseded_by"] in by_id and d["superseded_by"] not in walked:
+        walked.append(d["superseded_by"])
+        d = by_id[d["superseded_by"]]
+    return d, walked
+
+
+def session_holders(old, all_launches):
+    """Other launches that are not closed and still hold OLD's ACP session (loaded it, or were loaded
+    into it): starting another session/load of it would put two instances on one transcript."""
+    sess = old.get("acp_session") or old.get("resumed")
+    if not sess:
+        return []
+    out = []
+    for d in all_launches:
+        if d["id"] == old["id"] or d.get("closed"):
+            continue
+        status, _final, result = fleet.launch_state(d)
+        if d.get("pid") and not fleet.alive(d["pid"]):
+            continue    # a detached runner that is gone without writing its exit line
+        if sess in (d.get("acp_session"), d.get("resumed")) and (result is None and d.get("exit") is None):
+            out.append((d["id"], status))
+    return out
+
+
+def inbox_pending(d):
+    """Prompts queued in an interactive launch's inbox that acp-run has not taken yet."""
+    inbox = Path(d.get("inbox") or "")
+    if not d.get("inbox") or not inbox.is_dir():
+        return 0
+    return sum(1 for f in inbox.iterdir() if f.suffix in (".txt", ".md") and not f.name.startswith("."))
+
+
+def default_mark():
+    return os.environ.get("SESSION_FINDER_MARK") or None
 
 
 # ---- chains (for --baton) -------------------------------------------------------------------
@@ -250,15 +338,24 @@ def report(pane, agent, state, lid, name="", message=""):
 # ---- the run ---------------------------------------------------------------------------------
 
 def runner_script(d, acp_cmd, pane=None):
-    """A bash script the host runs: acp-run in the foreground, exit status kept, state reported."""
+    """A bash script the host runs: acp-run in the foreground, exit status kept, state reported.
+
+    A detached interactive launch (--host none) has no terminal: its stdin would be /dev/null, and
+    acp-run --interactive ends the session at stdin EOF, so it got exactly one turn (hcom trial 6c,
+    2026-10-11). It reads a FIFO opened read-write instead: no EOF ever arrives, the inbox feeds the
+    prompts, and /exit (launch.py close) ends it."""
     q = lambda s: "'" + str(s).replace("'", "'\\''") + "'"  # noqa: E731
     lines = ["#!/usr/bin/env bash", "set -o pipefail", f"echo 'launch {d['id']}: {d['agent']} in {d['cwd']} (acp)'"]
     if pane:
         lines.append(f"{q(HERDR)} pane report-agent {q(pane)} --source session-finder --agent {q(d['agent'])} "
                      f"--state working --agent-session-id {q(d['id'])} >/dev/null 2>&1")
+    stdin = f" 0<> {q(d['stdin'])}" if d.get("stdin") else ""
     # PYTHONUNBUFFERED: stdout is a pipe (tee), and the pane must show the agent as it streams
-    lines.append("PYTHONUNBUFFERED=1 " + " ".join(q(c) for c in acp_cmd) + f" 2> >(tee {q(d['err'])} >&2) | tee {q(d['out'])}")
+    lines.append("PYTHONUNBUFFERED=1 " + " ".join(q(c) for c in acp_cmd) + stdin +
+                 f" 2> >(tee {q(d['err'])} >&2) | tee {q(d['out'])}")
     lines.append("rc=${PIPESTATUS[0]}")
+    if d.get("stdin"):
+        lines.append(f"rm -f {q(d['stdin'])}")
     lines.append(f"printf '%s\\n' \"{{\\\"id\\\": \\\"{d['id']}\\\", \\\"exit\\\": $rc, \\\"ended\\\": $(date +%s)}}\" >> {q(fleet.LAUNCHES)}")
     if d.get("claim"):
         lines.append(f"printf 'DONE %s\\n' \"$(date +%Y-%m-%dT%H:%M:%S)\" >> {q(d['claim'])}")
@@ -343,13 +440,18 @@ def start(a, brief_text, parent=None):
          "model": a.model, "parent": parent, "chain": getattr(a, "_chain", None),
          "claim": None if a.dry_run else fleet.write_claim(f"sf-{lid}", f"launch {lid}", c["repo"], a.files or [],
                                                            f"brief: {a.name or ''}")}
+    mark = getattr(a, "mark", None)
+    if mark:
+        d["mark"] = mark
     ldir = STATE / f"launch-{lid}"
-    ldir.mkdir(parents=True, exist_ok=True)
+    if not a.dry_run:          # a dry run writes nothing (hcom trial 6d: it left brief.md/run.sh/inbox behind)
+        ldir.mkdir(parents=True, exist_ok=True)
     d.update(brief=str(ldir / "brief.md"), log=str(ldir / "acp.jsonl"), out=str(ldir / "out.txt"),
              err=str(ldir / "err.txt"), runner=str(ldir / "run.sh"), prompt_head=" ".join(brief_text.split())[:200])
-    Path(d["brief"]).write_text(brief_text)
+    if not a.dry_run:
+        Path(d["brief"]).write_text(brief_text)
 
-    host = a.host
+    host = a.host or "auto"
     if host == "auto":
         host = "orca" if os.environ.get("ORCA_TERMINAL_HANDLE") or os.environ.get("TERM_PROGRAM") == "Orca" else (
             "herdr" if herdr_up() else "none")
@@ -366,7 +468,12 @@ def start(a, brief_text, parent=None):
             acp_cmd += ["--resume", a.resume]   # session/load: the agent replays its own history
             d["resumed"] = a.resume
         d["interactive"], d["inbox"] = True, str(ldir / "inbox")
-        Path(d["inbox"]).mkdir(exist_ok=True)
+        if host == "none":
+            d["stdin"] = str(ldir / "stdin.fifo")    # see runner_script: no terminal, so no stdin EOF either
+        if not a.dry_run:
+            Path(d["inbox"]).mkdir(exist_ok=True)
+            if d.get("stdin"):
+                os.mkfifo(d["stdin"], 0o600)
         acp_cmd += ["--interactive", "--inbox", d["inbox"]]
         if a.model:
             acp_cmd += ["--model", a.model]
@@ -391,6 +498,13 @@ def start(a, brief_text, parent=None):
         if getattr(a, "resume", None):
             acp_cmd += ["--acp-arg=--resume", f"--acp-arg={a.resume}"]
             d["resumed"] = a.resume
+        elif agent == "claude" and acp_session_id_flag():
+            # Seed the conversation id (uam's idea, hcom trial 2026-10-11): a headless turn whose ACP
+            # handshake hangs falls back to `claude -p`, which then runs as exactly this id, and acp-run logs
+            # it as new_session, so reply/resume land in that conversation. Over ACP claude-agent-acp picks
+            # the id itself (and gives it to Claude as --session-id); its new_session record wins.
+            d["session_seed"] = str(uuid.uuid4())
+            acp_cmd += ["--acp-arg=--session-id", f"--acp-arg={d['session_seed']}"]
         for kv in a.set or []:
             acp_cmd += ["--acp-arg=--set", f"--acp-arg={kv}"]
         d.update(dispatch=True, report=str(ldir / f"{lid}-report.md"), done=str(ldir / f"{lid}-report.md.done"),
@@ -402,12 +516,12 @@ def start(a, brief_text, parent=None):
             print(f"launch: pane {a.pane} is gone; opening a new tab instead", file=sys.stderr)
             a.pane = None
         if a.pane:
-            free_pane(a.pane)
+            if not a.dry_run:
+                free_pane(a.pane)      # sends /exit to a finished agent there: never on a dry run
             pane = a.pane
             tab, wid = pane_tab(pane)
         elif a.dry_run:
-            wid, created = pick_workspace(cwd) if not a.dry_run else (os.environ.get("HERDR_WORKSPACE_ID", "?"), False)
-            pane, tab = "(new pane)", "(new tab)"
+            wid, pane, tab = os.environ.get("HERDR_WORKSPACE_ID", "?"), "(new pane)", "(new tab)"
         else:
             wid, created = pick_workspace(cwd)
             pane, tab = (first_pane(wid, d["name"]) if created else None) or new_herdr_pane(cwd, d["name"], wid)
@@ -416,11 +530,13 @@ def start(a, brief_text, parent=None):
         d["host"] = {"kind": "orca"}
     else:
         d["host"] = {"kind": "none"}
-    Path(d["runner"]).write_text(runner_script(d, acp_cmd, None if a.dry_run else pane))
-    os.chmod(d["runner"], 0o700)
+    script = runner_script(d, acp_cmd, None if a.dry_run else pane)
     if a.dry_run:
-        print(json.dumps({**d, "acp_cmd": acp_cmd, "dry_run": "no tab, claim or record was created"}, indent=1))
+        print(json.dumps({**d, "acp_cmd": acp_cmd, "runner_script": script,
+                          "dry_run": "nothing was written: no launch dir, tab, claim or record"}, indent=1))
         return d
+    Path(d["runner"]).write_text(script)
+    os.chmod(d["runner"], 0o700)
     record(d)
 
     if host == "herdr":
@@ -447,6 +563,11 @@ def start_tui(a, d, brief_text, host):
     """No ACP route: an interactive TUI in a herdr pane, prompted by key presses (the fragile way)."""
     if host != "herdr" or a.agent not in HERDR_KINDS:
         die(f"{a.agent} has no ACP route and no herdr kind; run it by hand: see model-routing's headless table")
+    if a.dry_run:     # before any pane is freed or created
+        pane, tab, wid = a.pane or "(new pane)", "(new tab)", os.environ.get("HERDR_WORKSPACE_ID", "?")
+        d["host"] = {"kind": "herdr-tui", "pane": pane, "tab": tab, "workspace": wid}
+        print(json.dumps({**d, "dry_run": "nothing was written: no launch dir, tab, claim or record"}, indent=1))
+        return d
     if a.pane:
         free_pane(a.pane)
         pane, (tab, wid) = a.pane, pane_tab(a.pane)
@@ -454,9 +575,6 @@ def start_tui(a, d, brief_text, host):
         wid, _ = pick_workspace(d["cwd"])
         pane, tab = new_herdr_pane(d["cwd"], d["name"], wid)
     d["host"] = {"kind": "herdr-tui", "pane": pane, "tab": tab, "workspace": wid}
-    if a.dry_run:
-        print(json.dumps(d, indent=1))
-        return d
     record(d)
     args = [HERDR, "agent", "start", f"sf-{d['id'][-8:]}", "--kind", a.agent, "--pane", pane, "--timeout", "60000"]
     rc, out = fleet.run(*args, timeout=70)
@@ -493,10 +611,44 @@ def cmd_start(a):
     return 0
 
 
+HOST_OF = {"herdr": "herdr", "herdr-tui": "herdr", "orca": "orca", "none": "none"}
+
+
 def cmd_reply(a):
-    old = next((d for d in fleet.launches() if d["id"] == a.id), None)
+    # The check (superseded? session held?) and the start are one step under a lock: helm's auto-audit and an
+    # agent's reply both continued launch 7085 into two session/loads of one ACP session (hcom trial 6a).
+    with turn_lock():
+        return _reply(a)
+
+
+def reply_refusal(lid):
+    """Why a next turn of launch LID must not start, or None. Two refusals (hcom trial 6a, 2026-10-11):
+    LID was already continued (superseded_by), or another launch that is still open holds its ACP session."""
+    every = fleet.launches()
+    by_id = {d["id"]: d for d in every}
+    old = by_id.get(lid)
     if not old:
-        die(f"no launch {a.id}")
+        return f"no launch {lid}"
+    if old.get("superseded_by"):
+        last, walked = newest(lid, by_id)
+        st = "closed" if last.get("closed") else fleet.launch_state(last)[0]
+        return (f"{lid} was already continued as {old['superseded_by']} (newest turn {walked[-1]}: {st}); a second "
+                f"turn from {lid} would load its session twice. Reply to the newest turn: "
+                f"launch.py reply {walked[-1]} \"<text>\"")
+    _status, _final, result = fleet.launch_state(old)
+    held = session_holders(old, every)
+    if held and not (old.get("interactive") and result is None):
+        return (f"launch {', '.join(f'{i} ({s})' for i, s in held)} already holds ACP session "
+                f"{(old.get('acp_session') or old.get('resumed') or '')[:8]}; reply to it instead "
+                "(or `launch.py close <id>` it first if it is dead)")
+    return None
+
+
+def _reply(a):
+    refusal = reply_refusal(a.id)
+    if refusal:
+        die(refusal)
+    old = next(d for d in fleet.launches() if d["id"] == a.id)
     status, final, result = fleet.launch_state(old)
     if old.get("interactive") and result is None:
         # the session is alive: queue the prompt in its inbox (acp-run picks it up when idle)
@@ -514,22 +666,32 @@ def cmd_reply(a):
         text = (f"This continues an earlier turn in {old['cwd']}. The brief for that turn was:\n\n{brief}\n\n"
                 f"Your reply to it ended:\n\n{final[-3000:]}\n\nThe operator now says: {a.text}\n\n"
                 "Continue from there; re-read the files you changed before editing them again.")
+    # The next turn runs where the first one did (hcom trial 6b: a --host none launch's reply opened a herdr
+    # tab), in the same mode (interactive or headless) and with the same mark, unless the caller overrides.
+    old_host = (old.get("host") or {}).get("kind")
+    host = a.host or HOST_OF.get(old_host, "auto")
     ns = argparse.Namespace(agent=old["agent"], cwd=old["cwd"], model=a.model or old.get("model"), name=old.get("name"),
-                            resume=resume,
-                            host=a.host, pane=(old.get("host") or {}).get("pane") if a.host == "herdr" or a.host == "auto" else None,
+                            resume=resume, interactive=not old.get("dispatch"),
+                            host=host, pane=(old.get("host") or {}).get("pane") if host in ("herdr", "auto") else None,
                             timeout=a.timeout, perm=a.perm, set=a.set, dry_run=a.dry_run, json=a.json, prompt=None,
-                            prompt_file=None, baton=False, chain=None, files=old.get("files") or [], force=True)
-    if ns.pane:
+                            prompt_file=None, baton=False, chain=None, files=old.get("files") or [], force=True,
+                            mark=getattr(a, "mark", None) or old.get("mark"))
+    if ns.pane and not str(ns.pane).startswith("("):
         ag = fleet.herdr_json("agent", "get", ns.pane).get("agent") or {}
         if (ag.get("agent_status") or "idle") not in ("idle", "done"):
             ns.pane = None   # busy pane: open a new tab instead
+    else:
+        ns.pane = None
     d = start(ns, text, parent=a.id)
     if not a.dry_run:
         record({"id": a.id, "closed": True, "superseded_by": d["id"]})
         if resume:
             record({"id": d["id"], "audited_turn": old.get("audited_turn")} if old.get("audited_turn") is not None else {"id": d["id"]})
+        h = d.get("host") or {}
+        where = {"herdr": f"herdr tab focus {h.get('tab', '?')}", "orca": f"orca terminal {h.get('terminal', '?')}",
+                 "none": "no terminal (detached)"}.get(h.get("kind"), h.get("kind") or "?")
         print(f"started {d['id']} as the next turn of {a.id} ({'session/load of ' + resume[:8] if resume else 'new ACP session'}; "
-              f"focus: herdr tab focus {(d['host'] or {}).get('tab', '?')})")
+              f"focus: {where}; wait: launch.py wait {d['id']})")
     return 0
 
 
@@ -539,26 +701,80 @@ def cmd_list(a):
         status, final, result = fleet.launch_state(d)
         rows.append({"id": d["id"], "agent": d.get("agent"), "cwd": fleet.short(d.get("cwd", "")), "name": d.get("name"),
                      "status": "closed" if d.get("closed") else status, "exit": (result or {}).get("exit", d.get("exit")),
-                     "host": d.get("host"), "last": fleet.clip(final, 160), "ts": d.get("ts")})
+                     "host": d.get("host"), "last": fleet.clip(final, 160), "ts": d.get("ts"), "mark": d.get("mark"),
+                     "superseded_by": d.get("superseded_by")})
     if a.json:
         print(json.dumps(rows, ensure_ascii=False))
     else:
         for r in rows:
-            print(f"[{r['id']}] {r['agent']} {r['status']}  {r['cwd']}  \"{r['name']}\"  exit={r['exit']}")
+            mark = f"  mark={r['mark']}" if r["mark"] else ""
+            nxt = f"  -> {r['superseded_by']}" if r["superseded_by"] else ""
+            print(f"[{r['id']}] {r['agent']} {r['status']}  {r['cwd']}  \"{r['name']}\"  exit={r['exit']}{mark}{nxt}")
             if r["last"]:
                 print(f"    last: {r['last']}")
     return 0 if rows else 1
 
 
+WAIT_POLL = 2
+
+
+def cmd_wait(a):
+    """Block until launch ID's turn ends: the one running now, or the one its inbox still holds. Per-id, unlike
+    `helm.py wait`, which returns the first fresh item of any session (hcom trial 2.2e). Follows superseded_by,
+    so `wait <id>` on a launch that `reply` continued waits for the newest turn."""
+    deadline = time.time() + a.timeout if a.timeout else None
+    need = None          # turn count that ends the wait when input was queued at the start
+    first = True
+    while True:
+        by_id = {d["id"]: d for d in fleet.launches()}
+        if a.id not in by_id:
+            die(f"no launch {a.id}")
+        d, walked = newest(a.id, by_id)
+        status, final, result = fleet.launch_state(d)
+        turns, pending = d.get("turns", 0), inbox_pending(d) if result is None else 0
+        if first:
+            # Input queued but not yet taken (acp-run polls the inbox each second) means the turn we want has not
+            # started; the state is still the previous turn's, so wait for one more turn record.
+            need = turns + 1 if pending else None
+            first = False
+        ended = result is not None or d.get("exit") is not None or bool(d.get("closed"))
+        if ended or (status != "working" and not pending and (need is None or turns >= need)):
+            out = {"id": d["id"], "asked": a.id, "followed": walked[1:], "status": "closed" if d.get("closed") else status,
+                   "alive": not ended, "turns": turns, "exit": (result or {}).get("exit", d.get("exit")),
+                   "final": final, "mark": d.get("mark"),
+                   "next": f"launch.py reply {d['id']} \"<text>\"", "log": d.get("log")}
+            if a.json:
+                print(json.dumps(out, ensure_ascii=False))
+            else:
+                via = f" (via {' -> '.join(walked)})" if len(walked) > 1 else ""
+                print(f"[{d['id']}]{via} {out['status']}{'' if out['alive'] else ' (exited, exit=' + str(out['exit']) + ')'}"
+                      f" after turn {turns}\n{final.strip()}\n  next: {out['next']}")
+            return 0
+        if deadline and time.time() > deadline:
+            if not a.json:
+                print(f"launch: [{d['id']}] still {status} after {a.timeout}s", file=sys.stderr)
+            return 3
+        time.sleep(WAIT_POLL)
+
+
 def cmd_audit(a):
     """Send the loose-ends audit as the session's next turn (operator 2026-10-08: /loose on the
     ACP window when done, then close it)."""
+    with turn_lock():
+        return _audit(a)
+
+
+def _audit(a):
     d = next((x for x in fleet.launches() if x["id"] == a.id), None)
     if not d:
         die(f"no launch {a.id}")
     status, final, result = fleet.launch_state(d)
     if d.get("closed"):
-        die(f"{a.id} is closed")
+        die(f"{a.id} is closed" + (f" (continued as {d['superseded_by']})" if d.get("superseded_by") else ""))
+    if d.get("mark") and not getattr(a, "force", False):
+        # hcom trial 6g: the operator's standing `helm.py wait --auto-audit` audited a trial launch and took it
+        # over. A marked launch belongs to whoever started it: they audit and close it (--force to do it anyway).
+        die(f"{a.id} is marked {d['mark']!r}: its starter drives it; not audited (launch.py audit {a.id} --force)")
     text = AUDIT.get(d.get("agent"), AUDIT_OTHER)
     if d.get("interactive") and result is None:
         if not inbox_send(d, text):
@@ -568,10 +784,13 @@ def cmd_audit(a):
         return 0
     if status == "working":
         die(f"{a.id} is still working")
+    refusal = reply_refusal(a.id)
+    if refusal:
+        die(refusal)
     record({"id": a.id, "audited_turn": d.get("turns", 0), "audit_sent": time.time()})
-    ns = argparse.Namespace(id=a.id, text=text, model=None, host="auto", timeout=1800, perm=None, set=None,
+    ns = argparse.Namespace(id=a.id, text=text, model=None, host=None, timeout=1800, perm=None, set=None,
                             dry_run=False, json=False)
-    return cmd_reply(ns)
+    return _reply(ns)
 
 
 def close_orca_terminal(handle):
@@ -636,9 +855,12 @@ def main():
     ap = argparse.ArgumentParser(prog="launch.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
 
-    def common(p):
+    def common(p, host_default="auto"):
         p.add_argument("--model")
-        p.add_argument("--host", choices=["auto", "herdr", "orca", "none"], default="auto")
+        p.add_argument("--host", choices=["auto", "herdr", "orca", "none"], default=host_default,
+                       help=None if host_default else "default: where the launch being continued ran")
+        p.add_argument("--mark", default=default_mark(),
+                       help="test/trial label (or SESSION_FINDER_MARK): audit refuses it, helm leaves it alone")
         p.add_argument("--timeout", type=int, default=14400,
                        help="seconds per turn (default 4 h: a 1 h limit cut a real deploy short on 2026-10-08)")
         p.add_argument("--perm")
@@ -664,13 +886,19 @@ def main():
     p = sub.add_parser("reply")
     p.add_argument("id")
     p.add_argument("text")
-    common(p)
+    common(p, host_default=None)
     p.set_defaults(fn=cmd_reply)
     p = sub.add_parser("list")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_list)
+    p = sub.add_parser("wait")
+    p.add_argument("id")
+    p.add_argument("--timeout", type=int, default=0, help="seconds (default 0: no limit); exit 3 on timeout")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_wait)
     p = sub.add_parser("audit")
     p.add_argument("id")
+    p.add_argument("--force", action="store_true", help="audit a --mark'ed launch anyway")
     p.set_defaults(fn=cmd_audit)
     p = sub.add_parser("close")
     p.add_argument("id")
