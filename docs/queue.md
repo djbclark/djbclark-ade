@@ -583,3 +583,6 @@ prompt-effort stays shadow. On 2026-10-18 run `bin/jev report --site prompt-effo
 and `bin/jev disagreements --site prompt-effort --limit 20`, then ask djbclark: act
 at 0.9, keep shadow, or off. A self-removing launchd job
 (`com.djbclark.jev-remind-2026-10-18`) pings Hermes that morning.
+Read the numbers knowing: the hook only loads in Claude sessions started after it was
+installed (~09:30 2026-10-11); one 13:36 row has `session=test` (a manual hook test, not a
+real prompt); the first six live calls took 0.5-1.7 s with one `TimeoutError` at 2.55 s.
