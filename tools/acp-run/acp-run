@@ -9,6 +9,7 @@
             [--model M] [--mode M] [--set ID=VALUE]... [--timeout SECS]
             [--log PATH] [--json] [--handshake-tries N] [--handshake-timeout S]
             [--no-fallback] [--prompt-retries N] [--max-load L] [--load-wait S]
+            [--wrapup-grace S [--wrapup TEXT]]
             [-i | --interactive [--inbox DIR] [--show-thinking]] [--resume ID]
     acp-run --list            agents and the command each one runs
     acp-run <agent> --info    initialize + session/new only; print modes,
@@ -66,6 +67,12 @@ average per CPU core is above L; with --load-wait S (env ACP_RUN_LOAD_WAIT)
 it waits up to S seconds for the load to drop first. Off by default.
 --handshake-timeout S (env ACP_RUN_HANDSHAKE_TIMEOUT) bounds initialize and
 session/new each; default 40 s, claude 90 s (HANDSHAKE_TIMEOUT).
+--wrapup-grace S: when --timeout cancels the turn, send the agent one more
+prompt (--wrapup TEXT, default "time is up, write your final report now") and
+wait up to S seconds for it before stopping, so a slice cut off mid-command can
+still write its report. The run still exits 124; the summary line says
+wrapup=<stop reason|timeout|skipped|error>. Off by default; acp-dispatch turns
+it on. Not with --interactive.
 
 --interactive (-i) keeps the session open for more prompts in one process (the
 ACP connection is the session). Agent text streams to stdout as it arrives,
@@ -825,6 +832,8 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
             except (TimeoutError, RequestError, ConnectionError):
                 out["stop_reason"] = "timeout"
             code = 124
+            if getattr(a, "wrapup_grace", 0) > 0 and not a.interactive:
+                await wrapup_turn(a, conn, sess, client, out)
             break
         except (RequestError, ConnectionError) as e:
             if not (can_retry and retryable_error(e)):
@@ -857,6 +866,50 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
         )
         await asyncio.sleep(delay)
     return finished, failure, code
+
+
+WRAPUP_DEFAULT = (
+    "TIME IS UP: acp-run stopped your turn at its --timeout and cancelled any running"
+    " command. This is one last short turn of {grace} seconds. Do not run tests, builds,"
+    " commits or anything else slow. Write your final report now with what you have:"
+    " what is done, what was verified, what is unfinished, and the exact next step."
+)
+
+
+async def wrapup_turn(a, conn, sess, client, out):
+    """After a --timeout cancel, give the agent one last prompt of --wrapup-grace
+    seconds to write its report (2026-10-10: an opencode slice had its work
+    verified, then sat in a git commit whose pre-commit Gradle hook queued on
+    the machine-wide Gradle slot; the cancel at 2400 s left its report at
+    `STATUS: working`). Skipped when the agent did not answer the cancel
+    within 15 s (stop_reason "timeout"), since a prompt sent then would queue
+    behind the turn still running. Records out["wrapup"]; the run still exits
+    124."""
+    if out.get("stop_reason") == "timeout":
+        out["wrapup"] = "skipped: the cancelled turn did not end"
+        client.rec("wrapup", {"status": out["wrapup"]})
+        return
+    text = (a.wrapup or WRAPUP_DEFAULT).replace("{grace}", f"{a.wrapup_grace:g}")
+    client.rec("wrapup", {"grace": a.wrapup_grace, "text": text})
+    client.text = []
+    task = client.prompt_task = asyncio.ensure_future(
+        conn.prompt(
+            session_id=sess.session_id, prompt=[TextContentBlock(type="text", text=text)]
+        )
+    )
+    try:
+        resp = await asyncio.wait_for(asyncio.shield(task), a.wrapup_grace)
+        out["wrapup"] = resp.stop_reason
+    except TimeoutError:
+        await conn.cancel(session_id=sess.session_id)
+        try:
+            await asyncio.wait_for(task, 15)
+        except (TimeoutError, RequestError, ConnectionError):
+            pass
+        out["wrapup"] = "timeout"
+    except (RequestError, ConnectionError) as e:
+        out["wrapup"] = "error: " + error_text(e)[:200]
+    client.rec("wrapup", {"status": out["wrapup"]})
 
 
 def verdict(a, out, finished, failure, code, client):
@@ -1628,6 +1681,8 @@ async def run(a, log, err, log_path):
             bits.append(f"tokens={tok}")
         if cost is not None:
             bits.append(f"cost=${cost:.4f}")
+        if "wrapup" in out:
+            bits.append(f"wrapup={out['wrapup'].split(':')[0]}")
         if "failure" in out:
             bits.append(f"fail={out['failure']}")
         if "error" in out:
@@ -1667,6 +1722,20 @@ def main():
         help="set an ACP session config option (see --info); repeatable",
     )
     ap.add_argument("--timeout", type=float, default=1800)
+    ap.add_argument(
+        "--wrapup-grace",
+        type=float,
+        default=0,
+        metavar="SECS",
+        help="after a --timeout cancel, send one last wrap-up prompt and wait up"
+        " to SECS for it (default 0: off; not with --interactive)",
+    )
+    ap.add_argument(
+        "--wrapup",
+        metavar="TEXT",
+        help="the wrap-up prompt ({grace} is replaced by the seconds); default:"
+        " write your final report now",
+    )
     ap.add_argument(
         "--auth",
         help="ACP auth method id to authenticate with (see --info), overriding"
@@ -1760,6 +1829,10 @@ def main():
         ap.error("--prompt-retries must be 0 or more")
     if a.handshake_timeout is not None and a.handshake_timeout <= 0:
         ap.error("--handshake-timeout must be positive")
+    if a.wrapup_grace < 0:
+        ap.error("--wrapup-grace must be 0 or more")
+    if a.wrapup and not a.wrapup_grace:
+        ap.error("--wrapup needs --wrapup-grace")
     a.prompt_text = None
     if not a.info:
         if a.prompt_file:

@@ -66,6 +66,11 @@ FAKE = textwrap.dedent("""\
       quotes_refusal)
                 printf 'The model answered "Sorry, I cannot fulfill your request" to the first brief.\\nThe second brief fixed that.\\n'; exit 0;;
       timeout)  exit 124;;
+      timeout_wrapup)  # stlib, 2026-10-10: cancelled at --timeout, report written in the wrap-up turn
+                printf 'STATUS: timed out\\nstaged 13 files, tests pass, not committed\\nDONE\\n' > "$report"
+                echo "written: $report"
+                echo "acp-run: agent=opencode stop=cancelled secs=2402.2 tools=109 perm=0+/0- wrapup=end_turn" >&2
+                exit 124;;
       echoargs) echo "$ARGS_SINK" > /dev/null; printf 'STATUS: working\\nDONE\\n' > "$report"; exit 0;;
     esac
     """)
@@ -336,12 +341,62 @@ class TestFailureNote(Base):
             self.assertEqual(r.returncode, want, (mode, r.stdout, r.stderr))
 
     def test_rearm_waiter_outlasts_the_slice_timeout(self):
+        # timeout + wrap-up grace (default 300) + 300
         self.dispatch("--timeout", "3600", name="long")
-        self.assertTrue(self.record("long")["rearm"].startswith("timeout 3900 "), self.record("long")["rearm"])
+        self.assertTrue(self.record("long")["rearm"].startswith("timeout 4200 "), self.record("long")["rearm"])
         self.dispatch("--timeout", "3600", "--wait-timeout", "5000", name="waited")
         self.assertTrue(self.record("waited")["rearm"].startswith("timeout 5000 "))
         self.dispatch(name="default")
-        self.assertTrue(self.record("default")["rearm"].startswith("timeout 2700 "))
+        self.assertTrue(self.record("default")["rearm"].startswith("timeout 3000 "))
+        self.dispatch("--wrapup-grace", "0", name="nograce")
+        self.assertTrue(self.record("nograce")["rearm"].startswith("timeout 2700 "))
+
+
+class TestTimeBudget(Base):
+    """2026-10-10, wedge-grants/stlib: opencode + deepseek-v4-pro had its 13-file change verified at
+    2009 s of 2400, then sat in `git commit` while the pre-commit Gradle hook queued on the
+    machine-wide Gradle slot. It was never told its deadline, and acp-run's cancel ended the run with
+    no chance to write the report, which stayed at `STATUS: working`."""
+
+    def test_brief_states_the_deadline_and_the_wrapup_turn(self):
+        self.dispatch("--timeout", "1800")
+        brief = (self.out / "s1-brief.md").read_text()
+        self.assertIn("## Time budget", brief)
+        self.assertIn("30 minutes after it starts", brief)
+        self.assertIn("before a commit", brief)
+        self.assertIn("one last turn of 300 seconds", brief)
+        self.assertLess(brief.index("## Delivery contract"), brief.index("## Time budget"))
+
+    def test_acp_run_gets_the_wrapup_prompt_naming_the_report(self):
+        self.dispatch()
+        cmd = self.record()["cmd"]
+        self.assertIn("--wrapup-grace 300", cmd)
+        self.assertIn("--wrapup ", cmd)
+        self.assertIn(str(self.out / "s1-report.md"), cmd.split("--wrapup ", 1)[1])
+        self.assertIn("{grace} seconds", cmd, "acp-run fills in the grace")
+        self.assertIn("STATUS: timed out", cmd)
+
+    def test_wrapup_grace_0_turns_it_off(self):
+        self.dispatch("--wrapup-grace", "0")
+        self.assertNotIn("--wrapup", self.record()["cmd"])
+        brief = (self.out / "s1-brief.md").read_text()
+        self.assertIn("## Time budget", brief)
+        self.assertNotIn("one last turn", brief)
+
+    def test_wrapup_report_is_delivered_but_not_a_clean_success(self):
+        r = self.dispatch(mode="timeout_wrapup")
+        self.assertEqual(r.returncode, 1, (r.stdout, r.stderr))
+        rec = self.record()
+        self.assertEqual(rec["status"], "done")
+        self.assertEqual(rec["exit"], 124)
+        text = Path(rec["report"]).read_text()
+        self.assertNotIn("NO-REPORT", text)
+        self.assertTrue(text.startswith("STATUS: timed out"))
+        c = run(["check", str(self.out / "jobs" / "s1.json")])
+        self.assertEqual(c.returncode, 1, c.stdout)
+        self.assertIn("acp-run exit=124 (timed out", c.stdout)
+        w = subprocess.run(["bash", "-c", rec["rearm"]], check=False, capture_output=True, text=True)
+        self.assertEqual(w.returncode, 1, (w.stdout, w.stderr))
 
 
 class TestCheck(Base):

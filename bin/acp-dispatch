@@ -52,6 +52,14 @@ starts "Sorry, I cannot ..." / "I must decline ..." as `FAILED refused` (2026-10
 gemini-pro-agent declined a security slice, the refusal was recovered, given DONE and checked
 `done`), and the note reads `NO-REPORT: refused (<agent>, <model>): <first sentence> ...`.
 
+Time budget (2026-10-10, wedge-grants/stlib): the brief copy ends with a "Time budget" section that
+gives the agent its --timeout in minutes and tells it to write the report before a commit, a push or
+any long command. acp-run gets --wrapup-grace (default 300 s, 0 turns it off) and a wrap-up prompt
+naming the report: when the timeout cancels the turn, the agent gets one last turn to write the report
+with first line `STATUS: timed out` and last line DONE. Such a report classifies `done` with
+`acp-run exit=124 (timed out ...)`, and dispatch and check exit 1, never 0. The rearm waiter allows
+timeout + wrap-up grace + 300 s.
+
 Exit codes (dispatch and check):
     0    report delivered and ends in DONE (dispatch: and acp-run exited 0)
     1    report present but unfinished (no DONE), or delivered with a non-zero acp-run exit
@@ -82,6 +90,30 @@ FOOTER_FILE = HERE.parent / "docs" / "dispatch-footer.md"
 STATE_ROOT = Path(os.environ.get("ACP_DISPATCH_STATE", str(Path.home() / ".local/state/bigteam")))
 DEFAULT_LEAD = "team-lead"
 DEFAULT_TIMEOUT = 2400           # bigteam Step 4 item 5: a tight timeout costs the whole report
+# acp-run --wrapup-grace: after the timeout cancel, one last prompt of this many seconds to write the
+# report (2026-10-10: stlib had its work verified, then hung in a git commit whose pre-commit Gradle hook
+# queued on the machine-wide Gradle slot; the cancel left the report at `STATUS: working`).
+DEFAULT_WRAPUP_GRACE = 300
+# Appended to an ACP slice's brief after the footer; Agent-tool prompts have no acp-run timeout.
+BUDGET_TEXT = """
+## Time budget (acp-dispatch)
+
+acp-run stops this slice {minutes} minutes after it starts and cancels whatever command is running then.
+Write the report as soon as the work is verified, before a commit, a push or any other long command, so
+the report already says what is done if one of them hangs (a pre-commit hook or a build can queue for
+minutes behind another build on this machine). Never start a command whose own timeout runs past the
+deadline; check the clock with `date` before a long one. {wrapup}
+"""
+WRAPUP_BUDGET = ("If time runs out you get one last turn of {grace} seconds to write the report, and no "
+                 "commands then.")
+WRAPUP_TEXT = (
+    "TIME IS UP: acp-run stopped your turn at its {timeout}-second limit and cancelled any running "
+    "command. This is one last turn of {{grace}} seconds. Do not run tests, builds, commits or any other "
+    "command. Write the report to `{report}` now: first line `STATUS: timed out`, then what is done, what "
+    "was verified, what is unfinished (for example: staged but not committed) and the exact next step; "
+    "last line `DONE`. Do not touch `{done}`: acp-dispatch does that once it has recorded the timeout. "
+    "Your reply is only `written: {report}`."
+)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # Agents whose ACP server has no model option (zcode-acp-server: "unsupported config option or switch failed: model").
 NO_MODEL_AGENTS = {"zcode"}
@@ -97,6 +129,7 @@ INFO_TIMEOUT = 150               # claude's session/new alone takes 13-24 s (acp
 # acp-run's DEFAULT_SET), so --info's list may not be the one acp-run matches against.
 MODEL_CHECK_SKIP = {"cline"}
 NO_REPORT_PREFIX = "NO-REPORT:"
+ACP_EXIT_NOTE = "; acp-run exit="
 
 
 # ---------------------------------------------------------------- helpers
@@ -156,7 +189,7 @@ def pid_alive(pid: int | None) -> bool:
 
 def rearm_cmd(done: Path, record: Path | None = None, seconds: int = 1800) -> str:
     """The waiter a lead runs (in the background) for a detached slice. `seconds` must outlast the
-    slice: launch passes its --wait-timeout, else --timeout + 300 (2026-10-10: a fixed 1800 s waiter
+    slice: launch passes its --wait-timeout, else --timeout + --wrapup-grace + 300 (2026-10-10: a fixed 1800 s waiter
     gave up on a live 2400 s slice and the lead read it as lost). It exits 124 on timeout;
     once .done appears it runs `check` on the record, so a partial, no-report or BLOCKED slice
     exits non-zero and prints its verdict (2026-10-10: a quota death exited the old waiter 0)."""
@@ -338,7 +371,8 @@ def check_items(items: list[str]) -> int:
     worst = 0
     for st, name, path, det in rows:
         print(f"{st}\t{name}\t{path}\t{det}")
-        worst = max(worst, STATUS_EXIT.get(st, 1))
+        # a DONE report from a run acp-run failed (a timeout's wrap-up report) exits 1, as dispatch does
+        worst = max(worst, 1 if st == "done" and ACP_EXIT_NOTE in det else STATUS_EXIT.get(st, 1))
     if not rows:
         print("check: nothing to check", file=sys.stderr)
         return 2
@@ -355,7 +389,8 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
     st, det = classify(report, Path(rec.get("done", str(done_path(report)))),
                        finished=finished or None, pid=rec.get("pid"))
     if rec.get("exit") not in (None, 0) and st == "done":
-        det += f"; acp-run exit={rec['exit']}"
+        det += f"{ACP_EXIT_NOTE}{rec['exit']}" + (" (timed out; the report was written in the wrap-up turn)"
+                                                 if rec["exit"] == 124 else "")
     return (st, rec.get("name", path.stem), str(report), det)
 
 
@@ -402,9 +437,9 @@ def finalize(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
             write_atomic(report, old + ("" if not old or old.endswith("\n") else "\n") + note + "\n")
             rec["failure"] = note
             st, det = classify(report, done, finished=True)
-    done.touch()
     rec["status"] = st
-    write_record(record_path, rec)
+    write_record(record_path, rec)      # before .done: the rearm waiter's check reads the exit code
+    done.touch()
     return st, det, rec
 
 
@@ -474,7 +509,10 @@ def dispatch(a: argparse.Namespace) -> int:
             p.unlink()
 
     prompt = Path(a.prompt_file).read_text() if a.prompt_file else a.prompt
-    write_atomic(brief, prompt.rstrip() + "\n\n" + footer_text(report, a.lead))
+    budget = BUDGET_TEXT.format(
+        minutes=f"{a.timeout / 60:g}",
+        wrapup=WRAPUP_BUDGET.format(grace=a.wrapup_grace) if a.wrapup_grace > 0 else "")
+    write_atomic(brief, prompt.rstrip() + "\n\n" + footer_text(report, a.lead).rstrip() + "\n" + budget)
 
     perm = a.perm or "all"
     if perm.startswith("scoped:"):
@@ -482,14 +520,18 @@ def dispatch(a: argparse.Namespace) -> int:
     acp_cmd = [acp_run, a.agent, "-C", str(Path(a.dir).resolve()), "-f", str(brief),
                *(["--model", a.model] if a.model else []),
                "--perm", perm, "--timeout", str(a.timeout), "--log", str(log)]
+    if a.wrapup_grace > 0:
+        acp_cmd += ["--wrapup-grace", str(a.wrapup_grace), "--wrapup",
+                    WRAPUP_TEXT.format(timeout=a.timeout, report=report, done=done)]
     acp_cmd += a.acp_arg or []
+    slice_secs = a.timeout + max(a.wrapup_grace, 0)
 
     rec = {
         "name": a.name, "agent": a.agent, "model": a.model, "dir": str(Path(a.dir).resolve()),
         "task": a.task, "out": str(out), "brief": str(brief), "report": str(report), "done": str(done),
         "final": str(final), "stderr": str(stderr), "log": str(log), "record": str(record),
         "owner": os.environ.get("CLAUDE_CODE_SESSION_ID", ""), "started": time.time(),
-        "cmd": " ".join(shlex.quote(c) for c in acp_cmd), "rearm": rearm_cmd(done, record, a.wait_timeout or a.timeout + 300),
+        "cmd": " ".join(shlex.quote(c) for c in acp_cmd), "rearm": rearm_cmd(done, record, a.wait_timeout or slice_secs + 300),
         "detached": bool(a.detach), "status": "running", "pid": None, "exit": None, "finished": None,
         "report_source": None, "lead": a.lead,
     }
@@ -514,7 +556,7 @@ def dispatch(a: argparse.Namespace) -> int:
         if a.no_wait:
             print(f"detached\t{a.name}\t{report}\nrecord: {record}\nrearm: {rec['rearm']}")
             return 0
-        deadline = time.time() + (a.wait_timeout or a.timeout + 300)
+        deadline = time.time() + (a.wait_timeout or slice_secs + 300)
         while not done.exists():
             if time.time() > deadline:
                 print(f"timeout\t{a.name}\t{report}\nstill running under launchd; rearm: {rec['rearm']}")
@@ -601,10 +643,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", help="explicit out dir instead of --task")
     ap.add_argument("--perm", default="all", help="all | deny | scoped:P1,P2 (the out dir is added)")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"acp-run --timeout (default {DEFAULT_TIMEOUT})")
+    ap.add_argument("--wrapup-grace", type=int, default=DEFAULT_WRAPUP_GRACE,
+                    help="acp-run --wrapup-grace: seconds for one last write-the-report turn after the "
+                         f"timeout cancel (default {DEFAULT_WRAPUP_GRACE}; 0 turns it off)")
     ap.add_argument("--lead", default=DEFAULT_LEAD, help="SendMessage address in the footer")
     ap.add_argument("--detach", action="store_true", help="run under launchd so it outlives this session")
     ap.add_argument("--no-wait", action="store_true", help="with --detach: return at once with the rearm command")
-    ap.add_argument("--wait-timeout", type=int, help="with --detach: seconds to wait for .done (default timeout+300)")
+    ap.add_argument("--wait-timeout", type=int,
+                    help="with --detach: seconds to wait for .done (default timeout+wrapup-grace+300)")
     ap.add_argument("--force", action="store_true", help="redo a slice whose .done or live record exists")
     ap.add_argument("--dry-run", action="store_true", help="compose the brief copy, print the command and paths, run nothing")
     ap.add_argument("--json", action="store_true")

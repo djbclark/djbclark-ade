@@ -44,6 +44,13 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    `--handshake-timeout` (env `ACP_RUN_HANDSHAKE_TIMEOUT`) bounds `initialize`
    and `session/new` each: 40 s by default, 90 s for `claude`, whose
    `session/new` takes 13 s on an idle machine and 17-24 s under heavy load.
+   `--wrapup-grace S` (off by default; `acp-dispatch` passes 300) sends one more
+   prompt after the timeout cancel (`--wrapup TEXT`, default "time is up, write
+   your final report now") and waits up to S seconds, so a slice cut off in a
+   hung command still writes its report; the run still exits 124 and the summary
+   says `wrapup=<stop reason|timeout|skipped|error>`. Added 2026-10-10 after an
+   opencode slice with verified work lost its report to a `git commit` whose
+   pre-commit Gradle hook queued on the machine-wide Gradle slot.
 6. **Safe permission answers**: only an offered `allow_once` or `reject_once`
    option is ever selected. Never an `*_always` option, which an agent may save
    beyond this run (Hermes writes `allow_always` to a permanent allowlist), and
