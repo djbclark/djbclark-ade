@@ -52,7 +52,10 @@ context is, and helm is a relay:
    something new needs the operator. While it waits it sends `/loose` to a
    Claude session that has gone idle (3 to 55 minutes idle, not the focused
    pane, empty input box, not audited since it last changed). The `/steps`
-   prompts that `/loose` produces come back through the queue.
+   prompts that `/loose` produces come back through the queue. A launch
+   started with `launch.py --mark <label>` (a test or trial its starter
+   drives) is never audited: `launch.py audit` refuses it (2026-10-11, hcom
+   trial 6g).
 4. A session idle past 55 minutes is never audited automatically: the
    one-hour prompt cache has expired, so the audit would re-read the whole
    context at full price. It becomes an "audit or skip" item instead.
