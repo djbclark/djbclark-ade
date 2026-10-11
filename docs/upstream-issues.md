@@ -400,6 +400,13 @@ Filed / found (2026-10-09):
    a bug/feature request, not a defaults question.
 2. Filed: https://github.com/william0wang/zcode-acp/issues/311 (prefix).
 3. Filed: https://github.com/william0wang/zcode-acp/issues/312 (stats chunk).
+4. **Both fixed upstream, 2026-10-10** (rechecked 2026-10-11): #311 closed by
+   0.66.0 ("dual-emit turnState under the ACP-reserved _zcode name", 9b86e51);
+   #312 closed by 0.67.0's opt-out (#313, 690172a): config
+   `session.showCompletionStatus: false` or env
+   `ZCODE_ACP_SHOW_COMPLETION_STATUS=0` omits the successful-turn status line.
+   0.67.0 is installed here; our two `acp-run` workarounds stay in place
+   (harmless) until someone switches `acp-run` to the opt-out.
 
 ## 8. ralph-orchestrator — a timed-out lifecycle hook is killed, its children keep running (draft, 2026-10-09)
 

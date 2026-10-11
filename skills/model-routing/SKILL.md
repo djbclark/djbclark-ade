@@ -276,9 +276,11 @@ and stop reason reliable. Full recipe: `bigteam` Step 4.
 ### Per-CLI headless forms (no ACP mode, or fallback)
 
 muse has no usable ACP route yet, so it keeps its form. zcode gained one on
-2026-10-08 (`acp-run zcode`, via the third-party `zcode-acp-server`; no model
-option, so no `--model`: its server fails the session with `unsupported config
-option or switch failed: model` if one is passed, and since 2026-10-09
+2026-10-08 (`acp-run zcode`, via the third-party `zcode-acp-server`; no
+`--model`: on 0.67.0 it advertises a `model` option but refuses every switch,
+failing the session with `unsupported config option or switch failed: model`
+(rechecked 2026-10-11; its README pins a model only at startup, via the env pair
+`ZCODE_PROVIDER` + `ZCODE_MODEL`), and since 2026-10-09
 `acp-dispatch zcode` takes no `--model` either; `--set thought=low|high|max`),
 and its row below is now the fallback.
 The rows for ACP-capable CLIs stay as a fallback for when an ACP route is

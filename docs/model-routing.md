@@ -172,8 +172,10 @@ from the first `{` instead, or the parse fails with "Extra data".
   standalone questions.
 - **z.ai GLM (lite) via zcode** — budget bulk coding on its own
   5h/weekly windows. Since 2026-10-08 `acp-run zcode` (third-party
-  `zcode-acp-server`) drives it; it offers no model option, so run it
-  without `--model`; effort is `--set thought=low|high|max` (default max).
+  `zcode-acp-server`) drives it; its advertised `model` option refuses
+  every switch (rechecked on 0.67.0, 2026-10-11), so run it without
+  `--model` (the bridge pins a model only at startup, via the env pair
+  `ZCODE_PROVIDER` + `ZCODE_MODEL`); effort is `--set thought=low|high|max` (default max).
   Headless `zcode -p` stays as the fallback and runs GLM-5.3 at max.
 - **opencode-go free models** (kimi-k3, minimax-m3, qwen3.x) — zero-cost
   experimental fan-out and ralph-tui default via the ungated wrapper;

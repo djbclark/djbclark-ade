@@ -171,8 +171,11 @@ AGENTS = {
     # zcode has no ACP mode of its own; william0wang/zcode-acp (npm -g
     # zcode-acp-server, 0.65.1) wraps `zcode app-server --stdio`. Verified
     # 2026-10-08: initialize ok, preflight "Reply with exactly: OK" passed.
-    # It exposes no model option: run it WITHOUT --model (zcode's own settings
-    # pick GLM-5.3 vs Flash); `--set thought=low|high|max` is its effort lever.
+    # Run it WITHOUT --model: on 0.67.0 it advertises a `model` option
+    # (GLM-5.3 / GLM-5.3-Flash) but refuses every switch, even to the current
+    # value ("unsupported config option or switch failed: model", rechecked
+    # 2026-10-11). Its README pins a model only at startup via the env pair
+    # ZCODE_PROVIDER + ZCODE_MODEL. `--set thought=low|high|max` is its effort lever.
     "zcode": (["zcode-acp-server"], None),
     # Google LLC signed; registry antigravity-acp (dl.google.com)
     "agy": (
@@ -209,7 +212,7 @@ YOLO_SET = {
     "qwen": {"mode": "yolo"},
     "devin": {"mode": "bypass"},
     "agy": {"mode": "yolo"},
-    "zcode": {"mode": "yolo"},  # zcode-acp-server: edit | yolo | auto
+    "zcode": {"mode": "yolo"},  # zcode-acp-server 0.67.0: plan | build | edit | yolo | auto
 }
 # Launch-command variants for agents whose ACP session has no auto-approve mode
 # but whose CLI takes a flag (audited 2026-10-03: cline --auto-approve true is
