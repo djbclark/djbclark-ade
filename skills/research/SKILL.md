@@ -269,7 +269,8 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    Fix a harness failure at the root in `~/src/djbclark-ade` (code, not only
    docs); do not just route around it, then say what you changed.
 7. **Pause on missing sources (operator, 2026-10-11).** A page or search a
-   slice needs that fails on every rung (`web-get` exit 5) is not a Gap to
+   slice needs that fails on every rung (`web-get` exit 5), or comes back
+   only cut at a provider's cap (`web-get` exit 6, not fetched), is not a Gap to
    write around: the slice stops with `BLOCKED: web access: <url or query>:
    <each rung's error>` (the `acp-dispatch` exit 4 convention) instead of
    writing findings without the source. The lead then stops dispatching

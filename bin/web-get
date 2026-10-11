@@ -2,46 +2,72 @@
 """web-get — web search and page fetch through a failover ladder, for shell-capable agents.
 
   web-get search "<query>" [--n 8] [--json]
-  web-get fetch <url> [--max-bytes N] [--json]
+  web-get fetch <url> [--max-bytes N] [--no-page-check] [--walk-budget S] [--json]
   web-get check [--json]
 
 Common flags: --only <p[,p]>, --skip <p[,p]>, --timeout <s per provider> (default 45, a
 wall-clock limit on each attempt), --crwl-timeout <s> (crawl4ai's own budget, default
 max(150, --timeout) or $WEB_GET_CRWL_TIMEOUT: a cold Chromium start under load takes 30-120 s),
 --wayback-timeout <s> (the wayback rung's own budget, default max(120, --timeout) or
-$WEB_GET_WAYBACK_TIMEOUT: the availability API plus a snapshot read took 54 s at load 18), --verbose (log each attempt to stderr). URLs are normalised once (IDNA host, percent-encoded path and query), so
-IRIs such as https://de.wikipedia.org/wiki/Köln reach every provider as ASCII.
+$WEB_GET_WAYBACK_TIMEOUT: the availability API plus a snapshot read took 54 s at load 18),
+--pdf-timeout <s> (the pdf rung's download + extract budget, default max(120, --timeout) or
+$WEB_GET_PDF_TIMEOUT), --walk-budget <s> (fetch: how long the ladder may keep walking after a
+provider-capped copy, default 300 or $WEB_GET_WALK_BUDGET), --verbose (log each attempt to stderr). URLs are normalised once (IDNA
+host, percent-encoded path and query), so IRIs such as https://de.wikipedia.org/wiki/Köln
+reach every provider as ASCII.
 
 Ladders (first provider that returns usable content wins):
-  search: exa (Exa MCP web_search_exa) -> parallel (Parallel MCP web_search)
-          -> jina-mcp (Jina MCP search_web, key) -> jina-search (s.jina.ai, key)
-          -> composio (composio CLI, COMPOSIO_SEARCH_DUCK_DUCK_GO)
-  fetch:  exa (web_fetch_exa) -> parallel (web_fetch, full_content) -> jina-reader (r.jina.ai,
-          key if available, else keyless) -> crawl4ai (crwl, renders JavaScript)
-          -> wayback (Wayback Machine snapshot, read via r.jina.ai, then direct)
-"jina" in --only/--skip means every jina-* provider.
+  search: exa-api (api.exa.ai /search, key) -> exa-mcp (keyless Exa MCP web_search_exa)
+          -> parallel (Parallel MCP web_search) -> jina-mcp (Jina MCP search_web, key)
+          -> jina-search (s.jina.ai, key) -> composio (composio CLI, COMPOSIO_SEARCH_DUCK_DUCK_GO)
+  fetch:  exa-api (api.exa.ai /contents, key, full text up to 1000000 characters) -> exa-mcp
+          (web_fetch_exa, 200000-character cap) -> parallel (web_fetch, full_content)
+          -> jina-reader (r.jina.ai, key if available, else keyless) -> pdf (PDF URLs only:
+          curl into a fresh temp dir, then pdftotext) -> crawl4ai (crwl, renders JavaScript;
+          skips PDFs) -> wayback (Wayback Machine snapshot, read via r.jina.ai, then direct)
+"exa" in --only/--skip means both exa-* rungs, "jina" every jina-* rung. With no Exa key the
+exa-api rung fails at once ("no Exa key") and the keyless MCP answers; provenance and --json
+name the rung that served the page (provider=exa-api or provider=exa-mcp).
 
 An attempt fails on: network error, HTTP >= 400, MCP isError, JSON-RPC error, timeout,
 empty or near-empty content (< 200 chars for a fetch; no "URL:" result line for a search), a
 block page (captcha, "access denied", "do not support this site", Cloudflare challenge, ...)
 or a rate-limit/quota notice returned as content (Exa's "You've hit Exa's free MCP rate
-limit", "upgrade your plan", "insufficient credits", ...). A Parallel fetch also fails when
-the page is not the one asked for (Parallel returns soft-404 and redirect pages with no
-error): a cross-host or site-root redirect, a "Page not found"/"404" title, or a title that
-shares no word with a URL path of two or more words when the body's start does not name it
-either ("wrong page: ..."). Same-site and redirector (doi.org, youtu.be, t.co) redirects pass.
-A heuristic, for Parallel only. The next provider is tried.
+limit", "upgrade your plan", "insufficient credits", ...). A fetch also fails when the page is
+not the one asked for, on every rung that reports a final URL or a title (exa-api, exa-mcp,
+parallel, jina-reader; providers return soft-404 and redirect pages with no error): a
+cross-host or site-root redirect, a "Page not found"/"404" title, or a title (jina-reader: the
+first heading when the title is empty) that shares no word with a URL path of two or more
+words when the body's start does not name it either ("wrong page: ..."). Same-site and
+redirector (doi.org, youtu.be, t.co) redirects pass; path words that name infrastructure, not
+the page (cache, epub, images, uploads, files, static, assets, blob, ...), are ignored. A
+heuristic: --no-page-check turns it off for a URL whose page you have checked yourself. The next
+provider is tried.
+
+Truncation is not success (operator rule 2026-10-11: every needed page is eventually fetched).
+A fetch rung whose body came back at its provider's cap (exa-api 1000000 characters, exa-mcp
+200000; Exa gives no other signal) is recorded and the ladder keeps walking for a fuller copy.
+The first complete body at least 0.8x as long as the longest capped one wins; otherwise the
+longest body is returned, flagged truncated. A rung whose own cap is no larger than the copy
+already held is skipped (no exa-mcp call after a capped exa-api reply). The walk stops starting
+new rungs --walk-budget seconds after the first capped copy. --json lists the copies that did
+not win under "held" (provider, chars, truncated), so a shorter complete copy is never lost.
 
 Output: content on stdout; provenance on stderr ("web-get: provider=<p> url=<u>").
---json prints {ok, kind, target, provider, url, attempts:[{provider,ok,error,ms}], content,
-truncated[, truncated_by, truncated_to]}. Cuts are flagged with "truncated": true and a stderr
-line: a --max-bytes cut (truncated_by "max-bytes") and an Exa page that came back at its
-200000-character maxCharacters cap (truncated_by "exa"; Exa gives no other signal).
+--json prints {ok, kind, target, provider, url, attempts:[{provider,ok,error,ms[,chars,
+truncated,note]}], content, truncated[, truncated_by, truncated_to, max_bytes_cut, held,
+snapshot, pdf_pages, pdf_bytes]}. Cuts are flagged with "truncated": true and a stderr line: a
+provider cap that no later rung beat (truncated_by "exa-api" or "exa-mcp", exit 6) and a
+--max-bytes cut (max_bytes_cut N; truncated_by "max-bytes" when no provider cap applies; the
+caller's choice, which never makes the ladder walk on). A capped copy cut by --max-bytes keeps
+its provider truncated_by, both stderr lines and exit 6. A wayback copy is "snapshot": true.
 
-Signals: SIGTERM/SIGINT/SIGHUP kill any running child process group (crwl and its Chromium)
-before web-get exits 128+n.
+Signals: SIGTERM/SIGINT/SIGHUP kill any running child process group (crwl and its Chromium,
+curl, pdftotext, the vault client) and remove the pdf rung's temp dirs before web-get exits 128+n.
 
-Exit codes: 0 success; 2 usage error; 5 ALL PROVIDERS FAILED. Exit 5 is the machine-readable
+Exit codes: 0 success; 2 usage error; 5 ALL PROVIDERS FAILED; 6 NOT YET FETCHED (fetch: the best
+copy is cut at a provider's cap; it is still printed, but the operator rule counts it as not
+fetched: try other URL forms, fix the tool, or pause). Exit 5 is the machine-readable
 PAUSE signal (operator rule, djbclark 2026-10-11): when every provider fails for a page or a
 search the task needs, pause the dependent work (stop scheduling dependent steps, checkpoint,
 report the failed URLs/queries and why, wait for the operator or for the provider to recover).
@@ -49,21 +75,32 @@ Never continue without the source, summarize it from memory, or drop it silently
 `check` exits 0 when >= 3 provider probes are healthy with at least one search and one fetch
 provider among them, else 5; narrowed with --only/--skip, it exits 0 only when every selected
 provider is healthy, else 5 without the pause message (a narrowed check is not an outage).
+The exa-api probes are billed by Exa (one search, one contents page); `check` makes no other
+paid call beyond Parallel's per-request billing on their side.
 
-Jina key: $JINA_API_KEY if already in the environment, else read once per run through
-`sudo-secretspec run` (non-interactive; captured in memory, never printed or written to disk).
-WEB_GET_NO_SECRETSPEC=1 skips that and uses the keyless routes (r.jina.ai only).
+Keys: $JINA_API_KEY and $EXA_API_KEY if already in the environment, else read once per run,
+together, through one `sudo-secretspec run` (non-interactive; captured in memory, sent only in
+request headers, never on argv, never printed or written to disk). The vault read runs before
+the ladder, outside every rung's budget, and only when a selected rung can use a key; the
+client is /usr/local/bin/sudo-secretspec when present (PATH otherwise; $WEB_GET_SECRETSPEC in
+tests), bounded by $WEB_GET_SECRETSPEC_TIMEOUT (default 30 s, its process tree killed after).
+Child processes (curl, pdftotext, pypdf, crwl, composio) never inherit either key, even from the
+environment. WEB_GET_NO_SECRETSPEC=1 skips the vault and uses the keyless routes (r.jina.ai and
+the Exa MCP only). A Jina key that r.jina.ai rejects (401/403) is retried once keyless.
 
-Test hooks (env): WEB_GET_EXA_URL, WEB_GET_PARALLEL_URL, WEB_GET_JINA_MCP_URL,
-WEB_GET_JINA_READER_URL, WEB_GET_JINA_SEARCH_URL, WEB_GET_WAYBACK_API_URL,
+Test hooks (env): WEB_GET_EXA_API_URL, WEB_GET_EXA_URL, WEB_GET_PARALLEL_URL,
+WEB_GET_JINA_MCP_URL, WEB_GET_JINA_READER_URL, WEB_GET_JINA_SEARCH_URL, WEB_GET_WAYBACK_API_URL,
 WEB_GET_WAYBACK_WEB_URL, WEB_GET_CRWL, WEB_GET_CRWL_DELAY (s, default 3), WEB_GET_CRWL_TIMEOUT,
-WEB_GET_WAYBACK_TIMEOUT, WEB_GET_COMPOSIO, WEB_GET_CHECK_URL.
+WEB_GET_WAYBACK_TIMEOUT, WEB_GET_PDF_TIMEOUT, WEB_GET_PDF_VIA, WEB_GET_CURL, WEB_GET_PDFTOTEXT,
+WEB_GET_COMPOSIO, WEB_GET_CHECK_URL, WEB_GET_CHECK_PDF_URL, WEB_GET_SECRETSPEC,
+WEB_GET_SECRETSPEC_TIMEOUT, WEB_GET_WALK_BUDGET.
 """
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
 import html.parser
+import http.client as _httpclient  # not `http`: the http() helper below shadows that name
 import json
 import math
 import os
@@ -72,29 +109,39 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-EXIT_OK, EXIT_USAGE, EXIT_ALL_FAILED = 0, 2, 5
+EXIT_OK, EXIT_USAGE, EXIT_ALL_FAILED, EXIT_TRUNCATED = 0, 2, 5, 6
 DEFAULT_TIMEOUT = 45.0
 DEFAULT_CRWL_TIMEOUT = 150.0
 DEFAULT_WAYBACK_TIMEOUT = 120.0
+DEFAULT_PDF_TIMEOUT = 120.0
+DEFAULT_WALK_BUDGET = 300.0  # seconds the ladder may walk on after a provider-capped copy
 EXA_MAX_CHARS = 200000  # web_fetch_exa maxCharacters; a body this long was cut by Exa
-EXA_CAP_SLACK = 0.99  # "near the cap": Exa returns exactly maxCharacters body characters
+EXA_API_MAX_CHARS = 1000000  # /contents text.maxCharacters: a 370913-character system card fits
+EXA_CAP_SLACK = 0.999  # "at the cap": Exa returns exactly maxCharacters body characters
+FULLER_SLACK = 0.8  # a complete copy this much shorter than a capped one is not "fuller"
+PDF_MAX_BYTES = 200 * 1024 * 1024
 GUARD_SLACK = 5.0  # hard per-attempt guard (SIGALRM) fires this long after the soft deadline
 MIN_FETCH_CHARS = 200
 MIN_SEARCH_CHARS = 40
 UA = "web-get/1.0 (+djbclark-ade)"
 PAUSE_MSG = "ALL PROVIDERS FAILED — pause dependent work (operator rule 2026-10-11)"
+CAPPED_PROVIDERS = ("exa-api", "exa-mcp")
+# Rungs that can use a key (wayback reads its snapshot through r.jina.ai).
+KEYED_RUNGS = {"exa-api", "jina-mcp", "jina-search", "jina-reader", "wayback"}
 
 
 def env(name: str, default: str) -> str:
     return os.environ.get(name) or default
 
 
+def exa_api_url() -> str: return env("WEB_GET_EXA_API_URL", "https://api.exa.ai").rstrip("/")
 def exa_url() -> str: return env("WEB_GET_EXA_URL", "https://mcp.exa.ai/mcp")
 def parallel_url() -> str: return env("WEB_GET_PARALLEL_URL", "https://search.parallel.ai/mcp")
 def jina_mcp_url() -> str: return env("WEB_GET_JINA_MCP_URL", "https://mcp.jina.ai/v1")
@@ -109,45 +156,99 @@ class ProviderError(Exception):
     """One provider attempt failed; the message says why."""
 
 
-# ---------------------------------------------------------------- Jina key (never printed)
+# ---------------------------------------------------------------- keys (never printed)
 
-_jina_lock = threading.Lock()
-_jina_state: dict = {"done": False, "key": None, "note": ""}
+VAULT_NAMES = ("JINA_API_KEY", "EXA_API_KEY")
+_key_lock = threading.Lock()
+_keys: dict = {"done": False, "JINA_API_KEY": None, "EXA_API_KEY": None, "notes": {}}
+
+
+def secretspec_client() -> str | None:
+    """The sudo-secretspec client: $WEB_GET_SECRETSPEC (tests), else the installed
+    /usr/local/bin one (a PATH entry could shadow it and feed fake keys), else PATH."""
+    v = os.environ.get("WEB_GET_SECRETSPEC")
+    if v:
+        return v
+    if os.access("/usr/local/bin/sudo-secretspec", os.X_OK):
+        return "/usr/local/bin/sudo-secretspec"
+    return shutil.which("sudo-secretspec")
+
+
+def _resolve_keys() -> None:
+    """Fill _keys once per run: each key from the environment, else every missing one through a
+    single `sudo-secretspec run` whose child prints them (captured in memory, never argv). The
+    child runs in its own session under run_cmd, so a hung broker is killed with its tree at
+    $WEB_GET_SECRETSPEC_TIMEOUT and a fatal signal kills it too; every missing key gets a note."""
+    with _key_lock:
+        if _keys["done"]:
+            return
+        _keys["done"] = True
+        missing = []
+        for name in VAULT_NAMES:
+            _keys[name] = os.environ.get(name) or None
+            if not _keys[name]:
+                missing.append(name)
+        if not missing:
+            return
+        notes = _keys["notes"]
+        try:
+            if os.environ.get("WEB_GET_NO_SECRETSPEC"):
+                notes.update({n: "WEB_GET_NO_SECRETSPEC set" for n in missing})
+                return
+            exe = secretspec_client()
+            if not exe:
+                notes.update({n: "sudo-secretspec not found" for n in missing})
+                return
+            try:
+                budget = float(os.environ.get("WEB_GET_SECRETSPEC_TIMEOUT") or 30)
+            except ValueError:
+                budget = 30.0
+            script = "printf '%s\\n' " + " ".join(f'"${{{n}:-}}"' for n in missing)
+            try:
+                rc, out, _ = run_cmd(
+                    [exe, "run", "--reason", "web-get: Exa and Jina search/fetch auth", "--",
+                     "/bin/sh", "-c", script], Deadline(max(budget, 0.5)))
+            except ProviderError as e:
+                why = (f"sudo-secretspec run timed out after {budget:g} s" if str(e) == "timeout"
+                       else f"sudo-secretspec run failed: {e}")
+                notes.update({n: why for n in missing})
+                return
+            lines = out.split("\n")
+            for i, name in enumerate(missing):
+                val = lines[i].strip() if rc == 0 and i < len(lines) else ""
+                if val and not any(c.isspace() for c in val):
+                    _keys[name] = val
+                else:
+                    notes[name] = (f"sudo-secretspec run gave no key (rc={rc})"
+                                   if rc or not val else "sudo-secretspec gave a malformed key")
+        finally:
+            for name in missing:
+                if not _keys[name] and not notes.get(name):
+                    notes[name] = "sudo-secretspec read interrupted"
+
+
+def vault_key(name: str) -> str | None:
+    _resolve_keys()
+    return _keys.get(name)
+
+
+def key_note(name: str) -> str:
+    return _keys["notes"].get(name, "")
 
 
 def jina_key() -> str | None:
-    with _jina_lock:
-        if _jina_state["done"]:
-            return _jina_state["key"]
-        _jina_state["done"] = True
-        key = os.environ.get("JINA_API_KEY") or None
-        if not key and not os.environ.get("WEB_GET_NO_SECRETSPEC"):
-            exe = shutil.which("sudo-secretspec")
-            if not exe:
-                _jina_state["note"] = "sudo-secretspec not found"
-            else:
-                try:
-                    p = subprocess.run(
-                        [exe, "run", "--reason", "web-get: Jina search/reader auth", "--",
-                         "/bin/sh", "-c", 'printf %s "$JINA_API_KEY"'],
-                        stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
-                    out = p.stdout.decode("utf-8", "replace").strip()
-                    if p.returncode == 0 and out and "\n" not in out and " " not in out:
-                        key = out
-                    else:
-                        _jina_state["note"] = f"sudo-secretspec run gave no key (rc={p.returncode})"
-                except (OSError, subprocess.TimeoutExpired) as e:
-                    _jina_state["note"] = f"sudo-secretspec run failed: {type(e).__name__}"
-        elif not key:
-            _jina_state["note"] = "WEB_GET_NO_SECRETSPEC set"
-        _jina_state["key"] = key
-        return key
+    return vault_key("JINA_API_KEY")
+
+
+def exa_key() -> str | None:
+    return vault_key("EXA_API_KEY")
 
 
 def redact(text: str) -> str:
-    key = _jina_state.get("key") or os.environ.get("JINA_API_KEY")
-    if key and text:
-        text = text.replace(key, "***")
+    for name in VAULT_NAMES:
+        for key in {_keys.get(name), os.environ.get(name)}:
+            if key and text:
+                text = text.replace(key, "***")
     return text
 
 
@@ -214,6 +315,8 @@ def http(method: str, url: str, dl: Deadline, data: bytes | None = None,
         raise ProviderError(f"network error: {reason}")
     except TimeoutError:
         raise ProviderError("timeout")
+    except _httpclient.HTTPException as e:  # IncompleteRead, RemoteDisconnected, BadStatusLine
+        raise ProviderError(f"network error: {type(e).__name__}")
     except (OSError, ValueError) as e:
         raise ProviderError(f"network error: {e}")
 
@@ -384,6 +487,11 @@ PATH_GENERIC = {
     "article", "articles", "blog", "blogs", "news", "item", "items", "view", "detail", "details",
     "category", "categories", "product", "products", "docs", "wiki", "search", "tags", "status",
     "default", "content", "contents", "story", "stories", "with", "from", "that", "this", "amp",
+    # Infrastructure: storage, CMS and repository path segments (/cache/epub/2701/...,
+    # /wp-content/uploads/..., /sites/default/files/..., /blob/main/...) name no page.
+    "cache", "epub", "images", "image", "uploads", "upload", "files", "file", "sites", "static",
+    "assets", "asset", "media", "download", "downloads", "public", "resources", "dist", "blob",
+    "tree", "refs", "heads", "attachments", "attachment",
 }
 # Link shorteners and resolvers: any landing site is the right one (the title is still checked).
 REDIRECTOR_HOSTS = {"doi.org", "dx.doi.org", "youtu.be", "t.co", "bit.ly", "tinyurl.com",
@@ -444,7 +552,8 @@ def page_mismatch(requested: str, got_url: str | None, title: str | None,
                   body: str | None = None) -> str | None:
     """Why the page a provider returned is not the requested one, or None when it matches.
 
-    A heuristic for Parallel's fetch only. Tolerant of http->https, a www. prefix, a trailing
+    A heuristic, applied to every fetch rung that reports a final URL or a title (exa-api,
+    exa-mcp, parallel, jina-reader). Tolerant of http->https, a www. prefix, a trailing
     slash, same-site redirects (to another path, or another host of the same domain:
     en.m.wikipedia.org), redirector links (doi.org, youtu.be, t.co) and twitter.com <-> x.com.
     Flags a cross-host redirect, a redirect from a deep path to the site root, a soft-404
@@ -546,6 +655,13 @@ def html_to_text(src: str) -> str:
 
 _children: set[int] = set()  # pids (= pgids) of running child sessions, killed on a signal
 _children_lock = threading.Lock()
+_tmpdirs: set[str] = set()  # live pdf-rung temp dirs (untrusted downloads), removed on a signal
+
+
+def cleanup_tmpdirs() -> None:
+    for d in list(_tmpdirs):
+        shutil.rmtree(d, ignore_errors=True)
+        _tmpdirs.discard(d)
 
 
 def _tree_pgids(root: int) -> set[int]:
@@ -589,6 +705,7 @@ def kill_children() -> None:
 
 def _on_fatal_signal(signum, frame):
     kill_children()
+    cleanup_tmpdirs()  # os._exit skips the pdf rung's finally
     try:
         sys.stderr.write(f"web-get: killed by signal {signum}; child processes killed\n")
         sys.stderr.flush()
@@ -605,10 +722,16 @@ def install_signal_handlers() -> None:
             pass
 
 
+def child_env() -> dict:
+    """The environment for a child process, without the Exa or Jina key: the children parse
+    untrusted input (curl, pdftotext, pypdf, crwl) or need no key (composio, the vault client)."""
+    return {k: v for k, v in os.environ.items() if k not in VAULT_NAMES}
+
+
 def run_cmd(argv: list[str], dl: Deadline) -> tuple[int, str, str]:
     try:
         p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, start_new_session=True)
+                             stderr=subprocess.PIPE, start_new_session=True, env=child_env())
     except OSError as e:
         raise ProviderError(f"cannot run {argv[0]}: {e}")
     with _children_lock:
@@ -644,7 +767,37 @@ def tool_path(envname: str, name: str) -> str:
 # ---------------------------------------------------------------- search providers
 
 
-def search_exa(q: str, n: int, dl: Deadline) -> tuple[str, str]:
+def exa_api(path: str, body: dict, dl: Deadline) -> dict:
+    """POST to the Exa REST API with the key in the x-api-key header (never argv or logs)."""
+    key = exa_key()
+    if not key:
+        raise ProviderError(f"no Exa key ({key_note('EXA_API_KEY')})")
+    _, _, text = http("POST", f"{exa_api_url()}{path}", dl, json.dumps(body).encode(),
+                      {"x-api-key": key, "Content-Type": "application/json",
+                       "Accept": "application/json"})
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        raise ProviderError("exa-api: unparseable reply")
+    if not isinstance(obj, dict):
+        raise ProviderError("exa-api: unexpected reply")
+    if obj.get("error") and not obj.get("results"):
+        raise ProviderError(f"exa-api: {obj.get('tag') or 'error'}: {str(obj['error'])[:200]}")
+    return obj
+
+
+def search_exa_api(q: str, n: int, dl: Deadline) -> tuple[str, str]:
+    # One /search call with highlights (no /contents call). Exa bills a search by result count:
+    # the default --n 8 stays in the base tier (up to 10 results); --n 11-25 costs more.
+    obj = exa_api("/search", {"query": q, "numResults": n, "type": "auto",
+                              "contents": {"highlights": True}}, dl)
+    rows = [{"title": r.get("title"), "url": r.get("url"),
+             "snippet": r.get("highlights") or r.get("summary") or (r.get("text") or "")[:1200]}
+            for r in obj.get("results") or [] if isinstance(r, dict)]
+    return check_search_content(fmt_results(rows, n)), ""
+
+
+def search_exa_mcp(q: str, n: int, dl: Deadline) -> tuple[str, str]:
     texts, _ = MCP(exa_url(), dl).call("web_search_exa",
                                        {"query": q, "objective": q, "numResults": n})
     return check_search_content("\n".join(texts)), ""
@@ -665,7 +818,7 @@ def search_parallel(q: str, n: int, dl: Deadline) -> tuple[str, str]:
 def search_jina_mcp(q: str, n: int, dl: Deadline) -> tuple[str, str]:
     key = jina_key()
     if not key:
-        raise ProviderError(f"no Jina key ({_jina_state['note']})")
+        raise ProviderError(f"no Jina key ({key_note('JINA_API_KEY')})")
     texts, _ = MCP(jina_mcp_url(), dl, auth=key).call("search_web", {"query": q})
     return check_search_content("\n---\n".join(t.strip() for t in texts[:n])), ""
 
@@ -673,7 +826,7 @@ def search_jina_mcp(q: str, n: int, dl: Deadline) -> tuple[str, str]:
 def search_jina_s(q: str, n: int, dl: Deadline) -> tuple[str, str]:
     key = jina_key()
     if not key:
-        raise ProviderError(f"no Jina key ({_jina_state['note']})")
+        raise ProviderError(f"no Jina key ({key_note('JINA_API_KEY')})")
     url = f"{jina_search_url()}/?q={urllib.parse.quote_plus(q)}"
     _, _, body = http("GET", url, dl, headers={"Authorization": f"Bearer {key}",
                                                "Accept": "application/json",
@@ -712,13 +865,69 @@ def exa_body_chars(text: str) -> int:
     return len(text[i + 2:]) if i >= 0 and text.lstrip().startswith("#") else len(text)
 
 
-def fetch_exa(url: str, dl: Deadline, max_chars: int):
+def header_field(text: str, names: tuple[str, ...], lines: int = 8) -> str | None:
+    """The value of the first 'Name: value' line among the first few lines of a reply."""
+    for line in (text or "").lstrip().splitlines()[:lines]:
+        for name in names:
+            if line.lower().startswith(name.lower() + ":"):
+                return line[len(name) + 1:].strip()
+    return None
+
+
+def first_heading(text: str, limit: int = 20000) -> str | None:
+    """The first level-1 markdown heading, past any navigation menu (zillow's 404 page put its
+    '# Uh oh,' under 130 lines of menu on 2026-10-11)."""
+    m = re.search(r"(?m)^#[ \t]+(\S.*)$", (text or "")[:limit])
+    return m.group(1).strip() if m else None
+
+
+_page_check = {"on": True}
+
+
+def check_page(provider: str, url: str, got: str | None, title: str | None, body: str) -> None:
+    """Fail the rung when it returned another page than the one asked for (page_mismatch)."""
+    if not _page_check["on"]:
+        return
+    why = page_mismatch(url, got, title, body)
+    if why:
+        raise ProviderError(f"{provider}: wrong page ({why})")
+
+
+def fetch_exa_api(url: str, dl: Deadline, max_chars: int):
+    # One /contents call for the full text; Exa handles PDFs and JavaScript pages itself.
+    obj = exa_api("/contents", {"urls": [url], "text": {"maxCharacters": EXA_API_MAX_CHARS}}, dl)
+    for st in obj.get("statuses") or []:
+        if isinstance(st, dict) and st.get("status") == "error":
+            err = st.get("error") or {}
+            code = err.get("httpStatusCode")
+            raise ProviderError(f"exa-api: {err.get('tag') or 'error'}"
+                                + (f" (HTTP {code})" if code else ""))
+    results = [r for r in obj.get("results") or [] if isinstance(r, dict)]
+    if not results:
+        raise ProviderError("exa-api: no results")
+    r = results[0]
+    body = r.get("text") or ""
+    title = (r.get("title") or "").strip()
+    got = r.get("url") or url
+    check_page("exa-api", url, got, title, body)
+    text = (f"Title: {title}\n" if title else "") + f"URL: {got}\n\n" + body
+    content = check_fetch_content(text)
+    if len(body) >= int(EXA_API_MAX_CHARS * EXA_CAP_SLACK):
+        return content, got, {"truncated_by": "exa-api", "truncated_to": EXA_API_MAX_CHARS}
+    return content, got
+
+
+def fetch_exa_mcp(url: str, dl: Deadline, max_chars: int):
     texts, _ = MCP(exa_url(), dl).call("web_fetch_exa", {"urls": [url], "maxCharacters": max_chars})
     text = "\n".join(texts)
     content = check_fetch_content(text)
+    head = text.lstrip()
+    title = head.splitlines()[0].lstrip("#").strip() if head.startswith("#") else (
+        header_field(text, ("Title",)) or "")
+    check_page("exa-mcp", url, header_field(text, ("URL",)), title, text)
     if exa_body_chars(text) >= int(max_chars * EXA_CAP_SLACK):
         # Exa cuts silently at maxCharacters: a body at the cap means the page is longer.
-        return content, url, {"truncated_by": "exa", "truncated_to": max_chars}
+        return content, url, {"truncated_by": "exa-mcp", "truncated_to": max_chars}
     return content, url
 
 
@@ -741,9 +950,7 @@ def fetch_parallel(url: str, dl: Deadline, max_chars: int) -> tuple[str, str]:
     title = r.get("title") or ""
     got = r.get("url") or url
     # Parallel returns soft-404 and redirect pages as ordinary results: check it is our page.
-    why = page_mismatch(url, got, title, body)
-    if why:
-        raise ProviderError(f"parallel: wrong page ({why})")
+    check_page("parallel", url, got, title, body)
     text = (f"Title: {title}\nURL: {got}\n\n" if title else "") + body
     if len(body.strip()) < MIN_FETCH_CHARS:
         raise ProviderError(f"near-empty content ({len(body.strip())} chars)")
@@ -753,15 +960,131 @@ def fetch_parallel(url: str, dl: Deadline, max_chars: int) -> tuple[str, str]:
 def _jina_read(target: str, dl: Deadline) -> str:
     key = jina_key()
     headers = {"Authorization": f"Bearer {key}"} if key else {}
-    _, _, body = http("GET", f"{jina_reader_url()}/{target}", dl, headers=headers)
+    try:
+        _, _, body = http("GET", f"{jina_reader_url()}/{target}", dl, headers=headers)
+    except ProviderError as e:
+        # A revoked or rotated key: r.jina.ai also works keyless (lower rate limit).
+        if not key or not re.match(r"HTTP 40[13]\b", str(e)):
+            raise
+        _, _, body = http("GET", f"{jina_reader_url()}/{target}", dl)
     return body
 
 
 def fetch_jina_reader(url: str, dl: Deadline, max_chars: int) -> tuple[str, str]:
-    return check_fetch_content(_jina_read(url, dl)), url
+    text = check_fetch_content(_jina_read(url, dl))
+    # r.jina.ai answers 'Title: ...', 'URL Source: <final url>', then 'Markdown Content:'. An
+    # empty title (it gave one for zillow's city page) falls back to the first heading.
+    title = header_field(text, ("Title",)) or first_heading(text) or ""
+    got = header_field(text, ("URL Source",))
+    check_page("jina-reader", url, got, title, text)
+    return text, url
+
+
+def is_pdf_url(url: str) -> bool:
+    """A URL that names a PDF: a .pdf path, or an arXiv /pdf/ link (no extension)."""
+    p = urllib.parse.urlsplit(url)
+    path = urllib.parse.unquote(p.path or "").lower().rstrip("/")
+    host = (p.hostname or "").lower()
+    return path.endswith(".pdf") or (
+        (host == "arxiv.org" or host.endswith(".arxiv.org")) and path.startswith("/pdf/"))
+
+
+_known_pdf: set[str] = set()  # URLs the pdf rung found to be PDFs by Content-Type or magic
+_not_pdf: set[str] = set()  # .pdf-looking URLs the pdf rung downloaded and found not a PDF
+
+
+def _pdf_src(url: str) -> str:
+    """Where the pdf rung reads `url` from: the URL itself, or under $WEB_GET_PDF_VIA (tests)."""
+    via = os.environ.get("WEB_GET_PDF_VIA")
+    return f"{via.rstrip('/')}/{url}" if via else url
+
+
+def _probe_pdf(url: str, dl: Deadline) -> bool:
+    """A GET that reads the headers and the first 1 KB only: is it a PDF (Content-Type or
+    %PDF- magic)?"""
+    req = urllib.request.Request(_pdf_src(url), headers={"User-Agent": UA, "Accept": "application/pdf,*/*"})
+    try:
+        with urllib.request.urlopen(req, timeout=min(dl.left(), 20.0)) as r:
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            _set_sock_timeout(r, dl.left())
+            head = r.read(1024)
+    except urllib.error.HTTPError as e:
+        raise ProviderError(f"pdf: probe HTTP {e.code}")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise ProviderError(f"pdf: probe failed: {getattr(e, 'reason', e)}")
+    return "pdf" in ctype or b"%PDF-" in head
+
+
+def _pdf_text(path: str, dl: Deadline) -> str:
+    """Text of a PDF: pdftotext (poppler), else pypdf through uv."""
+    exe = os.environ.get("WEB_GET_PDFTOTEXT") or shutil.which("pdftotext")
+    if exe:
+        rc, out, err = run_cmd([exe, "-enc", "UTF-8", "-q", path, "-"], dl)
+        if rc != 0:
+            raise ProviderError(f"pdf: pdftotext rc={rc}: {(err or out).strip()[:200]}")
+        return out
+    uv = shutil.which("uv")
+    if not uv:
+        raise ProviderError("pdf: neither pdftotext nor uv installed")
+    code = ("import sys, pypdf; r = pypdf.PdfReader(sys.argv[1]); "
+            "sys.stdout.write('\\f'.join((pg.extract_text() or '') for pg in r.pages))")
+    rc, out, err = run_cmd([uv, "run", "--quiet", "--no-project", "--with", "pypdf==6.19.0",
+                            "python", "-I", "-c", code, path], dl)
+    if rc != 0:
+        raise ProviderError(f"pdf: pypdf rc={rc}: {(err or out).strip().splitlines()[-1:]}")
+    return out
+
+
+def fetch_pdf(url: str, dl: Deadline, max_chars: int):
+    """PDF URLs only: download with curl into a fresh temp dir, extract the text locally."""
+    if not is_pdf_url(url):
+        if url not in _known_pdf and not _probe_pdf(url, dl):
+            raise ProviderError("pdf: not a PDF (no .pdf path, Content-Type or %PDF- magic)")
+        _known_pdf.add(url)
+    curl = os.environ.get("WEB_GET_CURL") or shutil.which("curl")
+    if not curl:
+        raise ProviderError("pdf: curl not installed")
+    tmp = tempfile.mkdtemp(prefix="web-get-pdf-")  # untrusted download: its own empty dir
+    _tmpdirs.add(tmp)
+    try:
+        dest = os.path.join(tmp, "doc.pdf")
+        rc, out, err = run_cmd([
+            curl, "-sS", "-L", "--fail", "--proto", "=http,https", "--max-redirs", "10",
+            "--max-filesize", str(PDF_MAX_BYTES), "--max-time", str(max(1, int(dl.left()))),
+            "-A", UA, "-H", "Accept: application/pdf,*/*", "-o", dest,
+            "-w", "%{content_type}\\n%{url_effective}\\n", _pdf_src(url)], dl)
+        if rc != 0:
+            why = {22: "HTTP error", 28: "timeout", 63: f"larger than {PDF_MAX_BYTES} bytes"}.get(rc, "")
+            if not why and "returned error" in err:  # curl gives 56, not 22, over HTTP/2
+                why = "HTTP error"
+            raise ProviderError(f"pdf: curl rc={rc}" + (f" ({why})" if why else "")
+                                + (f": {err.strip()[:200]}" if err.strip() else ""))
+        info = out.splitlines()
+        eff = info[1].strip() if len(info) > 1 else ""
+        got = eff if eff and eff != _pdf_src(url) else url
+        with open(dest, "rb") as fh:
+            magic = fh.read(1024)
+        if b"%PDF-" not in magic:
+            _not_pdf.add(url)  # crawl4ai may render it (a JS viewer or a landing page)
+            ctype = info[0].strip() if info else ""
+            raise ProviderError(f"pdf: not a PDF (Content-Type {ctype or 'none'})")
+        _known_pdf.add(url)
+        size = os.path.getsize(dest)
+        text = _pdf_text(dest, dl)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        _tmpdirs.discard(tmp)
+    pages = text.count("\f") + (1 if text.rsplit("\f", 1)[-1].strip() else 0)
+    text = re.sub(r"[ \t]+\n", "\n", text.replace("\f", "\n\n"))
+    # A valid PDF after a redirect is the document asked for (CDNs and S3 redirect cross-host),
+    # so the page check is not applied; a login page is not a PDF and fails above.
+    return check_fetch_content(text), got, {"pdf_pages": pages, "pdf_bytes": size}
 
 
 def fetch_crawl4ai(url: str, dl: Deadline, max_chars: int) -> tuple[str, str]:
+    if (is_pdf_url(url) and url not in _not_pdf) or url in _known_pdf:
+        # crwl 0.9.4 dies on a PDF ("'NoneType' object has no attribute 'raw_markdown'").
+        raise ProviderError("crawl4ai: skipped, a PDF (crwl cannot read PDFs; the pdf rung does)")
     exe = tool_path("WEB_GET_CRWL", "crwl")
     # A short fixed delay lets client-side JavaScript fill the page (moltbook.com's live
     # counters read 0 without it); wait_until=networkidle never settles on live feeds.
@@ -769,6 +1092,9 @@ def fetch_crawl4ai(url: str, dl: Deadline, max_chars: int) -> tuple[str, str]:
     rc, out, err = run_cmd([exe, url, "-o", "markdown", "-c", f"delay_before_return_html={delay}"], dl)
     if rc != 0:
         tail = (err or out).strip().splitlines()[-1:] or [""]
+        if "raw_markdown" in tail[0]:
+            raise ProviderError(f"crwl rc={rc}: no markdown for this page (a PDF or other "
+                                f"non-HTML document?): {tail[0][:160]}")
         raise ProviderError(f"crwl rc={rc}: {tail[0][:200]}")
     return check_fetch_content(out), url
 
@@ -790,24 +1116,28 @@ def fetch_wayback(url: str, dl: Deadline, max_chars: int) -> tuple[str, str]:
     note = f"[web-get: Wayback Machine snapshot {ts or '(closest to 2026)'} of {url}]\n\n"
     errors = []
     try:
-        return note + check_fetch_content(_jina_read(snap, dl)), snap
+        return note + check_fetch_content(_jina_read(snap, dl)), snap, {"snapshot": True}
     except ProviderError as e:
         errors.append(f"via r.jina.ai: {e}")
     raw = re.sub(r"(/web/\d+)(/)", r"\1id_\2", snap, count=1)
     try:
         _, hdrs, body = http("GET", raw, dl)
         text = html_to_text(body) if "html" in hdrs.get("content-type", "html") else body
-        return note + check_fetch_content(text), snap
+        return note + check_fetch_content(text), snap, {"snapshot": True}
     except ProviderError as e:
         errors.append(f"direct: {e}")
     raise ProviderError("wayback: " + "; ".join(errors))
 
 
-SEARCH = [("exa", search_exa), ("parallel", search_parallel), ("jina-mcp", search_jina_mcp),
-          ("jina-search", search_jina_s), ("composio", search_composio)]
-FETCH = [("exa", fetch_exa), ("parallel", fetch_parallel), ("jina-reader", fetch_jina_reader),
-         ("crawl4ai", fetch_crawl4ai), ("wayback", fetch_wayback)]
+SEARCH = [("exa-api", search_exa_api), ("exa-mcp", search_exa_mcp), ("parallel", search_parallel),
+          ("jina-mcp", search_jina_mcp), ("jina-search", search_jina_s), ("composio", search_composio)]
+FETCH = [("exa-api", fetch_exa_api), ("exa-mcp", fetch_exa_mcp), ("parallel", fetch_parallel),
+         ("jina-reader", fetch_jina_reader), ("pdf", fetch_pdf), ("crawl4ai", fetch_crawl4ai),
+         ("wayback", fetch_wayback)]
 ALL_NAMES = sorted({n for n, _ in SEARCH + FETCH})
+# A rung's own cap on the body it can return: after a capped copy at least this long, the rung
+# cannot do better, so it is skipped (billing: no exa-mcp call after a capped exa-api reply).
+RUNG_CAP = {"exa-api": EXA_API_MAX_CHARS, "exa-mcp": EXA_MAX_CHARS}
 
 
 # ---------------------------------------------------------------- ladder
@@ -820,14 +1150,16 @@ def parse_set(val: str | None) -> set[str]:
     for item in (x.strip().lower() for x in val.split(",")):
         if not item:
             continue
-        if item == "jina":
-            out |= {n for n in ALL_NAMES if n.startswith("jina")}
+        if item in ("jina", "exa"):
+            out |= {n for n in ALL_NAMES if n.startswith(item + "-")}
+        elif item in ("pdftotext",):
+            out.add("pdf")
         elif item in ("crwl", "crawl4ai"):
             out.add("crawl4ai")
         elif item in ALL_NAMES:
             out.add(item)
         else:
-            raise ValueError(f"unknown provider '{item}' (known: {', '.join(ALL_NAMES)}, jina)")
+            raise ValueError(f"unknown provider '{item}' (known: {', '.join(ALL_NAMES)}, exa, jina)")
     return out
 
 
@@ -858,31 +1190,80 @@ def guarded(seconds: float, thunk):
 
 
 def provider_timeout(name: str, timeout: float, crwl_timeout: float,
-                     wayback_timeout: float = DEFAULT_WAYBACK_TIMEOUT) -> float:
-    if name == "crawl4ai":
-        return crwl_timeout
-    return wayback_timeout if name == "wayback" else timeout
+                     wayback_timeout: float = DEFAULT_WAYBACK_TIMEOUT,
+                     pdf_timeout: float = DEFAULT_PDF_TIMEOUT) -> float:
+    return {"crawl4ai": crwl_timeout, "wayback": wayback_timeout, "pdf": pdf_timeout}.get(
+        name, timeout)
 
 
 def run_ladder(ladder, call, timeout: float, verbose: bool,
                crwl_timeout: float = DEFAULT_CRWL_TIMEOUT,
-               wayback_timeout: float = DEFAULT_WAYBACK_TIMEOUT) -> dict:
+               wayback_timeout: float = DEFAULT_WAYBACK_TIMEOUT,
+               pdf_timeout: float = DEFAULT_PDF_TIMEOUT, want_full: bool = False,
+               walk_budget: float = DEFAULT_WALK_BUDGET) -> dict:
     """A provider returns (content, where) or (content, where, meta); meta (e.g. truncated_by)
-    is merged into the result."""
+    is merged into the result.
+
+    want_full (fetch): a reply flagged truncated_by (a provider cap) is held and the ladder
+    walks on. The first complete reply at least FULLER_SLACK times as long as the longest held
+    one wins; at the end the longest reply is returned (truncated if it was capped). A rung
+    whose RUNG_CAP is no larger than the held copy is skipped, and no rung starts more than
+    walk_budget seconds after the first capped copy. The copies that did not win are listed
+    in the result's "held" (provider, chars, truncated)."""
     attempts = []
+    held: list[dict] = []  # successful replies that did not end the walk
+    walk_t0 = None  # when the first capped copy arrived
+
+    def finish(res: dict) -> dict:
+        others = [{"provider": r["provider"], "chars": len(r["content"]),
+                   "truncated": bool(r.get("truncated_by"))} for r in held if r is not res]
+        if others:
+            res["held"] = others
+        return res
+
+    def log(msg: str) -> None:
+        if verbose:
+            print(f"web-get: {msg}", file=sys.stderr)
+
     for name, fn in ladder:
+        capped = max((len(r["content"]) for r in held if r.get("truncated_by")), default=0)
+        if want_full and capped and RUNG_CAP.get(name, math.inf) <= capped:
+            err = f"skipped: its cap ({RUNG_CAP[name]} chars) cannot beat the held capped copy"
+            attempts.append({"provider": name, "ok": False, "error": err, "ms": 0})
+            log(f"try {name}: SKIP {err}")
+            continue
+        if want_full and walk_t0 is not None and time.monotonic() - walk_t0 >= walk_budget:
+            err = f"skipped: walk budget ({walk_budget:g} s after the capped copy) spent"
+            attempts.append({"provider": name, "ok": False, "error": err, "ms": 0})
+            log(f"try {name}: SKIP {err}")
+            continue
         t0 = time.monotonic()
-        budget = provider_timeout(name, timeout, crwl_timeout, wayback_timeout)
+        budget = provider_timeout(name, timeout, crwl_timeout, wayback_timeout, pdf_timeout)
         try:
             got = guarded(budget, lambda: call(fn, Deadline(budget)))
             content, where = got[0], got[1]
             meta = got[2] if len(got) > 2 else {}
             ms = int((time.monotonic() - t0) * 1000)
-            attempts.append({"provider": name, "ok": True, "error": None, "ms": ms})
-            if verbose:
-                print(f"web-get: try {name}: ok ({ms} ms, {len(content)} chars)", file=sys.stderr)
-            return {"ok": True, "provider": name, "url": where, "content": content,
-                    "attempts": attempts, **meta}
+            row = {"provider": name, "ok": True, "error": None, "ms": ms, "chars": len(content)}
+            attempts.append(row)
+            res = {"ok": True, "provider": name, "url": where, "content": content,
+                   "attempts": attempts, **meta}
+            if want_full and meta.get("truncated_by"):
+                row["truncated"] = True
+                held.append(res)
+                if walk_t0 is None:
+                    walk_t0 = time.monotonic()
+                log(f"try {name}: TRUNCATED ({ms} ms, {len(content)} chars, cap "
+                    f"{meta.get('truncated_to')}); walking on for a fuller copy")
+                continue
+            if want_full and capped and len(content) < FULLER_SLACK * capped:
+                row["note"] = f"shorter than the held capped copy ({capped} chars)"
+                held.append(res)
+                log(f"try {name}: ok but SHORT ({ms} ms, {len(content)} chars < "
+                    f"{FULLER_SLACK} x {capped}); walking on")
+                continue
+            log(f"try {name}: ok ({ms} ms, {len(content)} chars)")
+            return finish(res)
         except ProviderError as e:
             err = redact(str(e))
         except _HardTimeout:
@@ -891,8 +1272,10 @@ def run_ladder(ladder, call, timeout: float, verbose: bool,
             err = redact(f"internal error: {type(e).__name__}: {e}")
         ms = int((time.monotonic() - t0) * 1000)
         attempts.append({"provider": name, "ok": False, "error": err, "ms": ms})
-        if verbose:
-            print(f"web-get: try {name}: FAIL ({ms} ms) {err}", file=sys.stderr)
+        log(f"try {name}: FAIL ({ms} ms) {err}")
+    best = max(held, key=lambda r: len(r["content"]), default=None)
+    if best:
+        return finish(best)
     return {"ok": False, "provider": None, "url": None, "content": None, "attempts": attempts}
 
 
@@ -936,19 +1319,24 @@ def emit(kind: str, target: str, res: dict, as_json: bool) -> int:
         where = res["url"] or target
         label = "query" if kind == "search" and not res["url"] else "url"
         print(f"web-get: provider={res['provider']} {label}={where}", file=sys.stderr)
-        if res.get("truncated"):
-            if res.get("truncated_by") == "exa":
-                print(f"web-get: truncated: exa returned its {res['truncated_to']}-character cap "
-                      "(maxCharacters); the page is longer — quote it as an excerpt",
-                      file=sys.stderr)
-            else:
-                print(f"web-get: truncated to {res['truncated_to']} bytes (--max-bytes); the page "
-                      "is longer", file=sys.stderr)
+        capped = res.get("truncated_by") in CAPPED_PROVIDERS
+        if capped:
+            print(f"web-get: truncated: {res['truncated_by']} returned its "
+                  f"{res['truncated_to']}-character cap (maxCharacters) and no other rung "
+                  "gave a fuller copy; the page is longer — not yet fetched (operator rule "
+                  "2026-10-11, exit 6): try other URL forms, fix the tool, or pause",
+                  file=sys.stderr)
+        if res.get("max_bytes_cut"):
+            print(f"web-get: truncated to {res['max_bytes_cut']} bytes (--max-bytes); the page "
+                  "is longer", file=sys.stderr)
+        if res.get("snapshot"):
+            print("web-get: served from a Wayback Machine snapshot, not the live page",
+                  file=sys.stderr)
         if as_json:
             print(json.dumps(res, ensure_ascii=False))
         else:
             sys.stdout.write(res["content"].rstrip("\n") + "\n")
-        return EXIT_OK
+        return EXIT_TRUNCATED if capped else EXIT_OK
     summary = "; ".join(f"{a['provider']}: {a['error']} ({a['ms']} ms)" for a in res["attempts"])
     print(f"web-get: {PAUSE_MSG}; {kind} {target!r}; attempts: {summary or 'none (all skipped)'}",
           file=sys.stderr)
@@ -961,20 +1349,22 @@ def emit(kind: str, target: str, res: dict, as_json: bool) -> int:
 
 
 def cmd_check(only, skip, timeout, as_json, verbose, crwl_timeout=DEFAULT_CRWL_TIMEOUT,
-              wayback_timeout=DEFAULT_WAYBACK_TIMEOUT) -> int:
+              wayback_timeout=DEFAULT_WAYBACK_TIMEOUT, pdf_timeout=DEFAULT_PDF_TIMEOUT) -> int:
     """Narrowed by --only/--skip, ok means every selected probe is healthy; else the full
     threshold (>= 3 healthy, one search and one fetch among them)."""
     probe_url = env("WEB_GET_CHECK_URL", "https://example.com/")
+    pdf_url = env("WEB_GET_CHECK_PDF_URL", "https://www.irs.gov/pub/irs-pdf/fw9.pdf")
     jobs = []
     for name, fn in select(SEARCH, only, skip):
         jobs.append(("search", name, lambda fn=fn: fn("web-get health check", 1, Deadline(timeout))))
     for name, fn in select(FETCH, only, skip):
-        t = provider_timeout(name, timeout, crwl_timeout, wayback_timeout)
-        jobs.append(("fetch", name, lambda fn=fn, t=t: _probe_fetch(fn, probe_url, t)))
+        t = provider_timeout(name, timeout, crwl_timeout, wayback_timeout, pdf_timeout)
+        u = pdf_url if name == "pdf" else probe_url
+        jobs.append(("fetch", name, lambda fn=fn, t=t, u=u: _probe_fetch(fn, u, t)))
     if not jobs:
         print("web-get: no providers selected", file=sys.stderr)
         return EXIT_USAGE
-    jina_key()  # resolve once before threads start
+    _resolve_keys()  # once, before threads start
 
     def run(job):
         kind, name, thunk = job
@@ -989,7 +1379,7 @@ def cmd_check(only, skip, timeout, as_json, verbose, crwl_timeout=DEFAULT_CRWL_T
 
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs))
     futs = [ex.submit(run, j) for j in jobs]
-    longest = max(timeout, crwl_timeout, wayback_timeout)
+    longest = max(timeout, crwl_timeout, wayback_timeout, pdf_timeout)
     concurrent.futures.wait(futs, timeout=longest + GUARD_SLACK)
     rows, hung = [], False
     for j, fu in zip(jobs, futs):
@@ -1012,8 +1402,11 @@ def cmd_check(only, skip, timeout, as_json, verbose, crwl_timeout=DEFAULT_CRWL_T
         for k, n, g, e, ms in rows:
             print(f"{k:6} {n:12} {'ok  ' if g else 'FAIL'} {ms:6d} ms" + (f"  {e}" if e else ""))
         if not jina_key():
-            print(f"note: no Jina key ({_jina_state['note']}); jina-mcp/jina-search unavailable, "
+            print(f"note: no Jina key ({key_note('JINA_API_KEY')}); jina-mcp/jina-search unavailable, "
                   "jina-reader keyless", file=sys.stderr)
+        if not exa_key():
+            print(f"note: no Exa key ({key_note('EXA_API_KEY')}); exa-api unavailable, exa-mcp "
+                  "keyless", file=sys.stderr)
     sys.stdout.flush()
     if ok:
         why = ""
@@ -1026,6 +1419,7 @@ def cmd_check(only, skip, timeout, as_json, verbose, crwl_timeout=DEFAULT_CRWL_T
     if hung:
         sys.stderr.flush()
         kill_children()
+        cleanup_tmpdirs()
         os._exit(rc)
     return rc
 
@@ -1069,10 +1463,17 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--wayback-timeout", type=float, default=None,
                         help="seconds for the wayback attempt (default max(120, --timeout), "
                              "$WEB_GET_WAYBACK_TIMEOUT)")
+    common.add_argument("--pdf-timeout", type=float, default=None,
+                        help="seconds for the pdf attempt (default max(120, --timeout), "
+                             "$WEB_GET_PDF_TIMEOUT)")
+    common.add_argument("--walk-budget", type=float, default=None,
+                        help="fetch: seconds the ladder may keep walking after a provider-capped "
+                             "copy (default 300, $WEB_GET_WALK_BUDGET)")
     common.add_argument("--json", action="store_true", help="JSON object on stdout")
     common.add_argument("--verbose", "-v", action="store_true", help="log each attempt to stderr")
     ap = argparse.ArgumentParser(prog="web-get", description=__doc__.split("\n\n")[0],
-                                 epilog="Exit 0 ok, 2 usage, 5 all providers failed (PAUSE).")
+                                 epilog="Exit 0 ok, 2 usage, 5 all providers failed (PAUSE), "
+                                        "6 fetch cut at a provider cap (not yet fetched).")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("search", parents=[common], help="web search through the ladder")
     s.add_argument("query")
@@ -1080,6 +1481,8 @@ def main(argv: list[str] | None = None) -> int:
     f = sub.add_parser("fetch", parents=[common], help="fetch one page through the ladder")
     f.add_argument("url")
     f.add_argument("--max-bytes", type=int, default=0, help="truncate content to N bytes")
+    f.add_argument("--no-page-check", action="store_true",
+                   help="accept a page the wrong-page heuristic would reject (checked by you)")
     sub.add_parser("check", parents=[common], help="probe every provider once")
     a = ap.parse_args(argv)
 
@@ -1093,18 +1496,23 @@ def main(argv: list[str] | None = None) -> int:
                                      DEFAULT_CRWL_TIMEOUT, a.timeout)
         a.wayback_timeout = rung_budget(a.wayback_timeout, "WEB_GET_WAYBACK_TIMEOUT",
                                         DEFAULT_WAYBACK_TIMEOUT, a.timeout)
+        a.pdf_timeout = rung_budget(a.pdf_timeout, "WEB_GET_PDF_TIMEOUT",
+                                    DEFAULT_PDF_TIMEOUT, a.timeout)
+        a.walk_budget = rung_budget(a.walk_budget, "WEB_GET_WALK_BUDGET",
+                                    DEFAULT_WALK_BUDGET, -math.inf)
     except ValueError as e:
         print(f"web-get: {e}", file=sys.stderr)
         return EXIT_USAGE
-    if not all(math.isfinite(x) and x > 0 for x in (a.timeout, a.crwl_timeout, a.wayback_timeout)):
-        print("web-get: --timeout, --crwl-timeout and --wayback-timeout must be finite and > 0",
-              file=sys.stderr)
+    if not all(math.isfinite(x) and x > 0 for x in (a.timeout, a.crwl_timeout, a.wayback_timeout,
+                                                      a.pdf_timeout, a.walk_budget)):
+        print("web-get: --timeout, --crwl-timeout, --wayback-timeout, --pdf-timeout and "
+              "--walk-budget must be finite and > 0", file=sys.stderr)
         return EXIT_USAGE
     install_signal_handlers()
 
     if a.cmd == "check":
         return cmd_check(only, skip, a.timeout, a.json, a.verbose, a.crwl_timeout,
-                         a.wayback_timeout)
+                         a.wayback_timeout, a.pdf_timeout)
 
     if a.cmd == "search":
         q = a.query.strip()
@@ -1115,8 +1523,10 @@ def main(argv: list[str] | None = None) -> int:
         if not ladder:
             print("web-get: no search providers left after --only/--skip", file=sys.stderr)
             return EXIT_USAGE
+        if KEYED_RUNGS & {n for n, _ in ladder}:
+            _resolve_keys()  # before the ladder: never inside a rung's budget or SIGALRM guard
         res = run_ladder(ladder, lambda fn, dl: fn(q, min(a.n, 25), dl), a.timeout, a.verbose,
-                         a.crwl_timeout, a.wayback_timeout)
+                         a.crwl_timeout, a.wayback_timeout, a.pdf_timeout)
         return emit("search", q, res, a.json)
 
     url = a.url.strip()
@@ -1133,16 +1543,22 @@ def main(argv: list[str] | None = None) -> int:
     if not ladder:
         print("web-get: no fetch providers left after --only/--skip", file=sys.stderr)
         return EXIT_USAGE
+    _page_check["on"] = not a.no_page_check
+    if KEYED_RUNGS & {n for n, _ in ladder}:
+        _resolve_keys()  # before the ladder: never inside a rung's budget or SIGALRM guard
     # Exa always gets its full cap, so a small --max-bytes cannot make its reply near-empty
-    # and a reply at the cap reliably means Exa cut the page (flagged below).
+    # and a reply at the cap reliably means Exa cut the page; a capped reply makes the ladder
+    # walk on (want_full), a --max-bytes cut below is the caller's choice and never does.
     res = run_ladder(ladder, lambda fn, dl: fn(url, dl, EXA_MAX_CHARS), a.timeout, a.verbose,
-                     a.crwl_timeout, a.wayback_timeout)
+                     a.crwl_timeout, a.wayback_timeout, a.pdf_timeout, want_full=True,
+                     walk_budget=a.walk_budget)
     res["truncated"] = bool(res.get("truncated_by"))
     if res["ok"] and a.max_bytes > 0:
         cut = truncate_bytes(res["content"], a.max_bytes)
         if cut != res["content"]:
-            res.update(content=cut, truncated=True, truncated_by="max-bytes",
-                       truncated_to=a.max_bytes)
+            res.update(content=cut, truncated=True, max_bytes_cut=a.max_bytes)
+            if not res.get("truncated_by"):  # a provider cap stays the reason (exit 6)
+                res.update(truncated_by="max-bytes", truncated_to=a.max_bytes)
     return emit("fetch", url, res, a.json)
 
 

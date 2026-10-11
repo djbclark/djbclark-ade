@@ -51,7 +51,8 @@ An error on one page or one query is not that case: walk the ladder before
 giving up (your
 other search/fetch tools, then `~/src/djbclark-ade/bin/web-get search|fetch`
 if you have a shell; `fallback-chains/references/web-access.md`). If a source
-the slice needs still fails on every rung (`web-get` exit 5), stop with
+the slice needs still fails on every rung (`web-get` exit 5), or only a copy
+cut at a provider's cap exists (`web-get` exit 6) after other URL forms, stop with
 `BLOCKED: web access: <url or query>: <each rung's error>` instead of writing
 findings without it (operator rule, 2026-10-11).
 

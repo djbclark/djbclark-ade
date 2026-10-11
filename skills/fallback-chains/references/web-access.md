@@ -49,6 +49,35 @@ already stops a run that has no live search at all; this rule extends that to
 a single needed page or query. Memory note:
 `~/ops/site-private/memory/feedback_web_failover_pause.md`.
 
+1e. **Every needed page is eventually fetched (operator, 2026-10-11, later
+the same day).**
+
+> "We need to eventually get all of the web pages you are interested in
+> getting, don't accept errors meaning we never get something, we always
+> want to fallback or fix or stop and notify me so we can work together to
+> fix."
+
+A fetch error is never a final state. There are three moves, and only three:
+
+1e.1. **Fall back.** The next rung, `web-get`, then `web-get --only
+   <provider>` for each rung, then other URL forms: arXiv abs, PDF and HTML;
+   `raw.githubusercontent.com` or `gh api`; the PDF itself; a publisher
+   mirror; archive copies (3i).
+1e.2. **Fix the tool** in `~/src/djbclark-ade` when the gap is ours (a rung
+   that cannot read a page type, a wrong check), then fetch again.
+1e.3. **Stop and notify.** Pause as in 1b and run `~/.local/bin/hermes-ping
+   "<repo>: web access: <urls>: <errors>"` so the operator and the agent fix
+   it together.
+
+A truncated body counts as not yet fetched: Exa's cap, any provider limit, or
+`web-get`'s `truncated: ... not yet fetched` line and exit 6 (2.10). A `--max-bytes` cut
+the caller asked for is not truncation. Never record a source as
+"unverified" or "could not fetch" and move on. A workflow's failed fetches
+are a list to clear before its synthesis counts as final, and the rule
+applies retroactively: past work whose fetches failed gets its pages fetched
+now, and the deliverables that lacked them are revised where the page
+changes them.
+
 ## 2. Shell ladder: `web-get`
 
 `~/src/djbclark-ade/bin/web-get` is the one shell entry point, linked as
@@ -56,71 +85,150 @@ a single needed page or query. Memory note:
 as the last automated rung for every client below. The script's docstring is
 authoritative; this is its contract as of 2026-10-11.
 
-2.1. `web-get search '<query>' [--n 8]`: exa (`web_search_exa`) → parallel
-   (`web_search`) → jina-mcp (`search_web`, key) → jina-search (`s.jina.ai`,
-   key) → composio (`COMPOSIO_SEARCH_DUCK_DUCK_GO`).
-2.2. `web-get fetch '<url>' [--max-bytes N]`: exa (`web_fetch_exa`) →
-   parallel (`web_fetch`) → jina-reader (`r.jina.ai`, key if available) →
-   crawl4ai (`crwl`, renders JavaScript) → wayback (snapshot via `r.jina.ai`,
-   then direct). The URL is normalised once (IDNA host, percent-encoded path),
-   so IRIs such as `https://de.wikipedia.org/wiki/Köln` work. A `--max-bytes`
-   cut prints `web-get: truncated to N bytes` on stderr and sets
-   `"truncated": true` in `--json`: quote such a page as an excerpt. Exa cuts
-   silently at its 200000-character `maxCharacters` cap (a War and Peace fetch
-   came back with exactly 200000 body characters and no marker), so a reply at
-   the cap is flagged the same way (`truncated: exa returned its
-   200000-character cap` on stderr, `"truncated_by": "exa"`).
+2.1. `web-get search '<query>' [--n 8]`: exa-api (`api.exa.ai/search`, key;
+   one call, highlights inline) → exa-mcp (keyless `web_search_exa`) →
+   parallel (`web_search`) → jina-mcp (`search_web`, key) → jina-search
+   (`s.jina.ai`, key) → composio (`COMPOSIO_SEARCH_DUCK_DUCK_GO`).
+2.2. `web-get fetch '<url>' [--max-bytes N] [--no-page-check] [--walk-budget S]`: exa-api
+   (`api.exa.ai/contents`, key, full text up to 1000000 characters) → exa-mcp
+   (keyless `web_fetch_exa`, 200000-character cap) → parallel (`web_fetch`) →
+   jina-reader (`r.jina.ai`, key if available) → pdf (PDF URLs only, 2.9) →
+   crawl4ai (`crwl`, renders JavaScript; skips PDFs) → wayback (snapshot via
+   `r.jina.ai`, then direct). With no Exa key the exa-api rung fails at once
+   (`no Exa key`) and exa-mcp answers. stderr and `--json` name the rung that
+   served the page (`provider=exa-api` or `provider=exa-mcp`). The URL is
+   normalised once (IDNA host, percent-encoded path), so IRIs such as
+   `https://de.wikipedia.org/wiki/Köln` work. A `--max-bytes` cut prints
+   `web-get: truncated to N bytes` on stderr and sets `"truncated": true` and
+   `"max_bytes_cut": N` in `--json`: quote such a page as an excerpt. A
+   provider cap is different (2.10), and a `--max-bytes` cut never hides one.
 2.3. A rung fails on a network error, HTTP ≥ 400, an MCP or JSON-RPC error, a
    timeout, near-empty content, a block page, or a rate-limit or quota notice
    returned as content (Exa's free tier answers "You've hit Exa's free MCP rate
-   limit" with a normal reply). A Parallel fetch also fails when it returns the
+   limit" with a normal reply). A fetch rung also fails when it returns the
    wrong page (2.8). The next rung is then tried.
 2.4. Timeouts are wall-clock per attempt: `--timeout` (default 45 s) for the
    HTTP rungs, `--crwl-timeout` (default 150 s, or `$WEB_GET_CRWL_TIMEOUT`) for
    crawl4ai, whose cold Chromium start took 30-120 s at load 30-38, and
    `--wayback-timeout` (default 120 s, or `$WEB_GET_WAYBACK_TIMEOUT`) for
    wayback, whose availability lookup plus snapshot read took 54-57 s for one
-   dewiki page (6.8). Unless set by flag or environment, the crawl4ai and
-   wayback budgets are never below `--timeout`. All three must be finite and
-   > 0; a bad value (`nan`, a non-number in the environment) is a usage error,
-   exit 2. `check` uses the same budgets. Worst case a fetch walks for about 7
-   minutes before exit 5.
-2.5. `web-get check`: probes every provider once, in parallel, and exits 0
-   when at least 3 are healthy with one search and one fetch provider among
-   them, else 5. Narrowed with `--only`/`--skip`, it exits 0 only when every
-   selected provider is healthy, else 5 without the pause message (one sick
-   provider is not an outage). It makes real calls, including Parallel's (billed per request
-   on their side, free to us today) and a crawl4ai launch.
-2.6. `--only`/`--skip` take provider names (`jina` means every jina-* rung,
-   `crwl` is crawl4ai). `--json` prints `{ok, provider, url, attempts,
-   content, truncated}`, plus `truncated_by` (`max-bytes` or `exa`) and
-   `truncated_to` when `truncated` is true.
+   dewiki page (6.8), and `--pdf-timeout` (default 120 s, or
+   `$WEB_GET_PDF_TIMEOUT`) for the pdf rung's download and extraction (a
+   16 MB, 212-page system card took 7.4 s). Unless set by flag or environment,
+   the crawl4ai, wayback and pdf budgets are never below `--timeout`. All four
+   must be finite and > 0; a bad value (`nan`, a non-number in the
+   environment) is a usage error, exit 2. `check` uses the same budgets. Worst
+   case a fetch walks for about 11 minutes before exit 5. After a
+   provider-capped copy (2.10) no rung starts more than `--walk-budget`
+   seconds later (default 300, or `$WEB_GET_WALK_BUDGET`; skipped rungs say
+   "walk budget ... spent"). The vault read (5.6.4) runs before the ladder,
+   outside every rung's budget.
+2.5. `web-get check`: probes every provider once (13 probes: 6 search, 7
+   fetch), in parallel, and exits 0 when at least 3 are healthy with one
+   search and one fetch provider among them, else 5. Narrowed with
+   `--only`/`--skip`, it exits 0 only when every selected provider is
+   healthy, else 5 without the pause message (one sick provider is not an
+   outage). It makes real calls: two billed Exa REST calls (one search, one
+   contents page), Parallel's (billed per request on their side, free to us
+   today), a crawl4ai launch, and a download of a small PDF (the IRS W-9,
+   `$WEB_GET_CHECK_PDF_URL`) for the pdf rung.
+2.6. `--only`/`--skip` take provider names (`exa` means both exa-* rungs,
+   `jina` every jina-* rung, `crwl` is crawl4ai, `pdftotext` is pdf).
+   `--json` prints `{ok, provider, url, attempts, content, truncated}`, plus
+   `truncated_by` (`exa-api` or `exa-mcp` for a provider cap, else
+   `max-bytes`) and `truncated_to` when `truncated` is true, `max_bytes_cut`
+   when `--max-bytes` cut the body, `held` (the copies that did not win:
+   provider, chars, truncated), `"snapshot": true` for a wayback copy, and
+   `pdf_pages` and `pdf_bytes` for a pdf reply. Each successful attempt
+   carries `chars`, a capped one `"truncated": true`, a shorter held one a
+   `note`.
 2.7. Exit 0: a provider answered (stderr names it: `web-get:
    provider=<p> url=<u>`). Exit 2: usage error. **Exit 5: every provider
-   failed. Pause (section 1).** SIGTERM, SIGINT or SIGHUP kill any running
-   crwl and its Chromium before web-get exits 128+n.
-2.8. Parallel returns soft-404 and redirect pages as ordinary results (a
-   missing zillow listing came back as the site's "Anchorage AK Real Estate"
-   page, under the requested URL). `web-get` checks Parallel's page and fails
-   the rung (`parallel: wrong page (<reason>)`) on a redirect to another site
-   or to the site root, a soft-404 title in page-chrome form ("Page not
-   found", "404", "Error 404", "404 Not Found", "That page can't be found";
-   skipped when the path itself mentions 404 or "not found"), or a title
-   sharing no word with a URL path of two or more words when the body's first
-   5000 characters (URLs removed) do not name the path either. A title
-   matches when a path word's first five letters are in it or a title word is
-   in the path ("Built-in Types" for `stdtypes.html`); the body vouches for a
-   Wikipedia redirect (`/wiki/Samuel_Clemens`, titled "Mark Twain").
-   http→https, `www.`, a trailing slash, `/index.html`, same-site redirects
-   (another path, or another host of the same domain such as
-   `en.m.wikipedia.org`), redirector links (`doi.org`, `youtu.be`, `t.co`,
-   `bit.ly`) and twitter.com↔x.com pass; on `github.io`, `pages.dev` and
-   similar shared hosts each subdomain is its own site. This is a heuristic,
-   for Parallel only, and it misses cases: a realistic zillow path naming the
-   city (`1-Main-St-Anchorage-AK/`) matches the city page's title, and the
-   other rungs are not checked at all (Jina Reader gave the same zillow city
-   page with an empty title). So still check the title matches the page you
-   asked for before quoting it.
+   failed. Pause (section 1).** **Exit 6 (fetch): the best copy is cut at a
+   provider's cap.** It is printed, but it is not fetched (1e): try other URL
+   forms, fix the tool, or pause. A script that checks only for exit 0 treats
+   it as a failure, which is the point. SIGTERM, SIGINT or SIGHUP kill any
+   running crwl and its Chromium, curl, pdftotext or vault client and remove
+   the pdf rung's temp dirs before web-get exits 128+n.
+2.8. Providers return soft-404 and redirect pages as ordinary results (a
+   missing zillow listing came back from Parallel as the site's "Anchorage AK
+   Real Estate" page, under the requested URL, and from Jina Reader as the
+   same page with an empty title, or as zillow's "Uh oh, Error 404" page).
+   `web-get` checks the page on every fetch rung that reports a final URL or
+   a title: exa-api (the result's `url` and `title`), exa-mcp (the `# title`
+   and `URL:` header), parallel (`url`, `title`) and jina-reader (`Title:` and
+   `URL Source:`; an empty title falls back to the first `# ` heading in the
+   first 20000 characters). It fails the rung (`<rung>: wrong page
+   (<reason>)`) on a redirect to another site or to the site root, a soft-404
+   title in page-chrome form ("Page not found", "404", "Error 404", "404 Not
+   Found", "That page can't be found"; skipped when the path itself mentions
+   404 or "not found"), or a title sharing no word with a URL path of two or
+   more words when the body's first 5000 characters (URLs removed) do not
+   name the path either. Path words that name storage, a CMS or a repository
+   rather than the page (`cache`, `epub`, `images`, `uploads`, `files`,
+   `sites`, `static`, `assets`, `media`, `download(s)`, `public`,
+   `resources`, `dist`, `blob`, `tree`, `refs`, `heads`, `attachment(s)`) do
+   not count: on 2026-10-11 `gutenberg.org/cache/epub/2701/pg2701-images.html`
+   ("Moby Dick; or The Whale | Project Gutenberg") failed exa-api (billed),
+   exa-mcp and jina-reader as a wrong page and only crawl4ai served it, 36 s
+   instead of 1 s. A title matches when a path word's first five
+   letters are in it or a title word is in the path ("Built-in Types" for
+   `stdtypes.html`); the body vouches for a Wikipedia redirect
+   (`/wiki/Samuel_Clemens`, titled "Mark Twain"). http→https, `www.`, a
+   trailing slash, `/index.html`, same-site redirects (another path, or
+   another host of the same domain such as `en.m.wikipedia.org`), redirector
+   links (`doi.org`, `youtu.be`, `t.co`, `bit.ly`) and twitter.com↔x.com
+   pass; on `github.io`, `pages.dev` and similar shared hosts each subdomain
+   is its own site. The pdf rung is not checked (a valid PDF after a CDN or S3
+   redirect is the document; a login page is not a PDF and fails anyway), nor
+   are crawl4ai and wayback (no title or final URL). This is a heuristic and
+   it misses cases: a realistic zillow path naming the city
+   (`1-Main-St-Anchorage-AK/`) matches the city page's title. It can also
+   reject a correct page whose title shares no word with its URL (a slug in
+   another language); for a page you have checked yourself, `--no-page-check`
+   turns it off. So still check the title matches the page you asked for
+   before quoting it.
+2.9. PDFs. The pdf rung handles URLs that are PDFs: a `.pdf` path or an arXiv
+   `/pdf/` link, or otherwise a URL whose headers (`Content-Type`) or first
+   bytes (`%PDF-`) say PDF, read with one GET of the headers and the first
+   1 KB. It downloads
+   with `curl` (`--fail`, 200 MB `--max-filesize`, http/https only) into a
+   fresh `mkdtemp` directory, checks the `%PDF-` magic, extracts the text with
+   `pdftotext -enc UTF-8` (poppler 26.10.0, `/opt/homebrew/bin`; `pypdf`
+   6.19.0 through `uv run` when pdftotext is missing; 5.1.0 was affected by
+   GHSA-7hfw-26vp-jp8m), and removes the directory, on a signal too. No child
+   process (curl, pdftotext, pypdf, crwl, composio) inherits `EXA_API_KEY` or
+   `JINA_API_KEY`, even when they are exported. crawl4ai skips a PDF (`crwl`
+   0.9.4 dies with "'NoneType' object has no attribute 'raw_markdown'"), but
+   tries a `.pdf` URL that the pdf rung downloaded and found to be HTML (a
+   viewer or landing page), and a `crwl` crash with that message is
+   reported as "no markdown for this page (a PDF or other non-HTML
+   document?)". Exa, Parallel and Jina read most PDFs themselves; the pdf rung
+   is the local, exact copy when they fail or truncate.
+2.10. **Truncation is not success.** A fetch rung whose body comes back at
+   its provider's cap is held and the ladder walks on for a fuller copy:
+   exa-api at its 1000000-character `text.maxCharacters`, exa-mcp at its
+   200000-character `maxCharacters` (Exa cuts silently: a War and Peace fetch
+   came back with exactly 200000 body characters and no marker). The first
+   complete body at least 0.8 times as long as the longest capped one wins;
+   a shorter complete body is held too (`"note": "shorter than the held capped
+   copy"`). If none beats it, the longest body is returned with `"truncated":
+   true`, `"truncated_by": "exa-api"` or `"exa-mcp"`, a stderr line
+   ending "not yet fetched (operator rule 2026-10-11, exit 6): try other URL
+   forms, fix the tool, or pause" (1e), and **exit 6**. A `--max-bytes` cut of
+   such a copy keeps `truncated_by`, both stderr lines and exit 6. A rung
+   whose own cap is no larger than the held copy is skipped without a call
+   (no exa-mcp call after a capped exa-api reply). `--json` `held` lists the
+   copies that lost, so a shorter complete copy (or, with the 0.8 slack, a
+   capped one longer than the winner) is never dropped silently. The walk
+   stops starting rungs `--walk-budget` seconds after the first capped copy
+   (2.4); a wayback copy that wins is marked `"snapshot": true` and stderr
+   says it is not the live page. `EXA_CAP_SLACK` is 0.999: a body within
+   0.1% of the cap counts as capped. On 2026-10-11 the 212-page Fable 5.1 system card came
+   back complete from exa-api (371113 characters); with exa-api skipped,
+   exa-mcp was capped at 200000 and parallel then served the full 371489. A
+   `--max-bytes` cut is the caller's choice and never makes the ladder walk
+   on.
 
 Firecrawl is not on the shell ladder: there is no API key on the machine, only
 the claude.ai connector.
@@ -135,9 +243,9 @@ a page that is clearly not the content (login wall, bot check, cookie page).
 | 3a. Claude Code | `exa` `web_search_exa`; `parallel-search` `web_search`; `jina` `search_web`; built-in WebSearch; Firecrawl connector `firecrawl_search` (low credits, billed: 6.1); Composio search toolkit; `web-get search` | `exa` `web_fetch_exa`; `parallel-search` `web_fetch`; `jina` `read_url`; built-in WebFetch; `crawl4ai` `scrape {targets}` (JavaScript); Firecrawl `firecrawl_scrape` (6.1); Composio `FETCH_URL_CONTENT`; `web-get fetch` | `~/.claude.json` (user scope; `jina` uses a `headersHelper`) |
 | 3b. Codex | built-in web search; `exa`; `parallel-search`; `jina`; `web-get search` | `exa`; `parallel-search`; `jina` `read_url`; `crawl4ai` `scrape {targets}`; `web-get fetch` | `~/.codex/config.toml` (`jina` uses `http_headers_helper`; `crawl4ai` has `startup_timeout_sec = 120`) |
 | 3c. opencode | `exa`; `parallel-search`; `jina`; `web-get search` | same servers' fetch tools; `crawl4ai` `scrape {targets}`; `web-get fetch` | `~/.config/opencode/opencode.json` |
-| 3d. Cursor | `exa`; `parallel-search`; `jina`; `web-get search` | same servers' fetch tools; `crawl4ai` `scrape {targets}`; `web-get fetch` | `~/.cursor/mcp.json` |
+| 3d. Cursor | `exa`; `parallel-search`; `jina`; `web-get search` | same servers' fetch tools; `crawl4ai` `scrape {targets}`; `web-get fetch` | `~/.cursor/mcp.json`; each server also needs a per-project approval (`cursor-agent mcp enable <name>`, 6.4) |
 | 3e. agy (only via `acp-run agy`) | `exa`; `parallel-search`; `jina`; `web-get search` | same servers' fetch tools; `crawl4ai` `scrape {targets}`; `web-get fetch` | `~/.gemini/config/mcp_config.json` |
-| 3f. Hermes | its web plugin: `ddgs`, then keyless Exa, Parallel, Keenable | `jina-reader` extract backend; the `blocked-page-recovery` / `web-research` skill script `recover_page.py` (Jina Reader with the key is its tier 3) | `~/.hermes/config.yaml` `web.search_backend`, `web.extract_backend`; plugin `~/.hermes/plugins/web/jina_reader/` |
+| 3f. Hermes | its web plugin: keyed Exa (`web.search_backend: exa`, `provider_tier.exa: paid`, since 2026-10-11; was `ddgs`, whose package was not even installed in the Hermes venv), then keyless Exa, Parallel, Keenable | `jina-reader` extract backend; the `blocked-page-recovery` / `web-research` skill script `recover_page.py` (Jina Reader with the key is its tier 3) | `~/.hermes/config.yaml` `web.search_backend`, `web.extract_backend`; plugin `~/.hermes/plugins/web/jina_reader/` |
 
 3g. Composio search toolkit tools: `WEB`, `DUCK_DUCK_GO`, `EXA_ANSWER`,
 `TAVILY`, `FETCH_URL_CONTENT` (see the `composio-cli` skill).
@@ -165,6 +273,8 @@ that the copy is an archive snapshot and give its date.
 | 4i. Built-in | Claude Code WebSearch/WebFetch; Codex built-in web search | client login | | |
 | 4j. Composio | `composio` CLI | Composio login | search toolkit (3g) | |
 | 4k. Archives | Wayback Machine, archive.today | none | GET | Recovery only (3i). |
+| 4l. Exa REST API | `https://api.exa.ai` | `x-api-key: $EXA_API_KEY` (5.6) | POST `/search {query, numResults, type: auto, contents: {highlights: true}}`, POST `/contents {urls: [...], text: {maxCharacters}}` | Billed per call (about $0.001 a contents page; a search of up to 10 results is the base price, highlights included, and `web-get search --n 11-25` costs more). Errors are `{error, tag}` (`INVALID_API_KEY`, `NO_MORE_CREDITS`, ...); a per-URL failure is in `statuses[]` (`CRAWL_NOT_FOUND`). `text.maxCharacters` is documented with a maximum of 10000 but 1000000 is accepted and returned 370913 characters on 2026-10-11. Docs: `https://exa.ai/docs/llms.txt`, `reference/search.md`, `reference/get-contents.md`. |
+| 4m. PDF rung | local `curl` + `pdftotext` (poppler) | none | `web-get fetch --only pdf` | 2.9. |
 
 ## 5. Where config and keys live
 
@@ -185,8 +295,48 @@ Names and paths only. Never print or copy a key.
 5.4. To rotate: `sudo-secretspec set JINA_API_KEY`, replace the four files in
    5.3 (temp file, then `mv -f`, keep 0600), restart Hermes, reconnect the
    MCP servers, run `web-get check`.
-5.5. Exa, Parallel and Crawl4AI are keyless. Firecrawl has no key on the
+5.5. Parallel and Crawl4AI are keyless. Exa's MCP has a keyless tier (6.7);
+   its REST API needs `EXA_API_KEY` (5.6). Firecrawl has no key on the
    machine.
+5.6. **`EXA_API_KEY` (added 2026-10-11)**, `sudo-secretspec` entry
+   `EXA_API_KEY` (name only here; 36 characters). Wiring, verified 2026-10-11
+   with values masked:
+   5.6.1. Claude Code (`~/.claude.json`, `mcpServers.exa.headersHelper`) and
+      Codex (`~/.codex/config.toml`, `[mcp_servers.exa]
+      http_headers_helper`): a header helper that runs `sudo-secretspec run`
+      and prints `{"x-api-key": ...}` on each connect. Neither file holds the
+      key.
+   5.6.2. opencode (`~/.config/opencode/opencode.json`, `mcp.exa.headers`),
+      Cursor (`~/.cursor/mcp.json`, `mcpServers.exa.headers`) and agy
+      (`~/.gemini/config/mcp_config.json`, `mcpServers.exa.headers`): a
+      plaintext `x-api-key` header, files mode 0600.
+   5.6.3. Hermes: `EXA_API_KEY` in `~/.hermes/.env` (0600) and, in
+      `~/.hermes/config.yaml`, `web.search_backend: exa` with
+      `web.provider_tier.exa: paid` (always keyed, never the free tier);
+      `web.extract_backend` stays `jina-reader` (set it to `exa` to move
+      extraction too). `exa-py` 2.10.2 was installed through Hermes's own
+      `tools.lazy_deps.ensure("search.exa")`; Hermes would otherwise install
+      it on first use. `config.yaml` is not generated by any Ansible role: it
+      is a plain file tracked by the `~/.hermes` git repo (the switch is
+      commit a3e2f94 there, which holds only that hunk). Verified 2026-10-11:
+      a non-model `web_search_tool` call in the Hermes venv returned Exa
+      results with `keyless? False`, and the gateway was restarted
+      (`launchctl kickstart -k gui/$(id -u)/com.stayturgid.hermes-gateway`,
+      11:09:57) and reconnected Discord and Telegram.
+   5.6.4. `web-get`: `$EXA_API_KEY` if set, else read with `$JINA_API_KEY` in
+      one `sudo-secretspec run` per invocation, kept in memory and sent only
+      as the `x-api-key` header to `api.exa.ai` (never argv, never printed).
+      The read runs before the ladder and only when a selected rung can use
+      a key, through `/usr/local/bin/sudo-secretspec` when present (a PATH
+      entry could shadow it), bounded by `$WEB_GET_SECRETSPEC_TIMEOUT`
+      (default 30 s; the client's process tree is killed after). A failed
+      read names its reason on every keyed rung (`no Exa key (sudo-secretspec
+      run timed out after 30 s)`). r.jina.ai retries once keyless when it
+      rejects the Jina key (401/403).
+   5.6.5. To rotate: `sudo-secretspec set EXA_API_KEY`, replace the three
+      plaintext copies in 5.6.2 and the `~/.hermes/.env` line (temp file,
+      then `mv -f`, keep 0600), restart Hermes, reconnect the MCP servers, run
+      `web-get check`.
 
 ## 6. Known limits (2026-10-11)
 
@@ -196,10 +346,42 @@ Names and paths only. Never print or copy a key.
    is not reachable from a shell script.
 6.2. Jina: the key is a free trial key not attached to an account. It may run
    out or expire; a 401 or 402 from Jina means rotate (section 5).
-6.3. opencode: `opencode mcp list` prints "No MCP servers configured" for every
-   server, including ones that predate this chain. This is a pre-existing
-   listing bug; `opencode debug config` does resolve them. Not verified live.
-6.4. Cursor and agy: configured but not verified live. Codex lists `exa` as
+6.3. opencode (v2.0.26): the earlier "No MCP servers configured" from
+   `opencode mcp list` was a stale background service (`opencode serve
+   --service`), not the config; on 2026-10-11 it lists all six servers
+   connected. The service re-reads `opencode.json` but keeps an MCP
+   connection made before a header change, so after adding or rotating a key
+   reconnect that server: `opencode api POST
+   /api/experimental/mcp/<name>/disconnect`, then `.../connect` (`opencode
+   api` takes an operation id such as `mcp.list` or `METHOD /path`), or
+   `opencode service restart` when no other session's work runs under the
+   service. Verified live 2026-10-11 through `acp-run opencode`: its
+   `execute` tool called `tools.exa.web_search_exa` and
+   `tools.jina.search_web`, both answering.
+6.4. Live status per client, 2026-10-11 (`web-clients-live-report`):
+   6.4.1. Claude Code: `exa` and `jina` connected; a `claude -p` call used
+      `mcp__exa__web_search_exa` and `mcp__jina__search_web`. PASS.
+   6.4.2. Codex: `codex app-server` `mcpServerStatus/list` loads `exa` with
+      the key header (`agent_run` listed) and `jina` (12 tools). A
+      model-driven `codex exec` call is still to do: the 5-hour pool was
+      exhausted.
+   6.4.3. opencode: PASS (6.3).
+   6.4.4. Cursor: it was loading none of the web servers. `cursor-agent mcp
+      list` showed exa, jina, parallel-search and crawl4ai "not loaded (needs
+      approval)": approvals are per project directory
+      (`~/.cursor/projects/<dir>/mcp-approvals.json`). Fixed for `~` with
+      `cursor-agent mcp enable <name>` for the four; a run from another
+      directory may need the same. `mcp list-tools exa` then showed
+      `agent_run`. A live model call is still to do (plan exhausted to
+      2026-11-02).
+   6.4.5. agy: `mcp_config.json` matches the documented schema (`serverUrl`,
+      `headers`) and the vault values; a live `acp-run agy` call is still to
+      do (it hit its usage limit; aiuse had shown the pool as 88% left).
+   6.4.6. A no-model sign that a client sends the Exa key: Exa's `tools/list`
+      adds `agent_run` only when an `x-api-key` header is present (any key;
+      the vault key's validity was checked separately: a bogus key gets
+      "web_search_exa error (401): Invalid API key").
+   6.4.7. Older note: Codex lists `exa` as
    "Not logged in" (`parallel-search` "Unsupported", `jina` "Unknown"). That is
    cosmetic: Exa publishes OAuth protected-resource metadata
    (`https://mcp.exa.ai/.well-known/oauth-protected-resource`, optional
@@ -210,13 +392,18 @@ Names and paths only. Never print or copy a key.
    `codex exec` tool call was not made: the Codex 5-hour pool was exhausted.
    No config change is needed; `codex mcp login exa` would only attach an Exa
    account.
-6.5. Hermes: needs a restart to load `JINA_API_KEY` from `~/.hermes/.env`. Its
-   `jina_reader` plugin sends no key, so only `recover_page.py` uses it.
+6.5. Hermes: needs a restart to load a key from `~/.hermes/.env` (it was
+   restarted for `EXA_API_KEY` on 2026-10-11, 5.6.3). Its `jina_reader`
+   plugin sends no key, so only `recover_page.py` uses `JINA_API_KEY`.
+   Unrelated and older: its Signal adapter fails because signal-cli at
+   127.0.0.1:18765 is unreachable.
 6.6. reddit.com refused both WebFetch and Firecrawl scrape on 2026-10-09. Try
    Jina Reader, Crawl4AI and the archives before pausing.
 6.7. Exa's keyless tier rate-limits (twice on 2026-10-11). Its notice arrives
    as normal content; `web-get` treats it as a failed rung, and an MCP client
-   should do the same and move on.
+   should do the same and move on. Since 2026-10-11 `web-get` uses the keyed
+   REST API first (exa-api) and the keyless MCP only as its fallback; the
+   client MCP configs send the key (5.6).
 6.8. The Wayback rung can be slow (54 s, then 57 s, for one dewiki page on
    2026-10-11, over the 45 s HTTP default), so it has its own 120 s budget
    (`--wayback-timeout`, `$WEB_GET_WAYBACK_TIMEOUT`; 2.4). If it still times
