@@ -572,16 +572,13 @@ paths, queries or repo names; `TELEMETRY.md` upstream, and `graft telemetry
 debug` prints the payload) and runs a daily npm version check. Events are
 appended to `~/.graft/telemetry-queue.ndjson` and a detached child posts
 one batch at most once a day, so no command waits on the network.
-**Telemetry is on by design; leave it on** (djbclark, 2026-10-11): measured
-cost is about 1.7 ms of local file writes per command (a graft command takes
-0.5-1.5 s), one detached send a day, and no tokens in agent output beyond a
-one-time two-line stderr notice per machine, while the data helps a tool we
-depend on and contribute to. Keep the "anonymous usage stats" checkbox
-ticked in `graft init`, and do not run `graft telemetry disable` or set
-`DO_NOT_TRACK` unless the user asks for that (those are the opt-outs). It is
-inert in CI and in builds from source, which have no ingestion key, so
-`graft telemetry status` on djbclark's `~/src/Graft` checkout reports "no
-telemetry key". That is expected, not a fault. The `[graft] tokens saved ≈
+**Telemetry is off** (djbclark, 2026-10-11, revised the same day): the events
+only feed upstream's product analytics (Nanonets PostHog); they give us nothing
+locally, and builds from source, like djbclark's `~/src/Graft` checkout, have no
+ingestion key and cannot send anyway. Measured cost when on is small (about
+1.7 ms of local writes per command, one detached send a day, no tokens), so
+cost is not the reason. Run `graft telemetry disable` after install and untick
+the "anonymous usage stats" checkbox in `graft init`. The `[graft] tokens saved ≈
 N` line in tool output is graft's savings report, not telemetry, and
 `DO_NOT_TRACK` does not remove it or stop the version check (upstream
 #580). Selecting the `agents` host also writes user-level `~/.codex/`
