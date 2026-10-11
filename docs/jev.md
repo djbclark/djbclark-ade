@@ -170,3 +170,146 @@ JEV_MODE=off /Users/djbclark/ops/site-private/bin/bg python3 -m pytest -q tests/
 
 The explicit off override isolates the existing dispatch tests from a live
 mode file; new integration tests enable shadow/act only with mocked calls.
+
+## Offline evaluation (2026-10-11)
+
+`bin/jev-eval` replays history through `bin/jev decide` (a subprocess, `JEV_MODE=shadow`,
+`--site eval-<dataset>`, so every call is in `decisions.jsonl` like a live one) and through a
+Haiku baseline, then scores both. `bin/jev-eval {build,show,run,score}`; tests in
+`tests/test_jev_eval.py` (mocked deciders, no network). Data and raw per-row results stay
+outside the repo in `~/.local/state/jev/eval/` (`<dataset>.jsonl`, `<dataset>.{jev,haiku}.results.jsonl`,
+`score.json`); the rows contain excerpts of private task text.
+
+### Method
+
+1. **Jev:** same call shape as the live sites (6, 6 and 3 options; threshold 0.8; `--timeout 30` so
+   a slow call is measured, not cut, and p95 is compared with the live deadline afterwards).
+   `bin/jev` attaches option descriptions only for the site named `prompt-effort`, so for the
+   `eval-*` sites the definitions of the effort and kind options travel in the question text,
+   identically for both deciders. This differs from the live site, which sends the descriptions
+   as `criteria` values.
+2. **Haiku:** `claude -p --model haiku --effort low --tools "" --setting-sources "" --strict-mcp-config
+   --disable-slash-commands --no-session-persistence`, run in an empty cwd, a one-line system
+   prompt, the option list closed, no temperature set. The reply, trimmed of whitespace, must be exactly
+   one option name; anything else (including `Normal.`) is wrong. No reply was off-list in this run.
+   (`--bare` cannot be used: it refuses OAuth.)
+3. **Parallelism** 4 calls at once; Jev cost is the log's `usage.cost` (or the $0.042/M input
+   assumption), Haiku cost is `total_cost_usd` from `--output-format json`.
+4. Jev latency is the logged `latency_ms`; it includes the `sudo-secretspec` unlock because the
+   key is not in the environment. Haiku latency is the wall time of `claude -p` (CLI start included).
+
+### Datasets and where the truth comes from
+
+| Dataset | Rows | Truth taken from records | Truth labelled by the reviewing agent | Majority baseline |
+|---|---|---|---|---|
+| dispatch-verdict | 99 | 99 (job-record `status`, mapped as `jev_shadow` does) | 0 | 74.7% (`done`) |
+| slice-kind | 72 | 4 (a `(kind: X)` in the brief's own title, masked from the state) | 68 | 54.2% (`code`) |
+| prompt-effort | 100 | 0 | 100 | 43.0% (`normal`) |
+
+1. **The labels are a proxy, not ground truth.** The slice-kind and prompt-effort labels are one
+   agent's reading of the brief or prompt against the definitions in `route_agent.py` and
+   `claude/hooks/jev_effort_hook.py`. No operator reviewed them. Nothing in `batch.log`, `CLAIM` or
+   the job records names a kind, so the hoped-for "kind from a record" source barely exists.
+   Where the definitions are fuzzy (a short question; a doc edit that is also a design call) the
+   label is a judgment call, and a simple question was labelled `mechanical`.
+2. **dispatch-verdict truth is a text rule.** `classify()` in `bin/acp-dispatch` sets the status
+   from the report's first line (`BLOCKED:`), last line (`NO-REPORT`, `DONE`) and the recorded
+   failure note. So that dataset measures how well Jev re-derives a regex from the last 4000
+   characters, not whether the work was good.
+3. **Skew.** 74 of 99 outcomes are `done`; `refused` has no rows and `blocked` one. Slice-kind is
+   39 code, 18 research, 11 judgment, 3 mechanical and 1 github, so the per-class rows for the
+   rare kinds mean almost nothing. Prompt effort is 38 mechanical, 43 normal, 19 hard.
+4. **Sampling.** Slice-kind: every `*brief*.md` under `~/.local/state/bigteam` (not the `work*`
+   scratch dirs; this run's own briefs and exact copies dropped), at most 4 per task directory plus
+   any with a kind header. Prompt-effort: typed text from `~/.claude/projects/*/*.jsonl` (no tool results,
+   meta lines, `<...>` wrappers, slash commands, peer messages, dispatched briefs or context
+   summaries; at least 20 characters), spread across projects, first 1500 characters kept. The prompt
+   sample was re-drawn once after the filter was tightened, and the rows already labelled were kept.
+5. **Sample size.** 72 to 100 rows give a 95% interval of about plus or minus 9 to 10 points
+   (Wilson: Jev 65-82 / 73-90 / 53-72, Haiku 68-84 / 68-87 / 41-61 for the three datasets in the
+   order above). Differences between the deciders of under about 12 points are not established.
+
+### Headline
+
+| Dataset | Decider | Accuracy | 95% interval | p50 latency | p95 latency | Cost per call | Total cost |
+|---|---|---|---|---|---|---|---|
+| dispatch-verdict | Jev | 74.7% (74/99) | 65-82 | 0.80 s | 4.67 s | $0.000052 | $0.0051 |
+| dispatch-verdict | Haiku | 76.8% (76/99) | 68-84 | 5.50 s | 7.05 s | $0.00058 | $0.0575 |
+| slice-kind | Jev | 83.3% (60/72) | 73-90 | 0.94 s | 1.86 s | $0.000061 | $0.0044 |
+| slice-kind | Haiku | 79.2% (57/72) | 68-87 | 3.34 s | 5.34 s | $0.00062 | $0.0447 |
+| prompt-effort | Jev | 63.0% (63/100) | 53-72 | 1.09 s | 1.78 s | $0.000018 | $0.0018 |
+| prompt-effort | Haiku | 51.0% (51/100) | 41-61 | 3.72 s | 5.06 s | $0.00027 | $0.0266 |
+
+Jev's latency is its logged `latency_ms` (the wall time of the whole subprocess was 0.89 / 1.21 /
+1.37 s at p50 and 4.98 / 2.21 / 2.13 s at p95). Total spend: Haiku $0.129 (budget $2), Jev $0.011.
+Neither decider errored, timed out or answered off-list on any row. Paired outcomes (Jev right, Haiku
+wrong / Haiku right, Jev wrong): dispatch 3 / 5, slice-kind 11 / 8, prompt-effort 26 / 14. Only the
+last is near significance (two-sided sign test p of about 0.08).
+
+### Jev calibration
+
+Accuracy of Jev's chosen option by its probability for it (n in brackets):
+
+| Dataset | <0.5 | 0.5-0.6 | 0.6-0.7 | 0.7-0.8 | 0.8-0.9 | 0.9-1.0 |
+|---|---|---|---|---|---|---|
+| dispatch-verdict | 50% (4) | 0% (2) | 29% (7) | 38% (8) | 46% (13) | 94% (65) |
+| slice-kind | 0% (1) | 50% (6) | 17% (6) | 100% (1) | 88% (8) | 96% (50) |
+| prompt-effort | 67% (9) | 48% (31) | 75% (24) | 54% (13) | 67% (12) | 82% (11) |
+
+Accuracy and coverage if only answers at or above a threshold are used (coverage is the share of all rows):
+
+| Dataset | at 0.6 | at 0.8 | at 0.9 |
+|---|---|---|---|
+| dispatch-verdict | 77.4%, 94% | 85.9%, 79% | 93.8%, 66% (4 wrong of 65) |
+| slice-kind | 87.7%, 90% | 94.8%, 81% | 96.0%, 69% (2 wrong of 50) |
+| prompt-effort | 70.0%, 60% | 73.9%, 23% | 81.8%, 11% |
+
+1. Probabilities are usable for dispatch and slice-kind above 0.9 and not usable below it on
+   dispatch (below 0.9 the answers are right under half the time, and a score of 0.8 to 0.9 is a
+   coin flip). Prompt-effort is poorly calibrated: 0.5-0.6 is as accurate as 0.7-0.9.
+2. The four dispatch answers at or above 0.9 that were wrong: a `partial` called `done`, a `partial`
+   called `provider_error`, a `blocked` called `done`, a `provider_error` called `no_report`.
+
+### The effort hint (the only site that can act)
+
+Act fires only on a confident (>= 0.8) `mechanical` while the session runs Opus or Fable.
+
+| Jev says `mechanical` at | Rows | Truly mechanical | Labelled `normal` | Labelled `hard` |
+|---|---|---|---|---|
+| >= 0.6 | 24 | 20 | 4 | 0 |
+| >= 0.8 (live threshold) | 13 | 11 | 2 | 0 |
+| >= 0.9 | 9 | 8 | 1 | 0 |
+| >= 0.95 | 5 | 5 | 0 | 0 |
+
+Recall is low (11 of 38 mechanical rows at 0.8), so the hint would fire on about a ninth of prompts.
+No `hard` prompt was ever confidently called `mechanical` (Haiku called 3 of 19 `hard` prompts
+`mechanical`, unqualified). The 2 mistakes at 0.8 are `normal` prompts, so the cost of a wrong hint
+here is a suggestion to drop to Sonnet for a task a little above rote.
+
+### Per-site recommendation (by the promotion rule above)
+
+The rule asks for 200 successful live calls over seven days, 50 reviewed labels, 95% labelled
+accuracy, dispatch agreement of 95%, error rate below 1%, p95 under the deadline, mean cost under
+$0.0001 and no confident-mechanical on hard. This run can only speak to accuracy, agreement,
+cost, latency and the mistake rule; the live log has to supply the rest.
+
+| Site | Verdict | Why |
+|---|---|---|
+| dispatch-verdict | **Drop** (keep the shadow call only if it is re-aimed) | Accuracy and agreement 74.7% equal the always-`done` baseline and trail the 95% bar by 20 points; Haiku is no better (76.8%) and 10 times dearer; even at 0.9 it is 93.8% (below 95%) on two thirds of rows; 4 of 99 calls ran over 5 s with 4 in flight, close to the 5 s default timeout. The incumbent is a free exact rule. A Jev site only earns its place on a question the rule cannot answer, such as "did this report do what the brief asked", which needs labels this run does not have. |
+| prompt-effort | **Stay shadow** | 63.0% overall and 73.9% at the live 0.8 threshold, far below 95% on this agent's labels; no confident-mechanical on hard (rule met on 19 hard rows), p95 1.8 s fits the 3 s budget, cost $0.000018. If the hint is wanted sooner, raise the act threshold to 0.9 or 0.95 (8 of 9, then 5 of 5 right here) and let the live shadow log, labelled by the operator, confirm. Jev beat Haiku by 12 points, not conclusively. |
+| slice-kind (no live site exists) | **Candidate for a new shadow site** | 83.3% overall and 96.0% at 0.9 on 69% of rows, p95 1.9 s, $0.000061. Only worth wiring if routing wants a second opinion beside the rules in `route_agent.py`; start in shadow, send sub-0.9 answers to the existing rule, and have the operator relabel a sample. Not promotable: no live calls yet, and 68 of 72 labels are the reviewer's. |
+
+### What would change these numbers
+
+1. Operator labels. Sixty-eight slice-kind and 100 prompt-effort labels are one agent's; the first
+   disagreement the operator finds in either set is a reason to relabel the lot.
+2. State shape. Dispatch sees only the stderr summary and the last 4000 characters, as the live
+   site does; its truth depends on the first line (`BLOCKED:`) and the presence of a final `DONE`.
+   A variant that adds the report's first line was not run.
+3. Effort option text in the `criteria` (as live) rather than the question may move prompt-effort
+   either way; the eval could not use it without editing `bin/jev`.
+4. A larger, older mix: the dispatch history is 101 jobs from about a week of work.
+
+Reproduce: `bin/jev-eval build && bin/jev-eval run --dataset D --decider jev` (and `haiku`), then
+`bin/jev-eval score`. Runs resume; labels live in `~/.local/state/jev/eval/<dataset>.labels.json`.
+Offline test: `~/ops/site-private/bin/bg uv run --with pytest python3 -m pytest -q tests/test_jev_eval.py`.
