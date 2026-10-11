@@ -87,6 +87,13 @@ from typing import NoReturn
 
 HERE = Path(__file__).resolve().parent
 FOOTER_FILE = HERE.parent / "docs" / "dispatch-footer.md"
+DENY_NOTE = """
+**This run is read-only (`--perm deny`).** Every tool call that needs permission is refused,
+including writing `{report}` and creating its `.done` marker, so do not try. Put the whole
+report, in the shape the delivery contract describes, in your final message instead: an
+`acp-run` final message is not cut at 4,000 characters, and acp-dispatch saves it to the report
+path and marks it done for you. This overrides items 1, 2 and 7 of the delivery contract.
+"""
 STATE_ROOT = Path(os.environ.get("ACP_DISPATCH_STATE", str(Path.home() / ".local/state/bigteam")))
 DEFAULT_LEAD = "team-lead"
 DEFAULT_TIMEOUT = 2400           # bigteam Step 4 item 5: a tight timeout costs the whole report
@@ -512,9 +519,14 @@ def dispatch(a: argparse.Namespace) -> int:
     budget = BUDGET_TEXT.format(
         minutes=f"{a.timeout / 60:g}",
         wrapup=WRAPUP_BUDGET.format(grace=a.wrapup_grace) if a.wrapup_grace > 0 else "")
-    write_atomic(brief, prompt.rstrip() + "\n\n" + footer_text(report, a.lead).rstrip() + "\n" + budget)
-
     perm = a.perm or "all"
+    # --perm deny refuses every permission request, the report's Write included, so the footer's
+    # "write the report" cannot be followed (2026-10-11: an agy review was refused that Write and
+    # had to be recovered from its final message). Tell the agent the final message is the report.
+    deny_note = DENY_NOTE.format(report=report) if perm == "deny" else ""
+    write_atomic(brief, prompt.rstrip() + "\n\n" + footer_text(report, a.lead).rstrip() + "\n"
+                 + deny_note + budget)
+
     if perm.startswith("scoped:"):
         perm = f"{perm},{out}"          # the agent must be allowed to write its report
     acp_cmd = [acp_run, a.agent, "-C", str(Path(a.dir).resolve()), "-f", str(brief),

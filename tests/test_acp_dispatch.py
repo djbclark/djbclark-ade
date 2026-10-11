@@ -177,6 +177,18 @@ class TestDispatch(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn(f"--perm scoped:src/a.py,{self.out.resolve()}", self.record()["cmd"])
 
+    def test_deny_perm_brief_says_the_final_message_is_the_report(self):
+        # --perm deny refuses the report's Write too; the brief must not ask for the impossible.
+        r = self.dispatch("--perm", "deny")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        brief = (self.out / "s1-brief.md").read_text()
+        self.assertIn("read-only (`--perm deny`)", brief)
+        self.assertIn("final message", brief)
+
+    def test_all_perm_brief_has_no_read_only_note(self):
+        self.dispatch()
+        self.assertNotIn("--perm deny", (self.out / "s1-brief.md").read_text())
+
     def test_bad_perm_is_usage(self):
         r = self.dispatch("--perm", "yolo")
         self.assertEqual(r.returncode, 2)
