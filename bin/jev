@@ -1,0 +1,324 @@
+#!/usr/bin/env python3
+"""Bounded, auditable TypeSafe decisions. No third-party dependencies."""
+import os
+import sys
+from pathlib import Path
+
+
+def mode():
+    value = os.environ.get("JEV_MODE")
+    if value is None:
+        try:
+            value = (Path.home() / ".config/jev/mode").read_text().split()[0]
+        except (OSError, IndexError):
+            value = "off"
+    return value if value in ("off", "shadow", "act") else "off"
+
+
+# Off must not read stdin, import HTTP modules, or unlock credentials.
+if __name__ == "__main__" and sys.argv[1:2] == ["decide"] and mode() == "off":
+    sys.exit(3)
+
+import argparse
+import hashlib
+import json
+import math
+import signal
+import subprocess
+import tempfile
+import time
+import uuid
+from datetime import datetime, timezone
+from urllib.request import Request, urlopen
+
+EFFORT = {
+    "mechanical": "Apply a decision already made: edits, commits, doc writing, running known commands",
+    "normal": "Ordinary implementation with a clear shape",
+    "hard": "Unclear shape, architecture, adjudication, debugging that already failed once",
+}
+
+
+def log_path():
+    return Path.home() / ".local/state/jev/decisions.jsonl"
+
+
+def safe_json(row):
+    # Redact the credential even if it is accidentally present in supplied state/meta.
+    line = json.dumps(row, ensure_ascii=True, allow_nan=False)
+    key = os.environ.get("TYPESAFE_API_KEY")
+    if key:
+        line = line.replace(json.dumps(key)[1:-1], "[REDACTED]")
+    return line
+
+
+def append(row):
+    path = log_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    line = safe_json(row)
+    data = (line + "\n").encode()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        if os.write(fd, data) != len(data):
+            raise OSError("short log write")
+    finally:
+        os.close(fd)
+
+
+def alarm(_signum, _frame):
+    raise TimeoutError()
+
+
+def http_call(payload, key, timeout):
+    req = Request("https://api.typesafe.ai/v1/systemone",
+                  data=json.dumps(payload).encode(), method="POST",
+                  headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+    with urlopen(req, timeout=timeout) as response:
+        return json.load(response)
+
+
+def decide(a, selected_mode):
+    if selected_mode == "off":
+        return 3
+    started = time.monotonic()
+    row = dict(id=str(uuid.uuid4()), ts=datetime.now(timezone.utc).isoformat(),
+               site=a.site, mode=selected_mode, question=a.question, options=a.option,
+               probs={}, answer=None, prob=None, threshold=a.threshold,
+               incumbent=a.incumbent, agree=None, latency_ms=0, input_tokens=0,
+               meta=dict(a.meta), state_chars=0, state_sha256=hashlib.sha256(b"").hexdigest(),
+               state_excerpt="", error=None, cost=None)
+    previous = signal.signal(signal.SIGALRM, alarm)
+    signal.setitimer(signal.ITIMER_REAL, a.timeout)
+    child = None
+    try:
+        state = (a.state if a.state is not None else
+                 Path(a.state_file).read_text() if a.state_file else sys.stdin.read())
+        row.update(state_chars=len(state), state_sha256=hashlib.sha256(state.encode()).hexdigest(),
+                   state_excerpt=state[:1500])
+        key = os.environ.get("TYPESAFE_API_KEY")
+        if not key:
+            if os.environ.get("JEV_REEXEC"):
+                raise PermissionError()
+            # Re-execute through the boundary, supervised so unlocking is also bounded.
+            # The child returns its record; only this process appends it (one row per call).
+            env = dict(os.environ, JEV_REEXEC="1", JEV_MODE=selected_mode, JEV_RETURN_RECORD="1")
+            remaining = max(0.001, a.timeout - (time.monotonic() - started) - 0.05)
+            args = ["sudo-secretspec", "run", "--reason", "jev decision", "--",
+                    str(Path(__file__).resolve()), "decide", "--site", a.site,
+                    "--question", a.question, "--timeout", str(remaining),
+                    "--threshold", str(a.threshold)]
+            for option in a.option:
+                args += ["--option", option]
+            for k, v in a.meta:
+                args += ["--meta", k + "=" + v]
+            if a.incumbent is not None:
+                args += ["--incumbent", a.incumbent]
+            child = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, text=True, env=env,
+                                     start_new_session=True)
+            out, _ = child.communicate(state, timeout=remaining)
+            result = json.loads(out)
+            if child.returncode not in (0, 2) or not isinstance(result.get("record"), dict):
+                raise PermissionError()
+            row = result["record"]
+        else:
+            criteria = {o: EFFORT.get(o, o) if a.site == "prompt-effort" else o for o in a.option}
+            payload = {"state": state, "model": "jev-latest", "questions": {
+                "decision": {"type": "choice", "instructions": a.question, "criteria": criteria}}}
+            response = http_call(payload, key, max(0.001, a.timeout - (time.monotonic() - started)))
+            answer = response["answers"]["decision"]
+            probs = answer["probabilities"]
+            choice = answer["choice"]
+            if (set(probs) != set(a.option) or choice not in probs or
+                    any(not isinstance(p, (float, int)) or isinstance(p, bool) or
+                        not math.isfinite(p) or not 0 <= p <= 1 for p in probs.values()) or
+                    not math.isclose(sum(probs.values()), 1, abs_tol=0.01)):
+                raise ValueError()
+            usage = response.get("usage", {})
+            tokens = usage.get("input_tokens", 0)
+            cost = usage.get("cost")
+            if not isinstance(tokens, int) or tokens < 0:
+                raise ValueError()
+            if cost is not None and (not isinstance(cost, (int, float)) or
+                                     not math.isfinite(cost) or cost < 0):
+                raise ValueError()
+            row.update(probs=probs, answer=choice, prob=probs[choice], input_tokens=tokens,
+                       cost=cost, agree=None if a.incumbent is None else choice == a.incumbent)
+    except Exception as exc:
+        row["error"] = "TimeoutError" if isinstance(exc, subprocess.TimeoutExpired) else type(exc).__name__
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        if child is not None and child.poll() is None:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait()
+    row["latency_ms"] = round((time.monotonic() - started) * 1000, 3)
+    if os.environ.get("JEV_RETURN_RECORD") == "1" and os.environ.get("JEV_REEXEC") == "1":
+        print(safe_json({"record": row}))
+    else:
+        append(row)
+        output = {k: row[k] for k in ("site", "mode", "answer", "prob", "probs", "incumbent",
+                                      "agree", "latency_ms", "input_tokens", "id", "error")}
+        output["confident"] = row["error"] is None and row["prob"] >= a.threshold
+        output["act"] = selected_mode == "act" and output["confident"]
+        print(safe_json(output))
+    return 2 if row["error"] else 0
+
+
+def rows():
+    try:
+        with log_path().open() as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                    if isinstance(row, dict):
+                        yield row
+                except ValueError:
+                    continue  # tolerate an interrupted writer's trailing line
+    except FileNotFoundError:
+        return
+
+
+def percentile(values, fraction):
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    index = (len(ordered) - 1) * fraction
+    lo, hi = math.floor(index), math.ceil(index)
+    return round(ordered[lo] + (ordered[hi] - ordered[lo]) * (index - lo), 3)
+
+
+def report(a):
+    records = list(rows())
+    labels = {r["label_for"]: r["truth"] for r in records if "label_for" in r}
+    cutoff = time.time() - a.since
+    selected = [r for r in records if "id" in r and
+                (r.get("site") == a.site if a.site else r.get("site") != "smoke") and
+                datetime.fromisoformat(r["ts"]).timestamp() >= cutoff]
+    sites = {}
+    for site in sorted({r["site"] for r in selected}):
+        group = [r for r in selected if r["site"] == site]
+        good = [r for r in group if not r["error"]]
+        paired = [r for r in good if r["incumbent"] is not None]
+        labelled = [r for r in good if r["id"] in labels]
+        confusion = {}
+        for r in paired:
+            cell = confusion.setdefault(r["incumbent"], {})
+            cell[r["answer"]] = cell.get(r["answer"], 0) + 1
+        cost = sum(r["cost"] if r.get("cost") is not None else
+                   r["input_tokens"] * 0.042 / 1_000_000 for r in group)
+        sites[site] = dict(calls=len(group), errors=len(group) - len(good),
+                           latency_p50_ms=percentile([r["latency_ms"] for r in group], .5),
+                           latency_p95_ms=percentile([r["latency_ms"] for r in group], .95),
+                           input_tokens=sum(r["input_tokens"] for r in group), cost_usd=cost,
+                           cost_per_call_usd=cost / len(group),
+                           cost_assumptions="API usage.cost when present; otherwise input $0.042/million, output free; unknown failed-call usage counted as zero",
+                           agreement=sum(r["agree"] for r in paired) / len(paired) if paired else None,
+                           paired_calls=len(paired), confusion=confusion,
+                           confident_disagreements=sum(r["agree"] is False and r["prob"] >= r["threshold"] for r in good),
+                           labelled_calls=len(labelled),
+                           accuracy=sum(r["answer"] == labels[r["id"]] for r in labelled) / len(labelled) if labelled else None)
+        if site == "prompt-effort":
+            count = sum(r["answer"] == "mechanical" and r["prob"] >= r["threshold"] and
+                        any(m in r["meta"].get("model", "").lower() for m in ("opus", "fable")) for r in good)
+            sites[site]["savings_upper_bound"] = dict(
+                opportunities=count, assumed_tokens_per_turn=a.tokens_per_turn,
+                assumed_price_difference_usd_per_million=a.price_difference,
+                usd=count * a.tokens_per_turn * a.price_difference / 1_000_000,
+                assumptions="Upper bound: opportunities, not realized savings; every eligible prompt replaces one turn with the assumed token count and blended price difference; ignores cache, subscription pricing, retries and quality loss")
+    print(json.dumps({"sites": sites}, indent=None if a.json else 2, sort_keys=True))
+    return 0
+
+
+def positive(value):
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError("must be finite and positive")
+    return number
+
+
+def since(value):
+    try:
+        return positive(value[:-1]) * {"s": 1, "h": 3600, "d": 86400, "w": 604800}[value[-1]]
+    except (ValueError, KeyError, IndexError):
+        raise argparse.ArgumentTypeError("use a duration such as 7d") from None
+
+
+def meta(value):
+    key, sep, val = value.partition("=")
+    if not sep or not key:
+        raise argparse.ArgumentTypeError("use k=v")
+    return key, val
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    selected_mode = mode()
+    if argv[:1] == ["decide"] and selected_mode == "off":
+        return 3
+    p = argparse.ArgumentParser(description=__doc__)
+    sub = p.add_subparsers(dest="command", required=True)
+    m = sub.add_parser("mode")
+    m.add_argument("value", nargs="?", choices=("off", "shadow", "act"))
+    d = sub.add_parser("decide")
+    d.add_argument("--site", required=True)
+    src = d.add_mutually_exclusive_group()
+    src.add_argument("--state")
+    src.add_argument("--state-file")
+    d.add_argument("--question", required=True)
+    d.add_argument("--option", action="append", required=True)
+    d.add_argument("--incumbent")
+    d.add_argument("--threshold", type=float, default=.8)
+    d.add_argument("--timeout", type=positive, default=5)
+    d.add_argument("--meta", action="append", type=meta, default=[])
+    label = sub.add_parser("label")
+    label.add_argument("id")
+    label.add_argument("truth")
+    r = sub.add_parser("report")
+    r.add_argument("--site")
+    r.add_argument("--since", type=since, default=7 * 86400)
+    r.add_argument("--json", action="store_true")
+    r.add_argument("--tokens-per-turn", type=positive, default=4000)
+    r.add_argument("--price-difference", type=positive, default=10,
+                   help="assumed blended USD/million token difference, not a current price quote")
+    ds = sub.add_parser("disagreements")
+    ds.add_argument("--site", required=True)
+    ds.add_argument("--limit", type=int, default=20)
+    a = p.parse_args(argv)
+    if a.command == "mode":
+        if a.value:
+            path = Path.home() / ".config/jev/mode"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".mode-")
+            try:
+                with os.fdopen(fd, "w") as stream:
+                    stream.write(a.value + "\n")
+                os.replace(tmp, path)
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+        print(mode())
+        return 0
+    if a.command == "decide":
+        if len(set(a.option)) < 2 or len(set(a.option)) != len(a.option) or not 0 <= a.threshold <= 1:
+            p.error("need distinct options (at least two) and threshold in [0,1]")
+        return decide(a, selected_mode)
+    if a.command == "label":
+        append({"label_for": a.id, "truth": a.truth})
+        return 0
+    if a.command == "report":
+        return report(a)
+    disagreements = [r for r in rows() if r.get("site") == a.site and r.get("agree") is False and not r.get("error")]
+    for r in sorted(disagreements, key=lambda r: r["prob"], reverse=True)[:max(0, a.limit)]:
+        print(json.dumps({k: r[k] for k in ("id", "answer", "incumbent", "prob", "state_excerpt")}))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print(json.dumps({"error": type(exc).__name__}), file=sys.stderr)
+        sys.exit(2)
