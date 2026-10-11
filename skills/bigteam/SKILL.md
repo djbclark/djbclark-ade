@@ -136,6 +136,10 @@ window, so spending it costs nothing that orchestration needs.
    and re-probe between batches; a heavy Opus-high run drained it in ~35 minutes on
    2026-10-03. A 429 or `RESOURCE_EXHAUSTED` on a `claude-*` model means that pool
    is spent; try a `gemini-*` model before leaving agy.
+   **agy's file tools see only `-C`** (it ignores `--add-dir`; 2026-10-11).
+   `acp-dispatch` relays the report from `<-C>/.acp-dispatch/` by itself. Every
+   other file the brief names (an earlier report, a decision note, a log) must be
+   copied into `<-C>/.acp-dispatch/` first, and the brief must point there.
 5. **Not a replacement for the judgment tier:** use it as the independent reviewer
    of a decision claude or codex makes (Step 6), not as the one deciding.
 6. **`bin/route_agent.py route --kind code`** applies the same rule (the
