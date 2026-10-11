@@ -67,3 +67,26 @@ Verification: the running OpenCode reloads plugins on file change
 (`watcher subscribe … type=file`), so the fix is checkable without a restart —
 tail `~/.local/share/opencode/log/opencode.log` for `loading plugin id=…/rtk.ts`
 with no following `failed to load plugin` line.
+
+## Upstream status (2026-10-11)
+
+1. **openusage**: PR opened — `janekbaraniewski/openusage#421`
+   (`fix(opencode): support the OpenCode 2 plugin contract in the telemetry
+   integration`), after an independent security review (APPROVE, no findings).
+2. **rtk**: **no PR by us.** `rtk-ai/rtk#4187` already implements the same fix
+   (dual `{ id, setup, server }` export, `ctx.tool.hook("execute.before")`,
+   delegating to `rtk hook opencode`), is MERGEABLE and in maintainer review;
+   maintainers close duplicates in its favour (#4470, #4311, #3899). Our patch
+   is verified and pushed to `djbclark/rtk`, branch
+   `fix/opencode-v2-setup-export` (commit `b11bf398`), so a PR is one command
+   away if wanted. The recommended next step is a comment on #4187.
+3. **`rtk rewrite` vs `rtk hook opencode` — a permissions caveat.** Released rtk
+   (0.51.0) has no `hook opencode` subcommand, so the local shim's `rtk rewrite`
+   delegation is the only one that works today. Upstream's own review of #4187
+   found that a rewrite which does *not* judge OpenCode's rules can change which
+   permission rule matches (a MEDIUM authz finding: a `deny`/`ask` pattern for
+   e.g. `git push*` no longer matches after the rewrite). Our local shim is
+   therefore **unverified** for configs that rely on OpenCode `permissions`
+   deny/ask rules for bash. When rtk ships `hook opencode`, switch the shim's
+   delegation to it (it judges the rules); #4187 is where that lands.
+

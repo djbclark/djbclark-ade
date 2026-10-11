@@ -67,7 +67,7 @@ sudo-secretspec, ralph-tui-create-*, ...) stay where their installer put them.
 | Skill | What it does | How to use |
 |---|---|---|
 | `coderabbit-feeder` | Queues a CodeRabbit review request (attach mode for your repos, crossfork mode for others). | "queue a coderabbit review". |
-| `setup-modern-cli` | The replacement table for old Unix tools (rg←grep, fd←find, bat←cat, srgn←sed, eza←ls, hck←cut/awk, jq/yq, xh, ast-grep, dust/gdu, rtk), the command patterns to use, and the footguns (`rg -rln`, no-path `rg`, `sd` retired). | Load before shell searches in a repo, or when setting up a machine/repo toolchain; "modern CLI tools", "faster grep/find". |
+| `setup-modern-cli` | The replacement table for the classic Unix tools — `cat`/`ls`/`find`/`grep`/`sed`/`cut`/`du`/`df`/`ps`/`diff`/`curl`/JSON/YAML/archives and the rest — split into **agent-safe** (non-interactive) and **human-interactive** (TUIs/fuzzy finders, never called from an agent), with the command patterns, the search ladder, token discipline, and the footguns (`rg -rln` is `--replace`; a pathless `rg` over-searches; `sd` is retired). | Load before shell work in a repo, or when setting up a machine/repo toolchain; "modern CLI tools", "faster grep/find". |
 | `reorg-orca` | Reorganizes a cluttered Orca setup from the CLI and says which moves Orca cannot do yet. | "tidy my Orca workspaces". For herdr use `autorename`. |
 
 ## Disabled skills

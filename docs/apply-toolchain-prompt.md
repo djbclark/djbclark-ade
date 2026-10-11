@@ -411,7 +411,7 @@ step to the user in the interactive phase. If the installer offers to add
 ### 1.2 Install everything with Homebrew (one command)
 
 ```bash
-HOMEBREW_NO_AUTO_UPDATE=1 brew install \
+brew install \
   git gh uv just oven-sh/bun/bun node \
   ruff pre-commit gitleaks typos-cli semgrep \
   shellcheck shfmt biome lychee dotenv-linter actionlint \
@@ -433,6 +433,15 @@ crawl4ai-setup
 # Graft (agent context graph); confirm the package name against the upstream README first (§1.3):
 npm install -g @nanonets/graft
 ```
+
+**Do not prefix these with `HOMEBREW_NO_AUTO_UPDATE=1`** (earlier versions of this
+prompt did). Tools should update. The only reason to set it is a single command
+inside a long *automated* setup where a mid-run `brew update` (slow, and it can
+fail on a flaky network) would hurt more than it helps — and even then it is a
+one-command exception, not the default. On djbclark's machine the variable is
+already exported in `site-djbclark/shell/bashrc` and a scheduled
+`brew-fast-upgrade` Jobber job (daily 03:10) owns `brew update && brew upgrade`
+for brew and npm globals.
 
 ### 1.3 What each tool is, where it lives, and how it is installed
 
@@ -890,7 +899,10 @@ maintain two divergent copies. Add these sections:
    - Make one coherent change at a time. Commit early and often.
    - Don't trust a clean exit code; verify real outputs and state (ops-djbclark).
    - Use non-interactive command forms (`cp -f`, `mv -f`, `rm -f`, `ssh -o
-     BatchMode=yes`, `HOMEBREW_NO_AUTO_UPDATE=1`) (ops-djbclark).
+     BatchMode=yes`) (ops-djbclark). Do not add `HOMEBREW_NO_AUTO_UPDATE=1` to
+     commands: it suppresses brew's own auto-update (tools should update), it is
+     already exported in `site-djbclark/shell/bashrc`, and the scheduled
+     `brew-fast-upgrade` job owns updating.
    - Prefer `rg`, `fd`, `bat` and `srgn` in shell (`srgn --fail-none`, never
      `sd`, for edits: it must fail when nothing matched); use `ast-grep`/`semgrep` for
      code-shape queries; use the Graft tools before broad source reading
