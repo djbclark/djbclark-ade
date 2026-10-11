@@ -325,6 +325,20 @@ has already been violated by a real agent on this machine:
   outcome than a confident wrong edit.
 - Report in a fixed shape: `CHANGED:` / `SKIPPED:` / `NOTES:` / `DONE`.
 
+**A slice that drives an Android device** (adb, an emulator) adds three rules to the
+brief (2026-10-11; ShizukuTendCF turns its Watchdog on by default, so a killed
+Shizuku server comes back about 10 s later):
+
+1. **One agent per device.** Name the device serials the slice may address (every
+   `adb` call takes `-s <serial>`) and the ones it must never touch. Check that no
+   other live claim owns the device before dispatching.
+2. **Stop the server the way a user would.** Before a test that kills or replaces
+   the Shizuku server, stop it through the app (`HEADLESS_STOP`) or switch the
+   Watchdog off first, and switch it back on afterwards. A bare `kill` makes the
+   Watchdog restart it, and the test then measures the restart, not the change.
+3. **Leave the device as found**, or report exactly what was left (installed build,
+   settings changed, grants given) in the report's cleanup section.
+
 ## Step 4 — dispatch, and make sure you are told when each slice finishes
 
 Learning that an agent finished is the part that fails silently, so it is
