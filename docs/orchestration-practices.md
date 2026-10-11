@@ -27,7 +27,7 @@ agent has an ACP mode, and the per-CLI headless forms only where it has none
    Deterministic, free, and auditable.
 2. **A typed decision model**, a call that returns a probability per option
    and no text. TypeSafe's Jev is one (the `typesafe-ai` skill; needs a
-   TypeSafe API key, stored in `sudo-secretspec` as `TYPESAFE_API_KEY` since 2026-10-11, **not wired into any harness here yet**). Code reads
+   TypeSafe API key, stored in `sudo-secretspec` as `TYPESAFE_API_KEY` since 2026-10-11, **in shadow mode only since 2026-10-11** (`bin/jev`, `docs/jev.md`)). Code reads
    the probability and applies a threshold. Never ask a model how confident
    it is; read the distribution.¹ ⁴
 3. **A cheap text model** at low effort (haiku, a free pool), with a closed

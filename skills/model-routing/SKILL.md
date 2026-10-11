@@ -400,7 +400,7 @@ not send those to a frontier model at high effort. Cheapest rung first:
 
 1. **Code**: `route_agent.py`, exit codes, `aiuse --available`, a table.
 2. **A typed decision model** that returns a probability per option (TypeSafe
-   Jev; `typesafe-ai` skill). Not wired into any harness here yet. The key is
+   Jev; `typesafe-ai` skill). Shadow mode only since 2026-10-11 (`bin/jev`, `docs/jev.md`). The key is
    in `sudo-secretspec` as `TYPESAFE_API_KEY` (2026-10-11; reach it with
    `sudo-secretspec run`); a shadow-mode trial comes before it decides anything.
 3. **A cheap text model** at low effort, with a closed option list and a
