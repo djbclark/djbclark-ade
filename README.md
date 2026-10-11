@@ -22,8 +22,8 @@ their old paths are symlinks into this checkout).
    drives any agent that speaks the Agent Client Protocol: one-shot, an
    `--interactive` loop in a visible pane, `--resume`, scoped permissions.
 4. **Skills, linked everywhere.** Each skill is one directory in
-   [`skills/`](skills/); the [`skill-everywhere`](https://github.com/djbclark/site-djbclark/blob/master/bin/skill-everywhere.md) script
-   (`~/ops/site-private/bin/skill-everywhere`, README beside it) symlinks it into every TUI's skills dir, so one edit here reaches all of
+   [`skills/`](skills/); the [`skill-everywhere`](docs/skill-everywhere.md) script
+   (`~/src/djbclark-ade/bin/skill-everywhere`, with a compatibility link at `~/ops/site-private/bin/skill-everywhere`) symlinks it into every TUI's skills dir, so one edit here reaches all of
    them.
 
 ## The loop
@@ -114,12 +114,12 @@ add one:
 ```sh
 ln -s /Users/djbclark/src/djbclark-ade/skills/<name> ~/ops/site-djbclark/skills/<name>
 ln -s ../../site-djbclark/skills/<name> ~/ops/site-private/skills/<name>
-~/ops/site-private/bin/skill-everywhere <name>          # link into every TUI
-~/ops/site-private/bin/skill-everywhere --check <name>  # verify
+~/src/djbclark-ade/bin/skill-everywhere <name>          # link into every TUI
+~/src/djbclark-ade/bin/skill-everywhere --check <name>  # verify
 ```
 
 How each TUI finds skills, and how to prove one loaded: the script's
-[README](https://github.com/djbclark/site-djbclark/blob/master/bin/skill-everywhere.md).
+[skill-everywhere README](docs/skill-everywhere.md).
 
 `acp-run` is on PATH as `~/.local/bin/acp-run` → `~/ops/site-private/bin/acp-run`
 → `~/ops/site-djbclark/tools/acp-run/acp-run` → here; `fleet-watch`'s launchd

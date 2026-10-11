@@ -17,7 +17,8 @@ session's life, closing idle herdr panes safely, is the `herdr-tidy` skill.
 
 `/rename` is a built-in command a skill cannot call, so this skill writes the
 same records `/rename` writes, through `autorename.py` next to this file.
-It works in Claude Code, zcode, Grok, cursor-agent, and OpenCode, auto-detected
+It works in Claude Code, zcode, Grok, cursor-agent, OpenCode, and Codex in a
+Herdr pane, auto-detected
 (`OPENCODE_SESSION_ID` for OpenCode, `CURSOR_CONVERSATION_ID` when
 `CURSOR_AGENT=1` and cursor-agent is the nearest agent process above the shell,
 else `GROK_SESSION_ID` when `GROK_AGENT=1`, else `CLAUDE_CODE_SESSION_ID`, else

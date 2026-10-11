@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rename the current Claude Code, zcode, Grok, cursor-agent, or OpenCode session, the way /rename does.
+"""Rename the current Claude Code, zcode, Grok, cursor-agent, OpenCode, or Codex session.
 
 A skill cannot invoke the built-in /rename, so this writes what it writes:
 
@@ -30,6 +30,9 @@ A skill cannot invoke the built-in /rename, so this writes what it writes:
   server's `session.update` API — the same path the TUI's own rename uses, so a
   live session sees it at once. There is no manual/auto marker, so every title
   is treated as auto and `--auto` never skips.
+- Codex: `CODEX_THREAD_ID` identifies the session and `HERDR_PANE_ID` receives
+  the visible title through `herdr pane rename`; Codex exposes no local title
+  store to this skill, so `--auto` cannot detect a manual title.
 
 The session id comes from OPENCODE_SESSION_ID when this process is OpenCode,
 GROK_SESSION_ID when it is a Grok agent (`GROK_AGENT=1`), else
@@ -234,7 +237,7 @@ def grok_set_title(summary: Path, title: str) -> None:
 # store.db (tables blobs, meta), meta.json and prompt_history.json.
 
 STATE_DIR = Path.home() / ".local/state/autorename"
-AGENT_COMMS = {"cursor-agent": "cursor", "claude": "claude", "grok": "grok", "opencode": "opencode"}
+AGENT_COMMS = {"cursor-agent": "cursor", "claude": "claude", "grok": "grok", "opencode": "opencode", "codex": "codex"}
 
 
 def cursor_home() -> Path:
@@ -477,6 +480,42 @@ def opencode_set_title(sid: str, title: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------- Codex
+
+def codex_pane_title() -> str | None:
+    pane = os.environ.get("HERDR_PANE_ID")
+    herdr = shutil.which("herdr")
+    if not pane or herdr is None:
+        return None
+    try:
+        data = json.loads(subprocess.run(
+            [herdr, "pane", "get", pane], capture_output=True, text=True,
+            timeout=5, check=True).stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    value = data.get("label") or data.get("title")
+    return str(value).strip() or None
+
+
+def codex_set_title(title: str) -> bool:
+    pane = os.environ.get("HERDR_PANE_ID")
+    herdr = shutil.which("herdr")
+    if not pane or herdr is None:
+        print("autorename: Codex needs HERDR_PANE_ID and the herdr binary", file=sys.stderr)
+        return False
+    try:
+        result = subprocess.run([herdr, "pane", "rename", pane, title],
+                                capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"autorename: Codex pane rename failed: {exc}", file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        print(f"autorename: Codex pane rename failed: {(result.stderr or result.stdout).strip()}",
+              file=sys.stderr)
+        return False
+    return True
+
+
 # ----------------------------------------------------------------- all backs
 
 def session_id() -> str | None:
@@ -486,27 +525,34 @@ def session_id() -> str | None:
     cursor = (os.environ.get("CURSOR_CONVERSATION_ID")
               if os.environ.get("CURSOR_AGENT") == "1" else None)
     opencode = os.environ.get("OPENCODE_SESSION_ID")
+    codex = os.environ.get("CODEX_THREAD_ID")
     if cursor and (not (grok or claude or opencode) or nearest_agent() == "cursor"):
         return cursor
     if opencode and (not (grok or claude or cursor) or nearest_agent() == "opencode"):
         return opencode
+    if codex and (not (grok or claude or cursor or opencode) or nearest_agent() == "codex"):
+        return codex
     if grok and (os.environ.get("GROK_AGENT") == "1" or not claude):
         return grok
     if claude:
         return claude
     if opencode:
         return opencode
+    if codex:
+        return codex
     if grok:
         return grok
     return discover_session_id()
 
 
 def backend_for(sid: str) -> str:
-    """Which store owns this id: 'zcode', 'opencode', 'cursor', 'grok', or 'claude'."""
+    """Which store owns this id, including the Herdr-backed Codex session."""
     if sid.startswith("sess_"):
         return "zcode"
     if sid.startswith("ses_"):
         return "opencode"
+    if os.environ.get("CODEX_THREAD_ID") == sid:
+        return "codex"
     if find_cursor_chat(sid) is not None:
         return "cursor"
     grok_hit = find_grok_summary(sid) is not None
@@ -545,6 +591,8 @@ def read_title(sid: str) -> str | None:
         return title
     if kind == "opencode":
         return opencode_current_title(sid)
+    if kind == "codex":
+        return codex_pane_title()
     transcript = find_transcript(sid)
     return current_title(transcript) if transcript else None
 
@@ -560,7 +608,7 @@ def main() -> int:
     ap.add_argument("--show", action="store_true", help="print the current title and exit")
     ap.add_argument("--session-id", default=None,
                     help="session id (Claude Code uuid, cursor-agent chat id, Grok session id,"
-                         " OpenCode ses_…, or zcode sess_…); default: this session")
+                         " OpenCode ses_…, zcode sess_…, or Codex thread id); default: this session")
     ap.add_argument("--cursor-after-exit", type=int, default=None, help=argparse.SUPPRESS)
     ap.add_argument("--cursor-expect", default="", help=argparse.SUPPRESS)
     args = ap.parse_args()
@@ -600,6 +648,9 @@ def main() -> int:
         elif kind == "opencode":
             current = opencode_current_title(sid)
             source = "auto"
+        elif kind == "codex":
+            current = codex_pane_title()
+            source = "auto"
         else:
             transcript = find_transcript(sid)
             if transcript is None:
@@ -616,6 +667,8 @@ def main() -> int:
             print(current or "(no custom title)")
         elif kind == "opencode":
             print(current or "(no title)")
+        elif kind == "codex":
+            print(current or "(no pane title)")
         else:
             print(f"{current or '(no custom title)'} ({source})")
         return 0
@@ -651,6 +704,9 @@ def main() -> int:
             grok_set_title(summary, title)
         elif kind == "opencode":
             if not opencode_set_title(sid, title):
+                return 2
+        elif kind == "codex":
+            if not codex_set_title(title):
                 return 2
         else:
             record = json.dumps(
