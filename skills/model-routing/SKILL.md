@@ -388,6 +388,29 @@ Herdr-hosted TUIs (driving agents in Herdr panes; verified 2026-09-26):
 5. Model names get renamed and retired: a name from an old plan or roster is
    a hint. Check the live list (`acp-run <agent> --info`, the TUI's picker)
    before committing to it.
+6. **Route up when unsure.** Routing errors are asymmetric: a hard task on a
+   cheap worker costs a failed step and a retry, an easy task sent up costs a
+   little extra. If the kind is unclear, use the higher tier.
+
+## Multiple-choice decisions are not reasoning (2026-10-11)
+
+Many calls inside an agent loop pick from a list the harness already holds:
+which pool, which kind, retry or re-route or stop, which notes or tests. Do
+not send those to a frontier model at high effort. Cheapest rung first:
+
+1. **Code**: `route_agent.py`, exit codes, `aiuse --available`, a table.
+2. **A typed decision model** that returns a probability per option (TypeSafe
+   Jev; `typesafe-ai` skill). Not wired into any harness here yet: it needs a
+   TypeSafe API key through `sudo-secretspec` and a shadow-mode trial first.
+3. **A cheap text model** at low effort, with a closed option list and a
+   parser that rejects anything off the list.
+4. **The judgment tier**, when the question is not really multiple choice.
+
+The harness writes the options, code applies a threshold set by risk (cheap
+to undo about 0.6, a failed step about 0.8, irreversible means the operator
+decides), and anything below the threshold goes up a rung, never to a guess.
+Retry caps are counters in code, not sentences in a prompt. Reasons, sources
+and the shadow-mode rollout: `docs/orchestration-practices.md` (djbclark-ade).
 
 Standing orders that pair with this: continuous operation over handoff
 rituals; flag best-practice deviations to the operator (site-private

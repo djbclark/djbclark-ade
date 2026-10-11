@@ -31,9 +31,10 @@ Currently configured:
   `github-copilot`, `pi`, `cursor` (fixed 2026-08-02, was hitting the
   wrong binary via a PATH collision), `antigravity` (custom built-in
   plugin, wraps `agy` — the built-in `gemini` plugin is dead for this
-  account, don't use it), `grok` (custom built-in plugin; **excluded since 2026-10-06** — the
-  SuperGrok vendor pool is off-limits for now, see bigteam's *Current
-  exclusions*). `opencode-go`
+  account, don't use it; **but see *ACP* below: this plugin calls `agy
+  --print`, which the standing rule forbids**), `grok` (custom built-in
+  plugin; the 2026-10-06 exclusion lapsed 2026-10-09, small slices only
+  because GrokBot runs on that pool, see bigteam's *Reserve pools*). `opencode-go`
   exists but is currently disabled — see its own comment block in
   config.toml for why (a real, tracked upstream bug, not fixable locally).
 - **Prepaid-balance agents (`deepseek`, `opencode-zen`, `openrouter`) —
@@ -50,6 +51,25 @@ Currently configured:
   to the next. This mirrors the "never pick a usage-credits-backed model without
   asking" rule in `model-routing` (*Routing method*), applied to Ralph
   TUI's own agent selection.
+
+## ACP: the target route to every TUI (2026-10-11)
+
+Every orchestration skill here must reach several TUIs, through ACP wherever
+the agent has an ACP mode (`docs/orchestration-practices.md`, djbclark-ade).
+Ralph reaches its vendors through per-CLI plugins instead, which is why it
+inherited `agy --print` (`~/.config/ralph-tui/plugins/agents/antigravity.ts`,
+line ~123), the route that trips agy's hidden burst limit.
+
+1. **Status 2026-10-11:** `ralph-tui` is not on PATH, and
+   `docs/coding-factory.md` lists Ralph as dormant. Nothing runs today.
+2. **Before any controller goes live again:** disable the `antigravity`
+   agent, or replace it with an ACP-backed plugin. The target is one generic
+   custom plugin that runs `acp-run <agent> -C <repo> -f <prompt> --model <m>
+   --perm scoped:<paths>` and maps acp-run's exit codes (0 done, 1 failed,
+   124 timeout) to Ralph's task result. One plugin then reaches every agent in
+   `acp-run --list`. Not built; ask the operator before building it.
+3. Until then, route multi-vendor work through `bigteam` (`acp-dispatch`),
+   not Ralph.
 
 ## The one rule everything else follows from
 

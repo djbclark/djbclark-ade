@@ -59,6 +59,11 @@ about which side you are on, stay high and say so.
 - **One hard call inside otherwise ordinary work** — do not raise the whole
   session. Dispatch that single question to `fable-deep` and carry on; this is
   what its separate weekly budget is for (see model-routing).
+- **Multiple-choice calls inside a loop** (which pool, retry or stop, which
+  tests first) need no effort tier at all when code can answer them. Push
+  them into a script or a table (`route_agent.py`, exit codes) and keep the
+  thinking for the open-ended steps. See model-routing, *Multiple-choice
+  decisions are not reasoning*.
 - **Switching** — always name the switch and why. An unexplained tier change
   reads as inconsistency.
 

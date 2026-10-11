@@ -25,6 +25,16 @@ Two optimisation targets, both of them explicit operator goals:
 
 This skill is the *method*. `model-routing` holds the verified headless
 invocation forms and the billing-class map; read it, don't duplicate it here.
+The reasons and sources behind the brief shape, run sizing, the 3-attempt cap
+and focused-checks-first are in `docs/orchestration-practices.md`
+(djbclark-ade, 2026-10-11).
+
+**Decide in code, reason in Claude.** The orchestrator's multiple-choice
+calls (which kind, which pool, retry or re-route or stop, which tests first)
+come from code: `route_agent.py plan`, `acp-dispatch`'s exit code, `aiuse`'s
+exit 3, `git diff --name-only`. Don't spend a frontier turn on them. Spend it on
+slicing, briefs, diff review and integration. When code can't decide, route
+the slice **up** a tier, not down.
 
 ## Step 0 — another bigteam run may already be live
 
@@ -242,6 +252,11 @@ bind every slice to a vendor up front:
 6. **Say what moved:** one line per re-route in the batch log and the handoff
    ("slice 3: agy Claude/GPT 12% left, moved to claude"), so the final report
    shows which vendor ran which slice and why.
+7. **Log the outcome too:** per slice, `$OUT/batch.log` gets kind, agent,
+   model, attempts, the cost or token figure from acp-run's stderr summary,
+   and whether the diff passed your review unchanged. That log is the
+   evidence for changing a capability profile in `route_agent.py`; don't
+   change a profile without it.
 
 ## Step 2 — slice by file, not by topic
 
@@ -258,6 +273,13 @@ disjoint files in one tree need no merge, and merging five branches costs more
 than it saves at this granularity. Reach for `cow-workspaces` or
 `git worktree` only when slices genuinely must touch the same file.
 
+**Size the run to the work** (Anthropic's research-system heuristic, 2026):
+one slice for a lookup or a single-area change, 2-4 for a comparison or a
+multi-area change, more only when the parts are truly independent with clear
+owners. Overinvesting in a simple task is the common failure. **Cap each wave
+at the number of diffs you can review properly** before the next wave lands:
+verification, not generation, is the bottleneck.
+
 **Tag each slice with a kind** (`judgment`, `code`, `research`, `bulk`,
 `mechanical`, `github`) next to its owned paths, and leave the vendor open: the
 vendor is chosen at dispatch time by *Dynamic routing* (end of Step 1), because
@@ -272,7 +294,17 @@ Keep for **yourself** (the orchestrator), never delegate:
 - in a Hermes-owned repo, integration, release and live activation: Hermes
   stays the authority there; report worktree, commit and test evidence to it
 
-## Step 3 — the concurrency contract
+## Step 3 — the brief and the concurrency contract
+
+**Brief shape.** A vague brief is copied into every slice and each one goes
+wrong in its own way, so every brief names: the **objective** (what done looks
+like), the **owned paths**, the **inputs** (only the notes, files and findings
+this slice needs, plus the always-load set: this contract and the repo's
+non-negotiables; list anything you left out on purpose), **tool guidance**
+(graft before grep, the KB before the web), the **output format** (below), an
+**acceptance check** (the command or observation that proves it), and the
+**boundaries**. You pick the notes, not a cheap model: a wrongly dropped note
+fails silently.
 
 Every dispatched prompt carries the same hard rules. They exist because each one
 has already been violated by a real agent on this machine:
@@ -562,7 +594,10 @@ returned; do not guess a reset time.
   that tried to leave its files.
 - Read every diff yourself before committing. Agents are good and still get
   ordering, alphabetisation and scope wrong.
-- Run the tests centrally, once, after the batch settles.
+- Run the checks centrally after the batch settles, **focused first**: lint
+  and type-check on the changed files, then the tests that cover the diff
+  (catch most breaks in seconds), then **the full suite, once, before any
+  commit**. Focused checks are an early warning, never a replacement.
 - **A green local check can be hollow.** A checkout missing `node_modules`, a
   venv or Ansible collections makes check scripts skip lint and tests
   silently, so "passes locally" was true of nothing. Rerun with the full
@@ -584,6 +619,11 @@ returned; do not guess a reset time.
   routing*), not retried on the same one. The exception is a quota
   failure on one model-family pool: retry on the same vendor's other pool first
   (Step 1 item 3), because the vendor itself is not spent.
+- **Three attempts per slice, then stop.** The first run plus two re-routes;
+  count them in `$OUT/batch.log`. After the third failure on the same error,
+  the slice goes to the operator with the evidence (`hermes-ping` plus the
+  chat reply), not to a fourth vendor. The cap is a count you keep, not a
+  sentence in a prompt.
 
 ## Step 6 — second opinion on contract decisions
 

@@ -33,6 +33,12 @@ altitudes compose (a macro node can run a micro graph as its body).
   worth burning, per-service effort levers. Numbers are dated snapshots —
   always re-probe (`aiuse --json`, ~1 min, JSON starts after two preamble
   lines; `cswap list` for Claude windows).
+- [docs/orchestration-practices.md](docs/orchestration-practices.md) — the
+  rules every orchestration skill follows, with sources: decide in code (or a
+  typed decider) and reason in the judgment tier, risk-set thresholds that
+  route up when unsure, brief shape, run sizing, a 3-attempt cap, focused
+  checks before the full suite, and the standing requirement that every
+  orchestration skill reach several TUIs through ACP.
 - [docs/orca-integration.md](docs/orca-integration.md) — runnable macro-
   graph command sequences plus hard-won live-run lessons (stall false
   deaths, rejected-late `worker_done` semantics, the retry recipe, the
