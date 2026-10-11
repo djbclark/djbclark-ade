@@ -10,6 +10,8 @@
     acp-dispatch check (PATH)...                         classify reports: PATH is a report file,
                                                          a jobs/<name>.json record, or an out dir
     acp-dispatch finalize RECORD --exit RC               (internal) what the detached runner calls
+    acp-dispatch extend RECORD SECONDS                  add seconds, or 0 for no deadline
+    acp-dispatch resume RECORD [--timeout S] [-p TEXT | -f FILE] [--detach --no-wait]
 
 What it replaces: the dispatch recipe that bigteam, model-routing and home-agents.md used to
 spell out in prose and every dispatcher retyped — the report-file naming, "write the full
@@ -73,6 +75,7 @@ Exit 0 is still not success: verify the outcome (diff, tests, the report's conte
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -80,7 +83,9 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn
@@ -160,6 +165,21 @@ def write_record(path: Path, rec: dict) -> None:
     write_atomic(path, json.dumps(rec, indent=1, sort_keys=True) + "\n")
 
 
+@contextmanager
+def record_lock(path: Path):
+    with path.with_name(path.name + ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def update_record(path: Path, **fields) -> dict:
+    with record_lock(path):
+        rec = json.loads(path.read_text())
+        rec.update(fields)
+        write_record(path, rec)
+        return rec
+
+
 def load_footer() -> str:
     try:
         return FOOTER_FILE.read_text()
@@ -197,15 +217,100 @@ def pid_alive(pid: int | None) -> bool:
 
 
 def rearm_cmd(done: Path, record: Path | None = None, seconds: int = 1800) -> str:
-    """The waiter a lead runs (in the background) for a detached slice. `seconds` must outlast the
-    slice: launch passes its --wait-timeout, else --timeout + --wrapup-grace + 300 (2026-10-10: a fixed 1800 s waiter
-    gave up on a live 2400 s slice and the lead read it as lost). It exits 124 on timeout;
+    """The waiter a lead runs (in the background) for a detached slice. Record waiters follow
+    the mutable wait_timeout; bare markers use seconds (0 is unlimited, 2026-10-11).
+    The default remains --timeout + --wrapup-grace + 300. It exits 124 on timeout;
     once .done appears it runs `check` on the record, so a partial, no-report or BLOCKED slice
     exits non-zero and prints its verdict (2026-10-10: a quota death exited the old waiter 0)."""
-    wait = f"timeout {seconds} bash -c 'until [ -e {shlex.quote(str(done))} ]; do sleep 10; done'"
+    wait = (f"timeout {seconds} " if seconds else "") + "bash -c " + shlex.quote(
+        f"until [ -e {shlex.quote(str(done))} ]; do sleep 10; done")
     if record is None:
         return wait
+    wait = f"{shlex.quote(str(Path(__file__).resolve()))} wait {shlex.quote(str(record))}"
     return f"{wait} && {shlex.quote(str(Path(__file__).resolve()))} check {shlex.quote(str(record))}"
+
+
+def session_info(rec: dict) -> tuple[str | None, bool | None]:
+    sid, supported = rec.get("session_id"), None
+    try:
+        with Path(rec["log"]).open() as log:
+            for line in log:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                data = row.get("data") or {}
+                if row.get("kind") in ("new_session", "load_session", "resume_session"):
+                    sid = data.get("sessionId") or sid
+                elif row.get("kind") == "initialize":
+                    caps = data.get("agentCapabilities") or {}
+                    supported = bool(caps.get("loadSession")) or (
+                        (caps.get("sessionCapabilities") or {}).get("resume") is not None)
+    except FileNotFoundError:
+        pass
+    return sid, supported
+
+
+def wait_record(record: Path) -> int:
+    # Re-read the limit: an already-armed waiter follows extend (2026-10-11).
+    while True:
+        rec = json.loads(record.read_text())
+        if Path(rec["done"]).exists():
+            return 0
+        seconds = rec.get("wait_timeout", 0)
+        if seconds and time.time() > rec["started"] + seconds:
+            return 124
+        time.sleep(5)
+
+
+def extend_record(record: Path, seconds: int) -> int:
+    with record_lock(record):
+        return extend_locked(record, seconds)
+
+
+def extend_locked(record: Path, seconds: int) -> int:
+    rec = json.loads(record.read_text())
+    if rec.get("finished") or Path(rec["done"]).exists():
+        die("cannot extend a finished slice; use resume")
+    if seconds < 0:
+        die("seconds must be a whole number, 0 or more")
+    control = Path(rec["log"] + ".extend")
+    with record_lock(control):
+        value = seconds
+        if control.exists():
+            pending = control.read_text().strip()
+            if pending.isascii() and pending.isdigit():
+                value = int(pending) + seconds if int(pending) and seconds else 0
+        write_atomic(control, f"{value}\n")
+    cmd = shlex.split(rec.get("cmd", ""))
+    old = rec.get("timeout", int(cmd[cmd.index("--timeout") + 1]) if "--timeout" in cmd else DEFAULT_TIMEOUT)
+    rec["timeout"] = old + seconds if old and seconds else 0
+    rec["wait_timeout"] = (rec.get("wait_timeout", old + DEFAULT_WRAPUP_GRACE + 300) + seconds
+                           if rec["timeout"] and rec.get("wait_timeout", 1) else 0)
+    rec["session_id"] = session_info(rec)[0]
+    write_record(record, rec)
+    print(f"extended\t{rec['name']}\tlimit={rec['timeout']} (0 means unlimited)")
+    return 0
+
+
+def agent_report_path(agent: str, root: Path, out: Path, task: str | None, name: str) -> Path:
+    if agent != "agy":
+        return out / f"{name}-report.md"
+    inner = root / ".acp-dispatch"
+    inner.mkdir(exist_ok=True)
+    git = subprocess.run(["git", "-C", str(root), "rev-parse", "--git-path", "info/exclude"],
+                         check=False, capture_output=True, text=True)
+    if git.returncode == 0:
+        exclude = Path(git.stdout.strip())
+        if not exclude.is_absolute():
+            exclude = root / exclude
+        old = exclude.read_text() if exclude.exists() else ""
+        if ".acp-dispatch/" not in old.splitlines():
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            with exclude.open("a") as f:
+                f.write(("\n" if old and not old.endswith("\n") else "") + ".acp-dispatch/\n")
+    tag = re.sub(r"[^A-Za-z0-9._-]", "_", task or out.name)
+    return inner / f"{tag}-{name}-report.md"
 
 
 # ---------------------------------------------------------------- model check
@@ -530,8 +635,19 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
 # ---------------------------------------------------------------- finalize
 
 def finalize(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
+    with record_lock(record_path):
+        return finalize_locked(record_path, rc)
+
+
+def finalize_locked(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
     rec = json.loads(record_path.read_text())
     report, final, done = Path(rec["report"]), Path(rec["final"]), Path(rec["done"])
+    inner = Path(rec.get("agent_report", rec["report"]))
+    if inner != report:
+        if inner.exists():
+            shutil.move(str(inner), report)
+        done_path(inner).unlink(missing_ok=True)
+    rec["session_id"] = session_info(rec)[0]
     final_text = final.read_text() if final.exists() else ""
     has_report = report.exists() and report.read_text().strip() != ""
     body = final_text.strip()
@@ -594,14 +710,84 @@ def runner_script(rec: dict, acp_cmd: list[str], label: str, self_path: Path) ->
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 export CLAUDE_CODE_SESSION_ID={q(rec.get("owner") or "")}
 [ -e {q(rec["done"])} ] && {{ launchctl remove {q(label)}; exit 0; }}
-{" ".join(q(c) for c in acp_cmd)} > {q(rec["final"] + ".tmp")} 2> {q(rec["stderr"])}; rc=$?
-mv -f {q(rec["final"] + ".tmp")} {q(rec["final"])}
+python3 {q(str(self_path))} execute {q(rec["record"])}; rc=$?
 python3 {q(str(self_path))} finalize {q(rec["record"])} --exit "$rc"
 launchctl remove {q(label)}
 """
 
 
-def dispatch(a: argparse.Namespace) -> int:
+def execute_record(record: Path, tee: bool = False) -> int:
+    rec = json.loads(record.read_text())
+    with open(rec["final"] + ".tmp", "w") as fo, open(rec["stderr"], "w") as fe:
+        proc = subprocess.Popen(shlex.split(rec["cmd"]), stdout=subprocess.PIPE if tee else fo,
+                                stderr=fe, stdin=subprocess.DEVNULL, text=tee)
+        rec = update_record(record, pid=proc.pid)
+
+        def copy_output():
+            for line in proc.stdout:
+                fo.write(line)
+                fo.flush()
+                sys.stdout.write(line)
+                sys.stdout.flush()
+
+        copier = threading.Thread(target=copy_output) if tee else None
+        if copier:
+            copier.start()
+        try:
+            while True:
+                sid = rec.get("session_id") or session_info(rec)[0]
+                if sid and sid != rec.get("session_id"):
+                    rec = update_record(record, session_id=sid)
+                try:
+                    rc = proc.wait(timeout=0.5)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+        except KeyboardInterrupt:
+            proc.terminate()
+            rc = proc.wait()
+        if copier:
+            copier.join()
+    os.replace(rec["final"] + ".tmp", rec["final"])
+    return rc
+
+
+def resume_record(a: argparse.Namespace) -> int:
+    record = Path(a.record).expanduser().resolve()
+    rec = json.loads(record.read_text())
+    if not rec.get("finished") and not Path(rec["done"]).exists():
+        die("cannot resume a running slice; use extend")
+    if pid_alive(rec.get("pid")):
+        die("slice process is still running; wait for finalize before resuming")
+    sid, supported = session_info(rec)
+    if supported is False:
+        die(f"{rec['agent']} advertises neither load nor resume")
+    if not sid:
+        die("no ACP session id in the record or log")
+    old_cmd = shlex.split(rec["cmd"])
+
+    def option(flag: str, default=None):
+        return old_cmd[old_cmd.index(flag) + 1] if flag in old_cmd else default
+
+    original = rec.get("prompt") or Path(rec["brief"]).read_text().split("## Delivery contract", 1)[0]
+    prompt = (Path(a.prompt_file).read_text() if a.prompt_file else a.prompt) or (
+        "The previous turn was stopped by a time limit. Continue the brief from where it left off, "
+        "and rewrite the report with the complete result.\n\nOriginal brief:\n" + original)
+    args = argparse.Namespace(
+        agent=rec["agent"], model=rec.get("model"), name=rec["name"], dir=rec["dir"],
+        task=rec.get("task"), out=rec["out"], perm=rec.get("perm", option("--perm", "all")),
+        timeout=a.timeout if a.timeout is not None else rec.get("timeout", int(option("--timeout", DEFAULT_TIMEOUT))),
+        wrapup_grace=rec.get("wrapup_grace", int(option("--wrapup-grace", 0))),
+        lead=rec.get("lead", DEFAULT_LEAD), prompt=prompt, prompt_file=None,
+        detach=a.detach, no_wait=a.no_wait, wait_timeout=a.wait_timeout, force=True, dry_run=False,
+        json=False, tee=False, no_model_check=True, acp_run=old_cmd[0],
+        acp_arg=[*rec.get("acp_arg", []), "--resume", sid])
+    return dispatch(args, {**rec, "session_id": sid, "prompt": original})
+
+
+def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
+    if a.timeout < 0 or (a.wait_timeout is not None and a.wait_timeout < 0):
+        die("timeouts must be 0 or more")
     if not a.model and a.agent not in NO_MODEL_AGENTS:
         die("--model is required (an agent's own default is the expensive one; `acp-run <agent> --info` lists values)")
     if a.model and a.agent in NO_MODEL_AGENTS:
@@ -637,41 +823,65 @@ def dispatch(a: argparse.Namespace) -> int:
                 die(f"{record} says pid {old['pid']} is still running this slice (--force to ignore)")
         except (OSError, ValueError):
             pass
+    resume_count = previous.get("resume_count", 0) if previous else 0
+    if previous:
+        resume_count += 1
+        while (out / f"{a.name}-r{resume_count}-report.md").exists():
+            resume_count += 1
+        for src, suffix in ((report, "report.md"), (brief, "brief.md"), (log, "log.jsonl"),
+                            (final, "final.txt"), (stderr, "stderr.txt")):
+            if src.exists():
+                shutil.move(str(src), out / f"{a.name}-r{resume_count}-{suffix}")
+    Path(str(log) + ".extend").unlink(missing_ok=True)
     for p in (done, final, stderr):
         if p.exists():
             p.unlink()
 
     prompt = Path(a.prompt_file).read_text() if a.prompt_file else a.prompt
-    budget = BUDGET_TEXT.format(
+    budget = ("\n## Time budget (acp-dispatch)\n\nThere is no time limit for this slice. "
+              "Write the report as soon as the work is verified.\n" if a.timeout == 0 else BUDGET_TEXT.format(
         minutes=f"{a.timeout / 60:g}",
-        wrapup=WRAPUP_BUDGET.format(grace=a.wrapup_grace) if a.wrapup_grace > 0 else "")
+        wrapup=WRAPUP_BUDGET.format(grace=a.wrapup_grace) if a.wrapup_grace > 0 else ""))
+    agent_report = agent_report_path(a.agent, Path(a.dir).resolve(), out, a.task, a.name)
+    agent_done = done_path(agent_report)
+    if agent_report != report:
+        agent_done.unlink(missing_ok=True)
     perm = a.perm or "all"
     # --perm deny refuses every permission request, the report's Write included, so the footer's
     # "write the report" cannot be followed (2026-10-11: an agy review was refused that Write and
     # had to be recovered from its final message). Tell the agent the final message is the report.
-    deny_note = DENY_NOTE.format(report=report) if perm == "deny" else ""
-    write_atomic(brief, prompt.rstrip() + "\n\n" + footer_text(report, a.lead).rstrip() + "\n"
+    deny_note = DENY_NOTE.format(report=agent_report) if perm == "deny" else ""
+    write_atomic(brief, prompt.rstrip() + "\n\n" + footer_text(agent_report, a.lead).rstrip() + "\n"
                  + deny_note + budget)
 
     if perm.startswith("scoped:"):
         perm = f"{perm},{out}"          # the agent must be allowed to write its report
+        if agent_report != report:
+            perm += f",{agent_report.parent}"
     acp_cmd = [acp_run, a.agent, "-C", str(Path(a.dir).resolve()), "--add-dir", str(out), "-f", str(brief),
                *(["--model", a.model] if a.model else []),
                "--perm", perm, "--timeout", str(a.timeout), "--log", str(log)]
-    if a.wrapup_grace > 0:
+    if a.wrapup_grace > 0 and a.timeout:
         acp_cmd += ["--wrapup-grace", str(a.wrapup_grace), "--wrapup",
-                    WRAPUP_TEXT.format(timeout=a.timeout, report=report, done=done)]
+                    WRAPUP_TEXT.format(timeout=a.timeout, report=agent_report, done=agent_done)]
     acp_cmd += a.acp_arg or []
     slice_secs = a.timeout + max(a.wrapup_grace, 0)
+    wait_timeout = (0 if a.timeout == 0 else
+                    a.wait_timeout if a.wait_timeout is not None else slice_secs + 300)
 
     rec = {
         "name": a.name, "agent": a.agent, "model": a.model, "dir": str(Path(a.dir).resolve()),
         "task": a.task, "out": str(out), "brief": str(brief), "report": str(report), "done": str(done),
         "final": str(final), "stderr": str(stderr), "log": str(log), "record": str(record),
         "owner": os.environ.get("CLAUDE_CODE_SESSION_ID", ""), "started": time.time(),
-        "cmd": " ".join(shlex.quote(c) for c in acp_cmd), "rearm": rearm_cmd(done, record, a.wait_timeout or slice_secs + 300),
+        "cmd": " ".join(shlex.quote(c) for c in acp_cmd), "rearm": rearm_cmd(done, record, wait_timeout),
         "detached": bool(a.detach), "status": "running", "pid": None, "exit": None, "finished": None,
         "report_source": None, "lead": a.lead,
+        "agent_report": str(agent_report), "agent_done": str(agent_done), "perm": a.perm,
+        "timeout": a.timeout, "wait_timeout": wait_timeout, "wrapup_grace": a.wrapup_grace,
+        "acp_arg": previous.get("acp_arg", []) if previous else a.acp_arg or [],
+        "session_id": previous.get("session_id") if previous else None, "resume_count": resume_count,
+        "prompt": previous["prompt"] if previous else prompt,
     }
     if a.dry_run:
         rec["status"] = "dry-run"
@@ -686,43 +896,25 @@ def dispatch(a: argparse.Namespace) -> int:
         write_atomic(runner, runner_script(rec, acp_cmd, label, Path(__file__).resolve()), mode=0o700)
         sub = ["launchctl", "submit", "-l", label, "-o", str(out / f"{a.name}.out"),
                "-e", str(out / f"{a.name}.err"), "--", "/bin/bash", str(runner)]
+        rec = update_record(record, label=label, runner=str(runner))
         r = subprocess.run(sub, check=False, capture_output=True, text=True)
         if r.returncode != 0:
             die(f"launchctl submit failed ({r.returncode}): {r.stderr.strip()}", 1)
-        rec.update(label=label, runner=str(runner))
-        write_record(record, rec)
         if a.no_wait:
             print(f"detached\t{a.name}\t{report}\nrecord: {record}\nrearm: {rec['rearm']}")
             return 0
-        deadline = time.time() + (a.wait_timeout or slice_secs + 300)
-        while not done.exists():
-            if time.time() > deadline:
-                print(f"timeout\t{a.name}\t{report}\nstill running under launchd; rearm: {rec['rearm']}")
-                return 124
-            time.sleep(5)
+        if wait_record(record) == 124:
+            print(f"timeout\t{a.name}\t{report}\nstill running under launchd; rearm: {rec['rearm']}")
+            return 124
         rec = json.loads(record.read_text())
         st, det = classify(report, done, finished=True)
         rc = rec.get("exit")
     else:
-        with open(str(final) + ".tmp", "w") as fo, open(stderr, "w") as fe:
-            proc = subprocess.Popen(acp_cmd, stdout=subprocess.PIPE if a.tee else fo, stderr=fe,
-                                    stdin=subprocess.DEVNULL, text=bool(a.tee))
-            rec["pid"] = proc.pid
-            write_record(record, rec)
-            try:
-                if a.tee and proc.stdout is not None:
-                    # a visible host (herdr pane, Orca terminal) wants to see the agent as it streams
-                    for line in proc.stdout:
-                        fo.write(line)
-                        fo.flush()
-                        sys.stdout.write(line)
-                        sys.stdout.flush()
-                rc = proc.wait()
-            except KeyboardInterrupt:
-                proc.terminate()
-                rc = proc.wait()
-        os.replace(str(final) + ".tmp", final)
+        rc = execute_record(record, a.tee)
         st, det, rec = finalize(record, rc)
+
+    if previous and rc == 2 and session_info(rec)[1] is False:
+        die(f"{rec['agent']} advertises neither load nor resume")
 
     tail = ""
     try:
@@ -746,6 +938,27 @@ def dispatch(a: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] in ("extend", "resume", "wait", "execute"):
+        sub = argparse.ArgumentParser(prog=f"acp-dispatch {argv[0]}")
+        sub.add_argument("record")
+        if argv[0] == "extend":
+            sub.add_argument("seconds", type=int)
+        elif argv[0] == "resume":
+            sub.add_argument("--timeout", type=int)
+            prompt = sub.add_mutually_exclusive_group()
+            prompt.add_argument("-p", "--prompt")
+            prompt.add_argument("-f", "--prompt-file")
+            sub.add_argument("--detach", action="store_true")
+            sub.add_argument("--no-wait", action="store_true")
+            sub.add_argument("--wait-timeout", type=int)
+        s = sub.parse_args(argv[1:])
+        if argv[0] == "extend":
+            return extend_record(Path(s.record), s.seconds)
+        if argv[0] == "resume":
+            return resume_record(s)
+        if argv[0] == "execute":
+            return execute_record(Path(s.record))
+        return wait_record(Path(s.record))
     if argv and argv[0] in ("footer", "check", "finalize"):
         sub = argparse.ArgumentParser(prog=f"acp-dispatch {argv[0]}")
         if argv[0] == "footer":
@@ -780,7 +993,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--task", help="out dir is ~/.local/state/bigteam/<task>/ (default adhoc-<date>)")
     ap.add_argument("--out", help="explicit out dir instead of --task")
     ap.add_argument("--perm", default="all", help="all | deny | scoped:P1,P2 (the out dir is added)")
-    ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"acp-run --timeout (default {DEFAULT_TIMEOUT})")
+    ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
+                    help=f"acp-run --timeout (default {DEFAULT_TIMEOUT}; 0 is unlimited)")
     ap.add_argument("--wrapup-grace", type=int, default=DEFAULT_WRAPUP_GRACE,
                     help="acp-run --wrapup-grace: seconds for one last write-the-report turn after the "
                          f"timeout cancel (default {DEFAULT_WRAPUP_GRACE}; 0 turns it off)")
@@ -788,7 +1002,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--detach", action="store_true", help="run under launchd so it outlives this session")
     ap.add_argument("--no-wait", action="store_true", help="with --detach: return at once with the rearm command")
     ap.add_argument("--wait-timeout", type=int,
-                    help="with --detach: seconds to wait for .done (default timeout+wrapup-grace+300)")
+                    help="with --detach: seconds to wait for .done (default timeout+wrapup-grace+300; "
+                         "0 or --timeout 0 means unlimited)")
     ap.add_argument("--force", action="store_true", help="redo a slice whose .done or live record exists")
     ap.add_argument("--dry-run", action="store_true", help="compose the brief copy, print the command and paths, run nothing")
     ap.add_argument("--json", action="store_true")

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,7 @@ import textwrap
 import unittest
 from pathlib import Path
 from typing import Any, override
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 # ACP_DISPATCH_SCRIPT: test a candidate copy (in a tree whose docs/ links here) before it replaces the live one
@@ -40,11 +42,14 @@ FAKE = textwrap.dedent("""\
         exit 0
       fi
     done
-    brief=""; while [ $# -gt 0 ]; do case "$1" in -f) brief="$2"; shift;; esac; shift; done
+    brief=""; log=""; while [ $# -gt 0 ]; do case "$1" in
+      -f) brief="$2"; shift;; --log) log="$2"; shift;; esac; shift; done
+    printf '%s\\n' '{"kind":"initialize","data":{"agentCapabilities":{"loadSession":true}}}' '{"kind":"new_session","data":{"sessionId":"fake-session"}}' > "$log"
     echo "$@" > /dev/null
     report=$(grep -o 'deliverable to `[^`]*`' "$brief" | head -1 | sed 's/.*`\\(.*\\)`/\\1/')
     case "${FAKE_MODE:-writes}" in
       writes)   printf 'STATUS: working\\nfound it\\nDONE\\n' > "$report"; echo "written: $report"; exit 0;;
+      slow)     sleep 2; printf 'STATUS: working\\nfound it\\nDONE\\n' > "$report"; exit 0;;
       stdout)   echo "the whole answer in the final message"; exit 0;;
       blocked)  printf 'BLOCKED: do I own ~/opt/cfengine-dev?\\n' > "$report"; echo "BLOCKED: do I own ~/opt/cfengine-dev?"; exit 0;;
       partial)  printf 'STATUS: working\\nhalf\\n' > "$report"; echo "written: $report"; exit 0;;
@@ -188,7 +193,7 @@ class TestDispatch(Base):
         self.assertEqual(rec["exit"], 0)
         self.assertEqual(rec["report_source"], "agent")
         self.assertTrue(Path(rec["done"]).exists())
-        self.assertIn("until [ -e", rec["rearm"])
+        self.assertIn(" wait ", rec["rearm"])
         self.assertIn("--model m1", rec["cmd"])
         self.assertIn("--perm all", rec["cmd"])
         self.assertIn("--timeout 2400", rec["cmd"])
@@ -382,13 +387,13 @@ class TestFailureNote(Base):
     def test_rearm_waiter_outlasts_the_slice_timeout(self):
         # timeout + wrap-up grace (default 300) + 300
         self.dispatch("--timeout", "3600", name="long")
-        self.assertTrue(self.record("long")["rearm"].startswith("timeout 4200 "), self.record("long")["rearm"])
+        self.assertEqual(self.record("long")["wait_timeout"], 4200)
         self.dispatch("--timeout", "3600", "--wait-timeout", "5000", name="waited")
-        self.assertTrue(self.record("waited")["rearm"].startswith("timeout 5000 "))
+        self.assertEqual(self.record("waited")["wait_timeout"], 5000)
         self.dispatch(name="default")
-        self.assertTrue(self.record("default")["rearm"].startswith("timeout 3000 "))
+        self.assertEqual(self.record("default")["wait_timeout"], 3000)
         self.dispatch("--wrapup-grace", "0", name="nograce")
-        self.assertTrue(self.record("nograce")["rearm"].startswith("timeout 2700 "))
+        self.assertEqual(self.record("nograce")["wait_timeout"], 2700)
 
 
 class TestTimeBudget(Base):
@@ -405,6 +410,183 @@ class TestTimeBudget(Base):
         self.assertIn("before a commit", brief)
         self.assertIn("one last turn of 300 seconds", brief)
         self.assertLess(brief.index("## Delivery contract"), brief.index("## Time budget"))
+
+    def test_unlimited_has_no_budget_or_waiter_deadline(self):
+        r = self.dispatch("--timeout", "0", "--wait-timeout", "1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        brief = Path(self.record()["brief"]).read_text()
+        self.assertIn("no time limit", brief)
+        self.assertNotIn("stops this slice", brief)
+        self.assertEqual(self.record()["wait_timeout"], 0)
+        self.assertIn("--timeout 0", self.record()["cmd"])
+
+
+class TestSliceControls(Base):
+    def record_path(self):
+        return self.out / "jobs" / "s1.json"
+
+    def test_session_id_is_saved_while_fake_agent_is_running(self):
+        import time
+        cmd = [sys.executable, str(SCRIPT), "codex", "--model", "m1", "--name", "s1",
+               "-C", str(self.repo), "--out", str(self.out), "--acp-run", str(self.fake),
+               "--no-model-check", "-p", "work"]
+        with subprocess.Popen(cmd, env={**os.environ, "FAKE_MODE": "slow", "ACP_DISPATCH_AIUSE": "off"},
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+            deadline = time.monotonic() + 10
+            observed = None
+            while time.monotonic() < deadline:
+                if self.record_path().exists():
+                    observed = self.record()
+                    if observed.get("session_id"):
+                        break
+                time.sleep(0.05)
+            stdout, stderr = proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 0, (stdout, stderr))
+        self.assertIsNotNone(observed)
+        self.assertEqual(observed["session_id"], "fake-session")
+        self.assertIsNone(observed["finished"])
+
+    def test_extend_live_and_refuse_finished(self):
+        self.dispatch()
+        p = self.record_path()
+        self.assertEqual(run(["extend", str(p), "60"]).returncode, 2)
+        rec = self.record()
+        rec.update(finished=None, status="running", exit=None)
+        Path(rec["done"]).unlink()
+        p.write_text(json.dumps(rec))
+        for value, want in (("60", 2460), ("0", 0)):
+            r = run(["extend", str(p), value])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(Path(rec["log"] + ".extend").read_text().strip(), value)
+            self.assertEqual(self.record()["timeout"], want)
+        self.assertEqual(run(["extend", str(p), "-1"]).returncode, 2)
+
+    def test_resume_preserves_session_and_archives_each_report(self):
+        self.dispatch(mode="timeout_wrapup")
+        self.assertEqual(self.record()["session_id"], "fake-session")
+        for n in (1, 2):
+            r = run(["resume", str(self.record_path()), "--timeout", "0"],
+                    env={"FAKE_MODE": "writes", "ACP_DISPATCH_AIUSE": "off"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            rec = self.record()
+            self.assertIn("--resume fake-session", rec["cmd"])
+            self.assertEqual(rec["resume_count"], n)
+            self.assertTrue((self.out / f"s1-r{n}-report.md").exists())
+            self.assertTrue(Path(rec["done"]).exists())
+            self.assertEqual(run(["check", str(self.record_path())]).returncode, 0)
+            brief = Path(rec["brief"]).read_text()
+            self.assertIn("continue the brief", brief.lower())
+            self.assertEqual(brief.count("## Delivery contract"), 1)
+
+    def test_resume_legacy_log_and_custom_prompt(self):
+        self.dispatch()
+        rec = self.record()
+        rec.pop("session_id", None)
+        self.record_path().write_text(json.dumps(rec))
+        prompt = self.tmp / "continue.txt"
+        prompt.write_text("Finish the remaining check.")
+        r = run(["resume", str(self.record_path()), "-f", str(prompt)])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(Path(rec["brief"]).read_text().startswith("Finish the remaining check."))
+
+    def test_resume_unsupported_leaves_old_deliverable(self):
+        self.dispatch()
+        rec = self.record()
+        Path(rec["log"]).write_text(json.dumps({"kind": "initialize", "data": {
+            "agentCapabilities": {}}}) + "\n" + json.dumps({"kind": "new_session", "data": {
+                "sessionId": "fake-session"}}) + "\n")
+        old = Path(rec["report"]).read_text()
+        r = run(["resume", str(self.record_path())])
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("neither load nor resume", r.stderr)
+        self.assertEqual(Path(rec["report"]).read_text(), old)
+        self.assertTrue(Path(rec["done"]).exists())
+
+    def test_resume_detached_runner_uses_same_finalize_contract(self):
+        self.dispatch()
+        mod = runpy.run_path(str(SCRIPT))
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as launch:
+            rc = mod["main"](["resume", str(self.record_path()), "--detach", "--no-wait", "--timeout", "0"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(launch.call_args.args[0][:2], ["launchctl", "submit"])
+        rec = self.record()
+        self.assertFalse(Path(rec["done"]).exists())
+        self.assertIn("--resume fake-session", rec["cmd"])
+        runner = Path(rec["runner"]).read_text()
+        self.assertIn(" execute ", runner)
+        self.assertIn(" finalize ", runner)
+        self.assertIn('--exit "$rc"', runner)
+        # Invoke the fake agent through execute, never the launchd shell runner.
+        self.assertEqual(mod["execute_record"](self.record_path()), 0)
+        self.assertEqual(mod["finalize"](self.record_path(), 0)[0], "done")
+        self.assertEqual(run(["check", str(self.record_path())]).returncode, 0)
+
+    def test_waiter_observes_extension_after_it_starts(self):
+        self.dispatch("--timeout", "1")
+        rec = self.record()
+        Path(rec["done"]).unlink()
+        rec.update(started=0, finished=None, wait_timeout=2, timeout=1)
+        self.record_path().write_text(json.dumps(rec))
+        mod = runpy.run_path(str(SCRIPT))
+        def next_tick(_):
+            mod["extend_record"](self.record_path(), 0)
+        with patch("time.time", side_effect=[1, 100]), patch("time.sleep", side_effect=next_tick):
+            # On its second tick it sees unlimited; end the test with .done.
+            count = [0]
+            def ticks(_):
+                count[0] += 1
+                if count[0] == 1:
+                    next_tick(0)
+                else:
+                    Path(rec["done"]).touch()
+            with patch("time.sleep", side_effect=ticks):
+                self.assertEqual(mod["wait_record"](self.record_path()), 0)
+        self.assertEqual(count[0], 2)
+
+    def test_running_resume_refused_and_pending_extensions_accumulate(self):
+        self.dispatch()
+        rec = self.record()
+        rec.update(finished=None, exit=None)
+        Path(rec["done"]).unlink()
+        self.record_path().write_text(json.dumps(rec))
+        self.assertEqual(run(["resume", str(self.record_path())]).returncode, 2)
+        for value in (30, 40):
+            self.assertEqual(run(["extend", str(self.record_path()), str(value)]).returncode, 0)
+        self.assertEqual(Path(rec["log"] + ".extend").read_text(), "70\n")
+        self.assertEqual(self.record()["timeout"], 2470)
+
+    def test_agy_delivers_from_non_git_workspace(self):
+        r = self.dispatch_agent("agy", "m1", "--task", "test-task")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = self.record()
+        inner = self.repo / ".acp-dispatch" / "test-task-s1-report.md"
+        self.assertEqual(Path(rec["agent_report"]), inner.resolve())
+        self.assertIn(str(inner.resolve()), Path(rec["brief"]).read_text())
+        self.assertFalse(inner.exists())
+        self.assertTrue(Path(rec["report"]).exists())
+        self.assertTrue(Path(rec["done"]).exists())
+
+    def test_agy_git_exclude_appended_once(self):
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        for name in ("s1", "s2"):
+            r = self.dispatch_agent("agy", "m1", name=name)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        exclude = self.repo / ".git" / "info" / "exclude"
+        self.assertEqual(exclude.read_text().splitlines().count(".acp-dispatch/"), 1)
+
+    def test_agy_finalize_moves_inner_report_and_marker_before_out_done(self):
+        self.dispatch_agent("agy", "m1", "--perm", "scoped:src")
+        rec = self.record()
+        self.assertIn(str(Path(rec["agent_report"]).parent), rec["cmd"])
+        Path(rec["done"]).unlink()
+        Path(rec["agent_report"]).write_text("STATUS: working\nnew inner result\nDONE\n")
+        Path(rec["agent_done"]).touch()
+        r = run(["finalize", str(self.record_path()), "--exit", "0"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("new inner result", Path(rec["report"]).read_text())
+        self.assertFalse(Path(rec["agent_report"]).exists())
+        self.assertFalse(Path(rec["agent_done"]).exists())
+        self.assertTrue(Path(rec["done"]).exists())
 
     def test_acp_run_gets_the_wrapup_prompt_naming_the_report(self):
         self.dispatch()

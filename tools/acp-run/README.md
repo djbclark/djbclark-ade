@@ -68,6 +68,13 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    says `wrapup=<stop reason|timeout|skipped|error>`. Added 2026-10-10 after an
    opencode slice with verified work lost its report to a `git commit` whose
    pre-commit Gradle hook queued on the machine-wide Gradle slot.
+   `--timeout 0` removes the turn deadline and disables the wrap-up turn;
+   handshake limits still apply. While waiting, acp-run checks `<log>.extend`
+   at intervals of at most 30 seconds. Write a nonnegative whole number of
+   seconds there to add to the current deadline, or `0` to remove it. Positive
+   extensions leave an unlimited turn unlimited. The file is consumed and
+   deleted; malformed input is logged and ignored. `deadline_extended` records
+   carry the old and new monotonic deadlines (`null` means unlimited).
 7. **Safe permission answers**: only an offered `allow_once` or `reject_once`
    option is ever selected. Never an `*_always` option, which an agent may save
    beyond this run (Hermes writes `allow_always` to a permanent allowlist), and
@@ -99,6 +106,35 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
     and exit 130/143, so a killed run does not leave the agent running.
 12. **An interactive mode** (`--interactive`, below): one ACP session that stays
     open for more prompts, from a terminal, a pipe or a drop directory.
+
+## Dispatch slice controls (2026-10-11)
+
+`acp-dispatch <agent> ... --timeout 0` starts a slice without a time limit.
+Its record-based rearm waiter and detached wait have no deadline, even with an
+explicit `--wait-timeout`. For finite slices, the existing default remains
+timeout + wrap-up grace + 300 seconds; `--wait-timeout 0` makes just the waiter
+unlimited. Already-running record-based waiters follow later extensions.
+
+`acp-dispatch extend <out>/jobs/<name>.json 3600` adds an hour to a running
+slice. Use `0` to remove its deadline. The command atomically writes the control
+file and records the requested total limit; acp-run's log confirms application.
+Pending positive extensions accumulate. Finished slices are refused.
+
+`acp-dispatch resume <out>/jobs/<name>.json --timeout 14400` continues a
+finished slice in its original ACP session. Optional `-p TEXT` or `-f FILE`
+replaces the continuation prompt; `--detach --no-wait` uses the normal runner
+and rearm contract. Without a new timeout it reuses the recorded limit. The
+record stores the session id as soon as it is observed, and legacy records
+recover it from the log's `new_session` event. Agents advertising neither
+load nor resume are refused with exit 2. The previous report is preserved as
+`<name>-r1-report.md`, then `-r2`, and so on; each revision also keeps its brief,
+log, final text and stderr. Normal output and `.done` paths remain stable.
+
+For `agy`, the footer instead names
+`<-C>/.acp-dispatch/<task>-<name>-report.md` and its `.done`. Dispatch adds
+`.acp-dispatch/` once to the workspace repository's local Git exclude file
+(non-Git workspaces need no exclude). Finalize moves the report to the normal
+out folder before publishing its `.done`. Records retain both pairs of paths.
 
 ## Interactive mode
 

@@ -124,6 +124,7 @@ and Ctrl-C (SIGINT) does not exit while a turn runs.
 
 import argparse
 import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -818,6 +819,51 @@ def fallback_cli(a, client=None) -> int:
     return subprocess.run(cmd, cwd=str(Path(a.dir).resolve()), check=False).returncode
 
 
+def extend_deadline(client, deadline):
+    """Consume a whole-second extension beside the log (2026-10-11)."""
+    name = getattr(getattr(client, "log", None), "name", None)
+    if not isinstance(name, str):
+        return deadline
+    path = Path(name + ".extend")
+    if not path.exists():
+        return deadline
+    try:
+        with path.with_name(path.name + ".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return read_deadline_extension(client, deadline, path)
+    except OSError as e:
+        client.rec("deadline_extension_invalid", {"error": str(e)})
+        return deadline
+
+
+def read_deadline_extension(client, deadline, path):
+    try:
+        value = path.read_text().strip()
+    except FileNotFoundError:
+        return deadline
+    except (OSError, UnicodeError) as e:
+        client.rec("deadline_extension_invalid", {"error": str(e)})
+    else:
+        if re.fullmatch(r"[0-9]+", value):
+            try:
+                seconds = int(value)
+                new = None if seconds == 0 or deadline is None else deadline + seconds
+            except (ValueError, OverflowError) as e:
+                client.rec("deadline_extension_invalid", {"error": str(e)})
+            else:
+                client.rec("deadline_extended", {"old_deadline": deadline, "new_deadline": new,
+                                                 "seconds": seconds})
+                print(f"acp-run: deadline extended: {deadline} -> {new}", file=sys.stderr)
+                deadline = new
+        else:
+            client.rec("deadline_extension_invalid", {"value": value[:200]})
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        client.rec("deadline_extension_invalid", {"error": str(e)})
+    return deadline
+
+
 async def prompt_turn(a, conn, sess, client, text, out, wait=None):
     """Send one prompt, with --prompt-retries. Writes stop_reason, quota and
     usage into out; returns (finished, failure, code), code 124 on a timeout
@@ -829,7 +875,7 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
 
     finished, failure, code = False, None, None
     client.last_failure = None
-    deadline = time.monotonic() + a.timeout
+    deadline = time.monotonic() + a.timeout if a.timeout else None
     prompt = [TextContentBlock(type="text", text=text)]
     for attempt in range(a.prompt_retries + 1):
         # Retry only before any side effect (acpx: no retry once the
@@ -852,8 +898,24 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
         )
         why = None
         try:
-            resp = await wait(prompt_task, max(1, deadline - time.monotonic()))
+            while True:
+                deadline = extend_deadline(client, deadline)
+                left = deadline - time.monotonic() if deadline is not None else 30
+                if left <= 0:
+                    raise TimeoutError
+                try:
+                    resp = await wait(prompt_task, min(30, left))
+                    break
+                except TimeoutError:
+                    if prompt_task.done():
+                        # A timeout raised by the adapter itself is not a polling tick.
+                        raise
         except TimeoutError:
+            if a.interactive:
+                repl = getattr(wait, "__self__", None)
+                if repl is not None:
+                    repl.cancelled = client.cancelled = True
+                    repl.drop_question()
             await conn.cancel(session_id=sess.session_id)
             try:
                 resp = await asyncio.wait_for(prompt_task, 15)
@@ -861,7 +923,7 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
             except (TimeoutError, RequestError, ConnectionError):
                 out["stop_reason"] = "timeout"
             code = 124
-            if getattr(a, "wrapup_grace", 0) > 0 and not a.interactive:
+            if deadline is not None and getattr(a, "wrapup_grace", 0) > 0 and not a.interactive:
                 await wrapup_turn(a, conn, sess, client, out)
             break
         except (RequestError, ConnectionError) as e:
@@ -1389,10 +1451,7 @@ class Repl:
         while True:
             left = deadline - time.monotonic()
             if left <= 0:
-                # prompt_turn sends session/cancel next; an open permission
-                # question must be answered "cancelled" for the turn to end
-                self.cancelled = self.client.cancelled = True
-                self.drop_question()
+                # prompt_turn polls deadline controls; this need not end the turn.
                 raise TimeoutError
             get = self.inputs.getter()
             done, _ = await asyncio.wait(
@@ -1819,7 +1878,7 @@ def main():
         metavar="ID=VALUE",
         help="set an ACP session config option (see --info); repeatable",
     )
-    ap.add_argument("--timeout", type=float, default=1800)
+    ap.add_argument("--timeout", type=float, default=1800, help="seconds per turn; 0 means no deadline")
     ap.add_argument(
         "--wrapup-grace",
         type=float,
@@ -1915,6 +1974,8 @@ def main():
         " of starting a new one",
     )
     a = ap.parse_args()
+    if a.timeout < 0:
+        ap.error("--timeout must be 0 or more")
     if a.list:
         for n, (c, auth) in AGENTS.items():
             ok = "ok " if shutil.which(c[0]) else "-- "

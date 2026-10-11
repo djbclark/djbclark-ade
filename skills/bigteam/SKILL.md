@@ -425,13 +425,16 @@ until the work is committed or recorded in a repo.
    ruff passes) → update the report**, and give expensive verification its own
    slice when the count of suite runs is more than two. acp-dispatch's default
    `--timeout` is 2400 for this reason; the cost of a cancel is the whole report.
-6. **A cancelled slice is resumed, not re-tasked.** The session id is in the
-   `--log` file (`"sessionId"` in the result event). `acp-run <agent> -C <repo>
-   --resume <id> --model <m> --perm deny --timeout 600 -p "write your report
-   now from what you already did; edit nothing"` gets the real report from the
-   agent's own context (the claude adapter resumes; other adapters: check
-   `--info`). Only if that fails, reconstruct from the diff with a fresh
-   read-only slice.
+   Use `--timeout 0` for no time limit (the rearm waiter also waits indefinitely).
+   `acp-dispatch extend "$OUT/jobs/<name>.json" <seconds>` adds time to a running
+   slice; `0` removes its deadline, applied within 30 seconds (2026-10-11).
+6. **A cancelled slice is resumed, not re-tasked.** Use `acp-dispatch resume
+   "$OUT/jobs/<name>.json" --timeout 14400 [--detach --no-wait]`; optional `-p`
+   or `-f` supplies the continuation. It reuses the recorded session (legacy
+   logs: `new_session.data.sessionId`), preserves old reports as `-r1-report.md`,
+   `-r2-report.md`, and keeps the same out-folder report and `.done` paths.
+   Agents advertising neither load nor resume exit 2. Only if resume fails,
+   reconstruct from the diff with a fresh read-only slice.
 
 For agents with no working ACP route (zcode, muse), and as a fallback for
 agy when its ACP client fails (it fails independently of the CLI), use the
