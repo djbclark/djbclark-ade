@@ -198,6 +198,11 @@ class TestDispatch(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn(f"--perm scoped:src/a.py,{self.out.resolve()}", self.record()["cmd"])
 
+    def test_dispatch_passes_add_dir_for_out(self):
+        r = self.dispatch()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"--add-dir {self.out.resolve()}", self.record()["cmd"])
+
     def test_deny_perm_brief_says_the_final_message_is_the_report(self):
         # --perm deny refuses the report's Write too; the brief must not ask for the impossible.
         r = self.dispatch("--perm", "deny")

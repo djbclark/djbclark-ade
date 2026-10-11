@@ -655,7 +655,7 @@ def dispatch(a: argparse.Namespace) -> int:
 
     if perm.startswith("scoped:"):
         perm = f"{perm},{out}"          # the agent must be allowed to write its report
-    acp_cmd = [acp_run, a.agent, "-C", str(Path(a.dir).resolve()), "-f", str(brief),
+    acp_cmd = [acp_run, a.agent, "-C", str(Path(a.dir).resolve()), "--add-dir", str(out), "-f", str(brief),
                *(["--model", a.model] if a.model else []),
                "--perm", perm, "--timeout", str(a.timeout), "--log", str(log)]
     if a.wrapup_grace > 0:

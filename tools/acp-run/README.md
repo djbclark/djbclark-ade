@@ -18,7 +18,7 @@ logs. MIT licensed. The SDK is pinned below 1.0 until 1.0 is tested.
 ```sh
 acp-run --list                                  # agents and the command each runs
 acp-run claude --info                           # modes, config options, auth methods
-acp-run codex -C ~/src/repo -p 'Reply with exactly: OK' --model gpt-6-astra
+acp-run codex -C ~/src/repo --add-dir ~/.local/state/bigteam/task -p 'Reply with exactly: OK' --model gpt-6-astra
 acp-run copilot -C ~/src/repo -f brief.md --perm deny --timeout 1200 > report.md
 acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session you keep prompting
 ```
@@ -35,13 +35,22 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      edit/delete/move only when every path the tool call names is under one of
      the listed paths (relative to `-C`). This is an approval policy, not a
      sandbox: an allowed shell command can still write anywhere.
-3. **`--model`, `--mode` and `--set ID=VALUE`** for any config option `--info`
+3. **`--add-dir DIR` (repeatable)**: add extra workspace roots sent as
+   `additionalDirectories` in `session/new`. If advertised in `initialize` (in
+   `agentCapabilities` or `sessionCapabilities`), it is sent directly; if
+   unadvertised, it is still sent, falling back with a one-line log to a retry
+   without it if rejected. Lets an agent whose file tools are confined to its
+   workspace roots read and write outside `-C` (such as `acp-dispatch` report
+   folders). **agy ignores it** (2026-10-11): agy_acp_server 1.3.0 accepts the
+   field but never passes it to its allowed-directory list, so agy's file tools
+   still refuse paths outside `-C`.
+4. **`--model`, `--mode` and `--set ID=VALUE`** for any config option `--info`
    lists.
-4. **An audit trail**: every ACP event is logged as JSONL (default
+5. **An audit trail**: every ACP event is logged as JSONL (default
    `~/.local/state/acp-run/`), ending with a `result` record (summary and exit
    code), and one summary line goes to stderr: stop reason, seconds, tool calls,
    permissions allowed/denied, tokens, cost, failure class, log path.
-5. **Timeouts that cancel the turn** (`session/cancel`), and a bounded handshake
+6. **Timeouts that cancel the turn** (`session/cancel`), and a bounded handshake
    with retries (`--handshake-tries`), falling back to `claude -p` for the
    `claude` agent when its ACP session never starts (`--no-fallback` to disable).
    The fallback runs as a known conversation (`claude -p --session-id`: the
@@ -59,7 +68,7 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    says `wrapup=<stop reason|timeout|skipped|error>`. Added 2026-10-10 after an
    opencode slice with verified work lost its report to a `git commit` whose
    pre-commit Gradle hook queued on the machine-wide Gradle slot.
-6. **Safe permission answers**: only an offered `allow_once` or `reject_once`
+7. **Safe permission answers**: only an offered `allow_once` or `reject_once`
    option is ever selected. Never an `*_always` option, which an agent may save
    beyond this run (Hermes writes `allow_always` to a permanent allowlist), and
    never `cancelled`, which cancels the whole turn. An allow with no
@@ -67,7 +76,7 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    gets a JSON-RPC error. Under `scoped:`, a tool call with no kind gets one
    inferred from its title (`Edit ...` is an edit, as acpx does); one that cannot
    be inferred needs in-scope paths, like an edit.
-7. **Delivery checks.** Agents report some provider failures as a normal answer
+8. **Delivery checks.** Agents report some provider failures as a normal answer
    (`end_turn`). acp-run fails such a turn (exit 1, a `FAILED <class>` line on
    stderr, `"failure"` in `--json`) when the whole short reply is a refusal
    (`Upgrade your plan to continue`), when it is the model declining the task
@@ -78,17 +87,17 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    the same way: `quota`, `plan`, `auth` or `transient`. The patterns are a short
    table at the top of the script (`FAILURE_CLASSES`, `REPLY_REFUSALS`,
    `MODEL_REFUSALS`, `TAIL_ERROR`).
-8. **Opt-in prompt retry** (`--prompt-retries N`, default 0): a prompt that fails
+9. **Opt-in prompt retry** (`--prompt-retries N`, default 0): a prompt that fails
    with a transient error before any tool call or permission request is retried
    with backoff (1, 2, 4 s, at most 10 s). Quota, plan and auth failures are not
    retried.
-9. **Opt-in machine-load guard** (`--max-load L`, env `ACP_RUN_MAX_LOAD`): refuse
+10. **Opt-in machine-load guard** (`--max-load L`, env `ACP_RUN_MAX_LOAD`): refuse
    to start (exit 75) while the 1-minute load average per CPU core is above `L`;
    `--load-wait SECS` (env `ACP_RUN_LOAD_WAIT`) waits up to that long for the
    load to drop first. Off by default.
-10. **Clean interrupts**: SIGINT/SIGTERM send `session/cancel`, stop the agent
+11. **Clean interrupts**: SIGINT/SIGTERM send `session/cancel`, stop the agent
     and exit 130/143, so a killed run does not leave the agent running.
-11. **An interactive mode** (`--interactive`, below): one ACP session that stays
+12. **An interactive mode** (`--interactive`, below): one ACP session that stays
     open for more prompts, from a terminal, a pipe or a drop directory.
 
 ## Interactive mode

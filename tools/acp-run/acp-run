@@ -5,7 +5,7 @@
 # ///
 """Run one prompt through a coding agent over the Agent Client Protocol (ACP).
 
-    acp-run <agent> [-C DIR] [-p PROMPT | -f FILE | stdin] [--perm POLICY]
+    acp-run <agent> [-C DIR] [--add-dir DIR]... [-p PROMPT | -f FILE | stdin] [--perm POLICY]
             [--model M] [--mode M] [--set ID=VALUE]... [--timeout SECS]
             [--log PATH] [--json] [--handshake-tries N] [--handshake-timeout S]
             [--no-fallback] [--prompt-retries N] [--max-load L] [--load-wait S]
@@ -23,6 +23,10 @@ ACP event is logged as JSONL (including the prompt response) and ends with a
 "result" record holding the summary and exit code; the default log is under
 ~/.local/state/acp-run/. --json prints the summary fields plus "text", and
 "failure", "warning" and "quota" (an agent's _meta.quota) when present.
+
+--add-dir DIR adds an extra workspace root for this session (repeatable).
+The absolute paths are sent as additionalDirectories in session/new, allowing
+the agent's file tools to access paths outside -C (e.g. bigteam report folders).
 
 --perm decides each session/request_permission the agent sends:
     all              allow everything (default)
@@ -972,13 +976,72 @@ def can_resume(init):
     return bool(caps.load_session) or getattr(scaps, "resume", None) is not None
 
 
+def can_additional_directories(init):
+    if init is None:
+        return False
+    caps = (
+        getattr(init, "agent_capabilities", None)
+        if not isinstance(init, dict)
+        else (init.get("agent_capabilities") or init.get("agentCapabilities"))
+    )
+    if caps is None:
+        return False
+    if isinstance(caps, dict):
+        if caps.get("additional_directories") or caps.get("additionalDirectories"):
+            return True
+        scaps = caps.get("session_capabilities") or caps.get("sessionCapabilities") or {}
+        if isinstance(scaps, dict):
+            return bool(scaps.get("additional_directories") or scaps.get("additionalDirectories"))
+        return (
+            getattr(scaps, "additional_directories", None) is not None
+            or getattr(scaps, "additionalDirectories", None) is not None
+        )
+    if (
+        getattr(caps, "additional_directories", None) is not None
+        or getattr(caps, "additionalDirectories", None) is not None
+    ):
+        return True
+    scaps = getattr(caps, "session_capabilities", None)
+    if scaps is not None:
+        if (
+            getattr(scaps, "additional_directories", None) is not None
+            or getattr(scaps, "additionalDirectories", None) is not None
+        ):
+            return True
+        if isinstance(scaps, dict):
+            return bool(scaps.get("additional_directories") or scaps.get("additionalDirectories"))
+    return False
+
+
 async def open_session(a, conn, init, client, root, timeout):
     """session/new, or with --resume session/load (history replayed to the log
     only) or session/resume, whichever the agent advertises."""
+    add_dirs = [str(Path(d).expanduser().resolve()) for d in getattr(a, "add_dir", [])]
     if not a.resume:
-        sess = await asyncio.wait_for(
-            conn.new_session(mcp_servers=[], cwd=str(root)), timeout
-        )
+        kw = {}
+        if add_dirs:
+            kw["additional_directories"] = add_dirs
+        if add_dirs and not can_additional_directories(init):
+            try:
+                sess = await asyncio.wait_for(
+                    conn.new_session(mcp_servers=[], cwd=str(root), **kw), timeout
+                )
+            except RequestError as e:
+                print(
+                    f"acp-run: agent rejected additionalDirectories ({e}); retrying session/new without it",
+                    file=sys.stderr,
+                )
+                client.rec(
+                    "additional_directories_rejected",
+                    {"error": error_text(e), "dirs": add_dirs},
+                )
+                sess = await asyncio.wait_for(
+                    conn.new_session(mcp_servers=[], cwd=str(root)), timeout
+                )
+        else:
+            sess = await asyncio.wait_for(
+                conn.new_session(mcp_servers=[], cwd=str(root), **kw), timeout
+            )
         client.rec("new_session", dump(sess))
         return sess
     caps = init.agent_capabilities
@@ -1035,6 +1098,8 @@ def resume_argv(a, root, session_id):
         argv += ["--mode", a.mode]
     for kv in a.set:
         argv += ["--set", kv]
+    for d in getattr(a, "add_dir", []):
+        argv += ["--add-dir", d]
     if a.perm != "all":
         argv += ["--perm", a.perm]
     if a.inbox:
@@ -1734,6 +1799,14 @@ def main():
     )
     ap.add_argument("agent", nargs="?")
     ap.add_argument("-C", "--dir", default=".")
+    ap.add_argument(
+        "--add-dir",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="extra workspace root for this session (repeatable); sent as"
+        " additionalDirectories in session/new",
+    )
     ap.add_argument("-p", "--prompt")
     ap.add_argument("-f", "--prompt-file")
     ap.add_argument("--perm", default="all")

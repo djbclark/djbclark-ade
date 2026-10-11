@@ -64,5 +64,114 @@ class TestSessionSeed(unittest.TestCase):
             self.assertIn(want, r.stderr)
 
 
+PROBE_ADD_DIR = textwrap.dedent("""\
+    import asyncio, importlib.machinery, importlib.util, io, json, sys
+    from types import SimpleNamespace
+    from acp import RequestError
+    loader = importlib.machinery.SourceFileLoader("acp_run", sys.argv[1])
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("acp_run", loader))
+    loader.exec_module(mod)
+
+    class Client:
+        def __init__(self):
+            self.rows = []
+
+        def rec(self, kind, data):
+            self.rows.append([kind, data])
+
+    class FakeConn:
+        def __init__(self, reject_add_dir=False):
+            self.calls = []
+            self.reject_add_dir = reject_add_dir
+
+        async def new_session(self, cwd, additional_directories=None, mcp_servers=None, **kw):
+            self.calls.append({"cwd": cwd, "additional_directories": additional_directories})
+            if self.reject_add_dir and additional_directories is not None:
+                raise RequestError.invalid_params({"message": "unknown field additionalDirectories"})
+            return SimpleNamespace(session_id="sess-1", modes=[], config_options=[])
+
+    async def run_cases():
+        out = {}
+        # Case 1: capability advertised, add-dir reaches session/new
+        c1 = Client()
+        conn1 = FakeConn()
+        a1 = SimpleNamespace(resume=None, add_dir=["/tmp/extra1", "/tmp/extra2"])
+        init1 = SimpleNamespace(agent_capabilities=SimpleNamespace(
+            session_capabilities=SimpleNamespace(additional_directories=SimpleNamespace())
+        ))
+        s1 = await mod.open_session(a1, conn1, init1, c1, "/tmp/root", 10)
+        out["advertised"] = {"calls": conn1.calls, "rows": c1.rows, "session_id": s1.session_id}
+
+        # Case 2: capability absent, but agent accepts add-dir in session/new
+        c2 = Client()
+        conn2 = FakeConn()
+        a2 = SimpleNamespace(resume=None, add_dir=["/tmp/extra"])
+        init2 = SimpleNamespace(agent_capabilities=SimpleNamespace(
+            session_capabilities=SimpleNamespace(additional_directories=None)
+        ))
+        s2 = await mod.open_session(a2, conn2, init2, c2, "/tmp/root", 10)
+        out["unadvertised_accepted"] = {"calls": conn2.calls, "rows": c2.rows, "session_id": s2.session_id}
+
+        # Case 3: capability absent, agent rejects add-dir -> fallback retry without it
+        c3 = Client()
+        conn3 = FakeConn(reject_add_dir=True)
+        a3 = SimpleNamespace(resume=None, add_dir=["/tmp/extra"])
+        init3 = SimpleNamespace(agent_capabilities=SimpleNamespace(
+            session_capabilities=SimpleNamespace(additional_directories=None)
+        ))
+        s3 = await mod.open_session(a3, conn3, init3, c3, "/tmp/root", 10)
+        out["fallback_retry"] = {"calls": conn3.calls, "rows": c3.rows, "session_id": s3.session_id}
+
+        return out
+
+    print(json.dumps(asyncio.run(run_cases()), default=str))
+""")
+
+
+class TestAddDir(unittest.TestCase):
+    def test_add_dir_reaches_session_new_and_handles_fallback(self) -> None:
+        r = subprocess.run([*WITH, "-c", PROBE_ADD_DIR, str(SCRIPT)], check=False, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        res = json.loads(r.stdout)
+
+        # 1. Advertised capability: additional_directories reaches session/new with resolved paths
+        adv = res["advertised"]
+        self.assertEqual(len(adv["calls"]), 1)
+        self.assertEqual(
+            adv["calls"][0]["additional_directories"],
+            [str(Path("/tmp/extra1").resolve()), str(Path("/tmp/extra2").resolve())],
+        )
+
+        # 2. Unadvertised capability: still sent
+        unadv = res["unadvertised_accepted"]
+        self.assertEqual(len(unadv["calls"]), 1)
+        self.assertEqual(unadv["calls"][0]["additional_directories"], [str(Path("/tmp/extra").resolve())])
+
+        # 3. Fallback when rejected: retried without additional_directories
+        fb = res["fallback_retry"]
+        self.assertEqual(len(fb["calls"]), 2)
+        self.assertEqual(fb["calls"][0]["additional_directories"], [str(Path("/tmp/extra").resolve())])
+        self.assertIsNone(fb["calls"][1]["additional_directories"])
+        self.assertEqual(fb["rows"][0][0], "additional_directories_rejected")
+        self.assertEqual(fb["rows"][1][0], "new_session")
+        self.assertIn("retrying session/new without it", r.stderr)
+
+    def test_add_dir_cli_argparse_repeatable(self) -> None:
+        probe_args = textwrap.dedent("""\
+            import importlib.machinery, importlib.util, json, sys
+            loader = importlib.machinery.SourceFileLoader("acp_run", sys.argv[1])
+            mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("acp_run", loader))
+            loader.exec_module(mod)
+            import argparse
+            ap = argparse.ArgumentParser()
+            ap.add_argument("--add-dir", action="append", default=[])
+            args = ap.parse_args(["--add-dir", "/dir1", "--add-dir", "/dir2"])
+            print(json.dumps(args.add_dir))
+        """)
+        r = subprocess.run([*WITH, "-c", probe_args, str(SCRIPT)], check=False, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), ["/dir1", "/dir2"])
+
+
 if __name__ == "__main__":
     unittest.main()
