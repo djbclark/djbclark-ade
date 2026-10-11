@@ -181,7 +181,14 @@ authoritative; this is its contract as of 2026-10-11.
    pass; on `github.io`, `pages.dev` and similar shared hosts each subdomain
    is its own site. The pdf rung is not checked (a valid PDF after a CDN or S3
    redirect is the document; a login page is not a PDF and fails anyway), nor
-   are crawl4ai and wayback (no title or final URL). This is a heuristic and
+   is wayback (no title or final URL). crawl4ai is checked on its first
+   level-1 heading, plus Wikipedia's "does not have an article with this exact
+   name" page: on 2026-10-11 `crwl` exited 0 on lawcom.gov.uk's "Page not
+   found", a Vercel "This page doesn't exist", openai.com's "# 404" and a
+   missing Wikipedia title, and web-get used to serve each as the page. The
+   block list also covers Akamai's "Powered and protected by" challenge
+   (mdpi.com) and Cloudflare's "received a high number of requests" throttle
+   (cochranelibrary.com). This is a heuristic and
    it misses cases: a realistic zillow path naming the city
    (`1-Main-St-Anchorage-AK/`) matches the city page's title. It can also
    reject a correct page whose title shares no word with its URL (a slug in

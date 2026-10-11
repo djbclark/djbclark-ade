@@ -366,7 +366,10 @@ def fakes(tmp_path):
                     f'echo "$@" >> {tmp_path}/crwl.calls\n'
                     'case "$CRWL_MODE" in fail) echo "Error: NoneType" >&2; exit 1;; '
                     'pdfcrash) echo "Error: \'NoneType\' object has no attribute \'raw_markdown\'" >&2; exit 1;; '
-                    'slow) sleep 5;; esac\n'
+                    'slow) sleep 5;; '
+                    'soft404) printf "## Cookies on Site\\n* [Home](/)\\n#  Page not found\\n%0300d\\n" 0; exit 0;; '
+                    'noarticle) printf "# BITE model\\nWikipedia does not have an article with this exact name.\\n%0300d\\n" 0; exit 0;; '
+                    'esac\n'
                     "printf 'crawl4ai-js %s\\n' \"$1\"; i=0; while [ $i -lt 30 ]; do "
                     "printf 'rendered javascript content line\\n'; i=$((i+1)); done\n")
     comp = tmp_path / "composio"
@@ -496,6 +499,31 @@ def test_fetch_only_crawl4ai(server, fakes):
     assert p.returncode == 0
     assert "web-get: provider=crawl4ai" in p.stderr
     assert HITS == []
+
+
+@pytest.mark.parametrize("mode, why", [("soft404", "soft-404 title 'Page not found'"),
+                                       ("noarticle", "no such article")])
+def test_fetch_crawl4ai_soft404_is_failure(server, fakes, mode, why):
+    # crwl exits 0 on a site's own 404 page (lawcom.gov.uk, openai.com, Wikipedia; 2026-10-11)
+    p = run(server, fakes, "fetch", "https://js.example/some/deep-page", "--only", "crawl4ai",
+            "--json", extra={"CRWL_MODE": mode})
+    assert p.returncode == 5, p.stderr
+    out = json.loads(p.stdout)
+    assert why in out["attempts"][0]["error"]
+
+
+def test_akamai_challenge_is_block_page():
+    with pytest.raises(wg.ProviderError, match="block page"):
+        wg.check_fetch_content("Powered and protected by ![Powered by Akamai](https://x/_sec/a.svg) "
+                               "[Privacy](https://www.akamai.com/privacy)")
+    with pytest.raises(wg.ProviderError, match="block page"):
+        wg.check_fetch_content("cloudflare We have received a high number of requests from this session. "
+                               "To keep the service fast and reliable for everyone, this page will reload "
+                               "automatically in 28 seconds. Ray ID a48f8fdfbd716589")
+
+
+def test_soft404_title_this_page_does_not_exist():
+    assert "soft-404" in wg.page_mismatch("https://w.example/docs/a-b", None, "This page doesn’t exist")
 
 
 def test_fetch_skip_list(server, fakes):

@@ -36,7 +36,8 @@ block page (captcha, "access denied", "do not support this site", Cloudflare cha
 or a rate-limit/quota notice returned as content (Exa's "You've hit Exa's free MCP rate
 limit", "upgrade your plan", "insufficient credits", ...). A fetch also fails when the page is
 not the one asked for, on every rung that reports a final URL or a title (exa-api, exa-mcp,
-parallel, jina-reader; providers return soft-404 and redirect pages with no error): a
+parallel, jina-reader, crawl4ai on its first heading; providers return soft-404 and redirect pages
+with no error): a
 cross-host or site-root redirect, a "Page not found"/"404" title, or a title (jina-reader: the
 first heading when the title is empty) that shares no word with a URL path of two or more
 words when the body's start does not name it either ("wrong page: ..."). Same-site and
@@ -438,6 +439,10 @@ BLOCK_PATTERNS = [
     r"enable javascript and cookies to continue", r"checking your browser",
     r"request blocked", r"403 forbidden", r"you have been blocked", r"unusual traffic",
     r"rate limit(ed)? exceeded", r"too many requests", r"payment required",
+    # Akamai Bot Manager's challenge page (mdpi.com, 2026-10-11): "Powered and protected by".
+    r"powered and protected by",
+    # Cloudflare's per-session throttle page (cochranelibrary.com via crwl, 2026-10-11).
+    r"received a high number of requests",
 ]
 BLOCK_RE = re.compile("|".join(BLOCK_PATTERNS), re.I)
 # Rate-limit / quota notices that providers return as ordinary content (Exa's free MCP tier
@@ -503,7 +508,9 @@ def check_search_content(text: str) -> str:
 SOFT404_TITLE_RE = re.compile(
     r"^\W*(error\s*)?404\b|\b404\b.*\bnot found\b|\bpage not found\b|^\W*not found\b"
     r"|\bpage (could not|cannot|can't|can’t) be found\b|\bno longer available\b"
-    r"|\bpage unavailable\b", re.I)
+    r"|\bpage unavailable\b|\bthis page (doesn't|doesn’t|does not) exist\b", re.I)
+# MediaWiki's answer for a missing title (HTTP 404, but crwl reports rc 0).
+NO_ARTICLE_RE = re.compile(r"wikipedia does not have an article with this exact name", re.I)
 # A requested path that is itself about 404s or non-existence: the soft-404 test is skipped.
 SOFT404_PATH_RE = re.compile(r"404|not[\W_]*found|exist", re.I)
 # Path words that say nothing about the page (left out of the title-vs-path check).
@@ -1121,7 +1128,14 @@ def fetch_crawl4ai(url: str, dl: Deadline, max_chars: int) -> tuple[str, str]:
             raise ProviderError(f"crwl rc={rc}: no markdown for this page (a PDF or other "
                                 f"non-HTML document?): {tail[0][:160]}")
         raise ProviderError(f"crwl rc={rc}: {tail[0][:200]}")
-    return check_fetch_content(out), url
+    t = check_fetch_content(out)
+    # crwl answers a site's own 404 page with rc 0 (lawcom.gov.uk "Page not found" under its
+    # menu, a Vercel "This page doesn't exist", openai.com "# 404"; 2026-10-11): the page check
+    # on the first heading, as for jina-reader, plus Wikipedia's no-article page.
+    if NO_ARTICLE_RE.search(t[:20000]):
+        raise ProviderError("crawl4ai: wrong page (no such article: Wikipedia's search page)")
+    check_page("crawl4ai", url, None, first_heading(t), t)
+    return t, url
 
 
 WAYBACK_TS_RE = re.compile(r"/web/(\d{4,14})(?:[a-z]{2}_)?/")
