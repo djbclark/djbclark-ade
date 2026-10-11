@@ -77,6 +77,9 @@ line ~123), the route that trips agy's hidden burst limit.
    agent back at it.
 4. A stock (non-fork) ralph-tui has no `acp` plugin: install from the fork's
    integration branch, or route multi-vendor work through `bigteam`.
+5. **Fork-only on purpose** (operator, 2026-10-11): it depends on `acp-run`,
+   which exists only in djbclark-ade, so it is not offered upstream. An
+   upstream PR would need a plugin that speaks ACP itself.
 
 ## The one rule everything else follows from
 
