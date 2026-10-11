@@ -63,8 +63,8 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -277,9 +277,9 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
     collected = data.get("collected_at") or data.get("started_at") or ""
     age = None
     try:
-        stamp = datetime.fromisoformat(str(collected).replace("Z", "+00:00"))
-        age = (datetime.now(timezone.utc) - stamp).total_seconds()
-    except ValueError:
+        stamp = datetime.fromisoformat(str(collected))
+        age = (datetime.now(UTC) - stamp).total_seconds()
+    except (ValueError, TypeError):  # TypeError: a naive timestamp
         age = time.time() - path.stat().st_mtime
 
     snap = data.get("snapshot", data)
@@ -288,18 +288,52 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
         name = acct.get("provider")
         if not name or acct.get("error"):
             continue
+
+        # Account freshness: use account's age_seconds or collected_at
+        acct_age = None
+        if acct.get("age_seconds") is not None:
+            try:
+                acct_age = float(acct["age_seconds"])
+            except (ValueError, TypeError):
+                pass
+        if acct_age is None and acct.get("collected_at"):
+            try:
+                acct_stamp = datetime.fromisoformat(str(acct["collected_at"]))
+                acct_age = (datetime.now(UTC) - acct_stamp).total_seconds()
+            except (ValueError, TypeError):
+                pass
+        if acct_age is None:
+            acct_age = age
+        is_old = acct_age is not None and acct_age > STALE_SOFT
+
         # One account can hold several independent model-family pools; agy's
         # Claude/GPT pool is its own service, so its windows must not drag
         # the Gemini pool's headroom down (or the reverse).
-        per_key: dict[str, tuple[Any, dict[str, float]]] = {}
+        per_key: dict[str, tuple[Any, dict[str, float | None]]] = {}
         for w in acct.get("windows") or []:
-            remaining = w.get("remaining_percent")
-            if remaining is None:
-                continue
             key = pool_service(name, w.get("pool_family"))
             worst, detail = per_key.get(key, (None, {}))
-            detail[w.get("label") or "?"] = round(float(remaining), 1)
-            per_key[key] = (remaining if worst is None else min(worst, remaining), detail)
+            label = w.get("label") or "?"
+
+            state = w.get("state")
+            headroom = w.get("headroom_percent")
+            if state == "exhausted" or (headroom is not None and float(headroom) == 0):
+                remaining = 0.0
+            elif is_old:
+                remaining = None
+            else:
+                remaining = w.get("remaining_percent")
+                if remaining is None and headroom is not None:
+                    remaining = float(headroom)
+
+            if remaining is not None:
+                rem_val = round(float(remaining), 1)
+                detail[label] = rem_val
+                worst = rem_val if worst is None else min(worst, rem_val)
+            else:
+                detail[label] = None
+            per_key[key] = (worst, detail)
+
         if not per_key:
             per_key[name] = (None, {})
         for key, (worst, detail) in per_key.items():
@@ -316,7 +350,7 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
 def acp_list_output() -> str:
     """`acp-run --list`, or "" when it cannot run. Never raises; never hangs."""
     try:
-        proc = subprocess.run([ACP_RUN, "--list"], capture_output=True,
+        proc = subprocess.run([ACP_RUN, "--list"], check=False, capture_output=True,
                               text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -627,7 +661,7 @@ def main(argv: list[str] | None = None) -> int:
             svc = BY_NAME.get(name)
             flag = "" if not svc else ("  [retired]" if svc.retired else
                                        "  [never-bulk]" if svc.never_bulk else "")
-            print(f"  {name:16} {str(info.get('remaining')):>6}% remaining{flag}")
+            print(f"  {name:16} {info.get('remaining')!s:>6}% remaining{flag}")
         return 0
 
     if args.command == "hermes-chain":

@@ -11,12 +11,14 @@ import contextlib
 import os
 import sys
 import unittest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, ClassVar
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 
-import route_agent as r  # noqa: E402
+import route_agent as r
 
 IDLE = {
     "antigravity": {"remaining": 96.5}, "opencode-go": {"remaining": 97.0},
@@ -283,14 +285,13 @@ class TestAgyClaudeGptPool(unittest.TestCase):
                  "pool_family": "gemini"},
                 {"label": "Claude/GPT weekly", "remaining_percent": claude_gpt_left,
                  "pool_family": "claude_gpt"},
-            ]}]}, "collected_at": r.datetime.now(r.timezone.utc).isoformat()}))
+            ]}]}, "collected_at": r.datetime.now(r.UTC).isoformat()}))
         return path
 
     def load(self, **kw):
         import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.object(r, "SNAPSHOT", self.snapshot(tmp, **kw)):
-                return r.load_snapshot()[0]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(r, "SNAPSHOT", self.snapshot(tmp, **kw)):
+            return r.load_snapshot()[0]
 
     def test_pools_are_split_so_neither_drags_the_other(self):
         q = self.load(claude_gpt_left=3.0)
@@ -334,7 +335,7 @@ class TestPoolSplitIsGeneral(unittest.TestCase):
 class TestPlanWave(unittest.TestCase):
     """`plan` spreads one wave over pools and re-plans from live headroom."""
 
-    Q = {**IDLE, "antigravity-claude": {"remaining": 90.0}}
+    Q: ClassVar[dict[str, Any]] = {**IDLE, "antigravity-claude": {"remaining": 90.0}}
 
     def test_wave_respects_max_parallel_then_spills_to_the_next_pool(self):
         rows = r.plan(["code"] * 5, quota=self.Q)
@@ -359,7 +360,8 @@ class TestPlanWave(unittest.TestCase):
         self.assertIsNone(rows[0][1])
 
     def test_cli_plan_prints_one_numbered_line_per_slice(self):
-        import io, contextlib
+        import contextlib
+        import io
         buf = io.StringIO()
         with mock.patch.object(r, "load_snapshot", return_value=(self.Q, 60.0)), \
              contextlib.redirect_stdout(buf):
@@ -367,3 +369,109 @@ class TestPlanWave(unittest.TestCase):
         lines = buf.getvalue().strip().splitlines()
         self.assertEqual(len(lines), 2)
         self.assertTrue(lines[0].startswith("1. code"))
+
+
+class TestExhaustedAndStaleReadings(unittest.TestCase):
+    """(b) route_agent obeys exhausted state and ignores old readings."""
+
+    def make_snapshot(self, tmp, *, accounts, collected_at=None):
+        path = Path(tmp) / "latest.json"
+        data = {
+            "snapshot": {"accounts": accounts},
+            "collected_at": collected_at or r.datetime.now(r.UTC).isoformat(),
+        }
+        path.write_text(r.json.dumps(data))
+        return path
+
+    def load(self, accounts, collected_at=None):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            snap = self.make_snapshot(tmp, accounts=accounts, collected_at=collected_at)
+            with mock.patch.object(r, "SNAPSHOT", snap):
+                return r.load_snapshot()[0]
+
+    def test_exhausted_state_counts_as_zero_remaining(self):
+        """A window with state == 'exhausted' counts as 0 remaining even if remaining_percent is positive."""
+        accts = [{
+            "provider": "antigravity",
+            "windows": [{
+                "label": "Claude/GPT weekly",
+                "pool_family": "claude_gpt",
+                "remaining_percent": 47.6,
+                "state": "exhausted",
+            }],
+        }]
+        q = self.load(accts)
+        self.assertEqual(q["antigravity-claude"]["remaining"], 0.0)
+
+    def test_zero_headroom_percent_counts_as_zero_remaining(self):
+        """A window with headroom_percent == 0 counts as 0 remaining."""
+        accts = [{
+            "provider": "antigravity",
+            "windows": [{
+                "label": "Claude/GPT weekly",
+                "pool_family": "claude_gpt",
+                "remaining_percent": 50.0,
+                "headroom_percent": 0.0,
+                "state": "ok",
+            }],
+        }]
+        q = self.load(accts)
+        self.assertEqual(q["antigravity-claude"]["remaining"], 0.0)
+
+    def test_old_reading_by_age_seconds_treated_as_unmeasured_none(self):
+        """An account older than STALE_SOFT (25 min) has its headroom treated as None."""
+        accts = [{
+            "provider": "antigravity",
+            "age_seconds": 1800.0,  # 30 min > STALE_SOFT (1500s)
+            "windows": [{
+                "label": "Claude/GPT weekly",
+                "pool_family": "claude_gpt",
+                "remaining_percent": 90.0,
+                "state": "ok",
+            }],
+        }]
+        q = self.load(accts)
+        self.assertIsNone(q["antigravity-claude"]["remaining"])
+
+    def test_old_reading_by_collected_at_treated_as_unmeasured_none(self):
+        """An account whose collected_at is older than STALE_SOFT has headroom treated as None."""
+        old_time = (datetime.now(UTC) - timedelta(minutes=35)).isoformat()
+        accts = [{
+            "provider": "antigravity",
+            "collected_at": old_time,
+            "windows": [{
+                "label": "Claude/GPT weekly",
+                "pool_family": "claude_gpt",
+                "remaining_percent": 90.0,
+                "state": "ok",
+            }],
+        }]
+        q = self.load(accts)
+        self.assertIsNone(q["antigravity-claude"]["remaining"])
+
+    def test_old_reading_does_not_get_burn_first_bonus(self):
+        """When headroom is None (unmeasured), burn_first bonus is not applied."""
+        # claude has 30% headroom, antigravity-claude is unmeasured (None)
+        q = {**IDLE, "antigravity-claude": {"remaining": None}, "claude": {"remaining": 30.0}}
+        # Under normal conditions with > 40% headroom, antigravity-claude wins code.
+        # But with None, claude (score 1.0 + 1.75 = 2.75) beats antigravity-claude (rank 11.0 + pressure 5.0 = 16.0).
+        choice = r.route("code", quota=q)
+        self.assertIsNotNone(choice)
+        self.assertNotEqual(choice.service.name, "antigravity-claude")
+
+    def test_exhausted_state_on_old_reading_still_counts_as_zero(self):
+        """An override on an older account reading still registers as 0.0 remaining (exhausted)."""
+        accts = [{
+            "provider": "antigravity",
+            "age_seconds": 2400.0,  # 40 min
+            "windows": [{
+                "label": "Claude/GPT weekly",
+                "pool_family": "claude_gpt",
+                "remaining_percent": 47.6,
+                "state": "exhausted",
+            }],
+        }]
+        q = self.load(accts)
+        self.assertEqual(q["antigravity-claude"]["remaining"], 0.0)
+

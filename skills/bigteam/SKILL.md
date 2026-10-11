@@ -231,10 +231,11 @@ bind every slice to a vendor up front:
    a. **a slice finishes** (the notification re-invokes you anyway): probe, then
       plan the queue again;
    b. **a slice fails on quota or plan** (acp-run exit 1 `FAILED quota/plan`, a
-      429, `RESOURCE_EXHAUSTED`): `aiuse note-exhausted` with the reset time if
-      the error printed one, then `plan --exclude <service>` and re-route that
-      slice, trying the same vendor's other model-family pool first (item 3 of
-      *Reading the numbers*);
+      429, `RESOURCE_EXHAUSTED`): `acp-dispatch` automatically records the refusal
+      via `aiuse note-exhausted` when a reset time is parsed; `route_agent.py` obeys
+      exhausted state immediately and treats readings older than `STALE_SOFT` (25m) as
+      unmeasured (`None`). Then `plan --exclude <service>` and re-route that slice,
+      trying the same vendor's other model-family pool first (item 3 of *Reading the numbers*);
    c. **a quiet stretch:** while a wave runs, keep one background timer going,
       `sleep 1500; echo recheck` as its own `run_in_background: true` call (no
       model tokens until it fires; never CronCreate or `/loop`, per the standing
@@ -593,6 +594,7 @@ contract.
 **A slice that fails on quota** (429, `usage limit`, `RESOURCE_EXHAUSTED`) is
 Step 1 item 3: try the same vendor's other model-family pool before reassigning.
 Then **tell the next agent**, so it does not walk into the same wall:
+`acp-dispatch` notes quota refusals automatically when a reset duration or timestamp is in stderr; manual calls use:
 `aiuse note-exhausted <provider> [--family <gemini|claude_gpt|fable|...>]
 --resets-in 4h53m [--reason '<the 429 text>']` (or `--resets-at <ISO>`). It is an
 advisory override that expires at the reset time and shows up in

@@ -34,7 +34,9 @@ FAKE = textwrap.dedent("""\
         [ -n "$INFO_COUNT" ] && echo probe >> "$INFO_COUNT"
         [ -n "$FAKE_INFO_FAIL" ] && { echo "acp-run: agent down" >&2; exit 1; }
         echo '{"agent": {"name": "fake"}, "config_options": [{"id": "model", "category": "model",'
-        echo ' "options": [{"value": "m1", "name": "Model One"}, {"value": "claude-fable-5-1[1m]", "name": "Fable"}]}]}'
+        echo ' "options": [{"value": "m1", "name": "Model One"}, {"value": "claude-fable-5-1[1m]", "name": "Fable"},'
+        echo '            {"value": "claude-opus-5-5-high", "name": "Opus"}, {"value": "gemini-2.5-pro", "name": "Gemini"},'
+        echo '            {"value": "gpt-oss-120b", "name": "GPT"}]}]}'
         exit 0
       fi
     done
@@ -57,6 +59,21 @@ FAKE = textwrap.dedent("""\
                 printf 'STATUS: working\\n' > "$report"
                 echo "acp-run: FAILED quota: quota exhausted: reply truncated; edits may be present; it ended with 'You have reached your current quota for this period. Your limit will reset in 2 hours, 47 minutes.'" >&2
                 echo "acp-run: agent=agy stop=end_turn secs=356.1 tools=38 fail=quota" >&2
+                exit 1;;
+      quota_ts)
+                printf 'STATUS: working\\n' > "$report"
+                echo "acp-run: FAILED quota: Error 429: Individual quota reached. Resets in 2h47m44s. Details: quotaResetTimeStamp:2026-10-11T02:46:28Z" >&2
+                echo "acp-run: agent=agy stop=error secs=227.1 tools=38 fail=quota" >&2
+                exit 1;;
+      quota_gemini)
+                printf 'STATUS: working\\n' > "$report"
+                echo "acp-run: FAILED quota: quota exhausted: retry in 6 days, 6 hours" >&2
+                echo "acp-run: agent=agy stop=error secs=50.0 tools=5 fail=quota" >&2
+                exit 1;;
+      quota_unknown)
+                printf 'STATUS: working\\n' > "$report"
+                echo "acp-run: FAILED quota: quota exhausted: retry in 2 hours" >&2
+                echo "acp-run: agent=mystery stop=error secs=10.0 tools=2 fail=quota" >&2
                 exit 1;;
       refused)  # agy, gemini-pro-agent, wedge-grants/advisory2g-final.txt (2026-10-10), trimmed
                 echo "Sorry, I cannot fulfill your request. I am unable to analyze the upstream repository. I must decline tasks involving vulnerability analysis."
@@ -103,12 +120,16 @@ class Base(unittest.TestCase):
     def dispatch(self, *extra: str, mode: str = "writes", name: str = "s1") -> subprocess.CompletedProcess[str]:
         return self.dispatch_model("m1", *extra, mode=mode, name=name)
 
-    def dispatch_model(self, model: str, *extra: str, mode: str = "writes", name: str = "s1",
+    def dispatch_agent(self, agent: str, model: str, *extra: str, mode: str = "writes", name: str = "s1",
                        env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         e = {"FAKE_MODE": mode, "ACP_DISPATCH_MODEL_CACHE": str(self.tmp / "cache"),
-             "INFO_COUNT": str(self.tmp / "info-count"), **(env or {})}
-        return run(["codex", "--model", model, "--name", name, "-p", "do the thing", "-C", str(self.repo),
+             "INFO_COUNT": str(self.tmp / "info-count"), "ACP_DISPATCH_AIUSE": "off", **(env or {})}
+        return run([agent, "--model", model, "--name", name, "-p", "do the thing", "-C", str(self.repo),
                     "--out", str(self.out), "--acp-run", str(self.fake), *extra], env=e)
+
+    def dispatch_model(self, model: str, *extra: str, mode: str = "writes", name: str = "s1",
+                       env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        return self.dispatch_agent("codex", model, *extra, mode=mode, name=name, env=env)
 
     def probes(self) -> int:
         f = self.tmp / "info-count"
@@ -246,9 +267,10 @@ class TestModelCheck(Base):
 
     def test_unknown_model_is_refused_before_anything_is_written_or_detached(self):
         for extra in ((), ("--dry-run",), ("--detach", "--no-wait")):
-            r = self.dispatch_model("claude-opus-5-5-high", *extra)
+            r = self.dispatch_model("no-such-model-9", *extra)
             self.assertEqual(r.returncode, 2, (extra, r.stdout, r.stderr))
-            self.assertIn("no model 'claude-opus-5-5-high' for codex; have: m1, claude-fable-5-1[1m]", r.stderr)
+            self.assertIn("no model 'no-such-model-9' for codex; have: m1, claude-fable-5-1[1m], "
+                          "claude-opus-5-5-high, gemini-2.5-pro, gpt-oss-120b", r.stderr)
             self.assertFalse((self.out / "jobs" / "s1.json").exists(), extra)
             self.assertFalse((self.out / "s1-run.sh").exists(), extra)
 
@@ -459,6 +481,84 @@ class TestFooterFile(unittest.TestCase):
         rules = [ln for ln in text.splitlines() if ln[:2].rstrip(".").isdigit()]
         self.assertGreaterEqual(len(rules), 7)
         self.assertNotIn("\n- ", text, "operator rule: numbered lists, never bullets")
+
+
+class TestAiuseNoteExhausted(Base):
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.calls_file = self.tmp / "aiuse.calls"
+        self.fake_aiuse = self.tmp / "fake-aiuse"
+        self.fake_aiuse.write_text(f'#!/bin/bash\necho "$@" >> "{self.calls_file}"\nexit 0\n')
+        self.fake_aiuse.chmod(0o755)
+
+    def calls(self) -> list[str]:
+        return self.calls_file.read_text().splitlines() if self.calls_file.exists() else []
+
+    def test_quota_refusal_agy_claude_records_antigravity_claude_gpt_resets_at(self):
+        env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
+        r = self.dispatch_agent("agy", "claude-opus-5-5-high", mode="quota_ts", env=env)
+        self.assertEqual(r.returncode, 3)
+        calls = self.calls()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("note-exhausted antigravity --family claude_gpt --resets-at 2026-10-11T02:46:28Z", calls[0])
+        self.assertIn("--reason", calls[0])
+
+    def test_quota_refusal_agy_gemini_records_antigravity_gemini_resets_in(self):
+        env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
+        r = self.dispatch_agent("agy", "gemini-2.5-pro", mode="quota_gemini", env=env)
+        self.assertEqual(r.returncode, 3)
+        calls = self.calls()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("note-exhausted antigravity --family gemini --resets-in 6d6h", calls[0])
+
+    def test_quota_refusal_agy_gpt_records_antigravity_claude_gpt_resets_in(self):
+        env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
+        r = self.dispatch_agent("agy", "gpt-oss-120b", mode="quota_reply", env=env)
+        self.assertEqual(r.returncode, 3)
+        calls = self.calls()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("note-exhausted antigravity --family claude_gpt --resets-in 2h47m", calls[0])
+
+    def test_quota_refusal_codex_records_codex_resets_at_from_clock_time(self):
+        env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
+        r = self.dispatch_agent("codex", "m1", mode="quota_partial", env=env)
+        self.assertEqual(r.returncode, 3)
+        calls = self.calls()
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].startswith("note-exhausted codex --resets-at "), calls[0])
+        self.assertNotIn("--family", calls[0])
+
+    def test_unknown_agent_runs_nothing_and_says_so(self):
+        env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
+        r = self.dispatch_agent("mystery", "m1", mode="quota_unknown", env=env)
+        self.assertEqual(r.returncode, 3)
+        self.assertEqual(self.calls(), [])
+        rec = self.record()
+        self.assertIn("unknown agent", rec.get("failure", ""))
+
+    def test_no_reset_time_runs_nothing_and_says_so(self):
+        env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
+        r = self.dispatch_agent("codex", "m1", mode="quota", env=env)
+        self.assertEqual(r.returncode, 3)
+        self.assertEqual(self.calls(), [])
+        rec = self.record()
+        self.assertIn("no reset time", rec.get("failure", ""))
+
+    def test_aiuse_failure_does_not_break_acp_dispatch(self):
+        bad_aiuse = self.tmp / "failing-aiuse"
+        bad_aiuse.write_text("#!/bin/bash\necho 'aiuse crashed' >&2\nexit 1\n")
+        bad_aiuse.chmod(0o755)
+        env = {"ACP_DISPATCH_AIUSE": str(bad_aiuse)}
+        r = self.dispatch_agent("codex", "m1", mode="quota_partial", env=env)
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("aiuse", r.stderr)
+
+    def test_acp_dispatch_aiuse_off_disables_recording(self):
+        env = {"ACP_DISPATCH_AIUSE": "off"}
+        r = self.dispatch_agent("codex", "m1", mode="quota_partial", env=env)
+        self.assertEqual(r.returncode, 3)
+        self.assertEqual(self.calls(), [])
 
 
 if __name__ == "__main__":

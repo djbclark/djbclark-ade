@@ -81,7 +81,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn
 
@@ -298,6 +298,127 @@ def check_model(acp_run: str, agent: str, model: str, cwd: str) -> str | None:
 
 # ---------------------------------------------------------------- failure note
 
+# acp-run agent name -> aiuse provider id (`aiuse --json` accounts[].provider), pool family None.
+# agy is mapped per model in map_agent_to_provider (its Claude/GPT and Gemini pools are separate).
+AGENT_PROVIDER_MAP: dict[str, tuple[str, str | None]] = {
+    "claude": ("claude", None),
+    "codex": ("codex", None),
+    "copilot": ("copilot", None),
+    "cursor": ("cursor", None),
+    "cline": ("clinepass", None),
+    "opencode": ("opencode-go", None),
+    "zcode": ("zai", None),
+    "grok": ("grok", None),
+}
+
+
+def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | None] | None:
+    """Map acp agent and model to aiuse (provider, pool_family). None if unknown."""
+    if agent == "agy":
+        if model and model.startswith(("claude-", "gpt-")):
+            return "antigravity", "claude_gpt"
+        if model and model.startswith("gemini-"):
+            return "antigravity", "gemini"
+        return None
+    return AGENT_PROVIDER_MAP.get(agent)
+
+
+def parse_reset_for_aiuse(text: str, when_match: re.Match | None) -> tuple[str, str] | None:
+    """Extract reset argument for aiuse note-exhausted: ('--resets-at', ISO) or ('--resets-in', DURATION)."""
+    # 1. Exact ISO timestamp in stderr (e.g. quotaResetTimeStamp:2026-10-11T02:46:28Z)
+    m_ts = re.search(r"quotaResetTimeStamp:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))", text)
+    if m_ts:
+        return "--resets-at", m_ts.group(1)
+
+    if not when_match:
+        return None
+
+    prep = when_match.group(1).lower()
+    val = when_match.group(2).strip()
+
+    # 2. Clock time (e.g. "at 8:51 PM", "at 20:51")
+    if prep == "at" or re.search(r"\b\d{1,2}(?::\d{2})?\s*[AP]M\b", val, re.IGNORECASE):
+        m_clock = re.search(r"(\d{1,2})(?::(\d{2}))?\s*([AP]M)?", val, re.IGNORECASE)
+        if m_clock:
+            hour = int(m_clock.group(1))
+            minute = int(m_clock.group(2)) if m_clock.group(2) else 0
+            meridiem = m_clock.group(3).upper() if m_clock.group(3) else None
+            if meridiem == "PM" and hour < 12:
+                hour += 12
+            elif meridiem == "AM" and hour == 12:
+                hour = 0
+            now = datetime.now().astimezone()
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            return "--resets-at", target.isoformat()
+
+    # 3. Duration string (e.g. "6 days, 6 hours", "2 hours, 47 minutes", "2h47m44s")
+    unit_map = {
+        "d": "d", "day": "d", "days": "d",
+        "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h",
+        "m": "m", "min": "m", "mins": "m", "minute": "m", "minutes": "m",
+        "s": "s", "sec": "s", "secs": "s", "second": "s", "seconds": "s",
+    }
+    matches = list(re.finditer(r"(\d+(?:\.\d+)?)\s*([a-zA-Z]+)", val))
+    if matches:
+        parts = []
+        for m in matches:
+            num, unit = m.group(1), m.group(2).lower()
+            if unit in unit_map:
+                parts.append(f"{num}{unit_map[unit]}")
+            else:
+                parts = []
+                break
+        if parts:
+            return "--resets-in", "".join(parts)
+
+    return None
+
+
+def record_quota_refusal_in_aiuse(agent: str, model: str | None, text: str, rc: int | None,
+                                  when_match: re.Match | None) -> tuple[str, str]:
+    """Notify aiuse of quota exhaustion override.
+
+    Returns (status, extra_detail) where extra_detail is appended to the failure text
+    if the notification was skipped due to unknown agent or missing reset time.
+    """
+    mapping = map_agent_to_provider(agent, model)
+    if mapping is None:
+        return "unknown_agent", "; aiuse not notified: unknown agent"
+
+    reset = parse_reset_for_aiuse(text, when_match)
+    if reset is None:
+        return "no_reset_time", "; aiuse not notified: no reset time"
+
+    override = os.environ.get("ACP_DISPATCH_AIUSE")
+    if override and override.lower() in ("off", "0", "false", "none", "no"):
+        return "disabled", ""
+
+    aiuse_bin = override or shutil.which("aiuse") or "aiuse"
+
+    provider, family = mapping
+    flag, val = reset
+    cmd = [aiuse_bin, "note-exhausted", provider]
+    if family:
+        cmd.extend(["--family", family])
+    cmd.extend([flag, val])
+    reason = f"acp-dispatch: quota refusal ({agent}{', ' + model if model else ''}) exit {rc}"
+    cmd.extend(["--reason", reason])
+
+    try:
+        proc = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=10)
+        if proc.returncode != 0:
+            err = proc.stderr.strip() or f"exit {proc.returncode}"
+            print(f"acp-dispatch: warning: aiuse note-exhausted failed ({err})", file=sys.stderr)
+            return "failed", ""
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"acp-dispatch: warning: aiuse note-exhausted failed ({e})", file=sys.stderr)
+        return "failed", ""
+
+    return "ok", ""
+
+
 def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
                  reply: str = "") -> str | None:
     """The NO-REPORT line for an agent that stopped without DONE/BLOCKED because acp-run failed,
@@ -313,7 +434,7 @@ def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
     if not m and rc in (None, 0):
         return None
     cls = m.group(1) if m else ("timeout" if rc == 124 else f"exit {rc}")
-    when = re.search(r"(?:try again|resets?|retry) (at|in|after) ([^.\"'\\]{1,40})", text, re.IGNORECASE)
+    when = re.search(r"(?:try again|resets?|retry) (at|in|after) ([^\n.\"'\\]{1,40})", text, re.IGNORECASE)
     bits = [agent] + ([model] if model else []) + (
         [f"retry {when.group(1).lower()} {when.group(2).strip()}"] if when else [])
     first = re.split(r"(?<=[.!?])\s", " ".join(reply.split()), maxsplit=1)[0][:200]
@@ -321,8 +442,11 @@ def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
         return (f"{NO_REPORT_PREFIX} refused ({', '.join([agent] + ([model] if model else []))}): {first} "
                 f"(acp-run exit {rc}; the model declined the task, so nothing above is a deliverable; "
                 "appended by acp-dispatch)")
+    extra = ""
+    if cls == "quota":
+        _, extra = record_quota_refusal_in_aiuse(agent, model, text, rc, when)
     return (f"{NO_REPORT_PREFIX} {cls} ({', '.join(bits)}): acp-run exit {rc}; the agent stopped "
-            "before writing DONE, so nothing above is a deliverable (appended by acp-dispatch)")
+            f"before writing DONE, so nothing above is a deliverable{extra} (appended by acp-dispatch)")
 
 
 # ---------------------------------------------------------------- classify
