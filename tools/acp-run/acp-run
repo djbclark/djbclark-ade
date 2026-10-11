@@ -47,8 +47,10 @@ with "FAILED <class>" on stderr) when the agent returned a provider refusal as
 its answer, its reply ends in a refusal paragraph (agy appends "Usage Limit
 Reached ..." to the progress text it was streaming; a 429 in the agent's stderr
 during the turn also makes a quota mention in that last paragraph one), or its
-reply ends in a provider/transport error line. The patterns
-are the FAILURE_CLASSES, REPLY_REFUSALS and TAIL_ERROR tables in this script:
+reply ends in a provider/transport error line, or the whole short reply is the
+model declining the task ("Sorry, I cannot fulfill your request ..."). The patterns
+are the FAILURE_CLASSES, REPLY_REFUSALS, MODEL_REFUSALS and TAIL_ERROR tables in this script:
+    refused    the model declined the task (never retried; not a deliverable)
     quota      usage/rate limit or quota exhausted
     plan       model not available on the account's plan
     auth       not logged in / authentication required
@@ -298,6 +300,7 @@ FAILURE_TEXT = {
     "plan": "model not available on this plan",
     "auth": "not authenticated",
     "transient": "transient provider/transport error",
+    "refused": "model refused the task",
     "provider": "provider error",
 }
 # A whole reply of at most SHORT_REPLY characters that starts like this is a
@@ -317,6 +320,21 @@ REPLY_REFUSALS = [
     r"please (log|sign) ?in\b",
     r"(you are |you're )?not (logged|signed) in",
     r"auth(entication)? required",
+]
+# A whole reply of at most MODEL_REFUSAL_REPLY characters that STARTS like this is
+# the model declining the task (agy, gemini-pro-agent, 2026-10-10: "Sorry, I
+# cannot fulfill your request. ... I must decline tasks involving ..." as the
+# whole answer, 780 characters). Failure class "refused": never retried, and
+# acp-dispatch will not turn it into a report. Anchored at the start and length
+# capped so a real report that quotes a refusal sentence is not one. Each pattern
+# needs a refusal verb after "I can't": "I can't find the bug" is an answer.
+MODEL_REFUSAL_REPLY = 1500
+MODEL_REFUSALS = [
+    r"((i'?m|i am) )?(sorry|apologi[sz]e|apologies)\b[^.\n]{0,20}\bi (can(no|')t|am (unable|not able)|won't)\b",
+    r"i (can(no|')t|can not|won't|will not) (help|assist|fulfill|comply|do that|provide)",
+    r"i (am|'m) (unable|not able) to (help|assist|fulfill|comply|complete (this|your|the))",
+    r"i must (decline|refuse)",
+    r"i won't be able to (help|assist|fulfill|comply|complete)",
 ]
 # The agent's stderr during the turn shows the provider answered 429 (agy's
 # server logs "Status: RESOURCE_EXHAUSTED"). With that, a last paragraph that
@@ -391,6 +409,10 @@ def reply_failure(text, tools, stderr=""):
     if not s:
         return None
     lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    if len(s) <= MODEL_REFUSAL_REPLY and any(
+        re.match(rx, s.replace("\u2019", "'"), re.IGNORECASE) for rx in MODEL_REFUSALS
+    ):
+        return "refused", f"{FAILURE_TEXT['refused']}: reply was {s[:200]!r}"
     if len(s) <= SHORT_REPLY and any(
         re.match(rx, s, re.IGNORECASE) for rx in REPLY_REFUSALS
     ):

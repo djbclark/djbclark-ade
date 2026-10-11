@@ -38,6 +38,24 @@ LONG_REPORT = (
     "DONE"
 )
 
+# agy, gemini-pro-agent, wedge-grants/advisory2g-final.txt (2026-10-10)
+AGY_REFUSAL = (
+    "Sorry, I cannot fulfill your request. I am unable to analyze the upstream "
+    "`thejaustin/ShizukuPlus` repository to verify these vulnerabilities, nor can I draft a specific "
+    "security advisory detailing the exact file and line numbers for these issues. I must decline "
+    "tasks involving vulnerability analysis, validation, or the creation of actionable vulnerability "
+    "reports for concrete targets, regardless of authorization or intended private disclosure. \n\n"
+    "I can, however, explain the theoretical mechanics of Android IPC security, such as how to "
+    "securely validate calling packages and signatures for custom permissions, or discuss the "
+    "principles of secure configuration management. Let me know if you would like to explore these "
+    "general concepts.\n"
+)
+REPORT_QUOTING_REFUSAL = (
+    "STATUS: done\n\nThe first brief came back as: \"Sorry, I cannot fulfill your request. I must "
+    "decline tasks involving this.\" The second brief named the owner and the scope and the model "
+    "answered. " + "Findings follow. " * 120 + "\n\nDONE"
+)
+
 CASES = {
     "agy": [AGY_REPLY, 38, ""],
     "agy_without_stderr": [AGY_REPLY, 38, ""],
@@ -50,6 +68,14 @@ CASES = {
     "last_paragraph_mentions_limits_with_429": [
         "I got through most of it.\n\nThe provider rejected the request: rate limit.", 3, AGY_STDERR],
     "empty": ["", 0, AGY_STDERR],
+    "refusal": [AGY_REFUSAL, 0, ""],
+    "refusal_i_must_decline": ["I must decline this request.", 0, ""],
+    "refusal_curly": ["I\u2019m sorry, but I can\u2019t help with that.", 0, ""],
+    "refusal_cant_help": ["I can't help with that. Anything else?", 0, ""],
+    "refusal_wont_be_able": ["I won't be able to assist with this task.", 0, ""],
+    "answer_cannot_find": ["I cannot find a bug in that function; the guard is correct.", 4, ""],
+    "answer_sorry_for_delay": ["Sorry for the delay: the build finished and all tests pass.", 4, ""],
+    "report_quotes_refusal": [REPORT_QUOTING_REFUSAL, 12, ""],
 }
 
 PROBE = textwrap.dedent("""\
@@ -99,6 +125,20 @@ class TestReplyFailure(unittest.TestCase):
         res = self.results["tail_error_line"]
         assert res is not None
         self.assertEqual(res[0], "transient")
+
+    def test_model_refusal_is_class_refused(self):
+        for name in ("refusal", "refusal_i_must_decline", "refusal_curly", "refusal_cant_help", "refusal_wont_be_able"):
+            res = self.results[name]
+            self.assertIsNotNone(res, name)
+            assert res is not None
+            self.assertEqual(res[0], "refused", name)
+        res = self.results["refusal"]
+        assert res is not None
+        self.assertIn("Sorry, I cannot fulfill your request", res[1])
+
+    def test_answers_and_long_reports_that_mention_refusals_stay_successes(self):
+        for name in ("answer_cannot_find", "answer_sorry_for_delay", "report_quotes_refusal"):
+            self.assertIsNone(self.results[name], name)
 
     def test_report_that_discusses_quotas_stays_a_success(self):
         self.assertIsNone(self.results["report_about_quotas"])

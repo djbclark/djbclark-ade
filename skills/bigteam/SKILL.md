@@ -416,7 +416,8 @@ A foreground `acp-dispatch` call is itself the tracked wait. Its record's
 prints the verdict instead of exiting 0 whenever `.done` appears. A codex quota death had
 left only `STATUS: working` behind a waiter that exited 0. When acp-run fails before
 `DONE`, the report's last line is now `NO-REPORT: <class> (<agent>, <model>[, retry at
-<time>]) ...`.) **A sub-agent must
+<time>]) ...`; a model refusal is class `refused` and is never recovered from the final
+message as a `done` report.) **A sub-agent must
 never do its waiting by ending its turn:** a `run_in_background` completion
 notice does not wake an Agent-tool teammate, it arrives only with the next
 inbound message, so the agent stalls until someone writes to it (three of four
@@ -604,7 +605,7 @@ front of the operator if it removes something they deliberately built.
 | `opencode/*` model fails on funds | that's the prepaid Zen catalogue | use `opencode-go/*` for the free bundle |
 | a stray empty dir appears | agy has done this | `git status --porcelain` after every batch |
 | `.zcode/acp/sandbox.json` appears in the repo | `acp-dispatch zcode` writes its per-cwd sandbox config into `-C <repo>` (2026-10-09); a graft hook in a subdirectory cwd also drops a nested `graft/` + `.gitignore`/`.ignore` there | both are regenerable: `rm -rf .zcode` (and the nested graft trio when the repo root already has `graft/`) before committing |
-| `acp-run` exits 1 with `FAILED quota/plan/auth/transient` (or 5: empty reply, every permission denied) | since 2026-10-05 acp-run detects provider failures that arrive as a normal `end_turn` (plan-gated reply, reply cut off by a transport error, quota text); `reply truncated; edits may be present` means check the tree | read the stderr line and the log; reassign the slice or wait for the pool; for truncated, review what was edited |
+| `acp-run` exits 1 with `FAILED quota/plan/auth/transient/refused` (or 5: empty reply, every permission denied) | since 2026-10-05 acp-run detects provider failures that arrive as a normal `end_turn` (plan-gated reply, reply cut off by a transport error, quota text); `refused` (2026-10-10) is the model declining (a short reply starting "Sorry, I cannot ..." / "I must decline ..."), never retried, and acp-dispatch ends the report `NO-REPORT: refused (<agent>, <model>): <first sentence>` (exit 3) instead of recovering it as a deliverable: re-route the slice to another model (agy `gemini-pro-agent` declined a security-advisory slice) or reword the brief's authorization context; `reply truncated; edits may be present` means check the tree | read the stderr line and the log; reassign the slice or wait for the pool; for truncated, review what was edited |
 | no notification when an agent finishes | it was launched with a trailing shell `&` and no `run_in_background` call, so the harness is not tracking it | run each slice as a foreground command in its own `run_in_background: true` call (Step 4) |
 | a wait loop never ends | `until ! pgrep -f '<pattern>'` matches its own shell | wait on the report file, a PID or `wait`; bound it with `timeout` |
 | `RESOURCE_EXHAUSTED` / "usage limit" from a vendor you thought had headroom | `used_percent` read as free; or the pool was drained since the probe; or that model family's pool is spent while a sibling pool is fine | decide from `remaining_percent`, preflight, re-probe per batch, retry on the sibling model family |

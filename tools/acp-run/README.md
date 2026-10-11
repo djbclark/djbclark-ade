@@ -55,12 +55,14 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
 7. **Delivery checks.** Agents report some provider failures as a normal answer
    (`end_turn`). acp-run fails such a turn (exit 1, a `FAILED <class>` line on
    stderr, `"failure"` in `--json`) when the whole short reply is a refusal
-   (`Upgrade your plan to continue`), or when the reply ends in a provider or
+   (`Upgrade your plan to continue`), when it is the model declining the task
+   (`Sorry, I cannot fulfill your request ...`: class `refused`, never retried, and
+   acp-dispatch records it as NO-REPORT), or when the reply ends in a provider or
    transport error line (`Error: RetriableError: [unavailable] PING timed out`),
    reported as "reply truncated; edits may be present". ACP errors are classified
    the same way: `quota`, `plan`, `auth` or `transient`. The patterns are a short
    table at the top of the script (`FAILURE_CLASSES`, `REPLY_REFUSALS`,
-   `TAIL_ERROR`).
+   `MODEL_REFUSALS`, `TAIL_ERROR`).
 8. **Opt-in prompt retry** (`--prompt-retries N`, default 0): a prompt that fails
    with a transient error before any tool call or permission request is retried
    with backoff (1, 2, 4 s, at most 10 s). Quota, plan and auth failures are not

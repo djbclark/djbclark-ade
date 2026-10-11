@@ -58,6 +58,13 @@ FAKE = textwrap.dedent("""\
                 echo "acp-run: FAILED quota: quota exhausted: reply truncated; edits may be present; it ended with 'You have reached your current quota for this period. Your limit will reset in 2 hours, 47 minutes.'" >&2
                 echo "acp-run: agent=agy stop=end_turn secs=356.1 tools=38 fail=quota" >&2
                 exit 1;;
+      refused)  # agy, gemini-pro-agent, wedge-grants/advisory2g-final.txt (2026-10-10), trimmed
+                echo "Sorry, I cannot fulfill your request. I am unable to analyze the upstream repository. I must decline tasks involving vulnerability analysis."
+                echo "acp-run: FAILED refused: model refused the task: reply was 'Sorry, I cannot fulfill your request.'" >&2
+                echo "acp-run: agent=agy stop=end_turn secs=4.2 tools=0 fail=refused" >&2
+                exit 1;;
+      quotes_refusal)
+                printf 'The model answered "Sorry, I cannot fulfill your request" to the first brief.\\nThe second brief fixed that.\\n'; exit 0;;
       timeout)  exit 124;;
       echoargs) echo "$ARGS_SINK" > /dev/null; printf 'STATUS: working\\nDONE\\n' > "$report"; exit 0;;
     esac
@@ -278,6 +285,35 @@ class TestFailureNote(Base):
         self.assertEqual(r.returncode, 3)
         text = Path(self.record()["report"]).read_text()
         self.assertTrue(text.startswith("NO-REPORT: quota (codex, m1)"), text)
+
+    def test_model_refusal_in_the_final_message_is_no_report_not_done(self):
+        """2026-10-10: agy declined a security slice; the refusal was recovered, got DONE, checked `done`."""
+        r = self.dispatch(mode="refused")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertTrue(r.stdout.startswith("no-report\t"), r.stdout)
+        rec = self.record()
+        self.assertEqual(rec["status"], "no-report")
+        self.assertEqual(rec["report_source"], "final-message-failed")
+        text = Path(rec["report"]).read_text()
+        lines = text.splitlines()
+        self.assertTrue(lines[0].startswith("Sorry, I cannot"), text)
+        self.assertTrue(
+            lines[-1].startswith("NO-REPORT: refused (codex, m1): Sorry, I cannot fulfill your request."), lines[-1])
+        self.assertNotIn("DONE", lines)
+        self.assertNotIn("recovered by acp-dispatch", text)
+        c = run(["check", str(self.out / "jobs" / "s1.json")])
+        self.assertEqual(c.returncode, 3, c.stdout)
+        self.assertTrue(c.stdout.startswith("no-report\t"), c.stdout)
+        w = subprocess.run(["bash", "-c", rec["rearm"]], check=False, capture_output=True, text=True)
+        self.assertEqual(w.returncode, 3, (w.stdout, w.stderr))
+
+    def test_genuine_final_message_that_quotes_a_refusal_is_still_recovered(self):
+        r = self.dispatch(mode="quotes_refusal")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        rec = self.record()
+        self.assertEqual(rec["status"], "done")
+        self.assertEqual(rec["report_source"], "final-message")
+        self.assertNotIn("NO-REPORT", Path(rec["report"]).read_text())
 
     def test_clean_exit_partial_gets_no_note(self):
         self.dispatch(mode="partial")

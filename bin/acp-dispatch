@@ -45,6 +45,12 @@ For an ACP agent the final message (acp-run's stdout) is saved to $OUT/<name>-fi
 the agent did not write the report file but its final message carries the content, the report
 is recovered from it and the record says so (`report_source: final-message`) — stdout from
 acp-run is never truncated, so nothing is lost; the warning tells you the brief was not followed.
+Not when acp-run itself failed that turn (`FAILED <class>` on its stderr or a non-zero exit): the
+final message is then kept above a `NO-REPORT:` line and never gets a DONE (`report_source:
+final-message-failed`). A model refusal is such a failure: acp-run classifies a short reply that
+starts "Sorry, I cannot ..." / "I must decline ..." as `FAILED refused` (2026-10-10: agy
+gemini-pro-agent declined a security slice, the refusal was recovered, given DONE and checked
+`done`), and the note reads `NO-REPORT: refused (<agent>, <model>): <first sentence> ...`.
 
 Exit codes (dispatch and check):
     0    report delivered and ends in DONE (dispatch: and acp-run exited 0)
@@ -248,10 +254,13 @@ def check_model(acp_run: str, agent: str, model: str, cwd: str) -> str | None:
 
 # ---------------------------------------------------------------- failure note
 
-def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None) -> str | None:
+def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
+                 reply: str = "") -> str | None:
     """The NO-REPORT line for an agent that stopped without DONE/BLOCKED because acp-run failed,
     from acp-run's stderr (`FAILED <class>: ...`, `fail=<class> error='...'`). None when acp-run
-    exited 0 and printed no FAILED line (an ordinary partial report)."""
+    exited 0 and printed no FAILED line (an ordinary partial report). A model refusal (acp-run's
+    class `refused`, decided by its MODEL_REFUSALS table, the one list) carries the reply's first
+    sentence, so the report says what the model said."""
     try:
         text = stderr.read_text()
     except OSError:
@@ -263,6 +272,11 @@ def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None) ->
     when = re.search(r"(?:try again|resets?|retry) (at|in|after) ([^.\"'\\]{1,40})", text, re.IGNORECASE)
     bits = [agent] + ([model] if model else []) + (
         [f"retry {when.group(1).lower()} {when.group(2).strip()}"] if when else [])
+    first = re.split(r"(?<=[.!?])\s", " ".join(reply.split()), maxsplit=1)[0][:200]
+    if cls == "refused" and first:
+        return (f"{NO_REPORT_PREFIX} refused ({', '.join([agent] + ([model] if model else []))}): {first} "
+                f"(acp-run exit {rc}; the model declined the task, so nothing above is a deliverable; "
+                "appended by acp-dispatch)")
     return (f"{NO_REPORT_PREFIX} {cls} ({', '.join(bits)}): acp-run exit {rc}; the agent stopped "
             "before writing DONE, so nothing above is a deliverable (appended by acp-dispatch)")
 
@@ -351,23 +365,36 @@ def finalize(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
     final_text = final.read_text() if final.exists() else ""
     has_report = report.exists() and report.read_text().strip() != ""
     body = final_text.strip()
+    stderr_path = Path(rec.get("stderr", ""))
     if not has_report and body and body.lower() not in ("written", "done"):
         # The agent answered in its final message instead of the file. acp-run's stdout is
         # complete, so keep it, but say so: the brief was not followed.
         lines = body.splitlines()
-        if not (lines and lines[0].upper().startswith("BLOCKED:")):
-            lines.insert(0, "STATUS: recovered by acp-dispatch from the agent's final message "
-                            "(the agent did not write the report file)")
-        if lines[-1].strip() != "DONE" and not lines[0].upper().startswith("BLOCKED:"):
-            lines.append("DONE")
-        write_atomic(report, "\n".join(lines) + "\n")
-        rec["report_source"] = "final-message"
+        blocked = bool(lines) and lines[0].upper().startswith("BLOCKED:")
+        note = None if blocked else failure_note(
+            stderr_path, rc, rec.get("agent", "?"), rec.get("model"), body)
+        if note:
+            # acp-run itself failed this turn (a model refusal, a quota reply, a timeout): the
+            # final message is what the agent said, not a deliverable (2026-10-10: a refusal was
+            # recovered here, given DONE and classified done). Keep the text for the reader, end
+            # on the NO-REPORT line, never add DONE.
+            write_atomic(report, body + "\n" + note + "\n")
+            rec["report_source"] = "final-message-failed"
+            rec["failure"] = note
+        else:
+            if not blocked:
+                lines.insert(0, "STATUS: recovered by acp-dispatch from the agent's final message "
+                                "(the agent did not write the report file)")
+            if lines[-1].strip() != "DONE" and not blocked:
+                lines.append("DONE")
+            write_atomic(report, "\n".join(lines) + "\n")
+            rec["report_source"] = "final-message"
     elif has_report:
         rec["report_source"] = "agent"
     rec.update(finished=time.time(), exit=rc, pid=None)
     st, det = classify(report, done, finished=True)
     if st in ("partial", "no-report") and not det.startswith(NO_REPORT_PREFIX):
-        note = failure_note(Path(rec.get("stderr", "")), rc, rec.get("agent", "?"), rec.get("model"))
+        note = failure_note(stderr_path, rc, rec.get("agent", "?"), rec.get("model"), body)
         if note:
             old = report.read_text() if report.exists() else ""
             write_atomic(report, old + ("" if not old or old.endswith("\n") else "\n") + note + "\n")
