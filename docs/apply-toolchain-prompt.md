@@ -337,6 +337,23 @@ why", good for numerical regressions), `writing-for-agents` (when editing
 the repo) and `code-review` (standards-vs-spec review). The rest are harmless
 but unused.
 
+**From the TypeSafe marketplace** (public, MIT; added 2026-10-11):
+
+```text
+/plugin marketplace add typesafe-ai/skills
+/plugin install typesafe@typesafe-ai
+```
+
+`typesafe` provides the `typesafe-ai` skill: guidance for building features on
+TypeSafe's System One models (Jev), which return typed judgments and
+probabilities that code composes (choice, yes/no probability, score). Its
+instructions say to read the live docs at https://docs.typesafe.ai/llms.txt
+before writing an integration. Install it only for repos that call, or plan to
+call, the TypeSafe API; use it when a feature needs semantic judgment (routing,
+ranking, extraction, verification), not for rules or exact lookups that plain
+code handles. Other agents: `npx skills add typesafe-ai/skills --skill
+typesafe-ai` (use one install method, not both).
+
 **Graft's own wiring** (hooks, statusline and MCP server) is installed by
 `graft init` in §6, not here.
 
