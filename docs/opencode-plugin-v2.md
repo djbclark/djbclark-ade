@@ -68,6 +68,37 @@ Verification: the running OpenCode reloads plugins on file change
 tail `~/.local/share/opencode/log/opencode.log` for `loading plugin id=…/rtk.ts`
 with no following `failed to load plugin` line.
 
+## The permission order, measured (2026-10-11)
+
+Does the v2 `execute.before` hook run before or after OpenCode evaluates its
+permission rules? Measured with a throwaway plugin and a temporary rule, both
+reverted afterwards:
+
+1. Probe plugin: logged every `execute.before` event and rewrote one sentinel
+   command (`echo PERMTEST-ORIGINAL` → `echo PERMTEST-REWRITTEN`).
+2. Temporary config (V2 shape is a list of `{action, resource, effect}` with
+   `action: "shell"`):
+   `"permissions": [{ "action": "shell", "resource": "*PERMTEST-REWRITTEN*", "effect": "deny" }]`
+3. Running the sentinel was **denied** —
+   `{"error":{"type":"permission.rejected","message":"Permission denied: shell"}}`.
+   The original string does not match that rule, so the permission engine must
+   have seen the **rewritten** command.
+
+**Conclusion: the hook runs before permission evaluation**, so a plugin that
+rewrites a shell command can move it out from under a `deny`/`ask` rule that
+matched the original. That is exactly the gap `rtk rewrite` leaves and the one
+`rtk-ai/rtk#4187` closes by delegating to `rtk hook opencode` (which judges the
+rules) and by reading OpenCode 2's `permissions` list.
+
+Shape facts confirmed in 2.0.26: `ctx.tool.hook` exists; `execute.before`
+receives `{ agent, id, input, messageID, sessionID, tool }` with `tool` =
+`shell` for bash and `input.command` the raw command, *pre*-rewrite; a plugin
+can mutate `input.command` and the mutation reaches execution. So a
+permission-aware shim is possible: read the rules before rewriting.
+
+Our own `~/.config/opencode/opencode.json` has no `permissions` key, so the
+local shim is unaffected today; revisit if deny/ask rules are ever added.
+
 ## Upstream status (2026-10-11)
 
 1. **openusage**: PR opened — `janekbaraniewski/openusage#421`
