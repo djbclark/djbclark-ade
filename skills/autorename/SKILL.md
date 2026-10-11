@@ -225,10 +225,14 @@ python3 ~/ops/site-private/skills/autorename/herdr_place.py check --auto   # the
 It prints JSON: this tab, its workspace (with `generic` and `reason`), the other
 workspaces with their tab labels, and `ask`. If `in_herdr` is false, stop.
 
-**Whenever the tab stays put** (`ask` false, or the operator says "leave it"),
-still label it: if `tab.label` is a bare number or otherwise generic, run
-`herdr tab rename <tab.tab_id> <label>-t` (label as below). Only `move` sets a
-label, so skipping this leaves the tab showing "3" (operator, 2026-10-09).
+**`check` labels the tab itself** (2026-10-11): a generic `tab.label` is renamed from
+the session title before the JSON prints, and `tab_labelled` reports `'3' -> 'x-t'`
+(null when nothing was generic). Leaving the hook to remember the separate `label` call
+left the tab at "3" (operator, 2026-10-09 and again 2026-10-11). **Whenever the tab stays
+put** (`ask` false, or the operator says "leave it"), confirm `tab.label` is no longer a
+bare number; if it still is (or `tab_labelled` is an error), run `herdr_place.py label
+--from-title`. An operator-asked `/autorename` still runs `label --force --from-title`
+first (step 2).
 If `ask` is false, stop after that. (`--auto` gives `ask: false` once the
 operator answered this session.)
 Skip the question too if you are a dispatched worker no human is watching.

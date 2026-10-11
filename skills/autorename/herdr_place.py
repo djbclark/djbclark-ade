@@ -114,6 +114,22 @@ def check(auto: bool) -> int:
         print(json.dumps({"in_herdr": True, "error": str(exc), "ask": False}))
         return 0
 
+    # Labelling the tab is not optional and not the agent's job to remember (2026-10-11: the
+    # hook text omitted it and the tab stayed "3"): a generic tab label is replaced here, from
+    # the session title, so every `check` leaves the sidebar tab named.
+    tab_labelled = None
+    if generic_reason(tab["label"]) is not None and sid:
+        from autorename import read_title  # same directory
+        title = read_title(sid)
+        if title:
+            new = slug_from_title(title)
+            try:
+                herdr("tab", "rename", tab["tab_id"], new)
+                tab_labelled = f"{tab['label']!r} -> {new!r}"
+                tab["label"] = new
+            except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                tab_labelled = f"error: {exc}"
+
     reason = generic_reason(here["label"])
     answered = bool(sid) and state_path(sid).exists()
     print(json.dumps({
@@ -121,6 +137,7 @@ def check(auto: bool) -> int:
         "pane_id": pane["pane_id"],
         "cwd": pane.get("cwd"),
         "tab": {"tab_id": tab["tab_id"], "label": tab["label"], "pane_count": tab["pane_count"]},
+        "tab_labelled": tab_labelled,
         "workspace": {"workspace_id": here["workspace_id"], "label": here["label"],
                       "generic": reason is not None, "reason": reason},
         "other_workspaces": others,
