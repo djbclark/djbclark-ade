@@ -188,11 +188,41 @@ server from `~/.local/share/agy-acp-server/`); edit `AGENTS`, `DEFAULT_SET` and
 commands in whichever of its workspaces sorts first, often its own skills
 dir rather than `-C`, so acp-run names the working directory at the top of
 the prompt. It also drops `HTTPS_PROXY` for agy (Claude Code's opencodex
-proxy answers it with 407). simonepri/refined-antigravity-acp was tried and
-not adopted: it fixes neither problem, removes the `mode` config option
-(YOLO only through `--mode yolo`) and renames the models (`gemini-3.8-flash`
-plus `thought_level`); its hang and loop fixes are worth another look if
-those show up in agy runs.
+proxy answers it with 407).
+
+**The clientInfo gate (2026-10-10).** agy_acp_server 1.3.0 offers its
+non-Gemini models (`claude-opus-5-5-*`, `claude-sonnet-5-5-*`,
+`gpt-oss-120b-medium`) only to clients whose ACP `clientInfo.name` it
+recognises as Zed, Xcode or JetBrains; any other name gets the `gemini-*`
+models alone, and `--model claude-...` fails with "no model". acp-run
+therefore sends `zed` for agy (`CLIENT_NAME` in the script). Upstream:
+google-antigravity/antigravity-cli#1168, pingdotgg/t3code#16489. If
+`acp-run agy --info` lists no `claude-*` value, check that first.
+
+**Which server (compared 2026-10-10).** acp-run keeps Google's own
+`agy_acp_server.par` 1.3.0, the newest release (ACP registry
+`antigravity-acp` and dl.google.com; agy CLI 1.3.3 ships no newer ACP
+server). The alternatives and why not:
+
+1. simonepri/refined-antigravity-acp 1.4.2 wraps the same binary, so it
+   inherits the gate (our opt-in `REFINED_AGY_CLIENT_NAME`,
+   simonepri/refined-antigravity-acp#49, is unmerged); it replaces the
+   `mode` option and renames models to base id plus `thought_level`,
+   injects steering prompts and rewrites the session SQLite. Its hang,
+   crash-recycle and loop fixes are the reason to revisit it if those
+   show up in agy runs.
+2. shubzkothekar/antigravity-acp (Bun) spawns the `agy` CLI per prompt,
+   the path with the hidden burst limit, and downloads its own `agy`.
+3. An `agy -p` adapter of our own: the same burst-limit problem.
+
+To try another server for one run, set `ACP_RUN_AGY_SERVER` to its
+command (one path, `~` expanded), for example a newer server unpacked to
+`~/.local/share/agy-acp-server/<version>/agy_acp_server.par`, or
+`$(command -v refined-antigravity-acp)` once #49 lands (it needs
+`REFINED_AGY_ACP_BIN` pointing at the 1.3.0 binary and its
+`REFINED_AGY_CLIENT_NAME`). Unset it to go back. Check `--info` for the
+`mode` option and model ids before relying on it: `YOLO_SET` and
+`--model` use the stock server's names.
 
 ## Why not acpx?
 
