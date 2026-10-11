@@ -18,6 +18,11 @@
   "evidence_file": "../../research/ai-heaven/evidence.jsonl",
   "sources_file": "sources.md",
   "trial_from_phase": "3-sections",
+  "inventory": {
+    "roots": ["../..", "../../../../agents"],
+    "baseline": "b470f50",
+    "skip_dirs": ["graft", "node_modules", ".git", "sources", ".zcode"]
+  },
   "phases": [
     {"name": "0-opening", "independent": true},
     {"name": "1-chat", "max_rounds": 3},

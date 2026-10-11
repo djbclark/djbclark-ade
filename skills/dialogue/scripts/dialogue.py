@@ -19,11 +19,22 @@ Commands (the lead runs these; models never see the lead-only output):
     costs                           # per-phase totals from costs.jsonl
     probe [model]                   # "Reply with exactly: OK" through every pinned route
     unused-ids                      # optional moderator list: evidence and sources never cited
+    inventory [--root DIR]... [--baseline REV] [--skip NAME]...
+                                    # print the Markdown inventory every prompt carries
 
 The run folder holds `dialogue.json` (see references/run-config.example.json). With no
-config file the read-only commands (ledger, converged, folds, lint, strip) work on
-`<run>/dialogue/transcript.md` with the models inferred from the turn headers, so an
+config file the read-only commands (ledger, converged, folds, lint, strip, inventory) work
+on `<run>/dialogue/transcript.md` with the models inferred from the turn headers, so an
 older run can be audited in place. Stdlib only; Python 3.9+.
+
+Every prompt ends with an inventory of every *.md file under the config's
+`inventory.roots` (default: the run's `cwd`), rebuilt when the prompt is built, with files
+changed or added since `inventory.baseline` marked (operator ruling 2026-10-10).
+
+Per-seat env overrides (seat = a key of `models`, upper-cased, non-alphanumerics -> `_`):
+DIALOGUE_<SEAT>_MODEL replaces `model` on every route of that seat; DIALOGUE_<SEAT>_AGENT
+makes the first route `acp-run <agent>` (its `set` list is dropped); DIALOGUE_<SEAT>_SET
+(comma list of k=v, empty clears) and DIALOGUE_<SEAT>_POOL (aiuse pool label) go with it.
 """
 from __future__ import annotations
 
@@ -118,6 +129,14 @@ DEFAULT_SUFFIXES = [
 MAX_QUOTA_WAITS = 6
 DEFAULT_WAIT = 1800
 MAX_WAIT = 6 * 3600
+# Directory names never walked by the Markdown inventory; the run's prompt_out dir is skipped by path.
+INVENTORY_SKIP_DIRS = ["graft", "node_modules", ".git", "sources"]
+INVENTORY_RULING = (
+    'Operator ruling (2026-10-10): "Make sure the spec is written as the very last thing, and that the '
+    "spec writers get pointed at every single .md file we create to consider, including ones that may "
+    'not yet exist as I type this." This list is rebuilt every time a prompt is built. Consider each '
+    "file; say in your notes which you opened and which changed nothing."
+)
 
 
 def now() -> str:
@@ -162,7 +181,12 @@ class Run:
         self.word_budget = int(cfg.get("word_budget", 40_000))
         self.opening = cfg.get("opening_line", "AGREEMENTS:")
         self.suffixes = [re.compile(s) for s in cfg.get("suffix_patterns", DEFAULT_SUFFIXES)]
+        inv = cfg.get("inventory") or {}
+        self.inv_roots = [(root / r).resolve() for r in inv.get("roots", [])] or [self.cwd]
+        self.inv_baseline: str | None = inv.get("baseline") or None
+        self.inv_skip: list[str] = list(inv.get("skip_dirs", INVENTORY_SKIP_DIRS))
         self.models: dict[str, dict[str, Any]] = cfg.get("models", {})
+        self.overrides = apply_seat_overrides(self.models, os.environ)
         order = list(cfg.get("order") or self.models.keys())
         if not order:  # no config: infer from the transcript headers
             for t in turns(read(self.transcript)):
@@ -192,6 +216,42 @@ class Run:
             return False
         i, j = self.phase_index(phase), self.phase_index(self.trial_from)
         return i >= 0 and j >= 0 and i >= j and not self.phase(phase).get("independent")
+
+
+def seat_env(seat: str, what: str) -> str:
+    return "DIALOGUE_" + re.sub(r"[^A-Za-z0-9]", "_", seat).upper() + "_" + what
+
+
+def apply_seat_overrides(models: dict[str, dict[str, Any]], env: Any) -> list[str]:
+    """DIALOGUE_<SEAT>_{MODEL,AGENT,SET,POOL}: move a seat to another model or agent without editing
+    the config (e.g. DIALOGUE_FABLE_MODEL=claude-opus-5-5 while the Fable pool is spent). Mutates
+    `models` in place; returns one line per override applied, for the turn log."""
+    notes: list[str] = []
+    for seat, spec in models.items():
+        routes = [dict(r) for r in spec.get("routes", [])]
+        model, agent = env.get(seat_env(seat, "MODEL")), env.get(seat_env(seat, "AGENT"))
+        sets, pool = env.get(seat_env(seat, "SET")), env.get(seat_env(seat, "POOL"))
+        if agent:
+            first = routes[0] if routes else {}
+            routes[:1] = [{"kind": "acp", "agent": agent, "model": first.get("model", ""),
+                           "perm": first.get("perm", "all")}]
+            notes.append(f"{seat_env(seat, 'AGENT')}={agent}: first route is acp-run {agent}")
+        if model:
+            for r in routes:
+                if r.get("kind", "acp") in ("acp", "claude"):
+                    r["model"] = model
+            notes.append(f"{seat_env(seat, 'MODEL')}={model}")
+        if sets is not None and routes:
+            routes[0]["set"] = [s.strip() for s in sets.split(",") if s.strip()]
+            notes.append(f"{seat_env(seat, 'SET')}={sets}")
+        if pool:
+            spec["pool_label"] = pool
+            notes.append(f"{seat_env(seat, 'POOL')}={pool}")
+        if model or agent or sets is not None:
+            spec["routes"] = routes
+            spec["override_note"] = (f"this seat runs on {route_name(routes[0])} by env override"
+                                     if routes else "env override with no routes")
+    return notes
 
 
 def load_run(run_dir: str | None, config: str | None) -> Run:
@@ -495,6 +555,9 @@ def phase_instruction(run: Run, phase: str, instruction: Path | None) -> str:
 
 def head_parts(run: Run, model: str, phase: str, n: int) -> list[str]:
     label = run.models.get(model, {}).get("label", model)
+    note = run.models.get(model, {}).get("override_note")
+    if note:  # say which model actually holds the seat; `label` stays the seat name (anonymise uses it)
+        label += f"; {note}"
     return [
         f"# Dialogue turn {n}: you are **{model}** ({label}), phase **{phase}**, {now()}\n\n"
         f"Working directory: {run.cwd} (relative paths are relative to it). Speaking order every "
@@ -511,6 +574,98 @@ def docs_text(paths: list[Path], title: str) -> list[str]:
     for p in paths:
         out.append(f"# {title}: {p}\n\n" + (read(p) or "(missing or empty)"))
     return out
+
+
+def git_changed(root: Path, baseline: str) -> tuple[set[Path], list[str]]:
+    """Absolute paths under `root` committed after `baseline` (git log baseline..HEAD) or uncommitted
+    now (git status --porcelain, untracked files included). -> (paths, problems)."""
+    def git(*args: str, cwd: Path) -> subprocess.CompletedProcess[str] | None:
+        try:
+            return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=60)
+        except (subprocess.SubprocessError, OSError):
+            return None
+
+    top_r = git("rev-parse", "--show-toplevel", cwd=root)
+    if not top_r or top_r.returncode != 0 or not top_r.stdout.strip():
+        return set(), [f"{root} is not in a git checkout, so nothing under it is marked"]
+    top = Path(top_r.stdout.strip())
+    spec = os.path.relpath(root, top)
+    out: set[Path] = set()
+    problems: list[str] = []
+    log = git("log", "--name-only", "-z", "--format=", f"{baseline}..HEAD", "--", spec, cwd=top)
+    if not log or log.returncode != 0:
+        problems.append(f"git log {baseline}..HEAD failed under {top}: "
+                        f"{(log.stderr.strip()[:200] if log else 'git did not run')}")
+    else:
+        out |= {top / e.strip("\n") for e in log.stdout.split("\0") if e.strip("\n")}
+    st = git("status", "--porcelain", "-z", "--untracked-files=all", "--", spec, cwd=top)
+    if st and st.returncode == 0:
+        entries = st.stdout.split("\0")
+        k = 0
+        while k < len(entries):
+            e = entries[k]
+            k += 1
+            if len(e) < 4:
+                continue
+            out.add(top / e[3:])
+            if e[0] in "RC":  # a rename or copy entry is followed by its original path
+                k += 1
+    return out, problems
+
+
+def md_inventory(run: Run, roots: list[Path] | None = None, baseline: str | None = None,
+                 skip: list[str] | None = None) -> str:
+    """Every *.md file under the inventory roots, rebuilt on each call (operator ruling 2026-10-10).
+    Paths are shown relative to the run's cwd, as the models see them."""
+    roots = roots or run.inv_roots
+    baseline = baseline if baseline is not None else run.inv_baseline
+    skip_names = set(skip if skip is not None else run.inv_skip)
+    skip_paths = {run.prompt_out}
+    changed: set[Path] = set()
+    problems: list[str] = []
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.is_dir():
+            problems.append(f"root {root} does not exist (yet)")
+            continue
+        if baseline:
+            c, pr = git_changed(root, baseline)
+            changed |= c
+            problems += pr
+        for dirpath, dirnames, filenames in os.walk(root):  # followlinks=False: no symlink loops
+            dirnames[:] = sorted(d for d in dirnames
+                                 if d not in skip_names and Path(dirpath, d) not in skip_paths)
+            for fn in sorted(filenames):
+                p = Path(dirpath, fn)
+                if fn.lower().endswith(".md") and p not in seen:
+                    seen.add(p)
+                    files.append(p)
+    rows: list[str] = []
+    n_changed = 0
+    for p in files:
+        rel = os.path.relpath(p, run.cwd)
+        mark = ""
+        if p in changed:
+            n_changed += 1
+            mark = " **CHANGED or NEW since the baseline**"
+        if p.is_symlink():
+            rows.append(f"- `{rel}` (symlink to `{os.readlink(p)}`){mark}")
+            continue
+        try:
+            n = words(p.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            n = 0
+        rows.append(f"- `{rel}` ({n} words){mark}")
+    marked = (f"{n_changed} changed or added since baseline {baseline} (committed after it, or uncommitted "
+              "now) are marked **CHANGED or NEW**." if baseline else
+              "No baseline commit is configured, so no file is marked as changed.")
+    head = (f"{len(rows)} Markdown files under {', '.join(str(r) for r in roots)} (paths relative to "
+            f"{run.cwd}; skipped directories: {', '.join(sorted(skip_names)) or 'none'}, and {run.prompt_out}), "
+            f"listed when this prompt was built. {marked}\n"
+            + "".join(f"Inventory note: {x}\n" for x in problems)
+            + "\n" + INVENTORY_RULING + "\n\n")
+    return head + ("\n".join(rows) if rows else "(no Markdown files found)") + "\n"
 
 
 def build_prompt(run: Run, model: str, phase: str, instruction: Path | None, mode: str = "normal",
@@ -543,6 +698,7 @@ def build_prompt(run: Run, model: str, phase: str, instruction: Path | None, mod
         parts.append(INDEPENDENT_BLOCK)
     else:
         parts.append(f"# Transcript so far ({run.transcript.name})\n\n" + transcript_for_prompt(run, anonymise))
+    parts.append("# Every Markdown file in this project (regenerated for this turn)\n\n" + md_inventory(run))
     parts.append(f"# Your turn now ({model}, phase {phase}). Reply with the turn text only; it is appended "
                  "verbatim after the noise strip.\n")
     prompt = "\n\n".join(p for p in parts if p is not None)
@@ -795,13 +951,16 @@ def do_turn(run: Run, model: str, phase: str, instruction: Path | None, timeout:
         tag = f"judge-{n:03d}-{model}" if judge else f"turn-{n:03d}-{model}"
         pf = run.prompt_out / f"{tag}.prompt.md"
         pf.write_text(prompt, encoding="utf-8")
-        cost = {"turn": n, "model": model, "phase": phase, "mode": "judge" if judge else mode, "when": now(),
+        cost: dict[str, Any] = {"turn": n, "model": model, "phase": phase, "mode": "judge" if judge else mode, "when": now(),
                 "prompt_words": words(prompt), "prompt_bytes": len(prompt.encode())}
         if mode == "normal" and run.trial_enabled(phase):  # Grok 1.3 trial, recorded beside the full prompt
             trial = build_prompt(run, model, phase, instruction, "trial")
             tp = run.prompt_out / f"{tag}.trial.prompt.md"
             tp.write_text(trial, encoding="utf-8")
             cost.update(trial_words=words(trial), trial_bytes=len(trial.encode()))
+        if run.models[model].get("override_note"):
+            cost["override"] = [o for o in run.overrides if o.startswith(seat_env(model, ""))]
+            print(f"turn {n} {model} env override: {'; '.join(cost['override'])}", flush=True)
         print(f"turn {n} {model} phase={phase} mode={mode} prompt={cost['prompt_words']}w -> running", flush=True)
         t0 = time.time()
         reply, route, err = call_model(run, model, pf, timeout, n, phase)
@@ -1083,6 +1242,8 @@ def do_probe(run: Run, model: str | None) -> int:
     pf = run.prompt_out / "probe.prompt.md"
     pf.write_text("Reply with exactly: OK\n", encoding="utf-8")
     bad = 0
+    for o in run.overrides:
+        print(f"env override: {o}")
     for m in ([model] if model else run.order):
         for route in run.models.get(m, {}).get("routes", []):
             reply, err = run_route(run, route, pf, 300)
@@ -1159,9 +1320,18 @@ def main() -> None:
     pr = sub.add_parser("probe")
     pr.add_argument("model", nargs="?")
     sub.add_parser("unused-ids")
+    iv = sub.add_parser("inventory", help="print the Markdown inventory every prompt carries")
+    iv.add_argument("--root", action="append", type=Path, help="inventory root (repeatable; default: config)")
+    iv.add_argument("--baseline", help="mark files changed since this commit (default: config inventory.baseline)")
+    iv.add_argument("--skip", action="append", help="extra directory name to skip (repeatable)")
     a = ap.parse_args()
     run = load_run(a.run, a.config)
 
+    if a.cmd == "inventory":
+        roots = [r.resolve() for r in a.root] if a.root else None
+        skip = run.inv_skip + a.skip if a.skip else None
+        print(md_inventory(run, roots, a.baseline, skip), end="")
+        return
     if a.cmd == "turn":
         sys.exit(do_turn(run, a.model, a.phase, a.instruction, a.timeout, anonymise=a.anonymise))
     if a.cmd == "prompt":

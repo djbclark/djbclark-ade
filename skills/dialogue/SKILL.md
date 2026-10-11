@@ -64,6 +64,7 @@ $D recover astra --phase 3-sections --from FILE   # pasted recovery, headed reco
 $D costs                              # per-phase prompt/trial/reply words from costs.jsonl
 $D prompt grok --phase 3-sections [--final]       # build a prompt only, to inspect it
 $D strip FILE                         # show what the noise strip would remove
+$D inventory [--root D] [--baseline REV] [--skip NAME]   # the Markdown inventory (section 5a)
 python3 -I ~/.claude/skills/dialogue/scripts/cite_transcript.py <transcript.md> <evidence.jsonl>
 ```
 
@@ -165,6 +166,40 @@ Each turn runs a model for many minutes: in an interactive session start `round`
    Grok, `acp-run claude` for Fable) are unprobed: run `probe` before relying on them.
 4. Routing never changes authority: the final-word model's rulings stand whichever route
    carried them.
+5. **Moving a seat off a spent pool: env overrides, no config edit.** For seat `<SEAT>` (the
+   `models` key upper-cased, non-alphanumerics to `_`: `fable` -> `FABLE`, `grok-x` -> `GROK_X`):
+   `DIALOGUE_<SEAT>_MODEL=<m>` replaces `model` on every `acp`/`claude` route of that seat;
+   `DIALOGUE_<SEAT>_AGENT=<a>` turns the seat's first route into `acp-run <a>` (keeping the
+   route's model unless `_MODEL` is set; its `set` list and `effort` are dropped);
+   `DIALOGUE_<SEAT>_SET=k=v,k2=v2` replaces the first route's `--set` list (empty clears);
+   `DIALOGUE_<SEAT>_POOL=<label>` changes the `aiuse` pool the quota wait reads. Examples:
+   `DIALOGUE_FABLE_MODEL=claude-opus-5-5` (Fable weekly cap spent, 2026-10-10);
+   `DIALOGUE_GROK_AGENT=opencode DIALOGUE_GROK_MODEL=opencode-go/grok-4.7 DIALOGUE_GROK_POOL=Go`.
+   The turn prints the override, `costs.jsonl` records it (`route`, `override`), and the
+   prompt header tells the model which model holds the seat. Run `probe` with the same
+   variables set before relying on the new route.
+
+## 5a. Every Markdown file goes into every prompt (operator ruling 2026-10-10)
+
+> "Make sure the spec is written as the very last thing, and that the spec writers get
+> pointed at every single .md file we create to consider, including ones that may not yet
+> exist as I type this."
+
+1. Every prompt the script builds (normal, trial, independent and final) ends, just before
+   the "Your turn now" line, with an inventory of every `*.md` file under the inventory
+   roots, **rebuilt when the prompt is built**: path relative to the run's `cwd`, word
+   count, symlink target, and `**CHANGED or NEW since the baseline**` on files committed
+   after the baseline (`git log <baseline>..HEAD`) or uncommitted now (`git status
+   --porcelain`, untracked included). `dialogue.py inventory` prints it.
+2. Config (`dialogue.json`, paths relative to the run folder): `"inventory": {"roots": [...],
+   "baseline": "<commit>", "skip_dirs": [...]}`. Defaults: the run's `cwd` as the only root,
+   no baseline (nothing marked), skip `graft`, `node_modules`, `.git`, `sources` and the
+   run's `prompt_out` folder. `skip_dirs` replaces the default list, so repeat it when
+   adding to it. Set the baseline to the commit where the artifact first went final.
+3. **The artifact is written last.** Whenever a new or changed `.md` lands under the roots
+   after the final-word turn (new research, notes, a resident's files), re-run the final
+   phase: the final-word turn is always the last turn of the run. A spec rewrite prompt
+   carries the live inventory, never a hand-typed file list.
 
 ## 6. Optional (off unless switched on)
 
