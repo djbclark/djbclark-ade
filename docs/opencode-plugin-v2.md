@@ -100,12 +100,14 @@ Our own `~/.config/opencode/opencode.json` has no `permissions` key, so the
 local shim is unaffected today; revisit if deny/ask rules are ever added.
 
 **The local shim now fails closed anyway** (2026-10-11, operator's call):
-`~/.config/opencode/plugins/rtk.ts` registers no rewrite at all when the
-effective config declares any shell permission rules (`permissions`, a v1
-`permission` object, or an `experimental.policies` entry with
-`action: "permission"`), and says so on stderr. It reads the global config plus
-every `opencode.json(c)`/`.opencode/opencode.json(c)` from the session directory
-up to the filesystem root, and treats an unparsable file as "rules present". The
+`~/.config/opencode/plugins/rtk.ts` registers no rewrite at all when shell
+permission rules are in effect, and says so on stderr. It asks the host first —
+the v2 plugin context exposes `ctx.permission` with `{ get, hook, list, reply }`,
+so `ctx.permission.list()` gives the *effective* rules (global + project +
+managed), and only `deny`/`ask` entries on `shell`/`*` count. If the host cannot
+answer, it falls back to scanning the global config plus every
+`opencode.json(c)`/`.opencode/opencode.json(c)` from the session directory up to
+the filesystem root, treating an unparsable file as "rules present". The
 canonical copy lives at `djbclark-ade/opencode-plugins/rtk.ts` and is restored by
 `djbclark-ade/bin/opencode-plugin-guard` (Jobber 03:45) if a tool upgrade
 reverts it.
