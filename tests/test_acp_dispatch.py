@@ -53,6 +53,11 @@ FAKE = textwrap.dedent("""\
                 echo "acp-run: FAILED quota: RequestError: Internal error {\\"message\\": \\"You hit your usage limit. Upgrade to Pro or try again at 8:51 PM.\\"}" >&2
                 echo "acp-run: agent=codex stop=error secs=102.3 tools=21 fail=quota error='usageLimitExceeded'" >&2
                 exit 1;;
+      quota_reply)
+                printf 'STATUS: working\\n' > "$report"
+                echo "acp-run: FAILED quota: quota exhausted: reply truncated; edits may be present; it ended with 'You have reached your current quota for this period. Your limit will reset in 2 hours, 47 minutes.'" >&2
+                echo "acp-run: agent=agy stop=end_turn secs=356.1 tools=38 fail=quota" >&2
+                exit 1;;
       timeout)  exit 124;;
       echoargs) echo "$ARGS_SINK" > /dev/null; printf 'STATUS: working\\nDONE\\n' > "$report"; exit 0;;
     esac
@@ -260,6 +265,13 @@ class TestFailureNote(Base):
         c = run(["check", str(self.out / "jobs" / "s1.json")])
         self.assertEqual(c.returncode, 3)
         self.assertIn("NO-REPORT: quota", c.stdout)
+
+    def test_reset_in_a_duration_reads_retry_in(self):
+        """2026-10-10: agy's refusal said "reset in 2 hours, 47 minutes", not a clock time."""
+        r = self.dispatch(mode="quota_reply")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        last = Path(self.record()["report"]).read_text().splitlines()[-1]
+        self.assertTrue(last.startswith("NO-REPORT: quota (codex, m1, retry in 2 hours, 47 minutes)"), last)
 
     def test_note_is_written_into_an_empty_report_too(self):
         r = self.dispatch(mode="quota")

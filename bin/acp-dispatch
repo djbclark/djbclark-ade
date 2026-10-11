@@ -260,8 +260,9 @@ def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None) ->
     if not m and rc in (None, 0):
         return None
     cls = m.group(1) if m else ("timeout" if rc == 124 else f"exit {rc}")
-    when = re.search(r"(?:try again|resets?|retry) (?:at|in|after) ([^.\"'\\]{1,40})", text, re.IGNORECASE)
-    bits = [agent] + ([model] if model else []) + ([f"retry at {when.group(1).strip()}"] if when else [])
+    when = re.search(r"(?:try again|resets?|retry) (at|in|after) ([^.\"'\\]{1,40})", text, re.IGNORECASE)
+    bits = [agent] + ([model] if model else []) + (
+        [f"retry {when.group(1).lower()} {when.group(2).strip()}"] if when else [])
     return (f"{NO_REPORT_PREFIX} {cls} ({', '.join(bits)}): acp-run exit {rc}; the agent stopped "
             "before writing DONE, so nothing above is a deliverable (appended by acp-dispatch)")
 

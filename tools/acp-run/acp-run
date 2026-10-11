@@ -44,7 +44,10 @@ Agents decide what to ask about: some auto-allow by their own settings (use
 
 Delivery checks: a turn that ends with end_turn is still a failure (exit 1,
 with "FAILED <class>" on stderr) when the agent returned a provider refusal as
-its answer or its reply ends in a provider/transport error line. The patterns
+its answer, its reply ends in a refusal paragraph (agy appends "Usage Limit
+Reached ..." to the progress text it was streaming; a 429 in the agent's stderr
+during the turn also makes a quota mention in that last paragraph one), or its
+reply ends in a provider/transport error line. The patterns
 are the FAILURE_CLASSES, REPLY_REFUSALS and TAIL_ERROR tables in this script:
     quota      usage/rate limit or quota exhausted
     plan       model not available on the account's plan
@@ -113,6 +116,11 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+# zcode-acp-server sends its turn-state notification as "$/zcode/turnState". The
+# ACP Python library only knows "_" as the extension prefix and raises
+# method_not_found (a logged traceback per notification) for the JSON-RPC
+# reserved "$/" prefix, so fold "$/" into "_" and let ext_notification ignore it.
+import acp.router as _acp_router
 from acp import PROTOCOL_VERSION, Client, RequestError, connect_to_agent
 from acp.schema import (
     AgentMessageChunk,
@@ -123,12 +131,6 @@ from acp.schema import (
     RequestPermissionResponse,
     TextContentBlock,
 )
-
-# zcode-acp-server sends its turn-state notification as "$/zcode/turnState". The
-# ACP Python library only knows "_" as the extension prefix and raises
-# method_not_found (a logged traceback per notification) for the JSON-RPC
-# reserved "$/" prefix, so fold "$/" into "_" and let ext_notification ignore it.
-import acp.router as _acp_router
 
 _acp_route = _acp_router.MessageRouter.__call__
 
@@ -300,7 +302,11 @@ FAILURE_TEXT = {
 }
 # A whole reply of at most SHORT_REPLY characters that starts like this is a
 # refusal, not an answer. Anchored at the start so a report that merely
-# mentions quotas is not one.
+# mentions quotas is not one. The same patterns, anchored at the start of the
+# reply's LAST paragraph (itself at most SHORT_REPLY characters), catch a refusal
+# appended after progress text (agy, 2026-10-10: 356 s of work, then "Usage
+# Limit Reached\n\nYou have reached your current quota ... will reset in 2
+# hours, 47 minutes." as the end of the same message).
 SHORT_REPLY = 300
 REPLY_REFUSALS = [
     r"upgrade your plan",
@@ -312,6 +318,10 @@ REPLY_REFUSALS = [
     r"(you are |you're )?not (logged|signed) in",
     r"auth(entication)? required",
 ]
+# The agent's stderr during the turn shows the provider answered 429 (agy's
+# server logs "Status: RESOURCE_EXHAUSTED"). With that, a last paragraph that
+# merely mentions a quota/auth/plan problem is the refusal too.
+STDERR_REFUSAL = r"resource[ _-]?exhausted|\b429\b"
 # The last non-empty line of a reply that is an error report from the provider
 # or transport (cursor: "Error: RetriableError: ...", claude: "API Error: 529").
 TAIL_ERROR = r"^(api |provider )?error\b\s*[:(\d]|^selected model is at capacity"
@@ -373,9 +383,10 @@ def classify(text):
     return None
 
 
-def reply_failure(text, tools):
-    """(class, message) when a reply is a provider refusal or ends in a provider
-    error line, else None."""
+def reply_failure(text, tools, stderr=""):
+    """(class, message) when a reply is a provider refusal, ends in a refusal
+    paragraph or a provider error line, else None. stderr is the agent's stderr
+    since the prompt was sent: a 429 there backs a quota-looking last paragraph."""
     s = (text or "").strip()
     if not s:
         return None
@@ -385,6 +396,18 @@ def reply_failure(text, tools):
     ):
         cls = classify(s) or "provider"
         return cls, f"{FAILURE_TEXT[cls]}: reply was {s[:200]!r}"
+    last = re.split(r"\n\s*\n", s)[-1].strip()
+    if len(s) > len(last) and len(last) <= SHORT_REPLY:
+        refusal = any(re.match(rx, last, re.IGNORECASE) for rx in REPLY_REFUSALS)
+        backed = re.search(STDERR_REFUSAL, stderr or "", re.IGNORECASE) and classify(
+            last
+        )
+        if refusal or backed:
+            cls = classify(last) or "provider"
+            return cls, (
+                f"{FAILURE_TEXT[cls]}: reply truncated; edits may be present;"
+                f" it ended with {last[:200]!r}"
+            )
     if re.match(TAIL_ERROR, lines[-1], re.IGNORECASE):
         cls = classify(lines[-1]) or "provider"
         msg = f"{FAILURE_TEXT[cls]}: {lines[-1][:200]}"
@@ -474,6 +497,9 @@ class RunClient(Client):
         # the last delivery-check failure of this prompt (kept when a retry
         # dies), and an operator cancel that stops further retries
         self.last_failure, self.cancelled, self.prompt_task = None, False, None
+        # the agent's stderr file and its size when the prompt went out, so a
+        # turn's reply is judged with what the agent logged during it
+        self.err_path, self.err_mark = None, 0
         # copilot's autopilot mode ends a task with a `task_complete` tool call
         # whose rawInput.summary is the answer, and sends no agent_message_chunk
         # at all (seen 2026-10-10, gpt-6-astra, 38 tool calls, 0 message
@@ -692,12 +718,24 @@ async def _kill(proc):
     proc.terminate()
     try:
         await asyncio.wait_for(proc.wait(), 5)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         try:
             await asyncio.wait_for(proc.wait(), 5)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
+
+
+def stderr_since(path, mark, n=20000):
+    """The agent's stderr written after byte offset mark (at most the last n bytes)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            end = f.tell()
+            f.seek(max(mark, end - n))
+            return f.read().decode(errors="replace")
+    except OSError:
+        return ""
 
 
 def stderr_tail(path, n=2000):
@@ -746,18 +784,23 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
             out["stop_reason"], finished = "cancelled", True
             break
         client.text = []
+        if client.err_path:
+            try:
+                client.err_mark = os.path.getsize(client.err_path)
+            except OSError:
+                client.err_mark = 0
         prompt_task = client.prompt_task = asyncio.ensure_future(
             conn.prompt(session_id=sess.session_id, prompt=prompt)
         )
         why = None
         try:
             resp = await wait(prompt_task, max(1, deadline - time.monotonic()))
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await conn.cancel(session_id=sess.session_id)
             try:
                 resp = await asyncio.wait_for(prompt_task, 15)
                 out["stop_reason"] = resp.stop_reason
-            except (asyncio.TimeoutError, RequestError, ConnectionError):
+            except (TimeoutError, RequestError, ConnectionError):
                 out["stop_reason"] = "timeout"
             code = 124
             break
@@ -774,7 +817,11 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
             if resp.usage:
                 out["usage"] = dump(resp.usage)
             failure = client.last_failure = reply_failure(
-                "".join(client.text), client.tools
+                "".join(client.text),
+                client.tools,
+                stderr_since(client.err_path, client.err_mark)
+                if client.err_path
+                else "",
             )
             if not (can_retry and failure and failure[0] == "transient"):
                 finished = True
@@ -963,7 +1010,7 @@ class Herdr:
                 stderr=asyncio.subprocess.DEVNULL,
             )
             return await asyncio.wait_for(p.wait(), timeout)
-        except (OSError, asyncio.TimeoutError):
+        except (TimeoutError, OSError):
             if p is not None and p.returncode is None:
                 p.kill()
             return None
@@ -1181,7 +1228,7 @@ class Repl:
                 # question must be answered "cancelled" for the turn to end
                 self.cancelled = self.client.cancelled = True
                 self.drop_question()
-                raise asyncio.TimeoutError
+                raise TimeoutError
             get = self.inputs.getter()
             done, _ = await asyncio.wait(
                 {task, get}, timeout=left, return_when=asyncio.FIRST_COMPLETED
@@ -1244,7 +1291,7 @@ class Repl:
     async def _cancel(self):
         try:
             await asyncio.wait_for(self.conn.cancel(session_id=self.sess.session_id), 5)
-        except (asyncio.TimeoutError, RequestError, ConnectionError):
+        except (TimeoutError, RequestError, ConnectionError):
             pass
 
     async def ask(self, tool_call, kind):
@@ -1351,6 +1398,7 @@ async def run(a, log, err, log_path):
             client = RunClient(
                 log, a.perm, root, live=a.interactive, thinking=a.show_thinking
             )
+            client.err_path = err.name
             conn = connect_to_agent(client, proc.stdin, proc.stdout)
             try:
                 init = await asyncio.wait_for(
@@ -1372,7 +1420,7 @@ async def run(a, log, err, log_path):
                     a, conn, init, client, root, handshake_timeout
                 )
                 break
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 client.rec(
                     "handshake_timeout",
                     {"attempt": attempt, "tries": tries, "secs": handshake_timeout},
@@ -1471,12 +1519,7 @@ async def run(a, log, err, log_path):
                 await asyncio.wait_for(conn.cancel(session_id=sess.session_id), 5)
                 if client.prompt_task is not None:
                     await asyncio.wait_for(client.prompt_task, 5)
-            except (
-                asyncio.TimeoutError,
-                asyncio.CancelledError,  # a second signal: stop waiting
-                RequestError,
-                ConnectionError,
-            ):
+            except (TimeoutError, asyncio.CancelledError, RequestError, ConnectionError):
                 pass
         failure = failure or (client.last_failure if client else None)
         out["stop_reason"] = "interrupted"
