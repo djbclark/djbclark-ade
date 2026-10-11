@@ -335,6 +335,14 @@ class TestFailureNote(Base):
             r = subprocess.run(["bash", "-c", rearm], check=False, capture_output=True, text=True)
             self.assertEqual(r.returncode, want, (mode, r.stdout, r.stderr))
 
+    def test_rearm_waiter_outlasts_the_slice_timeout(self):
+        self.dispatch("--timeout", "3600", name="long")
+        self.assertTrue(self.record("long")["rearm"].startswith("timeout 3900 "), self.record("long")["rearm"])
+        self.dispatch("--timeout", "3600", "--wait-timeout", "5000", name="waited")
+        self.assertTrue(self.record("waited")["rearm"].startswith("timeout 5000 "))
+        self.dispatch(name="default")
+        self.assertTrue(self.record("default")["rearm"].startswith("timeout 2700 "))
+
 
 class TestCheck(Base):
     def test_check_classifies_records_and_reports_worst_exit(self):

@@ -155,7 +155,9 @@ def pid_alive(pid: int | None) -> bool:
 
 
 def rearm_cmd(done: Path, record: Path | None = None, seconds: int = 1800) -> str:
-    """The waiter a lead runs (in the background) for a detached slice. It exits 124 on timeout;
+    """The waiter a lead runs (in the background) for a detached slice. `seconds` must outlast the
+    slice: launch passes its --wait-timeout, else --timeout + 300 (2026-10-10: a fixed 1800 s waiter
+    gave up on a live 2400 s slice and the lead read it as lost). It exits 124 on timeout;
     once .done appears it runs `check` on the record, so a partial, no-report or BLOCKED slice
     exits non-zero and prints its verdict (2026-10-10: a quota death exited the old waiter 0)."""
     wait = f"timeout {seconds} bash -c 'until [ -e {shlex.quote(str(done))} ]; do sleep 10; done'"
@@ -487,7 +489,7 @@ def dispatch(a: argparse.Namespace) -> int:
         "task": a.task, "out": str(out), "brief": str(brief), "report": str(report), "done": str(done),
         "final": str(final), "stderr": str(stderr), "log": str(log), "record": str(record),
         "owner": os.environ.get("CLAUDE_CODE_SESSION_ID", ""), "started": time.time(),
-        "cmd": " ".join(shlex.quote(c) for c in acp_cmd), "rearm": rearm_cmd(done, record),
+        "cmd": " ".join(shlex.quote(c) for c in acp_cmd), "rearm": rearm_cmd(done, record, a.wait_timeout or a.timeout + 300),
         "detached": bool(a.detach), "status": "running", "pid": None, "exit": None, "finished": None,
         "report_source": None, "lead": a.lead,
     }
