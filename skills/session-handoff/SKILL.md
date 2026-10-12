@@ -135,6 +135,14 @@ since `workspaces` is replaced wholesale each write same as Current
 State). List **both** locations in the same write when a session is
 working a worktree task and `~/ops` concurrently — that's the whole point
 of v0.4, one call updates the canonical log and every pointer at once.
+**List only workspaces this chain owns.** Each listed workspace's pointer is
+rewritten to redirect to *your* chain, so listing a repo you merely touched
+(a harness fix in `djbclark-ade`, a one-line config commit in `~/ops`) steals
+that repo's pointer from the chain that owns it, and the next `/baton` there
+resumes the wrong work (2026-10-12: a Plektra session hijacked
+`djbclark-ade/main`). Before listing a repo, read its pointer: if it
+redirects to another live chain, leave it out and mention the side work in
+`history_bullets` instead.
 
 `read`/`fold` take `--state-root` and `--dir <pointer-directory>`; `read`
 returns the staleness verdict pre-computed per workspace. Only edit files
