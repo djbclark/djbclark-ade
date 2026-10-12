@@ -81,6 +81,11 @@ altitudes compose (a macro node can run a micro graph as its body).
   the close ledger `~/.local/state/session-finder/closed.jsonl`, closes the
   tab; `/helm-all` lists what was closed with its resume command. Never
   closes the helm/`coord` panes, claimed or `busy-background` sessions.
+- [docs/skillopt-sleep.md](docs/skillopt-sleep.md) — the nightly
+  SkillOpt-Sleep cycle (`bin/skillopt-night`, launchd 03:30): mines every
+  agent's transcripts, stages gated skill edits for review, never adopts by
+  itself; inert until the operator picks a backend. `/skillopt-sleep` reviews
+  and adopts.
 - [docs/upstream-issues.md](docs/upstream-issues.md) — filed-nowhere-yet
   bug drafts for third-party projects (graft statusline, hindsight config
   docs), written from problems verified here.

@@ -49,6 +49,8 @@ sudo-secretspec, ralph-tui-create-*, ...) stay where their installer put them.
 | `dialogue` | Runs a multi-model dialogue (for example Grok, Fable, Astra) that produces one artifact with a final-word model: fixed rounds through pinned routes, footers with point ids and dissent, a final-word state-file gate, noise strip and protocol lint. | "have the models chat about it and write X"; "three-model dialogue". Script: `skills/dialogue/scripts/dialogue.py`. |
 | `ralph-tui-orchestration` | Operates the Ralph TUI + Beads multi-repo controller (dormant since 2026-08-23). | Only when seeding or checking a Ralph controller. |
 | `terminus-kira` | Delegates a coding or shell task to a sandboxed agent in an Apple Container VM with one host directory mounted. | Risky or long tasks you want contained and reviewable. |
+| `skillopt-sleep` | Reviews and steers the nightly SkillOpt-Sleep cycle (`bin/skillopt-night`, launchd 03:30) that mines every agent's sessions and stages gated skill edits: last night's report, free mock dry-run, per-skill adoption, backend choice, handoff rounds. | `/skillopt-sleep`; "what did the agents learn last night", "adopt the proposal". Guide: `docs/skillopt-sleep.md`. |
+| `skillopt-sleep-learned` | The catch-all target SkillOpt-Sleep proposes edits to: lessons that belong to no single skill. Changes only by adoption. | Background rules for any task; edit only through `skillopt-sleep adopt` and a commit. |
 
 ## Knowledge and search
 

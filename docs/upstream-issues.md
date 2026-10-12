@@ -786,3 +786,61 @@ Observed on Claude Code 2.1.296, macOS. The display name comes from the function
 ### Searched first
 
 I searched anthropics/claude-code issues for "PostCompact", "PreCompact completed successfully", "hook command shown transcript" and "alwaysLoad". The nearest threads are #89622 (PostCompact stdin JSON escaping), #91910 (compact hooks firing for sub-agent compaction) and #101070 (an "idle" trigger value). None covers how the hook is displayed or what it costs in context.
+
+## 14. SkillOpt — `max_tokens_per_night` is documented and defaulted but never enforced (draft, 2026-10-12)
+
+**Repo:** microsoft/SkillOpt, `skillopt_sleep`, main at
+343db229dbd5ddaf9df6b1d5540d8bcdb2604d5c (installed with `uv tool install`).
+
+### What happens
+
+`skillopt_sleep/config.py` defines `"max_tokens_per_night": 400_000` under
+"budgets", and `skillopt_sleep/budget.py` has a `Budget` controller that
+"stops cleanly when exhausted". Nothing connects them: `rg max_tokens_per_night`
+over the package finds only the default, and `Budget(` is never constructed.
+A night's spend is bounded only by `max_tasks_per_night`, `edit_budget` and
+the number of fan-out skill groups.
+
+### Request
+
+1. Wire `max_tokens_per_night` into the cycle through `Budget` (stop before
+   the next model call once spent, and say so in `report.md`), or
+2. remove the key from `DEFAULTS` and the docs so users do not rely on it.
+
+### Searched first
+
+Issues and PRs for "max_tokens_per_night", "budget", "token budget": only
+unrelated threads (155, 130, 132, 57).
+
+## 15. SkillOpt — the harvest checkpoint is keyed by project, not by (project, source) (draft, 2026-10-12)
+
+**Repo:** microsoft/SkillOpt, main at 343db229.
+
+### What happens
+
+`cycle.py` reads `state.last_harvest_for(project)` and writes
+`state.set_last_harvest(project, started)` after every stateful run, whatever
+`transcript_source` was. Running one night per source for the same project
+(`--source claude`, then `--source codex`, ...) therefore gives every source
+after the first a window starting at the first run's start time: their older
+unseen sessions are skipped forever. Each source is also a separate store with
+its own timestamps, so one shared cursor cannot be right for all of them.
+
+### Repro
+
+1. `skillopt-sleep run --project P --scope all --source claude --backend mock`
+2. `skillopt-sleep run --project P --scope all --source codex --backend mock`:
+   `harvest done: sessions=` counts only Codex sessions that ended after step 1
+   started, although none were ever harvested.
+
+### Request
+
+Key `last_harvest` by `f"{project}::{source}"` (reading the bare project key as
+a fallback for existing state), or accept several `--source` values in one run.
+Workaround here: `bin/skillopt-night` swaps a per-source cursor into
+`state.json` before each run.
+
+### Searched first
+
+Issues and PRs for "checkpoint", "last_harvest", "per-source", "source": none
+covers it.

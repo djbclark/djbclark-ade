@@ -3,6 +3,21 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## SkillOpt-Sleep phase 2: pluggable transcript sources
+
+**Queued 2026-10-12 (operator asked for SkillOpt across all agent runs; phase 1
+shipped the same day, docs/skillopt-sleep.md). Not started.** Upstream
+`skillopt_sleep/harvest_sources.py` is a fixed if-chain, so Hermes
+(`~/.hermes/sessions`), zcode, grok, agy, muse, cline and acp-dispatch job
+reports are not learned from. Steps: (1) upstream PR adding a
+`skillopt_sleep.sources` entry-point group plus a `--source-module` flag, with
+the per-source checkpoint fix (draft: docs/upstream-issues.md section 15; ask
+before filing or opening the PR); (2) adapters here returning `SessionDigest`
+records, each with the replay-session filter; (3) add them to
+`bin/skillopt-night`'s source loop. Searched upstream 2026-10-12: no
+pluggable-source proposal; per-source PRs exist (266 DeepSeek Harness, 282
+Codex CLI rollouts). Drop the runner's codex shim when PR 282 merges.
+
 ## Last thing in the session: add fastino-glide to the toolchain prompt
 
 **Queued 2026-10-11 (operator). Not started; do it as the final step of the
