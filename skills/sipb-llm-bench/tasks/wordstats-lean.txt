@@ -1,0 +1,17 @@
+You are working in an empty git repository (your current directory). Do not use any todo or planning tools; use as few tool calls as possible (one write call per file, combine shell commands with &&). Do the five phases below in order, using your tools. After finishing each phase, run the bash command `echo PHASE-N-DONE` (N = the phase number) as its own tool call, then continue. Do not ask questions; do not stop early.
+
+PHASE 1 - build the package. Create a Python 3 package `wordstats/` (standard library only) with:
+  - `tokenize.py`: `tokenize(text) -> list[str]`, lower-cased words; keep internal apostrophes and hyphens ("don't", "well-known"), drop other punctuation, handle unicode letters.
+  - `counter.py`: `count_words(text) -> dict[str,int]` and `top_n(text, n) -> list[tuple[str,int]]` sorted by count descending, ties broken alphabetically.
+  - `cli.py` plus `__main__.py`: `python3 -m wordstats FILE --top N [--json]` printing a table (or JSON).
+  - `__init__.py` exporting the public functions.
+  Then write `tests/test_wordstats.py` using `unittest` with at least 12 test cases (empty input, ties, apostrophes, hyphens, unicode, case folding, n larger than vocabulary, CLI output via subprocess). Run `python3 -m unittest discover -v` and fix every failure until all pass.
+
+PHASE 2 - exercise it. Write `sample.txt` (at least 300 words of ordinary English prose) with a shell or Python command. Run the CLI on it with `--top 5` and with `--top 5 --json`, and show both outputs.
+
+PHASE 3 - network check. Run exactly: curl -sS -o /dev/null -w '%{http_code}\n' https://example.com
+and record the exact output in a new file `NOTES.md` under a heading "curl check". If the command is refused or blocked, record the exact error message instead.
+
+PHASE 4 - extend. Add a `--stopwords FILE` option (one word per line, words excluded from counts) to the CLI and to `count_words`/`top_n` (a `stopwords` keyword argument). Add at least 4 new tests for it, run the whole suite again and make it pass.
+
+PHASE 5 - wrap up. Append a summary of at most 12 lines to `NOTES.md` (files created, test count, anything that failed on the way and how you fixed it). Then run `git add -A && git commit -m "wordstats"`.

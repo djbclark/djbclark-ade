@@ -97,6 +97,7 @@ their old paths are symlinks into this checkout).
 | [`graft`](skills/graft/SKILL.md) | Use the graft code graph before grepping or reading source. |
 | [`todo`](skills/todo/SKILL.md) | Optional do-whenever tasks, kept as Basic Memory notes. |
 | [`terminus-kira`](skills/terminus-kira/SKILL.md) | Delegate a task to a sandboxed coding agent in an Apple Container VM. |
+| [`sipb-llm-bench`](skills/sipb-llm-bench/SKILL.md) | Benchmark a model on SIPB LLMs (or any OpenAI-compatible server) as a coding-agent backend: probes, tool-call conformance, two scored tasks. |
 | [`coderabbit-feeder`](skills/coderabbit-feeder/SKILL.md) | Queue a CodeRabbit review for a PR where CodeRabbit is not installed. |
 | [`skillopt-sleep`](skills/skillopt-sleep/SKILL.md) | Review the nightly SkillOpt-Sleep cycle (`bin/skillopt-night`): last night's report, free mock dry-run, per-skill adoption, the backend failover chain (`chain-check`). |
 | [`skillopt-sleep-learned`](skills/skillopt-sleep-learned/SKILL.md) | The catch-all skill SkillOpt-Sleep proposes edits to; lessons that belong to no single skill. |
