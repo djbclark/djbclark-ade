@@ -261,6 +261,25 @@ def pool_service(provider: str, family: str | None) -> str:
     return provider
 
 
+AIUSE_CONFIG = Path(os.environ.get("AIUSE_CONFIG", "~/.config/aiuse/config.toml")).expanduser()
+
+
+def operator_disabled(path: Path | None = None) -> set[str]:
+    """Services the operator switched off in aiuse's `[disabled_services]`.
+
+    Routing must honour them (2026-10-12: `plan` kept offering copilot and
+    cursor, both disabled there, one reserved for grokbot). Keys are aiuse's
+    canonical provider ids, the same names `Service.name` uses.
+    """
+    import tomllib
+
+    try:
+        with (path or AIUSE_CONFIG).open("rb") as fh:
+            return set((tomllib.load(fh).get("disabled_services") or {}).keys())
+    except (OSError, tomllib.TOMLDecodeError):
+        return set()
+
+
 def load_snapshot() -> tuple[dict[str, Any], float | None]:
     """Read aiuse's own latest snapshot. Never probes; never blocks."""
     path = SNAPSHOT
@@ -635,8 +654,9 @@ def main(argv: list[str] | None = None) -> int:
     pl = sub.add_parser("plan", help="assign a wave of slice kinds to services now")
     pl.add_argument("--kinds", required=True,
                     help="comma list, hardest first, e.g. code,code,research,bulk")
-    pl.add_argument("--exclude", default="",
-                    help="comma list of services to skip (just failed or spent)")
+    pl.add_argument("--exclude", action="append", default=[],
+                    help="comma list of services to skip (just failed or spent); repeatable. "
+                    "aiuse [disabled_services] are always skipped")
     pl.add_argument("--min-headroom", type=float, default=15.0)
     pl.add_argument("--json", action="store_true")
     pl.add_argument("--brief", action="append", default=[],
@@ -654,7 +674,8 @@ def main(argv: list[str] | None = None) -> int:
         bad = [k for k in kinds if k not in KINDS]
         if bad:
             parser.error(f"unknown kind(s) {bad}; choose from {KINDS}")
-        skip = {x.strip() for x in args.exclude.split(",") if x.strip()}
+        skip = {x.strip() for arg in args.exclude for x in arg.split(",") if x.strip()}
+        skip |= operator_disabled()
         rows = plan(kinds, quota=quota, min_headroom=args.min_headroom, exclude=skip)
         if args.brief:
             if len(args.brief) != len(kinds):
@@ -724,7 +745,7 @@ def main(argv: list[str] | None = None) -> int:
         print(" * = discovered without a curated profile")
         return 0
 
-    choice = route(args.kind, quota=quota, min_headroom=args.min_headroom)
+    choice = route(args.kind, quota=quota, min_headroom=args.min_headroom, exclude=operator_disabled())
     if args.brief:
         shadow_kind(args.brief, args.kind, choice.service.name if choice else None)
     if choice is None:
