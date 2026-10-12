@@ -84,8 +84,11 @@ altitudes compose (a macro node can run a micro graph as its body).
 - [docs/skillopt-sleep.md](docs/skillopt-sleep.md) — the nightly
   SkillOpt-Sleep cycle (`bin/skillopt-night`, launchd 03:30): mines every
   agent's transcripts, stages gated skill edits for review, never adopts by
-  itself; inert until the operator picks a backend. `/skillopt-sleep` reviews
-  and adopts.
+  itself; model calls go through a failover chain (`~/.skillopt-sleep/night.json`),
+  inert until the operator enables it. `/skillopt-sleep` reviews and adopts.
+- [docs/failover.md](docs/failover.md) — `bin/failover.py`: run any task
+  through an ordered chain of agent routes (deny list, allowlist, aiuse
+  preflight, attempt log). Reuse it instead of hand-rolling a fallback.
 - [docs/upstream-issues.md](docs/upstream-issues.md) — filed-nowhere-yet
   bug drafts for third-party projects (graft statusline, hindsight config
   docs), written from problems verified here.

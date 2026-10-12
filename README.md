@@ -63,7 +63,7 @@ their old paths are symlinks into this checkout).
 |---|---|
 | [`skills/`](skills/) | The skills (table below). |
 | [`tools/acp-run/`](tools/acp-run/) | `acp-run`, the ACP client every launcher uses. |
-| [`bin/`](bin/) | `acp-dispatch` (hand a slice to an agent and get its report back: wraps `acp-run`, appends [`docs/dispatch-footer.md`](docs/dispatch-footer.md), checks `--model` against the agent's live list before it starts, writes report/`.done`/record, exit codes for no-report and `BLOCKED:`, a `rearm` waiter that exits with the `check` verdict), `fleet-watch` (fleet change notices), `cow-pasture` (APFS copy-on-write workspaces), `herdr-sleeper` (idle-pane sleep), `herdr-jump` (focus a `w22:t4` address from a `prefix+:` popup), `herdr-ai` (natural language to Herdr commands from a `prefix+alt+i` popup), `orca-reorg-watch`, `skillopt-night` (nightly SkillOpt-Sleep cycle over every agent's transcripts; launchd job in [`launchd/`](launchd/)), `route_agent.py` (`route`/`plan`: pick a vendor, or spread a wave of slice kinds over pools by live headroom; bigteam re-plans at every slice boundary). |
+| [`bin/`](bin/) | `acp-dispatch` (hand a slice to an agent and get its report back: wraps `acp-run`, appends [`docs/dispatch-footer.md`](docs/dispatch-footer.md), checks `--model` against the agent's live list before it starts, writes report/`.done`/record, exit codes for no-report and `BLOCKED:`, a `rearm` waiter that exits with the `check` verdict), `fleet-watch` (fleet change notices), `cow-pasture` (APFS copy-on-write workspaces), `herdr-sleeper` (idle-pane sleep), `herdr-jump` (focus a `w22:t4` address from a `prefix+:` popup), `herdr-ai` (natural language to Herdr commands from a `prefix+alt+i` popup), `orca-reorg-watch`, `skillopt-night` (nightly SkillOpt-Sleep cycle over every agent's transcripts; launchd job in [`launchd/`](launchd/)), `failover.py` (run a task through an ordered chain of agent routes with policy, preflight and an attempt log; [`docs/failover.md`](docs/failover.md)), `route_agent.py` (`route`/`plan`: pick a vendor, or spread a wave of slice kinds over pools by live headroom; bigteam re-plans at every slice boundary). |
 | [`claude/commands/`](claude/commands/) | Claude Code slash commands: the thin wrappers `/helm-all`, `/session-finder-all`, `/resume`, `/herdr-tidy`, `/orca-tidy` (herdr-tidy over Orca terminals), `/skillopt-sleep`. |
 | [`docs/`](docs/) | Design records and dated operating knowledge (list below). |
 | [`plugins/`](plugins/) | `herdr-sleeper` herdr plugin (dev source of djbclark/herdr-sleeper). |
@@ -98,7 +98,7 @@ their old paths are symlinks into this checkout).
 | [`todo`](skills/todo/SKILL.md) | Optional do-whenever tasks, kept as Basic Memory notes. |
 | [`terminus-kira`](skills/terminus-kira/SKILL.md) | Delegate a task to a sandboxed coding agent in an Apple Container VM. |
 | [`coderabbit-feeder`](skills/coderabbit-feeder/SKILL.md) | Queue a CodeRabbit review for a PR where CodeRabbit is not installed. |
-| [`skillopt-sleep`](skills/skillopt-sleep/SKILL.md) | Review the nightly SkillOpt-Sleep cycle (`bin/skillopt-night`): last night's report, free mock dry-run, per-skill adoption, backend choice, handoff rounds. |
+| [`skillopt-sleep`](skills/skillopt-sleep/SKILL.md) | Review the nightly SkillOpt-Sleep cycle (`bin/skillopt-night`): last night's report, free mock dry-run, per-skill adoption, the backend failover chain (`chain-check`). |
 | [`skillopt-sleep-learned`](skills/skillopt-sleep-learned/SKILL.md) | The catch-all skill SkillOpt-Sleep proposes edits to; lessons that belong to no single skill. |
 | [`reorg-orca`](skills/reorg-orca/SKILL.md) | Reorganize an Orca setup from the CLI; says which moves Orca cannot do yet. |
 
@@ -165,6 +165,9 @@ way. `helm.py` imports `fleet` from the sibling `skills/session-finder/`.
     SkillOpt-Sleep cycle: what runs when, paths, config, choosing the backend,
     reading a night, adopting and rolling back, unsupported sources and the
     pluggable-source plan.
+15. [`docs/failover.md`](docs/failover.md) — `bin/failover.py`, the reusable
+    chain library: route registry, deny list and allowlists, preflight against
+    `aiuse --available`, ordered attempts with a JSONL log, fresh-context `ask`.
 
 ## Architecture: agent graphs at two altitudes
 

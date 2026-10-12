@@ -4,7 +4,7 @@ description: >-
   Review and steer the nightly SkillOpt-Sleep cycle that learns from every
   agent's past sessions on this Mac and stages gated skill edits: read last
   night's report, run a free mock dry-run, adopt a staged proposal per skill,
-  answer handoff prompts, choose or switch the optimizer backend. Use for
+  check or change the backend failover chain. Use for
   /skillopt-sleep, "sleep cycle", "what did the agents learn last night",
   "review staged skill proposals", "adopt the proposal".
 ---
@@ -58,34 +58,37 @@ any other change in this repo: `git add skills/<name>/SKILL.md`, a message
 naming the night, push. Roll back with `git revert` (or copy the backup back).
 Never pass `--auto-adopt`.
 
-## 4. The backend decision
+## 4. The backend chain
 
-`backend` in `~/.skillopt-sleep/config.json` decides which model pool the
-nightly optimizer burns. Options (docs/skillopt-sleep.md has the detail):
+The engine runs SkillOpt's `handoff` backend; `bin/skillopt-night` answers each
+round's prompts through the first working entry of the chain in
+`~/.skillopt-sleep/night.json` (library: `bin/failover.py`, docs/failover.md).
+Each prompt is a fresh `acp-run` session in an empty dir with `--perm deny`, or
+one request to the MIT SIPB endpoint. One entry answers a whole source night; if
+it fails, state is restored and the night reruns on the next entry.
 
-1. `opencode`: OpenCode Go pool via the `opencode` CLI.
-2. `azure_openai`: OpenAI-compatible mode against the local LiteLLM proxy
-   (`http://127.0.0.1:4000/v1`), `model` = a LiteLLM model name; the key comes
-   from `sudo-secretspec` at run time and goes only into the child env.
-3. `handoff`: no model calls from the engine; it writes prompts that an agent
-   session answers (section 5).
+```sh
+~/src/djbclark-ade/bin/skillopt-night chain-check     # preflight table: pool, floor, ready, why
+tail -n 20 ~/.local/state/skillopt-sleep/attempts.jsonl   # what each entry did and why it was skipped
+```
 
-`optimizer_backend`/`target_backend` split the roles (for example target =
-`opencode`, optimizer = `handoff`). Switch by editing the JSON (keep
-`docs/skillopt-sleep-config.example.json` in step), then preview with section 2.
+Policy (operator, 2026-10-12): allowed TUIs `zcode`, `agy`, `opencode`,
+`claude` (Haiku or Sonnet only), and `sipb` last. Never cursor, cline/ClinePass,
+Hermes, Opus or Fable; such a chain is refused whole. The chain ships with
+`"enabled": false` until the operator approves the per-entry list; enabling it
+is `"enabled": true` after a clean `chain-check`. Keep
+`docs/skillopt-sleep-night.example.json` in step. Sizing knobs: `max_sessions`
+(round 1 sends one prompt per harvested session), `jobs`, `max_rounds`,
+`source_timeout_s`.
 
-## 5. Handoff nights (subscription-only)
+## 5. A night by hand
 
-With `backend: "handoff"` the night runs one source and exits 3, leaving
-`~/src/djbclark-ade/.skillopt-sleep-handoff/PROMPTS.md` and `pending.json`,
-and pings Hermes. To answer:
-
-1. Read `PROMPTS.md`; for each pending id spawn a **fresh-context** sub-agent
-   (Agent tool, `model: "opus"`) with only that prompt's text, and write its
-   raw reply to `answers/<id>.md`. Never answer from this session's own
-   context: it would contaminate the held-out gate.
-2. Rerun the same command: `~/src/djbclark-ade/bin/skillopt-night --source <s>`.
-3. Repeat until it exits 0 (typically 3 to 6 rounds), then section 3.
+`~/src/djbclark-ade/bin/skillopt-night --source pi` runs one small source
+through the chain (it spends). Never answer `PROMPTS.md` from this session's
+own context: the runner's fresh-context answers keep the held-out gate clean.
+If a night was interrupted, its handoff dir
+(`~/src/djbclark-ade/.skillopt-sleep-handoff/<source>/`) is wiped at the next
+attempt.
 
 ## 6. Privacy boundary
 

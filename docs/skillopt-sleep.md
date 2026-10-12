@@ -7,37 +7,43 @@ proposes bounded edits, and keeps an edit only if a held-out validation gate
 does not regress. Proposals are **staged**; nothing changes a live skill until
 someone runs `skillopt-sleep adopt`. Day-to-day use is the
 [`skillopt-sleep`](../skills/skillopt-sleep/SKILL.md) skill (`/skillopt-sleep`).
+The model calls go through a failover chain built on
+[`bin/failover.py`](failover.md).
 
 ## 1. What runs when
 
 | When | What |
 |---|---|
 | 03:30 nightly | launchd `com.djbclark.skillopt-sleep` runs `bin/skillopt-night`. |
-| Each night | For each source with data (claude, codex, cursor, opencode, copilot_cli, pi): one `skillopt-sleep run --project ~/src/djbclark-ade --scope all --source <s> --skill-root ~/src/djbclark-ade/skills --preferences <docs/skillopt-preferences.md> --progress --json`, sequentially, under `nice -n 10`, 90 min timeout each. |
-| Until a backend is chosen | The runner sees `backend: "mock"`, prints "waiting for backend decision", records `waiting-backend`, exits 0. Nothing is mined or spent. |
+| Each night | For each source with data (claude, codex, cursor, opencode, copilot_cli, pi), one stateful `skillopt-sleep run --project ~/src/djbclark-ade --scope all --source <s> --backend handoff --skill-root ~/src/djbclark-ade/skills --preferences <docs/skillopt-preferences.md> --max-sessions N --progress --json`, sequentially, under `nice -n 10`. Each handoff round's prompts are answered through the chain (section 4). |
+| Until the chain is enabled | No `"enabled": true` chain in `~/.skillopt-sleep/night.json`: the runner prints "waiting for backend decision", records `waiting-backend`, exits 0. Nothing is mined or spent. |
 
-Guards in `bin/skillopt-night`: the overload gate from `bin/acp-dispatch`
-(load above 4x CPUs or critical memory pressure; waits up to 30 min then skips
-the night), a lock so two nights never overlap, and the mock refusal above.
-`--dry-run` always runs `skillopt-sleep dry-run --backend mock` and never moves
-a checkpoint; it takes about 30 s for all six sources.
+Guards in `bin/skillopt-night`: the chain policy check (a chain naming a denied
+or non-allowlisted route is refused whole, with one Hermes line), the overload
+gate from `bin/acp-dispatch` (load above 4x CPUs or critical memory pressure;
+waits up to 30 min then skips the night), and a lock so two nights never
+overlap. `--dry-run` always runs `skillopt-sleep dry-run --backend mock`, never
+touches the chain and never moves a checkpoint; it takes about 30 s for all six
+sources. `skillopt-night chain-check` runs only the chain preflights and prints
+the table.
 
 ## 2. Paths
 
 | Path | What |
 |---|---|
-| `~/.local/bin/skillopt-sleep` | The CLI. `uv tool install "skillopt @ git+https://github.com/microsoft/SkillOpt"`, upstream main at **343db229dbd5ddaf9df6b1d5540d8bcdb2604d5c** (2026-10-12; PyPI 0.2.0 lacks multi-skill fan-out, OpenAI-compatible endpoints, the OpenCode/Cursor/Copilot/Pi sources and the handoff backend). Upgrade: `uv tool upgrade skillopt`, then rerun section 4's dry-run. |
-| `~/.skillopt-sleep/config.json` | The config (copy: [`skillopt-sleep-config.example.json`](skillopt-sleep-config.example.json); keep them in step). |
+| `~/.local/bin/skillopt-sleep` | The CLI. `uv tool install "skillopt @ git+https://github.com/microsoft/SkillOpt"`, upstream main at **343db229dbd5ddaf9df6b1d5540d8bcdb2604d5c** (2026-10-12; PyPI 0.2.0 lacks multi-skill fan-out, OpenAI-compatible endpoints, the OpenCode/Cursor/Copilot/Pi sources and the handoff backend). Upgrade: `uv tool upgrade skillopt`, then rerun the dry-run. |
+| `~/.skillopt-sleep/config.json` | SkillOpt's config (copy: [`skillopt-sleep-config.example.json`](skillopt-sleep-config.example.json)). Its `backend: "mock"` only affects hand-run commands; the runner passes `--backend handoff`. |
+| `~/.skillopt-sleep/night.json` | The runner's own config: the chain, allowlist, sizing (copy: [`skillopt-sleep-night.example.json`](skillopt-sleep-night.example.json)). A separate file because SkillOpt's config is upstream's namespace. |
 | `~/.skillopt-sleep/state.json` | Upstream state: night counter, harvest checkpoint, slow memory, history. |
 | `~/.skillopt-sleep/evidence/` | Dry-run evidence logs. **Sensitive** (truncated prompts and replies). |
 | `~/src/djbclark-ade/.skillopt-sleep/staging/<night>/` | A real night's `report.md`, `report.json`, `diagnostics.json`, `manifest.json`, `evidence.jsonl` (sensitive), per-skill proposals, and `backup/` after an adoption. Git-ignored. |
-| `~/src/djbclark-ade/.skillopt-sleep-handoff/` | Handoff rounds (`PROMPTS.md`, `pending.json`, `answers/`). Git-ignored. |
-| `~/.local/state/skillopt-sleep/` | Runner state: `<date>-<source>.log` (`-dry` for dry-runs), `nights.jsonl` (one line per source run: rc, sessions, tasks, gate, proposals, staging dir), `cursors.json`, `codex-home/` shim, `launchd.out/.err`. |
+| `~/src/djbclark-ade/.skillopt-sleep-handoff/<source>/` | The running night's handoff rounds (`PROMPTS.md`, `pending.json`, `digests.json`, `tasks.json`, `answers/`). Git-ignored; moved to `handoff-archive/` when the night finishes. |
+| `~/.local/state/skillopt-sleep/` | Runner state: `<date>-<source>.log` (`-dry` for dry-runs), `nights.jsonl` (one line per source night), `attempts.jsonl` (every preflight and attempt, from bin/failover.py), `cursors.json`, `codex-home/` shim, `handoff-archive/` (last ten), `launchd.out/.err`. |
 | `launchd/com.djbclark.skillopt-sleep.plist` | The job; `skillopt-night install` copies it to `~/Library/LaunchAgents/` and bootstraps it, `skillopt-night uninstall` removes it. |
 | `skills/skillopt-sleep-learned/SKILL.md` | The managed catch-all target (`target_skill_path`): lessons that belong to no single skill. |
 | [`skillopt-preferences.md`](skillopt-preferences.md) | House rules passed as `--preferences` to every reflect step. |
 
-## 3. The config
+## 3. SkillOpt's config
 
 Keys set beyond upstream defaults: `projects: "all"`, `multi_skill_fanout:
 true` (one gated proposal per skill a session invoked, resolved from
@@ -47,87 +53,95 @@ score), `edit_budget: 4`, `max_tasks_per_night: 40`, `evolve_memory: true`
 (proposes edits to the project's `CLAUDE.md`, which here is a symlink to
 `AGENTS.md`), `evolve_skill: true`, `target_skill_path` and `skill_roots` as
 above, `redact_secrets: true`, `evidence_log: true`, `auto_adopt: false`, and
-absolute `opencode_db`, `opencode_path`, `cursor_path`, `codex_path`
-(`~/.opencodex/bin/codex`). `lookback_hours` stays 72: a source's first night
-reads only the last 72 hours. For a deliberate backfill run once by hand with
-`--lookback-hours N` (0 = all history; expensive with a real backend).
+absolute `opencode_db`, `opencode_path`, `cursor_path`, `codex_path`.
+`lookback_hours` stays 72: a source's first night reads only the last 72 hours.
+For a deliberate backfill run once by hand with `--lookback-hours N` (0 = all
+history; expensive).
 
 **`max_tokens_per_night` is not enforced** at 343db229: the key exists in
 `config.py` but nothing reads it (draft upstream issue in
-[upstream-issues.md](upstream-issues.md) section 14). Spend per source run is
-bounded only by `max_tasks_per_night`, `edit_budget`, the number of fan-out
-skill groups, and the runner's 90 min timeout. Lower `max_tasks_per_night` to
-cut spend.
+[upstream-issues.md](upstream-issues.md) section 14). Spend is bounded by
+`max_sessions` and `max_tasks_per_night`, `edit_budget`, the fan-out groups,
+`max_rounds` and the per-source timeout.
 
-## 4. Choosing and switching the backend
+## 4. The backend: a failover chain through acp-run
 
-Upstream backends that fit this Mac (the lead asks the operator to choose):
+**Why the handoff backend.** SkillOpt's `get_backend` is a fixed if-chain over
+backend names, and an unknown name silently becomes the mock backend, so no
+external backend can be registered without patching the installed package. The
+`handoff` backend makes no model calls itself: each round it writes the prompts
+it needs to `pending.json` and exits 3. The runner answers every prompt through
+the chain and reruns, until the engine finishes (typically 3 to 6 rounds;
+`max_rounds` caps it). Each prompt is answered by a fresh `acp-run` session in
+an empty temporary directory with `--perm deny` (no tools, no project context),
+or by one OpenAI-compatible request for the SIPB entry. That is what upstream
+asks for: every answer in a fresh context, so the held-out gate is not
+contaminated.
 
-1. **`opencode`**: the `opencode` CLI with project config, MCP and tools
-   disabled, billed to the OpenCode Go pool. Works today, no secret needed.
-   Transcript excerpts go to whichever provider OpenCode routes the model to.
-2. **`azure_openai`** in OpenAI-compatible mode against the local LiteLLM proxy
-   (`http://127.0.0.1:4000/v1`, override with `azure_endpoint`). `model` is a
-   LiteLLM model name from `~/ops/site-djbclark/roles/litellm/` (2026-10-12):
-   `go-kimi`, `go-deepseek-pro`, `go-deepseek-flash`, `go-glm-flash` (OpenCode
-   Go pool, direct API, spend logged per key), `gemini-free`,
-   `gemini-free-lite` (Gemini free tier; the role notes its RPM/RPD caps cannot
-   carry bulk), `grok-sub` (SuperGrok subscription via the OAuth bridge), and
-   `clinepass-*` (reserve pool: never). **Not available yet:** the runner reads
-   the key with `sudo-secretspec` (`SKILLOPT_LITELLM_API_KEY`, else
-   `LITELLM_MASTER_KEY`) and neither is declared in its schema. To enable,
-   preferably with a dedicated virtual key (add an `{alias: skillopt-sleep,
-   key: ...}` row to `litellm_client_keys` in the role and apply it), then:
+**One entry per source night.** All prompts of a source night are answered by
+the same entry, so baseline and candidate scores come from one model. An entry
+fails when its preflight fails, any answer fails (acp-run nonzero, a delivery
+check such as quota or refusal, or an empty answer), the run ends nonzero, the
+staging dir's `diagnostics.json` holds a `call_error` or "empty response on
+all", or tasks were mined but none replayed. Then the runner restores
+`state.json` from its pre-attempt copy, wipes the source's handoff dir and
+reruns that source night on the next entry. When the chain is exhausted it
+records `chain_exhausted` and sends one Hermes line.
 
-   ```sh
-   sudo-secretspec add SKILLOPT_LITELLM_API_KEY --description "LiteLLM virtual key for the nightly SkillOpt-Sleep run" --optional --reason "skillopt-night azure_openai backend"
-   sudo-secretspec set SKILLOPT_LITELLM_API_KEY --reason "skillopt-night azure_openai backend"
-   ```
+**Policy** (operator, 2026-10-12). Allowed TUIs: `zcode`, `agy`, `opencode`
+(OpenCode Go), `claude` (Haiku or Sonnet only), and the MIT SIPB
+OpenAI-compatible endpoint as the last entry. Denied everywhere by
+`bin/failover.py`: cursor, cline/ClinePass, Hermes, any Opus or Fable model.
+`crush` is under discussion and not in the allowlist. A violating chain is
+refused at load time, whole.
 
-   and mirror the declaration into the tracked declarations template (a
-   runtime `add` shows as `template-check` drift until then). The key is held
-   in memory and exported only into the child's environment.
-3. **`handoff`**: the engine makes no model calls. It writes prompts; an agent
-   session answers each in a fresh-context sub-agent (Opus on the Claude
-   subscription) and reruns, 3 to 6 rounds a night. Manual: the runner does
-   one source per night and pings when prompts are waiting
-   (`skills/skillopt-sleep` section 5).
+**Provisional chain** (installed with `"enabled": false`; the per-entry list,
+TUI, vendor, model, version and effort, awaits operator approval). Readiness is
+from `skillopt-night chain-check` on 2026-10-12:
 
-Roles can split: `target_backend`/`target_model` run the task attempts,
-`optimizer_backend`/`optimizer_model` mine, judge and write edits (for example
-target `opencode`, optimizer `handoff`). Backends to avoid: `claude` (draws the
-shared Claude weekly pool that orchestration depends on), `codex` (its own
-replay sessions get re-harvested, upstream issue 286), `cursor`.
+| # | Entry | Vendor | Pool | Floor | Ready 2026-10-12 |
+|---|---|---|---|---|---|
+| 1 | opencode `opencode-go/deepseek-v4-flash` | OpenCode Go | opencode-go | 10% | yes (25.7%) |
+| 2 | agy `gemini-3.8-flash`, effort medium (`gemini-3.8-flash-medium`) | Google | antigravity/gemini | 10% | yes (16.0%) |
+| 3 | zcode, effort low (`--set thought=low`; zcode refuses `--model`) | Z.ai | zai | 10% | no: weekly window exhausted |
+| 4 | claude `haiku` | Anthropic | claude/default | 15% | yes (20.0%) |
+| 5 | claude `sonnet` | Anthropic | claude/default | 15% | yes (20.0%) |
+| 6 | sipb `qwen3-coder:30b` via `http://127.0.0.1:8890/api` (sipb-llms-proxy), key `MIT_SIPB_API_KEY` | MIT SIPB | none tracked (aiuse has no windows) | none | yes (proxy reachable, key declared) |
 
-**Switch** by editing `backend` (and `model`) in `~/.skillopt-sleep/config.json`
-and the example copy, for instance:
+Effort levers that exist: zcode `--set thought=low|high|max`; agy's effort is
+the model id suffix (`-low`, `-medium`, `-high`); the claude and opencode ACP
+agents expose no effort option to acp-run, so their entries take none.
 
-```sh
-python3 - <<'EOF'
-import json, pathlib
-p = pathlib.Path.home() / ".skillopt-sleep/config.json"
-c = json.loads(p.read_text()); c["backend"] = "opencode"; c["model"] = ""
-p.write_text(json.dumps(c, indent=2) + "\n")
-EOF
-```
+**Sizing.** Round 1 sends one LLM-mining prompt per harvested session: a free
+handoff dry-run on 2026-10-12 produced **118** prompts for the claude source at
+upstream's default cap of 120 sessions. Every prompt is a whole agent spawn, so
+each one also pays that agent's system prompt. `max_sessions` (40 in the
+provisional file), `jobs` (parallel answers, 2), `max_rounds` (8) and
+`source_timeout_s` (7200) in night.json size it. Put free or under-used pools
+first and Claude late.
 
-Then check with `~/src/djbclark-ade/bin/skillopt-night --dry-run` (free), and
-optionally one real source by hand: `~/src/djbclark-ade/bin/skillopt-night
---source pi` (smallest store). Setting `backend` back to `mock` pauses the
-nightly job.
+**Enable or change.** Edit `~/.skillopt-sleep/night.json` (and the example copy),
+run `~/src/djbclark-ade/bin/skillopt-night chain-check`, then set
+`"enabled": true`. Optionally run one small source by hand first:
+`~/src/djbclark-ade/bin/skillopt-night --source pi`. Set `enabled` back to
+`false` to pause the nightly job.
 
 ## 5. Reading a night
 
-1. `tail ~/.local/state/skillopt-sleep/nights.jsonl`: per source, `rc`
-   (0 ok, 3 handoff pending, 124 timeout), `sessions`, `tasks`, `gate`
-   (`accept`/`reject`), `proposals`, `staging_dir`.
-2. `skillopt-sleep status --project ~/src/djbclark-ade`: `latest_staging`,
+1. `tail ~/.local/state/skillopt-sleep/nights.jsonl`: per source, `status`
+   (`ok`, `chain_exhausted`; `waiting-backend`, `chain-invalid`, `skipped:`
+   for the whole night), `entry` (which chain entry answered), `rounds`,
+   `answered`, `sessions`, `tasks`, `gate` (`accept`/`reject`), `proposals`,
+   `staging_dir`, and `failed` (every entry that was skipped or failed, why).
+2. `tail ~/.local/state/skillopt-sleep/attempts.jsonl`: each preflight and
+   attempt with its reason and seconds.
+3. `skillopt-sleep status --project ~/src/djbclark-ade`: `latest_staging`,
    `staged_skills` (pending), `adopted_skills`, history tail.
-3. `<latest_staging>/report.md`: what was mined, baseline vs candidate scores,
+4. `<latest_staging>/report.md`: what was mined, baseline vs candidate scores,
    each proposed edit and why it passed or failed the gate.
-4. A night that stages anything sends one Hermes line: "djbclark-ade:
-   skillopt-sleep staged N proposal(s) from <sources>; review: ...". Failures,
-   pending handoff prompts and an unavailable backend each send one line too.
+5. A night that stages anything sends one Hermes line: "djbclark-ade:
+   skillopt-sleep staged N proposal(s) from <sources>; review: ...". An
+   exhausted chain and a refused chain each send one line too.
 
 ## 6. Adopting and rolling back
 
@@ -157,7 +171,7 @@ capped at 120 sessions per source):
 | copilot_cli | `~/.copilot/session-store.db` | 31 | 28 |
 | pi | `~/.pi/agent/sessions` | 3 | 1 |
 
-Two runner workarounds for upstream behaviour:
+Runner workarounds for upstream behaviour:
 
 1. **Per-source cursors.** Upstream keys the harvest checkpoint by project
    only, so the second source in a night would see only sessions newer than
@@ -172,6 +186,11 @@ Two runner workarounds for upstream behaviour:
    `~/.local/state/skillopt-sleep/codex-home/archived_sessions/` as symlinks
    and passes `--codex-home`. Drop it when upstream PR 282 ("harvest Codex CLI
    rollout sessions") merges.
+3. **Per-source handoff dirs.** Upstream's handoff dir is one per project, and
+   it pins `digests.json`/`tasks.json` for resumption; it is archived only when
+   a night stages something. The runner sets `SKILLOPT_SLEEP_HANDOFF_DIR` per
+   source and archives the dir after every finished night, so a rejected night
+   never replays stale pinned tasks the next night.
 
 **Not supported upstream:** Hermes (`~/.hermes/sessions`), zcode (`~/.zcode`),
 grok (`~/.grok/projects`), agy, muse, cline, and acp-dispatch job reports
@@ -187,6 +206,9 @@ files_touched, feedback_signals, turn counts). Plan:
 1. Upstream PR making sources pluggable: a `skillopt_sleep.sources` entry-point
    group (name to `harvest(cfg, since_iso, limit) -> list[SessionDigest]`) and
    a `--source-module pkg.mod:func` flag, plus the per-source checkpoint fix.
+   The same treatment would suit backends (`get_backend` silently maps unknown
+   names to mock), which would let the chain plug in directly instead of
+   through handoff rounds.
 2. Adapters here for Hermes, zcode, grok, agy, muse, cline and acp-dispatch
    job reports, each with the replay-session filter.
 3. `skillopt-night` gains those sources in its loop.
@@ -200,8 +222,10 @@ Codex replay sessions). Issue 247 / PR 280 (`revert`).
 
 ## 9. Privacy
 
-A real backend receives transcript excerpts from **every** project on this
-Mac: user prompts, final replies, tools and skills used, with obvious secrets
-redacted (`redact_secrets`). The handoff backend keeps them in Claude
-sub-agents. `evidence.jsonl` and `~/.skillopt-sleep/evidence/` hold truncated
-prompts and replies: never commit, paste or upload them.
+The chain entry that answers a night receives transcript excerpts from
+**every** project on this Mac: user prompts, final replies, tools and skills
+used, with obvious secrets redacted (`redact_secrets`; `pending.json` prompts
+are redacted too). Which vendor sees them depends on which entry answered:
+`nights.jsonl` names it. `evidence.jsonl`, `~/.skillopt-sleep/evidence/` and
+the handoff dirs and archive hold prompts and replies: never commit, paste or
+upload them.
