@@ -34,11 +34,24 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
    `chain_exhausted` when nothing worked.
 5. **Executors**: `ask(entry, prompt)` answers one prompt in a fresh context
    (acp-run in an empty temp dir with `--perm deny`, prompt from a 0600 file,
-   never argv; or an OpenAI-compatible POST with the key read into memory by
-   `sudo-secretspec get`); `ask_many` answers a batch on one entry and fails the
+   never argv; acp-run's `claude -p` fallback also reads stdin since
+   2026-10-12). Tools stay off because acp-run enforces deny per agent and its
+   tripwire exits 77 when a tool still runs without asking, which `ask` turns
+   into `AttemptFailed`; the canary checks it before use. Or an
+   OpenAI-compatible POST with the key read once per process by
+   `sudo-secretspec get`, sent only to the registry endpoint, https or
+   loopback, and never across a redirect; `ask_many` answers a batch on one entry and fails the
    batch on the first failure; `run_command(entry, argv)` runs any command with
    `{tui} {agent} {model} {effort} {endpoint}` replaced in argv, `FAILOVER_*`
-   exported, and the entry's secret exported only into that child.
+   exported, and the entry's secret exported only into that child. Every child
+   gets a minimal env (`BASE_ENV_KEYS` plus the entry's allow-listed `env`) and
+   runs in its own process group, killed whole on timeout. acp-run logs go to
+   `~/.local/state/failover/acp-logs/` (0700), trimmed by `sweep_logs()`.
+6. **Chain policy against config tampering** (2026-10-12): `extra_args` may not
+   carry `--perm`, `--mode`, `--model`, `--set`, `--add-dir`, `--agent`, `-C`,
+   `-f`, `-p`, `--log`, `--resume` or the like (`FORBIDDEN_ARGS`; acp-run's
+   options are last-wins), every token and env value is checked against the
+   deny list, and `env` keys outside `ENV_ALLOW` are refused.
 
 ## CLI
 
