@@ -4,3 +4,7 @@
 __pycache__/
 .ruff_cache/
 .zcode/
+
+# SkillOpt-Sleep staging, evidence and handoff rounds (bin/skillopt-night): local, sensitive.
+/.skillopt-sleep/
+/.skillopt-sleep-handoff/
