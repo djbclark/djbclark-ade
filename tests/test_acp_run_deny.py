@@ -102,8 +102,34 @@ PROBE = textwrap.dedent("""\
             mod.subprocess.run = real
         return seen
 
+    def zcode_settings():
+        import os, shutil, tempfile
+        from pathlib import Path
+        home = Path(tempfile.mkdtemp())
+        (home / ".zcode" / "cli").mkdir(parents=True)
+        (home / ".zcode" / "cli" / "setting.json").write_text(json.dumps({
+            "permission": {"mode": "yolo", "autoApproveHighRisk": True},
+            "features": {"mcp": True, "subagent": True, "skill": True},
+            "mcp": {"servers": {"basic-memory": {"command": "x"}}},
+            "plugins": {"enabled": True, "enabledPlugins": {"p@m": True}},
+            "hooks": {"enabled": True, "events": {"Stop": [{"command": "x"}]}},
+            "storage": {"dir": "~/.zcode"}}))
+        old = os.environ.get("HOME")
+        os.environ["HOME"] = str(home)
+        try:
+            d = mod.zcode_deny_settings()
+        finally:
+            os.environ["HOME"] = old
+        out = {"settings": json.loads((d / "cli" / "setting.json").read_text()),
+               "config": json.loads((d / "cli" / "config.json").read_text()),
+               "mode": oct((d.stat().st_mode) & 0o777)}
+        shutil.rmtree(d)
+        shutil.rmtree(home)
+        return out
+
     async def main():
         return {
+            "zcode_settings": zcode_settings(),
             "trip_running": await turn("deny", [("update", upd("tool_call", "t1", "in_progress", "execute"))],
                                       wait_cancel=True),
             "trip_last_update": await turn("deny", [("update", upd("tool_call", "t1", "pending", "read")),
@@ -206,6 +232,32 @@ class TestPermDeny(unittest.TestCase):
         self.assertIn("--strict-mcp-config", d["cmd"])
         self.assertNotIn("--dangerously-skip-permissions", d["cmd"])
         self.assertIn("--dangerously-skip-permissions", self.r["fallback_all"]["cmd"])
+
+    def test_zcode_deny_settings_turn_off_mcp_plugins_hooks(self):
+        z = self.r["zcode_settings"]
+        st = z["settings"]
+        self.assertEqual(st["mcp"], {"servers": {}})
+        self.assertEqual(st["features"], {"mcp": False, "subagent": False, "skill": False})
+        self.assertFalse(st["plugins"]["enabled"])
+        self.assertEqual(st["plugins"]["enabledPlugins"], {})
+        self.assertFalse(st["hooks"]["enabled"])
+        self.assertEqual(st["permission"]["mode"], "plan")
+        self.assertFalse(st["permission"]["autoApproveHighRisk"])
+        for tool in ("Agent", "Skill", "SendMessage", "TaskOutput", "TaskStop", "mcp__*", "Bash"):
+            self.assertIn(tool, st["permission"]["disallowedTools"])
+        self.assertEqual(st["storage"], {"dir": "~/.zcode"}, "unrelated keys are kept")
+        self.assertFalse(z["config"]["hooks"]["enabled"])
+        self.assertEqual(z["mode"], "0o700")
+
+    def test_fallback_skips_user_settings_under_deny(self):
+        d = self.r["fallback_deny"]["cmd"]
+        self.assertEqual(d[d.index("--setting-sources") + 1], "project")
+
+    def test_no_option_abbreviations(self):
+        r = subprocess.run(["uv", "run", "--quiet", "--script", str(SCRIPT), "claude", "--per", "all", "-p", "hi"],
+                           check=False, capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("unrecognized arguments: --per", r.stderr)
 
     def test_crush_yolo_only_under_perm_all(self):
         self.assertNotIn("--yolo", self.r["crush_base"])

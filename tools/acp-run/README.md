@@ -35,13 +35,17 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      claude-agent-acp gets a session with no built-in tools, no user settings
      (so no `bypassPermissions` default or allow rules), no MCP servers and no
      bypass (`_meta.claudeCode.options`), then mode `default`; zcode starts in
-     `plan` (`ZCODE_ACP_MODE`) with its tools disallowed (`ZCODE_DISALLOWED_TOOLS`);
+     `plan` (`ZCODE_ACP_MODE`) with its tools disallowed (`ZCODE_DISALLOWED_TOOLS`,
+     MCP `mcp__*` included) and a per-run settings file (`ZCODE_CLI_SETTINGS_FILE`,
+     removed afterwards) with MCP servers, plugins, skills, subagents and hooks off;
      agy runs in mode `default`; crush runs without `--yolo` (now added only
      under `all`); opencode gets `OPENCODE_CONFIG_CONTENT={"permission":"deny"}`.
      A tripwire backs this up: any non-think tool call that starts or completes
      without a permission request cancels the turn and exits 77. The `claude -p`
-     fallback runs with `--tools ""`, `--strict-mcp-config` and
-     `--disallowedTools '*'`, and always reads its prompt from stdin.
+     fallback runs with `--tools ""`, `--strict-mcp-config`, `--disallowedTools '*'`
+     and `--setting-sources project` (no user hooks), and always reads its prompt
+     from stdin. Options are never abbreviated (`allow_abbrev=False`): `--per all`
+     is an error, not `--perm all`.
    - `scoped:P1,P2`: allow reads, searches, fetches, thinking and commands; allow
      edit/delete/move only when every path the tool call names is under one of
      the listed paths (relative to `-C`). This is an approval policy, not a

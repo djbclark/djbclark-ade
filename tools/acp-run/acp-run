@@ -144,6 +144,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -338,9 +339,39 @@ DENY_ENV = {
     "zcode": {
         "ZCODE_ACP_MODE": "plan",
         "ZCODE_DISALLOWED_TOOLS": "Bash Read Write Edit MultiEdit Glob Grep LS WebFetch"
-        " WebSearch Task NotebookEdit TodoWrite",
+        " WebSearch Task Agent Skill SendMessage TaskOutput TaskStop NotebookEdit TodoWrite"
+        " mcp__*",
     },
 }
+def zcode_deny_settings():
+    """A per-run zcode CLI settings dir for --perm deny (re-verification R3, 2026-10-12):
+    the user's ~/.zcode/cli/setting.json with MCP servers, plugins, skills, subagents
+    and hooks off and plan permissions, plus a hook-free legacy config.json beside it.
+    zcode reads it through ZCODE_CLI_SETTINGS_FILE ("lets a host run one process on
+    its own settings file (hooks, MCP servers, permissions)"), so only this child is
+    affected. Returns the temp dir (caller removes it)."""
+    try:
+        base = json.loads((Path.home() / ".zcode" / "cli" / "setting.json").read_text())
+    except (OSError, ValueError):
+        base = {}
+    if not isinstance(base, dict):
+        base = {}
+    base["features"] = {**(base.get("features") or {}),
+                        "mcp": False, "subagent": False, "skill": False}
+    base["mcp"] = {"servers": {}}
+    base["plugins"] = {**(base.get("plugins") or {}), "enabled": False, "enabledPlugins": {}}
+    base["skills"] = {**(base.get("skills") or {}), "enabled": False, "roots": []}
+    base["hooks"] = {"enabled": False, "events": {}}
+    base["permission"] = {**(base.get("permission") or {}), "mode": "plan", "allowedTools": [],
+                          "autoApproveHighRisk": False, "allowMediumRiskInAuto": False,
+                          "disallowedTools": DENY_ENV["zcode"]["ZCODE_DISALLOWED_TOOLS"].split()}
+    d = Path(tempfile.mkdtemp(prefix="acp-run-zcode-deny-"))
+    (d / "cli").mkdir()
+    (d / "cli" / "setting.json").write_text(json.dumps(base, indent=1))
+    (d / "cli" / "config.json").write_text(json.dumps({"hooks": {"enabled": False, "events": {}}}))
+    return d
+
+
 DENY_META = {
     # claude-agent-acp merges _meta.claudeCode.options into its SDK query options
     # (dist/acp-agent.js): tools [] removes every built-in tool, settingSources []
@@ -962,7 +993,7 @@ def fallback_cli(a, client=None) -> int:
         # Same as upstream SkillOpt's claude backend, plus no built-in tools and
         # no user MCP servers (adversary review 2026-10-12, C1a).
         cmd += ["--tools", "", "--strict-mcp-config", "--permission-mode", "default",
-                "--disallowedTools", "*"]
+                "--disallowedTools", "*", "--setting-sources", "project"]  # no user hooks
     if client is not None:
         client.rec("new_session", {"sessionId": sid, "via": "claude-cli"})
     print(f"acp-run: ACP handshake failed; fallback to claude CLI (session {sid})", file=sys.stderr)
@@ -1820,8 +1851,12 @@ async def run(a, log, err, log_path):
         cmd = YOLO_CMD[a.agent]
     root = Path(a.dir).resolve()
     env = dict(os.environ)
+    deny_dir = None
     if a.perm == "deny":
         env.update(DENY_ENV.get(a.agent, {}))
+        if a.agent == "zcode":
+            deny_dir = zcode_deny_settings()
+            env["ZCODE_CLI_SETTINGS_FILE"] = str(deny_dir / "cli" / "setting.json")
     if a.agent == "agy":
         env["GEMINI_HOME"] = ensure_agy_home()
         # Claude Code's settings point HTTPS_PROXY at the opencodex intercept
@@ -2040,6 +2075,8 @@ async def run(a, log, err, log_path):
     finally:
         logging.disable(logging.CRITICAL)  # a half-written line at shutdown is noise
         await _kill(proc)
+        if deny_dir is not None:
+            shutil.rmtree(deny_dir, ignore_errors=True)
         if herdr is not None:
             try:
                 await herdr.release()
@@ -2141,6 +2178,9 @@ def main():
         prog="acp-run",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        # No prefix matching: `--per all` must not mean `--perm all` (re-verification
+        # R10, 2026-10-12: abbreviations slipped past callers' forbidden-flag lists).
+        allow_abbrev=False,
     )
     ap.add_argument("agent", nargs="?")
     ap.add_argument("-C", "--dir", default=".")
