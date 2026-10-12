@@ -9,7 +9,7 @@
     "crush"
   ],
   "jobs": 2,
-  "max_rounds": 8,
+  "max_rounds": 60,
   "max_sessions": 40,
   "source_timeout_s": 7200,
   "deadline": "06:30",

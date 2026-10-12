@@ -105,7 +105,12 @@ NIGHT_DENY = (*failover.DENY, "muse", "pi", "grok", "codex", "copilot")
 NATIVE_BACKENDS = ("opencode", "claude")
 DEFAULT_TIMEOUT_S = 5400
 DEFAULT_LOAD_WAIT_S = 1800
-DEFAULT_MAX_ROUNDS = 8
+# Handoff rounds are cheap reruns; consolidation asks one or two dependent prompts per
+# round (reflect, then each gate trial), so a night needs far more than upstream's
+# "3-6" (run A, 2026-10-12: 8 rounds ended with skill groups still in progress).
+# A round that asks exactly the prompts it asked last round, answers written, is
+# stuck and fails the attempt; this cap is only a backstop.
+DEFAULT_MAX_ROUNDS = 60
 DEFAULT_JOBS = 2
 GATE_LOAD_PER_CPU = 4  # same number as bin/acp-dispatch; used only if its import fails
 PING = "~/.local/bin/hermes-ping"
@@ -483,6 +488,12 @@ def archive_handoff(source: str) -> None:
         shutil.rmtree(old, ignore_errors=True)
 
 
+def pending_ids(hdir: Path) -> frozenset[str]:
+    data = _read_json(hdir / "pending.json", {})
+    pending = data.get("pending") if isinstance(data, dict) else None
+    return frozenset(str(p["id"]) for p in pending or [])
+
+
 def answer_pending(entry: failover.Entry, hdir: Path, jobs: int) -> int:
     """Answer every prompt in pending.json on this entry; return how many."""
     data = _read_json(hdir / "pending.json", {})
@@ -642,6 +653,7 @@ def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[st
                             model=entry.native_model if use_native else "")
         stop = time.monotonic() + max(1.0, min(timeout, deadline - time.time()))
         rounds = answered = 0
+        last: frozenset[str] = frozenset()
         try:
             with open(log, "a") as lf:
                 lf.write(f"\n== attempt on {entry.label}{' (native backend)' if use_native else ''}\n")
@@ -650,6 +662,11 @@ def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[st
                 rc, stdout = invoke(cmd, log=log, env=env, timeout=stop - time.monotonic())
                 if rc != 3:
                     break
+                ids = pending_ids(hdir)
+                if ids and ids == last:
+                    raise failover.AttemptFailed(f"no progress: round {rounds} asked the same "
+                                                 f"{len(ids)} prompt(s) again after they were answered")
+                last = ids
                 if rounds >= max_rounds:
                     raise failover.AttemptFailed(f"still pending after {rounds} rounds")
                 if time.monotonic() >= stop:

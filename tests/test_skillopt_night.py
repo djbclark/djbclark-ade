@@ -46,16 +46,20 @@ row = {"argv": argv, "seen": state.get("last_harvest", {}).get(proj), "hdir": hd
        if hdir and (Path(hdir) / "digests.json").exists() else None}
 answer = None
 if backend == "handoff":
-    ans = Path(hdir) / "answers" / "p1.md"
-    if not ans.exists():
-        Path(hdir).mkdir(parents=True, exist_ok=True)
-        (Path(hdir) / "pending.json").write_text(json.dumps(
-            {"format": "skillopt_sleep.handoff.v1", "pending": [{"id": "p1", "prompt": "Q-" + src}]}))
-        row["round"] = "pending"
-        with open(os.environ["FAKE_LOG"], "a") as f:
-            f.write(json.dumps(row) + "\n")
-        sys.exit(3)
-    answer = ans.read_text()
+    # FAKE_ROUNDS dependent prompts p1..pN, one per round; FAKE_STUCK re-asks p1 forever
+    n = int(os.environ.get("FAKE_ROUNDS") or 1)
+    for i in range(1, n + 1):
+        ans = Path(hdir) / "answers" / f"p{i}.md"
+        if os.environ.get("FAKE_STUCK") or not ans.exists():
+            pid = "p1" if os.environ.get("FAKE_STUCK") else f"p{i}"
+            Path(hdir).mkdir(parents=True, exist_ok=True)
+            (Path(hdir) / "pending.json").write_text(json.dumps(
+                {"format": "skillopt_sleep.handoff.v1", "pending": [{"id": pid, "prompt": "Q-" + src}]}))
+            row["round"] = "pending"
+            with open(os.environ["FAKE_LOG"], "a") as f:
+                f.write(json.dumps(row) + "\n")
+            sys.exit(3)
+    answer = (Path(hdir) / "answers" / f"p{n}.md").read_text()
     row["answer"] = answer
 if mode == "run" and backend != "mock":
     state["night"] = state.get("night", 0) + 1
@@ -136,7 +140,10 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(failover, "ask", lambda e, p: f"ANS-{e.model}-{p}")
     monkeypatch.setattr(night.skillopt_sources, "store_present", lambda s: False)
     # the engine and adapters get a minimal env (M2): let the fake's own knobs through
-    monkeypatch.setattr(failover, "BASE_ENV_KEYS", (*failover.BASE_ENV_KEYS, "FAKE_LOG", "FAKE_RESULT"))
+    monkeypatch.setattr(failover, "BASE_ENV_KEYS",
+                        (*failover.BASE_ENV_KEYS, "FAKE_LOG", "FAKE_RESULT", "FAKE_ROUNDS", "FAKE_STUCK"))
+    monkeypatch.delenv("FAKE_ROUNDS", raising=False)
+    monkeypatch.delenv("FAKE_STUCK", raising=False)
     monkeypatch.setattr(night, "adapter_digests", _fake_adapter(ADAPTER_CALLS))
     ADAPTER_CALLS.clear()
     tool = tmp_path / "uvtool"
@@ -662,4 +669,23 @@ def test_preadopt_check_clean_and_bad_target(env, capsys):
     assert night.main(["preadopt-check", str(stage)]) == 0
     assert night.main(["preadopt-check", str(env / "nope")]) == 2
     assert night.main(["preadopt-check"]) == 2
+
+
+def test_many_dependent_rounds_converge(env, monkeypatch):
+    """Run A (2026-10-12): consolidation asks 1-2 dependent prompts per round, so a
+    night needs far more than 8 rounds; it must not be cut off while progressing."""
+    _night(env / "home", HAIKU_SONNET)
+    monkeypatch.setenv("FAKE_ROUNDS", "12")
+    assert night.main(["--source", "claude"]) == 0
+    row = _rows(env)[-1]
+    assert (row["status"], row["entry"], row["rounds"], row["answered"]) == ("ok", "claude:haiku@low", 13, 12)
+
+
+def test_stuck_engine_fails_the_attempt(env, monkeypatch):
+    _night(env / "home", HAIKU_SONNET)
+    monkeypatch.setenv("FAKE_STUCK", "1")
+    assert night.main(["--source", "claude"]) == 1
+    row = _rows(env)[-1]
+    assert row["status"] == "chain_exhausted"
+    assert all("no progress: round 2 asked the same 1 prompt(s)" in f for f in row["failed"])
 
