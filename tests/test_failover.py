@@ -398,7 +398,8 @@ def test_sweep_logs(tmp_path):
     old, new = d / "old.jsonl", d / "new.jsonl"
     old.write_text("x")
     new.write_text("y")
-    os.utime(old, (time.time() - 10 * 86400,) * 2)
+    t = time.time() - 10 * 86400
+    os.utime(old, (t, t))
     assert failover.sweep_logs(7) == 1
     assert not old.exists() and new.exists()
 
