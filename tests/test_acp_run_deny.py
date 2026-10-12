@@ -112,6 +112,14 @@ PROBE = textwrap.dedent("""\
                                                     ("perm", "t1"),
                                                     ("update", upd("tool_call_update", "t1", "failed"))]),
             "think_ok": await turn("deny", [("update", upd("tool_call", "t1", "completed", "think"))]),
+            # crush-acp: in_progress 1 ms before its permission request, then denied -> failed
+            "crush_order": await turn("deny", [("update", upd("tool_call", "t1", "pending", "execute")),
+                                              ("update", upd("tool_call_update", "t1", "in_progress")),
+                                              ("perm", "t1"),
+                                              ("update", upd("tool_call_update", "t1", "failed")),
+                                              ("update", upd("tool_call_update", "t1", "in_progress"))]),
+            # started, never asked, and the turn ends at once: the end-of-turn check trips
+            "started_never_asked": await turn("deny", [("update", upd("tool_call", "t1", "in_progress", "execute"))]),
             "perm_all": await turn("all", [("update", upd("tool_call", "t1", "completed", "execute"))]),
             "sessions": await sessions(),
             "fallback_deny": fallback("deny"),
@@ -162,6 +170,17 @@ class TestPermDeny(unittest.TestCase):
         self.assertIsNone(t["tripped"])
         self.assertTrue(t["finished"])
         self.assertNotEqual(t["code"], 77)
+
+    def test_in_progress_just_before_the_permission_request_is_not_a_trip(self):
+        t = self.r["crush_order"]
+        self.assertIsNone(t["tripped"])
+        self.assertTrue(t["finished"])
+        self.assertNotEqual(t["code"], 77)
+
+    def test_a_started_tool_that_never_asks_trips_at_turn_end(self):
+        t = self.r["started_never_asked"]
+        self.assertEqual(t["code"], 77)
+        self.assertEqual(t["out"]["stop_reason"], "tripwire")
 
     def test_think_tools_and_perm_all_never_trip(self):
         self.assertIsNone(self.r["think_ok"]["tripped"])

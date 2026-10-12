@@ -307,6 +307,10 @@ HANDSHAKE_TIMEOUT_DEFAULT = 40
 EXIT_ALL_DENIED = 5
 EXIT_LOAD = 75  # EX_TEMPFAIL: try again later
 EXIT_TRIPWIRE = 77  # EX_NOPERM: a tool ran without a permission request under --perm deny
+# A tool may report in_progress a moment before it asks: crush-acp sends in_progress,
+# then session/request_permission 1 ms later (canary, 2026-10-12). A started tool
+# trips only if its permission request has not arrived within this grace.
+TRIP_GRACE_S = 2.0
 
 # --perm deny made real per agent (adversary review 2026-10-12, C1). Each agent's
 # own defaults can run tools without ever sending session/request_permission:
@@ -655,6 +659,7 @@ class RunClient(Client):
         # tripwire (--perm deny): ids that went through request_permission, each
         # tool call's kind, and the first tool that ran without asking
         self.requested, self.tool_kinds, self.tripped = set(), {}, None
+        self.started_unasked = {}  # tool_call_id -> (monotonic start, title)
 
     def rec(self, kind, data):
         row = {"t": round(time.time(), 3), "kind": kind, "data": data}
@@ -709,13 +714,37 @@ class RunClient(Client):
         status = getattr(update, "status", None)
         if str(getattr(kind, "value", kind)) == "think":
             return
-        if str(getattr(status, "value", status)) in ("in_progress", "completed") and tid not in self.requested:
-            title = getattr(update, "title", None) or self.titles.get(tid) or str(tid)
-            self.tripped = f"tool {title!r} ran without a permission request under --perm deny"
-            self.rec("tripwire", {"tool_call_id": tid, "title": title, "status": str(status)})
+        status = str(getattr(status, "value", status))
+        if tid in self.requested or status not in ("in_progress", "completed"):
+            return
+        title = getattr(update, "title", None) or self.titles.get(tid) or str(tid)
+        self.titles.setdefault(tid, title)
+        if status == "completed":
+            self.trip(tid, title, status)
+        else:
+            self.started_unasked.setdefault(tid, (time.monotonic(), title))
+
+    def trip(self, tid, title, status):
+        self.tripped = f"tool {title!r} ran without a permission request under --perm deny"
+        self.rec("tripwire", {"tool_call_id": tid, "title": title, "status": status})
+
+    def check_started(self, grace=TRIP_GRACE_S):
+        """Trip on a tool that started and has not asked within grace seconds
+        (grace 0 at the end of a turn: it never asked)."""
+        if self.perm != "deny" or self.tripped:
+            return
+        now = time.monotonic()
+        for tid, (t0, title) in list(self.started_unasked.items()):
+            if tid in self.requested:
+                self.started_unasked.pop(tid, None)
+            elif now - t0 >= grace:
+                self.trip(tid, title, "in_progress")
+                return
 
     async def request_permission(self, session_id, tool_call, options, **kw):
-        self.requested.add(getattr(tool_call, "tool_call_id", None))
+        tid = getattr(tool_call, "tool_call_id", None)
+        self.requested.add(tid)
+        self.started_unasked.pop(tid, None)
         # Pick only *_once options. An *_always option can outlive this run
         # (Hermes saves allow_always to a permanent on-disk allowlist), and
         # "cancelled" means the whole turn was cancelled, not one action denied.
@@ -1081,6 +1110,8 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
                     left = deadline - time.monotonic() if deadline is not None else 30
                     if left <= 0:
                         raise TimeoutError
+                    if getattr(client, "check_started", None):
+                        client.check_started()
                     if getattr(client, "tripped", None):
                         break  # handled below, where the turn's reply is judged
                     deny = getattr(a, "perm", None) == "deny"
@@ -1112,6 +1143,8 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
                     raise
                 why = error_text(e)
             else:
+                if getattr(client, "check_started", None):
+                    client.check_started(grace=0)  # the turn is over: it never asked
                 trip = getattr(client, "tripped", None)
                 if trip:  # a tool ran without asking under --perm deny: stop the turn
                     if not prompt_task.done():
