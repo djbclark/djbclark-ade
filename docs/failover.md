@@ -57,7 +57,11 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
    outside `ENV_ALLOW` are refused.
 7. **Canary**: each acp entry is asked to create a file and write a basic-memory
    note; it passes only with 0 tool calls (not merely denied), no file and no
-   tripwire.
+   tripwire. The policy is per TUI in the registry (`Tui.canary`), so a chain
+   file cannot loosen it: `strict` (default) or `asked_denied_ok`, set only on
+   agy (djbclark, 2026-10-12), where tool calls are tolerated if every one asked
+   permission and was denied. The tripwire (exit 77) and the file check apply
+   to both.
 
 ## CLI
 

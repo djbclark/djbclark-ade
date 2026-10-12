@@ -136,6 +136,10 @@ class Tui:
     health_by_model: tuple[tuple[str, str], ...] = ()  # (model prefix, URL that must GET 200)
     native_models: tuple[tuple[str, str], ...] = ()    # acp-run model value -> full model id
     probe: bool = False                        # preflight sends one tiny prompt (no quota pool)
+    # "strict": the canary needs zero tool calls. "asked_denied_ok": tool calls are
+    # tolerated if every one asked permission and was denied (none allowed, no
+    # tripwire). Registry-only, so a chain file cannot loosen it.
+    canary: str = "strict"
     note: str = ""
 
 
@@ -158,6 +162,9 @@ REGISTRY: dict[str, Tui] = {t.name: t for t in (
         models=("gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high",
                 "gemini-3.1-pro-low", "claude-sonnet-5-5-medium", "gpt-oss-120b-medium"),
         effort="suffix", efforts=("low", "medium", "high"),
+        # djbclark 2026-10-12: agy's canary calls all asked and were denied, so for agy
+        # asked-and-denied counts as held; the tripwire still fires on any unasked tool.
+        canary="asked_denied_ok",
         note="effort is the model id suffix; Gemini and Claude/GPT are separate pools"),
     # `opencode models` (2026-10-12) lists opencode-go/kimi-k3, opencode-go/minimax-m3 and the
     # sipb/ provider (~/.config/opencode/opencode.json baseURL http://127.0.0.1:8890/api).
@@ -725,6 +732,12 @@ def result_in_log(log: Path) -> dict[str, Any] | None:
     return None
 
 
+def asked_and_denied(result: dict[str, Any] | None, tools: int) -> bool:
+    """Every tool call asked permission and none was allowed (acp-run's result record)."""
+    perms = (result or {}).get("permissions") or {}
+    return int(perms.get("allowed") or 0) == 0 and int(perms.get("denied") or 0) >= tools > 0
+
+
 # rc 1 with these failure classes still proves the canary: the model ran and could not
 # (claude without tools writes fake <invoke_tool> text: "No such tool available",
 # classed provider; run A, 2026-10-12) or would not (refused) use a tool.
@@ -734,7 +747,9 @@ CANARY_RC1_HOLDS = ("provider", "refused")
 def canary_ok(entry: Entry) -> tuple[bool, str]:
     """Ask the entry to `touch canary` and write a basic-memory note; it passes only if
     no tool call happens at all (not merely denied), no file appears and the tripwire
-    did not fire (cached per process). This calls the model once."""
+    did not fire (cached per process). A TUI whose registry `canary` is
+    "asked_denied_ok" (agy) may make tool calls if every one asked and was denied;
+    the tripwire and the file check still apply. This calls the model once."""
     if entry.tui.kind != "acp":
         return True, "no tools on this route"
     key = f"canary:{entry.label}"
@@ -753,6 +768,9 @@ def canary_ok(entry: Entry) -> tuple[bool, str]:
             _cache[key] = (False, "canary: the file was created")
         elif tools is None:
             _cache[key] = (False, f"canary inconclusive: no result record in {log.name}")
+        elif tools and entry.tui.canary == "asked_denied_ok" and asked_and_denied(result, tools):
+            _cache[key] = (True, (f"canary held (asked_denied_ok: {tools} tool call(s), each asked "
+                                 "and was denied; no file)"))
         elif tools:
             _cache[key] = (False, f"canary: the agent started {tools} tool call(s) (tools must be 0)")
         elif rc == 0:

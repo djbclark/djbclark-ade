@@ -354,6 +354,40 @@ def test_canary(tmp_path, monkeypatch, body, ok, why):
     assert failover.canary_ok(sipb) == (True, "no tools on this route")
 
 
+@pytest.mark.parametrize(("tui", "model", "fields", "rc", "ok", "why"), [
+    # agy: asked-and-denied tool calls hold
+    ("agy", "gemini-3.8-flash", '{"tool_calls": 3, "permissions": {"allowed": 0, "denied": 3}}', 5, True,
+     "asked_denied_ok: 3 tool call(s)"),
+    # agy: a tool that ran without asking (fewer denials than calls) is refused
+    ("agy", "gemini-3.8-flash", '{"tool_calls": 3, "permissions": {"allowed": 0, "denied": 2}}', 0, False,
+     "started 3 tool call(s)"),
+    # agy: an allowed call is refused
+    ("agy", "gemini-3.8-flash", '{"tool_calls": 1, "permissions": {"allowed": 1, "denied": 0}}', 0, False,
+     "started 1 tool call(s)"),
+    # agy: the tripwire still refuses
+    ("agy", "gemini-3.8-flash", '{"tool_calls": 1, "permissions": {"allowed": 0, "denied": 1}}', 77, False,
+     "tripwire"),
+    # every other TUI stays strict: asked-and-denied is still refused
+    ("claude", "haiku", '{"tool_calls": 3, "permissions": {"allowed": 0, "denied": 3}}', 5, False,
+     "tools must be 0"),
+    ("opencode", "opencode-go/minimax-m3", '{"tool_calls": 1, "permissions": {"allowed": 0, "denied": 1}}', 5,
+     False, "tools must be 0"),
+])
+def test_canary_policy_per_tui(tmp_path, monkeypatch, tui, model, fields, rc, ok, why):
+    _fake_acp(tmp_path, monkeypatch, "acp-policy", _result_log(fields) + f"echo DONE\nexit {rc}\n")
+    effort = {"effort": "medium"} if tui == "agy" else {}
+    (e,) = failover.load_chain([{"tui": tui, "model": model, **effort}])
+    got_ok, got_why = failover.canary_ok(e)
+    assert got_ok is ok and why in got_why
+
+
+def test_canary_policy_is_registry_only():
+    assert failover.REGISTRY["agy"].canary == "asked_denied_ok"
+    assert all(t.canary == "strict" for n, t in failover.REGISTRY.items() if n != "agy")
+    (e,) = failover.load_chain([{"tui": "claude", "model": "haiku", "canary": "asked_denied_ok"}])
+    assert e.tui.canary == "strict", "a chain entry cannot loosen the canary"
+
+
 def test_preflight_runs_canary_only_with_probe(tmp_path, monkeypatch):
     _fake_acp(tmp_path, monkeypatch, "acp-canary2",
               LOG_RESULT.format(tools=1) + 'while [ "$1" != "-C" ]; do shift; done; touch "$2/canary"\n')
