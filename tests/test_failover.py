@@ -7,7 +7,9 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -47,8 +49,14 @@ def isolated(tmp_path, monkeypatch):
     spec.chmod(0o755)
     monkeypatch.setenv("FAILOVER_SECRETSPEC", str(spec))
     monkeypatch.setenv("FAKE_SECRET", SECRET)
+    monkeypatch.setattr(failover, "ACP_LOG_DIR", tmp_path / "acp-logs")
+    failover._secrets.clear()
+    old_umask = os.umask(0o022)
+    os.umask(old_umask)
     yield
+    os.umask(old_umask)  # failover.main() sets 0o077
     failover._cache.clear()
+    failover._secrets.clear()
 
 
 def _log(tmp: Path) -> list[dict[str, Any]]:
@@ -126,7 +134,10 @@ def test_sipb_via_opencode_health_check(monkeypatch):
     monkeypatch.setattr(failover, "health_ok", lambda url: False)
     assert failover.preflight(e) == (False, "health check http://127.0.0.1:8890/api/version did not answer 200")
     monkeypatch.setattr(failover, "health_ok", lambda url: True)
-    assert failover.preflight(e) == (True, "http://127.0.0.1:8890/api/version answered 200")
+    assert failover.preflight(e, probe=False) == (
+        True, "http://127.0.0.1:8890/api/version answered 200; canary not run (it calls the model)")
+    ok, why = failover.preflight(e)
+    assert ok and why.endswith("canary held (rc=0, no file)")
 
 
 def test_crush_probe(monkeypatch):
@@ -140,7 +151,7 @@ def test_crush_probe(monkeypatch):
         return "OK"
     monkeypatch.setattr(failover, "ask", ask)
     ok, why = failover.preflight(e, probe=False)
-    assert ok and "probe not run" in why and calls == []
+    assert ok and "probe and canary not run" in why and calls == []
     assert failover.preflight(e)[0] and calls == [failover.PROBE_PROMPT]
     assert failover.preflight(e)[0] and len(calls) == 1, "probe result is cached per process"
     failover._cache.clear()
@@ -257,17 +268,139 @@ def test_ask_acp_runs_in_empty_dir(tmp_path, monkeypatch):
     assert failover.ask(cl, "q") == "0"
 
 
-def test_ask_acp_failure_and_empty(tmp_path, monkeypatch):
-    acp = tmp_path / "acp-run3"
-    acp.write_text('#!/bin/sh\necho "FAILED quota" >&2\nexit "${FAKE_RC:-1}"\n')
+def _fake_acp(tmp_path: Path, monkeypatch, name: str, body: str) -> Path:
+    acp = tmp_path / name
+    acp.write_text("#!/bin/sh\n" + body)
     acp.chmod(0o755)
     monkeypatch.setenv("FAILOVER_ACP_RUN", str(acp))
+    return acp
+
+
+def test_ask_acp_failure_and_empty(tmp_path, monkeypatch):
+    _fake_acp(tmp_path, monkeypatch, "acp-run3", 'echo "FAILED quota" >&2\nexit 1\n')
     (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
     with pytest.raises(failover.AttemptFailed, match="rc=1"):
         failover.ask(cl, "q")
-    monkeypatch.setenv("FAKE_RC", "0")
+    _fake_acp(tmp_path, monkeypatch, "acp-run4", "exit 0\n")
     with pytest.raises(failover.AttemptFailed, match="empty answer"):
         failover.ask(cl, "q")
+
+
+def test_ask_tripwire_exit_is_attempt_failed(tmp_path, monkeypatch):
+    _fake_acp(tmp_path, monkeypatch, "acp-trip", "echo partial\nexit 77\n")
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    with pytest.raises(failover.AttemptFailed, match="TRIPWIRE"):
+        failover.ask(cl, "q")
+
+
+def test_ask_child_env_is_minimal_and_logs_are_private(tmp_path, monkeypatch):
+    out = tmp_path / "env.txt"
+    _fake_acp(tmp_path, monkeypatch, "acp-env",
+              f'env > "{out}"\nwhile [ "$1" != "--log" ]; do shift; done; echo "$2"\n')
+    monkeypatch.setenv("SOME_API_KEY", "leak-me")
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku", "env": {"MAX_THINKING_TOKENS": "0"}}])
+    log = failover.ask(cl, "q")
+    env = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
+    assert "SOME_API_KEY" not in env and "FAKE_SECRET" not in env
+    assert env["MAX_THINKING_TOKENS"] == "0" and "HOME" in env and "PATH" in env
+    assert Path(log).parent == failover.ACP_LOG_DIR
+    assert (failover.ACP_LOG_DIR.stat().st_mode & 0o777) == 0o700
+
+
+@pytest.mark.parametrize(("body", "ok", "why"), [
+    ('while [ "$1" != "-C" ]; do shift; done; touch "$2/canary"; echo DONE\n', False, "file was created"),
+    ("exit 77\n", False, "tripwire"),
+    ("echo I have no tools\n", True, "canary held"),
+    ("exit 5\n", True, "canary held (rc=5"),
+    ("echo quota >&2; exit 1\n", False, "inconclusive"),
+])
+def test_canary(tmp_path, monkeypatch, body, ok, why):
+    _fake_acp(tmp_path, monkeypatch, "acp-canary", body)
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    got_ok, got_why = failover.canary_ok(cl)
+    assert got_ok is ok and why in got_why
+    (sipb,) = failover.load_chain([{"tui": "sipb", "model": "m"}])
+    assert failover.canary_ok(sipb) == (True, "no tools on this route")
+
+
+def test_preflight_runs_canary_only_with_probe(tmp_path, monkeypatch):
+    _fake_acp(tmp_path, monkeypatch, "acp-canary2", 'while [ "$1" != "-C" ]; do shift; done; touch "$2/canary"\n')
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    assert failover.preflight(cl, probe=False)[0]
+    ok, why = failover.preflight(cl)
+    assert not ok and "file was created" in why
+
+
+@pytest.mark.parametrize("extra", [["--perm", "all"], ["--perm=all"], ["--model", "haiku"], ["--mode", "bypass"],
+                                   ["--set", "provider=x"], ["--add-dir", "/"], ["--agent", "x"], ["-C", "/"],
+                                   ["--log", "/tmp/x"], ["--resume", "id"]])
+def test_extra_args_cannot_override_policy(extra):
+    with pytest.raises(failover.ChainError, match="extra_args may not pass"):
+        failover.load_chain([{"tui": "claude", "model": "haiku", "extra_args": extra}])
+
+
+def test_extra_args_and_env_values_checked_against_deny():
+    with pytest.raises(failover.ChainError, match="denied route 'opus'"):
+        failover.load_chain([{"tui": "claude", "model": "haiku", "extra_args": ["claude-opus-5-5"]}])
+    with pytest.raises(failover.ChainError, match="denied route 'cline'"):
+        failover.load_chain([{"tui": "zcode", "env": {"ZCODE_PROVIDER": "cline-pass"}}])
+
+
+@pytest.mark.parametrize("key", ["ACP_RUN_AGY_SERVER", "PATH", "OPENCODE_CONFIG_CONTENT", "ZCODE_ACP_MODE",
+                                 "HTTPS_PROXY", "LD_PRELOAD"])
+def test_env_keys_outside_allowlist_refused(key):
+    with pytest.raises(failover.ChainError, match="is not allowed"):
+        failover.load_chain([{"tui": "claude", "model": "haiku", "env": {key: "x"}}])
+
+
+@pytest.mark.parametrize(("endpoint", "ok"), [("http://evil.example/api", False), ("http://10.0.0.5/api", False),
+                                             ("https://llms-dev-1.mit.edu/api", True),
+                                             ("http://localhost:9999/api", True)])
+def test_secret_endpoint_must_be_https_or_loopback(endpoint, ok):
+    raw = [{"tui": "sipb", "model": "m", "endpoint": endpoint}]
+    if ok:
+        assert failover.load_chain(raw)[0].endpoint == endpoint
+    else:
+        with pytest.raises(failover.ChainError, match="https or loopback"):
+            failover.load_chain(raw)
+
+
+def test_secret_fetched_once_per_process(tmp_path, monkeypatch):
+    count = tmp_path / "count"
+    spec = tmp_path / "spec2"
+    spec.write_text(f'#!/bin/sh\necho x >> "{count}"\nprintf "%s\\n" "$FAKE_SECRET"\n')
+    spec.chmod(0o755)
+    monkeypatch.setenv("FAILOVER_SECRETSPEC", str(spec))
+    assert failover.secret_value("MIT_SIPB_API_KEY") == SECRET
+    assert failover.secret_value("MIT_SIPB_API_KEY") == SECRET
+    assert len(count.read_text().splitlines()) == 1
+
+
+def test_run_bounded_kills_the_whole_group(tmp_path):
+    pidfile = tmp_path / "child.pid"
+    with pytest.raises(subprocess.TimeoutExpired):
+        failover.run_bounded(["sh", "-c", f'sleep 60 & echo $! > "{pidfile}"; wait'],
+                             env=failover.minimal_env(), timeout=1)
+    pid = int(pidfile.read_text())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("the grandchild sleep outlived the timeout")
+
+
+def test_sweep_logs(tmp_path):
+    d = failover.ACP_LOG_DIR
+    d.mkdir(parents=True)
+    old, new = d / "old.jsonl", d / "new.jsonl"
+    old.write_text("x")
+    new.write_text("y")
+    os.utime(old, (time.time() - 10 * 86400,) * 2)
+    assert failover.sweep_logs(7) == 1
+    assert not old.exists() and new.exists()
 
 
 def test_ask_many_stops_on_first_failure(monkeypatch):
@@ -284,17 +417,26 @@ def test_ask_many_stops_on_first_failure(monkeypatch):
 
 
 def test_openai_secret_only_in_header(tmp_path, monkeypatch):
-    seen = {}
+    seen: dict[str, Any] = {}
 
-    def urlopen(req, timeout):
-        seen["auth"] = req.get_header("Authorization")
-        seen["url"] = req.full_url
-        seen["body"] = json.loads(req.data)
-        return io.BytesIO(json.dumps({"choices": [{"message": {"content": " hi "}}]}).encode())
-    monkeypatch.setattr(failover.urllib.request, "urlopen", urlopen)
+    class Opener:
+        def open(self, req, timeout):
+            seen["auth"] = req.unredirected_hdrs.get("Authorization")
+            seen["redirectable"] = req.headers.get("Authorization")
+            seen["url"] = req.full_url
+            seen["body"] = json.loads(req.data)
+            return io.BytesIO(json.dumps({"choices": [{"message": {"content": " hi "}}]}).encode())
+
+    def build_opener(*handlers):
+        seen["handlers"] = handlers
+        return Opener()
+    monkeypatch.setattr(failover.urllib.request, "build_opener", build_opener)
     (sipb,) = failover.load_chain([{"tui": "sipb", "model": "qwen3-coder:30b"}])
     assert failover.ask(sipb, "q") == "hi"
     assert seen["auth"] == f"Bearer {SECRET}"
+    assert seen["redirectable"] is None, "the key must not follow a redirect"
+    assert failover._NoRedirect in seen["handlers"]
+    assert failover._NoRedirect().redirect_request(None, None, 302, "", {}, "http://x") is None
     assert seen["url"] == "http://127.0.0.1:8890/api/chat/completions"
     assert seen["body"]["model"] == "qwen3-coder:30b"
     assert SECRET not in json.dumps({k: v for k, v in os.environ.items() if k != "FAKE_SECRET"})

@@ -19,11 +19,16 @@ and a floor. For every entry, in order:
 Every preflight and attempt is one JSON line in the attempt log
 (`~/.local/state/failover/attempts.jsonl` unless the caller names one).
 
-Two ways to execute an entry are built in: `ask()` answers one prompt (acp-run
-in a clean empty directory with `--perm deny`, so a fresh context with no tools;
-or an OpenAI-compatible POST for `openai_compat` entries, key from
-sudo-secretspec held in memory only), and `run_command()` runs any shell-callable
-task with the entry's fields substituted into argv and exported as FAILOVER_*.
+Two ways to execute an entry are built in: `ask()` answers one prompt (acp-run in
+a clean empty directory with `--perm deny`, a fresh context; acp-run makes deny real
+per agent, and a tripwire exits 77 if a tool still runs without asking, which
+`ask()` turns into AttemptFailed; or an OpenAI-compatible POST for `openai_compat`
+entries, key from sudo-secretspec held in memory once per process, never
+redirected), and `run_command()` runs any shell-callable task with the entry's
+fields substituted into argv and exported as FAILOVER_*. Children get a minimal
+env (BASE_ENV_KEYS plus the entry's allow-listed env) and run in their own process
+group, killed whole on timeout. Preflight's canary asks every acp entry to create a
+file and refuses the entry if it can.
 
 CLI:
     failover.py registry                                 # the route table
@@ -35,8 +40,9 @@ A chain FILE is JSON: either a list of entries or {"chain": [...], "allow": [...
 Entry keys: tui (required), model, effort, floor_percent (default 5), pool and
 pool_family (override the registry), endpoint (openai_compat), secret (a
 sudo-secretspec name exported as `secret_env`, default OPENAI_API_KEY for
-`run`), env (literal extra env), extra_args (list, appended to acp-run), timeout,
-label. Importable: skillopt-night uses load_chain/preflight/run_chain/ask.
+`run`; only to the registry endpoint, https or loopback), env (ENV_ALLOW keys
+only), extra_args (appended to acp-run; FORBIDDEN_ARGS refused), timeout, label,
+probe, health_url. Importable: skillopt-night uses load_chain/preflight/run_chain/ask.
 """
 from __future__ import annotations
 
@@ -46,14 +52,17 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -68,6 +77,21 @@ DEFAULT_FLOOR = 5.0
 # (operator 2026-10-12): never cursor, never cline/ClinePass, never Hermes,
 # never Claude Opus or anything stronger (Fable).
 DENY = ("cursor", "cline", "clinepass", "hermes", "opus", "fable")
+# acp-run arguments a chain entry may not pass in extra_args: each would override the
+# policy (acp-run's options are last-wins) or the fresh-context sandbox (adversary
+# review 2026-10-12, H1).
+FORBIDDEN_ARGS = ("--perm", "--mode", "--model", "--set", "--add-dir", "--agent", "-C", "--dir",
+                  "-f", "--file", "-p", "--prompt", "--log", "--resume", "--session-id",
+                  "-i", "--interactive", "--inbox", "--auth", "--verify")
+# The only env keys a chain entry may set for its child (H1); everything else is
+# refused at load time (ACP_RUN_*, PATH, OPENCODE_CONFIG*, ZCODE_ACP_MODE, ...).
+ENV_ALLOW = ("MAX_THINKING_TOKENS", "ZCODE_PROVIDER", "ZCODE_MODEL")
+# What a tool-capable child inherits from us (M2); entry env is added on top.
+BASE_ENV_KEYS = ("HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SHELL")
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+EXIT_TRIPWIRE = 77  # acp-run: a tool ran without a permission request under --perm deny
+ACP_LOG_DIR = Path.home() / ".local" / "state" / "failover" / "acp-logs"
+LOG_RETENTION_DAYS = 7
 
 
 class ChainError(ValueError):
@@ -250,13 +274,35 @@ def load_chain(spec: Any, *, allow: list[str] | None = None,
         if effort and effort not in tui.efforts:
             raise ChainError(f"entry {i}: {name} has no effort '{effort}' "
                              f"(levers: {', '.join(tui.efforts) or 'none'})")
+        extra = [str(x) for x in raw.get("extra_args") or []]
+        for tok in extra:
+            flag = tok.split("=", 1)[0]
+            if flag in FORBIDDEN_ARGS:
+                raise ChainError(f"entry {i}: extra_args may not pass {flag}")
+            hit = denied(tok, deny)
+            if hit:
+                raise ChainError(f"entry {i}: extra_args token {tok!r} names denied route '{hit}'")
+        env = raw.get("env") or {}
+        if not isinstance(env, dict):
+            raise ChainError(f"entry {i}: env must be an object")
+        for k, v in env.items():
+            if k not in ENV_ALLOW:
+                raise ChainError(f"entry {i}: env key {k!r} is not allowed (allowed: {', '.join(ENV_ALLOW)})")
+            hit = denied(str(v), deny)
+            if hit:
+                raise ChainError(f"entry {i}: env {k} names denied route '{hit}'")
+        endpoint = raw.get("endpoint")
+        if endpoint and (raw.get("secret") or tui.secret) and endpoint != tui.endpoint:
+            u = urllib.parse.urlparse(str(endpoint))
+            if not (u.scheme == "https" or (u.scheme == "http" and u.hostname in LOOPBACK)):
+                raise ChainError(f"entry {i}: a secret may only go to https or loopback, not {endpoint}")
         entry = Entry(tui=tui, model=model, effort=effort,
                       floor_percent=float(raw.get("floor_percent", DEFAULT_FLOOR)),
                       pool=raw.get("pool"), pool_family=raw.get("pool_family"),
                       endpoint=raw.get("endpoint"), secret=raw.get("secret"),
                       secret_env=str(raw.get("secret_env") or "OPENAI_API_KEY"),
-                      env={str(k): str(v) for k, v in (raw.get("env") or {}).items()},
-                      extra_args=[str(a) for a in raw.get("extra_args") or []],
+                      env={str(k): str(v) for k, v in env.items()},
+                      extra_args=extra,
                       timeout=int(raw.get("timeout", 600)), label=str(raw.get("label") or ""),
                       probe=raw.get("probe"), health_url=raw.get("health_url"))
         if denied(entry.model_arg, deny):
@@ -390,8 +436,9 @@ def probe_ok(entry: Entry) -> tuple[bool, str]:
 
 
 def preflight(entry: Entry, *, probe: bool = True) -> tuple[bool, str]:
-    """(ok, why). Binary, secret, health URL, pool; then the probe, the only step that
-    calls a model, and only for entries marked probe (skipped when probe=False)."""
+    """(ok, why). Binary, secret, health URL, pool; then the steps that call the model,
+    skipped when probe=False: the probe (entries marked probe) and the canary (every
+    acp entry: it must not be able to create a file under --perm deny)."""
     if entry.tui.kind == "acp":
         if not Path(acp_run()).exists():
             return False, f"acp-run not found at {acp_run()}"
@@ -418,12 +465,16 @@ def preflight(entry: Entry, *, probe: bool = True) -> tuple[bool, str]:
         if head is None or float(head) <= entry.floor_percent:
             return False, f"pool {entry.pool} headroom {head}% <= floor {entry.floor_percent}%"
         why = f"pool {entry.pool} headroom {float(head):.1f}% > floor {entry.floor_percent}%"
+    if not probe:
+        extra = "probe and canary" if entry.probe else "canary"
+        return True, f"{why}; {extra} not run (it calls the model)" if entry.tui.kind == "acp" else why
     if entry.probe:
-        if not probe:
-            return True, f"{why}; probe not run (it calls the model)"
         ok, pwhy = probe_ok(entry)
-        return ok, f"{why}; {pwhy}"
-    return True, why
+        if not ok:
+            return False, f"{why}; {pwhy}"
+        why = f"{why}; {pwhy}"
+    ok, cwhy = canary_ok(entry)
+    return ok, f"{why}; {cwhy}"
 
 
 # ── attempts ─────────────────────────────────────────────────────────────────
@@ -476,19 +527,89 @@ def run_chain(entries: list[Entry], attempt: Callable[[Entry], Any], *, task: st
     return ChainResult(False, None, None, rows)
 
 
+_secrets: dict[str, str] = {}
+_secret_lock = threading.Lock()
+
+
 def secret_value(name: str) -> str:
-    """Read one secret into memory; never written anywhere."""
-    out = subprocess.run([secretspec(), "get", name, "--reason", f"failover: {name} for a chain entry"],
-                         capture_output=True, text=True, timeout=60, check=False)
-    value = out.stdout.strip()
-    if out.returncode != 0 or not value:
-        raise AttemptFailed(f"secret {name} did not resolve")
-    return value
+    """Read one secret into memory once per process (one `sudo-secretspec get` per
+    night, not per prompt: the audit DB locks under floods); never written anywhere."""
+    with _secret_lock:
+        if name in _secrets:
+            return _secrets[name]
+        out = subprocess.run([secretspec(), "get", name, "--reason", f"failover: {name} for a chain entry"],
+                             capture_output=True, text=True, timeout=60, check=False)
+        value = out.stdout.strip()
+        if out.returncode != 0 or not value:
+            raise AttemptFailed(f"secret {name} did not resolve")
+        _secrets[name] = value
+        return value
 
 
-def acp_command(entry: Entry, prompt_file: Path, cwd: Path) -> list[str]:
+def minimal_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment a tool-capable child gets: BASE_ENV_KEYS from ours plus the
+    entry's allow-listed env, never the caller's whole env (API keys, proxies)."""
+    env = {k: os.environ[k] for k in BASE_ENV_KEYS if k in os.environ}
+    env.update(extra or {})
+    return env
+
+
+def run_bounded(cmd: list[str], *, env: dict[str, str], timeout: float, input_text: str | None = None,
+                capture: bool = True, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+    """Run cmd in its own session; on timeout kill the whole process group, so an
+    agent child (claude-agent-acp, opencode, ...) never outlives its acp-run."""
+    proc = subprocess.Popen(cmd, env=env, cwd=cwd, text=True, start_new_session=True,
+                            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+                            stdout=subprocess.PIPE if capture else None,
+                            stderr=subprocess.PIPE if capture else None)
+    try:
+        out, err = proc.communicate(input_text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_group(proc)
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def kill_group(proc: subprocess.Popen[str]) -> None:
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        try:
+            proc.wait(timeout=10)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def acp_log_path(agent: str) -> Path:
+    """Each answer's acp-run log goes to a private dir that sweep_logs() trims."""
+    ACP_LOG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return ACP_LOG_DIR / f"{datetime.now():%Y%m%d-%H%M%S}-{agent}-{uuid.uuid4().hex[:8]}.jsonl"
+
+
+def sweep_logs(max_age_days: float = LOG_RETENTION_DAYS) -> int:
+    """Delete failover's acp-run logs (prompts and answers, so transcript excerpts)
+    older than max_age_days; return how many files went."""
+    if not ACP_LOG_DIR.is_dir():
+        return 0
+    cutoff, n = time.time() - max_age_days * 86400, 0
+    for f in ACP_LOG_DIR.iterdir():
+        try:
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+                n += 1
+        except OSError:
+            continue
+    return n
+
+
+def acp_command(entry: Entry, prompt_file: Path, cwd: Path, log: Path | None = None) -> list[str]:
     cmd = [acp_run(), entry.tui.acp_agent or entry.tui.name, "-C", str(cwd), "-f", str(prompt_file),
            "--perm", "deny", "--timeout", str(entry.timeout)]
+    if log is not None:
+        cmd += ["--log", str(log)]
     if entry.tui.takes_model and entry.model_arg:
         cmd += ["--model", entry.model_arg]
     lever = entry.tui.effort or ""
@@ -497,24 +618,34 @@ def acp_command(entry: Entry, prompt_file: Path, cwd: Path) -> list[str]:
     return cmd + entry.extra_args
 
 
-def ask(entry: Entry, prompt: str) -> str:
-    """Answer one prompt on this entry in a fresh context; raise AttemptFailed."""
-    if entry.tui.kind == "openai_compat":
-        return _ask_openai(entry, prompt)
+def _acp_once(entry: Entry, prompt: str) -> tuple[subprocess.CompletedProcess[str], bool]:
+    """One acp-run turn in a fresh empty dir; (process, whether a file named canary appeared)."""
     with tempfile.TemporaryDirectory(prefix="failover-") as tmp:
         work = Path(tmp) / "work"
         work.mkdir()
         pf = Path(tmp) / "prompt.md"
         pf.write_text(prompt)
         pf.chmod(0o600)
-        env = {**os.environ, **entry.env}
+        cmd = acp_command(entry, pf, work, acp_log_path(entry.tui.name))
         try:
-            proc = subprocess.run(acp_command(entry, pf, work), capture_output=True, text=True,
-                                  stdin=subprocess.DEVNULL, env=env, check=False,
-                                  timeout=entry.timeout + 120)
+            proc = run_bounded(cmd, env=minimal_env(entry.env), timeout=entry.timeout + 120)
         except subprocess.TimeoutExpired as e:
             raise AttemptFailed(f"{entry.label}: acp-run hung past {entry.timeout + 120}s") from e
+        return proc, (work / "canary").exists()
+
+
+def ask(entry: Entry, prompt: str) -> str:
+    """Answer one prompt on this entry in a fresh context; raise AttemptFailed.
+
+    acp-run runs it in an empty temp dir under --perm deny, which acp-run enforces
+    per agent and backs with a tripwire (exit 77, EXIT_TRIPWIRE)."""
+    if entry.tui.kind == "openai_compat":
+        return _ask_openai(entry, prompt)
+    proc, _ = _acp_once(entry, prompt)
     answer = (proc.stdout or "").strip()
+    if proc.returncode == EXIT_TRIPWIRE:
+        raise AttemptFailed(f"{entry.label}: TRIPWIRE: a tool ran without a permission request "
+                            "under --perm deny (acp-run exit 77)")
     if proc.returncode != 0 or not answer:
         tail = (proc.stderr or "").strip().splitlines()[-1:] or [""]
         raise AttemptFailed(f"{entry.label}: acp-run rc={proc.returncode}"
@@ -522,15 +653,53 @@ def ask(entry: Entry, prompt: str) -> str:
     return answer
 
 
+CANARY_PROMPT = ("Use your tools to create an empty file named canary in the current working "
+                 "directory, then reply with exactly: DONE")
+
+
+def canary_ok(entry: Entry) -> tuple[bool, str]:
+    """Ask the entry to `touch canary`; it passes only if no file appears and no tool ran
+    without permission (cached per process). This calls the model once."""
+    if entry.tui.kind != "acp":
+        return True, "no tools on this route"
+    key = f"canary:{entry.label}"
+    if key not in _cache:
+        try:
+            proc, created = _acp_once(entry, CANARY_PROMPT)
+        except AttemptFailed as e:
+            _cache[key] = (False, f"canary inconclusive: {e}")
+            return _cache[key]
+        rc = proc.returncode
+        if rc == EXIT_TRIPWIRE:
+            _cache[key] = (False, "canary: a tool ran without permission (tripwire)")
+        elif created:
+            _cache[key] = (False, "canary: the file was created")
+        elif rc in (0, 5):  # 5: every permission request was denied
+            _cache[key] = (True, f"canary held (rc={rc}, no file)")
+        else:
+            tail = (proc.stderr or "").strip().splitlines()[-1:] or [""]
+            _cache[key] = (False, f"canary inconclusive (rc={rc}) {tail[0][:120]}")
+    return _cache[key]
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """POST with a Bearer key: never follow a redirect to another host or path."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _ask_openai(entry: Entry, prompt: str) -> str:
     key = secret_value(entry.secret) if entry.secret else ""
     body = json.dumps({"model": entry.model, "messages": [{"role": "user", "content": prompt}]})
     req = urllib.request.Request(f"{(entry.endpoint or '').rstrip('/')}/chat/completions",
                                  data=body.encode(), method="POST",
-                                 headers={"Content-Type": "application/json",
-                                          **({"Authorization": f"Bearer {key}"} if key else {})})
+                                 headers={"Content-Type": "application/json"})
+    if key:
+        req.add_unredirected_header("Authorization", f"Bearer {key}")
+    opener = urllib.request.build_opener(_NoRedirect)
     try:
-        with urllib.request.urlopen(req, timeout=entry.timeout) as resp:
+        with opener.open(req, timeout=entry.timeout) as resp:
             data = json.loads(resp.read() or b"null")
     except (urllib.error.URLError, OSError, ValueError) as e:
         raise AttemptFailed(f"{entry.label}: {type(e).__name__}: {str(e)[:200]}") from e
@@ -557,11 +726,12 @@ def ask_many(entry: Entry, prompts: dict[str, str], *, jobs: int = 2) -> dict[st
 
 
 def run_command(entry: Entry, argv: list[str], *,
-                timeout: int | None = None) -> subprocess.CompletedProcess[bytes]:
-    """Run argv with {tui} {agent} {model} {effort} {endpoint} substituted and FAILOVER_* exported."""
+                timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+    """Run argv with {tui} {agent} {model} {effort} {endpoint} substituted and FAILOVER_*
+    exported, in a minimal env plus the entry's secret (child only)."""
     fields = {"tui": entry.tui.name, "agent": entry.tui.acp_agent or "", "model": entry.model_arg,
               "effort": entry.effort, "endpoint": entry.endpoint or ""}
-    env = {**os.environ, **entry.env, **{f"FAILOVER_{k.upper()}": v for k, v in fields.items()}}
+    env = minimal_env({**entry.env, **{f"FAILOVER_{k.upper()}": v for k, v in fields.items()}})
     if entry.secret:
         env[entry.secret_env] = secret_value(entry.secret)
     cmd = []
@@ -569,7 +739,7 @@ def run_command(entry: Entry, argv: list[str], *,
         for k, v in fields.items():
             a = a.replace("{" + k + "}", v)
         cmd.append(a)
-    return subprocess.run(cmd, env=env, check=False, timeout=timeout)
+    return run_bounded(cmd, env=env, timeout=timeout or 10**9, capture=False)
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -610,6 +780,7 @@ def main(argv: list[str] | None = None) -> int:
             sp.add_argument("--timeout", type=int)
             sp.add_argument("command", nargs=argparse.REMAINDER)
     a = p.parse_args(argv)
+    os.umask(0o077)  # logs and answers hold transcript excerpts (L2)
     if a.cmd == "registry":
         print_table([{"tui": t.name, "kind": t.kind, "vendor": t.vendor, "agent": t.acp_agent,
                       "pool": t.pool or ",".join(sorted({x[1] for x in t.pool_by_model if x[1]})) or None,
