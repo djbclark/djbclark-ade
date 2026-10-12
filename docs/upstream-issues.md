@@ -916,3 +916,23 @@ adapters the PR would generalise. Operator approved filing; re-searched first
 (adding "entry_points", "external harvester", "third-party source", "register
 source"; PR #153's "seam" is one more if-branch, not a registry). Filed with an
 offer to send the PR: https://github.com/microsoft/SkillOpt/issues/314.
+
+## Fastino GLiDE: response `model` is `glide_v2`, docs say `glide` (not filed)
+
+**Seen:** 2026-10-11/12 on `POST https://api.fastino.ai/v1/systemone` with `"model": "fastino/glide"`.
+
+1. The response `model` field is `glide_v2` on every call (noul, choice and score). The contract page
+   (https://docs.fastino.ai/inference/systemone, "Expect model: \"glide\" in the response") and
+   the agent skill (https://docs.fastino.ai/.well-known/agent-skills/fastino-glide/SKILL.md, "model
+   echoes back with the `fastino/` prefix stripped") both say `glide`. Anything that asserts the
+   documented echo, as the TypeSafe-migration prompt tells you to, fails.
+2. An empty `state` (`""`) with a valid question returned 200 with a probability, though the docs
+   describe `state` as required and non-empty for the migration.
+
+**Searched first (2026-10-12):** web search "Fastino GLiDE systemone response model glide_v2 docs
+mismatch issue" and Firecrawl's developer index (GitHub issues/PRs) for "fastino GLiDE systemone
+state required empty github issue". Found no issue or thread about either point. Nearest results:
+the docs pages themselves, a press release, benchlm.ai and marktechpost write-ups, and a LiteLLM PR
+(berriai/litellm#45846) adding a `systemone` call type, which does not mention the model field.
+Fastino has no public docs repo that turned up, so the channel is unknown (support or Discord).
+**Not filed:** operator decides.
