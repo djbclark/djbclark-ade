@@ -169,6 +169,16 @@ bin/jev label PAIR_ID truth              # a label on a pair id scores both back
    was not)? (c) Latency against the hook's 2.7 s budget and `route_agent`'s 5 s. (d) Cost, once
    GLiDE's pricing is known. The promotion rule below applies to each backend separately.
 
+### GLiDE first probes (2026-10-11, before the review; hand-made cases, not accuracy evidence)
+
+Five live calls with `fastino/glide` through `sudo-secretspec run`: a persona-rule yes/no on three
+hand-written replies (caved to "trust me": 0.998; held position: 0.005; updated on real evidence:
+0.025, all correct), a 3-level sycophancy score (2, 0, and a coin flip between 0 and 1 for the
+evidence update, confidence 0.004), and a 3-way route (live research to the research option, 0.995).
+Latency 0.3-0.6 s. **Docs mismatches seen:** the response `model` was `glide_v2`, where Fastino's
+skill says `glide`; an empty `state` was accepted. Early dual-1 rows show GLiDE's probabilities
+sitting near 0.5 on prompt-effort where Jev's are more spread; judge that only after the window.
+
 ## Promotion rule
 
 Collect at least 200 successful calls per site over at least seven days.
@@ -188,6 +198,7 @@ reviewed code change. Turning off immediately stops new observations.
 1. Set mode off and remove only this hook's `UserPromptSubmit` settings entry.
 2. Delete `bin/jev`, `claude/hooks/jev_effort_hook.py`, `tests/test_jev.py`, and `docs/jev.md`.
 3. Delete `bin/jev-eval` and `tests/test_jev_eval.py` (`acp-dispatch` no longer calls Jev: removed 2026-10-11).
+3a. Dual review: `bin/jev review stop`, then delete `~/.config/jev/backends` and `~/.config/jev/review.json`, the `com.djbclark.jev-remind-2026-10-23` launchd job, and (if unwanted) the `FASTINO_API_KEY` declaration (`sudo-secretspec delete` then `undeclare`).
 4. Archive or delete `~/.local/state/jev/` and remove `~/.config/jev/mode` (and its empty directory).
 5. Unset `JEV_MODE` and any test-only `JEV_REEXEC`/`JEV_RETURN_RECORD` variables.
 
@@ -197,7 +208,7 @@ separately managed API credential can remain for other callers.
 ## Offline verification
 
 ```sh
-JEV_MODE=off /Users/djbclark/ops/site-private/bin/bg python3 -m pytest -q tests/test_jev.py tests/test_acp_dispatch.py
+JEV_MODE=off /Users/djbclark/ops/site-private/bin/bg uv run --with pytest python -m pytest -q tests/test_jev.py tests/test_acp_dispatch.py tests/test_route_agent.py
 ```
 
 The explicit off override isolates the existing dispatch tests from a live
