@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -122,8 +123,58 @@ except ImportError:  # pragma: no cover - exercised only outside the uv tool ven
         return _fallback_redact(text)
 
 
+# Extra redaction on top of upstream's prefixed-token and name=value patterns
+# (adversary review 2026-10-12, M1): PEM blocks, passwords in prose, and bare
+# high-entropy tokens such as a `sudo-secretspec get` output line.
+_PEM = re.compile(r"-----BEGIN [A-Z0-9 ]+-----[\s\S]*?(?:-----END [A-Z0-9 ]+-----|\Z)")
+_PROSE_SECRET = re.compile(r"(?i)\b(password|passphrase|passwd|api key|secret key)\b(\s*(?:is|was|:|=)\s*)\S+")
+_BARE_TOKEN = re.compile(r"(?<![A-Za-z0-9+/=_.-])[A-Za-z0-9+/=_-]{24,}(?![A-Za-z0-9+/=_.-])")
+
+
+def _entropy(s: str) -> float:
+    counts = {c: s.count(c) for c in set(s)}
+    return -sum(n / len(s) * math.log2(n / len(s)) for n in counts.values())
+
+
+def _bare(m: re.Match[str]) -> str:
+    tok = m.group(0)
+    if "/" in tok.strip("/") and tok.count("/") > 2:  # a path, not a key
+        return tok
+    lower = sum(c.islower() for c in tok)
+    upper = sum(c.isupper() for c in tok)
+    digits = sum(c.isdigit() for c in tok)
+    mixed = lower >= 2 and upper >= 2 and digits >= 2
+    need = 4.2 if len(tok) < 40 else 4.0
+    return "[REDACTED]" if mixed and _entropy(tok) >= need else tok
+
+
+def extra_redact(text: str) -> str:
+    text = _PEM.sub("[REDACTED PEM]", text)
+    text = _PROSE_SECRET.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", text)
+    return _BARE_TOKEN.sub(_bare, text)
+
+
 def clean(text: str) -> str:
-    return str(redact_secrets(text or "")).replace("\x00", "").strip()[:MAX_CHARS]
+    return extra_redact(str(redact_secrets(text or ""))).replace("\x00", "").strip()[:MAX_CHARS]
+
+
+# The first user prompt of sessions the nightly cycle itself creates when it
+# answers prompts through agents (adversary review 2026-10-12, H2): upstream's
+# attempt, miner and judge templates, and failover's probe and canary. The
+# runner also exports the first three as SKILLOPT_SLEEP_AGENT_MARKERS for
+# upstream's own harvesters.
+ENGINE_MARKERS = (
+    "Complete the following task for the user",
+    "You are mining a user's past AI-assistant sessions",
+    "Score how well the response satisfies the rubric",
+    "Reply with exactly: OK",
+    "create an empty file named canary",
+)
+
+
+def engine_session(d: dict[str, Any]) -> bool:
+    prompts = d.get("user_prompts") or []
+    return bool(prompts) and any(m in str(prompts[0]) for m in ENGINE_MARKERS)
 
 
 def iso(epoch: float | None) -> str:
@@ -143,9 +194,13 @@ def to_epoch(value: str | None) -> float | None:
     return dt.timestamp()
 
 
+EXCLUDE_PROJECTS: list[str] = []  # night.json exclude_projects, set by main()
+
+
 def excluded(project: str) -> bool:
     p = (project or "").rstrip("/") + "/"
-    return any(p.startswith(root) for root in EXCLUDED_ROOTS)
+    roots = [*EXCLUDED_ROOTS, *(x.rstrip("/") + "/" for x in EXCLUDE_PROJECTS)]
+    return any(p.startswith(root) for root in roots)
 
 
 class Builder:
@@ -178,7 +233,7 @@ class Builder:
     def finish(self, start: float | None, end: float | None) -> dict[str, Any] | None:
         self.d["started_at"], self.d["ended_at"] = iso(start), iso(end)
         self.d["feedback_signals"] = list(dict.fromkeys(self.d["feedback_signals"]))
-        if not self.d["user_prompts"]:
+        if not self.d["user_prompts"] or engine_session(self.d):
             return None
         if have_upstream and SessionDigest is not None:
             known = set(SessionDigest.__dataclass_fields__)
@@ -447,27 +502,79 @@ def store_present(name: str) -> bool:
     return False
 
 
-def harvest(name: str, since: str | None = None, limit: int = 0) -> list[dict[str, Any]]:
-    since_epoch = to_epoch(since)
+NATIVE = ("claude", "codex", "cursor", "opencode", "copilot_cli")
+TEXT_FIELDS = ("user_prompts", "assistant_finals")
+
+
+def finalize(d: dict[str, Any]) -> dict[str, Any] | None:
+    """The filters every digest passes, native or adapted: project exclusions, the
+    engine's own sessions, and redaction of every kept string."""
+    if excluded(str(d.get("project") or "")) or engine_session(d):
+        return None
+    for key in TEXT_FIELDS:
+        d[key] = [t for t in (clean(str(x)) for x in d.get(key) or []) if t]
+    if not d.get("user_prompts"):
+        return None
+    d["assistant_finals"] = d["assistant_finals"][-MAX_FINALS:]
+    return d
+
+
+def harvest_native(source: str, since: str | None, limit: int,
+                   codex_home: str | None = None) -> list[dict[str, Any]]:
+    """Upstream's own harvester for a source it supports, then finalize(): so native
+    sources get the same path exclusions, engine filter and redaction as the adapters."""
+    if not have_upstream:
+        raise SystemExit("skillopt_sources: native sources need the skillopt tool's Python")
+    from skillopt_sleep.config import load_config  # pyright: ignore[reportMissingImports]
+    from skillopt_sleep.harvest_sources import harvest_for_config  # pyright: ignore[reportMissingImports]
+    overrides: dict[str, Any] = {"transcript_source": source, "projects": "all",
+                                 "invoked_project": str(HOME)}
+    if codex_home:
+        overrides["codex_home"] = codex_home
+    cfg = load_config(**overrides)
+    digests = harvest_for_config(cfg, since_iso=since, limit=limit * 2 if limit else 0)
     out = []
-    with tempfile.TemporaryDirectory(prefix=f"skillopt-src-{name}-") as tmp:
-        for d in ADAPTERS[name](since_epoch, Path(tmp)):
+    for dg in digests:
+        d = finalize(dg.to_dict() if hasattr(dg, "to_dict") else dict(vars(dg)))
+        if d:
             out.append(d)
             if limit and len(out) >= limit:
                 break
-    out.sort(key=lambda d: d["ended_at"], reverse=True)
+    return out
+
+
+def harvest(name: str, since: str | None = None, limit: int = 0,
+            codex_home: str | None = None) -> list[dict[str, Any]]:
+    if name in NATIVE:
+        out = harvest_native(name, since, limit, codex_home)
+    else:
+        since_epoch = to_epoch(since)
+        out = []
+        with tempfile.TemporaryDirectory(prefix=f"skillopt-src-{name}-") as tmp:
+            for raw in ADAPTERS[name](since_epoch, Path(tmp)):
+                d = finalize(raw)
+                if d:
+                    out.append(d)
+                    if limit and len(out) >= limit:
+                        break
+    out.sort(key=lambda d: str(d.get("ended_at") or ""), reverse=True)
     return out
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="skillopt_sources", description=(__doc__ or "").split("\n\n")[0])
-    p.add_argument("source", choices=sorted(ADAPTERS))
+    p.add_argument("source", choices=sorted([*ADAPTERS, *NATIVE]))
+    p.add_argument("--exclude-project", action="append", default=[],
+                   help="skip sessions whose project is under this path (repeatable)")
+    p.add_argument("--codex-home", help="codex source: the --codex-home shim")
     p.add_argument("--since", help="ISO time; sessions that ended earlier are skipped")
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--out", type=Path, help="write the digest list here (default stdout)")
     p.add_argument("--stats", action="store_true", help="print counts only")
     a = p.parse_args(argv)
-    digests = harvest(a.source, a.since, a.limit)
+    os.umask(0o077)  # the digests hold transcript excerpts
+    EXCLUDE_PROJECTS[:] = [os.path.expanduser(x) for x in a.exclude_project]
+    digests = harvest(a.source, a.since, a.limit, a.codex_home)
     if a.stats:
         print(json.dumps({"source": a.source, "upstream_helpers": have_upstream, "digests": len(digests),
                           "user_prompts": sum(len(d["user_prompts"]) for d in digests),

@@ -5,6 +5,7 @@ SQLite for zcode, per-conversation SQLite with protobuf steps for agy, crush.db 
 projects.json for crush) and checks what is kept and what is dropped.
 """
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -55,6 +56,16 @@ def _meta(epoch: int) -> bytes:
 @pytest.fixture
 def tmp(tmp_path):
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _restore_globals():
+    """main() sets the process umask and EXCLUDE_PROJECTS; keep tests independent."""
+    old = os.umask(0o022)
+    os.umask(old)
+    yield
+    os.umask(old)
+    src.EXCLUDE_PROJECTS[:] = []
 
 
 def test_redaction_and_cap():
@@ -216,3 +227,60 @@ def test_cli_stats_and_out(tmp, monkeypatch, capsys):
     out = tmp / "digests.json"
     assert src.main(["zcode", "--since", "2026-01-01T00:00:00Z", "--out", str(out)]) == 0
     assert [d["session_id"] for d in json.loads(out.read_text())] == ["s1"]
+
+
+# ── adversary-review hardening (2026-10-12) ─────────────────────────────────
+
+@pytest.mark.parametrize(("text", "gone"), [
+    ("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\n-----END OPENSSH PRIVATE KEY-----", "b3BlbnNzaC1rZXk"),
+    ("the password is hunter22 ok", "hunter22"),
+    ("value aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z here", "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3z"),
+])
+def test_extra_redaction(text, gone):
+    assert gone not in src.clean(text)
+
+
+@pytest.mark.parametrize("keep", ["commit 3671c56a1b2c3d4e5f60718293a4b5c6d7e8f901",
+                                  "class ReadWriteLockManagerFactory2",
+                                  "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                                  "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk"])
+def test_redaction_keeps_ordinary_identifiers(keep):
+    assert src.clean(keep) == keep
+
+
+@pytest.mark.parametrize("first", [
+    "Complete the following task for the user. Follow the skill and memory rules.",
+    "Your working directory for this task is /x\n\nYou are mining a user's past AI-assistant sessions",
+    "Score how well the response satisfies the rubric, 0..1.",
+    "Reply with exactly: OK",
+    "Use your tools to create an empty file named canary in the current working directory",
+])
+def test_engine_sessions_dropped(first):
+    d = {"project": "/Users/x/src/p", "user_prompts": [first], "assistant_finals": ["x"]}
+    assert src.engine_session(d) and src.finalize(dict(d)) is None
+
+
+def test_finalize_redacts_excludes_and_caps(monkeypatch):
+    monkeypatch.setattr(src, "EXCLUDE_PROJECTS", ["/Users/x/src/secret"])
+    keep = {"project": "/Users/x/src/p", "user_prompts": [f"use {SECRET}", ""],
+            "assistant_finals": [str(i) for i in range(9)]}
+    d = src.finalize(keep)
+    assert d is not None and SECRET not in json.dumps(d)
+    assert d["user_prompts"] == ["use [REDACTED]"] or len(d["user_prompts"]) == 1
+    assert d["assistant_finals"] == [str(i) for i in range(4, 9)]
+    assert src.finalize({"project": "/Users/x/src/secret/sub", "user_prompts": ["hi"]}) is None
+    assert src.finalize({"project": "/var/folders/ab/T/failover-1/work", "user_prompts": ["hi"]}) is None
+
+
+def test_native_mode_needs_the_tool_python(monkeypatch):
+    monkeypatch.setattr(src, "have_upstream", False)
+    with pytest.raises(SystemExit, match="skillopt tool's Python"):
+        src.harvest_native("claude", None, 10)
+
+
+def test_cli_exclude_project(tmp, monkeypatch, capsys):
+    db = tmp / "db.sqlite"
+    _zcode_db(db)
+    monkeypatch.setitem(src.ADAPTERS, "zcode", lambda since, work: src.harvest_zcode(since, work, db=db))
+    assert src.main(["zcode", "--stats", "--exclude-project", "/Users/x/src/proj"]) == 0
+    assert json.loads(capsys.readouterr().out)["digests"] == 1  # only s4 (/Users/x/src/old) is left
