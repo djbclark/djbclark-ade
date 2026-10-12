@@ -1,6 +1,6 @@
 # Prompt: apply the djbclark / frdminc / Graft development toolchain to a repo
 
-Version 5.7 (2026-10-12). Supersedes 5.6, 5.5, 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
+Version 5.8 (2026-10-12). Supersedes 5.7, 5.6, 5.5, 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
 (2026-10-01, which superseded
 `CLAUDE_APPLY_DJBCLARK_TOOLING_Version4.md`). Lived at
 `site-djbclark/research/apply-dev-toolchain/CLAUDE_APPLY_DJBCLARK_TOOLING.md`
@@ -107,6 +107,10 @@ They are in the §1.2 install line, the §1.3 utilities table, and the skill's
 `references/replacements.md`; the "Not installed, and why" table there records
 what is still deliberately out (`jaq`, `mdcat`, `ov`, `tailspin`, `aria2c`,
 `f2`, `angle-grinder`, `fclones`, `atuin`, `lazygit`, `lnav`, `nomino`).
+
+What changed in 5.8 (2026-10-12): §0.6 lists the Fastino `fastino-glide` skill beside `typesafe-ai`
+(a second hosted decision model, installed project-level with `npx skills add`; key
+`FASTINO_API_KEY`).
 
 What changed in 5.7 (2026-10-12): §0.6 lists the new `sipb-llm-bench` skill (benchmark a
 model on SIPB LLMs or any OpenAI-compatible server as a coding-agent backend).
@@ -404,6 +408,20 @@ call, the TypeSafe API; use it when a feature needs semantic judgment (routing,
 ranking, extraction, verification), not for rules or exact lookups that plain
 code handles. Other agents: `npx skills add typesafe-ai/skills --skill
 typesafe-ai` (use one install method, not both).
+
+**`fastino-glide`** (Fastino's GLiDE, a second hosted decision model on the same
+`/v1/systemone` request shape: yes/no, pick-one and score questions with a
+probability per option). Install it only for repos that call, or plan to call,
+the Fastino API, and for the same kinds of judgment as `typesafe-ai`. One command,
+project-level, no prompts: `npx skills add https://docs.fastino.ai --skill
+fastino-glide -a claude-code -y` (`-a codex` or `-a cursor` for those agents; it
+lands in `.claude/skills/fastino-glide/` plus a `skills-lock.json` that pins its
+hash; read the SKILL.md before trusting it). The key is `FASTINO_API_KEY`: on
+djbclark's machine it lives in sudo-secretspec (`sudo-secretspec run --reason ... --
+cmd`), never in source. Verified live 2026-10-11/12: the response `model` is
+`glide_v2`, where Fastino's docs say `glide` (docs/upstream-issues.md). Remove with
+`npx skills remove fastino-glide` or by deleting the directory and its lockfile
+entry.
 
 **Graft's own wiring** (hooks, statusline and MCP server) is installed by
 `graft init` in §6, not here. The web-access MCP servers (Exa, Parallel

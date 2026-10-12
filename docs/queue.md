@@ -28,15 +28,6 @@ cline and acp-dispatch job reports, each with the replay-session filter; (3)
 add them to `bin/skillopt-night`'s source loop. Drop the runner's codex shim
 when upstream PR 282 merges.
 
-## Last thing in the session: add fastino-glide to the toolchain prompt
-
-**Queued 2026-10-11 (operator). Not started; do it as the final step of the
-session that installed the skill.** Add the Fastino GLiDE skill (installed
-project-level at `.claude/skills/fastino-glide/` via `npx skills add
-https://docs.fastino.ai --skill fastino-glide -a claude-code -y`; key
-`FASTINO_API_KEY` in sudo-secretspec) to `docs/apply-toolchain-prompt.md`.
-Drop this item when the entry ships.
-
 ## Research checker: namespace-aware citations across runs
 
 **Queued 2026-10-10 (operator, hiwymi `/loose`). Not started.** Research runs
