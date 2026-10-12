@@ -222,3 +222,22 @@ earlier the same day and silently reverted it; the change was only noticed
 because a later read showed the old text. Job and script retired, mission
 restored. The general lesson: a watchdog that auto-corrects instead of
 reporting will fight intentional change and lose work quietly.
+
+## SiYuan (added 2026-10-12)
+
+SiYuan 3.8.6 serves MCP from its own kernel: `http://127.0.0.1:6806/mcp`
+(streamable HTTP, JSON replies, 30 tools such as `notebook`, `document`,
+`block`, `search`, `sql`, `tag`, `ref`, `file`, `http_request`). There is no
+separate process, so nothing to launch and nothing for `roles/shared_mcp` to
+share: it is already one server inside the app, and it exists only while
+SiYuan runs (a closed app shows as failed in `claude mcp list`). `accessAuthCode`
+is empty and `networkServe` is false, so it is loopback-only and open to any
+local process.
+
+Registered in Claude Code (`claude mcp add --scope user --transport http siyuan
+http://127.0.0.1:6806/mcp`; backup `~/.claude.json.bak-2026-10-12-siyuan`) and
+in Hermes (`mcp_servers.siyuan` in `~/.hermes/config.yaml`). Hermes excludes
+`file`, `http_request`, `web_fetch`, `web_search` and `unzip` (`tools.exclude`),
+since it is reachable from Discord and has its own web tools. Not a proxy
+candidate: a Caddy bearer gate (as on 18797) only matters if it were ever
+exposed through the funnel, which its `file` and `http_request` tools rule out.
