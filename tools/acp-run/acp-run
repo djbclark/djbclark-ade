@@ -224,7 +224,14 @@ AGENTS = {
     # not as a config option, so acp-run refuses (operator: the default
     # model is enough). Verified 2026-10-11: prompt 'Reply with exactly: OK'
     # returned OK, stop=end_turn, 74 s.
-    "crush": (["env", "CRUSH_DISABLE_METRICS=1", "crush-acp", "acp", "--yolo"], "local"),
+    # CRUSH_GLOBAL_DATA gives acp-run its own Crush data dir: the shared one
+    # (~/.local/share/crush/crush.json) holds the model picked in the interactive TUI
+    # (and a Charm Hyper login), which overrides crushrc; on 2026-10-12 that sent
+    # every acp-run crush turn to Hyper ("out of credits") instead of SIPB LLMs.
+    # providers.json (the catalog cache) is copied there once.
+    "crush": (["env", "CRUSH_DISABLE_METRICS=1",
+               "CRUSH_GLOBAL_DATA=" + os.path.expanduser("~/.local/share/crush-acp"),
+               "crush-acp", "acp", "--yolo"], "local"),
 }
 # ACP_RUN_AGY_SERVER swaps agy's server command for one run without an edit: a
 # newer agy_acp_server.par unpacked beside 1.3.0, or a wrapper such as
