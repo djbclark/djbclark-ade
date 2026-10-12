@@ -172,6 +172,15 @@ adapter sources on 2026-10-12 (72-hour window) pinned 14 zcode, 40 agy and 7
 crush sessions and produced 14, 40 and 6 round-1 prompts. Put free or under-used pools
 first and Claude late.
 
+**Measured** (supervised runs, 2026-10-12, claude source). Run B: 40 sessions
+pinned, 20 tasks mined and replayed, 56 handoff rounds, 141 prompts answered by
+claude sonnet (low effort), 3040 s wall, 458,299 tokens by the engine's own count
+(above `max_tokens_per_night`, which upstream does not enforce: #313); gate
+rejected both candidates, nothing staged. Run A (10 sessions): 3 tasks, 6 rounds,
+17 prompts on SIPB deepseek-r1:32b, 2078 s including three earlier entries that
+failed on the old 8-round cap. Plan for roughly one to two hours and about half a
+million tokens per busy source per night; the 06:30 deadline cuts the rest.
+
 **Enable or change.** Edit `~/.skillopt-sleep/night.json` (and the example copy),
 run `~/src/djbclark-ade/bin/skillopt-night chain-check` (add `--probe` to run
 crush's one-prompt probe), then set `"enabled": true`. Optionally run one small source by hand first:
