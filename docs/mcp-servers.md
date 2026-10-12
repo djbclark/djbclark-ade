@@ -241,3 +241,11 @@ in Hermes (`mcp_servers.siyuan` in `~/.hermes/config.yaml`). Hermes excludes
 since it is reachable from Discord and has its own web tools. Not a proxy
 candidate: a Caddy bearer gate (as on 18797) only matters if it were ever
 exposed through the funnel, which its `file` and `http_request` tools rule out.
+
+**Checking Hermes (learned 2026-10-12).** The running gateway hot-reloads
+`mcp_servers`: `rg siyuan ~/.hermes/logs/gateway.log` shows
+`MCP servers reconciled with config: added=['siyuan']` within minutes of the edit, and
+`registered 25 tool(s)` (30 minus the 5 excluded). Do not infer this from the gateway's
+process age, and do not ask `ask_hermes`: it runs read-only, cannot run `/reload-mcp`,
+and answers from a session that started earlier. A `launchctl kickstart -k
+gui/$(id -u)/com.stayturgid.hermes-gateway` restart was unnecessary here.

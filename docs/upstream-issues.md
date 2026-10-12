@@ -936,3 +936,27 @@ the docs pages themselves, a press release, benchlm.ai and marktechpost write-up
 (berriai/litellm#45846) adding a `systemone` call type, which does not mention the model field.
 Fastino has no public docs repo that turned up, so the channel is unknown (support or Discord).
 **Not filed:** operator decides.
+
+## 3. zhiluop/siyuan-skills — `import_article.py` breaks on SiYuan 3.8 and without an `api_token`
+
+**Repo:** https://github.com/zhiluop/siyuan-skills (commit 2984f56, 2026-04-28).
+**Seen against:** SiYuan 3.8.6 (kernel), 2026-10-12, a live create-and-delete test.
+
+**1. Crash on `ensure_notebook_exists`.** `/api/notebook/lsNotebooks` returns
+`{"notebooks": [...]}` in 3.8.6. `_request` hands back that dict and the loop
+`for nb in notebooks: nb.get('name')` iterates its keys: `AttributeError: 'str'
+object has no attribute 'get'` (`import_article.py` line 103). Fix: unwrap
+`notebooks.get('notebooks')` when it is a dict (kept as a local patch here).
+
+**2. `KeyError: 'api_token'`.** `_request` and `verify_document` index
+`self.config['api_token']` (lines 57 and 149) although `insert_image.py` uses
+`config.get("api_token", "")`. A kernel with no access auth code needs no token, so
+the config key should be optional. Workaround: `"api_token": ""` in `siyuan.json`.
+
+**Minor:** `verify_document` right after `create_document` returns 0 because the SQL
+index lags by seconds; a short retry would make it meaningful.
+
+**Searched first (2026-10-12):** `gh issue list -R zhiluop/siyuan-skills --state all
+--search` for `lsNotebooks`, `api_token`, `notebooks`, `KeyError`, `3.8`, and the PR
+list. Found one unrelated closed question ("docker的siyuan如何配置？") and one open PR
+(#2, English README). Nothing on either defect. **Not filed:** operator decides.

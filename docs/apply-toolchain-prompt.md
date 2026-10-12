@@ -744,7 +744,9 @@ runs and the kernel has no access auth code, so keep `networkServe` off. Skills:
 `siyuan`, `siyuan-article-import`, `siyuan-excalidraw`, `siyuan-markdown`
 (vendored from `zhiluop/siyuan-skills`, MIT, in `djbclark-ade/skills/`; link them
 with `bin/skill-everywhere`). Their scripts read `~/.claude/siyuan.json`
-(`api_url`, `local_path`; no token unless the kernel sets an access auth code).
+(`api_url`, `local_path` and `"api_token": ""`: the key must exist but may be empty
+unless the kernel sets an access auth code; `import_article.py` needs a patch for
+SiYuan 3.8's `lsNotebooks` shape, see `skills/_shared/UPSTREAM.md`).
 
 **GitHub-side services** (accounts and app installs happen in the interactive phase)
 

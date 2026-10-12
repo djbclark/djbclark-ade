@@ -98,6 +98,8 @@ class SiYuanImporter:
         """
         # 先查询是否已存在
         notebooks = self._request('/api/notebook/lsNotebooks')
+        if isinstance(notebooks, dict):  # SiYuan 3.8 wraps the list: {"notebooks": [...]}
+            notebooks = notebooks.get('notebooks')
         if notebooks:
             for nb in notebooks:
                 if nb.get('name') == name:
