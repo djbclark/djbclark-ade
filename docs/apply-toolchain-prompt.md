@@ -336,7 +336,7 @@ offer the second:
 | `pr-review-toolkit` | yes | Specialised PR review agents (tests, error handling, type design, simplification); complements CodeRabbit with an in-session pass |
 | `security-guidance` | yes | Pattern warnings on edits plus an LLM diff review on stop, catching injection, hardcoded secrets and similar in Claude-written code |
 | `claude-md-management` | yes | Audits and maintains `AGENTS.md`/`CLAUDE.md` so §8 stays accurate as the repo evolves |
-| `pyright-lsp` | yes | Python language server for Claude's own edits (type-aware navigation); `uv tool install pyright` or `bun add --dev pyright` as it requires |
+| `pyright-lsp` | yes | Python language server for Claude's own edits (type-aware navigation); `brew install pyright` (§1.2; not `uv tool`, which would shadow it) or `bun add --dev pyright` as it requires |
 | `typescript-lsp` | yes | Same for the inline JavaScript and any `.ts` tests |
 | `skill-creator` | yes | Creates and evaluates skills; use it to write and validate `.claude/skills/dev-tooling` in §8 |
 | `session-report` | yes | Local HTML report of token use per session; feeds the §16 cost note |
@@ -449,7 +449,23 @@ HOMEBREW_NO_AUTO_UPDATE=1 brew install \
   miller gnu-sed gawk uutils-coreutils dasel qsv b3sum \
   dust gdu duf procs difftastic hyperfine tldr \
   hexyl ouch glow doggo ripgrep-all rargs entr csvlens watchexec \
-  duckdb jc gron moreutils
+  duckdb jc gron moreutils \
+  black mypy pyright flake8 pylint isort bandit pycodestyle yapf autopep8 \
+  vulture pyupgrade python-lsp-server pytest tox nox \
+  poetry pdm hatch virtualenv twine python-build python-setuptools \
+  python-packaging pip-tools pip-audit pipdeptree python-launcher python-argcomplete \
+  ipython jupyterlab jupytext sphinx mkdocs-material python-markdown \
+  numpy scipy pillow cython pybind11 python-matplotlib python-tabulate \
+  python-tk@3.14 python-gdbm@3.14 swig \
+  httpie cookiecutter commitizen litecli pgcli mycli pyinstaller
+# Python dev tools come from Homebrew first (2026-10-12). `mkdocs-material`
+# bundles `mkdocs`: never add the plain `mkdocs` formula. Skip `python-yq`: it
+# conflicts with the Go `yq` above. Keep the unversioned `python3` on the
+# interpreter the brew Python packages are linked against (3.14 as of
+# 2026-10-12; brew's own default moved to 3.15 on 2026-10-11), with a sidecar
+# README saying why; revisit when numpy/python-* formulae move up:
+ln -sfn /opt/homebrew/bin/python3.14 ~/.local/bin/python3
+printf '%s\n' 'python3 here pins brew python3.14: the brew Python packages are linked against it. See apply-toolchain-prompt.md 1.2.' > ~/.local/bin/python3.PIN-README.md
 
 # `runiq` (uniq on unsorted input) is not in Homebrew:
 cargo install runiq
@@ -457,7 +473,9 @@ cargo install runiq
 # Lighthouse and Puppeteer need a Chrome-family browser:
 ls "/Applications/Google Chrome.app" >/dev/null 2>&1 || brew install --cask google-chrome
 
-# Python CLIs installed as isolated global tools:
+# Python CLIs installed as isolated global tools: ONLY for what Homebrew lacks.
+# `~/.local/bin` sits ahead of `/opt/homebrew/bin` on PATH, so a stray
+# `uv tool install mypy` (or pipx) silently shadows the brew copy.
 uv tool install ansible-lint
 uv tool install pyinilint
 # Crawl4AI (JavaScript-rendering page fetch for agents, §1.3 "Agent web access");
