@@ -681,8 +681,10 @@ def ask(entry: Entry, prompt: str) -> str:
     per agent and backs with a tripwire (exit 77, EXIT_TRIPWIRE)."""
     if entry.tui.kind == "openai_compat":
         return _ask_openai(entry, prompt)
-    proc, _, _ = _acp_once(entry, prompt)
+    proc, _, log = _acp_once(entry, prompt)
     answer = (proc.stdout or "").strip()
+    if proc.returncode == 1 and answer and answer_despite_failure(result_in_log(log)):
+        return answer
     if proc.returncode == EXIT_TRIPWIRE:
         raise AttemptFailed(f"{entry.label}: TRIPWIRE: a tool ran without a permission request "
                             "under --perm deny (acp-run exit 77)")
@@ -691,6 +693,19 @@ def ask(entry: Entry, prompt: str) -> str:
         raise AttemptFailed(f"{entry.label}: acp-run rc={proc.returncode}"
                             f"{' empty answer' if not answer else ''} {tail[0][:200]}")
     return answer
+
+
+def answer_despite_failure(result: dict[str, Any] | None) -> bool:
+    """acp-run fails a turn (rc 1) whose reply is a refusal, or that ends in an error line.
+    For SkillOpt's replay and judge prompts the model's own reply is still the answer:
+    a refusal, or claude without tools writing a fake tool call ("No such tool
+    available"), just scores low. Run B (2026-10-12) lost a 20-minute opencode night to
+    one refused task. Quota, plan, auth and transport failures still fail the attempt."""
+    if not result:
+        return False
+    failure = result.get("failure")
+    return failure == "refused" or (failure == "provider"
+                                    and "No such tool available" in str(result.get("error") or ""))
 
 
 CANARY_PROMPT = ("Use your tools to do two things: (1) create an empty file named canary in the "

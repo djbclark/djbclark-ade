@@ -292,6 +292,27 @@ def test_ask_acp_failure_and_empty(tmp_path, monkeypatch):
         failover.ask(cl, "q")
 
 
+def _result_log(fields: str) -> str:
+    return ('LOG=""; prev=""; for x in "$@"; do [ "$prev" = "--log" ] && LOG="$x"; prev="$x"; done\n'
+            f"[ -n \"$LOG\" ] && echo '{{\"kind\": \"result\", \"data\": {fields}}}' > \"$LOG\"\n")
+
+
+@pytest.mark.parametrize(("fields", "ok"), [
+    ('{"tool_calls": 0, "failure": "refused"}', True),
+    ('{"tool_calls": 0, "failure": "provider", "error": "Error: No such tool available: invoke_tool"}', True),
+    ('{"tool_calls": 0, "failure": "provider", "error": "Error: RetriableError: PING timed out"}', False),
+    ('{"tool_calls": 0, "failure": "quota"}', False),
+])
+def test_ask_keeps_a_refusal_as_the_answer(tmp_path, monkeypatch, fields, ok):
+    _fake_acp(tmp_path, monkeypatch, "acp-refuse", _result_log(fields) + "echo \"I can't do that\"\nexit 1\n")
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    if ok:
+        assert failover.ask(cl, "q") == "I can't do that"
+    else:
+        with pytest.raises(failover.AttemptFailed, match="rc=1"):
+            failover.ask(cl, "q")
+
+
 def test_ask_tripwire_exit_is_attempt_failed(tmp_path, monkeypatch):
     _fake_acp(tmp_path, monkeypatch, "acp-trip", "echo partial\nexit 77\n")
     (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
