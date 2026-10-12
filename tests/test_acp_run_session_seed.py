@@ -31,6 +31,7 @@ PROBE = textwrap.dedent("""\
         def rec(self, kind, data): self.rows.append([kind, data])
     def fake_run(cmd, **kw):
         out[-1]["cmd"] = cmd
+        out[-1]["input"] = kw.get("input")
         return SimpleNamespace(returncode=0)
     mod.subprocess.run = fake_run
     for seed in (None, "0b8f6d0e-5d1c-4c35-9a77-3f1f2b6f9b10"):
@@ -53,7 +54,10 @@ class TestSessionSeed(unittest.TestCase):
             sid = cmd[cmd.index("--session-id") + 1]
             self.assertEqual(str(uuid.UUID(sid)), sid)
             self.assertEqual(case["rows"], [["new_session", {"sessionId": sid, "via": "claude-cli"}]])
-            self.assertEqual(cmd[:3], ["claude", "-p", "hi"])
+            # the prompt goes on stdin, never argv (adversary review 2026-10-12, L4)
+            self.assertEqual(cmd[:2], ["claude", "-p"])
+            self.assertNotIn("hi", cmd)
+            self.assertEqual(case["input"], "hi")
         self.assertEqual(seeded["cmd"][seeded["cmd"].index("--session-id") + 1], "0b8f6d0e-5d1c-4c35-9a77-3f1f2b6f9b10")
 
     def test_session_id_is_claude_only_and_must_be_a_uuid(self) -> None:
