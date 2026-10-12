@@ -9,14 +9,16 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "bin"))
-import failover
+sys.path.insert(0, str(ROOT / "bin"))  # bin/ is not a package; skillopt-night imports it the same way
+import failover  # pyright: ignore[reportMissingImports]
 
 SECRET = "sk-sipb-" + "c0ffee11" * 4
+REAL_ACP_AGENTS_OK = failover.acp_agents_ok
 
 AIUSE = {"schema_version": "1.2", "available": [
     {"provider": "opencode-go", "pool_family": None, "usable_now": True, "headroom_percent": 8.0},
@@ -49,7 +51,7 @@ def isolated(tmp_path, monkeypatch):
     failover._cache.clear()
 
 
-def _log(tmp: Path) -> list[dict]:
+def _log(tmp: Path) -> list[dict[str, Any]]:
     p = tmp / "attempts.jsonl"
     return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
 
@@ -92,12 +94,60 @@ def test_denied_routes_refused(raw):
     ({"tui": "nosuch"}, "allowlist"),
     ({"tui": "claude", "model": "claude-3-5-gpt"}, "not allowed"),
     ({"tui": "zcode", "model": "glm-5.3"}, "takes no model"),
-    ({"tui": "claude", "model": "haiku", "effort": "low"}, "no effort"),
+    ({"tui": "opencode", "model": "opencode-go/kimi-k3", "effort": "low"}, "no effort"),
+    ({"tui": "claude", "model": "haiku", "effort": "max"}, "no effort"),
     ({"model": "x"}, "needs a 'tui'"),
 ])
 def test_bad_entries_refused(raw, msg):
     with pytest.raises(failover.ChainError, match=msg):
         failover.load_chain({"allow": ["zcode", "agy", "opencode", "claude", "sipb"], "chain": [raw]})
+
+
+def test_deny_matches_whole_tokens_only():
+    deny = (*failover.DENY, "pi", "grok")
+    (ok,) = failover.load_chain([{"tui": "opencode", "model": "opencode-go/api-pilot"}], deny=deny)
+    assert ok.model == "opencode-go/api-pilot"
+    for raw in ({"tui": "opencode", "model": "opencode-go/grok-4.7"}, {"tui": "opencode", "label": "pi relay"}):
+        with pytest.raises(failover.ChainError, match="denied"):
+            failover.load_chain([raw], deny=deny)
+
+
+def test_native_model_and_claude_effort(tmp_path):
+    cl, oc = failover.load_chain([{"tui": "claude", "model": "haiku", "effort": "low"},
+                                  {"tui": "opencode", "model": "opencode-go/minimax-m3"}])
+    assert cl.native_model == "claude-haiku-5-5" and oc.native_model == "opencode-go/minimax-m3"
+    cmd = failover.acp_command(cl, tmp_path / "p.md", tmp_path)
+    assert cmd[cmd.index("--model") + 1] == "haiku" and cmd[cmd.index("--set") + 1] == "effort=low"
+
+
+def test_sipb_via_opencode_health_check(monkeypatch):
+    (e,) = failover.load_chain([{"tui": "opencode", "model": "sipb/qwen3-coder:30b"}])
+    assert (e.pool, e.health_url) == (None, "http://127.0.0.1:8890/api/version")
+    monkeypatch.setattr(failover, "health_ok", lambda url: False)
+    assert failover.preflight(e) == (False, "health check http://127.0.0.1:8890/api/version did not answer 200")
+    monkeypatch.setattr(failover, "health_ok", lambda url: True)
+    assert failover.preflight(e) == (True, "http://127.0.0.1:8890/api/version answered 200")
+
+
+def test_crush_probe(monkeypatch):
+    monkeypatch.setattr(failover, "acp_agents_ok", lambda: {"crush"})
+    (e,) = failover.load_chain([{"tui": "crush"}])
+    assert e.probe and e.pool is None
+    calls = []
+
+    def ask(entry, prompt):
+        calls.append(prompt)
+        return "OK"
+    monkeypatch.setattr(failover, "ask", ask)
+    ok, why = failover.preflight(e, probe=False)
+    assert ok and "probe not run" in why and calls == []
+    assert failover.preflight(e)[0] and calls == [failover.PROBE_PROMPT]
+    assert failover.preflight(e)[0] and len(calls) == 1, "probe result is cached per process"
+    failover._cache.clear()
+    monkeypatch.setattr(failover, "ask", lambda entry, prompt: "I cannot")
+    assert not failover.preflight(e)[0]
+    with pytest.raises(failover.ChainError, match="takes no model"):
+        failover.load_chain([{"tui": "crush", "model": "sipb/x"}])
 
 
 def test_unknown_tui_without_allowlist():
@@ -129,6 +179,18 @@ def test_preflight_missing_agent_and_secret(monkeypatch):
     monkeypatch.setattr(failover, "endpoint_reachable", lambda url: True)
     ok, why = failover.preflight(sipb)
     assert not ok and "NOT_DECLARED" in why
+
+
+def test_acp_agents_ok_loads_route_agent_by_path(tmp_path, monkeypatch):
+    fake = tmp_path / "acp-run-list"
+    fake.write_text("#!/bin/sh\necho 'ok claude    claude-agent-acp'\necho '-- devin     devin acp'\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("ACP_RUN", str(fake))
+    monkeypatch.delitem(sys.modules, "route_agent", raising=False)
+    monkeypatch.setattr(failover, "acp_agents_ok", REAL_ACP_AGENTS_OK)
+    failover._cache.clear()
+    assert failover.acp_agents_ok() == {"claude"}
+    assert "route_agent" in sys.modules
 
 
 def test_preflight_unreachable_endpoint(monkeypatch):

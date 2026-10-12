@@ -41,6 +41,7 @@ label. Importable: skillopt-night uses load_chain/preflight/run_chain/ask.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -87,7 +88,7 @@ class Tui:
     vendor: str = ""
     pool: str | None = None                    # aiuse provider id
     pool_family: str | None = None
-    pool_by_model: tuple[tuple[str, str, str | None], ...] = ()  # (model prefix, pool, family)
+    pool_by_model: tuple[tuple[str, str | None, str | None], ...] = ()  # (model prefix, pool, family)
     models: tuple[str, ...] = ()               # known ids (illustrative, from live lists)
     model_allow: str | None = None             # regex every model must match
     takes_model: bool = True
@@ -95,15 +96,23 @@ class Tui:
     efforts: tuple[str, ...] = ()
     endpoint: str | None = None
     secret: str | None = None                  # sudo-secretspec name for openai_compat
+    health_by_model: tuple[tuple[str, str], ...] = ()  # (model prefix, URL that must GET 200)
+    native_models: tuple[tuple[str, str], ...] = ()    # acp-run model value -> full model id
+    probe: bool = False                        # preflight sends one tiny prompt (no quota pool)
     note: str = ""
 
 
 # Model lists from acp-dispatch's live probes (~/.cache/acp-dispatch, 2026-10-12)
 # and the docs; they are hints, not a gate. `acp-run <agent> --info` is the authority.
 REGISTRY: dict[str, Tui] = {t.name: t for t in (
+    # claude-agent-acp's model values are default/opus/fable/sonnet/haiku (names "Haiku 5.5",
+    # "Sonnet 5.5"); acp-run matches a value, so "claude-haiku-5-5" itself would not resolve.
+    # Its `effort` option takes default/low/medium/high/xhigh/max (acp-run claude --info, 2026-10-12).
     Tui("claude", "acp", "claude", "Anthropic", "claude", "default",
         models=("haiku", "sonnet"),
         model_allow=r"^(haiku|sonnet|claude-(haiku|sonnet)-[\w.-]+)$",
+        native_models=(("haiku", "claude-haiku-5-5"), ("sonnet", "claude-sonnet-5-5")),
+        effort="set:effort", efforts=("low", "medium", "high"),
         note="Claude shared pool; Haiku or Sonnet only (Opus/Fable denied)"),
     Tui("agy", "acp", "agy", "Google", None, None,
         pool_by_model=(("gemini-", "antigravity", "gemini"),
@@ -113,11 +122,14 @@ REGISTRY: dict[str, Tui] = {t.name: t for t in (
                 "gemini-3.1-pro-low", "claude-sonnet-5-5-medium", "gpt-oss-120b-medium"),
         effort="suffix", efforts=("low", "medium", "high"),
         note="effort is the model id suffix; Gemini and Claude/GPT are separate pools"),
-    Tui("opencode", "acp", "opencode", "OpenCode Go", None, None,
-        pool_by_model=(("opencode-go/", "opencode-go", None),),
-        models=("opencode-go/deepseek-v4-flash", "opencode-go/deepseek-v4-pro",
-                "opencode-go/kimi-k3", "opencode-go/glm-5.3", "opencode-go/qwen3.8-max"),
-        note="model must name its provider (opencode-go/...) for the pool to be known"),
+    # `opencode models` (2026-10-12) lists opencode-go/kimi-k3, opencode-go/minimax-m3 and the
+    # sipb/ provider (~/.config/opencode/opencode.json baseURL http://127.0.0.1:8890/api).
+    Tui("opencode", "acp", "opencode", "OpenCode", None, None,
+        pool_by_model=(("opencode-go/", "opencode-go", None), ("sipb/", None, None)),
+        health_by_model=(("sipb/", "http://127.0.0.1:8890/api/version"),),
+        models=("opencode-go/minimax-m3", "opencode-go/kimi-k3", "opencode-go/deepseek-v4-flash",
+                "sipb/qwen3-coder:30b", "sipb/deepseek-r1:32b"),
+        note="model names its provider: opencode-go/... (Go pool) or sipb/... (MIT SIPB, free)"),
     Tui("zcode", "acp", "zcode", "Z.ai", "zai", None, takes_model=False,
         effort="set:thought", efforts=("low", "high", "max"),
         note="zcode-acp-server refuses --model; GLM via the z.ai plan"),
@@ -129,8 +141,8 @@ REGISTRY: dict[str, Tui] = {t.name: t for t in (
     Tui("copilot", "acp", "copilot", "GitHub", "copilot", None),
     Tui("grok", "acp", "grok", "xAI", "grok", None, note="reserve pool (GrokBot)"),
     Tui("qwen", "acp", "qwen", "Alibaba", None, None),
-    Tui("crush", "acp", "crush", "Charm", None, None, takes_model=False,
-        note="under discussion; SIPB via crushrc"),
+    Tui("crush", "acp", "crush", "Charm", None, None, takes_model=False, probe=True,
+        note="crush-acp (PR 2450 build), default model from crushrc (SIPB); never --model"),
     # Listed so a chain naming them fails with a clear reason (DENY also catches them).
     Tui("cursor", "acp", "cursor", "Cursor", "cursor", None, note="denied"),
     Tui("cline", "acp", "cline", "ClinePass", "clinepass", None, note="denied: reserve"),
@@ -153,6 +165,8 @@ class Entry:
     extra_args: list[str] = field(default_factory=list)
     timeout: int = 600
     label: str = ""
+    probe: bool | None = None
+    health_url: str | None = None
 
     def __post_init__(self) -> None:
         if not self.label:
@@ -162,6 +176,11 @@ class Entry:
             self.pool, self.pool_family = self._registry_pool()
         self.endpoint = self.endpoint or self.tui.endpoint
         self.secret = self.secret or self.tui.secret
+        if self.probe is None:
+            self.probe = self.tui.probe
+        if self.health_url is None:
+            self.health_url = next((url for prefix, url in self.tui.health_by_model
+                                    if self.model.startswith(prefix)), None)
 
     def _registry_pool(self) -> tuple[str | None, str | None]:
         for prefix, pool, family in self.tui.pool_by_model:
@@ -176,6 +195,11 @@ class Entry:
             return f"{self.model}-{self.effort}"
         return self.model
 
+    @property
+    def native_model(self) -> str:
+        """The full model id for SkillOpt's native backends (--native)."""
+        return dict(self.tui.native_models).get(self.model, self.model_arg)
+
     def row(self) -> dict[str, Any]:
         return {"label": self.label, "tui": self.tui.name, "vendor": self.tui.vendor,
                 "model": self.model_arg or None, "effort": self.effort or None,
@@ -186,8 +210,10 @@ class Entry:
 # ── loading and policy ───────────────────────────────────────────────────────
 
 def denied(text: str, deny: tuple[str, ...] = DENY) -> str | None:
-    low = text.lower()
-    return next((d for d in deny if d in low), None)
+    """The first denied word that is a whole token of text (split on non-alphanumerics),
+    so "pi" catches "pi" but not "api", and "opus" catches "claude-opus-5-5-low"."""
+    tokens = set(re.split(r"[^a-z0-9]+", text.lower()))
+    return next((d for d in deny if d in tokens), None)
 
 
 def load_chain(spec: Any, *, allow: list[str] | None = None,
@@ -231,7 +257,8 @@ def load_chain(spec: Any, *, allow: list[str] | None = None,
                       secret_env=str(raw.get("secret_env") or "OPENAI_API_KEY"),
                       env={str(k): str(v) for k, v in (raw.get("env") or {}).items()},
                       extra_args=[str(a) for a in raw.get("extra_args") or []],
-                      timeout=int(raw.get("timeout", 600)), label=str(raw.get("label") or ""))
+                      timeout=int(raw.get("timeout", 600)), label=str(raw.get("label") or ""),
+                      probe=raw.get("probe"), health_url=raw.get("health_url"))
         if denied(entry.model_arg, deny):
             raise ChainError(f"entry {i}: denied model '{entry.model_arg}'")
         entries.append(entry)
@@ -264,9 +291,16 @@ _cache: dict[str, Any] = {}
 def acp_agents_ok() -> set[str]:
     """Agents `acp-run --list` marks ok (route_agent's reader, reused)."""
     if "agents" not in _cache:
-        if str(BIN) not in sys.path:
-            sys.path.insert(0, str(BIN))
-        import route_agent
+        # Load bin/route_agent.py by path (not an implicit relative import), so this works
+        # whatever the caller's sys.path and cwd are.
+        route_agent = sys.modules.get("route_agent")
+        if route_agent is None:
+            spec = importlib.util.spec_from_file_location("route_agent", BIN / "route_agent.py")
+            if spec is None or spec.loader is None:
+                raise ImportError(f"cannot load {BIN / 'route_agent.py'}")
+            route_agent = importlib.util.module_from_spec(spec)
+            sys.modules["route_agent"] = route_agent  # dataclasses resolve their module here
+            spec.loader.exec_module(route_agent)
         _cache["agents"] = route_agent.acp_agents()
     return _cache["agents"]
 
@@ -330,8 +364,34 @@ def endpoint_reachable(url: str, timeout: float = 3.0) -> bool:
         return False
 
 
-def preflight(entry: Entry) -> tuple[bool, str]:
-    """(ok, why). Never calls a model."""
+def health_ok(url: str, timeout: float = 10.0) -> bool:
+    """GET url answers 200 (an unauthenticated status endpoint: no model call)."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+PROBE_PROMPT = "Reply with exactly: OK"
+
+
+def probe_ok(entry: Entry) -> tuple[bool, str]:
+    """One tiny prompt through the entry (cached per process). This one DOES call the model,
+    so it is reserved for routes with no quota pool to read (crush)."""
+    key = f"probe:{entry.label}"
+    if key not in _cache:
+        try:
+            answer = ask(entry, PROBE_PROMPT)
+            _cache[key] = ("OK" in answer.upper(), f"probe answered {answer[:40]!r}")
+        except AttemptFailed as e:
+            _cache[key] = (False, f"probe failed: {e}")
+    return _cache[key]
+
+
+def preflight(entry: Entry, *, probe: bool = True) -> tuple[bool, str]:
+    """(ok, why). Binary, secret, health URL, pool; then the probe, the only step that
+    calls a model, and only for entries marked probe (skipped when probe=False)."""
     if entry.tui.kind == "acp":
         if not Path(acp_run()).exists():
             return False, f"acp-run not found at {acp_run()}"
@@ -343,6 +403,11 @@ def preflight(entry: Entry) -> tuple[bool, str]:
         return False, f"endpoint {entry.endpoint} not reachable"
     if entry.secret and entry.secret not in declared_secrets():
         return False, f"secret {entry.secret} is not declared in sudo-secretspec"
+    if entry.health_url and not health_ok(entry.health_url):
+        return False, f"health check {entry.health_url} did not answer 200"
+    why = "no quota pool to check"
+    if entry.health_url:
+        why = f"{entry.health_url} answered 200"
     if entry.pool:
         row = pool_reading(entry)
         if row is None:
@@ -352,8 +417,13 @@ def preflight(entry: Entry) -> tuple[bool, str]:
         head = row.get("headroom_percent")
         if head is None or float(head) <= entry.floor_percent:
             return False, f"pool {entry.pool} headroom {head}% <= floor {entry.floor_percent}%"
-        return True, f"pool {entry.pool} headroom {float(head):.1f}% > floor {entry.floor_percent}%"
-    return True, "no quota pool to check"
+        why = f"pool {entry.pool} headroom {float(head):.1f}% > floor {entry.floor_percent}%"
+    if entry.probe:
+        if not probe:
+            return True, f"{why}; probe not run (it calls the model)"
+        ok, pwhy = probe_ok(entry)
+        return ok, f"{why}; {pwhy}"
+    return True, why
 
 
 # ── attempts ─────────────────────────────────────────────────────────────────
@@ -421,8 +491,9 @@ def acp_command(entry: Entry, prompt_file: Path, cwd: Path) -> list[str]:
            "--perm", "deny", "--timeout", str(entry.timeout)]
     if entry.tui.takes_model and entry.model_arg:
         cmd += ["--model", entry.model_arg]
-    if entry.effort and (entry.tui.effort or "").startswith("set:"):
-        cmd += ["--set", f"{entry.tui.effort[4:]}={entry.effort}"]
+    lever = entry.tui.effort or ""
+    if entry.effort and lever.startswith("set:"):
+        cmd += ["--set", f"{lever[4:]}={entry.effort}"]
     return cmd + entry.extra_args
 
 
@@ -485,7 +556,8 @@ def ask_many(entry: Entry, prompts: dict[str, str], *, jobs: int = 2) -> dict[st
         pool.shutdown(wait=True)
 
 
-def run_command(entry: Entry, argv: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess:
+def run_command(entry: Entry, argv: list[str], *,
+                timeout: int | None = None) -> subprocess.CompletedProcess[bytes]:
     """Run argv with {tui} {agent} {model} {effort} {endpoint} substituted and FAILOVER_* exported."""
     fields = {"tui": entry.tui.name, "agent": entry.tui.acp_agent or "", "model": entry.model_arg,
               "effort": entry.effort, "endpoint": entry.endpoint or ""}
@@ -510,16 +582,16 @@ def print_table(rows: list[dict[str, Any]], cols: list[str]) -> None:
         print("  ".join(str(r.get(c) if r.get(c) is not None else "-").ljust(widths[c]) for c in cols))
 
 
-def check_table(entries: list[Entry]) -> list[dict[str, Any]]:
+def check_table(entries: list[Entry], *, probe: bool = False) -> list[dict[str, Any]]:
     rows = []
     for i, e in enumerate(entries, 1):
-        ok, why = preflight(e)
+        ok, why = preflight(e, probe=probe)
         rows.append({"#": i, **e.row(), "ready": "yes" if ok else "no", "why": why})
     return rows
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="failover", description=__doc__.split("\n\n")[0])
+    p = argparse.ArgumentParser(prog="failover", description=(__doc__ or "").split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("registry")
     for name in ("check", "ask", "run"):
@@ -527,6 +599,9 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--chain", required=True, type=Path)
         sp.add_argument("--allow", help="comma-separated tui allowlist")
         sp.add_argument("--log", type=Path, help=f"attempt log (default {ATTEMPT_LOG})")
+        if name == "check":
+            sp.add_argument("--probe", action="store_true",
+                            help="also run probe preflights (these call the model)")
         if name == "ask":
             g = sp.add_mutually_exclusive_group(required=True)
             g.add_argument("-p", "--prompt")
@@ -537,7 +612,7 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
     if a.cmd == "registry":
         print_table([{"tui": t.name, "kind": t.kind, "vendor": t.vendor, "agent": t.acp_agent,
-                      "pool": t.pool or ",".join(sorted({x[1] for x in t.pool_by_model})) or None,
+                      "pool": t.pool or ",".join(sorted({x[1] for x in t.pool_by_model if x[1]})) or None,
                       "effort": ",".join(t.efforts) or None, "note": t.note}
                      for t in REGISTRY.values()],
                     ["tui", "kind", "vendor", "agent", "pool", "effort", "note"])
@@ -548,7 +623,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"failover: {e}", file=sys.stderr)
         return 2
     if a.cmd == "check":
-        rows = check_table(entries)
+        rows = check_table(entries, probe=a.probe)
         print_table(rows, ["#", "label", "vendor", "pool", "pool_family", "floor_percent", "ready", "why"])
         return 0 if any(r["ready"] == "yes" for r in rows) else 1
     if a.cmd == "ask":
