@@ -406,6 +406,12 @@ Names and paths only. Never print or copy a key.
    6.4.5. agy: `mcp_config.json` matches the documented schema (`serverUrl`,
       `headers`) and the vault values; a live `acp-run agy` call is still to
       do (it hit its usage limit; aiuse had shown the pool as 88% left).
+      2026-10-12: live `acp-run agy` calls show agy under ACP loads only
+      stdio servers (its session `brain/<id>/mcp/` held only graft and
+      token-savior); `serverUrl` entries (basic-memory, exa, jina,
+      parallel-search) never load. crawl4ai works through a stdio bridge to
+      the shared server: `mcp-proxy --transport streamablehttp
+      http://127.0.0.1:18798/mcp` (scrape of example.com returned the title).
    6.4.6. A no-model sign that a client sends the Exa key: Exa's `tools/list`
       adds `agent_run` only when an `x-api-key` header is present (any key;
       the vault key's validity was checked separately: a bogus key gets
