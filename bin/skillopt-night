@@ -12,15 +12,31 @@ sequence, under `nice`, with a bounded timeout each, staging everything under
     skillopt-night                     # the nightly run (launchd, 03:30)
     skillopt-night --dry-run           # mock backend, never advances checkpoints
     skillopt-night --source claude     # restrict (repeatable)
+    skillopt-night chain-check         # preflight the backend chain, print the table
     skillopt-night sources             # which sources have data here
     skillopt-night install             # copy + bootstrap the launchd plist
     skillopt-night uninstall           # bootout + remove the plist
 
+**Backend: a failover chain, executed through acp-run.** SkillOpt's
+`get_backend` is a fixed if-chain (an unknown name silently becomes the mock
+backend), so no external backend can be registered without patching it. The
+night therefore runs SkillOpt's `handoff` backend: the engine writes each round
+of model calls to pending.json and exits 3; this runner answers every prompt
+through one entry of the chain in ~/.skillopt-sleep/night.json (bin/failover.py:
+acp-run in a clean empty dir with --perm deny, so each prompt gets a fresh
+context, or an OpenAI-compatible POST for the SIPB endpoint) and reruns, until
+the engine finishes. One entry answers a whole source night, so baseline and
+candidate scores come from the same model. If an entry fails (preflight, an
+answer, the run itself, or the night's diagnostics), the runner restores
+state.json, wipes that source's handoff dir and reruns the source night on the
+next entry; when none is left it records `chain_exhausted`.
+
 Guards, in order:
 
-1. A stateful night refuses while `backend` in ~/.skillopt-sleep/config.json is
-   "mock" or empty: it prints "waiting for backend decision" and exits 0, so the
-   launchd job stays inert until the operator picks a model pool.
+1. A stateful night refuses unless night.json exists with `"enabled": true` and
+   a non-empty chain: it prints "waiting for backend decision" and exits 0, so
+   the launchd job stays inert until the operator approves the chain. A chain
+   that violates policy (bin/failover.py DENY, the allowlist) is refused whole.
 2. The load gate reuses `machine_overloaded()` from bin/acp-dispatch (load above
    4x CPUs or critical memory pressure); it waits up to --load-wait seconds,
    then skips the night.
@@ -32,20 +48,20 @@ keeps one cursor per source in cursors.json and swaps it into
 ~/.skillopt-sleep/state.json before each run. Upstream's codex harvester reads
 only a flat ~/.codex/archived_sessions (Codex Desktop); Codex CLI keeps rollouts
 in ~/.codex/sessions/YYYY/MM/DD, so the codex run gets a shim --codex-home whose
-archived_sessions holds symlinks to every rollout.
-
-The azure_openai backend (any OpenAI-compatible server; here the local LiteLLM
-proxy) needs a key: it is read with `sudo-secretspec get` into memory and
-exported only into the child's environment, never to disk or argv.
+archived_sessions holds symlinks to every rollout. Upstream's handoff dir is per
+project and is archived only when a night stages something, so each source gets
+its own dir (SKILLOPT_SLEEP_HANDOFF_DIR) and the runner archives it after every
+finished night.
 
 Outputs: ~/.local/state/skillopt-sleep/<date>-<source>.log per run, one JSON
-line per run in nights.jsonl, and at most one `hermes-ping` per event (proposals
-staged, a run failed, handoff prompts pending, backend unavailable).
+line per source night in nights.jsonl, every preflight/attempt in attempts.jsonl,
+and at most one `hermes-ping` per event (proposals staged, chain exhausted,
+chain invalid).
 
 Test hooks (environment): SKILLOPT_NIGHT_STATE_DIR, SKILLOPT_NIGHT_BIN,
-SKILLOPT_NIGHT_PING, SKILLOPT_NIGHT_SECRETSPEC, SKILLOPT_NIGHT_LAUNCH_AGENTS,
-SKILLOPT_NIGHT_NO_INSTALL=1 (install/uninstall print the plan, change nothing),
-SKILLOPT_NIGHT_NO_GATE=1.
+SKILLOPT_NIGHT_PING, SKILLOPT_NIGHT_LAUNCH_AGENTS, SKILLOPT_NIGHT_NO_INSTALL=1
+(install/uninstall print the plan, change nothing), SKILLOPT_NIGHT_NO_GATE=1;
+bin/failover.py reads FAILOVER_AIUSE_JSON, FAILOVER_ACP_RUN, FAILOVER_SECRETSPEC.
 """
 from __future__ import annotations
 
@@ -65,16 +81,20 @@ from pathlib import Path
 from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
+if str(REPO / "bin") not in sys.path:
+    sys.path.insert(0, str(REPO / "bin"))
+import failover
+
 LABEL = "com.djbclark.skillopt-sleep"
 PLIST_SRC = REPO / "launchd" / f"{LABEL}.plist"
 PREFERENCES = REPO / "docs" / "skillopt-preferences.md"
 SOURCES = ("claude", "codex", "cursor", "opencode", "copilot_cli", "pi")
-MOCK_BACKENDS = ("", "mock")
-# Secret names tried, in order, for the azure_openai (OpenAI-compatible) backend.
-LITELLM_SECRETS = ("SKILLOPT_LITELLM_API_KEY", "LITELLM_MASTER_KEY")
-LITELLM_ENDPOINT = "http://127.0.0.1:4000/v1"
+# Operator 2026-10-12: the only backends a night may use.
+DEFAULT_ALLOW = ["zcode", "agy", "opencode", "claude", "sipb"]
 DEFAULT_TIMEOUT_S = 5400
 DEFAULT_LOAD_WAIT_S = 1800
+DEFAULT_MAX_ROUNDS = 8
+DEFAULT_JOBS = 2
 GATE_LOAD_PER_CPU = 4  # same number as bin/acp-dispatch; used only if its import fails
 PING = "~/.local/bin/hermes-ping"
 REVIEW = "skillopt-sleep status --project ~/src/djbclark-ade"
@@ -98,8 +118,16 @@ def config_path() -> Path:
     return home() / ".skillopt-sleep" / "config.json"
 
 
+def night_path() -> Path:
+    return home() / ".skillopt-sleep" / "night.json"
+
+
 def sleep_state_path() -> Path:
     return home() / ".skillopt-sleep" / "state.json"
+
+
+def handoff_dir(source: str) -> Path:
+    return REPO / ".skillopt-sleep-handoff" / source
 
 
 def load_config() -> dict[str, Any]:
@@ -108,6 +136,19 @@ def load_config() -> dict[str, Any]:
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def load_night() -> dict[str, Any]:
+    try:
+        data = json.loads(night_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def load_entries(night: dict[str, Any]) -> list[failover.Entry]:
+    return failover.load_chain(night.get("chain") or [],
+                               allow=night.get("allow") or DEFAULT_ALLOW)
 
 
 # ── sources ──────────────────────────────────────────────────────────────────
@@ -198,6 +239,25 @@ def save_cursor(source: str, project: str, before: str | None) -> None:
         _write_json(path, cursors)
 
 
+def snapshot_state() -> bytes | None:
+    try:
+        return sleep_state_path().read_bytes()
+    except OSError:
+        return None
+
+
+def restore_state(snap: bytes | None) -> None:
+    """Undo whatever a failed attempt did to state.json (night counter, history, cursor)."""
+    sp = sleep_state_path()
+    if snap is None:
+        with contextlib.suppress(FileNotFoundError):
+            sp.unlink()
+        return
+    tmp = sp.with_name(sp.name + ".tmp")
+    tmp.write_bytes(snap)
+    os.replace(tmp, sp)
+
+
 # ── guards ───────────────────────────────────────────────────────────────────
 
 def machine_overloaded() -> str | None:
@@ -229,46 +289,7 @@ def wait_for_capacity(max_wait: int) -> str | None:
     return why
 
 
-# ── secrets (azure_openai via LiteLLM) ──────────────────────────────────────
-
-def secretspec() -> str:
-    return (os.environ.get("SKILLOPT_NIGHT_SECRETSPEC") or shutil.which("sudo-secretspec")
-            or "/usr/local/bin/sudo-secretspec")
-
-
-def litellm_secret_name() -> str | None:
-    """The first declared LiteLLM key name, from the value-free schema."""
-    try:
-        out = subprocess.run([secretspec(), "schema", "--reason",
-                              "skillopt-night: find the LiteLLM key name"],
-                             capture_output=True, text=True, timeout=60, check=False)
-        names = json.loads(out.stdout).get("properties", {})
-    except (OSError, ValueError, subprocess.SubprocessError, AttributeError):
-        return None
-    return next((n for n in LITELLM_SECRETS if n in names), None)
-
-
-def litellm_env(cfg: dict[str, Any]) -> dict[str, str] | None:
-    """Child-only env for the OpenAI-compatible backend, or None if no key."""
-    name = litellm_secret_name()
-    if not name:
-        return None
-    out = subprocess.run([secretspec(), "get", name, "--reason",
-                          "skillopt-night: LiteLLM key for the nightly SkillOpt run"],
-                         capture_output=True, text=True, timeout=60, check=False)
-    key = out.stdout.strip()
-    if out.returncode != 0 or not key:
-        return None
-    return {"AZURE_OPENAI_AUTH_MODE": "openai_compatible",
-            "AZURE_OPENAI_ENDPOINT": str(cfg.get("azure_endpoint") or LITELLM_ENDPOINT),
-            "AZURE_OPENAI_API_KEY": key}
-
-
-def uses_backend(cfg: dict[str, Any], name: str) -> bool:
-    return name in (cfg.get("backend"), cfg.get("optimizer_backend"), cfg.get("target_backend"))
-
-
-# ── one run ──────────────────────────────────────────────────────────────────
+# ── one skillopt-sleep invocation ────────────────────────────────────────────
 
 def preferences_text() -> str:
     try:
@@ -278,14 +299,17 @@ def preferences_text() -> str:
 
 
 def build_command(source: str, *, dry_run: bool, cfg: dict[str, Any],
-                  codex_home: Path | None = None) -> list[str]:
+                  codex_home: Path | None = None, backend: str = "handoff",
+                  max_sessions: int = 0) -> list[str]:
     cmd = ["nice", "-n", "10", skillopt_bin(), "dry-run" if dry_run else "run",
            "--project", str(REPO), "--scope", "all", "--source", source,
-           "--skill-root", str(REPO / "skills"), "--progress", "--json"]
-    if dry_run:
-        cmd += ["--backend", "mock"]
+           "--skill-root", str(REPO / "skills"), "--progress", "--json",
+           "--backend", "mock" if dry_run else backend]
     if source == "codex" and codex_home is not None:
         cmd += ["--codex-home", str(codex_home)]
+    if max_sessions and not dry_run:
+        # Each harvested session costs one LLM-mining prompt (one agent spawn) in round 1.
+        cmd += ["--max-sessions", str(max_sessions)]
     prefs = preferences_text()
     if prefs:
         cmd += ["--preferences", prefs]
@@ -310,6 +334,79 @@ def n_proposals(result: dict[str, Any]) -> int:
     return 1 if result.get("staging_dir") else 0
 
 
+def invoke(cmd: list[str], *, log: Path, env: dict[str, str], timeout: float) -> tuple[int, str]:
+    shown = list(cmd)
+    if "--preferences" in shown:
+        shown[shown.index("--preferences") + 1] = "<docs/skillopt-preferences.md>"
+    with open(log, "a") as lf:
+        lf.write(f"\n== {datetime.now().isoformat(timespec='seconds')} {' '.join(shown)}\n")
+        lf.flush()
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=lf, stdin=subprocess.DEVNULL,
+                                  text=True, env=env, cwd=str(REPO), timeout=max(1, timeout),
+                                  check=False)
+            rc, stdout = proc.returncode, proc.stdout or ""
+        except subprocess.TimeoutExpired as e:
+            rc = 124
+            stdout = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
+        lf.write(stdout)
+        lf.write(f"\n== rc={rc}\n")
+    return rc, stdout
+
+
+def night_failure(rc: int, result: dict[str, Any]) -> str | None:
+    """Why a finished night does not count as the backend answering, or None."""
+    if rc != 0:
+        return f"skillopt-sleep rc={rc}"
+    if result.get("ok") is False:
+        return f"skillopt-sleep error: {result.get('error')}: {str(result.get('message'))[:200]}"
+    staging = result.get("staging_dir")
+    if staging:
+        diag = Path(staging) / "diagnostics.json"
+        text = diag.read_text(errors="ignore") if diag.exists() else ""
+        if "empty response on all" in text:
+            return "diagnostics: empty response on all attempts"
+        data = _read_json(diag, {}) if text else {}
+        for key in ("call_error", "last_call_error"):
+            if isinstance(data, dict) and str(data.get(key) or "").strip():
+                return f"diagnostics: {key}: {str(data[key])[:200]}"
+        report = _read_json(Path(staging) / "report.json", {})
+        if isinstance(report, dict) and report.get("n_tasks") and report.get("n_replayed") == 0:
+            return "tasks were mined but none was replayed"
+    return None
+
+
+def reset_dir(path: Path) -> None:
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def archive_handoff(source: str) -> None:
+    """Move a finished night's handoff dir aside (upstream keeps it when nothing staged)."""
+    hdir = handoff_dir(source)
+    if not hdir.exists():
+        return
+    arch = state_dir() / "handoff-archive"
+    arch.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(hdir), str(arch / f"{source}-{datetime.now():%Y%m%d-%H%M%S}"))
+    for old in sorted(arch.iterdir())[:-10]:  # keep the last ten rounds; they hold transcript excerpts
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def answer_pending(entry: failover.Entry, hdir: Path, jobs: int) -> int:
+    """Answer every prompt in pending.json on this entry; return how many."""
+    data = _read_json(hdir / "pending.json", {})
+    pending = data.get("pending") if isinstance(data, dict) else None
+    if not pending:
+        raise failover.AttemptFailed("handoff exit 3 with no pending prompts")
+    prompts = {str(p["id"]): str(p["prompt"]) for p in pending}
+    answers = failover.ask_many(entry, prompts, jobs=jobs)
+    adir = hdir / "answers"
+    adir.mkdir(parents=True, exist_ok=True)
+    for key, text in answers.items():
+        (adir / f"{key}.md").write_text(text)
+    return len(answers)
+
+
 def record(row: dict[str, Any]) -> None:
     sd = state_dir()
     sd.mkdir(parents=True, exist_ok=True)
@@ -327,41 +424,83 @@ def ping(line: str) -> None:
         pass
 
 
-def run_source(source: str, *, dry_run: bool, cfg: dict[str, Any], timeout: int,
-               extra_env: dict[str, str] | None) -> dict[str, Any]:
+def log_path(source: str, dry_run: bool) -> Path:
     sd = state_dir()
     sd.mkdir(parents=True, exist_ok=True)
-    log = sd / f"{datetime.now():%Y-%m-%d}-{source}{'-dry' if dry_run else ''}.log"
+    return sd / f"{datetime.now():%Y-%m-%d}-{source}{'-dry' if dry_run else ''}.log"
+
+
+def run_dry(source: str, *, cfg: dict[str, Any], timeout: int) -> dict[str, Any]:
     shim = codex_shim(cfg) if source == "codex" else None
-    cmd = build_command(source, dry_run=dry_run, cfg=cfg, codex_home=shim)
-    env = dict(os.environ)
-    if extra_env:
-        env.update(extra_env)
-    project = str(REPO)
-    before = swap_in_cursor(source, project)
-    shown = list(cmd)
-    if "--preferences" in shown:
-        shown[shown.index("--preferences") + 1] = "<docs/skillopt-preferences.md>"
-    with open(log, "a") as lf:
-        lf.write(f"\n== {datetime.now().isoformat(timespec='seconds')} {' '.join(shown)}\n")
-        lf.flush()
-        try:
-            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=lf, stdin=subprocess.DEVNULL,
-                                  text=True, env=env, cwd=project, timeout=timeout, check=False)
-            rc, stdout = proc.returncode, proc.stdout or ""
-        except subprocess.TimeoutExpired as e:
-            rc = 124
-            stdout = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
-        lf.write(stdout)
-        lf.write(f"\n== rc={rc}\n")
-    if not dry_run:
-        save_cursor(source, project, before)
+    cmd = build_command(source, dry_run=True, cfg=cfg, codex_home=shim)
+    swap_in_cursor(source, str(REPO))
+    log = log_path(source, True)
+    rc, stdout = invoke(cmd, log=log, env=dict(os.environ), timeout=timeout)
     result = parse_result(stdout)
-    row = {"source": source, "mode": "dry-run" if dry_run else "run", "rc": rc,
-           "sessions": result.get("n_sessions"), "tasks": result.get("n_tasks"),
-           "accepted": result.get("accepted"), "gate": result.get("gate_action") or None,
-           "proposals": n_proposals(result), "staging_dir": result.get("staging_dir") or None,
-           "log": str(log)}
+    row = {"source": source, "mode": "dry-run", "rc": rc, "sessions": result.get("n_sessions"),
+           "tasks": result.get("n_tasks"), "accepted": result.get("accepted"),
+           "gate": result.get("gate_action") or None, "proposals": n_proposals(result),
+           "staging_dir": result.get("staging_dir") or None, "log": str(log)}
+    record(row)
+    return row
+
+
+def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[str, Any],
+                     timeout: int, max_rounds: int, jobs: int,
+                     max_sessions: int = 0) -> dict[str, Any]:
+    """One stateful source night through the chain; returns its nights.jsonl row."""
+    project = str(REPO)
+    log = log_path(source, False)
+    hdir = handoff_dir(source)
+    shim = codex_shim(cfg) if source == "codex" else None
+    cmd = build_command(source, dry_run=False, cfg=cfg, codex_home=shim, max_sessions=max_sessions)
+    env = {**os.environ, "SKILLOPT_SLEEP_HANDOFF_DIR": str(hdir)}
+
+    def attempt(entry: failover.Entry) -> dict[str, Any]:
+        snap = snapshot_state()
+        before = swap_in_cursor(source, project)
+        reset_dir(hdir)
+        deadline = time.monotonic() + timeout
+        rounds = answered = 0
+        try:
+            with open(log, "a") as lf:
+                lf.write(f"\n== attempt on {entry.label}\n")
+            while True:
+                rounds += 1
+                rc, stdout = invoke(cmd, log=log, env=env, timeout=deadline - time.monotonic())
+                if rc != 3:
+                    break
+                if rounds >= max_rounds:
+                    raise failover.AttemptFailed(f"still pending after {rounds} rounds")
+                if time.monotonic() >= deadline:
+                    raise failover.AttemptFailed(f"timeout after {rounds} rounds")
+                answered += answer_pending(entry, hdir, jobs)
+            result = parse_result(stdout)
+            why = night_failure(rc, result)
+            if why:
+                raise failover.AttemptFailed(why)
+        except failover.AttemptFailed:
+            restore_state(snap)
+            reset_dir(hdir)
+            raise
+        save_cursor(source, project, before)
+        archive_handoff(source)
+        return {"rc": rc, "result": result, "rounds": rounds, "answered": answered}
+
+    res = failover.run_chain(entries, attempt, task=f"skillopt-night {source}",
+                             log_path=state_dir() / "attempts.jsonl")
+    failed = [f"{r['label']}: {r['why']}" for r in res.attempts if not r["ok"]]
+    if not res.ok:
+        row = {"source": source, "mode": "run", "status": "chain_exhausted", "rc": None,
+               "proposals": 0, "failed": failed, "log": str(log)}
+    else:
+        v, result = res.value, res.value["result"]
+        row = {"source": source, "mode": "run", "status": "ok", "entry": res.entry.label,
+               "rc": v["rc"], "rounds": v["rounds"], "answered": v["answered"],
+               "sessions": result.get("n_sessions"), "tasks": result.get("n_tasks"),
+               "accepted": result.get("accepted"), "gate": result.get("gate_action") or None,
+               "proposals": n_proposals(result), "staging_dir": result.get("staging_dir") or None,
+               "failed": failed, "log": str(log)}
     record(row)
     return row
 
@@ -370,29 +509,25 @@ def run_source(source: str, *, dry_run: bool, cfg: dict[str, Any], timeout: int,
 
 def cmd_night(args: argparse.Namespace) -> int:
     cfg = load_config()
-    backend = str(cfg.get("backend") or "")
-    if not args.dry_run and backend in MOCK_BACKENDS:
-        print("skillopt-night: waiting for backend decision; run `skillopt-night --dry-run` "
-              "(see docs/skillopt-sleep.md)")
-        record({"mode": "run", "status": "waiting-backend"})
-        return 0
     sources = available_sources(cfg, args.source)
+    entries: list[failover.Entry] = []
+    night = load_night()
+    if not args.dry_run:
+        if not night.get("enabled") or not night.get("chain"):
+            print("skillopt-night: waiting for backend decision (no enabled chain in "
+                  f"{night_path()}); run `skillopt-night --dry-run` (see docs/skillopt-sleep.md)")
+            record({"mode": "run", "status": "waiting-backend"})
+            return 0
+        try:
+            entries = load_entries(night)
+        except failover.ChainError as e:
+            print(f"skillopt-night: chain refused: {e}", file=sys.stderr)
+            record({"mode": "run", "status": "chain-invalid", "why": str(e)})
+            ping(f"djbclark-ade: skillopt-sleep chain refused ({e}); fix {night_path()}")
+            return 1
     if not sources:
         print("skillopt-night: no transcript source with data", file=sys.stderr)
         return 0
-    extra_env: dict[str, str] | None = None
-    if not args.dry_run and uses_backend(cfg, "azure_openai"):
-        extra_env = litellm_env(cfg)
-        if extra_env is None:
-            msg = ("azure_openai backend unavailable: no LiteLLM key in sudo-secretspec "
-                   f"({' or '.join(LITELLM_SECRETS)}); see docs/skillopt-sleep.md")
-            print(f"skillopt-night: {msg}", file=sys.stderr)
-            record({"mode": "run", "status": "backend-unavailable"})
-            ping(f"djbclark-ade: skillopt-sleep {msg}")
-            return 0
-    if not args.dry_run and uses_backend(cfg, "handoff"):
-        # Handoff resumes by re-running the same command; one source per night.
-        sources = sources[:1]
     sd = state_dir()
     sd.mkdir(parents=True, exist_ok=True)
     with open(sd / "night.lock", "w") as lock:
@@ -406,27 +541,49 @@ def cmd_night(args: argparse.Namespace) -> int:
             print(f"skillopt-night: skipped, machine overloaded ({why})", file=sys.stderr)
             record({"mode": "dry-run" if args.dry_run else "run", "status": f"skipped: {why}"})
             return 0
-        rows = [run_source(s, dry_run=args.dry_run, cfg=cfg, timeout=args.timeout,
-                           extra_env=extra_env) for s in sources]
+        if args.dry_run:
+            rows = [run_dry(s, cfg=cfg, timeout=args.timeout or DEFAULT_TIMEOUT_S) for s in sources]
+        else:
+            timeout = args.timeout or int(night.get("source_timeout_s", DEFAULT_TIMEOUT_S))
+            rows = [run_source_chain(s, entries, cfg=cfg, timeout=timeout,
+                                     max_rounds=int(night.get("max_rounds", DEFAULT_MAX_ROUNDS)),
+                                     jobs=int(night.get("jobs", DEFAULT_JOBS)),
+                                     max_sessions=int(night.get("max_sessions", 0)))
+                    for s in sources]
     for r in rows:
-        print(f"{r['source']:12} rc={r['rc']} sessions={r['sessions']} tasks={r['tasks']} "
-              f"gate={r['gate']} proposals={r['proposals']} log={r['log']}")
+        print(f"{r['source']:12} {r.get('status', 'ok'):15} entry={r.get('entry', '-')} "
+              f"rc={r.get('rc')} sessions={r.get('sessions')} tasks={r.get('tasks')} "
+              f"gate={r.get('gate')} proposals={r.get('proposals')} log={r['log']}")
     if args.dry_run:
         return 0 if all(r["rc"] == 0 for r in rows) else 1
-    staged = [r for r in rows if r["proposals"]]
+    staged = [r for r in rows if r.get("proposals")]
     if staged:
         n = sum(r["proposals"] for r in staged)
         ping(f"djbclark-ade: skillopt-sleep staged {n} proposal(s) from "
              f"{','.join(r['source'] for r in staged)}; review: {REVIEW}")
-    pending = [r for r in rows if r["rc"] == 3 and uses_backend(cfg, "handoff")]
-    if pending:
-        ping(f"djbclark-ade: skillopt-sleep handoff prompts pending for {pending[0]['source']}; "
-             "answer them with /skillopt-sleep")
-    failed = [r for r in rows if r["rc"] not in (0, 3) or (r["rc"] == 3 and not pending)]
-    if failed:
-        ping(f"djbclark-ade: skillopt-sleep run failed for "
-             f"{','.join(r['source'] for r in failed)}; logs in {sd}")
-    return 0 if not failed else 1
+    exhausted = [r for r in rows if r.get("status") == "chain_exhausted"]
+    if exhausted:
+        ping(f"djbclark-ade: skillopt-sleep chain exhausted for "
+             f"{','.join(r['source'] for r in exhausted)}; see {sd}/attempts.jsonl")
+    return 0 if not exhausted else 1
+
+
+def cmd_chain_check(_args: argparse.Namespace) -> int:
+    night = load_night()
+    print(f"chain: {night_path()} enabled={bool(night.get('enabled'))} "
+          f"allow={night.get('allow') or DEFAULT_ALLOW}")
+    try:
+        entries = load_entries(night)
+    except failover.ChainError as e:
+        print(f"chain refused: {e}")
+        return 2
+    if not entries:
+        print("chain is empty")
+        return 1
+    rows = failover.check_table(entries)
+    failover.print_table(rows, ["#", "label", "vendor", "pool", "pool_family",
+                                "floor_percent", "ready", "why"])
+    return 0 if any(r["ready"] == "yes" for r in rows) else 1
 
 
 def cmd_sources(_args: argparse.Namespace) -> int:
@@ -481,22 +638,27 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="skillopt-night",
                                 description="fleet-wide nightly SkillOpt-Sleep cycle")
     p.add_argument("command", nargs="?", default="night",
-                   choices=["night", "sources", "install", "uninstall"])
+                   choices=["night", "chain-check", "sources", "install", "uninstall"])
+    p.add_argument("--chain-check", action="store_true", help="same as the chain-check command")
     p.add_argument("--dry-run", action="store_true",
                    help="skillopt-sleep dry-run --backend mock; never advances checkpoints")
     p.add_argument("--source", action="append", choices=list(SOURCES),
                    help="restrict to this source (repeatable)")
-    p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S,
-                   help="seconds per source run (default %(default)s)")
+    p.add_argument("--timeout", type=int, default=0,
+                   help="seconds per source attempt, all rounds (default: night.json "
+                        f"source_timeout_s, else {DEFAULT_TIMEOUT_S})")
     p.add_argument("--load-wait", type=int, default=DEFAULT_LOAD_WAIT_S,
                    help="seconds to wait for load to drop before skipping (default %(default)s)")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.chain_check:
+        args.command = "chain-check"
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    return {"night": cmd_night, "sources": cmd_sources, "install": cmd_install,
-            "uninstall": cmd_uninstall}[args.command](args)
+    return {"night": cmd_night, "chain-check": cmd_chain_check, "sources": cmd_sources,
+            "install": cmd_install, "uninstall": cmd_uninstall}[args.command](args)
 
 
 if __name__ == "__main__":

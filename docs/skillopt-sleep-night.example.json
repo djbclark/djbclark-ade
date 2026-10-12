@@ -1,0 +1,53 @@
+{
+  "_comment": "skillopt-night backend chain (bin/failover.py). PROVISIONAL 2026-10-12: entries pending operator approval; enabled stays false until then. Allowed TUIs (operator 2026-10-12): zcode, agy, opencode, claude (Haiku/Sonnet only), sipb (MIT SIPB, always last). Denied everywhere: cursor, cline/ClinePass, hermes, opus, fable. Sizing: round 1 sends one LLM-mining prompt per harvested session (118 for claude on 2026-10-12 at the default cap of 120), each a fresh acp-run agent; max_sessions caps that.",
+  "enabled": false,
+  "allow": [
+    "zcode",
+    "agy",
+    "opencode",
+    "claude",
+    "sipb"
+  ],
+  "jobs": 2,
+  "max_rounds": 8,
+  "max_sessions": 40,
+  "source_timeout_s": 7200,
+  "chain": [
+    {
+      "tui": "opencode",
+      "model": "opencode-go/deepseek-v4-flash",
+      "floor_percent": 10,
+      "timeout": 600
+    },
+    {
+      "tui": "agy",
+      "model": "gemini-3.8-flash",
+      "effort": "medium",
+      "floor_percent": 10,
+      "timeout": 600
+    },
+    {
+      "tui": "zcode",
+      "effort": "low",
+      "floor_percent": 10,
+      "timeout": 600
+    },
+    {
+      "tui": "claude",
+      "model": "haiku",
+      "floor_percent": 15,
+      "timeout": 600
+    },
+    {
+      "tui": "claude",
+      "model": "sonnet",
+      "floor_percent": 15,
+      "timeout": 600
+    },
+    {
+      "tui": "sipb",
+      "model": "qwen3-coder:30b",
+      "timeout": 1800
+    }
+  ]
+}
