@@ -422,10 +422,15 @@ def parse_result(stdout: str) -> dict[str, Any]:
 
 
 def n_proposals(result: dict[str, Any]) -> int:
-    staged = result.get("staged_skills") or []
-    if staged:
-        return len(staged)
-    return 1 if result.get("staging_dir") else 0
+    """Proposals actually staged: the staging manifest's per-skill rows plus its legacy
+    (managed skill / CLAUDE.md) entries. A staging dir alone is not a proposal: a
+    rejected night writes one too (run A, 2026-10-12, pinged "staged 1" for nothing)."""
+    staging = result.get("staging_dir")
+    if staging:
+        manifest = _read_json(Path(staging) / "manifest.json", None)
+        if isinstance(manifest, dict):
+            return len(manifest.get("skills") or []) + len(manifest.get("legacy") or {})
+    return len(result.get("staged_skills") or [])
 
 
 def invoke(cmd: list[str], *, log: Path, env: dict[str, str], timeout: float) -> tuple[int, str]:
@@ -631,7 +636,7 @@ def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[st
     env = engine_env({"SKILLOPT_SLEEP_HANDOFF_DIR": str(hdir)})
     pinned = state_dir() / f"digests-{source}.json"
     try:
-        adapter_digests(source, cfg, pinned, max_sessions or 120, exclude)
+        n_pinned = adapter_digests(source, cfg, pinned, max_sessions or 120, exclude)
     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
         row = {"source": source, "mode": "run", "status": "adapter-failed",
                "why": str(e)[:300], "proposals": 0, "log": str(log)}
@@ -704,7 +709,9 @@ def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[st
         v, result = res.value, res.value["result"]
         row = {"source": source, "mode": "run", "status": "ok", "entry": res.entry.label,
                "rc": v["rc"], "rounds": v["rounds"], "answered": v["answered"],
-               "sessions": result.get("n_sessions"), "tasks": result.get("n_tasks"),
+               # the engine reports 0 sessions for pinned digests: count what was pinned
+               "sessions": n_pinned if not result.get("n_sessions") else result.get("n_sessions"),
+               "tasks": result.get("n_tasks"),
                "accepted": result.get("accepted"), "gate": result.get("gate_action") or None,
                "proposals": n_proposals(result), "staging_dir": result.get("staging_dir") or None,
                "failed": failed, "log": str(log)}

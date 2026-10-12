@@ -256,6 +256,16 @@ def test_parse_result_after_progress_lines():
     assert night.parse_result("not json") == {}
 
 
+def test_proposals_counted_from_the_manifest(tmp_path):
+    stage = tmp_path / "night"
+    stage.mkdir()
+    (stage / "manifest.json").write_text(json.dumps({"accepted": False}))
+    assert night.n_proposals({"staging_dir": str(stage)}) == 0, "a rejected night stages nothing"
+    (stage / "manifest.json").write_text(json.dumps(
+        {"skills": [{"skill_name": "a"}, {"skill_name": "b"}], "legacy": {"memory": {}}}))
+    assert night.n_proposals({"staging_dir": str(stage)}) == 3
+
+
 def test_night_failure_reads_diagnostics(tmp_path):
     assert night.night_failure(1, {}) == "skillopt-sleep rc=1"
     assert night.night_failure(0, {"ok": False, "error": "x", "message": "m"}).startswith("skillopt-sleep error")
@@ -343,6 +353,7 @@ def test_handoff_round_answered_by_first_entry(env):
     assert calls[0]["hdir"] == str(env / "handoff" / "claude")
     row = _rows(env)[-1]
     assert (row["status"], row["entry"], row["rounds"], row["answered"]) == ("ok", "claude:haiku@low", 2, 1)
+    assert row["sessions"] == 3, "the engine's own count wins when it reports one"
     assert not (env / "handoff" / "claude").exists(), "a finished night's handoff dir is archived"
     assert len(list((env / "state" / "handoff-archive").iterdir())) == 1
 
@@ -416,6 +427,8 @@ def test_staged_proposals_ping_once(env, monkeypatch):
         {"n_tasks": 5, "staging_dir": str(env / "night-1"),
          "staged_skills": [{"skill_name": "a"}, {"skill_name": "b"}]}))
     (env / "night-1").mkdir()
+    (env / "night-1" / "manifest.json").write_text(json.dumps({"skills": [{"skill_name": "a"},
+                                                                         {"skill_name": "b"}]}))
     assert night.main(["--source", "claude"]) == 0
     assert _pings(env) == [("djbclark-ade: skillopt-sleep staged 2 proposal(s) from claude; "
                             "review: skillopt-sleep status --project ~/src/djbclark-ade")]
@@ -689,3 +702,10 @@ def test_stuck_engine_fails_the_attempt(env, monkeypatch):
     assert row["status"] == "chain_exhausted"
     assert all("no progress: round 2 asked the same 1 prompt(s)" in f for f in row["failed"])
 
+
+
+def test_pinned_count_when_engine_reports_no_sessions(env, monkeypatch):
+    _night(env / "home", HAIKU_SONNET)
+    monkeypatch.setenv("FAKE_RESULT", json.dumps({"n_sessions": 0, "n_tasks": 3, "staging_dir": ""}))
+    assert night.main(["--source", "claude"]) == 0
+    assert _rows(env)[-1]["sessions"] == 1
