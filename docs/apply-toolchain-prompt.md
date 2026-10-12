@@ -597,6 +597,19 @@ and it writes its index inside the repo. Tables, measured numbers and the
 Do not change global git config (e.g. making delta the pager) without asking.
 If the user agrees, back up `~/.gitconfig` first (§15).
 
+**Crush over ACP (temporary; added 2026-10-11, djbclark).** Crush is installed
+only to use SIPB LLMs (`brew install crush`; provider in `~/.config/crush/crushrc`).
+No release has an ACP mode, so `acp-run crush` runs a local build: clone the
+fork (`gh repo clone djbclark/crush ~/src/crush`), then
+`git -C ~/src/crush fetch upstream pull/2450/head:pr-2450` and
+`git -C ~/src/crush worktree add -b acp-pr2450 ~/src/crush-acp upstream/main`,
+merge `pr-2450` there (resolve `go.sum` by taking upstream's, then `go mod
+tidy`), cherry-pick the three yolo commits of `yolo-true-unblock`
+(upstream PR #3909, still open), `go build -o ~/.local/bin/crush-acp ./` (copy
+to a temp name, then `mv -f`). Registered in `tools/acp-run/acp-run` as
+`crush`; run it without `--model`. Drop all of this once PR #2450 merges and a
+release has `crush acp`.
+
 **Agent context graph**
 
 | Tool | Website | Install | What it does |
