@@ -41,6 +41,14 @@ FAKE = textwrap.dedent("""\
         echo '            {"value": "gpt-oss-120b", "name": "GPT"}]}]}'
         exit 0
       fi
+      if [ "$x" = "Reply with exactly: OK" ]; then
+        [ -n "$PREFLIGHT_COUNT" ] && echo probe >> "$PREFLIGHT_COUNT"
+        case "${PREFLIGHT_MODE:-pass}" in
+          pass) echo OK; exit 0;;
+          outage) echo 'RequestError: Internal error: Internal service failure {"errorName":"ServiceUnavailableError"}' >&2; exit 1;;
+          zcode_quota) echo 'ZCode turn failed: 1310 [1310][Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-10-14 22:56:01]' >&2; exit 1;;
+        esac
+      fi
     done
     brief=""; log=""; while [ $# -gt 0 ]; do case "$1" in
       -f) brief="$2"; shift;; --log) log="$2"; shift;; esac; shift; done
@@ -59,6 +67,11 @@ FAKE = textwrap.dedent("""\
                 printf 'STATUS: working\\n' > "$report"
                 echo "acp-run: FAILED quota: RequestError: Internal error {\\"message\\": \\"You hit your usage limit. Upgrade to Pro or try again at 8:51 PM.\\"}" >&2
                 echo "acp-run: agent=codex stop=error secs=102.3 tools=21 fail=quota error='usageLimitExceeded'" >&2
+                exit 1;;
+      quota_checkpoint)
+                printf 'STATUS: working\\nstep one done\\nmore work left\\n' > "$report"
+                echo "acp-run: FAILED quota: quota exhausted: retry in 2 hours" >&2
+                echo "acp-run: agent=codex stop=error secs=10.0 tools=2 fail=quota" >&2
                 exit 1;;
       quota_reply)
                 printf 'STATUS: working\\n' > "$report"
@@ -87,6 +100,9 @@ FAKE = textwrap.dedent("""\
                 exit 1;;
       quotes_refusal)
                 printf 'The model answered "Sorry, I cannot fulfill your request" to the first brief.\\nThe second brief fixed that.\\n'; exit 0;;
+      agent_metrics)
+                echo "acp-run: agent=codex stop=error secs=514.8 tools=536 fail=agent error='boom'" >&2
+                exit 1;;
       timeout)  exit 124;;
       timeout_wrapup)  # stlib, 2026-10-10: cancelled at --timeout, report written in the wrap-up turn
                 printf 'STATUS: timed out\\nstaged 13 files, tests pass, not committed\\nDONE\\n' > "$report"
@@ -121,14 +137,26 @@ class Base(unittest.TestCase):
         self.out = self.tmp / "out"
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
+        self.no_quota_snap = self.tmp / "no-quota.json"
+        self.no_quota_snap.write_text(json.dumps({
+            "collected_at": "2099-01-01T00:00:00+00:00",
+            "snapshot": {"accounts": []},
+        }))
 
-    def dispatch(self, *extra: str, mode: str = "writes", name: str = "s1") -> subprocess.CompletedProcess[str]:
-        return self.dispatch_model("m1", *extra, mode=mode, name=name)
+    def base_env(self, mode: str = "writes", **extra: str) -> dict[str, str]:
+        return {"FAKE_MODE": mode, "ACP_DISPATCH_MODEL_CACHE": str(self.tmp / "cache"),
+                "ACP_DISPATCH_PREFLIGHT": str(self.tmp / "preflight"),
+                "AIUSE_SNAPSHOT": str(self.no_quota_snap),
+                "PREFLIGHT_COUNT": str(self.tmp / "preflight-count"),
+                "INFO_COUNT": str(self.tmp / "info-count"), "ACP_DISPATCH_AIUSE": "off", **extra}
+
+    def dispatch(self, *extra: str, mode: str = "writes", name: str = "s1",
+                 env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        return self.dispatch_model("m1", *extra, mode=mode, name=name, env=env)
 
     def dispatch_agent(self, agent: str, model: str, *extra: str, mode: str = "writes", name: str = "s1",
                        env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        e = {"FAKE_MODE": mode, "ACP_DISPATCH_MODEL_CACHE": str(self.tmp / "cache"),
-             "INFO_COUNT": str(self.tmp / "info-count"), "ACP_DISPATCH_AIUSE": "off", **(env or {})}
+        e = self.base_env(mode, **(env or {}))
         return run([agent, "--model", model, "--name", name, "-p", "do the thing", "-C", str(self.repo),
                     "--out", str(self.out), "--acp-run", str(self.fake), *extra], env=e)
 
@@ -138,6 +166,10 @@ class Base(unittest.TestCase):
 
     def probes(self) -> int:
         f = self.tmp / "info-count"
+        return len(f.read_text().splitlines()) if f.exists() else 0
+
+    def preflight_probes(self) -> int:
+        f = self.tmp / "preflight-count"
         return len(f.read_text().splitlines()) if f.exists() else 0
 
     def record(self, name: str = "s1") -> dict[str, Any]:
@@ -197,6 +229,52 @@ class TestDispatch(Base):
         self.assertIn("--model m1", rec["cmd"])
         self.assertIn("--perm all", rec["cmd"])
         self.assertIn("--timeout 2400", rec["cmd"])
+
+    def test_preflight_pass_then_cache_hit(self):
+        self.assertEqual(self.dispatch(name="first").returncode, 0)
+        self.assertEqual(self.dispatch(name="second").returncode, 0)
+        self.assertEqual(self.preflight_probes(), 1)
+
+    def test_no_preflight_skips_probe(self):
+        self.assertEqual(self.dispatch("--no-preflight").returncode, 0)
+        self.assertEqual(self.preflight_probes(), 0)
+
+    def test_close_estimate_adds_checkpoint_instructions(self):
+        snap = self.tmp / "latest.json"
+        snap.write_text(json.dumps({"collected_at": "2099-01-01T00:00:00+00:00", "snapshot": {"accounts": [{
+            "provider": "codex", "windows": [{"label": "weekly", "remaining_percent": 12.0}]}]}}))
+        r = self.dispatch("--est-pct", "9", env={"AIUSE_SNAPSHOT": str(snap)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("## Checkpoint mode", (self.out / "s1-brief.md").read_text())
+        self.assertTrue(self.record()["checkpoint"])
+
+    def test_wont_fit_refuses_without_launching(self):
+        snap = self.tmp / "latest.json"
+        snap.write_text(json.dumps({"collected_at": "2099-01-01T00:00:00+00:00", "snapshot": {"accounts": [{
+            "provider": "codex", "windows": [{"label": "weekly", "remaining_percent": 12.0}]}]}}))
+        r = self.dispatch("--min-headroom", "0", "--est-pct", "13", env={"AIUSE_SNAPSHOT": str(snap)})
+        self.assertEqual(r.returncode, 5)
+        self.assertIn("class=wont-fit", r.stdout)
+        self.assertEqual(self.record()["status"], "unavailable")
+        self.assertEqual(self.preflight_probes(), 0)
+
+    def test_reroute_builds_continuation_and_links_records(self):
+        first = self.dispatch(mode="quota_partial")
+        self.assertEqual(first.returncode, 3)
+        old = self.out / "jobs" / "s1.json"
+        env = {"FAKE_MODE": "writes", "ACP_DISPATCH_MODEL_CACHE": str(self.tmp / "cache"),
+               "ACP_DISPATCH_PREFLIGHT": str(self.tmp / "preflight"),
+               "AIUSE_SNAPSHOT": str(self.tmp / "missing.json"), "ACP_DISPATCH_AIUSE": "off"}
+        result = run(["reroute", str(old), "--agent", "codex", "--model", "m1",
+                      "--acp-run", str(self.fake), "--no-preflight"], env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        new = json.loads((self.out / "jobs" / "s1-reroute-1.json").read_text())
+        self.assertEqual(new["rerouted_from"], str(old.resolve()))
+        continuation = Path(new["brief"]).read_text()
+        self.assertIn("Do not restart", continuation)
+        self.assertIn("Last checkpoint report", continuation)
+        self.assertIn("Current git diff --stat", continuation)
+        self.assertTrue((self.out / "s1-report.md").exists(), "old report remains in place")
 
     def test_scoped_perm_gets_the_out_dir_added(self):
         r = self.dispatch("--perm", "scoped:src/a.py")
@@ -430,7 +508,7 @@ class TestSliceControls(Base):
         cmd = [sys.executable, str(SCRIPT), "codex", "--model", "m1", "--name", "s1",
                "-C", str(self.repo), "--out", str(self.out), "--acp-run", str(self.fake),
                "--no-model-check", "-p", "work"]
-        with subprocess.Popen(cmd, env={**os.environ, "FAKE_MODE": "slow", "ACP_DISPATCH_AIUSE": "off"},
+        with subprocess.Popen(cmd, env={**os.environ, **self.base_env("slow")},
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
             deadline = time.monotonic() + 10
             observed = None
@@ -465,8 +543,7 @@ class TestSliceControls(Base):
         self.dispatch(mode="timeout_wrapup")
         self.assertEqual(self.record()["session_id"], "fake-session")
         for n in (1, 2):
-            r = run(["resume", str(self.record_path()), "--timeout", "0"],
-                    env={"FAKE_MODE": "writes", "ACP_DISPATCH_AIUSE": "off"})
+            r = run(["resume", str(self.record_path()), "--timeout", "0"], env=self.base_env())
             self.assertEqual(r.returncode, 0, r.stderr)
             rec = self.record()
             self.assertIn("--resume fake-session", rec["cmd"])
@@ -485,7 +562,7 @@ class TestSliceControls(Base):
         self.record_path().write_text(json.dumps(rec))
         prompt = self.tmp / "continue.txt"
         prompt.write_text("Finish the remaining check.")
-        r = run(["resume", str(self.record_path()), "-f", str(prompt)])
+        r = run(["resume", str(self.record_path()), "-f", str(prompt)], env=self.base_env())
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(Path(rec["brief"]).read_text().startswith("Finish the remaining check."))
 
@@ -496,7 +573,7 @@ class TestSliceControls(Base):
             "agentCapabilities": {}}}) + "\n" + json.dumps({"kind": "new_session", "data": {
                 "sessionId": "fake-session"}}) + "\n")
         old = Path(rec["report"]).read_text()
-        r = run(["resume", str(self.record_path())])
+        r = run(["resume", str(self.record_path())], env=self.base_env())
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("neither load nor resume", r.stderr)
         self.assertEqual(Path(rec["report"]).read_text(), old)
@@ -505,7 +582,8 @@ class TestSliceControls(Base):
     def test_resume_detached_runner_uses_same_finalize_contract(self):
         self.dispatch()
         mod = runpy.run_path(str(SCRIPT))
-        with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as launch:
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as launch, \
+             patch.dict(os.environ, self.base_env(), clear=False):
             rc = mod["main"](["resume", str(self.record_path()), "--detach", "--no-wait", "--timeout", "0"])
         self.assertEqual(rc, 0)
         self.assertEqual(launch.call_args.args[0][:2], ["launchctl", "submit"])
@@ -746,6 +824,68 @@ class TestAiuseNoteExhausted(Base):
         r = self.dispatch_agent("codex", "m1", mode="quota_partial", env=env)
         self.assertEqual(r.returncode, 3)
         self.assertEqual(self.calls(), [])
+
+    def test_preflight_outage_is_unavailable_and_notes_15m(self):
+        r = self.dispatch(env={"ACP_DISPATCH_AIUSE": str(self.fake_aiuse), "PREFLIGHT_MODE": "outage"})
+        self.assertEqual(r.returncode, 5)
+        self.assertIn("class=outage", r.stdout)
+        self.assertIn("note-exhausted codex --resets-in 15m --reason outage:", self.calls()[0])
+        self.assertEqual(self.record()["status"], "unavailable")
+
+    def test_zcode_1310_preflight_is_quota_with_reset(self):
+        env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse), "PREFLIGHT_MODE": "zcode_quota",
+               "ACP_DISPATCH_PREFLIGHT": str(self.tmp / "preflight"),
+               "PREFLIGHT_COUNT": str(self.tmp / "preflight-count"),
+               "AIUSE_SNAPSHOT": str(self.tmp / "missing.json")}
+        result = run(["zcode", "--name", "s1", "-p", "do it", "-C", str(self.repo),
+                      "--out", str(self.out), "--acp-run", str(self.fake)], env=env)
+        self.assertEqual(result.returncode, 5)
+        self.assertIn("class=quota", result.stdout)
+        self.assertIn("note-exhausted zai --resets-at 2026-10-14T22:56:01", self.calls()[0])
+
+    def test_agent_metrics_stderr_is_not_classified_as_outage(self):
+        env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
+        r = self.dispatch(mode="agent_metrics", env=env)
+        self.assertEqual(r.returncode, 3)
+        self.assertEqual(self.calls(), [])
+        self.assertIn("NO-REPORT: agent", self.record().get("failure", ""))
+
+    def test_slice_timeout_does_not_record_outage_note(self):
+        env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
+        r = self.dispatch(mode="timeout", env=env)
+        self.assertEqual(r.returncode, 124)
+        self.assertEqual(self.calls(), [])
+
+    def test_quota_death_voids_cached_preflight(self):
+        self.assertEqual(self.dispatch(name="first").returncode, 0)
+        self.assertEqual(self.dispatch(name="dies", mode="quota_checkpoint").returncode, 3)
+        self.assertEqual(self.preflight_probes(), 1)
+        self.assertEqual(self.dispatch(name="after").returncode, 0)
+        self.assertEqual(self.preflight_probes(), 2)
+
+    def test_quota_checkpointed_vs_plain_no_report(self):
+        snap = self.tmp / "latest.json"
+        snap.write_text(json.dumps({"collected_at": "2099-01-01T00:00:00+00:00", "snapshot": {"accounts": [{
+            "provider": "codex", "windows": [{"label": "weekly", "remaining_percent": 12.0}]}]}}))
+        env = {"AIUSE_SNAPSHOT": str(snap), "ACP_DISPATCH_AIUSE": "off"}
+        r = self.dispatch("--est-pct", "9", mode="quota_checkpoint", env=env)
+        self.assertEqual(r.returncode, 3)
+        rec_path = self.out / "jobs" / "s1.json"
+        chk = run(["check", str(rec_path)])
+        self.assertEqual(chk.returncode, 5)
+        self.assertIn("quota-checkpointed", chk.stdout)
+        self.assertIn(" reroute ", chk.stdout)
+        r2 = self.dispatch("--name", "s2", mode="quota", env=env)
+        self.assertEqual(r2.returncode, 3)
+        chk2 = run(["check", str(self.out / "jobs" / "s2.json")])
+        self.assertIn("no-report", chk2.stdout.splitlines()[0])
+        self.assertNotIn("quota-checkpointed", chk2.stdout)
+
+    def test_failure_class_rejects_bare_three_digit_metrics(self):
+        mod = runpy.run_path(str(SCRIPT))
+        cls, _ = mod["failure_class"](
+            "acp-run: agent=codex stop=error secs=514.8 tools=536 fail=agent", 1)
+        self.assertEqual(cls, "agent")
 
 
 if __name__ == "__main__":

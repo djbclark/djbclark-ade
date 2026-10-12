@@ -282,8 +282,10 @@ def operator_disabled(path: Path | None = None) -> set[str]:
 
 def load_snapshot() -> tuple[dict[str, Any], float | None]:
     """Read aiuse's own latest snapshot. Never probes; never blocks."""
-    path = SNAPSHOT
+    path = Path(os.environ.get("AIUSE_SNAPSHOT") or SNAPSHOT)
     if not path.exists():
+        if os.environ.get("AIUSE_SNAPSHOT"):
+            return {}, None
         candidates = sorted(path.parent.glob("20*.json"), reverse=True) if path.parent.is_dir() else []
         if not candidates:
             return {}, None

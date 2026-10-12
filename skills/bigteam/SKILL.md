@@ -88,9 +88,11 @@ because no snapshot sees a pool drained in the last few minutes.
 Read every number per `model-routing`'s *Reading quota numbers* and *agy has a
 burst limit* (the one copy of those rules): used is consumed, the fullest window
 binds, one TUI can hold several model-family pools (retry the vendor's other
-pool before reassigning), re-probe before each batch, preflight each target
-with `"Reply with exactly: OK"`, and agy only via `acp-run agy`, no probe loops.
-`aiuse --available` already encodes the first three in its output.
+pool before reassigning), re-probe before each batch, and agy only via
+`acp-run agy`, no probe loops. `acp-dispatch` enforces the target preflight
+with `"Reply with exactly: OK"`, caches a pass per agent/model for ten minutes,
+and refuses measured pools below 10% left. `aiuse --available` already encodes
+the first three in its output.
 
 Classify every pool before assigning anything:
 
@@ -389,7 +391,9 @@ its `.done` marker, the acp-run log, the stderr summary and the
 `scoped:` perm so the agent can write its report. Exit 0 = report ends in
 `DONE`; 1 = report present but unfinished, or acp-run failed; 3 = finished with
 no report (a delivery failure: re-task it, never reconstruct); 4 = the report
-starts `BLOCKED: <question>` (answer it, then resume the slice); 124 = timeout.
+starts `BLOCKED: <question>` (answer it, then resume the slice); 5 = pool
+unavailable before launch (re-plan with `--exclude`; this consumes no slice
+attempt); 124 = timeout.
 `acp-dispatch check $OUT` classifies every slice the same way later. **A Claude
 Code Agent-tool sub-agent cannot be driven by a script**: paste
 `acp-dispatch footer --report <scratchpad>/<name>-report.md` into its prompt
@@ -442,6 +446,13 @@ until the work is committed or recorded in a repo.
    `-r2-report.md`, and keeps the same out-folder report and `.done` paths.
    Agents advertising neither load nor resume exit 2. Only if resume fails,
    reconstruct from the diff with a fresh read-only slice.
+7. **Budget pool room too.** Pass `--est-pct N` when the orchestrator can
+   estimate the binding-window cost. A slice that will not fit exits 5 before
+   launch. Near-fit and unmeasured pools automatically get checkpoint mode;
+   use `--checkpoint` to force it. On quota death, `check` reports
+   `quota-checkpointed` and prints an `acp-dispatch reroute <record> --agent A
+   --model M` continuation command. The new record links `rerouted_from`; the
+   successor gets the original brief, checkpoint and owned-path diff stat.
 
 For agents with no working ACP route (zcode, muse), and as a fallback for
 agy when its ACP client fails (it fails independently of the CLI), use the
@@ -675,6 +686,8 @@ front of the operator if it removes something they deliberately built.
 | no notification when an agent finishes | it was launched with a trailing shell `&` and no `run_in_background` call, so the harness is not tracking it | run each slice as a foreground command in its own `run_in_background: true` call (Step 4) |
 | a wait loop never ends | `until ! pgrep -f '<pattern>'` matches its own shell | wait on the report file, a PID or `wait`; bound it with `timeout` |
 | `RESOURCE_EXHAUSTED` / "usage limit" from a vendor you thought had headroom | `used_percent` read as free; or the pool was drained since the probe; or that model family's pool is spent while a sibling pool is fine | decide from `remaining_percent`, preflight, re-probe per batch, retry on the sibling model family |
+| seven `opencode-go/*` slices fail in 15-21 s with `ServiceUnavailableError` / `Internal service failure` | the pool is in an outage, which quota snapshots do not show | automatic preflight exits 5, records a 15-minute outage override, and launches no slice; re-plan with `--exclude opencode-go` |
+| zcode says `1310 ... Weekly/Monthly Limit Exhausted` with a reset time | z.ai's pool is exhausted but aiuse has no live collector for the TUI | automatic preflight classifies quota, records the reset for `zai`, exits 5 and launches nothing; re-plan with `--exclude zai` |
 
 ## What this skill is not for
 

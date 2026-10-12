@@ -34,8 +34,9 @@ skill's snapshot in the same turn.
   machine form. Exit 0 = pools exist, **3 = nothing usable**, 1 = error. The
   cache (`~/.cache/aiuse/snapshots/latest.json`) stays fresh because the operator
   often runs `aiuse watch` and a launchd job snapshots hourly; treat it as good
-  while it says `fresh`, and still preflight each target (item 5 below), since no
-  snapshot sees a pool drained in the last few minutes. `aiuse serve` defaults to
+  while it says `fresh`; `acp-dispatch` automatically preflights the exact
+  agent/model and caches a pass for ten minutes, since no snapshot sees a pool
+  drained in the last few minutes. `aiuse serve` defaults to
   port 28787 and is not running here.
 - `aiuse --json -q` — everything, including exhausted pools. Schema 1.1 is
   self-describing: per window `state` (`exhausted` <=1% left, `tight` <15%, `ok`,
@@ -226,11 +227,20 @@ acp-run <agent> --info      # its models, modes and auth methods
 [--timeout S]`. It makes `--model` mandatory, appends the shared delivery footer
 (`docs/dispatch-footer.md`: report file, pointer-only final message, `BLOCKED:`
 protocol, no waiting by ending the turn), writes the report, `.done` marker, log
-and `jobs/<name>.json` record under `~/.local/state/bigteam/<task>/`, and exits
-0 done / 1 unfinished / 3 no report / 4 BLOCKED / 124 timeout. `acp-dispatch
+and `jobs/<name>.json` record under `~/.local/state/bigteam/<task>/`. Before
+launch it applies the router's snapshot, a 10% headroom gate (stricter than
+`route_agent plan`, which defaults to 15%), estimated-fit gate, and cached live
+preflight; `--no-preflight` and `--min-headroom 0` are explicit overrides. It
+exits 0 done / 1 unfinished / 3 no report / 4 BLOCKED / 5 pool unavailable
+before launch / 124 timeout. Exit 5 means re-plan with `--exclude` and does not
+count as a slice attempt. `acp-dispatch
 check <dir|report>...` classifies later; `acp-dispatch footer --report <path>`
 prints the footer for a Claude Code Agent-tool prompt, which no script can
 drive. Everything below about acp-run's flags still applies underneath it.
+Pass `--est-pct N` when known; near-fit and unmeasured work gets incremental
+checkpoint instructions (`--checkpoint` forces them). A quota death with a
+checkpoint prints `acp-dispatch reroute <record> --agent A --model M`, which
+continues from the report and diff in a linked record instead of restarting.
 
 - **Agents** (`--list`): claude (via the `claude-agent-acp` adapter), codex
   (via `codex-acp`), copilot, opencode, cursor, qwen, devin, cline,

@@ -90,6 +90,14 @@ class TestWasteBurning(unittest.TestCase):
         c = r.route("bulk", quota=q, min_headroom=15.0)
         self.assertNotEqual(c.service.name, "antigravity")
 
+    def test_default_headroom_gate_excludes_below_fifteen(self):
+        q = dict(IDLE, antigravity={"remaining": 14.9})
+        self.assertNotEqual(r.route("bulk", quota=q).service.name, "antigravity")
+
+    def test_default_headroom_excludes_note_exhausted_pool(self):
+        q = dict(IDLE, codex={"remaining": 0.0, "windows": {"weekly": 0.0}})
+        self.assertNotEqual(r.route("code", quota=q).service.name, "codex")
+
     def test_github_work_routes_to_copilot(self):
         self.assertEqual(r.route("github", quota=IDLE).service.name, "copilot")
 
@@ -353,6 +361,17 @@ class TestPlanWave(unittest.TestCase):
     def test_exclude_skips_a_service_that_just_failed(self):
         c = r.plan(["code"], quota=self.Q, exclude={"antigravity-claude"})[0][1]
         self.assertNotEqual(c.service.name, "antigravity-claude")
+
+    def test_plan_applies_default_fifteen_percent_headroom(self):
+        q = {**self.Q, "antigravity-claude": {"remaining": 14.0}}
+        c = r.plan(["code"], quota=q)[0][1]
+        self.assertNotEqual(c.service.name, "antigravity-claude")
+
+    def test_plan_skips_note_exhausted_pool(self):
+        q = {**self.Q, "codex": {"remaining": 0.0}}
+        c = r.plan(["code"], quota=q)[0][1]
+        self.assertIsNotNone(c)
+        self.assertNotEqual(c.service.name, "codex")
 
     def test_no_room_comes_back_as_none_not_an_error(self):
         drained = {k: {"remaining": 1.0} for k in {*IDLE, "antigravity-claude"}}
