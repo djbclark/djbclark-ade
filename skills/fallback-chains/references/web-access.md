@@ -412,6 +412,10 @@ Names and paths only. Never print or copy a key.
       parallel-search) never load. crawl4ai works through a stdio bridge to
       the shared server: `mcp-proxy --transport streamablehttp
       http://127.0.0.1:18798/mcp` (scrape of example.com returned the title).
+      Same day, djbclark chose to bridge all four `serverUrl` servers the same
+      way (exa and jina pass their key with `-H`, so it shows in `ps`); after it
+      agy's session loaded all 7 servers and an exa `web_search_exa` call
+      answered. Backup `mcp_config.json.bak-2026-10-12-agy-bridges`.
    6.4.6. A no-model sign that a client sends the Exa key: Exa's `tools/list`
       adds `agent_run` only when an `x-api-key` header is present (any key;
       the vault key's validity was checked separately: a bogus key gets
