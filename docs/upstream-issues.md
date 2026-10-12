@@ -856,7 +856,7 @@ CLI rollout layout, our shim) and
 https://github.com/microsoft/SkillOpt/issues/286#issuecomment-6132512856
 (replay provenance applies to CLI rollouts too).
 
-## 16. SkillOpt — make transcript sources and backends pluggable (draft, 2026-10-12; not filed)
+## 16. SkillOpt — make transcript sources and backends pluggable (filed 2026-10-12: microsoft/SkillOpt#314)
 
 **Repo:** microsoft/SkillOpt, `skillopt_sleep`, main at 343db229.
 
@@ -912,4 +912,7 @@ and source; found by the 2026-10-12 re-search on "since_iso"). Related single-so
 sessions), [#247](https://github.com/microsoft/SkillOpt/issues/247) /
 [#280](https://github.com/microsoft/SkillOpt/pull/280) (`revert`).
 Here: bin/skillopt_sources.py and bin/skillopt-night are the working
-adapters the PR would generalise. Ask djbclark before filing.
+adapters the PR would generalise. Operator approved filing; re-searched first
+(adding "entry_points", "external harvester", "third-party source", "register
+source"; PR #153's "seam" is one more if-branch, not a registry). Filed with an
+offer to send the PR: https://github.com/microsoft/SkillOpt/issues/314.

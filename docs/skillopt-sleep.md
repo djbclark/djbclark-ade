@@ -280,9 +280,9 @@ Runner workarounds for upstream behaviour:
 
 ## 8. Phase 2: pluggable sources and backends (queued, docs/queue.md)
 
-Upstream's `harvest_sources.py` and `get_backend` are fixed if-chains. The
-draft upstream issue ([upstream-issues.md](upstream-issues.md) section 16, not
-filed) proposes `skillopt_sleep.sources` / `skillopt_sleep.backends` entry
+Upstream's `harvest_sources.py` and `get_backend` are fixed if-chains.
+[microsoft/SkillOpt#314](https://github.com/microsoft/SkillOpt/issues/314)
+(filed 2026-10-12, with an offer to send the PR) proposes `skillopt_sleep.sources` / `skillopt_sleep.backends` entry
 points, `--source-module`/`--backend-module`, an error for unknown backends,
 the per-source checkpoint, and a public helper API for redaction and replay
 filters. With that merged, the three adapters here would register as real

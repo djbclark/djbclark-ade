@@ -21,9 +21,9 @@ the other limit phrasings in `failure_class`'s `quota_terms`), and a stable
 **Queued 2026-10-12 (operator asked for SkillOpt across all agent runs).
 Partly done the same day:** zcode, agy and crush adapters ship in
 `bin/skillopt_sources.py` (docs/skillopt-sleep.md section 7). Remaining: (1) the
-upstream issue drafted in docs/upstream-issues.md section 16 (entry points for
-sources and backends, unknown backend raises, per-source checkpoint, public
-helpers; ask before filing, then the PR); (2) adapters for Hermes, grok, muse,
+upstream PR offered in microsoft/SkillOpt#314 (entry points for sources and
+backends, unknown backend raises, public helpers; per-source checkpoint is
+#312), once upstream answers; (2) adapters for Hermes, grok, muse,
 cline and acp-dispatch job reports, each with the replay-session filter; (3)
 add them to `bin/skillopt-night`'s source loop. Drop the runner's codex shim
 when upstream PR 282 merges.
