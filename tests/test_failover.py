@@ -20,6 +20,9 @@ sys.path.insert(0, str(ROOT / "bin"))  # bin/ is not a package; skillopt-night i
 import failover  # pyright: ignore[reportMissingImports]
 
 SECRET = "sk-sipb-" + "c0ffee11" * 4
+# A fake acp-run whose result record says failure=provider (claude writing fake tool calls).
+LOG_PROVIDER = ('LOG=""; prev=""; for x in "$@"; do [ "$prev" = "--log" ] && LOG="$x"; prev="$x"; done\n'
+                '[ -n "$LOG" ] && echo \'{"kind": "result", "data": {"tool_calls": 0, "failure": "provider"}}\' > "$LOG"\n')
 # A fake acp-run line that finds its --log argument and writes a result record there.
 LOG_RESULT = ('LOG=""; prev=""; for x in "$@"; do [ "$prev" = "--log" ] && LOG="$x"; prev="$x"; done\n'
               '[ -n "$LOG" ] && echo \'{{"kind": "result", "data": {{"tool_calls": {tools}}}}}\' > "$LOG"\n')
@@ -319,6 +322,7 @@ def test_ask_child_env_is_minimal_and_logs_are_private(tmp_path, monkeypatch):
     (LOG_RESULT.format(tools=2) + "echo DONE\n", False, "started 2 tool call(s)"),
     ("echo no log written\n", False, "no result record"),
     (LOG_RESULT.format(tools=0) + "echo quota >&2; exit 1\n", False, "inconclusive (rc=1)"),
+    (LOG_PROVIDER + "exit 1\n", True, "rc=1 provider: no tool to call"),
 ])
 def test_canary(tmp_path, monkeypatch, body, ok, why):
     _fake_acp(tmp_path, monkeypatch, "acp-canary", body)

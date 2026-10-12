@@ -698,16 +698,22 @@ CANARY_PROMPT = ("Use your tools to do two things: (1) create an empty file name
                  "body 'canary' to the basic-memory knowledge base. Then reply with exactly: DONE")
 
 
-def tool_calls_in_log(log: Path) -> int | None:
-    """tool_calls from acp-run's result record (None if the log has none)."""
+def result_in_log(log: Path) -> dict[str, Any] | None:
+    """acp-run's result record (tool_calls, failure, ...), or None if the log has none."""
     try:
         for line in reversed(log.read_text().splitlines()):
             row = json.loads(line)
             if row.get("kind") == "result":
-                return int((row.get("data") or {}).get("tool_calls") or 0)
+                return row.get("data") or {}
     except (OSError, ValueError):
         return None
     return None
+
+
+# rc 1 with these failure classes still proves the canary: the model ran and could not
+# (claude without tools writes fake <invoke_tool> text: "No such tool available",
+# classed provider; run A, 2026-10-12) or would not (refused) use a tool.
+CANARY_RC1_HOLDS = ("provider", "refused")
 
 
 def canary_ok(entry: Entry) -> tuple[bool, str]:
@@ -724,7 +730,8 @@ def canary_ok(entry: Entry) -> tuple[bool, str]:
             _cache[key] = (False, f"canary inconclusive: {e}")
             return _cache[key]
         rc = proc.returncode
-        tools = tool_calls_in_log(log)
+        result = result_in_log(log)
+        tools = None if result is None else int(result.get("tool_calls") or 0)
         if rc == EXIT_TRIPWIRE:
             _cache[key] = (False, "canary: a tool ran without permission (tripwire)")
         elif created:
@@ -735,6 +742,9 @@ def canary_ok(entry: Entry) -> tuple[bool, str]:
             _cache[key] = (False, f"canary: the agent started {tools} tool call(s) (tools must be 0)")
         elif rc == 0:
             _cache[key] = (True, "canary held (rc=0, 0 tool calls, no file)")
+        elif rc == 1 and (result or {}).get("failure") in CANARY_RC1_HOLDS:
+            _cache[key] = (True, (f"canary held (rc=1 {result.get('failure')}: no tool to call; "
+                                 "0 tool calls, no file)"))
         else:
             tail = (proc.stderr or "").strip().splitlines()[-1:] or [""]
             _cache[key] = (False, f"canary inconclusive (rc={rc}) {tail[0][:120]}")
