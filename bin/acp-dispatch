@@ -716,7 +716,53 @@ launchctl remove {q(label)}
 """
 
 
+def machine_overloaded() -> str | None:
+    """Why the machine is too loaded to start another agent now, or None.
+
+    Every slice starts a whole agent plus its per-session MCP servers (~0.5-1 GB
+    phys footprint). On 2026-10-12 five slices plus a bench started within ~15 min
+    on the 16 GB Mac drove swap to 10.5 of 11.3 GB and the load average to 230.
+    """
+    try:
+        load1 = os.getloadavg()[0]
+        ncpu = os.cpu_count() or 8
+        if load1 > GATE_LOAD_PER_CPU * ncpu:
+            return f"load {load1:.0f} > {GATE_LOAD_PER_CPU}x{ncpu} cpus"
+        lvl = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        if lvl == "4":
+            return "memory pressure critical"
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return None
+
+
+GATE_LOAD_PER_CPU = 4
+GATE_POLL_S = 15
+
+
+def wait_for_capacity(record: Path) -> None:
+    """Hold the slice before it spawns while the machine is overloaded (never kills
+    anything already running). ACP_DISPATCH_NO_GATE=1 skips; the wait is capped at
+    ACP_DISPATCH_GATE_MAX seconds (default 900), after which the slice starts anyway."""
+    if os.environ.get("ACP_DISPATCH_NO_GATE") == "1":
+        return
+    cap = int(os.environ.get("ACP_DISPATCH_GATE_MAX", "900"))
+    start = time.monotonic()
+    why = machine_overloaded()
+    if not why:
+        return
+    update_record(record, gate=f"waiting: {why}")
+    print(f"acp-dispatch: holding start, {why} (up to {cap}s)", file=sys.stderr)
+    while why and time.monotonic() - start < cap:
+        time.sleep(GATE_POLL_S)
+        why = machine_overloaded()
+    waited = int(time.monotonic() - start)
+    update_record(record, gate=f"waited {waited}s" + (f", started anyway: {why}" if why else ""))
+
+
 def execute_record(record: Path, tee: bool = False) -> int:
+    wait_for_capacity(record)
     rec = json.loads(record.read_text())
     with open(rec["final"] + ".tmp", "w") as fo, open(rec["stderr"], "w") as fe:
         proc = subprocess.Popen(shlex.split(rec["cmd"]), stdout=subprocess.PIPE if tee else fo,
