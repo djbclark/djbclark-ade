@@ -59,8 +59,8 @@ For a deliberate backfill run once by hand with `--lookback-hours N` (0 = all
 history; expensive).
 
 **`max_tokens_per_night` is not enforced** at 343db229: the key exists in
-`config.py` but nothing reads it (draft upstream issue in
-[upstream-issues.md](upstream-issues.md) section 14). Spend is bounded by
+`config.py` but nothing reads it (filed as
+[microsoft/SkillOpt#313](https://github.com/microsoft/SkillOpt/issues/313)). Spend is bounded by
 `max_sessions` and `max_tasks_per_night`, `edit_budget`, the fan-out groups,
 `max_rounds` and the per-source timeout.
 
@@ -221,14 +221,16 @@ Runner workarounds for upstream behaviour:
 1. **Per-source cursors.** Upstream keys the harvest checkpoint by project
    only, so the second source in a night would see only sessions newer than
    the first run. The runner keeps one cursor per source in `cursors.json` and
-   swaps it into `state.json` before each run (draft upstream issue,
-   [upstream-issues.md](upstream-issues.md) section 15). Adapter sources use
+   swaps it into `state.json` before each run (filed as
+   [microsoft/SkillOpt#312](https://github.com/microsoft/SkillOpt/issues/312)). Adapter sources use
    their cursor as the adapter's `--since`.
 2. **Codex shim.** Upstream's codex harvester reads only a flat
    `~/.codex/archived_sessions` (Codex Desktop). Codex CLI writes
    `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`; the runner rebuilds
    `~/.local/state/skillopt-sleep/codex-home/archived_sessions/` as symlinks
-   and passes `--codex-home`. Drop it when upstream PR 282 merges.
+   and passes `--codex-home`. Drop it when upstream
+   [PR 282](https://github.com/microsoft/SkillOpt/pull/282) merges (evidence
+   comment posted 2026-10-12; subscribed, with issue 286).
 3. **Per-source handoff dirs.** Upstream's handoff dir is one per project, and
    it pins `digests.json`/`tasks.json` for resumption; it is archived only when
    a night stages something. The runner sets `SKILLOPT_SLEEP_HANDOFF_DIR` per
@@ -252,7 +254,9 @@ Remaining adapters: Hermes, grok, muse, cline, acp-dispatch job reports.
 Searched upstream 2026-10-12 ("pluggable", "plugin source", "entry point",
 "custom transcript", "transcript source", "custom backend", "backend
 registry", "get_backend", "per-source", "checkpoint", "budget"): no proposal for
-either. Related single-source work: issue 225 / PR 266 (DeepSeek Harness),
+either. Open single-source PRs worth watching: PR 153 (Antigravity, the
+`antigravity` dir only) and PR 114 (Hermes as backend and source). Related
+single-source work: issue 225 / PR 266 (DeepSeek Harness),
 issue 97 (VS Code Copilot), PR 282 (Codex CLI rollouts), issue 286 / PR 287
 (exclude Codex replay sessions); issue 247 / PR 280 (`revert`).
 

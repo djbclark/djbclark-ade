@@ -787,7 +787,7 @@ Observed on Claude Code 2.1.296, macOS. The display name comes from the function
 
 I searched anthropics/claude-code issues for "PostCompact", "PreCompact completed successfully", "hook command shown transcript" and "alwaysLoad". The nearest threads are #89622 (PostCompact stdin JSON escaping), #91910 (compact hooks firing for sub-agent compaction) and #101070 (an "idle" trigger value). None covers how the hook is displayed or what it costs in context.
 
-## 14. SkillOpt — `max_tokens_per_night` is documented and defaulted but never enforced (draft, 2026-10-12)
+## 14. SkillOpt — `max_tokens_per_night` is documented and defaulted but never enforced (filed 2026-10-12: microsoft/SkillOpt#313)
 
 **Repo:** microsoft/SkillOpt, `skillopt_sleep`, main at
 343db229dbd5ddaf9df6b1d5540d8bcdb2604d5c (installed with `uv tool install`).
@@ -810,9 +810,12 @@ the number of fan-out skill groups.
 ### Searched first
 
 Issues and PRs for "max_tokens_per_night", "budget", "token budget": only
-unrelated threads (155, 130, 132, 57).
+unrelated threads (155, 130, 132), plus one line in the closed multi-topic
+Codex feedback issue #57 (closed as completed for its other points). Re-searched
+before filing (open and closed, issues and PRs, 12 terms); filed as
+https://github.com/microsoft/SkillOpt/issues/313, citing #57.
 
-## 15. SkillOpt — the harvest checkpoint is keyed by project, not by (project, source) (draft, 2026-10-12)
+## 15. SkillOpt — the harvest checkpoint is keyed by project, not by (project, source) (filed 2026-10-12: microsoft/SkillOpt#312)
 
 **Repo:** microsoft/SkillOpt, main at 343db229.
 
@@ -843,7 +846,15 @@ Workaround here: `bin/skillopt-night` swaps a per-source cursor into
 ### Searched first
 
 Issues and PRs for "checkpoint", "last_harvest", "per-source", "source": none
-covers it.
+covers it. Re-searched before filing (adding "harvest checkpoint", "multiple
+sources", "since_iso", "per source"): none. Filed with a measured mock
+repro in isolated state (codex dry-run 60 sessions, a cursor run, the same
+dry-run 0) as https://github.com/microsoft/SkillOpt/issues/312.
+Evidence comments, 2026-10-12, both threads subscribed:
+https://github.com/microsoft/SkillOpt/pull/282#issuecomment-6132512292 (Codex
+CLI rollout layout, our shim) and
+https://github.com/microsoft/SkillOpt/issues/286#issuecomment-6132512856
+(replay provenance applies to CLI rollouts too).
 
 ## 16. SkillOpt — make transcript sources and backends pluggable (draft, 2026-10-12; not filed)
 
@@ -886,7 +897,12 @@ covers it.
 
 Issues and PRs for "pluggable", "plugin source", "entry point", "custom
 transcript", "transcript source", "custom backend", "backend registry",
-"get_backend": no proposal for either. Related single-source work:
+"get_backend": no proposal for either. Open PRs that add one source or backend
+each: [#153](https://github.com/microsoft/SkillOpt/pull/153) (Antigravity
+harvest, reads only `~/.gemini/antigravity/conversations`; our adapter also
+reads the `antigravity-cli` and `antigravity-acp` dirs) and
+[#114](https://github.com/microsoft/SkillOpt/pull/114) (Hermes Agent as backend
+and source; found by the 2026-10-12 re-search on "since_iso"). Related single-source work:
 [#225](https://github.com/microsoft/SkillOpt/issues/225) /
 [#266](https://github.com/microsoft/SkillOpt/pull/266) (DeepSeek Harness),
 [#97](https://github.com/microsoft/SkillOpt/issues/97) (VS Code Copilot),
