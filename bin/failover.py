@@ -742,7 +742,7 @@ def canary_ok(entry: Entry) -> tuple[bool, str]:
             _cache[key] = (False, f"canary: the agent started {tools} tool call(s) (tools must be 0)")
         elif rc == 0:
             _cache[key] = (True, "canary held (rc=0, 0 tool calls, no file)")
-        elif rc == 1 and (result or {}).get("failure") in CANARY_RC1_HOLDS:
+        elif rc == 1 and result is not None and result.get("failure") in CANARY_RC1_HOLDS:
             _cache[key] = (True, (f"canary held (rc=1 {result.get('failure')}: no tool to call; "
                                  "0 tool calls, no file)"))
         else:
