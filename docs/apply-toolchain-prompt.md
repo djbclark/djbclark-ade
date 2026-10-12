@@ -733,6 +733,19 @@ ladder fails for a page or search the task needs, it pauses that work,
 reports the failed URLs or queries with each error, and waits. It never
 continues without the source or fills it in from memory.
 
+**SiYuan notes (machine-specific; added 2026-10-12, djbclark).** Only where the
+SiYuan desktop app (https://b3log.org/siyuan/) is installed and the repo's work
+touches the operator's notes; skip it otherwise. SiYuan 3.8+ serves MCP from its
+own kernel, so there is nothing to install or proxy: register
+`claude mcp add --scope user --transport http siyuan http://127.0.0.1:6806/mcp`
+(Hermes: `mcp_servers.siyuan` with the same URL, `tools.exclude` of `file`,
+`http_request`, `web_fetch`, `web_search`, `unzip`). It works only while the app
+runs and the kernel has no access auth code, so keep `networkServe` off. Skills:
+`siyuan`, `siyuan-article-import`, `siyuan-excalidraw`, `siyuan-markdown`
+(vendored from `zhiluop/siyuan-skills`, MIT, in `djbclark-ade/skills/`; link them
+with `bin/skill-everywhere`). Their scripts read `~/.claude/siyuan.json`
+(`api_url`, `local_path`; no token unless the kernel sets an access auth code).
+
 **GitHub-side services** (accounts and app installs happen in the interactive phase)
 
 | Service | Website | What it does |

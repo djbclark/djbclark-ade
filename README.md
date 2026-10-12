@@ -99,6 +99,7 @@ their old paths are symlinks into this checkout).
 | [`terminus-kira`](skills/terminus-kira/SKILL.md) | Delegate a task to a sandboxed coding agent in an Apple Container VM. |
 | [`sipb-llm-bench`](skills/sipb-llm-bench/SKILL.md) | Benchmark a model on SIPB LLMs (or any OpenAI-compatible server) as a coding-agent backend: probes, tool-call conformance, two scored tasks. |
 | [`coderabbit-feeder`](skills/coderabbit-feeder/SKILL.md) | Queue a CodeRabbit review for a PR where CodeRabbit is not installed. |
+| [`siyuan`](skills/siyuan/SKILL.md) | SiYuan notes: concepts, API, templates, flashcards; with `siyuan-article-import`, `siyuan-excalidraw`, `siyuan-markdown` (vendored from `zhiluop/siyuan-skills`). |
 | [`skillopt-sleep`](skills/skillopt-sleep/SKILL.md) | Review the nightly SkillOpt-Sleep cycle (`bin/skillopt-night`): last night's report, free mock dry-run, per-skill adoption, the backend failover chain (`chain-check`). |
 | [`skillopt-sleep-learned`](skills/skillopt-sleep-learned/SKILL.md) | The catch-all skill SkillOpt-Sleep proposes edits to; lessons that belong to no single skill. |
 | [`reorg-orca`](skills/reorg-orca/SKILL.md) | Reorganize an Orca setup from the CLI; says which moves Orca cannot do yet. |
