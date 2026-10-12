@@ -330,6 +330,7 @@ in prose, and bare high-entropy tokens (mixed case and digits, entropy at least
 4.2 bits per character). It cannot catch everything: a secret written as
 ordinary words still goes out. To keep a project out entirely, list it in
 night.json `exclude_projects` (prefix match, every source).
+**Decision (djbclark, 2026-10-12): `exclude_projects` stays empty on purpose (`projects: "all"`), relying on the strengthened redaction.**
 
 **Retention.** These hold prompts and replies, are mode 0600/0700, and must never
 be committed, pasted or uploaded:
