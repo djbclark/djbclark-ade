@@ -47,11 +47,17 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
    gets a minimal env (`BASE_ENV_KEYS` plus the entry's allow-listed `env`) and
    runs in its own process group, killed whole on timeout. acp-run logs go to
    `~/.local/state/failover/acp-logs/` (0700), trimmed by `sweep_logs()`.
-6. **Chain policy against config tampering** (2026-10-12): `extra_args` may not
-   carry `--perm`, `--mode`, `--model`, `--set`, `--add-dir`, `--agent`, `-C`,
-   `-f`, `-p`, `--log`, `--resume` or the like (`FORBIDDEN_ARGS`; acp-run's
-   options are last-wins), every token and env value is checked against the
-   deny list, and `env` keys outside `ENV_ALLOW` are refused.
+6. **Chain policy against config tampering** (2026-10-12): `extra_args` is an
+   allow-list (`EXTRA_ARGS_ALLOWED`: `--prompt-retries`, `--handshake-tries`,
+   `--handshake-timeout`, `--max-load`, `--load-wait`, `--no-fallback`, and
+   `--set` only as `thought=` or `effort=` with low/medium/high/max), spelled
+   exactly and value-checked; everything else is refused, abbreviations such as
+   `--per all` or `-Call` included (acp-run also sets `allow_abbrev=False`).
+   Every token and env value is checked against the deny list, and `env` keys
+   outside `ENV_ALLOW` are refused.
+7. **Canary**: each acp entry is asked to create a file and write a basic-memory
+   note; it passes only with 0 tool calls (not merely denied), no file and no
+   tripwire.
 
 ## CLI
 

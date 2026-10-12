@@ -96,12 +96,18 @@ agents: claude inherited `bypassPermissions` from settings.json, zcode started
 in yolo, crush ran with `--yolo`, and opencode allows tools by default. Three
 layers now hold: (1) acp-run makes deny real per agent: claude gets a session
 with no built-in tools, no user settings, no MCP and no bypass; zcode starts in
-plan with its tools disallowed; agy runs in mode default; crush runs without
+plan with its tools disallowed (Agent, Skill, SendMessage, TaskOutput, TaskStop
+and `mcp__*` included) and runs on a per-run settings file
+(`ZCODE_CLI_SETTINGS_FILE`) with MCP servers, plugins, skills, subagents and hooks
+off; agy runs in mode default; crush runs without
 `--yolo`; opencode gets `{"permission": "deny"}`. (2) acp-run's tripwire
 cancels the turn and exits 77 if any tool still starts or completes without a
 permission request; failover treats that as a failed entry. (3) Every night's
-preflight runs a canary per entry: it asks the agent to create a file and
-refuses the entry if the file appears or a tool runs.
+preflight runs a canary per entry: it asks the agent to create a file and write
+a basic-memory note, and refuses the entry unless it made **zero** tool calls
+(not merely denied ones), no file appeared and the tripwire did not fire.
+zcode stays in the chain fail-closed: its pool is out until 2026-10-14, so its
+canary has not run live yet, and preflight refuses it until the canary holds.
 
 **One entry per source night.** All prompts of a source night are answered by
 the same entry, so baseline and candidate scores come from one model. An entry

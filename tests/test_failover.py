@@ -20,6 +20,9 @@ sys.path.insert(0, str(ROOT / "bin"))  # bin/ is not a package; skillopt-night i
 import failover  # pyright: ignore[reportMissingImports]
 
 SECRET = "sk-sipb-" + "c0ffee11" * 4
+# A fake acp-run line that finds its --log argument and writes a result record there.
+LOG_RESULT = ('LOG=""; prev=""; for x in "$@"; do [ "$prev" = "--log" ] && LOG="$x"; prev="$x"; done\n'
+              '[ -n "$LOG" ] && echo \'{{"kind": "result", "data": {{"tool_calls": {tools}}}}}\' > "$LOG"\n')
 REAL_ACP_AGENTS_OK = failover.acp_agents_ok
 
 AIUSE = {"schema_version": "1.2", "available": [
@@ -40,7 +43,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(failover, "ATTEMPT_LOG", tmp_path / "attempts.jsonl")
     monkeypatch.setattr(failover, "acp_agents_ok", lambda: {"claude", "agy", "opencode", "zcode"})
     acp = tmp_path / "acp-run"
-    acp.write_text("#!/bin/sh\nexit 0\n")
+    acp.write_text("#!/bin/sh\n" + LOG_RESULT.format(tools=0) + "exit 0\n")
     acp.chmod(0o755)
     monkeypatch.setenv("FAILOVER_ACP_RUN", str(acp))
     spec = tmp_path / "sudo-secretspec"
@@ -137,7 +140,7 @@ def test_sipb_via_opencode_health_check(monkeypatch):
     assert failover.preflight(e, probe=False) == (
         True, "http://127.0.0.1:8890/api/version answered 200; canary not run (it calls the model)")
     ok, why = failover.preflight(e)
-    assert ok and why.endswith("canary held (rc=0, no file)")
+    assert ok and why.endswith("canary held (rc=0, 0 tool calls, no file)")
 
 
 def test_crush_probe(monkeypatch):
@@ -247,14 +250,14 @@ def test_run_chain_exhausted(tmp_path):
 
 def test_acp_command_flags(tmp_path):
     zc, cl, agy = failover.load_chain([
-        {"tui": "zcode", "effort": "low"}, {"tui": "claude", "model": "haiku", "extra_args": ["--x"]},
+        {"tui": "zcode", "effort": "low"}, {"tui": "claude", "model": "haiku", "extra_args": ["--no-fallback"]},
         {"tui": "agy", "model": "gemini-3.8-flash", "effort": "high"}])
     cmd = failover.acp_command(zc, tmp_path / "p.md", tmp_path)
     assert cmd[1:3] == ["zcode", "-C"] and "--model" not in cmd
     assert cmd[cmd.index("--set") + 1] == "thought=low"
     assert cmd[cmd.index("--perm") + 1] == "deny" and cmd[cmd.index("-f") + 1] == str(tmp_path / "p.md")
     cmd = failover.acp_command(cl, tmp_path / "p.md", tmp_path)
-    assert cmd[cmd.index("--model") + 1] == "haiku" and cmd[-1] == "--x" and "--set" not in cmd
+    assert cmd[cmd.index("--model") + 1] == "haiku" and cmd[-1] == "--no-fallback" and "--set" not in cmd
     cmd = failover.acp_command(agy, tmp_path / "p.md", tmp_path)
     assert cmd[cmd.index("--model") + 1] == "gemini-3.8-flash-high"
 
@@ -308,11 +311,14 @@ def test_ask_child_env_is_minimal_and_logs_are_private(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(("body", "ok", "why"), [
-    ('while [ "$1" != "-C" ]; do shift; done; touch "$2/canary"; echo DONE\n', False, "file was created"),
-    ("exit 77\n", False, "tripwire"),
-    ("echo I have no tools\n", True, "canary held"),
-    ("exit 5\n", True, "canary held (rc=5"),
-    ("echo quota >&2; exit 1\n", False, "inconclusive"),
+    (LOG_RESULT.format(tools=1) + 'while [ "$1" != "-C" ]; do shift; done; touch "$2/canary"; echo DONE\n',
+     False, "file was created"),
+    (LOG_RESULT.format(tools=1) + "exit 77\n", False, "tripwire"),
+    (LOG_RESULT.format(tools=0) + "echo I have no tools\n", True, "canary held (rc=0, 0 tool calls"),
+    (LOG_RESULT.format(tools=1) + "exit 5\n", False, "started 1 tool call(s)"),
+    (LOG_RESULT.format(tools=2) + "echo DONE\n", False, "started 2 tool call(s)"),
+    ("echo no log written\n", False, "no result record"),
+    (LOG_RESULT.format(tools=0) + "echo quota >&2; exit 1\n", False, "inconclusive (rc=1)"),
 ])
 def test_canary(tmp_path, monkeypatch, body, ok, why):
     _fake_acp(tmp_path, monkeypatch, "acp-canary", body)
@@ -324,19 +330,41 @@ def test_canary(tmp_path, monkeypatch, body, ok, why):
 
 
 def test_preflight_runs_canary_only_with_probe(tmp_path, monkeypatch):
-    _fake_acp(tmp_path, monkeypatch, "acp-canary2", 'while [ "$1" != "-C" ]; do shift; done; touch "$2/canary"\n')
+    _fake_acp(tmp_path, monkeypatch, "acp-canary2",
+              LOG_RESULT.format(tools=1) + 'while [ "$1" != "-C" ]; do shift; done; touch "$2/canary"\n')
     (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
     assert failover.preflight(cl, probe=False)[0]
     ok, why = failover.preflight(cl)
     assert not ok and "file was created" in why
 
 
-@pytest.mark.parametrize("extra", [["--perm", "all"], ["--perm=all"], ["--model", "haiku"], ["--mode", "bypass"],
-                                   ["--set", "provider=x"], ["--add-dir", "/"], ["--agent", "x"], ["-C", "/"],
-                                   ["--log", "/tmp/x"], ["--resume", "id"]])
+@pytest.mark.parametrize("extra", [
+    ["--perm", "all"], ["--perm=all"], ["--model", "haiku"], ["--mode", "bypass"], ["--add-dir", "/"],
+    ["--agent", "x"], ["-C", "/"], ["--log", "/tmp/x"], ["--resume", "id"],
+    # re-verification R10: argparse abbreviations and glued short options
+    ["--per", "all"], ["--pe", "all"], ["--per=all"], ["--add", "/Users/djbclark"], ["-Call"],
+    ["-fprompt.md"], ["-p", "x"], ["-i"], ["--interact"], ["--prompt-retries", "1", "--perm", "all"],
+])
 def test_extra_args_cannot_override_policy(extra):
     with pytest.raises(failover.ChainError, match="extra_args may not pass"):
         failover.load_chain([{"tui": "claude", "model": "haiku", "extra_args": extra}])
+
+
+@pytest.mark.parametrize(("extra", "msg"), [
+    (["--set", "provider=x"], "bad value"), (["--set", "mode=yolo"], "bad value"),
+    (["--set=thought=yolo"], "bad value"), (["--set"], "needs a value"),
+    (["--prompt-retries", "x"], "bad value"), (["--no-fallback=1"], "takes no value"),
+])
+def test_extra_args_values_checked(extra, msg):
+    with pytest.raises(failover.ChainError, match=msg):
+        failover.load_chain([{"tui": "claude", "model": "haiku", "extra_args": extra}])
+
+
+@pytest.mark.parametrize("extra", [["--set", "thought=low"], ["--set=effort=medium"], ["--prompt-retries", "2"],
+                                   ["--no-fallback"], ["--handshake-timeout", "90", "--max-load", "6.5"]])
+def test_allowed_extra_args(extra):
+    (e,) = failover.load_chain([{"tui": "zcode", "extra_args": extra}])
+    assert e.extra_args == extra
 
 
 def test_extra_args_and_env_values_checked_against_deny():
