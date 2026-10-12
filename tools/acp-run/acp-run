@@ -206,12 +206,15 @@ AGENTS = {
     # ~/src/crush-acp and installed as ~/.local/bin/crush-acp. It insists on an
     # `authenticate` (method "local") before session/new, and ignores the
     # client's cwd: the workspace is the process cwd, so pass -C. Metrics off.
+    # --yolo (operator, 2026-10-11): the ~/.bashrc `crush` function adds it for
+    # shells only, so it is spelled out here; it also lifts the bash blocklist
+    # (our #3909 commits in the build). Needs the persistent --yolo flag.
     # Provider and model: SIPB LLMs via ~/.config/crush/crushrc. Run WITHOUT
     # --model: the PR offers models only in the session/new `models` field,
     # not as a config option, so acp-run refuses (operator: the default
     # model is enough). Verified 2026-10-11: prompt 'Reply with exactly: OK'
     # returned OK, stop=end_turn, 74 s.
-    "crush": (["env", "CRUSH_DISABLE_METRICS=1", "crush-acp", "acp"], "local"),
+    "crush": (["env", "CRUSH_DISABLE_METRICS=1", "crush-acp", "acp", "--yolo"], "local"),
 }
 # ACP_RUN_AGY_SERVER swaps agy's server command for one run without an edit: a
 # newer agy_acp_server.par unpacked beside 1.3.0, or a wrapper such as
