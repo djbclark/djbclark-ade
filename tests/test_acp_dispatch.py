@@ -888,5 +888,72 @@ class TestAiuseNoteExhausted(Base):
         self.assertEqual(cls, "agent")
 
 
+class TestCheckpointStale(Base):
+    stale_env = {"ACP_DISPATCH_STALE_CHECKPOINT_MIN": "1", "ACP_DISPATCH_AIUSE": "off"}
+
+    def _live_checkpoint_rec(self, *, checkpoint: bool = True) -> Path:
+        import time as time_mod
+        jobs = self.out / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        report = self.out / "s1-report.md"
+        log = self.out / "s1.jsonl"
+        done = self.out / "s1-report.md.done"
+        record = jobs / "s1.json"
+        report.write_text("")
+        log.write_text('{"kind":"initialize"}\n')
+        started = time_mod.time() - 7200
+        rec = {
+            "name": "s1", "agent": "codex", "model": "m1", "dir": str(self.repo),
+            "task": "t", "out": str(self.out), "report": str(report), "done": str(done),
+            "log": str(log), "record": str(record), "started": started,
+            "checkpoint": checkpoint, "finished": None, "pid": os.getpid(),
+            "status": "running",
+        }
+        record.write_text(json.dumps(rec))
+        old = time_mod.time() - 7200
+        os.utime(report, (old, old))
+        os.utime(log, None)
+        return record
+
+    def test_check_running_checkpoint_stale_when_report_old(self):
+        record = self._live_checkpoint_rec()
+        chk = run(["check", str(record)], env=self.stale_env)
+        self.assertEqual(chk.returncode, 1)
+        line = chk.stdout.splitlines()[0]
+        self.assertTrue(line.startswith("running\t"), line)
+        self.assertIn("checkpoint stale:", line)
+
+    def test_check_no_stale_when_report_fresh(self):
+        record = self._live_checkpoint_rec()
+        import time as time_mod
+        os.utime(Path(json.loads(record.read_text())["report"]), None)
+        chk = run(["check", str(record)], env=self.stale_env)
+        self.assertNotIn("checkpoint stale:", chk.stdout)
+
+    def test_check_no_stale_when_log_idle(self):
+        record = self._live_checkpoint_rec()
+        import time as time_mod
+        rec = json.loads(record.read_text())
+        old = time_mod.time() - 7200
+        os.utime(rec["log"], (old, old))
+        chk = run(["check", str(record)], env=self.stale_env)
+        self.assertNotIn("checkpoint stale:", chk.stdout)
+
+    def test_non_checkpoint_never_stale(self):
+        record = self._live_checkpoint_rec(checkpoint=False)
+        chk = run(["check", str(record)], env=self.stale_env)
+        self.assertNotIn("checkpoint stale:", chk.stdout)
+
+    def test_checkpoint_stale_seen_recorded_once(self):
+        record = self._live_checkpoint_rec()
+        env = self.stale_env
+        run(["check", str(record)], env=env)
+        first = json.loads(record.read_text()).get("checkpoint_stale_seen")
+        self.assertIsNotNone(first)
+        run(["check", str(record)], env=env)
+        second = json.loads(record.read_text()).get("checkpoint_stale_seen")
+        self.assertEqual(first, second)
+
+
 if __name__ == "__main__":
     unittest.main()

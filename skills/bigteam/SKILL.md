@@ -453,6 +453,10 @@ until the work is committed or recorded in a repo.
    `quota-checkpointed` and prints an `acp-dispatch reroute <record> --agent A
    --model M` continuation command. The new record links `rerouted_from`; the
    successor gets the original brief, checkpoint and owned-path diff stat.
+   While a checkpoint slice runs, `check`/`wait` may add `checkpoint stale: …`
+   when the agent is active but the report has not been rewritten recently —
+   note it and, if the binding pool is nearly empty, consider `reroute` before
+   quota kills the slice.
 
 For agents with no working ACP route (zcode, muse), and as a fallback for
 agy when its ACP client fails (it fails independently of the CLI), use the

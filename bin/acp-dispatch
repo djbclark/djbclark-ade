@@ -127,6 +127,7 @@ Keep `{report}` current while you work. After each logical step, replace it atom
 temporary file. Its first line stays `STATUS: working`; include a checklist of steps done, in
 progress and remaining, every file touched and its current state, and anything a successor needs.
 The checkpoint plus `git diff` must let another agent continue without repeating completed work.
+The checkpoint is checked for staleness; rewrite the report at least every 10 minutes of work even if a step is not finished.
 """
 WRAPUP_BUDGET = ("If time runs out you get one last turn of {grace} seconds to write the report, and no "
                  "commands then.")
@@ -150,6 +151,7 @@ PERM_RE = re.compile(r"^(all|deny|scoped:.+)$")
 STATUS_EXIT = {"done": 0, "partial": 1, "no-report": 3, "blocked": 4, "unavailable": 5,
                "quota-checkpointed": 5, "running": 1, "pending": 1}
 UNAVAILABLE_EXIT = 5
+LOG_ACTIVE_SEC = 5 * 60
 PREFLIGHT_TTL = 10 * 60
 PREFLIGHT_TIMEOUT = 90
 PREFLIGHT_ROOT = Path(os.environ.get(
@@ -274,6 +276,62 @@ def done_path(report: Path) -> Path:
     return report.with_name(report.name + ".done")
 
 
+def stale_checkpoint_minutes() -> float:
+    try:
+        return float(os.environ.get("ACP_DISPATCH_STALE_CHECKPOINT_MIN", "15"))
+    except ValueError:
+        return 15.0
+
+
+def checkpoint_stale(rec: dict, now: float | None = None) -> tuple[bool, int]:
+    """Running checkpoint slice with an active agent log but a report not refreshed recently."""
+    now = now or time.time()
+    if not rec.get("checkpoint"):
+        return False, 0
+    report = Path(rec["report"])
+    done = Path(rec.get("done", str(done_path(report))))
+    if rec.get("finished") or done.exists():
+        return False, 0
+    log = Path(rec.get("log", ""))
+    try:
+        if now - log.stat().st_mtime > LOG_ACTIVE_SEC:
+            return False, 0
+    except OSError:
+        return False, 0
+    started = float(rec.get("started") or now)
+    limit = stale_checkpoint_minutes() * 60
+    try:
+        ref = max(report.stat().st_mtime, started)
+    except OSError:
+        ref = started
+    age = now - ref
+    if age <= limit:
+        return False, 0
+    return True, int(age // 60)
+
+
+def checkpoint_stale_detail(rec: dict, now: float | None = None) -> str | None:
+    stale, minutes = checkpoint_stale(rec, now)
+    if not stale:
+        return None
+    return f"checkpoint stale: report not updated for {minutes} min while the agent is active"
+
+
+def checkpoint_stale_ref(rec: dict) -> float:
+    report = Path(rec["report"])
+    started = float(rec.get("started") or 0)
+    try:
+        return max(report.stat().st_mtime, started)
+    except OSError:
+        return started
+
+
+def note_checkpoint_stale_seen(record: Path, rec: dict) -> dict:
+    if checkpoint_stale(rec)[0] and "checkpoint_stale_seen" not in rec:
+        return update_record(record, checkpoint_stale_seen=int(time.time()))
+    return rec
+
+
 def check_report_name(report: Path) -> None:
     if CLAUDE_REFUSED_BASENAME.match(report.name):
         die(f"report basename {report.name!r} starts with report/summary/findings/analysis and ends "
@@ -329,13 +387,24 @@ def session_info(rec: dict) -> tuple[str | None, bool | None]:
 
 def wait_record(record: Path) -> int:
     # Re-read the limit: an already-armed waiter follows extend (2026-10-11).
+    stale_warned_ref: float | None = None
     while True:
         rec = json.loads(record.read_text())
         if Path(rec["done"]).exists():
             return 0
+        now = time.time()
         seconds = rec.get("wait_timeout", 0)
-        if seconds and time.time() > rec["started"] + seconds:
+        if seconds and now > rec["started"] + seconds:
             return 124
+        stale_msg = checkpoint_stale_detail(rec, now)
+        if stale_msg:
+            rec = note_checkpoint_stale_seen(record, rec)
+            ref = checkpoint_stale_ref(rec)
+            if stale_warned_ref != ref:
+                print(stale_msg, file=sys.stderr)
+                stale_warned_ref = ref
+        else:
+            stale_warned_ref = None
         time.sleep(5)
 
 
@@ -854,6 +923,11 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
                 rec_path = shlex.quote(str(path))
                 det = (f"checkpoint preserved; reroute: {script} reroute {rec_path} "
                        "--agent AGENT --model MODEL")
+    if not finished:
+        stale_msg = checkpoint_stale_detail(rec)
+        if stale_msg:
+            rec = note_checkpoint_stale_seen(path, rec)
+            det = f"{det}; {stale_msg}" if det else stale_msg
     return (st, rec.get("name", path.stem), str(report), det)
 
 
