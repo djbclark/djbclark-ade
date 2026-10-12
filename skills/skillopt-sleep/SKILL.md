@@ -13,7 +13,8 @@ description: >-
 
 `bin/skillopt-night` (in `~/src/djbclark-ade`) runs nightly at 03:30 from
 launchd (`com.djbclark.skillopt-sleep`). Per transcript source with data
-(claude, codex, cursor, opencode, copilot_cli, pi) it runs one
+(claude, codex, cursor, opencode, copilot_cli natively; zcode, agy, crush via
+`bin/skillopt_sources.py`; never pi) it runs one
 `skillopt-sleep run --scope all`, mining every project's sessions into tasks,
 replaying them against the current skills, and **staging** gated edits. Nothing
 changes a live skill until someone adopts it. Full guide:
@@ -72,11 +73,15 @@ it fails, state is restored and the night reruns on the next entry.
 tail -n 20 ~/.local/state/skillopt-sleep/attempts.jsonl   # what each entry did and why it was skipped
 ```
 
-Policy (operator, 2026-10-12): allowed TUIs `zcode`, `agy`, `opencode`,
-`claude` (Haiku or Sonnet only), and `sipb` last. Never cursor, cline/ClinePass,
-Hermes, Opus or Fable; such a chain is refused whole. The chain ships with
-`"enabled": false` until the operator approves the per-entry list; enabling it
-is `"enabled": true` after a clean `chain-check`. Keep
+Policy (operator-approved chain, 2026-10-12): opencode (Go: minimax-m3), agy
+(Gemini 3.8 Flash medium, then Claude Sonnet 5.5 low), zcode (low), claude
+(Haiku 5.5 low, then Sonnet 5.5 low; floor 15%), crush (probe), then opencode
+`sipb/qwen3-coder:30b` and `sipb/deepseek-r1:32b`. Never cursor, cline,
+ClinePass, Hermes, muse, pi, grok, codex, copilot, Opus or Fable; such a chain
+is refused whole. Every entry answers through acp-run; `--native` lets the
+opencode and claude entries use SkillOpt's own backends. The chain is installed
+with `"enabled": false`; enable with `"enabled": true` after a clean
+`chain-check` (`--probe` also runs crush's one-prompt probe). Keep
 `docs/skillopt-sleep-night.example.json` in step. Sizing knobs: `max_sessions`
 (round 1 sends one prompt per harvested session), `jobs`, `max_rounds`,
 `source_timeout_s`.

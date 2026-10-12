@@ -16,20 +16,17 @@ the other limit phrasings in `failure_class`'s `quota_terms`), and a stable
 `failure_class` to trust acp-run's class. Check first that no live run owns
 `tools/acp-run/acp-run` (it was owned by the sipb-bench run on 2026-10-12).
 
-## SkillOpt-Sleep phase 2: pluggable transcript sources
+## SkillOpt-Sleep phase 2: pluggable transcript sources and backends
 
-**Queued 2026-10-12 (operator asked for SkillOpt across all agent runs; phase 1
-shipped the same day, docs/skillopt-sleep.md). Not started.** Upstream
-`skillopt_sleep/harvest_sources.py` is a fixed if-chain, so Hermes
-(`~/.hermes/sessions`), zcode, grok, agy, muse, cline and acp-dispatch job
-reports are not learned from. Steps: (1) upstream PR adding a
-`skillopt_sleep.sources` entry-point group plus a `--source-module` flag, with
-the per-source checkpoint fix (draft: docs/upstream-issues.md section 15; ask
-before filing or opening the PR); (2) adapters here returning `SessionDigest`
-records, each with the replay-session filter; (3) add them to
-`bin/skillopt-night`'s source loop. Searched upstream 2026-10-12: no
-pluggable-source proposal; per-source PRs exist (266 DeepSeek Harness, 282
-Codex CLI rollouts). Drop the runner's codex shim when PR 282 merges.
+**Queued 2026-10-12 (operator asked for SkillOpt across all agent runs).
+Partly done the same day:** zcode, agy and crush adapters ship in
+`bin/skillopt_sources.py` (docs/skillopt-sleep.md section 7). Remaining: (1) the
+upstream issue drafted in docs/upstream-issues.md section 16 (entry points for
+sources and backends, unknown backend raises, per-source checkpoint, public
+helpers; ask before filing, then the PR); (2) adapters for Hermes, grok, muse,
+cline and acp-dispatch job reports, each with the replay-session filter; (3)
+add them to `bin/skillopt-night`'s source loop. Drop the runner's codex shim
+when upstream PR 282 merges.
 
 ## Last thing in the session: add fastino-glide to the toolchain prompt
 

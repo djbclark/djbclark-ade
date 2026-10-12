@@ -9,19 +9,25 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
 
 1. **Registry** (`REGISTRY`): one `Tui` per route, with its kind (`acp` through
    acp-run, or `openai_compat`), acp agent id, vendor, aiuse pool and family
-   (agy and opencode map the pool from the model prefix), known model ids, a
-   model allow-regex (claude: Haiku or Sonnet only), the effort lever
-   (`set:thought` for zcode, `suffix` for agy, none elsewhere), endpoint and
-   secret name (SIPB).
+   (agy and opencode map the pool from the model prefix; opencode `sipb/` has
+   none), known model ids, a model allow-regex (claude: Haiku or Sonnet only),
+   the effort lever (`set:effort` for claude, `set:thought` for zcode, `suffix`
+   for agy, none for opencode and crush), the native model id (claude `haiku`
+   is `claude-haiku-5-5`), health URLs, probe, endpoint and secret name
+   (the direct SIPB route).
 2. **Policy at load time** (`load_chain`): the global `DENY` list (cursor,
-   cline/ClinePass, hermes, opus, fable; operator 2026-10-12) is matched against
-   tui, model and label; a caller allowlist; unknown TUIs; models a TUI refuses;
+   cline/ClinePass, hermes, opus, fable; operator 2026-10-12), plus any words the
+   caller adds (skillopt-night adds muse, pi, grok, codex, copilot), is matched
+   as whole tokens of tui, model and label (so `pi` never catches `api`); a caller allowlist; unknown TUIs; models a TUI refuses;
    efforts with no lever. A violation refuses the whole chain (`ChainError`).
 3. **Preflight** (`preflight`): the agent has an `ok` row in `acp-run --list`
    (route_agent's reader), the pool is `usable_now` in `aiuse --available --json`
    with headroom above the entry's `floor_percent`, the secret is declared in
-   sudo-secretspec (value-free `schema`), the endpoint accepts a TCP connection.
-   Never calls a model.
+   sudo-secretspec (value-free `schema`), the endpoint accepts a TCP connection,
+   a health URL (opencode's `sipb/` models: the proxy's `/api/version`) answers
+   200. Routes with no quota pool to read (crush) get a one-prompt probe, the
+   only preflight step that calls a model; `check --probe` runs it, plain
+   `check` reports it as not run.
 4. **Ordered attempts** (`run_chain`): preflight, then the caller's function;
    `AttemptFailed` moves on. Every step is one line in the attempt log
    (`~/.local/state/failover/attempts.jsonl`, or the caller's path), ending in

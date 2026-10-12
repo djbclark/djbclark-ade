@@ -15,7 +15,7 @@ The model calls go through a failover chain built on
 | When | What |
 |---|---|
 | 03:30 nightly | launchd `com.djbclark.skillopt-sleep` runs `bin/skillopt-night`. |
-| Each night | For each source with data (claude, codex, cursor, opencode, copilot_cli, pi), one stateful `skillopt-sleep run --project ~/src/djbclark-ade --scope all --source <s> --backend handoff --skill-root ~/src/djbclark-ade/skills --preferences <docs/skillopt-preferences.md> --max-sessions N --progress --json`, sequentially, under `nice -n 10`. Each handoff round's prompts are answered through the chain (section 4). |
+| Each night | For each source with data (natively: claude, codex, cursor, opencode, copilot_cli; through this repo's adapters: zcode, agy, crush; pi is excluded), one stateful `skillopt-sleep run --project ~/src/djbclark-ade --scope all --source <s> --backend handoff --skill-root ~/src/djbclark-ade/skills --preferences <docs/skillopt-preferences.md> --max-sessions N --progress --json`, sequentially, under `nice -n 10`. Each handoff round's prompts are answered through the chain (section 4). |
 | Until the chain is enabled | No `"enabled": true` chain in `~/.skillopt-sleep/night.json`: the runner prints "waiting for backend decision", records `waiting-backend`, exits 0. Nothing is mined or spent. |
 
 Guards in `bin/skillopt-night`: the chain policy check (a chain naming a denied
@@ -88,41 +88,61 @@ all", or tasks were mined but none replayed. Then the runner restores
 reruns that source night on the next entry. When the chain is exhausted it
 records `chain_exhausted` and sends one Hermes line.
 
-**Policy** (operator, 2026-10-12). Allowed TUIs: `zcode`, `agy`, `opencode`
-(OpenCode Go), `claude` (Haiku or Sonnet only), and the MIT SIPB
-OpenAI-compatible endpoint as the last entry. Denied everywhere by
-`bin/failover.py`: cursor, cline/ClinePass, Hermes, any Opus or Fable model.
-`crush` is under discussion and not in the allowlist. A violating chain is
-refused at load time, whole.
+**Policy** (operator, 2026-10-12, approved chain). Allowed TUIs: `opencode`
+(OpenCode Go, and MIT SIPB through opencode's `sipb/` provider), `agy`,
+`zcode`, `claude` (Haiku or Sonnet only), `crush`. Denied everywhere, matched as
+whole tokens of tui, model and label: cursor, cline, clinepass, hermes, opus,
+fable (bin/failover.py `DENY`) plus muse, pi, grok, codex, copilot (skillopt-night
+`NIGHT_DENY`). A violating chain is refused at load time, whole.
 
-**Provisional chain** (installed with `"enabled": false`; the per-entry list,
-TUI, vendor, model, version and effort, awaits operator approval). Readiness is
-from `skillopt-night chain-check` on 2026-10-12:
+**Approved chain** (installed in night.json; `"enabled": false` until a first
+supervised run, section 4 end). Readiness from `skillopt-night chain-check` on
+2026-10-12:
 
-| # | Entry | Vendor | Pool | Floor | Ready 2026-10-12 |
-|---|---|---|---|---|---|
-| 1 | opencode `opencode-go/deepseek-v4-flash` | OpenCode Go | opencode-go | 10% | yes (25.7%) |
-| 2 | agy `gemini-3.8-flash`, effort medium (`gemini-3.8-flash-medium`) | Google | antigravity/gemini | 10% | yes (16.0%) |
-| 3 | zcode, effort low (`--set thought=low`; zcode refuses `--model`) | Z.ai | zai | 10% | no: weekly window exhausted |
-| 4 | claude `haiku` | Anthropic | claude/default | 15% | yes (20.0%) |
-| 5 | claude `sonnet` | Anthropic | claude/default | 15% | yes (20.0%) |
-| 6 | sipb `qwen3-coder:30b` via `http://127.0.0.1:8890/api` (sipb-llms-proxy), key `MIT_SIPB_API_KEY` | MIT SIPB | none tracked (aiuse has no windows) | none | yes (proxy reachable, key declared) |
+| # | TUI | Vendor / pool | Model | Effort | Preflight | Ready 2026-10-12 |
+|---|---|---|---|---|---|---|
+| 1 | opencode | OpenCode Go, `opencode-go` | `opencode-go/minimax-m3` | default | aiuse, floor 10% | yes (24.2%) |
+| 2 | agy | Antigravity Gemini, `antigravity/gemini` | `gemini-3.8-flash` (sent as `gemini-3.8-flash-medium`) | medium | aiuse, floor 10% | yes (16.0%) |
+| 3 | agy | Antigravity Claude/GPT, `antigravity/claude_gpt` | `claude-sonnet-5-5` (sent as `-low`) | low | aiuse, floor 10% | no: pool exhausted |
+| 4 | zcode | Z.ai GLM-5.3 (pinned by the bridge), `zai` | none (zcode refuses `--model`) | low (`--set thought=low`) | aiuse, floor 10% | no: weekly window exhausted until 2026-10-14 |
+| 5 | claude | Anthropic, `claude/default` | `haiku` = Haiku 5.5 (`claude-haiku-5-5` natively) | low (`--set effort=low`) | aiuse, floor 15% | yes (19.0%) |
+| 6 | claude | Anthropic, `claude/default` | `sonnet` = Sonnet 5.5 (`claude-sonnet-5-5` natively) | low | aiuse, floor 15% | yes (19.0%) |
+| 7 | crush | Charm, crush-acp (PR 2450 build), SIPB via crushrc | default only (never `--model`) | none | `acp-run --list` ok + a one-prompt probe | binary ok; probe not run here (it calls the model) |
+| 8 | opencode | MIT SIPB via `http://127.0.0.1:8890/api` | `sipb/qwen3-coder:30b` | default | proxy `/api/version` answers 200 | yes |
+| 9 | opencode | MIT SIPB | `sipb/deepseek-r1:32b` | default | same | yes |
 
-Effort levers that exist: zcode `--set thought=low|high|max`; agy's effort is
-the model id suffix (`-low`, `-medium`, `-high`); the claude and opencode ACP
-agents expose no effort option to acp-run, so their entries take none.
+Model ids were verified with `opencode models` (opencode-go/minimax-m3,
+opencode-go/kimi-k3, sipb/*), `acp-run claude --info` (model values
+haiku/sonnet named Haiku 5.5/Sonnet 5.5; effort default/low/medium/high/xhigh/max)
+and acp-dispatch's cached agy list (gemini-3.8-flash-medium,
+claude-sonnet-5-5-low). The claude entries name the acp-run values: acp-run
+would not resolve `claude-haiku-5-5` against claude-agent-acp's list. Entry 1
+takes minimax-m3 over kimi-k3 (both approved): this is bulk prompt answering,
+and minimax-m3 was 2 to 5 times faster at a quarter of the tokens in the
+2026-08-22 bake-off recorded in the LiteLLM role.
+
+**Execution path.** Every entry answers through acp-run, one fresh process per
+prompt (`acp-run <agent> -C <empty temp dir> -f <prompt file> --perm deny
+[--model M] [--set ...]`; a prompt file rather than `-p` keeps transcript
+excerpts out of `ps`). `skillopt-night --native` lets the opencode and claude
+entries use SkillOpt's own `opencode`/`claude` backends instead (`--backend
+opencode --model opencode-go/minimax-m3`, `--backend claude --model
+claude-haiku-5-5`), for native sources only; every other entry, and every
+adapter source, still goes through handoff and acp-run.
 
 **Sizing.** Round 1 sends one LLM-mining prompt per harvested session: a free
 handoff dry-run on 2026-10-12 produced **118** prompts for the claude source at
 upstream's default cap of 120 sessions. Every prompt is a whole agent spawn, so
 each one also pays that agent's system prompt. `max_sessions` (40 in the
-provisional file), `jobs` (parallel answers, 2), `max_rounds` (8) and
-`source_timeout_s` (7200) in night.json size it. Put free or under-used pools
+installed file), `jobs` (parallel answers, 2), `max_rounds` (8) and
+`source_timeout_s` (7200) in night.json size it. A free handoff dry-run of the
+adapter sources on 2026-10-12 (72-hour window) pinned 14 zcode, 40 agy and 7
+crush sessions and produced 14, 40 and 6 round-1 prompts. Put free or under-used pools
 first and Claude late.
 
 **Enable or change.** Edit `~/.skillopt-sleep/night.json` (and the example copy),
-run `~/src/djbclark-ade/bin/skillopt-night chain-check`, then set
-`"enabled": true`. Optionally run one small source by hand first:
+run `~/src/djbclark-ade/bin/skillopt-night chain-check` (add `--probe` to run
+crush's one-prompt probe), then set `"enabled": true`. Optionally run one small source by hand first:
 `~/src/djbclark-ade/bin/skillopt-night --source pi`. Set `enabled` back to
 `false` to pause the nightly job.
 
@@ -159,8 +179,8 @@ memory path resolves to `AGENTS.md` through the symlink; check the diff names
 
 ## 7. Sources
 
-Supported upstream and present here (free harvest, 2026-10-12, full history
-capped at 120 sessions per source):
+Natively harvested by SkillOpt (free harvest, 2026-10-12, full history capped
+at 120 sessions per source):
 
 | Source | Store | Sessions | Mined tasks |
 |---|---|---|---|
@@ -169,7 +189,32 @@ capped at 120 sessions per source):
 | cursor | `~/.cursor/projects` | 96 | 40 |
 | opencode | `~/.local/share/opencode/opencode.db` | 54 | 32 |
 | copilot_cli | `~/.copilot/session-store.db` | 31 | 28 |
-| pi | `~/.pi/agent/sessions` | 3 | 1 |
+
+pi (`~/.pi/agent/sessions`, 3 sessions) is excluded by the operator.
+
+Through [`bin/skillopt_sources.py`](../bin/skillopt_sources.py) (read-only, on
+temporary copies of every SQLite file; output is SessionDigest JSON that the
+runner pins as the handoff dir's `digests.json`, so SkillOpt mines it without
+harvesting; counts from `--stats` on 2026-10-12, all history / last 72 h):
+
+| Source | Store | Kept | Dropped | Digests |
+|---|---|---|---|---|
+| zcode | `~/.zcode/cli/db/db.sqlite` (OpenCode's schema minus the `agent`/`metadata` columns upstream requires, so upstream's opencode harvester reads 0 sessions there) | root sessions; user/assistant `text` parts that are not synthetic or ignored; `tool` part names | tool state and outputs, reasoning, step parts, files | 62 / 14 |
+| agy | one SQLite per conversation in `~/.gemini/antigravity-cli`, `antigravity-acp` and `antigravity` `/conversations` (`~/.local/share/agy-acp-home` links to the same); project from `conversation_summaries.db` workspace URIs | step_type 14 user text (protobuf field 19.2); step_type 15 visible reply (20.1) and tool name (20.7.2) | thinking (20.3), tool arguments (20.7.3), every other step type (tool results, file views, ephemeral system messages) | 275 / 72 |
+| crush | `<data_dir>/crush.db` for every project in `~/.local/share/crush-acp/projects.json` and `~/.local/share/crush/projects.json` | root sessions; user/assistant `text` parts; `tool_call` names | `reasoning` parts, tool arguments, `tool` role messages (outputs) | 12 / 7 |
+
+Not read, by inspection: `~/.zcode/v2` (task index, config, credentials),
+`~/.zcode/workspace` (empty), `~/.zcode/cli/rollout` (raw model I/O),
+`~/.zcode/runtime` (absent); `~/.gemini/history` (only `.project_root`
+markers) and `~/.gemini/tmp/*/chats` (two legacy Gemini CLI chats, July/August
+2026). Every kept string goes through upstream's `redact_secrets` (the adapter
+runs under the skillopt tool's Python to import it) and is capped at 4000
+characters; upstream's `_is_headless_replay`/`_is_agent_session` filters apply.
+Sessions whose project is under /tmp, /private/tmp, /var/folders (failover's
+answer dirs live there) or `~/.local/state` (bigteam benchmarks) are skipped:
+of crush's 67 registered projects, most are such benchmark or test dirs. The
+agy step-type numbers are an undocumented format observed on agy CLI 1.2 /
+acp server 1.3.0: a format change shows up as an agy row with 0 digests.
 
 Runner workarounds for upstream behaviour:
 
@@ -177,48 +222,39 @@ Runner workarounds for upstream behaviour:
    only, so the second source in a night would see only sessions newer than
    the first run. The runner keeps one cursor per source in `cursors.json` and
    swaps it into `state.json` before each run (draft upstream issue,
-   [upstream-issues.md](upstream-issues.md) section 15). After a night,
-   `state.json` holds the last source's cursor; a manual `skillopt-sleep run`
-   uses that.
+   [upstream-issues.md](upstream-issues.md) section 15). Adapter sources use
+   their cursor as the adapter's `--since`.
 2. **Codex shim.** Upstream's codex harvester reads only a flat
    `~/.codex/archived_sessions` (Codex Desktop). Codex CLI writes
    `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`; the runner rebuilds
    `~/.local/state/skillopt-sleep/codex-home/archived_sessions/` as symlinks
-   and passes `--codex-home`. Drop it when upstream PR 282 ("harvest Codex CLI
-   rollout sessions") merges.
+   and passes `--codex-home`. Drop it when upstream PR 282 merges.
 3. **Per-source handoff dirs.** Upstream's handoff dir is one per project, and
    it pins `digests.json`/`tasks.json` for resumption; it is archived only when
    a night stages something. The runner sets `SKILLOPT_SLEEP_HANDOFF_DIR` per
-   source and archives the dir after every finished night, so a rejected night
-   never replays stale pinned tasks the next night.
+   source and archives the dir after every finished night.
 
-**Not supported upstream:** Hermes (`~/.hermes/sessions`), zcode (`~/.zcode`),
-grok (`~/.grok/projects`), agy, muse, cline, and acp-dispatch job reports
-(`~/.local/state/bigteam/*/jobs`). Their sessions are not learned from yet.
+**Still not learned from:** Hermes (`~/.hermes/sessions`), grok
+(`~/.grok/projects`), muse, cline and acp-dispatch job reports
+(`~/.local/state/bigteam/*/jobs`).
 
-## 8. Phase 2: pluggable sources (queued, docs/queue.md)
+## 8. Phase 2: pluggable sources and backends (queued, docs/queue.md)
 
-`skillopt_sleep/harvest_sources.py` is a fixed if-chain over source names, each
-returning `SessionDigest` records (session_id, project, git_branch, started_at,
-ended_at, user_prompts, assistant_finals, tools_used, skills_used,
-files_touched, feedback_signals, turn counts). Plan:
+Upstream's `harvest_sources.py` and `get_backend` are fixed if-chains. The
+draft upstream issue ([upstream-issues.md](upstream-issues.md) section 16, not
+filed) proposes `skillopt_sleep.sources` / `skillopt_sleep.backends` entry
+points, `--source-module`/`--backend-module`, an error for unknown backends,
+the per-source checkpoint, and a public helper API for redaction and replay
+filters. With that merged, the three adapters here would register as real
+sources and the chain could plug in as a backend instead of handoff rounds.
+Remaining adapters: Hermes, grok, muse, cline, acp-dispatch job reports.
 
-1. Upstream PR making sources pluggable: a `skillopt_sleep.sources` entry-point
-   group (name to `harvest(cfg, since_iso, limit) -> list[SessionDigest]`) and
-   a `--source-module pkg.mod:func` flag, plus the per-source checkpoint fix.
-   The same treatment would suit backends (`get_backend` silently maps unknown
-   names to mock), which would let the chain plug in directly instead of
-   through handoff rounds.
-2. Adapters here for Hermes, zcode, grok, agy, muse, cline and acp-dispatch
-   job reports, each with the replay-session filter.
-3. `skillopt-night` gains those sources in its loop.
-
-Searched upstream 2026-10-12 (issues and PRs: "source", "harvest", "plugin
-entry point", "pluggable", "custom transcript", "per-source", "checkpoint",
-"budget"): no pluggable-source proposal exists. Related, each adding one more
-branch to the if-chain: issue 225 / PR 266 (DeepSeek Harness source), issue 97
-(VS Code Copilot), PR 282 (Codex CLI rollouts), issue 286 / PR 287 (exclude
-Codex replay sessions). Issue 247 / PR 280 (`revert`).
+Searched upstream 2026-10-12 ("pluggable", "plugin source", "entry point",
+"custom transcript", "transcript source", "custom backend", "backend
+registry", "get_backend", "per-source", "checkpoint", "budget"): no proposal for
+either. Related single-source work: issue 225 / PR 266 (DeepSeek Harness),
+issue 97 (VS Code Copilot), PR 282 (Codex CLI rollouts), issue 286 / PR 287
+(exclude Codex replay sessions); issue 247 / PR 280 (`revert`).
 
 ## 9. Privacy
 

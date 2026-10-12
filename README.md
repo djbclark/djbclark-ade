@@ -167,7 +167,8 @@ way. `helm.py` imports `fleet` from the sibling `skills/session-finder/`.
     pluggable-source plan.
 15. [`docs/failover.md`](docs/failover.md) — `bin/failover.py`, the reusable
     chain library: route registry, deny list and allowlists, preflight against
-    `aiuse --available`, ordered attempts with a JSONL log, fresh-context `ask`.
+    `aiuse --available`, ordered attempts with a JSONL log, fresh-context `ask`. `bin/skillopt_sources.py`
+    reads zcode, agy and crush session stores into SessionDigest JSON for it.
 
 ## Architecture: agent graphs at two altitudes
 

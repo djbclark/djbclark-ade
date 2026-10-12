@@ -844,3 +844,56 @@ Workaround here: `bin/skillopt-night` swaps a per-source cursor into
 
 Issues and PRs for "checkpoint", "last_harvest", "per-source", "source": none
 covers it.
+
+## 16. SkillOpt — make transcript sources and backends pluggable (draft, 2026-10-12; not filed)
+
+**Repo:** microsoft/SkillOpt, `skillopt_sleep`, main at 343db229.
+
+### Proposed issue text
+
+> **Title:** skillopt-sleep: pluggable transcript sources and backends (entry points)
+>
+> `harvest_sources.harvest_for_config` and `backend.get_backend` are fixed
+> if-chains. Every new harness needs a PR to core (open: #225/#266 DeepSeek
+> Harness, #97 VS Code Copilot, #282 Codex CLI rollouts), and `get_backend`
+> silently returns `MockBackend` for an unknown name, so a typo or an
+> out-of-tree backend produces a 0.0 -> 0.0 night instead of an error.
+>
+> Proposal:
+>
+> 1. Two entry-point groups, `skillopt_sleep.sources` (name ->
+>    `harvest(cfg, *, since_iso, limit, scope, invoked_project) -> list[SessionDigest]`)
+>    and `skillopt_sleep.backends` (name -> `factory(cfg) -> Backend`), consulted
+>    after the built-ins. `--source` and `--backend` accept any registered name.
+> 2. A `--source-module pkg.mod:func` / `--backend-module pkg.mod:Class` escape
+>    hatch for unpackaged adapters.
+> 3. `get_backend` raises on an unknown name instead of returning mock.
+> 4. Key the harvest checkpoint by `(project, source)` (see the per-source
+>    checkpoint report) so several sources can run per project per night.
+> 5. Export `_is_headless_replay`, `_is_agent_session`, `_is_meta_prompt`,
+>    `_detect_feedback` and `redact_secrets` as a small public helper API so
+>    external sources apply the same filters and redaction.
+>
+> Context: on one machine we run nightly cycles over claude, codex, cursor,
+> opencode and copilot_cli natively, plus three out-of-tree adapters (zcode, an
+> OpenCode fork whose DB lacks the `agent`/`metadata` columns; Antigravity, whose
+> per-conversation SQLite stores protobuf steps; Crush's per-project
+> `crush.db`). Today they reach the engine only by pre-writing `digests.json`
+> into the handoff dir, and every model call goes through the handoff backend
+> because no external backend can be registered.
+
+### Searched first (2026-10-12)
+
+Issues and PRs for "pluggable", "plugin source", "entry point", "custom
+transcript", "transcript source", "custom backend", "backend registry",
+"get_backend": no proposal for either. Related single-source work:
+[#225](https://github.com/microsoft/SkillOpt/issues/225) /
+[#266](https://github.com/microsoft/SkillOpt/pull/266) (DeepSeek Harness),
+[#97](https://github.com/microsoft/SkillOpt/issues/97) (VS Code Copilot),
+[#282](https://github.com/microsoft/SkillOpt/pull/282) (Codex CLI rollouts),
+[#286](https://github.com/microsoft/SkillOpt/issues/286) /
+[#287](https://github.com/microsoft/SkillOpt/pull/287) (exclude Codex replay
+sessions), [#247](https://github.com/microsoft/SkillOpt/issues/247) /
+[#280](https://github.com/microsoft/SkillOpt/pull/280) (`revert`).
+Here: bin/skillopt_sources.py and bin/skillopt-night are the working
+adapters the PR would generalise. Ask djbclark before filing.
