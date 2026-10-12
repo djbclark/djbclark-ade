@@ -41,9 +41,11 @@ altitudes compose (a macro node can run a micro graph as its body).
   orchestration skill reach several TUIs through ACP.
 - [docs/jev.md](docs/jev.md) — `bin/jev`, the TypeSafe Jev decision layer:
   off/shadow/act switch (`~/.config/jev/mode`), the call log, `jev report`, the
-  one shadow site (the prompt-effort hook; acp-dispatch verdicts retired), the
-  offline Jev-vs-Haiku evaluation and how to remove it all. Shadow since
-  2026-10-11; Jev-vs-GLiDE dual review ends by 2026-10-23.
+  two shadow sites (prompt-effort hook; agent-choice via `route_agent.py
+  --brief`; acp-dispatch verdicts retired), the offline Jev-vs-Haiku
+  evaluation and how to remove it all. Shadow since 2026-10-11. Review
+  `dual-1` asks Jev and Fastino GLiDE the same questions side by side and
+  ends itself by 2026-10-23 (`bin/jev review status`).
 - [docs/orca-integration.md](docs/orca-integration.md) — runnable macro-
   graph command sequences plus hard-won live-run lessons (stall false
   deaths, rejected-late `worker_done` semantics, the retry recipe, the
