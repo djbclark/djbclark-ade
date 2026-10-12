@@ -10,6 +10,7 @@
             [--log PATH] [--json] [--handshake-tries N] [--handshake-timeout S]
             [--no-fallback] [--prompt-retries N] [--max-load L] [--load-wait S]
             [--wrapup-grace S [--wrapup TEXT]]
+            [--verify CMD [--verify-retries N] [--verify-timeout S]]
             [-i | --interactive [--inbox DIR] [--show-thinking]] [--resume ID]
             [--session-id UUID]
     acp-run --list            agents and the command each one runs
@@ -78,6 +79,15 @@ wait up to S seconds for it before stopping, so a slice cut off mid-command can
 still write its report. The run still exits 124; the summary line says
 wrapup=<stop reason|timeout|skipped|error>. Off by default; acp-dispatch turns
 it on. Not with --interactive.
+--verify CMD runs a shell command (with -C DIR as cwd; exit 0 = pass) after a
+turn ends with end_turn and passes delivery checks. If the command fails,
+acp-run sends a follow-up prompt into the same session with the exit code and
+the last output (up to 40 lines, max 3000 chars) instructing the agent to fix
+the problem and retry, repeated up to --verify-retries N times (default 2).
+--verify-timeout SECS sets the timeout for each verify command execution
+(default 180). Respects the overall --timeout deadline; a final failed
+verification logs verify=fail and prints a warning on stderr without failing
+the exit code. Off by default. Not with --interactive.
 
 --interactive (-i) keeps the session open for more prompts in one process (the
 ACP connection is the session). Agent text streams to stdout as it arrives,
@@ -425,6 +435,8 @@ def dump(o):
         return [dump(x) for x in o]
     if hasattr(o, "model_dump"):
         return o.model_dump(mode="json", by_alias=True, exclude_none=True)
+    if hasattr(o, "__dict__"):
+        return {k: dump(v) for k, v in o.__dict__.items()}
     return o
 
 
@@ -878,6 +890,50 @@ def read_deadline_extension(client, deadline, path):
     return deadline
 
 
+def tail_lines(text, max_lines=40, max_chars=3000):
+    if not text:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    lines = text.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+    res = "\n".join(lines)
+    if len(res) > max_chars:
+        res = res[-max_chars:]
+    return res
+
+
+def build_verify_prompt(cmd, rc, output):
+    tail = tail_lines(output, max_lines=40, max_chars=3000)
+    return (
+        f'The check "{cmd}" failed (exit {rc}). Last output:\n'
+        f"{tail}\n"
+        "Fix the problem, run the check yourself, and only stop when it passes."
+    )
+
+
+def run_verify(cmd, cwd, timeout=180):
+    try:
+        r = subprocess.run(
+            cmd,
+            cwd=str(Path(cwd).resolve()),
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+        )
+        return r.returncode, tail_lines(r.stdout or "")
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout or ""
+        if isinstance(out, bytes):
+            out = out.decode("utf-8", "replace")
+        return 124, tail_lines(out)
+    except Exception as e:
+        return 1, str(e)
+
+
 async def prompt_turn(a, conn, sess, client, text, out, wait=None):
     """Send one prompt, with --prompt-retries. Writes stop_reason, quota and
     usage into out; returns (finished, failure, code), code 124 on a timeout
@@ -890,86 +946,137 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
     finished, failure, code = False, None, None
     client.last_failure = None
     deadline = time.monotonic() + a.timeout if a.timeout else None
-    prompt = [TextContentBlock(type="text", text=text)]
-    for attempt in range(a.prompt_retries + 1):
-        # Retry only before any side effect (acpx: no retry once the
-        # turn touched anything), with acpx's 1 s * 2^n, max 10 s backoff.
-        can_retry = (
-            attempt < a.prompt_retries
-            and client.tools == client.allowed == client.denied == 0
-        )
-        if attempt and client.cancelled:  # cancelled during the backoff
-            out["stop_reason"], finished = "cancelled", True
-            break
-        client.text = []
-        if client.err_path:
-            try:
-                client.err_mark = os.path.getsize(client.err_path)
-            except OSError:
-                client.err_mark = 0
-        prompt_task = client.prompt_task = asyncio.ensure_future(
-            conn.prompt(session_id=sess.session_id, prompt=prompt)
-        )
-        why = None
-        try:
-            while True:
-                deadline = extend_deadline(client, deadline)
-                left = deadline - time.monotonic() if deadline is not None else 30
-                if left <= 0:
-                    raise TimeoutError
+
+    verify_cmd = getattr(a, "verify", None)
+    verify_retries = getattr(a, "verify_retries", 2) if verify_cmd else 0
+    verify_timeout = getattr(a, "verify_timeout", 180)
+    verify_attempts = 0
+
+    current_text = text
+    for v_attempt in range(
+        verify_retries + 1 if (verify_cmd and not getattr(a, "interactive", False)) else 1
+    ):
+        prompt = [TextContentBlock(type="text", text=current_text)]
+        finished, failure, code = False, None, None
+        for attempt in range(a.prompt_retries + 1):
+            # Retry only before any side effect (acpx: no retry once the
+            # turn touched anything), with acpx's 1 s * 2^n, max 10 s backoff.
+            can_retry = (
+                attempt < a.prompt_retries
+                and client.tools == client.allowed == client.denied == 0
+            )
+            if attempt and client.cancelled:  # cancelled during the backoff
+                out["stop_reason"], finished = "cancelled", True
+                break
+            client.text = []
+            if client.err_path:
                 try:
-                    resp = await wait(prompt_task, min(30, left))
-                    break
-                except TimeoutError:
-                    if prompt_task.done():
-                        # A timeout raised by the adapter itself is not a polling tick.
-                        raise
-        except TimeoutError:
-            if a.interactive:
-                repl = getattr(wait, "__self__", None)
-                if repl is not None:
-                    repl.cancelled = client.cancelled = True
-                    repl.drop_question()
-            await conn.cancel(session_id=sess.session_id)
+                    client.err_mark = os.path.getsize(client.err_path)
+                except OSError:
+                    client.err_mark = 0
+            prompt_task = client.prompt_task = asyncio.ensure_future(
+                conn.prompt(session_id=sess.session_id, prompt=prompt)
+            )
+            why = None
             try:
-                resp = await asyncio.wait_for(prompt_task, 15)
+                while True:
+                    deadline = extend_deadline(client, deadline)
+                    left = deadline - time.monotonic() if deadline is not None else 30
+                    if left <= 0:
+                        raise TimeoutError
+                    try:
+                        resp = await wait(prompt_task, min(30, left))
+                        break
+                    except TimeoutError:
+                        if prompt_task.done():
+                            # A timeout raised by the adapter itself is not a polling tick.
+                            raise
+            except TimeoutError:
+                if a.interactive:
+                    repl = getattr(wait, "__self__", None)
+                    if repl is not None:
+                        repl.cancelled = client.cancelled = True
+                        repl.drop_question()
+                await conn.cancel(session_id=sess.session_id)
+                try:
+                    resp = await asyncio.wait_for(prompt_task, 15)
+                    out["stop_reason"] = resp.stop_reason
+                except (TimeoutError, RequestError, ConnectionError):
+                    out["stop_reason"] = "timeout"
+                code = 124
+                if deadline is not None and getattr(a, "wrapup_grace", 0) > 0 and not a.interactive:
+                    await wrapup_turn(a, conn, sess, client, out)
+                break
+            except (RequestError, ConnectionError) as e:
+                if not (can_retry and retryable_error(e)):
+                    raise
+                why = error_text(e)
+            else:
                 out["stop_reason"] = resp.stop_reason
-            except (TimeoutError, RequestError, ConnectionError):
-                out["stop_reason"] = "timeout"
-            code = 124
-            if deadline is not None and getattr(a, "wrapup_grace", 0) > 0 and not a.interactive:
-                await wrapup_turn(a, conn, sess, client, out)
+                client.rec("prompt_response", dump(resp))
+                quota = (resp.field_meta or {}).get("quota")
+                if quota:  # e.g. codex-acp/Gemini _meta.quota: keep for --json
+                    out["quota"] = quota
+                if resp.usage:
+                    out["usage"] = dump(resp.usage)
+                failure = client.last_failure = reply_failure(
+                    "".join(client.text),
+                    client.tools,
+                    stderr_since(client.err_path, client.err_mark)
+                    if client.err_path
+                    else "",
+                )
+                if not (can_retry and failure and failure[0] == "transient"):
+                    finished = True
+                    break
+                why = failure[1]
+            delay = min(2.0**attempt, 10.0)
+            client.rec("retry", {"attempt": attempt + 1, "delay": delay, "why": why})
+            print(
+                f"acp-run: retry {attempt + 1}/{a.prompt_retries} in {delay:g}s: {why}",
+                file=sys.stderr,
+            )
+            await asyncio.sleep(delay)
+
+        if not (verify_cmd and not getattr(a, "interactive", False)):
             break
-        except (RequestError, ConnectionError) as e:
-            if not (can_retry and retryable_error(e)):
-                raise
-            why = error_text(e)
-        else:
-            out["stop_reason"] = resp.stop_reason
-            client.rec("prompt_response", dump(resp))
-            quota = (resp.field_meta or {}).get("quota")
-            if quota:  # e.g. codex-acp/Gemini _meta.quota: keep for --json
-                out["quota"] = quota
-            if resp.usage:
-                out["usage"] = dump(resp.usage)
-            failure = client.last_failure = reply_failure(
+
+        delivery_ok = False
+        if finished and not failure and code is None and out.get("stop_reason") == "end_turn":
+            check_code, _ = select_exit(
+                out.get("stop_reason"),
                 "".join(client.text),
                 client.tools,
-                stderr_since(client.err_path, client.err_mark)
-                if client.err_path
-                else "",
+                client.allowed,
+                client.denied,
+                getattr(a, "perm", "all"),
+                failure,
             )
-            if not (can_retry and failure and failure[0] == "transient"):
-                finished = True
-                break
-            why = failure[1]
-        delay = min(2.0**attempt, 10.0)
-        client.rec("retry", {"attempt": attempt + 1, "delay": delay, "why": why})
-        print(
-            f"acp-run: retry {attempt + 1}/{a.prompt_retries} in {delay:g}s: {why}",
-            file=sys.stderr,
-        )
-        await asyncio.sleep(delay)
+            delivery_ok = (check_code == 0)
+
+        if not delivery_ok:
+            out["verify"] = "fail"
+            out["verify_attempts"] = verify_attempts
+            break
+
+        verify_attempts += 1
+        rc, tail = run_verify(verify_cmd, getattr(a, "dir", "."), verify_timeout)
+        client.rec("verify", {"attempt": verify_attempts, "rc": rc, "tail": tail})
+        if rc == 0:
+            out["verify"] = "pass"
+            out["verify_attempts"] = verify_attempts
+            break
+
+        out["verify"] = "fail"
+        out["verify_attempts"] = verify_attempts
+        if v_attempt >= verify_retries:
+            break
+
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+
+        current_text = build_verify_prompt(verify_cmd, rc, tail)
+
     return finished, failure, code
 
 
@@ -1819,9 +1926,17 @@ async def run(a, log, err, log_path):
             client.rec("turn", row)
     out.update(tool_calls=tools, permissions={"allowed": allowed, "denied": denied})
     out["exit"] = code
+    if getattr(a, "verify", None) and "verify" not in out:
+        out["verify"] = "fail"
+        out["verify_attempts"] = 0
     client.rec("result", out)
     if label:
         print(f"acp-run: FAILED {label}: {out.get('error')}", file=sys.stderr)
+    if out.get("verify") == "fail" and code == 0:
+        print(
+            f"acp-run: warning: verification failed after {out.get('verify_attempts', 0)} attempt(s): {a.verify}",
+            file=sys.stderr,
+        )
     if a.json:
         print(json.dumps({**out, "text": text}, indent=1))
     else:
@@ -1846,6 +1961,10 @@ async def run(a, log, err, log_path):
             bits.append(f"cost=${cost:.4f}")
         if "wrapup" in out:
             bits.append(f"wrapup={out['wrapup'].split(':')[0]}")
+        if "verify" in out:
+            bits.append(f"verify={out['verify']}")
+        if "verify_attempts" in out:
+            bits.append(f"verify_attempts={out['verify_attempts']}")
         if "failure" in out:
             bits.append(f"fail={out['failure']}")
         if "error" in out:
@@ -1906,6 +2025,25 @@ def main():
         metavar="TEXT",
         help="the wrap-up prompt ({grace} is replaced by the seconds); default:"
         " write your final report now",
+    )
+    ap.add_argument(
+        "--verify",
+        metavar="CMD",
+        help="shell command to verify the turn's work (exit 0 = pass); on failure, prompts the agent to fix it",
+    )
+    ap.add_argument(
+        "--verify-retries",
+        type=int,
+        default=2,
+        metavar="N",
+        help="retry verify follow-ups up to N times (default 2; only with --verify)",
+    )
+    ap.add_argument(
+        "--verify-timeout",
+        type=float,
+        default=180,
+        metavar="SECS",
+        help="timeout in seconds for each verify command run (default 180)",
     )
     ap.add_argument(
         "--auth",
@@ -2011,6 +2149,12 @@ def main():
         ap.error("--wrapup-grace must be 0 or more")
     if a.wrapup and not a.wrapup_grace:
         ap.error("--wrapup needs --wrapup-grace")
+    if a.verify_retries < 0:
+        ap.error("--verify-retries must be 0 or more")
+    if a.verify_timeout <= 0:
+        ap.error("--verify-timeout must be positive")
+    if a.verify is not None and not a.verify.strip():
+        ap.error("--verify command cannot be empty")
     if a.session_id is not None:
         if a.agent != "claude":
             ap.error("--session-id is for claude only")

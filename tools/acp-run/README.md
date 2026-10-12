@@ -106,6 +106,20 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
     and exit 130/143, so a killed run does not leave the agent running.
 12. **An interactive mode** (`--interactive`, below): one ACP session that stays
     open for more prompts, from a terminal, a pipe or a drop directory.
+13. **Verify-and-retry (`--verify CMD`)**: an opt-in verify loop for models that end
+    their turn early (`end_turn`) before finishing work. Runs `CMD` as a shell command
+    with `-C DIR` as cwd (exit 0 = pass). If `CMD` fails, acp-run sends a follow-up
+    prompt into the same session with the exit code and truncated output (last 40
+    lines, max 3000 chars), instructing the agent to fix the problem and retry.
+    Retries up to `--verify-retries N` times (default 2), with `--verify-timeout SECS`
+    (default 180) per check run. Respects the overall `--timeout` deadline.
+    The run summary (stderr line, `--json`, and JSONL log `result` record) records
+    `verify=pass|fail` and `verify_attempts=<n>`. A final failed verification prints
+    a warning on stderr and preserves exit 0 (off by default; callers decide).
+
+    ```sh
+    acp-run crush -C dir -p '...' --verify 'python3 -m unittest' --verify-retries 2
+    ```
 
 ## Dispatch slice controls (2026-10-11)
 
