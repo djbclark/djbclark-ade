@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Nightly SkillOpt-Sleep cycle (docs/skillopt-sleep.md). Installed by
-     `skillopt-night install`; inert while ~/.skillopt-sleep/config.json has
-     backend "mock" (the runner prints "waiting for backend decision", exits 0). -->
+     `skillopt-night install`; inert until ~/.skillopt-sleep/night.json has
+     "enabled": true and a chain (otherwise the runner prints "waiting for backend
+     decision" and exits 0). It also refuses to run any skillopt other than the
+     reviewed commit (REVIEWED_REV in bin/skillopt-night). -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.djbclark.skillopt-sleep</string>
