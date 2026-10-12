@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "skills": {
+    "fastino-glide": {
+      "source": "docs.fastino.ai",
+      "sourceUrl": "https://docs.fastino.ai",
+      "sourceType": "well-known",
+      "computedHash": "bd91e2c97e9815aa520b1ad3810ff182a1b74a55d3490bc9214960a3352ae6b2",
+      "wellKnownDigest": "sha256:6b2b91a1024dc31b8c3e73a4eaf7572c4b285f60a71360ca7270015643353649"
+    }
+  }
+}
