@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Nightly SkillOpt-Sleep cycle (docs/skillopt-sleep.md). Installed by
+     `skillopt-night install`; inert while ~/.skillopt-sleep/config.json has
+     backend "mock" (the runner prints "waiting for backend decision", exits 0). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.skillopt-sleep</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/djbclark/src/djbclark-ade/bin/skillopt-night</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/djbclark/.local/bin:/Users/djbclark/.opencodex/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/djbclark/src/djbclark-ade</string>
+  <key>RunAtLoad</key><false/>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>3</integer>
+    <key>Minute</key><integer>30</integer>
+  </dict>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>StandardOutPath</key><string>/Users/djbclark/.local/state/skillopt-sleep/launchd.out</string>
+  <key>StandardErrorPath</key><string>/Users/djbclark/.local/state/skillopt-sleep/launchd.err</string>
+</dict>
+</plist>
