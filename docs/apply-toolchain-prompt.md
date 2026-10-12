@@ -1,6 +1,6 @@
 # Prompt: apply the djbclark / frdminc / Graft development toolchain to a repo
 
-Version 5.5 (2026-10-11). Supersedes 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
+Version 5.6 (2026-10-12). Supersedes 5.5, 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
 (2026-10-01, which superseded
 `CLAUDE_APPLY_DJBCLARK_TOOLING_Version4.md`). Lived at
 `site-djbclark/research/apply-dev-toolchain/CLAUDE_APPLY_DJBCLARK_TOOLING.md`
@@ -107,6 +107,15 @@ They are in the §1.2 install line, the §1.3 utilities table, and the skill's
 `references/replacements.md`; the "Not installed, and why" table there records
 what is still deliberately out (`jaq`, `mdcat`, `ov`, `tailspin`, `aria2c`,
 `f2`, `angle-grinder`, `fclones`, `atuin`, `lazygit`, `lnav`, `nomino`).
+
+What changed in 5.6 (2026-10-12): Crawl4AI MCP is run as **one shared server
+per machine over HTTP**, not registered as a stdio command. Every agent session
+starts its own copy of each stdio MCP server, and a crawl4ai copy is a Python
+process, a Playwright driver and three headless Chromium processes (~230 MB
+phys footprint). On djbclark's 16 GB Mac, 15 concurrent sessions held 3.4 GB of
+them and, with the other per-session servers, pushed the load average to 230
+through swap thrash. The §1.3 row now starts it under a login agent and registers
+the URL; the same applies to any heavy stdio server every agent registers.
 
 ---
 
@@ -653,7 +662,7 @@ config and hooks; `--agents claude` does not, and `--no-global` skips them.
 | Parallel Search MCP (remote) | https://parallel.ai/ | `claude mcp add --transport http --scope user parallel-search https://search.parallel.ai/mcp`. No key | Web search by objective plus queries (`web_search`) and page fetch (`web_fetch`) |
 | Jina MCP (remote) and Reader | https://jina.ai/ | MCP at `https://mcp.jina.ai/v1` with header `Authorization: Bearer $JINA_API_KEY`. Keep the key in the user's secret store (on djbclark's machine `sudo-secretspec`, entry `JINA_API_KEY`) and pass it through the client's headers helper where it has one (Claude Code `headersHelper`, Codex `http_headers_helper`); a client without one needs the literal header in a mode-0600 config outside git. Reader `https://r.jina.ai/<url>` also works keyless at a lower rate limit; Search `https://s.jina.ai/?q=` needs the key | `read_url`, `search_web`, `search_arxiv`, `extract_pdf` and more; Reader turns any URL into markdown |
 | Crawl4AI | https://github.com/unclecode/crawl4ai | `uv tool install --python 3.13 'crawl4ai==0.9.4'`, then `crawl4ai-setup` (§1.2); `crawl4ai-doctor` checks it | Local headless-browser crawl: `crwl <url> -o markdown` renders JavaScript-heavy pages that plain fetches return empty. The package ships no MCP server; use the wrapper in the next row. A cold start under load takes 30-120 s |
-| Crawl4AI MCP (`mcp-crawl4ai`, third-party wrapper) | https://pypi.org/project/mcp-crawl4ai/ | `uv tool install --python 3.13 'mcp-crawl4ai==0.3.1' --with crawl4ai==0.9.4 --with fastmcp==4.0.10 --with mcp==2.2.0 --with playwright==1.63.0`, then register the stdio command `~/.local/bin/crawl4ai-mcp` as server `crawl4ai` (`claude mcp add --scope user crawl4ai -- ~/.local/bin/crawl4ai-mcp`; Codex `startup_timeout_sec = 120`, `tool_timeout_sec = 180`) | MCP tools `scrape {targets}` (a URL or a list; not `url`), `crawl`; reuses the Playwright Chromium; first start about 26 s |
+| Crawl4AI MCP (`mcp-crawl4ai`, third-party wrapper) | https://pypi.org/project/mcp-crawl4ai/ | `uv tool install --python 3.13 'mcp-crawl4ai==0.3.1' --with crawl4ai==0.9.4 --with fastmcp==4.0.10 --with mcp==2.2.0 --with playwright==1.63.0`, then run ONE shared copy per machine, `crawl4ai-mcp --transport http --host 127.0.0.1 --port 18798`, under a login agent (launchd `KeepAlive`; djbclark's: site-djbclark `roles/shared_mcp`, `just shared-mcp-apply`), and register its URL `http://127.0.0.1:18798/mcp` as server `crawl4ai` in every agent (`claude mcp add --scope user --transport http crawl4ai http://127.0.0.1:18798/mcp`; Codex `url = …` with `tool_timeout_sec = 180`). Do not register the stdio command `~/.local/bin/crawl4ai-mcp`: each agent session would start its own Python + Playwright + 3 Chromium (~230 MB) (5.6). One server shares one browser across clients; concurrent calls work | MCP tools `scrape {targets}` (a URL or a list; not `url`), `crawl`; reuses the Playwright Chromium; first start about 26 s |
 | `web-get` | https://github.com/djbclark/djbclark-ade (`bin/web-get`) | Symlink it into `~/.local/bin` (`ln -s ~/src/djbclark-ade/bin/web-get ~/.local/bin/web-get`, as for `acp-dispatch`) so the bare name resolves | Shell failover ladder: `web-get search '<query>'` (exa-api, exa-mcp, parallel, jina-mcp, jina-search, composio), `web-get fetch '<url>'` (exa-api, exa-mcp, parallel, jina-reader, pdf, crawl4ai, wayback), `web-get check` (which providers work now). exa-api is the Exa REST API with the user's `EXA_API_KEY` from the secret store (header only, never argv); without it the keyless Exa MCP answers. PDF URLs get a local rung (curl into a fresh temp dir, then `pdftotext`; crawl4ai skips them). Wall-clock timeouts per attempt (45 s; crawl4ai 150 s; wayback and pdf 120 s). A soft-404 or redirect page fails its rung on every rung that reports a URL or title (`--no-page-check` for a page checked by hand). A body cut at a provider's cap is not success: the ladder walks on for a fuller copy (for at most `--walk-budget`, 300 s) and flags `truncated`, exit 6, only if none is found; a `--max-bytes` cut is the caller's choice and never hides a provider cap. The vault read runs before the ladder with its own timeout; child processes never get the keys. Exit 5 means every provider failed |
 
 Register the MCP servers in user scope (back up `~/.claude.json` and the other
