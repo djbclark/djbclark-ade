@@ -475,3 +475,27 @@ class TestExhaustedAndStaleReadings(unittest.TestCase):
         q = self.load(accts)
         self.assertEqual(q["antigravity-claude"]["remaining"], 0.0)
 
+
+
+class ShadowKindTests(unittest.TestCase):
+    """The agent-choice shadow ask never changes or delays a route."""
+
+    def test_brief_is_sent_on_stdin_with_incumbent_and_all_kinds(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".md") as f:
+            f.write("Fix the flaky test in tests/test_x.py")
+            f.flush()
+            with mock.patch.object(r.subprocess, "Popen") as popen:
+                r.shadow_kind(f.name, "code", "claude")
+        args = popen.call_args.args[0]
+        self.assertEqual(args[1:3], ["decide", "--site"])
+        self.assertIn("agent-choice", args)
+        self.assertEqual(args[args.index("--incumbent") + 1], "code")
+        self.assertEqual([args[i + 1] for i, a in enumerate(args) if a == "--option"], list(r.KINDS))
+        popen.return_value.stdin.write.assert_called_once_with("Fix the flaky test in tests/test_x.py")
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
+    def test_failures_are_swallowed(self):
+        r.shadow_kind("/nonexistent/brief.md", "code", None)
+        with mock.patch.object(r.subprocess, "Popen", side_effect=OSError):
+            r.shadow_kind(__file__, "code", None)

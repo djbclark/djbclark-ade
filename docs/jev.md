@@ -130,6 +130,45 @@ changes the message's recipient):
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"/Users/djbclark/src/djbclark-ade/claude/hooks/jev_effort_hook.py","timeout":3}]}]}}
 ```
 
+## Dual review: Jev vs GLiDE (started 2026-10-11, ends by 2026-10-23)
+
+The Jev-only review (live since 2026-10-11, due 2026-10-18) was **closed 2026-10-11**; its results
+are in the closing report below. A new review compares Jev with Fastino's GLiDE
+(`POST https://api.fastino.ai/v1/systemone`, model `fastino/glide`, `X-API-Key`, key
+`FASTINO_API_KEY` in sudo-secretspec) **on the same state, options and option descriptions,
+concurrently, one call each**, and lasts at most **12 days**.
+
+```sh
+bin/jev review status                    # id, ends, active, backends
+bin/jev review start --days 12 --id dual-1   # --days above 12 is refused; one review at a time
+bin/jev review stop                      # writes a stop marker, removes ~/.config/jev/review.json
+echo jev,glide > ~/.config/jev/backends  # or JEV_BACKENDS=jev,glide; absent = jev only
+bin/jev report --review dual-1 --json    # per-backend sites plus a "pairs" section
+bin/jev disagreements --site agent-choice --between
+bin/jev label PAIR_ID truth              # a label on a pair id scores both backends
+```
+
+1. **Window.** `review start` writes `~/.config/jev/review.json`; when `ends_epoch` passes,
+   `mode()` returns `off`, so every `decide` exits 3 by itself. Each row carries the review id.
+2. **Rows.** One row per backend per call, sharing a `pair` id, with `backend` (`jev` | `glide`).
+   `latency_ms` is that backend's own call time (the unlock is excluded when there are two
+   backends); `total_ms` is the whole call. Old rows have neither field and count as `jev`.
+3. **Report.** Jev keeps its old site key; GLiDE's rows appear as `<site>@glide`. `pairs.<site>`
+   gives Jev-vs-GLiDE agreement and confusion, confident disagreements (both at the threshold),
+   matches with the incumbent, and, for labelled pairs, who was right alone. GLiDE reports no
+   cost, so its `cost_usd` is `null` rather than a guess; compare tokens and latency.
+4. **Sites.** `prompt-effort` (the hook; no incumbent) and **`agent-choice`** (new): `bin/route_agent.py
+   route --kind K --brief FILE` and `plan --kinds a,b --brief FA --brief FB` ask both deciders which of
+   the six kinds the brief is, beside the kind the caller chose (the incumbent), detached, never
+   changing the route. Without `--brief` nothing is asked. Options and their descriptions are the same
+   for both backends (`KINDS` and `EFFORT` in `bin/jev`).
+5. **Not a migration.** Jev stays the primary backend: the hook's act output and the exit code follow
+   it. Nothing acts on GLiDE.
+6. **Questions this review answers.** (a) Do they agree, and where not, who is right on labelled
+   pairs? (b) Is GLiDE's probability better calibrated (the offline prompt-effort run found Jev's
+   was not)? (c) Latency against the hook's 2.7 s budget and `route_agent`'s 5 s. (d) Cost, once
+   GLiDE's pricing is known. The promotion rule below applies to each backend separately.
+
 ## Promotion rule
 
 Collect at least 200 successful calls per site over at least seven days.

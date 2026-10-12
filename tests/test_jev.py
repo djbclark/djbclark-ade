@@ -239,10 +239,82 @@ def test_dispatch_never_calls_jev(jev, monkeypatch, tmp_path):
     final = tmp_path / "final"
     final.write_text("")
     record = tmp_path / "record.json"
-    rec = dict(report=str(report), final=str(final), done=str(report)+".done", agent="codex", name="test")
+    rec = dict(report=str(report), final=str(final), done=str(report)+".done", agent="codex", name="test",
+               log=str(tmp_path / "agent.log"))
     for mode in ("off", "shadow", "act"):
         monkeypatch.setenv("JEV_MODE", mode)
         record.write_text(json.dumps(rec))
         st, _, saved = dispatch.finalize(record, 0)
         assert dispatch.exit_for(st, 0) == 0 and saved["status"] == "done"
     popen.assert_not_called()
+
+
+def dual(jev, monkeypatch, jev_choice="a", glide_choice="a"):
+    monkeypatch.setenv("JEV_BACKENDS", "jev,glide")
+    monkeypatch.setenv("FASTINO_API_KEY", "glide-key-never-print")
+
+    def fake(payload, key, timeout):
+        pick = glide_choice if payload["model"] == "fastino/glide" else jev_choice
+        assert key == ("glide-key-never-print" if payload["model"] == "fastino/glide" else "test-key-never-print")
+        return response(choice=pick, prob=.9)
+
+    monkeypatch.setattr(jev, "http_call", Mock(side_effect=fake))
+
+
+def test_dual_backends_log_paired_rows(jev, monkeypatch, capsys):
+    dual(jev, monkeypatch, "a", "b")
+    assert jev.main(ARGS) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["answer"] == "a" and out["others"]["glide"]["answer"] == "b"
+    j, g = list(jev.rows())
+    assert (j["backend"], g["backend"]) == ("jev", "glide") and j["pair"] == g["pair"] and j["id"] != g["id"]
+    models = [c.args[0]["model"] for c in jev.http_call.call_args_list]
+    assert sorted(models) == ["fastino/glide", "jev-latest"]
+    assert "glide-key-never-print" not in jev.log_path().read_text()
+
+
+def test_dual_one_backend_error_keeps_the_other(jev, monkeypatch, capsys):
+    dual(jev, monkeypatch)
+    real = jev.http_call.side_effect
+
+    def flaky(payload, key, timeout):
+        if payload["model"] == "fastino/glide":
+            raise OSError()
+        return real(payload, key, timeout)
+
+    monkeypatch.setattr(jev, "http_call", Mock(side_effect=flaky))
+    assert jev.main(ARGS) == 0
+    j, g = list(jev.rows())
+    assert j["error"] is None and g["error"] == "OSError"
+
+
+def test_dual_report_pairs_and_labels_by_pair(jev, monkeypatch, capsys):
+    dual(jev, monkeypatch, "a", "b")
+    assert jev.main(ARGS) == 0
+    capsys.readouterr()
+    pair = list(jev.rows())[0]["pair"]
+    assert jev.main(["label", pair, "b"]) == 0
+    assert jev.main(["report", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert set(out["sites"]) == {"test", "test@glide"}
+    stats = out["pairs"]["test"]
+    assert stats["pairs"] == 1 and stats["agreement"] == 0 and stats["glide_right_only"] == 1
+    assert stats["confusion"] == {"a": {"b": 1}}
+    assert out["sites"]["test@glide"]["cost_usd"] is None  # no reported cost, no assumed price
+    assert jev.main(["disagreements", "--site", "test", "--between"]) == 0
+    assert json.loads(capsys.readouterr().out.splitlines()[0])["glide"] == "b"
+
+
+def test_review_window_expires_and_is_capped(jev, monkeypatch, capsys, tmp_path):
+    assert jev.main(["review", "start", "--days", "13"]) == 2
+    assert jev.main(["review", "start", "--days", "12", "--id", "t1"]) == 0
+    row = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert row["ends_epoch"] - row["starts_epoch"] == 12 * 86400
+    assert jev.main(["review", "start"]) == 2  # one at a time
+    capsys.readouterr()
+    answer(jev, monkeypatch, capsys)
+    assert list(jev.rows())[-1]["review"] == "t1"
+    review = tmp_path / ".config/jev/review.json"
+    review.write_text(json.dumps(dict(row, ends_epoch=time.time() - 1)))
+    assert jev.mode() == "off" and jev.main(["decide"]) == 3
+    assert jev.main(["review", "stop"]) == 0 and not review.exists()

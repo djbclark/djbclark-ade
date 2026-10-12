@@ -224,7 +224,10 @@ bind every slice to a vendor up front:
 1. **Queue slices by kind, not vendor.** Step 2 tags each slice `judgment`,
    `code`, `research`, `bulk`, `mechanical` or `github` (the router's kinds).
 2. **Plan a wave:** `~/src/djbclark-ade/bin/route_agent.py plan --kinds
-   code,code,research,bulk` (hardest first; `--json` for scripts). It reads the
+   code,code,research,bulk` (hardest first; `--json` for scripts; when the
+   brief files already exist, add one `--brief FILE` per kind in the same order,
+   which only logs what Jev and GLiDE think each kind is, never changes the
+   plan: `docs/jev.md` "Dual review"). It reads the
    aiuse snapshot (instant, no tokens), ranks by fitness and headroom, applies
    the burn-first rule, and **spreads the wave** with each service's
    `max_parallel` (agy Claude/GPT 3, agy Gemini 2, grok 1). Dispatch only the

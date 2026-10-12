@@ -3,6 +3,15 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Last thing in the session: add fastino-glide to the toolchain prompt
+
+**Queued 2026-10-11 (operator). Not started; do it as the final step of the
+session that installed the skill.** Add the Fastino GLiDE skill (installed
+project-level at `.claude/skills/fastino-glide/` via `npx skills add
+https://docs.fastino.ai --skill fastino-glide -a claude-code -y`; key
+`FASTINO_API_KEY` in sudo-secretspec) to `docs/apply-toolchain-prompt.md`.
+Drop this item when the entry ships.
+
 ## Research checker: namespace-aware citations across runs
 
 **Queued 2026-10-10 (operator, hiwymi `/loose`). Not started.** Research runs
@@ -574,15 +583,13 @@ The fork carries the fix as branch `djbclark/short-postcompact-hook` (upstream
 `main` + the PR commit, rebased 2026-10-10, **not built**). Build it only if
 djbclark asks; once a release ships #25211, delete that branch.
 
-## Review Jev prompt-effort shadow log (due 2026-10-18)
+## Review the Jev-vs-GLiDE dual review (ends by 2026-10-23)
 
-The offline test is done (2026-10-11; `bin/jev-eval`, results in `docs/jev.md`
-"Offline evaluation"): Jev beat Haiku on slice-kind and prompt-effort, and matched
-the always-`done` baseline on dispatch-verdict, which djbclark retired the same day.
-prompt-effort stays shadow. On 2026-10-18 run `bin/jev report --site prompt-effort`
-and `bin/jev disagreements --site prompt-effort --limit 20`, then ask djbclark: act
-at 0.9, keep shadow, or off. A self-removing launchd job
-(`com.djbclark.jev-remind-2026-10-18`) pings Hermes that morning.
-Read the numbers knowing: the hook only loads in Claude sessions started after it was
-installed (~09:30 2026-10-11); one 13:36 row has `session=test` (a manual hook test, not a
-real prompt); the first six live calls took 0.5-1.7 s with one `TimeoutError` at 2.55 s.
+**Started 2026-10-11 (operator).** The Jev-only prompt-effort review was closed the
+same day; see `docs/jev.md` "Dual review". Jev and GLiDE answer the same prompt-effort
+(hook) and agent-choice (`route_agent.py --brief`) questions side by side for at most 12
+days; the window closes itself (mode goes off). On 2026-10-23 run
+`bin/jev report --review dual-1 --json` and `bin/jev disagreements --site
+agent-choice --between`, label disagreements, then ask djbclark per backend: act, keep
+shadow, or off. A self-removing launchd job (`com.djbclark.jev-remind-2026-10-23`)
+pings Hermes that morning.

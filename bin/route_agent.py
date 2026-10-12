@@ -599,6 +599,30 @@ def apply_hermes_chain(chain: list[dict[str, str]]) -> str:
     return str(backup)
 
 
+JEV = Path(__file__).resolve().parent / "jev"
+
+
+def shadow_kind(brief_path: str, incumbent: str, service: str | None) -> None:
+    """Log what the deciders (Jev, GLiDE) say a brief's kind is, beside the caller's kind.
+
+    Site `agent-choice`; detached, so it never delays or changes the route. With the
+    jev mode off it exits at once. Any failure is swallowed.
+    """
+    try:
+        text = Path(brief_path).read_text(errors="replace")[:4000]
+        args = [str(JEV), "decide", "--site", "agent-choice",
+                "--question", "What kind of work is this delegated task?",
+                "--incumbent", incumbent, "--meta", f"service={service or ''}", "--timeout", "5"]
+        for kind in KINDS:
+            args += ["--option", kind]
+        child = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+        child.stdin.write(text)
+        child.stdin.close()
+    except Exception:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Route work to a vendor")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -606,6 +630,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--kind", required=True, choices=KINDS)
     r.add_argument("--json", action="store_true")
     r.add_argument("--min-headroom", type=float, default=15.0)
+    r.add_argument("--brief", help="the slice's brief file: its kind is also asked of Jev and "
+                   "GLiDE in shadow (site agent-choice); never changes the route")
     pl = sub.add_parser("plan", help="assign a wave of slice kinds to services now")
     pl.add_argument("--kinds", required=True,
                     help="comma list, hardest first, e.g. code,code,research,bulk")
@@ -613,6 +639,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="comma list of services to skip (just failed or spent)")
     pl.add_argument("--min-headroom", type=float, default=15.0)
     pl.add_argument("--json", action="store_true")
+    pl.add_argument("--brief", action="append", default=[],
+                    help="brief file per kind, in --kinds order (repeat; shadow-asks Jev and GLiDE)")
     sub.add_parser("show", help="snapshot age and per-service headroom")
     sub.add_parser("services", help="every service discovered right now")
     hc = sub.add_parser("hermes-chain", help="generate Hermes's provider chain")
@@ -628,6 +656,11 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"unknown kind(s) {bad}; choose from {KINDS}")
         skip = {x.strip() for x in args.exclude.split(",") if x.strip()}
         rows = plan(kinds, quota=quota, min_headroom=args.min_headroom, exclude=skip)
+        if args.brief:
+            if len(args.brief) != len(kinds):
+                parser.error("--brief must be given once per kind, in --kinds order")
+            for brief, (k, c) in zip(args.brief, rows):
+                shadow_kind(brief, k, c.service.name if c else None)
         stale = (not quota) or age is None or age > STALE_SOFT
         if args.json:
             print(json.dumps({
@@ -692,6 +725,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     choice = route(args.kind, quota=quota, min_headroom=args.min_headroom)
+    if args.brief:
+        shadow_kind(args.brief, args.kind, choice.service.name if choice else None)
     if choice is None:
         print(json.dumps({"kind": args.kind, "service": None,
                           "reason": "no eligible service with headroom"}))
