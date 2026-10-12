@@ -652,13 +652,14 @@ def cmd_night(args: argparse.Namespace) -> int:
             return 0
         if args.dry_run:
             rows = [run_dry(s, cfg=cfg, timeout=args.timeout or DEFAULT_TIMEOUT_S,
-                            limit=int(night.get("max_sessions") or 120)) for s in sources]
+                            limit=args.max_sessions or int(night.get("max_sessions") or 120))
+                    for s in sources]
         else:
             timeout = args.timeout or int(night.get("source_timeout_s", DEFAULT_TIMEOUT_S))
             rows = [run_source_chain(s, entries, cfg=cfg, timeout=timeout,
                                      max_rounds=int(night.get("max_rounds", DEFAULT_MAX_ROUNDS)),
                                      jobs=int(night.get("jobs", DEFAULT_JOBS)),
-                                     max_sessions=int(night.get("max_sessions", 0)),
+                                     max_sessions=args.max_sessions or int(night.get("max_sessions", 0)),
                                      native=args.native)
                     for s in sources]
     for r in rows:
@@ -764,6 +765,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--timeout", type=int, default=0,
                    help="seconds per source attempt, all rounds (default: night.json "
                         f"source_timeout_s, else {DEFAULT_TIMEOUT_S})")
+    p.add_argument("--max-sessions", type=int, default=0,
+                   help="cap harvested sessions for this run (default: night.json max_sessions)")
     p.add_argument("--load-wait", type=int, default=DEFAULT_LOAD_WAIT_S,
                    help="seconds to wait for load to drop before skipping (default %(default)s)")
     args = p.parse_args(argv)

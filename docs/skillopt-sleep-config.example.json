@@ -2,7 +2,7 @@
   "projects": "all",
   "transcript_source": "claude",
   "lookback_hours": 72,
-  "max_tasks_per_night": 40,
+  "max_tasks_per_night": 20,
   "max_tokens_per_night": 400000,
   "backend": "mock",
   "model": "",
@@ -18,7 +18,9 @@
   "evolve_skill": true,
   "multi_skill_fanout": true,
   "target_skill_path": "/Users/djbclark/src/djbclark-ade/skills/skillopt-sleep-learned/SKILL.md",
-  "skill_roots": ["/Users/djbclark/src/djbclark-ade/skills"],
+  "skill_roots": [
+    "/Users/djbclark/src/djbclark-ade/skills"
+  ],
   "managed_skill_name": "skillopt-sleep-learned",
   "auto_adopt": false,
   "redact_secrets": true,

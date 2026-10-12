@@ -429,6 +429,13 @@ def test_adapter_source_night_pins_digests(env, monkeypatch):
     assert cursors == {"zcode": "T-opencode"}
 
 
+def test_max_sessions_flag_overrides_night_json(env):
+    _night(env / "home", HAIKU_SONNET, max_sessions=40)
+    assert night.main(["--source", "claude", "--max-sessions", "10"]) == 0
+    argv = _calls(env)[0]["argv"]
+    assert argv[argv.index("--max-sessions") + 1] == "10"
+
+
 def test_adapter_failure_recorded(env, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("store unreadable")
