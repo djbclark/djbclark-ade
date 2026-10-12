@@ -3,6 +3,19 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## acp-run: classify quota and outage failures at the source
+
+**Queued 2026-10-12 (operator, from the acp-dispatch pool-guard work, 4bbf180).
+Not started; a cleanup, not urgent.** `acp-run` files zcode's
+`1310 [Weekly/Monthly Limit Exhausted. Your limit will reset at <time>]` as a
+plain failure and opencode-go's `ServiceUnavailableError` as `fail=transient`,
+so `acp-dispatch`'s `failure_class()` re-parses stderr to find quota and outage.
+Move that into acp-run: emit `fail=quota` with the reset time for 1310 (and
+the other limit phrasings in `failure_class`'s `quota_terms`), and a stable
+`fail=outage` for service-unavailable / 5xx / connection failures. Then shrink
+`failure_class` to trust acp-run's class. Check first that no live run owns
+`tools/acp-run/acp-run` (it was owned by the sipb-bench run on 2026-10-12).
+
 ## SkillOpt-Sleep phase 2: pluggable transcript sources
 
 **Queued 2026-10-12 (operator asked for SkillOpt across all agent runs; phase 1
