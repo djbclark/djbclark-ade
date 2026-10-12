@@ -959,4 +959,5 @@ index lags by seconds; a short retry would make it meaningful.
 **Searched first (2026-10-12):** `gh issue list -R zhiluop/siyuan-skills --state all
 --search` for `lsNotebooks`, `api_token`, `notebooks`, `KeyError`, `3.8`, and the PR
 list. Found one unrelated closed question ("docker的siyuan如何配置？") and one open PR
-(#2, English README). Nothing on either defect. **Not filed:** operator decides.
+(#2, English README). Nothing on either defect. **Filed 2026-10-12:**
+[zhiluop/siyuan-skills#3](https://github.com/zhiluop/siyuan-skills/issues/3).
