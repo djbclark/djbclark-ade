@@ -75,6 +75,10 @@ goes; it is never part of the name). Names may contain `+` and `-`.
    --new-tab`, and let the old one close when it empties. Create the missing
    workspaces in file order so they land in file order. Panes get new ids on
    move, so use the id from `move_result` for the renames that follow.
+   **A kept non-configured workspace is recreated too** whenever any configured
+   one is created or recreated: it is older than the new ones, so it jumps
+   above them once the `-old` copies close (2026-10-12: `Plektra` landed second,
+   above `helm`). Recreate it last, after the configured ones.
 
 ## Procedure
 

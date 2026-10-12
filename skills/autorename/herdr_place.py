@@ -189,8 +189,11 @@ def move(workspace: str | None, new_workspace: str | None, tab_label: str, focus
     return 0
 
 
-def slug_from_title(title: str, max_len: int = 28) -> str:
-    """'ClaudeHelm night run 2026-10-09 + Collie 1.18.1' -> 'claudehelm-night-run-collie-t'."""
+def slug_from_title(title: str, max_len: int = 21) -> str:
+    """'ClaudeHelm night run 2026-10-09 + Collie 1.18.1' -> 'claudehelm-night-run-t'.
+
+    max_len 21 keeps the label under the 24-character sidebar limit (workspace-layout.md).
+    """
     import re
     words = [w for w in re.sub(r"[^a-z0-9]+", " ", title.lower()).split() if not re.fullmatch(r"[0-9.-]+", w)]
     out = ""
