@@ -484,6 +484,11 @@ uv tool install pyinilint
 uv tool install --python 3.13 'crawl4ai==0.9.4'
 crawl4ai-setup
 
+# SkillOpt-Sleep (nightly skill learning from every agent's transcripts, §1.3
+# "SkillOpt-Sleep"); machine-wide, pinned to the upstream main commit verified
+# 2026-10-12 (PyPI 0.2.0 lacks the handoff backend and multi-skill fan-out):
+uv tool install "skillopt @ git+https://github.com/microsoft/SkillOpt@343db229dbd5ddaf9df6b1d5540d8bcdb2604d5c"
+
 # Graft (agent context graph); confirm the package name against the upstream README first (§1.3):
 npm install -g @nanonets/graft
 ```
@@ -636,6 +641,19 @@ tidy`), cherry-pick the three yolo commits of `yolo-true-unblock`
 to a temp name, then `mv -f`). Registered in `tools/acp-run/acp-run` as
 `crush`; run it without `--model`. Drop all of this once PR #2450 merges and a
 release has `crush acp`.
+
+**SkillOpt-Sleep: nightly skill learning (machine-wide; added 2026-10-12, djbclark).**
+Once per machine, not per repo. It mines every agent's past sessions into
+tasks, replays them against the current skills and stages gated SKILL.md /
+AGENTS.md edits for review; nothing changes until someone runs `skillopt-sleep
+adopt`. Guide: `djbclark-ade/docs/skillopt-sleep.md`.
+
+| Step | Command | What it does |
+|---|---|---|
+| CLI | `uv tool install "skillopt @ git+https://github.com/microsoft/SkillOpt@343db229dbd5ddaf9df6b1d5540d8bcdb2604d5c"` (§1.2) | `skillopt-sleep` (`run`, `dry-run`, `harvest`, `status`, `adopt`). Never use its `schedule` (crontab) or `--auto-adopt` |
+| Skills | `~/src/djbclark-ade/bin/skill-everywhere skillopt-sleep skillopt-sleep-learned` (needs the hub links `~/ops/site-djbclark/skills/<name>` → `~/src/djbclark-ade/skills/<name>` and `~/ops/site-private/skills/<name>` → `../../site-djbclark/skills/<name>`) | `/skillopt-sleep` (review last night, free mock `--dry-run`, per-skill adoption, the backend chain) in every TUI; `skillopt-sleep-learned` is the catch-all skill the cycle proposes edits to |
+| Nightly job | `~/src/djbclark-ade/bin/skillopt-night install` (copies `launchd/com.djbclark.skillopt-sleep.plist` to `~/Library/LaunchAgents/` and bootstraps it; `uninstall` reverses) | 03:30 nightly run over every transcript source; inert until `~/.skillopt-sleep/night.json` has `"enabled": true`. Check the chain first with `skillopt-night chain-check` |
+| Failover library | `~/src/djbclark-ade/bin/failover.py` (`registry`, `check`, `ask`, `run`; `docs/failover.md`) | The ordered chain of agent routes the night answers its prompts through (deny list, allowlist, aiuse preflight, attempt log). Reuse it for any tool that must fail over between pools instead of hand-rolling one |
 
 **Agent context graph**
 
