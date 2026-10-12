@@ -1,6 +1,6 @@
 # Prompt: apply the djbclark / frdminc / Graft development toolchain to a repo
 
-Version 5.4 (2026-10-11). Supersedes 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
+Version 5.5 (2026-10-11). Supersedes 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
 (2026-10-01, which superseded
 `CLAUDE_APPLY_DJBCLARK_TOOLING_Version4.md`). Lived at
 `site-djbclark/research/apply-dev-toolchain/CLAUDE_APPLY_DJBCLARK_TOOLING.md`
@@ -99,6 +99,14 @@ here, not only in the skill — `miller` (awk/sed/sort/join over CSV/TSV/JSON),
 the §1.2 install line and the §1.3 utilities table; `runiq` is noted as
 crates-only (`cargo install runiq`). Rationale and the per-tool verdicts live in
 `djbclark-ade/skills/setup-modern-cli/` (`SKILL.md` + `references/`).
+
+What changed in 5.5 (2026-10-11): four agent-data tools added — `duckdb` (SQL
+over CSV/JSON/Parquet with no import), `jc` (command output → JSON), `gron`
+(flatten JSON so `rg` can search it) and `moreutils` (`sponge`/`ifne`/`vidir`).
+They are in the §1.2 install line, the §1.3 utilities table, and the skill's
+`references/replacements.md`; the "Not installed, and why" table there records
+what is still deliberately out (`jaq`, `mdcat`, `ov`, `tailspin`, `aria2c`,
+`f2`, `angle-grinder`, `fclones`, `atuin`, `lazygit`, `lnav`, `nomino`).
 
 ---
 
@@ -431,7 +439,8 @@ HOMEBREW_NO_AUTO_UPDATE=1 brew install \
   ripgrep fd bat srgn eza hck git-delta jq yq xh ast-grep \
   miller gnu-sed gawk uutils-coreutils dasel qsv b3sum \
   dust gdu duf procs difftastic hyperfine tldr \
-  hexyl ouch glow doggo ripgrep-all rargs entr csvlens watchexec
+  hexyl ouch glow doggo ripgrep-all rargs entr csvlens watchexec \
+  duckdb jc gron moreutils
 
 # `runiq` (uniq on unsorted input) is not in Homebrew:
 cargo install runiq
@@ -558,6 +567,10 @@ it on automated install lines.
 | `watchexec`, `entr` | https://github.com/watchexec/watchexec | `brew install watchexec entr` | `watch` (non-interactive, safe for agents) |
 | `runiq` | https://github.com/whitfin/runiq | `cargo install runiq` (not in Homebrew) | `uniq` on unsorted input |
 | `rargs` | https://github.com/lotabout/rargs | `brew install rargs` | `xargs -I` plus `awk`-style conditions |
+| `duckdb` | https://duckdb.org/ | `brew install duckdb` | ad-hoc SQL over CSV/JSON/Parquet/globs with no import step — replaces long `awk`/`mlr`/`jq` chains |
+| `jc` | https://github.com/kellyjonbrazil/jc | `brew install jc` | JSON-ify the output of commands that have no `--json` (`ip`, `df`, `ls`, `dig`, `systemctl`, …) |
+| `gron` | https://github.com/tomnomnom/gron | `brew install gron` | flatten JSON to `path = value` lines so `rg` can search an unknown shape |
+| `moreutils` (`sponge`, `ifne`, `vidir`) | https://joeyh.name/code/moreutils/ | `brew install moreutils` | `sponge` writes a file from mid-pipeline, `ifne` runs only on non-empty input |
 
 These govern shell use. Claude Code's own `Read`/`Grep`/`Glob`/`Edit` tools
 stay preferred over shelling out when an equivalent exists (site-djbclark
