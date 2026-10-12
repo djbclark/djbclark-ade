@@ -11,12 +11,14 @@ import io
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 _loader = importlib.machinery.SourceFileLoader("skillopt_night", str(ROOT / "bin" / "skillopt-night"))
 _spec = importlib.util.spec_from_loader("skillopt_night", _loader)
+assert _spec is not None
 night = importlib.util.module_from_spec(_spec)
 _loader.exec_module(night)
 failover = night.failover
@@ -39,9 +41,11 @@ try:
     state = json.loads(st.read_text())
 except (OSError, ValueError):
     state = {}
-row = {"argv": argv, "seen": state.get("last_harvest", {}).get(proj), "hdir": hdir}
+row = {"argv": argv, "seen": state.get("last_harvest", {}).get(proj), "hdir": hdir,
+       "pinned": json.loads((Path(hdir) / "digests.json").read_text())
+       if hdir and (Path(hdir) / "digests.json").exists() else None}
 answer = None
-if mode == "run" and backend == "handoff":
+if backend == "handoff":
     ans = Path(hdir) / "answers" / "p1.md"
     if not ans.exists():
         Path(hdir).mkdir(parents=True, exist_ok=True)
@@ -53,6 +57,7 @@ if mode == "run" and backend == "handoff":
         sys.exit(3)
     answer = ans.read_text()
     row["answer"] = answer
+if mode == "run" and backend != "mock":
     state["night"] = state.get("night", 0) + 1
     state.setdefault("last_harvest", {})[proj] = "T-" + src
     st.parent.mkdir(parents=True, exist_ok=True)
@@ -109,21 +114,23 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_SECRET", SECRET)
     monkeypatch.delenv("FAKE_RESULT", raising=False)
     monkeypatch.setattr(night, "handoff_dir", lambda s: tmp_path / "handoff" / s)
-    monkeypatch.setattr(failover, "preflight", lambda e: (True, "ok (test)"))
+    monkeypatch.setattr(failover, "preflight", lambda e, probe=True: (True, "ok (test)"))
     monkeypatch.setattr(failover, "ask", lambda e, p: f"ANS-{e.model}-{p}")
+    monkeypatch.setattr(night.skillopt_sources, "store_present", lambda s: False)
     failover._cache.clear()
     return tmp_path
 
 
-def _night(home: Path, chain: list[dict], **kw) -> None:
+def _night(home: Path, chain: list[dict[str, Any]], **kw) -> None:
     spec = {"enabled": True, "chain": chain, **kw}
     (home / ".skillopt-sleep" / "night.json").write_text(json.dumps(spec))
 
 
-HAIKU_SONNET = [{"tui": "claude", "model": "haiku"}, {"tui": "claude", "model": "sonnet"}]
+HAIKU_SONNET = [{"tui": "claude", "model": "haiku", "effort": "low"},
+                {"tui": "claude", "model": "sonnet", "effort": "low"}]
 
 
-def _calls(tmp: Path) -> list[dict]:
+def _calls(tmp: Path) -> list[dict[str, Any]]:
     p = tmp / "calls.jsonl"
     return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
 
@@ -133,19 +140,19 @@ def _pings(tmp: Path) -> list[str]:
     return p.read_text().splitlines() if p.exists() else []
 
 
-def _rows(tmp: Path) -> list[dict]:
+def _rows(tmp: Path) -> list[dict[str, Any]]:
     p = tmp / "state" / "nights.jsonl"
     return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
 
 
-def _attempts(tmp: Path) -> list[dict]:
+def _attempts(tmp: Path) -> list[dict[str, Any]]:
     p = tmp / "state" / "attempts.jsonl"
     return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
 
 
 # ── argument assembly ───────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("source", night.SOURCES)
+@pytest.mark.parametrize("source", night.NATIVE_SOURCES)
 def test_run_command_per_source(env, source):
     cmd = night.build_command(source, dry_run=False, cfg={}, codex_home=env / "shim")
     assert cmd[:3] == ["nice", "-n", "10"]
@@ -157,6 +164,22 @@ def test_run_command_per_source(env, source):
     assert "--auto-adopt" not in cmd
     assert ("--codex-home" in cmd) == (source == "codex")
     assert "hermes-ping" in cmd[cmd.index("--preferences") + 1]
+
+
+@pytest.mark.parametrize("source", night.ADAPTER_SOURCES)
+def test_adapter_source_harvests_nothing_natively(env, source):
+    cmd = night.build_command(source, dry_run=False, cfg={})
+    assert cmd[cmd.index("--source") + 1] == "opencode"
+    assert cmd[cmd.index("--opencode-db") + 1] == ":memory:"
+
+
+def test_native_command(env):
+    cmd = night.build_command("claude", dry_run=False, cfg={}, backend="claude", model="claude-haiku-5-5")
+    assert cmd[cmd.index("--backend") + 1] == "claude" and cmd[cmd.index("--model") + 1] == "claude-haiku-5-5"
+
+
+def test_pi_is_not_a_source():
+    assert "pi" not in night.SOURCES
 
 
 def test_max_sessions_passed_on_runs_only(env):
@@ -222,7 +245,13 @@ def test_no_enabled_chain_refuses_stateful_night(env, capsys, spec):
 
 
 @pytest.mark.parametrize("bad", [{"tui": "cursor"}, {"tui": "claude", "model": "opus"},
-                                 {"tui": "codex"}, {"tui": "claude", "model": "claude-fable-5"}])
+                                 {"tui": "codex"}, {"tui": "claude", "model": "claude-fable-5"},
+                                 {"tui": "copilot"}, {"tui": "grok"}, {"tui": "hermes"},
+                                 {"tui": "opencode", "model": "opencode-go/grok-4.7"},
+                                 {"tui": "agy", "model": "claude-opus-5-5", "effort": "low"},
+                                 {"tui": "opencode", "model": "opencode-go/x", "label": "muse"},
+                                 {"tui": "opencode", "model": "opencode-go/x", "label": "pi"},
+                                 {"tui": "sipb", "model": "qwen3-coder:30b"}])
 def test_policy_violating_chain_refused_whole(env, bad):
     _night(env / "home", [HAIKU_SONNET[0], bad])
     assert night.main([]) == 1
@@ -268,7 +297,7 @@ def test_handoff_round_answered_by_first_entry(env):
     assert calls[1]["answer"] == "ANS-haiku-Q-claude"
     assert calls[0]["hdir"] == str(env / "handoff" / "claude")
     row = _rows(env)[-1]
-    assert (row["status"], row["entry"], row["rounds"], row["answered"]) == ("ok", "claude:haiku", 2, 1)
+    assert (row["status"], row["entry"], row["rounds"], row["answered"]) == ("ok", "claude:haiku@low", 2, 1)
     assert not (env / "handoff" / "claude").exists(), "a finished night's handoff dir is archived"
     assert len(list((env / "state" / "handoff-archive").iterdir())) == 1
 
@@ -283,8 +312,8 @@ def test_answer_failure_fails_over_to_next_entry(env, monkeypatch):
     monkeypatch.setattr(failover, "ask", ask)
     assert night.main(["--source", "claude"]) == 0
     row = _rows(env)[-1]
-    assert row["entry"] == "claude:sonnet"
-    assert row["failed"] == ["claude:haiku: simulated quota"]
+    assert row["entry"] == "claude:sonnet@low"
+    assert row["failed"] == ["claude:haiku@low: simulated quota"]
     assert _calls(env)[-1]["answer"] == "ANS-sonnet"
 
 
@@ -297,18 +326,18 @@ def test_bad_night_restores_state_and_reruns_on_next_entry(env, monkeypatch):
     assert json.loads(state.read_text())["night"] == 8, "the failed attempt's night was rolled back"
     answers = [c.get("answer") for c in _calls(env)]
     assert answers == [None, "BAD", None, "GOOD"], "the source night reran from scratch"
-    assert _rows(env)[-1]["entry"] == "claude:sonnet"
+    assert _rows(env)[-1]["entry"] == "claude:sonnet@low"
 
 
 def test_preflight_skip_logged(env, monkeypatch):
     _night(env / "home", HAIKU_SONNET)
     monkeypatch.setattr(failover, "preflight",
-                        lambda e: (False, "pool claude headroom 9% <= floor 15%") if e.model == "haiku"
-                        else (True, "ok"))
+                        lambda e, probe=True: (False, "pool claude headroom 9% <= floor 15%")
+                        if e.model == "haiku" else (True, "ok"))
     assert night.main(["--source", "claude"]) == 0
     att = _attempts(env)
     assert (att[0]["phase"], att[0]["ok"], att[0]["model"]) == ("preflight", False, "haiku")
-    assert _rows(env)[-1]["entry"] == "claude:sonnet"
+    assert _rows(env)[-1]["entry"] == "claude:sonnet@low"
 
 
 def test_chain_exhausted(env, monkeypatch):
@@ -317,7 +346,7 @@ def test_chain_exhausted(env, monkeypatch):
     assert night.main(["--source", "claude"]) == 1
     row = _rows(env)[-1]
     assert row["status"] == "chain_exhausted"
-    assert row["failed"] == ["claude:haiku: down", "claude:sonnet: down"]
+    assert row["failed"] == ["claude:haiku@low: down", "claude:sonnet@low: down"]
     assert _pings(env) == [("djbclark-ade: skillopt-sleep chain exhausted for claude; "
                            f"see {env / 'state'}/attempts.jsonl")]
     assert not (env / "home" / ".skillopt-sleep" / "state.json").exists()
@@ -357,7 +386,7 @@ def test_sipb_secret_never_on_disk(env, monkeypatch):
         seen["auth"] = req.get_header("Authorization")
         return io.BytesIO(json.dumps({"choices": [{"message": {"content": "sipb says hi"}}]}).encode())
     monkeypatch.setattr(failover.urllib.request, "urlopen", urlopen)
-    _night(env / "home", [{"tui": "sipb", "model": "qwen3-coder:30b"}])
+    _night(env / "home", [{"tui": "sipb", "model": "qwen3-coder:30b"}], allow=["sipb"])
     assert night.main(["--source", "claude"]) == 0
     assert seen["auth"] == f"Bearer {SECRET}"
     assert _calls(env)[-1]["answer"] == "sipb says hi"
@@ -368,12 +397,85 @@ def test_sipb_secret_never_on_disk(env, monkeypatch):
 
 
 
+DIGEST = {"session_id": "z1", "project": "/Users/x/src/p", "user_prompts": ["fix it"],
+          "assistant_finals": ["done"], "started_at": "2026-10-12T10:00:00Z",
+          "ended_at": "2026-10-12T10:05:00Z"}
+
+
+def _fake_adapter(calls: list[str]):
+    def fake(source, cfg, out, limit):
+        calls.append(f"{source}:{limit}")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps([DIGEST]))
+        return 1
+    return fake
+
+
+def test_adapter_source_night_pins_digests(env, monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(night, "adapter_digests", _fake_adapter(calls))
+    monkeypatch.setattr(night.skillopt_sources, "store_present", lambda s: s == "zcode")
+    _night(env / "home", HAIKU_SONNET, max_sessions=30)
+    assert night.available_sources({}) == ["claude", "codex", "zcode"]
+    assert night.main(["--source", "zcode"]) == 0
+    assert calls == ["zcode:30"]
+    first = _calls(env)[0]
+    assert first["pinned"] == [DIGEST], "round 1 already sees the adapter's digests"
+    assert first["argv"][first["argv"].index("--source") + 1] == "opencode"
+    row = _rows(env)[-1]
+    assert (row["source"], row["status"], row["entry"]) == ("zcode", "ok", "claude:haiku@low")
+    assert not (env / "state" / "digests-zcode.json").exists()
+    cursors = json.loads((env / "state" / "cursors.json").read_text())
+    assert cursors == {"zcode": "T-opencode"}
+
+
+def test_adapter_failure_recorded(env, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("store unreadable")
+    monkeypatch.setattr(night, "adapter_digests", boom)
+    monkeypatch.setattr(night.skillopt_sources, "store_present", lambda s: s == "agy")
+    _night(env / "home", HAIKU_SONNET)
+    assert night.main(["--source", "agy"]) == 0
+    assert _rows(env)[-1]["status"] == "adapter-failed"
+    assert _calls(env) == []
+
+
+def test_adapter_dry_run_counts_prompts_without_state(env, monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(night, "adapter_digests", _fake_adapter(calls))
+    monkeypatch.setattr(night.skillopt_sources, "store_present", lambda s: s == "crush")
+    assert night.main(["--dry-run", "--source", "crush"]) == 0
+    row = _rows(env)[-1]
+    assert (row["source"], row["rc"], row["ok"], row["sessions"], row["pending_prompts"]) == (
+        "crush", 3, True, 1, 1)
+    c = _calls(env)[0]
+    assert c["argv"][0] == "dry-run" and c["argv"][c["argv"].index("--backend") + 1] == "handoff"
+    assert not (env / "home" / ".skillopt-sleep" / "state.json").exists()
+
+
+def test_native_flag_uses_skillopt_backend(env):
+    _night(env / "home", [{"tui": "opencode", "model": "opencode-go/minimax-m3"}])
+    assert night.main(["--source", "claude", "--native"]) == 0
+    calls = _calls(env)
+    assert len(calls) == 1 and calls[0].get("round") is None
+    argv = calls[0]["argv"]
+    assert argv[argv.index("--backend") + 1] == "opencode"
+    assert argv[argv.index("--model") + 1] == "opencode-go/minimax-m3"
+    assert _rows(env)[-1]["entry"] == "opencode:opencode-go/minimax-m3"
+
+
+def test_native_flag_ignored_for_acp_only_entries(env):
+    _night(env / "home", [{"tui": "agy", "model": "gemini-3.8-flash", "effort": "medium"}])
+    assert night.main(["--source", "claude", "--native"]) == 0
+    assert [c.get("round") for c in _calls(env)] == ["pending", None]
+
+
 def test_chain_check_prints_table(env, capsys, monkeypatch):
     _night(env / "home", HAIKU_SONNET, enabled=False)
-    monkeypatch.setattr(failover, "preflight", lambda e: (e.model == "sonnet", "why-" + e.model))
+    monkeypatch.setattr(failover, "preflight", lambda e, probe=True: (e.model == "sonnet", "why-" + e.model))
     assert night.main(["--chain-check"]) == 0
     out = capsys.readouterr().out
-    assert "enabled=False" in out and "claude:haiku" in out and "why-sonnet" in out
+    assert "enabled=False" in out and "claude:haiku@low" in out and "why-sonnet" in out
     assert _calls(env) == []
 
 

@@ -75,6 +75,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -84,13 +85,22 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO / "bin") not in sys.path:
     sys.path.insert(0, str(REPO / "bin"))
 import failover
+import skillopt_sources
 
 LABEL = "com.djbclark.skillopt-sleep"
 PLIST_SRC = REPO / "launchd" / f"{LABEL}.plist"
 PREFERENCES = REPO / "docs" / "skillopt-preferences.md"
-SOURCES = ("claude", "codex", "cursor", "opencode", "copilot_cli", "pi")
-# Operator 2026-10-12: the only backends a night may use.
-DEFAULT_ALLOW = ["zcode", "agy", "opencode", "claude", "sipb"]
+# Sources SkillOpt harvests natively (pi excluded by the operator, 2026-10-12) and the three
+# this repo adapts (bin/skillopt_sources.py, fed to the handoff path as pinned digests).
+NATIVE_SOURCES = ("claude", "codex", "cursor", "opencode", "copilot_cli")
+ADAPTER_SOURCES = ("zcode", "agy", "crush")
+SOURCES = NATIVE_SOURCES + ADAPTER_SOURCES
+# Operator 2026-10-12 (approved chain): the only backends a night may use, and words no
+# entry may contain (on top of failover.DENY: cursor, cline, clinepass, hermes, opus, fable).
+DEFAULT_ALLOW = ["opencode", "agy", "zcode", "claude", "crush"]
+NIGHT_DENY = (*failover.DENY, "muse", "pi", "grok", "codex", "copilot")
+# Chain entries that SkillOpt can also drive with its own backend (--native).
+NATIVE_BACKENDS = ("opencode", "claude")
 DEFAULT_TIMEOUT_S = 5400
 DEFAULT_LOAD_WAIT_S = 1800
 DEFAULT_MAX_ROUNDS = 8
@@ -148,7 +158,7 @@ def load_night() -> dict[str, Any]:
 
 def load_entries(night: dict[str, Any]) -> list[failover.Entry]:
     return failover.load_chain(night.get("chain") or [],
-                               allow=night.get("allow") or DEFAULT_ALLOW)
+                               allow=night.get("allow") or DEFAULT_ALLOW, deny=NIGHT_DENY)
 
 
 # ── sources ──────────────────────────────────────────────────────────────────
@@ -164,7 +174,6 @@ def source_root(source: str, cfg: dict[str, Any]) -> Path:
                          or h / ".local" / "share" / "opencode" / "opencode.db"),
         "copilot_cli": Path(cfg.get("copilot_cli_session_store")
                             or h / ".copilot" / "session-store.db"),
-        "pi": Path(cfg.get("pi_home") or h / ".pi") / "agent" / "sessions",
     }
     return Path(os.path.expanduser(str(roots[source])))
 
@@ -177,9 +186,54 @@ def has_data(root: Path) -> bool:
     return False
 
 
+def source_present(source: str, cfg: dict[str, Any]) -> bool:
+    if source in ADAPTER_SOURCES:
+        return skillopt_sources.store_present(source)
+    return has_data(source_root(source, cfg))
+
+
 def available_sources(cfg: dict[str, Any], only: list[str] | None = None) -> list[str]:
     wanted = only or list(SOURCES)
-    return [s for s in SOURCES if s in wanted and has_data(source_root(s, cfg))]
+    return [s for s in SOURCES if s in wanted and source_present(s, cfg)]
+
+
+def tool_python() -> str:
+    """The skillopt uv tool's interpreter (its shebang), so adapters reuse upstream's
+    redaction and replay filters; this interpreter as a fallback."""
+    override = os.environ.get("SKILLOPT_NIGHT_TOOL_PYTHON")
+    if override:
+        return override
+    try:
+        first = Path(skillopt_bin()).read_text(errors="ignore").splitlines()[0]
+        if first.startswith("#!") and "python" in first and Path(first[2:].strip()).exists():
+            return first[2:].strip()
+    except (OSError, IndexError):
+        pass
+    return sys.executable
+
+
+def adapter_since(source: str, cfg: dict[str, Any]) -> str:
+    """This source's cursor, else the configured first-night lookback (local time)."""
+    cur = _read_json(state_dir() / "cursors.json", {}).get(source)
+    if cur:
+        return str(cur)
+    hours = float(cfg.get("lookback_hours") or 72)
+    return datetime.fromtimestamp(time.time() - hours * 3600).isoformat(timespec="seconds")
+
+
+def adapter_digests(source: str, cfg: dict[str, Any], out: Path, limit: int) -> int:
+    """Write SessionDigest JSON for an adapter source; return how many."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run([tool_python(), "-I", str(REPO / "bin" / "skillopt_sources.py"), source,
+                           "--since", adapter_since(source, cfg), "--limit", str(limit),
+                           "--out", str(out)],
+                          capture_output=True, text=True, timeout=1800, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(f"skillopt_sources {source} rc={proc.returncode}: {proc.stderr[-300:]}")
+    data = _read_json(out, None)
+    if isinstance(data, list):
+        return len(data)
+    raise RuntimeError(f"skillopt_sources {source} wrote no digest list")
 
 
 def codex_shim(cfg: dict[str, Any]) -> Path:
@@ -299,12 +353,18 @@ def preferences_text() -> str:
 
 
 def build_command(source: str, *, dry_run: bool, cfg: dict[str, Any],
-                  codex_home: Path | None = None, backend: str = "handoff",
-                  max_sessions: int = 0) -> list[str]:
+                  codex_home: Path | None = None, backend: str | None = None,
+                  model: str = "", max_sessions: int = 0) -> list[str]:
+    """backend None: mock for a dry-run, handoff otherwise. An adapter source runs as
+    `--source opencode --opencode-db :memory:` (harvests nothing by construction); its
+    sessions arrive as the handoff dir's pinned digests.json."""
+    backend = backend or ("mock" if dry_run else "handoff")
+    cli_source = ["opencode", "--opencode-db", ":memory:"] if source in ADAPTER_SOURCES else [source]
     cmd = ["nice", "-n", "10", skillopt_bin(), "dry-run" if dry_run else "run",
-           "--project", str(REPO), "--scope", "all", "--source", source,
-           "--skill-root", str(REPO / "skills"), "--progress", "--json",
-           "--backend", "mock" if dry_run else backend]
+           "--project", str(REPO), "--scope", "all", "--source", *cli_source,
+           "--skill-root", str(REPO / "skills"), "--progress", "--json", "--backend", backend]
+    if model:
+        cmd += ["--model", model]
     if source == "codex" and codex_home is not None:
         cmd += ["--codex-home", str(codex_home)]
     if max_sessions and not dry_run:
@@ -430,14 +490,17 @@ def log_path(source: str, dry_run: bool) -> Path:
     return sd / f"{datetime.now():%Y-%m-%d}-{source}{'-dry' if dry_run else ''}.log"
 
 
-def run_dry(source: str, *, cfg: dict[str, Any], timeout: int) -> dict[str, Any]:
+def run_dry(source: str, *, cfg: dict[str, Any], timeout: int, limit: int = 120) -> dict[str, Any]:
+    if source in ADAPTER_SOURCES:
+        return run_dry_adapter(source, cfg=cfg, timeout=timeout, limit=limit)
     shim = codex_shim(cfg) if source == "codex" else None
     cmd = build_command(source, dry_run=True, cfg=cfg, codex_home=shim)
     swap_in_cursor(source, str(REPO))
     log = log_path(source, True)
     rc, stdout = invoke(cmd, log=log, env=dict(os.environ), timeout=timeout)
     result = parse_result(stdout)
-    row = {"source": source, "mode": "dry-run", "rc": rc, "sessions": result.get("n_sessions"),
+    row = {"source": source, "mode": "dry-run", "rc": rc, "ok": rc == 0,
+           "sessions": result.get("n_sessions"),
            "tasks": result.get("n_tasks"), "accepted": result.get("accepted"),
            "gate": result.get("gate_action") or None, "proposals": n_proposals(result),
            "staging_dir": result.get("staging_dir") or None, "log": str(log)}
@@ -445,26 +508,70 @@ def run_dry(source: str, *, cfg: dict[str, Any], timeout: int) -> dict[str, Any]
     return row
 
 
+def run_dry_adapter(source: str, *, cfg: dict[str, Any], timeout: int, limit: int) -> dict[str, Any]:
+    """Adapter sources have no mock path (pinned digests load only through handoff): a
+    handoff dry-run in a throwaway dir makes no model calls and saves no state; it exits 3
+    with the round-1 prompts, which are counted and discarded."""
+    log = log_path(source, True)
+    with tempfile.TemporaryDirectory(prefix=f"skillopt-dry-{source}-") as tmp:
+        hdir = Path(tmp) / "handoff"
+        try:
+            n = adapter_digests(source, cfg, hdir / "digests.json", limit)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+            row = {"source": source, "mode": "dry-run", "rc": None, "ok": False,
+                   "status": "adapter-failed", "why": str(e)[:300], "log": str(log)}
+            record(row)
+            return row
+        cmd = build_command(source, dry_run=True, cfg=cfg, backend="handoff")
+        rc, stdout = invoke(cmd, log=log, timeout=timeout,
+                            env={**os.environ, "SKILLOPT_SLEEP_HANDOFF_DIR": str(hdir)})
+        pending = _read_json(hdir / "pending.json", {})
+        n_pending = len(pending.get("pending") or []) if isinstance(pending, dict) else 0
+    result = parse_result(stdout)
+    row = {"source": source, "mode": "dry-run", "rc": rc, "ok": rc in (0, 3), "sessions": n,
+           "tasks": result.get("n_tasks"), "pending_prompts": n_pending, "proposals": 0,
+           "log": str(log)}
+    record(row)
+    return row
+
+
 def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[str, Any],
                      timeout: int, max_rounds: int, jobs: int,
-                     max_sessions: int = 0) -> dict[str, Any]:
+                     max_sessions: int = 0, native: bool = False) -> dict[str, Any]:
     """One stateful source night through the chain; returns its nights.jsonl row."""
     project = str(REPO)
     log = log_path(source, False)
     hdir = handoff_dir(source)
     shim = codex_shim(cfg) if source == "codex" else None
-    cmd = build_command(source, dry_run=False, cfg=cfg, codex_home=shim, max_sessions=max_sessions)
     env = {**os.environ, "SKILLOPT_SLEEP_HANDOFF_DIR": str(hdir)}
+    pinned: Path | None = None
+    if source in ADAPTER_SOURCES:
+        pinned = state_dir() / f"digests-{source}.json"
+        try:
+            adapter_digests(source, cfg, pinned, max_sessions or 120)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+            row = {"source": source, "mode": "run", "status": "adapter-failed",
+                   "why": str(e)[:300], "proposals": 0, "log": str(log)}
+            record(row)
+            return row
 
     def attempt(entry: failover.Entry) -> dict[str, Any]:
         snap = snapshot_state()
         before = swap_in_cursor(source, project)
         reset_dir(hdir)
+        if pinned is not None:
+            hdir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(pinned, hdir / "digests.json")
+        use_native = native and pinned is None and entry.tui.name in NATIVE_BACKENDS
+        cmd = build_command(source, dry_run=False, cfg=cfg, codex_home=shim,
+                            max_sessions=max_sessions,
+                            backend=entry.tui.name if use_native else "handoff",
+                            model=entry.native_model if use_native else "")
         deadline = time.monotonic() + timeout
         rounds = answered = 0
         try:
             with open(log, "a") as lf:
-                lf.write(f"\n== attempt on {entry.label}\n")
+                lf.write(f"\n== attempt on {entry.label}{' (native backend)' if use_native else ''}\n")
             while True:
                 rounds += 1
                 rc, stdout = invoke(cmd, log=log, env=env, timeout=deadline - time.monotonic())
@@ -501,6 +608,8 @@ def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[st
                "accepted": result.get("accepted"), "gate": result.get("gate_action") or None,
                "proposals": n_proposals(result), "staging_dir": result.get("staging_dir") or None,
                "failed": failed, "log": str(log)}
+    if pinned is not None:
+        pinned.unlink(missing_ok=True)  # transcript excerpts; the night's own copy is archived
     record(row)
     return row
 
@@ -542,20 +651,23 @@ def cmd_night(args: argparse.Namespace) -> int:
             record({"mode": "dry-run" if args.dry_run else "run", "status": f"skipped: {why}"})
             return 0
         if args.dry_run:
-            rows = [run_dry(s, cfg=cfg, timeout=args.timeout or DEFAULT_TIMEOUT_S) for s in sources]
+            rows = [run_dry(s, cfg=cfg, timeout=args.timeout or DEFAULT_TIMEOUT_S,
+                            limit=int(night.get("max_sessions") or 120)) for s in sources]
         else:
             timeout = args.timeout or int(night.get("source_timeout_s", DEFAULT_TIMEOUT_S))
             rows = [run_source_chain(s, entries, cfg=cfg, timeout=timeout,
                                      max_rounds=int(night.get("max_rounds", DEFAULT_MAX_ROUNDS)),
                                      jobs=int(night.get("jobs", DEFAULT_JOBS)),
-                                     max_sessions=int(night.get("max_sessions", 0)))
+                                     max_sessions=int(night.get("max_sessions", 0)),
+                                     native=args.native)
                     for s in sources]
     for r in rows:
         print(f"{r['source']:12} {r.get('status', 'ok'):15} entry={r.get('entry', '-')} "
               f"rc={r.get('rc')} sessions={r.get('sessions')} tasks={r.get('tasks')} "
+              f"pending={r.get('pending_prompts', '-')} "
               f"gate={r.get('gate')} proposals={r.get('proposals')} log={r['log']}")
     if args.dry_run:
-        return 0 if all(r["rc"] == 0 for r in rows) else 1
+        return 0 if all(r.get("ok") for r in rows) else 1
     staged = [r for r in rows if r.get("proposals")]
     if staged:
         n = sum(r["proposals"] for r in staged)
@@ -568,7 +680,7 @@ def cmd_night(args: argparse.Namespace) -> int:
     return 0 if not exhausted else 1
 
 
-def cmd_chain_check(_args: argparse.Namespace) -> int:
+def cmd_chain_check(args: argparse.Namespace) -> int:
     night = load_night()
     print(f"chain: {night_path()} enabled={bool(night.get('enabled'))} "
           f"allow={night.get('allow') or DEFAULT_ALLOW}")
@@ -580,7 +692,7 @@ def cmd_chain_check(_args: argparse.Namespace) -> int:
     if not entries:
         print("chain is empty")
         return 1
-    rows = failover.check_table(entries)
+    rows = failover.check_table(entries, probe=args.probe)
     failover.print_table(rows, ["#", "label", "vendor", "pool", "pool_family",
                                 "floor_percent", "ready", "why"])
     return 0 if any(r["ready"] == "yes" for r in rows) else 1
@@ -589,8 +701,8 @@ def cmd_chain_check(_args: argparse.Namespace) -> int:
 def cmd_sources(_args: argparse.Namespace) -> int:
     cfg = load_config()
     for s in SOURCES:
-        root = source_root(s, cfg)
-        print(f"{s:12} {'data' if has_data(root) else 'none':5} {root}")
+        where = "bin/skillopt_sources.py" if s in ADAPTER_SOURCES else str(source_root(s, cfg))
+        print(f"{s:12} {'data' if source_present(s, cfg) else 'none':5} {where}")
     return 0
 
 
@@ -640,6 +752,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("command", nargs="?", default="night",
                    choices=["night", "chain-check", "sources", "install", "uninstall"])
     p.add_argument("--chain-check", action="store_true", help="same as the chain-check command")
+    p.add_argument("--probe", action="store_true",
+                   help="chain-check: also run probe preflights (crush; these call the model)")
+    p.add_argument("--native", action="store_true",
+                   help="opencode/claude entries use SkillOpt's own backend instead of acp-run "
+                        "answers (native sources only)")
     p.add_argument("--dry-run", action="store_true",
                    help="skillopt-sleep dry-run --backend mock; never advances checkpoints")
     p.add_argument("--source", action="append", choices=list(SOURCES),
