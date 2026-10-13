@@ -41,12 +41,27 @@ reports `UP,LOWER_UP`; `ip link set lo up` changes nothing. `systemd-detect-virt
 says `docker`, `uname -r` is 6.12.91, `dmesg` shows a microVM boot. Inside the
 job `unshare -n` hung until the job was cancelled.
 
-## Guess
+## Likely cause
 
-The runner is a libkrun microVM (see `SIPB/hyades` README). libkrun's default
-socket-proxy networking (TSI) is known not to give the guest a working loopback;
-a TAP/passt-style virtio-net backend or a guest-local loopback would avoid it.
-This is a guess from the symptom, not something verified.
+The runner is a libkrun microVM (see `SIPB/hyades` README). libkrun enables its
+socket-proxy networking (TSI) automatically when the VM has no network interface
+(libkrun docs: TSI and virtio-net+passt/gvproxy are mutually exclusive). Under
+TSI, guest AF_INET sockets are proxied through the host VMM, and
+https://github.com/libkrun/libkrun/issues/818 describes this exact symptom:
+`bind(port 0)` + `listen()` makes the VMM bind a different ephemeral port in its
+own netns, so the listener is unreachable, even for the process that created it.
+Related: https://github.com/libkrun/libkrun/issues/510 (guest-internal sockets
+intercepted by TSI). The probe above and Gradle's daemon both bind port 0. This
+is inferred from the symptom and the issue text, not verified on your host.
+
+## Probable fix (host side, as root)
+
+1. Start the CI microVMs with a virtio-net device backed by passt (or gvproxy)
+   instead of implicit TSI (`krun_add_net_unixstream` / `krun_add_net_unixgram`;
+   adding any NIC disables TSI). Loopback is then the guest kernel's own.
+2. Or a libkrun build that has #818 fixed, if one exists.
+3. Quick check of the diagnosis: a listener on a fixed port on 127.0.0.1 should
+   connect (prediction); only port-0 listeners should fail.
 
 ## Question
 
