@@ -135,14 +135,19 @@ since `workspaces` is replaced wholesale each write same as Current
 State). List **both** locations in the same write when a session is
 working a worktree task and `~/ops` concurrently — that's the whole point
 of v0.4, one call updates the canonical log and every pointer at once.
-**List only workspaces this chain owns.** Each listed workspace's pointer is
-rewritten to redirect to *your* chain, so listing a repo you merely touched
-(a harness fix in `djbclark-ade`, a one-line config commit in `~/ops`) steals
-that repo's pointer from the chain that owns it, and the next `/baton` there
-resumes the wrong work (2026-10-12: a Plektra session hijacked
-`djbclark-ade/main`). Before listing a repo, read its pointer: if it
-redirects to another live chain, leave it out and mention the side work in
-`history_bullets` instead.
+**List a repo as owned only if this chain owns it.** Each owned workspace's
+pointer is rewritten to redirect to *your* chain, so listing a repo you merely
+touched (a harness fix in `djbclark-ade`, a one-line config commit in `~/ops`)
+steals that repo's pointer from the chain that owns it, and the next `/baton`
+there resumes the wrong work (2026-10-12: a Plektra session hijacked
+`djbclark-ade/main`). Before listing a repo, read its pointer: if it redirects
+to another live chain, list it as a **side workspace** instead, by adding
+`"side": true` to its entry (since 2026-10-13). A side workspace keeps its git
+anchor in your log but gets no pointer, keeps the owner's sidecars, and its
+head moving does not make your log stale. A chain whose repos are all owned by
+other chains lists them all as side; its log is then found through
+`ls ~/.local/state/handoffs/chains/` (the discovery fallback) and read with
+`read --dir ~/.local/state/handoffs/chains/<chain-key>`.
 
 `read`/`fold` take `--state-root` and `--dir <pointer-directory>`; `read`
 returns the staleness verdict pre-computed per workspace. Only edit files
