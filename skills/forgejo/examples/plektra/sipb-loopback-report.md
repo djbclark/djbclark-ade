@@ -54,14 +54,22 @@ Related: https://github.com/libkrun/libkrun/issues/510 (guest-internal sockets
 intercepted by TSI). The probe above and Gradle's daemon both bind port 0. This
 is inferred from the symptom and the issue text, not verified on your host.
 
-## Probable fix (host side, as root)
+## Fix and workarounds (from the issue)
 
-1. Start the CI microVMs with a virtio-net device backed by passt (or gvproxy)
-   instead of implicit TSI (`krun_add_net_unixstream` / `krun_add_net_unixgram`;
-   adding any NIC disables TSI). Loopback is then the guest kernel's own.
-2. Or a libkrun build that has #818 fixed, if one exists.
-3. Quick check of the diagnosis: a listener on a fixed port on 127.0.0.1 should
-   connect (prediction); only port-0 listeners should fail.
+libkrun issue https://github.com/libkrun/libkrun/issues/818 (open, no fix PR as of
+2026-10-13; latest libkrun release v1.19.6) says:
+
+1. **Host fix:** boot the microVM with a real virtio-net NIC through passt, which
+   disables TSI entirely. With crun-krun: `--annotation krun.use_passt=1`
+   (podman: `--runtime=krun`). The reporter confirms the same repro then passes.
+   (libkrun API: `krun_add_net_unixstream` / `krun_add_net_unixgram`.)
+2. **Fixed ports work.** Only port-0 (ephemeral) listeners diverge, which matches
+   my probe; so a listener on a fixed port should connect here too (prediction).
+3. **Userspace workaround** (not published): an `LD_PRELOAD` shim that rewrites
+   port-0 binds to concrete ports. It would help Gradle only if it covers every
+   JVM it spawns, so (1) is the practical fix.
+4. A kernel-side patch for libkrunfw's 6.12.91 was announced in the issue
+   (2026-08-24); no PR was found. The job kernel here is 6.12.91.
 
 ## Question
 
