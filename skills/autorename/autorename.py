@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rename the current Claude Code, zcode, Grok, cursor-agent, OpenCode, or Codex session.
+"""Rename the current Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex, or omp session.
 
 A skill cannot invoke the built-in /rename, so this writes what it writes:
 
@@ -33,6 +33,13 @@ A skill cannot invoke the built-in /rename, so this writes what it writes:
 - Codex: `CODEX_THREAD_ID` identifies the session and `HERDR_PANE_ID` receives
   the visible title through `herdr pane rename`; Codex exposes no local title
   store to this skill, so `--auto` cannot detect a manual title.
+- omp: the running omp renames itself. Its extension `omp-bridge.ts` (next to
+  this file, symlinked into ~/.omp/agent/extensions/) registers each omp
+  process as STATE_DIR/omp/<pid>.json and applies a `<pid>.request.json` with
+  `setSessionName(title, "user")`, so omp's own auto-titling never replaces it.
+  The current title and its source are read from the session file's first line
+  (omp's fixed-width title slot). Writing that file from outside would make omp
+  move the session to a sibling file, so a session not running cannot be renamed.
 
 The session id comes from OPENCODE_SESSION_ID when this process is OpenCode,
 GROK_SESSION_ID when it is a Grok agent (`GROK_AGENT=1`), else
@@ -42,6 +49,8 @@ no session id env var). CURSOR_CONVERSATION_ID (with `CURSOR_AGENT=1`) wins
 when cursor-agent is the nearest agent process above this one; agent env vars
 are inherited by any agent started from another's shell, so the process tree
 breaks the tie.
+OMPCODE=1 with an `omp` process as the nearest agent above this one selects
+omp; its session id comes from the bridge's registration for that process.
 In any other TUI none of those exist and the script exits 2.
 
     autorename.py "Title words here"            # always rename
@@ -237,7 +246,8 @@ def grok_set_title(summary: Path, title: str) -> None:
 # store.db (tables blobs, meta), meta.json and prompt_history.json.
 
 STATE_DIR = Path.home() / ".local/state/autorename"
-AGENT_COMMS = {"cursor-agent": "cursor", "claude": "claude", "grok": "grok", "opencode": "opencode", "codex": "codex"}
+AGENT_COMMS = {"cursor-agent": "cursor", "claude": "claude", "grok": "grok", "opencode": "opencode",
+               "codex": "codex", "omp": "omp"}
 
 
 def cursor_home() -> Path:
@@ -399,8 +409,8 @@ def cursor_apply_after_exit(sid: str, pid: int, expect: str, title: str) -> int:
     return 0
 
 
-def nearest_agent() -> str | None:
-    """'cursor', 'claude' or 'grok': the closest agent process above this one."""
+def nearest_agent_proc() -> tuple[str, int] | None:
+    """(kind, pid) of the closest agent process above this one; kind is an AGENT_COMMS value."""
     try:
         out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,comm="], capture_output=True,
                              text=True, timeout=10).stdout
@@ -417,9 +427,15 @@ def nearest_agent() -> str | None:
             return None
         ppid, comm = procs[pid]
         if comm in AGENT_COMMS:
-            return AGENT_COMMS[comm]
+            return AGENT_COMMS[comm], pid
         pid = ppid
     return None
+
+
+def nearest_agent() -> str | None:
+    """'cursor', 'claude', 'grok', ...: the kind of the closest agent process above this one."""
+    hit = nearest_agent_proc()
+    return hit[0] if hit else None
 
 
 # ------------------------------------------------------------------ opencode
@@ -516,10 +532,112 @@ def codex_set_title(title: str) -> bool:
     return True
 
 
+# ----------------------------------------------------------------------- omp
+# A live omp registers through omp-bridge.ts as OMP_DIR/<pid>.json
+# ({pid, session_id, session_file}) and serves OMP_DIR/<pid>.request.json by
+# calling setSessionName, writing OMP_DIR/<pid>.result.<nonce>.json back. The
+# extension polls once a second, so a rename waits up to OMP_WAIT seconds.
+
+OMP_DIR = STATE_DIR / "omp"
+OMP_SESSIONS = Path(os.environ.get("PI_CODING_AGENT_DIR", Path.home() / ".omp/agent")) / "sessions"
+OMP_WAIT = 15.0
+OMP_SID_RE = re.compile(r"[0-9A-Za-z-]+")
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def omp_registration(pid: int | None = None, sid: str | None = None) -> dict | None:
+    """The bridge's record for a live omp process, looked up by pid or by session id."""
+    paths = [OMP_DIR / f"{pid}.json"] if pid is not None else sorted(OMP_DIR.glob("*.json"))
+    for path in paths:
+        if not path.stem.isdigit() or not _alive(int(path.stem)):
+            continue
+        try:
+            reg = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(reg, dict) or not isinstance(reg.get("session_id"), str):
+            continue
+        if sid is None or reg["session_id"] == sid:
+            reg["pid"] = int(path.stem)
+            return reg
+    return None
+
+
+def omp_session_file(sid: str, reg: dict | None) -> Path | None:
+    if reg and isinstance(reg.get("session_file"), str) and Path(reg["session_file"]).is_file():
+        return Path(reg["session_file"])
+    if not OMP_SID_RE.fullmatch(sid):
+        return None
+    hits = sorted(OMP_SESSIONS.glob(f"*/*_{sid}.jsonl"), key=lambda p: p.stat().st_mtime,
+                  reverse=True)
+    return hits[0] if hits else None
+
+
+def omp_read(session_file: Path | None) -> tuple[str | None, str | None]:
+    """(title, source) from omp's title slot on line 1, else from the session header."""
+    if session_file is None:
+        return None, None
+    with session_file.open(encoding="utf-8", errors="replace") as fh:
+        for _ in range(2):
+            try:
+                rec = json.loads(fh.readline())
+            except ValueError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if rec.get("type") == "title":
+                return rec.get("title") or None, rec.get("source")
+            if rec.get("type") == "session":
+                return rec.get("title") or None, rec.get("titleSource")
+    return None, None
+
+
+def omp_set_title(reg: dict, title: str) -> bool:
+    pid, nonce = reg["pid"], os.urandom(8).hex()
+    request = OMP_DIR / f"{pid}.request.json"
+    result = OMP_DIR / f"{pid}.result.{nonce}.json"
+    tmp = OMP_DIR / f".{pid}.request.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps({"title": title, "nonce": nonce}), encoding="utf-8")
+    tmp.replace(request)
+    deadline = time.monotonic() + OMP_WAIT
+    while not result.exists():
+        if time.monotonic() > deadline:
+            request.unlink(missing_ok=True)
+            print(f"autorename: omp (pid {pid}) did not answer within {OMP_WAIT:.0f}s;"
+                  " is omp-bridge.ts loaded?", file=sys.stderr)
+            return False
+        time.sleep(0.2)
+    try:
+        data = json.loads(result.read_text(encoding="utf-8"))
+    finally:
+        result.unlink(missing_ok=True)
+    if not data.get("accepted"):
+        print(f"autorename: omp refused the title: {data.get('error') or 'setSessionName declined'}",
+              file=sys.stderr)
+        return False
+    return True
+
+
 # ----------------------------------------------------------------- all backs
 
 def session_id() -> str | None:
-    """This session's id: cursor-agent, OpenCode, or Grok when this process is one, else Claude Code, else zcode."""
+    """This session's id: omp, cursor-agent, OpenCode, or Grok when this process is one, else Claude Code, else zcode."""
+    if os.environ.get("OMPCODE") == "1":
+        hit = nearest_agent_proc()
+        if hit and hit[0] == "omp":
+            # Never fall through to inherited ids: omp started from another
+            # agent's shell carries that agent's session env vars.
+            reg = omp_registration(pid=hit[1])
+            return reg["session_id"] if reg else None
     grok = os.environ.get("GROK_SESSION_ID")
     claude = os.environ.get("CLAUDE_CODE_SESSION_ID")
     cursor = (os.environ.get("CURSOR_CONVERSATION_ID")
@@ -553,6 +671,8 @@ def backend_for(sid: str) -> str:
         return "opencode"
     if os.environ.get("CODEX_THREAD_ID") == sid:
         return "codex"
+    if omp_registration(sid=sid) is not None or omp_session_file(sid, None) is not None:
+        return "omp"
     if find_cursor_chat(sid) is not None:
         return "cursor"
     grok_hit = find_grok_summary(sid) is not None
@@ -593,12 +713,14 @@ def read_title(sid: str) -> str | None:
         return opencode_current_title(sid)
     if kind == "codex":
         return codex_pane_title()
+    if kind == "omp":
+        return omp_read(omp_session_file(sid, omp_registration(sid=sid)))[0]
     transcript = find_transcript(sid)
     return current_title(transcript) if transcript else None
 
 
 def _operator_pinned(source: str | None) -> bool:
-    return source in {"custom", "manual"}
+    return source in {"custom", "manual", "user"}
 
 
 def main() -> int:
@@ -608,7 +730,8 @@ def main() -> int:
     ap.add_argument("--show", action="store_true", help="print the current title and exit")
     ap.add_argument("--session-id", default=None,
                     help="session id (Claude Code uuid, cursor-agent chat id, Grok session id,"
-                         " OpenCode ses_…, zcode sess_…, or Codex thread id); default: this session")
+                         " OpenCode ses_…, zcode sess_…, Codex thread id, or omp session id);"
+                         " default: this session")
     ap.add_argument("--cursor-after-exit", type=int, default=None, help=argparse.SUPPRESS)
     ap.add_argument("--cursor-expect", default="", help=argparse.SUPPRESS)
     args = ap.parse_args()
@@ -619,15 +742,22 @@ def main() -> int:
 
     sid = args.session_id or session_id()
     if not sid:
+        if os.environ.get("OMPCODE") == "1" and nearest_agent() == "omp":
+            print("autorename: this omp has not registered with the autorename bridge; link"
+                  f" {Path(__file__).resolve().parent / 'omp-bridge.ts'} into"
+                  " ~/.omp/agent/extensions/ and restart omp; nothing renamed", file=sys.stderr)
+            return 2
         print("autorename: no CURSOR_CONVERSATION_ID, OPENCODE_SESSION_ID, GROK_SESSION_ID,"
-              " CLAUDE_CODE_SESSION_ID, or zcode exec-log fd found (not a cursor-agent,"
-              " OpenCode, Grok, Claude Code, or zcode session); nothing renamed", file=sys.stderr)
+              " CLAUDE_CODE_SESSION_ID, omp bridge registration, or zcode exec-log fd found"
+              " (not a cursor-agent, OpenCode, Grok, Claude Code, omp, or zcode session);"
+              " nothing renamed", file=sys.stderr)
         return 2
 
     kind = backend_for(sid)
     transcript = None
     summary = None
     chat = None
+    omp_reg = None
     try:
         if kind == "cursor":
             chat = find_cursor_chat(sid)
@@ -651,6 +781,9 @@ def main() -> int:
         elif kind == "codex":
             current = codex_pane_title()
             source = "auto"
+        elif kind == "omp":
+            omp_reg = omp_registration(sid=sid)
+            current, source = omp_read(omp_session_file(sid, omp_reg))
         else:
             transcript = find_transcript(sid)
             if transcript is None:
@@ -707,6 +840,13 @@ def main() -> int:
                 return 2
         elif kind == "codex":
             if not codex_set_title(title):
+                return 2
+        elif kind == "omp":
+            if omp_reg is None:
+                print(f"autorename: omp session {sid} is not running (or its omp has no bridge);"
+                      " resume it and use /rename", file=sys.stderr)
+                return 2
+            if not omp_set_title(omp_reg, title):
                 return 2
         else:
             record = json.dumps(

@@ -17,9 +17,10 @@ session's life, closing idle herdr panes safely, is the `herdr-tidy` skill.
 
 `/rename` is a built-in command a skill cannot call, so this skill writes the
 same records `/rename` writes, through `autorename.py` next to this file.
-It works in Claude Code, zcode, Grok, cursor-agent, OpenCode, and Codex in a
+It works in Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex, and omp in a
 Herdr pane, auto-detected
-(`OPENCODE_SESSION_ID` for OpenCode, `CURSOR_CONVERSATION_ID` when
+(`OMPCODE=1` with omp the nearest agent process above the shell, then
+`OPENCODE_SESSION_ID` for OpenCode, `CURSOR_CONVERSATION_ID` when
 `CURSOR_AGENT=1` and cursor-agent is the nearest agent process above the shell,
 else `GROK_SESSION_ID` when `GROK_AGENT=1`, else `CLAUDE_CODE_SESSION_ID`, else
 zcode's exec-log fds); in any other TUI say so and stop.
@@ -173,6 +174,20 @@ at once. It reads the current title from that db (`AUTORENAME_OPENCODE_DB`
 overrides the path). OpenCode has no manual/auto title marker, so `--auto`
 treats every title as auto and never skips, and `--show` prints the bare title.
 The herdr tab label below is set as usual.
+
+**omp** (2026-10-13). omp holds a write lease on its session file and would move
+the session to a sibling file if anything else wrote it, so the running omp renames
+itself: `omp-bridge.ts` (next to this file) is an omp extension, installed as the
+symlink `~/.omp/agent/extensions/autorename-bridge.ts` (omp loads extensions only at
+startup, so sessions already running need a restart). It registers each omp process
+as `~/.local/state/autorename/omp/<pid>.json` and, once a second, applies a
+`<pid>.request.json` from the script with `setSessionName(title, "user")`, writing a
+result file back. The script finds the session as the nearest `omp` process above
+itself (omp runs bash-tool commands in its own process). It reads the title and its
+source from the session file's first line, omp's title slot; `user` is a manual
+title, so `--auto` keeps a title the operator set with `/rename`. A session that is
+not running cannot be renamed (exit 2: resume it and use `/rename`). Verified
+2026-10-13 with `omp -p`: `renamed:` and a `title_change` entry with `source: user`.
 
 **Grok nudge.** The same `autorename_nudge.py` is a Grok `Stop` hook, in
 `~/.grok/hooks/autorename.json` (machine-local, same as the Claude registration;
