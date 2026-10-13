@@ -1,0 +1,70 @@
+name: runner probe
+on:
+  push:
+    branches: ['probe/**']
+jobs:
+  gradle-daemon:
+    runs-on: ubuntu
+    steps:
+      - name: Checkout
+        uses: https://github.com/actions/checkout@v4
+      - name: Loopback TCP, address by address
+        run: |
+          cat > /tmp/lo.py <<'PY'
+          import socket, sys, threading, time
+          def probe(family, bind, connect):
+              try:
+                  s = socket.socket(family); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                  s.bind((bind, 0)); s.listen(5); port = s.getsockname()[1]
+                  threading.Thread(target=lambda: s.accept(), daemon=True).start()
+                  time.sleep(0.2)
+                  c = socket.socket(family); c.settimeout(5); c.connect((connect, port)); c.close()
+                  return "OK"
+              except Exception as e:
+                  return f"FAIL {type(e).__name__}: {e}"
+          for fam, b, c in [(socket.AF_INET, "127.0.0.1", "127.0.0.1"), (socket.AF_INET6, "::1", "::1"),
+                            (socket.AF_INET, "0.0.0.0", "127.0.0.1"), (socket.AF_INET, "0.0.0.0", "10.89.0.2"),
+                            (socket.AF_INET, "203.0.113.1", "203.0.113.1"), (socket.AF_INET, "0.0.0.0", "203.0.113.1")]:
+              print(f"bind {b:12} connect {c:12} -> {probe(fam, b, c)}")
+          PY
+          python3 /tmp/lo.py || true
+          echo "--- lo state, then try to bring it up"
+          ip -d link show lo 2>&1 | head -3 || true
+          ip link set lo up 2>&1 || echo "ip link set lo up failed"
+          python3 /tmp/lo.py 2>&1 | head -2 || true
+          echo "--- private network namespace (unshare -n) with its own lo"
+          unshare -n sh -c 'ip link set lo up && python3 /tmp/lo.py' 2>&1 | head -4 || echo "unshare -n failed"
+          echo "--- listeners / rules"
+          (ss -ltn 2>&1 | head -5) || true
+          (nft list ruleset 2>&1 | head -20) || true
+          (iptables -S 2>&1 | head -12) || true
+          cat /proc/sys/net/ipv4/ip_local_port_range
+          echo "kernel: $(uname -r)  virt: $(systemd-detect-virt 2>/dev/null || echo n/a)"
+          dmesg 2>/dev/null | tail -3 || true
+      - name: Install JDK 17
+        run: |
+          apt-get update -qq && apt-get install -y -qq openjdk-17-jdk-headless unzip
+          java -version
+      - name: Java loopback and Gradle daemon variants (empty project)
+        run: |
+          set +e
+          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          cat > /tmp/Lo.java <<'JAVA'
+          import java.net.*;
+          public class Lo { public static void main(String[] a) throws Exception {
+            try (ServerSocket s = new ServerSocket(0, 5, InetAddress.getLoopbackAddress())) {
+              System.out.println("loopback address: " + InetAddress.getLoopbackAddress());
+              try (Socket c = new Socket()) { c.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(), s.getLocalPort()), 3000); System.out.println("java loopback connect: OK"); }
+            } catch (Exception e) { System.out.println("java loopback connect: FAIL " + e); } } }
+          JAVA
+          java /tmp/Lo.java || true
+          chmod +x ./gradlew
+          mkdir -p /tmp/emptyproj && echo "rootProject.name='empty'" > /tmp/emptyproj/settings.gradle
+          try() { echo "=== $1"; shift; ( "$@" ) > /tmp/out.txt 2>&1; rc=$?; grep -E "BUILD|Could not connect|FAILURE|Connection refused" /tmp/out.txt | head -3; echo "rc=$rc"; ./gradlew --stop > /dev/null 2>&1 || true; }
+          ./gradlew --version > /dev/null 2>&1; echo "wrapper distribution fetched rc=$?"
+          try "default daemon" ./gradlew -p /tmp/emptyproj help
+          try "--no-daemon" ./gradlew --no-daemon -p /tmp/emptyproj help
+          GRADLE_OPTS="-Xmx512m -Dfile.encoding=UTF-8" try "--no-daemon, client JVM args matching build JVM args (in-process)" ./gradlew --no-daemon "-Dorg.gradle.jvmargs=-Xmx512m -Dfile.encoding=UTF-8" -p /tmp/emptyproj help
+          try "unshare -n (private lo), offline, default daemon" unshare -n sh -c 'ip link set lo up && ./gradlew --offline -p /tmp/emptyproj help'
+          try "unshare -n (private lo), offline, in-process" unshare -n sh -c 'ip link set lo up && GRADLE_OPTS="-Xmx512m -Dfile.encoding=UTF-8" ./gradlew --offline --no-daemon "-Dorg.gradle.jvmargs=-Xmx512m -Dfile.encoding=UTF-8" -p /tmp/emptyproj help'
+        continue-on-error: true

@@ -58,6 +58,46 @@ rotate, which a static secret store cannot follow, and both CLIs would keep the
 result in plaintext config. Use OAuth2 only for a human at a keyboard, never for
 agents.
 
+## forgejo.mit.edu CI (probed 2026-10-13, test repo `djbclark/plektra-djbclark`)
+
+Runner: SIPB's `sipbphus` (Forgejo Runner v13.1.0), docs in `SIPB/hyades`
+(`docs/inessential.md`) and `SIPB/ci-images`. Read these before debugging.
+
+1. **Label is `runs-on: ubuntu`**, not `ubuntu-latest` (a job on the wrong label
+   waits forever, no error). Image `forgejo.mit.edu/sipb/ci-images:ubuntu`:
+   Ubuntu 26.04, root with `sudo`, git, node 22, podman, nix. **No Java, no
+   Android SDK** (`apt-get install` works; Android/Gradle/Maven hosts reachable).
+2. **No default actions host:** write `uses: https://github.com/actions/checkout@v4`.
+   `upload-artifact@v4` is unsupported on Forgejo.
+3. Workflows live in `.forgejo/workflows/`; when that directory exists
+   `.github/workflows` is ignored. The job starts within a second of the push.
+4. Hardware seen by a job: AMD EPYC, `nproc` 16, 62 GB RAM, 931 GB disk. It is a
+   libkrun microVM, shared with other users, so repeat runs for timings.
+5. **Gradle does not run there yet.** Inside the job every TCP connect to
+   127.0.0.1 or ::1 is refused (also 0.0.0.0-bound to the container IP; only an
+   address bound on `dummy0`, 203.0.113.1, connects). Gradle's daemon, test
+   workers and Kotlin daemon all use loopback, so the build fails with "Could not
+   connect to the Gradle daemon" (run 170). `ip link set lo up` changes nothing;
+   `unshare -n` hung the job (cancel it). Needs SIPB: see `examples/plektra/sipb-loopback-report.md`.
+6. The job-log endpoint carries only the first step's `⭐ Run` marker, and there
+   is no per-step API: `examples/plektra/forgejo-ci.yml` prints `BENCHSTEP`
+   markers and `scripts/ci-step-times` reads them (or Gradle's `BUILD ... in`).
+
+`examples/plektra/` holds the workflow derived from the repo's GitHub `ci.yml`
+(`derive-forgejo-ci.py` keeps every Gradle step identical) and the probe
+history. Compare runs with
+`scripts/ci-step-times forgejo OWNER/REPO RUN` and `... github OWNER/REPO RUN`.
+
+## Agent loop (local agent <-> Forgejo CI, no agent on the server)
+
+1. Branch and commit locally, `git-forgejo push forgejo BRANCH`.
+2. `forgejo-api POST /repos/O/R/pulls --yes --data '{"head":"BRANCH","base":"plk/main","title":"..."}'`.
+3. Poll `GET /repos/O/R/actions/runs` for the run, then `.../runs/ID/jobs` and
+   `.../actions/jobs/JOB/logs` for failures; comment with
+   `POST /repos/O/R/issues/N/comments --yes`.
+4. Fix, push again, repeat. Cancel runs you no longer need
+   (`POST .../actions/runs/ID/cancel --yes`): the runner is shared.
+
 ## Rules
 
 1. Never print the token; `get`/`export` stream values (see `sudo-secretspec`).

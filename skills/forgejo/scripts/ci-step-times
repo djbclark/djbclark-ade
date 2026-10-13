@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""ci-step-times — per-step wall-clock times of a CI job, from Forgejo or GitHub.
+
+    ci-step-times forgejo OWNER/REPO RUN_ID [--host forgejo.mit.edu]
+    ci-step-times github  OWNER/REPO RUN_ID
+
+Prints a tab-separated table: step, seconds, Gradle's own `BUILD ... in` text for
+that step when present. Forgejo has no per-step API and its job-log endpoint only
+carries the first step's `⭐ Run` marker (verified 2026-10-13 on forgejo.mit.edu), so
+the Forgejo table comes from the job log in one of two ways: explicit
+`BENCHSTEP start|end <name> <epoch>` lines that a workflow prints (preferred; see
+the generator in the forgejo skill), or, without them, one row per Gradle
+`BUILD ... in` line (Gradle's own seconds) plus the job's first-to-last timestamp.
+GitHub's jobs API has started_at/completed_at per step.
+Read-only: it never starts a run. The Forgejo side re-runs itself under
+`sudo-secretspec run` through forgejo-api.
+"""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+FORGEJO_API = os.path.join(HERE, "forgejo-api")
+GRADLE = re.compile(r"BUILD (SUCCESSFUL|FAILED) in ([0-9hms ]+)")
+TS = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ")
+
+
+def gradle_secs(text: str) -> float:
+    h = re.search(r"(\d+)h", text)
+    m = re.search(r"(\d+)m", text)
+    sec = re.search(r"(\d+)s", text)
+    return (int(h.group(1)) * 3600 if h else 0) + (int(m.group(1)) * 60 if m else 0) + (int(sec.group(1)) if sec else 0)
+
+
+def forgejo(args) -> list[tuple[str, float, str]]:
+    from datetime import datetime
+
+    def api(path: str) -> str:
+        return subprocess.run([sys.executable, FORGEJO_API, "--host", args.host, "GET", path],
+                              check=True, capture_output=True, text=True).stdout
+
+    def ts(line: str):
+        m = re.match(r"^(\d{4}-\d\d-\d\dT[\d:.]+)\d*Z ", line)
+        return datetime.fromisoformat(m.group(1)) if m else None
+
+    jobs = json.loads(api(f"/repos/{args.repo}/actions/runs/{args.run}/jobs"))
+    jobs = jobs if isinstance(jobs, list) else jobs.get("jobs", [])
+    rows = []
+    for job in jobs:
+        log = api(f"/repos/{args.repo}/actions/jobs/{job['id']}/logs").splitlines()
+        marks = {}
+        first = last = None
+        n_build = 0
+        pending = ""
+        for line in log:
+            t = ts(line)
+            if t:
+                first = first or t
+                last = t
+            body = TS.sub("", line)
+            m = re.search(r"BENCHSTEP (start|end) (.+?) ([0-9.]+)(?: rc=(\d+))?\s*$", body)
+            if m:
+                kind, name, epoch, rc = m.groups()
+                if kind == "start":
+                    marks[name] = [float(epoch), None, ""]
+                elif name in marks:
+                    marks[name][1] = float(epoch)
+                    marks[name][2] = f"{pending} rc={rc}".strip()
+                    pending = ""
+                continue
+            g = GRADLE.search(body)
+            if g:
+                pending = f"{g.group(1)} {g.group(2).strip()}"
+                n_build += 1
+                if not any(True for _ in marks):
+                    rows.append((f"gradle build #{n_build} (Gradle's own time)", float(gradle_secs(g.group(2))), pending))
+        for name, (a, b, note) in marks.items():
+            if b is not None:
+                rows.append((name, b - a, note))
+        if first and last:
+            rows.append((f"job {job['id']} first-to-last log line", (last - first).total_seconds(), ""))
+    return rows
+
+
+def github(args) -> list[tuple[str, float, str]]:
+    out = subprocess.run(["gh", "api", f"repos/{args.repo}/actions/runs/{args.run}/jobs", "--paginate"],
+                         check=True, capture_output=True, text=True).stdout
+    from datetime import datetime
+
+    def t(s: str) -> datetime:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+    rows = []
+    for page in re.split(r"(?<=\})(?=\{)", out):
+        for job in json.loads(page).get("jobs", []):
+            for st in job.get("steps", []):
+                if st.get("started_at") and st.get("completed_at"):
+                    rows.append((st["name"], (t(st["completed_at"]) - t(st["started_at"])).total_seconds(), ""))
+    return rows
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("kind", choices=["forgejo", "github"])
+    ap.add_argument("repo")
+    ap.add_argument("run")
+    ap.add_argument("--host", default="forgejo.mit.edu")
+    args = ap.parse_args()
+    rows = forgejo(args) if args.kind == "forgejo" else github(args)
+    print("step\tseconds\tgradle")
+    total = 0.0
+    for name, secs, g in rows:
+        total += secs
+        print(f"{name}\t{secs:.1f}\t{g}")
+    print(f"TOTAL (sum of steps)\t{total:.1f}\t")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

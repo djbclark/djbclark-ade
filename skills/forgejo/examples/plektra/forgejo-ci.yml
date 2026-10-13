@@ -1,0 +1,122 @@
+name: Android CI (forgejo.mit.edu)
+
+on:
+  pull_request:
+  push:
+    branches: ['bench/**']
+
+jobs:
+  gradle-checks:
+    runs-on: ubuntu
+
+    steps:
+      - name: Checkout
+        uses: https://github.com/actions/checkout@v4
+
+      - name: Install JDK 17 and Android SDK (timed separately from Gradle)
+        run: |
+          trap 'echo "BENCHSTEP end Install JDK 17 and Android SDK (timed separately from Gradle) $(date +%s.%N) rc=$?"' EXIT
+          echo "BENCHSTEP start Install JDK 17 and Android SDK (timed separately from Gradle) $(date +%s.%N)"
+          set -euo pipefail
+          nproc; free -g | head -2
+          apt-get update -qq
+          apt-get install -y -qq openjdk-17-jdk-headless unzip
+          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+          echo "JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
+          java -version
+          export ANDROID_HOME="$HOME/android-sdk"
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          curl -fsSL -o /tmp/cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools"
+          mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+      - name: Make Gradle executable
+        run: chmod +x ./gradlew
+
+      - name: Compile stable debug (compile time only)
+        run: |
+          trap 'echo "BENCHSTEP end Compile stable debug (compile time only) $(date +%s.%N) rc=$?"' EXIT
+          echo "BENCHSTEP start Compile stable debug (compile time only) $(date +%s.%N)"
+          ./gradlew :app:compileStableDebugKotlin :app:compileStableDebugJavaWithJavac
+
+      - name: Run core modifier regression tests
+        run: |
+          trap 'echo "BENCHSTEP end Run core modifier regression tests $(date +%s.%N) rc=$?"' EXIT
+          echo "BENCHSTEP start Run core modifier regression tests $(date +%s.%N)"
+          ./gradlew :app:testStableDebugUnitTest --tests rocks.pkb.plektra.core.ModifierStateControllerTest
+
+      - name: Run input router modifier E2E tests
+        run: |
+          trap 'echo "BENCHSTEP end Run input router modifier E2E tests $(date +%s.%N) rc=$?"' EXIT
+          echo "BENCHSTEP start Run input router modifier E2E tests $(date +%s.%N)"
+          ./gradlew :app:testStableDebugUnitTest --tests rocks.pkb.plektra.inputmethod.InputEventRouterModifierE2ETest
+
+      - name: Run input router forward-delete tests
+        run: |
+          trap 'echo "BENCHSTEP end Run input router forward-delete tests $(date +%s.%N) rc=$?"' EXIT
+          echo "BENCHSTEP start Run input router forward-delete tests $(date +%s.%N)"
+          ./gradlew :app:testStableDebugUnitTest --tests rocks.pkb.plektra.inputmethod.InputEventRouterForwardDeleteAlternativesTest
+
+      - name: Run IME device behaviour tests
+        run: |
+          trap 'echo "BENCHSTEP end Run IME device behaviour tests $(date +%s.%N) rc=$?"' EXIT
+          echo "BENCHSTEP start Run IME device behaviour tests $(date +%s.%N)"
+          ./gradlew :app:testStableDebugUnitTest --tests rocks.pkb.plektra.inputmethod.PhysicalKeyboardInputMethodServiceDeviceBehaviorTest
+
+      - name: Run stable debug unit tests
+        run: |
+          trap 'echo "BENCHSTEP end Run stable debug unit tests $(date +%s.%N) rc=$?"' EXIT
+          echo "BENCHSTEP start Run stable debug unit tests $(date +%s.%N)"
+          ./gradlew :app:testStableDebugUnitTest
+
+      - name: Run stable release unit tests (F-Droid path)
+        run: |
+          trap 'echo "BENCHSTEP end Run stable release unit tests (F-Droid path) $(date +%s.%N) rc=$?"' EXIT
+          echo "BENCHSTEP start Run stable release unit tests (F-Droid path) $(date +%s.%N)"
+          ./gradlew :app:testStableReleaseUnitTest -PPLEKTRA_FDROID_BUILD=true
+
+      - name: Run nightly debug unit tests
+        run: |
+          trap 'echo "BENCHSTEP end Run nightly debug unit tests $(date +%s.%N) rc=$?"' EXIT
+          echo "BENCHSTEP start Run nightly debug unit tests $(date +%s.%N)"
+          ./gradlew :app:testNightlyDebugUnitTest
+
+      - name: Compile and test Google Play variants
+        run: |
+          trap 'echo "BENCHSTEP end Compile and test Google Play variants $(date +%s.%N) rc=$?"' EXIT
+          echo "BENCHSTEP start Compile and test Google Play variants $(date +%s.%N)"
+          ./gradlew :app:testPlayStableDebugUnitTest :app:testPlayNightlyDebugUnitTest
+
+      - name: Run nightly release unit tests
+        run: |
+          trap 'echo "BENCHSTEP end Run nightly release unit tests $(date +%s.%N) rc=$?"' EXIT
+          echo "BENCHSTEP start Run nightly release unit tests $(date +%s.%N)"
+          ./gradlew :app:testNightlyReleaseUnitTest
+
+      - name: Run stable debug lint
+        run: |
+          trap 'echo "BENCHSTEP end Run stable debug lint $(date +%s.%N) rc=$?"' EXIT
+          echo "BENCHSTEP start Run stable debug lint $(date +%s.%N)"
+          ./gradlew :app:lintStableDebug
+
+      - name: Run stable release lint
+        run: |
+          trap 'echo "BENCHSTEP end Run stable release lint $(date +%s.%N) rc=$?"' EXIT
+          echo "BENCHSTEP start Run stable release lint $(date +%s.%N)"
+          ./gradlew :app:lintStableRelease
+
+      - name: Run nightly debug lint
+        run: |
+          trap 'echo "BENCHSTEP end Run nightly debug lint $(date +%s.%N) rc=$?"' EXIT
+          echo "BENCHSTEP start Run nightly debug lint $(date +%s.%N)"
+          ./gradlew :app:lintNightlyDebug
+
+      - name: Run nightly release lint
+        run: |
+          trap 'echo "BENCHSTEP end Run nightly release lint $(date +%s.%N) rc=$?"' EXIT
+          echo "BENCHSTEP start Run nightly release lint $(date +%s.%N)"
+          ./gradlew :app:lintNightlyRelease
