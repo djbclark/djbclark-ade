@@ -42,7 +42,10 @@ everyone 10-19 s and a busy server queues silently for minutes.
    (stdlib Python). Open WebUI 0.6.30 ends tool-call streams with `finish_reason: "stop"`,
    which makes OpenAI-style agents stop after the first tool call. Without the proxy (or a
    fixed server) the agent tasks fail for reasons that are not the model's fault.
-   `toolcall_conformance.py` tells you which case you are in.
+   `toolcall_conformance.py` tells you which case you are in. The proxy (2026-10-13) also
+   rewrites a tool call the model wrote *as text* (`<tool_calls><invoke …`, `<function=…`,
+   `<view>…`) into a real `tool_calls` delta; without it the agent runs nothing (REPORT.md
+   section 4.7).
 
 ## Run it
 
@@ -103,6 +106,11 @@ server, nothing else is required), so set that up once. It deletes the per-run c
    the pass count, not one time.
 2. A model that fails the conformance check or task A with 0 tool calls is a server-side
    tool-parsing problem (template or parser), not a capability problem: see REPORT.md 4.3-4.4.
+   A model that answers a task by *describing* the tool call as text (or printing the
+   command in a fence) instead of emitting a `tool_calls` delta is the same class of problem
+   (REPORT.md 4.7); the proxy converts the explicit text forms, but a model that only prints
+   a ```` ```bash ```` fence is not rescued and should be dropped — `deepseek-r1:32b` did
+   this every time and is not in the example config.
 3. Runs that fail on a timeout or network error during an outage are suspect (ours), not the
    model's: mark them (`"invalid": true`, or a note row) and rerun.
 4. Do not edit task files between models you want to compare.
