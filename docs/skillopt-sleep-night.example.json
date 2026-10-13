@@ -1,12 +1,13 @@
 {
-  "_comment": "skillopt-night backend chain (bin/failover.py), operator-approved order 2026-10-12. Every entry is answered through acp-run (one fresh process per prompt) after its preflight: aiuse pool usable_now with headroom above floor_percent, or the SIPB proxy health URL, or (crush) a one-prompt probe. Allowed TUIs: opencode, agy, zcode, claude (Haiku/Sonnet), crush. Denied words: cursor, cline, clinepass, hermes, opus, fable, muse, pi, grok, codex, copilot. claude takes the acp-run model values haiku/sonnet (Haiku 5.5/Sonnet 5.5; --native passes claude-haiku-5-5/claude-sonnet-5-5). Round 1 sends one mining prompt per harvested session; max_sessions caps it. deadline: local HH:MM the whole night must end by. exclude_projects: path prefixes whose sessions never leave the machine (every source).",
-  "enabled": false,
+  "_comment": "skillopt-night backend chain (bin/failover.py), operator-approved order 2026-10-12. Every entry is answered through acp-run (one fresh process per prompt) after its preflight: aiuse pool usable_now with headroom above floor_percent, or the SIPB proxy health URL, or (crush) a one-prompt probe. Allowed TUIs: opencode, agy, zcode, claude (Haiku/Sonnet), crush, sipb (direct OpenAI-compatible POST to the loopback proxy, no agent; operator 2026-10-13: direct first, crush ACP as its failover). Denied words: cursor, cline, clinepass, hermes, opus, fable, muse, pi, grok, codex, copilot. claude takes the acp-run model values haiku/sonnet (Haiku 5.5/Sonnet 5.5; --native passes claude-haiku-5-5/claude-sonnet-5-5). Round 1 sends one mining prompt per harvested session; max_sessions caps it. deadline: local HH:MM the whole night must end by. exclude_projects: path prefixes whose sessions never leave the machine (every source). Optional (2026-10-13): top-level prompt_max_load (1-min load per core above which a prompt waits before spawning; default 2.0) and prompt_load_wait_s (give up and count a startup failure after this many seconds; default 600); per-entry retry_budget (startup failures retried per round, default max(3, 25% of the prompts)); sipb entries are a direct POST to the loopback proxy (no agent), crush stays last and is refused while its canary fails.",
+  "enabled": true,
   "allow": [
     "opencode",
     "agy",
     "zcode",
     "claude",
-    "crush"
+    "crush",
+    "sipb"
   ],
   "jobs": 2,
   "max_rounds": 60,
@@ -18,56 +19,77 @@
     {
       "tui": "opencode",
       "model": "opencode-go/minimax-m3",
-      "floor_percent": 10,
-      "timeout": 900
+      "floor_percent": 0,
+      "timeout": 900,
+      "extra_args": [
+        "--handshake-timeout",
+        "120",
+        "--handshake-tries",
+        "3"
+      ],
+      "retry_budget": 6
     },
     {
       "tui": "agy",
       "model": "gemini-3.8-flash",
       "effort": "medium",
-      "floor_percent": 10,
-      "timeout": 900
+      "floor_percent": 0,
+      "timeout": 900,
+      "extra_args": [
+        "--handshake-timeout",
+        "120",
+        "--handshake-tries",
+        "3"
+      ]
     },
     {
       "tui": "agy",
       "model": "claude-sonnet-5-5",
       "effort": "low",
-      "floor_percent": 10,
-      "timeout": 900
+      "floor_percent": 0,
+      "timeout": 900,
+      "extra_args": [
+        "--handshake-timeout",
+        "120",
+        "--handshake-tries",
+        "3"
+      ]
     },
     {
       "tui": "zcode",
       "effort": "low",
-      "floor_percent": 10,
+      "floor_percent": 0,
       "timeout": 900
     },
     {
       "tui": "claude",
       "model": "haiku",
       "effort": "low",
-      "floor_percent": 15,
+      "floor_percent": 5,
       "timeout": 900
     },
     {
       "tui": "claude",
       "model": "sonnet",
       "effort": "low",
-      "floor_percent": 15,
+      "floor_percent": 5,
       "timeout": 900
+    },
+    {
+      "tui": "sipb",
+      "model": "qwen3-coder:30b",
+      "timeout": 1800
+    },
+    {
+      "tui": "sipb",
+      "model": "deepseek-r1:32b",
+      "timeout": 1800
     },
     {
       "tui": "crush",
       "timeout": 1800
-    },
-    {
-      "tui": "opencode",
-      "model": "sipb/qwen3-coder:30b",
-      "timeout": 1800
-    },
-    {
-      "tui": "opencode",
-      "model": "sipb/deepseek-r1:32b",
-      "timeout": 1800
     }
-  ]
+  ],
+  "prompt_max_load": 2.0,
+  "prompt_load_wait_s": 600
 }
