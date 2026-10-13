@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# git-forgejo — run git against a Forgejo host over HTTPS with the token from
+# sudo-secretspec, without storing it anywhere.
+#
+#   git-forgejo -C ~/src/plektra-djbclark push forgejo plk/main
+#   FORGEJO_HOST=other.example.org git-forgejo clone https://other.example.org/o/r.git
+#
+# The token reaches git only through an environment variable read by a
+# GIT_ASKPASS helper (no secret in argv, in a file, or in the keychain):
+# `credential.helper=` is cleared so osxkeychain cannot save it. Remote URLs
+# stay token-free: https://HOST/OWNER/REPO.git
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOST="${FORGEJO_HOST:-forgejo.mit.edu}"
+VAR="DJBCLARK_$(printf '%s' "$HOST" | tr 'a-z.-' 'A-Z__')_TOKEN"
+exec sudo-secretspec run --reason "git against ${HOST}" -- \
+  bash -c 'export FORGEJO_GIT_TOKEN="${!1}" GIT_ASKPASS="$2" GIT_TERMINAL_PROMPT=0; shift 2; exec git -c credential.helper= "$@"' \
+  _ "$VAR" "$HERE/git-askpass" "$@"

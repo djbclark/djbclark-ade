@@ -21,6 +21,11 @@ Default host `forgejo.mit.edu` (Forgejo 16.0.5, Gitea-1.22-compatible API, probe
 2. `scripts/tea-forgejo` — `tea` (brew, v0.16.0) with the secret mapped onto its
    env login (`GITEA_INSTANCE_URL` + `GITEA_TOKEN`), so nothing lands in
    `~/.config/tea`. Best for `issues`, `pulls`, `releases`, `api`.
+2a. `scripts/git-forgejo` — git over HTTPS with the secret: `git-forgejo -C DIR
+   push forgejo BRANCH`. The token reaches git only through a `GIT_ASKPASS`
+   helper (`git-askpass`, holds no secret) and `credential.helper=` is cleared so
+   the keychain never stores it. Keep remote URLs token-free
+   (`https://HOST/OWNER/REPO.git`). Plain `git push` will prompt and fail by design.
 3. `fj` (brew `forgejo-cli`, Forgejo-native) — fine **unauthenticated** (public
    repos). **Do not `fj auth add-token` / `fj auth login` for agents:** it keeps
    the token in its own plaintext key file, outside sudo-secretspec.
