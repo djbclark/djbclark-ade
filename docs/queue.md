@@ -22,6 +22,20 @@ this repo on or after 2026-10-14 raises these three first, one `/steps` prompt e
 3. **The `-C` strip gap** in the next entry: the operator chose to note it and do no work on
    2026-10-13; raise it again.
 
+## Crush under `--perm deny`: adversary findings 1-4 (queued 2026-10-13, not fixed)
+
+**Queued after the review of 71ac081 (scratchpad adv3-report.md). Since the same day
+the SkillOpt night runs its chain with `perm: all` (operator decision), so none of
+these affects the night; they matter for `--perm deny` runs of crush (acp-dispatch
+read-only reviews).** (1) An untrusted `-C` repo's project `crushrc` runs as shell at crush
+startup and its files can leak; acp-run only warns (acp-run ~828-835). (2) MCP tools are not
+covered by `disabled_tools`, so the logged `"tools": "none"` can be false (~825). (3) The
+shadow-bypass scanner for the user's crushrc is a denylist and misses real bypasses (~746-749,
+859). (4) The 29-name tool snapshot fails open after a crush upgrade (~726-737). Notes 5-8 (git
+boundary, literal keys copied from a user crush.json, `/toggle_yolo` as a prompt, crush deny
+sessions' DB deleted with the temp dir) are in the report. **Decide:** harden deny-mode crush
+or leave crush out of deny-mode reviews.
+
 ## acp-run --perm deny: what the user-config strip still lets through
 
 **Queued 2026-10-13 (adversary review of the deny strip, finding 5). Needs an
