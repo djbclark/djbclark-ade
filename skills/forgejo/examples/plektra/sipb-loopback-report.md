@@ -77,3 +77,13 @@ Is a working loopback in `ubuntu` jobs possible (a runner or microVM network
 setting), or is a workaround expected? Also useful to know: the CPU and memory
 share one job gets (the VM reports 16 CPUs and 62 GB), and whether there is a
 job time limit.
+
+## Update 2026-10-13: userspace workaround verified (run 175, branch probe/shim)
+
+The `LD_PRELOAD` port-0 shim (`loopback-port-shim.c`, installed with `apt-get install gcc
+libc6-dev` in the job; no runner change needed) fixes loopback in `ubuntu` jobs: Python and
+Java loopback connects succeed with it and are refused without it, and Gradle's default daemon
+builds an empty project and a JUnit project (forked test worker) with `BUILD SUCCESSFUL`.
+Without the shim `--no-daemon` still fails ("Could not connect to the Gradle daemon": Gradle
+forks a single-use daemon). SIPB's answer on `krun.use_passt=1` (nested passt) means this
+workaround is the path; the report above is superseded for Plektra's purposes.
