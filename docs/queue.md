@@ -3,6 +3,24 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Ralph on OpenCode v2: postponed (operator, 2026-10-13)
+
+**Postponed by the operator ("postpone all ralph work"); do nothing until raised.**
+State when parked: the opencode-ralph-tui wrappers (`vendor/gate-scripts/`, live copies in
+`~/.local/bin/`) point at v2 `~/.local/bin/opencode` since `bea2e9d`; v1 is still on disk at
+`~/.opencode/bin/opencode`. Findings, none acted on:
+1. `bun ~/src/vendor/ralph-tui/dist/cli.js doctor --agent opencode-go` detects v2 2.0.27 but
+   fails the preflight with exit 130. Running the same args by hand (`opencode-ralph-tui run
+   --format json "<prompt>"`) gives v2 JSON events and then `provider.quota` 402 "Insufficient
+   account funds": the agent sets `provider = "opencode-go"` but no `model`, so no `--model`
+   is passed and v2 falls back to its default model. Untested: an explicit opencode-go model.
+2. ralph-tui's opencode plugin (`src/plugins/agents/builtin/opencode.ts` ~414-455) passes
+   `--variant`, which v2's `run` lacks (v2 takes `--model provider/model#variant`), and its
+   JSON parser was written for v1 events; neither is checked against v2.
+3. `ralph` on PATH (`/opt/homebrew/bin/ralph`, 2.10.1) is Homebrew's ralph-orchestrator
+   (mikeyobrien), a different project from ralph-tui, which still runs from the fork via
+   `bun ~/src/vendor/ralph-tui/dist/cli.js`. Decide which one "Ralph" means before resuming.
+
 ## Resurface 2026-10-14 (operator, 2026-10-13): first real SkillOpt-Sleep night, backends, -C repos
 
 **Queued 2026-10-13 by the operator: "resurface tomorrow".** Any session that opens
