@@ -44,12 +44,16 @@ The answer is always an offered allow_once or reject_once option, never an
 *_always one (those can be saved beyond this run) and never "cancelled" (that
 cancels the whole turn). An allow with no allow_once offered becomes a
 reject_once; with neither offered the agent gets a JSON-RPC error.
-Under --perm deny (without --interactive) opencode and agy start without the
-user's plugins, MCP servers and hooks, as claude and zcode do: a per-run temp
+Under --perm deny (without --interactive) opencode, agy and crush start without
+the user's plugins, MCP servers and hooks, as claude and zcode do: a per-run temp
 config (opencode: OPENCODE_CONFIG_DIR holding only provider/model keys, project
-config off; agy: GEMINI_HOME with empty mcp_config.json, hooks.json, plugins/),
-removed afterwards and logged as a "user_config" record. --keep-user-config
-(env ACP_RUN_KEEP_USER_CONFIG=1) keeps them.
+config off; agy: GEMINI_HOME with empty mcp_config.json, hooks.json, plugins/;
+crush: CRUSH_GLOBAL_CONFIG whose crushrc sources the user's with mcp/lsp/hook/
+permissions shadowed, no global context or skills), removed afterwards and logged
+as a "user_config" record. --keep-user-config (env ACP_RUN_KEEP_USER_CONFIG=1)
+keeps them. Under any --perm deny crush also gets no tools at all: every built-in
+tool is disabled in per-run config layers (crush runs its read-only tools without
+asking, so no permission answer could deny them); logged as "deny_config".
 --set applies any config option --info lists (e.g. --set provider=cline-pass).
 Some agents get defaults (DEFAULT_SET below): cline always runs on cline-pass.
 Agents decide what to ask about: some auto-allow by their own settings (use
@@ -150,6 +154,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -332,8 +337,9 @@ TRIPWIRE_EXEMPTABLE = ("read", "search")
 # own defaults can run tools without ever sending session/request_permission:
 # claude-agent-acp starts in settings.json permissions.defaultMode (here
 # bypassPermissions) and honours the user's allow rules; zcode-acp-server starts
-# in "yolo"; crush-acp runs with --yolo; opencode allows edit/bash/webfetch by
-# default. So under --perm deny acp-run (1) sets the strictest session mode
+# in "yolo"; crush-acp ran with --yolo (and without it still runs its read-only
+# tools unasked: crush_deny_dir turns every tool off); opencode allows
+# edit/bash/webfetch by default. So under --perm deny acp-run (1) sets the strictest session mode
 # (DENY_SET), (2) passes env that switches tools off or to deny (DENY_ENV),
 # (3) asks claude-agent-acp for a session with no built-in tools, no user
 # settings, no MCP servers and no bypass (DENY_META, sent as session/new
@@ -472,7 +478,7 @@ def zcode_deny_settings():
 # gets a per-run 0700 temp config, removed after the run; the user's files are only
 # read. --keep-user-config or ACP_RUN_KEEP_USER_CONFIG=1 keeps the old behaviour.
 # What was stripped is logged as a "user_config" record (names only, no values).
-STRIP_USER_CONFIG = ("opencode", "agy")
+STRIP_USER_CONFIG = ("opencode", "agy", "crush")  # crush: crush_strip_config, 2026-10-13
 # Top-level opencode config keys a stripped run keeps: provider, model and auth
 # selection. Everything else (mcp, plugin/plugins, agent, command, instructions,
 # experimental hooks, permission, ...) is dropped; auth itself lives in opencode's
@@ -708,9 +714,197 @@ def agy_deny_home():
     return d, info
 
 
+# --perm deny for crush, made real (2026-10-13). crush-acp (PR 2450 build) asks
+# permission for bash, edit, write, fetch and download, but runs its read-only tools
+# (glob, grep, ls, view, sourcegraph, LSP lookups) and bash's built-in safe commands
+# without asking: on the 2026-10-13 03:43 SkillOpt-Sleep canary it ran `glob` (ACP kind
+# "search") unasked and the tripwire fired (exit 77). Its ACP modes are "ask" (the
+# default) and "code"; neither makes those tools ask. But crush builds each agent's tool
+# set from an allow list, config.allToolNames() minus options.disabled_tools
+# (internal/config/config.go SetupAgents; buildTools keeps only listed names), so a deny
+# run disables every name in it: the agent has no built-in tool at all and can only
+# answer in text. A tool added to crush later is not in allToolNames until someone lists
+# it, so it stays out too. Config layers merge with go-jsons (arrays append, objects
+# merge, scalars: later wins), so no later layer can take a name off disabled_tools.
+# The list is crush-acp 88a67503's allToolNames(); `agent` and `agentic_fetch` are the
+# sub-agent tools.
+CRUSH_TOOLS = (
+    "agent", "agentic_fetch", "bash", "crush_info", "crush_logs", "job_output", "job_kill",
+    "download", "edit", "multiedit", "fetch", "glob", "grep", "ls", "question", "sourcegraph",
+    "todos", "view", "write", "list_mcp_resources", "read_mcp_resource",
+    "lsp_diagnostics", "lsp_references", "lsp_restart", "lsp_symbols", "lsp_definition",
+    "lsp_call_hierarchy", "lsp_rename", "lsp_replace_symbol",
+)
+# Project config files crush merges from -C up to its git root (lookupConfigs).
+CRUSH_PROJECT_FILES = (".crushrc", "crushrc", ".crush.json", "crush.json")
+# `mcp add NAME` in a crushrc (internal/shellconfig/mcp.go); names only, for the log
+# and to disable a project's servers.
+CRUSH_RC_MCP = re.compile(r"^\s*mcp\s+add\s+['\"]?([A-Za-z0-9_.@-]+)", re.M)
+# A crushrc line (comments removed) that could reach a config builtin past the stripped
+# run's shell functions: command/builtin/exec skip functions, a command runner (env,
+# xargs, ...) may exec the name directly, unset -f removes the functions. Refuse to strip.
+CRUSH_RC_BYPASS = re.compile(r"\b(command|builtin|exec|env|xargs|nohup|nice|timeout)\b[^\n;|&]*?"
+                             r"\b(mcp|lsp|hook|permissions|option)\b"
+                             r"|\bunset\b[^\n;|&]*?(?<!\S)-\w*f")
+CRUSH_RC_COMMENT = re.compile(r"(^|(?<=\s))#[^\n]*", re.M)
+# `option` keys a stripped run passes through from the user's crushrc; context paths,
+# skill paths, data directory, LSP and UI options are dropped.
+CRUSH_RC_KEEP_OPTIONS = ("request-timeout", "disable-skill", "auto-summarize",
+                         "provider-auto-update", "default-providers", "metrics")
+# Top-level keys (and options keys) a stripped run keeps from the user's global crush.json.
+CRUSH_KEEP_KEYS = ("$schema", "providers", "models")
+CRUSH_KEEP_OPTIONS = ("request_timeout", "disabled_skills", "disable_provider_auto_update",
+                      "disable_default_providers", "disable_metrics", "disable_auto_summarize")
+
+
+def crush_project_configs(root):
+    """The project config files crush would merge for cwd root: CRUSH_PROJECT_FILES in
+    root and each parent up to the enclosing git worktree root (root alone outside git)."""
+    root = Path(root).resolve()
+    chain = [root, *root.parents]
+    top = next((p for p in chain if (p / ".git").exists()), root)
+    found = []
+    for p in chain[:chain.index(top) + 1]:
+        found += [p / n for n in CRUSH_PROJECT_FILES if (p / n).is_file()]
+    return found
+
+
+def _crush_mcp_names(path):
+    """MCP server names a crush config file defines (JSON "mcp" keys, or crushrc
+    `mcp add NAME`); [] when it cannot be read."""
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return []
+    if path.name.endswith("rc"):
+        return CRUSH_RC_MCP.findall(text)
+    try:
+        m = json.loads(text).get("mcp")
+    except (ValueError, AttributeError):
+        return []
+    return [str(k) for k in m] if isinstance(m, dict) else []
+
+
+def crush_deny_dir(cmd, root, env):
+    """The tools-off half of --perm deny for crush (always applied, --interactive and
+    --keep-user-config included). A per-run 0700 temp dir holding:
+      data/crush.json     the global data layer (CRUSH_GLOBAL_DATA; it merges after the
+                          user's crush.json and crushrc), and
+      project/crush.json  the workspace layer (--data-dir; it merges after every project
+                          config, so it is the last word),
+    both {"options": {"disabled_tools": CRUSH_TOOLS, "auto_lsp": false},
+    "permissions": {"skip_requests": false}}, plus "mcp": {NAME: {"disabled": true}} for
+    each MCP server a project config file names. data/ also gets a copy of the catalog
+    cache providers.json from the agent's usual data dir. --data-dir moves crush's
+    session database and workspace overrides out of -C (a .crush/crush.json there would
+    otherwise merge last). Returns (temp dir, new cmd, log info); env gets
+    CRUSH_GLOBAL_DATA too. Raises OSError (nothing left behind) when it cannot be built."""
+    src = next((x.split("=", 1)[1] for x in cmd if x.startswith("CRUSH_GLOBAL_DATA=")),
+               env.get("CRUSH_GLOBAL_DATA"))
+    project = crush_project_configs(root)
+    mcp = sorted({n for f in project for n in _crush_mcp_names(f)})
+    over = {"options": {"disabled_tools": list(CRUSH_TOOLS), "auto_lsp": False},
+            "permissions": {"skip_requests": False}}
+    if mcp:
+        over["mcp"] = {n: {"disabled": True} for n in mcp}
+    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}crush-deny-{os.getpid()}-"))
+    try:
+        for sub in ("data", "project"):
+            (d / sub).mkdir(mode=0o700)
+            _private_write(d / sub / "crush.json", json.dumps(over, indent=1) + "\n")
+        if src:
+            with contextlib.suppress(FileNotFoundError):
+                shutil.copyfile(Path(src).expanduser() / "providers.json", d / "data" / "providers.json")
+    except BaseException:
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    data = f"CRUSH_GLOBAL_DATA={d / 'data'}"
+    new = [data if x.startswith("CRUSH_GLOBAL_DATA=") else x for x in cmd]
+    new += ["--data-dir", str(d / "project")]
+    env["CRUSH_GLOBAL_DATA"] = str(d / "data")
+    info = {"agent": "crush", "tools": "none", "disabled_tools": len(CRUSH_TOOLS),
+            "project_config": [str(f) for f in project], "project_mcp_disabled": mcp,
+            "env": ["CRUSH_GLOBAL_DATA"], "args": ["--data-dir"]}
+    rcs = [str(f) for f in project if f.name.endswith("rc")]
+    if rcs:
+        # crush runs a project crushrc as shell when it loads its config; no switch
+        # turns project config off (a deny run's tools stay off regardless)
+        with contextlib.suppress(OSError):
+            print(f"acp-run: warning: crush will run project crushrc {', '.join(rcs)} at startup",
+                  file=sys.stderr)
+    return d, new, info
+
+
+def crush_strip_config(env, d):
+    """The user-config half of --perm deny for crush (STRIP_USER_CONFIG): a per-run
+    global config dir d/config (CRUSH_GLOBAL_CONFIG) whose crushrc sources the user's
+    crushrc for its providers and models, with the config builtins that add MCP servers
+    (mcp), LSP servers (lsp), hooks (hook) and permission rules (permissions) shadowed by
+    no-op shell functions (crush's interpreter resolves a function before a registered
+    builtin; checked 2026-10-13), and `option` passed through only for
+    CRUSH_RC_KEEP_OPTIONS. The user's global crush.json, if any, is copied with only
+    CRUSH_KEEP_KEYS and options.CRUSH_KEEP_OPTIONS. With the config dir moved, crush's
+    default global context files (CRUSH.md beside it, AGENTS.md in its parent) are the
+    temp dir's, which do not exist, and CRUSH_SKILLS_DIR points at an empty d/skills, so
+    no global skill is listed. The user's files are only read; the crushrc keeps its
+    path (no secret is copied). Raises ValueError, before setting env, when the crushrc
+    could bypass the shadows (CRUSH_RC_BYPASS) or a file cannot be read. Returns log info."""
+    src = Path(env.get("CRUSH_GLOBAL_CONFIG") or Path(env.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+               / "crush").expanduser()
+    rc, js = src / "crushrc", src / "crush.json"
+    try:
+        text = rc.read_text() if rc.is_file() else ""
+    except (OSError, UnicodeDecodeError) as e:
+        raise ValueError(f"cannot read {rc}: {e}") from None
+    if CRUSH_RC_BYPASS.search(CRUSH_RC_COMMENT.sub("", text)):
+        raise ValueError(f"{rc} calls a config builtin through command/builtin or unsets a function")
+    kept, dropped, on_disk = {}, [], []
+    if js.is_file():
+        try:
+            cfg = json.loads(js.read_text())
+        except (OSError, ValueError, UnicodeDecodeError) as e:
+            raise ValueError(f"cannot read {js}: {e}") from None
+        if not isinstance(cfg, dict):
+            raise ValueError(f"cannot read {js}: not a JSON object")
+        for k, v in cfg.items():
+            if k in CRUSH_KEEP_KEYS:
+                kept[k] = v
+            elif k == "options" and isinstance(v, dict):
+                kept["options"] = {x: v[x] for x in CRUSH_KEEP_OPTIONS if x in v}
+                dropped += [f"options.{x}" for x in sorted(set(v) - set(CRUSH_KEEP_OPTIONS))]
+            else:
+                dropped.append(k)
+        prov = kept.get("providers")
+        for name, p in (prov.items() if isinstance(prov, dict) else ()):
+            for key in (p if isinstance(p, dict) else ()):
+                if _SECRET_KEY.search(str(key)) and isinstance(p[key], str) and not p[key].startswith("$"):
+                    on_disk.append(f"providers.{name}.{key}")
+    shadows = (
+        "# acp-run --perm deny: this run's crush config, removed after the run.\n"
+        "mcp() { :; }\nlsp() { :; }\nhook() { :; }\npermissions() { :; }\n"
+        "option() {\n  case \"$1\" in\n    " + "|".join(CRUSH_RC_KEEP_OPTIONS)
+        + ") command option \"$@\" ;;\n  esac\n}\n"
+        + (f"source {shlex.quote(str(rc))}\n" if text else ""))
+    cfg_dir, skills = d / "config", d / "skills"
+    cfg_dir.mkdir(mode=0o700)
+    skills.mkdir(mode=0o700)
+    _private_write(cfg_dir / "crushrc", shadows)
+    if kept:
+        _private_write(cfg_dir / "crush.json", json.dumps(kept, indent=1) + "\n")
+    env["CRUSH_GLOBAL_CONFIG"] = str(cfg_dir)
+    env["CRUSH_SKILLS_DIR"] = str(skills)
+    return {"agent": "crush", "action": "stripped", "source": str(src),
+            "mcp_servers": sorted(set(CRUSH_RC_MCP.findall(text)) | set(_crush_mcp_names(js))),
+            "lsp": len(re.findall(r"^\s*lsp\s", text, re.M)),
+            "hooks": len(re.findall(r"^\s*hook\s", text, re.M)),
+            "kept_keys": sorted(kept), "dropped_keys": dropped, "secrets_in_file": on_disk,
+            "global_context": "off", "skills": "none",
+            "env": ["CRUSH_GLOBAL_CONFIG", "CRUSH_SKILLS_DIR"]}
+
+
 def strip_user_config(a, env, deny_dir):
     """Apply STRIP_USER_CONFIG to env (in place) for a --perm deny, non-interactive run
-    of opencode or agy. Returns (deny_dir, log info or None): deny_dir is the temp dir
+    of opencode, agy or crush (crush builds inside deny_dir, run()'s crush_deny_dir). Returns (deny_dir, log info or None): deny_dir is the temp dir
     the caller removes. Anything else (--perm all/ask/scoped, --interactive, other
     agents) is untouched and logs nothing. If the temp config cannot be built the run
     keeps the user's config (deny still refuses every tool) and says so on stderr;
@@ -734,6 +928,11 @@ def strip_user_config(a, env, deny_dir):
             env["OPENCODE_CONFIG_PROJECT_DISABLE"] = "1"
             env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
             env.pop("OPENCODE_CONFIG", None)  # an explicit file is loaded on top; its kept keys are in d
+        elif a.agent == "crush":
+            # builds inside the tools-off dir run() made (crush_deny_dir)
+            if deny_dir is None:
+                raise ValueError("no per-run crush dir")
+            return deny_dir, crush_strip_config(env, deny_dir)
         else:
             d, info = agy_deny_home()
     except (OSError, ValueError) as e:
@@ -2285,6 +2484,13 @@ async def run(a, log, err, log_path):
             if a.agent == "zcode":
                 deny_dir = zcode_deny_settings()
                 env["ZCODE_CLI_SETTINGS_FILE"] = str(deny_dir / "cli" / "setting.json")
+            elif a.agent == "crush":
+                # every built-in tool off; no fallback: a crush deny run without it
+                # would run its read-only tools unasked, so it fails instead
+                deny_dir, cmd, crush_info = crush_deny_dir(cmd, root, env)
+                log.write(json.dumps({"t": round(time.time(), 3), "kind": "deny_config",
+                                      "data": crush_info}) + "\n")
+                log.flush()
         deny_dir, stripped = strip_user_config(a, env, deny_dir)
         if stripped is not None:
             log.write(json.dumps({"t": round(time.time(), 3), "kind": "user_config",

@@ -39,7 +39,8 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      MCP `mcp__*` included) and a per-run settings file (`ZCODE_CLI_SETTINGS_FILE`,
      removed afterwards) with MCP servers, plugins, skills, subagents and hooks off;
      agy runs in mode `default`; crush runs without `--yolo` (now added only
-     under `all`); opencode gets `OPENCODE_CONFIG_CONTENT={"permission":"deny"}`.
+     under `all`) and, since 2026-10-13, with **no tools at all** (below);
+     opencode gets `OPENCODE_CONFIG_CONTENT={"permission":"deny"}`.
      A tripwire backs this up: any non-think tool call that starts or completes
      without a permission request cancels the turn and exits 77. The `claude -p`
      fallback runs with `--tools ""`, `--strict-mcp-config`, `--disallowedTools '*'`
@@ -73,6 +74,41 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
        has an empty `mcp_config.json`, an empty `hooks.json` and an empty
        `plugins/` (agy plugins carry their own MCP servers and hooks). Workspace
        `.agents/` plugins in `-C` are not stripped.
+     - crush (crush-acp 88a67503, `crush_strip_config`): `CRUSH_GLOBAL_CONFIG=<tmp>/config`
+       holds a `crushrc` that defines no-op shell functions `mcp`, `lsp`, `hook`
+       and `permissions` (crush's interpreter resolves a function before its
+       config builtin; checked against the real build), passes `option` through
+       only for `request-timeout`, `disable-skill`, `auto-summarize`,
+       `provider-auto-update`, `default-providers` and `metrics`, then `source`s
+       the user's `crushrc` in place (its provider and API key are never copied).
+       A user `crush.json` there is copied with only `$schema`, `providers`,
+       `models` and a few options. Moving the config dir also drops crush's
+       global context files (`CRUSH.md` beside it, `AGENTS.md` above it), and
+       `CRUSH_SKILLS_DIR=<tmp>/skills` (empty) lists no global skill. A user
+       `crushrc` that says `command`/`builtin` before a config builtin, or
+       `unset -f`, could get past the shadows, so the strip refuses it (the run
+       keeps the user's config and says so; tools stay off either way). Not
+       scanned: files the user's `crushrc` itself `source`s.
+     **crush under every `deny` run (`crush_deny_dir`, 2026-10-13):** crush-acp asks
+     permission for `bash`, `edit`, `write`, `fetch` and `download`, but runs its
+     read-only tools (`glob`, `grep`, `ls`, `view`, `sourcegraph`, LSP lookups)
+     and bash's built-in safe commands without asking; on the 2026-10-13 03:43
+     SkillOpt-Sleep canary it ran `glob` unasked and the tripwire fired. Neither
+     ACP mode (`ask`, `code`) changes that. Crush builds each agent's tools from an
+     allow list (`allToolNames()` minus `options.disabled_tools`), so acp-run
+     disables every name on it (`CRUSH_TOOLS`) in two per-run config layers:
+     `CRUSH_GLOBAL_DATA=<tmp>/data` (merged after the user's global config) and
+     the workspace file under `--data-dir <tmp>/project` (merged last, after any
+     project `crush.json`/`crushrc`), with `auto_lsp: false` and
+     `permissions.skip_requests: false`. Crush merges config arrays by appending,
+     so no other layer can take a tool back off the list. MCP servers a project
+     config names (from `-C` up to the git root) get `disabled: true` there.
+     `--data-dir` also keeps crush's session database out of `-C`. The catalog
+     cache `providers.json` is copied in. This half has no fallback and applies
+     with `--interactive` and `--keep-user-config` too; it is logged as a
+     `deny_config` record. Result (2026-10-13, the real failover preflight): the
+     canary prompt got 0 tool calls (the model wrote a fake `<bash ...>` as text),
+     no file, rc 0; `Reply with exactly: OK` answered OK.
      The log gets a `user_config` record naming what was stripped (server, plugin
      and key names only, never values) and the result record `user_config:
      "stripped"`. `--keep-user-config` or `ACP_RUN_KEEP_USER_CONFIG=1` keeps the

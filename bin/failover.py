@@ -225,8 +225,11 @@ REGISTRY: dict[str, Tui] = {t.name: t for t in (
     Tui("copilot", "acp", "copilot", "GitHub", "copilot", None),
     Tui("grok", "acp", "grok", "xAI", "grok", None, note="reserve pool (GrokBot)"),
     Tui("qwen", "acp", "qwen", "Alibaba", None, None),
+    # canary "strict", no tripwire exemption: under --perm deny acp-run disables every
+    # crush tool (crush_deny_dir), so the canary sees 0 tool calls (verified 2026-10-13).
     Tui("crush", "acp", "crush", "Charm", None, None, takes_model=False, probe=True,
-        note="crush-acp (PR 2450 build), default model from crushrc (SIPB); never --model"),
+        note="crush-acp (PR 2450 build), default model from crushrc (SIPB); never --model;"
+             " no tools under --perm deny"),
     # Listed so a chain naming them fails with a clear reason (DENY also catches them).
     Tui("cursor", "acp", "cursor", "Cursor", "cursor", None, note="denied"),
     Tui("cline", "acp", "cline", "ClinePass", "clinepass", None, note="denied: reserve"),

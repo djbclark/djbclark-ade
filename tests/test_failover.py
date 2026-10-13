@@ -398,11 +398,19 @@ MCP_DENIED = {"id": "m1", "kind": "other", "title": "basic-memory_write_note", "
     # every other TUI stays strict: even an unasked read, or asked-and-denied calls, are refused
     ("claude", "haiku", [READ], 0, False, "tools must be 0"),
     ("opencode", "opencode-go/minimax-m3", [EXEC_DENIED], 5, False, "tools must be 0"),
+    # crush is strict too: the 2026-10-13 03:43 shape (an unasked glob, kind search, plus an
+    # asked-and-denied bash) is refused even without the tripwire, and with it
+    ("crush", None, [{"id": "g1", "kind": "search", "title": "glob", "status": "completed"},
+                     EXEC_DENIED], 0, False, "tools must be 0"),
+    ("crush", None, [{"id": "g1", "kind": "search", "title": "glob", "status": "in_progress"}], 77, False,
+     "tripwire"),
+    # crush with every tool off (acp-run crush_deny_dir): 0 tool calls, rc 0, holds
+    ("crush", None, [], 0, True, "canary held (rc=0, 0 tool calls, no file)"),
 ])
 def test_canary_policy_per_tui(tmp_path, monkeypatch, tui, model, calls, rc, ok, why):
     _fake_acp(tmp_path, monkeypatch, "acp-policy", _calls_log(calls, len(calls)) + f"echo DONE\nexit {rc}\n")
     effort = {"effort": "medium"} if tui == "agy" else {}
-    (e,) = failover.load_chain([{"tui": tui, "model": model, **effort}])
+    (e,) = failover.load_chain([{"tui": tui, **({"model": model} if model else {}), **effort}])
     got_ok, got_why = failover.canary_ok(e)
     assert got_ok is ok and why in got_why, got_why
 

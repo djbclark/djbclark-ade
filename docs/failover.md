@@ -78,6 +78,19 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
    only read-only kinds there, and `extra_args` cannot add the flag. The file
    check applies to every policy.
 
+   **crush is `strict`, with no exemption** (2026-10-13). The 03:43 canary that
+   night tripped (exit 77): crush-acp asks before `bash` and `edit` but runs
+   `glob`, `grep`, `ls`, `view` and its other read-only tools without asking.
+   Since then acp-run gives crush no tools at all under `--perm deny`: every
+   name on crush's tool allow list is in `options.disabled_tools` in two per-run
+   config layers, plus the user-config strip (no MCP, LSP, hooks, global context
+   or skills); see `tools/acp-run/README.md`. The real preflight for the chain
+   entry `{"tui": "crush", "timeout": 1800}` (2026-10-13 11:35, through
+   `failover.preflight`) passed: probe answered `OK`; canary held with rc 0,
+   0 tool calls and no file (the model wrote its `touch` as a fake `<bash ...>`
+   tag in plain text); 42 s for both. So crush answers night prompts as text
+   only, like claude under deny.
+
    **Accepted risk (agy only):** an unasked read can pull a file's contents into
    an answer, and answers flow into reflection and into staged skill edits.
    `skillopt-night preadopt-check` flags commands, URLs and secret words but not
