@@ -32,8 +32,6 @@ jobs:
           ip -d link show lo 2>&1 | head -3 || true
           ip link set lo up 2>&1 || echo "ip link set lo up failed"
           python3 /tmp/lo.py 2>&1 | head -2 || true
-          echo "--- private network namespace (unshare -n) with its own lo"
-          unshare -n sh -c 'ip link set lo up && python3 /tmp/lo.py' 2>&1 | head -4 || echo "unshare -n failed"
           echo "--- listeners / rules"
           (ss -ltn 2>&1 | head -5) || true
           (nft list ruleset 2>&1 | head -20) || true
@@ -65,6 +63,4 @@ jobs:
           try "default daemon" ./gradlew -p /tmp/emptyproj help
           try "--no-daemon" ./gradlew --no-daemon -p /tmp/emptyproj help
           GRADLE_OPTS="-Xmx512m -Dfile.encoding=UTF-8" try "--no-daemon, client JVM args matching build JVM args (in-process)" ./gradlew --no-daemon "-Dorg.gradle.jvmargs=-Xmx512m -Dfile.encoding=UTF-8" -p /tmp/emptyproj help
-          try "unshare -n (private lo), offline, default daemon" unshare -n sh -c 'ip link set lo up && ./gradlew --offline -p /tmp/emptyproj help'
-          try "unshare -n (private lo), offline, in-process" unshare -n sh -c 'ip link set lo up && GRADLE_OPTS="-Xmx512m -Dfile.encoding=UTF-8" ./gradlew --offline --no-daemon "-Dorg.gradle.jvmargs=-Xmx512m -Dfile.encoding=UTF-8" -p /tmp/emptyproj help'
         continue-on-error: true
