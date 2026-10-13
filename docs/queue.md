@@ -3,6 +3,19 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## self-slash cannot drive omp (found 2026-10-13, needs an operator decision)
+
+`bin/self-slash "/quit"` from an omp session in herdr pane w34:p2 queued, waited, and gave
+up: `~/.local/state/self-slash.log` 14:23:03-14:24:03 "no input prompt on screen yet" x9,
+then "gave up, no empty input prompt seen". Two causes: it looks for Claude's `❯` (or
+cursor's `→`) input marker, and omp draws a boxed composer (`composer.shape: box` in
+`~/.omp/agent/config.yml`); and herdr reports `agent: null` for omp panes, so self-slash
+cannot tell omp apart. So `/quit` and `/compact` via self-slash, and `/loose` Rule 4's
+quit, do not work in omp. **Decide:** teach self-slash omp's composer (screen
+scraping, breaks if the composer shape changes), or add a command channel to the omp
+bridge extension (`skills/autorename/omp-bridge.ts`), if omp's extension API can
+run a slash command or end a session.
+
 ## Ralph on OpenCode v2: postponed (operator, 2026-10-13)
 
 **Postponed by the operator ("postpone all ralph work"); do nothing until raised.**
@@ -31,7 +44,11 @@ this repo on or after 2026-10-14 raises these three first, one `/steps` prompt e
    per-prompt retries, the stripped opencode/agy startup, the direct SIPB entries and the
    lowered floors (0 for opencode-go/agy/zcode, 5 for claude) get sources through? Did crush
    and the new Hermes/grok/muse/cline/acp-dispatch adapters run? Measure prompts and tokens
-   per source: the logs have no token counts, so add them.
+   per source. Token capture landed 2026-10-13: attempts.jsonl attempt rows and
+   nights.jsonl rows carry `tokens` (backend-reported counts, never estimates; see
+   docs/failover.md). opencode, claude and direct sipb report counts; agy and crush are
+   unmetered (`tokens: null`, only the prompt count); zcode and hermes are unmetered
+   until a log shows `result.usage`. Still to do: read the first night's rows.
 2. **Denied backends** (`hermes`, `cursor`, `cline`, `clinepass`, `opus`, `fable` in
    `failover.DENY`; `muse`, `pi`, `grok`, `codex`, `copilot` in night.json/skillopt-night):
    the operator kept them denied on 2026-10-13 ("revisit after tonight"). With the night's real
