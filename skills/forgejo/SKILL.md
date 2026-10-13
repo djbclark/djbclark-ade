@@ -37,9 +37,11 @@ the default browser, lets `sudo-secretspec set` take the pasted value, then
 verifies it with `GET /user` and prints only the login. The name is
 `DJBCLARK_<HOST upper-cased, . and - as _>_TOKEN`.
 
-The runtime `add` puts the manifest ahead of the tracked declarations:
-`template-check` reports drift until the declaration is mirrored through review
-and release, or `delete` + `undeclare` removes it.
+The declaration is a runtime `add`. On this machine `sudo-secretspec
+template-check` says "no tracked declaration source configured" (2026-10-13), so
+there is nothing to mirror it into and no drift is reported. If a tracked source
+is ever configured, mirror the declaration there, or remove it with `delete` then
+`undeclare`.
 
 ## Token or OAuth2?
 

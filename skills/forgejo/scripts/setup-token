@@ -21,7 +21,7 @@ echo "== 1/4 declare ${NAME}"
 if out=$(sudo-secretspec add "$NAME" --optional \
     --description "Forgejo personal access token for https://${HOST}/api/v1" \
     --reason "$REASON" 2>&1); then
-  echo "declared (runtime manifest now ahead of the tracked declarations: mirror it or undeclare it)"
+  echo "declared (runtime declaration; template-check has no tracked source on this machine)"
 else
   echo "add did not succeed (usually: already declared): ${out}"
 fi
