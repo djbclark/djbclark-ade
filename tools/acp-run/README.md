@@ -85,16 +85,22 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      deep-merged as opencode does; a literal secret in a provider block (an
      `apiKey`-, `token`-, `secret`-like key or any `headers` value) goes to the
      child as `ACP_RUN_OPENCODE_SECRET_<n>` and appears in the file only as
-     `{env:...}` (values with a quote, backslash or brace stay in the 0600 file
-     and are listed in `secrets_in_file`); relative `{file:x}` references are
-     made absolute. The temp dir is built after the signal handlers are in place
-     and removed before the cancel/kill waits, so SIGTERM and early errors leave
-     nothing behind. It is not removed right after `session/new`: opencode
+     `{env:...}` (values that are not printable ASCII, or contain a quote,
+     backslash or brace, stay in the 0600 file and are listed in
+     `secrets_in_file`); relative `{file:x}` references are made absolute. This
+     is **not secret-free**: the env var reaches every child process the agent
+     starts (LSP servers, formatters, crash dumps). What it buys is that nothing
+     secret is left on disk after a SIGKILL. The temp dir is built after the
+     signal handlers are in place and removed before the cancel/kill waits
+     (opencode, zcode) or right after the agent has been stopped (agy, which can
+     still write a rotated credential under its home while it shuts down), so
+     SIGTERM and early errors leave nothing behind. It is not removed right after `session/new`: opencode
      watches its config dir and reloads on change, and agy keeps reading its
      home. Dirs are named `acp-run-<agent>-deny-<pid>-*`, and every deny run
      first sweeps this user's such dirs under the temp base that are older than
-     3 hours, belong to a dead pid, and are real dirs (never symlinks): that
-     covers runs killed with SIGKILL.
+     3 hours, belong to a dead pid (1-7 digits; anything else is never swept),
+     and are real dirs (never symlinks): that covers runs killed with SIGKILL.
+     A failing sweep only prints a warning; it never stops the run.
    - `scoped:P1,P2`: allow reads, searches, fetches, thinking and commands; allow
      edit/delete/move only when every path the tool call names is under one of
      the listed paths (relative to `-C`). This is an approval policy, not a

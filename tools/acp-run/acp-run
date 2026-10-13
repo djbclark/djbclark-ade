@@ -144,6 +144,7 @@ and Ctrl-C (SIGINT) does not exit while a turn runs.
 
 import argparse
 import asyncio
+import contextlib
 import fcntl
 import json
 import logging
@@ -362,7 +363,10 @@ DENY_ENV = {
 # so each deny run first sweeps this user's dirs older than DENY_DIR_MAX_AGE whose pid
 # is gone (sweep_stale_deny_dirs). Names without a pid (before 2026-10-13) go by age.
 DENY_DIR_PREFIX = "acp-run-"
-DENY_DIR_RE = re.compile(r"^acp-run-[a-z]+-deny-(?:(\d+)-)?[A-Za-z0-9_]+$")
+# The pid is bounded (a planted 11-digit name made os.kill raise OverflowError and
+# stopped every deny run: adversary re-review 2026-10-13, finding 1); fullmatch, so a
+# trailing newline does not match.
+DENY_DIR_RE = re.compile(r"acp-run-[a-z]+-deny-(?:(\d{1,7})-)?[A-Za-z0-9_]+")
 DENY_DIR_MAX_AGE = 3 * 3600
 
 
@@ -373,7 +377,9 @@ def remove_deny_dir(d):
     except FileNotFoundError:
         pass
     except OSError as e:
-        print(f"acp-run: could not remove {d}: {e}", file=sys.stderr)
+        # a broken stderr pipe must not skip the caller's finally (_kill, herdr release)
+        with contextlib.suppress(OSError):
+            print(f"acp-run: could not remove {d}: {e}", file=sys.stderr)
         shutil.rmtree(d, ignore_errors=True)
 
 
@@ -382,8 +388,8 @@ def _pid_alive(pid):
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except PermissionError:
-        return True
+    except (PermissionError, OverflowError, ValueError):
+        return True  # someone else's, or not a pid we can check: never sweep it
     return True
 
 
@@ -400,7 +406,7 @@ def sweep_stale_deny_dirs(base=None, max_age=DENY_DIR_MAX_AGE, now=None):
     except OSError:
         return gone
     for e in entries:
-        m = DENY_DIR_RE.match(e.name)
+        m = DENY_DIR_RE.fullmatch(e.name)
         if not m:
             continue
         try:
@@ -415,6 +421,16 @@ def sweep_stale_deny_dirs(base=None, max_age=DENY_DIR_MAX_AGE, now=None):
         remove_deny_dir(e.path)
         gone.append(e.name)
     return gone
+
+
+def safe_sweep_stale_deny_dirs():
+    """sweep_stale_deny_dirs that can never stop a deny run: warn and carry on."""
+    try:
+        return sweep_stale_deny_dirs()
+    except Exception as e:  # noqa: BLE001 - a planted name must not break deny runs
+        with contextlib.suppress(OSError):
+            print(f"acp-run: warning: stale deny-dir sweep failed: {e!r}", file=sys.stderr)
+        return None
 
 
 def zcode_deny_settings():
@@ -523,9 +539,12 @@ def deep_merge(base, over):
 # A provider value moved out of the temp file into the child's env (finding 1 of the
 # 2026-10-13 adversary review): opencode substitutes {env:NAME} in config text
 # (ConfigVariable.substitute, 2.0.27) before parsing, so the value must not contain
-# a quote, backslash, brace or control character; any other literal stays in the 0600 file.
+# a quote, backslash or brace, and must be printable ASCII (re-review finding 3); any
+# other literal stays in the 0600 file. Note: the env hands the value to every child the
+# agent starts (LSP servers, formatters); the gain is that nothing secret is left on
+# disk after a SIGKILL.
 _SECRET_KEY = re.compile(r"(?i)api[_-]?key|token|secret|passw|authorization|bearer|cookie|credential")
-_ENV_SAFE = re.compile(r'^[^"\\{}\x00-\x1f]+$')
+_ENV_SAFE = re.compile(r'[\x20\x21\x23-\x5b\x5d-\x7a\x7c\x7e]+')  # printable ASCII minus " \\ { }
 
 
 def _secrets_to_env(node, extra_env, left, path="provider", in_headers=False):
@@ -536,7 +555,7 @@ def _secrets_to_env(node, extra_env, left, path="provider", in_headers=False):
             _secrets_to_env(v, extra_env, left, p, in_headers or str(k).lower() == "headers")
         elif (isinstance(v, str) and (in_headers or _SECRET_KEY.search(str(k)))
               and "{env:" not in v and "{file:" not in v):
-            if _ENV_SAFE.match(v):
+            if _ENV_SAFE.fullmatch(v):
                 name = f"ACP_RUN_OPENCODE_SECRET_{len(extra_env)}"
                 extra_env[name] = v
                 node[k] = "{env:" + name + "}"
@@ -2475,10 +2494,12 @@ async def run(a, log, err, log_path):
                     code = tcode
     except asyncio.CancelledError:
         if "sig" not in got:
-            drop_deny_dir()
+            if a.agent != "agy":
+                drop_deny_dir()
             raise
         main_task.uncancel()
-        drop_deny_dir()  # before up to 20 s of cancel/kill waits a SIGKILL could cut short
+        if a.agent != "agy":
+            drop_deny_dir()  # before up to 20 s of cancel/kill waits a SIGKILL could cut short
         if conn is not None and sess is not None and not a.info:
             try:
                 await asyncio.wait_for(conn.cancel(session_id=sess.session_id), 5)
@@ -2506,8 +2527,13 @@ async def run(a, log, err, log_path):
             failure = (cls, f"{FAILURE_TEXT[cls]}: {out['error']}")
     finally:
         logging.disable(logging.CRITICAL)  # a half-written line at shutdown is noise
-        drop_deny_dir()  # before _kill's waits; the run is over either way
+        # opencode/zcode: before _kill's waits, the run is over either way. agy: after,
+        # since agy can still write under its GEMINI_HOME (a rotated credential) while
+        # it is being stopped (adversary re-review 2026-10-13, finding 5).
+        if a.agent != "agy":
+            drop_deny_dir()
         await _kill(proc)
+        drop_deny_dir()
         if herdr is not None:
             try:
                 await herdr.release()
@@ -2823,7 +2849,7 @@ def main():
             print(f"acp-run: refusing to start: {why}", file=sys.stderr)
             return EXIT_LOAD
     if a.perm == "deny":
-        sweep_stale_deny_dirs()  # dirs a SIGKILLed deny run could not remove
+        safe_sweep_stale_deny_dirs()  # dirs a SIGKILLed deny run could not remove
     state = Path.home() / ".local/state/acp-run"
     state.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")

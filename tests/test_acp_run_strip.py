@@ -38,7 +38,7 @@ USER_OPENCODE = {
         "baseURL": "http://127.0.0.1:8890/api", "apiKey": SECRET,
         "headers": {"Authorization": "Bearer " + SECRET, "X-Key": "{file:./key.txt}"}},
         "models": {"qwen3-coder:30b": {}}},
-        "odd": {"options": {"apiKey": 'ab"odd-literal'}}, "envd": {"options": {"apiKey": "{env:MY_KEY}"}}},
+        "odd": {"options": {"apiKey": 'ab"odd-literal'}}, "uni": {"options": {"apiKey": "abc\u2028def"}}, "envd": {"options": {"apiKey": "{env:MY_KEY}"}}},
     "model": "sipb/qwen3-coder:30b",
     "mcp": {"basic-memory": {"type": "remote", "url": "http://127.0.0.1:18796/mcp"},
             "exa": {"type": "remote", "url": "https://mcp.exa.ai/mcp",
@@ -148,6 +148,11 @@ PROBE = textwrap.dedent("""\
             (base / n / "f").write_text("x")
         link = base / "acp-run-opencode-deny-999997-linkxxxx"
         link.symlink_to(target)
+        planted = ["acp-run-x-deny-99999999999-a", "acp-run-opencode-deny-99999999999-abc",
+                   "acp-run-agy-deny-999995-abc\\n"]
+        for n in planted:
+            (base / n).mkdir()
+            os.utime(base / n, (old, old))
         afile = base / "acp-run-agy-deny-999996-filexxxx"
         afile.write_text("x")
         for k, n in names.items():
@@ -163,7 +168,47 @@ PROBE = textwrap.dedent("""\
         shutil.rmtree(target)
         return out
 
+    def robustness():
+        import contextlib, io as _io
+        out = {"pid_big": mod._pid_alive(10 ** 20)}
+        real = mod.sweep_stale_deny_dirs
+        def boom(*a, **k):
+            raise RuntimeError("planted")
+        mod.sweep_stale_deny_dirs = boom
+        buf = _io.StringIO()
+        try:
+            with contextlib.redirect_stderr(buf):
+                out["safe_sweep"] = mod.safe_sweep_stale_deny_dirs()
+        finally:
+            mod.sweep_stale_deny_dirs = real
+        out["safe_sweep_stderr"] = buf.getvalue()
+        class Broken:
+            def write(self, s):
+                raise BrokenPipeError(32, "Broken pipe")
+            def flush(self):
+                raise BrokenPipeError(32, "Broken pipe")
+        calls = []
+        real_rmtree = mod.shutil.rmtree
+        def failing(path, ignore_errors=False, **k):
+            calls.append(ignore_errors)
+            if not ignore_errors:
+                raise PermissionError(13, "denied")
+        mod.shutil.rmtree = failing
+        old_err = sys.stderr
+        sys.stderr = Broken()
+        try:
+            mod.remove_deny_dir("/nonexistent/acp-run-opencode-deny-1-x")
+            out["broken_stderr"] = "ok"
+        except BaseException as e:
+            out["broken_stderr"] = repr(e)
+        finally:
+            sys.stderr = old_err
+            mod.shutil.rmtree = real_rmtree
+        out["rmtree_calls"] = calls
+        return out
+
     print(json.dumps({
+        "robust": robustness(),
         "oc_broken": oc_error({"XDG_CONFIG_HOME": str(home / "broken")}),
         "oc_commas": oc({"XDG_CONFIG_HOME": str(home / "commas")}),
         "jsonc_commas": mod.jsonc_loads('{"a": [1, 2,], "b": {"c": "x,}",}, /* k */ }'),
@@ -210,6 +255,18 @@ FAKE_AGENT = textwrap.dedent("""\
     fake_out = Path(os.environ["FAKE_OUT"])
     fake_out.write_text(json.dumps(out))
     mode = os.environ.get("FAKE_MODE", "exit")
+    if os.environ.get("FAKE_ON_TERM") == "recreate":
+        import signal, time
+
+        def on_term(*_):
+            # like agy rotating a credential under its home while it is being stopped
+            g = os.environ["GEMINI_HOME"]
+            os.makedirs(g, exist_ok=True)
+            Path(g, "rotated.json").write_text("{}")
+            Path(str(fake_out) + ".term").write_text(g)
+            time.sleep(0.3)
+            os._exit(0)
+        signal.signal(signal.SIGTERM, on_term)
     if mode == "exit":
         sys.exit(0)  # die before the handshake: acp-run fails fast, then cleans up
 
@@ -238,6 +295,8 @@ FAKE_AGENT = textwrap.dedent("""\
             if pending is not None:
                 send({"id": pending, "result": {"stopReason": "cancelled"}})
                 pending = None
+        elif m == "session/set_mode":
+            send({"id": i, "result": {}})
         elif i is not None:
             send({"id": i, "error": {"code": -32601, "message": "not supported"}})
     """)
@@ -335,7 +394,7 @@ class TestStripUserConfig(unittest.TestCase):
 
     def test_opencode_explicit_config_file_is_merged_then_unset(self):
         w = self.r["oc_explicit"]["written"]
-        self.assertEqual(sorted(w["provider"]), ["envd", "extra", "odd", "sipb"])
+        self.assertEqual(sorted(w["provider"]), ["envd", "extra", "odd", "sipb", "uni"])
         sipb = w["provider"]["sipb"]
         self.assertEqual(sipb["options"]["baseURL"], "http://127.0.0.1:9999/api", "the override wins")
         self.assertIn("qwen3-coder:30b", sipb["models"], "deep merge keeps models (finding 3)")
@@ -358,7 +417,9 @@ class TestStripUserConfig(unittest.TestCase):
         self.assertEqual(o["written"]["provider"]["envd"]["options"]["apiKey"], "{env:MY_KEY}",
                          "an existing reference is left alone")
         # a value {env:} substitution would corrupt (a quote) stays in the 0600 file, and is listed
-        self.assertEqual(o["info"]["secrets_in_file"], ["provider.odd.options.apiKey"])
+        self.assertEqual(sorted(o["info"]["secrets_in_file"]),
+                         ["provider.odd.options.apiKey", "provider.uni.options.apiKey"],
+                         "non-ASCII stays in the file (re-review finding 3)")
         self.assertEqual(o["info"]["secrets_via_env"], 2)
         self.assertNotIn("Bearer " + SECRET, o["raw"])
         self.assertNotIn(json.dumps(SECRET), o["raw"])
@@ -392,6 +453,23 @@ class TestStripUserConfig(unittest.TestCase):
             self.assertIn(f"could not strip {agent}", s["stderr"], key)
             self.assertTrue(s["passed"], key)
             self.assertNotIn("OPENCODE_CONFIG_DIR", s["env"], key)
+
+    def test_planted_huge_pid_names_never_break_the_sweep(self):
+        w = self.r["sweep"]
+        for n in ("acp-run-x-deny-99999999999-a", "acp-run-opencode-deny-99999999999-abc",
+                  "acp-run-agy-deny-999995-abc\n"):
+            self.assertIn(n, w["left"], "not matched (bounded pid, fullmatch), so never swept")
+        self.assertTrue(self.r["robust"]["pid_big"], "an unbounded pid counts as alive")
+
+    def test_a_failing_sweep_only_warns(self):
+        r = self.r["robust"]
+        self.assertIsNone(r["safe_sweep"])
+        self.assertIn("stale deny-dir sweep failed", r["safe_sweep_stderr"])
+
+    def test_remove_deny_dir_survives_a_broken_stderr(self):
+        r = self.r["robust"]
+        self.assertEqual(r["broken_stderr"], "ok")
+        self.assertEqual(r["rmtree_calls"], [False, True], "still retries with ignore_errors")
 
     def test_sweep_removes_only_stale_dead_own_dirs(self):
         w = self.r["sweep"]
@@ -499,11 +577,15 @@ class TestStripEndToEnd(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def run_acp(self, agent: str, *args: str, env: dict[str, str] | None = None, mode: str = "exit",
-                sigterm: bool = False, fake: str = "opencode") -> dict[str, Any]:
+                sigterm: bool = False, fake: str = "opencode", planted: str = "") -> dict[str, Any]:
         n = len(list(self.tmp.glob("run-*")))
         d = self.tmp / f"run-{n}"
         d.mkdir()
         out, log = d / "env.json", d / "log.jsonl"
+        if planted:
+            (d / planted).mkdir()
+            old = time.time() - 4 * 3600
+            os.utime(d / planted, (old, old))
         e = {**os.environ, "HOME": str(self.home), "UV_CACHE_DIR": self.cache,
              "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_OUT": str(out), "FAKE_MODE": mode,
              "ACP_RUN_AGY_SERVER": str(self.bin / fake), "TMPDIR": str(d)}
@@ -526,14 +608,16 @@ class TestStripEndToEnd(unittest.TestCase):
             os.kill(json.loads(out.read_text())["acp_run_pid"], signal.SIGTERM)
         stdout, stderr = proc.communicate(timeout=180)
         recs = [json.loads(x) for x in log.read_text().splitlines() if x.strip()] if log.exists() else []
-        leftovers = [p.name for p in d.iterdir() if p.name.startswith("acp-run-")]
+        leftovers = [p.name for p in d.iterdir() if p.name.startswith("acp-run-") and p.name != planted]
+        term_file = Path(str(out) + ".term")
         turn_file = Path(str(out) + ".turn")
         return {"rc": proc.returncode, "stdout": stdout, "stderr": stderr,
                 "seen": json.loads(out.read_text()) if out.exists() else {},
                 "turn": json.loads(turn_file.read_text()) if turn_file.exists() else None,
                 "user_config": [x["data"] for x in recs if x["kind"] == "user_config"],
                 "result": next((x["data"] for x in recs if x["kind"] == "result"), {}),
-                "leftovers": leftovers, "live": live}
+                "leftovers": leftovers, "live": live, "planted_left": bool(planted) and (d / planted).exists(),
+                "term": term_file.read_text() if term_file.exists() else None}
 
     def test_successful_turn_keeps_the_config_during_the_turn_then_removes_it(self):
         r = self.run_acp("opencode", "--perm", "deny", mode="turn")
@@ -542,6 +626,22 @@ class TestStripEndToEnd(unittest.TestCase):
         self.assertTrue(r["turn"]["exists"], "the agent can still read its config during the turn")
         self.assertIn("acp-run-opencode-deny-", r["turn"]["cfg"])
         self.assertEqual(r["result"]["user_config"], "stripped")
+        self.assertEqual(r["leftovers"], [])
+
+    def test_a_planted_huge_pid_dir_does_not_stop_a_deny_run(self):
+        r = self.run_acp("opencode", "--perm", "deny", mode="turn", planted="acp-run-x-deny-99999999999-a")
+        self.assertEqual(r["rc"], 0, r["stderr"])
+        self.assertEqual(r["stdout"].strip(), "ok")
+        self.assertTrue(r["planted_left"])
+        self.assertNotIn("Traceback", r["stderr"])
+
+    def test_agy_home_is_removed_after_the_agent_stopped(self):
+        # the fake agy recreates its GEMINI_HOME and writes a file there on SIGTERM;
+        # removing the dir before _kill would leave that file behind
+        r = self.run_acp("agy", "--perm", "deny", "--mode", "default", mode="hang", sigterm=True,
+                         env={"FAKE_ON_TERM": "recreate"})
+        self.assertEqual(r["rc"], 143, r["stderr"])
+        self.assertIn("acp-run-agy-deny-", r["term"] or "", "the agent wrote under its home while stopping")
         self.assertEqual(r["leftovers"], [])
 
     def test_sigterm_mid_turn_removes_the_temp_dir(self):
@@ -561,6 +661,8 @@ class TestStripEndToEnd(unittest.TestCase):
     def test_unparseable_config_keeps_the_user_config_end_to_end(self):
         r = self.run_acp("opencode", "--perm", "deny", env={"XDG_CONFIG_HOME": str(self.home / "broken")})
         self.assertIsNone(r["seen"]["OPENCODE_CONFIG_DIR"])
+        self.assertEqual(json.loads(r["seen"]["OPENCODE_CONFIG_CONTENT"]), {"permission": "deny"},
+                         "the kept fallback still denies every tool")
         self.assertEqual(r["user_config"][0]["action"], "kept")
         self.assertIn("broken/opencode/opencode.json", r["stderr"])
 
