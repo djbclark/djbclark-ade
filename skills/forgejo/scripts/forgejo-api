@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""forgejo-api — authenticated call to a Forgejo /api/v1 endpoint, stdlib only.
+
+    forgejo-api [--host HOST] whoami
+    forgejo-api [--host HOST] GET  /repos/OWNER/REPO/issues?state=open
+    forgejo-api [--host HOST] POST /repos/OWNER/REPO/issues --data '{"title":"x"}' --yes
+    forgejo-api [--host HOST] PATCH /repos/OWNER/REPO/issues/3 --data @body.json --dry-run
+
+HOST defaults to forgejo.mit.edu. The token is read from
+DJBCLARK_<HOST>_TOKEN (forgejo.mit.edu -> DJBCLARK_FORGEJO_MIT_EDU_TOKEN); when
+it is not in the environment this script re-runs itself under
+`sudo-secretspec run`, so the value never appears in an argument, a file or the
+transcript. Anything but GET/HEAD needs --yes, or --dry-run to print the plan.
+"""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+DEFAULT_HOST = "forgejo.mit.edu"
+
+
+def secret_name(host: str) -> str:
+    return "DJBCLARK_" + re.sub(r"[^A-Z0-9]", "_", host.upper()) + "_TOKEN"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--host", default=DEFAULT_HOST)
+    ap.add_argument("--data", help="JSON body, or @file")
+    ap.add_argument("--yes", action="store_true", help="allow a mutating method")
+    ap.add_argument("--dry-run", action="store_true", help="print the request, send nothing")
+    ap.add_argument("method", help="GET, POST, PUT, PATCH, DELETE, or `whoami`")
+    ap.add_argument("path", nargs="?", default="")
+    a = ap.parse_args()
+
+    method, path = a.method.upper(), a.path
+    if method == "WHOAMI":
+        method, path = "GET", "/user"
+    if not path.startswith("/"):
+        ap.error("PATH must start with / (relative to /api/v1)")
+    if method not in ("GET", "HEAD") and not (a.yes or a.dry_run):
+        ap.error(f"{method} mutates the server: pass --yes, or --dry-run to preview")
+
+    body = None
+    if a.data:
+        raw = open(a.data[1:]).read() if a.data.startswith("@") else a.data
+        body = json.loads(raw)  # fail early on bad JSON
+
+    url = f"https://{a.host}/api/v1{path}"
+    if a.dry_run:
+        print(json.dumps({"method": method, "url": url, "body": body}, indent=2))
+        return 0
+
+    var = secret_name(a.host)
+    token = os.environ.get(var)
+    if not token:
+        if os.environ.get("FORGEJO_API_REEXEC"):
+            print(f"forgejo-api: {var} is not set or not declared in sudo-secretspec "
+                  f"(run setup-token {a.host})", file=sys.stderr)
+            return 2
+        env = dict(os.environ, FORGEJO_API_REEXEC="1")
+        return subprocess.call(
+            ["sudo-secretspec", "run", "--reason", f"Forgejo API call to {a.host}", "--",
+             sys.executable, os.path.abspath(__file__), *sys.argv[1:]], env=env)
+
+    req = urllib.request.Request(
+        url, method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": f"token {token}", "Accept": "application/json",
+                 **({"Content-Type": "application/json"} if body is not None else {})})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            payload = r.read().decode()
+    except urllib.error.HTTPError as e:
+        print(f"forgejo-api: HTTP {e.code} {e.reason}: {e.read().decode()[:500]}", file=sys.stderr)
+        return 1
+    except urllib.error.URLError as e:
+        print(f"forgejo-api: {e.reason}", file=sys.stderr)
+        return 1
+
+    if a.method.lower() == "whoami":
+        who = json.loads(payload)
+        print(f"{who.get('login')} ({who.get('email', 'no email shown')})")
+    elif payload:
+        print(payload)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

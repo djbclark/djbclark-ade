@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# setup-token — get a Forgejo personal access token into sudo-secretspec.
+#
+#   setup-token [HOST]        HOST defaults to forgejo.mit.edu
+#
+# The secret name is DJBCLARK_<HOST, upper-cased, . and - as _>_TOKEN, so
+# forgejo.mit.edu -> DJBCLARK_FORGEJO_MIT_EDU_TOKEN. Steps: declare the name
+# (optional, so `check` stays green on hosts without it), open the token page in
+# the default browser, let sudo-secretspec prompt for the value (it never
+# touches this script, a file, or the transcript), then verify the token with a
+# read-only GET /user that prints only the login.
+set -uo pipefail
+
+HOST="${1:-forgejo.mit.edu}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SUFFIX="$(printf '%s' "$HOST" | tr 'a-z.-' 'A-Z__')"
+NAME="DJBCLARK_${SUFFIX}_TOKEN"
+REASON="Forgejo API token for ${HOST}"
+
+echo "== 1/4 declare ${NAME}"
+if out=$(sudo-secretspec add "$NAME" --optional \
+    --description "Forgejo personal access token for https://${HOST}/api/v1" \
+    --reason "$REASON" 2>&1); then
+  echo "declared (runtime manifest now ahead of the tracked declarations: mirror it or undeclare it)"
+else
+  echo "add did not succeed (usually: already declared): ${out}"
+fi
+
+echo
+echo "== 2/4 create the token in your browser"
+cat <<EOF
+Settings > Applications > Generate New Token. Name it e.g. "djbclark-agents".
+Suggested scopes (the token page shows the value ONCE; leave unticked what you
+do not need):
+  read:user  write:repository  write:issue  read:organization  read:notification
+Add write:organization / write:package / write:admin only if you need them.
+EOF
+open "https://${HOST}/user/settings/applications" || echo "open failed: visit that URL yourself"
+
+echo
+echo "== 3/4 store it (sudo-secretspec prompts for the value; paste the token)"
+read -r -p "Press Enter when you have copied the token... " _
+if ! sudo-secretspec set "$NAME" --reason "$REASON"; then
+  echo "set failed; nothing stored" >&2
+  exit 1
+fi
+
+echo
+echo "== 4/4 verify (prints only the login)"
+if sudo-secretspec run --reason "verify ${NAME}" -- \
+    python3 "$HERE/forgejo-api" --host "$HOST" whoami; then
+  echo "OK: ${NAME} works against https://${HOST}"
+else
+  echo "FAILED: the stored token was rejected (401/403) or the host is unreachable." >&2
+  echo "Re-run this script to replace it: set overwrites the stored value." >&2
+  exit 1
+fi
