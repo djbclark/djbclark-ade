@@ -40,14 +40,17 @@ setup = '''      - name: Install JDK 17 and Android SDK (timed separately from G
 '''
 # 4b. the SIPB runner is a libkrun microVM whose TSI networking refuses loopback connects to
 # port-0 listeners (libkrun#818), which breaks Gradle's daemon and test workers. Build an
-# LD_PRELOAD shim that rewrites port-0 binds to fixed ports and export it to every later step.
+# LD_PRELOAD shim that rewrites port-0 binds to fixed ports and preload it system-wide (/etc/ld.so.preload).
 shim_c = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "loopback-port-shim.c")).read()
 shim_step = ("      - name: Build loopback port-0 shim (libkrun#818 workaround)\n        run: |\n"
              "          cat > /tmp/portshim.c <<'SHIM_C'\n"
              + "".join(("          " + l if l.strip() else "") + "\n" for l in shim_c.splitlines())
              + "          SHIM_C\n"
-             "          gcc -shared -fPIC -O2 -o /tmp/portshim.so /tmp/portshim.c -ldl\n"
-             '          echo "LD_PRELOAD=/tmp/portshim.so" >> "$GITHUB_ENV"\n')
+             "          gcc -shared -fPIC -O2 -o /usr/local/lib/portshim.so /tmp/portshim.c -ldl\n"
+             # /etc/ld.so.preload (jobs run as root) reaches every process; an LD_PRELOAD exported
+             # through $GITHUB_ENV did NOT reach Gradle's daemon (run 176: it still bound port 39217).
+             "          echo /usr/local/lib/portshim.so >> /etc/ld.so.preload\n"
+             "          true && python3 -c 'print(\"preload ok\")'\n")
 setup = setup + "\n" + shim_step
 src, n = re.subn(r"      - name: Set up JDK 17\n(?:        .*\n|          .*\n)+?(?=\n      - name: Make Gradle executable)", setup, src, count=1)
 assert n == 1, "setup-java step not found"

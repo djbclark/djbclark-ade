@@ -1,0 +1,17 @@
+name: runner resources
+on:
+  push:
+    branches: ['probe/**']
+jobs:
+  resources:
+    runs-on: ubuntu
+    steps:
+      - name: Checkout
+        uses: https://github.com/actions/checkout@v4
+      - name: Probe CPU, memory, disk, cgroup limits (3 passes)
+        run: |
+          apt-get update -qq && apt-get install -y -qq gcc libc6-dev python3 > /dev/null
+          for i in 1 2 3; do echo "######## pass $i"; bash ./resource-probe.sh 2>&1; done
+          echo "######## kernel view of the VM"
+          dmesg 2>/dev/null | grep -Ei 'krun|virtio|hypervisor|cpu' | head -8 || true
+          cat /proc/pressure/cpu /proc/pressure/memory /proc/pressure/io 2>/dev/null || true
