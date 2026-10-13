@@ -3,6 +3,7 @@
 No test calls a model, aiuse, acp-run or sudo-secretspec for real: fixtures and
 fake executables stand in for all of them.
 """
+import dataclasses
 import hashlib
 import io
 import json
@@ -354,38 +355,81 @@ def test_canary(tmp_path, monkeypatch, body, ok, why):
     assert failover.canary_ok(sipb) == (True, "no tools on this route")
 
 
-@pytest.mark.parametrize(("tui", "model", "fields", "rc", "ok", "why"), [
-    # agy: asked-and-denied tool calls hold
-    ("agy", "gemini-3.8-flash", '{"tool_calls": 3, "permissions": {"allowed": 0, "denied": 3}}', 5, True,
-     "asked_denied_ok: 3 tool call(s)"),
-    # agy: a tool that ran without asking (fewer denials than calls) is refused
-    ("agy", "gemini-3.8-flash", '{"tool_calls": 3, "permissions": {"allowed": 0, "denied": 2}}', 0, False,
-     "started 3 tool call(s)"),
-    # agy: an allowed call is refused
-    ("agy", "gemini-3.8-flash", '{"tool_calls": 1, "permissions": {"allowed": 1, "denied": 0}}', 0, False,
-     "started 1 tool call(s)"),
+def _calls_log(calls: list[dict[str, Any]], tools: int) -> str:
+    """A fake acp-run body that writes tool_call/permission/result records to its --log."""
+    rows = []
+    for c in calls:
+        rows.append({"kind": "update", "data": {"sessionUpdate": "tool_call", "toolCallId": c["id"],
+                                                "kind": c["kind"], "title": c["title"], "status": "pending"}})
+        if c.get("decision"):
+            rows.append({"kind": "permission", "data": {"tool_call": {"toolCallId": c["id"], "title": c["title"]},
+                                                        "decision": c["decision"]}})
+        rows.append({"kind": "update", "data": {"sessionUpdate": "tool_call_update", "toolCallId": c["id"],
+                                                "status": c["status"]}})
+    allowed = sum(c.get("decision") == "allow" for c in calls)
+    denied = sum(c.get("decision") == "deny" for c in calls)
+    rows.append({"kind": "result", "data": {"tool_calls": tools,
+                                            "permissions": {"allowed": allowed, "denied": denied}}})
+    body = "\n".join(json.dumps(r) for r in rows)
+    return ('LOG=""; prev=""; for x in "$@"; do [ "$prev" = "--log" ] && LOG="$x"; prev="$x"; done\n'
+            f"cat > \"$LOG\" <<'EOF_LOG'\n{body}\nEOF_LOG\n")
+
+
+READ = {"id": "r1", "kind": "read", "title": "Running view_file", "status": "completed"}
+EXEC_DENIED = {"id": "x1", "kind": "execute", "title": "touch canary", "decision": "deny", "status": "failed"}
+MCP_DENIED = {"id": "m1", "kind": "other", "title": "basic-memory_write_note", "decision": "deny",
+              "status": "failed"}
+
+
+@pytest.mark.parametrize(("tui", "model", "calls", "rc", "ok", "why"), [
+    # agy reads_ok: an unasked read plus asked-and-denied exec and MCP calls hold
+    ("agy", "gemini-3.8-flash", [READ, EXEC_DENIED, MCP_DENIED], 5, True, "reads_ok: 3 tool call(s)"),
+    # agy: an unasked execute call is refused
+    ("agy", "gemini-3.8-flash", [READ, {**EXEC_DENIED, "decision": None, "status": "completed"}], 0, False,
+     "execute tool 'touch canary' did not ask and get denied"),
+    # agy: an allowed edit is refused
+    ("agy", "gemini-3.8-flash", [{"id": "e1", "kind": "edit", "title": "edit_file", "decision": "allow",
+                                  "status": "completed"}], 0, False, "edit tool 'edit_file'"),
+    # agy: an unasked MCP (kind other) call is refused
+    ("agy", "gemini-3.8-flash", [{**MCP_DENIED, "decision": None, "status": "completed"}], 0, False,
+     "other tool 'basic-memory_write_note'"),
     # agy: the tripwire still refuses
-    ("agy", "gemini-3.8-flash", '{"tool_calls": 1, "permissions": {"allowed": 0, "denied": 1}}', 77, False,
-     "tripwire"),
-    # every other TUI stays strict: asked-and-denied is still refused
-    ("claude", "haiku", '{"tool_calls": 3, "permissions": {"allowed": 0, "denied": 3}}', 5, False,
-     "tools must be 0"),
-    ("opencode", "opencode-go/minimax-m3", '{"tool_calls": 1, "permissions": {"allowed": 0, "denied": 1}}', 5,
-     False, "tools must be 0"),
+    ("agy", "gemini-3.8-flash", [EXEC_DENIED], 77, False, "tripwire"),
+    # every other TUI stays strict: even an unasked read, or asked-and-denied calls, are refused
+    ("claude", "haiku", [READ], 0, False, "tools must be 0"),
+    ("opencode", "opencode-go/minimax-m3", [EXEC_DENIED], 5, False, "tools must be 0"),
 ])
-def test_canary_policy_per_tui(tmp_path, monkeypatch, tui, model, fields, rc, ok, why):
-    _fake_acp(tmp_path, monkeypatch, "acp-policy", _result_log(fields) + f"echo DONE\nexit {rc}\n")
+def test_canary_policy_per_tui(tmp_path, monkeypatch, tui, model, calls, rc, ok, why):
+    _fake_acp(tmp_path, monkeypatch, "acp-policy", _calls_log(calls, len(calls)) + f"echo DONE\nexit {rc}\n")
     effort = {"effort": "medium"} if tui == "agy" else {}
     (e,) = failover.load_chain([{"tui": tui, "model": model, **effort}])
     got_ok, got_why = failover.canary_ok(e)
-    assert got_ok is ok and why in got_why
+    assert got_ok is ok and why in got_why, got_why
 
 
-def test_canary_policy_is_registry_only():
-    assert failover.REGISTRY["agy"].canary == "asked_denied_ok"
-    assert all(t.canary == "strict" for n, t in failover.REGISTRY.items() if n != "agy")
-    (e,) = failover.load_chain([{"tui": "claude", "model": "haiku", "canary": "asked_denied_ok"}])
+def test_asked_denied_ok_policy_still_works(tmp_path, monkeypatch):
+    tui = dataclasses.replace(failover.REGISTRY["claude"], canary="asked_denied_ok")
+    monkeypatch.setitem(failover.REGISTRY, "claude", tui)
+    _fake_acp(tmp_path, monkeypatch, "acp-ado", _calls_log([EXEC_DENIED, MCP_DENIED], 2) + "exit 5\n")
+    (e,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    assert failover.canary_ok(e)[0]
+
+
+def test_canary_policy_and_exemption_are_registry_only(tmp_path):
+    agy = failover.REGISTRY["agy"]
+    assert (agy.canary, agy.tripwire_exempt) == ("reads_ok", ("read", "search"))
+    assert all(t.canary == "strict" and not t.tripwire_exempt
+               for n, t in failover.REGISTRY.items() if n != "agy")
+    (e,) = failover.load_chain([{"tui": "claude", "model": "haiku", "canary": "reads_ok"}])
     assert e.tui.canary == "strict", "a chain entry cannot loosen the canary"
+    with pytest.raises(failover.ChainError, match="extra_args may not pass"):
+        failover.load_chain([{"tui": "claude", "model": "haiku",
+                              "extra_args": ["--tripwire-exempt-kinds", "read"]}])
+    a, c = failover.load_chain([{"tui": "agy", "model": "gemini-3.8-flash", "effort": "medium"},
+                                {"tui": "claude", "model": "haiku"}])
+    cmd = failover.acp_command(a, tmp_path / "p", tmp_path)
+    assert cmd[cmd.index("--tripwire-exempt-kinds") + 1] == "read,search"
+    assert "--tripwire-exempt-kinds" not in failover.acp_command(c, tmp_path / "p", tmp_path)
 
 
 def test_preflight_runs_canary_only_with_probe(tmp_path, monkeypatch):
