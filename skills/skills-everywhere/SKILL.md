@@ -9,7 +9,10 @@ description: >-
 # skills-everywhere
 
 Use the machine-wide linker; it points every client at the canonical skill
-checkout and does not copy files:
+checkout and does not copy files. Clients covered (the `targets` table in the
+script): Claude Code, Codex, omp (oh-my-pi, `~/.omp/agent/skills`), Copilot,
+Cursor, opencode, zcode, Grok, Qwen, Devin, Cline, Muse, Antigravity and
+Hermes:
 
 ```sh
 ~/src/djbclark-ade/bin/skill-everywhere <skill-name>...

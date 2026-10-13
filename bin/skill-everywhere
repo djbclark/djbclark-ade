@@ -25,6 +25,9 @@ src_root="${SKILL_EVERYWHERE_HUB:-${OPS_ROOT:-$HOME/ops}/site-private/skills}"
 # binary|skills dir to link into, or "via <dir>" when the TUI already reads a
 # dir we fill (a second link there would list the skill twice), or "x <why>".
 # Verified 2026-10-03 by asking each TUI headlessly whether it saw 'steps'.
+# omp (oh-my-pi) added 2026-10-13: it also reads ~/.agents/skills, but dedups
+# by realpath, so its native dir lists each skill once and keeps working if
+# its agents provider is turned off.
 targets='
 claude|~/.claude/skills
 codex|~/.agents/skills
@@ -39,6 +42,7 @@ cursor-agent|via ~/.claude/skills
 grok|~/.grok/skills
 muse|via ~/.claude/skills
 zcode|via ~/.agents/skills
+omp|~/.omp/agent/skills
 '
 
 mode=link

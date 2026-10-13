@@ -2,7 +2,7 @@
 
 README for [`skill-everywhere`](../bin/skill-everywhere) (canonical script in
 this repository; compatibility command `~/ops/site-private/bin/skill-everywhere`). It makes a local skill available to
-every agent TUI on this machine (Claude Code, Codex, Copilot, Cursor, opencode,
+every agent TUI on this machine (Claude Code, Codex, omp, Copilot, Cursor, opencode,
 zcode, Grok, Qwen, Devin, Cline, Muse, Antigravity and Hermes) by
 symlinking it into each one's skills dir, and this page says how to prove each
 TUI actually loads it. Until 2026-10-08 this was the `skill-everywhere` skill;
@@ -57,6 +57,7 @@ after the directory is gone: it removes only links whose target is exactly
 | Grok (`grok`, including Grok Build) | `~/.grok/skills`. It also scans `~/.claude/skills` and `~/.agents/skills` and dedups by name. Verified 2026-10-04: a same-named `SKILL.md` under `~/.agents/skills/.trash` was the copy this session was offered, so `~/.grok/config.toml` ignores that trash dir and this script links the live skill here. |
 | zcode (`zcode`) | already reads `~/.agents/skills`; an extra link listed it twice. **Loaded ≠ slash-invocable (2026-10-05):** zcode exposes only built-ins and plugin commands as bare `/<name>`; a user skill is invoked with the built-in `/skill <name>`, and a bare `/<name>` needs a command wrapper — `skills: <name>` frontmatter auto-mounts it — in `~/.zcode/commands/` (editable copies: `site-private/zcode/commands/`, symlinked like `claude/commands/`; first wrapper: `steps`). |
 | Antigravity (`agy`) | `~/.gemini/antigravity-cli/skills` (agy CLI 1.2.16; links are followed). Verified with `/skills` in interactive agy. Headless `agy -p` answers never mention user skills, not even the installer's bailian ones, so check agy interactively. `~/.gemini/config/skills` and `~/.gemini/antigravity/skills` are not read by the CLI |
+| omp / oh-my-pi (`omp`) | `~/.omp/agent/skills` (native, highest skill priority; added 2026-10-13). omp also reads `~/.agents/skills`, but de-duplicates by `realpath`, so the second link does not list a skill twice. omp ignores `~/.claude/skills` unless `claude` is in its `enabledProviders`. Prove it with `omp -p --no-title "<step 3 prompt>"` from a scratch dir. |
 
 `aiuse --json` providers with no TUI of their own (alibaba, deepseek,
 openrouter, litellm, opencode-zen, clinepass, grok) are API pools behind the
