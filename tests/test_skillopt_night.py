@@ -766,3 +766,33 @@ def test_pinned_count_when_engine_reports_no_sessions(env, monkeypatch):
     monkeypatch.setenv("FAKE_RESULT", json.dumps({"n_sessions": 0, "n_tasks": 3, "staging_dir": ""}))
     assert night.main(["--source", "claude"]) == 0
     assert _rows(env)[-1]["sessions"] == 1
+
+
+# ── every agent's sessions are a source (2026-10-13) ────────────────────────
+
+NEW_ADAPTERS = ("hermes", "grok", "muse", "cline", "acp_dispatch")
+
+
+def test_every_adapter_is_a_night_source():
+    assert set(night.ADAPTER_SOURCES) == set(night.skillopt_sources.ADAPTERS)
+    for s in NEW_ADAPTERS:
+        assert s in night.SOURCES and night.parse_args(["--source", s]).source == [s]
+
+
+def test_source_names_are_not_backends():
+    # hermes, grok, muse and cline are read from, never asked: the backend deny list is unchanged
+    for word in ("hermes", "grok", "muse", "cline"):
+        assert word in night.NIGHT_DENY
+
+
+def test_default_night_harvests_the_new_sources(env, monkeypatch):
+    monkeypatch.setattr(night.skillopt_sources, "store_present", lambda s: s in NEW_ADAPTERS)
+    assert night.available_sources({}) == ["claude", "codex", *NEW_ADAPTERS]
+    assert night.main(["--dry-run"]) == 0
+    assert ADAPTER_CALLS == [f"{s}:120" for s in ("claude", "codex", *NEW_ADAPTERS)]
+
+
+def test_sources_command_lists_new_sources(env, capsys):
+    assert night.main(["sources"]) == 0
+    listed = [line.split()[0] for line in capsys.readouterr().out.splitlines()]
+    assert all(s in listed for s in NEW_ADAPTERS)

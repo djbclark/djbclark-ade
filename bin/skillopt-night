@@ -5,7 +5,8 @@ SkillOpt-Sleep (https://microsoft.github.io/SkillOpt/, `uv tool install` from
 upstream main) mines past agent transcripts into tasks, replays them against the
 current skills, and stages gated edits to SKILL.md / CLAUDE.md for review. Its
 CLI handles one transcript source per run; this wrapper runs one stateful
-`skillopt-sleep run --scope all` per source that has data on this Mac, in
+`skillopt-sleep run --scope all` per source that has data on this Mac (five
+native, eight through bin/skillopt_sources.py adapters, Hermes included), in
 sequence, under `nice`, with a bounded timeout each, staging everything under
 ~/src/djbclark-ade. docs/skillopt-sleep.md is the operator guide.
 
@@ -98,10 +99,12 @@ import skillopt_sources
 LABEL = "com.djbclark.skillopt-sleep"
 PLIST_SRC = REPO / "launchd" / f"{LABEL}.plist"
 PREFERENCES = REPO / "docs" / "skillopt-preferences.md"
-# Sources SkillOpt harvests natively (pi excluded by the operator, 2026-10-12) and the three
-# this repo adapts (bin/skillopt_sources.py, fed to the handoff path as pinned digests).
+# Sources SkillOpt harvests natively (pi excluded by the operator, 2026-10-12) and the ones
+# this repo adapts (bin/skillopt_sources.py, fed to the handoff path as pinned digests;
+# hermes, grok, muse, cline and acp_dispatch added 2026-10-13). A source name is where
+# transcripts are read from; it says nothing about which backends may answer (NIGHT_DENY).
 NATIVE_SOURCES = ("claude", "codex", "cursor", "opencode", "copilot_cli")
-ADAPTER_SOURCES = ("zcode", "agy", "crush")
+ADAPTER_SOURCES = ("zcode", "agy", "crush", "hermes", "grok", "muse", "cline", "acp_dispatch")
 SOURCES = NATIVE_SOURCES + ADAPTER_SOURCES
 # Operator 2026-10-12 (approved chain): the only backends a night may use, and words no
 # entry may contain (on top of failover.DENY: cursor, cline, clinepass, hermes, opus, fable).

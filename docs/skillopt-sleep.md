@@ -15,7 +15,7 @@ The model calls go through a failover chain built on
 | When | What |
 |---|---|
 | 03:30 nightly | launchd `com.djbclark.skillopt-sleep` runs `bin/skillopt-night`. |
-| Each night | For each source with data (natively: claude, codex, cursor, opencode, copilot_cli; through this repo's adapters: zcode, agy, crush; pi is excluded), `bin/skillopt_sources.py` writes the source's sessions (at most `max_sessions`, filtered and redacted) as the handoff dir's `digests.json`, then one stateful `skillopt-sleep run --project ~/src/djbclark-ade --scope all --source opencode --opencode-db :memory: --backend handoff --skill-root ~/src/djbclark-ade/skills --preferences <docs/skillopt-preferences.md> --progress --json` mines exactly those (the `:memory:` source harvests nothing by itself), sequentially, under `nice -n 10`. Each handoff round's prompts are answered through the chain (section 4). |
+| Each night | For each source with data (natively: claude, codex, cursor, opencode, copilot_cli; through this repo's adapters: zcode, agy, crush, and since 2026-10-13 hermes, grok, muse, cline, acp_dispatch; pi is excluded), `bin/skillopt_sources.py` writes the source's sessions (at most `max_sessions`, filtered and redacted) as the handoff dir's `digests.json`, then one stateful `skillopt-sleep run --project ~/src/djbclark-ade --scope all --source opencode --opencode-db :memory: --backend handoff --skill-root ~/src/djbclark-ade/skills --preferences <docs/skillopt-preferences.md> --progress --json` mines exactly those (the `:memory:` source harvests nothing by itself), sequentially, under `nice -n 10`. Each handoff round's prompts are answered through the chain (section 4). |
 | Until the chain is enabled | No `"enabled": true` chain in `~/.skillopt-sleep/night.json`: the runner prints "waiting for backend decision", records `waiting-backend`, exits 0. Nothing is mined or spent. |
 
 Guards in `bin/skillopt-night` (most added after the 2026-10-12 adversary review):
@@ -300,6 +300,35 @@ harvesting; counts from `--stats` on 2026-10-12, all history / last 72 h):
 | agy | one SQLite per conversation in `~/.gemini/antigravity-cli`, `antigravity-acp` and `antigravity` `/conversations` (`~/.local/share/agy-acp-home` links to the same); project from `conversation_summaries.db` workspace URIs | step_type 14 user text (protobuf field 19.2); step_type 15 visible reply (20.1) and tool name (20.7.2) | thinking (20.3), tool arguments (20.7.3), every other step type (tool results, file views, ephemeral system messages) | 275 / 72 |
 | crush | `<data_dir>/crush.db` for every project in `~/.local/share/crush-acp/projects.json` and `~/.local/share/crush/projects.json` | root sessions; user/assistant `text` parts; `tool_call` names | `reasoning` parts, tool arguments, `tool` role messages (outputs) | 12 / 7 |
 
+**Added 2026-10-13** (every agent on this Mac is now a source; counts from
+`--stats` under the skillopt tool's Python on 2026-10-13, all history / last
+72 h; the night caps each at `max_sessions`). These never write to the store,
+read any file over 32 MiB as its first and last 16 MiB only (JSON metadata over
+4 MiB, briefs and reports over 256 KiB are skipped or cut), slice each raw
+string to 16000 characters before redaction, skip a session touched in the
+last 10 minutes (`AGE_GUARD_S`: still being written; it is newer than the
+cursor, so the next night reads it) and skip corrupt or torn records:
+
+| Source | Store | Kept | Dropped | Digests |
+|---|---|---|---|---|
+| hermes | `~/.hermes/state.db` (SQLite, 1.6 GB plus WAL), opened in place with `mode=ro` and `PRAGMA query_only` (a nightly copy would be too large). Tables `sessions` (`source`: cli, telegram, discord, desktop, cron, oneshot, mcp-ask, acp, subagent; `cwd`, `git_branch`, epoch `started_at`/`ended_at`/`last_activity_at`) and `messages` (`role`, `content`, `tool_calls` JSON, `display_kind`, `_compressed_summary`, `active`/`compacted`) | every session source except `subagent` children (a compression continuation, a child of the same source, is its own session); `user` and `assistant` rows, compacted (pre-compression) rows included, `steer` turns included; tool names from `tool_calls`; the newest 400 replies and first 2000 prompts of a session; cron: the newest run per distinct prompt (586 runs share 3 prompts) | `tool` rows (outputs), reasoning columns, compression summaries, `process_complete`/`model_switch`/`hidden`/`failed_turn` rows | 174 / 11 |
+| grok | `~/.grok/sessions/<url-encoded cwd>/<id>/chat_history.jsonl` (records `system`, `user` with optional `synthetic_reason`, `assistant` with `tool_calls[].name`, `reasoning` (encrypted), `tool_result`) and `summary.json` (`info.cwd`, `head_branch`, ISO `created_at`/`last_active_at`); `<url-encoded cwd>/prompt_history.jsonl` (every typed prompt with `session_id`, `is_bash`) | user turns without `synthetic_reason` (the `<user_query>` body) plus typed prompts a compaction dropped from chat_history; assistant text; tool names | system prompt, system reminders, compaction notes, stop-hook feedback, reasoning, tool arguments and results, `!` shell lines | 46 / 9 |
+| muse | `~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl`: event records `{record_type, payload_type, payload, recorded_at (µs)}` | `runtime.user_intent.accepted` model messages on the `main` surface; `runtime.session` events `assistant_message_committed` (text) and `assistant_tool_calls_committed` (names); project from `runtime.session.metadata` `workspace_root` | reasoning, tool results, task/reminder events, other surfaces, `subagent/<id>/session.jsonl` children | 2 / 0 (4 sessions: one has no prompt, one is a `Reply with exactly: OK` probe) |
+| cline | `~/.cline/data/sessions/<id>/<id>.json` (metadata: `cwd`, ISO `started_at`/`ended_at`, `is_subagent`) and `<id>.messages.json` (`{messages: [{role, content: [{type: text\|thinking\|tool_use\|tool_result}]}]}`) | user `text` parts (the `<user_input mode=...>` wrapper stripped); assistant `text` parts; `tool_use` names | `thinking`, `tool_use` input, `tool_result`, subagent sessions | 19 / 1 |
+| acp_dispatch | `~/.local/state/bigteam/<task>/jobs/<name>.json` job records (`prompt`, `brief`, `report`, `final`, `log`, `dir`, `status`, epoch `started`/`finished`) | the slice prompt (record `prompt`, else the brief file) as the user turn; the report the agent wrote (else its final text) as the reply; tool names from the ACP log's `tool_call` titles (first word); project is the job's `dir` | `tool_call_update` inputs, message chunks, the run's stdout/stderr; a job still `running` inside its timeout | 146 / 107 |
+
+Not read, by inspection (2026-10-13): `~/.hermes/sessions` (60
+`request_dump_*.json` API error dumps of sessions already in state.db, and
+`sessions.json`, a legacy gateway routing mirror), the `state.db.bak-*`
+backups, `~/.hermes/state.db` FTS tables; `~/.grok/projects` (only MCP tool
+descriptor JSON), each grok session's `updates.jsonl`/`events.jsonl` (ACP
+update stream and UI events: the same turns, chunked) and `compaction/`
+segments; muse's `session-index.db` (an index of the same files) and
+`tui-history.jsonl`; cline's `sessions.db` (the same metadata as the
+per-session JSON) and `~/.cline/data/cache/user_input_history.jsonl` (TUI input
+history without session ids). Hermes's `source` is not Hermes's backend: as a
+chain backend `hermes` stays denied (section 4).
+
 Not read, by inspection: `~/.zcode/v2` (task index, config, credentials),
 `~/.zcode/workspace` (empty), `~/.zcode/cli/rollout` (raw model I/O),
 `~/.zcode/runtime` (absent); `~/.gemini/history` (only `.project_root`
@@ -333,9 +362,12 @@ Runner workarounds for upstream behaviour:
    a night stages something. The runner sets `SKILLOPT_SLEEP_HANDOFF_DIR` per
    source and archives the dir after every finished night.
 
-**Still not learned from:** Hermes (`~/.hermes/sessions`), grok
-(`~/.grok/projects`), muse, cline and acp-dispatch job reports
-(`~/.local/state/bigteam/*/jobs`).
+**Still not learned from:** nothing known (2026-10-13). Hermes, grok, muse,
+cline and acp-dispatch job reports moved to the table above that day. Sessions
+under the ephemeral roots (/tmp, /private/tmp, /var/folders, `~/.local/state`)
+are still skipped as benchmarks and scratch dirs, for every source: that
+includes Hermes oneshot/cli sessions started in /private/tmp and acp-dispatch
+slices whose `dir` is a `~/.local/state/bigteam/<task>/wt` worktree.
 
 ## 8. Phase 2: pluggable sources and backends (queued, docs/queue.md)
 
@@ -344,9 +376,10 @@ Upstream's `harvest_sources.py` and `get_backend` are fixed if-chains.
 (filed 2026-10-12, with an offer to send the PR) proposes `skillopt_sleep.sources` / `skillopt_sleep.backends` entry
 points, `--source-module`/`--backend-module`, an error for unknown backends,
 the per-source checkpoint, and a public helper API for redaction and replay
-filters. With that merged, the three adapters here would register as real
+filters. With that merged, the eight adapters here would register as real
 sources and the chain could plug in as a backend instead of handoff rounds.
-Remaining adapters: Hermes, grok, muse, cline, acp-dispatch job reports.
+No adapter remains to write (Hermes, grok, muse, cline and acp-dispatch job
+reports landed 2026-10-13).
 
 Searched upstream 2026-10-12 ("pluggable", "plugin source", "entry point",
 "custom transcript", "transcript source", "custom backend", "backend
@@ -361,7 +394,9 @@ issue 97 (VS Code Copilot), PR 282 (Codex CLI rollouts), issue 286 / PR 287
 
 **What leaves the machine.** The chain entry that answers a night receives
 transcript excerpts from **every** project on this Mac (claude, codex, cursor,
-opencode, copilot_cli, zcode, agy and crush sessions): user prompts, final
+opencode, copilot_cli, zcode, agy, crush, and since 2026-10-13 Hermes (Telegram,
+Discord, desktop, cron and CLI conversations included), grok, muse, cline and
+acp-dispatch slice briefs and reports): user prompts, final
 replies, tool and skill names. By entry that is: OpenCode Go (MiniMax M3 via
 opencode.ai), Google Antigravity (Gemini; and Anthropic Sonnet through Google's
 Claude/GPT pool), Z.ai (GLM), Anthropic (Haiku, Sonnet), and MIT SIPB (crush and
