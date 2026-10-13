@@ -44,7 +44,9 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      without a permission request cancels the turn and exits 77. The `claude -p`
      fallback runs with `--tools ""`, `--strict-mcp-config`, `--disallowedTools '*'`
      and `--setting-sources project` (no user hooks), and always reads its prompt
-     from stdin. Options are never abbreviated (`allow_abbrev=False`): `--per all`
+     from stdin. `--tripwire-exempt-kinds read,search` lets tool calls of those
+     read-only ACP kinds run unasked without tripping (failover passes it for agy
+     only; any other kind is a usage error). Options are never abbreviated (`allow_abbrev=False`): `--per all`
      is an error, not `--perm all`.
    - `scoped:P1,P2`: allow reads, searches, fetches, thinking and commands; allow
      edit/delete/move only when every path the tool call names is under one of

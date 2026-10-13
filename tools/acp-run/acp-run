@@ -312,6 +312,11 @@ EXIT_TRIPWIRE = 77  # EX_NOPERM: a tool ran without a permission request under -
 # then session/request_permission 1 ms later (canary, 2026-10-12). A started tool
 # trips only if its permission request has not arrived within this grace.
 TRIP_GRACE_S = 2.0
+# ACP tool kinds a caller may exempt from the tripwire with --tripwire-exempt-kinds
+# (read-only kinds only; never execute, edit, delete, move, fetch or other). Used by
+# failover for agy alone (djbclark, 2026-10-12): agy's default mode runs reads such as
+# view_file (kind "read") without asking; its shell commands are kind "execute".
+TRIPWIRE_EXEMPTABLE = ("read", "search")
 
 # --perm deny made real per agent (adversary review 2026-10-12, C1). Each agent's
 # own defaults can run tools without ever sending session/request_permission:
@@ -690,6 +695,7 @@ class RunClient(Client):
         # tripwire (--perm deny): ids that went through request_permission, each
         # tool call's kind, and the first tool that ran without asking
         self.requested, self.tool_kinds, self.tripped = set(), {}, None
+        self.exempt_kinds = frozenset()  # --tripwire-exempt-kinds
         self.started_unasked = {}  # tool_call_id -> (monotonic start, title)
 
     def rec(self, kind, data):
@@ -743,7 +749,8 @@ class RunClient(Client):
             self.tool_kinds[tid] = kind
         kind = self.tool_kinds.get(tid)
         status = getattr(update, "status", None)
-        if str(getattr(kind, "value", kind)) == "think":
+        kind_s = str(getattr(kind, "value", kind))
+        if kind_s == "think" or kind_s in self.exempt_kinds:
             return
         status = str(getattr(status, "value", status))
         if tid in self.requested or status not in ("in_progress", "completed"):
@@ -1929,6 +1936,9 @@ async def run(a, log, err, log_path):
             client = RunClient(
                 log, a.perm, root, live=a.interactive, thinking=a.show_thinking
             )
+            client.exempt_kinds = frozenset(
+                k for k in getattr(a, "tripwire_exempt_kinds", "").split(",") if k
+            )
             client.err_path = err.name
             conn = connect_to_agent(client, proc.stdin, proc.stdout)
             try:
@@ -2195,6 +2205,12 @@ def main():
     ap.add_argument("-p", "--prompt")
     ap.add_argument("-f", "--prompt-file")
     ap.add_argument("--perm", default="all")
+    ap.add_argument(
+        "--tripwire-exempt-kinds",
+        default="",
+        help="comma-separated read-only ACP tool kinds (read, search) that may run"
+        " without a permission request under --perm deny without tripping",
+    )
     ap.add_argument("--model")
     ap.add_argument("--mode")
     ap.add_argument(
@@ -2319,6 +2335,9 @@ def main():
         " of starting a new one",
     )
     a = ap.parse_args()
+    bad = [k for k in a.tripwire_exempt_kinds.split(',') if k and k not in TRIPWIRE_EXEMPTABLE]
+    if bad:
+        ap.error(f"--tripwire-exempt-kinds: only read-only kinds {', '.join(TRIPWIRE_EXEMPTABLE)}; not {', '.join(bad)}")
     if a.timeout < 0:
         ap.error("--timeout must be 0 or more")
     if a.list:

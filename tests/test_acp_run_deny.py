@@ -60,8 +60,9 @@ PROBE = textwrap.dedent("""\
             self.cancels += 1
             self.ev.set()
 
-    async def turn(perm, script, **kw):
+    async def turn(perm, script, exempt=(), **kw):
         client = mod.RunClient(io.StringIO(), perm, ".")
+        client.exempt_kinds = frozenset(exempt)
         conn = FakeConn(client, script, **kw)
         a = NS(timeout=10, prompt_retries=0, interactive=False, wrapup_grace=0, wrapup=None, perm=perm)
         out = {}
@@ -138,6 +139,13 @@ PROBE = textwrap.dedent("""\
                                                     ("perm", "t1"),
                                                     ("update", upd("tool_call_update", "t1", "failed"))]),
             "think_ok": await turn("deny", [("update", upd("tool_call", "t1", "completed", "think"))]),
+            # --tripwire-exempt-kinds read (agy): an unasked read runs, an unasked execute still trips
+            "exempt_read": await turn("deny", [("update", upd("tool_call", "t1", "in_progress", "read")),
+                                              ("update", upd("tool_call_update", "t1", "completed"))],
+                                      exempt=("read",)),
+            "exempt_exec": await turn("deny", [("update", upd("tool_call", "t1", "completed", "execute"))],
+                                      exempt=("read",)),
+            "no_exempt_read": await turn("deny", [("update", upd("tool_call", "t1", "completed", "read"))]),
             # crush-acp: in_progress 1 ms before its permission request, then denied -> failed
             "crush_order": await turn("deny", [("update", upd("tool_call", "t1", "pending", "execute")),
                                               ("update", upd("tool_call_update", "t1", "in_progress")),
@@ -207,6 +215,19 @@ class TestPermDeny(unittest.TestCase):
         t = self.r["started_never_asked"]
         self.assertEqual(t["code"], 77)
         self.assertEqual(t["out"]["stop_reason"], "tripwire")
+
+    def test_exempt_kinds_let_reads_run_and_nothing_else(self):
+        self.assertIsNone(self.r["exempt_read"]["tripped"])
+        self.assertTrue(self.r["exempt_read"]["finished"])
+        self.assertEqual(self.r["exempt_exec"]["code"], 77)
+        self.assertEqual(self.r["no_exempt_read"]["code"], 77, "without the flag a read still trips")
+
+    def test_only_read_only_kinds_can_be_exempted(self):
+        r = subprocess.run(["uv", "run", "--quiet", "--script", str(SCRIPT), "claude", "--perm", "deny",
+                            "--tripwire-exempt-kinds", "read,execute", "-p", "hi"],
+                           check=False, capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("only read-only kinds", r.stderr)
 
     def test_think_tools_and_perm_all_never_trip(self):
         self.assertIsNone(self.r["think_ok"]["tripped"])
