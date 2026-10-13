@@ -78,7 +78,8 @@ Runner: SIPB's `sipbphus` (Forgejo Runner v13.1.0), docs in `SIPB/hyades`
    address bound on `dummy0`, 203.0.113.1, connects). Gradle's daemon, test
    workers and Kotlin daemon all use loopback, so the build fails with "Could not
    connect to the Gradle daemon" (run 170). `ip link set lo up` changes nothing;
-   `unshare -n` hung the job (cancel it). Needs SIPB: see `examples/plektra/sipb-loopback-report.md`.
+   `unshare -n` hung the job (cancel it). Cause is probably libkrun TSI
+   (libkrun#818, open); host fix `krun.use_passt=1`. Needs SIPB: see `examples/plektra/sipb-loopback-report.md`.
 6. The job-log endpoint carries only the first step's `⭐ Run` marker, and there
    is no per-step API: `examples/plektra/forgejo-ci.yml` prints `BENCHSTEP`
    markers and `scripts/ci-step-times` reads them (or Gradle's `BUILD ... in`).
