@@ -78,6 +78,16 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    `--handshake-timeout` (env `ACP_RUN_HANDSHAKE_TIMEOUT`) bounds `initialize`
    and `session/new` each: 40 s by default, 90 s for `claude`, whose
    `session/new` takes 13 s on an idle machine and 17-24 s under heavy load.
+   Each handshake try starts a fresh agent after a timeout, or after a
+   `transient` ACP error in `initialize` or `session/new` (backoff 1, 2, 4..
+   10 s; nothing has run yet, so a retry repeats nothing). Added 2026-10-13
+   after opencode's `ServiceUnavailableError` ("Location plugins did not finish
+   activating") failed 24 `session/new` calls in one night with no retry. Quota,
+   plan, auth and unclassified errors are not retried. The timeout error names
+   the step that hung (`initialize hung`, `session/new hung`).
+   A prompt that finishes on the same tick as a 1 s poll times out is taken as
+   finished. Before 2026-10-13 it was reported as a timeout (exit 124), which
+   threw away two good answers.
    `--wrapup-grace S` (off by default; `acp-dispatch` passes 300) sends one more
    prompt after the timeout cancel (`--wrapup TEXT`, default "time is up, write
    your final report now") and waits up to S seconds, so a slice cut off in a

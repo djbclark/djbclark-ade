@@ -73,6 +73,9 @@ average per CPU core is above L; with --load-wait S (env ACP_RUN_LOAD_WAIT)
 it waits up to S seconds for the load to drop first. Off by default.
 --handshake-timeout S (env ACP_RUN_HANDSHAKE_TIMEOUT) bounds initialize and
 session/new each; default 40 s, claude 90 s (HANDSHAKE_TIMEOUT).
+--handshake-tries N (default 2) starts a fresh agent after a handshake timeout,
+or after a transient ACP error in initialize or session/new (backoff 1, 2, 4..
+10 s; nothing has run yet). The error names the step that hung.
 --wrapup-grace S: when --timeout cancels the turn, send the agent one more
 prompt (--wrapup TEXT, default "time is up, write your final report now") and
 wait up to S seconds for it before stopping, so a slice cut off mid-command can
@@ -1157,9 +1160,18 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
                         resp = await wait(prompt_task, min(1 if deny else 30, left))
                         break
                     except TimeoutError:
-                        if prompt_task.done():
-                            # A timeout raised by the adapter itself is not a polling tick.
+                        if not prompt_task.done():
+                            continue  # a polling tick
+                        if prompt_task.cancelled():
                             raise
+                        # The poll timed out on the same tick the prompt finished
+                        # (2026-10-13: end_turn at 39 s and 152 s, both exit 124):
+                        # take its answer. Its own error is raised as is; a timeout
+                        # raised by the adapter itself is still a timeout.
+                        if prompt_task.exception() is not None:
+                            raise prompt_task.exception() from None
+                        resp = prompt_task.result()
+                        break
             except TimeoutError:
                 if a.interactive:
                     repl = getattr(wait, "__self__", None)
@@ -1297,6 +1309,11 @@ async def wrapup_turn(a, conn, sess, client, out):
         resp = await asyncio.wait_for(asyncio.shield(task), a.wrapup_grace)
         out["wrapup"] = resp.stop_reason
     except TimeoutError:
+        if task.done() and not task.cancelled() and task.exception() is None:
+            # finished on the timeout's own tick, as in prompt_turn
+            out["wrapup"] = task.result().stop_reason
+            client.rec("wrapup", {"status": out["wrapup"]})
+            return
         await conn.cancel(session_id=sess.session_id)
         try:
             await asyncio.wait_for(task, 15)
@@ -1892,6 +1909,7 @@ async def run(a, log, err, log_path):
         a.agent, HANDSHAKE_TIMEOUT_DEFAULT
     )
     tries = max(1, a.handshake_tries)
+    hung = []  # the handshake phase each timed-out try hung in
     proc = client = conn = init = sess = repl = herdr = None
     # SIGINT/SIGTERM: cancel the turn cooperatively (session/cancel), stop the
     # agent and exit 128+signal, as acpx does for SIGINT. Without this, SIGTERM
@@ -1941,6 +1959,7 @@ async def run(a, log, err, log_path):
             )
             client.err_path = err.name
             conn = connect_to_agent(client, proc.stdin, proc.stdout)
+            phase = "initialize"  # the handshake step a failure is reported against
             try:
                 init = await asyncio.wait_for(
                     conn.initialize(
@@ -1956,28 +1975,69 @@ async def run(a, log, err, log_path):
                 )
                 client.rec("initialize", dump(init))
                 if auth:
+                    phase = "authenticate"
                     await asyncio.wait_for(conn.authenticate(method_id=auth), 300)
+                phase = "session/new"
+                if a.resume:
+                    caps = init.agent_capabilities
+                    phase = "session/load" if caps and caps.load_session else "session/resume"
                 sess = await open_session(
                     a, conn, init, client, root, handshake_timeout
                 )
                 break
             except TimeoutError:
+                hung.append(phase)
                 client.rec(
                     "handshake_timeout",
-                    {"attempt": attempt, "tries": tries, "secs": handshake_timeout},
+                    {
+                        "attempt": attempt,
+                        "tries": tries,
+                        "secs": handshake_timeout,
+                        "phase": phase,
+                    },
                 )
                 print(
-                    f"acp-run: handshake timeout ({handshake_timeout:g}s)"
-                    f" attempt {attempt}/{tries}",
+                    f"acp-run: handshake timeout ({handshake_timeout:g}s, {phase}"
+                    f" hung) attempt {attempt}/{tries}",
                     file=sys.stderr,
                 )
                 await _kill(proc)
                 proc = None
+            except RequestError as e:
+                # A transient error before any turn is safe to retry in a fresh
+                # agent: nothing ran yet (opencode 2026-10-13, 24 times in three
+                # hours: ServiceUnavailableError "Location plugins did not finish
+                # activating" at session/new). Quota, plan, auth and unclassified
+                # errors are not retried; the last try's error is the run's.
+                why = error_text(e)
+                if attempt == tries or classify(why) != "transient":
+                    raise
+                delay = min(2.0 ** (attempt - 1), 10.0)
+                client.rec(
+                    "handshake_retry",
+                    {
+                        "attempt": attempt,
+                        "tries": tries,
+                        "phase": phase,
+                        "delay": delay,
+                        "why": why[:300],
+                    },
+                )
+                print(
+                    f"acp-run: handshake {phase} failed, attempt {attempt}/{tries};"
+                    f" retry in {delay:g}s: {why[:200]}",
+                    file=sys.stderr,
+                )
+                await _kill(proc)
+                proc = None
+                await asyncio.sleep(delay)
         else:
             out["error"] = (
                 f"TimeoutError: handshake after {tries} tries of"
-                f" {handshake_timeout:g}s (session/new hung)"
+                f" {handshake_timeout:g}s ({', '.join(dict.fromkeys(hung))} hung)"
             )
+            if len(hung) < tries:
+                out["error"] += f"; {tries - len(hung)} failed transiently"
             if (
                 not a.no_fallback
                 and a.agent == "claude"
@@ -2267,7 +2327,8 @@ def main():
         "--handshake-tries",
         type=int,
         default=2,
-        help="ACP initialize+session/new attempts before fallback (default 2)",
+        help="ACP initialize+session/new attempts (after a timeout or a transient"
+        " error) before fallback (default 2)",
     )
     ap.add_argument(
         "--handshake-timeout",
