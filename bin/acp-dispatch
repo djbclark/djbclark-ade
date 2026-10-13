@@ -86,9 +86,9 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
-import tempfile
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -240,6 +240,42 @@ def estimate_pct(out: Path, agent: str, model: str | None, prompt: str,
         return values[len(values) // 2], f"history ({len(values)} slices)"
     size = len(prompt)
     return (3.0 if size <= 2000 else 7.0 if size <= 8000 else 12.0), "brief-size default"
+
+
+def estimate_windows(out: Path, agent: str, model: str | None) -> dict[str, float]:
+    """Median measured drop per quota window (label -> percent) from this task's past slices.
+
+    One scalar mixed windows: a slice that empties the 5-hour window while the
+    weekly one binds before it was "measured" as weekly-before minus 5h-after
+    (2026-10-13: certpin4 recorded 70%, so the next codex slice was refused
+    against 69% weekly left although it needed ~15% of the week).
+    """
+    seen: dict[str, list[float]] = {}
+    jobs = out / "jobs"
+    if jobs.is_dir():
+        for path in jobs.glob("*.json"):
+            try:
+                row = json.loads(path.read_text())
+                if row.get("agent") != agent or row.get("model") != model:
+                    continue
+                for label, used in (row.get("measured_usage_windows") or {}).items():
+                    seen.setdefault(label, []).append(float(used))
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+    return {label: sorted(v)[len(v) // 2] for label, v in seen.items() if v}
+
+
+def window_fit(estimates: dict[str, float], windows: dict) -> tuple[str | None, bool]:
+    """(refusal reason or None, near-limit) comparing each window's estimate with its own remaining."""
+    near = False
+    for label, est in sorted(estimates.items()):
+        rem = windows.get(label)
+        if rem is None:
+            continue
+        if est > float(rem):
+            return f"estimated use {est:.1f}% > {float(rem):.1f}% left on {label}", near
+        near = near or est <= float(rem) <= est * 1.5
+    return None, near
 
 
 def unavailable_record(out: Path, a: argparse.Namespace, reason: str, cls: str,
@@ -979,12 +1015,25 @@ def finalize_locked(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
     rec.update(finished=time.time(), exit=rc, pid=None)
     try:
         _, age = route_module().load_snapshot()
-        after, _ = pool_reading(rec.get("agent", ""), rec.get("model"))
+        after, after_reading = pool_reading(rec.get("agent", ""), rec.get("model"))
         before = rec.get("snapshot_remaining_before")
         started = rec.get("started")
         snapshot_after_start = (age is not None and started is not None
                                 and (time.time() - float(age)) >= float(started))
-        if (snapshot_after_start and before is not None and after is not None
+        win_before = (rec.get("snapshot_reading") or {}).get("windows") or {}
+        win_after = (after_reading or {}).get("windows") or {}
+        used = {k: round(float(win_before[k]) - float(win_after[k]), 2) for k in win_before
+                if win_before.get(k) is not None and win_after.get(k) is not None
+                and float(win_before[k]) >= float(win_after[k])}  # a window that reset is skipped
+        if snapshot_after_start and used:
+            rec["measured_usage_windows"] = used
+            # The scalar is the drop on the window that bound before the start, the same
+            # window `snapshot_remaining_before` came from, never a mix of two windows.
+            binding = min((k for k in win_before if win_before.get(k) is not None),
+                          key=lambda k: float(win_before[k]), default=None)
+            if binding in used:
+                rec["measured_usage_pct"] = used[binding]
+        elif (snapshot_after_start and not win_before and before is not None and after is not None
                 and float(before) >= float(after)):
             rec["measured_usage_pct"] = round(float(before) - float(after), 2)
     except (ValueError, TypeError):
@@ -1040,7 +1089,7 @@ def machine_overloaded() -> str | None:
         if load1 > GATE_LOAD_PER_CPU * ncpu:
             return f"load {load1:.0f} > {GATE_LOAD_PER_CPU}x{ncpu} cpus"
         lvl = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
-                             capture_output=True, text=True, timeout=5).stdout.strip()
+                             check=False, capture_output=True, text=True, timeout=5).stdout.strip()
         if lvl == "4":
             return "memory pressure critical"
     except (OSError, subprocess.SubprocessError):
@@ -1221,12 +1270,18 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     if estimate < 0:
         die("--est-pct must be 0 or more")
     remaining, reading = pool_reading(a.agent, a.model)
-    checkpoint = bool(a.checkpoint or remaining is None or (
-        remaining is not None and estimate <= remaining <= estimate * 1.5))
+    windows = (reading or {}).get("windows") or {}
+    per_window = {} if a.est_pct is not None else {
+        k: v for k, v in estimate_windows(out, a.agent, a.model).items() if windows.get(k) is not None}
+    window_refusal, window_near = window_fit(per_window, windows)
+    checkpoint = bool(a.checkpoint or remaining is None or window_near or (
+        not per_window and remaining is not None and estimate <= remaining <= estimate * 1.5))
     if not a.dry_run and a.min_headroom > 0 and remaining is not None and remaining < a.min_headroom:
         return unavailable_record(out, a, f"headroom {remaining:.1f}% < minimum {a.min_headroom:.1f}%",
                                   "headroom", remaining, estimate)
-    if not a.dry_run and remaining is not None and estimate > remaining:
+    if not a.dry_run and per_window and window_refusal:
+        return unavailable_record(out, a, window_refusal, "wont-fit", remaining, estimate)
+    if not a.dry_run and not per_window and remaining is not None and estimate > remaining:
         return unavailable_record(out, a, f"estimated use {estimate:.1f}% > {remaining:.1f}% left",
                                   "wont-fit", remaining, estimate)
     if not a.dry_run and not a.no_preflight:

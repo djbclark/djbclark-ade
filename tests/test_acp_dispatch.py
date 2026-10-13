@@ -20,7 +20,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
-from typing import Any, override
+from typing import Any, ClassVar, override
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -256,6 +256,32 @@ class TestDispatch(Base):
         self.assertEqual(r.returncode, 5)
         self.assertIn("class=wont-fit", r.stdout)
         self.assertEqual(self.record()["status"], "unavailable")
+        self.assertEqual(self.preflight_probes(), 0)
+
+    def _window_history(self, five_hour: float, weekly: float) -> dict[str, str]:
+        # A past codex slice that emptied the 5-hour window but used 15% of the week.
+        (self.out / "jobs").mkdir(parents=True, exist_ok=True)
+        (self.out / "jobs" / "old.json").write_text(json.dumps({
+            "agent": "codex", "model": "m1", "measured_usage_pct": 70.0,
+            "measured_usage_windows": {"5h": 100.0, "weekly": 15.0}}))
+        snap = self.tmp / "latest.json"
+        snap.write_text(json.dumps({"collected_at": "2099-01-01T00:00:00+00:00", "snapshot": {"accounts": [{
+            "provider": "codex", "windows": [{"label": "5h", "remaining_percent": five_hour},
+                                             {"label": "weekly", "remaining_percent": weekly}]}]}}))
+        return {"AIUSE_SNAPSHOT": str(snap)}
+
+    def test_fit_is_checked_per_window_not_against_the_tightest(self):
+        # 2026-10-13: a 70% scalar (weekly-before minus 5h-after) refused this slice
+        # against 69% weekly left; per window it needs 100% of a fresh 5h and 15% of the week.
+        r = self.dispatch("--min-headroom", "0", env=self._window_history(100.0, 69.0))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(self.record()["checkpoint"], "100% estimate on 100% left is near the limit")
+
+    def test_per_window_refusal_names_the_window(self):
+        r = self.dispatch("--min-headroom", "0", env=self._window_history(100.0, 10.0))
+        self.assertEqual(r.returncode, 5)
+        self.assertIn("class=wont-fit", r.stdout)
+        self.assertIn("left on weekly", r.stdout)
         self.assertEqual(self.preflight_probes(), 0)
 
     def test_reroute_builds_continuation_and_links_records(self):
@@ -889,7 +915,7 @@ class TestAiuseNoteExhausted(Base):
 
 
 class TestCheckpointStale(Base):
-    stale_env = {"ACP_DISPATCH_STALE_CHECKPOINT_MIN": "1", "ACP_DISPATCH_AIUSE": "off"}
+    stale_env: ClassVar[dict[str, str]] = {"ACP_DISPATCH_STALE_CHECKPOINT_MIN": "1", "ACP_DISPATCH_AIUSE": "off"}
 
     def _live_checkpoint_rec(self, *, checkpoint: bool = True) -> Path:
         import time as time_mod
@@ -925,7 +951,6 @@ class TestCheckpointStale(Base):
 
     def test_check_no_stale_when_report_fresh(self):
         record = self._live_checkpoint_rec()
-        import time as time_mod
         os.utime(Path(json.loads(record.read_text())["report"]), None)
         chk = run(["check", str(record)], env=self.stale_env)
         self.assertNotIn("checkpoint stale:", chk.stdout)
