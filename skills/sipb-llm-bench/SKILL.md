@@ -99,6 +99,26 @@ server, nothing else is required), so set that up once. It deletes the per-run c
 4. Every task row records the provider that actually served it (`providers`); `summary`
    counts only rows served by `sipb-llms`, and skips rows you mark `"invalid": true`.
 
+## The essentials battery (basic coding + sysadmin)
+
+`bench.py essentials` runs a fixed set of small, objectively scored tasks (see
+`essentials.py`): file create/append, config edits (TOML, JSON, YAML, nginx,
+systemd unit, `.env`), a bug fix, a new function + test, rename/move, `mkdir -p`,
+find/replace, a git commit, a shell pipeline, a multi-step CSV script, a
+runtime-error fix, and file permissions. It is a floor: a model that cannot do
+these should not be offered to a coding agent. Each task is a prompt + seed files
++ a Python verifier that checks the artifact on disk (or runs the tests) — never
+the model's own report.
+
+```bash
+python3 bench.py essentials --models qwen3.6:35b-a3b-q4_K_M            # one pass per model
+python3 bench.py essentials --models MODEL --only edit_toml,nginx_config
+python3 bench.py summary                                               # adds an "essentials" column
+```
+
+One pass per model (no repeats), so the score is "N/M tasks done correctly". Rows
+are `kind: "essentials"` in `results.jsonl`.
+
 ## Reading the numbers
 
 1. Task A is a smoke test; most usable models pass it. Task B separates models: small

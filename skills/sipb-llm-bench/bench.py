@@ -30,6 +30,13 @@ RC = os.path.expanduser(os.environ.get("CRUSH_RC", "~/.config/crush/crushrc"))
 REASONERS = ("qwen3.5", "qwen3.6", "qwen3.7", "qwen3.8", "gpt-oss", "deepseek-r1", "gemma4")
 DEFAULT_RUNNER = "acp-run crush -C {dir} -p {prompt} --timeout {cap} --log {log}"
 
+# Optional: the small coding + sysadmin battery (each task has a Python verifier).
+try:
+    sys.path.insert(0, HERE)
+    import essentials  # noqa: E402
+except Exception:  # noqa: BLE001
+    essentials = None
+
 
 def key():
     """API key from $SIPB_API_KEY, else the first sk- token in the crush config. Never printed."""
@@ -104,6 +111,40 @@ def probes(label, model, effort):
     return True
 
 
+def pin_crush_data_model(model):
+    """acp-run's crush forces CRUSH_GLOBAL_DATA=~/.local/share/crush-acp, whose
+    crush.json `models` overrides the per-run crushrc; point it at the model under
+    test for the run (returns a restore callable). Without this the run silently
+    goes to whatever model that shared file holds (here, an Anthropic model) and
+    the measured `providers` is wrong."""
+    d = os.path.expanduser("~/.local/share/crush-acp")
+    os.makedirs(d, exist_ok=True)
+    path = f"{d}/crush.json"
+    try:
+        old = open(path).read()
+    except OSError:
+        old = None
+    try:
+        j = json.loads(old) if old else {}
+    except ValueError:
+        j = {}
+    j.setdefault("models", {})["large"] = {"model": model, "provider": "sipb-llms"}
+    j["models"]["small"] = {"model": model, "provider": "sipb-llms"}
+    with open(path, "w") as f:
+        f.write(json.dumps(j))
+
+    def restore():
+        if old is None:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        else:
+            with open(path, "w") as f:
+                f.write(old)
+    return restore
+
+
 def make_rc(model, think, effort, dest):
     """Copy the user's crushrc, replace its model add/large/small lines, optionally set effort."""
     text = open(RC).read()
@@ -157,8 +198,10 @@ def run_task_inner(label, model, think, effort, task, cap, prompt_file, rules, e
         sh("git add -A && git commit -qm init", proj)
     env = dict(os.environ)
     crush = runner is DEFAULT_RUNNER
+    restore = None
     if crush:                                     # private crush config + data dir per run
         make_rc(model, think, effort, xdg)
+        restore = pin_crush_data_model(model)
         if rules:
             shutil.copy(rules, f"{xdg}/crush/CRUSH.md")
         os.makedirs(f"{xdgd}/crush", exist_ok=True)
@@ -180,6 +223,8 @@ def run_task_inner(label, model, think, effort, task, cap, prompt_file, rules, e
         err = p.stderr[-600:]; rc = p.returncode
     except subprocess.TimeoutExpired:
         err = "harness-timeout"; rc = 124
+    if restore:
+        restore()
     secs = time.time() - t0
     m = re.search(r"stop=(\S+) secs=([\d.]+) tools=(\d+)", err)     # acp-run's summary line
     thoughts = 0
@@ -224,6 +269,64 @@ def run_task_inner(label, model, think, effort, task, cap, prompt_file, rules, e
     shutil.rmtree(xdg, ignore_errors=True)        # holds the API key
     shutil.rmtree(xdgd, ignore_errors=True)
     return res["pass"]
+
+
+def run_essentials(label, model, think, effort, runner, rules, extra, only=None):
+    """Run each essentials task once; one row per task; check the artifact, not the
+    agent's report. Returns (passed, total)."""
+    passed = 0
+    tasks = [t for t in essentials.TASKS if not only or t["name"] in only]
+    for task in tasks:
+        run = f"{label}-ess-{task['name']}-{int(time.time())}"
+        d = f"{O}/runs/{run}"
+        proj, xdg, xdgd = f"{d}/proj", f"{d}/xdg", f"{d}/xdgdata"
+        os.makedirs(proj)
+        essentials.seed_project(proj, task)
+        env = dict(os.environ)
+        restore = None
+        if runner is DEFAULT_RUNNER:
+            make_rc(model, think, effort, xdg)
+            restore = pin_crush_data_model(model)
+            if rules:
+                shutil.copy(rules, f"{xdg}/crush/CRUSH.md")
+            os.makedirs(f"{xdgd}/crush", exist_ok=True)
+            gp = os.path.expanduser("~/.local/share/crush/providers.json")
+            if os.path.exists(gp):
+                shutil.copy(gp, f"{xdgd}/crush/providers.json")
+            env.update(XDG_CONFIG_HOME=xdg, XDG_DATA_HOME=xdgd)
+        else:
+            env.update(SIPB_MODEL=model, SIPB_THINK="1" if think else "0", SIPB_EFFORT=effort or "")
+            if rules:
+                shutil.copy(rules, f"{proj}/AGENTS.md")
+        cmd = [a.replace("{dir}", proj).replace("{prompt}", task["prompt"]).replace("{cap}", "300")
+               .replace("{log}", f"{d}/log.jsonl") for a in shlex.split(runner)] + list(extra)
+        status(f"{label}: essentials {task['name']} running")
+        t0 = time.time()
+        try:
+            p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=390)
+            err, rc = p.stderr[-600:], p.returncode
+        except subprocess.TimeoutExpired:
+            err, rc = "harness-timeout", 124
+        if restore:
+            restore()
+        secs = time.time() - t0
+        try:
+            ok, detail = task["verify"](proj)
+        except Exception as e:  # noqa: BLE001
+            ok, detail = False, f"verify-error: {e}"
+        provs = set()
+        try:
+            provs = set(re.findall(r'"provider":"([^"]+)"', open(f"{proj}/.crush/logs/crush.log").read()))
+        except Exception:
+            pass
+        shutil.rmtree(xdg, ignore_errors=True)
+        shutil.rmtree(xdgd, ignore_errors=True)
+        record({"kind": "essentials", "combo": label, "model": model, "think": think,
+                "effort": effort, "task": task["name"], "pass": bool(ok), "secs": round(secs, 1),
+                "rc": rc, "detail": str(detail)[:200], "providers": sorted(provs),
+                "err_tail": err[-150:] if rc else ""})
+        passed += bool(ok)
+    return passed, len(tasks)
 
 
 def build_combos(models, modes):
@@ -273,19 +376,42 @@ def cmd_run(a):
     open(f"{O}/DONE-{a.tag}", "w").write(time.strftime("%c") + "\n")
 
 
+def cmd_essentials(a):
+    if essentials is None:
+        sys.exit("essentials.py not found next to bench.py")
+    combos = build_combos([m for m in a.models.split(",") if m], [x for x in a.modes.split(",") if x])
+    extra = a.extra.split("|") if a.extra else []
+    runner = a.runner or DEFAULT_RUNNER
+    rules = os.path.join(TASKS, "rules.md") if a.rules else None
+    only = set(x for x in a.only.split(",") if x)
+    if a.dry_run:
+        for label, (m, think, eff) in combos.items():
+            print(f"  {label}: {len(essentials.TASKS)} essentials tasks; runner {runner}")
+        return
+    if os.path.exists(f"{O}/DONE-ess-{a.tag}"):
+        return
+    for label, (model, think, effort) in combos.items():
+        passed, total = run_essentials(label, model, think, effort, runner, rules, extra, only)
+        print(f"{label}: {passed}/{total} essentials passed")
+    status("finished")
+    open(f"{O}/DONE-ess-{a.tag}", "w").write(time.strftime("%c") + "\n")
+
+
 def cmd_summary(a):
     rows = [json.loads(l) for l in open(f"{O}/results.jsonl") if l.strip()]
     by = {}
     for r in rows:
         c = r.get("combo")
-        if not c or r.get("kind") not in ("probe", "task") or r.get("invalid"):
+        if not c or r.get("kind") not in ("probe", "task", "essentials") or r.get("invalid"):
             continue
-        # a task row counts only if the run really went to this server's provider
-        if r["kind"] == "task" and not a.all and r.get("providers") != ["sipb-llms"]:
+        # a task/essentials row counts only if the run really went to this server's provider
+        if r["kind"] in ("task", "essentials") and not a.all and r.get("providers") != ["sipb-llms"]:
             continue
-        by.setdefault(c, {"probe": None, "fizz": [], "ws": []})
+        by.setdefault(c, {"probe": None, "fizz": [], "ws": [], "ess": []})
         if r["kind"] == "probe":
             by[c]["probe"] = r
+        elif r["kind"] == "essentials":
+            by[c]["ess"].append(r)
         elif r["task"].startswith("fizz"):
             by[c]["fizz"].append(r)
         else:
@@ -300,12 +426,12 @@ def cmd_summary(a):
         ok = [r["secs"] for r in rs if r.get("pass") and r.get("secs")]
         return f"{sum(1 for r in rs if r.get('pass'))}/{len(rs)}" + (f", median {statistics.median(ok):.0f} s" if ok else "")
 
-    print("| combo | cold TTFT s | decode chunks/s | 10k prefill s (1st / repeat) | task A | task B |")
-    print("| --- | --- | --- | --- | --- | --- |")
+    print("| combo | cold TTFT s | decode chunks/s | 10k prefill s (1st / repeat) | task A | task B | essentials |")
+    print("| --- | --- | --- | --- | --- | --- | --- |")
     for c, v in by.items():
         p = v["probe"] or {}
         print(f"| {c} | {f(p.get('cold_ttft'))} | {f(p.get('decode_cps'), 0)} | "
-              f"{f(p.get('prefill1_ttft'))} / {f(p.get('prefill2_ttft'))} | {tasks(v['fizz'])} | {tasks(v['ws'])} |")
+              f"{f(p.get('prefill1_ttft'))} / {f(p.get('prefill2_ttft'))} | {tasks(v['fizz'])} | {tasks(v['ws'])} | {tasks(v['ess'])} |")
 
 
 def main():
@@ -327,6 +453,17 @@ def main():
     r.add_argument("--tag", default="A", help="batch tag; a batch with DONE-<tag> present is skipped")
     r.add_argument("--dry-run", action="store_true", help="print the plan and exit; no requests")
     r.set_defaults(fn=cmd_run)
+    e = sub.add_parser("essentials",
+                       help="small coding+sysadmin battery (file/config/git/pipeline tasks), one pass per model")
+    e.add_argument("--models", required=True, help="comma-separated server model ids, e.g. qwen3.6:35b-a3b-q4_K_M")
+    e.add_argument("--modes", default="", help="think,nothink (default: both for reasoning families)")
+    e.add_argument("--rules", action="store_true", help="give the agent tasks/rules.md")
+    e.add_argument("--extra", default="", help="extra runner args, '|'-separated")
+    e.add_argument("--runner", help=f"agent runner command (default: {DEFAULT_RUNNER})")
+    e.add_argument("--tag", default="ess", help="batch tag; a finished batch (DONE-ess-<tag>) is skipped")
+    e.add_argument("--only", default="", help="comma-separated task names to run (default: all)")
+    e.add_argument("--dry-run", action="store_true")
+    e.set_defaults(fn=cmd_essentials)
     s = sub.add_parser("summary", help="markdown table from results.jsonl (skips rows with \"invalid\": true)")
     s.add_argument("--all", action="store_true", help="also count task rows whose provider is not exactly sipb-llms")
     s.set_defaults(fn=cmd_summary)
