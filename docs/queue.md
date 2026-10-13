@@ -3,6 +3,21 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## acp-run --perm deny: what the user-config strip still lets through
+
+**Queued 2026-10-13 (adversary review of the deny strip, finding 5). Needs an
+operator decision.** Since 2026-10-13 a non-interactive `--perm deny` run starts
+opencode and agy without the user's global plugins, MCP servers and hooks
+(tools/acp-run/README.md). Still loaded: agy's workspace `.agents/` plugins
+(skills, hooks, MCP) in the `-C` dir, and opencode's skills from
+`~/.claude/skills` and `~/.agents/skills` (opencode 2.0.27 has no switch for
+them). Plugin hooks run code without any tool permission request, so deny and
+the exit-77 tripwire cannot see them. Not a regression (the old behaviour
+loaded everything), and failover runs in an empty temp dir. **Decide:** should
+`--perm deny` against an untrusted `-C` repo (an acp-dispatch read-only review
+of someone else's code) refuse, copy the repo without `.agents/`, or shadow
+agy's workspace roots, and is opencode's skill loading acceptable?
+
 ## acp-run: classify quota and outage failures at the source
 
 **Queued 2026-10-12 (operator, from the acp-dispatch pool-guard work, 4bbf180).

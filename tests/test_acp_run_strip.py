@@ -16,10 +16,12 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 from typing import Any, ClassVar, override
@@ -33,7 +35,10 @@ USER_OPENCODE = {
     "$schema": "https://opencode.ai/config.json",
     "experimental": {"max_retries": 1, "hook": {"session_completed": [{"command": ["x"]}]}},
     "provider": {"sipb": {"npm": "@ai-sdk/openai-compatible", "options": {
-        "baseURL": "http://127.0.0.1:8890/api", "apiKey": SECRET}, "models": {"qwen3-coder:30b": {}}}},
+        "baseURL": "http://127.0.0.1:8890/api", "apiKey": SECRET,
+        "headers": {"Authorization": "Bearer " + SECRET, "X-Key": "{file:./key.txt}"}},
+        "models": {"qwen3-coder:30b": {}}},
+        "odd": {"options": {"apiKey": 'ab"odd-literal'}}, "envd": {"options": {"apiKey": "{env:MY_KEY}"}}},
     "model": "sipb/qwen3-coder:30b",
     "mcp": {"basic-memory": {"type": "remote", "url": "http://127.0.0.1:18796/mcp"},
             "exa": {"type": "remote", "url": "https://mcp.exa.ai/mcp",
@@ -63,8 +68,9 @@ PROBE = textwrap.dedent("""\
         return oct(stat.S_IMODE(p.lstat().st_mode))
 
     def oc(env):
-        d, info = mod.opencode_deny_config(env)
-        out = {"info": info, "written": json.loads((d / "opencode.json").read_text()),
+        d, info, extra = mod.opencode_deny_config(env)
+        raw = (d / "opencode.json").read_text()
+        out = {"info": info, "written": json.loads(raw), "raw": raw, "extra": extra,
                "files": sorted(x.name for x in d.iterdir()), "dir_mode": mode(d),
                "file_mode": mode(d / "opencode.json")}
         shutil.rmtree(d)
@@ -90,25 +96,81 @@ PROBE = textwrap.dedent("""\
             "hooks": (g / "config" / "hooks.json").read_text()}
         return out
 
-    def strip(agent, perm, interactive=False, keep=False, env_keep=None):
+    def oc_error(env):
+        try:
+            mod.opencode_deny_config(env)
+        except ValueError as e:
+            return str(e)
+        return None
+
+    def strip(agent, perm, interactive=False, keep=False, env_keep=None, xdg=None, mkdtemp_fails=False):
+        import contextlib, io as _io
         a = NS(agent=agent, perm=perm, interactive=interactive, keep_user_config=keep)
         env = {"OPENCODE_CONFIG": str(home / "explicit.json"), "KEEP": "me"}
+        if xdg:
+            env["XDG_CONFIG_HOME"] = str(home / xdg)
+        real_mkdtemp = mod.tempfile.mkdtemp
+        if mkdtemp_fails:
+            def boom(*a, **k):
+                raise OSError(28, "No space left on device")
+            mod.tempfile.mkdtemp = boom
+        errbuf = _io.StringIO()
         old = os.environ.pop("ACP_RUN_KEEP_USER_CONFIG", None)
         if env_keep is not None:
             os.environ["ACP_RUN_KEEP_USER_CONFIG"] = env_keep
         try:
-            d, info = mod.strip_user_config(a, env, "PASSED")
+            with contextlib.redirect_stderr(errbuf):
+                d, info = mod.strip_user_config(a, env, "PASSED")
         finally:
+            mod.tempfile.mkdtemp = real_mkdtemp
             os.environ.pop("ACP_RUN_KEEP_USER_CONFIG", None)
             if old is not None:
                 os.environ["ACP_RUN_KEEP_USER_CONFIG"] = old
         out = {"dir": None if d in (None, "PASSED") else str(d), "passed": d == "PASSED",
-               "info": info, "env": env}
+               "info": info, "env": env, "stderr": errbuf.getvalue()}
         if out["dir"]:
             shutil.rmtree(d)
         return out
 
+    def sweep():
+        import os, tempfile, time
+        base = Path(tempfile.mkdtemp())
+        old = time.time() - 4 * 3600
+        target = Path(tempfile.mkdtemp())
+        (target / "keep.txt").write_text("x")
+        names = {"dead_old": "acp-run-opencode-deny-999999-abcd1234",
+                 "nopid_old": "acp-run-agy-deny-odedcp3y",
+                 "dead_fresh": "acp-run-zcode-deny-999998-abcd1234",
+                 "live_old": f"acp-run-opencode-deny-{os.getppid()}-abcd1234",
+                 "other_old": "something-else-old"}
+        for n in names.values():
+            (base / n).mkdir()
+            (base / n / "f").write_text("x")
+        link = base / "acp-run-opencode-deny-999997-linkxxxx"
+        link.symlink_to(target)
+        afile = base / "acp-run-agy-deny-999996-filexxxx"
+        afile.write_text("x")
+        for k, n in names.items():
+            if k != "dead_fresh":
+                os.utime(base / n, (old, old))
+        os.utime(link, (old, old), follow_symlinks=False)
+        os.utime(afile, (old, old))
+        gone = mod.sweep_stale_deny_dirs(str(base))
+        left = sorted(x.name for x in base.iterdir())
+        out = {"names": names, "gone": sorted(gone), "left": left,
+               "target_intact": (target / "keep.txt").exists()}
+        shutil.rmtree(base)
+        shutil.rmtree(target)
+        return out
+
     print(json.dumps({
+        "oc_broken": oc_error({"XDG_CONFIG_HOME": str(home / "broken")}),
+        "oc_commas": oc({"XDG_CONFIG_HOME": str(home / "commas")}),
+        "jsonc_commas": mod.jsonc_loads('{"a": [1, 2,], "b": {"c": "x,}",}, /* k */ }'),
+        "sweep": sweep(),
+        "s_oc_broken": strip("opencode", "deny", xdg="broken"),
+        "s_oc_mkdtemp": strip("opencode", "deny", mkdtemp_fails=True),
+        "s_agy_mkdtemp": strip("agy", "deny", mkdtemp_fails=True),
         "oc": oc({"XDG_CONFIG_HOME": str(home / ".config")}),
         "oc_explicit": oc({"XDG_CONFIG_HOME": str(home / ".config"),
                            "OPENCODE_CONFIG": str(home / "explicit.json")}),
@@ -130,19 +192,54 @@ PROBE = textwrap.dedent("""\
 
 FAKE_AGENT = textwrap.dedent("""\
     #!/usr/bin/python3
+    # A minimal ACP agent: records its env, then (FAKE_MODE) exits at once, answers
+    # one turn with "ok", or hangs in the turn until cancelled.
     import json, os, sys
     from pathlib import Path
     keys = ("OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT",
             "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_CONFIG_PROJECT_DISABLE", "GEMINI_HOME")
     out = {k: os.environ.get(k) for k in keys}
+    out["all_env"] = dict(os.environ)
+    out["acp_run_pid"] = os.getppid()
     d = os.environ.get("OPENCODE_CONFIG_DIR")
     if d and Path(d, "opencode.json").exists():
         out["opencode_json"] = json.loads(Path(d, "opencode.json").read_text())
     g = os.environ.get("GEMINI_HOME")
     if g and Path(g, "config", "mcp_config.json").exists():
         out["agy_mcp"] = json.loads(Path(g, "config", "mcp_config.json").read_text())
-    Path(os.environ["FAKE_OUT"]).write_text(json.dumps(out))
-    sys.exit(0)  # die before the handshake: acp-run fails fast, then cleans up
+    fake_out = Path(os.environ["FAKE_OUT"])
+    fake_out.write_text(json.dumps(out))
+    mode = os.environ.get("FAKE_MODE", "exit")
+    if mode == "exit":
+        sys.exit(0)  # die before the handshake: acp-run fails fast, then cleans up
+
+    def send(o):
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", **o}) + "\\n")
+        sys.stdout.flush()
+
+    pending = None
+    for line in sys.stdin:
+        msg = json.loads(line)
+        m, i = msg.get("method"), msg.get("id")
+        if m == "initialize":
+            send({"id": i, "result": {"protocolVersion": 1, "agentCapabilities": {}, "authMethods": []}})
+        elif m == "session/new":
+            send({"id": i, "result": {"sessionId": "s1"}})
+        elif m == "session/prompt":
+            cfg = os.environ.get("OPENCODE_CONFIG_DIR") or os.environ.get("GEMINI_HOME")
+            Path(str(fake_out) + ".turn").write_text(json.dumps({"cfg": cfg, "exists": bool(cfg) and Path(cfg).exists()}))
+            if mode == "hang":
+                pending = i
+                continue
+            send({"method": "session/update", "params": {"sessionId": "s1", "update": {
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ok"}}}})
+            send({"id": i, "result": {"stopReason": "end_turn"}})
+        elif m == "session/cancel":
+            if pending is not None:
+                send({"id": pending, "result": {"stopReason": "cancelled"}})
+                pending = None
+        elif i is not None:
+            send({"id": i, "error": {"code": -32601, "message": "not supported"}})
     """)
 
 
@@ -154,7 +251,13 @@ def write_home(home: Path) -> None:
     for name in ("rtk.ts", "moshi-hooks.ts"):
         (oc / "plugins" / name).write_text("export default {}\n")
     (home / "explicit.json").write_text(json.dumps({
-        "provider": {"extra": {"npm": "x"}}, "mcp": {"explicit-mcp": {"type": "local"}}}))
+        "provider": {"extra": {"npm": "x"}, "sipb": {"options": {"baseURL": "http://127.0.0.1:9999/api"}}},
+        "mcp": {"explicit-mcp": {"type": "local"}}}))
+    (home / "broken" / "opencode").mkdir(parents=True)
+    (home / "broken" / "opencode" / "opencode.json").write_text('{"provider": {"sipb": {}}')
+    (home / "commas" / "opencode").mkdir(parents=True)
+    (home / "commas" / "opencode" / "opencode.jsonc").write_text(
+        '{"model": "sipb/x", // c\n "provider": {"sipb": {"models": {"x": {},},},},}')
     g = home / ".gemini"
     (g / "config" / "plugins" / "flutter").mkdir(parents=True)
     (g / "config" / "plugins" / "flutter" / "mcp_config.json").write_text('{"mcpServers": {"dart": {}}}')
@@ -232,7 +335,11 @@ class TestStripUserConfig(unittest.TestCase):
 
     def test_opencode_explicit_config_file_is_merged_then_unset(self):
         w = self.r["oc_explicit"]["written"]
-        self.assertEqual(sorted(w["provider"]), ["extra", "sipb"])
+        self.assertEqual(sorted(w["provider"]), ["envd", "extra", "odd", "sipb"])
+        sipb = w["provider"]["sipb"]
+        self.assertEqual(sipb["options"]["baseURL"], "http://127.0.0.1:9999/api", "the override wins")
+        self.assertIn("qwen3-coder:30b", sipb["models"], "deep merge keeps models (finding 3)")
+        self.assertIn("apiKey", sipb["options"], "deep merge keeps the key reference (finding 3)")
         self.assertIn("explicit-mcp", self.r["oc_explicit"]["info"]["mcp_servers"])
         env = self.r["s_oc_deny"]["env"]
         self.assertNotIn("OPENCODE_CONFIG", env, "the explicit file would load its mcp on top")
@@ -240,6 +347,61 @@ class TestStripUserConfig(unittest.TestCase):
     def test_opencode_without_any_user_config_still_starts(self):
         self.assertEqual(self.r["oc_none"]["written"], {})
         self.assertEqual(self.r["oc_none"]["info"]["mcp_servers"], [])
+
+    def test_literal_secrets_go_to_env_not_the_file(self):
+        o = self.r["oc"]
+        opts = o["written"]["provider"]["sipb"]["options"]
+        self.assertTrue(opts["apiKey"].startswith("{env:ACP_RUN_OPENCODE_SECRET_"))
+        self.assertTrue(opts["headers"]["Authorization"].startswith("{env:ACP_RUN_OPENCODE_SECRET_"))
+        self.assertEqual(o["extra"][opts["apiKey"][5:-1]], SECRET)
+        self.assertEqual(o["extra"][opts["headers"]["Authorization"][5:-1]], "Bearer " + SECRET)
+        self.assertEqual(o["written"]["provider"]["envd"]["options"]["apiKey"], "{env:MY_KEY}",
+                         "an existing reference is left alone")
+        # a value {env:} substitution would corrupt (a quote) stays in the 0600 file, and is listed
+        self.assertEqual(o["info"]["secrets_in_file"], ["provider.odd.options.apiKey"])
+        self.assertEqual(o["info"]["secrets_via_env"], 2)
+        self.assertNotIn("Bearer " + SECRET, o["raw"])
+        self.assertNotIn(json.dumps(SECRET), o["raw"])
+        self.assertNotIn(SECRET, json.dumps(o["info"]))
+
+    def test_relative_file_refs_are_made_absolute(self):
+        x = self.r["oc"]["written"]["provider"]["sipb"]["options"]["headers"]["X-Key"]
+        self.assertEqual(x, "{file:" + str(self.home / ".config" / "opencode" / "key.txt") + "}")
+
+    def test_unparseable_config_refuses_to_strip(self):
+        self.assertIn("broken/opencode/opencode.json", self.r["oc_broken"])
+        s = self.r["s_oc_broken"]
+        self.assertEqual(s["info"]["action"], "kept")
+        self.assertIn("broken/opencode/opencode.json", s["info"]["why"])
+        self.assertIn("keeping them", s["stderr"])
+        self.assertIn("broken/opencode/opencode.json", s["stderr"])
+        self.assertNotIn("OPENCODE_CONFIG_DIR", s["env"])
+        self.assertTrue(s["passed"])
+
+    def test_trailing_commas_are_accepted(self):
+        self.assertEqual(self.r["jsonc_commas"], {"a": [1, 2], "b": {"c": "x,}"}})
+        w = self.r["oc_commas"]["written"]
+        self.assertEqual(w["model"], "sipb/x")
+        self.assertIn("x", w["provider"]["sipb"]["models"])
+
+    def test_build_error_falls_back_to_the_user_config_with_a_stderr_line(self):
+        for key, agent in (("s_oc_mkdtemp", "opencode"), ("s_agy_mkdtemp", "agy")):
+            s = self.r[key]
+            self.assertEqual(s["info"]["action"], "kept", key)
+            self.assertIn("No space left", s["info"]["why"], key)
+            self.assertIn(f"could not strip {agent}", s["stderr"], key)
+            self.assertTrue(s["passed"], key)
+            self.assertNotIn("OPENCODE_CONFIG_DIR", s["env"], key)
+
+    def test_sweep_removes_only_stale_dead_own_dirs(self):
+        w = self.r["sweep"]
+        n = w["names"]
+        self.assertEqual(w["gone"], sorted([n["dead_old"], n["nopid_old"]]))
+        for k in ("dead_fresh", "live_old", "other_old"):
+            self.assertIn(n[k], w["left"], k)
+        self.assertIn("acp-run-opencode-deny-999997-linkxxxx", w["left"], "a symlink is never swept")
+        self.assertIn("acp-run-agy-deny-999996-filexxxx", w["left"], "a file is never swept")
+        self.assertTrue(w["target_intact"])
 
     def test_jsonc_comments_outside_strings_only(self):
         self.assertEqual(self.r["jsonc"], {"a": "x // y /* z */", "b": 1})
@@ -326,6 +488,9 @@ class TestStripEndToEnd(unittest.TestCase):
         fake = cls.bin / "opencode"
         fake.write_text(FAKE_AGENT)
         fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+        broken = cls.bin / "broken-agent"
+        broken.write_text("#!/nonexistent/interpreter\n")
+        broken.chmod(broken.stat().st_mode | stat.S_IXUSR)
         cls.cache = uv_cache()
 
     @classmethod
@@ -333,29 +498,90 @@ class TestStripEndToEnd(unittest.TestCase):
     def tearDownClass(cls) -> None:
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def run_acp(self, agent: str, *args: str, env: dict[str, str] | None = None) -> dict[str, Any]:
+    def run_acp(self, agent: str, *args: str, env: dict[str, str] | None = None, mode: str = "exit",
+                sigterm: bool = False, fake: str = "opencode") -> dict[str, Any]:
         n = len(list(self.tmp.glob("run-*")))
         d = self.tmp / f"run-{n}"
         d.mkdir()
         out, log = d / "env.json", d / "log.jsonl"
         e = {**os.environ, "HOME": str(self.home), "UV_CACHE_DIR": self.cache,
-             "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_OUT": str(out),
-             "ACP_RUN_AGY_SERVER": str(self.bin / "opencode"), "TMPDIR": str(d)}
-        e.pop("ACP_RUN_KEEP_USER_CONFIG", None)
-        e.pop("OPENCODE_CONFIG", None)
-        e.pop("OPENCODE_CONFIG_DIR", None)
+             "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_OUT": str(out), "FAKE_MODE": mode,
+             "ACP_RUN_AGY_SERVER": str(self.bin / fake), "TMPDIR": str(d)}
+        for k in ("ACP_RUN_KEEP_USER_CONFIG", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR",
+                  "HERDR_PANE_ID", "HERDR_ENV"):
+            e.pop(k, None)
         e.update(env or {})
-        r = subprocess.run(
-            ["uv", "run", "--quiet", "--with", SDK, "python", "-I", str(SCRIPT), agent, "-C", str(d),
-             "-p", "Reply with the word ok", "--handshake-tries", "1", "--handshake-timeout", "10",
-             "--no-fallback", "--log", str(log), *args],
-            check=False, capture_output=True, text=True, timeout=180, env=e)
-        recs = [json.loads(x) for x in log.read_text().splitlines() if x.strip()]
+        argv = ["uv", "run", "--quiet", "--with", SDK, "python", "-I", str(SCRIPT), agent, "-C", str(d),
+                "-p", "Reply with the word ok", "--handshake-tries", "1", "--handshake-timeout", "10",
+                "--no-fallback", "--timeout", "60", "--log", str(log), *args]
+        proc = subprocess.Popen(argv, env=e, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+        live: list[str] = []
+        if sigterm:
+            turn = Path(str(out) + ".turn")
+            deadline = time.time() + 120
+            while not turn.exists() and time.time() < deadline and proc.poll() is None:
+                time.sleep(0.2)
+            live = [p.name for p in d.iterdir() if p.name.startswith("acp-run-")]
+            os.kill(json.loads(out.read_text())["acp_run_pid"], signal.SIGTERM)
+        stdout, stderr = proc.communicate(timeout=180)
+        recs = [json.loads(x) for x in log.read_text().splitlines() if x.strip()] if log.exists() else []
         leftovers = [p.name for p in d.iterdir() if p.name.startswith("acp-run-")]
-        return {"rc": r.returncode, "stderr": r.stderr, "seen": json.loads(out.read_text()),
+        turn_file = Path(str(out) + ".turn")
+        return {"rc": proc.returncode, "stdout": stdout, "stderr": stderr,
+                "seen": json.loads(out.read_text()) if out.exists() else {},
+                "turn": json.loads(turn_file.read_text()) if turn_file.exists() else None,
                 "user_config": [x["data"] for x in recs if x["kind"] == "user_config"],
                 "result": next((x["data"] for x in recs if x["kind"] == "result"), {}),
-                "leftovers": leftovers}
+                "leftovers": leftovers, "live": live}
+
+    def test_successful_turn_keeps_the_config_during_the_turn_then_removes_it(self):
+        r = self.run_acp("opencode", "--perm", "deny", mode="turn")
+        self.assertEqual(r["rc"], 0, r["stderr"])
+        self.assertEqual(r["stdout"].strip(), "ok")
+        self.assertTrue(r["turn"]["exists"], "the agent can still read its config during the turn")
+        self.assertIn("acp-run-opencode-deny-", r["turn"]["cfg"])
+        self.assertEqual(r["result"]["user_config"], "stripped")
+        self.assertEqual(r["leftovers"], [])
+
+    def test_sigterm_mid_turn_removes_the_temp_dir(self):
+        r = self.run_acp("opencode", "--perm", "deny", mode="hang", sigterm=True)
+        self.assertEqual(r["rc"], 143, r["stderr"])
+        self.assertEqual(len(r["live"]), 1, "the dir existed while the turn ran")
+        self.assertEqual(r["leftovers"], [], "SIGTERM still removes it")
+
+    def test_early_exception_removes_the_temp_dir(self):
+        # the agent cannot even be started (missing interpreter): run() fails in
+        # create_subprocess_exec, after the temp config was built
+        r = self.run_acp("agy", "--perm", "deny", fake="broken-agent")
+        self.assertEqual(r["rc"], 1, r["stderr"])
+        self.assertEqual(r["user_config"][0]["action"], "stripped")
+        self.assertEqual(r["leftovers"], [])
+
+    def test_unparseable_config_keeps_the_user_config_end_to_end(self):
+        r = self.run_acp("opencode", "--perm", "deny", env={"XDG_CONFIG_HOME": str(self.home / "broken")})
+        self.assertIsNone(r["seen"]["OPENCODE_CONFIG_DIR"])
+        self.assertEqual(r["user_config"][0]["action"], "kept")
+        self.assertIn("broken/opencode/opencode.json", r["stderr"])
+
+    def test_interactive_ask_and_scoped_runs_get_the_same_env_as_perm_all(self):
+        def env_of(*args: str) -> dict[str, str]:
+            r = self.run_acp("opencode", *args)
+            self.assertEqual(r["user_config"], [], args)
+            got = dict(r["seen"]["all_env"])
+            for k in ("FAKE_OUT", "TMPDIR", "VIRTUAL_ENV", "PATH", "_"):
+                got.pop(k, None)
+            return {k: v for k, v in got.items() if not k.startswith("UV_")}
+        base = env_of("--perm", "all")
+        for args in (("--perm", "scoped:."), ("--interactive", "--perm", "ask"),
+                     ("--interactive", "--perm", "deny")):
+            got = env_of(*args)
+            extra = {k: v for k, v in got.items() if base.get(k) != v}
+            missing = sorted(set(base) - set(got))
+            if args[-1] == "deny":  # DENY_ENV still applies; nothing else may differ
+                self.assertEqual(json.loads(extra.pop("OPENCODE_CONFIG_CONTENT")), {"permission": "deny"})
+            self.assertEqual((extra, missing), ({}, []), args)
+            self.assertFalse([k for k in got if k.startswith("ACP_RUN_OPENCODE_SECRET")], args)
 
     def test_opencode_deny_gets_the_temp_config_and_it_is_removed(self):
         r = self.run_acp("opencode", "--perm", "deny")
@@ -364,6 +590,8 @@ class TestStripEndToEnd(unittest.TestCase):
         self.assertIn("acp-run-opencode-deny-", seen["OPENCODE_CONFIG_DIR"])
         self.assertNotIn("mcp", seen["opencode_json"])
         self.assertIn("sipb", seen["opencode_json"]["provider"])
+        self.assertNotIn(SECRET, json.dumps(seen["opencode_json"]["provider"]["sipb"]))
+        self.assertEqual(seen["all_env"]["ACP_RUN_OPENCODE_SECRET_0"], SECRET, "the key reaches opencode by env")
         self.assertEqual(json.loads(seen["OPENCODE_CONFIG_CONTENT"]), {"permission": "deny"})
         self.assertEqual(seen["OPENCODE_DISABLE_PROJECT_CONFIG"], "1")
         self.assertEqual(len(r["user_config"]), 1)

@@ -357,6 +357,66 @@ DENY_ENV = {
         " mcp__*",
     },
 }
+# Per-run --perm deny temp dirs are named <DENY_DIR_PREFIX><agent>-deny-<pid>-<random>
+# under tempfile.gettempdir(). run() removes its own; a run killed with SIGKILL cannot,
+# so each deny run first sweeps this user's dirs older than DENY_DIR_MAX_AGE whose pid
+# is gone (sweep_stale_deny_dirs). Names without a pid (before 2026-10-13) go by age.
+DENY_DIR_PREFIX = "acp-run-"
+DENY_DIR_RE = re.compile(r"^acp-run-[a-z]+-deny-(?:(\d+)-)?[A-Za-z0-9_]+$")
+DENY_DIR_MAX_AGE = 3 * 3600
+
+
+def remove_deny_dir(d):
+    """rmtree a per-run temp dir (never follows symlinks); say so if it fails."""
+    try:
+        shutil.rmtree(d)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print(f"acp-run: could not remove {d}: {e}", file=sys.stderr)
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def sweep_stale_deny_dirs(base=None, max_age=DENY_DIR_MAX_AGE, now=None):
+    """Remove stale per-run deny dirs left by killed runs: real directories (not
+    symlinks) directly under the temp base, owned by this user, matching DENY_DIR_RE,
+    last modified more than max_age ago, whose pid (if named) is no longer running.
+    Returns the names removed."""
+    base = base or tempfile.gettempdir()
+    now = time.time() if now is None else now
+    gone = []
+    try:
+        entries = list(os.scandir(base))
+    except OSError:
+        return gone
+    for e in entries:
+        m = DENY_DIR_RE.match(e.name)
+        if not m:
+            continue
+        try:
+            st = e.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        if (e.is_symlink() or not e.is_dir(follow_symlinks=False) or st.st_uid != os.getuid()
+                or now - st.st_mtime < max_age):
+            continue
+        if m.group(1) and (int(m.group(1)) == os.getpid() or _pid_alive(int(m.group(1)))):
+            continue
+        remove_deny_dir(e.path)
+        gone.append(e.name)
+    return gone
+
+
 def zcode_deny_settings():
     """A per-run zcode CLI settings dir for --perm deny (re-verification R3, 2026-10-12):
     the user's ~/.zcode/cli/setting.json with MCP servers, plugins, skills, subagents
@@ -379,7 +439,7 @@ def zcode_deny_settings():
     base["permission"] = {**(base.get("permission") or {}), "mode": "plan", "allowedTools": [],
                           "autoApproveHighRisk": False, "allowMediumRiskInAuto": False,
                           "disallowedTools": DENY_ENV["zcode"]["ZCODE_DISALLOWED_TOOLS"].split()}
-    d = Path(tempfile.mkdtemp(prefix="acp-run-zcode-deny-"))
+    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}zcode-deny-{os.getpid()}-"))
     (d / "cli").mkdir()
     (d / "cli" / "setting.json").write_text(json.dumps(base, indent=1))
     (d / "cli" / "config.json").write_text(json.dumps({"hooks": {"enabled": False, "events": {}}}))
@@ -415,7 +475,8 @@ def keep_user_config(a):
 
 
 def jsonc_loads(text):
-    """json.loads that also takes // and /* */ comments outside strings (opencode.jsonc)."""
+    """json.loads that also takes // and /* */ comments and trailing commas outside
+    strings, as opencode's JSONC parser does (opencode.jsonc)."""
     out, i, n, in_str = [], 0, len(text), False
     while i < n:
         c = text[i]
@@ -437,10 +498,63 @@ def jsonc_loads(text):
             j = text.find("*/", i + 2)
             i = n if j < 0 else j + 2
             continue
+        elif c in "}]":
+            # drop a trailing comma: the last non-space character emitted before } or ]
+            k = len(out) - 1
+            while k >= 0 and out[k] in " \t\r\n":
+                k -= 1
+            if k >= 0 and out[k] == ",":
+                del out[k]
+            out.append(c)
         else:
             out.append(c)
         i += 1
     return json.loads("".join(out))
+
+
+def deep_merge(base, over):
+    """Recursive dict merge (over wins), as opencode merges its config files."""
+    out = dict(base)
+    for k, v in over.items():
+        out[k] = deep_merge(out[k], v) if isinstance(out.get(k), dict) and isinstance(v, dict) else v
+    return out
+
+
+# A provider value moved out of the temp file into the child's env (finding 1 of the
+# 2026-10-13 adversary review): opencode substitutes {env:NAME} in config text
+# (ConfigVariable.substitute, 2.0.27) before parsing, so the value must not contain
+# a quote, backslash, brace or control character; any other literal stays in the 0600 file.
+_SECRET_KEY = re.compile(r"(?i)api[_-]?key|token|secret|passw|authorization|bearer|cookie|credential")
+_ENV_SAFE = re.compile(r'^[^"\\{}\x00-\x1f]+$')
+
+
+def _secrets_to_env(node, extra_env, left, path="provider", in_headers=False):
+    """Replace literal secret-looking strings under node with {env:...}, in place."""
+    for k, v in list(node.items()):
+        p = f"{path}.{k}"
+        if isinstance(v, dict):
+            _secrets_to_env(v, extra_env, left, p, in_headers or str(k).lower() == "headers")
+        elif (isinstance(v, str) and (in_headers or _SECRET_KEY.search(str(k)))
+              and "{env:" not in v and "{file:" not in v):
+            if _ENV_SAFE.match(v):
+                name = f"ACP_RUN_OPENCODE_SECRET_{len(extra_env)}"
+                extra_env[name] = v
+                node[k] = "{env:" + name + "}"
+            else:
+                left.append(p)
+
+
+def _abs_file_refs(obj, base):
+    """Rewrite relative {file:x} references to absolute paths under base, since the
+    copy lives in the temp dir and opencode resolves them against the config file."""
+    if isinstance(obj, dict):
+        return {k: _abs_file_refs(v, base) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_abs_file_refs(v, base) for v in obj]
+    if isinstance(obj, str) and "{file:" in obj:
+        return re.sub(r"\{file:([^}]+)\}", lambda m: m.group(0) if m.group(1).startswith(("/", "~"))
+                      else "{file:" + os.path.normpath(os.path.join(base, m.group(1))) + "}", obj)
+    return obj
 
 
 def _private_write(path, text):
@@ -452,40 +566,43 @@ def _private_write(path, text):
 
 def opencode_deny_config(env):
     """A per-run OPENCODE_CONFIG_DIR for --perm deny: one opencode.json holding only
-    OPENCODE_KEEP_KEYS from the user's global config (and OPENCODE_CONFIG, if set).
-    opencode v2 (checked 2.0.27, from the bundled source) takes OPENCODE_CONFIG_DIR as
-    its global config directory instead of ~/.config/opencode, and scans plugins
-    only in <global>/plugin(s)/ and project .opencode/ dirs, so no user plugin and
-    no MCP server is loaded; the caller also turns project config off. Returns
-    (temp dir, log info); the caller removes the dir. env is the child's env."""
+    OPENCODE_KEEP_KEYS from the user's global config (and OPENCODE_CONFIG, if set),
+    deep-merged in that order as opencode does. opencode v2 (checked 2.0.27, from the
+    bundled source) takes OPENCODE_CONFIG_DIR as its global config directory instead
+    of ~/.config/opencode, and scans plugins only in <global>/plugin(s)/ and project
+    .opencode/ dirs, so no user plugin and no MCP server is loaded; the caller also
+    turns project config off. Literal secrets in provider blocks go to the child's
+    env as {env:...} references instead of the file; relative {file:x} references are
+    made absolute (the copy no longer sits next to them). Raises ValueError, before
+    creating anything, when a source file cannot be read or parsed: a partial copy
+    would silently lose the provider or model. Returns (temp dir, log info, extra env);
+    the caller removes the dir. env is the child's env."""
     src = Path(env.get("OPENCODE_CONFIG_DIR") or Path(
         env.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode").expanduser()
     files = [src / "opencode.json", src / "opencode.jsonc"]
     if env.get("OPENCODE_CONFIG"):
         files.append(Path(env["OPENCODE_CONFIG"]).expanduser())
-    kept, dropped, mcp, plugins, unreadable = {}, set(), set(), [], []
+    kept, dropped, mcp, plugins = {}, set(), set(), []
     for f in files:
         try:
             cfg = jsonc_loads(f.read_text())
         except FileNotFoundError:
             continue
-        except (OSError, ValueError, UnicodeDecodeError):
-            unreadable.append(str(f))
-            continue
+        except (OSError, ValueError, UnicodeDecodeError) as e:
+            raise ValueError(f"cannot read {f}: {e}") from None
         if not isinstance(cfg, dict):
-            unreadable.append(str(f))
-            continue
+            raise ValueError(f"cannot read {f}: not a JSON object")
         for k, v in cfg.items():
-            if k == "provider" and isinstance(v, dict):
-                kept["provider"] = {**(kept.get("provider") or {}), **v}
+            if k in ("provider", "experimental") and isinstance(v, dict):
+                if k == "experimental":
+                    keep = {x: v[x] for x in OPENCODE_KEEP_EXPERIMENTAL if x in v}
+                    if set(v) - set(keep):
+                        dropped.add("experimental." + ",".join(sorted(set(v) - set(keep))))
+                    v = keep
+                if v:
+                    kept[k] = deep_merge(kept.get(k) or {}, _abs_file_refs(v, str(f.parent)))
             elif k in OPENCODE_KEEP_KEYS:
-                kept[k] = v
-            elif k == "experimental" and isinstance(v, dict):
-                keep = {x: v[x] for x in OPENCODE_KEEP_EXPERIMENTAL if x in v}
-                if keep:
-                    kept["experimental"] = {**(kept.get("experimental") or {}), **keep}
-                if set(v) - set(keep):
-                    dropped.add("experimental." + ",".join(sorted(set(v) - set(keep))))
+                kept[k] = _abs_file_refs(v, str(f.parent))
             else:
                 dropped.add(k)
         m = cfg.get("mcp")
@@ -505,7 +622,10 @@ def opencode_deny_config(env):
             plugins += [f"{sub}/{e.name}" for e in sorted((src / sub).iterdir())]
         except OSError:
             pass
-    d = Path(tempfile.mkdtemp(prefix="acp-run-opencode-deny-"))
+    extra_env, on_disk = {}, []
+    if isinstance(kept.get("provider"), dict):
+        _secrets_to_env(kept["provider"], extra_env, on_disk)
+    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}opencode-deny-{os.getpid()}-"))
     try:
         _private_write(d / "opencode.json", json.dumps(kept, indent=1))
     except BaseException:
@@ -514,10 +634,11 @@ def opencode_deny_config(env):
     info = {"agent": "opencode", "action": "stripped", "source": str(src),
             "kept_keys": sorted(kept), "dropped_keys": sorted(dropped),
             "mcp_servers": sorted(mcp), "plugins": plugins, "project_config": "off",
-            "unreadable": unreadable,
+            "secrets_via_env": len(extra_env), "secrets_in_file": on_disk,
             "env": ["OPENCODE_CONFIG_DIR", "OPENCODE_DISABLE_PROJECT_CONFIG",
-                    "OPENCODE_CONFIG_PROJECT_DISABLE", "-OPENCODE_CONFIG"]}
-    return d, info
+                    "OPENCODE_CONFIG_PROJECT_DISABLE", "-OPENCODE_CONFIG"]
+            + sorted(extra_env)}
+    return d, info, extra_env
 
 
 def agy_deny_home():
@@ -542,7 +663,7 @@ def agy_deny_home():
         plugins = sorted(e.name for e in (src / "config" / "plugins").iterdir() if e.is_dir())
     except OSError:
         plugins = []
-    d = Path(tempfile.mkdtemp(prefix="acp-run-agy-deny-"))
+    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}agy-deny-{os.getpid()}-"))
     try:
         (d / "config").mkdir(mode=0o700)
         for base, tgt in ((src, d), (src / "config", d / "config")):
@@ -573,7 +694,12 @@ def strip_user_config(a, env, deny_dir):
     of opencode or agy. Returns (deny_dir, log info or None): deny_dir is the temp dir
     the caller removes. Anything else (--perm all/ask/scoped, --interactive, other
     agents) is untouched and logs nothing. If the temp config cannot be built the run
-    keeps the user's config (deny still refuses every tool) and says so."""
+    keeps the user's config (deny still refuses every tool) and says so on stderr;
+    that includes an unreadable or unparseable opencode config file.
+    Known limits (adversary review 2026-10-13, finding 4): auth a run rewrites by
+    write-then-rename through the agy shadow's symlinks (oauth_creds.json) lands in
+    the temp dir and is lost with it; opencode {file:x} references are made absolute,
+    but a relative one added by another config layer would resolve against the temp dir."""
     if a.perm != "deny" or getattr(a, "interactive", False) or a.agent not in STRIP_USER_CONFIG:
         return deny_dir, None
     why = keep_user_config(a)
@@ -582,7 +708,8 @@ def strip_user_config(a, env, deny_dir):
                           "why": "--keep-user-config" if why == "flag" else "ACP_RUN_KEEP_USER_CONFIG"}
     try:
         if a.agent == "opencode":
-            d, info = opencode_deny_config(env)
+            d, info, extra = opencode_deny_config(env)
+            env.update(extra)  # literal provider secrets, referenced as {env:...} in d
             env["OPENCODE_CONFIG_DIR"] = str(d)
             # opencode reads OPENCODE_CONFIG_PROJECT_DISABLE ?? OPENCODE_DISABLE_PROJECT_CONFIG
             env["OPENCODE_CONFIG_PROJECT_DISABLE"] = "1"
@@ -2093,42 +2220,7 @@ async def run(a, log, err, log_path):
     root = Path(a.dir).resolve()
     env = dict(os.environ)
     deny_dir = None
-    if a.perm == "deny":
-        env.update(DENY_ENV.get(a.agent, {}))
-        if a.agent == "zcode":
-            deny_dir = zcode_deny_settings()
-            env["ZCODE_CLI_SETTINGS_FILE"] = str(deny_dir / "cli" / "setting.json")
-    deny_dir, stripped = strip_user_config(a, env, deny_dir)
-    if stripped is not None:
-        log.write(json.dumps({"t": round(time.time(), 3), "kind": "user_config",
-                              "data": stripped}) + "\n")
-        log.flush()
-    if a.agent == "agy":
-        env["GEMINI_HOME"] = str(deny_dir) if deny_dir else ensure_agy_home()
-        # Claude Code's settings point HTTPS_PROXY at the opencodex intercept
-        # proxy, which answers agy with 407 (2026-10-09).
-        for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
-            env.pop(k, None)
-        # agy lists its skills dirs as workspaces too and runs commands in
-        # whichever sorts first ("Command Working Directory"), often
-        # ~/.local/share/agy-acp-home/antigravity-cli/skills, not the session
-        # cwd: verified 2026-10-09 (`pwd` printed the skills dir; agy
-        # recreates that dir if the shadow omits it). Naming the dir in the
-        # prompt fixed it; the refined-antigravity-acp wrapper does not.
-        if a.prompt_text:
-            a.prompt_text = (
-                f"Your working directory for this task is {root}: run every"
-                " shell command there and create files there unless told"
-                " otherwise.\n\n" + a.prompt_text
-            )
-    if a.interactive:
-        # acp-run reports this pane to herdr itself; the agent's own herdr
-        # hooks (Claude Code's report as herdr:claude) would compete for it.
-        env.pop("HERDR_PANE_ID", None)
-        env.pop("HERDR_ENV", None)
     t0, out, code = time.time(), {"agent": a.agent, "log": str(log_path)}, 1
-    if stripped is not None:
-        out["user_config"] = stripped["action"]
     handshake_timeout = a.handshake_timeout or HANDSHAKE_TIMEOUT.get(
         a.agent, HANDSHAKE_TIMEOUT_DEFAULT
     )
@@ -2158,7 +2250,51 @@ async def run(a, log, err, log_path):
     for s in sigs:
         loop.add_signal_handler(s, on_signal, s)
     failure, finished = None, False
+
+    def drop_deny_dir():
+        nonlocal deny_dir
+        if deny_dir is not None:
+            remove_deny_dir(deny_dir)
+            deny_dir = None
+
     try:
+        # The temp config dirs are built inside the try, after the signal handlers,
+        # so an exception or SIGTERM from here on always reaches drop_deny_dir()
+        # (adversary review 2026-10-13, finding 1).
+        if a.perm == "deny":
+            env.update(DENY_ENV.get(a.agent, {}))
+            if a.agent == "zcode":
+                deny_dir = zcode_deny_settings()
+                env["ZCODE_CLI_SETTINGS_FILE"] = str(deny_dir / "cli" / "setting.json")
+        deny_dir, stripped = strip_user_config(a, env, deny_dir)
+        if stripped is not None:
+            log.write(json.dumps({"t": round(time.time(), 3), "kind": "user_config",
+                                  "data": stripped}) + "\n")
+            log.flush()
+            out["user_config"] = stripped["action"]
+        if a.agent == "agy":
+            env["GEMINI_HOME"] = str(deny_dir) if deny_dir else ensure_agy_home()
+            # Claude Code's settings point HTTPS_PROXY at the opencodex intercept
+            # proxy, which answers agy with 407 (2026-10-09).
+            for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+                env.pop(k, None)
+            # agy lists its skills dirs as workspaces too and runs commands in
+            # whichever sorts first ("Command Working Directory"), often
+            # ~/.local/share/agy-acp-home/antigravity-cli/skills, not the session
+            # cwd: verified 2026-10-09 (`pwd` printed the skills dir; agy
+            # recreates that dir if the shadow omits it). Naming the dir in the
+            # prompt fixed it; the refined-antigravity-acp wrapper does not.
+            if a.prompt_text:
+                a.prompt_text = (
+                    f"Your working directory for this task is {root}: run every"
+                    " shell command there and create files there unless told"
+                    " otherwise.\n\n" + a.prompt_text
+                )
+        if a.interactive:
+            # acp-run reports this pane to herdr itself; the agent's own herdr
+            # hooks (Claude Code's report as herdr:claude) would compete for it.
+            env.pop("HERDR_PANE_ID", None)
+            env.pop("HERDR_ENV", None)
         for attempt in range(1, tries + 1):
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -2339,8 +2475,10 @@ async def run(a, log, err, log_path):
                     code = tcode
     except asyncio.CancelledError:
         if "sig" not in got:
+            drop_deny_dir()
             raise
         main_task.uncancel()
+        drop_deny_dir()  # before up to 20 s of cancel/kill waits a SIGKILL could cut short
         if conn is not None and sess is not None and not a.info:
             try:
                 await asyncio.wait_for(conn.cancel(session_id=sess.session_id), 5)
@@ -2368,9 +2506,8 @@ async def run(a, log, err, log_path):
             failure = (cls, f"{FAILURE_TEXT[cls]}: {out['error']}")
     finally:
         logging.disable(logging.CRITICAL)  # a half-written line at shutdown is noise
+        drop_deny_dir()  # before _kill's waits; the run is over either way
         await _kill(proc)
-        if deny_dir is not None:
-            shutil.rmtree(deny_dir, ignore_errors=True)
         if herdr is not None:
             try:
                 await herdr.release()
@@ -2685,6 +2822,8 @@ def main():
         if why:
             print(f"acp-run: refusing to start: {why}", file=sys.stderr)
             return EXIT_LOAD
+    if a.perm == "deny":
+        sweep_stale_deny_dirs()  # dirs a SIGKILLed deny run could not remove
     state = Path.home() / ".local/state/acp-run"
     state.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")

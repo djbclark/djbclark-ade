@@ -77,8 +77,24 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      and key names only, never values) and the result record `user_config:
      "stripped"`. `--keep-user-config` or `ACP_RUN_KEEP_USER_CONFIG=1` keeps the
      user's config (logged as `"action": "kept"`); if the temp config cannot be
-     built, the run keeps it too and says so on stderr. `--perm all`, `ask`,
-     `scoped:` and `--interactive` runs are unchanged.
+     built, or an opencode config file cannot be read or parsed (JSONC with
+     comments and trailing commas is fine), the run keeps it too and says so on
+     stderr, naming the file. `--perm all`, `ask`, `scoped:` and `--interactive`
+     runs are unchanged.
+     Hardening after the adversary review (2026-10-13): config layers are
+     deep-merged as opencode does; a literal secret in a provider block (an
+     `apiKey`-, `token`-, `secret`-like key or any `headers` value) goes to the
+     child as `ACP_RUN_OPENCODE_SECRET_<n>` and appears in the file only as
+     `{env:...}` (values with a quote, backslash or brace stay in the 0600 file
+     and are listed in `secrets_in_file`); relative `{file:x}` references are
+     made absolute. The temp dir is built after the signal handlers are in place
+     and removed before the cancel/kill waits, so SIGTERM and early errors leave
+     nothing behind. It is not removed right after `session/new`: opencode
+     watches its config dir and reloads on change, and agy keeps reading its
+     home. Dirs are named `acp-run-<agent>-deny-<pid>-*`, and every deny run
+     first sweeps this user's such dirs under the temp base that are older than
+     3 hours, belong to a dead pid, and are real dirs (never symlinks): that
+     covers runs killed with SIGKILL.
    - `scoped:P1,P2`: allow reads, searches, fetches, thinking and commands; allow
      edit/delete/move only when every path the tool call names is under one of
      the listed paths (relative to `-C`). This is an approval policy, not a
