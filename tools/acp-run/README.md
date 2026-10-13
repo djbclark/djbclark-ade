@@ -48,6 +48,37 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      read-only ACP kinds run unasked without tripping (failover passes it for agy
      only; any other kind is a usage error). Options are never abbreviated (`allow_abbrev=False`): `--per all`
      is an error, not `--perm all`.
+     Since 2026-10-13 a `deny` run that is not `--interactive` also starts
+     **opencode and agy without the user's plugins, MCP servers and hooks**
+     (claude and zcode already ran that way). On the 2026-10-13 SkillOpt-Sleep
+     night all 21 failed attempts died while the agent started: opencode's
+     "Location plugins did not finish activating" and agy's "MCP: 7 server(s)
+     still connecting after 32s". Neither agent has a switch for it, so each gets
+     a per-run 0700 temp config, removed after the run; the user's own files are
+     only read, never changed:
+     - opencode (v2.0.27): `OPENCODE_CONFIG_DIR=<tmp>` replaces
+       `~/.config/opencode` as its global config directory, so the plugin dirs
+       there (`plugins/rtk.ts`, ...) are never scanned. `<tmp>/opencode.json`
+       holds only `$schema`, `provider`, `model`, `small_model`,
+       `enabled_providers`, `disabled_providers` and `experimental.max_retries`
+       from the user's `opencode.json`/`opencode.jsonc` (and `OPENCODE_CONFIG`,
+       which is then unset): no `mcp`, `plugin`, `agent`, `command`, hooks.
+       `OPENCODE_DISABLE_PROJECT_CONFIG=1` (and `OPENCODE_CONFIG_PROJECT_DISABLE=1`)
+       skips project `.opencode/` dirs and `opencode.json` files. Logins
+       (`opencode-go/`) live in opencode's data dir and still work. Not stripped:
+       skills in `~/.claude/skills` and `~/.agents/skills` (opencode reads them
+       with no switch to turn it off) and any `.well-known` remote config.
+     - agy: `GEMINI_HOME=<tmp>` is a shadow like `~/.local/share/agy-acp-home`
+       (symlinks to everything in `~/.gemini`, login included) whose `config/`
+       has an empty `mcp_config.json`, an empty `hooks.json` and an empty
+       `plugins/` (agy plugins carry their own MCP servers and hooks). Workspace
+       `.agents/` plugins in `-C` are not stripped.
+     The log gets a `user_config` record naming what was stripped (server, plugin
+     and key names only, never values) and the result record `user_config:
+     "stripped"`. `--keep-user-config` or `ACP_RUN_KEEP_USER_CONFIG=1` keeps the
+     user's config (logged as `"action": "kept"`); if the temp config cannot be
+     built, the run keeps it too and says so on stderr. `--perm all`, `ask`,
+     `scoped:` and `--interactive` runs are unchanged.
    - `scoped:P1,P2`: allow reads, searches, fetches, thinking and commands; allow
      edit/delete/move only when every path the tool call names is under one of
      the listed paths (relative to `-C`). This is an approval policy, not a

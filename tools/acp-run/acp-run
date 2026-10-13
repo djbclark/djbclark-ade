@@ -6,7 +6,7 @@
 """Run one prompt through a coding agent over the Agent Client Protocol (ACP).
 
     acp-run <agent> [-C DIR] [--add-dir DIR]... [-p PROMPT | -f FILE | stdin] [--perm POLICY]
-            [--model M] [--mode M] [--set ID=VALUE]... [--timeout SECS]
+            [--keep-user-config] [--model M] [--mode M] [--set ID=VALUE]... [--timeout SECS]
             [--log PATH] [--json] [--handshake-tries N] [--handshake-timeout S]
             [--no-fallback] [--prompt-retries N] [--max-load L] [--load-wait S]
             [--wrapup-grace S [--wrapup TEXT]]
@@ -44,6 +44,12 @@ The answer is always an offered allow_once or reject_once option, never an
 *_always one (those can be saved beyond this run) and never "cancelled" (that
 cancels the whole turn). An allow with no allow_once offered becomes a
 reject_once; with neither offered the agent gets a JSON-RPC error.
+Under --perm deny (without --interactive) opencode and agy start without the
+user's plugins, MCP servers and hooks, as claude and zcode do: a per-run temp
+config (opencode: OPENCODE_CONFIG_DIR holding only provider/model keys, project
+config off; agy: GEMINI_HOME with empty mcp_config.json, hooks.json, plugins/),
+removed afterwards and logged as a "user_config" record. --keep-user-config
+(env ACP_RUN_KEEP_USER_CONFIG=1) keeps them.
 --set applies any config option --info lists (e.g. --set provider=cline-pass).
 Some agents get defaults (DEFAULT_SET below): cline always runs on cline-pass.
 Agents decide what to ask about: some auto-allow by their own settings (use
@@ -378,6 +384,217 @@ def zcode_deny_settings():
     (d / "cli" / "setting.json").write_text(json.dumps(base, indent=1))
     (d / "cli" / "config.json").write_text(json.dumps({"hooks": {"enabled": False, "events": {}}}))
     return d
+
+
+# --perm deny (not --interactive) also starts opencode and agy WITHOUT the user's
+# plugins, MCP servers and hooks, as zcode (zcode_deny_settings) and claude
+# (DENY_META) already run (2026-10-13). On the 2026-10-13 SkillOpt-Sleep night all
+# 21 failed attempts died while the agent started: opencode's "Location plugins did
+# not finish activating" (its 4 plugins in ~/.config/opencode/plugins/ plus 6 MCP
+# servers) and agy's "MCP: 7 server(s) still connecting after 32s". A deny run
+# refuses every tool anyway. Neither agent has a "no plugins/MCP" switch, so each
+# gets a per-run 0700 temp config, removed after the run; the user's files are only
+# read. --keep-user-config or ACP_RUN_KEEP_USER_CONFIG=1 keeps the old behaviour.
+# What was stripped is logged as a "user_config" record (names only, no values).
+STRIP_USER_CONFIG = ("opencode", "agy")
+# Top-level opencode config keys a stripped run keeps: provider, model and auth
+# selection. Everything else (mcp, plugin/plugins, agent, command, instructions,
+# experimental hooks, permission, ...) is dropped; auth itself lives in opencode's
+# data dir, which OPENCODE_CONFIG_DIR does not move.
+OPENCODE_KEEP_KEYS = ("$schema", "provider", "model", "small_model",
+                      "enabled_providers", "disabled_providers")
+OPENCODE_KEEP_EXPERIMENTAL = ("max_retries",)
+
+
+def keep_user_config(a):
+    """'flag' / 'env' when the caller asked to keep the user's plugins and MCP, else ''."""
+    if getattr(a, "keep_user_config", False):
+        return "flag"
+    v = os.environ.get("ACP_RUN_KEEP_USER_CONFIG", "").strip().lower()
+    return "env" if v and v not in ("0", "false", "no", "off") else ""
+
+
+def jsonc_loads(text):
+    """json.loads that also takes // and /* */ comments outside strings (opencode.jsonc)."""
+    out, i, n, in_str = [], 0, len(text), False
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 1
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+            out.append(c)
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        else:
+            out.append(c)
+        i += 1
+    return json.loads("".join(out))
+
+
+def _private_write(path, text):
+    """Write a 0600 file (its 0700 temp dir is the real boundary)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+
+
+def opencode_deny_config(env):
+    """A per-run OPENCODE_CONFIG_DIR for --perm deny: one opencode.json holding only
+    OPENCODE_KEEP_KEYS from the user's global config (and OPENCODE_CONFIG, if set).
+    opencode v2 (checked 2.0.27, from the bundled source) takes OPENCODE_CONFIG_DIR as
+    its global config directory instead of ~/.config/opencode, and scans plugins
+    only in <global>/plugin(s)/ and project .opencode/ dirs, so no user plugin and
+    no MCP server is loaded; the caller also turns project config off. Returns
+    (temp dir, log info); the caller removes the dir. env is the child's env."""
+    src = Path(env.get("OPENCODE_CONFIG_DIR") or Path(
+        env.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode").expanduser()
+    files = [src / "opencode.json", src / "opencode.jsonc"]
+    if env.get("OPENCODE_CONFIG"):
+        files.append(Path(env["OPENCODE_CONFIG"]).expanduser())
+    kept, dropped, mcp, plugins, unreadable = {}, set(), set(), [], []
+    for f in files:
+        try:
+            cfg = jsonc_loads(f.read_text())
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, UnicodeDecodeError):
+            unreadable.append(str(f))
+            continue
+        if not isinstance(cfg, dict):
+            unreadable.append(str(f))
+            continue
+        for k, v in cfg.items():
+            if k == "provider" and isinstance(v, dict):
+                kept["provider"] = {**(kept.get("provider") or {}), **v}
+            elif k in OPENCODE_KEEP_KEYS:
+                kept[k] = v
+            elif k == "experimental" and isinstance(v, dict):
+                keep = {x: v[x] for x in OPENCODE_KEEP_EXPERIMENTAL if x in v}
+                if keep:
+                    kept["experimental"] = {**(kept.get("experimental") or {}), **keep}
+                if set(v) - set(keep):
+                    dropped.add("experimental." + ",".join(sorted(set(v) - set(keep))))
+            else:
+                dropped.add(k)
+        m = cfg.get("mcp")
+        if isinstance(m, dict):
+            servers = m.get("servers") if isinstance(m.get("servers"), dict) else m
+            mcp.update(str(s) for s in servers)
+        for k in ("plugin", "plugins"):
+            vals = cfg.get(k)
+            for p in vals if isinstance(vals, list) else []:
+                # a name or path only, never a plugin's options
+                name = p if isinstance(p, str) else (p[0] if isinstance(p, list) and p else
+                                                     p.get("package") if isinstance(p, dict) else None)
+                if isinstance(name, str):
+                    plugins.append(name)
+    for sub in ("plugin", "plugins"):
+        try:
+            plugins += [f"{sub}/{e.name}" for e in sorted((src / sub).iterdir())]
+        except OSError:
+            pass
+    d = Path(tempfile.mkdtemp(prefix="acp-run-opencode-deny-"))
+    try:
+        _private_write(d / "opencode.json", json.dumps(kept, indent=1))
+    except BaseException:
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    info = {"agent": "opencode", "action": "stripped", "source": str(src),
+            "kept_keys": sorted(kept), "dropped_keys": sorted(dropped),
+            "mcp_servers": sorted(mcp), "plugins": plugins, "project_config": "off",
+            "unreadable": unreadable,
+            "env": ["OPENCODE_CONFIG_DIR", "OPENCODE_DISABLE_PROJECT_CONFIG",
+                    "OPENCODE_CONFIG_PROJECT_DISABLE", "-OPENCODE_CONFIG"]}
+    return d, info
+
+
+def agy_deny_home():
+    """A per-run GEMINI_HOME for --perm deny: like ensure_agy_home()'s shadow (symlinks
+    to everything in ~/.gemini, login included) but config/ has an empty
+    mcp_config.json, an empty hooks.json and an empty plugins/ dir. agy_acp_server
+    1.3.0 reads global MCP servers from $GEMINI_HOME/config/mcp_config.json
+    (mcp_servers.load_global_mcp_configs) and plugins (each with its own skills,
+    hooks.json and mcp_config.json) from $GEMINI_HOME/config/plugins/. Returns
+    (temp dir, log info); the caller removes the dir (rmtree unlinks the symlinks
+    and never follows them)."""
+    src = Path.home() / ".gemini"
+    mcp, unreadable = [], []
+    try:
+        servers = json.loads((src / "config" / "mcp_config.json").read_text()).get("mcpServers")
+        mcp = sorted(str(s) for s in servers) if isinstance(servers, dict) else []
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, AttributeError, UnicodeDecodeError):
+        unreadable.append(str(src / "config" / "mcp_config.json"))
+    try:
+        plugins = sorted(e.name for e in (src / "config" / "plugins").iterdir() if e.is_dir())
+    except OSError:
+        plugins = []
+    d = Path(tempfile.mkdtemp(prefix="acp-run-agy-deny-"))
+    try:
+        (d / "config").mkdir(mode=0o700)
+        for base, tgt in ((src, d), (src / "config", d / "config")):
+            try:
+                entries = sorted(base.iterdir())
+            except OSError:
+                continue
+            for f in entries:
+                if base == src and f.name == "config":
+                    continue
+                if f.name == "plugins" or f.name.startswith(("hooks.json", "mcp_config.json")):
+                    continue
+                (tgt / f.name).symlink_to(f)
+        _private_write(d / "config" / "mcp_config.json", '{"mcpServers": {}}\n')
+        _private_write(d / "config" / "hooks.json", "{}\n")
+        (d / "config" / "plugins").mkdir(mode=0o700)
+    except BaseException:
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    info = {"agent": "agy", "action": "stripped", "source": str(src), "mcp_servers": mcp,
+            "plugins": plugins, "hooks": "config/hooks.json", "unreadable": unreadable,
+            "env": ["GEMINI_HOME"]}
+    return d, info
+
+
+def strip_user_config(a, env, deny_dir):
+    """Apply STRIP_USER_CONFIG to env (in place) for a --perm deny, non-interactive run
+    of opencode or agy. Returns (deny_dir, log info or None): deny_dir is the temp dir
+    the caller removes. Anything else (--perm all/ask/scoped, --interactive, other
+    agents) is untouched and logs nothing. If the temp config cannot be built the run
+    keeps the user's config (deny still refuses every tool) and says so."""
+    if a.perm != "deny" or getattr(a, "interactive", False) or a.agent not in STRIP_USER_CONFIG:
+        return deny_dir, None
+    why = keep_user_config(a)
+    if why:
+        return deny_dir, {"agent": a.agent, "action": "kept",
+                          "why": "--keep-user-config" if why == "flag" else "ACP_RUN_KEEP_USER_CONFIG"}
+    try:
+        if a.agent == "opencode":
+            d, info = opencode_deny_config(env)
+            env["OPENCODE_CONFIG_DIR"] = str(d)
+            # opencode reads OPENCODE_CONFIG_PROJECT_DISABLE ?? OPENCODE_DISABLE_PROJECT_CONFIG
+            env["OPENCODE_CONFIG_PROJECT_DISABLE"] = "1"
+            env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+            env.pop("OPENCODE_CONFIG", None)  # an explicit file is loaded on top; its kept keys are in d
+        else:
+            d, info = agy_deny_home()
+    except (OSError, ValueError) as e:
+        print(f"acp-run: could not strip {a.agent}'s plugins and MCP servers; keeping them: {e}",
+              file=sys.stderr)
+        return deny_dir, {"agent": a.agent, "action": "kept", "why": f"error: {e}"[:300]}
+    return d, info
 
 
 DENY_META = {
@@ -1881,8 +2098,13 @@ async def run(a, log, err, log_path):
         if a.agent == "zcode":
             deny_dir = zcode_deny_settings()
             env["ZCODE_CLI_SETTINGS_FILE"] = str(deny_dir / "cli" / "setting.json")
+    deny_dir, stripped = strip_user_config(a, env, deny_dir)
+    if stripped is not None:
+        log.write(json.dumps({"t": round(time.time(), 3), "kind": "user_config",
+                              "data": stripped}) + "\n")
+        log.flush()
     if a.agent == "agy":
-        env["GEMINI_HOME"] = ensure_agy_home()
+        env["GEMINI_HOME"] = str(deny_dir) if deny_dir else ensure_agy_home()
         # Claude Code's settings point HTTPS_PROXY at the opencodex intercept
         # proxy, which answers agy with 407 (2026-10-09).
         for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
@@ -1905,6 +2127,8 @@ async def run(a, log, err, log_path):
         env.pop("HERDR_PANE_ID", None)
         env.pop("HERDR_ENV", None)
     t0, out, code = time.time(), {"agent": a.agent, "log": str(log_path)}, 1
+    if stripped is not None:
+        out["user_config"] = stripped["action"]
     handshake_timeout = a.handshake_timeout or HANDSHAKE_TIMEOUT.get(
         a.agent, HANDSHAKE_TIMEOUT_DEFAULT
     )
@@ -2265,6 +2489,12 @@ def main():
     ap.add_argument("-p", "--prompt")
     ap.add_argument("-f", "--prompt-file")
     ap.add_argument("--perm", default="all")
+    ap.add_argument(
+        "--keep-user-config",
+        action="store_true",
+        help="under --perm deny, start opencode and agy with the user's plugins, MCP"
+        " servers and hooks anyway (default: stripped; env ACP_RUN_KEEP_USER_CONFIG=1)",
+    )
     ap.add_argument(
         "--tripwire-exempt-kinds",
         default="",
