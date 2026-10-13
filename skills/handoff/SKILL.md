@@ -194,10 +194,14 @@ per the 2026-08-23 operator decision retiring `just ops-memory-sync`; that
 target's release-gating precondition was failing for site-djbclark):**
 
 1. `cd ~/ops/site-private && git pull --rebase` — another agent may have
-   written to `memory/` since you started.
-2. `git add memory/handoffs/ && git commit -m "memory: handoff <repo>/<filename>"`
-   — memory-only commit; NOTHING else staged.
-3. `git push` immediately. Leave the tree clean.
+   written to `memory/` since you started. **If it refuses because another
+   agent has unstaged edits** (common in site-private), never stash, add or
+   `--autostash` them: skip the pull, do step 2, then `git fetch` and push
+   only if `git status -sb` shows ahead and not behind; if behind, ask.
+2. `git add memory/handoffs/<repo>/<filename> && git commit -m "memory: handoff <repo>/<filename>"`
+   — memory-only commit of your own file; NOTHING else staged (other
+   agents' files under `memory/handoffs/` may be untracked or modified).
+3. `git push` immediately. Leave your own changes clean.
 
 **Any other project target:**
 
