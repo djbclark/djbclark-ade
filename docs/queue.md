@@ -7,14 +7,15 @@ when they ship (into the relevant doc) or when they're dropped (say why).
 
 `bin/self-slash "/quit"` from an omp session in herdr pane w34:p2 queued, waited, and gave
 up: `~/.local/state/self-slash.log` 14:23:03-14:24:03 "no input prompt on screen yet" x9,
-then "gave up, no empty input prompt seen". Two causes: it looks for Claude's `❯` (or
+then "gave up, no empty input prompt seen". Cause: it looks for Claude's `❯` (or
 cursor's `→`) input marker, and omp draws a boxed composer (`composer.shape: box` in
-`~/.omp/agent/config.yml`); and herdr reports `agent: null` for omp panes, so self-slash
-cannot tell omp apart. So `/quit` and `/compact` via self-slash, and `/loose` Rule 4's
-quit, do not work in omp. **Decide:** teach self-slash omp's composer (screen
-scraping, breaks if the composer shape changes), or add a command channel to the omp
-bridge extension (`skills/autorename/omp-bridge.ts`), if omp's extension API can
-run a slash command or end a session.
+`~/.omp/agent/config.yml`). herdr does identify the pane (`herdr pane get` →
+`.result.pane.agent` = `"omp"`; an earlier "agent: null" read the wrong JSON path), so
+self-slash can branch on it the way it does for cursor. So `/quit` and `/compact` via
+self-slash, and `/loose` Rule 4's quit, do not work in omp yet. **Decide:** teach
+self-slash omp's composer (screen scraping, breaks if the composer shape changes), or
+add a command channel to the omp bridge extension (`skills/autorename/omp-bridge.ts`),
+if omp's extension API can run a slash command or end a session.
 
 ## Ralph on OpenCode v2: postponed (operator, 2026-10-13)
 
