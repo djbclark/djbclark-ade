@@ -29,7 +29,7 @@
 
 set -euo pipefail
 
-REAL_OPENCODE="${RALPH_TUI_OPENCODE_BIN:-/Users/djbclark/.local/bin/opencode}"   # OpenCode v2 since 2026-10-13
+REAL_OPENCODE="${RALPH_TUI_OPENCODE_BIN:-/Users/djbclark/.opencode/bin/opencode}"
 CODEXBAR_CONFIG="${CODEXBAR_CONFIG:-$HOME/.config/codexbar/config.json}"
 GATE_VAR="RALPH_TUI_ALLOW_PREPAID"
 
