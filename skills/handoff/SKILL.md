@@ -205,6 +205,9 @@ target's release-gating precondition was failing for site-djbclark):**
 
 **Any other project target:**
 
+0. If the repo's `.pre-commit-config.yaml` runs prettier, run `npx --no-install
+   prettier --write <handoff file>` first: its check hook rejects the commit
+   otherwise (2026-10-13, aiuse).
 1. `cd <repo-root> && git add docs/handoffs/ && git commit -m "docs: handoff <slug>"`
    — handoff-only commit; nothing else staged.
 2. Push only if that project's own AGENTS.md/CLAUDE.md declares an
