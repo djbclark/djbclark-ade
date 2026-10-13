@@ -116,7 +116,20 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      built, or an opencode config file cannot be read or parsed (JSONC with
      comments and trailing commas is fine), the run keeps it too and says so on
      stderr, naming the file. `--perm all`, `ask`, `scoped:` and `--interactive`
-     runs are unchanged.
+     runs are unchanged unless `--strip-user-config` is given.
+     `--strip-user-config` (env `ACP_RUN_STRIP_USER_CONFIG=1`, 2026-10-13) applies
+     the same strip under any non-interactive `--perm` for opencode, agy, crush and
+     zcode. It is a startup-reliability switch, not a permission control: the
+     SkillOpt-Sleep night runs `--perm all --strip-user-config` (operator,
+     2026-10-13). Outside deny nothing permission-related is added: opencode gets
+     no `OPENCODE_CONFIG_CONTENT`, agy and zcode keep their `--perm all` yolo modes,
+     crush keeps every built-in tool (a per-run `crush-strip-` data dir and
+     `--data-dir` with only `auto_lsp: false` and project MCP servers disabled,
+     logged as `strip_config`; crushrc `mcp`/`lsp`/`hook`/`permissions` shadowed as
+     under deny), and zcode gets a per-run `ZCODE_CLI_SETTINGS_FILE` with MCP,
+     plugins, skills and hooks off and the user's `permission` block untouched.
+     Temp dirs are `acp-run-<agent>-strip-<pid>-*` and are swept like deny dirs.
+     Under `--perm deny` the flag adds nothing; `--keep-user-config` wins.
      Hardening after the adversary review (2026-10-13): config layers are
      deep-merged as opencode does; a literal secret in a provider block (an
      `apiKey`-, `token`-, `secret`-like key or any `headers` value) goes to the

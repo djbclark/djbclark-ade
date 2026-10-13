@@ -24,8 +24,9 @@ backend), so no external backend can be registered without patching it. The
 night therefore runs SkillOpt's `handoff` backend: the engine writes each round
 of model calls to pending.json and exits 3; this runner answers every prompt
 through one entry of the chain in ~/.skillopt-sleep/night.json (bin/failover.py:
-acp-run in a clean empty dir with --perm deny, so each prompt gets a fresh
-context, or an OpenAI-compatible POST for the SIPB endpoint) and reruns, until
+acp-run --strip-user-config in a clean empty dir under the entry's --perm, so each
+prompt gets a fresh context, or an OpenAI-compatible POST for the SIPB endpoint) and
+reruns, until
 the engine finishes. One entry answers a whole source night, so baseline and
 candidate scores come from the same model. If an entry fails (preflight, an
 answer, the run itself, or the night's diagnostics), the runner restores
@@ -37,7 +38,13 @@ Guards, in order:
 1. A stateful night refuses unless night.json exists with `"enabled": true` and
    a non-empty chain: it prints "waiting for backend decision" and exits 0, so
    the launchd job stays inert until the operator approves the chain. A chain
-   that violates policy (bin/failover.py DENY, the allowlist) is refused whole.
+   that violates policy (bin/failover.py DENY, the allowlist, a perm outside
+   deny/all) is refused whole. night.json "perm" (entry "perm" overrides) picks
+   acp-run's --perm per entry: "deny" (failover's default: the deny canary, the
+   exit-77 tripwire) or "all" (operator 2026-10-13: "I want all of the TUIs and
+   hermes to be able to run any tools they want"; no canary, no tripwire, the agent
+   runs any tool with the user's permissions in an empty temp dir). Every attempt
+   line, attempts.jsonl row and nights.jsonl row names the perm.
 2. The load gate reuses `machine_overloaded()` from bin/acp-dispatch (load above
    4x CPUs or critical memory pressure); it waits up to --load-wait seconds,
    then skips the night. Since 2026-10-13 every prompt has its own, stricter gate
@@ -107,8 +114,11 @@ NATIVE_SOURCES = ("claude", "codex", "cursor", "opencode", "copilot_cli")
 ADAPTER_SOURCES = ("zcode", "agy", "crush", "hermes", "grok", "muse", "cline", "acp_dispatch")
 SOURCES = NATIVE_SOURCES + ADAPTER_SOURCES
 # Operator 2026-10-12 (approved chain): the only backends a night may use, and words no
-# entry may contain (on top of failover.DENY: cursor, cline, clinepass, hermes, opus, fable).
-DEFAULT_ALLOW = ["opencode", "agy", "zcode", "claude", "crush"]
+# entry may contain (on top of failover.DENY: cursor, cline, clinepass, opus, fable).
+# Hermes admitted 2026-10-13 (operator: "I want all of the TUIs and hermes to be able to
+# run any tools they want"); muse, pi, grok, codex, copilot (and failover.DENY's cursor,
+# cline/clinepass, opus, fable) stay denied until the operator revisits them.
+DEFAULT_ALLOW = ["opencode", "agy", "zcode", "claude", "crush", "hermes"]
 NIGHT_DENY = (*failover.DENY, "muse", "pi", "grok", "codex", "copilot")
 # Chain entries that SkillOpt can also drive with its own backend (--native).
 NATIVE_BACKENDS = ("opencode", "claude")
@@ -192,8 +202,12 @@ def load_night() -> dict[str, Any]:
 
 
 def load_entries(night: dict[str, Any]) -> list[failover.Entry]:
+    """The night's chain: night.json "perm" is the chain default (failover's "deny" when
+    absent), an entry's "perm" overrides it; every acp entry gets acp-run
+    --strip-user-config (the 2026-10-13 startup-failure fix, not a permission control)."""
     return failover.load_chain(night.get("chain") or [],
-                               allow=night.get("allow") or DEFAULT_ALLOW, deny=NIGHT_DENY)
+                               allow=night.get("allow") or DEFAULT_ALLOW, deny=NIGHT_DENY,
+                               perm=night.get("perm"), strip_user_config=True)
 
 
 # ── sources ──────────────────────────────────────────────────────────────────
@@ -712,7 +726,8 @@ def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[st
         last: frozenset[str] = frozenset()
         try:
             with open(log, "a") as lf:
-                lf.write(f"\n== attempt on {entry.label}{' (native backend)' if use_native else ''}\n")
+                lf.write(f"\n== attempt on {entry.label} perm={entry.perm}"
+                         f"{' (native backend)' if use_native else ''}\n")
             while True:
                 rounds += 1
                 rc, stdout = invoke(cmd, log=log, env=env, timeout=stop - time.monotonic())
@@ -740,6 +755,7 @@ def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[st
         archive_handoff(source)
         return {"rc": rc, "result": result, "rounds": rounds, "answered": answered}
 
+    perms = {e.label: e.perm for e in entries}
     stopped = None
     try:
         res = failover.run_chain(entries, attempt, task=f"skillopt-night {source}",
@@ -750,22 +766,23 @@ def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[st
         pinned.unlink(missing_ok=True)  # transcript excerpts; the night's own copy is archived
     if res is None:
         row = {"source": source, "mode": "run", "status": f"stopped: {stopped}", "rc": None,
-               "proposals": 0, "retries": pacing.retried, "log": str(log)}
+               "proposals": 0, "retries": pacing.retried, "perms": perms, "log": str(log)}
     elif not res.ok:
         failed = [f"{r['label']}: {r['why']}" for r in res.attempts if not r["ok"]]
         row = {"source": source, "mode": "run", "status": "chain_exhausted", "rc": None,
-               "proposals": 0, "failed": failed, "retries": pacing.retried, "log": str(log)}
+               "proposals": 0, "failed": failed, "retries": pacing.retried, "perms": perms,
+               "log": str(log)}
     else:
         failed = [f"{r['label']}: {r['why']}" for r in res.attempts if not r["ok"]]
         v, result = res.value, res.value["result"]
         row = {"source": source, "mode": "run", "status": "ok", "entry": res.entry.label,
-               "rc": v["rc"], "rounds": v["rounds"], "answered": v["answered"],
+               "perm": res.entry.perm, "rc": v["rc"], "rounds": v["rounds"], "answered": v["answered"],
                # the engine reports 0 sessions for pinned digests: count what was pinned
                "sessions": n_pinned if not result.get("n_sessions") else result.get("n_sessions"),
                "tasks": result.get("n_tasks"),
                "accepted": result.get("accepted"), "gate": result.get("gate_action") or None,
                "proposals": n_proposals(result), "staging_dir": result.get("staging_dir") or None,
-               "failed": failed, "retries": pacing.retried, "log": str(log)}
+               "failed": failed, "retries": pacing.retried, "perms": perms, "log": str(log)}
     record(row)
     return row
 
@@ -847,6 +864,7 @@ def cmd_night(args: argparse.Namespace) -> int:
             failover.sweep_logs()
     for r in rows:
         print(f"{r['source']:12} {r.get('status', 'ok'):15} entry={r.get('entry', '-')} "
+              f"perm={r.get('perm') or ','.join(sorted(set((r.get('perms') or {}).values()))) or '-'} "
               f"rc={r.get('rc')} sessions={r.get('sessions')} tasks={r.get('tasks')} "
               f"pending={r.get('pending_prompts', '-')} "
               f"gate={r.get('gate')} proposals={r.get('proposals')} log={r['log']}")
@@ -956,7 +974,8 @@ def cmd_preadopt_check(args: argparse.Namespace) -> int:
 def cmd_chain_check(args: argparse.Namespace) -> int:
     night = load_night()
     print(f"chain: {night_path()} enabled={bool(night.get('enabled'))} "
-          f"allow={night.get('allow') or DEFAULT_ALLOW}")
+          f"allow={night.get('allow') or DEFAULT_ALLOW} "
+          f"perm={night.get('perm') or failover.DEFAULT_PERM} (entry perm overrides)")
     try:
         entries = load_entries(night)
     except failover.ChainError as e:
@@ -967,7 +986,7 @@ def cmd_chain_check(args: argparse.Namespace) -> int:
         return 1
     rows = failover.check_table(entries, probe=args.probe)
     failover.print_table(rows, ["#", "label", "vendor", "pool", "pool_family",
-                                "floor_percent", "ready", "why"])
+                                "floor_percent", "perm", "ready", "why"])
     return 0 if any(r["ready"] == "yes" for r in rows) else 1
 
 

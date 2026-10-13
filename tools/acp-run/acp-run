@@ -6,7 +6,7 @@
 """Run one prompt through a coding agent over the Agent Client Protocol (ACP).
 
     acp-run <agent> [-C DIR] [--add-dir DIR]... [-p PROMPT | -f FILE | stdin] [--perm POLICY]
-            [--keep-user-config] [--model M] [--mode M] [--set ID=VALUE]... [--timeout SECS]
+            [--keep-user-config] [--strip-user-config] [--model M] [--mode M] [--set ID=VALUE]... [--timeout SECS]
             [--log PATH] [--json] [--handshake-tries N] [--handshake-timeout S]
             [--no-fallback] [--prompt-retries N] [--max-load L] [--load-wait S]
             [--wrapup-grace S [--wrapup TEXT]]
@@ -54,6 +54,17 @@ as a "user_config" record. --keep-user-config (env ACP_RUN_KEEP_USER_CONFIG=1)
 keeps them. Under any --perm deny crush also gets no tools at all: every built-in
 tool is disabled in per-run config layers (crush runs its read-only tools without
 asking, so no permission answer could deny them); logged as "deny_config".
+--strip-user-config (env ACP_RUN_STRIP_USER_CONFIG=1) applies the same strip of
+the user's plugins, MCP servers and hooks under ANY --perm (not --interactive),
+for opencode, agy, crush and zcode; it is a startup-reliability switch, not a
+permission control (operator 2026-10-13: the SkillOpt-Sleep night runs --perm all
+with it). Outside --perm deny nothing else changes: opencode gets no deny
+permission, agy and zcode keep their --perm all modes, crush keeps every built-in
+tool (only its LSP auto-start and project MCP servers are off; a per-run data dir
+and --data-dir as under deny); zcode gets a per-run settings file with MCP,
+plugins, skills and hooks off and the user's permission block untouched. Under
+--perm deny it changes nothing (deny already strips). Temp dirs are named
+acp-run-<agent>-strip-<pid>-*; --keep-user-config still wins.
 --set applies any config option --info lists (e.g. --set provider=cline-pass).
 Some agents get defaults (DEFAULT_SET below): cline always runs on cline-pass.
 Agents decide what to ask about: some auto-allow by their own settings (use
@@ -372,7 +383,9 @@ DENY_DIR_PREFIX = "acp-run-"
 # The pid is bounded (a planted 11-digit name made os.kill raise OverflowError and
 # stopped every deny run: adversary re-review 2026-10-13, finding 1); fullmatch, so a
 # trailing newline does not match.
-DENY_DIR_RE = re.compile(r"acp-run-[a-z]+-deny-(?:(\d{1,7})-)?[A-Za-z0-9_]+")
+# --strip-user-config outside --perm deny names its dirs <prefix><agent>-strip-<pid>-...
+# (2026-10-13), swept the same way.
+DENY_DIR_RE = re.compile(r"acp-run-[a-z]+-(?:deny|strip)-(?:(\d{1,7})-)?[A-Za-z0-9_]+")
 DENY_DIR_MAX_AGE = 3 * 3600
 
 
@@ -446,22 +459,36 @@ def zcode_deny_settings():
     zcode reads it through ZCODE_CLI_SETTINGS_FILE ("lets a host run one process on
     its own settings file (hooks, MCP servers, permissions)"), so only this child is
     affected. Returns the temp dir (caller removes it)."""
+    return _zcode_settings(deny=True)
+
+
+def zcode_strip_settings():
+    """The --strip-user-config settings dir for zcode outside --perm deny (2026-10-13):
+    like zcode_deny_settings, MCP servers, plugins, skills and hooks off, but the
+    user's permission block and subagent feature untouched (the run keeps its --perm
+    all yolo mode and every built-in tool). Returns the temp dir (caller removes it)."""
+    return _zcode_settings(deny=False)
+
+
+def _zcode_settings(deny):
     try:
         base = json.loads((Path.home() / ".zcode" / "cli" / "setting.json").read_text())
     except (OSError, ValueError):
         base = {}
     if not isinstance(base, dict):
         base = {}
-    base["features"] = {**(base.get("features") or {}),
-                        "mcp": False, "subagent": False, "skill": False}
+    off = {"mcp": False, "subagent": False, "skill": False} if deny else {"mcp": False, "skill": False}
+    base["features"] = {**(base.get("features") or {}), **off}
     base["mcp"] = {"servers": {}}
     base["plugins"] = {**(base.get("plugins") or {}), "enabled": False, "enabledPlugins": {}}
     base["skills"] = {**(base.get("skills") or {}), "enabled": False, "roots": []}
     base["hooks"] = {"enabled": False, "events": {}}
-    base["permission"] = {**(base.get("permission") or {}), "mode": "plan", "allowedTools": [],
-                          "autoApproveHighRisk": False, "allowMediumRiskInAuto": False,
-                          "disallowedTools": DENY_ENV["zcode"]["ZCODE_DISALLOWED_TOOLS"].split()}
-    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}zcode-deny-{os.getpid()}-"))
+    if deny:
+        base["permission"] = {**(base.get("permission") or {}), "mode": "plan", "allowedTools": [],
+                              "autoApproveHighRisk": False, "allowMediumRiskInAuto": False,
+                              "disallowedTools": DENY_ENV["zcode"]["ZCODE_DISALLOWED_TOOLS"].split()}
+    tag = "deny" if deny else "strip"
+    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}zcode-{tag}-{os.getpid()}-"))
     (d / "cli").mkdir()
     (d / "cli" / "setting.json").write_text(json.dumps(base, indent=1))
     (d / "cli" / "config.json").write_text(json.dumps({"hooks": {"enabled": False, "events": {}}}))
@@ -494,6 +521,27 @@ def keep_user_config(a):
         return "flag"
     v = os.environ.get("ACP_RUN_KEEP_USER_CONFIG", "").strip().lower()
     return "env" if v and v not in ("0", "false", "no", "off") else ""
+
+
+# --strip-user-config / ACP_RUN_STRIP_USER_CONFIG=1 (2026-10-13): the strip above, decoupled
+# from --perm deny. The startup failures it fixed were plugins and MCP servers, not
+# permissions, and the SkillOpt-Sleep night now runs --perm all (operator 2026-10-13).
+# Outside deny it applies to these agents; under deny it adds nothing (deny strips already).
+STRIP_ANY_PERM = ("opencode", "agy", "crush", "zcode")
+
+
+def strip_requested(a):
+    """True when the caller asked for --strip-user-config (flag or env)."""
+    if getattr(a, "strip_user_config", False):
+        return True
+    v = os.environ.get("ACP_RUN_STRIP_USER_CONFIG", "").strip().lower()
+    return bool(v) and v not in ("0", "false", "no", "off")
+
+
+def strips_outside_deny(a):
+    """--strip-user-config applies to this run beyond what --perm deny already does."""
+    return (a.perm != "deny" and not getattr(a, "interactive", False)
+            and a.agent in STRIP_ANY_PERM and strip_requested(a))
 
 
 def jsonc_loads(text):
@@ -589,7 +637,7 @@ def _private_write(path, text):
         f.write(text)
 
 
-def opencode_deny_config(env):
+def opencode_deny_config(env, tag="deny"):
     """A per-run OPENCODE_CONFIG_DIR for --perm deny: one opencode.json holding only
     OPENCODE_KEEP_KEYS from the user's global config (and OPENCODE_CONFIG, if set),
     deep-merged in that order as opencode does. opencode v2 (checked 2.0.27, from the
@@ -650,7 +698,7 @@ def opencode_deny_config(env):
     extra_env, on_disk = {}, []
     if isinstance(kept.get("provider"), dict):
         _secrets_to_env(kept["provider"], extra_env, on_disk)
-    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}opencode-deny-{os.getpid()}-"))
+    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}opencode-{tag}-{os.getpid()}-"))
     try:
         _private_write(d / "opencode.json", json.dumps(kept, indent=1))
     except BaseException:
@@ -666,7 +714,7 @@ def opencode_deny_config(env):
     return d, info, extra_env
 
 
-def agy_deny_home():
+def agy_deny_home(tag="deny"):
     """A per-run GEMINI_HOME for --perm deny: like ensure_agy_home()'s shadow (symlinks
     to everything in ~/.gemini, login included) but config/ has an empty
     mcp_config.json, an empty hooks.json and an empty plugins/ dir. agy_acp_server
@@ -688,7 +736,7 @@ def agy_deny_home():
         plugins = sorted(e.name for e in (src / "config" / "plugins").iterdir() if e.is_dir())
     except OSError:
         plugins = []
-    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}agy-deny-{os.getpid()}-"))
+    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}agy-{tag}-{os.getpid()}-"))
     try:
         (d / "config").mkdir(mode=0o700)
         for base, tgt in ((src, d), (src / "config", d / "config")):
@@ -785,7 +833,7 @@ def _crush_mcp_names(path):
     return [str(k) for k in m] if isinstance(m, dict) else []
 
 
-def crush_deny_dir(cmd, root, env):
+def crush_deny_dir(cmd, root, env, tools_off=True):
     """The tools-off half of --perm deny for crush (always applied, --interactive and
     --keep-user-config included). A per-run 0700 temp dir holding:
       data/crush.json     the global data layer (CRUSH_GLOBAL_DATA; it merges after the
@@ -798,16 +846,25 @@ def crush_deny_dir(cmd, root, env):
     cache providers.json from the agent's usual data dir. --data-dir moves crush's
     session database and workspace overrides out of -C (a .crush/crush.json there would
     otherwise merge last). Returns (temp dir, new cmd, log info); env gets
-    CRUSH_GLOBAL_DATA too. Raises OSError (nothing left behind) when it cannot be built."""
+    CRUSH_GLOBAL_DATA too. Raises OSError (nothing left behind) when it cannot be built.
+
+    tools_off=False (--strip-user-config outside --perm deny, 2026-10-13) builds the same
+    dir, named crush-strip-, without disabled_tools and without the permissions key:
+    every built-in tool stays on and crush's own --yolo / permission prompts (which
+    --perm all auto-approves) decide; LSP auto-start and project MCP servers stay off."""
     src = next((x.split("=", 1)[1] for x in cmd if x.startswith("CRUSH_GLOBAL_DATA=")),
                env.get("CRUSH_GLOBAL_DATA"))
     project = crush_project_configs(root)
     mcp = sorted({n for f in project for n in _crush_mcp_names(f)})
-    over = {"options": {"disabled_tools": list(CRUSH_TOOLS), "auto_lsp": False},
-            "permissions": {"skip_requests": False}}
+    if tools_off:
+        over = {"options": {"disabled_tools": list(CRUSH_TOOLS), "auto_lsp": False},
+                "permissions": {"skip_requests": False}}
+    else:
+        over = {"options": {"auto_lsp": False}}
     if mcp:
         over["mcp"] = {n: {"disabled": True} for n in mcp}
-    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}crush-deny-{os.getpid()}-"))
+    tag = "deny" if tools_off else "strip"
+    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}crush-{tag}-{os.getpid()}-"))
     try:
         for sub in ("data", "project"):
             (d / sub).mkdir(mode=0o700)
@@ -822,7 +879,8 @@ def crush_deny_dir(cmd, root, env):
     new = [data if x.startswith("CRUSH_GLOBAL_DATA=") else x for x in cmd]
     new += ["--data-dir", str(d / "project")]
     env["CRUSH_GLOBAL_DATA"] = str(d / "data")
-    info = {"agent": "crush", "tools": "none", "disabled_tools": len(CRUSH_TOOLS),
+    info = {"agent": "crush", "tools": "none" if tools_off else "all",
+            "disabled_tools": len(CRUSH_TOOLS) if tools_off else 0,
             "project_config": [str(f) for f in project], "project_mcp_disabled": mcp,
             "env": ["CRUSH_GLOBAL_DATA"], "args": ["--data-dir"]}
     rcs = [str(f) for f in project if f.name.endswith("rc")]
@@ -835,7 +893,7 @@ def crush_deny_dir(cmd, root, env):
     return d, new, info
 
 
-def crush_strip_config(env, d):
+def crush_strip_config(env, d, why="--perm deny"):
     """The user-config half of --perm deny for crush (STRIP_USER_CONFIG): a per-run
     global config dir d/config (CRUSH_GLOBAL_CONFIG) whose crushrc sources the user's
     crushrc for its providers and models, with the config builtins that add MCP servers
@@ -880,7 +938,7 @@ def crush_strip_config(env, d):
                 if _SECRET_KEY.search(str(key)) and isinstance(p[key], str) and not p[key].startswith("$"):
                     on_disk.append(f"providers.{name}.{key}")
     shadows = (
-        "# acp-run --perm deny: this run's crush config, removed after the run.\n"
+        f"# acp-run {why}: this run's crush config, removed after the run.\n"
         "mcp() { :; }\nlsp() { :; }\nhook() { :; }\npermissions() { :; }\n"
         "option() {\n  case \"$1\" in\n    " + "|".join(CRUSH_RC_KEEP_OPTIONS)
         + ") command option \"$@\" ;;\n  esac\n}\n"
@@ -912,16 +970,32 @@ def strip_user_config(a, env, deny_dir):
     Known limits (adversary review 2026-10-13, finding 4): auth a run rewrites by
     write-then-rename through the agy shadow's symlinks (oauth_creds.json) lands in
     the temp dir and is lost with it; opencode {file:x} references are made absolute,
-    but a relative one added by another config layer would resolve against the temp dir."""
-    if a.perm != "deny" or getattr(a, "interactive", False) or a.agent not in STRIP_USER_CONFIG:
+    but a relative one added by another config layer would resolve against the temp dir.
+
+    --strip-user-config (strips_outside_deny, 2026-10-13) applies the same strip under any
+    other non-interactive --perm for opencode, agy, crush and zcode, with dirs named
+    -strip- and nothing permission-related added: opencode gets no deny permission
+    (DENY_ENV is applied by run() under deny only), zcode a settings file with the user's
+    permission block untouched (zcode_strip_settings), crush builds inside run()'s
+    tools-on dir (crush_deny_dir tools_off=False)."""
+    outside = strips_outside_deny(a)
+    if not outside and (a.perm != "deny" or getattr(a, "interactive", False)
+                        or a.agent not in STRIP_USER_CONFIG):
         return deny_dir, None
     why = keep_user_config(a)
     if why:
         return deny_dir, {"agent": a.agent, "action": "kept",
                           "why": "--keep-user-config" if why == "flag" else "ACP_RUN_KEEP_USER_CONFIG"}
+    tag = "strip" if outside else "deny"
     try:
+        if outside and a.agent == "zcode":
+            d = zcode_strip_settings()
+            env["ZCODE_CLI_SETTINGS_FILE"] = str(d / "cli" / "setting.json")
+            return d, {"agent": "zcode", "action": "stripped", "mcp": "off", "plugins": "off",
+                       "skills": "off", "hooks": "off", "permission": "user's",
+                       "env": ["ZCODE_CLI_SETTINGS_FILE"]}
         if a.agent == "opencode":
-            d, info, extra = opencode_deny_config(env)
+            d, info, extra = opencode_deny_config(env, tag)
             env.update(extra)  # literal provider secrets, referenced as {env:...} in d
             env["OPENCODE_CONFIG_DIR"] = str(d)
             # opencode reads OPENCODE_CONFIG_PROJECT_DISABLE ?? OPENCODE_DISABLE_PROJECT_CONFIG
@@ -932,9 +1006,11 @@ def strip_user_config(a, env, deny_dir):
             # builds inside the tools-off dir run() made (crush_deny_dir)
             if deny_dir is None:
                 raise ValueError("no per-run crush dir")
+            if outside:
+                return deny_dir, crush_strip_config(env, deny_dir, "--strip-user-config")
             return deny_dir, crush_strip_config(env, deny_dir)
         else:
-            d, info = agy_deny_home()
+            d, info = agy_deny_home(tag)
     except (OSError, ValueError) as e:
         print(f"acp-run: could not strip {a.agent}'s plugins and MCP servers; keeping them: {e}",
               file=sys.stderr)
@@ -2491,6 +2567,18 @@ async def run(a, log, err, log_path):
                 log.write(json.dumps({"t": round(time.time(), 3), "kind": "deny_config",
                                       "data": crush_info}) + "\n")
                 log.flush()
+        elif a.agent == "crush" and strips_outside_deny(a) and not keep_user_config(a):
+            # --strip-user-config outside deny: the same per-run data dir and --data-dir,
+            # every tool on; if it cannot be built, crush runs on the user's config
+            try:
+                deny_dir, cmd, crush_info = crush_deny_dir(cmd, root, env, tools_off=False)
+                log.write(json.dumps({"t": round(time.time(), 3), "kind": "strip_config",
+                                      "data": crush_info}) + "\n")
+                log.flush()
+            except OSError as e:
+                with contextlib.suppress(OSError):
+                    print(f"acp-run: could not build crush's per-run config dir; keeping the "
+                          f"user's: {e}", file=sys.stderr)
         deny_dir, stripped = strip_user_config(a, env, deny_dir)
         if stripped is not None:
             log.write(json.dumps({"t": round(time.time(), 3), "kind": "user_config",
@@ -2865,6 +2953,13 @@ def main():
         " servers and hooks anyway (default: stripped; env ACP_RUN_KEEP_USER_CONFIG=1)",
     )
     ap.add_argument(
+        "--strip-user-config",
+        action="store_true",
+        help="strip opencode's, agy's, crush's and zcode's plugins, MCP servers and hooks"
+        " under any --perm, not only deny (not a permission control; env"
+        " ACP_RUN_STRIP_USER_CONFIG=1); --keep-user-config wins",
+    )
+    ap.add_argument(
         "--tripwire-exempt-kinds",
         default="",
         help="comma-separated read-only ACP tool kinds (read, search) that may run"
@@ -3054,8 +3149,8 @@ def main():
         if why:
             print(f"acp-run: refusing to start: {why}", file=sys.stderr)
             return EXIT_LOAD
-    if a.perm == "deny":
-        safe_sweep_stale_deny_dirs()  # dirs a SIGKILLed deny run could not remove
+    if a.perm == "deny" or strips_outside_deny(a):
+        safe_sweep_stale_deny_dirs()  # dirs a SIGKILLed deny/strip run could not remove
     state = Path.home() / ".local/state/acp-run"
     state.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")

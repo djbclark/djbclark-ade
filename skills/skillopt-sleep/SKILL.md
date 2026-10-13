@@ -75,22 +75,30 @@ Never pass `--auto-adopt`.
 The engine runs SkillOpt's `handoff` backend; `bin/skillopt-night` answers each
 round's prompts through the first working entry of the chain in
 `~/.skillopt-sleep/night.json` (library: `bin/failover.py`, docs/failover.md).
-Each prompt is a fresh `acp-run` session in an empty dir with `--perm deny`,
-which acp-run enforces per agent (no tools; a tripwire exits 77 if one still
-runs), and a nightly canary refuses any entry that can still create a file. One entry answers a whole source night; if
+Each prompt is a fresh `acp-run` session in an empty dir with
+`--strip-user-config` and the entry's `--perm` (night.json `"perm"`, an entry's
+own `"perm"` overrides; default `deny`). Under `deny` acp-run enforces it per
+agent (no tools; a tripwire exits 77 if one still runs) and a nightly canary
+refuses any entry that can still create a file. Under `all` (operator
+2026-10-13: "I want all of the TUIs and hermes to be able to run any tools they
+want") the agent runs any tool with the user's permissions, with no canary and
+no tripwire, on prompts built from mined session text that can carry injected
+instructions; the empty dir hands it nothing but confines nothing
+(docs/skillopt-sleep.md section 4). One entry answers a whole source night; if
 it fails, state is restored and the night reruns on the next entry.
 
 ```sh
-~/src/djbclark-ade/bin/skillopt-night chain-check     # preflight table: pool, floor, ready, why
+~/src/djbclark-ade/bin/skillopt-night chain-check     # preflight table: pool, floor, perm, ready, why
 tail -n 20 ~/.local/state/skillopt-sleep/attempts.jsonl   # what each entry did and why it was skipped
 ```
 
 Policy (operator-approved chain, 2026-10-12): opencode (Go: minimax-m3), agy
 (Gemini 3.8 Flash medium, then Claude Sonnet 5.5 low), zcode (low), claude
 (Haiku 5.5 low, then Sonnet 5.5 low; floor 15%), crush (probe), then opencode
-`sipb/qwen3-coder:30b` and `sipb/deepseek-r1:32b`. Never cursor, cline,
-ClinePass, Hermes, muse, pi, grok, codex, copilot, Opus or Fable; such a chain
-is refused whole. Every entry answers through acp-run; `--native` lets the
+`sipb/qwen3-coder:30b` and `sipb/deepseek-r1:32b`; since 2026-10-13 hermes may
+be an entry too (`hermes acp`, its own model chain, a probe like crush). Never
+cursor, cline, ClinePass, muse, pi, grok, codex, copilot, Opus or Fable; such a
+chain is refused whole. Every entry answers through acp-run; `--native` lets the
 opencode and claude entries use SkillOpt's own backends. The chain is installed
 with `"enabled": false`; enable with `"enabled": true` after a clean
 `chain-check` (`--probe` also runs crush's one-prompt probe). Keep

@@ -93,7 +93,6 @@ def test_load_keeps_order_and_resolves_pools():
 @pytest.mark.parametrize("raw", [
     {"tui": "cursor"},
     {"tui": "cline"},
-    {"tui": "hermes"},
     {"tui": "claude", "model": "opus"},
     {"tui": "claude", "model": "claude-fable-5"},
     {"tui": "agy", "model": "claude-opus-5-5", "effort": "low"},
@@ -842,3 +841,178 @@ def test_cli_run_fails_over(tmp_path):
     assert failover.main(["run", "--chain", str(chain), "--", sys.executable, "-c", code, "{model}"]) == 0
     rows = [r for r in _log(tmp_path) if r["phase"] == "attempt"]
     assert [(r["model"], r["ok"]) for r in rows] == [("haiku", False), ("sonnet", True)]
+
+
+# ── perm: deny (default) or all (operator 2026-10-13) ───────────────────────
+
+def test_perm_defaults_to_deny_everywhere():
+    assert failover.DEFAULT_PERM == "deny" and failover.PERMS == ("deny", "all")
+    (e,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    assert e.perm == "deny" and e.strip_user_config is False
+    assert e.row()["perm"] == "deny"
+
+
+def test_perm_chain_default_and_entry_override():
+    spec = {"perm": "all", "chain": [{"tui": "claude", "model": "haiku"},
+                                     {"tui": "opencode", "model": "opencode-go/kimi-k3", "perm": "deny"}]}
+    a, d = failover.load_chain(spec)
+    assert (a.perm, d.perm) == ("all", "deny")
+    a, d = failover.load_chain([{"tui": "claude", "model": "haiku", "perm": "all"},
+                                {"tui": "zcode"}], perm="deny")
+    assert (a.perm, d.perm) == ("all", "deny")
+    (x,) = failover.load_chain({"perm": "deny", "chain": [{"tui": "zcode"}]}, perm="all")
+    assert x.perm == "all", "the caller's perm beats the spec's top-level perm"
+
+
+@pytest.mark.parametrize("spec", [
+    {"perm": "ask", "chain": [{"tui": "zcode"}]},
+    {"perm": "scoped:.", "chain": [{"tui": "zcode"}]},
+    {"perm": True, "chain": [{"tui": "zcode"}]},
+    {"chain": [{"tui": "zcode", "perm": "ALL"}]},
+    {"chain": [{"tui": "zcode", "perm": None}]},
+    {"chain": [{"tui": "zcode", "perm": ["all"]}]},
+])
+def test_unknown_perm_refused(spec):
+    with pytest.raises(failover.ChainError, match="perm must be one of deny, all"):
+        failover.load_chain(spec)
+
+
+def test_perm_cannot_come_through_extra_args():
+    for extra in (["--perm", "all"], ["--strip-user-config"], ["--perm=all"]):
+        with pytest.raises(failover.ChainError, match="extra_args may not pass"):
+            failover.load_chain([{"tui": "zcode", "extra_args": extra}])
+
+
+def test_acp_command_perm_all_and_strip(tmp_path):
+    agy, zc = failover.load_chain({"perm": "all", "chain": [
+        {"tui": "agy", "model": "gemini-3.8-flash", "effort": "medium"}, {"tui": "zcode"}]},
+        strip_user_config=True)
+    cmd = failover.acp_command(agy, tmp_path / "p", tmp_path)
+    assert cmd[cmd.index("--perm") + 1] == "all" and "--strip-user-config" in cmd
+    assert "--tripwire-exempt-kinds" not in cmd, "the exemption only means something under deny"
+    assert "--strip-user-config" in failover.acp_command(zc, tmp_path / "p", tmp_path)
+    (d,) = failover.load_chain([{"tui": "agy", "model": "gemini-3.8-flash", "effort": "medium"}])
+    cmd = failover.acp_command(d, tmp_path / "p", tmp_path)
+    assert cmd[cmd.index("--perm") + 1] == "deny" and "--strip-user-config" not in cmd
+    assert cmd[cmd.index("--tripwire-exempt-kinds") + 1] == "read,search"
+    d.perm = "yolo"
+    with pytest.raises(failover.ChainError, match="perm must be one of"):
+        failover.acp_command(d, tmp_path / "p", tmp_path)
+
+
+def test_preflight_perm_all_never_runs_the_canary(monkeypatch):
+    monkeypatch.setattr(failover, "canary_ok", lambda e: pytest.fail("canary ran under perm all"))
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku", "perm": "all"}])
+    ok, why = failover.preflight(cl)
+    assert ok and why == "pool claude headroom 20.0% > floor 5.0%; perm all: no canary"
+    assert failover.preflight(cl, probe=False) == (True, why)
+    (oc,) = failover.load_chain([{"tui": "opencode", "model": "opencode-go/kimi-k3", "perm": "all"}])
+    assert failover.preflight(oc) == (True, "pool opencode-go headroom 8.0% > floor 5.0%; perm all: no canary")
+    (low,) = failover.load_chain([{"tui": "opencode", "model": "opencode-go/kimi-k3", "perm": "all",
+                                   "floor_percent": 10}])
+    assert failover.preflight(low) == (False, "pool opencode-go headroom 8.0% <= floor 10.0%")
+    # pool, health and binary checks still refuse exactly as before
+    monkeypatch.setattr(failover, "acp_agents_ok", lambda: set())
+    assert failover.preflight(cl)[1] == "acp-run --list has no ok row for 'claude'"
+
+
+def test_preflight_perm_all_probe_entries_probe_instead(monkeypatch):
+    monkeypatch.setattr(failover, "acp_agents_ok", lambda: {"crush", "hermes"})
+    monkeypatch.setattr(failover, "canary_ok", lambda e: pytest.fail("canary ran under perm all"))
+    calls = []
+
+    def ask(entry, prompt):
+        calls.append((entry.tui.name, entry.perm, prompt))
+        return "OK"
+    monkeypatch.setattr(failover, "ask", ask)
+    cr, he = failover.load_chain({"perm": "all", "chain": [{"tui": "crush"}, {"tui": "hermes"}]})
+    ok, why = failover.preflight(cr, probe=False)
+    assert ok and why == "no quota pool to check; perm all: no canary; probe not run (it calls the model)"
+    assert calls == [], "chain-check (probe=False) spends nothing"
+    assert failover.preflight(cr) == (True, "no quota pool to check; perm all: no canary; probe answered 'OK'")
+    assert failover.preflight(he)[0]
+    assert calls == [("crush", "all", failover.PROBE_PROMPT), ("hermes", "all", failover.PROBE_PROMPT)]
+    monkeypatch.setattr(failover, "ask", lambda e, p: "nope")
+    failover._cache.clear()
+    assert not failover.preflight(cr)[0]
+
+
+def test_canary_ok_is_a_no_op_under_perm_all(monkeypatch):
+    monkeypatch.setattr(failover, "_acp_once", lambda e, p: pytest.fail("canary spawned"))
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku", "perm": "all"}])
+    assert failover.canary_ok(cl) == (True, "no canary under perm all (tools are allowed)")
+
+
+def test_preflight_cache_keeps_deny_and_all_apart():
+    d, a = failover.load_chain([{"tui": "claude", "model": "haiku"},
+                                {"tui": "claude", "model": "haiku", "perm": "all"}])
+    assert failover.preflight_key(d) != failover.preflight_key(a)
+    assert failover.preflight_key(d) == "preflight:" + json.dumps(
+        ["claude", "haiku", "", "claude", "default", 5.0]), "the deny key is unchanged"
+
+
+def test_ask_perm_all_rc77_is_not_reported_as_a_tripwire(tmp_path, monkeypatch):
+    _fake_acp(tmp_path, monkeypatch, "acp-77", "exit 77\n")
+    (d,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    with pytest.raises(failover.AttemptFailed, match="TRIPWIRE"):
+        failover.ask(d, "q")
+    (a,) = failover.load_chain([{"tui": "claude", "model": "haiku", "perm": "all"}])
+    with pytest.raises(failover.AttemptFailed) as exc:
+        failover.ask(a, "q")
+    assert "TRIPWIRE" not in str(exc.value) and "rc=77" in str(exc.value)
+
+
+def test_ask_perm_all_passes_perm_and_strip_to_acp_run(tmp_path, monkeypatch):
+    out = tmp_path / "argv.txt"
+    _fake_acp(tmp_path, monkeypatch, "acp-argv",
+              f'printf "%s\\n" "$@" > {out}\n' + LOG_RESULT.format(tools=3) + "echo answer\n")
+    (a,) = failover.load_chain({"perm": "all", "chain": [{"tui": "zcode", "effort": "low"}]},
+                               strip_user_config=True)
+    assert failover.ask(a, "q") == "answer"
+    argv = out.read_text().splitlines()
+    assert argv[argv.index("--perm") + 1] == "all" and "--strip-user-config" in argv
+
+
+def test_run_chain_rows_carry_perm(tmp_path):
+    entries = failover.load_chain({"perm": "all", "chain": [
+        {"tui": "claude", "model": "haiku"}, {"tui": "claude", "model": "sonnet", "perm": "deny"}]})
+
+    def attempt(e):
+        if e.model == "haiku":
+            raise failover.AttemptFailed("no")
+        return 1
+    assert failover.run_chain(entries, attempt, task="t", check=False).ok
+    rows = [r for r in _log(tmp_path) if r["phase"] == "attempt"]
+    assert [(r["model"], r["perm"]) for r in rows] == [("haiku", "all"), ("sonnet", "deny")]
+    assert [r["perm"] for r in failover.check_table(entries)] == ["all", "deny"]
+
+
+def test_cli_check_shows_perm(tmp_path, capsys):
+    chain = tmp_path / "chain.json"
+    chain.write_text(json.dumps({"perm": "all", "chain": [{"tui": "claude", "model": "haiku"}]}))
+    assert failover.main(["check", "--chain", str(chain)]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].split()[6] == "perm" and " all " in out.splitlines()[1]
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"perm": "yolo", "chain": [{"tui": "claude", "model": "haiku"}]}))
+    assert failover.main(["check", "--chain", str(bad)]) == 2
+
+
+# ── hermes is a backend (operator 2026-10-13) ───────────────────────────────
+
+def test_hermes_is_a_backend_without_pool_or_model():
+    assert "hermes" not in failover.DENY
+    for word in ("cursor", "cline", "clinepass", "opus", "fable"):
+        assert word in failover.DENY
+    (h,) = failover.load_chain([{"tui": "hermes"}])
+    assert (h.tui.acp_agent, h.pool, h.pool_family, h.probe, h.tui.takes_model) == (
+        "hermes", None, None, True, False)
+    with pytest.raises(failover.ChainError, match="takes no model"):
+        failover.load_chain([{"tui": "hermes", "model": "big-pickle"}])
+
+
+def test_hermes_preflight_has_no_quota_pool(monkeypatch):
+    monkeypatch.setattr(failover, "acp_agents_ok", lambda: {"hermes"})
+    (h,) = failover.load_chain([{"tui": "hermes", "perm": "all"}])
+    assert failover.preflight(h, probe=False) == (
+        True, "no quota pool to check; perm all: no canary; probe not run (it calls the model)")

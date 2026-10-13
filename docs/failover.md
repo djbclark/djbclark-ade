@@ -12,26 +12,33 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
    (agy and opencode map the pool from the model prefix; opencode `sipb/` has
    none), known model ids, a model allow-regex (claude: Haiku or Sonnet only),
    the effort lever (`set:effort` for claude, `set:thought` for zcode, `suffix`
-   for agy, none for opencode and crush), the native model id (claude `haiku`
-   is `claude-haiku-5-5`), health URLs, probe, endpoint and secret name
-   (the direct SIPB route).
+   for agy, none for opencode, crush and hermes), the native model id (claude
+   `haiku` is `claude-haiku-5-5`), health URLs, probe, endpoint and secret name
+   (the direct SIPB route). `hermes` (2026-10-13) is `hermes acp`: no `--model`
+   (Hermes picks its own: `~/.hermes/config.yaml` `model.default` with its
+   free-first `fallback_providers`, which can reach paid routes), no aiuse pool,
+   so like crush it gets the one-prompt probe.
 2. **Policy at load time** (`load_chain`): the global `DENY` list (cursor,
-   cline/ClinePass, hermes, opus, fable; operator 2026-10-12), plus any words the
+   cline/ClinePass, opus, fable; operator 2026-10-12; hermes was on it until the
+   operator admitted it on 2026-10-13), plus any words the
    caller adds (skillopt-night adds muse, pi, grok, codex, copilot), is matched
    as whole tokens of tui, model and label (so `pi` never catches `api`); a caller allowlist; unknown TUIs; models a TUI refuses;
-   efforts with no lever. A violation refuses the whole chain (`ChainError`).
+   efforts with no lever; a `perm` other than `deny` or `all` (item 9). A
+   violation refuses the whole chain (`ChainError`).
 3. **Preflight** (`preflight`): the agent has an `ok` row in `acp-run --list`
    (route_agent's reader), the pool is `usable_now` in `aiuse --available --json`
    with headroom above the entry's `floor_percent`, the secret is declared in
    sudo-secretspec (value-free `schema`), the endpoint accepts a TCP connection,
    a health URL (opencode's `sipb/` models: the proxy's `/api/version`) answers
-   200. Routes with no quota pool to read (crush) get a one-prompt probe, the
-   only preflight step that calls a model; `check --probe` runs it, plain
-   `check` reports it as not run.
+   200. Routes with no quota pool to read (crush, hermes) get a one-prompt
+   probe; it and the deny canary (item 7) are the only preflight steps that call
+   a model; `check --probe` runs them, plain `check` reports them as not run.
+   A `perm: all` entry has no canary (item 9), so plain `check` spends nothing
+   on it and `check --probe` spends only the probe of entries marked probe.
 
    **Cached for an hour (2026-10-13).** `run_chain` calls `preflight_cached`,
    which keeps each result, ok or refused, per (tui, model, effort, pool,
-   floor) for `PREFLIGHT_TTL_S` (3600 s) and logs a hit as `preflight cached
+   floor, and perm when it is not `deny`) for `PREFLIGHT_TTL_S` (3600 s) and logs a hit as `preflight cached
    (Ns old): <why>`. Before, skillopt-night ran preflight again for each of its
    eight sources. An expired entry drops the aiuse reading and its own canary
    and probe, so the recheck is real. `check` and `check --probe` (and
@@ -42,11 +49,13 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
    `chain_exhausted` when nothing worked. Prompt retries add `"phase": "retry"`
    lines (item 8).
 5. **Executors**: `ask(entry, prompt)` answers one prompt in a fresh context
-   (acp-run in an empty temp dir with `--perm deny`, prompt from a 0600 file,
-   never argv; acp-run's `claude -p` fallback also reads stdin since
-   2026-10-12). Tools stay off because acp-run enforces deny per agent and its
-   tripwire exits 77 when a tool still runs without asking, which `ask` turns
-   into `AttemptFailed`; the canary checks it before use. Or an
+   (acp-run in an empty temp dir with the entry's `--perm`, `deny` unless the
+   chain says otherwise (item 9), prompt from a 0600 file, never argv; acp-run's
+   `claude -p` fallback also reads stdin since 2026-10-12). Under `deny` tools
+   stay off because acp-run enforces deny per agent and its tripwire exits 77
+   when a tool still runs without asking, which `ask` turns into
+   `AttemptFailed`; the canary checks it before use. Under `all` the agent runs
+   any tool it wants and nothing checks it. Or an
    OpenAI-compatible POST with the key read once per process by
    `sudo-secretspec get`, sent only to the registry endpoint, https or
    loopback, and never across a redirect; `ask_many` answers a batch on one entry and fails the
@@ -122,6 +131,34 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
    randomness are `Pacing` fields, so tests never sleep and failover never
    imports skillopt-night.
 
+9. **`perm`: deny or all** (2026-10-13). Operator decision, verbatim: "I want
+   crush to be able to run any tools it wants. I want all of the TUIs and hermes
+   to be able to run any tools they want." Scope: the SkillOpt-Sleep night
+   (skillopt-night, `~/.skillopt-sleep/night.json`). A chain sets `"perm"` at the
+   top level and an entry may override it; values are `deny` (the library
+   default, unchanged for every other caller: acp-dispatch read-only reviews,
+   `failover.py ask/check` without a perm, ...) and `all`; anything else is
+   refused at load time, and `extra_args` can never pass `--perm` (item 6).
+   Under `all`: acp-run gets `--perm all`; there is no canary (its job is to prove
+   deny holds) and no exit-77 tripwire handling; preflight keeps the binary,
+   secret, health URL, pool and probe checks; everything else in items 3-8 (the
+   preflight cache, the load gate, startup retries, the empty temp dir per
+   prompt, timeouts and the process-group kill) is the same. Every preflight,
+   attempt and retry row in the attempt log carries `"perm"`, `check` prints a
+   `perm` column, and the agy `--tripwire-exempt-kinds` flag is passed under
+   `deny` only. A caller may also set `Entry.strip_user_config` (skillopt-night
+   does, for every entry): `ask` then passes acp-run `--strip-user-config`, the
+   2026-10-13 startup-failure fix (no user plugins, MCP servers or hooks for
+   opencode, agy, crush and zcode) decoupled from deny; it is not a chain-file
+   key and not in `EXTRA_ARGS_ALLOWED`.
+
+   **The exposure, plainly:** with `perm: all` an unattended run gives agents
+   full tool use with the user's permissions (shell, file edits anywhere the
+   user can write, network) while the prompts carry mined session text, which
+   can contain injected instructions. Each prompt still runs in an empty temp
+   dir, so nothing is handed to it, but nothing confines it either. The `deny`
+   default, its canary and its tripwire stay in force for every other caller.
+
 ## CLI
 
 ```sh
@@ -131,8 +168,10 @@ bin/failover.py ask --chain chain.json -p 'question'       # first working entry
 bin/failover.py run --chain chain.json -- mytool --model {model}   # first rc 0 wins
 ```
 
-A chain file is a JSON list of entries, or `{"allow": [...], "chain": [...]}`.
-Entry keys: `tui` (required), `model`, `effort`, `floor_percent` (default 5),
+A chain file is a JSON list of entries, or `{"allow": [...], "perm":
+"deny"|"all", "chain": [...]}` (`perm` default `deny`, item 9).
+Entry keys: `tui` (required), `perm` (overrides the chain's), `model`, `effort`,
+`floor_percent` (default 5),
 `pool`/`pool_family` (override), `endpoint`, `secret`, `secret_env` (default
 `OPENAI_API_KEY`, for `run`), `env`, `extra_args`, `timeout`, `label`,
 `retry_budget` (startup retries per `ask_many` round; item 8).

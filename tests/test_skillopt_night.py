@@ -23,6 +23,7 @@ night = importlib.util.module_from_spec(_spec)
 _loader.exec_module(night)
 failover = night.failover
 REAL_ASK = failover.ask
+REAL_PREFLIGHT = failover.preflight
 
 PROJECT = str(ROOT)
 SECRET = "sk-sipb-" + "beefcafe" * 4
@@ -298,7 +299,7 @@ def test_no_enabled_chain_refuses_stateful_night(env, capsys, spec):
 
 @pytest.mark.parametrize("bad", [{"tui": "cursor"}, {"tui": "claude", "model": "opus"},
                                  {"tui": "codex"}, {"tui": "claude", "model": "claude-fable-5"},
-                                 {"tui": "copilot"}, {"tui": "grok"}, {"tui": "hermes"},
+                                 {"tui": "copilot"}, {"tui": "grok"},
                                  {"tui": "opencode", "model": "opencode-go/grok-4.7"},
                                  {"tui": "agy", "model": "claude-opus-5-5", "effort": "low"},
                                  {"tui": "opencode", "model": "opencode-go/x", "label": "muse"},
@@ -780,9 +781,11 @@ def test_every_adapter_is_a_night_source():
 
 
 def test_source_names_are_not_backends():
-    # hermes, grok, muse and cline are read from, never asked: the backend deny list is unchanged
-    for word in ("hermes", "grok", "muse", "cline"):
+    # grok, muse and cline are read from, never asked: they stay on the backend deny list.
+    # hermes is a source AND, since 2026-10-13 (operator), a backend.
+    for word in ("grok", "muse", "cline"):
         assert word in night.NIGHT_DENY
+    assert "hermes" not in night.NIGHT_DENY and "hermes" in night.DEFAULT_ALLOW
 
 
 def test_default_night_harvests_the_new_sources(env, monkeypatch):
@@ -796,3 +799,88 @@ def test_sources_command_lists_new_sources(env, capsys):
     assert night.main(["sources"]) == 0
     listed = [line.split()[0] for line in capsys.readouterr().out.splitlines()]
     assert all(s in listed for s in NEW_ADAPTERS)
+
+
+# ── perm per chain/entry and the strip switch (operator 2026-10-13) ─────────
+
+def test_night_entries_default_to_deny_and_always_strip(env):
+    entries = night.load_entries({"chain": HAIKU_SONNET})
+    assert [(e.perm, e.strip_user_config) for e in entries] == [("deny", True), ("deny", True)]
+
+
+def test_night_perm_all_with_entry_override(env):
+    entries = night.load_entries({"perm": "all", "chain": [
+        HAIKU_SONNET[0], {**HAIKU_SONNET[1], "perm": "deny"}, {"tui": "hermes"}, {"tui": "crush"}]})
+    assert [(e.tui.name, e.perm, e.strip_user_config) for e in entries] == [
+        ("claude", "all", True), ("claude", "deny", True), ("hermes", "all", True), ("crush", "all", True)]
+
+
+@pytest.mark.parametrize("spec", [{"perm": "ask"}, {"perm": "bypass"}, {"perm": 1}])
+def test_night_bad_perm_refused_whole(env, spec):
+    _night(env / "home", HAIKU_SONNET, **spec)
+    assert night.main([]) == 1
+    assert _calls(env) == []
+    assert _rows(env)[-1]["status"] == "chain-invalid" and "perm must be one of" in _rows(env)[-1]["why"]
+
+
+def test_night_bad_entry_perm_refused_whole(env):
+    _night(env / "home", [HAIKU_SONNET[0], {**HAIKU_SONNET[1], "perm": "scoped:."}], perm="all")
+    assert night.main([]) == 1
+    assert _calls(env) == []
+
+
+def test_hermes_alone_is_a_valid_night_chain(env):
+    (h,) = night.load_entries({"chain": [{"tui": "hermes"}], "perm": "all"})
+    assert h.tui.name == "hermes" and h.pool is None and h.perm == "all"
+
+
+def test_perm_all_visible_in_log_attempts_and_nights(env, capsys):
+    _night(env / "home", HAIKU_SONNET, perm="all")
+    assert night.main(["--source", "claude"]) == 0
+    row = _rows(env)[-1]
+    assert row["status"] == "ok" and row["perm"] == "all"
+    assert row["perms"] == {"claude:haiku@low": "all", "claude:sonnet@low": "all"}
+    att = [r for r in _attempts(env) if r["phase"] in ("preflight", "attempt")]
+    assert att and all(r["perm"] == "all" for r in att)
+    assert "== attempt on claude:haiku@low perm=all" in Path(row["log"]).read_text()
+    assert "perm=all" in capsys.readouterr().out
+
+
+def test_chain_exhausted_row_names_each_perm(env):
+    _night(env / "home", [HAIKU_SONNET[0], {**HAIKU_SONNET[1], "perm": "deny"}], perm="all")
+    failover_ask = failover.ask
+
+    def boom(e, p):
+        raise failover.AttemptFailed("no")
+    try:
+        failover.ask = boom
+        assert night.main(["--source", "claude"]) == 1
+    finally:
+        failover.ask = failover_ask
+    row = _rows(env)[-1]
+    assert row["status"] == "chain_exhausted"
+    assert row["perms"] == {"claude:haiku@low": "all", "claude:sonnet@low": "deny"}
+
+
+def test_chain_check_shows_perm_and_spends_nothing(env, capsys, monkeypatch):
+    # the real preflight: no model call for perm all entries (no canary), none for deny
+    # entries either (chain-check never runs the canary or the probe)
+    monkeypatch.setattr(failover, "preflight", REAL_PREFLIGHT)
+    monkeypatch.setattr(failover, "ask", lambda e, p: pytest.fail("chain-check called a model"))
+    monkeypatch.setattr(failover, "_acp_once", lambda e, p: pytest.fail("chain-check spawned acp-run"))
+    monkeypatch.setattr(failover, "acp_agents_ok", lambda: {"crush", "claude", "hermes"})
+    monkeypatch.setattr(failover, "acp_run", lambda: "/bin/sh")
+    aiuse = env / "aiuse.json"
+    aiuse.write_text("x\n" + json.dumps({"available": [
+        {"provider": "claude", "pool_family": "default", "usable_now": True, "headroom_percent": 50}]}))
+    monkeypatch.setenv("FAILOVER_AIUSE_JSON", str(aiuse))
+    _night(env / "home", [{"tui": "crush"}, {"tui": "hermes"}, {**HAIKU_SONNET[0], "perm": "deny"}],
+           perm="all")
+    assert night.main(["chain-check"]) == 0
+    out = capsys.readouterr().out
+    assert "perm=all (entry perm overrides)" in out
+    lines = out.splitlines()
+    assert "perm" in lines[1].split()
+    assert " all " in lines[2] and "perm all: no canary; probe not run" in lines[2]
+    assert " all " in lines[3] and lines[3].split()[1] == "hermes:default"
+    assert " deny " in lines[4] and "canary not run (it calls the model)" in lines[4]

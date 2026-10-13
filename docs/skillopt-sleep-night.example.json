@@ -1,13 +1,15 @@
 {
-  "_comment": "skillopt-night backend chain (bin/failover.py), operator-approved order 2026-10-12. Every entry is answered through acp-run (one fresh process per prompt) after its preflight: aiuse pool usable_now with headroom above floor_percent, or the SIPB proxy health URL, or (crush) a one-prompt probe. Allowed TUIs: opencode, agy, zcode, claude (Haiku/Sonnet), crush, sipb (direct OpenAI-compatible POST to the loopback proxy, no agent; operator 2026-10-13: direct first, crush ACP as its failover). Denied words: cursor, cline, clinepass, hermes, opus, fable, muse, pi, grok, codex, copilot. claude takes the acp-run model values haiku/sonnet (Haiku 5.5/Sonnet 5.5; --native passes claude-haiku-5-5/claude-sonnet-5-5). Round 1 sends one mining prompt per harvested session; max_sessions caps it. deadline: local HH:MM the whole night must end by. exclude_projects: path prefixes whose sessions never leave the machine (every source). Optional (2026-10-13): top-level prompt_max_load (1-min load per core above which a prompt waits before spawning; default 2.0) and prompt_load_wait_s (give up and count a startup failure after this many seconds; default 600); per-entry retry_budget (startup failures retried per round, default max(3, 25% of the prompts)); sipb entries are a direct POST to the loopback proxy (no agent), crush stays last and is refused while its canary fails.",
+  "_comment": "skillopt-night backend chain (bin/failover.py), operator-approved order 2026-10-12. Every entry is answered through acp-run (one fresh process per prompt) after its preflight: aiuse pool usable_now with headroom above floor_percent, or the SIPB proxy health URL, or (crush) a one-prompt probe. Allowed TUIs: opencode, agy, zcode, claude (Haiku/Sonnet), crush, sipb (direct OpenAI-compatible POST to the loopback proxy, no agent; operator 2026-10-13: direct first, crush ACP as its failover). Denied words: cursor, cline, clinepass, opus, fable, muse, pi, grok, codex, copilot (hermes admitted as a backend 2026-10-13: `hermes acp`, no model, no aiuse pool, a one-prompt probe; its position here is illustrative). claude takes the acp-run model values haiku/sonnet (Haiku 5.5/Sonnet 5.5; --native passes claude-haiku-5-5/claude-sonnet-5-5). Round 1 sends one mining prompt per harvested session; max_sessions caps it. deadline: local HH:MM the whole night must end by. exclude_projects: path prefixes whose sessions never leave the machine (every source). Optional (2026-10-13): top-level prompt_max_load (1-min load per core above which a prompt waits before spawning; default 2.0) and prompt_load_wait_s (give up and count a startup failure after this many seconds; default 600); per-entry retry_budget (startup failures retried per round, default max(3, 25% of the prompts)); sipb entries are a direct POST to the loopback proxy (no agent), crush stays last and is refused while its canary fails. perm (2026-10-13): top-level default for every entry, an entry's own \"perm\" overrides it; \"deny\" (failover's default: acp-run --perm deny, the deny canary, the exit-77 tripwire) or \"all\" (acp-run --perm all: the agent runs any tool with the user's permissions; no canary, no tripwire). Operator 2026-10-13: \"I want crush to be able to run any tools it wants. I want all of the TUIs and hermes to be able to run any tools they want.\" Exposure: an unattended run gives agents full tool use while the prompts hold mined session text that can carry injected instructions; each prompt runs in an empty temp dir, which hands it nothing but confines nothing (docs/skillopt-sleep.md section 4). The night always adds acp-run --strip-user-config (no user plugins, MCP servers or hooks for opencode, agy, crush, zcode); it is not a night.json key.",
   "enabled": true,
+  "perm": "all",
   "allow": [
     "opencode",
     "agy",
     "zcode",
     "claude",
     "crush",
-    "sipb"
+    "sipb",
+    "hermes"
   ],
   "jobs": 2,
   "max_rounds": 60,
@@ -87,6 +89,10 @@
     },
     {
       "tui": "crush",
+      "timeout": 1800
+    },
+    {
+      "tui": "hermes",
       "timeout": 1800
     }
   ],

@@ -6,10 +6,10 @@ endpoint from the REGISTRY below, a model, an effort, the aiuse pool it draws
 and a floor. For every entry, in order:
 
 1. **load-time policy**: an entry is refused outright (ChainError) when it names
-   a globally denied route (DENY: cursor, cline/ClinePass, Hermes, any Opus or
-   Fable model; operator 2026-10-12), a TUI outside the caller's allowlist, a TUI
-   the registry does not know, a model the TUI's `model_allow` rejects, or an
-   effort the TUI has no lever for;
+   a globally denied route (DENY: cursor, cline/ClinePass, any Opus or Fable model;
+   operator 2026-10-12; Hermes admitted 2026-10-13), a TUI outside the caller's
+   allowlist, a TUI the registry does not know, a model the TUI's `model_allow`
+   rejects, an effort the TUI has no lever for, or a `perm` outside PERMS;
 2. **preflight**: the binary exists (`acp-run --list` shows the agent `ok`), the
    pool is `usable_now` in `aiuse --available --json` with headroom above the
    entry's floor, and any secret the entry needs is declared in sudo-secretspec;
@@ -22,9 +22,11 @@ result is cached per (tui, model, effort, pool, floor) for PREFLIGHT_TTL_S insid
 run_chain, logged as "preflight cached"; `check` always recomputes (2026-10-13).
 
 Two ways to execute an entry are built in: `ask()` answers one prompt (acp-run in
-a clean empty directory with `--perm deny`, a fresh context; acp-run makes deny real
-per agent, and a tripwire exits 77 if a tool still runs without asking, which
-`ask()` turns into AttemptFailed; or an OpenAI-compatible POST for `openai_compat`
+a clean empty directory with the entry's `--perm`, a fresh context; under `deny`, the
+default, acp-run makes deny real per agent, and a tripwire exits 77 if a tool still
+runs without asking, which `ask()` turns into AttemptFailed; under `all` (a chain's or
+entry's "perm", 2026-10-13: the SkillOpt-Sleep night) the agent may run any tool, with
+no tripwire and no canary; or an OpenAI-compatible POST for `openai_compat`
 entries, key from sudo-secretspec held in memory once per process, never
 redirected), and `run_command()` runs any shell-callable task with the entry's
 fields substituted into argv and exported as FAILOVER_*. `ask_many()` answers a
@@ -36,8 +38,10 @@ a prompt whose acp-run failed before any turn ran (`StartupFailed`) up to
 (2026-10-13: 21 startup failures, no retry, five sources ended chain_exhausted).
 Children get a minimal
 env (BASE_ENV_KEYS plus the entry's allow-listed env) and run in their own process
-group, killed whole on timeout. Preflight's canary asks every acp entry to create a
-file and refuses the entry if it can.
+group, killed whole on timeout. Preflight's canary asks every `perm: deny` acp entry
+to create a file and refuses the entry if it can; `perm: all` entries skip it (their
+probe, if marked, is the model check). Every preflight/attempt/retry row carries the
+entry's perm.
 
 CLI:
     failover.py registry                                 # the route table
@@ -45,8 +49,9 @@ CLI:
     failover.py ask   --chain FILE (-p TEXT | -f FILE)    # answer one prompt via the chain
     failover.py run   --chain FILE -- CMD {model} ...     # any command; first rc 0 wins
 
-A chain FILE is JSON: either a list of entries or {"chain": [...], "allow": [...]}.
-Entry keys: tui (required), model, effort, floor_percent (default 5), pool and
+A chain FILE is JSON: either a list of entries or {"chain": [...], "allow": [...],
+"perm": "deny"|"all"} (perm default "deny"). Entry keys: perm (overrides the chain's),
+tui (required), model, effort, floor_percent (default 5), pool and
 pool_family (override the registry), endpoint (openai_compat), secret (a
 sudo-secretspec name exported as `secret_env`, default OPENAI_API_KEY for
 `run`; only to the registry endpoint, https or loopback), env (ENV_ALLOW keys
@@ -85,9 +90,20 @@ BIN = Path(__file__).resolve().parent
 ATTEMPT_LOG = Path.home() / ".local" / "state" / "failover" / "attempts.jsonl"
 DEFAULT_FLOOR = 5.0
 # Hard exclusions, matched case-insensitively against tui, acp agent and model
-# (operator 2026-10-12): never cursor, never cline/ClinePass, never Hermes,
-# never Claude Opus or anything stronger (Fable).
-DENY = ("cursor", "cline", "clinepass", "hermes", "opus", "fable")
+# (operator 2026-10-12): never cursor, never cline/ClinePass, never Claude Opus or
+# anything stronger (Fable). Hermes was here until 2026-10-13, when the operator
+# admitted it as a backend ("I want all of the TUIs and hermes to be able to run any
+# tools they want").
+DENY = ("cursor", "cline", "clinepass", "opus", "fable")
+# What acp-run --perm an acp entry runs under (2026-10-13). "deny" (the library
+# default, every caller but the SkillOpt-Sleep night): acp-run refuses every permission
+# request, makes deny real per agent, trips (exit 77) on a tool that runs unasked, and
+# preflight runs the deny canary. "all": acp-run allows every request and the agent
+# runs its tools freely (no tripwire, no canary; preflight keeps the binary, secret,
+# health, pool and probe checks). A chain sets it with a top-level "perm", an entry
+# with its own "perm"; nothing else (extra_args never passes --perm).
+PERMS = ("deny", "all")
+DEFAULT_PERM = "deny"
 # The only acp-run flags a chain entry may pass in extra_args, each with a value check
 # (None: takes no value). Everything else is refused, so neither a policy flag (acp-run's
 # options are last-wins) nor an abbreviation of one (`--per all`, `-Call`) gets through
@@ -230,10 +246,15 @@ REGISTRY: dict[str, Tui] = {t.name: t for t in (
     Tui("crush", "acp", "crush", "Charm", None, None, takes_model=False, probe=True,
         note="crush-acp (PR 2450 build), default model from crushrc (SIPB); never --model;"
              " no tools under --perm deny"),
+    # `hermes acp` (acp-run AGENTS). Admitted as a backend 2026-10-13 (operator). Hermes
+    # picks its own model: ~/.hermes/config.yaml model.default with its free-first
+    # fallback_providers chain (which can reach paid routes), so never --model; aiuse has
+    # no Hermes pool, so like crush preflight probes it with one tiny prompt.
+    Tui("hermes", "acp", "hermes", "Hermes", None, None, takes_model=False, probe=True,
+        note="hermes acp; its own free-first model chain with a paid fallback; never --model"),
     # Listed so a chain naming them fails with a clear reason (DENY also catches them).
     Tui("cursor", "acp", "cursor", "Cursor", "cursor", None, note="denied"),
     Tui("cline", "acp", "cline", "ClinePass", "clinepass", None, note="denied: reserve"),
-    Tui("hermes", "acp", "hermes", "Hermes", None, None, note="denied"),
 )}
 
 
@@ -255,6 +276,9 @@ class Entry:
     probe: bool | None = None
     health_url: str | None = None
     retry_budget: int | None = None            # startup retries per ask_many round (None: default)
+    perm: str = DEFAULT_PERM                   # acp-run --perm: "deny" | "all" (PERMS)
+    # acp-run --strip-user-config: set by the caller (skillopt-night), never by a chain file
+    strip_user_config: bool = False
 
     def __post_init__(self) -> None:
         if not self.label:
@@ -292,7 +316,7 @@ class Entry:
         return {"label": self.label, "tui": self.tui.name, "vendor": self.tui.vendor,
                 "model": self.model_arg or None, "effort": self.effort or None,
                 "pool": self.pool, "pool_family": self.pool_family,
-                "floor_percent": self.floor_percent}
+                "floor_percent": self.floor_percent, "perm": self.perm}
 
 
 # ── loading and policy ───────────────────────────────────────────────────────
@@ -304,15 +328,27 @@ def denied(text: str, deny: tuple[str, ...] = DENY) -> str | None:
     return next((d for d in deny if d in tokens), None)
 
 
-def load_chain(spec: Any, *, allow: list[str] | None = None,
-               deny: tuple[str, ...] = DENY) -> list[Entry]:
-    """Validate a chain spec (list, or dict with "chain"/"allow") into Entries.
+def _perm_value(where: str, value: Any) -> str:
+    if value not in PERMS:
+        raise ChainError(f"{where}: perm must be one of {', '.join(PERMS)}, not {value!r}")
+    return str(value)
 
+
+def load_chain(spec: Any, *, allow: list[str] | None = None,
+               deny: tuple[str, ...] = DENY, perm: Any = None,
+               strip_user_config: bool = False) -> list[Entry]:
+    """Validate a chain spec (list, or dict with "chain"/"allow"/"perm") into Entries.
+
+    perm is the chain default (a dict spec's top-level "perm" when the caller passes
+    none; DEFAULT_PERM "deny" when neither does); an entry's own "perm" overrides it.
+    Both must be in PERMS. strip_user_config is the caller's (not a chain key).
     Refuses the whole chain on the first bad entry: a policy violation is a
     config error to fix, not a rung to skip at 03:30."""
     if isinstance(spec, dict):
         allow = allow if allow is not None else spec.get("allow")
+        perm = perm if perm is not None else spec.get("perm")
         spec = spec.get("chain", [])
+    chain_perm = _perm_value("chain", DEFAULT_PERM if perm is None else perm)
     if not isinstance(spec, list):
         raise ChainError("chain must be a list of entries")
     entries = []
@@ -352,6 +388,7 @@ def load_chain(spec: Any, *, allow: list[str] | None = None,
         budget = raw.get("retry_budget")
         if budget is not None and (isinstance(budget, bool) or not isinstance(budget, int) or budget < 0):
             raise ChainError(f"entry {i}: retry_budget must be a whole number >= 0, not {budget!r}")
+        entry_perm = _perm_value(f"entry {i}", raw["perm"]) if "perm" in raw else chain_perm
         endpoint = raw.get("endpoint")
         if endpoint and (raw.get("secret") or tui.secret) and endpoint != tui.endpoint:
             u = urllib.parse.urlparse(str(endpoint))
@@ -366,7 +403,8 @@ def load_chain(spec: Any, *, allow: list[str] | None = None,
                       extra_args=extra,
                       timeout=int(raw.get("timeout", 600)), label=str(raw.get("label") or ""),
                       probe=raw.get("probe"), health_url=raw.get("health_url"),
-                      retry_budget=budget)
+                      retry_budget=budget, perm=entry_perm,
+                      strip_user_config=bool(strip_user_config))
         if denied(entry.model_arg, deny):
             raise ChainError(f"entry {i}: denied model '{entry.model_arg}'")
         entries.append(entry)
@@ -404,12 +442,13 @@ def check_extra_args(i: int, extra: list[str], deny: tuple[str, ...]) -> None:
         k += 1
 
 
-def load_chain_file(path: Path, *, allow: list[str] | None = None) -> list[Entry]:
+def load_chain_file(path: Path, *, allow: list[str] | None = None,
+                    strip_user_config: bool = False) -> list[Entry]:
     try:
         spec = json.loads(Path(path).read_text())
     except (OSError, ValueError) as e:
         raise ChainError(f"cannot read chain {path}: {e}") from e
-    return load_chain(spec, allow=allow)
+    return load_chain(spec, allow=allow, strip_user_config=strip_user_config)
 
 
 # ── preflight ────────────────────────────────────────────────────────────────
@@ -518,7 +557,7 @@ PROBE_PROMPT = "Reply with exactly: OK"
 def probe_ok(entry: Entry) -> tuple[bool, str]:
     """One tiny prompt through the entry (cached per process). This one DOES call the model,
     so it is reserved for routes with no quota pool to read (crush)."""
-    key = f"probe:{entry.label}"
+    key = f"probe:{entry.label}" + (f":{entry.perm}" if entry.perm != DEFAULT_PERM else "")
     if key not in _cache:
         try:
             answer = ask(entry, PROBE_PROMPT)
@@ -558,6 +597,16 @@ def preflight(entry: Entry, *, probe: bool = True) -> tuple[bool, str]:
         if head is None or float(head) <= entry.floor_percent:
             return False, f"pool {entry.pool} headroom {head}% <= floor {entry.floor_percent}%"
         why = f"pool {entry.pool} headroom {float(head):.1f}% > floor {entry.floor_percent}%"
+    if entry.tui.kind == "acp" and entry.perm == "all":
+        # perm all (2026-10-13): no deny canary (its job is to prove deny holds); the
+        # probe, for entries marked probe, is the check that calls the model
+        why = f"{why}; perm all: no canary"
+        if not probe:
+            return True, f"{why}; probe not run (it calls the model)" if entry.probe else why
+        if entry.probe:
+            ok, pwhy = probe_ok(entry)
+            return ok, f"{why}; {pwhy}"
+        return True, why
     if not probe:
         extra = "probe and canary" if entry.probe else "canary"
         return True, f"{why}; {extra} not run (it calls the model)" if entry.tui.kind == "acp" else why
@@ -571,8 +620,11 @@ def preflight(entry: Entry, *, probe: bool = True) -> tuple[bool, str]:
 
 
 def preflight_key(entry: Entry) -> str:
-    return "preflight:" + json.dumps([entry.tui.name, entry.model_arg, entry.effort, entry.pool,
-                                      entry.pool_family, entry.floor_percent])
+    key = [entry.tui.name, entry.model_arg, entry.effort, entry.pool, entry.pool_family,
+           entry.floor_percent]
+    if entry.perm != DEFAULT_PERM:  # a perm all result (no canary) never stands in for deny
+        key.append(entry.perm)
+    return "preflight:" + json.dumps(key)
 
 
 def preflight_cached(entry: Entry, *, ttl: float = PREFLIGHT_TTL_S,
@@ -587,7 +639,8 @@ def preflight_cached(entry: Entry, *, ttl: float = PREFLIGHT_TTL_S,
     if hit is not None and t - hit[0] < ttl:
         return hit[1], f"preflight cached ({t - hit[0]:.0f}s old): {hit[2]}"
     if hit is not None:
-        for k in ("pools", f"canary:{entry.label}", f"probe:{entry.label}"):
+        for k in ("pools", f"canary:{entry.label}", f"probe:{entry.label}",
+                  f"probe:{entry.label}:{entry.perm}"):
             _cache.pop(k, None)
     ok, why = preflight(entry)
     _cache[key] = (t, ok, why)
@@ -724,8 +777,15 @@ def sweep_logs(max_age_days: float = LOG_RETENTION_DAYS) -> int:
 
 
 def acp_command(entry: Entry, prompt_file: Path, cwd: Path, log: Path | None = None) -> list[str]:
+    """The acp-run argv for one prompt. --perm is the entry's validated perm (PERMS);
+    --strip-user-config only when the caller set it (skillopt-night), never from a chain
+    file; the tripwire exemption only matters under deny, so only deny passes it."""
+    if entry.perm not in PERMS:
+        raise ChainError(f"{entry.label}: perm must be one of {', '.join(PERMS)}, not {entry.perm!r}")
     cmd = [acp_run(), entry.tui.acp_agent or entry.tui.name, "-C", str(cwd), "-f", str(prompt_file),
-           "--perm", "deny", "--timeout", str(entry.timeout)]
+           "--perm", entry.perm, "--timeout", str(entry.timeout)]
+    if entry.strip_user_config:
+        cmd.append("--strip-user-config")
     if log is not None:
         cmd += ["--log", str(log)]
     if entry.tui.takes_model and entry.model_arg:
@@ -733,7 +793,7 @@ def acp_command(entry: Entry, prompt_file: Path, cwd: Path, log: Path | None = N
     lever = entry.tui.effort or ""
     if entry.effort and lever.startswith("set:"):
         cmd += ["--set", f"{lever[4:]}={entry.effort}"]
-    if entry.tui.tripwire_exempt:
+    if entry.tui.tripwire_exempt and entry.perm == "deny":
         cmd += ["--tripwire-exempt-kinds", ",".join(entry.tui.tripwire_exempt)]
     return cmd + entry.extra_args
 
@@ -759,8 +819,9 @@ def _acp_once(entry: Entry, prompt: str) -> tuple[subprocess.CompletedProcess[st
 def ask(entry: Entry, prompt: str) -> str:
     """Answer one prompt on this entry in a fresh context; raise AttemptFailed.
 
-    acp-run runs it in an empty temp dir under --perm deny, which acp-run enforces
-    per agent and backs with a tripwire (exit 77, EXIT_TRIPWIRE)."""
+    acp-run runs it in an empty temp dir under the entry's --perm: deny, which acp-run
+    enforces per agent and backs with a tripwire (exit 77, EXIT_TRIPWIRE), or all, which
+    lets the agent run any tool (no tripwire; nothing confines it but the empty dir)."""
     if entry.tui.kind == "openai_compat":
         return _ask_openai(entry, prompt)
     proc, _, log = _acp_once(entry, prompt)
@@ -768,7 +829,7 @@ def ask(entry: Entry, prompt: str) -> str:
     result = result_in_log(log)
     if proc.returncode == 1 and answer and answer_despite_failure(result):
         return answer
-    if proc.returncode == EXIT_TRIPWIRE:
+    if proc.returncode == EXIT_TRIPWIRE and entry.perm == "deny":
         raise AttemptFailed(f"{entry.label}: TRIPWIRE: a tool ran without a permission request "
                             "under --perm deny (acp-run exit 77)")
     if proc.returncode != 0 or not answer:
@@ -893,6 +954,8 @@ def canary_ok(entry: Entry) -> tuple[bool, str]:
     the tripwire and the file check still apply. This calls the model once."""
     if entry.tui.kind != "acp":
         return True, "no tools on this route"
+    if entry.perm != "deny":
+        return True, f"no canary under perm {entry.perm} (tools are allowed)"
     key = f"canary:{entry.label}"
     if key not in _cache:
         try:
@@ -1161,7 +1224,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if a.cmd == "check":
         rows = check_table(entries, probe=a.probe)
-        print_table(rows, ["#", "label", "vendor", "pool", "pool_family", "floor_percent", "ready", "why"])
+        print_table(rows, ["#", "label", "vendor", "pool", "pool_family", "floor_percent", "perm",
+                           "ready", "why"])
         return 0 if any(r["ready"] == "yes" for r in rows) else 1
     if a.cmd == "ask":
         prompt = a.prompt if a.prompt is not None else a.file.read_text()

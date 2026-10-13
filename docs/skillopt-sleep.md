@@ -22,8 +22,12 @@ Guards in `bin/skillopt-night` (most added after the 2026-10-12 adversary review
 
 1. **Reviewed code only.** The night refuses (exit 2, one Hermes line) unless the
    uv receipt's pinned rev and the installed commit both equal `REVIEWED_REV`.
+   Since 2026-10-13 this matters more, not less: under `perm: all` (section 4)
+   the engine's prompts drive agents that can run tools, so an unreviewed
+   upstream engine stays refused.
 2. **Chain policy.** A chain naming a denied or non-allowlisted route, a forbidden
-   `extra_args` flag or a non-allow-listed `env` key is refused whole.
+   `extra_args` flag, a non-allow-listed `env` key or a `perm` other than `deny`
+   or `all` is refused whole.
 3. **Deadline and load.** The whole night ends by `deadline` (night.json, default
    06:30 local). Before each source and each chain attempt the runner checks
    the deadline and the overload gate from `bin/acp-dispatch` (load above 4x
@@ -47,8 +51,10 @@ Guards in `bin/skillopt-night` (most added after the 2026-10-12 adversary review
 `--dry-run` takes the same path as a real night up to the first model call: it
 pins each source's digests and runs `skillopt-sleep dry-run --backend handoff`,
 which makes no model calls and saves no state, then counts the round-1 prompts.
-`skillopt-night chain-check` runs the free preflights; `--probe` adds the
-probe and the canary, which call each model once.
+`skillopt-night chain-check` runs the free preflights and prints each entry's
+`perm`; `--probe` adds the probe and, for `perm: deny` entries only, the canary,
+which call each model once. A `perm: all` entry has no canary, so plain
+`chain-check` spends nothing on it.
 
 ## 2. Paths
 
@@ -96,11 +102,54 @@ external backend can be registered without patching the installed package. The
 it needs to `pending.json` and exits 3. The runner answers every prompt through
 the chain and reruns, until the engine finishes (typically 3 to 6 rounds;
 `max_rounds` caps it). Each prompt is answered by a fresh `acp-run` session in
-an empty temporary directory with `--perm deny`, or by one OpenAI-compatible
-request for the direct SIPB route. That is what upstream asks for: every answer
+an empty temporary directory with the entry's `--perm` (`deny` or `all`, below)
+and `--strip-user-config`, or by one OpenAI-compatible request for the direct
+SIPB route. That is what upstream asks for: every answer
 in a fresh context, so the held-out gate is not contaminated.
 
-**Tools are off, and that is enforced, not assumed** (adversary review
+**`perm`: which tool policy each entry runs under (2026-10-13).** Operator
+decision, verbatim (djbclark, 2026-10-13): "I want crush to be able to run any
+tools it wants. I want all of the TUIs and hermes to be able to run any tools
+they want." night.json takes a top-level `"perm"` (the chain default) and an
+entry may override it with its own `"perm"`; the values are `deny` and `all`,
+anything else refuses the chain. Without a `"perm"` the night still runs
+`deny` (bin/failover.py's default, which every other failover and acp-dispatch
+caller keeps). Under `all`: acp-run runs with `--perm all` and allows every
+permission request; claude, agy and zcode get their yolo modes and crush its
+`--yolo`; there is no canary and no exit-77 tripwire (those exist to prove
+deny holds); preflight keeps the binary, pool, health and probe checks, and the
+load gate, startup retries, empty temp dir per prompt, timeouts and
+process-group kill are unchanged. Every attempt line in the source log (`==
+attempt on <entry> perm=all`), every `attempts.jsonl` row and every
+`nights.jsonl` row (`perm` for the entry that answered, `perms` for every
+entry) names the perm.
+
+**`--strip-user-config` is separate from `perm`.** The strip of the user's
+plugins, MCP servers and hooks fixed the 2026-10-13 startup failures (section 4,
+startup retries); it was tied to `--perm deny`, but it is not a permission
+control. acp-run's `--strip-user-config` now applies it under any `--perm` for
+opencode, agy, crush and zcode, and the night passes it to every entry. Under
+`all` it adds nothing permission-related: opencode gets no
+`{"permission": "deny"}`, crush keeps every built-in tool (no
+`options.disabled_tools`), zcode keeps the user's permission block. See
+`tools/acp-run/README.md`.
+
+**The exposure under `perm: all`, plainly.** An unattended 03:30 run gives the
+agents full tool use with the user's permissions: shell commands, file edits
+anywhere the user can write, network access, the user's credentials as files
+on disk. The prompts carry mined session text from every project on this Mac
+(section 9), and that text can contain injected instructions, from a pasted
+web page, a tool output, an email, a Telegram message to Hermes. Replayed
+prompts are real past tasks ("commit and push", "merge PR N", "send the
+email"), and under `all` an agent may simply do them again. Each prompt still
+runs in an empty temp dir, so nothing is handed to it, but nothing confines it
+either: it can `cd` anywhere. Hermes in particular runs its own model chain,
+free-first but with paid fallbacks (`~/.hermes/config.yaml`
+`fallback_providers`, including ClinePass and the Codex pool), so a Hermes
+entry can spend pools the night's deny list names. The `deny` paragraphs below
+still describe every entry left on `deny` and every other caller.
+
+**Under `perm: deny`, tools are off, and that is enforced, not assumed** (adversary review
 2026-10-12, C1). Replayed prompts are real past tasks ("commit and push", "merge
 PR N", "send the email"), and `--perm deny` alone did not stop four of the five
 agents: claude inherited `bypassPermissions` from settings.json, zcode started
@@ -163,12 +212,14 @@ hour; the attempt log says `preflight cached (Ns old): ...`. An expired result
 re-reads aiuse and reruns that entry's canary. `skillopt-night chain-check`
 and `--probe` always recompute.
 
-**Policy** (operator, 2026-10-12, approved chain). Allowed TUIs: `opencode`
-(OpenCode Go, and MIT SIPB through opencode's `sipb/` provider), `agy`,
-`zcode`, `claude` (Haiku or Sonnet only), `crush`. Denied everywhere, matched as
-whole tokens of tui, model and label: cursor, cline, clinepass, hermes, opus,
-fable (bin/failover.py `DENY`) plus muse, pi, grok, codex, copilot (skillopt-night
-`NIGHT_DENY`). A violating chain is refused at load time, whole.
+**Policy** (operator, 2026-10-12, approved chain; hermes added 2026-10-13).
+Allowed TUIs: `opencode` (OpenCode Go, and MIT SIPB through opencode's `sipb/`
+provider), `agy`, `zcode`, `claude` (Haiku or Sonnet only), `crush`, and since
+2026-10-13 `hermes` (`hermes acp`, no `--model`, no aiuse pool, a one-prompt
+probe like crush). Denied everywhere, matched as whole tokens of tui, model and
+label: cursor, cline, clinepass, opus, fable (bin/failover.py `DENY`) plus muse,
+pi, grok, codex, copilot (skillopt-night `NIGHT_DENY`); the operator revisits
+those on 2026-10-14. A violating chain is refused at load time, whole.
 
 **Approved chain** (installed in night.json; `"enabled": false` until a first
 supervised run, section 4 end). Readiness from `skillopt-night chain-check` on
@@ -197,8 +248,9 @@ and minimax-m3 was 2 to 5 times faster at a quarter of the tokens in the
 2026-08-22 bake-off recorded in the LiteLLM role.
 
 **Execution path.** Every entry answers through acp-run, one fresh process per
-prompt (`acp-run <agent> -C <empty temp dir> -f <prompt file> --perm deny
---log <private log> [--model M] [--set ...]`; a prompt file rather than `-p`
+prompt (`acp-run <agent> -C <empty temp dir> -f <prompt file> --perm <deny|all>
+--strip-user-config --timeout N --log <private log> [--model M] [--set ...]`; a
+prompt file rather than `-p`
 keeps transcript excerpts out of `ps`). `skillopt-night --native` lets the
 opencode and claude entries use SkillOpt's own `opencode`/`claude` backends
 instead, for native sources only, with SkillOpt's native harvest (so without
@@ -235,11 +287,12 @@ crush's one-prompt probe), then set `"enabled": true`. Optionally run one small 
 
 1. `tail ~/.local/state/skillopt-sleep/nights.jsonl`: per source, `status`
    (`ok`, `chain_exhausted`; `waiting-backend`, `chain-invalid`, `skipped:`
-   for the whole night), `entry` (which chain entry answered), `rounds`,
+   for the whole night), `entry` (which chain entry answered), `perm` (its
+   acp-run `--perm`) and `perms` (every entry's), `rounds`,
    `answered`, `sessions`, `tasks`, `gate` (`accept`/`reject`), `proposals`,
    `staging_dir`, and `failed` (every entry that was skipped or failed, why).
 2. `tail ~/.local/state/skillopt-sleep/attempts.jsonl`: each preflight and
-   attempt with its reason and seconds.
+   attempt with its reason, seconds and `perm`.
 3. `skillopt-sleep status --project ~/src/djbclark-ade`: `latest_staging`,
    `staged_skills` (pending), `adopted_skills`, history tail.
 4. `<latest_staging>/report.md`: what was mined, baseline vs candidate scores,
@@ -399,9 +452,12 @@ Discord, desktop, cron and CLI conversations included), grok, muse, cline and
 acp-dispatch slice briefs and reports): user prompts, final
 replies, tool and skill names. By entry that is: OpenCode Go (MiniMax M3 via
 opencode.ai), Google Antigravity (Gemini; and Anthropic Sonnet through Google's
-Claude/GPT pool), Z.ai (GLM), Anthropic (Haiku, Sonnet), and MIT SIPB (crush and
-opencode's `sipb/` models, self-hosted open-weight models). `nights.jsonl` names
-the entry that answered each source.
+Claude/GPT pool), Z.ai (GLM), Anthropic (Haiku, Sonnet), MIT SIPB (crush and
+opencode's `sipb/` models, self-hosted open-weight models), and Hermes (whatever
+its own chain picks: `big-pickle` by default, then ClinePass, OpenCode Go or the
+Codex pool). `nights.jsonl` names the entry that answered each source. Under
+`perm: all` (section 4) an answering agent can also send anything it can read
+anywhere, not only what the prompt holds.
 
 **Redaction is pattern-based.** Upstream's `redact_secrets` (prefixed tokens,
 Bearer headers, name=value pairs) plus this repo's pass: PEM blocks, passwords
