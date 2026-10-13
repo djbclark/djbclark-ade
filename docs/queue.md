@@ -7,8 +7,9 @@ when they ship (into the relevant doc) or when they're dropped (say why).
 
 **Postponed by the operator ("postpone all ralph work"); do nothing until raised.**
 State when parked: the opencode-ralph-tui wrappers (`vendor/gate-scripts/`, live copies in
-`~/.local/bin/`) point at v2 `~/.local/bin/opencode` since `bea2e9d`; v1 is still on disk at
-`~/.opencode/bin/opencode`. Findings, none acted on:
+`~/.local/bin/`) were pointed at v2 in `bea2e9d`, then switched back to v1
+(`~/.opencode/bin/opencode`, 1.18.32) in `d3de341` at the operator's request, so Ralph runs
+v1 while parked even though plain `opencode` is v2. Findings, from the v2 trial, none acted on:
 1. `bun ~/src/vendor/ralph-tui/dist/cli.js doctor --agent opencode-go` detects v2 2.0.27 but
    fails the preflight with exit 130. Running the same args by hand (`opencode-ralph-tui run
    --format json "<prompt>"`) gives v2 JSON events and then `provider.quota` 402 "Insufficient
