@@ -261,6 +261,10 @@ get `herdr agent start --kind` plus `agent prompt` — the fragile way; say so.
 
 ## 6. Reach each agent
 
+`fleet.py list`/`show` print a `WARNING:` on stderr when `~/.claude/settings.json` lacks `env`
+`CLAUDE_CODE_HARBOR_KITE=1`, or the installed Claude binary no longer reads it: without it, a server flag that
+flips to false turns peer messaging off in running Claude sessions (2026-10-13; anthropics/claude-code#100760).
+
 | Agent / host | Running session | Ended session |
 |---|---|---|
 | claude (TUI) | `SendMessage({to: "<name>"})`; read its latest prompt line first. Not in your `ListAgents`, no messaging socket (`fleet.py` then says so in `reach:`), or a delivery notice says SendMessage was refused → `relay.py <id> "<one line>"` (keys into its herdr/Orca/tmux pane; queued while it works; refused on a draft or an open question). Finished (`/handoff`) → rung 3b, never SendMessage | `claude --resume <id>` (rung 3d) or `launch.py --baton` |

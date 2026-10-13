@@ -45,6 +45,11 @@ except (ImportError, SyntaxError):   # SyntaxError: an older python (3.9) that c
 
 HOME = str(Path.home())
 CLAUDE = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+CLAUDE_JSON = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home())) / ".claude.json"
+# Claude Code's cross-session messaging gate (2.1.296): the server flag below, overridden by the env var.
+# With the flag false a long-running session drops ListAgents and peer SendMessage at its next flag
+# refresh (2026-10-13; anthropics/claude-code#100760). The env var lives in ~/.claude/settings.json `env`.
+MSG_FLAG, MSG_ENV = "tengu_harbor_kite", "CLAUDE_CODE_HARBOR_KITE"
 HERDR = os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr") or str(Path.home() / ".local/bin/herdr")
 STATE_DIR = Path(os.environ.get("SESSION_FINDER_STATE", Path.home() / ".local/state/session-finder"))
 LAUNCHES = STATE_DIR / "launches.jsonl"
@@ -1105,6 +1110,60 @@ def render_ended(it):
     return "\n".join(lines)
 
 
+def _read_json(p):
+    try:
+        return json.loads(Path(p).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _binary_has(path, needle, cache=None):
+    """Whether the file at `path` contains `needle`, cached by path and mtime (a Claude binary is ~240 MB)."""
+    cache = Path(cache or STATE_DIR / "messaging-binary-check.json")
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    prefix = f"{os.path.realpath(path)}:{int(st.st_mtime)}:"
+    key = prefix + needle
+    seen = {k: v for k, v in _read_json(cache).items() if k.startswith(prefix)}   # drop older binaries
+    if key in seen:
+        return seen[key]
+    import mmap
+    try:
+        with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            found = m.find(needle.encode()) >= 0
+    except (OSError, ValueError):
+        return None
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache.with_suffix(".tmp")
+        tmp.write_text(json.dumps({**seen, key: found}))
+        os.replace(tmp, cache)
+    except OSError:
+        pass
+    return found
+
+
+def messaging_warning(claude_json=CLAUDE_JSON, settings=CLAUDE / "settings.json", binary=None, cache=None):
+    """A one-line warning when Claude sessions can lose cross-session messaging, else None.
+
+    The server flag flips between true and false (2026-10-12/13), so its current value proves nothing:
+    the override must be in settings `env`, and while the installed binary still has the flag, it must
+    also still have the variable's name (a release could rename it). A binary with neither has no gate."""
+    note = "(memory/reference_cross_session_messaging_flag_override.md)"
+    env = (_read_json(settings).get("env") or {}).get(MSG_ENV, "")
+    if str(env).lower() not in ("1", "true", "yes", "on"):
+        flag = (_read_json(claude_json).get("cachedGrowthBookFeatures") or {}).get(MSG_FLAG)
+        return (f"WARNING: {settings} has no env {MSG_ENV}=1 (server flag {MSG_FLAG} is cached as {flag}): "
+                f"when the flag reads false, running sessions lose ListAgents and peer SendMessage {note}")
+    binary = binary or shutil.which("claude")
+    if binary and _binary_has(binary, MSG_ENV, cache) is False and _binary_has(binary, MSG_FLAG, cache):
+        return (f"WARNING: {os.path.realpath(binary)} still has {MSG_FLAG} but no longer reads {MSG_ENV}: "
+                f"the messaging override is dead; find its new name {note}")
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", nargs="?", default="list", choices=["list", "ended", "show", "conflicts"])
@@ -1124,6 +1183,9 @@ def main():
         print(json.dumps(items, ensure_ascii=False) if a.json else "\n\n".join(render_ended(it) for it in items))
         return 0 if items else 1
     ss = sessions(include_shell=a.all or a.cmd == "show")
+    warn = messaging_warning()
+    if warn:
+        print(warn, file=sys.stderr)
     if a.cmd == "show":
         ss = [s for s in ss if a.ident in (s["id"], s["name"], s["sid"])]
         for s in ss:
