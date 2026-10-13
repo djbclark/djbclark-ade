@@ -1,6 +1,6 @@
 # Prompt: apply the djbclark / frdminc / Graft development toolchain to a repo
 
-Version 5.9 (2026-10-13). Supersedes 5.8, 5.7, 5.6, 5.5, 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
+Version 5.10 (2026-10-13). Supersedes 5.9, 5.8, 5.7, 5.6, 5.5, 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
 (2026-10-01, which superseded
 `CLAUDE_APPLY_DJBCLARK_TOOLING_Version4.md`). Lived at
 `site-djbclark/research/apply-dev-toolchain/CLAUDE_APPLY_DJBCLARK_TOOLING.md`
@@ -107,6 +107,11 @@ They are in the §1.2 install line, the §1.3 utilities table, and the skill's
 `references/replacements.md`; the "Not installed, and why" table there records
 what is still deliberately out (`jaq`, `mdcat`, `ov`, `tailspin`, `aria2c`,
 `f2`, `angle-grinder`, `fclones`, `atuin`, `lazygit`, `lnav`, `nomino`).
+
+What changed in 5.10 (2026-10-13): `forgejo-cli` (`fj`) and `tea` join the Homebrew
+install (§1.2, §1.3) and §0.6 lists the `forgejo` skill (token in `sudo-secretspec`,
+`setup-token`, `forgejo-api`, `tea-forgejo`). `pyforgejo` is deliberately not installed:
+a library, used on demand with `uv run --with pyforgejo`.
 
 What changed in 5.9 (2026-10-13): §0.6 lists the `autorename` skill, including the
 user-level symlink that lets it rename omp sessions (its `omp-bridge.ts` extension).
@@ -381,6 +386,7 @@ symlinking the skill directory into `.claude/skills/<name>/`:
 | `sipb-llm-bench` | offer | Benchmarks a model on MIT SIPB LLMs (or any OpenAI-compatible Open WebUI/Ollama server) as an agentic-coding backend: speed probes, a tool-call conformance check, two tool-using tasks scored by running the tests, and a procedure for updating the published report. Serial and gentle on the shared server; only useful for a repo that targets such a server. |
 | `setup-modern-cli` | yes | The standing instruction to prefer modern tools over the classic ones: the replacement table (`rg`←`grep`, `fd`←`find`, `bat`←`cat`, `srgn`←`sed`, `eza`←`ls`, `hck`←`cut`/`awk`, `jq`/`yq`, `xh`, `ast-grep`, `dust`/`gdu`, `rtk`) with the exact command patterns, the footguns (`rg -rln` is `--replace`; a pathless `rg` over-searches; `sd` is retired), and the measured search policy from §1.3 (`rg` by default, opt-in indexed `ig` as a first line for one known literal, never `ayg`). Load it before shell searches; it is the long form of the §1.3 table. |
 | `autorename` | offer | `/autorename`: names the current agent session (Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex in a herdr pane, omp) from what it is working on, writing where each TUI's own `/rename` writes; `--auto` keeps a title the user set by hand. **omp needs one user-level step:** `ln -s <djbclark-ade>/skills/autorename/omp-bridge.ts ~/.omp/agent/extensions/autorename-bridge.ts`, then restart omp (it loads extensions at startup only). The extension lets the running omp rename itself, because omp moves a session to a new file when anything else writes it. Ask before creating the symlink: it is outside the repo and loads into every omp session. |
+| `forgejo` | offer | Uses a Forgejo instance (default `forgejo.mit.edu`) with the token held in `sudo-secretspec` as `DJBCLARK_<HOST>_TOKEN`: `scripts/setup-token` declares the secret (optional), opens the token page and verifies it; `forgejo-api` makes one `/api/v1` call (mutations need `--yes`); `tea-forgejo` runs `tea` with the secret on its env login. Needs `fj` and `tea` from §1.2, and a token only the user can create in the browser, so offer it only where the user works with a Forgejo server. |
 
 **From Matt Pocock's skills marketplace** (public):
 
@@ -467,7 +473,7 @@ step to the user in the interactive phase. If the installer offers to add
 
 ```bash
 HOMEBREW_NO_AUTO_UPDATE=1 brew install \
-  git gh uv just oven-sh/bun/bun node \
+  git gh forgejo-cli tea uv just oven-sh/bun/bun node \
   ruff pre-commit gitleaks typos-cli semgrep \
   shellcheck shfmt biome lychee dotenv-linter actionlint \
   openjdk coreutils caddy \
@@ -536,6 +542,8 @@ it on automated install lines.
 |---|---|---|---|
 | Git | https://git-scm.com/ | `brew install git` | Version control |
 | GitHub CLI `gh` | https://cli.github.com/ | `brew install gh` | GitHub from the terminal: repos, PRs, Actions, forks, collaborators |
+| Forgejo CLI `fj` | https://codeberg.org/forgejo-contrib/forgejo-cli | `brew install forgejo-cli` | Forgejo from the terminal (Forgejo-native). Use unauthenticated only: `fj auth` keeps tokens in its own plaintext file, outside `sudo-secretspec` |
+| `tea` | https://gitea.com/gitea/tea | `brew install tea` | Gitea/Forgejo CLI for authenticated agent work: the `forgejo` skill's `tea-forgejo` feeds it `GITEA_INSTANCE_URL` and `GITEA_TOKEN` from `sudo-secretspec`, so never `tea login add` |
 | uv | https://docs.astral.sh/uv/ | `brew install uv` | Python interpreters, virtual environments, locked dependencies (`uv.lock`) |
 | just | https://just.systems/ | `brew install just` | Command runner (`just test`, `just check`, …). `just --fmt --check` is the justfile linter/formatter |
 | Bun | https://bun.sh/ | `brew install oven-sh/bun/bun` | Installs and runs repo-local JS tooling (`bunx`), with `bun.lock` |
