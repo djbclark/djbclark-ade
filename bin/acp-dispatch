@@ -861,6 +861,9 @@ def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
         _, extra = record_quota_refusal_in_aiuse(agent, model, text, rc, when)
     elif cls in ("outage", "transient"):
         note_outage_in_aiuse(agent, model, text)
+    if "stop=cancelled" in text and not extra:
+        extra = (" [stop=cancelled before the time limit: a foreground command that ran about an hour"
+                 " is a known cause, see dispatch-footer item 10]")
     return (f"{NO_REPORT_PREFIX} {cls} ({', '.join(bits)}): acp-run exit {rc}; the agent stopped "
             f"before writing DONE, so nothing above is a deliverable{extra} (appended by acp-dispatch)")
 

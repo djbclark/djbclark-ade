@@ -982,3 +982,22 @@ class TestCheckpointStale(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCancelledHint(unittest.TestCase):
+    """2026-10-13: an opencode slice's 3,626 s foreground command was interrupted and cancelled the turn."""
+
+    def test_stop_cancelled_note_points_at_the_footer_rule(self):
+        import importlib.machinery
+        import importlib.util
+        import tempfile
+        loader = importlib.machinery.SourceFileLoader("acp_dispatch_hint", str(Path(__file__).resolve().parent.parent / "bin" / "acp-dispatch"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        with tempfile.TemporaryDirectory() as tmp:
+            err = Path(tmp) / "err"
+            err.write_text("acp-run: agent=opencode stop=cancelled secs=7444.2 tools=82\n")
+            note = mod.failure_note(err, 1, "opencode", "m1")
+        self.assertIn("stop=cancelled before the time limit", note)
+        self.assertIn("dispatch-footer item 10", note)
