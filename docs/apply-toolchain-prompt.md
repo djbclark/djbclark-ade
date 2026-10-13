@@ -1,6 +1,6 @@
 # Prompt: apply the djbclark / frdminc / Graft development toolchain to a repo
 
-Version 5.8 (2026-10-12). Supersedes 5.7, 5.6, 5.5, 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
+Version 5.9 (2026-10-13). Supersedes 5.8, 5.7, 5.6, 5.5, 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
 (2026-10-01, which superseded
 `CLAUDE_APPLY_DJBCLARK_TOOLING_Version4.md`). Lived at
 `site-djbclark/research/apply-dev-toolchain/CLAUDE_APPLY_DJBCLARK_TOOLING.md`
@@ -107,6 +107,9 @@ They are in the §1.2 install line, the §1.3 utilities table, and the skill's
 `references/replacements.md`; the "Not installed, and why" table there records
 what is still deliberately out (`jaq`, `mdcat`, `ov`, `tailspin`, `aria2c`,
 `f2`, `angle-grinder`, `fclones`, `atuin`, `lazygit`, `lnav`, `nomino`).
+
+What changed in 5.9 (2026-10-13): §0.6 lists the `autorename` skill, including the
+user-level symlink that lets it rename omp sessions (its `omp-bridge.ts` extension).
 
 What changed in 5.8 (2026-10-12): §0.6 lists the Fastino `fastino-glide` skill beside `typesafe-ai`
 (a second hosted decision model, installed project-level with `npx skills add`; key
@@ -377,6 +380,7 @@ symlinking the skill directory into `.claude/skills/<name>/`:
 | `dialogue` | yes | Runs a multi-model dialogue that produces one artifact (a spec, a report, a design) with a final-word model: fixed speaking rounds through pinned headless routes (for example Grok, Claude and GPT via `acp-run`), a machine-read footer per turn with point ids, status and dissent, a transcript that is the record, and `scripts/dialogue.py` checks for the failures the first run measured (noise strip, protocol lint, final-word gate). Use when several vendors should argue the points of contention before one writes the deliverable; not for a quick second opinion or for fan-out work with no argument between models. |
 | `sipb-llm-bench` | offer | Benchmarks a model on MIT SIPB LLMs (or any OpenAI-compatible Open WebUI/Ollama server) as an agentic-coding backend: speed probes, a tool-call conformance check, two tool-using tasks scored by running the tests, and a procedure for updating the published report. Serial and gentle on the shared server; only useful for a repo that targets such a server. |
 | `setup-modern-cli` | yes | The standing instruction to prefer modern tools over the classic ones: the replacement table (`rg`←`grep`, `fd`←`find`, `bat`←`cat`, `srgn`←`sed`, `eza`←`ls`, `hck`←`cut`/`awk`, `jq`/`yq`, `xh`, `ast-grep`, `dust`/`gdu`, `rtk`) with the exact command patterns, the footguns (`rg -rln` is `--replace`; a pathless `rg` over-searches; `sd` is retired), and the measured search policy from §1.3 (`rg` by default, opt-in indexed `ig` as a first line for one known literal, never `ayg`). Load it before shell searches; it is the long form of the §1.3 table. |
+| `autorename` | offer | `/autorename`: names the current agent session (Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex in a herdr pane, omp) from what it is working on, writing where each TUI's own `/rename` writes; `--auto` keeps a title the user set by hand. **omp needs one user-level step:** `ln -s <djbclark-ade>/skills/autorename/omp-bridge.ts ~/.omp/agent/extensions/autorename-bridge.ts`, then restart omp (it loads extensions at startup only). The extension lets the running omp rename itself, because omp moves a session to a new file when anything else writes it. Ask before creating the symlink: it is outside the repo and loads into every omp session. |
 
 **From Matt Pocock's skills marketplace** (public):
 
