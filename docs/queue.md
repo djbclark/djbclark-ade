@@ -3,6 +3,25 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Resurface 2026-10-14 (operator, 2026-10-13): first real SkillOpt-Sleep night, backends, -C repos
+
+**Queued 2026-10-13 by the operator: "resurface tomorrow".** Any session that opens
+this repo on or after 2026-10-14 raises these three first, one `/steps` prompt each:
+1. **Read the first night on the new chain** (03:30 on 2026-10-14): `nights.jsonl` and
+   `attempts.jsonl` in `~/.local/state/skillopt-sleep/`, `skillopt-sleep status`. Did the
+   per-prompt retries, the stripped opencode/agy startup, the direct SIPB entries and the
+   lowered floors (0 for opencode-go/agy/zcode, 5 for claude) get sources through? Did crush
+   and the new Hermes/grok/muse/cline/acp-dispatch adapters run? Measure prompts and tokens
+   per source: the logs have no token counts, so add them.
+2. **Denied backends** (`hermes`, `cursor`, `cline`, `clinepass`, `opus`, `fable` in
+   `failover.DENY`; `muse`, `pi`, `grok`, `codex`, `copilot` in night.json/skillopt-night):
+   the operator kept them denied on 2026-10-13 ("revisit after tonight"). With the night's real
+   counts, decide whether Hermes or codex joins as a late chain entry. `aiuse --available`
+   shows only opencode-go, claude (default and Fable) and antigravity/gemini; codex, cursor,
+   copilot, grok, pi and muse have no window.
+3. **The `-C` strip gap** in the next entry: the operator chose to note it and do no work on
+   2026-10-13; raise it again.
+
 ## acp-run --perm deny: what the user-config strip still lets through
 
 **Queued 2026-10-13 (adversary review of the deny strip, finding 5). Needs an
