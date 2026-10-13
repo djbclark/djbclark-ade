@@ -204,6 +204,19 @@ is never retried. Each retry is one `"phase": "retry"` line in `attempts.jsonl`
 (prompt id, try, backoff, budget left), and the source's `nights.jsonl` row
 counts them in `retries`.
 
+**Token counts (2026-10-13).** Every `"phase": "attempt"` row in `attempts.jsonl`
+(failed attempts too) and every `nights.jsonl` row of a source that ran gets
+`prompts` (prompts answered) and `tokens`: the backend-reported counts summed
+over those prompts, `{"metered", "input", "output", "cached_read", "cached_write",
+"total"}` (a field no prompt reported is omitted). When no answered prompt was
+metered the row has `"tokens": null` (and still `"prompts": N`), never zeros. The
+counts are a lower bound: a prompt that spends tokens then fails adds nothing. The nights
+row sums every attempt of that source night, failed entries included. opencode,
+claude and direct sipb report counts; agy and crush do not, so a night that lands
+there is `tokens: null`; zcode, hermes and the other backends are unmetered until
+a log shows `result.usage`. A night split across backends sums only the metered
+prompts (`metered` < `prompts`). Details: docs/failover.md item 5a.
+
 **Preflight is cached for the night (2026-10-13).** The night once ran the
 same preflight again for every source: each source repeated the same
 `aiuse` floor refusals and printed crush's canary refusal again. Each

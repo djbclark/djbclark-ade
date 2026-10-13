@@ -154,14 +154,14 @@ def test_crush_probe(monkeypatch):
 
     def ask(entry, prompt):
         calls.append(prompt)
-        return "OK"
+        return failover.Answer("OK")
     monkeypatch.setattr(failover, "ask", ask)
     ok, why = failover.preflight(e, probe=False)
     assert ok and "probe and canary not run" in why and calls == []
     assert failover.preflight(e)[0] and calls == [failover.PROBE_PROMPT]
     assert failover.preflight(e)[0] and len(calls) == 1, "probe result is cached per process"
     failover._cache.clear()
-    monkeypatch.setattr(failover, "ask", lambda entry, prompt: "I cannot")
+    monkeypatch.setattr(failover, "ask", lambda entry, prompt: failover.Answer("I cannot"))
     assert not failover.preflight(e)[0]
     with pytest.raises(failover.ChainError, match="takes no model"):
         failover.load_chain([{"tui": "crush", "model": "sipb/x"}])
@@ -271,7 +271,7 @@ def test_ask_acp_runs_in_empty_dir(tmp_path, monkeypatch):
     acp.chmod(0o755)
     monkeypatch.setenv("FAILOVER_ACP_RUN", str(acp))
     (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
-    assert failover.ask(cl, "q") == "0"
+    assert failover.ask(cl, "q").text == "0"
 
 
 def _fake_acp(tmp_path: Path, monkeypatch, name: str, body: str) -> Path:
@@ -307,7 +307,7 @@ def test_ask_keeps_a_refusal_as_the_answer(tmp_path, monkeypatch, fields, ok):
     _fake_acp(tmp_path, monkeypatch, "acp-refuse", _result_log(fields) + "echo \"I can't do that\"\nexit 1\n")
     (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
     if ok:
-        assert failover.ask(cl, "q") == "I can't do that"
+        assert failover.ask(cl, "q").text == "I can't do that"
     else:
         with pytest.raises(failover.AttemptFailed, match="rc=1"):
             failover.ask(cl, "q")
@@ -326,7 +326,7 @@ def test_ask_child_env_is_minimal_and_logs_are_private(tmp_path, monkeypatch):
               f'env > "{out}"\nwhile [ "$1" != "--log" ]; do shift; done; echo "$2"\n')
     monkeypatch.setenv("SOME_API_KEY", "leak-me")
     (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku", "env": {"MAX_THINKING_TOKENS": "0"}}])
-    log = failover.ask(cl, "q")
+    log = failover.ask(cl, "q").text
     env = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
     assert "SOME_API_KEY" not in env and "FAKE_SECRET" not in env
     assert env["MAX_THINKING_TOKENS"] == "0" and "HOME" in env and "PATH" in env
@@ -548,7 +548,7 @@ def test_ask_many_stops_on_first_failure(monkeypatch):
     def fake(entry, prompt):
         if prompt == "bad":
             raise failover.AttemptFailed("nope")
-        return prompt.upper()
+        return failover.Answer(prompt.upper())
     monkeypatch.setattr(failover, "ask", fake)
     assert failover.ask_many(cl, {"a": "x", "b": "y"}) == {"a": "X", "b": "Y"}
     with pytest.raises(failover.AttemptFailed):
@@ -571,7 +571,7 @@ def test_openai_secret_only_in_header(tmp_path, monkeypatch):
         return Opener()
     monkeypatch.setattr(failover.urllib.request, "build_opener", build_opener)
     (sipb,) = failover.load_chain([{"tui": "sipb", "model": "qwen3-coder:30b"}])
-    assert failover.ask(sipb, "q") == "hi"
+    assert failover.ask(sipb, "q").text == "hi"
     assert seen["auth"] == f"Bearer {SECRET}"
     assert seen["redirectable"] is None, "the key must not follow a redirect"
     assert failover._NoRedirect in seen["handlers"]
@@ -660,7 +660,7 @@ def test_ask_many_retries_a_startup_failure_then_succeeds(tmp_path, monkeypatch)
         calls.append(prompt)
         if prompt == "x" and calls.count("x") < 3:
             raise failover.StartupFailed("claude:haiku: acp-run rc=124 [startup: handshake]")
-        return prompt.upper()
+        return failover.Answer(prompt.upper())
     monkeypatch.setattr(failover, "ask", fake)
     clock = Clock()
     pacing = _pacing(tmp_path, clock)
@@ -734,7 +734,7 @@ def test_default_retry_budget_is_a_quarter_of_the_round(tmp_path, monkeypatch):
         seen[prompt] = seen.get(prompt, 0) + 1
         if seen[prompt] == 1:
             raise failover.StartupFailed("x")
-        return "ok"
+        return failover.Answer("ok")
     monkeypatch.setattr(failover, "ask", fake)
     (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
     prompts = {str(i): str(i) for i in range(20)}
@@ -746,7 +746,7 @@ def test_spawn_gate_waits_for_load_then_proceeds(tmp_path, monkeypatch):
     (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
     loads = iter([40.0, 40.0, 10.0])
     calls: list[str] = []
-    monkeypatch.setattr(failover, "ask", lambda e, p: calls.append(p) or "A")
+    monkeypatch.setattr(failover, "ask", lambda e, p: calls.append(p) or failover.Answer("A"))
     clock = Clock()
     pacing = _pacing(tmp_path, clock, max_load=2.0, cpus=8, load=lambda: next(loads))
     assert failover.ask_many(cl, {"a": "q"}, pacing=pacing) == {"a": "A"}
@@ -756,7 +756,7 @@ def test_spawn_gate_waits_for_load_then_proceeds(tmp_path, monkeypatch):
 def test_spawn_gate_gives_up_at_the_cap_without_spawning(tmp_path, monkeypatch):
     (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
     calls: list[str] = []
-    monkeypatch.setattr(failover, "ask", lambda e, p: calls.append(p) or "A")
+    monkeypatch.setattr(failover, "ask", lambda e, p: calls.append(p) or failover.Answer("A"))
     clock = Clock()
     pacing = _pacing(tmp_path, clock, max_load=2.0, cpus=8, load=lambda: 40.0, load_wait=600, retries=0)
     with pytest.raises(failover.AttemptFailed, match=r"load gate: 5.00/core > 2 after waiting 600s"):
@@ -779,7 +779,7 @@ def test_spawn_gate_stop_hook_ends_the_batch(tmp_path, monkeypatch):
         pass
     (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
     calls: list[str] = []
-    monkeypatch.setattr(failover, "ask", lambda e, p: calls.append(p) or "A")
+    monkeypatch.setattr(failover, "ask", lambda e, p: calls.append(p) or failover.Answer("A"))
 
     def stop():
         raise Stop("memory pressure critical")
@@ -923,7 +923,7 @@ def test_preflight_perm_all_probe_entries_probe_instead(monkeypatch):
 
     def ask(entry, prompt):
         calls.append((entry.tui.name, entry.perm, prompt))
-        return "OK"
+        return failover.Answer("OK")
     monkeypatch.setattr(failover, "ask", ask)
     cr, he = failover.load_chain({"perm": "all", "chain": [{"tui": "crush"}, {"tui": "hermes"}]})
     ok, why = failover.preflight(cr, probe=False)
@@ -932,7 +932,7 @@ def test_preflight_perm_all_probe_entries_probe_instead(monkeypatch):
     assert failover.preflight(cr) == (True, "no quota pool to check; perm all: no canary; probe answered 'OK'")
     assert failover.preflight(he)[0]
     assert calls == [("crush", "all", failover.PROBE_PROMPT), ("hermes", "all", failover.PROBE_PROMPT)]
-    monkeypatch.setattr(failover, "ask", lambda e, p: "nope")
+    monkeypatch.setattr(failover, "ask", lambda e, p: failover.Answer("nope"))
     failover._cache.clear()
     assert not failover.preflight(cr)[0]
 
@@ -968,7 +968,7 @@ def test_ask_perm_all_passes_perm_and_strip_to_acp_run(tmp_path, monkeypatch):
               f'printf "%s\\n" "$@" > {out}\n' + LOG_RESULT.format(tools=3) + "echo answer\n")
     (a,) = failover.load_chain({"perm": "all", "chain": [{"tui": "zcode", "effort": "low"}]},
                                strip_user_config=True)
-    assert failover.ask(a, "q") == "answer"
+    assert failover.ask(a, "q").text == "answer"
     argv = out.read_text().splitlines()
     assert argv[argv.index("--perm") + 1] == "all" and "--strip-user-config" in argv
 
@@ -1016,3 +1016,126 @@ def test_hermes_preflight_has_no_quota_pool(monkeypatch):
     (h,) = failover.load_chain([{"tui": "hermes", "perm": "all"}])
     assert failover.preflight(h, probe=False) == (
         True, "no quota pool to check; perm all: no canary; probe not run (it calls the model)")
+
+
+# ── token counts ────────────────────────────────────────────────────────────
+
+# Result-record fields as acp-run wrote them in real logs (2026-10-12 acp-logs).
+CLAUDE_RESULT = ('{"turns": 1, "tool_calls": 0, "usage": {"totalTokens": 2807, "inputTokens": 2, '
+                 '"outputTokens": 64, "cachedReadTokens": 535, "cachedWriteTokens": 2206}}')
+OPENCODE_RESULT = ('{"turns": 1, "tool_calls": 0, "usage": {"totalTokens": 4619, "inputTokens": 4413, '
+                   '"outputTokens": 78, "cachedReadTokens": 128}}')
+# agy: no per-prompt usage; usage_update.used is context size and is not a count.
+AGY_RESULT = '{"turns": 1, "tool_calls": 0, "usage_update": {"used": 18311, "size": 1048576}}'
+
+
+def _ask_with_result(tmp_path, monkeypatch, name, fields):
+    _fake_acp(tmp_path, monkeypatch, name, _result_log(fields) + "echo answer\n")
+    (e,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    return failover.ask(e, "q")
+
+
+def test_ask_reads_usage_from_the_acp_result_record(tmp_path, monkeypatch):
+    got = _ask_with_result(tmp_path, monkeypatch, "acp-claude", CLAUDE_RESULT)
+    assert got.text == "answer"
+    assert got.usage == {"input": 2, "output": 64, "cached_read": 535, "cached_write": 2206, "total": 2807}
+    got = _ask_with_result(tmp_path, monkeypatch, "acp-opencode", OPENCODE_RESULT)
+    assert got.usage == {"input": 4413, "output": 78, "cached_read": 128, "cached_write": None,
+                         "total": 4619}
+    assert _ask_with_result(tmp_path, monkeypatch, "acp-agy", AGY_RESULT).usage is None
+    assert _ask_with_result(tmp_path, monkeypatch, "acp-nores", "{}").usage is None
+
+
+def test_tally_sums_metered_prompts_and_counts_unmetered_ones(tmp_path, monkeypatch):
+    tally = failover.Tally()
+    for name, fields in (("a", CLAUDE_RESULT), ("b", OPENCODE_RESULT), ("c", AGY_RESULT),
+                         ("d", CLAUDE_RESULT)):
+        tally.add(_ask_with_result(tmp_path, monkeypatch, f"acp-{name}", fields))
+    assert tally.row_fields() == {"prompts": 4, "tokens": {
+        "metered": 3, "input": 4417, "output": 206, "cached_read": 1198,
+        "cached_write": 4412, "total": 10233}}
+    assert tally.row_fields(since=2) == {"prompts": 2, "tokens": {
+        "metered": 1, "input": 2, "output": 64, "cached_read": 535,
+        "cached_write": 2206, "total": 2807}}, "marked slice: only the later prompts"
+    only_opencode = failover.Tally()
+    only_opencode.add(_ask_with_result(tmp_path, monkeypatch, "acp-o", OPENCODE_RESULT))
+    assert "cached_write" not in only_opencode.row_fields()["tokens"], "an unreported field is omitted"
+
+
+def test_all_unmetered_prompts_give_null_tokens_and_a_prompt_count(tmp_path, monkeypatch):
+    tally = failover.Tally()
+    assert tally.row_fields() == {"prompts": 0, "tokens": None}
+    for name in ("a", "b"):
+        tally.add(_ask_with_result(tmp_path, monkeypatch, f"acp-{name}", AGY_RESULT))
+    assert tally.row_fields() == {"prompts": 2, "tokens": None}
+
+
+def test_openai_usage_maps_to_tokens(monkeypatch):
+    body = {"choices": [{"message": {"content": "hi"}}],
+            # SIPB's real shape: OpenAI counts plus Ollama extras, which are ignored
+            "usage": {"prompt_tokens": 15, "completion_tokens": 2, "total_tokens": 17,
+                      "prompt_eval_count": 15, "eval_count": 2, "total_duration": 812345678}}
+
+    class Opener:
+        def open(self, req, timeout):
+            return io.BytesIO(json.dumps(body).encode())
+    monkeypatch.setattr(failover.urllib.request, "build_opener", lambda *h: Opener())
+    (sipb,) = failover.load_chain([{"tui": "sipb", "model": "qwen3-coder:30b"}])
+    got = failover.ask(sipb, "q")
+    assert got.usage == {"input": 15, "output": 2, "cached_read": None, "cached_write": None, "total": 17}
+    del body["usage"]
+    assert failover.ask(sipb, "q").usage is None
+
+
+def test_run_chain_puts_tokens_on_each_attempt_row(tmp_path, monkeypatch):
+    chain = failover.load_chain([{"tui": "claude", "model": "haiku"}, {"tui": "claude", "model": "sonnet"}])
+    pacing = _pacing(tmp_path, Clock())
+    calls = []
+
+    def fake(entry, prompt):
+        calls.append(entry.model)
+        if entry.model == "haiku" and prompt == "b":
+            raise failover.AttemptFailed("simulated quota")
+        usage = None if entry.model == "sonnet" else {"input": 10, "output": 1, "cached_read": None,
+                                                      "cached_write": None, "total": 11}
+        return failover.Answer(prompt.upper(), usage)
+    monkeypatch.setattr(failover, "ask", fake)
+
+    def attempt(e):
+        return failover.ask_many(e, {"a": "a", "b": "b"}, jobs=1, pacing=pacing)
+    res = failover.run_chain(chain, attempt, task="t", log_path=tmp_path / "attempts.jsonl",
+                             check=False, tally=pacing.tally)
+    assert res.ok and res.entry.model == "sonnet"
+    rows = _log(tmp_path)
+    assert rows[0]["ok"] is False and rows[0]["prompts"] == 1 and rows[0]["tokens"] == {
+        "metered": 1, "input": 10, "output": 1, "total": 11}, "a failed attempt still counts its answers"
+    assert rows[1]["ok"] is True and rows[1]["tokens"] is None and rows[1]["prompts"] == 2
+    night_row = pacing.tally.row_fields()
+    assert night_row["prompts"] == 3 and night_row["tokens"]["metered"] == 1, "sums every attempt"
+
+
+@pytest.mark.parametrize(("log_text", "usage"), [
+    ('{"kind": "result", "data": [1, 2]}', None),
+    ('{"kind": "result", "data": "done"}', None),
+    ('[1, 2]', None),
+    ('{"kind": "result", "data": {"usage": [1, 2]}}', None),
+    ('{"kind": "result", "data": {"usage": "lots"}}', None),
+    ('{"kind": "result", "data": {"usage": {"totalTokens": "17", "inputTokens": "15"}}}', None),
+    ('{"kind": "result", "data": {"usage": {"totalTokens": -5, "outputTokens": -1}}}', None),
+    ('{"kind": "result", "data": {"usage": {"totalTokens": true, "inputTokens": false}}}', None),
+    ('{"kind": "result", "data": {"usage": {"totalTokens": 1e999, "inputTokens": 3}}}',
+     {"input": 3, "output": None, "cached_read": None, "cached_write": None, "total": None}),
+    ('{"kind": "update", "data": {}}', None),
+    (None, None),  # acp-run wrote no log at all
+])
+def test_ask_survives_malformed_usage(tmp_path, monkeypatch, log_text, usage):
+    """A strange log must never break an answered prompt: the answer stays, the count is None."""
+    logfile = tmp_path / "log.txt"
+    body = 'LOG=""; prev=""; for x in "$@"; do [ "$prev" = "--log" ] && LOG="$x"; prev="$x"; done\n'
+    if log_text is not None:
+        logfile.write_text(log_text + "\n")
+        body += f'cat "{logfile}" > "$LOG"\n'
+    _fake_acp(tmp_path, monkeypatch, "acp-weird", body + "echo answer\n")
+    (e,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    got = failover.ask(e, "q")
+    assert got.text == "answer" and got.usage == usage

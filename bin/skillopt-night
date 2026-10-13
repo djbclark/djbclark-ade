@@ -68,8 +68,9 @@ its own dir (SKILLOPT_SLEEP_HANDOFF_DIR) and the runner archives it after every
 finished night.
 
 Outputs: ~/.local/state/skillopt-sleep/<date>-<source>.log per run, one JSON
-line per source night in nights.jsonl, every preflight/attempt in attempts.jsonl,
-and at most one `hermes-ping` per event (proposals staged, chain exhausted,
+line per source night in nights.jsonl, every preflight/attempt in attempts.jsonl
+(both carry `tokens`, the backend-reported counts of the answered prompts; see
+docs/failover.md), and at most one `hermes-ping` per event (proposals staged, chain exhausted,
 chain invalid).
 
 Test hooks (environment): SKILLOPT_NIGHT_STATE_DIR, SKILLOPT_NIGHT_BIN,
@@ -759,19 +760,20 @@ def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[st
     stopped = None
     try:
         res = failover.run_chain(entries, attempt, task=f"skillopt-night {source}",
-                                 log_path=state_dir() / "attempts.jsonl")
+                                 log_path=state_dir() / "attempts.jsonl", tally=pacing.tally)
     except NightStop as e:
         stopped, res = str(e), None
     finally:
         pinned.unlink(missing_ok=True)  # transcript excerpts; the night's own copy is archived
     if res is None:
         row = {"source": source, "mode": "run", "status": f"stopped: {stopped}", "rc": None,
-               "proposals": 0, "retries": pacing.retried, "perms": perms, "log": str(log)}
+               "proposals": 0, "retries": pacing.retried, "perms": perms, "log": str(log),
+               **pacing.tally.row_fields()}
     elif not res.ok:
         failed = [f"{r['label']}: {r['why']}" for r in res.attempts if not r["ok"]]
         row = {"source": source, "mode": "run", "status": "chain_exhausted", "rc": None,
                "proposals": 0, "failed": failed, "retries": pacing.retried, "perms": perms,
-               "log": str(log)}
+               "log": str(log), **pacing.tally.row_fields()}
     else:
         failed = [f"{r['label']}: {r['why']}" for r in res.attempts if not r["ok"]]
         v, result = res.value, res.value["result"]
@@ -782,7 +784,8 @@ def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[st
                "tasks": result.get("n_tasks"),
                "accepted": result.get("accepted"), "gate": result.get("gate_action") or None,
                "proposals": n_proposals(result), "staging_dir": result.get("staging_dir") or None,
-               "failed": failed, "retries": pacing.retried, "perms": perms, "log": str(log)}
+               "failed": failed, "retries": pacing.retried, "perms": perms, "log": str(log),
+               **pacing.tally.row_fields()}
     record(row)
     return row
 

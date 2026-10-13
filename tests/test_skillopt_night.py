@@ -138,7 +138,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("FAKE_RESULT", raising=False)
     monkeypatch.setattr(night, "handoff_dir", lambda s: tmp_path / "handoff" / s)
     monkeypatch.setattr(failover, "preflight", lambda e, probe=True: (True, "ok (test)"))
-    monkeypatch.setattr(failover, "ask", lambda e, p: f"ANS-{e.model}-{p}")
+    monkeypatch.setattr(failover, "ask", lambda e, p: failover.Answer(f"ANS-{e.model}-{p}"))
     monkeypatch.setattr(night.skillopt_sources, "store_present", lambda s: False)
     # the engine and adapters get a minimal env (M2): let the fake's own knobs through
     monkeypatch.setattr(failover, "BASE_ENV_KEYS",
@@ -365,7 +365,7 @@ def test_answer_failure_fails_over_to_next_entry(env, monkeypatch):
     def ask(e, p):
         if e.model == "haiku":
             raise failover.AttemptFailed("simulated quota")
-        return f"ANS-{e.model}"
+        return failover.Answer(f"ANS-{e.model}")
     monkeypatch.setattr(failover, "ask", ask)
     assert night.main(["--source", "claude"]) == 0
     row = _rows(env)[-1]
@@ -378,7 +378,7 @@ def test_bad_night_restores_state_and_reruns_on_next_entry(env, monkeypatch):
     _night(env / "home", HAIKU_SONNET)
     state = env / "home" / ".skillopt-sleep" / "state.json"
     state.write_text(json.dumps({"night": 7, "last_harvest": {}}))
-    monkeypatch.setattr(failover, "ask", lambda e, p: "BAD" if e.model == "haiku" else "GOOD")
+    monkeypatch.setattr(failover, "ask", lambda e, p: failover.Answer("BAD" if e.model == "haiku" else "GOOD"))
     assert night.main(["--source", "claude"]) == 0
     assert json.loads(state.read_text())["night"] == 8, "the failed attempt's night was rolled back"
     answers = [c.get("answer") for c in _calls(env)]
@@ -753,7 +753,7 @@ def test_startup_retry_counted_in_the_night_row(env, monkeypatch):
         tries.append(p)
         if len(tries) == 1:
             raise failover.StartupFailed("claude:haiku: acp-run rc=1 [startup: ServiceUnavailableError]")
-        return f"ANS-{e.model}"
+        return failover.Answer(f"ANS-{e.model}")
     monkeypatch.setattr(failover, "ask", ask)
     assert night.main(["--source", "claude"]) == 0
     row = _rows(env)[-1]
@@ -884,3 +884,26 @@ def test_chain_check_shows_perm_and_spends_nothing(env, capsys, monkeypatch):
     assert " all " in lines[2] and "perm all: no canary; probe not run" in lines[2]
     assert " all " in lines[3] and lines[3].split()[1] == "hermes:default"
     assert " deny " in lines[4] and "canary not run (it calls the model)" in lines[4]
+
+
+def test_nights_row_and_attempt_rows_carry_tokens(env, monkeypatch):
+    _night(env / "home", HAIKU_SONNET)
+    usage = {"input": 4413, "output": 78, "cached_read": 128, "cached_write": None, "total": 4619}
+    monkeypatch.setattr(failover, "ask",
+                        lambda e, p: failover.Answer(f"ANS-{e.model}", usage if e.model == "haiku" else None))
+    assert night.main(["--source", "claude"]) == 0
+    row = _rows(env)[-1]
+    assert row["answered"] >= 1 and row["prompts"] == row["answered"] and row["tokens"] == {
+        "metered": row["answered"], "input": 4413 * row["answered"],
+        "output": 78 * row["answered"], "cached_read": 128 * row["answered"],
+        "total": 4619 * row["answered"]}
+    ok = [r for r in _attempts(env) if r["phase"] == "attempt"]
+    assert len(ok) == 1 and (ok[0]["prompts"], ok[0]["tokens"]) == (row["prompts"], row["tokens"])
+
+
+def test_unmetered_night_writes_null_tokens(env, monkeypatch):
+    _night(env / "home", HAIKU_SONNET)
+    monkeypatch.setattr(failover, "ask", lambda e, p: failover.Answer(f"ANS-{e.model}"))
+    assert night.main(["--source", "claude"]) == 0
+    row = _rows(env)[-1]
+    assert row["tokens"] is None and row["prompts"] == row["answered"] >= 1

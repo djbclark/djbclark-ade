@@ -57,6 +57,13 @@ sudo-secretspec name exported as `secret_env`, default OPENAI_API_KEY for
 `run`; only to the registry endpoint, https or loopback), env (ENV_ALLOW keys
 only), extra_args (appended to acp-run; only EXTRA_ARGS_ALLOWED flags), timeout, label,
 probe, health_url, retry_budget (startup-failure retries per ask_many round). Importable: skillopt-night uses load_chain/preflight/run_chain/ask.
+
+Token counts (2026-10-13): `ask()` returns an `Answer(text, usage)`; `usage` is the
+backend's own per-prompt counts (acp-run's result record, or the OpenAI `usage` of a
+direct POST) as {input, output, cached_read, cached_write, total}, or None when the
+backend reports none (agy, crush): such a prompt is unmetered, never zero. Nothing is
+estimated. `Pacing.tally` (a `Tally`) collects every answer `ask_many` returns, and
+`run_chain(tally=)` puts `prompts` and `tokens` on each attempt row.
 """
 from __future__ import annotations
 
@@ -560,7 +567,7 @@ def probe_ok(entry: Entry) -> tuple[bool, str]:
     key = f"probe:{entry.label}" + (f":{entry.perm}" if entry.perm != DEFAULT_PERM else "")
     if key not in _cache:
         try:
-            answer = ask(entry, PROBE_PROMPT)
+            answer = ask(entry, PROBE_PROMPT).text
             _cache[key] = ("OK" in answer.upper(), f"probe answered {answer[:40]!r}")
         except AttemptFailed as e:
             _cache[key] = (False, f"probe failed: {e}")
@@ -647,6 +654,77 @@ def preflight_cached(entry: Entry, *, ttl: float = PREFLIGHT_TTL_S,
     return ok, why
 
 
+# ── token counts ─────────────────────────────────────────────────────────────
+
+USAGE_FIELDS = ("input", "output", "cached_read", "cached_write", "total")
+_ACP_USAGE = {"input": "inputTokens", "output": "outputTokens", "cached_read": "cachedReadTokens",
+              "cached_write": "cachedWriteTokens", "total": "totalTokens"}
+_OPENAI_USAGE = {"input": "prompt_tokens", "output": "completion_tokens", "total": "total_tokens"}
+
+
+def _usage(raw: Any, names: dict[str, str]) -> dict[str, int | None] | None:
+    """The backend's counts under USAGE_FIELDS (None for a field it did not report), or
+    None when it reported no count at all. Counts are copied, never derived."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, int | None] = {}
+    for k in USAGE_FIELDS:
+        v = raw.get(names[k]) if k in names else None
+        ok = isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0
+        out[k] = int(v) if ok else None
+    return out if any(v is not None for v in out.values()) else None
+
+
+def usage_from_acp(result: dict[str, Any] | None) -> dict[str, int | None] | None:
+    """Per-prompt counts from acp-run's result record (opencode and claude write
+    `usage`; agy and crush write none; usage_update.used is context size, not a count)."""
+    return _usage(result.get("usage"), _ACP_USAGE) if isinstance(result, dict) else None
+
+
+def usage_from_openai(data: Any) -> dict[str, int | None] | None:
+    """Counts from an OpenAI-style chat completion's `usage`; other keys are ignored."""
+    return _usage(data.get("usage") if isinstance(data, dict) else None, _OPENAI_USAGE)
+
+
+@dataclass
+class Answer:
+    text: str
+    usage: dict[str, int | None] | None = None
+
+
+class Tally:
+    """Per-prompt usage of every prompt answered so far, None for an unmetered one."""
+
+    def __init__(self) -> None:
+        self._prompts: list[dict[str, int | None] | None] = []
+        self._lock = threading.Lock()
+
+    def add(self, answer: Answer) -> None:
+        with self._lock:
+            self._prompts.append(answer.usage)
+
+    def mark(self) -> int:
+        with self._lock:
+            return len(self._prompts)
+
+    def row_fields(self, since: int = 0) -> dict[str, Any]:
+        """Row fields for the prompts answered since mark `since`: `prompts` (answered),
+        and `tokens`: `metered` (those with usage) plus the summed fields, a field no
+        metered prompt reported omitted; None when no prompt was metered (unmetered is
+        not zero)."""
+        with self._lock:
+            prompts = self._prompts[since:]
+        metered = [u for u in prompts if u is not None]
+        if not metered:
+            return {"prompts": len(prompts), "tokens": None}
+        tokens: dict[str, Any] = {"metered": len(metered)}
+        for k in USAGE_FIELDS:
+            seen = [u[k] for u in metered if u[k] is not None]
+            if seen:
+                tokens[k] = sum(seen)
+        return {"prompts": len(prompts), "tokens": tokens}
+
+
 # ── attempts ─────────────────────────────────────────────────────────────────
 
 def log_attempt(path: Path | None, row: dict[str, Any]) -> None:
@@ -665,10 +743,12 @@ class ChainResult:
 
 
 def run_chain(entries: list[Entry], attempt: Callable[[Entry], Any], *, task: str = "",
-              log_path: Path | None = None, check: bool = True) -> ChainResult:
+              log_path: Path | None = None, check: bool = True,
+              tally: Tally | None = None) -> ChainResult:
     """Try entries in order: preflight (cached, preflight_cached), then attempt(entry).
     attempt returns a value on success and raises AttemptFailed (or returns an
-    AttemptFailed) otherwise."""
+    AttemptFailed) otherwise. With a tally, every attempt row (ok or not) gets the
+    `tokens` of the prompts answered during that attempt (Tally.row_fields)."""
     rows = []
     for entry in entries:
         if check:
@@ -678,19 +758,21 @@ def run_chain(entries: list[Entry], attempt: Callable[[Entry], Any], *, task: st
             log_attempt(log_path, row)
             if not ok:
                 continue
-        t0 = time.monotonic()
+        t0, start = time.monotonic(), tally.mark() if tally else 0
         try:
             value = attempt(entry)
             if isinstance(value, AttemptFailed):
                 raise value
         except AttemptFailed as e:
             row = {"task": task, "phase": "attempt", "ok": False, "why": str(e),
-                   "seconds": round(time.monotonic() - t0, 1), **entry.row()}
+                   "seconds": round(time.monotonic() - t0, 1), **entry.row(),
+                   **(tally.row_fields(start) if tally else {})}
             rows.append(row)
             log_attempt(log_path, row)
             continue
         row = {"task": task, "phase": "attempt", "ok": True, "why": "",
-               "seconds": round(time.monotonic() - t0, 1), **entry.row()}
+               "seconds": round(time.monotonic() - t0, 1), **entry.row(),
+               **(tally.row_fields(start) if tally else {})}
         rows.append(row)
         log_attempt(log_path, row)
         return ChainResult(True, entry, value, rows)
@@ -816,8 +898,9 @@ def _acp_once(entry: Entry, prompt: str) -> tuple[subprocess.CompletedProcess[st
         return proc, (work / "canary").exists(), log
 
 
-def ask(entry: Entry, prompt: str) -> str:
-    """Answer one prompt on this entry in a fresh context; raise AttemptFailed.
+def ask(entry: Entry, prompt: str) -> Answer:
+    """Answer one prompt on this entry in a fresh context; raise AttemptFailed. The
+    Answer carries the backend's token counts (None: unmetered).
 
     acp-run runs it in an empty temp dir under the entry's --perm: deny, which acp-run
     enforces per agent and backs with a tripwire (exit 77, EXIT_TRIPWIRE), or all, which
@@ -828,7 +911,7 @@ def ask(entry: Entry, prompt: str) -> str:
     answer = (proc.stdout or "").strip()
     result = result_in_log(log)
     if proc.returncode == 1 and answer and answer_despite_failure(result):
-        return answer
+        return Answer(answer, usage_from_acp(result))
     if proc.returncode == EXIT_TRIPWIRE and entry.perm == "deny":
         raise AttemptFailed(f"{entry.label}: TRIPWIRE: a tool ran without a permission request "
                             "under --perm deny (acp-run exit 77)")
@@ -838,7 +921,7 @@ def ask(entry: Entry, prompt: str) -> str:
                f"{' empty answer' if not answer else ''} {tail[0][:200]}")
         why = startup_failure(proc.returncode, answer, result)
         raise StartupFailed(f"{msg} [startup: {why}]") if why else AttemptFailed(msg)
-    return answer
+    return Answer(answer, usage_from_acp(result))
 
 
 def startup_failure(rc: int, answer: str, result: dict[str, Any] | None) -> str | None:
@@ -887,8 +970,9 @@ def result_in_log(log: Path) -> dict[str, Any] | None:
     try:
         for line in reversed(log.read_text().splitlines()):
             row = json.loads(line)
-            if row.get("kind") == "result":
-                return row.get("data") or {}
+            if isinstance(row, dict) and row.get("kind") == "result":
+                data = row.get("data")
+                return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return None
     return None
@@ -1000,7 +1084,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _ask_openai(entry: Entry, prompt: str) -> str:
+def _ask_openai(entry: Entry, prompt: str) -> Answer:
     key = secret_value(entry.secret) if entry.secret else ""
     body = json.dumps({"model": entry.model, "messages": [{"role": "user", "content": prompt}]})
     req = urllib.request.Request(f"{(entry.endpoint or '').rstrip('/')}/chat/completions",
@@ -1020,7 +1104,7 @@ def _ask_openai(entry: Entry, prompt: str) -> str:
         raise AttemptFailed(f"{entry.label}: malformed response") from e
     if not answer:
         raise AttemptFailed(f"{entry.label}: empty answer")
-    return answer
+    return Answer(answer, usage_from_openai(data))
 
 
 @dataclass
@@ -1047,6 +1131,7 @@ class Pacing:
     cpus: int = 0                               # 0: os.cpu_count()
     rand: Callable[[], float] = random.random
     retried: int = 0                            # retries run so far (the night's row reports it)
+    tally: Tally = field(default_factory=Tally)  # every answered prompt's usage (the rows' `tokens`)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def left(self) -> float:
@@ -1106,7 +1191,8 @@ class _Budget:
 
 def _ask_paced(entry: Entry, key: str, prompt: str, pacing: Pacing, budget: _Budget,
                abort: threading.Event) -> str:
-    """ask() one prompt behind the spawn gate, retrying StartupFailed only."""
+    """ask() one prompt behind the spawn gate, retrying StartupFailed only; the answer's
+    usage goes to pacing.tally."""
     tries = 0
     while True:
         tries += 1
@@ -1115,7 +1201,9 @@ def _ask_paced(entry: Entry, key: str, prompt: str, pacing: Pacing, budget: _Bud
         try:
             if entry.tui.kind == "acp":
                 spawn_gate(entry, pacing, abort)
-            return ask(entry, prompt)
+            answer = ask(entry, prompt)
+            pacing.tally.add(answer)
+            return answer.text
         except StartupFailed as e:
             if tries > pacing.retries:
                 raise AttemptFailed(f"{e}; still failing after {tries} tries") from e
@@ -1137,7 +1225,8 @@ def ask_many(entry: Entry, prompts: dict[str, str], *, jobs: int = 2,
              pacing: Pacing | None = None) -> dict[str, str]:
     """Answer every prompt on ONE entry (no mid-batch model switch). A startup failure is
     retried per prompt (Pacing); any other failure, a spent budget or an exception from
-    the stop hook fails all at once."""
+    the stop hook fails all at once. Each answered prompt's usage lands in pacing.tally,
+    including prompts answered before a batch fails."""
     pacing = pacing or Pacing()
     total = (entry.retry_budget if entry.retry_budget is not None
              else max(RETRY_BUDGET_MIN, math.ceil(RETRY_BUDGET_SHARE * len(prompts))))
@@ -1229,7 +1318,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if any(r["ready"] == "yes" for r in rows) else 1
     if a.cmd == "ask":
         prompt = a.prompt if a.prompt is not None else a.file.read_text()
-        res = run_chain(entries, lambda e: ask(e, prompt), task="ask", log_path=a.log)
+        tally = Tally()
+
+        def answer(e: Entry) -> str:
+            ans = ask(e, prompt)
+            tally.add(ans)
+            return ans.text
+        res = run_chain(entries, answer, task="ask", log_path=a.log, tally=tally)
         if res.ok:
             print(res.value)
         return 0 if res.ok else 1

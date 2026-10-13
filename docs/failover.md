@@ -47,7 +47,9 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
    `AttemptFailed` moves on. Every step is one line in the attempt log
    (`~/.local/state/failover/attempts.jsonl`, or the caller's path), ending in
    `chain_exhausted` when nothing worked. Prompt retries add `"phase": "retry"`
-   lines (item 8).
+   lines (item 8). A caller that passes `run_chain(tally=)` (skillopt-night, the
+   `ask` command) gets `prompts` and `tokens` fields on every `"phase": "attempt"` row,
+   failed attempts included (item 5a).
 5. **Executors**: `ask(entry, prompt)` answers one prompt in a fresh context
    (acp-run in an empty temp dir with the entry's `--perm`, `deny` unless the
    chain says otherwise (item 9), prompt from a 0600 file, never argv; acp-run's
@@ -65,6 +67,39 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
    gets a minimal env (`BASE_ENV_KEYS` plus the entry's allow-listed `env`) and
    runs in its own process group, killed whole on timeout. acp-run logs go to
    `~/.local/state/failover/acp-logs/` (0700), trimmed by `sweep_logs()`.
+
+   **5a. Token counts (2026-10-13).** `ask()` returns `Answer(text, usage)`.
+   `usage` is what the backend itself reported for that one prompt, never an
+   estimate: `{input, output, cached_read, cached_write, total}`, a field `null`
+   when the backend leaves it out, or `None` for the whole prompt when it reports
+   nothing (*unmetered*, not zero). ACP entries read it from the `usage` of
+   acp-run's `result` row (`usage_from_acp`); `openai_compat` entries read
+   `usage.prompt_tokens`, `completion_tokens` and `total_tokens` of the response
+   (`usage_from_openai`; the Ollama extras SIPB adds are ignored). Observed
+   2026-10-12/13: opencode (its `sipb/*` models too), claude and direct sipb
+   report counts; agy and crush report none (agy's `usage_update.used` is context
+   size, so it is not read); zcode and hermes had no logs yet and count as
+   unmetered until a log shows a `result.usage`. The counts are the backend's
+   own: claude's `input` is only the uncached part (`total` = input + output +
+   cached_read + cached_write); opencode's `total` = input + output +
+   cached_read.
+
+   A `Tally` sums them. An attempt row (and a skillopt-night `nights.jsonl` row,
+   which sums every attempt of that source night) always has `prompts`, the
+   prompts answered, and `tokens`:
+
+   - `"prompts": 4, "tokens": {"metered": 3, "input": 4417, "output": 206,
+     "cached_read": 1198, "cached_write": 4412, "total": 10233}`: `metered` counts
+     the prompts with usage, and each field is the sum over the metered prompts
+     that reported it (a field no prompt reported is omitted).
+   - `"prompts": 2, "tokens": null` when no answered prompt was metered. Never
+     zeros.
+
+   The counts are a lower bound: a prompt that spends tokens and then fails adds
+   nothing, though a failed attempt's row still counts the prompts it answered
+   before failing. A malformed `usage` (not an object, non-numeric, negative,
+   boolean or infinite values) counts as unmetered for that field; it never fails
+   the prompt. Preflight probes and canaries are not tallied.
 6. **Chain policy against config tampering** (2026-10-12): `extra_args` is an
    allow-list (`EXTRA_ARGS_ALLOWED`: `--prompt-retries`, `--handshake-tries`,
    `--handshake-timeout`, `--max-load`, `--load-wait`, `--no-fallback`, and
@@ -122,7 +157,8 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
    max(3, 25% of the round's prompts). A spent budget, or any other failure,
    fails the batch at once and aborts the other prompts. Each retry writes a
    `"phase": "retry"` row (prompt, try, backoff_s, budget_left), and
-   `Pacing.retried` counts them. Before every acp-run spawn, `spawn_gate` runs
+   `Pacing.retried` counts them. `ask_many` also adds every answered prompt's
+   token usage to `Pacing.tally` (item 5a). Before every acp-run spawn, `spawn_gate` runs
    `Pacing.stop`, a hook that may raise (skillopt-night ends the night on
    critical memory pressure). It then waits while the 1-minute load per core
    is above `Pacing.max_load` (off by default; skillopt-night uses 2.0),
