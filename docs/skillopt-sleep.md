@@ -28,6 +28,17 @@ Guards in `bin/skillopt-night` (most added after the 2026-10-12 adversary review
    06:30 local). Before each source and each chain attempt the runner checks
    the deadline and the overload gate from `bin/acp-dispatch` (load above 4x
    CPUs or critical memory pressure), waiting at most until the deadline.
+   **Per-prompt gate (2026-10-13).** That gate ran about 26 times on the night
+   of 2026-10-13 and never fired, while opencode and agy took 15-79 s to open a
+   session and 21 attempts died starting up. Now, before every acp-run spawn,
+   the runner waits while the 1-minute load per core is above 2.0 (16 on 8
+   cores; night.json `prompt_max_load`, env `SKILLOPT_NIGHT_PROMPT_MAX_LOAD`),
+   polling every 15 s, at most 600 s per spawn (`prompt_load_wait_s`, env
+   `SKILLOPT_NIGHT_PROMPT_LOAD_WAIT`) and never past the deadline. A longer
+   wait counts as a retryable startup failure (section 4), not a spawn into the
+   overload. Critical memory pressure seen before any spawn ends the night
+   (`stopped: overloaded: memory pressure critical`), and the attempt's
+   `state.json` is restored. `SKILLOPT_NIGHT_NO_GATE=1` turns both gates off.
 4. **One night at a time** (a lock).
 5. **Hygiene.** umask 077, the state dir is 0700, the engine and adapters get a
    minimal env, timed-out children are killed with their whole process group,
@@ -50,7 +61,7 @@ probe and the canary, which call each model once.
 | `~/.skillopt-sleep/evidence/` | Dry-run evidence logs. **Sensitive** (truncated prompts and replies). |
 | `~/src/djbclark-ade/.skillopt-sleep/staging/<night>/` | A real night's `report.md`, `report.json`, `diagnostics.json`, `manifest.json`, `evidence.jsonl` (sensitive), per-skill proposals, and `backup/` after an adoption. Git-ignored. |
 | `~/src/djbclark-ade/.skillopt-sleep-handoff/<source>/` | The running night's handoff rounds (`PROMPTS.md`, `pending.json`, `digests.json`, `tasks.json`, `answers/`). Git-ignored; moved to `handoff-archive/` when the night finishes. |
-| `~/.local/state/skillopt-sleep/` | Runner state: `<date>-<source>.log` (`-dry` for dry-runs), `nights.jsonl` (one line per source night), `attempts.jsonl` (every preflight and attempt, from bin/failover.py), `cursors.json`, `codex-home/` shim, `handoff-archive/` (last ten), `launchd.out/.err`. |
+| `~/.local/state/skillopt-sleep/` | Runner state: `<date>-<source>.log` (`-dry` for dry-runs), `nights.jsonl` (one line per source night), `attempts.jsonl` (every preflight, attempt and startup retry, from bin/failover.py), `cursors.json`, `codex-home/` shim, `handoff-archive/` (last ten), `launchd.out/.err`. |
 | `launchd/com.djbclark.skillopt-sleep.plist` | The job; `skillopt-night install` copies it to `~/Library/LaunchAgents/` and bootstraps it, `skillopt-night uninstall` removes it. |
 | `skills/skillopt-sleep-learned/SKILL.md` | The managed catch-all target (`target_skill_path`): lessons that belong to no single skill. |
 | [`skillopt-preferences.md`](skillopt-preferences.md) | House rules passed as `--preferences` to every reflect step. |
@@ -126,6 +137,31 @@ all", or tasks were mined but none replayed. Then the runner restores
 `state.json` from its pre-attempt copy, wipes the source's handoff dir and
 reruns that source night on the next entry. When the chain is exhausted it
 records `chain_exhausted` and sends one Hermes line.
+
+**Startup failures are retried per prompt (2026-10-13).** On the night of
+2026-10-13 five of eight sources ended `chain_exhausted`. All 21 failed attempts
+died before the model answered: in `initialize`, in `session/new`, or while
+MCP servers and plugins loaded (opencode's `ServiceUnavailableError: Location
+plugins did not finish activating`, `OpenCode server is unavailable`, agy's
+`initialize` hang). One such prompt failed its whole entry. Now a prompt whose
+acp-run result shows 0 turns, 0 tool calls, no permission request and no answer
+(and a failure class other than quota, plan, auth, refused or tripwire) is
+retried up to 2 more times after about 20 s and 60 s (±25% jitter, capped at
+120 s, never past the deadline). The retries come out of a per-round budget:
+25% of that round's prompts, at least 3, or the entry's `retry_budget`. A
+spent budget fails the entry as before, and so does every other failure (an
+answer, a tool call, a denied permission, a tripwire, a quota refusal), which
+is never retried. Each retry is one `"phase": "retry"` line in `attempts.jsonl`
+(prompt id, try, backoff, budget left), and the source's `nights.jsonl` row
+counts them in `retries`.
+
+**Preflight is cached for the night (2026-10-13).** The night once ran the
+same preflight again for every source: each source repeated the same
+`aiuse` floor refusals and printed crush's canary refusal again. Each
+(tui, model, effort, pool, floor) result, ok or refused, is now reused for an
+hour; the attempt log says `preflight cached (Ns old): ...`. An expired result
+re-reads aiuse and reruns that entry's canary. `skillopt-night chain-check`
+and `--probe` always recompute.
 
 **Policy** (operator, 2026-10-12, approved chain). Allowed TUIs: `opencode`
 (OpenCode Go, and MIT SIPB through opencode's `sipb/` provider), `agy`,

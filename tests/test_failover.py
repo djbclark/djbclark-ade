@@ -592,6 +592,229 @@ def test_run_command_secret_only_in_child_env(tmp_path):
     assert SECRET not in out.read_text()
 
 
+# ── startup retries, the spawn gate, the preflight cache (2026-10-13) ───────
+
+@pytest.mark.parametrize(("rc", "fields", "startup"), [
+    (1, '{"turns": 0, "tool_calls": 0, "failure": "transient", "permissions": {"allowed": 0, "denied": 0}}', True),
+    (124, '{"turns": 0, "tool_calls": 0, "error": "TimeoutError: handshake after 2 tries of 40s"}', True),
+    (1, '{"turns": 0, "tool_calls": 0, "failure": "provider"}', True),
+    (1, '{"turns": 1, "tool_calls": 0, "failure": "transient"}', False),
+    (1, '{"turns": 0, "tool_calls": 1, "failure": "transient"}', False),
+    (1, '{"turns": 0, "tool_calls": 0, "permissions": {"allowed": 0, "denied": 1}}', False),
+    (1, '{"turns": 0, "tool_calls": 0, "failure": "quota"}', False),
+    (1, '{"turns": 0, "tool_calls": 0, "failure": "auth"}', False),
+    (1, '{"tool_calls": 0, "failure": "transient"}', False),
+])
+def test_ask_marks_only_clean_startup_failures(tmp_path, monkeypatch, rc, fields, startup):
+    _fake_acp(tmp_path, monkeypatch, "acp-start", _result_log(fields) + f"echo boom >&2\nexit {rc}\n")
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    with pytest.raises(failover.AttemptFailed) as ei:
+        failover.ask(cl, "q")
+    assert isinstance(ei.value, failover.StartupFailed) is startup
+    if startup:
+        assert "[startup: " in str(ei.value)
+
+
+def test_ask_load_refusal_and_missing_record(tmp_path, monkeypatch):
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    _fake_acp(tmp_path, monkeypatch, "acp-load", "exit 75\n")
+    with pytest.raises(failover.StartupFailed, match="exit 75"):
+        failover.ask(cl, "q")
+    _fake_acp(tmp_path, monkeypatch, "acp-norecord", "exit 1\n")
+    with pytest.raises(failover.AttemptFailed) as ei:
+        failover.ask(cl, "q")
+    assert not isinstance(ei.value, failover.StartupFailed), "no result record is no proof"
+
+
+class Clock:
+    """A fake clock whose sleep advances it, for Pacing."""
+
+    def __init__(self) -> None:
+        self.t, self.slept = 1_000_000.0, []
+
+    def now(self) -> float:
+        return self.t
+
+    def sleep(self, s: float) -> None:
+        self.slept.append(s)
+        self.t += s
+
+
+def _pacing(tmp_path: Path, clock: Clock, **kw) -> "failover.Pacing":
+    return failover.Pacing(sleep=clock.sleep, now=clock.now, rand=lambda: 0.5,
+                           log_path=tmp_path / "attempts.jsonl", task="t", **kw)
+
+
+def test_ask_many_retries_a_startup_failure_then_succeeds(tmp_path, monkeypatch):
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    calls: list[str] = []
+
+    def fake(entry, prompt):
+        calls.append(prompt)
+        if prompt == "x" and calls.count("x") < 3:
+            raise failover.StartupFailed("claude:haiku: acp-run rc=124 [startup: handshake]")
+        return prompt.upper()
+    monkeypatch.setattr(failover, "ask", fake)
+    clock = Clock()
+    pacing = _pacing(tmp_path, clock)
+    assert failover.ask_many(cl, {"a": "x", "b": "y"}, jobs=1, pacing=pacing) == {"a": "X", "b": "Y"}
+    assert calls.count("x") == 3 and pacing.retried == 2
+    assert sum(clock.slept) == pytest.approx(20 + 60), "backoff 20 s then 60 s (jitter 0 here)"
+    rows = [r for r in _log(tmp_path) if r["phase"] == "retry"]
+    assert [(r["prompt"], r["try"], r["backoff_s"]) for r in rows] == [("a", 1, 20.0), ("a", 2, 60.0)]
+    assert rows[-1]["budget_left"] == 1 and rows[0]["label"] == "claude:haiku" and rows[0]["task"] == "t"
+
+
+def test_ask_many_never_retries_other_failures(tmp_path, monkeypatch):
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    calls: list[str] = []
+
+    def fake(entry, prompt):
+        calls.append(prompt)
+        raise failover.AttemptFailed("claude:haiku: acp-run rc=1 FAILED quota")
+    monkeypatch.setattr(failover, "ask", fake)
+    clock = Clock()
+    pacing = _pacing(tmp_path, clock)
+    with pytest.raises(failover.AttemptFailed, match="FAILED quota"):
+        failover.ask_many(cl, {"a": "x"}, pacing=pacing)
+    assert calls == ["x"] and clock.slept == [] and pacing.retried == 0
+    assert not [r for r in _log(tmp_path) if r["phase"] == "retry"]
+
+
+def test_ask_many_retry_budget_and_per_prompt_cap(tmp_path, monkeypatch):
+    calls: list[str] = []
+
+    def fake(entry, prompt):
+        calls.append(prompt)
+        raise failover.StartupFailed("down [startup: x]")
+    monkeypatch.setattr(failover, "ask", fake)
+    (tight,) = failover.load_chain([{"tui": "claude", "model": "haiku", "retry_budget": 1}])
+    with pytest.raises(failover.AttemptFailed, match=r"retry budget spent \(1 this round\)") as ei:
+        failover.ask_many(tight, {"a": "x"}, pacing=_pacing(tmp_path, Clock()))
+    assert not isinstance(ei.value, failover.StartupFailed), "the entry fails, not one more retry"
+    assert calls == ["x", "x"]
+    calls.clear()
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    with pytest.raises(failover.AttemptFailed, match="still failing after 3 tries"):
+        failover.ask_many(cl, {"a": "x"}, pacing=_pacing(tmp_path, Clock()))
+    assert calls == ["x"] * 3
+    calls.clear()
+    (none,) = failover.load_chain([{"tui": "claude", "model": "haiku", "retry_budget": 0}])
+    with pytest.raises(failover.AttemptFailed, match="budget spent"):
+        failover.ask_many(none, {"a": "x"}, pacing=_pacing(tmp_path, Clock()))
+    assert calls == ["x"]
+
+
+def test_retry_needs_time_before_the_deadline(tmp_path, monkeypatch):
+    monkeypatch.setattr(failover, "ask", lambda e, p: (_ for _ in ()).throw(failover.StartupFailed("x")))
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    clock = Clock()
+    with pytest.raises(failover.AttemptFailed, match="no time left before the deadline"):
+        failover.ask_many(cl, {"a": "q"}, pacing=_pacing(tmp_path, clock, deadline=clock.t + 10))
+    assert clock.slept == []
+
+
+@pytest.mark.parametrize("budget", [-1, "3", True, 1.5])
+def test_retry_budget_validated(budget):
+    with pytest.raises(failover.ChainError, match="retry_budget"):
+        failover.load_chain([{"tui": "claude", "model": "haiku", "retry_budget": budget}])
+
+
+def test_default_retry_budget_is_a_quarter_of_the_round(tmp_path, monkeypatch):
+    seen: dict[str, int] = {}
+
+    def fake(entry, prompt):
+        seen[prompt] = seen.get(prompt, 0) + 1
+        if seen[prompt] == 1:
+            raise failover.StartupFailed("x")
+        return "ok"
+    monkeypatch.setattr(failover, "ask", fake)
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    prompts = {str(i): str(i) for i in range(20)}
+    with pytest.raises(failover.AttemptFailed, match=r"budget spent \(5 this round\)"):
+        failover.ask_many(cl, prompts, jobs=1, pacing=_pacing(tmp_path, Clock()))
+
+
+def test_spawn_gate_waits_for_load_then_proceeds(tmp_path, monkeypatch):
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    loads = iter([40.0, 40.0, 10.0])
+    calls: list[str] = []
+    monkeypatch.setattr(failover, "ask", lambda e, p: calls.append(p) or "A")
+    clock = Clock()
+    pacing = _pacing(tmp_path, clock, max_load=2.0, cpus=8, load=lambda: next(loads))
+    assert failover.ask_many(cl, {"a": "q"}, pacing=pacing) == {"a": "A"}
+    assert sum(clock.slept) == 30 and calls == ["q"], "two 15 s polls at 5/core, then 1.25/core spawns"
+
+
+def test_spawn_gate_gives_up_at_the_cap_without_spawning(tmp_path, monkeypatch):
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    calls: list[str] = []
+    monkeypatch.setattr(failover, "ask", lambda e, p: calls.append(p) or "A")
+    clock = Clock()
+    pacing = _pacing(tmp_path, clock, max_load=2.0, cpus=8, load=lambda: 40.0, load_wait=600, retries=0)
+    with pytest.raises(failover.AttemptFailed, match=r"load gate: 5.00/core > 2 after waiting 600s"):
+        failover.ask_many(cl, {"a": "q"}, pacing=pacing)
+    assert calls == [] and sum(clock.slept) == 600
+    clock = Clock()  # the deadline bounds the wait too
+    with pytest.raises(failover.StartupFailed, match="after waiting 100s"):
+        failover.spawn_gate(cl, _pacing(tmp_path, clock, max_load=2.0, cpus=8, load=lambda: 40.0,
+                                        deadline=clock.t + 100))
+    # a gate give-up is a startup failure, so ask_many retries it like one
+    clock = Clock()
+    pacing = _pacing(tmp_path, clock, max_load=2.0, cpus=8, load=lambda: 40.0, load_wait=30)
+    with pytest.raises(failover.AttemptFailed, match="still failing after 3 tries"):
+        failover.ask_many(cl, {"a": "q"}, pacing=pacing)
+    assert calls == [] and pacing.retried == 2
+
+
+def test_spawn_gate_stop_hook_ends_the_batch(tmp_path, monkeypatch):
+    class Stop(Exception):
+        pass
+    (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    calls: list[str] = []
+    monkeypatch.setattr(failover, "ask", lambda e, p: calls.append(p) or "A")
+
+    def stop():
+        raise Stop("memory pressure critical")
+    with pytest.raises(Stop):
+        failover.ask_many(cl, {"a": "q", "b": "r"}, pacing=_pacing(tmp_path, Clock(), stop=stop))
+    assert calls == []
+
+
+def test_preflight_cache_hit_miss_and_ttl(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(failover, "preflight",
+                        lambda e, probe=True: calls.append(e.label) or (False, "canary: tripwire"))
+    haiku, sonnet = failover.load_chain([{"tui": "claude", "model": "haiku"},
+                                         {"tui": "claude", "model": "sonnet"}])
+    t = [0.0]
+    clock = lambda: t[0]
+    assert failover.preflight_cached(haiku, now=clock) == (False, "canary: tripwire")
+    t[0] = 100.0
+    ok, why = failover.preflight_cached(haiku, now=clock)
+    assert not ok and why == "preflight cached (100s old): canary: tripwire" and calls == ["claude:haiku"]
+    assert failover.preflight_cached(sonnet, now=clock)[1] == "canary: tripwire", "another key misses"
+    failover._cache["pools"] = []
+    failover._cache["canary:claude:haiku"] = (False, "old")
+    t[0] = 3601.0
+    assert failover.preflight_cached(haiku, now=clock)[1] == "canary: tripwire"
+    assert calls == ["claude:haiku", "claude:sonnet", "claude:haiku"], "expired after the TTL"
+    assert "pools" not in failover._cache and "canary:claude:haiku" not in failover._cache
+
+
+def test_run_chain_uses_the_cache_and_check_bypasses_it(tmp_path, monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(failover, "preflight", lambda e, probe=True: calls.append(e.label) or (True, "ok"))
+    entries = failover.load_chain([{"tui": "claude", "model": "haiku"}])
+    for _ in range(2):
+        assert failover.run_chain(entries, lambda e: 1, task="t").ok
+    whys = [r["why"] for r in _log(tmp_path) if r["phase"] == "preflight"]
+    assert whys[0] == "ok" and whys[1].startswith("preflight cached (") and len(calls) == 1
+    failover.check_table(entries)
+    failover.check_table(entries, probe=True)
+    assert len(calls) == 3, "check (and check --probe) always recompute"
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def test_cli_check_and_refusal(tmp_path, capsys):

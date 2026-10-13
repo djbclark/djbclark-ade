@@ -16,8 +16,10 @@ and a floor. For every entry, in order:
 3. **attempt**: the caller's function runs the task on that entry; it returns
    ok or a reason. A failure moves on to the next entry.
 
-Every preflight and attempt is one JSON line in the attempt log
-(`~/.local/state/failover/attempts.jsonl` unless the caller names one).
+Every preflight, attempt and prompt retry is one JSON line in the attempt log
+(`~/.local/state/failover/attempts.jsonl` unless the caller names one). A preflight
+result is cached per (tui, model, effort, pool, floor) for PREFLIGHT_TTL_S inside
+run_chain, logged as "preflight cached"; `check` always recomputes (2026-10-13).
 
 Two ways to execute an entry are built in: `ask()` answers one prompt (acp-run in
 a clean empty directory with `--perm deny`, a fresh context; acp-run makes deny real
@@ -25,7 +27,14 @@ per agent, and a tripwire exits 77 if a tool still runs without asking, which
 `ask()` turns into AttemptFailed; or an OpenAI-compatible POST for `openai_compat`
 entries, key from sudo-secretspec held in memory once per process, never
 redirected), and `run_command()` runs any shell-callable task with the entry's
-fields substituted into argv and exported as FAILOVER_*. Children get a minimal
+fields substituted into argv and exported as FAILOVER_*. `ask_many()` answers a
+batch on one entry: before every acp-run spawn it runs the caller's `Pacing` gate
+(stop hook, then a wait while the load per core is above `max_load`), and it retries
+a prompt whose acp-run failed before any turn ran (`StartupFailed`) up to
+`Pacing.retries` times with backoff, within a per-round budget (`retry_budget`, else
+25% of the round's prompts, at least 3); any other failure fails the batch at once
+(2026-10-13: 21 startup failures, no retry, five sources ended chain_exhausted).
+Children get a minimal
 env (BASE_ENV_KEYS plus the entry's allow-listed env) and run in their own process
 group, killed whole on timeout. Preflight's canary asks every acp entry to create a
 file and refuses the entry if it can.
@@ -42,14 +51,16 @@ pool_family (override the registry), endpoint (openai_compat), secret (a
 sudo-secretspec name exported as `secret_env`, default OPENAI_API_KEY for
 `run`; only to the registry endpoint, https or loopback), env (ENV_ALLOW keys
 only), extra_args (appended to acp-run; only EXTRA_ARGS_ALLOWED flags), timeout, label,
-probe, health_url. Importable: skillopt-night uses load_chain/preflight/run_chain/ask.
+probe, health_url, retry_budget (startup-failure retries per ask_many round). Importable: skillopt-night uses load_chain/preflight/run_chain/ask.
 """
 from __future__ import annotations
 
 import argparse
 import importlib.util
 import json
+import math
 import os
+import random
 import re
 import shutil
 import signal
@@ -103,6 +114,22 @@ ENV_ALLOW = ("MAX_THINKING_TOKENS", "ZCODE_PROVIDER", "ZCODE_MODEL")
 BASE_ENV_KEYS = ("HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SHELL")
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
 EXIT_TRIPWIRE = 77  # acp-run: a tool ran without a permission request under --perm deny
+EXIT_LOAD = 75      # acp-run: --max-load refused to start the agent (nothing ran)
+# Startup-failure retries (2026-10-13 night: every one of 21 failed attempts died in
+# initialize, session/new or MCP/plugin loading, and one such prompt failed its whole
+# entry). Per prompt: up to PROMPT_RETRIES more tries after RETRY_BACKOFF_S (jittered,
+# capped); per ask_many round: at most retry_budget retries, default
+# max(RETRY_BUDGET_MIN, RETRY_BUDGET_SHARE x prompts).
+PROMPT_RETRIES = 2
+RETRY_BACKOFF_S = (20.0, 60.0)
+RETRY_BACKOFF_CAP_S = 120.0
+RETRY_BUDGET_SHARE = 0.25
+RETRY_BUDGET_MIN = 3
+# acp-run failure classes that are never a startup failure, even before the first turn.
+NOT_RETRIED = ("quota", "plan", "auth", "refused", "tripwire")
+# How long run_chain trusts a preflight result, ok or not (2026-10-13: the same refusals
+# were recomputed for every source); `check` and `--probe` never use the cache.
+PREFLIGHT_TTL_S = 3600.0
 ACP_LOG_DIR = Path.home() / ".local" / "state" / "failover" / "acp-logs"
 LOG_RETENTION_DAYS = 7
 
@@ -113,6 +140,11 @@ class ChainError(ValueError):
 
 class AttemptFailed(RuntimeError):
     """One entry could not do the task; the chain moves on."""
+
+
+class StartupFailed(AttemptFailed):
+    """acp-run failed before any turn ran (or the load gate never let it spawn): nothing
+    reached the model and no tool ran, so ask_many may retry the prompt."""
 
 
 @dataclass(frozen=True)
@@ -219,6 +251,7 @@ class Entry:
     label: str = ""
     probe: bool | None = None
     health_url: str | None = None
+    retry_budget: int | None = None            # startup retries per ask_many round (None: default)
 
     def __post_init__(self) -> None:
         if not self.label:
@@ -313,6 +346,9 @@ def load_chain(spec: Any, *, allow: list[str] | None = None,
             hit = denied(str(v), deny)
             if hit:
                 raise ChainError(f"entry {i}: env {k} names denied route '{hit}'")
+        budget = raw.get("retry_budget")
+        if budget is not None and (isinstance(budget, bool) or not isinstance(budget, int) or budget < 0):
+            raise ChainError(f"entry {i}: retry_budget must be a whole number >= 0, not {budget!r}")
         endpoint = raw.get("endpoint")
         if endpoint and (raw.get("secret") or tui.secret) and endpoint != tui.endpoint:
             u = urllib.parse.urlparse(str(endpoint))
@@ -326,7 +362,8 @@ def load_chain(spec: Any, *, allow: list[str] | None = None,
                       env={str(k): str(v) for k, v in env.items()},
                       extra_args=extra,
                       timeout=int(raw.get("timeout", 600)), label=str(raw.get("label") or ""),
-                      probe=raw.get("probe"), health_url=raw.get("health_url"))
+                      probe=raw.get("probe"), health_url=raw.get("health_url"),
+                      retry_budget=budget)
         if denied(entry.model_arg, deny):
             raise ChainError(f"entry {i}: denied model '{entry.model_arg}'")
         entries.append(entry)
@@ -530,6 +567,30 @@ def preflight(entry: Entry, *, probe: bool = True) -> tuple[bool, str]:
     return ok, f"{why}; {cwhy}"
 
 
+def preflight_key(entry: Entry) -> str:
+    return "preflight:" + json.dumps([entry.tui.name, entry.model_arg, entry.effort, entry.pool,
+                                      entry.pool_family, entry.floor_percent])
+
+
+def preflight_cached(entry: Entry, *, ttl: float = PREFLIGHT_TTL_S,
+                     now: Callable[[], float] | None = None) -> tuple[bool, str]:
+    """preflight(entry) at most once per ttl seconds per (tui, model, effort, pool, floor),
+    failures and successes alike, so a night with eight sources spawns a refused canary
+    once instead of once per source (2026-10-13). An expired result also drops the
+    process-wide aiuse reading and this entry's canary and probe, so the recheck is real
+    (a pool can recover mid-night). run_chain uses it; check_table never does."""
+    key, t = preflight_key(entry), (now or time.monotonic)()
+    hit = _cache.get(key)
+    if hit is not None and t - hit[0] < ttl:
+        return hit[1], f"preflight cached ({t - hit[0]:.0f}s old): {hit[2]}"
+    if hit is not None:
+        for k in ("pools", f"canary:{entry.label}", f"probe:{entry.label}"):
+            _cache.pop(k, None)
+    ok, why = preflight(entry)
+    _cache[key] = (t, ok, why)
+    return ok, why
+
+
 # ── attempts ─────────────────────────────────────────────────────────────────
 
 def log_attempt(path: Path | None, row: dict[str, Any]) -> None:
@@ -549,12 +610,13 @@ class ChainResult:
 
 def run_chain(entries: list[Entry], attempt: Callable[[Entry], Any], *, task: str = "",
               log_path: Path | None = None, check: bool = True) -> ChainResult:
-    """Try entries in order: preflight, then attempt(entry). attempt returns a value
-    on success and raises AttemptFailed (or returns an AttemptFailed) otherwise."""
+    """Try entries in order: preflight (cached, preflight_cached), then attempt(entry).
+    attempt returns a value on success and raises AttemptFailed (or returns an
+    AttemptFailed) otherwise."""
     rows = []
     for entry in entries:
         if check:
-            ok, why = preflight(entry)
+            ok, why = preflight_cached(entry)
             row = {"task": task, "phase": "preflight", "ok": ok, "why": why, **entry.row()}
             rows.append(row)
             log_attempt(log_path, row)
@@ -700,16 +762,42 @@ def ask(entry: Entry, prompt: str) -> str:
         return _ask_openai(entry, prompt)
     proc, _, log = _acp_once(entry, prompt)
     answer = (proc.stdout or "").strip()
-    if proc.returncode == 1 and answer and answer_despite_failure(result_in_log(log)):
+    result = result_in_log(log)
+    if proc.returncode == 1 and answer and answer_despite_failure(result):
         return answer
     if proc.returncode == EXIT_TRIPWIRE:
         raise AttemptFailed(f"{entry.label}: TRIPWIRE: a tool ran without a permission request "
                             "under --perm deny (acp-run exit 77)")
     if proc.returncode != 0 or not answer:
         tail = (proc.stderr or "").strip().splitlines()[-1:] or [""]
-        raise AttemptFailed(f"{entry.label}: acp-run rc={proc.returncode}"
-                            f"{' empty answer' if not answer else ''} {tail[0][:200]}")
+        msg = (f"{entry.label}: acp-run rc={proc.returncode}"
+               f"{' empty answer' if not answer else ''} {tail[0][:200]}")
+        why = startup_failure(proc.returncode, answer, result)
+        raise StartupFailed(f"{msg} [startup: {why}]") if why else AttemptFailed(msg)
     return answer
+
+
+def startup_failure(rc: int, answer: str, result: dict[str, Any] | None) -> str | None:
+    """Why this failed acp-run is a clean startup failure (safe to retry), or None.
+
+    Clean means acp-run's own result record proves nothing ran: turns 0 (the prompt was
+    never sent: initialize or session/new hung or failed, e.g. opencode's
+    "ServiceUnavailableError: Location plugins did not finish activating" or "OpenCode
+    server is unavailable", agy's initialize hang), 0 tool calls, no permission request,
+    no answer, and a failure class that is not quota/plan/auth/refused/tripwire. Exit 75
+    (acp-run's --max-load refused to start) is clean too. No result record, or an old
+    acp-run without "turns", is not proof, so it is never retried."""
+    if rc == EXIT_LOAD:
+        return "acp-run's load gate refused to start the agent (exit 75)"
+    if rc in (0, EXIT_TRIPWIRE) or answer or result is None or "turns" not in result:
+        return None
+    perms = result.get("permissions") or {}
+    if (int(result.get("turns") or 0) or int(result.get("tool_calls") or 0)
+            or int(perms.get("allowed") or 0) or int(perms.get("denied") or 0)):
+        return None
+    if result.get("failure") in NOT_RETRIED:
+        return None
+    return f"failed before the first turn ({result.get('failure') or 'unclassified'}, rc={rc})"
 
 
 def answer_despite_failure(result: dict[str, Any] | None) -> bool:
@@ -869,13 +957,131 @@ def _ask_openai(entry: Entry, prompt: str) -> str:
     return answer
 
 
-def ask_many(entry: Entry, prompts: dict[str, str], *, jobs: int = 2) -> dict[str, str]:
-    """Answer every prompt on ONE entry (no mid-batch model switch); any failure fails all."""
+@dataclass
+class Pacing:
+    """How ask_many spaces and retries acp-run spawns (2026-10-13). The defaults retry
+    startup failures and gate nothing; skillopt-night passes its load gate, its deadline,
+    a stop hook (critical memory pressure ends the night) and its attempt log. The clock,
+    sleep, load reading and randomness are injectable so tests never sleep."""
+
+    retries: int = PROMPT_RETRIES               # more tries per prompt, startup failures only
+    backoff: tuple[float, ...] = RETRY_BACKOFF_S
+    backoff_cap: float = RETRY_BACKOFF_CAP_S
+    jitter: float = 0.25                        # +-25% of each backoff
+    max_load: float | None = None               # 1-min load per core above which nothing spawns
+    load_poll: float = 15.0
+    load_wait: float = 600.0                    # per spawn; past it, a retryable StartupFailed
+    deadline: float | None = None               # epoch seconds: no wait or retry beyond it
+    stop: Callable[[], None] | None = None      # raises to end the run (called before each spawn)
+    log_path: Path | None = None
+    task: str = ""
+    sleep: Callable[[float], None] = time.sleep
+    now: Callable[[], float] = time.time
+    load: Callable[[], float] = field(default=lambda: os.getloadavg()[0])
+    cpus: int = 0                               # 0: os.cpu_count()
+    rand: Callable[[], float] = random.random
+    retried: int = 0                            # retries run so far (the night's row reports it)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def left(self) -> float:
+        return math.inf if self.deadline is None else self.deadline - self.now()
+
+    def delay(self, n: int) -> float:
+        """The backoff before retry n (1-based), jittered and capped."""
+        base = self.backoff[min(n, len(self.backoff)) - 1] if self.backoff else 0.0
+        return max(0.0, min(self.backoff_cap, base * (1 + self.jitter * (2 * self.rand() - 1))))
+
+
+def _nap(pacing: Pacing, seconds: float, abort: threading.Event | None) -> None:
+    """Sleep in slices of at most 5 s, returning early once the batch is aborted."""
+    while seconds > 0 and not (abort is not None and abort.is_set()):
+        step = min(5.0, seconds)
+        pacing.sleep(step)
+        seconds -= step
+
+
+def spawn_gate(entry: Entry, pacing: Pacing, abort: threading.Event | None = None) -> None:
+    """Before one acp-run spawn: the stop hook, then wait (polling every load_poll s, never
+    past the deadline) while the 1-minute load per core is above max_load. A wait longer
+    than load_wait raises StartupFailed instead of spawning into the overload. The night's
+    own gate ran only before each source and entry and never fired on 2026-10-13, while
+    agents took 15-79 s just to open a session."""
+    if pacing.stop is not None:
+        pacing.stop()
+    if pacing.max_load is None:
+        return
+    cpus, waited = pacing.cpus or os.cpu_count() or 8, 0.0
+    while True:
+        per_core = pacing.load() / cpus
+        if per_core <= pacing.max_load:
+            return
+        left = min(pacing.load_wait - waited, pacing.left())
+        if left <= 0 or (abort is not None and abort.is_set()):
+            raise StartupFailed(f"{entry.label}: load gate: {per_core:.2f}/core > {pacing.max_load:g} "
+                                f"after waiting {waited:.0f}s; not spawned")
+        step = min(pacing.load_poll, left)
+        _nap(pacing, step, abort)
+        waited += step
+        if pacing.stop is not None:
+            pacing.stop()
+
+
+class _Budget:
+    def __init__(self, total: int) -> None:
+        self.total, self.left, self._lock = total, total, threading.Lock()
+
+    def take(self) -> bool:
+        with self._lock:
+            if self.left <= 0:
+                return False
+            self.left -= 1
+            return True
+
+
+def _ask_paced(entry: Entry, key: str, prompt: str, pacing: Pacing, budget: _Budget,
+               abort: threading.Event) -> str:
+    """ask() one prompt behind the spawn gate, retrying StartupFailed only."""
+    tries = 0
+    while True:
+        tries += 1
+        if abort.is_set():
+            raise AttemptFailed(f"{entry.label}: batch aborted")
+        try:
+            if entry.tui.kind == "acp":
+                spawn_gate(entry, pacing, abort)
+            return ask(entry, prompt)
+        except StartupFailed as e:
+            if tries > pacing.retries:
+                raise AttemptFailed(f"{e}; still failing after {tries} tries") from e
+            wait = pacing.delay(tries)
+            if wait >= pacing.left():
+                raise AttemptFailed(f"{e}; no time left before the deadline to retry") from e
+            if not budget.take():
+                raise AttemptFailed(f"{e}; retry budget spent ({budget.total} this round)") from e
+            with pacing._lock:
+                pacing.retried += 1
+            log_attempt(pacing.log_path, {"task": pacing.task, "phase": "retry", "ok": False,
+                                          "why": str(e), "prompt": key, "try": tries,
+                                          "backoff_s": round(wait, 1), "budget_left": budget.left,
+                                          **entry.row()})
+            _nap(pacing, wait, abort)
+
+
+def ask_many(entry: Entry, prompts: dict[str, str], *, jobs: int = 2,
+             pacing: Pacing | None = None) -> dict[str, str]:
+    """Answer every prompt on ONE entry (no mid-batch model switch). A startup failure is
+    retried per prompt (Pacing); any other failure, a spent budget or an exception from
+    the stop hook fails all at once."""
+    pacing = pacing or Pacing()
+    total = (entry.retry_budget if entry.retry_budget is not None
+             else max(RETRY_BUDGET_MIN, math.ceil(RETRY_BUDGET_SHARE * len(prompts))))
+    budget, abort = _Budget(total), threading.Event()
     pool = ThreadPoolExecutor(max_workers=max(1, jobs))
-    futures = {k: pool.submit(ask, entry, p) for k, p in prompts.items()}
+    futures = {k: pool.submit(_ask_paced, entry, k, p, pacing, budget, abort) for k, p in prompts.items()}
     try:
         return {k: f.result() for k, f in futures.items()}
-    except AttemptFailed:
+    except BaseException:
+        abort.set()
         pool.shutdown(wait=True, cancel_futures=True)
         raise
     finally:

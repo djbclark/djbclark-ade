@@ -39,7 +39,13 @@ Guards, in order:
    that violates policy (bin/failover.py DENY, the allowlist) is refused whole.
 2. The load gate reuses `machine_overloaded()` from bin/acp-dispatch (load above
    4x CPUs or critical memory pressure); it waits up to --load-wait seconds,
-   then skips the night.
+   then skips the night. Since 2026-10-13 every prompt has its own, stricter gate
+   (failover.Pacing via prompt_pacing): before each acp-run spawn it waits while
+   the 1-minute load per core is above 2.0 (night.json `prompt_max_load`, env
+   SKILLOPT_NIGHT_PROMPT_MAX_LOAD), polling every 15 s, at most 600 s per spawn
+   (`prompt_load_wait_s`, SKILLOPT_NIGHT_PROMPT_LOAD_WAIT) and never past the
+   deadline; a longer wait is a retryable startup failure. Critical memory
+   pressure seen before any spawn ends the night (NightStop).
 3. One night at a time (an flock under the state dir).
 
 Upstream keys the harvest checkpoint by project only, so a second source run in
@@ -112,6 +118,11 @@ DEFAULT_LOAD_WAIT_S = 1800
 # stuck and fails the attempt; this cap is only a backstop.
 DEFAULT_MAX_ROUNDS = 60
 DEFAULT_JOBS = 2
+# The per-prompt gate (2026-10-13): no acp-run spawn while the 1-minute load per core is
+# above this (16 on 8 cores; acp-run notes session/new slowing at load 20-70), waiting at
+# most DEFAULT_PROMPT_LOAD_WAIT_S per spawn before it counts as a startup failure.
+DEFAULT_PROMPT_MAX_LOAD = 2.0
+DEFAULT_PROMPT_LOAD_WAIT_S = 600
 GATE_LOAD_PER_CPU = 4  # same number as bin/acp-dispatch; used only if its import fails
 PING = "~/.local/bin/hermes-ping"
 REVIEW = "skillopt-sleep status --project ~/src/djbclark-ade"
@@ -499,14 +510,15 @@ def pending_ids(hdir: Path) -> frozenset[str]:
     return frozenset(str(p["id"]) for p in pending or [])
 
 
-def answer_pending(entry: failover.Entry, hdir: Path, jobs: int) -> int:
+def answer_pending(entry: failover.Entry, hdir: Path, jobs: int,
+                   pacing: failover.Pacing | None = None) -> int:
     """Answer every prompt in pending.json on this entry; return how many."""
     data = _read_json(hdir / "pending.json", {})
     pending = data.get("pending") if isinstance(data, dict) else None
     if not pending:
         raise failover.AttemptFailed("handoff exit 3 with no pending prompts")
     prompts = {str(p["id"]): str(p["prompt"]) for p in pending}
-    answers = failover.ask_many(entry, prompts, jobs=jobs)
+    answers = failover.ask_many(entry, prompts, jobs=jobs, pacing=pacing)
     adir = hdir / "answers"
     adir.mkdir(parents=True, exist_ok=True)
     for key, text in answers.items():
@@ -557,6 +569,40 @@ def night_guard(deadline: float, load_wait: int) -> None:
     why = wait_for_capacity(int(min(load_wait, left)))
     if why:
         raise NightStop(f"overloaded: {why}")
+
+
+def memory_stop() -> None:
+    """failover.Pacing.stop, before every prompt's spawn: end the night on critical memory
+    pressure (night_guard's check, machine_overloaded); high load only delays the spawn."""
+    if os.environ.get("SKILLOPT_NIGHT_NO_GATE") == "1":
+        return
+    why = machine_overloaded()
+    if why and "memory" in why:
+        raise NightStop(f"overloaded: {why}")
+
+
+def _setting(env: str, night: dict[str, Any], key: str, default: float) -> float:
+    """A number from the environment, else night.json, else default (a bad value too)."""
+    for name, raw in ((env, os.environ.get(env)), (key, night.get(key))):
+        if raw is None or raw == "":
+            continue
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            print(f"skillopt-night: ignoring {name}={raw!r}", file=sys.stderr)
+    return default
+
+
+def prompt_pacing(night: dict[str, Any], deadline: float, source: str) -> failover.Pacing:
+    """The per-prompt gate and startup-failure retries for one source night (2026-10-13)."""
+    gate = os.environ.get("SKILLOPT_NIGHT_NO_GATE") != "1"
+    return failover.Pacing(
+        max_load=(_setting("SKILLOPT_NIGHT_PROMPT_MAX_LOAD", night, "prompt_max_load",
+                           DEFAULT_PROMPT_MAX_LOAD) if gate else None),
+        load_wait=_setting("SKILLOPT_NIGHT_PROMPT_LOAD_WAIT", night, "prompt_load_wait_s",
+                           DEFAULT_PROMPT_LOAD_WAIT_S),
+        deadline=deadline, stop=memory_stop if gate else None,
+        log_path=state_dir() / "attempts.jsonl", task=f"skillopt-night {source}")
 
 
 def uv_tool_dir() -> Path:
@@ -626,12 +672,14 @@ def run_dry(source: str, *, cfg: dict[str, Any], timeout: int, limit: int = 120,
 def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[str, Any],
                      timeout: int, max_rounds: int, jobs: int, max_sessions: int = 0,
                      native: bool = False, deadline: float | None = None,
-                     load_wait: int = 0, exclude: list[str] | None = None) -> dict[str, Any]:
+                     load_wait: int = 0, exclude: list[str] | None = None,
+                     pacing: failover.Pacing | None = None) -> dict[str, Any]:
     """One stateful source night through the chain; returns its nights.jsonl row."""
     project = str(REPO)
     log = log_path(source, False)
     hdir = handoff_dir(source)
     deadline = deadline if deadline is not None else time.time() + timeout
+    pacing = pacing or prompt_pacing({}, deadline, source)
     shim = codex_shim(cfg) if source == "codex" else None
     env = engine_env({"SKILLOPT_SLEEP_HANDOFF_DIR": str(hdir)})
     pinned = state_dir() / f"digests-{source}.json"
@@ -676,12 +724,12 @@ def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[st
                     raise failover.AttemptFailed(f"still pending after {rounds} rounds")
                 if time.monotonic() >= stop:
                     raise failover.AttemptFailed(f"timeout after {rounds} rounds")
-                answered += answer_pending(entry, hdir, jobs)
+                answered += answer_pending(entry, hdir, jobs, pacing)
             result = parse_result(stdout)
             why = night_failure(rc, result)
             if why:
                 raise failover.AttemptFailed(why)
-        except failover.AttemptFailed:
+        except (failover.AttemptFailed, NightStop):  # NightStop: memory pressure mid-attempt
             restore_state(snap)
             reset_dir(hdir)
             raise
@@ -699,11 +747,11 @@ def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[st
         pinned.unlink(missing_ok=True)  # transcript excerpts; the night's own copy is archived
     if res is None:
         row = {"source": source, "mode": "run", "status": f"stopped: {stopped}", "rc": None,
-               "proposals": 0, "log": str(log)}
+               "proposals": 0, "retries": pacing.retried, "log": str(log)}
     elif not res.ok:
         failed = [f"{r['label']}: {r['why']}" for r in res.attempts if not r["ok"]]
         row = {"source": source, "mode": "run", "status": "chain_exhausted", "rc": None,
-               "proposals": 0, "failed": failed, "log": str(log)}
+               "proposals": 0, "failed": failed, "retries": pacing.retried, "log": str(log)}
     else:
         failed = [f"{r['label']}: {r['why']}" for r in res.attempts if not r["ok"]]
         v, result = res.value, res.value["result"]
@@ -714,7 +762,7 @@ def run_source_chain(source: str, entries: list[failover.Entry], *, cfg: dict[st
                "tasks": result.get("n_tasks"),
                "accepted": result.get("accepted"), "gate": result.get("gate_action") or None,
                "proposals": n_proposals(result), "staging_dir": result.get("staging_dir") or None,
-               "failed": failed, "log": str(log)}
+               "failed": failed, "retries": pacing.retried, "log": str(log)}
     record(row)
     return row
 
@@ -787,7 +835,8 @@ def cmd_night(args: argparse.Namespace) -> int:
                                        max_rounds=int(night.get("max_rounds", DEFAULT_MAX_ROUNDS)),
                                        jobs=int(night.get("jobs", DEFAULT_JOBS)), max_sessions=limit,
                                        native=args.native, deadline=deadline,
-                                       load_wait=args.load_wait, exclude=exclude)
+                                       load_wait=args.load_wait, exclude=exclude,
+                                       pacing=prompt_pacing(night, deadline, s))
                 rows.append(row)
                 if str(row.get("status", "")).startswith("stopped"):
                     break

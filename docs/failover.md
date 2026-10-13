@@ -28,10 +28,19 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
    200. Routes with no quota pool to read (crush) get a one-prompt probe, the
    only preflight step that calls a model; `check --probe` runs it, plain
    `check` reports it as not run.
+
+   **Cached for an hour (2026-10-13).** `run_chain` calls `preflight_cached`,
+   which keeps each result, ok or refused, per (tui, model, effort, pool,
+   floor) for `PREFLIGHT_TTL_S` (3600 s) and logs a hit as `preflight cached
+   (Ns old): <why>`. Before, skillopt-night ran preflight again for each of its
+   eight sources. An expired entry drops the aiuse reading and its own canary
+   and probe, so the recheck is real. `check` and `check --probe` (and
+   skillopt-night `chain-check`) never use the cache.
 4. **Ordered attempts** (`run_chain`): preflight, then the caller's function;
    `AttemptFailed` moves on. Every step is one line in the attempt log
    (`~/.local/state/failover/attempts.jsonl`, or the caller's path), ending in
-   `chain_exhausted` when nothing worked.
+   `chain_exhausted` when nothing worked. Prompt retries add `"phase": "retry"`
+   lines (item 8).
 5. **Executors**: `ask(entry, prompt)` answers one prompt in a fresh context
    (acp-run in an empty temp dir with `--perm deny`, prompt from a 0600 file,
    never argv; acp-run's `claude -p` fallback also reads stdin since
@@ -41,7 +50,7 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
    OpenAI-compatible POST with the key read once per process by
    `sudo-secretspec get`, sent only to the registry endpoint, https or
    loopback, and never across a redirect; `ask_many` answers a batch on one entry and fails the
-   batch on the first failure; `run_command(entry, argv)` runs any command with
+   batch on the first failure that is not a retried startup failure (item 8); `run_command(entry, argv)` runs any command with
    `{tui} {agent} {model} {effort} {endpoint}` replaced in argv, `FAILOVER_*`
    exported, and the entry's secret exported only into that child. Every child
    gets a minimal env (`BASE_ENV_KEYS` plus the entry's allow-listed `env`) and
@@ -73,6 +82,32 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
    an answer, and answers flow into reflection and into staged skill edits.
    `skillopt-night preadopt-check` flags commands, URLs and secret words but not
    leaked file content, so adoption review must read the diff for such content.
+8. **Startup retries and the spawn gate** (2026-10-13). On the night of
+   2026-10-13 all 21 failed skillopt-night attempts died before the model
+   answered: opencode's `ServiceUnavailableError: Location plugins did not
+   finish activating` and `OpenCode server is unavailable`, `session/new` and
+   agy `initialize` handshake hangs. One such prompt failed its whole entry.
+   `ask` now raises `StartupFailed`, a subclass of `AttemptFailed`, when
+   acp-run's result record proves nothing ran: 0 turns, 0 tool calls, no
+   permission request, no answer, and a failure class other than
+   `NOT_RETRIED` (quota, plan, auth, refused, tripwire). Exit 75 from acp-run's
+   `--max-load` counts too. No result record, or a record without `turns`, is
+   not proof, so it is never retried. `ask_many(entry, prompts, jobs=,
+   pacing=)` retries such a prompt up to `PROMPT_RETRIES` (2) more times after
+   `RETRY_BACKOFF_S` (20 s, 60 s, ±25% jitter, capped at 120 s, never past
+   `Pacing.deadline`). The retries come from a per-round budget: the entry's
+   `retry_budget` (a whole number >= 0, validated at load time), else
+   max(3, 25% of the round's prompts). A spent budget, or any other failure,
+   fails the batch at once and aborts the other prompts. Each retry writes a
+   `"phase": "retry"` row (prompt, try, backoff_s, budget_left), and
+   `Pacing.retried` counts them. Before every acp-run spawn, `spawn_gate` runs
+   `Pacing.stop`, a hook that may raise (skillopt-night ends the night on
+   critical memory pressure). It then waits while the 1-minute load per core
+   is above `Pacing.max_load` (off by default; skillopt-night uses 2.0),
+   polling every `load_poll` s. A wait longer than `load_wait` (600 s) raises
+   `StartupFailed` instead of spawning. The clock, sleep, load reading and
+   randomness are `Pacing` fields, so tests never sleep and failover never
+   imports skillopt-night.
 
 ## CLI
 
@@ -86,7 +121,8 @@ bin/failover.py run --chain chain.json -- mytool --model {model}   # first rc 0 
 A chain file is a JSON list of entries, or `{"allow": [...], "chain": [...]}`.
 Entry keys: `tui` (required), `model`, `effort`, `floor_percent` (default 5),
 `pool`/`pool_family` (override), `endpoint`, `secret`, `secret_env` (default
-`OPENAI_API_KEY`, for `run`), `env`, `extra_args`, `timeout`, `label`.
+`OPENAI_API_KEY`, for `run`), `env`, `extra_args`, `timeout`, `label`,
+`retry_budget` (startup retries per `ask_many` round; item 8).
 
 Tests: `tests/test_failover.py` (through `~/ops/site-private/bin/bg uv run
 pytest -q tests/test_failover.py`).

@@ -704,6 +704,63 @@ def test_stuck_engine_fails_the_attempt(env, monkeypatch):
 
 
 
+def test_prompt_pacing_settings(env, monkeypatch):
+    monkeypatch.setenv("SKILLOPT_NIGHT_NO_GATE", "0")
+    p = night.prompt_pacing({}, 123.0, "claude")
+    assert (p.max_load, p.load_wait, p.deadline, p.stop) == (2.0, 600, 123.0, night.memory_stop)
+    assert p.log_path == env / "state" / "attempts.jsonl" and p.task == "skillopt-night claude"
+    p = night.prompt_pacing({"prompt_max_load": 3, "prompt_load_wait_s": 60}, 1.0, "codex")
+    assert (p.max_load, p.load_wait) == (3.0, 60.0)
+    monkeypatch.setenv("SKILLOPT_NIGHT_PROMPT_MAX_LOAD", "1.5")
+    monkeypatch.setenv("SKILLOPT_NIGHT_PROMPT_LOAD_WAIT", "junk")
+    p = night.prompt_pacing({"prompt_max_load": 3, "prompt_load_wait_s": 60}, 1.0, "codex")
+    assert (p.max_load, p.load_wait) == (1.5, 60.0), "env wins; a bad value falls through"
+    monkeypatch.setenv("SKILLOPT_NIGHT_NO_GATE", "1")
+    p = night.prompt_pacing({}, 1.0, "claude")
+    assert p.max_load is None and p.stop is None
+
+
+def test_memory_pressure_mid_attempt_stops_the_night_and_restores_state(env, monkeypatch):
+    _night(env / "home", HAIKU_SONNET)
+    state = env / "home" / ".skillopt-sleep" / "state.json"
+    state.write_text(json.dumps({"night": 4}))
+    monkeypatch.setenv("SKILLOPT_NIGHT_NO_GATE", "0")
+    monkeypatch.setenv("SKILLOPT_NIGHT_PROMPT_MAX_LOAD", "1e9")  # the real load never gates here
+    seen = []
+
+    def overloaded():  # night_guard before the source and the entry, then the prompt's spawn
+        seen.append(1)
+        return None if len(seen) <= 2 else "memory pressure critical"
+    monkeypatch.setattr(night, "machine_overloaded", overloaded)
+    assert night.main(["--source", "claude", "--load-wait", "0"]) == 0
+    row = _rows(env)[-1]
+    assert row["status"] == "stopped: overloaded: memory pressure critical"
+    assert json.loads(state.read_text()) == {"night": 4}, "the cursor swap was rolled back"
+    assert not (env / "handoff" / "claude").exists()
+
+
+def test_startup_retry_counted_in_the_night_row(env, monkeypatch):
+    import dataclasses
+    _night(env / "home", HAIKU_SONNET)
+    slept: list[float] = []
+    orig = night.prompt_pacing
+    monkeypatch.setattr(night, "prompt_pacing",
+                        lambda *a: dataclasses.replace(orig(*a), sleep=slept.append))
+    tries: list[str] = []
+
+    def ask(e, p):
+        tries.append(p)
+        if len(tries) == 1:
+            raise failover.StartupFailed("claude:haiku: acp-run rc=1 [startup: ServiceUnavailableError]")
+        return f"ANS-{e.model}"
+    monkeypatch.setattr(failover, "ask", ask)
+    assert night.main(["--source", "claude"]) == 0
+    row = _rows(env)[-1]
+    assert (row["status"], row["entry"], row["retries"], row["failed"]) == ("ok", "claude:haiku@low", 1, [])
+    retry = [r for r in _attempts(env) if r["phase"] == "retry"]
+    assert len(retry) == 1 and retry[0]["task"] == "skillopt-night claude" and 15 <= sum(slept) <= 25
+
+
 def test_pinned_count_when_engine_reports_no_sessions(env, monkeypatch):
     _night(env / "home", HAIKU_SONNET)
     monkeypatch.setenv("FAKE_RESULT", json.dumps({"n_sessions": 0, "n_tasks": 3, "staging_dir": ""}))
