@@ -105,9 +105,13 @@ a. **Running and not finished → message it.** Read its latest prompt line firs
    if it is mid-task on something else, say so to the operator instead of
    interrupting. Reach by the table in section 6. **SendMessage fails** ("No agent
    named … is reachable": a workflow sub-agent's `ListAgents` often lists only its
-   teammates, 2026-10-11) → `relay.py <id> "<one line>"`, which types it into the
+   teammates, 2026-10-11), **or a `[Cross-session delivery notice]` says it was
+   refused** (that session turned inbound messages off, 2026-10-12) →
+   `relay.py <id> "<one line>"`, which types it into the
    session's own pane; a working Claude queues it for its next tool round. Put a
-   long brief in a file and relay one line naming its absolute path.
+   long brief in a file and relay one line naming its absolute path. Don't resend
+   a refused message, and don't hand the operator a clipboard prompt to paste in
+   its place: relay it.
 b. **Running but finished** (`finished: /handoff` or `/quit`: its last prompt was a
    handoff or it is sitting at "Bye!") → **never continue there** (operator rule,
    2026-10-08: "it ends with a /handoff; a new session should be opened in its CWD
@@ -259,7 +263,7 @@ get `herdr agent start --kind` plus `agent prompt` — the fragile way; say so.
 
 | Agent / host | Running session | Ended session |
 |---|---|---|
-| claude (TUI) | `SendMessage({to: "<name>"})`; read its latest prompt line first. Not in your `ListAgents`, or no messaging socket (`fleet.py` then says so in `reach:`) → `relay.py <id> "<one line>"` (keys into its herdr/Orca/tmux pane; queued while it works; refused on a draft or an open question). Finished (`/handoff`) → rung 3b, never SendMessage | `claude --resume <id>` (rung 3d) or `launch.py --baton` |
+| claude (TUI) | `SendMessage({to: "<name>"})`; read its latest prompt line first. Not in your `ListAgents`, no messaging socket (`fleet.py` then says so in `reach:`), or a delivery notice says SendMessage was refused → `relay.py <id> "<one line>"` (keys into its herdr/Orca/tmux pane; queued while it works; refused on a draft or an open question). Finished (`/handoff`) → rung 3b, never SendMessage | `claude --resume <id>` (rung 3d) or `launch.py --baton` |
 | any ACP launch (`host acp`, id `YYYYMMDD-…`) | `launch.py reply <id> "<text>"`, then `launch.py wait <id>` | `launch.py list`; its log under `~/.local/state/session-finder/` |
 | hermes (Telegram/desktop chat, `hermes-gw`) | `ask_hermes` (MCP) to prompt it; `messages_send` with `target="telegram:<chat>[:<thread>]"` posts as Hermes; approvals: `permissions_list_open` / `permissions_respond` | `hermes --resume <id>` |
 | hermes (CLI in a pane) | `helm.py send <pane> "<text>"` | same |
