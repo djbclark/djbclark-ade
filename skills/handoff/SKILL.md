@@ -232,6 +232,7 @@ title derived from this session's work (not "handoff"):
 python3 ~/ops/site-private/skills/autorename/autorename.py --auto "<title>"
 ```
 
-It keeps a title the operator set by hand, and exits 2 without harm outside
-Claude Code (no `CLAUDE_CODE_SESSION_ID`); in that case skip it silently. Add its
-one-line result to the report.
+It keeps a title the operator set by hand. It works in Claude Code, zcode, Grok,
+cursor-agent, OpenCode, Codex in a herdr pane, and omp (once its bridge extension is
+installed and omp restarted), and exits 2 without harm where it finds no supported
+session; in that case skip it silently. Add its one-line result to the report.
