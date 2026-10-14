@@ -100,7 +100,9 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      `CRUSH_GLOBAL_DATA=<tmp>/data` (merged after the user's global config) and
      the workspace file under `--data-dir <tmp>/project` (merged last, after any
      project `crush.json`/`crushrc`), with `auto_lsp: false` and
-     `permissions.skip_requests: false`. Crush merges config arrays by appending,
+     `permissions.skip_requests: false`. (2026-10-14, operator: acp-run runs crush yolo only. The user's crushrc auto-allow PreToolUse hook makes crush
+     skip the permission requests `--perm scoped:` and `ask` depend on, so acp-run refuses them for crush with
+     exit 2; `--perm deny` is unaffected.) Crush merges config arrays by appending,
      so no other layer can take a tool back off the list. MCP servers a project
      config names (from `-C` up to the git root) get `disabled: true` there.
      `--data-dir` also keeps crush's session database out of `-C`. The catalog

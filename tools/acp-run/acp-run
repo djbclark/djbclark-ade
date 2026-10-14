@@ -3108,6 +3108,15 @@ def main():
         ap.error(f"agent must be one of: {', '.join(AGENTS)}")
     if not (a.perm in ("all", "deny", "ask") or a.perm.startswith("scoped:")):
         ap.error("--perm must be all, deny, ask or scoped:PATH[,PATH...]")
+    if a.agent == "crush" and (a.perm == "ask" or a.perm.startswith("scoped:")):
+        # operator 2026-10-14: acp-run runs crush yolo. The user's crushrc ends with an
+        # auto-allow PreToolUse hook, so crush never sends the permission requests these
+        # policies rely on (measured: a write outside the scope ran, perm=0+/0-); refuse
+        # instead of accepting a gate that cannot hold. --perm deny is unaffected (it
+        # switches every tool off and strips the hook).
+        ap.error("--perm %s is not supported for crush: it runs yolo only (use --perm all, "
+                 "--perm deny for a read-only run, or another agent for path scoping)"
+                 % ("scoped:" if a.perm.startswith("scoped:") else "ask"))
     if a.perm == "ask" and not a.interactive:
         ap.error("--perm ask needs --interactive")
     if (a.inbox or a.show_thinking) and not a.interactive:

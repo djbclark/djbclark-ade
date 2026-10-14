@@ -22,6 +22,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -499,6 +500,25 @@ class TestCrushDenyEndToEnd(unittest.TestCase):
         self.assertNotIn("acp-run-", s["env"]["CRUSH_GLOBAL_DATA"])
         self.assertIsNone(s["env"]["CRUSH_GLOBAL_CONFIG"])
         self.assertEqual((r["deny_config"], r["user_config"]), ([], []))
+
+class TestCrushYoloOnly(unittest.TestCase):
+    """acp-run runs crush yolo (operator, 2026-10-14): the user's crushrc auto-allow hook makes
+    crush skip the permission requests that --perm scoped:/ask need, so they are refused."""
+
+    def run_cli(self, *args):
+        script = Path(__file__).resolve().parent.parent / "tools" / "acp-run" / "acp-run"
+        return subprocess.run([str(script), "crush", *args, "-p", "x"],
+                              capture_output=True, text=True, timeout=30)
+
+    def test_scoped_and_ask_are_refused_for_crush(self):
+        for perm in ("scoped:.", "ask"):
+            r = self.run_cli("--perm", perm)
+            self.assertEqual(r.returncode, 2, perm)
+            self.assertIn("not supported for crush", r.stderr)
+
+    def test_deny_is_not_refused_by_the_perm_check(self):
+        r = self.run_cli("--perm", "deny", "--timeout", "1", "-C", "/nonexistent-dir-for-test")
+        self.assertNotIn("not supported for crush", r.stderr)
 
 
 if __name__ == "__main__":
