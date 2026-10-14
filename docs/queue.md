@@ -59,7 +59,7 @@ this repo on or after 2026-10-14 raises these three first, one `/steps` prompt e
 3. **The `-C` strip gap** in the next entry: the operator chose to note it and do no work on
    2026-10-13; raise it again.
 
-## Crush under `--perm deny`: adversary findings 1-4 (queued 2026-10-13, not fixed)
+## Crush under `--perm deny`: adversary findings 1-4 (DECIDED 2026-10-14: crush excluded from deny-mode reviews; fixes still not made)
 
 **Queued after the review of 71ac081 (scratchpad adv3-report.md). Since the same day
 the SkillOpt night runs its chain with `perm: all` (operator decision), so none of
@@ -70,8 +70,10 @@ covered by `disabled_tools`, so the logged `"tools": "none"` can be false (~825)
 shadow-bypass scanner for the user's crushrc is a denylist and misses real bypasses (~746-749,
 859). (4) The 29-name tool snapshot fails open after a crush upgrade (~726-737). Notes 5-8 (git
 boundary, literal keys copied from a user crush.json, `/toggle_yolo` as a prompt, crush deny
-sessions' DB deleted with the temp dir) are in the report. **Decide:** harden deny-mode crush
-or leave crush out of deny-mode reviews.
+sessions' DB deleted with the temp dir) are in the report. **Decided 2026-10-14 (operator,
+via /steps): leave crush out of deny-mode reviews** — acp-dispatch deny-mode reviews of
+untrusted repos run on opencode/agy until the findings are fixed; hardening the fork
+remains possible later but is not queued.
 
 ## acp-run --perm deny: what the user-config strip still lets through
 
