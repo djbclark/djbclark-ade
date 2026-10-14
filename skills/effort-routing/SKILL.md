@@ -15,7 +15,7 @@ vendor* runs work. This one decides *how much thinking* the current session
 spends. They are different problems and get confused constantly.
 
 Canonical source: `skills/effort-routing/SKILL.md` in djbclark-ade
-(`~/src/djbclark-ade`; every TUI links to it through the skill-everywhere hub). Snapshot
+(`~/src/djbclark-ade`; every TUI links to it directly via skill-everywhere). Snapshot
 **2026-08-23**.
 
 ## The honest constraint

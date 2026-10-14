@@ -13,7 +13,7 @@ description: >-
 Canonical source of this skill: `skills/model-routing/SKILL.md` in the
 djbclark-ade repo (`~/src/djbclark-ade`, github.com/djbclark/djbclark-ade).
 `~/.claude/skills/model-routing/` and every other TUI's copy are symlinks to it
-through the skill-everywhere hub (`~/ops/site-private/skills/model-routing`),
+via a direct skill-everywhere link (`~/src/djbclark-ade/skills/model-routing`),
 so there is nothing to keep in sync.
 
 The canonical, dated matrix lives at

@@ -11,12 +11,12 @@ description: >-
 
 # session-finder — which session, where, and how the work continues
 
-Canonical copy: `~/src/djbclark-ade/skills/session-finder/` (git: `~/src/djbclark-ade`, github.com/djbclark/djbclark-ade); every TUI reaches it through the skill-everywhere hub `~/ops/site-private/skills/session-finder`.
+Canonical copy: `~/src/djbclark-ade/skills/session-finder/` (git: `~/src/djbclark-ade`, github.com/djbclark/djbclark-ade); every TUI links it directly (skill-everywhere).
 `ListAgents` shows names only (`one-offs-91`), not topics. Four scripts here answer
 from local files, with no model tokens:
 
 ```bash
-S=~/ops/site-private/skills/session-finder
+S=~/src/djbclark-ade/skills/session-finder
 python3 -I $S/session-find.py <keyword>...       # running sessions, every TUI, ranked by keyword
 python3 -I $S/session-history.py <keyword>...    # every session of every agent, live or ended, full text
 python3 -I $S/fleet.py [list|show <id>|ended|conflicts --cwd DIR]   # the fleet itself

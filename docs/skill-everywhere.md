@@ -9,13 +9,17 @@ TUI actually loads it. Until 2026-10-08 this was the `skill-everywhere` skill;
 it was demoted to a README because it is needed only when adding a skill, and
 its description cost listing budget in every session of every TUI.
 
-The skill lives once, in git: the orchestration and session-hygiene skills in
-`~/src/djbclark-ade/skills/<name>/` (since 2026-10-08), the rest in
-`~/ops/site-djbclark/skills/<name>/` (for a moved skill that path is a symlink
-into djbclark-ade). Either way it is
-reached at `~/ops/site-private/skills/<name>` (a symlink; the private skills
-`1password` and `tell-chief-of-staff` are real directories there). Every TUI gets a
-**symlink** to that `site-private` path, so editing the git copy updates every agent. Never copy: a
+The skill lives once, in git, and every TUI gets a **direct symlink** to it —
+no hub, no chained symlinks (the old TUI → `site-private/skills` →
+`site-djbclark/skills` → djbclark-ade chain was collapsed 2026-10-14; ops-repo
+churn can no longer break skill loading):
+
+- public skills: `~/src/djbclark-ade/skills/<name>/` — link target
+  `~/src/djbclark-ade/skills/<name>`
+- private skills: `~/ops/site-private/skills/<name>/` (real directory; only
+  `1password` today) — link target `~/ops/site-private/skills/<name>`
+
+Editing the git copy updates every agent. Never copy: a
 copy drifts silently. `~/.agents/skills/handoff` is a symlink to the git
 copy. The stale copy is `~/.agents/skills/.trash/`. Grok walks that tree
 and can advertise the trash skill under the live name. Hide it with
@@ -30,16 +34,20 @@ and can advertise the trash skill under the live name. Hide it with
 ~/src/djbclark-ade/bin/skill-everywhere --remove <name>... # undo
 ```
 
-If the skill is not reachable at `site-private/skills/<name>` yet, put it in
-place first; `~/ops/site-djbclark/skills/README.md` has the steps for a public and a private skill. The script skips TUIs that aren't installed. If a path
+If the skill has no directory yet, create it first: public skills in
+`~/src/djbclark-ade/skills/<name>/`, private ones (operator ruling required)
+in `~/ops/site-private/skills/<name>/` plus a line in `.githooks/private-paths`
+there. The script skips TUIs that aren't installed. If a path
 already exists and isn't our link, the script leaves it alone and exits non-zero.
-Report that rather than overwriting it.
+Report that rather than overwriting it. In link mode the script also
+**collapses chains**: any existing link whose realpath equals the target but
+whose readlink differs is replaced with the direct link.
 
 **Retiring a skill:** run `--remove <name>` and re-point anything that loads
 it by name (Hermes `skill-slash` handlers, Claude/zcode command wrappers)
-before deleting its directory and its hub symlinks. `--remove` also works
+before deleting its directory. `--remove` also works
 after the directory is gone: it removes only links whose target is exactly
-`site-private/skills/<name>`.
+one of the two roots.
 
 ## 2. Where each TUI looks (verified 2026-10-03)
 
@@ -55,7 +63,7 @@ after the directory is gone: it removes only links whose target is exactly
 | Hermes (`hermes`) | `~/.local/share/skill-everywhere/skills`, which Hermes put in its own `skills.external_dirs` |
 | Cursor (`cursor-agent`), Muse (`muse`) | already read `~/.claude/skills`; no extra link |
 | Grok (`grok`, including Grok Build) | `~/.grok/skills`. It also scans `~/.claude/skills` and `~/.agents/skills` and dedups by name. Verified 2026-10-04: a same-named `SKILL.md` under `~/.agents/skills/.trash` was the copy this session was offered, so `~/.grok/config.toml` ignores that trash dir and this script links the live skill here. |
-| zcode (`zcode`) | already reads `~/.agents/skills`; an extra link listed it twice. **Loaded ≠ slash-invocable (2026-10-05):** zcode exposes only built-ins and plugin commands as bare `/<name>`; a user skill is invoked with the built-in `/skill <name>`, and a bare `/<name>` needs a command wrapper — `skills: <name>` frontmatter auto-mounts it — in `~/.zcode/commands/` (editable copies: `site-private/zcode/commands/`, symlinked like `claude/commands/`; first wrapper: `steps`). |
+| zcode (`zcode`) | already reads `~/.agents/skills`; an extra link listed it twice. **Loaded ≠ slash-invocable (2026-10-05):** zcode exposes only built-ins and plugin commands as bare `/<name>`; a user skill is invoked with the built-in `/skill <name>`, and a bare `/<name>` needs a command wrapper — `skills: <name>` frontmatter auto-mounts it — in `~/.zcode/commands/` (editable copies: `~/src/djbclark-ade/zcode/commands/`, symlinked into `~/.zcode/commands/`; first wrapper: `steps`). |
 | Antigravity (`agy`) | `~/.gemini/antigravity-cli/skills` (agy CLI 1.2.16; links are followed). Verified with `/skills` in interactive agy. Headless `agy -p` answers never mention user skills, not even the installer's bailian ones, so check agy interactively. `~/.gemini/config/skills` and `~/.gemini/antigravity/skills` are not read by the CLI |
 | omp / oh-my-pi (`omp`) | `~/.omp/agent/skills` (native, highest skill priority; added 2026-10-13). omp also reads `~/.agents/skills`, but de-duplicates by `realpath`, so the second link does not list a skill twice. omp ignores `~/.claude/skills` unless `claude` is in its `enabledProviders`. Prove it with `omp -p --no-title "<step 3 prompt>"` from a scratch dir. |
 
@@ -110,10 +118,9 @@ no manual gateway restart. The Telegram pull-up `/` menu is only republished
 at adapter (re)connect, so a just-added command may not autocomplete until the
 next restart, but typing it still works and `/commands` lists it. If you cannot
 run `skill-everywhere` (e.g. changing the plugin without a skill), ask Hermes
-to run `reload-plugins` the same way. Claude Code slash wrappers are reached
-through `site-private/claude/commands/` (symlinked into `~/.claude/commands/`);
-`helm-all.md`, `session-finder-all.md` and `resume.md`
-there are themselves symlinks into `~/src/djbclark-ade/claude/commands/`.
+to run `reload-plugins` the same way. Claude Code slash wrappers live in
+`~/src/djbclark-ade/claude/commands/` and are symlinked directly into
+`~/.claude/commands/`.
 
 ## 4. When the table is wrong
 

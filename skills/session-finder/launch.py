@@ -62,7 +62,7 @@ ACP_DISPATCH = os.environ.get("ACP_DISPATCH") or shutil.which("acp-dispatch") or
 ACP_AGENTS = {"claude", "codex", "copilot", "opencode", "cursor", "qwen", "cline", "hermes", "agy", "devin"}
 HERDR_KINDS = {"claude", "codex", "cursor", "opencode", "copilot", "qwen", "cline", "hermes", "agy", "muse", "grok", "devin"}
 EXCLUDED = {"grok"}   # operator exclusion 2026-10-06 (bigteam: Current exclusions)
-SKILLS = Path.home() / "ops/site-private/skills"
+SKILLS = Path.home() / "src/djbclark-ade/skills"
 STATE = fleet.STATE_DIR
 HERDR = fleet.HERDR
 

@@ -11,7 +11,7 @@ description: >-
 
 # helm — every waiting session, one prompt at a time
 
-Canonical copy: `~/src/djbclark-ade/skills/helm/` (git: `~/src/djbclark-ade`, github.com/djbclark/djbclark-ade); every TUI reaches it through the skill-everywhere hub `~/ops/site-private/skills/helm`.
+Canonical copy: `~/src/djbclark-ade/skills/helm/` (git: `~/src/djbclark-ade`, github.com/djbclark/djbclark-ade); every TUI links it directly (skill-everywhere).
 Design and prior art: `~/src/djbclark-ade/docs/helm.md`.
 
 Each session runs its own `/steps` and `/loose`, because that is where its
@@ -20,8 +20,8 @@ waiting and carries answers back; you only present the choice. He changes
 windows only when an item needs more depth than a prompt can carry.
 
 ```bash
-H="python3 -I $HOME/ops/site-private/skills/helm/helm.py"
-L="python3 -I $HOME/ops/site-private/skills/session-finder/launch.py"
+H="python3 -I $HOME/src/djbclark-ade/skills/helm/helm.py"
+L="python3 -I $HOME/src/djbclark-ade/skills/session-finder/launch.py"
 $H scan                      # open items, every TUI, ranked (--all: every session; --ended: section 7; --order attention: old order)
 $H wait --auto-audit         # block until something new needs him
 $H answer <id> <n>           # pick option n; one number per question

@@ -12,7 +12,7 @@ description: >-
 # dialogue — several models argue, one artifact, one final word
 
 Canonical copy: `~/src/djbclark-ade/skills/dialogue/` (git: `~/src/djbclark-ade`);
-every TUI reaches it through the skill-everywhere hub `~/ops/site-private/skills/dialogue`.
+every TUI links it directly (skill-everywhere).
 Born 2026-10-10 from the hiwymi `spec/ai-heaven` run (Grok 4.7, Claude Fable 5.1,
 GPT-6 Astra; 17 turns, 5 phases). The operator ruled that the skill is built from that
 run's measured performance and that **Grok 4.7's rulings are final on its design**

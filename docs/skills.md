@@ -2,25 +2,25 @@
 
 Every hand-written skill that is safe to publish lives in [`skills/`](../skills/).
 Each directory holds a `SKILL.md` (the instructions an agent loads) plus any
-scripts or reference files beside it. Skills are reached through one chain, so
-editing here reaches every agent TUI:
+scripts or reference files beside it. Every TUI links the skill **directly**
+at this repo — one symlink, no chain — so editing here reaches every agent
+TUI:
 
 ```
-~/.claude/skills/<name>  ->  ~/ops/site-private/skills/<name>
-                         ->  ~/ops/site-djbclark/skills/<name>   (symlink)
-                         ->  ~/src/djbclark-ade/skills/<name>    (the real files)
+~/.claude/skills/<name>  ->  ~/src/djbclark-ade/skills/<name>    (the real files)
 ```
 
-The old `~/ops/site-djbclark/skills/<name>` paths still work; they are symlinks
-into this repo. Do not edit through them in a way that replaces the symlink.
+(The hub chain through `~/ops/site-private/skills` → `~/ops/site-djbclark/skills`
+was collapsed to these direct links on 2026-10-14; those paths no longer work.)
 
 **How to use a skill.** In Claude Code type `/<name>` (with arguments after it),
 or say one of the trigger phrases below and the agent loads it. Other TUIs find
 the same skills through their own skills dir (`skill-everywhere`, README beside it).
 
-**Not here, on purpose.** `1password` and `tell-chief-of-staff` are private by
-decision and stay real directories in `~/ops/site-private/skills/` (this repo is
-public). Tool-managed skills (bailian-*, composio-cli, herdr, orca-*,
+**Not here, on purpose.** `1password` is private by decision and stays a real
+directory in `~/ops/site-private/skills/` (this repo is public).
+`tell-chief-of-staff` moved here on 2026-10-14 (operator ruling: public).
+Tool-managed skills (bailian-*, composio-cli, herdr, orca-*,
 sudo-secretspec, ralph-tui-create-*, ...) stay where their installer put them.
 
 ## Sessions and handoffs
@@ -61,6 +61,7 @@ sudo-secretspec, ralph-tui-create-*, ...) stay where their installer put them.
 | `report` | Formats a long Markdown deliverable for Marked 2: numbered superscript citations, linked evidence table, descriptive file names, short paragraphs, render check by window capture. | `/report`; before the first `open -a "Marked 2"` of a research report, spec or review. Scripts: `skills/report/scripts/{reformat_citations,cite_sup}.py`. |
 | `book-to-kb` | Adds a book (EPUB, PDF, DOCX, ...) to the local knowledge base at `~/kb` so any session can query it cheaply. | Give it a book path; query later with `book-kb query '<regex>' <slug>`. |
 | `gmail-search` | Searches the local full-text index of the whole mailbox in about 100 ms; read-only. | "search my email", "find that message from X". |
+| `tell-chief-of-staff` | Sends a message to the operator's cloud Grok Bot "Chief of Staff" via its inbound webhook, and explains how Chief of Staff can call back into Claude (ask_claude MCP tool). Webhook URL/key live in Keychain. | "tell grok", "tell Chief of Staff", "hand this to grokbot". |
 | `graft` | Tells an agent to use the graft code graph before grepping or reading source. | Loads on its own in any graft-indexed repo. |
 | `todo` | Tracks optional do-whenever tasks as Basic Memory notes. | "what could I work on"; "add to my todo". |
 
@@ -85,11 +86,9 @@ on: [disabled-skills.md](disabled-skills.md).
 ## Adding or moving a skill
 
 1. Put the directory in `skills/<name>/` here with a `SKILL.md` (front matter `name` and `description`).
-2. Link it into the hub and every TUI:
+2. Link it into every TUI:
 
    ```sh
-   ln -s /Users/djbclark/src/djbclark-ade/skills/<name> ~/ops/site-djbclark/skills/<name>
-   ln -s ../../site-djbclark/skills/<name> ~/ops/site-private/skills/<name>
    ~/src/djbclark-ade/bin/skill-everywhere <name>
    ~/src/djbclark-ade/bin/skill-everywhere --check <name>
    ```

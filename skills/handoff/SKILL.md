@@ -229,7 +229,7 @@ Last step, after the report. Run the `autorename` skill in `--auto` mode with a
 title derived from this session's work (not "handoff"):
 
 ```bash
-python3 ~/ops/site-private/skills/autorename/autorename.py --auto "<title>"
+python3 ~/src/djbclark-ade/skills/autorename/autorename.py --auto "<title>"
 ```
 
 It keeps a title the operator set by hand. It works in Claude Code, zcode, Grok,

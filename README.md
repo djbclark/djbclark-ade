@@ -108,19 +108,16 @@ their old paths are symlinks into this checkout).
 | [`reorg-orca`](skills/reorg-orca/SKILL.md) | Reorganize an Orca setup from the CLI; says which moves Orca cannot do yet. |
 
 Every skill with its trigger phrases and how to use it: [`docs/skills.md`](docs/skills.md).
-Two skills, `1password` and `tell-chief-of-staff`, are private and stay in `site-private`.
+One skill, `1password`, is private and stays in `~/ops/site-private/skills/`;
+`tell-chief-of-staff` moved here on 2026-10-14.
 
 ## Install (this machine)
 
-Skills are reached through one hub, `~/ops/site-private/skills/<name>`, which
-every TUI's skills dir links to. For a skill that lives here the chain is
-`~/.claude/skills/<name>` → `~/ops/site-private/skills/<name>` →
-`~/ops/site-djbclark/skills/<name>` → `~/src/djbclark-ade/skills/<name>`. To
-add one:
+Every TUI's skills dir links **directly** at this repo (collapsed 2026-10-14,
+no hub, no chains): `~/.claude/skills/<name>` →
+`~/src/djbclark-ade/skills/<name>`. To add one:
 
 ```sh
-ln -s /Users/djbclark/src/djbclark-ade/skills/<name> ~/ops/site-djbclark/skills/<name>
-ln -s ../../site-djbclark/skills/<name> ~/ops/site-private/skills/<name>
 ~/src/djbclark-ade/bin/skill-everywhere <name>          # link into every TUI
 ~/src/djbclark-ade/bin/skill-everywhere --check <name>  # verify
 ```

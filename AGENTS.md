@@ -113,19 +113,20 @@ altitudes compose (a macro node can run a micro graph as its body).
   and herdr placement; its nudge hooks are Claude `UserPromptSubmit` in
   `~/.claude/settings.json` (cursor-agent runs that one too, as
   `beforeSubmitPrompt`) and Grok `Stop` in `~/.grok/hooks/autorename.json`
-  (Grok discards UserPromptSubmit context), both reaching it through the old
-  `~/ops/site-djbclark/skills/autorename` path, now a symlink)
+  (Grok discards UserPromptSubmit context))
   (README.md has a one-line table; `/helm-all`, `/session-finder-all`,
   `/resume`, `/herdr-tidy` and `/orca-tidy` are thin command wrappers in
   [claude/commands/](claude/commands/)).
-  Every TUI reaches them as `~/ops/site-private/skills/<name>` →
-  `~/ops/site-djbclark/skills/<name>` (an absolute symlink into this
-  checkout), so **edit them here**, never through a TUI path. Since 2026-10-09
+  Every TUI links each skill **directly** as
+  `~/<tui>/skills/<name>` → `~/src/djbclark-ade/skills/<name>` (collapsed
+  2026-10-14; no hub, no chains), so **edit them here**, never through a TUI
+  path. Since 2026-10-09
   **every** hand-written skill lives here, including `gmail-search`, `reorg-orca`,
   `book-to-kb`, `graft`, `todo`, `research`, `terminus-kira` and
-  `coderabbit-feeder` ([docs/skills.md](docs/skills.md) lists all of them);
+  `coderabbit-feeder`, and since 2026-10-14 also `tell-chief-of-staff`
+  ([docs/skills.md](docs/skills.md) lists all of them);
   **a new skill always goes here** (operator standing rule, 2026-10-09), except
-  the private `1password` and `tell-chief-of-staff`, which stay in `site-private`.
+  the private `1password`, which stays in `site-private/skills/`.
 - [tools/acp-run/](tools/acp-run/README.md) — the ACP client every
   launcher uses (`~/.local/bin/acp-run` resolves here).
   [bin/fleet-watch](bin/fleet-watch) — launchd fleet change notices to

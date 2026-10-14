@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
-# Make shared skills (the site-private hub, backed by djbclark-ade) visible to every agent TUI on
-# this machine by symlinking them into each TUI's user-level skills dir.
-#     skill-everywhere <name>...            link (idempotent)
+# Make a shared skill visible to every agent TUI on this machine by
+# symlinking it into each TUI's user-level skills dir.
+#     skill-everywhere <name>...            link (idempotent, collapses chains)
 #     skill-everywhere --check <name>...    report per-TUI status, change nothing
 #     skill-everywhere --remove <name>...   remove links this script would make
-# Links point at the git checkout, so editing the skill in its git repo
-# (site-djbclark/skills, or ~/src/djbclark-ade/skills for the orchestration
-# skills; site-private only for private ones) updates it everywhere; never
+# Content lives in exactly one place (2026-10-14 chain collapse):
+#   ~/src/djbclark-ade/skills/<name>            public skills (default)
+#   ~/ops/site-private/skills/<name>            private skills (e.g. 1password)
+# and every TUI links DIRECTLY at that path — no hub layers, no chained
+# symlinks (the old TUI -> site-private/skills -> site-djbclark/skills ->
+# djbclark-ade chain is retired; ops-repo churn can no longer break skill
+# loading). Editing the skill in its git repo updates it everywhere; never
 # copy (copies drift, e.g. ~/.agents/skills/handoff).
+# In link mode, any existing link whose realpath equals the target but whose
+# readlink differs (a leftover chain) is atomically replaced with the direct
+# link.
 # Hermes owns ~/.hermes/, so it is never edited here. Instead Hermes itself put
 # ~/.local/share/skill-everywhere/skills in its skills.external_dirs (done
 # 2026-10-03), and this script links into that dir.
@@ -18,9 +25,8 @@
 # batched prompt, --print-timeout): looped agy -p probes helped lock out its CLI on
 # 2026-10-03 (see skills/model-routing, "agy has a burst limit").
 set -euo pipefail
-# site-private/skills remains the hub so existing TUI links stay stable. Public
-# skills in it point into djbclark-ade; private skills remain private there.
-src_root="${SKILL_EVERYWHERE_HUB:-${OPS_ROOT:-$HOME/ops}/site-private/skills}"
+ade_root="${SKILL_EVERYWHERE_ADE:-$HOME/src/djbclark-ade/skills}"
+priv_root="${SKILL_EVERYWHERE_PRIVATE:-${OPS_ROOT:-$HOME/ops}/site-private/skills}"
 
 # binary|skills dir to link into, or "via <dir>" when the TUI already reads a
 # dir we fill (a second link there would list the skill twice), or "x <why>".
@@ -36,7 +42,6 @@ copilot|~/.copilot/skills
 opencode|~/.config/opencode/skills
 qwen|~/.qwen/skills
 devin|~/.config/devin/skills
-cline|~/.cline/skills
 hermes|~/.local/share/skill-everywhere/skills
 cursor-agent|via ~/.claude/skills
 grok|~/.grok/skills
@@ -47,15 +52,21 @@ omp|~/.omp/agent/skills
 
 mode=link
 case "${1:-}" in --check) mode=check; shift ;; --remove) mode=remove; shift ;; esac
-[[ $# -gt 0 ]] || { sed -n '2,6p' "$0" >&2; exit 2; }
+[[ $# -gt 0 ]] || { sed -n '2,7p' "$0" >&2; exit 2; }
 
 rc=0
 for name in "$@"; do
-  src="$src_root/$name"
-  # --remove still works once the skill dir is gone: it only unlinks links
-  # whose target is exactly $src, so retiring a skill can run in either order.
-  if [[ ! -f $src/SKILL.md && $mode != remove ]]; then
-    echo "error: no $src/SKILL.md" >&2; rc=1; continue
+  if [[ -f $ade_root/$name/SKILL.md ]]; then src="$ade_root/$name"
+  elif [[ -f $priv_root/$name/SKILL.md ]]; then src="$priv_root/$name"
+  else
+    if [[ $mode != remove ]]; then
+      echo "error: no SKILL.md under $ade_root/$name or $priv_root/$name" >&2; rc=1; continue
+    fi
+    # --remove still works once the skill dir is gone: it only unlinks links
+    # whose target is one of the two roots, so retiring a skill can run in
+    # either order. Without a source there is nothing to compare realpaths
+    # against, so fall back to the public root's path for target matching.
+    src="$ade_root/$name"
   fi
   echo "== $name"
   while IFS='|' read -r bin dir; do
@@ -65,9 +76,7 @@ for name in "$@"; do
     dir="${dir/#\~/$HOME}"; link="$dir/$name"
     if [[ -L $link && "$(readlink "$link")" == "$src" ]]; then state=linked
     elif [[ -L $link && -e $src && "$(realpath "$link" 2>/dev/null)" == "$(realpath "$src")" ]]; then
-      # e.g. ~/.copilot/skills/x -> ~/.claude/skills/x -> $src: same skill,
-      # one hop longer. Works; --remove leaves it, relink by hand if wanted.
-      state="linked via $(readlink "$link")"
+      state="chained via $(readlink "$link")"
     elif [[ -L $link ]]; then state="other link -> $(readlink "$link")"
     elif [[ -e $link ]]; then state="real dir/file (not ours)"
     else state=missing; fi
@@ -79,7 +88,13 @@ for name in "$@"; do
       link)
         if [[ $state == missing ]]; then
           mkdir -p "$dir"; ln -s "$src" "$link"; printf '  %-13s linked\n' "$bin"
-        elif [[ $state == linked || $state == "linked via "* ]]; then printf '  %-13s already %s\n' "$bin" "$state"
+        elif [[ $state == linked ]]; then printf '  %-13s already linked\n' "$bin"
+        elif [[ $state == chained\ * ]]; then
+          # ln -sfn (not ln+mv): macOS mv follows a symlink-to-dir
+          # destination and moves the temp link INSIDE the target dir
+          # instead of replacing the link.
+          ln -sfn "$src" "$link"
+          printf '  %-13s relinked direct (was %s)\n' "$bin" "$state"
         else printf '  %-13s %s; left alone\n' "$bin" "$state"; rc=1; fi ;;
     esac
   done <<<"$targets"

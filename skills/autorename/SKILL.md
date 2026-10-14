@@ -10,9 +10,9 @@ description: >-
 
 # autorename — title the session from what you know
 
-Canonical copy: `~/src/djbclark-ade/skills/autorename/` (git: `~/src/djbclark-ade`; moved from
-`~/ops/site-djbclark/skills/` on 2026-10-08, which is now a symlink here); every TUI reaches it through
-the skill-everywhere hub `~/ops/site-private/skills/autorename`. Its sibling for the other end of a
+Canonical copy: `~/src/djbclark-ade/skills/autorename/` (git: `~/src/djbclark-ade`; moved
+from `~/ops/site-djbclark/skills/autorename` on 2026-10-08); every TUI links to it directly
+(skill-everywhere). Its sibling for the other end of a
 session's life, closing idle herdr panes safely, is the `herdr-tidy` skill.
 
 `/rename` is a built-in command a skill cannot call, so this skill writes the
@@ -98,8 +98,8 @@ seen 2026-10-09), so call one by full path:
 `/opt/homebrew/opt/python@3.14/bin/python3.14` in place of `python3` below.
 
 ```bash
-python3 ~/ops/site-private/skills/autorename/autorename.py "<title>"          # operator asked
-python3 ~/ops/site-private/skills/autorename/autorename.py --auto "<title>"   # called from /handoff
+python3 ~/src/djbclark-ade/skills/autorename/autorename.py "<title>"          # operator asked
+python3 ~/src/djbclark-ade/skills/autorename/autorename.py --auto "<title>"   # called from /handoff
 ```
 
 `--auto` leaves the title alone when the operator renamed the session by hand
@@ -208,9 +208,9 @@ it (operator, 2026-10-09, after three renames changed nothing he could see). Ins
 herdr, right after step 2 (and whenever the operator has typed `/rename` by hand), run:
 
 ```bash
-python3 ~/ops/site-private/skills/autorename/herdr_place.py label --force --from-title   # operator asked: always relabel
-python3 ~/ops/site-private/skills/autorename/herdr_place.py label --from-title           # --auto / hook: generic labels only
-python3 ~/ops/site-private/skills/autorename/herdr_place.py label [--force] <label>-t    # your own label
+python3 ~/src/djbclark-ade/skills/autorename/herdr_place.py label --force --from-title   # operator asked: always relabel
+python3 ~/src/djbclark-ade/skills/autorename/herdr_place.py label --from-title           # --auto / hook: generic labels only
+python3 ~/src/djbclark-ade/skills/autorename/herdr_place.py label [--force] <label>-t    # your own label
 ```
 
 It prints `labelled:`, `unchanged:`, `kept:` (the tab already had a real label) or
@@ -233,8 +233,8 @@ so the tab label below carries the name.
 Run this after step 2 whatever it printed (renamed, unchanged or skipped). `/handoff` Step 8 skips it: a session being handed off is about to end.
 
 ```bash
-python3 ~/ops/site-private/skills/autorename/herdr_place.py check          # operator asked
-python3 ~/ops/site-private/skills/autorename/herdr_place.py check --auto   # the nudge hook
+python3 ~/src/djbclark-ade/skills/autorename/herdr_place.py check          # operator asked
+python3 ~/src/djbclark-ade/skills/autorename/herdr_place.py check --auto   # the nudge hook
 ```
 
 It prints JSON: this tab, its workspace (with `generic` and `reason`), the other

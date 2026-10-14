@@ -10,7 +10,7 @@ description: >-
 
 # steps — one open item at a time, recommendation first
 
-Canonical copy: `~/src/djbclark-ade/skills/steps/` (git: `~/src/djbclark-ade`, github.com/djbclark/djbclark-ade); every TUI reaches it through the skill-everywhere hub `~/ops/site-private/skills/steps`.
+Canonical copy: `~/src/djbclark-ade/skills/steps/` (git: `~/src/djbclark-ade`, github.com/djbclark/djbclark-ade); every TUI reaches it via a direct skill-everywhere link `~/src/djbclark-ade/skills/steps`.
 Hermes Telegram `/steps` needs plugin `skill-slash` (not just the skill file).
 Claude Code: `site-private/claude/commands/steps.md` → `~/.claude/commands/`.
 
