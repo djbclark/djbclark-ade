@@ -17,7 +17,11 @@ Default host `forgejo.mit.edu` (Forgejo 16.0.5, Gitea-1.22-compatible API, probe
 
 1. `scripts/forgejo-api` — stdlib Python, one call to `/api/v1`. Re-runs itself
    under `sudo-secretspec run`; mutations need `--yes`, `--dry-run` prints the plan.
-   `forgejo-api whoami`, `forgejo-api GET /repos/OWNER/REPO/issues`.
+   `forgejo-api whoami`, `forgejo-api GET /repos/OWNER/REPO/issues`. **Never run it (or `tea-forgejo`) with `--help`**:
+   it is a live-service CLI. Usage: `forgejo-api [--host H] METHOD /PATH [--data '{json}'|@file.json] [--yes] [--dry-run]`;
+   a comment is `POST /repos/O/R/issues/N/comments --data @body.json --yes`, with `body.json` made by
+   `jq -Rs '{body: .}' < text.md > body.json` and checked with `[ -s body.json ]` first (2026-10-14: a `--help` on a POST
+   was run by mistake; it posted nothing, this line is the fix).
 2. `scripts/tea-forgejo` — `tea` (brew, v0.16.0) with the secret mapped onto its
    env login (`GITEA_INSTANCE_URL` + `GITEA_TOKEN`), so nothing lands in
    `~/.config/tea`. Best for `issues`, `pulls`, `releases`, `api`.

@@ -704,24 +704,18 @@ Cause: macOS BSD `/usr/bin/sed` rejects `1{/^$/d}` (`extra characters at the end
 first, use `gsed`. Memory: `feedback_exit_status_through_pipe.md` (site-private `e5c12bd`). The forgejo skill
 scripts have no `--body-file` use, so they needed no guard.
 
-## Flaky MockWebServer tests on the SIPB runner: find a repro (queued 2026-10-14, after the `sed` item)
+## Flaky MockWebServer tests on the SIPB runner — DONE 2026-10-14
 
-On the Hyades runner the full Plektra suite now completes (1,417 tests, run 203), but about six okhttp
-MockWebServer tests (`OpenAiLiveSpeechClientTest`, `SpeechApiClientTest`) fail with `unexpected end of
-stream` or `Timed out waiting`, a different subset each run (runs 203-205), also with the shim's `shutdown()`
-turned into a no-op (`SHIM_SHUTDOWN=noop`), and pass on a laptop. Suspect: a second libkrun TSI loopback
-data-path bug. Write a minimal repro (loopback HTTP request/response loop with keep-alive and a server
-`close()` between requests, in Python or C; run it with `push-probe.sh`), then file it upstream and link it
-from libkrun#926 and SIPB/hyades#2. Tools: `skills/forgejo/examples/plektra/` (`run-matrix.sh` with
-`MATRIX_MODE=diag` and `DIAG_CMD`, `push-probe.sh`, `heartbeat.sh`).
-
-**Progress 2026-10-14.** First repro attempt, negative: `skills/forgejo/examples/plektra/keepalive-repro.py`
-(Python loopback HTTP keep-alive, 1-4 requests per connection, `Connection: close` announced, server `close()` with
-and without `shutdown()`, 8 and 16 client threads) run by `probe-keepalive.yml` (run 208; shim off, shim on, shim with
-`SHIM_SHUTDOWN=noop`): 18 combinations, about 530,000 requests, 0 errors, same as the laptop. (Run 207 showed a few
-timeouts; they were a bug in the repro's acceptor, which stopped at the deadline. Fixed.) So plain well-behaved
-keep-alive is not the trigger. Next: reproduce with Java (the JVM's `Socket`/`ServerSocket` and okhttp pooling), e.g.
-a standalone `MockWebServer` + `OkHttpClient` loop with `SocketPolicy` variants fetched from Maven Central, or run
-the failing test classes in a loop on the runner; look at what the failing tests do differently (abrupt
-`DISCONNECT_*` policies, half-closes, large streamed bodies, WebSocket upgrades in `OpenAiLiveSpeechClientTest`).
-
+Root causes found with a Python churn repro, a standalone okhttp 4.11 MockWebServer loop (`java-churn/`) and C probes
+(`duplex-probe.c`, `reuse-probe.c`, `dup-bind-probe.py`), each checked against a normal Linux kernel (Ubuntu 24.04
+container): (1) the shim's port seed repeated within a second, so consecutive servers got the same port, and
+libkrun TSI keeps a listener closed during a blocked `accept()` alive (libkrun#929); (2) a blocked `recv()` blocks
+`send()` on the same socket, which stalled WebSocket clients (libkrun#819/#926); (3) TSI sockets always have
+`SO_REUSEPORT` (libkrun#860), so duplicate listens succeed. Fixed in `loopback-port-shim.c` (new seed plus ring of
+recent ports; wait in `poll()` before blocking reads and accepts). The full Plektra suite (1,417 tests) now fails only
+`CornerButtonThemeTest` (also fails on GitHub Actions and a laptop), in runs 229 and 230 in a row, 3 m 4 s test step.
+Tickets updated: libkrun#926 (retitled, comment), #819, #860, new #929; SIPB/hyades#2 comment 25. Wrong turns, kept
+because they cost time: a Python keep-alive repro that was negative (and had its own acceptor bug), `SO_RCVTIMEO` is not
+honoured under TSI (use `poll`), and `forgejo-api --help` was run once by mistake (posted nothing).
+Open: whether the 3 of 20 rounds that still fail in `reuse-probe` with the shim (gap 0) matter; check libkrun#926,
+#929, #819, #860 and SIPB/hyades#2 for replies; `CornerButtonThemeTest` is an upstream Plektra issue.

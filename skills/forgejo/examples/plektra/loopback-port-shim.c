@@ -1,13 +1,14 @@
-/* LD_PRELOAD shim: rewrite bind(port 0) to a concrete random port.
+/* LD_PRELOAD shim for libkrun TSI loopback networking (SIPB Hyades runner). Four workarounds, all measured 2026-10-14:
  *
- * Works around libkrun TSI bug libkrun#818: a listener bound to port 0 lands on
- * a different port in the VMM's netns and is unreachable; fixed-port binds work.
- * Inherited by every child JVM through the environment.
- *
- * Also works around a second TSI bug: shutdown(2) on a listening socket either fails with ENOTCONN
- * or, while another thread is blocked in accept(), never returns (getpeername blocks too, and getsockopt(SO_ACCEPTCONN) wrongly says 0). Java's ServerSocket.close() (and so
- * okhttp's MockWebServer.shutdown()) calls it and hangs the test JVM forever. A shutdown() on a
- * listening socket is made a no-op here; close() still wakes a blocked accept() through the JDK's signal.
+ * 1. bind(port 0) is rewritten to a concrete random port in 20000-32000 (libkrun#818: a listener bound to port 0 lands
+ *    on a different port in the VMM's netns and is unreachable). Never the same port twice in a row, and not any of
+ *    the last 4096 handed out: a port reused right after its listener closed loses the new listener's connections
+ *    (libkrun#929). Inherited by every child JVM through the environment.
+ * 2. A thread blocked in recv()/read()/accept() blocks every other call on that socket from other threads, send()
+ *    included (libkrun#819, #926). Blocking reads and accepts on TCP sockets therefore wait in poll() first (parked in
+ *    poll() holds no lock), then read; signals still interrupt the wait, so the JDK's close wake-up keeps working.
+ * 3. shutdown() on a listener is a no-op (it blocks or fails with ENOTCONN; getsockopt(SO_ACCEPTCONN) says 0), and
+ *    on other sockets runs in a helper thread with a 300 ms wait. Java's ServerSocket.close()/Socket.close() call it.
  *
  *   gcc -shared -fPIC -O2 -pthread -o /tmp/portshim.so loopback-port-shim.c -ldl
  *   LD_PRELOAD=/tmp/portshim.so ./gradlew ...
