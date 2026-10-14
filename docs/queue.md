@@ -707,3 +707,14 @@ still counted as success (no `pipefail`, `cmd > out; echo rc=$?` rule not applie
 `--body-file` is never created from an empty file (a check in the `forgejo` skill scripts and in `gh issue
 create` habits: `[ -s file ]` first). Fix the instructions that would have prevented it (`~/CLAUDE.md` item 33
 and 11), and say what changed. Do it last, after the other queued items.
+
+## Flaky MockWebServer tests on the SIPB runner: find a repro (queued 2026-10-14, after the `sed` item)
+
+On the Hyades runner the full Plektra suite now completes (1,417 tests, run 203), but about six okhttp
+MockWebServer tests (`OpenAiLiveSpeechClientTest`, `SpeechApiClientTest`) fail with `unexpected end of
+stream` or `Timed out waiting`, a different subset each run (runs 203-205), also with the shim's `shutdown()`
+turned into a no-op (`SHIM_SHUTDOWN=noop`), and pass on a laptop. Suspect: a second libkrun TSI loopback
+data-path bug. Write a minimal repro (loopback HTTP request/response loop with keep-alive and a server
+`close()` between requests, in Python or C; run it with `push-probe.sh`), then file it upstream and link it
+from libkrun#926 and SIPB/hyades#2. Tools: `skills/forgejo/examples/plektra/` (`run-matrix.sh` with
+`MATRIX_MODE=diag` and `DIAG_CMD`, `push-probe.sh`, `heartbeat.sh`).
