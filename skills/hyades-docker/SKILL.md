@@ -46,7 +46,11 @@ emails you and prunes unused images), 2 groups; more via sipb-hyades-root@mit.ed
    runs it in a Moira group account. No args: interactive console (needs a terminal).
    Read-only, safe to run any time: `list`, `getconf [NAME]`, `status NAME`,
    `logs NAME`, `lsvol`, `df`, `timetravel`, `help`. **Never `--help`**: it is a
-   live service; `hyades help CMD`.
+   live service; `hyades help CMD`. **`hyades -`** reads console commands from
+   stdin (one per line): use it whenever an argument holds a secret (a `setconf`
+   with a token in `envs`), so it never shows in the shared host's process list
+   (2026-10-14). The console repeats the previous command on an empty line
+   (`cmd.Cmd`); the wrapper drops blank lines, and so must anything else you pipe in.
 2. **`scripts/hyades-registry ENGINE-ARGS`**: one podman (docker only if podman is
    absent, or `HYADES_ENGINE=docker`) command logged in to `forgejo.mit.edu` with the
    token from sudo-secretspec, through a throwaway auth file: `hyades-registry push

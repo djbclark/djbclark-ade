@@ -6,6 +6,13 @@
 #   hyades setconf NAME "$(jq -c . conf.json)"
 #   hyades -g GROUP list                 # same, inside Moira group account GROUP
 #   printf 'ls /mnt\n' | hyades tmprun docker.io/library/alpine
+#   printf 'setconf NAME %s\n' "$json" | hyades -      # console commands on stdin
+#
+# `hyades -` sends stdin to the console, one command per line (an `exit` is
+# appended), so arguments holding a secret (an env value in setconf) never
+# appear in the remote process list, which other users of the shared host can
+# read. The prompt and colour codes are stripped from the output. Blank lines
+# are dropped, since the console repeats the previous command on an empty line.
 #
 # The console exits 0 even when a command fails (Python traceback, podman or
 # krun "Error:", "*** Unknown syntax"), so for every command that ends on its
@@ -19,6 +26,22 @@ SSH=(ssh -o BatchMode=yes)
 
 group=""
 if [ "${1:-}" = "-g" ]; then group="$2"; shift 2; fi
+
+if [ "${1:-}" = "-" ]; then
+  [ -t 0 ] && { echo "hyades -: pipe console commands on stdin" >&2; exit 2; }
+  out="$(mktemp)"; trap 'rm -f "$out"' EXIT
+  # Blank lines are dropped: the console (cmd.Cmd) repeats the last command on an empty line.
+  { if [ -n "$group" ]; then printf 'entergp %s\n' "$group"; fi; gawk 'NF'; printf 'exit\n'; } \
+    | "${SSH[@]}" -T "$DEST" 2>&1 \
+    | gsed -E 's/\x1b\[[0-9;]*m//g; s/^(\([^)]*@[^)]*\) )+//' \
+    | gsed -E '/^=== Welcome to the Hyades console ===$/d; /^Type \? or help/d; /^User guide: /d; /^$/d' > "$out"
+  rc=${PIPESTATUS[1]}
+  cat "$out"
+  [ "$rc" -ne 0 ] && exit "$rc"
+  rg -q -e '^Traceback \(most recent call last\)' -e '^Error: ' -e '^\*\*\* Unknown syntax' \
+        -e '^Failed to ' -e '^Unit .* could not be found' -e "^Couldn't execute" "$out" && exit 1
+  exit 0
+fi
 
 if [ $# -eq 0 ]; then
   [ -t 0 ] || { echo "hyades: the interactive console needs a terminal; pass a command" >&2; exit 2; }

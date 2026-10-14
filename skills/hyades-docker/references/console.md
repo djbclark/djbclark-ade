@@ -12,6 +12,13 @@ Every command works as `ssh djbclark@hyades.mit.edu CMD ARGS` (the console runs
 turns the error markers back into exit 1. Arguments are split on single spaces by
 the console (no shell, no quoting), and SSH joins your argv with spaces first.
 
+With no command, the console reads commands from stdin even without a terminal
+(`printf 'list\n' | ssh -T djbclark@hyades.mit.edu`; `scripts/hyades -` wraps
+this), which keeps secret arguments out of the remote argv. **An empty line repeats
+the previous command** (Python `cmd.Cmd.emptyline`, not overridden in `console.py`):
+a stray blank line after `delete NAME` or `start NAME` runs it again, at the
+interactive prompt too (verified 2026-10-14 with `list`).
+
 Names (microVM, subdomain, volume, network) must match `[a-z0-9_][a-z0-9_-]*`;
 images `[a-z0-9.:/_][a-z0-9.:/_-]*` (lower case only: an image ref with an upper-case
 owner fails); env var names `[a-zA-Z0-9_]+`; no newlines in paths or values.
