@@ -68,9 +68,26 @@ podman-desktop, or start any other local VM without asking. A macOS podman clien
 with no connection can do nothing, not even `login` or `images`, so **build and push
 in Forgejo CI** (hyades-action, below; the runner is podman/buildah on Hyades' CI
 host). A remote Linux podman host would also work (`podman system connection add`).
-Registry work that needs no engine (inspect, copy, retag a remote image) could use
-`skopeo` or `crane`, both not installed. Hyades is x86_64: when building on Apple
-Silicon anywhere, use `--platform linux/amd64`.
+Hyades is x86_64: when building on Apple Silicon anywhere, use
+`--platform linux/amd64`.
+
+**VM-free image tools (brew, installed 2026-10-14):**
+
+1. `crane` (go-containerregistry): talks to registries directly. `crane manifest`,
+   `crane config --platform linux/amd64 IMAGE | jq .config.User` (check an image's `USER` before `exec`, see
+   console bug #5), `crane ls` (tags), `crane copy` (mirror docker.io into
+   forgejo.mit.edu), `crane delete`, and **image building without a VM**: `crane append
+   -b BASE -f layer.tar -t NEW` plus `crane mutate NEW --entrypoint ... --cmd ...` is
+   enough for a script or static binary on a base image (`--platform linux/amd64`).
+2. `skopeo`: inspect/copy/sync/delete between registries and archive formats
+   (`docker-archive:`, `oci:`, `dir:`), reading the same `auth.json` format as podman
+   (`--authfile`), with signature policy support.
+3. `hadolint`: lint a `Dockerfile` before pushing it to CI (`hadolint Dockerfile`).
+
+Authenticated use (private packages, pushes): give them a throwaway login the same
+way `hyades-registry` does (`crane auth login -u djbclark --password-stdin
+forgejo.mit.edu` with `DOCKER_CONFIG` pointing at a temp dir; `skopeo login
+--authfile TMP --password-stdin`), under `sudo-secretspec run`. Public images need no login.
 
 ## Rules
 

@@ -61,19 +61,20 @@ owner fails); env var names `[a-zA-Z0-9_]+`; no newlines in paths or values.
 | `entergp GROUP [CMD]` | `sudo entergp GROUP [CMD]` | needs membership of Moira group GROUP (a non-hidden list with "Moira Group" ticked in WebMoira, or `blanche`); creates the group account on first use (max 2 groups per user). With CMD it runs one console command in the group account: `scripts/hyades -g GROUP list` |
 | `exit`, `EOF` (Ctrl-D) | leave the console | |
 
-## Bugs (drafts in `../tickets/`, two-tier per the forgejo skill)
+## Bugs (filed 2026-10-14, two-tier: upstream SIPB/hyades #5-#8, AI detail djbclark/hyades #1-#4; texts in `../tickets/`)
 
-1. `exec` fails for images with a non-root `USER`: crun's `open_terminal`
+1. (#5) `exec` fails for images with a non-root `USER`: crun's `open_terminal`
    (`linux.c`) chowns the host pty to the exec uid and gets `EPERM`; uid 0 skips the
    chown (`ekzhang/rustpad` is `User: 1000:1000`; alpine runs as root). `tmprun` of
    the uid-1000 image works, so it is the exec path only.
-2. `tmprun IMAGE CMD` runs `--`; `exec`/`tmprun` pass CMD as one argv element.
-3. Exit status is always 0, so scripts cannot detect failure.
-4. A `tmprun` microVM is orphaned when the SSH client dies (verified with `timeout
+2. (#6) `tmprun IMAGE CMD` runs `--`; `exec`/`tmprun` pass CMD as one argv element.
+3. (#7) Exit status is always 0, so scripts cannot detect failure.
+4. (#8) A `tmprun` microVM is orphaned when the SSH client dies (verified with `timeout
    25`); `stop 'libpod-<id>*'` stops it, since `stop` passes its argument to
    `systemctl --user` unvalidated and the container has a transient
    `libpod-<id>.scope`.
 
 Tracker: https://forgejo.mit.edu/SIPB/hyades/issues (security issues to
-sipb-hyades-root@mit.edu instead). djbclark already filed #2, #3 and #4 there (CI
-runner; see the `forgejo-ci` skill).
+sipb-hyades-root@mit.edu instead). #2, #3 and #4 are the CI-runner issues (see the
+`forgejo-ci` skill). Updates go into the issue bodies, never new comments (forgejo
+skill, two-tier rule 4).

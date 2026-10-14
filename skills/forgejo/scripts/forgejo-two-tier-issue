@@ -6,6 +6,8 @@ AI-oriented report in our public fork, and a short human-readable one upstream.
         --human human.md --ai ai.md --dry-run
     forgejo-two-tier-issue --upstream SIPB/hyades --title "..." --human human.md --ai ai.md --yes
     forgejo-two-tier-issue --upstream SIPB/hyades --existing 7 --ai ai.md --yes   # backfill an AI twin
+    forgejo-two-tier-issue --upstream SIPB/hyades --existing 7 --ai ai.md \
+        --human short.md [--title "shorter title"] --yes      # ... and rewrite #7 to the short form
 
 Steps (djbclark's rule for SIPB projects, 2026-10-14; usable for any upstream):
 1. Make sure FORK_OWNER/<repo> exists as a public fork of --upstream with issues
@@ -13,8 +15,11 @@ Steps (djbclark's rule for SIPB projects, 2026-10-14; usable for any upstream):
 2. Open the AI issue in the fork: title "[AI detail] TITLE", body = --ai, plus a
    header naming the upstream issue (filled in at step 4).
 3. Open the upstream issue: body = --human, plus a footer linking the AI issue.
-   With --existing N, skip this and link to upstream issue N instead (a comment
-   is added upstream only with --comment-existing).
+   With --existing N, link to upstream issue N instead; with --human as well,
+   rewrite N's body (and title, if --title) to the short form plus that footer;
+   without --human, only --comment-existing adds the link upstream.
+   Squashing your own comments into the bodies and deleting them is a separate
+   step (forgejo-api DELETE /repos/O/R/issues/comments/ID --yes).
 4. Edit the AI issue so its header links the upstream issue.
 Prints both URLs. All calls go through forgejo-api (token from sudo-secretspec).
 Upstream filing is outward-facing: show djbclark the human draft first.
@@ -95,9 +100,9 @@ def main():
 
     # 2. AI issue in the fork
     up_title = a.title
-    if a.existing is not None:
+    if a.existing is not None and not a.title:
         up = api(a.host, "GET", f"/repos/{a.upstream}/issues/{a.existing}")
-        up_title = up.get("title", f"#{a.existing}") if not dry else (a.title or f"#{a.existing}")
+        up_title = up.get("title", f"#{a.existing}")
     pending = "_Upstream issue: being filed; this line is replaced with the link._"
     def ai_body(link_line):
         return (f"{link_line}\n\n"
@@ -111,9 +116,9 @@ def main():
     ai_url = ai_issue.get("html_url", f"{site}/{fork}/issues/<new>")
 
     # 3. upstream issue
+    footer = (f"\n\n---\nFull technical detail (long, written for AI agents): {ai_url}\n"
+              f"_Prepared with an AI coding assistant; results reviewed by me._")
     if a.existing is None:
-        footer = (f"\n\n---\nFull technical detail (long, written for AI agents): {ai_url}\n"
-                  f"_Prepared with an AI coding assistant; results reviewed by me._")
         up_issue = api(a.host, "POST", f"/repos/{a.upstream}/issues",
                        {"title": a.title, "body": human_text + footer}, dry)
         up_url = up_issue.get("html_url", f"{site}/{a.upstream}/issues/<new>")
@@ -125,6 +130,11 @@ def main():
             print(f"[dry-run] PATCH /repos/{fork}/issues/<new>  (link -> upstream)")
     else:
         up_url = up_link_known
+        if a.human:
+            patch = {"body": human_text + footer}
+            if a.title:
+                patch["title"] = a.title
+            api(a.host, "PATCH", f"/repos/{a.upstream}/issues/{a.existing}", patch, dry)
         if a.comment_existing:
             api(a.host, "POST", f"/repos/{a.upstream}/issues/{a.existing}/comments",
                 {"body": f"Full technical detail (long, written for AI agents): {ai_url}"}, dry)

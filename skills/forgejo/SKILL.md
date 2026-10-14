@@ -94,13 +94,22 @@ forgejo.mit.edu (`SIPB/*`; usable for any upstream that wants the same):
 2. Upstream, a **concise human issue** (what broke, a minimal repro, one or two fix
    ideas; aim for under ~150 words) with a footer linking the AI issue.
 3. Both link each other: the AI issue's first line is `**Upstream issue:** URL`.
+4. **Everything lives in the issue bodies.** Later findings are edits in place
+   (`PATCH /repos/O/R/issues/N` with a new body; both tiers), never new comments by
+   us. Our own comments, if any, are squashed into the bodies and then deleted
+   (`DELETE /repos/O/R/issues/comments/ID`); other people's comments stay, and the
+   AI issue quotes them under "Thread history". Never delete a comment of ours that
+   someone replied to without folding the context into the body first.
 
 `scripts/forgejo-two-tier-issue --upstream SIPB/REPO --title T --human human.md --ai ai.md
 --dry-run`, then `--yes`, does all of it (fork, enable issues, AI issue, upstream issue,
 back-link) and prints both URLs; `--existing N --ai ai.md` adds an AI twin to an
 already-filed upstream issue (`--comment-existing` also posts the link upstream). The
-human draft is outward-facing: show it to djbclark before `--yes`. Hyades drafts live
-in `skills/hyades-docker/tickets/`; CI-runner drafts in the `forgejo-ci` repo's `docs/tickets/`.
+human draft is outward-facing: show it to djbclark before `--yes`. `--existing N --human
+short.md [--title T]` also rewrites an already-filed issue to the short form. Hyades drafts
+live in `skills/hyades-docker/tickets/`; CI-runner drafts in the `forgejo-ci` repo's
+`docs/tickets/two-tier/` (with the pre-rewrite originals). Fork: `djbclark/hyades`
+(created 2026-10-14). Filed 2026-10-14: SIPB/hyades #2-#8, AI twins djbclark/hyades #1-#7.
 
 ## Container registry and Hyades deploys
 
