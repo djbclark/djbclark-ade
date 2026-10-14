@@ -98,4 +98,13 @@ def mark(m: "re.Match[str]") -> str:
 
 
 src = re.sub(r"      - name: (.+)\n        run: \|\n", mark, src)
+# 8. final step: how much space and RAM the build actually used (sizes the tmpfs or SSD ask to SIPB).
+usage = '''
+      - name: Storage and memory used by this build
+        if: always()
+        run: |
+          echo "BENCHUSAGE workspace $(du -shL "$GITHUB_WORKSPACE" 2>/dev/null | cut -f1) gradle_home $(du -shL "$HOME/.gradle" 2>/dev/null | cut -f1) android_sdk $(du -shL "$HOME/android-sdk" 2>/dev/null | cut -f1)"
+          df -hT / /mnt/fast /dev/shm 2>/dev/null; free -m | head -2
+'''
+src = src.rstrip("\n") + "\n" + usage
 sys.stdout.write(src.rstrip("\n") + "\n")
