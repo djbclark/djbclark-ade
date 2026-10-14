@@ -741,8 +741,9 @@ rounds, not the shim), and a few more full-suite runs stay clean (two so far, ru
    plainly that the real fix belongs in libkrun's TSI driver.
 
 **Progress 2026-10-14.** Step 1 is done: `skills/forgejo/examples/plektra/shim-by-default.md` (how jobs run, the six ways to
-get the shim into jobs, why not global yet, alternative job images with measured pull times). Step 2 is drafted, not
-filed: `skills/forgejo/examples/plektra/sipb-hyades-shim-request-draft.md`; it waits for djbclark's review. Verified along
+get the shim into jobs, why not global yet, alternative job images with measured pull times). Step 2 is FILED (2026-10-14, djbclark approved
+the draft): https://forgejo.mit.edu/SIPB/hyades/issues/3, linked from SIPB/hyades#2 (comment 28); text in
+`skills/forgejo/examples/plektra/sipb-hyades-shim-request-draft.md`. Verified along
 the way: the shim builds and works identically on the ubuntu, alpine and rocky labels (run 238); job-level `container:`
 works on the runner (run 239; `ghcr.io/cirruslabs/android-sdk:36` pulled in 47 s and already has SDK 36, but JDK 21 and no
 `node`); curl -L download speed 79 to 102 MB/s and `mount -o remount,dax` does nothing (run 237, SIPB/hyades#2 comment 26).
@@ -762,3 +763,9 @@ works on the runner (run 239; `ghcr.io/cirruslabs/android-sdk:36` pulled in 47 s
    ticket, `forgejo-api` never `--help`, `--body-file` guard); (f) the suite results and what still fails
    (`CornerButtonThemeTest`); (g) the SIPB and libkrun ticket map. Keep SKILL.md under about 200 lines and push detail
    into `examples/plektra/*.md`.
+
+4. **Build our own CI image** (added 2026-10-14, operator said yes): `FROM ghcr.io/cirruslabs/android-sdk:36`, plus JDK 17,
+   `nodejs` (for `actions/checkout`) and the precompiled shim at `/usr/local/lib/portshim.so` (built in a stage with `gcc`
+   so the final image needs none), pinned by digest in the workflow. Open: where it is hosted (a registry the runner can
+   pull from: forgejo.mit.edu container registry or ghcr.io), and the runner's CPU architecture (build for it). Verify on the
+   runner: pull time, a full suite run with no install and no compile step, shim loaded through `LD_PRELOAD`.

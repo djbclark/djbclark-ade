@@ -1,4 +1,4 @@
-# DRAFT, not filed. Title: Request: ship a precompiled loopback LD_PRELOAD shim in the ci-images (opt-in), for jobs that start local servers
+# FILED 2026-10-14 as https://forgejo.mit.edu/SIPB/hyades/issues/3 . Title: Request: ship a precompiled loopback LD_PRELOAD shim in the ci-images (opt-in), for jobs that start local servers
 
 ## Summary
 
