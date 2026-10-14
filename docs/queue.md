@@ -719,3 +719,21 @@ because they cost time: a Python keep-alive repro that was negative (and had its
 honoured under TSI (use `poll`), and `forgejo-api --help` was run once by mistake (posted nothing).
 Open: whether the 3 of 20 rounds that still fail in `reuse-probe` with the shim (gap 0) matter; check libkrun#926,
 #929, #819, #860 and SIPB/hyades#2 for replies; `CornerButtonThemeTest` is an upstream Plektra issue.
+
+## Make the loopback shim available by default on forgejo.mit.edu, then ask SIPB (queued 2026-10-14, operator)
+
+**Start only after the shim works perfectly**: the `reuse-probe` residue (3 of 20 rounds fail at gap 0 with the shim,
+item 4.1 of the 2026-10-14 summary) is understood and fixed or explained, and a few more full-suite runs stay clean.
+
+1. Look into how the shim (`skills/forgejo/examples/plektra/loopback-port-shim.c`) could always be used by
+   forgejo.mit.edu jobs, where appropriate: for example baked into the runner image or the `ubuntu` label's base
+   image, loaded through `/etc/ld.so.preload` by the runner or a container entrypoint, or a shared setup action; and
+   when it is not appropriate (jobs that never use loopback, jobs that bring their own network setup, anything that
+   relies on `shutdown()` or blocking-read semantics). Check what SIPB controls (image, runner config) versus what a
+   job can do (the derived workflow builds it with `gcc` in about 1 s today, needing `gcc libc6-dev` installed first),
+   and whether a precompiled shim would do (musl/glibc, arm64/x86_64).
+2. Then open a ticket on SIPB/hyades with that request and links to all the shim code and evidence: the shim, the
+   probes (`duplex-probe.c`, `reuse-probe.c`, `dup-bind-probe.py`, `java-churn/`), `skills/forgejo/SKILL.md` item 5,
+   the numbers (suite 7 failures to 1; 800 MockWebServer iterations in 1 s instead of 150 s), and the libkrun tickets
+   (#818, #819, #860, #926, #929). Link it from SIPB/hyades#2. Show the draft to djbclark before filing, and state
+   plainly that the real fix belongs in libkrun's TSI driver.
