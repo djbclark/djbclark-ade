@@ -138,9 +138,18 @@ def _v_script_exec(p):
     return exe and "deployed" in out, f"exec={exe} out={out.strip()[:40]}"
 
 
+def _first_num(s):
+    m = re.search(r"-?\d+(?:\.\d+)?", s)
+    return float(m.group()) if m else None
+
+
 def _v_multistep_csv(p):
-    out = sh("python3 sumcol.py 2>&1", p)[1] if os.path.exists(f"{p}/sumcol.py") else "<no sumcol.py>"
-    return ("6" in out and _read(f"{p}/result.txt").strip() == "6"), f"stdout={out.strip()[:30]} result={_read(f'{p}/result.txt').strip()[:10]}"
+    if not os.path.exists(f"{p}/sumcol.py"):
+        return False, "<no sumcol.py>"
+    rc, out = sh("python3 sumcol.py 2>&1", p)
+    res = _read(f"{p}/result.txt")
+    ok = rc == 0 and _first_num(out) == 6.0 and _first_num(res) == 6.0
+    return ok, f"rc={rc} stdout={out.strip()[:20]} result={res.strip()[:10]}"
 
 
 def _v_fix_runtime(p):
@@ -188,26 +197,26 @@ TASKS = [
     {"name": "read_and_write", "verify": _v_read_and_write, "seed": {"notes.md": "# Notes\nHOST=localhost\nPORT=5432\nDEBUG=yes\n"},
      "prompt": 'notes.md contains a line "PORT=<number>". Write only that number to a new file port.txt.'},
     {"name": "mkdir_tree", "verify": _v_mkdir_tree, "seed": {},
-     "prompt": "Create the directory path a/b/c and put a file named marker.txt inside it containing the text ok."},
+     "prompt": "In the current directory, create the directory path a/b/c and put a file named marker.txt inside it containing the text ok."},
     {"name": "grep_replace", "verify": _v_grep_replace, "seed": {"data.txt": "foo one\nfoo two\nbaz foo\n"},
      "prompt": "In data.txt replace every occurrence of foo with bar."},
     {"name": "git_commit", "verify": _v_git_commit, "seed": "GIT",
      "prompt": "This is a git repository with an uncommitted new file. Stage all changes and commit them with the message 'add feature'."},
     {"name": "shell_pipeline", "verify": _v_shell_pipeline, "seed": {},
-     "prompt": "Create a file numbers.txt containing the numbers 3, 1, 2 and 2 (one per line). Then create sorted.txt containing those numbers unique and sorted ascending, one per line."},
+     "prompt": "In the current directory, create a file numbers.txt containing the numbers 3, 1, 2 and 2 (one per line). Then create sorted.txt containing those numbers unique and sorted ascending, one per line."},
     {"name": "update_json", "verify": _v_update_json, "seed": {"package.json": '{\n  "name": "demo",\n  "version": "1.0.0",\n  "private": true\n}\n'},
      "prompt": 'In package.json set the value of the key "version" to "2.0.0". Keep it valid JSON and change nothing else.'},
     {"name": "nginx_config", "verify": _v_nginx, "seed": {"nginx.conf": "user nginx;\nworker_processes 1;\nerror_log /var/log/nginx/error.log;\n"},
      "prompt": "In nginx.conf change the worker_processes directive from 1 to 4, leaving the rest of the file unchanged."},
     {"name": "script_exec", "verify": _v_script_exec, "seed": {},
-     "prompt": "Create a shell script named deploy.sh that prints the single word 'deployed', make it executable (chmod +x), and run it once."},
+     "prompt": "In the current directory, create a shell script named deploy.sh that prints the single word 'deployed', make it executable (chmod +x), and run it once."},
     {"name": "multistep_csv", "verify": _v_multistep_csv, "seed": {"data.csv": "name,value\na,1\nb,2\nc,3\n"},
      "prompt": "data.csv is present (a header row name,value then rows). Write a Python script sumcol.py that reads data.csv and prints the sum of the numbers in the second column. Run it and write just that sum to result.txt."},
     {"name": "fix_runtime", "verify": _v_fix_runtime,
      "seed": {"run.py": "def total():\n    return 40 + 2\n\n\nprint(totl())\n"},
      "prompt": "run.py in the current directory crashes when run with python3. Fix it so that 'python3 run.py' prints 42 and exits successfully."},
     {"name": "file_mode", "verify": _v_file_mode, "seed": {},
-     "prompt": "Create a file secret.txt containing the text topsecret, then set its permissions to 600 (owner read/write only)."},
+     "prompt": "In the current directory, create a file named secret.txt containing the text topsecret, then set its permissions to 600 (owner read/write only)."},
     {"name": "yaml_edit", "verify": _v_yaml, "seed": {"service.yaml": "app: myapp\nreplicas: 1\nimage: myapp:1.0\n"},
      "prompt": "In service.yaml set replicas to 3. Change nothing else."},
     {"name": "env_file", "verify": _v_env, "seed": {".env": "APP=1\nLOG_LEVEL=info\n"},
