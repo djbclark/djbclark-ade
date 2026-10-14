@@ -500,6 +500,16 @@ class TestCrushDenyEndToEnd(unittest.TestCase):
         self.assertIsNone(s["env"]["CRUSH_GLOBAL_CONFIG"])
         self.assertEqual((r["deny_config"], r["user_config"]), ([], []))
 
+class TestCrushAutoAllowMarker(unittest.TestCase):
+    """The user's crushrc ends with an auto-allow PreToolUse hook that is silent when
+    ACP_RUN_CRUSH is set; without the marker, --perm scoped: would never be asked (measured
+    2026-10-14: a write outside the scope ran, perm=0+/0-)."""
+
+    def test_both_crush_commands_carry_the_marker(self):
+        src = (Path(__file__).resolve().parent.parent / "tools" / "acp-run" / "acp-run").read_text()
+        self.assertEqual(src.count('"CRUSH_DISABLE_METRICS=1", "ACP_RUN_CRUSH=1"'), 2,
+                         "AGENTS['crush'] and YOLO_CMD['crush'] must both set ACP_RUN_CRUSH=1")
+
 
 if __name__ == "__main__":
     unittest.main()
