@@ -1,0 +1,38 @@
+name: runner probe (download speed with curl -L, virtiofs dax remount)
+on:
+  push:
+    branches: ['probe/**']
+jobs:
+  curldax:
+    runs-on: ubuntu
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: https://github.com/actions/checkout@v4
+      - name: Download speed with curl -L (the first measurement returned 0.0 without -L)
+        shell: bash
+        run: |
+          set +e
+          apt-get update -qq; apt-get install -y -qq curl > /dev/null
+          for url in https://services.gradle.org/distributions/gradle-8.13-bin.zip \
+                     https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
+                     https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-compiler-embeddable/1.9.24/kotlin-compiler-embeddable-1.9.24.jar; do
+            for i in 1 2 3; do
+              curl -sSL -o /dev/null -w "$(basename $url) run $i: %{http_code} %{size_download} bytes in %{time_total}s = %{speed_download} B/s\n" "$url"
+            done
+          done
+      - name: Is the root virtiofs mounted with dax, and does a remount help?
+        shell: bash
+        run: |
+          set +e
+          apt-get install -y -qq python3 > /dev/null
+          echo "--- mount facts"; grep -E ' / ' /proc/self/mountinfo | cut -c1-200; dmesg 2>/dev/null | grep -Ei 'virtiofs|dax' | head -6
+          echo "--- baseline small-file benchmark on the root filesystem"
+          python3 disk-probe.py /root/dp-before 2>&1 | tail -12
+          echo "--- remount with dax (20 s limit)"
+          timeout -s KILL 20 mount -o remount,dax=always / ; echo "remount dax=always rc=$?"
+          timeout -s KILL 20 mount -o remount,dax / ; echo "remount dax rc=$?"
+          grep -E ' / ' /proc/self/mountinfo | cut -c1-200
+          echo "--- small-file benchmark after the remount attempt"
+          python3 disk-probe.py /root/dp-after 2>&1 | tail -12
+          exit 0

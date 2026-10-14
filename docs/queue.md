@@ -739,3 +739,26 @@ rounds, not the shim), and a few more full-suite runs stay clean (two so far, ru
    the numbers (suite 7 failures to 1; 800 MockWebServer iterations in 1 s instead of 150 s), and the libkrun tickets
    (#818, #819, #860, #926, #929). Link it from SIPB/hyades#2. Show the draft to djbclark before filing, and state
    plainly that the real fix belongs in libkrun's TSI driver.
+
+**Progress 2026-10-14.** Step 1 is done: `skills/forgejo/examples/plektra/shim-by-default.md` (how jobs run, the six ways to
+get the shim into jobs, why not global yet, alternative job images with measured pull times). Step 2 is drafted, not
+filed: `skills/forgejo/examples/plektra/sipb-hyades-shim-request-draft.md`; it waits for djbclark's review. Verified along
+the way: the shim builds and works identically on the ubuntu, alpine and rocky labels (run 238); job-level `container:`
+works on the runner (run 239; `ghcr.io/cirruslabs/android-sdk:36` pulled in 47 s and already has SDK 36, but JDK 21 and no
+`node`); curl -L download speed 79 to 102 MB/s and `mount -o remount,dax` does nothing (run 237, SIPB/hyades#2 comment 26).
+
+3. **Make the forgejo skill cover all of this** (added 2026-10-14, operator: "Make a forgejo skill, and include proper use
+   of shim and image selection in it, as well as anything else useful we have discovered"; the request said "forgego",
+   read as forgejo). A `forgejo` skill already exists (`skills/forgejo/SKILL.md`: API, tokens, tea/fj, git, some CI
+   notes); extend and reorganise it, or split a CI half into its own skill if SKILL.md gets too long, decided when doing
+   it (a new skill goes in `skills/<name>/` here, `docs/skills.md`). Include at least: (a) when and how to use the shim
+   (opt-in snippet, the three TSI behaviours in one paragraph, what it does not cover: Go and static binaries; `SO_RCVTIMEO`
+   is not honoured under TSI, so use `poll`); (b) image selection: stock labels and what they lack, job-level `container:`
+   overrides, images are never re-pulled (pin by digest), `actions/checkout` needs `node` in the image, measured pull
+   times, our own image if built; (c) how to run and read probe workflows (`push-probe.sh`, waiting on a run, reading a
+   job log by API, `exit 124` meaning, line-buffer output, use a fresh port per run because stale listeners drain over about
+   a minute); (d) runner facts (capacity 4, one krun microVM per job, shared host loopback, labels to images, resources);
+   (e) ticket etiquette learned (search before filing, wait for testing, label AI preparation, correct yourself in the
+   ticket, `forgejo-api` never `--help`, `--body-file` guard); (f) the suite results and what still fails
+   (`CornerButtonThemeTest`); (g) the SIPB and libkrun ticket map. Keep SKILL.md under about 200 lines and push detail
+   into `examples/plektra/*.md`.

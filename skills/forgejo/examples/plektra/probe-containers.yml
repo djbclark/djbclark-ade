@@ -1,0 +1,59 @@
+name: runner probe (alternative job container images)
+on:
+  push:
+    branches: ['probe/**']
+jobs:
+  androidsdk36:
+    runs-on: ubuntu
+    container:
+      image: ghcr.io/cirruslabs/android-sdk:36
+    steps:
+      - name: Inspect the image, build the shim, run the probes
+        shell: bash
+        run: |
+          set +e
+          t0=$(date +%s)
+          . /etc/os-release; echo "image OS: $PRETTY_NAME"; uname -r
+          for b in java javac gcc cc python3 curl wget git node unzip sdkmanager; do printf '%-10s %s\n' $b "$(command -v $b || echo MISSING)"; done
+          java -version 2>&1 | head -1; echo "ANDROID_HOME=$ANDROID_HOME"; ls $ANDROID_HOME/platforms 2>/dev/null; ls $ANDROID_HOME/build-tools 2>/dev/null
+          echo "user: $(id -un)"; df -h / | tail -1
+          B=https://raw.githubusercontent.com/djbclark/djbclark-ade/51eb2fbc6b15b3aa901ea806510fd33231dafc6f/skills/forgejo/examples/plektra
+          mkdir -p /tmp/w && cd /tmp/w
+          for f in loopback-port-shim.c duplex-probe.c reuse-probe.c; do curl -fsSL -o $f $B/$f || wget -q -O $f $B/$f; done; ls -l
+          if ! command -v gcc > /dev/null; then
+            s=$(date +%s); (apt-get update -qq && apt-get install -y -qq gcc libc6-dev) > /dev/null 2>&1; echo "installed gcc in $(( $(date +%s) - s )) s rc=$?"
+          fi
+          gcc -shared -fPIC -O2 -pthread -o /tmp/portshim.so loopback-port-shim.c -ldl; echo "shim build rc=$?"
+          gcc -O2 -pthread -o /tmp/duplex duplex-probe.c; gcc -O2 -pthread -o /tmp/rp reuse-probe.c 2>/dev/null
+          echo "--- duplex WITHOUT shim"; timeout -s KILL 40 /tmp/duplex 2>&1 | grep -E '^reader=recv'
+          echo "--- duplex WITH shim";    LD_PRELOAD=/tmp/portshim.so timeout -s KILL 40 /tmp/duplex 2>&1 | grep -E '^reader=recv'
+          echo "--- reuse-probe WITH shim, 20 rounds"; LD_PRELOAD=/tmp/portshim.so REUSE_PORT=31985 timeout -s KILL 100 /tmp/rp 20 0 jdk
+          echo "total step time: $(( $(date +%s) - t0 )) s"
+          exit 0
+  temurin17:
+    runs-on: ubuntu
+    container:
+      image: docker.io/library/eclipse-temurin:17-jdk-noble
+    steps:
+      - name: Inspect the image, build the shim, run the probes
+        shell: bash
+        run: |
+          set +e
+          t0=$(date +%s)
+          . /etc/os-release; echo "image OS: $PRETTY_NAME"; uname -r
+          for b in java javac gcc cc python3 curl wget git node unzip sdkmanager; do printf '%-10s %s\n' $b "$(command -v $b || echo MISSING)"; done
+          java -version 2>&1 | head -1; echo "ANDROID_HOME=$ANDROID_HOME"; ls $ANDROID_HOME/platforms 2>/dev/null; ls $ANDROID_HOME/build-tools 2>/dev/null
+          echo "user: $(id -un)"; df -h / | tail -1
+          B=https://raw.githubusercontent.com/djbclark/djbclark-ade/51eb2fbc6b15b3aa901ea806510fd33231dafc6f/skills/forgejo/examples/plektra
+          mkdir -p /tmp/w && cd /tmp/w
+          for f in loopback-port-shim.c duplex-probe.c reuse-probe.c; do curl -fsSL -o $f $B/$f || wget -q -O $f $B/$f; done; ls -l
+          if ! command -v gcc > /dev/null; then
+            s=$(date +%s); (apt-get update -qq && apt-get install -y -qq gcc libc6-dev) > /dev/null 2>&1; echo "installed gcc in $(( $(date +%s) - s )) s rc=$?"
+          fi
+          gcc -shared -fPIC -O2 -pthread -o /tmp/portshim.so loopback-port-shim.c -ldl; echo "shim build rc=$?"
+          gcc -O2 -pthread -o /tmp/duplex duplex-probe.c; gcc -O2 -pthread -o /tmp/rp reuse-probe.c 2>/dev/null
+          echo "--- duplex WITHOUT shim"; timeout -s KILL 40 /tmp/duplex 2>&1 | grep -E '^reader=recv'
+          echo "--- duplex WITH shim";    LD_PRELOAD=/tmp/portshim.so timeout -s KILL 40 /tmp/duplex 2>&1 | grep -E '^reader=recv'
+          echo "--- reuse-probe WITH shim, 20 rounds"; LD_PRELOAD=/tmp/portshim.so REUSE_PORT=31985 timeout -s KILL 100 /tmp/rp 20 0 jdk
+          echo "total step time: $(( $(date +%s) - t0 )) s"
+          exit 0
