@@ -5,6 +5,8 @@ import re
 import subprocess
 import sys
 
+VARIANT = os.environ.get("DERIVE_STORAGE", "asis")   # asis | tmpfs | loop
+assert VARIANT in ("asis", "tmpfs", "loop")
 src = subprocess.run(
     ["git", "-C", sys.argv[1], "show", f"{sys.argv[2]}:.github/workflows/ci.yml"],
     check=True, capture_output=True, text=True).stdout
@@ -52,6 +54,23 @@ shim_step = ("      - name: Build loopback port-0 shim (libkrun#818 workaround)\
              "          echo /usr/local/lib/portshim.so >> /etc/ld.so.preload\n"
              "          true && python3 -c 'print(\"preload ok\")'\n")
 setup = setup + "\n" + shim_step
+# 4c. optional storage step BEFORE the toolchain install: the job's disk is virtiofs (small-file ops
+# 0.03-0.2x of a Mac, probed 2026-10-13); move the checkout, Gradle home and Android SDK onto tmpfs
+# (/dev/shm, 32 GiB) or onto an ext4 image on a loop device. The workspace is bind-mounted over its
+# own path so later steps keep their working directory.
+if VARIANT != "asis":
+    prep = ("          F=/dev/shm/fast\n          mkdir -p $F\n" if VARIANT == "tmpfs" else
+            "          apt-get update -qq && apt-get install -y -qq e2fsprogs\n"
+            "          truncate -s 40G /root/fast.img\n          mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 /root/fast.img\n"
+            "          F=/mnt/fast; mkdir -p $F; mount -o loop,noatime /root/fast.img $F\n")
+    storage = (f"      - name: Storage variant {VARIANT} (workspace, Gradle home, Android SDK)\n        run: |\n"
+               "          set -euo pipefail\n" + prep +
+               "          mkdir -p $F/ws $F/gradle $F/sdk\n"
+               '          cp -a "$GITHUB_WORKSPACE/." $F/ws/\n'
+               '          mount --bind $F/ws "$GITHUB_WORKSPACE"\n'
+               '          ln -sfn $F/gradle "$HOME/.gradle"; ln -sfn $F/sdk "$HOME/android-sdk"\n'
+               "          df -hT \"$GITHUB_WORKSPACE\" \"$HOME/.gradle/\" \"$HOME/android-sdk/\"\n")
+    setup = storage + "\n" + setup
 src, n = re.subn(r"      - name: Set up JDK 17\n(?:        .*\n|          .*\n)+?(?=\n      - name: Make Gradle executable)", setup, src, count=1)
 assert n == 1, "setup-java step not found"
 
@@ -71,7 +90,7 @@ assert n == 1, "upload step not found"
 # `run:` step prints BENCHSTEP start/end lines with epoch seconds (read by ci-step-times).
 def mark(m: "re.Match[str]") -> str:
     name = m.group(1)
-    return (f"      - name: {name}\n        run: |\n"
+    return (f"      - name: {name}\n        timeout-minutes: 25\n        run: |\n"
             f"          trap 'echo \"BENCHSTEP end {name} $(date +%s.%N) rc=$?\"' EXIT\n"
             f"          echo \"BENCHSTEP start {name} $(date +%s.%N)\"\n")
 

@@ -26,6 +26,7 @@ def probe(d):
             for p in paths: os.unlink(p)
         for name, fn in (("create_4KiB_files", create), ("stat", stat), ("open_read", read), ("unlink", unlink)):
             s = t(fn); print(f"  {name}_per_s {n / s:.0f}")
+        if os.environ.get("DP_SMALL"): return
         buf = os.urandom(1 << 20); big = os.path.join(w, "big")
         def seq(sync):
             def run():
@@ -44,4 +45,7 @@ def probe(d):
         shutil.rmtree(w, ignore_errors=True)
 
 if __name__ == "__main__":
-    for d in sys.argv[1:]: probe(d)
+    args = sys.argv[1:]
+    if args and args[0] == "--small":      # metadata ops only, for parallel-scaling runs
+        os.environ["DP_SMALL"] = "1"; args = args[1:]
+    for d in args: probe(d)

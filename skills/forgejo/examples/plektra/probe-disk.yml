@@ -1,16 +1,13 @@
-name: runner disk and limits
+name: runner disk experiments
 on:
   push:
     branches: ['probe/**']
 jobs:
   disk:
     runs-on: ubuntu
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: https://github.com/actions/checkout@v4
-      - name: Disk type and throttling limits
-        run: bash ./limits-probe.sh 2>&1
-      - name: Small-file and sequential IO on / , the workspace and tmpfs
-        run: |
-          df -hT / /dev/shm /tmp "$PWD" 2>&1
-          for i in 1 2; do echo "######## pass $i"; python3 ./disk-probe.py /root/dp "$PWD/dp" /dev/shm/dp /tmp/dp; done
+      - name: Disk experiments (loop ext4, tmpfs, fio, parallel, realistic)
+        run: bash ./disk-experiments.sh 2>&1
