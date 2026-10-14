@@ -251,11 +251,6 @@ AGENTS = {
     # --yolo (operator, 2026-10-11): the ~/.bashrc `crush` function adds it for
     # shells only, so it is spelled out here; it also lifts the bash blocklist
     # (our #3909 commits in the build). Needs the persistent --yolo flag.
-    # ACP_RUN_CRUSH=1 (2026-10-14): the user's crushrc ends with a PreToolUse hook that
-    # auto-allows every tool call for the interactive TUI (~/.config/crush/hooks/
-    # auto-allow.sh, which prints nothing when this variable is set). Under --perm
-    # scoped: that hook would approve calls before crush asks, so acp-run would never
-    # see the request (measured: a write outside the scope went through, perm=0+/0-).
     # Provider and model: SIPB LLMs via ~/.config/crush/crushrc. Run WITHOUT
     # --model: the PR offers models only in the session/new `models` field,
     # not as a config option, so acp-run refuses (operator: the default
@@ -266,7 +261,7 @@ AGENTS = {
     # (and a Charm Hyper login), which overrides crushrc; on 2026-10-12 that sent
     # every acp-run crush turn to Hyper ("out of credits") instead of SIPB LLMs.
     # providers.json (the catalog cache) is copied there once.
-    "crush": (["env", "CRUSH_DISABLE_METRICS=1", "ACP_RUN_CRUSH=1",
+    "crush": (["env", "CRUSH_DISABLE_METRICS=1",
                "CRUSH_GLOBAL_DATA=" + CRUSH_DATA,
                "crush-acp", "acp"], "local"),
 }
@@ -309,7 +304,7 @@ YOLO_CMD = {
     # --yolo also lifts crush's bash blocklist, so it is added only under
     # --perm all (adversary review 2026-10-12, C1c); every other policy runs
     # crush without it and its tools ask for permission.
-    "crush": ["env", "CRUSH_DISABLE_METRICS=1", "ACP_RUN_CRUSH=1",
+    "crush": ["env", "CRUSH_DISABLE_METRICS=1",
               "CRUSH_GLOBAL_DATA=" + CRUSH_DATA,
               "crush-acp", "acp", "--yolo"],
 }
