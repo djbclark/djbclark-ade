@@ -46,7 +46,9 @@ shim source is pinned there by commit (`SHIM_SHA`): bump it when `loopback-port-
 
 ## 3. The shim (libkrun TSI workarounds)
 
-Source `skills/forgejo/examples/plektra/loopback-port-shim.c` (232 lines). **Four problems, one `LD_PRELOAD` library:**
+Source `skills/forgejo/examples/plektra/loopback-port-shim.c` (232 lines); **public home since 2026-10-14: https://forgejo.mit.edu/djbclark/loopback-port-shim**
+(MIT; the shim, `make check`, probes, `docs/`, snapshots of these skills, probe workflows and tooling; local clone `~/src/loopback-port-shim`;
+SIPB/hyades#3 points at it). **Four problems, one `LD_PRELOAD` library:**
 
 1. A listener bound to **port 0 is unreachable** (libkrun#818). The shim rewrites `bind(port 0)` to a random port in
    20000-32000 (nanosecond seed, mutex, ring of the last 4096 ports).

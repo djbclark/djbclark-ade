@@ -772,3 +772,7 @@ works on the runner (run 239; `ghcr.io/cirruslabs/android-sdk:36` pulled in 47 s
    the digest when the Dockerfile changes; ask SIPB (in #3) whether they prefer to host the image themselves.
 5. **forgejo skill: DONE 2026-10-14** as the new `skills/forgejo-ci/` (CI half split out of `skills/forgejo`; evidence in
    `skills/forgejo-ci/runner-notes.md`), linked into every TUI with `skill-everywhere`, rows in README and `docs/skills.md`.
+6. **Public shim repo: DONE 2026-10-14**: https://forgejo.mit.edu/djbclark/loopback-port-shim (MIT; local `~/src/loopback-port-shim`; shim, probes,
+   docs, skills snapshots, probe tooling); SIPB/hyades#3 body edited to point at it, comment 30. **Drift to manage:** the shim source and
+   docs now exist in two places (djbclark-ade `skills/forgejo/examples/plektra/` and the new repo); edit the new repo for the shim from
+   now on, and repoint the image's `SHIM_URL` (github.com/djbclark/ci-image-plektra Dockerfile) at it when the shim next changes.
