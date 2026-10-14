@@ -695,18 +695,14 @@ agent-choice --between`, label disagreements, then ask djbclark per backend: act
 shadow, or off. A self-removing launchd job (`com.djbclark.jev-remind-2026-10-23`)
 pings Hermes that morning.
 
-## Why the `sed` edit failed twice (queued 2026-10-14, operator)
+## Why the `sed` edit failed twice (queued 2026-10-14, operator) — DONE 2026-10-14
 
-Twice in one Forgejo-CI session a `sed` command failed with BSD `sed` syntax errors, and the failure was not
-noticed in time. The second time (`sed '1d' f | sed '1{/^$/d}' > body.md`, `extra characters at the end of d
-command`), the failing right-hand `sed` left an empty body file, and `gh issue create --body-file` filed
-libkrun/libkrun#926 with an empty body (fixed a minute later). The first time was `sed -i` through a wrapper
-(see the 2026-10-13 note in `memory/`). Find out: (1) which `sed` is in play (macOS BSD `sed`, `rtk`, or a shell
-alias; `~/CLAUDE.md` already retires `sd` and prefers `srgn -L`); (2) why a pipeline whose last stage failed
-still counted as success (no `pipefail`, `cmd > out; echo rc=$?` rule not applied); (3) a guard so a
-`--body-file` is never created from an empty file (a check in the `forgejo` skill scripts and in `gh issue
-create` habits: `[ -s file ]` first). Fix the instructions that would have prevented it (`~/CLAUDE.md` item 33
-and 11), and say what changed. Do it last, after the other queued items.
+Cause: macOS BSD `/usr/bin/sed` rejects `1{/^$/d}` (`extra characters at the end of d command`; BSD needs
+`1{/^$/d;}`), and the redirect still created an empty `body.md`, which `gh issue create --body-file` filed
+(libkrun#926). GNU sed is installed as `gsed`. Fixed in `~/CLAUDE.md` item 33 (`home-agents.md`, site-djbclark
+`0e3fbf4`; `cursor/home-agents.mdc` likewise): never feed a `--body-file` from a pipeline, check `[ -s f ]`
+first, use `gsed`. Memory: `feedback_exit_status_through_pipe.md` (site-private `e5c12bd`). The forgejo skill
+scripts have no `--body-file` use, so they needed no guard.
 
 ## Flaky MockWebServer tests on the SIPB runner: find a repro (queued 2026-10-14, after the `sed` item)
 
