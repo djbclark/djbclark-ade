@@ -54,7 +54,7 @@ shim_step = ("      - name: Build loopback port-0 shim (libkrun#818 workaround)\
              + "".join(("          " + l if l.strip() else "") + "\n" for l in hb_sh.splitlines())
              + "          HB_SH\n"
              "          chmod +x /usr/local/bin/hb.sh\n"
-             "          gcc -shared -fPIC -O2 -o /usr/local/lib/portshim.so /tmp/portshim.c -ldl\n"
+             "          gcc -shared -fPIC -O2 -pthread -o /usr/local/lib/portshim.so /tmp/portshim.c -ldl\n"
              # /etc/ld.so.preload (jobs run as root) reaches every process; an LD_PRELOAD exported
              # through $GITHUB_ENV did NOT reach Gradle's daemon (run 176: it still bound port 39217).
              "          echo /usr/local/lib/portshim.so >> /etc/ld.so.preload\n"

@@ -9,13 +9,14 @@
  * okhttp's MockWebServer.shutdown()) calls it and hangs the test JVM forever. A shutdown() on a
  * listening socket is made a no-op here; close() still wakes a blocked accept() through the JDK's signal.
  *
- *   gcc -shared -fPIC -O2 -o /tmp/portshim.so loopback-port-shim.c -ldl
+ *   gcc -shared -fPIC -O2 -pthread -o /tmp/portshim.so loopback-port-shim.c -ldl
  *   LD_PRELOAD=/tmp/portshim.so ./gradlew ...
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -90,9 +91,44 @@ int dup3(int oldfd, int newfd, int flags) {
 }
 
 typedef int (*shutdown_fn)(int, int);
+static shutdown_fn real_shutdown;
+
+/* Any other socket: under TSI, shutdown() also blocks while another thread sits in a blocking read() or
+ * connect() on it (okhttp's WebSocket reader; Socket.close() calls shutdown first). Run the real call in a
+ * helper thread and give up waiting after 300 ms; the helper is then already inside the kernel, so the later
+ * close() cannot race with fd reuse, and the JDK's dup2+signal wakes the blocked reader as usual. */
+struct sd { int fd, how, rc, err, done, refs; pthread_mutex_t m; pthread_cond_t c; };
+
+static void *sd_thread(void *p) {
+    struct sd *a = p;
+    int rc = real_shutdown(a->fd, a->how), e = errno;
+    pthread_mutex_lock(&a->m);
+    a->rc = rc; a->err = e; a->done = 1; pthread_cond_signal(&a->c);
+    int last = --a->refs == 0;
+    pthread_mutex_unlock(&a->m);
+    if (last) free(a);
+    return 0;
+}
+
 int shutdown(int fd, int how) {
-    static shutdown_fn real;
-    if (!real) real = (shutdown_fn)dlsym(RTLD_NEXT, "shutdown");
+    if (!real_shutdown) real_shutdown = (shutdown_fn)dlsym(RTLD_NEXT, "shutdown");
     if (fd >= 0 && fd < MAXFD && listening[fd]) return 0;
-    return real(fd, how);
+    struct sd *a = calloc(1, sizeof *a);
+    pthread_t t;
+    if (!a) return real_shutdown(fd, how);
+    a->fd = fd; a->how = how; a->refs = 2;
+    pthread_mutex_init(&a->m, 0); pthread_cond_init(&a->c, 0);
+    if (pthread_create(&t, 0, sd_thread, a)) { free(a); return real_shutdown(fd, how); }
+    pthread_detach(t);
+    struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
+    dl.tv_nsec += 300 * 1000000L; if (dl.tv_nsec >= 1000000000L) { dl.tv_sec++; dl.tv_nsec -= 1000000000L; }
+    int rc = 0, e = 0;
+    pthread_mutex_lock(&a->m);
+    while (!a->done && pthread_cond_timedwait(&a->c, &a->m, &dl) == 0) ;
+    if (a->done) { rc = a->rc; e = a->err; }
+    int last = --a->refs == 0;
+    pthread_mutex_unlock(&a->m);
+    if (last) free(a);
+    if (rc) { errno = e; return rc; }
+    return 0;
 }
