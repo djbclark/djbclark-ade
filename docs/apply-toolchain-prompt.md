@@ -671,7 +671,7 @@ fork (`gh repo clone djbclark/crush ~/src/crush`), then
 `git -C ~/src/crush worktree add -b acp-pr2450 ~/src/crush-acp upstream/main`,
 merge `pr-2450` there (resolve `go.sum` by taking upstream's, then `go mod
 tidy`), cherry-pick the three yolo commits of `yolo-true-unblock`
-(upstream PR #3909, still open), `go build -o ~/.local/bin/crush-acp ./` (copy
+(upstream PR #3909, withdrawn 2026-10-14: the TUI now runs stock Homebrew Crush; the built `crush-acp` keeps these commits, so rebuild from this branch, never from plain upstream), `go build -o ~/.local/bin/crush-acp ./` (copy
 to a temp name, then `mv -f`). Registered in `tools/acp-run/acp-run` as
 `crush`; run it without `--model`. Drop all of this once PR #2450 merges and a
 release has `crush acp`.
