@@ -95,6 +95,11 @@ not crushrc: set `models.large` and `models.small` to the default, prune `recent
 and check `<project>/.crush/logs/crush.log` for `ModelProvider called` to see the model
 actually used.
 
+`think` (in `crush.json` or crushrc's `model large ... --think`) does nothing for the custom
+`sipb-llms` provider: crush-acp's `internal/agent/coordinator.go` reads it only for Anthropic,
+Hyper and io.net. Reasoning for SIPB comes from the provider's `--extra-body
+'{"reasoning_effort":"high"}'` in crushrc (checked 2026-10-14).
+
 ## How a run is judged
 
 1. **Probes** (direct requests): cold time to first token (includes a model swap if another
