@@ -78,10 +78,15 @@ def _v_fix_bug(p):
 
 def _v_add_function(p):
     rc1, _ = sh("python3 -c 'import math_utils; assert math_utils.add(2,3)==5' 2>&1", p)
+    if rc1 != 0:
+        return False, "add() wrong or missing"
     rc2, out = sh("python3 -m unittest discover 2>&1", p)
-    m = re.search(r"Ran (\d+) test", out)
-    n = int(m.group(1)) if m else 0
-    return rc1 == 0 and rc2 == 0 and n >= 1, f"import_rc={rc1} unittest_rc={rc2} ntests={n}"
+    if rc2 == 0 and re.search(r"Ran [1-9]\d* test", out):
+        return True, "unittest"
+    rc3, out3 = sh("python3 -m pytest -q 2>&1", p)     # pytest-style tests are fine too
+    if rc3 == 0 and re.search(r"\d+ passed", out3):
+        return True, "pytest"
+    return False, f"no runnable tests (unittest rc={rc2})"
 
 
 def _v_rename_move(p):
@@ -191,7 +196,7 @@ TASKS = [
     {"name": "fix_bug", "verify": _v_fix_bug, "seed": {"calc.py": CALC_BUGGY, "test_calc.py": TEST_CALC},
      "prompt": 'calc.py and test_calc.py are in the current directory. Running "python3 -m unittest" fails. Fix calc.py so the tests pass. Do not modify test_calc.py.'},
     {"name": "add_function_and_test", "verify": _v_add_function, "seed": {"math_utils.py": "def unused():\n    return 0\n"},
-     "prompt": "In math_utils.py add a function add(a, b) that returns a + b. Add a test file test_math_utils.py that imports add and tests it, then run the tests."},
+     "prompt": "In math_utils.py add a function add(a, b) that returns a + b. Add a test file test_math_utils.py that imports add and tests it (unittest or pytest), then run the tests."},
     {"name": "rename_move", "verify": _v_rename_move, "seed": {"old_name.txt": "keep me\n"},
      "prompt": "Rename the file old_name.txt to new_name.txt."},
     {"name": "read_and_write", "verify": _v_read_and_write, "seed": {"notes.md": "# Notes\nHOST=localhost\nPORT=5432\nDEBUG=yes\n"},
