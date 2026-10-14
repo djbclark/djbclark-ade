@@ -16,6 +16,10 @@ Default host `forgejo.mit.edu` (Forgejo 16.0.5, Gitea-1.22-compatible API, probe
 
 ## Tools (installed globally, 2026-10-13)
 
+The `scripts/` are **not on PATH**: call them by full path,
+`~/src/djbclark-ade/skills/forgejo/scripts/NAME` (2026-10-14: a bare `git-forgejo push`
+failed with "command not found").
+
 1. `scripts/forgejo-api` — stdlib Python, one call to `/api/v1`. Re-runs itself
    under `sudo-secretspec run`; mutations need `--yes`, `--dry-run` prints the plan.
    `forgejo-api whoami`, `forgejo-api GET /repos/OWNER/REPO/issues`. **Never run it (or `tea-forgejo`) with `--help`**:
@@ -126,7 +130,7 @@ step, using `forgejo-api --data @-` above. Package listing stays here:
 
 ## Agent loop (local agent <-> Forgejo CI, no agent on the server)
 
-1. Branch and commit locally, `git-forgejo push forgejo BRANCH`.
+1. Branch and commit locally, `~/src/djbclark-ade/skills/forgejo/scripts/git-forgejo push forgejo BRANCH`.
 2. `forgejo-api POST /repos/O/R/pulls --yes --data '{"head":"BRANCH","base":"plk/main","title":"..."}'`.
 3. Poll `GET /repos/O/R/actions/runs` for the run, then `.../runs/ID/jobs` and
    `.../actions/jobs/JOB/logs` for failures; comment with
