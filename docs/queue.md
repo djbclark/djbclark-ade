@@ -694,3 +694,16 @@ days; the window closes itself (mode goes off). On 2026-10-23 run
 agent-choice --between`, label disagreements, then ask djbclark per backend: act, keep
 shadow, or off. A self-removing launchd job (`com.djbclark.jev-remind-2026-10-23`)
 pings Hermes that morning.
+
+## Why the `sed` edit failed twice (queued 2026-10-14, operator)
+
+Twice in one Forgejo-CI session a `sed` command failed with BSD `sed` syntax errors, and the failure was not
+noticed in time. The second time (`sed '1d' f | sed '1{/^$/d}' > body.md`, `extra characters at the end of d
+command`), the failing right-hand `sed` left an empty body file, and `gh issue create --body-file` filed
+libkrun/libkrun#926 with an empty body (fixed a minute later). The first time was `sed -i` through a wrapper
+(see the 2026-10-13 note in `memory/`). Find out: (1) which `sed` is in play (macOS BSD `sed`, `rtk`, or a shell
+alias; `~/CLAUDE.md` already retires `sd` and prefers `srgn -L`); (2) why a pipeline whose last stage failed
+still counted as success (no `pipefail`, `cmd > out; echo rc=$?` rule not applied); (3) a guard so a
+`--body-file` is never created from an empty file (a check in the `forgejo` skill scripts and in `gh issue
+create` habits: `[ -s file ]` first). Fix the instructions that would have prevented it (`~/CLAUDE.md` item 33
+and 11), and say what changed. Do it last, after the other queued items.
