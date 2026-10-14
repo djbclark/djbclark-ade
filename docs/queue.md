@@ -714,3 +714,14 @@ data-path bug. Write a minimal repro (loopback HTTP request/response loop with k
 `close()` between requests, in Python or C; run it with `push-probe.sh`), then file it upstream and link it
 from libkrun#926 and SIPB/hyades#2. Tools: `skills/forgejo/examples/plektra/` (`run-matrix.sh` with
 `MATRIX_MODE=diag` and `DIAG_CMD`, `push-probe.sh`, `heartbeat.sh`).
+
+**Progress 2026-10-14.** First repro attempt, negative: `skills/forgejo/examples/plektra/keepalive-repro.py`
+(Python loopback HTTP keep-alive, 1-4 requests per connection, `Connection: close` announced, server `close()` with
+and without `shutdown()`, 8 and 16 client threads) run by `probe-keepalive.yml` (run 208; shim off, shim on, shim with
+`SHIM_SHUTDOWN=noop`): 18 combinations, about 530,000 requests, 0 errors, same as the laptop. (Run 207 showed a few
+timeouts; they were a bug in the repro's acceptor, which stopped at the deadline. Fixed.) So plain well-behaved
+keep-alive is not the trigger. Next: reproduce with Java (the JVM's `Socket`/`ServerSocket` and okhttp pooling), e.g.
+a standalone `MockWebServer` + `OkHttpClient` loop with `SocketPolicy` variants fetched from Maven Central, or run
+the failing test classes in a loop on the runner; look at what the failing tests do differently (abrupt
+`DISCONNECT_*` policies, half-closes, large streamed bodies, WebSocket upgrades in `OpenAiLiveSpeechClientTest`).
+
