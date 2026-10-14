@@ -28,7 +28,11 @@ The blocked `accept()` holds the TSI socket lock across the vsock round trip (#8
 
 ## Impact and workaround
 
-Test suites that start one okhttp MockWebServer per test fail with `unexpected end of stream` or time out when two consecutive servers get the same port number; on this runner that was about 30% of iterations in a standalone okhttp loop. Workarounds from userspace: never reuse a port number soon after closing it, and wait in `poll()` instead of a blocking `accept()` (parking in `poll()` does not hold the lock; with such an LD_PRELOAD shim the probe above gives 17 of 20 at gap 0 and 20 of 20 at gap 50 ms; I do not know why 3 rounds still fail at gap 0). [`loopback-port-shim.c`](https://github.com/djbclark/djbclark-ade/blob/236ba60/skills/forgejo/examples/plektra/loopback-port-shim.c).
+Test suites that start one okhttp MockWebServer per test fail with `unexpected end of stream` or time out when two consecutive servers get the same port number; on this runner that was about 30% of iterations in a standalone okhttp loop. Workarounds from userspace: never reuse a port number soon after closing it, and wait in `poll()` instead of a blocking `accept()` (parking in `poll()` does not hold the lock; with such an LD_PRELOAD shim the probe above gives 60 of 60 rounds at every gap from 0 to 50 ms, with the JDK wake and with a signal-only wake, on a port that has no leftovers from earlier runs). [`loopback-port-shim.c`](https://github.com/djbclark/djbclark-ade/blob/236ba60/skills/forgejo/examples/plektra/loopback-port-shim.c).
+
+## The stale listeners drain (added later the same day)
+
+They are not permanent. After a run without the workaround had leaked listeners on a port (2 of 10 rounds worked), a later run **with** the workaround on that same port failed only in its first 3 rounds and then every round worked; on an untouched port in the same job, 40 of 40; on the leaked port again 60 s later, 40 of 40, and 5 min later 40 of 40. So each stale listener seems to swallow one connection and then go away, which would fit its blocked `accept()` round trip still being pending in the VMM until a connection completes it. That is a guess. The wake method does not matter: a signal-only wake and `dup2` plus signal both fail 26 of 30 rounds at gap 0 without the workaround.
 
 ## Questions
 

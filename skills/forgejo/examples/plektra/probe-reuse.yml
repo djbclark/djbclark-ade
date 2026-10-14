@@ -16,11 +16,13 @@ jobs:
           uname -r
           gcc -O2 -pthread -o /tmp/rp reuse-probe.c 2>/dev/null; echo "gcc rc=$?"
           gcc -shared -fPIC -O2 -pthread -o /tmp/portshim.so loopback-port-shim.c -ldl; echo "shim gcc rc=$?"
-          for gap in 0 5 50 500 2000; do
-            echo "--- no shim, gap ${gap} ms";   timeout -s KILL 120 /tmp/rp 20 $gap jdk;  echo "   (exit $?)"
-          done
-          for gap in 0 50; do
-            echo "--- with shim (poll before accept), gap ${gap} ms"; LD_PRELOAD=/tmp/portshim.so timeout -s KILL 120 /tmp/rp 20 $gap jdk; echo "   (exit $?)"
-          done
-          echo "--- no shim, nobody blocked in accept (control)"; timeout -s KILL 60 /tmp/rp 20 0 none; echo "   (exit $?)"
+          one() { lbl=$1; shift; echo "--- $lbl"; REUSE_VERBOSE=1 timeout -s KILL 200 "$@" > /tmp/o.txt 2> /tmp/e.txt; echo "   (exit $?)"; grep -E '^wake=' /tmp/o.txt; echo "   failing rounds: $(grep FAIL /tmp/e.txt | cut -d: -f1 | tr -d 'round ' | tr '\n' ' ')"; }
+          S="env LD_PRELOAD=/tmp/portshim.so /tmp/rp"
+          # Does a stale listener leaked by earlier rounds on a port explain failures of LATER shimmed rounds on that port?
+          one "1. SHIM first, fresh port 31960, 40 rounds (expect 40 ok)" $S 40 0 jdk
+          one "2. NO shim, leak stale listeners on port 31961, 10 rounds" env REUSE_PORT=31961 /tmp/rp 10 0 jdk
+          one "3. SHIM on the leaked port 31961, 40 rounds" env REUSE_PORT=31961 LD_PRELOAD=/tmp/portshim.so /tmp/rp 40 0 jdk
+          one "4. SHIM on an untouched port 31962, same job, 40 rounds" env REUSE_PORT=31962 LD_PRELOAD=/tmp/portshim.so /tmp/rp 40 0 jdk
+          sleep 60; one "5. SHIM on the leaked port 31961 again, 60 s later, 40 rounds" env REUSE_PORT=31961 LD_PRELOAD=/tmp/portshim.so /tmp/rp 40 0 jdk
+          sleep 240; one "6. SHIM on the leaked port 31961 again, 5 min later, 40 rounds" env REUSE_PORT=31961 LD_PRELOAD=/tmp/portshim.so /tmp/rp 40 0 jdk
           exit 0

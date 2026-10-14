@@ -6,7 +6,8 @@
  *
  *   gcc -O2 -pthread -o reuse-probe reuse-probe.c && ./reuse-probe [rounds] [gap_ms] [wake]
  *   wake: jdk (default; dup2 /dev/null over the fd, then pthread_kill SIGUSR1, as the JDK does), close (plain close),
- *         none (nobody was blocked in accept: the accepting thread already returned)
+ *         kill (pthread_kill SIGUSR1 only, no dup2, then close), none (nobody was blocked in accept: the accepting
+ *         thread already returned). REUSE_PORT=N picks the port (default 31960); REUSE_VERBOSE=1 prints one line per round with its outcome and wait time.
  * Prints one summary line: rounds where the client got its echo, EOF/reset, timed out.
  */
 #define _GNU_SOURCE
@@ -20,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 static int trace;
@@ -41,7 +43,7 @@ static void *acc_new(void *p) {
 int main(int argc, char **argv) {
     setvbuf(stdout, 0, _IOLBF, 0);
     int rounds = argc > 1 ? atoi(argv[1]) : 200, gap = argc > 2 ? atoi(argv[2]) : 0; const char *wake = argc > 3 ? argv[3] : "jdk";
-    trace = getenv("REUSE_TRACE") != 0; int port = 31960, ok = 0, eof = 0, timeout = 0, other = 0;
+    trace = getenv("REUSE_TRACE") != 0; int port = getenv("REUSE_PORT") ? atoi(getenv("REUSE_PORT")) : 31960, ok = 0, eof = 0, timeout = 0, other = 0;
     struct sigaction sa = {.sa_handler = onsig}; sigaction(SIGUSR1, &sa, 0);   /* no SA_RESTART */
     for (int i = 0; i < rounds; i++) {
         T("round %d: listen l1", i); int l1 = make_listener(port); pthread_t t1;
@@ -49,6 +51,7 @@ int main(int argc, char **argv) {
         if (blocked) { pthread_create(&t1, 0, acc_old, &l1); usleep(20000); }
         T("round %d: waking old accept (%s)", i, wake);
         if (!strcmp(wake, "close")) close(l1);
+        else if (!strcmp(wake, "kill")) { pthread_kill(t1, SIGUSR1); pthread_join(t1, 0); close(l1); }
         else if (!strcmp(wake, "jdk")) { int z = open("/dev/null", O_RDONLY); dup2(z, l1); close(z); pthread_kill(t1, SIGUSR1); T("round %d: signalled, joining old accept thread", i); pthread_join(t1, 0); T("round %d: old accept thread returned", i); close(l1); }
         else close(l1);                       /* none */
         if (blocked && !strcmp(wake, "close")) usleep(1000);
@@ -57,9 +60,10 @@ int main(int argc, char **argv) {
         int c = socket(AF_INET, SOCK_STREAM, 0);
         struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(0x7f000001)};
         T("round %d: connect", i); if (connect(c, (void *)&a, sizeof a)) { other++; close(c); goto next; }
-        T("round %d: connected, send+wait", i); write(c, "ping\n", 5); char b[16]; struct pollfd pf = {c, POLLIN, 0};
+        T("round %d: connected, send+wait", i); write(c, "ping\n", 5); char b[16]; struct pollfd pf = {c, POLLIN, 0}; struct timespec w0; clock_gettime(CLOCK_MONOTONIC, &w0); int before = ok;
         if (poll(&pf, 1, 2000) == 0) timeout++;   /* poll, not SO_RCVTIMEO: TSI does not honour it */
         else { int n = read(c, b, sizeof b); if (n > 0) ok++; else eof++; }
+        if (getenv("REUSE_VERBOSE")) { struct timespec w1; clock_gettime(CLOCK_MONOTONIC, &w1); fprintf(stderr, "round %d: %s after %ld ms\n", i, ok > before ? "ok" : "FAIL", (w1.tv_sec - w0.tv_sec) * 1000 + (w1.tv_nsec - w0.tv_nsec) / 1000000); }
         close(c);
     next:
         if (ok + eof + timeout + other < i + 1) other++;

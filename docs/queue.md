@@ -717,13 +717,15 @@ recent ports; wait in `poll()` before blocking reads and accepts). The full Plek
 Tickets updated: libkrun#926 (retitled, comment), #819, #860, new #929; SIPB/hyades#2 comment 25. Wrong turns, kept
 because they cost time: a Python keep-alive repro that was negative (and had its own acceptor bug), `SO_RCVTIMEO` is not
 honoured under TSI (use `poll`), and `forgejo-api --help` was run once by mistake (posted nothing).
-Open: whether the 3 of 20 rounds that still fail in `reuse-probe` with the shim (gap 0) matter; check libkrun#926,
+The 3-of-20 `reuse-probe` failures with the shim were stale listeners leaked by earlier no-shim runs on the same fixed port
+(each swallows one connection, then they are gone within 60 s); on a clean port the shim gives 60 of 60 at gaps of 0 to
+50 ms (runs 235, 236; libkrun#929 corrected). Open: check libkrun#926,
 #929, #819, #860 and SIPB/hyades#2 for replies; `CornerButtonThemeTest` is an upstream Plektra issue.
 
 ## Make the loopback shim available by default on forgejo.mit.edu, then ask SIPB (queued 2026-10-14, operator)
 
-**Start only after the shim works perfectly**: the `reuse-probe` residue (3 of 20 rounds fail at gap 0 with the shim,
-item 4.1 of the 2026-10-14 summary) is understood and fixed or explained, and a few more full-suite runs stay clean.
+**Start only after the shim works perfectly**: the `reuse-probe` residue is explained (done 2026-10-14: stale listeners leaked by earlier
+rounds, not the shim), and a few more full-suite runs stay clean (two so far, runs 229 and 230).
 
 1. Look into how the shim (`skills/forgejo/examples/plektra/loopback-port-shim.c`) could always be used by
    forgejo.mit.edu jobs, where appropriate: for example baked into the runner image or the `ubuntu` label's base
