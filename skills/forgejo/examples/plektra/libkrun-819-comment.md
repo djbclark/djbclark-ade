@@ -1,5 +1,0 @@
-Same lock, wider reach (measured on SIPB's Hyades runner, libkrun "2.0-sipb", guest kernel 6.12.91; details in #926):
-
-1. A blocking `recv()`/`read()` holds it as well as `accept()`, and the calls it blocks include `send()`, `shutdown()` and `getpeername()`, not only `getsockname()`. [`duplex-probe.c`](https://github.com/djbclark/djbclark-ade/blob/236ba60/skills/forgejo/examples/plektra/duplex-probe.c): a thread parked in `recv()` on a connected socket and another thread `send()`ing on it: the data reaches the peer only after the `recv()` is released (normal kernel: 0 to 1 ms).
-2. A thread parked in `poll()` does not hold the lock, so from userspace one can wait in `poll()` before a blocking `read`/`accept`; an LD_PRELOAD shim doing that made a 1,417-test Gradle/okhttp suite on that runner go from 7 failures per run to 1 (the remaining one also fails elsewhere).
-3. A listener closed while another thread is blocked in `accept()` is not released; a new listener on the same port then loses most connections: #929.

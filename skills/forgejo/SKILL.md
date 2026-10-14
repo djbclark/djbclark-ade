@@ -67,7 +67,8 @@ agents.
 Moved to the **`forgejo-ci` skill** (2026-10-14): runner facts, job-image selection (our own `ghcr.io/djbclark/ci-image-plektra`),
 the loopback `LD_PRELOAD` shim for libkrun TSI bugs (Gradle daemon, okhttp MockWebServer, WebSocket tests), probe tooling,
 ticket etiquette and the SIPB/libkrun ticket map. The evidence behind it, unchanged, is in
-`skills/forgejo-ci/runner-notes.md`; scripts and probes stay in `examples/plektra/` here. Compare runs with
+`docs/runner-notes.md` in the new public repo **https://forgejo.mit.edu/djbclark/loopback-port-shim** (local `~/src/loopback-port-shim`), which
+is also where the shim, probes, probe workflows and `ci/tools/` scripts now live (`skills/forgejo/examples/plektra/` is only a pointer). Compare runs with
 `scripts/ci-step-times forgejo OWNER/REPO RUN` and `... github OWNER/REPO RUN`.
 
 ## Agent loop (local agent <-> Forgejo CI, no agent on the server)

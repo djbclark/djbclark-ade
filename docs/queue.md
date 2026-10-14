@@ -727,7 +727,7 @@ The 3-of-20 `reuse-probe` failures with the shim were stale listeners leaked by 
 **Start only after the shim works perfectly**: the `reuse-probe` residue is explained (done 2026-10-14: stale listeners leaked by earlier
 rounds, not the shim), and a few more full-suite runs stay clean (two so far, runs 229 and 230).
 
-1. Look into how the shim (`skills/forgejo/examples/plektra/loopback-port-shim.c`) could always be used by
+1. Look into how the shim (`loopback-port-shim.c` (in the new repo, `~/src/loopback-port-shim`)) could always be used by
    forgejo.mit.edu jobs, where appropriate: for example baked into the runner image or the `ubuntu` label's base
    image, loaded through `/etc/ld.so.preload` by the runner or a container entrypoint, or a shared setup action; and
    when it is not appropriate (jobs that never use loopback, jobs that bring their own network setup, anything that
@@ -740,10 +740,10 @@ rounds, not the shim), and a few more full-suite runs stay clean (two so far, ru
    (#818, #819, #860, #926, #929). Link it from SIPB/hyades#2. Show the draft to djbclark before filing, and state
    plainly that the real fix belongs in libkrun's TSI driver.
 
-**Progress 2026-10-14.** Step 1 is done: `skills/forgejo/examples/plektra/shim-by-default.md` (how jobs run, the six ways to
+**Progress 2026-10-14.** Step 1 is done: `docs/shim-by-default.md` in the new repo (how jobs run, the six ways to
 get the shim into jobs, why not global yet, alternative job images with measured pull times). Step 2 is FILED (2026-10-14, djbclark approved
 the draft): https://forgejo.mit.edu/SIPB/hyades/issues/3, linked from SIPB/hyades#2 (comment 28); text in
-`skills/forgejo/examples/plektra/sipb-hyades-shim-request-draft.md`. Verified along
+`docs/tickets/sipb-hyades-shim-request-draft.md` in the new repo. Verified along
 the way: the shim builds and works identically on the ubuntu, alpine and rocky labels (run 238); job-level `container:`
 works on the runner (run 239; `ghcr.io/cirruslabs/android-sdk:36` pulled in 47 s and already has SDK 36, but JDK 21 and no
 `node`); curl -L download speed 79 to 102 MB/s and `mount -o remount,dax` does nothing (run 237, SIPB/hyades#2 comment 26).
@@ -762,7 +762,7 @@ works on the runner (run 239; `ghcr.io/cirruslabs/android-sdk:36` pulled in 47 s
    (e) ticket etiquette learned (search before filing, wait for testing, label AI preparation, correct yourself in the
    ticket, `forgejo-api` never `--help`, `--body-file` guard); (f) the suite results and what still fails
    (`CornerButtonThemeTest`); (g) the SIPB and libkrun ticket map. Keep SKILL.md under about 200 lines and push detail
-   into `examples/plektra/*.md`.
+   into `docs/*.md` of the new repo.
 
 4. **Build our own CI image: DONE 2026-10-14** (operator said yes; hosted on public ghcr.io, built by GitHub Actions for amd64).
    `ghcr.io/djbclark/ci-image-plektra` (repo github.com/djbclark/ci-image-plektra, local `~/src/ci-image-plektra`):
@@ -771,8 +771,10 @@ works on the runner (run 239; `ghcr.io/cirruslabs/android-sdk:36` pulled in 47 s
    `DERIVE_IMAGE=ghcr.io/...@sha256:<digest> push-bench.sh asis BRANCH` runs the full suite on it (run 241). Remaining: bump
    the digest when the Dockerfile changes; ask SIPB (in #3) whether they prefer to host the image themselves.
 5. **forgejo skill: DONE 2026-10-14** as the new `skills/forgejo-ci/` (CI half split out of `skills/forgejo`; evidence in
-   `skills/forgejo-ci/runner-notes.md`), linked into every TUI with `skill-everywhere`, rows in README and `docs/skills.md`.
-6. **Public shim repo: DONE 2026-10-14**: https://forgejo.mit.edu/djbclark/loopback-port-shim (MIT; local `~/src/loopback-port-shim`; shim, probes,
-   docs, skills snapshots, probe tooling); SIPB/hyades#3 body edited to point at it, comment 30. **Drift to manage:** the shim source and
-   docs now exist in two places (djbclark-ade `skills/forgejo/examples/plektra/` and the new repo); edit the new repo for the shim from
-   now on, and repoint the image's `SHIM_URL` (github.com/djbclark/ci-image-plektra Dockerfile) at it when the shim next changes.
+   `docs/runner-notes.md` of the new repo), linked into every TUI with `skill-everywhere`, rows in README and `docs/skills.md`.
+6. **Public shim repo: DONE 2026-10-14, and it is now the only home** (operator: "move to just using the new repo"):
+   https://forgejo.mit.edu/djbclark/loopback-port-shim (MIT; local `~/src/loopback-port-shim`): shim, probes, docs, ticket texts,
+   probe workflows, `ci/tools/` scripts, and the `forgejo-ci` skill (`skills/forgejo-ci` here is a symlink into it).
+   `skills/forgejo/examples/plektra/` is a README pointer with an old-name to new-path table (tickets already filed link there).
+   SIPB/hyades#3 body points at the repo (comment 30). Remaining: the CI image's `SHIM_URL` still pins djbclark-ade commit `da6d68f`;
+   repoint it at the new repo when the shim next changes.
