@@ -21,7 +21,9 @@ Default host `forgejo.mit.edu` (Forgejo 16.0.5, Gitea-1.22-compatible API, probe
    it is a live-service CLI. Usage: `forgejo-api [--host H] METHOD /PATH [--data '{json}'|@file.json] [--yes] [--dry-run]`;
    a comment is `POST /repos/O/R/issues/N/comments --data @body.json --yes`, with `body.json` made by
    `jq -Rs '{body: .}' < text.md > body.json` and checked with `[ -s body.json ]` first (2026-10-14: a `--help` on a POST
-   was run by mistake; it posted nothing, this line is the fix).
+   was run by mistake; it posted nothing, this line is the fix). `--output FILE` saves the raw bytes (binary-safe), and PATH
+   may be a full `https://HOST/...` URL on the same host, so `forgejo-api --output app.apk GET <browser_download_url>`
+   downloads a private release asset; a redirect to another host never gets the token (2026-10-14).
 2. `scripts/tea-forgejo` — `tea` (brew, v0.16.0) with the secret mapped onto its
    env login (`GITEA_INSTANCE_URL` + `GITEA_TOKEN`), so nothing lands in
    `~/.config/tea`. Best for `issues`, `pulls`, `releases`, `api`.

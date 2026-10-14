@@ -5,7 +5,10 @@
     forgejo-api [--host HOST] GET  /repos/OWNER/REPO/issues?state=open
     forgejo-api [--host HOST] POST /repos/OWNER/REPO/issues --data '{"title":"x"}' --yes
     forgejo-api [--host HOST] PATCH /repos/OWNER/REPO/issues/3 --data @body.json --dry-run
+    forgejo-api [--host HOST] --output app.apk GET https://HOST/attachments/UUID
 
+PATH is relative to /api/v1, or a full https://HOST/... URL on the same host (release
+attachment downloads). --output writes the raw response bytes to a file instead of printing.
 HOST defaults to forgejo.mit.edu. The token is read from
 DJBCLARK_<HOST>_TOKEN (forgejo.mit.edu -> DJBCLARK_FORGEJO_MIT_EDU_TOKEN); when
 it is not in the environment this script re-runs itself under
@@ -19,9 +22,20 @@ import re
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 DEFAULT_HOST = "forgejo.mit.edu"
+
+
+class SameHostAuthRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but never send the token to another host (e.g. object storage)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(newurl).hostname != urllib.parse.urlsplit(req.full_url).hostname:
+            new.remove_header("Authorization")
+        return new
 
 
 def secret_name(host: str) -> str:
@@ -34,6 +48,7 @@ def main() -> int:
     ap.add_argument("--data", help="JSON body, or @file")
     ap.add_argument("--yes", action="store_true", help="allow a mutating method")
     ap.add_argument("--dry-run", action="store_true", help="print the request, send nothing")
+    ap.add_argument("--output", help="write the raw response body to this file")
     ap.add_argument("method", help="GET, POST, PUT, PATCH, DELETE, or `whoami`")
     ap.add_argument("path", nargs="?", default="")
     a = ap.parse_args()
@@ -41,8 +56,9 @@ def main() -> int:
     method, path = a.method.upper(), a.path
     if method == "WHOAMI":
         method, path = "GET", "/user"
-    if not path.startswith("/"):
-        ap.error("PATH must start with / (relative to /api/v1)")
+    site = f"https://{a.host}/"
+    if not (path.startswith("/") or path.startswith(site)):
+        ap.error(f"PATH must start with / (relative to /api/v1) or {site}")
     if method not in ("GET", "HEAD") and not (a.yes or a.dry_run):
         ap.error(f"{method} mutates the server: pass --yes, or --dry-run to preview")
 
@@ -51,7 +67,7 @@ def main() -> int:
         raw = open(a.data[1:]).read() if a.data.startswith("@") else a.data
         body = json.loads(raw)  # fail early on bad JSON
 
-    url = f"https://{a.host}/api/v1{path}"
+    url = path if path.startswith(site) else f"https://{a.host}/api/v1{path}"
     if a.dry_run:
         print(json.dumps({"method": method, "url": url, "body": body}, indent=2))
         return 0
@@ -74,8 +90,14 @@ def main() -> int:
         headers={"Authorization": f"token {token}", "Accept": "application/json",
                  **({"Content-Type": "application/json"} if body is not None else {})})
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            payload = r.read().decode()
+        opener = urllib.request.build_opener(SameHostAuthRedirect)
+        with opener.open(req, timeout=300 if a.output else 30) as r:
+            raw_payload = r.read()
+        if a.output:
+            with open(a.output, "wb") as f:
+                f.write(raw_payload)
+            return 0
+        payload = raw_payload.decode()
     except urllib.error.HTTPError as e:
         print(f"forgejo-api: HTTP {e.code} {e.reason}: {e.read().decode()[:500]}", file=sys.stderr)
         return 1
