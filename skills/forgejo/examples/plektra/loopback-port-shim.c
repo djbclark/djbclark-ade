@@ -23,6 +23,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#define RECENT 4096   /* ports not handed out again by this process until 4096 others were */
 typedef int (*bind_fn)(int, const struct sockaddr *, socklen_t);
 
 int bind(int fd, const struct sockaddr *addr, socklen_t len) {
@@ -40,13 +41,30 @@ int bind(int fd, const struct sockaddr *addr, socklen_t len) {
     union { struct sockaddr_storage ss; struct sockaddr_in a4; struct sockaddr_in6 a6; } copy;
     if (len > sizeof copy) return real(fd, addr, len);
     __builtin_memcpy(&copy, addr, len);
-    unsigned seed = (unsigned)getpid() * 2654435761u ^ (unsigned)time(NULL) ^ (unsigned)fd;
+    /* Never hand out the same port twice in a row: under TSI a listener that was just closed is still alive for a
+     * moment on the host side, and a new listener on the same port number is accepted by bind() (no EADDRINUSE) but
+     * its connections land on the dying one (EOF, "unexpected end of stream"; verified 2026-10-14, run 220: every
+     * failure had port == previous port). So ports come from a high-resolution seed (the old pid^time(s)^fd seed
+     * repeated within a second, i.e. the same port for every test of that second) and skip the last RECENT ports. */
+    static pthread_mutex_t pm = PTHREAD_MUTEX_INITIALIZER;
+    static unsigned short recent[RECENT]; static unsigned nrecent;
+    static unsigned long long ctr;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    unsigned long long z = (unsigned long long)ts.tv_nsec ^ ((unsigned long long)ts.tv_sec << 30) ^ ((unsigned long long)getpid() << 17) ^ (++ctr * 0x9E3779B97F4A7C15ull);
+    z ^= z >> 30; z *= 0xBF58476D1CE4E5B9ull; z ^= z >> 27; z *= 0x94D049BB133111EBull; z ^= z >> 31;
+    unsigned seed = (unsigned)z;
     /* 20000-32000: below the kernel ephemeral range, so no clash with auto-assigned ports */
-    for (int i = 0; i < 200; i++) {
+    for (int i = 0; i < 400; i++) {
         unsigned short port = (unsigned short)(20000 + rand_r(&seed) % 12000);
+        int seen = 0;
+        pthread_mutex_lock(&pm);
+        for (unsigned k = 0; k < RECENT && k < nrecent; k++) if (recent[k] == port) { seen = 1; break; }
+        pthread_mutex_unlock(&pm);
+        if (seen) continue;
         if (copy.ss.ss_family == AF_INET) copy.a4.sin_port = htons(port);
         else copy.a6.sin6_port = htons(port);
         int rc = real(fd, (struct sockaddr *)&copy, len);
+        if (rc == 0) { pthread_mutex_lock(&pm); recent[nrecent++ % RECENT] = port; pthread_mutex_unlock(&pm); }
         if (rc == 0 || errno != EADDRINUSE) return rc;
     }
     return real(fd, addr, len);

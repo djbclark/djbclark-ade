@@ -1,0 +1,19 @@
+name: runner probe (duplicate bind)
+on:
+  push:
+    branches: ['probe/**']
+jobs:
+  dupbind:
+    runs-on: ubuntu
+    steps:
+      - name: Checkout
+        uses: https://github.com/actions/checkout@v4
+      - name: Does a second listener on a port in use fail with EADDRINUSE?
+        shell: bash
+        run: |
+          uname -r; python3 --version
+          python3 dup-bind-probe.py
+          for rep in 1 2; do
+            echo "=== churn, 16 threads, random ports, SO_REUSEADDR OFF (rep $rep)"
+            CHURN_NOREUSE=1 CHURN_RANDOM=1 python3 listener-churn-repro.py 20000 16 | head -8; echo "exit ${PIPESTATUS[0]}"
+          done

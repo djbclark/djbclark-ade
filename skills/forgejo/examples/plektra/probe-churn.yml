@@ -1,0 +1,23 @@
+name: runner probe (listener churn)
+on:
+  push:
+    branches: ['probe/**']
+jobs:
+  churn:
+    runs-on: ubuntu
+    steps:
+      - name: Checkout
+        uses: https://github.com/actions/checkout@v4
+      - name: Build the shim
+        run: |
+          apt-get update -qq; apt-get install -y -qq gcc libc6-dev > /dev/null
+          gcc -shared -fPIC -O2 -pthread -o /tmp/portshim.so loopback-port-shim.c -ldl; echo "gcc rc=$?"
+      - name: Short-lived listeners, each checked end to end (a correct stack reports 0 errors)
+        run: |
+          set +e
+          run() { echo "=== $1"; shift; timeout -s KILL 120 "$@"; echo "   (exit $?)"; }
+          for rep in 1 2 3; do
+            run "NO shim, python random ports, 16 threads, 20000 listeners (rep $rep)" env CHURN_RANDOM=1 python3 listener-churn-repro.py 20000 16
+          done
+          cat /proc/sys/net/ipv4/ip_local_port_range; ss -ltn 2>/dev/null | head -5
+          exit 0
