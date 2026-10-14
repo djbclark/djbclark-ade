@@ -1,0 +1,1 @@
+tmprun IMAGE CMD runs "--" as the command; exec/tmprun pass CMD as a single argument

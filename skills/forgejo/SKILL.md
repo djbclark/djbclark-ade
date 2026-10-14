@@ -81,6 +81,27 @@ ticket etiquette and the SIPB/libkrun ticket map. The evidence behind it, unchan
 is also where the shim, probes, probe workflows and `ci/tools/` scripts now live (`skills/forgejo/examples/plektra/` is only a pointer). Compare runs with
 `scripts/ci-step-times forgejo OWNER/REPO RUN` and `... github OWNER/REPO RUN`.
 
+## Filing issues on SIPB projects: two tiers, linked (djbclark, 2026-10-14)
+
+SIPB prefers short, human-readable issues. For **every** issue on any SIPB project on
+forgejo.mit.edu (`SIPB/*`; usable for any upstream that wants the same):
+
+1. Public fork `djbclark/<repo>` (created if missing, issues enabled), holding the
+   **full AI-oriented issue**: everything an agent would want (environment, exact
+   commands and output, code reading with commit-pinned file:line, hypotheses
+   marked as such, patches, impact). Verbose is fine there: only AIs read it.
+   Title `[AI detail] <upstream title>`.
+2. Upstream, a **concise human issue** (what broke, a minimal repro, one or two fix
+   ideas; aim for under ~150 words) with a footer linking the AI issue.
+3. Both link each other: the AI issue's first line is `**Upstream issue:** URL`.
+
+`scripts/forgejo-two-tier-issue --upstream SIPB/REPO --title T --human human.md --ai ai.md
+--dry-run`, then `--yes`, does all of it (fork, enable issues, AI issue, upstream issue,
+back-link) and prints both URLs; `--existing N --ai ai.md` adds an AI twin to an
+already-filed upstream issue (`--comment-existing` also posts the link upstream). The
+human draft is outward-facing: show it to djbclark before `--yes`. Hyades drafts live
+in `skills/hyades-docker/tickets/`; CI-runner drafts in the `forgejo-ci` repo's `docs/tickets/`.
+
 ## Container registry and Hyades deploys
 
 forgejo.mit.edu is also SIPB's OCI registry (`forgejo.mit.edu/OWNER/NAME`, Packages

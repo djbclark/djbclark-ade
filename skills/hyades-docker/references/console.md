@@ -47,8 +47,8 @@ owner fails); env var names `[a-zA-Z0-9_]+`; no newlines in paths or values.
 | Command | Runs | Notes |
 |---|---|---|
 | `start NAME`, `stop NAME`, `restart NAME`, `kill NAME` | `systemctl --user start/stop/restart/kill NAME` | units have `Restart=on-failure` (5 s), start limit 10 per 120 s, `TimeoutStartSec=300`, `AutoUpdate=registry`. `stop` discards everything outside volumes. Lingering is enabled, so microVMs run while you are logged out |
-| `exec NAME CMD` | `podman exec -it NAME -- CMD` | **broken as of 2026-10-14**: `Error: krun: chown /dev/pts/N: Operation not permitted: OCI permission denied`, with or without `ssh -tt`, from the interactive console too (tested on `djbclark-rustpad`). Also CMD is passed as ONE argv element, so `exec NAME ls /` would look for a program named `ls /`. Use `tmprun` instead |
-| `tmprun IMAGE [CMD]` | `podman run --rm -it -v VOL:/mnt/VOL ... IMAGE -- CMD` with every volume of every microVM mounted under `/mnt` | **with CMD it is broken**: `--` lands after the image, so the guest runs `--` (`Couldn't execute '--': ENOENT`). **Without CMD it works**, so feed a script on stdin: `printf 'ls /mnt; df -h\n' \| scripts/hyades tmprun docker.io/library/alpine` (verified: guest kernel 6.12.109, `nproc` 4). The warning "input device is not a TTY" is harmless. The pulled image stays until the weekly `podman system prune -a -f` |
+| `exec NAME CMD` | `podman exec -it NAME -- CMD` | **broken as of 2026-10-14 for images with a non-root `USER`**: `Error: krun: chown /dev/pts/N: Operation not permitted: OCI permission denied`, with or without `ssh -tt`, from the interactive console too (tested on `djbclark-rustpad`, uid 1000; bug 1 below). Also CMD is passed as ONE argv element, so `exec NAME ls /` would look for a program named `ls /`. Use `tmprun` instead |
+| `tmprun IMAGE [CMD]` | `podman run --rm -it -v VOL:/mnt/VOL ... IMAGE -- CMD` with every volume of every microVM mounted under `/mnt` | **with CMD it is broken**: `--` lands after the image, so the guest runs `--` (`Couldn't execute '--': ENOENT`). **Without CMD it works**, so feed a script on stdin: `printf 'ls /mnt; df -h\n' \| scripts/hyades tmprun docker.io/library/alpine` (verified: guest kernel 6.12.109, `nproc` 4). The warning "input device is not a TTY" is harmless. End the script with `exit` and never kill the SSH client mid-run: the microVM is orphaned (bug 4). The pulled image stays until the weekly `podman system prune -a -f` |
 | `update` | `podman auto-update` | pulls newer images for every unit and restarts what changed. Hyades also does this daily, and on `POST https://hyades.mit.edu` with `X-Token` |
 
 ## Registry, keys, tokens, groups
@@ -61,11 +61,18 @@ owner fails); env var names `[a-zA-Z0-9_]+`; no newlines in paths or values.
 | `entergp GROUP [CMD]` | `sudo entergp GROUP [CMD]` | needs membership of Moira group GROUP (a non-hidden list with "Moira Group" ticked in WebMoira, or `blanche`); creates the group account on first use (max 2 groups per user). With CMD it runs one console command in the group account: `scripts/hyades -g GROUP list` |
 | `exit`, `EOF` (Ctrl-D) | leave the console | |
 
-## Bugs worth filing (not filed; ask djbclark first)
+## Bugs (drafts in `../tickets/`, two-tier per the forgejo skill)
 
-1. `exec`: krun cannot chown the pty (above); and CMD is one argv element.
-2. `tmprun IMAGE CMD`: `--` after the image becomes the command.
+1. `exec` fails for images with a non-root `USER`: crun's `open_terminal`
+   (`linux.c`) chowns the host pty to the exec uid and gets `EPERM`; uid 0 skips the
+   chown (`ekzhang/rustpad` is `User: 1000:1000`; alpine runs as root). `tmprun` of
+   the uid-1000 image works, so it is the exec path only.
+2. `tmprun IMAGE CMD` runs `--`; `exec`/`tmprun` pass CMD as one argv element.
 3. Exit status is always 0, so scripts cannot detect failure.
+4. A `tmprun` microVM is orphaned when the SSH client dies (verified with `timeout
+   25`); `stop 'libpod-<id>*'` stops it, since `stop` passes its argument to
+   `systemctl --user` unvalidated and the container has a transient
+   `libpod-<id>.scope`.
 
 Tracker: https://forgejo.mit.edu/SIPB/hyades/issues (security issues to
 sipb-hyades-root@mit.edu instead). djbclark already filed #2, #3 and #4 there (CI

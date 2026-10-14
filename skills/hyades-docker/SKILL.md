@@ -61,10 +61,16 @@ emails you and prunes unused images), 2 groups; more via sipb-hyades-root@mit.ed
 
 **Podman over docker.** Hyades itself is podman, the guide recommends it, and
 everything here works the same with either, so use `podman`; fall back to `docker`
-only where podman is unavailable. Neither is installed on this Mac (2026-10-14):
-`brew install podman && podman machine init && podman machine start` (ask before
-installing: it runs a Linux VM). Hyades is x86_64: on Apple Silicon build with
-`podman build --platform linux/amd64`.
+only where podman is unavailable. **On this Mac podman 6.1.4 is installed as a
+client only (brew, 2026-10-14) and there is deliberately no `podman machine`:
+djbclark does not want local VMs.** Never run `podman machine init/start`, install
+podman-desktop, or start any other local VM without asking. A macOS podman client
+with no connection can do nothing, not even `login` or `images`, so **build and push
+in Forgejo CI** (hyades-action, below; the runner is podman/buildah on Hyades' CI
+host). A remote Linux podman host would also work (`podman system connection add`).
+Registry work that needs no engine (inspect, copy, retag a remote image) could use
+`skopeo` or `crane`, both not installed. Hyades is x86_64: when building on Apple
+Silicon anywhere, use `--platform linux/amd64`.
 
 ## Rules
 
@@ -83,7 +89,14 @@ installing: it runs a Linux VM). Hyades is x86_64: on Apple Silicon build with
    `login` (private images): a separate `read:package`-only token, so Hyades never
    holds write access.
 6. Security vulnerabilities go to sipb-hyades-root@mit.edu, never the public tracker.
-   Filing any issue is outward-facing: show djbclark the draft first.
+   Filing any issue is outward-facing: show djbclark the draft first. **SIPB issues
+   are two-tier** (djbclark, 2026-10-14): a short human-readable issue upstream and a
+   full AI-oriented one in the public fork `djbclark/hyades`, linked both ways:
+   `forgejo-two-tier-issue` (forgejo skill). Drafts live in `tickets/N-slug/`
+   (`title.txt`, `human.md`, `ai.md`).
+7. `tmprun` with a script on stdin must end the script with `exit`; never kill the
+   SSH client (`timeout`) while it runs: the microVM is orphaned and keeps using quota.
+   Stop an orphan with `scripts/hyades stop 'libpod-<container id>*'` (id from `df`).
 
 ## hyades.json (`~/.config/hyades.json`; `getconf`/`setconf`, or `edit`)
 
@@ -109,6 +122,8 @@ Scripted edit: `scripts/hyades getconf NAME > c.json`, change it with `jq`, then
 one-command WordPress (SQLite) with its volume.
 
 **Build locally, push, run** (the guide's flow, with our helpers):
+
+On a machine with a working podman (not this Mac; see above):
 
 ```bash
 podman build --platform linux/amd64 -t forgejo.mit.edu/djbclark/myapp:latest .

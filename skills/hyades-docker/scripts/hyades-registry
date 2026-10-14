@@ -26,6 +26,12 @@ fi
   exit 2
 }
 [ $# -gt 0 ] || { echo "usage: hyades-registry ENGINE-ARGS... (e.g. push IMAGE)" >&2; exit 2; }
+if [ "$(basename "$ENGINE")" = podman ] && [ "$(uname)" = Darwin ] && [ -z "$(podman system connection list --format '{{.Name}}' 2>/dev/null)" ]; then
+  echo "hyades-registry: podman on macOS is only a client and has no connection (no podman machine, by" >&2
+  echo "djbclark's choice: no local VMs). Build and push in Forgejo CI (SIPB/hyades-action) instead, or add a" >&2
+  echo "remote Linux podman: podman system connection add NAME ssh://USER@HOST/run/user/UID/podman/podman.sock" >&2
+  exit 3
+fi
 SUFFIX="$(printf '%s' "$REG" | tr 'a-z.-' 'A-Z__')"
 
 exec sudo-secretspec run --reason "container registry access to ${REG}" -- bash -c '
