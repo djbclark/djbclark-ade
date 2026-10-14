@@ -15,5 +15,5 @@ git -C "$REPO" read-tree "$PARENT"
 git -C "$REPO" update-index --add --cacheinfo "100644,$(git -C "$REPO" hash-object -w "$Y"),.forgejo/workflows/ci.yml"
 SHA=$(git -C "$REPO" commit-tree "$(git -C "$REPO" write-tree)" -p "$PARENT" -m "bench: storage variant $V")
 rm -f "$GIT_INDEX_FILE" "$Y"; unset GIT_INDEX_FILE
-"$GF" -C "$REPO" push forgejo "$SHA:refs/heads/$BR" 2>&1 | tail -1
+"$GF" -C "$REPO" push forgejo "+$SHA:refs/heads/$BR" 2>&1 | tail -1
 echo "$SHA"
