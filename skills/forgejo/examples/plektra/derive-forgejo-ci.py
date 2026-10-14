@@ -55,11 +55,13 @@ shim_step = ("      - name: Build loopback port-0 shim (libkrun#818 workaround)\
              "          true && python3 -c 'print(\"preload ok\")'\n")
 setup = setup + "\n" + shim_step
 # 4c. optional storage step BEFORE the toolchain install: the job's disk is virtiofs (small-file ops
-# 0.03-0.2x of a Mac, probed 2026-10-13); move the checkout, Gradle home and Android SDK onto tmpfs
-# (/dev/shm, 32 GiB) or onto an ext4 image on a loop device. The workspace is bind-mounted over its
+# 0.03-0.2x of a Mac, probed 2026-10-13); move the checkout, Gradle home and Android SDK onto a guest tmpfs
+# (mounted at /mnt/fast, 48 GiB; /dev/shm is only 32 GiB and noexec) or onto an ext4 image on a loop device. The workspace is bind-mounted over its
 # own path so later steps keep their working directory.
 if VARIANT != "asis":
-    prep = ("          F=/dev/shm/fast\n          mkdir -p $F\n" if VARIANT == "tmpfs" else
+    # /dev/shm is mounted noexec (aapt2 and SDK tools would not run), so mount a fresh guest tmpfs
+    # (root in the job; crun-krun --tmpfs would be host-side, so do it in the guest). 48 GiB cap of 62.8 GiB.
+    prep = ("          F=/mnt/fast; mkdir -p $F; mount -t tmpfs -o size=48g,mode=755 tmpfs $F\n" if VARIANT == "tmpfs" else
             "          apt-get update -qq && apt-get install -y -qq e2fsprogs\n"
             "          truncate -s 40G /root/fast.img\n          mkfs.ext4 -q -F -E lazy_itable_init=1,lazy_journal_init=1 /root/fast.img\n"
             "          F=/mnt/fast; mkdir -p $F; mount -o loop,noatime /root/fast.img $F\n")
