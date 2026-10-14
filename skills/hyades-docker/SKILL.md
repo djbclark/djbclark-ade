@@ -51,7 +51,11 @@ emails you and prunes unused images), 2 groups; more via sipb-hyades-root@mit.ed
    absent, or `HYADES_ENGINE=docker`) command logged in to `forgejo.mit.edu` with the
    token from sudo-secretspec, through a throwaway auth file: `hyades-registry push
    forgejo.mit.edu/djbclark/app:latest`. Never a bare `podman login`: it leaves the
-   token base64 in `~/.config/containers/auth.json`.
+   token base64 in `~/.config/containers/auth.json`. **On this Mac use
+   `HYADES_ENGINE=crane` (or `skopeo`)**, which needs no VM (2026-10-14):
+   `HYADES_ENGINE=crane hyades-registry append --platform linux/amd64 -b BASE -f
+   layer.tar -t forgejo.mit.edu/djbclark/NAME:TAG` (layer: `gtar --owner=0
+   --group=0 --numeric-owner -cf layer.tar etc`).
 3. **`scripts/hyades-update-token check | trigger | rotate --yes`**: the account's
    update token in sudo-secretspec (`DJBCLARK_HYADES_UPDATE_TOKEN`), never printed.
 4. **`scripts/hyades-ci-secrets OWNER/REPO --yes`** (or `--user --yes`,
@@ -84,10 +88,9 @@ Hyades is x86_64: when building on Apple Silicon anywhere, use
    (`--authfile`), with signature policy support.
 3. `hadolint`: lint a `Dockerfile` before pushing it to CI (`hadolint Dockerfile`).
 
-Authenticated use (private packages, pushes): give them a throwaway login the same
-way `hyades-registry` does (`crane auth login -u djbclark --password-stdin
-forgejo.mit.edu` with `DOCKER_CONFIG` pointing at a temp dir; `skopeo login
---authfile TMP --password-stdin`), under `sudo-secretspec run`. Public images need no login.
+Authenticated use (private packages, pushes): `HYADES_ENGINE=crane hyades-registry
+CRANE-ARGS` or `HYADES_ENGINE=skopeo hyades-registry SKOPEO-ARGS` (tool 2) does the
+throwaway login for you; never hand-roll one. Public images need no login.
 
 ## Rules
 

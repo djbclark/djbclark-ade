@@ -5,6 +5,12 @@
 #   hyades-registry push forgejo.mit.edu/djbclark/myapp:latest
 #   hyades-registry pull forgejo.mit.edu/djbclark/private-thing
 #   HYADES_ENGINE=docker hyades-registry push ...
+#   HYADES_ENGINE=crane hyades-registry append -b BASE -f layer.tar -t IMAGE   # VM-free
+#   HYADES_ENGINE=skopeo hyades-registry copy docker://SRC docker://DST          # VM-free
+#
+# On this Mac podman is a client only (no podman machine), so podman/docker
+# cannot build or push here: use crane or skopeo, which talk to the registry
+# directly.
 #
 # The login goes to a throwaway auth file (podman: REGISTRY_AUTH_FILE; docker:
 # DOCKER_CONFIG) in a 0700 temp dir that is deleted afterwards, because a plain
@@ -21,15 +27,16 @@ if [ -z "$ENGINE" ]; then
   for e in podman docker; do command -v "$e" >/dev/null && { ENGINE="$e"; break; }; done
 fi
 [ -n "$ENGINE" ] || {
-  echo "hyades-registry: neither podman nor docker is installed. Prefer podman:" >&2
-  echo "  brew install podman && podman machine init && podman machine start" >&2
+  echo "hyades-registry: neither podman nor docker is installed. Set HYADES_ENGINE=crane or skopeo" >&2
+  echo "(registry-only, no VM). Never start a local VM (podman machine) without asking djbclark." >&2
   exit 2
 }
 [ $# -gt 0 ] || { echo "usage: hyades-registry ENGINE-ARGS... (e.g. push IMAGE)" >&2; exit 2; }
 if [ "$(basename "$ENGINE")" = podman ] && [ "$(uname)" = Darwin ] && [ -z "$(podman system connection list --format '{{.Name}}' 2>/dev/null)" ]; then
   echo "hyades-registry: podman on macOS is only a client and has no connection (no podman machine, by" >&2
-  echo "djbclark's choice: no local VMs). Build and push in Forgejo CI (SIPB/hyades-action) instead, or add a" >&2
-  echo "remote Linux podman: podman system connection add NAME ssh://USER@HOST/run/user/UID/podman/podman.sock" >&2
+  echo "djbclark's choice: no local VMs). Use HYADES_ENGINE=crane or skopeo (registry-only, no VM), build and" >&2
+  echo "push in Forgejo CI (SIPB/hyades-action), or add a remote Linux podman:" >&2
+  echo "  podman system connection add NAME ssh://USER@HOST/run/user/UID/podman/podman.sock" >&2
   exit 3
 fi
 SUFFIX="$(printf '%s' "$REG" | tr 'a-z.-' 'A-Z__')"
@@ -44,10 +51,11 @@ exec sudo-secretspec run --reason "container registry access to ${REG}" -- bash 
   fi
   dir="$(mktemp -d)"; chmod 700 "$dir"; trap "rm -rf \"$dir\"" EXIT
   case "$(basename "$engine")" in
-    docker*) export DOCKER_CONFIG="$dir"; auth=() ;;
-    *)       export REGISTRY_AUTH_FILE="$dir/auth.json"; auth=(--authfile "$dir/auth.json") ;;
+    docker*) export DOCKER_CONFIG="$dir"; login_cmd=("$engine" login) ;;
+    crane*)  export DOCKER_CONFIG="$dir"; login_cmd=("$engine" auth login) ;;
+    *)       export REGISTRY_AUTH_FILE="$dir/auth.json"; login_cmd=("$engine" login --authfile "$dir/auth.json") ;;
   esac
-  printf "%s" "$tok" | "$engine" login "${auth[@]}" -u "$login" --password-stdin "$reg" >/dev/null || {
+  printf "%s" "$tok" | "${login_cmd[@]}" -u "$login" --password-stdin "$reg" >/dev/null || {
     echo "hyades-registry: $engine login to $reg failed (token rejected or registry unreachable)" >&2; exit 1; }
   unset tok "$pkg" "$main"
   "$engine" "$@"
