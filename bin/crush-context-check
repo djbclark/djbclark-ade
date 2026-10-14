@@ -1,0 +1,138 @@
+#!/usr/bin/env -S python3 -I
+"""crush-context-check — ask before Crush auto-loads project context files into its prompt.
+
+SCOPE: only for Crush on small-context models (SIPB LLMs, 32k window). Crush v0.98.1 puts AGENTS.md, CLAUDE.md,
+GEMINI.md, .cursorrules, .cursor/rules/ ... from the starting directory (plus ~/.config/crush/CRUSH.md and
+~/.config/AGENTS.md) into every request, with no way to ask first or opt out (upstream issue
+charmbracelet/crush#4070). This runs from the `crush()` shell function before the TUI starts: it lists what
+Crush will load, with sizes and a token estimate against the 32k window, and asks.
+
+  crush-context-check [--cwd DIR] [--window N] [--force-interactive]
+
+Answer: [y]es start / [a]lways for this directory (until the files change) / [N]o quit.
+Exit 0 = start Crush, 1 = declined. Silent when nothing would load, when stdin is not a terminal, or when
+CRUSH_CONTEXT_OK=1. Crush follows symlinks, so a `CLAUDE.md -> AGENTS.md` pair is sent twice (#4018); shown as such.
+Workaround that needs no tool: start Crush from a subdirectory containing none of these files.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import sys
+from pathlib import Path
+
+# crush v0.98.1 internal/config/config.go defaultContextPaths (the list is only ever appended to)
+DEFAULTS = [
+    ".github/copilot-instructions.md", ".cursorrules", ".cursor/rules/", "CLAUDE.md", "CLAUDE.local.md",
+    "GEMINI.md", "gemini.md", "crush.md", "crush.local.md", "Crush.md", "Crush.local.md", "CRUSH.md",
+    "CRUSH.local.md", "AGENTS.md", "agents.md", "Agents.md",
+]
+CHARS_PER_TOKEN = 2.7  # measured 2026-10-14: 45,367 chars = 16,762 tokens through Qwen3.6 on SIPB
+BASE_TOKENS = 13_000  # Crush's own prompt with trimmed tools and no skills (measured, see research/sipb-llms/setup.md)
+SUMMARIZE_AT = 0.8  # Crush summarizes when less than 20% of a small window remains
+OK_FILE = Path(os.environ.get("CRUSH_CONTEXT_OK_FILE") or Path.home() / ".config/crush/context-ok.txt")
+
+
+def global_paths() -> list[Path]:
+    cdir = Path(os.environ.get("CRUSH_GLOBAL_CONFIG") or Path.home() / ".config/crush")
+    return [cdir / "CRUSH.md", cdir.parent / "AGENTS.md"]
+
+
+def project_files(cwd: Path) -> list[Path]:
+    """Files Crush reads from the starting directory. Keyed on the lower-cased name, as Crush does."""
+    out: list[Path] = []
+    seen: set[str] = set()
+    for rel in sorted(DEFAULTS):  # Crush sorts the list, so capitals win
+        key = rel.lower()
+        if key in seen:
+            continue
+        p = cwd / rel
+        if rel.endswith("/"):
+            if p.is_dir():
+                seen.add(key)
+                out += sorted(f for f in p.rglob("*") if f.is_file())
+        elif p.is_file():
+            seen.add(key)
+            out.append(p)
+    return out
+
+
+def collect(cwd: Path):
+    rows = []  # (path, display, size, note); one row per time Crush sends the file
+    seen_real: dict[str, str] = {}
+    for p in project_files(cwd) + [g for g in global_paths() if g.is_file()]:
+        real = str(p.resolve())
+        size = p.stat().st_size
+        shown = os.path.relpath(p, cwd) if str(p).startswith(str(cwd)) else str(p).replace(str(Path.home()), "~")
+        note = f"same file as {seen_real[real]}: Crush sends it twice (#4018)" if real in seen_real else ""
+        seen_real.setdefault(real, shown)
+        rows.append((p, shown, size, note))
+    return rows
+
+
+def signature(cwd: Path, rows) -> str:
+    h = hashlib.sha256(str(cwd).encode())
+    for p, shown, size, _ in rows:
+        try:
+            h.update(f"{shown}:{size}:{p.stat().st_mtime_ns}".encode())
+        except OSError:
+            h.update(shown.encode())
+    return f"{cwd}\t{h.hexdigest()[:16]}"
+
+
+def approved(sig: str) -> bool:
+    try:
+        return sig in OK_FILE.read_text().splitlines()
+    except OSError:
+        return False
+
+
+def remember(cwd: Path, sig: str) -> None:
+    try:
+        keep = [l for l in (OK_FILE.read_text().splitlines() if OK_FILE.exists() else []) if not l.startswith(f"{cwd}\t")]
+        OK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        OK_FILE.write_text("\n".join(keep + [sig]) + "\n")
+    except OSError as e:
+        print(f"crush-context-check: could not remember the answer ({e})", file=sys.stderr)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="Ask before Crush loads project context files.")
+    ap.add_argument("--cwd", default=os.getcwd())
+    ap.add_argument("--window", type=int, default=int(os.environ.get("CRUSH_CONTEXT_WINDOW", "32768")))
+    ap.add_argument("--force-interactive", action="store_true", help="ask even without a terminal (tests)")
+    a = ap.parse_args(argv)
+    cwd = Path(a.cwd).resolve()
+    if os.environ.get("CRUSH_CONTEXT_OK") == "1" or not (a.force_interactive or sys.stdin.isatty()):
+        return 0
+    rows = collect(cwd)
+    if not rows:
+        return 0
+    sig = signature(cwd, rows)
+    if approved(sig):
+        return 0
+    tokens = round(sum(size for _, _, size, _ in rows) / CHARS_PER_TOKEN)
+    limit = int(a.window * SUMMARIZE_AT)
+    print(f"Crush will load these into its prompt ({cwd}):")
+    for _, shown, size, note in rows:
+        print(f"  {shown}  {size:,} bytes (~{round(size / CHARS_PER_TOKEN):,} tokens)" + (f"  <- {note}" if note else ""))
+    flag = "  <- ABOVE the summarize trigger: every turn will end in a summary" if BASE_TOKENS + tokens > limit else ""
+    print(f"  total ~{tokens:,} tokens + ~{BASE_TOKENS:,} base = ~{BASE_TOKENS + tokens:,} of {limit:,} "
+          f"(Crush summarizes above this, window {a.window:,}){flag}")
+    try:
+        ans = input("Load them? [y]es / [a]lways for this directory / [N]o quit: ").strip().lower()
+    except EOFError:
+        ans = ""
+    if ans in ("y", "yes"):
+        return 0
+    if ans in ("a", "always"):
+        remember(cwd, sig)
+        return 0
+    print("Not started. To skip them: start Crush from a subdirectory that has none of these files, "
+          "or CRUSH_CONTEXT_OK=1 crush to skip this question.")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
