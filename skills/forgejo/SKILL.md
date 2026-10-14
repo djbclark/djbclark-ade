@@ -73,16 +73,37 @@ Runner: SIPB's `sipbphus` (Forgejo Runner v13.1.0), docs in `SIPB/hyades`
    `.github/workflows` is ignored. The job starts within a second of the push.
 4. Hardware seen by a job: AMD EPYC, `nproc` 16, 62 GB RAM, 931 GB disk. It is a
    libkrun microVM, shared with other users, so repeat runs for timings.
-5. **Gradle does not run there yet.** Inside the job every TCP connect to
-   127.0.0.1 or ::1 is refused (also 0.0.0.0-bound to the container IP; only an
-   address bound on `dummy0`, 203.0.113.1, connects). Gradle's daemon, test
-   workers and Kotlin daemon all use loopback, so the build fails with "Could not
-   connect to the Gradle daemon" (run 170). `ip link set lo up` changes nothing;
-   `unshare -n` hung the job (cancel it). Cause is probably libkrun TSI
-   (libkrun#818, open); host fix `krun.use_passt=1`. Needs SIPB: see `examples/plektra/sipb-loopback-report.md`.
+5. **Gradle needs the port-0 shim there.** Inside the job a listener bound to port 0
+   cannot be connected to (even from the same process): libkrun TSI bug libkrun#818;
+   fixed-port binds work. Gradle's daemon, test workers and Kotlin daemon all bind
+   port 0, so unshimmed builds die with "Could not connect to the Gradle daemon"
+   (runs 168-174, 176). SIPB does not want `krun.use_passt=1` (nested passt). **Fix,
+   verified in runs 175 and 177 (Gradle daemon, forked test worker, 4+ test steps
+   `BUILD SUCCESSFUL`):** `examples/plektra/loopback-port-shim.c` is an `LD_PRELOAD`
+   shim that rewrites port-0 `bind()` to a random port in 20000-32000. In the job:
+   `apt-get install -y gcc libc6-dev`, `gcc -shared -fPIC -O2 -o /usr/local/lib/portshim.so
+   shim.c -ldl`, `echo /usr/local/lib/portshim.so >> /etc/ld.so.preload` (root).
+   **An `LD_PRELOAD` written to `$GITHUB_ENV` does not reach Gradle's daemon (run 176)**;
+   `/etc/ld.so.preload` does. `derive-forgejo-ci.py` adds this step. `--no-daemon` does
+   not help (Gradle forks a single-use daemon over the same socket). `examples/plektra/sipb-loopback-report.md`
+   has the report and the 2026-10-13 update.
 6. The job-log endpoint carries only the first step's `⭐ Run` marker, and there
    is no per-step API: `examples/plektra/forgejo-ci.yml` prints `BENCHSTEP`
    markers and `scripts/ci-step-times` reads them (or Gradle's `BUILD ... in`).
+
+7. **Resources per job (probed 2026-10-13, `examples/plektra/resource-probe.sh`,
+   `limits-probe.sh`, `disk-probe.py`; run on the Mac too to compare):** 16 vCPU
+   (EPYC at 3.0 GHz, 1 thread/core, KVM) and 62.8 GiB RAM, no swap, no cgroup
+   limits (the VM is the cap), CPU steal 0.01 %. Versus an M1 Air: 2.0x cores,
+   3.9x RAM, 2.6x all-thread compute, 0.85x one-thread compute. **Disk is the weak
+   spot:** `/`, `/tmp` and the workspace are all virtiofs (no guest block device, so
+   SSD vs HDD is not detectable; nosync write = fsync write = 177 MiB/s, i.e. write-through
+   FUSE). Small files: about 1.6-2.3k creates/s, 13-15k stats/s, 4-5k opens/s, which is
+   0.14x, 0.034x, 0.075x of the Mac. **`/dev/shm` is a 32 GiB tmpfs: 29-33x faster than
+   virtiofs on small-file operations** (51k creates/s, 380k stats/s, 117k open+read/s),
+   so put `GRADLE_USER_HOME`, the Android SDK and the checkout there for speed.
+   Other limits: soft `nofile` 1024 (hard 4096), `kernel.pid_max` 16384,
+   `inotify.max_user_instances` 128, virtio balloon present, PSI off.
 
 `examples/plektra/` holds the workflow derived from the repo's GitHub `ci.yml`
 (`derive-forgejo-ci.py` keeps every Gradle step identical) and the probe
