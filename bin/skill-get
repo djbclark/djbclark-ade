@@ -1,6 +1,9 @@
 #!/usr/bin/env -S python3 -I
 """skill-get — load one agent skill on demand, for small-context models.
 
+SCOPE: only for small-context models (Crush + Qwen on SIPB LLMs, 32k window). Models with real web search
+and skill loaders (Claude, Codex, Grok, ...) should use those; this is the lean replacement, not a general tool.
+
   skill-get --list [keyword ...]        compact catalogue (names only; with keywords: name + one-liner)
   skill-get <name> [--offset N] [--max-chars N]
   skill-get <name> --ref <relative/path>   a file under the skill's references/ or scripts/

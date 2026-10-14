@@ -1,6 +1,9 @@
 #!/usr/bin/env -S python3 -I
 """web-digest — one-call web research for small-context models.
 
+SCOPE: only for small-context models (Crush + Qwen on SIPB LLMs, 32k window). Models with real web search
+and skill loaders (Claude, Codex, Grok, ...) should use those; this is the lean replacement, not a general tool.
+
   web-digest "<question>" [--url URL ...] [--max-tokens 700] [--pages 4] [--thorough]
 
 Searches (or reads the given --url pages), fetches the best pages through the `web-get` failover
