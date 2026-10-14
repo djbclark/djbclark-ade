@@ -5,7 +5,7 @@
  * Inherited by every child JVM through the environment.
  *
  * Also works around a second TSI bug: shutdown(2) on a listening socket either fails with ENOTCONN
- * or, while another thread is blocked in accept(), never returns (and so do getsockopt/getpeername then). Java's ServerSocket.close() (and so
+ * or, while another thread is blocked in accept(), never returns (getpeername blocks too, and getsockopt(SO_ACCEPTCONN) wrongly says 0). Java's ServerSocket.close() (and so
  * okhttp's MockWebServer.shutdown()) calls it and hangs the test JVM forever. A shutdown() on a
  * listening socket is made a no-op here; close() still wakes a blocked accept() through the JDK's signal.
  *
@@ -53,7 +53,7 @@ int bind(int fd, const struct sockaddr *addr, socklen_t len) {
 }
 
 /* shutdown() on a listener must not reach the kernel, and the shim cannot ask the socket whether it is a
- * listener: under TSI any call that takes the socket lock (getsockopt, getpeername, shutdown) blocks while
+ * listener: under TSI getsockopt(SO_ACCEPTCONN) answers 0 for a listener, and getpeername and shutdown block while
  * another thread sits in accept(). So listening fds are recorded in listen() and forgotten in close()/dup2(). */
 #define MAXFD 65536
 static volatile unsigned char listening[MAXFD];

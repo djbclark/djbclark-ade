@@ -1,8 +1,8 @@
-<!-- Draft for https://github.com/libkrun/libkrun/issues . NOT FILED. Title: "TSI: shutdown(), getsockopt() and getpeername() block while another thread is blocked in accept() or read() on the same socket (hangs Java ServerSocket.close())" -->
+<!-- Draft for https://github.com/libkrun/libkrun/issues . NOT FILED. Title: "TSI: shutdown() and getpeername() block while another thread is blocked in accept() or read() on the same socket (hangs Java ServerSocket.close())" -->
 
 ## Summary
 
-In a krun guest with TSI networking, `shutdown(2)` on a TCP socket never returns while another thread of the process is blocked in `accept()` (listener) or `read()` (connected client) on that same socket. `getsockopt()` and `getpeername()` on the listener block the same way. On a normal Linux kernel `shutdown()` on a listener wakes the blocked `accept()`; it is how Java (`ServerSocket.close()`, `Socket.close()`), okhttp's MockWebServer and many other runtimes unblock an accept thread. Here the closing thread hangs forever, so for example a Gradle test JVM stops with a thread stuck in `sun.nio.ch.Net.shutdown` and the CI job runs until its timeout. Related to the port-0 problem in #818, found while working around it.
+In a krun guest with TSI networking, `shutdown(2)` on a TCP socket never returns while another thread of the process is blocked in `accept()` (listener) or `read()` (connected client) on that same socket. `getpeername()` on the listener blocks the same way. (`getsockopt(SO_ACCEPTCONN)` does not block, but returns 0 for a socket that is listening.) On a normal Linux kernel `shutdown()` on a listener wakes the blocked `accept()`; it is how Java (`ServerSocket.close()`, `Socket.close()`), okhttp's MockWebServer and many other runtimes unblock an accept thread. Here the closing thread hangs forever, so for example a Gradle test JVM stops with a thread stuck in `sun.nio.ch.Net.shutdown` and the CI job runs until its timeout. Related to the port-0 problem in #818, found while working around it.
 
 Prepared with an AI coding assistant (Claude Code) from probe runs on SIPB's Hyades CI runner (libkrun "2.0-sipb", guest kernel 6.12.91, root and loopback through TSI); I reviewed the results. I have not tried upstream main outside that runner.
 
@@ -26,10 +26,11 @@ Also: `ServerSocket s = new ServerSocket(31340)` with a thread in `s.accept()`, 
 | `close(fd)` alone | `accept` stays blocked (same as a normal kernel, where close does not wake accept) |
 | `shutdown(fd, SHUT_RD)` | never returns |
 | `shutdown(fd, SHUT_RDWR)` | never returns |
-| `getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN)`, `getpeername(fd)` | never return |
+| `getpeername(fd)` | never returns |
+| `getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN)` | returns at once, value 0 (the socket is listening, so this looks wrong) |
 | `shutdown(fd, SHUT_RDWR)` on a listener with no thread in `accept()` | fails with `ENOTCONN` (a normal kernel returns 0) |
 
-So the blocked `accept()` seems to hold a lock that every other socket operation needs. Probe workflows and logs: https://github.com/djbclark/djbclark-ade/tree/master/skills/forgejo/examples/plektra (`probe-shutdown*.yml`, `probe-accept.yml`, `accept-probe.c`).
+So the blocked `accept()` seems to hold a lock that some other socket operations need. Probe workflows and logs: https://github.com/djbclark/djbclark-ade/tree/master/skills/forgejo/examples/plektra (`probe-shutdown*.yml`, `probe-accept.yml`, `accept-probe.c`).
 
 ## Workaround in use
 
@@ -37,7 +38,7 @@ An `LD_PRELOAD` shim records listening fds in `listen()` (forgotten in `close`/`
 
 ## Questions
 
-1. Is the blocking intended (a socket-wide lock held during `accept`/`read`), or a bug? A fix that lets `shutdown` and `getsockopt` proceed concurrently with a blocked `accept` would match Linux behavior.
+1. Is the blocking intended (a socket-wide lock held during `accept`/`read`), or a bug? A fix that lets `shutdown` and `getpeername` proceed concurrently with a blocked `accept` would match Linux behavior.
 2. For CI users, would `krun.use_passt=1` avoid TSI for loopback entirely? SIPB prefers not to enable it (nested passt), which is why I am asking about a TSI fix.
 
 ## Related

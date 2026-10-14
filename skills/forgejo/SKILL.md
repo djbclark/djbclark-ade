@@ -87,13 +87,14 @@ Runner: SIPB's `sipbphus` (Forgejo Runner v13.1.0), docs in `SIPB/hyades`
    `/etc/ld.so.preload` does. `derive-forgejo-ci.py` adds this step. `--no-daemon` does
    not help (Gradle forks a single-use daemon over the same socket). `examples/plektra/sipb-loopback-report.md`
    has the report and the 2026-10-13 update.
-   **Second TSI bug, found 2026-10-14 (runs 189-205): `shutdown(2)`, `getsockopt` and `getpeername`
-   block while another thread is blocked in `accept()` or `read()` on the same socket.** Java's
+   **Second TSI bug, found 2026-10-14 (runs 189-206): `shutdown(2)` and `getpeername`
+   block while another thread is blocked in `accept()` or `read()` on the same socket
+   (`getsockopt(SO_ACCEPTCONN)` returns at once but says 0 for a listener).** Java's
    `ServerSocket.close()`/`Socket.close()` call `shutdown()` first, so okhttp MockWebServer tests
    hung the test worker forever (the full `testStableDebugUnitTest` step stalled until its
    timeout; the runner then logs `context deadline exceeded` tearing the container down; **disk speed
    was not the cause: as-is, tmpfs and loop storage all hung identically**). The shim therefore also
-   wraps `listen`/`close`/`dup2`/`dup3` (fd table of listeners, because asking the socket would block) and
+   wraps `listen`/`close`/`dup2`/`dup3` (fd table of listeners, because asking the socket does not work: SO_ACCEPTCONN says 0 and getpeername blocks) and
    `shutdown()` (no-op on listeners, otherwise real call in a helper thread, 300 ms wait; `SHIM_SHUTDOWN=passthrough|noop`
    for experiments; build with `-pthread`). With it the full suite completes (run 203: 1,417 tests, 3 m 27 s,
    7 failed = the known `CornerButtonThemeTest` plus about six flaky MockWebServer tests, `unexpected end of stream`,

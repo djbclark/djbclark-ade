@@ -12,7 +12,7 @@ jobs:
         run: |
           apt-get update -qq; apt-get install -y -qq gcc libc6-dev > /dev/null
           gcc -O2 -pthread -o /tmp/ap accept-probe.c || exit 1
-          for m in 7 6 5 4; do timeout -s KILL 8 /tmp/ap $m; echo "   (exit $?)"; done
+          for m in 7 8 5 6; do timeout -s KILL 8 /tmp/ap $m; echo "   (exit $?)"; done
           echo "--- with the same listener type in a thread-less shutdown"
           python3 - <<'PY'
           import socket
