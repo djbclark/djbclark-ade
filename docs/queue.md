@@ -776,5 +776,5 @@ works on the runner (run 239; `ghcr.io/cirruslabs/android-sdk:36` pulled in 47 s
    https://forgejo.mit.edu/djbclark/loopback-port-shim (MIT; local `~/src/loopback-port-shim`): shim, probes, docs, ticket texts,
    probe workflows, `ci/tools/` scripts, and the `forgejo-ci` skill (`skills/forgejo-ci` here is a symlink into it).
    `skills/forgejo/examples/plektra/` is a README pointer with an old-name to new-path table (tickets already filed link there).
-   SIPB/hyades#3 body points at the repo (comment 30). Remaining: the CI image's `SHIM_URL` still pins djbclark-ade commit `da6d68f`;
-   repoint it at the new repo when the shim next changes.
+   SIPB/hyades#3 body points at the repo (comment 30). The CI image's Dockerfile now pins the new repo's commit; rebuilt, digest
+   `sha256:90a5de59e4a7efaa70b4de6af3221023151a2087cfb2689cecfe18a6a1cf602e`, run 242 passed. Nothing left.
