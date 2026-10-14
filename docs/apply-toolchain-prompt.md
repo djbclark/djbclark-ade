@@ -478,7 +478,7 @@ HOMEBREW_NO_AUTO_UPDATE=1 brew install \
   shellcheck shfmt biome lychee dotenv-linter actionlint \
   openjdk coreutils caddy \
   ripgrep fd bat srgn eza hck git-delta jq yq xh ast-grep \
-  miller gnu-sed gawk uutils-coreutils dasel qsv b3sum \
+  miller gnu-sed gawk findutils grep make gnu-tar uutils-coreutils dasel qsv b3sum \
   dust gdu duf procs difftastic hyperfine tldr \
   hexyl ouch glow doggo ripgrep-all rargs entr csvlens watchexec \
   duckdb jc gron moreutils \
@@ -614,7 +614,7 @@ it on automated install lines.
 | xh | https://github.com/ducaale/xh | `brew install xh` | `curl` for JSON APIs |
 | ast-grep | https://ast-grep.github.io/ | `brew install ast-grep` | `rg` for code-shape queries |
 | `mlr` (Miller) | https://miller.readthedocs.io/ | `brew install miller` | `awk`/`sed`/`cut`/`join`/`sort` over CSV/TSV/JSON with named fields: `mlr --csv sort -f col f.csv` |
-| GNU `gsort`/`gsed`/`gawk`/`gdate` | https://www.gnu.org/software/coreutils/ | `brew install coreutils gnu-sed gawk` | BSD-vs-GNU flag drift (`sort -h`, `sed -i`, `date -d`): call the `g`-prefixed binary in scripts |
+| GNU `gsort`/`gsed`/`gawk`/`gdate`/`gfind`/`gxargs`/`ggrep`/`gmake`/`gtar` | https://www.gnu.org/software/coreutils/ | `brew install coreutils gnu-sed gawk findutils grep make gnu-tar` | BSD-vs-GNU flag drift (`sort -h`, `sed -i`, `date -d`, `find -printf`): call the `g`-prefixed binary in scripts; standing rule since 2026-10-14: prefer brew GNU tools over macOS BSD ones, install what is missing |
 | `uu-*` (uutils) | https://uutils.github.io/coreutils/ | `brew install uutils-coreutils` | portable GNU-compatible coreutils (`uu-sort`, `uu-cut`, …); its `sed`/`awk` are still in progress |
 | `dust`, `gdu` | https://github.com/bootandy/dust | `brew install dust gdu` | `du` — and never `du`/`find` over `~/.cache` (they time out) |
 | `duf` | https://github.com/muesli/duf | `brew install duf` | `df` |
