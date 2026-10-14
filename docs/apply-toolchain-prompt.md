@@ -52,6 +52,15 @@ Practical notes before you paste it:
 5. It is long on purpose. A long, specific prompt costs a few thousand input
    tokens once and saves many round trips of clarification; the token rules in
    §0.5 are where the real savings are.
+6. **Skip every Crush item unless you drive weak, small-context LLMs with it.**
+   djbclark's Crush setup (`crushrc`, `CRUSH.md`, the `crush()` shell function,
+   `web-digest`, `web-digest-mcp`, `skill-get`, `crush-context-check`, the
+   `sipb-llms-proxy`, the empty skills directory, the denied built-in tools, the
+   auto-allow hook) exists only to make Crush + Qwen on SIPB LLMs (32k window) usable. It
+   trades away skills, tools, project context and web access to save tokens, and
+   it prompts or blocks things a capable model needs. With Claude, Codex, Grok or
+   any large-context model, use that agent's own web search, skills and
+   project-instruction loading, and use stock Crush with its defaults.
 
 What changed from Version 4, so you can diff the intent rather than the text:
 Graft's install and commit policy follow its current upstream README; the
@@ -663,7 +672,10 @@ and it writes its index inside the repo. Tables, measured numbers and the
 Do not change global git config (e.g. making delta the pager) without asking.
 If the user agrees, back up `~/.gitconfig` first (§15).
 
-**Crush over ACP (temporary; added 2026-10-11, djbclark).** Crush is installed
+**Crush over ACP (temporary; added 2026-10-11, djbclark).** **Everything about Crush in this
+prompt, here and in the tool table, is for one purpose: driving weak, small-context LLMs
+(Qwen on SIPB LLMs, 32k window). Do not apply it for any other use of Crush; see Practical
+note 6.** Crush is installed
 only to use SIPB LLMs (`brew install crush`; provider in `~/.config/crush/crushrc`).
 No release has an ACP mode, so `acp-run crush` runs a local build: clone the
 fork (`gh repo clone djbclark/crush ~/src/crush`), then
