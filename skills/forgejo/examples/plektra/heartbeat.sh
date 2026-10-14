@@ -16,7 +16,18 @@ while :; do
       echo "THREADNAMES $(grep '^"' /tmp/js.$p | sed -E 's/^"([^"]*)".*/\1/; s/[0-9]+/N/g' | sort | uniq -c | sort -rn | head -8 | tr -s ' ' | tr '\n' ';')"
       grep -A32 '^"Test worker"' /tmp/js.$p | cut -c1-170
       awk 'BEGIN{RS="";ORS="\n\n"} /java.lang.Shutdown|Runtime.exit|DestroyJavaVM/' /tmp/js.$p | head -50 | cut -c1-170
+      echo "WORKER-OTHER-THREADS (not looper/GC/pool)"
+      awk 'BEGIN{RS="";ORS="\n\n"} !/queued-work-looper|DefaultDispatcher|GC Thread|Refine|Conc#|Cleaner|pool-|Compiler|Signal|Reference|Finalizer|Service Thread|Monitor|Notification|Attach|Sweeper|VM Thread/ && /org.gradle|plektra|robolectric|java.net|SocketChannel/' /tmp/js.$p | head -70 | cut -c1-170
     fi
   done
+  if [ $((i % 5)) = 4 ]; then
+    dp=$(pgrep -f 'GradleDaemon' | head -1)
+    if [ -n "$dp" ]; then
+      jstack "$dp" > /tmp/jd.$dp 2>&1
+      echo "DAEMONSTACK pid=$dp $(grep 'Thread.State' /tmp/jd.$dp | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
+      awk 'BEGIN{RS="";ORS="\n\n"} /SocketChannelImpl|EPoll|test|Test|worker/ && !/GC Thread|Refine|Conc#|Cleaner|Compiler|Signal|Reference|Finalizer|Service Thread|Attach|Sweeper|VM Thread/' /tmp/jd.$dp | head -90 | cut -c1-170
+    fi
+    echo "TCP $(awk 'NR>1{print $4}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | sort | uniq -c | tr -s ' ' | tr '\n' ';') QUEUED=$(awk 'NR>1 && $5!="00000000:00000000"{n++} END{print n+0}' /proc/net/tcp /proc/net/tcp6 2>/dev/null)"
+  fi
   i=$((i+1)); sleep 15
 done
