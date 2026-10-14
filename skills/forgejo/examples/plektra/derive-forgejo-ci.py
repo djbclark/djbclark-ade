@@ -18,6 +18,8 @@ src = src.replace("on:\n  pull_request:\n",
                   "on:\n  pull_request:\n  push:\n    branches: ['bench/**']\n", 1)
 # 2. MIT runner label (SIPB's Forgejo runner offers `ubuntu`, not `ubuntu-latest`).
 src = src.replace("runs-on: ubuntu-latest", "runs-on: ubuntu", 1)
+if os.environ.get("DERIVE_IMAGE"):
+    src = src.replace("runs-on: ubuntu\n", "runs-on: ubuntu\n    container:\n      image: " + os.environ["DERIVE_IMAGE"] + "\n", 1)
 # 3. no default actions host there: use the full URL.
 src = src.replace("uses: actions/checkout@v4", "uses: https://github.com/actions/checkout@v4", 1)
 
@@ -60,6 +62,20 @@ shim_step = ("      - name: Build loopback port-0 shim (libkrun#818 workaround)\
              "          echo /usr/local/lib/portshim.so >> /etc/ld.so.preload\n"
              "          true && python3 -c 'print(\"preload ok\")'\n")
 setup = setup + "\n" + shim_step
+# 4d. our own image (DERIVE_IMAGE=ghcr.io/djbclark/ci-image-plektra@sha256:...) already has JDK 17, the Android SDK,
+# node and /usr/local/lib/portshim.so: no install, no compile, only the system-wide preload (jobs run as root).
+IMAGE = os.environ.get("DERIVE_IMAGE")
+if IMAGE:
+    assert VARIANT == "asis", "DERIVE_IMAGE combines only with the default storage"
+    setup = ('''      - name: Toolchain and loopback shim from the image (no install, no compile)
+        run: |
+          set -euo pipefail
+          nproc; free -g | head -2
+          java -version
+          echo "ANDROID_HOME=$ANDROID_HOME"; ls "$ANDROID_HOME/platforms"
+          echo /usr/local/lib/portshim.so >> /etc/ld.so.preload
+          true && python3 -c 'print("preload ok")'
+''')
 # 4c. optional storage step BEFORE the toolchain install: the job's disk is virtiofs (small-file ops
 # 0.03-0.2x of a Mac, probed 2026-10-13); move the checkout, Gradle home and Android SDK onto a guest tmpfs
 # (mounted at /mnt/fast, 48 GiB; /dev/shm is only 32 GiB and noexec) or onto an ext4 image on a loop device. The workspace is bind-mounted over its

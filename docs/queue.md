@@ -764,8 +764,11 @@ works on the runner (run 239; `ghcr.io/cirruslabs/android-sdk:36` pulled in 47 s
    (`CornerButtonThemeTest`); (g) the SIPB and libkrun ticket map. Keep SKILL.md under about 200 lines and push detail
    into `examples/plektra/*.md`.
 
-4. **Build our own CI image** (added 2026-10-14, operator said yes): `FROM ghcr.io/cirruslabs/android-sdk:36`, plus JDK 17,
-   `nodejs` (for `actions/checkout`) and the precompiled shim at `/usr/local/lib/portshim.so` (built in a stage with `gcc`
-   so the final image needs none), pinned by digest in the workflow. Open: where it is hosted (a registry the runner can
-   pull from: forgejo.mit.edu container registry or ghcr.io), and the runner's CPU architecture (build for it). Verify on the
-   runner: pull time, a full suite run with no install and no compile step, shim loaded through `LD_PRELOAD`.
+4. **Build our own CI image: DONE 2026-10-14** (operator said yes; hosted on public ghcr.io, built by GitHub Actions for amd64).
+   `ghcr.io/djbclark/ci-image-plektra` (repo github.com/djbclark/ci-image-plektra, local `~/src/ci-image-plektra`):
+   `FROM ghcr.io/cirruslabs/android-sdk:36` + JDK 17 + node 18 + `/usr/local/lib/portshim.so` (source pinned by commit
+   `SHIM_SHA`). Run 240 on the runner: `actions/checkout` works, the shim fixes the duplex stall and 20 of 20 reuse rounds.
+   `DERIVE_IMAGE=ghcr.io/...@sha256:<digest> push-bench.sh asis BRANCH` runs the full suite on it (run 241). Remaining: bump
+   the digest when the Dockerfile changes; ask SIPB (in #3) whether they prefer to host the image themselves.
+5. **forgejo skill: DONE 2026-10-14** as the new `skills/forgejo-ci/` (CI half split out of `skills/forgejo`; evidence in
+   `skills/forgejo-ci/runner-notes.md`), linked into every TUI with `skill-everywhere`, rows in README and `docs/skills.md`.

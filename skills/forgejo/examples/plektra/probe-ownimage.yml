@@ -1,0 +1,29 @@
+name: runner probe (our own CI image)
+on:
+  push:
+    branches: ['probe/**']
+jobs:
+  ownimage:
+    runs-on: ubuntu
+    container:
+      image: ghcr.io/djbclark/ci-image-plektra@sha256:1cde5b7bbf5c68aadafef20106b1c3a82b49fc3b0069a7c1ea2e26ddb1c25848
+    steps:
+      - name: Node action works (actions/checkout) in the image
+        uses: https://github.com/actions/checkout@v4
+      - name: Toolchain, shim and probes from the image
+        shell: bash
+        run: |
+          set +e
+          t0=$(date +%s)
+          echo "user: $(id -un)"; java -version 2>&1 | head -1; node --version; git --version; echo "ANDROID_HOME=$ANDROID_HOME"; ls $ANDROID_HOME/platforms
+          ls -l /usr/local/lib/portshim.so
+          ls | head -5
+          B=https://raw.githubusercontent.com/djbclark/djbclark-ade/da6d68f/skills/forgejo/examples/plektra
+          mkdir -p /tmp/w && cd /tmp/w
+          for f in duplex-probe.c reuse-probe.c; do curl -fsSL -o $f $B/$f; done
+          gcc -O2 -pthread -o /tmp/duplex duplex-probe.c; gcc -O2 -pthread -o /tmp/rp reuse-probe.c 2>/dev/null
+          echo "--- duplex WITHOUT shim"; timeout -s KILL 40 /tmp/duplex 2>&1 | grep -E '^reader=recv'
+          echo "--- duplex WITH shim (image path)"; LD_PRELOAD=/usr/local/lib/portshim.so timeout -s KILL 40 /tmp/duplex 2>&1 | grep -E '^reader=recv'
+          echo "--- reuse-probe WITH shim, 20 rounds"; LD_PRELOAD=/usr/local/lib/portshim.so REUSE_PORT=32117 timeout -s KILL 100 /tmp/rp 20 0 jdk
+          echo "total step time: $(( $(date +%s) - t0 )) s"
+          exit 0

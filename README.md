@@ -99,7 +99,8 @@ their old paths are symlinks into this checkout).
 | [`todo`](skills/todo/SKILL.md) | Optional do-whenever tasks, kept as Basic Memory notes. |
 | [`terminus-kira`](skills/terminus-kira/SKILL.md) | Delegate a task to a sandboxed coding agent in an Apple Container VM. |
 | [`sipb-llm-bench`](skills/sipb-llm-bench/SKILL.md) | Benchmark a model on SIPB LLMs (or any OpenAI-compatible server) as a coding-agent backend: probes, tool-call conformance, two scored tasks. |
-| [`forgejo`](skills/forgejo/SKILL.md) | Use a Forgejo instance (default `forgejo.mit.edu`) with the token in `sudo-secretspec`: `setup-token`, `forgejo-api`, `tea-forgejo`. For the SIPB `ubuntu` CI runner it also records the `LD_PRELOAD` loopback shim (port 0 and `shutdown()`) Gradle needs there (libkrun#818) and the per-job resource limits (16 vCPU, 62.8 GiB, virtiofs disk with a 32 GiB tmpfs). |
+| [`forgejo`](skills/forgejo/SKILL.md) | Use a Forgejo instance (default `forgejo.mit.edu`) with the token in `sudo-secretspec`: `setup-token`, `forgejo-api`, `tea-forgejo`. CI on forgejo.mit.edu is the `forgejo-ci` skill. |
+| [`forgejo-ci`](skills/forgejo-ci/SKILL.md) | Runs CI on SIPB Hyades (forgejo.mit.edu `ubuntu`, libkrun microVMs): runner facts, job-image selection (our own `ghcr.io/djbclark/ci-image-plektra`), the loopback `LD_PRELOAD` shim for libkrun TSI bugs, probe tooling, ticket etiquette and the ticket map. |
 | [`coderabbit-feeder`](skills/coderabbit-feeder/SKILL.md) | Queue a CodeRabbit review for a PR where CodeRabbit is not installed. |
 | [`siyuan`](skills/siyuan/SKILL.md) | SiYuan notes: concepts, API, templates, flashcards; with `siyuan-article-import`, `siyuan-excalidraw`, `siyuan-markdown` (vendored from `zhiluop/siyuan-skills`). |
 | [`skillopt-sleep`](skills/skillopt-sleep/SKILL.md) | Review the nightly SkillOpt-Sleep cycle (`bin/skillopt-night`): last night's report, free mock dry-run, per-skill adoption, the backend failover chain (`chain-check`). |
