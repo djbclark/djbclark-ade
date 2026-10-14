@@ -420,6 +420,15 @@ command (one path, `~` expanded), for example a newer server unpacked to
 `mode` option and model ids before relying on it: `YOLO_SET` and
 `--model` use the stock server's names.
 
+## Crush data dir (2026-10-14)
+
+`acp-run crush` hands crush-acp `CRUSH_GLOBAL_DATA=~/.local/share/crush-acp`, the same dir the
+interactive `crush` shell function uses, so a model picked in the TUI is also the model
+`acp-run` runs on. `ACP_RUN_CRUSH_DATA=<dir>` moves it for one run (`~` expanded); the SIPB
+benchmark (`skills/sipb-llm-bench/bench.py`) sets it to a private dir with the model under test
+pinned in `crush.json` and the catalog cache `providers.json` copied in, so it never edits the
+shared file.
+
 ## Why not acpx?
 
 [acpx](https://github.com/openclaw/acpx) is the maintained general-purpose ACP CLI

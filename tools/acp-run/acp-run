@@ -204,6 +204,10 @@ async def _route_dollar_as_extension(self, method, params, is_notification):
 
 _acp_router.MessageRouter.__call__ = _route_dollar_as_extension
 
+# The Crush data dir acp-run hands crush-acp. ACP_RUN_CRUSH_DATA moves it for one run (the SIPB
+# benchmark pins a model in a private copy, 2026-10-14, so it never touches the interactive TUI's
+# crush.json in the default dir, which the `crush` shell function shares).
+CRUSH_DATA = os.path.expanduser(os.environ.get("ACP_RUN_CRUSH_DATA") or "~/.local/share/crush-acp")
 # name: (command, auth method id or None). DEFAULT_SET holds ACP session config
 # options always applied for an agent (before --set): its ACP mode can ignore
 # the TUI's own settings. Verified 2026-10-03 unless noted;
@@ -258,7 +262,7 @@ AGENTS = {
     # every acp-run crush turn to Hyper ("out of credits") instead of SIPB LLMs.
     # providers.json (the catalog cache) is copied there once.
     "crush": (["env", "CRUSH_DISABLE_METRICS=1",
-               "CRUSH_GLOBAL_DATA=" + os.path.expanduser("~/.local/share/crush-acp"),
+               "CRUSH_GLOBAL_DATA=" + CRUSH_DATA,
                "crush-acp", "acp"], "local"),
 }
 # ACP_RUN_AGY_SERVER swaps agy's server command for one run without an edit: a
@@ -301,7 +305,7 @@ YOLO_CMD = {
     # --perm all (adversary review 2026-10-12, C1c); every other policy runs
     # crush without it and its tools ask for permission.
     "crush": ["env", "CRUSH_DISABLE_METRICS=1",
-              "CRUSH_GLOBAL_DATA=" + os.path.expanduser("~/.local/share/crush-acp"),
+              "CRUSH_GLOBAL_DATA=" + CRUSH_DATA,
               "crush-acp", "acp", "--yolo"],
 }
 # Extra environment per agent. agy's ACP server runs the user's global hooks in

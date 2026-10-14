@@ -88,8 +88,9 @@ server, nothing else is required), so set that up once. It deletes the per-run c
 `~/.local/share/crush-acp/crush.json` has a `models` block** (2026-10-14). The shell
 function (`~/.bashrc`) sets `CRUSH_GLOBAL_DATA` to that dir, and the TUI's model picker
 writes the chosen model there (plus `recent_models`), so one pick of `qwen3.5:35b`
-silently overrides the crushrc default. The benchmark pins the same file and restores it
-afterwards (`pin_crush_data_model`). If the TUI opens on the wrong model, fix that file,
+silently overrides the crushrc default. The benchmark no longer touches that file: it builds
+a private data dir per run (`crush_data_dir`) and passes it to `acp-run` as
+`ACP_RUN_CRUSH_DATA`. If the TUI opens on the wrong model, fix that file,
 not crushrc: set `models.large` and `models.small` to the default, prune `recent_models`,
 and check `<project>/.crush/logs/crush.log` for `ModelProvider called` to see the model
 actually used.

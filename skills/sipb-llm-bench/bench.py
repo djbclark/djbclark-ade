@@ -115,38 +115,22 @@ def probes(label, model, effort):
     return True
 
 
-def pin_crush_data_model(model):
-    """acp-run's crush forces CRUSH_GLOBAL_DATA=~/.local/share/crush-acp, whose
-    crush.json `models` overrides the per-run crushrc; point it at the model under
-    test for the run (returns a restore callable). Without this the run silently
-    goes to whatever model that shared file holds (here, an Anthropic model) and
-    the measured `providers` is wrong."""
-    d = os.path.expanduser("~/.local/share/crush-acp")
+def crush_data_dir(model, run_dir):
+    """acp-run's crush reads CRUSH_GLOBAL_DATA/crush.json, whose `models` overrides the per-run
+    crushrc. The default dir (~/.local/share/crush-acp) is the interactive TUI's too, so the
+    benchmark builds a private one under the run dir, pins the model under test there, and
+    returns its path for ACP_RUN_CRUSH_DATA; nothing shared is touched, so a killed run leaves
+    nothing to restore (2026-10-14). Without the pin the run silently goes to whatever model
+    the shared file holds and the measured `providers` is wrong."""
+    d = f"{run_dir}/crushdata"
     os.makedirs(d, exist_ok=True)
-    path = f"{d}/crush.json"
-    try:
-        old = open(path).read()
-    except OSError:
-        old = None
-    try:
-        j = json.loads(old) if old else {}
-    except ValueError:
-        j = {}
-    j.setdefault("models", {})["large"] = {"model": model, "provider": "sipb-llms"}
-    j["models"]["small"] = {"model": model, "provider": "sipb-llms"}
-    with open(path, "w") as f:
-        f.write(json.dumps(j))
-
-    def restore():
-        if old is None:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-        else:
-            with open(path, "w") as f:
-                f.write(old)
-    return restore
+    pin = {"model": model, "provider": "sipb-llms"}
+    with open(f"{d}/crush.json", "w") as f:
+        f.write(json.dumps({"models": {"large": pin, "small": dict(pin)}}))
+    cat = os.path.expanduser("~/.local/share/crush-acp/providers.json")   # catalog cache
+    if os.path.exists(cat):
+        shutil.copy(cat, f"{d}/providers.json")
+    return d
 
 
 def make_rc(model, think, effort, dest):
@@ -202,10 +186,9 @@ def run_task_inner(label, model, think, effort, task, cap, prompt_file, rules, e
         sh("git add -A && git commit -qm init", proj)
     env = dict(os.environ)
     crush = runner is DEFAULT_RUNNER
-    restore = None
     if crush:                                     # private crush config + data dir per run
         make_rc(model, think, effort, xdg)
-        restore = pin_crush_data_model(model)
+        env["ACP_RUN_CRUSH_DATA"] = crush_data_dir(model, d)
         if rules:
             shutil.copy(rules, f"{xdg}/crush/CRUSH.md")
         os.makedirs(f"{xdgd}/crush", exist_ok=True)
@@ -227,8 +210,6 @@ def run_task_inner(label, model, think, effort, task, cap, prompt_file, rules, e
         err = p.stderr[-600:]; rc = p.returncode
     except subprocess.TimeoutExpired:
         err = "harness-timeout"; rc = 124
-    if restore:
-        restore()
     secs = time.time() - t0
     m = re.search(r"stop=(\S+) secs=([\d.]+) tools=(\d+)", err)     # acp-run's summary line
     thoughts = 0
@@ -288,10 +269,9 @@ def run_essentials(label, model, think, effort, runner, rules, extra, only=None,
         os.makedirs(proj)
         mod.seed_project(proj, task)
         env = dict(os.environ)
-        restore = None
         if runner is DEFAULT_RUNNER:
             make_rc(model, think, effort, xdg)
-            restore = pin_crush_data_model(model)
+            env["ACP_RUN_CRUSH_DATA"] = crush_data_dir(model, d)
             if rules:
                 shutil.copy(rules, f"{xdg}/crush/CRUSH.md")
             os.makedirs(f"{xdgd}/crush", exist_ok=True)
@@ -312,8 +292,6 @@ def run_essentials(label, model, think, effort, runner, rules, extra, only=None,
             err, rc = p.stderr[-600:], p.returncode
         except subprocess.TimeoutExpired:
             err, rc = "harness-timeout", 124
-        if restore:
-            restore()
         secs = time.time() - t0
         try:
             ok, detail = task["verify"](proj)
