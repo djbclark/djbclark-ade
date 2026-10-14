@@ -9,8 +9,11 @@
 
 PATH is relative to /api/v1, or a full https://HOST/... URL on the same host (release
 attachment downloads). --output writes the raw response bytes to a file instead of printing.
+--data @- reads the JSON body from stdin (for bodies holding a secret, e.g. an Actions
+secret: `... | jq -Rs '{data: .}' | forgejo-api PUT /repos/O/R/actions/secrets/N --data @- --yes`).
 HOST defaults to forgejo.mit.edu. The token is read from
-DJBCLARK_<HOST>_TOKEN (forgejo.mit.edu -> DJBCLARK_FORGEJO_MIT_EDU_TOKEN); when
+DJBCLARK_<HOST>_TOKEN (forgejo.mit.edu -> DJBCLARK_FORGEJO_MIT_EDU_TOKEN), or from
+the variable named by FORGEJO_TOKEN_VAR (a narrower token, e.g. a package one); when
 it is not in the environment this script re-runs itself under
 `sudo-secretspec run`, so the value never appears in an argument, a file or the
 transcript. Anything but GET/HEAD needs --yes, or --dry-run to print the plan.
@@ -63,16 +66,23 @@ def main() -> int:
         ap.error(f"{method} mutates the server: pass --yes, or --dry-run to preview")
 
     body = None
+    raw = None
     if a.data:
-        raw = open(a.data[1:]).read() if a.data.startswith("@") else a.data
+        if a.data == "@-":
+            raw = sys.stdin.read()
+        elif a.data.startswith("@"):
+            raw = open(a.data[1:]).read()
+        else:
+            raw = a.data
         body = json.loads(raw)  # fail early on bad JSON
 
     url = path if path.startswith(site) else f"https://{a.host}/api/v1{path}"
     if a.dry_run:
-        print(json.dumps({"method": method, "url": url, "body": body}, indent=2))
+        shown = {"data": "<from stdin, not shown>"} if a.data == "@-" else body
+        print(json.dumps({"method": method, "url": url, "body": shown}, indent=2))
         return 0
 
-    var = secret_name(a.host)
+    var = os.environ.get("FORGEJO_TOKEN_VAR") or secret_name(a.host)
     token = os.environ.get(var)
     if not token:
         if os.environ.get("FORGEJO_API_REEXEC"):
@@ -80,9 +90,10 @@ def main() -> int:
                   f"(run setup-token {a.host})", file=sys.stderr)
             return 2
         env = dict(os.environ, FORGEJO_API_REEXEC="1")
-        return subprocess.call(
+        return subprocess.run(
             ["sudo-secretspec", "run", "--reason", f"Forgejo API call to {a.host}", "--",
-             sys.executable, os.path.abspath(__file__), *sys.argv[1:]], env=env)
+             sys.executable, os.path.abspath(__file__), *sys.argv[1:]], env=env,
+            input=raw if a.data == "@-" else None, text=True).returncode
 
     req = urllib.request.Request(
         url, method=method,

@@ -1,0 +1,74 @@
+# Hyades console help, captured 2026-10-14 over ssh djbclark@hyades.mit.edu
+# (one-line docstrings; behaviour and caveats are in console.md)
+
+$ ssh djbclark@hyades.mit.edu help
+
+Documented commands (type help <topic>):
+========================================
+EOF     edit     exit     impvol  logs        rmvol    status      update   
+create  editssh  expvol   kill    lsvol       setconf  stop        updtoken 
+delete  entergp  getconf  list    regenerate  start    timetravel  wordpress
+df      exec     help     login   restart     stats    tmprun    
+
+$ ssh djbclark@hyades.mit.edu help EOF
+EOF: Exit on Ctrl-D
+$ ssh djbclark@hyades.mit.edu help create
+create NAME IMAGE PORT?: Create new microVM
+$ ssh djbclark@hyades.mit.edu help delete
+delete NAME: Delete microVM (does NOT delete its volumes)
+$ ssh djbclark@hyades.mit.edu help df
+df: Get disk usage of images and volumes
+$ ssh djbclark@hyades.mit.edu help edit
+edit: Edit Hyades config
+$ ssh djbclark@hyades.mit.edu help editssh
+editssh: Edit ~/.ssh/authorized_keys
+$ ssh djbclark@hyades.mit.edu help entergp
+entergp GROUP CMD?: Enter a Moira group account and optionally run a command
+$ ssh djbclark@hyades.mit.edu help exec
+exec NAME CMD: Execute command inside microVM
+$ ssh djbclark@hyades.mit.edu help exit
+exit: Exit the Hyades console
+$ ssh djbclark@hyades.mit.edu help expvol
+expvol VOL: Export volume to stdout
+$ ssh djbclark@hyades.mit.edu help getconf
+getconf NAME?: Get configuration for microVM (useful for scripting)
+$ ssh djbclark@hyades.mit.edu help help
+List available commands with "help" or detailed help with "help cmd".
+$ ssh djbclark@hyades.mit.edu help impvol
+impvol VOL: Import volume from stdin
+$ ssh djbclark@hyades.mit.edu help kill
+kill NAME: Kill microVM
+$ ssh djbclark@hyades.mit.edu help list
+list: Get list of microVMs
+$ ssh djbclark@hyades.mit.edu help login
+login REGISTRY: Authenticate to OCI image registry
+$ ssh djbclark@hyades.mit.edu help logs
+logs NAME: Get logs of microVM
+$ ssh djbclark@hyades.mit.edu help lsvol
+lsvol: List all volumes on disk
+$ ssh djbclark@hyades.mit.edu help regenerate
+regenerate: Regenerate internal files from Hyades config
+$ ssh djbclark@hyades.mit.edu help restart
+restart NAME: Restart microVM
+$ ssh djbclark@hyades.mit.edu help rmvol
+rmvol VOL: Delete volume from disk
+$ ssh djbclark@hyades.mit.edu help setconf
+setconf NAME: Set configuration for microVM (useful for scripting)
+$ ssh djbclark@hyades.mit.edu help start
+start NAME: Start microVM
+$ ssh djbclark@hyades.mit.edu help stats
+stats: Monitor resource usage of microVMs
+$ ssh djbclark@hyades.mit.edu help status
+status NAME: Get status of microVM
+$ ssh djbclark@hyades.mit.edu help stop
+stop NAME: Stop microVM
+$ ssh djbclark@hyades.mit.edu help timetravel
+timetravel DATE?: Get Hyades configuration at a previous date
+$ ssh djbclark@hyades.mit.edu help tmprun
+tmprun IMAGE CMD?: Run a temporary microVM with all volumes mounted
+$ ssh djbclark@hyades.mit.edu help update
+update: Check all images for updates
+$ ssh djbclark@hyades.mit.edu help updtoken
+updtoken: Generate a token for triggering updates
+$ ssh djbclark@hyades.mit.edu help wordpress
+wordpress NAME: One-command installer for WordPress

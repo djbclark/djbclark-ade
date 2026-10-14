@@ -4,7 +4,8 @@ description: >-
   Use a Forgejo instance (forgejo.mit.edu by default) from an agent: issues,
   pull requests, repos, any /api/v1 endpoint, with the token held in
   sudo-secretspec. Use when a task mentions Forgejo, forgejo.mit.edu, Codeberg,
-  `fj`, `tea`, or needs a Forgejo/Gitea API token set up or rotated.
+  `fj`, `tea`, or needs a Forgejo/Gitea API token set up or rotated. Deploying
+  images to SIPB Hyades (*.sipb.cloud) is the hyades-docker skill.
 ---
 
 # Forgejo
@@ -24,6 +25,10 @@ Default host `forgejo.mit.edu` (Forgejo 16.0.5, Gitea-1.22-compatible API, probe
    was run by mistake; it posted nothing, this line is the fix). `--output FILE` saves the raw bytes (binary-safe), and PATH
    may be a full `https://HOST/...` URL on the same host, so `forgejo-api --output app.apk GET <browser_download_url>`
    downloads a private release asset; a redirect to another host never gets the token (2026-10-14).
+   `--data @-` reads the body from stdin, for bodies holding a secret (an Actions secret:
+   `printf %s "$V" | jq -Rs '{data: .}' | forgejo-api PUT /repos/O/R/actions/secrets/NAME --data @- --yes`,
+   or `/user/actions/secrets/NAME` for every repo you own); `FORGEJO_TOKEN_VAR=OTHER_VAR` uses a
+   different stored token (2026-10-14).
 2. `scripts/tea-forgejo` — `tea` (brew, v0.16.0) with the secret mapped onto its
    env login (`GITEA_INSTANCE_URL` + `GITEA_TOKEN`), so nothing lands in
    `~/.config/tea`. Best for `issues`, `pulls`, `releases`, `api`.
@@ -46,7 +51,10 @@ Run `scripts/setup-token [HOST]`. It declares `DJBCLARK_FORGEJO_MIT_EDU_TOKEN`
 (optional, so `check` stays green on hosts without it), opens the token page in
 the default browser, lets `sudo-secretspec set` take the pasted value, then
 verifies it with `GET /user` and prints only the login. The name is
-`DJBCLARK_<HOST upper-cased, . and - as _>_TOKEN`.
+`DJBCLARK_<HOST upper-cased, . and - as _>_TOKEN`. `setup-token HOST PURPOSE` makes a
+second, narrower token `DJBCLARK_<HOST>_<PURPOSE>_TOKEN`: `setup-token forgejo.mit.edu
+PACKAGE` is the `write:package`-only token for container pushes and Hyades CI
+(`hyades-docker` skill), verified with `GET /packages/djbclark`.
 
 The declaration is a runtime `add`. On this machine `sudo-secretspec
 template-check` says "no tracked declaration source configured" (2026-10-13), so
@@ -72,6 +80,19 @@ ticket etiquette and the SIPB/libkrun ticket map. The evidence behind it, unchan
 `docs/runner-notes.md` in the new public repo **https://forgejo.mit.edu/djbclark/loopback-port-shim** (local `~/src/loopback-port-shim`), which
 is also where the shim, probes, probe workflows and `ci/tools/` scripts now live (`skills/forgejo/examples/plektra/` is only a pointer). Compare runs with
 `scripts/ci-step-times forgejo OWNER/REPO RUN` and `... github OWNER/REPO RUN`.
+
+## Container registry and Hyades deploys
+
+forgejo.mit.edu is also SIPB's OCI registry (`forgejo.mit.edu/OWNER/NAME`, Packages
+tab) and the image source for **Hyades**, SIPB's microVM hosting (`*.sipb.cloud`).
+That side is the **`hyades-docker` skill** (`skills/hyades-docker/`): its
+`hyades-registry push IMAGE` runs podman (preferred) or docker logged in with the
+package token through a throwaway auth file (never a bare `podman login`, which saves
+the token in `auth.json`), and `hyades-ci-secrets OWNER/REPO --yes` puts
+`PACKAGE_TOKEN`/`UPDATE_TOKEN` into Actions secrets for the
+[SIPB/hyades-action](https://forgejo.mit.edu/SIPB/hyades-action) build-push-update
+step, using `forgejo-api --data @-` above. Package listing stays here:
+`forgejo-api GET '/packages/OWNER?type=container'`.
 
 ## Agent loop (local agent <-> Forgejo CI, no agent on the server)
 

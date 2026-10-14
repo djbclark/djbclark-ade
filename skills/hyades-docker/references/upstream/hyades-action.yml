@@ -1,0 +1,54 @@
+name: 'Hyades Action'
+description: 'Composite CI action for building and deploying a Docker image to Hyades'
+
+inputs:
+  package_token:
+    description: 'Token for pushing to the Forgejo registry'
+    required: true
+  update_token:
+    description: 'Token for triggering Hyades update'
+    required: false
+    default: ''
+  containerfiles:
+    description: 'Dockerfile path'
+    required: false
+    default: './Dockerfile'
+  tags:
+    description: 'Tag(s) for the built image'
+    required: false
+    default: 'latest'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Use tmpfs
+      shell: bash
+      run: |
+        if [ ! -d /var/lib/containers/storage ]; then
+          mkdir -p /var/lib/containers/storage
+          mount -t tmpfs tmpfs /var/lib/containers/storage
+        fi
+
+    - name: Build image
+      id: build
+      uses: https://github.com/redhat-actions/buildah-build@v3
+      with:
+        image: ${{ github.repository }}
+        containerfiles: ${{ inputs.containerfiles }}
+        tags: ${{ inputs.tags }}
+        extra-args: --network=host
+
+    - name: Push to Forgejo registry
+      uses: https://github.com/redhat-actions/push-to-registry@v3
+      with:
+        image: ${{ steps.build.outputs.image }}
+        tags: ${{ steps.build.outputs.tags }}
+        registry: forgejo.mit.edu
+        username: ${{ github.actor }}
+        password: ${{ inputs.package_token }}
+
+    - name: Trigger Hyades update
+      if: ${{ inputs.update_token != '' }}
+      shell: bash
+      run: |
+        curl -s --fail -X POST -H "X-Token: ${{ inputs.update_token }}" https://hyades.mit.edu

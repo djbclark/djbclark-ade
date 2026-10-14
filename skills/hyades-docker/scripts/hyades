@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# hyades — run one Hyades console command over SSH, with a real exit status.
+#
+#   hyades                               # interactive console (needs a terminal)
+#   hyades list | getconf [NAME] | status NAME | logs NAME | lsvol | df
+#   hyades setconf NAME "$(jq -c . conf.json)"
+#   hyades -g GROUP list                 # same, inside Moira group account GROUP
+#   printf 'ls /mnt\n' | hyades tmprun docker.io/library/alpine
+#
+# The console exits 0 even when a command fails (Python traceback, podman or
+# krun "Error:", "*** Unknown syntax"), so for every command that ends on its
+# own this wrapper saves the output, prints it, and exits 1 if it holds one of
+# those markers. `stats` streams until killed: run it under `timeout`.
+# HYADES_USER (default djbclark) and HYADES_HOST (default hyades.mit.edu).
+set -uo pipefail
+HOST="${HYADES_HOST:-hyades.mit.edu}"
+DEST="${HYADES_USER:-djbclark}@${HOST}"
+SSH=(ssh -o BatchMode=yes)
+
+group=""
+if [ "${1:-}" = "-g" ]; then group="$2"; shift 2; fi
+
+if [ $# -eq 0 ]; then
+  [ -t 0 ] || { echo "hyades: the interactive console needs a terminal; pass a command" >&2; exit 2; }
+  if [ -n "$group" ]; then exec ssh -t "$DEST" entergp "$group"; fi
+  exec ssh -t "$DEST"
+fi
+
+cmd="$1"
+case "$cmd" in
+  help|'?') ;;
+  *) [ "${2:-}" = "--help" ] && { echo "hyades: never pass --help; use: hyades help $cmd" >&2; exit 2; } ;;
+esac
+
+remote=("$@")
+[ -n "$group" ] && remote=(entergp "$group" "$@")
+
+case "$cmd" in
+  edit|editssh|login)
+    # Editors (rnano, `edit v` = rvim) and podman login's password prompt.
+    [ -t 0 ] || { echo "hyades: '$cmd' is interactive; run it in a terminal (or use setconf for scripting)" >&2; exit 2; }
+    exec ssh -t "$DEST" "${remote[@]}" ;;
+  stats)
+    exec "${SSH[@]}" -t "$DEST" "${remote[@]}" ;;
+esac
+
+out="$(mktemp)"
+trap 'rm -f "$out"' EXIT
+"${SSH[@]}" "$DEST" "${remote[@]}" > "$out" 2>&1
+rc=$?
+cat "$out"
+[ $rc -ne 0 ] && exit $rc
+if rg -q -e '^Traceback \(most recent call last\)' -e '^Error: ' -e '^\*\*\* Unknown syntax' \
+      -e '^Failed to ' -e '^Unit .* could not be found' -e "^Couldn't execute" "$out"; then
+  exit 1
+fi
+exit 0

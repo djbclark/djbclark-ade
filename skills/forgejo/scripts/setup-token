@@ -1,25 +1,35 @@
 #!/usr/bin/env bash
 # setup-token — get a Forgejo personal access token into sudo-secretspec.
 #
-#   setup-token [HOST]        HOST defaults to forgejo.mit.edu
+#   setup-token [HOST] [PURPOSE]   HOST defaults to forgejo.mit.edu
 #
 # The secret name is DJBCLARK_<HOST, upper-cased, . and - as _>_TOKEN, so
-# forgejo.mit.edu -> DJBCLARK_FORGEJO_MIT_EDU_TOKEN. Steps: declare the name
-# (optional, so `check` stays green on hosts without it), open the token page in
-# the default browser, let sudo-secretspec prompt for the value (it never
-# touches this script, a file, or the transcript), then verify the token with a
-# read-only GET /user that prints only the login.
+# forgejo.mit.edu -> DJBCLARK_FORGEJO_MIT_EDU_TOKEN. With PURPOSE (upper case,
+# e.g. PACKAGE) it is DJBCLARK_<HOST>_<PURPOSE>_TOKEN: a second, narrower token.
+# `setup-token forgejo.mit.edu PACKAGE` is the write:package-only token that
+# podman login and Hyades CI (the hyades-docker skill) use. Steps: declare the
+# name (optional, so `check` stays green on hosts without it), open the token
+# page in the default browser, let sudo-secretspec prompt for the value (it
+# never touches this script, a file, or the transcript), then verify it with a
+# read-only call that prints only the login (or the package count).
 set -uo pipefail
 
 HOST="${1:-forgejo.mit.edu}"
+PURPOSE="${2:-}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUFFIX="$(printf '%s' "$HOST" | tr 'a-z.-' 'A-Z__')"
-NAME="DJBCLARK_${SUFFIX}_TOKEN"
-REASON="Forgejo API token for ${HOST}"
+if [ -n "$PURPOSE" ]; then
+  [[ "$PURPOSE" =~ ^[A-Z][A-Z0-9_]*$ ]] || { echo "PURPOSE must be upper case, e.g. PACKAGE" >&2; exit 2; }
+  NAME="DJBCLARK_${SUFFIX}_${PURPOSE}_TOKEN"
+  REASON="Forgejo ${PURPOSE} token for ${HOST}"
+else
+  NAME="DJBCLARK_${SUFFIX}_TOKEN"
+  REASON="Forgejo API token for ${HOST}"
+fi
 
 echo "== 1/4 declare ${NAME}"
 if out=$(sudo-secretspec add "$NAME" --optional \
-    --description "Forgejo personal access token for https://${HOST}/api/v1" \
+    --description "Forgejo personal access token${PURPOSE:+ (${PURPOSE})} for https://${HOST}" \
     --reason "$REASON" 2>&1); then
   echo "declared (runtime declaration; template-check has no tracked source on this machine)"
 else
@@ -28,13 +38,23 @@ fi
 
 echo
 echo "== 2/4 create the token in your browser"
-cat <<EOF
+if [ "$PURPOSE" = PACKAGE ]; then
+  cat <<EOF
+Settings > Applications > Generate New Token. Name it e.g. "djbclark-packages".
+Scope: write:package ONLY (it implies read:package). Repository access: all.
+This token ends up as the PACKAGE_TOKEN CI secret in Hyades-deployed repos, so
+keep it this narrow. (Hyades' own console \`login\` wants a separate read:package
+token; see the hyades-docker skill.)
+EOF
+else
+  cat <<EOF
 Settings > Applications > Generate New Token. Name it e.g. "djbclark-agents".
 Suggested scopes (the token page shows the value ONCE; leave unticked what you
 do not need):
   read:user  write:repository  write:issue  read:organization  read:notification
 Add write:organization / write:package / write:admin only if you need them.
 EOF
+fi
 open "https://${HOST}/user/settings/applications" || echo "open failed: visit that URL yourself"
 
 echo
@@ -46,9 +66,19 @@ if ! sudo-secretspec set "$NAME" --reason "$REASON"; then
 fi
 
 echo
-echo "== 4/4 verify (prints only the login)"
-if sudo-secretspec run --reason "verify ${NAME}" -- \
-    python3 "$HERE/forgejo-api" --host "$HOST" whoami; then
+echo "== 4/4 verify"
+if [ -n "$PURPOSE" ]; then
+  owner="${FORGEJO_USER:-djbclark}"
+  check=(env FORGEJO_TOKEN_VAR="$NAME" python3 "$HERE/forgejo-api" --host "$HOST" GET "/packages/${owner}?limit=50")
+else
+  check=(python3 "$HERE/forgejo-api" --host "$HOST" whoami)
+fi
+if res=$(sudo-secretspec run --reason "verify ${NAME}" -- "${check[@]}"); then
+  if [ -n "$PURPOSE" ]; then
+    echo "packages visible to ${owner}: $(printf '%s' "$res" | jq length)"
+  else
+    echo "$res"
+  fi
   echo "OK: ${NAME} works against https://${HOST}"
 else
   echo "FAILED: the stored token was rejected (401/403) or the host is unreachable." >&2
