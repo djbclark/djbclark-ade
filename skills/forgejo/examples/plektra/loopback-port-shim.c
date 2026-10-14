@@ -15,6 +15,8 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -75,6 +77,7 @@ int bind(int fd, const struct sockaddr *addr, socklen_t len) {
  * another thread sits in accept(). So listening fds are recorded in listen() and forgotten in close()/dup2(). */
 #define MAXFD 65536
 static volatile unsigned char listening[MAXFD];
+static volatile unsigned char sockfd[MAXFD];   /* blocking-capable TCP sockets (socket()/accept() results) */
 
 typedef int (*listen_fn)(int, int);
 int listen(int fd, int backlog) {
@@ -89,7 +92,7 @@ typedef int (*close_fn)(int);
 int close(int fd) {
     static close_fn real;
     if (!real) real = (close_fn)dlsym(RTLD_NEXT, "close");
-    if (fd >= 0 && fd < MAXFD) listening[fd] = 0;
+    if (fd >= 0 && fd < MAXFD) { listening[fd] = 0; sockfd[fd] = 0; }
     return real(fd);
 }
 
@@ -97,7 +100,7 @@ typedef int (*dup2_fn)(int, int);
 int dup2(int oldfd, int newfd) {
     static dup2_fn real;
     if (!real) real = (dup2_fn)dlsym(RTLD_NEXT, "dup2");
-    if (newfd >= 0 && newfd < MAXFD) listening[newfd] = 0;
+    if (newfd >= 0 && newfd < MAXFD) { listening[newfd] = 0; sockfd[newfd] = 0; }
     return real(oldfd, newfd);
 }
 
@@ -105,8 +108,79 @@ typedef int (*dup3_fn)(int, int, int);
 int dup3(int oldfd, int newfd, int flags) {
     static dup3_fn real;
     if (!real) real = (dup3_fn)dlsym(RTLD_NEXT, "dup3");
-    if (newfd >= 0 && newfd < MAXFD) listening[newfd] = 0;
+    if (newfd >= 0 && newfd < MAXFD) { listening[newfd] = 0; sockfd[newfd] = 0; }
     return real(oldfd, newfd, flags);
+}
+
+/* Third TSI bug (found 2026-10-14, runs 224-227 duplex-probe.c): while one thread is blocked in recv()/read()/accept()
+ * on a socket, send() and every other call on that socket from another thread blocks too (shutdown, getpeername: the
+ * earlier hangs; a WebSocket client's writer thread behind its reader thread: the 3 OpenAiLiveSpeechClientTest
+ * timeouts). A thread parked in poll() does not hold it. So a BLOCKING read or accept on a TCP socket first waits in
+ * poll() and only then reads, which no longer blocks. Signals still interrupt the poll (EINTR), so the JDK's
+ * close-wakes-blocked-thread trick keeps working. Non-blocking sockets and MSG_DONTWAIT calls pass straight through. */
+typedef int (*socket_fn)(int, int, int);
+int socket(int domain, int type, int proto) {
+    static socket_fn real;
+    if (!real) real = (socket_fn)dlsym(RTLD_NEXT, "socket");
+    int fd = real(domain, type, proto);
+    if (fd >= 0 && fd < MAXFD) sockfd[fd] = (domain == AF_INET || domain == AF_INET6) && (type & 0xff) == SOCK_STREAM;
+    return fd;
+}
+
+/* 0: go ahead and call the real function; -1 (errno set, EINTR for a signal): the wait failed. */
+static int wait_readable(int fd, int flags) {
+    if (fd < 0 || fd >= MAXFD || !sockfd[fd] || (flags & MSG_DONTWAIT)) return 0;
+    int fl = fcntl(fd, F_GETFL);
+    if (fl < 0 || (fl & O_NONBLOCK)) return 0;
+    struct pollfd pf = {fd, POLLIN, 0};
+    for (;;) { int r = poll(&pf, 1, -1); if (r > 0) return 0; if (r < 0) return -1; }
+}
+
+typedef ssize_t (*read_fn)(int, void *, size_t);
+ssize_t read(int fd, void *buf, size_t n) {
+    static read_fn real;
+    if (!real) real = (read_fn)dlsym(RTLD_NEXT, "read");
+    if (wait_readable(fd, 0) < 0) return -1;
+    return real(fd, buf, n);
+}
+typedef ssize_t (*recv_fn)(int, void *, size_t, int);
+ssize_t recv(int fd, void *buf, size_t n, int flags) {
+    static recv_fn real;
+    if (!real) real = (recv_fn)dlsym(RTLD_NEXT, "recv");
+    if (wait_readable(fd, flags) < 0) return -1;
+    return real(fd, buf, n, flags);
+}
+typedef ssize_t (*recvfrom_fn)(int, void *, size_t, int, struct sockaddr *, socklen_t *);
+ssize_t recvfrom(int fd, void *buf, size_t n, int flags, struct sockaddr *a, socklen_t *l) {
+    static recvfrom_fn real;
+    if (!real) real = (recvfrom_fn)dlsym(RTLD_NEXT, "recvfrom");
+    if (wait_readable(fd, flags) < 0) return -1;
+    return real(fd, buf, n, flags, a, l);
+}
+typedef ssize_t (*recvmsg_fn)(int, struct msghdr *, int);
+ssize_t recvmsg(int fd, struct msghdr *m, int flags) {
+    static recvmsg_fn real;
+    if (!real) real = (recvmsg_fn)dlsym(RTLD_NEXT, "recvmsg");
+    if (wait_readable(fd, flags) < 0) return -1;
+    return real(fd, m, flags);
+}
+typedef int (*accept_fn)(int, struct sockaddr *, socklen_t *);
+int accept(int fd, struct sockaddr *a, socklen_t *l) {
+    static accept_fn real;
+    if (!real) real = (accept_fn)dlsym(RTLD_NEXT, "accept");
+    if (wait_readable(fd, 0) < 0) return -1;
+    int c = real(fd, a, l);
+    if (c >= 0 && c < MAXFD) sockfd[c] = 1;
+    return c;
+}
+typedef int (*accept4_fn)(int, struct sockaddr *, socklen_t *, int);
+int accept4(int fd, struct sockaddr *a, socklen_t *l, int flags) {
+    static accept4_fn real;
+    if (!real) real = (accept4_fn)dlsym(RTLD_NEXT, "accept4");
+    if (wait_readable(fd, 0) < 0) return -1;
+    int c = real(fd, a, l, flags);
+    if (c >= 0 && c < MAXFD) sockfd[c] = 1;
+    return c;
 }
 
 typedef int (*shutdown_fn)(int, int);
