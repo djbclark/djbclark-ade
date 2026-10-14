@@ -39,7 +39,8 @@ TOOL = {
 
 
 def call(args: dict) -> dict:
-    q = str(args.get("question") or "").strip()
+    # a small model guesses the argument name (2026-10-14: `query`); accept the usual aliases
+    q = str(next((args[k] for k in ("question", "query", "q", "search", "text") if args.get(k)), "")).strip()
     if not q:
         return {"content": [{"type": "text", "text": "web_search needs a non-empty `question`."}], "isError": True}
     cmd = [WEB_DIGEST, q]
