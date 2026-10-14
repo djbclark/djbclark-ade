@@ -18,6 +18,7 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -113,6 +114,10 @@ static void *sd_thread(void *p) {
 int shutdown(int fd, int how) {
     if (!real_shutdown) real_shutdown = (shutdown_fn)dlsym(RTLD_NEXT, "shutdown");
     if (fd >= 0 && fd < MAXFD && listening[fd]) return 0;
+    static int mode = -1;   /* SHIM_SHUTDOWN: async (default) | passthrough | noop, for experiments */
+    if (mode < 0) { const char *e = getenv("SHIM_SHUTDOWN"); mode = !e ? 0 : !strcmp(e, "passthrough") ? 1 : !strcmp(e, "noop") ? 2 : 0; }
+    if (mode == 1) return real_shutdown(fd, how);
+    if (mode == 2) return 0;
     struct sd *a = calloc(1, sizeof *a);
     pthread_t t;
     if (!a) return real_shutdown(fd, how);

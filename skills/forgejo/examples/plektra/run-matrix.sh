@@ -45,7 +45,7 @@ run_one() {  # NAME STORAGE BRANCH MAXMIN [FULL_CMD]
 { echo "# Matrix started $(date -u +%FT%TZ)"; } > "$SUM"
 if [ "${MATRIX_MODE:-}" = diag ]; then   # one full-suite run with thread dumps of the hung test worker
   export DERIVE_STEP_MIN=${DIAG_STEP_MIN:-16}
-  run_one diag-asis asis bench/mit-diag $((DERIVE_STEP_MIN*2+20)) "./gradlew :app:testStableDebugUnitTest --info"
+  run_one diag-asis asis bench/mit-diag $((DERIVE_STEP_MIN*2+20)) "${DIAG_CMD:-./gradlew :app:testStableDebugUnitTest --info}"
   echo; echo "# Matrix finished $(date -u +%FT%TZ)" >> "$SUM"
   "$HOME/.local/bin/hermes-ping" "djbclark-ade: forgejo CI diag run finished, see $SUM"; exit 0
 fi
