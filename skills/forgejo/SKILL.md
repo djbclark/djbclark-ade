@@ -87,20 +87,28 @@ Runner: SIPB's `sipbphus` (Forgejo Runner v13.1.0), docs in `SIPB/hyades`
    `/etc/ld.so.preload` does. `derive-forgejo-ci.py` adds this step. `--no-daemon` does
    not help (Gradle forks a single-use daemon over the same socket). `examples/plektra/sipb-loopback-report.md`
    has the report and the 2026-10-13 update.
-   **Second TSI bug, found 2026-10-14 (runs 189-206): `shutdown(2)` and `getpeername`
-   block while another thread is blocked in `accept()` or `read()` on the same socket
-   (`getsockopt(SO_ACCEPTCONN)` returns at once but says 0 for a listener).** Java's
-   `ServerSocket.close()`/`Socket.close()` call `shutdown()` first, so okhttp MockWebServer tests
-   hung the test worker forever (the full `testStableDebugUnitTest` step stalled until its
-   timeout; the runner then logs `context deadline exceeded` tearing the container down; **disk speed
-   was not the cause: as-is, tmpfs and loop storage all hung identically**). The shim therefore also
-   wraps `listen`/`close`/`dup2`/`dup3` (fd table of listeners, because asking the socket does not work: SO_ACCEPTCONN says 0 and getpeername blocks) and
-   `shutdown()` (no-op on listeners, otherwise real call in a helper thread, 300 ms wait; `SHIM_SHUTDOWN=passthrough|noop`
-   for experiments; build with `-pthread`). With it the full suite completes (run 203: 1,417 tests, 3 m 27 s,
-   7 failed = the known `CornerButtonThemeTest` plus about six flaky MockWebServer tests, `unexpected end of stream`,
-   different ones each run, also with `shutdown()` a no-op, so a TSI loopback data issue not fixed by the shim).
-   Diagnosis tools: `heartbeat.sh` (jstack of the test worker and Gradle daemon every 75 s), `run-matrix.sh`
-   (`MATRIX_MODE=diag`, `DIAG_CMD`), `push-probe.sh`, `probe-shutdown*.yml`, `probe-accept.yml`.
+   **Three more TSI behaviours, found and worked around 2026-10-14 (runs 189-228), all in the same shim:**
+   (a) **A thread blocked in `recv()`/`read()`/`accept()` on a socket blocks every other call on that socket
+   from other threads: `send()`, `shutdown()`, `getpeername()`** (`getsockopt(SO_ACCEPTCONN)` returns at once
+   but says 0 for a listener). Java's `ServerSocket.close()`/`Socket.close()` call `shutdown()` first, so okhttp
+   MockWebServer tests hung the test worker forever (**disk speed was not the cause: as-is, tmpfs and loop
+   storage all hung identically**), and a WebSocket client's writer thread stalled behind its reader thread (the
+   deterministic `OpenAiLiveSpeechClientTest` 3 s timeouts). A thread parked in `poll()` does not hold the lock, so the
+   shim waits in `poll()` before every blocking `read`/`recv`/`recvfrom`/`recvmsg`/`accept`/`accept4` on a TCP
+   socket (fd table kept from `socket()`/`accept()`), and still wraps `listen`/`close`/`dup2`/`dup3`/`shutdown()`
+   (no-op on listeners, otherwise real call in a helper thread with a 300 ms wait; `SHIM_SHUTDOWN=passthrough|noop`
+   for experiments; build with `-pthread`). Probe: `duplex-probe.c` (`probe-duplex.yml`). (b) **A port number
+   reused right after its listener closed lands the new listener's connections on the old one**
+   (`unexpected end of stream`, `Broken pipe`): the shim's old random port seed repeated within a second, so
+   consecutive MockWebServers got the same port. The shim now seeds from the nanosecond clock and skips the last 4096
+   ports it handed out. (c) With `SO_REUSEADDR` on both sockets, a second `bind()`+`listen()` on a port that
+   already has a listener succeeds (a normal kernel returns `EADDRINUSE`; `dup-bind-probe.py`). Java sets
+   `SO_REUSEADDR` on `ServerSocket` by default, so neither the kernel nor the shim sees a collision.
+   Results: full suite run 203 (before): 1,417 tests, 7 failed; run 222 (port fix): 4 failed; the Java
+   okhttp/MockWebServer churn repro (`java-churn/`, `probe-javachurn.yml`) went from about 30% failures to 0 of 800 and
+   from 150 s to 1 s per 800 iterations. Diagnosis tools: `heartbeat.sh` (jstack of the test worker and Gradle daemon
+   every 75 s), `run-matrix.sh` (`MATRIX_MODE=diag`, `DIAG_CMD`), `push-probe.sh`, `probe-*.yml`,
+   `listener-churn-repro.py`, `keepalive-repro.py` (negative: plain Python keep-alive is fine).
 6. The job-log endpoint carries only the first step's `⭐ Run` marker, and there
    is no per-step API: `examples/plektra/forgejo-ci.yml` prints `BENCHSTEP`
    markers and `scripts/ci-step-times` reads them (or Gradle's `BUILD ... in`).

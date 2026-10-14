@@ -1,0 +1,25 @@
+name: runner probe (port reuse after a blocked accept)
+on:
+  push:
+    branches: ['probe/**']
+jobs:
+  reuse:
+    runs-on: ubuntu
+    steps:
+      - name: Checkout
+        uses: https://github.com/actions/checkout@v4
+      - name: New listener on a port whose old listener was closed while a thread sat in accept()
+        shell: bash
+        run: |
+          set +e
+          apt-get update -qq; apt-get install -y -qq gcc libc6-dev > /dev/null
+          uname -r
+          gcc -O2 -pthread -o /tmp/rp reuse-probe.c 2>/dev/null; echo "gcc rc=$?"
+          gcc -shared -fPIC -O2 -pthread -o /tmp/portshim.so loopback-port-shim.c -ldl; echo "shim gcc rc=$?"
+          echo "--- TRACE no shim, 3 rounds"; REUSE_TRACE=1 timeout -s KILL 25 /tmp/rp 3 0 jdk 2>&1 | tail -25; echo "   (exit ${PIPESTATUS[0]})"
+          for gap in 0 5 50; do
+            echo "--- no shim, gap ${gap} ms";   timeout -s KILL 60 /tmp/rp 100 $gap jdk;  echo "   (exit $?)"
+            echo "--- with shim, gap ${gap} ms"; LD_PRELOAD=/tmp/portshim.so timeout -s KILL 60 /tmp/rp 100 $gap jdk; echo "   (exit $?)"
+          done
+          echo "--- no shim, nobody blocked in accept (control)"; timeout -s KILL 60 /tmp/rp 100 0 none; echo "   (exit $?)"
+          exit 0
