@@ -18,7 +18,7 @@ Prepared with an AI coding assistant (Claude Code) from probe runs on the runner
 
 ## What I am asking for
 
-1. A precompiled `/usr/local/lib/portshim.so` in each ci-images Dockerfile (a build stage with `gcc`; glibc build for ubuntu and rocky, musl build for alpine), from `loopback-port-shim.c` (about 270 lines of C, MIT-compatible, I am happy to license it as you prefer). Today every job installs `gcc` (about 30 s) and compiles it.
+1. A precompiled `/usr/local/lib/portshim.so` in each ci-images Dockerfile (a build stage with `gcc`; glibc build for ubuntu and rocky, musl build for alpine), from `loopback-port-shim.c` (232 lines of C; it has no license header yet, and I am happy to license it as you prefer). Today every job installs `gcc` (about 30 s) and compiles it.
 2. **Opt-in, not global.** Jobs enable it with `LD_PRELOAD=/usr/local/lib/portshim.so` or one line into `/etc/ld.so.preload`. I am not asking for it to be preloaded for every job, because: it makes blocking reads wait in `poll()`, which changes `EINTR` behaviour for programs that rely on `SA_RESTART` (untested); it does not reach Go or other static binaries, which the images ship (`golang`, `podman`, `hugo`); and with `capacity = 4` the VMs share the host's loopback ports (#860), which the shim only reduces.
 3. Optionally: if you carry your own libkrun fork ("2.0-sipb"), the proper fix is in the guest TSI driver (not holding the socket lock across a blocking `recv`/`accept`; releasing a closed listener; port-0 binds), and then the shim goes away.
 
