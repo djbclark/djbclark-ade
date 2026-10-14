@@ -117,7 +117,21 @@ python3 bench.py summary                                               # adds an
 ```
 
 One pass per model (no repeats), so the score is "N/M tasks done correctly". Rows
-are `kind: "essentials"` in `results.jsonl`.
+are `kind: "essentials"` in `results.jsonl`. `bench.py run` also runs this battery
+by default, after probes and tasks A/B; add `--no-essentials` to skip it.
+
+## The advanced battery (harder, tool-use-heavy)
+
+`bench.py advanced` runs a second set (see `advanced.py`) for probing beyond the
+floor: rename a symbol across files, parse a log into a required summary, a CLI
+that must exit non-zero on a missing file, CSV->JSON, create a git branch and
+commit on it, fix an edge case (empty input), fix a bug across a three-file import
+chain, and a SQLite query. Same scoring rule — the artifact, not the report — and
+`bench.py summary` shows it as an "advanced" column.
+
+```bash
+python3 bench.py advanced --models MODEL
+```
 
 ## Reading the numbers
 

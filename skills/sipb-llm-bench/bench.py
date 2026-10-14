@@ -36,6 +36,10 @@ try:
     import essentials  # noqa: E402
 except Exception:  # noqa: BLE001
     essentials = None
+try:
+    import advanced  # noqa: E402
+except Exception:  # noqa: BLE001
+    advanced = None
 
 
 def key():
@@ -271,17 +275,18 @@ def run_task_inner(label, model, think, effort, task, cap, prompt_file, rules, e
     return res["pass"]
 
 
-def run_essentials(label, model, think, effort, runner, rules, extra, only=None):
-    """Run each essentials task once; one row per task; check the artifact, not the
-    agent's report. Returns (passed, total)."""
+def run_essentials(label, model, think, effort, runner, rules, extra, only=None, mod=None, kind="essentials"):
+    """Run each task of a battery module once; one row per task; check the artifact,
+    not the agent's report. Returns (passed, total)."""
+    mod = mod or essentials
     passed = 0
-    tasks = [t for t in essentials.TASKS if not only or t["name"] in only]
+    tasks = [t for t in mod.TASKS if not only or t["name"] in only]
     for task in tasks:
         run = f"{label}-ess-{task['name']}-{int(time.time())}"
         d = f"{O}/runs/{run}"
         proj, xdg, xdgd = f"{d}/proj", f"{d}/xdg", f"{d}/xdgdata"
         os.makedirs(proj)
-        essentials.seed_project(proj, task)
+        mod.seed_project(proj, task)
         env = dict(os.environ)
         restore = None
         if runner is DEFAULT_RUNNER:
@@ -321,7 +326,7 @@ def run_essentials(label, model, think, effort, runner, rules, extra, only=None)
             pass
         shutil.rmtree(xdg, ignore_errors=True)
         shutil.rmtree(xdgd, ignore_errors=True)
-        record({"kind": "essentials", "combo": label, "model": model, "think": think,
+        record({"kind": kind, "combo": label, "model": model, "think": think,
                 "effort": effort, "task": task["name"], "pass": bool(ok), "secs": round(secs, 1),
                 "rc": rc, "detail": str(detail)[:200], "providers": sorted(provs),
                 "err_tail": err[-150:] if rc else ""})
@@ -350,8 +355,10 @@ def cmd_run(a):
     if a.dry_run:
         print(f"results dir {O}\nbase {BASE}\nrunner {runner}\nrules {rules}\nwordstats {wordstats} cap {a.wordstats_cap}s")
         for label, (m, think, eff) in combos.items():
+            n_ess = "no" if (a.no_essentials or a.fizz_only or essentials is None) else len(essentials.TASKS)
             print(f"  {label}: model={m} think={think} effort={eff}; probes={not a.no_probe}; "
-                  f"fizz x{a.fizz}; wordstats={'forced' if a.force_wordstats else 'if fizz passes' if not a.fizz_only else 'no'}")
+                  f"fizz x{a.fizz}; wordstats={'forced' if a.force_wordstats else 'if fizz passes' if not a.fizz_only else 'no'}; "
+                  f"essentials={n_ess}")
         return
     if os.path.exists(f"{O}/DONE-{a.tag}"):
         return
@@ -372,29 +379,41 @@ def cmd_run(a):
             run_task(label, model, think, effort, "wordstats", a.wordstats_cap, wordstats, rules, extra, runner)
         else:
             record({"kind": "skip", "combo": label, "why": "fizz failed twice"})
+        if not a.no_essentials and essentials is not None:
+            passed, total = run_essentials(label, model, think, effort, runner, rules, extra)
+            print(f"{label}: {passed}/{total} essentials passed")
     status("finished")
     open(f"{O}/DONE-{a.tag}", "w").write(time.strftime("%c") + "\n")
 
 
-def cmd_essentials(a):
-    if essentials is None:
-        sys.exit("essentials.py not found next to bench.py")
+def _cmd_battery(a, mod, kind, name):
+    if mod is None:
+        sys.exit(f"{name}.py not found next to bench.py")
     combos = build_combos([m for m in a.models.split(",") if m], [x for x in a.modes.split(",") if x])
     extra = a.extra.split("|") if a.extra else []
     runner = a.runner or DEFAULT_RUNNER
     rules = os.path.join(TASKS, "rules.md") if a.rules else None
     only = set(x for x in a.only.split(",") if x)
     if a.dry_run:
-        for label, (m, think, eff) in combos.items():
-            print(f"  {label}: {len(essentials.TASKS)} essentials tasks; runner {runner}")
+        for label in combos:
+            print(f"  {label}: {len(mod.TASKS)} {name} tasks; runner {runner}")
         return
-    if os.path.exists(f"{O}/DONE-ess-{a.tag}"):
+    if os.path.exists(f"{O}/DONE-{kind}-{a.tag}"):
         return
     for label, (model, think, effort) in combos.items():
-        passed, total = run_essentials(label, model, think, effort, runner, rules, extra, only)
-        print(f"{label}: {passed}/{total} essentials passed")
+        passed, total = run_essentials(label, model, think, effort, runner, rules, extra, only,
+                                       mod=mod, kind=kind)
+        print(f"{label}: {passed}/{total} {name} passed")
     status("finished")
-    open(f"{O}/DONE-ess-{a.tag}", "w").write(time.strftime("%c") + "\n")
+    open(f"{O}/DONE-{kind}-{a.tag}", "w").write(time.strftime("%c") + "\n")
+
+
+def cmd_essentials(a):
+    _cmd_battery(a, essentials, "essentials", "essentials")
+
+
+def cmd_advanced(a):
+    _cmd_battery(a, advanced, "advanced", "advanced")
 
 
 def cmd_summary(a):
@@ -402,16 +421,18 @@ def cmd_summary(a):
     by = {}
     for r in rows:
         c = r.get("combo")
-        if not c or r.get("kind") not in ("probe", "task", "essentials") or r.get("invalid"):
+        if not c or r.get("kind") not in ("probe", "task", "essentials", "advanced") or r.get("invalid"):
             continue
-        # a task/essentials row counts only if the run really went to this server's provider
-        if r["kind"] in ("task", "essentials") and not a.all and r.get("providers") != ["sipb-llms"]:
+        # a task/battery row counts only if the run really went to this server's provider
+        if r["kind"] in ("task", "essentials", "advanced") and not a.all and r.get("providers") != ["sipb-llms"]:
             continue
-        by.setdefault(c, {"probe": None, "fizz": [], "ws": [], "ess": []})
+        by.setdefault(c, {"probe": None, "fizz": [], "ws": [], "ess": [], "adv": []})
         if r["kind"] == "probe":
             by[c]["probe"] = r
         elif r["kind"] == "essentials":
             by[c]["ess"].append(r)
+        elif r["kind"] == "advanced":
+            by[c]["adv"].append(r)
         elif r["task"].startswith("fizz"):
             by[c]["fizz"].append(r)
         else:
@@ -426,12 +447,12 @@ def cmd_summary(a):
         ok = [r["secs"] for r in rs if r.get("pass") and r.get("secs")]
         return f"{sum(1 for r in rs if r.get('pass'))}/{len(rs)}" + (f", median {statistics.median(ok):.0f} s" if ok else "")
 
-    print("| combo | cold TTFT s | decode chunks/s | 10k prefill s (1st / repeat) | task A | task B | essentials |")
-    print("| --- | --- | --- | --- | --- | --- | --- |")
+    print("| combo | cold TTFT s | decode chunks/s | 10k prefill s (1st / repeat) | task A | task B | essentials | advanced |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- |")
     for c, v in by.items():
         p = v["probe"] or {}
         print(f"| {c} | {f(p.get('cold_ttft'))} | {f(p.get('decode_cps'), 0)} | "
-              f"{f(p.get('prefill1_ttft'))} / {f(p.get('prefill2_ttft'))} | {tasks(v['fizz'])} | {tasks(v['ws'])} | {tasks(v['ess'])} |")
+              f"{f(p.get('prefill1_ttft'))} / {f(p.get('prefill2_ttft'))} | {tasks(v['fizz'])} | {tasks(v['ws'])} | {tasks(v['ess'])} | {tasks(v['adv'])} |")
 
 
 def main():
@@ -451,6 +472,7 @@ def main():
     r.add_argument("--fizz-only", action="store_true")
     r.add_argument("--probes-only", action="store_true", help="speed probes only; no agent runner needed")
     r.add_argument("--tag", default="A", help="batch tag; a batch with DONE-<tag> present is skipped")
+    r.add_argument("--no-essentials", action="store_true", help="skip the essentials battery (run probes+tasks only)")
     r.add_argument("--dry-run", action="store_true", help="print the plan and exit; no requests")
     r.set_defaults(fn=cmd_run)
     e = sub.add_parser("essentials",
@@ -464,6 +486,17 @@ def main():
     e.add_argument("--only", default="", help="comma-separated task names to run (default: all)")
     e.add_argument("--dry-run", action="store_true")
     e.set_defaults(fn=cmd_essentials)
+    v = sub.add_parser("advanced",
+                       help="harder, tool-use-heavy battery (multi-file rename, log parsing, CLI, git branch, SQLite)")
+    v.add_argument("--models", required=True, help="comma-separated server model ids")
+    v.add_argument("--modes", default="", help="think,nothink (default: both for reasoning families)")
+    v.add_argument("--rules", action="store_true", help="give the agent tasks/rules.md")
+    v.add_argument("--extra", default="", help="extra runner args, '|'-separated")
+    v.add_argument("--runner", help=f"agent runner command (default: {DEFAULT_RUNNER})")
+    v.add_argument("--tag", default="adv", help="batch tag; a finished batch (DONE-advanced-<tag>) is skipped")
+    v.add_argument("--only", default="", help="comma-separated task names to run (default: all)")
+    v.add_argument("--dry-run", action="store_true")
+    v.set_defaults(fn=cmd_advanced)
     s = sub.add_parser("summary", help="markdown table from results.jsonl (skips rows with \"invalid\": true)")
     s.add_argument("--all", action="store_true", help="also count task rows whose provider is not exactly sipb-llms")
     s.set_defaults(fn=cmd_summary)
