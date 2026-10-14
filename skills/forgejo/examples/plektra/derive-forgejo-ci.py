@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 
+STEP_MIN = int(os.environ.get("DERIVE_STEP_MIN", "25"))   # per-step timeout (minutes)
 VARIANT = os.environ.get("DERIVE_STORAGE", "asis")   # asis | tmpfs | loop
 assert VARIANT in ("asis", "tmpfs", "loop")
 src = subprocess.run(
@@ -44,14 +45,14 @@ setup = '''      - name: Install JDK 17 and Android SDK (timed separately from G
 # port-0 listeners (libkrun#818), which breaks Gradle's daemon and test workers. Build an
 # LD_PRELOAD shim that rewrites port-0 binds to fixed ports and preload it system-wide (/etc/ld.so.preload).
 shim_c = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "loopback-port-shim.c")).read()
+hb_sh = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "heartbeat.sh")).read()
 shim_step = ("      - name: Build loopback port-0 shim (libkrun#818 workaround)\n        run: |\n"
              "          cat > /tmp/portshim.c <<'SHIM_C'\n"
              + "".join(("          " + l if l.strip() else "") + "\n" for l in shim_c.splitlines())
              + "          SHIM_C\n"
              "          cat > /usr/local/bin/hb.sh <<'HB_SH'\n"
-             "          #!/bin/sh\n"
-             "          while :; do echo \"HEARTBEAT $(date +%T) load=$(cut -d' ' -f1-3 /proc/loadavg) $(free -m | awk '/Mem/{print \\\"used=\\\"$3\\\" avail=\\\"$7}') java=$(pgrep -c java)\"; ps -eo pid,pcpu,rss,stat,etimes,args --sort=-pcpu | sed -n 2,4p | cut -c1-150; sleep 15; done\n"
-             "          HB_SH\n"
+             + "".join(("          " + l if l.strip() else "") + "\n" for l in hb_sh.splitlines())
+             + "          HB_SH\n"
              "          chmod +x /usr/local/bin/hb.sh\n"
              "          gcc -shared -fPIC -O2 -o /usr/local/lib/portshim.so /tmp/portshim.c -ldl\n"
              # /etc/ld.so.preload (jobs run as root) reaches every process; an LD_PRELOAD exported
@@ -78,7 +79,7 @@ if VARIANT != "asis":
                '          ln -sfn $F/gradle "$HOME/.gradle"; ln -sfn $F/sdk "$HOME/android-sdk"\n'
                "          df -hT \"$GITHUB_WORKSPACE\" \"$HOME/.gradle/\" \"$HOME/android-sdk/\"\n")
     setup = storage + "\n" + setup
-src, n = re.subn(r"      - name: Set up JDK 17\n(?:        .*\n|          .*\n)+?(?=\n      - name: Make Gradle executable)", setup, src, count=1)
+src, n = re.subn(r"      - name: Set up JDK 17\n(?:        .*\n|          .*\n)+?(?=\n      - name: Make Gradle executable)", lambda m: setup, src, count=1)  # lambda: setup holds backslashes (shell \n, awk)
 assert n == 1, "setup-java step not found"
 
 # 5. an explicit compile-only step before the first test step: isolates compile time.
@@ -97,7 +98,7 @@ assert n == 1, "upload step not found"
 # `run:` step prints BENCHSTEP start/end lines with epoch seconds (read by ci-step-times).
 def mark(m: "re.Match[str]") -> str:
     name = m.group(1)
-    return (f"      - name: {name}\n        timeout-minutes: 25\n        run: |\n"
+    return (f"      - name: {name}\n        timeout-minutes: {STEP_MIN}\n        run: |\n"
             f"          trap 'rc=$?; [ -n \"$HB\" ] && kill $HB 2>/dev/null; echo \"BENCHSTEP end {name} $(date +%s.%N) rc=$rc\"' EXIT\n"
             "          HB=; [ -x /usr/local/bin/hb.sh ] && { /usr/local/bin/hb.sh & HB=$!; } || true\n"
             f"          echo \"BENCHSTEP start {name} $(date +%s.%N)\"\n")

@@ -43,6 +43,12 @@ run_one() {  # NAME STORAGE BRANCH MAXMIN [FULL_CMD]
   } >> "$SUM"
 }
 { echo "# Matrix started $(date -u +%FT%TZ)"; } > "$SUM"
+if [ "${MATRIX_MODE:-}" = diag ]; then   # one full-suite run with thread dumps of the hung test worker
+  export DERIVE_STEP_MIN=${DIAG_STEP_MIN:-16}
+  run_one diag-asis asis bench/mit-diag $((DERIVE_STEP_MIN*2+20)) "./gradlew :app:testStableDebugUnitTest --info"
+  echo; echo "# Matrix finished $(date -u +%FT%TZ)" >> "$SUM"
+  "$HOME/.local/bin/hermes-ping" "djbclark-ade: forgejo CI diag run finished, see $SUM"; exit 0
+fi
 run_one iso-asis asis bench/mit-iso "$ISO_MIN" "$ISO_CMD"
 if [ "$LAST_HUNG" = 1 ]; then
   echo; echo "RESULT: CornerButtonThemeTest alone hangs the runner VM on as-is storage; trying tmpfs." >> "$SUM"
