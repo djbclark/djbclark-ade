@@ -9,7 +9,7 @@ builds just to test. Source for the local column: 94 recorded builds mined from
 |---|---|---|---|
 | Cold compile + configure (compile-only step) | no run yet | 4 m 23 s (run 177, 2026-10-13, with the port-0 shim) | 4 m 30 s (cold daemon, 27/28 tasks) |
 | Targeted test steps (core modifier / router E2E / forward-delete / IME) | no run yet | 59 s / 11 s / 11 s / 25 s (Gradle's own times, run 177) | not recorded per step |
-| Cold full `testStableDebugUnitTest`, fresh tree | no run yet | not finished: run 177 printed nothing for 20 min after 23:30:44 and was cancelled | 8 m 34 s best; 11 m 53 s; 13 m 53 s (load 156) |
+| Cold full `testStableDebugUnitTest`, fresh tree | no run yet | 3 m 27 s test step after compile (run 203, 2026-10-14, 1,417 tests, 7 failed: known `CornerButtonThemeTest` plus about 6 flaky MockWebServer tests); job total about 12 min | 8 m 34 s best; 11 m 53 s; 13 m 53 s (load 156) |
 | Warm full `testStableDebugUnitTest` | no run yet | not measured | 2 m 17 s to 3 m 56 s (about 3 min is the tests) |
 | `lintStableDebug` | no run yet | not reached | 2 m 48 s warm to 6 m 31 s fresh tree |
 | Toolchain setup (JDK + Android SDK) | preinstalled | about 80 s (apt + sdkmanager), measured in run 170 | n/a |
@@ -24,9 +24,9 @@ builds just to test. Source for the local column: 94 recorded builds mined from
 2. **forgejo.mit.edu:** loopback was refused inside the runner microVM (libkrun#818) until the
    port-0 `LD_PRELOAD` shim (`loopback-port-shim.c`, preloaded through `/etc/ld.so.preload`)
    went in; since run 177 Gradle compiles and passes the targeted tests there. The full
-   `testStableDebugUnitTest` step then went silent (a `CornerButtonThemeTest` failure at
-   23:30:25, last output 23:30:44) and run 177 was cancelled after 27 min. Open: hung test or
-   slow virtiofs; rerun with a step timeout. Branch `bench/mit-ci` carries the workflow.
+   `testStableDebugUnitTest` step then hung (runs 177, 183, 185-194, 201) because `shutdown()` blocks in the
+   libkrun guest while another thread waits on the socket (okhttp MockWebServer); the shim now wraps it (run 203
+   finished). Branch `bench/mit-ci` carries the workflow.
    Per-job resources and the disk comparison with the Mac: SKILL.md item 7.
 
 ## Confounds to state with any number
@@ -37,3 +37,15 @@ builds just to test. Source for the local column: 94 recorded builds mined from
 2. Local uses JDK 21 and a local plus remote build cache; CI uses JDK 17 and, on
    GitHub, `cache: gradle` for dependencies only.
 3. MIT job hardware is a shared 16-vCPU microVM (2.0x the Mac's cores, 0.85x one-thread compute, 3.9x RAM), but its disk is virtiofs: small-file operations run at 0.034x to 0.23x of the Mac; `/dev/shm` tmpfs is 29-33x faster than that disk. Repeat runs for a spread.
+
+## Storage variants (same commit, one run each, 2026-10-14; the jobs share a host, treat under 20% as noise)
+
+| step (s) | root fs (as-is) | guest tmpfs | ext4 loop image |
+|---|---|---|---|
+| install JDK + SDK | 69.3 | 49.1 | 44.9 |
+| compile | 276.4 | 202.8 | 182.7 |
+| four targeted test steps | 112.0 | 138.6 | 88.8 |
+| total | 458 | 393 | 324 |
+
+Workspace 300 MiB, Gradle home 1.7 GiB, SDK 600 MiB; tmpfs used 2.5 GiB, RAM in use up to 11.7 GiB.
+

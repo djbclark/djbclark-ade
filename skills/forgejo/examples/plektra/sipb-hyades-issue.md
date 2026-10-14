@@ -4,7 +4,7 @@
 
 Jobs on the `sipbphus` runner (`ubuntu` label) are fast on CPU and RAM but slow on the root filesystem, which is libkrun's virtiofs. Android/Gradle builds, which are mostly small-file work, spend a large share of their time there. As suggested in chat, putting the workspace, Gradle home and SDK on a guest tmpfs works well: on the same commit the setup-plus-compile-plus-targeted-tests part of a job ran 1.2x faster on a tmpfs (compile 1.4x) and 1.4x faster on an ext4 image on a loop device (compile 1.5x) than on the root fs. This issue collects the numbers so that (1) the recipe can be documented for CI users and (2) you can decide whether a host-side change (a virtio-blk scratch disk, or libkrun virtiofs tuning) is worth it. The upstream libkrun side is in https://github.com/libkrun/libkrun/issues/924 (the cause is in libkrun's virtiofs server: one request queue, one worker thread, no writeback cache, and no API to change them).
 
-I am not asking for anything urgent. Our builds work. Measurements and text were prepared with an AI coding assistant (Claude Code) from CI logs; I reviewed the numbers.
+I am not asking for anything urgent. Compile and the unit tests run; one hang and a few flaky loopback tests are described at the end. Measurements and text were prepared with an AI coding assistant (Claude Code) from CI logs; I reviewed the numbers.
 
 ## What a job gets (measured in a job; the local machine is an M1 MacBook Air)
 
@@ -35,7 +35,7 @@ No CPU, memory or pids cgroup limits are visible. Soft `nofile` 1024 (hard 4096)
 
 Writes on virtiofs run at the same speed with and without `fsync`, so they are write-through. It is not the physical disks: a 1 GiB sequential read gets 824 MiB/s, and the metadata path is latency-bound (16 parallel processes reach about 8x the single-process stat rate).
 
-## What it does to a real build (Plektra, an Android app: JDK 17, Android SDK, Gradle compile plus 1,251 unit tests, run locally; same commit, three runs one after another)
+## What it does to a real build (Plektra, an Android app: JDK 17, Android SDK, Gradle compile plus about 1,400 unit tests; same commit, three runs one after another)
 
 | step (seconds) | root fs (as-is) | guest tmpfs | ext4 loop image |
 |---|---|---|---|
@@ -53,11 +53,27 @@ Writes on virtiofs run at the same speed with and without `fsync`, so they are w
 1. **Document the recipe** in `ci-images` or the README: `mount -t tmpfs -o size=Ng tmpfs /mnt/fast`, then put the checkout, `~/.gradle`, `~/.npm`, build output there. A working example is in our workflow: [link to workflow in the test repo, or paste]. Optionally a `/usr/local/bin/fast-scratch` helper in the base image so jobs do not each write it.
 2. **A virtio-blk scratch disk** (an SSD or an image on one) would help only if it is exposed to the VM as virtio-blk: libkrun maintainers say a virtio-blk root gets near parity with QEMU (libkrun#655, 2026-05-04: the same build took 11.2 s on virtiofs and 6.0 s with a virtio-blk root; with a virtio-blk root it matched libvirt). Today crun has no annotation to attach a disk outside the SEV variant (libkrun#667 item 4), so this needs a crun/runner change, not just hardware. A host SSD under `/tmp` exposed through virtiofs would still be write-through and single-threaded, so it would not help much by itself.
 3. **libkrun virtiofs tuning** (writeback cache, more request queues or workers) would speed up every job without any workflow change, but it is an upstream change; see libkrun#924 where I ask whether they would accept it and offer to test patches here. Mounting with `dax` may also help; I have not tried it.
-4. **Loopback bug note** (libkrun#818, which I reported earlier): jobs also cannot listen on port 0 and connect to it. We work around it with a small `LD_PRELOAD` shim loaded through `/etc/ld.so.preload`; it needs `gcc` in the job. If `krun.use_passt=1` is not wanted, a `gcc`-free fix would be a precompiled shim in the base image.
+4. **Loopback** (see the section below): jobs cannot listen on port 0 (libkrun#818) and cannot `shutdown()` a socket another thread is blocked on. We work around both with a small `LD_PRELOAD` shim loaded through `/etc/ld.so.preload`; it needs `gcc` in the job. A precompiled shim in the base image would save every user that, but fixing it in libkrun (or `krun.use_passt=1`) would remove the need for it.
 
-## A build step that hangs
+## A test run that hangs, and flaky loopback tests
 
-TODO_HANG_SECTION
+Related to the loopback bug I reported earlier (libkrun#818), but a different failure, and a worse one: **a test JVM hangs forever** and the job runs until its timeout (then the runner logs `context deadline exceeded ... podman.sock` while tearing the container down).
+
+1. Cause: with libkrun's TSI networking, `shutdown(2)`, `getsockopt` and `getpeername` on a socket **block while another thread is blocked in `accept()` or `read()` on the same socket**. On a normal Linux kernel `shutdown()` on a listener wakes the blocked `accept()`. Java's `ServerSocket.close()` and `Socket.close()` call `shutdown()` first, so okhttp's MockWebServer (`MockWebServer.shutdown()`, `RealWebSocket.cancel()`) never returned and the Gradle test worker stopped, idle, with about 1,000 leftover threads. Thread dumps taken in the job show the worker in `sun.nio.ch.Net.shutdown` (native, runnable).
+2. Minimal repro, run in any krun container (`bare` and `accepted_client` fail with ENOTCONN; `accept_blocked` never returns):
+
+```python
+import socket, threading, time
+s = socket.socket(); s.bind(("127.0.0.1", 31337)); s.listen(5)
+threading.Thread(target=lambda: s.accept(), daemon=True).start(); time.sleep(0.3)
+s.shutdown(socket.SHUT_RDWR)   # hangs forever here
+```
+
+   Other wake-ups behave: `pthread_kill` interrupts a blocked `accept()` (EINTR), `dup2` over the fd plus a signal does too; `close()` alone and `shutdown(SHUT_RD)` do not. Probe workflows and results are in the repo linked below (`probe-shutdown*.yml`, `probe-accept.yml`).
+3. Workaround: the same `LD_PRELOAD` shim now also wraps `listen`/`close`/`dup2`/`dup3` (to know which fds are listeners without asking the socket) and `shutdown()`, which becomes a no-op on listeners and otherwise runs in a helper thread with a 300 ms wait. With it the full suite (1,417 tests) completes: the test step takes about 3.5 minutes and the job about 12 minutes.
+4. Still failing after that: six MockWebServer-based tests (`OpenAiLiveSpeechClientTest`, `SpeechApiClientTest`) fail with `unexpected end of stream` or timeouts, a different subset on different runs; they pass on a laptop and on GitHub's runners. They fail the same way with `shutdown()` turned into a no-op, so the shim is not the cause: the loopback data path is the suspect. I cannot tell more from inside the job.
+5. Ask: either enable `krun.use_passt=1` for these jobs (I understand the nested-passt concern, and I would take any fix that makes loopback behave like a kernel loopback), or a TSI/libkrun fix. Upstream notes are in libkrun#924 and the repro above can be filed as its own libkrun issue if you prefer.
+
 
 ## Offer
 
