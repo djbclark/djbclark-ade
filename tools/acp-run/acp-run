@@ -61,6 +61,9 @@ plugins, skills and hooks off and the user's permission block untouched. Under
 --perm deny it changes nothing (deny already strips). Temp dirs are named
 acp-run-<agent>-strip-<pid>-*; --keep-user-config still wins.
 --set applies any config option --info lists (e.g. --set provider=cline-pass).
+cursor: plain model ids plus context/reasoning_effort/fast options (model applied
+first), e.g. acp-run cursor --model grok-4.7 --set context=500k --set fast=false
+--set reasoning_effort=high; bracketed preset strings no longer apply.
 Some agents get defaults (DEFAULT_SET below): cline always runs on cline-pass.
 Agents decide what to ask about: some auto-allow by their own settings (use
 --mode to pick a stricter one; --info lists the modes).
@@ -319,6 +322,13 @@ YOLO_CMD = {
 # google-antigravity/antigravity-cli#1168). The name feeds nothing else but the
 # User-Agent host_path. Same finding: pingdotgg/t3code#16489. 2026-10-10.
 CLIENT_NAME = {"agy": "zed"}
+# cursor-agent acp gates models by capability, not clientInfo: without
+# clientCapabilities._meta.parameterizedModelPicker it offers one exploded
+# preset per model ("grok-4.7[context=256k,...,fast=true]"); with it, plain
+# model ids plus separate context/reasoning_effort/fast options
+# (forum.cursor.com/t/161317, zed-industries/zed#57571). For these agents
+# `model` is applied FIRST (a model switch resets its params). 2026-10-14.
+PARAM_MODEL_PICKER = {"cursor"}
 # Seconds allowed for initialize and for session/new, each. claude-agent-acp's
 # session/new spends 13 s in its SDK initialize phase on an idle machine and
 # 17-24 s at load 20-70 (measured 2026-10-05), so 40 s was too close; acpx
@@ -2551,7 +2561,11 @@ async def run(a, log, err, log_path):
                 init = await asyncio.wait_for(
                     conn.initialize(
                         protocol_version=PROTOCOL_VERSION,
-                        client_capabilities=ClientCapabilities(),
+                        client_capabilities=ClientCapabilities(
+                            field_meta={"parameterizedModelPicker": True}
+                        )
+                        if a.agent in PARAM_MODEL_PICKER
+                        else ClientCapabilities(),
                         client_info=Implementation(
                             name=CLIENT_NAME.get(a.agent, "acp-run"),
                             title="acp-run",
@@ -2669,6 +2683,9 @@ async def run(a, log, err, log_path):
             if a.model:
                 sets.pop("model", None)
                 sets["model"] = a.model  # last: models depend on provider
+            if a.agent in PARAM_MODEL_PICKER and "model" in sets:
+                # first: switching model resets context/effort/fast
+                sets = {"model": sets.pop("model"), **sets}
             if a.resume and not sess.config_options and sets:
                 client.rec("config_skipped", {"sets": sets})
                 print(
