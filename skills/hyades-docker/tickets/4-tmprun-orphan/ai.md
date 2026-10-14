@@ -75,3 +75,10 @@ exits. Not verified which signal path applies here.
 Easy to hit with scripted use (`ssh hyades tmprun IMAGE < script` with a
 timeout, or a dropped Wi-Fi connection during an interactive `tmprun ubuntu`).
 Orphans consume vCPU/RAM quota and keep volumes mounted read-write.
+
+## Duplicate search (2026-10-14, after filing)
+
+Searched for existing reports of this and the sibling console bugs:
+1. SIPB/hyades and SIPB/hyades-action issues, all states: only SIPB/hyades #1 (closed, unrelated Ctrl+D request) and our own #2-#8.
+2. containers/crun GitHub issues for "krun chown", "open_terminal chown", "exec tty krun permission denied": no hits.
+3. github.com/sipb/crun has issues disabled. Upstream containers/crun's `handlers/krun.c` has no exec path at all (sipb/crun main is 5 commits ahead of containers/crun main), so the exec/pty bug is SIPB-specific and SIPB/hyades is the right tracker.
