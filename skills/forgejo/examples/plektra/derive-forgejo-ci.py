@@ -98,8 +98,8 @@ assert n == 1, "upload step not found"
 def mark(m: "re.Match[str]") -> str:
     name = m.group(1)
     return (f"      - name: {name}\n        timeout-minutes: 25\n        run: |\n"
-            f"          trap 'rc=$?; kill $HB 2>/dev/null; echo \"BENCHSTEP end {name} $(date +%s.%N) rc=$rc\"' EXIT\n"
-            "          HB=; [ -x /usr/local/bin/hb.sh ] && { /usr/local/bin/hb.sh & HB=$!; }\n"
+            f"          trap 'rc=$?; [ -n \"$HB\" ] && kill $HB 2>/dev/null; echo \"BENCHSTEP end {name} $(date +%s.%N) rc=$rc\"' EXIT\n"
+            "          HB=; [ -x /usr/local/bin/hb.sh ] && { /usr/local/bin/hb.sh & HB=$!; } || true\n"
             f"          echo \"BENCHSTEP start {name} $(date +%s.%N)\"\n")
 
 
