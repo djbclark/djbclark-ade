@@ -75,3 +75,11 @@ For a private, disposable root filesystem (every CI job's container rootfs), the
 4. #824 (open): virtio-blk services one request at a time per disk.
 5. #515 and containers/crun#1952: `--tmpfs` under crun-krun is host-side and goes through virtiofs; only `/dev/shm` is a guest tmpfs.
 6. SIPB's Hyades README TODO lists "virtiofs performance tweaks (or just use tmpfs?)".
+
+## Update (2026-10-14)
+
+1. Same commit, one run each of a real Android/Gradle CI job (JDK and SDK install, compile, four targeted test steps): 458 s with the root on virtiofs, 393 s with the workspace, Gradle home and SDK on a guest tmpfs, 324 s on an ext4 image on a loop device. Compile alone: 276 s, 203 s, 183 s. The jobs share a host, so treat differences under about 20% as noise.
+2. The build used 2.6 GiB of disk and up to 11.7 GiB of RAM, so a tmpfs is enough for it.
+3. The numbers and suggestions for the runner's operators are in https://forgejo.mit.edu/SIPB/hyades/issues/2.
+4. Unrelated to the filesystem but found on the same runner: a TSI hang in `shutdown()` while another thread is blocked in `accept()`/`read()`: #926.
+
