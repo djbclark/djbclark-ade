@@ -84,6 +84,16 @@ With the default runner the harness builds a private Crush config per run from y
 `~/.config/crush/crushrc` (see `crushrc.example`: a provider block pointing at the proxy or
 server, nothing else is required), so set that up once. It deletes the per-run copy, which holds the key, after each run.
 
+**The interactive `crush` TUI ignores crushrc's `model large/small` once
+`~/.local/share/crush-acp/crush.json` has a `models` block** (2026-10-14). The shell
+function (`~/.bashrc`) sets `CRUSH_GLOBAL_DATA` to that dir, and the TUI's model picker
+writes the chosen model there (plus `recent_models`), so one pick of `qwen3.5:35b`
+silently overrides the crushrc default. The benchmark pins the same file and restores it
+afterwards (`pin_crush_data_model`). If the TUI opens on the wrong model, fix that file,
+not crushrc: set `models.large` and `models.small` to the default, prune `recent_models`,
+and check `<project>/.crush/logs/crush.log` for `ModelProvider called` to see the model
+actually used.
+
 ## How a run is judged
 
 1. **Probes** (direct requests): cold time to first token (includes a model swap if another
