@@ -380,15 +380,15 @@ arrive first. **For every agent that speaks ACP, dispatch through
 `acp-run`, whose agent list, flags and current status are in `model-routing`):
 
     acp-dispatch <agent> --model <m> --name <name> --task <task> -C <repo> \
-        -f "$OUT/brief-<name>.md" --perm scoped:<owned file>,<owned file> [--timeout 2400]
+        -f "$OUT/brief-<name>.md" [--perm deny] [--timeout 2400]
 
 It enforces what this step used to spell out in prose (2026-10-08): `--model`
 is mandatory; the brief gets `docs/dispatch-footer.md` appended (report file
 `$OUT/<name>-report.md`, final message is a pointer only, the `BLOCKED:`
 protocol, never end a turn waiting on a background notification); the report,
 its `.done` marker, the acp-run log, the stderr summary and the
-`$OUT/jobs/<name>.json` record are written for you; the out dir is added to a
-`scoped:` perm so the agent can write its report. Exit 0 = report ends in
+`$OUT/jobs/<name>.json` record are written for you; the out dir is passed as
+`--add-dir` so the agent can write its report there. Exit 0 = report ends in
 `DONE`; 1 = report present but unfinished, or acp-run failed; 3 = finished with
 no report (a delivery failure: re-task it, never reconstruct); 4 = the report
 starts `BLOCKED: <question>` (answer it, then resume the slice); 5 = pool
@@ -405,12 +405,16 @@ relative to `-C`. No trailing `&`: the Bash call itself is the background job.)
 outputs, logs and diffs for a fan-out live under `~/.local/state/bigteam/<task>/`
 until the work is committed or recorded in a repo.
 
-1. **`--perm scoped:<owned files>`** turns Step 2's one-owner-per-file rule into
-   a per-call check: an edit outside the slice's paths is refused, not just
-   discouraged. It binds only agents that send permission requests (copilot and
-   cline do; claude, cursor and opencode mostly auto-allow by their own
-   settings, so give those a stricter `--mode` where `--info` offers one, and
-   still check the diff). Use `--perm deny` for review-only slices.
+1. **Ownership is checked after the run, not gated during it.** `acp-run` runs
+   yolo for every agent (operator 2026-10-14): `--perm scoped:<owned files>` is
+   gone (it now only warns and runs as `--perm all`), and no agent's edits are
+   refused by path. Step 2's one-owner-per-file rule is enforced by the brief
+   (name the owned files and say nothing else may change) plus a **mandatory
+   post-run check**: as each slice finishes, run `git -C <slice dir> status
+   --short` and `git -C <slice dir> diff --stat`, and flag every changed or new
+   path outside that slice's owned files before integrating it (revert or
+   re-assign it; never let it ride along silently). Use `--perm deny` for
+   review-only slices; it stays enforced (every request refused, tripwire on).
 2. **Always `--model`** (except `zcode`, whose ACP server has no model option
    and rejects one; acp-dispatch knows). Otherwise acp-dispatch refuses to run without it. The default is
    the agent's own, which for the claude adapter is the expensive settings model.
@@ -452,7 +456,8 @@ until the work is committed or recorded in a repo.
    use `--checkpoint` to force it. On quota death, `check` reports
    `quota-checkpointed` and prints an `acp-dispatch reroute <record> --agent A
    --model M` continuation command. The new record links `rerouted_from`; the
-   successor gets the original brief, checkpoint and owned-path diff stat.
+   successor gets the original brief, checkpoint and the slice dir's diff stat
+   (the whole tree since 2026-10-14; it was limited to the `scoped:` paths).
    While a checkpoint slice runs, `check`/`wait` may add `checkpoint stale: …`
    when the agent is active but the report has not been rewritten recently —
    note it and, if the binding pool is nearly empty, consider `reroute` before
@@ -631,8 +636,9 @@ returned; do not guess a reset time.
 - **Exit 0 is not success.** A file holding only a preamble, or a reviewer
   returning no findings, is a failed run. Check for an actual report. This holds
   for `acp-run` too: an agent can end its turn normally with a provider error
-  as its whole reply. The summary line's permissions-denied count shows a slice
-  that tried to leave its files.
+  as its whole reply. Since 2026-10-14 nothing refuses a slice that leaves its
+  files (acp-run runs yolo): the post-run `git status --short` / `git diff
+  --stat` check in Step 4 is what catches it.
 - Read every diff yourself before committing. Agents are good and still get
   ordering, alphabetisation and scope wrong.
 - Run the checks centrally after the batch settles, **focused first**: lint

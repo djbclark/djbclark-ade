@@ -3,7 +3,7 @@
 
     acp-dispatch <agent> --model M --name NAME (-p PROMPT | -f BRIEF) [-C DIR]
                  (--model is not accepted by zcode, whose ACP server has no model option: omit it)
-                 [--task TASK | --out DIR] [--perm all|deny|scoped:P1,P2] [--timeout S]
+                 [--task TASK | --out DIR] [--perm all|deny] [--timeout S]
                  [--lead NAME] [--detach [--no-wait] [--wait-timeout S]] [--dry-run] [--json]
                  [--min-headroom PCT] [--est-pct PCT] [--checkpoint] [--no-preflight]
     acp-dispatch footer --report PATH [--lead NAME]      the shared footer, filled in, for an
@@ -146,6 +146,8 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 NO_MODEL_AGENTS = {"zcode"}
 # Claude Code 2.1.295 refuses a sub-agent's Write for this basename (tengu_subagent_md_report_blocked).
 CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.IGNORECASE)
+# acp-run runs yolo for every agent (operator 2026-10-14): all or deny. A scoped:... value from an
+# old caller or job record is still accepted, with a warning, and runs as all.
 PERM_RE = re.compile(r"^(all|deny|scoped:.+)$")
 
 STATUS_EXIT = {"done": 0, "partial": 1, "no-report": 3, "blocked": 4, "unavailable": 5,
@@ -1200,15 +1202,11 @@ def reroute_record(a: argparse.Namespace) -> int:
     old = json.loads(old_path.read_text())
     original = old.get("prompt") or Path(old["brief"]).read_text().split("## Delivery contract", 1)[0]
     checkpoint = Path(old["report"]).read_text() if Path(old["report"]).exists() else "(no checkpoint report)"
-    paths = []
-    perm = old.get("perm") or ""
-    if perm.startswith("scoped:"):
-        paths = [p for p in perm.removeprefix("scoped:").split(",") if p and p != old.get("out")]
-    diff_cmd = ["git", "-C", old["dir"], "diff", "--stat"] + (["--", *paths] if paths else [])
+    diff_cmd = ["git", "-C", old["dir"], "diff", "--stat"]
     diff = subprocess.run(diff_cmd, check=False, capture_output=True, text=True).stdout.strip() or "(no diff stat)"
     prompt = ("Continue this slice from its checkpoint. Do not restart or repeat completed work.\n\n"
               f"Original brief:\n{original}\n\nLast checkpoint report:\n{checkpoint}\n\n"
-              f"Current git diff --stat for owned paths:\n{diff}\n")
+              f"Current git diff --stat:\n{diff}\n")
     base = old["name"] + "-reroute"
     jobs = Path(old["out"]) / "jobs"
     n = 1
@@ -1240,7 +1238,11 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     if not NAME_RE.match(a.name or ""):
         die("--name must be 1-64 chars of letters, digits, . _ - (it names every output file)")
     if a.perm and not PERM_RE.match(a.perm):
-        die("--perm must be all, deny or scoped:PATH[,PATH...]")
+        die("--perm must be all or deny")
+    if a.perm and a.perm.startswith("scoped:"):
+        print(f"acp-dispatch: warning: --perm {a.perm} is no longer enforced: acp-run runs yolo for every"
+              " agent (treated as --perm all); use --perm deny for a read-only run", file=sys.stderr)
+        a.perm = "all"
     if bool(a.prompt) == bool(a.prompt_file):
         die("give exactly one of -p PROMPT or -f BRIEF")
     acp_run = a.acp_run or shutil.which("acp-run")
@@ -1324,10 +1326,6 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     write_atomic(brief, prompt.rstrip() + "\n\n" + footer_text(agent_report, a.lead).rstrip() + "\n"
                  + deny_note + checkpoint_note + budget)
 
-    if perm.startswith("scoped:"):
-        perm = f"{perm},{out}"          # the agent must be allowed to write its report
-        if agent_report != report:
-            perm += f",{agent_report.parent}"
     acp_cmd = [acp_run, a.agent, "-C", str(Path(a.dir).resolve()), "--add-dir", str(out), "-f", str(brief),
                *(["--model", a.model] if a.model else []),
                "--perm", perm, "--timeout", str(a.timeout), "--log", str(log)]
@@ -1477,7 +1475,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("-C", "--dir", default=".", help="repo the agent works in (default: cwd)")
     ap.add_argument("--task", help="out dir is ~/.local/state/bigteam/<task>/ (default adhoc-<date>)")
     ap.add_argument("--out", help="explicit out dir instead of --task")
-    ap.add_argument("--perm", default="all", help="all | deny | scoped:P1,P2 (the out dir is added)")
+    ap.add_argument("--perm", default="all", help="all (default) | deny (read-only); a deprecated scoped:... warns and runs as all")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
                     help=f"acp-run --timeout (default {DEFAULT_TIMEOUT}; 0 is unlimited)")
     ap.add_argument("--wrapup-grace", type=int, default=DEFAULT_WRAPUP_GRACE,

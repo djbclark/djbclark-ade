@@ -66,7 +66,8 @@ line ~123), the route that trips agy's hidden burst limit.
    `feat-acp-plugin` of djbclark/ralph-tui, merged into
    `integration-2026-08-02`, the branch to build Ralph from; docs page
    `website/content/docs/plugins/agents/acp.mdx`). It sends the prompt on
-   stdin to `acp-run <agent> -C <cwd> --perm <all|deny|scoped:…> --model <m>`
+   stdin to `acp-run <agent> -C <cwd> --perm <all|deny> --model <m>`
+   (`scoped:…` is deprecated since 2026-10-14: it warns and runs as `all`)
    and maps exit 0/124/other to success/timeout/failure. One plugin reaches
    every agent in `acp-run --list`; prefer it over any per-CLI plugin. Config:
    `plugin = "acp"`, `agent` and `model` under `[agents.options]` (a top-level

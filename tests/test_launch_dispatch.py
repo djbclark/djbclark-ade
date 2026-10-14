@@ -48,7 +48,7 @@ class TestLaunchDispatch(unittest.TestCase):
         return json.loads(r.stdout)
 
     def test_headless_launch_goes_through_acp_dispatch(self) -> None:
-        d = self.launch("--model", "m1", "--no-interactive", "-p", "fix it", "--perm", "scoped:src/a.py",
+        d = self.launch("--model", "m1", "--no-interactive", "-p", "fix it", "--perm", "deny",
                         "--set", "provider=x")
         cmd = d["acp_cmd"]
         self.assertEqual(cmd[0], str(DISPATCH))
@@ -58,7 +58,7 @@ class TestLaunchDispatch(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--out") + 1], str(Path(d["brief"]).parent))
         self.assertIn("--tee", cmd)
         self.assertEqual(cmd[cmd.index("--acp-run") + 1], str(self.acp_run))
-        self.assertEqual(cmd[cmd.index("--perm") + 1], "scoped:src/a.py")
+        self.assertEqual(cmd[cmd.index("--perm") + 1], "deny")
         self.assertIn("--acp-arg=--set", cmd)
         self.assertIn("--acp-arg=provider=x", cmd)
         self.assertNotIn("--interactive", cmd)

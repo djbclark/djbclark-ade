@@ -28,8 +28,15 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
 1. **A per-agent table**: the launch command for each agent, per-agent default
    config options (`DEFAULT_SET`), each agent's own auto-approve mode (`YOLO_SET`),
    and environment set-up where an agent needs it.
-2. **A permission policy** answering every `session/request_permission`:
-   - `all` (default): allow everything.
+2. **A permission policy** answering every `session/request_permission`.
+   acp-run runs yolo for every agent (operator 2026-10-14): there are two
+   policies, `all` and `deny`. The old `scoped:P1,P2` and `ask` are still
+   accepted for old callers but are not enforced: each prints one line,
+   `acp-run: warning: --perm <value> is no longer enforced: acp-run runs yolo
+   for every agent (treated as --perm all); use --perm deny for a read-only
+   run`, and the run is exactly `--perm all` (`ask` no longer needs
+   `--interactive`).
+   - `all` (default): allow everything, including under `--interactive`.
    - `deny`: refuse everything, and make the agent actually ask (2026-10-12,
      after an adversary review found four agents ran tools without ever asking):
      claude-agent-acp gets a session with no built-in tools, no user settings
@@ -100,9 +107,7 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      `CRUSH_GLOBAL_DATA=<tmp>/data` (merged after the user's global config) and
      the workspace file under `--data-dir <tmp>/project` (merged last, after any
      project `crush.json`/`crushrc`), with `auto_lsp: false` and
-     `permissions.skip_requests: false`. (2026-10-14, operator: acp-run runs crush yolo only. The user's crushrc auto-allow PreToolUse hook makes crush
-     skip the permission requests `--perm scoped:` and `ask` depend on, so acp-run refuses them for crush with
-     exit 2; `--perm deny` is unaffected.) Crush merges config arrays by appending,
+     `permissions.skip_requests: false`. Crush merges config arrays by appending,
      so no other layer can take a tool back off the list. MCP servers a project
      config names (from `-C` up to the git root) get `disabled: true` there.
      `--data-dir` also keeps crush's session database out of `-C`. The catalog
@@ -117,8 +122,8 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      user's config (logged as `"action": "kept"`); if the temp config cannot be
      built, or an opencode config file cannot be read or parsed (JSONC with
      comments and trailing commas is fine), the run keeps it too and says so on
-     stderr, naming the file. `--perm all`, `ask`, `scoped:` and `--interactive`
-     runs are unchanged unless `--strip-user-config` is given.
+     stderr, naming the file. `--perm all` and `--interactive` runs are
+     unchanged unless `--strip-user-config` is given.
      `--strip-user-config` (env `ACP_RUN_STRIP_USER_CONFIG=1`, 2026-10-13) applies
      the same strip under any non-interactive `--perm` for opencode, agy, crush and
      zcode. It is a startup-reliability switch, not a permission control: the
@@ -152,10 +157,6 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      3 hours, belong to a dead pid (1-7 digits; anything else is never swept),
      and are real dirs (never symlinks): that covers runs killed with SIGKILL.
      A failing sweep only prints a warning; it never stops the run.
-   - `scoped:P1,P2`: allow reads, searches, fetches, thinking and commands; allow
-     edit/delete/move only when every path the tool call names is under one of
-     the listed paths (relative to `-C`). This is an approval policy, not a
-     sandbox: an allowed shell command can still write anywhere.
 3. **`--add-dir DIR` (repeatable)**: add extra workspace roots sent as
    `additionalDirectories` in `session/new`. If advertised in `initialize` (in
    `agentCapabilities` or `sessionCapabilities`), it is sent directly; if
@@ -211,9 +212,9 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    beyond this run (Hermes writes `allow_always` to a permanent allowlist), and
    never `cancelled`, which cancels the whole turn. An allow with no
    `allow_once` offered becomes a `reject_once`; with neither offered the agent
-   gets a JSON-RPC error. Under `scoped:`, a tool call with no kind gets one
-   inferred from its title (`Edit ...` is an edit, as acpx does); one that cannot
-   be inferred needs in-scope paths, like an edit.
+   gets a JSON-RPC error. A tool call with no kind gets one inferred from its
+   title (`Edit ...` is an edit, as acpx does), logged as `inferred_kind` in the
+   permission record.
 8. **Delivery checks.** Agents report some provider failures as a normal answer
    (`end_turn`). acp-run fails such a turn (exit 1, a `FAILED <class>` line on
    stderr, `"failure"` in `--json`) when the whole short reply is a refusal
@@ -314,19 +315,18 @@ acp-run claude -C ~/src/repo -i --resume SESSION_ID          # reopen an earlier
    prints `FAILED <class>` and returns to the prompt rather than ending the
    session. On exit the stderr summary carries `turns=N` (or `--json` the last
    turn's text), and the exit code is the last turn's (0 when no turn ran).
-6. **`--perm ask`** (interactive only) prints each permission request and waits
-   for `y` or `n`, typed or written to the inbox. Parallel requests are asked one
-   at a time, and `/cancel` or Ctrl-C answers an open question as cancelled. The
-   answer is still only an offered `allow_once` or `reject_once`. The agent must
-   actually send requests: `claude` needs `--perm ask --set mode=default`, or
-   its own settings can auto-allow and nothing is asked.
+6. **Permissions.** Requests are answered by the `--perm` policy without
+   asking: `all` (the default) allows each one, `deny` refuses each one. The
+   interactive `--perm ask` y/n prompt was removed on 2026-10-14 (operator:
+   acp-run runs yolo for every agent); `--perm ask` now warns and runs as
+   `all`.
 7. **`--resume ID`** reopens an ACP session with `session/load` (history is
    replayed to the log only, not printed) or `session/resume`, whichever the agent
    advertises in `initialize` (`--info` shows `loadSession` and
    `sessionCapabilities`). It exits 2 if the agent advertises neither.
 8. **herdr reports.** In a herdr pane (`HERDR_PANE_ID` set; `HERDR_BIN_PATH` or
-   `herdr` on `PATH`) it reports `working`, `idle` and `blocked` (a pending
-   permission question) as source `acp-run`, with a resume command
+   `herdr` on `PATH`) it reports `working` and `idle` as source `acp-run`
+   (`blocked`, for a pending `--perm ask` question, went with it on 2026-10-14), with a resume command
    (`acp-run <agent> -C DIR --interactive --resume ID ...`), and releases the
    pane on exit. Reports run in the background and never hold up the session.
    herdr before 0.9.2 rejects the resume command, so on 0.9.1 it is dropped.
@@ -435,7 +435,8 @@ shared file.
 
 [acpx](https://github.com/openclaw/acpx) is the maintained general-purpose ACP CLI
 and is the better choice for most people. On 2026-10-05 it lacked two things this
-script exists for: permission rules scoped to file paths, and per-agent
+script exists for: permission rules scoped to file paths (since dropped:
+acp-run runs yolo, with only `deny` as a gate, operator 2026-10-14), and per-agent
 environment and default config options. If acpx gains those, a thin wrapper over
 it would replace this script.
 

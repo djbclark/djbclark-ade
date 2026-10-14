@@ -302,10 +302,21 @@ class TestDispatch(Base):
         self.assertIn("Current git diff --stat", continuation)
         self.assertTrue((self.out / "s1-report.md").exists(), "old report remains in place")
 
-    def test_scoped_perm_gets_the_out_dir_added(self):
-        r = self.dispatch("--perm", "scoped:src/a.py")
+    def test_scoped_perm_is_deprecated_and_runs_as_all(self):
+        # operator 2026-10-14: acp-run runs yolo for every agent; scoped: warns and runs as all.
+        r = self.dispatch("--perm", "scoped:x")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(f"--perm scoped:src/a.py,{self.out.resolve()}", self.record()["cmd"])
+        self.assertEqual(r.stderr.count("--perm scoped:x is no longer enforced"), 1, r.stderr)
+        self.assertIn("treated as --perm all", r.stderr)
+        rec = self.record()
+        self.assertIn("--perm all ", rec["cmd"])
+        self.assertNotIn("scoped:", rec["cmd"])
+        self.assertEqual(rec["perm"], "all")
+
+    def test_unknown_perm_is_refused(self):
+        r = self.dispatch("--perm", "ask")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--perm must be all or deny", r.stderr)
 
     def test_dispatch_passes_add_dir_for_out(self):
         r = self.dispatch()
@@ -679,7 +690,7 @@ class TestSliceControls(Base):
         self.assertEqual(exclude.read_text().splitlines().count(".acp-dispatch/"), 1)
 
     def test_agy_finalize_moves_inner_report_and_marker_before_out_done(self):
-        self.dispatch_agent("agy", "m1", "--perm", "scoped:src")
+        self.dispatch_agent("agy", "m1")
         rec = self.record()
         self.assertIn(str(Path(rec["agent_report"]).parent), rec["cmd"])
         Path(rec["done"]).unlink()

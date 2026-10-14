@@ -216,7 +216,7 @@ text and passing `--yolo`-style flags.
 
 ```
 acp-run <agent> -C <dir> (-p PROMPT | -f FILE | stdin) --model M \
-        [--mode M] [--perm all|deny|scoped:P1,P2] [--timeout S] [--log PATH] [--json]
+        [--mode M] [--perm all|deny] [--timeout S] [--log PATH] [--json]
 acp-run --list              # agents and the command each runs
 acp-run <agent> --info      # its models, modes and auth methods
 ```
@@ -258,12 +258,12 @@ continues from the report and diff in a linked record instead of restarting.
 - **Always pass `--model`.** Without it the agent uses its own default; for
   the claude adapter that is the settings model, which cost about 6× a
   `--model sonnet` run on the same task. `--info` lists valid values.
-- **`--perm`:** `scoped:<paths>` allows reads, searches and commands, and
-  allows edits only under the listed paths (relative to `-C`); `deny` refuses
-  every request (read-only review). Only agents that ask are bound by it:
-  copilot and cline ask; claude, cursor and opencode follow their own
-  settings and mostly auto-allow, so pick a stricter `--mode` (see `--info`)
-  when that matters, and check the diff afterwards.
+- **`--perm`:** `all` (the default) is yolo for every agent; `deny` refuses
+  every request (read-only review, with a tripwire for tools that run without
+  asking). Those are the only two policies (operator 2026-10-14): the old
+  `scoped:<paths>` and `ask` are accepted but only print a deprecation warning
+  and run as `all`. For a work slice, name the owned files in the brief and
+  check `git status --short` / `git diff --stat` afterwards.
 - **Exit 0 is still not success.** An agent can end its turn normally with a
   provider error as its reply. Verify the outcome (tests, diff, a real
   review in the output) exactly as for the headless forms.
@@ -299,7 +299,7 @@ The rows for ACP-capable CLIs stay as a fallback for when an ACP route is
 broken. **agy:** prefer `acp-run agy`; the `agy -p` form below is the fallback and
 is subject to the burst budget in "agy has a burst limit" above.
 
-**Default permission mode: yolo or its equivalent, for every agent however launched** (standing rule 2026-10-03, `home-agents.md`). Gate only for a review-only slice or bigteam's `--perm scoped:` check, and say so. Use `-s read-only` on codex only for review-only calls; work slices use `--dangerously-bypass-approvals-and-sandbox`.
+**Default permission mode: yolo or its equivalent, for every agent however launched** (standing rule 2026-10-03, `home-agents.md`). Gate only for a review-only slice (`--perm deny`), and say so; acp-run has no other gate since 2026-10-14 (bigteam checks file ownership from the diff after the run). Use `-s read-only` on codex only for review-only calls; work slices use `--dangerously-bypass-approvals-and-sandbox`.
 
 **Authority for launch flags:** Orca's roster,
 `~/Library/Application Support/orca/profiles/local-default/orca-data.json`

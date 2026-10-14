@@ -20,7 +20,8 @@ their old paths are symlinks into this checkout).
    [`docs/orca-integration.md`](docs/orca-integration.md) covers Orca's task DAG.
 3. **ACP for agent-to-agent control.** [`tools/acp-run`](tools/acp-run/README.md)
    drives any agent that speaks the Agent Client Protocol: one-shot, an
-   `--interactive` loop in a visible pane, `--resume`, scoped permissions.
+   `--interactive` loop in a visible pane, `--resume`; yolo for every agent,
+   with `--perm deny` for read-only review (2026-10-14).
 4. **Skills, linked everywhere.** Each skill is one directory in
    [`skills/`](skills/); the [`skill-everywhere`](docs/skill-everywhere.md) script
    (`~/src/djbclark-ade/bin/skill-everywhere`, with a compatibility link at `~/ops/site-private/bin/skill-everywhere`) symlinks it into every TUI's skills dir, so one edit here reaches all of

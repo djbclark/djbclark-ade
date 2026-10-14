@@ -228,10 +228,11 @@ get `herdr agent start --kind` plus `agent prompt` — the fragile way; say so.
    trial, 2026-10-11), and `fleet.sessions(include_marked=False)` leaves it out.
    You audit and close it.
 3. Always `--model`. Default `--timeout` is four hours per turn (an hour cut a
-   real deploy short); `--perm scoped:<paths>` for review-style gating, `--perm
-   ask` to answer permissions in the pane (on claude add `--set mode=default`,
-   its settings otherwise bypass permissions); `--files` lists the paths the
-   claim owns. On herdr 0.9.1 `herdr agent prompt` does not reach a session that
+   real deploy short); acp-run runs yolo for every agent (operator 2026-10-14),
+   so the only gate is `--perm deny` for a review-only session (`scoped:` and
+   `ask` are deprecated: a warning, then `--perm all`); `--files` lists the
+   paths the claim owns, and the diff afterwards is the check that it kept to
+   them. On herdr 0.9.1 `herdr agent prompt` does not reach a session that
    reported itself (Claude Code's own hook owns the pane), so text goes through
    the inbox (`launch.py reply`) or `herdr pane run`, never `agent prompt`.
 4. **Next turns and waiting** (2026-10-11 fixes). `launch.py reply <id>` keeps

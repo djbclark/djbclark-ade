@@ -30,16 +30,11 @@ The absolute paths are sent as additionalDirectories in session/new, allowing
 the agent's file tools to access paths outside -C (e.g. bigteam report folders).
 
 --perm decides each session/request_permission the agent sends:
-    all              allow everything (default)
+    all              allow everything (default; also under --interactive)
     deny             refuse everything (read-only review)
-    scoped:P1,P2     allow reads, searches, fetches, thinking and commands;
-                     allow edit/delete/move only when every path the tool call
-                     names is under one of P1,P2 (relative to -C); refuse the rest.
-                     A tool call without a kind gets one inferred from its title
-                     ("Edit ..." is an edit); one that cannot be inferred needs
-                     in-scope paths like an edit.
-    ask              (--interactive only) print each request and wait for y/n
-                     on stdin or from the --inbox
+acp-run runs yolo for every agent (operator 2026-10-14): there is no other
+permission-gating policy. The old --perm scoped:PATHS and --perm ask are still
+accepted but deprecated: they print one warning on stderr and run as --perm all.
 The answer is always an offered allow_once or reject_once option, never an
 *_always one (those can be saved beyond this run) and never "cancelled" (that
 cancels the whole turn). An allow with no allow_once offered becomes a
@@ -130,7 +125,7 @@ turn gets the delivery checks; a failed one prints "FAILED <class>" and returns
 to the prompt. On exit: the stderr summary line (turns=N), or --json with the
 last turn's text; the exit code is the last turn's (0 when no turn ran).
 In a herdr pane (HERDR_PANE_ID set, HERDR_BIN_PATH or herdr found) it reports
-state working/idle/blocked as source acp-run with a resume command
+state working/idle as source acp-run with a resume command
 (acp-run <agent> -C DIR --interactive --resume ID ...; dropped on herdr before
 0.9.2, which rejects it), and releases the pane on exit, so `herdr agent prompt
 <pane> TEXT` and `herdr agent list` work. The agent process gets no
@@ -187,7 +182,6 @@ from acp.schema import (
     AgentMessageChunk,
     AllowedOutcome,
     ClientCapabilities,
-    DeniedOutcome,
     Implementation,
     RequestPermissionResponse,
     TextContentBlock,
@@ -278,7 +272,7 @@ DEFAULT_SET = {
 }
 # djbclark 2026-10-03: "yolo or equivalent should be default for all agents,
 # and all agents called from other agents". Applied unless the caller asks for
-# gating with --perm scoped:/deny (those need the agent to send permission
+# a read-only run with --perm deny (that needs the agent to send permission
 # requests), and always overridable with --mode/--set. Values are the agent's
 # own mode ids from `acp-run <agent> --info`; agents missing here have no
 # auto-approve mode (opencode, cursor, cline, hermes) and follow their own
@@ -302,8 +296,8 @@ YOLO_SET = {
 YOLO_CMD = {
     "cline": ["cline", "--acp", "--auto-approve", "true"],
     # --yolo also lifts crush's bash blocklist, so it is added only under
-    # --perm all (adversary review 2026-10-12, C1c); every other policy runs
-    # crush without it and its tools ask for permission.
+    # --perm all (adversary review 2026-10-12, C1c); --perm deny runs crush
+    # without it (and with every tool off).
     "crush": ["env", "CRUSH_DISABLE_METRICS=1",
               "CRUSH_GLOBAL_DATA=" + CRUSH_DATA,
               "crush-acp", "acp", "--yolo"],
@@ -314,8 +308,6 @@ YOLO_CMD = {
 # execute"). GEMINI_HOME points it at a shadow home that symlinks everything
 # in ~/.gemini (login included) except an empty hooks.json. See
 # ensure_agy_home() and memory/reference_acp_adapter_vetting_2026-10-03.md.
-READ_KINDS = {"read", "search", "fetch", "think", "switch_mode", "other", "execute"}
-WRITE_KINDS = {"edit", "delete", "move"}
 # ACP clientInfo.name sent on initialize, per agent (default "acp-run").
 # agy_acp_server 1.3.0 offers its non-Gemini models (Claude Opus/Sonnet 5.5,
 # GPT-OSS) only to clients it recognises: model_selection.py
@@ -967,7 +959,7 @@ def crush_strip_config(env, d, why="--perm deny"):
 def strip_user_config(a, env, deny_dir):
     """Apply STRIP_USER_CONFIG to env (in place) for a --perm deny, non-interactive run
     of opencode, agy or crush (crush builds inside deny_dir, run()'s crush_deny_dir). Returns (deny_dir, log info or None): deny_dir is the temp dir
-    the caller removes. Anything else (--perm all/ask/scoped, --interactive, other
+    the caller removes. Anything else (--perm all, --interactive, other
     agents) is untouched and logs nothing. If the temp config cannot be built the run
     keeps the user's config (deny still refuses every tool) and says so on stderr;
     that includes an unreadable or unparseable opencode config file.
@@ -1191,8 +1183,9 @@ def dump(o):
 
 
 def infer_kind(kind, title):
-    """The tool kind a scoped policy should judge: the agent's own kind, else one
-    inferred from the title's first word (acpx's approach), else None."""
+    """The tool kind logged with a permission record ("inferred_kind"): the
+    agent's own kind, else one inferred from the title's first word (acpx's
+    approach), else None."""
     if kind and kind != "other":
         return kind
     head = re.split(r"[:\s(`]", (title or "").strip().lower(), maxsplit=1)[0]
@@ -1319,10 +1312,9 @@ class RunClient(Client):
         self.text, self.tools, self.allowed, self.denied = [], 0, 0, 0
         self.usage = None
         # --interactive: stream updates to stdout (live), print thoughts too
-        # (thinking); ask() answers --perm ask; replaying is set during
-        # session/load, whose history replay is logged but neither printed
-        # nor counted, except as messages.
-        self.live, self.thinking, self.ask = live, thinking, None
+        # (thinking); replaying is set during session/load, whose history
+        # replay is logged but neither printed nor counted, except as messages.
+        self.live, self.thinking = live, thinking
         self.replaying, self.replayed, self._last_msg = False, 0, None
         self.titles, self.bol = {}, True
         # the last delivery-check failure of this prompt (kept when a retry
@@ -1362,26 +1354,9 @@ class RunClient(Client):
         self.write(("" if self.bol else "\n") + s + "\n", dim)
 
     def decide(self, tool_call):
-        if self.perm == "all":
-            return True
-        if self.perm == "deny":
-            return False
-        kind = infer_kind(
-            getattr(tool_call, "kind", None), getattr(tool_call, "title", None)
-        )
-        if kind in READ_KINDS:
-            return True
-        # edit/delete/move, or a kind that is missing and not inferable
-        locs = getattr(tool_call, "locations", None) or []
-        paths = [Path(loc.path) for loc in locs]
-        if not paths:
-            return False
-        scopes = [
-            (self.root / s).resolve()
-            for s in self.perm.split(":", 1)[1].split(",")
-            if s
-        ]
-        return all(any(p.resolve().is_relative_to(s) for s in scopes) for p in paths)
+        # yolo for every agent (operator 2026-10-14): only --perm deny refuses;
+        # main() maps the deprecated scoped:/ask to "all" before this runs.
+        return self.perm != "deny"
 
     def check_tripwire(self, update):
         """Under --perm deny, any non-think tool call that starts or completes
@@ -1432,26 +1407,11 @@ class RunClient(Client):
         # (Hermes saves allow_always to a permanent on-disk allowlist), and
         # "cancelled" means the whole turn was cancelled, not one action denied.
         # With no fitting option, answer with a JSON-RPC error. Same rules as
-        # multica-ai/multica#5351. --perm ask answers "cancelled" only when the
-        # operator cancels the turn while the question is open.
+        # multica-ai/multica#5351.
         kind = infer_kind(
             getattr(tool_call, "kind", None), getattr(tool_call, "title", None)
         )
-        if self.perm == "ask" and self.ask:
-            ok = await self.ask(tool_call, kind)
-        else:
-            ok = self.decide(tool_call)
-        if ok is None:
-            self.rec(
-                "permission",
-                {
-                    "tool_call": dump(tool_call),
-                    "options": [dump(o) for o in options],
-                    "inferred_kind": kind,
-                    "decision": "cancelled",
-                },
-            )
-            return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
+        ok = self.decide(tool_call)
         allow = next((o for o in options if o.kind == "allow_once"), None)
         reject = next((o for o in options if o.kind == "reject_once"), None)
         granted = ok and allow is not None
@@ -1819,7 +1779,6 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
                     repl = getattr(wait, "__self__", None)
                     if repl is not None:
                         repl.cancelled = client.cancelled = True
-                        repl.drop_question()
                 await conn.cancel(session_id=sess.session_id)
                 try:
                     resp = await asyncio.wait_for(prompt_task, 15)
@@ -2307,11 +2266,9 @@ class Repl:
         self.herdr, self.proc, self.err = herdr, proc, err
         self.inputs = Inputs(a.inbox)
         self.running = self.cancelled = self.exiting = False
-        self.queued, self.perm_fut, self.n, self.tasks = [], None, 0, set()
-        self.ask_lock = asyncio.Lock()
+        self.queued, self.n, self.tasks = [], 0, set()
         self.last_out, self.last_code, self.last_text = {}, 0, ""
         self.tot = {"tools": 0, "allowed": 0, "denied": 0}
-        client.ask = self.ask
 
     def say(self, s):
         self.client.line(s, dim=True)
@@ -2343,9 +2300,6 @@ class Repl:
                         c.bol = True  # the terminal echoed the line
                     else:
                         c.write((text.rstrip() if ev == "line" else "") + "\n")
-                if self.perm_fut is not None and not self.perm_fut.done():
-                    self.during_turn(ev, text, src)
-                    continue
                 if ev == "eof":
                     break
                 t = text.strip()
@@ -2394,7 +2348,6 @@ class Repl:
             fatal = True
         finally:
             self.running = False
-            self.drop_question()
         code, label = verdict(a, out, finished, failure, code, c)
         secs = round(time.time() - t0, 1)
         stop = out.get("stop_reason", "error")
@@ -2413,7 +2366,7 @@ class Repl:
 
     async def wait(self, task, secs):
         """Wait for the prompt response while handling input: /cancel,
-        /exit, permission answers, and prompts queued for later."""
+        /exit, and prompts queued for later."""
         deadline = time.monotonic() + secs
         while True:
             left = deadline - time.monotonic()
@@ -2431,19 +2384,6 @@ class Repl:
 
     def during_turn(self, ev, text, src):
         t = text.strip()
-        if src != "tty" and ev == "line" and self.perm_fut is not None:
-            self.client.write(t + "\n")
-        if self.perm_fut is not None and not self.perm_fut.done():
-            if t.lower() in ("y", "yes", "n", "no"):
-                self.perm_fut.set_result(t.lower().startswith("y"))
-            elif ev == "eof" or t in ("/exit", "/cancel"):
-                self.exiting = self.exiting or t != "/cancel"
-                self.cancel_turn(t or "EOF")
-            elif t:  # a prompt, not an answer: keep it for later
-                self.queued.append((ev, text, src))
-                self.say(f"[queued: {t[:60]}]")
-                self.client.write("allow? [y/n] ")
-            return
         # /exit typed at the terminal with nothing queued ahead of it ends the
         # session now; from a pipe or the inbox, and EOF, it waits its turn.
         if t == "/exit" and src == "tty" and not self.queued:
@@ -2469,45 +2409,15 @@ class Repl:
             return
         self.cancelled = self.client.cancelled = True
         self.say(f"[{why}: cancelling the turn]")
-        self.drop_question()
         t = asyncio.ensure_future(self._cancel())
         self.tasks.add(t)
         t.add_done_callback(self.tasks.discard)
-
-    def drop_question(self):
-        """Answer an open --perm ask question "cancelled"."""
-        if self.perm_fut is not None and not self.perm_fut.done():
-            self.perm_fut.set_result(None)
 
     async def _cancel(self):
         try:
             await asyncio.wait_for(self.conn.cancel(session_id=self.sess.session_id), 5)
         except (TimeoutError, RequestError, ConnectionError):
             pass
-
-    async def ask(self, tool_call, kind):
-        """--perm ask: True/False from the operator, None if the turn was
-        cancelled meanwhile. Parallel tool calls ask one at a time."""
-        async with self.ask_lock:
-            if self.cancelled or not self.running:
-                return None
-            title = getattr(tool_call, "title", None) or "tool call"
-            locs = getattr(tool_call, "locations", None) or []
-            paths = [loc.path for loc in locs]
-            self.client.line(
-                f"[permission] {title} (kind {kind or '?'})"
-                + (f" paths: {', '.join(paths)}" if paths else "")
-            )
-            self.client.write("allow? [y/n] ")
-            self.herdr.state("blocked", f"permission: {title}")
-            self.perm_fut = asyncio.get_running_loop().create_future()
-            try:
-                return await self.perm_fut
-            finally:
-                self.perm_fut = None
-                self.client.bol = True
-                if self.running and not self.cancelled:
-                    self.herdr.state("working")
 
 
 async def run(a, log, err, log_path):
@@ -2949,7 +2859,12 @@ def main():
     )
     ap.add_argument("-p", "--prompt")
     ap.add_argument("-f", "--prompt-file")
-    ap.add_argument("--perm", default="all")
+    ap.add_argument(
+        "--perm",
+        default="all",
+        help="all (default, yolo) or deny (read-only); the deprecated scoped:PATHS"
+        " and ask warn and run as all",
+    )
     ap.add_argument(
         "--keep-user-config",
         action="store_true",
@@ -3079,7 +2994,7 @@ def main():
     ap.add_argument(
         "--inbox",
         metavar="DIR",
-        help="with --interactive, also take prompts (and y/n answers) from"
+        help="with --interactive, also take prompts from"
         " *.txt/*.md files dropped into DIR",
     )
     ap.add_argument(
@@ -3107,18 +3022,14 @@ def main():
     if a.agent not in AGENTS:
         ap.error(f"agent must be one of: {', '.join(AGENTS)}")
     if not (a.perm in ("all", "deny", "ask") or a.perm.startswith("scoped:")):
-        ap.error("--perm must be all, deny, ask or scoped:PATH[,PATH...]")
-    if a.agent == "crush" and (a.perm == "ask" or a.perm.startswith("scoped:")):
-        # operator 2026-10-14: acp-run runs crush yolo. The user's crushrc ends with an
-        # auto-allow PreToolUse hook, so crush never sends the permission requests these
-        # policies rely on (measured: a write outside the scope ran, perm=0+/0-); refuse
-        # instead of accepting a gate that cannot hold. --perm deny is unaffected (it
-        # switches every tool off and strips the hook).
-        ap.error("--perm %s is not supported for crush: it runs yolo only (use --perm all, "
-                 "--perm deny for a read-only run, or another agent for path scoping)"
-                 % ("scoped:" if a.perm.startswith("scoped:") else "ask"))
-    if a.perm == "ask" and not a.interactive:
-        ap.error("--perm ask needs --interactive")
+        ap.error("--perm must be all or deny")
+    if a.perm == "ask" or a.perm.startswith("scoped:"):
+        # operator 2026-10-14: acp-run runs yolo for every agent; the old scoped:/ask
+        # policies are accepted for old callers but no longer enforced.
+        print(f"acp-run: warning: --perm {a.perm} is no longer enforced: acp-run runs yolo"
+              " for every agent (treated as --perm all); use --perm deny for a read-only run",
+              file=sys.stderr)
+        a.perm = "all"
     if (a.inbox or a.show_thinking) and not a.interactive:
         ap.error("--inbox and --show-thinking need --interactive")
     if a.prompt_retries < 0:

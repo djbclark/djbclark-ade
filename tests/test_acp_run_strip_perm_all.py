@@ -132,7 +132,6 @@ PROBE = textwrap.dedent("""\
         "oc_deny_flag": strip("opencode", "deny", flag=True),
         "oc_all_keep": strip("opencode", "all", flag=True, keep=True),
         "oc_all_interactive": strip("opencode", "all", flag=True, interactive=True),
-        "oc_scoped": strip("opencode", "scoped:.", flag=True),
         "agy_all": strip("agy", "all", flag=True),
         "zcode_all": strip("zcode", "all", flag=True),
         "zcode_deny_flag": strip("zcode", "deny", flag=True),
@@ -285,10 +284,6 @@ class TestStripOutsideDenyConfig(unittest.TestCase):
             s = self.r[key]
             self.assertIsNone(s["info"], key)
             self.assertEqual(s["env"], {"XDG_CONFIG_HOME": str(self.home / ".config"), "KEEP": "me"}, key)
-
-    def test_scoped_strips_too(self):
-        self.assertEqual(self.r["oc_scoped"]["info"]["action"], "stripped")
-        self.assertIn("-strip-", self.r["oc_scoped"]["dir"])
 
     def test_keep_user_config_wins(self):
         s = self.r["oc_all_keep"]

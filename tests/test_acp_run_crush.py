@@ -501,24 +501,28 @@ class TestCrushDenyEndToEnd(unittest.TestCase):
         self.assertIsNone(s["env"]["CRUSH_GLOBAL_CONFIG"])
         self.assertEqual((r["deny_config"], r["user_config"]), ([], []))
 
-class TestCrushYoloOnly(unittest.TestCase):
-    """acp-run runs crush yolo (operator, 2026-10-14): the user's crushrc auto-allow hook makes
-    crush skip the permission requests that --perm scoped:/ask need, so they are refused."""
-
-    def run_cli(self, *args):
-        script = Path(__file__).resolve().parent.parent / "tools" / "acp-run" / "acp-run"
-        return subprocess.run([str(script), "crush", *args, "-p", "x"],
-                              capture_output=True, text=True, timeout=30)
-
-    def test_scoped_and_ask_are_refused_for_crush(self):
+    def test_deprecated_scoped_and_ask_warn_and_run_as_perm_all(self):
+        # operator 2026-10-14: acp-run runs yolo for every agent. --perm scoped:/ask are still
+        # accepted (ask no longer needs --interactive) but print one warning and run as --perm all.
         for perm in ("scoped:.", "ask"):
-            r = self.run_cli("--perm", perm)
-            self.assertEqual(r.returncode, 2, perm)
-            self.assertIn("not supported for crush", r.stderr)
+            with self.subTest(perm=perm):
+                r = self.run_acp("--perm", perm)
+                self.assertEqual(r["rc"], 0, r["stderr"])
+                self.assertEqual(r["stdout"].strip(), "ok")
+                warn = (f"acp-run: warning: --perm {perm} is no longer enforced: acp-run runs yolo for"
+                        " every agent (treated as --perm all); use --perm deny for a read-only run")
+                self.assertEqual(r["stderr"].count(warn), 1, r["stderr"])
+                self.assertEqual(r["stderr"].count("warning: --perm"), 1, r["stderr"])
+                s = r["seen"]
+                self.assertIn("--yolo", s["argv"], "the --perm all launch command")
+                self.assertNotIn("--data-dir", s["argv"])
+                self.assertIsNone(s["env"]["CRUSH_GLOBAL_CONFIG"])
+                self.assertEqual((r["deny_config"], r["user_config"]), ([], []))
 
-    def test_deny_is_not_refused_by_the_perm_check(self):
-        r = self.run_cli("--perm", "deny", "--timeout", "1", "-C", "/nonexistent-dir-for-test")
-        self.assertNotIn("not supported for crush", r.stderr)
+    def test_unknown_perm_is_a_usage_error(self):
+        r = self.run_acp("--perm", "bogus")
+        self.assertEqual(r["rc"], 2, r["stderr"])
+        self.assertIn("--perm must be all or deny", r["stderr"])
 
 
 if __name__ == "__main__":

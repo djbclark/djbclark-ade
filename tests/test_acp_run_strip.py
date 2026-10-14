@@ -227,7 +227,6 @@ PROBE = textwrap.dedent("""\
         "s_oc_env": strip("opencode", "deny", env_keep="1"),
         "s_oc_env0": strip("opencode", "deny", env_keep="0"),
         "s_oc_all": strip("opencode", "all"),
-        "s_oc_scoped": strip("opencode", "scoped:."),
         "s_oc_interactive": strip("opencode", "deny", interactive=True),
         "s_agy_deny": strip("agy", "deny"),
         "s_zcode_deny": strip("zcode", "deny"),
@@ -534,8 +533,8 @@ class TestStripUserConfig(unittest.TestCase):
             self.assertIn("OPENCODE_CONFIG", s["env"])
         self.assertEqual(self.r["s_oc_env0"]["info"]["action"], "stripped", "=0 does not keep")
 
-    def test_perm_all_scoped_interactive_and_other_agents_untouched(self):
-        for key in ("s_oc_all", "s_oc_scoped", "s_oc_interactive", "s_zcode_deny", "s_claude_deny"):
+    def test_perm_all_interactive_and_other_agents_untouched(self):
+        for key in ("s_oc_all", "s_oc_interactive", "s_zcode_deny", "s_claude_deny"):
             s = self.r[key]
             self.assertIsNone(s["info"], key)
             self.assertTrue(s["passed"], key)
@@ -666,16 +665,22 @@ class TestStripEndToEnd(unittest.TestCase):
         self.assertEqual(r["user_config"][0]["action"], "kept")
         self.assertIn("broken/opencode/opencode.json", r["stderr"])
 
-    def test_interactive_ask_and_scoped_runs_get_the_same_env_as_perm_all(self):
+    def test_deprecated_scoped_ask_and_interactive_runs_get_the_same_env_as_perm_all(self):
+        # operator 2026-10-14: --perm scoped:/ask warn once and run as --perm all (ask needs no
+        # --interactive any more).
         def env_of(*args: str) -> dict[str, str]:
             r = self.run_acp("opencode", *args)
             self.assertEqual(r["user_config"], [], args)
+            warned = r["stderr"].count("is no longer enforced: acp-run runs yolo for every agent"
+                                       " (treated as --perm all)")
+            self.assertEqual(warned, 1 if args[-1] in ("scoped:.", "ask") else 0, (args, r["stderr"]))
+            self.assertNotIn("needs --interactive", r["stderr"], args)
             got = dict(r["seen"]["all_env"])
             for k in ("FAKE_OUT", "TMPDIR", "VIRTUAL_ENV", "PATH", "_"):
                 got.pop(k, None)
             return {k: v for k, v in got.items() if not k.startswith("UV_")}
         base = env_of("--perm", "all")
-        for args in (("--perm", "scoped:."), ("--interactive", "--perm", "ask"),
+        for args in (("--perm", "scoped:."), ("--perm", "ask"), ("--interactive", "--perm", "ask"),
                      ("--interactive", "--perm", "deny")):
             got = env_of(*args)
             extra = {k: v for k, v in got.items() if base.get(k) != v}
