@@ -121,6 +121,15 @@ throwaway login for you; never hand-roll one. Public images need no login.
 7. `tmprun` with a script on stdin must end the script with `exit`; never kill the
    SSH client (`timeout`) while it runs: the microVM is orphaned and keeps using quota.
    Stop an orphan with `scripts/hyades stop 'libpod-<container id>*'` (id from `df`).
+   **The script is typed into an interactive shell on a terminal** (`podman run -it`),
+   so (2026-10-14, three hung builds): (a) the rest of the script is every command's
+   stdin: give anything that may read it `</dev/null` (`apt-get`/debconf swallowed
+   the remaining lines; also set `DEBIAN_FRONTEND=noninteractive`); (b) keep lines
+   under 4096 bytes (the terminal's line limit cut a 15 KB base64 line and left an
+   open quote); (c) keep the script small and fetch payloads inside the guest
+   (`curl` a raw URL) instead of pasting them. A hung build shows ~0% CPU in
+   `timeout 10 scripts/hyades stats`; stop it as above. Check `df` for every
+   `bash` container afterwards: one hung build left two.
 
 ## hyades.json (`~/.config/hyades.json`; `getconf`/`setconf`, or `edit`)
 
@@ -217,10 +226,20 @@ first successful run. Watch runs with the `forgejo` skill (`forgejo-api GET
    Fixed kernel, no modules, TSI networking (TCP/UDP only: no VPNs, raw sockets).
    If systemd-resolved breaks DNS, hardcode `18.0.70.160`, `18.0.72.3`, `18.0.71.151`
    in `/etc/resolv.conf`. Details: `references/upstream/inessential.md`.
-5. **Not supported by design:** static hosting, a sql.mit.edu replacement (use SQLite
+5. **libkrun TSI bugs hit Hyades services too, not only the CI runner**
+   (2026-10-14): a listener on **port 0** is unreachable (libkrun#818), so any
+   image that opens an internal ephemeral-port server fails (Firecrawl's
+   playwright-service: `ERR_PROXY_CONNECTION_FAILED` on every page). Fix: add
+   `loopback-port-shim` to the image and set `LD_PRELOAD` in `envs` (see the
+   `forgejo-ci` skill for the bug list; build example below).
+6. **Worked example, a multi-microVM stack:** `examples/firecrawl/` (self-hosted
+   Firecrawl: six microVMs on one shared network, a Caddy bearer-token gate built
+   with `crane append`, the shimmed Playwright image built via `tmprun`). `deploy
+   apply|up|down|status`.
+7. **Not supported by design:** static hosting, a sql.mit.edu replacement (use SQLite
    or your own PostgreSQL microVM), remctl, non-Linux kernels, public IPs per microVM
    (XVM), running `docker-compose.yml` directly (translate it to hyades.json).
-6. **Backups:** btrbk snapshots of the host (`timetravel` shows your config's); the
+8. **Backups:** btrbk snapshots of the host (`timetravel` shows your config's); the
    server applies updates Mondays 4:20.
 
 ## Overlap with other skills

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# build-playwright-image — Firecrawl's playwright-service plus loopback-port-shim,
+# pushed to forgejo.mit.edu, with no local VM.
+#
+#   build-playwright-image [SHIM_SHA]     default: the pinned commit below
+#
+# 1. Compile the shim on Hyades in a throwaway Debian bookworm microVM (`tmprun`;
+#    bookworm = the playwright-service image's glibc 2.36). The guest fetches the
+#    source itself: a tmprun script is typed into a terminal, so payloads must not
+#    be pasted through stdin (hyades-docker skill, rule 7).
+# 2. Add it as /usr/local/lib/portshim.so with `crane append` and push.
+# The deploy script sets LD_PRELOAD=/usr/local/lib/portshim.so on the microVM.
+set -euo pipefail
+SCRIPTS="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../../scripts" && pwd)"
+SHIM_SHA="${1:-b759c7044271a69fbeae2f4f0dc29afee3223174}"
+BASE="${PW_BASE:-ghcr.io/firecrawl/playwright-service:latest}"
+TAG="forgejo.mit.edu/djbclark/firecrawl-playwright:shim-${SHIM_SHA:0:7}"
+SRC="https://forgejo.mit.edu/djbclark/loopback-port-shim/raw/commit/${SHIM_SHA}/loopback-port-shim.c"
+
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+cat > "$work/script.sh" <<EOF
+export DEBIAN_FRONTEND=noninteractive; apt-get update -qq </dev/null >/dev/null 2>&1; apt-get install -y -qq gcc libc6-dev curl ca-certificates </dev/null >/dev/null 2>&1
+curl -fsS -o /tmp/shim.c $SRC </dev/null && gcc -shared -fPIC -O2 -pthread -o /tmp/portshim.so /tmp/shim.c -ldl </dev/null && echo SHIM-BEGIN && base64 /tmp/portshim.so && echo SHIM-END
+exit
+EOF
+echo "== compiling the shim on Hyades (tmprun debian:bookworm, about a minute)"
+"$SCRIPTS/hyades" tmprun docker.io/library/debian:bookworm < "$work/script.sh" > "$work/out.txt" 2>&1
+tr -d '\r' < "$work/out.txt" | gsed 's/\x1b\[[0-9;?]*[A-Za-z]//g' \
+  | gsed -n '/^SHIM-BEGIN$/,/^SHIM-END$/p' | gsed '1d;$d' | base64 -d > "$work/portshim.so"
+file "$work/portshim.so" | rg -q 'ELF 64-bit LSB shared object, x86-64' || {
+  echo "build failed; guest output:" >&2; tail -20 "$work/out.txt" >&2; exit 1; }
+
+echo "== pushing $TAG"
+mkdir -p "$work/layer/usr/local/lib"
+install -m 0755 "$work/portshim.so" "$work/layer/usr/local/lib/portshim.so"
+gtar --owner=0 --group=0 --numeric-owner -C "$work/layer" -cf "$work/shim.tar" usr
+HYADES_ENGINE=crane "$SCRIPTS/hyades-registry" append --platform linux/amd64 -b "$BASE" -f "$work/shim.tar" -t "$TAG"
+echo "done: set PW_IMAGE=$TAG for ./deploy apply if the tag changed"
