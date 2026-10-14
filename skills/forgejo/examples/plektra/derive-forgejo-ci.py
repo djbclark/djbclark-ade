@@ -48,6 +48,11 @@ shim_step = ("      - name: Build loopback port-0 shim (libkrun#818 workaround)\
              "          cat > /tmp/portshim.c <<'SHIM_C'\n"
              + "".join(("          " + l if l.strip() else "") + "\n" for l in shim_c.splitlines())
              + "          SHIM_C\n"
+             "          cat > /usr/local/bin/hb.sh <<'HB_SH'\n"
+             "          #!/bin/sh\n"
+             "          while :; do echo \"HEARTBEAT $(date +%T) load=$(cut -d' ' -f1-3 /proc/loadavg) $(free -m | awk '/Mem/{print \\\"used=\\\"$3\\\" avail=\\\"$7}') java=$(pgrep -c java)\"; ps -eo pid,pcpu,rss,stat,etimes,args --sort=-pcpu | sed -n 2,4p | cut -c1-150; sleep 15; done\n"
+             "          HB_SH\n"
+             "          chmod +x /usr/local/bin/hb.sh\n"
              "          gcc -shared -fPIC -O2 -o /usr/local/lib/portshim.so /tmp/portshim.c -ldl\n"
              # /etc/ld.so.preload (jobs run as root) reaches every process; an LD_PRELOAD exported
              # through $GITHUB_ENV did NOT reach Gradle's daemon (run 176: it still bound port 39217).
@@ -93,11 +98,19 @@ assert n == 1, "upload step not found"
 def mark(m: "re.Match[str]") -> str:
     name = m.group(1)
     return (f"      - name: {name}\n        timeout-minutes: 25\n        run: |\n"
-            f"          trap 'echo \"BENCHSTEP end {name} $(date +%s.%N) rc=$?\"' EXIT\n"
+            f"          trap 'rc=$?; kill $HB 2>/dev/null; echo \"BENCHSTEP end {name} $(date +%s.%N) rc=$rc\"' EXIT\n"
+            "          HB=; [ -x /usr/local/bin/hb.sh ] && { /usr/local/bin/hb.sh & HB=$!; }\n"
             f"          echo \"BENCHSTEP start {name} $(date +%s.%N)\"\n")
 
 
 src = re.sub(r"      - name: (.+)\n        run: \|\n", mark, src)
+# 7b. optional: replace the full-suite command, to isolate a hang (DERIVE_FULL_CMD="./gradlew ... --info").
+FULL = os.environ.get("DERIVE_FULL_CMD")
+if FULL:
+    full_re = re.compile(r"(      - name: Run stable debug unit tests\n(?:        .*\n|          .*\n)*?)          \./gradlew :app:testStableDebugUnitTest\n")
+    full_line = "          " + FULL + "\n"
+    src, n = full_re.subn(lambda m: m.group(1) + full_line, src, count=1)
+    assert n == 1, "full test step not found"
 # 8. final step: how much space and RAM the build actually used (sizes the tmpfs or SSD ask to SIPB).
 usage = '''
       - name: Storage and memory used by this build
