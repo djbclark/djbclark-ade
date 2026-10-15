@@ -3,7 +3,9 @@ name: effort-routing
 description: >-
   Match your own reasoning effort to the work within a session: drop to a
   cheaper tier for mechanical stretches, climb back for judgment, and say when
-  you switch. Use for long stretches of file edits, doc writing or command
+  you switch. When you dispatch, also pick a context window: a bigger one for
+  a whole-corpus read or a long log, the default when the extra tokens would
+  only cost more. Use for long stretches of file edits, doc writing or command
   running, when a high-effort session does rote work, when dispatching
   subagents, or on "should we drop the thinking level for this".
 ---
@@ -103,6 +105,34 @@ cache misses only in terms of the time-based lifetime. Treat it as unverified
 — if it is true, mid-session switching is more expensive than it looks, so
 prefer dispatching a subagent over re-tiering a long session, which is the
 better move anyway.
+
+## Context window, when you dispatch
+
+Effort is how hard the model thinks. The context window is how much text it
+can hold. Pick both when you send work out. This session still cannot change
+its own window mid-turn; the lever is the dispatched call.
+
+1. Ask for a bigger window when the slice must read a whole corpus or a long
+   log (`--context 500k` or `1m`). Keep the default for a small edit, a
+   classification, or a short diff. A bigger window bills more per token on
+   some services (xAI long-context rates from a 200k prompt; Cursor input
+   above 256k at 2×, and Fast at 3×; Copilot's long tier costs more AI
+   credits) and can be slower.
+2. Request it on the same command as the model and the effort. The model is
+   applied first. `acp-run <agent> -C <dir> -p '<prompt>' --model M --effort low --context 500k`.
+   `acp-dispatch` takes `--effort` and `--context` as first-class flags
+   (checked with the model before the slice is written, stored on the job,
+   kept by `resume`): `acp-dispatch <agent> --model M --effort low --context 500k`.
+   `--acp-arg` still forwards other flags; a dash-leading value needs
+   `--acp-arg=--meta`.
+3. Read stderr `acp-run: applied: model=... effort=... ctx=...` before you
+   trust the run. `(unverified)` means that value could not be read back. A
+   mismatch is failure class `config`, exit 1. A level or size the agent
+   cannot take exits 2 and names the valid values. Codex accepts only the
+   model's own fixed size. hermes, agy, cline, qwen, opencode and crush have
+   no window knob: pick a model whose catalog window is already big enough,
+   or leave `--context` off. The table is `tools/acp-run/README.md`, section
+   "Per-agent choices: vendor, model, effort, context (2026-10-15)".
 
 ## Related
 

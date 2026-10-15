@@ -1,7 +1,7 @@
 ---
 name: model-routing
 description: >-
-  Route AI work by vendor × model × effort across every service on this machine:
+  Route AI work by vendor × model × effort × context window across every service on this machine:
   map aiuse --json lines to their TUIs, tell subscription from prepaid from free
   pools, spot unused quota worth burning. Use when choosing which agent/model
   should run a task, before big multi-agent runs, when a quota window is tight,
@@ -220,7 +220,8 @@ text and passing `--yolo`-style flags.
 
 ```
 acp-run <agent> -C <dir> (-p PROMPT | -f FILE | stdin) --model M \
-        [--mode M] [--perm all|deny] [--timeout S] [--log PATH] [--json]
+        [--effort L] [--context SIZE] [--mode M] [--perm all|deny] \
+        [--timeout S] [--log PATH] [--json]
 acp-run --list              # agents and the command each runs
 acp-run <agent> --info      # its models, modes and auth methods
 ```
@@ -228,7 +229,8 @@ acp-run <agent> --info      # its models, modes and auth methods
 **For a slice that must deliver a report, call `acp-dispatch` instead of
 `acp-run` directly** (`bin/acp-dispatch` in djbclark-ade, on PATH; 2026-10-08):
 `acp-dispatch <agent> --model M --name N --task T -C <dir> -f <brief> [--perm P]
-[--timeout S]`. It makes `--model` mandatory, appends the shared delivery footer
+[--effort L] [--context SIZE] [--timeout S]`. It makes `--model` mandatory
+except for zcode (accepted, still optional), appends the shared delivery footer
 (`docs/dispatch-footer.md`: report file, pointer-only final message, `BLOCKED:`
 protocol, no waiting by ending the turn), writes the report, `.done` marker, log
 and `jobs/<name>.json` record under `~/.local/state/bigteam/<task>/`. Before
@@ -248,7 +250,7 @@ continues from the report and diff in a linked record instead of restarting.
 
 - **Agents** (`--list`): claude (via the `claude-agent-acp` adapter), codex
   (via `codex-acp`), copilot, opencode, cursor, qwen, devin, cline,
-  hermes, grok (`grok agent --always-approve stdio`; `--model grok-4.7`; exclusion lifted 2026-10-09, probe 4 s), agy
+  hermes, grok (`grok agent --always-approve stdio`, dropped under `--perm deny`; `--model grok-4.7`; exclusion lifted 2026-10-09, probe 4 s), agy
   (Google's signed `agy_acp_server.par`; verified 2026-10-03 22:54, 6.5 s; fails
   independently of the `agy` CLI, see "agy has a burst limit" above).
   Which ones currently work end to end, and what the others need, is
@@ -259,9 +261,32 @@ continues from the report and diff in a linked record instead of restarting.
   path); full JSONL event log under `~/.local/state/acp-run/` unless
   `--log` names one. Exit 0 = end_turn, 1 = error/other stop reason,
   124 = timeout (it sends `session/cancel` first).
-- **Always pass `--model`.** Without it the agent uses its own default; for
-  the claude adapter that is the settings model, which cost about 6× a
-  `--model sonnet` run on the same task. `--info` lists valid values.
+- **Always pass `--model`**, except zcode, where it works (acp-run sets
+  `ZCODE_BIN`, fixed 2026-10-15) and `acp-dispatch` still does not require it.
+  Without it every other agent uses its own default; for the claude adapter
+  that is the settings model, which cost about 6× a `--model sonnet` run on
+  the same task. `--info` lists valid values.
+- **Context window is a routing choice next to vendor, model and effort**
+  (2026-10-15). Ask for a bigger window when the slice reads a whole corpus
+  or a long log, and leave the default for a small edit. A bigger window
+  bills more per token on some services (xAI long-context rates from a 200k
+  prompt; Cursor input above 256k at 2×, Fast at 3×; Copilot's long tier
+  costs more AI credits) and can be slower.
+  1. Request it with `acp-run <agent> --model M --effort high --context 500k`
+     (also `256k`, `1m`, and the sizes that agent's table lists). The model
+     is applied first.
+  2. `acp-dispatch --effort` and `--context` are first-class (checked with the
+     model before the job is written, stored on the record, kept by `resume`):
+     `acp-dispatch <agent> --model M --effort high --context 500k`.
+     `--acp-arg` still forwards other flags; a dash-leading value needs
+     `--acp-arg=--meta`.
+  3. Read stderr `acp-run: applied: model=... effort=... ctx=...`.
+     `(unverified)` means that value could not be read back. A mismatch is
+     failure class `config`, exit 1. A level or size the agent cannot take
+     exits 2 and names the valid values. Codex accepts only that model's
+     fixed size (`gpt-6.1-sol` is the 500k model). The full table is
+     `tools/acp-run/README.md`, section "Per-agent choices: vendor, model,
+     effort, context (2026-10-15)".
 - **`--perm`:** `all` (the default) is yolo for every agent; `deny` refuses
   every request (read-only review, with a tripwire for tools that run without
   asking). Those are the only two policies (operator 2026-10-14): the old
@@ -290,15 +315,19 @@ and stop reason reliable. Full recipe: `bigteam` Step 4.
 ### Per-CLI headless forms (no ACP mode, or fallback)
 
 muse has no usable ACP route yet, so it keeps its form. zcode gained one on
-2026-10-08 (`acp-run zcode`, via the third-party `zcode-acp-server`; no
-`--model`: on 0.67.0 it advertises a `model` option but refuses every switch,
-failing the session with `unsupported config option or switch failed: model`
-(rechecked 2026-10-11; its README pins a model only at startup, via the env pair
-`ZCODE_PROVIDER` + `ZCODE_MODEL`, which was refused too, even for GLM-5.3; both
-checks ran while the z.ai weekly limit was exhausted, so recheck after it
-resets), and since 2026-10-09
-`acp-dispatch zcode` takes no `--model` either; `--set thought=low|high|max`),
-and its row below is now the fallback.
+2026-10-08 (`acp-run zcode`, via the third-party `zcode-acp-server`). acp-run
+sets `ZCODE_BIN` to `vendor/zcode.cjs` (fixed 2026-10-15). The earlier
+"refuses every switch" error (`unsupported config option or switch failed:
+model`) was that missing variable: the server followed `which zcode`, a
+symlink, and never injected `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`. The
+2026-10-11 weekly-limit note was a different failure. `--model` works and
+`acp-dispatch zcode` still does not require it. Pass it when you want
+GLM-5.3-Flash. Effort is option `thought` (`low` / `high` / `max` on GLM-5.3,
+default max; `medium` and `xhigh` exit 2, no neighbor map). `--context N` is
+only `ZCODE_ACP_AUTO_COMPACT_THRESHOLD`, a compact cap; GLM-5.3's window is
+fixed at 1,000,000. A 2026-10-15 prompt died `project_token_login_failed` at
+the z.ai login, unrelated to acp-run. Table: `tools/acp-run/README.md`.
+Its row below is the fallback.
 The rows for ACP-capable CLIs stay as a fallback for when an ACP route is
 broken. **agy:** prefer `acp-run agy`; the `agy -p` form below is the fallback and
 is subject to the burst budget in "agy has a burst limit" above.
@@ -400,12 +429,15 @@ Herdr-hosted TUIs (driving agents in Herdr panes; verified 2026-09-26):
    to it, by any route, without the operator's specific yes for that run
    (`bigteam`'s *Operator-gated agents*; acp-run and acp-dispatch need
    `ACP_OPERATOR_APPROVED=omp`).
-4. Levers: `acp-run <agent> --model <m> [--mode <m>]` for one-shot calls
-   to ACP-capable agents (`--info` lists the values); Claude workflows
+4. Levers: `acp-run <agent> --model <m> [--effort L] [--context SIZE] [--mode <m>]`
+   for one-shot calls to ACP-capable agents (`--info` lists models; the
+   2026-10-15 per-agent table in `tools/acp-run/README.md` lists effort
+   levels and which context sizes are real). A bigger `--context` is for a
+   whole-corpus read or a long log, not for a small edit. Check stderr
+   `acp-run: applied: model=... effort=... ctx=...`. Claude workflows
    `agent(..., {model, effort})`; Orca
-   `worker-start --agent <any enabled TUI> --model --effort`; codex
-   `model_reasoning_effort`; the per-CLI flags in the headless table for
-   non-ACP CLIs.
+   `worker-start --agent <any enabled TUI> --model --effort`; the per-CLI
+   flags in the headless table for non-ACP CLIs.
 5. Model names get renamed and retired: a name from an old plan or roster is
    a hint. Check the live list (`acp-run <agent> --info`, the TUI's picker)
    before committing to it.

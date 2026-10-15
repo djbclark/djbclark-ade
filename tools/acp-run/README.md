@@ -5,11 +5,13 @@ Run one prompt through a coding agent over the
 the agent's final message on stdout. It is how one agent on this machine hands a
 self-contained task to another vendor's agent: Claude Code, Codex, Copilot,
 opencode, Cursor, Qwen Code, Devin, Cline, Hermes, Antigravity (`agy`), Grok and
-zcode (through the third-party `zcode-acp-server`, whose `model` option refuses
-every switch, so it is the one agent run without `--model`; its README pins a
-model only at startup with the env pair `ZCODE_PROVIDER` + `ZCODE_MODEL`, which
-was refused as well; both checked 2026-10-11 while the z.ai weekly limit was
-exhausted, so recheck after it resets; `--set thought=low|high|max`).
+zcode (through the third-party `zcode-acp-server`). Vendor, model, effort and
+context for each agent are in the 2026-10-15 section below. acp-run sets
+`ZCODE_BIN` to that package's `vendor/zcode.cjs` when the file is present, so
+`--model` works (fixed 2026-10-15; the 2026-10-11 "refuses every switch" note
+was the missing variable, measured while the weekly limit was also exhausted).
+A 2026-10-15 prompt still died at the z.ai login (`project_token_login_failed`),
+which is outside acp-run.
 
 A single-file [uv script](https://docs.astral.sh/uv/guides/scripts/) on the
 official Python SDK (`agent-client-protocol`); no daemon, no state beyond its
@@ -48,6 +50,8 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      agy runs in mode `default`; crush runs without `--yolo` (now added only
      under `all`) and, since 2026-10-13, with **no tools at all** (below);
      opencode gets `OPENCODE_CONFIG_CONTENT={"permission":"deny"}`.
+     Grok under `--perm deny` drops `--always-approve` and runs on a per-run
+     `GROK_HOME` (Per-agent choices, item 6).
      A tripwire backs this up: any non-think tool call that starts or completes
      without a permission request cancels the turn and exits 77. The `claude -p`
      fallback runs with `--tools ""`, `--strict-mcp-config`, `--disallowedTools '*'`
@@ -125,8 +129,8 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
      stderr, naming the file. `--perm all` and `--interactive` runs are
      unchanged unless `--strip-user-config` is given.
      `--strip-user-config` (env `ACP_RUN_STRIP_USER_CONFIG=1`, 2026-10-13) applies
-     the same strip under any non-interactive `--perm` for opencode, agy, crush and
-     zcode. It is a startup-reliability switch, not a permission control: the
+     the same strip under any non-interactive `--perm` for opencode, agy, crush,
+     zcode and grok. It is a startup-reliability switch, not a permission control: the
      SkillOpt-Sleep night runs `--perm all --strip-user-config` (operator,
      2026-10-13). Outside deny nothing permission-related is added: opencode gets
      no `OPENCODE_CONFIG_CONTENT`, agy and zcode keep their `--perm all` yolo modes,
@@ -166,8 +170,23 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    folders). **agy ignores it** (2026-10-11): agy_acp_server 1.3.0 accepts the
    field but never passes it to its allowed-directory list, so agy's file tools
    still refuse paths outside `-C`.
-4. **`--model`, `--mode` and `--set ID=VALUE`** for any config option `--info`
-   lists.
+4. **`--model`, `--mode`, `--effort LEVEL`, `--context SIZE` and `--set ID=VALUE`**
+   for any config option `--info` lists. Since 2026-10-15, `--effort` and
+   `--context` are the normalized names (`256k`, `500k`, `1m`, and the other
+   sizes that agent's section lists). Order: provider, model, other `--set`
+   and mode, then effort, then context. A value the agent or the chosen model
+   cannot take is a usage error (exit 2) before any prompt, and it lists the
+   valid values. qwen, zcode and agy do not clamp. Stderr, before the summary
+   line: `acp-run: applied: model=... effort=... ctx=...` (also on the JSONL
+   `result` record as `applied`, a separate `applied` record, and `--json`).
+   Unreadable values are `(unverified)`. A requested value the agent reports
+   differently is failure class `config`, exit 1. On cursor,
+   `--set reasoning_effort=LEVEL` hits only option id `reasoning_effort`
+   (`grok-4.7`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `gemini-4-argon`,
+   `gemini-3.8-flash`). Use `--effort` on the other cursor models.
+   `--info --model M [--effort] [--context] [--set]` applies that combination
+   with no prompt. `--info --all-models` is the per-model option matrix.
+   The per-agent section below is the table.
 5. **An audit trail**: every ACP event is logged as JSONL (default
    `~/.local/state/acp-run/`), ending with a `result` record (summary and exit
    code), and one summary line goes to stderr: stop reason, seconds, tool calls,
@@ -253,6 +272,171 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
     acp-run crush -C dir -p '...' --verify 'python3 -m unittest' --verify-retries 2
     ```
 
+## Per-agent choices: vendor, model, effort, context (2026-10-15)
+
+Landed 2026-10-15 (6528ccf, 77bd2bf, 0221561, faead67, ada7620). Value lists are from that agent's `--info` on this Mac that day. Regenerate: `acp-run <agent> --info --all-models` (per-model option matrix, no prompt). One combination, no prompt: `acp-run <agent> --info --model M [--effort L] [--context S] [--set ID=VALUE]`.
+
+1. `--effort`: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, `default`. Aliases, not clamps: `extra-high`=`xhigh`, `off`/`disabled`=`none`, `maximum`=`max`, `min`=`minimal`. `--context`: `200k`, `256k`, `272k`, `400k`, `500k`, `1m`, or a positive integer (`k`=1000, `m`=1,000,000).
+2. Order, every agent: provider, model, other `--set` and mode, effort, context. A model switch resets effort and context and changes which values exist.
+3. A LEVEL or SIZE the agent or model cannot take exits 2 before any prompt and names the valid values. qwen, zcode and agy do not clamp. agy `xhigh`/`max` exit 2.
+4. Read-back, stderr before the summary line: `acp-run: applied: model=... effort=... ctx=...`. Same fields on the JSONL `result` record (`applied`), a separate `applied` record, and `--json`. Unreadable values are marked `(unverified)` (`effort=high(unverified)`). A requested value the agent reports differently is failure class `config`, exit 1 (option response before the prompt, or `usage_update.size` after the turn). Under `--interactive` the line is still printed; a post-turn window mismatch does not change the exit code.
+5. `--meta JSON` deep-merges into `session/new` `_meta` over `systemPrompt` and the deny meta. `--agent-arg ARG` (repeatable) appends to the launch command. `--agent-env K=V` (repeatable; one argument may be `K=V,K2=V2`, split only before another `NAME=`) appends to the child environment. Per host, `~/.config/acp-run.env` or `$ACP_RUN_ENV_FILE`: `ACP_RUN_ARGS_<AGENT>` (shell-split), `ACP_RUN_ENV_<AGENT>="K=V,K=V"`.
+6. `HERDR_PANE_ID` and `HERDR_ENV` are removed on every run. Under `--perm deny`, grok starts without `--always-approve` on a per-run `GROK_HOME`: symlinks to `~/.grok` except `hooks/`, `skills/`, `plugins/`, `installed-plugins/` and `config.toml`. The copy drops `[[hooks.*]]`, `[plugins]`, `[mcp_servers.*]`, `ui.permission_mode`, `ui.yolo`, and ends with `[permission] ask = ["*"]` (deny > ask > allow). tomllib requires the copy to equal the original minus exactly those parts; otherwise grok keeps the user's home and the run says so. A token rewritten as a regular file in the temp home is copied back. `--strip-user-config` is the same strip without the permission table. `--perm all` still runs the user's grok hooks; without the herdr variables they cannot rename the caller's tab.
+7. `acp-dispatch --effort` and `--context` are first-class. Checked with the model before anything is written (`acp-run <agent> --info --model M --effort E --context C`), stored on the job record, kept by `resume`. `--acp-arg` still forwards other flags; a dash-leading value needs `--acp-arg=--meta`. zcode `--model` is accepted and still optional.
+8. No `--fast`. Use `--set fast=on|off` (claude Opus only), `--set fast=true|false` (cursor), `--set fast-mode=on|off` (codex), or a model id (`grok-4.7-build-fast`, copilot `claude-opus-4.8-fast`). Thinking budget: `--agent-env MAX_THINKING_TOKENS=N` or `ACP_RUN_ENV_CLAUDE`. Not implemented (exit 2, or not a flag): hermes shadow home for effort/context, crush `/set_reasoning_effort`, opencode/qwen context caps (`OPENCODE_CONFIG_CONTENT` `limit.context` untested; a cap cannot raise a window), agy `--auth-method` (`AGY_ACP_DEFAULT_MODEL` via `ACP_RUN_ENV_AGY`), `ZCODE_ACP_QUOTA_AUTO_RESUME=0` (operator's choice). Claude `--context 1m` does not add `[1m]`. No warning yet for opencodex GPT rows in claude's model list.
+
+`ocx-*` grok ids are OpenAI via the opencodex proxy `127.0.0.1:10100` (provider `openai`, ChatGPT auth to `https://chatgpt.com/backend-api/codex`). Billed to the ChatGPT plan, not xAI. Cursor `--set reasoning_effort=LEVEL` hits only option id `reasoning_effort`: `grok-4.7`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `gemini-4-argon`, `gemini-3.8-flash`. Other cursor models use option `effort` or `reasoning`; use `--effort`.
+
+`pick_config` tries every option of a category and ignores a trailing `(openai)` or `[1m]` (`--model qwen3.8-max` selects `qwen3.8-max(openai)`). An ambiguous short name exits 2 (hermes `claude-sonnet-5.5`). `--info` without `--model` is the default model's options only. hermes and crush `--info` include `session/new`'s `models`.
+
+### claude
+
+https://code.claude.com/docs/en/model-config — claude-agent-acp 0.90.0, Claude Code 2.1.300.
+
+Provider is inherited env only (`ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`). No `--provider`. This Mac's `HTTPS_PROXY` is the opencodex intercept `127.0.0.1:10200`. A description starting `opencodex` is OpenAI: `claude-opus-4-8-cuk` (GPT 6 Astra), `-bs8` (6.1 Sol), `-f1a` (6 Sol), `-plv` (6 Luna), `-ncb` (5.6 Sol), `-myc` (5.6 Terra, set fails "Internal error"), `-j97` (5.6 Luna), `-teq` (5.5, "Internal error").
+
+`--model` (unique-token match): `default`/`opus` = Opus 5.5, `fable` = Fable 5.1, `sonnet` = Sonnet 5.5, `haiku` = Haiku 5.5, `claude-sonnet-5`, `claude-opus-5`, `claude-fable-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`. TUI also `best`, `opusplan`, full ids, `[1m]`.
+
+Effort option `effort`: `low` `medium` `high` `xhigh` `max`, plus `default`. No `xhigh` on Opus 4.6 or Sonnet 4.6. No option on Haiku 4.5 and older. Defaults: `high`; Opus/Sonnet/Haiku 5.5 `medium`; Opus 4.7 `xhigh`. `ultracode` is a setting, not a level. Also `CLAUDE_CODE_EFFORT_LEVEL`, settings `effortLevel` / `modelSettings` (`max` refused there), `ultrathink`.
+
+Context: Fable 5.1, Fable 5, Sonnet 5, Sonnet 5.5, Haiku 5.5, Opus 4.7+ are 1M native. Opus 4.6 and Sonnet 4.6 are 200K, 1M only via `[1m]` (plan dependent) — `--context 1m` does not add that suffix. `--context 200k` sets child `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` (haiku `usage_update.size` 1000000 to 200000). `--context 1m` leaves the model's own window. Other sizes exit 2. A 1m request that comes back 200k is `FAILED config`. Auto-compact 100K–1M: `--autocompact`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. Gateway: `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
+
+Fast option `fast` `on`/`off` only on `opus`, `claude-opus-5`, `claude-opus-4-8`, and the opencodex GPT rows. Not on fable, sonnet, haiku, Opus 4.7, Opus 4.6. Extended thinking is always on for 5.5 and Fable.
+
+### codex
+
+https://developers.openai.com/codex/config-reference , openai/codex#53742, #53336 — codex-acp 2.2.2 (@openai/codex 0.160.1), cli 0.162.1.
+
+Env `MODEL_PROVIDER`, `CODEX_API_KEY`, `OPENAI_API_KEY`, or `--oss --local-provider lmstudio`/`ollama`. This Mac: ChatGPT Plus. No `--provider`.
+
+Models: `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna` (user default), `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`. Hidden: `gpt-reserve`, `codex-auto-review`.
+
+Effort option `reasoning_effort`. `low medium high xhigh max ultra` on gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-5.6-sol, gpt-5.6-terra. No `ultra` on gpt-6-luna, gpt-5.6-luna. Defaults: 6.1-sol, 6-astra, 5.6-sol `low`; the rest `medium`. CLI docs also list `minimal`. TUI: `-c model_reasoning_effort`, `/model`.
+
+Context is the model's fixed window: gpt-6.1-sol 500000 (475000 effective); every other visible model 272000 (258400). All have `max_context_window` 872000, `effective_context_window_percent` 95. `--context 500k` only with `--model gpt-6.1-sol`; `--context 272k` only on the others; else exit 2 and the message names `--model gpt-6.1-sol`. Does not change the model. `model_context_window` works on `codex exec` (400000 became 380000) and not via codex-acp (`CODEX_CONFIG`, temp `CODEX_HOME`, `CODEX_PATH` `-c` all failed). Read-back accepts `usage_update.size` within 90–101% (the 95% share).
+
+Fast: `--set fast-mode=on` or `off` (all 7). `service_tier` `fast` (priority) / `flex` / default. Priority copy: 6.1-sol and 6-astra "2x speed, increased usage"; 6-sol and 6-luna "1.5x speed"; 5.6 "1.5x speed, increased usage". `features.fast_mode`.
+
+### copilot
+
+https://github.blog/changelog/2026-06-04-larger-context-windows-and-configurable-reasoning-levels-for-github-copilot/ , https://docs.github.com/en/copilot/reference/ai-models/supported-models , github/copilot-cli#3481 — CLI 1.0.95.
+
+GitHub login only. Not passed through: `COPILOT_PROVIDER_TYPE` `openai`/`azure`/`anthropic`, `_BASE_URL` `_API_KEY` `_API_KEY_COMMAND` `_BEARER_TOKEN` `_WIRE_API` (`completions`/`responses`) `_TRANSPORT` (`http`/`websockets`) `_MODEL_ID` `_WIRE_MODEL` `_MAX_PROMPT_TOKENS` `_MAX_OUTPUT_TOKENS` `_HEADERS`, `COPILOT_OFFLINE=true`.
+
+Models: `auto` (listed twice, first wins; ACP starts on `claude-sonnet-5.5`, not TUI `model: auto`), `claude-sonnet-5.5`, `claude-sonnet-5`, `claude-fable-5.1`, `claude-fable-5`, `claude-opus-5.5`, `claude-opus-5`, `claude-opus-4.8`, `claude-opus-4.8-fast` (fast mode; 30× `_meta.copilotUsage`), `claude-haiku-5.5`, `claude-haiku-4.5`, `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5-mini`, `mai-code-1.1-flash`, `gemini-3.8-flash`, `gemini-3.7-flash`, `grok-4.7`, `grok-4.6`, `grok-4.5`, `kimi-k3`, `gemini-4-argon`. `copilot help config` also `claude-sonnet-4.6`. `--auto-tier efficiency|balance|intelligence` is not wired (`COPILOT_AUTO_TIER`, model `auto` only).
+
+Effort option `reasoning_effort` (launch `--reasoning-effort` is the same knob and survives a model switch). CLI set `none minimal low medium high xhigh max`; picker is the subset; default `medium`. `low,medium,high,xhigh,max`: sonnet-5.5, sonnet-5, fable-5.1, fable-5, opus-5.5, opus-5, opus-4.8, opus-4.8-fast, haiku-5.5, gpt-6-astra (each prefixed `claude-` or bare gpt as in the model list). `none,low,medium,high,xhigh,max`: gpt-6.1-sol, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna. `none,low,medium,high,xhigh`: gpt-5.5, gpt-5.4, gpt-5.4-mini. `low,medium,high,xhigh`: gpt-5.3-codex, grok-4.7, grok-4.6. `low,medium,high`: gpt-5-mini, mai-code-1.1-flash, gemini-3.8-flash, gemini-3.7-flash, grok-4.5, gemini-4-argon. `low,high,max`: kimi-k3. No option: `auto`, `claude-haiku-4.5` (CLI `--reasoning-effort` with `--model auto` exits 1).
+
+Context is a launch flag, not an ACP option: `200k`/`256k`/`272k` → `--context default`; `1m` → `--context long_context`; else exit 2. `--model` is repeated on that server command, because `session/set_config_option model` resets the tier (measured 272000 vs 922000). Read-back by tier: ≤300000 default, ≥800000 long. Measured default 272000 (gpt-5.4, gpt-5.5); long 922000 on gpt-5.5 (picker "1.1M"); long costs more credits. Copilot's 1M table, not filtered by acp-run: Claude Sonnet 4.6/5/5.5, Opus 4.8/5/5.5 and fast, Haiku 5.5, Fable 5/5.1, GPT-5.3-Codex, 5.4, 5.5, 5.6 Luna/Sol/Terra, GPT-6 Astra/Luna/Sol, 6.1 Sol, Kimi K3. A miss is `FAILED config`. TUI: `/model`+Tab, `contextTier`, `/model --session`.
+
+### opencode
+
+https://opencode.ai/docs/models/ , https://opencode.ai/v2/docs/models , https://models.dev/api.json — 2.0.29.
+
+Connected: alibaba 58, alibaba-cn 90, opencode (Zen) 44, opencode-go 31, sipb 19 (242 ids, same as `opencode models`). Provider is the slash prefix. Examples: `opencode/claude-opus-5-5`, `opencode/claude-sonnet-5-5`, `opencode/claude-fable-5-1`, `opencode/gpt-6-sol`, `opencode/gpt-6.1-sol`, `opencode/gpt-5.5`, `opencode-go/glm-5.3`, `opencode-go/kimi-k3`, `opencode-go/deepseek-v4-pro`, `opencode-go/qwen3.8-max`, `sipb/qwen3.6:35b-a3b-q4_K_M`. No user `model`: `opencode-go/gemini-4-argon-contributor`. Dashes, not dots. TUI `/models`, `opencode run -m provider/model[#variant]`. Effort is re-read after a second model set (the first response can still be the previous model's list).
+
+Effort option `effort`; `default` = no variant, always offered. Groups plus `default`, 2026-10-15. `none,low,medium,high,xhigh,max`: opencode/claude-opus-5-5, gpt-6-astra, gpt-6-sol, gpt-6.1-sol, opencode-go/deepseek-v4-pro, gpt-6-luna, grok-4.6. `low,medium,high,xhigh,max`: opencode/claude-fable-5-1, claude-sonnet-5, claude-sonnet-5-5, claude-haiku-4-5, gpt-6-luna (Zen), grok-4.7, deepseek-v4-pro (Zen), opencode-go/claude-haiku-5-5. `none,low,medium,high,xhigh`: gpt-5.5, gpt-5.5-pro, gpt-5.4-nano, gpt-5.3-codex-spark. `low,medium,high,xhigh`: gpt-5.4-mini, grok-build-0.1, opencode-go/grok-4.7, hy3. `medium,high,xhigh`: gpt-5.6-terra. `minimal,low,medium,high,xhigh`: muse-spark-1.3-contributor-free, nemotron-3-ultra-free, opencode-go/qwen3.7-plus. `minimal,low,medium,high`: gemini-3.8-flash. `low,medium,high`: opencode/gemini-4-argon, glm-5.3, gemini-3.5-flash-lite, opencode-go/glm-5.2, cat-jam-free, every `sipb/*`. `low,high,max`: kimi-k3, gemini-3.1-pro, gpt-5.3-codex, deepseek-v4.1-flash (Zen), opencode-go/gemini-4-argon-contributor. Also `none,high,max` / `high,max` / `max` / `none,thinking` / `none,low,medium,xhigh` / `none,low,high,max` / `none,low,high` on Alibaba, Qwen, Longcat, Muse, Space-Bunny, Kimi-code, Hy4. No effort option on 97 Alibaba/Qwen/DeepSeek-R1 ids. No fast switch (`#variant` is effort).
+
+Context exits 2. `limit.context`: opencode/claude-opus-5-5 1000000; gpt-6-sol 1050000 (`input` 922000); opencode-go/glm-5.2 1000000; kimi-k3 1048576; most Qwen/Alibaba 131072–262144. Missing limit treated as 200000 (`sipb`; servers run ~32K). `compaction.*`.
+
+### cursor
+
+https://cursor.com/docs/models/grok-4-7 , https://cursor.com/docs/cli/reference/parameters , https://cursor.com/docs/cli/acp — cursor-agent 2026.10.14-0f9edde. No prompt sent.
+
+`--model` is the plain id. Rejected: presets (`grok-4.7-high-fast`) and brackets (`claude-opus-4-8[context=1m,effort=high,fast=false]`). `default` = Auto. Vendors covered below: Claude Fable 5.1/5, Opus 5.5/5/4.8/4.7/4.6/4.5, Sonnet 5.5/5/4.6/4.5/4, Haiku 5.5/4.5; GPT-5.6 Sol/Terra/Luna, 5.5, 5.4, 5.4 mini/nano, 5.3 Codex, 5.2, 5.1, 5 mini; Gemini 4 Argon, 3.8/3.7/3.6/3.5/3 Flash, 3.1 Pro, 2.5 Flash; Grok 4.7/4.6/4.5; Composer 2.5; Muse Spark 1.3; Kimi K3, K2.7 Code; GLM 5.2, 5.3, 5.3 Flash.
+
+`--effort`: category `thought_level`, never id `thinking`. `xhigh` = `extra-high`. `--context`: option `context`, or exit 2 if the model has none. Grok 4.7 input above 256k is 2×; Fast is 3×. Fast is the Premium default. `--set fast=true|false`, `--set thinking=true|false` only where listed.
+
+1. Grok 4.7: context `256k`/`500k`; [reasoning_effort] default `high` of `low`/`medium`/`high`/`xhigh`; fast `false`/`true`.
+2. Grok 4.6: [effort] `low`/`medium`/`high` (default)/`xhigh`; fast. Grok 4.5: [effort] `low`/`medium`/`high` (default); fast default `true`. Composer 2.5: fast only, default `true`.
+3. Opus 5.5: context `300k`/`1m`; [effort] default `medium` of `low`/`medium`/`high`/`xhigh`/`max`; fast. Opus 5 and 4.8: thinking; context `300k`/`1m`; [effort] default `high`, low through max; fast. Opus 4.7: same, effort default `xhigh`. Opus 4.6: thinking; context `200k`/`1m`; [effort] `low`/`medium`/`high`/`max` (no `xhigh`); no fast. Opus 4.5: thinking only.
+4. Fable 5.1 and 5: thinking; context `300k`/`1m`; [effort] low through max, default high; no fast. Sonnet 5.5: context `300k`/`1m`; [reasoning_effort] low through max, default high. Sonnet 5: thinking, context, [effort]. Sonnet 4.6: thinking; context `200k`/`1m`; [effort] `low`/`medium`/`high`/`max`. Sonnet 4.5: thinking. Sonnet 4: thinking default `false`. Haiku 5.5: thinking; context `300k`/`1m`; [reasoning_effort] low through max. Haiku 4.5: thinking.
+5. GPT-5.6 Sol/Terra/Luna: context `272k`/`1m`; [reasoning] default `medium` of `none`/`low`/`medium`/`high`/`xhigh`/`max`; fast. GPT-5.5 and 5.4: context `272k`/`1m`; [reasoning] `none`/`low`/`medium`/`high`/`extra-high`; fast. GPT-5.4 mini/nano: [reasoning] `none`/`low`/`medium`/`high`/`xhigh`. GPT-5.3 Codex: [reasoning] `low`/`medium`/`high`/`extra-high` (default `extra-high`); fast. GPT-5.2: [reasoning] low through `extra-high`; fast. GPT-5.1: `low`/`medium`/`high`. GPT-5 mini: none.
+6. Gemini 4 Argon and 3.8 Flash: [reasoning_effort] `low`/`medium`/`high`. 3.7 Flash: [effort] `low`/`medium`/`high`. 3.6 Flash: [effort] `minimal`/`low`/`medium`/`high`. 3.1 Pro, 3 Flash, 3.5 Flash, 2.5 Flash: none.
+7. Muse Spark 1.3: context `300k`/`1m`; [effort] `minimal`/`low`/`medium`/`high` (default)/`xhigh`/`max`. Kimi K3: [reasoning] `low`/`high`/`max` (default max). K2.7 Code: none. GLM 5.2: `high`/`max`. GLM 5.3 and 5.3 Flash: `low`/`high`/`max`.
+
+### qwen
+
+https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/ , https://github.com/QwenLM/qwen-code/blob/main/docs/users/configuration/settings.md , QwenLM/qwen-code#8698 — 0.25.1.
+
+Not a flag: `--auth-type` `openai` `openai-responses` `anthropic` `qwen-oauth` `gemini` `vertex-ai`. Entries live in `settings.json` `modelProviders.<authType>[]`. Here, 10 Coding Plan models at `https://coding-intl.dashscope.aliyuncs.com/v1`; Bailian `qwen3.8-max` at `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1`. `--info` auth: `openai` only. Suffix `(openai)` is the authType. Live: `--model qwen3.8-max --effort low` → `qwen3.8-max(openai)`, effort low, ctx 1m.
+
+Models: `qwen3.5-plus`, `qwen3.6-plus` (Pro only), `qwen3.7-plus`, `glm-5`, `kimi-k2.5`, `MiniMax-M2.5`, `qwen3-coder-plus`, `qwen3-coder-next`, `qwen3-max-2026-01-23`, `glm-4.7`, `qwen3.8-max`. Also `fastModel`, `advisorModel`, `--advisor`, `/model --fast --vision --voice --compaction --image`. `/model --fast` picks `fastModel`, not effort.
+
+Effort option `reasoning_effort`: only a listed value. `none`/`default` only on `qwen3.5-plus`, `qwen3.6-plus`, `qwen3.7-plus`, `kimi-k2.5`, `qwen3-max-2026-01-23`. `qwen3.8-max`: `none` `low` `medium` `xhigh` (default `xhigh`); `high` and `max` exit 2. `glm-5`, `glm-4.7`, `MiniMax-M2.5`: `none` `default` `low` `medium` `high` `xhigh` `max`. Coders `qwen3-coder-plus`, `qwen3-coder-next`: no option. TUI `/effort` is the wider `low`–`max`. glm/MiniMax extra tiers may be `enable_thinking` no-ops on the Coding Plan (not re-checked with `--openai-logging`). Vendor notifications without a prefix are extension notifications.
+
+Context exits 2. `generationConfig.contextWindowSize`: `qwen3.5-plus` `qwen3.6-plus` `qwen3.7-plus` `qwen3-coder-plus` 1000000; `kimi-k2.5` `qwen3-coder-next` `qwen3-max-2026-01-23` 262144; `glm-5` `glm-4.7` 202752; `MiniMax-M2.5` 196608; `qwen3.8-max` unset (models.dev; live turn 1m). A lower size only compacts earlier. `context.autoCompactThreshold` 0.85.
+
+### cline
+
+https://docs.cline.bot/cli/cli-reference , https://docs.cline.bot/usage/acp , https://docs.cline.bot/sdk/model-providers , cline/cline#14820 — 3.0.71.
+
+`--set provider=cline` (313, usage billing), `cline-pass` (18; acp-run default, before the model), `openai-codex` (9). TUI `cline auth -p ID -k KEY -m MODEL` (30+ providers).
+
+`cline/` examples: `anthropic/claude-sonnet-5.5` (default there), `claude-opus-5.5`, `claude-opus-5`, `claude-fable-5.1`, `claude-haiku-5.5`, `openai/gpt-6.1-sol` and `-pro`, `gpt-6-sol` and `-pro`, `gpt-6-luna` and `-pro`, `gpt-6-astra` and `-pro`, `x-ai/grok-4.7`, `grok-4.6`, `google/gemini-3.8-flash`, `meta/muse-spark-1.3`, `~openai/gpt-sol-latest`, `:free` (313). `cline-pass/`: `mimo-v2.6-flash` (ACP default), `mimo-v2.6-pro`, `deepseek-v4.1-flash`, `deepseek-v4-pro`, `glm-5.3`, `glm-5.3-flash`, `kimi-k3`, `qwen3.7-plus`, `qwen3.7-max`, `qwen3.8-max`, `minimax-m3`, `mimo-v2.5`, `mimo-v2.5-pro`, `muse-spark-1.3-contributor`. `cline-free/`: `solar-mini4`, `mimo-v2.6-flash`, `step-5-preview`, `muse-spark-1.3-contributor`. `openai-codex`: `gpt-6.1-sol`, `gpt-6-luna`, `gpt-6-sol`, `gpt-6-astra`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.5`, `gpt-5.3-codex-spark`. TUI's saved `cline-pass/deepseek-v4.1-flash` is not the ACP start. `-pro` ids are models, not a fast flag.
+
+`--effort` is launch `--thinking` `none` `low` `medium` `high` `xhigh`. `max` exits 2. `default` adds nothing. No ACP option: effort read-back `(unverified)`. Omitted, ACP sends `reasoning_effort: "none"` (file `~/.cline/data/settings/providers.json` says `medium` and is ignored). Bare CLI `--thinking` means medium. `--context` exits 2 (catalog window; `ModelInfo.contextWindow` for custom models only). `--compaction agentic|basic|off` (default `agentic`) is not `--context`.
+
+### hermes
+
+`~/.hermes/hermes-agent/website/docs/user-guide/features/acp.md` — 0.21.5. No provider prompt.
+
+`config_options` null. `--model` is `session/set_model` on `session/new` `models` (436; `have:` shows 40 then "... N more"). Read-back `(unverified)`. `--set` is stored and ignored. Shape `provider:model` or `custom:name:model`. Counts: nous 64, openrouter 61, anthropic 13, openai-codex 13, copilot 30, copilot-acp 31, xai-oauth 14, alibaba 15, alibaba-cn 15, alibaba-coding-plan 10, opencode-zen 88, opencode-free 5, custom 77 (`custom:sipb-llms:*`). `model.provider` here `cline2`. Examples: `nous:anthropic/claude-fable-5.1`, `nous:openai/gpt-6-astra`, `nous:openai/gpt-6.1-sol`, `openai-codex:gpt-6.1-sol`, `anthropic:claude-opus-5`, `xai-oauth:grok-4.7`, `alibaba-coding-plan:qwen3.7-plus`, `opencode-zen:big-pickle`, `custom:sipb-llms:deepseek-r1:32b`. `claude-sonnet-5.5` is ambiguous and refused; `nous:anthropic/claude-sonnet-5.5` is not. Audit current: `custom:big-pickle`. Not persisted. `hermes --provider` is oneshot/tui only.
+
+`--effort` exits 2. `config.yaml`: `agent.reasoning_effort` (`medium` here), `agent.reasoning_overrides`. Levels `none minimal low medium high xhigh max ultra`. Provider wire clamps: Codex GPT-6 Astra low through max (`ultra` dropped), Kimi K3 `low`/`high`/`max`, Grok 4.6+ through `xhigh`. TUI `--reasoning`, `/reasoning`. No `HERMES_HOME` shadow.
+
+`--context` exits 2. Bigger window = model id `openai-codex:gpt-6-astra-900k`, `openai-codex:gpt-6-sol-900k`. Resolve: `model.context_length`, `providers.<p>.models.<m>.context_length`, `~/.hermes/context_length_cache.yaml`, endpoint, models.dev, else 128K. Cache: gpt-5.5 codex 272000, nous 1050000. `compression.threshold` 0.4, `threshold_tokens` 100000. `-pro` `-fast` `-flex` `-900k` are ids (`gpt-6-astra-pro` and the same suffixes).
+
+### zcode
+
+https://docs.z.ai/guides/llm/glm-5.3 , zcode-acp-server README — CLI 0.16.9, zcode-app-cli 3.15.3-35, server 0.69.3.
+
+acp-run sets `ZCODE_BIN=<pkg>/vendor/zcode.cjs` when that file and `vendor/provider/zcode-builtin.json` exist. `--model` works because of that. Fixed 2026-10-15: earlier the server used `which zcode` (symlink, no `.js`), skipped `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`, and rejected every switch ("unsupported config option or switch failed: model"). The 2026-10-11 weekly-limit note was a different failure. Dispatch still allows omitting `--model` (two models). A 2026-10-15 prompt died `project_token_login_failed` at z.ai, same on the old binary. `--info` proven; a turn is not.
+
+Provider switch not shown to work. Plan ids: `account:{zai,bigmodel}-{individual,team}-coding-plan` and `start-plan`, `account:*-offpeak-idle-plan`, `account:*-highspeed-card` (10), plus `builtin:zai-coding-plan`, `builtin:zai` (API key), `builtin:bigmodel*`, `builtin:zai-start-plan`. Custom `~/.zcode/v2/provider_config.json`. Here only `builtin:zai-coding-plan` is on. `zai-start-plan` = `coding_plan_not_entitled`. Pin: `ZCODE_PROVIDER=builtin:zai-coding-plan`. Probes of `builtin:zai` and `builtin:zai-start-plan` still returned only coding-plan GLM-5.3.
+
+Models: `builtin:zai-coding-plan\GLM-5.3`, `builtin:zai-coding-plan\GLM-5.3-Flash` (`--model GLM-5.3-Flash` matches). Registry also GLM-5.2, GLM-5-Turbo (start/team), GLM-5.1/4.x custom. A switch resets effort to `max`.
+
+Effort option `thought`. GLM-5.3 and Flash: `low` `high` `max` (default `max`, cannot disable). GLM-5.2: `disabled` `high` `max`. GLM-5-Turbo and GLM-5.1: `disabled` `enabled`. No map onto a neighbor: `medium` and `xhigh` exit 2 on GLM-5.3. `default` keeps the model default. `disabled` aliases to `none` and matches an option that canonicalizes to `none`.
+
+Windows fixed: 5.3 / Flash / 5.2 = 1000000 (out 128000); 5-Turbo, 5.1, glm-5, 4.x = 200000; GLM-4.5 = 131072; custom id `[1m]` = 1000000; `properties.contextWindow` sets a custom model. `--context N` is `ZCODE_ACP_AUTO_COMPACT_THRESHOLD` (compact once `contextUsed` ≥ N), not a larger window. ctx `(unverified)`. No fast toggle.
+
+### agy
+
+`agy --help`; CLI 1.3.5, server 1.3.0. https://antigravity.google/docs/models is stale (3.6 Flash, Claude 4.6). `agy models` not run.
+
+OAuth offers Gemini, Claude, GPT-OSS, the last two only when `clientInfo.name` is `zed` / JetBrains / Xcode (acp-run sends `zed`). Creds: `oauth-personal` (here), `oauth-business` (no Claude/GPT-OSS), `GEMINI_API_KEY` with optional `GOOGLE_GEMINI_BASE_URL`, Vertex (Gemini-only hard-coded list: 3.1 Pro, 3.5/3.6/3.7/3.8 Flash). No `--provider`, no `--auth-method`.
+
+Ids: `gemini-3.8-flash-{high,medium,low}`, `claude-opus-5-5-{low,medium,high}`, `claude-sonnet-5-5-{low,medium,high}`, `gpt-oss-120b-medium`. API key adds `gemini-3.1-pro-high`, `gemini-3.1-pro-low` (base `gemini-3.1-pro-preview`). `AGY_ACP_DEFAULT_MODEL` default `gemini-3.8-flash-high`.
+
+`--effort low|medium|high` picks `<base>-<level>` (`claude-opus-5-5` + high → `claude-opus-5-5-high`). `xhigh` and `max` exit 2, not rewritten to high. `agy -p --effort max` can reach them; acp-run does not call it. `gpt-oss-120b` is fixed `-medium`. ThinkingLevel: 1 LOW, 2 MEDIUM, 3 HIGH, 4 MINIMAL, 5 EXTRA_HIGH. Options: `model`, `mode` only. `--context` exits 2. Gemini 3.x Flash and 3.1 Pro: 1048576. OAuth `maxTokens` from CCPA `fetchAvailableModels`. Claude and GPT-OSS windows not measured.
+
+### grok
+
+https://docs.x.ai/developers/grok-4-7 , https://docs.x.ai/developers/pricing — 1.0.52.
+
+`cli-chat-proxy.grok.com/v1` (grok.com, `XAI_API_KEY`, or `cached_token`). `[model_providers.X]` / `[model.Y]` in `~/.grok/config.toml`. `GROK_MODELS_BASE_URL`, `GROK_MODELS_LIST_URL`. Models: `grok-4.7` (default; server `grok-4.7-build`, fingerprint `fp_5719f1aec35dd73c`), `grok-4.7-build-fast` (same fingerprint, 2×, 1.5× on long context, not free), `grok-4.6`, `grok-4.5`, `ocx-gpt-6-astra`, `ocx-gpt-6-1-sol`, `ocx-gpt-6-sol`, `ocx-gpt-6-luna`, `ocx-gpt-5-6-sol`, `ocx-gpt-5-6-terra`, `ocx-gpt-5-6-luna`, `ocx-gpt-5-5`. No `--fast`.
+
+Effort `reasoning_effort`, also sent as `reasoningEffort` on the window's `session/set_model`. `low medium high` (default high) `xhigh` on 4.7, 4.7-build-fast, 4.6. 4.5 stops at `high`. `ocx-*` add `max`, except `ocx-gpt-5-5`. Docs also list menu ids `none`, `minimal`.
+
+Context: `session/set_model` `_meta.contextWindow`. Must be in initialize `modelState.availableModels[]._meta.contextWindows`. Measured: four xAI ids 256000 (default) and 500000; `ocx-gpt-6-1-sol` 500000 only; other `ocx-*` 272000 only. `300k` on 4.7 exits 2 (`valid: 256k, 500k`). Config ids `context_window` / `context` / `contextWindow` return "Invalid params". Read-back: `_x.ai/session/info` `context.total`. Live `grok-4.7` low + 500k → `acp-run: applied: model=grok-4.7 effort=low ctx=500k`. TUI `/context-window`, `[model.X] context_window`, `context_windows=[256000,500000]`. Session-scoped; follows a model that lists it; smaller triggers auto-compact. Long-context price from a 200k prompt.
+
+### crush
+
+https://github.com/charmbracelet/crush/pull/2450 — crush-acp v0.98.2, `88a675032c64`.
+
+Catalog 41 providers / 1793 models: aihubmix 349, vercel 297, openrouter 283, venice 125, cortecs 99, opencode-zen 85, opencode-go 38, ionet 37, copilot 35, openai 32, anthropic 18, gemini 11, xai 7, plus bedrock, azure, vertexai, groq, deepseek, zai, moonshot. `provider add`: `openai` `openai-compat` `openrouter` `vercel` `anthropic` `google` `azure` `bedrock` `google-vertex` `hyper` `litellm` `llamacpp` `lmstudio` `ollama` `omlx`. Here: `sipb-llms` in `~/.config/crush/crushrc` (`qwen3.6:35b-a3b-q4_K_M`, `qwen3.5:35b`), Hyper login in the interactive dir. Data dir `~/.local/share/crush-acp` (`CRUSH_GLOBAL_DATA`); `ACP_RUN_CRUSH_DATA` moves it.
+
+ACP models: `sipb-llms:qwen3.5:35b`, `sipb-llms:qwen3.6:35b-a3b-q4_K_M` (current). TUI large/small Ctrl+P, Tab. `--model` is `session/set_model` and crush writes `crush.json` `models.large` (`ScopeGlobal`). Allowed only with `ACP_RUN_CRUSH_DATA`, `--perm deny`, or `--strip-user-config`; else exit 2 (default dir is shared). Read-back `(unverified)`.
+
+`--effort` exits 2. SIPB models: `can_reason`, no `reasoning_levels`, `extra_body` `reasoning_effort: high`. Catalog: fable/opus and gpt-6.1-sol `low,medium,high,xhigh,max`; gpt-6-sol and gpt-6-luna also `none`; gemini 3.8 and grok-4.5 `low,medium,high`; deepseek-v4-flash `low,high,max`; most open models `low,medium,high`; 565 none. Schema lists only `low,medium,high`; crush uses the model's list. `think` bool for Anthropic/Hyper. No `/set_reasoning_effort` turn.
+
+`--context` exits 2. Catalog mostly 1000000–1050000; grok-4.5 500000; copilot Claude 200000–264000; opencode-go glm/kimi ~1M. crushrc `--context-window` (SIPB 32768). `max_tokens` schema max 200000. `disable_auto_summarize`.
+
+### devin
+
+Not installed (`devin-cli` 3000.11.3 via `brew install --cask devin-cli`). Registry: https://agentrq.com/docs/agents/devin .
+
 ## Dispatch slice controls (2026-10-11)
 
 `acp-dispatch <agent> ... --timeout 0` starts a slice without a time limit.
@@ -260,6 +444,13 @@ Its record-based rearm waiter and detached wait have no deadline, even with an
 explicit `--wait-timeout`. For finite slices, the existing default remains
 timeout + wrap-up grace + 300 seconds; `--wait-timeout 0` makes just the waiter
 unlimited. Already-running record-based waiters follow later extensions.
+
+`acp-dispatch --effort` and `--context` (2026-10-15) are first-class. They are
+checked with the model before anything is written
+(`acp-run <agent> --info --model M --effort E --context C`), stored on the job
+record, and kept by `resume`. `--acp-arg` still forwards other flags; a
+dash-leading value needs `--acp-arg=--meta`. zcode `--model` is accepted and
+still optional.
 
 `acp-dispatch extend <out>/jobs/<name>.json 3600` adds an hour to a running
 slice. Use `0` to remove its deadline. The command atomically writes the control

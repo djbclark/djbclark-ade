@@ -400,7 +400,8 @@ arrive first. **For every agent that speaks ACP, dispatch through
         -f "$OUT/brief-<name>.md" [--perm deny] [--timeout 2400]
 
 It enforces what this step used to spell out in prose (2026-10-08): `--model`
-is mandatory; the brief gets `docs/dispatch-footer.md` appended (report file
+is mandatory except for zcode, where it is accepted and still optional (item 2);
+the brief gets `docs/dispatch-footer.md` appended (report file
 `$OUT/<name>-report.md`, final message is a pointer only, the `BLOCKED:`
 protocol, never end a turn waiting on a background notification); the report,
 its `.done` marker, the acp-run log, the stderr summary and the
@@ -432,9 +433,12 @@ until the work is committed or recorded in a repo.
    path outside that slice's owned files before integrating it (revert or
    re-assign it; never let it ride along silently). Use `--perm deny` for
    review-only slices; it stays enforced (every request refused, tripwire on).
-2. **Always `--model`** (except `zcode`, whose ACP server has no model option
-   and rejects one; acp-dispatch knows). Otherwise acp-dispatch refuses to run without it. The default is
-   the agent's own, which for the claude adapter is the expensive settings model.
+2. **Always `--model`** (except `zcode`: acp-run sets `ZCODE_BIN`, so `--model`
+   works as of 2026-10-15, and `acp-dispatch` still does not require one).
+   Otherwise acp-dispatch refuses to run without it. The default is the
+   agent's own, which for the claude adapter is the expensive settings model.
+   A 2026-10-15 zcode prompt died `project_token_login_failed` at z.ai, which
+   is outside acp-run. The README section has the levels and the compact cap.
 3. **Per-slice files, all under `$OUT`:** `<name>.jsonl` is the acp-run event
    log (every tool call and permission decision, for when a slice goes wrong);
    `<name>-stderr.txt` holds the one-line summary (stop reason, tool calls,
@@ -479,8 +483,26 @@ until the work is committed or recorded in a repo.
    when the agent is active but the report has not been rewritten recently —
    note it and, if the binding pool is nearly empty, consider `reroute` before
    quota kills the slice.
+8. **Context window sits next to model and effort.** A slice that must read a
+   whole corpus or a long log should ask for a bigger window. A small edit
+   should keep the agent's default: a bigger window bills more per token on
+   some services (xAI long-context rates from a 200k prompt; Cursor input
+   above 256k at 2×, Fast at 3×; Copilot's long tier costs more AI credits)
+   and can be slower. `acp-dispatch <agent> --model <m> --effort high --context 500k`
+   (or `1m`). `--effort` and `--context` are first-class: checked with the
+   model before anything is written, stored on the job record, kept by
+   `resume`. `--acp-arg` still forwards other flags; a dash-leading value
+   needs `--acp-arg=--meta`. A direct call is
+   `acp-run <agent> --model M --context 500k --effort high`. The model is
+   applied first. Read `<name>-stderr.txt` for
+   `acp-run: applied: model=... effort=... ctx=...`. `(unverified)` means that
+   value could not be read back. A mismatch is failure class `config`, exit 1.
+   A level or size the agent cannot take exits 2 and names the valid values.
+   Codex accepts only that model's fixed size (`gpt-6.1-sol` is the 500k model).
+   The full table is `tools/acp-run/README.md`, section "Per-agent choices:
+   vendor, model, effort, context (2026-10-15)".
 
-For agents with no working ACP route (zcode, muse), and as a fallback for
+For muse, which has no ACP route, and as a fallback for zcode and for
 agy when its ACP client fails (it fails independently of the CLI), use the
 per-CLI form from `model-routing`, with **stdin closed** and a `timeout` guard:
 

@@ -2,7 +2,7 @@
 
 Goal: know exactly which models are reachable through which service on this
 machine, which budget each spends, and route every graph node by vendor ×
-model × effort so tokens are spent where judgment lives. Facts are a
+model × effort × context window so tokens are spent where judgment lives. Facts are a
 **snapshot dated 2026-08-23**, verified against `aiuse --json` (the
 operator's own tool, github.com/djbclark/aiuse — allow ~1 min) and direct
 CLI probes. Percentages drift constantly — re-probe, don't trust this file
@@ -136,18 +136,47 @@ Parsing gotcha: `aiuse --json` prints two preamble lines *and* the JSON's
 opening `{` is part of what a naive `tail -n +3` strips. Take everything
 from the first `{` instead, or the parse fails with "Extra data".
 
-## Effort levers per service
+## Effort and context levers per service
 
-- **claude**: session effort low→max; per-node `model`/`effort` in
-  Workflow `agent()`; per-worker `--model`/`--effort` in Orca
-  `worker-start`.
-- **codex**: `model_reasoning_effort` minimal→xhigh in
-  `~/.codex/config.toml` (currently `gpt-5.6-sol` @ high); per-worker via
-  Orca launch prefs.
-- **grok/cursor/copilot/agy/opencode**: model choice is the lever
-  (`-m`/`--model`/per-invocation); no separate effort knob confirmed.
-- **bl**: model choice per call; Token Plan vs PAYG routing per
-  bailian-web-search skill.
+Updated 2026-10-15. The old "no separate effort knob" line for grok, cursor,
+copilot, agy and opencode is retired: each of those has an effort control,
+and several have a context-size control. The full table (exact model ids,
+effort spellings, context sizes, and what is not reachable) is
+`tools/acp-run/README.md`, section "Per-agent choices: vendor, model, effort,
+context (2026-10-15)".
+
+Ask for a bigger window when the work is a whole-corpus read or a long log:
+`acp-run <agent> --model M --effort high --context 500k` (also `256k`, `1m`,
+and the sizes that agent's section lists). Leave the default for a small edit.
+A bigger window bills more per token on some services (xAI long-context rates
+from a 200k prompt; Cursor input above 256k at 2×, Fast at 3×; Copilot's long
+tier costs more AI credits) and can be slower. Order: provider, model, other
+`--set`, effort, context. A level or size the agent cannot take exits 2 before
+any prompt and lists the valid values. Stderr, before the summary:
+`acp-run: applied: model=... effort=... ctx=...`. Unreadable values are
+`(unverified)`. A requested value the agent reports differently is failure
+class `config`, exit 1. `acp-dispatch` takes `--effort` and `--context` as
+first-class flags (checked with the model before the job is written, stored on
+the record, kept by `resume`):
+`acp-dispatch <agent> --model M --effort high --context 500k`. `--acp-arg`
+still forwards other flags; a dash-leading value needs `--acp-arg=--meta`.
+
+1. **claude.** Effort `low` / `medium` / `high` / `xhigh` / `max` via `--effort` (Opus 4.6 and Sonnet 4.6 have no `xhigh`; Haiku 4.5 and older have none). `--context 200k` sets `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`. `--context 1m` is the model's own window and does not add `[1m]`. Any other size exits 2. Workflow `agent()` and Orca `worker-start --model --effort` still set the session tier.
+2. **codex.** Effort includes `ultra` on gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-5.6-sol and gpt-5.6-terra; luna models stop at `max`. Context is fixed by the model: `--context 500k` only with `--model gpt-6.1-sol` (475000 effective); `--context 272k` on the others (258400). Any other size exits 2 and the message names `--model gpt-6.1-sol`. The flag does not swap the model. `model_context_window` works on `codex exec`, not on codex-acp. `~/.codex/config.toml` still holds the CLI default.
+3. **copilot.** `--effort` sets `reasoning_effort` (launch `--reasoning-effort` is the same knob). `auto` and `claude-haiku-4.5` have no option. Context is a launch flag: `200k` / `256k` / `272k` become `--context default`; `1m` becomes `--context long_context`. The words `default` and `long` are not `--context` values. `--model` is repeated on that server command because `set_config_option model` resets the tier. A tier that does not land is failure class `config`, exit 1. acp-run does not filter on Copilot's 1M product table. Long measured 922000 on gpt-5.5 and costs more AI credits.
+4. **opencode.** `--effort` is the variant list on the `effort` option (`default` means no variant). `--context` exits 2. `limit.context` is fixed per model in the models.dev catalog.
+5. **cursor.** `--effort` picks the `thought_level` option whose id is not `thinking` (`reasoning_effort`, `effort`, or `reasoning`). `xhigh` matches `extra-high`. `--set reasoning_effort=LEVEL` works only on grok-4.7, claude-sonnet-5-5, claude-haiku-5-5, gemini-4-argon and gemini-3.8-flash. `--context` sets option `context` where the model has one (`256k`/`500k`, `300k`/`1m`, `200k`/`1m`, `272k`/`1m`).
+6. **grok.** Effort is option `reasoning_effort`: `low` / `medium` / `high` / `xhigh` on grok-4.7, grok-4.7-build-fast and grok-4.6; grok-4.5 stops at `high`; `ocx-*` adds `max` except ocx-gpt-5-5. Context is `session/set_model` `_meta.contextWindow`, and the size must be one that model offers. grok-4.7 is `256k` / `500k` (`300k` exits 2). `ocx-gpt-6-1-sol` offers 500k only; the other `ocx-*` ids offer 272k only. Those `ocx-*` ids are OpenAI models billed to the ChatGPT plan through the opencodex proxy. Read-back is `_x.ai/session/info` `context.total`.
+7. **qwen.** No clamp: only a listed `reasoning_effort` value is accepted. Toggle-only models (qwen3.5-plus, qwen3.6-plus, qwen3.7-plus, kimi-k2.5, qwen3-max-2026-01-23) offer `none` / `default`; `low` exits 2. qwen3.8-max offers `none` / `low` / `medium` / `xhigh` (`high` and `max` exit 2). glm-5, glm-4.7 and MiniMax-M2.5 offer low through max. The coder models have no option. `--model qwen3.8-max` selects `qwen3.8-max(openai)`. `--context` exits 2.
+8. **cline.** `--effort` is the launch flag `--thinking` (`none` / `low` / `medium` / `high` / `xhigh`). `max` exits 2. `default` adds no flag. There is no ACP option, so effort read-back is `(unverified)`. Omitted, ACP sends `reasoning_effort` `none`. `--context` exits 2.
+9. **hermes.** `--model` works via `session/set_model` (read-back `(unverified)`). `--effort` and `--context` exit 2. `config_options` is null and `--set` is stored and ignored. A bigger window is a model id such as `openai-codex:gpt-6-astra-900k`. An ambiguous short name (`claude-sonnet-5.5`) exits 2. Effort in `config.yaml` `agent.reasoning_effort` is what the process starts with.
+10. **zcode.** acp-run sets `ZCODE_BIN` (fixed 2026-10-15), so `--model` works. `acp-dispatch` still treats it as optional. Effort is option `thought`: GLM-5.3 and GLM-5.3-Flash are `low` / `high` / `max` (default max). `medium` and `xhigh` exit 2; there is no neighbor map. `--context N` sets `ZCODE_ACP_AUTO_COMPACT_THRESHOLD` (a compaction cap, not a window); ctx read-back is `(unverified)`. The GLM-5.3 window itself is fixed at 1,000,000. A 2026-10-15 prompt died `project_token_login_failed` at z.ai, unrelated to acp-run.
+11. **agy.** `--effort low` / `medium` / `high` rewrites the model id to `<base>-<level>` (`gemini-3.8-flash`, `claude-opus-5-5`, `claude-sonnet-5-5`). `xhigh` and `max` exit 2. They are not rewritten to high. `gpt-oss-120b` is fixed at medium. `--context` exits 2 (Gemini 3.x Flash is 1,048,576; Claude and GPT-OSS windows were not measured).
+12. **crush.** `--model` is `session/set_model` and works only with a private data dir (`ACP_RUN_CRUSH_DATA`, or `--perm deny`, or `--strip-user-config`); otherwise exit 2. The default `CRUSH_GLOBAL_DATA` (`~/.local/share/crush-acp`) is not enough. `--effort` and `--context` exit 2. Read-back is `(unverified)`. The SIPB models here have no `reasoning_levels`.
+13. **bl.** Model choice per call. No effort or context knob in this matrix. Token Plan vs PAYG routing stays in the bailian-web-search skill.
+14. **devin.** Not installed.
+
+Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choices: vendor, model, effort, context (2026-10-15)". Regenerate with `acp-run <agent> --info --all-models`.
 
 ## Which AI for which work (judgment snapshot, 2026-08-23)
 
@@ -172,13 +201,17 @@ from the first `{` instead, or the parse fails with "Extra data".
   standalone questions.
 - **z.ai GLM (lite) via zcode** — budget bulk coding on its own
   5h/weekly windows. Since 2026-10-08 `acp-run zcode` (third-party
-  `zcode-acp-server`) drives it; its advertised `model` option refuses
-  every switch (rechecked on 0.67.0, 2026-10-11), so run it without
-  `--model` (the bridge pins a model only at startup, via the env pair
-  `ZCODE_PROVIDER` + `ZCODE_MODEL`, and that pin was refused too, even for
-  GLM-5.3; both checks ran while the z.ai weekly limit was exhausted, error
-  1310, so recheck after the 2026-10-14 reset); effort is `--set thought=low|high|max` (default max).
-  Headless `zcode -p` stays as the fallback and runs GLM-5.3 at max.
+  `zcode-acp-server`) drives it. acp-run sets `ZCODE_BIN` to the package's
+  `vendor/zcode.cjs` (fixed 2026-10-15). The earlier "refuses every switch"
+  failures were that missing variable: the server followed `which zcode`, a
+  symlink, and never injected `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`. `--model`
+  works and stays optional in `acp-dispatch`. Effort is option `thought`
+  (`low` / `high` / `max` on GLM-5.3, default max; no neighbor map). The
+  window is fixed at 1,000,000; `--context N` is only a compact cap.
+  A 2026-10-15 prompt died `project_token_login_failed` at the z.ai login,
+  unrelated to acp-run. Detail is the levers section above and
+  `tools/acp-run/README.md`. Headless `zcode -p` stays as the fallback and
+  runs GLM-5.3 at max.
 - **opencode-go free models** (kimi-k3, minimax-m3, qwen3.x) — zero-cost
   experimental fan-out and ralph-tui default via the ungated wrapper;
   burn freely.

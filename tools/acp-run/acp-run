@@ -91,8 +91,8 @@ environment unless already set, e.g. ACP_RUN_DEFAULT_SET_CLAUDE="model=sonnet,ef
 (merged over that agent's defaults; --model/--set still win), ACP_RUN_AGY_CMD,
 ACP_RUN_CLINE_CMD.
 cursor: plain model ids plus context/reasoning_effort/fast options (model applied
-first), e.g. acp-run cursor --model grok-4.7 --set context=500k --set fast=false
---set reasoning_effort=high; bracketed preset strings no longer apply.
+first), e.g. acp-run cursor --model grok-4.7 --context 500k --set fast=false
+--effort high; bracketed preset strings no longer apply.
 Some agents get defaults (DEFAULT_SET below): cline always runs on cline-pass.
 Agents decide what to ask about: some auto-allow by their own settings (use
 --mode to pick a stricter one; --info lists the modes).
