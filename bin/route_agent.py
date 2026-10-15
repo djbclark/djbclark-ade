@@ -217,6 +217,11 @@ SERVICES: tuple[Service, ...] = (
             # worth reserving for coding judgment rather than spending on
             # background agent turns.
             access="cli-only",
+            # The code/research rows are kept on purpose (review 2026-10-15,
+            # finding 4): they rank below every everyday pool, so plan only
+            # falls through to astra when those are full, which is the
+            # operator's "make full use of the frontier models; *usually*
+            # other pools for everyday work".
             models={"judgment": "gpt-6-astra --effort xhigh",
                     "code": "gpt-6-astra --effort high",
                     "research": "gpt-6-astra --effort medium"}),
