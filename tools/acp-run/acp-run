@@ -56,6 +56,10 @@ sends a permission request; before 2026-10-15 every grok deny run tripped, exit 
 keeps them. Under any --perm deny crush also gets no tools at all: every built-in
 tool is disabled in per-run config layers (crush runs its read-only tools without
 asking, so no permission answer could deny them); logged as "deny_config".
+Under every other non-interactive --perm grok also starts on that stripped GROK_HOME (operator
+2026-10-15), but only hooks/, skills/, plugins/ and the config's hooks and plugins go: MCP servers and the
+permission mode stay. ACP_RUN_GROK_USER_HOOKS=1 (or --keep-user-config) keeps the user's ~/.grok.
+The "user_config" record names the "home" used.
 --strip-user-config (env ACP_RUN_STRIP_USER_CONFIG=1) applies the same strip of
 the user's plugins, MCP servers and hooks under ANY --perm (not --interactive),
 for opencode, agy, crush, zcode and grok; it is a startup-reliability switch, not a
@@ -909,6 +913,10 @@ def agy_deny_home(tag="deny"):
 GROK_HOME_DROP = ("hooks", "skills", "plugins", "installed-plugins", "config.toml")
 GROK_DROP_TABLES = ("mcp_servers", "plugins", "hooks")
 GROK_DENY_UI_KEYS = ("permission_mode", "yolo")
+# Default for every non-interactive grok run (operator 2026-10-15): the same stripped home but
+# only hooks, skills and plugins go; MCP servers (tools the operator configured on purpose) and
+# the permission mode stay. Opt out: ACP_RUN_GROK_USER_HOOKS=1 (or --keep-user-config) keeps ~/.grok.
+GROK_HOOKS_ONLY_TABLES = ("plugins", "hooks")
 # Under deny the copy ends with this table, replacing the user's own [permission]: a bare `*` ask
 # rule makes grok send session/request_permission for every tool, file reads included (grok runs
 # its "read-only" tools, and writes under the user's allow rules, without asking otherwise;
@@ -920,12 +928,12 @@ def grok_real_home():
     return Path(os.environ.get("GROK_HOME") or Path.home() / ".grok").expanduser()
 
 
-def grok_filter_config(text, deny=True):
+def grok_filter_config(text, deny=True, mcp=True):
     """(filtered config.toml text, dropped names). Drops the tables in GROK_DROP_TABLES (and
-    their sub-tables) and, with deny, ui.permission_mode / ui.yolo. Line based; the caller
-    checks the result with tomllib (grok_check_config)."""
+    their sub-tables; mcp=False keeps [mcp_servers.*]) and, with deny, ui.permission_mode /
+    ui.yolo. Line based; the caller checks the result with tomllib (grok_check_config)."""
     out, dropped, skip, table = [], [], False, ""
-    drop = GROK_DROP_TABLES + (("permission",) if deny else ())
+    drop = (GROK_DROP_TABLES if mcp else GROK_HOOKS_ONLY_TABLES) + (("permission",) if deny else ())
     for line in text.splitlines(keepends=True):
         m = re.match(r"\s*\[\[?\s*([^\[\]]+?)\s*\]\]?\s*(#.*)?$", line)
         if m:
@@ -946,14 +954,15 @@ def grok_filter_config(text, deny=True):
     return new, dropped
 
 
-def grok_check_config(old_text, new_text, deny=True):
+def grok_check_config(old_text, new_text, deny=True, mcp=True):
     """True when new_text parses and equals old_text minus the dropped parts."""
     import tomllib
     try:
         old, new = tomllib.loads(old_text), tomllib.loads(new_text)
     except (tomllib.TOMLDecodeError, ValueError):
         return False
-    want = {k: v for k, v in old.items() if k not in GROK_DROP_TABLES}
+    gone = GROK_DROP_TABLES if mcp else GROK_HOOKS_ONLY_TABLES
+    want = {k: v for k, v in old.items() if k not in gone}
     if deny:
         want.pop("permission", None)
         want["permission"] = {"ask": ["*"]}
@@ -962,7 +971,13 @@ def grok_check_config(old_text, new_text, deny=True):
     return new == want
 
 
-def grok_strip_home(tag="deny", deny=True):
+def grok_user_hooks_requested():
+    """True when ACP_RUN_GROK_USER_HOOKS asks for the user's own grok home on headless runs."""
+    v = os.environ.get("ACP_RUN_GROK_USER_HOOKS", "").strip().lower()
+    return bool(v) and v not in ("0", "false", "no", "off")
+
+
+def grok_strip_home(tag="deny", deny=True, mcp=True):
     """A per-run GROK_HOME without the user's hooks, skills, plugins and MCP servers (see the
     note above). Returns (temp dir, log info); the caller removes the dir (rmtree unlinks
     the symlinks and never follows them). Raises ValueError, before creating anything, when
@@ -973,8 +988,8 @@ def grok_strip_home(tag="deny", deny=True):
         text = cfg.read_text() if cfg.is_file() else ""
     except (OSError, UnicodeDecodeError) as e:
         raise ValueError(f"cannot read {cfg}: {e}") from None
-    new_text, dropped = grok_filter_config(text, deny)
-    if not grok_check_config(text, new_text, deny):
+    new_text, dropped = grok_filter_config(text, deny, mcp)
+    if not grok_check_config(text, new_text, deny, mcp):
         raise ValueError(f"cannot filter {cfg} safely")
     try:
         hooks = sorted(e.name for e in (src / "hooks").iterdir())
@@ -994,8 +1009,9 @@ def grok_strip_home(tag="deny", deny=True):
     except BaseException:
         shutil.rmtree(d, ignore_errors=True)
         raise
-    return d, {"agent": "grok", "action": "stripped", "source": str(src), "hooks": hooks,
-               "dropped": dropped, "skills": "~/.grok/skills off", "env": ["GROK_HOME"]}
+    return d, {"agent": "grok", "action": "stripped", "source": str(src), "home": str(d),
+               "hooks": hooks, "dropped": dropped, "skills": "~/.grok/skills off",
+               "mcp": "off" if mcp else "kept", "env": ["GROK_HOME"]}
 
 
 def grok_sync_auth(d, src=None):
@@ -1234,14 +1250,24 @@ def strip_user_config(a, env, deny_dir):
     permission block untouched (zcode_strip_settings), crush builds inside run()'s
     tools-on dir (crush_deny_dir tools_off=False)."""
     outside = strips_outside_deny(a)
-    if not outside and (a.perm != "deny" or getattr(a, "interactive", False)
-                        or a.agent not in STRIP_USER_CONFIG):
+    # grok, every non-interactive run not already stripped above (operator 2026-10-15): no
+    # user hooks, skills or plugins, MCP servers and permission mode kept (tag "hooks").
+    grok_hooks = (a.agent == "grok" and not outside and a.perm != "deny"
+                  and not getattr(a, "interactive", False))
+    if not outside and not grok_hooks and (a.perm != "deny" or getattr(a, "interactive", False)
+                                           or a.agent not in STRIP_USER_CONFIG):
         return deny_dir, None
     why = keep_user_config(a)
     if why:
-        return deny_dir, {"agent": a.agent, "action": "kept",
-                          "why": "--keep-user-config" if why == "flag" else "ACP_RUN_KEEP_USER_CONFIG"}
-    tag = "strip" if outside else "deny"
+        info = {"agent": a.agent, "action": "kept",
+                "why": "--keep-user-config" if why == "flag" else "ACP_RUN_KEEP_USER_CONFIG"}
+        if a.agent == "grok":
+            info["home"] = str(grok_real_home())
+        return deny_dir, info
+    if grok_hooks and grok_user_hooks_requested():
+        return deny_dir, {"agent": "grok", "action": "kept", "why": "ACP_RUN_GROK_USER_HOOKS",
+                          "home": str(grok_real_home())}
+    tag = "hooks" if grok_hooks else "strip" if outside else "deny"
     try:
         if outside and a.agent == "zcode":
             d = zcode_strip_settings()
@@ -1265,14 +1291,17 @@ def strip_user_config(a, env, deny_dir):
                 return deny_dir, crush_strip_config(env, deny_dir, "--strip-user-config")
             return deny_dir, crush_strip_config(env, deny_dir)
         elif a.agent == "grok":
-            d, info = grok_strip_home(tag, deny=not outside)
+            d, info = grok_strip_home(tag, deny=not (outside or grok_hooks), mcp=not grok_hooks)
             env["GROK_HOME"] = str(d)
         else:
             d, info = agy_deny_home(tag)
     except (OSError, ValueError) as e:
         print(f"acp-run: could not strip {a.agent}'s plugins and MCP servers; keeping them: {e}",
               file=sys.stderr)
-        return deny_dir, {"agent": a.agent, "action": "kept", "why": f"error: {e}"[:300]}
+        kept = {"agent": a.agent, "action": "kept", "why": f"error: {e}"[:300]}
+        if a.agent == "grok":
+            kept["home"] = str(grok_real_home())
+        return deny_dir, kept
     return d, info
 
 

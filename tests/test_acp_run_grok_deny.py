@@ -95,11 +95,16 @@ PROBE = textwrap.dedent("""\
         return {"text": text, "dropped": dropped, "ok": mod.grok_check_config(CONFIG, text, deny),
                 "parsed": tomllib.loads(text)}
 
-    def strip(perm, strip_flag=False, keep=False):
-        a = NS(agent="grok", perm=perm, interactive=False, keep_user_config=keep,
+    def strip(perm, strip_flag=False, keep=False, interactive=False, optout=None):
+        a = NS(agent="grok", perm=perm, interactive=interactive, keep_user_config=keep,
                strip_user_config=strip_flag)
         env = {}
-        d, info = mod.strip_user_config(a, env, None)
+        if optout is not None:
+            os.environ["ACP_RUN_GROK_USER_HOOKS"] = optout
+        try:
+            d, info = mod.strip_user_config(a, env, None)
+        finally:
+            os.environ.pop("ACP_RUN_GROK_USER_HOOKS", None)
         out = {"info": info, "env": env}
         if d:
             p = Path(d)
@@ -225,6 +230,12 @@ PROBE = textwrap.dedent("""\
             "deny": tmpl(True), "keep": tmpl(False),
             "strip_deny": strip("deny"), "strip_outside": strip("all", strip_flag=True),
             "strip_all_no_flag": strip("all"), "strip_kept": strip("deny", keep=True),
+            "hooks_all": strip("all"), "hooks_interactive": strip("all", interactive=True),
+            "hooks_optout": strip("all", optout="1"), "hooks_optout_off": strip("all", optout="0"),
+            "hooks_optout_deny": strip("deny", optout="1"),
+            "hooks_keep_flag": strip("all", keep=True),
+            "hooks_tmpl": {"text": mod.grok_filter_config(CONFIG, False, False)[0],
+                           "ok": mod.grok_check_config(CONFIG, mod.grok_filter_config(CONFIG, False, False)[0], False, False)},
             "sync": sync_auth(),
             "spawn_grok_deny": await spawn("grok", "deny"),
             "spawn_grok_all": await spawn("grok", "all"),
@@ -287,6 +298,7 @@ class TestGrokDenyAndScrub(unittest.TestCase):
         self.assertEqual(set(s["links"]), {"auth.json", "models_cache.json", "sessions"})
         self.assertEqual(s["mode"], "0o600")
         self.assertEqual(s["info"]["action"], "stripped")
+        self.assertEqual(s["info"]["mcp"], "off")
         self.assertIn("autorename.json", s["info"]["hooks"])
         self.assertEqual(s["env"], {"GROK_HOME": s["env"]["GROK_HOME"]})
         self.assertEqual(s["config"]["permission"], {"ask": ["*"]})
@@ -296,8 +308,9 @@ class TestGrokDenyAndScrub(unittest.TestCase):
         self.assertIn("GROK_HOME", out["env"])
         self.assertEqual(out["config"]["ui"]["permission_mode"], "always-approve")
         self.assertIn("dropped", out["info"])
-        self.assertEqual(self.r["strip_all_no_flag"]["info"], None)
         self.assertEqual(self.r["strip_kept"]["info"]["action"], "kept")
+        self.assertIn("home", out["info"])
+        self.assertEqual(out["info"]["mcp"], "off")
 
     def test_rotated_token_is_copied_back_only_when_a_valid_newer_file(self):
         s = self.r["sync"]
@@ -313,10 +326,54 @@ class TestGrokDenyAndScrub(unittest.TestCase):
         self.assertEqual(allow["cmd"], ["grok", "agent", "--always-approve", "stdio"])
         self.assertTrue(deny["grok_home"])
         self.assertEqual(deny["user_config"][0]["action"], "stripped")
-        self.assertIsNone(allow["grok_home"])
+        # --perm all, headless: the stripped home too (2026-10-15), still with --always-approve
+        self.assertTrue(allow["grok_home"])
+        self.assertEqual(allow["user_config"][0]["action"], "stripped")
+        self.assertEqual(allow["user_config"][0]["home"], allow["grok_home"])
         strip = self.r["spawn_grok_strip"]
         self.assertTrue(strip["grok_home"])
         self.assertIn("--always-approve", strip["cmd"])
+
+    def test_all_headless_runs_a_stripped_home_without_the_ask_rule(self):
+        s = self.r["hooks_all"]
+        self.assertEqual(s["info"]["action"], "stripped")
+        self.assertEqual(s["info"]["mcp"], "kept")
+        self.assertEqual(s["info"]["home"], s["env"]["GROK_HOME"])
+        self.assertEqual(s["names"], ["auth.json", "config.toml", "models_cache.json", "sessions"])
+        c = s["config"]
+        for gone in ("hooks", "plugins"):
+            self.assertNotIn(gone, c)
+        self.assertEqual(c["permission"], {"allow": ["Bash(git *)"]})  # the user's rules, no ask = ["*"]
+        self.assertEqual(c["ui"]["permission_mode"], "always-approve")
+        self.assertEqual(sorted(c["mcp_servers"]), ["basic-memory", "graft"])
+        self.assertEqual(c["models"], {"default": "grok-4.7"})
+        self.assertIn("ocx-gpt-6-astra", c["model"])
+        self.assertEqual(sorted(s["info"]["dropped"]), ["hooks", "plugins"])
+        self.assertTrue(self.r["hooks_tmpl"]["ok"])
+
+    def test_interactive_grok_keeps_the_users_home(self):
+        s = self.r["hooks_interactive"]
+        self.assertIsNone(s["info"])
+        self.assertNotIn("GROK_HOME", s["env"])
+
+    def test_opt_out_var_keeps_the_users_home_and_logs_it(self):
+        s = self.r["hooks_optout"]
+        self.assertEqual(s["info"]["action"], "kept")
+        self.assertEqual(s["info"]["why"], "ACP_RUN_GROK_USER_HOOKS")
+        self.assertTrue(s["info"]["home"].endswith("/.grok"))
+        self.assertNotIn("GROK_HOME", s["env"])
+        for name in ("hooks_optout_off", "hooks_keep_flag"):
+            with self.subTest(name=name):
+                off = self.r[name]
+                self.assertEqual(off["info"]["action"] == "kept", name == "hooks_keep_flag")
+                self.assertEqual("GROK_HOME" in off["env"], name == "hooks_optout_off")
+
+    def test_opt_out_var_does_not_loosen_deny(self):
+        s = self.r["hooks_optout_deny"]
+        self.assertEqual(s["info"]["action"], "stripped")
+        self.assertEqual(s["info"]["mcp"], "off")
+        self.assertEqual(s["config"]["permission"], {"ask": ["*"]})
+        self.assertNotIn("mcp_servers", s["config"])
 
     def test_herdr_pane_vars_never_reach_the_agent(self):
         self.assertEqual(self.r["scrub"], ["HERDR_PANE_ID", "HERDR_ENV"])
