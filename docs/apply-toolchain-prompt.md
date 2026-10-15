@@ -623,7 +623,7 @@ it on automated install lines.
 | xh | https://github.com/ducaale/xh | `brew install xh` | `curl` for JSON APIs |
 | ast-grep | https://ast-grep.github.io/ | `brew install ast-grep` | `rg` for code-shape queries |
 | `mlr` (Miller) | https://miller.readthedocs.io/ | `brew install miller` | `awk`/`sed`/`cut`/`join`/`sort` over CSV/TSV/JSON with named fields: `mlr --csv sort -f col f.csv` |
-| GNU `gsort`/`gsed`/`gawk`/`gdate`/`gfind`/`gxargs`/`ggrep`/`gmake`/`gtar` | https://www.gnu.org/software/coreutils/ | `brew install coreutils gnu-sed gawk findutils grep make gnu-tar` | BSD-vs-GNU flag drift (`sort -h`, `sed -i`, `date -d`, `find -printf`): call the `g`-prefixed binary in scripts; standing rule since 2026-10-14: prefer brew GNU tools over macOS BSD ones, install what is missing |
+| GNU `gsort`/`gsed`/`gawk`/`gdate`/`gfind`/`gxargs`/`ggrep`/`gmake`/`gtar` | https://www.gnu.org/software/coreutils/ | `brew install coreutils gnu-sed gawk findutils grep make gnu-tar` | BSD-vs-GNU flag drift (`sort -h`, `sed -i`, `date -d`, `find -printf`): call the `g`-prefixed binary in scripts; standing rule since 2026-10-14: prefer brew GNU tools over macOS BSD ones, install what is missing; since 2026-10-15 always `gsed`, never bare `sed`, unless BSD sed is required |
 | `uu-*` (uutils) | https://uutils.github.io/coreutils/ | `brew install uutils-coreutils` | portable GNU-compatible coreutils (`uu-sort`, `uu-cut`, …); its `sed`/`awk` are still in progress |
 | `gnu-tools-check` | https://github.com/djbclark/djbclark-ade (`bin/gnu-tools-check`) | `ln -s ~/src/djbclark-ade/bin/gnu-tools-check ~/.local/bin/gnu-tools-check`; needs the GNU tools in the row above | Enforces the row above: `gnu-tools-check [paths]` lists shell code (scripts, `just` recipes, fenced shell blocks and pipelines in Markdown) that calls a bare BSD tool where BSD and GNU differ (`sed`, `awk`, `grep`, `find`, `date`, `head`, `tail`, `tr`, `xargs`, … 24 in all) or passes a GNU-only long option to a BSD basic (`ls`, `cp`, `rm`, …). Quote- and heredoc-aware, scans tracked and untracked files (not gitignored ones). Opt-outs: a `.gnu-tools-check-ignore` file of globs, a `gnu-tools-check: portable` marker for a file meant to run on BSD, a `gnu-tools-check: ignore` line marker. Exit 1 on findings. Added 2026-10-14 |
 | `dust`, `gdu` | https://github.com/bootandy/dust | `brew install dust gdu` | `du` — and never `du`/`find` over `~/.cache` (they time out) |
@@ -796,7 +796,7 @@ inside Gradle and are not meaningful as global installs.
 
 ## 2. Coverage rule for unlisted languages and formats
 
-Inventory every tracked file type (`git ls-files | sed 's/.*\.//' | sort | uniq -c`,
+Inventory every tracked file type (`git ls-files | gsed 's/.*\.//' | sort | uniq -c`,
 plus extensionless scripts identified by shebang). For **any language or format
 not covered in §1**, have a `researcher` find tools in the same spirit and treat
 them as if they had been on the original list. The spirit is:
