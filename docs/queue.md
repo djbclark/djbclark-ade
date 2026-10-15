@@ -12,8 +12,19 @@ layer's `engines:` list (SearXNG ships it as both), bump `REV` to `r2`, build, u
 `web-get search --only firecrawl '!gp <topic>'` plus a plain query. It is a general
 engine, so every Firecrawl search would then ask it. It uses Grokipedia's
 undocumented `api/full-text-search` endpoint (no key, no published limits; it answered
-200 on 2026-10-14). Fold in any other engine changes the operator picks from the
-candidates reviewed the same day, so the image is rebuilt once.
+200 on 2026-10-14).
+
+In the same rebuild, enable these for `!shortcut` use only (operator, 2026-10-14). Each
+is `disabled: true` in SearXNG's defaults and none is in the `general` category, so
+plain Firecrawl searches never reach them; add them with `disabled: false`:
+1. Development: `hackernews` (`!hn`), `npm`, `crates.io` (`!crates`), `lib.rs` (`!lrs`),
+   `pkg.go.dev` (`!pgo`), `huggingface` (`!hf`), `codeberg` (`!cb`), `gitlab` (`!gl`).
+2. Papers: `openalex` (`!oa`) with `mailto:` set for OpenAlex's polite pool, and
+   `crossref` (`!cr`). Take the address from `git config user.email` at build time so it
+   stays out of this public repo. SearXNG's crossref engine has no contact setting, so it
+   stays in Crossref's anonymous pool.
+3. Other: `nixos wiki` (`!nixw`), `lobste.rs` (`!lo`).
+Then add the new shortcuts to the list in `skills/fallback-chains/references/web-access.md`.
 
 ## self-slash cannot drive omp (found 2026-10-13, needs an operator decision)
 

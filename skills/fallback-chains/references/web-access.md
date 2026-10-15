@@ -92,6 +92,17 @@ authoritative; this is its contract as of 2026-10-11.
    one call, highlights inline) → exa-mcp (keyless `web_search_exa`) →
    parallel (`web_search`) → jina-mcp (`search_web`, key) → jina-search
    (`s.jina.ai`, key) → composio (`COMPOSIO_SEARCH_DUCK_DUCK_GO`).
+   **SearXNG shortcuts (2026-10-14):** Firecrawl sends SearXNG no category, so a
+   plain query asks only the general engines (DuckDuckGo, Google Programmable
+   Search, Wikipedia, Wikidata). A `!shortcut` in the query picks a specialist
+   engine instead: `web-get search --only firecrawl '!st git rebase onto'`, or
+   the same text to `firecrawl_search`. Pin firecrawl: any other rung gets the
+   literal `!st`. Enabled: `!st` Stack Overflow, `!su` Super User, `!ubuntu`
+   Ask Ubuntu, `!gh` GitHub repositories, `!arx` arXiv, `!se` Semantic Scholar,
+   `!pub` PubMed, `!pypi` PyPI, `!dh` Docker Hub, `!al` Arch wiki, `!ge` Gentoo
+   wiki, `!mdn` MDN, `!man` ManKier man pages. The keyless APIs behind them are
+   metered per IP and Hyades has one: Stack Exchange allows 300 requests a day,
+   GitHub search 10 a minute, so use them for targeted lookups, not loops.
 2.2. `web-get fetch '<url>' [--max-bytes N] [--no-page-check] [--walk-budget S]`: exa-api
    (`api.exa.ai/contents`, key, full text up to 1000000 characters) → exa-mcp
    (keyless `web_fetch_exa`, 200000-character cap) → parallel (`web_fetch`) →
