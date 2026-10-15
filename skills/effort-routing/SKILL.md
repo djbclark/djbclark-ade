@@ -59,17 +59,20 @@ about which side you are on, stay high and say so.
 - **Fan-out of rote nodes** — dispatch them at `model: "haiku"`,
   `effort: "low"` rather than doing them inline at session tier.
 - **One hard call inside otherwise ordinary work** — do not raise the whole
-  session. Dispatch that single question to `fable-deep` (or `acp-dispatch
-  codex --model gpt-6-astra --effort xhigh` for an independent second opinion)
-  and carry on. Fable is **not** a separate budget: it is a sublimit (at most
-  50%) of the shared Claude weekly and bills the 5-hour window too. Use it
+  session. Check `cswap list` first; under 10% of the Fable cap or a tight 5h
+  window, use `acp-dispatch codex --model gpt-6-astra --effort xhigh` (or Opus
+  xhigh). Otherwise dispatch that single question to `fable-deep` (or the astra
+  call for an independent second opinion) and carry on. Fable is **not** a
+  separate budget: it is a sublimit (at most 50%) of the shared Claude weekly and bills the 5-hour window too. Use it
   fully for exactly this kind of call, and send the ordinary work around it
   to the everyday pools (model-routing, *Routing policy*).
 - **Minimum needed spec for every sub-agent, unasked** (operator 2026-10-15):
-  the goal is cost against code quality, not token count. Haiku at `low` for
-  a lookup, a classification or a reformat; Sonnet at `medium` for an
-  implementation with a clear shape; Opus at `high` when the shape is unclear
-  or the diff must be right first time; Fable at `xhigh` for the calls above.
+  the goal is cost against code quality, not token count. Agent-tool
+  sub-agents only at Haiku `low`, for a lookup, a classification or a reformat
+  (Claude's own models bill the shared Claude/Fable pool); implementation, clear
+  shape or not, goes through `acp-dispatch` to the everyday pools (agy
+  `claude-opus-5-5 --effort high`, zcode `GLM-5.3 --effort high`, cursor
+  `default`); Fable/astra at `xhigh` only for the judgment calls above.
   Delegate proactively so the session's own context stays small, and route
   up when unsure.
 - **Multiple-choice calls inside a loop** (which pool, retry or stop, which

@@ -53,7 +53,8 @@ preferences, because they encode consequences a score cannot see:
 - hermes is never a delegation target; omp only with the operator's explicit
   per-run approval (`ACP_OPERATOR_APPROVED=omp`); neither is ever discovered
   as a routable service here;
-- **never** bulk-route to clinepass — it is the Hindsight/hermes lifeline;
+- **never** route a slice to clinepass (NEVER_ROUTE) — it is the Hindsight/hermes
+  lifeline and stays only in `hermes_chain`;
 - the prepaid tier (opencode-zen, openrouter, deepseek) is retired until an
   explicit operator top-up.
 
@@ -106,7 +107,7 @@ STALE_SOFT = 25 * 60       # aiuse's own `fresh` threshold; older = re-collect b
 # they hold at least this much headroom.
 BURN_FIRST_MIN = 40.0
 BURN_FIRST_BONUS = 4.0
-KINDS = ("judgment", "code", "bulk", "research", "mechanical", "github")
+KINDS = ("judgment", "code", "bulk", "research", "mechanical", "github", "realtime-web")
 
 
 @dataclass(frozen=True)
@@ -193,15 +194,16 @@ class Service:
 # `models` is the acp-run `--model [--effort L]` suggestion per kind; `agent`
 # is the acp-run agent name when it differs from the aiuse provider id.
 SERVICES: tuple[Service, ...] = (
-    Service("claude", "claude (Fable 5.1 @ xhigh for judgment; Sonnet for the rest)",
-            {"judgment": 1, "code": 24, "research": 30},
+    Service("claude", "claude (Fable 5.1 @ xhigh, judgment only)",
+            {"judgment": 1},
             "subscription",
             "orchestration pool; Fable is a sublimit of the SAME weekly window "
             "(at most 50% of it), not a separate allowance",
             judgment_tier=True, access="cli-only",
-            models={"judgment": "fable --effort xhigh",
-                    "code": "sonnet --effort medium",
-                    "research": "sonnet --effort medium"}),
+            # No code/research row: everyday work on this pool eats the room
+            # Fable needs (review 2026-10-15); Haiku lookups go through the
+            # Agent tool, not acp-dispatch.
+            models={"judgment": "fable --effort xhigh"}),
     Service("codex", "codex (gpt-6-astra @ xhigh)",
             {"judgment": 2, "code": 22, "research": 28},
             "subscription",
@@ -301,14 +303,13 @@ SERVICES: tuple[Service, ...] = (
     # RESERVE (operator 2026-10-15: "never deplete the grok and copilot
     # pools"): GitHub-side Copilot code review of commits draws on this
     # allowance. Hard floor, one slice at a time, only for GitHub-shaped work.
-    Service("copilot", "copilot", {"github": 1, "code": 30}, "subscription",
+    Service("copilot", "copilot", {"github": 1}, "subscription",
             # GitHub: the Copilot endpoint is for officially supported clients
             # only. Using it as a generic model provider violates the ToS and
             # risks account suspension. CLI only, never a Hermes provider.
             "RESERVE: PR review, repo Q&A (official client only)",
             access="forbidden", reserve_floor=60.0, max_parallel=1,
-            models={"github": "claude-sonnet-5.5 --effort medium",
-                    "code": "claude-sonnet-5.5 --effort medium"}),
+            models={"github": "claude-sonnet-5.5 --effort medium"}),
     # Cursor reports two model sublimits of one monthly total: the Auto pool
     # (Cursor's own models) and the third-party pool. They drain at very
     # different rates (2026-10-15: auto 75% left, third-party 11% left), so
@@ -325,11 +326,12 @@ SERVICES: tuple[Service, ...] = (
                     "mechanical": "claude-haiku-5-5 --effort low"}),
     # RESERVE: GrokBot (the cloud Chief of Staff) runs on the SuperGrok pool.
     # Hard floor, one slice at a time, only when a Grok model is the point.
-    Service("grok", "grok", {"research": 15, "bulk": 30}, "subscription",
+    # Only the explicit `realtime-web` kind reaches it: generic research/bulk
+    # ranks used to let `plan` fall through to it (review 2026-10-15).
+    Service("grok", "grok", {"realtime-web": 1}, "subscription",
             "RESERVE: GrokBot runs on it; realtime X/web angle only",
             max_parallel=1, reserve_floor=60.0,
-            models={"research": "grok-4.7 --effort high",
-                    "bulk": "grok-4.7 --effort low"}),
+            models={"realtime-web": "grok-4.7 --effort high"}),
     Service("clinepass", "cline", {"bulk": 40, "code": 40, "mechanical": 40},
             "subscription",
             # An API-key bundle we hold, so Hermes may call it directly. The
@@ -540,7 +542,7 @@ DEFAULT_PROFILE = {"bulk": 60, "mechanical": 60}
 # (acp-run/acp-dispatch gate both behind ACP_OPERATOR_APPROVED). Discovery would
 # otherwise hand them DEFAULT_PROFILE bulk work: omp sat in `aiuse --available`
 # with 100% headroom on 2026-10-15.
-NEVER_ROUTE = frozenset({"hermes"})
+NEVER_ROUTE = frozenset({"hermes", "clinepass"})  # clinepass: Hermes's lifeline, never a slice target
 OPERATOR_GATED = frozenset({"omp"})
 # Below this much of the Fable sublimit, judgment on claude falls back to Opus.
 FABLE_MIN_LEFT = 10.0
@@ -597,9 +599,16 @@ class Choice:
     def dispatch(self) -> str:
         """The acp-dispatch line for this choice (add --name/--task/-C/-f)."""
         agent = self.service.acp_agent
+        extra = DISPATCH_EXTRA.get(agent, "")
         if self.model:
-            return f"acp-dispatch {agent} --model {self.model}"
+            return f"acp-dispatch {agent} --model {self.model}{extra}"
         return f"acp-dispatch {agent} --model <id from: acp-run {agent} --info>"
+
+
+# Flags a dispatch line needs for acp-run to accept the model at all. crush:
+# `--model` rewrites the shared data dir's crush.json, so acp-run exits 2 unless
+# the run strips the user config or gets ACP_RUN_CRUSH_DATA (review 2026-10-15).
+DISPATCH_EXTRA = {"crush": " --acp-arg=--strip-user-config"}
 
 
 def suggest_model(svc: Service, kind: str, info: dict[str, Any]) -> str:
@@ -633,6 +642,8 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         remaining = info.get("remaining")
         if remaining is not None and remaining < max(min_headroom, svc.reserve_floor):
             continue                       # too tight to hand work to, or a reserve at its floor
+        if remaining is None and svc.reserve_floor:
+            continue                       # a reserve with no fresh reading fails closed (review 2026-10-15)
         # Lower is better. Rank encodes fitness; headroom pulls idle pools up
         # for bulk work and is only a tie-break for judgment, where capability
         # must dominate cost.

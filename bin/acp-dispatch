@@ -524,6 +524,14 @@ def model_values(info: dict) -> list[dict] | None:
         for v in o.get("options") or []:
             values += v.get("options", [v]) if "options" in v else [v]
         return [{"value": v.get("value"), "name": v.get("name")} for v in values]
+    # crush (and any agent on the ACP `models` field) lists models in
+    # session/new `models.availableModels`, not as a config option; acp-run's
+    # --model reaches them through session/set_model (2026-10-15: the dispatcher
+    # told every crush slice to "drop --model", so route_agent's free SIPB row
+    # could never be dispatched).
+    avail = (info.get("models") or {}).get("availableModels") or []
+    if avail:
+        return [{"value": m.get("modelId"), "name": m.get("name")} for m in avail]
     return None
 
 

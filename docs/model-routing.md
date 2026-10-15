@@ -27,6 +27,10 @@ quoting a chain, and update its snapshot if you change one.
 > it well, proactively through `/bigteam` and minimum-spec sub-agents; (4)
 > **grok and copilot are reserves** with a hard floor of 60% left (GrokBot and
 > GitHub-side Copilot review run on them; copilot read 100% used that day);
+> after an adversarial review the same day, only an explicit kind reaches
+> them (`github` for copilot, `realtime-web` for grok), a stale or missing
+> reading fails closed, `acp-dispatch claude` is judgment-only (Fable xhigh;
+> Haiku lookups go through the Agent tool), and clinepass is `NEVER_ROUTE`;
 > (5) **hermes is never a delegation target** (gated in acp-run/acp-dispatch
 > like omp); omp only with the operator's explicit per-run yes; never an
 > all-vendor fan-out; (6) the context window is a per-slice choice (`--context`),

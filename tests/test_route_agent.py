@@ -24,7 +24,7 @@ IDLE = {
     "antigravity": {"remaining": 96.5}, "opencode-go": {"remaining": 97.0},
     "claude": {"remaining": 47.0}, "codex": {"remaining": 100.0},
     "clinepass": {"remaining": 48.0}, "copilot": {"remaining": 69.8},
-    "zai": {"remaining": 70.3}, "grok": {"remaining": 45.0},
+    "zai": {"remaining": 70.3}, "grok": {"remaining": 65.0},  # above its 60% reserve floor
     "cursor": {"remaining": 56.0}, "devin": {"remaining": 100.0},
     # The free half of opencode-zen. Present in the fixture because it is a
     # strong default for bulk, so leaving it out let it win tests by accident.
@@ -113,10 +113,15 @@ class TestWasteBurning(unittest.TestCase):
 
 class TestDegradation(unittest.TestCase):
     def test_works_with_no_quota_at_all(self):
-        """A stale or missing cache must degrade to capability-only routing."""
+        """A stale or missing cache must degrade to capability-only routing,
+        except for the reserve pools, which fail closed without a fresh
+        reading (review 2026-10-15): github and realtime-web stay queued."""
         for kind in r.KINDS:
             c = r.route(kind, quota={})
-            self.assertIsNotNone(c, f"{kind} should still route without quota")
+            if kind in ("github", "realtime-web"):
+                self.assertIsNone(c, f"{kind} is reserve-only and must not route unmeasured")
+            else:
+                self.assertIsNotNone(c, f"{kind} should still route without quota")
 
     def test_unknown_kind_rejected(self):
         with self.assertRaises(ValueError):
@@ -551,12 +556,20 @@ class TestRoutingPolicy2026_10_15(unittest.TestCase):
         q["grok"] = {"remaining": 59.0}
         q["copilot"] = {"remaining": 59.0}
         self.assertIsNone(r.route("github", quota=q))
-        c = r.route("research", quota=q)
-        self.assertTrue(c is None or c.service.name != "grok")
+        self.assertIsNone(r.route("realtime-web", quota=q))
+        # Generic kinds never reach the reserves, whatever their headroom.
+        q["grok"] = {"remaining": 100.0}
+        q["copilot"] = {"remaining": 100.0}
+        for kind in ("research", "bulk", "code"):
+            c = r.route(kind, quota=q)
+            self.assertNotIn(c.service.name if c else None, {"grok", "copilot"}, kind)
         q["grok"] = {"remaining": 61.0}
         q["copilot"] = {"remaining": 61.0}
         self.assertEqual(r.route("github", quota=q).service.name, "copilot")
-        self.assertEqual(r.route("research", quota=q).service.name, "grok")
+        self.assertEqual(r.route("realtime-web", quota=q).service.name, "grok")
+        # A reserve with no reading at all fails closed.
+        q["grok"] = {}
+        self.assertIsNone(r.route("realtime-web", quota=q))
         self.assertIn("RESERVE", r.route("github", quota=q).why)
 
     def test_everyday_code_avoids_the_frontier_pools_when_others_have_room(self):

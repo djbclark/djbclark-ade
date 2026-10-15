@@ -31,7 +31,8 @@ review and rework. Concretely:
    crush/SIPB. Every slice names its **vendor × model × effort × context**,
    at the minimum spec that does it well; never redo work already paid for.
 3. **Reserves are never depleted** (grok and copilot: floor 60% left, one small
-   slice, only when that vendor is the point); **hermes is never a target**;
+   slice, only when that vendor is the point: copilot for `github` slices,
+   grok for `realtime-web` ones); **hermes is never a target**;
    **omp only with the operator's explicit yes**; never an all-vendor fan-out.
 4. **Use this skill proactively**, even when not asked: any discrete,
    separable work leaves this session's context.
@@ -117,9 +118,9 @@ Classify every pool before assigning anything:
 | **exhausted** | `remaining_percent` ≈ 0 on ANY window of that pool | skip that pool entirely (the same vendor's other model-family pool may be fine) |
 | **frontier** | Claude Fable 5.1 and codex `gpt-6-astra` | judgment, adjudication, security-relevant, whole-corpus, adversarial review; use fully (weekly windows), never for everyday slices; see *Pool policy* below |
 | **lifeline** | another agent runs on it | use with care and never let it run out; see *Reserve pools* below (clinepass and Claude itself) |
-| **reserve** | grok (GrokBot) and copilot (GitHub-side review) | hard floor 60% left (`route_agent.py` `reserve_floor`), one small slice at a time, only when that vendor is the point |
+| **reserve** | grok (GrokBot) and copilot (GitHub-side review) | hard floor 60% left (`route_agent.py` `reserve_floor`), one small slice at a time, only when that vendor is the point (copilot: kind `github`; grok: kind `realtime-web`); a missing or stale reading means do not use |
 | **never** | hermes; the prepaid pools; credits-backed models | not a target by any route; `acp-run`/`acp-dispatch` refuse hermes like omp |
-| **burn-first** | a pool whose window resets and the allowance is lost, with >= 40% left on every window (`aiuse` raises a `kind:"burn"` alert). Today: **agy's Claude/GPT pool** (`acp-run agy --model claude-opus-5-5-high` / `claude-sonnet-5-5-high`), and any provider's idle second pool | assign it first for code, review, research and second opinions, 2-3 slices at once; see *agy Claude/GPT pool* below |
+| **burn-first** | a pool whose window resets and the allowance is lost, with >= 40% left on every window (`aiuse` raises a `kind:"burn"` alert). Today: **agy's Claude/GPT pool** (`acp-run agy --model claude-opus-5-5-high` / `claude-sonnet-5-5-high`), and any provider's idle second pool | assign it first for code, review and research, 2-3 slices at once (judgment goes to the frontier pools); see *agy Claude/GPT pool* below |
 | **shared allowance** | a GitHub-side feature draws on the same subscription | usable, but spend modestly and keep a margin; see *Copilot* under *Reserve pools* below |
 | **prepaid** | real money | never without a fresh explicit operator decision |
 | **excluded** | operator has ruled it out | respect it, with its end condition (below) |
@@ -159,10 +160,13 @@ needs from it:
    free) for light bulk. Claude's own Sonnet/Haiku only as small Agent-tool
    sub-agents (they bill the orchestrator's pool).
 4. **`github` slices** are the only use of copilot, and only above its 60%
-   floor; `gh` from any other agent covers most GitHub work.
+   floor; `gh` from any other agent covers most GitHub work. **`realtime-web`
+   slices** are the only use of grok, same floor, an explicit opt-in when a
+   realtime X/web angle is the point.
 5. **Never**: hermes (gated like omp in `acp-run`/`acp-dispatch`), omp
    without `ACP_OPERATOR_APPROVED=omp` after a specific yes, prepaid or
-   credits-backed models, clinepass, devin, an all-vendor fan-out.
+   credits-backed models, clinepass (never a bigteam target: `NEVER_ROUTE` in
+   `route_agent.py`; it stays in Hermes's chain), devin, an all-vendor fan-out.
 6. **Route up when unsure**, and tell the next re-plan what moved (item 6 of
    *Dynamic routing*).
 
@@ -176,11 +180,11 @@ window, so spending it costs nothing that orchestration needs.
 1. **Probe it as its own pool.** `aiuse --available` lists it as `antigravity
    claude_gpt`, apart from `antigravity gemini`. Decide from its two windows'
    `remaining_percent`; either one under 15% means skip it this batch.
-2. **Assignment order for a slice that needs Claude-class judgment of code or
-   prose** (implementation, reviews, research synthesis, a second opinion on a
-   contract decision): the agy Claude/GPT pool first, then codex, then claude's
-   own window. `claude-opus-5-5-high` for the hard slices, `claude-sonnet-5-5-high`
-   for volume. Mechanical edits and bulk reading still go to the free and Gemini
+2. **Assignment order for a Claude-class code, review or research slice**
+   (implementation, reviews, research synthesis): the agy Claude/GPT pool
+   first, then the other everyday pools in `plan`'s order; judgment goes to the
+   frontier pools (*Pool policy* item 2). `claude-opus-5-5-high` for the hard
+   slices, `claude-sonnet-5-5-high` for volume. Mechanical edits and bulk reading still go to the free and Gemini
    pools first; do not spend Opus on them just because it is idle.
 3. **The ACP route reaches it through a client-name workaround (2026-10-10).** agy_acp_server 1.3.0 offers non-Gemini models only to clients whose ACP `clientInfo.name` is `zed`, `xcode` or `JetBrains.*` (`supports_third_party_models()` in its `model_selection.py`), so `acp-run` identifies itself to agy as `zed` (0b56897).
    Before that, the server listed only `gemini-*` models and `claude-opus-5-5-high` failed with
@@ -236,9 +240,8 @@ as well as claude and codex", during the `ai-heaven` research run). Route:
 `acp-run grok -C <dir> -p '<prompt>' --model grok-4.7` (`grok models` lists
 grok-4.7 default, grok-4.7-build-fast, grok-4.6, grok-4.5; the CLI also
 takes `--reasoning-effort`, `--prompt-file`, `--permission-mode`); probe
-answered in 4 s on 2026-10-09. `aiuse` shows no grok pool (its collector is
-off), so check the window in the `grok` TUI before a bulk batch, and keep the
-*Reserve pools* note below (GrokBot runs on it). Still true: the `grok` entry
+answered in 4 s on 2026-10-09. A missing or stale grok reading in `aiuse`
+means do not use it; keep the *Reserve pools* note below (GrokBot runs on it). Still true: the `grok` entry
 in `~/.config/aiuse/config.toml` `[disabled_services]` is commented out, and
 Hermes's `fallback_providers` do not name `grok-sub` (operator's call).
 
@@ -264,22 +267,25 @@ These pools have something else depending on them. Running one dry breaks that
 dependant, which costs more than any slice saves:
 
 1. **clinepass** — Hermes runs on it, through the LiteLLM gateway on `:4000`.
-   Never bulk-route to it.
+   Never a bigteam target (`NEVER_ROUTE` in `route_agent.py`; it stays in
+   Hermes's chain).
 2. **The grok TUI** (`grok`, the SuperGrok subscription) — GrokBot, the cloud
    "Chief of Staff", runs on it. **Hard floor: 60% left** (operator
    2026-10-15, "a special effort to never deplete the grok and copilot
    pools"; `route_agent.py` `reserve_floor`), one small slice at a time
-   (`max_parallel` 1), and only when a Grok model is the point (the realtime
-   X/web angle), or a run the operator asked for by name. `aiuse --available`
-   shows its window again since 2026-10-10 (caam collector); confirm in the
-   `grok` TUI if in doubt. Grok *models* reached through another TUI (opencode,
+   (`max_parallel` 1), and only for `realtime-web` slices (an explicit opt-in:
+   the realtime X/web angle is the point), or a run the operator asked for by
+   name. `aiuse --available` shows its window again since 2026-10-10 (caam
+   collector); a missing or stale reading means do not use (`route_agent.py`
+   fails closed for grok and copilot). Grok *models* reached through another TUI (opencode,
    cursor, copilot, …) bill that TUI's pool instead and are fine.
 3. **Copilot** (`copilot`) — the same GitHub Copilot subscription that
    GitHub-side features use, notably automatic Copilot code review of commits
    to `master` (djbclark's note of 2026-07-30), so a drained allowance stops
    those reviews. It read **100% used on 2026-10-15**, so this has already
    gone wrong once. Same rule as grok: **floor 60% left**, one small slice,
-   only for `github` slices that need GitHub context `gh` cannot give.
+   only for `github` slices that need GitHub context `gh` cannot give; a
+   missing or stale reading means do not use.
 4. **Claude** — do use it; it does the judgment, integration and review. But
    orchestration runs from Claude, so if its 5-hour or weekly window runs out,
    nothing else gets dispatched, integrated or committed either. Check

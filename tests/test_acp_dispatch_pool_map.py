@@ -36,5 +36,22 @@ class CursorPoolsTest(unittest.TestCase):
         self.assertIsNone(acpd.map_agent_to_provider("hermes", None))
 
 
+class ModelValuesTest(unittest.TestCase):
+    def test_config_option_models(self):
+        info = {"config_options": [{"id": "model", "options": [{"value": "a", "name": "A"}]}]}
+        self.assertEqual(acpd.model_values(info), [{"value": "a", "name": "A"}])
+
+    def test_acp_models_field_as_crush_reports_it(self):
+        info = {"config_options": None, "models": {"availableModels": [
+            {"modelId": "sipb-llms:qwen3.6:35b-a3b-q4_K_M", "name": "SIPB LLMs / Qwen3.6 35B A3B"}],
+            "currentModelId": "sipb-llms:qwen3.6:35b-a3b-q4_K_M"}}
+        values = acpd.model_values(info)
+        self.assertEqual(values, [{"value": "sipb-llms:qwen3.6:35b-a3b-q4_K_M", "name": "SIPB LLMs / Qwen3.6 35B A3B"}])
+        self.assertTrue(acpd.match_model(values, "sipb-llms:qwen3.6:35b-a3b-q4_K_M")[0])
+
+    def test_no_models_anywhere(self):
+        self.assertIsNone(acpd.model_values({"config_options": None, "models": None}))
+
+
 if __name__ == "__main__":
     unittest.main()

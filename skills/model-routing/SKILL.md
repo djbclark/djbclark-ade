@@ -165,7 +165,8 @@ Rules for any agent that dispatches to agy:
    *critical* burn alert (5h 100% left, weekly 49% left, weekly resets in ~5 h).
    Gate on `aiuse --available`, not on a standing rule: **at >= 40% left on both
    Claude/GPT windows, prefer it** over claude's own window and codex for code,
-   review, research and second opinions, via `acp-run agy --model
+   review and research (judgment goes to the frontier pools; agy only as an
+   independent reviewer of a frontier decision), via `acp-run agy --model
    claude-opus-5-5-high` (hard calls) or `claude-sonnet-5-5-high` (volume);
    `gpt-oss-120b-medium` is offered too. Over ACP these ids exist only because
    agy_acp_server 1.3.0 offers non-Gemini models only to clients whose ACP `clientInfo.name` is `zed`, `xcode` or `JetBrains.*` (`supports_third_party_models()` in its `model_selection.py`), so `acp-run` identifies itself to agy as `zed` (0b56897); the gate is deliberate in Google's code, so this is a
@@ -464,10 +465,12 @@ method that runs the waves.
    shared pool of item 2.
 4. **Minimum needed spec, proactively.** Pick the smallest model, effort and
    context that will do the slice *well*, and delegate even when nobody asked:
-   `/bigteam` for separable work; an Agent sub-agent (`model: "haiku"`, `effort:
-   "low"` for a lookup or a classification; `sonnet` / `medium` for ordinary
-   implementation; `opus` / `high` when the shape is unclear) for small things,
-   so the session's own context stays small. **Route up when unsure**: a hard
+   `/bigteam` for separable work; an Agent sub-agent only at `model: "haiku"`,
+   `effort: "low"` for a lookup or a classification (item 3: it bills the
+   shared pool), so the session's own context stays small. Implementation,
+   whether its shape is clear or not, goes through `acp-dispatch` to the
+   everyday pools (agy `claude-opus-5-5 --effort high`, zcode `GLM-5.3
+   --effort high`, cursor `default`); Fable/astra only for judgment (item 1). **Route up when unsure**: a hard
    slice on a cheap worker costs a failed step and a retry; an easy slice sent
    up costs a little extra.
 5. **The context window is a choice**, next to model and effort. Default is
@@ -481,11 +484,14 @@ method that runs the waves.
    review of commits draws on its premium requests; it read 100% used on
    2026-10-15, so this has already gone wrong once). Hard floor **60% left**
    (`reserve_floor` in `route_agent.py`), one small slice at a time, and only
-   when that vendor is the point: a Grok model for the realtime X/web angle,
-   Copilot for GitHub-context work that `gh` from any other agent cannot do.
-   Grok *models* reached through another TUI (cursor, copilot, opencode) bill
-   that TUI and are fine. **clinepass**: never (Hermes lifeline; aiuse
-   `[disabled_services]`). Claude itself: keep enough 5h headroom to finish
+   when that vendor is the point: grok only for `realtime-web` slices (an
+   explicit opt-in: the realtime X/web angle is the point), copilot only for
+   `github` slices, GitHub-context work that `gh` from any other agent cannot
+   do. A missing or stale grok/copilot reading means do not use (`route_agent.py`
+   fails closed). Grok *models* reached through another TUI (cursor, copilot,
+   opencode) bill that TUI and are fine. **clinepass**: never a bigteam target
+   (`NEVER_ROUTE` in `route_agent.py`; it stays in Hermes's chain as its
+   lifeline; aiuse `[disabled_services]`). Claude itself: keep enough 5h headroom to finish
    integrating what is in flight, because orchestration runs from it.
 7. **Never:** **hermes** as a delegation target (the operator's own assistant;
    `acp-run` and `acp-dispatch` refuse it the way they refuse omp); **omp**
