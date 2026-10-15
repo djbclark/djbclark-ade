@@ -7,6 +7,7 @@
 
     acp-run <agent> [-C DIR] [--add-dir DIR]... [-p PROMPT | -f FILE | stdin] [--perm POLICY]
             [--keep-user-config] [--strip-user-config] [--model M] [--mode M] [--set ID=VALUE]... [--timeout SECS]
+            [--effort LEVEL] [--context SIZE] [--meta JSON] [--agent-arg ARG]... [--agent-env K=V]...
             [--log PATH] [--json] [--handshake-tries N] [--handshake-timeout S]
             [--no-fallback] [--prompt-retries N] [--max-load L] [--load-wait S]
             [--wrapup-grace S [--wrapup TEXT]]
@@ -17,6 +18,9 @@
     acp-run <agent> --info    initialize + session/new only; print modes,
                               config options (models), auth methods and
                               capabilities (loadSession, sessionCapabilities)
+    acp-run <agent> --info --model M [--effort L] [--context S] [--set ..]
+                              apply those first (no prompt) and show the options
+                              that result; --all-models does it for every model
 
 The agent's final message goes to stdout. A summary line goes to stderr
 (stop reason, seconds, tool calls, permissions, tokens, cost, log path). Every
@@ -64,6 +68,21 @@ plugins, skills and hooks off and the user's permission block untouched. Under
 --perm deny it changes nothing (deny already strips). Temp dirs are named
 acp-run-<agent>-strip-<pid>-*; --keep-user-config still wins.
 --set applies any config option --info lists (e.g. --set provider=cline-pass).
+--effort LEVEL (none, minimal, low, medium, high, xhigh, max, ultra, default; extra-high is
+xhigh) and --context SIZE (200k, 256k, 272k, 400k, 500k, 1m or a token count) are normalized
+across agents. Each is translated to the agent's own knob (an ACP option, a launch flag or
+env var, grok's session/set_model, claude's CLAUDE_CODE_DISABLE_1M_CONTEXT, agy's model-id
+suffix, ...) and applied after the model and every other option, since a model switch resets
+them. One the agent or model cannot take (hermes/crush effort; qwen/opencode/crush/cline/
+agy/hermes context; a size the model does not list; codex other than the model's fixed
+window) exits 2 before any prompt, naming the valid values. After the options are set and
+after the turn (usage_update.size) acp-run reads back what the agent reports and prints
+"acp-run: applied: model=... effort=... ctx=..." (values it cannot read back are marked
+(unverified)); the same goes into the "result" record and --json as "applied". A requested
+value the agent reports differently is failure class "config", exit 1. --meta JSON is merged
+into session/new _meta. --agent-arg ARG / --agent-env K=V append to the agent's launch
+command / environment (per host: ACP_RUN_ARGS_<AGENT> split like a shell line,
+ACP_RUN_ENV_<AGENT>="K=V,K=V").
 The agent never sees HERDR_PANE_ID or HERDR_ENV (acp-run drops them on every run, not
 only --interactive: an agent hook once renamed the caller's herdr tab).
 Per-host settings: ~/.config/acp-run.env (or $ACP_RUN_ENV_FILE), when present,
@@ -156,8 +175,10 @@ record is already Claude's own id.
 
 Exit codes: 0 end_turn with some output; 1 other stop reason, agent error,
 an empty reply (no text, no tool calls; or no text under --perm deny or after
-a denied permission), or a delivery-check failure (quota/plan/auth/provider
-error or truncated reply); 2 usage error; 5 empty reply and every permission
+a denied permission), a delivery-check failure (quota/plan/auth/provider
+error or truncated reply) or a requested model/effort/context the agent did
+not apply (FAILED config); 2 usage error (including an --effort/--context the
+agent or model cannot take); 5 empty reply and every permission
 request was denied; 75 refused by --max-load; 77 under --perm deny a tool ran
 without a permission request (tripwire; turn cancelled); 124 timed out (session/cancel
 sent first, then the process is killed); 130/143 interrupted by SIGINT/SIGTERM
@@ -202,10 +223,22 @@ from acp.schema import (
 
 _acp_route = _acp_router.MessageRouter.__call__
 
+# hermes and crush-acp list their models only in the legacy session/new field `models`, which the
+# SDK's NewSessionResponse drops; keep unknown fields (sess.model_extra) so --info can list them
+# and --model can use session/set_model.
+import acp.schema as _acp_schema
+
+_acp_schema.NewSessionResponse.model_config["extra"] = "allow"
+_acp_schema.NewSessionResponse.model_rebuild(force=True)
+
 
 async def _route_dollar_as_extension(self, method, params, is_notification):
     if isinstance(method, str) and method.startswith("$/"):
         method = "_" + method[2:]
+    elif isinstance(method, str) and is_notification and method != "session/update" and not method.startswith("_"):
+        # qwen sends "qwen/notify/session/model-update" without the extension prefix: a
+        # logged traceback per notification (2026-10-15); ext_notification ignores it
+        method = "_" + method
     return await _acp_route(self, method, params, is_notification)
 
 
@@ -389,8 +422,8 @@ CLIENT_NAME = {"agy": "zed"}
 # clientCapabilities._meta.parameterizedModelPicker it offers one exploded
 # preset per model ("grok-4.7[context=256k,...,fast=true]"); with it, plain
 # model ids plus separate context/reasoning_effort/fast options
-# (forum.cursor.com/t/161317, zed-industries/zed#57571). For these agents
-# `model` is applied FIRST (a model switch resets its params). 2026-10-14.
+# (forum.cursor.com/t/161317, zed-industries/zed#57571). The model goes first for
+# every agent now (order_sets, 2026-10-15); this set only decides the capability.
 PARAM_MODEL_PICKER = {"cursor"}
 # User-level global rules sent as session/new _meta.systemPrompt, for agents
 # that do not load a global rules file over ACP themselves. agy_acp_server
@@ -1330,6 +1363,7 @@ FAILURE_TEXT = {
     "refused": "model refused the task",
     "provider": "provider error",
     "tripwire": "a tool ran without a permission request under --perm deny",
+    "config": "a requested model, effort or context was not applied",
 }
 # A whole reply of at most SHORT_REPLY characters that starts like this is a
 # refusal, not an answer. Anchored at the start so a report that merely
@@ -1747,10 +1781,10 @@ def flat_values(option):
     return values
 
 
-def _toks(x):
-    """Dash-separated lowercase tokens of x without a trailing "[...]" or "(...)" (claude's
+def _toks(x, split="-"):
+    """Lowercase tokens of x split on `split`, without a trailing "[...]" or "(...)" (claude's
     "[1m]", qwen's "(openai)" authType suffix)."""
-    return re.sub(r"(\[[^\]]*\]|\([^)]*\))$", "", str(x or "")).lower().split("-")
+    return re.split(split, re.sub(r"(\[[^\]]*\]|\([^)]*\))$", "", str(x or "")).lower())
 
 
 def match_value(values, want):
@@ -1762,16 +1796,19 @@ def match_value(values, want):
     for v in values:
         if want in (v.get("value"), v.get("name")):
             return v, []
-    wt = _toks(want)
-    cands = []
-    for v in values:
-        for cand in (v.get("value"), v.get("name")):
-            ct = _toks(cand)
-            if any(ct[i : i + len(wt)] == wt for i in range(len(ct) - len(wt) + 1)):
-                cands.append(v)
-                break
-    if len(cands) == 1:
-        return cands[0], []
+    for split in (r"-", r"[-:/]"):  # then also across provider prefixes: nous:anthropic/claude-x
+        wt = _toks(want, split)
+        cands = []
+        for v in values:
+            for cand in (v.get("value"), v.get("name")):
+                ct = _toks(cand, split)
+                if any(ct[i : i + len(wt)] == wt for i in range(len(ct) - len(wt) + 1)):
+                    cands.append(v)
+                    break
+        if len(cands) == 1:
+            return cands[0], []
+        if cands:
+            break
     return None, cands
 
 
@@ -1811,6 +1848,481 @@ def pick_config(options, want, category):
     else:
         head = f"acp-run: no {category} '{want}'; "
     raise SystemExit(head + " | ".join(parts))
+
+
+# ---------------------------------------------------------------- --effort / --context
+# Normalized flags (2026-10-15, audits R1-R3 under ~/.local/state/bigteam/acp-context/). Each is
+# translated to the agent's own knob, always AFTER the model (a model switch resets effort and
+# context and changes which values exist), read back, and refused (exit 2, before any prompt) when
+# the agent or model cannot take it. A requested value the agent did not take is failure class
+# "config" (exit 1).
+
+
+class ConfigError(Exception):
+    """A requested model, effort or context was not applied (failure class config, exit 1)."""
+
+
+def usage_exit(msg):
+    """A request the agent or model cannot satisfy: say why on stderr and exit 2, before any prompt."""
+    print(f"acp-run: {msg}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+EFFORT_ALIASES = {
+    "extra-high": "xhigh", "extra_high": "xhigh", "extrahigh": "xhigh", "x-high": "xhigh",
+    "maximum": "max", "off": "none", "disabled": "none", "disable": "none", "min": "minimal",
+}
+EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "default")
+
+
+def canon_effort(s):
+    """An effort level in one spelling: 'Extra High', 'extra-high' and 'xhigh' are xhigh."""
+    t = re.sub(r"\s+", "-", str(s if s is not None else "").strip().lower())
+    return EFFORT_ALIASES.get(t, t)
+
+
+def effort_arg(s):
+    """argparse type of --effort: the canonical level."""
+    c = canon_effort(s)
+    if c not in EFFORT_LEVELS:
+        raise argparse.ArgumentTypeError(
+            f"unknown effort {s!r}; valid: {', '.join(EFFORT_LEVELS)} (extra-high is xhigh)")
+    return c
+
+
+def parse_size(s):
+    """'500k' / '1m' / '272000' / '1M' as a token count, or None."""
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([km]?)", str(s if s is not None else "").strip().lower())
+    if not m:
+        return None
+    n = int(round(float(m.group(1)) * {"": 1, "k": 1000, "m": 1_000_000}[m.group(2)]))
+    return n if n > 0 else None
+
+
+def fmt_size(n):
+    if not isinstance(n, int):
+        return str(n)
+    if n % 1_000_000 == 0:
+        return f"{n // 1_000_000}m"
+    if n % 1000 == 0:
+        return f"{n // 1000}k"
+    return str(n)
+
+
+def context_arg(s):
+    """argparse type of --context: tokens (200k, 256k, 272k, 400k, 500k, 1m or a plain integer)."""
+    n = parse_size(s)
+    if n is None:
+        raise argparse.ArgumentTypeError(
+            f"unknown context size {s!r}; use 200k, 256k, 272k, 400k, 500k, 1m or an integer")
+    return n
+
+
+def opt_dicts(options):
+    return [dump(o) for o in options or []]
+
+
+def current_value(options, ident):
+    for o in opt_dicts(options):
+        if o.get("id") == ident:
+            return o.get("currentValue")
+    return None
+
+
+# ACP config option ids that carry a reasoning level (cursor uses a different one per model);
+# `thinking` is an on/off switch, not a level, so it is never matched.
+EFFORT_IDS = ("reasoning_effort", "effort", "reasoning", "thought", "thought_level")
+CONTEXT_IDS = ("context", "context_window", "context_size")
+
+
+def effort_options(options):
+    return [o for o in opt_dicts(options)
+            if o.get("id") != "thinking" and (o.get("id") in EFFORT_IDS or o.get("category") == "thought_level")]
+
+
+def resolve_effort(options, level, who):
+    """(config id, value) of the option that sets `level`, None for `default` the agent does not
+    list; exits 2 naming the valid values when the agent or model cannot take it."""
+    cands = effort_options(options)
+    if not cands:
+        switch = [o["id"] for o in opt_dicts(options) if o.get("id") == "thinking"]
+        usage_exit(f"{who} offers no reasoning-effort option"
+                   + (" (only an on/off 'thinking' switch: --set thinking=true|false)" if switch else ""))
+    want = canon_effort(level)
+    for o in cands:
+        for v in flat_values(o):
+            if want in (canon_effort(v.get("value")), canon_effort(v.get("name"))):
+                return o["id"], v["value"]
+    if want == "default":
+        return None
+    have = "; ".join(f"{o['id']}: " + ", ".join(str(v.get("value")) for v in flat_values(o)) for o in cands)
+    usage_exit(f"{who} has no effort '{level}'; valid: {have}")
+
+
+def resolve_context_option(options, tokens, who):
+    """(config id, value) of a context option offering `tokens`; None when there is no context
+    option; exits 2 naming the valid sizes when it does not offer them."""
+    cands = [o for o in opt_dicts(options) if o.get("id") in CONTEXT_IDS]
+    if not cands:
+        return None
+    for o in cands:
+        for v in flat_values(o):
+            if tokens in (parse_size(v.get("value")), parse_size(v.get("name"))):
+                return o["id"], v["value"]
+    have = "; ".join(f"{o['id']}: " + ", ".join(str(v.get("value")) for v in flat_values(o)) for o in cands)
+    usage_exit(f"{who} has no context {fmt_size(tokens)}; valid: {have}")
+
+
+# What cannot be requested, and why (R1-R3; "not reachable over ACP" is said, never ignored).
+EFFORT_NOT_REACHABLE = {
+    "hermes": "hermes' ACP server has no reasoning option (it reads agent.reasoning_effort from"
+              " config.yaml only; a shadow HERMES_HOME is not implemented)",
+    "crush": "crush-acp has no reasoning option (the reasoning level lives in its model config;"
+             " its SIPB models have none)",
+}
+CONTEXT_NOT_REACHABLE = {
+    "agy": "the window is fixed per model (Gemini 1m) and agy has no ACP knob for it",
+    "qwen": "the window is a property of the model entry in settings.json; choose a model with the"
+            " window you want (--info lists them)",
+    "opencode": "the window is fixed per model by the models.dev catalog; opencode has no ACP knob",
+    "crush": "the window is fixed per model in crush's catalog",
+    "cline": "the window is fixed per model by the provider catalog",
+    "hermes": "the window is resolved per provider and model; choose a -900k model id where one exists",
+}
+COPILOT_TIERS = {200000: "default", 256000: "default", 272000: "default", 1000000: "long_context"}
+CLAUDE_CONTEXTS = (200000, 1000000)
+CODEX_CONTEXTS = (272000, 500000)
+CLINE_EFFORTS = ("none", "low", "medium", "high", "xhigh")
+AGY_EFFORTS = ("low", "medium", "high")
+# models whose option list returned by set_config_option(model) can still be the previous
+# model's (opencode, R2 finding 3): the same model is sent once more to get the real list
+REFETCH_AFTER_MODEL = ("opencode",)
+
+
+def check_static(a):
+    """Exit 2 for an --effort/--context the agent can never take, before anything is started."""
+    effort, ctx = getattr(a, "effort", None), getattr(a, "context", None)
+    if effort and effort != "default":
+        if a.agent in EFFORT_NOT_REACHABLE:
+            usage_exit(f"--effort: {a.agent}: {EFFORT_NOT_REACHABLE[a.agent]}")
+        if a.agent == "cline" and effort not in CLINE_EFFORTS:
+            usage_exit(f"--effort: cline takes {', '.join(CLINE_EFFORTS)} (--thinking); not {effort}")
+        if a.agent == "agy" and effort not in AGY_EFFORTS:
+            usage_exit(f"--effort: agy bakes the level into the model id; valid: {', '.join(AGY_EFFORTS)}"
+                       f" (xhigh and max are not reachable over ACP); not {effort}")
+    if ctx:
+        if a.agent in CONTEXT_NOT_REACHABLE:
+            usage_exit(f"--context: {a.agent}: {CONTEXT_NOT_REACHABLE[a.agent]}")
+        if a.agent == "claude" and ctx not in CLAUDE_CONTEXTS:
+            usage_exit("--context: claude is 200k (CLAUDE_CODE_DISABLE_1M_CONTEXT) or the model's own 1m;"
+                       f" not {fmt_size(ctx)}")
+        if a.agent == "codex" and ctx not in CODEX_CONTEXTS:
+            usage_exit("--context: codex's window is fixed by the model: 272k (most), 500k"
+                       f" (gpt-6.1-sol only); not {fmt_size(ctx)}")
+        if a.agent == "copilot" and ctx not in COPILOT_TIERS:
+            usage_exit("--context: copilot has a default tier (200k, 256k or 272k) and a long one (1m);"
+                       f" not {fmt_size(ctx)}")
+
+
+def env_pairs(text):
+    """'K=V,K2=V2' (a comma only splits before another NAME=) as a dict."""
+    out = {}
+    for part in re.split(r",(?=[A-Za-z_][A-Za-z0-9_]*=)", text or ""):
+        k, sep, v = part.strip().partition("=")
+        if sep and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
+            out[k] = v
+    return out
+
+
+def launch_tweaks(a, cmd, env):
+    """The agent's launch command with the flags --effort/--context/--agent-arg need at start
+    (env changed in place). cline's --thinking, copilot's --context/--model, claude's 1M switch,
+    zcode's compaction cap and the per-agent ACP_RUN_ARGS_<AGENT> / ACP_RUN_ENV_<AGENT> /
+    --agent-arg / --agent-env pass-throughs (R1 6.4, R2 5.1)."""
+    effort, ctx = getattr(a, "effort", None), getattr(a, "context", None)
+    cmd = list(cmd)
+    if a.agent == "claude" and ctx == 200000:
+        env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "1"
+    if a.agent == "zcode" and ctx:
+        env["ZCODE_ACP_AUTO_COMPACT_THRESHOLD"] = str(ctx)
+    if a.agent == "copilot" and ctx:
+        # set_config_option(model) resets the context tier to default (R2 finding 1): the tier
+        # and the model are server flags
+        cmd += ["--context", COPILOT_TIERS[ctx]]
+        if a.model:
+            cmd += ["--model", a.model]
+    if a.agent == "cline" and effort and effort != "default":
+        cmd += ["--thinking", effort]
+    cmd += shlex.split(os.environ.get(f"ACP_RUN_ARGS_{a.agent.upper()}", "")) + list(getattr(a, "agent_arg", None) or [])
+    env.update(env_pairs(os.environ.get(f"ACP_RUN_ENV_{a.agent.upper()}", "")))
+    for kv in getattr(a, "agent_env", None) or []:
+        env.update(env_pairs(kv))
+    return cmd
+
+
+def grok_windows(init, model_id):
+    """The context windows grok's initialize response lists for model_id ([] when unknown)."""
+    meta = (dump(init) or {}).get("_meta") or {}
+    for m in ((meta.get("modelState") or {}).get("availableModels") or []):
+        if m.get("modelId") == model_id:
+            return [w for w in ((m.get("_meta") or {}).get("contextWindows") or []) if isinstance(w, int)]
+    return []
+
+
+def models_extra(sess):
+    """The legacy session/new `models` field (hermes, crush-acp) as a dict, or None. The SDK's
+    NewSessionResponse allows extra fields since module load (see _acp_schema below)."""
+    extra = getattr(sess, "model_extra", None) or {}
+    m = extra.get("models")
+    return m if isinstance(m, dict) else None
+
+
+def models_values(models):
+    return [{"value": m.get("modelId"), "name": m.get("name")} for m in (models or {}).get("availableModels") or []
+            if isinstance(m, dict)]
+
+
+async def set_model_fallback(a, conn, sess, client, want, per_run_data):
+    """--model for an agent whose session/new has no `model` config option but lists `models`
+    (hermes, crush-acp): the unstable session/set_model, which the pinned SDK lacks. Returns the
+    model id set, or None when the agent lists no models."""
+    models = models_extra(sess)
+    if not models:
+        return None
+    values = models_values(models)
+    v, amb = match_value(values, want)
+    if v is None:
+        raise SystemExit(f"acp-run: no model '{want}'"
+                         + (f" (ambiguous: {', '.join(str(c.get('value')) for c in amb)})" if amb else "")
+                         + "; have: " + ", ".join(str(x.get("value")) for x in values))
+    if a.agent == "crush" and not per_run_data:
+        # crush-acp persists the choice into the data dir's crush.json (R2 finding 4), and the
+        # default dir is shared with the interactive `crush` shell function
+        usage_exit("crush: --model rewrites the data dir's crush.json; give it a private one with"
+                   " ACP_RUN_CRUSH_DATA=DIR (or run under --perm deny / --strip-user-config)")
+    await conn._conn.send_request("session/set_model", {"sessionId": sess.session_id, "modelId": v["value"]})
+    client.rec("set_model", {"modelId": v["value"]})
+    return v["value"]
+
+
+async def grok_set_context(conn, sess, init, client, options, tokens, who):
+    """grok: session/set_model {_meta: {contextWindow, reasoningEffort}} (the method is not in the
+    pinned SDK) and the free read-back _x.ai/session/info context.total. reasoningEffort is
+    repeated so the call does not reset it to the model's default. Returns context.total."""
+    model_id = current_value(options, "model")
+    windows = grok_windows(init, model_id)
+    if windows and tokens not in windows:
+        usage_exit(f"{who} has no context {fmt_size(tokens)}; valid: {', '.join(fmt_size(w) for w in windows)}")
+    meta = {"contextWindow": tokens}
+    eff = current_value(options, "reasoning_effort")
+    if eff:
+        meta["reasoningEffort"] = eff
+    try:
+        await conn._conn.send_request("session/set_model", {"sessionId": sess.session_id, "modelId": model_id, "_meta": meta})
+    except RequestError as e:
+        if "context window" in str(e):
+            usage_exit(f"{who} refused context {fmt_size(tokens)}: {e}")
+        raise
+    client.rec("set_model", {"modelId": model_id, "_meta": meta})
+    info = await conn.ext_method("x.ai/session/info", {"sessionId": sess.session_id})
+    if isinstance(info, dict) and isinstance(info.get("result"), dict):
+        info = info["result"]  # the SDK hands back the JSON-RPC envelope's result under "result"
+    client.rec("session_info", {k: info[k] for k in ("model", "modelDisplayName", "context") if isinstance(info, dict) and k in info}
+               if isinstance(info, dict) else {"raw": str(info)[:200]})
+    total = ((info or {}).get("context") or {}).get("total") if isinstance(info, dict) else None
+    return total if isinstance(total, int) else None
+
+
+def agy_effort_model(options, want_model, level):
+    """agy bakes the effort into the model id (<base>-low|medium|high): the model value for
+    `level` on want_model's base, or exit 2 naming what the base is offered at."""
+    cid, val = pick_config(options, want_model, "model") if want_model else (None, None)
+    val = val or current_value(options, "model")
+    base = re.sub(r"-(low|medium|high)$", "", str(val))
+    values = [str(v.get("value")) for o in opt_dicts(options) if o.get("id") == "model" for v in flat_values(o)]
+    levels = [x[len(base) + 1:] for x in values if x.startswith(base + "-") and x[len(base) + 1:] in AGY_EFFORTS]
+    target = f"{base}-{level}"
+    if target not in values:
+        usage_exit(f"agy {base} is offered at effort: {', '.join(levels) or '(none: fixed in the id)'}; not {level}")
+    return target
+
+
+async def apply_config(a, conn, sess, init, client, sets, applied, per_run_data=False):
+    """Apply the options in `sets` (order_sets: provider, model, the rest), then --effort and
+    --context, to the new session; fill `applied` with what the agent reports back and raise
+    ConfigError when it reports something else than was requested. Returns the final options.
+    The agent's own response to each set carries the complete updated option list, which is
+    the read-back (grok adds _x.ai/session/info for the window)."""
+    options = sess.config_options
+    effort, ctx = getattr(a, "effort", None), getattr(a, "context", None)
+    copilot_launch_model = a.agent == "copilot" and bool(ctx)
+    want_model = sets.get("model")
+    if effort and effort != "default" and a.agent == "agy":
+        sets = dict(sets)
+        sets["model"] = agy_effort_model(options, want_model, effort)
+        want_model = sets["model"]
+    got = {}  # option id -> (value we set, True when the agent's response confirmed it)
+    items = list(sets.items())
+    for i, (key, want) in enumerate(items):
+        if key == "mode" and not has_config(options, "mode"):
+            # refined-antigravity-acp offers its modes (yolo, default)
+            # only as ACP session modes, not as a config option
+            mode_ids = [m.get("id") for m in (dump(sess.modes) or {}).get("availableModes", [])]
+            if want in mode_ids:
+                await conn.set_session_mode(session_id=sess.session_id, mode_id=want)
+                client.rec("set_mode", {"id": want})
+                continue
+        if key == "model" and not has_config(options, "model"):
+            done = await set_model_fallback(a, conn, sess, client, want, per_run_data)
+            if done is not None:
+                applied["model"] = done
+                applied.setdefault("unverified", []).append("model")
+                continue
+        cid, val = pick_config(options, want, key)
+        if key == "model" and copilot_launch_model:
+            # already the server's --model; only check below that it is the session's
+            if current_value(options, "model") != val:
+                raise ConfigError(f"copilot started on model {current_value(options, 'model')!r}, not {val!r}")
+            continue
+        resp = await conn.set_config_option(config_id=cid, session_id=sess.session_id, value=val)
+        new = getattr(resp, "config_options", None)
+        options = new or options
+        client.rec("set_config", {"id": cid, "value": val})
+        if key == "model":
+            got[cid] = (val, bool(new))
+        if key == "model" and a.agent in REFETCH_AFTER_MODEL and (i + 1 < len(items) or effort or ctx):
+            resp = await conn.set_config_option(config_id=cid, session_id=sess.session_id, value=val)
+            options = getattr(resp, "config_options", None) or options
+    who = f"{a.agent} {current_value(options, 'model') or applied.get('model') or ''}".strip()
+    if effort and a.agent != "agy" and a.agent != "cline":
+        picked = resolve_effort(options, effort, who)
+        if picked:
+            cid, val = picked
+            resp = await conn.set_config_option(config_id=cid, session_id=sess.session_id, value=val)
+            new = getattr(resp, "config_options", None)
+            options = new or options
+            client.rec("set_config", {"id": cid, "value": val})
+            got[cid] = (val, bool(new))
+            applied["effort_id"] = cid
+    if ctx:
+        if a.agent == "grok":
+            total = await grok_set_context(conn, sess, init, client, options, ctx, who)
+            applied["ctx"], applied["ctx_source"] = total, "x.ai/session/info"
+            if total is None:
+                applied.setdefault("unverified", []).append("ctx")
+            elif total != ctx:
+                raise ConfigError(f"requested context {fmt_size(ctx)} but grok reports {fmt_size(total)}")
+        else:
+            picked = resolve_context_option(options, ctx, who)
+            if picked:
+                cid, val = picked
+                resp = await conn.set_config_option(config_id=cid, session_id=sess.session_id, value=val)
+                new = getattr(resp, "config_options", None)
+                options = new or options
+                client.rec("set_config", {"id": cid, "value": val})
+                got[cid] = (val, bool(new))
+                applied["ctx_id"] = cid
+            elif a.agent == "codex":
+                model = str(current_value(options, "model") or "")
+                fixed = 500000 if "gpt-6.1-sol" in model else 272000
+                if ctx != fixed:
+                    usage_exit(f"{who}: codex's window is fixed by the model ({fmt_size(fixed)}); only gpt-6.1-sol"
+                               " has 500k (--model gpt-6.1-sol), the others 272k")
+                applied["ctx_expected"] = fixed
+            elif a.agent in ("claude", "copilot"):
+                applied["ctx_expected"] = ctx  # launch-time switch; confirmed by usage_update.size
+            elif a.agent == "zcode":
+                applied["ctx_cap"] = applied["ctx"] = ctx  # compaction cap (ZCODE_ACP_AUTO_COMPACT_THRESHOLD)
+                applied.setdefault("unverified", []).append("ctx")
+            else:
+                usage_exit(f"{who} offers no context option (valid: see --info)")
+    read_back(a, options, got, applied)
+    return options
+
+
+def values_match(want, have, fuzzy=False):
+    """True when two option values name the same thing: equal or the same effort spelling; with
+    fuzzy also token-wise (claude may answer 'haiku' with its full model id)."""
+    if want == have or canon_effort(want) == canon_effort(have):
+        return True
+    return fuzzy and (match_value([{"value": have, "name": have}], str(want))[0] is not None
+                      or match_value([{"value": want, "name": want}], str(have))[0] is not None)
+
+
+def read_back(a, options, got, applied):
+    """Fill applied from the final options and raise ConfigError for each value the agent's
+    response reports differently from the one that was set."""
+    model = current_value(options, "model")
+    if model is not None:
+        applied["model"] = model
+    eid = applied.get("effort_id")
+    effort_opts = effort_options(options)
+    if eid:
+        applied["effort"] = current_value(options, eid)
+    elif effort_opts:
+        applied["effort"] = effort_opts[0].get("currentValue")
+    elif a.agent == "agy" and model:
+        m = re.search(r"-(low|medium|high)$", str(model))
+        applied["effort"] = m.group(1) if m else None
+    elif a.agent == "cline" and getattr(a, "effort", None):
+        applied["effort"] = a.effort
+        applied.setdefault("unverified", []).append("effort")
+    cid = applied.get("ctx_id") or next(
+        (o["id"] for o in opt_dicts(options) if o.get("id") in CONTEXT_IDS and "ctx" not in applied), None)
+    if cid:
+        applied["ctx"] = parse_size(current_value(options, cid)) or current_value(options, cid)
+        applied["ctx_source"] = f"option {cid}"
+    for ident, (val, confirmed) in got.items():
+        have = current_value(options, ident)
+        if confirmed and have is not None and not values_match(val, have, fuzzy=a.agent == "claude"):
+            raise ConfigError(f"set {ident}={val!r} but the agent reports {have!r}")
+    ctx = getattr(a, "context", None)
+    if ctx and isinstance(applied.get("ctx"), int) and not size_ok(ctx, applied["ctx"]):
+        raise ConfigError(f"requested context {fmt_size(ctx)} but the agent reports {fmt_size(applied['ctx'])}")
+    eff = getattr(a, "effort", None)
+    if eff and eff != "default" and a.agent not in ("cline",) and applied.get("effort") is not None \
+            and not values_match(eff, applied["effort"]):
+        raise ConfigError(f"requested effort {eff} but the agent reports {applied['effort']!r}")
+
+
+def size_ok(want, have):
+    """A reported window is the requested one: codex and claude report the usable share (95%),
+    copilot the prompt budget, so the lower bound is 90%."""
+    return isinstance(have, int) and 0.9 * want <= have <= 1.01 * want
+
+
+def post_turn(a, applied, usage):
+    """After the turn: the window the agent reports in usage_update.size. Fills applied['ctx']
+    when no earlier read-back gave one; returns an error text when a requested window was not
+    the one in effect, else None."""
+    size = (usage or {}).get("size")
+    ctx = getattr(a, "context", None)
+    if applied.get("ctx_cap"):
+        return None  # a compaction cap (zcode): the window itself is unchanged and nothing reads the cap back
+    if isinstance(size, int):
+        if not isinstance(applied.get("ctx"), int) or applied.get("ctx_source") in (None, "usage_update"):
+            applied["ctx"], applied["ctx_source"] = size, "usage_update"
+            if "ctx" in applied.get("unverified", []):
+                applied["unverified"].remove("ctx")
+        if ctx and applied.get("ctx_source") == "usage_update" and not size_ok(ctx, size):
+            return f"requested context {fmt_size(ctx)} but the agent reports {fmt_size(size)} (usage_update)"
+    elif ctx and not isinstance(applied.get("ctx"), int):
+        applied.setdefault("unverified", []).append("ctx")
+        applied["ctx"], applied["ctx_source"] = ctx, "requested"
+    return None
+
+
+def applied_line(applied):
+    """'model=grok-4.7 effort=low ctx=500k' with unverified values marked, '' when nothing is known."""
+    unv = set(applied.get("unverified") or [])
+    bits = []
+    for k in ("model", "effort", "ctx"):
+        v = applied.get(k)
+        if v is None:
+            continue
+        s = fmt_size(v) if k == "ctx" else str(v)
+        bits.append(f"{k}={s}" + ("(unverified)" if k in unv else ""))
+    return " ".join(bits)
 
 
 def ensure_agy_home() -> str:
@@ -1879,6 +2391,11 @@ def fallback_cli(a, client=None) -> int:
     sid = getattr(a, "session_id", None) or str(uuid.uuid4())
     # The prompt goes on stdin, never argv (process listings show argv).
     cmd = ["claude", "-p", "--model", model, "--session-id", sid]
+    env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
+    if getattr(a, "effort", None) and a.effort != "default":
+        cmd += ["--effort", a.effort]
+    if getattr(a, "context", None) == 200000:
+        env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "1"
     if a.perm == "all":
         cmd.append("--dangerously-skip-permissions")
     elif a.perm == "deny":
@@ -1890,7 +2407,7 @@ def fallback_cli(a, client=None) -> int:
         client.rec("new_session", {"sessionId": sid, "via": "claude-cli"})
     print(f"acp-run: ACP handshake failed; fallback to claude CLI (session {sid})", file=sys.stderr)
     return subprocess.run(cmd, cwd=str(Path(a.dir).resolve()), input=a.prompt_text or "",
-                          text=True, check=False).returncode
+                          text=True, check=False, env=env).returncode
 
 
 def extend_deadline(client, deadline):
@@ -2302,6 +2819,8 @@ async def open_session(a, conn, init, client, root, timeout):
             kw["systemPrompt"] = rules  # sent as session/new _meta
         if getattr(a, "perm", None) == "deny":
             kw.update(DENY_META.get(a.agent, {}))  # sent as session/new _meta
+        if getattr(a, "meta", None):
+            kw = deep_merge(kw, a.meta)  # --meta JSON, merged over the above
         if add_dirs:
             kw["additional_directories"] = add_dirs
         if add_dirs and not can_additional_directories(init):
@@ -2382,6 +2901,10 @@ def resume_argv(a, root, session_id):
         argv += ["--mode", a.mode]
     for kv in a.set:
         argv += ["--set", kv]
+    if getattr(a, "effort", None):
+        argv += ["--effort", a.effort]
+    if getattr(a, "context", None):
+        argv += ["--context", fmt_size(a.context)]
     for d in getattr(a, "add_dir", []):
         argv += ["--add-dir", d]
     if a.perm != "all":
@@ -2716,6 +3239,27 @@ class Repl:
             pass
 
 
+async def all_models_options(conn, sess, options):
+    """--info --all-models: for each value of the `model` option, switch to it (no prompt) and
+    record the other options that model offers, as {model: {option id: {current, values}}}
+    (the matrix behind R1 section 3.2). A model that refuses the switch is recorded as an error."""
+    model = next((o for o in opt_dicts(options) if o.get("id") == "model"), None)
+    if model is None:
+        return {"error": "the agent offers no 'model' config option"}
+    out = {}
+    for v in flat_values(model):
+        try:
+            resp = await conn.set_config_option(config_id="model", session_id=sess.session_id, value=v["value"])
+        except Exception as e:  # noqa: BLE001 - one bad model must not hide the others
+            out[v["value"]] = {"error": error_text(e)[:200]}
+            continue
+        out[v["value"]] = {
+            o["id"]: {"current": o.get("currentValue"), "values": [x.get("value") for x in flat_values(o)]}
+            for o in opt_dicts(getattr(resp, "config_options", None) or []) if o.get("id") != "model"
+        }
+    return out
+
+
 async def run(a, log, err, log_path):
     cmd, auth = AGENTS[a.agent]
     auth = a.auth or auth
@@ -2735,6 +3279,7 @@ async def run(a, log, err, log_path):
     tries = max(1, a.handshake_tries)
     hung = []  # the handshake phase each timed-out try hung in
     proc = client = conn = init = sess = repl = herdr = None
+    applied = {}  # what the agent reports back for model / effort / context (apply_config)
     # SIGINT/SIGTERM: cancel the turn cooperatively (session/cancel), stop the
     # agent and exit 128+signal, as acpx does for SIGINT. Without this, SIGTERM
     # left the agent process running. --interactive: SIGINT (Ctrl-C) cancels
@@ -2828,6 +3373,7 @@ async def run(a, log, err, log_path):
         # would compete for it; acp-run's own Herdr class reads its own os.environ.
         for k in SCRUB_ENV:
             env.pop(k, None)
+        cmd = launch_tweaks(a, cmd, env)
         for attempt in range(1, tries + 1):
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -2946,6 +3492,18 @@ async def run(a, log, err, log_path):
             pass
         elif a.info:
             caps = init.agent_capabilities
+            options = sess.config_options
+            wants = bool(a.model or a.set or getattr(a, "effort", None) or getattr(a, "context", None))
+            if wants:
+                # --info --model M [--set ...] [--effort ..] [--context ..]: apply them (no
+                # prompt) and show the options that result, so a model's effort and context
+                # choices are visible (R1 6.6)
+                sets = dict(DEFAULT_SET.get(a.agent, {}))
+                sets.update(kv.split("=", 1) for kv in a.set)
+                if a.model:
+                    sets["model"] = a.model
+                options = await apply_config(a, conn, sess, init, client, order_sets(sets), applied,
+                                             per_run_data=bool(deny_dir or os.environ.get("ACP_RUN_CRUSH_DATA")))
             info = {
                 "agent": dump(init.agent_info),
                 "auth_methods": dump(init.auth_methods),
@@ -2956,8 +3514,14 @@ async def run(a, log, err, log_path):
                     else None,
                 },
                 "modes": dump(sess.modes),
-                "config_options": dump(sess.config_options),
+                "config_options": dump(options),
             }
+            if models_extra(sess):
+                info["models"] = models_extra(sess)  # hermes, crush-acp: set with --model (session/set_model)
+            if wants:
+                info["applied"] = {k: v for k, v in applied.items() if k in ("model", "effort", "ctx", "unverified")}
+            if getattr(a, "all_models", False):
+                info["per_model"] = await all_models_options(conn, sess, options)
             print(json.dumps(info, indent=1))
             print(
                 "acp-run: capabilities loadSession="
@@ -2979,7 +3543,7 @@ async def run(a, log, err, log_path):
             if a.model:
                 sets["model"] = a.model
             sets = order_sets(sets)
-            if a.resume and not sess.config_options and sets:
+            if a.resume and not sess.config_options and (sets or getattr(a, "effort", None) or getattr(a, "context", None)):
                 client.rec("config_skipped", {"sets": sets})
                 print(
                     f"acp-run: resumed session offers no config options;"
@@ -2987,29 +3551,12 @@ async def run(a, log, err, log_path):
                     file=sys.stderr,
                 )
                 sets = {}
-            options = sess.config_options
-            for key, want in sets.items():
-                if key == "mode" and not has_config(options, "mode"):
-                    # refined-antigravity-acp offers its modes (yolo, default)
-                    # only as ACP session modes, not as a config option
-                    mode_ids = [
-                        m.get("id")
-                        for m in (dump(sess.modes) or {}).get("availableModes", [])
-                    ]
-                    if want in mode_ids:
-                        await conn.set_session_mode(
-                            session_id=sess.session_id, mode_id=want
-                        )
-                        client.rec("set_mode", {"id": want})
-                        continue
-                cid, val = pick_config(options, want, key)
-                resp = await conn.set_config_option(
-                    config_id=cid, session_id=sess.session_id, value=val
-                )
-                # the response carries the updated options (a provider switch
-                # changes the model list)
-                options = getattr(resp, "config_options", None) or options
-                client.rec("set_config", {"id": cid, "value": val})
+                if getattr(a, "effort", None) or getattr(a, "context", None):
+                    usage_exit("--effort/--context: the resumed session offers no config options")
+            await apply_config(a, conn, sess, init, client, sets, applied,
+                               per_run_data=bool(deny_dir or os.environ.get("ACP_RUN_CRUSH_DATA")))
+            if applied:
+                client.rec("applied", applied)
             if a.interactive:
                 herdr = Herdr(a.agent)
                 herdr.session_id = sess.session_id
@@ -3048,6 +3595,10 @@ async def run(a, log, err, log_path):
         code = 128 + got["sig"]
     except SystemExit:
         raise
+    except ConfigError as e:
+        # a requested model/effort/context was not applied: nothing was prompted
+        out["error"] = str(e)[:500]
+        failure = ("config", f"{FAILURE_TEXT['config']}: {out['error']}")
     except Exception as e:  # noqa: BLE001 - any agent failure becomes a summary line + exit 1
         failure = failure or (client.last_failure if client else None)
         out["error"] = error_text(e)[:500]
@@ -3087,6 +3638,8 @@ async def run(a, log, err, log_path):
         return code
     if client.usage:
         out["usage_update"] = client.usage
+    if repl is not None and applied:
+        post_turn(a, applied, client.usage)
     label = None
     if repl is not None:
         for k, v in repl.last_out.items():  # the last turn's stop reason etc.
@@ -3101,12 +3654,20 @@ async def run(a, log, err, log_path):
             text = client.task_summary  # copilot task_complete summary (see RunClient)
             out["text_source"] = "task_complete"
         code, label = verdict(a, out, finished, failure, code, client)
+        bad = post_turn(a, applied, client.usage) if client.prompt_task is not None else None
+        if bad and not failure:
+            # the window the agent reports after the turn is not the one asked for
+            out["error"], out["failure"], label = bad, "config", "config"
+            if code == 0:
+                code = 1
         out["turns"] = 1 if client.prompt_task is not None else 0
         if out["turns"]:
             row = {"n": 1, "stop_reason": out.get("stop_reason", "error")}
             row.update(seconds=out["seconds"], exit=code)
             client.rec("turn", row)
     out.update(tool_calls=tools, permissions={"allowed": allowed, "denied": denied})
+    if applied:
+        out["applied"] = {k: v for k, v in applied.items() if k in ("model", "effort", "ctx", "ctx_source", "unverified")}
     out["exit"] = code
     if getattr(a, "verify", None) and "verify" not in out:
         out["verify"] = "fail"
@@ -3153,8 +3714,21 @@ async def run(a, log, err, log_path):
             bits.append(f"error={out['error']!r}")
         if "warning" in out:
             bits.append(f"warning={out['warning']!r}")
+        if applied_line(applied):
+            print("acp-run: applied: " + applied_line(applied), file=sys.stderr)
         print("acp-run: " + " ".join(bits) + f" log={log_path}", file=sys.stderr)
     return code
+
+
+def meta_arg(s):
+    """argparse type of --meta: a JSON object."""
+    try:
+        v = json.loads(s)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"not JSON: {e}") from None
+    if not isinstance(v, dict):
+        raise argparse.ArgumentTypeError("must be a JSON object")
+    return v
 
 
 def env_float(name):
@@ -3231,6 +3805,47 @@ def main():
         default=[],
         metavar="ID=VALUE",
         help="set an ACP session config option (see --info); repeatable",
+    )
+    ap.add_argument(
+        "--effort",
+        type=effort_arg,
+        metavar="LEVEL",
+        help="reasoning effort (none, minimal, low, medium, high, xhigh, max, ultra, default), set"
+        " through the agent's own knob after the model and read back; exit 2 naming the valid"
+        " values when the agent or model cannot take it",
+    )
+    ap.add_argument(
+        "--context",
+        type=context_arg,
+        metavar="SIZE",
+        help="context window (200k, 256k, 272k, 400k, 500k, 1m or a token count); exit 2 when the"
+        " agent or model cannot take it (see the README table)",
+    )
+    ap.add_argument(
+        "--meta",
+        type=meta_arg,
+        metavar="JSON",
+        help="a JSON object merged into session/new _meta (over systemPrompt and the deny meta)",
+    )
+    ap.add_argument(
+        "--agent-arg",
+        action="append",
+        default=[],
+        metavar="ARG",
+        help="extra argument appended to the agent's launch command (repeatable; env"
+        " ACP_RUN_ARGS_<AGENT> is split like a shell line)",
+    )
+    ap.add_argument(
+        "--agent-env",
+        action="append",
+        default=[],
+        metavar="K=V[,K=V]",
+        help="extra environment for the agent process (repeatable; env ACP_RUN_ENV_<AGENT>)",
+    )
+    ap.add_argument(
+        "--all-models",
+        action="store_true",
+        help="with --info: switch to every model (no prompt) and list the options each one offers",
     )
     ap.add_argument("--timeout", type=float, default=1800, help="seconds per turn; 0 means no deadline")
     ap.add_argument(
@@ -3374,6 +3989,9 @@ def main():
         a.perm = "all"
     if (a.inbox or a.show_thinking) and not a.interactive:
         ap.error("--inbox and --show-thinking need --interactive")
+    if a.all_models and not a.info:
+        ap.error("--all-models needs --info")
+    check_static(a)
     if a.prompt_retries < 0:
         ap.error("--prompt-retries must be 0 or more")
     if a.handshake_timeout is not None and a.handshake_timeout <= 0:
