@@ -111,7 +111,11 @@ report, in the shape the delivery contract describes, in your final message inst
 path and marks it done for you. This overrides items 1, 2 and 7 of the delivery contract.
 """
 STATE_ROOT = Path(os.environ.get("ACP_DISPATCH_STATE", str(Path.home() / ".local/state/bigteam")))
-DEFAULT_LEAD = "team-lead"
+# SendMessage address of the parent. An Agent-tool sub-agent reaches its main session as "main";
+# "team-lead" lands in ~/.claude/teams/session-<sid>/inboxes/team-lead.json, which a session that
+# is not running an agent team never reads (2026-10-15: 9 report chunks sat unread; probe: "main"
+# arrived at once, the session's own peer name is refused). Use --lead team-lead inside a team.
+DEFAULT_LEAD = "main"
 DEFAULT_TIMEOUT = 2400           # bigteam Step 4 item 5: a tight timeout costs the whole report
 # acp-run --wrapup-grace: after the timeout cancel, one last prompt of this many seconds to write the
 # report (2026-10-10: stlib had its work verified, then hung in a git commit whose pre-commit Gradle hook
