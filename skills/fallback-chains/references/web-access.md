@@ -256,8 +256,10 @@ authoritative; this is its contract as of 2026-10-11.
    `latest: no capture (HTTP 404: page 'Wayback Machine'); CDX: no 200
    capture: not archived`.
 
-Firecrawl is not on the shell ladder: there is no API key on the machine, only
-the claude.ai connector.
+Firecrawl is not on the `web-get` ladder. Since 2026-10-14 every MCP client has the
+shared self-hosted `firecrawl` server (4h); the commercial fallback is the
+claude.ai connector (OAuth); the commercial API key (`FIRECRAWL_API_KEY`, 5.5) is
+used only by `bench/firecrawl/fc-bench`.
 
 ## 3. Per-client ladder
 
@@ -266,11 +268,11 @@ a page that is clearly not the content (login wall, bot check, cookie page).
 
 | Client | Search rungs | Fetch rungs | Config |
 |---|---|---|---|
-| 3a. Claude Code | `exa` `web_search_exa`; `parallel-search` `web_search`; `jina` `search_web`; built-in WebSearch; Firecrawl connector `firecrawl_search` (low credits, billed: 6.1); Composio search toolkit; `web-get search` | `exa` `web_fetch_exa`; `parallel-search` `web_fetch`; `jina` `read_url`; built-in WebFetch; `crawl4ai` `scrape {targets}` (JavaScript); Firecrawl `firecrawl_scrape` (6.1); Composio `FETCH_URL_CONTENT`; `web-get fetch` | `~/.claude.json` (user scope; `jina` uses a `headersHelper`) |
-| 3b. Codex | built-in web search; `exa`; `parallel-search`; `jina`; `web-get search` | `exa`; `parallel-search`; `jina` `read_url`; `crawl4ai` `scrape {targets}`; `web-get fetch` | `~/.codex/config.toml` (`jina` uses `http_headers_helper`; `crawl4ai` has `startup_timeout_sec = 120`) |
-| 3c. opencode | `exa`; `parallel-search`; `jina`; `web-get search` | same servers' fetch tools; `crawl4ai` `scrape {targets}`; `web-get fetch` | `~/.config/opencode/opencode.json` |
-| 3d. Cursor | `exa`; `parallel-search`; `jina`; `web-get search` | same servers' fetch tools; `crawl4ai` `scrape {targets}`; `web-get fetch` | `~/.cursor/mcp.json`; each server also needs a per-project approval, keyed to a hash of its config, so changing a server's entry voids it and needs a fresh `cursor-agent mcp enable <name>` (2026-10-12) (`cursor-agent mcp enable <name>`, 6.4) |
-| 3e. agy (only via `acp-run agy`) | `exa`; `parallel-search`; `jina`; `web-get search` | same servers' fetch tools; `crawl4ai` `scrape {targets}`; `web-get fetch` | `~/.gemini/config/mcp_config.json` |
+| 3a. Claude Code | `exa` `web_search_exa`; `parallel-search` `web_search`; `jina` `search_web`; built-in WebSearch; shared `firecrawl` `firecrawl_search` (self-hosted, 4h); Firecrawl connector `firecrawl_search` (commercial, billed: 6.1); Composio search toolkit; `web-get search` | `exa` `web_fetch_exa`; `parallel-search` `web_fetch`; `jina` `read_url`; built-in WebFetch; `crawl4ai` `scrape {targets}` (JavaScript); shared `firecrawl` `firecrawl_scrape` (self-hosted, JavaScript, 4h); Firecrawl connector `firecrawl_scrape` (commercial: Cloudflare-guarded pages, 6.1); Composio `FETCH_URL_CONTENT`; `web-get fetch` | `~/.claude.json` (user scope; `jina` uses a `headersHelper`) |
+| 3b. Codex | built-in web search; `exa`; `parallel-search`; `jina`; `firecrawl`; `web-get search` | `exa`; `parallel-search`; `jina` `read_url`; `crawl4ai` `scrape {targets}`; `firecrawl` `firecrawl_scrape`; `web-get fetch` | `~/.codex/config.toml` (`jina` uses `http_headers_helper`; `crawl4ai` has `startup_timeout_sec = 120`) |
+| 3c. opencode | `exa`; `parallel-search`; `jina`; `firecrawl`; `web-get search` | same servers' fetch tools; `crawl4ai` `scrape {targets}`; `firecrawl` `firecrawl_scrape`; `web-get fetch` | `~/.config/opencode/opencode.json` |
+| 3d. Cursor | `exa`; `parallel-search`; `jina`; `firecrawl`; `web-get search` | same servers' fetch tools; `crawl4ai` `scrape {targets}`; `firecrawl` `firecrawl_scrape`; `web-get fetch` | `~/.cursor/mcp.json`; each server also needs a per-project approval, keyed to a hash of its config, so changing a server's entry voids it and needs a fresh `cursor-agent mcp enable <name>` (2026-10-12) (`cursor-agent mcp enable <name>`, 6.4) |
+| 3e. agy (only via `acp-run agy`) | `exa`; `parallel-search`; `jina`; `firecrawl`; `web-get search` | same servers' fetch tools; `crawl4ai` `scrape {targets}`; `firecrawl` `firecrawl_scrape`; `web-get fetch` | `~/.gemini/config/mcp_config.json` |
 | 3f. Hermes | its web plugin: keyed Exa (`web.search_backend: exa`, `provider_tier.exa: paid`, since 2026-10-11; was `ddgs`, whose package was not even installed in the Hermes venv), then keyless Exa, Parallel, Keenable | `jina-reader` extract backend; the `blocked-page-recovery` / `web-research` skill script `recover_page.py` (Jina Reader with the key is its tier 3) | `~/.hermes/config.yaml` `web.search_backend`, `web.extract_backend`; plugin `~/.hermes/plugins/web/jina_reader/` |
 
 3g. Composio search toolkit tools: `WEB`, `DUCK_DUCK_GO`, `EXA_ANSWER`,
@@ -298,7 +300,7 @@ give its date.
 | 4e. Jina Search | `https://s.jina.ai/?q=<query>` | key required (401 without) | GET | |
 | 4f. Crawl4AI | local, `crwl <url> -o markdown` | none | CLI (uv tool, version 0.9.4, Python 3.13) | Renders JavaScript (checked on typesafe.ai and moltbook.com). The package ships no MCP server; see 4g. A cold Chromium start under load takes 30-120 s. |
 | 4g. Crawl4AI MCP | one shared local server over HTTP, `http://127.0.0.1:18798/mcp` (launchd `com.djbclark.crawl4ai-mcp`, site-djbclark `roles/shared_mcp`, since 2026-10-12; was a stdio copy per session). Server name `crawl4ai` in all five clients | none | `scrape {targets}` (a URL or a list of 1-20; `url` is rejected), `crawl`, `close_session`, `get_artifact` | Third-party wrapper `mcp-crawl4ai` 0.3.1: `uv tool install --python 3.13 'mcp-crawl4ai==0.3.1' --with crawl4ai==0.9.4 --with fastmcp==4.0.10 --with mcp==2.2.0 --with playwright==1.63.0`. Reuses the installed Playwright Chromium. First start 26 s, later 1.4-2.7 s. |
-| 4h. Firecrawl | claude.ai connector (OAuth) | connector login | `firecrawl_search`, `firecrawl_scrape`, `firecrawl_research_*` | Claude Code only. Billed per request. |
+| 4h. Firecrawl | (a) self-hosted, shared: `http://127.0.0.1:18804/mcp` (launchd `com.djbclark.firecrawl-mcp`, site-djbclark `roles/shared_mcp`, since 2026-10-14), server name `firecrawl` in all five clients (agy through `mcp-proxy --transport streamablehttp`); backend `https://djbclark-firecrawl.sipb.cloud` on SIPB Hyades. (b) commercial: claude.ai connector (OAuth) | (a) none from the client; the shared server holds `FIRECRAWL_SELFHOST_API_KEY` (5.5). (b) connector login | `firecrawl_scrape`, `firecrawl_search`, `firecrawl_crawl` + `firecrawl_check_crawl_status` (tested on (a) 2026-10-14), `firecrawl_map`; (a) also lists the cloud-only `firecrawl_agent*`, `firecrawl_monitor_*`, `firecrawl_research_*` and `firecrawl_interact*`, which need (b) | (a) `firecrawl-mcp` 3.23.7 over Firecrawl 2.11.519, no rate limit, no credits, renders JavaScript, fetches reddit.com. Fails on Cloudflare challenge pages (Stack Overflow) and `map` reads sitemaps only: use (b) for those. Deploy: `hyades-docker` skill, `examples/firecrawl/`. Comparison: `docs/firecrawl-commercial-vs-selfhosted-2026-10-14.md`. (b) Claude Code only. Billed per request. |
 | 4i. Built-in | Claude Code WebSearch/WebFetch; Codex built-in web search | client login | | |
 | 4j. Composio | `composio` CLI | Composio login | search toolkit (3g) | |
 | 4k. Archives | Wayback Machine, archive.today | none | GET | Recovery only (3i). |
@@ -325,8 +327,11 @@ Names and paths only. Never print or copy a key.
    5.3 (temp file, then `mv -f`, keep 0600), restart Hermes, reconnect the
    MCP servers, run `web-get check`.
 5.5. Parallel and Crawl4AI are keyless. Exa's MCP has a keyless tier (6.7);
-   its REST API needs `EXA_API_KEY` (5.6). Firecrawl has no key on the
-   machine.
+   its REST API needs `EXA_API_KEY` (5.6). Firecrawl (2026-10-14):
+   `sudo-secretspec` entries `FIRECRAWL_SELFHOST_API_KEY` (the bearer token of
+   the self-hosted gate; the shared server gets it at `just
+   shared-mcp-apply-secrets`, into its 0600 plist) and `FIRECRAWL_API_KEY`
+   (commercial free plan; `bench/firecrawl/fc-bench` only).
 5.6. **`EXA_API_KEY` (added 2026-10-11)**, `sudo-secretspec` entry
    `EXA_API_KEY` (name only here; 36 characters). Wiring, verified 2026-10-11
    with values masked:
@@ -369,10 +374,12 @@ Names and paths only. Never print or copy a key.
 
 ## 6. Known limits (2026-10-11)
 
-6.1. Firecrawl: the account is low on credits and rate limited (about 11-16
-   requests a minute, and "Payment Required" errors), so it sits after the
-   free rungs in 3a. Expect it to fail and fall through to the next rung. It
-   is not reachable from a shell script.
+6.1. Firecrawl commercial: the free plan allows about 10 requests a minute (5
+   parallel requests all got 429 on 2026-10-14) and 1000 credits a month, so
+   it sits after the free rungs in 3a. Expect it to fail and fall through to
+   the next rung. The self-hosted shared server (4h) has neither limit but
+   depends on SIPB Hyades being up, and fetches from MIT's address space:
+   keep crawls modest.
 6.2. Jina: the key is a free trial key not attached to an account. It may run
    out or expire; a 401 or 402 from Jina means rotate (section 5).
 6.3. opencode (v2.0.26): the earlier "No MCP servers configured" from
@@ -437,7 +444,9 @@ Names and paths only. Never print or copy a key.
    Unrelated and older: its Signal adapter fails because signal-cli at
    127.0.0.1:18765 is unreachable.
 6.6. reddit.com refused both WebFetch and Firecrawl scrape on 2026-10-09. Try
-   Jina Reader, Crawl4AI and the archives before pausing.
+   Jina Reader, Crawl4AI and the archives before pausing. Since 2026-10-14 the
+   self-hosted `firecrawl_scrape` (4h) fetches it (the commercial API still
+   refuses: "we do not support this site").
 6.7. Exa's keyless tier rate-limits (twice on 2026-10-11). Its notice arrives
    as normal content; `web-get` treats it as a failed rung, and an MCP client
    should do the same and move on. Since 2026-10-11 `web-get` uses the keyed
