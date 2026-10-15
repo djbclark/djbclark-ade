@@ -3,39 +3,6 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
-## Hyades SearXNG: turn on Grokipedia (operator, 2026-10-14)
-
-**Status 2026-10-14 22:25: built, not deployed.** `firecrawl-searxng:...-r2` is pushed
-and `deploy` defaults to it, but every Hyades console call (`deploy apply`, `stop`,
-`start`, `status`) then failed with "Could not enable linger: No such device or
-address" and "Failed to connect to user scope bus": new SSH logins get no systemd user
-session, a host-side fault (the running microVMs kept serving); reported as SIPB/hyades#11. Remaining: `./deploy
-apply`, stop/start `djbclark-fc-searxng`, then the checks below. Until then `-r1` runs.
-Operator, 2026-10-14: if the fault turns out to be transient (a retry works), teach
-`skills/hyades-docker/scripts/hyades` to wait 3 minutes and retry once on these two errors
-before reporting a problem.
-
-Queued by the operator. In `skills/hyades-docker/examples/firecrawl/build-searxng-image`,
-add `- name: grokipedia` with `disabled: false` and `inactive: false` to the settings
-layer's `engines:` list (SearXNG ships it as both), bump `REV` to `r2`, build, update
-`SX_IMAGE` in `deploy`, `./deploy apply`, restart `djbclark-fc-searxng`, and check
-`web-get search --only firecrawl '!gp <topic>'` plus a plain query. It is a general
-engine, so every Firecrawl search would then ask it. It uses Grokipedia's
-undocumented `api/full-text-search` endpoint (no key, no published limits; it answered
-200 on 2026-10-14).
-
-In the same rebuild, enable these for `!shortcut` use only (operator, 2026-10-14). Each
-is `disabled: true` in SearXNG's defaults and none is in the `general` category, so
-plain Firecrawl searches never reach them; add them with `disabled: false`:
-1. Development: `hackernews` (`!hn`), `npm`, `crates.io` (`!crates`), `lib.rs` (`!lrs`),
-   `pkg.go.dev` (`!pgo`), `huggingface` (`!hf`), `codeberg` (`!cb`), `gitlab` (`!gl`).
-2. Papers: `openalex` (`!oa`) with `mailto:` set for OpenAlex's polite pool, and
-   `crossref` (`!cr`). Take the address from `git config user.email` at build time so it
-   stays out of this public repo. SearXNG's crossref engine has no contact setting, so it
-   stays in Crossref's anonymous pool.
-3. Other: `nixos wiki` (`!nixw`), `lobste.rs` (`!lo`).
-Then add the new shortcuts to the list in `skills/fallback-chains/references/web-access.md`.
-
 ## self-slash cannot drive omp (found 2026-10-13, needs an operator decision)
 
 `bin/self-slash "/quit"` from an omp session in herdr pane w34:p2 queued, waited, and gave

@@ -88,6 +88,10 @@ owner fails); env var names `[a-zA-Z0-9_]+`; no newlines in paths or values.
    no logind session. `list`, `getconf`, `df`, `logs` still work and running microVMs keep
    serving. `setconf` still saves `hyades.json` but its `daemon-reload` fails, so the saved
    config and the loaded units differ until a later reload. Retrying from here does not help.
+   Cleared on the host by 2026-10-14 23:20 EDT. SIPB's @xy has seen it occasionally before
+   (journal: `pam_systemd(sshd:session): Varlink call io.systemd.Login.CreateSession failed`)
+   and suspects a logind bug or Hyades' `hidepid=4` hardening; if it recurs, add a note to
+   #11's body (two-tier rule 4) rather than filing a new issue.
 
 Tracker: https://forgejo.mit.edu/SIPB/hyades/issues (security issues to
 sipb-hyades-root@mit.edu instead). #2, #3 and #4 are the CI-runner issues (see the
