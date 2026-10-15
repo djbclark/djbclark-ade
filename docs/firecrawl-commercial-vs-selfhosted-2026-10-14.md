@@ -100,6 +100,10 @@ microVM plus `SEARXNG_ENDPOINT`), worth adding if search starts failing.
    stay out of the shared host's process list, and drops blank lines (the console repeats
    the previous command on an empty line); the `tmprun` stdin pitfalls (commands eat the
    script, 4 KB line limit) are written down.
+4. Filed upstream: firecrawl/firecrawl#5135 (`SSRF_PROXY_PORT`, so problem 1 needs no
+   shim), a repro comment on libkrun/libkrunfw#140, SIPB/hyades#9 (problem 2), #10 (PR:
+   the console ignores empty lines) and in-place updates to SIPB/hyades#5 (`tmprun` pty)
+   and #8 (an oops also orphans `tmprun`).
 
 ## Recommendation in detail
 

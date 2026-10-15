@@ -1,0 +1,1 @@
+playwright-service: optional SSRF_PROXY_PORT for the SSRF proxy

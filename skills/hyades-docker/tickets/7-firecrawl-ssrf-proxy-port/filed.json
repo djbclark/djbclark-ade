@@ -1,0 +1,6 @@
+{
+  "upstream": "https://github.com/firecrawl/firecrawl/pull/5135",
+  "branch": "djbclark/firecrawl:playwright-ssrf-proxy-port",
+  "commit": "79ae376",
+  "dry_run": false
+}

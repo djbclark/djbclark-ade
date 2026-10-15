@@ -1,5 +1,6 @@
 {
   "upstream": "https://forgejo.mit.edu/SIPB/hyades/issues/9",
   "ai_detail": "https://forgejo.mit.edu/djbclark/hyades/issues/8",
-  "dry_run": false
+  "dry_run": false,
+  "upstream_comment": "https://github.com/libkrun/libkrunfw/issues/140#issuecomment-6182072849"
 }

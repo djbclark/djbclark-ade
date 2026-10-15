@@ -1,3 +1,7 @@
+**Upstream issue:** https://forgejo.mit.edu/SIPB/hyades/issues/8
+
+> This is the full technical report, written for AI coding agents (verbose by design). The short human-readable version lives upstream. Prepared with an AI coding assistant; results reviewed by @djbclark.
+
 ## Summary
 
 A `tmprun` microVM (`podman run --rm -it ...`) outlives the SSH session that
@@ -42,6 +46,19 @@ It works because `do_stop` passes its argument unvalidated to
 lack of `check_name` in start/stop/restart/kill/status/logs is probably fine
 security-wise, since it is the user's own systemd instance, but worth knowing.)
 
+## Update 2026-10-14 (evening): a guest kernel oops orphans it too
+
+Second trigger, with the SSH client alive: the guest kernel oops of SIPB/hyades#9
+(`getsockopt(SOL_IP, IP_TOS)` on a TSI UDP socket; libkrunfw#140). In
+`tmprun docker.io/library/python:3-alpine` the oops killed `python3`
+("note: python3[496] exited with irqs disabled"), but the microVM never exited:
+`tmprun` did not return, and after the local client was stopped by `timeout`
+the container stayed `running` in `df`. Three such orphans were stopped with
+`stop libpod-<id>*` during that investigation (in stdin mode the console takes
+quotes literally, so the argument goes unquoted). A unit tied to the SSH session
+would not help this case; a `ps`/`tmpstop` command (or a run-time limit for
+`tmprun`) would.
+
 ## Probable cause
 
 With no TTY (or after the TTY's controlling process dies), sshd closes the
@@ -76,9 +93,11 @@ Easy to hit with scripted use (`ssh hyades tmprun IMAGE < script` with a
 timeout, or a dropped Wi-Fi connection during an interactive `tmprun ubuntu`).
 Orphans consume vCPU/RAM quota and keep volumes mounted read-write.
 
+
 ## Duplicate search (2026-10-14, after filing)
 
 Searched for existing reports of this and the sibling console bugs:
 1. SIPB/hyades and SIPB/hyades-action issues, all states: only SIPB/hyades #1 (closed, unrelated Ctrl+D request) and our own #2-#8.
 2. containers/crun GitHub issues for "krun chown", "open_terminal chown", "exec tty krun permission denied": no hits.
 3. github.com/sipb/crun has issues disabled. Upstream containers/crun's `handlers/krun.c` has no exec path at all (sipb/crun main is 5 commits ahead of containers/crun main), so the exec/pty bug is SIPB-specific and SIPB/hyades is the right tracker.
+

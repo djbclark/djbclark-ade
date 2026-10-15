@@ -1,3 +1,7 @@
+**Upstream issue:** https://forgejo.mit.edu/SIPB/hyades/issues/5
+
+> This is the full technical report, written for AI coding agents (verbose by design). The short human-readable version lives upstream. Prepared with an AI coding assistant; results reviewed by @djbclark.
+
 ## Summary
 
 Hyades console `exec NAME CMD` (`podman exec -it NAME -- CMD`) fails before the
@@ -89,9 +93,28 @@ full Linux distro"). Many Docker Hub images set a non-root `USER`, so this block
 it for them. Workaround today: `tmprun IMAGE` with a script on stdin (all
 volumes are mounted under `/mnt`).
 
+## Update 2026-10-14 (evening): `tmprun` with piped stdin has the same root
+
+`do_tmprun` runs `podman run --rm -it ...` unconditionally (console.py line ~377),
+so a script piped into `ssh hyades tmprun IMAGE` is typed into an interactive
+shell on a pty rather than read from a pipe. Observed while building an image
+with a `tmprun debian:bookworm` script:
+
+1. A 15 KB base64 line was cut at the terminal's canonical-mode line limit
+   (4095 bytes), leaving an open quote; the shell then waited forever.
+2. `apt-get install` (debconf) read the following script lines from the
+   terminal as answers, so the rest of the script never ran. Workaround:
+   `</dev/null` on every stdin-reading command and `DEBIAN_FRONTEND=noninteractive`.
+3. Output has CRLF line ends, echoed input and ANSI escapes, so extracted data
+   (a base64 payload) must have `\r` and `\x1b[...` stripped first.
+
+Passing `-t` only when the SSH session has a TTY (`sys.stdin.isatty()`), for
+both `exec` and `tmprun`, would fix this and the `chown` failure above.
+
 ## Related
 
 A separate issue covers `exec NAME CMD` passing CMD as a single argv element.
+
 
 ## Duplicate search (2026-10-14, after filing)
 
@@ -99,3 +122,4 @@ Searched for existing reports of this and the sibling console bugs:
 1. SIPB/hyades and SIPB/hyades-action issues, all states: only SIPB/hyades #1 (closed, unrelated Ctrl+D request) and our own #2-#8.
 2. containers/crun GitHub issues for "krun chown", "open_terminal chown", "exec tty krun permission denied": no hits.
 3. github.com/sipb/crun has issues disabled. Upstream containers/crun's `handlers/krun.c` has no exec path at all (sipb/crun main is 5 commits ahead of containers/crun main), so the exec/pty bug is SIPB-specific and SIPB/hyades is the right tracker.
+

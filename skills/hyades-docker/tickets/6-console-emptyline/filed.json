@@ -1,0 +1,6 @@
+{
+  "upstream": "https://forgejo.mit.edu/SIPB/hyades/pulls/10",
+  "branch": "djbclark/hyades:console-ignore-empty-line",
+  "commit": "26a6700",
+  "dry_run": false
+}
