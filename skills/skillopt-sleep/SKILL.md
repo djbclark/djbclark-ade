@@ -24,7 +24,7 @@ changes a live skill until someone adopts it. Full guide:
 
 ```sh
 skillopt-sleep status --project ~/src/djbclark-ade        # night, staged skills, latest staging dir
-tail -n 8 ~/.local/state/skillopt-sleep/nights.jsonl      # one line per source run: rc, tasks, gate, proposals
+gtail -n 8 ~/.local/state/skillopt-sleep/nights.jsonl      # one line per source run: rc, tasks, gate, proposals
 ```
 
 `status` prints `latest_staging`; read `<that dir>/report.md` first (the
@@ -89,7 +89,7 @@ it fails, state is restored and the night reruns on the next entry.
 
 ```sh
 ~/src/djbclark-ade/bin/skillopt-night chain-check     # preflight table: pool, floor, perm, ready, why
-tail -n 20 ~/.local/state/skillopt-sleep/attempts.jsonl   # what each entry did and why it was skipped
+gtail -n 20 ~/.local/state/skillopt-sleep/attempts.jsonl   # what each entry did and why it was skipped
 ```
 
 Policy (operator-approved chain, 2026-10-12): opencode (Go: minimax-m3), agy

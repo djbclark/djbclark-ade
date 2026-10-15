@@ -534,7 +534,7 @@ detached job follows the same contract (2026-10-08).
 
    `owner` is the id of the Claude session that launched it. Claude Code sets
    `CLAUDE_CODE_SESSION_ID` in every Bash call (checked 2026-10-08 with
-   `env | grep -i session`; there is no `CLAUDE_SESSION_ID`). Use
+   `env | ggrep -i session`; there is no `CLAUDE_SESSION_ID`). Use
    `${CLAUDE_CODE_SESSION_ID:-unknown}`. `rearm` is the exact bounded waiter
    with absolute paths inlined. A record is **open** until it carries a
    `"closed": <epoch>` key; `/handoff` lists open records of its session and

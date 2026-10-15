@@ -57,7 +57,7 @@ items, or if it would make more sense, deal with them before the handoff".)
 
 ## Step 1 — Gather external state (parallel Bash, never agents)
 
-`git log --oneline -15`, `git diff --stat`, `git status -s | head -30`,
+`git log --oneline -15`, `git diff --stat`, `git status -s | ghead -30`,
 `git branch --show-current`, `git rev-parse HEAD`; Beads state if
 available and this is an ops-djbclark-suite repo (`bd list
 --status=in_progress`) — skip this bullet entirely for other projects

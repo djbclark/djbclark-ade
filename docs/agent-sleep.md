@@ -10,7 +10,7 @@ with **6.5 of 8 GB swap in use** and ~6.9 GB in the compressor.
 `orca diagnostics memory` reported `hostUsed: 10 GB / 16 GB`. Fourteen of the
 fifteen lived in Herdr panes (`herdr agent list`), most idle 5–6 hours.
 
-Probes: `ps -eo rss,comm | awk '$2 ~ /claude/ {s+=$1;n++} END {print n, s/1024/1024 " GB"}'`,
+Probes: `ps -eo rss,comm | gawk '$2 ~ /claude/ {s+=$1;n++} END {print n, s/1024/1024 " GB"}'`,
 `sysctl vm.swapusage`, `orca diagnostics memory --json`.
 
 ## Orca: Agent hibernation (built in, GUI)

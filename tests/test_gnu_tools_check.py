@@ -58,6 +58,32 @@ class ScanText(unittest.TestCase):
         self.assertEqual(found('env A=1 python3 x --host h\nmkdir -p -- --odd\nrm -f x\n'), [])
 
 
+def found_md(text):
+    return found(gtc.markdown_shell(text))
+
+
+class Markdown(unittest.TestCase):
+    def test_fenced_shell_blocks_keep_line_numbers(self):
+        text = "intro\n```bash\nls\ntail -n 8 f\n```\n```python\nsort(x)\n```\n```\nsed p\n```\n"
+        self.assertEqual(found_md(text), [(4, "tail")])
+
+    def test_console_block_counts_prompt_lines_only(self):
+        text = "```console\n$ grep x f\nsort of output\n% wc -l f\n```\n"
+        self.assertEqual(found_md(text), [(2, "grep"), (4, "wc")])
+
+    def test_inline_pipeline_is_a_call_but_a_named_tool_is_not(self):
+        text = "Run `git status -s | head -30` now.\nBSD `sed -i ''` differs; use `gsed`.\n"
+        self.assertEqual(found_md(text), [(1, "head")])
+
+    def test_inline_escaped_pipe_and_templates(self):
+        text = "| `opencode models \\| grep ^x` |\n`.action{ now | date \"2006\" }`\n`{{ x | sort }}`\n"
+        self.assertEqual(found_md(text), [(1, "grep")])
+
+    def test_ignore_marker_and_unbalanced_quotes(self):
+        text = "`a | sort` <!-- gnu-tools-check: ignore -->\n`it's | wc`\n`x | uniq`\n"
+        self.assertEqual(found_md(text), [(3, "uniq")])
+
+
 class Main(unittest.TestCase):
     def run_main(self, *args):
         out = io.StringIO()

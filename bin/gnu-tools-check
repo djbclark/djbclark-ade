@@ -3,8 +3,9 @@
 
 Usage: gnu-tools-check [--exclude GLOB]... [PATH...]   (default PATH: .)
 
-Scans shell code only (*.sh, *.bash, *.zsh, *.sh.j2, justfiles, *.just, and files
-with a sh/bash/zsh shebang) and reports, at command position:
+Scans shell code only (*.sh, *.bash, *.zsh, *.sh.j2, justfiles, *.just, files with
+a sh/bash/zsh shebang, and in *.md the fenced bash/sh/shell/zsh/console blocks and
+inline code spans that hold a pipeline) and reports, at command position:
 
   1. a bare name of a tool whose BSD and GNU versions differ in ways we have hit
      (sed, awk, grep, tr, date, stat, ...): use the g-prefixed name;
@@ -67,6 +68,58 @@ def is_shell(path: Path) -> bool:
             return bool(_SHEBANG.match(fh.read(128)))
     except OSError:
         return False
+
+
+_FENCE_OPEN = re.compile(r"^\s*(```+|~~~+)\s*(bash|sh|shell|zsh|console)\b")
+
+
+_SPAN = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+_PIPELINE = re.compile(r"[|;&`]|\$\(")
+
+
+def inline_pipelines(line: str) -> str:
+    """Inline code spans that hold a pipeline, each prefixed with a dummy word so a
+    tool named at the start of a span (prose: "`sed -i ''` is BSD") isn't a call."""
+    spans = [s.replace("\\|", "|") for s in _SPAN.findall(line)]
+    keep = [
+        s for s in spans
+        if _PIPELINE.search(s) and "{{" not in s and ".action{" not in s
+        and s.count("'") % 2 == 0 and s.count('"') % 2 == 0
+    ]
+    return " ; ".join("x " + s for s in keep)
+
+
+def markdown_shell(text: str) -> str:
+    """The shell code of a Markdown file: fenced shell blocks, and inline code spans
+    that hold a pipeline. Other lines are blank, so line numbers still match. In a
+    console block only "$ " / "% " prompt lines count."""
+    out, fence, console = [], None, False
+    for line in text.splitlines():
+        if IGNORE_LINE in line:
+            out.append("")
+        elif fence is None:
+            m = _FENCE_OPEN.match(line)
+            if m:
+                fence, console = m.group(1), m.group(2) == "console"
+                out.append("")
+            elif line.lstrip().startswith(("```", "~~~")):
+                fence, console = "NOSHELL" + line.strip()[:3], False
+                out.append("")
+            else:
+                out.append(inline_pipelines(line))
+        elif fence.startswith("NOSHELL"):
+            if line.strip().startswith(fence[7:]):
+                fence = None
+            out.append("")
+        elif line.strip().startswith(fence):
+            fence = None
+            out.append("")
+        elif console:
+            s = line.lstrip()
+            out.append(s[2:] if s.startswith(("$ ", "% ")) else "")
+        else:
+            out.append(line)
+    return "\n".join(out) + "\n"
 
 
 def excluded(path: str, globs) -> bool:
@@ -250,12 +303,17 @@ def main(argv=None) -> int:
             return 2
         globs = DEFAULT_EXCLUDES + args.exclude + load_ignore(root)
         for path in iter_files(root, globs):
-            if not is_shell(path):
+            is_md = path.suffix.lower() == ".md"
+            if not is_md and not is_shell(path):
                 continue
             try:
                 text = path.read_text(errors="replace")
             except OSError:
                 continue
+            if is_md:
+                if any(PORTABLE in ln for ln in text.splitlines()[:20]):
+                    continue
+                text = markdown_shell(text)
             for no, _tool, msg in scan_text(text):
                 print(f"{path}:{no}: {msg}")
                 findings += 1

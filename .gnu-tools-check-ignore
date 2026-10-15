@@ -1,0 +1,8 @@
+# Files that keep bare BSD/POSIX tool names on purpose (bin/gnu-tools-check).
+
+# Historical session handoffs: records, not instructions
+docs/handoffs/*
+# Run on a fresh machine, before brew's GNU tools are installed
+docs/apply-toolchain-prompt.md
+# Shows the old find/grep habits it replaces
+skills/setup-modern-cli/*

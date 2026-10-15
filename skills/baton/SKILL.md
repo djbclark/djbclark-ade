@@ -53,7 +53,7 @@ under the task directory the Tier 1 pointer names; never adopt a record whose
    on its record yourself.
 
 If a waiter times out (it is bounded) with no `.done`, check the detached job
-is still alive (`launchctl list | grep <label>`) before re-arming once more or
+is still alive (`launchctl list | ggrep <label>`) before re-arming once more or
 reporting it lost.
 
 `/resume` is the same thing under its older name (the `resume` skill was
