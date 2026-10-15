@@ -7,7 +7,8 @@
 
 Common flags: --only <p[,p]>, --skip <p[,p]>, --timeout <s per provider> (default 45, a
 wall-clock limit on each attempt), --crwl-timeout <s> (crawl4ai's own budget, default
-max(150, --timeout) or $WEB_GET_CRWL_TIMEOUT: a cold Chromium start under load takes 30-120 s),
+max(150, --timeout) or $WEB_GET_CRWL_TIMEOUT: a cold Chromium start under load takes 30-120 s;
+firecrawl-mcp gets the same budget),
 --wayback-timeout <s> (the wayback rung's own budget, default max(120, --timeout) or
 $WEB_GET_WAYBACK_TIMEOUT: a missed latest capture plus a CDX lookup and a re-read take 15-60 s),
 --pdf-timeout <s> (the pdf rung's download + extract budget, default max(120, --timeout) or
@@ -25,9 +26,11 @@ Ladders (first provider that returns usable content wins):
           (web_fetch_exa, 200000-character cap) -> parallel (web_fetch, full_content)
           -> jina-reader (r.jina.ai, key if available, else keyless) -> pdf (PDF URLs only:
           curl into a fresh temp dir, then pdftotext) -> crawl4ai (crwl, renders JavaScript;
-          skips PDFs) -> wayback (newest Wayback Machine capture, read raw (id_) from
+          skips PDFs) -> firecrawl-mcp (the shared Firecrawl MCP server's firecrawl_scrape:
+          self-hosted, retried by firecrawl-router on the commercial API for bot walls) -> wayback (newest Wayback Machine capture, read raw (id_) from
           web.archive.org; CDX API if missing; r.jina.ai only with a Jina key)
-"exa" in --only/--skip means both exa-* rungs, "jina" every jina-* rung. With no Exa key the
+"exa" in --only/--skip means both exa-* rungs, "jina" every jina-* rung, "firecrawl" both
+firecrawl rungs. With no Exa key the
 exa-api rung fails at once ("no Exa key") and the keyless MCP answers; provenance and --json
 name the rung that served the page (provider=exa-api or provider=exa-mcp).
 
@@ -92,7 +95,7 @@ Child processes (curl, pdftotext, pypdf, crwl, composio) never inherit either ke
 environment. WEB_GET_NO_SECRETSPEC=1 skips the vault and uses the keyless routes (r.jina.ai and
 the Exa MCP only). A Jina key that r.jina.ai rejects (401/403) is retried once keyless.
 
-Test hooks (env): WEB_GET_FIRECRAWL_URL, WEB_GET_EXA_API_URL, WEB_GET_EXA_URL, WEB_GET_PARALLEL_URL,
+Test hooks (env): WEB_GET_FIRECRAWL_URL, WEB_GET_FIRECRAWL_MCP_URL, WEB_GET_EXA_API_URL, WEB_GET_EXA_URL, WEB_GET_PARALLEL_URL,
 WEB_GET_JINA_MCP_URL, WEB_GET_JINA_READER_URL, WEB_GET_JINA_SEARCH_URL,
 WEB_GET_WAYBACK_WEB_URL (captures and the CDX API), WEB_GET_CRWL, WEB_GET_CRWL_DELAY (s,
 default 3), WEB_GET_CRWL_TIMEOUT, WEB_GET_WAYBACK_TIMEOUT, WEB_GET_PDF_TIMEOUT, WEB_GET_PDF_VIA,
@@ -148,6 +151,9 @@ def env(name: str, default: str) -> str:
 
 def firecrawl_url() -> str:
     return env("WEB_GET_FIRECRAWL_URL", "https://djbclark-firecrawl.sipb.cloud").rstrip("/")
+
+
+def firecrawl_mcp_url() -> str: return env("WEB_GET_FIRECRAWL_MCP_URL", "http://127.0.0.1:18804/mcp")
 
 
 def exa_api_url() -> str: return env("WEB_GET_EXA_API_URL", "https://api.exa.ai").rstrip("/")
@@ -453,6 +459,12 @@ BLOCK_PATTERNS = [
     r"powered and protected by",
     # Cloudflare's per-session throttle page (cochranelibrary.com via crwl, 2026-10-11).
     r"received a high number of requests",
+    # Cloudflare's newer interstitial, then other bot-management vendors' challenge pages:
+    # DataDome, HUMAN (PerimeterX), Imperva Incapsula, Vercel Attack Mode, AWS WAF, F5.
+    r"performing security verification", r"please enable js and disable any ad blocker",
+    r"captcha-delivery\.com", r"press (&|and) hold", r"incapsula incident id",
+    r"request unsuccessful\. incapsula", r"vercel security checkpoint",
+    r"let'?s confirm you are human", r"awswaf", r"the requested url was rejected",
 ]
 BLOCK_RE = re.compile("|".join(BLOCK_PATTERNS), re.I)
 # Rate-limit / quota notices that providers return as ordinary content (Exa's free MCP tier
@@ -1144,6 +1156,33 @@ def fetch_pdf(url: str, dl: Deadline, max_chars: int):
     return check_fetch_content(text), got, {"pdf_pages": pages, "pdf_bytes": size}
 
 
+def fetch_firecrawl_mcp(url: str, dl: Deadline, max_chars: int) -> tuple[str, str]:
+    # The shared server's router scrapes on the self-hosted instance and retries a bot-walled
+    # page (status 202/403/405/429/503, or a challenge body) on the commercial API.
+    texts, _ = MCP(firecrawl_mcp_url(), dl).call("firecrawl_scrape",
+                                                  {"url": url, "formats": ["markdown"]})
+    raw = "\n".join(texts)
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError:
+        doc = {"markdown": raw}
+    if not isinstance(doc, dict):
+        raise ProviderError("firecrawl-mcp: unexpected reply")
+    meta = doc.get("metadata") or {}
+    code = meta.get("statusCode")
+    if isinstance(code, int) and code >= 400:
+        raise ProviderError(f"firecrawl-mcp: page status {code}")
+    body = doc.get("markdown") or ""
+    got = meta.get("url") or meta.get("sourceURL") or url
+    title = meta.get("title") or ""
+    check_page("firecrawl-mcp", url, got, title, body)
+    text = (f"Title: {title}\nURL: {got}\n\n" if title else "") + body
+    text = check_fetch_content(text)
+    if len(body.strip()) < MIN_FETCH_CHARS:
+        raise ProviderError(f"near-empty content ({len(body.strip())} chars)")
+    return text, got
+
+
 def fetch_crawl4ai(url: str, dl: Deadline, max_chars: int) -> tuple[str, str]:
     if (is_pdf_url(url) and url not in _not_pdf) or url in _known_pdf:
         # crwl 0.9.4 dies on a PDF ("'NoneType' object has no attribute 'raw_markdown'").
@@ -1280,7 +1319,7 @@ SEARCH = [("firecrawl", search_firecrawl), ("exa-api", search_exa_api), ("exa-mc
           ("composio", search_composio)]
 FETCH = [("exa-api", fetch_exa_api), ("exa-mcp", fetch_exa_mcp), ("parallel", fetch_parallel),
          ("jina-reader", fetch_jina_reader), ("pdf", fetch_pdf), ("crawl4ai", fetch_crawl4ai),
-         ("wayback", fetch_wayback)]
+         ("firecrawl-mcp", fetch_firecrawl_mcp), ("wayback", fetch_wayback)]
 ALL_NAMES = sorted({n for n, _ in SEARCH + FETCH})
 # A rung's own cap on the body it can return: after a capped copy at least this long, the rung
 # cannot do better, so it is skipped (billing: no exa-mcp call after a capped exa-api reply).
@@ -1297,8 +1336,8 @@ def parse_set(val: str | None) -> set[str]:
     for item in (x.strip().lower() for x in val.split(",")):
         if not item:
             continue
-        if item in ("jina", "exa"):
-            out |= {n for n in ALL_NAMES if n.startswith(item + "-")}
+        if item in ("jina", "exa", "firecrawl"):
+            out |= {n for n in ALL_NAMES if n == item or n.startswith(item + "-")}
         elif item in ("pdftotext",):
             out.add("pdf")
         elif item in ("crwl", "crawl4ai"):
@@ -1306,7 +1345,8 @@ def parse_set(val: str | None) -> set[str]:
         elif item in ALL_NAMES:
             out.add(item)
         else:
-            raise ValueError(f"unknown provider '{item}' (known: {', '.join(ALL_NAMES)}, exa, jina)")
+            raise ValueError(f"unknown provider '{item}' (known: {', '.join(ALL_NAMES)}, exa, jina, "
+                             "firecrawl)")
     return out
 
 
@@ -1339,8 +1379,8 @@ def guarded(seconds: float, thunk):
 def provider_timeout(name: str, timeout: float, crwl_timeout: float,
                      wayback_timeout: float = DEFAULT_WAYBACK_TIMEOUT,
                      pdf_timeout: float = DEFAULT_PDF_TIMEOUT) -> float:
-    return {"crawl4ai": crwl_timeout, "wayback": wayback_timeout, "pdf": pdf_timeout}.get(
-        name, timeout)
+    return {"crawl4ai": crwl_timeout, "firecrawl-mcp": crwl_timeout, "wayback": wayback_timeout,
+            "pdf": pdf_timeout}.get(name, timeout)
 
 
 def run_ladder(ladder, call, timeout: float, verbose: bool,

@@ -14,7 +14,9 @@ Each request goes to the primary (self-hosted). It is retried once on the
 fallback (commercial) when the primary:
   1. cannot be reached or times out;
   2. answers 404 (route not in self-hosted Firecrawl: agent, monitor, ...) or 5xx;
-  3. scrapes a page whose own status is 403, 429 or 503 (bot walls);
+  3. scrapes a bot wall: a page whose own status is 202 or 405 (AWS WAF's challenge and
+     CAPTCHA), 403, 429 or 503, or a short page whose text is a challenge (Cloudflare,
+     Akamai, DataDome, HUMAN/PerimeterX, Imperva, Vercel, AWS WAF, F5);
   4. maps 0 links, or searches 0 results.
 A fallback that also fails returns the primary's answer (or the fallback's,
 when the primary was unreachable). Never the other way round: the fallback's
@@ -55,7 +57,19 @@ from dataclasses import dataclass
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 ABS_API_LINK_RE = re.compile(r"^https?://[^/]+(/v\d+/.*)$")
-BOT_WALL_STATUSES = {403, 429, 503}
+BOT_WALL_STATUSES = {202, 403, 405, 429, 503}
+# Keep in step with BLOCK_PATTERNS in bin/web-get. Matched only on a short page (a challenge
+# interstitial), so an article that mentions "captcha" is not a bot wall.
+BOT_WALL_RE = re.compile("|".join([
+    r"just a moment\.\.\.", r"attention required!? \| cloudflare", r"checking your browser",
+    r"performing security verification", r"enable javascript and cookies to continue",
+    r"verify you are (a )?human", r"you have been blocked", r"received a high number of requests",
+    r"powered and protected by", r"please enable js and disable any ad blocker",
+    r"captcha-delivery\.com", r"press (&|and) hold", r"incapsula incident id",
+    r"request unsuccessful\. incapsula", r"vercel security checkpoint",
+    r"let'?s confirm you are human", r"awswaf", r"the requested url was rejected",
+]), re.I)
+BOT_WALL_MAX_CHARS = 5000
 HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
     "trailers", "transfer-encoding", "upgrade", "host", "content-length",
@@ -118,6 +132,11 @@ def fallback_reason(path: str, reply: Reply) -> str:
         code = (data.get("metadata") or {}).get("statusCode")
         if code in BOT_WALL_STATUSES:
             return f"page status {code}"
+        md = data.get("markdown")
+        if isinstance(md, str) and len(md) < BOT_WALL_MAX_CHARS:
+            m = BOT_WALL_RE.search(md)
+            if m:
+                return f"challenge page ({m.group(0)!r})"
     if route.endswith("/map"):
         links = doc.get("links") if "links" in doc else (data or {}).get("links") if isinstance(data, dict) else None
         if isinstance(links, list) and not links:

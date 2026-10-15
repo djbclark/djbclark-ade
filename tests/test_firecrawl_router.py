@@ -104,6 +104,30 @@ class RouterTest(unittest.TestCase):
         self.f.routes[("POST", "/v2/scrape")] = self.ok_scrape(200)
         self.assertEqual(self.req("POST", "/v2/scrape", {"url": "u"})[1], "fallback")
 
+    def test_aws_waf_statuses_fall_back(self):
+        for code in (202, 405):
+            self.p.routes[("POST", "/v2/scrape")] = self.ok_scrape(code)
+            self.f.routes[("POST", "/v2/scrape")] = self.ok_scrape(200)
+            self.assertEqual(self.req("POST", "/v2/scrape", {"url": "u"})[1], "fallback", code)
+
+    def test_challenge_body_with_status_200_falls_back(self):
+        for text in ("Just a moment...\nEnable JavaScript and cookies to continue",
+                     "Please enable JS and disable any ad blocker",
+                     "Press & Hold to confirm you are a human (and not a bot).",
+                     "Request unsuccessful. Incapsula incident ID: 123-456",
+                     "Vercel Security Checkpoint"):
+            self.p.routes[("POST", "/v2/scrape")] = (200, {"success": True, "data": {
+                "markdown": text, "metadata": {"statusCode": 200}}})
+            self.f.routes[("POST", "/v2/scrape")] = self.ok_scrape(200)
+            self.assertEqual(self.req("POST", "/v2/scrape", {"url": "u"})[1], "fallback", text)
+
+    def test_long_article_mentioning_a_challenge_stays_on_primary(self):
+        md = "How to press and hold a CAPTCHA button. " + "Real article text. " * 400
+        self.p.routes[("POST", "/v2/scrape")] = (200, {"success": True, "data": {
+            "markdown": md, "metadata": {"statusCode": 200}}})
+        self.assertEqual(self.req("POST", "/v2/scrape", {"url": "u"})[1], "primary")
+        self.assertEqual(self.f.seen, [])
+
     def test_plain_404_page_does_not_fall_back(self):
         self.p.routes[("POST", "/v2/scrape")] = self.ok_scrape(404)
         self.assertEqual(self.req("POST", "/v2/scrape", {"url": "u"})[1], "primary")

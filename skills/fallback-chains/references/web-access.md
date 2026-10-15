@@ -96,7 +96,11 @@ authoritative; this is its contract as of 2026-10-11.
    (`api.exa.ai/contents`, key, full text up to 1000000 characters) → exa-mcp
    (keyless `web_fetch_exa`, 200000-character cap) → parallel (`web_fetch`) →
    jina-reader (`r.jina.ai`, key if available) → pdf (PDF URLs only, 2.9) →
-   crawl4ai (`crwl`, renders JavaScript; skips PDFs) → wayback (the newest
+   crawl4ai (`crwl`, renders JavaScript; skips PDFs) → firecrawl-mcp (the
+   shared Firecrawl MCP server's `firecrawl_scrape` at `127.0.0.1:18804`:
+   self-hosted, and `firecrawl-router` retries a bot-walled page on the
+   commercial API, which gets through Cloudflare; same budget as crawl4ai;
+   added 2026-10-14) → wayback (the newest
    capture, read raw from `web.archive.org`; 2.11). With no Exa key the exa-api rung fails at once
    (`no Exa key`) and exa-mcp answers. stderr and `--json` name the rung that
    served the page (`provider=exa-api` or `provider=exa-mcp`). The URL is
@@ -126,7 +130,7 @@ authoritative; this is its contract as of 2026-10-11.
    seconds later (default 300, or `$WEB_GET_WALK_BUDGET`; skipped rungs say
    "walk budget ... spent"). The vault read (5.6.4) runs before the ladder,
    outside every rung's budget.
-2.5. `web-get check`: probes every provider once (14 probes: 7 search, 7
+2.5. `web-get check`: probes every provider once (15 probes: 7 search, 8
    fetch), in parallel, and exits 0 when at least 3 are healthy with one
    search and one fetch provider among them, else 5. Narrowed with
    `--only`/`--skip`, it exits 0 only when every selected provider is
@@ -191,7 +195,10 @@ authoritative; this is its contract as of 2026-10-11.
    missing Wikipedia title, and web-get used to serve each as the page. The
    block list also covers Akamai's "Powered and protected by" challenge
    (mdpi.com) and Cloudflare's "received a high number of requests" throttle
-   (cochranelibrary.com). This is a heuristic and
+   (cochranelibrary.com), and since 2026-10-14 the challenge pages of
+   Cloudflare's newer interstitial ("Performing security verification"),
+   DataDome, HUMAN/PerimeterX ("Press & Hold"), Imperva Incapsula, Vercel
+   Attack Mode, AWS WAF and F5 (`firecrawl-router` keeps the same list). This is a heuristic and
    it misses cases: a realistic zillow path naming the city
    (`1-Main-St-Anchorage-AK/`) matches the city page's title. It can also
    reject a correct page whose title shares no word with its URL (a slug in

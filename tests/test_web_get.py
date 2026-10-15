@@ -33,6 +33,7 @@ _loader.exec_module(wg)
 KEY = "jina_TESTKEY_0123456789abcdef"
 EXA_KEY = "exa-TESTKEY-0123-4567-89ab-cdef0123"
 FC_KEY = "fc-TESTKEY-0123456789abcdef0123456789abcdef"
+FC_CHALLENGE = "Please enable JS and disable any ad blocker"
 ARTICLE = "This is the real article body. " * 40  # ~1240 chars
 BLOCK = "<html><title>Just a moment...</title>Checking your browser before accessing.</html>" + " " * 300
 # Verbatim from a live `web-get search ... --only exa` on 2026-10-11 (Exa's free tier, rc 0).
@@ -163,6 +164,11 @@ class Stub(http.server.BaseHTTPRequestHandler):
             text = f"# page\nURL: {args['urls'][0]}\nPublished: 2026-10-11\n\n" + (ARTICLE * (n // len(ARTICLE) + 1))[:n]
         elif tool == "web_fetch_exa":
             text = f"Title: page\nURL: {args['urls'][0]}\n\nexa-fetch {ARTICLE}"
+        elif tool == "firecrawl_scrape":
+            code = int(mode[6:]) if mode.startswith("status") else 200
+            md = FC_CHALLENGE if mode == "challenge" else "fc-scrape " + ARTICLE
+            text = json.dumps({"markdown": md, "metadata": {
+                "statusCode": code, "url": args["url"], "sourceURL": args["url"], "title": "Page"}})
         elif tool == "web_fetch":
             text = json.dumps({"results": [{"url": args["urls"][0], "title": "P",
                                             "full_content": "parallel-fetch " + ARTICLE}]})
@@ -438,6 +444,7 @@ def _env(server, fakes, key=True, extra=None, exa_key=False, fc_key=False):
          if not k.startswith(("WEB_GET_", "JINA_", "EXA_", "FIRECRAWL_"))}
     e.update({
         "WEB_GET_FIRECRAWL_URL": f"{server}/firecrawl",
+        "WEB_GET_FIRECRAWL_MCP_URL": "http://127.0.0.1:9/mcp",  # off unless a test points it at fcmcp
         "WEB_GET_EXA_API_URL": f"{server}/exaapi", "WEB_GET_PDF_VIA": f"{server}/pdfsrv",
         "WEB_GET_PDFTOTEXT": fakes["pdftotext"], "WEB_GET_CHECK_PDF_URL": "https://pdf.example/probe.pdf",
         "TMPDIR": str(fakes["tmp"]),
@@ -501,7 +508,7 @@ def test_fetch_full_order_to_wayback(server, fakes):
     assert p.returncode == 0, p.stderr
     out = json.loads(p.stdout)
     assert [a["provider"] for a in out["attempts"]] == ["exa-api", "exa-mcp", "parallel", "jina-reader",
-                                                       "pdf", "crawl4ai", "wayback"]
+                                                       "pdf", "crawl4ai", "firecrawl-mcp", "wayback"]
     assert "not a PDF" in out["attempts"][4]["error"]
     assert out["provider"] == "wayback"
     # the raw id_ capture is read straight from the archive, not through r.jina.ai
@@ -578,7 +585,7 @@ def test_fetch_all_fail_exit_5_pause_message(server, fakes):
     for name in ("exa-api", "exa-mcp", "parallel", "jina-reader", "pdf", "crawl4ai", "wayback"):
         assert f"{name}: " in p.stderr
     out = json.loads(p.stdout)
-    assert out["ok"] is False and out["content"] is None and len(out["attempts"]) == 7
+    assert out["ok"] is False and out["content"] is None and len(out["attempts"]) == 8
 
 
 def test_fetch_timeout_moves_on(server, fakes):
@@ -1613,3 +1620,51 @@ def test_http_exception_is_a_network_error(monkeypatch):
     monkeypatch.setattr(wg.urllib.request, "urlopen", boom)
     with pytest.raises(wg.ProviderError, match=r"^network error: IncompleteRead$"):
         wg.http("GET", "https://x.example/", wg.Deadline(5))
+
+
+
+def _fc_only(server):
+    return {"WEB_GET_FIRECRAWL_MCP_URL": f"{server}/fcmcp/mcp"}
+
+
+def test_firecrawl_mcp_fetch_rung(server, fakes):
+    p = run(server, fakes, "fetch", "https://site.example/a", "--only", "firecrawl-mcp", "--json",
+            extra=_fc_only(server))
+    out = json.loads(p.stdout)
+    assert p.returncode == 0 and out["provider"] == "firecrawl-mcp"
+    assert "fc-scrape" in out["content"] and out["url"] == "https://site.example/a"
+    assert ARGS[-1] == {"prov": "fcmcp", "tool": "firecrawl_scrape", "url": "https://site.example/a",
+                        "formats": ["markdown"]}
+
+
+def test_firecrawl_alias_selects_both_rungs():
+    assert wg.parse_set("firecrawl") == {"firecrawl", "firecrawl-mcp"}
+
+
+@pytest.mark.parametrize("mode, why", [("status403", "page status 403"),
+                                       ("challenge", "block page"),
+                                       ("iserror", "MCP isError")])
+def test_firecrawl_mcp_failure_walks_on_to_wayback(server, fakes, mode, why):
+    MODES["fcmcp"] = mode
+    WAYBACK_CDX_STAMPS[:] = []
+    p = run(server, fakes, "fetch", "https://site.example/a", "--only", "firecrawl-mcp,wayback",
+            "--json", extra=_fc_only(server))
+    out = json.loads(p.stdout)
+    assert out["attempts"][0]["provider"] == "firecrawl-mcp" and out["attempts"][0]["ok"] is False
+    assert why in out["attempts"][0]["error"]
+    assert out["attempts"][1]["provider"] == "wayback"
+
+
+@pytest.mark.parametrize("text", [
+    "Performing security verification. This website uses a security service.",
+    "Please enable JS and disable any ad blocker",
+    '<iframe src="https://geo.captcha-delivery.com/captcha/"></iframe>',
+    "Press & Hold to confirm you are a human (and not a bot).",
+    "Request unsuccessful. Incapsula incident ID: 938000123456",
+    "Vercel Security Checkpoint. We're verifying your browser.",
+    "Let's confirm you are human. Complete the security check before continuing.",
+    "The requested URL was rejected. Please consult with your administrator.",
+])
+def test_bot_vendor_challenge_pages_are_block_pages(text):
+    with pytest.raises(wg.ProviderError, match="block page"):
+        wg.check_fetch_content(text + " " * 300)

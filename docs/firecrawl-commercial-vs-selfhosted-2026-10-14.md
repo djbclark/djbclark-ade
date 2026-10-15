@@ -139,7 +139,9 @@ added the same evening (next section).
    choice of home). `firecrawl-mcp` talks to one API, so the router runs it as a child
    on an ephemeral loopback port with a per-process token, sends each request to the
    self-hosted API, and retries it once on the commercial one when self-hosted is
-   unreachable, answers 404 or 5xx, scrapes a page whose own status is 403/429/503, or
+   unreachable, answers 404 or 5xx, scrapes a page whose own status is 403/429/503
+   (since 2026-10-14 also 202 and 405, AWS WAF's challenge and CAPTCHA, and a short page
+   whose text is a Cloudflare, Akamai, DataDome, HUMAN, Imperva, Vercel or F5 challenge), or
    maps or searches nothing. Never the other way round: a commercial 429 or 402 never
    sends work back. Crawl jobs stay on the backend that started them (it remembers the
    job id and rewrites `next` links to itself). Tests: `tests/test_firecrawl_router.py`.
