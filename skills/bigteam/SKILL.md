@@ -504,8 +504,10 @@ until the work is committed or recorded in a repo.
    post-run check**: as each slice finishes, run `git -C <slice dir> status
    --short` and `git -C <slice dir> diff --stat`, and flag every changed or new
    path outside that slice's owned files before integrating it (revert or
-   re-assign it; never let it ride along silently). Use `--perm deny` for
-   review-only slices; it stays enforced (every request refused, tripwire on),
+   re-assign it; never let it ride along silently). `--perm deny` is for
+   security-sensitive slices only, not for every review (operator 2026-10-15:
+   subagents run yolo unless clearly security-sensitive); where it is used it
+   stays enforced (every request refused, tripwire on),
    and on an agent that reads without asking (crush, agy) add
    `--acp-arg=--tripwire-exempt-kinds=read,search`, or the first `grep` ends the
    slice with exit 77 and no report. cursor cannot deny at all (it takes

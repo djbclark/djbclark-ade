@@ -349,7 +349,7 @@ The rows for ACP-capable CLIs stay as a fallback for when an ACP route is
 broken. **agy:** prefer `acp-run agy`; the `agy -p` form below is the fallback and
 is subject to the burst budget in "agy has a burst limit" above.
 
-**Default permission mode: yolo or its equivalent, for every agent however launched** (standing rule 2026-10-03, `home-agents.md`). Gate only for a review-only slice (`--perm deny`), and say so; acp-run has no other gate since 2026-10-14 (bigteam checks file ownership from the diff after the run). Use `-s read-only` on codex only for review-only calls; work slices use `--dangerously-bypass-approvals-and-sandbox`.
+**Default permission mode: yolo or its equivalent, for every agent however launched** (standing rule 2026-10-03, `home-agents.md`). Gate only a clearly security-sensitive slice (prompt-injection exposure: `--perm deny`), and say so (operator 2026-10-15; a plain review runs yolo with a read-only brief and a diff check); acp-run has no other gate since 2026-10-14 (bigteam checks file ownership from the diff after the run). `-s read-only` on codex likewise only for those calls; work slices use `--dangerously-bypass-approvals-and-sandbox`.
 
 **Authority for launch flags:** Orca's roster,
 `~/Library/Application Support/orca/profiles/local-default/orca-data.json`
