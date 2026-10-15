@@ -69,9 +69,9 @@ esac
 
 out="$(mktemp)"
 trap 'rm -f "$out"' EXIT
-"${SSH[@]}" "$DEST" "${remote[@]}" > "$out" 2>&1
-rc=$?
-cat "$out"
+# Streamed, not buffered: a tmprun killed by a timeout must still show what it printed.
+"${SSH[@]}" "$DEST" "${remote[@]}" 2>&1 | tee "$out"
+rc=${PIPESTATUS[0]}
 [ $rc -ne 0 ] && exit $rc
 if rg -q -e '^Traceback \(most recent call last\)' -e '^Error: ' -e '^\*\*\* Unknown syntax' \
       -e '^Failed to ' -e '^Unit .* could not be found' -e "^Couldn't execute" "$out"; then

@@ -80,6 +80,8 @@ owner fails); env var names `[a-zA-Z0-9_]+`; no newlines in paths or values.
    25`); `stop 'libpod-<id>*'` stops it, since `stop` passes its argument to
    `systemctl --user` unvalidated and the container has a transient
    `libpod-<id>.scope`.
+   Through `scripts/hyades -` (stdin) write it **without quotes**, `stop libpod-<id>*`:
+   the console takes quotes literally ("Invalid unit name", 2026-10-14), one ID per line.
 
 Tracker: https://forgejo.mit.edu/SIPB/hyades/issues (security issues to
 sipb-hyades-root@mit.edu instead). #2, #3 and #4 are the CI-runner issues (see the

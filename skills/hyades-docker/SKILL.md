@@ -120,7 +120,10 @@ throwaway login for you; never hand-roll one. Public images need no login.
    (`title.txt`, `human.md`, `ai.md`).
 7. `tmprun` with a script on stdin must end the script with `exit`; never kill the
    SSH client (`timeout`) while it runs: the microVM is orphaned and keeps using quota.
-   Stop an orphan with `scripts/hyades stop 'libpod-<container id>*'` (id from `df`).
+   Stop an orphan with `scripts/hyades stop 'libpod-<container id>*'` (id from `df`;
+   through `hyades -` no quotes: `stop libpod-<id>*`). A guest kernel oops also leaves
+   the microVM hung, so check `df` after any failed run. The wrapper streams output
+   (since 2026-10-14), so a run cut off by a timeout still shows what it printed.
    **The script is typed into an interactive shell on a terminal** (`podman run -it`),
    so (2026-10-14, three hung builds): (a) the rest of the script is every command's
    stdin: give anything that may read it `</dev/null` (`apt-get`/debconf swallowed
