@@ -295,8 +295,11 @@ continues from the report and diff in a linked record instead of restarting.
      `tools/acp-run/README.md`, section "Per-agent choices: vendor, model,
      effort, context (2026-10-15)".
 - **`--perm`:** `all` (the default) is yolo for every agent; `deny` refuses
-  every request (read-only review, with a tripwire for tools that run without
-  asking). Those are the only two policies (operator 2026-10-14): the old
+  every request, with a tripwire (exit 77, no report) for any tool that runs
+  without asking, **reads included**: cursor, crush and agy run `grep`/`read`
+  unasked, so a read-only review on them also needs
+  `--acp-arg=--tripwire-exempt-kinds=read,search` (2026-10-15: a cursor review
+  slice tripped on `grep` without it). Those are the only two policies (operator 2026-10-14): the old
   `scoped:<paths>` and `ask` are accepted but only print a deprecation warning
   and run as `all`. For a work slice, name the owned files in the brief and
   check `git status --short` / `git diff --stat` afterwards.

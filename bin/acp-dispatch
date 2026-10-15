@@ -658,6 +658,15 @@ def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | Non
         if model and model.startswith("gemini-"):
             return "antigravity", "gemini"
         return None
+    if agent == "cursor":
+        # `default` is Cursor's Auto pool (acp-run README, "Per-agent choices"); every
+        # other id draws on the third-party pool. aiuse reports them as two windows that
+        # drain at very different rates (2026-10-15: auto 74% left, third-party 11%), so
+        # a `--model default` slice must not be refused, or costed, on the third-party
+        # reading (route_agent.py SERVICES has a `cursor-auto` row for the same split).
+        if not model or model in ("default", "auto"):
+            return "cursor", "auto"
+        return "cursor", None
     if agent == "opencode":
         if model and model.startswith("opencode-go/"):
             return "opencode-go", None
@@ -1539,7 +1548,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="acp-run --effort: none|minimal|low|medium|high|xhigh|max|ultra|default; checked with the model")
     ap.add_argument("--context", metavar="SIZE",
                     help="acp-run --context: 200k|256k|272k|400k|500k|1m or a token count; checked with the model")
-    ap.add_argument("--perm", default="all", help="all (default) | deny (read-only); a deprecated scoped:... warns and runs as all")
+    ap.add_argument("--perm", default="all", help="all (default) | deny: every permission request refused and a tripwire (exit 77) on any "
+                         "tool that runs without asking, reads included (cursor, crush and agy read unasked); "
+                         "a read-only reviewer adds --acp-arg=--tripwire-exempt-kinds=read,search. "
+                         "A deprecated scoped:... warns and runs as all")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
                     help=f"acp-run --timeout (default {DEFAULT_TIMEOUT}; 0 is unlimited)")
     ap.add_argument("--wrapup-grace", type=int, default=DEFAULT_WRAPUP_GRACE,

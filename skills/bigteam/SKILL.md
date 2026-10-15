@@ -499,7 +499,10 @@ until the work is committed or recorded in a repo.
    --short` and `git -C <slice dir> diff --stat`, and flag every changed or new
    path outside that slice's owned files before integrating it (revert or
    re-assign it; never let it ride along silently). Use `--perm deny` for
-   review-only slices; it stays enforced (every request refused, tripwire on).
+   review-only slices; it stays enforced (every request refused, tripwire on),
+   and on an agent that reads without asking (cursor, crush, agy) add
+   `--acp-arg=--tripwire-exempt-kinds=read,search`, or the first `grep` ends the
+   slice with exit 77 and no report (2026-10-15).
 2. **Always `--model`** (except `zcode`: acp-run sets `ZCODE_BIN`, so `--model`
    works as of 2026-10-15, and `acp-dispatch` still does not require one).
    Otherwise acp-dispatch refuses to run without it. The default is the
