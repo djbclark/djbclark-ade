@@ -1522,7 +1522,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="acp-dispatch", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("agent", help="an acp-run agent (acp-run --list)")
-    ap.add_argument("--model", help="required except for zcode (no model option); acp-run <agent> --info lists values")
+    ap.add_argument("--model", help="required except for zcode (optional there since acp-run sets ZCODE_BIN); acp-run <agent> --info lists values")
     ap.add_argument("--name", required=True, help="slice name; names every output file")
     ap.add_argument("-p", "--prompt")
     ap.add_argument("-f", "--prompt-file", help="the brief (a file); the footer is appended to a copy")
