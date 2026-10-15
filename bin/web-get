@@ -841,7 +841,7 @@ def exa_api(path: str, body: dict, dl: Deadline) -> dict:
 
 
 def search_firecrawl(q: str, n: int, dl: Deadline) -> tuple[str, str]:
-    # Self-hosted, so no per-call bill; its SearXNG backend asks Google, Bing, Brave and others.
+    # Self-hosted, so no per-call bill; its SearXNG backend asks DuckDuckGo, Brave, Startpage and Mojeek.
     key = firecrawl_key()
     if not key:
         raise ProviderError(f"no Firecrawl key ({key_note('FIRECRAWL_SELFHOST_API_KEY')})")
