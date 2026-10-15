@@ -11,6 +11,9 @@ and `deploy` defaults to it, but every Hyades console call (`deploy apply`, `sto
 address" and "Failed to connect to user scope bus": new SSH logins get no systemd user
 session, a host-side fault (the running microVMs kept serving); reported as SIPB/hyades#11. Remaining: `./deploy
 apply`, stop/start `djbclark-fc-searxng`, then the checks below. Until then `-r1` runs.
+Operator, 2026-10-14: if the fault turns out to be transient (a retry works), teach
+`skills/hyades-docker/scripts/hyades` to wait 3 minutes and retry once on these two errors
+before reporting a problem.
 
 Queued by the operator. In `skills/hyades-docker/examples/firecrawl/build-searxng-image`,
 add `- name: grokipedia` with `disabled: false` and `inactive: false` to the settings
