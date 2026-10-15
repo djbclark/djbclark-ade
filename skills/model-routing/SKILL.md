@@ -202,6 +202,10 @@ Rules for any agent that dispatches to agy:
   provider `sipb`).
 - **Prepaid real money, gated**: opencode-zen, openrouter, deepseek —
   only via the `opencode-ralph-tui-*` gate scripts, never by default.
+- **Operator-gated (2026-10-15)**: omp (oh-my-pi), every route (`omp`,
+  `omp -p`, `omp acp`, acp-run/acp-dispatch, Orca, herdr): never without the
+  operator's specific, explicit approval for that run; `aiuse` flags it
+  `requires_operator_approval`. Rules: `bigteam`'s *Operator-gated agents*.
 
 ## Headless invocation (one-shot prompts to other TUIs)
 
@@ -392,7 +396,10 @@ Herdr-hosted TUIs (driving agents in Herdr panes; verified 2026-09-26):
    decision. Usage credits and overage toggles (Claude usage credits, Codex
    credits, OpenCode Go "Use balance") are real money too: never pick a
    credits-backed model without asking, and never re-enable a disabled
-   toggle to reach a better model.
+   toggle to reach a better model. **omp is operator-gated**: never route
+   to it, by any route, without the operator's specific yes for that run
+   (`bigteam`'s *Operator-gated agents*; acp-run and acp-dispatch need
+   `ACP_OPERATOR_APPROVED=omp`).
 4. Levers: `acp-run <agent> --model <m> [--mode <m>]` for one-shot calls
    to ACP-capable agents (`--info` lists the values); Claude workflows
    `agent(..., {model, effort})`; Orca

@@ -144,6 +144,9 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # set fails: "unsupported config option or switch failed: model"; its ZCODE_PROVIDER+ZCODE_MODEL env pin was refused
 # too. Checked 2026-10-11 with the z.ai weekly limit exhausted: recheck after it resets).
 NO_MODEL_AGENTS = {"zcode"}
+# Never dispatched without the operator's specific, explicit approval for that run (operator 2026-10-15);
+# the same gate is in acp-run.
+OPERATOR_GATED = {"omp"}
 # Claude Code 2.1.295 refuses a sub-agent's Write for this basename (tengu_subagent_md_report_blocked).
 CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.IGNORECASE)
 # acp-run runs yolo for every agent (operator 2026-10-14): all or deny. A scoped:... value from an
@@ -1231,6 +1234,10 @@ def reroute_record(a: argparse.Namespace) -> int:
 def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     if a.timeout < 0 or (a.wait_timeout is not None and a.wait_timeout < 0):
         die("timeouts must be 0 or more")
+    if a.agent in OPERATOR_GATED and a.agent not in {
+            x.strip() for x in os.environ.get("ACP_OPERATOR_APPROVED", "").split(",") if x.strip()}:
+        die(f"{a.agent} needs specific, explicit operator approval for this run; ask first, then set"
+            f" ACP_OPERATOR_APPROVED={a.agent} (acp-run applies the same gate)")
     if not a.model and a.agent not in NO_MODEL_AGENTS:
         die("--model is required (an agent's own default is the expensive one; `acp-run <agent> --info` lists values)")
     if a.model and a.agent in NO_MODEL_AGENTS:

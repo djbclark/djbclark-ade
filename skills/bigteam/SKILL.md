@@ -106,6 +106,7 @@ Classify every pool before assigning anything:
 | **shared allowance** | a GitHub-side feature draws on the same subscription | usable, but spend modestly and keep a margin; see *Copilot* under *Reserve pools* below |
 | **prepaid** | real money | never without a fresh explicit operator decision |
 | **excluded** | operator has ruled it out | respect it, with its end condition (below) |
+| **operator-gated** | the operator must approve each use | never plan, probe or dispatch it without the operator's specific, explicit yes for this run; see *Operator-gated agents* below |
 
 ### agy Claude/GPT pool — assign it first while it has headroom (operator, 2026-10-10)
 
@@ -182,6 +183,22 @@ off), so check the window in the `grok` TUI before a bulk batch, and keep the
 *Reserve pools* note below (GrokBot runs on it). Still true: the `grok` entry
 in `~/.config/aiuse/config.toml` `[disabled_services]` is commented out, and
 Hermes's `fallback_providers` do not name `grok-sub` (operator's call).
+
+### Operator-gated agents — ask first, every time (operator, 2026-10-15)
+
+"Not use omp or omp acp without specific explicit operator approval." This is a
+standing gate, not an exclusion with an end date:
+
+1. **omp (oh-my-pi)**, by every route: `omp`, `omp -p`, `omp acp`, an `acp-run` or
+   `acp-dispatch` slice, an Orca `--agent omp` worker, a herdr pane, and any model
+   reached through omp. `aiuse` marks the omp row `requires_operator_approval`
+   ("AI: Do not use without asking operator"); headroom on it is not permission.
+2. Approval is specific: the operator names omp for this run or this slice. A
+   general "use every agent", "bigteam this" or a peer's routing plan does not
+   count, and one approval does not carry over to the next batch.
+3. To ask, put it in the wave plan as its own AskUserQuestion option, with the
+   slice and why omp. After a yes, set `ACP_OPERATOR_APPROVED=omp` for that call:
+   `acp-run` and `acp-dispatch` refuse an omp slice without it.
 
 ### Reserve pools — never run them out
 

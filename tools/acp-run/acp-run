@@ -2971,6 +2971,18 @@ def env_float(name):
         raise SystemExit(f"acp-run: {name}={v!r} is not a number") from None
 
 
+# Agents nothing may run without the operator's specific, explicit approval for that run
+# (operator 2026-10-15: "not use omp or omp acp without specific explicit operator approval").
+# The caller sets ACP_OPERATOR_APPROVED=<agent>[,<agent>] only after the operator said yes;
+# acp-dispatch applies the same gate. omp has no AGENTS entry yet, so approval alone is not enough.
+OPERATOR_GATED = {"omp": "oh-my-pi bills Claude cloud credits; aiuse marks it requires_operator_approval"}
+APPROVAL_ENV = "ACP_OPERATOR_APPROVED"
+
+
+def operator_approved() -> set[str]:
+    return {x.strip() for x in os.environ.get(APPROVAL_ENV, "").split(",") if x.strip()}
+
+
 def main():
     ap = argparse.ArgumentParser(
         prog="acp-run",
@@ -3152,6 +3164,9 @@ def main():
             ok = "ok " if shutil.which(c[0]) else "-- "
             print(f"{ok}{n:9} {' '.join(c)}" + (f"  (auth {auth})" if auth else ""))
         return 0
+    if a.agent in OPERATOR_GATED and a.agent not in operator_approved():
+        ap.error(f"{a.agent} needs specific, explicit operator approval for this run"
+                 f" ({OPERATOR_GATED[a.agent]}); once given, set {APPROVAL_ENV}={a.agent}")
     if a.agent not in AGENTS:
         ap.error(f"agent must be one of: {', '.join(AGENTS)}")
     if not (a.perm in ("all", "deny", "ask") or a.perm.startswith("scoped:")):
