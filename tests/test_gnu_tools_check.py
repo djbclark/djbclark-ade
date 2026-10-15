@@ -120,6 +120,14 @@ class Main(unittest.TestCase):
             self.assertIn("y.sh:1: bare sort", out)
             self.assertNotIn("venv", out)
 
+    def test_records_are_skipped_by_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            for rel in ("handoffs/h.md", "memory/reports/r.md", "memory/MEMORY.md"):
+                (p / rel).parent.mkdir(parents=True, exist_ok=True)
+                (p / rel).write_text("```sh\nsed p f\n```\n")
+            self.assertEqual(self.run_main(d), (0, ""))
+
     def test_missing_path_is_a_usage_error(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(gtc.main(["/nonexistent/path/xyz"]), 2)

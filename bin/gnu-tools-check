@@ -45,6 +45,8 @@ DEFAULT_EXCLUDES = [
     "*/.git/*", "*/node_modules/*", "*/graft/*", "*/vendor/*", "*/.venv/*",
     "*/termux/*", "*/android/*", "*/.github/*", "*/.forgejo/*", "*/Dockerfile*",
     "*/gradlew",
+    # Records, not instructions: session handoffs, dated reports, the memory index.
+    "*/handoffs/*", "*/reports/*", "*/MEMORY.md",
 ]
 IGNORE_FILE = ".gnu-tools-check-ignore"
 PORTABLE = "gnu-tools-check: portable"
