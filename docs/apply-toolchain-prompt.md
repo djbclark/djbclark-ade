@@ -796,7 +796,7 @@ inside Gradle and are not meaningful as global installs.
 
 ## 2. Coverage rule for unlisted languages and formats
 
-Inventory every tracked file type (`git ls-files | gsed 's/.*\.//' | sort | uniq -c`,
+Inventory every tracked file type (`git ls-files | gsed 's/.*\.//' | gsort | guniq -c`,
 plus extensionless scripts identified by shebang). For **any language or format
 not covered in §1**, have a `researcher` find tools in the same spirit and treat
 them as if they had been on the original list. The spirit is:
@@ -1306,7 +1306,7 @@ orchestrator does this directly, without subagents.
    that directory, a label in the user's own namespace, not `com.djbclark.*`).
    Install the LaunchAgent only if the user says yes, and record it in the
    backup manifest as "absent" so it can be removed (§15). Verify it with
-   `launchctl list | grep coderabbit-feeder` and a log line showing a tick.
+   `launchctl list | ggrep coderabbit-feeder` and a log line showing a tick.
 9. **Explain how to watch and act on results:** findings land in
    `~/.config/coderabbit-feeder/findings/`. Fix actionable findings with
    normal PRs under the AGENTS.md rules. The feeder never auto-commits fixes.

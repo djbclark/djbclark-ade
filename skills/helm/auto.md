@@ -270,7 +270,7 @@ handled once, in this order, and not repaired:
     a worker's script hid a failed pick. Print `git log --oneline -5` after
     any scripted branch build.
 14. **Tests that spawn ansible need a UTF-8 locale** (agent shells export
-    none); tests that touch a Hermes home run with `HOME=$(mktemp -d)` or the
+    none); tests that touch a Hermes home run with `HOME=$(gmktemp -d)` or the
     suite provisions ~2 GB into the real `~/.hermes`.
 15. **Operator pause.** "Pause everything at an opportune moment" means: cancel
     the next wave, let running workers finish (never waste spent tokens),
