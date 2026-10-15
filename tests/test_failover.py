@@ -267,7 +267,7 @@ def test_acp_command_flags(tmp_path):
 
 def test_ask_acp_runs_in_empty_dir(tmp_path, monkeypatch):
     acp = tmp_path / "acp-run2"
-    acp.write_text('#!/bin/sh\nwhile [ "$1" != "-C" ]; do shift; done; ls -A "$2" | wc -l | tr -d " "\n')
+    acp.write_text('#!/bin/sh\nwhile [ "$1" != "-C" ]; do shift; done; ls -A "$2" | gwc -l | gtr -d " "\n')
     acp.chmod(0o755)
     monkeypatch.setenv("FAILOVER_ACP_RUN", str(acp))
     (cl,) = failover.load_chain([{"tui": "claude", "model": "haiku"}])

@@ -24,6 +24,7 @@
 # This script makes no model calls. When re-verifying, probe agy at most ONCE (one
 # batched prompt, --print-timeout): looped agy -p probes helped lock out its CLI on
 # 2026-10-03 (see skills/model-routing, "agy has a burst limit").
+export PATH="/opt/homebrew/bin:$PATH"
 set -euo pipefail
 ade_root="${SKILL_EVERYWHERE_ADE:-$HOME/src/djbclark-ade/skills}"
 priv_root="${SKILL_EVERYWHERE_PRIVATE:-${OPS_ROOT:-$HOME/ops}/site-private/skills}"
@@ -52,7 +53,7 @@ omp|~/.omp/agent/skills
 
 mode=link
 case "${1:-}" in --check) mode=check; shift ;; --remove) mode=remove; shift ;; esac
-[[ $# -gt 0 ]] || { sed -n '2,7p' "$0" >&2; exit 2; }
+[[ $# -gt 0 ]] || { gsed -n '2,7p' "$0" >&2; exit 2; }
 
 rc=0
 for name in "$@"; do
@@ -74,10 +75,10 @@ for name in "$@"; do
     if ! command -v "$bin" >/dev/null; then printf '  %-13s not installed\n' "$bin"; continue; fi
     if [[ $dir == via* || $dir == x* ]]; then printf '  %-13s %s\n' "$bin" "${dir#x }"; continue; fi
     dir="${dir/#\~/$HOME}"; link="$dir/$name"
-    if [[ -L $link && "$(readlink "$link")" == "$src" ]]; then state=linked
-    elif [[ -L $link && -e $src && "$(realpath "$link" 2>/dev/null)" == "$(realpath "$src")" ]]; then
-      state="chained via $(readlink "$link")"
-    elif [[ -L $link ]]; then state="other link -> $(readlink "$link")"
+    if [[ -L $link && "$(greadlink "$link")" == "$src" ]]; then state=linked
+    elif [[ -L $link && -e $src && "$(grealpath "$link" 2>/dev/null)" == "$(grealpath "$src")" ]]; then
+      state="chained via $(greadlink "$link")"
+    elif [[ -L $link ]]; then state="other link -> $(greadlink "$link")"
     elif [[ -e $link ]]; then state="real dir/file (not ours)"
     else state=missing; fi
     case $mode in
@@ -101,7 +102,7 @@ for name in "$@"; do
 done
 
 if command -v hermes >/dev/null \
-   && ! grep -qF skill-everywhere/skills ~/.hermes/config.yaml 2>/dev/null; then
+   && ! ggrep -qF skill-everywhere/skills ~/.hermes/config.yaml 2>/dev/null; then
   echo "warning: hermes no longer lists ~/.local/share/skill-everywhere/skills in" \
        "skills.external_dirs; ask Hermes to re-add it" >&2
 fi
@@ -113,7 +114,7 @@ fi
 # for a manual gateway restart from Terminal. Idempotent and cheap. Does nothing
 # when the gateway is not running or predates the verb.
 if [[ $mode == link ]] && command -v hermes >/dev/null; then
-  hpy="$(head -1 "$(command -v hermes)")"     # shebang = the venv python
+  hpy="$(ghead -1 "$(command -v hermes)")"     # shebang = the venv python
   hpy="${hpy#\#!}"
   if [[ ! -x $hpy ]]; then hpy="$(command -v python3)"; fi
   # Pipeline through python must run from a cwd inside the agent project, else

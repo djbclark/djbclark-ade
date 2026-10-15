@@ -10,14 +10,15 @@
 #    be pasted through stdin (hyades-docker skill, rule 7).
 # 2. Add it as /usr/local/lib/portshim.so with `crane append` and push.
 # The deploy script sets LD_PRELOAD=/usr/local/lib/portshim.so on the microVM.
+export PATH="/opt/homebrew/bin:$PATH"
 set -euo pipefail
-SCRIPTS="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../../scripts" && pwd)"
+SCRIPTS="$(cd "$(dirname "$(grealpath "${BASH_SOURCE[0]}")")/../../scripts" && pwd)"
 SHIM_SHA="${1:-b5f2cd304bc602d9ecd1d25cee8482bc8d097b80}"
 BASE="${PW_BASE:-ghcr.io/firecrawl/playwright-service:latest}"
 TAG="forgejo.mit.edu/djbclark/firecrawl-playwright:shim-${SHIM_SHA:0:7}"
 SRC="https://forgejo.mit.edu/djbclark/loopback-port-shim/raw/commit/${SHIM_SHA}/loopback-port-shim.c"
 
-work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+work="$(gmktemp -d)"; trap 'rm -rf "$work"' EXIT
 cat > "$work/script.sh" <<EOF
 export DEBIAN_FRONTEND=noninteractive; apt-get update -qq </dev/null >/dev/null 2>&1; apt-get install -y -qq gcc libc6-dev curl ca-certificates </dev/null >/dev/null 2>&1
 curl -fsS -o /tmp/shim.c $SRC </dev/null && gcc -shared -fPIC -O2 -pthread -o /tmp/portshim.so /tmp/shim.c -ldl </dev/null && echo SHIM-BEGIN && base64 /tmp/portshim.so && echo SHIM-END
@@ -25,10 +26,10 @@ exit
 EOF
 echo "== compiling the shim on Hyades (tmprun debian:bookworm, about a minute)"
 "$SCRIPTS/hyades" tmprun docker.io/library/debian:bookworm < "$work/script.sh" > "$work/out.txt" 2>&1
-tr -d '\r' < "$work/out.txt" | gsed 's/\x1b\[[0-9;?]*[A-Za-z]//g' \
-  | gsed -n '/^SHIM-BEGIN$/,/^SHIM-END$/p' | gsed '1d;$d' | base64 -d > "$work/portshim.so"
+gtr -d '\r' < "$work/out.txt" | gsed 's/\x1b\[[0-9;?]*[A-Za-z]//g' \
+  | gsed -n '/^SHIM-BEGIN$/,/^SHIM-END$/p' | gsed '1d;$d' | gbase64 -d > "$work/portshim.so"
 file "$work/portshim.so" | rg -q 'ELF 64-bit LSB shared object, x86-64' || {
-  echo "build failed; guest output:" >&2; tail -20 "$work/out.txt" >&2; exit 1; }
+  echo "build failed; guest output:" >&2; gtail -20 "$work/out.txt" >&2; exit 1; }
 
 echo "== pushing $TAG"
 mkdir -p "$work/layer/usr/local/lib"

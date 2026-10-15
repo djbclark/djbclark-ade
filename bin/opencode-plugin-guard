@@ -18,6 +18,7 @@
 #
 # Exit codes: 0 ok / nothing to do; 1 something was restored or needs attention.
 
+export PATH="/opt/homebrew/bin:$PATH"
 set -euo pipefail
 
 CANONICAL_DIR="${OPENCODE_PLUGIN_GUARD_CANONICAL:-$HOME/src/djbclark-ade/opencode-plugins}"
@@ -38,11 +39,11 @@ log() { printf '%s\n' "$*"; }
 has_v2() {
   local f="$1"
   [ -f "$f" ] || return 1
-  grep -qE 'export default \{[[:space:]]*id:' "$f" 2>/dev/null || return 1
-  grep -qE '(^|[^[:alnum:]_])(setup|effect)([^[:alnum:]_]|$)' "$f" 2>/dev/null
+  ggrep -qE 'export default \{[[:space:]]*id:' "$f" 2>/dev/null || return 1
+  ggrep -qE '(^|[^[:alnum:]_])(setup|effect)([^[:alnum:]_]|$)' "$f" 2>/dev/null
 }
 
-sha() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
+sha() { shasum -a 256 "$1" 2>/dev/null | gawk '{print $1}'; }
 
 # upstream_or_drift <name> <live> <canonical> — v2 present but not our bytes.
 upstream_or_drift() {
@@ -55,8 +56,8 @@ upstream_or_drift() {
   # A newer still-v1 template rewritten by us would look like drift only in the
   # version comment; flag it rather than silently restoring an old base.
   local live_ver canon_ver
-  live_ver="$(grep -o 'opencode-integration-version: [0-9.]*' "$live" 2>/dev/null | head -1 || true)"
-  canon_ver="$(grep -o 'opencode-integration-version: [0-9.]*' "$canonical" 2>/dev/null | head -1 || true)"
+  live_ver="$(ggrep -o 'opencode-integration-version: [0-9.]*' "$live" 2>/dev/null | ghead -1 || true)"
+  canon_ver="$(ggrep -o 'opencode-integration-version: [0-9.]*' "$canonical" 2>/dev/null | ghead -1 || true)"
   if [ -n "$live_ver" ] && [ -n "$canon_ver" ] && [ "$live_ver" != "$canon_ver" ]; then
     log "    WARNING: canonical drift — live says '$live_ver', canonical '$canon_ver'."
     log "    Refresh $CANONICAL_DIR/$(basename "$canonical") and re-run."
@@ -64,7 +65,7 @@ upstream_or_drift() {
     return
   fi
   log "    -> treating as upstream v2 (or a local edit); not touching it"
-  date -u '+%Y-%m-%dT%H:%M:%SZ' >>"$STATE_DIR/upstream-v2-$name"
+  gdate -u '+%Y-%m-%dT%H:%M:%SZ' >>"$STATE_DIR/upstream-v2-$name"
 }
 
 handle() {
@@ -87,7 +88,7 @@ handle() {
   cp "$canonical" "$tmp"
   chmod 0644 "$tmp"
   mv -f "$tmp" "$file" # atomic replace; OpenCode's watcher reloads it
-  log "    restored $(basename "$file") from canonical (sha $(sha "$file" | cut -c1-12))"
+  log "    restored $(basename "$file") from canonical (sha $(sha "$file" | gcut -c1-12))"
   rc=1
 }
 
@@ -100,14 +101,14 @@ strip_plugin_entry() {
     [ -f "$candidate" ] && cfg="$candidate" && break
   done
   [ -n "$cfg" ] || return 0
-  grep -q 'openusage-telemetry.ts' "$cfg" || return 0
+  ggrep -q 'openusage-telemetry.ts' "$cfg" || return 0
   log "  opencode.json still lists openusage-telemetry.ts as a plugin entry"
   if [ "$CHECK" = 1 ]; then
     log "    would strip it (backup first)"
     rc=1
     return
   fi
-  cp "$cfg" "$cfg.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+  cp "$cfg" "$cfg.bak-$(gdate -u +%Y%m%dT%H%M%SZ)"
   python3 - "$cfg" <<'PY'
 import json, sys
 p = sys.argv[1]
@@ -125,7 +126,7 @@ print("    stripped the redundant plugin entry")
 PY
 }
 
-log "opencode-plugin-guard $( [ "$CHECK" = 1 ] && echo '(check)' || echo '(enforce)') — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+log "opencode-plugin-guard $( [ "$CHECK" = 1 ] && echo '(check)' || echo '(enforce)') — $(gdate -u +%Y-%m-%dT%H:%M:%SZ)"
 
 if [ -f "$SENTINEL" ]; then
   log "  sentinel $SENTINEL present: both plugins are upstream-v2. Nothing to do."
@@ -149,7 +150,7 @@ if [ "$rtk_done" = 1 ] && [ "$ou_done" = 1 ]; then
   if [ "$CHECK" = 1 ]; then
     log "  both plugins look upstream-v2 (would retire)"
   else
-    touch "$SENTINEL"
+    gtouch "$SENTINEL"
     log "  both plugins look upstream-v2 — wrote $SENTINEL"
     "$HOME/.local/bin/hermes-ping" "djbclark-ade: opencode-plugin-guard is obsolete (both plugins upstream-v2); delete the Jobber job + bin/opencode-plugin-guard" || true
   fi

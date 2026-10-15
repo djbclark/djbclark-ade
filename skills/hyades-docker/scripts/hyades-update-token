@@ -11,13 +11,14 @@
 # After a rotate, re-run hyades-ci-secrets for each repo (or once with --user).
 # Stored as DJBCLARK_HYADES_UPDATE_TOKEN, or DJBCLARK_HYADES_<GROUP>_UPDATE_TOKEN
 # for a Moira group account (-g GROUP, via entergp).
+export PATH="/opt/homebrew/bin:$PATH"
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 group=""
 if [ "${1:-}" = "-g" ]; then group="$2"; shift 2; fi
 VAR="DJBCLARK_HYADES_UPDATE_TOKEN"
 if [ -n "$group" ]; then
-  VAR="DJBCLARK_HYADES_$(printf '%s' "$group" | tr 'a-z.-' 'A-Z__')_UPDATE_TOKEN"
+  VAR="DJBCLARK_HYADES_$(printf '%s' "$group" | gtr 'a-z.-' 'A-Z__')_UPDATE_TOKEN"
 fi
 URL="https://${HYADES_HOST:-hyades.mit.edu}"
 
@@ -42,7 +43,7 @@ case "${1:-}" in
       --reason "hyades-docker: Hyades update token" >/dev/null 2>&1 || true
     args=(updtoken); [ -n "$group" ] && args=(-g "$group" updtoken)
     out="$("$HERE/hyades" "${args[@]}" 2>&1)" || { echo "updtoken failed:" >&2; printf '%s\n' "$out" | gsed -E 's/[0-9a-f]{32}/<redacted>/g' >&2; exit 1; }
-    tok="$(printf '%s' "$out" | gsed -nE 's/.*Your update token is ([0-9a-f]{32})\..*/\1/p' | head -1)"
+    tok="$(printf '%s' "$out" | gsed -nE 's/.*Your update token is ([0-9a-f]{32})\..*/\1/p' | ghead -1)"
     unset out
     [ ${#tok} -eq 32 ] || { echo "could not find a token in the updtoken output (format changed?)" >&2; exit 1; }
     printf '%s' "$tok" | sudo-secretspec set "$VAR" --reason "hyades-docker: store rotated update token" >/dev/null || {

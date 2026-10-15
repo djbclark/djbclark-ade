@@ -20,6 +20,7 @@
 # AGY_CLI_MODEL_API_MAX_RETRIES defaults to 0: agy's default of 8 retries per
 # failed request is what turned a burst into a lockout. Agents still use
 # `acp-run agy`, never this.
+export PATH="/opt/homebrew/bin:$PATH"
 set -euo pipefail
 
 NAME=${AGY_LINUX_CONTAINER:-agy-linux}
@@ -63,6 +64,6 @@ envs=(-e "TERM=${TERM:-xterm-256color}" -e "AGY_CLI_MODEL_API_MAX_RETRIES=${AGY_
 while IFS='=' read -r k _; do
   [ "$k" = AGY_CLI_MODEL_API_MAX_RETRIES ] && continue
   envs+=(-e "$k=${!k}")
-done < <(env | grep -E '^(AGY_[A-Z0-9_]*|CLOUD_CODE_URL)=' || true)
+done < <(env | ggrep -E '^(AGY_[A-Z0-9_]*|CLOUD_CODE_URL)=' || true)
 
 exec container exec "${flags[@]}" "${envs[@]}" -w "$wd" "$NAME" "$AGY" "$@"

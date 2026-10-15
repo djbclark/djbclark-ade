@@ -9,10 +9,11 @@
 # GIT_ASKPASS helper (no secret in argv, in a file, or in the keychain):
 # `credential.helper=` is cleared so osxkeychain cannot save it. Remote URLs
 # stay token-free: https://HOST/OWNER/REPO.git
+export PATH="/opt/homebrew/bin:$PATH"
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOST="${FORGEJO_HOST:-forgejo.mit.edu}"
-VAR="DJBCLARK_$(printf '%s' "$HOST" | tr 'a-z.-' 'A-Z__')_TOKEN"
+VAR="DJBCLARK_$(printf '%s' "$HOST" | gtr 'a-z.-' 'A-Z__')_TOKEN"
 exec sudo-secretspec run --reason "git against ${HOST}" -- \
   bash -c 'export FORGEJO_GIT_TOKEN="${!1}" GIT_ASKPASS="$2" GIT_TERMINAL_PROMPT=0; shift 2; exec git -c credential.helper= "$@"' \
   _ "$VAR" "$HERE/git-askpass" "$@"

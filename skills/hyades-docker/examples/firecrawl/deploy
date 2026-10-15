@@ -25,8 +25,9 @@
 #                           :8080) -> https://djbclark-firecrawl.sipb.cloud;
 #                           bearer token FIRECRAWL_SELFHOST_API_KEY required
 # The gate token goes to the console on stdin (`hyades -`), never in argv.
+export PATH="/opt/homebrew/bin:$PATH"
 set -euo pipefail
-HY="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../../scripts" && pwd)/hyades"
+HY="$(cd "$(dirname "$(grealpath "${BASH_SOURCE[0]}")")/../../scripts" && pwd)/hyades"
 FC_TAG="${FC_TAG:-2.11.519}"
 PW_IMAGE="${PW_IMAGE:-forgejo.mit.edu/djbclark/firecrawl-playwright:shim-b5f2cd3}"
 SUB="${FC_SUBDOMAIN:-djbclark-firecrawl}"
@@ -108,5 +109,5 @@ cmd_delete() {
 
 case "${1:-}" in
   apply|up|down|status|delete) "cmd_$1" ;;
-  *) sed -n '2,9p' "$0" >&2; exit 2 ;;
+  *) gsed -n '2,9p' "$0" >&2; exit 2 ;;
 esac

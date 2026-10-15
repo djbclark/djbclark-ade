@@ -12,6 +12,7 @@
 # Emits SessionStart hookSpecificOutput.additionalContext. Fails open: any
 # problem exits 0 silently rather than blocking session start.
 
+export PATH="/opt/homebrew/bin:$PATH"
 set -uo pipefail
 
 # ── stdout-purity check on the BASH_ENV chain ────────────────────────────
@@ -66,7 +67,7 @@ fi
 
 command -v cswap >/dev/null 2>&1 || exit 0
 
-raw="$(cswap list 2>/dev/null | grep -v 'A newer version of claude-swap')" || exit 0
+raw="$(cswap list 2>/dev/null | ggrep -v 'A newer version of claude-swap')" || exit 0
 [ -n "${raw//[[:space:]]/}" ] || exit 0
 
 python3 -c '

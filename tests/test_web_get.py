@@ -701,7 +701,7 @@ def test_decode_body_content_encodings():
 def test_crwl_gets_js_delay(server, fakes, tmp_path):
     argv = tmp_path / "argv"
     crwl = tmp_path / "crwl-argv"
-    crwl.write_text(f'#!/bin/sh\necho "$@" > {argv}\nyes content line | head -40\n')
+    crwl.write_text(f'#!/bin/sh\necho "$@" > {argv}\nyes content line | ghead -40\n')
     crwl.chmod(0o755)
     p = run(server, fakes, "fetch", "https://js.example/", "--only", "crawl4ai",
             extra={"WEB_GET_CRWL": str(crwl)})

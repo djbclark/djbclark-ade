@@ -21,6 +21,7 @@
 #
 # Never touches the source repo. Never runs in ~/ops/* (deployment checkouts;
 # operator decision 2026-09-20).
+export PATH="/opt/homebrew/bin:$PATH"
 set -euo pipefail
 
 usage() {
@@ -114,7 +115,7 @@ PY
 exclude_graft_cache() { # $1 = pasture path
   local ex="$1/.git/info/exclude"
   mkdir -p "$1/.git/info"
-  grep -qxF 'graft/.cache/' "$ex" 2>/dev/null || printf 'graft/.cache/\n' >> "$ex"
+  ggrep -qxF 'graft/.cache/' "$ex" 2>/dev/null || printf 'graft/.cache/\n' >> "$ex"
 }
 
 # Delete graft's untracked session cache (and graft/ itself if that is all it
@@ -123,7 +124,7 @@ clean_graft_cache() { # $1 = pasture path
   local p=$1
   [ -d "$p/graft" ] || return 0
   if ! git -C "$p" ls-files --error-unmatch graft >/dev/null 2>&1; then
-    if [ -z "$(find "$p/graft" -mindepth 1 -not -path "$p/graft/.cache" -not -path "$p/graft/.cache/*" -print -quit)" ]; then
+    if [ -z "$(gfind "$p/graft" -mindepth 1 -not -path "$p/graft/.cache" -not -path "$p/graft/.cache/*" -print -quit)" ]; then
       rm -rf -- "$p/graft"; log "removed untracked graft/ cache"
     fi
   elif [ -d "$p/graft/.cache" ] && [ -z "$(git -C "$p" ls-files graft/.cache)" ]; then
@@ -182,7 +183,7 @@ case "$cmd" in
     args=(create "$name" --source "$source" --print-path)
     [ -n "$branch" ] && args+=(--branch "$branch")
     # cow prints "Switched to a new branch" on stdout before the path; keep the last line.
-    path=$(cow "${args[@]}" | tail -n 1)
+    path=$(cow "${args[@]}" | gtail -n 1)
     [ -d "$path" ] || { log "cow create did not yield a directory: $path"; exit 1; }
     if [ "$keep" = 1 ]; then log "--keep-secrets: skipping scrub"; else scrub "$path" 0; fi
     exclude_graft_cache "$path"

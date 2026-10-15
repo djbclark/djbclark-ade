@@ -29,6 +29,7 @@
 # slash command only accepts the autocomplete, so up to two more Enters are sent
 # while the text (or its menu row) is still on screen (verified 2026-10-10 with
 # /rename; /quit left its menu row open, cursor-agent 2026.10.01).
+export PATH="/opt/homebrew/bin:$PATH"
 set -u
 delay=6; dry=0
 while :; do case "${1:-}" in --delay) delay="$2"; shift 2;; --dry-run) dry=1; shift;; *) break;; esac; done
@@ -69,16 +70,16 @@ log="$HOME/.local/state/self-slash.log"; mkdir -p "$(dirname "$log")"
 # freshly compacted 37k context into 126k (the queued second /compact ran after
 # the first, and each one costs ~150k+ base-input-equivalent tokens).
 lockdir="$HOME/.local/state/self-slash"; mkdir -p "$lockdir"
-lock="$lockdir/$(printf '%s' "$pane" | tr -c 'A-Za-z0-9_.-' '_').pid"
+lock="$lockdir/$(printf '%s' "$pane" | gtr -c 'A-Za-z0-9_.-' '_').pid"
 if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   if [ -s "$lock" ] && kill -0 "$(cat "$lock")" 2>/dev/null; then
     echo "self-slash: a command is already queued for $host $pane (pid $(cat "$lock")); not queuing another. See $log." >&2; exit 7
   fi
   case "$text" in /compact*)
     gap="${SELF_SLASH_COMPACT_GAP:-1800}"
-    last=$(grep -F " $host $pane: sent /compact" "$log" 2>/dev/null | tail -1 | cut -c1-19)
+    last=$(ggrep -F " $host $pane: sent /compact" "$log" 2>/dev/null | gtail -1 | gcut -c1-19)
     if [ -n "$last" ]; then
-      ago=$(( $(date +%s) - $(date -j -f '%Y-%m-%d %H:%M:%S' "$last" +%s 2>/dev/null || echo 0) ))
+      ago=$(( $(gdate +%s) - $(gdate -d "$last" +%s 2>/dev/null || echo 0) ))
       if [ "$ago" -lt "$gap" ]; then
         echo "self-slash: /compact was already sent to $host $pane ${ago}s ago (< ${gap}s); not compacting again. Compaction is not free; keep working (SELF_SLASH_COMPACT_GAP=N to override)." >&2; exit 7
       fi
@@ -146,8 +147,8 @@ print(text if text else "EMPTY")
 print("RAW " + repr(lines[-1][:220]), file=sys.stderr)' "$marker" 2>>"$log"
   else
     screen=$(read_screen)
-    if ! printf "%s\n" "$screen" | grep -qE "^[[:space:]]*❯"; then echo NOPROMPT; return; fi
-    prompt=$(printf "%s\n" "$screen" | grep -E "^[[:space:]]*❯" | tail -1 | sed -E "s/^[[:space:]]*❯[[:space:]]*//")
+    if ! printf "%s\n" "$screen" | ggrep -qE "^[[:space:]]*❯"; then echo NOPROMPT; return; fi
+    prompt=$(printf "%s\n" "$screen" | ggrep -E "^[[:space:]]*❯" | gtail -1 | gsed -E "s/^[[:space:]]*❯[[:space:]]*//")
     case "$prompt" in "Try \""*|"Try “"*|"Press up to edit queued messages"*) prompt="";; esac
     echo "${prompt:-EMPTY}"
   fi
@@ -181,7 +182,7 @@ send_text() {
 
 # Two parents can pass the check above before either child writes the lock.
 if [ -s "$lock" ] && [ "$(cat "$lock")" != "$$" ] && kill -0 "$(cat "$lock")" 2>/dev/null; then
-  echo "$(date '+%F %T') $host $pane: another waiter (pid $(cat "$lock")) already queued; NOT sent: ${text:0:80}"; exit 7
+  echo "$(gdate '+%F %T') $host $pane: another waiter (pid $(cat "$lock")) already queued; NOT sent: ${text:0:80}"; exit 7
 fi
 echo $$ > "$lock"; trap 'rm -f "$lock"' EXIT
 sleep "$delay"
@@ -205,12 +206,12 @@ for p in json.load(sys.stdin).get("result", {}).get("panes", []):
     # tokens)", or "esc to interrupt"); no such line means the turn has ended and
     # the command will run, so treat that as idle.  cursor-agent's marker is
     # "ctrl+c to stop" at the right of its input box.
-    if ! herdr agent read "$pane" --source visible --lines 60 2>/dev/null | grep -qE '…[[:space:]]*\([0-9]+[smh]|esc to interrupt|ctrl\+c to stop'; then
-      [ "$said" = 2 ] || { echo "$(date '+%F %T') $host $pane: status working but no main-turn spinner on screen (background sub-agent only); treating as idle"; said=2; }
+    if ! herdr agent read "$pane" --source visible --lines 60 2>/dev/null | ggrep -qE '…[[:space:]]*\([0-9]+[smh]|esc to interrupt|ctrl\+c to stop'; then
+      [ "$said" = 2 ] || { echo "$(gdate '+%F %T') $host $pane: status working but no main-turn spinner on screen (background sub-agent only); treating as idle"; said=2; }
       return 0
     fi
-    [ "$said" = 1 ] || { echo "$(date '+%F %T') $host $pane: session is working, waiting for idle before sending"; said=1; }
-    [ "$waited" -lt "${SELF_SLASH_WAIT:-900}" ] || { echo "$(date '+%F %T') $host $pane: gave up after ${waited}s, session still working; NOT sent: ${text:0:80}"; exit 6; }
+    [ "$said" = 1 ] || { echo "$(gdate '+%F %T') $host $pane: session is working, waiting for idle before sending"; said=1; }
+    [ "$waited" -lt "${SELF_SLASH_WAIT:-900}" ] || { echo "$(gdate '+%F %T') $host $pane: gave up after ${waited}s, session still working; NOT sent: ${text:0:80}"; exit 6; }
     sleep 5; waited=$((waited+5))
   done
 }
@@ -220,7 +221,7 @@ while :; do
   prompt=$(classify_prompt)
   if [ "$prompt" = NOPROMPT ]; then
     noprompt=$((noprompt+1)); [ "$noprompt" -le 9 ] || break
-    echo "$(date '+%F %T') $host $pane: no input prompt on screen yet (attempt $noprompt), waiting"; sleep 5; continue
+    echo "$(gdate '+%F %T') $host $pane: no input prompt on screen yet (attempt $noprompt), waiting"; sleep 5; continue
   fi
   if [ "$prompt" != EMPTY ]; then
     # Operator text on the ❯ line: an unsent draft, a message QUEUED mid-turn
@@ -235,17 +236,17 @@ while :; do
     # SELF_SLASH_GHOST=<seconds> re-enables the old behaviour explicitly, at the
     # caller's risk; unset or 0 means never.
     if [ "$prompt" = "$last_prompt" ]; then same=$((same+5)); else same=0; last_prompt="$prompt"
-      echo "$(date '+%F %T') $host $pane: text on input line (draft or queued message), waiting: ${prompt:0:60}"; fi
+      echo "$(gdate '+%F %T') $host $pane: text on input line (draft or queued message), waiting: ${prompt:0:60}"; fi
     drafted=$((drafted+5))
     if [ "$drafted" -ge "${SELF_SLASH_WAIT:-900}" ]; then
-      echo "$(date '+%F %T') $host $pane: REFUSED after ${drafted}s, text still in input box; NOT sent: ${prompt:0:60}"; exit 4
+      echo "$(gdate '+%F %T') $host $pane: REFUSED after ${drafted}s, text still in input box; NOT sent: ${prompt:0:60}"; exit 4
     fi
     ghost="${SELF_SLASH_GHOST:-0}"
     if [ "$ghost" -le 0 ] || [ "$same" -lt "$ghost" ]; then sleep 5; wait_idle; continue; fi
-    echo "$(date '+%F %T') $host $pane: unchanged for ${same}s while idle and SELF_SLASH_GHOST=$ghost set by caller; sending over it"
+    echo "$(gdate '+%F %T') $host $pane: unchanged for ${same}s while idle and SELF_SLASH_GHOST=$ghost set by caller; sending over it"
   fi
-  send_text && { echo "$(date '+%F %T') $host $pane: sent ${text:0:80}"; exit 0; }
+  send_text && { echo "$(gdate '+%F %T') $host $pane: sent ${text:0:80}"; exit 0; }
   sendfail=$((sendfail+1)); [ "$sendfail" -le 6 ] || break
-  echo "$(date '+%F %T') $host $pane: send failed (attempt $sendfail)"; sleep 5
+  echo "$(gdate '+%F %T') $host $pane: send failed (attempt $sendfail)"; sleep 5
 done
-echo "$(date '+%F %T') $host $pane: gave up, no empty input prompt seen"; exit 5
+echo "$(gdate '+%F %T') $host $pane: gave up, no empty input prompt seen"; exit 5

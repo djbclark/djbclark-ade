@@ -54,7 +54,7 @@ FAKE = textwrap.dedent("""\
       -f) brief="$2"; shift;; --log) log="$2"; shift;; esac; shift; done
     printf '%s\\n' '{"kind":"initialize","data":{"agentCapabilities":{"loadSession":true}}}' '{"kind":"new_session","data":{"sessionId":"fake-session"}}' > "$log"
     echo "$@" > /dev/null
-    report=$(grep -o 'deliverable to `[^`]*`' "$brief" | head -1 | sed 's/.*`\\(.*\\)`/\\1/')
+    report=$(ggrep -o 'deliverable to `[^`]*`' "$brief" | ghead -1 | gsed 's/.*`\\(.*\\)`/\\1/')
     case "${FAKE_MODE:-writes}" in
       writes)   printf 'STATUS: working\\nfound it\\nDONE\\n' > "$report"; echo "written: $report"; exit 0;;
       slow)     sleep 2; printf 'STATUS: working\\nfound it\\nDONE\\n' > "$report"; exit 0;;

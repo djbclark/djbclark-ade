@@ -11,6 +11,7 @@
 #    command, read over SSH (read-only; needs a key in Hyades' authorized_keys or
 #    a Kerberos ticket).
 # Then `git diff references/` shows what changed upstream.
+export PATH="/opt/homebrew/bin:$PATH"
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REF="$HERE/../references"
@@ -22,7 +23,7 @@ mkdir -p "$UP"
 fail=0
 
 fetch() { # repo path dest
-  local tmp; tmp="$(mktemp)"
+  local tmp; tmp="$(gmktemp)"
   if curl -sSfL "$RAW/SIPB/$1/raw/branch/main/$2" -o "$tmp" && [ -s "$tmp" ]; then
     chmod 644 "$tmp" && mv -f "$tmp" "$3"
   else
@@ -41,7 +42,7 @@ sha() { curl -sSf "$RAW/api/v1/repos/SIPB/$1/branches/main" | jq -r '.commit.id'
 {
   echo "# Upstream snapshots"
   echo
-  echo "Fetched $(date +%F) by \`scripts/hyades-refresh-docs\`. Copyright 2026 SIPB, MIT licence (\`LICENSE\`)."
+  echo "Fetched $(gdate +%F) by \`scripts/hyades-refresh-docs\`. Copyright 2026 SIPB, MIT licence (\`LICENSE\`)."
   echo
   echo "| File | Source | Commit |"
   echo "|---|---|---|"
@@ -54,15 +55,15 @@ sha() { curl -sSf "$RAW/api/v1/repos/SIPB/$1/branches/main" | jq -r '.commit.id'
 } > "$UP/SOURCE.md"
 
 # Console help: the topic list comes from `help` itself, so new commands appear.
-tmp="$(mktemp)"
+tmp="$(gmktemp)"
 if timeout 60 ssh -o BatchMode=yes "$USER_AT" help > "$tmp" 2>&1 && rg -q 'Documented commands' "$tmp"; then
   {
-    echo "# Hyades console help, captured $(date +%F) over ssh $USER_AT"
+    echo "# Hyades console help, captured $(gdate +%F) over ssh $USER_AT"
     echo "# (one-line docstrings; behaviour and caveats are in console.md)"
     echo
     echo '$ ssh '"$USER_AT"' help'
     cat "$tmp"
-    for t in $(gsed -n '/^=\+$/,$p' "$tmp" | gsed '1d' | tr -s ' ' '\n' | rg -v '^$' | sort); do
+    for t in $(gsed -n '/^=\+$/,$p' "$tmp" | gsed '1d' | gtr -s ' ' '\n' | rg -v '^$' | gsort); do
       echo '$ ssh '"$USER_AT"' help '"$t"
       timeout 30 ssh -o BatchMode=yes "$USER_AT" help "$t" 2>&1
     done

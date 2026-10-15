@@ -345,20 +345,20 @@ def runner_script(d, acp_cmd, pane=None):
     2026-10-11). It reads a FIFO opened read-write instead: no EOF ever arrives, the inbox feeds the
     prompts, and /exit (launch.py close) ends it."""
     q = lambda s: "'" + str(s).replace("'", "'\\''") + "'"  # noqa: E731
-    lines = ["#!/usr/bin/env bash", "set -o pipefail", f"echo 'launch {d['id']}: {d['agent']} in {d['cwd']} (acp)'"]
+    lines = ["#!/usr/bin/env bash", 'export PATH="/opt/homebrew/bin:$PATH"', "set -o pipefail", f"echo 'launch {d['id']}: {d['agent']} in {d['cwd']} (acp)'"]
     if pane:
         lines.append(f"{q(HERDR)} pane report-agent {q(pane)} --source session-finder --agent {q(d['agent'])} "
                      f"--state working --agent-session-id {q(d['id'])} >/dev/null 2>&1")
     stdin = f" 0<> {q(d['stdin'])}" if d.get("stdin") else ""
     # PYTHONUNBUFFERED: stdout is a pipe (tee), and the pane must show the agent as it streams
     lines.append("PYTHONUNBUFFERED=1 " + " ".join(q(c) for c in acp_cmd) + stdin +
-                 f" 2> >(tee {q(d['err'])} >&2) | tee {q(d['out'])}")
+                 f" 2> >(gtee {q(d['err'])} >&2) | gtee {q(d['out'])}")
     lines.append("rc=${PIPESTATUS[0]}")
     if d.get("stdin"):
         lines.append(f"rm -f {q(d['stdin'])}")
-    lines.append(f"printf '%s\\n' \"{{\\\"id\\\": \\\"{d['id']}\\\", \\\"exit\\\": $rc, \\\"ended\\\": $(date +%s)}}\" >> {q(fleet.LAUNCHES)}")
+    lines.append(f"printf '%s\\n' \"{{\\\"id\\\": \\\"{d['id']}\\\", \\\"exit\\\": $rc, \\\"ended\\\": $(gdate +%s)}}\" >> {q(fleet.LAUNCHES)}")
     if d.get("claim"):
-        lines.append(f"printf 'DONE %s\\n' \"$(date +%Y-%m-%dT%H:%M:%S)\" >> {q(d['claim'])}")
+        lines.append(f"printf 'DONE %s\\n' \"$(gdate +%Y-%m-%dT%H:%M:%S)\" >> {q(d['claim'])}")
     if pane:
         lines.append(f"{q(HERDR)} pane report-agent {q(pane)} --source session-finder --agent {q(d['agent'])} "
                      f"--state idle --agent-session-id {q(d['id'])} --message \"exit $rc\" >/dev/null 2>&1")

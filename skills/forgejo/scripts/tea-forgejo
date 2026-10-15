@@ -8,9 +8,10 @@
 # is configured, so nothing is written to ~/.config/tea (never `tea login add`
 # here: it stores the token in plaintext). The secret is DJBCLARK_<HOST>_TOKEN,
 # see setup-token.
+export PATH="/opt/homebrew/bin:$PATH"
 set -uo pipefail
 HOST="${FORGEJO_HOST:-forgejo.mit.edu}"
-VAR="DJBCLARK_$(printf '%s' "$HOST" | tr 'a-z.-' 'A-Z__')_TOKEN"
+VAR="DJBCLARK_$(printf '%s' "$HOST" | gtr 'a-z.-' 'A-Z__')_TOKEN"
 exec sudo-secretspec run --reason "tea against ${HOST}" -- \
   bash -c 'export GITEA_INSTANCE_URL="https://$1" GITEA_TOKEN="${!2}"; shift 2; exec tea "$@"' \
   _ "$HOST" "$VAR" "$@"

@@ -12,12 +12,13 @@
 # page in the default browser, let sudo-secretspec prompt for the value (it
 # never touches this script, a file, or the transcript), then verify it with a
 # read-only call that prints only the login (or the package count).
+export PATH="/opt/homebrew/bin:$PATH"
 set -uo pipefail
 
 HOST="${1:-forgejo.mit.edu}"
 PURPOSE="${2:-}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SUFFIX="$(printf '%s' "$HOST" | tr 'a-z.-' 'A-Z__')"
+SUFFIX="$(printf '%s' "$HOST" | gtr 'a-z.-' 'A-Z__')"
 if [ -n "$PURPOSE" ]; then
   [[ "$PURPOSE" =~ ^[A-Z][A-Z0-9_]*$ ]] || { echo "PURPOSE must be upper case, e.g. PACKAGE" >&2; exit 2; }
   NAME="DJBCLARK_${SUFFIX}_${PURPOSE}_TOKEN"

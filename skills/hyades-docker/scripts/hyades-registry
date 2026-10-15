@@ -19,6 +19,7 @@
 # the forgejo skill's `setup-token forgejo.mit.edu PACKAGE`), falling back to
 # DJBCLARK_<REGISTRY>_TOKEN. FORGEJO_USER (default djbclark) is the login name.
 # HYADES_REGISTRY (default forgejo.mit.edu).
+export PATH="/opt/homebrew/bin:$PATH"
 set -uo pipefail
 REG="${HYADES_REGISTRY:-forgejo.mit.edu}"
 LOGIN="${FORGEJO_USER:-djbclark}"
@@ -39,7 +40,7 @@ if [ "$(basename "$ENGINE")" = podman ] && [ "$(uname)" = Darwin ] && [ -z "$(po
   echo "  podman system connection add NAME ssh://USER@HOST/run/user/UID/podman/podman.sock" >&2
   exit 3
 fi
-SUFFIX="$(printf '%s' "$REG" | tr 'a-z.-' 'A-Z__')"
+SUFFIX="$(printf '%s' "$REG" | gtr 'a-z.-' 'A-Z__')"
 
 exec sudo-secretspec run --reason "container registry access to ${REG}" -- bash -c '
   set -uo pipefail
@@ -49,7 +50,7 @@ exec sudo-secretspec run --reason "container registry access to ${REG}" -- bash 
     echo "hyades-registry: neither $pkg nor $main holds a value (forgejo skill: setup-token $reg PACKAGE)" >&2
     exit 2
   fi
-  dir="$(mktemp -d)"; chmod 700 "$dir"; trap "rm -rf \"$dir\"" EXIT
+  dir="$(gmktemp -d)"; chmod 700 "$dir"; trap "rm -rf \"$dir\"" EXIT
   case "$(basename "$engine")" in
     docker*) export DOCKER_CONFIG="$dir"; login_cmd=("$engine" login) ;;
     crane*)  export DOCKER_CONFIG="$dir"; login_cmd=("$engine" auth login) ;;

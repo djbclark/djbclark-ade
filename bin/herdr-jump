@@ -21,6 +21,7 @@
 # `herdr agent focus` covers agent panes only). Popup commands get
 # HERDR_BIN_PATH and HERDR_SOCKET_PATH; from a plain shell the defaults
 # below apply.
+export PATH="/opt/homebrew/bin:$PATH"
 set -u
 
 HB=${HERDR_BIN_PATH:-herdr}
@@ -41,11 +42,11 @@ fi
 
 # Normalise: trim, accept "22:t4" / "22" without the w, and any letter case.
 # Workspace ids are uppercase hex (w2E); the w/t/p markers are lowercase.
-addr=$(printf '%s' "$addr" | tr -d '[:space:]')
+addr=$(printf '%s' "$addr" | gtr -d '[:space:]')
 [ -n "$addr" ] || exit 0
 case "$addr" in [wW]*) addr=${addr#?} ;; esac
 ws=${addr%%:*}; rest=${addr#"$ws"}
-ws=$(printf '%s' "$ws" | tr 'a-f' 'A-F'); rest=$(printf '%s' "$rest" | tr 'TP' 'tp')
+ws=$(printf '%s' "$ws" | gtr 'a-f' 'A-F'); rest=$(printf '%s' "$rest" | gtr 'TP' 'tp')
 addr="w$ws$rest"
 case "$addr" in
     w[0-9A-F]*) ;;
@@ -59,15 +60,15 @@ case "$addr" in
         req=$(printf '{"id":"jump","method":"pane.focus","params":{"pane_id":"%s"}}\n' "$addr")
         resp=$(printf '%s\n' "$req" | nc -U -w 2 "$SOCK") || fail "socket call failed"
         case "$resp" in
-            *'"error"'*) fail "herdr: $(printf '%s' "$resp" | sed -E 's/.*"message":"([^"]*)".*/\1/')" ;;
+            *'"error"'*) fail "herdr: $(printf '%s' "$resp" | gsed -E 's/.*"message":"([^"]*)".*/\1/')" ;;
             *'"result"'*) exit 0 ;;
             *) fail "no reply from herdr" ;;
         esac
         ;;
     w*:t*)
-        out=$("$HB" tab focus "$addr" 2>&1) || fail "$(printf '%s' "$out" | sed -E 's/.*"message":"([^"]*)".*/\1/')"
+        out=$("$HB" tab focus "$addr" 2>&1) || fail "$(printf '%s' "$out" | gsed -E 's/.*"message":"([^"]*)".*/\1/')"
         ;;
     w*)
-        out=$("$HB" workspace focus "$addr" 2>&1) || fail "$(printf '%s' "$out" | sed -E 's/.*"message":"([^"]*)".*/\1/')"
+        out=$("$HB" workspace focus "$addr" 2>&1) || fail "$(printf '%s' "$out" | gsed -E 's/.*"message":"([^"]*)".*/\1/')"
         ;;
 esac
