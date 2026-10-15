@@ -2,7 +2,8 @@
 """acp-dispatch — one consistent way to hand a slice to an agent and get its report back.
 
     acp-dispatch <agent> --model M --name NAME (-p PROMPT | -f BRIEF) [-C DIR]
-                 (--model is not accepted by zcode, whose ACP server has no model option: omit it)
+                 (--model may be omitted for zcode only, which has just two models)
+                 [--effort LEVEL] [--context SIZE]
                  [--task TASK | --out DIR] [--perm all|deny] [--timeout S]
                  [--lead NAME] [--detach [--no-wait] [--wait-timeout S]] [--dry-run] [--json]
                  [--min-headroom PCT] [--est-pct PCT] [--checkpoint] [--no-preflight]
@@ -37,6 +38,12 @@ agent's model list comes from `acp-run <agent> --info` (its ACP session/new list
 acp-run itself matches against), cached per agent for 6 h under ~/.cache/acp-dispatch and
 re-read once on a miss; a miss exits 2 with the `have:` list. If the probe itself fails the
 dispatch goes ahead with a warning. --no-model-check skips it.
+
+--effort LEVEL and --context SIZE are acp-run's normalized flags (acp-run --help), passed to it
+first-class after --model and recorded in the job record. They are checked together with the model,
+before anything is written or detached, by `acp-run <agent> --info --model M --effort E --context C`
+(it applies them to a fresh session without a prompt): an agent or model that cannot take the value
+exits 2 here with acp-run's list of valid values. --acp-arg still passes anything else through.
 
 When the agent stops without a DONE or BLOCKED report and acp-run failed (a quota or plan
 refusal, a crash, a timeout), finalize appends a last line `NO-REPORT: <class> (<agent>,
@@ -140,10 +147,10 @@ WRAPUP_TEXT = (
     "Your reply is only `written: {report}`."
 )
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-# Agents whose ACP server refuses a model switch (zcode-acp-server 0.67.0 advertises `model` but every
-# set fails: "unsupported config option or switch failed: model"; its ZCODE_PROVIDER+ZCODE_MODEL env pin was refused
-# too. Checked 2026-10-11 with the z.ai weekly limit exhausted: recheck after it resets).
-NO_MODEL_AGENTS = {"zcode"}
+# Agents that may be dispatched without --model. zcode-acp-server's model switch failed for every call until
+# 2026-10-15 ("unsupported config option or switch failed: model"); acp-run now gives it ZCODE_BIN, which
+# fixes it, so --model is accepted; it stays optional because the agent has only two models.
+MODEL_OPTIONAL_AGENTS = {"zcode"}
 # Never dispatched without the operator's specific, explicit approval for that run (operator 2026-10-15);
 # the same gate is in acp-run.
 OPERATOR_GATED = {"omp"}
@@ -515,20 +522,25 @@ def model_values(info: dict) -> list[dict] | None:
 
 
 def match_model(values: list[dict], want: str) -> tuple[bool, str]:
-    """Mirror of acp-run pick_config: an exact value or name, else a unique run of
-    dash-separated tokens (a trailing "[...]" ignored on both sides). (ok, why-not)."""
+    """Mirror of acp-run match_value: an exact value or name, else a unique run of dash-separated
+    tokens (a trailing "[...]" or "(...)" ignored on both sides), else the same across `:` and `/`
+    (hermes: nous:anthropic/claude-x). (ok, why-not)."""
     if any(want in (v.get("value"), v.get("name")) for v in values):
         return True, ""
 
-    def toks(x: object) -> list[str]:
-        return re.sub(r"\[[^\]]*\]$", "", str(x or "")).lower().split("-")
+    def toks(x: object, split: str) -> list[str]:
+        return re.split(split, re.sub(r"(\[[^\]]*\]|\([^)]*\))$", "", str(x or "")).lower())
 
-    wt = toks(want)
-    cands = [v for v in values
-             if any(any(ct[i:i + len(wt)] == wt for i in range(len(ct) - len(wt) + 1))
-                    for ct in (toks(v.get("value")), toks(v.get("name"))))]
-    if len(cands) == 1:
-        return True, ""
+    cands: list[dict] = []
+    for split in ("-", "[-:/]"):
+        wt = toks(want, split)
+        cands = [v for v in values
+                 if any(any(ct[i:i + len(wt)] == wt for i in range(len(ct) - len(wt) + 1))
+                        for ct in (toks(v.get("value"), split), toks(v.get("name"), split)))]
+        if len(cands) == 1:
+            return True, ""
+        if cands:
+            break
     amb = f" (ambiguous: {', '.join(str(c.get('value')) for c in cands)})" if cands else ""
     return False, amb + "; have: " + ", ".join(str(v.get("value")) for v in values)
 
@@ -585,6 +597,35 @@ def check_model(acp_run: str, agent: str, model: str, cwd: str) -> str | None:
         return f"{agent} offers no model option (acp-run {agent} --info): drop --model"
     ok, why = match_model(values, model)
     return None if ok else f"no model '{model}' for {agent}{why}"
+
+
+def check_options(acp_run: str, agent: str, model: str | None, effort: str | None, context: str | None,
+                  cwd: str) -> str | None:
+    """None when --effort/--context are takeable by the agent (on `model`), else the usage error to
+    die with. Runs acp-run's own check: `--info --model M --effort E --context C` applies them to a
+    fresh session (no prompt) and exits 2 naming the valid values. If the probe itself fails the
+    dispatch goes ahead with a warning."""
+    cmd = [acp_run, agent, "--info", "-C", cwd]
+    if model and agent not in MODEL_CHECK_SKIP:
+        cmd += ["--model", model]
+    if effort:
+        cmd += ["--effort", effort]
+    if context:
+        cmd += ["--context", context]
+    try:
+        r = subprocess.run(cmd, check=False, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                           timeout=INFO_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"acp-dispatch: warning: could not check --effort/--context ({e}); dispatching anyway", file=sys.stderr)
+        return None
+    lines = [ln for ln in r.stderr.splitlines() if ln.startswith("acp-run:")]
+    if r.returncode == 2 or "FAILED config" in r.stderr:
+        why = (lines[-1] if lines else f"exit {r.returncode}").removeprefix("acp-run: ")
+        return f"{agent}: {why}"
+    if r.returncode != 0:
+        print(f"acp-dispatch: warning: could not check --effort/--context (acp-run --info exit {r.returncode}); "
+              "dispatching anyway", file=sys.stderr)
+    return None
 
 
 # ---------------------------------------------------------------- failure note
@@ -1196,7 +1237,7 @@ def resume_record(a: argparse.Namespace) -> int:
         detach=a.detach, no_wait=a.no_wait, wait_timeout=a.wait_timeout, force=True, dry_run=False,
         json=False, tee=False, no_model_check=True, no_preflight=True, min_headroom=10.0,
         est_pct=rec.get("estimated_usage_pct"), checkpoint=rec.get("checkpoint", False), acp_run=old_cmd[0],
-        acp_arg=[*rec.get("acp_arg", []), "--resume", sid])
+        effort=rec.get("effort"), context=rec.get("context"), acp_arg=[*rec.get("acp_arg", []), "--resume", sid])
     return dispatch(args, {**rec, "session_id": sid, "prompt": original})
 
 
@@ -1238,10 +1279,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
             x.strip() for x in os.environ.get("ACP_OPERATOR_APPROVED", "").split(",") if x.strip()}:
         die(f"{a.agent} needs specific, explicit operator approval for this run; ask first, then set"
             f" ACP_OPERATOR_APPROVED={a.agent} (acp-run applies the same gate)")
-    if not a.model and a.agent not in NO_MODEL_AGENTS:
+    if not a.model and a.agent not in MODEL_OPTIONAL_AGENTS:
         die("--model is required (an agent's own default is the expensive one; `acp-run <agent> --info` lists values)")
-    if a.model and a.agent in NO_MODEL_AGENTS:
-        die(f"{a.agent} has no model option: its ACP server rejects --model (2026-10-09); drop it")
     if not NAME_RE.match(a.name or ""):
         die("--name must be 1-64 chars of letters, digits, . _ - (it names every output file)")
     if a.perm and not PERM_RE.match(a.perm):
@@ -1259,6 +1298,12 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
             and not any(x.startswith("--set") for x in a.acp_arg or [])):
         # Synchronously, before anything is written or detached (2026-10-10).
         bad = check_model(acp_run, a.agent, a.model, str(Path(a.dir).resolve()))
+        if bad:
+            die(bad)
+    effort, context = getattr(a, "effort", None), getattr(a, "context", None)
+    if ((effort or context) and not a.no_model_check and not a.dry_run
+            and not any(x.startswith("--set") for x in a.acp_arg or [])):
+        bad = check_options(acp_run, a.agent, a.model, effort, context, str(Path(a.dir).resolve()))
         if bad:
             die(bad)
     out = Path(a.out).expanduser().resolve() if a.out else STATE_ROOT / (a.task or f"adhoc-{date.today().isoformat()}")
@@ -1335,6 +1380,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
 
     acp_cmd = [acp_run, a.agent, "-C", str(Path(a.dir).resolve()), "--add-dir", str(out), "-f", str(brief),
                *(["--model", a.model] if a.model else []),
+               *(["--effort", effort] if effort else []), *(["--context", context] if context else []),
                "--perm", perm, "--timeout", str(a.timeout), "--log", str(log)]
     if a.wrapup_grace > 0 and a.timeout:
         acp_cmd += ["--wrapup-grace", str(a.wrapup_grace), "--wrapup",
@@ -1353,6 +1399,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         "detached": bool(a.detach), "status": "running", "pid": None, "exit": None, "finished": None,
         "report_source": None, "lead": a.lead,
         "agent_report": str(agent_report), "agent_done": str(agent_done), "perm": a.perm,
+        "effort": effort, "context": context,
         "timeout": a.timeout, "wait_timeout": wait_timeout, "wrapup_grace": a.wrapup_grace,
         "acp_arg": previous.get("acp_arg", []) if previous else a.acp_arg or [],
         "session_id": previous.get("session_id") if previous else None, "resume_count": resume_count,
@@ -1482,6 +1529,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("-C", "--dir", default=".", help="repo the agent works in (default: cwd)")
     ap.add_argument("--task", help="out dir is ~/.local/state/bigteam/<task>/ (default adhoc-<date>)")
     ap.add_argument("--out", help="explicit out dir instead of --task")
+    ap.add_argument("--effort", metavar="LEVEL",
+                    help="acp-run --effort: none|minimal|low|medium|high|xhigh|max|ultra|default; checked with the model")
+    ap.add_argument("--context", metavar="SIZE",
+                    help="acp-run --context: 200k|256k|272k|400k|500k|1m or a token count; checked with the model")
     ap.add_argument("--perm", default="all", help="all (default) | deny (read-only); a deprecated scoped:... warns and runs as all")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
                     help=f"acp-run --timeout (default {DEFAULT_TIMEOUT}; 0 is unlimited)")
