@@ -17,7 +17,8 @@ host, percent-encoded path and query), so IRIs such as https://de.wikipedia.org/
 reach every provider as ASCII.
 
 Ladders (first provider that returns usable content wins):
-  search: exa-api (api.exa.ai /search, key) -> exa-mcp (keyless Exa MCP web_search_exa)
+  search: firecrawl (self-hosted Firecrawl /v2/search on Hyades, backed by SearXNG, key)
+          -> exa-api (api.exa.ai /search, key) -> exa-mcp (keyless Exa MCP web_search_exa)
           -> parallel (Parallel MCP web_search) -> jina-mcp (Jina MCP search_web, key)
           -> jina-search (s.jina.ai, key) -> composio (composio CLI, COMPOSIO_SEARCH_DUCK_DUCK_GO)
   fetch:  exa-api (api.exa.ai /contents, key, full text up to 1000000 characters) -> exa-mcp
@@ -80,7 +81,8 @@ provider is healthy, else 5 without the pause message (a narrowed check is not a
 The exa-api probes are billed by Exa (one search, one contents page); `check` makes no other
 paid call beyond Parallel's per-request billing on their side.
 
-Keys: $JINA_API_KEY and $EXA_API_KEY if already in the environment, else read once per run,
+Keys: $JINA_API_KEY, $EXA_API_KEY and $FIRECRAWL_SELFHOST_API_KEY (the bearer token of the
+self-hosted Firecrawl gate) if already in the environment, else read once per run,
 together, through one `sudo-secretspec run` (non-interactive; captured in memory, sent only in
 request headers, never on argv, never printed or written to disk). The vault read runs before
 the ladder, outside every rung's budget, and only when a selected rung can use a key; the
@@ -90,7 +92,7 @@ Child processes (curl, pdftotext, pypdf, crwl, composio) never inherit either ke
 environment. WEB_GET_NO_SECRETSPEC=1 skips the vault and uses the keyless routes (r.jina.ai and
 the Exa MCP only). A Jina key that r.jina.ai rejects (401/403) is retried once keyless.
 
-Test hooks (env): WEB_GET_EXA_API_URL, WEB_GET_EXA_URL, WEB_GET_PARALLEL_URL,
+Test hooks (env): WEB_GET_FIRECRAWL_URL, WEB_GET_EXA_API_URL, WEB_GET_EXA_URL, WEB_GET_PARALLEL_URL,
 WEB_GET_JINA_MCP_URL, WEB_GET_JINA_READER_URL, WEB_GET_JINA_SEARCH_URL,
 WEB_GET_WAYBACK_WEB_URL (captures and the CDX API), WEB_GET_CRWL, WEB_GET_CRWL_DELAY (s,
 default 3), WEB_GET_CRWL_TIMEOUT, WEB_GET_WAYBACK_TIMEOUT, WEB_GET_PDF_TIMEOUT, WEB_GET_PDF_VIA,
@@ -137,11 +139,15 @@ UA = "web-get/1.0 (+djbclark-ade)"
 PAUSE_MSG = "ALL PROVIDERS FAILED — pause dependent work (operator rule 2026-10-11)"
 CAPPED_PROVIDERS = ("exa-api", "exa-mcp")
 # Rungs that can use a key (wayback falls back to r.jina.ai, which needs one for web.archive.org).
-KEYED_RUNGS = {"exa-api", "jina-mcp", "jina-search", "jina-reader", "wayback"}
+KEYED_RUNGS = {"firecrawl", "exa-api", "jina-mcp", "jina-search", "jina-reader", "wayback"}
 
 
 def env(name: str, default: str) -> str:
     return os.environ.get(name) or default
+
+
+def firecrawl_url() -> str:
+    return env("WEB_GET_FIRECRAWL_URL", "https://djbclark-firecrawl.sipb.cloud").rstrip("/")
 
 
 def exa_api_url() -> str: return env("WEB_GET_EXA_API_URL", "https://api.exa.ai").rstrip("/")
@@ -159,9 +165,9 @@ class ProviderError(Exception):
 
 # ---------------------------------------------------------------- keys (never printed)
 
-VAULT_NAMES = ("JINA_API_KEY", "EXA_API_KEY")
+VAULT_NAMES = ("JINA_API_KEY", "EXA_API_KEY", "FIRECRAWL_SELFHOST_API_KEY")
 _key_lock = threading.Lock()
-_keys: dict = {"done": False, "JINA_API_KEY": None, "EXA_API_KEY": None, "notes": {}}
+_keys: dict = {"done": False, "notes": {}, **{n: None for n in VAULT_NAMES}}
 
 
 def secretspec_client() -> str | None:
@@ -207,7 +213,7 @@ def _resolve_keys() -> None:
             script = "printf '%s\\n' " + " ".join(f'"${{{n}:-}}"' for n in missing)
             try:
                 rc, out, _ = run_cmd(
-                    [exe, "run", "--reason", "web-get: Exa and Jina search/fetch auth", "--",
+                    [exe, "run", "--reason", "web-get: Exa, Jina and Firecrawl search/fetch auth", "--",
                      "/bin/sh", "-c", script], Deadline(max(budget, 0.5)))
             except ProviderError as e:
                 why = (f"sudo-secretspec run timed out after {budget:g} s" if str(e) == "timeout"
@@ -243,6 +249,10 @@ def jina_key() -> str | None:
 
 def exa_key() -> str | None:
     return vault_key("EXA_API_KEY")
+
+
+def firecrawl_key() -> str | None:
+    return vault_key("FIRECRAWL_SELFHOST_API_KEY")
 
 
 def redact(text: str) -> str:
@@ -818,6 +828,27 @@ def exa_api(path: str, body: dict, dl: Deadline) -> dict:
     return obj
 
 
+def search_firecrawl(q: str, n: int, dl: Deadline) -> tuple[str, str]:
+    # Self-hosted, so no per-call bill; its SearXNG backend asks Google, Bing, Brave and others.
+    key = firecrawl_key()
+    if not key:
+        raise ProviderError(f"no Firecrawl key ({key_note('FIRECRAWL_SELFHOST_API_KEY')})")
+    _, _, text = http("POST", f"{firecrawl_url()}/v2/search", dl,
+                      json.dumps({"query": q, "limit": n}).encode(),
+                      {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                       "Accept": "application/json"})
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        raise ProviderError("firecrawl: unparseable reply")
+    if not isinstance(obj, dict) or not obj.get("success"):
+        raise ProviderError(f"firecrawl: {str((obj or {}).get('error') or 'error')[:200]}")
+    data = obj.get("data")
+    rows = data.get("web") if isinstance(data, dict) else data
+    rows = [r for r in rows or [] if isinstance(r, dict)]
+    return check_search_content(fmt_results(rows, n)), ""
+
+
 def search_exa_api(q: str, n: int, dl: Deadline) -> tuple[str, str]:
     # One /search call with highlights (no /contents call). Exa bills a search by result count:
     # the default --n 8 stays in the base tier (up to 10 results); --n 11-25 costs more.
@@ -1244,8 +1275,9 @@ def fetch_wayback(url: str, dl: Deadline, max_chars: int) -> tuple[str, str]:
     raise ProviderError("wayback: " + "; ".join(errors))
 
 
-SEARCH = [("exa-api", search_exa_api), ("exa-mcp", search_exa_mcp), ("parallel", search_parallel),
-          ("jina-mcp", search_jina_mcp), ("jina-search", search_jina_s), ("composio", search_composio)]
+SEARCH = [("firecrawl", search_firecrawl), ("exa-api", search_exa_api), ("exa-mcp", search_exa_mcp),
+          ("parallel", search_parallel), ("jina-mcp", search_jina_mcp), ("jina-search", search_jina_s),
+          ("composio", search_composio)]
 FETCH = [("exa-api", fetch_exa_api), ("exa-mcp", fetch_exa_mcp), ("parallel", fetch_parallel),
          ("jina-reader", fetch_jina_reader), ("pdf", fetch_pdf), ("crawl4ai", fetch_crawl4ai),
          ("wayback", fetch_wayback)]
@@ -1522,6 +1554,9 @@ def cmd_check(only, skip, timeout, as_json, verbose, crwl_timeout=DEFAULT_CRWL_T
         if not jina_key():
             print(f"note: no Jina key ({key_note('JINA_API_KEY')}); jina-mcp/jina-search unavailable, "
                   "jina-reader keyless", file=sys.stderr)
+        if not firecrawl_key():
+            print(f"note: no Firecrawl key ({key_note('FIRECRAWL_SELFHOST_API_KEY')}); firecrawl "
+                  "unavailable", file=sys.stderr)
         if not exa_key():
             print(f"note: no Exa key ({key_note('EXA_API_KEY')}); exa-api unavailable, exa-mcp "
                   "keyless", file=sys.stderr)

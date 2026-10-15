@@ -85,7 +85,10 @@ changes them.
 as the last automated rung for every client below. The script's docstring is
 authoritative; this is its contract as of 2026-10-11.
 
-2.1. `web-get search '<query>' [--n 8]`: exa-api (`api.exa.ai/search`, key;
+2.1. `web-get search '<query>' [--n 8]`: firecrawl (the self-hosted
+   Firecrawl's `/v2/search` at `djbclark-firecrawl.sipb.cloud`, bearer
+   `FIRECRAWL_SELFHOST_API_KEY`, backed by SearXNG on Hyades; free, added
+   2026-10-14) → exa-api (`api.exa.ai/search`, key;
    one call, highlights inline) → exa-mcp (keyless `web_search_exa`) →
    parallel (`web_search`) → jina-mcp (`search_web`, key) → jina-search
    (`s.jina.ai`, key) → composio (`COMPOSIO_SEARCH_DUCK_DUCK_GO`).
@@ -123,7 +126,7 @@ authoritative; this is its contract as of 2026-10-11.
    seconds later (default 300, or `$WEB_GET_WALK_BUDGET`; skipped rungs say
    "walk budget ... spent"). The vault read (5.6.4) runs before the ladder,
    outside every rung's budget.
-2.5. `web-get check`: probes every provider once (13 probes: 6 search, 7
+2.5. `web-get check`: probes every provider once (14 probes: 7 search, 7
    fetch), in parallel, and exits 0 when at least 3 are healthy with one
    search and one fetch provider among them, else 5. Narrowed with
    `--only`/`--skip`, it exits 0 only when every selected provider is
@@ -204,8 +207,8 @@ authoritative; this is its contract as of 2026-10-11.
    `pdftotext -enc UTF-8` (poppler 26.10.0, `/opt/homebrew/bin`; `pypdf`
    6.19.0 through `uv run` when pdftotext is missing; 5.1.0 was affected by
    GHSA-7hfw-26vp-jp8m), and removes the directory, on a signal too. No child
-   process (curl, pdftotext, pypdf, crwl, composio) inherits `EXA_API_KEY` or
-   `JINA_API_KEY`, even when they are exported. crawl4ai skips a PDF (`crwl`
+   process (curl, pdftotext, pypdf, crwl, composio) inherits `EXA_API_KEY`,
+   `JINA_API_KEY` or `FIRECRAWL_SELFHOST_API_KEY`, even when they are exported. crawl4ai skips a PDF (`crwl`
    0.9.4 dies with "'NoneType' object has no attribute 'raw_markdown'"), but
    tries a `.pdf` URL that the pdf rung downloaded and found to be HTML (a
    viewer or landing page), and a `crwl` crash with that message is
@@ -358,9 +361,11 @@ Names and paths only. Never print or copy a key.
       results with `keyless? False`, and the gateway was restarted
       (`launchctl kickstart -k gui/$(id -u)/com.stayturgid.hermes-gateway`,
       11:09:57) and reconnected Discord and Telegram.
-   5.6.4. `web-get`: `$EXA_API_KEY` if set, else read with `$JINA_API_KEY` in
-      one `sudo-secretspec run` per invocation, kept in memory and sent only
-      as the `x-api-key` header to `api.exa.ai` (never argv, never printed).
+   5.6.4. `web-get`: `$EXA_API_KEY` if set, else read with `$JINA_API_KEY` and
+      `$FIRECRAWL_SELFHOST_API_KEY` in one `sudo-secretspec run` per
+      invocation, kept in memory and sent only as the `x-api-key` header to
+      `api.exa.ai` (the Firecrawl one only as the gate's bearer token; never
+      argv, never printed).
       The read runs before the ladder and only when a selected rung can use
       a key, through `/usr/local/bin/sudo-secretspec` when present (a PATH
       entry could shadow it), bounded by `$WEB_GET_SECRETSPEC_TIMEOUT`

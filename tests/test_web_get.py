@@ -32,6 +32,7 @@ _loader.exec_module(wg)
 
 KEY = "jina_TESTKEY_0123456789abcdef"
 EXA_KEY = "exa-TESTKEY-0123-4567-89ab-cdef0123"
+FC_KEY = "fc-TESTKEY-0123456789abcdef0123456789abcdef"
 ARTICLE = "This is the real article body. " * 40  # ~1240 chars
 BLOCK = "<html><title>Just a moment...</title>Checking your browser before accessing.</html>" + " " * 300
 # Verbatim from a live `web-get search ... --only exa` on 2026-10-11 (Exa's free tier, rc 0).
@@ -110,6 +111,8 @@ class Stub(http.server.BaseHTTPRequestHandler):
         prov = self.path.strip("/").split("/")[0]  # exa | parallel | jinamcp | exaapi
         if prov == "exaapi":
             return self._exa_rest(msg)
+        if prov == "firecrawl":
+            return self._firecrawl(msg)
         AUTH_SEEN.append(self.headers.get("Authorization") or "")
         if "id" not in msg:  # notification
             self.send_response(202)
@@ -204,6 +207,23 @@ class Stub(http.server.BaseHTTPRequestHandler):
         return self._send(200, json.dumps({"requestId": "r4", "results": [
             {"id": url, "url": url, "title": title, "text": text}],
             "statuses": [{"id": url, "status": "success", "source": "cached"}]}))
+
+    def _firecrawl(self, body):
+        """Self-hosted Firecrawl /v2/search behind the bearer-token gate (Caddy answers 401)."""
+        AUTH_SEEN.append(self.headers.get("Authorization") or "")
+        HITS.append("firecrawl:" + "/" + self.path.strip("/").split("/", 1)[1])
+        ARGS.append({"prov": "firecrawl", **body})
+        mode = MODES.get("firecrawl", "ok")
+        if self.headers.get("Authorization") != f"Bearer {FC_KEY}":
+            return self._send(401, "Unauthorized", "text/plain")
+        if mode == "http500":
+            return self._send(500, json.dumps({"success": False, "error": "searxng down"}))
+        if mode == "notsuccess":
+            return self._send(200, json.dumps({"success": False, "error": "No search results"}))
+        rows = [] if mode == "empty" else [
+            {"url": f"https://fc.example/{i}", "title": f"fc {i}", "description": f"fc snippet {i}",
+             "position": i} for i in range(1, body.get("limit", 5) + 1)]
+        return self._send(200, json.dumps({"success": True, "data": {"web": rows}}))
 
     def _wayback(self, u, rest, mode):
         """Live behaviour 2026-10-11: /web/<any ts>id_/<url> redirects to the nearest capture,
@@ -413,9 +433,11 @@ def reset():
     WAYBACK_CDX_STAMPS.clear()
 
 
-def _env(server, fakes, key=True, extra=None, exa_key=False):
-    e = {k: v for k, v in os.environ.items() if not k.startswith(("WEB_GET_", "JINA_", "EXA_"))}
+def _env(server, fakes, key=True, extra=None, exa_key=False, fc_key=False):
+    e = {k: v for k, v in os.environ.items()
+         if not k.startswith(("WEB_GET_", "JINA_", "EXA_", "FIRECRAWL_"))}
     e.update({
+        "WEB_GET_FIRECRAWL_URL": f"{server}/firecrawl",
         "WEB_GET_EXA_API_URL": f"{server}/exaapi", "WEB_GET_PDF_VIA": f"{server}/pdfsrv",
         "WEB_GET_PDFTOTEXT": fakes["pdftotext"], "WEB_GET_CHECK_PDF_URL": "https://pdf.example/probe.pdf",
         "TMPDIR": str(fakes["tmp"]),
@@ -430,16 +452,19 @@ def _env(server, fakes, key=True, extra=None, exa_key=False):
         e["JINA_API_KEY"] = KEY
     if exa_key:
         e["EXA_API_KEY"] = EXA_KEY
+    if fc_key:
+        e["FIRECRAWL_SELFHOST_API_KEY"] = FC_KEY
     e.update(extra or {})
     return e
 
 
-def run(server, fakes, *args, key=True, extra=None, timeout=60, exa_key=False):
-    e = _env(server, fakes, key, extra, exa_key)
+def run(server, fakes, *args, key=True, extra=None, timeout=60, exa_key=False, fc_key=False):
+    e = _env(server, fakes, key, extra, exa_key, fc_key)
     p = subprocess.run([sys.executable, "-I", str(SCRIPT), *args], env=e, capture_output=True,
                        text=True, timeout=timeout)
     assert KEY not in p.stdout and KEY not in p.stderr, "Jina key leaked to output"
     assert EXA_KEY not in p.stdout and EXA_KEY not in p.stderr, "Exa key leaked to output"
+    assert FC_KEY not in p.stdout and FC_KEY not in p.stderr, "Firecrawl key leaked to output"
     return p
 
 
@@ -776,8 +801,8 @@ def test_search_order_to_composio(server, fakes):
     p = run(server, fakes, "search", "q", "--json")
     out = json.loads(p.stdout)
     assert p.returncode == 0
-    assert [a["provider"] for a in out["attempts"]] == ["exa-api", "exa-mcp", "parallel", "jina-mcp",
-                                                       "jina-search", "composio"]
+    assert [a["provider"] for a in out["attempts"]] == ["firecrawl", "exa-api", "exa-mcp", "parallel",
+                                                       "jina-mcp", "jina-search", "composio"]
     assert "https://ddg.example/1" in out["content"]
 
 
@@ -808,7 +833,7 @@ def test_search_exa_rate_limit_notice_fails_over(server, fakes):
     p = run(server, fakes, "search", "q", "--json")
     out = json.loads(p.stdout)
     assert p.returncode == 0 and out["provider"] == "parallel"
-    assert "rate-limit/quota" in out["attempts"][1]["error"]
+    assert "rate-limit/quota" in out["attempts"][2]["error"]
     p = run(server, fakes, "search", "q", "--only", "exa")
     assert p.returncode == 5 and "ALL PROVIDERS FAILED" in p.stderr
 
@@ -935,7 +960,7 @@ def test_parse_set_aliases():
     assert wg.parse_set("crwl, exa") == {"crawl4ai", "exa-api", "exa-mcp"}
     assert wg.parse_set("pdftotext,exa-api") == {"pdf", "exa-api"}
     with pytest.raises(ValueError):
-        wg.parse_set("firecrawl")
+        wg.parse_set("bogus")
 
 
 def test_redact():
@@ -1189,7 +1214,43 @@ def test_exa_api_failure_falls_to_exa_mcp(server, fakes, mode, why):
 def test_exa_api_search_failure_falls_to_exa_mcp(server, fakes):
     MODES["exaapi"] = "http401"
     out = json.loads(run(server, fakes, "search", "q", "--json", exa_key=True).stdout)
-    assert out["provider"] == "exa-mcp" and "Invalid API key" in out["attempts"][0]["error"]
+    assert out["provider"] == "exa-mcp" and "Invalid API key" in out["attempts"][1]["error"]
+
+
+def test_firecrawl_search_first_with_bearer_key(server, fakes):
+    p = run(server, fakes, "search", "agents", "--n", "3", "--json", fc_key=True, exa_key=True)
+    out = json.loads(p.stdout)
+    assert p.returncode == 0 and out["provider"] == "firecrawl"
+    assert [a["provider"] for a in out["attempts"]] == ["firecrawl"]
+    assert out["content"].count("URL: https://fc.example/") == 3 and "fc snippet 1" in out["content"]
+    assert HITS == ["firecrawl:/v2/search"] and AUTH_SEEN == [f"Bearer {FC_KEY}"]
+    assert ARGS == [{"prov": "firecrawl", "query": "agents", "limit": 3}]
+    assert EXA_SEEN == []  # the paid rung is never reached
+
+
+def test_firecrawl_without_key_falls_to_exa(server, fakes):
+    out = json.loads(run(server, fakes, "search", "q", "--json", exa_key=True).stdout)
+    assert out["provider"] == "exa-api"
+    assert out["attempts"][0] == {**out["attempts"][0], "provider": "firecrawl", "ok": False,
+                                  "error": "no Firecrawl key (WEB_GET_NO_SECRETSPEC set)"}
+    assert not any(h.startswith("firecrawl:") for h in HITS)  # no request without a key
+
+
+@pytest.mark.parametrize("mode, why", [("http500", "500"), ("notsuccess", "No search results"),
+                                       ("empty", "")])
+def test_firecrawl_failure_falls_to_exa(server, fakes, mode, why):
+    MODES["firecrawl"] = mode
+    out = json.loads(run(server, fakes, "search", "q", "--json", fc_key=True, exa_key=True).stdout)
+    assert out["provider"] == "exa-api" and out["attempts"][0]["provider"] == "firecrawl"
+    assert out["attempts"][0]["ok"] is False and why in out["attempts"][0]["error"]
+
+
+def test_firecrawl_wrong_key_is_redacted(server, fakes):
+    p = run(server, fakes, "search", "q", "--only", "firecrawl", "--json",
+            extra={"FIRECRAWL_SELFHOST_API_KEY": "fc-WRONG-key-0123456789"})
+    out = json.loads(p.stdout)
+    assert p.returncode == 5 and "401" in out["attempts"][0]["error"]
+    assert "fc-WRONG-key-0123456789" not in p.stdout + p.stderr
 
 
 def test_no_exa_key_uses_keyless_mcp(server, fakes):
