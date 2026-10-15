@@ -9,7 +9,7 @@ when they ship (into the relevant doc) or when they're dropped (say why).
 and `deploy` defaults to it, but every Hyades console call (`deploy apply`, `stop`,
 `start`, `status`) then failed with "Could not enable linger: No such device or
 address" and "Failed to connect to user scope bus": new SSH logins get no systemd user
-session, a host-side fault (the running microVMs kept serving). Remaining: `./deploy
+session, a host-side fault (the running microVMs kept serving); reported as SIPB/hyades#11. Remaining: `./deploy
 apply`, stop/start `djbclark-fc-searxng`, then the checks below. Until then `-r1` runs.
 
 Queued by the operator. In `skills/hyades-docker/examples/firecrawl/build-searxng-image`,
