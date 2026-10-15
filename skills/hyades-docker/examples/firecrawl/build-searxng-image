@@ -19,6 +19,7 @@
 #      image ships unchecked-hash .pyc files, which Python loads without
 #      looking at the source, so the layer also whiteouts the two cached files.
 #      A new SearXNG tag whose sources no longer match fails the build here.
+#      Reported upstream as searxng#6840; drop the patch once it is fixed there.
 #   3. Turns on Grokipedia and twelve specialist engines that SearXNG ships
 #      disabled (operator, 2026-10-14). Firecrawl sends no category, so only
 #      general engines answer plain queries; the rest answer their !shortcut
