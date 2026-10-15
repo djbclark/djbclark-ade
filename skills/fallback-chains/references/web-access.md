@@ -101,8 +101,10 @@ authoritative; this is its contract as of 2026-10-11.
    Ask Ubuntu, `!gh` GitHub repositories, `!arx` arXiv, `!se` Semantic Scholar,
    `!pub` PubMed, `!pypi` PyPI, `!dh` Docker Hub, `!al` Arch wiki, `!ge` Gentoo
    wiki, `!mdn` MDN, `!man` ManKier man pages. The keyless APIs behind them are
-   metered per IP and Hyades has one: Stack Exchange allows 300 requests a day,
-   GitHub search 10 a minute, so use them for targeted lookups, not loops.
+   metered per IP, and the microVMs most likely share the Hyades host's (assumed,
+   not measured): Stack Exchange allows about 300 requests a day without a key (a
+   third-party figure; its throttle page gives none), GitHub search 10 a minute
+   (GitHub's docs). Use them for targeted lookups, not loops.
 2.2. `web-get fetch '<url>' [--max-bytes N] [--no-page-check] [--walk-budget S]`: exa-api
    (`api.exa.ai/contents`, key, full text up to 1000000 characters) → exa-mcp
    (keyless `web_fetch_exa`, 200000-character cap) → parallel (`web_fetch`) →
