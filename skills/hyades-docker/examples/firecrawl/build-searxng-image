@@ -9,16 +9,28 @@
 # Hyades microVMs get no config mounts, so the file goes into the image as one
 # layer (`crane append`). Everything else stays SearXNG's default
 # (use_default_settings); the deploy script sets the port and SEARXNG_SECRET.
+#
+# The same layer:
+#   1. Disables Brave, which answers 429 to every SearXNG query (searxng#1651).
+#   2. Patches the Wikipedia and Wikidata engines to send SearXNG's own
+#      User-Agent with a contact URL instead of a browser one. Wikimedia allows
+#      200 requests a minute for a compliant bot User-Agent and 10 for an
+#      unidentified client (meta.wikimedia.org/wiki/User-Agent_policy). The
+#      image ships unchecked-hash .pyc files, which Python loads without
+#      looking at the source, so the layer also whiteouts the two cached files.
+#      A new SearXNG tag whose sources no longer match fails the build here.
 export PATH="/opt/homebrew/bin:$PATH"
 set -euo pipefail
 SCRIPTS="$(cd "$(dirname "$(grealpath "${BASH_SOURCE[0]}")")/../../scripts" && pwd)"
 SX_TAG="${1:-2026.10.15-b00212a83}"
+REV="r1"   # bump when this layer changes for the same SearXNG tag
 BASE="docker.io/searxng/searxng:$SX_TAG"
-TAG="forgejo.mit.edu/djbclark/firecrawl-searxng:$SX_TAG"
+TAG="forgejo.mit.edu/djbclark/firecrawl-searxng:$SX_TAG-$REV"
+CONTACT="https://github.com/djbclark/djbclark-ade/tree/master/skills/hyades-docker/examples/firecrawl"
 
 work="$(gmktemp -d)"; trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/layer/etc/searxng"
-cat > "$work/layer/etc/searxng/settings.yml" <<'EOF'
+cat > "$work/layer/etc/searxng/settings.yml" <<EOF
 use_default_settings: true
 server:
   # Reached only from Firecrawl on the shared microVM network, never directly.
@@ -29,8 +41,53 @@ search:
   formats:
     - html
     - json
+outgoing:
+  # Appended to "SearXNG/<version>", the User-Agent the patched Wikimedia
+  # engines send.
+  useragent_suffix: "(+$CONTACT)"
+engines:
+  - name: brave
+    disabled: true
 EOF
+
+src=usr/local/searxng/searx
+echo "== reading engine sources from $BASE"
+crane export --platform linux/amd64 "$BASE" "$work/base.tar"
+pycs=("$src/engines/__pycache__/wikipedia.cpython-314.pyc" "$src/__pycache__/wikidata.cpython-314.pyc")
+gtar -C "$work/layer" -xf "$work/base.tar" "$src/engines/wikipedia.py" "$src/wikidata.py"
+gtar -tf "$work/base.tar" "${pycs[@]}" >/dev/null   # fails if the Python version moved
+rm -f "$work/base.tar"
+python3 - "$work/layer/$src" <<'PY'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+
+def patch(rel, edits):
+    p = root / rel
+    text = p.read_text()
+    for old, new in edits:
+        assert text.count(old) == 1, f"{rel}: expected one {old!r}"
+        text = text.replace(old, new)
+    p.write_text(text)
+
+patch("engines/wikipedia.py", [(
+    '    params["soft_max_redirects"] = 2\n',
+    '    params["soft_max_redirects"] = 2\n'
+    '    params["headers"]["User-Agent"] = utils.searxng_useragent()\n',
+)])
+patch("wikidata.py", [
+    ("from searx.utils import gen_useragent\n", "from searx.utils import searxng_useragent\n"),
+    ('"User-Agent": gen_useragent(),', '"User-Agent": searxng_useragent(),'),
+])
+PY
+for pyc in "${pycs[@]}"; do
+  mkdir -p "$work/layer/$(dirname "$pyc")"
+  gtouch "$work/layer/$(dirname "$pyc")/.wh.$(basename "$pyc")"
+done
+
 gtar --owner=0 --group=0 --numeric-owner -C "$work/layer" -cf "$work/settings.tar" etc
+# Files only: a directory entry would reset the owner of /usr and its parents.
+(cd "$work/layer" && gfind usr -type f -print0) |
+  gtar --owner=977 --group=977 --numeric-owner --no-recursion --null -C "$work/layer" -rf "$work/settings.tar" -T -
 
 echo "== pushing $TAG"
 HYADES_ENGINE=crane "$SCRIPTS/hyades-registry" append --platform linux/amd64 -b "$BASE" -f "$work/settings.tar" -t "$TAG"

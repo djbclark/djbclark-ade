@@ -93,7 +93,7 @@ added the same evening (next section).
    only way in is Firecrawl's `/v2/search` behind the gate.
 2. **Result:** the API log now says "Using searxng search" instead of "Using
    DuckDuckGo search"; a 5-result search through the gate took 2.3 s, and relevant
-   results came back for both test queries. SearXNG queries DuckDuckGo, Brave, Startpage, Mojeek, Wikipedia and Wikidata (SearXNG's defaults; Google and Bing are off by default); Brave answers 429 (it blocks SearXNG as a bot) and is suspended for 180 s each time, and the rest answered.
+   results came back for both test queries. SearXNG queries DuckDuckGo, Startpage, Mojeek, Wikipedia and Wikidata (SearXNG's defaults; Google and Bing are off by default). Brave, also a default, answered 429 to every query (it blocks SearXNG as a bot, searxng#1651), so the image disables it. The image also patches the Wikipedia and Wikidata engines to send SearXNG's own User-Agent with a contact URL rather than a browser one, which Wikimedia allows 200 requests a minute instead of 10 (meta.wikimedia.org/wiki/User-Agent_policy). DuckDuckGo, Startpage and Mojeek publish no rate limits.
 3. **`web-get` uses it first:** a new `firecrawl` search rung (self-hosted
    `/v2/search`, bearer `FIRECRAWL_SELFHOST_API_KEY` from the same vault read as the
    other keys) now leads the search ladder, with exa-api and the rest behind it. A
