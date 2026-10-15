@@ -68,7 +68,7 @@ owner fails); env var names `[a-zA-Z0-9_]+`; no newlines in paths or values.
 | `entergp GROUP [CMD]` | `sudo entergp GROUP [CMD]` | needs membership of Moira group GROUP (a non-hidden list with "Moira Group" ticked in WebMoira, or `blanche`); creates the group account on first use (max 2 groups per user). With CMD it runs one console command in the group account: `scripts/hyades -g GROUP list` |
 | `exit`, `EOF` (Ctrl-D) | leave the console | |
 
-## Bugs (filed 2026-10-14, two-tier: upstream SIPB/hyades #5-#8, AI detail djbclark/hyades #1-#4; texts in `../tickets/`)
+## Bugs (filed 2026-10-14, two-tier: upstream SIPB/hyades #5-#8 and #11, AI detail djbclark/hyades #1-#4 and #9; texts in `../tickets/`)
 
 1. (#5) `exec` fails for images with a non-root `USER`: crun's `open_terminal`
    (`linux.c`) chowns the host pty to the exec uid and gets `EPERM`; uid 0 skips the
@@ -82,6 +82,12 @@ owner fails); env var names `[a-zA-Z0-9_]+`; no newlines in paths or values.
    `libpod-<id>.scope`.
    Through `scripts/hyades -` (stdin) write it **without quotes**, `stop libpod-<id>*`:
    the console takes quotes literally ("Invalid unit name", 2026-10-14), one ID per line.
+5. (#11) Host fault, not ours: every login prints `Could not enable linger: No such device
+   or address` and anything using `systemctl --user` fails with `Failed to connect to user
+   scope bus ... $XDG_RUNTIME_DIR not defined` (first seen 2026-10-14 22:20 EDT): logins get
+   no logind session. `list`, `getconf`, `df`, `logs` still work and running microVMs keep
+   serving. `setconf` still saves `hyades.json` but its `daemon-reload` fails, so the saved
+   config and the loaded units differ until a later reload. Retrying from here does not help.
 
 Tracker: https://forgejo.mit.edu/SIPB/hyades/issues (security issues to
 sipb-hyades-root@mit.edu instead). #2, #3 and #4 are the CI-runner issues (see the
