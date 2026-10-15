@@ -195,9 +195,39 @@ PROBE = textwrap.dedent("""\
             await mod._route_dollar_as_extension(None, m, {}, n)
         return seen
 
+    async def meta_merge():
+        got = []
+        class C:
+            async def new_session(self, **kw):
+                got.append(kw)
+                return NS(session_id="s")
+        init = NS(agent_capabilities=None)
+        for meta in (None, {"claudeCode": {"options": {"model": "x"}}, "foo": 1}):
+            a = NS(add_dir=[], resume=None, perm="deny", agent="claude", meta=meta)
+            await mod.open_session(a, C(), init, Rec(), "/r", 5)
+        return got
+
+    def fallback():
+        seen = {}
+        def fake(cmd, **kw):
+            seen.update(cmd=cmd, env=kw.get("env"))
+            return NS(returncode=0)
+        real, mod.subprocess.run = mod.subprocess.run, fake
+        os.environ["HERDR_PANE_ID"] = "w:p"
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                mod.fallback_cli(args("claude", model="haiku", effort="low", context=200000, dir=".", prompt_text="hi", session_id=None))
+        finally:
+            mod.subprocess.run = real
+            del os.environ["HERDR_PANE_ID"]
+        return {"cmd": seen["cmd"], "disable_1m": seen["env"].get("CLAUDE_CODE_DISABLE_1M_CONTEXT"),
+                "herdr": "HERDR_PANE_ID" in seen["env"]}
+
     async def main():
         out = {}
+        out["fallback"] = fallback()
         out["routing"] = await routing()
+        out["meta"] = await meta_merge()
         out["canon"] = [mod.canon_effort(x) for x in ("Extra High", "extra-high", "XHIGH", "Maximum", "off", "low")]
         out["sizes"] = [mod.parse_size(x) for x in ("500k", "1M", "272000", "1.5m", "x", "0")]
         out["fmt"] = [mod.fmt_size(x) for x in (500000, 1000000, 258400, 2000000)]
@@ -290,6 +320,9 @@ PROBE = textwrap.dedent("""\
             "claude_bad": mod.post_turn(args("claude", context=200000), {"ctx_expected": 200000}, {"size": 1000000}),
             "codex_effective": mod.post_turn(args("codex", context=272000), {}, {"size": 258400}),
             "copilot_long": mod.post_turn(args("copilot", context=1000000), {}, {"size": 922000}),
+            "copilot_default": mod.post_turn(args("copilot", context=200000), {}, {"size": 272000}),
+            "copilot_default_got_long": mod.post_turn(args("copilot", context=200000), {}, {"size": 922000}),
+            "copilot_long_got_default": mod.post_turn(args("copilot", context=1000000), {}, {"size": 272000}),
             "none_reported": None,
         }
         ap = {"ctx_expected": 200000}
@@ -334,6 +367,20 @@ class TestEffortContext(unittest.TestCase):
         # qwen's "qwen/notify/..." used to log a traceback per notification
         self.assertEqual(self.r["routing"], ["session/update", "_zcode/turnState", "_qwen/notify/session/model-update",
                                              "_x.ai/hooks", "session/request_permission", "qwen/notify/x"])
+
+    def test_the_claude_cli_fallback_gets_the_effort_and_the_window_switch(self):
+        f = self.r["fallback"]
+        self.assertEqual(f["cmd"][f["cmd"].index("--effort"):][:2], ["--effort", "low"])
+        self.assertEqual(f["disable_1m"], "1")
+        self.assertFalse(f["herdr"])
+
+    def test_meta_is_merged_over_the_deny_meta(self):
+        plain, merged = self.r["meta"]
+        self.assertEqual(plain["claudeCode"]["options"]["tools"], [])
+        self.assertNotIn("foo", plain)
+        self.assertEqual(merged["claudeCode"]["options"]["model"], "x")
+        self.assertEqual(merged["claudeCode"]["options"]["tools"], [])   # the deny meta survives
+        self.assertEqual(merged["foo"], 1)
 
     def test_effort_resolves_through_aliases_and_the_models_own_option_id(self):
         r = self.r["resolve"]
@@ -457,6 +504,9 @@ class TestEffortContext(unittest.TestCase):
         self.assertIn("requested context 200k but the agent reports 1m", p["claude_bad"])
         self.assertIsNone(p["codex_effective"])   # 95% of 272k
         self.assertIsNone(p["copilot_long"])      # 922k prompt budget of the 1m tier
+        self.assertIsNone(p["copilot_default"])   # the default tier reports 272k whatever 200k..272k was asked
+        self.assertIn("agent reports 922k", p["copilot_default_got_long"])
+        self.assertIn("agent reports 272k", p["copilot_long_got_default"])
         self.assertIsNone(p["none_reported"][0])
         self.assertEqual(p["none_reported"][1]["ctx"], 200000)
         self.assertEqual(p["none_reported"][1]["unverified"], ["ctx"])

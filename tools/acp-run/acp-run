@@ -2310,8 +2310,15 @@ def post_turn(a, applied, usage):
             applied["ctx"], applied["ctx_source"] = size, "usage_update"
             if "ctx" in applied.get("unverified", []):
                 applied["unverified"].remove("ctx")
-        if ctx and applied.get("ctx_source") == "usage_update" and not size_ok(ctx, size):
-            return f"requested context {fmt_size(ctx)} but the agent reports {fmt_size(size)} (usage_update)"
+        if ctx and applied.get("ctx_source") == "usage_update":
+            if a.agent == "copilot":
+                # two tiers: the default one reports a ~272k prompt budget whatever 200k/256k/272k
+                # was asked, the long one ~922k of its 1m
+                ok = size <= 300000 if COPILOT_TIERS.get(ctx) == "default" else size >= 800000
+            else:
+                ok = size_ok(ctx, size)
+            if not ok:
+                return f"requested context {fmt_size(ctx)} but the agent reports {fmt_size(size)} (usage_update)"
     elif ctx and not isinstance(applied.get("ctx"), int):
         applied.setdefault("unverified", []).append("ctx")
         applied["ctx"], applied["ctx_source"] = ctx, "requested"
