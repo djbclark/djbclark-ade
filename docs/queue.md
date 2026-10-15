@@ -5,6 +5,13 @@ when they ship (into the relevant doc) or when they're dropped (say why).
 
 ## Hyades SearXNG: turn on Grokipedia (operator, 2026-10-14)
 
+**Status 2026-10-14 22:25: built, not deployed.** `firecrawl-searxng:...-r2` is pushed
+and `deploy` defaults to it, but every Hyades console call (`deploy apply`, `stop`,
+`start`, `status`) then failed with "Could not enable linger: No such device or
+address" and "Failed to connect to user scope bus": new SSH logins get no systemd user
+session, a host-side fault (the running microVMs kept serving). Remaining: `./deploy
+apply`, stop/start `djbclark-fc-searxng`, then the checks below. Until then `-r1` runs.
+
 Queued by the operator. In `skills/hyades-docker/examples/firecrawl/build-searxng-image`,
 add `- name: grokipedia` with `disabled: false` and `inactive: false` to the settings
 layer's `engines:` list (SearXNG ships it as both), bump `REV` to `r2`, build, update
@@ -744,10 +751,8 @@ because they cost time: a Python keep-alive repro that was negative (and had its
 honoured under TSI (use `poll`), and `forgejo-api --help` was run once by mistake (posted nothing).
 The 3-of-20 `reuse-probe` failures with the shim were stale listeners leaked by earlier no-shim runs on the same fixed port
 (each swallows one connection, then they are gone within 60 s); on a clean port the shim gives 60 of 60 at gaps of 0 to
-50 ms (runs 235, 236; libkrun#929 corrected). Checked 2026-10-14 evening: no new upstream replies on
-libkrun#819, #860, #926 or #929 after ours (#860's maintainer note is from 2026-09-22). SIPB/hyades#2 and
-libkrun#924 did get maintainer replies; they are recorded in the `forgejo-ci` skill (keep Plektra's ext4 loop
-image; do not pursue writeback, extra virtiofs workers, or DAX). `CornerButtonThemeTest` is an upstream Plektra issue.
+50 ms (runs 235, 236; libkrun#929 corrected). Open: check libkrun#926,
+#929, #819, #860 and SIPB/hyades#2 for replies; `CornerButtonThemeTest` is an upstream Plektra issue.
 
 ## Make the loopback shim available by default on forgejo.mit.edu, then ask SIPB (queued 2026-10-14, operator)
 
