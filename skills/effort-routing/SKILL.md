@@ -59,8 +59,19 @@ about which side you are on, stay high and say so.
 - **Fan-out of rote nodes** — dispatch them at `model: "haiku"`,
   `effort: "low"` rather than doing them inline at session tier.
 - **One hard call inside otherwise ordinary work** — do not raise the whole
-  session. Dispatch that single question to `fable-deep` and carry on; this is
-  what its separate weekly budget is for (see model-routing).
+  session. Dispatch that single question to `fable-deep` (or `acp-dispatch
+  codex --model gpt-6-astra --effort xhigh` for an independent second opinion)
+  and carry on. Fable is **not** a separate budget: it is a sublimit (at most
+  50%) of the shared Claude weekly and bills the 5-hour window too. Use it
+  fully for exactly this kind of call, and send the ordinary work around it
+  to the everyday pools (model-routing, *Routing policy*).
+- **Minimum needed spec for every sub-agent, unasked** (operator 2026-10-15):
+  the goal is cost against code quality, not token count. Haiku at `low` for
+  a lookup, a classification or a reformat; Sonnet at `medium` for an
+  implementation with a clear shape; Opus at `high` when the shape is unclear
+  or the diff must be right first time; Fable at `xhigh` for the calls above.
+  Delegate proactively so the session's own context stays small, and route
+  up when unsure.
 - **Multiple-choice calls inside a loop** (which pool, retry or stop, which
   tests first) need no effort tier at all when code can answer them. Push
   them into a script or a table (`route_agent.py`, exit codes) and keep the
@@ -86,7 +97,13 @@ it. Verified against
   on usage credits.
 - **`/clear` costs nothing; `/compact` is itself a large request**, because
   it reads the conversation it summarises. When you want a fresh start rather
-  than continuity, clear — do not compact out of habit.
+  than continuity, clear — do not compact out of habit. Since 2026-10-15
+  compaction is automatic: `autoCompactWindow` is 400000 in
+  `~/.claude/settings.json` (every model, every host; the PreCompact hook
+  writes the Tier 1 checkpoint first), and `context_size_nudge.py` tells a
+  herdr or Orca session to compact itself earlier at a natural boundary via
+  `self-slash "/compact <focus>"`, or to run the `handoff` skill then `/new`
+  on a topic change. Do not ask the operator for either.
 - **Subagents isolate verbose work.** Test runs, log processing and doc
   fetches keep their output in the subagent's context and return only a
   summary. This is why dispatch beats doing rote work inline, independent of

@@ -61,6 +61,10 @@ STATE_PATH = Path.home() / ".claude" / "state" / "context-nudges.json"
 EARLY_GROWTH = 40_000   # level 1: start delegating
 ASK_GROWTH = 200_000    # level 2: compact / ask the operator
 ASK_TOTAL = 400_000     # level 2 regardless of floor
+# ~/.claude/settings.json "autoCompactWindow" (set 2026-10-15): Claude Code
+# compacts by itself at this size, on every host, so outside herdr/Orca the
+# level-2 note no longer asks the operator. Keep the two numbers equal.
+AUTO_COMPACT_WINDOW = 400_000
 REPEAT_EVERY = 100_000  # level 3, 4, ...: again per this much more
 PAGE_GROWTH = 300_000   # Hermes ping (once per climb), whichever comes first
 PAGE_TOTAL = 500_000
@@ -192,25 +196,27 @@ def _ask_message(total, growth, repeat):
         # operator ruling 2026-10-09, memory/feedback_self_compact.md).
         return (
             f"{lead}: {total:,} tokens (+{growth:,} since the session started "
-            "or last compacted). If you are continuing the same work, then at "
-            "the next natural boundary (a task done, never mid-edit or with a "
-            "sub-agent result unread) compact yourself without asking: save "
-            "what the next turn needs, run ~/src/djbclark-ade/bin/self-slash "
-            "\"/compact <focus>\" ONCE and end the turn. If the next task is a "
-            "different topic, ask the operator for /handoff then /new instead "
-            "(nothing to summarize). If self-slash refuses, ask for /compact. "
+            "or last compacted). Handle it yourself, without asking (operator "
+            "2026-10-15): at the next natural boundary (a task done, never "
+            "mid-edit or with a sub-agent result unread), if you are continuing "
+            "the same work, save what the next turn needs, run "
+            "~/src/djbclark-ade/bin/self-slash \"/compact <focus>\" ONCE and end "
+            "the turn. If the next task is a different topic, run the `handoff` "
+            "skill now (it writes the Tier 2 document), then self-slash \"/new\" "
+            "and end the turn. Only if self-slash refuses (a draft on the input "
+            "line) ask the operator for /compact or /new. "
             + _COST_NOTE
         )
     return (
         f"{lead}: {total:,} tokens (+{growth:,} since the session started or "
-        "last compacted). At the next natural boundary (before starting the "
-        "next task, never mid-edit), ask the operator with AskUserQuestion: "
-        "1) /compact (Recommended when continuing the same work); 2) /handoff "
-        "then /new (topic change, or the conversation itself is the only "
-        "state); 3) Continue here and send the rest to /bigteam. Until "
-        "answered, start no new heavy work inline: delegate it. Exception: an "
-        "unattended session with no operator present keeps going by "
-        "delegating. " + _COST_NOTE
+        "last compacted). Do not ask: Claude Code compacts this session by "
+        f"itself at {AUTO_COMPACT_WINDOW:,} tokens (autoCompactWindow in "
+        "~/.claude/settings.json; the PreCompact hook writes the Tier 1 "
+        "checkpoint first). Until then start no new heavy work inline: send it "
+        "through /bigteam or a minimum-spec sub-agent. If the next task is a "
+        "different topic, run the `handoff` skill now (Tier 2 document) and "
+        "tell the operator /new is ready; otherwise keep going. "
+        + _COST_NOTE
     )
 
 

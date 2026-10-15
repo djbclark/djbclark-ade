@@ -12,6 +12,29 @@ Failure chains (what runs when a chosen model fails) are a different
 document: `skills/fallback-chains/`. Re-read its live sources before
 quoting a chain, and update its snapshot if you change one.
 
+> **Update 2026-10-15 (operator): the routing policy is now cost against code
+> quality, every TUI, any directory.** The one copy is
+> `skills/model-routing/SKILL.md`, *Routing policy (operator, 2026-10-15)*;
+> `bin/route_agent.py plan` applies it and prints the `acp-dispatch <agent>
+> --model M --effort E` line per slice. In short: (1) Claude Fable 5.1 at
+> `xhigh` and codex's top frontier model (`gpt-6-astra`) are used **fully** for
+> serious-effort work (judgment, adjudication, security-relevant changes,
+> whole-corpus reads, adversarial review); (2) **Fable and "claude" are one
+> pool**: Fable is a <=50% sublimit of the shared weekly and bills the 5-hour
+> window too, so the "separate Fable weekly" wording below is **wrong**; (3)
+> everyday work goes to the other pools (agy Claude/GPT, Cursor Auto, zai
+> GLM-5.3, opencode-go, agy Gemini, crush/SIPB) at the minimum spec that does
+> it well, proactively through `/bigteam` and minimum-spec sub-agents; (4)
+> **grok and copilot are reserves** with a hard floor of 60% left (GrokBot and
+> GitHub-side Copilot review run on them; copilot read 100% used that day);
+> (5) **hermes is never a delegation target** (gated in acp-run/acp-dispatch
+> like omp); omp only with the operator's explicit per-run yes; never an
+> all-vendor fan-out; (6) the context window is a per-slice choice (`--context`),
+> default unless a whole-corpus read; (7) compaction is automatic
+> (`autoCompactWindow` 400000 in `~/.claude/settings.json`; herdr/Orca sessions
+> compact earlier via `self-slash`; a topic change runs the `handoff` skill then
+> `/new`). Snapshot numbers below are older and only illustrate the shape.
+>
 > **Update 2026-10-10 (operator): use agy's Claude/GPT pool heavily while it has
 > headroom** (5h 100% left, weekly 49% left, critical burn alert). Via
 > `acp-run agy --model claude-opus-5-5-high` / `claude-sonnet-5-5-high`, 2-3 slices
@@ -56,7 +79,7 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 
 | aiuse provider | CLI / TUI on this machine | Plan | Billing | Windows |
 |---|---|---|---|---|
-| `claude` (gmail) | `claude` (Claude Code; cswap acct 2; Orca/ralph-tui drive it) | Max-class | monthly sub | 5h + weekly + **separate Fable weekly** |
+| `claude` (gmail) | `claude` (Claude Code; cswap acct 2; Orca/ralph-tui drive it) | Max-class | monthly sub | 5h + weekly; **Fable is a <=50% sublimit of the same weekly** (aiuse `max_share_of_parent_percent`), not a separate pool (corrected 2026-10-15) |
 | `claude` (mit) | **permanently gone** (operator, 2026-08-23) — removed from cswap | — | — | — |
 | `codex` | `codex` (v0.149) | ChatGPT Plus | monthly sub | weekly |
 | `antigravity` | `agy` (v1.1.18; ralph-tui-antigravity-plugin exists) | Google AI Pro | monthly sub | Gemini 5h/weekly **plus Claude/GPT 5h/weekly** |
@@ -180,16 +203,19 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
 
 ## Which AI for which work (judgment snapshot, 2026-08-23)
 
-- **Claude Fable 5 @ xhigh** — hardest single-shot adjudications,
-  architecture, whole-corpus analysis. Has its **own weekly bucket**, so
-  it doesn't drain the Sonnet/Opus pool.
+- **Claude Fable 5.1 @ xhigh** — hardest single-shot adjudications,
+  architecture, whole-corpus analysis (1M native). **Use it fully** for that
+  work (operator 2026-10-15). It does **not** have its own bucket: Fable is a
+  sublimit of at most 50% of the shared Claude weekly and bills the 5-hour
+  window too (corrected 2026-10-15).
 - **Claude Sonnet 5** — default agentic-coding workhorse; best harness
   integration (workflows, skills, Orca, this repo).
 - **Claude Haiku 4.5 @ low** — mechanical fan-out nodes: extract,
   classify, reformat.
-- **Codex (gpt-5.6-sol @ high)** — strong second coding vendor: parallel
-  breadth, second opinions, porting; a separate weekly pool, first
-  overflow target for real coding.
+- **Codex (gpt-6-astra @ xhigh/high; 2026-10-15)** — the second frontier
+  pool: hard implementation slices, adversarial second opinions, contract
+  decisions. **Use it fully, for astra**: everyday slices go to the everyday
+  pools, not to `gpt-6-luna` on this window.
 - **Gemini via agy** — big-context reading, summarization, multimodal,
   bulk research; the most-wasted subscription → default overflow for
   non-critical bulk. Its Claude/GPT windows are unexplored.
@@ -222,30 +248,37 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
 - **Devin** — autonomous end-to-end PR-shaped tasks; currently 100%
   unused, activation is an open operator question.
 
-## Routing policy
+## Routing policy (2026-10-15; the one copy is `skills/model-routing/SKILL.md`)
 
-1. **Free and already-wasted pools first** for suitable bulk work:
-   opencode-go and sipb cost nothing; antigravity/devin/copilot/cursor
-   are use-it-or-lose-it monthly quota that history shows expiring
-   unused.
+1. **Frontier pools, used fully, for serious-effort work:** Claude Fable 5.1
+   at `xhigh` (an Agent-tool `fable-deep` call, or `acp-dispatch claude
+   --model fable --effort xhigh`) and codex `gpt-6-astra` (`acp-dispatch codex
+   --model gpt-6-astra --effort xhigh`). Fable is a <=50% sublimit of the one
+   shared Claude weekly (and bills the 5h window); under 10% of its cap the
+   router suggests `opus --effort xhigh`.
+2. **Everyday work on the other pools**, cheapest adequate first: agy
+   Claude/GPT (>= 40% left), Cursor Auto, zai GLM-5.3, opencode-go, agy Gemini
+   for bulk and big-context reads, crush/SIPB for light bulk. Minimum spec
+   (model × effort × context) that does it well; route up when unsure.
    **Exception, 2026-10-03:** antigravity's CLI has a burst limit (roughly 60
    generation requests an hour per login) that `aiuse` cannot see, so spread its
    work over hours, prefer `acp-run agy`, and never fan out a batch at it.
-2. **Core pools (claude, codex) for judgment and agentic work**; tier
-   inside them (Haiku/low for mechanical, Fable/xhigh for adjudication).
-   Check `cswap list` before big runs; shift breadth to codex or the
-   wasted pools when the Claude 5h window is hot.
-3. **Prepaid requires an explicit fresh human decision** — enforced by
-   the gated wrappers, currently moot since all three balances are empty.
-4. **Never bulk-route to clinepass** (Hindsight/hermes lifeline, hottest
-   weekly window).
-5. **Probes over memory**: `aiuse --json` (~1 min, authoritative across
-   all services; ignore its `kind:"conserve"` pace alerts for go/no-go),
-   `cswap list` (Claude), `codex login status`, `opencode models`,
-   `bl quota list`, `curl localhost:4000/v1/models` (LiteLLM),
-   `agy --version`, `devin --version`, `copilot --version`.
+3. **Reserves, floor 60% left, one small slice, only when that vendor is the
+   point:** grok (GrokBot) and copilot (GitHub-side Copilot review).
+4. **Never:** hermes as a target; omp without `ACP_OPERATOR_APPROVED=omp` after
+   a specific yes; clinepass (Hindsight/hermes lifeline); prepaid or
+   credits-backed models without a fresh operator decision; devin; an
+   all-vendor fan-out.
+5. **Probes over memory**: `aiuse --available` (exit 3 = nothing usable;
+   ignore `kind:"conserve"` pace alerts for go/no-go), `cswap list` (Claude:
+   5h, 7d and Fable together), `route_agent.py plan --kinds ...`, then
+   `acp-run <agent> --info` for ids; re-plan at every slice boundary.
    Probe agy **once** and reuse the answer: every `agy -p` is a generation request
    against its hourly burst budget (see the 2026-10-03 correction).
+6. **Context hygiene:** Claude Code compacts by itself at 400k
+   (`autoCompactWindow`); herdr/Orca sessions compact earlier at a natural
+   boundary via `self-slash`; a topic change runs the `handoff` skill then
+   `/new`. Nothing here asks the operator.
 
 ## Formerly open questions — resolved by operator, 2026-08-23
 

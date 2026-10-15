@@ -47,5 +47,28 @@ class OmpGateTest(unittest.TestCase):
         self.assertIn("--name must be", r.stderr)
 
 
+class HermesGateTest(unittest.TestCase):
+    """hermes is never a delegation target (operator 2026-10-15); the same gate covers it."""
+
+    def test_acp_run_refuses_hermes_without_approval(self):
+        r = run([ACP_RUN, "hermes", "-p", "hi"], None)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn(GATE_MSG, r.stderr)
+
+    def test_acp_run_omp_approval_does_not_unlock_hermes(self):
+        r = run([ACP_RUN, "hermes", "-p", "hi"], "omp")
+        self.assertIn(GATE_MSG, r.stderr)
+
+    def test_acp_dispatch_refuses_hermes_without_approval(self):
+        r = run([ACP_DISPATCH, "hermes", "--model", "m", "--name", "bad name!", "-p", "hi"], None)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn(GATE_MSG, r.stderr)
+
+    def test_acp_dispatch_passes_the_hermes_gate_with_approval(self):
+        r = run([ACP_DISPATCH, "hermes", "--model", "m", "--name", "bad name!", "-p", "hi"], "hermes")
+        self.assertNotIn(GATE_MSG, r.stderr)
+        self.assertIn("--name must be", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

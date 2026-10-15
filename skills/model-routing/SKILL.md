@@ -70,8 +70,10 @@ any raw number from another source.
    fullest window binds: codex at 100% used on its 5-hour window is unusable for
    ~5 hours even with its weekly window at 35% used.
 3. **One TUI can hold several independent pools, one per model family.** agy:
-   Gemini and Claude/GPT are separate pools (`agy models`); Claude: ordinary vs
-   Fable bucket; Cursor: Auto/included vs "other models". A 429 or
+   Gemini and Claude/GPT are separate pools (`agy models`); Cursor: Auto vs
+   third-party (the `cursor-auto` and `cursor` services in `route_agent.py`).
+   Claude is **not** such a case: Fable is a sublimit of the one shared pool
+   (next paragraph). A 429 or
    `RESOURCE_EXHAUSTED` describes the pool the chosen model draws on, not the
    vendor. Retry on a model from the vendor's other pool before declaring the
    vendor spent (agy: a `gemini-*` model when a `claude-*`/`gpt-*` one is
@@ -192,12 +194,17 @@ Rules for any agent that dispatches to agy:
 
 ## Billing classes (2026-08-23 shape; membership drifts)
 
-- **Monthly subscription windows**: claude (5h/weekly/+Fable bucket),
-  codex (ChatGPT Plus weekly), antigravity/agy (Google AI Pro — also
-  exposes Claude/GPT windows), copilot (premium requests), cursor Pro,
-  grok (SuperGrok; GrokBot runs on it, so small slices; delegation re-allowed 2026-10-09, `acp-run grok --model grok-4.7`; `aiuse` cannot see its window), zai GLM lite (via the zcode TUI), clinepass (Cline windows; feeds
-  hermes via LiteLLM :4000; reserve, never run out), devin (disabled in Orca on
-  purpose).
+- **Monthly subscription windows**: claude (5h/weekly, with Fable a <=50%
+  sublimit of the same weekly, not a separate bucket), codex (ChatGPT Plus
+  weekly; spend it on `gpt-6-astra`), antigravity/agy (Google AI Pro — also
+  exposes Claude/GPT windows), copilot (premium requests; **reserve, floor
+  60%**), cursor Pro (Auto and third-party sublimits), grok (SuperGrok;
+  **reserve, floor 60%**: GrokBot runs on it; `acp-run grok --model grok-4.7`),
+  zai GLM coding plan (via the zcode TUI; an everyday pool), clinepass (Cline
+  windows; feeds hermes via LiteLLM :4000; never delegated, aiuse-disabled),
+  devin (disabled in Orca on purpose).
+- **Never a delegation target**: hermes (the operator's assistant; gated in
+  acp-run/acp-dispatch since 2026-10-15).
 - **Free**: opencode-go bundled models; sipb (MIT-hosted, `opencode`
   provider `sipb`).
 - **Prepaid real money, gated**: opencode-zen, openrouter, deepseek —
@@ -410,40 +417,97 @@ Herdr-hosted TUIs (driving agents in Herdr panes; verified 2026-09-26):
   shell first (command substitution) and the agent gets their output.
   Single-quote the prompt or escape each backtick.
 
-## Routing method
+## Routing policy (operator, 2026-10-15; the one copy, every TUI, any directory)
 
-1. Free and chronically-unused subscription pools first for bulk work —
-   aiuse's history section names them (historically: antigravity,
-   opencode-go, copilot, cursor).
-2. Claude/codex for judgment and agentic work; tier inside them (haiku/
-   low for mechanical, fable/xhigh for hardest adjudication — Fable has
-   its own weekly bucket).
-3. **Reserve pools and exclusions:** clinepass (Hermes runs on it), Claude
-   itself (orchestration runs from it), Copilot's shared allowance, and the
-   grok TUI (GrokBot) — the one copy is `bigteam`'s *Reserve pools* and
-   *Current exclusions* (the grok-vendor exclusion lapsed 2026-10-09). Never prepaid without an explicit fresh operator
-   decision. Usage credits and overage toggles (Claude usage credits, Codex
-   credits, OpenCode Go "Use balance") are real money too: never pick a
-   credits-backed model without asking, and never re-enable a disabled
-   toggle to reach a better model. **omp is operator-gated**: never route
-   to it, by any route, without the operator's specific yes for that run
-   (`bigteam`'s *Operator-gated agents*; acp-run and acp-dispatch need
-   `ACP_OPERATOR_APPROVED=omp`).
-4. Levers: `acp-run <agent> --model <m> [--effort L] [--context SIZE] [--mode <m>]`
-   for one-shot calls to ACP-capable agents (`--info` lists models; the
-   2026-10-15 per-agent table in `tools/acp-run/README.md` lists effort
-   levels and which context sizes are real). A bigger `--context` is for a
-   whole-corpus read or a long log, not for a small edit. Check stderr
-   `acp-run: applied: model=... effort=... ctx=...`. Claude workflows
-   `agent(..., {model, effort})`; Orca
-   `worker-start --agent <any enabled TUI> --model --effort`; the per-CLI
-   flags in the headless table for non-ACP CLIs.
-5. Model names get renamed and retired: a name from an old plan or roster is
-   a hint. Check the live list (`acp-run <agent> --info`, the TUI's picker)
-   before committing to it.
-6. **Route up when unsure.** Routing errors are asymmetric: a hard task on a
-   cheap worker costs a failed step and a retry, an easy task sent up costs a
-   little extra. If the kind is unclear, use the higher tier.
+Goal: **minimise cost while maximising code quality.** Not "minimise tokens":
+tokens on different pools cost different money, and a weak model's cheap
+tokens are paid for again in review and rework. Every choice is **vendor ×
+model × effort × context window**, made per slice, always through ACP
+(`acp-dispatch` / `acp-run`), and never by fanning one prompt out to every
+vendor ("use all agents" is not a routing plan). `bin/route_agent.py plan
+--kinds ...` applies the rules below from the aiuse snapshot and prints the
+`acp-dispatch <agent> --model M --effort E` line per slice; `bigteam` is the
+method that runs the waves.
+
+1. **Serious-effort work goes to the two frontier pools, and they are to be
+   used fully.** Claude Fable 5.1 (`acp-dispatch claude --model fable --effort
+   xhigh`; inside Claude Code the `fable-deep` agent) and codex's top frontier
+   model, today `gpt-6-astra` (`acp-dispatch codex --model gpt-6-astra --effort
+   xhigh`, `high` for a hard implementation slice). Serious means architecture,
+   adjudication, debugging that already defeated one attempt, a
+   security-relevant change, a whole-corpus read (Fable's 1M native window), the
+   final review of a contract decision, an adversarial second opinion. Both
+   windows reset weekly, and an unspent weekly is money wasted: plan hard
+   slices onto them rather than hoarding. codex is for astra; do not spend its
+   window on `gpt-6-luna` everyday slices.
+2. **Fable and "claude" are one pool.** `aiuse --available` lists two routing
+   entries, but Fable is a model sublimit: **at most 50% of the shared Claude
+   weekly**, and every Fable run bills the shared 5-hour and weekly windows too
+   (`cswap list`: read the 5h, 7d and Fable lines together; the fullest
+   binds). Under 10% of the Fable cap, judgment falls back to Opus 5.5 at the
+   same effort (`route_agent.py` does this; `FABLE_MIN_LEFT`).
+3. **Everyday work goes to the other pools**, so the frontier windows stay for
+   item 1: implementation with a clear shape, tests, refactors, doc writing,
+   research summaries, bulk reads, mechanical edits. Order by fitness, then
+   headroom, as `plan` computes it: agy's Claude/GPT pool while it has >= 40%
+   left (Opus/Sonnet 5.5 quality that is otherwise lost at reset), Cursor's
+   Auto pool (`--model default`; its third-party pool is separate and often
+   tight), zai GLM-5.3 (`GLM-5.3 --effort high` for code, `GLM-5.3-Flash
+   --effort low` for bulk), opencode-go, agy Gemini for bulk and big-context
+   reads, crush/SIPB (free, 30B-class) for light bulk. Claude's own
+   Sonnet/Haiku only as Agent-tool sub-agents for small lookups: they bill the
+   shared pool of item 2.
+4. **Minimum needed spec, proactively.** Pick the smallest model, effort and
+   context that will do the slice *well*, and delegate even when nobody asked:
+   `/bigteam` for separable work; an Agent sub-agent (`model: "haiku"`, `effort:
+   "low"` for a lookup or a classification; `sonnet` / `medium` for ordinary
+   implementation; `opus` / `high` when the shape is unclear) for small things,
+   so the session's own context stays small. **Route up when unsure**: a hard
+   slice on a cheap worker costs a failed step and a retry; an easy slice sent
+   up costs a little extra.
+5. **The context window is a choice**, next to model and effort. Default is
+   the agent's own window. `--context 500k` / `1m` only for a whole-corpus read
+   or a long log: bigger windows bill more per token on xAI (from a 200k
+   prompt), Cursor (2× above 256k, Fast 3×) and Copilot (long tier), and can be
+   slower. Read `acp-run: applied: model=... effort=... ctx=...`; the per-agent
+   table is `tools/acp-run/README.md` (2026-10-15).
+6. **Reserves, never depleted:** the **grok TUI** (GrokBot, the cloud Chief of
+   Staff, runs on its SuperGrok pool) and **copilot** (GitHub-side Copilot
+   review of commits draws on its premium requests; it read 100% used on
+   2026-10-15, so this has already gone wrong once). Hard floor **60% left**
+   (`reserve_floor` in `route_agent.py`), one small slice at a time, and only
+   when that vendor is the point: a Grok model for the realtime X/web angle,
+   Copilot for GitHub-context work that `gh` from any other agent cannot do.
+   Grok *models* reached through another TUI (cursor, copilot, opencode) bill
+   that TUI and are fine. **clinepass**: never (Hermes lifeline; aiuse
+   `[disabled_services]`). Claude itself: keep enough 5h headroom to finish
+   integrating what is in flight, because orchestration runs from it.
+7. **Never:** **hermes** as a delegation target (the operator's own assistant;
+   `acp-run` and `acp-dispatch` refuse it the way they refuse omp); **omp**
+   without the operator's specific, explicit yes for that run
+   (`ACP_OPERATOR_APPROVED=omp`; `bigteam`'s *Operator-gated agents*); the
+   prepaid pools (opencode-zen paid, openrouter, deepseek) without a fresh
+   operator decision; a credits-backed model (Claude usage credits, Codex
+   credits, OpenCode Go "Use balance") or re-enabling a disabled toggle to reach
+   a better model; `devin` (dormant by choice); an all-vendor fan-out.
+8. **Probes over memory, per batch:** `aiuse --available` (exit 3 = nothing
+   usable), `cswap list`, then `route_agent.py plan --kinds ...`; re-plan at
+   every slice boundary (`bigteam`, *Dynamic routing*). Exhausted vendors come
+   back by themselves when their window resets; keep no private skip list.
+9. **Levers:** `acp-run <agent> --model M [--effort L] [--context SIZE] [--mode M]`
+   (`--info` lists the ids); `acp-dispatch` takes the same three flags; Claude
+   workflows `agent(..., {model, effort})`; Orca `worker-start --agent <TUI>
+   --model --effort`; the per-CLI headless forms only where no ACP route exists
+   (muse) or as a fallback.
+10. Model names get renamed and retired: a name from an old plan or roster is a
+    hint. Check `acp-run <agent> --info` before committing to an id.
+11. **Context hygiene is part of cost.** Claude Code compacts a session by
+    itself at 400k tokens (`autoCompactWindow` in `~/.claude/settings.json`,
+    2026-10-15; the PreCompact hook writes the Tier 1 checkpoint). In a herdr
+    pane or Orca terminal compact earlier, at a natural boundary, with
+    `self-slash "/compact <focus>"`; on a topic change run the `handoff` skill,
+    then `/new`. Never ask the operator to do either unless `self-slash`
+    refuses (`effort-routing`, *What actually dominates cost*).
 
 ## Multiple-choice decisions are not reasoning (2026-10-11)
 

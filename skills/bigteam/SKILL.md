@@ -15,16 +15,30 @@ Turn one prompt into parallel work across every agent CLI on this machine,
 spending the *cheapest adequate* pool for each slice and keeping Claude's own
 window for what only it should do.
 
-Two optimisation targets, both of them explicit operator goals:
+The optimisation target (operator, 2026-10-15): **minimise cost while
+maximising code quality.** Not "minimise tokens": tokens on different pools
+cost different money, and a weak model's cheap tokens are paid for again in
+review and rework. Concretely:
 
-1. **Token value** — don't spend Opus on mechanical edits, and never redo work
-   already paid for.
-2. **Multi-vendor monthly-plan use** — several subscriptions here reset monthly
-   and go chronically unused. Idle quota is wasted money. Prefer a fresh
-   subscription pool over Claude's 5-hour window for anything delegable.
+1. **The two frontier pools are used fully for serious work**: Claude Fable
+   5.1 at `xhigh` and codex's top frontier model (`gpt-6-astra`). Hard slices,
+   adjudications, security-relevant changes, whole-corpus reads and
+   adversarial second opinions go there; their weekly windows are lost if
+   unspent. Fable and "claude" are **one pool** (Fable is a <=50% sublimit of
+   the shared weekly and bills the 5-hour window too).
+2. **Everyday work goes to the other pools** so those windows stay free:
+   agy's Claude/GPT pool, Cursor Auto, zai GLM-5.3, opencode-go, agy Gemini,
+   crush/SIPB. Every slice names its **vendor × model × effort × context**,
+   at the minimum spec that does it well; never redo work already paid for.
+3. **Reserves are never depleted** (grok and copilot: floor 60% left, one small
+   slice, only when that vendor is the point); **hermes is never a target**;
+   **omp only with the operator's explicit yes**; never an all-vendor fan-out.
+4. **Use this skill proactively**, even when not asked: any discrete,
+   separable work leaves this session's context.
 
-This skill is the *method*. `model-routing` holds the verified headless
-invocation forms and the billing-class map; read it, don't duplicate it here.
+This skill is the *method*. `model-routing` holds the one copy of the routing
+policy (*Routing policy (operator, 2026-10-15)*), the verified invocation
+forms and the billing-class map; read it, don't duplicate it here.
 The reasons and sources behind the brief shape, run sizing, the 3-attempt cap
 and focused-checks-first are in `docs/orchestration-practices.md`
 (djbclark-ade, 2026-10-11).
@@ -101,12 +115,56 @@ Classify every pool before assigning anything:
 | **fresh subscription** | monthly/weekly window largely unused | bulk, mechanical, writing, research — use heavily |
 | **tight** | >40% of the binding window burned | one slice at most, or skip |
 | **exhausted** | `remaining_percent` ≈ 0 on ANY window of that pool | skip that pool entirely (the same vendor's other model-family pool may be fine) |
+| **frontier** | Claude Fable 5.1 and codex `gpt-6-astra` | judgment, adjudication, security-relevant, whole-corpus, adversarial review; use fully (weekly windows), never for everyday slices; see *Pool policy* below |
 | **lifeline** | another agent runs on it | use with care and never let it run out; see *Reserve pools* below (clinepass and Claude itself) |
+| **reserve** | grok (GrokBot) and copilot (GitHub-side review) | hard floor 60% left (`route_agent.py` `reserve_floor`), one small slice at a time, only when that vendor is the point |
+| **never** | hermes; the prepaid pools; credits-backed models | not a target by any route; `acp-run`/`acp-dispatch` refuse hermes like omp |
 | **burn-first** | a pool whose window resets and the allowance is lost, with >= 40% left on every window (`aiuse` raises a `kind:"burn"` alert). Today: **agy's Claude/GPT pool** (`acp-run agy --model claude-opus-5-5-high` / `claude-sonnet-5-5-high`), and any provider's idle second pool | assign it first for code, review, research and second opinions, 2-3 slices at once; see *agy Claude/GPT pool* below |
 | **shared allowance** | a GitHub-side feature draws on the same subscription | usable, but spend modestly and keep a margin; see *Copilot* under *Reserve pools* below |
 | **prepaid** | real money | never without a fresh explicit operator decision |
 | **excluded** | operator has ruled it out | respect it, with its end condition (below) |
 | **operator-gated** | the operator must approve each use | never plan, probe or dispatch it without the operator's specific, explicit yes for this run; see *Operator-gated agents* below |
+
+### Pool policy — who gets which slice (operator, 2026-10-15)
+
+The one copy of the rules is `model-routing`, *Routing policy (operator,
+2026-10-15)*; `bin/route_agent.py plan` applies them and prints the
+`acp-dispatch <agent> --model M --effort E` line per slice. What a fan-out
+needs from it:
+
+1. **Spec every slice as vendor × model × effort × context, at the minimum
+   that does it well.** The brief states all four; the dispatch is
+   `acp-dispatch <agent> --model M --effort E [--context S] ...`; the waiter or
+   the lead checks `<name>-stderr.txt` for `acp-run: applied: model=...
+   effort=... ctx=...` (exit 1 class `config` = the request did not land).
+   Context stays at the agent's default unless the slice reads a whole corpus
+   or a long log (`--context 500k` / `1m`; bigger windows bill more on xAI,
+   Cursor and Copilot).
+2. **`judgment` slices** (architecture, adjudication, debugging that defeated
+   one attempt, security-relevant edits, whole-corpus reads, the adversarial
+   second opinion of Step 6) go to the frontier pools and use them fully:
+   `acp-dispatch claude --model fable --effort xhigh` (an Agent-tool
+   `fable-deep` call is the in-session form) or `acp-dispatch codex --model
+   gpt-6-astra --effort xhigh`. Fable's cap is 50% of the shared Claude weekly
+   and it bills the 5-hour window too; under 10% of the cap, `plan` suggests
+   `opus --effort xhigh` instead. codex is for astra, not for luna-class
+   everyday slices.
+3. **`code`, `research`, `bulk`, `mechanical` slices** go to the everyday
+   pools, in `plan`'s order: agy Claude/GPT (>= 40% left; `claude-opus-5-5
+   --effort high` for code, `claude-sonnet-5-5` for volume), Cursor Auto
+   (`cursor --model default`), zai (`zcode --model GLM-5.3 --effort high`;
+   `GLM-5.3-Flash --effort low` for bulk), opencode-go (`opencode --model
+   opencode-go/glm-5.3`), agy Gemini (`agy --model gemini-3.8-flash --effort
+   medium`) for bulk and big-context reads, crush (`sipb-llms:qwen3.6:35b-a3b-q4_K_M`,
+   free) for light bulk. Claude's own Sonnet/Haiku only as small Agent-tool
+   sub-agents (they bill the orchestrator's pool).
+4. **`github` slices** are the only use of copilot, and only above its 60%
+   floor; `gh` from any other agent covers most GitHub work.
+5. **Never**: hermes (gated like omp in `acp-run`/`acp-dispatch`), omp
+   without `ACP_OPERATOR_APPROVED=omp` after a specific yes, prepaid or
+   credits-backed models, clinepass, devin, an all-vendor fan-out.
+6. **Route up when unsure**, and tell the next re-plan what moved (item 6 of
+   *Dynamic routing*).
 
 ### agy Claude/GPT pool — assign it first while it has headroom (operator, 2026-10-10)
 
@@ -208,28 +266,30 @@ dependant, which costs more than any slice saves:
 1. **clinepass** — Hermes runs on it, through the LiteLLM gateway on `:4000`.
    Never bulk-route to it.
 2. **The grok TUI** (`grok`, the SuperGrok subscription) — GrokBot, the cloud
-   "Chief of Staff", runs on it. Delegation allowed again since 2026-10-09
-   (see *Current exclusions* above): small slices, or a run the operator asked
-   for by name, window checked first in the `grok` TUI (`aiuse` cannot see
-   it). Grok *models* reached through another TUI (opencode, cursor,
-   copilot, …) bill that TUI's pool instead and are fine.
-3. **Claude** — do use it; it does the judgment, integration and review. But
+   "Chief of Staff", runs on it. **Hard floor: 60% left** (operator
+   2026-10-15, "a special effort to never deplete the grok and copilot
+   pools"; `route_agent.py` `reserve_floor`), one small slice at a time
+   (`max_parallel` 1), and only when a Grok model is the point (the realtime
+   X/web angle), or a run the operator asked for by name. `aiuse --available`
+   shows its window again since 2026-10-10 (caam collector); confirm in the
+   `grok` TUI if in doubt. Grok *models* reached through another TUI (opencode,
+   cursor, copilot, …) bill that TUI's pool instead and are fine.
+3. **Copilot** (`copilot`) — the same GitHub Copilot subscription that
+   GitHub-side features use, notably automatic Copilot code review of commits
+   to `master` (djbclark's note of 2026-07-30), so a drained allowance stops
+   those reviews. It read **100% used on 2026-10-15**, so this has already
+   gone wrong once. Same rule as grok: **floor 60% left**, one small slice,
+   only for `github` slices that need GitHub context `gh` cannot give.
+4. **Claude** — do use it; it does the judgment, integration and review. But
    orchestration runs from Claude, so if its 5-hour or weekly window runs out,
    nothing else gets dispatched, integrated or committed either. Check
    `cswap list` before every batch, not once per session, and keep enough
-   headroom to finish integrating what is already in flight.
+   headroom to finish integrating what is already in flight. Fable is a
+   sublimit of this same pool (at most 50% of the weekly), not an extra
+   allowance: a Fable slice spends the 5-hour window too.
 
 If one of these is the only pool left for a slice, wait or ask; don't spend the
 reserve.
-
-**Copilot — lighter care, not a lifeline.** The `copilot` TUI draws on the same
-GitHub Copilot subscription that GitHub-side features use, notably automatic
-Copilot code review of commits to `master` (djbclark's note of 2026-07-30), so a
-drained allowance can also stop those reviews. Be careful, but far less than
-with clinepass: nothing of the operator's runs on it, it is not a bulk pool
-(its direct-use allowance is small), and it is opt-in only for slices that lean
-on GitHub context. Check its remaining premium requests first and give it one
-small slice at most, never a whole batch.
 
 Ignore `aiuse`'s `kind:"conserve"` pace alerts for go/no-go; they fire on a fast
 hour even when the window is nearly untouched.
@@ -243,16 +303,19 @@ bind every slice to a vendor up front:
 1. **Queue slices by kind, not vendor.** Step 2 tags each slice `judgment`,
    `code`, `research`, `bulk`, `mechanical` or `github` (the router's kinds).
 2. **Plan a wave:** `~/src/djbclark-ade/bin/route_agent.py plan --kinds
-   code,code,research,bulk` (hardest first; `--json` for scripts; when the
+   judgment,code,research,bulk` (hardest first; `--json` for scripts; when the
    brief files already exist, add one `--brief FILE` per kind in the same order,
    which only logs what Jev and GLiDE think each kind is, never changes the
    plan: `docs/jev.md` "Dual review"). It reads the
    aiuse snapshot (instant, no tokens), ranks by fitness and headroom, applies
-   the burn-first rule, and **spreads the wave** with each service's
-   `max_parallel` (agy Claude/GPT 3, agy Gemini 2, grok 1). Dispatch only the
-   slices it gives a pool; a slice with `none` stays queued. A `WARNING:
-   snapshot empty/old` means run `aiuse --available --live` (in the background)
-   first.
+   the burn-first rule, the reserve floors and the frontier-for-judgment rule,
+   and **spreads the wave** with each service's `max_parallel` (agy Claude/GPT
+   3, agy Gemini 2, Cursor Auto 2, grok 1, copilot 1). Each line ends with the
+   dispatch to run, `acp-dispatch <agent> --model M --effort E` (`--json`:
+   `agent`, `model`, `dispatch`); add `--name`, `--task`, `-C`, `-f` and, when
+   the slice needs it, `--context`. Dispatch only the slices it gives a pool; a
+   slice with `none` stays queued. A `WARNING: snapshot empty/old` means run
+   `aiuse --available --live` (in the background) first.
 3. **Re-plan at every boundary, before dispatching the next queued slice:**
    a. **a slice finishes** (the notification re-invokes you anyway): probe, then
       plan the queue again;
@@ -309,8 +372,12 @@ verification, not generation, is the bottleneck.
 
 **Tag each slice with a kind** (`judgment`, `code`, `research`, `bulk`,
 `mechanical`, `github`) next to its owned paths, and leave the vendor open: the
-vendor is chosen at dispatch time by *Dynamic routing* (end of Step 1), because
-the pools will have moved by the time a queued slice is reached.
+vendor, model and effort are chosen at dispatch time by *Dynamic routing* (end
+of Step 1; `plan` prints the `acp-dispatch` line), because the pools will have
+moved by the time a queued slice is reached. Decide the **context window** now,
+per slice: the default unless the slice reads a whole corpus or a long log.
+Tag honestly: a `judgment` slice on an everyday pool fails and is re-run at
+frontier cost; a `code` slice tagged `judgment` wastes a frontier turn.
 
 Keep for **yourself** (the orchestrator), never delegate:
 
@@ -739,7 +806,7 @@ front of the operator if it removes something they deliberately built.
 | seven `opencode-go/*` slices fail in 15-21 s with `ServiceUnavailableError` / `Internal service failure` | the pool is in an outage, which quota snapshots do not show | automatic preflight exits 5, records a 15-minute outage override, and launches no slice; re-plan with `--exclude opencode-go` |
 | zcode says `1310 ... Weekly/Monthly Limit Exhausted` with a reset time | z.ai's pool is exhausted but aiuse has no live collector for the TUI | automatic preflight classifies quota, records the reset for `zai`, exits 5 and launches nothing; re-plan with `--exclude zai` |
 
-## What this skill is not for
+## What this skill is not for, and when to use it unasked
 
 A single-file edit, a lookup, or anything where the coordination overhead
 exceeds the work. Fan-out has a real fixed cost: writing the slices, enforcing
@@ -748,3 +815,13 @@ discrete task that would read many files, logs or long outputs into this
 session belongs in a fan-out even as one or two slices, because keeping this
 context small is itself the goal (2026-10-08). Do it yourself only when the
 work is small enough that its tokens cost less than the brief and review.
+
+**Use it proactively** (operator, 2026-10-15): nobody has to say "/bigteam".
+Whenever a prompt contains separable, discrete work, or the context-size hook
+has fired, slice it and send it out at the minimum spec that does it well; a
+single lookup goes to a minimum-spec Agent sub-agent instead (`effort-routing`).
+The orchestrator's own context is also a cost: Claude Code compacts it by itself
+at 400k tokens (`autoCompactWindow`), and in a herdr pane or Orca terminal the
+orchestrator compacts earlier at a wave boundary with `self-slash "/compact
+<focus>"`, or runs the `handoff` skill then `/new` on a topic change, without
+asking.

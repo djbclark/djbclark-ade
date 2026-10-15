@@ -29,6 +29,11 @@ IDLE = {
     # The free half of opencode-zen. Present in the fixture because it is a
     # strong default for bulk, so leaving it out let it win tests by accident.
     "opencode-zen-free": {"remaining": 100.0},
+    # 2026-10-15 rows: Cursor's Auto pool, the free SIPB models via crush and
+    # the aiuse-disabled Alibaba plan; present so "drain every pool" fixtures
+    # drain them too instead of leaving them unmeasured and routable.
+    "cursor-auto": {"remaining": 56.0}, "crush": {"remaining": 100.0},
+    "alibaba": {"remaining": 50.0},
 }
 
 
@@ -66,9 +71,13 @@ class TestStandingRules(unittest.TestCase):
         self.assertTrue(c.service.judgment_tier)
         self.assertIn(c.service.name, {"claude", "codex"})
 
-    def test_judgment_prefers_claude_even_when_idle_pools_are_emptier(self):
-        # antigravity at 100% must not win judgment work
+    def test_judgment_prefers_the_frontier_pools_even_when_idle_pools_are_emptier(self):
+        # antigravity at 100% must not win judgment work; between the two
+        # frontier pools the one with more headroom may (2026-10-15 policy:
+        # use both fully).
         q = dict(IDLE, antigravity={"remaining": 100.0}, claude={"remaining": 20.0})
+        self.assertIn(r.route("judgment", quota=q).service.name, {"claude", "codex"})
+        q = dict(IDLE, claude={"remaining": 90.0}, codex={"remaining": 90.0})
         self.assertEqual(r.route("judgment", quota=q).service.name, "claude")
 
 
@@ -145,7 +154,8 @@ class TestDiscovery(unittest.TestCase):
         names = {s.name for s in r.discover(IDLE)}
         for alias in ("cline", "claude-agent-teams"):
             self.assertNotIn(alias, names)
-        self.assertIn("zcode", {s.cli for s in r.discover(IDLE) if s.name == "zai"})
+        self.assertTrue(all(s.cli.startswith("zcode") and s.acp_agent == "zcode"
+                            for s in r.discover(IDLE) if s.name == "zai"))
         self.assertEqual(r.ALIASES["cline"], "clinepass")
 
     def test_alias_does_not_create_a_second_clinepass(self):
@@ -473,11 +483,13 @@ class TestExhaustedAndStaleReadings(unittest.TestCase):
         """When headroom is None (unmeasured), burn_first bonus is not applied."""
         # claude has 30% headroom, antigravity-claude is unmeasured (None)
         q = {**IDLE, "antigravity-claude": {"remaining": None}, "claude": {"remaining": 30.0}}
-        # Under normal conditions with > 40% headroom, antigravity-claude wins code.
-        # But with None, claude (score 1.0 + 1.75 = 2.75) beats antigravity-claude (rank 11.0 + pressure 5.0 = 16.0).
-        choice = r.route("code", quota=q)
-        self.assertIsNotNone(choice)
-        self.assertNotEqual(choice.service.name, "antigravity-claude")
+        # Unmeasured: rank 11 + unmeasured pressure 5 and no bonus. Measured at
+        # 90%: rank 11 + 0.25 - BURN_FIRST_BONUS. The gap must show the bonus.
+        unmeasured = r.route("code", quota=q)
+        measured = r.route("code", quota={**q, "antigravity-claude": {"remaining": 90.0}})
+        self.assertEqual(measured.service.name, "antigravity-claude")
+        if unmeasured.service.name == "antigravity-claude":
+            self.assertGreaterEqual(unmeasured.score - measured.score, r.BURN_FIRST_BONUS)
 
     def test_exhausted_state_on_old_reading_still_counts_as_zero(self):
         """An override on an older account reading still registers as 0.0 remaining (exhausted)."""
@@ -518,3 +530,101 @@ class ShadowKindTests(unittest.TestCase):
         r.shadow_kind("/nonexistent/brief.md", "code", None)
         with mock.patch.object(r.subprocess, "Popen", side_effect=OSError):
             r.shadow_kind(__file__, "code", None)
+
+
+class TestRoutingPolicy2026_10_15(unittest.TestCase):
+    """Operator policy of 2026-10-15: frontier pools for serious work, reserves
+    with a floor, hermes/omp never routable, Fable a sublimit of the shared pool,
+    a model suggestion on every route."""
+
+    def test_hermes_and_omp_are_never_discovered(self):
+        q = {**IDLE, "hermes": {"remaining": 100.0}, "omp": {"remaining": 99.7}}
+        names = {s.name for s in r.discover(q)}
+        self.assertNotIn("hermes", names)
+        self.assertNotIn("omp", names)
+        for kind in r.KINDS:
+            c = r.route(kind, quota=q)
+            self.assertNotIn(c.service.name if c else None, {"hermes", "omp"})
+
+    def test_reserve_floor_blocks_grok_and_copilot_below_sixty_percent(self):
+        q = {name: {"remaining": 0.0} for name in (*IDLE, "antigravity-claude")}
+        q["grok"] = {"remaining": 59.0}
+        q["copilot"] = {"remaining": 59.0}
+        self.assertIsNone(r.route("github", quota=q))
+        c = r.route("research", quota=q)
+        self.assertTrue(c is None or c.service.name != "grok")
+        q["grok"] = {"remaining": 61.0}
+        q["copilot"] = {"remaining": 61.0}
+        self.assertEqual(r.route("github", quota=q).service.name, "copilot")
+        self.assertEqual(r.route("research", quota=q).service.name, "grok")
+        self.assertIn("RESERVE", r.route("github", quota=q).why)
+
+    def test_everyday_code_avoids_the_frontier_pools_when_others_have_room(self):
+        q = {**IDLE, "antigravity-claude": {"remaining": 0.0}, "cursor-auto": {"remaining": 75.0}}
+        c = r.route("code", quota=q)
+        self.assertNotIn(c.service.name, {"claude", "codex"})
+
+    def test_judgment_suggests_fable_then_falls_back_to_opus(self):
+        q = {**IDLE, "claude": {"remaining": 90.0, "sublimits": {"fable": 97.0}}}
+        self.assertEqual(r.route("judgment", quota=q).model, "fable --effort xhigh")
+        q["claude"] = {"remaining": 90.0, "sublimits": {"fable": 4.0}}
+        self.assertEqual(r.route("judgment", quota=q).model, "opus --effort xhigh")
+
+    def test_codex_judgment_is_the_top_frontier_model(self):
+        q = {**IDLE, "claude": {"remaining": 5.0}}
+        c = r.route("judgment", quota=q)
+        self.assertEqual(c.service.name, "codex")
+        self.assertTrue(c.model.startswith("gpt-6-astra"))
+        self.assertEqual(c.dispatch, "acp-dispatch codex --model gpt-6-astra --effort xhigh")
+
+    def test_dispatch_line_uses_the_acp_agent_name(self):
+        q = {**IDLE, "antigravity-claude": {"remaining": 90.0}}
+        c = r.route("code", quota=q)
+        self.assertEqual(c.service.name, "antigravity-claude")
+        self.assertTrue(c.dispatch.startswith("acp-dispatch agy --model claude-opus-5-5"))
+
+    def test_plan_json_carries_model_and_dispatch(self):
+        rows = r.plan(["judgment", "bulk"], quota=IDLE)
+        for _, c in rows:
+            self.assertIsNotNone(c)
+            self.assertTrue(c.dispatch.startswith("acp-dispatch "))
+
+
+class TestFableSublimitAndCursorSplit(unittest.TestCase):
+    def load(self, accounts):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "latest.json"
+            path.write_text(r.json.dumps({"snapshot": {"accounts": accounts},
+                                          "collected_at": r.datetime.now(r.UTC).isoformat()}))
+            with mock.patch.object(r, "SNAPSHOT", path):
+                return r.load_snapshot()[0]
+
+    def test_spent_fable_sublimit_does_not_exhaust_the_claude_pool(self):
+        q = self.load([{"provider": "claude", "windows": [
+            {"label": "Claude Code 5-hour", "pool_family": "default", "remaining_percent": 86.0,
+             "headroom_percent": 86.0, "state": "ok", "quota_scope": "shared"},
+            {"label": "Claude Code weekly", "pool_family": "default", "remaining_percent": 96.0,
+             "headroom_percent": 96.0, "state": "ok", "quota_scope": "shared"},
+            {"label": "Claude Code weekly — Fable", "pool_family": "fable", "remaining_percent": 0.0,
+             "headroom_percent": 0.0, "state": "exhausted", "quota_scope": "model_sublimit",
+             "shared_pool_family": "default", "max_share_of_parent_percent": 50.0}]}])
+        self.assertEqual(q["claude"]["remaining"], 86.0)
+        self.assertEqual(q["claude"]["sublimits"], {"fable": 0.0})
+        self.assertEqual(r.route("judgment", quota=q).model, "opus --effort xhigh")
+
+    def test_cursor_auto_pool_is_split_from_the_tight_third_party_pool(self):
+        q = self.load([{"provider": "cursor", "windows": [
+            {"label": "total", "pool_family": "total", "remaining_percent": 73.9,
+             "headroom_percent": 73.9, "state": "ok"},
+            {"label": "auto", "pool_family": "auto", "remaining_percent": 75.4,
+             "headroom_percent": 73.9, "state": "ok", "quota_scope": "model_sublimit",
+             "shared_pool_family": "total"},
+            {"label": "third-party", "pool_family": "third_party", "remaining_percent": 11.2,
+             "headroom_percent": 11.2, "state": "tight", "quota_scope": "model_sublimit",
+             "shared_pool_family": "total"}]}])
+        self.assertEqual(q["cursor-auto"]["remaining"], 73.9)
+        self.assertEqual(q["cursor"]["remaining"], 11.2)
+        c = r.route("code", quota=q)
+        self.assertEqual(c.service.name, "cursor-auto")
+        self.assertEqual(c.dispatch, "acp-dispatch cursor --model default")
