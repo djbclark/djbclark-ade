@@ -385,7 +385,7 @@ YOLO_SET = {
     "qwen": {"mode": "yolo"},
     "devin": {"mode": "bypass"},
     "agy": {"mode": "yolo"},
-    "zcode": {"mode": "yolo"},  # zcode-acp-server 0.67.0: plan | build | edit | yolo | auto
+    "zcode": {"mode": "yolo"},  # zcode-acp-server 0.69: plan | build | edit | guarded | yolo
 }
 # Launch-command variants for agents whose ACP session has no auto-approve mode
 # but whose CLI takes a flag (audited 2026-10-03: cline --auto-approve true is
@@ -1773,6 +1773,12 @@ def has_config(options, category):
     )
 
 
+def have_list(values, limit=40):
+    """The 'have:' list of an error: the first `limit` values, then how many more there are."""
+    names = [str(v.get("value")) for v in values]
+    return ", ".join(names[:limit]) + (f", ... {len(names) - limit} more (acp-run <agent> --info)" if len(names) > limit else "")
+
+
 def flat_values(option):
     """The select values of a dumped config option, groups flattened."""
     values = []
@@ -1840,7 +1846,7 @@ def pick_config(options, want, category):
             (f"{o.get('id')}: " if len(misses) > 1 else "")
             + (f"(ambiguous: {', '.join(str(c.get('value')) for c in amb)}) " if amb else "")
             + "have: "
-            + ", ".join(str(v.get("value")) for v in values)
+            + have_list(values)
         )
     if len(misses) == 1 and misses[0][2]:
         head = f"acp-run: no {category} '{want}' (ambiguous: {', '.join(str(c.get('value')) for c in misses[0][2])}); have: "
@@ -2094,7 +2100,7 @@ async def set_model_fallback(a, conn, sess, client, want, per_run_data):
     if v is None:
         raise SystemExit(f"acp-run: no model '{want}'"
                          + (f" (ambiguous: {', '.join(str(c.get('value')) for c in amb)})" if amb else "")
-                         + "; have: " + ", ".join(str(x.get("value")) for x in values))
+                         + "; have: " + have_list(values))
     if a.agent == "crush" and not per_run_data:
         # crush-acp persists the choice into the data dir's crush.json (R2 finding 4), and the
         # default dir is shared with the interactive `crush` shell function
@@ -3517,7 +3523,9 @@ async def run(a, log, err, log_path):
                 "config_options": dump(options),
             }
             if models_extra(sess):
-                info["models"] = models_extra(sess)  # hermes, crush-acp: set with --model (session/set_model)
+                info["models"] = dict(models_extra(sess))  # hermes, crush-acp: set with --model (session/set_model)
+                if wants and applied.get("model"):
+                    info["models"]["currentModelId"] = applied["model"]
             if wants:
                 info["applied"] = {k: v for k, v in applied.items() if k in ("model", "effort", "ctx", "unverified")}
             if getattr(a, "all_models", False):
