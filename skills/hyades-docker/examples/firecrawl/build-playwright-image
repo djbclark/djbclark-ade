@@ -12,7 +12,7 @@
 # The deploy script sets LD_PRELOAD=/usr/local/lib/portshim.so on the microVM.
 set -euo pipefail
 SCRIPTS="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../../scripts" && pwd)"
-SHIM_SHA="${1:-b759c7044271a69fbeae2f4f0dc29afee3223174}"
+SHIM_SHA="${1:-b5f2cd304bc602d9ecd1d25cee8482bc8d097b80}"
 BASE="${PW_BASE:-ghcr.io/firecrawl/playwright-service:latest}"
 TAG="forgejo.mit.edu/djbclark/firecrawl-playwright:shim-${SHIM_SHA:0:7}"
 SRC="https://forgejo.mit.edu/djbclark/loopback-port-shim/raw/commit/${SHIM_SHA}/loopback-port-shim.c"

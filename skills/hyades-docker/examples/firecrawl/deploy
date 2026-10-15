@@ -28,7 +28,7 @@
 set -euo pipefail
 HY="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../../scripts" && pwd)/hyades"
 FC_TAG="${FC_TAG:-2.11.519}"
-PW_IMAGE="${PW_IMAGE:-forgejo.mit.edu/djbclark/firecrawl-playwright:shim-b759c70}"
+PW_IMAGE="${PW_IMAGE:-forgejo.mit.edu/djbclark/firecrawl-playwright:shim-b5f2cd3}"
 SUB="${FC_SUBDOMAIN:-djbclark-firecrawl}"
 P=djbclark-fc
 ORDER=(redis rabbitmq postgres playwright api gate)
