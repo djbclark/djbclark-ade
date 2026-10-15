@@ -1558,8 +1558,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="acp-run --context: 200k|256k|272k|400k|500k|1m or a token count; checked with the model")
     ap.add_argument("--perm", default="all", help="all (default) | deny: every permission request refused and a tripwire (exit 77) on any "
                          "tool that runs without asking, reads included (crush and agy read unasked: add "
-                         "--acp-arg=--tripwire-exempt-kinds=read,search; cursor also runs shell commands "
-                         "unasked, so review it under all with a read-only brief and a diff check). "
+                         "--acp-arg=--tripwire-exempt-kinds=read,search; cursor cannot deny at all, acp-run "
+                         "refuses it: review it under all with a read-only brief and a diff check). "
+                         "Subagents run yolo unless security-sensitive (operator 2026-10-15). "
                          "A deprecated scoped:... warns and runs as all")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
                     help=f"acp-run --timeout (default {DEFAULT_TIMEOUT}; 0 is unlimited)")

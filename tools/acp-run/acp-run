@@ -480,6 +480,24 @@ DENY_SET = {
     "zcode": {"mode": "plan"},
     "agy": {"mode": "default"},
 }
+# cursor-agent acp decides permissions from ~/.cursor/cli-config.json
+# `approvalMode` ("unrestricted" here: the operator's yolo default) and the
+# static allowlist, never from the ACP session mode: with `ask` and `plan`
+# applied it still ran `uname -a` and `rg --version` without a
+# session/request_permission (2026-10-15, four repro runs, tripwire each
+# time). Searched forum.cursor.com and GitHub first: threads 174744 (ACP
+# ignores Run Mode, only the allowlist decides; same build 2026.10.14),
+# 165665, 153825, 126035 describe the allowlist behaviour, none a defect
+# here. So --perm deny on cursor cannot hold and is refused up front, unless
+# the caller points CURSOR_CONFIG_DIR (cursor.com/docs/cli/reference/
+# configuration) at a config whose approvalMode is `allowlist`.
+DENY_UNSUPPORTED = {
+    "cursor": "cursor-agent acp takes permissions from ~/.cursor/cli-config.json approvalMode"
+              " (unrestricted) and never sends session/request_permission; run it under --perm all"
+              " with a read-only brief and a diff check (subagents run yolo unless security-sensitive,"
+              " operator 2026-10-15), or set CURSOR_CONFIG_DIR to a config with approvalMode allowlist",
+}
+DENY_UNSUPPORTED_OVERRIDE_ENV = {"cursor": "CURSOR_CONFIG_DIR"}
 DENY_ENV = {
     # opencode's PermissionConfig accepts one action for every tool (config schema,
     # https://opencode.ai/config.json, checked 2026-10-12 against v2.0.27).
@@ -4071,6 +4089,9 @@ def main():
         ap.error(f"--tripwire-exempt-kinds: only read-only kinds {', '.join(TRIPWIRE_EXEMPTABLE)}; not {', '.join(bad)}")
     if a.timeout < 0:
         ap.error("--timeout must be 0 or more")
+    if a.perm == "deny" and a.agent in DENY_UNSUPPORTED \
+            and not os.environ.get(DENY_UNSUPPORTED_OVERRIDE_ENV.get(a.agent, "")):
+        ap.error(f"--perm deny: {DENY_UNSUPPORTED[a.agent]}")
     if a.list:
         for n, (c, auth) in AGENTS.items():
             ok = "ok " if shutil.which(c[0]) else "-- "

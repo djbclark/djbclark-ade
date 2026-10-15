@@ -299,10 +299,14 @@ continues from the report and diff in a linked record instead of restarting.
   every request, with a tripwire (exit 77, no report) for any tool that runs
   without asking, **reads included**: crush and agy run `grep`/`read` unasked,
   so a read-only review on them also needs
-  `--acp-arg=--tripwire-exempt-kinds=read,search`. **cursor also runs shell
-  commands unasked** (2026-10-15: two review slices tripped, on `grep` and then
-  on a shell `rg`), so review on cursor under `all` with a read-only brief and
-  check `git status` for stray edits after. Those are the only two policies (operator 2026-10-14): the old
+  `--acp-arg=--tripwire-exempt-kinds=read,search`. **cursor cannot deny at
+  all**: cursor-agent takes permissions from `~/.cursor/cli-config.json`
+  `approvalMode` (`unrestricted`, the yolo default) and never sends a
+  permission request, whatever ACP mode is set (2026-10-15: four repro runs),
+  so acp-run refuses `cursor --perm deny`; review on cursor under `all` with a
+  read-only brief and check `git status` for stray edits after. **`deny` is
+  for security-sensitive slices only** (prompt-injection exposure and the
+  like); every other sub-agent runs yolo (operator 2026-10-15). Those are the only two policies (operator 2026-10-14): the old
   `scoped:<paths>` and `ask` are accepted but only print a deprecation warning
   and run as `all`. For a work slice, name the owned files in the brief and
   check `git status --short` / `git diff --stat` afterwards.

@@ -295,3 +295,25 @@ class TestPermDeny(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDenyUnsupported(unittest.TestCase):
+    """cursor takes permissions from its own config's approvalMode, never from ACP
+    (2026-10-15: ask and plan modes still ran shell commands unasked), so --perm deny
+    on it is a usage error unless CURSOR_CONFIG_DIR points at an allowlist config."""
+
+    def test_cursor_perm_deny_is_refused_up_front(self):
+        env = {k: v for k, v in os.environ.items() if k != "CURSOR_CONFIG_DIR"}
+        r = subprocess.run(["uv", "run", "--quiet", "--script", str(SCRIPT), "cursor", "--perm", "deny",
+                            "-p", "hi"], check=False, capture_output=True, text=True, timeout=120, env=env)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("approvalMode", r.stderr)
+        self.assertIn("--perm all", r.stderr)
+
+    def test_cursor_config_dir_lifts_the_refusal(self):
+        env = dict(os.environ, CURSOR_CONFIG_DIR="/nonexistent-acp-run-test")
+        # --list is handled right after the refusal check, so nothing is launched.
+        r = subprocess.run(["uv", "run", "--quiet", "--script", str(SCRIPT), "cursor", "--perm", "deny",
+                            "--list"], check=False, capture_output=True, text=True, timeout=120, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("approvalMode", r.stderr)

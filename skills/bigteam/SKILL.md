@@ -508,9 +508,12 @@ until the work is committed or recorded in a repo.
    review-only slices; it stays enforced (every request refused, tripwire on),
    and on an agent that reads without asking (crush, agy) add
    `--acp-arg=--tripwire-exempt-kinds=read,search`, or the first `grep` ends the
-   slice with exit 77 and no report. cursor also runs shell commands unasked, so
-   a cursor review runs under `all` with a read-only brief and a `git status`
-   check after (2026-10-15: two cursor review slices tripped under `deny`).
+   slice with exit 77 and no report. cursor cannot deny at all (it takes
+   permissions from its own config's `approvalMode`, never from ACP; acp-run
+   refuses `cursor --perm deny`), so a cursor review runs under `all` with a
+   read-only brief and a `git status` check after. Reserve `deny` for
+   security-sensitive slices (prompt-injection exposure); everything else
+   runs yolo (operator 2026-10-15).
 2. **Always `--model`** (except `zcode`: acp-run sets `ZCODE_BIN`, so `--model`
    works as of 2026-10-15, and `acp-dispatch` still does not require one).
    Otherwise acp-dispatch refuses to run without it. The default is the
