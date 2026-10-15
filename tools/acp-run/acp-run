@@ -78,8 +78,8 @@ across agents. Each is translated to the agent's own knob (an ACP option, a laun
 env var, grok's session/set_model, claude's CLAUDE_CODE_DISABLE_1M_CONTEXT, agy's model-id
 suffix, ...) and applied after the model and every other option, since a model switch resets
 them. One the agent or model cannot take (hermes/crush effort; qwen/opencode/crush/cline/
-agy/hermes context; a size the model does not list; codex other than the model's fixed
-window) exits 2 before any prompt, naming the valid values. After the options are set and
+agy/hermes context; a size the model does not list; a codex size above the model's
+max_context_window) exits 2 before any prompt, naming the valid values. After the options are set and
 after the turn (usage_update.size) acp-run reads back what the agent reports and prints
 "acp-run: applied: model=... effort=... ctx=..." (values it cannot read back are marked
 (unverified)); the same goes into the "result" record and --json as "applied". A requested
@@ -2026,7 +2026,46 @@ CONTEXT_NOT_REACHABLE = {
 }
 COPILOT_TIERS = {200000: "default", 256000: "default", 272000: "default", 1000000: "long_context"}
 CLAUDE_CONTEXTS = (200000, 1000000)
-CODEX_CONTEXTS = (272000, 500000)
+CODEX_EFFECTIVE = 0.95  # codex reports 95% of model_context_window as the usable window (usage_update.size)
+
+
+def codex_expected_size(ctx):
+    """The usage_update.size codex reports for model_context_window=ctx."""
+    return round(ctx * CODEX_EFFECTIVE)
+
+
+def codex_max_window(model):
+    """The model's max_context_window from codex's own catalog ($CODEX_HOME/models_cache.json,
+    default ~/.codex), or None when the catalog or the model is not there (the read-back after
+    the turn then catches a clamped window). The longest slug found in `model` wins."""
+    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "models_cache.json"
+    try:
+        models = json.loads(path.read_text()).get("models") or []
+    except (OSError, ValueError, AttributeError):
+        return None
+    best = None
+    for m in models:
+        slug, mx = m.get("slug"), m.get("max_context_window")
+        if isinstance(slug, str) and isinstance(mx, int) and slug in str(model) \
+                and (best is None or len(slug) > len(best[0])):
+            best = (slug, mx)
+    return best[1] if best else None
+
+
+def codex_config_with_window(current, ctx):
+    """CODEX_CONFIG (a JSON object codex-acp merges into the session config) with
+    model_context_window=ctx, keeping everything else `current` already sets."""
+    cfg = {}
+    if current and current.strip():
+        try:
+            cfg = json.loads(current)
+        except ValueError:
+            cfg = None
+        if not isinstance(cfg, dict):
+            usage_exit("--context: codex needs CODEX_CONFIG to be a JSON object to add model_context_window;"
+                       f" it is {current[:60]!r}")
+    cfg["model_context_window"] = ctx
+    return json.dumps(cfg, separators=(",", ":"))
 CLINE_EFFORTS = ("none", "low", "medium", "high", "xhigh")
 AGY_EFFORTS = ("low", "medium", "high")
 # models whose option list returned by set_config_option(model) can still be the previous
@@ -2051,9 +2090,6 @@ def check_static(a):
         if a.agent == "claude" and ctx not in CLAUDE_CONTEXTS:
             usage_exit("--context: claude is 200k (CLAUDE_CODE_DISABLE_1M_CONTEXT) or the model's own 1m;"
                        f" not {fmt_size(ctx)}")
-        if a.agent == "codex" and ctx not in CODEX_CONTEXTS:
-            usage_exit("--context: codex's window is fixed by the model: 272k (most), 500k"
-                       f" (gpt-6.1-sol only); not {fmt_size(ctx)}")
         if a.agent == "copilot" and ctx not in COPILOT_TIERS:
             usage_exit("--context: copilot has a default tier (200k, 256k or 272k) and a long one (1m);"
                        f" not {fmt_size(ctx)}")
@@ -2092,6 +2128,10 @@ def launch_tweaks(a, cmd, env):
     env.update(env_pairs(os.environ.get(f"ACP_RUN_ENV_{a.agent.upper()}", "")))
     for kv in getattr(a, "agent_env", None) or []:
         env.update(env_pairs(kv))
+    if a.agent == "codex" and ctx:
+        # codex-acp merges CODEX_CONFIG into the session config: model_context_window sets the
+        # window (usage_update.size = 95% of it), clamped by the model's max_context_window
+        env["CODEX_CONFIG"] = codex_config_with_window(env.get("CODEX_CONFIG"), ctx)
     return cmd
 
 
@@ -2258,12 +2298,15 @@ async def apply_config(a, conn, sess, init, client, sets, applied, per_run_data=
                 got[cid] = (val, bool(new))
                 applied["ctx_id"] = cid
             elif a.agent == "codex":
-                model = str(current_value(options, "model") or "")
-                fixed = 500000 if "gpt-6.1-sol" in model else 272000
-                if ctx != fixed:
-                    usage_exit(f"{who}: codex's window is fixed by the model ({fmt_size(fixed)}); only gpt-6.1-sol"
-                               " has 500k (--model gpt-6.1-sol), the others 272k")
-                applied["ctx_expected"] = fixed
+                # launch-time CODEX_CONFIG model_context_window (launch_tweaks); confirmed by
+                # usage_update.size == 95% of it after the turn
+                model = str(current_value(options, "model") or applied.get("model") or a.model or "")
+                limit = codex_max_window(model)
+                if limit and ctx > limit:
+                    usage_exit(f"{who}: codex's window for this model is at most {fmt_size(limit)}"
+                               f" (max_context_window); not {fmt_size(ctx)}")
+                applied["ctx_expected"] = ctx
+                applied["ctx_requested"] = ctx
             elif a.agent in ("claude", "copilot"):
                 applied["ctx_expected"] = ctx  # launch-time switch; confirmed by usage_update.size
             elif a.agent == "zcode":
@@ -2340,6 +2383,15 @@ def post_turn(a, applied, usage):
             if "ctx" in applied.get("unverified", []):
                 applied["unverified"].remove("ctx")
         if ctx and applied.get("ctx_source") == "usage_update":
+            if a.agent == "codex":
+                # model_context_window=ctx reads back as 95% of it (allow codex's rounding)
+                want = codex_expected_size(ctx)
+                if abs(size - want) > 1:
+                    return (f"requested context {fmt_size(ctx)} but the agent reports {fmt_size(size)}"
+                            f" (usage_update; expected {want}, 95% of the request; a model's"
+                            " max_context_window clamps it)")
+                applied["ctx_requested"] = ctx
+                return None
             if a.agent == "copilot":
                 # two tiers: the default one reports a ~272k prompt budget whatever 200k/256k/272k
                 # was asked, the long one ~922k of its 1m
@@ -2363,6 +2415,8 @@ def applied_line(applied):
         if v is None:
             continue
         s = fmt_size(v) if k == "ctx" else str(v)
+        if k == "ctx" and applied.get("ctx_requested") not in (None, v):
+            s = f"{fmt_size(applied['ctx_requested'])}/{v}"  # requested / effective (codex: 95%)
         bits.append(f"{k}={s}" + ("(unverified)" if k in unv else ""))
     return " ".join(bits)
 

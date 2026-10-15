@@ -258,6 +258,7 @@ PROBE = textwrap.dedent("""\
             "claude_200": static("claude", context=200000),
             "codex_400": static("codex", context=400000),
             "codex_500": static("codex", context=500000),
+            "codex_800": static("codex", context=800000),
             "copilot_400": static("copilot", context=400000),
             "copilot_1m": static("copilot", context=1000000),
             "grok_any": static("grok", context=500000),
@@ -278,6 +279,27 @@ PROBE = textwrap.dedent("""\
         env = {}
         out["pass_through"] = {"cmd": mod.launch_tweaks(a, ["codex-acp"], env), "env": env}
         del os.environ["ACP_RUN_ARGS_CODEX"], os.environ["ACP_RUN_ENV_CODEX"]
+        # codex --context: CODEX_CONFIG model_context_window, merged into what is already set
+        def codex_env(cfg=None, **kw):
+            e = {"CODEX_CONFIG": cfg} if cfg is not None else {}
+            mod.launch_tweaks(args("codex", **kw), ["codex-acp"], e)
+            return e.get("CODEX_CONFIG")
+        out["codex_cfg"] = {
+            "fresh": codex_env(context=400000),
+            "none": codex_env(effort="high"),
+            "merge": codex_env('{"sandbox_mode":"read-only","model_context_window":1}', context=400000),
+            "empty": codex_env("", context=200000),
+        }
+        e = {}
+        os.environ["ACP_RUN_ENV_CODEX"] = 'CODEX_CONFIG={"a":1,"b":[1,2]}'
+        mod.launch_tweaks(args("codex", context=300000, agent_env=["X=1"]), ["codex-acp"], e)
+        os.environ.pop("ACP_RUN_ENV_CODEX")
+        out["codex_cfg"]["agent_env"] = e
+        e = {}
+        mod.launch_tweaks(args("codex", context=300000, agent_env=['CODEX_CONFIG={"b":2,"c":3}']), ["codex-acp"], e)
+        out["codex_cfg"]["agent_env_json"] = e
+        out["codex_cfg"]["not_json"] = exits(lambda: codex_env("model_context_window = 5", context=400000))
+        out["codex_cfg"]["claude_untouched"] = tweaks("claude", context=200000)["env"]
 
         out["grok"] = await apply("grok", args("grok", model="m-a", effort="low", context=500000))
         out["order"] = await apply("cursor", args("cursor", model="m-b", effort="xhigh"),
@@ -290,7 +312,17 @@ PROBE = textwrap.dedent("""\
         out["no_effort_on_model"] = await apply("cursor", args("cursor", model="m-c", effort="low"))
         out["agy"] = await apply("agy", args("agy", model="gem-high", effort="low"), ag=None) if False else None
         out["codex_ok"] = await apply("codex", args("codex", model="m-c", context=272000))
-        out["codex_bad"] = await apply("codex", args("codex", model="m-c", context=500000))
+        out["codex_400"] = await apply("codex", args("codex", model="m-c", context=400000))
+        os.environ["CODEX_HOME"] = home = tempfile.mkdtemp()
+        with open(os.path.join(home, "models_cache.json"), "w") as f:
+            json.dump({"models": [{"slug": "m", "max_context_window": 100000},
+                                  {"slug": "m-c", "max_context_window": 872000}]}, f)
+        out["codex_bad"] = await apply("codex", args("codex", model="m-c", context=900000))
+        out["codex_max_ok"] = await apply("codex", args("codex", model="m-c", context=872000))
+        out["codex_max_lookup"] = [mod.codex_max_window("m-c"), mod.codex_max_window("x/m-c/low"), mod.codex_max_window("zz")]
+        os.environ["CODEX_HOME"] = home + "/nope"
+        out["codex_max_lookup"].append(mod.codex_max_window("m-c"))
+        del os.environ["CODEX_HOME"]
         out["claude_ctx"] = await apply("claude", args("claude", model="m-c", context=200000))
         out["zcode_cap"] = await apply("zcode", args("zcode", model="m-c", context=200000))
         out["cline_effort"] = await apply("cline", args("cline", model="m-c", effort="high"))
@@ -319,6 +351,10 @@ PROBE = textwrap.dedent("""\
             "claude_ok": mod.post_turn(args("claude", context=200000), {"ctx_expected": 200000}, {"size": 200000}),
             "claude_bad": mod.post_turn(args("claude", context=200000), {"ctx_expected": 200000}, {"size": 1000000}),
             "codex_effective": mod.post_turn(args("codex", context=272000), {}, {"size": 258400}),
+            "codex_400": mod.post_turn(args("codex", context=400000), {"ctx_expected": 400000}, {"size": 380000}),
+            "codex_round": mod.post_turn(args("codex", context=272001), {}, {"size": 258400}),
+            "codex_clamped": mod.post_turn(args("codex", context=900000), {}, {"size": 828400}),
+            "codex_old": mod.post_turn(args("codex", context=400000), {}, {"size": 258400}),
             "copilot_long": mod.post_turn(args("copilot", context=1000000), {}, {"size": 922000}),
             "copilot_default": mod.post_turn(args("copilot", context=200000), {}, {"size": 272000}),
             "copilot_default_got_long": mod.post_turn(args("copilot", context=200000), {}, {"size": 922000}),
@@ -403,14 +439,14 @@ class TestEffortContext(unittest.TestCase):
     def test_unreachable_requests_exit_2_with_the_reason(self):
         s = self.r["static"]
         for name in ("hermes_effort", "crush_effort", "cline_max", "agy_max", "qwen_ctx", "opencode_ctx",
-                     "claude_500", "codex_400", "copilot_400"):
+                     "claude_500", "copilot_400"):
             with self.subTest(name=name):
                 self.assertEqual(s[name]["code"], 2, s[name])
         self.assertIn("hermes' ACP server has no reasoning option", s["hermes_effort"]["stderr"])
         self.assertIn("xhigh and max are not reachable", s["agy_max"]["stderr"])
         self.assertIn("claude is 200k", s["claude_500"]["stderr"])
-        self.assertIn("gpt-6.1-sol only", s["codex_400"]["stderr"])
-        for name in ("cline_xhigh", "agy_high", "default_ok", "claude_200", "codex_500", "copilot_1m", "grok_any"):
+        for name in ("cline_xhigh", "agy_high", "default_ok", "claude_200", "codex_400", "codex_500", "codex_800",
+                     "copilot_1m", "grok_any"):
             with self.subTest(name=name):
                 self.assertEqual(s[name], {"ret": None})
 
@@ -461,11 +497,28 @@ class TestEffortContext(unittest.TestCase):
         self.assertTrue(s["ok"], s)
         self.assertEqual(s["calls"], [["model", "m-b"], ["model", "m-b"], ["effort", "max"]])
 
-    def test_codex_context_is_fixed_by_the_model(self):
-        self.assertTrue(self.r["codex_ok"]["ok"])
-        self.assertEqual(self.r["codex_ok"]["applied"]["ctx_expected"], 272000)
+    def test_codex_context_is_any_size_up_to_the_models_max_window(self):
+        for name, ctx in (("codex_ok", 272000), ("codex_400", 400000), ("codex_max_ok", 872000)):
+            with self.subTest(name=name):
+                self.assertTrue(self.r[name]["ok"], self.r[name])
+                self.assertEqual(self.r[name]["applied"]["ctx_expected"], ctx)
+                self.assertEqual(self.r[name]["calls"], [["model", "m-c"]])  # no ACP option: CODEX_CONFIG at launch
         self.assertEqual(self.r["codex_bad"]["exit"], 2)
-        self.assertIn("gpt-6.1-sol", self.r["codex_bad"]["stderr"])
+        self.assertIn("at most 872k (max_context_window); not 900k", self.r["codex_bad"]["stderr"])
+        self.assertEqual(self.r["codex_max_lookup"], [872000, 872000, None, None])
+
+    def test_codex_context_goes_into_codex_config_merged_with_what_is_set(self):
+        c = self.r["codex_cfg"]
+        self.assertEqual(c["fresh"], '{"model_context_window":400000}')
+        self.assertIsNone(c["none"])
+        self.assertEqual(json.loads(c["merge"]), {"sandbox_mode": "read-only", "model_context_window": 400000})
+        self.assertEqual(c["empty"], '{"model_context_window":200000}')
+        self.assertEqual(json.loads(c["agent_env"]["CODEX_CONFIG"]), {"a": 1, "b": [1, 2], "model_context_window": 300000})
+        self.assertEqual(c["agent_env"]["X"], "1")
+        self.assertEqual(json.loads(c["agent_env_json"]["CODEX_CONFIG"]), {"b": 2, "c": 3, "model_context_window": 300000})
+        self.assertEqual(c["not_json"]["code"], 2)
+        self.assertIn("CODEX_CONFIG to be a JSON object", c["not_json"]["stderr"])
+        self.assertEqual(c["claude_untouched"], {"CLAUDE_CODE_DISABLE_1M_CONTEXT": "1"})
 
     def test_claude_zcode_and_cline_are_launch_time_and_reported_as_such(self):
         self.assertEqual(self.r["claude_ctx"]["applied"]["ctx_expected"], 200000)
@@ -503,6 +556,10 @@ class TestEffortContext(unittest.TestCase):
         self.assertIsNone(p["claude_ok"])
         self.assertIn("requested context 200k but the agent reports 1m", p["claude_bad"])
         self.assertIsNone(p["codex_effective"])   # 95% of 272k
+        self.assertIsNone(p["codex_400"])         # 95% of 400k
+        self.assertIsNone(p["codex_round"])       # 272001 x 95% = 258400.95, reported 258400
+        self.assertIn("expected 855000", p["codex_clamped"])   # clamped by max_context_window
+        self.assertIn("agent reports 258400", p["codex_old"])
         self.assertIsNone(p["copilot_long"])      # 922k prompt budget of the 1m tier
         self.assertIsNone(p["copilot_default"])   # the default tier reports 272k whatever 200k..272k was asked
         self.assertIn("agent reports 922k", p["copilot_default_got_long"])

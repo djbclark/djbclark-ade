@@ -128,8 +128,8 @@ its own window mid-turn; the lever is the dispatched call.
 3. Read stderr `acp-run: applied: model=... effort=... ctx=...` before you
    trust the run. `(unverified)` means that value could not be read back. A
    mismatch is failure class `config`, exit 1. A level or size the agent
-   cannot take exits 2 and names the valid values. Codex accepts only the
-   model's own fixed size. hermes, agy, cline, qwen, opencode and crush have
+   cannot take exits 2 and names the valid values. Codex takes any size up to
+   the model's `max_context_window` (the effective window is 95% of it). hermes, agy, cline, qwen, opencode and crush have
    no window knob: pick a model whose catalog window is already big enough,
    or leave `--context` off. The table is `tools/acp-run/README.md`, section
    "Per-agent choices: vendor, model, effort, context (2026-10-15)".
