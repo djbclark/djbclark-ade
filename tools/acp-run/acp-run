@@ -61,6 +61,11 @@ plugins, skills and hooks off and the user's permission block untouched. Under
 --perm deny it changes nothing (deny already strips). Temp dirs are named
 acp-run-<agent>-strip-<pid>-*; --keep-user-config still wins.
 --set applies any config option --info lists (e.g. --set provider=cline-pass).
+Per-host settings: ~/.config/acp-run.env (or $ACP_RUN_ENV_FILE), when present,
+holds KEY=VALUE / export KEY="VALUE" lines (no shell expansion) loaded into the
+environment unless already set, e.g. ACP_RUN_DEFAULT_SET_CLAUDE="model=sonnet,effort=high"
+(merged over that agent's defaults; --model/--set still win), ACP_RUN_AGY_CMD,
+ACP_RUN_CLINE_CMD.
 cursor: plain model ids plus context/reasoning_effort/fast options (model applied
 first), e.g. acp-run cursor --model grok-4.7 --set context=500k --set fast=false
 --set reasoning_effort=high; bracketed preset strings no longer apply.
@@ -204,6 +209,39 @@ _acp_router.MessageRouter.__call__ = _route_dollar_as_extension
 # The Crush data dir acp-run hands crush-acp. ACP_RUN_CRUSH_DATA moves it for one run (the SIPB
 # benchmark pins a model in a private copy, 2026-10-14, so it never touches the interactive TUI's
 # crush.json in the default dir, which the `crush` shell function shares).
+# Per-host settings file: ~/.config/acp-run.env (ACP_RUN_ENV_FILE overrides
+# the path), read when present so every caller sees it, including shells that
+# source no rc file (agent tool calls, cron, bash -c). Lines are KEY=VALUE or
+# export KEY=VALUE, with optional single/double quotes; blank lines and #
+# comments are skipped. Nothing is executed or expanded. A variable already in
+# the environment wins. 2026-10-14.
+def load_env_file(path=None):
+    path = Path(os.path.expanduser(
+        path or os.environ.get("ACP_RUN_ENV_FILE") or "~/.config/acp-run.env"))
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, sep, val = line.partition("=")
+        key = key.strip()
+        if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
+            val = val[1:-1]
+        else:
+            val = val.split(" #", 1)[0].rstrip()
+        os.environ.setdefault(key, val)
+
+
+load_env_file()
+
 # cline binary: ACP_RUN_CLINE_CMD, else ~/.local/bin/cline when present (the
 # box: a sh wrapper pinning Node 22 over npm -g --prefix ~/.local cline), else
 # "cline" from PATH.
