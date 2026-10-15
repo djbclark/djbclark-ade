@@ -34,6 +34,10 @@ Environment:
   FIRECRAWL_ROUTER_FALLBACK    "off" disables the fallback
   FIRECRAWL_ROUTER_TIMEOUT     floor for the per-request timeout, seconds (default 120)
 
+--open drops the bearer token, so local programs that speak the Firecrawl API
+(Hermes' firecrawl web backend) can use the router at a fixed --listen address;
+it refuses a non-loopback address.
+
 One log line per request on stderr: method, path, backend, status, seconds and
 the fallback reason. Keys are never logged.
 """
@@ -310,9 +314,12 @@ def main(argv=None) -> int:
         argv, child = argv[:i], argv[i + 1:]
     ap = argparse.ArgumentParser(prog="firecrawl-router", description=__doc__.split("\n\n")[0])
     ap.add_argument("--listen", default="127.0.0.1:0", help="HOST:PORT (default 127.0.0.1:0, ephemeral)")
+    ap.add_argument("--open", action="store_true", help="no bearer token (loopback --listen only)")
     args = ap.parse_args(argv)
+    if args.open and args.listen.rpartition(":")[0] not in ("127.0.0.1", "localhost", "::1", "[::1]"):
+        ap.error("--open needs a loopback --listen address")
 
-    token = secrets.token_urlsafe(32) if child else ""
+    token = secrets.token_urlsafe(32) if child and not args.open else ""
     router = build_router(os.environ, token)
     srv = serve(router, args.listen)
     fb = router.fallback.base if router.fallback else "none"
@@ -326,7 +333,7 @@ def main(argv=None) -> int:
             return 0
     env = {k: v for k, v in os.environ.items() if k not in ("FIRECRAWL_SELFHOST_API_KEY", "FIRECRAWL_SELFHOST_URL")}
     env["FIRECRAWL_API_URL"] = router.public_base
-    env["FIRECRAWL_API_KEY"] = token
+    env["FIRECRAWL_API_KEY"] = token or "router-open"
     proc = subprocess.Popen(child, env=env)
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, lambda s, _f: proc.send_signal(s))

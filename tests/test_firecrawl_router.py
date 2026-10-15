@@ -128,6 +128,16 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(self.req("POST", "/v2/scrape", {"url": "u"})[1], "primary")
         self.assertEqual(self.f.seen, [])
 
+    def test_open_router_needs_no_token(self):
+        self.router.token = ""
+        self.p.routes[("POST", "/v2/search")] = (200, {"success": True, "data": {"web": [{"url": "a"}]}})
+        self.assertEqual(self.req("POST", "/v2/search", {"query": "q"}, token="")[:2], (200, "primary"))
+        self.assertEqual(self.p.seen[-1][2], "Bearer pk")
+
+    def test_open_refuses_non_loopback_listen(self):
+        with self.assertRaises(SystemExit):
+            fr.main(["--listen", "0.0.0.0:18805", "--open"])
+
     def test_plain_404_page_does_not_fall_back(self):
         self.p.routes[("POST", "/v2/scrape")] = self.ok_scrape(404)
         self.assertEqual(self.req("POST", "/v2/scrape", {"url": "u"})[1], "primary")
