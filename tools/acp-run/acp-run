@@ -204,6 +204,14 @@ _acp_router.MessageRouter.__call__ = _route_dollar_as_extension
 # The Crush data dir acp-run hands crush-acp. ACP_RUN_CRUSH_DATA moves it for one run (the SIPB
 # benchmark pins a model in a private copy, 2026-10-14, so it never touches the interactive TUI's
 # crush.json in the default dir, which the `crush` shell function shares).
+# cline binary: ACP_RUN_CLINE_CMD, else ~/.local/bin/cline when present (the
+# box: a sh wrapper pinning Node 22 over npm -g --prefix ~/.local cline), else
+# "cline" from PATH.
+CLINE_CMD = os.environ.get("ACP_RUN_CLINE_CMD") or (
+    os.path.expanduser("~/.local/bin/cline")
+    if os.access(os.path.expanduser("~/.local/bin/cline"), os.X_OK)
+    else "cline"
+)
 CRUSH_DATA = os.path.expanduser(os.environ.get("ACP_RUN_CRUSH_DATA") or "~/.local/share/crush-acp")
 # name: (command, auth method id or None). DEFAULT_SET holds ACP session config
 # options always applied for an agent (before --set): its ACP mode can ignore
@@ -219,7 +227,7 @@ AGENTS = {
     "cursor": (["cursor-agent", "acp"], "cursor_login"),
     "qwen": (["qwen", "--acp"], None),
     "devin": (["devin", "acp"], None),
-    "cline": (["cline", "--acp"], None),
+    "cline": ([CLINE_CMD, "--acp"], None),
     "hermes": (["hermes", "acp"], None),
     # zcode has no ACP mode of its own; william0wang/zcode-acp (npm -g
     # zcode-acp-server, 0.65.1) wraps `zcode app-server --stdio`. Verified
@@ -266,13 +274,30 @@ AGENTS = {
 # newer agy_acp_server.par unpacked beside 1.3.0, or a wrapper such as
 # refined-antigravity-acp. Unset is the default path above (compared
 # 2026-10-10, tools/acp-run/README.md "agy").
-if os.environ.get("ACP_RUN_AGY_SERVER"):
-    AGENTS["agy"] = ([os.path.expanduser(os.environ["ACP_RUN_AGY_SERVER"])], None)
+# ACP_RUN_AGY_CMD is an alias. With neither set, ~/.local/bin/refined-antigravity-acp
+# is used when present: on hosts without a "nobody" group (the Grok Bot box)
+# the official .par crashes at startup, and the wrapper also injects
+# _meta.systemPrompt (GLOBAL_RULES). 2026-10-14.
+_AGY_WRAPPER = os.path.expanduser("~/.local/bin/refined-antigravity-acp")
+_agy_cmd = os.environ.get("ACP_RUN_AGY_SERVER") or os.environ.get("ACP_RUN_AGY_CMD")
+if _agy_cmd:
+    AGENTS["agy"] = ([os.path.expanduser(_agy_cmd)], None)
+elif os.access(_AGY_WRAPPER, os.X_OK):
+    AGENTS["agy"] = ([_AGY_WRAPPER], None)
 DEFAULT_SET = {
     # cline's ACP mode defaults to provider "cline" (paid Cline account) even
     # though the TUI is set up for ClinePass; djbclark uses cline-pass.
     "cline": {"provider": "cline-pass"},
 }
+# Per-host defaults without an edit: ACP_RUN_DEFAULT_SET_<AGENT>="id=value,..."
+# (e.g. ACP_RUN_DEFAULT_SET_CLAUDE="model=sonnet,effort=high") is merged over
+# DEFAULT_SET for that agent; --model/--set still win. An empty value is a no-op.
+for _k, _v in os.environ.items():
+    if _k.startswith("ACP_RUN_DEFAULT_SET_") and _v.strip():
+        _agent = _k[len("ACP_RUN_DEFAULT_SET_"):].lower()
+        DEFAULT_SET.setdefault(_agent, {}).update(
+            kv.strip().split("=", 1) for kv in _v.split(",") if "=" in kv
+        )
 # djbclark 2026-10-03: "yolo or equivalent should be default for all agents,
 # and all agents called from other agents". Applied unless the caller asks for
 # a read-only run with --perm deny (that needs the agent to send permission
@@ -297,7 +322,7 @@ YOLO_SET = {
 # `acp`, and breaks it, but opencode's default already allows in-workspace
 # work). Applied under the same condition as YOLO_SET.
 YOLO_CMD = {
-    "cline": ["cline", "--acp", "--auto-approve", "true"],
+    "cline": [CLINE_CMD, "--acp", "--auto-approve", "true"],
     # --yolo also lifts crush's bash blocklist, so it is added only under
     # --perm all (adversary review 2026-10-12, C1c); --perm deny runs crush
     # without it (and with every tool off).
@@ -329,6 +354,14 @@ CLIENT_NAME = {"agy": "zed"}
 # (forum.cursor.com/t/161317, zed-industries/zed#57571). For these agents
 # `model` is applied FIRST (a model switch resets its params). 2026-10-14.
 PARAM_MODEL_PICKER = {"cursor"}
+# User-level global rules sent as session/new _meta.systemPrompt, for agents
+# that do not load a global rules file over ACP themselves. agy_acp_server
+# (1.3.0) loads no global GEMINI.md (tested 2026-10-11 with both
+# $GEMINI_HOME/GEMINI.md and $GEMINI_HOME/config/GEMINI.md: not in context);
+# refined-antigravity-acp's missing-system-prompt fix injects _meta.systemPrompt
+# into the first prompt as a <user_instruction> block (the official .par
+# ignores it). Missing files are skipped. New sessions only.
+GLOBAL_RULES = {"agy": ["~/.gemini/GEMINI.md"]}
 # Seconds allowed for initialize and for session/new, each. claude-agent-acp's
 # session/new spends 13 s in its SDK initialize phase on an idle machine and
 # 17-24 s at load 20-70 (measured 2026-10-05), so 40 s was too close; acpx
@@ -1502,10 +1535,22 @@ class RunClient(Client):
         pass
 
 
+def has_config(options, category):
+    """True when a config option has id or category `category`."""
+    return any(
+        category in (dump(o).get("id"), dump(o).get("category")) for o in options or []
+    )
+
+
 def pick_config(options, want, category):
-    """Find a select config option (e.g. category 'model') and the value matching want."""
-    for opt in options or []:
-        o = dump(opt)
+    """Find a select config option (e.g. category 'model') and the value matching want.
+
+    An option whose id is `category` wins over one that only shares the
+    category: cline lists "provider" (category model) before "model"
+    (category model), so `--model X` used to be matched against providers."""
+    opts = [dump(opt) for opt in options or []]
+    exact = [o for o in opts if o.get("id") == category]
+    for o in exact or opts:
         if o.get("id") != category and o.get("category") != category:
             continue
         values = []
@@ -1971,6 +2016,19 @@ def can_resume(init):
     return bool(caps.load_session) or getattr(scaps, "resume", None) is not None
 
 
+def global_rules_prompt(agent):
+    """Text of the agent's user-level global rules files (GLOBAL_RULES), or None."""
+    parts = []
+    for f in GLOBAL_RULES.get(agent, []):
+        try:
+            t = Path(f).expanduser().read_text().strip()
+        except OSError:
+            continue
+        if t:
+            parts.append(t)
+    return "\n\n".join(parts) or None
+
+
 def can_additional_directories(init):
     if init is None:
         return False
@@ -2014,6 +2072,9 @@ async def open_session(a, conn, init, client, root, timeout):
     add_dirs = [str(Path(d).expanduser().resolve()) for d in getattr(a, "add_dir", [])]
     if not a.resume:
         kw = {}
+        rules = global_rules_prompt(a.agent)
+        if rules:
+            kw["systemPrompt"] = rules  # sent as session/new _meta
         if getattr(a, "perm", None) == "deny":
             kw.update(DENY_META.get(a.agent, {}))  # sent as session/new _meta
         if add_dirs:
@@ -2694,11 +2755,28 @@ async def run(a, log, err, log_path):
                     file=sys.stderr,
                 )
                 sets = {}
+            options = sess.config_options
             for key, want in sets.items():  # provider before model: models depend on it
-                cid, val = pick_config(sess.config_options, want, key)
-                await conn.set_config_option(
+                if key == "mode" and not has_config(options, "mode"):
+                    # refined-antigravity-acp offers its modes (yolo, default)
+                    # only as ACP session modes, not as a config option
+                    mode_ids = [
+                        m.get("id")
+                        for m in (dump(sess.modes) or {}).get("availableModes", [])
+                    ]
+                    if want in mode_ids:
+                        await conn.set_session_mode(
+                            session_id=sess.session_id, mode_id=want
+                        )
+                        client.rec("set_mode", {"id": want})
+                        continue
+                cid, val = pick_config(options, want, key)
+                resp = await conn.set_config_option(
                     config_id=cid, session_id=sess.session_id, value=val
                 )
+                # the response carries the updated options (a provider switch
+                # changes the model list)
+                options = getattr(resp, "config_options", None) or options
                 client.rec("set_config", {"id": cid, "value": val})
             if a.interactive:
                 herdr = Herdr(a.agent)
