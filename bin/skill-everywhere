@@ -43,6 +43,7 @@ copilot|~/.copilot/skills
 opencode|~/.config/opencode/skills
 qwen|~/.qwen/skills
 devin|~/.config/devin/skills
+cline|~/.cline/skills
 hermes|~/.local/share/skill-everywhere/skills
 cursor-agent|via ~/.claude/skills
 grok|~/.grok/skills
@@ -78,6 +79,7 @@ for name in "$@"; do
     if [[ -L $link && "$(greadlink "$link")" == "$src" ]]; then state=linked
     elif [[ -L $link && -e $src && "$(grealpath "$link" 2>/dev/null)" == "$(grealpath "$src")" ]]; then
       state="chained via $(greadlink "$link")"
+    elif [[ -L $link && ! -e $link ]]; then state="dangling -> $(greadlink "$link")"
     elif [[ -L $link ]]; then state="other link -> $(greadlink "$link")"
     elif [[ -e $link ]]; then state="real dir/file (not ours)"
     else state=missing; fi
@@ -96,6 +98,12 @@ for name in "$@"; do
           # instead of replacing the link.
           ln -sfn "$src" "$link"
           printf '  %-13s relinked direct (was %s)\n' "$bin" "$state"
+        elif [[ $state == dangling\ * ]]; then
+          # Nobody owns a link whose target is gone (2026-10-15: 36 links in
+          # ~/.cline/skills still pointed at the pre-2026-10-09 site-private
+          # path); replace it rather than preserve a dead pointer.
+          ln -sfn "$src" "$link"
+          printf '  %-13s relinked (was %s)\n' "$bin" "$state"
         else printf '  %-13s %s; left alone\n' "$bin" "$state"; rc=1; fi ;;
     esac
   done <<<"$targets"
