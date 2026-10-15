@@ -39,19 +39,22 @@ The answer is always an offered allow_once or reject_once option, never an
 *_always one (those can be saved beyond this run) and never "cancelled" (that
 cancels the whole turn). An allow with no allow_once offered becomes a
 reject_once; with neither offered the agent gets a JSON-RPC error.
-Under --perm deny (without --interactive) opencode, agy and crush start without
+Under --perm deny (without --interactive) opencode, agy, crush and grok start without
 the user's plugins, MCP servers and hooks, as claude and zcode do: a per-run temp
 config (opencode: OPENCODE_CONFIG_DIR holding only provider/model keys, project
 config off; agy: GEMINI_HOME with empty mcp_config.json, hooks.json, plugins/;
 crush: CRUSH_GLOBAL_CONFIG whose crushrc sources the user's with mcp/lsp/hook/
-permissions shadowed, no global context or skills), removed afterwards and logged
-as a "user_config" record. --keep-user-config (env ACP_RUN_KEEP_USER_CONFIG=1)
+permissions shadowed, no global context or skills; grok: GROK_HOME without hooks/,
+skills/, plugins/, whose config.toml has no hooks, plugins or MCP servers and asks
+before every tool), removed afterwards and logged as a "user_config" record. Under
+--perm deny grok also starts without --always-approve (it is the only way grok
+sends a permission request; before 2026-10-15 every grok deny run tripped, exit 77). --keep-user-config (env ACP_RUN_KEEP_USER_CONFIG=1)
 keeps them. Under any --perm deny crush also gets no tools at all: every built-in
 tool is disabled in per-run config layers (crush runs its read-only tools without
 asking, so no permission answer could deny them); logged as "deny_config".
 --strip-user-config (env ACP_RUN_STRIP_USER_CONFIG=1) applies the same strip of
 the user's plugins, MCP servers and hooks under ANY --perm (not --interactive),
-for opencode, agy, crush and zcode; it is a startup-reliability switch, not a
+for opencode, agy, crush, zcode and grok; it is a startup-reliability switch, not a
 permission control (operator 2026-10-13: the SkillOpt-Sleep night runs --perm all
 with it). Outside --perm deny nothing else changes: opencode gets no deny
 permission, agy and zcode keep their --perm all modes, crush keeps every built-in
@@ -61,6 +64,8 @@ plugins, skills and hooks off and the user's permission block untouched. Under
 --perm deny it changes nothing (deny already strips). Temp dirs are named
 acp-run-<agent>-strip-<pid>-*; --keep-user-config still wins.
 --set applies any config option --info lists (e.g. --set provider=cline-pass).
+The agent never sees HERDR_PANE_ID or HERDR_ENV (acp-run drops them on every run, not
+only --interactive: an agent hook once renamed the caller's herdr tab).
 Per-host settings: ~/.config/acp-run.env (or $ACP_RUN_ENV_FILE), when present,
 holds KEY=VALUE / export KEY="VALUE" lines (no shell expansion) loaded into the
 environment unless already set, e.g. ACP_RUN_DEFAULT_SET_CLAUDE="model=sonnet,effort=high"
@@ -268,16 +273,11 @@ AGENTS = {
     "cline": ([CLINE_CMD, "--acp"], None),
     "hermes": (["hermes", "acp"], None),
     # zcode has no ACP mode of its own; william0wang/zcode-acp (npm -g
-    # zcode-acp-server, 0.65.1) wraps `zcode app-server --stdio`. Verified
-    # 2026-10-08: initialize ok, preflight "Reply with exactly: OK" passed.
-    # Run it WITHOUT --model: on 0.67.0 it advertises a `model` option
-    # (GLM-5.3 / GLM-5.3-Flash) but refuses every switch, even to the current
-    # value ("unsupported config option or switch failed: model", rechecked
-    # 2026-10-11). Its README pins a model only at startup via the env pair
-    # ZCODE_PROVIDER + ZCODE_MODEL, but that was refused too, even for GLM-5.3
-    # ("zcode refused configured model ..."). Caveat: both checks ran while the
-    # z.ai weekly limit was exhausted (1310, resets 2026-10-14 22:56); recheck
-    # after the reset. `--set thought=low|high|max` is its effort lever.
+    # zcode-acp-server) wraps `zcode app-server --stdio`. Model switches work when
+    # the server gets ZCODE_BIN=<pkg>/vendor/zcode.cjs (zcode_bin(), set in run()); until
+    # 2026-10-15 every switch failed because it resolved the `zcode` symlink instead
+    # ("unsupported config option or switch failed: model"). `--set thought=low|high|max`
+    # (or --effort) is its effort lever, and a model switch resets it: model goes first.
     "zcode": (["zcode-acp-server"], None),
     # Google LLC signed; registry antigravity-acp (dl.google.com)
     "agy": (
@@ -406,6 +406,11 @@ GLOBAL_RULES = {"agy": ["~/.gemini/GEMINI.md"]}
 # allows it 60 s. Overridden by --handshake-timeout / ACP_RUN_HANDSHAKE_TIMEOUT.
 HANDSHAKE_TIMEOUT = {"claude": 90}
 HANDSHAKE_TIMEOUT_DEFAULT = 40
+# Removed from the agent's environment on every run (see run()): the caller's herdr pane.
+SCRUB_ENV = ("HERDR_PANE_ID", "HERDR_ENV")
+# Agents that can still write under their per-run home while being stopped (agy: a rotated
+# credential; grok: auth.json): their temp dir is removed after the agent is stopped.
+AFTER_KILL_DROP = ("agy", "grok")
 
 # Exit codes beyond 0/1/2/124. 5 matches acpx's "every permission denied".
 EXIT_ALL_DENIED = 5
@@ -529,6 +534,21 @@ def safe_sweep_stale_deny_dirs():
         return None
 
 
+def zcode_bin():
+    """The zcode CLI's real entry for zcode-acp-server's ZCODE_BIN: <pkg>/vendor/zcode.cjs, found
+    from the `zcode` on PATH (a symlink to <pkg>/bin/zcode.js). Left to the server's own lookup
+    (None) when it is not found. Without it the server resolves `which zcode`, gets the
+    symlink without a ".js" suffix, never injects ZCODE_BUILTIN_PROVIDER_CONFIG_FILE, and the
+    backend refuses every model switch ("Provider Registry ... does not contain Model";
+    root cause found 2026-10-15; it is why --model looked unsupported since 2026-10-09)."""
+    which = shutil.which("zcode")
+    if not which:
+        return None
+    pkg = Path(os.path.realpath(which)).parent.parent
+    entry = pkg / "vendor" / "zcode.cjs"
+    return str(entry) if entry.is_file() and (entry.parent / "provider" / "zcode-builtin.json").is_file() else None
+
+
 def zcode_deny_settings():
     """A per-run zcode CLI settings dir for --perm deny (re-verification R3, 2026-10-12):
     the user's ~/.zcode/cli/setting.json with MCP servers, plugins, skills, subagents
@@ -582,7 +602,7 @@ def _zcode_settings(deny):
 # gets a per-run 0700 temp config, removed after the run; the user's files are only
 # read. --keep-user-config or ACP_RUN_KEEP_USER_CONFIG=1 keeps the old behaviour.
 # What was stripped is logged as a "user_config" record (names only, no values).
-STRIP_USER_CONFIG = ("opencode", "agy", "crush")  # crush: crush_strip_config, 2026-10-13
+STRIP_USER_CONFIG = ("opencode", "agy", "crush", "grok")  # crush: crush_strip_config, 2026-10-13; grok: grok_strip_home, 2026-10-15
 # Top-level opencode config keys a stripped run keeps: provider, model and auth
 # selection. Everything else (mcp, plugin/plugins, agent, command, instructions,
 # experimental hooks, permission, ...) is dropped; auth itself lives in opencode's
@@ -604,7 +624,7 @@ def keep_user_config(a):
 # from --perm deny. The startup failures it fixed were plugins and MCP servers, not
 # permissions, and the SkillOpt-Sleep night now runs --perm all (operator 2026-10-13).
 # Outside deny it applies to these agents; under deny it adds nothing (deny strips already).
-STRIP_ANY_PERM = ("opencode", "agy", "crush", "zcode")
+STRIP_ANY_PERM = ("opencode", "agy", "crush", "zcode", "grok")
 
 
 def strip_requested(a):
@@ -837,6 +857,131 @@ def agy_deny_home(tag="deny"):
             "plugins": plugins, "hooks": "config/hooks.json", "unreadable": unreadable,
             "env": ["GEMINI_HOME"]}
     return d, info
+
+
+# --perm deny for grok, made real (2026-10-15). Two causes made `acp-dispatch`'s preflight probe
+# ("Reply with exactly: OK" under --perm deny) exit 77 (tripwire) for grok: (1) acp-run launched
+# `grok agent --always-approve stdio` for every policy, so grok never sent a
+# session/request_permission; (2) the user's grok hooks ran on a trivial prompt: the Stop hook
+# ~/.grok/hooks/autorename.json (autorename_nudge.py) answers "the session still needs a title"
+# (grok's Stop hook may return additionalContext, so the turn goes on), and grok then ran its
+# read-only tool read_file on ~/.grok/skills/autorename/SKILL.md, which grok runs without ever asking.
+# So a deny run (a) drops --always-approve (run()) and (b) starts grok on a per-run GROK_HOME that
+# symlinks everything in the real one except hooks/, skills/, plugins/, installed-plugins/ and
+# config.toml, whose copy has no [[hooks.*]], [plugins] or [mcp_servers.*] tables and, under deny,
+# no ui.permission_mode / ui.yolo (the user's config says always-approve). The config copy is
+# checked with tomllib: it must equal the original minus exactly those parts, else grok keeps the
+# user's home and the run says so. A rotated token grok writes to the temp auth.json as a regular
+# file is copied back by grok_sync_auth. Skills the user keeps elsewhere (~/.agents/skills) stay.
+GROK_HOME_DROP = ("hooks", "skills", "plugins", "installed-plugins", "config.toml")
+GROK_DROP_TABLES = ("mcp_servers", "plugins", "hooks")
+GROK_DENY_UI_KEYS = ("permission_mode", "yolo")
+# Under deny the copy ends with this table, replacing the user's own [permission]: a bare `*` ask
+# rule makes grok send session/request_permission for every tool, file reads included (grok runs
+# its "read-only" tools, and writes under the user's allow rules, without asking otherwise;
+# severity is deny > ask > allow, so no allow rule from any source beats it).
+GROK_DENY_PERMISSION = '\n# acp-run --perm deny: ask before every tool (the answer is always no)\n[permission]\nask = ["*"]\n'
+
+
+def grok_real_home():
+    return Path(os.environ.get("GROK_HOME") or Path.home() / ".grok").expanduser()
+
+
+def grok_filter_config(text, deny=True):
+    """(filtered config.toml text, dropped names). Drops the tables in GROK_DROP_TABLES (and
+    their sub-tables) and, with deny, ui.permission_mode / ui.yolo. Line based; the caller
+    checks the result with tomllib (grok_check_config)."""
+    out, dropped, skip, table = [], [], False, ""
+    drop = GROK_DROP_TABLES + (("permission",) if deny else ())
+    for line in text.splitlines(keepends=True):
+        m = re.match(r"\s*\[\[?\s*([^\[\]]+?)\s*\]\]?\s*(#.*)?$", line)
+        if m:
+            table = m.group(1).strip()
+            head = re.split(r"\s*\.\s*", table, maxsplit=1)[0].strip("\"'")
+            skip = head in drop
+            if skip and head not in dropped:
+                dropped.append(head)
+        if skip:
+            continue
+        if deny and table == "ui" and re.match(r"\s*(" + "|".join(GROK_DENY_UI_KEYS) + r")\s*=", line):
+            dropped.append("ui." + line.split("=", 1)[0].strip())
+            continue
+        out.append(line)
+    new = "".join(out)
+    if deny:
+        new += ("" if new.endswith("\n") or not new else "\n") + GROK_DENY_PERMISSION
+    return new, dropped
+
+
+def grok_check_config(old_text, new_text, deny=True):
+    """True when new_text parses and equals old_text minus the dropped parts."""
+    import tomllib
+    try:
+        old, new = tomllib.loads(old_text), tomllib.loads(new_text)
+    except (tomllib.TOMLDecodeError, ValueError):
+        return False
+    want = {k: v for k, v in old.items() if k not in GROK_DROP_TABLES}
+    if deny:
+        want.pop("permission", None)
+        want["permission"] = {"ask": ["*"]}
+        if isinstance(want.get("ui"), dict):
+            want["ui"] = {k: v for k, v in want["ui"].items() if k not in GROK_DENY_UI_KEYS}
+    return new == want
+
+
+def grok_strip_home(tag="deny", deny=True):
+    """A per-run GROK_HOME without the user's hooks, skills, plugins and MCP servers (see the
+    note above). Returns (temp dir, log info); the caller removes the dir (rmtree unlinks
+    the symlinks and never follows them). Raises ValueError, before creating anything, when
+    the config copy is not exactly the original minus the dropped parts."""
+    src = grok_real_home()
+    cfg = src / "config.toml"
+    try:
+        text = cfg.read_text() if cfg.is_file() else ""
+    except (OSError, UnicodeDecodeError) as e:
+        raise ValueError(f"cannot read {cfg}: {e}") from None
+    new_text, dropped = grok_filter_config(text, deny)
+    if not grok_check_config(text, new_text, deny):
+        raise ValueError(f"cannot filter {cfg} safely")
+    try:
+        hooks = sorted(e.name for e in (src / "hooks").iterdir())
+    except OSError:
+        hooks = []
+    d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}grok-{tag}-{os.getpid()}-"))
+    try:
+        try:
+            entries = sorted(src.iterdir())
+        except OSError:
+            entries = []
+        for f in entries:
+            if f.name not in GROK_HOME_DROP:
+                (d / f.name).symlink_to(f)
+        if text:
+            _private_write(d / "config.toml", new_text)
+    except BaseException:
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    return d, {"agent": "grok", "action": "stripped", "source": str(src), "hooks": hooks,
+               "dropped": dropped, "skills": "~/.grok/skills off", "env": ["GROK_HOME"]}
+
+
+def grok_sync_auth(d, src=None):
+    """Copy a token grok rewrote as a regular file in the temp home back over the real
+    auth.json when it is newer and valid JSON (rename-over replaces the symlink, so the
+    write would otherwise be lost with the temp dir). True when copied."""
+    new, real = Path(d) / "auth.json", Path(src or grok_real_home()) / "auth.json"
+    try:
+        if new.is_symlink() or not new.is_file() or new.stat().st_mtime <= real.stat().st_mtime:
+            return False
+        json.loads(new.read_text())
+        target = real.resolve()
+        tmp = target.with_name(target.name + f".acp-run-{os.getpid()}")
+        shutil.copyfile(new, tmp)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, target)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 # --perm deny for crush, made real (2026-10-13). crush-acp (PR 2450 build) asks
@@ -1086,6 +1231,9 @@ def strip_user_config(a, env, deny_dir):
             if outside:
                 return deny_dir, crush_strip_config(env, deny_dir, "--strip-user-config")
             return deny_dir, crush_strip_config(env, deny_dir)
+        elif a.agent == "grok":
+            d, info = grok_strip_home(tag, deny=not outside)
+            env["GROK_HOME"] = str(d)
         else:
             d, info = agy_deny_home(tag)
     except (OSError, ValueError) as e:
@@ -1541,6 +1689,8 @@ class RunClient(Client):
                 self.write(update.content.text)
         elif kind == "tool_call":
             self.tools += 1
+            if getattr(update, "title", None):  # the tripwire names the tool, not its id
+                self.titles.setdefault(getattr(update, "tool_call_id", None), update.title)
             self.check_tripwire(update)
             if getattr(update, "title", None) == "task_complete":
                 raw = dump(update).get("rawInput") or {}
@@ -1573,6 +1723,15 @@ class RunClient(Client):
         pass
 
 
+def order_sets(sets):
+    """The --set/default options in the order they must be applied, for every agent: the
+    provider (cline: the model list depends on it), then the model, then the rest. A model
+    switch resets the agent's effort/context/fast to the new model's defaults and changes
+    which effort values exist (grok, codex, cursor, qwen, zcode, opencode; R1 headline 2),
+    so anything model-dependent comes after it."""
+    return {k: sets[k] for k in ("provider", "model", *sets) if k in sets}
+
+
 def has_config(options, category):
     """True when a config option has id or category `category`."""
     return any(
@@ -1580,50 +1739,78 @@ def has_config(options, category):
     )
 
 
+def flat_values(option):
+    """The select values of a dumped config option, groups flattened."""
+    values = []
+    for v in option.get("options", []):
+        values += v.get("options", [v]) if "options" in v else [v]
+    return values
+
+
+def _toks(x):
+    """Dash-separated lowercase tokens of x without a trailing "[...]" or "(...)" (claude's
+    "[1m]", qwen's "(openai)" authType suffix)."""
+    return re.sub(r"(\[[^\]]*\]|\([^)]*\))$", "", str(x or "")).lower().split("-")
+
+
+def match_value(values, want):
+    """(the value dict matching want, []) or (None, ambiguous candidates). An exact value or
+    name wins. The claude ACP server's model list varies between launches ("fable" one
+    time, "claude-fable-5-1[1m]" the next; 2026-10-10), so fall back to a unique token
+    match: a value whose dash-separated tokens contain the wanted name's tokens as a
+    contiguous run."""
+    for v in values:
+        if want in (v.get("value"), v.get("name")):
+            return v, []
+    wt = _toks(want)
+    cands = []
+    for v in values:
+        for cand in (v.get("value"), v.get("name")):
+            ct = _toks(cand)
+            if any(ct[i : i + len(wt)] == wt for i in range(len(ct) - len(wt) + 1)):
+                cands.append(v)
+                break
+    if len(cands) == 1:
+        return cands[0], []
+    return None, cands
+
+
 def pick_config(options, want, category):
     """Find a select config option (e.g. category 'model') and the value matching want.
 
     An option whose id is `category` wins over one that only shares the
     category: cline lists "provider" (category model) before "model"
-    (category model), so `--model X` used to be matched against providers."""
+    (category model), so `--model X` used to be matched against providers.
+    Every option of the winning group is tried before giving up (cursor lists
+    several thought_level options; the first need not be the one with the value)."""
     opts = [dump(opt) for opt in options or []]
     exact = [o for o in opts if o.get("id") == category]
-    for o in exact or opts:
-        if o.get("id") != category and o.get("category") != category:
-            continue
-        values = []
-        for v in o.get("options", []):
-            values += v.get("options", [v]) if "options" in v else [v]
-        for v in values:
-            if want in (v.get("value"), v.get("name")):
-                return o["id"], v["value"]
-        # No exact match. The claude ACP server's model list varies between
-        # launches ("fable" one time, "claude-fable-5-1[1m]" the next;
-        # 2026-10-10), so fall back to a unique token match: strip a trailing
-        # "[...]" from both sides and accept a value whose dash-separated
-        # tokens contain the wanted name's tokens as a contiguous run.
-        def toks(x):
-            return re.sub(r"\[[^\]]*\]$", "", str(x or "")).lower().split("-")
-
-        wt = toks(want)
-        cands = []
-        for v in values:
-            for cand in (v.get("value"), v.get("name")):
-                ct = toks(cand)
-                if any(ct[i : i + len(wt)] == wt for i in range(len(ct) - len(wt) + 1)):
-                    cands.append(v)
-                    break
-        if len(cands) == 1:
-            return o["id"], cands[0]["value"]
+    cand = exact or [o for o in opts if o.get("category") == category]
+    if not cand:
         raise SystemExit(
-            f"acp-run: no {category} '{want}'"
-            + (f" (ambiguous: {', '.join(str(c.get('value')) for c in cands)})" if cands else "")
-            + "; have: "
+            f"acp-run: agent offers no '{category}' config option (try --info)"
+        )
+    misses = []
+    for o in cand:
+        values = flat_values(o)
+        v, amb = match_value(values, want)
+        if v is not None:
+            return o["id"], v["value"]
+        misses.append((o, values, amb))
+    parts = []
+    for o, values, amb in misses:
+        parts.append(
+            (f"{o.get('id')}: " if len(misses) > 1 else "")
+            + (f"(ambiguous: {', '.join(str(c.get('value')) for c in amb)}) " if amb else "")
+            + "have: "
             + ", ".join(str(v.get("value")) for v in values)
         )
-    raise SystemExit(
-        f"acp-run: agent offers no '{category}' config option (try --info)"
-    )
+    if len(misses) == 1 and misses[0][2]:
+        head = f"acp-run: no {category} '{want}' (ambiguous: {', '.join(str(c.get('value')) for c in misses[0][2])}); have: "
+        parts = [parts[0].split("have: ", 1)[1]]
+    else:
+        head = f"acp-run: no {category} '{want}'; "
+    raise SystemExit(head + " | ".join(parts))
 
 
 def ensure_agy_home() -> str:
@@ -2534,6 +2721,10 @@ async def run(a, log, err, log_path):
     auth = a.auth or auth
     if a.perm == "all" and not a.mode and a.agent in YOLO_CMD:
         cmd = YOLO_CMD[a.agent]
+    if a.agent == "grok" and a.perm == "deny":
+        # --always-approve makes grok run every tool without a session/request_permission,
+        # so a deny run could neither refuse nor be told apart from a runaway (2026-10-15)
+        cmd = [x for x in cmd if x != "--always-approve"]
     root = Path(a.dir).resolve()
     env = dict(os.environ)
     deny_dir = None
@@ -2571,6 +2762,8 @@ async def run(a, log, err, log_path):
     def drop_deny_dir():
         nonlocal deny_dir
         if deny_dir is not None:
+            if a.agent == "grok":
+                grok_sync_auth(deny_dir)
             remove_deny_dir(deny_dir)
             deny_dir = None
 
@@ -2608,6 +2801,8 @@ async def run(a, log, err, log_path):
                                   "data": stripped}) + "\n")
             log.flush()
             out["user_config"] = stripped["action"]
+        if a.agent == "zcode" and not env.get("ZCODE_BIN") and zcode_bin():
+            env["ZCODE_BIN"] = zcode_bin()
         if a.agent == "agy":
             env["GEMINI_HOME"] = str(deny_dir) if deny_dir else ensure_agy_home()
             # Claude Code's settings point HTTPS_PROXY at the opencodex intercept
@@ -2626,11 +2821,13 @@ async def run(a, log, err, log_path):
                     " shell command there and create files there unless told"
                     " otherwise.\n\n" + a.prompt_text
                 )
-        if a.interactive:
-            # acp-run reports this pane to herdr itself; the agent's own herdr
-            # hooks (Claude Code's report as herdr:claude) would compete for it.
-            env.pop("HERDR_PANE_ID", None)
-            env.pop("HERDR_ENV", None)
+        # Every run, not only --interactive (2026-10-15: a grok probe fired the user's
+        # autorename hook, which renamed the CALLER's herdr tab through the inherited
+        # HERDR_PANE_ID). Under --interactive acp-run also reports the pane to herdr
+        # itself and the agent's own herdr hooks (Claude Code's report as herdr:claude)
+        # would compete for it; acp-run's own Herdr class reads its own os.environ.
+        for k in SCRUB_ENV:
+            env.pop(k, None)
         for attempt in range(1, tries + 1):
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -2780,11 +2977,8 @@ async def run(a, log, err, log_path):
                 sets.update(DENY_SET.get(a.agent, {}))
             sets.update(kv.split("=", 1) for kv in a.set)
             if a.model:
-                sets.pop("model", None)
-                sets["model"] = a.model  # last: models depend on provider
-            if a.agent in PARAM_MODEL_PICKER and "model" in sets:
-                # first: switching model resets context/effort/fast
-                sets = {"model": sets.pop("model"), **sets}
+                sets["model"] = a.model
+            sets = order_sets(sets)
             if a.resume and not sess.config_options and sets:
                 client.rec("config_skipped", {"sets": sets})
                 print(
@@ -2794,7 +2988,7 @@ async def run(a, log, err, log_path):
                 )
                 sets = {}
             options = sess.config_options
-            for key, want in sets.items():  # provider before model: models depend on it
+            for key, want in sets.items():
                 if key == "mode" and not has_config(options, "mode"):
                     # refined-antigravity-acp offers its modes (yolo, default)
                     # only as ACP session modes, not as a config option
@@ -2835,11 +3029,11 @@ async def run(a, log, err, log_path):
                     code = tcode
     except asyncio.CancelledError:
         if "sig" not in got:
-            if a.agent != "agy":
+            if a.agent not in AFTER_KILL_DROP:
                 drop_deny_dir()
             raise
         main_task.uncancel()
-        if a.agent != "agy":
+        if a.agent not in AFTER_KILL_DROP:
             drop_deny_dir()  # before up to 20 s of cancel/kill waits a SIGKILL could cut short
         if conn is not None and sess is not None and not a.info:
             try:
@@ -2871,7 +3065,7 @@ async def run(a, log, err, log_path):
         # opencode/zcode: before _kill's waits, the run is over either way. agy: after,
         # since agy can still write under its GEMINI_HOME (a rotated credential) while
         # it is being stopped (adversary re-review 2026-10-13, finding 5).
-        if a.agent != "agy":
+        if a.agent not in AFTER_KILL_DROP:
             drop_deny_dir()
         await _kill(proc)
         drop_deny_dir()
