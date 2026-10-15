@@ -114,7 +114,7 @@ human draft is outward-facing: show it to djbclark before `--yes`. `--existing N
 short.md [--title T]` also rewrites an already-filed issue to the short form. Hyades drafts
 live in `skills/hyades-docker/tickets/`; CI-runner drafts in the `forgejo-ci` repo's
 `docs/tickets/two-tier/` (with the pre-rewrite originals). Fork: `djbclark/hyades`
-(created 2026-10-14). Filed 2026-10-14: SIPB/hyades #2-#8, AI twins djbclark/hyades #1-#7.
+(created 2026-10-14). Filed 2026-10-14: SIPB/hyades #2-#9, AI twins djbclark/hyades #1-#8.
 
 ## Container registry and Hyades deploys
 
