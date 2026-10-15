@@ -90,7 +90,7 @@ microVM plus `SEARXNG_ENDPOINT`), worth adding if search starts failing.
    `ERR_PROXY_CONNECTION_FAILED` and fell back to plain fetch (no JavaScript). Fixed with
    our `loopback-port-shim` in a derived image (`build-playwright-image`).
 2. **One Cloudflare-fronted page wedged Playwright for good:** Chromium's network thread
-   called `getsockopt(SOL_IPV6, ...)` on a UDP socket and the guest kernel oopsed in
+   called `getsockopt(SOL_IP, IP_TOS)` on a UDP socket and the guest kernel oopsed in
    `tsi_stream_getsockopt` (open upstream: libkrun/libkrunfw#140). Every later page timed
    out (the first self-hosted run, `results/selfhost-20261015T000004Z.json`, shows it:
    12/16 with 30 s stalls). Fixed in the shim (problem 5, commit b5f2cd3); the second run

@@ -36,8 +36,9 @@ failed with "command not found").
 2. `scripts/tea-forgejo` — `tea` (brew, v0.16.0) with the secret mapped onto its
    env login (`GITEA_INSTANCE_URL` + `GITEA_TOKEN`), so nothing lands in
    `~/.config/tea`. Best for `issues`, `pulls`, `releases`, `api`.
-2a. `scripts/git-forgejo` — git over HTTPS with the secret: `git-forgejo -C DIR
-   push forgejo BRANCH`. The token reaches git only through a `GIT_ASKPASS`
+2a. `scripts/git-forgejo` — git over HTTPS with the secret:
+   `~/src/djbclark-ade/skills/forgejo/scripts/git-forgejo -C DIR push forgejo BRANCH`
+   (full path every time: the bare name failed twice on 2026-10-14). The token reaches git only through a `GIT_ASKPASS`
    helper (`git-askpass`, holds no secret) and `credential.helper=` is cleared so
    the keychain never stores it. Keep remote URLs token-free
    (`https://HOST/OWNER/REPO.git`). Plain `git push` will prompt and fail by design.
