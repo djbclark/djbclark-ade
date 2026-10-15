@@ -498,7 +498,10 @@ HOMEBREW_NO_AUTO_UPDATE=1 brew install \
   ipython jupyterlab jupytext sphinx mkdocs-material python-markdown \
   numpy scipy pillow cython pybind11 python-matplotlib python-tabulate \
   python-tk@3.14 python-gdbm@3.14 swig \
-  httpie cookiecutter commitizen litecli pgcli mycli pyinstaller
+  httpie cookiecutter commitizen litecli pgcli mycli pyinstaller \
+  age
+# `age` (2026-10-15): encrypts the `get` volume exports streamed to defeat
+# (`~/src/get/scripts/export-volumes`, `AGE_RECIPIENT`); not a VM, a 12 MB CLI.
 # Python dev tools come from Homebrew first (2026-10-12). `mkdocs-material`
 # bundles `mkdocs`: never add the plain `mkdocs` formula. Skip `python-yq`: it
 # conflicts with the Go `yq` above. Keep the unversioned `python3` on the
