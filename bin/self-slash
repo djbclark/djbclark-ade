@@ -19,8 +19,10 @@
 # pane's agent_status is "working": a command sent mid-turn is swallowed, never run
 # (seen 2026-10-09: a /rename sent while the session worked left no trace).
 # A stale $HERDR_PANE_ID (pane moved between workspaces) is resolved via `herdr pane get`.
-# Refuses (exit 7) while another command is queued for the same pane, and a
-# /compact within SELF_SLASH_COMPACT_GAP (default 1800 s) of the last one sent there.
+# Refuses (exit 7) a /compact while another command is queued for the same pane, or
+# within SELF_SLASH_COMPACT_GAP (default 1800 s) of the last one sent there. Any
+# other command queues behind the pending one (2026-10-14: /quit after autorename's
+# /rename at the end of /loose + /handoff was refused).
 # Runs detached (nohup) so it survives the Bash tool returning; the log
 # is ~/.local/state/self-slash.log.  First verified 2026-10-09 (ClaudeHelm, herdr);
 # Orca backend verified 2026-10-09.
@@ -72,8 +74,16 @@ log="$HOME/.local/state/self-slash.log"; mkdir -p "$(dirname "$log")"
 lockdir="$HOME/.local/state/self-slash"; mkdir -p "$lockdir"
 lock="$lockdir/$(printf '%s' "$pane" | gtr -c 'A-Za-z0-9_.-' '_').pid"
 if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
+  after=""
   if [ -s "$lock" ] && kill -0 "$(cat "$lock")" 2>/dev/null; then
-    echo "self-slash: a command is already queued for $host $pane (pid $(cat "$lock")); not queuing another. See $log." >&2; exit 7
+    case "$text" in
+      /compact*)
+        echo "self-slash: a command is already queued for $host $pane (pid $(cat "$lock")); not queuing another. See $log." >&2; exit 7;;
+      *)
+        # A different command (e.g. /quit after autorename's /rename) runs after it.
+        after="$(cat "$lock")"
+        echo "self-slash: $host $pane already has a queued command (pid $after); this one runs after it" >&2;;
+    esac
   fi
   case "$text" in /compact*)
     gap="${SELF_SLASH_COMPACT_GAP:-1800}"
@@ -87,7 +97,7 @@ if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   esac
 fi
 if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
-  SELF_SLASH_CHILD=1 nohup "$0" --delay "$delay" "$text" >>"$log" 2>&1 </dev/null &
+  SELF_SLASH_CHILD=1 SELF_SLASH_AFTER="$after" nohup "$0" --delay "$delay" "$text" >>"$log" 2>&1 </dev/null &
   echo "self-slash: queued for $host $pane in ${delay}s (log: $log)"
   exit 0
 fi
@@ -180,6 +190,14 @@ send_text() {
   fi
 }
 
+# Queued behind another waiter: wait for it to finish (bounded), then take the lock.
+if [ -n "${SELF_SLASH_AFTER:-}" ]; then
+  end=$(( $(gdate +%s) + ${SELF_SLASH_WAIT:-900} ))
+  while kill -0 "$SELF_SLASH_AFTER" 2>/dev/null; do
+    [ "$(gdate +%s)" -lt "$end" ] || { echo "$(gdate '+%F %T') $host $pane: waiter $SELF_SLASH_AFTER still queued after ${SELF_SLASH_WAIT:-900}s; NOT sent: ${text:0:80}"; exit 7; }
+    sleep 2
+  done
+fi
 # Two parents can pass the check above before either child writes the lock.
 if [ -s "$lock" ] && [ "$(cat "$lock")" != "$$" ] && kill -0 "$(cat "$lock")" 2>/dev/null; then
   echo "$(gdate '+%F %T') $host $pane: another waiter (pid $(cat "$lock")) already queued; NOT sent: ${text:0:80}"; exit 7
