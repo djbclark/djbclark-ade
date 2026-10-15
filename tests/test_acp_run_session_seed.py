@@ -99,7 +99,7 @@ PROBE_ADD_DIR = textwrap.dedent("""\
         # Case 1: capability advertised, add-dir reaches session/new
         c1 = Client()
         conn1 = FakeConn()
-        a1 = SimpleNamespace(resume=None, add_dir=["/tmp/extra1", "/tmp/extra2"])
+        a1 = SimpleNamespace(agent="claude", resume=None, add_dir=["/tmp/extra1", "/tmp/extra2"])
         init1 = SimpleNamespace(agent_capabilities=SimpleNamespace(
             session_capabilities=SimpleNamespace(additional_directories=SimpleNamespace())
         ))
@@ -109,7 +109,7 @@ PROBE_ADD_DIR = textwrap.dedent("""\
         # Case 2: capability absent, but agent accepts add-dir in session/new
         c2 = Client()
         conn2 = FakeConn()
-        a2 = SimpleNamespace(resume=None, add_dir=["/tmp/extra"])
+        a2 = SimpleNamespace(agent="claude", resume=None, add_dir=["/tmp/extra"])
         init2 = SimpleNamespace(agent_capabilities=SimpleNamespace(
             session_capabilities=SimpleNamespace(additional_directories=None)
         ))
@@ -119,7 +119,7 @@ PROBE_ADD_DIR = textwrap.dedent("""\
         # Case 3: capability absent, agent rejects add-dir -> fallback retry without it
         c3 = Client()
         conn3 = FakeConn(reject_add_dir=True)
-        a3 = SimpleNamespace(resume=None, add_dir=["/tmp/extra"])
+        a3 = SimpleNamespace(agent="claude", resume=None, add_dir=["/tmp/extra"])
         init3 = SimpleNamespace(agent_capabilities=SimpleNamespace(
             session_capabilities=SimpleNamespace(additional_directories=None)
         ))
