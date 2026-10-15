@@ -19,14 +19,21 @@
 #      image ships unchecked-hash .pyc files, which Python loads without
 #      looking at the source, so the layer also whiteouts the two cached files.
 #      A new SearXNG tag whose sources no longer match fails the build here.
+#   3. Turns on Grokipedia and twelve specialist engines that SearXNG ships
+#      disabled (operator, 2026-10-14). Firecrawl sends no category, so only
+#      general engines answer plain queries; the rest answer their !shortcut
+#      (skills/fallback-chains/references/web-access.md, 2.1).
 export PATH="/opt/homebrew/bin:$PATH"
 set -euo pipefail
 SCRIPTS="$(cd "$(dirname "$(grealpath "${BASH_SOURCE[0]}")")/../../scripts" && pwd)"
 SX_TAG="${1:-2026.10.15-b00212a83}"
-REV="r1"   # bump when this layer changes for the same SearXNG tag
+REV="r2"   # bump when this layer changes for the same SearXNG tag
 BASE="docker.io/searxng/searxng:$SX_TAG"
 TAG="forgejo.mit.edu/djbclark/firecrawl-searxng:$SX_TAG-$REV"
 CONTACT="https://github.com/djbclark/djbclark-ade/tree/master/skills/hyades-docker/examples/firecrawl"
+# OpenAlex's polite pool wants a contact address; kept out of this repo.
+MAILTO="${SEARXNG_MAILTO:-$(git -C "$SCRIPTS" config user.email)}"
+[ -n "$MAILTO" ] || { echo "set SEARXNG_MAILTO or git user.email" >&2; exit 1; }
 
 work="$(gmktemp -d)"; trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/layer/etc/searxng"
@@ -48,6 +55,37 @@ outgoing:
 engines:
   - name: brave
     disabled: true
+  # Grokipedia is a general engine: every plain query asks it.
+  - name: grokipedia
+    disabled: false
+    inactive: false
+  # Not general: reached only by their !shortcut (hn, npm, crates, lrs, pgo,
+  # hf, cb, gl, oa, cr, nixw, lo).
+  - name: hackernews
+    disabled: false
+  - name: npm
+    disabled: false
+  - name: crates.io
+    disabled: false
+  - name: lib.rs
+    disabled: false
+  - name: pkg.go.dev
+    disabled: false
+  - name: huggingface
+    disabled: false
+  - name: codeberg
+    disabled: false
+  - name: gitlab
+    disabled: false
+  - name: openalex
+    disabled: false
+    mailto: "$MAILTO"
+  - name: crossref
+    disabled: false
+  - name: nixos wiki
+    disabled: false
+  - name: lobste.rs
+    disabled: false
 EOF
 
 src=usr/local/searxng/searx

@@ -33,7 +33,7 @@ set -euo pipefail
 HY="$(cd "$(dirname "$(grealpath "${BASH_SOURCE[0]}")")/../../scripts" && pwd)/hyades"
 FC_TAG="${FC_TAG:-2.11.519}"
 PW_IMAGE="${PW_IMAGE:-forgejo.mit.edu/djbclark/firecrawl-playwright:shim-b5f2cd3}"
-SX_IMAGE="${SX_IMAGE:-forgejo.mit.edu/djbclark/firecrawl-searxng:2026.10.15-b00212a83-r1}"
+SX_IMAGE="${SX_IMAGE:-forgejo.mit.edu/djbclark/firecrawl-searxng:2026.10.15-b00212a83-r2}"
 SUB="${FC_SUBDOMAIN:-djbclark-firecrawl}"
 P=djbclark-fc
 ORDER=(redis rabbitmq postgres playwright searxng api gate)
