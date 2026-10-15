@@ -14,7 +14,7 @@ the fallback** for the three things self-hosting cannot do (below).
    (`FIRECRAWL_API_KEY` in sudo-secretspec; 1025 credits at the start, 988 at the end).
 2. **Self-hosted:** Firecrawl 2.11.519 on Hyades as six microVMs on one shared network
    (Redis hub, RabbitMQ, NuQ Postgres, Playwright, the API harness with its workers, a
-   Caddy bearer-token gate) at `https://djbclark-firecrawl.sipb.cloud`
+   Caddy bearer-token gate; a seventh, SearXNG, was added after the benchmark) at `https://djbclark-firecrawl.sipb.cloud`
    (`FIRECRAWL_SELFHOST_API_KEY`). Deploy files and notes:
    `skills/hyades-docker/examples/firecrawl/` (`deploy apply|up|down|status`).
 3. **Shared MCP server ("the universal proxy"):** `firecrawl-mcp` 3.23.7 on
@@ -79,9 +79,31 @@ Notes on the table:
 3. **Availability:** Hyades aims for at most 5 minutes of downtime a month, applies
    updates every Monday at 4:20, and runs on one server.
 
-Search worked on both; the self-hosted one scrapes DuckDuckGo, which can block a busy
-IP. Firecrawl's self-hosting guide recommends a SearXNG instance instead (one more
-microVM plus `SEARXNG_ENDPOINT`), worth adding if search starts failing.
+Search worked on both; the self-hosted one scraped DuckDuckGo, which can block a busy
+IP. Firecrawl's self-hosting guide recommends a SearXNG instance instead, so one was
+added the same evening (next section).
+
+## Addendum: SearXNG as the search backend (2026-10-14, later)
+
+1. **What:** a seventh microVM, `djbclark-fc-searxng`, on the same shared network, on
+   port 8888 (the gate already holds 8080 on the shared localhost). The image is the
+   upstream `searxng/searxng` plus one layer with a `settings.yml` that turns on JSON
+   output (`build-searxng-image`; there is no environment variable for it). The API
+   reaches it as `SEARXNG_ENDPOINT=http://127.0.0.1:8888`; it is not exposed, so the
+   only way in is Firecrawl's `/v2/search` behind the gate.
+2. **Result:** the API log now says "Using searxng search" instead of "Using
+   DuckDuckGo search"; a 5-result search through the gate took 2.3 s, and relevant
+   results came back for both test queries. SearXNG queries Google, Bing, Brave and
+   others; Brave refused the first query from Hyades, and the rest answered.
+3. **`web-get` uses it first:** a new `firecrawl` search rung (self-hosted
+   `/v2/search`, bearer `FIRECRAWL_SELFHOST_API_KEY` from the same vault read as the
+   other keys) now leads the search ladder, with exa-api and the rest behind it. A
+   live `web-get search` answered from it in 1.9 s with no Exa call.
+4. **Spend, checked first:** neither paid search service reports spend to us. Exa's
+   per-key usage API needs a Team Management service key (requested through
+   Exa support; the free tier is $10 a month), and Jina's balance shows only on its
+   dashboard. Moving the default search off Exa is the saving either way: every
+   `web-get search` used to be one billed Exa call.
 
 ## Problems found and fixed on the way
 
@@ -130,4 +152,4 @@ microVM plus `SEARXNG_ENDPOINT`), worth adding if search starts failing.
    belong on the commercial API.
 5. **Resource cost on Hyades:** about 7 GB RAM of the 32 GiB quota (API 4.1 GB,
    Playwright 1.2 GB, the rest under 0.6 GB each) and 4.4 GB of images of 40 GiB, with
-   six of the ten microVM slots.
+   six of the ten microVM slots. SearXNG adds about 0.75 GB and a seventh slot.

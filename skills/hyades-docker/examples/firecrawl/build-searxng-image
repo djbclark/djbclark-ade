@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# build-searxng-image — SearXNG with a settings.yml that serves JSON, pushed to
+# forgejo.mit.edu with no local VM.
+#
+#   build-searxng-image [SEARXNG_TAG]     default: the pinned tag below
+#
+# Firecrawl's search calls SEARXNG_ENDPOINT/search?format=json, and SearXNG only
+# serves the formats listed in settings.yml (search.formats, no env equivalent).
+# Hyades microVMs get no config mounts, so the file goes into the image as one
+# layer (`crane append`). Everything else stays SearXNG's default
+# (use_default_settings); the deploy script sets the port and SEARXNG_SECRET.
+export PATH="/opt/homebrew/bin:$PATH"
+set -euo pipefail
+SCRIPTS="$(cd "$(dirname "$(grealpath "${BASH_SOURCE[0]}")")/../../scripts" && pwd)"
+SX_TAG="${1:-2026.10.15-b00212a83}"
+BASE="docker.io/searxng/searxng:$SX_TAG"
+TAG="forgejo.mit.edu/djbclark/firecrawl-searxng:$SX_TAG"
+
+work="$(gmktemp -d)"; trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/layer/etc/searxng"
+cat > "$work/layer/etc/searxng/settings.yml" <<'EOF'
+use_default_settings: true
+server:
+  # Reached only from Firecrawl on the shared microVM network, never directly.
+  limiter: false
+  public_instance: false
+  image_proxy: false
+search:
+  formats:
+    - html
+    - json
+EOF
+gtar --owner=0 --group=0 --numeric-owner -C "$work/layer" -cf "$work/settings.tar" etc
+
+echo "== pushing $TAG"
+HYADES_ENGINE=crane "$SCRIPTS/hyades-registry" append --platform linux/amd64 -b "$BASE" -f "$work/settings.tar" -t "$TAG"
+echo "done: set SX_IMAGE=$TAG for ./deploy apply if the tag changed"

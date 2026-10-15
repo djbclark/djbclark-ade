@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy — self-hosted Firecrawl on Hyades as six microVMs sharing one network.
+# deploy — self-hosted Firecrawl on Hyades as seven microVMs sharing one network.
 #
 #   deploy apply     write every microVM's hyades.json entry (setconf; no restart)
 #   deploy up        start them in dependency order, then wait for the API
@@ -19,6 +19,9 @@
 #                           unreachable (libkrun#818), so without the shim every
 #                           page fails ERR_PROXY_CONNECTION_FAILED. Rebuild:
 #                           ./build-playwright-image (no local VM).
+#   djbclark-fc-searxng     $SX_IMAGE (:8888): SearXNG with JSON on
+#                           (./build-searxng-image); the API's search backend
+#                           (SEARXNG_ENDPOINT) instead of scraping DuckDuckGo
 #   djbclark-fc-api         ghcr.io/firecrawl/firecrawl:$FC_TAG, harness = API
 #                           (:3002) plus workers (:3004, :3005)
 #   djbclark-fc-gate        forgejo.mit.edu/djbclark/firecrawl-gate (Caddy,
@@ -30,9 +33,10 @@ set -euo pipefail
 HY="$(cd "$(dirname "$(grealpath "${BASH_SOURCE[0]}")")/../../scripts" && pwd)/hyades"
 FC_TAG="${FC_TAG:-2.11.519}"
 PW_IMAGE="${PW_IMAGE:-forgejo.mit.edu/djbclark/firecrawl-playwright:shim-b5f2cd3}"
+SX_IMAGE="${SX_IMAGE:-forgejo.mit.edu/djbclark/firecrawl-searxng:2026.10.15-b00212a83}"
 SUB="${FC_SUBDOMAIN:-djbclark-firecrawl}"
 P=djbclark-fc
-ORDER=(redis rabbitmq postgres playwright api gate)
+ORDER=(redis rabbitmq postgres playwright searxng api gate)
 
 conf() { # IMAGE NETWORK PORTS-JSON ENVS-JSON
   jq -cn --arg i "$1" --arg n "$2" --argjson p "$3" --argjson e "$4" \
@@ -49,9 +53,13 @@ api_env() {
     POSTGRES_HOST: "127.0.0.1", POSTGRES_PORT: "5432", POSTGRES_USER: "postgres",
     POSTGRES_PASSWORD: "postgres", POSTGRES_DB: "postgres",
     NUM_WORKERS_PER_QUEUE: "8", CRAWL_CONCURRENT_REQUESTS: "10", MAX_CONCURRENT_JOBS: "5",
-    BROWSER_POOL_SIZE: "5", HARNESS_STARTUP_TIMEOUT_MS: "120000"
+    BROWSER_POOL_SIZE: "5", HARNESS_STARTUP_TIMEOUT_MS: "120000",
+    SEARXNG_ENDPOINT: "http://127.0.0.1:8888"
   } + ($ENV | with_entries(select(.key | test("^SEARXNG_"))))'
 }
+
+# SearXNG's cookie-signing key: it refuses to start with its default one.
+random_secret() { ghead -c 32 /dev/urandom | gbase64 | gtr -dc 'A-Za-z0-9'; }
 
 cmd_apply() {
   local hub="$P-redis"
@@ -62,6 +70,9 @@ cmd_apply() {
       '{"POSTGRES_USER":"postgres","POSTGRES_PASSWORD":"postgres","POSTGRES_DB":"postgres"}')"
     printf 'setconf %s %s\n' "$P-playwright" "$(conf "$PW_IMAGE" "$hub" '{}' \
       '{"PORT":"3000","MAX_CONCURRENT_PAGES":"10","LD_PRELOAD":"/usr/local/lib/portshim.so"}')"
+    # 8888, not the image's 8080: the gate already holds 8080 on the shared localhost.
+    printf 'setconf %s %s\n' "$P-searxng" "$(conf "$SX_IMAGE" "$hub" '{}' "$(jq -cn --arg s "$(random_secret)" \
+      '{GRANIAN_HOST: "0.0.0.0", GRANIAN_PORT: "8888", SEARXNG_SECRET: $s}')")"
     printf 'setconf %s %s\n' "$P-api" "$(conf "ghcr.io/firecrawl/firecrawl:$FC_TAG" "$hub" '{}' "$(api_env)")"
   } | "$HY" -
   # The gate entry carries the token: build it inside sudo-secretspec run and pipe it.
@@ -85,8 +96,8 @@ wait_active() { # NAME SECONDS
 
 cmd_up() {
   local s
-  for s in redis rabbitmq postgres playwright; do "$HY" start "$P-$s" >/dev/null; done
-  for s in redis rabbitmq postgres playwright; do wait_active "$P-$s" 300; done
+  for s in redis rabbitmq postgres playwright searxng; do "$HY" start "$P-$s" >/dev/null; done
+  for s in redis rabbitmq postgres playwright searxng; do wait_active "$P-$s" 300; done
   sleep 15   # rabbitmq and postgres accept connections a few seconds after the unit is active
   "$HY" start "$P-api" >/dev/null && wait_active "$P-api" 300
   "$HY" start "$P-gate" >/dev/null && wait_active "$P-gate" 120

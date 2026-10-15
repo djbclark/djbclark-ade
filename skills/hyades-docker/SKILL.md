@@ -236,8 +236,9 @@ first successful run. Watch runs with the `forgejo` skill (`forgejo-api GET
    `loopback-port-shim` to the image and set `LD_PRELOAD` in `envs` (see the
    `forgejo-ci` skill for the bug list; build example below).
 6. **Worked example, a multi-microVM stack:** `examples/firecrawl/` (self-hosted
-   Firecrawl: six microVMs on one shared network, a Caddy bearer-token gate built
-   with `crane append`, the shimmed Playwright image built via `tmprun`). `deploy
+   Firecrawl: seven microVMs on one shared network, a Caddy bearer-token gate built
+   with `crane append`, the shimmed Playwright image built via `tmprun`, SearXNG as
+   its search backend with a `settings.yml` layer added by `crane append`). `deploy
    apply|up|down|status`.
 7. **Not supported by design:** static hosting, a sql.mit.edu replacement (use SQLite
    or your own PostgreSQL microVM), remctl, non-Linux kernels, public IPs per microVM
