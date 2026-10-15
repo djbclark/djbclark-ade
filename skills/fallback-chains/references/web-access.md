@@ -257,9 +257,9 @@ authoritative; this is its contract as of 2026-10-11.
    capture: not archived`.
 
 Firecrawl is not on the `web-get` ladder. Since 2026-10-14 every MCP client has the
-shared self-hosted `firecrawl` server (4h); the commercial fallback is the
-claude.ai connector (OAuth); the commercial API key (`FIRECRAWL_API_KEY`, 5.5) is
-used only by `bench/firecrawl/fc-bench`.
+shared self-hosted `firecrawl` server (4h); its router falls back to the
+commercial API by itself (4h); the claude.ai connector (OAuth) is a further manual
+rung in Claude Code.
 
 ## 3. Per-client ladder
 
@@ -300,7 +300,7 @@ give its date.
 | 4e. Jina Search | `https://s.jina.ai/?q=<query>` | key required (401 without) | GET | |
 | 4f. Crawl4AI | local, `crwl <url> -o markdown` | none | CLI (uv tool, version 0.9.4, Python 3.13) | Renders JavaScript (checked on typesafe.ai and moltbook.com). The package ships no MCP server; see 4g. A cold Chromium start under load takes 30-120 s. |
 | 4g. Crawl4AI MCP | one shared local server over HTTP, `http://127.0.0.1:18798/mcp` (launchd `com.djbclark.crawl4ai-mcp`, site-djbclark `roles/shared_mcp`, since 2026-10-12; was a stdio copy per session). Server name `crawl4ai` in all five clients | none | `scrape {targets}` (a URL or a list of 1-20; `url` is rejected), `crawl`, `close_session`, `get_artifact` | Third-party wrapper `mcp-crawl4ai` 0.3.1: `uv tool install --python 3.13 'mcp-crawl4ai==0.3.1' --with crawl4ai==0.9.4 --with fastmcp==4.0.10 --with mcp==2.2.0 --with playwright==1.63.0`. Reuses the installed Playwright Chromium. First start 26 s, later 1.4-2.7 s. |
-| 4h. Firecrawl | (a) self-hosted, shared: `http://127.0.0.1:18804/mcp` (launchd `com.djbclark.firecrawl-mcp`, site-djbclark `roles/shared_mcp`, since 2026-10-14), server name `firecrawl` in all five clients (agy through `mcp-proxy --transport streamablehttp`); backend `https://djbclark-firecrawl.sipb.cloud` on SIPB Hyades. (b) commercial: claude.ai connector (OAuth) | (a) none from the client; the shared server holds `FIRECRAWL_SELFHOST_API_KEY` (5.5). (b) connector login | `firecrawl_scrape`, `firecrawl_search`, `firecrawl_crawl` + `firecrawl_check_crawl_status` (tested on (a) 2026-10-14), `firecrawl_map`; (a) also lists the cloud-only `firecrawl_agent*`, `firecrawl_monitor_*`, `firecrawl_research_*` and `firecrawl_interact*`, which need (b) | (a) `firecrawl-mcp` 3.23.7 over Firecrawl 2.11.519, no rate limit, no credits, renders JavaScript, fetches reddit.com. Fails on Cloudflare challenge pages (Stack Overflow) and `map` reads sitemaps only: use (b) for those. Deploy: `hyades-docker` skill, `examples/firecrawl/`. Comparison: `docs/firecrawl-commercial-vs-selfhosted-2026-10-14.md`. (b) Claude Code only. Billed per request. |
+| 4h. Firecrawl | (a) self-hosted, shared: `http://127.0.0.1:18804/mcp` (launchd `com.djbclark.firecrawl-mcp`, site-djbclark `roles/shared_mcp`, since 2026-10-14), server name `firecrawl` in all five clients (agy through `mcp-proxy --transport streamablehttp`); backend `https://djbclark-firecrawl.sipb.cloud` on SIPB Hyades. (b) commercial: claude.ai connector (OAuth) | (a) none from the client; the shared server holds `FIRECRAWL_SELFHOST_API_KEY` (5.5). (b) connector login | `firecrawl_scrape`, `firecrawl_search`, `firecrawl_crawl` + `firecrawl_check_crawl_status` (tested on (a) 2026-10-14), `firecrawl_map`; (a) also lists the cloud-only `firecrawl_agent*`, `firecrawl_monitor_*`, `firecrawl_research_*` and `firecrawl_interact*`, which need (b) | (a) `firecrawl-mcp` 3.23.7 over Firecrawl 2.11.519, no rate limit, no credits, renders JavaScript, fetches reddit.com. It fails on Cloudflare challenge pages (Stack Overflow) and its `map` reads sitemaps only, so `bin/firecrawl-router` (the server's parent process) retries those, 5xx answers, an unreachable backend and empty searches on the commercial API (`FIRECRAWL_API_KEY`) automatically; the response header `X-Firecrawl-Backend` and one log line in `~/Library/Logs/shared-mcp/firecrawl-mcp.log` name the backend used. Deploy: `hyades-docker` skill, `examples/firecrawl/`. Comparison: `docs/firecrawl-commercial-vs-selfhosted-2026-10-14.md`. (b) Claude Code only. Billed per request. |
 | 4i. Built-in | Claude Code WebSearch/WebFetch; Codex built-in web search | client login | | |
 | 4j. Composio | `composio` CLI | Composio login | search toolkit (3g) | |
 | 4k. Archives | Wayback Machine, archive.today | none | GET | Recovery only (3i). |
@@ -329,9 +329,10 @@ Names and paths only. Never print or copy a key.
 5.5. Parallel and Crawl4AI are keyless. Exa's MCP has a keyless tier (6.7);
    its REST API needs `EXA_API_KEY` (5.6). Firecrawl (2026-10-14):
    `sudo-secretspec` entries `FIRECRAWL_SELFHOST_API_KEY` (the bearer token of
-   the self-hosted gate; the shared server gets it at `just
-   shared-mcp-apply-secrets`, into its 0600 plist) and `FIRECRAWL_API_KEY`
-   (commercial free plan; `bench/firecrawl/fc-bench` only).
+   the self-hosted gate) and `FIRECRAWL_API_KEY` (commercial free plan: the
+   router's fallback and `bench/firecrawl/fc-bench`). The shared server gets
+   both at `just shared-mcp-apply-secrets`, into its 0600 plist; the
+   `firecrawl-mcp` child sees neither, only a per-process router token.
 5.6. **`EXA_API_KEY` (added 2026-10-11)**, `sudo-secretspec` entry
    `EXA_API_KEY` (name only here; 36 characters). Wiring, verified 2026-10-11
    with values masked:

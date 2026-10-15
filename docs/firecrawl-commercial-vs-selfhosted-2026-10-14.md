@@ -107,12 +107,20 @@ microVM plus `SEARXNG_ENDPOINT`), worth adding if search starts failing.
    limit, no credits, Reddit works, JavaScript rendering works, and it is one shared
    instance for every agent.
 2. **Fallback: commercial**, for Cloudflare-challenge pages, `map`, and outages of the
-   Hyades stack. Keep the claude.ai Firecrawl connector and `FIRECRAWL_API_KEY` for this.
-3. **Automatic fallback is not built yet.** `firecrawl-mcp` talks to one API. The clean
-   way is a small router on the shared port that sends each request to the self-hosted
-   API and retries on the commercial one on a 5xx, a timeout, a Cloudflare 403 or an
-   empty map, and never the other way round for a 429. That is a new tool, so where it
-   lives is djbclark's call.
+   Hyades stack, through the router below (`FIRECRAWL_API_KEY`); the claude.ai
+   Firecrawl connector stays as a manual rung in Claude Code.
+3. **Automatic fallback: `bin/firecrawl-router`** (added the same day, djbclark's
+   choice of home). `firecrawl-mcp` talks to one API, so the router runs it as a child
+   on an ephemeral loopback port with a per-process token, sends each request to the
+   self-hosted API, and retries it once on the commercial one when self-hosted is
+   unreachable, answers 404 or 5xx, scrapes a page whose own status is 403/429/503, or
+   maps or searches nothing. Never the other way round: a commercial 429 or 402 never
+   sends work back. Crawl jobs stay on the backend that started them (it remembers the
+   job id and rewrites `next` links to itself). Tests: `tests/test_firecrawl_router.py`.
+   Live, through the shared MCP server: Reddit stayed self-hosted (5.7 s), Stack
+   Overflow fell back (3.3 s, 169k characters), the books map fell back (2.0 s), and a
+   3-page crawl stayed self-hosted through to "completed". Each fallback is one log line
+   in `~/Library/Logs/shared-mcp/firecrawl-mcp.log` with its reason.
 4. **Watch the outward-facing side:** the crawler fetches from MIT's address space on a
    free SIPB service that excludes commercial use. Keep agent volume modest; heavy crawls
    belong on the commercial API.

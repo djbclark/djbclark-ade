@@ -1,0 +1,320 @@
+#!/usr/bin/env -S python3 -I
+"""firecrawl-router — Firecrawl REST API with a self-hosted primary and a commercial fallback.
+
+Usage:
+  firecrawl-router [--listen HOST:PORT] -- firecrawl-mcp [ARGS...]
+  firecrawl-router [--listen HOST:PORT]            # serve only, for tests: no token check
+
+With a child command, the router listens on a loopback port (ephemeral by
+default), starts the child with FIRECRAWL_API_URL pointing at itself and
+FIRECRAWL_API_KEY set to a random per-process token, and exits with the
+child. The child never sees either real key.
+
+Each request goes to the primary (self-hosted). It is retried once on the
+fallback (commercial) when the primary:
+  1. cannot be reached or times out;
+  2. answers 404 (route not in self-hosted Firecrawl: agent, monitor, ...) or 5xx;
+  3. scrapes a page whose own status is 403, 429 or 503 (bot walls);
+  4. maps 0 links, or searches 0 results.
+A fallback that also fails returns the primary's answer (or the fallback's,
+when the primary was unreachable). Never the other way round: the fallback's
+429 or 402 never sends work to the primary.
+
+Async jobs (crawl, batch scrape, extract) stay on the backend that created
+them: the router remembers job id -> backend and rewrites absolute `url`/`next`
+links in responses to point back at itself.
+
+Environment:
+  FIRECRAWL_SELFHOST_URL       primary base URL (required)
+  FIRECRAWL_SELFHOST_API_KEY   primary bearer token (optional)
+  FIRECRAWL_FALLBACK_URL       fallback base URL (default https://api.firecrawl.dev)
+  FIRECRAWL_API_KEY            fallback key; empty disables the fallback
+  FIRECRAWL_ROUTER_FALLBACK    "off" disables the fallback
+  FIRECRAWL_ROUTER_TIMEOUT     floor for the per-request timeout, seconds (default 120)
+
+One log line per request on stderr: method, path, backend, status, seconds and
+the fallback reason. Keys are never logged.
+"""
+
+from __future__ import annotations
+
+import argparse
+import http.server
+import json
+import os
+import re
+import secrets
+import signal
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+ABS_API_LINK_RE = re.compile(r"^https?://[^/]+(/v\d+/.*)$")
+BOT_WALL_STATUSES = {403, 429, 503}
+HOP_HEADERS = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
+    "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+    "authorization", "accept-encoding",
+}
+MAX_JOBS = 10000
+
+
+@dataclass
+class Backend:
+    name: str
+    base: str
+    key: str
+
+
+@dataclass
+class Reply:
+    status: int
+    headers: dict
+    body: bytes
+    error: str = ""
+
+    def json(self):
+        try:
+            return json.loads(self.body)
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+
+def call(backend: Backend, method: str, path: str, headers: dict, body: bytes | None,
+         timeout: float) -> Reply:
+    hdrs = {k: v for k, v in headers.items() if k.lower() not in HOP_HEADERS}
+    if backend.key:
+        hdrs["Authorization"] = f"Bearer {backend.key}"
+    req = urllib.request.Request(backend.base + path, data=body, headers=hdrs, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return Reply(r.status, dict(r.headers), r.read())
+    except urllib.error.HTTPError as e:
+        return Reply(e.code, dict(e.headers or {}), e.read() or b"")
+    except Exception as e:  # noqa: BLE001 - any transport failure is a fallback reason
+        return Reply(0, {}, b"", f"{type(e).__name__}: {e}")
+
+
+def fallback_reason(path: str, reply: Reply) -> str:
+    if reply.status == 0:
+        return f"unreachable ({reply.error})"
+    if reply.status == 404:
+        return "404 (route not on this backend)"
+    if reply.status >= 500:
+        return f"HTTP {reply.status}"
+    if reply.status != 200:
+        return ""
+    doc = reply.json()
+    if not isinstance(doc, dict):
+        return ""
+    data = doc.get("data")
+    route = path.split("?", 1)[0].rstrip("/")
+    if route.endswith("/scrape") and isinstance(data, dict):
+        code = (data.get("metadata") or {}).get("statusCode")
+        if code in BOT_WALL_STATUSES:
+            return f"page status {code}"
+    if route.endswith("/map"):
+        links = doc.get("links") if "links" in doc else (data or {}).get("links") if isinstance(data, dict) else None
+        if isinstance(links, list) and not links:
+            return "map returned 0 links"
+    if route.endswith("/search"):
+        if isinstance(data, list) and not data:
+            return "search returned 0 results"
+        if isinstance(data, dict) and not any(isinstance(v, list) and v for v in data.values()):
+            return "search returned 0 results"
+    return ""
+
+
+def request_timeout(body: bytes | None, floor: float) -> float:
+    try:
+        ms = json.loads(body or b"{}").get("timeout")
+    except (ValueError, AttributeError):
+        ms = None
+    if isinstance(ms, (int, float)) and ms > 0:
+        return max(floor, ms / 1000 + 30)
+    return floor
+
+
+class Router:
+    def __init__(self, primary: Backend, fallback: Backend | None, timeout: float,
+                 token: str = "", log=sys.stderr):
+        self.primary = primary
+        self.fallback = fallback
+        self.timeout = timeout
+        self.token = token
+        self.public_base = ""
+        self.jobs: dict[str, str] = {}
+        self.lock = threading.Lock()
+        self.log = log
+
+    def backend(self, name: str) -> Backend:
+        return self.fallback if (name == "fallback" and self.fallback) else self.primary
+
+    def remember(self, job_id: str, name: str) -> None:
+        with self.lock:
+            if len(self.jobs) >= MAX_JOBS:
+                self.jobs.pop(next(iter(self.jobs)))
+            self.jobs[job_id] = name
+
+    def owner(self, path: str) -> str | None:
+        m = UUID_RE.search(path)
+        if not m:
+            return None
+        with self.lock:
+            return self.jobs.get(m.group(0), "primary")
+
+    def rewrite(self, reply: Reply, name: str) -> Reply:
+        """Record job ids and point absolute API links back at the router."""
+        doc = reply.json()
+        if not isinstance(doc, dict):
+            return reply
+        changed = False
+        if isinstance(doc.get("id"), str) and UUID_RE.fullmatch(doc["id"]):
+            self.remember(doc["id"], name)
+
+        def fix(holder: dict, key: str) -> None:
+            nonlocal changed
+            v = holder.get(key)
+            if isinstance(v, str) and self.public_base:
+                m = ABS_API_LINK_RE.match(v)
+                if m:
+                    j = UUID_RE.search(m.group(1))
+                    if j:
+                        self.remember(j.group(0), name)
+                    holder[key] = self.public_base + m.group(1)
+                    changed = True
+
+        fix(doc, "url")
+        fix(doc, "next")
+        if isinstance(doc.get("data"), dict):
+            fix(doc["data"], "next")
+        if changed:
+            reply.body = json.dumps(doc).encode()
+        return reply
+
+    def handle(self, method: str, path: str, headers: dict, body: bytes | None) -> tuple[Reply, str]:
+        t0 = time.monotonic()
+        timeout = request_timeout(body, self.timeout)
+        owner = self.owner(path)
+        if owner is not None:
+            b = self.backend(owner)
+            reply = self.rewrite(call(b, method, path, headers, body, timeout), b.name)
+            self._log(method, path, b.name, reply, t0, "job owner")
+            return reply, b.name
+        first = call(self.primary, method, path, headers, body, timeout)
+        reason = fallback_reason(path, first)
+        if not reason or not self.fallback:
+            self._log(method, path, "primary", first, t0, reason and f"{reason}; no fallback")
+            return self.rewrite(first, "primary"), "primary"
+        second = call(self.fallback, method, path, headers, body, timeout)
+        if 200 <= second.status < 300 or first.status == 0:
+            self._log(method, path, "fallback", second, t0, reason)
+            return self.rewrite(second, "fallback"), "fallback"
+        self._log(method, path, "primary", first, t0, f"{reason}; fallback HTTP {second.status or second.error}")
+        return self.rewrite(first, "primary"), "primary"
+
+    def _log(self, method, path, backend, reply, t0, note) -> None:
+        status = reply.status or "ERR"
+        line = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {method} {path.split('?', 1)[0]} -> {backend} {status} {time.monotonic() - t0:.1f}s"
+        if note:
+            line += f" [{note}]"
+        print(line, file=self.log, flush=True)
+
+
+def make_handler(router: Router):
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *_):
+            pass
+
+        def _serve(self):
+            if router.token and self.headers.get("Authorization") != f"Bearer {router.token}":
+                self._send(401, {"Content-Type": "application/json"}, b'{"success":false,"error":"unauthorized"}')
+                return
+            n = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(n) if n else None
+            reply, backend = router.handle(self.command, self.path, dict(self.headers), body)
+            if reply.status == 0:
+                self._send(502, {"Content-Type": "application/json"},
+                           json.dumps({"success": False, "error": f"firecrawl-router: {reply.error}"}).encode())
+                return
+            hdrs = {k: v for k, v in reply.headers.items()
+                    if k.lower() not in HOP_HEADERS and k.lower() != "content-encoding"}
+            hdrs["X-Firecrawl-Backend"] = backend
+            self._send(reply.status, hdrs, reply.body)
+
+        def _send(self, status, headers, body):
+            self.send_response(status)
+            for k, v in headers.items():
+                self.send_header(k, v)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = do_POST = do_DELETE = do_PUT = do_PATCH = _serve
+
+    return Handler
+
+
+def build_router(env, token: str) -> Router:
+    primary_url = (env.get("FIRECRAWL_SELFHOST_URL") or "").rstrip("/")
+    if not primary_url:
+        sys.exit("firecrawl-router: FIRECRAWL_SELFHOST_URL is not set")
+    primary = Backend("primary", primary_url, env.get("FIRECRAWL_SELFHOST_API_KEY", ""))
+    fallback = None
+    fb_key = env.get("FIRECRAWL_API_KEY", "")
+    if fb_key and env.get("FIRECRAWL_ROUTER_FALLBACK", "").lower() != "off":
+        fallback = Backend("fallback", (env.get("FIRECRAWL_FALLBACK_URL") or "https://api.firecrawl.dev").rstrip("/"), fb_key)
+    return Router(primary, fallback, float(env.get("FIRECRAWL_ROUTER_TIMEOUT") or 120), token)
+
+
+def serve(router: Router, listen: str) -> http.server.ThreadingHTTPServer:
+    host, _, port = listen.rpartition(":")
+    srv = http.server.ThreadingHTTPServer((host or "127.0.0.1", int(port or 0)), make_handler(router))
+    srv.daemon_threads = True
+    router.public_base = f"http://{srv.server_address[0]}:{srv.server_address[1]}"
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    child = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, child = argv[:i], argv[i + 1:]
+    ap = argparse.ArgumentParser(prog="firecrawl-router", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--listen", default="127.0.0.1:0", help="HOST:PORT (default 127.0.0.1:0, ephemeral)")
+    args = ap.parse_args(argv)
+
+    token = secrets.token_urlsafe(32) if child else ""
+    router = build_router(os.environ, token)
+    srv = serve(router, args.listen)
+    fb = router.fallback.base if router.fallback else "none"
+    print(f"firecrawl-router: {router.public_base} primary={router.primary.base} fallback={fb}",
+          file=sys.stderr, flush=True)
+
+    if not child:
+        try:
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            return 0
+    env = {k: v for k, v in os.environ.items() if k not in ("FIRECRAWL_SELFHOST_API_KEY", "FIRECRAWL_SELFHOST_URL")}
+    env["FIRECRAWL_API_URL"] = router.public_base
+    env["FIRECRAWL_API_KEY"] = token
+    proc = subprocess.Popen(child, env=env)
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, lambda s, _f: proc.send_signal(s))
+    rc = proc.wait()
+    srv.shutdown()
+    return rc if rc >= 0 else 128 - rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())
