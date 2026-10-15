@@ -3,6 +3,18 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Hyades SearXNG: turn on Grokipedia (operator, 2026-10-14)
+
+Queued by the operator. In `skills/hyades-docker/examples/firecrawl/build-searxng-image`,
+add `- name: grokipedia` with `disabled: false` and `inactive: false` to the settings
+layer's `engines:` list (SearXNG ships it as both), bump `REV` to `r2`, build, update
+`SX_IMAGE` in `deploy`, `./deploy apply`, restart `djbclark-fc-searxng`, and check
+`web-get search --only firecrawl '!gp <topic>'` plus a plain query. It is a general
+engine, so every Firecrawl search would then ask it. It uses Grokipedia's
+undocumented `api/full-text-search` endpoint (no key, no published limits; it answered
+200 on 2026-10-14). Fold in any other engine changes the operator picks from the
+candidates reviewed the same day, so the image is rebuilt once.
+
 ## self-slash cannot drive omp (found 2026-10-13, needs an operator decision)
 
 `bin/self-slash "/quit"` from an omp session in herdr pane w34:p2 queued, waited, and gave
