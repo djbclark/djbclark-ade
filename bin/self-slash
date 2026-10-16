@@ -67,6 +67,7 @@ if [ "${#text}" -gt "${SELF_SLASH_MAX:-300}" ]; then
 fi
 [ "$dry" = 1 ] && { echo "self-slash: dry run, would send to $host $pane after ${delay}s: ${text:0:80}"; exit 0; }
 log="$HOME/.local/state/self-slash.log"; mkdir -p "$(dirname "$log")"
+prompt_line="$(dirname "$(realpath "$0")")/../skills/session-finder/prompt_line.py"
 # One waiter per pane, and no second /compact soon after one: on 2026-10-10 the
 # log showed five pairs sent to one pane within 1-3 minutes, and one compacted a
 # freshly compacted 37k context into 126k (the queued second /compact ran after
@@ -114,47 +115,9 @@ fi
 # (ESC[2m, no RGB grey), was classified EMPTY, and the /compact was sent over it.
 classify_prompt() {
   if [ "$host" = herdr ]; then
-    # cursor-agent draws its cursor block in reverse video (ESC[7m) over the first
-    # letter of its dim placeholder, so reverse-video text is not operator text.
-    herdr agent read "$pane" --source visible --lines 12 --format ansi 2>/dev/null | python3 -c '
-import re, sys
-mark = sys.argv[1]
-lines = [l for l in sys.stdin.read().splitlines() if mark in l]
-if not lines:
-    print("NOPROMPT"); sys.exit()
-after = lines[-1].split(mark, 1)[1]
-dim = grey = rev = False; plain = []
-for tok in re.split(r"(\x1b\[[0-9;]*m)", after):
-    if tok.startswith("\x1b["):
-        # Walk the parameters: 38/48 consume their colour arguments, so the "2" in
-        # an RGB background (48;2;r;g;b) is not read as dim.
-        codes = tok[2:-1].split(";") if tok[2:-1] else ["0"]
-        i = 0
-        while i < len(codes):
-            c = codes[i]
-            if c in ("38", "48"):
-                n = 3 if codes[i + 1:i + 2] == ["5"] else 5
-                if c == "38":
-                    grey = codes[i + 1:i + n] in (["2", "153", "153", "153"], ["5", "245"], ["5", "8"])
-                i += n; continue
-            if c in ("", "0"): dim = grey = rev = False
-            elif c == "2": dim = True
-            elif c == "22": dim = False
-            elif c == "7": rev = True
-            elif c == "27": rev = False
-            elif c in ("39", "37", "97"): grey = False
-            elif c == "90": grey = True
-            i += 1
-        continue
-    txt = tok.replace("\xa0", " ")
-    if txt.strip() and not (dim or grey or rev):
-        plain.append(txt)
-text = "".join(plain).strip()
-if text.startswith(("Try \"", "Try \u201c", "Press up to edit queued messages",
-                    "Plan, search, build anything", "Add a follow-up")):
-    text = ""
-print(text if text else "EMPTY")
-print("RAW " + repr(lines[-1][:220]), file=sys.stderr)' "$marker" 2>>"$log"
+    # The rules (dim, grey, reverse video, known hints) live in prompt_line.py, shared with relay.py.
+    herdr agent read "$pane" --source visible --lines 12 --format ansi 2>/dev/null \
+      | python3 "$prompt_line" "$marker" 2>>"$log"
   else
     screen=$(read_screen)
     if ! printf "%s\n" "$screen" | ggrep -qE "^[[:space:]]*❯"; then echo NOPROMPT; return; fi

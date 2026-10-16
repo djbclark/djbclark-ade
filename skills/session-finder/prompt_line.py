@@ -68,5 +68,9 @@ def classify(screen: str, mark: str = "❯") -> str | None:
 
 
 if __name__ == "__main__":
-    r = classify(sys.stdin.read(), sys.argv[1] if len(sys.argv) > 1 else "❯")
+    mark = sys.argv[1] if len(sys.argv) > 1 else "❯"
+    screen = sys.stdin.read()
+    r = classify(screen, mark)
     print("NOPROMPT" if r is None else (r or "EMPTY"))
+    if r is not None:  # the raw line, for bin/self-slash's log
+        print("RAW " + repr([ln for ln in screen.splitlines() if mark in ln][-1][:220]), file=sys.stderr)
