@@ -7,7 +7,7 @@ repo's `.mcp.json`.
 
 ## Roster
 
-Since 2026-10-10, 13 servers (beeper, ghost-os, cua-driver, paper-search and 9
+Since 2026-10-10, 12 servers (ghost-os, cua-driver, paper-search and 9
 claude.ai connectors) are blocked in Claude Code through `deniedMcpServers` in
 `~/.claude/settings.json`; [disabled-skills.md](disabled-skills.md) lists them,
 why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
@@ -15,7 +15,7 @@ why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
 | Server | Transport / command | Scope | What it is |
 |---|---|---|---|
 | `hermes` | stdio: `hermes mcp serve` | user | The **Hermes Agent** as an MCP server — see below |
-| `beeper` | HTTP: `http://127.0.0.1:23373/v0/mcp` | user | Beeper Desktop's local API — cross-network chat search/read/send. OAuth-gated; see below. **Blocked in Claude Code since 2026-10-10** (`deniedMcpServers`) |
+| `beeper` | HTTP: `http://127.0.0.1:23373/v0/mcp` | user | Beeper Desktop's local API — cross-network chat search/read/send. OAuth-gated; see below. Re-enabled in Claude Code 2026-10-16 (was blocked 2026-10-10) |
 | `graft` | stdio: `graft mcp` | this repo (`.mcp.json`) | Repo context graph (`graft_find_code`, `graft_trace_calls`, …) |
 | `ghost-os` | stdio: `/opt/homebrew/bin/ghost mcp` | user | macOS UI automation via accessibility tree + vision. **Blocked in Claude Code since 2026-10-10** (`deniedMcpServers`) |
 | `hindsight` | stdio: `node ~/.hindsight/coding-agents/dist/mcp-server.js` | user | Per-repo Hindsight coding-agent memory (the 🧠 banner) |
