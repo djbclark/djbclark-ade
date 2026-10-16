@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """relay — type a one-line message into a running agent's terminal, when SendMessage cannot reach it. No model.
 
-    relay.py <id|name|sid> "<text>" [--wait S] [--json]
+    relay.py <id|name|sid|pane> "<text>" [--wait S] [--json]    (pane: a herdr pane id such as w34:p4)
 
 The fallback for session-finder's rung 3a (2026-10-11): a workflow sub-agent's ListAgents often lists only
 its teammates, so `SendMessage({to: "<name>"})` to a running Claude TUI fails with "No agent named … is
@@ -72,7 +72,7 @@ def type_line(chan, text):
 
 
 def find(ident, ss):
-    hits = [s for s in ss if ident in (s["id"], s["name"], s.get("sid"))]
+    hits = [s for s in ss if ident in (s["id"], s["name"], s.get("sid"), s.get("pane"))]
     if not hits and len(ident) >= 8:
         hits = [s for s in ss if (s.get("sid") or "").startswith(ident)]
     return hits
