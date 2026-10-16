@@ -581,8 +581,11 @@ until the work is committed or recorded in a repo.
    `acp-run: applied: model=... effort=... ctx=...`. `(unverified)` means that
    value could not be read back. A mismatch is failure class `config`, exit 1.
    A level or size the agent cannot take exits 2 and names the valid values.
-   Codex takes any size up to the model's `max_context_window` (872k) via
-   `CODEX_CONFIG`; the window in effect is 95% of the request.
+   Codex context is fixed by the model: gpt-6.1-sol 500000 (475000 effective);
+   every other visible model 272000 (258400); all have `max_context_window`
+   872000. `--context 500k` only with `--model gpt-6.1-sol`; `--context 272k`
+   only on the others; anything else exits 2 (the message names
+   `--model gpt-6.1-sol`).
    The full table is `tools/acp-run/README.md`, section "Per-agent choices:
    vendor, model, effort, context (2026-10-15)".
 
