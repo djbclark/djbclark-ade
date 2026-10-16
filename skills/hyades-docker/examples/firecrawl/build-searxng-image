@@ -23,7 +23,9 @@
 #   3. (r3) Weights Grokipedia down to 0.3 and enables Bing and Yahoo, because
 #      DuckDuckGo (captcha) and Google (429) fail from the Hyades IP and plain
 #      technical queries returned only Grokipedia pages.
-#   4. Turns on Grokipedia and twelve specialist engines that SearXNG ships
+#   4. (r4, when SEARXNG_GOOGLE_PROXY is set) Enables the Google engine through a
+#      forward proxy and turns "google cse" off.
+#   5. Turns on Grokipedia and twelve specialist engines that SearXNG ships
 #      disabled (operator, 2026-10-14). Firecrawl sends no category, so only
 #      general engines answer plain queries; the rest answer their !shortcut
 #      (skills/fallback-chains/references/web-access.md, 2.1).
@@ -31,10 +33,19 @@ export PATH="/opt/homebrew/bin:$PATH"
 set -euo pipefail
 SCRIPTS="$(cd "$(dirname "$(grealpath "${BASH_SOURCE[0]}")")/../../scripts" && pwd)"
 SX_TAG="${1:-2026.10.15-b00212a83}"
-REV="r3"   # bump when this layer changes for the same SearXNG tag
+REV="r4"   # bump when this layer changes for the same SearXNG tag
 BASE="docker.io/searxng/searxng:$SX_TAG"
 TAG="forgejo.mit.edu/djbclark/firecrawl-searxng:$SX_TAG-$REV"
 CONTACT="https://github.com/djbclark/djbclark-ade/tree/master/skills/hyades-docker/examples/firecrawl"
+# Optional (r4): URL of a forward proxy for the Google engine, e.g. the tinyproxy on
+# vps-primary (it allows CONNECT to www.google.com only, from the Hyades egress address
+# only). Taken from the environment so the address is not committed here; it does end up
+# in the pushed image layer. Unset: Google is left off.
+# NOTE (2026-10-16): does not help. SearXNG 2026.10.15 asks https://www.google.com/wml/search
+# with a Nokia feature-phone User-Agent and gets HTTP 403 from EVERY address, including a
+# clean one (curl_cffi chrome99_android from djbclark's Mac, and through the proxy), so the
+# Google engine is broken upstream (searxng#6359), not blocked by IP. r3 stays deployed.
+GOOGLE_PROXY="${SEARXNG_GOOGLE_PROXY:-}"
 # OpenAlex's polite pool wants a contact address; kept out of this repo.
 MAILTO="${SEARXNG_MAILTO:-$(git -C "$SCRIPTS" config user.email)}"
 [ -n "$MAILTO" ] || { echo "set SEARXNG_MAILTO or git user.email" >&2; exit 1; }
@@ -73,6 +84,17 @@ engines:
     disabled: false
   - name: yahoo
     disabled: false
+$( [ -n "$GOOGLE_PROXY" ] && cat <<GEOF
+  # Google through the vps-primary proxy (r4). "google cse" talks to cse.google.com,
+  # which the proxy does not allow, and was rate-limited from the shared Hyades
+  # address, so it is off; the plain "google" engine uses www.google.com only.
+  - name: google
+    disabled: false
+    proxies: "$GOOGLE_PROXY"
+  - name: google cse
+    disabled: true
+GEOF
+)
   # Not general: reached only by their !shortcut (hn, npm, crates, lrs, pgo,
   # hf, cb, gl, oa, cr, nixw, lo).
   - name: hackernews
