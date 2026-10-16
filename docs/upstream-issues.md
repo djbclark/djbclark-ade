@@ -121,6 +121,20 @@ which is the cheap habit.
 A `--no-gitignore` flag (or writing to `.git/info/exclude` by default) would
 remove the papercut; worth raising upstream if it recurs.
 
+**Root-cause fix (2026-10-16):** the exclude entry is not enough, because
+`ensureGitignored` only looks at the tracked `.gitignore`. The writer in Claude
+Code sessions is the `Stop` hook (`~/.claude/helpers/graft-hooks.cjs stop` runs
+`graft build` inside a hook child; no wrapper on PATH sees it). The off switch
+is `GRAFT_NO_GITIGNORE=1` (same as `graft build --no-gitignore`), and the
+`env` block of `~/.claude/settings.json` is the one place that reaches hooks,
+the stdio MCP server and the Bash tool alike. `bin/claude-settings-env` sets it
+(idempotent, `--check` to audit; test: `tests/test_claude_settings_env.py`).
+The 2026-10-10 note about setting it "on MCP defs + hooks" never persisted
+there. Verified in a scratch repo: `env -u GRAFT_NO_GITIGNORE graft build`
+modifies `.gitignore`; with the variable set it does not. The variable does not
+cover `ensureBuildConfigIgnored` (`/.graft/`, written when a persisted build
+option is saved): that one has no switch in 0.23.0.
+
 ## 3. orca — CLI parity for structural reorg (filed 2026-09-26)
 
 **Filed:** [stablyai/orca#23272](https://github.com/stablyai/orca/issues/23272)
