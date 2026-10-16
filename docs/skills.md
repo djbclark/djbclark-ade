@@ -10,6 +10,12 @@ TUI:
 ~/.claude/skills/<name>  ->  ~/src/djbclark-ade/skills/<name>    (the real files)
 ```
 
+Two skill dirs here are themselves symlinks into other repos: `forgejo-ci`
+(`~/src/loopback-port-shim`) and `sudo-secretspec` (`~/src/sudo-secretspec`).
+**Commit an edit to a skill in the repo of its `realpath`**: `git add` here fails
+with "pathspec is beyond a symbolic link" (2026-10-16), and the other repo may
+hold another session's uncommitted edits, so stage only your hunk there.
+
 (The hub chain through `~/ops/site-private/skills` → `~/ops/site-djbclark/skills`
 was collapsed to these direct links on 2026-10-14; those paths no longer work.)
 
