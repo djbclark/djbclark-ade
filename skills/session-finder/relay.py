@@ -32,6 +32,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import fleet  # noqa: E402
+import prompt_line  # noqa: E402
 
 HERDR = fleet.HERDR
 
@@ -51,11 +52,19 @@ def screen(chan, lines=20):
 
 
 def draft(chan):
-    """Text typed but not sent in a Claude Code input box (its prompt line starts with ❯)."""
-    for ln in reversed(screen(chan, 14).splitlines()):
-        if ln.startswith("❯"):
-            return ln[1:].strip()
-    return ""
+    """Text typed but not sent in a Claude Code input box (its prompt line starts with ❯).
+
+    Read with ANSI codes where the channel has them: Claude Code's suggested next prompt (ghost text that
+    anything typed replaces) and its hints are dim or grey, not a draft (prompt_line.py; 2026-10-16 a dim
+    suggestion was refused as a draft)."""
+    kind, target = chan
+    if kind == "herdr":
+        out = fleet.run(HERDR, "agent", "read", target, "--source", "visible", "--lines", "14", "--format", "ansi")[1]
+    elif kind == "tmux":
+        out = fleet.run("tmux", "capture-pane", "-p", "-e", "-t", target)[1]
+    else:
+        out = screen(chan, 14)
+    return prompt_line.classify("\n".join(out.splitlines()[-14:])) or ""
 
 
 def type_line(chan, text):
