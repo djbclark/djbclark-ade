@@ -14,7 +14,7 @@ send-text` + `agent send-keys enter`, Orca `terminal send`, tmux `send-keys`), t
   * Refused: this session; an ACP launch (`launch.py reply` is its channel); a finished session (`/handoff`
     or `/quit`: start a /baton session instead); one blocked on a question or permission (`helm.py answer`);
     one with no channel (Ghostty/iTerm/headless: say its `where:` line); and any input box that already
-    holds a draft (someone is typing there).
+    holds a draft (someone is typing there; Claude Code's dim/grey suggested prompt is not one: prompt_line.py).
   * Verified, never assumed: a Claude session counts as delivered once the text shows up in its transcript
     (a queued message is recorded as a queue-operation at once), else as queued once the pane shows it.
   * One line: newlines are folded to spaces (an Enter would submit half the message). For a long brief,

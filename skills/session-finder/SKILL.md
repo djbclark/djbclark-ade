@@ -268,7 +268,7 @@ flips to false turns peer messaging off in running Claude sessions (2026-10-13; 
 
 | Agent / host | Running session | Ended session |
 |---|---|---|
-| claude (TUI) | `SendMessage({to: "<name>"})`; read its latest prompt line first. Not in your `ListAgents`, no messaging socket (`fleet.py` then says so in `reach:`), or a delivery notice says SendMessage was refused → `relay.py <id> "<one line>"` (keys into its herdr/Orca/tmux pane; queued while it works; refused on a draft or an open question). Finished (`/handoff`) → rung 3b, never SendMessage | `claude --resume <id>` (rung 3d) or `launch.py --baton` |
+| claude (TUI) | `SendMessage({to: "<name>"})`; read its latest prompt line first. Not in your `ListAgents`, no messaging socket (`fleet.py` then says so in `reach:`), or a delivery notice says SendMessage was refused → `relay.py <id> "<one line>"` (keys into its herdr/Orca/tmux pane; queued while it works; refused on a typed draft or an open question; a dim/grey suggested prompt is not a draft). Finished (`/handoff`) → rung 3b, never SendMessage | `claude --resume <id>` (rung 3d) or `launch.py --baton` |
 | any ACP launch (`host acp`, id `YYYYMMDD-…`) | `launch.py reply <id> "<text>"`, then `launch.py wait <id>` | `launch.py list`; its log under `~/.local/state/session-finder/` |
 | hermes (Telegram/desktop chat, `hermes-gw`) | `ask_hermes` (MCP) to prompt it; `messages_send` with `target="telegram:<chat>[:<thread>]"` posts as Hermes; approvals: `permissions_list_open` / `permissions_respond` | `hermes --resume <id>` |
 | hermes (CLI in a pane) | `helm.py send <pane> "<text>"` | same |
