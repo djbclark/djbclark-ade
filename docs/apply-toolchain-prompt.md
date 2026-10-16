@@ -1,6 +1,6 @@
 # Prompt: apply the djbclark / frdminc / Graft development toolchain to a repo
 
-Version 5.10 (2026-10-13). Supersedes 5.9, 5.8, 5.7, 5.6, 5.5, 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
+Version 5.11 (2026-10-16). Supersedes 5.10, 5.9, 5.8, 5.7, 5.6, 5.5, 5.4, 5.3, 5.2 and 5.1 (2026-10-09) and Version 5
 (2026-10-01, which superseded
 `CLAUDE_APPLY_DJBCLARK_TOOLING_Version4.md`). Lived at
 `site-djbclark/research/apply-dev-toolchain/CLAUDE_APPLY_DJBCLARK_TOOLING.md`
@@ -116,6 +116,13 @@ They are in the §1.2 install line, the §1.3 utilities table, and the skill's
 `references/replacements.md`; the "Not installed, and why" table there records
 what is still deliberately out (`jaq`, `mdcat`, `ov`, `tailspin`, `aria2c`,
 `f2`, `angle-grinder`, `fclones`, `atuin`, `lazygit`, `lnav`, `nomino`).
+
+What changed in 5.11 (2026-10-16): a new **MIT Athena** block after the SiYuan notes
+(AuriStor AFS client, `athena-kinit` Kerberos renewal with AFS tokens, `athena-locker`
+for `attach`/`add`/`detach`/`fsid` and `/mit`). Everything Athena-related, and the other
+items that need an MIT login (`forgejo` for forgejo.mit.edu, `sipb-llm-bench`, the Crush
+setup for SIPB LLMs), now says up front that it applies only if the user has an MIT
+account (Athena/Kerberos); skip it otherwise.
 
 What changed in 5.10 (2026-10-13): `forgejo-cli` (`fj`) and `tea` join the Homebrew
 install (§1.2, §1.3) and §0.6 lists the `forgejo` skill (token in `sudo-secretspec`,
@@ -392,10 +399,10 @@ symlinking the skill directory into `.claude/skills/<name>/`:
 |---|---|---|
 | `report` | yes | `/report`: formats a long Markdown deliverable (research report, spec, review) so it reads well in a Markdown previewer such as Marked 2: numbered superscript citations linked to an anchored list, an evidence table whose ids link to the source (no URL column), descriptive file names with a symlink at any generic name a tool expects, paragraphs under ~180 words, and a render check that captures only the previewer's window. Its two stdlib scripts (`scripts/reformat_citations.py`, `scripts/cite_sup.py`) are idempotent. Apply it before the first `open` of any long document the user will read, not after a formatting complaint. |
 | `dialogue` | yes | Runs a multi-model dialogue that produces one artifact (a spec, a report, a design) with a final-word model: fixed speaking rounds through pinned headless routes (for example Grok, Claude and GPT via `acp-run`), a machine-read footer per turn with point ids, status and dissent, a transcript that is the record, and `scripts/dialogue.py` checks for the failures the first run measured (noise strip, protocol lint, final-word gate). Use when several vendors should argue the points of contention before one writes the deliverable; not for a quick second opinion or for fan-out work with no argument between models. |
-| `sipb-llm-bench` | offer | Benchmarks a model on MIT SIPB LLMs (or any OpenAI-compatible Open WebUI/Ollama server) as an agentic-coding backend: speed probes, a tool-call conformance check, two tool-using tasks scored by running the tests, and a procedure for updating the published report. Serial and gentle on the shared server; only useful for a repo that targets such a server. |
+| `sipb-llm-bench` | offer | Benchmarks a model on MIT SIPB LLMs (or any OpenAI-compatible Open WebUI/Ollama server) as an agentic-coding backend: speed probes, a tool-call conformance check, two tool-using tasks scored by running the tests, and a procedure for updating the published report. Serial and gentle on the shared server; only useful for a repo that targets such a server. SIPB's own servers need an MIT account, so skip it for a user without one. |
 | `setup-modern-cli` | yes | The standing instruction to prefer modern tools over the classic ones: the replacement table (`rg`←`grep`, `fd`←`find`, `bat`←`cat`, `srgn`←`sed`, `eza`←`ls`, `hck`←`cut`/`awk`, `jq`/`yq`, `xh`, `ast-grep`, `dust`/`gdu`, `rtk`) with the exact command patterns, the footguns (`rg -rln` is `--replace`; a pathless `rg` over-searches; `sd` is retired), and the measured search policy from §1.3 (`rg` by default, opt-in indexed `ig` as a first line for one known literal, never `ayg`). Load it before shell searches; it is the long form of the §1.3 table. |
 | `autorename` | offer | `/autorename`: names the current agent session (Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex in a herdr pane, omp) from what it is working on, writing where each TUI's own `/rename` writes; `--auto` keeps a title the user set by hand. **omp needs one user-level step:** `ln -s <djbclark-ade>/skills/autorename/omp-bridge.ts ~/.omp/agent/extensions/autorename-bridge.ts`, then restart omp (it loads extensions at startup only). The extension lets the running omp rename itself, because omp moves a session to a new file when anything else writes it. Ask before creating the symlink: it is outside the repo and loads into every omp session. |
-| `forgejo` | offer | Uses a Forgejo instance (default `forgejo.mit.edu`) with the token held in `sudo-secretspec` as `DJBCLARK_<HOST>_TOKEN`: `scripts/setup-token` declares the secret (optional), opens the token page and verifies it; `forgejo-api` makes one `/api/v1` call (mutations need `--yes`); `tea-forgejo` runs `tea` with the secret on its env login. Needs `fj` and `tea` from §1.2, and a token only the user can create in the browser, so offer it only where the user works with a Forgejo server. For the SIPB `ubuntu` CI runner it also records the `LD_PRELOAD` loopback shim (port 0 and `shutdown()`) Gradle needs there (libkrun#818) and the per-job resource limits (16 vCPU, 62.8 GiB, virtiofs disk with a 32 GiB tmpfs). |
+| `forgejo` | offer | Uses a Forgejo instance (default `forgejo.mit.edu`) with the token held in `sudo-secretspec` as `DJBCLARK_<HOST>_TOKEN`: `scripts/setup-token` declares the secret (optional), opens the token page and verifies it; `forgejo-api` makes one `/api/v1` call (mutations need `--yes`); `tea-forgejo` runs `tea` with the secret on its env login. Needs `fj` and `tea` from §1.2, and a token only the user can create in the browser, so offer it only where the user works with a Forgejo server. The default host `forgejo.mit.edu` (and the SIPB runner below) need an MIT account (Athena/Touchstone login), so skip those for a user without one. For the SIPB `ubuntu` CI runner it also records the `LD_PRELOAD` loopback shim (port 0 and `shutdown()`) Gradle needs there (libkrun#818) and the per-job resource limits (16 vCPU, 62.8 GiB, virtiofs disk with a 32 GiB tmpfs). |
 
 **From Matt Pocock's skills marketplace** (public):
 
@@ -680,7 +687,8 @@ If the user agrees, back up `~/.gitconfig` first (§15).
 prompt, here and in the tool table, is for one purpose: driving weak, small-context LLMs
 (Qwen on SIPB LLMs, 32k window). Do not apply it for any other use of Crush; see Practical
 note 6.** Crush is installed
-only to use SIPB LLMs (`brew install crush`; provider in `~/.config/crush/crushrc`).
+only to use SIPB LLMs (`brew install crush`; provider in `~/.config/crush/crushrc`),
+which need an MIT account: skip all of it for a user without one.
 No release has an ACP mode, so `acp-run crush` runs a local build: clone the
 fork (`gh repo clone djbclark/crush ~/src/crush`), then
 `git -C ~/src/crush fetch upstream pull/2450/head:pr-2450` and
@@ -780,6 +788,18 @@ with `bin/skill-everywhere`). Their scripts read `~/.claude/siyuan.json`
 (`api_url`, `local_path` and `"api_token": ""`: the key must exist but may be empty
 unless the kernel sets an access auth code; `import_article.py` needs a patch for
 SiYuan 3.8's `lsNotebooks` shape, see `skills/_shared/UPSTREAM.md`).
+
+**MIT Athena (machine-specific; added 2026-10-16, djbclark).** **Only if the user has
+an MIT Athena account (a Kerberos principal `<user>@ATHENA.MIT.EDU`); skip every item
+in this block otherwise.** Ask first; never create or guess an account. Everything
+below is the macOS setup in site-djbclark `macos/athena-kerberos/`
+(https://github.com/djbclark/site-djbclark/tree/master/macos/athena-kerberos):
+
+| Item | Website | Install | What it does |
+|---|---|---|---|
+| Kerberos renewal (`athena-kinit`) | https://github.com/djbclark/site-djbclark (`macos/athena-kerberos/`) | `macos/athena-kerberos/install.sh` (user level; first run `athena-kinit init` stores the password in the login Keychain). Apple's Heimdal `kinit`, `~/Library/Preferences/edu.mit.Kerberos` (realm `ATHENA.MIT.EDU`, forwardable, renewable 7 d), hourly LaunchAgent `com.djbclark.athena-kinit` | Keeps a renewable TGT; each renewal also runs `aklog` for the local AFS token and pushes the TGT to the Athena dialup and, if configured, a VPS. The dialups still require Duo after Kerberos (one shared ssh master; the `athena-master` and `athena-duo-askpass` scripts in the same directory) |
+| AuriStor AFS client | https://www.auristor.com/filesystem/client-installer/ | Download the dmg for the installed macOS (macOS 27: `https://www.auristor.com/downloads/auristor/osx/macos-27.0/AuriStor-client-2021.05-72-GoldenGate.dmg`; the path is `osx/macos-<version>/`, find the current file name on the installer page), check `pkgutil --check-signature` on the `.pkg`, then `sudo installer -pkg Auristor-Lite.pkg -target /`. Edit `/etc/yfs/yfs-client.conf.d/thiscell.conf` to `thiscell = athena.mit.edu` (the pkg's cell dialog only runs in the GUI installer). On Apple Silicon the Mac needs Permissive Security with "allow user management of kernel extensions" (Startup Security Utility in Recovery; `sudo bputil -d` shows it), then Privacy & Security → Allow "AuriStor, Inc." and a reboot, which also creates `/afs` (`afs` line in `/etc/synthetic.conf`) | `/afs` with the Athena cell; the OpenAFS client has no maintained Apple Silicon build. The AuriStor EULA applies. Tokens: `aklog` (done by `athena-kinit`), check with `tokens` |
+| `athena-locker` (`attach`, `detach`, `add`, `fsid`) and `/mit` | https://github.com/djbclark/site-djbclark (`macos/athena-kerberos/athena-locker`) | `macos/athena-kerberos/install.sh` links the commands into `~/.local/bin` and adds the `add` shell function to `~/.bashrc.local`; once as root `sudo /bin/sh macos/athena-kerberos/install-root.sh` makes `/mit` a synthetic symlink to `/Users/Shared/mit` (reboot). Lockers to pre-attach go in `~/.config/athena/lockers` (LaunchAgent `com.djbclark.athena-lockers`, hourly). Needs the AuriStor client above | Athena's `attach`/`add` on a Mac: Hesiod lookup (TXT `<name>.filsys.ns.athena.mit.edu`), `aklog -path`, symlink into `/mit`. Not on demand: a locker must be attached before `cd /mit/<locker>` (Athena's FUSE `pyhesiodfs` is not reproduced). Most locker binaries are Linux builds, so only scripts and data lockers are useful |
 
 **GitHub-side services** (accounts and app installs happen in the interactive phase)
 
