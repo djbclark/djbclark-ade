@@ -1,5 +1,7 @@
 # Hyades console help, captured 2026-10-14 over ssh djbclark@hyades.mit.edu
 # (one-line docstrings; behaviour and caveats are in console.md)
+# Note 2026-10-16: the `help tmprun` line below was hand-updated to the live text (no IMAGE
+# since SIPB/hyades 3e291d2b6e); the rest is as captured 2026-10-14.
 
 $ ssh djbclark@hyades.mit.edu help
 
@@ -65,7 +67,7 @@ stop NAME: Stop microVM
 $ ssh djbclark@hyades.mit.edu help timetravel
 timetravel DATE?: Get Hyades configuration at a previous date
 $ ssh djbclark@hyades.mit.edu help tmprun
-tmprun IMAGE CMD?: Run a temporary microVM with all volumes mounted
+tmprun CMD?: Run a temporary microVM with all volumes mounted
 $ ssh djbclark@hyades.mit.edu help update
 update: Check all images for updates
 $ ssh djbclark@hyades.mit.edu help updtoken

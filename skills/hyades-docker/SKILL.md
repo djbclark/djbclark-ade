@@ -118,8 +118,27 @@ throwaway login for you; never hand-roll one. Public images need no login.
    full AI-oriented one in the public fork `djbclark/hyades`, linked both ways:
    `forgejo-two-tier-issue` (forgejo skill). Drafts live in `tickets/N-slug/`
    (`title.txt`, `human.md`, `ai.md`).
-7. `tmprun` with a script on stdin must end the script with `exit`; never kill the
-   SSH client (`timeout`) while it runs: the microVM is orphaned and keeps using quota.
+7. **`tmprun` changed 2026-10-15** (SIPB/hyades `3e291d2b6e`, fixes #6, "makes #8 less
+   likely"; verified 2026-10-16): it is now `tmprun CMD?`, **no image argument**. The
+   guest is `bash` on an empty overlay rootfs (`--rootfs /var/empty:O`) using the host's
+   NixOS tools via `/nix/store` and `/run/current-system/sw` (curl, sha256sum, tar, gzip,
+   grep present; no package manager, no gcc assumed); host `/etc` is mounted and not
+   writable by us, so write to `/tmp` (`mkdir -p /tmp /var/lib` works); every volume is at
+   `/mnt/VOL`. An image name is now run as a command (`bash: docker.io/library/alpine:3.22:
+   No such file or directory`), so **`tmprun IMAGE` scripts are broken**. Static binaries
+   fetched with `curl` into `/tmp` run fine; unix sockets and SQLite WAL on a volume
+   (virtiofs) work (worked example: `~/src/headscale/scripts/bootstrap`, public repo
+   forgejo.mit.edu/djbclark/headscale, runs headscale's CLI on its volume and moves a
+   secret out encrypted with `age` to a throwaway recipient).
+   A script on stdin (`hyades tmprun < script.sh`, no args) still works, typed into an
+   interactive bash on a pty, so the old rules hold: end the script with `exit`, give
+   stdin readers `</dev/null`, keep lines under 4096 bytes. **New gotcha:** the output
+   carries ANSI colour codes, `ESC]0;...BEL` title sequences, CRs and bracketed-paste
+   markers (`ESC[?2004l` is prepended to the first output line of every command), so an
+   exact-line match (`^-----BEGIN AGE ENCRYPTED FILE-----$`) fails until you strip:
+   `tr -d '\r' | gsed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g'`.
+   Never kill the SSH client (`timeout`) while it runs: the microVM may still be
+   orphaned (#8 is "less likely", not fixed) and keeps using quota.
    Stop an orphan with `scripts/hyades stop 'libpod-<container id>*'` (id from `df`;
    through `hyades -` no quotes: `stop libpod-<id>*`). A guest kernel oops also leaves
    the microVM hung, so check `df` after any failed run. The wrapper streams output
@@ -219,7 +238,8 @@ first successful run. Watch runs with the `forgejo` skill (`forgejo-api GET
    test with `curl` and a browser user agent.
 2. **Volumes:** `lsvol`, `rmvol VOL`, `expvol VOL > v.tar`, `impvol VOL < v.tar`.
    Copy to a group: `ssh djbclark@hyades.mit.edu expvol V | ssh djbclark@hyades.mit.edu entergp G impvol V`.
-   Edit files in volumes with `tmprun` + a stdin script (all volumes at `/mnt/VOL`);
+   Edit files in volumes with `tmprun` + a stdin script (no image argument since
+   2026-10-15, see Rules 7; all volumes at `/mnt/VOL`);
    `exec` is broken (see `references/console.md`).
 3. **Groups:** `entergp GROUP` (any member gets full access: use an officers-only
    list). Moira list must be a non-hidden "Moira Group" (WebMoira or `blanche`).
@@ -237,7 +257,7 @@ first successful run. Watch runs with the `forgejo` skill (`forgejo-api GET
    `forgejo-ci` skill for the bug list; build example below).
 6. **Worked example, a multi-microVM stack:** `examples/firecrawl/` (self-hosted
    Firecrawl: seven microVMs on one shared network, a Caddy bearer-token gate built
-   with `crane append`, the shimmed Playwright image built via `tmprun`, SearXNG as
+   with `crane append`, the shimmed Playwright image (its `tmprun debian:bookworm` build is broken since 2026-10-15), SearXNG as
    its search backend with a `settings.yml` layer added by `crane append`). `deploy
    apply|up|down|status`.
 7. **Not supported by design:** static hosting, a sql.mit.edu replacement (use SQLite

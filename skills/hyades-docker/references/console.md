@@ -54,8 +54,8 @@ owner fails); env var names `[a-zA-Z0-9_]+`; no newlines in paths or values.
 | Command | Runs | Notes |
 |---|---|---|
 | `start NAME`, `stop NAME`, `restart NAME`, `kill NAME` | `systemctl --user start/stop/restart/kill NAME` | units have `Restart=on-failure` (5 s), start limit 10 per 120 s, `TimeoutStartSec=300`, `AutoUpdate=registry`. `stop` discards everything outside volumes. Lingering is enabled, so microVMs run while you are logged out |
-| `exec NAME CMD` | `podman exec -it NAME -- CMD` | **broken as of 2026-10-14 for images with a non-root `USER`**: `Error: krun: chown /dev/pts/N: Operation not permitted: OCI permission denied`, with or without `ssh -tt`, from the interactive console too (tested on `djbclark-rustpad`, uid 1000; bug 1 below). Also CMD is passed as ONE argv element, so `exec NAME ls /` would look for a program named `ls /`. Use `tmprun` instead |
-| `tmprun IMAGE [CMD]` | `podman run --rm -it -v VOL:/mnt/VOL ... IMAGE -- CMD` with every volume of every microVM mounted under `/mnt` | **with CMD it is broken**: `--` lands after the image, so the guest runs `--` (`Couldn't execute '--': ENOENT`). **Without CMD it works**, so feed a script on stdin: `printf 'ls /mnt; df -h\n' \| scripts/hyades tmprun docker.io/library/alpine` (verified: guest kernel 6.12.109, `nproc` 4). The warning "input device is not a TTY" is harmless. End the script with `exit` and never kill the SSH client mid-run: the microVM is orphaned (bug 4). The script goes through a pty into an interactive shell: a command that reads stdin (`apt-get` via debconf) eats the rest of the script, so give it `</dev/null`; lines over 4095 bytes are cut; fetch payloads in the guest rather than pasting them (2026-10-14). The pulled image stays until the weekly `podman system prune -a -f` |
+| `exec NAME CMD` | `podman exec -it NAME -- CMD` | **broken as of 2026-10-14 for images with a non-root `USER`**: `Error: krun: chown /dev/pts/N: Operation not permitted: OCI permission denied`, with or without `ssh -tt`, from the interactive console too (tested on `djbclark-rustpad`, uid 1000; bug 1 below). Also CMD is passed as ONE argv element, so `exec NAME ls /` would look for a program named `ls /`. Use `tmprun` for volume files instead (it has no image since 2026-10-15) |
+| `tmprun [CMD]` | **since SIPB/hyades `3e291d2b6e` (2026-10-15; live `help tmprun`: `tmprun CMD?: Run a temporary microVM with all volumes mounted`)**: `podman run --rm -it -e PATH=/run/current-system/sw/bin -v /etc:/etc -v /run/current-system/sw:/run/current-system/sw -v /nix/store:/nix/store` + `-v VOL:/mnt/VOL` for every volume of every microVM + `--rootfs /var/empty:O bash` and, with CMD, `-c CMD` | **No image argument any more** (the old `tmprun IMAGE [CMD]` is gone; an image name is run as a command and fails `No such file or directory`). The guest is bash on an empty overlay rootfs with the host's NixOS tools (curl, sha256sum, tar, gzip, grep seen; no package manager); host `/etc` is mounted and not writable, so use `/tmp` (`mkdir -p /tmp /var/lib` works). Static binaries curled into `/tmp` run; a unix socket and SQLite WAL on a volume (virtiofs) work. With CMD is fixed upstream (bug 2). **A stdin script still works** (`printf 'ls /mnt; df -h\n' \| scripts/hyades tmprun`), typed into an interactive bash on a pty: end it with `exit`, give stdin readers `</dev/null` (`apt-get` via debconf ate the rest of the script before), lines over 4095 bytes are cut, fetch payloads in the guest rather than pasting them. The warning "input device is not a TTY" is harmless. **Output carries ANSI colour, `ESC]0;...BEL` titles, CRs and bracketed-paste markers (`ESC[?2004l` prepended to the first output line of each command)**: strip before exact-line matching, `tr -d '\r' \| gsed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\][^\x07]*\x07//g'`. Never kill the SSH client mid-run (bug 4). Worked example: `~/src/headscale/scripts/bootstrap`. (Verified 2026-10-16.) |
 | `update` | `podman auto-update` | pulls newer images for every unit and restarts what changed. Hyades also does this daily, and on `POST https://hyades.mit.edu` with `X-Token` |
 
 ## Registry, keys, tokens, groups
@@ -73,11 +73,15 @@ owner fails); env var names `[a-zA-Z0-9_]+`; no newlines in paths or values.
 1. (#5) `exec` fails for images with a non-root `USER`: crun's `open_terminal`
    (`linux.c`) chowns the host pty to the exec uid and gets `EPERM`; uid 0 skips the
    chown (`ekzhang/rustpad` is `User: 1000:1000`; alpine runs as root). `tmprun` of
-   the uid-1000 image works, so it is the exec path only.
-2. (#6) `tmprun IMAGE CMD` runs `--`; `exec`/`tmprun` pass CMD as one argv element.
+   the uid-1000 image worked (before 2026-10-15), so it is the exec path only.
+2. (#6) `tmprun IMAGE CMD` ran `--`; `exec`/`tmprun` pass CMD as one argv element.
+   **Fixed upstream for `tmprun` 2026-10-15** (`3e291d2b6e`: `tmprun CMD?` runs
+   `bash -c CMD`, verified from the new code, 2026-10-16); the CMD-as-one-argv problem
+   remains for `exec`.
 3. (#7) Exit status is always 0, so scripts cannot detect failure.
-4. (#8) A `tmprun` microVM is orphaned when the SSH client dies (verified with `timeout
-   25`); `stop 'libpod-<id>*'` stops it, since `stop` passes its argument to
+4. (#8) A `tmprun` microVM was orphaned when the SSH client dies (verified with `timeout
+   25`, 2026-10-14; `3e291d2b6e` "makes #8 less likely" 2026-10-15, not re-tested, so
+   still never kill the client); `stop 'libpod-<id>*'` stops it, since `stop` passes its argument to
    `systemctl --user` unvalidated and the container has a transient
    `libpod-<id>.scope`.
    Through `scripts/hyades -` (stdin) write it **without quotes**, `stop libpod-<id>*`:

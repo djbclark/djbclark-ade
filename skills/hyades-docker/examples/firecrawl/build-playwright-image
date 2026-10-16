@@ -4,6 +4,15 @@
 #
 #   build-playwright-image [SHIM_SHA]     default: the pinned commit below
 #
+# BROKEN since 2026-10-15 (SIPB/hyades 3e291d2b6e): `tmprun` takes no image any more.
+# The step-1 call below passes `docker.io/library/debian:bookworm`, which the console
+# now runs as a bash command (`No such file or directory`), and the guest is bash on
+# the host's NixOS tools with no apt or gcc, so the glibc-2.36 build cannot happen
+# there. Logic left as is. To rebuild the shim: compile it where a Debian bookworm
+# toolchain exists (a `runs-on: ubuntu` job with a debian:bookworm container, see the
+# forgejo-ci skill, or a local container) and feed the .so to step 2, or reuse the
+# already pushed tag (set PW_IMAGE to it). Untested whether the host has a compiler.
+#
 # 1. Compile the shim on Hyades in a throwaway Debian bookworm microVM (`tmprun`;
 #    bookworm = the playwright-service image's glibc 2.36). The guest fetches the
 #    source itself: a tmprun script is typed into a terminal, so payloads must not

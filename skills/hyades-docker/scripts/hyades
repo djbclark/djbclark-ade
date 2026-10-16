@@ -5,7 +5,7 @@
 #   hyades list | getconf [NAME] | status NAME | logs NAME | lsvol | df
 #   hyades setconf NAME "$(jq -c . conf.json)"
 #   hyades -g GROUP list                 # same, inside Moira group account GROUP
-#   printf 'ls /mnt\n' | hyades tmprun docker.io/library/alpine
+#   printf 'ls /mnt\nexit\n' | hyades tmprun     # no image arg since 2026-10-15; output has ANSI/CR noise
 #   printf 'setconf NAME %s\n' "$json" | hyades -      # console commands on stdin
 #
 # `hyades -` sends stdin to the console, one command per line (an `exit` is
