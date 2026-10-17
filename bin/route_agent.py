@@ -548,7 +548,9 @@ DEFAULT_PROFILE = {"bulk": 60, "mechanical": 60}
 # otherwise hand them DEFAULT_PROFILE bulk work: omp sat in `aiuse --available`
 # with 100% headroom on 2026-10-15.
 NEVER_ROUTE = frozenset({"hermes", "clinepass"})  # clinepass: Hermes's lifeline, never a slice target
-OPERATOR_GATED = frozenset({"omp"})
+# cline (operator 2026-10-17): the TUI is uninstalled; gated so a reinstall does not put it back
+# into discovery by accident (ALIASES folds it into clinepass, which NEVER_ROUTE covers).
+OPERATOR_GATED = frozenset({"omp", "cline"})
 # Below this much of the Fable sublimit, judgment on claude falls back to Opus.
 FABLE_MIN_LEFT = 10.0
 

@@ -3876,9 +3876,13 @@ def env_float(name):
 # assistant and aiuse lists it under [disabled_services]).
 # The caller sets ACP_OPERATOR_APPROVED=<agent>[,<agent>] only after the operator said yes;
 # acp-dispatch applies the same gate. omp has no AGENTS entry yet, so approval alone is not enough.
+# cline (operator 2026-10-17): the CLI and Cline.app were uninstalled; the machinery stays so it can
+# be re-enabled on purpose (reinstall, then approve). Only Hermes still uses Cline, through its own
+# ClinePass API key, never through this.
 OPERATOR_GATED = {
     "omp": "oh-my-pi bills Claude cloud credits; aiuse marks it requires_operator_approval",
     "hermes": "the operator's own assistant, never a delegation target (operator 2026-10-15)",
+    "cline": "uninstalled 2026-10-17; only Hermes uses Cline (its ClinePass API pool)",
 }
 APPROVAL_ENV = "ACP_OPERATOR_APPROVED"
 

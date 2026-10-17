@@ -159,7 +159,9 @@ MODEL_OPTIONAL_AGENTS = {"zcode"}
 # the same gate is in acp-run.
 # omp (operator 2026-10-15) and hermes (same day: "hermes should never be used" as a
 # delegation target) need ACP_OPERATOR_APPROVED=<agent>; acp-run applies the same gate.
-OPERATOR_GATED = {"omp", "hermes"}
+# cline (operator 2026-10-17): uninstalled, left in place for a deliberate re-enable; Hermes
+# keeps its own ClinePass API pool.
+OPERATOR_GATED = {"omp", "hermes", "cline"}
 # Claude Code 2.1.295 refuses a sub-agent's Write for this basename (tengu_subagent_md_report_blocked).
 CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.IGNORECASE)
 # acp-run runs yolo for every agent (operator 2026-10-14): all or deny. A scoped:... value from an

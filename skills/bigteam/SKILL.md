@@ -256,6 +256,11 @@ standing gate, not an exclusion with an end date:
    `acp-dispatch` slice, an Orca `--agent omp` worker, a herdr pane, and any model
    reached through omp. `aiuse` marks the omp row `requires_operator_approval`
    ("AI: Do not use without asking operator"); headroom on it is not permission.
+1a. **cline (operator 2026-10-17)**: the CLI and Cline.app are uninstalled. The
+   machinery (`acp-run cline`, `acp-dispatch cline`, the `route_agent.py` alias)
+   stays, gated behind `ACP_OPERATOR_APPROVED=cline`, so it is re-enabled only on
+   purpose: reinstall, then the operator names it. Hermes still uses Cline through
+   its own ClinePass API key; that is Hermes's pool, not a bigteam target.
 2. Approval is specific: the operator names omp for this run or this slice. A
    general "use every agent", "bigteam this" or a peer's routing plan does not
    count, and one approval does not carry over to the next batch.

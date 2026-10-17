@@ -225,6 +225,10 @@ Rules for any agent that dispatches to agy:
   `omp -p`, `omp acp`, acp-run/acp-dispatch, Orca, herdr): never without the
   operator's specific, explicit approval for that run; `aiuse` flags it
   `requires_operator_approval`. Rules: `bigteam`'s *Operator-gated agents*.
+  **cline (2026-10-17)**: the TUI and Cline.app are uninstalled; acp-run,
+  acp-dispatch and `route_agent.py` gate it like omp so nothing calls it until
+  the operator re-enables it on purpose. Hermes keeps using Cline through its
+  own ClinePass API key; that pool stays.
 
 ## Headless invocation (one-shot prompts to other TUIs)
 
@@ -514,7 +518,9 @@ method that runs the waves.
 7. **Never:** **hermes** as a delegation target (the operator's own assistant;
    `acp-run` and `acp-dispatch` refuse it the way they refuse omp); **omp**
    without the operator's specific, explicit yes for that run
-   (`ACP_OPERATOR_APPROVED=omp`; `bigteam`'s *Operator-gated agents*); the
+   (`ACP_OPERATOR_APPROVED=omp`; `bigteam`'s *Operator-gated agents*); **cline**,
+   uninstalled 2026-10-17 and gated the same way (Hermes's ClinePass pool is
+   separate and stays); the
    prepaid pools (opencode-zen paid, openrouter, deepseek) without a fresh
    operator decision; a credits-backed model (Claude usage credits, Codex
    credits, OpenCode Go "Use balance") or re-enabling a disabled toggle to reach
