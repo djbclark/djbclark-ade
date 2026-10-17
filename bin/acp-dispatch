@@ -808,6 +808,23 @@ def preflight_reply_ok(stdout: str) -> bool:
     return line.upper() == "OK"
 
 
+AUTH_TERMS = ("project_token_login_failed", "token_login_failed", "login_failed", "auth_failed",
+              "invalid authentication token", "oauth token has expired", "oauth token revoked",
+              "login expired", "please run /login", "not logged in", "authentication_error")
+AUTH_HINTS = {
+    "zcode": "zcode's z.ai login expired: run `zcode login` in a terminal (recurs daily, zai-org/feedback#1001)",
+    "codex": "codex login expired: run `codex login`",
+    "claude": "Claude Code login expired: run `claude auth login`",
+    "cursor": "cursor-agent login expired: run `cursor-agent login`",
+    "copilot": "copilot login expired: run `gh auth login`",
+    "grok": "grok login expired: run `grok login`",
+}
+
+
+def auth_hint(agent: str) -> str:
+    return AUTH_HINTS.get(agent, f"{agent}: stored login expired, log in again")
+
+
 def failure_class(text: str, rc: int | None, *, preflight: bool = False) -> tuple[str | None, re.Match | None]:
     """Classify errors acp-run does not yet classify, including zcode 1310."""
     low = text.lower()
@@ -817,6 +834,12 @@ def failure_class(text: str, rc: int | None, *, preflight: bool = False) -> tupl
                    "individual quota reached", "rate limit exceeded", "insufficient quota")
     if "[1310]" in low or any(term in low for term in quota_terms):
         return "quota", when
+    # A stored login the agent cannot refresh: not transient, not an outage, and no retry or
+    # reroute fixes it; the operator must log in again. zcode's z.ai coding-plan token exchange
+    # fails this way about once a day since 2026-10-14 (zai-org/feedback#1001); it was being
+    # reported as fail=transient and silently rerouted, which is the opposite of what was wanted.
+    if any(term in low for term in AUTH_TERMS):
+        return "auth", when
     m = re.search(r"\bfail=(\S+)", text) or re.search(r"FAILED (\S+?):?(?:\s|$)", text)
     if m:
         return m.group(1), when
@@ -874,13 +897,22 @@ def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, s
             pass
         with tempfile.TemporaryDirectory(prefix="acp-dispatch-preflight-") as td:
             log = Path(td) / "probe.jsonl"
-            cmd = [acp_run, agent, "-C", td, "-p", "Reply with exactly: OK",
-                   "--perm", "deny", "--timeout", str(PREFLIGHT_TIMEOUT), "--log", str(log)]
-            if model:
-                cmd += ["--model", model]
-            try:
-                proc = subprocess.run(cmd, check=False, capture_output=True, text=True,
+            # A read-only probe. Some agents cannot honour --perm deny (cursor-agent's ACP never
+            # sends permission requests) and acp-run refuses it up front with exit 2 and a
+            # "--perm deny:" message; until 2026-10-16 that killed every such dispatch in preflight.
+            # The probe prompt needs no tools, so on that refusal rerun it with --perm all in the
+            # empty temp dir.
+            def run_probe(perm: str) -> subprocess.CompletedProcess:
+                cmd = [acp_run, agent, "-C", td, "-p", "Reply with exactly: OK",
+                       "--perm", perm, "--timeout", str(PREFLIGHT_TIMEOUT), "--log", str(log)]
+                if model:
+                    cmd += ["--model", model]
+                return subprocess.run(cmd, check=False, capture_output=True, text=True,
                                       stdin=subprocess.DEVNULL, timeout=PREFLIGHT_TIMEOUT + 10)
+            try:
+                proc = run_probe("deny")
+                if proc.returncode == 2 and "--perm deny" in proc.stderr:
+                    proc = run_probe("all")
                 combined = (proc.stdout + "\n" + proc.stderr).strip()
             except (OSError, subprocess.TimeoutExpired) as exc:
                 proc = None
@@ -897,6 +929,8 @@ def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, s
         elif cls == "outage":
             note_outage_in_aiuse(agent, model, combined)
         detail = " ".join(combined.split())[-400:] or f"exit {None if proc is None else proc.returncode}"
+        if cls == "auth":
+            detail = f"{auth_hint(agent)} | {detail}"
         reset_text = reset[1] if reset else None
         return False, detail, cls, reset_text
 
