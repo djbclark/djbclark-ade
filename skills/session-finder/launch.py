@@ -346,6 +346,10 @@ def runner_script(d, acp_cmd, pane=None):
     prompts, and /exit (launch.py close) ends it."""
     q = lambda s: "'" + str(s).replace("'", "'\\''") + "'"  # noqa: E731
     lines = ["#!/usr/bin/env bash", 'export PATH="/opt/homebrew/bin:$PATH"', "set -o pipefail", f"echo 'launch {d['id']}: {d['agent']} in {d['cwd']} (acp)'"]
+    # The herdr pane starts a fresh shell, so the operator's per-run approval for a gated agent (hermes,
+    # omp) would never reach acp-run there: carry it into the script (2026-10-17: exit 2 in the pane).
+    if os.environ.get("ACP_OPERATOR_APPROVED"):
+        lines.insert(2, f"export ACP_OPERATOR_APPROVED={q(os.environ['ACP_OPERATOR_APPROVED'])}")
     if pane:
         lines.append(f"{q(HERDR)} pane report-agent {q(pane)} --source session-finder --agent {q(d['agent'])} "
                      f"--state working --agent-session-id {q(d['id'])} >/dev/null 2>&1")

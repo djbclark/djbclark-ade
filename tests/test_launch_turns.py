@@ -102,6 +102,14 @@ class TestDryRun(LaunchCase):
                             "-p", "x", "--dry-run", "--json")
         d = json.loads(r.stdout)
         self.assertIn("acp-run", d["runner_script"])
+        self.assertNotIn("ACP_OPERATOR_APPROVED", d["runner_script"])
+
+    def test_runner_script_carries_the_operator_approval(self) -> None:
+        # the herdr pane is a fresh shell: without this a gated agent's run exits 2 there (2026-10-17)
+        r = self.run_launch("start", "--agent", "claude", "--cwd", str(self.repo), "--model", "m", "--host", "none",
+                            "-p", "x", "--dry-run", "--json", ACP_OPERATOR_APPROVED="hermes")
+        d = json.loads(r.stdout)
+        self.assertIn("export ACP_OPERATOR_APPROVED='hermes'", d["runner_script"])
 
 
 class TestDetachedInteractive(LaunchCase):
