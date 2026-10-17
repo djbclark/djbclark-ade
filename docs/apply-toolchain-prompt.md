@@ -377,6 +377,27 @@ offer the second:
 | `feature-dev` | offer | Explore, design, implement, review workflow for new features |
 | `ralph-loop` | no (mention only) | Self-repeating loops; not appropriate until the baseline and gates exist and the user has used the plain workflow for a while |
 
+**Claude Code mods** (function-hook plugins that draw live lines above the
+prompt or panes beside the transcript; Claude Code 2.1.287+; user scope, since
+they are per-person UI, not per-repo). Each runs unsandboxed as the user, so
+read its `hooks/` for shell, network or file writes and run `claude plugin
+validate <dir>` before installing. djbclark's own order and the skip list are
+in site-private `memory/project_claude_code_mods_rollout.md` (2026-10-17):
+
+```text
+/plugin marketplace add hamzafer/claude-code-mods
+/plugin install agent-radar@claude-code-mods
+/plugin install context-bar@claude-code-mods
+```
+
+| Mod | Install? | What it gives the user |
+|---|---|---|
+| `agent-radar` | yes | One live line above the prompt per running subagent: elapsed time, tool count, current action; `/radar` lists every agent and its messages. Replaces the bare "N background agents" line |
+| `context-bar` | yes | The context window as a stacked bar above the prompt, a color per category, token counts and the compaction point; `/context-bar` toggles it |
+| `blast-radius` | offer | Holds `rm -r`, force pushes and migrations, previews what they would destroy, cancels after 60 s unanswered |
+| `agentpane` (`xuanji86/claude-agentpane`), `flightdeck` (`scasella/claude-flightdeck`) | offer | Side panes of the subagents (rows with current tool call, model, tokens; swimlanes); they dock on their own only at 110–144+ columns, otherwise `/agentpane`, `/flightdeck` |
+| `task-poke`, `cache-warm`, `usage-meter`, `token-weather`, `gemini-*` | no (mention only) | Spend tokens unattended, or duplicate `aiuse` and the quota hook |
+
 **From djbclark's orchestration marketplace** (public, MIT):
 
 ```text
