@@ -8,6 +8,7 @@
                                         answer that unlocks the most unattended work first.
     helm.py wait [--auto-audit] [--settle S] [--timeout S] [--json]
                                         block until an item appears or changes; print only those
+    helm.py check <id> [--fp F]        is the question still pending? 0 yes, 10 answered elsewhere, 11 changed
     helm.py show <id>                   one session in full: question, last reply, screen
     helm.py answer <id> <n>...          pick option n (1-based), one number per question
     helm.py answer <id> --text "..."    answer a single question in free text
@@ -328,7 +329,8 @@ def render(it, full=False):
                 out.append(f"    {n}. {o.get('label', '')}{desc}")
         if it.get("context"):
             out.append(f"  said before asking: {it['context']}")
-        how = f"helm.py answer {it['id']} <n> | --text \"...\"" if it["reachable"] else "no channel: answer in the pane"
+        how = (f"helm.py answer {it['id']} --fp {it['fp']} <n> | --text \"...\"" if it["reachable"]
+               else "no channel: answer in the pane")
         out.append(f"  answer: {how}")
     elif k in ("plan", "permission", "blocked"):
         label = {"plan": "PLAN APPROVAL", "permission": f"PERMISSION ({it.get('tool')})", "blocked": "BLOCKED"}[k]
@@ -448,8 +450,47 @@ def cmd_show(a, state):
     emit([it], a.json, full=True)
 
 
+ANSWERED, CHANGED = 10, 11   # exit codes of `check` and `answer`: already answered elsewhere / no longer this prompt
+
+
+def question_status(s, it, fp):
+    """Is the question the relay showed (`fp` = its tool_use_id; None = whatever is pending now)
+    still waiting? -> ("pending", None) | ("answered", {question: answer}) | ("changed", None).
+    Operator, 2026-10-11: he often answers in the pane while the relay prompt is open."""
+    if it["kind"] == "question" and (not fp or it["fp"] == fp or it["fp"].endswith(fp)):
+        return "pending", None
+    path = transcript(s["sid"]) if s.get("sid") and s["agent"] == "claude" else None
+    if fp and path:
+        for tid, got in parse(path)["answers"].items():
+            if tid == fp or tid.endswith(fp):
+                return "answered", got
+    return "changed", None
+
+
+def report_status(it, status, got):
+    if status == "answered":
+        print(f"ALREADY ANSWERED [{it['id']}]: " + "; ".join(f'"{clip(q, 60)}" = "{a}"' for q, a in (got or {}).items()))
+    elif status == "changed":
+        now = f"it is {it['kind']}" + (f", a different question (fp {it['fp']})" if it["kind"] == "question" else "")
+        print(f"NOT PENDING [{it['id']}]: the question shown is no longer waiting and no answer is recorded; {now}")
+
+
+def cmd_check(a, state):
+    s, it = find(a.id, state)
+    status, got = question_status(s, it, a.fp)
+    if status == "pending":
+        print(f"PENDING [{it['id']}]: still waiting on the same question")
+        return 0
+    report_status(it, status, got)
+    return ANSWERED if status == "answered" else CHANGED
+
+
 def cmd_answer(a, state):
     s, it = find(a.id, state)
+    status, got = question_status(s, it, a.fp)   # checked again at send time, before any key
+    if status != "pending":
+        report_status(it, status, got)
+        sys.exit(ANSWERED if status == "answered" else CHANGED)
     if it["kind"] != "question":
         sys.exit(f"helm: {it['id']} has no pending question (it is {it['kind']}); nothing sent")
     if not s.get("chan"):
@@ -571,8 +612,13 @@ def main():
     p.add_argument("id")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_show)
+    p = sub.add_parser("check", help="is the question still pending? exit 0 pending, 10 already answered, 11 changed")
+    p.add_argument("id")
+    p.add_argument("--fp", help="the fp printed with the question (pins it)")
+    p.set_defaults(fn=cmd_check)
     p = sub.add_parser("answer")
     p.add_argument("id")
+    p.add_argument("--fp", help="the fp printed with the question; refuses (exit 10/11) if it is no longer pending")
     p.add_argument("choice", nargs="*", type=int)
     p.add_argument("--text")
     p.set_defaults(fn=cmd_answer)

@@ -24,7 +24,8 @@ H="python3 -I $HOME/src/djbclark-ade/skills/helm/helm.py"
 L="python3 -I $HOME/src/djbclark-ade/skills/session-finder/launch.py"
 $H scan                      # open items, every TUI, ranked (--all: every session; --ended: section 7; --order attention: old order)
 $H wait --auto-audit         # block until something new needs him
-$H answer <id> <n>           # pick option n; one number per question
+$H check <id> --fp <fp>      # still pending? exit 0 yes, 10 already answered in the terminal, 11 changed
+$H answer <id> --fp <fp> <n> # pick option n; one number per question (refuses with 10/11 if no longer pending)
 $H answer <id> --text "..."  # free-text answer to a single question
 $H audit <id>                # send /loose to an idle session
 $H skip <id>                 # hide until that session changes
@@ -60,14 +61,32 @@ Hermes; never numbered prose). One item per call.
    a. Header chip: the project name (12 characters at most).
    b. Question text: the item's heading (`project — where · "title"`) on the
       first line, then the session's question, unchanged.
-   c. Options: its labels and descriptions, same order, `(Recommended)` kept
-      where it put it. Do not add your own ranking. If you know something the
-      session cannot (two sessions about to touch the same thing), say it in
-      one prose line before the prompt.
-   d. Send his pick: `$H answer <id> <n>`. Text typed under "Other" goes with
-      `--text`. `skip` typed there means `$H skip <id>`; `stop` ends the walk.
-   e. A prompt with several questions: ask each as its own prompt, then send
-      once (`$H answer <id> 2 1`). A multi-select prompt cannot be sent this
+   c. Options: **first, always, `I think I already answered this elsewhere`**
+      (operator, 2026-10-11: he often answers in the pane while the relay
+      prompt is open), then its labels and descriptions, same order,
+      `(Recommended)` kept where it put it. Do not add your own ranking. If
+      you know something the session cannot (two sessions about to touch the
+      same thing), say it in one prose line before the prompt. A question
+      with four options leaves no slot (the prompt tool allows four): skip
+      the extra option and treat `answered` typed under "Other" the same way;
+      the automatic check in (d) still runs.
+   d. **Check before every send and every relay**: `$H check <id> --fp <fp>`
+      (the `fp` is printed on the question; `answer` takes the same `--fp`
+      and refuses by itself). Exit 10 = already answered in the terminal: say
+      `already answered: "<answer>"` in one line and go to the next item, no
+      prompt. Exit 11 = no longer this prompt (the session moved on): rescan
+      and relay what is open now. Exit 0 = still pending.
+      **If he picks "I think I already answered this elsewhere"**, run the
+      same check: exit 10 confirms it (report the recorded answer, go to the
+      next item); exit 0 or 11 means it is not answered (say so in one line)
+      and you **re-prompt** with the question as it is now (new `fp` if the
+      session asked a different one).
+   e. Send his pick: `$H answer <id> --fp <fp> <n>`. Text typed under "Other"
+      goes with `--text`. `skip` typed there means `$H skip <id>`; `stop`
+      ends the walk. Exit 10 or 11 from `answer` means nothing was sent; handle
+      it as in (d).
+   f. A prompt with several questions: ask each as its own prompt, then send
+      once (`$H answer <id> --fp <fp> 2 1`). A multi-select prompt cannot be sent this
       way: give him the `focus:` command.
 2. **`permission`, `plan`, `blocked`** — helm could not parse a question.
    Show the screen excerpt in one prose block, offer the choices that are on
@@ -114,7 +133,10 @@ On exit 1, say what it printed; nothing went through.
 
 Run `$H wait --auto-audit` with `run_in_background: true`. It polls locally and
 exits only when an item is new or changed, printing only those items. When the
-notification arrives, relay them (section 2) and start it again.
+notification arrives, start it again **first**, in the same turn as the
+first prompt, then relay the items (section 2). `/helm` runs continuously
+(operator, 2026-10-11): a `wait` that is not running while a prompt sits open
+means new prompts from other sessions are missed.
 
 1. Never poll, never `/loop`, never schedule a recurring prompt for this.
 2. One `wait` at a time.
@@ -138,7 +160,8 @@ notification arrives, relay them (section 2) and start it again.
    plugin since 2026-10-06; `/skill helm` also works). Same script. Per item, one `clarify`: the question starts with
    `project · where — `, then the session's question; `choices` are its option
    labels (under about 60 characters each, first one is its recommendation).
-   Then `$H answer`. Hermes is not re-invoked by a background command, so it
+   Then `$H check` and `$H answer --fp` as in 2.1(d, e); the first `choices` entry is
+   `I think I already answered this elsewhere`. Hermes is not re-invoked by a background command, so it
    runs `scan`, walks the items, and runs `scan` again until nothing is open.
 2. **Hermes's own open approvals** (Claude side): `permissions_list_open` on
    the `hermes` MCP server lists them, `permissions_respond` answers. Check
