@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# wait-file: block until a file the waited-on command writes is ready, with a hard timeout.
+#
+#   wait-file [--timeout SECONDS] [--match REGEX] PATH
+#
+# Ready means PATH exists and is non-empty, or, with --match, holds a line matching the extended
+# regex REGEX (e.g. --match '^rc=' for a `...; echo rc=$? >> LOG` job). Prints the resolved path on
+# stderr first, then the file's last 5 lines when it is ready.
+#
+# Refuses (exit 2), before waiting at all, a PATH that is empty, relative, or whose directory does
+# not exist: an unset variable in `until grep -q rc= "$S/x.log"` turns the path into /x.log, which
+# never appears, so a hand-rolled waiter sits out its whole timeout after the work has ended
+# (2026-10-17: twice in one day, 14 and 15 minutes; dispatch-footer rule 13).
+#
+# Exit: 0 ready, 2 bad usage or path, 124 timed out (default 1200 s).
+set -uo pipefail
+
+timeout=1200
+match=
+while [ $# -gt 0 ]; do
+  case "$1" in
+  --timeout) timeout="${2:-}"; shift 2 ;;
+  --match) match="${2:-}"; shift 2 ;;
+  --) shift; break ;;
+  -*) echo "wait-file: unknown option $1" >&2; exit 2 ;;
+  *) break ;;
+  esac
+done
+[ $# -eq 1 ] || { echo "usage: wait-file [--timeout SECONDS] [--match REGEX] PATH" >&2; exit 2; }
+path="$1"
+case "$timeout" in '' | *[!0-9]*) echo "wait-file: --timeout needs whole seconds, got '$timeout'" >&2; exit 2 ;; esac
+[ -n "$path" ] || { echo "wait-file: empty PATH (an unset variable?)" >&2; exit 2; }
+case "$path" in /*) ;; *) echo "wait-file: PATH must be absolute, got '$path'" >&2; exit 2 ;; esac
+dir="${path%/*}"
+[ -n "$dir" ] || dir=/
+if [ "$dir" = / ]; then
+  echo "wait-file: refusing '$path' at the filesystem root (an unset variable before it?)" >&2
+  exit 2
+fi
+[ -d "$dir" ] || { echo "wait-file: directory '$dir' does not exist, so '$path' never will" >&2; exit 2; }
+
+echo "wait-file: waiting up to ${timeout}s for $path${match:+ to match /$match/}" >&2
+ready() {
+  if [ -n "$match" ]; then
+    [ -f "$path" ] && grep -qE -- "$match" "$path"
+  else
+    [ -s "$path" ]
+  fi
+}
+start=$SECONDS
+until ready; do
+  if [ $((SECONDS - start)) -ge "$timeout" ]; then
+    echo "wait-file: timed out after ${timeout}s on $path" >&2
+    exit 124
+  fi
+  sleep 2
+done
+tail -n 5 "$path"
