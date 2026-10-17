@@ -293,6 +293,21 @@ CLINE_CMD = os.environ.get("ACP_RUN_CLINE_CMD") or (
     else "cline"
 )
 CRUSH_DATA = os.path.expanduser(os.environ.get("ACP_RUN_CRUSH_DATA") or "~/.local/share/crush-acp")
+
+
+def _agy_server():
+    """The newest agy_acp_server.par under ~/.local/share/agy-acp-server/<version>/ (agy upgrades
+    unpack a new version dir; until 2026-10-17 1.3.0 was hard-coded here). Falls back to the
+    bare path pattern so a missing install fails with a readable path."""
+    root = Path.home() / ".local/share/agy-acp-server"
+
+    def key(d):
+        return [int(x) if x.isdigit() else 0 for x in re.split(r"[.-]", d.name)]
+
+    dirs = sorted((d for d in root.glob("*/") if (d / "agy_acp_server.par").is_file()), key=key)
+    return str((dirs[-1] if dirs else root / "<version>") / "agy_acp_server.par")
+
+
 # name: (command, auth method id or None). DEFAULT_SET holds ACP session config
 # options always applied for an agent (before --set): its ACP mode can ignore
 # the TUI's own settings. Verified 2026-10-03 unless noted;
@@ -318,7 +333,7 @@ AGENTS = {
     "zcode": (["zcode-acp-server"], None),
     # Google LLC signed; registry antigravity-acp (dl.google.com)
     "agy": (
-        [os.path.expanduser("~/.local/share/agy-acp-server/1.3.0/agy_acp_server.par")],
+        [_agy_server()],
         None,
     ),
     # native ACP; xAI registry entry grok-build (a reserve pool: GrokBot)
@@ -346,7 +361,7 @@ AGENTS = {
                "crush-acp", "acp"], "local"),
 }
 # ACP_RUN_AGY_SERVER swaps agy's server command for one run without an edit: a
-# newer agy_acp_server.par unpacked beside 1.3.0, or a wrapper such as
+# specific agy_acp_server.par instead of the newest one, or a wrapper such as
 # refined-antigravity-acp. Unset is the default path above (compared
 # 2026-10-10, tools/acp-run/README.md "agy").
 # ACP_RUN_AGY_CMD is an alias. With neither set, ~/.local/bin/refined-antigravity-acp
@@ -816,7 +831,7 @@ def opencode_deny_config(env, tag="deny"):
         except (OSError, ValueError, UnicodeDecodeError) as e:
             raise ValueError(f"cannot read {f}: {e}") from None
         if not isinstance(cfg, dict):
-            raise ValueError(f"cannot read {f}: not a JSON object")
+            raise ValueError(f"cannot read {f}: not a JSON object")  # noqa: TRY004 - callers catch ValueError for every unreadable config
         for k, v in cfg.items():
             if k in ("provider", "experimental") and isinstance(v, dict):
                 if k == "experimental":
@@ -1076,14 +1091,14 @@ CRUSH_TOOLS = (
 CRUSH_PROJECT_FILES = (".crushrc", "crushrc", ".crush.json", "crush.json")
 # `mcp add NAME` in a crushrc (internal/shellconfig/mcp.go); names only, for the log
 # and to disable a project's servers.
-CRUSH_RC_MCP = re.compile(r"^\s*mcp\s+add\s+['\"]?([A-Za-z0-9_.@-]+)", re.M)
+CRUSH_RC_MCP = re.compile(r"^\s*mcp\s+add\s+['\"]?([A-Za-z0-9_.@-]+)", re.MULTILINE)
 # A crushrc line (comments removed) that could reach a config builtin past the stripped
 # run's shell functions: command/builtin/exec skip functions, a command runner (env,
 # xargs, ...) may exec the name directly, unset -f removes the functions. Refuse to strip.
 CRUSH_RC_BYPASS = re.compile(r"\b(command|builtin|exec|env|xargs|nohup|nice|timeout)\b[^\n;|&]*?"
                              r"\b(mcp|lsp|hook|permissions|option)\b"
                              r"|\bunset\b[^\n;|&]*?(?<!\S)-\w*f")
-CRUSH_RC_COMMENT = re.compile(r"(^|(?<=\s))#[^\n]*", re.M)
+CRUSH_RC_COMMENT = re.compile(r"(^|(?<=\s))#[^\n]*", re.MULTILINE)
 # `option` keys a stripped run passes through from the user's crushrc; context paths,
 # skill paths, data directory, LSP and UI options are dropped.
 CRUSH_RC_KEEP_OPTIONS = ("request-timeout", "disable-skill", "auto-summarize",
@@ -1242,8 +1257,8 @@ def crush_strip_config(env, d, why="--perm deny"):
     env["CRUSH_SKILLS_DIR"] = str(skills)
     return {"agent": "crush", "action": "stripped", "source": str(src),
             "mcp_servers": sorted(set(CRUSH_RC_MCP.findall(text)) | set(_crush_mcp_names(js))),
-            "lsp": len(re.findall(r"^\s*lsp\s", text, re.M)),
-            "hooks": len(re.findall(r"^\s*hook\s", text, re.M)),
+            "lsp": len(re.findall(r"^\s*lsp\s", text, re.MULTILINE)),
+            "hooks": len(re.findall(r"^\s*hook\s", text, re.MULTILINE)),
             "kept_keys": sorted(kept), "dropped_keys": dropped, "secrets_in_file": on_disk,
             "global_context": "off", "skills": "none",
             "env": ["CRUSH_GLOBAL_CONFIG", "CRUSH_SKILLS_DIR"]}
@@ -1948,7 +1963,7 @@ def parse_size(s):
     m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([km]?)", str(s if s is not None else "").strip().lower())
     if not m:
         return None
-    n = int(round(float(m.group(1)) * {"": 1, "k": 1000, "m": 1_000_000}[m.group(2)]))
+    n = round(float(m.group(1)) * {"": 1, "k": 1000, "m": 1_000_000}[m.group(2)])
     return n if n > 0 else None
 
 
@@ -2229,7 +2244,7 @@ async def grok_set_context(conn, sess, init, client, options, tokens, who):
 def agy_effort_model(options, want_model, level):
     """agy bakes the effort into the model id (<base>-low|medium|high): the model value for
     `level` on want_model's base, or exit 2 naming what the base is offered at."""
-    cid, val = pick_config(options, want_model, "model") if want_model else (None, None)
+    _cid, val = pick_config(options, want_model, "model") if want_model else (None, None)
     val = val or current_value(options, "model")
     base = re.sub(r"-(low|medium|high)$", "", str(val))
     values = [str(v.get("value")) for o in opt_dicts(options) if o.get("id") == "model" for v in flat_values(o)]
@@ -2767,7 +2782,7 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
             out["verify_attempts"] = verify_attempts
             break
 
-        verify_attempts += 1  # noqa: SIM113 - counts only attempts that reached the check
+        verify_attempts += 1
         rc, tail = run_verify(verify_cmd, getattr(a, "dir", "."), verify_timeout)
         client.rec("verify", {"attempt": verify_attempts, "rc": rc, "tail": tail})
         if rc == 0:
