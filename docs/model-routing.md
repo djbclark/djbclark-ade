@@ -99,7 +99,7 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 | `devin` | `devin` (v3000.5.20) — **disabled in Orca's TUI roster**, so its 100%-unused windows are deliberate dormancy | ? | sub (ACUs) | daily + weekly |
 | `alibaba` / `alibabatokenplan` / `qwencloud` | `bl` (Bailian, v1.17.1; bailian-* skills) | **ID verification pending, expected live ~2026-08-26** | token plan + PAYG | — until verified |
 | `muse` | the Muse service (own account via gmail; `opencode-go/muse-spark-1.2-contributor` surfaces its models) | ? | ? | ? |
-| (not in aiuse) | `opencode` provider `sipb` — MIT SIPB-hosted models (ollama-style: qwen3-coder:30b, deepseek-r1:32b, gemma…). **For agent/coding use, only `qwen3.6:35b-a3b-q4_K_M` runs tasks reliably** — deepseek-r1:32b fabricates success, qwq:32b truncates every agent-sized stream, exaone-deep:32b/gemma3:27b return the over-long `null`; see site-djbclark `research/sipb-llms/REPORT.md` §3.1 | MIT affiliation | free | none |
+| (not in aiuse) | `opencode` provider `sipb` — MIT SIPB-hosted models (ollama-style: qwen3-coder:30b, deepseek-r1:32b, gemma…). **For agent/coding use, only `qwen3.6:35b-a3b-q4_K_M` runs tasks reliably** — deepseek-r1:32b fabricates success, qwq:32b truncates every agent-sized stream, exaone-deep:32b/gemma3:27b return the over-long `null`; see forgejo.mit.edu/djbclark/sipb-llms `report/REPORT.md` §3.1 | MIT affiliation | free | none |
 
 Monthly-subscription pools: claude, codex, antigravity, copilot, cursor,
 grok, zai, clinepass (window-shaped), devin. Free: opencode-go, sipb.

@@ -29,7 +29,7 @@ DEFAULTS = [
     "CRUSH.local.md", "AGENTS.md", "agents.md", "Agents.md",
 ]
 CHARS_PER_TOKEN = 2.7  # measured 2026-10-14: 45,367 chars = 16,762 tokens through Qwen3.6 on SIPB
-BASE_TOKENS = 13_000  # Crush's own prompt with trimmed tools and no skills (measured, see research/sipb-llms/setup.md)
+BASE_TOKENS = 13_000  # Crush's own prompt with trimmed tools and no skills (measured, see ~/src/sipb-llms/docs/setup.md)
 SUMMARIZE_AT = 0.8  # Crush summarizes when less than 20% of a small window remains
 OK_FILE = Path(os.environ.get("CRUSH_CONTEXT_OK_FILE") or Path.home() / ".config/crush/context-ok.txt")
 

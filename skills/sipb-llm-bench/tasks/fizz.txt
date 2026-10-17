@@ -1,1 +1,0 @@
-The tests in this repo fail. Run `python3 -m unittest`, find the bug(s) in fizz.py, fix them, rerun the tests until they pass, then git commit with message "fix fizzbuzz".
