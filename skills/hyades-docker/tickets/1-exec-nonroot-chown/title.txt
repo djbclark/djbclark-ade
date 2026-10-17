@@ -1,1 +1,0 @@
-exec fails with "chown /dev/pts/N: Operation not permitted" when the image runs as a non-root USER

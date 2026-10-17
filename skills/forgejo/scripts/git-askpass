@@ -1,7 +1,0 @@
-#!/bin/sh
-# git-askpass — GIT_ASKPASS helper for git-forgejo. Holds no secret: it echoes
-# the username, or the token that git-forgejo put in FORGEJO_GIT_TOKEN.
-case "$1" in
-  Username*) printf '%s\n' "${FORGEJO_GIT_USER:-djbclark}" ;;
-  *) printf '%s\n' "${FORGEJO_GIT_TOKEN:?FORGEJO_GIT_TOKEN unset; run through git-forgejo}" ;;
-esac

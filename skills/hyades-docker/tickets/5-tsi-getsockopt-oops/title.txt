@@ -1,1 +1,0 @@
-Guest kernel oops in tsi_stream_getsockopt on UDP sockets hangs the microVM (libkrunfw#140)

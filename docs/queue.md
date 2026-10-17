@@ -767,7 +767,7 @@ works on the runner (run 239; `ghcr.io/cirruslabs/android-sdk:36` pulled in 47 s
    into `docs/*.md` of the new repo.
 
 4. **Build our own CI image: DONE 2026-10-14** (operator said yes; hosted on public ghcr.io, built by GitHub Actions for amd64).
-   `ghcr.io/djbclark/ci-image-plektra` (repo github.com/djbclark/ci-image-plektra, local `~/src/ci-image-plektra`):
+   `ghcr.io/djbclark/ci-image-plektra` (canonical repo forgejo.mit.edu/djbclark/ci-image-plektra; GitHub mirror builds it; local `~/src/ci-image-plektra`):
    `FROM ghcr.io/cirruslabs/android-sdk:36` + JDK 17 + node 18 + `/usr/local/lib/portshim.so` (source pinned by commit
    `SHIM_SHA`). Run 240 on the runner: `actions/checkout` works, the shim fixes the duplex stall and 20 of 20 reuse rounds.
    `DERIVE_IMAGE=ghcr.io/...@sha256:<digest> push-bench.sh asis BRANCH` runs the full suite on it (run 241). Remaining: bump

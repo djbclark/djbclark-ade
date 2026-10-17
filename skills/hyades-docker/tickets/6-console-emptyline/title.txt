@@ -1,1 +1,0 @@
-Ignore empty lines in the console
