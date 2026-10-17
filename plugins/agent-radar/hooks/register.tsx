@@ -9,7 +9,7 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { AcpJob, RadarAgent } from '../types'
 import { bandsFile, parseOrder, stackBands } from './bands'
-import { RECORDS_SH, TAILS_SH, baseName, blocks, isJobRunning, jobMatches, logSummary, outputPathOf, parseOpen, parseRecords, shellLabel, tailLines } from './watch'
+import { RECORDS_SH, TAILS_SH, baseName, blocks, isDispatchCommand, isJobRunning, jobMatches, logSummary, outputPathOf, parseOpen, parseRecords, shellLabel, shouldScan, tailLines } from './watch'
 
 const PANE = 'agent-radar'
 const SHOW_DONE_MS = 30_000 // a finished agent stays in the band this long
@@ -28,6 +28,8 @@ const now = atom({ plugin: 'agent-radar', key: 'now' } as const, 0)
 let bandOrder: Promise<string[]> | undefined // read once per session: restart to apply
 let isPolling = false // a slow lsof must not let two polls overlap
 let sessionStart = 0 // jobs that ended before this session started are not its own
+let lastDispatchAt = 0 // when the Bash hook last saw an acp-dispatch / bigteam command: no records scan before one
+let radarScanned = false // the first /radar scans the records once, for jobs launched before this mod loaded
 let lsofBin: string | null | undefined // undefined: not tried yet; null: none works
 const dismissed = new Set<string>() // cleared in the pane: a poll must not bring them back
 
@@ -74,6 +76,7 @@ export const register: Register = on => {
 
   // A background Bash command: a line until its output file is no longer open.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if (isDispatchCommand(e.command)) lastDispatchAt = Date.now() // starts (and extends) the records scan
     const r = await next(e)
     if (r.deny || r.isError) return r
     const result = r.result as { backgroundTaskId?: string; backgroundOutputPath?: string } | undefined
@@ -107,6 +110,10 @@ export const register: Register = on => {
 
   on('command.run', { command: 'radar' }, async $ => {
     await adopt($)
+    if (!radarScanned) {
+      radarScanned = true
+      await poll($, true).catch(() => {}) // adopt-style: jobs launched before this mod loaded
+    }
     await update($, selected, () => null)
     await $.ui.open({ id: PANE, title: 'Agent Radar', focus: true })
     const list = (await read($, agents)).filter(a => !a.hidden)
@@ -261,6 +268,8 @@ async function readBandOrder($: EngineInterface): Promise<string[]> {
 export function resetBandOrder() {
   bandOrder = undefined
   dismissed.clear()
+  lastDispatchAt = 0
+  radarScanned = false
   lsofBin = undefined
   isPolling = false
 }
@@ -285,11 +294,11 @@ async function adopt($: EngineInterface) {
 
 // ---------------------------------------------------------------- the poll: shells and jobs
 
-async function poll($: EngineInterface) {
+async function poll($: EngineInterface, force = false) {
   if (isPolling) return
   isPolling = true
   try {
-    await pollOnce($)
+    await pollOnce($, force)
   } finally {
     isPolling = false
   }
@@ -305,17 +314,20 @@ async function sessionId($: EngineInterface): Promise<string | undefined> {
   return (await $.session.id().catch(() => undefined)) || (await $.env.get('CLAUDE_CODE_SESSION_ID').catch(() => undefined)) || undefined
 }
 
-async function pollOnce($: EngineInterface) {
-  const sid = await sessionId($)
-
+async function pollOnce($: EngineInterface, force: boolean) {
   // 1. This session's job records (one process), merged into the list; shells that are a job's waiter are hidden.
-  let jobs: AcpJob[] = []
-  if (sid) {
-    const root = (await $.env.get('ACP_DISPATCH_STATE').catch(() => undefined)) || `${(await $.env.get('HOME').catch(() => undefined)) ?? ''}/.local/state/bigteam`
-    const r = await run($, ['sh', '-c', RECORDS_SH, 'sh', root, sid], 8_000)
-    if (r && r.exitCode === 0) jobs = parseRecords(r.stdout, sid)
+  //    Only after a dispatch command (or the first /radar): most sessions never dispatch and must not pay for the scan.
+  let toasts: string[] = []
+  if (shouldScan(await read($, agents), lastDispatchAt, Date.now(), force)) {
+    const sid = await sessionId($)
+    let jobs: AcpJob[] = []
+    if (sid) {
+      const root = (await $.env.get('ACP_DISPATCH_STATE').catch(() => undefined)) || `${(await $.env.get('HOME').catch(() => undefined)) ?? ''}/.local/state/bigteam`
+      const r = await run($, ['sh', '-c', RECORDS_SH, 'sh', root, sid], 8_000)
+      if (r && r.exitCode === 0) jobs = parseRecords(r.stdout, sid)
+    }
+    toasts = await merge($, jobs)
   }
-  const toasts = await merge($, jobs)
 
   // 2. Which running shells still hold their output file open (one lsof for all of them).
   const list = await read($, agents)

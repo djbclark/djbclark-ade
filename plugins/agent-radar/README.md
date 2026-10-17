@@ -35,7 +35,10 @@ result names no output file is not tracked.
 
 ### How a job is followed
 
-One `sh -c` per poll lists the records under `$ACP_DISPATCH_STATE` (default `~/.local/state/bigteam`, written
+The records are scanned only in a session that needs it: after its Bash hook has seen a command containing
+`acp-dispatch` or `bigteam`, until no tracked job runs and 60 s have passed since the last such command, plus
+once at the first `/radar` (for jobs launched before the mod loaded). A session that never dispatches does no
+scan at all. When scanning, one `sh -c` per poll lists the records under `$ACP_DISPATCH_STATE` (default `~/.local/state/bigteam`, written
 by `bin/acp-dispatch`) that changed in the last 3 days and name this session's id; one more reads the tail of
 the logs of the running ones. Only records this session launched (`owner` = the session id) and that are running,
 or ended after the session started, are shown.

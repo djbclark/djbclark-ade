@@ -157,6 +157,19 @@ export function parseRecords(stdout: string, sessionId: string): AcpJob[] {
   return jobs
 }
 
+// A command that dispatches a job (or works with the bigteam state): the records scan starts after one.
+export function isDispatchCommand(command: string): boolean {
+  return /\b(?:acp-dispatch|bigteam)\b/.test(command)
+}
+
+// Scan the job records? Only once this session has run a dispatch command and until no tracked job
+// runs and `afterMs` have passed since the last one; `force` (the first /radar) scans once regardless.
+export function shouldScan(list: readonly { kind?: string; status: string }[], lastDispatchAt: number, at: number, force = false, afterMs = 60_000): boolean {
+  if (force) return true
+  if (list.some(a => a.kind === 'acp' && a.status === 'running')) return true
+  return lastDispatchAt > 0 && at - lastDispatchAt < afterMs
+}
+
 export function isJobRunning(job: Pick<AcpJob, 'status'>) {
   return job.status === 'running' || job.status === 'pending'
 }

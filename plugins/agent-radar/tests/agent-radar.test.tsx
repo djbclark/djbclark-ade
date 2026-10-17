@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { describe as label, elapsed, isShown, resetBandOrder } from '../hooks/register'
-import { agentOf, baseName, jobMatches, logSummary, outputPathOf, parseRecords, shellLabel, tailLines } from '../hooks/watch'
+import { agentOf, baseName, isDispatchCommand, jobMatches, logSummary, outputPathOf, parseRecords, shellLabel, shouldScan, tailLines } from '../hooks/watch'
 
 const BAND = { component: 'AbovePrompt', props: { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 120 } }
 const PANE = { component: 'Pane', requestId: 'agent-radar', props: { title: 'Agent Radar', isFocused: true, bodyColumns: 100, placement: 'dock' } }
@@ -159,6 +159,17 @@ describe('agent-radar', () => {
     expect(jobMatches('acp-dispatch codex --name docs --detach', job() as any)).toBe(true)
     expect(jobMatches('acp-dispatch codex --name other', job() as any)).toBe(false)
     expect(jobMatches('sleep 5', job() as any)).toBe(false)
+    expect(isDispatchCommand('~/src/djbclark-ade/bin/acp-dispatch codex --name x')).toBe(true)
+    expect(isDispatchCommand('ls ~/.local/state/bigteam')).toBe(true)
+    expect(isDispatchCommand('gh run watch 1')).toBe(false)
+    const acp = (status: string) => [{ kind: 'acp', status }]
+    expect(shouldScan([], 0, 100_000)).toBe(false) // never dispatched: no scan
+    expect(shouldScan([{ status: 'running' }], 0, 100_000)).toBe(false) // a subagent or shell is no reason
+    expect(shouldScan([], 100_000, 130_000)).toBe(true) // within 60 s of a dispatch command
+    expect(shouldScan([], 100_000, 161_000)).toBe(false) // 60 s passed, nothing running
+    expect(shouldScan(acp('running'), 100_000, 400_000)).toBe(true) // a tracked job still runs
+    expect(shouldScan(acp('done'), 100_000, 161_000)).toBe(false)
+    expect(shouldScan([], 0, 100_000, true)).toBe(true) // the first /radar
     expect(tailLines('a\r\n\x1b[31mb\x1b[0m\n\n c \n', 2)).toEqual(['b', ' c'])
     const log = [
       '{"t": 1, "kind": "update", "data": {"sessionUpdate": "tool_call", "title": "read_file"}}',
@@ -231,6 +242,7 @@ describe('agent-radar', () => {
     state.records = [job(), job({ name: 'theirs', owner: 'other', record: '/state/t/jobs/theirs.json' })]
     state.tails['/state/t/docs.jsonl'] = '{"t": 1, "kind": "update", "data": {"sessionUpdate": "tool_call", "title": "Read `a.md`"}}\n'
     await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await $.tool.call({ tool: 'Bash', command: 'acp-dispatch grok --name docs --detach --no-wait' } as any) // starts the records scan
     await clock.advance(5_000)
     const band = await $.ui.mount({ plugin: 'agent-radar', surface: 'terminal', ...BAND } as any)
     await eventually(() => band.find({ type: 'Text', text: /acp .*· running · > Read `a\.md`/ }))
@@ -275,5 +287,42 @@ describe('agent-radar', () => {
     await clock.advance(5_000)
     await eventually(async () => (await $.command.run({ command: 'radar', args: '' } as any)).text === '2 running, 0 finished')
     expect((await $.command.run({ command: 'radar', args: '' } as any)).text).toBe('2 running, 0 finished')
+  })
+
+  test('a session that never runs acp-dispatch does no records scan; the first /radar scans once', async ($, on) => {
+    const { clock, state } = engine(on)
+    const scans = () => state.runs.filter(a => a[2]?.includes('radar:records')).length
+    state.records = [job({ status: 'done', started: NOW() - 3700, finished: NOW() - 3600 })] // there, but nobody asked
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await $.agent.spawn({ prompt: 'run it', description: 'sweep runner' } as any)
+    await $.tool.call({ tool: 'Bash', command: 'gh run watch 123', run_in_background: true } as any)
+    for (let i = 0; i < 4; i++) {
+      await clock.advance(5_000)
+      await settle()
+    }
+    await eventually(() => state.runs.some(a => a[0]?.endsWith('lsof'))) // the polls ran: for the shell
+    expect(scans()).toBe(0)
+    // /radar scans once, adopt-style: a job launched before this mod loaded shows
+    const r = await $.command.run({ command: 'radar', args: '' } as any)
+    expect(scans()).toBe(1)
+    expect(r.text).toBe('2 running, 0 finished') // the subagent and the shell; the old job ended before this session
+    await $.command.run({ command: 'radar', args: '' } as any)
+    await clock.advance(5_000)
+    await settle()
+    expect(scans()).toBe(1) // the second /radar and the timer do not: no job runs, no dispatch command was seen
+  })
+
+  test('a Bash command that dispatches starts the records scan', async ($, on) => {
+    const { clock, state } = engine(on)
+    const scans = () => state.runs.filter(a => a[2]?.includes('radar:records')).length
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await $.tool.call({ tool: 'Bash', command: 'git status' } as any)
+    await clock.advance(5_000)
+    await settle()
+    expect(scans()).toBe(0)
+    await $.tool.call({ tool: 'Bash', command: 'acp-dispatch codex --name later --detach --no-wait' } as any)
+    await clock.advance(5_000)
+    await eventually(() => scans() > 0)
+    expect(scans()).toBeGreaterThan(0)
   })
 })
