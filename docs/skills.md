@@ -10,9 +10,10 @@ TUI:
 ~/.claude/skills/<name>  ->  ~/src/djbclark-ade/skills/<name>    (the real files)
 ```
 
-Four skill dirs here are themselves symlinks into other repos: `forgejo-ci`
+Five skill dirs here are themselves symlinks into other repos: `forgejo-ci`
 (`~/src/loopback-port-shim`), `sudo-secretspec` (`~/src/sudo-secretspec`),
-and `forgejo` and `hyades-docker` (`~/src/sipb-agent-skills`).
+`forgejo` and `hyades-docker` (`~/src/sipb-agent-skills`), and `sipb-llm-bench`
+(`~/src/sipb-llms`).
 **Commit an edit to a skill in the repo of its `realpath`**: `git add` here fails
 with "pathspec is beyond a symbolic link" (2026-10-16), and the other repo may
 hold another session's uncommitted edits, so stage only your hunk there.
