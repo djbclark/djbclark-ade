@@ -823,6 +823,19 @@ below is the macOS setup in `~/src/athena-mac/`
 | AuriStor AFS client | https://www.auristor.com/filesystem/client-installer/ | Download the dmg for the installed macOS (macOS 27: `https://www.auristor.com/downloads/auristor/osx/macos-27.0/AuriStor-client-2021.05-72-GoldenGate.dmg`; the path is `osx/macos-<version>/`, find the current file name on the installer page), check `pkgutil --check-signature` on the `.pkg`, then `sudo installer -pkg Auristor-Lite.pkg -target /`. Edit `/etc/yfs/yfs-client.conf.d/thiscell.conf` to `thiscell = athena.mit.edu` (the pkg's cell dialog only runs in the GUI installer). On Apple Silicon the Mac needs Permissive Security with "allow user management of kernel extensions" (Startup Security Utility in Recovery; `sudo bputil -d` shows it), then Privacy & Security → Allow "AuriStor, Inc." and a reboot, which also creates `/afs` (`afs` line in `/etc/synthetic.conf`) | `/afs` with the Athena cell; the OpenAFS client has no maintained Apple Silicon build. The AuriStor EULA applies. Tokens: `aklog` (done by `athena-kinit`), check with `tokens` |
 | `athena-locker` (`attach`, `detach`, `add`, `fsid`) and `/mit` | https://forgejo.mit.edu/djbclark/athena-mac (`~/src/athena-mac/athena-locker`) | `~/src/athena-mac/install.sh` links the commands into `~/.local/bin` and adds the `add` shell function to `~/.bashrc.local`; once as root `sudo /bin/sh ~/src/athena-mac/install-root.sh` makes `/mit` a synthetic symlink to `/Users/Shared/mit` (reboot). Lockers to pre-attach go in `~/.config/athena/lockers` (LaunchAgent `com.djbclark.athena-lockers`, hourly). Needs the AuriStor client above | Athena's `attach`/`add` on a Mac: Hesiod lookup (TXT `<name>.filsys.ns.athena.mit.edu`), `aklog -path`, symlink into `/mit`. Not on demand: a locker must be attached before `cd /mit/<locker>` (Athena's FUSE `pyhesiodfs` is not reproduced). Most locker binaries are Linux builds, so only scripts and data lockers are useful |
 
+**BB agent workspace (machine-specific; added 2026-10-17, djbclark).** **Only on
+djbclark's own machines, and only if the user has a tailnet with a BB server; skip
+every item in this block otherwise.** BB (https://github.com/get-bb/bb, npm
+`bb-app`) is the web workspace that starts coding agents on a machine. It has
+**no login**: reach it over the tailnet only, never `tailscale funnel`. djbclark's
+server is on vps-primary (docs in site-djbclark `docs/bb-vps-primary.md`; module
+and enrolment steps in the bb-nix README, https://github.com/djbclark/bb-nix).
+
+| Item | Website | Install | What it does |
+|---|---|---|---|
+| `bb` CLI (and `bb-app`, `bb-host-daemon`) | https://www.npmjs.com/package/bb-app | `npm i -g bb-app@<server version>` (the version the vps-primary server runs, pinned in bb-nix `pkgs/pins.json`; mismatched versions break the daemon protocol). Do not run BB's own `install.sh` on NixOS | Command line for threads, projects, machines, plugins and settings (`bb thread spawn`, `bb machine list`) |
+| Enrol this machine into vps-primary's BB | https://github.com/djbclark/bb-nix#adding-another-machine | In the BB web UI (tailnet URL in `docs/bb-vps-primary.md`): Settings, Machines, add a machine, **Manual** provider (never `bb connect`); the credential lasts 15 minutes and is a secret. Then `bb machine enroll --bootstrap-env BB_ENROLLMENT` as the user the agents should run as, and start the host daemon. The machine URL is the server's :38443 address, exactly as shown in Settings | The machine appears online in the server's UI; threads started there run here. Log each agent in on this machine as that user (their own logins; never copy another machine's refresh tokens) |
+
 **GitHub-side services** (accounts and app installs happen in the interactive phase)
 
 | Service | Website | What it does |
