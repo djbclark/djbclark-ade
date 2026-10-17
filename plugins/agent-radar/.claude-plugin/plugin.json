@@ -1,0 +1,12 @@
+{
+  "name": "agent-radar",
+  "version": "0.2.0-djb.1",
+  "description": "One live line above the prompt per running subagent, background shell or detached acp-dispatch job: time, kind and what it is doing. /radar shows them all. Fork of hamzafer/claude-code-mods agent-radar 0.1.3.",
+  "author": {
+    "name": "Hamza Zafar",
+    "url": "https://github.com/hamzafer"
+  },
+  "homepage": "https://github.com/hamzafer/claude-code-mods",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
