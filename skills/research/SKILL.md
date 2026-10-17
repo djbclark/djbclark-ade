@@ -235,7 +235,7 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    process: `claude -p "Reply with exactly: OK" --model
    ocx-claude-native--gpt-6-astra` (the "isn't described by this version's
    model catalog" line is a warning, not a failure). If it fails or the
-   Codex pool is out (`aiuse --live`), use `acp-dispatch codex --model
+   Codex pool is out (`aiuse --available --live --json`), use `acp-dispatch codex --model
    gpt-6-astra`, and if that is out too, the next family with quota
    (`acp-dispatch zcode`, no `--model`), labelling the review
    non-independent for any slice that family worked on.

@@ -38,6 +38,17 @@ skill's snapshot in the same turn.
   agent/model and caches a pass for ten minutes, since no snapshot sees a pool
   drained in the last few minutes. `aiuse serve` defaults to
   port 28787 and is not running here.
+  **Agents always run it with `--json`, stderr kept out (`2>/dev/null`)** (djbclark,
+  2026-10-17): the human table is not a contract and its format changes. The
+  contract is `aiuse schema` (docs/json-contract.md). Read `.available[]`:
+  `provider`, `pool_family`, `cli_binary`, `usable_now`, `headroom_percent`,
+  `binding_window`, `available_at`, `requires_operator_approval`; top-level
+  `fresh`/`age_seconds` for staleness (stale: add `--live`) and `excluded[]`
+  for pools the operator ruled out. Per window, decide from `state`
+  (`exhausted` | `tight` | `ok` | `unknown`) or `remaining_percent`. In full
+  `aiuse --json`, accounts are `.snapshot.accounts[]`; never match rows with a
+  recursive `..` jq walk, which also picks up `agent_notes` entries (no numbers).
+  `jq -r '.available[] | "\(.provider)/\(.pool_family // "default") via \(.cli_binary): \(.headroom_percent)% left"'`.
 - `aiuse --json -q` — everything, including exhausted pools. Schema 1.1 is
   self-describing: per window `state` (`exhausted` <=1% left, `tight` <15%, `ok`,
   `unknown`), `headroom_percent`, and `pool_family` + `models_hint` on split

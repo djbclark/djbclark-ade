@@ -79,10 +79,12 @@ before slicing:
 
 ## Step 1 — probe, never assume
 
-    aiuse --available        # usable pools only, one line per vendor AND model family, cache, <1 s
-    aiuse --available --live # force a live collect (~30-60 s)
+    aiuse --available --json 2>/dev/null        # usable pools only, per vendor AND model family, cache, <1 s
+    aiuse --available --live --json 2>/dev/null # force a live collect (~30-60 s)
     cswap list               # Claude 5h / weekly / Fable
 
+**Always `--json`** and read it by the schema: the field list is in `model-routing`
+*Probes* (`aiuse schema` is the contract; the human table changes, 2026-10-17).
 `aiuse --available` (aiuse 3.1.4+) prints only pools that can take work, sorted by
 headroom, every window as "X% used / Y% left", with the data's age on its first
 line. Exit 0 means usable pools exist, **3 means nothing is usable** (the data is
