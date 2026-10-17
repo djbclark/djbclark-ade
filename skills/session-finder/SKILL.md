@@ -101,9 +101,14 @@ cheapest option when cold); resuming an ended transcript re-reads all of it at f
 price (about 250k tokens per MB); a `/baton` session reads only the Tier 1 log and
 the Tier 2 handoff (a few thousand tokens); a clean session reads only its brief.
 
-a. **Running and not finished → message it.** Read its latest prompt line first;
-   if it is mid-task on something else, say so to the operator instead of
-   interrupting. Reach by the table in section 6. **SendMessage fails** ("No agent
+a. **Running and not finished → message it, even while it is `working` on
+   something else** (operator, 2026-10-17: I asked instead of relaying to a busy
+   `~/ops` session, and he said an open agent is never blocked and I could have
+   sent it the task). A message to a working Claude is queued for its next tool
+   round, so it interrupts nothing. Read its latest prompt line only to name
+   files it is editing (section 4.2), not to decide whether to ask. Ask the
+   operator only when it is the same task or the same dirty files; otherwise
+   relay the request and say so. Reach by the table in section 6. **SendMessage fails** ("No agent
    named … is reachable": a workflow sub-agent's `ListAgents` often lists only its
    teammates, 2026-10-11), **or a `[Cross-session delivery notice]` says it was
    refused** (that session turned inbound messages off, 2026-10-12) →
