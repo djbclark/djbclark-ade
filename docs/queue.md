@@ -721,8 +721,10 @@ because they cost time: a Python keep-alive repro that was negative (and had its
 honoured under TSI (use `poll`), and `forgejo-api --help` was run once by mistake (posted nothing).
 The 3-of-20 `reuse-probe` failures with the shim were stale listeners leaked by earlier no-shim runs on the same fixed port
 (each swallows one connection, then they are gone within 60 s); on a clean port the shim gives 60 of 60 at gaps of 0 to
-50 ms (runs 235, 236; libkrun#929 corrected). Open: check libkrun#926,
-#929, #819, #860 and SIPB/hyades#2 for replies; `CornerButtonThemeTest` is an upstream Plektra issue.
+50 ms (runs 235, 236; libkrun#929 corrected). Checked 2026-10-14 evening: no new upstream replies on
+libkrun#819, #860, #926 or #929 after ours (#860's maintainer note is from 2026-09-22). SIPB/hyades#2 and
+libkrun#924 did get maintainer replies; they are recorded in the `forgejo-ci` skill (keep Plektra's ext4 loop
+image; do not pursue writeback, extra virtiofs workers, or DAX). `CornerButtonThemeTest` is an upstream Plektra issue.
 
 ## Make the loopback shim available by default on forgejo.mit.edu, then ask SIPB (queued 2026-10-14, operator)
 
@@ -749,6 +751,8 @@ the draft): https://forgejo.mit.edu/SIPB/hyades/issues/3, linked from SIPB/hyade
 the way: the shim builds and works identically on the ubuntu, alpine and rocky labels (run 238); job-level `container:`
 works on the runner (run 239; `ghcr.io/cirruslabs/android-sdk:36` pulled in 47 s and already has SDK 36, but JDK 21 and no
 `node`); curl -L download speed 79 to 102 MB/s and `mount -o remount,dax` does nothing (run 237, SIPB/hyades#2 comment 26).
+
+**Answered 2026-10-14 evening. Do not re-ask.** @xy on #3: passt for the CI runner only (not Hyades) until upstream TSI fixes; the shim may enter ci-images only after a human has reviewed and understood the code. djbclark's comment 69: he will not review the C, and SIPB may close the ticket. Plektra keeps the opt-in preload in `ghcr.io/djbclark/ci-image-plektra`. If SIPB enables passt for CI, re-run the suite without the shim before removing it. #2's disk reply is the same day's `forgejo-ci` skill update: keep the ext4 loop image.
 
 3. **Make the forgejo skill cover all of this** (added 2026-10-14, operator: "Make a forgejo skill, and include proper use
    of shim and image selection in it, as well as anything else useful we have discovered"; the request said "forgego",
