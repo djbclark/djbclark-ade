@@ -106,9 +106,9 @@ authoritative; this is its contract as of 2026-10-11.
    wiki, `!mdn` MDN, `!man` ManKier man pages; since 2026-10-14 (image `-r2`)
    also `!hn` Hacker News, `!npm` npm, `!crates` crates.io, `!lrs` lib.rs, `!pgo`
    pkg.go.dev, `!hf` Hugging Face, `!cb` Codeberg, `!gl` GitLab, `!oa` OpenAlex
-   (polite pool), `!cr` Crossref, `!nixw` NixOS wiki. `!lo` (lobste.rs) is
-   enabled but useless: lobste.rs answers SearXNG with a "not a bot" challenge
-   page, so the query falls through to unrelated results. A shortcut that finds
+   (polite pool), `!cr` Crossref, `!nixw` NixOS wiki. `!lo` (lobste.rs) was
+   dropped in image `-r6` (2026-10-17): lobste.rs answers SearXNG with a "not a
+   bot" challenge page, so `!lo` is now plain query text. A shortcut that finds
    nothing does this too, so check that the URLs come from the engine's site. The keyless APIs behind them are
    metered per IP, and the microVMs most likely share the Hyades host's (assumed,
    not measured): Stack Exchange allows about 300 requests a day without a key (a
