@@ -242,7 +242,10 @@ workspaces with their tab labels, and `ask`. If `in_herdr` is false, stop.
 
 **`check` labels the tab itself** (2026-10-11): a generic `tab.label` is renamed from
 the session title before the JSON prints, and `tab_labelled` reports `'3' -> 'x-t'`
-(null when nothing was generic). Leaving the hook to remember the separate `label` call
+(null when nothing was replaceable). **Replaceable** = generic, or a `-t` label autorename
+wrote earlier on a single-pane tab (2026-10-11: a stale `helm-t` from the pane's previous
+session stayed for the whole new session; `replaceable()` in `herdr_place.py`, test
+`tests/test_autorename_tab_label.py`). Leaving the hook to remember the separate `label` call
 left the tab at "3" (operator, 2026-10-09 and again 2026-10-11). **Whenever the tab stays
 put** (`ask` false, or the operator says "leave it"), confirm `tab.label` is no longer a
 bare number; if it still is (or `tab_labelled` is an error), run `herdr_place.py label

@@ -63,6 +63,13 @@ def generic_reason(label: str) -> str | None:
     return None
 
 
+def replaceable(label: str, pane_count: int) -> bool:
+    """May autorename replace this tab label? A generic one, or one autorename itself wrote
+    earlier (the `-t` suffix) on a single-pane tab: 2026-10-11, a tab kept the previous
+    session's `helm-t` for the new session's whole life because only generic labels were replaced."""
+    return generic_reason(label) is not None or (label.endswith("-t") and pane_count == 1)
+
+
 def config_path() -> Path:
     return Path(os.environ.get("AUTORENAME_WORKSPACES") or Path.home() / ".config/autorename/workspaces.conf")
 
@@ -115,17 +122,17 @@ def check(auto: bool) -> int:
         return 0
 
     # Labelling the tab is not optional and not the agent's job to remember (2026-10-11: the
-    # hook text omitted it and the tab stayed "3"): a generic tab label is replaced here, from
-    # the session title, so every `check` leaves the sidebar tab named.
+    # hook text omitted it and the tab stayed "3"): a generic or autorename-made tab label is
+    # replaced here, from the session title, so every `check` leaves the sidebar tab named.
     tab_labelled = None
-    if generic_reason(tab["label"]) is not None and sid:
+    if replaceable(tab["label"], tab["pane_count"]) and sid:
         from autorename import read_title  # same directory
         title = read_title(sid)
         if title:
             new = slug_from_title(title)
             try:
                 herdr("tab", "rename", tab["tab_id"], new)
-                tab_labelled = f"{tab['label']!r} -> {new!r}"
+                tab_labelled = f"{tab['label']!r} -> {new!r}" if new != tab["label"] else "unchanged"
                 tab["label"] = new
             except (RuntimeError, subprocess.TimeoutExpired) as exc:
                 tab_labelled = f"error: {exc}"
@@ -230,7 +237,7 @@ def label(text: str | None, from_title: bool, force: bool) -> int:
         if tab["label"] == text:
             print(f"unchanged: tab {tab['tab_id']} already {text!r}")
             return 0
-        if not force and generic_reason(tab["label"]) is None:
+        if not force and not replaceable(tab["label"], tab["pane_count"]):
             print(f"kept: tab {tab['tab_id']} already has a real label {tab['label']!r} (--force to replace)")
             return 0
         herdr("tab", "rename", tab["tab_id"], text)
