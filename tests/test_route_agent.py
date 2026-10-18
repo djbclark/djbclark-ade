@@ -685,11 +685,12 @@ class TestRoutingPolicyToml(unittest.TestCase):
     # Frozen expectation for three representative rows (behaviour-preserving refactor).
     EXPECTED: ClassVar[dict[str, dict[str, Any]]] = {
         "claude": {
-            "cli": "claude (Opus 5.5 @ high for judgment; Fable only for frontier)",
-            "good_at": {"judgment": 1, "frontier": 2},
+            "cli": "claude (Opus 5.5 @ high for judgment; Sonnet 5.5 for code; Fable only for frontier)",
+            "good_at": {"judgment": 1, "frontier": 2, "code": 12},
             "billing": "subscription",
             "judgment_tier": True,
-            "models": {"judgment": "opus --effort high", "frontier": "fable --effort high"},
+            "models": {"judgment": "opus --effort high", "frontier": "fable --effort high",
+                       "code": "sonnet --effort high"},
             "pool": None, "max_parallel": 4, "agent": "", "burn_first": False,
         },
         "codex": {
@@ -966,3 +967,67 @@ class TestRoutingPolicyToml(unittest.TestCase):
         self.assertIn("codex", out)
         self.assertIn("frontier", out)
         self.assertIn("gpt-6-astra", out)
+
+
+class TestQualityBand(unittest.TestCase):
+    """[routing].quality_max_rank_gap (2026-10-18, plektra lead with djbclark's approval): quota
+    never buys a much weaker pool into code or judgment."""
+
+    # The live readings when `plan --kinds code` picked Gemini Flash (r40): every r11-r20 code
+    # pool was under the 15% headroom floor, and Flash had 98% left.
+    CASE = {"antigravity-claude": {"remaining": 0.0}, "antigravity": {"remaining": 97.8},
+            "opencode-go": {"remaining": 2.5}, "zai": {"remaining": 12.2},
+            "cursor-auto": {"remaining": 0.0}, "cursor": {"remaining": 11.2},
+            # claude was not a code pool then (code added 2026-10-18 by the operator); drained
+            # here so the case still isolates the band
+            "codex": {"remaining": 0.0}, "claude": {"remaining": 0.0},
+            "opencode-zen-free": {"remaining": 100.0}, "clinepass": {"remaining": 100.0},
+            "devin": {"remaining": 100.0}, "alibaba": {"remaining": 100.0},
+            "crush": {"remaining": 100.0}}
+
+    def test_flash_is_not_a_code_pool(self):
+        self.assertFalse(r.BY_NAME["antigravity"].eligible("code"))
+
+    def test_the_2026_10_18_case_queues_code_instead_of_routing_far_down(self):
+        best = r.quality_best("code", list(r.discover(self.CASE)))
+        self.assertIsNotNone(best)
+        c = r.route("code", quota=self.CASE)
+        self.assertIsNone(c, c and f"{c.service.name} r{c.service.rank_for('code')}")
+        why = r.unrouted_why("code", self.CASE)
+        self.assertIn(f"{best.name} r{best.rank_for('code')}", why)
+        self.assertIn("quality_max_rank_gap", why)
+
+    def test_a_far_lower_ranked_pool_never_wins_on_headroom(self):
+        """Even with every pool idle, nothing outside the band is chosen for code; and the
+        moment an in-band pool has room again, it gets the slice."""
+        gap = r.QUALITY_MAX_RANK_GAP["code"]
+        services = list(r.discover(self.CASE))
+        best = r.quality_best("code", services)
+        assert best is not None
+        far = [s.name for s in services
+               if s.eligible("code") and s.rank_for("code") - best.rank_for("code") > gap]
+        self.assertTrue(far, "fixture should include pools outside the band")
+        q = dict(self.CASE, zai={"remaining": 50.0})
+        c = r.route("code", quota=q)
+        self.assertIsNotNone(c)
+        self.assertNotIn(c.service.name, far)
+        self.assertLessEqual(c.service.rank_for("code") - best.rank_for("code"), gap)
+
+    def test_claude_codes_on_sonnet_never_fable(self):
+        """Operator 2026-10-18: claude is a code pool; only Fable is not."""
+        c = r.route("code", quota=dict(self.CASE, claude={"remaining": 61.0}))
+        self.assertIsNotNone(c)
+        self.assertEqual((c.service.name, c.model), ("claude", "sonnet --effort high"))
+        self.assertNotIn("fable", c.model)
+
+    def test_judgment_has_a_band_too(self):
+        self.assertIn("judgment", r.QUALITY_MAX_RANK_GAP)
+
+    def test_an_excluded_best_pool_moves_the_band(self):
+        """A failed pool passed in `exclude` no longer anchors the band (the reroute path)."""
+        services = list(r.discover(self.CASE))
+        best = r.quality_best("code", services)
+        assert best is not None
+        nxt = r.quality_best("code", services, {best.name})
+        self.assertIsNotNone(nxt)
+        self.assertNotEqual(nxt.name, best.name)

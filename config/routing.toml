@@ -32,6 +32,13 @@ pace_penalty_above = 1.5
 pace_penalty = 6.0
 # Half-penalty factor for judgment/frontier pace (2026-10-18 review finding 5b).
 pace_penalty_judgment_factor = 0.5
+# Quality band (2026-10-18, plektra lead with djbclark's approval): a code or judgment slice
+# never goes to a pool more than this many good_at rank steps worse than the best pool eligible
+# for the kind, quota aside (reserves and excluded pools don't set the best). Headroom,
+# burn-first and pace reorder pools inside the band; they never pull a much weaker tier in.
+# Case: with the r11-r20 code pools at their headroom floors, code went to Gemini Flash (r40).
+# Nothing in the band has room: no route (keep it queued until a reset, or exclude by hand).
+quality_max_rank_gap = { code = 10, judgment = 10 }
 # Most `frontier` slices one wave puts on a single pool (operator 2026-10-18).
 frontier_per_wave = 1
 # Below this much of the Fable sublimit, frontier on claude falls back to Opus.
@@ -130,17 +137,18 @@ clinepass = ["cline-pass/deepseek-v4-flash", "cline-pass/minimax-m3"]
 
 [[service]]
 name = "claude"
-cli = "claude (Opus 5.5 @ high for judgment; Fable only for frontier)"
-good_at = { judgment = 1, frontier = 2 }
+cli = "claude (Opus 5.5 @ high for judgment; Sonnet 5.5 for code; Fable only for frontier)"
+good_at = { judgment = 1, frontier = 2, code = 12 }
 billing = "subscription"
 note = "orchestration pool; Fable is a sublimit of the SAME weekly window (at most 50% of it), not a separate allowance"
 judgment_tier = true
 access = "cli-only"
-# No code/research row: everyday work on this pool eats the room
-# judgment needs (review 2026-10-15); Haiku lookups go through the
-# Agent tool, not acp-dispatch. Fable at xhigh is never suggested:
+# Code on Sonnet 5.5 (operator 2026-10-18: "claude should be in a code pool, it's just fable
+# that shouldn't be"); rank 12 keeps the use-it-or-lose-it antigravity-claude pool (11) first.
+# This replaces the 2026-10-15 "no code row" rule; Fable stays frontier-only. No research row;
+# Haiku lookups go through the Agent tool, not acp-dispatch. Fable at xhigh is never suggested:
 # acp-dispatch makes it an operator-approved run (2026-10-18).
-models = { judgment = "opus --effort high", frontier = "fable --effort high" }
+models = { judgment = "opus --effort high", frontier = "fable --effort high", code = "sonnet --effort high" }
 
 [[service]]
 name = "codex"
@@ -191,7 +199,7 @@ models = { code = "claude-opus-5-5 --effort high", research = "claude-sonnet-5-5
 [[service]]
 name = "antigravity"
 cli = "agy (gemini)"
-good_at = { bulk = 1, research = 1, mechanical = 2, code = 40 }
+good_at = { bulk = 1, research = 1, mechanical = 2 }
 billing = "subscription"
 # Google AI Pro does NOT include API access — subscriptions are chat
 # -interface only, and a Gemini API key bills separately. Reaching
@@ -201,7 +209,10 @@ note = "big context, summarisation, multimodal; most-wasted pool"
 max_parallel = 2
 access = "cli-only"
 agent = "agy"
-models = { bulk = "gemini-3.8-flash --effort medium", research = "gemini-3.8-flash --effort high", mechanical = "gemini-3.8-flash --effort low", code = "gemini-3.8-flash --effort high" }
+# No `code` (2026-10-18, plektra lead with djbclark's approval): Flash is GLM-5.3 / Kimi K2.6
+# tier on hard agentic coding (Terminal-Bench 4.0 19.1% vs Sonnet 5.5's 70.6%, FrontierSWE v2
+# 19.6% vs 61.9%; benchlm.ai 2026-10-17) and strong only on saturated benchmarks.
+models = { bulk = "gemini-3.8-flash --effort medium", research = "gemini-3.8-flash --effort high", mechanical = "gemini-3.8-flash --effort low" }
 
 # opencode-zen-free is NOT a separate provider — it is the free subset of
 # opencode-zen's models. Kept as its own row because the free and paid

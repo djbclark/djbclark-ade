@@ -510,17 +510,22 @@ method that runs the waves.
    Auto pool (`--model default`; its third-party pool is separate and often
    tight), zai GLM-5.3 (`GLM-5.3 --effort high` for code, `GLM-5.3-Flash
    --effort low` for bulk), opencode-go, agy Gemini for bulk and big-context
-   reads, crush/SIPB (free, 30B-class) for light bulk. Claude's own
-   Sonnet/Haiku only as Agent-tool sub-agents for small lookups: they bill the
-   shared pool of item 2.
+   reads, crush/SIPB (free, 30B-class) for light bulk. Claude's own pool
+   codes on Sonnet 5.5 (`claude --model sonnet --effort high`, rank 12, right
+   after agy's Claude pool; operator 2026-10-18: only Fable stays out of
+   code); Haiku only as Agent-tool sub-agents for small lookups. Gemini Flash
+   is not a code pool (2026-10-18: GLM-5.3 tier on hard agentic coding), and
+   **quota never buys a much weaker pool into code or judgment**: `plan`
+   only picks pools within `[routing].quality_max_rank_gap` (10) rank steps
+   of the best eligible one, and otherwise keeps the slice queued.
 4. **Minimum needed spec, proactively.** Pick the smallest model, effort and
    context that will do the slice *well*, and delegate even when nobody asked:
    `/bigteam` for separable work; an Agent sub-agent only at `model: "haiku"`,
    `effort: "low"` for a lookup or a classification (item 3: it bills the
    shared pool), so the session's own context stays small. Implementation,
    whether its shape is clear or not, goes through `acp-dispatch` to the
-   everyday pools (agy `claude-opus-5-5 --effort high`, zcode `GLM-5.3
-   --effort high`, cursor `default`); Fable/astra only for `frontier` (item 1b). **Start on the cheap eligible tier and escalate
+   everyday pools (agy `claude-opus-5-5 --effort high`, claude `sonnet --effort high`,
+   zcode `GLM-5.3 --effort high`, cursor `default`); Fable/astra only for `frontier` (item 1b). **Start on the cheap eligible tier and escalate
    on a verified failure** (operator, 2026-10-18; it replaced "route up when
    unsure"): when a slice fails its check, `acp-dispatch reroute <record>
    --agent A --model M` continues it on a stronger pool, from the report and

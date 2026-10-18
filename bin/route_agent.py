@@ -213,6 +213,7 @@ PACE_PENALTY_ABOVE: float
 PACE_PENALTY: float
 PACE_PENALTY_JUDGMENT_FACTOR: float
 FRONTIER_PER_WAVE: int
+QUALITY_MAX_RANK_GAP: dict[str, int]
 DEFAULT_PROFILE: dict[str, int]
 NEVER_ROUTE: frozenset[str]
 OPERATOR_GATED: frozenset[str]
@@ -291,7 +292,7 @@ def apply_policy(data: dict[str, Any]) -> None:
     """Install a loaded policy dict as this module's routing constants."""
     global POLICY, SERVICES, BY_NAME, KINDS, BURN_FIRST_MIN, BURN_FIRST_BONUS
     global BURN_FIRST_WASTE_MIN, PACE_PENALTY_ABOVE, PACE_PENALTY
-    global PACE_PENALTY_JUDGMENT_FACTOR
+    global PACE_PENALTY_JUDGMENT_FACTOR, QUALITY_MAX_RANK_GAP
     global FRONTIER_PER_WAVE, DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED
     global FABLE_MIN_LEFT, ALIASES, DISPATCH_EXTRA, HERMES_MODELS
     global HERMES_PROVIDER_NAME
@@ -316,6 +317,8 @@ def apply_policy(data: dict[str, Any]) -> None:
         PACE_PENALTY = float(routing["pace_penalty"])
         PACE_PENALTY_JUDGMENT_FACTOR = float(routing["pace_penalty_judgment_factor"])
         FRONTIER_PER_WAVE = int(routing["frontier_per_wave"])
+        QUALITY_MAX_RANK_GAP = {str(k): int(v) for k, v in
+                                (routing.get("quality_max_rank_gap") or {}).items()}
         FABLE_MIN_LEFT = float(routing["fable_min_left"])
         DEFAULT_PROFILE = {str(k): int(v) for k, v in routing["default_profile"].items()}
 
@@ -769,6 +772,27 @@ def suggest_model(svc: Service, kind: str, info: dict[str, Any]) -> str:
     return model
 
 
+def quality_best(kind: str, services: list[Service],
+                 exclude: frozenset[str] | set[str] = frozenset()) -> Service | None:
+    """The best-ranked pool eligible for `kind`, quota aside, that anchors the quality band
+    ([routing].quality_max_rank_gap). Reserves and excluded pools never anchor it."""
+    pool = [s for s in services
+            if s.eligible(kind) and s.name not in exclude and not s.reserve_floor]
+    return min(pool, key=lambda s: (s.rank_for(kind), s.name), default=None)
+
+
+def unrouted_why(kind: str, quota: dict[str, Any] | None = None,
+                 exclude: frozenset[str] | set[str] = frozenset()) -> str:
+    """Why route() found nothing for `kind`, for plan's queued line."""
+    gap = QUALITY_MAX_RANK_GAP.get(kind)
+    best = quality_best(kind, list(discover(quota or {})), exclude)
+    if gap is None or best is None:
+        return "no pool has room: keep queued"
+    return (f"no pool within {gap} rank steps of the best for {kind} ({best.name} "
+            f"r{best.rank_for(kind)}) has room; weaker pools are not used for {kind} "
+            f"([routing].quality_max_rank_gap): keep queued until a reset")
+
+
 def route(kind: str, *, quota: dict[str, Any] | None = None,
           min_headroom: float = 15.0,
           exclude: frozenset[str] | set[str] = frozenset()) -> Choice | None:
@@ -783,11 +807,16 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}")
     quota = {} if quota is None else quota
+    services = list(discover(quota))
+    best = quality_best(kind, services, exclude)
+    gap = QUALITY_MAX_RANK_GAP.get(kind)
 
     scored: list[tuple[float, Service, float | None, list[str]]] = []
-    for svc in discover(quota):
+    for svc in services:
         if not svc.eligible(kind) or svc.name in exclude:
             continue
+        if gap is not None and best is not None and svc.rank_for(kind) - best.rank_for(kind) > gap:
+            continue                       # outside the quality band: quota never buys this pool in
         info = quota.get(svc.name) or {}
         remaining = info.get("remaining")
         if remaining is not None and remaining < max(min_headroom, svc.reserve_floor):
@@ -1392,7 +1421,7 @@ def main(argv: list[str] | None = None) -> int:
                             "model": c.model if c else None,
                             "dispatch": c.dispatch if c else None,
                             "remaining": c.remaining if c else None,
-                            "why": c.why if c else "no pool has room: keep queued"}
+                            "why": c.why if c else unrouted_why(k, quota, skip)}
                            for k, c in rows]}, indent=1))
         else:
             if stale:
@@ -1402,7 +1431,8 @@ def main(argv: list[str] | None = None) -> int:
                       "is capability-only for unmeasured pools", file=sys.stderr)
             for i, (k, c) in enumerate(rows, 1):
                 if c is None:
-                    print(f"{i}. {k:10} -> (none: keep queued, re-plan at the next boundary)")
+                    print(f"{i}. {k:10} -> (none: {unrouted_why(k, quota, skip)}; "
+                          "re-plan at the next boundary)")
                 else:
                     rem = "" if c.remaining is None else f" {c.remaining:.0f}% left"
                     print(f"{i}. {k:10} -> {c.service.name}{rem}  [{c.service.cli}]"

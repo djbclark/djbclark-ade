@@ -62,19 +62,20 @@ class TestKindRequired(RoutingDispatch):
 
 
 class TestEligibility(RoutingDispatch):
-    def test_claude_code_refused_names_eligible(self):
-        r = self.dispatch_agent("claude", "m1", "--kind", "code", "--no-model-check", "--no-preflight")
+    def test_claude_bulk_refused_names_eligible(self):
+        # claude codes since 2026-10-18 (operator); bulk is still not its kind
+        r = self.dispatch_agent("claude", "m1", "--kind", "bulk", "--no-model-check", "--no-preflight")
         self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("not eligible for --kind code", r.stderr)
+        self.assertIn("not eligible for --kind bulk", r.stderr)
         self.assertIn("eligible:", r.stderr)
         self.assertIn("route-override", r.stderr)
 
     def test_route_override_passes_eligibility(self):
         r = self.dispatch_agent(
-            "claude", "m1", "--kind", "code", "--no-model-check", "--no-preflight",
+            "claude", "m1", "--kind", "bulk", "--no-model-check", "--no-preflight",
             env={"ACP_OPERATOR_APPROVED": "route-override"})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.record()["kind"], "code")
+        self.assertEqual(self.record()["kind"], "bulk")
 
 
 class TestFrontierModelGate(RoutingDispatch):
