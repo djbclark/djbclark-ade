@@ -1,5 +1,16 @@
 """Shared pytest setup for the djbclark-ade tests."""
 import os
+import tempfile
+from pathlib import Path
+
+# Never make fixtures inside the real dispatch state root. A slice that ran these tests with
+# TMPDIR under its task dir (2026-10-14, gnu-normalize) left 80 acpd-* fixture trees there, whose
+# fake jobs/*.json records reap, the in-flight cap and dispatch history then scanned as real.
+_STATE = (Path.home() / ".local/state/bigteam").resolve()
+for _var in ("TMPDIR", "TEMP", "TMP"):
+    if os.environ.get(_var) and Path(os.environ[_var]).resolve().is_relative_to(_STATE):
+        del os.environ[_var]
+tempfile.tempdir = None
 
 # acp-dispatch holds a slice's start while the real machine is overloaded
 # (bin/acp-dispatch wait_for_capacity). Tests must not depend on the host's
