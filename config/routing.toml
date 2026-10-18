@@ -184,7 +184,10 @@ billing = "subscription"
 # the zai Coding Plan's TUI; acp-run zcode drives it.
 note = "coding plan; an everyday code and bulk pool"
 agent = "zcode"
-models = { code = "GLM-5.3 --effort high", research = "GLM-5.3 --effort high", bulk = "GLM-5.3-Flash --effort low", mechanical = "GLM-5.3-Flash --effort low" }
+# zcode lists each model under two providers since 2026-10-18 (builtin:zai\ and
+# builtin:zai-coding-plan\), so a bare GLM-5.3 is ambiguous and acp-dispatch refuses it;
+# the coding-plan ids are the subscription's.
+models = { code = 'builtin:zai-coding-plan\GLM-5.3 --effort high', research = 'builtin:zai-coding-plan\GLM-5.3 --effort high', bulk = 'builtin:zai-coding-plan\GLM-5.3-Flash --effort low', mechanical = 'builtin:zai-coding-plan\GLM-5.3-Flash --effort low' }
 
 # Alibaba's coding plan through the qwen TUI. aiuse keeps `alibaba` under
 # [disabled_services] (operator 2026-10-08), so `plan` skips it until the
