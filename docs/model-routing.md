@@ -18,15 +18,16 @@ quoting a chain, and update its snapshot if you change one.
 > reset. Since then: judgment is Opus 5.5 at `high`; codex astra and Fable 5.1
 > (`high`) are reached only through the `frontier` kind, one slice per pool
 > per wave, for work that really needs them; `acp-dispatch` allows one fresh
-> codex slice in flight machine-wide and refuses Fable `xhigh`/`max` without
-> `ACP_OPERATOR_APPROVED=fable-xhigh`. Where the 2026-10-15 text below says
+> codex slice in flight machine-wide (replaced the same night by a per-service
+> in-flight quota reservation, see *Routing policy* below) and refuses Fable
+> `xhigh`/`max` without `ACP_OPERATOR_APPROVED=fable-xhigh`. Where the 2026-10-15 text below says
 > "use them fully", read this instead.
 >
 > **Update 2026-10-15 (operator): the routing policy is now cost against code
 > quality, every TUI, any directory.** The one copy is
 > `skills/model-routing/SKILL.md`, *Routing policy (operator, 2026-10-15)*;
 > `bin/route_agent.py plan` applies it and prints the `acp-dispatch <agent>
-> --model M --effort E` line per slice. In short: (1) Claude Fable 5.1 at
+> --model M --kind K --effort E` line per slice. In short: (1) Claude Fable 5.1 at
 > `xhigh` and codex's top frontier model (`gpt-6-astra`) are used **fully** for
 > serious-effort work (judgment, adjudication, security-relevant changes,
 > whole-corpus reads, adversarial review); (2) **Fable and "claude" are one
@@ -195,7 +196,7 @@ any prompt and lists the valid values. Stderr, before the summary:
 class `config`, exit 1. `acp-dispatch` takes `--effort` and `--context` as
 first-class flags (checked with the model before the job is written, stored on
 the record, kept by `resume`):
-`acp-dispatch <agent> --model M --effort high --context 500k`. `--acp-arg`
+`acp-dispatch <agent> --model M --kind K --effort high --context 500k`. `--acp-arg`
 still forwards other flags; a dash-leading value needs `--acp-arg=--meta`.
 
 **A quota stop is resumed in place, automatically** (operator 2026-10-18: a
@@ -278,8 +279,8 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
 - **Codex (gpt-6-astra @ high; 2026-10-18)** — the second frontier pool,
   only for a slice that really needs astra to look it over (a
   security-relevant or concurrency fix's final review, debugging that
-  defeated real attempts). One slice in flight at a time: its 5-hour window
-  holds about one hard slice. Everyday slices go to the everyday pools, not
+  defeated real attempts). Its in-flight slices reserve quota against a new
+  one (2026-10-18): its 5-hour window holds about one hard slice. Everyday slices go to the everyday pools, not
   to `gpt-6-luna` on this window.
 - **Gemini via agy** — big-context reading, summarization, multimodal,
   bulk research; the most-wasted subscription → default overflow for
@@ -316,17 +317,21 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
 ## Routing policy (2026-10-15; the one copy is `skills/model-routing/SKILL.md`)
 
 1. **Frontier models only for what really needs them (2026-10-18):** judgment
-   is `acp-dispatch claude --model opus --effort high`; the `frontier` kind,
-   one slice per pool per wave, reaches codex `gpt-6-astra` (`acp-dispatch
-   codex --model gpt-6-astra --effort high`, one in flight machine-wide) and
-   Fable 5.1 (`fable-deep`, or `acp-dispatch claude --model fable --effort
-   high`; `xhigh` needs `ACP_OPERATOR_APPROVED=fable-xhigh`). Fable is a <=50%
+   is `acp-dispatch claude --model opus --kind judgment --effort high`; the
+   `frontier` kind, one slice per pool per wave, reaches codex `gpt-6-astra`
+   (`acp-dispatch codex --model gpt-6-astra --kind frontier --effort high`;
+   in-flight slices reserve quota, so a second one is refused when the first
+   leaves no room) and Fable 5.1 (`fable-deep`, or `acp-dispatch claude
+   --model fable --kind frontier --effort high`; both are read-only advisors
+   unless `ACP_OPERATOR_APPROVED=frontier-exec`; `xhigh` needs `ACP_OPERATOR_APPROVED=fable-xhigh`). Fable is a <=50%
    sublimit of the one shared Claude weekly (and bills the 5h window); under
    10% of its cap the router suggests `opus --effort high`.
 2. **Everyday work on the other pools**, cheapest adequate first: agy
    Claude/GPT (>= 40% left), Cursor Auto, zai GLM-5.3, opencode-go, agy Gemini
    for bulk and big-context reads, crush/SIPB for light bulk. Minimum spec
-   (model × effort × context) that does it well; route up when unsure.
+   (model × effort × context) that does it well. Start on the cheap eligible
+   tier and escalate through `acp-dispatch reroute` on a verified failure
+   (operator, 2026-10-18; it replaced "route up when unsure").
    **Exception, 2026-10-03:** antigravity's CLI has a burst limit (roughly 60
    generation requests an hour per login) that `aiuse` cannot see, so spread its
    work over hours, prefer `acp-run agy`, and never fan out a batch at it.
@@ -346,6 +351,21 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
    (`autoCompactWindow`); herdr/Orca sessions compact earlier at a natural
    boundary via `self-slash`; a topic change runs the `handoff` skill then
    `/new`. Nothing here asks the operator.
+
+**Where the numbers live (2026-10-18).** `config/routing.toml` is the source of
+truth for the kinds, each service's `good_at` ranks, the frontier model list
+and the pace and burn-first knobs; `bin/route_agent.py policy --md` prints it
+as a table, so copy no numbers from this file. A fresh `acp-dispatch` requires
+`--kind` (exit 2 without it) and an eligible agent and model;
+`ACP_OPERATOR_APPROVED=route-override` skips only the eligibility check. A
+frontier model runs only with `--kind frontier`, by default as a read-only
+advisor (`--role advise`; `--role exec` needs
+`ACP_OPERATOR_APPROVED=frontier-exec`). Escalation is cheap-first, through
+`acp-dispatch reroute` (item 2). Scoring is pace- and reset-aware: a computed
+burn-first bonus goes to a pool that would waste quota at its reset, and a pace
+penalty to a pool burning fast. `route_agent.py calibrate` reports done rates,
+and `bin/routing-recalibrate` (monthly, launchd) has Opus re-rank `good_at`
+from them.
 
 ## Formerly open questions — resolved by operator, 2026-08-23
 

@@ -60,11 +60,13 @@ about which side you are on, stay high and say so.
   `effort: "low"` rather than doing them inline at session tier.
 - **One hard call inside otherwise ordinary work** — do not raise the whole
   session. Dispatch that single question to `acp-dispatch claude --model opus
-  --effort high` and carry on. Only when it really needs a frontier model
+  --kind judgment --effort high` and carry on. Only when it really needs a frontier model
   (it defeated real attempts, or is a security-relevant final review) use
   `fable-deep` (Fable at `high`) or `acp-dispatch codex --model gpt-6-astra
-  --effort high`, one at a time: codex's 5-hour window holds about one hard
-  slice (2026-10-18). Fable is **not** a separate budget: it is a sublimit (at
+  --kind frontier --effort high` (a read-only advisor by default), one at a
+  time: codex's 5-hour window holds about one hard slice, and a second one
+  is refused while the first one's estimated quota is reserved (class
+  `inflight`, 2026-10-18). Fable is **not** a separate budget: it is a sublimit (at
   most 50%) of the shared Claude weekly and bills the 5-hour window too. Fable
   at `xhigh` needs djbclark's yes for that run (model-routing, *Routing
   policy* item 1).
@@ -75,8 +77,9 @@ about which side you are on, stay high and say so.
   shape or not, goes through `acp-dispatch` to the everyday pools (agy
   `claude-opus-5-5 --effort high`, zcode `GLM-5.3 --effort high`, cursor
   `default`); Fable/astra (`high`) only for the rare frontier calls above.
-  Delegate proactively so the session's own context stays small, and route
-  up when unsure.
+  Delegate proactively so the session's own context stays small, start on
+  the cheap eligible tier and escalate through `acp-dispatch reroute` on a
+  verified failure (operator, 2026-10-18).
 - **Multiple-choice calls inside a loop** (which pool, retry or stop, which
   tests first) need no effort tier at all when code can answer them. Push
   them into a script or a table (`route_agent.py`, exit codes) and keep the
@@ -144,7 +147,7 @@ its own window mid-turn; the lever is the dispatched call.
    applied first. `acp-run <agent> -C <dir> -p '<prompt>' --model M --effort low --context 500k`.
    `acp-dispatch` takes `--effort` and `--context` as first-class flags
    (checked with the model before the slice is written, stored on the job,
-   kept by `resume`): `acp-dispatch <agent> --model M --effort low --context 500k`.
+   kept by `resume`): `acp-dispatch <agent> --model M --kind <kind> --effort low --context 500k`.
    `--acp-arg` still forwards other flags; a dash-leading value needs
    `--acp-arg=--meta`.
 3. Read stderr `acp-run: applied: model=... effort=... ctx=...` before you

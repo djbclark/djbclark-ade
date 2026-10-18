@@ -170,8 +170,9 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
 
 1. **Workers, refuter, writer and reviewer are `/bigteam` slices, not only
    Claude sub-agents.** Dispatch each brief with `acp-dispatch <agent> --model M
-   --name N --task research-<slug> -C <run-folder-parent> -f <brief-file>`
-   (codex, zcode, opencode, cursor-agent, copilot, agy via `acp-run`; the
+   --kind <kind> --name N --task research-<slug> -C <run-folder-parent> -f <brief-file>`
+   (`--kind research` on the everyday pools, `frontier` for astra and Fable;
+   codex, zcode, opencode, cursor-agent, copilot, agy via `acp-run`; the
    `model-routing` skill and the `aiuse` rules in `~/CLAUDE.md` give the
    mechanics). Reasons: the reads stay out of the lead's context, the
    quota spreads across vendors, and the reviewer gets a genuinely different
@@ -184,21 +185,24 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    1b. **Role-to-model map, operator ruling 2026-10-10** (research skill
    only; the `model-routing` skill is unchanged until a run has exercised
    this): **lead and reviewer are the latest Grok**, reached through the
-   `grok` TUI (`acp-dispatch grok --model grok-4.7`, or newer when `grok`
-   lists one) or through `cursor-agent` with the same Grok model as Cursor
+   `grok` TUI (`acp-dispatch grok --model grok-4.7 --kind realtime-web`, or newer when `grok`
+   lists one; `realtime-web` is the only kind grok is eligible for, 2026-10-18,
+   and any other kind needs `ACP_OPERATOR_APPROVED=route-override`) or through `cursor-agent` with the same Grok model as Cursor
    names it (check its model list before the first call; never guess the
    id). When a Claude Code session is the one running `/research`, it still
    plans and dispatches, but the adjudication and the final refute-mode read
    go to a Grok slice and its verdict is applied as given. **Every worker
    role runs on all four families at once, not in rotation**: each slice,
    the refuter and the writer are dispatched in parallel to Astra
-   (`acp-dispatch codex --model gpt-6-astra`), Fable (`acp-dispatch claude
-   --model 'claude-fable-5-1[1m]'`, quoted, the id exactly as `acp-run claude
+   (`acp-dispatch codex --model gpt-6-astra --kind frontier`; frontier slices
+   run as read-only advisors by default and their report is the deliverable,
+   2026-10-18), Fable (`acp-dispatch claude
+   --model 'claude-fable-5-1[1m]' --kind frontier`, quoted, the id exactly as `acp-run claude
    --info` lists it: on 2026-10-10 11:19 a dispatch with `claude-fable-5-1`
    failed with "acp-run: no model 'claude-fable-5-1'; have: default, opus,
    claude-fable-5-1[1m], sonnet, haiku, ..."; or an Agent-tool sub-agent),
    Grok and agy
-   (`acp-dispatch agy --model <m>`, only ever via ACP, never `agy -p`;
+   (`acp-dispatch agy --model <m> --kind research`, only ever via ACP, never `agy -p`;
    `--model claude-opus-5-5 --effort high` (agy 1.4.1, 2026-10-18, dropped the effort-suffixed ids) draws its Claude/GPT pool, which `aiuse`
    lists as `antigravity claude_gpt`, burn-first while >= 40% left, see
    bigteam. Over ACP the `claude-*`/`gpt-*` ids appear only because
@@ -236,8 +240,8 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    ocx-claude-native--gpt-6-astra` (the "isn't described by this version's
    model catalog" line is a warning, not a failure). If it fails or the
    Codex pool is out (`aiuse --available --live --json`), use `acp-dispatch codex --model
-   gpt-6-astra`, and if that is out too, the next family with quota
-   (`acp-dispatch zcode`, no `--model`), labelling the review
+   gpt-6-astra --kind frontier`, and if that is out too, the next family with quota
+   (`acp-dispatch zcode --kind research`, no `--model`), labelling the review
    non-independent for any slice that family worked on.
 2. Sub-agent prompts carry the delivery contract: `acp-dispatch` appends it
    itself; for an Agent-tool sub-agent paste the output of
@@ -257,7 +261,7 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
 6. **Preflight mechanics.** Print the probe brief with `python3 -I
    scripts/research_check.py probe --brief`, save it to `<run>/.probe.md`
    and dispatch it to each planned route in parallel, e.g. `acp-dispatch
-   <agent> --model M --name probe-<agent> --task research-<slug> -C <run
+   <agent> --model M --kind <kind> --name probe-<agent> --task research-<slug> -C <run
    parent> -f <run>/.probe.md` (same agents, models and quoting as item
    1b; an Agent-tool sub-agent gets the brief plus the item 2 footer).
    Then `python3 -I scripts/research_check.py probe <each report file>`:

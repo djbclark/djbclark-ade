@@ -251,9 +251,11 @@ acp-run <agent> --info      # its models, modes and auth methods
 
 **For a slice that must deliver a report, call `acp-dispatch` instead of
 `acp-run` directly** (`bin/acp-dispatch` in djbclark-ade, on PATH; 2026-10-08):
-`acp-dispatch <agent> --model M --name N --task T -C <dir> -f <brief> [--perm P]
+`acp-dispatch <agent> --model M --kind K --name N --task T -C <dir> -f <brief> [--perm P]
 [--effort L] [--context SIZE] [--timeout S]`. It makes `--model` mandatory
-except for zcode (accepted, still optional), appends the shared delivery footer
+except for zcode (accepted, still optional) and `--kind` mandatory on a fresh
+dispatch (2026-10-18; exit 2 without it, or when the agent and model are not
+eligible for that kind), appends the shared delivery footer
 (`docs/dispatch-footer.md`: report file, pointer-only final message, `BLOCKED:`
 protocol, no waiting by ending the turn), writes the report, `.done` marker, log
 and `jobs/<name>.json` record under `~/.local/state/bigteam/<task>/`. Before
@@ -311,7 +313,7 @@ the pool is out for days.
      is applied first.
   2. `acp-dispatch --effort` and `--context` are first-class (checked with the
      model before the job is written, stored on the record, kept by `resume`):
-     `acp-dispatch <agent> --model M --effort high --context 500k`.
+     `acp-dispatch <agent> --model M --kind K --effort high --context 500k`.
      `--acp-arg` still forwards other flags; a dash-leading value needs
      `--acp-arg=--meta`.
   3. Read stderr `acp-run: applied: model=... effort=... ctx=...`.
@@ -465,7 +467,7 @@ model × effort × context window**, made per slice, always through ACP
 (`acp-dispatch` / `acp-run`), and never by fanning one prompt out to every
 vendor ("use all agents" is not a routing plan). `bin/route_agent.py plan
 --kinds ...` applies the rules below from the aiuse snapshot and prints the
-`acp-dispatch <agent> --model M --effort E` line per slice; `bigteam` is the
+`acp-dispatch <agent> --model M --kind K --effort E` line per slice; `bigteam` is the
 method that runs the waves.
 
 1. **The two frontier models are scarce: send them only what really needs
@@ -474,18 +476,23 @@ method that runs the waves.
    high/xhigh together. Codex's 5-hour window ran out and all four stopped
    waiting for the reset, although the weekly still had 82% left. So:
    1a. **Judgment** (review, design, adjudication) is `acp-dispatch claude
-       --model opus --effort high`. It is not Fable and not codex.
-   1b. **`frontier`** is the only route to codex `gpt-6-astra` (`--effort
-       high`) or Fable 5.1 (`--effort high`): one slice per pool per wave, for
+       --model opus --kind judgment --effort high`. It is not Fable and not
+       codex.
+   1b. **`frontier`** is the only route to codex `gpt-6-astra` (`--kind
+       frontier --effort high`) or Fable 5.1 (`--kind frontier --effort high`):
+       one slice per pool per wave, for
        work that really needs a frontier model to look it over. Examples: a
        security-relevant or concurrency fix's final review, debugging that has
        defeated real attempts, an adjudication no cheaper model settles, a
        whole-corpus read that needs Fable's 1M window. "Upstream-bound", "small
        issues" and "a second opinion would be nice" are not reasons.
-   1c. **codex: one slice in flight, machine-wide.** `acp-dispatch` refuses a
-       second fresh codex slice (exit 5, class `inflight`); resumes are exempt.
-       `ACP_DISPATCH_INFLIGHT=codex=2` overrides for a run. codex is only for
-       astra; never spend its window on `gpt-6-luna` everyday slices.
+   1c. **In-flight slices reserve quota, per service** (2026-10-18; it replaced
+       the codex-only "one slice in flight" cap). Each running slice reserves
+       its estimated quota on its service, and a fresh dispatch must fit what
+       is left: `acp-dispatch` refuses one that does not (exit 5, class
+       `inflight`); resumes are exempt. `ACP_DISPATCH_INFLIGHT=codex=2`
+       still sets a hard cap for a run. codex is only for astra; never spend
+       its window on `gpt-6-luna` everyday slices.
    1d. **Fable at `xhigh`/`max` almost never runs**: `acp-dispatch` refuses it
        without `ACP_OPERATOR_APPROVED=fable-xhigh`. Ask djbclark first; the
        `fable-deep` agent runs at `high`.
@@ -513,9 +520,12 @@ method that runs the waves.
    shared pool), so the session's own context stays small. Implementation,
    whether its shape is clear or not, goes through `acp-dispatch` to the
    everyday pools (agy `claude-opus-5-5 --effort high`, zcode `GLM-5.3
-   --effort high`, cursor `default`); Fable/astra only for `frontier` (item 1b). **Route up when unsure**: a hard
-   slice on a cheap worker costs a failed step and a retry; an easy slice sent
-   up costs a little extra.
+   --effort high`, cursor `default`); Fable/astra only for `frontier` (item 1b). **Start on the cheap eligible tier and escalate
+   on a verified failure** (operator, 2026-10-18; it replaced "route up when
+   unsure"): when a slice fails its check, `acp-dispatch reroute <record>
+   --agent A --model M` continues it on a stronger pool, from the report and
+   the diff. Sending a hard slice to a cheap worker first costs one failed step
+   and a reroute; guessing high costs a frontier window every time.
 5. **The context window is a choice**, next to model and effort. Default is
    the agent's own window. `--context 500k` / `1m` only for a whole-corpus read
    or a long log: bigger windows bill more per token on xAI (from a 200k
@@ -564,6 +574,23 @@ method that runs the waves.
     `self-slash "/compact <focus>"`; on a topic change run the `handoff` skill,
     then `/new`. Never ask the operator to do either unless `self-slash`
     refuses (`effort-routing`, *What actually dominates cost*).
+
+**Where the numbers live (2026-10-18).** The routing policy is data, and
+`config/routing.toml` is the source of truth: the kinds, each service's
+`good_at` ranks, the frontier model list, the pace and burn-first knobs. Print
+it as a table with `bin/route_agent.py policy --md`; copy no numbers from
+this file. A fresh `acp-dispatch <agent> --model M --kind K` requires the
+kind (exit 2 without it) and the agent and model must be eligible for it;
+`ACP_OPERATOR_APPROVED=route-override` skips only that eligibility check.
+A frontier model (`gpt-6-astra`, `fable`) runs only with `--kind frontier`
+and, by default, as a read-only advisor (`--role advise`: the report is the
+deliverable, and a tree edit is flagged); `--role exec` needs
+`ACP_OPERATOR_APPROVED=frontier-exec`. Escalation is cheap-first, through
+`acp-dispatch reroute` (item 4). Scoring is pace- and reset-aware: a computed
+burn-first bonus goes to a pool that would waste quota at its reset, and a pace
+penalty to a pool burning fast. `route_agent.py calibrate` reports done rates
+per service and kind, and `bin/routing-recalibrate` (monthly, launchd) has Opus
+re-rank `good_at` from them.
 
 ## Multiple-choice decisions are not reasoning (2026-10-11)
 

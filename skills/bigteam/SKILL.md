@@ -24,8 +24,12 @@ review and rework. Concretely:
    (operator 2026-10-18). Claude Fable 5.1 and codex `gpt-6-astra` are reached
    only through the `frontier` kind, one slice per pool per wave. On
    2026-10-18 a wave of four astra slices emptied codex's 5-hour window and
-   every one stopped. Judgment is Opus 5.5 at `high`. `acp-dispatch` allows one
-   fresh codex slice in flight at a time, and refuses Fable at `xhigh` without
+   every one stopped. Judgment is Opus 5.5 at `high`. `acp-dispatch` runs a
+   frontier model only with `--kind frontier`, as a read-only advisor unless
+   `ACP_OPERATOR_APPROVED=frontier-exec` (2026-10-18); it reserves each
+   in-flight slice's estimated quota on its service before a new one fits (a
+   refusal is class `inflight`, exit 5; this replaced the one-fresh-codex-slice
+   cap, 2026-10-18), and refuses Fable at `xhigh` without
    `ACP_OPERATOR_APPROVED=fable-xhigh`. Fable and "claude" are **one pool**
    (Fable is a <=50% sublimit of the shared weekly and bills the 5-hour window
    too).
@@ -121,7 +125,7 @@ Classify every pool before assigning anything:
 | **fresh subscription** | monthly/weekly window largely unused | bulk, mechanical, writing, research — use heavily |
 | **tight** | >40% of the binding window burned | one slice at most, or skip |
 | **exhausted** | `remaining_percent` ≈ 0 on ANY window of that pool | skip that pool entirely (the same vendor's other model-family pool may be fine) |
-| **frontier** | Claude Fable 5.1 and codex `gpt-6-astra` | only a slice that really needs a frontier model to look it over (a security-relevant or concurrency fix's final review, debugging that defeated real attempts, a whole-corpus read); one per pool per wave, codex one in flight machine-wide; see *Pool policy* below |
+| **frontier** | Claude Fable 5.1 and codex `gpt-6-astra` | only a slice that really needs a frontier model to look it over (a security-relevant or concurrency fix's final review, debugging that defeated real attempts, a whole-corpus read); one per pool per wave, in-flight slices reserve quota (2026-10-18); see *Pool policy* below |
 | **lifeline** | another agent runs on it | use with care and never let it run out; see *Reserve pools* below (clinepass and Claude itself) |
 | **reserve** | grok (GrokBot) and copilot (GitHub-side review) | hard floor 60% left (`route_agent.py` `reserve_floor`), one small slice at a time, only when that vendor is the point (copilot: kind `github`; grok: kind `realtime-web`); a missing or stale reading means do not use |
 | **never** | hermes; the prepaid pools; credits-backed models | not a target by any route; `acp-run`/`acp-dispatch` refuse hermes like omp |
@@ -135,29 +139,38 @@ Classify every pool before assigning anything:
 
 The one copy of the rules is `model-routing`, *Routing policy (operator,
 2026-10-15)*; `bin/route_agent.py plan` applies them and prints the
-`acp-dispatch <agent> --model M --effort E` line per slice. What a fan-out
-needs from it:
+`acp-dispatch <agent> --model M --kind K --effort E` line per slice (the policy
+table is `config/routing.toml`, printed by `route_agent.py policy --md`). What
+a fan-out needs from it:
 
 1. **Spec every slice as vendor × model × effort × context, at the minimum
    that does it well.** The brief states all four; the dispatch is
-   `acp-dispatch <agent> --model M --effort E [--context S] ...`; the waiter or
+   `acp-dispatch <agent> --model M --kind K --effort E [--context S] ...`
+   (`--kind` is required on a fresh dispatch: exit 2 without it, or when the
+   agent and model are not eligible for that kind; 2026-10-18); the waiter or
    the lead checks `<name>-stderr.txt` for `acp-run: applied: model=...
    effort=... ctx=...` (exit 1 class `config` = the request did not land).
    Context stays at the agent's default unless the slice reads a whole corpus
    or a long log (`--context 500k` / `1m`; bigger windows bill more on xAI,
    Cursor and Copilot).
 2. **`judgment` slices** (architecture, adjudication, the adversarial second
-   opinion of Step 6) go to `acp-dispatch claude --model opus --effort high`.
+   opinion of Step 6) go to `acp-dispatch claude --model opus --kind judgment
+   --effort high`.
    **`frontier` slices** are the rare few that really need a frontier model
    (debugging that defeated real attempts, a security-relevant or concurrency
    fix's final review, a whole-corpus read): `acp-dispatch codex --model
-   gpt-6-astra --effort high` or `acp-dispatch claude --model fable --effort
-   high` (an Agent-tool `fable-deep` call is the in-session form), one per pool
-   per wave. Fable's cap is 50% of the shared Claude weekly and it bills the
+   gpt-6-astra --kind frontier --effort high` or `acp-dispatch claude --model
+   fable --kind frontier --effort high` (an Agent-tool `fable-deep` call is the
+   in-session form), one per pool per wave. A frontier slice is a read-only
+   advisor by default (`--role advise`: its deliverable is the report, and
+   `check` says ADVISOR EDITED THE TREE if it edits); `--role exec` needs
+   `ACP_OPERATOR_APPROVED=frontier-exec` (2026-10-18). Fable's cap is 50% of the shared Claude weekly and it bills the
    5-hour window too; under 10% of the cap, `plan` suggests `opus --effort
    high` instead. Fable at `xhigh` needs djbclark's yes for that run. codex is
-   for astra, not for luna-class everyday slices, and runs one slice at a
-   time: a "small issues" wave is not frontier work (2026-10-18).
+   for astra, not for luna-class everyday slices, and its in-flight slices
+   reserve quota against a new one (class `inflight`, exit 5; replaced the
+   one-slice cap, 2026-10-18): a "small issues" wave is not frontier work
+   (2026-10-18).
 3. **`code`, `research`, `bulk`, `mechanical` slices** go to the everyday
    pools, in `plan`'s order: agy Claude/GPT (>= 40% left; `claude-opus-5-5
    --effort high` for code, `claude-sonnet-5-5` for volume), Cursor Auto
@@ -175,8 +188,10 @@ needs from it:
    without `ACP_OPERATOR_APPROVED=omp` after a specific yes, prepaid or
    credits-backed models, clinepass (never a bigteam target: `NEVER_ROUTE` in
    `route_agent.py`; it stays in Hermes's chain), devin, an all-vendor fan-out.
-6. **Route up when unsure**, and tell the next re-plan what moved (item 6 of
-   *Dynamic routing*).
+6. **Start on the cheap eligible tier and escalate on a verified failure**
+   (operator, 2026-10-18; it replaces "route up when unsure"): move the slice
+   with `acp-dispatch reroute <record> --agent A --model M`, and tell the next
+   re-plan what moved (item 6 of *Dynamic routing*).
 
 ### agy Claude/GPT pool — assign it first while it has headroom (operator, 2026-10-10)
 
@@ -330,8 +345,8 @@ bind every slice to a vendor up front:
    the burn-first rule, the reserve floors and the frontier-for-judgment rule,
    and **spreads the wave** with each service's `max_parallel` (agy Claude/GPT
    3, agy Gemini 2, Cursor Auto 2, grok 1, copilot 1). Each line ends with the
-   dispatch to run, `acp-dispatch <agent> --model M --effort E` (`--json`:
-   `agent`, `model`, `dispatch`); add `--name`, `--task`, `-C`, `-f` and, when
+   dispatch to run, `acp-dispatch <agent> --model M --kind K --effort E`
+   (the model shell-quoted; `--json`: `agent`, `model`, `dispatch`); add `--name`, `--task`, `-C`, `-f` and, when
    the slice needs it, `--context`. Dispatch only the slices it gives a pool; a
    slice with `none` stays queued. A `WARNING: snapshot empty/old` means run
    `aiuse --available --live` (in the background) first.
@@ -482,11 +497,13 @@ arrive first. **For every agent that speaks ACP, dispatch through
 `acp-dispatch`** (`bin/acp-dispatch` in djbclark-ade, on PATH; it wraps
 `acp-run`, whose agent list, flags and current status are in `model-routing`):
 
-    acp-dispatch <agent> --model <m> --name <name> --task <task> -C <repo> \
+    acp-dispatch <agent> --model <m> --kind <kind> --name <name> --task <task> -C <repo> \
         -f "$OUT/brief-<name>.md" [--perm deny] [--timeout 2400]
 
 It enforces what this step used to spell out in prose (2026-10-08): `--model`
 is mandatory except for zcode, where it is accepted and still optional (item 2);
+`--kind` is mandatory on a fresh dispatch (2026-10-18; `resume` and `reroute`
+inherit it from the record);
 the brief gets `docs/dispatch-footer.md` appended (report file
 `$OUT/<name>-report.md`, final message is a pointer only, the `BLOCKED:`
 protocol, never end a turn waiting on a background notification); the report,
@@ -621,7 +638,7 @@ until the work is committed or recorded in a repo.
    should keep the agent's default: a bigger window bills more per token on
    some services (xAI long-context rates from a 200k prompt; Cursor input
    above 256k at 2×, Fast at 3×; Copilot's long tier costs more AI credits)
-   and can be slower. `acp-dispatch <agent> --model <m> --effort high --context 500k`
+   and can be slower. `acp-dispatch <agent> --model <m> --kind <kind> --effort high --context 500k`
    (or `1m`). `--effort` and `--context` are first-class: checked with the
    model before anything is written, stored on the job record, kept by
    `resume`. `--acp-arg` still forwards other flags; a dash-leading value
