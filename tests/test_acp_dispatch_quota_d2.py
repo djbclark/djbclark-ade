@@ -45,6 +45,13 @@ EXTRA_MODES = textwrap.dedent("""\
               echo "acp-run: agent=zcode stop=end_turn secs=356.1 tools=38" >&2
               echo "written: $report"
               exit 0;;
+      quota_words_in_work)  # review 2026-10-18: a slice that greps quota code is not quota-stopped
+              printf 'STATUS: working\\n' > "$report"
+              printf '%s\\n' '{"kind":"update","data":{"sessionUpdate":"tool_call_update","status":"completed","rawOutput":"bin/acp-dispatch: Individual quota reached ... RESOURCE_EXHAUSTED"}}' >> "$log"
+              printf '%s\\n' '{"kind":"update","data":{"sessionUpdate":"agent_thought_chunk","content":{"text":"the usage limit regex"}}}' >> "$log"
+              echo "acp-run: agent=zcode stop=end_turn secs=56.1 tools=8" >&2
+              echo "written: $report"
+              exit 0;;
     """)
 
 # fake acp-run with D2's modes plus a --list handler, so route_agent's discovery is hermetic
@@ -397,6 +404,16 @@ class TestExit0Quota(QuotaBase):
         rec = self.record()
         self.assertEqual((rec["status"], rec.get("failure"), rec.get("auto_resume")),
                          ("done", None, None))
+        self.assertEqual(self.aiuse_notes(), [])
+
+    def test_quota_words_in_the_agents_own_work_are_not_a_refusal(self):
+        """Only runtime events near the log's end count: tool output and thoughts that mention
+        quota (a slice working on acp-dispatch itself) must not mark the pool exhausted."""
+        self.dispatch_agent("zcode", "m1", "--kind", "code", mode="quota_words_in_work",
+                            env={"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)})
+        rec = self.record()
+        self.assertFalse(str(rec.get("failure") or "").startswith("NO-REPORT: quota"), rec.get("failure"))
+        self.assertIsNone(rec.get("auto_resume"))
         self.assertEqual(self.aiuse_notes(), [])
 
 

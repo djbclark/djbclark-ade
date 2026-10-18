@@ -170,7 +170,9 @@ class Base(unittest.TestCase):
                 "ACP_DISPATCH_STATE": str(self.tmp / "state"),
                 # D2: these suites' fixtures reset years out (2036); the far-reset
                 # skip must not fire for them (D2's own tests cover the rule)
-                "ACP_DISPATCH_MAX_WAIT_HOURS": "876576", **extra}
+                "ACP_DISPATCH_MAX_WAIT_HOURS": "876576",
+                # never the real pmset: a cached sudo ticket would wake the Mac for a fixture
+                "ACP_DISPATCH_PMSET": "/usr/bin/false", **extra}
 
     def dispatch(self, *extra: str, mode: str = "writes", name: str = "s1",
                  env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:

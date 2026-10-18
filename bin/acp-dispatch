@@ -2304,6 +2304,38 @@ def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
             f"before writing DONE, so nothing above is a deliverable{extra} (appended by acp-dispatch)")
 
 
+QUOTA_LOG_TAIL_EVENTS = 30
+# Session-log events that carry the agent's own words or a tool's output, never a refusal by the
+# runtime: a slice that greps or tests quota code (acp-dispatch's own slices) fills these with
+# "usage limit" and "RESOURCE_EXHAUSTED" (2026-10-18 review: the acp-resume-hardening log held 12
+# matches, 9 of them not the refusal).
+QUOTA_LOG_SKIP_UPDATES = ("agent_thought_chunk", "agent_message_chunk", "user_message_chunk", "tool_call")
+
+
+def quota_log_tail(log: Path) -> str:
+    """The last QUOTA_LOG_TAIL_EVENTS session-log lines that could be a runtime refusal (failed
+    tool calls, result/turn events, non-JSON lines), joined; "" when unreadable. The refusal that
+    ends an exit-0 run is at the end of the log (agy's 429: lines 756-758 of 761)."""
+    try:
+        lines = log.read_text(errors="replace").splitlines()[-QUOTA_LOG_TAIL_EVENTS:]
+    except OSError:
+        return ""
+    keep = []
+    for line in lines:
+        try:
+            data = (json.loads(line) or {}).get("data")
+        except (ValueError, AttributeError):
+            keep.append(line)
+            continue
+        if isinstance(data, dict):
+            upd = data.get("sessionUpdate")
+            if upd in QUOTA_LOG_SKIP_UPDATES or (upd == "tool_call_update"
+                                                 and data.get("status") != "failed"):
+                continue
+        keep.append(line)
+    return "\n".join(keep)
+
+
 def exit0_quota_note(rec: dict) -> tuple[str, str] | None:
     """(the NO-REPORT quota note, the text it came from) for a run that exited 0 with a quota
     refusal hidden in the session log, or None. failure_note reads acp-run's stderr only and
@@ -2314,9 +2346,8 @@ def exit0_quota_note(rec: dict) -> tuple[str, str] | None:
     DONE, so rc 0 no longer skips the detection; the note is failure_note's quota form, so check
     and auto-resume treat the slice as a quota stop."""
     agent, model = rec.get("agent", "?"), rec.get("model")
-    try:
-        text = Path(rec.get("log", "")).read_text()
-    except OSError:
+    text = quota_log_tail(Path(rec.get("log", "")))
+    if not text:
         return None
     cls, when = failure_class(text, 0)
     if cls != "quota":
