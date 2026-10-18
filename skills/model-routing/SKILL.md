@@ -267,9 +267,20 @@ check <dir|report>...` classifies later; `acp-dispatch footer --report <path>`
 prints the footer for a Claude Code Agent-tool prompt, which no script can
 drive. Everything below about acp-run's flags still applies underneath it.
 Pass `--est-pct N` when known; near-fit and unmeasured work gets incremental
-checkpoint instructions (`--checkpoint` forces them). A quota death with a
-checkpoint prints `acp-dispatch reroute <record> --agent A --model M`, which
-continues from the report and diff in a linked record instead of restarting.
+checkpoint instructions (`--checkpoint` forces them). **A quota stop is
+resumed in place, automatically** (2026-10-18): finalize schedules
+`acp-dispatch auto-resume` under launchd for the reset time plus 5 min, gated
+on the pool's live headroom (`aiuse --available --json --live`, 20% left,
+re-checked 6 times), up to 3 attempts; the same session continues with a
+prompt saying the stop was the limit, not the agent. The `rearm` waiter waits
+through it; `check` reports `resume-scheduled` (exit 1, still running). A quota
+stop it cannot schedule (`--no-auto-resume`, no session id, an agent without
+load/resume) stays exit 3 and the `check` line ends with the
+`acp-dispatch resume <record> --detach --no-wait` to run after the retry time.
+A quota death with a checkpoint also prints `acp-dispatch reroute <record>
+--agent A --model M`, which continues from the report and diff on another pool
+in a linked record instead of restarting; prefer the in-place resume unless
+the pool is out for days.
 
 - **Agents** (`--list`): claude (via the `claude-agent-acp` adapter), codex
   (via `codex-acp`), copilot, opencode, cursor, qwen, devin, cline,

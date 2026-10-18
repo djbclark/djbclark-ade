@@ -52,7 +52,9 @@ FAKE = textwrap.dedent("""\
     done
     brief=""; log=""; while [ $# -gt 0 ]; do case "$1" in
       -f) brief="$2"; shift;; --log) log="$2"; shift;; esac; shift; done
-    printf '%s\\n' '{"kind":"initialize","data":{"agentCapabilities":{"loadSession":true}}}' '{"kind":"new_session","data":{"sessionId":"fake-session"}}' > "$log"
+    caps='{"loadSession":true}'; [ "$FAKE_CAPS" = none ] && caps='{}'
+    printf '%s\\n' "{\\"kind\\":\\"initialize\\",\\"data\\":{\\"agentCapabilities\\":$caps}}" > "$log"
+    [ "$FAKE_CAPS" = nosid ] || printf '%s\\n' '{"kind":"new_session","data":{"sessionId":"fake-session"}}' >> "$log"
     echo "$@" > /dev/null
     report=$(ggrep -o 'deliverable to `[^`]*`' "$brief" | ghead -1 | gsed 's/.*`\\(.*\\)`/\\1/')
     case "${FAKE_MODE:-writes}" in
@@ -63,6 +65,11 @@ FAKE = textwrap.dedent("""\
       partial)  printf 'STATUS: working\\nhalf\\n' > "$report"; echo "written: $report"; exit 0;;
       nothing)  exit 0;;
       quota)    echo "FAILED quota" >&2; exit 1;;
+      quota_codex_date)  # codex, gpt-6-astra, plektra-small-issues/s1-stderr.txt (2026-10-18), trimmed
+                printf 'STATUS: working\\nsettings search wired; CI running\\n' > "$report"
+                echo 'acp-run: FAILED quota: RequestError: Internal error {"message": "You hit your usage limit. Upgrade to Pro or try again at Oct 18th, 2026 4:41 AM.", "codexErrorInfo": "usageLimitExceeded"}' >&2
+                echo "acp-run: agent=codex stop=error secs=523.0 tools=38 perm=0+/0- fail=quota error='usageLimitExceeded'" >&2
+                exit 1;;
       quota_partial)
                 printf 'STATUS: working\\n' > "$report"
                 echo "acp-run: FAILED quota: RequestError: Internal error {\\"message\\": \\"You hit your usage limit. Upgrade to Pro or try again at 8:51 PM.\\"}" >&2
@@ -142,12 +149,21 @@ class Base(unittest.TestCase):
             "collected_at": "2099-01-01T00:00:00+00:00",
             "snapshot": {"accounts": []},
         }))
+        # A quota stop schedules an in-place resume under launchd (2026-10-18); never a real one here.
+        self.launchctl_calls = self.tmp / "launchctl.calls"
+        self.fake_launchctl = self.tmp / "fake-launchctl"
+        self.fake_launchctl.write_text(f'#!/bin/bash\necho "$@" >> "{self.launchctl_calls}"\nexit 0\n')
+        self.fake_launchctl.chmod(0o755)
+
+    def launchctl(self) -> list[str]:
+        return self.launchctl_calls.read_text().splitlines() if self.launchctl_calls.exists() else []
 
     def base_env(self, mode: str = "writes", **extra: str) -> dict[str, str]:
         return {"FAKE_MODE": mode, "ACP_DISPATCH_MODEL_CACHE": str(self.tmp / "cache"),
                 "ACP_DISPATCH_PREFLIGHT": str(self.tmp / "preflight"),
                 "AIUSE_SNAPSHOT": str(self.no_quota_snap),
                 "PREFLIGHT_COUNT": str(self.tmp / "preflight-count"),
+                "ACP_DISPATCH_LAUNCHCTL": str(self.fake_launchctl),
                 "INFO_COUNT": str(self.tmp / "info-count"), "ACP_DISPATCH_AIUSE": "off", **extra}
 
     def dispatch(self, *extra: str, mode: str = "writes", name: str = "s1",
@@ -286,8 +302,9 @@ class TestDispatch(Base):
 
     def test_reroute_builds_continuation_and_links_records(self):
         first = self.dispatch(mode="quota_partial")
-        self.assertEqual(first.returncode, 3)
+        self.assertEqual(first.returncode, 1)          # resume-scheduled (2026-10-18)
         old = self.out / "jobs" / "s1.json"
+        self.assertEqual(json.loads(old.read_text())["auto_resume"]["state"], "scheduled")
         env = {"FAKE_MODE": "writes", "ACP_DISPATCH_MODEL_CACHE": str(self.tmp / "cache"),
                "ACP_DISPATCH_PREFLIGHT": str(self.tmp / "preflight"),
                "AIUSE_SNAPSHOT": str(self.tmp / "missing.json"), "ACP_DISPATCH_AIUSE": "off"}
@@ -296,6 +313,8 @@ class TestDispatch(Base):
         self.assertEqual(result.returncode, 0, result.stderr)
         new = json.loads((self.out / "jobs" / "s1-reroute-1.json").read_text())
         self.assertEqual(new["rerouted_from"], str(old.resolve()))
+        # the reroute supersedes the scheduled in-place resume of the old record
+        self.assertEqual(json.loads(old.read_text())["auto_resume"]["state"], "cancelled")
         continuation = Path(new["brief"]).read_text()
         self.assertIn("Do not restart", continuation)
         self.assertIn("Last checkpoint report", continuation)
@@ -370,7 +389,7 @@ class TestDispatch(Base):
         self.assertTrue(Path(self.record()["done"]).exists(), ".done is touched even on failure")
 
     def test_acp_run_failure_without_report_keeps_its_summary(self):
-        r = self.dispatch(mode="quota")
+        r = self.dispatch("--no-auto-resume", mode="quota")
         self.assertEqual(r.returncode, 3)
         self.assertIn("FAILED quota", r.stderr)
         self.assertEqual(self.record()["exit"], 1)
@@ -425,27 +444,38 @@ class TestFailureNote(Base):
     """2026-10-10: codex died of quota after writing only `STATUS: working`; the waiter exited 0."""
 
     def test_quota_death_after_status_working_is_no_report_with_a_reason(self):
+        # Since 2026-10-18 a quota stop schedules an in-place resume: the slice is still running
+        # (exit 1, `resume-scheduled`); the NO-REPORT line is written all the same.
         r = self.dispatch(mode="quota_partial")
-        self.assertEqual(r.returncode, 3, r.stdout)
-        self.assertTrue(r.stdout.startswith("no-report\t"), r.stdout)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertTrue(r.stdout.startswith("resume-scheduled\t"), r.stdout)
         rec = self.record()
-        self.assertEqual(rec["status"], "no-report")
+        self.assertEqual(rec["status"], "resume-scheduled")
         last = Path(rec["report"]).read_text().splitlines()[-1]
         self.assertTrue(last.startswith("NO-REPORT: quota (codex, m1, retry at 8:51 PM)"), last)
         self.assertEqual(rec["failure"], last)
         c = run(["check", str(self.out / "jobs" / "s1.json")])
+        self.assertEqual(c.returncode, 1)
+        self.assertIn("resume-scheduled", c.stdout)
+        # opted out: the plain no-report, exit 3, with the manual resume command
+        r = self.dispatch("--no-auto-resume", mode="quota_partial", name="s2")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertTrue(r.stdout.startswith("no-report\t"), r.stdout)
+        self.assertEqual(self.record("s2")["status"], "no-report")
+        c = run(["check", str(self.out / "jobs" / "s2.json")])
         self.assertEqual(c.returncode, 3)
         self.assertIn("NO-REPORT: quota", c.stdout)
+        self.assertIn(" resume ", c.stdout)
 
     def test_reset_in_a_duration_reads_retry_in(self):
         """2026-10-10: agy's refusal said "reset in 2 hours, 47 minutes", not a clock time."""
-        r = self.dispatch(mode="quota_reply")
+        r = self.dispatch("--no-auto-resume", mode="quota_reply")
         self.assertEqual(r.returncode, 3, r.stdout)
         last = Path(self.record()["report"]).read_text().splitlines()[-1]
         self.assertTrue(last.startswith("NO-REPORT: quota (codex, m1, retry in 2 hours, 47 minutes)"), last)
 
     def test_note_is_written_into_an_empty_report_too(self):
-        r = self.dispatch(mode="quota")
+        r = self.dispatch("--no-auto-resume", mode="quota")
         self.assertEqual(r.returncode, 3)
         text = Path(self.record()["report"]).read_text()
         self.assertTrue(text.startswith("NO-REPORT: quota (codex, m1)"), text)
@@ -484,7 +514,7 @@ class TestFailureNote(Base):
         self.assertNotIn("NO-REPORT", Path(self.record()["report"]).read_text())
 
     def test_finalize_twice_does_not_append_twice(self):
-        self.dispatch(mode="quota_partial")
+        self.dispatch("--no-auto-resume", mode="quota_partial")
         rec = self.out / "jobs" / "s1.json"
         r = run(["finalize", str(rec), "--exit", "1"])
         self.assertEqual(r.returncode, 3)
@@ -493,7 +523,8 @@ class TestFailureNote(Base):
 
     def test_rearm_waiter_exits_with_the_check_verdict(self):
         for mode, want in (("writes", 0), ("partial", 1), ("quota_partial", 3), ("blocked", 4)):
-            self.dispatch(mode=mode, name=mode.replace("_", "-"))
+            # --no-auto-resume: with the automatic resume on, the waiter would wait through it
+            self.dispatch("--no-auto-resume", mode=mode, name=mode.replace("_", "-"))
             rearm = self.record(mode.replace("_", "-"))["rearm"]
             self.assertIn(" check ", rearm)
             r = subprocess.run(["bash", "-c", rearm], check=False, capture_output=True, text=True)
@@ -799,7 +830,7 @@ class TestAiuseNoteExhausted(Base):
 
     def test_quota_refusal_agy_claude_records_antigravity_claude_gpt_resets_at(self):
         env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
-        r = self.dispatch_agent("agy", "claude-opus-5-5-high", mode="quota_ts", env=env)
+        r = self.dispatch_agent("agy", "claude-opus-5-5-high", "--no-auto-resume", mode="quota_ts", env=env)
         self.assertEqual(r.returncode, 3)
         calls = self.calls()
         self.assertEqual(len(calls), 1)
@@ -808,7 +839,7 @@ class TestAiuseNoteExhausted(Base):
 
     def test_quota_refusal_agy_gemini_records_antigravity_gemini_resets_in(self):
         env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
-        r = self.dispatch_agent("agy", "gemini-2.5-pro", mode="quota_gemini", env=env)
+        r = self.dispatch_agent("agy", "gemini-2.5-pro", "--no-auto-resume", mode="quota_gemini", env=env)
         self.assertEqual(r.returncode, 3)
         calls = self.calls()
         self.assertEqual(len(calls), 1)
@@ -816,7 +847,7 @@ class TestAiuseNoteExhausted(Base):
 
     def test_quota_refusal_agy_gpt_records_antigravity_claude_gpt_resets_in(self):
         env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
-        r = self.dispatch_agent("agy", "gpt-oss-120b", mode="quota_reply", env=env)
+        r = self.dispatch_agent("agy", "gpt-oss-120b", "--no-auto-resume", mode="quota_reply", env=env)
         self.assertEqual(r.returncode, 3)
         calls = self.calls()
         self.assertEqual(len(calls), 1)
@@ -824,7 +855,7 @@ class TestAiuseNoteExhausted(Base):
 
     def test_quota_refusal_codex_records_codex_resets_at_from_clock_time(self):
         env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
-        r = self.dispatch_agent("codex", "m1", mode="quota_partial", env=env)
+        r = self.dispatch_agent("codex", "m1", "--no-auto-resume", mode="quota_partial", env=env)
         self.assertEqual(r.returncode, 3)
         calls = self.calls()
         self.assertEqual(len(calls), 1)
@@ -833,7 +864,7 @@ class TestAiuseNoteExhausted(Base):
 
     def test_unknown_agent_runs_nothing_and_says_so(self):
         env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
-        r = self.dispatch_agent("mystery", "m1", mode="quota_unknown", env=env)
+        r = self.dispatch_agent("mystery", "m1", "--no-auto-resume", mode="quota_unknown", env=env)
         self.assertEqual(r.returncode, 3)
         self.assertEqual(self.calls(), [])
         rec = self.record()
@@ -841,7 +872,7 @@ class TestAiuseNoteExhausted(Base):
 
     def test_no_reset_time_runs_nothing_and_says_so(self):
         env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
-        r = self.dispatch_agent("codex", "m1", mode="quota", env=env)
+        r = self.dispatch_agent("codex", "m1", "--no-auto-resume", mode="quota", env=env)
         self.assertEqual(r.returncode, 3)
         self.assertEqual(self.calls(), [])
         rec = self.record()
@@ -852,13 +883,13 @@ class TestAiuseNoteExhausted(Base):
         bad_aiuse.write_text("#!/bin/bash\necho 'aiuse crashed' >&2\nexit 1\n")
         bad_aiuse.chmod(0o755)
         env = {"ACP_DISPATCH_AIUSE": str(bad_aiuse)}
-        r = self.dispatch_agent("codex", "m1", mode="quota_partial", env=env)
+        r = self.dispatch_agent("codex", "m1", "--no-auto-resume", mode="quota_partial", env=env)
         self.assertEqual(r.returncode, 3)
         self.assertIn("aiuse", r.stderr)
 
     def test_acp_dispatch_aiuse_off_disables_recording(self):
         env = {"ACP_DISPATCH_AIUSE": "off"}
-        r = self.dispatch_agent("codex", "m1", mode="quota_partial", env=env)
+        r = self.dispatch_agent("codex", "m1", "--no-auto-resume", mode="quota_partial", env=env)
         self.assertEqual(r.returncode, 3)
         self.assertEqual(self.calls(), [])
 
@@ -895,7 +926,7 @@ class TestAiuseNoteExhausted(Base):
 
     def test_quota_death_voids_cached_preflight(self):
         self.assertEqual(self.dispatch(name="first").returncode, 0)
-        self.assertEqual(self.dispatch(name="dies", mode="quota_checkpoint").returncode, 3)
+        self.assertEqual(self.dispatch("--no-auto-resume", name="dies", mode="quota_checkpoint").returncode, 3)
         self.assertEqual(self.preflight_probes(), 1)
         self.assertEqual(self.dispatch(name="after").returncode, 0)
         self.assertEqual(self.preflight_probes(), 2)
@@ -906,13 +937,20 @@ class TestAiuseNoteExhausted(Base):
             "provider": "codex", "windows": [{"label": "weekly", "remaining_percent": 12.0}]}]}}))
         env = {"AIUSE_SNAPSHOT": str(snap), "ACP_DISPATCH_AIUSE": "off"}
         r = self.dispatch("--est-pct", "9", mode="quota_checkpoint", env=env)
-        self.assertEqual(r.returncode, 3)
+        self.assertEqual(r.returncode, 1)                 # resume-scheduled (2026-10-18)
         rec_path = self.out / "jobs" / "s1.json"
         chk = run(["check", str(rec_path)])
-        self.assertEqual(chk.returncode, 5)
-        self.assertIn("quota-checkpointed", chk.stdout)
-        self.assertIn(" reroute ", chk.stdout)
-        r2 = self.dispatch("--name", "s2", mode="quota", env=env)
+        self.assertEqual(chk.returncode, 1)
+        self.assertIn("resume-scheduled", chk.stdout)
+        self.assertIn(" reroute ", chk.stdout)            # the checkpoint reroute stays on offer
+        # opted out of the automatic resume: the checkpoint reroute verdict as before
+        r1 = self.dispatch("--est-pct", "9", "--no-auto-resume", mode="quota_checkpoint", name="s1b", env=env)
+        self.assertEqual(r1.returncode, 3)
+        chk1 = run(["check", str(self.out / "jobs" / "s1b.json")])
+        self.assertEqual(chk1.returncode, 5)
+        self.assertIn("quota-checkpointed", chk1.stdout)
+        self.assertIn(" reroute ", chk1.stdout)
+        r2 = self.dispatch("--name", "s2", "--no-auto-resume", mode="quota", env=env)
         self.assertEqual(r2.returncode, 3)
         chk2 = run(["check", str(self.out / "jobs" / "s2.json")])
         self.assertIn("no-report", chk2.stdout.splitlines()[0])

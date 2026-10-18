@@ -243,7 +243,9 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    itself; for an Agent-tool sub-agent paste the output of
    `acp-dispatch footer --report <scratchpad>/<name>-report.md`. Read the
    report file, never the final message. `acp-dispatch check <dir>` before
-   the gate lists no-report and `BLOCKED:` slices. Claude Code refuses a
+   the gate lists no-report and `BLOCKED:` slices; a `resume-scheduled` one
+   (exit 1) is a quota stop being resumed in place automatically, so wait for
+   it rather than re-dispatching the brief (2026-10-18). Claude Code refuses a
    sub-agent Write to a basename starting with `report`, `summary`,
    `findings` or `analysis`: a sub-agent writer writes `draft.md` in the run
    folder and the lead moves it to `report.md` (seen 2026-10-09).

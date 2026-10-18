@@ -258,7 +258,9 @@ outside the repo in `~/.local/state/jev/eval/` (`<dataset>.jsonl`, `<dataset>.{j
 2. **dispatch-verdict truth is a text rule.** `classify()` in `bin/acp-dispatch` sets the status
    from the report's first line (`BLOCKED:`), last line (`NO-REPORT`, `DONE`) and the recorded
    failure note. So that dataset measures how well Jev re-derives a regex from the last 4000
-   characters, not whether the work was good.
+   characters, not whether the work was good. (Since 2026-10-18 one verdict is not in the text at
+   all: `resume-scheduled`, a quota stop whose in-place resume is pending, comes from the record's
+   `auto_resume` state; the report still ends `NO-REPORT: quota`.)
 3. **Skew.** 74 of 99 outcomes are `done`; `refused` has no rows and `blocked` one. Slice-kind is
    39 code, 18 research, 11 judgment, 3 mechanical and 1 github, so the per-class rows for the
    rare kinds mean almost nothing. Prompt effort is 38 mechanical, 43 normal, 19 hard.

@@ -24,7 +24,10 @@ agent has an ACP mode, and the per-CLI headless forms only where it has none
 
 1. **Code.** A rule or a table: `route_agent.py plan`, `acp-dispatch`'s exit
    codes, `aiuse --available`'s exit 3, `git diff --name-only` to pick tests.
-   Deterministic, free, and auditable.
+   Deterministic, free, and auditable. The reaction to a quota stop is code
+   too (2026-10-18): `acp-dispatch` schedules the in-place resume of the same
+   session itself (exit 1 `resume-scheduled`, the waiter waits through it);
+   only a non-quota exit 3 is a re-task decision for the judgment tier.
 2. **A typed decision model**, a call that returns a probability per option
    and no text. TypeSafe's Jev is one (the `typesafe-ai` skill; needs a
    TypeSafe API key, stored in `sudo-secretspec` as `TYPESAFE_API_KEY` since 2026-10-11, **in shadow mode only since 2026-10-11** (`bin/jev`, `docs/jev.md`)). Code reads

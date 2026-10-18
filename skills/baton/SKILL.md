@@ -48,9 +48,14 @@ under the task directory the Tier 1 pointer names; never adopt a record whose
    temp-file-and-`mv -f` form (`.closed=(now|floor)`). Records are closed, never
    deleted. A rearm written by `acp-dispatch` since 2026-10-10 ends in
    `acp-dispatch check <record>`: exit 1 means partial, 3 means no-report (a
-   last line `NO-REPORT: ...` says why, e.g. a quota refusal), and 4 means
-   BLOCKED. An older rearm exits 0 on any `.done`, so run `acp-dispatch check`
-   on its record yourself.
+   last line `NO-REPORT: ...` says why), and 4 means BLOCKED. A quota stop is
+   resumed in place automatically (2026-10-18): the waiter keeps waiting
+   through the scheduled resume, and `check` on such a record prints
+   `resume-scheduled` with exit 1 (still running; re-arm the waiter). Exit 3
+   with `NO-REPORT: quota` means no automatic resume is pending; the line ends
+   with the exact `acp-dispatch resume <record> --detach --no-wait` to run
+   after the retry time, never a fresh dispatch. An older rearm exits 0 on any
+   `.done`, so run `acp-dispatch check` on its record yourself.
 
 If a waiter times out (it is bounded) with no `.done`, check the detached job
 is still alive (`launchctl list | ggrep <label>`) before re-arming once more or

@@ -7,6 +7,7 @@
                  [--task TASK | --out DIR] [--perm all|deny] [--timeout S]
                  [--lead NAME] [--detach [--no-wait] [--wait-timeout S]] [--dry-run] [--json]
                  [--min-headroom PCT] [--est-pct PCT] [--checkpoint] [--no-preflight]
+                 [--no-auto-resume]
     acp-dispatch footer --report PATH [--lead NAME]      the shared footer, filled in, for an
                                                          Agent-tool prompt (paste it verbatim)
     acp-dispatch check (PATH)...                         classify reports: PATH is a report file,
@@ -14,7 +15,10 @@
     acp-dispatch finalize RECORD --exit RC               (internal) what the detached runner calls
     acp-dispatch extend RECORD SECONDS                  add seconds, or 0 for no deadline
     acp-dispatch resume RECORD [--timeout S] [-p TEXT | -f FILE] [--detach --no-wait]
+                 [--no-auto-resume]
     acp-dispatch reroute RECORD --agent A --model M [--detach --no-wait]
+    acp-dispatch auto-resume RECORD --attempt N          (internal) what the scheduled resume
+                                                         runner calls after a quota stop
 
 What it replaces: the dispatch recipe that bigteam, model-routing and home-agents.md used to
 spell out in prose and every dispatcher retyped — the report-file naming, "write the full
@@ -71,12 +75,38 @@ with first line `STATUS: timed out` and last line DONE. Such a report classifies
 `acp-run exit=124 (timed out ...)`, and dispatch and check exit 1, never 0. The rearm waiter allows
 timeout + wrap-up grace + 300 s.
 
+A quota stop is resumed in place, automatically (operator 2026-10-18: "tokens spent thinking about
+a problem are something"; three codex slices had been stopped by the 5-hour limit and the lead was
+about to re-task them from fresh briefs). When finalize writes `NO-REPORT: quota (...)` and the
+record has an ACP session id and the agent advertises session/load or session/resume, finalize
+schedules a one-shot `acp-dispatch auto-resume RECORD` under launchd (the same mechanism as
+--detach, so it outlives the lead's session) for the reset time plus a 5-minute margin: the reset
+time comes from acp-run's stderr, else from the pool's `resets_at` in aiuse's snapshot, else a
+30-minute back-off. Before resuming, the runner gates on the pool's live headroom
+(`aiuse --available --json --live`, 20% left; re-checked up to 6 times, 10 min apart, then it gives
+up with the manual command in the record). The resume reopens the same session with a prompt
+saying the stop was the usage limit, not the agent: continue, redo nothing finished, complete the
+report and the `.done`. Three automatic attempts per slice, then `given-up`. The record's
+`auto_resume` field carries state, attempt, `not_before_iso`, label and runner; `resume_count`
+links the runs. `--no-auto-resume` (dispatch and resume) turns it off for that slice;
+ACP_DISPATCH_NO_AUTO_RESUME=1 for a whole session. A record that already has `closed` is never
+scheduled. The `rearm` waiter does not end on such a stop: `wait` sees the pending auto-resume and
+keeps waiting through it to the real end (bounded: reset + gate window + 15 min), so a lead's
+background waiter needs no change. `check` on a record in that state prints `resume-scheduled` and
+exits 1 (still running, like `running`/`pending`); exit 3 keeps meaning a real no-report. A quota
+stop that cannot be resumed automatically (no session id, agent without load/resume, opted out,
+attempts exhausted) stays exit 3 and the `check` line ends with the exact
+`acp-dispatch resume <record>` command and the retry time.
+
 Exit codes (dispatch and check):
     0    report delivered and ends in DONE (dispatch: and acp-run exited 0)
-    1    report present but unfinished (no DONE), or delivered with a non-zero acp-run exit
+    1    report present but unfinished (no DONE), or delivered with a non-zero acp-run exit;
+         also `running`, `pending` and `resume-scheduled` (a quota stop whose in-place resume is
+         scheduled: still running, wait for the rearm waiter)
     2    usage (missing or unknown --model, bad name, report basename Claude Code would refuse, ...)
     3    delivery failure: the agent finished (or died) and there is no report, or its report
-         ends in a NO-REPORT: line (acp-run failed before the agent wrote DONE)
+         ends in a NO-REPORT: line (acp-run failed before the agent wrote DONE) and no automatic
+         resume is pending; for a quota stop the line carries the manual resume command
     4    BLOCKED: the report's first line is a question for the lead; answer it, then resume
     5    pool unavailable before launch; re-plan with --exclude (no slice attempt consumed)
     124  timed out waiting for the .done marker (--detach without --no-wait)
@@ -169,7 +199,22 @@ CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md
 PERM_RE = re.compile(r"^(all|deny|scoped:.+)$")
 
 STATUS_EXIT = {"done": 0, "partial": 1, "no-report": 3, "blocked": 4, "unavailable": 5,
-               "quota-checkpointed": 5, "running": 1, "pending": 1}
+               "quota-checkpointed": 5, "running": 1, "pending": 1, "resume-scheduled": 1}
+# Automatic in-place resume after a quota stop (operator 2026-10-18; see the docstring).
+AUTO_RESUME_MAX = 3                      # automatic attempts per slice, then given-up
+AUTO_RESUME_MARGIN = 5 * 60              # seconds after the reset before the first headroom check
+AUTO_RESUME_BACKOFF = 30 * 60            # when neither stderr nor aiuse gives a reset time
+AUTO_RESUME_MIN_HEADROOM = float(os.environ.get("ACP_DISPATCH_RESUME_HEADROOM", "20"))
+AUTO_RESUME_GATE_TRIES = 6
+AUTO_RESUME_GATE_POLL = 10 * 60
+AUTO_RESUME_SLEEP_POLL = 60              # the runner re-reads the record this often while it waits
+AUTO_RESUME_PENDING = ("scheduled", "waiting-headroom", "resuming")
+AUTO_RESUME_TEXT = (
+    "The previous turn was stopped by the provider's usage limit, not by anything you did, and the "
+    "limit has reset. Continue the brief from where you left off in this same session: do not redo "
+    "finished work (check `git status` and `git diff` for what is already there), finish the remaining "
+    "steps, then write the complete report and touch its `.done` marker as the brief says.\n\n"
+    "Original brief:\n")
 UNAVAILABLE_EXIT = 5
 LOG_ACTIVE_SEC = 5 * 60
 PREFLIGHT_TTL = 10 * 60
@@ -444,10 +489,22 @@ def session_info(rec: dict) -> tuple[str | None, bool | None]:
 def wait_record(record: Path) -> int:
     # Re-read the limit: an already-armed waiter follows extend (2026-10-11).
     stale_warned_ref: float | None = None
+    resume_noted: int | None = None
     while True:
         rec = json.loads(record.read_text())
+        ar = rec.get("auto_resume") or {}
         if Path(rec["done"]).exists():
-            return 0
+            if ar.get("state") not in AUTO_RESUME_PENDING or rec.get("closed"):
+                return 0
+            # A quota stop with an in-place resume scheduled is not the end (2026-10-18): wait
+            # through the reset, the headroom gate and the resumed run, bounded.
+            if time.time() > float(ar.get("not_before") or 0) + AUTO_RESUME_GATE_TRIES * AUTO_RESUME_GATE_POLL + 900:
+                return 124
+            if resume_noted != ar.get("attempt"):
+                print(f"acp-dispatch: {rec['name']}: {auto_resume_detail(ar)}", file=sys.stderr)
+                resume_noted = ar.get("attempt")
+            time.sleep(5)
+            continue
         now = time.time()
         seconds = rec.get("wait_timeout", 0)
         if seconds and now > rec["started"] + seconds:
@@ -687,10 +744,98 @@ def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | Non
     return AGENT_PROVIDER_MAP.get(agent)
 
 
+MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep",
+                                      "oct", "nov", "dec"), start=1)}
+MONTH_DATE_RE = re.compile(
+    r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})"
+    r"(?:,?\s+(\d{1,2})(?::(\d{2}))?\s*([AaPp])\.?[Mm]\.?)?", re.IGNORECASE)
+ISO_RESET_RE = re.compile(
+    r"quotaResetTimeStamp:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))")
+PLAIN_RESET_RE = re.compile(
+    r"limit will reset at\s+(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})(?:\s*(Z|[+-]\d{2}:?\d{2}))?", re.IGNORECASE)
+DURATION_UNITS = {
+    "d": 86400, "day": 86400, "days": 86400,
+    "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+    "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+    "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+}
+
+
+def _month_date(val: str) -> datetime | None:
+    """codex's `try again at Oct 18th, 2026 4:41 AM` (the operator's local clock), as an aware datetime.
+    The clock-time branch used to read the `18` of `18th` as the hour (2026-10-18)."""
+    m = MONTH_DATE_RE.search(val)
+    if not m:
+        return None
+    month = MONTHS[m.group(1).lower()[:3]]
+    hour = int(m.group(4)) if m.group(4) else 0
+    minute = int(m.group(5)) if m.group(5) else 0
+    if m.group(6):
+        if m.group(6).lower() == "p" and hour < 12:
+            hour += 12
+        elif m.group(6).lower() == "a" and hour == 12:
+            hour = 0
+    try:
+        return datetime(int(m.group(3)), month, int(m.group(2)), hour, minute).astimezone()
+    except ValueError:
+        return None
+
+
+def _duration_seconds(val: str) -> int | None:
+    matches = list(re.finditer(r"(\d+(?:\.\d+)?)\s*([a-zA-Z]+)", val))
+    if not matches:
+        return None
+    total = 0.0
+    for m in matches:
+        unit = DURATION_UNITS.get(m.group(2).lower())
+        if unit is None:
+            return None
+        total += float(m.group(1)) * unit
+    return int(total)
+
+
+def parse_reset_datetime(text: str, when_match: re.Match | None,
+                         now: datetime | None = None) -> datetime | None:
+    """The reset time a quota refusal names, as an aware datetime, or None. The same phrasings
+    parse_reset_for_aiuse knows: an ISO stamp, zcode's `limit will reset at 2026-10-14 22:56:01`,
+    codex's `try again at Oct 18th, 2026 4:41 AM` or `at 8:51 PM`, agy's `in 2 hours, 47 minutes`."""
+    now = now or datetime.now().astimezone()
+    m = ISO_RESET_RE.search(text)
+    if m:
+        return datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
+    m = PLAIN_RESET_RE.search(text)
+    if m:
+        stamp = datetime.fromisoformat(m.group(1).replace(" ", "T") + (m.group(2) or "").replace("Z", "+00:00"))
+        return stamp if stamp.tzinfo else stamp.astimezone()
+    if not when_match:
+        return None
+    prep = when_match.group(1).lower()
+    val = when_match.group(2).strip()
+    dated = _month_date(val)
+    if dated:
+        return dated
+    if prep == "at" or re.search(r"\b\d{1,2}(?::\d{2})?\s*[AP]M\b", val, re.IGNORECASE):
+        m_clock = re.search(r"(\d{1,2})(?::(\d{2}))?\s*([AP]M)?", val, re.IGNORECASE)
+        if m_clock:
+            hour = int(m_clock.group(1))
+            minute = int(m_clock.group(2)) if m_clock.group(2) else 0
+            meridiem = m_clock.group(3).upper() if m_clock.group(3) else None
+            if meridiem == "PM" and hour < 12:
+                hour += 12
+            elif meridiem == "AM" and hour == 12:
+                hour = 0
+            if hour > 23 or minute > 59:
+                return None
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            return target + timedelta(days=1) if target <= now else target
+    secs = _duration_seconds(val)
+    return now + timedelta(seconds=secs) if secs else None
+
+
 def parse_reset_for_aiuse(text: str, when_match: re.Match | None) -> tuple[str, str] | None:
     """Extract reset argument for aiuse note-exhausted: ('--resets-at', ISO) or ('--resets-in', DURATION)."""
     # 1. Exact ISO timestamp in stderr (e.g. quotaResetTimeStamp:2026-10-11T02:46:28Z)
-    m_ts = re.search(r"quotaResetTimeStamp:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))", text)
+    m_ts = ISO_RESET_RE.search(text)
     if m_ts:
         return "--resets-at", m_ts.group(1)
 
@@ -703,6 +848,10 @@ def parse_reset_for_aiuse(text: str, when_match: re.Match | None) -> tuple[str, 
 
     prep = when_match.group(1).lower()
     val = when_match.group(2).strip()
+
+    dated = _month_date(val)
+    if dated:
+        return "--resets-at", dated.isoformat()
 
     # 2. Clock time (e.g. "at 8:51 PM", "at 20:51")
     if prep == "at" or re.search(r"\b\d{1,2}(?::\d{2})?\s*[AP]M\b", val, re.IGNORECASE):
@@ -785,6 +934,266 @@ def record_quota_refusal_in_aiuse(agent: str, model: str | None, text: str, rc: 
         return "failed", ""
 
     return "ok", ""
+
+
+# ---------------------------------------------------------------- auto-resume after a quota stop
+
+def aiuse_bin() -> str | None:
+    """The aiuse to call, or None when ACP_DISPATCH_AIUSE turns it off (tests)."""
+    override = os.environ.get("ACP_DISPATCH_AIUSE")
+    if override and override.lower() in ("off", "0", "false", "none", "no"):
+        return None
+    return override or shutil.which("aiuse") or "aiuse"
+
+
+def _pool_entries(items: list, provider: str, family: str | None) -> list[dict]:
+    rows = []
+    for it in items or []:
+        if not isinstance(it, dict) or it.get("provider") != provider:
+            continue
+        if family and it.get("pool_family") not in (None, family):
+            continue
+        rows.append(it)
+    return rows
+
+
+def _parse_stamp(value) -> datetime | None:
+    try:
+        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return stamp if stamp.tzinfo else stamp.astimezone()
+
+
+def aiuse_reset_time(agent: str, model: str | None) -> datetime | None:
+    """The pool's next reset from aiuse's own snapshot (`resets_at` of an exhausted window, else the
+    account's `available_at`), for a refusal whose text names no time. Never probes."""
+    mapping = map_agent_to_provider(agent, model)
+    if mapping is None:
+        return None
+    provider, family = mapping
+    path = Path(os.environ.get("AIUSE_SNAPSHOT") or route_module().SNAPSHOT)
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    snap = data.get("snapshot", data)
+    now = datetime.now().astimezone()
+    stamps: list[datetime] = []
+    for acct in _pool_entries(snap.get("accounts") or [], provider, None):
+        if acct.get("error"):
+            continue
+        for w in acct.get("windows") or []:
+            if family and w.get("pool_family") not in (None, family):
+                continue
+            left = w.get("headroom_percent", w.get("remaining_percent"))
+            exhausted = w.get("state") == "exhausted" or (left is not None and float(left) <= 1.0)
+            stamp = _parse_stamp(w.get("resets_at")) if exhausted else None
+            if stamp and stamp > now:
+                stamps.append(stamp)
+        stamp = _parse_stamp(acct.get("available_at"))
+        if stamp and stamp > now:
+            stamps.append(stamp)
+    return min(stamps) if stamps else None
+
+
+def pool_headroom_live(agent: str, model: str | None) -> tuple[float | None, str]:
+    """(percent left on the pool now, how it was read) from `aiuse --available --json --live`.
+    None means unknown (aiuse off, failed, or the pool is not listed): the caller goes ahead."""
+    mapping = map_agent_to_provider(agent, model)
+    if mapping is None:
+        return None, "unknown agent"
+    binary = aiuse_bin()
+    if not binary:
+        return None, "aiuse off"
+    provider, family = mapping
+    try:
+        proc = subprocess.run([binary, "--available", "--json", "--live"], check=False,
+                              capture_output=True, text=True, timeout=240)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"aiuse failed ({e})"
+    raw = proc.stdout
+    start = raw.find("{")
+    try:
+        data = json.loads(raw[start:]) if start >= 0 else {}
+    except ValueError:
+        return None, f"aiuse output unreadable (exit {proc.returncode})"
+    for key in ("available", "excluded"):
+        for row in _pool_entries(data.get(key) or [], provider, family):
+            left = row.get("headroom_percent")
+            if left is None:
+                windows = [w.get("headroom_percent", w.get("remaining_percent")) for w in row.get("windows") or []]
+                windows = [float(x) for x in windows if x is not None]
+                left = min(windows) if windows else None
+            if left is not None:
+                return float(left), f"aiuse {key}: {float(left):.1f}% left"
+    return None, "pool not listed by aiuse"
+
+
+def launchctl_bin() -> str:
+    return os.environ.get("ACP_DISPATCH_LAUNCHCTL") or "launchctl"
+
+
+def submit_launchd(label: str, runner: Path, out_log: Path, err_log: Path) -> str | None:
+    """Submit RUNNER under LABEL; the error text when launchctl refused, else None."""
+    sub = [launchctl_bin(), "submit", "-l", label, "-o", str(out_log), "-e", str(err_log),
+           "--", "/bin/bash", str(runner)]
+    try:
+        r = subprocess.run(sub, check=False, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return str(e)
+    if r.returncode != 0:
+        return f"launchctl submit failed ({r.returncode}): {r.stderr.strip()}"
+    return None
+
+
+def auto_resume_runner_script(rec: dict, label: str, attempt: int, self_path: Path) -> str:
+    q = shlex.quote
+    return f"""#!/bin/bash
+# written by acp-dispatch: one-shot in-place resume after a quota stop (attempt {attempt});
+# launchd restarts a submitted job on exit, so this removes its own label
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export CLAUDE_CODE_SESSION_ID={q(rec.get("owner") or "")}
+python3 {q(str(self_path))} auto-resume {q(rec["record"])} --attempt {attempt}
+launchctl remove {q(label)}
+"""
+
+
+def manual_resume_hint(rec: dict, record_path: Path) -> str:
+    """The command a lead runs to continue a quota-stopped slice by hand, with the retry time."""
+    ar = rec.get("auto_resume") or {}
+    when = ar.get("not_before_iso")
+    if not when:
+        m = re.search(r"retry (?:at|in|after) ([^)]+)\)", str(rec.get("failure", "")))
+        when = m.group(1) if m else None
+    script = shlex.quote(str(Path(__file__).resolve()))
+    return (f"resume in place after {when or 'the reset'}: {script} resume "
+            f"{shlex.quote(str(rec.get('record') or record_path))} --detach --no-wait")
+
+
+def auto_resume_detail(ar: dict) -> str:
+    bits = [f"quota stop; resumes in place at {ar.get('not_before_iso', '?')}",
+            f"attempt {ar.get('attempt', '?')}/{ar.get('max', AUTO_RESUME_MAX)}",
+            f"reset from {ar.get('reset_source', '?')}"]
+    if ar.get("state") != "scheduled":
+        bits.append(ar.get("detail") or ar["state"])
+    if ar.get("label"):
+        bits.append(f"launchd {ar['label']}")
+    return "; ".join(bits) + "; still running: the rearm waiter waits through it"
+
+
+def schedule_auto_resume(record_path: Path, rec: dict, stderr_text: str) -> None:
+    """Called by finalize for a quota NO-REPORT: schedule one in-place resume of this record under
+    launchd, or say in rec['auto_resume'] why not (the lead then resumes by hand). Mutates rec."""
+    prev = rec.get("auto_resume") or {}
+    attempt = int(prev.get("attempt") or 0) + 1
+    history = list(prev.get("history") or [])
+    if prev.get("state") in AUTO_RESUME_PENDING and prev.get("label"):
+        return                                   # a finalize re-run: the earlier schedule stands
+
+    def off(state: str, why: str) -> None:
+        rec["auto_resume"] = {"state": state, "detail": why, "attempt": attempt - 1,
+                              "max": AUTO_RESUME_MAX, "history": history}
+
+    if os.environ.get("ACP_DISPATCH_NO_AUTO_RESUME") == "1" or prev.get("state") == "off":
+        return off("off", prev.get("detail") or "ACP_DISPATCH_NO_AUTO_RESUME=1")
+    if rec.get("closed"):
+        return off("skipped", "record already closed")
+    if attempt > AUTO_RESUME_MAX:
+        return off("given-up", f"{AUTO_RESUME_MAX} automatic resumes already made")
+    sid, supported = rec.get("session_id"), session_info(rec)[1]
+    if not sid:
+        return off("skipped", "no ACP session id in the record or log")
+    if supported is False:
+        return off("skipped", f"{rec.get('agent')} advertises neither load nor resume")
+    now = datetime.now().astimezone()
+    when = parse_reset_datetime(stderr_text, failure_class(stderr_text, rec.get("exit"))[1], now)
+    source = "stderr"
+    if when is None:
+        when, source = aiuse_reset_time(rec.get("agent", ""), rec.get("model")), "aiuse"
+    if when is None:
+        when, source = now + timedelta(seconds=AUTO_RESUME_BACKOFF), "backoff"
+    not_before = max(when + timedelta(seconds=AUTO_RESUME_MARGIN), now + timedelta(seconds=60))
+    out = Path(rec["out"])
+    label = f"acp-dispatch.{rec.get('task') or out.name}.{rec['name']}.resume{attempt}"
+    runner = out / f"{rec['name']}-resume{attempt}.sh"
+    write_atomic(runner, auto_resume_runner_script(rec, label, attempt, Path(__file__).resolve()), mode=0o700)
+    ar = {"state": "scheduled", "attempt": attempt, "max": AUTO_RESUME_MAX,
+          "not_before": not_before.timestamp(), "not_before_iso": not_before.isoformat(timespec="minutes"),
+          "reset_source": source, "label": label, "runner": str(runner), "scheduled_at": time.time(),
+          "history": history}
+    err = submit_launchd(label, runner, out / f"{rec['name']}-resume{attempt}.out",
+                         out / f"{rec['name']}-resume{attempt}.err")
+    if err:
+        ar.update(state="failed", detail=err, label=None)
+        print(f"acp-dispatch: warning: auto-resume not scheduled: {err}", file=sys.stderr)
+    rec["auto_resume"] = ar
+
+
+def auto_resume_record(record: Path, attempt: int) -> int:
+    """The scheduled runner: wait for the reset, gate on headroom, then resume the record in this
+    process (execute + finalize, so a second quota stop schedules the next attempt)."""
+    record = record.expanduser().resolve()
+
+    def current() -> tuple[dict, dict]:
+        rec = json.loads(record.read_text())
+        return rec, rec.get("auto_resume") or {}
+
+    def superseded(rec: dict, ar: dict) -> str | None:
+        if rec.get("closed"):
+            return "record closed"
+        if ar.get("attempt") != attempt:
+            return f"attempt {ar.get('attempt')} is current, not {attempt}"
+        if ar.get("state") not in ("scheduled", "waiting-headroom"):
+            return f"state is {ar.get('state')}"
+        if not rec.get("finished") and not Path(rec["done"]).exists():
+            return "slice is running again"
+        return None
+
+    rec, ar = current()
+    why = superseded(rec, ar)
+    if why:
+        print(f"auto-resume\t{rec.get('name')}\tsuperseded: {why}")
+        return 0
+    while time.time() < float(ar.get("not_before") or 0):
+        time.sleep(max(1, min(AUTO_RESUME_SLEEP_POLL, float(ar["not_before"]) - time.time())))
+        rec, ar = current()
+        why = superseded(rec, ar)
+        if why:
+            print(f"auto-resume\t{rec.get('name')}\tsuperseded: {why}")
+            return 0
+    history = list(ar.get("history") or [])
+    for n in range(1, AUTO_RESUME_GATE_TRIES + 1):
+        left, how = pool_headroom_live(rec["agent"], rec.get("model"))
+        if left is None or left >= AUTO_RESUME_MIN_HEADROOM:
+            break
+        detail = f"{left:.1f}% left < {AUTO_RESUME_MIN_HEADROOM:g}% (check {n}/{AUTO_RESUME_GATE_TRIES})"
+        if n == AUTO_RESUME_GATE_TRIES:
+            history.append({"attempt": attempt, "outcome": "given-up: " + detail, "at": time.time()})
+            rec = update_record(record, auto_resume={**ar, "state": "given-up", "detail": detail, "history": history})
+            print(f"auto-resume\t{rec['name']}\tgiven-up: {detail}; {manual_resume_hint(rec, record)}")
+            return 3
+        rec = update_record(record, auto_resume={**ar, "state": "waiting-headroom", "detail": detail})
+        ar = rec["auto_resume"]
+        time.sleep(AUTO_RESUME_GATE_POLL)
+        rec, _ = current()
+        why = superseded(rec, ar)
+        if why:
+            print(f"auto-resume\t{rec.get('name')}\tsuperseded: {why}")
+            return 0
+    history.append({"attempt": attempt, "outcome": "resumed", "at": time.time(), "headroom": how})
+    update_record(record, auto_resume={**ar, "state": "resuming", "detail": how, "history": history,
+                                       "resumed_at": time.time()})
+    ns = argparse.Namespace(record=str(record), timeout=None, prompt=None, prompt_file=None, detach=False,
+                            no_wait=False, wait_timeout=None, no_auto_resume=False)
+    try:
+        return resume_record(ns, quota_stop=True)
+    except SystemExit as e:
+        rec, ar = current()
+        if ar.get("state") == "resuming":
+            update_record(record, auto_resume={**ar, "state": "failed",
+                                               "detail": f"resume exited {e.code}; see {rec['name']}-resume{attempt}.err"})
+        raise
 
 
 OUTAGE_HTTP = re.compile(
@@ -1036,6 +1445,18 @@ def check_items(items: list[str]) -> int:
     return worst
 
 
+def checkpoint_preserved(report: Path) -> bool:
+    """A checkpoint-mode report with real content above its NO-REPORT line: worth a reroute."""
+    try:
+        rlines = [ln for ln in report.read_text().splitlines() if ln.strip()]
+    except OSError:
+        return False
+    if len(rlines) < 2 or not rlines[0].strip().upper().startswith("STATUS: WORKING"):
+        return False
+    body = rlines[:-1] if rlines[-1].strip().startswith(NO_REPORT_PREFIX) else rlines
+    return len(body) >= 2
+
+
 def check_record(path: Path) -> tuple[str, str, str, str]:
     try:
         rec = json.loads(path.read_text())
@@ -1052,21 +1473,20 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
         det += f"{ACP_EXIT_NOTE}{rec['exit']}" + (" (timed out; the report was written in the wrap-up turn)"
                                                  if rec["exit"] == 124 else "")
     failure = str(rec.get("failure", "")).lower()
-    if rec.get("checkpoint") and "quota" in failure and report.exists():
-        try:
-            rtext = report.read_text()
-        except OSError:
-            rtext = ""
-        rlines = [ln for ln in rtext.splitlines() if ln.strip()]
-        if (len(rlines) >= 2 and rlines[0].strip().upper().startswith("STATUS: WORKING")):
-            tail = rlines[-1].strip()
-            body = rlines[:-1] if tail.startswith(NO_REPORT_PREFIX) else rlines
-            if len(body) >= 2:
-                st = "quota-checkpointed"
-                script = shlex.quote(str(Path(__file__).resolve()))
-                rec_path = shlex.quote(str(path))
-                det = (f"checkpoint preserved; reroute: {script} reroute {rec_path} "
-                       "--agent AGENT --model MODEL")
+    ar = rec.get("auto_resume") or {}
+    script, rec_path = shlex.quote(str(Path(__file__).resolve())), shlex.quote(str(path))
+    reroute = (f"{script} reroute {rec_path} --agent AGENT --model MODEL"
+               if rec.get("checkpoint") and "quota" in failure and checkpoint_preserved(report) else None)
+    if finished and ar.get("state") in AUTO_RESUME_PENDING and not rec.get("closed"):
+        # Still running as far as the lead is concerned: the scheduled resume reopens the session.
+        det = auto_resume_detail(ar) + (f"; or reroute now: {reroute}" if reroute else "")
+        return ("resume-scheduled", rec.get("name", path.stem), str(report), det)
+    if finished and st == "no-report" and failure.startswith("no-report: quota"):
+        why = f" (auto-resume {ar['state']}: {ar['detail']})" if ar.get("detail") else ""
+        det = f"{det}; {manual_resume_hint(rec, path)}{why}"
+    if reroute:
+        st = "quota-checkpointed"
+        det = f"checkpoint preserved; reroute: {reroute}; or {manual_resume_hint(rec, path)}"
     if not finished:
         stale_msg = checkpoint_stale_detail(rec)
         if stale_msg:
@@ -1154,6 +1574,16 @@ def finalize_locked(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
             write_atomic(report, old + ("" if not old or old.endswith("\n") else "\n") + note + "\n")
             rec["failure"] = note
             st, det = classify(report, done, finished=True)
+    if st == "no-report" and str(rec.get("failure", "")).startswith(f"{NO_REPORT_PREFIX} quota"):
+        try:
+            stderr_text = stderr_path.read_text()
+        except OSError:
+            stderr_text = ""
+        schedule_auto_resume(record_path, rec, stderr_text)
+        if (rec.get("auto_resume") or {}).get("state") == "scheduled":
+            st, det = "resume-scheduled", auto_resume_detail(rec["auto_resume"])
+        else:
+            det = f"{det}; {manual_resume_hint(rec, record_path)}"
     rec["status"] = st
     write_record(record_path, rec)      # before .done: the rearm waiter's check reads the exit code
     done.touch()
@@ -1266,7 +1696,9 @@ def execute_record(record: Path, tee: bool = False) -> int:
     return rc
 
 
-def resume_record(a: argparse.Namespace) -> int:
+def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
+    """Reopen the record's ACP session and continue. quota_stop selects the usage-limit prompt (the
+    stop was the provider's limit, not the agent; redo nothing finished)."""
     record = Path(a.record).expanduser().resolve()
     rec = json.loads(record.read_text())
     if not rec.get("finished") and not Path(rec["done"]).exists():
@@ -1285,9 +1717,11 @@ def resume_record(a: argparse.Namespace) -> int:
 
     original = rec.get("prompt") or Path(rec["brief"]).read_text().split("## Delivery contract", 1)[0]
     prompt = (Path(a.prompt_file).read_text() if a.prompt_file else a.prompt) or (
+        AUTO_RESUME_TEXT + original if quota_stop else
         "The previous turn was stopped by a time limit. Continue the brief from where it left off, "
         "and rewrite the report with the complete result.\n\nOriginal brief:\n" + original)
     args = argparse.Namespace(
+        no_auto_resume=getattr(a, "no_auto_resume", False),
         agent=rec["agent"], model=rec.get("model"), name=rec["name"], dir=rec["dir"],
         task=rec.get("task"), out=rec["out"], perm=rec.get("perm", option("--perm", "all")),
         timeout=a.timeout if a.timeout is not None else rec.get("timeout", int(option("--timeout", DEFAULT_TIMEOUT))),
@@ -1328,6 +1762,10 @@ def reroute_record(a: argparse.Namespace) -> int:
     new_path = jobs / f"{base}-{n}.json"
     if new_path.exists():
         update_record(new_path, rerouted_from=str(old_path))
+        ar = json.loads(old_path.read_text()).get("auto_resume") or {}
+        if ar.get("state") in AUTO_RESUME_PENDING:
+            # the scheduled runner reads this state and exits without resuming (superseded)
+            update_record(old_path, auto_resume={**ar, "state": "cancelled", "detail": f"rerouted to {new_path.name}"})
     return rc
 
 
@@ -1466,6 +1904,15 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         "estimated_usage_pct": estimate, "estimate_source": estimate_source,
         "snapshot_remaining_before": remaining, "snapshot_reading": reading,
         "checkpoint": checkpoint,
+        # Automatic in-place resume after a quota stop (finalize schedules it); "off" is the
+        # opt-out, carried through every resume of this slice. A resumed run keeps the attempt
+        # count and history so a second quota stop schedules attempt n+1, up to AUTO_RESUME_MAX.
+        "auto_resume": ({"state": "off", "detail": "--no-auto-resume"}
+                        if getattr(a, "no_auto_resume", False) or (
+                            (previous or {}).get("auto_resume") or {}).get("state") == "off"
+                        else {**((previous or {}).get("auto_resume") or {}), "state": "resumed"}
+                        if previous and (previous.get("auto_resume") or {}).get("attempt")
+                        else None),
     }
     if a.dry_run:
         rec["status"] = "dry-run"
@@ -1491,7 +1938,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
             print(f"timeout\t{a.name}\t{report}\nstill running under launchd; rearm: {rec['rearm']}")
             return 124
         rec = json.loads(record.read_text())
-        st, det = classify(report, done, finished=True)
+        st, _, _, det = check_record(record)      # a pending auto-resume reads resume-scheduled
         rc = rec.get("exit")
     else:
         rc = execute_record(record, a.tee)
@@ -1522,11 +1969,13 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if argv and argv[0] in ("extend", "resume", "reroute", "wait", "execute"):
+    if argv and argv[0] in ("extend", "resume", "reroute", "wait", "execute", "auto-resume"):
         sub = argparse.ArgumentParser(prog=f"acp-dispatch {argv[0]}")
         sub.add_argument("record")
         if argv[0] == "extend":
             sub.add_argument("seconds", type=int)
+        elif argv[0] == "auto-resume":
+            sub.add_argument("--attempt", type=int, required=True)
         elif argv[0] == "resume":
             sub.add_argument("--timeout", type=int)
             prompt = sub.add_mutually_exclusive_group()
@@ -1535,6 +1984,8 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--detach", action="store_true")
             sub.add_argument("--no-wait", action="store_true")
             sub.add_argument("--wait-timeout", type=int)
+            sub.add_argument("--no-auto-resume", action="store_true",
+                             help="no automatic in-place resume if this run stops on quota")
         elif argv[0] == "reroute":
             sub.add_argument("--agent", required=True)
             sub.add_argument("--model")
@@ -1554,6 +2005,8 @@ def main(argv: list[str] | None = None) -> int:
             return reroute_record(s)
         if argv[0] == "execute":
             return execute_record(Path(s.record))
+        if argv[0] == "auto-resume":
+            return auto_resume_record(Path(s.record), s.attempt)
         return wait_record(Path(s.record))
     if argv and argv[0] in ("footer", "check", "finalize"):
         sub = argparse.ArgumentParser(prog=f"acp-dispatch {argv[0]}")
@@ -1620,6 +2073,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="refuse a measured pool below this percent left (default 10; 0 disables)")
     ap.add_argument("--est-pct", type=float, help="estimated percent of the binding quota window this slice uses")
     ap.add_argument("--checkpoint", action="store_true", help="force incremental checkpoint instructions")
+    ap.add_argument("--no-auto-resume", action="store_true",
+                    help="a quota stop is not resumed in place automatically (the default since 2026-10-18); "
+                         "check then prints the manual `acp-dispatch resume` command")
     ap.add_argument("--acp-run", help="path to acp-run (default: PATH)")
     ap.add_argument("--acp-arg", action="append", help="extra argument passed through to acp-run (repeatable)")
     a = ap.parse_args(argv)

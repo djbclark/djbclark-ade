@@ -3017,6 +3017,22 @@ async def open_session(a, conn, init, client, root, timeout):
     )
 
 
+def resume_hint(a, root, session_id):
+    """stderr line after a quota stop in a one-shot run: the command that continues this very
+    session once the limit resets, for any TUI or script (operator 2026-10-18: the tokens a session
+    spent thinking are work; never re-task it from a fresh brief). acp-dispatch does this itself."""
+    argv = ["acp-run", a.agent, "-C", str(root), "--resume", session_id]
+    if a.model:
+        argv += ["--model", a.model]
+    for flag in ("effort", "context"):
+        if getattr(a, flag, None):
+            argv += [f"--{flag}", getattr(a, flag)]
+    argv += ["-p", "The previous turn was stopped by the provider's usage limit, not by you; the limit "
+                   "has reset. Continue where you left off without redoing finished work."]
+    return (f"acp-run: usage limit stopped session {session_id}; after the reset continue it with: "
+            + shlex.join(argv))
+
+
 def resume_argv(a, root, session_id):
     """The command herdr runs to reopen this session after a restart: a plain
     command name on PATH first, no apostrophes or control characters."""
@@ -3806,6 +3822,8 @@ async def run(a, log, err, log_path):
     client.rec("result", out)
     if label:
         print(f"acp-run: FAILED {label}: {out.get('error')}", file=sys.stderr)
+    if label == "quota" and repl is None and sess is not None and init is not None and can_resume(init):
+        print(resume_hint(a, root, sess.session_id), file=sys.stderr)
     if out.get("verify") == "fail" and code == 0:
         print(
             f"acp-run: warning: verification failed after {out.get('verify_attempts', 0)} attempt(s): {a.verify}",

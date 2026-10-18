@@ -188,6 +188,24 @@ the record, kept by `resume`):
 `acp-dispatch <agent> --model M --effort high --context 500k`. `--acp-arg`
 still forwards other flags; a dash-leading value needs `--acp-arg=--meta`.
 
+**A quota stop is resumed in place, automatically** (operator 2026-10-18: a
+session's thinking is work; three codex slices stopped by the 5-hour limit were
+about to be re-tasked from fresh briefs). `acp-dispatch finalize` writes the
+`NO-REPORT: quota (...)` line as before, then schedules `acp-dispatch
+auto-resume RECORD` under launchd for the reset time (acp-run's stderr, else
+aiuse's `resets_at`, else a 30-min back-off) plus 5 min; the runner gates on
+`aiuse --available --json --live` (20% left, 6 checks 10 min apart), then
+reopens the same ACP session (`acp-run --resume`) with a prompt saying the stop
+was the limit, not the agent. Up to 3 attempts per slice; the record's
+`auto_resume` field shows state, attempt, `not_before_iso` and the launchd
+label. The `rearm` waiter waits through it; `check` says `resume-scheduled`
+(exit 1, still running); exit 3 stays a real no-report and, for a quota stop
+without an automatic resume (`--no-auto-resume`, no session id, an agent
+without load/resume, 3 attempts used), ends with the exact `acp-dispatch resume
+<record> --detach --no-wait` and the retry time. Direct `acp-run` use prints
+the same kind of line on a quota stop: the session id and the `acp-run <agent>
+... --resume <sid> -p ...` command that continues it.
+
 1. **claude.** Effort `low` / `medium` / `high` / `xhigh` / `max` via `--effort` (Opus 4.6 and Sonnet 4.6 have no `xhigh`; Haiku 4.5 and older have none). `--context 200k` sets `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`. `--context 1m` is the model's own window and does not add `[1m]`. Any other size exits 2. Workflow `agent()` and Orca `worker-start --model --effort` still set the session tier.
 2. **codex.** Effort includes `ultra` on gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-5.6-sol and gpt-5.6-terra; luna models stop at `max`. Context is fixed by the model: gpt-6.1-sol 500000 (475000 effective); every other visible model 272000 (258400); all have `max_context_window` 872000. `--context 500k` only with `--model gpt-6.1-sol`; `--context 272k` only on the others; anything else exits 2 (the message names `--model gpt-6.1-sol`). The launch-time `CODEX_CONFIG` (`model_context_window`, merged with any `CODEX_CONFIG` already set; a value that is not a JSON object exits 2) is how the size is set. The window in effect is 95% of SIZE (`--context 400k` reads back 380000, `applied: ctx=400k/380000`); a read-back that is not 95% of SIZE is failure class `config`. The flag does not swap the model. `~/.codex/config.toml` still holds the CLI default.
 3. **copilot.** `--effort` sets `reasoning_effort` (launch `--reasoning-effort` is the same knob). `auto` and `claude-haiku-4.5` have no option. Context is a launch flag: `200k` / `256k` / `272k` become `--context default`; `1m` becomes `--context long_context`. The words `default` and `long` are not `--context` values. `--model` is repeated on that server command because `set_config_option model` resets the tier. A tier that does not land is failure class `config`, exit 1. acp-run does not filter on Copilot's 1M product table. Long measured 922000 on gpt-5.5 and costs more AI credits.
