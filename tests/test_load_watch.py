@@ -98,3 +98,37 @@ def test_long_gap_restarts_the_clock(tmp_path, monkeypatch):
     assert at(2000) == ""            # 1000 s gap is a sleep: hot clock restarts at 2000
     assert at(2200) == ""
     assert "sustained load" in at(2400)
+
+
+def test_ci_decide_check_modes_and_legacy_rows(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    top = os.path.realpath(repo)
+    (tmp_path / "ci-only.tsv").write_text(f"{top}\tscripts/ci-run\t2026-10-18\n")  # pre-decide 3-column row
+    assert run(tmp_path, "ci", "check", str(repo)).stdout.split("\t")[:2] == ["ci", "scripts/ci-run"]
+    assert run(tmp_path, "ci-only", "check", str(repo)).stdout.strip() == "scripts/ci-run"
+    assert run(tmp_path, "ci", "decide", str(repo), "local", "needs Xcode").returncode == 0
+    assert run(tmp_path, "ci", "check", str(repo)).stdout.split("\t")[:2] == ["local", "needs Xcode"]
+    assert run(tmp_path, "ci-only", "check", str(repo)).returncode == 1  # bg's old reader: only ci refuses
+    assert run(tmp_path, "ci", "decide", str(repo), "local").returncode == 2  # a reason is required
+    assert run(tmp_path, "ci", "check", str(tmp_path)).returncode == 1  # undecided
+
+
+def test_ci_worktree_and_glob_take_a_decision(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "x"], check=True)
+    subprocess.run(git + ["worktree", "add", "-q", str(tmp_path / "wt")], check=True)
+    assert run(tmp_path, "ci", "decide", str(repo), "pending", "seeded").returncode == 0
+    out = run(tmp_path, "ci", "check", str(tmp_path / "wt")).stdout.strip().split("\t")
+    assert out == ["pending", "seeded", os.path.realpath(repo)]
+    other = tmp_path / "pastures" / "p1"
+    other.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    assert run(tmp_path, "ci", "check", str(other)).returncode == 1
+    glob = os.path.realpath(tmp_path / "pastures") + "/*"
+    assert run(tmp_path, "ci", "decide", glob, "local", "queue in flight").returncode == 0
+    assert run(tmp_path, "ci", "check", str(other)).stdout.split("\t")[0] == "local"

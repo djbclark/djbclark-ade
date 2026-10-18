@@ -5,7 +5,9 @@
     load-watch status                       streak, top consumers in the window, cooldowns
     load-watch incidents [-n N]             the incident ledger, newest last
     load-watch ack ID "what you did"        the agent's answer to a brief (recorded in the ledger)
-    load-watch ci-only list|add DIR "CMD"|rm DIR|check DIR
+    load-watch ci list|check DIR|rm DIR       the CI-first decisions `bg` reads
+    load-watch ci decide DIR ci "CI CMD"|local "why"|pending "note"
+    load-watch ci-only list|add DIR "CMD"|rm DIR|check DIR   (older form of `ci`, kept for scripts)
     load-watch install|uninstall            the launchd job (launchd/com.djbclark.load-watch.plist)
 
 Why (2026-10-18): agents keep starting heavy builds and tests on this 8-core Mac (load 24-41 that
@@ -25,7 +27,13 @@ work), ask djbclark before creating a Forgejo copy, and, once CI runs there, `lo
 the repo so `bg` refuses local builds and tests in it.
 
 State: ~/.local/state/load-watch/ (state.json, incidents.jsonl, briefs/, sample.log).
-Registry: ~/.config/load-watch/ci-only.tsv (repo top-level TAB CI command TAB date), read by `bg`.
+Registry: ~/.config/load-watch/ci-only.tsv (repo TAB mode TAB CI command or reason TAB date), read by `bg`
+through `load-watch ci check`. CI-first (djbclark, 2026-10-18): every repo `bg` builds in needs a decision.
+`ci`: `bg` refuses and names the CI command. `local`: runs here, with the reason (macOS-only, ...).
+`pending`: runs here but `bg` reminds the agent to investigate (repos seeded from 7 days of `bg` use).
+No row: `bg` refuses (exit 3) until the agent investigates offloading with the forgejo-ci skill and decides.
+A git worktree or cow pasture with no row of its own takes its main repo's row; a key ending in `/*`
+covers every repo under that directory. Older 3-column rows (repo, CI command, date) read as `ci`.
 Exit: 0 ok, 1 nothing found (check, ack of an unknown id), 2 usage.
 """
 import argparse
@@ -191,13 +199,21 @@ def forgejo_remote(top):
     return next((ln.split()[1] for ln in r.stdout.splitlines() if "forgejo" in ln), "")
 
 
+MODES = ("ci", "local", "pending")
+
+
 def registry():
+    """repo -> [mode, CI command or reason, date]."""
     rows = {}
     try:
         for ln in REGISTRY.read_text().splitlines():
             parts = ln.split("\t")
-            if parts and parts[0] and not parts[0].startswith("#"):
-                rows[parts[0]] = parts[1:] + [""] * (2 - len(parts[1:]))
+            if not parts or not parts[0] or parts[0].startswith("#"):
+                continue
+            if len(parts) > 1 and parts[1] in MODES:
+                rows[parts[0]] = (parts[1:] + ["", ""])[:3]
+            else:  # pre-2026-10-18 row: repo, CI command, date
+                rows[parts[0]] = ["ci"] + (parts[1:] + ["", ""])[:2]
     except OSError:
         pass
     return rows
@@ -206,9 +222,41 @@ def registry():
 def write_registry(rows):
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     tmp = REGISTRY.with_suffix(".tmp")
-    tmp.write_text("# repo top-level\tCI command (what bg tells agents to run instead)\tadded\n" +
-                   "".join(f"{k}\t{v[0]}\t{v[1]}\n" for k, v in sorted(rows.items())))
+    tmp.write_text("# repo top-level (or DIR/*)\tci|local|pending\tCI command, or why local\tdecided\n" +
+                   "".join(f"{k}\t{v[0]}\t{v[1]}\t{v[2]}\n" for k, v in sorted(rows.items())))
     tmp.replace(REGISTRY)
+
+
+def main_worktree(top):
+    """The main checkout of a linked git worktree, else ''."""
+    try:
+        r = subprocess.run(["git", "-C", top, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    common = r.stdout.strip()
+    return os.path.dirname(common) if r.returncode == 0 and common.endswith("/.git") else ""
+
+
+def pasture_source(top):
+    """The checkout a cow pasture was made from (~/.cow/state.json records it), else ''."""
+    try:
+        pastures = json.loads((HOME / ".cow/state.json").read_text()).get("pastures") or []
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return next((p.get("source") or "" for p in pastures if isinstance(p, dict) and p.get("path") == top), "")
+
+
+def decision(top, rows):
+    """(key, row) deciding `top`: its own row, its main worktree's or pasture source's, or a DIR/* row."""
+    for key in (top, main_worktree(top), pasture_source(top)):
+        if key and key in rows:
+            return key, rows[key]
+    globs = [k for k in rows if k.endswith("/*") and (top + "/").startswith(k[:-1])]
+    if globs:
+        key = max(globs, key=len)
+        return key, rows[key]
+    return "", None
 
 
 def brief(inc, g, top, remote, load1, ncpu):
@@ -413,26 +461,57 @@ def cmd_ack(a):
     return 0
 
 
+def cmd_ci(a):
+    rows = registry()
+    if a.op == "list":
+        for k, v in sorted(rows.items()):
+            print("\t".join([k] + v))
+        return 0
+    if not a.dir:
+        print("load-watch ci check|rm|decide needs DIR", file=sys.stderr)
+        return 2
+    top = a.dir.rstrip("/") if a.dir.endswith("/*") else (git_top(a.dir) or os.path.realpath(a.dir))
+    if a.op == "check":  # bg: "mode<TAB>text<TAB>key", exit 1 when undecided
+        key, row = decision(top, rows)
+        if row is None:
+            return 1
+        print(f"{row[0]}\t{row[1]}\t{key}")
+        return 0
+    if a.op == "decide":
+        if a.mode not in MODES or not a.text:
+            print('load-watch ci decide DIR ci "CI command"|local "why"|pending "note"', file=sys.stderr)
+            return 2
+        rows[top] = [a.mode, a.text, time.strftime("%Y-%m-%d")]
+    elif a.op == "rm":
+        if rows.pop(top, None) is None:
+            print(f"load-watch: {top} has no decision", file=sys.stderr)
+            return 1
+    write_registry(rows)
+    print(f"{a.op} {top}" + (f" {a.mode}" if a.op == "decide" else ""))
+    return 0
+
+
 def cmd_ci_only(a):
     rows = registry()
     if a.op == "list":
         for k, v in sorted(rows.items()):
-            print(f"{k}\t{v[0]}\t{v[1]}")
+            if v[0] == "ci":
+                print(f"{k}\t{v[1]}\t{v[2]}")
         return 0
     if not a.dir:
         print("load-watch ci-only add|rm|check needs DIR", file=sys.stderr)
         return 2
     top = git_top(a.dir) or os.path.realpath(a.dir)
     if a.op == "check":
-        if top in rows:
-            print(rows[top][0])
+        if rows.get(top, [""])[0] == "ci":
+            print(rows[top][1])
             return 0
         return 1
     if a.op == "add":
         if not a.ci_cmd:
             print("load-watch ci-only add DIR \"CI command\"", file=sys.stderr)
             return 2
-        rows[top] = [a.ci_cmd, time.strftime("%Y-%m-%d")]
+        rows[top] = ["ci", a.ci_cmd, time.strftime("%Y-%m-%d")]
     elif a.op == "rm":
         if rows.pop(top, None) is None:
             print(f"load-watch: {top} is not registered", file=sys.stderr)
@@ -475,6 +554,11 @@ def main():
     p.add_argument("op", choices=["list", "add", "rm", "check"])
     p.add_argument("dir", nargs="?")
     p.add_argument("ci_cmd", nargs="?", metavar="CMD")
+    p = sub.add_parser("ci")
+    p.add_argument("op", choices=["list", "check", "decide", "rm"])
+    p.add_argument("dir", nargs="?")
+    p.add_argument("mode", nargs="?", choices=MODES)
+    p.add_argument("text", nargs="?", metavar="CMD_OR_REASON")
     sub.add_parser("install")
     sub.add_parser("uninstall")
     a = ap.parse_args()
@@ -482,7 +566,7 @@ def main():
         ap.print_usage(sys.stderr)
         return 2
     return {"sample": cmd_sample, "status": cmd_status, "incidents": cmd_incidents, "ack": cmd_ack,
-            "ci-only": cmd_ci_only, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
+            "ci": cmd_ci, "ci-only": cmd_ci_only, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
 
 
 if __name__ == "__main__":
