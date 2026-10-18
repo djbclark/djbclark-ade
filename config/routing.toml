@@ -92,6 +92,11 @@ frontier_models = ["gpt-6-astra", "fable"]
 # purpose: the in-flight quota reservation replaced `codex = 1` (operator 2026-10-18).
 # ACP_DISPATCH_INFLIGHT=name=N still overrides per run (service or agent name).
 inflight_cap = {}
+# A quota reset further out than this many hours is not waited for (2026-10-18): no
+# launchd auto-resume sits around for days (agy's weekly cap resets ~148 h out; codex's
+# weekly ~5 days). finalize records a skipped auto-resume and `check` points at a
+# reroute instead. aiuse's 30-min back-off guess is never subject to this limit.
+auto_resume_max_wait_hours = 6
 # Flags a dispatch line needs for acp-run to accept the model at all. crush:
 # `--model` rewrites the shared data dir's crush.json, so acp-run exits 2 unless
 # the run strips the user config or gets ACP_RUN_CRUSH_DATA (review 2026-10-15).
@@ -103,6 +108,14 @@ extra = { crush = " --acp-arg=--strip-user-config" }
 codex = 60.0
 claude = 8.0
 antigravity-claude = 15.0
+
+[escalation]
+# Operator 2026-10-18: cheap first; a failed slice climbs one rung, never straight to frontier.
+ladder = ["mechanical", "bulk", "code", "judgment", "frontier"]
+
+# Kinds off the ladder land where the operator says, not where an index would put them.
+[escalation.next]
+research = "judgment"
 
 [hermes]
 # Hermes names the provider differently from aiuse for the paid pool.

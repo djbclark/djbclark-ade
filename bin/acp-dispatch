@@ -22,7 +22,9 @@
                                                          bare report path when no .json exists)
     acp-dispatch resume RECORD [--timeout S] [-p TEXT | -f FILE] [--detach --no-wait]
                  [--no-auto-resume]
-    acp-dispatch reroute RECORD --agent A --model M [--detach --no-wait]
+    acp-dispatch reroute RECORD (--agent A --model M | --escalate) [--detach --no-wait]
+                 (--escalate climbs one rung of [escalation] in config/routing.toml,
+                  never straight to the top; agent/model from route_agent's top route)
     acp-dispatch auto-resume RECORD --attempt N          (internal) what the scheduled resume
                                                          runner calls after a quota stop
     acp-dispatch reap [RECORD|DIR]... [--quiet]          finalize every unfinished record whose
@@ -108,6 +110,31 @@ exits 1 (still running, like `running`/`pending`); exit 3 keeps meaning a real n
 stop that cannot be resumed automatically (no session id, agent without load/resume, opted out,
 attempts exhausted) stays exit 3 and the `check` line ends with the exact
 `acp-dispatch resume <record>` command and the retry time.
+
+Quota-stop refinements (2026-10-18): (1) a reset further out than `[dispatch].
+auto_resume_max_wait_hours` (default 6) is not waited for — agy's weekly cap resets ~148 h out
+and a 5-day codex weekly has no business in launchd either — finalize records
+`auto_resume.state = "skipped"` (+`far_reset`) naming the reset, and `check` prints a
+ready-to-run `reroute RECORD --agent A --model M` from route_agent's top route for the record's
+kind, excluding the stopped pool (the manual resume hint stays when nothing is eligible).
+(2) The Mac is woken 2 min before the resume fires via `sudo -n pmset schedule wake` (helper:
+`schedule_wake`/`cancel_wake`, binary overridable with ACP_DISPATCH_PMSET); the result lands in
+`auto_resume.wake` — "unavailable: ..." until the operator decides on a sudoers rule — and the
+wake is cancelled best-effort when the resume runs or the schedule is cancelled (closed,
+rerouted, superseded). (3) An agent that exits 0 after a quota refusal (agy did; the 429 lived
+in the session log, not acp-run's stderr) is caught: finalize scans the log too when rc is 0
+and the report is not DONE, notifies aiuse and writes the same `NO-REPORT: quota` line, so
+check and auto-resume treat it as a quota stop. (4) A quota stop on a partial checkpoint report
+auto-resumes as well — the report is its checkpoint; a DONE report never does. (5) A zone-less
+`limit will reset at ...` from zcode is Beijing time (UTC+8), not the local clock.
+
+Cheap-first escalation (operator decision 1.4, 2026-10-18): a slice that failed on its tier
+(no-report or partial, not quota, not BLOCKED) climbs ONE rung of the `[escalation]` ladder in
+config/routing.toml (`research` jumps to `judgment` via `[escalation.next]`), never straight to
+the top. `check` appends `; escalate: acp-dispatch reroute RECORD --escalate (-> <next kind>)`,
+and `reroute --escalate` takes route_agent's top route for the next kind excluding the failed
+pool — every gate still runs, frontier lands as advisor without ACP_OPERATOR_APPROVED=
+frontier-exec, and the top rung refuses with exit 2.
 
 A refused resume leaves the record alone (2026-10-18): `resume` runs the same pool checks as a
 fresh dispatch (headroom, window fit, estimate, in-flight reservation), and a refusal used to
@@ -219,9 +246,10 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import NoReturn
+from zoneinfo import ZoneInfo
 
 HERE = Path(__file__).resolve().parent
 FOOTER_FILE = HERE.parent / "docs" / "dispatch-footer.md"
@@ -308,6 +336,17 @@ FRONTIER_MODELS = [str(x).lower() for x in
                    (_routing_policy.POLICY["dispatch"].get("frontier_models") or [])]
 ESTIMATE_FLOOR = {str(k): float(v) for k, v in
                   (_routing_policy.POLICY["dispatch"].get("estimate_floor") or {}).items()}
+# A quota reset further out than this is not waited for (operator 2026-10-18, 6.5a): agy's
+# weekly cap resets ~148 h out and resume_unsupported() already says that session may not even
+# reopen, and a 5-day codex weekly stop has no business sitting in a launchd job either. finalize
+# skips the schedule and `check` points at a reroute. [dispatch].auto_resume_max_wait_hours;
+# ACP_DISPATCH_MAX_WAIT_HOURS overrides (tests reuse fixtures whose resets are years out).
+AUTO_RESUME_MAX_WAIT_HOURS = float(
+    os.environ.get("ACP_DISPATCH_MAX_WAIT_HOURS")
+    or (_routing_policy.POLICY["dispatch"].get("auto_resume_max_wait_hours") or 6))
+# pmset wake scheduling for an auto-resume (2026-10-18, 6.6): wake the Mac this long before the
+# launchd job fires, so a sleeping machine does not delay the resume past the reset.
+WAKE_LEAD_SECONDS = 120
 PLACEHOLDER_MODELS = frozenset({"m1"})  # test placeholders; skipped in machine-wide history
 # Claude Code 2.1.295 refuses a sub-agent's Write for this basename (tengu_subagent_md_report_blocked).
 CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.IGNORECASE)
@@ -656,6 +695,43 @@ def refuse_kind(service: str | None, kind: str) -> NoReturn:
     die(f"{label} is not eligible for --kind {kind}; eligible: {who}; "
         f"override with ACP_OPERATOR_APPROVED=route-override "
         f"(or run route_agent.py plan --kinds {kind})")
+
+
+def escalation_next(kind: str | None) -> str | None:
+    """The next kind up the cheap-first ladder (operator decision 1.4, 2026-10-18): ONE rung,
+    never straight to the top; `research` jumps to `judgment`. [escalation] in
+    config/routing.toml is the data, so the mapping never lives in code. None at the top rung,
+    for an unknown kind, or for a kind with no ladder entry."""
+    if not kind:
+        return None
+    esc = route_module().POLICY.get("escalation") or {}
+    explicit = (esc.get("next") or {}).get(kind)
+    if explicit:
+        return str(explicit)
+    ladder = [str(x) for x in (esc.get("ladder") or [])]
+    i = ladder.index(kind) if kind in ladder else -1
+    return ladder[i + 1] if 0 <= i < len(ladder) - 1 else None
+
+
+def reroute_command(rec: dict, record_path: Path) -> str | None:
+    """A ready-to-run `acp-dispatch reroute RECORD --agent A --model M` line: route_agent's top
+    route for the record's kind with the pool that just quota-stopped excluded (2026-10-18,
+    6.5a — a far reset is rerouted, not waited out). None when the record has no kind or nothing
+    else is eligible for it."""
+    kind = rec.get("kind")
+    if not kind:
+        return None
+    exclude = {svc} if (svc := record_service(rec)) else set()
+    try:
+        choice = route_module().route(str(kind), exclude=exclude)
+    except ValueError:
+        return None
+    if choice is None or not choice.model:
+        return None
+    model = choice.model.split()[0]              # "<model> [--effort L]" — the effort is a
+    script = shlex.quote(str(Path(__file__).resolve()))   # separate acp-dispatch flag, not this one
+    return (f"{script} reroute {shlex.quote(str(rec.get('record') or record_path))} "
+            f"--agent {choice.service.acp_agent} --model {shlex.quote(model)}")
 
 
 def git_identity_warning(repo: Path) -> str | None:
@@ -1527,19 +1603,37 @@ def _duration_seconds(val: str) -> int | None:
     return int(total)
 
 
+def _plain_reset_stamp(val: str, agent: str | None) -> datetime | None:
+    """A zone-less `limit will reset at YYYY-MM-DD HH:MM:SS` as an aware datetime. zcode's is
+    Beijing time (operator 2026-10-18: aiuse's live probe of the z.ai 5-hour window returned
+    resets_at 2026-10-18T20:22:46+00:00 for `2026-10-19 04:22:46`, which is 04:22:46 at UTC+8);
+    reading it as local pushed not_before four hours late. Every other agent's is the local
+    clock."""
+    try:
+        stamp = datetime.fromisoformat(val.strip().replace(" ", "T"))
+    except ValueError:
+        return None
+    if agent == "zcode" and stamp.tzinfo is None:
+        return stamp.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+    return stamp if stamp.tzinfo else stamp.astimezone()
+
+
 def parse_reset_datetime(text: str, when_match: re.Match | None,
-                         now: datetime | None = None) -> datetime | None:
+                         now: datetime | None = None, agent: str | None = None) -> datetime | None:
     """The reset time a quota refusal names, as an aware datetime, or None. The same phrasings
     parse_reset_for_aiuse knows: an ISO stamp, zcode's `limit will reset at 2026-10-14 22:56:01`,
-    codex's `try again at Oct 18th, 2026 4:41 AM` or `at 8:51 PM`, agy's `in 2 hours, 47 minutes`."""
+    codex's `try again at Oct 18th, 2026 4:41 AM` or `at 8:51 PM`, agy's `in 2 hours, 47 minutes`,
+    `Resets in 148h22m36s` (compact, no spaces) and `Refreshes in 6 days and 4 hours` (`and`
+    between terms; 2026-10-18, agy's weekly cap)."""
     now = now or datetime.now().astimezone()
     m = ISO_RESET_RE.search(text)
     if m:
         return datetime.fromisoformat(m.group(1))
     m = PLAIN_RESET_RE.search(text)
     if m:
-        stamp = datetime.fromisoformat(m.group(1).replace(" ", "T") + (m.group(2) or "").replace("Z", "+00:00"))
-        return stamp if stamp.tzinfo else stamp.astimezone()
+        stamped = _plain_reset_stamp(m.group(1) + (m.group(2) or ""), agent)
+        if stamped is not None:
+            return stamped
     if not when_match:
         return None
     prep = when_match.group(1).lower()
@@ -1565,7 +1659,8 @@ def parse_reset_datetime(text: str, when_match: re.Match | None,
     return now + timedelta(seconds=secs) if secs else None
 
 
-def parse_reset_for_aiuse(text: str, when_match: re.Match | None) -> tuple[str, str] | None:
+def parse_reset_for_aiuse(text: str, when_match: re.Match | None,
+                          agent: str | None = None) -> tuple[str, str] | None:
     """Extract reset argument for aiuse note-exhausted: ('--resets-at', ISO) or ('--resets-in', DURATION)."""
     # 1. Exact ISO timestamp in stderr (e.g. quotaResetTimeStamp:2026-10-11T02:46:28Z)
     m_ts = ISO_RESET_RE.search(text)
@@ -1574,7 +1669,10 @@ def parse_reset_for_aiuse(text: str, when_match: re.Match | None) -> tuple[str, 
 
     m_plain = re.search(r"limit will reset at\s+(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\s*[A-Z]+|Z|[+-]\d{2}:?\d{2})?)", text, re.IGNORECASE)
     if m_plain:
-        return "--resets-at", m_plain.group(1).strip().replace(" ", "T", 1)
+        stamped = _plain_reset_stamp(m_plain.group(1), agent)
+        if stamped is not None:
+            # in UTC so aiuse never has to guess a zone (zcode's zone-less stamp is +08:00)
+            return "--resets-at", stamped.astimezone(timezone.utc).isoformat()
 
     if not when_match:
         return None
@@ -1603,7 +1701,9 @@ def parse_reset_for_aiuse(text: str, when_match: re.Match | None) -> tuple[str, 
                 target += timedelta(days=1)
             return "--resets-at", target.isoformat()
 
-    # 3. Duration string (e.g. "6 days, 6 hours", "2 hours, 47 minutes", "2h47m44s")
+    # 3. Duration string (e.g. "6 days, 6 hours", "2 hours, 47 minutes", "2h47m44s",
+    # "148h22m36s" compact, "6 days and 4 hours" with `and` — the digit-anchored match skips
+    # the separator words, and the unit map folds day/days either way; 2026-10-18)
     unit_map = {
         "d": "d", "day": "d", "days": "d",
         "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h",
@@ -1637,7 +1737,7 @@ def record_quota_refusal_in_aiuse(agent: str, model: str | None, text: str, rc: 
     if mapping is None:
         return "unknown_agent", "; aiuse not notified: unknown agent"
 
-    reset = parse_reset_for_aiuse(text, when_match)
+    reset = parse_reset_for_aiuse(text, when_match, agent)
     if reset is None:
         return "no_reset_time", "; aiuse not notified: no reset time"
 
@@ -1780,6 +1880,54 @@ def submit_launchd(label: str, runner: Path, out_log: Path, err_log: Path) -> st
     return None
 
 
+def pmset_bin() -> str:
+    """pmset for wake scheduling; ACP_DISPATCH_PMSET overrides (tests point it at a fake)."""
+    return os.environ.get("ACP_DISPATCH_PMSET") or "/usr/bin/pmset"
+
+
+def wake_stamp(not_before: datetime | float) -> str:
+    """The wake time as pmset's quoted local date/time, "MM/dd/yy HH:mm:ss" (man pmset)."""
+    at = (not_before if isinstance(not_before, datetime)
+          else datetime.fromtimestamp(float(not_before))) - timedelta(seconds=WAKE_LEAD_SECONDS)
+    return at.strftime("%m/%d/%y %H:%M:%S")
+
+
+def schedule_wake(not_before: datetime) -> str:
+    """Try to have the Mac awake before the auto-resume fires (2026-10-18, 6.6): launchd does
+    not run the job while the machine sleeps, so a reset that lands overnight would silently
+    wait for the next wake. sudo -n never prompts: this machine has no NOPASSWD rule for pmset,
+    so the expected result is "unavailable: ..." — adding one is the operator's decision, never
+    ours to make. Returns "scheduled <time>" or "unavailable: <reason>"."""
+    stamp = wake_stamp(not_before)
+    try:
+        r = subprocess.run(["sudo", "-n", pmset_bin(), "schedule", "wake", stamp], check=False,
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"unavailable: {e}"
+    if r.returncode != 0:
+        why = " ".join(((r.stderr or r.stdout) or "").split())[:160] or f"exit {r.returncode}"
+        return f"unavailable: sudo -n pmset schedule wake failed ({why})"
+    return f"scheduled {stamp}"
+
+
+def cancel_wake(not_before: float | None) -> None:
+    """Best effort: drop the wake event schedule_wake added for this not_before — the resume
+    ran, or the schedule was cancelled (closed, rerouted, superseded). Never raises."""
+    if not not_before:
+        return
+    try:
+        subprocess.run(["sudo", "-n", pmset_bin(), "schedule", "cancel", "wake",
+                        wake_stamp(not_before)], check=False, capture_output=True, text=True,
+                       timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def wake_is_scheduled(ar: dict) -> bool:
+    """Whether this auto-resume state carries a wake event that must be cancelled."""
+    return str(ar.get("wake") or "").startswith("scheduled ")
+
+
 def auto_resume_runner_script(rec: dict, label: str, attempt: int, self_path: Path) -> str:
     q = shlex.quote
     return f"""#!/bin/bash
@@ -1840,10 +1988,20 @@ def schedule_auto_resume(record_path: Path, rec: dict, stderr_text: str) -> None
     if supported is False:
         return off("skipped", f"{rec.get('agent')} advertises neither load nor resume")
     now = datetime.now().astimezone()
-    when = parse_reset_datetime(stderr_text, failure_class(stderr_text, rec.get("exit"))[1], now)
+    when = parse_reset_datetime(stderr_text, failure_class(stderr_text, rec.get("exit"))[1], now,
+                               agent=rec.get("agent"))
     source = "stderr"
     if when is None:
         when, source = aiuse_reset_time(rec.get("agent", ""), rec.get("model")), "aiuse"
+    if when is not None and when - now > timedelta(hours=AUTO_RESUME_MAX_WAIT_HOURS):
+        # 2026-10-18, 6.5a: a reset days out (agy's weekly cap ~148 h, codex's 5-day weekly) must
+        # not sit in launchd waiting — resume_unsupported() already says an agy Claude session
+        # may not even reopen. Any agent, not just agy. The back-off guess below is never subject
+        # to this: it is 30 minutes, and it is not a reset.
+        off("skipped", f"reset {when.isoformat(timespec='minutes')} is more than "
+                       f"{AUTO_RESUME_MAX_WAIT_HOURS:g} h away; reroute instead of waiting")
+        rec["auto_resume"]["far_reset"] = True
+        return
     if when is None:
         when, source = now + timedelta(seconds=AUTO_RESUME_BACKOFF), "backoff"
     not_before = max(when + timedelta(seconds=AUTO_RESUME_MARGIN), now + timedelta(seconds=60))
@@ -1860,6 +2018,10 @@ def schedule_auto_resume(record_path: Path, rec: dict, stderr_text: str) -> None
     if err:
         ar.update(state="failed", detail=err, label=None)
         print(f"acp-dispatch: warning: auto-resume not scheduled: {err}", file=sys.stderr)
+    else:
+        # the Mac must be awake when the job fires (2026-10-18, 6.6); expected to record
+        # "unavailable" until the operator decides on a sudoers rule for pmset
+        ar["wake"] = schedule_wake(not_before)
     rec["auto_resume"] = ar
 
 
@@ -1883,9 +2045,16 @@ def auto_resume_record(record: Path, attempt: int) -> int:
             return "slice is running again"
         return None
 
+    def drop_wake(ar: dict) -> None:
+        # the wake event belongs to this schedule: once the resume runs, or the schedule is
+        # cancelled (closed, rerouted, superseded), it must go (2026-10-18, 6.6)
+        if wake_is_scheduled(ar):
+            cancel_wake(ar.get("not_before"))
+
     rec, ar = current()
     why = superseded(rec, ar)
     if why:
+        drop_wake(ar)
         print(f"auto-resume\t{rec.get('name')}\tsuperseded: {why}")
         return 0
     while time.time() < float(ar.get("not_before") or 0):
@@ -1893,6 +2062,7 @@ def auto_resume_record(record: Path, attempt: int) -> int:
         rec, ar = current()
         why = superseded(rec, ar)
         if why:
+            drop_wake(ar)
             print(f"auto-resume\t{rec.get('name')}\tsuperseded: {why}")
             return 0
     history = list(ar.get("history") or [])
@@ -1904,6 +2074,7 @@ def auto_resume_record(record: Path, attempt: int) -> int:
         if n == AUTO_RESUME_GATE_TRIES:
             history.append({"attempt": attempt, "outcome": "given-up: " + detail, "at": time.time()})
             rec = update_record(record, auto_resume={**ar, "state": "given-up", "detail": detail, "history": history})
+            drop_wake(rec["auto_resume"])
             print(f"auto-resume\t{rec['name']}\tgiven-up: {detail}; {manual_resume_hint(rec, record)}")
             return 3
         rec = update_record(record, auto_resume={**ar, "state": "waiting-headroom", "detail": detail})
@@ -1912,8 +2083,10 @@ def auto_resume_record(record: Path, attempt: int) -> int:
         rec, _ = current()
         why = superseded(rec, ar)
         if why:
+            drop_wake(ar)
             print(f"auto-resume\t{rec.get('name')}\tsuperseded: {why}")
             return 0
+    drop_wake(ar)
     history.append({"attempt": attempt, "outcome": "resumed", "at": time.time(), "headroom": how})
     update_record(record, auto_resume={**ar, "state": "resuming", "detail": how, "history": history,
                                        "resumed_at": time.time()})
@@ -1974,7 +2147,9 @@ def auth_hint(agent: str) -> str:
 def failure_class(text: str, rc: int | None, *, preflight: bool = False) -> tuple[str | None, re.Match | None]:
     """Classify errors acp-run does not yet classify, including zcode 1310."""
     low = text.lower()
-    when = re.search(r"(?:try again|resets?|retry|limit will reset) (at|in|after) ([^\n.\"'\\]{1,64})",
+    # "Refreshes in 6 days and 4 hours" is agy's weekly-cap phrasing (2026-10-18) and plays the
+    # same role as "Resets in"; both carry the when-phrase the reset parsers read.
+    when = re.search(r"(?:try again|resets?|refresh(?:es)?|retry|limit will reset) (at|in|after) ([^\n.\"'\\]{1,64})",
                      text, re.IGNORECASE)
     quota_terms = ("limit exhausted", "usage limit", "quota exhausted", "resource_exhausted",
                    "individual quota reached", "rate limit exceeded", "insufficient quota")
@@ -2069,7 +2244,7 @@ def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, s
             write_atomic(state, json.dumps({"ok": True, "time": time.time()}) + "\n")
             return True, "probe", "ok", None
         cls = cls or "preflight"
-        reset = parse_reset_for_aiuse(combined, when)
+        reset = parse_reset_for_aiuse(combined, when, agent)
         if cls == "quota":
             record_quota_refusal_in_aiuse(agent, model, combined, None if proc is None else proc.returncode, when)
         elif cls == "outage":
@@ -2127,6 +2302,32 @@ def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
                  " is a known cause, see dispatch-footer item 10]")
     return (f"{NO_REPORT_PREFIX} {cls} ({', '.join(bits)}): acp-run exit {rc}; the agent stopped "
             f"before writing DONE, so nothing above is a deliverable{extra} (appended by acp-dispatch)")
+
+
+def exit0_quota_note(rec: dict) -> tuple[str, str] | None:
+    """(the NO-REPORT quota note, the text it came from) for a run that exited 0 with a quota
+    refusal hidden in the session log, or None. failure_note reads acp-run's stderr only and
+    short-circuits rc 0 (`if not cls and rc in (None, 0) and not fallback: return None`), so an
+    agent that exits 0 after a refusal (2026-10-18, acp-resume-hardening `resume`: agy stopped
+    end_turn on a 429, the 429 lived only in resume.jsonl, the slice recorded plain `partial`)
+    never reached the quota path. finalize_locked calls this when rc is 0 and the report is not
+    DONE, so rc 0 no longer skips the detection; the note is failure_note's quota form, so check
+    and auto-resume treat the slice as a quota stop."""
+    agent, model = rec.get("agent", "?"), rec.get("model")
+    try:
+        text = Path(rec.get("log", "")).read_text()
+    except OSError:
+        return None
+    cls, when = failure_class(text, 0)
+    if cls != "quota":
+        return None
+    _, extra = record_quota_refusal_in_aiuse(agent, model, text, 0, when)
+    forget_preflight(agent, model)
+    bits = [agent] + ([model] if model else []) + (
+        [f"retry {when.group(1).lower()} {when.group(2).strip()}"] if when else [])
+    note = (f"{NO_REPORT_PREFIX} quota ({', '.join(bits)}): acp-run exit 0; the agent stopped "
+            f"before writing DONE, so nothing above is a deliverable{extra} (appended by acp-dispatch)")
+    return note, text
 
 
 # ---------------------------------------------------------------- classify
@@ -2230,12 +2431,27 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
         # Still running as far as the lead is concerned: the scheduled resume reopens the session.
         det = auto_resume_detail(ar) + (f"; or reroute now: {reroute}" if reroute else "")
         return ("resume-scheduled", rec.get("name", path.stem), str(report), det)
-    if finished and st == "no-report" and failure.startswith("no-report: quota"):
+    if finished and st in ("no-report", "partial") and failure.startswith("no-report: quota"):
         why = f" (auto-resume {ar['state']}: {ar['detail']})" if ar.get("detail") else ""
-        det = f"{det}; {manual_resume_hint(rec, path)}{why}"
+        if ar.get("far_reset"):
+            # the reset is beyond auto_resume_max_wait_hours: point at a reroute, not a wait
+            cmd = reroute_command(rec, path)
+            if cmd:
+                det = f"{det}; reroute now: {cmd}{why}"
+            else:
+                det = (f"{det}; {manual_resume_hint(rec, path)}{why}; no other pool eligible "
+                       f"for kind {rec.get('kind')!r}")
+        else:
+            det = f"{det}; {manual_resume_hint(rec, path)}{why}"
     if reroute:
         st = "quota-checkpointed"
         det = f"checkpoint preserved; reroute: {reroute}; or {manual_resume_hint(rec, path)}"
+    if finished and st in ("no-report", "partial") and "quota" not in failure:
+        # a slice that failed on its tier climbs one rung (operator decision 1.4, 2026-10-18);
+        # quota stops carry their own reroute rule above, BLOCKED asks the lead instead
+        nxt = escalation_next(rec.get("kind"))
+        if nxt:
+            det = f"{det}; escalate: {script} reroute {rec_path} --escalate (-> {nxt})"
     if not finished:
         stale_msg = checkpoint_stale_detail(rec)
         if stale_msg:
@@ -2272,6 +2488,7 @@ def finalize_locked(record_path: Path, rc: int | None, finished_at: float | None
     final_text = final.read_text() if final.exists() else ""
     has_report = report.exists() and report.read_text().strip() != ""
     body = final_text.strip()
+    quota_log_text = ""       # the session-log text an exit-0 quota scan matched (item 4)
     stderr_path = Path(rec.get("stderr", ""))
     if not has_report and body and body.lower() not in ("written", "done"):
         # The agent answered in its final message instead of the file. acp-run's stdout is
@@ -2280,6 +2497,12 @@ def finalize_locked(record_path: Path, rc: int | None, finished_at: float | None
         blocked = bool(lines) and lines[0].upper().startswith("BLOCKED:")
         note = None if blocked else failure_note(
             stderr_path, rc, rec.get("agent", "?"), rec.get("model"), body, fallback_class(rec))
+        if note is None and not blocked and rc == 0:
+            # an exit-0 run whose refusal text never reached acp-run's stderr (item 4, 2026-10-18):
+            # scan the session log before recovering the final message as if all was well
+            got = exit0_quota_note(rec)
+            if got:
+                note, quota_log_text = got
         if note:
             # acp-run itself failed this turn (a model refusal, a quota reply, a timeout): the
             # final message is what the agent said, not a deliverable (2026-10-10: a refusal was
@@ -2333,16 +2556,27 @@ def finalize_locked(record_path: Path, rc: int | None, finished_at: float | None
     st, det = classify(report, done, finished=True)
     if st in ("partial", "no-report") and not det.startswith(NO_REPORT_PREFIX):
         note = failure_note(stderr_path, rc, rec.get("agent", "?"), rec.get("model"), body, fallback_class(rec))
+        if note is None and rc == 0:
+            # rc 0 must not short-circuit the quota detection (item 4, 2026-10-18): the refusal
+            # can sit in the session log while stderr says nothing
+            got = exit0_quota_note(rec)
+            if got:
+                note, quota_log_text = got
         if note:
             old = report.read_text() if report.exists() else ""
             write_atomic(report, old + ("" if not old or old.endswith("\n") else "\n") + note + "\n")
             rec["failure"] = note
             st, det = classify(report, done, finished=True)
-    if st == "no-report" and str(rec.get("failure", "")).startswith(f"{NO_REPORT_PREFIX} quota"):
+    # A partial checkpoint report is this slice's checkpoint: a quota stop on it auto-resumes
+    # too (operator 2026-10-18: a zcode 5-hour stop with `STATUS: working` scheduled nothing).
+    # A DONE report never does — that is a delivered slice.
+    if st in ("no-report", "partial") and str(rec.get("failure", "")).startswith(f"{NO_REPORT_PREFIX} quota"):
         try:
             stderr_text = stderr_path.read_text()
         except OSError:
             stderr_text = ""
+        if quota_log_text:
+            stderr_text += "\n" + quota_log_text       # the reset time may be in the log
         schedule_auto_resume(record_path, rec, stderr_text)
         if (rec.get("auto_resume") or {}).get("state") == "scheduled":
             st, det = "resume-scheduled", auto_resume_detail(rec["auto_resume"])
@@ -2616,6 +2850,32 @@ def reroute_record(a: argparse.Namespace) -> int:
     # record continue, but gates still run (only a resume with previous skips them).
     kind = getattr(a, "kind", None) or old.get("kind")
     role = getattr(a, "role", None) or old.get("role")
+    effort = None
+    if getattr(a, "escalate", False):
+        # Operator decision 1.4 (2026-10-18): cheap first — a failed slice climbs ONE rung of
+        # the ladder in config/routing.toml, never straight to the top. The agent×model is
+        # route_agent's top route for the next kind on any pool but the one that just failed;
+        # every gate below still runs (eligibility, reservation, frontier as advisor).
+        nxt = escalation_next(old.get("kind"))
+        if nxt is None:
+            esc = route_module().POLICY.get("escalation") or {}
+            ladder = ", ".join(str(x) for x in (esc.get("ladder") or [])) or "none configured"
+            die(f"--escalate: kind {old.get('kind')!r} has no rung above it (ladder: {ladder}); "
+                "at the top, re-plan by hand (route_agent.py plan)", 2)
+        old_svc = old.get("service") or resolve_service(str(old.get("agent") or ""), old.get("model"))
+        choice = route_module().route(nxt, exclude={old_svc} if old_svc else set())
+        if choice is None:
+            die(f"--escalate: nothing eligible for --kind {nxt} excluding {old_svc or 'the failed'}"
+                f" pool; re-plan by hand (route_agent.py plan --kinds {nxt})", 2)
+        a.agent = choice.service.acp_agent
+        bits = choice.model.split()
+        if bits:
+            a.model = bits[0]
+            if len(bits) >= 3 and bits[1] == "--effort":
+                effort = bits[2]
+        kind = nxt
+        if nxt == "frontier" and not getattr(a, "role", None):
+            role = "advise"    # never inherit exec into frontier without frontier-exec approval
     new_svc = resolve_service(a.agent, a.model)
     old_svc = old.get("service") or resolve_service(str(old.get("agent") or ""), old.get("model"))
     if a.est_pct is not None:
@@ -2632,7 +2892,7 @@ def reroute_record(a: argparse.Namespace) -> int:
         force=False, dry_run=False, json=False, tee=False, no_model_check=False,
         no_preflight=a.no_preflight, min_headroom=a.min_headroom,
         est_pct=est,
-        checkpoint=True, acp_run=a.acp_run, acp_arg=[],
+        checkpoint=True, acp_run=a.acp_run, acp_arg=[], effort=effort,
         kind=kind, role=role, from_record=True)
     rc = dispatch(ns)
     new_path = jobs / f"{base}-{n}.json"
@@ -2640,7 +2900,10 @@ def reroute_record(a: argparse.Namespace) -> int:
         update_record(new_path, rerouted_from=str(old_path))
         ar = json.loads(old_path.read_text()).get("auto_resume") or {}
         if ar.get("state") in AUTO_RESUME_PENDING:
-            # the scheduled runner reads this state and exits without resuming (superseded)
+            # the scheduled runner reads this state and exits without resuming (superseded);
+            # a wake event scheduled for it is dropped with the job (2026-10-18, 6.6)
+            if wake_is_scheduled(ar):
+                cancel_wake(ar.get("not_before"))
             update_record(old_path, auto_resume={**ar, "state": "cancelled", "detail": f"rerouted to {new_path.name}"})
     return rc
 
@@ -3013,7 +3276,13 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--no-auto-resume", action="store_true",
                              help="no automatic in-place resume if this run stops on quota")
         elif argv[0] == "reroute":
-            sub.add_argument("--agent", required=True)
+            pick = sub.add_mutually_exclusive_group(required=True)
+            pick.add_argument("--agent")
+            pick.add_argument("--escalate", action="store_true",
+                              help="reroute one rung up the cheap-first ladder ([escalation] in "
+                                   "config/routing.toml): agent/model from route_agent's top "
+                                   "route for the next kind, excluding the failed pool; every "
+                                   "gate still runs; refused (exit 2) at the top rung")
             sub.add_argument("--model")
             sub.add_argument("--kind", choices=_routing_policy.KINDS,
                              help="override the inherited kind (gates still run)")
