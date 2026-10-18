@@ -156,7 +156,10 @@ stamp="$root/.radar-reap-stamp"
 if command -v acp-dispatch >/dev/null 2>&1 && [ -z "$(find "$stamp" -mmin -2 2>/dev/null)" ]; then
   : > "$stamp" 2>/dev/null && ( acp-dispatch reap --quiet "$root" </dev/null >/dev/null 2>&1 & )
 fi
-find "$root" -maxdepth 3 -type f -path '*/jobs/*.json' -mtime -3 -size -64k -exec sh -c 'sid=$1; shift; for f; do b=$( ( head -c 65536 -- "$f" 2>/dev/null & t=$!; ( sleep 3; kill "$t" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$t"; kill "$w" 2>/dev/null ) | LC_ALL=C tr -d "\\001" ); case $b in *"$sid"*) printf "\\001%s\\n%s\\n" "$f" "$b";; esac; done' sh "$sid" {} + 2>/dev/null
+# Only records that name the session go through the per-file read below: one grep for all of them first
+# (-D skip passes FIFOs and devices by, --null keeps any file name whole). Reading all ~44 records every
+# poll cost sh+head+watchdog+sleep per record per session, ~250 forks/s across 7 sessions (2026-10-18).
+find "$root" -maxdepth 3 -type f -path '*/jobs/*.json' -mtime -3 -size -64k -exec grep -l --null -D skip -F -- "$sid" {} + 2>/dev/null | xargs -0 sh -c 'sid=$1; shift; for f; do b=$( ( head -c 65536 -- "$f" 2>/dev/null & t=$!; ( sleep 3; kill "$t" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$t"; kill "$w" 2>/dev/null ) | LC_ALL=C tr -d "\\001" ); case $b in *"$sid"*) printf "\\001%s\\n%s\\n" "$f" "$b";; esac; done' sh "$sid" 2>/dev/null
 exit 0
 `
 
