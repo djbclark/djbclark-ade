@@ -33,7 +33,7 @@ def test_ci_only_add_check_rm(tmp_path):
     r = run(tmp_path, "ci-only", "check", str(repo))
     assert (r.returncode, r.stdout.strip()) == (0, "scripts/ci-run test")
     line = [ln for ln in (tmp_path / "ci-only.tsv").read_text().splitlines() if not ln.startswith("#")][0]
-    assert line.split("\t")[:2] == [top, "scripts/ci-run test"]  # the format bg's gawk reads
+    assert line.split("\t")[:3] == [top, "ci", "scripts/ci-run test"]  # repo, mode, CI command, date
     assert run(tmp_path, "ci-only", "check", str(tmp_path)).returncode == 1
     assert run(tmp_path, "ci-only", "rm", str(repo)).returncode == 0
     assert run(tmp_path, "ci-only", "check", str(repo)).returncode == 1
