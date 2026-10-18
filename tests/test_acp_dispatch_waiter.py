@@ -135,6 +135,22 @@ class TestRearmLine(WaiterBase):
         self.assertEqual(proc.returncode, 0, (out, err))
         self.assertTrue(out.startswith("done\te2e\t"), out)
 
+    def test_a_quota_wait_does_not_run_python_every_tick(self):
+        """Review 2026-10-18: a resume-scheduled record keeps `finished` set while it waits, so
+        the cheap check is true on every tick; only its turning true may force a pass."""
+        self.dispatch(mode="quota_codex_date")            # schedules the in-place resume
+        calls = self.tmp / "passes.log"
+        wrapper = self.tmp / "acp-dispatch-logged"
+        wrapper.write_text(f'#!/bin/bash\necho "$*" >> {calls}\nexec {sys.executable} {SCRIPT} "$@"\n')
+        wrapper.chmod(0o755)
+        env = {**os.environ, "ACP_DISPATCH_BIN": str(wrapper), "ACP_DISPATCH_WAIT_TICK": "1"}
+        proc = subprocess.Popen(["bash", "-c", self.record()["rearm"]], env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(5)
+        proc.kill()
+        proc.wait()
+        self.assertEqual(calls.read_text().count("wait --once"), 1, calls.read_text())
+
     def test_rearm_line_exits_124_when_wait_timeout_passes(self):
         self.dispatch()
         self.unfinished(wait_timeout=1, started=time.time() - 5)

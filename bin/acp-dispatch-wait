@@ -10,22 +10,31 @@
 # 16 GB Mac. The cheap check runs every 10 s (the DONE marker exists, or `"finished":` holds a
 # number in the record JSON — null means still running); `acp-dispatch wait --once` runs every
 # 60 s and the moment the cheap check trips, so a dead slice is still reaped and the
-# stale-checkpoint and auto-resume notices still appear (once per distinct state).
+# stale-checkpoint and auto-resume notices still appear (once per distinct state). "Trips" means
+# turns true: a quota-stopped record keeps `finished` set for the hours its in-place resume waits,
+# and re-running Python on every 10 s tick then would undo the saving (review 2026-10-18).
+# ACP_DISPATCH_WAIT_TICK / ACP_DISPATCH_WAIT_PASS (seconds) and ACP_DISPATCH_BIN are test seams.
 #
 # Exit: `wait --once`'s verdict — loops on 75 (EX_TEMPFAIL, still running); on 0 execs
 # `acp-dispatch check RECORD` and exits with its code (0 done, 1 partial, 3 no-report,
 # 4 BLOCKED); 124 (the record's wait_timeout) and any unexpected exit pass straight through.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
-dispatch="$here/acp-dispatch"
+dispatch=${ACP_DISPATCH_BIN:-$here/acp-dispatch}
 record=${1:?usage: acp-dispatch-wait RECORD DONE}
 marker=${2:?usage: acp-dispatch-wait RECORD DONE}
-since=60
+tick=${ACP_DISPATCH_WAIT_TICK:-10}
+pass=${ACP_DISPATCH_WAIT_PASS:-60}
+since=$pass
+was=0
 while :; do
   if [ -e "$marker" ] || grep -Eq '"finished"[[:space:]]*:[[:space:]]*[-0-9]' "$record" 2>/dev/null; then
-    since=60
+    [ "$was" -eq 0 ] && since=$pass
+    was=1
+  else
+    was=0
   fi
-  if [ "$since" -ge 60 ]; then
+  if [ "$since" -ge "$pass" ]; then
     "$dispatch" wait --once "$record"
     rc=$?
     if [ "$rc" -eq 75 ]; then
@@ -36,6 +45,6 @@ while :; do
       exit "$rc"
     fi
   fi
-  sleep 10
-  since=$((since + 10))
+  sleep "$tick"
+  since=$((since + tick))
 done
