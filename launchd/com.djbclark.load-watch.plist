@@ -19,8 +19,9 @@
   <key>WorkingDirectory</key><string>/Users/djbclark/src/djbclark-ade</string>
   <key>RunAtLoad</key><true/>
   <key>StartInterval</key><integer>20</integer>
-  <key>ProcessType</key><string>Background</string>
-  <key>LowPriorityIO</key><true/>
+  <!-- Interactive, not Background: a background job runs on the E-cores only, and during a spike its own ps
+       timed out every sample (2026-10-18, load 50-110), so it could never name the culprit. One ps per 20 s. -->
+  <key>ProcessType</key><string>Interactive</string>
   <key>StandardOutPath</key><string>/Users/djbclark/.local/state/load-watch/launchd.out</string>
   <key>StandardErrorPath</key><string>/Users/djbclark/.local/state/load-watch/launchd.err</string>
 </dict>
