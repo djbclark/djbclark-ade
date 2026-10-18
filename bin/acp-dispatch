@@ -2063,7 +2063,8 @@ def resume_unsupported(rec: dict) -> str | None:
     and set_session_model (a Gemini workaround, b/541293285); Vertex Claude rejects the replay with
     `messages.1.content.0.thinking.signature: Field required`, so an agy session on a non-Gemini
     model fails its first resumed turn every time (2026-10-18, two slices; root cause:
-    https://x.com/Davidwuuu92/status/2110264348870631635)."""
+    https://x.com/Davidwuuu92/status/2110264348870631635; reported upstream as
+    https://github.com/google-antigravity/antigravity-cli/issues/1281: drop this when it is fixed)."""
     model = (rec.get("model_applied") or rec.get("model") or "").lower()
     if rec.get("agent") == "agy" and not model.startswith("gemini"):
         return (f"agy cannot reopen a {model or 'non-Gemini'} session: its ACP server strips the"
