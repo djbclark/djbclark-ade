@@ -142,7 +142,7 @@ export function logSummary(text: string, n = 8): string[] {
 // changed in the last 3 days, each after a \001 line with its path. One process for all of them.
 // A \001 inside a file is dropped (LC_ALL=C: BSD tr rejects invalid UTF-8), so no file can forge a block.
 // A record is read only if it is a regular file under 64 KiB, and at most 64 KiB of it, once: the session id is
-// looked for in that one copy. The read runs under the watchdog of TAILS_SH (a record swapped for a FIFO between
+// looked for in that one copy. The read runs under the alarm of TAILS_SH (a record swapped for a FIFO between
 // find's type check and the open would block `head` for ever, and find and sh with it). `-exec sh -c 'for f'`
 // keeps a file name with a newline in one piece. A relative or option-like $root (ACP_DISPATCH_STATE) is refused.
 export const RECORDS_SH = `# radar:records
@@ -159,7 +159,7 @@ fi
 # Only records that name the session go through the per-file read below: one grep for all of them first
 # (-D skip passes FIFOs and devices by, --null keeps any file name whole). Reading all ~44 records every
 # poll cost sh+head+watchdog+sleep per record per session, ~250 forks/s across 7 sessions (2026-10-18).
-find "$root" -maxdepth 3 -type f -path '*/jobs/*.json' -mtime -3 -size -64k -exec grep -l --null -D skip -F -- "$sid" {} + 2>/dev/null | xargs -0 sh -c 'sid=$1; shift; for f; do b=$( ( head -c 65536 -- "$f" 2>/dev/null & t=$!; ( sleep 3; kill "$t" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$t"; kill "$w" 2>/dev/null ) | LC_ALL=C tr -d "\\001" ); case $b in *"$sid"*) printf "\\001%s\\n%s\\n" "$f" "$b";; esac; done' sh "$sid" 2>/dev/null
+find "$root" -maxdepth 3 -type f -path '*/jobs/*.json' -mtime -3 -size -64k -exec grep -l --null -D skip -F -- "$sid" {} + 2>/dev/null | xargs -0 sh -c 'sid=$1; shift; for f; do b=$(perl -e "alarm 3; exec @ARGV" head -c 65536 -- "$f" 2>/dev/null | LC_ALL=C tr -d "\\001"); case $b in *"$sid"*) printf "\\001%s\\n%s\\n" "$f" "$b";; esac; done' sh "$sid" 2>/dev/null
 exit 0
 `
 
@@ -167,15 +167,15 @@ exit 0
 // A \001 inside a tail is dropped (see RECORDS_SH), so a log cannot forge the tail of another file.
 // Only a regular file that is not a symlink is tailed (not a FIFO or a device such as /dev/zero, which tail would
 // never finish reading), and the tail is killed after 3 s anyway, in case a file is swapped for a FIFO between the check and
-// the open. The watchdog kills that one tail (never the process group) and has its output closed, so it does
-// not hold the pipe to tr open.
+// the open: `perl -e 'alarm 3; exec @ARGV'` arms SIGALRM and becomes the tail, so the alarm kills that one
+// process. It replaced a `( sleep 3; kill $t ) &` watchdog subshell per file: killing the subshell left its
+// `sleep 3` orphaned, 4 forks per file per 5 s poll per session, 75 orphans alive at once and load 46
+// (2026-10-18).
 export const TAILS_SH = `# radar:tails
 for f in "$@"; do
   printf '\\001%s\\n' "$f"
   [ -f "$f" ] && [ ! -L "$f" ] || continue
-  ( tail -c 16384 -- "$f" 2>/dev/null & t=$!
-    ( sleep 3; kill "$t" 2>/dev/null ) >/dev/null 2>&1 & w=$!
-    wait "$t"; kill "$w" 2>/dev/null ) | LC_ALL=C tr -d '\\001'
+  perl -e 'alarm 3; exec @ARGV' tail -c 16384 -- "$f" 2>/dev/null | LC_ALL=C tr -d '\\001'
 done
 exit 0
 `
