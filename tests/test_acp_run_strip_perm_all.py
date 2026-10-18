@@ -232,6 +232,18 @@ def write_home(home: Path) -> None:
     (data / "providers.json").write_text('[{"id": "cached"}]')
 
 
+# The end-to-end classes put a fake agent named like the real one (opencode, ...) first on PATH.
+# PATH holds only that dir and the system dirs, and uv is called by absolute path, so a real
+# opencode/agy/crush/zcode in ~/.local/bin, ~/.opencode/bin or Homebrew can never start: no
+# network, no credentials, no quota (a real opencode answered "Authentication required" here
+# on 2026-10-18 and failed 12 of these tests).
+UV = shutil.which("uv") or "uv"
+
+
+def hermetic_path(fake_bin: Path) -> str:
+    return f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+
+
 def uv_cache() -> str:
     r = subprocess.run(["uv", "cache", "dir"], check=True, capture_output=True, text=True)
     return r.stdout.strip()
@@ -397,6 +409,7 @@ class TestStripOutsideDenyEndToEnd(unittest.TestCase):
             f.write_text(FAKE)
             f.chmod(f.stat().st_mode | stat.S_IXUSR)
         cls.cache = uv_cache()
+        assert shutil.which("opencode", path=hermetic_path(cls.bin)) == str(cls.bin / "opencode"), "a real opencode is reachable"
 
     @classmethod
     @override
@@ -409,7 +422,7 @@ class TestStripOutsideDenyEndToEnd(unittest.TestCase):
         d.mkdir()
         out, log = d / "seen.json", d / "log.jsonl"
         e = {**os.environ, "HOME": str(self.home), "UV_CACHE_DIR": self.cache,
-             "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_OUT": str(out), "TMPDIR": str(d),
+             "PATH": hermetic_path(self.bin), "FAKE_OUT": str(out), "TMPDIR": str(d),
              "ACP_RUN_AGY_SERVER": str(self.bin / "fake-agy")}
         for k in ("ACP_RUN_KEEP_USER_CONFIG", "ACP_RUN_STRIP_USER_CONFIG", "OPENCODE_CONFIG",
                   "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT", "CRUSH_GLOBAL_CONFIG",
@@ -417,7 +430,7 @@ class TestStripOutsideDenyEndToEnd(unittest.TestCase):
                   "ZCODE_CLI_SETTINGS_FILE", "ZCODE_ACP_MODE"):
             e.pop(k, None)
         e.update(env or {})
-        argv = ["uv", "run", "--quiet", "--with", SDK, "python", "-I", str(SCRIPT), agent, "-C", str(d),
+        argv = [UV, "run", "--quiet", "--with", SDK, "python", "-I", str(SCRIPT), agent, "-C", str(d),
                 "-p", "Reply with the word ok", "--handshake-tries", "1", "--handshake-timeout", "20",
                 "--no-fallback", "--timeout", "60", "--log", str(log), *args]
         p = subprocess.run(argv, env=e, stdin=subprocess.DEVNULL, capture_output=True, text=True,

@@ -330,6 +330,18 @@ def write_home(home: Path) -> None:
     (g / "config" / "hooks.json").write_text('{"PreToolUse": [{"command": "orca-status"}]}')
 
 
+# The end-to-end classes put a fake agent named like the real one (opencode, ...) first on PATH.
+# PATH holds only that dir and the system dirs, and uv is called by absolute path, so a real
+# opencode/agy/crush/zcode in ~/.local/bin, ~/.opencode/bin or Homebrew can never start: no
+# network, no credentials, no quota (a real opencode answered "Authentication required" here
+# on 2026-10-18 and failed 12 of these tests).
+UV = shutil.which("uv") or "uv"
+
+
+def hermetic_path(fake_bin: Path) -> str:
+    return f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+
+
 def uv_cache() -> str:
     r = subprocess.run(["uv", "cache", "dir"], check=True, capture_output=True, text=True)
     return r.stdout.strip()
@@ -569,6 +581,7 @@ class TestStripEndToEnd(unittest.TestCase):
         broken.write_text("#!/nonexistent/interpreter\n")
         broken.chmod(broken.stat().st_mode | stat.S_IXUSR)
         cls.cache = uv_cache()
+        assert shutil.which("opencode", path=hermetic_path(cls.bin)) == str(cls.bin / "opencode"), "a real opencode is reachable"
 
     @classmethod
     @override
@@ -586,13 +599,13 @@ class TestStripEndToEnd(unittest.TestCase):
             old = time.time() - 4 * 3600
             os.utime(d / planted, (old, old))
         e = {**os.environ, "HOME": str(self.home), "UV_CACHE_DIR": self.cache,
-             "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_OUT": str(out), "FAKE_MODE": mode,
+             "PATH": hermetic_path(self.bin), "FAKE_OUT": str(out), "FAKE_MODE": mode,
              "ACP_RUN_AGY_SERVER": str(self.bin / fake), "TMPDIR": str(d)}
         for k in ("ACP_RUN_KEEP_USER_CONFIG", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR",
                   "HERDR_PANE_ID", "HERDR_ENV"):
             e.pop(k, None)
         e.update(env or {})
-        argv = ["uv", "run", "--quiet", "--with", SDK, "python", "-I", str(SCRIPT), agent, "-C", str(d),
+        argv = [UV, "run", "--quiet", "--with", SDK, "python", "-I", str(SCRIPT), agent, "-C", str(d),
                 "-p", "Reply with the word ok", "--handshake-tries", "1", "--handshake-timeout", "10",
                 "--no-fallback", "--timeout", "60", "--log", str(log), *args]
         proc = subprocess.Popen(argv, env=e, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

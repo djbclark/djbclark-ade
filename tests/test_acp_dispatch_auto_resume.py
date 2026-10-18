@@ -328,8 +328,14 @@ class TestRunner(AutoResumeBase):
         self.record_path().write_text(json.dumps(rec))
         mod = runpy.run_path(str(SCRIPT))
         sleeps: list[float] = []
+        real_sleep = time.sleep
 
         def tick(s: float) -> None:
+            if sleeps:
+                # the reset has arrived and the runner resumed the slice in this process: its wait
+                # loop polls with time.sleep too, and must neither be counted nor rewrite the record
+                real_sleep(min(s, 0.2))
+                return
             sleeps.append(s)
             r = self.record()
             r["auto_resume"]["not_before"] = time.time() - 1   # the reset arrives
