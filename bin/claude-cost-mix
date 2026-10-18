@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""claude-cost-mix: where Claude Code spend goes, from local transcripts.
+
+    claude-cost-mix [--days N] [--project SUBSTR] [--read W] [--write W] [--output W] [--json]
+
+Reads ~/.claude/projects/**/*.jsonl (sub-agent transcripts included) modified in the last N
+days (default 7) and prints, in input-token equivalents:
+
+1. the cost mix: input, cache writes, cache reads, output;
+2. which tool outputs carry it: a tool result of s tokens costs s * WRITE when first cached
+   plus s * READ on every later request in the same transcript (compaction ignored, so this
+   is an upper bound on what any tool that shrinks that output could save);
+3. cost by context size at the time of each request, main-session vs sub-agent split, the
+   number of compactions, and the fixed preamble: each transcript's first-request context
+   (system prompt, tool and skill listings, CLAUDE.md) re-read on every later request.
+
+Use it before believing a "70x fewer tokens" claim: a tool can save at most the share its
+tool output carries (2026-10-18: navigation output was <=16% of Claude cost, cache reads 71%).
+
+Weights default to Anthropic's price ratios against base input: cache read 0.1, cache write
+2.0 (the 1-hour TTL this machine uses, ENABLE_PROMPT_CACHING_1H; 5-minute writes are 1.25),
+output 5. Transcripts do not record the TTL, so pass --write 1.25 for 5-minute caching.
+Tool output size is characters / 4. Exit: 0 ok, 2 bad usage, 3 no transcripts in range.
+"""
+import argparse
+import glob
+import json
+import os
+import re
+import sys
+import time
+from collections import defaultdict
+from statistics import median as _median
+
+
+def median(xs):
+    return _median(xs) if xs else 0
+
+NAV_BASH = re.compile(
+    r"^\s*(?:cd [^;&|]+(?:&&|;)\s*)?"
+    r"(rg|grep|ggrep|fd|find|cat|head|tail|gsed -n|sed -n|ast-grep|sg|ls|tree|wc|graft)\b"
+)
+NAV_TOOLS = {"Read", "Grep", "Glob", "Bash:nav", "Bash:graft", "mcp:graft"}
+BUCKETS = [(0, "<100k"), (100_000, "100-200k"), (200_000, "200-300k"),
+           (300_000, "300-400k"), (400_000, "400k+")]
+
+
+def tool_label(block):
+    name = block.get("name", "?")
+    if name == "Bash":
+        cmd = (block.get("input") or {}).get("command", "")
+        if re.match(r"^\s*(?:cd [^;&|]+(?:&&|;)\s*)?graft\b", cmd):
+            return "Bash:graft"
+        return "Bash:nav" if NAV_BASH.match(cmd) else "Bash:other"
+    if name.startswith("mcp__"):
+        return "mcp:" + name.split("__")[1]
+    return name
+
+
+def result_chars(block):
+    content = block.get("content")
+    if isinstance(content, list):
+        return sum(len(x.get("text", "")) for x in content if isinstance(x, dict))
+    return len(str(content or ""))
+
+
+def bucket(ctx):
+    label = BUCKETS[0][1]
+    for floor, name in BUCKETS:
+        if ctx >= floor:
+            label = name
+    return label
+
+
+def scan(path, w, acc):
+    seen = set()
+    events = []  # ("api",) or ("res", label, tokens)
+    labels = {}
+    first = None  # context size of the transcript's first request: the fixed preamble
+    kind = "sub-agent" if "/subagents/" in path else "main"
+    try:
+        fh = open(path, errors="replace")
+    except OSError:
+        return
+    with fh:
+        for line in fh:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if d.get("subtype") == "compact_boundary":
+                acc["compactions"] += 1
+                continue
+            m = d.get("message") or {}
+            if d.get("type") == "assistant":
+                mid, u = m.get("id"), m.get("usage") or {}
+                if mid and u and mid not in seen:
+                    seen.add(mid)
+                    parts = {
+                        "input": u.get("input_tokens", 0) * 1.0,
+                        "cache_write": u.get("cache_creation_input_tokens", 0) * w["write"],
+                        "cache_read": u.get("cache_read_input_tokens", 0) * w["read"],
+                        "output": u.get("output_tokens", 0) * w["output"],
+                    }
+                    cost = sum(parts.values())
+                    for k, v in parts.items():
+                        acc["mix"][k] += v
+                    ctx = (u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+                           + u.get("cache_read_input_tokens", 0))
+                    acc["ctx"][bucket(ctx)] += cost
+                    acc["ctx_requests"][bucket(ctx)] += 1
+                    acc["kind"][kind] += cost
+                    if first is None:
+                        first = ctx
+                        acc["first_ctx"][kind].append(ctx)
+                    acc["preamble"] += min(ctx, first) * w["read"]
+                    acc["requests"] += 1
+                    events.append(("api",))
+                for b in m.get("content") or []:
+                    if isinstance(b, dict) and b.get("type") == "tool_use":
+                        labels[b.get("id")] = tool_label(b)
+            elif d.get("type") == "user" and isinstance(m.get("content"), list):
+                for b in m["content"]:
+                    if isinstance(b, dict) and b.get("type") == "tool_result":
+                        events.append(("res", labels.get(b.get("tool_use_id"), "?"),
+                                       result_chars(b) / 4))
+    later = 0
+    for e in reversed(events):
+        if e[0] == "api":
+            later += 1
+            continue
+        _, label, tokens = e
+        acc["tool_cost"][label] += tokens * (w["write"] + w["read"] * later)
+        acc["tool_tokens"][label] += tokens
+        acc["tool_calls"][label] += 1
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--days", type=float, default=7)
+    ap.add_argument("--project", default="", help="only transcript paths containing this")
+    ap.add_argument("--read", type=float, default=0.1)
+    ap.add_argument("--write", type=float, default=2.0)
+    ap.add_argument("--output", type=float, default=5.0)
+    ap.add_argument("--root", default=os.path.expanduser("~/.claude/projects"))
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+    w = {"read": a.read, "write": a.write, "output": a.output}
+    cut = time.time() - a.days * 86400
+    files = [f for f in glob.glob(os.path.join(a.root, "**", "*.jsonl"), recursive=True)
+             if a.project in f and os.path.getmtime(f) >= cut]
+    if not files:
+        print(f"claude-cost-mix: no transcripts under {a.root} in the last {a.days:g} days",
+              file=sys.stderr)
+        return 3
+    acc = {k: defaultdict(float) for k in
+           ("mix", "ctx", "ctx_requests", "kind", "tool_cost", "tool_tokens", "tool_calls")}
+    acc.update(compactions=0, requests=0, preamble=0.0, first_ctx={"main": [], "sub-agent": []})
+    for f in files:
+        scan(f, w, acc)
+    total = sum(acc["mix"].values()) or 1.0
+    nav = sum(v for k, v in acc["tool_cost"].items() if k in NAV_TOOLS)
+    if a.json:
+        out = {
+            "days": a.days, "transcripts": len(files), "requests": acc["requests"],
+            "compactions": acc["compactions"], "weights": w, "total_units": total,
+            "mix": {k: v / total for k, v in acc["mix"].items()},
+            "by_context": {n: acc["ctx"][n] / total for _, n in BUCKETS},
+            "by_kind": {k: v / total for k, v in acc["kind"].items()},
+            "tools": {k: {"calls": int(acc["tool_calls"][k]), "tokens": acc["tool_tokens"][k],
+                          "share": v / total}
+                      for k, v in sorted(acc["tool_cost"].items(), key=lambda x: -x[1])},
+            "navigation_share": nav / total,
+            "preamble_share": acc["preamble"] / total,
+            "median_first_context": {k: median(v) for k, v in acc["first_ctx"].items()},
+        }
+        print(json.dumps(out, indent=1))
+        return 0
+    mix = acc["mix"]
+    print(f"transcripts {len(files)}, requests {acc['requests']:,}, compactions "
+          f"{acc['compactions']}, last {a.days:g} days; weights read {a.read} write {a.write} "
+          f"output {a.output}")
+    print(f"total {total / 1e6:,.1f}M input-equivalent units: "
+          + ", ".join(f"{k.replace('_', ' ')} {mix[k] / total:.1%}"
+                      for k in ("input", "cache_write", "cache_read", "output")))
+    print("\ncost by context size at the request:")
+    for _, n in BUCKETS:
+        print(f"  {n:<10}{acc['ctx'][n] / total:>7.1%}   {int(acc['ctx_requests'][n]):>8,} requests")
+    print("cost by transcript kind: " + ", ".join(
+        f"{k} {v / total:.1%}" for k, v in sorted(acc["kind"].items(), key=lambda x: -x[1])))
+    fc = acc["first_ctx"]
+    print(f"fixed preamble (first request's context, re-read on every request): "
+          f"{acc['preamble'] / total:.1%} of cost; median first context main "
+          f"{median(fc['main']) / 1000:.0f}k, sub-agent {median(fc['sub-agent']) / 1000:.0f}k")
+    print(f"\n{'tool output':<24}{'calls':>8}{'Mtok':>8}{'share':>8}")
+    for k, v in sorted(acc["tool_cost"].items(), key=lambda x: -x[1])[:20]:
+        print(f"{k:<24}{int(acc['tool_calls'][k]):>8,}{acc['tool_tokens'][k] / 1e6:>8.2f}"
+              f"{v / total:>8.1%}")
+    print(f"\nnavigation output (Read/Grep/Glob, rg/cat/ls/fd via Bash, graft): at most "
+          f"{nav / total:.1%} of cost")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
