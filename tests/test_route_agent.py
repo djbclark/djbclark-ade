@@ -668,3 +668,195 @@ class TestFableSublimitAndCursorSplit(unittest.TestCase):
         c = r.route("code", quota=q)
         self.assertEqual(c.service.name, "cursor-auto")
         self.assertEqual(c.dispatch, "acp-dispatch cursor --model default")
+
+
+class TestRoutingPolicyToml(unittest.TestCase):
+    """config/routing.toml is the source of truth for curated routing data."""
+
+    # Frozen expectation for three representative rows (behaviour-preserving refactor).
+    EXPECTED: ClassVar[dict[str, dict[str, Any]]] = {
+        "claude": {
+            "cli": "claude (Opus 5.5 @ high for judgment; Fable only for frontier)",
+            "good_at": {"judgment": 1, "frontier": 2},
+            "billing": "subscription",
+            "judgment_tier": True,
+            "models": {"judgment": "opus --effort high", "frontier": "fable --effort high"},
+            "pool": None, "max_parallel": 4, "agent": "", "burn_first": False,
+        },
+        "codex": {
+            "cli": "codex (gpt-6-astra, frontier only)",
+            "good_at": {"frontier": 1},
+            "billing": "subscription",
+            "judgment_tier": True,
+            "models": {"frontier": "gpt-6-astra --effort high"},
+            "pool": None, "max_parallel": 1, "agent": "", "burn_first": False,
+        },
+        "antigravity-claude": {
+            "cli": "agy (acp-run agy --model claude-opus-5-5 --effort high | claude-sonnet-5-5)",
+            "good_at": {"code": 11, "research": 3, "mechanical": 6},
+            "billing": "subscription",
+            "judgment_tier": False,
+            "models": {"code": "claude-opus-5-5 --effort high",
+                       "research": "claude-sonnet-5-5 --effort high",
+                       "mechanical": "claude-sonnet-5-5 --effort low"},
+            "pool": ("antigravity", "claude_gpt"), "max_parallel": 3,
+            "agent": "agy", "burn_first": True,
+        },
+    }
+
+    def tearDown(self):
+        # Restore the repo policy after any test that reloads a temp file.
+        r.reload_policy(Path(__file__).resolve().parent.parent / "config" / "routing.toml")
+
+    def test_loaded_services_match_frozen_expectation(self):
+        for name, expect in self.EXPECTED.items():
+            svc = r.BY_NAME[name]
+            self.assertEqual(svc.cli, expect["cli"], name)
+            self.assertEqual(svc.good_at, expect["good_at"], name)
+            self.assertEqual(svc.billing, expect["billing"], name)
+            self.assertEqual(svc.judgment_tier, expect["judgment_tier"], name)
+            self.assertEqual(svc.models, expect["models"], name)
+            self.assertEqual(svc.pool, expect["pool"], name)
+            self.assertEqual(svc.max_parallel, expect["max_parallel"], name)
+            self.assertEqual(svc.agent, expect["agent"], name)
+            self.assertEqual(svc.burn_first, expect["burn_first"], name)
+
+    def test_routing_policy_env_changes_route_output(self):
+        import tempfile
+        import textwrap
+        base = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        # Make claude lose judgment (rank 99) and invent a fake judgment winner.
+        patched = base.replace(
+            'good_at = { judgment = 1, frontier = 2 }',
+            'good_at = { judgment = 99, frontier = 2 }',
+            1,
+        )
+        # Inject a judgment-tier service that wins when claude is demoted.
+        inject = textwrap.dedent('''
+            [[service]]
+            name = "policy-test-judge"
+            cli = "policy-test-judge"
+            good_at = { judgment = 1 }
+            billing = "subscription"
+            judgment_tier = true
+            models = { judgment = "test-model" }
+        ''')
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
+            fh.write(patched + inject)
+            tmp = fh.name
+        try:
+            with mock.patch.dict(os.environ, {"ROUTING_POLICY": tmp}):
+                r.reload_policy()
+            # Drain everything else; only our test judge should take judgment.
+            q = {**IDLE, "claude": {"remaining": 5.0},
+                 "policy-test-judge": {"remaining": 100.0}}
+            choice = r.route("judgment", quota=q)
+            self.assertIsNotNone(choice)
+            self.assertEqual(choice.service.name, "policy-test-judge")
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_unknown_key_names_the_file(self):
+        import tempfile
+        import textwrap
+        bad = textwrap.dedent('''
+            [routing]
+            kinds = ["bulk"]
+            burn_first_min = 40.0
+            burn_first_bonus = 4.0
+            frontier_per_wave = 1
+            fable_min_left = 10.0
+            default_profile = { bulk = 60 }
+
+            [discovery]
+            never_route = []
+            operator_gated = []
+            aliases = {}
+
+            [dispatch]
+            operator_gated = []
+            fable_gated_efforts = []
+            inflight_cap = {}
+            extra = {}
+
+            [hermes]
+            provider_name = {}
+
+            [hermes.models]
+
+            [[service]]
+            name = "x"
+            cli = "x"
+            good_at = { bulk = 1 }
+            billing = "free"
+            not_a_field = true
+        ''')
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
+            fh.write(bad)
+            tmp = fh.name
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                r.load_policy(tmp)
+            msg = str(ctx.exception)
+            self.assertIn(tmp, msg)
+            self.assertIn("unknown key", msg)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_missing_name_names_the_file(self):
+        import tempfile
+        import textwrap
+        bad = textwrap.dedent('''
+            [routing]
+            kinds = ["bulk"]
+            burn_first_min = 40.0
+            burn_first_bonus = 4.0
+            frontier_per_wave = 1
+            fable_min_left = 10.0
+            default_profile = { bulk = 60 }
+
+            [discovery]
+            never_route = []
+            operator_gated = []
+            aliases = {}
+
+            [dispatch]
+            operator_gated = []
+            fable_gated_efforts = []
+            inflight_cap = {}
+            extra = {}
+
+            [hermes]
+            provider_name = {}
+
+            [hermes.models]
+
+            [[service]]
+            cli = "x"
+            good_at = { bulk = 1 }
+            billing = "free"
+        ''')
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
+            fh.write(bad)
+            tmp = fh.name
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                r.load_policy(tmp)
+            msg = str(ctx.exception)
+            self.assertIn(tmp, msg)
+            self.assertIn("missing required", msg)
+            self.assertIn("name", msg)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_policy_md_contains_codex_frontier_row(self):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = r.main(["policy", "--md"])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("codex", out)
+        self.assertIn("frontier", out)
+        self.assertIn("gpt-6-astra", out)

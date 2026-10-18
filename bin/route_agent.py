@@ -80,7 +80,8 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+import tomllib
+from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -104,16 +105,8 @@ NON_ACP_HEADLESS = frozenset({"muse"})  # zcode joined acp-run 2026-10-08 (zcode
 STALE_HARD = 6 * 3600      # beyond this, treat headroom as unknown
 STALE_SOFT = 25 * 60       # aiuse's own `fresh` threshold; older = re-collect before a wave
 
-# Kinds of work. Deliberately few — a taxonomy nobody can apply is worse than
-# a coarse one that gets used.
-# burn_first services (use-it-or-lose-it pools) win a tie-sized margin while
-# they hold at least this much headroom.
-BURN_FIRST_MIN = 40.0
-BURN_FIRST_BONUS = 4.0
-KINDS = ("judgment", "frontier", "code", "bulk", "research", "mechanical", "github",
-         "realtime-web")
-# Most `frontier` slices one wave puts on a single pool (operator 2026-10-18).
-FRONTIER_PER_WAVE = 1
+# KINDS, BURN_FIRST_*, FRONTIER_PER_WAVE and the curated SERVICES rows are
+# loaded from config/routing.toml (see load_policy / apply_policy below).
 
 
 @dataclass(frozen=True)
@@ -191,180 +184,216 @@ class Service:
         return self.good_at[kind]
 
 
-# Profiles from docs/model-routing.md "Which AI for which work", rewritten
-# 2026-10-15 to the operator's routing policy and narrowed 2026-10-18: Claude
-# Fable 5.1 and codex's top frontier model (gpt-6-astra today) are reached
-# only through the `frontier` kind, one slice per pool per wave; judgment is
-# Opus 5.5 at high; everyday work goes to the OTHER pools; grok and
-# copilot are reserves with a hard floor (GrokBot and GitHub-side Copilot
-# review run on them); hermes is never a target; omp is operator-gated.
-# `models` is the acp-run `--model [--effort L]` suggestion per kind; `agent`
-# is the acp-run agent name when it differs from the aiuse provider id.
-SERVICES: tuple[Service, ...] = (
-    Service("claude", "claude (Opus 5.5 @ high for judgment; Fable only for frontier)",
-            {"judgment": 1, "frontier": 2},
-            "subscription",
-            "orchestration pool; Fable is a sublimit of the SAME weekly window "
-            "(at most 50% of it), not a separate allowance",
-            judgment_tier=True, access="cli-only",
-            # No code/research row: everyday work on this pool eats the room
-            # judgment needs (review 2026-10-15); Haiku lookups go through the
-            # Agent tool, not acp-dispatch. Fable at xhigh is never suggested:
-            # acp-dispatch makes it an operator-approved run (2026-10-18).
-            models={"judgment": "opus --effort high",
-                    "frontier": "fable --effort high"}),
-    Service("codex", "codex (gpt-6-astra, frontier only)",
-            {"frontier": 1},
-            "subscription",
-            "top frontier coding model: only a slice that really needs astra "
-            "to look it over; one at a time",
-            judgment_tier=True, max_parallel=1,
-            # Tolerated rather than committed: OpenAI neither permits nor
-            # prohibits subscription use inside a non-OpenAI tool, and
-            # tolerated is fine. The real reason to keep it out of Hermes's
-            # chain is capability, not licensing — these are among the
-            # strongest coding models available here, so the weekly pool is
-            # worth reserving for coding judgment rather than spending on
-            # background agent turns.
-            access="cli-only",
-            # No judgment/code/research rows (operator 2026-10-18): the 2026-10-15
-            # fall-through let plan, and leads copying it, put whole waves on
-            # astra; its 5-hour window holds about one hard slice. acp-dispatch
-            # also refuses a second codex slice while one is in flight.
-            models={"frontier": "gpt-6-astra --effort high"}),
-    # agy's second pool: Claude Opus/Sonnet 5.5 and GPT via the same Google AI
-    # Pro subscription, a separate 5h/weekly window from Gemini. Operator
-    # 2026-10-10: it has a lot of headroom, so use it. Real Claude-class
-    # coding and review capacity that is otherwise wasted at each reset.
-    # Reach it ONLY through `acp-run agy --model claude-opus-5-5 --effort high`
-    # (or claude-sonnet-5-5), never `agy -p`; see model-routing's agy rules.
-    # Over ACP these ids exist only because acp-run sends clientInfo.name
-    # "zed": agy_acp_server 1.3.0 gives non-Gemini models only to zed, xcode
-    # and JetBrains.* clients (supports_third_party_models(), deliberate, so a
-    # client-name workaround a later .par may close; antigravity-cli#1168).
-    # acp-dispatch checks --model against `acp-run agy --info` before running.
-    Service("antigravity-claude",
-            "agy (acp-run agy --model claude-opus-5-5 --effort high | claude-sonnet-5-5)",
-            {"code": 11, "research": 3, "mechanical": 6},
-            "subscription",
-            "Claude/GPT pool on the Google AI Pro plan; use-it-or-lose-it, "
-            "ACP client only",
-            burn_first=True, pool=("antigravity", "claude_gpt"),
-            max_parallel=3, access="cli-only", agent="agy",
-            models={"code": "claude-opus-5-5 --effort high",
-                    "research": "claude-sonnet-5-5 --effort high",
-                    "mechanical": "claude-sonnet-5-5 --effort low"}),
-    Service("antigravity", "agy (gemini)",
-            {"bulk": 1, "research": 1, "mechanical": 2, "code": 40},
-            "subscription",
-            # Google AI Pro does NOT include API access — subscriptions are chat
-            # -interface only, and a Gemini API key bills separately. Reaching
-            # it via the agy CLI spends the subscription; wiring Hermes to a
-            # GEMINI_API_KEY would spend real money.
-            "big context, summarisation, multimodal; most-wasted pool",
-            max_parallel=2, access="cli-only", agent="agy",
-            models={"bulk": "gemini-3.8-flash --effort medium",
-                    "research": "gemini-3.8-flash --effort high",
-                    "mechanical": "gemini-3.8-flash --effort low",
-                    "code": "gemini-3.8-flash --effort high"}),
-    # opencode-zen-free is NOT a separate provider — it is the free subset of
-    # opencode-zen's models. Kept as its own row because the free and paid
-    # halves have different billing and different eligibility, which is the
-    # distinction that actually drives routing. Claude reaches both through
-    # the `opencode` TUI; Hermes reaches the free half as an API provider.
-    Service("opencode-zen-free", "opencode (zen free models)",
-            {"bulk": 5, "mechanical": 5, "code": 45}, "free",
-            "free half of opencode-zen; usable by Claude via the opencode TUI "
-            "and by Hermes as a direct API provider",
-            access="api", agent="opencode"),
-    Service("opencode-go", "opencode (go tier)",
-            {"bulk": 2, "mechanical": 1, "code": 18},
-            "free", "kimi/minimax/qwen/glm catalogs", agent="opencode",
-            models={"bulk": "opencode-go/kimi-k3 --effort low",
-                    "mechanical": "opencode-go/glm-5.3 --effort low",
-                    "code": "opencode-go/glm-5.3 --effort high"}),
-    Service("zai", "zcode (GLM-5.3)", {"bulk": 3, "mechanical": 3, "code": 16, "research": 12},
-            "subscription",
-            # zcode (Z.ai's own TUI, GLM-5.3 / GLM-5.3-Flash x low/high/max) is
-            # the zai Coding Plan's TUI; acp-run zcode drives it.
-            "coding plan; an everyday code and bulk pool", agent="zcode",
-            models={"code": "GLM-5.3 --effort high",
-                    "research": "GLM-5.3 --effort high",
-                    "bulk": "GLM-5.3-Flash --effort low",
-                    "mechanical": "GLM-5.3-Flash --effort low"}),
-    # Alibaba's coding plan through the qwen TUI. aiuse keeps `alibaba` under
-    # [disabled_services] (operator 2026-10-08), so `plan` skips it until the
-    # operator re-enables it there; the row exists so discovery does not
-    # surface the bare `qwen` agent as an unprofiled, un-disable-able service.
-    Service("alibaba", "qwen (Alibaba coding plan)",
-            {"bulk": 30, "mechanical": 30, "code": 30, "research": 30},
-            "subscription", "disabled in aiuse until the operator re-enables it",
-            agent="qwen",
-            models={"code": "qwen3.8-max --effort medium",
-                    "research": "qwen3.8-max --effort medium",
-                    "bulk": "qwen3.8-max --effort low",
-                    "mechanical": "qwen3.8-max --effort low"}),
-    # MIT SIPB-hosted models through the crush fork (ACP). Free, no quota
-    # window in aiuse, 30B-class: light bulk and mechanical slices only.
-    Service("crush", "crush (SIPB models, free)", {"bulk": 8, "mechanical": 8},
-            "free", "MIT SIPB-hosted 30B-class models; light slices only",
-            models={"bulk": "sipb-llms:qwen3.6:35b-a3b-q4_K_M",
-                    "mechanical": "sipb-llms:qwen3.6:35b-a3b-q4_K_M"}),
-    Service("devin", "devin", {"bulk": 20, "code": 45}, "subscription",
-            "disabled in Orca's roster — dormant by choice"),
-    # RESERVE (operator 2026-10-15: "never deplete the grok and copilot
-    # pools"): GitHub-side Copilot code review of commits draws on this
-    # allowance. Hard floor, one slice at a time, only for GitHub-shaped work.
-    Service("copilot", "copilot", {"github": 1}, "subscription",
-            # GitHub: the Copilot endpoint is for officially supported clients
-            # only. Using it as a generic model provider violates the ToS and
-            # risks account suspension. CLI only, never a Hermes provider.
-            "RESERVE: PR review, repo Q&A (official client only)",
-            access="forbidden", reserve_floor=60.0, max_parallel=1,
-            models={"github": "claude-sonnet-5.5 --effort medium"}),
-    # Cursor reports two model sublimits of one monthly total: the Auto pool
-    # (Cursor's own models) and the third-party pool. They drain at very
-    # different rates (2026-10-15: auto 75% left, third-party 11% left), so
-    # the Auto pool is its own routing entry; the provider row keeps the rest.
-    Service("cursor-auto", "cursor (Auto pool)",
-            {"code": 14, "mechanical": 4, "bulk": 6, "research": 12}, "subscription",
-            "Cursor Auto/Composer pool; monthly, use-it-or-lose-it",
-            burn_first=True, pool=("cursor", "auto"), max_parallel=2, agent="cursor",
-            models={"code": "default", "mechanical": "default", "bulk": "default",
-                    "research": "default"}),
-    Service("cursor", "cursor (third-party models)", {"code": 20, "mechanical": 10},
-            "subscription", "Cursor third-party pool", agent="cursor",
-            models={"code": "claude-sonnet-5-5 --effort medium",
-                    "mechanical": "claude-haiku-5-5 --effort low"}),
-    # RESERVE: GrokBot (the cloud Chief of Staff) runs on the SuperGrok pool.
-    # Hard floor, one slice at a time, only when a Grok model is the point.
-    # Only the explicit `realtime-web` kind reaches it: generic research/bulk
-    # ranks used to let `plan` fall through to it (review 2026-10-15).
-    Service("grok", "grok", {"realtime-web": 1}, "subscription",
-            "RESERVE: GrokBot runs on it; realtime X/web angle only",
-            max_parallel=1, reserve_floor=60.0,
-            models={"realtime-web": "grok-4.7 --effort high"}),
-    Service("clinepass", "cline", {"bulk": 40, "code": 40, "mechanical": 40},
-            "subscription",
-            # An API-key bundle we hold, so Hermes may call it directly. The
-            # old blanket never_bulk rule was retired 2026-08-24 in favour of
-            # the measured burn-rate alert (agent_stats.py burn). aiuse's
-            # [disabled_services] keeps it out of `plan` since 2026-10-08.
-            "Hermes-usable API pool; watch the burn alert", access="api", agent="cline",
-            models={"bulk": "cline-pass/deepseek-v4.1-flash",
-                    "mechanical": "cline-pass/deepseek-v4.1-flash",
-                    "code": "cline-pass/glm-5.3"}),
-    # The paid half of the same provider. Retired with the prepaid tier, not
-    # because the provider is unusable — restoring it is a top-up decision.
-    Service("opencode-zen", "opencode (zen paid models)", {"code": 50, "bulk": 50},
-            "prepaid", "paid half of opencode-zen; prepaid tier retired 2026-08-23",
-            retired=True, agent="opencode"),
-    Service("openrouter", "opencode-ralph-tui-openrouter", {"code": 50, "bulk": 50},
-            "prepaid", "prepaid retired 2026-08-23", retired=True),
-    Service("deepseek", "opencode-ralph-tui-deepseek", {"code": 50, "bulk": 50},
-            "prepaid", "prepaid retired 2026-08-23", retired=True),
-)
-BY_NAME = {s.name: s for s in SERVICES}
+# Policy file: env ROUTING_POLICY, else <repo>/config/routing.toml (same
+# resolution style as ACP_RUN).
+def resolve_policy_path() -> Path:
+    return Path(os.environ.get("ROUTING_POLICY") or
+                (Path(__file__).resolve().parent.parent / "config" / "routing.toml"))
+
+
+POLICY_PATH = resolve_policy_path()
+POLICY: dict[str, Any] = {}
+SERVICE_KEYS = {f.name for f in fields(Service)}
+_SERVICE_REQUIRED = ("name", "cli", "good_at", "billing")
+
+# Populated by apply_policy from the TOML; names and types match the former
+# module-level literals so every caller and test keeps working.
+SERVICES: tuple[Service, ...]
+BY_NAME: dict[str, Service]
+KINDS: tuple[str, ...]
+BURN_FIRST_MIN: float
+BURN_FIRST_BONUS: float
+FRONTIER_PER_WAVE: int
+DEFAULT_PROFILE: dict[str, int]
+NEVER_ROUTE: frozenset[str]
+OPERATOR_GATED: frozenset[str]
+FABLE_MIN_LEFT: float
+ALIASES: dict[str, str]
+DISPATCH_EXTRA: dict[str, str]
+HERMES_MODELS: dict[str, list[str]]
+HERMES_PROVIDER_NAME: dict[str, str]
+
+
+def load_policy(path: Path | str) -> dict[str, Any]:
+    """Parse and validate config/routing.toml (or ROUTING_POLICY).
+
+    Each [[service]] may only use Service field names; name/cli/good_at/billing
+    are required. Raises ValueError naming the file and the entry on bad input.
+    """
+    path = Path(path)
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except OSError as e:
+        raise ValueError(f"routing policy {path}: {e}") from e
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"routing policy {path}: {e}") from e
+
+    services = data.get("service")
+    if services is None:
+        raise ValueError(f"routing policy {path}: missing [[service]] entries")
+    if not isinstance(services, list):
+        raise ValueError(f"routing policy {path}: 'service' must be an array of tables")
+
+    for i, entry in enumerate(services):
+        label = entry.get("name") if isinstance(entry, dict) else i
+        if not isinstance(entry, dict):
+            raise ValueError(f"routing policy {path}: [[service]] entry {i} is not a table")
+        unknown = set(entry) - SERVICE_KEYS
+        if unknown:
+            raise ValueError(
+                f"routing policy {path}: [[service]] {label!r}: "
+                f"unknown key(s) {sorted(unknown)}")
+        missing = [k for k in _SERVICE_REQUIRED if k not in entry]
+        if missing:
+            raise ValueError(
+                f"routing policy {path}: [[service]] {label!r}: "
+                f"missing required key(s) {missing}")
+        pool = entry.get("pool")
+        if pool is not None and not (isinstance(pool, list) and len(pool) == 2
+                                       and all(isinstance(x, str) for x in pool)):
+            raise ValueError(
+                f"routing policy {path}: [[service]] {label!r}: "
+                f"pool must be a 2-element string array, got {pool!r}")
+    for section in ("routing", "discovery", "dispatch", "hermes"):
+        if section not in data or not isinstance(data[section], dict):
+            raise ValueError(f"routing policy {path}: missing [{section}] table")
+    return data
+
+
+def _service_from_entry(entry: dict[str, Any]) -> Service:
+    kwargs = dict(entry)
+    if kwargs.get("pool") is not None:
+        a, b = kwargs["pool"]
+        kwargs["pool"] = (a, b)
+    kwargs["good_at"] = {str(k): int(v) for k, v in kwargs["good_at"].items()}
+    if "models" in kwargs and kwargs["models"] is not None:
+        kwargs["models"] = {str(k): str(v) for k, v in kwargs["models"].items()}
+    return Service(**kwargs)
+
+
+def apply_policy(data: dict[str, Any]) -> None:
+    """Install a loaded policy dict as this module's routing constants."""
+    global POLICY, SERVICES, BY_NAME, KINDS, BURN_FIRST_MIN, BURN_FIRST_BONUS
+    global FRONTIER_PER_WAVE, DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED
+    global FABLE_MIN_LEFT, ALIASES, DISPATCH_EXTRA, HERMES_MODELS
+    global HERMES_PROVIDER_NAME
+
+    POLICY = data
+    routing = data["routing"]
+    discovery = data["discovery"]
+    dispatch = data["dispatch"]
+    hermes = data["hermes"]
+
+    KINDS = tuple(routing["kinds"])
+    BURN_FIRST_MIN = float(routing["burn_first_min"])
+    BURN_FIRST_BONUS = float(routing["burn_first_bonus"])
+    FRONTIER_PER_WAVE = int(routing["frontier_per_wave"])
+    FABLE_MIN_LEFT = float(routing["fable_min_left"])
+    DEFAULT_PROFILE = {str(k): int(v) for k, v in routing["default_profile"].items()}
+
+    NEVER_ROUTE = frozenset(discovery["never_route"])
+    OPERATOR_GATED = frozenset(discovery["operator_gated"])
+    ALIASES = {str(k): str(v) for k, v in discovery["aliases"].items()}
+
+    DISPATCH_EXTRA = {str(k): str(v) for k, v in (dispatch.get("extra") or {}).items()}
+    HERMES_MODELS = {str(k): [str(m) for m in v]
+                      for k, v in (hermes.get("models") or {}).items()}
+    HERMES_PROVIDER_NAME = {str(k): str(v)
+                            for k, v in (hermes.get("provider_name") or {}).items()}
+
+    SERVICES = tuple(_service_from_entry(e) for e in data["service"])
+    BY_NAME = {s.name: s for s in SERVICES}
+
+
+def reload_policy(path: Path | str | None = None) -> dict[str, Any]:
+    """Re-read ROUTING_POLICY (or `path`) and re-apply. Used by tests."""
+    global POLICY_PATH
+    POLICY_PATH = Path(path) if path is not None else resolve_policy_path()
+    data = load_policy(POLICY_PATH)
+    apply_policy(data)
+    return data
+
+
+def policy_public() -> dict[str, Any]:
+    """Effective policy as a JSON-serialisable dict (services expanded)."""
+    def svc_row(s: Service) -> dict[str, Any]:
+        return {
+            "name": s.name, "cli": s.cli, "good_at": dict(s.good_at),
+            "billing": s.billing, "note": s.note, "never_bulk": s.never_bulk,
+            "retired": s.retired, "judgment_tier": s.judgment_tier,
+            "access": s.access, "hermes_only": s.hermes_only,
+            "burn_first": s.burn_first,
+            "pool": list(s.pool) if s.pool else None,
+            "max_parallel": s.max_parallel, "agent": s.agent,
+            "models": dict(s.models), "reserve_floor": s.reserve_floor,
+        }
+    return {
+        "path": str(POLICY_PATH),
+        "routing": {
+            "kinds": list(KINDS),
+            "burn_first_min": BURN_FIRST_MIN,
+            "burn_first_bonus": BURN_FIRST_BONUS,
+            "frontier_per_wave": FRONTIER_PER_WAVE,
+            "fable_min_left": FABLE_MIN_LEFT,
+            "default_profile": dict(DEFAULT_PROFILE),
+        },
+        "discovery": {
+            "never_route": sorted(NEVER_ROUTE),
+            "operator_gated": sorted(OPERATOR_GATED),
+            "aliases": dict(ALIASES),
+        },
+        "dispatch": {
+            "operator_gated": list(POLICY["dispatch"]["operator_gated"]),
+            "fable_gated_efforts": list(POLICY["dispatch"]["fable_gated_efforts"]),
+            "inflight_cap": {str(k): int(v)
+                             for k, v in POLICY["dispatch"]["inflight_cap"].items()},
+            "extra": dict(DISPATCH_EXTRA),
+        },
+        "hermes": {
+            "models": {k: list(v) for k, v in HERMES_MODELS.items()},
+            "provider_name": dict(HERMES_PROVIDER_NAME),
+        },
+        "services": [svc_row(s) for s in SERVICES],
+    }
+
+
+def policy_markdown() -> str:
+    """Markdown tables: services × kinds (rank, model), gates, caps."""
+    lines = ["# Routing policy", "", f"Source: `{POLICY_PATH}`", "",
+             "## Services × kinds", ""]
+    header = "| service | " + " | ".join(KINDS) + " |"
+    sep = "|---|" + "|".join("---" for _ in KINDS) + "|"
+    lines += [header, sep]
+    for s in SERVICES:
+        cells = []
+        for k in KINDS:
+            if k not in s.good_at:
+                cells.append("—")
+            else:
+                model = s.models.get(k, "")
+                cell = f"r{s.good_at[k]}"
+                if model:
+                    cell += f" `{model}`"
+                cells.append(cell)
+        lines.append(f"| {s.name} | " + " | ".join(cells) + " |")
+    lines += ["", "## Gates and caps", ""]
+    lines.append("| key | value |")
+    lines.append("|---|---|")
+    d = POLICY["dispatch"]
+    lines.append(f"| discovery.never_route | {', '.join(sorted(NEVER_ROUTE))} |")
+    lines.append(f"| discovery.operator_gated | {', '.join(sorted(OPERATOR_GATED))} |")
+    lines.append(f"| dispatch.operator_gated | {', '.join(d['operator_gated'])} |")
+    lines.append(f"| dispatch.fable_gated_efforts | {', '.join(d['fable_gated_efforts'])} |")
+    caps = ", ".join(f"{k}={v}" for k, v in d["inflight_cap"].items())
+    lines.append(f"| dispatch.inflight_cap | {caps} |")
+    lines.append(f"| routing.frontier_per_wave | {FRONTIER_PER_WAVE} |")
+    lines.append(f"| routing.fable_min_left | {FABLE_MIN_LEFT} |")
+    lines.append(f"| routing.burn_first_min | {BURN_FIRST_MIN} |")
+    return "\n".join(lines) + "\n"
+
+
+apply_policy(load_policy(POLICY_PATH))
 
 
 # -- quota snapshot + service discovery ----------------------------------
@@ -546,36 +575,8 @@ def installed_roster() -> set[str]:
     return names
 
 
-# Curated profiles overlay discovery; anything discovered without one gets
-# DEFAULT_PROFILE so a newly-added agent is routable rather than invisible.
-DEFAULT_PROFILE = {"bulk": 60, "mechanical": 60}
-# Never a routable service, whatever aiuse or acp-run lists (operator 2026-10-15):
-# hermes is the operator's own assistant; omp needs a per-run operator approval
-# (acp-run/acp-dispatch gate both behind ACP_OPERATOR_APPROVED). Discovery would
-# otherwise hand them DEFAULT_PROFILE bulk work: omp sat in `aiuse --available`
-# with 100% headroom on 2026-10-15.
-NEVER_ROUTE = frozenset({"hermes", "clinepass"})  # clinepass: Hermes's lifeline, never a slice target
-# cline (operator 2026-10-17): the TUI is uninstalled; gated so a reinstall does not put it back
-# into discovery by accident (ALIASES folds it into clinepass, which NEVER_ROUTE covers).
-OPERATOR_GATED = frozenset({"omp", "cline"})
-# Below this much of the Fable sublimit, frontier on claude falls back to Opus.
-FABLE_MIN_LEFT = 10.0
-
-# Discovery names the TUI; aiuse names the account behind it. Without this
-# map, discovery would surface `cline` as a brand-new service and hand it bulk
-# work — silently defeating the never-bulk rule that protects clinepass, which
-# is Hindsight's and hermes's inference lifeline. Any alias inherits the
-# curated service's constraints rather than becoming a second entry.
-ALIASES = {
-    "cline": "clinepass",
-    "agy": "antigravity",
-    "claude-agent-teams": "claude",
-    "openclaude": "claude",
-    "opencode": "opencode-go",
-    "kimi": "opencode-go",
-    "zcode": "zai",
-    "qwen": "alibaba",
-}
+# DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED, FABLE_MIN_LEFT and ALIASES
+# come from config/routing.toml via apply_policy.
 
 
 def discover(quota: dict[str, Any] | None = None) -> list[Service]:
@@ -619,10 +620,7 @@ class Choice:
         return f"acp-dispatch {agent} --model <id from: acp-run {agent} --info>"
 
 
-# Flags a dispatch line needs for acp-run to accept the model at all. crush:
-# `--model` rewrites the shared data dir's crush.json, so acp-run exits 2 unless
-# the run strips the user config or gets ACP_RUN_CRUSH_DATA (review 2026-10-15).
-DISPATCH_EXTRA = {"crush": " --acp-arg=--strip-user-config"}
+# DISPATCH_EXTRA comes from [dispatch].extra in config/routing.toml.
 
 
 def suggest_model(svc: Service, kind: str, info: dict[str, Any]) -> str:
@@ -727,16 +725,7 @@ def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
     return out
 
 
-# Concrete models per Hermes-usable provider, cheapest-capable first within
-# each. Only providers with access == "api" may appear: everything else is
-# reachable solely through its own vendor CLI.
-HERMES_MODELS: dict[str, list[str]] = {
-    "opencode-zen-free": ["deepseek-v4-flash-free", "hy3-free",
-                          "nemotron-3.5-lightning-free"],
-    "clinepass": ["cline-pass/deepseek-v4-flash", "cline-pass/minimax-m3"],
-}
-# Hermes names the provider differently from aiuse for the paid pool.
-HERMES_PROVIDER_NAME = {"clinepass": "cline"}
+# HERMES_MODELS and HERMES_PROVIDER_NAME come from [hermes] in config/routing.toml.
 
 
 def hermes_chain(quota: dict[str, Any] | None = None) -> list[dict[str, str]]:
@@ -845,6 +834,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("services", help="every service discovered right now")
     hc = sub.add_parser("hermes-chain", help="generate Hermes's provider chain")
     hc.add_argument("--apply", action="store_true", help="write it to config.yaml")
+    pol = sub.add_parser("policy", help="print the effective routing policy")
+    pol.add_argument("--md", action="store_true",
+                     help="markdown tables (services × kinds, gates, caps)")
 
     args = parser.parse_args(argv)
     quota, age = load_snapshot()
@@ -914,6 +906,13 @@ def main(argv: list[str] | None = None) -> int:
               + ", ".join(f"{s.name}[{s.access}]" for s in excluded))
         if args.apply:
             print("\n  backup:", apply_hermes_chain(chain))
+        return 0
+
+    if args.command == "policy":
+        if args.md:
+            sys.stdout.write(policy_markdown())
+        else:
+            print(json.dumps(policy_public(), indent=2))
         return 0
 
     if args.command == "services":

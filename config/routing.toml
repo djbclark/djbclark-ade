@@ -1,0 +1,314 @@
+# Machine-readable routing policy. Consumed by bin/route_agent.py and
+# bin/acp-dispatch. Edit here; do not restate the data in Python.
+# Profiles from docs/model-routing.md "Which AI for which work", rewritten
+# 2026-10-15 to the operator's routing policy and narrowed 2026-10-18: Claude
+# Fable 5.1 and codex's top frontier model (gpt-6-astra today) are reached
+# only through the `frontier` kind, one slice per pool per wave; judgment is
+# Opus 5.5 at high; everyday work goes to the OTHER pools; grok and
+# copilot are reserves with a hard floor (GrokBot and GitHub-side Copilot
+# review run on them); hermes is never a target; omp is operator-gated.
+# `models` is the acp-run `--model [--effort L]` suggestion per kind; `agent`
+# is the acp-run agent name when it differs from the aiuse provider id.
+
+[routing]
+# Kinds of work. Deliberately few — a taxonomy nobody can apply is worse than
+# a coarse one that gets used.
+kinds = ["judgment", "frontier", "code", "bulk", "research", "mechanical", "github", "realtime-web"]
+# burn_first services (use-it-or-lose-it pools) win a tie-sized margin while
+# they hold at least this much headroom.
+burn_first_min = 40.0
+burn_first_bonus = 4.0
+# Most `frontier` slices one wave puts on a single pool (operator 2026-10-18).
+frontier_per_wave = 1
+# Below this much of the Fable sublimit, frontier on claude falls back to Opus.
+fable_min_left = 10.0
+# Curated profiles overlay discovery; anything discovered without one gets
+# default_profile so a newly-added agent is routable rather than invisible.
+default_profile = { bulk = 60, mechanical = 60 }
+
+[discovery]
+# Never a routable service, whatever aiuse or acp-run lists (operator 2026-10-15):
+# hermes is the operator's own assistant; omp needs a per-run operator approval
+# (acp-run/acp-dispatch gate both behind ACP_OPERATOR_APPROVED). Discovery would
+# otherwise hand them DEFAULT_PROFILE bulk work: omp sat in `aiuse --available`
+# with 100% headroom on 2026-10-15.
+# clinepass: Hermes's lifeline, never a slice target
+never_route = ["hermes", "clinepass"]
+# cline (operator 2026-10-17): the TUI is uninstalled; gated so a reinstall does not put it back
+# into discovery by accident (ALIASES folds it into clinepass, which NEVER_ROUTE covers).
+operator_gated = ["omp", "cline"]
+# Discovery names the TUI; aiuse names the account behind it. Without this
+# map, discovery would surface `cline` as a brand-new service and hand it bulk
+# work — silently defeating the never-bulk rule that protects clinepass, which
+# is Hindsight's and hermes's inference lifeline. Any alias inherits the
+# curated service's constraints rather than becoming a second entry.
+aliases = { cline = "clinepass", agy = "antigravity", claude-agent-teams = "claude", openclaude = "claude", opencode = "opencode-go", kimi = "opencode-go", zcode = "zai", qwen = "alibaba" }
+
+[dispatch]
+# Never dispatched without the operator's specific, explicit approval for that run (operator 2026-10-15);
+# the same gate is in acp-run.
+# omp (operator 2026-10-15) and hermes (same day: "hermes should never be used" as a
+# delegation target) need ACP_OPERATOR_APPROVED=<agent>; acp-run applies the same gate.
+# cline (operator 2026-10-17): uninstalled, left in place for a deliberate re-enable; Hermes
+# keeps its own ClinePass API pool.
+# Distinct from [discovery].operator_gated (dispatch also gates hermes).
+operator_gated = ["omp", "hermes", "cline"]
+# Fable at xhigh/max should almost never run (operator 2026-10-18): the same approval gate, keyed
+# ACP_OPERATOR_APPROVED=fable-xhigh. Fable at high is the frontier route_agent.py suggests.
+fable_gated_efforts = ["xhigh", "max"]
+# Most fresh slices one agent may have in flight machine-wide (operator 2026-10-18: four
+# gpt-6-astra slices started together emptied codex's 5-hour window and all four stopped).
+# A resume is never refused: it continues work already paid for. ACP_DISPATCH_INFLIGHT=codex=2
+# overrides per run.
+inflight_cap = { codex = 1 }
+# Flags a dispatch line needs for acp-run to accept the model at all. crush:
+# `--model` rewrites the shared data dir's crush.json, so acp-run exits 2 unless
+# the run strips the user config or gets ACP_RUN_CRUSH_DATA (review 2026-10-15).
+extra = { crush = " --acp-arg=--strip-user-config" }
+
+[hermes]
+# Hermes names the provider differently from aiuse for the paid pool.
+provider_name = { clinepass = "cline" }
+# Concrete models per Hermes-usable provider, cheapest-capable first within
+# each. Only providers with access == "api" may appear: everything else is
+# reachable solely through its own vendor CLI.
+
+[hermes.models]
+opencode-zen-free = ["deepseek-v4-flash-free", "hy3-free", "nemotron-3.5-lightning-free"]
+clinepass = ["cline-pass/deepseek-v4-flash", "cline-pass/minimax-m3"]
+
+[[service]]
+name = "claude"
+cli = "claude (Opus 5.5 @ high for judgment; Fable only for frontier)"
+good_at = { judgment = 1, frontier = 2 }
+billing = "subscription"
+note = "orchestration pool; Fable is a sublimit of the SAME weekly window (at most 50% of it), not a separate allowance"
+judgment_tier = true
+access = "cli-only"
+# No code/research row: everyday work on this pool eats the room
+# judgment needs (review 2026-10-15); Haiku lookups go through the
+# Agent tool, not acp-dispatch. Fable at xhigh is never suggested:
+# acp-dispatch makes it an operator-approved run (2026-10-18).
+models = { judgment = "opus --effort high", frontier = "fable --effort high" }
+
+[[service]]
+name = "codex"
+cli = "codex (gpt-6-astra, frontier only)"
+good_at = { frontier = 1 }
+billing = "subscription"
+note = "top frontier coding model: only a slice that really needs astra to look it over; one at a time"
+judgment_tier = true
+max_parallel = 1
+# Tolerated rather than committed: OpenAI neither permits nor
+# prohibits subscription use inside a non-OpenAI tool, and
+# tolerated is fine. The real reason to keep it out of Hermes's
+# chain is capability, not licensing — these are among the
+# strongest coding models available here, so the weekly pool is
+# worth reserving for coding judgment rather than spending on
+# background agent turns.
+access = "cli-only"
+# No judgment/code/research rows (operator 2026-10-18): the 2026-10-15
+# fall-through let plan, and leads copying it, put whole waves on
+# astra; its 5-hour window holds about one hard slice. acp-dispatch
+# also refuses a second codex slice while one is in flight.
+models = { frontier = "gpt-6-astra --effort high" }
+
+# agy's second pool: Claude Opus/Sonnet 5.5 and GPT via the same Google AI
+# Pro subscription, a separate 5h/weekly window from Gemini. Operator
+# 2026-10-10: it has a lot of headroom, so use it. Real Claude-class
+# coding and review capacity that is otherwise wasted at each reset.
+# Reach it ONLY through `acp-run agy --model claude-opus-5-5 --effort high`
+# (or claude-sonnet-5-5), never `agy -p`; see model-routing's agy rules.
+# Over ACP these ids exist only because acp-run sends clientInfo.name
+# "zed": agy_acp_server 1.3.0 gives non-Gemini models only to zed, xcode
+# and JetBrains.* clients (supports_third_party_models(), deliberate, so a
+# client-name workaround a later .par may close; antigravity-cli#1168).
+# acp-dispatch checks --model against `acp-run agy --info` before running.
+[[service]]
+name = "antigravity-claude"
+cli = "agy (acp-run agy --model claude-opus-5-5 --effort high | claude-sonnet-5-5)"
+good_at = { code = 11, research = 3, mechanical = 6 }
+billing = "subscription"
+note = "Claude/GPT pool on the Google AI Pro plan; use-it-or-lose-it, ACP client only"
+burn_first = true
+pool = ["antigravity", "claude_gpt"]
+max_parallel = 3
+access = "cli-only"
+agent = "agy"
+models = { code = "claude-opus-5-5 --effort high", research = "claude-sonnet-5-5 --effort high", mechanical = "claude-sonnet-5-5 --effort low" }
+
+[[service]]
+name = "antigravity"
+cli = "agy (gemini)"
+good_at = { bulk = 1, research = 1, mechanical = 2, code = 40 }
+billing = "subscription"
+# Google AI Pro does NOT include API access — subscriptions are chat
+# -interface only, and a Gemini API key bills separately. Reaching
+# it via the agy CLI spends the subscription; wiring Hermes to a
+# GEMINI_API_KEY would spend real money.
+note = "big context, summarisation, multimodal; most-wasted pool"
+max_parallel = 2
+access = "cli-only"
+agent = "agy"
+models = { bulk = "gemini-3.8-flash --effort medium", research = "gemini-3.8-flash --effort high", mechanical = "gemini-3.8-flash --effort low", code = "gemini-3.8-flash --effort high" }
+
+# opencode-zen-free is NOT a separate provider — it is the free subset of
+# opencode-zen's models. Kept as its own row because the free and paid
+# halves have different billing and different eligibility, which is the
+# distinction that actually drives routing. Claude reaches both through
+# the `opencode` TUI; Hermes reaches the free half as an API provider.
+[[service]]
+name = "opencode-zen-free"
+cli = "opencode (zen free models)"
+good_at = { bulk = 5, mechanical = 5, code = 45 }
+billing = "free"
+note = "free half of opencode-zen; usable by Claude via the opencode TUI and by Hermes as a direct API provider"
+access = "api"
+agent = "opencode"
+
+[[service]]
+name = "opencode-go"
+cli = "opencode (go tier)"
+good_at = { bulk = 2, mechanical = 1, code = 18 }
+billing = "free"
+note = "kimi/minimax/qwen/glm catalogs"
+agent = "opencode"
+models = { bulk = "opencode-go/kimi-k3 --effort low", mechanical = "opencode-go/glm-5.3 --effort low", code = "opencode-go/glm-5.3 --effort high" }
+
+[[service]]
+name = "zai"
+cli = "zcode (GLM-5.3)"
+good_at = { bulk = 3, mechanical = 3, code = 16, research = 12 }
+billing = "subscription"
+# zcode (Z.ai's own TUI, GLM-5.3 / GLM-5.3-Flash x low/high/max) is
+# the zai Coding Plan's TUI; acp-run zcode drives it.
+note = "coding plan; an everyday code and bulk pool"
+agent = "zcode"
+models = { code = "GLM-5.3 --effort high", research = "GLM-5.3 --effort high", bulk = "GLM-5.3-Flash --effort low", mechanical = "GLM-5.3-Flash --effort low" }
+
+# Alibaba's coding plan through the qwen TUI. aiuse keeps `alibaba` under
+# [disabled_services] (operator 2026-10-08), so `plan` skips it until the
+# operator re-enables it there; the row exists so discovery does not
+# surface the bare `qwen` agent as an unprofiled, un-disable-able service.
+[[service]]
+name = "alibaba"
+cli = "qwen (Alibaba coding plan)"
+good_at = { bulk = 30, mechanical = 30, code = 30, research = 30 }
+billing = "subscription"
+note = "disabled in aiuse until the operator re-enables it"
+agent = "qwen"
+models = { code = "qwen3.8-max --effort medium", research = "qwen3.8-max --effort medium", bulk = "qwen3.8-max --effort low", mechanical = "qwen3.8-max --effort low" }
+
+# MIT SIPB-hosted models through the crush fork (ACP). Free, no quota
+# window in aiuse, 30B-class: light bulk and mechanical slices only.
+[[service]]
+name = "crush"
+cli = "crush (SIPB models, free)"
+good_at = { bulk = 8, mechanical = 8 }
+billing = "free"
+note = "MIT SIPB-hosted 30B-class models; light slices only"
+models = { bulk = "sipb-llms:qwen3.6:35b-a3b-q4_K_M", mechanical = "sipb-llms:qwen3.6:35b-a3b-q4_K_M" }
+
+[[service]]
+name = "devin"
+cli = "devin"
+good_at = { bulk = 20, code = 45 }
+billing = "subscription"
+note = "disabled in Orca's roster — dormant by choice"
+
+# RESERVE (operator 2026-10-15: "never deplete the grok and copilot
+# pools"): GitHub-side Copilot code review of commits draws on this
+# allowance. Hard floor, one slice at a time, only for GitHub-shaped work.
+[[service]]
+name = "copilot"
+cli = "copilot"
+good_at = { github = 1 }
+billing = "subscription"
+# GitHub: the Copilot endpoint is for officially supported clients
+# only. Using it as a generic model provider violates the ToS and
+# risks account suspension. CLI only, never a Hermes provider.
+note = "RESERVE: PR review, repo Q&A (official client only)"
+access = "forbidden"
+reserve_floor = 60.0
+max_parallel = 1
+models = { github = "claude-sonnet-5.5 --effort medium" }
+
+# Cursor reports two model sublimits of one monthly total: the Auto pool
+# (Cursor's own models) and the third-party pool. They drain at very
+# different rates (2026-10-15: auto 75% left, third-party 11% left), so
+# the Auto pool is its own routing entry; the provider row keeps the rest.
+[[service]]
+name = "cursor-auto"
+cli = "cursor (Auto pool)"
+good_at = { code = 14, mechanical = 4, bulk = 6, research = 12 }
+billing = "subscription"
+note = "Cursor Auto/Composer pool; monthly, use-it-or-lose-it"
+burn_first = true
+pool = ["cursor", "auto"]
+max_parallel = 2
+agent = "cursor"
+models = { code = "default", mechanical = "default", bulk = "default", research = "default" }
+
+[[service]]
+name = "cursor"
+cli = "cursor (third-party models)"
+good_at = { code = 20, mechanical = 10 }
+billing = "subscription"
+note = "Cursor third-party pool"
+agent = "cursor"
+models = { code = "claude-sonnet-5-5 --effort medium", mechanical = "claude-haiku-5-5 --effort low" }
+
+# RESERVE: GrokBot (the cloud Chief of Staff) runs on the SuperGrok pool.
+# Hard floor, one slice at a time, only when a Grok model is the point.
+# Only the explicit `realtime-web` kind reaches it: generic research/bulk
+# ranks used to let `plan` fall through to it (review 2026-10-15).
+[[service]]
+name = "grok"
+cli = "grok"
+good_at = { realtime-web = 1 }
+billing = "subscription"
+note = "RESERVE: GrokBot runs on it; realtime X/web angle only"
+max_parallel = 1
+reserve_floor = 60.0
+models = { realtime-web = "grok-4.7 --effort high" }
+
+[[service]]
+name = "clinepass"
+cli = "cline"
+good_at = { bulk = 40, code = 40, mechanical = 40 }
+billing = "subscription"
+# An API-key bundle we hold, so Hermes may call it directly. The
+# old blanket never_bulk rule was retired 2026-08-24 in favour of
+# the measured burn-rate alert (agent_stats.py burn). aiuse's
+# [disabled_services] keeps it out of `plan` since 2026-10-08.
+note = "Hermes-usable API pool; watch the burn alert"
+access = "api"
+agent = "cline"
+models = { bulk = "cline-pass/deepseek-v4.1-flash", mechanical = "cline-pass/deepseek-v4.1-flash", code = "cline-pass/glm-5.3" }
+
+# The paid half of the same provider. Retired with the prepaid tier, not
+# because the provider is unusable — restoring it is a top-up decision.
+[[service]]
+name = "opencode-zen"
+cli = "opencode (zen paid models)"
+good_at = { code = 50, bulk = 50 }
+billing = "prepaid"
+note = "paid half of opencode-zen; prepaid tier retired 2026-08-23"
+retired = true
+agent = "opencode"
+
+[[service]]
+name = "openrouter"
+cli = "opencode-ralph-tui-openrouter"
+good_at = { code = 50, bulk = 50 }
+billing = "prepaid"
+note = "prepaid retired 2026-08-23"
+retired = true
+
+[[service]]
+name = "deepseek"
+cli = "opencode-ralph-tui-deepseek"
+good_at = { code = 50, bulk = 50 }
+billing = "prepaid"
+note = "prepaid retired 2026-08-23"
+retired = true

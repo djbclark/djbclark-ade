@@ -249,15 +249,20 @@ MODEL_OPTIONAL_AGENTS = {"zcode"}
 # delegation target) need ACP_OPERATOR_APPROVED=<agent>; acp-run applies the same gate.
 # cline (operator 2026-10-17): uninstalled, left in place for a deliberate re-enable; Hermes
 # keeps its own ClinePass API pool.
-OPERATOR_GATED = {"omp", "hermes", "cline"}
+# Values from config/routing.toml [dispatch] (via route_agent.POLICY).
+_bindir = str(Path(__file__).resolve().parent)
+if _bindir not in sys.path:
+    sys.path.insert(0, _bindir)
+import route_agent as _routing_policy  # noqa: E402
+OPERATOR_GATED = set(_routing_policy.POLICY["dispatch"]["operator_gated"])
 # Fable at xhigh/max should almost never run (operator 2026-10-18): the same approval gate, keyed
 # ACP_OPERATOR_APPROVED=fable-xhigh. Fable at high is the frontier route_agent.py suggests.
-FABLE_GATED_EFFORTS = {"xhigh", "max"}
+FABLE_GATED_EFFORTS = set(_routing_policy.POLICY["dispatch"]["fable_gated_efforts"])
 # Most fresh slices one agent may have in flight machine-wide (operator 2026-10-18: four
 # gpt-6-astra slices started together emptied codex's 5-hour window and all four stopped).
 # A resume is never refused: it continues work already paid for. ACP_DISPATCH_INFLIGHT=codex=2
 # overrides per run.
-INFLIGHT_CAP = {"codex": 1}
+INFLIGHT_CAP = {k: int(v) for k, v in _routing_policy.POLICY["dispatch"]["inflight_cap"].items()}
 INFLIGHT_SPAWN_GRACE = 10 * 60           # a running record whose pid is not written yet counts this long
 # Claude Code 2.1.295 refuses a sub-agent's Write for this basename (tengu_subagent_md_report_blocked).
 CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.IGNORECASE)
