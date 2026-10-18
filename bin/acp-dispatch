@@ -1602,7 +1602,9 @@ AUTH_TERMS = ("project_token_login_failed", "token_login_failed", "login_failed"
               "invalid authentication token", "oauth token has expired", "oauth token revoked",
               "login expired", "please run /login", "not logged in", "authentication_error")
 AUTH_HINTS = {
-    "zcode": "zcode's z.ai login expired: run `zcode login` in a terminal (recurs daily, zai-org/feedback#1001)",
+    # Never `zcode login` (2026-10-18): it flips the account provider back to the OAuth exchange that
+    # expires daily (zai-org/feedback#1001); bin/zcode-key-auth keeps it on the Coding Plan API key.
+    "zcode": "zcode left the Coding Plan API key: run `zcode-key-auth apply` (never `zcode login`, zai-org/feedback#1001)",
     "codex": "codex login expired: run `codex login`",
     "claude": "Claude Code login expired: run `claude auth login`",
     "cursor": "cursor-agent login expired: run `cursor-agent login`",

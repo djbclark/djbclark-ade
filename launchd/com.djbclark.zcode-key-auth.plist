@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Keep zcode on the Z.ai Coding Plan API key (bin/zcode-key-auth). At login and every 6 hours,
+     `zcode-key-auth apply --ping` checks that the account provider's auth-source is still "manual"
+     and its key still matches the vault's ZAI_CODING_PLAN_API_KEY; it pings only when it had to
+     repair something (a `zcode login` flips auth-source back to "oauth", which expires daily,
+     zai-org/feedback#1001) or failed. Idempotent; no model, no network. Installed by
+     `zcode-key-auth install`, removed by `zcode-key-auth uninstall`. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.zcode-key-auth</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/djbclark/src/djbclark-ade/bin/zcode-key-auth</string>
+    <string>apply</string>
+    <string>--ping</string>
+    <string>--quiet</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/djbclark/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/djbclark/src/djbclark-ade</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>21600</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/djbclark/.local/state/zcode-key-auth/apply.out</string>
+  <key>StandardErrorPath</key><string>/Users/djbclark/.local/state/zcode-key-auth/apply.err</string>
+</dict>
+</plist>
