@@ -357,5 +357,27 @@ class LLMFormatsTest(unittest.TestCase):
         self.assertEqual(ex.rungs[0].base, "http://127.0.0.1:8890/api")
 
 
+class ChildEnvTest(unittest.TestCase):
+    def test_child_never_sees_the_router_keys(self):
+        import os
+        import tempfile
+        from unittest import mock
+        secrets_ = {"FIRECRAWL_SELFHOST_API_KEY": "gate-secret", "FIRECRAWL_ROUTER_SIPB_KEY": "sipb-secret",
+                    "FIRECRAWL_ROUTER_LITELLM_KEY": "litellm-secret"}
+        env = {"FIRECRAWL_SELFHOST_URL": "http://127.0.0.1:9", "PATH": os.environ.get("PATH", ""), **secrets_}
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "env.json"
+            code = f"import json,os;json.dump(dict(os.environ),open({str(out)!r},'w'))"
+            with mock.patch.dict(os.environ, env, clear=True):
+                rc = fr.main(["--listen", "127.0.0.1:0", "--", sys.executable, "-c", code])
+            child = json.loads(out.read_text())
+        self.assertEqual(rc, 0)
+        for k in secrets_:
+            self.assertNotIn(k, child)
+        self.assertNotIn("secret", json.dumps(child))
+        self.assertTrue(child["FIRECRAWL_API_URL"].startswith("http://127.0.0.1:"))
+        self.assertGreater(len(child["FIRECRAWL_API_KEY"]), 20)  # the per-process router token
+
+
 if __name__ == "__main__":
     unittest.main()
