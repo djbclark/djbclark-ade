@@ -469,6 +469,18 @@ load nor resume are refused with exit 2. The previous report is preserved as
 `<name>-r1-report.md`, then `-r2`, and so on; each revision also keeps its brief,
 log, final text and stderr. Normal output and `.done` paths remain stable.
 
+`acp-dispatch tell <out>/jobs/<name>.json "stop after step 3"` sends a message
+into a running slice (2026-10-18). It appends a `## MSG N` entry to
+`<record>.inbox.md` next to the record, and for a `claude` slice also writes
+one JSON frame to the live session's messaging socket (found via
+`~/.claude/sessions/<pid>.json`; undocumented protocol, so a miss is never an
+error — the inbox is the source of truth). A bare report path works as RECORD
+when no `.json` exists (Agent-tool sub-agents): the inbox becomes
+`<report>.inbox.md`. A finished record is refused with exit 2 and the `resume`
+command to use instead. The footer has the slice answer each message with
+`REPLY N:` in `<record>.replies.md`; `check` shows `inbox: N sent, M answered`
+and `resume` carries unanswered messages into the prompt.
+
 For `agy`, the footer instead names
 `<-C>/.acp-dispatch/<task>-<name>-report.md` and its `.done`. Dispatch adds
 `.acp-dispatch/` once to the workspace repository's local Git exclude file

@@ -17,6 +17,9 @@
                                                          a jobs/<name>.json record, or an out dir
     acp-dispatch finalize RECORD --exit RC               (internal) what the detached runner calls
     acp-dispatch extend RECORD SECONDS                  add seconds, or 0 for no deadline
+    acp-dispatch tell RECORD MESSAGE [--from NAME]      send a message into a running slice
+                                                         (MESSAGE - reads stdin; RECORD may be a
+                                                         bare report path when no .json exists)
     acp-dispatch resume RECORD [--timeout S] [-p TEXT | -f FILE] [--detach --no-wait]
                  [--no-auto-resume]
     acp-dispatch reroute RECORD --agent A --model M [--detach --no-wait]
@@ -168,6 +171,17 @@ actually applied (`model_applied`, from the log's `applied` row) and `resume` pa
 family alias such as `fable` that a resumed session's model list resolves differently cannot kill
 the resume (2026-10-18: "no model 'fable' (ambiguous: claude-fable-5-1, claude-fable-5)").
 
+`tell` (2026-10-18) passes a message into a running slice: one `## MSG N` entry appended to
+`<record>.inbox.md` next to the record (a bare report path works too and uses
+`<report>.inbox.md`, for Agent-tool sub-agents), and for a `claude` slice also one JSON frame
+written to the live session's messaging socket, found through `~/.claude/sessions/<pid>.json`.
+That protocol is undocumented, so a missing registry entry or a failed connect is never an
+error — the inbox entry is the source of truth. A finished record is refused (exit 2) with the
+`resume` command to use instead. The footer has the slice read the inbox between steps and
+answer each message with `REPLY N:` in `<record>.replies.md` (a separate file, so the slice's
+writes never race the lead's appends); `check` appends `inbox: N sent, M answered`, and
+`resume` carries every unanswered message into the next prompt.
+
 Exit codes (dispatch and check):
     0    report delivered and ends in DONE (dispatch: and acp-run exited 0)
     1    report present but unfinished (no DONE), or delivered with a non-zero acp-run exit;
@@ -197,11 +211,13 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -711,11 +727,32 @@ def load_footer() -> str:
         die(f"footer missing: {FOOTER_FILE} ({e})")
 
 
-def footer_text(report: Path, lead: str) -> str:
+def footer_text(report: Path, lead: str, inbox: Path | None = None,
+                replies: Path | None = None) -> str:
     return (load_footer()
             .replace("{report}", str(report))
             .replace("{done}", str(done_path(report)))
+            .replace("{inbox}", str(inbox or report_inbox(report)))
+            .replace("{replies}", str(replies or report_replies(report)))
             .replace("{lead}", lead))
+
+
+def record_inbox(record: Path) -> Path:
+    """Lead-message inbox beside a jobs record (`<name>.json` -> `<name>.inbox.md`)."""
+    return record.with_suffix(".inbox.md")
+
+
+def record_replies(record: Path) -> Path:
+    return record.with_suffix(".replies.md")
+
+
+def report_inbox(report: Path) -> Path:
+    """Inbox when no record is known (an Agent-tool report): beside the report."""
+    return report.with_name(report.name + ".inbox.md")
+
+
+def report_replies(report: Path) -> Path:
+    return report.with_name(report.name + ".replies.md")
 
 
 def done_path(report: Path) -> Path:
@@ -1145,6 +1182,121 @@ def agent_report_path(agent: str, root: Path, out: Path, task: str | None, name:
                 f.write(("\n" if old and not old.endswith("\n") else "") + ".acp-dispatch/\n")
     tag = re.sub(r"[^A-Za-z0-9._-]", "_", task or out.name)
     return inner / f"{tag}-{name}-report.md"
+
+
+# ---------------------------------------------------------------- tell (lead messages)
+
+def claude_sessions_dir() -> Path:
+    return Path(os.environ.get("ACP_DISPATCH_CLAUDE_SESSIONS",
+                               str(Path.home() / ".claude" / "sessions")))
+
+
+def claude_socket_send(sock_path: Path, sender: str, message: str) -> bool:
+    """One JSON line to a live Claude Code session's messaging socket, then SHUT_WR; nothing
+    comes back. False on any failure: the protocol is undocumented (verified on this machine
+    2026-10-18; source: gist Smolevich/5d8a0619f840d66f7fca64205ef047e7), so the inbox entry,
+    not this, is the source of truth."""
+    wrap = (f'<cross-session-message from="acp-dispatch" from-name="acp-dispatch tell ({sender})" '
+            f'from-mode="bypass">\n{message.strip()}\n</cross-session-message>')
+    frame = {"msgV": 1, "msg_id": str(uuid.uuid4()), "type": "user",
+             "message": {"role": "user", "content": wrap}, "priority": "next", "from": "acp-dispatch"}
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(10)
+            s.connect(str(sock_path))
+            s.sendall(json.dumps(frame).encode() + b"\n")
+            s.shutdown(socket.SHUT_WR)
+    except OSError:
+        return False
+    return True
+
+
+def claude_live_delivery(rec: dict, sender: str, message: str) -> int | None:
+    """Also hand the message to the record's live Claude Code session; the pid delivered to,
+    or None (no session id, no registry entry, dead pid, failed connect: all fine)."""
+    sid = rec.get("session_id") or session_info(rec)[0]
+    if not sid:
+        return None
+    for path in sorted(claude_sessions_dir().glob("*.json")):
+        try:
+            entry = json.loads(path.read_text())
+            pid = int(entry["pid"])
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+        if entry.get("sessionId") != sid or not pid_alive(pid):
+            continue
+        sock = entry.get("messagingSocketPath")
+        if sock and claude_socket_send(Path(sock), sender, message):
+            return pid
+    return None
+
+
+def append_message(inbox: Path, sender: str, message: str) -> int:
+    """One `## MSG N` entry, under the inbox's own lock so two tellers never interleave."""
+    with record_lock(inbox):
+        current = inbox.read_text() if inbox.exists() else ""
+        n = 1 + len(re.findall(r"(?m)^## MSG ", current))
+        entry = f"## MSG {n} · {datetime.now().isoformat(timespec='seconds')} · from {sender}\n" \
+                + message.strip() + "\n"
+        with inbox.open("a") as f:
+            f.write(("\n" if current else "") + entry)
+        return n
+
+
+def inbox_messages(record: Path) -> list[tuple[int, str, str, str]]:
+    """(N, timestamp, sender, text) per `## MSG` header in the record's inbox, oldest first."""
+    try:
+        text = record_inbox(record).read_text()
+    except OSError:
+        return []
+    out: list[tuple[int, str, str, str]] = []
+    for part in re.split(r"(?m)^(?=## MSG )", text):
+        m = re.match(r"## MSG (\d+) · (.+?) · from (.+)\n(.*)$", part, re.DOTALL)
+        if m:
+            out.append((int(m.group(1)), m.group(2), m.group(3), m.group(4).strip()))
+    return out
+
+
+def answered_ids(record: Path) -> set[int]:
+    """Message numbers with a `REPLY N:` line in the replies file."""
+    try:
+        replies = record_replies(record).read_text()
+    except OSError:
+        return set()
+    return {int(n) for n in re.findall(r"(?m)^REPLY (\d+):", replies)}
+
+
+def last_reply(record: Path) -> str | None:
+    try:
+        replies = record_replies(record).read_text()
+    except OSError:
+        return None
+    lines = [m.group(1).strip() for m in re.finditer(r"(?m)^REPLY \d+:(.*)$", replies)]
+    return lines[-1] if lines else None
+
+
+def tell_record(a: argparse.Namespace) -> int:
+    target = Path(a.record).expanduser().resolve()
+    message = sys.stdin.read() if a.message == "-" else a.message
+    if not message.strip():
+        die("give a message (or - to read one from stdin)")
+    rec = None
+    if target.suffix == ".json":
+        try:
+            rec = json.loads(target.read_text())
+        except (OSError, ValueError) as e:
+            die(f"unreadable record {target}: {e}")
+        done = rec.get("done") or (done_path(Path(rec["report"])) if rec.get("report") else None)
+        if rec.get("finished") or (done and Path(done).exists()):
+            die(f"slice {rec.get('name', target.stem)} is finished; the message would never be read. "
+                f"Give it to the next run instead: acp-dispatch resume {target} -p '<message>'")
+        inbox = record_inbox(target)
+    else:
+        inbox = report_inbox(target)                    # an Agent-tool report: no record, no delivery
+    append_message(inbox, a.sender, message)
+    pid = claude_live_delivery(rec, a.sender, message) if rec and rec.get("agent") == "claude" else None
+    print(f"delivered: inbox + live session {pid}" if pid else "delivered: inbox")
+    return 0
 
 
 # ---------------------------------------------------------------- model check
@@ -2086,6 +2238,13 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
             det = f"{det}; {stale_msg}" if det else stale_msg
     if rec.get("advisor_edited"):
         det = f"{det}; ADVISOR EDITED THE TREE" if det else "ADVISOR EDITED THE TREE"
+    msgs = inbox_messages(path)
+    if msgs:
+        answered = sum(1 for m in msgs if m[0] in answered_ids(path))
+        det = f"{det}; inbox: {len(msgs)} sent, {answered} answered"
+        reply = last_reply(path)
+        if reply:
+            det += f", last reply: {reply[:80]}"
     return (st, rec.get("name", path.stem), str(report), det)
 
 
@@ -2411,6 +2570,13 @@ def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
                   "redo finished work: check the tree first.\n\n" + checkpoint_context(rec)
                   + prompt.replace(" in this same session", ""))
         resume_arg = []
+    unread = [(n, when, sender, body) for n, when, sender, body in inbox_messages(record)
+              if n not in answered_ids(record)]
+    if unread:
+        prompt += ("\n\nMessages from the lead you have not answered yet (answer each with REPLY N in "
+                   f"{record_replies(record)}):\n\n"
+                   + "\n\n".join(f"MSG {n} ({when}, from {sender}):\n{body}"
+                                 for n, when, sender, body in unread))
     args = argparse.Namespace(
         no_auto_resume=getattr(a, "no_auto_resume", False),
         agent=rec["agent"], model=rec.get("model_applied") or rec.get("model"), name=rec["name"], dir=rec["dir"],
@@ -2670,9 +2836,12 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     deny_note = DENY_NOTE.format(report=agent_report) if perm == "deny" else ""
     advisor_note = ("\n" + ADVISOR_NOTE.strip() + "\n") if role == "advise" else ""
     checkpoint_note = CHECKPOINT_TEXT.format(report=agent_report) if checkpoint else ""
-    # Advisor section sits after the prompt and before the footer (operator 2026-10-18).
+    # Advisor section sits after the prompt and before the footer (operator 2026-10-18). The inbox
+    # and replies sit beside the record in jobs/, not beside the report: an agy slice's footer
+    # names a report inside the repo, and `tell` always finds the inbox next to the record.
     write_atomic(brief, prompt.rstrip() + ("\n" + advisor_note + "\n" if advisor_note else "\n\n")
-                 + footer_text(agent_report, a.lead).rstrip() + "\n"
+                 + footer_text(agent_report, a.lead, inbox=record_inbox(record),
+                               replies=record_replies(record)).rstrip() + "\n"
                  + deny_note + checkpoint_note + budget)
     if not previous and not a.dry_run:
         # Detached Jev/GLiDE shadow; never blocks or changes the outcome. Skip on --dry-run.
@@ -2817,13 +2986,17 @@ def main(argv: list[str] | None = None) -> int:
         if not s.items:
             die("give a record, a jobs/ dir or a task dir (e.g. ~/.local/state/bigteam)")
         return reap_items(s.items, s.quiet)
-    if argv and argv[0] in ("extend", "resume", "reroute", "wait", "execute", "auto-resume"):
+    if argv and argv[0] in ("extend", "resume", "reroute", "wait", "execute", "auto-resume", "tell"):
         sub = argparse.ArgumentParser(prog=f"acp-dispatch {argv[0]}")
         sub.add_argument("record")
         if argv[0] == "extend":
             sub.add_argument("seconds", type=int)
         elif argv[0] == "auto-resume":
             sub.add_argument("--attempt", type=int, required=True)
+        elif argv[0] == "tell":
+            sub.add_argument("message", help="the message (- reads stdin)")
+            sub.add_argument("--from", dest="sender", default="lead", metavar="NAME",
+                             help="who the message is from (default lead)")
         elif argv[0] == "resume":
             sub.add_argument("--timeout", type=int)
             prompt = sub.add_mutually_exclusive_group()
@@ -2859,6 +3032,8 @@ def main(argv: list[str] | None = None) -> int:
             return execute_record(Path(s.record))
         if argv[0] == "auto-resume":
             return auto_resume_record(Path(s.record), s.attempt)
+        if argv[0] == "tell":
+            return tell_record(s)
         return wait_record(Path(s.record))
     if argv and argv[0] in ("footer", "check", "finalize"):
         sub = argparse.ArgumentParser(prog=f"acp-dispatch {argv[0]}")
