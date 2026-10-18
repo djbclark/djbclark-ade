@@ -435,6 +435,29 @@ def inflight_records(agent: str, skip: Path, out: Path) -> list[Path]:
     return busy
 
 
+def git_identity_warning(repo: Path) -> str | None:
+    """Why commits in `repo` would not be the operator's, or None (2026-10-18).
+
+    A skillopt-night replay wrote an upstream maintainer's identity into a shared worktree
+    .git/config and a later slice committed under it. acp-run's identity guard refuses such
+    commits; this says so before the slice runs. Never raises."""
+    def get(*args: str) -> str:
+        try:
+            return subprocess.run(["git", *args], capture_output=True, text=True, check=False,
+                                  timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+    want = get("config", "--global", "--get", "user.email")
+    have = get("-C", str(repo), "config", "--show-scope", "--get", "user.email")
+    scope, _, email = have.partition("\t")
+    if not want or not email or email == want or scope == "global":
+        return None
+    name = get("-C", str(repo), "config", "--get", "user.name")
+    return (f"{repo}: git {scope} config names {name} <{email}>, not the operator <{want}>; acp-run's "
+            f"identity guard will refuse this slice's commits. Fix: git -C {repo} config --{scope} "
+            "--unset user.name; and the same for user.email")
+
+
 def unavailable_record(out: Path, a: argparse.Namespace, reason: str, cls: str,
                        remaining: float | None = None, estimate: float | None = None) -> int:
     jobs = out / "jobs"
@@ -2347,6 +2370,10 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
                         if previous and (previous.get("auto_resume") or {}).get("attempt")
                         else None),
     }
+    identity = git_identity_warning(Path(a.dir).resolve())
+    if identity:
+        rec["git_identity_warning"] = identity
+        print(f"acp-dispatch: warning: {identity}", file=sys.stderr)
     if a.dry_run:
         rec["status"] = "dry-run"
         print(json.dumps(rec, indent=1, sort_keys=True) if a.json else
