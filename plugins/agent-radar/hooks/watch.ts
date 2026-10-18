@@ -149,8 +149,13 @@ export const RECORDS_SH = `# radar:records
 root=$1; sid=$2
 case $root in /*) ;; *) exit 0;; esac
 [ -d "$root" ] || exit 0
-# a slice whose process died without finalize would otherwise read as running forever (2026-10-18)
-command -v acp-dispatch >/dev/null 2>&1 && acp-dispatch reap --quiet "$root" >/dev/null 2>&1
+# a slice whose process died without finalize would otherwise read as running forever (2026-10-18). At most once
+# per 2 minutes machine-wide, detached: inline on every 5 s poll of every session it started a Python reap per poll,
+# the poll's 8 s timeout orphaned them on the starved E-cores, and load reached 110 (2026-10-18).
+stamp="$root/.radar-reap-stamp"
+if command -v acp-dispatch >/dev/null 2>&1 && [ -z "$(find "$stamp" -mmin -2 2>/dev/null)" ]; then
+  : > "$stamp" 2>/dev/null && ( acp-dispatch reap --quiet "$root" </dev/null >/dev/null 2>&1 & )
+fi
 find "$root" -maxdepth 3 -type f -path '*/jobs/*.json' -mtime -3 -size -64k -exec sh -c 'sid=$1; shift; for f; do b=$( ( head -c 65536 -- "$f" 2>/dev/null & t=$!; ( sleep 3; kill "$t" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$t"; kill "$w" 2>/dev/null ) | LC_ALL=C tr -d "\\001" ); case $b in *"$sid"*) printf "\\001%s\\n%s\\n" "$f" "$b";; esac; done' sh "$sid" {} + 2>/dev/null
 exit 0
 `
