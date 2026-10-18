@@ -178,7 +178,7 @@ Rules for any agent that dispatches to agy:
    Claude/GPT windows, prefer it** over claude's own window and codex for code,
    review and research (judgment goes to the frontier pools; agy only as an
    independent reviewer of a frontier decision), via `acp-run agy --model
-   claude-opus-5-5-high` (hard calls) or `claude-sonnet-5-5-high` (volume);
+   claude-opus-5-5 --effort high` (hard calls) or `--model claude-sonnet-5-5 --effort high` (volume; agy 1.4.1, 2026-10-18, dropped the effort-suffixed ids);
    `gpt-oss-120b-medium` is offered too. Over ACP these ids exist only because
    agy_acp_server 1.3.0 offers non-Gemini models only to clients whose ACP `clientInfo.name` is `zed`, `xcode` or `JetBrains.*` (`supports_third_party_models()` in its `model_selection.py`), so `acp-run` identifies itself to agy as `zed` (0b56897); the gate is deliberate in Google's code, so this is a
    client-name workaround that a later `.par` could close. Check with

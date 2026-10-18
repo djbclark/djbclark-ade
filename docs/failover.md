@@ -11,7 +11,7 @@ consumer ([skillopt-sleep.md](skillopt-sleep.md) section 4). It is built so
    acp-run, or `openai_compat`), acp agent id, vendor, aiuse pool and family
    (agy and opencode map the pool from the model prefix; opencode `sipb/` has
    none), known model ids, a model allow-regex (claude: Haiku or Sonnet only),
-   the effort lever (`set:effort` for claude, `set:thought` for zcode, `suffix`
+   the effort lever (`set:effort` for claude, `set:thought` for zcode, `flag` (`--effort`)
    for agy, none for opencode, crush and hermes), the native model id (claude
    `haiku` is `claude-haiku-5-5`), health URLs, probe, endpoint and secret name
    (the direct SIPB route). `hermes` (2026-10-13) is `hermes acp`: no `--model`

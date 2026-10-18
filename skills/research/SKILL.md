@@ -199,7 +199,7 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    claude-fable-5-1[1m], sonnet, haiku, ..."; or an Agent-tool sub-agent),
    Grok and agy
    (`acp-dispatch agy --model <m>`, only ever via ACP, never `agy -p`;
-   `--model claude-opus-5-5-high` draws its Claude/GPT pool, which `aiuse`
+   `--model claude-opus-5-5 --effort high` (agy 1.4.1, 2026-10-18, dropped the effort-suffixed ids) draws its Claude/GPT pool, which `aiuse`
    lists as `antigravity claude_gpt`, burn-first while >= 40% left, see
    bigteam. Over ACP the `claude-*`/`gpt-*` ids appear only because
    acp-run identifies itself to agy as `zed`: agy_acp_server 1.3.0 hides
@@ -208,7 +208,7 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    failed with "no model 'claude-opus-5-5-high'; have: gemini-...".
    `acp-dispatch` checks `--model` against `acp-run agy --info` before it
    starts. If no `claude-*` id is listed, the workaround has stopped working:
-   use `gemini-3.8-flash-high` and note in `plan.md` that the Claude/GPT
+   use `--model gemini-3.8-flash --effort high` and note in `plan.md` that the Claude/GPT
    pool was unreachable). The lead merges
    the four evidence files for a slice (dedupe by source and quote, keep
    every family's unique rows) and the Grok lead picks among the four

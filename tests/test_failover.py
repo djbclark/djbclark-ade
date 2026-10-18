@@ -85,7 +85,7 @@ def test_load_keeps_order_and_resolves_pools():
     assert [(e.pool, e.pool_family) for e in chain] == [
         ("opencode-go", None), ("antigravity", "gemini"), ("zai", None),
         ("claude", "default"), (None, None)]
-    assert chain[1].model_arg == "gemini-3.8-flash-medium"
+    assert chain[1].model_arg == "gemini-3.8-flash"
     assert chain[1].floor_percent == 12
     assert chain[4].secret == "MIT_SIPB_API_KEY"
 
@@ -262,7 +262,8 @@ def test_acp_command_flags(tmp_path):
     cmd = failover.acp_command(cl, tmp_path / "p.md", tmp_path)
     assert cmd[cmd.index("--model") + 1] == "haiku" and cmd[-1] == "--no-fallback" and "--set" not in cmd
     cmd = failover.acp_command(agy, tmp_path / "p.md", tmp_path)
-    assert cmd[cmd.index("--model") + 1] == "gemini-3.8-flash-high"
+    assert cmd[cmd.index("--model") + 1] == "gemini-3.8-flash"
+    assert cmd[cmd.index("--effort") + 1] == "high" and "--set" not in cmd
 
 
 def test_ask_acp_runs_in_empty_dir(tmp_path, monkeypatch):

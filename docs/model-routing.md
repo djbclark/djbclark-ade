@@ -51,7 +51,7 @@ quoting a chain, and update its snapshot if you change one.
 >
 > **Update 2026-10-10 (operator): use agy's Claude/GPT pool heavily while it has
 > headroom** (5h 100% left, weekly 49% left, critical burn alert). Via
-> `acp-run agy --model claude-opus-5-5-high` / `claude-sonnet-5-5-high`, 2-3 slices
+> `acp-run agy --model claude-opus-5-5 --effort high` / `--model claude-sonnet-5-5 --effort high` (agy 1.4.1, 2026-10-18, dropped the effort-suffixed ids), 2-3 slices
 > at a time, gated on `aiuse --available`; `skills/model-routing/SKILL.md`
 > (*Reading quota numbers* item 4) and `skills/bigteam/SKILL.md` (*agy Claude/GPT
 > pool*) carry the rule, `bin/route_agent.py` the `antigravity-claude` service.
@@ -60,9 +60,9 @@ quoting a chain, and update its snapshot if you change one.
 > ACP server listed only `gemini-*` models, so `claude-opus-5-5-high` failed with `no model`
 > while `aiuse` showed the pool at 100% left. The cause is client-side:
 > agy_acp_server 1.3.0 offers non-Gemini models only to clients whose ACP `clientInfo.name` is `zed`, `xcode` or `JetBrains.*` (`supports_third_party_models()` in its `model_selection.py`), so `acp-run` identifies itself to agy as `zed` (0b56897).
-> `acp-run agy --info` now lists `claude-opus-5-5-{low,medium,high}`,
+> `acp-run agy --info` then listed `claude-opus-5-5-{low,medium,high}`,
 > `claude-sonnet-5-5-{low,medium,high}` and `gpt-oss-120b-medium`, and a
-> `claude-sonnet-5-5-low` probe answered. The gate is deliberate in Google's code
+> `claude-sonnet-5-5-low` probe answered. Since agy 1.4.1 (2026-10-18) it lists bare `claude-opus-5-5` and `claude-sonnet-5-5` and takes the effort as `--effort`. The gate is deliberate in Google's code
 > (google-antigravity/antigravity-cli#1168 and pingdotgg/t3code#16489 report it), so this
 > is a workaround, not a fix, and a later `.par` release could close it. `acp-dispatch`
 > checks `--model` before it detaches. Detail: `skills/bigteam/SKILL.md` (*agy Claude/GPT

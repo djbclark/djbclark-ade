@@ -184,7 +184,7 @@ class Tui:
     models: tuple[str, ...] = ()               # known ids (illustrative, from live lists)
     model_allow: str | None = None             # regex every model must match
     takes_model: bool = True
-    effort: str | None = None                  # "set:<option>" | "suffix" | None
+    effort: str | None = None                  # "set:<option>" | "flag" | None
     efforts: tuple[str, ...] = ()
     endpoint: str | None = None
     secret: str | None = None                  # sudo-secretspec name for openai_compat
@@ -218,9 +218,8 @@ REGISTRY: dict[str, Tui] = {t.name: t for t in (
         pool_by_model=(("gemini-", "antigravity", "gemini"),
                        ("claude-", "antigravity", "claude_gpt"),
                        ("gpt-", "antigravity", "claude_gpt")),
-        models=("gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high",
-                "gemini-3.1-pro-low", "claude-sonnet-5-5-medium", "gpt-oss-120b-medium"),
-        effort="suffix", efforts=("low", "medium", "high"),
+        models=("gemini-3.8-flash", "claude-sonnet-5-5", "gpt-oss-120b-medium"),
+        effort="flag", efforts=("low", "medium", "high"),
         # djbclark 2026-10-12: agy's default mode runs reads (view_file, ACP kind "read")
         # without asking; for agy alone those may run unasked, and every other call
         # (execute, edit, delete, other/MCP, ...) must ask and be denied. Kinds seen in
@@ -228,7 +227,7 @@ REGISTRY: dict[str, Tui] = {t.name: t for t in (
         # other (MCP such as basic-memory_write_note). Accepted risk: a read can pull
         # file contents into an answer (docs/failover.md).
         canary="reads_ok", tripwire_exempt=("read", "search"),
-        note="effort is the model id suffix; Gemini and Claude/GPT are separate pools"),
+        note="bare model ids, effort via --effort (thinking_level, agy 1.4.1 2026-10-18); Gemini and Claude/GPT are separate pools"),
     # `opencode models` (2026-10-12) lists opencode-go/kimi-k3, opencode-go/minimax-m3 and the
     # sipb/ provider (~/.config/opencode/opencode.json baseURL http://127.0.0.1:8890/api).
     Tui("opencode", "acp", "opencode", "OpenCode", None, None,
@@ -309,9 +308,7 @@ class Entry:
 
     @property
     def model_arg(self) -> str:
-        """The model id as the TUI expects it (agy carries effort in the id)."""
-        if self.tui.effort == "suffix" and self.effort and not self.model.endswith(f"-{self.effort}"):
-            return f"{self.model}-{self.effort}"
+        """The model id as the TUI expects it (effort never rides in the id)."""
         return self.model
 
     @property
@@ -875,6 +872,8 @@ def acp_command(entry: Entry, prompt_file: Path, cwd: Path, log: Path | None = N
     lever = entry.tui.effort or ""
     if entry.effort and lever.startswith("set:"):
         cmd += ["--set", f"{lever[4:]}={entry.effort}"]
+    elif entry.effort and lever == "flag":
+        cmd += ["--effort", entry.effort]
     if entry.tui.tripwire_exempt and entry.perm == "deny":
         cmd += ["--tripwire-exempt-kinds", ",".join(entry.tui.tripwire_exempt)]
     return cmd + entry.extra_args

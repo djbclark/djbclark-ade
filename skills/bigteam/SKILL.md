@@ -125,7 +125,7 @@ Classify every pool before assigning anything:
 | **lifeline** | another agent runs on it | use with care and never let it run out; see *Reserve pools* below (clinepass and Claude itself) |
 | **reserve** | grok (GrokBot) and copilot (GitHub-side review) | hard floor 60% left (`route_agent.py` `reserve_floor`), one small slice at a time, only when that vendor is the point (copilot: kind `github`; grok: kind `realtime-web`); a missing or stale reading means do not use |
 | **never** | hermes; the prepaid pools; credits-backed models | not a target by any route; `acp-run`/`acp-dispatch` refuse hermes like omp |
-| **burn-first** | a pool whose window resets and the allowance is lost, with >= 40% left on every window (`aiuse` raises a `kind:"burn"` alert). Today: **agy's Claude/GPT pool** (`acp-run agy --model claude-opus-5-5-high` / `claude-sonnet-5-5-high`), and any provider's idle second pool | assign it first for code, review and research, 2-3 slices at once (judgment goes to the frontier pools); see *agy Claude/GPT pool* below |
+| **burn-first** | a pool whose window resets and the allowance is lost, with >= 40% left on every window (`aiuse` raises a `kind:"burn"` alert). Today: **agy's Claude/GPT pool** (`acp-run agy --model claude-opus-5-5 --effort high` / `--model claude-sonnet-5-5 --effort high`, agy 1.4.1 (2026-10-18) dropped the effort-suffixed ids), and any provider's idle second pool | assign it first for code, review and research, 2-3 slices at once (judgment goes to the frontier pools); see *agy Claude/GPT pool* below |
 | **shared allowance** | a GitHub-side feature draws on the same subscription | usable, but spend modestly and keep a margin; see *Copilot* under *Reserve pools* below |
 | **prepaid** | real money | never without a fresh explicit operator decision |
 | **excluded** | operator has ruled it out | respect it, with its end condition (below) |
@@ -191,15 +191,15 @@ window, so spending it costs nothing that orchestration needs.
 2. **Assignment order for a Claude-class code, review or research slice**
    (implementation, reviews, research synthesis): the agy Claude/GPT pool
    first, then the other everyday pools in `plan`'s order; judgment goes to the
-   frontier pools (*Pool policy* item 2). `claude-opus-5-5-high` for the hard
-   slices, `claude-sonnet-5-5-high` for volume. Mechanical edits and bulk reading still go to the free and Gemini
+   frontier pools (*Pool policy* item 2). `--model claude-opus-5-5 --effort high` for the hard
+   slices, `--model claude-sonnet-5-5 --effort high` for volume. Mechanical edits and bulk reading still go to the free and Gemini
    pools first; do not spend Opus on them just because it is idle.
 3. **The ACP route reaches it through a client-name workaround (2026-10-10).** agy_acp_server 1.3.0 offers non-Gemini models only to clients whose ACP `clientInfo.name` is `zed`, `xcode` or `JetBrains.*` (`supports_third_party_models()` in its `model_selection.py`), so `acp-run` identifies itself to agy as `zed` (0b56897).
    Before that, the server listed only `gemini-*` models and `claude-opus-5-5-high` failed with
    `no model` (google-antigravity/antigravity-cli#1168, pingdotgg/t3code#16489). The gate is
    deliberate in Google's code, so this is a client-name workaround, not a bug fix, and a later
    `.par` release could close it. `acp-run agy --info` lists the ids (today
-   `claude-opus-5-5-{low,medium,high}`, `claude-sonnet-5-5-{low,medium,high}`,
+   bare `claude-opus-5-5` and `claude-sonnet-5-5` (agy 1.4.1, 2026-10-18; effort is the `thinking_level` option, set with `--effort low|medium|high`, no longer an id suffix),
    `gpt-oss-120b-medium`, plus `gemini-*` and `gemini-pro-agent`, the ACP id of Gemini 3.1 Pro
    High). `acp-dispatch` now checks `--model` against that list before it detaches and exits 2
    with `have:`. If no `claude-*` id is listed, the workaround has stopped working: route to
