@@ -39,6 +39,20 @@ def test_report_path_named_in_the_prompt_is_reused(tmp_path):
     assert "report: /abs/dir/toolbox-adversary-report.md" in out["updatedInput"]["prompt"]
 
 
+def test_a_finished_or_ambiguous_report_path_is_never_reused(tmp_path):
+    done = tmp_path / "slice-report.md"
+    done.write_text("STATUS: done\n")
+    (tmp_path / "slice-report.md.done").write_text("")
+    env = fake_dispatch(tmp_path)
+    # The 2026-10-18 case: background names the slice's finished report, the label names the review's own.
+    out = run({"description": "Review", "prompt": f"Background: {done}.\nReport path: /abs/review-report.md"}, env=env)
+    assert "report: /abs/review-report.md" in out["updatedInput"]["prompt"]
+    out = run({"description": "Review", "prompt": f"Background: {done}."}, env=env)
+    assert f"report: {tmp_path / 'reports' / 's1' / 'review-report.md'}" in out["updatedInput"]["prompt"]
+    out = run({"description": "Two", "prompt": "see /a/x-report.md and /b/y-report.md"}, env=env)
+    assert f"report: {tmp_path / 'reports' / 's1' / 'two-report.md'}" in out["updatedInput"]["prompt"]
+
+
 def test_footer_that_cannot_be_built_still_denies(tmp_path):
     assert run({"prompt": "research X"}, env=fake_dispatch(tmp_path, ok=False))["permissionDecision"] == "deny"
 

@@ -7,7 +7,8 @@ footer is what makes it write a report file, a `.done` marker and `BLOCKED:` ins
 2026-10-18 a lead launched a research sub-agent without it and had to SendMessage the contract afterwards.
 The footer's own heading is the check. A prompt without it is no longer denied (2026-10-18, djbclark: the
 deny cost a relaunch for a step the hook can do itself): the hook appends the footer through `updatedInput`.
-The report path is the first absolute `*-report.md` path the prompt names, else
+The report path is the one the prompt labels ("Report path: /abs/x-report.md") or the only absolute
+`*-report.md` path it names, never one whose `.done` exists, else
 `~/.local/state/agent-reports/<session>/<name>-report.md`; the sub-agent's `written: <path>` final line and
 the hook's `additionalContext` both name it. If the footer cannot be built, the old deny stands. Exempt:
 claude-code-guide and statusline-setup (short answers by design). AGENT_FOOTER_GATE_OFF=1 disables it.
@@ -25,6 +26,7 @@ MARK = "Delivery contract"
 EXEMPT = {"claude-code-guide", "statusline-setup"}
 ACP_DISPATCH = os.environ.get("AGENT_FOOTER_ACP_DISPATCH") or str(Path.home() / "src/djbclark-ade/bin/acp-dispatch")
 REPORT_IN_PROMPT = re.compile(r"(/[\w.@~+/-]+-report\.md)\b")
+REPORT_LABELLED = re.compile(r"(?i)report(?: path| file)?\s*(?:is|:|=)\s*`?(/[\w.@~+/-]+-report\.md)\b")
 DENY_REASON = (
     "This sub-agent prompt has no delivery footer (~/CLAUDE.md rule 25) and the hook could not build one. Run "
     "`~/src/djbclark-ade/bin/acp-dispatch footer --report <scratchpad>/<name>-report.md`, paste its "
@@ -37,10 +39,21 @@ def slug(text):
     return s or "subagent"
 
 
+def named_report(prompt):
+    """The report path the prompt itself gives: a labelled one, else the only one it mentions. A path whose
+    .done exists is someone's finished report (2026-10-18: a review prompt that named the slice's report as
+    background got that path), so it is never reused."""
+    labelled = REPORT_LABELLED.findall(prompt)
+    paths = labelled or sorted(set(REPORT_IN_PROMPT.findall(prompt)))
+    if len(paths) != 1 and not labelled:
+        return None
+    return None if Path(paths[0] + ".done").exists() else paths[0]
+
+
 def report_path(data, tool_input):
-    m = REPORT_IN_PROMPT.search(str(tool_input.get("prompt") or ""))
-    if m:
-        return m.group(1)
+    named = named_report(str(tool_input.get("prompt") or ""))
+    if named:
+        return named
     session = slug(str(data.get("session_id") or "session"))
     name = slug(str(tool_input.get("name") or tool_input.get("description") or ""))
     d = Path(os.environ.get("AGENT_FOOTER_REPORT_DIR") or Path.home() / ".local/state/agent-reports") / session
