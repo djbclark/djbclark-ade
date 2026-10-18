@@ -98,6 +98,15 @@ class TestTell(TellBase):
         self.assertIn("resume", r.stderr)
         self.assertFalse(self.inbox.exists(), "a refused tell writes nothing")
 
+    def test_tell_accepts_a_finished_record_with_a_resume_scheduled(self):
+        self.dispatch_agent("codex", "m1")
+        rec = self.record()
+        rec["auto_resume"] = {"state": "scheduled", "attempt": 1, "not_before": 0}
+        self.record_path.write_text(json.dumps(rec))
+        r = run(["tell", str(self.record_path), "after the reset, skip step 2"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("skip step 2", self.inbox.read_text())
+
     def test_tell_reads_stdin_and_names_the_sender(self):
         self.dispatch_running()
         r = run_stdin(["tell", str(self.record_path), "-", "--from", "operator"], {}, "via stdin")
@@ -149,6 +158,8 @@ class TestTell(TellBase):
         self.assertTrue(wrap.startswith('<cross-session-message from="acp-dispatch" '
                                          'from-name="acp-dispatch tell (lead)" from-mode="bypass">\n'))
         self.assertIn("\nstop after step 3\n", wrap)
+        self.assertIn("MSG 1 from lead", wrap)
+        self.assertIn(f"REPLY 1: <one line>` appended to {self.replies.resolve()}", wrap)
         self.assertTrue(wrap.endswith("</cross-session-message>"))
         # the inbox entry is written all the same
         self.assertIn("stop after step 3", self.inbox.read_text())

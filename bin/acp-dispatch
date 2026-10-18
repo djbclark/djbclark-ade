@@ -1287,14 +1287,19 @@ def tell_record(a: argparse.Namespace) -> int:
         except (OSError, ValueError) as e:
             die(f"unreadable record {target}: {e}")
         done = rec.get("done") or (done_path(Path(rec["report"])) if rec.get("report") else None)
-        if rec.get("finished") or (done and Path(done).exists()):
+        # A quota stop with an in-place resume scheduled is not over: resume carries the message.
+        pending = (rec.get("auto_resume") or {}).get("state") in AUTO_RESUME_PENDING and not rec.get("closed")
+        if not pending and (rec.get("finished") or (done and Path(done).exists())):
             die(f"slice {rec.get('name', target.stem)} is finished; the message would never be read. "
                 f"Give it to the next run instead: acp-dispatch resume {target} -p '<message>'")
         inbox = record_inbox(target)
     else:
         inbox = report_inbox(target)                    # an Agent-tool report: no record, no delivery
-    append_message(inbox, a.sender, message)
-    pid = claude_live_delivery(rec, a.sender, message) if rec and rec.get("agent") == "claude" else None
+    n = append_message(inbox, a.sender, message)
+    # The live copy names its number and the replies file, as the footer's inbox rule expects.
+    live = (f"MSG {n} from {a.sender} (also in {inbox}; answer it with `REPLY {n}: <one line>` "
+            f"appended to {record_replies(target)}):\n{message.strip()}")
+    pid = claude_live_delivery(rec, a.sender, live) if rec and rec.get("agent") == "claude" else None
     print(f"delivered: inbox + live session {pid}" if pid else "delivered: inbox")
     return 0
 
