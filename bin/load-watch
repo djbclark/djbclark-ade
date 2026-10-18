@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""load-watch: find the agent behind a sustained load spike, tell it, and steer that work to Forgejo CI. No model.
+"""load-watch: find the agent behind a sustained load spike, tell it, and steer that work to CI (free GitHub runners; Forgejo/Hyades for MIT/SIPB work). No model.
 
     load-watch sample [--dry-run] [-v]      one sample (launchd runs this every 20 s)
     load-watch status                       streak, top consumers in the window, cooldowns
@@ -14,7 +14,7 @@
 Why (2026-10-18): agents keep starting heavy builds and tests on this 8-core Mac (load 24-41 that
 morning; 180 on 2026-10-13, 300-400 on 2026-10-04). `bg`, `heavy-shim` and the Claude test hook throttle
 what goes through them; nothing noticed what did not, or told the agent that started it. Plektra and
-stayturgid-agent already build only on SIPB's Forgejo runner (`forgejo-ci` skill); this finds the next
+stayturgid-agent already build only on CI (free GitHub runners since 2026-10-18, `ci/base` + `ci/run/**`; `forgejo-ci` skill); this finds the next
 candidate.
 
 Each sample is one `ps` call and `os.getloadavg()`: no model, no network. A sample counts as hot when
@@ -24,7 +24,7 @@ to the session whose pid is its ancestor, a daemonised one such as a Gradle daem
 in its git repo) and, for each session above LW_MIN_CORES (1.5) cores, writes a brief, types one line
 naming it into the session (relay.py), and sends one hermes-ping (with a ready `acp-dispatch cursor` line for a fixer when the relay fails). A session or repo is not told again
 for LW_COOLDOWN_H (6) hours. The agent is asked to finish what is running (never to kill paid-for
-work), ask djbclark before creating a Forgejo copy, and, once CI runs there, `load-watch ci-only add`
+work), ask djbclark before creating a CI copy of a repo that is not on GitHub, and, once CI runs, `load-watch ci-only add`
 the repo so `bg` refuses local builds and tests in it.
 
 Job guard (2026-10-18): each sample also checks launchd jobs (see the `job guard` section): a crash loop in
@@ -37,7 +37,7 @@ Registry: ~/.config/load-watch/ci-only.tsv (repo TAB mode TAB CI command or reas
 through `load-watch ci check`. CI-first (djbclark, 2026-10-18): every repo `bg` builds in needs a decision.
 `ci`: `bg` refuses and names the CI command. `local`: runs here, with the reason (macOS-only, ...).
 `pending`: runs here but `bg` reminds the agent to investigate (repos seeded from 7 days of `bg` use).
-No row: `bg` refuses (exit 3) until the agent investigates offloading with the forgejo-ci skill and decides.
+No row: `bg` refuses (exit 3) until the agent investigates offloading (GitHub runners: `forgejo-ci` skill section 6 item 6) and decides.
 A git worktree or cow pasture with no row of its own takes its main repo's row; a key ending in `/*`
 covers every repo under that directory. Older 3-column rows (repo, CI command, date) read as `ci`.
 Exit: 0 ok, 1 nothing found (check, ack of an unknown id), 2 usage.
@@ -273,8 +273,8 @@ def brief(inc, g, top, remote, load1, ncpu):
     procs = "\n".join(f"{i}. pid {p['pid']}, {p['cores']} cores: `{p['cmd'][:200]}`"
                       for i, p in enumerate(sorted(g["procs"], key=lambda p: -p["cores"])[:8], 1))
     listed = top in registry()
-    where = (f"It already has a Forgejo remote: `{remote}`." if remote else
-             "It has no Forgejo remote yet.") if top else "The work ran outside any git repo."
+    where = (f"It has a Forgejo remote: `{remote}` (MIT/SIPB CI)." if remote else
+             "It has no Forgejo remote (a GitHub-sourced repo uses GitHub runners).") if top else "The work ran outside any git repo."
     return f"""# load-watch incident {inc}
 
 Written {stamp()} by `~/src/djbclark-ade/bin/load-watch` (no model). Load was {load1:.1f} on {ncpu} cores
@@ -289,17 +289,17 @@ Repo: `{top or '-'}`. {where}{' It is already registered CI-only, so this ran ou
 
 1. Finish the step you are on. Do not kill or restart running work to obey this (it is already paid for);
    just do not start another heavy local run of this kind.
-2. Next time, run this kind of build or test on SIPB's Forgejo runner: load the `forgejo-ci` skill
+2. Next time, run this kind of build or test on CI: load the `forgejo-ci` skill
    (`~/src/djbclark-ade/skills/forgejo-ci/SKILL.md`, section 6 item 6 is the recipe for a repo whose
-   source of truth stays on GitHub: a private copy on forgejo.mit.edu, a `.forgejo/workflows/` job, a
-   wait/fetch script).
-3. Creating a Forgejo repo or pushing to it is outward-facing: if the repo has no Forgejo copy yet, ask
+   source of truth is on GitHub: an orphan `ci/base` branch with a workflow and a `scripts/github-*`
+   wrapper that pushes `ci/run/<slug>` to free GitHub runners; Forgejo/Hyades only for MIT/SIPB work).
+3. Pushing branches to a repo djbclark does not own, or creating a Forgejo repo, is outward-facing: ask
    djbclark first (one AskUserQuestion, or hermes-ping if no one is at your pane). Light work that
    cannot move (a single small test file) goes through `~/ops/site-private/bin/bg` instead.
-4. Once a CI job runs there, register the repo so `bg` refuses heavy local runs and names your command:
+4. Once a CI job runs, register the repo so `bg` refuses heavy local runs and names your command:
    `~/src/djbclark-ade/bin/load-watch ci-only add {top or '<repo top>'} "<the command that runs it on CI>"`.
 5. If you are a fresh agent dispatched on this brief, the session that ran the work is gone: djbclark
-   dispatched you after agreeing to a Forgejo copy, so steps 2-4 are yours.
+   dispatched you after agreeing to a CI copy, so steps 2-4 are yours.
 6. Answer this brief in one line: `~/src/djbclark-ade/bin/load-watch ack {inc} "<what you did or plan>"`.
 """
 
@@ -322,7 +322,7 @@ def notify(inc, g, top, path, load1, ncpu, dry):
     ping = (f"djbclark-ade: load-watch {inc}: {who} used ~{g['cores']:.1f} cores at load {load1:.0f} "
             f"({cmd}); {'told it' if relayed else 'could not reach it (' + (s.get('where') or 'no channel') + ')'};"
             f" brief {path}")
-    if not relayed:  # the code-slice pick (route_agent.py plan, 2026-10-18); he runs it after a yes to a Forgejo copy
+    if not relayed:  # the code-slice pick (route_agent.py plan, 2026-10-18); he runs it after a yes to a CI copy
         ping += (f"; to hand it to a fixer: ~/src/djbclark-ade/bin/acp-dispatch cursor --model default --kind code "
                  f"--name load-watch-{Path(path).stem} --task load-watch "
                  f"-C {top or s.get('cwd') or HOME} -f {path} --detach --no-wait")
