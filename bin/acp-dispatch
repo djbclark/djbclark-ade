@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """acp-dispatch — one consistent way to hand a slice to an agent and get its report back.
 
-    acp-dispatch <agent> --model M --name NAME (-p PROMPT | -f BRIEF) [-C DIR]
+    acp-dispatch <agent> --model M --kind KIND --name NAME (-p PROMPT | -f BRIEF) [-C DIR]
                  (--model may be omitted for zcode only, which has just two models)
+                 (--kind is required on a fresh dispatch: route_agent.KINDS; resume/reroute
+                  inherit it from the record; a pre-change record with no kind still continues)
+                 [--role advise|exec]   (frontier only; default advise; other kinds record exec)
                  [--effort LEVEL] [--context SIZE]
                  [--task TASK | --out DIR] [--perm all|deny] [--timeout S]
                  [--lead NAME] [--detach [--no-wait] [--wait-timeout S]] [--dry-run] [--json]
@@ -104,14 +107,26 @@ attempts exhausted) stays exit 3 and the `check` line ends with the exact
 `acp-dispatch resume <record>` command and the retry time.
 
 A refused resume leaves the record alone (2026-10-18): `resume` runs the same pool checks as a
-fresh dispatch (headroom, window fit, estimate), and a refusal used to overwrite the record with a
-bare `unavailable` one, losing `log`, `session_id`, `cmd`, `brief`, `prompt`, `auto_resume`,
-`closed` and `resume_count`, so the next resume crashed. Now the record keeps every key and gains
-a `refusals` list, one `{at, class, detail}` entry per refused resume; exit 5 and the
-`unavailable` stdout line are unchanged. A fresh dispatch (no record to continue) still writes
-the `unavailable` record. `resume` on a record that has no `log` or `cmd` (one clobbered before
-this fix) stops with a message instead of a traceback; `session_info` returns the stored session id
-and no capability for it.
+fresh dispatch (headroom, window fit, estimate, in-flight reservation), and a refusal used to
+overwrite the record with a bare `unavailable` one, losing `log`, `session_id`, `cmd`, `brief`,
+`prompt`, `auto_resume`, `closed` and `resume_count`, so the next resume crashed. Now the record
+keeps every key and gains a `refusals` list, one `{at, class, detail}` entry per refused resume;
+exit 5 and the `unavailable` stdout line are unchanged. A fresh dispatch (no record to continue)
+still writes the `unavailable` record. `resume` on a record that has no `log` or `cmd` (one
+clobbered before this fix) stops with a message instead of a traceback; `session_info` returns the
+stored session id and no capability for it.
+
+--kind (2026-10-18): a fresh dispatch must name a route_agent kind; the agent×model is mapped to a
+routing service the same way pool headroom is, and an ineligible pair exits 2 naming who *is*
+eligible (ACP_OPERATOR_APPROVED=route-override skips eligibility only). Frontier models
+(`[dispatch].frontier_models`, substring on --model) require `--kind frontier` and ignore
+route-override. Frontier defaults to `--role advise` (read-only brief section + tree hash; a tree
+change sets `advisor_edited` and check says ADVISOR EDITED THE TREE); `--role exec` needs
+ACP_OPERATOR_APPROVED=frontier-exec. Estimate history is machine-wide when this task has fewer than
+3 measured slices; `[dispatch.estimate_floor]` floors the brief-size default. Before fit checks,
+other in-flight slices on the same *service* reserve their `estimated_usage_pct` /
+`estimated_usage_windows` (conservative: the whole estimate, even if the snapshot already counts
+part of it). A resume is never refused by that reservation. `class=inflight` is exit 5.
 
 A detached slice that dies without running finalize (a reboot's SIGTERM, SIGKILL, OOM, power
 loss, launchd unloading it) used to leave `exit: null, finished: null` forever, so every reader
@@ -158,12 +173,14 @@ Exit codes (dispatch and check):
     1    report present but unfinished (no DONE), or delivered with a non-zero acp-run exit;
          also `running`, `pending` and `resume-scheduled` (a quota stop whose in-place resume is
          scheduled: still running, wait for the rearm waiter)
-    2    usage (missing or unknown --model, bad name, report basename Claude Code would refuse, ...)
+    2    usage (missing --kind/--model, ineligible kind, frontier model without --kind frontier,
+         frontier --role exec without approval, bad name, report basename Claude Code would refuse, ...)
     3    delivery failure: the agent finished (or died) and there is no report, or its report
          ends in a NO-REPORT: line (acp-run failed before the agent wrote DONE) and no automatic
          resume is pending; for a quota stop the line carries the manual resume command
     4    BLOCKED: the report's first line is a question for the lead; answer it, then resume
-    5    pool unavailable before launch; re-plan with --exclude (no slice attempt consumed)
+    5    pool unavailable before launch (headroom, wont-fit, inflight reservation/cap, preflight);
+         re-plan with --exclude (no slice attempt consumed)
     124  timed out waiting for the .done marker (--detach without --no-wait)
     (a reaped record's acp-run exit is 255 `lost` when neither an exit file nor launchd knows it;
      a signalled runner's is 128+signal, e.g. 143 for SIGTERM)
@@ -173,6 +190,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -197,6 +215,13 @@ including writing `{report}` and creating its `.done` marker, so do not try. Put
 report, in the shape the delivery contract describes, in your final message instead: an
 `acp-run` final message is not cut at 4,000 characters, and acp-dispatch saves it to the report
 path and marks it done for you. This overrides items 1, 2 and 7 of the delivery contract.
+"""
+ADVISOR_NOTE = """
+## Advisor role
+
+This is a read-only review or consultation. Do not edit, create or delete files in the working
+tree, commit, push or change git config. The deliverable is the report: findings, recommendations,
+and exact file:line references.
 """
 STATE_ROOT = Path(os.environ.get("ACP_DISPATCH_STATE", str(Path.home() / ".local/state/bigteam")))
 # SendMessage address of the parent. An Agent-tool sub-agent reaches its main session as "main";
@@ -258,12 +283,16 @@ OPERATOR_GATED = set(_routing_policy.POLICY["dispatch"]["operator_gated"])
 # Fable at xhigh/max should almost never run (operator 2026-10-18): the same approval gate, keyed
 # ACP_OPERATOR_APPROVED=fable-xhigh. Fable at high is the frontier route_agent.py suggests.
 FABLE_GATED_EFFORTS = set(_routing_policy.POLICY["dispatch"]["fable_gated_efforts"])
-# Most fresh slices one agent may have in flight machine-wide (operator 2026-10-18: four
-# gpt-6-astra slices started together emptied codex's 5-hour window and all four stopped).
-# A resume is never refused: it continues work already paid for. ACP_DISPATCH_INFLIGHT=codex=2
-# overrides per run.
-INFLIGHT_CAP = {k: int(v) for k, v in _routing_policy.POLICY["dispatch"]["inflight_cap"].items()}
+# Optional hard cap per service (empty since the reservation replaced `codex = 1`,
+# operator 2026-10-18). ACP_DISPATCH_INFLIGHT=name=N overrides (service or agent name).
+# A resume is never refused by the reservation or this cap: it continues paid work.
+INFLIGHT_CAP = {k: int(v) for k, v in (_routing_policy.POLICY["dispatch"].get("inflight_cap") or {}).items()}
 INFLIGHT_SPAWN_GRACE = 10 * 60           # a running record whose pid is not written yet counts this long
+FRONTIER_MODELS = [str(x).lower() for x in
+                   (_routing_policy.POLICY["dispatch"].get("frontier_models") or [])]
+ESTIMATE_FLOOR = {str(k): float(v) for k, v in
+                  (_routing_policy.POLICY["dispatch"].get("estimate_floor") or {}).items()}
+PLACEHOLDER_MODELS = frozenset({"m1"})  # test placeholders; skipped in machine-wide history
 # Claude Code 2.1.295 refuses a sub-agent's Write for this basename (tengu_subagent_md_report_blocked).
 CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.IGNORECASE)
 # acp-run runs yolo for every agent (operator 2026-10-14): all or deny. A scoped:... value from an
@@ -364,47 +393,115 @@ def pool_reading(agent: str, model: str | None) -> tuple[float | None, dict]:
     return info.get("remaining"), info
 
 
+def resolve_service(agent: str, model: str | None) -> str | None:
+    """Routing service for agent×model, same map as pool_reading. None if unknown."""
+    mapping = map_agent_to_provider(agent, model)
+    if mapping is None:
+        return None
+    return route_module().pool_service(*mapping)
+
+
+def record_service(row: dict) -> str | None:
+    """Service name stored on the record, or derived from agent×model for older records."""
+    if row.get("service"):
+        return str(row["service"])
+    return resolve_service(str(row.get("agent") or ""), row.get("model"))
+
+
+def is_frontier_model(model: str | None) -> bool:
+    if not model:
+        return False
+    low = model.lower()
+    return any(tok in low for tok in FRONTIER_MODELS)
+
+
+def approved_tokens() -> set[str]:
+    return {x.strip() for x in os.environ.get("ACP_OPERATOR_APPROVED", "").split(",") if x.strip()}
+
+
+def _history_rows(paths: list[Path], agent: str, model: str | None, *,
+                  skip_placeholders: bool) -> list[tuple[float, dict]]:
+    """(mtime, row) for measured records matching agent×model, newest first."""
+    rows: list[tuple[float, dict]] = []
+    for path in paths:
+        try:
+            row = json.loads(path.read_text())
+            mtime = path.stat().st_mtime
+        except (OSError, ValueError, TypeError):
+            continue
+        if row.get("agent") != agent or row.get("model") != model:
+            continue
+        if skip_placeholders and str(row.get("model") or "") in PLACEHOLDER_MODELS:
+            continue
+        if row.get("measured_usage_pct") is None and not row.get("measured_usage_windows"):
+            continue
+        rows.append((mtime, row))
+    rows.sort(key=lambda t: t[0], reverse=True)
+    return rows
+
+
+def session_finder_state() -> Path:
+    """session-finder's launch state root (env SESSION_FINDER_STATE); same as fleet.STATE_DIR."""
+    return Path(os.environ.get("SESSION_FINDER_STATE",
+                               str(Path.home() / ".local/state/session-finder")))
+
+
+def measured_history(out: Path, agent: str, model: str | None
+                     ) -> tuple[list[dict], str]:
+    """Measured job rows for estimates: task (≥3) else machine-wide (20) else task remainder."""
+    task_paths = list((out / "jobs").glob("*.json")) if (out / "jobs").is_dir() else []
+    task = _history_rows(task_paths, agent, model, skip_placeholders=False)
+    if len(task) >= 3:
+        return [r for _, r in task], f"history ({len(task)} slices, task)"
+    machine = _history_rows(
+        record_paths([str(STATE_ROOT), str(session_finder_state())]), agent, model,
+        skip_placeholders=True)[:20]
+    if machine:
+        return [r for _, r in machine], f"history ({len(machine)} slices, machine)"
+    if task:
+        return [r for _, r in task], f"history ({len(task)} slices, task)"
+    return [], "brief-size default"
+
+
 def estimate_pct(out: Path, agent: str, model: str | None, prompt: str,
-                 explicit: float | None) -> tuple[float, str]:
+                 explicit: float | None, service: str | None = None) -> tuple[float, str]:
     if explicit is not None:
         return explicit, "explicit"
-    values = []
-    jobs = out / "jobs"
-    if jobs.is_dir():
-        for path in jobs.glob("*.json"):
-            try:
-                row = json.loads(path.read_text())
-                if row.get("agent") == agent and row.get("model") == model and row.get("measured_usage_pct") is not None:
-                    values.append(float(row["measured_usage_pct"]))
-            except (OSError, ValueError, TypeError):
-                pass
+    rows, source = measured_history(out, agent, model)
+    values = [float(r["measured_usage_pct"]) for r in rows
+              if r.get("measured_usage_pct") is not None]
+    floor = ESTIMATE_FLOOR.get(service or "", 0.0)
     if values:
         values.sort()
-        return values[len(values) // 2], f"history ({len(values)} slices)"
+        est = values[len(values) // 2]
+        # Fewer than 3 slices: do not let a single tiny measurement beat the floor.
+        if len(values) < 3 and floor:
+            est = max(est, floor)
+        return est, source
     size = len(prompt)
-    return (3.0 if size <= 2000 else 7.0 if size <= 8000 else 12.0), "brief-size default"
+    est = 3.0 if size <= 2000 else 7.0 if size <= 8000 else 12.0
+    if floor:
+        est = max(est, floor)
+    return est, "brief-size default"
 
 
 def estimate_windows(out: Path, agent: str, model: str | None) -> dict[str, float]:
-    """Median measured drop per quota window (label -> percent) from this task's past slices.
+    """Median measured drop per quota window (label -> percent).
 
-    One scalar mixed windows: a slice that empties the 5-hour window while the
-    weekly one binds before it was "measured" as weekly-before minus 5h-after
-    (2026-10-13: certpin4 recorded 70%, so the next codex slice was refused
+    Prefers this task's history (≥3 slices); else the most recent 20 machine-wide
+    (2026-10-18). One scalar mixed windows: a slice that empties the 5-hour window
+    while the weekly one binds before it was "measured" as weekly-before minus
+    5h-after (2026-10-13: certpin4 recorded 70%, so the next codex slice was refused
     against 69% weekly left although it needed ~15% of the week).
     """
+    rows, _ = measured_history(out, agent, model)
     seen: dict[str, list[float]] = {}
-    jobs = out / "jobs"
-    if jobs.is_dir():
-        for path in jobs.glob("*.json"):
-            try:
-                row = json.loads(path.read_text())
-                if row.get("agent") != agent or row.get("model") != model:
-                    continue
-                for label, used in (row.get("measured_usage_windows") or {}).items():
-                    seen.setdefault(label, []).append(float(used))
-            except (OSError, ValueError, TypeError, AttributeError):
-                pass
+    for row in rows:
+        try:
+            for label, used in (row.get("measured_usage_windows") or {}).items():
+                seen.setdefault(label, []).append(float(used))
+        except (TypeError, ValueError, AttributeError):
+            pass
     return {label: sorted(v)[len(v) // 2] for label, v in seen.items() if v}
 
 
@@ -421,19 +518,26 @@ def window_fit(estimates: dict[str, float], windows: dict) -> tuple[str | None, 
     return None, near
 
 
-def inflight_cap(agent: str) -> int | None:
+def inflight_cap(agent: str, service: str | None = None) -> int | None:
     caps = dict(INFLIGHT_CAP)
     for item in os.environ.get("ACP_DISPATCH_INFLIGHT", "").split(","):
         name, _, n = item.partition("=")
         if name.strip() and n.strip().isdigit():
             caps[name.strip()] = int(n)
+    if service and service in caps:
+        return caps[service]
     return caps.get(agent)
 
 
-def inflight_records(agent: str, skip: Path, out: Path) -> list[Path]:
-    """Records under STATE_ROOT (and this task's --out) still running a slice on `agent`."""
+def inflight_records(service: str | None, skip: Path, out: Path,
+                     agent: str | None = None) -> list[Path]:
+    """Records under STATE_ROOT, session-finder launches, and this task's --out still running.
+
+    Matched by routing service when known (agy carries two services); else by agent name
+    so ACP_DISPATCH_INFLIGHT=crush=1 still works for agents with no aiuse map.
+    """
     busy, seen = [], {skip.resolve()}
-    for path in record_paths([str(STATE_ROOT), str(out)]):
+    for path in record_paths([str(STATE_ROOT), str(out), str(session_finder_state())]):
         if path.resolve() in seen:
             continue
         seen.add(path.resolve())
@@ -441,13 +545,101 @@ def inflight_records(agent: str, skip: Path, out: Path) -> list[Path]:
             row = json.loads(path.read_text())
         except (OSError, ValueError):
             continue
-        if row.get("agent") != agent or row.get("status") != "running":
+        if row.get("status") != "running":
+            continue
+        if service:
+            if record_service(row) != service:
+                continue
+        elif agent:
+            if row.get("agent") != agent:
+                continue
+        else:
+            continue
+        # Skip a dead/reused-pid row; keep spawn-grace when pid is not written yet.
+        if dead_reason(row) is not None:
             continue
         pid = row.get("pid")
-        if pid_alive(pid) or (pid is None and time.time() - float(row.get("started") or 0)
-                              < INFLIGHT_SPAWN_GRACE):
+        if pid is not None or (time.time() - float(row.get("started") or 0)
+                               < INFLIGHT_SPAWN_GRACE):
             busy.append(path)
     return busy
+
+
+def reserved_usage(busy: list[Path],
+                   window_labels: list[str] | tuple[str, ...] | None = None
+                   ) -> tuple[float, dict[str, float]]:
+    """Sum in-flight estimates. Conservative: whole estimate even if the snapshot already
+    counts part of a running slice (operator 2026-10-18).
+
+    A busy row with no `estimated_usage_windows` (pre-change, resume, --est-pct) still
+    reserves its scalar on every window label of the new dispatch.
+    """
+    total = 0.0
+    windows: dict[str, float] = {}
+    labels = list(window_labels or ())
+    for path in busy:
+        try:
+            row = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        try:
+            scalar = float(row.get("estimated_usage_pct") or 0)
+        except (TypeError, ValueError):
+            scalar = 0.0
+        total += scalar
+        row_windows = row.get("estimated_usage_windows") or {}
+        if row_windows:
+            for label, used in row_windows.items():
+                try:
+                    windows[label] = windows.get(label, 0.0) + float(used)
+                except (TypeError, ValueError):
+                    pass
+        elif labels and scalar:
+            for label in labels:
+                windows[label] = windows.get(label, 0.0) + scalar
+    return total, windows
+
+
+def advisor_tree_snap(repo: Path) -> dict | None:
+    """HEAD + hash of porcelain status (all untracked) plus `git diff HEAD --binary`."""
+    def _b(data: bytes | str | None) -> bytes:
+        if data is None:
+            return b""
+        return data if isinstance(data, (bytes, bytearray)) else str(data).encode()
+
+    try:
+        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=False, timeout=5)
+        if head.returncode != 0:
+            return None
+        status = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain=v1", "-z",
+             "--untracked-files=all"],
+            capture_output=True, check=False, timeout=5)
+        if status.returncode != 0:
+            return None
+        diff = subprocess.run(
+            ["git", "-C", str(repo), "diff", "HEAD", "--binary"],
+            capture_output=True, check=False, timeout=30)
+        if diff.returncode not in (0, 1):  # 1 = differences (still a valid snap)
+            return None
+        blob = _b(status.stdout) + b"\0" + _b(diff.stdout)
+        return {"head": head.stdout.strip(),
+                "status_hash": hashlib.sha256(blob).hexdigest()}
+    except (OSError, subprocess.SubprocessError, TypeError, UnicodeError):
+        return None
+
+
+def refuse_kind(service: str | None, kind: str) -> NoReturn:
+    router = route_module()
+    disabled = router.operator_disabled()
+    eligible = sorted(s.name for s in router.discover()
+                      if s.eligible(kind) and s.name not in disabled)
+    who = ", ".join(eligible) if eligible else "(none)"
+    label = service or "(unknown service)"
+    die(f"{label} is not eligible for --kind {kind}; eligible: {who}; "
+        f"override with ACP_OPERATOR_APPROVED=route-override "
+        f"(or run route_agent.py plan --kinds {kind})")
 
 
 def git_identity_warning(repo: Path) -> str | None:
@@ -504,6 +696,8 @@ def unavailable_record(out: Path, a: argparse.Namespace, reason: str, cls: str,
            "task": a.task, "out": str(out), "record": str(record), "report": str(report),
            "done": str(done_path(report)), "status": "unavailable", "unavailable_class": cls,
            "detail": reason, "remaining_percent": remaining, "estimated_usage_pct": estimate,
+           "kind": getattr(a, "kind", None), "service": getattr(a, "service", None),
+           "role": getattr(a, "role", None),
            "started": time.time(), "finished": time.time(), "exit": UNAVAILABLE_EXIT, "pid": None}
     write_record(record, rec)
     print(f"unavailable\t{a.name}\tclass={cls} agent={a.agent} model={a.model or '(default)'} {reason}")
@@ -1890,6 +2084,8 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
         if stale_msg:
             rec = note_checkpoint_stale_seen(path, rec)
             det = f"{det}; {stale_msg}" if det else stale_msg
+    if rec.get("advisor_edited"):
+        det = f"{det}; ADVISOR EDITED THE TREE" if det else "ADVISOR EDITED THE TREE"
     return (st, rec.get("name", path.stem), str(report), det)
 
 
@@ -1940,6 +2136,11 @@ def finalize_locked(record_path: Path, rc: int | None, finished_at: float | None
         rec["report_source"] = "agent"
     rec.update(finished=finished_at or time.time(), exit=rc, pid=None)
     rec["model_applied"] = applied_model(rec) or rec.get("model_applied")
+    if rec.get("role") == "advise" and rec.get("advisor_tree_before"):
+        after_tree = advisor_tree_snap(Path(rec.get("dir") or "."))
+        rec["advisor_tree_after"] = after_tree
+        if after_tree is not None and after_tree != rec.get("advisor_tree_before"):
+            rec["advisor_edited"] = True
     try:
         _, age = route_module().load_snapshot()
         after, after_reading = pool_reading(rec.get("agent", ""), rec.get("model"))
@@ -2220,7 +2421,8 @@ def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
         detach=a.detach, no_wait=a.no_wait, wait_timeout=a.wait_timeout, force=True, dry_run=False,
         json=False, tee=False, no_model_check=True, no_preflight=True, min_headroom=10.0,
         est_pct=rec.get("estimated_usage_pct"), checkpoint=rec.get("checkpoint", False), acp_run=old_cmd[0],
-        effort=rec.get("effort"), context=rec.get("context"), acp_arg=[*rec.get("acp_arg", []), *resume_arg])
+        effort=rec.get("effort"), context=rec.get("context"), acp_arg=[*rec.get("acp_arg", []), *resume_arg],
+        kind=rec.get("kind"), role=rec.get("role"), from_record=True)
     return dispatch(args, {**rec, "session_id": sid, "prompt": original})
 
 
@@ -2239,6 +2441,18 @@ def reroute_record(a: argparse.Namespace) -> int:
     n = 1
     while (jobs / f"{base}-{n}.json").exists():
         n += 1
+    # Inherit kind/role; --kind on the CLI overrides. from_record lets a kind-less legacy
+    # record continue, but gates still run (only a resume with previous skips them).
+    kind = getattr(a, "kind", None) or old.get("kind")
+    role = getattr(a, "role", None) or old.get("role")
+    new_svc = resolve_service(a.agent, a.model)
+    old_svc = old.get("service") or resolve_service(str(old.get("agent") or ""), old.get("model"))
+    if a.est_pct is not None:
+        est = a.est_pct
+    elif new_svc is not None and new_svc == old_svc:
+        est = old.get("estimated_usage_pct")
+    else:
+        est = None  # estimate afresh for a different service
     ns = argparse.Namespace(
         agent=a.agent, model=a.model, name=f"{base}-{n}", dir=old["dir"], task=old.get("task"),
         out=old["out"], perm=old.get("perm") or "all", timeout=a.timeout or old.get("timeout", DEFAULT_TIMEOUT),
@@ -2246,8 +2460,9 @@ def reroute_record(a: argparse.Namespace) -> int:
         prompt=prompt, prompt_file=None, detach=a.detach, no_wait=a.no_wait, wait_timeout=None,
         force=False, dry_run=False, json=False, tee=False, no_model_check=False,
         no_preflight=a.no_preflight, min_headroom=a.min_headroom,
-        est_pct=a.est_pct if a.est_pct is not None else old.get("estimated_usage_pct"),
-        checkpoint=True, acp_run=a.acp_run, acp_arg=[])
+        est_pct=est,
+        checkpoint=True, acp_run=a.acp_run, acp_arg=[],
+        kind=kind, role=role, from_record=True)
     rc = dispatch(ns)
     new_path = jobs / f"{base}-{n}.json"
     if new_path.exists():
@@ -2262,13 +2477,13 @@ def reroute_record(a: argparse.Namespace) -> int:
 def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     if a.timeout < 0 or (a.wait_timeout is not None and a.wait_timeout < 0):
         die("timeouts must be 0 or more")
-    if a.agent in OPERATOR_GATED and a.agent not in {
-            x.strip() for x in os.environ.get("ACP_OPERATOR_APPROVED", "").split(",") if x.strip()}:
+    approved = approved_tokens()
+    if a.agent in OPERATOR_GATED and a.agent not in approved:
         die(f"{a.agent} needs specific, explicit operator approval for this run; ask first, then set"
             f" ACP_OPERATOR_APPROVED={a.agent} (acp-run applies the same gate)")
     if (not previous and "fable" in (a.model or "").lower()
             and (getattr(a, "effort", None) or "").lower() in FABLE_GATED_EFFORTS
-            and "fable-xhigh" not in {x.strip() for x in os.environ.get("ACP_OPERATOR_APPROVED", "").split(",")}):
+            and "fable-xhigh" not in approved):
         die(f"fable at --effort {a.effort} needs explicit operator approval for this run (operator"
             " 2026-10-18: almost never); use --effort high, or ask first, then set"
             " ACP_OPERATOR_APPROVED=fable-xhigh")
@@ -2284,6 +2499,51 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         a.perm = "all"
     if bool(a.prompt) == bool(a.prompt_file):
         die("give exactly one of -p PROMPT or -f BRIEF")
+
+    # --kind / --role (2026-10-18). Only a resume (previous set: same agent/model) skips
+    # the gates. reroute inherits kind then runs frontier-model, eligibility and exec gates
+    # as a fresh dispatch. from_record still lets a kind-less legacy record continue
+    # (eligibility skipped when kind is unknown; frontier target → frontier/advise).
+    is_resume = previous is not None
+    from_record = getattr(a, "from_record", False)
+    kind = getattr(a, "kind", None)
+    if previous is not None and "kind" in previous:
+        kind = previous.get("kind")  # may be None on a pre-change record
+    if not is_resume and not kind and is_frontier_model(a.model) and from_record:
+        # Kind-less legacy reroute onto a frontier model: treat as frontier/advise.
+        kind = "frontier"
+    if not is_resume and not kind and not from_record:
+        kinds = ", ".join(_routing_policy.KINDS)
+        die(f"--kind is required (one of: {kinds}); run route_agent.py plan --kinds <kind> "
+            "to pick the agent and model")
+    service = resolve_service(a.agent, a.model)
+    a.kind, a.service = kind, service
+    if not is_resume and kind:
+        if is_frontier_model(a.model) and kind != "frontier":
+            die(f"model {a.model!r} is a frontier model; use --kind frontier "
+                f"(route-override does not skip this)")
+        router = route_module()
+        svc = router.BY_NAME.get(service) if service else None
+        if svc is None:
+            # Unknown map: fall back through the alias map to a curated profile (qwen→alibaba).
+            canon = router.ALIASES.get(a.agent, a.agent)
+            svc = router.BY_NAME.get(canon)
+        if svc is not None:
+            if not svc.eligible(kind) and "route-override" not in approved:
+                refuse_kind(service or svc.name, kind)
+        else:
+            # Unknown agent/model: only [routing].default_profile kinds.
+            if kind not in router.DEFAULT_PROFILE and "route-override" not in approved:
+                refuse_kind(service, kind)
+    if kind == "frontier":
+        role = getattr(a, "role", None) or (previous or {}).get("role") or "advise"
+        if role == "exec" and not is_resume and "frontier-exec" not in approved:
+            die("--role exec with --kind frontier needs ACP_OPERATOR_APPROVED=frontier-exec "
+                "(frontier is advisor by default; operator 2026-10-18)")
+    else:
+        role = "exec"  # --role ignored for non-frontier
+    a.role = role
+
     acp_run = a.acp_run or shutil.which("acp-run")
     if not acp_run:
         die("acp-run not on PATH (and no --acp-run given)")
@@ -2316,30 +2576,61 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         except (OSError, ValueError):
             pass
     prompt = Path(a.prompt_file).read_text() if a.prompt_file else a.prompt
-    estimate, estimate_source = estimate_pct(out, a.agent, a.model, prompt, a.est_pct)
+    estimate, estimate_source = estimate_pct(out, a.agent, a.model, prompt, a.est_pct, service)
     if estimate < 0:
         die("--est-pct must be 0 or more")
     remaining, reading = pool_reading(a.agent, a.model)
     windows = (reading or {}).get("windows") or {}
-    per_window = {} if a.est_pct is not None else {
-        k: v for k, v in estimate_windows(out, a.agent, a.model).items() if windows.get(k) is not None}
-    window_refusal, window_near = window_fit(per_window, windows)
+    if previous is not None:
+        # A resume carries its prior per-window estimate so it still reserves for others.
+        per_window = dict(previous.get("estimated_usage_windows") or {})
+    elif a.est_pct is not None:
+        per_window = {}
+    else:
+        per_window = {
+            k: v for k, v in estimate_windows(out, a.agent, a.model).items()
+            if windows.get(k) is not None}
+    # In-flight reservation by service (2026-10-18). A resume is never refused by it (reserved
+    # is zeroed when previous is set); its own estimate still counts as in flight for others.
+    # Conservative: whole estimate reserved even though the snapshot may already count part of
+    # a running slice. Unknown-service agents match by agent name (F7).
+    busy = inflight_records(service, record, out, agent=None if service else a.agent)
+    reserved, reserved_win = (0.0, {}) if previous else reserved_usage(busy, list(windows))
+    fit_remaining = (float(remaining) - reserved) if remaining is not None else None
+    fit_windows = {k: float(v) - reserved_win.get(k, 0.0) for k, v in windows.items()}
+    window_refusal, window_near = window_fit(per_window, fit_windows)
+    unreserved_window_refusal, _ = window_fit(per_window, windows)
+    unreserved_ok = not (
+        (per_window and unreserved_window_refusal) or
+        (not per_window and remaining is not None and estimate > float(remaining)))
+    reserved_fit_fails = (
+        (per_window and window_refusal) or
+        (not per_window and fit_remaining is not None and estimate > fit_remaining))
     checkpoint = bool(a.checkpoint or remaining is None or window_near or (
-        not per_window and remaining is not None and estimate <= remaining <= estimate * 1.5))
+        not per_window and fit_remaining is not None and estimate <= fit_remaining <= estimate * 1.5))
     if not a.dry_run and a.min_headroom > 0 and remaining is not None and remaining < a.min_headroom:
         return unavailable_record(out, a, f"headroom {remaining:.1f}% < minimum {a.min_headroom:.1f}%",
                                   "headroom", remaining, estimate, previous)
+    # class=inflight only when the slice would fit with zero reservation (F9).
+    if not a.dry_run and not previous and busy and reserved_fit_fails and unreserved_ok:
+        names = ", ".join(p.stem for p in busy[:5])
+        detail = (window_refusal if per_window and window_refusal else
+                  f"estimated use {estimate:.1f}% > {fit_remaining:.1f}% left after reserving "
+                  f"{reserved:.1f}% for in-flight")
+        label = service or a.agent
+        return unavailable_record(
+            out, a, f"{detail}; in-flight on {label}: {names}", "inflight", remaining, estimate, previous)
     if not a.dry_run and per_window and window_refusal:
         return unavailable_record(out, a, window_refusal, "wont-fit", remaining, estimate, previous)
-    if not a.dry_run and not per_window and remaining is not None and estimate > remaining:
-        return unavailable_record(out, a, f"estimated use {estimate:.1f}% > {remaining:.1f}% left",
+    if not a.dry_run and not per_window and fit_remaining is not None and estimate > fit_remaining:
+        return unavailable_record(out, a, f"estimated use {estimate:.1f}% > {fit_remaining:.1f}% left",
                                   "wont-fit", remaining, estimate, previous)
-    cap = inflight_cap(a.agent)
+    cap = inflight_cap(a.agent, service)
     if not a.dry_run and not previous and cap is not None:
-        busy = inflight_records(a.agent, record, out)
         if len(busy) >= cap:
+            label = service or a.agent
             return unavailable_record(
-                out, a, f"{len(busy)} {a.agent} slice(s) already in flight (cap {cap}): "
+                out, a, f"{len(busy)} {label} slice(s) already in flight (cap {cap}): "
                 f"{', '.join(p.stem for p in busy[:3])}; wait for one, or route elsewhere "
                 f"(route_agent.py plan)", "inflight", remaining, estimate)
     if not a.dry_run and not a.no_preflight:
@@ -2377,9 +2668,15 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     # "write the report" cannot be followed (2026-10-11: an agy review was refused that Write and
     # had to be recovered from its final message). Tell the agent the final message is the report.
     deny_note = DENY_NOTE.format(report=agent_report) if perm == "deny" else ""
+    advisor_note = ("\n" + ADVISOR_NOTE.strip() + "\n") if role == "advise" else ""
     checkpoint_note = CHECKPOINT_TEXT.format(report=agent_report) if checkpoint else ""
-    write_atomic(brief, prompt.rstrip() + "\n\n" + footer_text(agent_report, a.lead).rstrip() + "\n"
+    # Advisor section sits after the prompt and before the footer (operator 2026-10-18).
+    write_atomic(brief, prompt.rstrip() + ("\n" + advisor_note + "\n" if advisor_note else "\n\n")
+                 + footer_text(agent_report, a.lead).rstrip() + "\n"
                  + deny_note + checkpoint_note + budget)
+    if not previous and not a.dry_run:
+        # Detached Jev/GLiDE shadow; never blocks or changes the outcome. Skip on --dry-run.
+        route_module().shadow_kind(str(brief), kind or "", service)
 
     acp_cmd = [acp_run, a.agent, "-C", str(Path(a.dir).resolve()), "--add-dir", str(out), "-f", str(brief),
                *(["--model", a.model] if a.model else []),
@@ -2392,6 +2689,10 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     slice_secs = a.timeout + max(a.wrapup_grace, 0)
     wait_timeout = (0 if a.timeout == 0 else
                     a.wait_timeout if a.wait_timeout is not None else slice_secs + 300)
+    if previous is not None and role == "advise" and previous.get("advisor_tree_before") is not None:
+        tree_before = previous.get("advisor_tree_before")
+    else:
+        tree_before = advisor_tree_snap(Path(a.dir).resolve()) if role == "advise" else None
 
     rec = {
         "name": a.name, "agent": a.agent, "model": a.model, "dir": str(Path(a.dir).resolve()),
@@ -2407,9 +2708,12 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         "acp_arg": previous.get("acp_arg", []) if previous else a.acp_arg or [],
         "session_id": previous.get("session_id") if previous else None, "resume_count": resume_count,
         "prompt": previous["prompt"] if previous else prompt,
-        "estimated_usage_pct": estimate, "estimate_source": estimate_source,
+        "kind": kind, "service": service, "role": role,
+        "estimated_usage_pct": estimate, "estimated_usage_windows": per_window,
+        "estimate_source": estimate_source,
         "snapshot_remaining_before": remaining, "snapshot_reading": reading,
         "checkpoint": checkpoint,
+        "advisor_tree_before": tree_before,
         # Automatic in-place resume after a quota stop (finalize schedules it); "off" is the
         # opt-out, carried through every resume of this slice. A resumed run keeps the attempt
         # count and history so a second quota stop schedules attempt n+1, up to AUTO_RESUME_MAX.
@@ -2420,14 +2724,36 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
                         if previous and (previous.get("auto_resume") or {}).get("attempt")
                         else None),
     }
+    if previous and previous.get("advisor_edited"):
+        rec["advisor_edited"] = True
     identity = git_identity_warning(Path(a.dir).resolve())
     if identity:
         rec["git_identity_warning"] = identity
         print(f"acp-dispatch: warning: {identity}", file=sys.stderr)
     if a.dry_run:
         rec["status"] = "dry-run"
-        print(json.dumps(rec, indent=1, sort_keys=True) if a.json else
-              f"dry-run\t{a.name}\t{report}\nbrief: {brief}\ncmd: {rec['cmd']}")
+        rec["reserved_usage_pct"] = reserved
+        rec["reserved_usage_windows"] = reserved_win
+        rec["inflight"] = [p.stem for p in busy]
+        would = None
+        if a.min_headroom > 0 and remaining is not None and remaining < a.min_headroom:
+            would = "headroom"
+        elif not previous and busy and reserved_fit_fails and unreserved_ok:
+            would = "inflight"
+        elif reserved_fit_fails:
+            would = "wont-fit"
+        elif not previous and cap is not None and len(busy) >= cap:
+            would = "inflight"
+        if a.json:
+            if would:
+                rec["would_refuse_class"] = would
+            print(json.dumps(rec, indent=1, sort_keys=True))
+        else:
+            res_note = (f"\nreservation: {reserved:.1f}% across {len(busy)} in-flight "
+                        f"({', '.join(p.stem for p in busy) or 'none'})")
+            print(f"dry-run\t{a.name}\t{report}\nbrief: {brief}\ncmd: {rec['cmd']}{res_note}")
+            if would:
+                print(f"would refuse: class={would}")
         return 0
     write_record(record, rec)
 
@@ -2511,6 +2837,10 @@ def main(argv: list[str] | None = None) -> int:
         elif argv[0] == "reroute":
             sub.add_argument("--agent", required=True)
             sub.add_argument("--model")
+            sub.add_argument("--kind", choices=_routing_policy.KINDS,
+                             help="override the inherited kind (gates still run)")
+            sub.add_argument("--role", choices=("advise", "exec"),
+                             help="frontier only; default advise when kind is frontier")
             sub.add_argument("--timeout", type=int)
             sub.add_argument("--detach", action="store_true")
             sub.add_argument("--no-wait", action="store_true")
@@ -2557,6 +2887,11 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("agent", help="an acp-run agent (acp-run --list)")
     ap.add_argument("--model", help="required except for zcode (optional there since acp-run sets ZCODE_BIN); acp-run <agent> --info lists values")
+    ap.add_argument("--kind", choices=_routing_policy.KINDS,
+                    help="required on a fresh dispatch (route_agent kinds); resume/reroute inherit from the record")
+    ap.add_argument("--role", choices=("advise", "exec"),
+                    help="frontier only: advise (default) or exec (needs ACP_OPERATOR_APPROVED=frontier-exec); "
+                         "ignored for other kinds")
     ap.add_argument("--name", required=True, help="slice name; names every output file")
     ap.add_argument("-p", "--prompt")
     ap.add_argument("-f", "--prompt-file", help="the brief (a file); the footer is appended to a copy")

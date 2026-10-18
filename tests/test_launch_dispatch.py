@@ -48,12 +48,13 @@ class TestLaunchDispatch(unittest.TestCase):
         return json.loads(r.stdout)
 
     def test_headless_launch_goes_through_acp_dispatch(self) -> None:
-        d = self.launch("--model", "m1", "--no-interactive", "-p", "fix it", "--perm", "deny",
-                        "--set", "provider=x")
+        d = self.launch("--model", "m1", "--kind", "frontier", "--no-interactive", "-p", "fix it",
+                        "--perm", "deny", "--set", "provider=x")
         cmd = d["acp_cmd"]
         self.assertEqual(cmd[0], str(DISPATCH))
         self.assertEqual(cmd[1], "codex")
         self.assertIn("--model", cmd)
+        self.assertEqual(cmd[cmd.index("--kind") + 1], "frontier")
         self.assertEqual(cmd[cmd.index("--name") + 1], d["id"])
         self.assertEqual(cmd[cmd.index("--out") + 1], str(Path(d["brief"]).parent))
         self.assertIn("--tee", cmd)
@@ -71,10 +72,19 @@ class TestLaunchDispatch(unittest.TestCase):
         env = dict(os.environ, SESSION_FINDER_STATE=str(self.tmp / "state"), ACP_RUN=str(self.acp_run),
                    ACP_DISPATCH=str(DISPATCH), HERDR_BIN_PATH=str(self.tmp / "no-herdr"))
         r = subprocess.run([sys.executable, "-I", str(LAUNCH), "start", "--agent", "codex", "--cwd", str(self.repo),
-                            "--host", "none", "--dry-run", "--no-interactive", "-p", "x"],
+                            "--host", "none", "--dry-run", "--no-interactive", "--kind", "frontier", "-p", "x"],
                            capture_output=True, text=True, env=env)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("--model is required", r.stderr)
+
+    def test_headless_launch_requires_a_kind(self) -> None:
+        env = dict(os.environ, SESSION_FINDER_STATE=str(self.tmp / "state"), ACP_RUN=str(self.acp_run),
+                   ACP_DISPATCH=str(DISPATCH), HERDR_BIN_PATH=str(self.tmp / "no-herdr"))
+        r = subprocess.run([sys.executable, "-I", str(LAUNCH), "start", "--agent", "codex", "--cwd", str(self.repo),
+                            "--host", "none", "--dry-run", "--no-interactive", "--model", "m1", "-p", "x"],
+                           capture_output=True, text=True, env=env)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--kind is required", r.stderr)
 
     def test_interactive_launch_keeps_plain_acp_run_and_no_footer(self) -> None:
         d = self.launch("--model", "m1", "-p", "talk to me")
@@ -89,7 +99,7 @@ class TestLaunchDispatch(unittest.TestCase):
 
     def test_dispatch_dry_run_of_the_composed_command_appends_the_footer(self) -> None:
         """The command launch.py composes is accepted by acp-dispatch and yields a footer-bearing brief."""
-        d = self.launch("--model", "m1", "--no-interactive", "-p", "fix it")
+        d = self.launch("--model", "m1", "--kind", "frontier", "--no-interactive", "-p", "fix it")
         # launch.py's dry run writes nothing (hcom trial 6d), so lay down the brief a real start would write
         Path(d["brief"]).parent.mkdir(parents=True)
         _ = Path(d["brief"]).write_text("fix it")
@@ -103,6 +113,79 @@ class TestLaunchDispatch(unittest.TestCase):
         self.assertTrue(text.startswith("fix it"))
         self.assertIn("## Delivery contract", text)
         self.assertIn(d["report"], text)
+
+    def test_headless_launch_stores_kind_and_reply_inherits_it(self) -> None:
+        # F2: kind is stored on the launch record; reply passes it through without --kind.
+        state = self.tmp / "state"
+        env = dict(os.environ, SESSION_FINDER_STATE=str(state), ACP_RUN=str(self.acp_run),
+                   ACP_DISPATCH=str(DISPATCH), HERDR_BIN_PATH=str(self.tmp / "no-herdr"))
+        # Real (non-dry-run) start would need acp-dispatch to finish; plant a finished headless launch.
+        lid = "codex-replykind"
+        ldir = state / f"launch-{lid}"
+        ldir.mkdir(parents=True)
+        job = ldir / "jobs" / f"{lid}.json"
+        job.parent.mkdir(parents=True)
+        job.write_text(json.dumps({"kind": "frontier", "agent": "codex", "model": "m1"}))
+        report = ldir / f"{lid}-report.md"
+        report.write_text("STATUS: working\nok\nDONE\n")
+        done = Path(str(report) + ".done")
+        done.write_text("")
+        log = ldir / f"{lid}.jsonl"
+        log.write_text(json.dumps({"t": 1, "kind": "initialize",
+                                   "data": {"agentCapabilities": {"loadSession": True}}}) + "\n"
+                       + json.dumps({"t": 1, "kind": "new_session",
+                                     "data": {"sessionId": "S1"}}) + "\n"
+                       + json.dumps({"t": 2, "kind": "turn", "data": {}}) + "\n"
+                       + json.dumps({"t": 3, "kind": "result", "data": {"exit": 0}}) + "\n")
+        (state / "launches.jsonl").write_text(json.dumps({
+            "id": lid, "ts": 1, "agent": "codex", "cwd": str(self.repo), "name": lid,
+            "model": "m1", "kind": "frontier", "dispatch": True, "exit": 0,
+            "brief": str(ldir / "brief.md"), "report": str(report), "done": str(done),
+            "job": str(job), "log": str(log), "host": {"kind": "none"},
+        }) + "\n")
+        (ldir / "brief.md").write_text("fix it")
+        r = subprocess.run([sys.executable, "-I", str(LAUNCH), "reply", lid, "next",
+                            "--dry-run", "--json"], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        d = json.loads(r.stdout)
+        cmd = d["acp_cmd"]
+        self.assertEqual(cmd[0], str(DISPATCH))
+        self.assertEqual(cmd[cmd.index("--kind") + 1], "frontier")
+
+    def test_reply_recovers_kind_from_job_record(self) -> None:
+        # Pre-change launch: no kind on the launch row; recover from jobs/<id>.json.
+        state = self.tmp / "state"
+        env = dict(os.environ, SESSION_FINDER_STATE=str(state), ACP_RUN=str(self.acp_run),
+                   ACP_DISPATCH=str(DISPATCH), HERDR_BIN_PATH=str(self.tmp / "no-herdr"))
+        lid = "codex-legacykind"
+        ldir = state / f"launch-{lid}"
+        ldir.mkdir(parents=True)
+        job = ldir / "jobs" / f"{lid}.json"
+        job.parent.mkdir(parents=True)
+        job.write_text(json.dumps({"kind": "code", "agent": "codex", "model": "m1"}))
+        report = ldir / f"{lid}-report.md"
+        report.write_text("STATUS: working\nok\nDONE\n")
+        done = Path(str(report) + ".done")
+        done.write_text("")
+        log = ldir / f"{lid}.jsonl"
+        log.write_text(json.dumps({"t": 1, "kind": "initialize",
+                                   "data": {"agentCapabilities": {"loadSession": True}}}) + "\n"
+                       + json.dumps({"t": 1, "kind": "new_session",
+                                     "data": {"sessionId": "S1"}}) + "\n"
+                       + json.dumps({"t": 2, "kind": "turn", "data": {}}) + "\n"
+                       + json.dumps({"t": 3, "kind": "result", "data": {"exit": 0}}) + "\n")
+        (state / "launches.jsonl").write_text(json.dumps({
+            "id": lid, "ts": 1, "agent": "codex", "cwd": str(self.repo), "name": lid,
+            "model": "m1", "dispatch": True, "exit": 0,
+            "brief": str(ldir / "brief.md"), "report": str(report), "done": str(done),
+            "job": str(job), "log": str(log), "host": {"kind": "none"},
+        }) + "\n")
+        (ldir / "brief.md").write_text("fix it")
+        r = subprocess.run([sys.executable, "-I", str(LAUNCH), "reply", lid, "next",
+                            "--dry-run", "--json"], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        cmd = json.loads(r.stdout)["acp_cmd"]
+        self.assertEqual(cmd[cmd.index("--kind") + 1], "code")
 
 
 if __name__ == "__main__":

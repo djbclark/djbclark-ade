@@ -495,7 +495,11 @@ def start(a, brief_text, parent=None):
         # the report starts "BLOCKED:" (launches.jsonl records that exit). --tee keeps the pane live.
         if not a.model:
             die("--model is required for a headless launch (acp-dispatch refuses to run without it)")
-        acp_cmd = [ACP_DISPATCH, agent, "--model", a.model, "--name", lid, "--out", str(ldir), "-C", cwd,
+        if not getattr(a, "kind", None):
+            die("--kind is required for a headless launch (acp-dispatch refuses to run without it; "
+                "route_agent.py plan --kinds … picks agent and model)")
+        acp_cmd = [ACP_DISPATCH, agent, "--model", a.model, "--kind", a.kind, "--name", lid,
+                   "--out", str(ldir), "-C", cwd,
                    "-f", d["brief"], "--timeout", str(a.timeout), "--tee", "--acp-run", ACP_RUN, "--force"]
         if a.perm:
             acp_cmd += ["--perm", a.perm]
@@ -511,7 +515,8 @@ def start(a, brief_text, parent=None):
             acp_cmd += ["--acp-arg=--session-id", f"--acp-arg={d['session_seed']}"]
         for kv in a.set or []:
             acp_cmd += ["--acp-arg=--set", f"--acp-arg={kv}"]
-        d.update(dispatch=True, report=str(ldir / f"{lid}-report.md"), done=str(ldir / f"{lid}-report.md.done"),
+        d.update(dispatch=True, kind=a.kind,
+                 report=str(ldir / f"{lid}-report.md"), done=str(ldir / f"{lid}-report.md.done"),
                  job=str(ldir / "jobs" / f"{lid}.json"), log=str(ldir / f"{lid}.jsonl"))
 
     pane = tab = None
@@ -674,12 +679,21 @@ def _reply(a):
     # tab), in the same mode (interactive or headless) and with the same mark, unless the caller overrides.
     old_host = (old.get("host") or {}).get("kind")
     host = a.host or HOST_OF.get(old_host, "auto")
+    # Headless reply needs --kind (acp-dispatch). Prefer CLI, then the launch record, then the
+    # acp-dispatch job record written for a pre-change launch that stored no kind.
+    kind = getattr(a, "kind", None) or old.get("kind")
+    if not kind and old.get("dispatch") and old.get("job"):
+        try:
+            kind = json.loads(Path(old["job"]).read_text()).get("kind")
+        except (OSError, ValueError, TypeError):
+            kind = None
     ns = argparse.Namespace(agent=old["agent"], cwd=old["cwd"], model=a.model or old.get("model"), name=old.get("name"),
                             resume=resume, interactive=not old.get("dispatch"),
                             host=host, pane=(old.get("host") or {}).get("pane") if host in ("herdr", "auto") else None,
                             timeout=a.timeout, perm=a.perm, set=a.set, dry_run=a.dry_run, json=a.json, prompt=None,
                             prompt_file=None, baton=False, chain=None, files=old.get("files") or [], force=True,
-                            mark=getattr(a, "mark", None) or old.get("mark"))
+                            mark=getattr(a, "mark", None) or old.get("mark"),
+                            kind=kind)
     if ns.pane and not str(ns.pane).startswith("("):
         ag = fleet.herdr_json("agent", "get", ns.pane).get("agent") or {}
         if (ag.get("agent_status") or "idle") not in ("idle", "done"):
@@ -861,6 +875,7 @@ def main():
 
     def common(p, host_default="auto"):
         p.add_argument("--model")
+        p.add_argument("--kind", help="required for --no-interactive (passed to acp-dispatch)")
         p.add_argument("--host", choices=["auto", "herdr", "orca", "none"], default=host_default,
                        help=None if host_default else "default: where the launch being continued ran")
         p.add_argument("--mark", default=default_mark(),

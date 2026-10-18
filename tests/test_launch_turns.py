@@ -87,7 +87,8 @@ class LaunchCase(unittest.TestCase):
 
 class TestDryRun(LaunchCase):
     def test_dry_run_writes_nothing(self) -> None:
-        for extra in (["--agent", "claude", "--model", "m"], ["--agent", "claude", "--model", "m", "--no-interactive"],
+        for extra in (["--agent", "claude", "--model", "m"],
+                      ["--agent", "claude", "--model", "m", "--kind", "judgment", "--no-interactive"],
                       ["--agent", "muse", "--host", "herdr"]):
             host = [] if "--host" in extra else ["--host", "none"]
             r = self.run_launch("start", "--cwd", str(self.repo), "-p", "x", "--dry-run", "--json", *host, *extra)
@@ -206,12 +207,14 @@ class TestReplyInherits(LaunchCase):
         self.assertIn("--resume", d["acp_cmd"])
 
     def test_reply_keeps_a_headless_launch_headless(self) -> None:
-        self.exited("H", dispatch=True, report=str(self.tmp / "H-report.md"), done=str(self.tmp / "H-report.md.done"))
+        self.exited("H", dispatch=True, kind="frontier",
+                    report=str(self.tmp / "H-report.md"), done=str(self.tmp / "H-report.md.done"))
         r = self.run_launch("reply", "H", "next", "--dry-run", "--json")
         self.assertEqual(r.returncode, 0, r.stderr)
         d = json.loads(r.stdout)
         self.assertEqual(d["acp_cmd"][0], str(DISPATCH))
         self.assertEqual(d["host"], {"kind": "none"})
+        self.assertEqual(d["acp_cmd"][d["acp_cmd"].index("--kind") + 1], "frontier")
 
     def test_explicit_host_still_wins(self) -> None:
         self.exited("A")
@@ -222,7 +225,7 @@ class TestReplyInherits(LaunchCase):
 class TestSessionSeed(LaunchCase):
     def test_headless_claude_gets_a_seeded_session_id(self) -> None:
         r = self.run_launch("start", "--agent", "claude", "--cwd", str(self.repo), "--model", "m", "--host", "none",
-                            "--no-interactive", "-p", "x", "--dry-run", "--json")
+                            "--kind", "judgment", "--no-interactive", "-p", "x", "--dry-run", "--json")
         d = json.loads(r.stdout)
         seed = d["session_seed"]
         self.assertEqual(str(uuid.UUID(seed)), seed)
@@ -230,7 +233,8 @@ class TestSessionSeed(LaunchCase):
         self.assertEqual(cmd[cmd.index("--acp-arg=--session-id") + 1], f"--acp-arg={seed}")
 
     def test_interactive_and_non_claude_launches_are_not_seeded(self) -> None:
-        for extra in (["--agent", "claude"], ["--agent", "codex", "--no-interactive"]):
+        for extra in (["--agent", "claude"],
+                      ["--agent", "codex", "--kind", "frontier", "--no-interactive"]):
             r = self.run_launch("start", "--cwd", str(self.repo), "--model", "m", "--host", "none", "-p", "x",
                                 "--dry-run", "--json", *extra)
             d = json.loads(r.stdout)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shlex
 import sys
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -592,7 +593,8 @@ class TestRoutingPolicy2026_10_15(unittest.TestCase):
     def test_codex_frontier_is_the_top_frontier_model(self):
         c = r.route("frontier", quota=IDLE)
         self.assertEqual(c.service.name, "codex")
-        self.assertEqual(c.dispatch, "acp-dispatch codex --model gpt-6-astra --effort high")
+        self.assertEqual(c.dispatch,
+                         "acp-dispatch codex --model gpt-6-astra --effort high --kind frontier")
 
 
 class TestFrontierConservative2026_10_18(unittest.TestCase):
@@ -621,6 +623,13 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
         c = r.route("code", quota=q)
         self.assertEqual(c.service.name, "antigravity-claude")
         self.assertTrue(c.dispatch.startswith("acp-dispatch agy --model claude-opus-5-5"))
+
+    def test_dispatch_quotes_zcode_model_with_backslash(self):
+        # F12: zcode ids contain a backslash; shlex.split must round-trip the model token.
+        svc = next(s for s in r.SERVICES if s.name == "zai")
+        choice = r.Choice(svc, 80.0, 1.0, model=r"builtin:zai-coding-plan\GLM-5.3", kind="code")
+        parts = shlex.split(choice.dispatch)
+        self.assertEqual(parts[parts.index("--model") + 1], r"builtin:zai-coding-plan\GLM-5.3")
 
     def test_plan_json_carries_model_and_dispatch(self):
         rows = r.plan(["judgment", "bulk"], quota=IDLE)
@@ -667,7 +676,7 @@ class TestFableSublimitAndCursorSplit(unittest.TestCase):
         self.assertEqual(q["cursor"]["remaining"], 11.2)
         c = r.route("code", quota=q)
         self.assertEqual(c.service.name, "cursor-auto")
-        self.assertEqual(c.dispatch, "acp-dispatch cursor --model default")
+        self.assertEqual(c.dispatch, "acp-dispatch cursor --model default --kind code")
 
 
 class TestRoutingPolicyToml(unittest.TestCase):

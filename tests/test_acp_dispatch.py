@@ -173,11 +173,22 @@ class Base(unittest.TestCase):
                  env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return self.dispatch_model("m1", *extra, mode=mode, name=name, env=env)
 
+    def default_kind(self, agent: str, model: str) -> str:
+        """Eligible --kind for the common test agents (required since 2026-10-18)."""
+        if agent in ("codex", "claude"):
+            return "frontier" if "fable" in model.lower() or "astra" in model.lower() else (
+                "frontier" if agent == "codex" else "judgment")
+        if agent == "agy" and model.startswith(("claude-", "gpt-")):
+            return "code"
+        return "bulk"
+
     def dispatch_agent(self, agent: str, model: str, *extra: str, mode: str = "writes", name: str = "s1",
                        env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         e = self.base_env(mode, **(env or {}))
+        kind = [] if any(x == "--kind" or str(x).startswith("--kind=") for x in extra) else [
+            "--kind", self.default_kind(agent, model)]
         return run([agent, "--model", model, "--name", name, "-p", "do the thing", "-C", str(self.repo),
-                    "--out", str(self.out), "--acp-run", str(self.fake), *extra], env=e)
+                    "--out", str(self.out), "--acp-run", str(self.fake), *kind, *extra], env=e)
 
     def dispatch_model(self, model: str, *extra: str, mode: str = "writes", name: str = "s1",
                        env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -197,7 +208,8 @@ class Base(unittest.TestCase):
 
 class TestUsage(Base):
     def test_model_is_mandatory(self):
-        r = run(["codex", "--name", "x", "-p", "hi", "--out", str(self.out), "--acp-run", str(self.fake)])
+        r = run(["codex", "--kind", "frontier", "--name", "x", "-p", "hi", "--out", str(self.out),
+                 "--acp-run", str(self.fake)])
         self.assertEqual(r.returncode, 2)
         self.assertIn("--model is required", r.stderr)
 
@@ -413,13 +425,23 @@ class TestFrontierGates(Base):
     """2026-10-18: four gpt-6-astra slices started together emptied codex's 5-hour window and all
     four stopped; Fable at xhigh should almost never run."""
 
-    def running_codex(self) -> Path:
+    def running_codex(self, estimated: float = 60.0) -> Path:
         jobs = self.tmp / "state" / "other-task" / "jobs"
         jobs.mkdir(parents=True)
         rec = jobs / "busy.json"
-        rec.write_text(json.dumps({"name": "busy", "agent": "codex", "model": "m1",
-                                   "status": "running", "pid": os.getpid(), "started": 0}))
+        pid_start = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(os.getpid())], check=False,
+            capture_output=True, text=True).stdout.strip()
+        rec.write_text(json.dumps({"name": "busy", "agent": "codex", "model": "m1", "service": "codex",
+                                   "status": "running", "pid": os.getpid(), "pid_start": pid_start,
+                                   "started": 0, "estimated_usage_pct": estimated}))
         return rec
+
+    def codex_snap(self, remaining: float) -> dict[str, str]:
+        snap = self.tmp / "latest.json"
+        snap.write_text(json.dumps({"collected_at": "2099-01-01T00:00:00+00:00", "snapshot": {"accounts": [{
+            "provider": "codex", "windows": [{"label": "5h", "remaining_percent": remaining}]}]}}))
+        return {"AIUSE_SNAPSHOT": str(snap)}
 
     def test_fable_xhigh_needs_operator_approval(self):
         r = self.dispatch_model("fable-5-1", "--effort", "xhigh", "--no-model-check")
@@ -431,17 +453,22 @@ class TestFrontierGates(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_fable_high_is_not_gated(self):
+        # frontier defaults to advise; no frontier-exec needed
         r = self.dispatch_model("fable-5-1", "--effort", "high", "--no-model-check")
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_second_codex_slice_is_unavailable_while_one_is_in_flight(self):
-        self.running_codex()
-        r = self.dispatch()
+        # Reservation (2026-10-18): 60% in flight + floor 60% estimate vs 70% left → inflight.
+        self.running_codex(60.0)
+        r = self.dispatch(env=self.codex_snap(70.0))
         self.assertEqual(r.returncode, 5, (r.stdout, r.stderr))
         rec = self.record()
         self.assertEqual((rec["status"], rec["unavailable_class"]), ("unavailable", "inflight"))
         self.assertIn("busy", rec["detail"])
-        self.assertEqual(self.dispatch(name="s2", env={"ACP_DISPATCH_INFLIGHT": "codex=2"}).returncode, 0)
+        # Hard-cap override still works when reservation leaves room (--est-pct under the remainder).
+        self.assertEqual(self.dispatch(
+            "--est-pct", "5", name="s2",
+            env={**self.codex_snap(100.0), "ACP_DISPATCH_INFLIGHT": "codex=2"}).returncode, 0)
 
     def test_a_dead_or_finished_codex_record_does_not_count(self):
         rec = self.running_codex()
@@ -450,7 +477,7 @@ class TestFrontierGates(Base):
 
     def test_other_agents_are_not_capped(self):
         self.running_codex()
-        self.assertEqual(self.dispatch_agent("claude", "m1").returncode, 0)
+        self.assertEqual(self.dispatch_agent("claude", "m1", env=self.codex_snap(70.0)).returncode, 0)
 
 
 class TestModelCheck(Base):
@@ -620,7 +647,8 @@ class TestSliceControls(Base):
 
     def test_session_id_is_saved_while_fake_agent_is_running(self):
         import time
-        cmd = [sys.executable, str(SCRIPT), "codex", "--model", "m1", "--name", "s1",
+        cmd = [sys.executable, str(SCRIPT), "codex", "--model", "m1", "--kind", "frontier",
+               "--name", "s1",
                "-C", str(self.repo), "--out", str(self.out), "--acp-run", str(self.fake),
                "--no-model-check", "-p", "work"]
         with subprocess.Popen(cmd, env={**os.environ, **self.base_env("slow")},
@@ -985,7 +1013,7 @@ class TestAiuseNoteExhausted(Base):
                "ACP_DISPATCH_PREFLIGHT": str(self.tmp / "preflight"),
                "PREFLIGHT_COUNT": str(self.tmp / "preflight-count"),
                "AIUSE_SNAPSHOT": str(self.tmp / "missing.json")}
-        result = run(["zcode", "--name", "s1", "-p", "do it", "-C", str(self.repo),
+        result = run(["zcode", "--kind", "bulk", "--name", "s1", "-p", "do it", "-C", str(self.repo),
                       "--out", str(self.out), "--acp-run", str(self.fake)], env=env)
         self.assertEqual(result.returncode, 5)
         self.assertIn("class=quota", result.stdout)

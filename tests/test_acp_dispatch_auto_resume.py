@@ -53,10 +53,12 @@ class AutoResumeBase(Base):
         # A measured, healthy pool, as on the real night: the slice is not a checkpoint slice
         # (an unmeasured pool makes every slice one, and a two-line report then classifies
         # `quota-checkpointed`, exit 5, which test_acp_dispatch covers).
+        # Weekly must stay above the codex estimate floor (60%) × 1.5, or the near-limit
+        # rule forces checkpoint (2026-10-18 dispatch.estimate_floor).
         self.healthy_snap = self.tmp / "healthy.json"
         _ = self.healthy_snap.write_text(json.dumps({"collected_at": "2099-01-01T00:00:00+00:00", "snapshot": {
             "accounts": [{"provider": "codex", "windows": [
-                {"label": "5h", "remaining_percent": 98.0}, {"label": "weekly", "remaining_percent": 80.0}]}]}}))
+                {"label": "5h", "remaining_percent": 98.0}, {"label": "weekly", "remaining_percent": 95.0}]}]}}))
 
     @override
     def base_env(self, mode: str = "writes", **extra: str) -> dict[str, str]:

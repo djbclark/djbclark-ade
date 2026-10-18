@@ -78,6 +78,7 @@ import argparse
 import glob
 import json
 import os
+import shlex
 import shutil
 import statistics
 import subprocess
@@ -395,8 +396,11 @@ def policy_public() -> dict[str, Any]:
         "dispatch": {
             "operator_gated": list(POLICY["dispatch"]["operator_gated"]),
             "fable_gated_efforts": list(POLICY["dispatch"]["fable_gated_efforts"]),
+            "frontier_models": list(POLICY["dispatch"].get("frontier_models") or []),
             "inflight_cap": {str(k): int(v)
-                             for k, v in POLICY["dispatch"]["inflight_cap"].items()},
+                             for k, v in (POLICY["dispatch"].get("inflight_cap") or {}).items()},
+            "estimate_floor": {str(k): float(v)
+                               for k, v in (POLICY["dispatch"].get("estimate_floor") or {}).items()},
             "extra": dict(DISPATCH_EXTRA),
         },
         "hermes": {
@@ -434,8 +438,12 @@ def policy_markdown() -> str:
     lines.append(f"| discovery.operator_gated | {', '.join(sorted(OPERATOR_GATED))} |")
     lines.append(f"| dispatch.operator_gated | {', '.join(d['operator_gated'])} |")
     lines.append(f"| dispatch.fable_gated_efforts | {', '.join(d['fable_gated_efforts'])} |")
-    caps = ", ".join(f"{k}={v}" for k, v in d["inflight_cap"].items())
+    caps = ", ".join(f"{k}={v}" for k, v in (d.get("inflight_cap") or {}).items()) or "(none)"
     lines.append(f"| dispatch.inflight_cap | {caps} |")
+    floors = ", ".join(f"{k}={v}" for k, v in (d.get("estimate_floor") or {}).items()) or "(none)"
+    lines.append(f"| dispatch.estimate_floor | {floors} |")
+    frontiers = ", ".join(d.get("frontier_models") or []) or "(none)"
+    lines.append(f"| dispatch.frontier_models | {frontiers} |")
     lines.append(f"| routing.frontier_per_wave | {FRONTIER_PER_WAVE} |")
     lines.append(f"| routing.fable_min_left | {FABLE_MIN_LEFT} |")
     lines.append(f"| routing.burn_first_min | {BURN_FIRST_MIN} |")
@@ -728,15 +736,21 @@ class Choice:
     why: str = ""
     alternatives: list[str] = field(default_factory=list)
     model: str = ""                 # "<model> [--effort L]" for acp-run
+    kind: str = ""                  # required by acp-dispatch (2026-10-18)
 
     @property
     def dispatch(self) -> str:
         """The acp-dispatch line for this choice (add --name/--task/-C/-f)."""
         agent = self.service.acp_agent
         extra = DISPATCH_EXTRA.get(agent, "")
+        kind = f" --kind {self.kind}" if self.kind else ""
         if self.model:
-            return f"acp-dispatch {agent} --model {self.model}{extra}"
-        return f"acp-dispatch {agent} --model <id from: acp-run {agent} --info>"
+            # Quote only the model id: suggest_model may append " --effort …".
+            # zcode ids contain a backslash (builtin:zai-coding-plan\GLM-5.3).
+            parts = self.model.split(None, 1)
+            model = shlex.quote(parts[0]) + (f" {parts[1]}" if len(parts) > 1 else "")
+            return f"acp-dispatch {agent} --model {model}{extra}{kind}"
+        return f"acp-dispatch {agent} --model <id from: acp-run {agent} --info>{kind}"
 
 
 # DISPATCH_EXTRA comes from [dispatch].extra in config/routing.toml.
@@ -838,7 +852,8 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         why.append(best.note)
     return Choice(best, remaining, best_score, "; ".join(why),
                   [s.name for _, s, _, _ in scored[1:4]],
-                  model=suggest_model(best, kind, quota.get(best.name) or {}))
+                  model=suggest_model(best, kind, quota.get(best.name) or {}),
+                  kind=kind)
 
 
 def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,

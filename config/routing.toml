@@ -85,15 +85,24 @@ operator_gated = ["omp", "hermes", "cline"]
 # Fable at xhigh/max should almost never run (operator 2026-10-18): the same approval gate, keyed
 # ACP_OPERATOR_APPROVED=fable-xhigh. Fable at high is the frontier route_agent.py suggests.
 fable_gated_efforts = ["xhigh", "max"]
-# Most fresh slices one agent may have in flight machine-wide (operator 2026-10-18: four
-# gpt-6-astra slices started together emptied codex's 5-hour window and all four stopped).
-# A resume is never refused: it continues work already paid for. ACP_DISPATCH_INFLIGHT=codex=2
-# overrides per run.
-inflight_cap = { codex = 1 }
+# Substring match on --model (case-insensitive): these only run with --kind frontier
+# (operator 2026-10-18; route-override does not skip this).
+frontier_models = ["gpt-6-astra", "fable"]
+# Optional hard cap per service (or agent name via ACP_DISPATCH_INFLIGHT). Empty on
+# purpose: the in-flight quota reservation replaced `codex = 1` (operator 2026-10-18).
+# ACP_DISPATCH_INFLIGHT=name=N still overrides per run (service or agent name).
+inflight_cap = {}
 # Flags a dispatch line needs for acp-run to accept the model at all. crush:
 # `--model` rewrites the shared data dir's crush.json, so acp-run exits 2 unless
 # the run strips the user config or gets ACP_RUN_CRUSH_DATA (review 2026-10-15).
 extra = { crush = " --acp-arg=--strip-user-config" }
+
+# When there is no measured history, floor the brief-size default (operator 2026-10-18:
+# gpt-6-astra median 65% of codex's 5-hour window across 4 measured slices).
+[dispatch.estimate_floor]
+codex = 60.0
+claude = 8.0
+antigravity-claude = 15.0
 
 [hermes]
 # Hermes names the provider differently from aiuse for the paid pool.

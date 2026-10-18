@@ -93,8 +93,9 @@ class Effort(base.Base):
         r = self.dispatch_agent("zcode", "GLM-5.3-Flash", "--no-model-check", "--dry-run", env=self.env())
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("--model GLM-5.3-Flash", r.stdout)
-        r = base.run(["zcode", "--name", "z", "-p", "hi", "--out", str(self.out), "--acp-run", str(self.fake),
-                      "--dry-run", "-C", str(self.repo)], env=self.base_env("writes", **self.env()))
+        r = base.run(["zcode", "--kind", "bulk", "--name", "z", "-p", "hi", "--out", str(self.out),
+                      "--acp-run", str(self.fake), "--dry-run", "-C", str(self.repo)],
+                     env=self.base_env("writes", **self.env()))
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_resume_keeps_the_flags(self):

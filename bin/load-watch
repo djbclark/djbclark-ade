@@ -314,7 +314,8 @@ def notify(inc, g, top, path, load1, ncpu, dry):
             f"({cmd}); {'told it' if relayed else 'could not reach it (' + (s.get('where') or 'no channel') + ')'};"
             f" brief {path}")
     if not relayed:  # the code-slice pick (route_agent.py plan, 2026-10-18); he runs it after a yes to a Forgejo copy
-        ping += (f"; to hand it to a fixer: ~/src/djbclark-ade/bin/acp-dispatch cursor --model default "
+        ping += (f"; to hand it to a fixer: ~/src/djbclark-ade/bin/acp-dispatch cursor --model default --kind code "
+                 f"--name load-watch-{Path(path).stem} --task load-watch "
                  f"-C {top or s.get('cwd') or HOME} -f {path} --detach --no-wait")
     if not dry and HERMES_PING.exists():
         subprocess.run([str(HERMES_PING), ping], capture_output=True, timeout=60)
