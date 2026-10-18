@@ -27,7 +27,7 @@ Ladders (first provider that returns usable content wins):
           -> jina-reader (r.jina.ai, key if available, else keyless) -> pdf (PDF URLs only:
           curl into a fresh temp dir, then pdftotext) -> crawl4ai (crwl, renders JavaScript;
           skips PDFs) -> firecrawl-mcp (the shared Firecrawl MCP server's firecrawl_scrape:
-          self-hosted, retried by firecrawl-router on the commercial API for bot walls) -> wayback (newest Wayback Machine capture, read raw (id_) from
+          self-hosted only; the commercial fallback is off since 2026-10-18, so a bot-walled page fails this rung) -> wayback (newest Wayback Machine capture, read raw (id_) from
           web.archive.org; CDX API if missing; r.jina.ai only with a Jina key)
 "exa" in --only/--skip means both exa-* rungs, "jina" every jina-* rung, "firecrawl" both
 firecrawl rungs. With no Exa key the
