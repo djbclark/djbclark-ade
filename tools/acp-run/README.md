@@ -604,7 +604,9 @@ google-antigravity/antigravity-cli#1168, pingdotgg/t3code#16489. If
 `antigravity-acp` and dl.google.com; agy CLI 1.3.3 ships no newer ACP
 server). Since 2026-10-17 acp-run runs the newest version dir under
 `~/.local/share/agy-acp-server/` instead of a hard-coded 1.3.0, and agy is kept at the
-registry's latest (1.4.1 that day; on Linux the registry adds `--uid=`). The 1.3.0 notes
+registry's latest (1.4.1 that day; on Linux the registry adds `--uid=`). Checked again 2026-10-18:
+agy CLI 1.4.2 (Homebrew) still runs server 1.4.1, the newest published (the registry lists 1.4.1;
+dl.google.com answers 404 for 1.4.2, 1.4.3 and 1.5.0). The 1.3.0 notes
 in this file are as tested then. The alternatives and why not:
 
 1. simonepri/refined-antigravity-acp 1.4.2 wraps the same binary, so it
