@@ -553,7 +553,10 @@ def test_plist_shape():
         plist = plistlib.load(f)
     assert plist["Label"] == night.LABEL
     assert plist["StartCalendarInterval"] == {"Hour": 3, "Minute": 30}
-    assert plist["ProgramArguments"] == [str(ROOT / "bin" / "skillopt-night")]
+    # The plist names the installed checkout (~/src/djbclark-ade), not whichever worktree runs this test
+    # (2026-10-18: comparing with ROOT failed in every worktree).
+    (prog,) = plist["ProgramArguments"]
+    assert prog.startswith("/") and prog.endswith("/djbclark-ade/bin/skillopt-night")
     assert plist["EnvironmentVariables"]["PATH"].split(":")[0].endswith("/.local/bin")
     assert plist["RunAtLoad"] is False
 
