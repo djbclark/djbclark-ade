@@ -1,6 +1,6 @@
 # Fallback-chain snapshot
 
-Verified 2026-10-10 against the live sources in SKILL.md, including the safe pass later that day. Re-read those sources before using this file. If they differ, update this file in the same turn.
+Verified 2026-10-17 against the live sources in SKILL.md. Re-read those sources before using this file. If they differ, update this file in the same turn.
 
 No hop has a separate version field. The model id is the version. Effort and thinking are listed only where a config or source field sets them. The only global effort knob is `agent.reasoning_effort: medium`.
 
@@ -12,10 +12,9 @@ Source: `~/.hermes/config.yaml`. An unpinned session walks this when the primary
 |---|---|---|---|---|
 | a1. Primary | cline2 | `big-pickle` | medium (global) | not set |
 | a2. Fallback 1 | cline2 | `cline2-pass/deepseek-v4-flash` | not set | not set |
-| a3. Fallback 2 | opencode-go | `deepseek-v4-pro` | not set | not set |
-| a4. Fallback 3 | openai-codex | `gpt-5.5` | not set | not set |
+| a3. Fallback 2 | openai-codex | `gpt-5.5` | not set | not set |
 
-a5. `grok-sub` / `xai-oauth` is absent from this list. A comment in that file says it was removed on 2026-10-06. That comment is stale relative to cron and session pins, which do use xAI.
+a4. `grok-sub` / `xai-oauth` is absent from this list. A comment in that file says it was removed on 2026-10-06. That comment is stale relative to cron and session pins, which do use xAI.
 
 ## b. This class of session pins
 
@@ -27,7 +26,7 @@ A `/model` pin changes the primary. It is not the cron/`delegate_task` rule that
 | b2. Gateway sessions | 82 | xai-oauth | `grok-4.6` | not set | not set |
 | b3. Gateway sessions | 1 | xai-oauth | `grok-4.7` | not set | not set |
 | b4. Gateway sessions | 1 | cline2 | `cline2-pass/deepseek-v4-flash` | not set | not set |
-| b5. Gateway sessions with no override | 11 | follow a1–a4 | | | |
+| b5. Gateway sessions with no override | 11 | follow a1–a3 | | | |
 
 b6. No Hermes profiles exist (`~/.hermes/profiles` absent), so there is no second profile chain.
 
@@ -37,7 +36,7 @@ Fleet default, used only by unpinned agent jobs: vendor `xai-oauth`, model `grok
 
 | Job | State | Chain |
 |---|---|---|
-| c1. Gmail index twice-daily summary | enabled, unpinned | `xai-oauth` / `grok-4.7`, then a2–a4 |
+| c1. Gmail index twice-daily summary | enabled, unpinned | `xai-oauth` / `grok-4.7`, then a2–a3 |
 | c2. Shizuku forks utilities add-ons Newsletter | enabled, unpinned | same as c1 |
 | c3. memory-curator-decision-reminder | enabled, pinned | `cline2` / `cline2-pass/deepseek-v4-flash` only |
 | c4. Memory curator (daily) | enabled, pinned | same as c3 |
@@ -50,7 +49,7 @@ The other 30 cron jobs are `no_agent` scripts. They do not call a model. On 2026
 
 d1. Compression is pinned to `cline2` / `cline2-pass/deepseek-v4-flash`, timeout 300. There is no `auxiliary.compression.fallback_chain`. A stall skips the model and uses the deterministic summary. No other auxiliary task is configured.
 
-d2. MoA is off the picker. `moa.presets.default.enabled` is false, which is the flag Hermes reads. The unrecognized top-level `moa.enabled` key was removed on 2026-10-10. `default_preset` is still `free-advice`, and that preset does not exist. That is harmless while no preset is enabled. Interactive `model.provider` is `cline2`, not `moa`. An explicit `/moa` still runs the saved aggregator (`opencode-go` / `kimi-k3`) and skips reference models.
+d2. MoA is off the picker. `moa.presets.default.enabled` is false, which is the flag Hermes reads. `default_preset` is still `free-advice`, and that preset does not exist, so Hermes resolves `default`. That is harmless while no preset is enabled. Interactive `model.provider` is `cline2`, not `moa`. An explicit `/moa` runs preset `default`: reference and aggregator are both `openai-codex` / `gpt-5.5`. The dead `opencode-go` / `kimi-k3` aggregator was removed on 2026-10-17. MoA stayed off: `litellm-local` / `clinepass-deepseek` fell through to reserve `grok-sub`, direct `cline2` returned HTTP 402, and `openai-codex` / `gpt-5.5` returned a model-entitlement rejection. Do not point this aggregator at `grok` or `copilot`; those are reserve pools.
 
 d3. There is no `delegation` block. An unpinned `delegate_task` child inherits the parent's chain. A child given its own provider or model does not. Source: `scoped_fallback_chain`.
 
@@ -66,10 +65,6 @@ Alias to model. Vendor is the model prefix or the API host. No secrets. Only `go
 | clinepass-minimax-m3 | clinepass | `minimax-m3` |
 | clinepass-kimi-k3 | clinepass | `kimi-k3` |
 | grok-sub | xai-oauth, via the local proxy | `grok-4.20-0309-non-reasoning` |
-| go-kimi | opencode-go | `kimi-k3` |
-| go-deepseek-pro | opencode-go | `deepseek-v4-pro` |
-| go-deepseek-flash | opencode-go | `deepseek-v4-flash` |
-| go-glm-flash | opencode-go | `glm-5.3-flash` |
 | gemini-free | gemini | `gemini-3.7-flash` |
 | gemini-free-lite | gemini | `gemini-3.1-flash-lite` |
 
