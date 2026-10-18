@@ -391,8 +391,8 @@ class TestWaiter(AutoResumeBase):
     def test_rearm_command_text_is_unchanged(self):
         self.dispatch("--no-auto-resume", mode="quota_codex_date")
         rearm = self.record()["rearm"]
-        self.assertIn(" wait ", rearm)
-        self.assertIn(" check ", rearm)
+        self.assertIn("acp-dispatch-wait", rearm)
+        self.assertIn("jobs/s1.json", rearm)
         r = subprocess.run(["bash", "-c", rearm], check=False, capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 3, (r.stdout, r.stderr))
 

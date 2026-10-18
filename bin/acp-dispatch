@@ -27,10 +27,18 @@
                   never straight to the top; agent/model from route_agent's top route)
     acp-dispatch auto-resume RECORD --attempt N          (internal) what the scheduled resume
                                                          runner calls after a quota stop
-    acp-dispatch reap [RECORD|DIR]... [--quiet]          finalize every unfinished record whose
+    acp-dispatch wait RECORD [--once]                     block until the record is finalized
+                                                         (reaped first if its process died);
+                                                         --once runs a single pass and exits 0
+                                                         finished, 75 still running, 124 timed out
+    acp-dispatch reap [RECORD|DIR]... [--quiet] [--force] finalize every unfinished record whose
                                                          process is gone, and re-submit a
                                                          scheduled auto-resume a reboot removed
-                                                         (idempotent, any time)
+                                                         (idempotent, any time; a dir sweep runs
+                                                         at most once per 60 s — the stamp in
+                                                         ~/.local/state/acp-dispatch/reap.stamp,
+                                                         ACP_DISPATCH_REAP_MIN_INTERVAL, 0 off;
+                                                         --force or one .json record skips it)
     acp-dispatch reap --install | --uninstall            the launchd sweep (RunAtLoad + every 30 min)
 
 What it replaces: the dispatch recipe that bigteam, model-routing and home-agents.md used to
@@ -209,6 +217,15 @@ answer each message with `REPLY N:` in `<record>.replies.md` (a separate file, s
 writes never race the lead's appends); `check` appends `inbox: N sent, M answered`, and
 `resume` carries every unanswered message into the next prompt.
 
+The rearm waiter is cheap (2026-10-18): `rearm_cmd` prints one call to bin/acp-dispatch-wait,
+which holds only bash, sleep and grep while the slice runs — a resident Python `wait` per waiting
+lead was 13-32 MB of RSS each, and 26 of them (306 MB) were the biggest Python cost on the machine
+during the load-60-90 memory stall. Every 10 s it checks the `.done` marker or `"finished":` set
+in the record JSON; every 60 s, and the moment that check trips, it runs `wait --once RECORD`
+(one pass: 0 finished, 75 EX_TEMPFAIL still running, 124 timed out), looping on 75 and ending in
+`acp-dispatch check RECORD` with its exit code. route_agent is imported lazily (load_policy), so
+wait, reap, check, footer, extend and finalize invocations pay nothing for the routing module.
+
 Exit codes (dispatch and check):
     0    report delivered and ends in DONE (dispatch: and acp-run exited 0)
     1    report present but unfinished (no DONE), or delivered with a non-zero acp-run exit;
@@ -318,32 +335,72 @@ MODEL_OPTIONAL_AGENTS = {"zcode"}
 # delegation target) need ACP_OPERATOR_APPROVED=<agent>; acp-run applies the same gate.
 # cline (operator 2026-10-17): uninstalled, left in place for a deliberate re-enable; Hermes
 # keeps its own ClinePass API pool.
-# Values from config/routing.toml [dispatch] (via route_agent.POLICY).
-_bindir = str(Path(__file__).resolve().parent)
-if _bindir not in sys.path:
-    sys.path.insert(0, _bindir)
-import route_agent as _routing_policy  # noqa: E402
-OPERATOR_GATED = set(_routing_policy.POLICY["dispatch"]["operator_gated"])
+# Values from config/routing.toml [dispatch] (via route_agent.POLICY), filled in place by
+# load_policy() on first routing use (2026-10-18). They used to be derived at import, so every
+# invocation paid for route_agent and its config parse even when it never routed — a trivial
+# `reap` or `wait` included; one caller's 5 s reap poll built a load of 110 on its own.
+OPERATOR_GATED: set[str] = set()
 # Fable at xhigh/max should almost never run (operator 2026-10-18): the same approval gate, keyed
 # ACP_OPERATOR_APPROVED=fable-xhigh. Fable at high is the frontier route_agent.py suggests.
-FABLE_GATED_EFFORTS = set(_routing_policy.POLICY["dispatch"]["fable_gated_efforts"])
+FABLE_GATED_EFFORTS: set[str] = set()
 # Optional hard cap per service (empty since the reservation replaced `codex = 1`,
 # operator 2026-10-18). ACP_DISPATCH_INFLIGHT=name=N overrides (service or agent name).
 # A resume is never refused by the reservation or this cap: it continues paid work.
-INFLIGHT_CAP = {k: int(v) for k, v in (_routing_policy.POLICY["dispatch"].get("inflight_cap") or {}).items()}
+INFLIGHT_CAP: dict[str, int] = {}
+FRONTIER_MODELS: list[str] = []
+ESTIMATE_FLOOR: dict[str, float] = {}
 INFLIGHT_SPAWN_GRACE = 10 * 60           # a running record whose pid is not written yet counts this long
-FRONTIER_MODELS = [str(x).lower() for x in
-                   (_routing_policy.POLICY["dispatch"].get("frontier_models") or [])]
-ESTIMATE_FLOOR = {str(k): float(v) for k, v in
-                  (_routing_policy.POLICY["dispatch"].get("estimate_floor") or {}).items()}
+_routing_module = None
+
+
+def load_policy():
+    """Import route_agent once, on first routing use, and fill the [dispatch]-derived constants
+    above in place (mutated, not rebound, so their consumers read them as plain globals). Module
+    import stays free of it so the cheap subcommands — reap, wait, check, footer, extend,
+    finalize — never pay for the routing module and its config parse (2026-10-18)."""
+    global _routing_module
+    if _routing_module is None:
+        bindir = str(Path(__file__).resolve().parent)
+        if bindir not in sys.path:
+            sys.path.insert(0, bindir)
+        import route_agent
+        _routing_module = route_agent
+    d = _routing_module.POLICY["dispatch"]
+    OPERATOR_GATED.clear()
+    OPERATOR_GATED.update(d["operator_gated"])
+    FABLE_GATED_EFFORTS.clear()
+    FABLE_GATED_EFFORTS.update(d["fable_gated_efforts"])
+    INFLIGHT_CAP.clear()
+    INFLIGHT_CAP.update({k: int(v) for k, v in (d.get("inflight_cap") or {}).items()})
+    FRONTIER_MODELS[:] = [str(x).lower() for x in (d.get("frontier_models") or [])]
+    ESTIMATE_FLOOR.clear()
+    ESTIMATE_FLOOR.update({str(k): float(v) for k, v in (d.get("estimate_floor") or {}).items()})
+    return _routing_module
+
+
+class _RoutingPolicy:
+    """route_agent behind first attribute use (a module's own globals do not get PEP 562
+    __getattr__), so `_routing_policy.KINDS` in the parsers imports nothing until a
+    dispatch-shaped invocation needs the choices."""
+
+    def __getattr__(self, name: str):
+        return getattr(load_policy(), name)
+
+
+_routing_policy = _RoutingPolicy()
+
+
 # A quota reset further out than this is not waited for (operator 2026-10-18, 6.5a): agy's
 # weekly cap resets ~148 h out and resume_unsupported() already says that session may not even
 # reopen, and a 5-day codex weekly stop has no business sitting in a launchd job either. finalize
-# skips the schedule and `check` points at a reroute. [dispatch].auto_resume_max_wait_hours;
-# ACP_DISPATCH_MAX_WAIT_HOURS overrides (tests reuse fixtures whose resets are years out).
-AUTO_RESUME_MAX_WAIT_HOURS = float(
-    os.environ.get("ACP_DISPATCH_MAX_WAIT_HOURS")
-    or (_routing_policy.POLICY["dispatch"].get("auto_resume_max_wait_hours") or 6))
+# skips the schedule and `check` points at a reroute. [dispatch].auto_resume_max_wait_hours,
+# read at call time so the cheap subcommands stay import-free; ACP_DISPATCH_MAX_WAIT_HOURS
+# overrides (tests reuse fixtures whose resets are years out).
+def auto_resume_max_wait_hours() -> float:
+    return float(os.environ.get("ACP_DISPATCH_MAX_WAIT_HOURS")
+                 or (load_policy().POLICY["dispatch"].get("auto_resume_max_wait_hours") or 6))
+
+
 # pmset wake scheduling for an auto-resume (2026-10-18, 6.6): wake the Mac this long before the
 # launchd job fires, so a sleeping machine does not delay the resume past the reset.
 WAKE_LEAD_SECONDS = 120
@@ -371,6 +428,12 @@ SIGNAL_GRACE = 25                        # seconds after TERM is forwarded to ac
 FINALIZE_WAIT = int(os.environ.get("ACP_DISPATCH_FINALIZE_WAIT", "120"))  # resume waits this long for finalize
 REAP_LABEL = "com.djbclark.acp-dispatch-reap"
 REAP_PLIST = HERE.parent / "launchd" / f"{REAP_LABEL}.plist"
+# The sweep throttle (2026-10-18): one caller put `acp-dispatch reap DIR` in a 5 s poll and
+# pushed the machine to load 110. A sweep younger than this many seconds exits 0 at once
+# (0 disables). ACP_DISPATCH_REAP_STAMP overrides the stamp's path (tests).
+REAP_MIN_INTERVAL = float(os.environ.get("ACP_DISPATCH_REAP_MIN_INTERVAL", "60"))
+REAP_STAMP = Path(os.environ.get(
+    "ACP_DISPATCH_REAP_STAMP", str(Path.home() / ".local/state/acp-dispatch/reap.stamp")))
 AUTO_RESUME_TEXT = (
     "The previous turn was stopped by the provider's usage limit, not by anything you did, and the "
     "limit has reset. Continue the brief from where you left off in this same session: do not redo "
@@ -1073,6 +1136,28 @@ def resubmit_auto_resume(path: Path) -> tuple[str, str] | None:
                                f"{'not_before passed: runs now, headroom-gated' if late else 'not_before ' + str(ar.get('not_before_iso', '?'))})")
 
 
+def reap_throttled(items: list[str], force: bool = False) -> bool:
+    """True when this sweep should exit 0 before reading any record: the machine-wide stamp is
+    younger than ACP_DISPATCH_REAP_MIN_INTERVAL seconds. --force and a sweep naming one .json
+    record are never throttled; a sweep that runs touches the stamp (2026-10-18, so no caller
+    can make `reap` expensive again however tightly it polls)."""
+    if force or REAP_MIN_INTERVAL <= 0:
+        return False
+    if len(items) == 1 and Path(items[0]).expanduser().suffix == ".json":
+        return False
+    try:
+        if time.time() - REAP_STAMP.stat().st_mtime < REAP_MIN_INTERVAL:
+            return True
+    except OSError:
+        pass                                    # no stamp yet: this is the first sweep
+    try:
+        REAP_STAMP.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic(REAP_STAMP, f"{time.time()}\n")
+    except OSError:
+        pass                                    # an unwritable stamp must never break reap
+    return False
+
+
 def reap_items(items: list[str], quiet: bool = False) -> int:
     """`acp-dispatch reap`: safe any time; prints one line per record it finalized and one per
     auto-resume it re-submitted to launchd; exit 0."""
@@ -1115,17 +1200,21 @@ def reap_install(uninstall: bool = False) -> int:
 
 
 def rearm_cmd(done: Path, record: Path | None = None, seconds: int = 1800) -> str:
-    """The waiter a lead runs (in the background) for a detached slice. Record waiters follow
-    the mutable wait_timeout; bare markers use seconds (0 is unlimited, 2026-10-11).
-    The default remains --timeout + --wrapup-grace + 300. It exits 124 on timeout;
-    once .done appears it runs `check` on the record, so a partial, no-report or BLOCKED slice
-    exits non-zero and prints its verdict (2026-10-10: a quota death exited the old waiter 0)."""
+    """The waiter a lead runs (in the background) for a detached slice. A record waiter is one
+    line calling bin/acp-dispatch-wait (2026-10-18), which holds only bash, sleep and grep while
+    the slice runs — a resident Python `wait` per waiting lead was 13-32 MB of RSS each, 306 MB
+    across 26 waiters during the 2026-10-18 load stall on this 16 GB Mac — and runs a real
+    `wait --once` pass every 60 s and the moment its cheap check trips. It follows the record's
+    mutable wait_timeout (`extend` moves it), loops on wait --once's 75 (still running) and ends
+    in `acp-dispatch check RECORD`: 0 done, 1 partial, 3 no-report, 4 BLOCKED, 124 timed out
+    (2026-10-10: a quota death used to exit the old waiter 0). Bare markers keep the bounded
+    `until [ -e ]` shape; seconds 0 is unlimited (2026-10-11)."""
     wait = (f"timeout {seconds} " if seconds else "") + "bash -c " + shlex.quote(
         f"until [ -e {shlex.quote(str(done))} ]; do sleep 10; done")
     if record is None:
         return wait
-    wait = f"{shlex.quote(str(Path(__file__).resolve()))} wait {shlex.quote(str(record))}"
-    return f"{wait} && {shlex.quote(str(Path(__file__).resolve()))} check {shlex.quote(str(record))}"
+    helper = Path(__file__).resolve().with_name("acp-dispatch-wait")
+    return f"{shlex.quote(str(helper))} {shlex.quote(str(record))} {shlex.quote(str(done))}"
 
 
 def session_info(rec: dict) -> tuple[str | None, bool | None]:
@@ -1170,43 +1259,67 @@ def applied_model(rec: dict) -> str | None:
     return model
 
 
+# `wait --once` (2026-10-18): the cheap rearm waiter's probe. EX_TEMPFAIL, like cron's temporary
+# failure, so the shell loop can tell "still running" from every terminal outcome.
+WAIT_RUNNING_EXIT = 75
+
+
+def note_wait_state(record: Path, rec: dict, **fields) -> dict:
+    """Persist a wait-notice marker under the record's lock. The record unchanged when it cannot
+    be written (the notice may then repeat; never block the wait on it)."""
+    try:
+        return update_record(record, **fields)
+    except (OSError, ValueError):
+        return rec
+
+
+def wait_once(record: Path) -> int:
+    """One pass of wait_record's loop, no sleep (2026-10-18): 0 the record is finished (a dead
+    slice is reaped here first and counts as finished), 124 past its wait_timeout with no
+    pending auto-resume, WAIT_RUNNING_EXIT (75) still running. The stale-checkpoint and
+    auto-resume notices keep their side effects and print once per distinct state:
+    wait_stale_warned / wait_resume_noted persist in the record, so repeated single passes
+    behave exactly like the old resident loop's locals."""
+    rec = json.loads(record.read_text())
+    if dead_reason(rec):
+        reap_record(record)          # the finished check below sees the record it wrote
+        rec = json.loads(record.read_text())
+    ar = rec.get("auto_resume") or {}
+    if rec.get("finished"):
+        # Finalized (not merely `.done`: the agent touches that itself while acp-run and
+        # finalize still run, so `wait && resume` used to race finalize; 2026-10-18).
+        if ar.get("state") not in AUTO_RESUME_PENDING or rec.get("closed"):
+            return 0
+        # A quota stop with an in-place resume scheduled is not the end (2026-10-18): wait
+        # through the reset, the headroom gate and the resumed run, bounded.
+        if time.time() > float(ar.get("not_before") or 0) + AUTO_RESUME_GATE_TRIES * AUTO_RESUME_GATE_POLL + 900:
+            return 124
+        if rec.get("wait_resume_noted") != ar.get("attempt"):
+            print(f"acp-dispatch: {rec['name']}: {auto_resume_detail(ar)}", file=sys.stderr)
+            rec = note_wait_state(record, rec, wait_resume_noted=ar.get("attempt"))
+        return WAIT_RUNNING_EXIT
+    now = time.time()
+    seconds = rec.get("wait_timeout", 0)
+    if seconds and now > rec["started"] + seconds:
+        return 124
+    stale_msg = checkpoint_stale_detail(rec, now)
+    if stale_msg:
+        rec = note_checkpoint_stale_seen(record, rec)
+        ref = checkpoint_stale_ref(rec)
+        if rec.get("wait_stale_warned") != ref:
+            print(stale_msg, file=sys.stderr)
+            note_wait_state(record, rec, wait_stale_warned=ref)
+    elif rec.get("wait_stale_warned") is not None:
+        note_wait_state(record, rec, wait_stale_warned=None)   # a fresh stale episode warns again
+    return WAIT_RUNNING_EXIT
+
+
 def wait_record(record: Path) -> int:
     # Re-read the limit: an already-armed waiter follows extend (2026-10-11).
-    stale_warned_ref: float | None = None
-    resume_noted: int | None = None
     while True:
-        rec = json.loads(record.read_text())
-        ar = rec.get("auto_resume") or {}
-        if rec.get("finished"):
-            # Finalized (not merely `.done`: the agent touches that itself while acp-run and
-            # finalize still run, so `wait && resume` used to race finalize; 2026-10-18).
-            if ar.get("state") not in AUTO_RESUME_PENDING or rec.get("closed"):
-                return 0
-            # A quota stop with an in-place resume scheduled is not the end (2026-10-18): wait
-            # through the reset, the headroom gate and the resumed run, bounded.
-            if time.time() > float(ar.get("not_before") or 0) + AUTO_RESUME_GATE_TRIES * AUTO_RESUME_GATE_POLL + 900:
-                return 124
-            if resume_noted != ar.get("attempt"):
-                print(f"acp-dispatch: {rec['name']}: {auto_resume_detail(ar)}", file=sys.stderr)
-                resume_noted = ar.get("attempt")
-            time.sleep(5)
-            continue
-        if dead_reason(rec):
-            reap_record(record)      # the next pass sees it finished and returns at once
-            continue
-        now = time.time()
-        seconds = rec.get("wait_timeout", 0)
-        if seconds and now > rec["started"] + seconds:
-            return 124
-        stale_msg = checkpoint_stale_detail(rec, now)
-        if stale_msg:
-            rec = note_checkpoint_stale_seen(record, rec)
-            ref = checkpoint_stale_ref(rec)
-            if stale_warned_ref != ref:
-                print(stale_msg, file=sys.stderr)
-                stale_warned_ref = ref
-        else:
-            stale_warned_ref = None
+        rc = wait_once(record)
+        if rc != WAIT_RUNNING_EXIT:
+            return rc
         time.sleep(5)
 
 
@@ -1993,13 +2106,13 @@ def schedule_auto_resume(record_path: Path, rec: dict, stderr_text: str) -> None
     source = "stderr"
     if when is None:
         when, source = aiuse_reset_time(rec.get("agent", ""), rec.get("model")), "aiuse"
-    if when is not None and when - now > timedelta(hours=AUTO_RESUME_MAX_WAIT_HOURS):
+    if when is not None and when - now > timedelta(hours=(max_wait := auto_resume_max_wait_hours())):
         # 2026-10-18, 6.5a: a reset days out (agy's weekly cap ~148 h, codex's 5-day weekly) must
         # not sit in launchd waiting — resume_unsupported() already says an agy Claude session
         # may not even reopen. Any agent, not just agy. The back-off guess below is never subject
         # to this: it is 30 minutes, and it is not a reset.
         off("skipped", f"reset {when.isoformat(timespec='minutes')} is more than "
-                       f"{AUTO_RESUME_MAX_WAIT_HOURS:g} h away; reroute instead of waiting")
+                       f"{max_wait:g} h away; reroute instead of waiting")
         rec["auto_resume"]["far_reset"] = True
         return
     if when is None:
@@ -2940,6 +3053,7 @@ def reroute_record(a: argparse.Namespace) -> int:
 
 
 def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
+    load_policy()   # the [dispatch]-derived gates below are lazy since 2026-10-18
     if a.timeout < 0 or (a.wait_timeout is not None and a.wait_timeout < 0):
         die("timeouts must be 0 or more")
     approved = approved_tokens()
@@ -3277,6 +3391,8 @@ def main(argv: list[str] | None = None) -> int:
         sub = argparse.ArgumentParser(prog="acp-dispatch reap")
         sub.add_argument("items", nargs="*", metavar="RECORD|DIR")
         sub.add_argument("--quiet", action="store_true")
+        sub.add_argument("--force", action="store_true",
+                         help="sweep even when the machine-wide stamp is inside the minimum interval")
         sub.add_argument("--install", action="store_true", help="install the launchd sweep (RunAtLoad, every 30 min)")
         sub.add_argument("--uninstall", action="store_true")
         s = sub.parse_args(argv[1:])
@@ -3284,10 +3400,16 @@ def main(argv: list[str] | None = None) -> int:
             return reap_install(uninstall=s.uninstall)
         if not s.items:
             die("give a record, a jobs/ dir or a task dir (e.g. ~/.local/state/bigteam)")
+        if reap_throttled(s.items, s.force):
+            return 0                        # a sweep ran inside the minimum interval (2026-10-18)
         return reap_items(s.items, s.quiet)
     if argv and argv[0] in ("extend", "resume", "reroute", "wait", "execute", "auto-resume", "tell"):
         sub = argparse.ArgumentParser(prog=f"acp-dispatch {argv[0]}")
         sub.add_argument("record")
+        if argv[0] == "wait":
+            sub.add_argument("--once", action="store_true",
+                             help="one pass, no sleep: 0 finished, 75 still running, 124 timed out "
+                                  "(the cheap rearm waiter's probe)")
         if argv[0] == "extend":
             sub.add_argument("seconds", type=int)
         elif argv[0] == "auto-resume":
@@ -3339,6 +3461,8 @@ def main(argv: list[str] | None = None) -> int:
             return auto_resume_record(Path(s.record), s.attempt)
         if argv[0] == "tell":
             return tell_record(s)
+        if argv[0] == "wait" and s.once:
+            return wait_once(Path(s.record))
         return wait_record(Path(s.record))
     if argv and argv[0] in ("footer", "check", "finalize"):
         sub = argparse.ArgumentParser(prog=f"acp-dispatch {argv[0]}")

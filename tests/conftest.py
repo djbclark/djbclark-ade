@@ -21,3 +21,7 @@ os.environ.setdefault("ACP_DISPATCH_NO_GATE", "1")
 # leave a real launchd job behind: test_acp_dispatch.py gives finalize a fake launchctl that
 # records its arguments; anything else gets a no-op.
 os.environ.setdefault("ACP_DISPATCH_LAUNCHCTL", "/usr/bin/true")
+# `reap` throttles dir sweeps younger than 60 s through a machine-wide stamp (2026-10-18).
+# Off in tests: dir sweeps must always run and must never touch the real machine's stamp;
+# test_acp_dispatch_waiter.py turns the throttle on explicitly per test.
+os.environ.setdefault("ACP_DISPATCH_REAP_MIN_INTERVAL", "0")

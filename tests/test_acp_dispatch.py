@@ -261,7 +261,8 @@ class TestDispatch(Base):
         self.assertEqual(rec["exit"], 0)
         self.assertEqual(rec["report_source"], "agent")
         self.assertTrue(Path(rec["done"]).exists())
-        self.assertIn(" wait ", rec["rearm"])
+        self.assertIn("acp-dispatch-wait", rec["rearm"])
+        self.assertIn(str((self.out / "jobs" / "s1.json").resolve()), rec["rearm"])
         self.assertIn("--model m1", rec["cmd"])
         self.assertIn("--perm all", rec["cmd"])
         self.assertIn("--timeout 2400", rec["cmd"])
@@ -605,7 +606,7 @@ class TestFailureNote(Base):
             # --no-auto-resume: with the automatic resume on, the waiter would wait through it
             self.dispatch("--no-auto-resume", mode=mode, name=mode.replace("_", "-"))
             rearm = self.record(mode.replace("_", "-"))["rearm"]
-            self.assertIn(" check ", rearm)
+            self.assertIn("acp-dispatch-wait", rearm)   # ends in `check` inside the helper (2026-10-18)
             r = subprocess.run(["bash", "-c", rearm], check=False, capture_output=True, text=True)
             self.assertEqual(r.returncode, want, (mode, r.stdout, r.stderr))
 
