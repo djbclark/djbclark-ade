@@ -36,8 +36,8 @@ quoting a chain, and update its snapshot if you change one.
 > everyday work goes to the other pools (agy Claude/GPT, Cursor Auto, zai
 > GLM-5.3, opencode-go, agy Gemini, crush/SIPB) at the minimum spec that does
 > it well, proactively through `/bigteam` and minimum-spec sub-agents; (4)
-> **grok and copilot are reserves** with a hard floor of 60% left (GrokBot and
-> GitHub-side Copilot review run on them; copilot read 100% used that day);
+> **grok and copilot are reserves** (**grok released 2026-10-18**: GrokBot moved to its own Cursor pool, so grok is an ordinary subscription pool and copilot the only reserve) with a hard floor of 60% left (GrokBot and
+> GitHub-side Copilot review ran on them; copilot read 100% used that day);
 > after an adversarial review the same day, only an explicit kind reaches
 > them (`github` for copilot, `realtime-web` for grok), a stale or missing
 > reading fails closed, `acp-dispatch claude` is judgment-only (Fable xhigh;

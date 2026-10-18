@@ -4,9 +4,10 @@
 # 2026-10-15 to the operator's routing policy and narrowed 2026-10-18: Claude
 # Fable 5.1 and codex's top frontier model (gpt-6-astra today) are reached
 # only through the `frontier` kind, one slice per pool per wave; judgment is
-# Opus 5.5 at high; everyday work goes to the OTHER pools; grok and
-# copilot are reserves with a hard floor (GrokBot and GitHub-side Copilot
-# review run on them); hermes is never a target; omp is operator-gated.
+# Opus 5.5 at high; everyday work goes to the OTHER pools; copilot is the one
+# reserve, with a hard floor (GitHub-side Copilot review runs on it; grok is an
+# ordinary pool since 2026-10-18, when GrokBot moved to its own Cursor pool);
+# hermes is never a target; omp is operator-gated.
 # `models` is the acp-run `--model [--effort L]` suggestion per kind; `agent`
 # is the acp-run agent name when it differs from the aiuse provider id.
 
@@ -282,7 +283,7 @@ billing = "subscription"
 note = "disabled in Orca's roster — dormant by choice"
 
 # RESERVE (operator 2026-10-15: "never deplete the grok and copilot
-# pools"): GitHub-side Copilot code review of commits draws on this
+# pools"; grok released 2026-10-18, copilot stays): GitHub-side Copilot code review of commits draws on this
 # allowance. Hard floor, one slice at a time, only for GitHub-shaped work.
 [[service]]
 name = "copilot"
@@ -298,6 +299,11 @@ reserve_floor = 60.0
 max_parallel = 1
 models = { github = "claude-sonnet-5.5 --effort medium" }
 
+# GrokBot (the cloud Chief of Staff) runs on its own separate Cursor pool since
+# 2026-10-18 (operator, after the $60 Cursor plan), not on the grok TUI's SuperGrok pool.
+# aiuse reports it as the separate provider `grok-bot` ("Grok Bot Weekly", no cli_binary):
+# it has no [[service]] here and is never a routing target. The two Cursor services below
+# are Cursor Auto and third-party routing, unchanged; do not route into the GrokBot pool.
 # Cursor reports two model sublimits of one monthly total: the Auto pool
 # (Cursor's own models) and the third-party pool. They drain at very
 # different rates (2026-10-15: auto 75% left, third-party 11% left), so
@@ -323,19 +329,16 @@ note = "Cursor third-party pool"
 agent = "cursor"
 models = { code = "claude-sonnet-5-5 --effort medium", mechanical = "claude-haiku-5-5 --effort low" }
 
-# RESERVE: GrokBot (the cloud Chief of Staff) runs on the SuperGrok pool.
-# Hard floor, one slice at a time, only when a Grok model is the point.
-# Only the explicit `realtime-web` kind reaches it: generic research/bulk
-# ranks used to let `plan` fall through to it (review 2026-10-15).
+# Ordinary subscription pool (SuperGrok). It was a reserve 2026-10-15..18 because GrokBot
+# drew on it; GrokBot moved to its own Cursor pool 2026-10-18 (operator), so the floor and
+# the one-slice cap are gone. Ranked behind the burn-first pools (antigravity, cursor-auto).
 [[service]]
 name = "grok"
 cli = "grok"
-good_at = { realtime-web = 1 }
+good_at = { realtime-web = 1, research = 25, bulk = 30 }
 billing = "subscription"
-note = "RESERVE: GrokBot runs on it; realtime X/web angle only"
-max_parallel = 1
-reserve_floor = 60.0
-models = { realtime-web = "grok-4.7 --effort high" }
+note = "SuperGrok subscription; realtime X/web angle first, research and bulk behind the burn-first pools"
+models = { realtime-web = "grok-4.7 --effort high", research = "grok-4.7 --effort high", bulk = "grok-4.7-build-fast --effort low" }
 
 [[service]]
 name = "clinepass"

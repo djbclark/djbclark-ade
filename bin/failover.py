@@ -245,7 +245,7 @@ REGISTRY: dict[str, Tui] = {t.name: t for t in (
         note="free, slow shared GPU via the loopback sipb-llms-proxy; aiuse has no windows"),
     Tui("codex", "acp", "codex", "OpenAI", "codex", None, note="opencodex GPT pool"),
     Tui("copilot", "acp", "copilot", "GitHub", "copilot", None),
-    Tui("grok", "acp", "grok", "xAI", "grok", None, note="reserve pool (GrokBot)"),
+    Tui("grok", "acp", "grok", "xAI", "grok", None, note="ordinary pool (GrokBot moved to its own Cursor pool 2026-10-18)"),
     Tui("qwen", "acp", "qwen", "Alibaba", None, None),
     # canary "strict", no tripwire exemption: under --perm deny acp-run disables every
     # crush tool (crush_deny_dir), so the canary sees 0 tool calls (verified 2026-10-13).

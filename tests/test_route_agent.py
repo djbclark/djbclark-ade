@@ -25,7 +25,7 @@ IDLE = {
     "antigravity": {"remaining": 96.5}, "opencode-go": {"remaining": 97.0},
     "claude": {"remaining": 47.0}, "codex": {"remaining": 100.0},
     "clinepass": {"remaining": 48.0}, "copilot": {"remaining": 69.8},
-    "zai": {"remaining": 70.3}, "grok": {"remaining": 65.0},  # above its 60% reserve floor
+    "zai": {"remaining": 70.3}, "grok": {"remaining": 65.0},
     "cursor": {"remaining": 56.0}, "devin": {"remaining": 100.0},
     # The free half of opencode-zen. Present in the fixture because it is a
     # strong default for bulk, so leaving it out let it win tests by accident.
@@ -114,11 +114,12 @@ class TestWasteBurning(unittest.TestCase):
 class TestDegradation(unittest.TestCase):
     def test_works_with_no_quota_at_all(self):
         """A stale or missing cache must degrade to capability-only routing,
-        except for the reserve pools, which fail closed without a fresh
-        reading (review 2026-10-15): github and realtime-web stay queued."""
+        except for the reserve pool (copilot), which fails closed without a fresh
+        reading (review 2026-10-15): github stays queued. realtime-web routes
+        again since grok stopped being a reserve (2026-10-18)."""
         for kind in r.KINDS:
             c = r.route(kind, quota={})
-            if kind in ("github", "realtime-web"):
+            if kind == "github":
                 self.assertIsNone(c, f"{kind} is reserve-only and must not route unmeasured")
             else:
                 self.assertIsNotNone(c, f"{kind} should still route without quota")
@@ -551,26 +552,35 @@ class TestRoutingPolicy2026_10_15(unittest.TestCase):
             c = r.route(kind, quota=q)
             self.assertNotIn(c.service.name if c else None, {"hermes", "omp"})
 
-    def test_reserve_floor_blocks_grok_and_copilot_below_sixty_percent(self):
+    def test_reserve_floor_blocks_copilot_below_sixty_percent(self):
         q = {name: {"remaining": 0.0} for name in (*IDLE, "antigravity-claude")}
-        q["grok"] = {"remaining": 59.0}
         q["copilot"] = {"remaining": 59.0}
         self.assertIsNone(r.route("github", quota=q))
-        self.assertIsNone(r.route("realtime-web", quota=q))
-        # Generic kinds never reach the reserves, whatever their headroom.
-        q["grok"] = {"remaining": 100.0}
+        # Generic kinds never reach the reserve, whatever its headroom.
         q["copilot"] = {"remaining": 100.0}
         for kind in ("research", "bulk", "code"):
             c = r.route(kind, quota=q)
-            self.assertNotIn(c.service.name if c else None, {"grok", "copilot"}, kind)
-        q["grok"] = {"remaining": 61.0}
+            self.assertNotIn(c.service.name if c else None, {"copilot"}, kind)
         q["copilot"] = {"remaining": 61.0}
         self.assertEqual(r.route("github", quota=q).service.name, "copilot")
-        self.assertEqual(r.route("realtime-web", quota=q).service.name, "grok")
         # A reserve with no reading at all fails closed.
-        q["grok"] = {}
-        self.assertIsNone(r.route("realtime-web", quota=q))
-        self.assertIn("RESERVE", r.route("github", quota=q).why)
+        q["copilot"] = {}
+        self.assertIsNone(r.route("github", quota=q))
+
+    def test_grok_is_an_ordinary_pool_since_grokbot_moved_off_it(self):
+        # 2026-10-18: GrokBot runs on its own Cursor pool, so grok has no floor.
+        svc = next(s for s in r.SERVICES if s.name == "grok")
+        self.assertEqual(svc.reserve_floor, 0.0)
+        self.assertGreater(svc.max_parallel, 1)
+        for kind in ("realtime-web", "research", "bulk"):
+            self.assertTrue(svc.eligible(kind), kind)
+        q = {name: {"remaining": 0.0} for name in (*IDLE, "antigravity-claude")}
+        q["grok"] = {"remaining": 20.0}
+        self.assertEqual(r.route("realtime-web", quota=q).service.name, "grok")
+        # Behind the burn-first pools: with antigravity open, research goes there.
+        q["antigravity"] = {"remaining": 90.0}
+        q["grok"] = {"remaining": 90.0}
+        self.assertEqual(r.route("research", quota=q).service.name, "antigravity")
 
     def test_everyday_code_avoids_the_frontier_pools_when_others_have_room(self):
         q = {**IDLE, "antigravity-claude": {"remaining": 0.0}, "cursor-auto": {"remaining": 75.0}}

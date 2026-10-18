@@ -51,8 +51,9 @@ preferences, because they encode consequences a score cannot see:
   never run). Everyday work goes to the other pools;
 - Fable is a sublimit (at most 50%) of the SAME Claude weekly window, not a
   separate allowance: a Fable run bills the shared window too;
-- grok and copilot are reserves with a hard floor (`reserve_floor`): GrokBot
-  and GitHub-side Copilot review run on them; never deplete them;
+- copilot is the one reserve, with a hard floor (`reserve_floor`): GitHub-side
+  Copilot review runs on it; never deplete it (grok was a reserve until
+  2026-10-18, when GrokBot moved to its own Cursor pool);
 - hermes is never a delegation target; omp only with the operator's explicit
   per-run approval (`ACP_OPERATOR_APPROVED=omp`); neither is ever discovered
   as a routable service here;
@@ -168,8 +169,8 @@ class Service:
     # Ids as that agent's `--info` lists them (tools/acp-run/README.md).
     models: dict[str, str] = field(default_factory=dict)
     # A reserve pool's hard floor: never route to it with less than this much
-    # of its binding window left, whatever `min_headroom` says (grok: GrokBot
-    # runs on it; copilot: GitHub-side Copilot review draws on it).
+    # of its binding window left, whatever `min_headroom` says (copilot:
+    # GitHub-side Copilot review draws on it; grok was one until 2026-10-18).
     reserve_floor: float = 0.0
 
     @property
@@ -477,7 +478,7 @@ def operator_disabled(path: Path | None = None) -> set[str]:
     """Services the operator switched off in aiuse's `[disabled_services]`.
 
     Routing must honour them (2026-10-12: `plan` kept offering copilot and
-    cursor, both disabled there, one reserved for grokbot). Keys are aiuse's
+    cursor, both disabled there, one then reserved for grokbot). Keys are aiuse's
     canonical provider ids, the same names `Service.name` uses.
     """
     import tomllib

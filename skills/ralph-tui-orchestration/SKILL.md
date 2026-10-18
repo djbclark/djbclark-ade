@@ -33,8 +33,8 @@ Currently configured:
   plugin, wraps `agy` — the built-in `gemini` plugin is dead for this
   account, don't use it; **but see *ACP* below: this plugin calls `agy
   --print`, which the standing rule forbids**), `grok` (custom built-in
-  plugin; the 2026-10-06 exclusion lapsed 2026-10-09, small slices only
-  because GrokBot runs on that pool, see bigteam's *Reserve pools*). `opencode-go`
+  plugin; the 2026-10-06 exclusion lapsed 2026-10-09, an ordinary pool since
+  2026-10-18, when GrokBot moved to its own Cursor pool; see bigteam's *Reserve pools*). `opencode-go`
   exists but is currently disabled — see its own comment block in
   config.toml for why (a real, tracked upstream bug, not fixable locally).
 - **Prepaid-balance agents (`deepseek`, `opencode-zen`, `openrouter`) —
