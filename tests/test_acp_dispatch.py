@@ -68,7 +68,7 @@ FAKE = textwrap.dedent("""\
       quota)    echo "FAILED quota" >&2; exit 1;;
       quota_codex_date)  # codex, gpt-6-astra, plektra-small-issues/s1-stderr.txt (2026-10-18), trimmed
                 printf 'STATUS: working\\nsettings search wired; CI running\\n' > "$report"
-                echo 'acp-run: FAILED quota: RequestError: Internal error {"message": "You hit your usage limit. Upgrade to Pro or try again at Oct 18th, 2026 4:41 AM.", "codexErrorInfo": "usageLimitExceeded"}' >&2
+                echo 'acp-run: FAILED quota: RequestError: Internal error {"message": "You hit your usage limit. Upgrade to Pro or try again at Oct 18th, 2036 4:41 AM.", "codexErrorInfo": "usageLimitExceeded"}' >&2
                 echo "acp-run: agent=codex stop=error secs=523.0 tools=38 perm=0+/0- fail=quota error='usageLimitExceeded'" >&2
                 exit 1;;
       quota_partial)
@@ -693,6 +693,36 @@ class TestSliceControls(Base):
         self.assertIn("neither load nor resume", r.stderr)
         self.assertEqual(Path(rec["report"]).read_text(), old)
         self.assertTrue(Path(rec["done"]).exists())
+
+    def test_resume_of_an_agy_claude_slice_continues_in_a_new_session(self):
+        # agy_acp_server strips thought signatures on session/load, so a reopened Claude
+        # session 400s on its first turn (2026-10-18): continue fresh, with a checkpoint
+        self.dispatch()
+        rec = self.record()
+        rec.update(agent="agy", model="claude-opus-5-5", model_applied="claude-opus-5-5")
+        self.record_path().write_text(json.dumps(rec))
+        with Path(rec["log"]).open("a") as log:
+            log.write(json.dumps({"kind": "update", "data": {
+                "sessionUpdate": "tool_call", "title": "Running edit_file"}}) + "\n")
+        r = run(["resume", str(self.record_path()), "--timeout", "0"], env=self.base_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("continuing in a new session", r.stderr)
+        rec = self.record()
+        self.assertNotIn("--resume", rec["cmd"])
+        brief = Path(rec["brief"]).read_text()
+        self.assertTrue(brief.startswith("This continues a slice"), brief[:200])
+        self.assertIn("Running edit_file", brief)
+        self.assertIn("Git status of the working tree", brief)
+        self.assertEqual(brief.count("## Delivery contract"), 1)
+
+    def test_resume_of_an_agy_gemini_slice_reopens_its_session(self):
+        self.dispatch()
+        rec = self.record()
+        rec.update(agent="agy", model="gemini-3.8-flash", model_applied="gemini-3.8-flash")
+        self.record_path().write_text(json.dumps(rec))
+        r = run(["resume", str(self.record_path()), "--timeout", "0"], env=self.base_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--resume fake-session", self.record()["cmd"])
 
     def test_resume_detached_runner_uses_same_finalize_contract(self):
         self.dispatch()

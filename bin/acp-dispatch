@@ -1120,7 +1120,7 @@ def parse_reset_datetime(text: str, when_match: re.Match | None,
     now = now or datetime.now().astimezone()
     m = ISO_RESET_RE.search(text)
     if m:
-        return datetime.fromisoformat(m.group(1).replace("Z", "+00:00"))
+        return datetime.fromisoformat(m.group(1))
     m = PLAIN_RESET_RE.search(text)
     if m:
         stamp = datetime.fromisoformat(m.group(1).replace(" ", "T") + (m.group(2) or "").replace("Z", "+00:00"))
@@ -1277,7 +1277,7 @@ def _pool_entries(items: list, provider: str, family: str | None) -> list[dict]:
 
 def _parse_stamp(value) -> datetime | None:
     try:
-        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        stamp = datetime.fromisoformat(str(value))
     except (ValueError, TypeError):
         return None
     return stamp if stamp.tzinfo else stamp.astimezone()
@@ -2057,6 +2057,43 @@ def execute_record(record: Path, tee: bool = False) -> int:
     return rc
 
 
+def resume_unsupported(rec: dict) -> str | None:
+    """Why the record's own session cannot be reopened even though the agent advertises
+    session/load, else None. agy_acp_server strips every stored thought signature on session/load
+    and set_session_model (a Gemini workaround, b/541293285); Vertex Claude rejects the replay with
+    `messages.1.content.0.thinking.signature: Field required`, so an agy session on a non-Gemini
+    model fails its first resumed turn every time (2026-10-18, two slices; root cause:
+    https://x.com/Davidwuuu92/status/2110264348870631635)."""
+    model = (rec.get("model_applied") or rec.get("model") or "").lower()
+    if rec.get("agent") == "agy" and not model.startswith("gemini"):
+        return (f"agy cannot reopen a {model or 'non-Gemini'} session: its ACP server strips the"
+                " thought signatures Claude needs on session/load")
+    return None
+
+
+def checkpoint_context(rec: dict, tools: int = 20) -> str:
+    """What a new session needs to pick up a slice whose own session cannot be reopened: the
+    tree's state, the last tool calls of the old session and any report it began."""
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", rec["dir"], *args], check=False,
+                              capture_output=True, text=True).stdout.strip()
+    titles: list[str] = []
+    try:
+        for line in Path(rec["log"]).read_text().splitlines():
+            row = json.loads(line)
+            data = row.get("data") or {}
+            if row.get("kind") == "update" and data.get("sessionUpdate") == "tool_call" and data.get("title"):
+                titles.append(" ".join(str(data["title"]).split())[:160])
+    except (OSError, ValueError):
+        pass
+    report = Path(rec["report"])
+    begun = report.read_text().strip() if report.exists() else ""
+    return ("Git status of the working tree (your earlier edits are already in it):\n"
+            f"{git('status', '--short') or '(clean)'}\n\nGit diff --stat:\n{git('diff', '--stat') or '(no diff)'}\n\n"
+            f"Last tool calls of the earlier session:\n" + ("\n".join(titles[-tools:]) or "(none)") + "\n\n"
+            "Report the earlier session began:\n" + (begun or "(none)") + "\n\n")
+
+
 def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
     """Reopen the record's ACP session and continue. quota_stop selects the usage-limit prompt (the
     stop was the provider's limit, not the agent; redo nothing finished)."""
@@ -2076,9 +2113,10 @@ def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
         time.sleep(2)
         rec = json.loads(record.read_text())
     sid, supported = session_info(rec)
-    if supported is False:
+    broken = resume_unsupported(rec)
+    if supported is False and not broken:
         die(f"{rec['agent']} advertises neither load nor resume")
-    if not sid:
+    if not sid and not broken:
         die("no ACP session id in the record or log")
     old_cmd = shlex.split(rec["cmd"])
 
@@ -2090,6 +2128,16 @@ def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
         AUTO_RESUME_TEXT + original if quota_stop else
         "The previous turn was stopped by a time limit. Continue the brief from where it left off, "
         "and rewrite the report with the complete result.\n\nOriginal brief:\n" + original)
+    resume_arg = ["--resume", sid]
+    if broken:
+        # Continue in a new session instead, told where the old one stopped (acpx's fallback for a
+        # session it cannot reopen, openclaw/acpx reconnect.ts).
+        print(f"acp-dispatch: {rec['name']}: {broken}; continuing in a new session with a checkpoint",
+              file=sys.stderr)
+        prompt = ("This continues a slice whose earlier session stopped and cannot be reopened. Do not "
+                  "redo finished work: check the tree first.\n\n" + checkpoint_context(rec)
+                  + prompt.replace(" in this same session", ""))
+        resume_arg = []
     args = argparse.Namespace(
         no_auto_resume=getattr(a, "no_auto_resume", False),
         agent=rec["agent"], model=rec.get("model_applied") or rec.get("model"), name=rec["name"], dir=rec["dir"],
@@ -2100,7 +2148,7 @@ def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
         detach=a.detach, no_wait=a.no_wait, wait_timeout=a.wait_timeout, force=True, dry_run=False,
         json=False, tee=False, no_model_check=True, no_preflight=True, min_headroom=10.0,
         est_pct=rec.get("estimated_usage_pct"), checkpoint=rec.get("checkpoint", False), acp_run=old_cmd[0],
-        effort=rec.get("effort"), context=rec.get("context"), acp_arg=[*rec.get("acp_arg", []), "--resume", sid])
+        effort=rec.get("effort"), context=rec.get("context"), acp_arg=[*rec.get("acp_arg", []), *resume_arg])
     return dispatch(args, {**rec, "session_id": sid, "prompt": original})
 
 

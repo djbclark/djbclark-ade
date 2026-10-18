@@ -61,6 +61,10 @@ CASES = {
     "agy_without_stderr": [AGY_REPLY, 38, ""],
     "whole_short_reply": ["Upgrade your plan to continue", 0, ""],
     "tail_error_line": ["worked a while\nError: RetriableError: [unavailable] PING timed out", 5, ""],
+    "error_json_reply": [
+        ('{\\"type\\":\\"error\\",\\"error\\":{\\"type\\":\\"invalid_request_error\\",\\"message\\":'
+         '\\"messages.1.content.0.thinking.signature: Field required\\"}}'), 0, ""],
+    "error_json_reply_unescaped": ['{"type": "error", "error": {"type": "overloaded_error"}}', 0, ""],
     "report_about_quotas": [LONG_REPORT, 12, ""],
     "report_about_quotas_with_429_in_stderr": [LONG_REPORT, 12, AGY_STDERR],
     "last_paragraph_mentions_limits_no_429": [
@@ -123,6 +127,16 @@ class TestReplyFailure(unittest.TestCase):
 
     def test_tail_error_line_still_fails_as_transient(self):
         res = self.results["tail_error_line"]
+        assert res is not None
+        self.assertEqual(res[0], "transient")
+
+    def test_provider_error_json_reply_fails(self):
+        # agy 2026-10-18: a resumed Claude session answered with the 400 body, stop end_turn
+        res = self.results["error_json_reply"]
+        assert res is not None
+        self.assertEqual(res[0], "provider")
+        self.assertIn("thinking.signature", res[1])
+        res = self.results["error_json_reply_unescaped"]
         assert res is not None
         self.assertEqual(res[0], "transient")
 

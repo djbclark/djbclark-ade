@@ -576,7 +576,10 @@ until the work is committed or recorded in a repo.
    10 min apart), up to 3 attempts; the record's `auto_resume` field shows
    `state`, `attempt`, `not_before_iso`, `label`. The `rearm` waiter keeps
    waiting through it to the real end; `check` on such a record prints
-   `resume-scheduled` (exit 1: still running). Exit 3 stays a real no-report:
+   `resume-scheduled` (exit 1: still running). An agy slice on a Claude/GPT
+   model cannot reopen its session (agy strips the thought signatures Claude
+   needs; `docs/model-routing.md`), so its resume continues in a new session
+   with a checkpoint instead. Exit 3 stays a real no-report:
    for a quota stop without an automatic resume (`--no-auto-resume`, no
    session id, agent without load/resume, 3 attempts used) the `check` line
    ends with the exact `acp-dispatch resume <record> --detach --no-wait`

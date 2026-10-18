@@ -96,8 +96,9 @@ class TestSchedule(AutoResumeBase):
         ar = rec["auto_resume"]
         self.assertEqual(ar["state"], "scheduled")
         self.assertEqual((ar["attempt"], ar["max"], ar["reset_source"]), (1, 3, "stderr"))
-        # "try again at Oct 18th, 2026 4:41 AM" on the local clock, plus the 5-minute margin
-        want = datetime(2026, 10, 18, 4, 46).astimezone().timestamp()
+        # "try again at Oct 18th, 2036 4:41 AM" on the local clock, plus the 5-minute margin (a
+        # future year: a reset already past is scheduled from now; 2026 broke this on 2026-10-18)
+        want = datetime(2036, 10, 18, 4, 46).astimezone().timestamp()
         self.assertAlmostEqual(ar["not_before"], want, delta=1)
         self.assertEqual(ar["label"], "acp-dispatch.out.s1.resume1")
         calls = self.launchctl()
@@ -108,7 +109,7 @@ class TestSchedule(AutoResumeBase):
         self.assertIn("launchctl remove acp-dispatch.out.s1.resume1", runner)
         # the report still ends on its NO-REPORT line; the record stays finished with .done
         lines = Path(rec["report"]).read_text().splitlines()
-        self.assertTrue(lines[-1].startswith("NO-REPORT: quota (codex, m1, retry at Oct 18th, 2026 4:41 AM)"), lines[-1])
+        self.assertTrue(lines[-1].startswith("NO-REPORT: quota (codex, m1, retry at Oct 18th, 2036 4:41 AM)"), lines[-1])
         self.assertTrue(Path(rec["done"]).exists())
         self.assertEqual(rec["status"], "resume-scheduled")
         # finalize again (a hand re-run): the earlier schedule stands, no second launchd job
@@ -135,7 +136,7 @@ class TestSchedule(AutoResumeBase):
         c = run(["check", str(self.record_path())])
         self.assertEqual(c.returncode, 3)
         self.assertIn(f"resume {rec['record']} --detach --no-wait", c.stdout)
-        self.assertIn("after Oct 18th, 2026 4:41 AM", c.stdout)
+        self.assertIn("after Oct 18th, 2036 4:41 AM", c.stdout)
         self.assertIn("auto-resume off", c.stdout)
         # the opt-out follows the slice through a manual resume
         rr = run(["resume", str(self.record_path()), "--timeout", "0"], env=self.base_env("quota_codex_date"))

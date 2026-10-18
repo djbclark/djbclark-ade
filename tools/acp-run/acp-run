@@ -1465,8 +1465,14 @@ MODEL_REFUSALS = [
 # merely mentions a quota/auth/plan problem is the refusal too.
 STDERR_REFUSAL = r"resource[ _-]?exhausted|\b429\b"
 # The last non-empty line of a reply that is an error report from the provider
-# or transport (cursor: "Error: RetriableError: ...", claude: "API Error: 529").
-TAIL_ERROR = r"^(api |provider )?error\b\s*[:(\d]|^selected model is at capacity"
+# or transport (cursor: "Error: RetriableError: ...", claude: "API Error: 529"),
+# or the provider's raw error JSON relayed as the reply (agy, 2026-10-18: a resumed
+# Claude session answered `{\"type\":\"error\",\"error\":{\"type\":
+# \"invalid_request_error\",...}}` with stop end_turn; the quotes arrive escaped).
+TAIL_ERROR = (
+    r"^(api |provider )?error\b\s*[:(\d]|^selected model is at capacity"
+    r'|^\{\s*\\?"type\\?"\s*:\s*\\?"error\\?"'
+)
 
 # Tool kind from a permission request's title when the agent sends no kind.
 # Ported from acpx (MIT, github.com/openclaw/acpx src/permissions.ts
@@ -3060,8 +3066,8 @@ def resume_hint(a, root, session_id):
     for flag in ("effort", "context"):
         if getattr(a, flag, None):
             argv += [f"--{flag}", getattr(a, flag)]
-    argv += ["-p", "The previous turn was stopped by the provider's usage limit, not by you; the limit "
-                   "has reset. Continue where you left off without redoing finished work."]
+    argv += ["-p", ("The previous turn was stopped by the provider's usage limit, not by you; the limit "
+                    "has reset. Continue where you left off without redoing finished work.")]
     return (f"acp-run: usage limit stopped session {session_id}; after the reset continue it with: "
             + shlex.join(argv))
 

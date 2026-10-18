@@ -206,7 +206,13 @@ auto-resume RECORD` under launchd for the reset time (acp-run's stderr, else
 aiuse's `resets_at`, else a 30-min back-off) plus 5 min; the runner gates on
 `aiuse --available --json --live` (20% left, 6 checks 10 min apart), then
 reopens the same ACP session (`acp-run --resume`) with a prompt saying the stop
-was the limit, not the agent. Up to 3 attempts per slice; the record's
+was the limit, not the agent. **Exception: agy on a non-Gemini model**
+(2026-10-18): agy_acp_server strips the thought signatures Vertex Claude needs
+on every session/load, so the reopened session 400s with `thinking.signature:
+Field required`; `resume` (manual or automatic) starts a new session instead,
+with a checkpoint (git status and diff stat, the old session's last tool calls,
+the report it began), and acp-run fails a reply that is a provider error JSON
+as class `provider`. Up to 3 attempts per slice; the record's
 `auto_resume` field shows state, attempt, `not_before_iso` and the launchd
 label. The `rearm` waiter waits through it; `check` says `resume-scheduled`
 (exit 1, still running); exit 3 stays a real no-report and, for a quota stop
