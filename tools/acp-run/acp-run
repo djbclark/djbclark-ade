@@ -2154,7 +2154,7 @@ def check_static(a):
         if a.agent == "cline" and effort not in CLINE_EFFORTS:
             usage_exit(f"--effort: cline takes {', '.join(CLINE_EFFORTS)} (--thinking); not {effort}")
         if a.agent == "agy" and effort not in AGY_EFFORTS:
-            usage_exit(f"--effort: agy bakes the level into the model id; valid: {', '.join(AGY_EFFORTS)}"
+            usage_exit(f"--effort: agy's thinking levels are {', '.join(AGY_EFFORTS)}"
                        f" (xhigh and max are not reachable over ACP); not {effort}")
     if ctx:
         if a.agent in CONTEXT_NOT_REACHABLE:
@@ -2281,8 +2281,8 @@ async def grok_set_context(conn, sess, init, client, options, tokens, who):
 
 
 def agy_effort_model(options, want_model, level):
-    """agy bakes the effort into the model id (<base>-low|medium|high): the model value for
-    `level` on want_model's base, or exit 2 naming what the base is offered at."""
+    """agy before 1.4.1 baked the effort into the model id (<base>-low|medium|high): the model
+    value for `level` on want_model's base, or exit 2 naming what the base is offered at."""
     _cid, val = pick_config(options, want_model, "model") if want_model else (None, None)
     val = val or current_value(options, "model")
     base = re.sub(r"-(low|medium|high)$", "", str(val))
@@ -2304,7 +2304,10 @@ async def apply_config(a, conn, sess, init, client, sets, applied, per_run_data=
     effort, ctx = getattr(a, "effort", None), getattr(a, "context", None)
     copilot_launch_model = a.agent == "copilot" and bool(ctx)
     want_model = sets.get("model")
-    if effort and effort != "default" and a.agent == "agy":
+    # agy up to 1.4.0 baked the level into the model id; 1.4.1 offers bare ids plus a
+    # `thinking_level` option (category thought_level), which the generic path sets (2026-10-18)
+    agy_suffix = a.agent == "agy" and not effort_options(options)
+    if effort and effort != "default" and agy_suffix:
         sets = dict(sets)
         sets["model"] = agy_effort_model(options, want_model, effort)
         want_model = sets["model"]
@@ -2341,7 +2344,7 @@ async def apply_config(a, conn, sess, init, client, sets, applied, per_run_data=
             resp = await conn.set_config_option(config_id=cid, session_id=sess.session_id, value=val)
             options = getattr(resp, "config_options", None) or options
     who = f"{a.agent} {current_value(options, 'model') or applied.get('model') or ''}".strip()
-    if effort and a.agent != "agy" and a.agent != "cline":
+    if effort and not agy_suffix and a.agent != "cline":
         picked = resolve_effort(options, effort, who)
         if picked:
             cid, val = picked

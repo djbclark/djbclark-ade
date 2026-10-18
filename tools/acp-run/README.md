@@ -409,7 +409,7 @@ OAuth offers Gemini, Claude, GPT-OSS, the last two only when `clientInfo.name` i
 
 Ids: `gemini-3.8-flash-{high,medium,low}`, `claude-opus-5-5-{low,medium,high}`, `claude-sonnet-5-5-{low,medium,high}`, `gpt-oss-120b-medium`. API key adds `gemini-3.1-pro-high`, `gemini-3.1-pro-low` (base `gemini-3.1-pro-preview`). `AGY_ACP_DEFAULT_MODEL` default `gemini-3.8-flash-high`.
 
-`--effort low|medium|high` picks `<base>-<level>` (`claude-opus-5-5` + high → `claude-opus-5-5-high`). `xhigh` and `max` exit 2, not rewritten to high. `agy -p --effort max` can reach them; acp-run does not call it. `gpt-oss-120b` is fixed `-medium`. ThinkingLevel: 1 LOW, 2 MEDIUM, 3 HIGH, 4 MINIMAL, 5 EXTRA_HIGH. Options: `model`, `mode` only. `--context` exits 2. Gemini 3.x Flash and 3.1 Pro: 1048576. OAuth `maxTokens` from CCPA `fetchAvailableModels`. Claude and GPT-OSS windows not measured.
+agy 1.4.1 (2026-10-18) lists bare ids (`gemini-4-argon`, `gemini-3.8-flash`, `claude-opus-5-5`, `claude-sonnet-5-5`, `gpt-oss-120b-medium`) plus a `thinking_level` option (low/medium/high, default high), which `--effort` sets like any other effort option. Before 1.4.1, `--effort low|medium|high` picked `<base>-<level>` (`claude-opus-5-5` + high → `claude-opus-5-5-high`); acp-run still does that when no thought-level option is offered. `xhigh` and `max` exit 2, not rewritten to high. `agy -p --effort max` can reach them; acp-run does not call it. `gpt-oss-120b` is fixed `-medium`. ThinkingLevel: 1 LOW, 2 MEDIUM, 3 HIGH, 4 MINIMAL, 5 EXTRA_HIGH. Options: `model`, `mode` only. `--context` exits 2. Gemini 3.x Flash and 3.1 Pro: 1048576. OAuth `maxTokens` from CCPA `fetchAvailableModels`. Claude and GPT-OSS windows not measured.
 
 ### grok
 

@@ -346,6 +346,10 @@ PROBE = textwrap.dedent("""\
         out["agy_low"] = await apply("agy", args("agy", model="claude-x-high", effort="low"), ag=AgyAgent("gem-high"))
         out["agy_default_model"] = await apply("agy", args("agy", effort="low"), ag=AgyAgent("gem-high"))
         out["agy_missing"] = await apply("agy", args("agy", model="oss-medium", effort="high"), ag=AgyAgent("gem-high"))
+        # agy 1.4.1: bare model ids and a thinking_level option, set like any other effort
+        MODELS["claude-opus-5-5"] = ("thinking_level", ["low", "medium", "high"], "high", None)
+        out["agy_thinking_level"] = await apply("agy", args("agy", model="claude-opus-5-5", effort="low"),
+                                                ag=Agent("claude-opus-5-5"))
 
         out["post"] = {
             "claude_ok": mod.post_turn(args("claude", context=200000), {"ctx_expected": 200000}, {"size": 200000}),
@@ -550,6 +554,12 @@ class TestEffortContext(unittest.TestCase):
         self.assertEqual(self.r["agy_default_model"]["calls"], [["model", "gem-low"]])
         self.assertEqual(self.r["agy_missing"]["exit"], 2)
         self.assertEqual(self.r["agy_missing"]["stderr"], "acp-run: agy oss is offered at effort: medium; not high")
+
+    def test_agy_1_4_1_effort_is_the_thinking_level_option(self):
+        r = self.r["agy_thinking_level"]
+        self.assertIn(["thinking_level", "low"], r["calls"])
+        self.assertNotIn(["model", "claude-opus-5-5-low"], r["calls"])
+        self.assertEqual(r["line"], "model=claude-opus-5-5 effort=low")
 
     def test_the_window_after_the_turn_is_checked_against_the_request(self):
         p = self.r["post"]
