@@ -52,6 +52,7 @@ MIN_CORES = float(os.environ.get("LW_MIN_CORES", "1.5"))
 COOLDOWN_S = float(os.environ.get("LW_COOLDOWN_H", "6")) * 3600
 MY_UID = os.getuid()
 STUCK = []  # commands ps saw in state U this sample
+BGRUN = []  # commands runnable at background priority this sample
 
 
 def now():
@@ -88,19 +89,24 @@ def ps_table():
     `time` difference misses every process that starts and exits between samples, and macOS `ps -S` does
     not fold exited children into the parent: checked 2026-10-18)."""
     try:
-        out = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,%cpu=,state=,command="], capture_output=True, text=True,
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,%cpu=,state=,pri=,command="], capture_output=True, text=True,
                              timeout=20).stdout
     except subprocess.TimeoutExpired:  # the machine is stalling (2026-10-18, load 77): skip this sample
         return None
     table = {}
     for line in out.splitlines():
-        parts = line.split(None, 5)
-        if len(parts) < 5 or not parts[0].isdigit():
+        parts = line.split(None, 6)
+        if len(parts) < 6 or not parts[0].isdigit():
             continue
+        cmd = parts[6] if len(parts) > 6 else ""
         if parts[4].startswith("U"):  # uninterruptible wait: counts in load, uses no CPU
-            STUCK.append(parts[5][:80] if len(parts) > 5 else parts[0])
+            STUCK.append(cmd[:80] or parts[0])
+        # runnable at background QoS (priority 4: E-cores only, throttled). A pile of these is load with idle
+        # P-cores: 2026-10-18's load 110 was orphaned agent-radar scans at background QoS.
+        if parts[4].startswith("R") and parts[5] == "4":
+            BGRUN.append(" ".join(os.path.basename(w) for w in cmd.split()[:2])[:60])
         try:
-            table[parts[0]] = (int(parts[1]), int(parts[2]), float(parts[3]) / 100, parts[5] if len(parts) > 5 else "")
+            table[parts[0]] = (int(parts[1]), int(parts[2]), float(parts[3]) / 100, cmd)
         except ValueError:
             continue
     return table
@@ -356,8 +362,14 @@ def not_cpu(use, span, ncpu):
     except (OSError, subprocess.TimeoutExpired):
         swap = "?"
     stuck = sorted(set(STUCK))
+    counts = {}
+    for c in BGRUN:
+        counts[c] = counts.get(c, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: -kv[1])[:4]
     return (f"processes used ~{cpu:.1f} of {ncpu} cores; swap {swap}; "
-            f"{len(stuck)} stuck in disk/network wait" + (f": {', '.join(stuck[:4])}" if stuck else ""))
+            f"{len(stuck)} stuck in disk/network wait" + (f": {', '.join(stuck[:4])}" if stuck else "") +
+            f"; {len(BGRUN)} runnable at background priority" +
+            (": " + ", ".join(f"{n}x {c}" for c, n in top) if top else ""))
 
 
 def cmd_status(a):
