@@ -30,6 +30,8 @@ _spec = importlib.util.spec_from_file_location("relay", SF / "relay.py")
 assert _spec and _spec.loader
 relay = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(relay)
+# main() records unsent messages; keep the tests' records out of the real ledger
+relay.UNSENT = Path(tempfile.mkdtemp(prefix="relay-test-")) / "relay-unsent.json"
 
 
 def sess(**kw: Any) -> dict[str, Any]:
@@ -183,3 +185,25 @@ class TestStuckInBox(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOwnLeftover(unittest.TestCase):
+    def test_draft_matching_our_unsent_text(self) -> None:
+        sent = "From djbclark-ade: a long proposal that ends with say which of 1-5 you want."
+        self.assertTrue(relay.ours(sent, sent))
+        self.assertTrue(relay.ours("…a long proposal that ends with say which of 1-5 you want.", sent))
+        self.assertFalse(relay.ours("someone typing their own words here, not ours at all", sent))
+        self.assertFalse(relay.ours("anything", None))
+
+    def test_unsent_ledger_round_trip(self) -> None:
+        import tempfile
+        orig = relay.UNSENT
+        with tempfile.TemporaryDirectory() as d:
+            relay.UNSENT = relay.Path(d) / "u.json"
+            try:
+                relay.note_unsent("abc", "hello")
+                self.assertEqual(relay._unsent(), {"abc": "hello"})
+                relay.note_unsent("abc", None)
+                self.assertEqual(relay._unsent(), {})
+            finally:
+                relay.UNSENT = orig

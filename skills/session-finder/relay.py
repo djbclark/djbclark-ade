@@ -43,6 +43,10 @@ HERDR = fleet.HERDR
 ENTER_DELAY = 0.5
 ENTER_RETRIES = 2
 RETRY_AFTER = 2.0
+# Messages this relay typed whose Enter never landed, per session id. A later relay to that session finds the
+# text in the input box and used to refuse it as someone's draft (2026-10-18: a proposal to djbclark-ade-87
+# sat unsent there and blocked the next relay); now it submits its own leftover first.
+UNSENT = Path(os.environ.get("RELAY_UNSENT", Path.home() / ".local/state/session-finder/relay-unsent.json"))
 
 
 def screen(chan, lines=20):
@@ -108,6 +112,35 @@ def stuck_in_box(chan, text):
     return bool(d) and (d[:30] == text[:30] or d.startswith("[Pasted text"))
 
 
+def _unsent():
+    try:
+        return json.loads(UNSENT.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def note_unsent(sid, text):
+    """Remember TEXT as left unsent in session SID's box (None forgets it)."""
+    rows = _unsent()
+    if text is None:
+        if rows.pop(sid, None) is None:
+            return
+    else:
+        rows[sid] = text
+    UNSENT.parent.mkdir(parents=True, exist_ok=True)
+    tmp = UNSENT.with_suffix(".tmp")
+    tmp.write_text(json.dumps(rows, ensure_ascii=False))
+    tmp.replace(UNSENT)
+
+
+def ours(d, text):
+    """True when draft D is (the visible part of) TEXT, which this relay typed earlier."""
+    d, t = " ".join(d.split()), " ".join((text or "").split())
+    if not d or not t:
+        return False
+    return d[:30] == t[:30] or d[-30:] in t or d.startswith("[Pasted text")
+
+
 def find(ident, ss):
     hits = [s for s in ss if ident in (s["id"], s["name"], s.get("sid"), s.get("pane"))]
     if not hits and len(ident) >= 8:
@@ -157,6 +190,17 @@ def main():
         return 1
     chan = tuple(s["chan"])
     d = draft(chan) if s["agent"] == "claude" else ""
+    left = _unsent().get(s["id"])
+    if d and ours(d, left):
+        press_enter(chan)
+        for _ in range(10):
+            time.sleep(1)
+            d = draft(chan)
+            if not d:
+                break
+        if not d:
+            note_unsent(s["id"], None)
+            print(f"relay: [{s['id']}] submitted our earlier message left unsent in its box", file=sys.stderr)
     if d:
         print(f"relay: [{s['id']}] not sent: its input box holds a draft ({fleet.clip(d, 60)!r})", file=sys.stderr)
         return 1
@@ -192,6 +236,8 @@ def main():
         time.sleep(1)
     out = {"id": s["id"], "name": s["name"], "status": s["status"], "via": f"{chan[0]} {chan[1]}",
            "result": seen or "unverified", "text": text}
+    if s["agent"] == "claude":
+        note_unsent(s["id"], None if seen or not stuck_in_box(chan, text) else text)
     if a.json:
         print(json.dumps(out, ensure_ascii=False))
     elif seen:
