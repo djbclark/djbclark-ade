@@ -1,0 +1,3 @@
+# acp-dispatch: wake the Mac 2 minutes before a scheduled quota auto-resume, and cancel
+# that wake (operator approved 2026-10-18). Only these two pmset forms; nothing else.
+djbclark ALL=(root) NOPASSWD: /usr/bin/pmset schedule wake *, /usr/bin/pmset schedule cancel wake *

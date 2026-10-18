@@ -480,7 +480,12 @@ Long-reset rule (same day): a quota stop whose reset is more than
 `check` prints a ready-to-run reroute line instead, and the scheduled resume
 tries to wake the Mac first (`sudo -n pmset schedule wake`, recorded in
 `auto_resume.wake`; cancelled best-effort when the resume runs or the schedule
-is cancelled).
+is cancelled). That needs the NOPASSWD rule in
+`config/sudoers.d/acp-dispatch-pmset` (only `pmset schedule wake *` and
+`pmset schedule cancel wake *`; operator-approved and installed 2026-10-18):
+`visudo -cf` it, then `sudo install -m 0440 -o root -g wheel
+config/sudoers.d/acp-dispatch-pmset /etc/sudoers.d/`. Without it the wake
+records `unavailable: ...` and the resume runs at the Mac's next wake.
 
 `acp-dispatch tell <out>/jobs/<name>.json "stop after step 3"` sends a message
 into a running slice (2026-10-18). It appends a `## MSG N` entry to
