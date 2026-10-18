@@ -469,6 +469,19 @@ load nor resume are refused with exit 2. The previous report is preserved as
 `<name>-r1-report.md`, then `-r2`, and so on; each revision also keeps its brief,
 log, final text and stderr. Normal output and `.done` paths remain stable.
 
+`acp-dispatch reroute <out>/jobs/<name>.json (--agent A --model M | --escalate)`
+continues a stopped slice from its checkpoint on another pool (2026-10-18).
+`--escalate` climbs exactly one rung of the cheap-first `[escalation]` ladder
+in `config/routing.toml` (operator decision 1.4) and takes `route_agent`'s top
+route for the next kind, excluding the pool that failed; every dispatch gate
+still runs and the top rung refuses with exit 2 — never straight to frontier.
+Long-reset rule (same day): a quota stop whose reset is more than
+`[dispatch].auto_resume_max_wait_hours` (6) away is not auto-resumed in place;
+`check` prints a ready-to-run reroute line instead, and the scheduled resume
+tries to wake the Mac first (`sudo -n pmset schedule wake`, recorded in
+`auto_resume.wake`; cancelled best-effort when the resume runs or the schedule
+is cancelled).
+
 `acp-dispatch tell <out>/jobs/<name>.json "stop after step 3"` sends a message
 into a running slice (2026-10-18). It appends a `## MSG N` entry to
 `<record>.inbox.md` next to the record, and for a `claude` slice also writes

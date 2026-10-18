@@ -406,8 +406,15 @@ class TestEscalation(QuotaBase):
     def setUp(self) -> None:
         super().setUp()
         mod = runpy.run_path(str(SCRIPT))
-        mod["route_module"]().reload_policy(str(self.policy))
+        router = mod["route_module"]()
+        self._policy_path = router.POLICY_PATH
+        router.reload_policy(str(self.policy))
         self.mod = mod
+
+    def tearDown(self) -> None:
+        # reload_policy mutates the shared route_agent module for the rest of this pytest
+        # process; restore the repo policy or test_route_agent sees the toy one
+        self.mod["route_module"]().reload_policy(str(self._policy_path))
 
     def test_ladder_next_kind_mapping(self):
         nxt = self.mod["escalation_next"]

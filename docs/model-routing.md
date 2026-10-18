@@ -360,8 +360,17 @@ as a table, so copy no numbers from this file. A fresh `acp-dispatch` requires
 `ACP_OPERATOR_APPROVED=route-override` skips only the eligibility check. A
 frontier model runs only with `--kind frontier`, by default as a read-only
 advisor (`--role advise`; `--role exec` needs
-`ACP_OPERATOR_APPROVED=frontier-exec`). Escalation is cheap-first, through
-`acp-dispatch reroute` (item 2). Scoring is pace- and reset-aware: a computed
+`ACP_OPERATOR_APPROVED=frontier-exec`). Escalation is cheap-first and now a
+ladder, not a judgment call (operator decision 1.4, 2026-10-18): a slice that
+failed on its tier (no-report or partial, not quota) climbs ONE rung of
+`[escalation]` in `config/routing.toml` (mechanical -> bulk -> code -> judgment
+-> frontier; `research` -> judgment via `[escalation.next]`) through
+`acp-dispatch reroute RECORD --escalate` — `check` prints the command, the
+agent/model come from `route_agent`'s top route for the next kind excluding
+the failed pool, and the top rung refuses (exit 2). A quota stop whose reset
+is more than `[dispatch].auto_resume_max_wait_hours` (6) away is rerouted the
+same way instead of waiting for an in-place auto-resume. Scoring is pace- and
+reset-aware: a computed
 burn-first bonus goes to a pool that would waste quota at its reset, and a pace
 penalty to a pool burning fast. `route_agent.py calibrate` reports done rates,
 and `bin/routing-recalibrate` (monthly, launchd) has Opus re-rank `good_at`
