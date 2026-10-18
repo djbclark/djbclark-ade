@@ -9,7 +9,7 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { AcpJob, RadarAgent } from '../types'
 import { bandsFile, parseOrder, stackBands } from './bands'
-import { RECORDS_SH, TAILS_SH, baseName, blocks, isDispatchCommand, isJobRunning, jobMatches, logSummary, outputPathOf, parseOpen, parseRecords, shellLabel, shouldScan, tailLines } from './watch'
+import { RECORDS_SH, TAILS_SH, baseName, blocks, isDispatchCommand, isJobRunning, isOutputPath, isSafePath, jobMatches, logSummary, oneLine, outputPathOf, parseOpen, parseRecords, shellLabel, shouldScan, tailLines } from './watch'
 
 const PANE = 'agent-radar'
 const SHOW_DONE_MS = 30_000 // a finished agent stays in the band this long
@@ -59,7 +59,7 @@ export const register: Register = on => {
     const r = await next(e)
     if (r.agentId) {
       const id = r.agentId
-      const one: RadarAgent = { id, kind: 'agent', description: e.description || e.name || e.subagentType, type: e.subagentType, status: 'running', startedAt: Date.now(), tools: 0, last: 'starting' }
+      const one: RadarAgent = { id, kind: 'agent', description: oneLine(e.description || e.name || e.subagentType) || 'agent', type: oneLine(e.subagentType, 60), status: 'running', startedAt: Date.now(), tools: 0, last: 'starting' }
       await update($, agents, list => [one, ...list.filter(a => a.id !== id)].slice(0, 30))
     }
     return r
@@ -166,8 +166,8 @@ export const register: Register = on => {
             <Text color={color(one)} bold>{`${icon(one)} ${one.description}`}</Text>
             <Text dimColor>{`  shell · ${elapsed(one)} · ${one.status === 'running' ? 'running' : one.status}`}</Text>
           </Text>
-          <Text dimColor wrap="truncate-end">{`$ ${(one.command ?? '').replace(/\s+/g, ' ').slice(0, 300)}`}</Text>
-          {one.out && <Text dimColor wrap="truncate-end">{`output: ${one.out}`}</Text>}
+          <Text dimColor wrap="truncate-end">{`$ ${oneLine(one.command ?? '', 300)}`}</Text>
+          {one.out && <Text dimColor wrap="truncate-end">{`output: ${oneLine(one.out, 300)}`}</Text>}
           {rule}
           {lines.length === 0 && <Text dimColor>No output yet.</Text>}
           {lines.map(l => (
@@ -189,7 +189,7 @@ export const register: Register = on => {
           </Text>
           <Text wrap="truncate-end">{`agent ${j.agent} · model ${j.model || '(default)'} · effort ${j.effort || '(default)'}`}</Text>
           <Text wrap="truncate-end">{`status ${j.status} · exit ${j.exit ?? '-'}`}</Text>
-          {j.report && <Text dimColor wrap="truncate-end">{`report: ${j.report}`}</Text>}
+          {j.report && <Text dimColor wrap="truncate-end">{`report: ${oneLine(j.report, 300)}`}</Text>}
           {rule}
           {lines.length === 0 && <Text dimColor>No log lines yet.</Text>}
           {lines.map(l => (
@@ -215,7 +215,7 @@ export const register: Register = on => {
           {messages.map(m => (
             <Text wrap="truncate-end">
               <Text color={m.role === 'assistant' ? 'cyan' : undefined} bold>{m.role === 'assistant' ? 'agent: ' : 'task:  '}</Text>
-              <Text>{m.text.replace(/\s+/g, ' ').slice(0, 400) || '(tool calls)'}</Text>
+              <Text>{oneLine(m.text, 400) || '(tool calls)'}</Text>
             </Text>
           ))}
           {buttons}
@@ -282,8 +282,8 @@ async function adopt($: EngineInterface) {
     .map((a): RadarAgent => ({
       id: a.id,
       kind: 'agent',
-      description: a.description,
-      type: a.type,
+      description: oneLine(a.description) || 'agent',
+      type: oneLine(a.type, 60),
       status: a.status === 'running' ? 'running' : a.status === 'completed' ? 'done' : 'failed',
       startedAt: Date.now(),
       tools: 0,
@@ -331,12 +331,12 @@ async function pollOnce($: EngineInterface, force: boolean) {
 
   // 2. Which running shells still hold their output file open (one lsof for all of them).
   const list = await read($, agents)
-  const shells = list.filter(a => kindOf(a) === 'shell' && a.status === 'running' && !a.hidden && a.out)
+  const shells = list.filter(a => kindOf(a) === 'shell' && a.status === 'running' && !a.hidden && isOutputPath(a.out)) // state kept across a hot reload is checked again
   const open = shells.length > 0 ? await openFiles($, shells.map(a => a.out!)) : undefined
 
   // 3. The tails of what is running (one process): shell output, job logs. A job that just ended gets one last read.
   const tailOf = new Map<string, string>()
-  const wanted = list.filter(a => !a.hidden && ((kindOf(a) === 'shell' && a.status === 'running' && a.out) || (kindOf(a) === 'acp' && a.job?.log && (a.status === 'running' || !a.final))))
+  const wanted = list.filter(a => !a.hidden && ((kindOf(a) === 'shell' && a.status === 'running' && isOutputPath(a.out)) || (kindOf(a) === 'acp' && isSafePath(a.job?.log) && (a.status === 'running' || !a.final))))
   const files = [...new Set(wanted.map(a => (kindOf(a) === 'shell' ? a.out! : a.job!.log!)))]
   if (files.length > 0) {
     const t = await run($, ['sh', '-c', TAILS_SH, 'sh', ...files], 8_000)
@@ -466,8 +466,8 @@ export function elapsed(a: Pick<RadarAgent, 'startedAt' | 'endedAt'>, at = Date.
 
 // A short label for one tool call: what a person would say the agent is doing.
 export function describe(e: Record<string, unknown>): string {
-  const tool = String(e.tool)
-  const s = (k: string) => (typeof e[k] === 'string' ? (e[k] as string) : '')
+  const tool = oneLine(String(e.tool), 120)
+  const s = (k: string) => oneLine(e[k], 200) // external text: cleaned and cut before it is shown
   const file = (p: string) => p.split('/').slice(-2).join('/')
   if (tool === 'Bash') return `running ${s('description') || s('command').slice(0, 50)}`
   if (tool === 'Edit' || tool === 'Write') return `editing ${file(s('file_path'))}`

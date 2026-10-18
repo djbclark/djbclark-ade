@@ -46,7 +46,7 @@ or ended after the session started, are shown.
 ## Fork
 
 Forked from `agent-radar` 0.1.3 by Hamza Zafar (MIT), <https://github.com/hamzafer/claude-code-mods>
-(`mods/agent-radar`). Version here: `0.2.0-djb.1`. Upstream's license text and author are kept
+(`mods/agent-radar`). Version here: `0.2.0-djb.2`. Upstream's license text and author are kept
 ([LICENSE](LICENSE), `plugin.json`).
 
 What changed:
@@ -57,7 +57,23 @@ What changed:
 2. `hooks/watch.ts` (new): the pure parts (agent CLI and model from a command, output path from the tool
    result, job record parsing, log summary, the two poll scripts).
 3. `types/index.d.ts`: `kind`, `AcpJob` and the shell and job fields on `RadarAgent`.
-4. `tests/agent-radar.test.tsx`: upstream's three tests plus six for the above.
+4. `tests/agent-radar.test.tsx`: upstream's three tests plus eighteen for the above and the hardening below.
+5. Hardening (`-djb.2`), the behaviour of the fixes from the adversary review of upstream's background-shell PR
+   (<https://github.com/hamzafer/claude-code-mods/pull/129>), applied to every place the fork shows or reads
+   external data, the `acp-dispatch` job records included, which upstream lacks:
+   * Escape sequences are stripped from everything shown (CSI, OSC such as the clipboard write, DCS, the 8-bit
+     forms, `ESC c` and the other two-byte escapes, C0/C1 control characters except tab and line breaks) and so
+     are the bidi controls (U+061C, U+200E/F, U+202A-E, U+2066-9). That covers command text, the Bash
+     description, output tails, log events, subagent descriptions, messages and tool-call labels, and every
+     text field of a job record. Shown labels are single lines.
+   * A command is cut at 4096 characters before any regex runs (agent label, `--model`, `--name`, the
+     dispatch check).
+   * A path the radar hands to `lsof` or `tail` (a shell's output file, a job's `log`) must be absolute, free of
+     whitespace, control characters and `..` segments; a shell's must also end in `.output`. A job record's
+     `report`, `done` and `record` must pass the same check or are dropped. Paths shown are cleaned.
+   * The tail and record scripts pipe through `LC_ALL=C tr -d '\001'`, so no log or record can forge another
+     file's block (`LC_ALL=C` because BSD `tr` rejects invalid UTF-8).
+   * Job record numbers must be finite; text fields are cut (name 100, others 64) and an empty name drops the record.
 
 The generic part (background shells) is meant for upstream; the `acp-dispatch` part is specific to this
 toolchain and is not.
