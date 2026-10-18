@@ -210,8 +210,10 @@ Rules for any agent that dispatches to agy:
   sublimit of the same weekly, not a separate bucket), codex (ChatGPT Plus
   weekly; spend it on `gpt-6-astra`), antigravity/agy (Google AI Pro — also
   exposes Claude/GPT windows), copilot (premium requests; **reserve, floor
-  60%**), cursor Pro (Auto and third-party sublimits), grok (SuperGrok;
-  **reserve, floor 60%**: GrokBot runs on it; `acp-run grok --model grok-4.7`),
+  60%**), cursor Pro (Auto and third-party sublimits; GrokBot has its own
+  separate Cursor pool since 2026-10-18, never a target), grok (SuperGrok; an
+  ordinary pool since 2026-10-18: realtime-web, research, bulk;
+  `acp-run grok --model grok-4.7`),
   zai GLM coding plan (via the zcode TUI; an everyday pool), clinepass (Cline
   windows; feeds hermes via LiteLLM :4000; never delegated, aiuse-disabled),
   devin (disabled in Orca on purpose).
@@ -531,23 +533,83 @@ method that runs the waves.
    --agent A --model M` continues it on a stronger pool, from the report and
    the diff. Sending a hard slice to a cheap worker first costs one failed step
    and a reroute; guessing high costs a frontier window every time.
+
+   **Which Claude tier** (2026-10-18). Each one has a use. The default executor
+   is Sonnet, and a slice climbs on evidence, not on a hunch. Prior art:
+   Anthropic's model guides,[^tiers] its advisor strategy,[^advisor] Claude
+   Code's `opusplan` and effort docs,[^cc] and the routing literature
+   (RouteLLM, FrugalGPT).[^routing]
+   4a. **Haiku** is for lookups, classification, extraction and one-file
+       summaries, as an Agent-tool sub-agent at `effort: "low"`. Anthropic: "Quick
+       answers, summaries, and simple extraction".
+   4b. **Sonnet 5.5** (`claude --model sonnet --kind code --effort high`) is the
+       everyday executor. It implements from a clear brief or plan, writes
+       tests, refactors, debugs with a repro and writes docs. Anthropic calls it
+       the "versatile default" for "Coding, writing, analysis, and multi-step
+       workflows"; Claude Code calls it the model "for daily coding tasks". Use
+       `--effort high` where "verification matters or edge cases are likely,
+       such as fixing a bug in an existing codebase", and `medium` for
+       "day-to-day engineering work with a clear scope".
+   4c. **Opus 5.5** (`--kind judgment --effort high`) is for reasoning that
+       "genuinely needs sustained thinking". It has five uses:
+       1. **Planning:** the brief or plan a Sonnet slice will execute. This is
+          `opusplan`'s split: Opus "for complex reasoning and architecture
+          decisions", Sonnet "for code generation and implementation".
+       2. **Review and adjudication** of a slice's diff.
+       3. **Code that is hard up front**, which may start on Opus directly
+          (`claude --model opus --kind code --effort high`, or agy's Claude
+          pool, whose code row is already Opus). That means root cause without
+          a repro; concurrency, clock, cache or cross-path state bugs; and a
+          change whose design spans several modules or an unfamiliar
+          architecture.
+       4. **The next rung** after Sonnet fails a verified check:
+          `reroute --escalate` takes code to judgment, never straight to Fable.
+       5. **The advisor** to a Sonnet executor. A Sonnet slice that hits a
+          design decision it can't settle writes `BLOCKED: <question>` instead
+          of guessing. The Opus-tier lead answers in a few hundred tokens and
+          resumes it, or steers it with `acp-dispatch tell`. In Anthropic's
+          tests, Sonnet with an Opus advisor scored 2.7 points higher on
+          SWE-bench Multilingual than Sonnet alone, and cost 11.9% less per
+          task.
+   4d. **Fable 5.1** (`--kind frontier --effort high`) is an advisor unless
+       `frontier-exec` is set, and item 1b gates it. It is for previously
+       unsolved problems; long-horizon work from a rough idea "with fewer
+       check-ins"; a whole-corpus read that needs its 1M window; and work that
+       Opus was tried on and missed ("Problems you've tested with Opus and it
+       struggled").
+   4e. **Climb on evidence.** Go Sonnet → Opus → Fable only when the lighter
+       tier was tried and "the lighter answer misses things that matter"; start
+       on Opus only for 4c's third use. Anthropic's API guide says the
+       opposite: start on the most intelligent model and turn effort down. That
+       is right when each token costs money and nothing else is shared. Here
+       the binding limit is the shared Claude windows (item 2), so the cascade
+       wins: FrugalGPT and RouteLLM report about 2× lower cost at the same
+       quality.
+
+[^tiers]: https://academy.claude.com/tutorials/choosing-the-right-claude-model and https://claude.com/resources/articles/claude-models-explained-choosing-the-best-model-for-your-use-case (read 2026-10-18).
+[^advisor]: https://claude.com/resources/articles/the-advisor-strategy and https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool (2026-04-09).
+[^cc]: https://code.claude.com/docs/en/model-config (aliases, `opusplan`, effort levels).
+[^routing]: https://arxiv.org/abs/2406.18665 (RouteLLM) and FrugalGPT's cascade (cheap model first, escalate when a check fails).
+
 5. **The context window is a choice**, next to model and effort. Default is
    the agent's own window. `--context 500k` / `1m` only for a whole-corpus read
    or a long log: bigger windows bill more per token on xAI (from a 200k
    prompt), Cursor (2× above 256k, Fast 3×) and Copilot (long tier), and can be
    slower. Read `acp-run: applied: model=... effort=... ctx=...`; the per-agent
    table is `tools/acp-run/README.md` (2026-10-15).
-6. **Reserves, never depleted:** the **grok TUI** (GrokBot, the cloud Chief of
-   Staff, runs on its SuperGrok pool) and **copilot** (GitHub-side Copilot
+6. **The reserve, never depleted:** **copilot** (GitHub-side Copilot
    review of commits draws on its premium requests; it read 100% used on
    2026-10-15, so this has already gone wrong once). Hard floor **60% left**
    (`reserve_floor` in `route_agent.py`), one small slice at a time, and only
-   when that vendor is the point: grok only for `realtime-web` slices (an
-   explicit opt-in: the realtime X/web angle is the point), copilot only for
-   `github` slices, GitHub-context work that `gh` from any other agent cannot
-   do. A missing or stale grok/copilot reading means do not use (`route_agent.py`
-   fails closed). Grok *models* reached through another TUI (cursor, copilot,
-   opencode) bill that TUI and are fine. **clinepass**: never a bigteam target
+   for `github` slices, GitHub-context work that `gh` from any other agent cannot
+   do. A missing or stale copilot reading means do not use (`route_agent.py`
+   fails closed). **Grok is no longer a reserve (2026-10-18):** GrokBot (the
+   cloud Chief of Staff) moved to its own separate Cursor pool when djbclark
+   upgraded to the $60 Cursor plan, so the `grok` TUI is an ordinary
+   subscription pool (`realtime-web`, `research`, `bulk`; no floor), ranked
+   behind the burn-first pools; never route into the GrokBot pool (aiuse
+   provider `grok-bot`). Grok *models* reached through another TUI (cursor,
+   copilot, opencode) bill that TUI and are fine. **clinepass**: never a bigteam target
    (`NEVER_ROUTE` in `route_agent.py`; it stays in Hermes's chain as its
    lifeline; aiuse `[disabled_services]`). Claude itself: keep enough 5h headroom to finish
    integrating what is in flight, because orchestration runs from it.
