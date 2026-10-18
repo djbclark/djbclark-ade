@@ -277,6 +277,7 @@ flips to false turns peer messaging off in running Claude sessions (2026-10-13; 
 | any ACP launch (`host acp`, id `YYYYMMDD-…`) | `launch.py reply <id> "<text>"`, then `launch.py wait <id>` | `launch.py list`; its log under `~/.local/state/session-finder/` |
 | hermes (Telegram/desktop chat, `hermes-gw`) | `ask_hermes` (MCP) to prompt it; `messages_send` with `target="telegram:<chat>[:<thread>]"` posts as Hermes; approvals: `permissions_list_open` / `permissions_respond` | `hermes --resume <id>` |
 | hermes (CLI in a pane) | `helm.py send <pane> "<text>"` | same |
+| hermes (to make it *change* something: `ask_hermes` is read-only) | after djbclark's yes for that run: `ACP_OPERATOR_APPROVED=hermes launch.py --agent hermes --cwd ~ -f brief.md --model <explicit id>`; pick the id from its `new_session` model list, never `custom:*` (2026-10-17: `custom:big-pickle` went to sipb-llms-proxy, not ClinePass) | `launch.py reply <id>` |
 | muse | `muse session-message send --target <uuid|name>`, body on stdin | `muse resume <id>` |
 | codex, cursor, opencode, cline, copilot, qwen, zcode, agy (TUIs in herdr/Orca/tmux) | `helm.py send <id> "<text>"` when idle (keys into the pane; verify on screen), else its `focus:` | the `resume:` line session-history prints |
 | a TUI herdr does not detect (`zcode`, `muse`, …; listed from `pane process-info`, status `unknown`) | `helm.py send <pane> "<text>"` only after reading its screen | the `resume:` line session-history prints |
