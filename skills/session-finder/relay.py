@@ -17,6 +17,8 @@ send-text` + `agent send-keys enter`, Orca `terminal send`, tmux `send-keys`), t
     holds a draft (someone is typing there; Claude Code's dim/grey suggested prompt is not one: prompt_line.py).
   * Verified, never assumed: a Claude session counts as delivered once the text shows up in its transcript
     (a queued message is recorded as a queue-operation at once), else as queued once the pane shows it.
+  * Enter goes in ENTER_DELAY after the text, and again (up to ENTER_RETRIES times) while the text still
+    sits in a Claude input box: sent in one burst it reads as a paste and does not submit (2026-10-18).
   * One line: newlines are folded to spaces (an Enter would submit half the message). For a long brief,
     write it to a file and relay one line that names the file's absolute path.
 
@@ -35,6 +37,12 @@ import fleet  # noqa: E402
 import prompt_line  # noqa: E402
 
 HERDR = fleet.HERDR
+# Pause between the text and its Enter (2026-10-18): sent back to back, Claude Code reads the burst as a
+# paste and the Enter inside it does not submit, so the message sat in the input box until the operator
+# pressed Enter by hand. ENTER_RETRIES more Enters go in when the text is still in the box after RETRY_AFTER s.
+ENTER_DELAY = 0.5
+ENTER_RETRIES = 2
+RETRY_AFTER = 2.0
 
 
 def screen(chan, lines=20):
@@ -67,17 +75,35 @@ def draft(chan):
     return prompt_line.classify("\n".join(out.splitlines()[-14:])) or ""
 
 
+def press_enter(chan):
+    kind, target = chan
+    if kind == "herdr":
+        return fleet.run(HERDR, "agent", "send-keys", target, "enter")[0] == 0
+    if kind == "tmux":
+        return fleet.run("tmux", "send-keys", "-t", target, "Enter")[0] == 0
+    return False
+
+
 def type_line(chan, text):
     kind, target = chan
     if kind == "herdr":
-        return (fleet.run(HERDR, "pane", "send-text", target, text)[0] == 0
-                and fleet.run(HERDR, "agent", "send-keys", target, "enter")[0] == 0)
-    if kind == "orca":
+        if fleet.run(HERDR, "pane", "send-text", target, text)[0] != 0:
+            return False
+    elif kind == "orca":
         return fleet.run("orca", "terminal", "send", "--terminal", target, "--text", text, "--enter", timeout=20)[0] == 0
-    if kind == "tmux":
-        return (fleet.run("tmux", "send-keys", "-t", target, "-l", text)[0] == 0
-                and fleet.run("tmux", "send-keys", "-t", target, "Enter")[0] == 0)
-    return False
+    elif kind == "tmux":
+        if fleet.run("tmux", "send-keys", "-t", target, "-l", text)[0] != 0:
+            return False
+    else:
+        return False
+    time.sleep(ENTER_DELAY)
+    return press_enter(chan)
+
+
+def stuck_in_box(chan, text):
+    """True while TEXT still sits unsent in a Claude Code input box: its Enter did not land."""
+    d = draft(chan)
+    return bool(d) and " ".join(d.split())[:30] == text[:30]
 
 
 def find(ident, ss):
@@ -140,6 +166,7 @@ def main():
     # the transcript stores the text JSON-escaped; match on a prefix of it
     probe = json.dumps(text[:40], ensure_ascii=False)[1:-1]
     seen, deadline = None, time.time() + a.wait
+    typed_at, retries = time.time(), 0
     while time.time() < deadline:
         if tx and tx.is_file():
             with tx.open("rb") as fh:
@@ -147,10 +174,15 @@ def main():
                 if probe in fh.read().decode("utf-8", "replace"):
                     seen = "delivered"
                     break
+        stuck = s["agent"] == "claude" and stuck_in_box(chan, text)
+        if stuck and retries < ENTER_RETRIES and time.time() - typed_at >= RETRY_AFTER:
+            press_enter(chan)
+            typed_at, retries = time.time(), retries + 1
         scr = screen(chan, 30)
-        # Claude Code's queue hint; for other TUIs the text on a line that is not the input prompt
+        # Claude Code's queue hint (not while our text is still in its input box: the hint may be for an
+        # earlier message); for other TUIs the text on a line that is not the input prompt
         # (still on the ❯ line means Enter did not land)
-        if "queued messages" in scr or (s["agent"] != "claude" and any(
+        if (not stuck and "queued messages" in scr) or (s["agent"] != "claude" and any(
                 text[:30] in ln and not ln.lstrip().startswith(("❯", ">")) for ln in scr.splitlines())):
             seen = seen or "queued"
             if not tx:

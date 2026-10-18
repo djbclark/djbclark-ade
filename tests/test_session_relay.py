@@ -129,6 +129,37 @@ class TestRelayRules(unittest.TestCase):
             self.assertEqual(calls.read_text().splitlines(),
                              ["pane send-text w1:p1 hello there", "agent send-keys w1:p1 enter"])
 
+    def run_main(self, drafts: list[str], scr: str, transcript: Path | None = None) -> tuple[int, list[str]]:
+        """main() against one fake working Claude session; DRAFTS are successive input-box reads."""
+        enters: list[str] = []
+        reads = iter(drafts)
+        saved = (relay.fleet.sessions, relay.type_line, relay.draft, relay.press_enter, relay.screen,
+                 relay.RETRY_AFTER, sys.argv)
+        relay.fleet.sessions = lambda: [sess(transcript=str(transcript) if transcript else None)]
+        relay.type_line = lambda chan, text: True
+        relay.draft = lambda chan: next(reads, "")
+        relay.press_enter = lambda chan: enters.append("enter") or True
+        relay.screen = lambda chan, lines=20: scr
+        relay.RETRY_AFTER = 0
+        sys.argv = ["relay.py", "peer-1", "hello there friend", "--wait", "3"]
+        try:
+            rc = relay.main()
+        finally:
+            (relay.fleet.sessions, relay.type_line, relay.draft, relay.press_enter, relay.screen,
+             relay.RETRY_AFTER, sys.argv) = saved
+        return rc, enters
+
+    def test_text_left_in_the_box_gets_another_enter(self) -> None:
+        # first read is the pre-send draft check (empty), then the text sits in the box once, then it is gone
+        rc, enters = self.run_main(["", "hello there friend", ""], "Press up to edit queued messages")
+        self.assertEqual(rc, 0)
+        self.assertEqual(enters, ["enter"])
+
+    def test_queue_hint_is_not_delivery_while_the_text_is_still_in_the_box(self) -> None:
+        rc, enters = self.run_main([""] + ["hello there friend"] * 50, "Press up to edit queued messages")
+        self.assertEqual(rc, 1)
+        self.assertEqual(enters, ["enter"] * relay.ENTER_RETRIES)
+
 
 if __name__ == "__main__":
     unittest.main()
