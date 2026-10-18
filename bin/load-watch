@@ -15,8 +15,8 @@ stayturgid-agent already build only on SIPB's Forgejo runner (`forgejo-ci` skill
 candidate.
 
 Each sample is one `ps` call and `os.getloadavg()`: no model, no network. A sample counts as hot when
-the 1-minute load per core is at least LW_LOAD_PER_CORE (2.0). After LW_SUSTAIN (15, i.e. 5 minutes) hot
-samples in a row it attributes the mean CPU of those samples to sessions (session-finder's fleet.py; a process belongs
+the 1-minute load per core is at least LW_LOAD_PER_CORE (2.0). After LW_SUSTAIN_S (300) seconds of
+continuously hot samples it attributes the mean CPU of the samples in that window to sessions (session-finder's fleet.py; a process belongs
 to the session whose pid is its ancestor, a daemonised one such as a Gradle daemon to the only session
 in its git repo) and, for each session above LW_MIN_CORES (1.5) cores, writes a brief, types one line
 naming it into the session (relay.py), and sends one hermes-ping (with a ready `acp-dispatch cursor` line for a fixer when the relay fails). A session or repo is not told again
@@ -46,8 +46,8 @@ LABEL = "com.djbclark.load-watch"
 HERMES_PING = HOME / ".local/bin/hermes-ping"
 
 LOAD_PER_CORE = float(os.environ.get("LW_LOAD_PER_CORE", "2.0"))
-SAMPLE_S = 20  # launchd StartInterval
-SUSTAIN = int(os.environ.get("LW_SUSTAIN", "15"))  # samples
+SUSTAIN_S = float(os.environ.get("LW_SUSTAIN_S", "300"))  # seconds of continuous hot load
+MAX_GAP_S = 900  # a longer gap between samples is a sleep, not load
 MIN_CORES = float(os.environ.get("LW_MIN_CORES", "1.5"))
 COOLDOWN_S = float(os.environ.get("LW_COOLDOWN_H", "6")) * 3600
 MY_UID = os.getuid()
@@ -215,7 +215,7 @@ def brief(inc, g, top, remote, load1, ncpu):
     return f"""# load-watch incident {inc}
 
 Written {stamp()} by `~/src/djbclark-ade/bin/load-watch` (no model). Load was {load1:.1f} on {ncpu} cores
-(threshold {LOAD_PER_CORE} per core) for {SUSTAIN} samples in a row ({SUSTAIN * SAMPLE_S // 60} min), and your session
+(threshold {LOAD_PER_CORE} per core) for {SUSTAIN_S / 60:g}+ min, and your session
 ({s.get('agent')} `{s.get('name') or s['id']}`, cwd `{s.get('cwd')}`) used about {g['cores']:.1f} cores of it:
 
 {procs}
@@ -244,7 +244,7 @@ Repo: `{top or '-'}`. {where}{' It is already registered CI-only, so this ran ou
 def notify(inc, g, top, path, load1, ncpu, dry):
     s = g["session"]
     cmd = sorted(g["procs"], key=lambda p: -p["cores"])[0]["cmd"][:60] if g["procs"] else "the session itself"
-    line = (f"load-watch {inc}: load {load1:.0f} on {ncpu} cores for {SUSTAIN * SAMPLE_S // 60}+ min; your processes used "
+    line = (f"load-watch {inc}: load {load1:.0f} on {ncpu} cores for {SUSTAIN_S / 60:g}+ min; your processes used "
             f"~{g['cores']:.1f} cores ({cmd}). After your current step, read {path} and act on it.")
     relayed = False
     if not dry:
@@ -270,30 +270,32 @@ def notify(inc, g, top, path, load1, ncpu, dry):
 def cmd_sample(a):
     st = load_state()
     t = now()
-    table = ps_table()
-    if table is None:  # a stall this bad is itself a hot sample: keep the streak going, add no CPU data
-        log(f"ps timed out at load {os.getloadavg()[0]:.0f}; sample counted hot, no CPU data")
-        st["t"], st["streak"] = t, st.get("streak", 0) + 1
-        save_state(st)
-        return 0
-    d = {pid: [round(cores, 2), uid, cmd[:300], ppid] for pid, (ppid, uid, cores, cmd) in table.items() if cores >= 0.05}
     load1 = os.getloadavg()[0]
     ncpu = os.cpu_count() or 1
     hot = load1 / ncpu >= LOAD_PER_CORE
     gap = t - st.get("t", 0)
     st["t"] = t
-    if hot and gap < 300:
-        st["samples"] = (st.get("samples", []) + [{"t": t, "d": d}])[-SUSTAIN:]
+    # Time, not a sample count (2026-10-18: under a load-60 stall launchd ran us every 3-7 minutes, so 15
+    # samples took 45+ min and one 7-min gap restarted the count). A gap over MAX_GAP_S is a sleep.
+    if hot and (not st.get("hot_since") or gap >= MAX_GAP_S):
+        st["hot_since"], st["samples"], st["streak"] = t, [], 0
+    elif not hot:
+        st["hot_since"], st["samples"], st["streak"] = None, [], 0
+    table = ps_table()
+    if table is None:  # a stall this bad is itself a hot sample: keep the streak going, add no CPU data
+        log(f"ps timed out at load {load1:.0f}; sample counted, no CPU data")
+        st["streak"] = st.get("streak", 0) + hot
+        save_state(st)
+        return 0
+    if hot:
+        d = {pid: [round(c, 2), uid, cmd[:300], ppid] for pid, (ppid, uid, c, cmd) in table.items() if c >= 0.05}
+        st["samples"] = [x for x in st.get("samples", []) if x["t"] >= t - SUSTAIN_S] + [{"t": t, "d": d}]
         st["streak"] = st.get("streak", 0) + 1
-    elif hot:  # first sample, or after sleep: start a new streak
-        st["samples"], st["streak"] = [{"t": t, "d": d}], 1
-    else:
-        st["samples"], st["streak"] = [], 0
     st["load1"] = load1
     st["cooldown"] = {k: v for k, v in st.get("cooldown", {}).items() if t - v < COOLDOWN_S}
     if a.verbose:
         print(f"load {load1:.1f}/{ncpu} hot={hot} streak={st['streak']}")
-    if st["streak"] >= SUSTAIN:
+    if hot and t - st["hot_since"] >= SUSTAIN_S:
         use, span = window(st)
         groups, loose = attribute(use, span, ppids(st, table))
         told = 0
@@ -336,10 +338,10 @@ def cmd_sample(a):
             # 2026-10-18: load 90 from memory starvation and a hung AFS aklog blamed no agent and told no one
             if "nocpu" not in st["cooldown"] and not a.dry_run and HERMES_PING.exists():
                 subprocess.run([str(HERMES_PING), f"djbclark-ade: load-watch: load {load1:.0f} on {ncpu} cores for "
-                                f"{SUSTAIN * SAMPLE_S // 60}+ min and no agent build behind it; {why}"],
+                                f"{SUSTAIN_S / 60:g}+ min and no agent build behind it; {why}"],
                                capture_output=True, timeout=60)
                 st["cooldown"]["nocpu"] = t
-    elif not st["streak"]:
+    elif not hot:
         st.pop("loose_logged", None)
     save_state(st)
     return 0
@@ -361,7 +363,7 @@ def not_cpu(use, span, ncpu):
 def cmd_status(a):
     st = load_state()
     use, span = window(st)
-    print(f"load1 {st.get('load1', 0):.1f} on {os.cpu_count()} cores; hot streak {st.get('streak', 0)}/{SUSTAIN} "
+    print(f"load1 {st.get('load1', 0):.1f} on {os.cpu_count()} cores; hot for {now() - st['hot_since'] if st.get('hot_since') else 0:.0f}/{SUSTAIN_S:.0f} s, {st.get('streak', 0)} samples "
           f"(threshold {LOAD_PER_CORE}/core, {MIN_CORES} cores per session, cooldown {COOLDOWN_S / 3600:g} h)")
     for pid, (secs, _, cmd) in sorted(use.items(), key=lambda kv: -kv[1][0])[:8]:
         print(f"  {secs / span if span else 0:5.2f} cores  pid {pid}  {cmd[:110]}")

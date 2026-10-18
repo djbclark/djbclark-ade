@@ -61,3 +61,40 @@ def test_ack_records_and_unknown_id(tmp_path):
     assert run(tmp_path, "ack", "x1", "moved to CI").returncode == 0
     assert "moved to CI" in json.loads((state / "incidents.jsonl").read_text())["ack"]
     assert run(tmp_path, "ack", "nope", "x").returncode == 1
+
+
+def _sampler(tmp_path, monkeypatch):
+    lw = load_module()
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(lw, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(lw, "HERMES_PING", tmp_path / "no-such-ping")
+    monkeypatch.setattr(lw, "now", lambda: clock["t"])
+    monkeypatch.setattr(lw.os, "getloadavg", lambda: (40.0, 40.0, 40.0))
+    monkeypatch.setattr(lw.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(lw, "ps_table", lambda: {"1": (0, 0, 0.1, "x")})
+    monkeypatch.setattr(lw, "attribute", lambda use, span, parent: ({}, []))
+
+    class A:
+        dry_run = False
+        verbose = False
+
+    def at(t):
+        clock["t"] = t
+        lw.cmd_sample(A())
+        return (tmp_path / "sample.log").read_text() if (tmp_path / "sample.log").exists() else ""
+    return at
+
+
+def test_sustain_is_time_based_and_tolerates_slow_samples(tmp_path, monkeypatch):
+    at = _sampler(tmp_path, monkeypatch)
+    assert at(1000) == ""
+    assert at(1200) == ""            # 200 s hot: not yet
+    assert "sustained load" in at(1400)  # 400 s hot, samples 200 s apart (a stalled launchd)
+
+
+def test_long_gap_restarts_the_clock(tmp_path, monkeypatch):
+    at = _sampler(tmp_path, monkeypatch)
+    at(1000)
+    assert at(2000) == ""            # 1000 s gap is a sleep: hot clock restarts at 2000
+    assert at(2200) == ""
+    assert "sustained load" in at(2400)
