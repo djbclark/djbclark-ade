@@ -78,12 +78,14 @@ class AutoResumeBase(Base):
 
     def run_auto_resume(self, seq: str, mode: str = "writes", attempt: int = 1,
                         name: str = "s1") -> tuple[int, list[float]]:
-        """Run the scheduled runner's work in-process with sleeps recorded, not slept."""
-        mod = runpy.run_path(str(SCRIPT))
+        """Run the scheduled runner's work in-process with sleeps recorded, not slept. The
+        module loads inside the patched env so module constants (e.g. the D2 max-wait override
+        these fixtures need for their 2036 resets) read the same values a subprocess would."""
         sleeps: list[float] = []
         env = self.base_env(mode, ACP_DISPATCH_AIUSE=str(self.fake_aiuse), FAKE_AIUSE_SEQ=seq,
                             FAKE_AIUSE_COUNT=str(self.aiuse_count))
         with patch.dict(os.environ, env), patch("time.sleep", side_effect=sleeps.append):
+            mod = runpy.run_path(str(SCRIPT))
             rc = mod["auto_resume_record"](self.record_path(name), attempt)
         return rc, sleeps
 

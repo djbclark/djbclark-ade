@@ -167,7 +167,10 @@ class Base(unittest.TestCase):
                 "ACP_DISPATCH_LAUNCHCTL": str(self.fake_launchctl),
                 "INFO_COUNT": str(self.tmp / "info-count"), "ACP_DISPATCH_AIUSE": "off",
                 # The in-flight cap scans this root: never the machine's real running slices.
-                "ACP_DISPATCH_STATE": str(self.tmp / "state"), **extra}
+                "ACP_DISPATCH_STATE": str(self.tmp / "state"),
+                # D2: these suites' fixtures reset years out (2036); the far-reset
+                # skip must not fire for them (D2's own tests cover the rule)
+                "ACP_DISPATCH_MAX_WAIT_HOURS": "876576", **extra}
 
     def dispatch(self, *extra: str, mode: str = "writes", name: str = "s1",
                  env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -1017,7 +1020,8 @@ class TestAiuseNoteExhausted(Base):
                       "--out", str(self.out), "--acp-run", str(self.fake)], env=env)
         self.assertEqual(result.returncode, 5)
         self.assertIn("class=quota", result.stdout)
-        self.assertIn("note-exhausted zai --resets-at 2026-10-14T22:56:01", self.calls()[0])
+        # D2/MSG 2: zcode zone-less stamps are Beijing time, so aiuse gets the UTC instant
+        self.assertIn("note-exhausted zai --resets-at 2026-10-14T14:56:01+00:00", self.calls()[0])
 
     def test_agent_metrics_stderr_is_not_classified_as_outage(self):
         env = {"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)}
