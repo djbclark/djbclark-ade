@@ -22,6 +22,20 @@ A fallback that also fails returns the primary's answer (or the fallback's,
 when the primary was unreachable). Never the other way round: the fallback's
 429 or 402 never sends work to the primary.
 
+LLM formats (2026-10-18). Self-hosted Firecrawl has no LLM, so a scrape that asks for the
+`query` or `json` format would fail there, and the commercial API is not used. The router
+strips those formats from the upstream request, takes the markdown from the primary and
+runs the model itself, in this order (first rung that answers wins):
+  1. SIPB LLMs (via the local sipb-llms-proxy), when the page fits ~24k tokens;
+  2. the same model, chunked: each chunk is mapped, the partial results are reduced. A page
+     past that is never sent whole, because the SIPB server silently keeps only the LAST 16k
+     tokens of a prompt over ~32k (no error). A reply whose `usage.prompt_tokens` is far below
+     the size sent counts as truncated and falls through;
+  3. the free large-context LiteLLM pool (gemini-free, then gemini-free-lite).
+When every rung fails, the page's markdown is returned with a `warning` instead of an error.
+The answer goes in `data.answer` (query) and `data.json` (json); the header X-Firecrawl-LLM
+names the rung. FIRECRAWL_ROUTER_LLM=off passes the formats through untouched.
+
 Async jobs (crawl, batch scrape, extract) stay on the backend that created
 them: the router remembers job id -> backend and rewrites absolute `url`/`next`
 links in responses to point back at itself.
@@ -33,6 +47,12 @@ Environment:
   FIRECRAWL_API_KEY            fallback key; empty disables the fallback
   FIRECRAWL_ROUTER_FALLBACK    "off" disables the fallback
   FIRECRAWL_ROUTER_TIMEOUT     floor for the per-request timeout, seconds (default 120)
+  FIRECRAWL_ROUTER_LLM         "off" disables LLM-format handling (default on)
+  FIRECRAWL_ROUTER_SIPB_KEY    SIPB LLMs key (MIT_SIPB_API_KEY); BASE default http://127.0.0.1:8890/api,
+                               MODEL default qwen3.6:35b-a3b-q4_K_M (…_SIPB_BASE, …_SIPB_MODEL)
+  FIRECRAWL_ROUTER_LITELLM_KEY LiteLLM key; BASE default http://127.0.0.1:4000/v1, models gemini-free,
+                               gemini-free-lite (…_LITELLM_BASE, …_LITELLM_MODELS, comma list)
+  FIRECRAWL_ROUTER_LLM_DEADLINE seconds to spend on one scrape's extraction (default 420)
 
 --open drops the bearer token, so local programs that speak the Firecrawl API
 (Hermes' firecrawl web backend) can use the router at a fixed --listen address;
@@ -163,9 +183,232 @@ def request_timeout(body: bytes | None, floor: float) -> float:
     return floor
 
 
+# ---- LLM formats (query, json) -------------------------------------------------------------
+CHARS_PER_TOKEN = 3.3  # conservative (real prose is ~4+): overestimates tokens, so budgets hold
+SIPB_ONE_SHOT_CHARS = int(24000 * CHARS_PER_TOKEN)   # whole page in one call
+SIPB_CHUNK_CHARS = int(16000 * CHARS_PER_TOKEN)      # one chunk of a map-reduce
+BIG_ONE_SHOT_CHARS = 600_000                         # ~180k tokens; gemini's window is 1M
+BIG_CHUNK_CHARS = 400_000
+TRUNCATION_CHARS_PER_TOKEN = 5.0  # more chars per reported prompt token than this = cut short
+LLM_MAX_TOKENS = 4096
+LLM_NONE = "NONE"
+LLM_SYS = "You answer questions about a web page. Use only the page content provided. Be concise."
+LLM_QUOTE_SYS = ("Reply with ONE verbatim quote from the page that answers the question. "
+                 "Output only the quote, nothing else.")
+LLM_ABSTAIN = "The page does not contain an answer to this question."
+
+
+class LLMError(Exception):
+    pass
+
+
+@dataclass
+class Rung:
+    name: str
+    base: str
+    key: str
+    model: str
+    one_shot: int
+    chunk: int
+    check_truncation: bool = False
+
+
+def wanted_formats(doc: dict):
+    """Split a scrape body's formats into (kept formats, [LLM wants]) -- None when it has none.
+
+    A want is {"kind": "json"|"query", "prompt", "schema", "mode"}. Both encodings are read:
+    the v2 object ({"type": "json", "prompt": ..., "schema": ...}) and the v1 string with a
+    top-level jsonOptions/queryOptions."""
+    formats = doc.get("formats")
+    if not isinstance(formats, list):
+        return None
+    kept, wants = [], []
+    for f in formats:
+        kind = f.get("type") if isinstance(f, dict) else f
+        if kind in ("json", "query"):
+            opts = f if isinstance(f, dict) else (doc.get("jsonOptions" if kind == "json" else "queryOptions") or {})
+            wants.append({"kind": kind, "prompt": str(opts.get("prompt") or ""),
+                          "schema": opts.get("schema"), "mode": opts.get("mode") or "freeform"})
+        else:
+            kept.append(f)
+    return (kept, wants) if wants else None
+
+
+def split_chunks(text: str, size: int) -> list[str]:
+    """Pieces of at most `size` chars, cut at a paragraph or line break when one is near."""
+    out, i = [], 0
+    while i < len(text):
+        j = min(i + size, len(text))
+        if j < len(text):
+            for sep in ("\n\n", "\n", " "):
+                k = text.rfind(sep, i + size // 2, j)
+                if k > 0:
+                    j = k + len(sep)
+                    break
+        out.append(text[i:j])
+        i = j
+    return out
+
+
+def norm_text(s: str) -> str:
+    return re.sub(r"\s+", " ", s.replace("`", "").replace("**", "")).strip().lower()
+
+
+def parse_json_text(text: str):
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    m = re.search(r"[\[{].*[\]}]", text, re.S)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except ValueError:
+            pass
+    raise LLMError("model did not return JSON")
+
+
+class Extractor:
+    """Runs the query/json formats over a page's markdown, rung by rung."""
+
+    def __init__(self, rungs: list[Rung], deadline: float = 420.0, call_timeout: float = 240.0):
+        self.rungs = rungs
+        self.deadline = deadline
+        self.call_timeout = call_timeout
+
+    def chat(self, rung: Rung, system: str, user: str, schema=None, expect_json=False) -> str:
+        body = {"model": rung.model, "temperature": 0, "max_tokens": LLM_MAX_TOKENS,
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+        if expect_json:
+            body["response_format"] = ({"type": "json_schema", "json_schema": {"name": "extract", "strict": True, "schema": schema}}
+                                       if isinstance(schema, dict) else {"type": "json_object"})
+        d = self._post(rung, body)
+        if d is None and expect_json:  # server refused response_format: ask in the prompt alone
+            body.pop("response_format")
+            d = self._post(rung, body)
+        if d is None:
+            raise LLMError("HTTP 4xx")
+        choice = (d.get("choices") or [{}])[0]
+        text = ((choice.get("message") or {}).get("content") or "").strip()
+        if not text:
+            raise LLMError(f"empty reply (finish_reason={choice.get('finish_reason')})")
+        ptok = (d.get("usage") or {}).get("prompt_tokens")
+        if rung.check_truncation and isinstance(ptok, int) and ptok * TRUNCATION_CHARS_PER_TOKEN < len(user) + len(system):
+            raise LLMError(f"prompt truncated by the server ({ptok} tokens for {len(user) + len(system)} chars)")
+        return text
+
+    def _post(self, rung: Rung, body: dict):
+        hdrs = {"Content-Type": "application/json"}
+        if rung.key:
+            hdrs["Authorization"] = f"Bearer {rung.key}"
+        req = urllib.request.Request(rung.base + "/chat/completions", data=json.dumps(body).encode(), headers=hdrs)
+        try:
+            with urllib.request.urlopen(req, timeout=self.call_timeout) as r:
+                d = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            if e.code in (400, 422) and "response_format" in body:
+                return None
+            raise LLMError(f"HTTP {e.code}") from e
+        except Exception as e:  # noqa: BLE001
+            raise LLMError(f"{type(e).__name__}: {e}") from e
+        if not isinstance(d, dict) or not d.get("choices"):
+            raise LLMError("bad response body")
+        return d
+
+    # one want on one rung, whole page or chunked
+    def answer(self, rung: Rung, want: dict, md: str):
+        if len(md) <= rung.one_shot:
+            return self._one(rung, want, md), 1
+        chunks = split_chunks(md, rung.chunk)
+        return self._map_reduce(rung, want, chunks), len(chunks)
+
+    def _one(self, rung, want, md):
+        q = want["prompt"]
+        if want["kind"] == "json":
+            schema = want["schema"]
+            sys_ = "Extract data from the page as JSON. Output only the JSON." + (
+                f"\nSchema: {json.dumps(schema)}" if schema else "")
+            return parse_json_text(self.chat(rung, sys_, f"{q}\n\nPage content:\n{md}".strip(), schema, True))
+        sys_ = LLM_QUOTE_SYS if want["mode"] == "directQuote" else LLM_SYS
+        return self.chat(rung, sys_, f"Page content:\n{md}\n\nQuestion: {q}")
+
+    def _map_reduce(self, rung, want, chunks):
+        q = want["prompt"]
+        if want["kind"] == "json":
+            schema = want["schema"]
+            sys_ = ("Extract data from this EXCERPT of a longer page as JSON. Use null or an empty list for "
+                    "anything the excerpt does not mention. Output only the JSON."
+                    + (f"\nSchema: {json.dumps(schema)}" if schema else ""))
+            parts = [parse_json_text(self.chat(rung, sys_, f"{q}\n\nExcerpt {i}/{len(chunks)}:\n{c}".strip(), schema, True))
+                     for i, c in enumerate(chunks, 1)]
+            red = ("Merge these partial JSON objects, extracted from consecutive excerpts of ONE page, into a single JSON "
+                   "object. Prefer non-null values, join lists without duplicates. Output only the JSON."
+                   + (f"\nSchema: {json.dumps(schema)}" if schema else ""))
+            return parse_json_text(self.chat(rung, red, json.dumps(parts), schema, True))
+        quote = want["mode"] == "directQuote"
+        map_sys = ((LLM_QUOTE_SYS if quote else LLM_SYS)
+                   + f" This is one excerpt of a longer page; reply exactly {LLM_NONE} if it holds nothing relevant.")
+        hits = []
+        for i, c in enumerate(chunks, 1):
+            a = self.chat(rung, map_sys, f"Excerpt {i}/{len(chunks)}:\n{c}\n\nQuestion: {q}")
+            if a.strip().strip('."\'') != LLM_NONE:
+                hits.append(a)
+        if not hits:
+            return LLM_ABSTAIN
+        if len(hits) == 1:
+            return hits[0]
+        joined = "\n".join(f"[{i}] {h}" for i, h in enumerate(hits, 1))
+        return self.chat(rung, LLM_QUOTE_SYS if quote else LLM_SYS,
+                         f"Candidate answers from different excerpts of one page:\n{joined}\n\n"
+                         f"Question: {q}\n{'Pick the best candidate and output it verbatim.' if quote else 'Write the single final answer.'}")
+
+    def run(self, wants: list[dict], md: str) -> tuple[dict, str, str]:
+        """(fields to merge into data, name of the rung(s) that answered, warning or '')."""
+        fields, used, errors = {}, [], []
+        t_end = time.monotonic() + self.deadline
+        for want in wants:
+            key = "json" if want["kind"] == "json" else "answer"
+            for rung in self.rungs:
+                if time.monotonic() > t_end:
+                    errors.append("deadline")
+                    break
+                try:
+                    value, n = self.answer(rung, want, md)
+                except LLMError as e:
+                    errors.append(f"{rung.name}: {e}")
+                    continue
+                if want["kind"] == "query" and want["mode"] == "directQuote" and value != LLM_ABSTAIN \
+                        and norm_text(value).strip("\"'“” ") not in norm_text(md):
+                    errors.append(f"{rung.name}: quote not found in the page")
+                    continue
+                fields[key] = value
+                used.append(f"{rung.name}{'x' + str(n) if n > 1 else ''}")
+                break
+        warning = ""
+        if len(fields) < len(wants):
+            warning = "LLM extraction failed (" + "; ".join(errors)[:300] + "); returning the page markdown instead."
+        return fields, "+".join(used), warning
+
+
+def build_extractor(env) -> Extractor | None:
+    if (env.get("FIRECRAWL_ROUTER_LLM") or "").lower() == "off":
+        return None
+    rungs = [Rung("sipb", (env.get("FIRECRAWL_ROUTER_SIPB_BASE") or "http://127.0.0.1:8890/api").rstrip("/"),
+                  env.get("FIRECRAWL_ROUTER_SIPB_KEY", ""),
+                  env.get("FIRECRAWL_ROUTER_SIPB_MODEL") or "qwen3.6:35b-a3b-q4_K_M",
+                  SIPB_ONE_SHOT_CHARS, SIPB_CHUNK_CHARS, check_truncation=True)]
+    lite_base = (env.get("FIRECRAWL_ROUTER_LITELLM_BASE") or "http://127.0.0.1:4000/v1").rstrip("/")
+    for m in (env.get("FIRECRAWL_ROUTER_LITELLM_MODELS") or "gemini-free,gemini-free-lite").split(","):
+        if m.strip():
+            rungs.append(Rung(m.strip(), lite_base, env.get("FIRECRAWL_ROUTER_LITELLM_KEY", ""), m.strip(),
+                              BIG_ONE_SHOT_CHARS, BIG_CHUNK_CHARS))
+    return Extractor(rungs, float(env.get("FIRECRAWL_ROUTER_LLM_DEADLINE") or 420))
+
+
 class Router:
     def __init__(self, primary: Backend, fallback: Backend | None, timeout: float,
-                 token: str = "", log=sys.stderr):
+                 token: str = "", log=sys.stderr, extractor: Extractor | None = None):
+        self.extractor = extractor
         self.primary = primary
         self.fallback = fallback
         self.timeout = timeout
@@ -221,6 +464,40 @@ class Router:
         return reply
 
     def handle(self, method: str, path: str, headers: dict, body: bytes | None) -> tuple[Reply, str]:
+        if self.extractor and method == "POST" and path.split("?", 1)[0].rstrip("/").endswith("/scrape"):
+            try:
+                doc = json.loads(body or b"{}")
+            except ValueError:
+                doc = None
+            split = wanted_formats(doc) if isinstance(doc, dict) else None
+            if split:
+                return self._scrape_with_llm(method, path, headers, doc, *split)
+        return self._forward(method, path, headers, body)
+
+    def _scrape_with_llm(self, method, path, headers, doc, kept, wants) -> tuple[Reply, str]:
+        t0 = time.monotonic()
+        has_md = any((f.get("type") if isinstance(f, dict) else f) == "markdown" for f in kept)
+        up = {k: v for k, v in doc.items() if k not in ("jsonOptions", "queryOptions")}
+        up["formats"] = kept if has_md else kept + ["markdown"]
+        reply, backend = self._forward(method, path, headers, json.dumps(up).encode())
+        out = reply.json()
+        data = out.get("data") if isinstance(out, dict) else None
+        md = data.get("markdown") if isinstance(data, dict) else None
+        if reply.status != 200 or not isinstance(md, str) or not md.strip():
+            return reply, backend
+        fields, used, warning = self.extractor.run(wants, md)
+        data.update(fields)
+        if warning:
+            data["warning"] = (data.get("warning", "") + " " + warning).strip()
+        elif not has_md:
+            data.pop("markdown", None)
+        reply.body = json.dumps(out).encode()
+        reply.headers = {k: v for k, v in reply.headers.items() if k.lower() != "content-length"}
+        reply.headers["X-Firecrawl-LLM"] = used or "none"
+        self._log(method, path, backend, reply, t0, f"llm: {used or 'FAILED'}; {len(md)} chars")
+        return reply, backend
+
+    def _forward(self, method: str, path: str, headers: dict, body: bytes | None) -> tuple[Reply, str]:
         t0 = time.monotonic()
         timeout = request_timeout(body, self.timeout)
         owner = self.owner(path)
@@ -294,7 +571,8 @@ def build_router(env, token: str) -> Router:
     fb_key = env.get("FIRECRAWL_API_KEY", "")
     if fb_key and env.get("FIRECRAWL_ROUTER_FALLBACK", "").lower() != "off":
         fallback = Backend("fallback", (env.get("FIRECRAWL_FALLBACK_URL") or "https://api.firecrawl.dev").rstrip("/"), fb_key)
-    return Router(primary, fallback, float(env.get("FIRECRAWL_ROUTER_TIMEOUT") or 120), token)
+    return Router(primary, fallback, float(env.get("FIRECRAWL_ROUTER_TIMEOUT") or 120), token,
+                  extractor=build_extractor(env))
 
 
 def serve(router: Router, listen: str) -> http.server.ThreadingHTTPServer:
@@ -331,7 +609,8 @@ def main(argv=None) -> int:
             threading.Event().wait()
         except KeyboardInterrupt:
             return 0
-    env = {k: v for k, v in os.environ.items() if k not in ("FIRECRAWL_SELFHOST_API_KEY", "FIRECRAWL_SELFHOST_URL")}
+    hidden = ("FIRECRAWL_SELFHOST_API_KEY", "FIRECRAWL_SELFHOST_URL", "FIRECRAWL_ROUTER_SIPB_KEY", "FIRECRAWL_ROUTER_LITELLM_KEY")
+    env = {k: v for k, v in os.environ.items() if k not in hidden}
     env["FIRECRAWL_API_URL"] = router.public_base
     env["FIRECRAWL_API_KEY"] = token or "router-open"
     proc = subprocess.Popen(child, env=env)
