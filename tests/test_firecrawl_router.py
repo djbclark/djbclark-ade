@@ -346,6 +346,23 @@ class LLMFormatsTest(unittest.TestCase):
         self.assertIn("deadline", doc["data"]["warning"])
         self.assertEqual(self.llm_b.bodies, [])
 
+    def test_a_hung_call_is_cut_at_the_deadline_not_its_own_timeout(self):
+        # 2026-10-18: a SIPB call that hung for its whole call timeout ended a scrape at 322 s, past Claude
+        # Code's 300 s MCP limit. The call now gets only what is left of the deadline.
+        def hang(b, p):
+            time.sleep(3)
+            return llm_ok("late")
+        self.llm_a.reply = hang
+        self.llm_b.reply = hang
+        router = self.router()
+        router.extractor.deadline = 0.6
+        t0 = time.monotonic()
+        r, doc = self.scrape(router, {"url": "u", "formats": [{"type": "query", "prompt": "q"}]})
+        self.assertLess(time.monotonic() - t0, 2.5)
+        self.assertNotIn("answer", doc["data"])
+        self.assertIn("deadline", doc["data"]["warning"])
+        self.assertEqual(r.status, 200)
+
     def test_direct_quote_none_is_an_abstain_not_a_failure(self):
         self.llm_a.reply = lambda b, p: llm_ok("NONE")
         r, doc = self.scrape(self.router(), {"url": "u", "formats": [{"type": "query", "prompt": "q", "mode": "directQuote"}]})

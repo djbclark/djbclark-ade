@@ -52,7 +52,8 @@ Environment:
                                MODEL default qwen3.6:35b-a3b-q4_K_M (…_SIPB_BASE, …_SIPB_MODEL)
   FIRECRAWL_ROUTER_LITELLM_KEY LiteLLM key; BASE default http://127.0.0.1:4000/v1, models gemini-free,
                                gemini-free-lite (…_LITELLM_BASE, …_LITELLM_MODELS, comma list)
-  FIRECRAWL_ROUTER_LLM_DEADLINE seconds to spend on one scrape's extraction (default 420)
+  FIRECRAWL_ROUTER_LLM_DEADLINE seconds to spend on one scrape's extraction (default 240: under
+                               Claude Code's 300 s MCP idle limit with room for the scrape itself)
 
 --open drops the bearer token, so local programs that speak the Firecrawl API
 (Hermes' firecrawl web backend) can use the router at a fixed --listen address;
@@ -273,7 +274,7 @@ def parse_json_text(text: str):
 class Extractor:
     """Runs the query/json formats over a page's markdown, rung by rung."""
 
-    def __init__(self, rungs: list[Rung], deadline: float = 420.0, call_timeout: float = 240.0):
+    def __init__(self, rungs: list[Rung], deadline: float = 240.0, call_timeout: float = 240.0):
         self.rungs = rungs
         self.deadline = deadline
         self.call_timeout = call_timeout
@@ -313,8 +314,13 @@ class Extractor:
         if rung.key:
             hdrs["Authorization"] = f"Bearer {rung.key}"
         req = urllib.request.Request(rung.base + "/chat/completions", data=json.dumps(body).encode(), headers=hdrs)
+        # No call outlives the scrape's deadline: a SIPB call that hung for its full 240 s after a slow start
+        # finished a scrape at 322 s, after Claude Code had dropped the MCP call at 300 s (2026-10-18).
+        left = getattr(self._tl, "t_end", float("inf")) - time.monotonic()
+        if left <= 0:
+            raise LLMError("deadline")
         try:
-            with urllib.request.urlopen(req, timeout=self.call_timeout) as r:
+            with urllib.request.urlopen(req, timeout=max(1.0, min(self.call_timeout, left))) as r:
                 d = json.loads(r.read())
         except urllib.error.HTTPError as e:
             if e.code in (400, 422) and "response_format" in body:
@@ -416,7 +422,7 @@ def build_extractor(env) -> Extractor | None:
         if m.strip():
             rungs.append(Rung(m.strip(), lite_base, env.get("FIRECRAWL_ROUTER_LITELLM_KEY", ""), m.strip(),
                               BIG_ONE_SHOT_CHARS, BIG_CHUNK_CHARS))
-    return Extractor(rungs, float(env.get("FIRECRAWL_ROUTER_LLM_DEADLINE") or 420))
+    return Extractor(rungs, float(env.get("FIRECRAWL_ROUTER_LLM_DEADLINE") or 240))
 
 
 class Router:
