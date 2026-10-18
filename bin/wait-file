@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # wait-file: block until a file the waited-on command writes is ready, with a hard timeout.
 #
-#   wait-file [--timeout SECONDS] [--match REGEX] PATH
+#   wait-file [--timeout SECONDS] [--nonempty | --match REGEX] PATH
 #
-# Ready means PATH exists and is non-empty, or, with --match, holds a line matching the extended
-# regex REGEX (e.g. --match '^rc=' for a `...; echo rc=$? >> LOG` job). Prints the resolved path on
+# Ready means PATH exists (an empty `.done` marker counts: 2026-10-17, a non-empty test held a slice
+# 6 minutes past its marker), with --nonempty that it is non-empty, or with --match that it holds a line
+# matching the extended regex REGEX (e.g. --match '^rc=' for a `...; echo rc=$? >> LOG` job). Prints the resolved path on
 # stderr first, then the file's last 5 lines when it is ready.
 #
 # Refuses (exit 2), before waiting at all, a PATH that is empty, relative, or whose directory does
@@ -17,16 +18,18 @@ set -uo pipefail
 
 timeout=1200
 match=
+nonempty=
 while [ $# -gt 0 ]; do
   case "$1" in
   --timeout) timeout="${2:-}"; shift 2 ;;
   --match) match="${2:-}"; shift 2 ;;
+  --nonempty) nonempty=1; shift ;;
   --) shift; break ;;
   -*) echo "wait-file: unknown option $1" >&2; exit 2 ;;
   *) break ;;
   esac
 done
-[ $# -eq 1 ] || { echo "usage: wait-file [--timeout SECONDS] [--match REGEX] PATH" >&2; exit 2; }
+[ $# -eq 1 ] || { echo "usage: wait-file [--timeout SECONDS] [--nonempty | --match REGEX] PATH" >&2; exit 2; }
 path="$1"
 case "$timeout" in '' | *[!0-9]*) echo "wait-file: --timeout needs whole seconds, got '$timeout'" >&2; exit 2 ;; esac
 [ -n "$path" ] || { echo "wait-file: empty PATH (an unset variable?)" >&2; exit 2; }
@@ -43,8 +46,10 @@ echo "wait-file: waiting up to ${timeout}s for $path${match:+ to match /$match/}
 ready() {
   if [ -n "$match" ]; then
     [ -f "$path" ] && grep -qE -- "$match" "$path"
-  else
+  elif [ -n "$nonempty" ]; then
     [ -s "$path" ]
+  else
+    [ -e "$path" ]
   fi
 }
 start=$SECONDS

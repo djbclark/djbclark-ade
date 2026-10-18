@@ -44,7 +44,7 @@ def test_ready_when_non_empty(tmp_path: Path) -> None:
         log.write_text("hello\n")
 
     threading.Thread(target=write).start()
-    r = run("--timeout", "15", str(log))
+    r = run("--timeout", "15", "--nonempty", str(log))
     assert r.returncode == 0
     assert "hello" in r.stdout
 
@@ -62,3 +62,11 @@ def test_match_waits_for_line(tmp_path: Path) -> None:
     r = run("--timeout", "15", "--match", "^rc=", str(log))
     assert r.returncode == 0
     assert "rc=0" in r.stdout
+
+
+def test_empty_done_marker_is_ready(tmp_path: Path) -> None:
+    # a touched .done marker is empty: existence is enough (2026-10-17: a slice waited 6 minutes past it)
+    marker = tmp_path / "report.md.done"
+    marker.touch()
+    assert run("--timeout", "5", str(marker)).returncode == 0
+    assert run("--timeout", "1", "--nonempty", str(marker)).returncode == 124
