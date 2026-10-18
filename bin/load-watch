@@ -8,6 +8,7 @@
     load-watch ci list|check DIR|rm DIR       the CI-first decisions `bg` reads
     load-watch ci decide DIR ci "CI CMD"|local "why"|pending "note"
     load-watch ci-only list|add DIR "CMD"|rm DIR|check DIR   (older form of `ci`, kept for scripts)
+    load-watch guard status|list|add LABEL [KEY=VALUE...] [--note N]|rm LABEL|reset LABEL
     load-watch install|uninstall            the launchd job (launchd/com.djbclark.load-watch.plist)
 
 Why (2026-10-18): agents keep starting heavy builds and tests on this 8-core Mac (load 24-41 that
@@ -26,7 +27,12 @@ for LW_COOLDOWN_H (6) hours. The agent is asked to finish what is running (never
 work), ask djbclark before creating a Forgejo copy, and, once CI runs there, `load-watch ci-only add`
 the repo so `bg` refuses local builds and tests in it.
 
-State: ~/.local/state/load-watch/ (state.json, incidents.jsonl, briefs/, sample.log).
+Job guard (2026-10-18): each sample also checks launchd jobs (see the `job guard` section): a crash loop in
+any non-Apple job, and hangs, CPU, memory or run time in the jobs listed in ~/.config/load-watch/guard.tsv.
+A trip boots the job out, kills its processes, pings Hermes and cools it down 90 min, then re-tests it; a
+5th round in 24 h disables it for good (`load-watch guard reset LABEL` brings it back). Events: guard.jsonl.
+
+State: ~/.local/state/load-watch/ (state.json, incidents.jsonl, guard.jsonl, briefs/, sample.log).
 Registry: ~/.config/load-watch/ci-only.tsv (repo TAB mode TAB CI command or reason TAB date), read by `bg`
 through `load-watch ci check`. CI-first (djbclark, 2026-10-18): every repo `bg` builds in needs a decision.
 `ci`: `bg` refuses and names the CI command. `local`: runs here, with the reason (macOS-only, ...).
@@ -39,6 +45,7 @@ Exit: 0 ok, 1 nothing found (check, ack of an unknown id), 2 usage.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -60,6 +67,7 @@ MIN_CORES = float(os.environ.get("LW_MIN_CORES", "1.5"))
 COOLDOWN_S = float(os.environ.get("LW_COOLDOWN_H", "6")) * 3600
 MY_UID = os.getuid()
 STUCK = []  # commands ps saw in state U this sample
+PSTATE = {}  # pid -> (ps state, rss in KB) this sample, for the job guard
 BGRUN = []  # commands runnable at background priority this sample
 
 
@@ -97,16 +105,17 @@ def ps_table():
     `time` difference misses every process that starts and exits between samples, and macOS `ps -S` does
     not fold exited children into the parent: checked 2026-10-18)."""
     try:
-        out = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,%cpu=,state=,pri=,command="], capture_output=True, text=True,
-                             timeout=20).stdout
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,%cpu=,state=,pri=,rss=,command="], capture_output=True,
+                             text=True, timeout=20).stdout
     except subprocess.TimeoutExpired:  # the machine is stalling (2026-10-18, load 77): skip this sample
         return None
     table = {}
     for line in out.splitlines():
-        parts = line.split(None, 6)
-        if len(parts) < 6 or not parts[0].isdigit():
+        parts = line.split(None, 7)
+        if len(parts) < 7 or not parts[0].isdigit():
             continue
-        cmd = parts[6] if len(parts) > 6 else ""
+        cmd = parts[7] if len(parts) > 7 else ""
+        PSTATE[parts[0]] = (parts[4], int(parts[6]) if parts[6].isdigit() else 0)
         if parts[4].startswith("U"):  # uninterruptible wait: counts in load, uses no CPU
             STUCK.append(cmd[:80] or parts[0])
         # runnable at background QoS (priority 4: E-cores only, throttled). A pile of these is load with idle
@@ -322,6 +331,265 @@ def notify(inc, g, top, path, load1, ncpu, dry):
     return relayed, ping
 
 
+# ---- job guard (djbclark, 2026-10-18) -------------------------------------------------------------------
+# A frequent watchdog for launchd jobs: stop a job that hangs, eats resources, or crash-loops, cool it down,
+# re-test it, and stop it for good after GUARD_MAX_ROUNDS rounds in a day. Why: that day three jobs had
+# crash-looped ~6,000 times each since boot (landing on a Python upgrade, cua-driver "already running",
+# signal-cli unlinked) and athena-lockers' aklog hung in uninterruptible AFS wait for 15+ minutes.
+# Crash loops are checked for every job in the user's launchd domain; hangs and resources only for jobs
+# listed in GUARD (label TAB key=value,... TAB note), because daemons such as litellm legitimately use CPU.
+GUARD = Path(os.environ.get("LW_GUARD", HOME / ".config/load-watch/guard.tsv"))
+GUARD_COOLDOWN_S = float(os.environ.get("LW_GUARD_COOLDOWN_S", "5400"))  # 90 min, then a re-test
+GUARD_TEST_S = 1800        # a re-enabled job that trips within this window starts the next round
+GUARD_MAX_ROUNDS = 5       # rounds in 24 h before the job is disabled for good
+LOOP_RUNS, LOOP_WINDOW_S = 20, 600   # crash loop: this many failed restarts within this window
+LOOP_CHECK_S = 120         # `launchctl print` failing jobs at most this often
+LIMIT_KEYS = {"hang_s": 120.0, "max_cores": 0.0, "cores_s": 60.0, "max_rss_mb": 0.0, "max_runtime_s": 0.0}
+GUARD_EXEMPT = {LABEL}
+
+
+def guard_rows():
+    rows = {}
+    try:
+        for ln in GUARD.read_text().splitlines():
+            parts = ln.split("\t")
+            if not parts[0] or parts[0].startswith("#"):
+                continue
+            lim = dict(LIMIT_KEYS)
+            for kv in (parts[1] if len(parts) > 1 else "").split(","):
+                k, _, v = kv.partition("=")
+                if k.strip() in lim:
+                    try:
+                        lim[k.strip()] = float(v)
+                    except ValueError:
+                        pass
+            rows[parts[0]] = {"limits": lim, "note": parts[2] if len(parts) > 2 else ""}
+    except OSError:
+        pass
+    return rows
+
+
+def write_guard_rows(rows):
+    GUARD.parent.mkdir(parents=True, exist_ok=True)
+    tmp = GUARD.with_suffix(".tmp")
+    tmp.write_text("# launchd label\tlimits (hang_s, max_cores, cores_s, max_rss_mb, max_runtime_s; 0 = off)\tnote\n" +
+                   "".join(f"{k}\t" + ",".join(f"{a}={b:g}" for a, b in v["limits"].items()) + f"\t{v['note']}\n"
+                           for k, v in sorted(rows.items())))
+    tmp.replace(GUARD)
+
+
+def launchd_jobs():
+    """label -> (pid or None, last exit status string), one `launchctl list`."""
+    try:
+        out = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    jobs = {}
+    for ln in out.splitlines()[1:]:
+        p = ln.split("\t")
+        if len(p) == 3:
+            jobs[p[2]] = (int(p[0]) if p[0].isdigit() else None, p[1])
+    return jobs
+
+
+def job_info(label):
+    """(runs, plist path) from `launchctl print`."""
+    try:
+        out = subprocess.run(["launchctl", "print", f"gui/{MY_UID}/{label}"], capture_output=True, text=True,
+                             timeout=20).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None, ""
+    runs = re.search(r"^\s*runs = (\d+)", out, re.M)
+    path = re.search(r"^\s*path = (\S.*)$", out, re.M)
+    return (int(runs.group(1)) if runs else None), (path.group(1).strip() if path else "")
+
+
+def tree(pid, table):
+    kids = {}
+    for p, row in table.items():
+        kids.setdefault(str(row[0]), []).append(p)
+    out, todo = [], [str(pid)]
+    while todo:
+        p = todo.pop()
+        if p in table and p not in out:
+            out.append(p)
+            todo += kids.get(p, [])
+    return out
+
+
+def gevent(label, kind, detail):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(STATE_DIR / "guard.jsonl", "a") as f:
+        f.write(json.dumps({"t": stamp(), "label": label, "event": kind, "detail": detail}) + "\n")
+    log(f"guard: {label}: {kind}: {detail}")
+
+
+def gping(msg, dry):
+    if not dry and HERMES_PING.exists():
+        subprocess.run([str(HERMES_PING), f"djbclark-ade: load-watch guard: {msg}"], capture_output=True, timeout=60)
+
+
+def guard_stop(label, reason, s, pids, table, t, dry):
+    """Boot the job out, kill its processes, start a cooldown round (or stop it for good)."""
+    if not s.get("plist"):
+        s["plist"] = job_info(label)[1]
+    rounds = [r for r in s.get("rounds", []) if t - r < 86400] + [t]
+    final = len(rounds) >= GUARD_MAX_ROUNDS
+    s.update(rounds=rounds, trip=reason, tripped=t, hot_since=None, u_since={}, run_since={})
+    if final:
+        s.update(state="permanent", until=None)
+    else:
+        s.update(state="cooldown", until=t + GUARD_COOLDOWN_S)
+    if not dry:
+        subprocess.run(["launchctl", "bootout", f"gui/{MY_UID}/{label}"], capture_output=True, timeout=30)
+        if final:
+            subprocess.run(["launchctl", "disable", f"gui/{MY_UID}/{label}"], capture_output=True, timeout=30)
+        for sig in ("-TERM", "-KILL"):
+            alive = [p for p in pids if p in table]
+            if alive:
+                subprocess.run(["kill", sig] + alive, capture_output=True, timeout=10)
+                time.sleep(2)
+    if final:
+        gevent(label, "stopped-for-good", f"{reason}; round {len(rounds)} in 24 h")
+        gping(f"stopped {label} for good after {len(rounds)} rounds today ({reason}); launchctl-disabled. "
+              f"Bring it back: ~/src/djbclark-ade/bin/load-watch guard reset {label}", dry)
+    else:
+        back = time.strftime("%H:%M", time.localtime(s["until"]))
+        gevent(label, "cooldown", f"{reason}; round {len(rounds)}/{GUARD_MAX_ROUNDS - 1} today, re-test at {back}")
+        gping(f"stopped {label} ({reason}); cooldown round {len(rounds)} of {GUARD_MAX_ROUNDS - 1} allowed today, "
+              f"re-test at {back}", dry)
+
+
+def guard_restart(label, s, jobs, t, dry):
+    """Cooldown over: load the job again and watch it for GUARD_TEST_S."""
+    plist = s.get("plist", "")
+    if label in jobs:  # someone loaded it meanwhile
+        s.update(state="testing", until=t + GUARD_TEST_S)
+        gevent(label, "re-test", "already loaded by someone else; watching it")
+        return
+    if not plist or not Path(plist).exists():
+        s.update(state="released", until=None)
+        gevent(label, "released", f"plist {plist or '?'} is gone; not restarting it")
+        return
+    if not dry:
+        r = subprocess.run(["launchctl", "bootstrap", f"gui/{MY_UID}", plist], capture_output=True, text=True,
+                           timeout=30)
+        if r.returncode != 0:
+            s.update(state="released", until=None)
+            gevent(label, "released", f"bootstrap failed ({(r.stderr or r.stdout).strip()[:120]}); left off")
+            return
+    s.update(state="testing", until=t + GUARD_TEST_S)
+    gevent(label, "re-test", f"loaded again from {plist}; watching it for {GUARD_TEST_S / 60:g} min")
+
+
+def guard(st, table, t, dry):
+    g = st.setdefault("guard", {})
+    jobs = launchd_jobs()
+    if jobs is None:
+        return
+    rows = guard_rows()
+    for label, s in list(g.items()):
+        if s.get("state") == "cooldown" and t >= s.get("until", 0):
+            guard_restart(label, s, jobs, t, dry)
+        elif s.get("state") == "testing" and t >= s.get("until", 0):
+            s.update(state="ok", until=None)
+            gevent(label, "passed", f"no trip in {GUARD_TEST_S / 60:g} min after the re-test")
+        elif s.get("state") in (None, "ok") and not s.get("rounds") and label not in rows and not s.get("loop"):
+            g.pop(label)  # nothing to remember
+    loop_check = t - st.get("guard_loop_t", 0) >= LOOP_CHECK_S
+    if loop_check:
+        st["guard_loop_t"] = t
+    for label, (pid, status) in jobs.items():
+        if label in GUARD_EXEMPT or label.startswith(("com.apple.", "application.")):
+            continue  # never Apple's own agents, nor app instances launchd tracks for the GUI
+        s = g.get(label) or {}
+        if s.get("state") in ("cooldown", "permanent", "released"):
+            continue
+        reason, pids = None, (tree(pid, table) if pid else [])
+        # a crash loop: a failing last exit and the restart count climbing
+        if loop_check and status not in ("0", "-"):
+            runs = job_info(label)[0]
+            if runs is not None:
+                hist = [h for h in s.get("loop", []) if t - h[0] <= LOOP_WINDOW_S] + [[t, runs]]
+                s["loop"] = hist
+                if runs - hist[0][1] >= LOOP_RUNS:
+                    reason = (f"crash loop: {runs - hist[0][1]} restarts in {(t - hist[0][0]) / 60:.0f} min, "
+                              f"last exit {status}")
+        elif status in ("0", "-"):
+            s.pop("loop", None)
+        lim = rows.get(label, {}).get("limits")
+        if lim and pids and not reason:
+            u = {p: s.get("u_since", {}).get(p, t) for p in pids if PSTATE.get(p, ("",))[0].startswith("U")}
+            s["u_since"] = u
+            stuck = [p for p, since in u.items() if lim["hang_s"] and t - since >= lim["hang_s"]]
+            cores = sum(table[p][2] for p in pids)
+            rss_mb = sum(PSTATE.get(p, ("", 0))[1] for p in pids) / 1024
+            runs_for = t - s.get("run_since", {}).get(str(pid), t)
+            s["run_since"] = {str(pid): s.get("run_since", {}).get(str(pid), t)}
+            if lim["max_cores"] and cores > lim["max_cores"]:
+                s["hot_since"] = s.get("hot_since") or t
+            else:
+                s["hot_since"] = None
+            if stuck:
+                reason = (f"hung: {table[stuck[0]][3][:70]} in uninterruptible wait "
+                          f"{t - u[stuck[0]]:.0f} s")
+            elif s.get("hot_since") and t - s["hot_since"] >= lim["cores_s"]:
+                reason = f"{cores:.1f} cores for {t - s['hot_since']:.0f} s (limit {lim['max_cores']:g})"
+            elif lim["max_rss_mb"] and rss_mb > lim["max_rss_mb"]:
+                reason = f"{rss_mb:.0f} MB resident (limit {lim['max_rss_mb']:g})"
+            elif lim["max_runtime_s"] and runs_for > lim["max_runtime_s"]:
+                reason = f"running {runs_for / 60:.0f} min (limit {lim['max_runtime_s'] / 60:g})"
+        elif lim and not pids:
+            s.update(u_since={}, run_since={}, hot_since=None)
+        if reason:
+            guard_stop(label, reason, s, pids, table, t, dry)
+        if s:
+            g[label] = s
+
+
+def cmd_guard(a):
+    rows, st = guard_rows(), load_state()
+    g = st.get("guard", {})
+    if a.op == "status":
+        for label, s in sorted(g.items()):
+            when = time.strftime("%H:%M", time.localtime(s["until"])) if s.get("until") else "-"
+            print(f"{label}\t{s.get('state', 'ok')}\tuntil {when}\trounds today "
+                  f"{len([r for r in s.get('rounds', []) if now() - r < 86400])}\t{s.get('trip', '')}")
+        return 0
+    if a.op == "list":
+        for k, v in sorted(rows.items()):
+            print(f"{k}\t" + ",".join(f"{x}={y:g}" for x, y in v["limits"].items()) + f"\t{v['note']}")
+        return 0
+    if not a.label:
+        print("load-watch guard add|rm|reset needs LABEL", file=sys.stderr)
+        return 2
+    if a.op == "add":
+        lim = dict(LIMIT_KEYS)
+        for kv in a.limits:
+            k, _, v = kv.partition("=")
+            if k not in lim:
+                print(f"load-watch guard add: unknown limit {k!r} (one of {', '.join(lim)})", file=sys.stderr)
+                return 2
+            lim[k] = float(v)
+        rows[a.label] = {"limits": lim, "note": a.note or ""}
+        write_guard_rows(rows)
+    elif a.op == "rm":
+        if rows.pop(a.label, None) is None:
+            print(f"load-watch: {a.label} is not guarded", file=sys.stderr)
+            return 1
+        write_guard_rows(rows)
+    elif a.op == "reset":  # bring a stopped job back now and forget its rounds
+        s = g.pop(a.label, {})
+        plist = s.get("plist") or job_info(a.label)[1]
+        subprocess.run(["launchctl", "enable", f"gui/{MY_UID}/{a.label}"], capture_output=True, timeout=30)
+        if plist and Path(plist).exists():
+            subprocess.run(["launchctl", "bootstrap", f"gui/{MY_UID}", plist], capture_output=True, timeout=30)
+        save_state(st)
+        gevent(a.label, "reset", f"by hand; loaded from {plist or '?'}")
+    print(f"{a.op} {a.label}")
+    return 0
+
+
 def cmd_sample(a):
     st = load_state()
     t = now()
@@ -342,6 +610,10 @@ def cmd_sample(a):
         st["streak"] = st.get("streak", 0) + hot
         save_state(st)
         return 0
+    try:
+        guard(st, table, t, a.dry_run)
+    except Exception as e:  # noqa: BLE001 - the guard must never stop load sampling
+        log(f"guard error: {e!r}")
     if hot:
         d = {pid: [round(c, 2), uid, cmd[:300], ppid] for pid, (ppid, uid, c, cmd) in table.items() if c >= 0.05}
         st["samples"] = [x for x in st.get("samples", []) if x["t"] >= t - SUSTAIN_S] + [{"t": t, "d": d}]
@@ -555,6 +827,11 @@ def main():
     p.add_argument("op", choices=["list", "add", "rm", "check"])
     p.add_argument("dir", nargs="?")
     p.add_argument("ci_cmd", nargs="?", metavar="CMD")
+    p = sub.add_parser("guard")
+    p.add_argument("op", choices=["status", "list", "add", "rm", "reset"])
+    p.add_argument("label", nargs="?")
+    p.add_argument("limits", nargs="*", metavar="KEY=VALUE")
+    p.add_argument("--note")
     p = sub.add_parser("ci")
     p.add_argument("op", choices=["list", "check", "decide", "rm"])
     p.add_argument("dir", nargs="?")
@@ -567,7 +844,7 @@ def main():
         ap.print_usage(sys.stderr)
         return 2
     return {"sample": cmd_sample, "status": cmd_status, "incidents": cmd_incidents, "ack": cmd_ack,
-            "ci": cmd_ci, "ci-only": cmd_ci_only, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
+            "guard": cmd_guard, "ci": cmd_ci, "ci-only": cmd_ci_only, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
 
 
 if __name__ == "__main__":

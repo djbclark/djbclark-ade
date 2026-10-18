@@ -73,6 +73,7 @@ def _sampler(tmp_path, monkeypatch):
     monkeypatch.setattr(lw.os, "cpu_count", lambda: 8)
     monkeypatch.setattr(lw, "ps_table", lambda: {"1": (0, 0, 0.1, "x")})
     monkeypatch.setattr(lw, "attribute", lambda use, span, parent: ({}, []))
+    monkeypatch.setattr(lw, "guard", lambda *args: None)
 
     class A:
         dry_run = False
@@ -132,3 +133,65 @@ def test_ci_worktree_and_glob_take_a_decision(tmp_path):
     glob = os.path.realpath(tmp_path / "pastures") + "/*"
     assert run(tmp_path, "ci", "decide", glob, "local", "queue in flight").returncode == 0
     assert run(tmp_path, "ci", "check", str(other)).stdout.split("\t")[0] == "local"
+
+
+def _guard(tmp_path, monkeypatch, jobs, runs=None):
+    lw = load_module()
+    calls = []
+    monkeypatch.setattr(lw, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(lw, "GUARD", tmp_path / "guard.tsv")
+    monkeypatch.setattr(lw, "HERMES_PING", tmp_path / "no-such-ping")
+    monkeypatch.setattr(lw, "launchd_jobs", lambda: dict(jobs))
+    monkeypatch.setattr(lw, "job_info", lambda label: (runs["n"] if runs else None, str(tmp_path / "j.plist")))
+    monkeypatch.setattr(lw.time, "sleep", lambda s: None)
+    monkeypatch.setattr(lw.subprocess, "run", lambda argv, **kw: calls.append(argv) or
+                        subprocess.CompletedProcess(argv, 0, "", ""))
+    (tmp_path / "j.plist").write_text("x")
+    return lw, calls
+
+
+def test_guard_hang_cools_down_retests_and_passes(tmp_path, monkeypatch):
+    jobs = {"com.x.job": (100, "0")}
+    lw, calls = _guard(tmp_path, monkeypatch, jobs)
+    (tmp_path / "guard.tsv").write_text("com.x.job\thang_s=120\tAFS\n")
+    table = {"100": (1, 501, 0.0, "python lockers"), "101": (100, 501, 0.0, "aklog -path /afs/x")}
+    lw.PSTATE.clear()
+    lw.PSTATE.update({"100": ("S", 1000), "101": ("U", 1000)})
+    st = {}
+    lw.guard(st, table, 1000.0, False)
+    assert st["guard"]["com.x.job"].get("state") is None      # stuck, but not for 120 s yet
+    lw.guard(st, table, 1130.0, False)
+    s = st["guard"]["com.x.job"]
+    assert s["state"] == "cooldown" and "hung" in s["trip"]
+    assert ["launchctl", "bootout", f"gui/{lw.MY_UID}/com.x.job"] in calls
+    assert any(c[:2] == ["kill", "-TERM"] and "101" in c for c in calls)
+    jobs.clear()                                              # booted out
+    lw.guard(st, {}, 1130.0 + lw.GUARD_COOLDOWN_S, False)
+    assert s["state"] == "testing"
+    assert ["launchctl", "bootstrap", f"gui/{lw.MY_UID}", str(tmp_path / "j.plist")] in calls
+    lw.guard(st, {}, 1130.0 + lw.GUARD_COOLDOWN_S + lw.GUARD_TEST_S, False)
+    assert s["state"] == "ok"
+
+
+def test_guard_fifth_round_in_a_day_stops_for_good(tmp_path, monkeypatch):
+    lw, calls = _guard(tmp_path, monkeypatch, {"com.x.job": (100, "0")})
+    (tmp_path / "guard.tsv").write_text("com.x.job\tmax_rss_mb=10\t\n")
+    lw.PSTATE.clear()
+    lw.PSTATE["100"] = ("S", 50 * 1024)
+    t = 10000.0
+    st = {"guard": {"com.x.job": {"rounds": [t - 4000, t - 3000, t - 2000, t - 1000]}}}
+    lw.guard(st, {"100": (1, 501, 0.0, "hog")}, t, False)
+    assert st["guard"]["com.x.job"]["state"] == "permanent"
+    assert ["launchctl", "disable", f"gui/{lw.MY_UID}/com.x.job"] in calls
+
+
+def test_guard_catches_a_crash_loop_on_any_job(tmp_path, monkeypatch):
+    runs = {"n": 100}
+    lw, calls = _guard(tmp_path, monkeypatch, {"com.y.loop": (None, "1")}, runs)
+    lw.PSTATE.clear()
+    st = {}
+    lw.guard(st, {}, 1000.0, False)
+    runs["n"] = 130
+    lw.guard(st, {}, 1000.0 + lw.LOOP_CHECK_S, False)
+    s = st["guard"]["com.y.loop"]
+    assert s["state"] == "cooldown" and "crash loop: 30 restarts" in s["trip"]
