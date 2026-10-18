@@ -71,8 +71,8 @@ FAKE_SUDO = """#!/bin/bash
 # fake sudo: tests must never run a real sudo -n. Fails like the real non-tinteractive
 # one when SUDO_FAIL is set (this machine has no NOPASSWD rule for pmset).
 [ -n "$SUDO_FAIL" ] && { echo "sudo: a password is required" >&2; exit 1; }
-[ "$1" = "-n" ] && shift                      # sudo's own flag, not pmset's
 echo "sudo $*" >> "$SUDO_LOG"
+while [ "${1#-}" != "$1" ]; do shift; done     # sudo's own flags (-k -n), not pmset's
 exec "$@"
 """
 
@@ -316,7 +316,9 @@ class TestFarResetSkips(QuotaBase):
         want = self.mod_wake_stamp(ar["not_before"])
         self.assertEqual(ar["wake"], f"scheduled {want}")
         self.assertEqual(self.pmset_calls(), [f"pmset schedule wake {want}"])
-        self.assertIn("schedule wake", self.sudo_log.read_text())   # routed through sudo
+        # routed through sudo -k -n: a cached ticket must not stand in for the rule (2026-10-18)
+        self.assertIn("sudo -k -n ", self.sudo_log.read_text())
+        self.assertIn("schedule wake", self.sudo_log.read_text())
 
     @staticmethod
     def mod_wake_stamp(not_before: float) -> str:

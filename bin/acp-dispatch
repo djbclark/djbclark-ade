@@ -2038,13 +2038,15 @@ def wake_stamp(not_before: datetime | float) -> str:
 def schedule_wake(not_before: datetime) -> str:
     """Try to have the Mac awake before the auto-resume fires (2026-10-18, 6.6): launchd does
     not run the job while the machine sleeps, so a reset that lands overnight would silently
-    wait for the next wake. sudo -n never prompts: it needs the NOPASSWD rule in
+    wait for the next wake. `sudo -k -n` never prompts and ignores a cached ticket (without
+    clearing it), so "scheduled" means the rule works, not that someone just authenticated
+    (2026-10-18: this Mac's sudo timestamp is global). It needs the NOPASSWD rule in
     config/sudoers.d/acp-dispatch-pmset (operator-approved and installed 2026-10-18), and records
     "unavailable: ..." on a machine without it; installing it is the operator's call, never an
     agent's. Returns "scheduled <time>" or "unavailable: <reason>"."""
     stamp = wake_stamp(not_before)
     try:
-        r = subprocess.run(["sudo", "-n", pmset_bin(), "schedule", "wake", stamp], check=False,
+        r = subprocess.run(["sudo", "-k", "-n", pmset_bin(), "schedule", "wake", stamp], check=False,
                            capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.SubprocessError) as e:
         return f"unavailable: {e}"
@@ -2060,7 +2062,7 @@ def cancel_wake(not_before: float | None) -> None:
     if not not_before:
         return
     try:
-        subprocess.run(["sudo", "-n", pmset_bin(), "schedule", "cancel", "wake",
+        subprocess.run(["sudo", "-k", "-n", pmset_bin(), "schedule", "cancel", "wake",
                         wake_stamp(not_before)], check=False, capture_output=True, text=True,
                        timeout=20)
     except (OSError, subprocess.SubprocessError):
