@@ -52,6 +52,10 @@ Verified 2026-09-20:
    source's project. Removal: `cow-pasture remove <name>` unregisters it via
    `orca project setup-delete --setup <repo-id>` (plain `cow remove` leaves a
    dangling registration that Orca still resolves). Real fix: stablyai/orca#16226.
+4. **`cow-pasture` is not on `PATH`**: call `~/src/djbclark-ade/bin/cow-pasture`.
+   Plain `cow remove <short-name>` prints "not found — skipping" and **exits 0**
+   having removed nothing; it needs `<source>/<name>` (2026-10-18). Check `ls`
+   afterwards.
 
 ## Orca dispatch recipe
 
