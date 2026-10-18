@@ -52,7 +52,12 @@ SECRET_PATTERNS=(
 log() { printf 'cow-pasture: %s\n' "$*" >&2; }
 
 matches_secret() { # $1 = path relative to pasture
-  local base; base=$(basename "$1")
+  # Installed packages are code, not secrets: a venv's site-packages holds modules
+  # named credentials.py (google-auth, botocore, ...), and deleting them broke the
+  # copied venvs (2026-10-18, hermes-agent merge pasture).
+  case "/$1" in */site-packages/*|*/dist-packages/*|*/node_modules/*) return 1 ;; esac
+  # ${1##*/}, not $(basename): one fork per file took minutes over ~160k venv files.
+  local base=${1##*/}
   local pat
   for pat in "${SECRET_PATTERNS[@]}"; do
     # shellcheck disable=SC2254
