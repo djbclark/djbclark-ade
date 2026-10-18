@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""load-watch: find the agent behind a sustained load spike, tell it, and steer that work to Forgejo CI. No model.
+
+    load-watch sample [--dry-run] [-v]      one sample (launchd runs this every 20 s)
+    load-watch status                       streak, top consumers in the window, cooldowns
+    load-watch incidents [-n N]             the incident ledger, newest last
+    load-watch ack ID "what you did"        the agent's answer to a brief (recorded in the ledger)
+    load-watch ci-only list|add DIR "CMD"|rm DIR|check DIR
+    load-watch install|uninstall            the launchd job (launchd/com.djbclark.load-watch.plist)
+
+Why (2026-10-18): agents keep starting heavy builds and tests on this 8-core Mac (load 24-41 that
+morning; 180 on 2026-10-13, 300-400 on 2026-10-04). `bg`, `heavy-shim` and the Claude test hook throttle
+what goes through them; nothing noticed what did not, or told the agent that started it. Plektra and
+stayturgid-agent already build only on SIPB's Forgejo runner (`forgejo-ci` skill); this finds the next
+candidate.
+
+Each sample is one `ps` call and `os.getloadavg()`: no model, no network. A sample counts as hot when
+the 1-minute load per core is at least LW_LOAD_PER_CORE (2.0). After LW_SUSTAIN (15, i.e. 5 minutes) hot
+samples in a row it attributes the mean CPU of those samples to sessions (session-finder's fleet.py; a process belongs
+to the session whose pid is its ancestor, a daemonised one such as a Gradle daemon to the only session
+in its git repo) and, for each session above LW_MIN_CORES (1.5) cores, writes a brief, types one line
+naming it into the session (relay.py), and sends one hermes-ping. A session or repo is not told again
+for LW_COOLDOWN_H (6) hours. The agent is asked to finish what is running (never to kill paid-for
+work), ask djbclark before creating a Forgejo copy, and, once CI runs there, `load-watch ci-only add`
+the repo so `bg` refuses local builds and tests in it.
+
+State: ~/.local/state/load-watch/ (state.json, incidents.jsonl, briefs/, sample.log).
+Registry: ~/.config/load-watch/ci-only.tsv (repo top-level TAB CI command TAB date), read by `bg`.
+Exit: 0 ok, 1 nothing found (check, ack of an unknown id), 2 usage.
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+ADE = Path(__file__).resolve().parent.parent
+SF = ADE / "skills" / "session-finder"
+STATE_DIR = Path(os.environ.get("LW_STATE_DIR", HOME / ".local/state/load-watch"))
+REGISTRY = Path(os.environ.get("LW_REGISTRY", HOME / ".config/load-watch/ci-only.tsv"))
+PLIST = ADE / "launchd" / "com.djbclark.load-watch.plist"
+LABEL = "com.djbclark.load-watch"
+HERMES_PING = HOME / ".local/bin/hermes-ping"
+
+LOAD_PER_CORE = float(os.environ.get("LW_LOAD_PER_CORE", "2.0"))
+SAMPLE_S = 20  # launchd StartInterval
+SUSTAIN = int(os.environ.get("LW_SUSTAIN", "15"))  # samples
+MIN_CORES = float(os.environ.get("LW_MIN_CORES", "1.5"))
+COOLDOWN_S = float(os.environ.get("LW_COOLDOWN_H", "6")) * 3600
+MY_UID = os.getuid()
+
+
+def now():
+    return time.time()
+
+
+def stamp(t=None):
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(t or now()))
+
+
+def log(msg):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(STATE_DIR / "sample.log", "a") as f:
+        f.write(f"{stamp()} {msg}\n")
+
+
+def load_state():
+    try:
+        return json.loads((STATE_DIR / "state.json").read_text())
+    except (OSError, ValueError):
+        return {"samples": [], "streak": 0, "cooldown": {}}
+
+
+def save_state(st):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_DIR / "state.json.tmp"
+    tmp.write_text(json.dumps(st))
+    tmp.replace(STATE_DIR / "state.json")
+
+
+def ps_table():
+    """pid -> (ppid, uid, cores now, command), one ps call. `%cpu` is the kernel's decayed recent share, so a
+    snapshot every 20 s averages to an unbiased per-process estimate, short-lived compilers included (a
+    `time` difference misses every process that starts and exits between samples, and macOS `ps -S` does
+    not fold exited children into the parent: checked 2026-10-18)."""
+    out = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,%cpu=,command="], capture_output=True, text=True,
+                         timeout=10).stdout
+    table = {}
+    for line in out.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 4 or not parts[0].isdigit():
+            continue
+        try:
+            table[parts[0]] = (int(parts[1]), int(parts[2]), float(parts[3]) / 100, parts[4] if len(parts) > 4 else "")
+        except ValueError:
+            continue
+    return table
+
+
+def window(st):
+    """pid -> [cores summed over the kept samples, uid, command], and the number of samples (so sum / n is the
+    mean)."""
+    use = {}
+    for s in st["samples"]:
+        for pid, (cores, uid, cmd, _) in s["d"].items():
+            row = use.setdefault(pid, [0.0, uid, cmd])
+            row[0] += cores
+    return use, len(st["samples"])
+
+
+def ppids(st, table):
+    """pid -> ppid, from the window's samples (processes that have exited since) and the current table."""
+    out = {pid: r[3] for s in st["samples"] for pid, r in s["d"].items()}
+    out.update({pid: row[0] for pid, row in table.items()})
+    return out
+
+
+def git_top(path):
+    try:
+        r = subprocess.run(["git", "-C", path, "rev-parse", "--show-toplevel"], capture_output=True, text=True,
+                           timeout=5)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def proc_cwd(pid):
+    try:
+        r = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True,
+                           timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return next((ln[1:] for ln in r.stdout.splitlines() if ln.startswith("n")), "")
+
+
+def attribute(use, span, parent):
+    """Group the window's CPU by session. Returns (per-session dicts, unattributed rows)."""
+    sys.path.insert(0, str(SF))
+    import fleet  # noqa: E402  (session-finder; ~2 s, so only on a sustained spike)
+    sessions = [s for s in fleet.sessions() if s.get("pid")]
+    by_pid = {str(s["pid"]): s for s in sessions}
+    tops = {}
+    for s in sessions:
+        tops.setdefault(git_top(s["cwd"]) if s.get("cwd") else "", []).append(s)
+    groups, loose = {}, []
+    for pid, (secs, uid, cmd) in sorted(use.items(), key=lambda kv: -kv[1][0]):
+        cores = secs / span if span else 0
+        if cores < 0.1:
+            break
+        owner, p, hops = None, pid, 0
+        while p and hops < 64:
+            if p in by_pid:
+                owner = by_pid[p]
+                break
+            p, hops = str(parent.get(p, "")), hops + 1
+        if owner is None and uid == MY_UID and cores >= 0.5 and pid in parent:
+            top = git_top(proc_cwd(pid) or "/")
+            if top and len(tops.get(top, [])) == 1:
+                owner = tops[top][0]
+        row = {"pid": int(pid), "cores": round(cores, 2), "cmd": cmd[:300]}
+        if owner is None:
+            loose.append(row)
+            continue
+        g = groups.setdefault(owner["id"], {"session": owner, "cores": 0.0, "procs": []})
+        if str(owner["pid"]) != pid:  # the TUI's own CPU is not build work
+            g["cores"] += cores
+            g["procs"].append(row)
+    return groups, loose
+
+
+def forgejo_remote(top):
+    try:
+        r = subprocess.run(["git", "-C", top, "remote", "-v"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return next((ln.split()[1] for ln in r.stdout.splitlines() if "forgejo" in ln), "")
+
+
+def registry():
+    rows = {}
+    try:
+        for ln in REGISTRY.read_text().splitlines():
+            parts = ln.split("\t")
+            if parts and parts[0] and not parts[0].startswith("#"):
+                rows[parts[0]] = parts[1:] + [""] * (2 - len(parts[1:]))
+    except OSError:
+        pass
+    return rows
+
+
+def write_registry(rows):
+    REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+    tmp = REGISTRY.with_suffix(".tmp")
+    tmp.write_text("# repo top-level\tCI command (what bg tells agents to run instead)\tadded\n" +
+                   "".join(f"{k}\t{v[0]}\t{v[1]}\n" for k, v in sorted(rows.items())))
+    tmp.replace(REGISTRY)
+
+
+def brief(inc, g, top, remote, load1, ncpu):
+    s = g["session"]
+    procs = "\n".join(f"{i}. pid {p['pid']}, {p['cores']} cores: `{p['cmd'][:200]}`"
+                      for i, p in enumerate(sorted(g["procs"], key=lambda p: -p["cores"])[:8], 1))
+    listed = top in registry()
+    where = (f"It already has a Forgejo remote: `{remote}`." if remote else
+             "It has no Forgejo remote yet.") if top else "The work ran outside any git repo."
+    return f"""# load-watch incident {inc}
+
+Written {stamp()} by `~/src/djbclark-ade/bin/load-watch` (no model). Load was {load1:.1f} on {ncpu} cores
+(threshold {LOAD_PER_CORE} per core) for {SUSTAIN} samples in a row ({SUSTAIN * SAMPLE_S // 60} min), and your session
+({s.get('agent')} `{s.get('name') or s['id']}`, cwd `{s.get('cwd')}`) used about {g['cores']:.1f} cores of it:
+
+{procs}
+
+Repo: `{top or '-'}`. {where}{' It is already registered CI-only, so this ran outside `bg`.' if listed else ''}
+
+## What to do
+
+1. Finish the step you are on. Do not kill or restart running work to obey this (it is already paid for);
+   just do not start another heavy local run of this kind.
+2. Next time, run this kind of build or test on SIPB's Forgejo runner: load the `forgejo-ci` skill
+   (`~/src/djbclark-ade/skills/forgejo-ci/SKILL.md`, section 6 item 6 is the recipe for a repo whose
+   source of truth stays on GitHub: a private copy on forgejo.mit.edu, a `.forgejo/workflows/` job, a
+   wait/fetch script).
+3. Creating a Forgejo repo or pushing to it is outward-facing: if the repo has no Forgejo copy yet, ask
+   djbclark first (one AskUserQuestion, or hermes-ping if no one is at your pane). Light work that
+   cannot move (a single small test file) goes through `~/ops/site-private/bin/bg` instead.
+4. Once a CI job runs there, register the repo so `bg` refuses heavy local runs and names your command:
+   `~/src/djbclark-ade/bin/load-watch ci-only add {top or '<repo top>'} "<the command that runs it on CI>"`.
+5. Answer this brief in one line: `~/src/djbclark-ade/bin/load-watch ack {inc} "<what you did or plan>"`.
+"""
+
+
+def notify(inc, g, top, path, load1, ncpu, dry):
+    s = g["session"]
+    cmd = sorted(g["procs"], key=lambda p: -p["cores"])[0]["cmd"][:60] if g["procs"] else "the session itself"
+    line = (f"load-watch {inc}: load {load1:.0f} on {ncpu} cores for {SUSTAIN * SAMPLE_S // 60}+ min; your processes used "
+            f"~{g['cores']:.1f} cores ({cmd}). After your current step, read {path} and act on it.")
+    relayed = False
+    if not dry:
+        target = s.get("sid") or s["id"]
+        try:
+            r = subprocess.run([sys.executable, str(SF / "relay.py"), target, line], capture_output=True,
+                               text=True, timeout=60)
+            relayed = r.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    who = f"{s.get('agent')} {s.get('name') or s['id']}"
+    ping = (f"djbclark-ade: load-watch {inc}: {who} used ~{g['cores']:.1f} cores at load {load1:.0f} "
+            f"({cmd}); {'told it' if relayed else 'could not reach it (' + (s.get('where') or 'no channel') + ')'};"
+            f" brief {path}")
+    if not dry and HERMES_PING.exists():
+        subprocess.run([str(HERMES_PING), ping], capture_output=True, timeout=60)
+    return relayed, ping
+
+
+def cmd_sample(a):
+    st = load_state()
+    t = now()
+    table = ps_table()
+    d = {pid: [round(cores, 2), uid, cmd[:300], ppid] for pid, (ppid, uid, cores, cmd) in table.items() if cores >= 0.05}
+    load1 = os.getloadavg()[0]
+    ncpu = os.cpu_count() or 1
+    hot = load1 / ncpu >= LOAD_PER_CORE
+    gap = t - st.get("t", 0)
+    st["t"] = t
+    if hot and gap < 300:
+        st["samples"] = (st.get("samples", []) + [{"t": t, "d": d}])[-SUSTAIN:]
+        st["streak"] = st.get("streak", 0) + 1
+    elif hot:  # first sample, or after sleep: start a new streak
+        st["samples"], st["streak"] = [{"t": t, "d": d}], 1
+    else:
+        st["samples"], st["streak"] = [], 0
+    st["load1"] = load1
+    st["cooldown"] = {k: v for k, v in st.get("cooldown", {}).items() if t - v < COOLDOWN_S}
+    if a.verbose:
+        print(f"load {load1:.1f}/{ncpu} hot={hot} streak={st['streak']}")
+    if st["streak"] >= SUSTAIN:
+        use, span = window(st)
+        groups, loose = attribute(use, span, ppids(st, table))
+        told = 0
+        for g in sorted(groups.values(), key=lambda g: -g["cores"]):
+            s = g["session"]
+            if g["cores"] < MIN_CORES or not g["procs"]:
+                continue
+            top = git_top(s["cwd"]) if s.get("cwd") else ""
+            keys = [f"sid:{s.get('sid') or s['id']}"] + ([f"repo:{top}"] if top else [])
+            if any(k in st["cooldown"] for k in keys):
+                continue
+            inc = time.strftime("%Y%m%d-%H%M", time.localtime(t)) + f"-{s['id'][:8]}"
+            path = STATE_DIR / "briefs" / f"{inc}.md"
+            if not a.dry_run:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(brief(inc, g, top, forgejo_remote(top) if top else "", load1, ncpu))
+            relayed, ping = notify(inc, g, top, path, load1, ncpu, a.dry_run)
+            rec = {"id": inc, "t": stamp(t), "load1": round(load1, 1), "ncpu": ncpu, "cores": round(g["cores"], 2),
+                   "agent": s.get("agent"), "session": s.get("name") or s["id"], "sid": s.get("sid"),
+                   "cwd": s.get("cwd"), "repo": top, "procs": g["procs"][:8], "relayed": relayed,
+                   "brief": str(path), "dry_run": a.dry_run}
+            if a.dry_run:
+                print(json.dumps(rec, indent=1))
+                print(ping)
+                continue
+            for k in keys:
+                st["cooldown"][k] = t
+            with open(STATE_DIR / "incidents.jsonl", "a") as f:
+                f.write(json.dumps(rec) + "\n")
+            log(f"incident {inc} {rec['session']} {rec['cores']} cores relayed={relayed}")
+            told += 1
+        if a.verbose or a.dry_run:
+            for row in loose[:5]:
+                print(f"unattributed: pid {row['pid']} {row['cores']} cores {row['cmd'][:100]}")
+        if not told and not st.get("loose_logged"):
+            log("sustained load, no agent session above threshold; top: " +
+                "; ".join(f"{r['cores']} {r['cmd'][:60]}" for r in loose[:3]))
+            st["loose_logged"] = True
+    elif not st["streak"]:
+        st.pop("loose_logged", None)
+    save_state(st)
+    return 0
+
+
+def cmd_status(a):
+    st = load_state()
+    use, span = window(st)
+    print(f"load1 {st.get('load1', 0):.1f} on {os.cpu_count()} cores; hot streak {st.get('streak', 0)}/{SUSTAIN} "
+          f"(threshold {LOAD_PER_CORE}/core, {MIN_CORES} cores per session, cooldown {COOLDOWN_S / 3600:g} h)")
+    for pid, (secs, _, cmd) in sorted(use.items(), key=lambda kv: -kv[1][0])[:8]:
+        print(f"  {secs / span if span else 0:5.2f} cores  pid {pid}  {cmd[:110]}")
+    for k, v in st.get("cooldown", {}).items():
+        print(f"  cooldown {k} until {stamp(v + COOLDOWN_S)}")
+    return 0
+
+
+def incidents():
+    try:
+        return [json.loads(ln) for ln in (STATE_DIR / "incidents.jsonl").read_text().splitlines() if ln.strip()]
+    except OSError:
+        return []
+
+
+def cmd_incidents(a):
+    for r in incidents()[-a.n:]:
+        ack = f"  ack: {r['ack']}" if r.get("ack") else ""
+        print(f"{r['id']}  {r['t']}  load {r['load1']}  {r['agent']} {r['session']}  {r['cores']} cores  "
+              f"{r.get('repo') or r.get('cwd')}  relayed={r['relayed']}{ack}")
+    return 0
+
+
+def cmd_ack(a):
+    rows = incidents()
+    hit = next((r for r in rows if r["id"] == a.id), None)
+    if not hit:
+        print(f"load-watch: no incident {a.id}", file=sys.stderr)
+        return 1
+    hit["ack"] = f"{stamp()} {a.note}"
+    tmp = STATE_DIR / "incidents.jsonl.tmp"
+    tmp.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    tmp.replace(STATE_DIR / "incidents.jsonl")
+    print(f"recorded ack for {a.id}")
+    return 0
+
+
+def cmd_ci_only(a):
+    rows = registry()
+    if a.op == "list":
+        for k, v in sorted(rows.items()):
+            print(f"{k}\t{v[0]}\t{v[1]}")
+        return 0
+    if not a.dir:
+        print("load-watch ci-only add|rm|check needs DIR", file=sys.stderr)
+        return 2
+    top = git_top(a.dir) or os.path.realpath(a.dir)
+    if a.op == "check":
+        if top in rows:
+            print(rows[top][0])
+            return 0
+        return 1
+    if a.op == "add":
+        if not a.ci_cmd:
+            print("load-watch ci-only add DIR \"CI command\"", file=sys.stderr)
+            return 2
+        rows[top] = [a.ci_cmd, time.strftime("%Y-%m-%d")]
+    elif a.op == "rm":
+        if rows.pop(top, None) is None:
+            print(f"load-watch: {top} is not registered", file=sys.stderr)
+            return 1
+    write_registry(rows)
+    print(f"{a.op} {top}")
+    return 0
+
+
+def cmd_install(a):
+    dest = HOME / "Library/LaunchAgents" / PLIST.name
+    dom = f"gui/{os.getuid()}"
+    subprocess.run(["launchctl", "bootout", f"{dom}/{LABEL}"], capture_output=True)
+    if a.cmd == "uninstall":
+        dest.unlink(missing_ok=True)
+        print(f"removed {dest}")
+        return 0
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".tmp")
+    tmp.write_text(PLIST.read_text())
+    tmp.replace(dest)
+    r = subprocess.run(["launchctl", "bootstrap", dom, str(dest)], capture_output=True, text=True)
+    print(f"installed {dest}" if r.returncode == 0 else f"bootstrap failed: {r.stderr.strip()}")
+    return r.returncode
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd")
+    p = sub.add_parser("sample")
+    p.add_argument("--dry-run", action="store_true", help="attribute and print; no brief, relay, ping or cooldown")
+    p.add_argument("-v", "--verbose", action="store_true")
+    sub.add_parser("status")
+    p = sub.add_parser("incidents")
+    p.add_argument("-n", type=int, default=20)
+    p = sub.add_parser("ack")
+    p.add_argument("id")
+    p.add_argument("note")
+    p = sub.add_parser("ci-only")
+    p.add_argument("op", choices=["list", "add", "rm", "check"])
+    p.add_argument("dir", nargs="?")
+    p.add_argument("ci_cmd", nargs="?", metavar="CMD")
+    sub.add_parser("install")
+    sub.add_parser("uninstall")
+    a = ap.parse_args()
+    if a.cmd is None:
+        ap.print_usage(sys.stderr)
+        return 2
+    return {"sample": cmd_sample, "status": cmd_status, "incidents": cmd_incidents, "ack": cmd_ack,
+            "ci-only": cmd_ci_only, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

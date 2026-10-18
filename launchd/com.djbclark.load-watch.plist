@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- load-watch (bin/load-watch): every 20 s one `ps` and the load average, no model. After 5 minutes
+     of load at or above 2 per core it finds the agent session whose processes used the CPU, writes it
+     a brief, types one line into its pane and pings Hermes, so heavy builds move to Forgejo CI.
+     Installed by `load-watch install`, removed by `load-watch uninstall`. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.load-watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/djbclark/src/djbclark-ade/bin/load-watch</string>
+    <string>sample</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/djbclark/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/djbclark/src/djbclark-ade</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>20</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>StandardOutPath</key><string>/Users/djbclark/.local/state/load-watch/launchd.out</string>
+  <key>StandardErrorPath</key><string>/Users/djbclark/.local/state/load-watch/launchd.err</string>
+</dict>
+</plist>
