@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Monthly AI re-rank of config/routing.toml good_at from calibrate
+     suggestions (operator /steps 1.5, 2026-10-18). Runs bin/routing-recalibrate
+     on Day 1 at 09:00. Do not load here — the lead installs it.
+     bin/routing-recalibrate mkdir -p's ~/.local/state/bigteam/routing-recalibrate
+     before writing briefs; create that dir before first load so launchd can
+     open StandardOutPath/StandardErrorPath. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.routing-recalibrate</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/djbclark/src/djbclark-ade/bin/routing-recalibrate</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/djbclark/.local/bin:/Users/djbclark/.opencodex/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/djbclark/src/djbclark-ade</string>
+  <key>RunAtLoad</key><false/>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Day</key><integer>1</integer>
+    <key>Hour</key><integer>9</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>StandardOutPath</key><string>/Users/djbclark/.local/state/bigteam/routing-recalibrate/launchd.out</string>
+  <key>StandardErrorPath</key><string>/Users/djbclark/.local/state/bigteam/routing-recalibrate/launchd.err</string>
+</dict>
+</plist>

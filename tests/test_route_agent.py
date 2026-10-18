@@ -764,9 +764,21 @@ class TestRoutingPolicyToml(unittest.TestCase):
             kinds = ["bulk"]
             burn_first_min = 40.0
             burn_first_bonus = 4.0
+            burn_first_waste_min = 30.0
+            pace_penalty_above = 1.5
+            pace_penalty = 6.0
+            pace_penalty_judgment_factor = 0.5
             frontier_per_wave = 1
             fable_min_left = 10.0
             default_profile = { bulk = 60 }
+
+            [calibrate]
+            min_outcomes = 5
+            min_peers = 2
+            suggest_worse_below = 25.0
+            suggest_worse_delta = 5
+            suggest_better_above = 15.0
+            suggest_better_delta = 3
 
             [discovery]
             never_route = []
@@ -811,9 +823,21 @@ class TestRoutingPolicyToml(unittest.TestCase):
             kinds = ["bulk"]
             burn_first_min = 40.0
             burn_first_bonus = 4.0
+            burn_first_waste_min = 30.0
+            pace_penalty_above = 1.5
+            pace_penalty = 6.0
+            pace_penalty_judgment_factor = 0.5
             frontier_per_wave = 1
             fable_min_left = 10.0
             default_profile = { bulk = 60 }
+
+            [calibrate]
+            min_outcomes = 5
+            min_peers = 2
+            suggest_worse_below = 25.0
+            suggest_worse_delta = 5
+            suggest_better_above = 15.0
+            suggest_better_delta = 3
 
             [discovery]
             never_route = []
@@ -848,6 +872,79 @@ class TestRoutingPolicyToml(unittest.TestCase):
             self.assertIn("name", msg)
         finally:
             Path(tmp).unlink(missing_ok=True)
+
+    def test_missing_routing_or_calibrate_key_names_the_file(self):
+        import tempfile
+        import textwrap
+        # Missing [calibrate] table → load_policy ValueError with path.
+        no_cal = textwrap.dedent('''
+            [routing]
+            kinds = ["bulk"]
+            burn_first_min = 40.0
+            burn_first_bonus = 4.0
+            burn_first_waste_min = 30.0
+            pace_penalty_above = 1.5
+            pace_penalty = 6.0
+            pace_penalty_judgment_factor = 0.5
+            frontier_per_wave = 1
+            fable_min_left = 10.0
+            default_profile = { bulk = 60 }
+
+            [discovery]
+            never_route = []
+            operator_gated = []
+            aliases = {}
+
+            [dispatch]
+            operator_gated = []
+            fable_gated_efforts = []
+            inflight_cap = {}
+            extra = {}
+
+            [hermes]
+            provider_name = {}
+
+            [hermes.models]
+
+            [[service]]
+            name = "x"
+            cli = "x"
+            good_at = { bulk = 1 }
+            billing = "free"
+        ''')
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
+            fh.write(no_cal)
+            tmp = fh.name
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                r.load_policy(tmp)
+            msg = str(ctx.exception)
+            self.assertIn(tmp, msg)
+            self.assertIn("calibrate", msg)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+        # Present sections but a missing routing key → apply_policy ValueError.
+        base = (Path(__file__).resolve().parent.parent / "config" / "routing.toml"
+                ).read_text()
+        patched = base.replace(
+            "pace_penalty_judgment_factor = 0.5\n", "", 1)
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
+            fh.write(patched)
+            tmp = fh.name
+        try:
+            data = r.load_policy(tmp)
+            with self.assertRaises(ValueError) as ctx:
+                r.POLICY_PATH = Path(tmp)
+                r.apply_policy(data)
+            msg = str(ctx.exception)
+            self.assertIn(tmp, msg)
+            self.assertIn("pace_penalty_judgment_factor", msg)
+            self.assertNotIsInstance(ctx.exception, KeyError)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+            r.reload_policy(
+                Path(__file__).resolve().parent.parent / "config" / "routing.toml")
 
     def test_policy_md_contains_codex_frontier_row(self):
         import io

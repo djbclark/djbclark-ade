@@ -15,9 +15,23 @@
 # a coarse one that gets used.
 kinds = ["judgment", "frontier", "code", "bulk", "research", "mechanical", "github", "realtime-web"]
 # burn_first services (use-it-or-lose-it pools) win a tie-sized margin while
-# they hold at least this much headroom.
+# they hold at least this much headroom. Static `burn_first = true` on a
+# [[service]] is only a fallback when expected waste at reset is unknown
+# (operator /steps 1.6, 2026-10-18: prefer computed burn_first).
 burn_first_min = 40.0
 burn_first_bonus = 4.0
+# Expected unused share of the binding window at reset (percent points). At or
+# above this, the pool gets burn_first_bonus even with burn_first = false
+# (2026-10-18: codex weekly at 82% left while burning 3.2×; agy Claude/GPT
+# weekly hit its cap minutes after a "41% left" reading).
+burn_first_waste_min = 30.0
+# When the binding window's pace_ratio is above this, add pace_penalty to the
+# rank (judgment/frontier take pace_penalty_judgment_factor — capability still
+# dominates). 2026-10-18.
+pace_penalty_above = 1.5
+pace_penalty = 6.0
+# Half-penalty factor for judgment/frontier pace (2026-10-18 review finding 5b).
+pace_penalty_judgment_factor = 0.5
 # Most `frontier` slices one wave puts on a single pool (operator 2026-10-18).
 frontier_per_wave = 1
 # Below this much of the Fable sublimit, frontier on claude falls back to Opus.
@@ -25,6 +39,21 @@ fable_min_left = 10.0
 # Curated profiles overlay discovery; anything discovered without one gets
 # default_profile so a newly-added agent is routable rather than invisible.
 default_profile = { bulk = 60, mechanical = 60 }
+
+# Calibrate report thresholds (route_agent.py calibrate; monthly AI re-rank).
+# Operator /steps 1.5, 2026-10-18: outcome field + AI re-ranking, not human.
+[calibrate]
+# Minimum finished dispatches in a service×kind before suggesting a rank change.
+min_outcomes = 5
+# Other services eligible for that kind required before a peer-median suggestion
+# (2026-10-18 review finding 3b: a single peer auto-awards ±delta).
+min_peers = 2
+# Done-rate points below the peer-median for that kind → suggest +5 rank (worse).
+suggest_worse_below = 25.0
+suggest_worse_delta = 5
+# Done-rate points above the peer-median → suggest −3 rank (better).
+suggest_better_above = 15.0
+suggest_better_delta = 3
 
 [discovery]
 # Never a routable service, whatever aiuse or acp-run lists (operator 2026-10-15):

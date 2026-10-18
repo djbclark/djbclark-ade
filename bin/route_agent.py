@@ -69,20 +69,23 @@ Usage:
     route_agent.py route --kind bulk
     route_agent.py route --kind judgment --json
     route_agent.py refresh          # force a synchronous quota refresh
-    route_agent.py show             # cache age and per-service headroom
+    route_agent.py show             # cache age, headroom, pace, expected waste
+    route_agent.py calibrate [--since DAYS] [--json] [--min N]
 """
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import shutil
+import statistics
 import subprocess
 import sys
 import time
 import tomllib
 from dataclasses import dataclass, field, fields
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -139,9 +142,10 @@ class Service:
     # a genuinely Hermes-only provider would otherwise silently win Claude
     # routing decisions it cannot serve.
     hermes_only: bool = False
-    # A pool whose window resets and its allowance is lost: while it has real
-    # headroom it outranks pools that carry the same kind of work but keep
-    # their balance. `route` applies BURN_FIRST_BONUS above BURN_FIRST_MIN.
+    # Static fallback for burn-first when expected waste at reset is unknown.
+    # Prefer computed waste ≥ burn_first_waste_min (2026-10-18). When waste is
+    # known this flag is ignored; when unknown, `route` still applies
+    # BURN_FIRST_BONUS above BURN_FIRST_MIN.
     burn_first: bool = False
     # Set when this service is ONE of several independent model-family pools
     # that a single aiuse provider reports: (aiuse provider, window
@@ -203,6 +207,10 @@ BY_NAME: dict[str, Service]
 KINDS: tuple[str, ...]
 BURN_FIRST_MIN: float
 BURN_FIRST_BONUS: float
+BURN_FIRST_WASTE_MIN: float
+PACE_PENALTY_ABOVE: float
+PACE_PENALTY: float
+PACE_PENALTY_JUDGMENT_FACTOR: float
 FRONTIER_PER_WAVE: int
 DEFAULT_PROFILE: dict[str, int]
 NEVER_ROUTE: frozenset[str]
@@ -212,6 +220,12 @@ ALIASES: dict[str, str]
 DISPATCH_EXTRA: dict[str, str]
 HERMES_MODELS: dict[str, list[str]]
 HERMES_PROVIDER_NAME: dict[str, str]
+CALIBRATE_MIN_OUTCOMES: int
+CALIBRATE_MIN_PEERS: int
+CALIBRATE_SUGGEST_WORSE_BELOW: float
+CALIBRATE_SUGGEST_WORSE_DELTA: int
+CALIBRATE_SUGGEST_BETTER_ABOVE: float
+CALIBRATE_SUGGEST_BETTER_DELTA: int
 
 
 def load_policy(path: Path | str) -> dict[str, Any]:
@@ -255,7 +269,7 @@ def load_policy(path: Path | str) -> dict[str, Any]:
             raise ValueError(
                 f"routing policy {path}: [[service]] {label!r}: "
                 f"pool must be a 2-element string array, got {pool!r}")
-    for section in ("routing", "discovery", "dispatch", "hermes"):
+    for section in ("routing", "discovery", "dispatch", "hermes", "calibrate"):
         if section not in data or not isinstance(data[section], dict):
             raise ValueError(f"routing policy {path}: missing [{section}] table")
     return data
@@ -275,32 +289,55 @@ def _service_from_entry(entry: dict[str, Any]) -> Service:
 def apply_policy(data: dict[str, Any]) -> None:
     """Install a loaded policy dict as this module's routing constants."""
     global POLICY, SERVICES, BY_NAME, KINDS, BURN_FIRST_MIN, BURN_FIRST_BONUS
+    global BURN_FIRST_WASTE_MIN, PACE_PENALTY_ABOVE, PACE_PENALTY
+    global PACE_PENALTY_JUDGMENT_FACTOR
     global FRONTIER_PER_WAVE, DEFAULT_PROFILE, NEVER_ROUTE, OPERATOR_GATED
     global FABLE_MIN_LEFT, ALIASES, DISPATCH_EXTRA, HERMES_MODELS
     global HERMES_PROVIDER_NAME
+    global CALIBRATE_MIN_OUTCOMES, CALIBRATE_MIN_PEERS
+    global CALIBRATE_SUGGEST_WORSE_BELOW
+    global CALIBRATE_SUGGEST_WORSE_DELTA, CALIBRATE_SUGGEST_BETTER_ABOVE
+    global CALIBRATE_SUGGEST_BETTER_DELTA
 
     POLICY = data
-    routing = data["routing"]
-    discovery = data["discovery"]
-    dispatch = data["dispatch"]
-    hermes = data["hermes"]
+    try:
+        routing = data["routing"]
+        discovery = data["discovery"]
+        dispatch = data["dispatch"]
+        hermes = data["hermes"]
+        calibrate = data["calibrate"]
 
-    KINDS = tuple(routing["kinds"])
-    BURN_FIRST_MIN = float(routing["burn_first_min"])
-    BURN_FIRST_BONUS = float(routing["burn_first_bonus"])
-    FRONTIER_PER_WAVE = int(routing["frontier_per_wave"])
-    FABLE_MIN_LEFT = float(routing["fable_min_left"])
-    DEFAULT_PROFILE = {str(k): int(v) for k, v in routing["default_profile"].items()}
+        KINDS = tuple(routing["kinds"])
+        BURN_FIRST_MIN = float(routing["burn_first_min"])
+        BURN_FIRST_BONUS = float(routing["burn_first_bonus"])
+        BURN_FIRST_WASTE_MIN = float(routing["burn_first_waste_min"])
+        PACE_PENALTY_ABOVE = float(routing["pace_penalty_above"])
+        PACE_PENALTY = float(routing["pace_penalty"])
+        PACE_PENALTY_JUDGMENT_FACTOR = float(routing["pace_penalty_judgment_factor"])
+        FRONTIER_PER_WAVE = int(routing["frontier_per_wave"])
+        FABLE_MIN_LEFT = float(routing["fable_min_left"])
+        DEFAULT_PROFILE = {str(k): int(v) for k, v in routing["default_profile"].items()}
 
-    NEVER_ROUTE = frozenset(discovery["never_route"])
-    OPERATOR_GATED = frozenset(discovery["operator_gated"])
-    ALIASES = {str(k): str(v) for k, v in discovery["aliases"].items()}
+        NEVER_ROUTE = frozenset(discovery["never_route"])
+        OPERATOR_GATED = frozenset(discovery["operator_gated"])
+        ALIASES = {str(k): str(v) for k, v in discovery["aliases"].items()}
 
-    DISPATCH_EXTRA = {str(k): str(v) for k, v in (dispatch.get("extra") or {}).items()}
-    HERMES_MODELS = {str(k): [str(m) for m in v]
-                      for k, v in (hermes.get("models") or {}).items()}
-    HERMES_PROVIDER_NAME = {str(k): str(v)
-                            for k, v in (hermes.get("provider_name") or {}).items()}
+        DISPATCH_EXTRA = {str(k): str(v) for k, v in (dispatch.get("extra") or {}).items()}
+        HERMES_MODELS = {str(k): [str(m) for m in v]
+                          for k, v in (hermes.get("models") or {}).items()}
+        HERMES_PROVIDER_NAME = {str(k): str(v)
+                                for k, v in (hermes.get("provider_name") or {}).items()}
+
+        CALIBRATE_MIN_OUTCOMES = int(calibrate["min_outcomes"])
+        CALIBRATE_MIN_PEERS = int(calibrate["min_peers"])
+        CALIBRATE_SUGGEST_WORSE_BELOW = float(calibrate["suggest_worse_below"])
+        CALIBRATE_SUGGEST_WORSE_DELTA = int(calibrate["suggest_worse_delta"])
+        CALIBRATE_SUGGEST_BETTER_ABOVE = float(calibrate["suggest_better_above"])
+        CALIBRATE_SUGGEST_BETTER_DELTA = int(calibrate["suggest_better_delta"])
+    except KeyError as e:
+        raise ValueError(
+            f"routing policy {POLICY_PATH}: missing key {e.args[0]!r}"
+        ) from e
 
     SERVICES = tuple(_service_from_entry(e) for e in data["service"])
     BY_NAME = {s.name: s for s in SERVICES}
@@ -334,9 +371,21 @@ def policy_public() -> dict[str, Any]:
             "kinds": list(KINDS),
             "burn_first_min": BURN_FIRST_MIN,
             "burn_first_bonus": BURN_FIRST_BONUS,
+            "burn_first_waste_min": BURN_FIRST_WASTE_MIN,
+            "pace_penalty_above": PACE_PENALTY_ABOVE,
+            "pace_penalty": PACE_PENALTY,
+            "pace_penalty_judgment_factor": PACE_PENALTY_JUDGMENT_FACTOR,
             "frontier_per_wave": FRONTIER_PER_WAVE,
             "fable_min_left": FABLE_MIN_LEFT,
             "default_profile": dict(DEFAULT_PROFILE),
+        },
+        "calibrate": {
+            "min_outcomes": CALIBRATE_MIN_OUTCOMES,
+            "min_peers": CALIBRATE_MIN_PEERS,
+            "suggest_worse_below": CALIBRATE_SUGGEST_WORSE_BELOW,
+            "suggest_worse_delta": CALIBRATE_SUGGEST_WORSE_DELTA,
+            "suggest_better_above": CALIBRATE_SUGGEST_BETTER_ABOVE,
+            "suggest_better_delta": CALIBRATE_SUGGEST_BETTER_DELTA,
         },
         "discovery": {
             "never_route": sorted(NEVER_ROUTE),
@@ -390,6 +439,10 @@ def policy_markdown() -> str:
     lines.append(f"| routing.frontier_per_wave | {FRONTIER_PER_WAVE} |")
     lines.append(f"| routing.fable_min_left | {FABLE_MIN_LEFT} |")
     lines.append(f"| routing.burn_first_min | {BURN_FIRST_MIN} |")
+    lines.append(f"| routing.burn_first_waste_min | {BURN_FIRST_WASTE_MIN} |")
+    lines.append(f"| routing.pace_penalty_above | {PACE_PENALTY_ABOVE} |")
+    lines.append(f"| routing.pace_penalty | {PACE_PENALTY} |")
+    lines.append(f"| routing.pace_penalty_judgment_factor | {PACE_PENALTY_JUDGMENT_FACTOR} |")
     return "\n".join(lines) + "\n"
 
 
@@ -474,12 +527,14 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
 
         # One account can hold several independent model-family pools; agy's
         # Claude/GPT pool is its own service, so its windows must not drag
-        # the Gemini pool's headroom down (or the reverse).
-        per_key: dict[str, tuple[Any, dict[str, float | None], dict[str, float | None]]] = {}
+        # the Gemini pool's headroom down (or the reverse). Binding-window
+        # pace/reset fields ride with the least-remaining window (2026-10-18).
+        per_key: dict[str, tuple[Any, dict[str, float | None],
+                                 dict[str, float | None], dict[str, Any]]] = {}
         for w in acct.get("windows") or []:
             family = w.get("pool_family")
             key = pool_service(name, family)
-            worst, detail, sublimits = per_key.get(key, (None, {}, {}))
+            worst, detail, sublimits, bind = per_key.get(key, (None, {}, {}, {}))
             label = w.get("label") or "?"
 
             state = w.get("state")
@@ -506,21 +561,85 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
                 # and stay binding for the service that owns them.
                 sublimits[family or label] = rem_val
             elif rem_val is not None:
-                worst = rem_val if worst is None else min(worst, rem_val)
-            per_key[key] = (worst, detail, sublimits)
+                if worst is None or rem_val < worst:
+                    worst = rem_val
+                    bind = {
+                        "pace_ratio": w.get("pace_ratio"),
+                        "resets_at": w.get("resets_at"),
+                        "window_minutes": w.get("window_minutes"),
+                    }
+            per_key[key] = (worst, detail, sublimits, bind)
 
         if not per_key:
-            per_key[name] = (None, {}, {})
-        for key, (worst, detail, sublimits) in per_key.items():
-            prior = providers.get(key, {}).get("remaining")
-            if prior is not None and worst is not None:
-                worst = min(worst, prior)      # several accounts: the tightest wins
-            providers[key] = {"remaining": None if worst is None else round(float(worst), 1),
-                              "windows": detail, "sublimits": sublimits,
-                              "billing_kind": acct.get("billing_kind")}
+            per_key[name] = (None, {}, {}, {})
+        for key, (worst, detail, sublimits, bind) in per_key.items():
+            prior = providers.get(key) or {}
+            prior_rem = prior.get("remaining")
+            if prior_rem is not None and worst is not None:
+                if prior_rem < worst:
+                    # several accounts: the tightest wins, keep its bind fields
+                    worst = prior_rem
+                    bind = {k: prior.get(k) for k in ("pace_ratio", "resets_at",
+                                                      "window_minutes")}
+                # else keep this account's bind (already set for `worst`)
+            elif prior_rem is not None and worst is None:
+                worst = prior_rem
+                bind = {k: prior.get(k) for k in ("pace_ratio", "resets_at",
+                                                  "window_minutes")}
+            providers[key] = {
+                "remaining": None if worst is None else round(float(worst), 1),
+                "windows": detail, "sublimits": sublimits,
+                "billing_kind": acct.get("billing_kind"),
+                "pace_ratio": bind.get("pace_ratio"),
+                "resets_at": bind.get("resets_at"),
+                "window_minutes": bind.get("window_minutes"),
+            }
     if age is not None and age > STALE_HARD:
         return {}, age
     return providers, age
+
+
+def hours_to_reset(resets_at: Any, *, now: datetime | None = None) -> float | None:
+    """Hours until `resets_at` (ISO), or None when unparseable.
+
+    A reset already in the past returns 0.0 (not None), so expected waste
+    equals remaining — the window has refilled.
+    """
+    if not resets_at:
+        return None
+    try:
+        stamp = datetime.fromisoformat(str(resets_at).replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=UTC)
+        now = now or datetime.now(UTC)
+        return max(0.0, (stamp - now).total_seconds() / 3600.0)
+    except (ValueError, TypeError):
+        return None
+
+
+def expected_waste(remaining: float | None, pace_ratio: Any,
+                   resets_at: Any, window_minutes: Any,
+                   *, now: datetime | None = None) -> float | None:
+    """Unused share of the binding window at reset if current pace holds.
+
+    projected_use ≈ pace × (100 / W_hours) × t_hours; waste = max(0, r − that).
+    Missing pace_ratio assumes p = 1. Missing resets_at or window_minutes →
+    unknown (None). Operator /steps 1.6, 2026-10-18.
+    """
+    if remaining is None or resets_at is None or window_minutes is None:
+        return None
+    try:
+        w_hours = float(window_minutes) / 60.0
+        if w_hours <= 0:
+            return None
+        t = hours_to_reset(resets_at, now=now)
+        if t is None:
+            return None
+        p = 1.0 if pace_ratio is None else float(pace_ratio)
+        projected = p * (100.0 / w_hours) * t
+        return max(0.0, float(remaining) - projected)
+    except (ValueError, TypeError):
+        return None
 
 
 def acp_list_output() -> str:
@@ -641,12 +760,17 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
           exclude: frozenset[str] | set[str] = frozenset()) -> Choice | None:
     """Choose a service for `kind`, preferring idle paid capacity for bulk.
 
+    Score = rank + (100 − remaining) × weight / 10, then pace/reset adjustments
+    (2026-10-18): burn_first_bonus when expected waste at reset is high (or the
+    static TOML flag when waste is unknown), and a pace_penalty when the
+    binding window is burning ahead of schedule.
+
     `exclude` names services to skip (full for this wave, or just failed)."""
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}")
     quota = {} if quota is None else quota
 
-    scored: list[tuple[float, Service, float | None]] = []
+    scored: list[tuple[float, Service, float | None, list[str]]] = []
     for svc in discover(quota):
         if not svc.eligible(kind) or svc.name in exclude:
             continue
@@ -669,17 +793,40 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         else:
             pressure = (100.0 - remaining) * weight / 10.0
         rank = svc.rank_for(kind) + pressure
-        if svc.burn_first and remaining is not None and remaining >= BURN_FIRST_MIN:
+        tags: list[str] = []
+        waste = expected_waste(remaining, info.get("pace_ratio"),
+                               info.get("resets_at"), info.get("window_minutes"))
+        if waste is not None:
+            # Reserves keep their floor gate; never boost them to burn unused
+            # quota (2026-10-18 review finding 6c).
+            if waste >= BURN_FIRST_WASTE_MIN and not svc.reserve_floor:
+                rank -= BURN_FIRST_BONUS
+                tags.append(f"would waste {waste:.0f}% at reset")
+        elif svc.burn_first and remaining is not None and remaining >= BURN_FIRST_MIN:
+            # Static TOML fallback only when waste cannot be computed.
             rank -= BURN_FIRST_BONUS
-        scored.append((rank, svc, remaining))
+        pace = info.get("pace_ratio")
+        if pace is not None:
+            try:
+                pace_f = float(pace)
+            except (ValueError, TypeError):
+                pace_f = None
+            if pace_f is not None and pace_f > PACE_PENALTY_ABOVE:
+                pen = PACE_PENALTY
+                if kind in ("judgment", "frontier"):
+                    pen = pen * PACE_PENALTY_JUDGMENT_FACTOR
+                rank += pen
+                tags.append(f"pace {pace_f:.1f}× (penalty {pen:g})")
+        scored.append((rank, svc, remaining, tags))
 
     if not scored:
         return None
     scored.sort(key=lambda t: (t[0], t[1].name))
-    best_score, best, remaining = scored[0]
+    best_score, best, remaining, tags = scored[0]
     why = [f"{kind}: {best.cli}"]
     if remaining is not None:
         why.append(f"{remaining:.0f}% headroom")
+    why.extend(tags)
     if best.billing == "free":
         why.append("free tier")
     elif kind in ("bulk", "mechanical") and remaining is not None and remaining > 80:
@@ -690,7 +837,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     if best.note:
         why.append(best.note)
     return Choice(best, remaining, best_score, "; ".join(why),
-                  [s.name for _, s, _ in scored[1:4]],
+                  [s.name for _, s, _, _ in scored[1:4]],
                   model=suggest_model(best, kind, quota.get(best.name) or {}))
 
 
@@ -789,6 +936,352 @@ def apply_hermes_chain(chain: list[dict[str, str]]) -> str:
 
 JEV = Path(__file__).resolve().parent / "jev"
 
+# Dispatch state root (same default as acp-dispatch). Overridable for tests.
+ACP_DISPATCH_STATE = Path(os.environ.get("ACP_DISPATCH_STATE")
+                          or (Path.home() / ".local" / "state" / "bigteam"))
+
+# Copied from bin/acp-dispatch (do not import: slice B edits that file). Agent
+# name → (aiuse provider, pool_family). agy/cursor/opencode are model-dependent.
+_AGENT_PROVIDER_MAP: dict[str, tuple[str, str | None]] = {
+    "claude": ("claude", None),
+    "codex": ("codex", None),
+    "copilot": ("copilot", None),
+    "cursor": ("cursor", None),
+    "cline": ("clinepass", None),
+    "opencode": ("opencode-go", None),
+    "zcode": ("zai", None),
+    "grok": ("grok", None),
+}
+
+
+def map_agent_to_provider(agent: str, model: str | None) -> tuple[str, str | None] | None:
+    """Map acp agent and model to aiuse (provider, pool_family). None if unknown.
+
+    Kept in sync with acp-dispatch.map_agent_to_provider by hand (2026-10-18);
+    calibrate must not import acp-dispatch while that file is mid-edit.
+    """
+    if agent == "agy":
+        if model and model.startswith(("claude-", "gpt-")):
+            return "antigravity", "claude_gpt"
+        if model and model.startswith("gemini-"):
+            return "antigravity", "gemini"
+        return None
+    if agent == "cursor":
+        if not model or model in ("default", "auto"):
+            return "cursor", "auto"
+        return "cursor", None
+    if agent == "opencode":
+        if model and model.startswith("opencode-go/"):
+            return "opencode-go", None
+        if model and ("free" in model or model.startswith("opencode-zen-free/")):
+            return "opencode-zen-free", None
+        if model and model.startswith("opencode-zen/"):
+            return "opencode-zen", None
+    return _AGENT_PROVIDER_MAP.get(agent)
+
+
+def dispatch_service_name(agent: str, model: str | None) -> str:
+    """Routing service key for a dispatch record's agent+model."""
+    mapping = map_agent_to_provider(agent, model)
+    if mapping is None:
+        return agent or "?"
+    return pool_service(mapping[0], mapping[1])
+
+
+def _is_test_placeholder(rec: dict[str, Any]) -> bool:
+    """Skip synthetic pytest / temp-dir acp-run records."""
+    if rec.get("model") == "m1":
+        return True
+    cmd = str(rec.get("cmd") or "")
+    for part in cmd.split():
+        if "acp-run" not in part:
+            continue
+        if "/tmp/" in part or "/var/folders/" in part or "/pytest" in part:
+            return True
+    return False
+
+
+def _iter_job_records(state_dir: Path | None = None) -> list[dict[str, Any]]:
+    """Every `*/jobs/*.json` and `*/*/jobs/*.json` under the dispatch state dir."""
+    root = state_dir or ACP_DISPATCH_STATE
+    out: list[dict[str, Any]] = []
+    for pat in ("*/jobs/*.json", "*/*/jobs/*.json"):
+        for path in sorted(glob.glob(str(root / pat))):
+            try:
+                data = json.loads(Path(path).read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict):
+                data = dict(data)
+                data["_path"] = path
+                out.append(data)
+    return out
+
+
+def _record_when(rec: dict[str, Any]) -> datetime | None:
+    """Best timestamp for --since filtering: finished, else started.
+
+    Real dispatch records store epoch floats; ISO strings remain accepted.
+    The `done` key is a report path, never a timestamp.
+    """
+    for key in ("finished", "started"):
+        raw = rec.get(key)
+        if raw is None or raw == "":
+            continue
+        if isinstance(raw, (int, float)):
+            try:
+                return datetime.fromtimestamp(float(raw), UTC)
+            except (ValueError, OSError, OverflowError):
+                continue
+        try:
+            stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=UTC)
+            return stamp
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _no_report_class(rec: dict[str, Any]) -> str | None:
+    """Class after `NO-REPORT:` in detail/failure, or status==no-report → 'no-report'."""
+    for key in ("detail", "failure"):
+        text = str(rec.get(key) or "")
+        if text.startswith("NO-REPORT:"):
+            rest = text[len("NO-REPORT:"):].strip()
+            parts = rest.split("(", 1)[0].strip().split()
+            return parts[0].lower() if parts else "no-report"
+    if rec.get("status") == "no-report":
+        return "no-report"
+    return None
+
+
+def _suggest_basis_counts(recs: list[dict[str, Any]]) -> tuple[int, int]:
+    """(n, done) for suggestion rates: finished, non-quota, non-unavailable."""
+    n = done = 0
+    for rec in recs:
+        if _no_report_class(rec) == "quota":
+            continue
+        if rec.get("unavailable_class") is not None or rec.get("status") == "unavailable":
+            continue
+        n += 1
+        if rec.get("status") == "done":
+            done += 1
+    return n, done
+
+
+def _median_or_none(vals: list[float]) -> float | None:
+    if not vals:
+        return None
+    return float(statistics.median(vals))
+
+
+def calibrate_report(*, since_days: float | None = None, min_n: int | None = None,
+                     state_dir: Path | None = None,
+                     now: datetime | None = None) -> dict[str, Any]:
+    """Summarise dispatch outcomes for re-ranking good_at.
+
+    Schema (read-only; slice D writes `outcome` later):
+      outcome.ci      — "pass" | "fail"
+      outcome.review  — "pass" | "fail"
+      outcome.merged  — bool
+
+    Groups by service × model × kind (missing kind → `?`). Skips model `m1`
+    and temp-dir fake acp-run cmds. Running / unfinished records are counted
+    as `in_flight` and excluded from groups. Suggestions compare each
+    service×kind done rate (finished, non-quota, non-unavailable) to the
+    median of at least `[calibrate].min_peers` other services eligible for
+    that kind, when n ≥ min (config `[calibrate].min_outcomes`).
+    """
+    min_n = CALIBRATE_MIN_OUTCOMES if min_n is None else int(min_n)
+    now = now or datetime.now(UTC)
+    cutoff = None if since_days is None else now - timedelta(days=float(since_days))
+
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    in_flight = 0
+    for rec in _iter_job_records(state_dir):
+        if _is_test_placeholder(rec):
+            continue
+        when = _record_when(rec)
+        if cutoff is not None and (when is None or when < cutoff):
+            continue
+        if rec.get("status") == "running" or rec.get("finished") is None:
+            in_flight += 1
+            continue
+        agent = str(rec.get("agent") or "?")
+        model = rec.get("model")
+        model_s = "?" if model is None else str(model)
+        kind = rec.get("kind")
+        kind_s = "?" if not kind else str(kind)
+        service = dispatch_service_name(agent, None if model is None else str(model))
+        groups.setdefault((service, model_s, kind_s), []).append(rec)
+
+    group_rows: list[dict[str, Any]] = []
+    for (service, model, kind), recs in sorted(groups.items()):
+        n = len(recs)
+        done = sum(1 for r in recs if r.get("status") == "done")
+        no_report = 0
+        quota_stop = 0
+        for r in recs:
+            cls = _no_report_class(r)
+            if cls is not None:
+                no_report += 1
+                if cls == "quota":
+                    quota_stop += 1
+            elif r.get("unavailable_class") == "quota":
+                quota_stop += 1
+        usage = [float(r["measured_usage_pct"])
+                 for r in recs if r.get("measured_usage_pct") is not None]
+        win_vals: dict[str, list[float]] = {}
+        for r in recs:
+            windows = r.get("measured_usage_windows") or {}
+            if isinstance(windows, dict):
+                for label, val in windows.items():
+                    if val is None:
+                        continue
+                    try:
+                        win_vals.setdefault(str(label), []).append(float(val))
+                    except (ValueError, TypeError):
+                        pass
+        ci_n = rev_n = merged_n = 0
+        ci_pass = rev_pass = merged_true = 0
+        for r in recs:
+            out = r.get("outcome")
+            if not isinstance(out, dict):
+                continue
+            if out.get("ci") in ("pass", "fail"):
+                ci_n += 1
+                if out["ci"] == "pass":
+                    ci_pass += 1
+            if out.get("review") in ("pass", "fail"):
+                rev_n += 1
+                if out["review"] == "pass":
+                    rev_pass += 1
+            if isinstance(out.get("merged"), bool):
+                merged_n += 1
+                if out["merged"]:
+                    merged_true += 1
+        group_rows.append({
+            "service": service,
+            "model": model,
+            "kind": kind,
+            "n": n,
+            "done": done,
+            "done_rate": round(100.0 * done / n, 1) if n else 0.0,
+            "no_report": no_report,
+            "quota_stop": quota_stop,
+            "median_measured_usage_pct": _median_or_none(usage),
+            "median_measured_usage_windows": {
+                k: _median_or_none(v) for k, v in sorted(win_vals.items())
+            },
+            "outcome": {
+                "ci_pass_rate": (round(100.0 * ci_pass / ci_n, 1) if ci_n else None),
+                "review_pass_rate": (round(100.0 * rev_pass / rev_n, 1) if rev_n else None),
+                "merged_rate": (round(100.0 * merged_true / merged_n, 1) if merged_n else None),
+                "n_ci": ci_n, "n_review": rev_n, "n_merged": merged_n,
+            },
+        })
+
+    # Suggestions: aggregate by service × kind (models folded). Rates use the
+    # non-quota / non-unavailable basis; raw table counts stay above.
+    # kind=? is a reporting bucket for legacy records with no kind — it is not
+    # a good_at key, so never suggest a rank change for it (2026-10-18).
+    sk: dict[tuple[str, str], dict[str, float]] = {}
+    for (service, _model, kind), recs in groups.items():
+        if kind == "?":
+            continue
+        sn, sd = _suggest_basis_counts(recs)
+        key = (service, kind)
+        agg = sk.setdefault(key, {"n": 0.0, "done": 0.0})
+        agg["n"] += sn
+        agg["done"] += sd
+
+    # Peer medians: eligible services with n ≥ min; need ≥ min_peers others.
+    by_kind: dict[str, list[tuple[str, float, float]]] = {}
+    for (service, kind), agg in sk.items():
+        if agg["n"] < min_n:
+            continue
+        svc = BY_NAME.get(service)
+        if svc is None or not svc.eligible(kind):
+            continue
+        rate = 100.0 * agg["done"] / agg["n"]
+        by_kind.setdefault(kind, []).append((service, rate, agg["n"]))
+
+    suggestions: list[dict[str, Any]] = []
+    for kind, peers in sorted(by_kind.items()):
+        for service, rate, n in peers:
+            others = [r for s, r, _ in peers if s != service]
+            if len(others) < CALIBRATE_MIN_PEERS:
+                continue
+            med = float(statistics.median(others))
+            delta = None
+            reason = None
+            if rate < med - CALIBRATE_SUGGEST_WORSE_BELOW:
+                delta = CALIBRATE_SUGGEST_WORSE_DELTA
+                reason = (f"done_rate {rate:.1f} is >{CALIBRATE_SUGGEST_WORSE_BELOW:g} "
+                          f"points below peer median {med:.1f}")
+            elif rate > med + CALIBRATE_SUGGEST_BETTER_ABOVE:
+                delta = -CALIBRATE_SUGGEST_BETTER_DELTA
+                reason = (f"done_rate {rate:.1f} is >{CALIBRATE_SUGGEST_BETTER_ABOVE:g} "
+                          f"points above peer median {med:.1f}")
+            if delta is None:
+                continue
+            suggestions.append({
+                "service": service,
+                "kind": kind,
+                "n": int(n),
+                "done_rate": round(rate, 1),
+                "peer_median_done_rate": round(med, 1),
+                "suggest_rank_delta": delta,
+                "reason": reason,
+            })
+    suggestions.sort(key=lambda s: (s["kind"], s["service"]))
+
+    return {
+        "generated_at": now.isoformat(),
+        "since_days": since_days,
+        "min_n": min_n,
+        "in_flight": in_flight,
+        "groups": group_rows,
+        "suggestions": suggestions,
+    }
+
+
+def format_calibrate_table(report: dict[str, Any]) -> str:
+    """Human table for `route_agent.py calibrate` (non-JSON)."""
+    lines = [
+        f"calibrate: {len(report['groups'])} groups, "
+        f"{len(report['suggestions'])} suggestions, "
+        f"{report.get('in_flight', 0)} in_flight "
+        f"(min n={report['min_n']}"
+        + (f", since {report['since_days']}d" if report.get("since_days") else "")
+        + ")",
+        "",
+        f"{'service':18} {'model':28} {'kind':10} {'done':8} "
+        f"{'n':>4} {'nr':>3} {'q':>3} {'usage%':>7}",
+    ]
+    for g in report["groups"]:
+        done = f"{g['done']}/{g['n']}"
+        usage = g["median_measured_usage_pct"]
+        usage_s = "—" if usage is None else f"{usage:.1f}"
+        lines.append(
+            f"{g['service'][:18]:18} {g['model'][:28]:28} {g['kind'][:10]:10} "
+            f"{done:8} {g['n']:4d} {g['no_report']:3d} {g['quota_stop']:3d} "
+            f"{usage_s:>7}"
+        )
+    if report["suggestions"]:
+        lines += ["", "suggestions:"]
+        for s in report["suggestions"]:
+            sign = "+" if s["suggest_rank_delta"] > 0 else ""
+            lines.append(
+                f"  {s['service']} × {s['kind']}: rank {sign}{s['suggest_rank_delta']} "
+                f"(done {s['done_rate']}% vs peer median {s['peer_median_done_rate']}%, "
+                f"n={s['n']})"
+            )
+    else:
+        lines += ["", "suggestions: (none)"]
+    return "\n".join(lines) + "\n"
+
 
 def shadow_kind(brief_path: str, incumbent: str, service: str | None) -> None:
     """Log what the deciders (Jev, GLiDE) say a brief's kind is, beside the caller's kind.
@@ -830,15 +1323,35 @@ def main(argv: list[str] | None = None) -> int:
     pl.add_argument("--json", action="store_true")
     pl.add_argument("--brief", action="append", default=[],
                     help="brief file per kind, in --kinds order (repeat; shadow-asks Jev and GLiDE)")
-    sub.add_parser("show", help="snapshot age and per-service headroom")
+    sub.add_parser("show", help="snapshot age, headroom, pace, expected waste")
     sub.add_parser("services", help="every service discovered right now")
     hc = sub.add_parser("hermes-chain", help="generate Hermes's provider chain")
     hc.add_argument("--apply", action="store_true", help="write it to config.yaml")
     pol = sub.add_parser("policy", help="print the effective routing policy")
     pol.add_argument("--md", action="store_true",
                      help="markdown tables (services × kinds, gates, caps)")
+    cal = sub.add_parser(
+        "calibrate",
+        help="dispatch outcome report + suggested good_at rank changes",
+    )
+    cal.add_argument("--since", type=float, default=None, metavar="DAYS",
+                     help="only records finished/started within the last DAYS")
+    cal.add_argument("--json", action="store_true",
+                     help="stable JSON for the monthly AI re-rank job")
+    cal.add_argument("--min", type=int, default=None, metavar="N",
+                     help="minimum n for suggestions "
+                     f"(default [calibrate].min_outcomes={CALIBRATE_MIN_OUTCOMES})")
 
     args = parser.parse_args(argv)
+    if args.command == "calibrate":
+        # No snapshot needed; avoid a stale-hard wipe delaying the report.
+        report = calibrate_report(since_days=args.since, min_n=args.min)
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            print(format_calibrate_table(report))
+        return 0
+
     quota, age = load_snapshot()
 
     if args.command == "plan":
@@ -891,7 +1404,23 @@ def main(argv: list[str] | None = None) -> int:
             svc = BY_NAME.get(name)
             flag = "" if not svc else ("  [retired]" if svc.retired else
                                        "  [never-bulk]" if svc.never_bulk else "")
-            print(f"  {name:16} {info.get('remaining')!s:>6}% remaining{flag}")
+            rem = info.get("remaining")
+            pace = info.get("pace_ratio")
+            hrs = hours_to_reset(info.get("resets_at"))
+            waste = expected_waste(rem, pace, info.get("resets_at"),
+                                   info.get("window_minutes"))
+            extra = []
+            if pace is not None:
+                try:
+                    extra.append(f"pace {float(pace):.2f}×")
+                except (ValueError, TypeError):
+                    pass
+            if hrs is not None:
+                extra.append(f"reset in {hrs:.1f}h")
+            if waste is not None:
+                extra.append(f"waste≈{waste:.0f}%")
+            trail = ("  " + ", ".join(extra)) if extra else ""
+            print(f"  {name:16} {rem!s:>6}% remaining{trail}{flag}")
         return 0
 
     if args.command == "hermes-chain":
