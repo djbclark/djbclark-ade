@@ -165,7 +165,9 @@ class Base(unittest.TestCase):
                 "AIUSE_SNAPSHOT": str(self.no_quota_snap),
                 "PREFLIGHT_COUNT": str(self.tmp / "preflight-count"),
                 "ACP_DISPATCH_LAUNCHCTL": str(self.fake_launchctl),
-                "INFO_COUNT": str(self.tmp / "info-count"), "ACP_DISPATCH_AIUSE": "off", **extra}
+                "INFO_COUNT": str(self.tmp / "info-count"), "ACP_DISPATCH_AIUSE": "off",
+                # The in-flight cap scans this root: never the machine's real running slices.
+                "ACP_DISPATCH_STATE": str(self.tmp / "state"), **extra}
 
     def dispatch(self, *extra: str, mode: str = "writes", name: str = "s1",
                  env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -405,6 +407,50 @@ class TestDispatch(Base):
         self.assertEqual(r.returncode, 2)
         self.assertIn("already finished", r.stderr)
         self.assertEqual(self.dispatch("--force").returncode, 0)
+
+
+class TestFrontierGates(Base):
+    """2026-10-18: four gpt-6-astra slices started together emptied codex's 5-hour window and all
+    four stopped; Fable at xhigh should almost never run."""
+
+    def running_codex(self) -> Path:
+        jobs = self.tmp / "state" / "other-task" / "jobs"
+        jobs.mkdir(parents=True)
+        rec = jobs / "busy.json"
+        rec.write_text(json.dumps({"name": "busy", "agent": "codex", "model": "m1",
+                                   "status": "running", "pid": os.getpid(), "started": 0}))
+        return rec
+
+    def test_fable_xhigh_needs_operator_approval(self):
+        r = self.dispatch_model("fable-5-1", "--effort", "xhigh", "--no-model-check")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("ACP_OPERATOR_APPROVED=fable-xhigh", r.stderr)
+        self.assertFalse((self.out / "jobs" / "s1.json").exists())
+        r = self.dispatch_model("fable-5-1", "--effort", "xhigh", "--no-model-check",
+                                env={"ACP_OPERATOR_APPROVED": "fable-xhigh"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_fable_high_is_not_gated(self):
+        r = self.dispatch_model("fable-5-1", "--effort", "high", "--no-model-check")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_second_codex_slice_is_unavailable_while_one_is_in_flight(self):
+        self.running_codex()
+        r = self.dispatch()
+        self.assertEqual(r.returncode, 5, (r.stdout, r.stderr))
+        rec = self.record()
+        self.assertEqual((rec["status"], rec["unavailable_class"]), ("unavailable", "inflight"))
+        self.assertIn("busy", rec["detail"])
+        self.assertEqual(self.dispatch(name="s2", env={"ACP_DISPATCH_INFLIGHT": "codex=2"}).returncode, 0)
+
+    def test_a_dead_or_finished_codex_record_does_not_count(self):
+        rec = self.running_codex()
+        rec.write_text(json.dumps({"agent": "codex", "status": "done", "pid": os.getpid()}))
+        self.assertEqual(self.dispatch().returncode, 0)
+
+    def test_other_agents_are_not_capped(self):
+        self.running_codex()
+        self.assertEqual(self.dispatch_agent("claude", "m1").returncode, 0)
 
 
 class TestModelCheck(Base):

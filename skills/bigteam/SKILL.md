@@ -20,12 +20,15 @@ maximising code quality.** Not "minimise tokens": tokens on different pools
 cost different money, and a weak model's cheap tokens are paid for again in
 review and rework. Concretely:
 
-1. **The two frontier pools are used fully for serious work**: Claude Fable
-   5.1 at `xhigh` and codex's top frontier model (`gpt-6-astra`). Hard slices,
-   adjudications, security-relevant changes, whole-corpus reads and
-   adversarial second opinions go there; their weekly windows are lost if
-   unspent. Fable and "claude" are **one pool** (Fable is a <=50% sublimit of
-   the shared weekly and bills the 5-hour window too).
+1. **The two frontier models are scarce: only what really needs them**
+   (operator 2026-10-18). Claude Fable 5.1 and codex `gpt-6-astra` are reached
+   only through the `frontier` kind, one slice per pool per wave. On
+   2026-10-18 a wave of four astra slices emptied codex's 5-hour window and
+   every one stopped. Judgment is Opus 5.5 at `high`. `acp-dispatch` allows one
+   fresh codex slice in flight at a time, and refuses Fable at `xhigh` without
+   `ACP_OPERATOR_APPROVED=fable-xhigh`. Fable and "claude" are **one pool**
+   (Fable is a <=50% sublimit of the shared weekly and bills the 5-hour window
+   too).
 2. **Everyday work goes to the other pools** so those windows stay free:
    agy's Claude/GPT pool, Cursor Auto, zai GLM-5.3, opencode-go, agy Gemini,
    crush/SIPB. Every slice names its **vendor × model × effort × context**,
@@ -118,7 +121,7 @@ Classify every pool before assigning anything:
 | **fresh subscription** | monthly/weekly window largely unused | bulk, mechanical, writing, research — use heavily |
 | **tight** | >40% of the binding window burned | one slice at most, or skip |
 | **exhausted** | `remaining_percent` ≈ 0 on ANY window of that pool | skip that pool entirely (the same vendor's other model-family pool may be fine) |
-| **frontier** | Claude Fable 5.1 and codex `gpt-6-astra` | judgment, adjudication, security-relevant, whole-corpus, adversarial review; use fully (weekly windows), never for everyday slices; see *Pool policy* below |
+| **frontier** | Claude Fable 5.1 and codex `gpt-6-astra` | only a slice that really needs a frontier model to look it over (a security-relevant or concurrency fix's final review, debugging that defeated real attempts, a whole-corpus read); one per pool per wave, codex one in flight machine-wide; see *Pool policy* below |
 | **lifeline** | another agent runs on it | use with care and never let it run out; see *Reserve pools* below (clinepass and Claude itself) |
 | **reserve** | grok (GrokBot) and copilot (GitHub-side review) | hard floor 60% left (`route_agent.py` `reserve_floor`), one small slice at a time, only when that vendor is the point (copilot: kind `github`; grok: kind `realtime-web`); a missing or stale reading means do not use |
 | **never** | hermes; the prepaid pools; credits-backed models | not a target by any route; `acp-run`/`acp-dispatch` refuse hermes like omp |
@@ -143,15 +146,18 @@ needs from it:
    Context stays at the agent's default unless the slice reads a whole corpus
    or a long log (`--context 500k` / `1m`; bigger windows bill more on xAI,
    Cursor and Copilot).
-2. **`judgment` slices** (architecture, adjudication, debugging that defeated
-   one attempt, security-relevant edits, whole-corpus reads, the adversarial
-   second opinion of Step 6) go to the frontier pools and use them fully:
-   `acp-dispatch claude --model fable --effort xhigh` (an Agent-tool
-   `fable-deep` call is the in-session form) or `acp-dispatch codex --model
-   gpt-6-astra --effort xhigh`. Fable's cap is 50% of the shared Claude weekly
-   and it bills the 5-hour window too; under 10% of the cap, `plan` suggests
-   `opus --effort xhigh` instead. codex is for astra, not for luna-class
-   everyday slices.
+2. **`judgment` slices** (architecture, adjudication, the adversarial second
+   opinion of Step 6) go to `acp-dispatch claude --model opus --effort high`.
+   **`frontier` slices** are the rare few that really need a frontier model
+   (debugging that defeated real attempts, a security-relevant or concurrency
+   fix's final review, a whole-corpus read): `acp-dispatch codex --model
+   gpt-6-astra --effort high` or `acp-dispatch claude --model fable --effort
+   high` (an Agent-tool `fable-deep` call is the in-session form), one per pool
+   per wave. Fable's cap is 50% of the shared Claude weekly and it bills the
+   5-hour window too; under 10% of the cap, `plan` suggests `opus --effort
+   high` instead. Fable at `xhigh` needs djbclark's yes for that run. codex is
+   for astra, not for luna-class everyday slices, and runs one slice at a
+   time: a "small issues" wave is not frontier work (2026-10-18).
 3. **`code`, `research`, `bulk`, `mechanical` slices** go to the everyday
    pools, in `plan`'s order: agy Claude/GPT (>= 40% left; `claude-opus-5-5
    --effort high` for code, `claude-sonnet-5-5` for volume), Cursor Auto
@@ -390,7 +396,7 @@ of Step 1; `plan` prints the `acp-dispatch` line), because the pools will have
 moved by the time a queued slice is reached. Decide the **context window** now,
 per slice: the default unless the slice reads a whole corpus or a long log.
 Tag honestly: a `judgment` slice on an everyday pool fails and is re-run at
-frontier cost; a `code` slice tagged `judgment` wastes a frontier turn.
+higher cost; a `code` slice tagged `judgment` or `frontier` wastes a scarce turn.
 
 Keep for **yourself** (the orchestrator), never delegate:
 

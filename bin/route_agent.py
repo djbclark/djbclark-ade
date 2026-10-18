@@ -43,9 +43,12 @@ The operator's standing routing rules are encoded as hard constraints, not
 preferences, because they encode consequences a score cannot see:
 
 - free and chronically-unused pools first for bulk work;
-- claude/codex for judgment: Claude Fable 5.1 and codex's top frontier model
-  (gpt-6-astra) are to be used FULLY for serious-effort work, so everyday
-  work goes to the other pools (operator 2026-10-15);
+- judgment goes to claude's Opus 5.5 at high; the two frontier models, Claude
+  Fable 5.1 and codex's gpt-6-astra, are reached ONLY through the explicit
+  `frontier` kind, at most one slice per pool per wave, for work that really
+  needs them (operator 2026-10-18: a wave of four astra slices emptied
+  codex's 5-hour window and every one stopped; Fable at xhigh should almost
+  never run). Everyday work goes to the other pools;
 - Fable is a sublimit (at most 50%) of the SAME Claude weekly window, not a
   separate allowance: a Fable run bills the shared window too;
 - grok and copilot are reserves with a hard floor (`reserve_floor`): GrokBot
@@ -107,7 +110,10 @@ STALE_SOFT = 25 * 60       # aiuse's own `fresh` threshold; older = re-collect b
 # they hold at least this much headroom.
 BURN_FIRST_MIN = 40.0
 BURN_FIRST_BONUS = 4.0
-KINDS = ("judgment", "code", "bulk", "research", "mechanical", "github", "realtime-web")
+KINDS = ("judgment", "frontier", "code", "bulk", "research", "mechanical", "github",
+         "realtime-web")
+# Most `frontier` slices one wave puts on a single pool (operator 2026-10-18).
+FRONTIER_PER_WAVE = 1
 
 
 @dataclass(frozen=True)
@@ -177,7 +183,7 @@ class Service:
             return False
         if kind in ("bulk", "mechanical") and self.never_bulk:
             return False
-        if kind == "judgment" and not self.judgment_tier:
+        if kind in ("judgment", "frontier") and not self.judgment_tier:
             return False
         return kind in self.good_at
 
@@ -186,29 +192,33 @@ class Service:
 
 
 # Profiles from docs/model-routing.md "Which AI for which work", rewritten
-# 2026-10-15 to the operator's routing policy: Claude Fable 5.1 and codex's
-# top frontier model (gpt-6-astra today) carry the serious-effort work and
-# should be used fully, so everyday work goes to the OTHER pools; grok and
+# 2026-10-15 to the operator's routing policy and narrowed 2026-10-18: Claude
+# Fable 5.1 and codex's top frontier model (gpt-6-astra today) are reached
+# only through the `frontier` kind, one slice per pool per wave; judgment is
+# Opus 5.5 at high; everyday work goes to the OTHER pools; grok and
 # copilot are reserves with a hard floor (GrokBot and GitHub-side Copilot
 # review run on them); hermes is never a target; omp is operator-gated.
 # `models` is the acp-run `--model [--effort L]` suggestion per kind; `agent`
 # is the acp-run agent name when it differs from the aiuse provider id.
 SERVICES: tuple[Service, ...] = (
-    Service("claude", "claude (Fable 5.1 @ xhigh, judgment only)",
-            {"judgment": 1},
+    Service("claude", "claude (Opus 5.5 @ high for judgment; Fable only for frontier)",
+            {"judgment": 1, "frontier": 2},
             "subscription",
             "orchestration pool; Fable is a sublimit of the SAME weekly window "
             "(at most 50% of it), not a separate allowance",
             judgment_tier=True, access="cli-only",
             # No code/research row: everyday work on this pool eats the room
-            # Fable needs (review 2026-10-15); Haiku lookups go through the
-            # Agent tool, not acp-dispatch.
-            models={"judgment": "fable --effort xhigh"}),
-    Service("codex", "codex (gpt-6-astra @ xhigh)",
-            {"judgment": 2, "code": 22, "research": 28},
+            # judgment needs (review 2026-10-15); Haiku lookups go through the
+            # Agent tool, not acp-dispatch. Fable at xhigh is never suggested:
+            # acp-dispatch makes it an operator-approved run (2026-10-18).
+            models={"judgment": "opus --effort high",
+                    "frontier": "fable --effort high"}),
+    Service("codex", "codex (gpt-6-astra, frontier only)",
+            {"frontier": 1},
             "subscription",
-            "top frontier coding model: hard slices and second opinions, not everyday work",
-            judgment_tier=True,
+            "top frontier coding model: only a slice that really needs astra "
+            "to look it over; one at a time",
+            judgment_tier=True, max_parallel=1,
             # Tolerated rather than committed: OpenAI neither permits nor
             # prohibits subscription use inside a non-OpenAI tool, and
             # tolerated is fine. The real reason to keep it out of Hermes's
@@ -217,14 +227,11 @@ SERVICES: tuple[Service, ...] = (
             # worth reserving for coding judgment rather than spending on
             # background agent turns.
             access="cli-only",
-            # The code/research rows are kept on purpose (review 2026-10-15,
-            # finding 4): they rank below every everyday pool, so plan only
-            # falls through to astra when those are full, which is the
-            # operator's "make full use of the frontier models; *usually*
-            # other pools for everyday work".
-            models={"judgment": "gpt-6-astra --effort xhigh",
-                    "code": "gpt-6-astra --effort high",
-                    "research": "gpt-6-astra --effort medium"}),
+            # No judgment/code/research rows (operator 2026-10-18): the 2026-10-15
+            # fall-through let plan, and leads copying it, put whole waves on
+            # astra; its 5-hour window holds about one hard slice. acp-dispatch
+            # also refuses a second codex slice while one is in flight.
+            models={"frontier": "gpt-6-astra --effort high"}),
     # agy's second pool: Claude Opus/Sonnet 5.5 and GPT via the same Google AI
     # Pro subscription, a separate 5h/weekly window from Gemini. Operator
     # 2026-10-10: it has a lot of headroom, so use it. Real Claude-class
@@ -551,7 +558,7 @@ NEVER_ROUTE = frozenset({"hermes", "clinepass"})  # clinepass: Hermes's lifeline
 # cline (operator 2026-10-17): the TUI is uninstalled; gated so a reinstall does not put it back
 # into discovery by accident (ALIASES folds it into clinepass, which NEVER_ROUTE covers).
 OPERATOR_GATED = frozenset({"omp", "cline"})
-# Below this much of the Fable sublimit, judgment on claude falls back to Opus.
+# Below this much of the Fable sublimit, frontier on claude falls back to Opus.
 FABLE_MIN_LEFT = 10.0
 
 # Discovery names the TUI; aiuse names the account behind it. Without this
@@ -621,13 +628,13 @@ DISPATCH_EXTRA = {"crush": " --acp-arg=--strip-user-config"}
 def suggest_model(svc: Service, kind: str, info: dict[str, Any]) -> str:
     """The model/effort to pass for `kind` on `svc`, from its profile.
 
-    claude's judgment slot is Fable 5.1 while the Fable sublimit (at most 50%
+    claude's frontier slot is Fable 5.1 while the Fable sublimit (at most 50%
     of the shared weekly) has room, else Opus at the same effort."""
     model = svc.models.get(kind, "")
-    if svc.name == "claude" and kind == "judgment":
+    if svc.name == "claude" and kind == "frontier":
         fable = (info.get("sublimits") or {}).get("fable")
         if fable is not None and fable < FABLE_MIN_LEFT:
-            model = "opus --effort xhigh"
+            model = "opus --effort high"
     return model
 
 
@@ -701,13 +708,19 @@ def plan(kinds: list[str], *, quota: dict[str, Any] | None = None,
     slice finishes. Re-run it at every wave boundary; it is a snapshot-file
     read, so it is instant and costs no tokens."""
     load: dict[str, int] = {}
+    frontier: dict[str, int] = {}
     full = set(exclude)
     out: list[tuple[str, Choice | None]] = []
     for kind in kinds:
-        choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=full)
+        skip = full
+        if kind == "frontier":
+            skip = full | {n for n, k in frontier.items() if k >= FRONTIER_PER_WAVE}
+        choice = route(kind, quota=quota, min_headroom=min_headroom, exclude=skip)
         if choice is not None:
             name = choice.service.name
             load[name] = load.get(name, 0) + 1
+            if kind == "frontier":
+                frontier[name] = frontier.get(name, 0) + 1
             if load[name] >= choice.service.max_parallel:
                 full.add(name)
         out.append((kind, choice))

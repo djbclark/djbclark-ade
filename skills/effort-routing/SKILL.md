@@ -43,7 +43,7 @@ Ask what the *next several actions* look like, not the last one:
 |---|---|
 | Applying a decision already made; edits, commits, doc writing, running known commands | **low / haiku** |
 | Normal implementation with a clear shape; tests, adapters, refactors | **medium / sonnet** |
-| The shape is not clear yet; architecture, adjudication, debugging something that already defeated one attempt, whole-corpus reading | **high / xhigh, Fable** |
+| The shape is not clear yet; architecture, adjudication, debugging something that already defeated one attempt | **high, Opus** (Fable `high` only when that really needs it; `xhigh` almost never, operator 2026-10-18) |
 
 Two traps worth naming. A session set high stays high through hours of rote
 work because nobody notices — that is the common failure, and it is invisible
@@ -59,20 +59,22 @@ about which side you are on, stay high and say so.
 - **Fan-out of rote nodes** — dispatch them at `model: "haiku"`,
   `effort: "low"` rather than doing them inline at session tier.
 - **One hard call inside otherwise ordinary work** — do not raise the whole
-  session. Check `cswap list` first; under 10% of the Fable cap or a tight 5h
-  window, use `acp-dispatch codex --model gpt-6-astra --effort xhigh` (or Opus
-  xhigh). Otherwise dispatch that single question to `fable-deep` (or the astra
-  call for an independent second opinion) and carry on. Fable is **not** a
-  separate budget: it is a sublimit (at most 50%) of the shared Claude weekly and bills the 5-hour window too. Use it
-  fully for exactly this kind of call, and send the ordinary work around it
-  to the everyday pools (model-routing, *Routing policy*).
+  session. Dispatch that single question to `acp-dispatch claude --model opus
+  --effort high` and carry on. Only when it really needs a frontier model
+  (it defeated real attempts, or is a security-relevant final review) use
+  `fable-deep` (Fable at `high`) or `acp-dispatch codex --model gpt-6-astra
+  --effort high`, one at a time: codex's 5-hour window holds about one hard
+  slice (2026-10-18). Fable is **not** a separate budget: it is a sublimit (at
+  most 50%) of the shared Claude weekly and bills the 5-hour window too. Fable
+  at `xhigh` needs djbclark's yes for that run (model-routing, *Routing
+  policy* item 1).
 - **Minimum needed spec for every sub-agent, unasked** (operator 2026-10-15):
   the goal is cost against code quality, not token count. Agent-tool
   sub-agents only at Haiku `low`, for a lookup, a classification or a reformat
   (Claude's own models bill the shared Claude/Fable pool); implementation, clear
   shape or not, goes through `acp-dispatch` to the everyday pools (agy
   `claude-opus-5-5 --effort high`, zcode `GLM-5.3 --effort high`, cursor
-  `default`); Fable/astra at `xhigh` only for the judgment calls above.
+  `default`); Fable/astra (`high`) only for the rare frontier calls above.
   Delegate proactively so the session's own context stays small, and route
   up when unsure.
 - **Multiple-choice calls inside a loop** (which pool, retry or stop, which

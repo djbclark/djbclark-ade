@@ -468,17 +468,27 @@ vendor ("use all agents" is not a routing plan). `bin/route_agent.py plan
 `acp-dispatch <agent> --model M --effort E` line per slice; `bigteam` is the
 method that runs the waves.
 
-1. **Serious-effort work goes to the two frontier pools, and they are to be
-   used fully.** Claude Fable 5.1 (`acp-dispatch claude --model fable --effort
-   xhigh`; inside Claude Code the `fable-deep` agent) and codex's top frontier
-   model, today `gpt-6-astra` (`acp-dispatch codex --model gpt-6-astra --effort
-   xhigh`, `high` for a hard implementation slice). Serious means architecture,
-   adjudication, debugging that already defeated one attempt, a
-   security-relevant change, a whole-corpus read (Fable's 1M native window), the
-   final review of a contract decision, an adversarial second opinion. Both
-   windows reset weekly, and an unspent weekly is money wasted: plan hard
-   slices onto them rather than hoarding. codex is for astra; do not spend its
-   window on `gpt-6-luna` everyday slices.
+1. **The two frontier models are scarce: send them only what really needs
+   them** (operator 2026-10-18, narrowing 2026-10-15's "use them fully"). That
+   night a lead put four plektra "small issues" slices on `gpt-6-astra` at
+   high/xhigh together. Codex's 5-hour window ran out and all four stopped
+   waiting for the reset, although the weekly still had 82% left. So:
+   1a. **Judgment** (review, design, adjudication) is `acp-dispatch claude
+       --model opus --effort high`. It is not Fable and not codex.
+   1b. **`frontier`** is the only route to codex `gpt-6-astra` (`--effort
+       high`) or Fable 5.1 (`--effort high`): one slice per pool per wave, for
+       work that really needs a frontier model to look it over. Examples: a
+       security-relevant or concurrency fix's final review, debugging that has
+       defeated real attempts, an adjudication no cheaper model settles, a
+       whole-corpus read that needs Fable's 1M window. "Upstream-bound", "small
+       issues" and "a second opinion would be nice" are not reasons.
+   1c. **codex: one slice in flight, machine-wide.** `acp-dispatch` refuses a
+       second fresh codex slice (exit 5, class `inflight`); resumes are exempt.
+       `ACP_DISPATCH_INFLIGHT=codex=2` overrides for a run. codex is only for
+       astra; never spend its window on `gpt-6-luna` everyday slices.
+   1d. **Fable at `xhigh`/`max` almost never runs**: `acp-dispatch` refuses it
+       without `ACP_OPERATOR_APPROVED=fable-xhigh`. Ask djbclark first; the
+       `fable-deep` agent runs at `high`.
 2. **Fable and "claude" are one pool.** `aiuse --available` lists two routing
    entries, but Fable is a model sublimit: **at most 50% of the shared Claude
    weekly**, and every Fable run bills the shared 5-hour and weekly windows too
@@ -503,7 +513,7 @@ method that runs the waves.
    shared pool), so the session's own context stays small. Implementation,
    whether its shape is clear or not, goes through `acp-dispatch` to the
    everyday pools (agy `claude-opus-5-5 --effort high`, zcode `GLM-5.3
-   --effort high`, cursor `default`); Fable/astra only for judgment (item 1). **Route up when unsure**: a hard
+   --effort high`, cursor `default`); Fable/astra only for `frontier` (item 1b). **Route up when unsure**: a hard
    slice on a cheap worker costs a failed step and a retry; an easy slice sent
    up costs a little extra.
 5. **The context window is a choice**, next to model and effort. Default is

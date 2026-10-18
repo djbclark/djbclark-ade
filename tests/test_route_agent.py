@@ -69,16 +69,15 @@ class TestStandingRules(unittest.TestCase):
     def test_judgment_only_goes_to_judgment_tier(self):
         c = r.route("judgment", quota=IDLE)
         self.assertTrue(c.service.judgment_tier)
-        self.assertIn(c.service.name, {"claude", "codex"})
+        self.assertEqual(c.service.name, "claude")
 
-    def test_judgment_prefers_the_frontier_pools_even_when_idle_pools_are_emptier(self):
-        # antigravity at 100% must not win judgment work; between the two
-        # frontier pools the one with more headroom may (2026-10-15 policy:
-        # use both fully).
+    def test_judgment_never_reaches_codex_even_when_claude_is_tight(self):
+        # antigravity at 100% must not win judgment work, and since 2026-10-18
+        # codex is reached only through the explicit frontier kind.
         q = dict(IDLE, antigravity={"remaining": 100.0}, claude={"remaining": 20.0})
-        self.assertIn(r.route("judgment", quota=q).service.name, {"claude", "codex"})
-        q = dict(IDLE, claude={"remaining": 90.0}, codex={"remaining": 90.0})
         self.assertEqual(r.route("judgment", quota=q).service.name, "claude")
+        q = dict(IDLE, claude={"remaining": 5.0})
+        self.assertIsNone(r.route("judgment", quota=q))
 
 
 class TestWasteBurning(unittest.TestCase):
@@ -577,18 +576,45 @@ class TestRoutingPolicy2026_10_15(unittest.TestCase):
         c = r.route("code", quota=q)
         self.assertNotIn(c.service.name, {"claude", "codex"})
 
-    def test_judgment_suggests_fable_then_falls_back_to_opus(self):
+    def test_judgment_is_opus_high_and_never_fable(self):
         q = {**IDLE, "claude": {"remaining": 90.0, "sublimits": {"fable": 97.0}}}
-        self.assertEqual(r.route("judgment", quota=q).model, "fable --effort xhigh")
-        q["claude"] = {"remaining": 90.0, "sublimits": {"fable": 4.0}}
-        self.assertEqual(r.route("judgment", quota=q).model, "opus --effort xhigh")
+        self.assertEqual(r.route("judgment", quota=q).model, "opus --effort high")
 
-    def test_codex_judgment_is_the_top_frontier_model(self):
-        q = {**IDLE, "claude": {"remaining": 5.0}}
-        c = r.route("judgment", quota=q)
+    def test_frontier_suggests_fable_high_then_falls_back_to_opus(self):
+        q = {**IDLE, "codex": {"remaining": 0.0},
+             "claude": {"remaining": 90.0, "sublimits": {"fable": 97.0}}}
+        self.assertEqual(r.route("frontier", quota=q).model, "fable --effort high")
+        q["claude"] = {"remaining": 90.0, "sublimits": {"fable": 4.0}}
+        self.assertEqual(r.route("frontier", quota=q).model, "opus --effort high")
+        for svc in r.SERVICES:
+            self.assertFalse(any("xhigh" in m and "fable" in m for m in svc.models.values()), svc.name)
+
+    def test_codex_frontier_is_the_top_frontier_model(self):
+        c = r.route("frontier", quota=IDLE)
         self.assertEqual(c.service.name, "codex")
-        self.assertTrue(c.model.startswith("gpt-6-astra"))
-        self.assertEqual(c.dispatch, "acp-dispatch codex --model gpt-6-astra --effort xhigh")
+        self.assertEqual(c.dispatch, "acp-dispatch codex --model gpt-6-astra --effort high")
+
+
+class TestFrontierConservative2026_10_18(unittest.TestCase):
+    """Operator 2026-10-18: a wave of four astra slices emptied codex's 5-hour
+    window; codex only for work that really needs astra, Fable xhigh almost never."""
+
+    def test_codex_takes_only_the_frontier_kind(self):
+        q = {name: {"remaining": 0.0} for name in (*IDLE, "antigravity-claude", "cursor-auto")}
+        q["codex"] = {"remaining": 100.0}
+        for kind in r.KINDS:
+            c = r.route(kind, quota=q)
+            if kind != "frontier":
+                self.assertNotEqual(c.service.name if c else None, "codex", kind)
+
+    def test_a_wave_puts_at_most_one_frontier_slice_on_each_pool(self):
+        rows = r.plan(["frontier"] * 4, quota=IDLE)
+        names = [c.service.name if c else None for _, c in rows]
+        self.assertEqual(names, ["codex", "claude", None, None])
+
+    def test_judgment_slices_after_a_frontier_slice_stay_on_claude(self):
+        rows = r.plan(["frontier", "judgment", "judgment"], quota=IDLE)
+        self.assertEqual([c.service.name for _, c in rows], ["codex", "claude", "claude"])
 
     def test_dispatch_line_uses_the_acp_agent_name(self):
         q = {**IDLE, "antigravity-claude": {"remaining": 90.0}}
@@ -624,7 +650,8 @@ class TestFableSublimitAndCursorSplit(unittest.TestCase):
              "shared_pool_family": "default", "max_share_of_parent_percent": 50.0}]}])
         self.assertEqual(q["claude"]["remaining"], 86.0)
         self.assertEqual(q["claude"]["sublimits"], {"fable": 0.0})
-        self.assertEqual(r.route("judgment", quota=q).model, "opus --effort xhigh")
+        self.assertEqual(r.route("frontier", quota={**q, "codex": {"remaining": 0.0}}).model,
+                         "opus --effort high")
 
     def test_cursor_auto_pool_is_split_from_the_tight_third_party_pool(self):
         q = self.load([{"provider": "cursor", "windows": [

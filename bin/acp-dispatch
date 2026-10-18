@@ -240,6 +240,15 @@ MODEL_OPTIONAL_AGENTS = {"zcode"}
 # cline (operator 2026-10-17): uninstalled, left in place for a deliberate re-enable; Hermes
 # keeps its own ClinePass API pool.
 OPERATOR_GATED = {"omp", "hermes", "cline"}
+# Fable at xhigh/max should almost never run (operator 2026-10-18): the same approval gate, keyed
+# ACP_OPERATOR_APPROVED=fable-xhigh. Fable at high is the frontier route_agent.py suggests.
+FABLE_GATED_EFFORTS = {"xhigh", "max"}
+# Most fresh slices one agent may have in flight machine-wide (operator 2026-10-18: four
+# gpt-6-astra slices started together emptied codex's 5-hour window and all four stopped).
+# A resume is never refused: it continues work already paid for. ACP_DISPATCH_INFLIGHT=codex=2
+# overrides per run.
+INFLIGHT_CAP = {"codex": 1}
+INFLIGHT_SPAWN_GRACE = 10 * 60           # a running record whose pid is not written yet counts this long
 # Claude Code 2.1.295 refuses a sub-agent's Write for this basename (tengu_subagent_md_report_blocked).
 CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.IGNORECASE)
 # acp-run runs yolo for every agent (operator 2026-10-14): all or deny. A scoped:... value from an
@@ -395,6 +404,35 @@ def window_fit(estimates: dict[str, float], windows: dict) -> tuple[str | None, 
             return f"estimated use {est:.1f}% > {float(rem):.1f}% left on {label}", near
         near = near or est <= float(rem) <= est * 1.5
     return None, near
+
+
+def inflight_cap(agent: str) -> int | None:
+    caps = dict(INFLIGHT_CAP)
+    for item in os.environ.get("ACP_DISPATCH_INFLIGHT", "").split(","):
+        name, _, n = item.partition("=")
+        if name.strip() and n.strip().isdigit():
+            caps[name.strip()] = int(n)
+    return caps.get(agent)
+
+
+def inflight_records(agent: str, skip: Path, out: Path) -> list[Path]:
+    """Records under STATE_ROOT (and this task's --out) still running a slice on `agent`."""
+    busy, seen = [], {skip.resolve()}
+    for path in record_paths([str(STATE_ROOT), str(out)]):
+        if path.resolve() in seen:
+            continue
+        seen.add(path.resolve())
+        try:
+            row = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if row.get("agent") != agent or row.get("status") != "running":
+            continue
+        pid = row.get("pid")
+        if pid_alive(pid) or (pid is None and time.time() - float(row.get("started") or 0)
+                              < INFLIGHT_SPAWN_GRACE):
+            busy.append(path)
+    return busy
 
 
 def unavailable_record(out: Path, a: argparse.Namespace, reason: str, cls: str,
@@ -2108,6 +2146,12 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
             x.strip() for x in os.environ.get("ACP_OPERATOR_APPROVED", "").split(",") if x.strip()}:
         die(f"{a.agent} needs specific, explicit operator approval for this run; ask first, then set"
             f" ACP_OPERATOR_APPROVED={a.agent} (acp-run applies the same gate)")
+    if (not previous and "fable" in (a.model or "").lower()
+            and (getattr(a, "effort", None) or "").lower() in FABLE_GATED_EFFORTS
+            and "fable-xhigh" not in {x.strip() for x in os.environ.get("ACP_OPERATOR_APPROVED", "").split(",")}):
+        die(f"fable at --effort {a.effort} needs explicit operator approval for this run (operator"
+            " 2026-10-18: almost never); use --effort high, or ask first, then set"
+            " ACP_OPERATOR_APPROVED=fable-xhigh")
     if not a.model and a.agent not in MODEL_OPTIONAL_AGENTS:
         die("--model is required (an agent's own default is the expensive one; `acp-run <agent> --info` lists values)")
     if not NAME_RE.match(a.name or ""):
@@ -2170,6 +2214,14 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     if not a.dry_run and not per_window and remaining is not None and estimate > remaining:
         return unavailable_record(out, a, f"estimated use {estimate:.1f}% > {remaining:.1f}% left",
                                   "wont-fit", remaining, estimate)
+    cap = inflight_cap(a.agent)
+    if not a.dry_run and not previous and cap is not None:
+        busy = inflight_records(a.agent, record, out)
+        if len(busy) >= cap:
+            return unavailable_record(
+                out, a, f"{len(busy)} {a.agent} slice(s) already in flight (cap {cap}): "
+                f"{', '.join(p.stem for p in busy[:3])}; wait for one, or route elsewhere "
+                f"(route_agent.py plan)", "inflight", remaining, estimate)
     if not a.dry_run and not a.no_preflight:
         ok, detail, cls, reset = preflight(acp_run, a.agent, a.model)
         if not ok:

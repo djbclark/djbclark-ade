@@ -12,6 +12,16 @@ Failure chains (what runs when a chosen model fails) are a different
 document: `skills/fallback-chains/`. Re-read its live sources before
 quoting a chain, and update its snapshot if you change one.
 
+> **Update 2026-10-18 (operator): the frontier models are scarce.** A lead put
+> four plektra "small issues" slices on codex `gpt-6-astra` at high/xhigh
+> together; codex's 5-hour window ran out and all four stopped waiting for the
+> reset. Since then: judgment is Opus 5.5 at `high`; codex astra and Fable 5.1
+> (`high`) are reached only through the `frontier` kind, one slice per pool
+> per wave, for work that really needs them; `acp-dispatch` allows one fresh
+> codex slice in flight machine-wide and refuses Fable `xhigh`/`max` without
+> `ACP_OPERATOR_APPROVED=fable-xhigh`. Where the 2026-10-15 text below says
+> "use them fully", read this instead.
+>
 > **Update 2026-10-15 (operator): the routing policy is now cost against code
 > quality, every TUI, any directory.** The one copy is
 > `skills/model-routing/SKILL.md`, *Routing policy (operator, 2026-10-15)*;
@@ -245,19 +255,22 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
 
 ## Which AI for which work (judgment snapshot, 2026-08-23)
 
-- **Claude Fable 5.1 @ xhigh** — hardest single-shot adjudications,
-  architecture, whole-corpus analysis (1M native). **Use it fully** for that
-  work (operator 2026-10-15). It does **not** have its own bucket: Fable is a
+- **Claude Fable 5.1 @ high** — the rare call that really needs it: an
+  adjudication nothing cheaper settles, whole-corpus analysis (1M native).
+  `xhigh` almost never, and only with the operator's yes for that run
+  (2026-10-18; "use it fully", 2026-10-15, is withdrawn). It does **not** have its own bucket: Fable is a
   sublimit of at most 50% of the shared Claude weekly and bills the 5-hour
   window too (corrected 2026-10-15).
 - **Claude Sonnet 5** — default agentic-coding workhorse; best harness
   integration (workflows, skills, Orca, this repo).
 - **Claude Haiku 4.5 @ low** — mechanical fan-out nodes: extract,
   classify, reformat.
-- **Codex (gpt-6-astra @ xhigh/high; 2026-10-15)** — the second frontier
-  pool: hard implementation slices, adversarial second opinions, contract
-  decisions. **Use it fully, for astra**: everyday slices go to the everyday
-  pools, not to `gpt-6-luna` on this window.
+- **Codex (gpt-6-astra @ high; 2026-10-18)** — the second frontier pool,
+  only for a slice that really needs astra to look it over (a
+  security-relevant or concurrency fix's final review, debugging that
+  defeated real attempts). One slice in flight at a time: its 5-hour window
+  holds about one hard slice. Everyday slices go to the everyday pools, not
+  to `gpt-6-luna` on this window.
 - **Gemini via agy** — big-context reading, summarization, multimodal,
   bulk research; the most-wasted subscription → default overflow for
   non-critical bulk. Its Claude/GPT windows are unexplored.
@@ -292,12 +305,14 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
 
 ## Routing policy (2026-10-15; the one copy is `skills/model-routing/SKILL.md`)
 
-1. **Frontier pools, used fully, for serious-effort work:** Claude Fable 5.1
-   at `xhigh` (an Agent-tool `fable-deep` call, or `acp-dispatch claude
-   --model fable --effort xhigh`) and codex `gpt-6-astra` (`acp-dispatch codex
-   --model gpt-6-astra --effort xhigh`). Fable is a <=50% sublimit of the one
-   shared Claude weekly (and bills the 5h window); under 10% of its cap the
-   router suggests `opus --effort xhigh`.
+1. **Frontier models only for what really needs them (2026-10-18):** judgment
+   is `acp-dispatch claude --model opus --effort high`; the `frontier` kind,
+   one slice per pool per wave, reaches codex `gpt-6-astra` (`acp-dispatch
+   codex --model gpt-6-astra --effort high`, one in flight machine-wide) and
+   Fable 5.1 (`fable-deep`, or `acp-dispatch claude --model fable --effort
+   high`; `xhigh` needs `ACP_OPERATOR_APPROVED=fable-xhigh`). Fable is a <=50%
+   sublimit of the one shared Claude weekly (and bills the 5h window); under
+   10% of its cap the router suggests `opus --effort high`.
 2. **Everyday work on the other pools**, cheapest adequate first: agy
    Claude/GPT (>= 40% left), Cursor Auto, zai GLM-5.3, opencode-go, agy Gemini
    for bulk and big-context reads, crush/SIPB for light bulk. Minimum spec
