@@ -141,26 +141,28 @@ export function logSummary(text: string, n = 8): string[] {
 // The shell script that lists this session's job records: only records that name the session and
 // changed in the last 3 days, each after a \001 line with its path. One process for all of them.
 // A \001 inside a file is dropped (LC_ALL=C: BSD tr rejects invalid UTF-8), so no file can forge a block.
-// A record is read only if it is a regular file under 64 KiB, and at most 64 KiB of it; `-exec sh -c 'for f'`
+// A record is read only if it is a regular file under 64 KiB, and at most 64 KiB of it, once: the session id is
+// looked for in that one copy. The read runs under the watchdog of TAILS_SH (a record swapped for a FIFO between
+// find's type check and the open would block `head` for ever, and find and sh with it). `-exec sh -c 'for f'`
 // keeps a file name with a newline in one piece. A relative or option-like $root (ACP_DISPATCH_STATE) is refused.
 export const RECORDS_SH = `# radar:records
 root=$1; sid=$2
 case $root in /*) ;; *) exit 0;; esac
 [ -d "$root" ] || exit 0
-find "$root" -maxdepth 3 -type f -path '*/jobs/*.json' -mtime -3 -size -64k -exec sh -c 'sid=$1; shift; for f; do head -c 65536 -- "$f" 2>/dev/null | grep -qF -- "$sid" || continue; printf "\\001%s\\n" "$f"; head -c 65536 -- "$f" 2>/dev/null | LC_ALL=C tr -d "\\001"; done' sh "$sid" {} + 2>/dev/null
+find "$root" -maxdepth 3 -type f -path '*/jobs/*.json' -mtime -3 -size -64k -exec sh -c 'sid=$1; shift; for f; do b=$( ( head -c 65536 -- "$f" 2>/dev/null & t=$!; ( sleep 3; kill "$t" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$t"; kill "$w" 2>/dev/null ) | LC_ALL=C tr -d "\\001" ); case $b in *"$sid"*) printf "\\001%s\\n%s\\n" "$f" "$b";; esac; done' sh "$sid" {} + 2>/dev/null
 exit 0
 `
 
 // The tail of each file named, each after a \001 line with its path: one process for all of them.
 // A \001 inside a tail is dropped (see RECORDS_SH), so a log cannot forge the tail of another file.
-// Only a regular file is tailed (not a FIFO or a device such as /dev/zero, which tail would never finish
-// reading), and the tail is killed after 3 s anyway, in case a file is swapped for a FIFO between the check and
+// Only a regular file that is not a symlink is tailed (not a FIFO or a device such as /dev/zero, which tail would
+// never finish reading), and the tail is killed after 3 s anyway, in case a file is swapped for a FIFO between the check and
 // the open. The watchdog kills that one tail (never the process group) and has its output closed, so it does
 // not hold the pipe to tr open.
 export const TAILS_SH = `# radar:tails
 for f in "$@"; do
   printf '\\001%s\\n' "$f"
-  [ -f "$f" ] || continue
+  [ -f "$f" ] && [ ! -L "$f" ] || continue
   ( tail -c 16384 -- "$f" 2>/dev/null & t=$!
     ( sleep 3; kill "$t" 2>/dev/null ) >/dev/null 2>&1 & w=$!
     wait "$t"; kill "$w" 2>/dev/null ) | LC_ALL=C tr -d '\\001'

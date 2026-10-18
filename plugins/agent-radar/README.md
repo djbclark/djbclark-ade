@@ -46,7 +46,7 @@ or ended after the session started, are shown.
 ## Fork
 
 Forked from `agent-radar` 0.1.3 by Hamza Zafar (MIT), <https://github.com/hamzafer/claude-code-mods>
-(`mods/agent-radar`). Version here: `0.2.0-djb.3`. Upstream's license text and author are kept
+(`mods/agent-radar`). Version here: `0.2.0-djb.4`. Upstream's license text and author are kept
 ([LICENSE](LICENSE), `plugin.json`).
 
 What changed:
@@ -58,7 +58,7 @@ What changed:
    result, job record parsing, log summary, the two poll scripts).
 3. `types/index.d.ts`: `kind`, `AcpJob` and the shell and job fields on `RadarAgent`.
 4. `tests/agent-radar.test.tsx`: upstream's three tests plus twenty-four for the above and the hardening below.
-5. Hardening (`-djb.2`, `-djb.3`), the behaviour of the fixes from the adversary review of upstream's background-shell PR
+5. Hardening (`-djb.2` to `-djb.4`), the behaviour of the fixes from the adversary review of upstream's background-shell PR
    (<https://github.com/hamzafer/claude-code-mods/pull/129>), applied to every place the fork shows or reads
    external data, the `acp-dispatch` job records included, which upstream lacks:
    * Escape sequences are stripped from everything shown (CSI, OSC such as the clipboard write, DCS, the 8-bit
@@ -82,6 +82,9 @@ What changed:
      short `includes()`; `rearm` is not kept. A carriage return in a log line is dropped. The record scan reads
      only regular files under 64 KiB, at most 64 KiB of each, keeps a file name with a newline whole, and refuses
      a relative `ACP_DISPATCH_STATE`.
+   * `-djb.4` (second review): the record scan reads each record once, under the same 3 s watchdog as the tail
+     script, so a record swapped for a FIFO between `find` and the read cannot leave `find`, `sh` and `head`
+     blocked for ever; the tail script also skips symlinks.
 
 The generic part (background shells) is meant for upstream; the `acp-dispatch` part is specific to this
 toolchain and is not.

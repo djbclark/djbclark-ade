@@ -384,7 +384,7 @@ describe('agent-radar', () => {
     // behaviour (one \001 per file, invalid UTF-8 kept, rc 0) was run against a real shell when this was ported.
     expect(TAILS_SH).toContain(`tail -c 16384 -- "$f" 2>/dev/null &`)
     expect(TAILS_SH).toContain(`) | LC_ALL=C tr -d '\\001'`)
-    expect(RECORDS_SH).toContain(`head -c 65536 -- "$f" 2>/dev/null | LC_ALL=C tr -d "\\001"`)
+    expect(RECORDS_SH).toContain(`) | LC_ALL=C tr -d "\\001"`)
     expect(TAILS_SH).toContain(`printf '\\001%s\\n' "$f"`) // the one \001 per file that stays: the block marker
     // what is left once the scripts have run: blocks split only at the markers
     const out = '\x01/a.log\nstart\nforged line\n\x01/b.log\nfine\n'
@@ -550,7 +550,7 @@ describe('agent-radar', () => {
   })
 
   test('the tail script tails regular files only, under a watchdog that never signals a process group', () => {
-    expect(TAILS_SH).toContain('[ -f "$f" ] || continue') // no FIFO, no device (/dev/zero), no symlink to either
+    expect(TAILS_SH).toContain('[ -f "$f" ] && [ ! -L "$f" ] || continue') // no FIFO, no device (/dev/zero), no symlink at all
     expect(TAILS_SH).toContain('( sleep 3; kill "$t" 2>/dev/null ) >/dev/null 2>&1 &') // a swapped-in FIFO cannot outlive the poll
     expect(TAILS_SH).toContain('wait "$t"; kill "$w"')
     expect(TAILS_SH).not.toMatch(/kill\s+(-|0)/) // kill 0 / kill -N would hit Claude Code's own process group
@@ -560,7 +560,12 @@ describe('agent-radar', () => {
   test('the records script is bounded, keeps odd file names whole and refuses a relative root', () => {
     expect(RECORDS_SH).toContain('case $root in /*) ;; *) exit 0;; esac')
     expect(RECORDS_SH).toContain('-size -64k')
-    expect(RECORDS_SH).toContain('head -c 65536')
+    // each record is read once, under the watchdog of the tail script: a record swapped for a FIFO cannot hang head, sh and find
+    expect(RECORDS_SH.match(/head -c 65536/g)).toHaveLength(1)
+    expect(RECORDS_SH).not.toContain('grep')
+    expect(RECORDS_SH).toContain('case $b in *"$sid"*) printf')
+    expect(RECORDS_SH).toContain('( sleep 3; kill "$t" 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait "$t"; kill "$w" 2>/dev/null')
+    expect(RECORDS_SH).not.toMatch(/kill\s+(-|0)/)
     expect(RECORDS_SH).toContain("-exec sh -c 'sid=$1; shift; for f; do")
     expect(RECORDS_SH).not.toContain('read -r') // no splitting of a name at a newline
     expect(RECORDS_SH).not.toMatch(/\bcat\b/)
