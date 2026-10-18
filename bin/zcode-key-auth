@@ -74,8 +74,20 @@ function ping(msg) {
 
 function withVault(args) {
   if (process.env[VAULT]) return process.env[VAULT].trim();
-  const r = spawnSync("sudo-secretspec", ["run", "--reason", "zcode-key-auth: keep zcode on the coding plan key",
-    "--", process.execPath, __filename, "apply", ...args], { stdio: "inherit" });
+  // Up to 3 tries, 10 s apart (2026-10-18): concurrent opens of the vault's history DB can race on
+  // CREATE TRIGGER ("trigger captured_values_is_append_only already exists"), and the first launchd run,
+  // at load 85, hit it; an immediate retry succeeds. The child is this script, so a retry is idempotent.
+  let r;
+  for (let i = 0; i < 3; i++) {
+    if (i) spawnSync("/bin/sleep", ["10"]);
+    r = spawnSync("sudo-secretspec", ["run", "--reason", "zcode-key-auth: keep zcode on the coding plan key",
+      "--", process.execPath, __filename, "apply", ...args],
+      { stdio: "inherit", env: { ...process.env, ZKA_CHILD: "1" } });
+    if (r.status === 0) break;
+  }
+  // The child never pings a failure (ZKA_CHILD), so three tries make one ping, here.
+  if (r.status !== 0 && args.includes("--ping"))
+    ping(`djbclark-ade: zcode-key-auth apply failed after 3 tries (rc ${r.status}); see ~/.local/state/zcode-key-auth/apply.err`);
   process.exit(r.status ?? 1);
 }
 
@@ -133,6 +145,6 @@ try {
   process.exit(table[cmd]());
 } catch (e) {
   console.error(`zcode-key-auth: ${e.message}`);
-  if (rest.includes("--ping")) ping(`djbclark-ade: zcode-key-auth failed: ${e.message}`);
+  if (rest.includes("--ping") && !process.env.ZKA_CHILD) ping(`djbclark-ade: zcode-key-auth failed: ${e.message}`);
   process.exit(1);
 }
