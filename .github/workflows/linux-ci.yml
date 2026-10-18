@@ -1,0 +1,35 @@
+name: Linux CI
+
+# Overlay-only on ci/base. Runs djbclark-ade's pytest suite on ubuntu-latest.
+# Mac-only tests (launchd, Keychain, this Mac's state) are skipped here only
+# through DJBCLARK_ADE_CI=1 / the --deselect list below, never by editing tests.
+
+on:
+  push:
+    branches: ['ci/run/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DJBCLARK_ADE_CI: "1"
+  # conftest.py also sets these; exported so subprocesses of tests see them too.
+  ACP_DISPATCH_LAUNCHCTL: /usr/bin/true
+  ACP_DISPATCH_NO_GATE: "1"
+
+jobs:
+  pytest:
+    name: pytest (tests/)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Git identity (tests make commits)
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@example.invalid"
+          git config --global init.defaultBranch master
+      - name: Run pytest
+        run: uv run --no-project --with pytest python -m pytest -q tests/ -p no:cacheprovider
