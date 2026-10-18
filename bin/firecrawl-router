@@ -17,7 +17,10 @@ fallback (commercial) when the primary:
   3. scrapes a bot wall: a page whose own status is 202 or 405 (AWS WAF's challenge and
      CAPTCHA), 403, 429 or 503, or a short page whose text is a challenge (Cloudflare,
      Akamai, DataDome, HUMAN/PerimeterX, Imperva, Vercel, AWS WAF, F5);
-  4. maps 0 links, or searches 0 results.
+  4. scrapes with an LLM format (json, query) that self-hosted cannot run: it has no
+     OPENAI_API_KEY, so it answers 200 with a `warning` such as "Query generation failed"
+     or "JSON extraction failed" and no result;
+  5. maps 0 links, or searches 0 results.
 A fallback that also fails returns the primary's answer (or the fallback's,
 when the primary was unreachable). Never the other way round: the fallback's
 429 or 402 never sends work to the primary.
@@ -74,6 +77,9 @@ BOT_WALL_RE = re.compile("|".join([
     r"let'?s confirm you are human", r"awswaf", r"the requested url was rejected",
 ]), re.I)
 BOT_WALL_MAX_CHARS = 5000
+# A scrape's own `warning` when an LLM step (json / query format) failed. Self-hosted has no LLM key,
+# so it reports the failure inside a 200; the commercial API runs the step.
+LLM_FAILED_RE = re.compile(r"(generation|extraction) failed|api key is missing", re.I)
 HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
     "trailers", "transfer-encoding", "upgrade", "host", "content-length",
@@ -141,6 +147,11 @@ def fallback_reason(path: str, reply: Reply) -> str:
             m = BOT_WALL_RE.search(md)
             if m:
                 return f"challenge page ({m.group(0)!r})"
+        warning = data.get("warning")
+        if isinstance(warning, str):
+            m = LLM_FAILED_RE.search(warning)
+            if m:
+                return f"LLM step failed on this backend ({m.group(0)!r})"
     if route.endswith("/map"):
         links = doc.get("links") if "links" in doc else (data or {}).get("links") if isinstance(data, dict) else None
         if isinstance(links, list) and not links:
