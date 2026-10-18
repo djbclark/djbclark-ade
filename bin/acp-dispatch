@@ -19,6 +19,9 @@
     acp-dispatch reroute RECORD --agent A --model M [--detach --no-wait]
     acp-dispatch auto-resume RECORD --attempt N          (internal) what the scheduled resume
                                                          runner calls after a quota stop
+    acp-dispatch reap [RECORD|DIR]... [--quiet]          finalize every unfinished record whose
+                                                         process is gone (idempotent, any time)
+    acp-dispatch reap --install | --uninstall            the launchd sweep (RunAtLoad + every 30 min)
 
 What it replaces: the dispatch recipe that bigteam, model-routing and home-agents.md used to
 spell out in prose and every dispatcher retyped — the report-file naming, "write the full
@@ -98,6 +101,34 @@ stop that cannot be resumed automatically (no session id, agent without load/res
 attempts exhausted) stays exit 3 and the `check` line ends with the exact
 `acp-dispatch resume <record>` command and the retry time.
 
+A detached slice that dies without running finalize (a reboot's SIGTERM, SIGKILL, OOM, power
+loss, launchd unloading it) used to leave `exit: null, finished: null` forever, so every reader
+showed it running (2026-10-17: trackpad-settings, pid 51407, killed by a reboot, listed as running
+hours later; a rearm waiter on it sat until its timeout). Since 2026-10-18: (1) the detached
+runner traps TERM/HUP/INT, forwards TERM to acp-run (which cancels the turn and stops the agent),
+SIGKILLs it after 25 s, and finalizes with 128+signal (`NO-REPORT: killed: SIGTERM (...)`); it also
+writes `<name>.exit` before finalize. (2) The record stores `pid_start` (`ps -o lstart=`) with the
+pid, so one shared rule, `dead_reason()`, says whether an unfinished record's process is gone: pid
+not alive, or alive but not the same process (a reused pid after a reboot); a record from before
+`pid_start` counts as running only while the command line still looks like this slice. (3)
+`acp-dispatch reap` finalizes such a record once, under its lock: exit from `<name>.exit`, else
+launchd's last exit status for the record's label (`launchctl print gui/$UID/<label>`), else 255
+(`lost`); `finished` is the last write to the log/report/stderr; the record carries `reaped:
+{reason, exit_source, at}`. A record whose report ends in DONE with `.done` present is finished
+normally (the runner died after the agent delivered). `check`, `wait` and `resume` apply the rule
+first, so a dead slice is never "running" to a reader; `wait` returns at once on one. The sweep
+`acp-dispatch reap ~/.local/state/bigteam` runs from launchd (`reap --install`;
+launchd/com.djbclark.acp-dispatch-reap.plist) at login and every 30 min. The reaped slice's
+stderr still decides the class: a quota refusal there follows the quota path (auto-resume).
+
+`wait` returns only once the record is finalized (or reaped), not when `.done` appears: the agent
+itself touches `.done` as its last act, so acp-run and finalize may still be running (2026-10-18:
+`wait && resume` hit "slice process is still running"). `resume` also waits up to 120 s
+(ACP_DISPATCH_FINALIZE_WAIT) for finalize when `.done` exists. finalize records the model acp-run
+actually applied (`model_applied`, from the log's `applied` row) and `resume` passes that, so a
+family alias such as `fable` that a resumed session's model list resolves differently cannot kill
+the resume (2026-10-18: "no model 'fable' (ambiguous: claude-fable-5-1, claude-fable-5)").
+
 Exit codes (dispatch and check):
     0    report delivered and ends in DONE (dispatch: and acp-run exited 0)
     1    report present but unfinished (no DONE), or delivered with a non-zero acp-run exit;
@@ -110,6 +141,8 @@ Exit codes (dispatch and check):
     4    BLOCKED: the report's first line is a question for the lead; answer it, then resume
     5    pool unavailable before launch; re-plan with --exclude (no slice attempt consumed)
     124  timed out waiting for the .done marker (--detach without --no-wait)
+    (a reaped record's acp-run exit is 255 `lost` when neither an exit file nor launchd knows it;
+     a signalled runner's is 128+signal, e.g. 143 for SIGTERM)
 Exit 0 is still not success: verify the outcome (diff, tests, the report's content).
 """
 from __future__ import annotations
@@ -121,6 +154,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -209,6 +243,12 @@ AUTO_RESUME_GATE_TRIES = 6
 AUTO_RESUME_GATE_POLL = 10 * 60
 AUTO_RESUME_SLEEP_POLL = 60              # the runner re-reads the record this often while it waits
 AUTO_RESUME_PENDING = ("scheduled", "waiting-headroom", "resuming")
+# Dead-slice handling (2026-10-18; see the docstring).
+LOST_EXIT = 255                          # a reaped slice with no exit from an exit file or launchd
+SIGNAL_GRACE = 25                        # seconds after TERM is forwarded to acp-run before SIGKILL
+FINALIZE_WAIT = int(os.environ.get("ACP_DISPATCH_FINALIZE_WAIT", "120"))  # resume waits this long for finalize
+REAP_LABEL = "com.djbclark.acp-dispatch-reap"
+REAP_PLIST = HERE.parent / "launchd" / f"{REAP_LABEL}.plist"
 AUTO_RESUME_TEXT = (
     "The previous turn was stopped by the provider's usage limit, not by anything you did, and the "
     "limit has reset. Continue the brief from where you left off in this same session: do not redo "
@@ -451,6 +491,164 @@ def pid_alive(pid: int | None) -> bool:
     return True
 
 
+def proc_start(pid: int | None) -> str | None:
+    """`ps -o lstart=` of PID: the process start time, which with the pid identifies a process
+    across pid reuse (after a reboot pids come back; 2026-10-17: trackpad-settings pid 51407)."""
+    if not pid:
+        return None
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], check=False, capture_output=True,
+                             text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out or None
+
+
+def proc_cmd(pid: int | None) -> str:
+    if not pid:
+        return ""
+    try:
+        return subprocess.run(["ps", "-o", "command=", "-p", str(pid)], check=False, capture_output=True,
+                              text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def process_matches(rec: dict) -> bool:
+    """The record's pid is alive and still the process this slice launched. A record written
+    before `pid_start` was stored counts only while the command line still looks like the slice."""
+    pid = rec.get("pid")
+    if not pid or not pid_alive(pid):
+        return False
+    if rec.get("pid_start"):
+        return proc_start(pid) == rec["pid_start"]
+    cmd = proc_cmd(pid)
+    first = (shlex.split(rec.get("cmd", "")) or [""])[0]
+    return bool(cmd) and ("acp-run" in cmd or bool(first and Path(first).name in cmd)) and (
+        not rec.get("agent") or rec["agent"] in cmd)
+
+
+def launchd_print(label: str) -> str | None:
+    """`launchctl print gui/$UID/<label>`: its text, "" when the job is not loaded, None when
+    launchctl itself is unavailable."""
+    try:
+        r = subprocess.run([launchctl_bin(), "print", f"gui/{os.getuid()}/{label}"], check=False,
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else ""
+
+
+def launchd_last_exit(label: str) -> int | None:
+    text = launchd_print(label)
+    if not text:
+        return None
+    m = re.search(r"last exit (?:code|status)\s*=\s*(-?\d+)", text)
+    return int(m.group(1)) if m else None
+
+
+def dead_reason(rec: dict) -> str | None:
+    """Why this unfinished record's process is gone, or None (finished, or still running). The one
+    shared rule every reader applies (check, wait, resume, reap, the auto-resume runner)."""
+    if rec.get("finished") or rec.get("status") in ("unavailable", "dry-run") or "report" not in rec:
+        return None
+    pid = rec.get("pid")
+    if pid is None:
+        label = rec.get("label")
+        if label and time.time() - float(rec.get("started") or time.time()) > 120 and launchd_print(label) == "":
+            return f"launchd job {label} is gone and the agent never started"
+        return None
+    if not pid_alive(pid):
+        return f"pid {pid} gone without finalize"
+    if not process_matches(rec):
+        return f"pid {pid} is another process now (reused)"
+    return None
+
+
+def exit_file(rec: dict) -> Path:
+    return Path(rec["log"]).with_suffix(".exit")
+
+
+def reap_record(path: Path) -> tuple[str, str] | None:
+    """Finalize a record whose process is gone (SIGKILL, a reboot, power loss: no trap could run).
+    (status, detail) when it reaped, None when the record is finished or still running. Idempotent,
+    under the record's lock, so two sweeps at once reap it once."""
+    with record_lock(path):
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        reason = dead_reason(rec)
+        if not reason:
+            return None
+        report, done = Path(rec["report"]), Path(rec["done"])
+        rc, src = None, "lost"
+        try:
+            rc, src = int(exit_file(rec).read_text().strip()), "exit file"
+        except (OSError, ValueError):
+            pass
+        if rc is None and rec.get("label"):
+            got = launchd_last_exit(rec["label"])
+            if got is not None:
+                rc, src = got, "launchd"
+        delivered = done.exists() and classify(report, done, finished=True)[0] in ("done", "blocked")
+        if rc is None:
+            rc = 0 if delivered else LOST_EXIT
+        stamps = [p.stat().st_mtime for p in (Path(rec["log"]), report, Path(rec.get("stderr", "")), done)
+                  if str(p) and p.exists()]
+        finished_at = max(stamps) if stamps else time.time()
+        rec["reaped"] = {"reason": reason, "exit_source": src, "at": time.time()}
+        write_record(path, rec)
+        st, det, _ = finalize_locked(path, rc, finished_at=finished_at)
+        return st, det
+
+
+def record_paths(items: list[str]) -> list[Path]:
+    paths: list[Path] = []
+    for item in items:
+        p = Path(item).expanduser()
+        if p.is_dir():
+            paths += sorted(set(p.glob("jobs/*.json")) | set(p.glob("*/jobs/*.json")))
+        elif p.suffix == ".json":
+            paths.append(p)
+    return paths
+
+
+def reap_items(items: list[str], quiet: bool = False) -> int:
+    """`acp-dispatch reap`: safe any time; prints one line per record it finalized; exit 0."""
+    n = 0
+    for path in record_paths(items):
+        got = reap_record(path)
+        if got:
+            n += 1
+            st, det = got
+            print(f"reaped\t{path.stem}\t{path}\t{st}: {det}")
+    if not quiet and not n:
+        print("reap: nothing to reap", file=sys.stderr)
+    return 0
+
+
+def reap_install(uninstall: bool = False) -> int:
+    """Copy launchd/com.djbclark.acp-dispatch-reap.plist to ~/Library/LaunchAgents and bootstrap it
+    (the way skillopt-night installs its job); ACP_DISPATCH_LAUNCH_AGENTS overrides the directory."""
+    dest = Path(os.environ.get("ACP_DISPATCH_LAUNCH_AGENTS") or Path.home() / "Library" / "LaunchAgents") / REAP_PLIST.name
+    domain = f"gui/{os.getuid()}"
+    lc = launchctl_bin()
+    subprocess.run([lc, "bootout", f"{domain}/{REAP_LABEL}"], check=False, capture_output=True)
+    if uninstall:
+        dest.unlink(missing_ok=True)
+        print(f"removed {dest}")
+        return 0
+    (Path.home() / ".local/state/acp-dispatch").mkdir(parents=True, exist_ok=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".tmp")
+    shutil.copyfile(REAP_PLIST, tmp)
+    os.replace(tmp, dest)
+    r = subprocess.run([lc, "bootstrap", domain, str(dest)], check=False, capture_output=True, text=True)
+    print(f"installed {dest}; bootstrap rc={r.returncode}" + (f" {r.stderr.strip()}" if r.returncode else ""))
+    return r.returncode
+
+
 def rearm_cmd(done: Path, record: Path | None = None, seconds: int = 1800) -> str:
     """The waiter a lead runs (in the background) for a detached slice. Record waiters follow
     the mutable wait_timeout; bare markers use seconds (0 is unlimited, 2026-10-11).
@@ -486,6 +684,25 @@ def session_info(rec: dict) -> tuple[str | None, bool | None]:
     return sid, supported
 
 
+def applied_model(rec: dict) -> str | None:
+    """The model id acp-run reports it applied (its `applied` log row), for `resume` to pass
+    instead of the alias the dispatch used (2026-10-18: `fable` resolved on a fresh session and
+    was ambiguous on the resumed one)."""
+    model = None
+    try:
+        with Path(rec["log"]).open() as log:
+            for line in log:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("kind") == "applied" and (row.get("data") or {}).get("model"):
+                    model = str(row["data"]["model"])
+    except (FileNotFoundError, KeyError, TypeError):
+        pass
+    return model
+
+
 def wait_record(record: Path) -> int:
     # Re-read the limit: an already-armed waiter follows extend (2026-10-11).
     stale_warned_ref: float | None = None
@@ -493,7 +710,9 @@ def wait_record(record: Path) -> int:
     while True:
         rec = json.loads(record.read_text())
         ar = rec.get("auto_resume") or {}
-        if Path(rec["done"]).exists():
+        if rec.get("finished"):
+            # Finalized (not merely `.done`: the agent touches that itself while acp-run and
+            # finalize still run, so `wait && resume` used to race finalize; 2026-10-18).
             if ar.get("state") not in AUTO_RESUME_PENDING or rec.get("closed"):
                 return 0
             # A quota stop with an in-place resume scheduled is not the end (2026-10-18): wait
@@ -504,6 +723,9 @@ def wait_record(record: Path) -> int:
                 print(f"acp-dispatch: {rec['name']}: {auto_resume_detail(ar)}", file=sys.stderr)
                 resume_noted = ar.get("attempt")
             time.sleep(5)
+            continue
+        if dead_reason(rec):
+            reap_record(record)      # the next pass sees it finished and returns at once
             continue
         now = time.time()
         seconds = rec.get("wait_timeout", 0)
@@ -1346,8 +1568,18 @@ def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, s
         return False, detail, cls, reset_text
 
 
+def fallback_class(rec: dict) -> str | None:
+    """The class for a slice that acp-run's stderr cannot explain: the runner was signalled, or
+    the record was reaped after its process vanished."""
+    if rec.get("signal"):
+        return f"killed: {rec['signal']}"
+    if rec.get("reaped"):
+        return f"lost ({rec['reaped'].get('reason', '?')})"
+    return None
+
+
 def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
-                 reply: str = "") -> str | None:
+                 reply: str = "", fallback: str | None = None) -> str | None:
     """The NO-REPORT line for an agent that stopped without DONE/BLOCKED because acp-run failed,
     from acp-run's stderr (`FAILED <class>: ...`, `fail=<class> error='...'`). None when acp-run
     exited 0 and printed no FAILED line (an ordinary partial report). A model refusal (acp-run's
@@ -1358,9 +1590,11 @@ def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
     except OSError:
         text = ""
     cls, when = failure_class(text, rc)
-    if not cls and rc in (None, 0):
+    if not cls and rc in (None, 0) and not fallback:
         return None
-    cls = cls or f"exit {rc}"
+    if cls and cls.startswith("exit ") and fallback:
+        cls = None
+    cls = cls or fallback or f"exit {rc}"
     bits = [agent] + ([model] if model else []) + (
         [f"retry {when.group(1).lower()} {when.group(2).strip()}"] if when else [])
     first = re.split(r"(?<=[.!?])\s", " ".join(reply.split()), maxsplit=1)[0][:200]
@@ -1465,6 +1699,8 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
     if rec.get("status") == "unavailable":
         return ("unavailable", rec.get("name", path.stem), str(rec.get("report", path)),
                 rec.get("detail", "pool unavailable; re-plan with --exclude"))
+    if dead_reason(rec) and reap_record(path):
+        rec = json.loads(path.read_text())
     report = Path(rec["report"])
     finished = bool(rec.get("finished")) or Path(rec.get("done", str(done_path(report)))).exists()
     st, det = classify(report, Path(rec.get("done", str(done_path(report)))),
@@ -1502,7 +1738,7 @@ def finalize(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
         return finalize_locked(record_path, rc)
 
 
-def finalize_locked(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
+def finalize_locked(record_path: Path, rc: int | None, finished_at: float | None = None) -> tuple[str, str, dict]:
     rec = json.loads(record_path.read_text())
     report, final, done = Path(rec["report"]), Path(rec["final"]), Path(rec["done"])
     inner = Path(rec.get("agent_report", rec["report"]))
@@ -1521,7 +1757,7 @@ def finalize_locked(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
         lines = body.splitlines()
         blocked = bool(lines) and lines[0].upper().startswith("BLOCKED:")
         note = None if blocked else failure_note(
-            stderr_path, rc, rec.get("agent", "?"), rec.get("model"), body)
+            stderr_path, rc, rec.get("agent", "?"), rec.get("model"), body, fallback_class(rec))
         if note:
             # acp-run itself failed this turn (a model refusal, a quota reply, a timeout): the
             # final message is what the agent said, not a deliverable (2026-10-10: a refusal was
@@ -1540,7 +1776,8 @@ def finalize_locked(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
             rec["report_source"] = "final-message"
     elif has_report:
         rec["report_source"] = "agent"
-    rec.update(finished=time.time(), exit=rc, pid=None)
+    rec.update(finished=finished_at or time.time(), exit=rc, pid=None)
+    rec["model_applied"] = applied_model(rec) or rec.get("model_applied")
     try:
         _, age = route_module().load_snapshot()
         after, after_reading = pool_reading(rec.get("agent", ""), rec.get("model"))
@@ -1568,7 +1805,7 @@ def finalize_locked(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
         pass
     st, det = classify(report, done, finished=True)
     if st in ("partial", "no-report") and not det.startswith(NO_REPORT_PREFIX):
-        note = failure_note(stderr_path, rc, rec.get("agent", "?"), rec.get("model"), body)
+        note = failure_note(stderr_path, rc, rec.get("agent", "?"), rec.get("model"), body, fallback_class(rec))
         if note:
             old = report.read_text() if report.exists() else ""
             write_atomic(report, old + ("" if not old or old.endswith("\n") else "\n") + note + "\n")
@@ -1604,11 +1841,19 @@ def exit_for(st: str, rc: int | None) -> int:
 def runner_script(rec: dict, acp_cmd: list[str], label: str, self_path: Path) -> str:
     q = shlex.quote
     return f"""#!/bin/bash
-# written by acp-dispatch; launchd restarts a submitted job on exit, so this removes its own label
+# written by acp-dispatch; launchd restarts a submitted job on exit, so this removes its own label.
+# TERM/HUP/INT (a shutdown, launchd unloading the job) go to `execute`, which forwards TERM to
+# acp-run, SIGKILLs it after {SIGNAL_GRACE} s and exits 128+signal; `wait` returns early on a trapped
+# signal, so it is repeated until the child is gone. The exit file lets `acp-dispatch reap`
+# finish the record if finalize itself never ran.
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 export CLAUDE_CODE_SESSION_ID={q(rec.get("owner") or "")}
 [ -e {q(rec["done"])} ] && {{ launchctl remove {q(label)}; exit 0; }}
-python3 {q(str(self_path))} execute {q(rec["record"])}; rc=$?
+python3 {q(str(self_path))} execute {q(rec["record"])} & child=$!
+trap 'kill -TERM "$child" 2>/dev/null' TERM HUP INT
+wait "$child"; rc=$?
+while kill -0 "$child" 2>/dev/null; do wait "$child"; rc=$?; done
+echo "$rc" > {q(str(exit_file(rec)))}
 python3 {q(str(self_path))} finalize {q(rec["record"])} --exit "$rc"
 launchctl remove {q(label)}
 """
@@ -1662,10 +1907,23 @@ def wait_for_capacity(record: Path) -> None:
 def execute_record(record: Path, tee: bool = False) -> int:
     wait_for_capacity(record)
     rec = json.loads(record.read_text())
+    got: dict = {}
     with open(rec["final"] + ".tmp", "w") as fo, open(rec["stderr"], "w") as fe:
         proc = subprocess.Popen(shlex.split(rec["cmd"]), stdout=subprocess.PIPE if tee else fo,
                                 stderr=fe, stdin=subprocess.DEVNULL, text=tee)
-        rec = update_record(record, pid=proc.pid)
+        rec = update_record(record, pid=proc.pid, pid_start=proc_start(proc.pid))
+
+        def on_signal(signum, _frame):
+            # a shutdown or launchd unloading the job: acp-run cancels the turn and stops the
+            # agent on TERM; the runner then finalizes with 128+signal (2026-10-18)
+            if "sig" not in got:
+                got.update(sig=signum, at=time.time())
+                try:
+                    proc.send_signal(signal.SIGTERM)
+                except OSError:
+                    pass
+
+        old = {s: signal.signal(s, on_signal) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
 
         def copy_output():
             for line in proc.stdout:
@@ -1686,13 +1944,20 @@ def execute_record(record: Path, tee: bool = False) -> int:
                     rc = proc.wait(timeout=0.5)
                     break
                 except subprocess.TimeoutExpired:
-                    pass
+                    if got and time.time() - got["at"] > SIGNAL_GRACE:
+                        proc.kill()
         except KeyboardInterrupt:
             proc.terminate()
             rc = proc.wait()
+        finally:
+            for s, handler in old.items():
+                signal.signal(s, handler)
         if copier:
             copier.join()
     os.replace(rec["final"] + ".tmp", rec["final"])
+    if got:
+        update_record(record, signal=signal.Signals(got["sig"]).name)
+        return 128 + int(got["sig"])
     return rc
 
 
@@ -1701,10 +1966,19 @@ def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
     stop was the provider's limit, not the agent; redo nothing finished)."""
     record = Path(a.record).expanduser().resolve()
     rec = json.loads(record.read_text())
-    if not rec.get("finished") and not Path(rec["done"]).exists():
-        die("cannot resume a running slice; use extend")
-    if pid_alive(rec.get("pid")):
-        die("slice process is still running; wait for finalize before resuming")
+    deadline = time.time() + FINALIZE_WAIT
+    while not rec.get("finished"):
+        if dead_reason(rec):
+            reap_record(record)                      # a dead slice is finished now
+            rec = json.loads(record.read_text())
+            break
+        if not Path(rec["done"]).exists():
+            die("cannot resume a running slice; use extend")
+        # `.done` is the agent's own last act; acp-run and finalize may still be running
+        if time.time() > deadline:
+            die("slice process is still running; wait for finalize before resuming")
+        time.sleep(2)
+        rec = json.loads(record.read_text())
     sid, supported = session_info(rec)
     if supported is False:
         die(f"{rec['agent']} advertises neither load nor resume")
@@ -1722,7 +1996,7 @@ def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
         "and rewrite the report with the complete result.\n\nOriginal brief:\n" + original)
     args = argparse.Namespace(
         no_auto_resume=getattr(a, "no_auto_resume", False),
-        agent=rec["agent"], model=rec.get("model"), name=rec["name"], dir=rec["dir"],
+        agent=rec["agent"], model=rec.get("model_applied") or rec.get("model"), name=rec["name"], dir=rec["dir"],
         task=rec.get("task"), out=rec["out"], perm=rec.get("perm", option("--perm", "all")),
         timeout=a.timeout if a.timeout is not None else rec.get("timeout", int(option("--timeout", DEFAULT_TIMEOUT))),
         wrapup_grace=rec.get("wrapup_grace", int(option("--wrapup-grace", 0))),
@@ -1925,7 +2199,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         label = f"acp-dispatch.{(a.task or out.name)}.{a.name}"
         runner = out / f"{a.name}-run.sh"
         write_atomic(runner, runner_script(rec, acp_cmd, label, Path(__file__).resolve()), mode=0o700)
-        sub = ["launchctl", "submit", "-l", label, "-o", str(out / f"{a.name}.out"),
+        sub = [launchctl_bin(), "submit", "-l", label, "-o", str(out / f"{a.name}.out"),
                "-e", str(out / f"{a.name}.err"), "--", "/bin/bash", str(runner)]
         rec = update_record(record, label=label, runner=str(runner))
         r = subprocess.run(sub, check=False, capture_output=True, text=True)
@@ -1969,6 +2243,18 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "reap":
+        sub = argparse.ArgumentParser(prog="acp-dispatch reap")
+        sub.add_argument("items", nargs="*", metavar="RECORD|DIR")
+        sub.add_argument("--quiet", action="store_true")
+        sub.add_argument("--install", action="store_true", help="install the launchd sweep (RunAtLoad, every 30 min)")
+        sub.add_argument("--uninstall", action="store_true")
+        s = sub.parse_args(argv[1:])
+        if s.install or s.uninstall:
+            return reap_install(uninstall=s.uninstall)
+        if not s.items:
+            die("give a record, a jobs/ dir or a task dir (e.g. ~/.local/state/bigteam)")
+        return reap_items(s.items, s.quiet)
     if argv and argv[0] in ("extend", "resume", "reroute", "wait", "execute", "auto-resume"):
         sub = argparse.ArgumentParser(prog=f"acp-dispatch {argv[0]}")
         sub.add_argument("record")

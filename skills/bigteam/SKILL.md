@@ -575,6 +575,19 @@ until the work is committed or recorded in a repo.
    session id, agent without load/resume, 3 attempts used) the `check` line
    ends with the exact `acp-dispatch resume <record> --detach --no-wait`
    command and the retry time; run that after the reset, never a new dispatch.
+   **A slice whose process died without finalize is reaped, never "running".**
+   The detached runner traps TERM/HUP/INT and finalizes with 128+signal
+   (`NO-REPORT: killed: SIGTERM`); for the rest (SIGKILL, a reboot, power
+   loss) `acp-dispatch reap [RECORD|DIR]` finalizes every record whose pid is
+   gone or belongs to another process now (`pid_start` is stored at launch;
+   pids are reused after a reboot), exit from the runner's exit file or
+   launchd, else 255 `lost`, with a `reaped` reason. `check`, `wait` and
+   `resume` apply the same rule first, so a dead slice never sits behind a
+   waiter until its timeout; a launchd sweep (`acp-dispatch reap --install`,
+   RunAtLoad + every 30 min) fixes records nobody is reading (2026-10-18).
+   `wait` returns only once the record is finalized, not on the agent's own
+   `.done` touch, so `wait && resume` never races finalize; `resume` passes
+   the model acp-run actually applied (`model_applied`), not the alias.
 7. **Budget pool room too.** Pass `--est-pct N` when the orchestrator can
    estimate the binding-window cost. A slice that will not fit exits 5 before
    launch. Near-fit and unmeasured pools automatically get checkpoint mode;

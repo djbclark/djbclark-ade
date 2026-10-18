@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Sweep for dead acp-dispatch slices (bin/acp-dispatch, "A detached slice that dies without
+     running finalize"). At login (RunAtLoad: the reboot that killed the slice is exactly when
+     its record needs fixing) and every 30 minutes, `acp-dispatch reap` finalizes every
+     unfinished record under ~/.local/state/bigteam whose process is gone, so no reader shows
+     it running. Idempotent and cheap (one `ps` per unfinished record). Installed by
+     `acp-dispatch reap --install`, removed by `acp-dispatch reap --uninstall`. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.acp-dispatch-reap</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/djbclark/src/djbclark-ade/bin/acp-dispatch</string>
+    <string>reap</string>
+    <string>--quiet</string>
+    <string>/Users/djbclark/.local/state/bigteam</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/djbclark/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/djbclark/src/djbclark-ade</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>1800</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>StandardOutPath</key><string>/Users/djbclark/.local/state/acp-dispatch/reap.out</string>
+  <key>StandardErrorPath</key><string>/Users/djbclark/.local/state/acp-dispatch/reap.err</string>
+</dict>
+</plist>

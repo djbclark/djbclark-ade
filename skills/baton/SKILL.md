@@ -57,9 +57,16 @@ under the task directory the Tier 1 pointer names; never adopt a record whose
    after the retry time, never a fresh dispatch. An older rearm exits 0 on any
    `.done`, so run `acp-dispatch check` on its record yourself.
 
-If a waiter times out (it is bounded) with no `.done`, check the detached job
-is still alive (`launchctl list | ggrep <label>`) before re-arming once more or
-reporting it lost.
+If a waiter times out (it is bounded) with no `.done`, run `acp-dispatch reap
+<record>` (or `acp-dispatch check <record>`, which applies the same rule): a
+slice whose process is gone (a reboot, SIGKILL, power loss) is finalized on the
+spot with its exit from the runner's exit file or launchd, else 255 `lost`, and
+`check` then gives the real verdict; a live slice is left alone, so re-arm the
+waiter. Never judge liveness by hand from `launchctl list` or `ps`: pids are
+reused after a reboot (2026-10-17: trackpad-settings read as running for
+hours), and `wait` returns only once a record is finalized or reaped, never on
+the agent's own `.done` touch (2026-10-18). A launchd sweep
+(`acp-dispatch reap --install`) does the same at login and every 30 min.
 
 `/resume` is the same thing under its older name (the `resume` skill was
 folded in here on 2026-10-08; Claude Code keeps a `/resume` command wrapper

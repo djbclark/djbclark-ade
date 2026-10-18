@@ -55,6 +55,7 @@ FAKE = textwrap.dedent("""\
     caps='{"loadSession":true}'; [ "$FAKE_CAPS" = none ] && caps='{}'
     printf '%s\\n' "{\\"kind\\":\\"initialize\\",\\"data\\":{\\"agentCapabilities\\":$caps}}" > "$log"
     [ "$FAKE_CAPS" = nosid ] || printf '%s\\n' '{"kind":"new_session","data":{"sessionId":"fake-session"}}' >> "$log"
+    [ -n "$FAKE_APPLIED" ] && printf '%s\\n' "{\\"kind\\":\\"applied\\",\\"data\\":{\\"model\\":\\"$FAKE_APPLIED\\"}}" >> "$log"
     echo "$@" > /dev/null
     report=$(ggrep -o 'deliverable to `[^`]*`' "$brief" | ghead -1 | gsed 's/.*`\\(.*\\)`/\\1/')
     case "${FAKE_MODE:-writes}" in
@@ -654,7 +655,8 @@ class TestSliceControls(Base):
              patch.dict(os.environ, self.base_env(), clear=False):
             rc = mod["main"](["resume", str(self.record_path()), "--detach", "--no-wait", "--timeout", "0"])
         self.assertEqual(rc, 0)
-        self.assertEqual(launch.call_args.args[0][:2], ["launchctl", "submit"])
+        self.assertTrue(launch.call_args.args[0][0].endswith("launchctl"), launch.call_args.args[0])
+        self.assertEqual(launch.call_args.args[0][1], "submit")
         rec = self.record()
         self.assertFalse(Path(rec["done"]).exists())
         self.assertIn("--resume fake-session", rec["cmd"])
@@ -684,7 +686,9 @@ class TestSliceControls(Base):
                 if count[0] == 1:
                     next_tick(0)
                 else:
+                    # finalize lands: `wait` returns on `finished`, not on `.done` alone (2026-10-18)
                     Path(rec["done"]).touch()
+                    mod["update_record"](self.record_path(), finished=1.0, exit=0, pid=None)
             with patch("time.sleep", side_effect=ticks):
                 self.assertEqual(mod["wait_record"](self.record_path()), 0)
         self.assertEqual(count[0], 2)
@@ -981,7 +985,7 @@ class TestCheckpointStale(Base):
             "name": "s1", "agent": "codex", "model": "m1", "dir": str(self.repo),
             "task": "t", "out": str(self.out), "report": str(report), "done": str(done),
             "log": str(log), "record": str(record), "started": started,
-            "checkpoint": checkpoint, "finished": None, "pid": os.getpid(),
+            "checkpoint": checkpoint, "finished": None, "pid": os.getpid(), "pid_start": subprocess.run(["ps", "-o", "lstart=", "-p", str(os.getpid())], check=False, capture_output=True, text=True).stdout.strip(),
             "status": "running",
         }
         record.write_text(json.dumps(rec))

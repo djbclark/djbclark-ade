@@ -1876,8 +1876,41 @@ def match_value(values, want):
         if len(cands) == 1:
             return cands[0], []
         if cands:
+            best = newest_version(cands, wt, split)
+            if best is not None:
+                return best, []
             break
     return None, cands
+
+
+def newest_version(cands, wt, split):
+    """Among several values that all contain the wanted tokens (`fable` in claude-fable-5-1 and
+    claude-fable-5), the one whose version tokens after the match are greatest, when that is
+    unique: a family alias then resolves the same way on a fresh and a resumed session
+    (2026-10-18: a resumed claude session listed both and `--model fable` died ambiguous)."""
+    keyed = []
+    for v in cands:
+        best_key = None
+        for cand in (v.get("value"), v.get("name")):
+            ct = _toks(cand, split)
+            for i in range(len(ct) - len(wt) + 1):
+                if ct[i : i + len(wt)] == wt:
+                    tail = ct[i + len(wt):]
+                    nums = []
+                    for t in tail:
+                        if not t.isdigit():
+                            break
+                        nums.append(int(t))
+                    key = (tuple(nums), -len(tail))
+                    if best_key is None or key > best_key:
+                        best_key = key
+        if best_key is None:
+            return None
+        keyed.append((best_key, v))
+    keyed.sort(key=lambda kv: kv[0], reverse=True)
+    if len(keyed) > 1 and keyed[0][0] == keyed[1][0]:
+        return None
+    return keyed[0][1]
 
 
 def pick_config(options, want, category):
