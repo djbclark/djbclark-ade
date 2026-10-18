@@ -122,6 +122,18 @@ stop that cannot be resumed automatically (no session id, agent without load/res
 attempts exhausted) stays exit 3 and the `check` line ends with the exact
 `acp-dispatch resume <record>` command and the retry time.
 
+Failure classes (NO-REPORT line): `quota`, `auth`, `refused`, `outage`, `timeout`, `transient`
+(acp-run's FAILED transient: a truncated reply, an http/2 CANCEL), `killed`, `lost`, `exit N`.
+2026-10-18: a transient failure on a pool whose headroom is below 10% (the --min-headroom default,
+read with `pool_reading`, the reading a resume refusal uses) is a quota stop in disguise — a cursor
+slice died on an http/2 CANCEL and minutes later `resume` was refused at 0.0% headroom. finalize
+writes `NO-REPORT: quota (...)` with "transient error on a pool at N% headroom: treated as quota"
+and the ordinary quota path follows (auto-resume at the reset, or the reroute for a far one).
+Otherwise `transient` stays. For transient and outage `check` suggests `reroute RECORD --agent A
+--model M` (route_agent's top route for the record's kind, this pool excluded) and never
+`--escalate`: a transport error says nothing about the tier. Other failures keep the one-rung
+`--escalate` hint.
+
 Quota-stop refinements (2026-10-18): (1) a reset further out than `[dispatch].
 auto_resume_max_wait_hours` (default 6) is not waited for — agy's weekly cap resets ~148 h out
 and a 5-day codex weekly has no business in launchd either — finalize records
@@ -2412,6 +2424,27 @@ def fallback_class(rec: dict) -> str | None:
     return None
 
 
+# A transient failure on a pool below this much headroom is treated as a quota stop. The
+# `--min-headroom` default: the same bar a fresh dispatch or resume is refused at.
+TRANSIENT_QUOTA_HEADROOM = 10.0
+# NO-REPORT classes that are a transport or service error, not a verdict on the slice's tier.
+TRANSPORT_FAILURES = tuple(f"{NO_REPORT_PREFIX} {c}".lower() for c in ("transient", "outage"))   # `check` lowercases
+
+
+def transient_pool_starved(agent: str, model: str | None) -> float | None:
+    """Percent headroom left when the pool of agent×model is below TRANSIENT_QUOTA_HEADROOM, else
+    None (healthy, unknown, or a lookup error). Same reading the headroom refusal uses
+    (`pool_reading`), no new aiuse parsing. 2026-10-18: a cursor slice died on an http/2 CANCEL,
+    class transient; minutes later the pool read 0.0% and `resume` was refused."""
+    try:
+        remaining, _ = pool_reading(agent, model)
+    except (OSError, ValueError, TypeError):
+        return None
+    if remaining is None or float(remaining) >= TRANSIENT_QUOTA_HEADROOM:
+        return None
+    return float(remaining)
+
+
 def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
                  reply: str = "", fallback: str | None = None) -> str | None:
     """The NO-REPORT line for an agent that stopped without DONE/BLOCKED because acp-run failed,
@@ -2437,9 +2470,17 @@ def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
                 f"(acp-run exit {rc}; the model declined the task, so nothing above is a deliverable; "
                 "appended by acp-dispatch)")
     extra = ""
+    starved = transient_pool_starved(agent, model) if cls == "transient" else None
+    if starved is not None:
+        # a transport error ("reply truncated ... CANCEL") on a pool with no headroom is the quota
+        # stop in disguise: same NO-REPORT quota line, so check and auto-resume take the quota path
+        cls = "quota"
+        extra = f"; transient error on a pool at {starved:.1f}% headroom: treated as quota"
     if cls in ("quota", "outage", "transient"):
         forget_preflight(agent, model)
-    if cls == "quota":
+    if starved is not None:
+        pass        # aiuse already shows the empty pool; the error text names no reset time to note
+    elif cls == "quota":
         _, extra = record_quota_refusal_in_aiuse(agent, model, text, rc, when)
     elif cls in ("outage", "transient"):
         note_outage_in_aiuse(agent, model, text)
@@ -2625,10 +2666,17 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
         det = f"checkpoint preserved; reroute: {reroute}; or {manual_resume_hint(rec, path)}"
     if finished and st in ("no-report", "partial") and "quota" not in failure:
         # a slice that failed on its tier climbs one rung (operator decision 1.4, 2026-10-18);
-        # quota stops carry their own reroute rule above, BLOCKED asks the lead instead
-        nxt = escalation_next(rec.get("kind"))
-        if nxt:
-            det = f"{det}; escalate: {script} reroute {rec_path} --escalate (-> {nxt})"
+        # quota stops carry their own reroute rule above, BLOCKED asks the lead instead. A
+        # transport error (transient, outage) says nothing about the tier: reroute to the
+        # next pool route_agent plans for the kind, and never suggest climbing the ladder
+        # (2026-10-18: a cursor slice's CANCEL was offered `--escalate (-> judgment)`).
+        if failure.startswith(TRANSPORT_FAILURES):
+            cmd = reroute_command(rec, path)
+            det = f"{det}; reroute: {cmd}" if cmd else f"{det}; no other pool eligible for kind {rec.get('kind')!r}"
+        else:
+            nxt = escalation_next(rec.get("kind"))
+            if nxt:
+                det = f"{det}; escalate: {script} reroute {rec_path} --escalate (-> {nxt})"
     if not finished:
         stale_msg = checkpoint_stale_detail(rec)
         if stale_msg:
