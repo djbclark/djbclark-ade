@@ -387,18 +387,15 @@ in site-private `memory/project_claude_code_mods_rollout.md` (2026-10-17):
 ```text
 /plugin marketplace add hamzafer/claude-code-mods
 /plugin install context-bar@claude-code-mods
-/plugin marketplace add djbclark/djbclark-ade
-/plugin install agent-radar@djbclark-ade
 ```
 
-`agent-radar` comes from djbclark's fork in this repo (`plugins/agent-radar`,
-marketplace `djbclark-ade`), not from `claude-code-mods`: if
-`agent-radar@claude-code-mods` is installed, disable it first (`claude plugin
-disable agent-radar@claude-code-mods`), since both register `/radar`.
+`agent-radar` was removed on 2026-10-18 (djbclark: more trouble than it is worth). Its every-5-second
+shell scans in each Claude session drove load to 46-110 that day. Where it is installed, run
+`claude plugin uninstall agent-radar@djbclark-ade` and `claude plugin uninstall agent-radar@claude-code-mods`,
+then `/reload-plugins` in each running session.
 
 | Mod | Install? | What it gives the user |
 |---|---|---|
-| `agent-radar` (djbclark fork, `agent-radar@djbclark-ade`) | yes | One live line above the prompt per running subagent, **background Bash command** and **detached `acp-dispatch` job** (the upstream mod shows only subagents): kind tag, elapsed time, current action or last output line, a toast when each ends (red, with its status, when a job ends anything but `done`). A shell that runs `acp-run`/`codex exec`/... is labelled with that agent and `--model`. `/radar` lists all three kinds: a shell's output tail, a job's agent, model, effort, status, exit, report and log tail. Replaces the bare "N background agents" line. Details and fork notes: `plugins/agent-radar/README.md` |
 | `context-bar` | yes | The context window as a stacked bar above the prompt, a color per category, token counts and the compaction point; `/context-bar` toggles it |
 | `claude-powerline` (`Owloops/claude-powerline`; `/plugin marketplace add Owloops/claude-powerline`, `/plugin install claude-powerline@claude-powerline`) | yes | A status line under the prompt: model, live reasoning effort, context used with the auto-compact point, Claude Code version, 5-hour and 7-day quota, session cost, git branch. Install the npm package pinned (`npm install -g @owloops/claude-powerline@<version at least two weeks old>`) and point `statusLine.command` at that binary with `--config`, not at the README's `npx ... @latest`, which re-resolves on every refresh. The plugin itself is only the `/powerline` wizard |
 | `blast-radius` | offer | Holds `rm -r`, force pushes and migrations, previews what they would destroy, cancels after 60 s unanswered |

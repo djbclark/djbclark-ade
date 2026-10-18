@@ -237,7 +237,7 @@ dead, or reused by another process). `acp-dispatch reap [RECORD|DIR]`
 finalizes such records once (exit from the runner's exit file, else launchd's
 last exit status, else 255 `lost`; `finished` from the log's last write;
 `reaped: {reason, exit_source, at}`); `check`, `wait` and `resume` apply the
-rule first, agent-radar's scan calls `reap` before reading, and a launchd sweep
+rule first, and a launchd sweep
 (`acp-dispatch reap --install`; `launchd/com.djbclark.acp-dispatch-reap.plist`,
 RunAtLoad + every 30 min) covers records nobody reads. `wait` returns only
 once a record is finalized or reaped (the agent's own `.done` touch no longer
