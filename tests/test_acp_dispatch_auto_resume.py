@@ -15,6 +15,7 @@ import json
 import os
 import runpy
 import subprocess
+import sys
 import time
 import unittest
 from datetime import datetime, timedelta
@@ -415,6 +416,203 @@ class TestResetParsing(unittest.TestCase):
         flag, val = mod["parse_reset_for_aiuse"](text, mod["failure_class"](text, 1)[1])
         self.assertEqual(flag, "--resets-at")
         self.assertEqual(datetime.fromisoformat(val), datetime(2026, 10, 18, 4, 41).astimezone())
+
+
+STATEFUL_LAUNCHCTL = """#!/bin/bash
+# fake launchctl that remembers what was submitted: `print gui/UID/LABEL` succeeds only for a
+# label in $FAKE_LOADED (as a real one does until a reboot), `submit -l LABEL ...` loads it
+echo "$@" >> "$FAKE_CALLS"
+case "$1" in
+  submit) echo "$3" >> "$FAKE_LOADED" ;;
+  print) grep -qxF "${2##*/}" "$FAKE_LOADED" 2>/dev/null && { echo "state = running"; exit 0; }; exit 113 ;;
+esac
+exit 0
+"""
+
+
+class TestRebootResume(AutoResumeBase):
+    """2026-10-18: a `launchctl submit` job does not survive a reboot or logout, so a scheduled
+    auto-resume was lost with its record still saying `scheduled`. The reap sweep re-submits it."""
+    loaded: Path = Path()
+    stateful: Path = Path()
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.stateful = self.tmp / "stateful-launchctl"
+        _ = self.stateful.write_text(STATEFUL_LAUNCHCTL)
+        self.stateful.chmod(0o755)
+        self.loaded = self.tmp / "loaded"
+
+    def env(self, **extra: str) -> dict[str, str]:
+        return {**self.base_env("quota_codex_date", FAKE_LOADED=str(self.loaded), FAKE_CALLS=str(self.launchctl_calls)),
+                "ACP_DISPATCH_LAUNCHCTL": str(self.stateful), **extra}
+
+    def scheduled(self) -> dict:
+        r = self.dispatch(mode="quota_codex_date", env=self.env())
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(self.record()["auto_resume"]["state"], "scheduled")
+        return self.record()
+
+    def reboot(self) -> None:
+        self.loaded.write_text("")
+
+    def reap(self, *extra: str) -> subprocess.CompletedProcess[str]:
+        return run(["reap", str(self.record_path()), *extra], env=self.env())
+
+    def submits(self) -> list[str]:
+        return [c for c in self.launchctl() if c.startswith("submit ")]
+
+    def test_reboot_loses_the_job_and_the_sweep_resubmits_it_once(self):
+        before = self.scheduled()
+        ar0 = before["auto_resume"]
+        self.assertEqual(len(self.submits()), 1)
+        r = self.reap()                                         # still loaded: nothing to do
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+        self.assertEqual(len(self.submits()), 1)
+        self.reboot()
+        r = self.reap()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.splitlines()
+        self.assertEqual(len(lines), 1, r.stdout)
+        self.assertTrue(lines[0].startswith("resubmitted\ts1\t"), lines[0])
+        self.assertIn(ar0["label"], lines[0])
+        self.assertIn(f"not_before {ar0['not_before_iso']}", lines[0])
+        self.assertEqual(len(self.submits()), 2)
+        self.assertIn(f"submit -l {ar0['label']} ", self.submits()[1])
+        ar = self.record()["auto_resume"]
+        self.assertEqual((ar["state"], ar["attempt"], ar["label"], ar["not_before"]),
+                         ("scheduled", 1, ar0["label"], ar0["not_before"]))
+        self.assertEqual(len(ar["resubmitted"]), 1)
+        self.assertAlmostEqual(ar["resubmitted"][0], time.time(), delta=60)
+        # the next sweep finds the label loaded again: exactly once
+        r2 = self.reap()
+        self.assertEqual((r2.returncode, r2.stdout), (0, ""), r2.stderr)
+        self.assertEqual(len(self.submits()), 2)
+        # and a second reboot is handled the same way
+        self.reboot()
+        self.assertTrue(self.reap().stdout.startswith("resubmitted\ts1\t"))
+        self.assertEqual(len(self.record()["auto_resume"]["resubmitted"]), 2)
+
+    def test_not_before_already_past_runs_now_and_stays_headroom_gated(self):
+        self.scheduled()
+        self.past_due()
+        self.reboot()
+        nb = self.record()["auto_resume"]["not_before"]
+        r = self.reap()
+        self.assertIn("not_before passed: runs now, headroom-gated", r.stdout)
+        self.assertEqual(self.record()["auto_resume"]["not_before"], nb)
+        self.assertEqual(len(self.submits()), 2)
+        # the resubmitted runner is the same attempt, and the gate still decides
+        rc, _ = self.run_auto_resume("5", mode="quota_codex_date")
+        self.assertEqual(rc, 3)
+        self.assertEqual(self.record()["auto_resume"]["state"], "given-up")
+
+    def test_waiting_headroom_is_resubmitted_and_resuming_is_reopened(self):
+        for state, want in (("waiting-headroom", "waiting-headroom"), ("resuming", "scheduled")):
+            with self.subTest(state=state):
+                self.setUp()
+                self.scheduled()
+                rec = self.record()
+                rec["auto_resume"]["state"] = state
+                _ = self.record_path().write_text(json.dumps(rec))
+                self.reboot()
+                self.assertTrue(self.reap().stdout.startswith("resubmitted\ts1\t"))
+                self.assertEqual(self.record()["auto_resume"]["state"], want)
+                if state == "resuming":                         # the runner accepts it again
+                    self.past_due()
+                    rc, _ = self.run_auto_resume("90", mode="writes")
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(self.record()["status"], "done")
+
+    def test_never_resubmitted_when_closed_superseded_or_finished(self):
+        self.scheduled()
+        pristine = self.record()
+        cases = {
+            "closed": lambda r: r.update(closed=True),
+            "manual resume": lambda r: r["auto_resume"].update(state="resumed"),
+            "reroute": lambda r: r["auto_resume"].update(state="cancelled"),
+            "given up": lambda r: r["auto_resume"].update(state="given-up"),
+            "failed": lambda r: r["auto_resume"].update(state="failed"),
+            "running again": lambda r: r.update(finished=None),
+            "never scheduled": lambda r: r.pop("auto_resume"),
+        }
+        self.reboot()
+        for why, mutate in cases.items():
+            with self.subTest(why=why):
+                rec = json.loads(json.dumps(pristine))
+                mutate(rec)
+                _ = self.record_path().write_text(json.dumps(rec))
+                self.assertEqual(self.reap("--quiet").stdout, "")
+                self.assertEqual(len(self.submits()), 1, why)
+        # a newer attempt owns a different, still-loaded label; the old attempt's is gone
+        rec = json.loads(json.dumps(pristine))
+        rec["auto_resume"].update(attempt=2, label="acp-dispatch.out.s1.resume2")
+        _ = self.record_path().write_text(json.dumps(rec))
+        _ = self.loaded.write_text("acp-dispatch.out.s1.resume2\n")
+        self.assertEqual(self.reap("--quiet").stdout, "")
+        self.assertEqual(len(self.submits()), 1)
+
+    def test_a_real_manual_resume_after_the_reboot_is_not_undone(self):
+        self.scheduled()
+        self.reboot()
+        rr = run(["resume", str(self.record_path()), "--timeout", "0"], env=self.base_env("writes"))
+        self.assertEqual(rr.returncode, 0, rr.stdout + rr.stderr)
+        self.assertEqual(self.record()["auto_resume"]["state"], "resumed")
+        self.assertEqual(self.reap("--quiet").stdout, "")
+        self.assertEqual(len(self.submits()), 1)
+
+    def test_two_concurrent_sweeps_submit_once(self):
+        self.scheduled()
+        self.reboot()
+        cmd = [sys.executable, str(SCRIPT), "reap", str(self.record_path())]
+        env = {**os.environ, **self.env()}
+        procs = [subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                 for _ in range(4)]
+        outs = [p.communicate(timeout=60)[0] for p in procs]
+        self.assertEqual([p.returncode for p in procs], [0] * 4)
+        self.assertEqual(sum(o.count("resubmitted\t") for o in outs), 1, outs)
+        self.assertEqual(len(self.submits()), 2)
+        self.assertEqual(len(self.record()["auto_resume"]["resubmitted"]), 1)
+
+    def test_launchctl_unavailable_changes_nothing(self):
+        self.scheduled()
+        self.reboot()
+        r = run(["reap", str(self.record_path())], env=self.env(ACP_DISPATCH_LAUNCHCTL=str(self.tmp / "no-such-launchctl")))
+        self.assertEqual((r.returncode, r.stdout), (0, ""), r.stderr)
+        self.assertNotIn("resubmitted", self.record()["auto_resume"])
+
+    def test_a_refused_submit_is_recorded_and_retried_by_the_next_sweep(self):
+        self.scheduled()
+        self.reboot()
+        bad = self.tmp / "refusing-launchctl"
+        _ = bad.write_text('#!/bin/bash\n[ "$1" = print ] && exit 113\necho nope >&2; exit 5\n')
+        bad.chmod(0o755)
+        r = run(["reap", str(self.record_path())], env=self.env(ACP_DISPATCH_LAUNCHCTL=str(bad)))
+        self.assertTrue(r.stdout.startswith("resubmit-failed\ts1\t"), r.stdout)
+        self.assertIn("launchctl submit failed (5): nope", r.stdout)
+        ar = self.record()["auto_resume"]
+        self.assertEqual(ar["state"], "scheduled")
+        self.assertNotIn("resubmitted", ar)
+        self.assertIn("nope", ar["resubmit_failed"])
+        r = self.reap()
+        self.assertTrue(r.stdout.startswith("resubmitted\ts1\t"), r.stdout)
+        ar = self.record()["auto_resume"]
+        self.assertNotIn("resubmit_failed", ar)
+        self.assertEqual(len(ar["resubmitted"]), 1)
+
+    def test_missing_runner_script_is_rewritten(self):
+        ar0 = self.scheduled()["auto_resume"]
+        Path(ar0["runner"]).unlink()
+        self.reboot()
+        self.assertTrue(self.reap().stdout.startswith("resubmitted\ts1\t"))
+        self.assertIn(f"auto-resume {self.record()['record']} --attempt 1", Path(ar0["runner"]).read_text())
+
+    def test_sweep_over_a_directory_covers_every_record(self):
+        self.scheduled()
+        self.reboot()
+        r = run(["reap", str(self.out)], env=self.env())
+        self.assertTrue(r.stdout.startswith("resubmitted\ts1\t"), r.stdout + r.stderr)
 
 
 if __name__ == "__main__":

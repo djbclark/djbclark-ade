@@ -585,6 +585,13 @@ until the work is committed or recorded in a repo.
    `resume` apply the same rule first, so a dead slice never sits behind a
    waiter until its timeout; a launchd sweep (`acp-dispatch reap --install`,
    RunAtLoad + every 30 min) fixes records nobody is reading (2026-10-18).
+   **A scheduled auto-resume survives a reboot:** `launchctl submit` jobs do
+   not, so the same sweep re-submits any pending auto-resume (`scheduled`,
+   `waiting-headroom`, `resuming`) whose launchd label is no longer loaded,
+   same attempt and `not_before` (already past: it runs at once, still
+   headroom-gated), once even with concurrent sweeps, never for a closed,
+   manually resumed, rerouted or superseded record; `reap` prints a
+   `resubmitted` line and the record gets `auto_resume.resubmitted`.
    `wait` returns only once the record is finalized, not on the agent's own
    `.done` touch, so `wait && resume` never races finalize; `resume` passes
    the model acp-run actually applied (`model_applied`), not the alias.

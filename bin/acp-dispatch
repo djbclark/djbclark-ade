@@ -20,7 +20,9 @@
     acp-dispatch auto-resume RECORD --attempt N          (internal) what the scheduled resume
                                                          runner calls after a quota stop
     acp-dispatch reap [RECORD|DIR]... [--quiet]          finalize every unfinished record whose
-                                                         process is gone (idempotent, any time)
+                                                         process is gone, and re-submit a
+                                                         scheduled auto-resume a reboot removed
+                                                         (idempotent, any time)
     acp-dispatch reap --install | --uninstall            the launchd sweep (RunAtLoad + every 30 min)
 
 What it replaces: the dispatch recipe that bigteam, model-routing and home-agents.md used to
@@ -120,6 +122,18 @@ first, so a dead slice is never "running" to a reader; `wait` returns at once on
 `acp-dispatch reap ~/.local/state/bigteam` runs from launchd (`reap --install`;
 launchd/com.djbclark.acp-dispatch-reap.plist) at login and every 30 min. The reaped slice's
 stderr still decides the class: a quota refusal there follows the quota path (auto-resume).
+
+A scheduled auto-resume survives a reboot (2026-10-18): `launchctl submit` jobs are removed by a
+reboot or logout, leaving a record that says `scheduled` with nothing to run it. The same sweep
+(`reap`, so at login and every 30 min) also finds each finished, unclosed record whose
+`auto_resume.state` is pending (scheduled, waiting-headroom, resuming) and whose launchd label is
+no longer loaded (`launchctl print` says so; an unavailable launchctl changes nothing) and submits
+the same attempt again: same label and `not_before` (already past: the runner starts at once, still
+gated on pool headroom). Under the record's lock, so concurrent sweeps submit once; a closed,
+manually resumed, rerouted, given-up or newer-attempt record (its state is no longer pending, or the
+label is a newer one) is never revived. `auto_resume.resubmitted` lists the epochs; a refused submit is kept in
+`auto_resume.resubmit_failed` and retried by the next sweep. `reap` prints
+`resubmitted<TAB>name<TAB>record<TAB>label attempt N (...)` per re-submission (or `resubmit-failed`).
 
 `wait` returns only once the record is finalized (or reaped), not when `.done` appears: the agent
 itself touches `.done` as its last act, so acp-run and finalize may still be running (2026-10-18:
@@ -614,8 +628,47 @@ def record_paths(items: list[str]) -> list[Path]:
     return paths
 
 
+def resubmit_auto_resume(path: Path) -> tuple[str, str] | None:
+    """A scheduled auto-resume that a reboot or logout removed from launchd (`launchctl submit` jobs
+    do not survive either): submit the same attempt again. (verb, detail) when it acted, else None.
+    Only a finished, unclosed record whose auto_resume is pending and whose label launchd no longer
+    has; under the record's lock, so two sweeps at once submit once. Manual resume, reroute, a newer
+    attempt or a close leave the state non-pending (or change the label), so they are never revived."""
+    with record_lock(path):
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        ar = rec.get("auto_resume") or {}
+        label, state = ar.get("label"), ar.get("state")
+        if (state not in AUTO_RESUME_PENDING or rec.get("closed") or not rec.get("finished")
+                or not label or not ar.get("runner")):
+            return None
+        if launchd_print(label) != "":               # still loaded, or launchctl itself unavailable
+            return None
+        attempt, runner = int(ar.get("attempt") or 1), Path(ar["runner"])
+        if not runner.exists():
+            write_atomic(runner, auto_resume_runner_script(rec, label, attempt, Path(__file__).resolve()), mode=0o700)
+        err = submit_launchd(label, runner, runner.with_suffix(".out"), runner.with_suffix(".err"))
+        if err:
+            rec["auto_resume"] = {**ar, "resubmit_failed": err}
+            write_record(path, rec)
+            return "resubmit-failed", f"{label}: {err}"
+        now = time.time()
+        # a runner killed between "resuming" and the resumed dispatch's record write: the runner
+        # only accepts scheduled/waiting-headroom, so reopen it
+        rec["auto_resume"] = {**ar, "state": "scheduled" if state == "resuming" else state,
+                              "resubmitted": [*ar.get("resubmitted", []), now]}
+        rec["auto_resume"].pop("resubmit_failed", None)
+        write_record(path, rec)
+        late = float(ar.get("not_before") or 0) <= now
+        return "resubmitted", (f"{label} attempt {attempt} ("
+                               f"{'not_before passed: runs now, headroom-gated' if late else 'not_before ' + str(ar.get('not_before_iso', '?'))})")
+
+
 def reap_items(items: list[str], quiet: bool = False) -> int:
-    """`acp-dispatch reap`: safe any time; prints one line per record it finalized; exit 0."""
+    """`acp-dispatch reap`: safe any time; prints one line per record it finalized and one per
+    auto-resume it re-submitted to launchd; exit 0."""
     n = 0
     for path in record_paths(items):
         got = reap_record(path)
@@ -623,6 +676,11 @@ def reap_items(items: list[str], quiet: bool = False) -> int:
             n += 1
             st, det = got
             print(f"reaped\t{path.stem}\t{path}\t{st}: {det}")
+            continue                 # finalize may have just scheduled a resume: the next sweep checks it
+        again = resubmit_auto_resume(path)
+        if again:
+            n += 1
+            print(f"{again[0]}\t{path.stem}\t{path}\t{again[1]}")
     if not quiet and not n:
         print("reap: nothing to reap", file=sys.stderr)
     return 0

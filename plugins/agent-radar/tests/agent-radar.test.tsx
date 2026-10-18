@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { describe as label, elapsed, isShown, resetBandOrder } from '../hooks/register'
-import { RECORDS_SH, TAILS_SH, agentOf, baseName, blocks, clean, isDispatchCommand, isOutputPath, isSafePath, jobMatches, logSummary, oneLine, outputPathOf, parseRecords, shellLabel, shouldScan, tailLines } from '../hooks/watch'
+import { RECORDS_SH, TAILS_SH, agentOf, baseName, blocks, clean, isDispatchCommand, isJobRunning, isOutputPath, isSafePath, jobMatches, logSummary, oneLine, outputPathOf, parseRecords, shellLabel, shouldScan, tailLines } from '../hooks/watch'
 
 const BAND = { component: 'AbovePrompt', props: { hasSurvey: false, isWorking: true, maxRows: 10, bodyColumns: 120 } }
 const PANE = { component: 'Pane', requestId: 'agent-radar', props: { title: 'Agent Radar', isFocused: true, bodyColumns: 100, placement: 'dock' } }
@@ -169,6 +169,9 @@ describe('agent-radar', () => {
     expect(shouldScan([], 100_000, 161_000)).toBe(false) // 60 s passed, nothing running
     expect(shouldScan(acp('running'), 100_000, 400_000)).toBe(true) // a tracked job still runs
     expect(shouldScan(acp('done'), 100_000, 161_000)).toBe(false)
+    // a quota stop whose in-place resume is scheduled is not finished yet
+    expect(['running', 'pending', 'resume-scheduled'].map(status => isJobRunning({ status }))).toEqual([true, true, true])
+    expect(['done', 'no-report', 'partial'].map(status => isJobRunning({ status }))).toEqual([false, false, false])
     expect(shouldScan([], 0, 100_000, true)).toBe(true) // the first /radar
     expect(tailLines('a\r\n\x1b[31mb\x1b[0m\n\n c \n', 2)).toEqual(['b', ' c'])
     const log = [

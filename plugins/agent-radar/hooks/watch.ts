@@ -238,7 +238,7 @@ export function shouldScan(list: readonly { kind?: string; status: string }[], l
 }
 
 export function isJobRunning(job: Pick<AcpJob, 'status'>) {
-  return job.status === 'running' || job.status === 'pending'
+  return job.status === 'running' || job.status === 'pending' || job.status === 'resume-scheduled'
 }
 
 // File names `lsof -Fn` reports open, as base names (the task id is unique; /tmp and /private/tmp agree).
