@@ -51,6 +51,7 @@ SUSTAIN = int(os.environ.get("LW_SUSTAIN", "15"))  # samples
 MIN_CORES = float(os.environ.get("LW_MIN_CORES", "1.5"))
 COOLDOWN_S = float(os.environ.get("LW_COOLDOWN_H", "6")) * 3600
 MY_UID = os.getuid()
+STUCK = []  # commands ps saw in state U this sample
 
 
 def now():
@@ -86,15 +87,20 @@ def ps_table():
     snapshot every 20 s averages to an unbiased per-process estimate, short-lived compilers included (a
     `time` difference misses every process that starts and exits between samples, and macOS `ps -S` does
     not fold exited children into the parent: checked 2026-10-18)."""
-    out = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,%cpu=,command="], capture_output=True, text=True,
-                         timeout=10).stdout
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,uid=,%cpu=,state=,command="], capture_output=True, text=True,
+                             timeout=20).stdout
+    except subprocess.TimeoutExpired:  # the machine is stalling (2026-10-18, load 77): skip this sample
+        return None
     table = {}
     for line in out.splitlines():
-        parts = line.split(None, 4)
-        if len(parts) < 4 or not parts[0].isdigit():
+        parts = line.split(None, 5)
+        if len(parts) < 5 or not parts[0].isdigit():
             continue
+        if parts[4].startswith("U"):  # uninterruptible wait: counts in load, uses no CPU
+            STUCK.append(parts[5][:80] if len(parts) > 5 else parts[0])
         try:
-            table[parts[0]] = (int(parts[1]), int(parts[2]), float(parts[3]) / 100, parts[4] if len(parts) > 4 else "")
+            table[parts[0]] = (int(parts[1]), int(parts[2]), float(parts[3]) / 100, parts[5] if len(parts) > 5 else "")
         except ValueError:
             continue
     return table
@@ -265,6 +271,11 @@ def cmd_sample(a):
     st = load_state()
     t = now()
     table = ps_table()
+    if table is None:  # a stall this bad is itself a hot sample: keep the streak going, add no CPU data
+        log(f"ps timed out at load {os.getloadavg()[0]:.0f}; sample counted hot, no CPU data")
+        st["t"], st["streak"] = t, st.get("streak", 0) + 1
+        save_state(st)
+        return 0
     d = {pid: [round(cores, 2), uid, cmd[:300], ppid] for pid, (ppid, uid, cores, cmd) in table.items() if cores >= 0.05}
     load1 = os.getloadavg()[0]
     ncpu = os.cpu_count() or 1
@@ -318,13 +329,33 @@ def cmd_sample(a):
             for row in loose[:5]:
                 print(f"unattributed: pid {row['pid']} {row['cores']} cores {row['cmd'][:100]}")
         if not told and not st.get("loose_logged"):
-            log("sustained load, no agent session above threshold; top: " +
+            why = not_cpu(use, span, ncpu)
+            log("sustained load, no agent session above threshold; " + why + "; top: " +
                 "; ".join(f"{r['cores']} {r['cmd'][:60]}" for r in loose[:3]))
             st["loose_logged"] = True
+            # 2026-10-18: load 90 from memory starvation and a hung AFS aklog blamed no agent and told no one
+            if "nocpu" not in st["cooldown"] and not a.dry_run and HERMES_PING.exists():
+                subprocess.run([str(HERMES_PING), f"djbclark-ade: load-watch: load {load1:.0f} on {ncpu} cores for "
+                                f"{SUSTAIN * SAMPLE_S // 60}+ min and no agent build behind it; {why}"],
+                               capture_output=True, timeout=60)
+                st["cooldown"]["nocpu"] = t
     elif not st["streak"]:
         st.pop("loose_logged", None)
     save_state(st)
     return 0
+
+
+def not_cpu(use, span, ncpu):
+    """One line on what the load is when no session's CPU explains it: sampled CPU, swap, stuck processes."""
+    cpu = sum(r[0] for r in use.values()) / span if span else 0
+    try:
+        swap = subprocess.run(["sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, timeout=5).stdout
+        swap = " ".join(swap.split()[:6]).replace(" = ", "=")
+    except (OSError, subprocess.TimeoutExpired):
+        swap = "?"
+    stuck = sorted(set(STUCK))
+    return (f"processes used ~{cpu:.1f} of {ncpu} cores; swap {swap}; "
+            f"{len(stuck)} stuck in disk/network wait" + (f": {', '.join(stuck[:4])}" if stuck else ""))
 
 
 def cmd_status(a):
