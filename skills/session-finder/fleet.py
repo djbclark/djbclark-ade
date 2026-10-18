@@ -1039,7 +1039,9 @@ def conflicts(cwd, live=None, sid=None):
     mine = [c for c in claims() if c["repo"] in (repo, top) or any(f.startswith(top) for f in c["files"])]
     rc, out = run("git", "-C", top, "status", "--porcelain", timeout=15)
     dirty = [ln[3:] for ln in out.splitlines() if ln.strip()] if rc == 0 else []
-    sid_live = [s for s in live if sid and s.get("sid") == sid]
+    # the caller itself is live by definition, never a second copy (2026-10-18: a broadcast told every session
+    # to pass its own --sid, and each one was told not to resume itself)
+    sid_live = [s for s in live if sid and s.get("sid") == sid and not s.get("self")]
     return {"repo": top, "blocking": blocking, "idle": idle, "finished": [s for s in here if s.get("finished")],
             "claims": mine, "dirty": dirty[:40], "sid_live": sid_live}
 
