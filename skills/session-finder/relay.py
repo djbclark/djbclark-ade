@@ -158,6 +158,9 @@ def refusal(s):
         return (f"finished ({s['finished']}): never continue there; start a fresh session from its handoff "
                 "(session-finder rung 3b, launch.py --baton)")
     if not s.get("chan"):
+        rec = fleet.dispatch_record(s.get("sid"))
+        if rec:
+            return f"a headless acp-dispatch slice (no pane): acp-dispatch tell {rec} \"<text>\""
         return f"no terminal channel ({s.get('where') or 'unknown terminal'}); tell the operator its where: line"
     st = s.get("status")
     if st == "blocked":

@@ -370,10 +370,36 @@ def _acp_pane_of(pid):
 RELAY = 'relay.py {id} "<text>" (types it into its pane; queued if it is working)'
 
 
+_DISPATCH = None
+
+
+def dispatch_record(sid):
+    """The open acp-dispatch job record whose session is SID, or None. A headless slice has no pane to
+    relay into, but `acp-dispatch tell RECORD MESSAGE` reaches it (2026-10-18: relay.py told a lead to
+    "tell the operator" about a running merge worker that tell could reach)."""
+    global _DISPATCH
+    if not sid:
+        return None
+    if _DISPATCH is None:
+        _DISPATCH = {}
+        for f in [*BIGTEAM.glob("*/jobs/*.json"), *STATE_DIR.glob("launch-*/jobs/*.json")]:
+            try:
+                rec = json.loads(f.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(rec, dict) and rec.get("session_id") and "closed" not in rec:
+                _DISPATCH[rec["session_id"]] = str(f)
+    return _DISPATCH.get(sid)
+
+
 def claude_reach(d, sid):
     """How to message a running Claude TUI. SendMessage needs the session's messaging socket (the
     registry's messagingSocketPath) and a caller whose ListAgents lists it: a workflow sub-agent's often
-    does not (2026-10-11, q-shizuku relay), so the pane relay is named as the fallback."""
+    does not (2026-10-11, q-shizuku relay), so the pane relay is named as the fallback. A headless
+    acp-dispatch slice is reached with `acp-dispatch tell` instead."""
+    rec = dispatch_record(sid)
+    if rec:
+        return f'acp-dispatch tell {rec} "<text>" (a headless acp-dispatch slice: no pane to relay into)'
     name = d.get("name") or sid[:8]
     sock = d.get("messagingSocketPath")
     if sock and os.path.exists(sock):
