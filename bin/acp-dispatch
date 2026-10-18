@@ -103,6 +103,16 @@ stop that cannot be resumed automatically (no session id, agent without load/res
 attempts exhausted) stays exit 3 and the `check` line ends with the exact
 `acp-dispatch resume <record>` command and the retry time.
 
+A refused resume leaves the record alone (2026-10-18): `resume` runs the same pool checks as a
+fresh dispatch (headroom, window fit, estimate), and a refusal used to overwrite the record with a
+bare `unavailable` one, losing `log`, `session_id`, `cmd`, `brief`, `prompt`, `auto_resume`,
+`closed` and `resume_count`, so the next resume crashed. Now the record keeps every key and gains
+a `refusals` list, one `{at, class, detail}` entry per refused resume; exit 5 and the
+`unavailable` stdout line are unchanged. A fresh dispatch (no record to continue) still writes
+the `unavailable` record. `resume` on a record that has no `log` or `cmd` (one clobbered before
+this fix) stops with a message instead of a traceback; `session_info` returns the stored session id
+and no capability for it.
+
 A detached slice that dies without running finalize (a reboot's SIGTERM, SIGKILL, OOM, power
 loss, launchd unloading it) used to leave `exit: null, finished: null` forever, so every reader
 showed it running (2026-10-17: trackpad-settings, pid 51407, killed by a reboot, listed as running
@@ -458,12 +468,33 @@ def git_identity_warning(repo: Path) -> str | None:
             "--unset user.name; and the same for user.email")
 
 
+def keep_record_note_refusal(record: Path, reason: str, cls: str) -> bool:
+    """A refused resume must not replace the record of the run it would have continued
+    (2026-10-18: three finished codex records lost log, session id, cmd and brief to a headroom
+    refusal, and the next resume crashed). Append the refusal to `refusals` under the record's lock;
+    False when there is no readable record to keep."""
+    try:
+        with record_lock(record):
+            rec = json.loads(record.read_text())
+            if not isinstance(rec, dict):
+                return False
+            rec.setdefault("refusals", []).append({"at": time.time(), "class": cls, "detail": reason})
+            write_record(record, rec)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def unavailable_record(out: Path, a: argparse.Namespace, reason: str, cls: str,
-                       remaining: float | None = None, estimate: float | None = None) -> int:
+                       remaining: float | None = None, estimate: float | None = None,
+                       previous: dict | None = None) -> int:
     jobs = out / "jobs"
     jobs.mkdir(parents=True, exist_ok=True)
     report = out / f"{a.name}-report.md"
     record = jobs / f"{a.name}.json"
+    if previous and keep_record_note_refusal(record, reason, cls):
+        print(f"unavailable\t{a.name}\tclass={cls} agent={a.agent} model={a.model or '(default)'} {reason}")
+        return UNAVAILABLE_EXIT
     rec = {"name": a.name, "agent": a.agent, "model": a.model, "dir": str(Path(a.dir).resolve()),
            "task": a.task, "out": str(out), "record": str(record), "report": str(report),
            "done": str(done_path(report)), "status": "unavailable", "unavailable_class": cls,
@@ -784,6 +815,8 @@ def rearm_cmd(done: Path, record: Path | None = None, seconds: int = 1800) -> st
 
 def session_info(rec: dict) -> tuple[str | None, bool | None]:
     sid, supported = rec.get("session_id"), None
+    if not rec.get("log"):
+        return sid, None                                  # a record without a log has nothing to read
     try:
         with Path(rec["log"]).open() as log:
             for line in log:
@@ -2103,7 +2136,7 @@ def checkpoint_context(rec: dict, tools: int = 20) -> str:
                               capture_output=True, text=True).stdout.strip()
     titles: list[str] = []
     try:
-        for line in Path(rec["log"]).read_text().splitlines():
+        for line in Path(rec.get("log", "")).read_text().splitlines():
             row = json.loads(line)
             data = row.get("data") or {}
             if row.get("kind") == "update" and data.get("sessionUpdate") == "tool_call" and data.get("title"):
@@ -2136,6 +2169,11 @@ def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
             die("slice process is still running; wait for finalize before resuming")
         time.sleep(2)
         rec = json.loads(record.read_text())
+    missing = [k for k in ("log", "cmd") if not rec.get(k)]
+    if missing:
+        die(f"record {record} has no {' or '.join(missing)}; it was overwritten (an older acp-dispatch "
+            "replaced it when a resume was refused) and cannot be resumed through the record. Resume "
+            "the agent session by hand with acp-run --resume SESSION_ID, or dispatch the slice again")
     sid, supported = session_info(rec)
     broken = resume_unsupported(rec)
     if supported is False and not broken:
@@ -2280,12 +2318,12 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         not per_window and remaining is not None and estimate <= remaining <= estimate * 1.5))
     if not a.dry_run and a.min_headroom > 0 and remaining is not None and remaining < a.min_headroom:
         return unavailable_record(out, a, f"headroom {remaining:.1f}% < minimum {a.min_headroom:.1f}%",
-                                  "headroom", remaining, estimate)
+                                  "headroom", remaining, estimate, previous)
     if not a.dry_run and per_window and window_refusal:
-        return unavailable_record(out, a, window_refusal, "wont-fit", remaining, estimate)
+        return unavailable_record(out, a, window_refusal, "wont-fit", remaining, estimate, previous)
     if not a.dry_run and not per_window and remaining is not None and estimate > remaining:
         return unavailable_record(out, a, f"estimated use {estimate:.1f}% > {remaining:.1f}% left",
-                                  "wont-fit", remaining, estimate)
+                                  "wont-fit", remaining, estimate, previous)
     cap = inflight_cap(a.agent)
     if not a.dry_run and not previous and cap is not None:
         busy = inflight_records(a.agent, record, out)
@@ -2299,7 +2337,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         if not ok:
             suffix = f" reset={reset}" if reset else ""
             return unavailable_record(out, a, f"preflight failed: {detail}{suffix}", cls,
-                                      remaining, estimate)
+                                      remaining, estimate, previous)
     resume_count = previous.get("resume_count", 0) if previous else 0
     if previous:
         resume_count += 1
