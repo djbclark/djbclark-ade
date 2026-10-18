@@ -1096,7 +1096,7 @@ def calibrate_report(*, since_days: float | None = None, min_n: int | None = Non
                      now: datetime | None = None) -> dict[str, Any]:
     """Summarise dispatch outcomes for re-ranking good_at.
 
-    Schema (read-only; slice D writes `outcome` later):
+    Schema (read-only; `acp-dispatch outcome RECORD --ci/--review/--merged` writes it):
       outcome.ci      — "pass" | "fail"
       outcome.review  — "pass" | "fail"
       outcome.merged  — bool

@@ -632,7 +632,16 @@ until the work is committed or recorded in a repo.
    While a checkpoint slice runs, `check`/`wait` may add `checkpoint stale: …`
    when the agent is active but the report has not been rewritten recently —
    note it and, if the binding pool is nearly empty, consider `reroute` before
-   quota kills the slice.
+   quota kills the slice. A quota reset more than 6 h out is not auto-resumed:
+   `check` prints a ready `reroute` line. A slice that failed on its tier
+   (no-report or partial, not quota) climbs one rung, never straight to
+   frontier: `check` prints `acp-dispatch reroute <record> --escalate`
+   (2026-10-18). **Steer a running slice with `acp-dispatch tell <record>
+   "<msg>"`** (inbox file plus the live session for Claude; `check` shows the
+   replies). **Once its work is reviewed, CI'd and merged, record that:
+   `acp-dispatch outcome <record> --ci pass --review pass --merged`**
+   (`--not-merged`, `fail` likewise); `route_agent.py calibrate` re-ranks the
+   pools from these fields (2026-10-18).
 8. **Context window sits next to model and effort.** A slice that must read a
    whole corpus or a long log should ask for a bigger window. A small edit
    should keep the agent's default: a bigger window bills more per token on

@@ -499,6 +499,14 @@ command to use instead. The footer has the slice answer each message with
 `REPLY N:` in `<record>.replies.md`; `check` shows `inbox: N sent, M answered`
 and `resume` carries unanswered messages into the prompt.
 
+`acp-dispatch outcome <record> --ci pass --review fail --merged` records what
+became of a finished slice's work (2026-10-18): `outcome.ci`/`outcome.review`
+("pass" | "fail") and `outcome.merged` (`--not-merged` writes false), merged
+into earlier calls, the fields `route_agent.py calibrate` re-ranks pools from.
+`--review fail` means the lead's review found a defect that had to be fixed
+before merge, even when the fixed work then merged.
+An unfinished record, or no flag at all, is refused with exit 2.
+
 For `agy`, the footer instead names
 `<-C>/.acp-dispatch/<task>-<name>-report.md` and its `.done`. Dispatch adds
 `.acp-dispatch/` once to the workspace repository's local Git exclude file

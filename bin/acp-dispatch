@@ -22,6 +22,9 @@
                                                          bare report path when no .json exists)
     acp-dispatch resume RECORD [--timeout S] [-p TEXT | -f FILE] [--detach --no-wait]
                  [--no-auto-resume]
+    acp-dispatch outcome RECORD [--ci pass|fail] [--review pass|fail] [--merged|--not-merged]
+                                                         what became of a finished slice's work,
+                                                         for route_agent.py calibrate (merges)
     acp-dispatch reroute RECORD (--agent A --model M | --escalate) [--detach --no-wait]
                  (--escalate climbs one rung of [escalation] in config/routing.toml,
                   never straight to the top; agent/model from route_agent's top route)
@@ -1491,6 +1494,32 @@ def tell_record(a: argparse.Namespace) -> int:
             f"appended to {record_replies(target)}):\n{message.strip()}")
     pid = claude_live_delivery(rec, a.sender, live) if rec and rec.get("agent") == "claude" else None
     print(f"delivered: inbox + live session {pid}" if pid else "delivered: inbox")
+    return 0
+
+
+def outcome_record(a: argparse.Namespace) -> int:
+    """Record what became of a finished slice's work (2026-10-18, slice D3): `outcome.ci` and
+    `outcome.review` ("pass" | "fail") and `outcome.merged` (bool), the fields
+    `route_agent.py calibrate` reads to re-rank good_at. Each flag merges into what an earlier
+    call wrote, so CI, review and merge can be recorded as each happens."""
+    path = Path(a.record).expanduser().resolve()
+    fields = {k: v for k, v in (("ci", a.ci), ("review", a.review), ("merged", a.merged))
+              if v is not None}
+    if not fields:
+        die("give at least one of --ci, --review, --merged/--not-merged", 2)
+    try:
+        with record_lock(path):
+            rec = json.loads(path.read_text())
+            if not rec.get("finished"):
+                die(f"slice {rec.get('name', path.stem)} has not finished; record its outcome "
+                    "once the work it delivered has been checked", 2)
+            out = {**(rec.get("outcome") or {}), **fields, "at": time.time()}
+            rec["outcome"] = out
+            write_record(path, rec)
+    except (OSError, ValueError) as e:
+        die(f"unreadable record {path}: {e}", 2)
+    shown = ", ".join(f"{k}={str(out[k]).lower()}" for k in ("ci", "review", "merged") if k in out)
+    print(f"outcome\t{rec.get('name', path.stem)}\t{shown}")
     return 0
 
 
@@ -3405,7 +3434,8 @@ def main(argv: list[str] | None = None) -> int:
         if reap_throttled(s.items, s.force):
             return 0                        # a sweep ran inside the minimum interval (2026-10-18)
         return reap_items(s.items, s.quiet)
-    if argv and argv[0] in ("extend", "resume", "reroute", "wait", "execute", "auto-resume", "tell"):
+    if argv and argv[0] in ("extend", "resume", "reroute", "wait", "execute", "auto-resume", "tell",
+                            "outcome"):
         sub = argparse.ArgumentParser(prog=f"acp-dispatch {argv[0]}")
         sub.add_argument("record")
         if argv[0] == "wait":
@@ -3420,6 +3450,12 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("message", help="the message (- reads stdin)")
             sub.add_argument("--from", dest="sender", default="lead", metavar="NAME",
                              help="who the message is from (default lead)")
+        elif argv[0] == "outcome":
+            sub.add_argument("--ci", choices=("pass", "fail"))
+            sub.add_argument("--review", choices=("pass", "fail"))
+            merged = sub.add_mutually_exclusive_group()
+            merged.add_argument("--merged", action="store_const", const=True, default=None)
+            merged.add_argument("--not-merged", dest="merged", action="store_const", const=False)
         elif argv[0] == "resume":
             sub.add_argument("--timeout", type=int)
             prompt = sub.add_mutually_exclusive_group()
@@ -3463,6 +3499,8 @@ def main(argv: list[str] | None = None) -> int:
             return auto_resume_record(Path(s.record), s.attempt)
         if argv[0] == "tell":
             return tell_record(s)
+        if argv[0] == "outcome":
+            return outcome_record(s)
         if argv[0] == "wait" and s.once:
             return wait_once(Path(s.record))
         return wait_record(Path(s.record))
