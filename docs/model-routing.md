@@ -210,7 +210,10 @@ was the limit, not the agent. **Exception: agy on a non-Gemini model**
 (2026-10-18): agy_acp_server strips the thought signatures Vertex Claude needs
 on every session/load, so the reopened session 400s with `thinking.signature:
 Field required`
-(https://github.com/google-antigravity/antigravity-cli/issues/1281); `resume` (manual or automatic) starts a new session instead,
+(https://github.com/google-antigravity/antigravity-cli/issues/1281; untested since f633339: acp-run now
+reopens agy with `session/resume`, which agy advertises, and a Gemini session resumed that way with nothing
+replayed; whether resume also strips Claude signatures is unknown: retest after the Claude/GPT weekly
+reset, 2026-10-24); `resume` (manual or automatic) starts a new session instead,
 with a checkpoint (git status and diff stat, the old session's last tool calls,
 the report it began), and acp-run fails a reply that is a provider error JSON
 as class `provider`. Up to 3 attempts per slice; the record's
