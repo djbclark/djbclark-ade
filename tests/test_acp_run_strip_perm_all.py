@@ -19,6 +19,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -233,15 +234,34 @@ def write_home(home: Path) -> None:
 
 
 # The end-to-end classes put a fake agent named like the real one (opencode, ...) first on PATH.
-# PATH holds only that dir and the system dirs, and uv is called by absolute path, so a real
-# opencode/agy/crush/zcode in ~/.local/bin, ~/.opencode/bin or Homebrew can never start: no
-# network, no credentials, no quota (a real opencode answered "Authentication required" here
-# on 2026-10-18 and failed 12 of these tests).
+# The child gets only that dir and the system dirs, and uv is called by absolute path, so a real
+# opencode/agy/crush/zcode can never start: no network, no credentials, no quota. Two traps
+# (2026-10-18): `uv run` prepends the dir of the interpreter it picks to the child's PATH, and for
+# Homebrew's python that dir is /opt/homebrew/bin, where a real opencode sits ahead of the fake
+# (the real one answered "Authentication required" and failed 12 tests); and the system PATH alone
+# leaves uv only /usr/bin's Python 3.9, which cannot resolve the ACP SDK. So UV_PYTHON pins a
+# managed interpreter (dir holds no agents), and assert_fakes_win probes the whole chain.
 UV = shutil.which("uv") or "uv"
 
 
-def hermetic_path(fake_bin: Path) -> str:
-    return f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin"
+def _uv_python() -> str:
+    r = subprocess.run([UV, "python", "find", ">=3.10,<3.15"], check=False, capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else sys.executable
+
+
+def hermetic_env(fake_bin: Path) -> dict[str, str]:
+    return {"PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin", "UV_PYTHON": _uv_python()}
+
+
+def assert_fakes_win(fake_bin: Path, cache: str, names: tuple[str, ...]) -> None:
+    """Resolve each agent name the way acp-run's child sees PATH (inside `uv run`): it must be the fake."""
+    env = {**os.environ, "UV_CACHE_DIR": cache, **hermetic_env(fake_bin)}
+    code = "import shutil,sys;print(*(shutil.which(n) for n in sys.argv[1:]), sep='\\n')"
+    r = subprocess.run([UV, "run", "--quiet", "--with", SDK, "python", "-I", "-c", code, *names],
+                       check=False, capture_output=True, text=True, env=env, timeout=180)
+    got = r.stdout.split()
+    want = [str(fake_bin / n) for n in names]
+    assert got == want, f"a real agent binary shadows the fake: {got} != {want}\n{r.stderr}"
 
 
 def uv_cache() -> str:
@@ -409,7 +429,7 @@ class TestStripOutsideDenyEndToEnd(unittest.TestCase):
             f.write_text(FAKE)
             f.chmod(f.stat().st_mode | stat.S_IXUSR)
         cls.cache = uv_cache()
-        assert shutil.which("opencode", path=hermetic_path(cls.bin)) == str(cls.bin / "opencode"), "a real opencode is reachable"
+        assert_fakes_win(cls.bin, cls.cache, ("opencode", "zcode-acp-server", "crush-acp", "fake-agy"))
 
     @classmethod
     @override
@@ -422,7 +442,7 @@ class TestStripOutsideDenyEndToEnd(unittest.TestCase):
         d.mkdir()
         out, log = d / "seen.json", d / "log.jsonl"
         e = {**os.environ, "HOME": str(self.home), "UV_CACHE_DIR": self.cache,
-             "PATH": hermetic_path(self.bin), "FAKE_OUT": str(out), "TMPDIR": str(d),
+             **hermetic_env(self.bin), "FAKE_OUT": str(out), "TMPDIR": str(d),
              "ACP_RUN_AGY_SERVER": str(self.bin / "fake-agy")}
         for k in ("ACP_RUN_KEEP_USER_CONFIG", "ACP_RUN_STRIP_USER_CONFIG", "OPENCODE_CONFIG",
                   "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT", "CRUSH_GLOBAL_CONFIG",
