@@ -19,7 +19,7 @@ the 1-minute load per core is at least LW_LOAD_PER_CORE (2.0). After LW_SUSTAIN 
 samples in a row it attributes the mean CPU of those samples to sessions (session-finder's fleet.py; a process belongs
 to the session whose pid is its ancestor, a daemonised one such as a Gradle daemon to the only session
 in its git repo) and, for each session above LW_MIN_CORES (1.5) cores, writes a brief, types one line
-naming it into the session (relay.py), and sends one hermes-ping. A session or repo is not told again
+naming it into the session (relay.py), and sends one hermes-ping (with a ready `acp-dispatch cursor` line for a fixer when the relay fails). A session or repo is not told again
 for LW_COOLDOWN_H (6) hours. The agent is asked to finish what is running (never to kill paid-for
 work), ask djbclark before creating a Forgejo copy, and, once CI runs there, `load-watch ci-only add`
 the repo so `bg` refuses local builds and tests in it.
@@ -229,7 +229,9 @@ Repo: `{top or '-'}`. {where}{' It is already registered CI-only, so this ran ou
    cannot move (a single small test file) goes through `~/ops/site-private/bin/bg` instead.
 4. Once a CI job runs there, register the repo so `bg` refuses heavy local runs and names your command:
    `~/src/djbclark-ade/bin/load-watch ci-only add {top or '<repo top>'} "<the command that runs it on CI>"`.
-5. Answer this brief in one line: `~/src/djbclark-ade/bin/load-watch ack {inc} "<what you did or plan>"`.
+5. If you are a fresh agent dispatched on this brief, the session that ran the work is gone: djbclark
+   dispatched you after agreeing to a Forgejo copy, so steps 2-4 are yours.
+6. Answer this brief in one line: `~/src/djbclark-ade/bin/load-watch ack {inc} "<what you did or plan>"`.
 """
 
 
@@ -251,6 +253,9 @@ def notify(inc, g, top, path, load1, ncpu, dry):
     ping = (f"djbclark-ade: load-watch {inc}: {who} used ~{g['cores']:.1f} cores at load {load1:.0f} "
             f"({cmd}); {'told it' if relayed else 'could not reach it (' + (s.get('where') or 'no channel') + ')'};"
             f" brief {path}")
+    if not relayed:  # the code-slice pick (route_agent.py plan, 2026-10-18); he runs it after a yes to a Forgejo copy
+        ping += (f"; to hand it to a fixer: ~/src/djbclark-ade/bin/acp-dispatch cursor --model default "
+                 f"-C {top or s.get('cwd') or HOME} -f {path} --detach --no-wait")
     if not dry and HERMES_PING.exists():
         subprocess.run([str(HERMES_PING), ping], capture_output=True, timeout=60)
     return relayed, ping
