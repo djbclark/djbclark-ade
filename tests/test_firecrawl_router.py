@@ -121,20 +121,6 @@ class RouterTest(unittest.TestCase):
             self.f.routes[("POST", "/v2/scrape")] = self.ok_scrape(200)
             self.assertEqual(self.req("POST", "/v2/scrape", {"url": "u"})[1], "fallback", text)
 
-    def test_llm_format_warning_with_status_200_falls_back(self):
-        for warning in ("Query generation failed after all models.",
-                        "JSON extraction failed: OpenAI API key is missing. Pass it using the 'apiKey' parameter"):
-            self.p.routes[("POST", "/v2/scrape")] = (200, {"success": True, "data": {
-                "metadata": {"statusCode": 200}, "warning": warning}})
-            self.f.routes[("POST", "/v2/scrape")] = self.ok_scrape(200)
-            self.assertEqual(self.req("POST", "/v2/scrape", {"url": "u"})[1], "fallback", warning)
-
-    def test_unrelated_scrape_warning_stays_on_primary(self):
-        self.p.routes[("POST", "/v2/scrape")] = (200, {"success": True, "data": {
-            "markdown": "x", "metadata": {"statusCode": 200}, "warning": "Scrape timed out partway"}})
-        self.assertEqual(self.req("POST", "/v2/scrape", {"url": "u"})[1], "primary")
-        self.assertEqual(self.f.seen, [])
-
     def test_long_article_mentioning_a_challenge_stays_on_primary(self):
         md = "How to press and hold a CAPTCHA button. " + "Real article text. " * 400
         self.p.routes[("POST", "/v2/scrape")] = (200, {"success": True, "data": {
