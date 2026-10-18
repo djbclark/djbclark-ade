@@ -179,7 +179,7 @@ describe('agent-radar', () => {
       '{"t": 4, "kind": "result", "data": {"exit": 0, "tool_calls": 3}}',
     ].join('\n')
     expect(logSummary(log)).toEqual(['> read_file', 'Writing the report', 'result: exit 0 · 3 tool calls'])
-    const records = `\x01/a.json\n${JSON.stringify(job())}\n\x01/b.json\n${JSON.stringify(job({ name: 'x', owner: 'other' }))}\n\x01/c.json\n{not json`
+    const records = `\x01/state/t/jobs/docs.json\n${JSON.stringify(job())}\n\x01/state/t/jobs/x.json\n${JSON.stringify(job({ name: 'x', owner: 'other' }))}\n\x01/state/t/jobs/c.json\n{not json`
     expect(parseRecords(records, 's').map(j => j.name)).toEqual(['docs'])
   })
 
@@ -382,8 +382,9 @@ describe('agent-radar', () => {
   test('the tail and record scripts drop \\001 and survive invalid UTF-8; no file can forge a block', () => {
     // A hooks module may not import node:child_process, so the scripts are checked by what they say here; the
     // behaviour (one \001 per file, invalid UTF-8 kept, rc 0) was run against a real shell when this was ported.
-    expect(TAILS_SH).toContain(`tail -c 16384 -- "$f" 2>/dev/null | LC_ALL=C tr -d '\\001'`)
-    expect(RECORDS_SH).toContain(`cat -- "$f" | LC_ALL=C tr -d '\\001'`)
+    expect(TAILS_SH).toContain(`tail -c 16384 -- "$f" 2>/dev/null &`)
+    expect(TAILS_SH).toContain(`) | LC_ALL=C tr -d '\\001'`)
+    expect(RECORDS_SH).toContain(`head -c 65536 -- "$f" 2>/dev/null | LC_ALL=C tr -d "\\001"`)
     expect(TAILS_SH).toContain(`printf '\\001%s\\n' "$f"`) // the one \001 per file that stays: the block marker
     // what is left once the scripts have run: blocks split only at the markers
     const out = '\x01/a.log\nstart\nforged line\n\x01/b.log\nfine\n'
@@ -392,7 +393,6 @@ describe('agent-radar', () => {
 
   test('job record fields are cleaned, cut and path-checked; hostile ones cannot reach the screen or tail', () => {
     const hostile = job({
-      name: `d${ESC}[31mocs\nforged line‮`,
       agent: `gr${ESC}]52;c;ZXZpbA==\x07ok`,
       model: `m${ESC}[2J\x9b1mx${'y'.repeat(500)}`,
       effort: `high\n${ESC}[0m`,
@@ -406,7 +406,7 @@ describe('agent-radar', () => {
       rearm: 'x'.repeat(10_000),
     })
     const [j] = parseRecords(`\x01/state/t/jobs/docs.json\n${JSON.stringify(hostile)}\n`, 's')
-    expect(j!.name).toBe('docs forged line')
+    expect(j!.name).toBe('docs')
     expect(j!.agent).toBe('grok')
     expect(j!.model).toHaveLength(64)
     expect(j!.model).toMatch(/^mx/)
@@ -418,11 +418,11 @@ describe('agent-radar', () => {
     expect(j!.record).toBe('/state/t/jobs/docs.json') // the record's own claim "/" is refused; the file found is used
     expect(j!.exit).toBeNull()
     expect(j!.started).toBeUndefined()
-    expect(j!.rearm).toHaveLength(4096)
-    // a record whose name is nothing but escapes is no record
-    expect(parseRecords(`\x01/a.json\n${JSON.stringify(job({ name: `${ESC}[31m\x07` }))}\n`, 's')).toEqual([])
+    expect(j!.rearm).toBeUndefined() // never kept: it only repeats the record path
+    // a record named in escapes (or whose name is not its file name) is no record
+    for (const name of [`${ESC}[31m\x07`, `d${ESC}[31mocs\nforged line‮`, 'other']) expect(parseRecords(`\x01/state/t/jobs/docs.json\n${JSON.stringify(job({ name }))}\n`, 's')).toEqual([])
     // a good record passes through unchanged
-    expect(parseRecords(`\x01/a.json\n${JSON.stringify(job())}\n`, 's')[0]).toMatchObject({ name: 'docs', agent: 'grok', model: 'grok-4.7', effort: 'high', log: '/state/t/docs.jsonl', report: '/state/t/docs-report.md', done: '/state/t/docs-report.md.done' })
+    expect(parseRecords(`\x01/state/t/jobs/docs.json\n${JSON.stringify(job())}\n`, 's')[0]).toMatchObject({ name: 'docs', agent: 'grok', model: 'grok-4.7', effort: 'high', log: '/state/t/docs.jsonl', report: '/state/t/docs-report.md', done: '/state/t/docs-report.md.done' })
   })
 
   test('a log is summarised without the agent\'s escape sequences', () => {
@@ -471,7 +471,7 @@ describe('agent-radar', () => {
 
   test('a job record with a hostile log path is shown but its log is never tailed; its text is clean', async ($, on) => {
     const { clock, state } = engine(on)
-    state.records = [job({ name: `docs${ESC}[31m`, model: `grok-4.7${ESC}]52;c;Zg\x07‮`, log: '/state/t/../../etc/shadow', report: '/state/../etc/passwd' })]
+    state.records = [job({ model: `grok-4.7${ESC}]52;c;Zg\x07‮`, log: '/state/t/../../etc/shadow', report: '/state/../etc/passwd' })]
     await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
     await $.tool.call({ tool: 'Bash', command: 'acp-dispatch grok --name docs --detach --no-wait' } as any)
     await clock.advance(5_000)
@@ -505,5 +505,82 @@ describe('agent-radar', () => {
     expect(await ui.find({ type: 'Text', text: /^done fine$/ })).toBeDefined()
     await ui.unmount()
     await band.unmount()
+  })
+
+  // ---------------------------------------------------------------- security, second round (adversary review of b2bc99d)
+
+  const rec = (over: Record<string, unknown> = {}, path = '/state/t/jobs/docs.json') => parseRecords(`\x01${path}\n${JSON.stringify(job(over))}\n`, 's')
+
+  test('a job log, report and done marker must lie inside the record\'s own <out>; the record is the file found', () => {
+    const [ok] = rec()
+    expect(ok).toMatchObject({ record: '/state/t/jobs/docs.json', log: '/state/t/docs.jsonl', report: '/state/t/docs-report.md', done: '/state/t/docs-report.md.done' })
+    // a device, another job's directory, the root, a sibling out dir: none is tailed or shown
+    for (const log of ['/dev/zero', '/dev/tty', '/etc/shadow', '/state/other/docs.jsonl', '/state/docs.jsonl', '/state/t/../other/x.jsonl', '/state/tt/docs.jsonl', '/', 'docs.jsonl', '/state/t/sp ace.jsonl']) {
+      const [j] = rec({ log, report: log, done: `${log}.done` })
+      expect(j!.log).toBeUndefined()
+      expect(j!.report).toBeUndefined()
+      expect(j!.done).toBeUndefined()
+    }
+    expect(rec({ done: '/state/t/docs-report.md' })[0]!.done).toBeUndefined() // not a .done marker
+    expect(rec({ record: '/dev/zero' })[0]!.record).toBe('/state/t/jobs/docs.json') // a record cannot name another
+    // where the record was found must look like <out>/jobs/<name>.json, with the name the file's
+    expect(rec({}, '/state/t/docs.json')).toEqual([])
+    expect(rec({}, '/state/t/jobs/other.json')).toEqual([])
+    expect(rec({}, '/jobs/docs.json')).toEqual([]) // <out> would be the root
+    expect(rec({}, '/state/t/jobs/do cs.json')).toEqual([])
+    expect(rec({}, '/state/t/jobs/docs.json\nsecret')).toEqual([])
+  })
+
+  test('a job log outside its out dir, or a device, is never handed to the tail script', async ($, on) => {
+    const { clock, state } = engine(on)
+    state.records = [job({ log: '/dev/zero' }), job({ name: 'b', record: '/state/t/jobs/b.json', log: '/state/other/b.jsonl' }), job({ name: 'c', record: '/state/t/jobs/c.json', log: '/state/t/c.jsonl' })]
+    state.tails['/state/t/c.jsonl'] = '{"t": 1, "kind": "update", "data": {"sessionUpdate": "tool_call", "title": "Read c.md"}}\n'
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' } as any)
+    await $.tool.call({ tool: 'Bash', command: 'acp-dispatch grok --name docs --detach --no-wait' } as any)
+    await clock.advance(5_000)
+    const band = await $.ui.mount({ plugin: 'agent-radar', surface: 'terminal', ...BAND } as any)
+    await eventually(() => band.find({ type: 'Text', text: /> Read c\.md/ }))
+    expect(await band.find({ type: 'Text', text: /> Read c\.md/ })).toBeDefined() // the one inside its out dir is followed
+    await clock.advance(5_000)
+    await settle()
+    const handed = state.runs.filter(a => a[2]?.includes('radar:tails')).flat()
+    expect(handed).toContain('/state/t/c.jsonl')
+    expect(handed.some(a => a.includes('/dev/zero') || a.includes('/state/other'))).toBe(false)
+    await band.unmount()
+  })
+
+  test('the tail script tails regular files only, under a watchdog that never signals a process group', () => {
+    expect(TAILS_SH).toContain('[ -f "$f" ] || continue') // no FIFO, no device (/dev/zero), no symlink to either
+    expect(TAILS_SH).toContain('( sleep 3; kill "$t" 2>/dev/null ) >/dev/null 2>&1 &') // a swapped-in FIFO cannot outlive the poll
+    expect(TAILS_SH).toContain('wait "$t"; kill "$w"')
+    expect(TAILS_SH).not.toMatch(/kill\s+(-|0)/) // kill 0 / kill -N would hit Claude Code's own process group
+    expect(TAILS_SH.indexOf('printf')).toBeLessThan(TAILS_SH.indexOf('[ -f')) // the header stays, so an ended job still gets its one last read
+  })
+
+  test('the records script is bounded, keeps odd file names whole and refuses a relative root', () => {
+    expect(RECORDS_SH).toContain('case $root in /*) ;; *) exit 0;; esac')
+    expect(RECORDS_SH).toContain('-size -64k')
+    expect(RECORDS_SH).toContain('head -c 65536')
+    expect(RECORDS_SH).toContain("-exec sh -c 'sid=$1; shift; for f; do")
+    expect(RECORDS_SH).not.toContain('read -r') // no splitting of a name at a newline
+    expect(RECORDS_SH).not.toMatch(/\bcat\b/)
+    expect(RECORDS_SH).toContain('LC_ALL=C tr -d "\\001"')
+  })
+
+  test('a job matches a command by identity only; a forged record cannot hide shells', () => {
+    const [j] = rec({ record: ' ', rearm: ' ' })
+    for (const cmd of ['sleep 100', 'curl -s http://x/ & wait', 'echo a b', '/state/t/jobs/docs.json.bak', '/x/state/t/jobs/docs.json', 'cat /state/t/jobs/docs.jsonl']) expect(jobMatches(cmd, j!)).toBe(false)
+    expect(jobMatches("/b/acp-dispatch wait '/state/t/jobs/docs.json' && /b/acp-dispatch check /state/t/jobs/docs.json", j!)).toBe(true)
+    expect(jobMatches('until [ -e /state/t/docs-report.md.done ]; do sleep 10; done', j!)).toBe(true)
+    expect(jobMatches('acp-dispatch codex --name docs --detach', j!)).toBe(true)
+    // hand-built jobs: a short or empty string matches nothing
+    for (const bad of [' ', '/', '/tmp', 'x', '']) expect(jobMatches('sleep 100 && echo y z', { name: 'n', record: bad, done: bad })).toBe(false)
+  })
+
+  test('a carriage return in a log line cannot move the cursor', () => {
+    const log = `{"t": 1, "kind": "update", "data": {"sessionUpdate": "agent_message_chunk", "content": {"text": "ok\\r✓ all tests passed\\r\\nnext\\rline"}}}`
+    const lines = logSummary(log)
+    expect(lines).toEqual(['ok', '✓ all tests passed', 'next', 'line'])
+    for (const l of lines) expect(l).not.toMatch(/[\r\n]/)
   })
 })

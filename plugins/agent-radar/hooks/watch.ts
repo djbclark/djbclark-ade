@@ -63,11 +63,21 @@ export function baseName(path: string) {
   return path.slice(path.lastIndexOf('/') + 1)
 }
 
+// Does the command name this path as a whole word (not inside a longer path or file name)?
+function mentions(command: string, p: string | undefined): boolean {
+  if (!p) return false
+  for (let i = command.indexOf(p); i >= 0; i = command.indexOf(p, i + 1)) {
+    if (!/[\w./~-]/.test(command[i - 1] ?? ' ') && !/[\w./-]/.test(command[i + p.length] ?? ' ')) return true
+  }
+  return false
+}
+
 // Is this shell command the waiter or the launcher of that job? Then the job is the one line.
-export function jobMatches(command: string, job: Pick<AcpJob, 'name' | 'record' | 'done' | 'rearm'>): boolean {
-  if (job.record && command.includes(job.record)) return true
-  if (job.done && command.includes(job.done)) return true
-  if (job.rearm && command.includes(job.rearm)) return true
+// By identity only: the record path (what `rearm` runs on) or the .done marker named as a word, or the
+// launcher's `--name`. `record` and `done` are the paths the scan found and checked (parseRecords), never a
+// short string a record could choose to match every command.
+export function jobMatches(command: string, job: Pick<AcpJob, 'name' | 'record' | 'done'>): boolean {
+  if (mentions(command, job.record) || mentions(command, job.done)) return true
   const name = /acp-dispatch\b[^;&|]*?--name[ =]["']?([\w.-]+)/.exec(command.slice(0, MAX_COMMAND))?.[1] // capped: the lazy scan is quadratic
   return name !== undefined && name === job.name
 }
@@ -101,7 +111,7 @@ export function logSummary(text: string, n = 8): string[] {
   const out: string[] = []
   let words = ''
   const flush = () => {
-    if (words.trim()) out.push(...clean(words).split(/\n+/).map(l => l.trim()).filter(Boolean).map(l => l.slice(0, 200)))
+    if (words.trim()) out.push(...clean(words).split(/[\r\n]+/).map(l => l.trim()).filter(Boolean).map(l => l.slice(0, 200)))
     words = ''
   }
   for (const raw of text.split('\n')) {
@@ -131,18 +141,30 @@ export function logSummary(text: string, n = 8): string[] {
 // The shell script that lists this session's job records: only records that name the session and
 // changed in the last 3 days, each after a \001 line with its path. One process for all of them.
 // A \001 inside a file is dropped (LC_ALL=C: BSD tr rejects invalid UTF-8), so no file can forge a block.
+// A record is read only if it is a regular file under 64 KiB, and at most 64 KiB of it; `-exec sh -c 'for f'`
+// keeps a file name with a newline in one piece. A relative or option-like $root (ACP_DISPATCH_STATE) is refused.
 export const RECORDS_SH = `# radar:records
 root=$1; sid=$2
+case $root in /*) ;; *) exit 0;; esac
 [ -d "$root" ] || exit 0
-find "$root" -maxdepth 3 -type f -path '*/jobs/*.json' -mtime -3 -exec grep -lF -- "$sid" {} + 2>/dev/null |
-  while IFS= read -r f; do printf '\\001%s\\n' "$f"; cat -- "$f" | LC_ALL=C tr -d '\\001'; done
+find "$root" -maxdepth 3 -type f -path '*/jobs/*.json' -mtime -3 -size -64k -exec sh -c 'sid=$1; shift; for f; do head -c 65536 -- "$f" 2>/dev/null | grep -qF -- "$sid" || continue; printf "\\001%s\\n" "$f"; head -c 65536 -- "$f" 2>/dev/null | LC_ALL=C tr -d "\\001"; done' sh "$sid" {} + 2>/dev/null
 exit 0
 `
 
 // The tail of each file named, each after a \001 line with its path: one process for all of them.
 // A \001 inside a tail is dropped (see RECORDS_SH), so a log cannot forge the tail of another file.
+// Only a regular file is tailed (not a FIFO or a device such as /dev/zero, which tail would never finish
+// reading), and the tail is killed after 3 s anyway, in case a file is swapped for a FIFO between the check and
+// the open. The watchdog kills that one tail (never the process group) and has its output closed, so it does
+// not hold the pipe to tr open.
 export const TAILS_SH = `# radar:tails
-for f in "$@"; do printf '\\001%s\\n' "$f"; tail -c 16384 -- "$f" 2>/dev/null | LC_ALL=C tr -d '\\001'; done
+for f in "$@"; do
+  printf '\\001%s\\n' "$f"
+  [ -f "$f" ] || continue
+  ( tail -c 16384 -- "$f" 2>/dev/null & t=$!
+    ( sleep 3; kill "$t" 2>/dev/null ) >/dev/null 2>&1 & w=$!
+    wait "$t"; kill "$w" 2>/dev/null ) | LC_ALL=C tr -d '\\001'
+done
 exit 0
 `
 
@@ -158,8 +180,9 @@ export function blocks(stdout: string): { path: string; body: string }[] {
 }
 
 // The job records this session owns. Anything that is no JSON object with a name is skipped.
-// Every field is external data: text is cleaned and cut, paths are kept only if `isSafePath` (they are
-// read by tail and shown), numbers only if finite.
+// Every field is external data: text is cleaned and cut, paths are kept only if `isSafePath` and inside the
+// record's own <out> (the log is read by tail, the others are shown or matched), numbers only if finite.
+// `rearm` is not kept: it only repeats the record path.
 export function parseRecords(stdout: string, sessionId: string): AcpJob[] {
   const jobs: AcpJob[] = []
   for (const { path, body } of blocks(stdout)) {
@@ -168,6 +191,12 @@ export function parseRecords(stdout: string, sessionId: string): AcpJob[] {
       if (!r || typeof r.name !== 'string' || r.owner !== sessionId || r.status === 'dry-run') continue
       const name = oneLine(r.name, 100)
       if (!name) continue
+      // acp-dispatch writes <out>/jobs/<name>.json and the report, marker and log into <out>: so the record is
+      // the file the scan found (a record cannot name another), and every other path must be inside that <out>.
+      const dir = path.slice(0, path.lastIndexOf('/'))
+      const out = dir.slice(0, -'/jobs'.length)
+      if (!isSafePath(path) || !dir.endsWith('/jobs') || out.length < 2 || baseName(path) !== `${r.name}.json`) continue
+      const inside = (p: unknown): p is string => isSafePath(p) && p.startsWith(`${out}/`)
       const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
       const field = (v: unknown, max = 64) => oneLine(v, max) || undefined
       jobs.push({
@@ -177,11 +206,10 @@ export function parseRecords(stdout: string, sessionId: string): AcpJob[] {
         effort: field(r.effort, 32) ?? null,
         status: field(r.status, 32) ?? 'running',
         exit: num(r.exit) ?? null,
-        report: isSafePath(r.report) ? r.report : undefined,
-        log: isSafePath(r.log) ? r.log : undefined,
-        record: isSafePath(r.record) ? r.record : isSafePath(path) ? path : undefined,
-        done: isSafePath(r.done) ? r.done : undefined,
-        rearm: typeof r.rearm === 'string' ? r.rearm.slice(0, MAX_COMMAND) : undefined, // only compared with commands, never shown
+        report: inside(r.report) ? r.report : undefined,
+        log: inside(r.log) ? r.log : undefined,
+        record: path,
+        done: inside(r.done) && r.done.endsWith('.done') ? r.done : undefined,
         started: num(r.started),
         finished: num(r.finished) ?? null,
       })

@@ -46,7 +46,7 @@ or ended after the session started, are shown.
 ## Fork
 
 Forked from `agent-radar` 0.1.3 by Hamza Zafar (MIT), <https://github.com/hamzafer/claude-code-mods>
-(`mods/agent-radar`). Version here: `0.2.0-djb.2`. Upstream's license text and author are kept
+(`mods/agent-radar`). Version here: `0.2.0-djb.3`. Upstream's license text and author are kept
 ([LICENSE](LICENSE), `plugin.json`).
 
 What changed:
@@ -57,8 +57,8 @@ What changed:
 2. `hooks/watch.ts` (new): the pure parts (agent CLI and model from a command, output path from the tool
    result, job record parsing, log summary, the two poll scripts).
 3. `types/index.d.ts`: `kind`, `AcpJob` and the shell and job fields on `RadarAgent`.
-4. `tests/agent-radar.test.tsx`: upstream's three tests plus eighteen for the above and the hardening below.
-5. Hardening (`-djb.2`), the behaviour of the fixes from the adversary review of upstream's background-shell PR
+4. `tests/agent-radar.test.tsx`: upstream's three tests plus twenty-four for the above and the hardening below.
+5. Hardening (`-djb.2`, `-djb.3`), the behaviour of the fixes from the adversary review of upstream's background-shell PR
    (<https://github.com/hamzafer/claude-code-mods/pull/129>), applied to every place the fork shows or reads
    external data, the `acp-dispatch` job records included, which upstream lacks:
    * Escape sequences are stripped from everything shown (CSI, OSC such as the clipboard write, DCS, the 8-bit
@@ -74,6 +74,14 @@ What changed:
    * The tail and record scripts pipe through `LC_ALL=C tr -d '\001'`, so no log or record can forge another
      file's block (`LC_ALL=C` because BSD `tr` rejects invalid UTF-8).
    * Job record numbers must be finite; text fields are cut (name 100, others 64) and an empty name drops the record.
+   * `-djb.3` (adversary review of `-djb.2`): a record is accepted only at `<out>/jobs/<name>.json`, and its
+     `log`, `report` and `done` must lie inside that `<out>` (`done` ends in `.done`); `record` is the file the
+     scan found, whatever the record claims. The tail script tails regular files only (no FIFO, no device such as
+     `/dev/zero`) and kills each tail after 3 s, so a dispatched agent cannot make the radar leak a process. A job
+     is matched to a shell by identity (the record path or `.done` marker as a whole word, or `--name`), never by a
+     short `includes()`; `rearm` is not kept. A carriage return in a log line is dropped. The record scan reads
+     only regular files under 64 KiB, at most 64 KiB of each, keeps a file name with a newline whole, and refuses
+     a relative `ACP_DISPATCH_STATE`.
 
 The generic part (background shells) is meant for upstream; the `acp-dispatch` part is specific to this
 toolchain and is not.
