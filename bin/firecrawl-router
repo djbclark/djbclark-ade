@@ -190,11 +190,13 @@ SIPB_CHUNK_CHARS = int(16000 * CHARS_PER_TOKEN)      # one chunk of a map-reduce
 BIG_ONE_SHOT_CHARS = 600_000                         # ~180k tokens; gemini's window is 1M
 BIG_CHUNK_CHARS = 400_000
 TRUNCATION_CHARS_PER_TOKEN = 5.0  # more chars per reported prompt token than this = cut short
+TRUNCATION_MIN_CHARS = 40_000     # a smaller prompt is never cut (repetitive text tokenizes at 5+ chars/token)
+TRUNCATION_CAP_TOKENS = 16386     # ollama halves a 32768 window and reports 16386 (ollama/ollama#17427)
 LLM_MAX_TOKENS = 4096
 LLM_NONE = "NONE"
 LLM_SYS = "You answer questions about a web page. Use only the page content provided. Be concise."
 LLM_QUOTE_SYS = ("Reply with ONE verbatim quote from the page that answers the question. "
-                 "Output only the quote, nothing else.")
+                 "Output only the quote, nothing else. If nothing on the page answers it, reply exactly NONE.")
 LLM_ABSTAIN = "The page does not contain an answer to this question."
 
 
@@ -275,26 +277,35 @@ class Extractor:
         self.rungs = rungs
         self.deadline = deadline
         self.call_timeout = call_timeout
+        self.log = sys.stderr
+        self._tl = threading.local()  # t_end of the scrape being served on this thread
 
     def chat(self, rung: Rung, system: str, user: str, schema=None, expect_json=False) -> str:
+        if time.monotonic() > getattr(self._tl, "t_end", float("inf")):
+            raise LLMError("deadline")
         body = {"model": rung.model, "temperature": 0, "max_tokens": LLM_MAX_TOKENS,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
         if expect_json:
             body["response_format"] = ({"type": "json_schema", "json_schema": {"name": "extract", "strict": True, "schema": schema}}
                                        if isinstance(schema, dict) else {"type": "json_object"})
-        d = self._post(rung, body)
-        if d is None and expect_json:  # server refused response_format: ask in the prompt alone
-            body.pop("response_format")
+        for attempt in (1, 2):  # SIPB now and then returns an empty reply (2026-10-18): ask once more
             d = self._post(rung, body)
-        if d is None:
-            raise LLMError("HTTP 4xx")
-        choice = (d.get("choices") or [{}])[0]
-        text = ((choice.get("message") or {}).get("content") or "").strip()
+            if d is None and expect_json:  # server refused response_format: ask in the prompt alone
+                body.pop("response_format")
+                d = self._post(rung, body)
+            if d is None:
+                raise LLMError("HTTP 4xx")
+            choice = (d.get("choices") or [{}])[0]
+            text = ((choice.get("message") or {}).get("content") or "").strip()
+            if text:
+                break
         if not text:
             raise LLMError(f"empty reply (finish_reason={choice.get('finish_reason')})")
         ptok = (d.get("usage") or {}).get("prompt_tokens")
-        if rung.check_truncation and isinstance(ptok, int) and ptok * TRUNCATION_CHARS_PER_TOKEN < len(user) + len(system):
-            raise LLMError(f"prompt truncated by the server ({ptok} tokens for {len(user) + len(system)} chars)")
+        sent = len(user) + len(system)
+        if rung.check_truncation and isinstance(ptok, int) and sent >= TRUNCATION_MIN_CHARS \
+                and (ptok * TRUNCATION_CHARS_PER_TOKEN < sent or ptok == TRUNCATION_CAP_TOKENS):
+            raise LLMError(f"prompt truncated by the server ({ptok} tokens for {sent} chars)")
         return text
 
     def _post(self, rung: Rung, body: dict):
@@ -329,8 +340,9 @@ class Extractor:
             sys_ = "Extract data from the page as JSON. Output only the JSON." + (
                 f"\nSchema: {json.dumps(schema)}" if schema else "")
             return parse_json_text(self.chat(rung, sys_, f"{q}\n\nPage content:\n{md}".strip(), schema, True))
-        sys_ = LLM_QUOTE_SYS if want["mode"] == "directQuote" else LLM_SYS
-        return self.chat(rung, sys_, f"Page content:\n{md}\n\nQuestion: {q}")
+        quote = want["mode"] == "directQuote"
+        out = self.chat(rung, LLM_QUOTE_SYS if quote else LLM_SYS, f"Page content:\n{md}\n\nQuestion: {q}")
+        return LLM_ABSTAIN if quote and out.strip().strip('."\'') == LLM_NONE else out
 
     def _map_reduce(self, rung, want, chunks):
         q = want["prompt"]
@@ -366,6 +378,7 @@ class Extractor:
         """(fields to merge into data, name of the rung(s) that answered, warning or '')."""
         fields, used, errors = {}, [], []
         t_end = time.monotonic() + self.deadline
+        self._tl.t_end = t_end
         for want in wants:
             key = "json" if want["kind"] == "json" else "answer"
             for rung in self.rungs:
@@ -376,6 +389,7 @@ class Extractor:
                     value, n = self.answer(rung, want, md)
                 except LLMError as e:
                     errors.append(f"{rung.name}: {e}")
+                    print(f"  llm rung {rung.name} failed: {e}", file=self.log, flush=True)
                     continue
                 if want["kind"] == "query" and want["mode"] == "directQuote" and value != LLM_ABSTAIN \
                         and norm_text(value).strip("\"'“” ") not in norm_text(md):
@@ -409,6 +423,8 @@ class Router:
     def __init__(self, primary: Backend, fallback: Backend | None, timeout: float,
                  token: str = "", log=sys.stderr, extractor: Extractor | None = None):
         self.extractor = extractor
+        if extractor:
+            extractor.log = log
         self.primary = primary
         self.fallback = fallback
         self.timeout = timeout
@@ -483,6 +499,12 @@ class Router:
         out = reply.json()
         data = out.get("data") if isinstance(out, dict) else None
         md = data.get("markdown") if isinstance(data, dict) else None
+        if reply.status == 200 and isinstance(data, dict) and isinstance(md, str) and not md.strip():
+            data["warning"] = (data.get("warning", "") + " The page has no content, so there is nothing to extract from.").strip()
+            reply.body = json.dumps(out).encode()
+            reply.headers = {k: v for k, v in reply.headers.items() if k.lower() != "content-length"}
+            reply.headers["X-Firecrawl-LLM"] = "none"
+            return reply, backend
         if reply.status != 200 or not isinstance(md, str) or not md.strip():
             return reply, backend
         fields, used, warning = self.extractor.run(wants, md)

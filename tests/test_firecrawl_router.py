@@ -6,6 +6,7 @@ import io
 import json
 import sys
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -305,11 +306,72 @@ class LLMFormatsTest(unittest.TestCase):
         self.assertRegex(r.headers["X-Firecrawl-LLM"], r"^sipbx\d+$")
 
     def test_truncated_prompt_is_detected_and_falls_to_next_rung(self):
-        self.page = "word " * 400
+        self.page = "word " * 10_000
         self.llm_a.reply = lambda b, p: llm_ok("wrong, saw 10 tokens", ptok=10)
-        r, doc = self.scrape(self.router(trunc=True), {"url": "u", "formats": [{"type": "query", "prompt": "q"}]})
+        r, doc = self.scrape(self.router(one_shot=10**6, trunc=True), {"url": "u", "formats": [{"type": "query", "prompt": "q"}]})
         self.assertEqual(doc["data"]["answer"], "lean (b)")
         self.assertEqual(r.headers["X-Firecrawl-LLM"], "big")
+
+    def test_small_prompt_is_never_called_truncated(self):
+        # repetitive text tokenizes at 5+ chars per token (2026-10-18: 1883 tokens for 9502 chars)
+        self.llm_a.reply = lambda b, p: llm_ok("lean", ptok=10)
+        r, doc = self.scrape(self.router(trunc=True), {"url": "u", "formats": [{"type": "query", "prompt": "q"}]})
+        self.assertEqual(r.headers["X-Firecrawl-LLM"], "sipb")
+
+    def test_the_16386_cap_signature_is_truncation_even_for_dense_text(self):
+        self.page = "word " * 10_000  # 50k chars / 16386 = 3.05 chars per token: the ratio rule alone misses it
+        self.llm_a.reply = lambda b, p: llm_ok("start lost", ptok=fr.TRUNCATION_CAP_TOKENS)
+        r, doc = self.scrape(self.router(one_shot=10**6, trunc=True), {"url": "u", "formats": [{"type": "query", "prompt": "q"}]})
+        self.assertEqual(r.headers["X-Firecrawl-LLM"], "big")
+
+    def test_empty_page_warns_and_calls_no_model(self):
+        self.page = "  \n"
+        r, doc = self.scrape(self.router(), {"url": "u", "formats": [{"type": "query", "prompt": "q"}]})
+        self.assertEqual(r.status, 200)
+        self.assertIn("no content", doc["data"]["warning"])
+        self.assertEqual(r.headers["X-Firecrawl-LLM"], "none")
+        self.assertEqual(self.llm_a.bodies + self.llm_b.bodies, [])
+
+    def test_deadline_stops_a_chunk_loop_midway(self):
+        self.page = "\n\n".join(f"Section {i}: filler text here." for i in range(60))
+
+        def slow(b, p):
+            time.sleep(0.3)
+            return llm_ok("NONE")
+        self.llm_a.reply = slow
+        router = self.router(one_shot=300, chunk=250)
+        router.extractor.deadline = 0.8
+        r, doc = self.scrape(router, {"url": "u", "formats": [{"type": "query", "prompt": "q"}]})
+        self.assertLess(len(self.llm_a.bodies), 10)
+        self.assertIn("deadline", doc["data"]["warning"])
+        self.assertEqual(self.llm_b.bodies, [])
+
+    def test_direct_quote_none_is_an_abstain_not_a_failure(self):
+        self.llm_a.reply = lambda b, p: llm_ok("NONE")
+        r, doc = self.scrape(self.router(), {"url": "u", "formats": [{"type": "query", "prompt": "q", "mode": "directQuote"}]})
+        self.assertEqual(doc["data"]["answer"], fr.LLM_ABSTAIN)
+        self.assertEqual(r.headers["X-Firecrawl-LLM"], "sipb")
+        self.assertEqual(self.llm_b.bodies, [])
+
+    def test_one_empty_reply_is_retried_on_the_same_rung(self):
+        replies = iter(["", "lean"])
+        self.llm_a.reply = lambda b, p: llm_ok(next(replies))
+        r, doc = self.scrape(self.router(), {"url": "u", "formats": [{"type": "query", "prompt": "q"}]})
+        self.assertEqual(doc["data"]["answer"], "lean")
+        self.assertEqual(r.headers["X-Firecrawl-LLM"], "sipb")
+        self.assertEqual(len(self.llm_a.bodies), 2)
+
+    def test_two_empty_replies_fall_to_the_next_rung(self):
+        self.llm_a.reply = lambda b, p: llm_ok("")
+        r, doc = self.scrape(self.router(), {"url": "u", "formats": [{"type": "query", "prompt": "q"}]})
+        self.assertEqual(r.headers["X-Firecrawl-LLM"], "big")
+        self.assertEqual(len(self.llm_a.bodies), 2)
+
+    def test_a_failed_rung_is_logged_even_when_a_later_one_answers(self):
+        self.llm_a.reply = lambda b, p: (500, {"error": "down"})
+        router = self.router()
+        self.scrape(router, {"url": "u", "formats": [{"type": "query", "prompt": "q"}]})
+        self.assertIn("llm rung sipb failed: HTTP 500", router.log.getvalue())
 
     def test_every_rung_failing_returns_the_markdown_with_a_warning(self):
         self.llm_a.reply = self.llm_b.reply = lambda b, p: (500, {"error": "down"})
