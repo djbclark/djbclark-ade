@@ -31,6 +31,12 @@ AGY_STDERR = (
     "google.antigravity.types.AntigravityExecutionError: Error 429, Message: Individual quota "
     "reached. Resets in 2h47m44s., Status: RESOURCE_EXHAUSTED\n"
 )
+# agy 2026-10-18: the run ended on the weekly cap while the reply was progress text
+AGY_RUN_FAILED = (
+    "harness stderr: Agent run failed: executor run failed: Error 429, Message: Individual quota "
+    "reached. Please upgrade your subscription to increase your limits. Resets in 148h22m36s., "
+    "Status: RESOURCE_EXHAUSTED, Details: [map[@type:type.googleapis.com/google.rpc.ErrorInfo]]\n"
+)
 LONG_REPORT = (
     "STATUS: done\n\nThe wedge grants are held per UID in a rate limit table; when the quota for a "
     "caller is exceeded the service answers with a usage limit error and the manager shows it.\n\n"
@@ -65,6 +71,10 @@ CASES = {
         ('{\\"type\\":\\"error\\",\\"error\\":{\\"type\\":\\"invalid_request_error\\",\\"message\\":'
          '\\"messages.1.content.0.thinking.signature: Field required\\"}}'), 0, ""],
     "error_json_reply_unescaped": ['{"type": "error", "error": {"type": "overloaded_error"}}', 0, ""],
+    "agy_run_failed_quota": [
+        "Now the README paragraph.Final test run, ruff, and a check that no format hunks remain.",
+        42, AGY_RUN_FAILED],
+    "agy_run_failed_after_done": [LONG_REPORT, 12, AGY_RUN_FAILED],
     "report_about_quotas": [LONG_REPORT, 12, ""],
     "report_about_quotas_with_429_in_stderr": [LONG_REPORT, 12, AGY_STDERR],
     "last_paragraph_mentions_limits_no_429": [
@@ -139,6 +149,14 @@ class TestReplyFailure(unittest.TestCase):
         res = self.results["error_json_reply_unescaped"]
         assert res is not None
         self.assertEqual(res[0], "transient")
+
+    def test_agy_run_failure_in_stderr_fails_a_progress_reply(self):
+        res = self.results["agy_run_failed_quota"]
+        assert res is not None
+        self.assertEqual(res[0], "quota")
+        self.assertIn("148h22m36s", res[1])
+        self.assertIn("edits may be present", res[1])
+        self.assertIsNone(self.results["agy_run_failed_after_done"])
 
     def test_model_refusal_is_class_refused(self):
         for name in ("refusal", "refusal_i_must_decline", "refusal_curly", "refusal_cant_help", "refusal_wont_be_able"):

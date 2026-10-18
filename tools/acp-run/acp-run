@@ -166,9 +166,10 @@ state working/idle as source acp-run with a resume command
 0.9.2, which rejects it), and releases the pane on exit, so `herdr agent prompt
 <pane> TEXT` and `herdr agent list` work. The agent process gets no
 HERDR_PANE_ID/HERDR_ENV, so its own herdr hooks do not report the pane too.
---resume ID reopens an ACP session with session/load (history replayed to the
-log only) or session/resume, whichever the agent advertises; exit 2 if it
-advertises neither.
+--resume ID reopens an ACP session with session/resume (no replay) or, when
+the agent has no resume or it fails with -32601/-32602, session/load (history
+replayed to the log only); exit 2 if it advertises neither, or if the agent has
+no such session. session/close ends every run when advertised.
 --session-id UUID (claude): the conversation id the claude CLI runs as when
 acp-run falls back to it after an ACP handshake hang (`claude -p
 --session-id`); without it the fallback picks a fresh UUID. Either way the
@@ -1464,6 +1465,13 @@ MODEL_REFUSALS = [
 # server logs "Status: RESOURCE_EXHAUSTED"). With that, a last paragraph that
 # merely mentions a quota/auth/plan problem is the refusal too.
 STDERR_REFUSAL = r"resource[ _-]?exhausted|\b429\b"
+# agy's server ending the whole run on a provider error (2026-10-18: "Agent run failed:
+# executor run failed: Error 429, Message: Individual quota reached. ... Resets in
+# 148h22m36s., Status: RESOURCE_EXHAUSTED" while the reply was progress text with stop
+# end_turn and no quota wording). The run was cut off whatever the reply says.
+AGENT_RUN_FAILED = (
+    r"Agent run failed: executor run failed: Error (\d{3}), Message: (.{0,400}?)(?:, Status: (\w+)|$)"
+)
 # The last non-empty line of a reply that is an error report from the provider
 # or transport (cursor: "Error: RetriableError: ...", claude: "API Error: 529"),
 # or the provider's raw error JSON relayed as the reply (agy, 2026-10-18: a resumed
@@ -1537,7 +1545,8 @@ def classify(text):
 def reply_failure(text, tools, stderr=""):
     """(class, message) when a reply is a provider refusal, ends in a refusal
     paragraph or a provider error line, else None. stderr is the agent's stderr
-    since the prompt was sent: a 429 there backs a quota-looking last paragraph."""
+    since the prompt was sent: a 429 there backs a quota-looking last paragraph, and an
+    agy run failure there (AGENT_RUN_FAILED) fails any reply not ending in DONE."""
     s = (text or "").strip()
     if not s:
         return None
@@ -1563,6 +1572,14 @@ def reply_failure(text, tools, stderr=""):
                 f"{FAILURE_TEXT[cls]}: reply truncated; edits may be present;"
                 f" it ended with {last[:200]!r}"
             )
+    run_failed = re.search(AGENT_RUN_FAILED, stderr or "", re.MULTILINE)
+    if run_failed and lines[-1] != "DONE":
+        err = " ".join(x for x in run_failed.groups() if x)
+        cls = classify(err) or "provider"
+        return cls, (
+            f"{FAILURE_TEXT[cls]}: the agent's run failed; edits may be present;"
+            f" Error {err[:200]}"
+        )
     if re.match(TAIL_ERROR, lines[-1], re.IGNORECASE):
         cls = classify(lines[-1]) or "provider"
         msg = f"{FAILURE_TEXT[cls]}: {lines[-1][:200]}"
@@ -1647,6 +1664,9 @@ class RunClient(Client):
         # replay is logged but neither printed nor counted, except as messages.
         self.live, self.thinking = live, thinking
         self.replaying, self.replayed, self._last_msg = False, 0, None
+        # the sessionId of each update seen while replaying (--resume): one
+        # that is not the requested id means the agent opened another session
+        self.replay_sids = set()
         self.titles, self.bol = {}, True
         # the last delivery-check failure of this prompt (kept when a retry
         # dies), and an operator cancel that stops further retries
@@ -1773,6 +1793,7 @@ class RunClient(Client):
         self.rec("update", dump(update))
         kind = getattr(update, "session_update", "")
         if self.replaying:
+            self.replay_sids.add(session_id)
             if kind in ("user_message_chunk", "agent_message_chunk"):
                 if kind != self._last_msg:
                     self.replayed += 1
@@ -2980,8 +3001,9 @@ def can_additional_directories(init):
 
 
 async def open_session(a, conn, init, client, root, timeout):
-    """session/new, or with --resume session/load (history replayed to the log
-    only) or session/resume, whichever the agent advertises."""
+    """session/new, or with --resume session/resume (preferred: no replay) or
+    session/load (history replayed to the log only), whichever the agent
+    advertises; load is the fallback when resume fails with -32601/-32602."""
     add_dirs = [str(Path(d).expanduser().resolve()) for d in getattr(a, "add_dir", [])]
     if not a.resume:
         kw = {}
@@ -3020,43 +3042,144 @@ async def open_session(a, conn, init, client, root, timeout):
         return sess
     caps = init.agent_capabilities
     scaps = caps.session_capabilities if caps else None
-    client.replaying = True
-    try:
-        if caps and caps.load_session:
-            how = "load_session"
-            resp = await asyncio.wait_for(
-                conn.load_session(cwd=str(root), session_id=a.resume, mcp_servers=[]),
-                max(timeout, 120),  # a long history takes a while to replay
-            )
-        elif getattr(scaps, "resume", None) is not None:
-            how = "resume_session"
-            resp = await asyncio.wait_for(
-                conn.resume_session(cwd=str(root), session_id=a.resume, mcp_servers=[]),
-                timeout,
-            )
+    can_load = bool(caps and caps.load_session)
+    can_res = getattr(scaps, "resume", None) is not None
+    if not (can_load or can_res):
+        print(
+            f"acp-run: {a.agent} cannot resume a session: its initialize"
+            " response advertises neither loadSession nor"
+            " sessionCapabilities.resume (see --info)",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    # The spec drops extra roots a load/resume does not name again, and lets a
+    # client send them only when the agent advertises additionalDirectories.
+    kw = {}
+    if add_dirs:
+        if can_additional_directories(init):
+            kw["additional_directories"] = add_dirs
         else:
             print(
-                f"acp-run: {a.agent} cannot resume a session: its initialize"
-                " response advertises neither loadSession nor"
-                " sessionCapabilities.resume (see --info)",
+                f"acp-run: {a.agent} does not advertise additionalDirectories;"
+                f" --add-dir not sent on resume: {' '.join(add_dirs)}",
                 file=sys.stderr,
             )
-            raise SystemExit(2)
+            client.rec("additional_directories_not_sent", {"dirs": add_dirs})
+    client.replaying = True
+    try:
+        # session/resume first: it restores the session without replaying the
+        # whole history, which session/load must do (ACP session-resume RFD).
+        how = "resume_session" if can_res else "load_session"
+        try:
+            if can_res:
+                try:
+                    resp = await asyncio.wait_for(
+                        conn.resume_session(
+                            cwd=str(root), session_id=a.resume, mcp_servers=[], **kw
+                        ),
+                        timeout,
+                    )
+                except RequestError as e:
+                    if (
+                        not can_load
+                        or session_not_found(e)
+                        or getattr(e, "code", None) not in (-32601, -32602)
+                    ):
+                        raise
+                    print(
+                        f"acp-run: session/resume failed ({error_text(e)[:200]});"
+                        " falling back to session/load",
+                        file=sys.stderr,
+                    )
+                    client.rec("resume_fallback_load", {"error": error_text(e)})
+                    how, client.replayed, client._last_msg = "load_session", 0, None
+            if how == "load_session":
+                resp = await asyncio.wait_for(
+                    conn.load_session(
+                        cwd=str(root), session_id=a.resume, mcp_servers=[], **kw
+                    ),
+                    max(timeout, 120),  # a long history takes a while to replay
+                )
+        except RequestError as e:
+            if not session_not_found(e):
+                raise
+            client.rec("resume_not_found", {"how": how, "error": error_text(e)})
+            print(
+                f"acp-run: {a.agent} has no session {a.resume} to resume",
+                file=sys.stderr,
+            )
+            raise SystemExit(2) from None
         # Let replayed updates still being handled finish before counting.
+        sids = getattr(client, "replay_sids", set())
         tracker = getattr(conn, "_session_updates", None)
         if tracker is not None:
-            await tracker.wait(a.resume)
+            for sid in {a.resume, *sids}:
+                await tracker.wait(sid)
     finally:
         client.replaying = False
     client.rec(how, dump(resp))
+    other = sorted(str(s) for s in sids if s != a.resume)
+    if other:
+        # an agent that does not know the id may open another (or a blank)
+        # session instead of failing: never prompt into it
+        client.rec("resume_session_mismatch", {"requested": a.resume, "got": other})
+        print(
+            f"acp-run: {a.agent} reopened session {', '.join(other)}, not {a.resume};"
+            " refusing to prompt it",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     print(
         f"resumed session {a.resume} ({client.replayed} messages)",
         file=sys.stdout if a.interactive else sys.stderr,
         flush=True,
     )
     return SimpleNamespace(
-        session_id=a.resume, modes=resp.modes, config_options=resp.config_options
+        session_id=a.resume,
+        modes=getattr(resp, "modes", None),
+        config_options=getattr(resp, "config_options", None),
     )
+
+
+def session_not_found(e):
+    """True when a session/load or session/resume error says the session id is
+    unknown: JSON-RPC -32002 (resource not found, RequestError.resource_not_found)
+    or an error text that names a missing session."""
+    code = getattr(e, "code", None)
+    if code == -32002:
+        return True
+    if code == -32601:  # "Method not found" is about the method, not the session
+        return False
+    text = f"{e} {json.dumps(getattr(e, 'data', None), default=str)}".lower()
+    return bool(
+        re.search(
+            r"\b(session|conversation|resource)\b[^.]{0,80}\b(not found|does not exist|unknown)\b"
+            r"|\b(no such|unknown) (session|conversation)\b",
+            text,
+        )
+    )
+
+
+async def close_session(a, conn, init, sess, client, proc):
+    """session/close, when the agent advertises sessionCapabilities.close, so it
+    cancels any work and frees (and can flush) the session before acp-run stops
+    the process. Best effort: 5 s, errors only logged."""
+    if conn is None or sess is None or init is None or getattr(a, "info", False):
+        return
+    if proc is None or proc.returncode is not None:
+        return
+    caps = getattr(init, "agent_capabilities", None)
+    scaps = getattr(caps, "session_capabilities", None) if caps else None
+    if getattr(scaps, "close", None) is None or not hasattr(conn, "close_session"):
+        return
+    try:
+        await asyncio.wait_for(conn.close_session(session_id=sess.session_id), 5)
+        client.rec("close_session", {"session_id": sess.session_id})
+    except (Exception, asyncio.CancelledError) as e:  # noqa: BLE001 - never fail the run on close
+        client.rec(
+            "close_session_failed",
+            {"session_id": sess.session_id, "error": error_text(e)},
+        )
 
 
 def resume_hint(a, root, session_id):
@@ -3610,7 +3733,12 @@ async def run(a, log, err, log_path):
                 phase = "session/new"
                 if a.resume:
                     caps = init.agent_capabilities
-                    phase = "session/load" if caps and caps.load_session else "session/resume"
+                    scaps = caps.session_capabilities if caps else None
+                    phase = (
+                        "session/resume"
+                        if getattr(scaps, "resume", None) is not None
+                        else "session/load"
+                    )
                 sess = await open_session(
                     a, conn, init, client, root, handshake_timeout
                 )
@@ -3802,6 +3930,10 @@ async def run(a, log, err, log_path):
             failure = (cls, f"{FAILURE_TEXT[cls]}: {out['error']}")
     finally:
         logging.disable(logging.CRITICAL)  # a half-written line at shutdown is noise
+        # session/close before the agent is stopped (--interactive: the REPL has
+        # returned, so its turns are over)
+        if client is not None:
+            await close_session(a, conn, init, sess, client, proc)
         # opencode/zcode: before _kill's waits, the run is over either way. agy: after,
         # since agy can still write under its GEMINI_HOME (a rotated credential) while
         # it is being stopped (adversary re-review 2026-10-13, finding 5).

@@ -515,6 +515,17 @@ acp-run claude -C ~/src/repo -i --resume SESSION_ID          # reopen an earlier
    replayed to the log only, not printed) or `session/resume`, whichever the agent
    advertises in `initialize` (`--info` shows `loadSession` and
    `sessionCapabilities`). It exits 2 if the agent advertises neither.
+   Since 2026-10-18 (ACP session-resume RFD): with both advertised it calls
+   `session/resume` first (no replay, "0 messages") and falls back to
+   `session/load` only on a -32601/-32602 error (logged as
+   `resume_fallback_load`). `--add-dir` is sent again, in full, on whichever call
+   runs, but only when the agent advertises
+   `sessionCapabilities.additionalDirectories`; otherwise one stderr line says the
+   extra directories were not sent. An unknown id (resource-not-found) or a replay
+   from a different session id exits 2 before any prompt. At the end of every
+   run (after the last `--interactive` turn) it sends `session/close` when the
+   agent advertises `sessionCapabilities.close`, before stopping the agent
+   (5 s, errors only logged as `close_session_failed`).
 8. **herdr reports.** In a herdr pane (`HERDR_PANE_ID` set; `HERDR_BIN_PATH` or
    `herdr` on `PATH`) it reports `working` and `idle` as source `acp-run`
    (`blocked`, for a pending `--perm ask` question, went with it on 2026-10-14), with a resume command
