@@ -803,6 +803,18 @@ ladder fails for a page or search the task needs, it pauses that work,
 reports the failed URLs or queries with each error, and waits. It never
 continues without the source or fills it in from memory.
 
+**Paseo (added 2026-10-18, djbclark).** Paseo (https://paseo.sh, github.com/getpaseo/paseo,
+Apache-2.0) is an agentic development environment: a daemon that runs Claude Code, Codex, Copilot,
+OpenCode, Pi and other agents in worktrees, with desktop, web, Android/iOS and CLI clients. On a Mac:
+`brew install --cask paseo` (app plus the `paseo` CLI), then site-djbclark's `just
+paseo-desktop-apply` (daemon on `127.0.0.1:7263`, web UI on, relay off, `tailscale serve
+--https=7263`; never funnel, no password, so tailnet-only). Linux/NixOS hosts use
+forgejo.mit.edu/djbclark/paseo-nix (CI-built package plus `services.paseo`). Skills: `paseo`,
+`paseo-advisor`, `paseo-committee`, `paseo-handoff`, `paseo-help`, `paseo-plugin` (vendored in
+`djbclark-ade/skills/`, link them with `bin/skill-everywhere`; the advisor/committee/handoff triggers
+are narrowed to explicit Paseo requests, see `skills/paseo/UPSTREAM.md`). Fleet setup:
+site-djbclark `docs/paseo.md`.
+
 **SiYuan notes (machine-specific; added 2026-10-12, djbclark).** Only where the
 SiYuan desktop app (https://b3log.org/siyuan/) is installed and the repo's work
 touches the operator's notes; skip it otherwise. SiYuan 3.8+ serves MCP from its
