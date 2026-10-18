@@ -48,8 +48,8 @@ def test_mix_tools_and_buckets(tmp_path, capsys):
     assert mod.main(["--root", str(tmp_path), "--json", "--write", "2", "--read", "0.1"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["requests"] == 2 and out["compactions"] == 1
-    # cache write 1000*2 = 2000, cache read 250000*0.1 = 25000
-    assert out["total_units"] == 27_000
+    # no model id: $1/MTok base, read 0.1. cache write 1000*2 = 2000, read 250000*0.1 = 25000 (x 1e-6 $)
+    assert abs(out["total_usd"] - 0.027) < 1e-12
     assert abs(out["mix"]["cache_read"] - 25_000 / 27_000) < 1e-9
     assert abs(out["by_context"]["200-300k"] - 25_000 / 27_000) < 1e-9
     # rg result: 100 tokens * (2 + 0.1 * 1 later request); pytest output: 1000 tokens likewise
@@ -74,3 +74,15 @@ def test_labels():
     assert lab("cat f | head") == "Bash:nav"
     assert lab("git status") == "Bash:other"
     assert mod.tool_label({"name": "mcp__firecrawl__firecrawl_search"}) == "mcp:firecrawl"
+
+
+def test_per_model_price(tmp_path, capsys):
+    proj = tmp_path / "p"
+    proj.mkdir()
+    u = {"input_tokens": 0, "cache_creation_input_tokens": 0,
+         "cache_read_input_tokens": 1_000_000, "output_tokens": 0}
+    line = {"type": "assistant", "message": {"id": "m", "model": "claude-opus-5-5", "usage": u}}
+    (proj / "s.jsonl").write_text(json.dumps(line) + "\n")
+    assert load().main(["--root", str(tmp_path), "--json"]) == 0
+    # Opus 5.5: $4/MTok base, reads 0.05x -> 1M read tokens cost $0.20
+    assert abs(json.loads(capsys.readouterr().out)["total_usd"] - 0.20) < 1e-9
