@@ -161,5 +161,25 @@ class TestRelayRules(unittest.TestCase):
         self.assertEqual(enters, ["enter"] * relay.ENTER_RETRIES)
 
 
+class TestStuckInBox(unittest.TestCase):
+    def check(self, box: str, text: str) -> bool:
+        orig = relay.draft
+        relay.draft = lambda chan: box
+        try:
+            return relay.stuck_in_box(("herdr", "w1:p1"), text)
+        finally:
+            relay.draft = orig
+
+    def test_own_text_still_in_box(self) -> None:
+        self.assertTrue(self.check("From the Paseo session: hello  there", "From the Paseo session: hello there"))
+
+    def test_collapsed_paste_placeholder_is_ours(self) -> None:
+        self.assertTrue(self.check("[Pasted text #1 +3 lines]", "a long relayed message " * 40))
+
+    def test_empty_or_other_box_is_not_stuck(self) -> None:
+        self.assertFalse(self.check("", "hello"))
+        self.assertFalse(self.check("something else entirely", "hello"))
+
+
 if __name__ == "__main__":
     unittest.main()

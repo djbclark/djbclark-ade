@@ -102,8 +102,10 @@ def type_line(chan, text):
 
 def stuck_in_box(chan, text):
     """True while TEXT still sits unsent in a Claude Code input box: its Enter did not land."""
-    d = draft(chan)
-    return bool(d) and " ".join(d.split())[:30] == text[:30]
+    d = " ".join(draft(chan).split())
+    # A long burst can be collapsed into a "[Pasted text #N +M lines]" placeholder, which never matches
+    # the text itself; with no other draft possible right after our own typing, it is ours (2026-10-18).
+    return bool(d) and (d[:30] == text[:30] or d.startswith("[Pasted text"))
 
 
 def find(ident, ss):
