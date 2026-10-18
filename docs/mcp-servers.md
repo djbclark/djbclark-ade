@@ -16,7 +16,7 @@ why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
 |---|---|---|---|
 | `hermes` | stdio: `hermes mcp serve` | user | The **Hermes Agent** as an MCP server — see below |
 | `beeper` | HTTP: `http://127.0.0.1:23373/v0/mcp` | user | Beeper Desktop's local API — cross-network chat search/read/send. OAuth-gated; see below. Re-enabled in Claude Code 2026-10-16 (was blocked 2026-10-10) |
-| `graft` | stdio: `graft mcp` | this repo (`.mcp.json`) | Repo context graph (`graft_find_code`, `graft_trace_calls`, …) |
+| `graft` | stdio: `graft mcp` | **removed 2026-10-18** (was this repo's `.mcp.json`) | Repo context graph. Deregistered from every agent TUI on 2026-10-18 (95 MCP calls vs ~24,000 CLI uses in 14 days; a stdio process per session); use the `graft` CLI. Claude Code also lists `graft` and `token-savior` under `disabledMcpjsonServers` in `~/.claude/settings.local.json`, so a stray project `.mcp.json` cannot bring it back |
 | `ghost-os` | stdio: `/opt/homebrew/bin/ghost mcp` | user | macOS UI automation via accessibility tree + vision. **Blocked in Claude Code since 2026-10-10** (`deniedMcpServers`) |
 | `hindsight` | stdio: `node ~/.hindsight/coding-agents/dist/mcp-server.js` | user | Per-repo Hindsight coding-agent memory (the 🧠 banner) |
 | `hindsight-shared` | HTTP: `http://127.0.0.1:8888/mcp/hermes-shared/` | user | Shared Hindsight bank (`hermes-shared` in the URL is the bank name) |

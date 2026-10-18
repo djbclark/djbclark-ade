@@ -320,7 +320,7 @@ files sequential.
 - Subagents return **compact structured summaries** (tables or bullet lists,
   at most about 150 lines), with file paths and line numbers instead of pasted
   file contents.
-- Read narrowly. Use the Graft MCP tools or `graft ask`/`graft skeleton` once
+- Read narrowly. Use `graft ask`/`graft skeleton` once
   the graph is built, `ast-grep`, `rg` and file line ranges instead of whole
   files. Never read the data directories.
 - Write facts down once, in `HANDOFF.md` or `tests/baseline/BASELINE.md`, and
@@ -477,8 +477,9 @@ cmd`), never in source. Verified live 2026-10-11/12: the response `model` is
 `npx skills remove fastino-glide` or by deleting the directory and its lockfile
 entry.
 
-**Graft's own wiring** (hooks, statusline and MCP server) is installed by
-`graft init` in §6, not here. The web-access MCP servers (Exa, Parallel
+**Graft's own wiring** (hooks, statusline and, unless `--no-mcp`, the MCP server) is installed by
+`graft init` in §6, not here. **`token-savior` (MCP server and `uv` tool) was removed
+on djbclark's machine 2026-10-18 (0 calls in 14 days): do not install or register it.** The web-access MCP servers (Exa, Parallel
 Search, Jina, Crawl4AI) are installed with the §1.3 "Agent web access" table.
 
 **Explain each one to the user.** In the interactive phase (§12, step 2)
@@ -754,7 +755,9 @@ build` adds `graft/` to `.gitignore` itself; the graph is a local cache like
 `node_modules`, and what gets committed is the wiring `graft init` drops in:
 `.claude/` (hooks, statusline, `.claude/skills/graft/SKILL.md`), the project
 `.mcp.json` entry for the Graft MCP server (`graft mcp`; skip with
-`--no-mcp`), and `AGENTS.md` only if the `agents` host is selected.
+`--no-mcp`, which is what djbclark's machine does since 2026-10-18: Graft's MCP
+server was deregistered there after 95 MCP calls against ~24,000 CLI uses in 14
+days, so use the CLI and prefer `graft init --no-mcp`), and `AGENTS.md` only if the `agents` host is selected.
 `graft init` merges into `.claude/settings.json` without clobbering, is
 idempotent, and has `--dry-run`, `--agents claude`, `--no-hooks` and
 `--no-statusline`. `graft build --deep` (LLM summaries) needs an API key and
@@ -1205,7 +1208,7 @@ The skill body should cover:
 - the before/after-test rule and `just baseline`;
 - how to add a test of each kind (pytest, Node math, Puppeteer);
 - how to add a new language or format (§2 rule plus N+1 wiring);
-- search-tool selection (Graft MCP / `graft ask` / `ast-grep` / `rg`);
+- search-tool selection (`graft ask` / `ast-grep` / `rg`);
 - the token budget rules from §0.5, in short form;
 - the suppression policy;
 - how to request review (`review-ready` label; coderabbit-feeder for bulk).

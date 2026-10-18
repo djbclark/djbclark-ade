@@ -35,12 +35,14 @@ budget that Claude Code fills and truncates (assumed, not confirmed).
    connector, which needs its own API key and sign-in.
 2. **Context7** (~0.2k): agent-friendly library docs; re-check its use on or
    after 2026-10-24 (docs/queue.md).
-3. **token-savior**: djbclark kept it although transcripts show 0 calls ever.
+3. **token-savior**: djbclark kept it although transcripts show 0 calls ever. **Removed 2026-10-18** (0 real calls in 14 days of 1,458 transcripts): deregistered from every agent CLI, `uv tool uninstall token-savior-recall`, launcher deleted.
 4. **graft**: kept, but its tools now load on demand (`alwaysLoad` dropped from
    `.mcp.json`) and its per-prompt hook is gone. Measured over the week to
    2026-10-10: used in ~6% of sessions, and 64% of its answers were followed by
    a re-read of the same file; its "tokens saved" banner claimed 1.95M against
-   ~71k tokens of actual output.
+   ~71k tokens of actual output. **MCP registration removed 2026-10-18** (95 MCP
+   calls vs ~24,000 CLI uses in 14 days; ~270 MB of per-session stdio processes):
+   the `graft` CLI and graft's hooks stay.
 
 That trims every request of every session, not just compacted ones. Background:
 `~/ops/site-private/memory/feedback_self_compact.md` item 7. Re-add anything
@@ -74,8 +76,8 @@ in `~/.claude/settings.json` (takes effect at once, even mid-session).
 | `paper-search` (local) | 57 | Academic search/download across arXiv, PubMed, SSRN, Semantic Scholar, OpenAlex and more; ~0.65k tokens/session, 3 calls in the week to 2026-10-10, all doable with the `arxiv` MCP, Firecrawl `firecrawl_research_*` or an OpenAlex `curl`. Blocked 2026-10-10. |
 
 Still on: Beeper (re-enabled 2026-10-16 by djbclark to watch the Hyades room), Gmail, Google Calendar, Google Drive, Context7, Firecrawl,
-claude-in-chrome, basic-memory, bezalel, arxiv, token-savior,
-graft, hermes, cow.
+claude-in-chrome, basic-memory, bezalel, arxiv, hermes, cow (token-savior and
+graft's MCP server were removed 2026-10-18).
 
 ## Plugins disabled
 

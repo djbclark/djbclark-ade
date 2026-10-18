@@ -51,8 +51,8 @@ print(json.dumps({"hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "additionalContext": (
         "This repo is indexed by graft. Before grepping/globbing for code, try "
-        "graft_find_code (how/where), graft_find_all (every occurrence), "
-        "graft_trace_calls (callers/blast radius) or graft_file_api (a file's API). "
+        "`graft ask` (how/where), `graft grep` (every occurrence), "
+        "`graft callers` (callers/blast radius) or `graft skeleton` (a file's API). "
         "Fall back to Grep/Glob for non-code text or when graft misses."
     ),
 }}))
