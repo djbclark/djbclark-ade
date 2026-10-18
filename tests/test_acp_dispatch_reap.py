@@ -138,6 +138,25 @@ class TestReap(ReapBase):
         self.assertTrue(c.stdout.startswith(("pending\tlive\t", "running\tlive\t", "partial\tlive\t")), c.stdout)
         self.assertNotIn("reaped", self.record("live"))
 
+    def test_ps_timeout_is_not_pid_reuse(self):
+        # 2026-10-18: at load 35+ `ps -o lstart=` hit its 10 s timeout, proc_start returned None,
+        # and a live slice (hermes-forgejo-ci) was called reused and reaped as lost
+        self.dispatch()
+        mod = self.mod()
+        me = os.getpid()
+        self.unfinished(pid=me, pid_start=mod["proc_start"](me))
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(["ps"], 10)):
+            self.assertIsNone(mod["dead_reason"](self.record()))
+
+    def test_resume_clears_the_last_runs_exit_file(self):
+        # a stale <name>.exit from the run before a resume was read as the resumed run's exit code
+        self.dispatch()
+        exit_path = Path(self.record()["log"]).with_suffix(".exit")
+        _ = exit_path.write_text("1\n")
+        r = run(["resume", str(self.record_path()), "--timeout", "0"], env=self.base_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(exit_path.exists())
+
     def test_old_format_record_without_pid_start(self):
         self.dispatch()
         mod = self.mod()

@@ -632,7 +632,10 @@ def process_matches(rec: dict) -> bool:
     if not pid or not pid_alive(pid):
         return False
     if rec.get("pid_start"):
-        return proc_start(pid) == rec["pid_start"]
+        # None: ps failed or timed out, which proves nothing about a pid kill(0) finds alive
+        # (2026-10-18: at load 35+ the 10 s ps timeout called a live slice reused and reap lost it)
+        now = proc_start(pid)
+        return now is None or now == rec["pid_start"]
     cmd = proc_cmd(pid)
     first = (shlex.split(rec.get("cmd", "")) or [""])[0]
     return bool(cmd) and ("acp-run" in cmd or bool(first and Path(first).name in cmd)) and (
@@ -2355,6 +2358,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
             if src.exists():
                 shutil.move(str(src), out / f"{a.name}-r{resume_count}-{suffix}")
     Path(str(log) + ".extend").unlink(missing_ok=True)
+    # the last run's exit code; left in place, reap read it as this run's (2026-10-18)
+    log.with_suffix(".exit").unlink(missing_ok=True)
     for p in (done, final, stderr):
         if p.exists():
             p.unlink()
