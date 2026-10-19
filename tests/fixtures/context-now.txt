@@ -1,0 +1,409 @@
+Warning: claude.ai MCP servers blocked by enterprise policy: claude.ai Claude Docs, claude.ai Have I Been Pwned, claude.ai Wolfram, claude.ai ElevenLabs, claude.ai Hugging Face, claude.ai Cloudflare Developer Platform, claude.ai Slack, claude.ai Figma, claude.ai Canva
+## Context Usage
+
+**Model:** claude-opus-5-5[1m]  
+**Tokens:** 46.3k / 400k (12%)
+
+### Estimated usage by category
+
+| Category | Tokens | Percentage |
+|----------|--------|------------|
+| System prompt | 2.5k | 0.6% |
+| MCP tools | 11k | 2.8% |
+| MCP server instructions | 4.8k | 1.2% |
+| MCP tools (deferred) | 115.6k | 28.9% |
+| System tools (deferred) | 15k | 3.8% |
+| Custom agents | 875 | 0.2% |
+| Memory files | 14.5k | 3.6% |
+| Skills | 10k | 2.5% |
+| Messages | 2.7k | 0.7% |
+| Free space | 320.7k | 80.2% |
+| Autocompact buffer | 33k | 8.3% |
+
+### MCP Tools
+
+| Tool | Server | Tokens |
+|------|--------|--------|
+| mcp__arxiv__check_alerts | arxiv | 452 |
+| mcp__arxiv__citation_graph | arxiv | 330 |
+| mcp__arxiv__download_paper | arxiv | 618 |
+| mcp__arxiv__export_citations | arxiv | 280 |
+| mcp__arxiv__get_abstract | arxiv | 210 |
+| mcp__arxiv__get_paper_latex | arxiv | 307 |
+| mcp__arxiv__get_paper_latex_section | arxiv | 357 |
+| mcp__arxiv__get_paper_outline | arxiv | 238 |
+| mcp__arxiv__list_paper_latex_sections | arxiv | 211 |
+| mcp__arxiv__list_papers | arxiv | 266 |
+| mcp__arxiv__list_watches | arxiv | 166 |
+| mcp__arxiv__read_paper | arxiv | 490 |
+| mcp__arxiv__read_paper_section | arxiv | 324 |
+| mcp__arxiv__reindex | arxiv | 117 |
+| mcp__arxiv__search_paper_text | arxiv | 310 |
+| mcp__arxiv__search_papers | arxiv | 779 |
+| mcp__arxiv__semantic_search | arxiv | 391 |
+| mcp__arxiv__unwatch_topic | arxiv | 199 |
+| mcp__arxiv__watch_topic | arxiv | 598 |
+| mcp__basic-memory__basic_memory_diagnostics | basic-memory | 194 |
+| mcp__basic-memory__build_context | basic-memory | 1.1k |
+| mcp__basic-memory__create_memory_project | basic-memory | 546 |
+| mcp__basic-memory__delete_note | basic-memory | 577 |
+| mcp__basic-memory__edit_note | basic-memory | 1.7k |
+| mcp__basic-memory__fetch | basic-memory | 114 |
+| mcp__basic-memory__list_directory | basic-memory | 757 |
+| mcp__basic-memory__list_memory_projects | basic-memory | 305 |
+| mcp__basic-memory__list_workspaces | basic-memory | 153 |
+| mcp__basic-memory__move_note | basic-memory | 848 |
+| mcp__basic-memory__read_content | basic-memory | 419 |
+| mcp__basic-memory__read_note | basic-memory | 776 |
+| mcp__basic-memory__recent_activity | basic-memory | 901 |
+| mcp__basic-memory__schema_diff | basic-memory | 333 |
+| mcp__basic-memory__schema_infer | basic-memory | 404 |
+| mcp__basic-memory__schema_validate | basic-memory | 432 |
+| mcp__basic-memory__search | basic-memory | 116 |
+| mcp__basic-memory__search_notes | basic-memory | 1.5k |
+| mcp__basic-memory__view_note | basic-memory | 340 |
+| mcp__basic-memory__write_note | basic-memory | 1.2k |
+| mcp__bezalel__cards__buy | bezalel | 311 |
+| mcp__bezalel__cards__checkout_cancel | bezalel | 194 |
+| mcp__bezalel__cards__checkout_coverage | bezalel | 227 |
+| mcp__bezalel__cards__checkout_fill | bezalel | 418 |
+| mcp__bezalel__cards__checkout_finish | bezalel | 325 |
+| mcp__bezalel__cards__checkout_profile | bezalel | 230 |
+| mcp__bezalel__cards__checkout_start | bezalel | 415 |
+| mcp__bezalel__cards__checkout_status | bezalel | 260 |
+| mcp__bezalel__cards__close_card | bezalel | 180 |
+| mcp__bezalel__cards__create_card | bezalel | 386 |
+| mcp__bezalel__cards__get_balance | bezalel | 86 |
+| mcp__bezalel__cards__get_card_details | bezalel | 217 |
+| mcp__bezalel__cards__list_cards | bezalel | 150 |
+| mcp__bezalel__cards__list_merchants | bezalel | 120 |
+| mcp__bezalel__cards__list_transactions | bezalel | 150 |
+| mcp__bezalel__cards__pause_card | bezalel | 185 |
+| mcp__bezalel__cards__purchase_status | bezalel | 217 |
+| mcp__bezalel__cards__resume_card | bezalel | 180 |
+| mcp__bezalel__cards__track_purchase | bezalel | 207 |
+| mcp__bezalel__computer__bash | bezalel | 219 |
+| mcp__bezalel__computer__control | bezalel | 243 |
+| mcp__bezalel__computer__screenshot | bezalel | 158 |
+| mcp__bezalel__computer__status | bezalel | 250 |
+| mcp__bezalel__computer__task | bezalel | 393 |
+| mcp__bezalel__connectors__connect | bezalel | 573 |
+| mcp__bezalel__connectors__execute | bezalel | 566 |
+| mcp__bezalel__connectors__fill_login | bezalel | 413 |
+| mcp__bezalel__connectors__get_tool | bezalel | 390 |
+| mcp__bezalel__connectors__investigate_order | bezalel | 310 |
+| mcp__bezalel__connectors__list_connections | bezalel | 277 |
+| mcp__bezalel__connectors__list_logins | bezalel | 131 |
+| mcp__bezalel__connectors__list_private_connections | bezalel | 120 |
+| mcp__bezalel__connectors__list_toolkits | bezalel | 473 |
+| mcp__bezalel__connectors__list_tools | bezalel | 271 |
+| mcp__bezalel__email__create_draft | bezalel | 570 |
+| mcp__bezalel__email__create_inbox | bezalel | 155 |
+| mcp__bezalel__email__delete_draft | bezalel | 160 |
+| mcp__bezalel__email__get_draft | bezalel | 147 |
+| mcp__bezalel__email__get_message | bezalel | 169 |
+| mcp__bezalel__email__get_thread | bezalel | 174 |
+| mcp__bezalel__email__list_drafts | bezalel | 116 |
+| mcp__bezalel__email__list_inboxes | bezalel | 91 |
+| mcp__bezalel__email__list_messages | bezalel | 172 |
+| mcp__bezalel__email__list_threads | bezalel | 161 |
+| mcp__bezalel__email__reply | bezalel | 360 |
+| mcp__bezalel__email__send | bezalel | 499 |
+| mcp__bezalel__email__update_draft | bezalel | 440 |
+| mcp__bezalel__finance__bank_spending_summary | bezalel | 296 |
+| mcp__bezalel__finance__delete_receipt | bezalel | 128 |
+| mcp__bezalel__finance__list_accounts | bezalel | 227 |
+| mcp__bezalel__finance__list_receipts | bezalel | 141 |
+| mcp__bezalel__finance__list_transactions | bezalel | 391 |
+| mcp__bezalel__finance__log_receipt | bezalel | 197 |
+| mcp__bezalel__finance__spend_summary | bezalel | 127 |
+| mcp__bezalel__finance__sync_transactions | bezalel | 202 |
+| mcp__bezalel__finance__update_receipt | bezalel | 208 |
+| mcp__bezalel__health__check | bezalel | 294 |
+| mcp__bezalel__health__feedback_receipt | bezalel | 128 |
+| mcp__bezalel__health__report_feedback | bezalel | 677 |
+| mcp__bezalel__imessage__react | bezalel | 202 |
+| mcp__bezalel__imessage__send | bezalel | 347 |
+| mcp__bezalel__imessage__send_attachment | bezalel | 372 |
+| mcp__bezalel__imessage__send_poll | bezalel | 336 |
+| mcp__bezalel__imessage__status | bezalel | 117 |
+| mcp__bezalel__imessage__typing | bezalel | 152 |
+| mcp__bezalel__memory__add | bezalel | 266 |
+| mcp__bezalel__memory__forget | bezalel | 203 |
+| mcp__bezalel__memory__ingest_session | bezalel | 372 |
+| mcp__bezalel__memory__profile | bezalel | 142 |
+| mcp__bezalel__memory__search | bezalel | 294 |
+| mcp__bezalel__sandbox__create | bezalel | 175 |
+| mcp__bezalel__sandbox__exec | bezalel | 411 |
+| mcp__bezalel__sandbox__kill | bezalel | 153 |
+| mcp__bezalel__sandbox__list | bezalel | 97 |
+| mcp__bezalel__sandbox__read_file | bezalel | 139 |
+| mcp__bezalel__sandbox__write_file | bezalel | 186 |
+| mcp__bezalel__skills__delete | bezalel | 150 |
+| mcp__bezalel__skills__get | bezalel | 149 |
+| mcp__bezalel__skills__list | bezalel | 120 |
+| mcp__bezalel__skills__save | bezalel | 338 |
+| mcp__claude_ai_Context7__query-docs | claude_ai_Context7 | 810 |
+| mcp__claude_ai_Context7__resolve-library-id | claude_ai_Context7 | 1.1k |
+| mcp__claude_ai_Firecrawl__firecrawl_developer_search | claude_ai_Firecrawl | 366 |
+| mcp__claude_ai_Firecrawl__firecrawl_find_tools | claude_ai_Firecrawl | 1.3k |
+| mcp__claude_ai_Firecrawl__firecrawl_gov_search | claude_ai_Firecrawl | 494 |
+| mcp__claude_ai_Firecrawl__firecrawl_research_inspect_paper | claude_ai_Firecrawl | 241 |
+| mcp__claude_ai_Firecrawl__firecrawl_research_read_paper | claude_ai_Firecrawl | 325 |
+| mcp__claude_ai_Firecrawl__firecrawl_research_related_papers | claude_ai_Firecrawl | 366 |
+| mcp__claude_ai_Firecrawl__firecrawl_research_search_papers | claude_ai_Firecrawl | 587 |
+| mcp__claude_ai_Firecrawl__firecrawl_scrape | claude_ai_Firecrawl | 2.5k |
+| mcp__claude_ai_Firecrawl__firecrawl_search | claude_ai_Firecrawl | 2.4k |
+| mcp__claude_ai_Gmail__apply_sensitive_message_label | claude_ai_Gmail | 457 |
+| mcp__claude_ai_Gmail__apply_sensitive_thread_label | claude_ai_Gmail | 402 |
+| mcp__claude_ai_Gmail__create_draft | claude_ai_Gmail | 1.7k |
+| mcp__claude_ai_Gmail__create_label | claude_ai_Gmail | 2k |
+| mcp__claude_ai_Gmail__delete_draft | claude_ai_Gmail | 144 |
+| mcp__claude_ai_Gmail__delete_label | claude_ai_Gmail | 128 |
+| mcp__claude_ai_Gmail__forward | claude_ai_Gmail | 1.6k |
+| mcp__claude_ai_Gmail__get_draft | claude_ai_Gmail | 751 |
+| mcp__claude_ai_Gmail__get_message | claude_ai_Gmail | 1.2k |
+| mcp__claude_ai_Gmail__get_thread | claude_ai_Gmail | 1.2k |
+| mcp__claude_ai_Gmail__label_message | claude_ai_Gmail | 488 |
+| mcp__claude_ai_Gmail__label_thread | claude_ai_Gmail | 521 |
+| mcp__claude_ai_Gmail__list_drafts | claude_ai_Gmail | 873 |
+| mcp__claude_ai_Gmail__list_labels | claude_ai_Gmail | 382 |
+| mcp__claude_ai_Gmail__mark_message_spam | claude_ai_Gmail | 174 |
+| mcp__claude_ai_Gmail__mark_thread_spam | claude_ai_Gmail | 269 |
+| mcp__claude_ai_Gmail__reply | claude_ai_Gmail | 1.8k |
+| mcp__claude_ai_Gmail__search_threads | claude_ai_Gmail | 2.7k |
+| mcp__claude_ai_Gmail__send_message | claude_ai_Gmail | 2k |
+| mcp__claude_ai_Gmail__trash_message | claude_ai_Gmail | 257 |
+| mcp__claude_ai_Gmail__trash_thread | claude_ai_Gmail | 263 |
+| mcp__claude_ai_Gmail__unlabel_message | claude_ai_Gmail | 380 |
+| mcp__claude_ai_Gmail__unlabel_thread | claude_ai_Gmail | 363 |
+| mcp__claude_ai_Gmail__unmark_message_spam | claude_ai_Gmail | 177 |
+| mcp__claude_ai_Gmail__unmark_thread_spam | claude_ai_Gmail | 172 |
+| mcp__claude_ai_Gmail__untrash_message | claude_ai_Gmail | 178 |
+| mcp__claude_ai_Gmail__untrash_thread | claude_ai_Gmail | 172 |
+| mcp__claude_ai_Gmail__update_draft | claude_ai_Gmail | 1.8k |
+| mcp__claude_ai_Gmail__update_label | claude_ai_Gmail | 1.8k |
+| mcp__claude_ai_Gmail__update_message_labels | claude_ai_Gmail | 471 |
+| mcp__claude_ai_Google_Calendar__create_event | claude_ai_Google_Calendar | 3.6k |
+| mcp__claude_ai_Google_Calendar__delete_event | claude_ai_Google_Calendar | 321 |
+| mcp__claude_ai_Google_Calendar__get_event | claude_ai_Google_Calendar | 208 |
+| mcp__claude_ai_Google_Calendar__list_calendars | claude_ai_Google_Calendar | 347 |
+| mcp__claude_ai_Google_Calendar__list_events | claude_ai_Google_Calendar | 1.4k |
+| mcp__claude_ai_Google_Calendar__respond_to_event | claude_ai_Google_Calendar | 494 |
+| mcp__claude_ai_Google_Calendar__search_events | claude_ai_Google_Calendar | 233 |
+| mcp__claude_ai_Google_Calendar__suggest_time | claude_ai_Google_Calendar | 776 |
+| mcp__claude_ai_Google_Calendar__update_event | claude_ai_Google_Calendar | 2.8k |
+| mcp__claude_ai_Google_Drive__copy_file | claude_ai_Google_Drive | 422 |
+| mcp__claude_ai_Google_Drive__create_file | claude_ai_Google_Drive | 931 |
+| mcp__claude_ai_Google_Drive__download_file_content | claude_ai_Google_Drive | 479 |
+| mcp__claude_ai_Google_Drive__get_file_metadata | claude_ai_Google_Drive | 485 |
+| mcp__claude_ai_Google_Drive__get_file_permissions | claude_ai_Google_Drive | 136 |
+| mcp__claude_ai_Google_Drive__list_recent_files | claude_ai_Google_Drive | 667 |
+| mcp__claude_ai_Google_Drive__read_file_content | claude_ai_Google_Drive | 890 |
+| mcp__claude_ai_Google_Drive__search_files | claude_ai_Google_Drive | 1.2k |
+| mcp__claude_ai_Google_Drive__share_file | claude_ai_Google_Drive | 404 |
+| mcp__claude_ai_Google_Drive__trash_file | claude_ai_Google_Drive | 158 |
+| mcp__claude_ai_Google_Drive__update_file | claude_ai_Google_Drive | 411 |
+| mcp__cow__cow_create | cow | 271 |
+| mcp__cow__cow_extract | cow | 186 |
+| mcp__cow__cow_fetch_from | cow | 224 |
+| mcp__cow__cow_list | cow | 117 |
+| mcp__cow__cow_materialise | cow | 150 |
+| mcp__cow__cow_migrate | cow | 260 |
+| mcp__cow__cow_remove | cow | 181 |
+| mcp__cow__cow_run | cow | 224 |
+| mcp__cow__cow_status | cow | 116 |
+| mcp__cow__cow_sync | cow | 192 |
+| mcp__crawl4ai__close_session | crawl4ai | 263 |
+| mcp__crawl4ai__crawl | crawl4ai | 338 |
+| mcp__crawl4ai__get_artifact | crawl4ai | 393 |
+| mcp__crawl4ai__scrape | crawl4ai | 372 |
+| mcp__exa__agent_run | exa | 1.2k |
+| mcp__exa__web_fetch_exa | exa | 275 |
+| mcp__exa__web_search_exa | exa | 549 |
+| mcp__firecrawl__firecrawl_agent | firecrawl | 2.4k |
+| mcp__firecrawl__firecrawl_agent_status | firecrawl | 302 |
+| mcp__firecrawl__firecrawl_check_crawl_status | firecrawl | 160 |
+| mcp__firecrawl__firecrawl_crawl | firecrawl | 1.5k |
+| mcp__firecrawl__firecrawl_credit_usage | firecrawl | 523 |
+| mcp__firecrawl__firecrawl_developer_search | firecrawl | 363 |
+| mcp__firecrawl__firecrawl_feedback | firecrawl | 1.6k |
+| mcp__firecrawl__firecrawl_find_tools | firecrawl | 1.2k |
+| mcp__firecrawl__firecrawl_gov_search | firecrawl | 490 |
+| mcp__firecrawl__firecrawl_interact | firecrawl | 1.3k |
+| mcp__firecrawl__firecrawl_interact_stop | firecrawl | 146 |
+| mcp__firecrawl__firecrawl_map | firecrawl | 408 |
+| mcp__firecrawl__firecrawl_monitor_check | firecrawl | 372 |
+| mcp__firecrawl__firecrawl_monitor_checks | firecrawl | 253 |
+| mcp__firecrawl__firecrawl_monitor_create | firecrawl | 591 |
+| mcp__firecrawl__firecrawl_monitor_delete | firecrawl | 144 |
+| mcp__firecrawl__firecrawl_monitor_get | firecrawl | 139 |
+| mcp__firecrawl__firecrawl_monitor_list | firecrawl | 188 |
+| mcp__firecrawl__firecrawl_monitor_run | firecrawl | 156 |
+| mcp__firecrawl__firecrawl_monitor_update | firecrawl | 224 |
+| mcp__firecrawl__firecrawl_parse | firecrawl | 1.1k |
+| mcp__firecrawl__firecrawl_research_inspect_paper | firecrawl | 236 |
+| mcp__firecrawl__firecrawl_research_read_paper | firecrawl | 322 |
+| mcp__firecrawl__firecrawl_research_related_papers | firecrawl | 363 |
+| mcp__firecrawl__firecrawl_research_search_papers | firecrawl | 582 |
+| mcp__firecrawl__firecrawl_scrape | firecrawl | 2.7k |
+| mcp__firecrawl__firecrawl_search | firecrawl | 3.4k |
+| mcp__firecrawl__firecrawl_search_feedback | firecrawl | 712 |
+| mcp__hermes__ask_hermes | hermes | 357 |
+| mcp__hermes__attachments_fetch | hermes | 239 |
+| mcp__hermes__channels_list | hermes | 214 |
+| mcp__hermes__conversation_get | hermes | 147 |
+| mcp__hermes__conversations_list | hermes | 330 |
+| mcp__hermes__events_poll | hermes | 327 |
+| mcp__hermes__events_wait | hermes | 307 |
+| mcp__hermes__messages_read | hermes | 239 |
+| mcp__hermes__messages_send | hermes | 382 |
+| mcp__hermes__permissions_list_open | hermes | 174 |
+| mcp__hermes__permissions_respond | hermes | 180 |
+| mcp__jina__capture_screenshot_url | jina | 221 |
+| mcp__jina__deduplicate_strings | jina | 216 |
+| mcp__jina__extract_pdf | jina | 249 |
+| mcp__jina__guess_datetime_url | jina | 155 |
+| mcp__jina__primer | jina | 106 |
+| mcp__jina__read_url | jina | 698 |
+| mcp__jina__search_arxiv | jina | 216 |
+| mcp__jina__search_images | jina | 285 |
+| mcp__jina__search_jina_blog | jina | 228 |
+| mcp__jina__search_ssrn | jina | 216 |
+| mcp__jina__search_web | jina | 272 |
+| mcp__jina__sort_by_relevance | jina | 186 |
+| mcp__parallel-search__web_fetch | parallel-search | 1.3k |
+| mcp__parallel-search__web_search | parallel-search | 907 |
+
+### Custom Agents
+
+| Agent Type | Source | Tokens |
+|------------|--------|--------|
+| adversary | User | 79 |
+| backend | User | 60 |
+| fable-deep | User | 173 |
+| ocx-gpt-6-1-sol | User | 132 |
+| ocx-gpt-6-astra | User | 128 |
+| ocx-gpt-6-luna | User | 128 |
+| ocx-self | User | 111 |
+| ux | User | 64 |
+
+### Memory Files
+
+| Type | Path | Tokens |
+|------|------|--------|
+| User | /Users/djbclark/.claude/CLAUDE.md | 8.3k |
+| Project | /Users/djbclark/src/djbclark-ade/CLAUDE.md | 5.8k |
+| AutoMem | /Users/djbclark/.claude/projects/-Users-djbclark-src-djbclark-ade/memory/MEMORY.md | 391 |
+
+### Skills
+
+| Skill | Source | Tokens |
+|-------|--------|--------|
+| 1password | User | ~170 |
+| autorename | User | ~120 |
+| bailian-cli | User | ~240 |
+| bailian-docs-llm-wiki | User | ~100 |
+| bailian-finetune | User | ~170 |
+| bailian-gen | User | ~200 |
+| bailian-managed-agent | User | ~190 |
+| bailian-model-recommend | User | ~70 |
+| bailian-protocol | User | ~100 |
+| bailian-train-deploy | User | ~170 |
+| bailian-web-search | User | ~200 |
+| baton | User | ~110 |
+| bigteam | User | ~140 |
+| book-to-kb | User | ~120 |
+| coderabbit-feeder | User | ~110 |
+| composio-cli | User | ~200 |
+| computer-use | User | ~150 |
+| cow-workspaces | User | ~140 |
+| dialogue | User | ~150 |
+| effort-routing | User | ~180 |
+| fallback-chains | User | ~50 |
+| firecrawl | User | ~310 |
+| forgejo | User | ~120 |
+| forgejo-ci | User | ~190 |
+| gmail-search | User | ~100 |
+| graft | User | ~90 |
+| handoff | User | ~80 |
+| helm | User | ~140 |
+| herdr | User | ~110 |
+| herdr-tidy | User | ~120 |
+| hyades-docker | User | ~210 |
+| loose | User | ~120 |
+| model-routing | User | ~140 |
+| orca-cli | User | ~210 |
+| orca-per-workspace-env | User | ~160 |
+| orchestration | User | ~180 |
+| paseo | User | ~40 |
+| paseo-advisor | User | ~80 |
+| paseo-committee | User | ~70 |
+| paseo-handoff | User | ~60 |
+| paseo-help | User | ~120 |
+| paseo-plugin | User | ~200 |
+| ralph-tui-create-beads | User | ~100 |
+| ralph-tui-create-beads-rust | User | ~110 |
+| ralph-tui-create-json | User | ~80 |
+| ralph-tui-orchestration | User | ~110 |
+| ralph-tui-prd | User | ~100 |
+| reorg-orca | User | < 20 |
+| report | User | ~100 |
+| research | User | ~130 |
+| session-finder | User | ~150 |
+| session-handoff | User | ~120 |
+| setup-modern-cli | User | < 20 |
+| sipb-llm-bench | User | ~130 |
+| siyuan | User | < 20 |
+| siyuan-article-import | User | < 20 |
+| siyuan-excalidraw | User | < 20 |
+| siyuan-markdown | User | < 20 |
+| skillopt-sleep | User | < 20 |
+| skillopt-sleep-learned | User | < 20 |
+| skills-everywhere | User | ~70 |
+| steps | User | ~120 |
+| sudo-secretspec | User | ~150 |
+| teach | User | < 20 |
+| tell-chief-of-staff | User | < 20 |
+| terminus-kira | User | < 20 |
+| todo | User | ~110 |
+| fastino-glide | Project | < 20 |
+| helm-all | User | < 20 |
+| orca-tidy | User | < 20 |
+| resume | User | ~20 |
+| session-finder-all | User | ~20 |
+| graph-audit | Project | < 20 |
+| composio:composio-connect | Plugin (composio) | < 20 |
+| claude-powerline:powerline | Plugin (claude-powerline) | < 20 |
+| typesafe:typesafe-ai | Plugin (typesafe) | < 20 |
+| dataviz | Built-in | ~480 |
+| update-config | Built-in | ~240 |
+| keybindings-help | Built-in | ~80 |
+| code-review | Built-in | ~330 |
+| simplify | Built-in | ~60 |
+| fewer-permission-prompts | Built-in | ~60 |
+| loop | Built-in | ~120 |
+| schedule | Built-in | ~130 |
+| claude-api | Built-in | ~360 |
+| workflow-authoring | Built-in | ~80 |
+| run | Built-in | ~120 |
+| plugin-authoring | Built-in | ~90 |
+| init | Built-in | < 20 |
+| security-review | Built-in | < 20 |
+| built-in-browser | claude.ai sync | < 20 |
+| chrome-browser | claude.ai sync | < 20 |
+| anthropic-skills:computer-use | claude.ai sync | < 20 |
+| anthropic-skills:deep-research | claude.ai sync | < 20 |
+| doc-coauthoring | claude.ai sync | < 20 |
+| docs | claude.ai sync | < 20 |
+| docx | claude.ai sync | < 20 |
+| google-workspace | claude.ai sync | < 20 |
+| import-memory | claude.ai sync | < 20 |
+| learn | claude.ai sync | < 20 |
+| morning | claude.ai sync | < 20 |
+| pdf | claude.ai sync | < 20 |
+| pptx | claude.ai sync | < 20 |
+| skill-creator | claude.ai sync | < 20 |
+| web-artifacts-builder | claude.ai sync | < 20 |
+| xlsx | claude.ai sync | < 20 |
+

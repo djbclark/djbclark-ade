@@ -1,0 +1,26 @@
+# Budgets for bin/context-budget-check: what a fresh Claude Code session may cost before the first
+# prompt, in tokens, as `claude -p "/context"` reports it (2026-10-18; Fable review of the
+# cache-cost report, section 4.8). Every number below is a ceiling on one /context row; "total" is
+# its "Tokens:" figure (deferred MCP tools, free space and the autocompact buffer are not in it).
+
+# Directories to measure, in order. Each is a place a session starts; the project CLAUDE.md,
+# auto-memory MEMORY.md and project skills differ per directory, so the numbers do too.
+dirs = ["~/src/djbclark-ade", "~"]
+
+[budget]
+total = 32000
+memory = 9000
+skills = 7500
+mcp_tools = 6500
+mcp_instructions = 5000
+grow_alert = 2000       # a rise of this many tokens in any row (or the total) since the last file pages
+
+# Overrides for one directory (any key above; the rest are inherited from [budget]).
+# "~" loads djbclark's home instructions twice: ~/.claude/CLAUDE.md and ~/AGENTS.md are the same
+# file (home-agents.md, 8.4k each), plus a 8.1k auto-memory MEMORY.md of its own. That is the
+# measured 2026-10-18 floor (memory 25k, total 45.9k) less what the planned trim of home-agents.md
+# should save (about 2.8k each). Lower these to the [budget] defaults once the duplicate load and
+# the home MEMORY.md are fixed; until then the growth alert is what guards "~".
+[budget."~"]
+total = 42000
+memory = 20000

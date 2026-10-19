@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Nightly fresh-session context budget check (bin/context-budget-check, config/context-budget.toml).
+     Installed by `context-budget-check install`, 03:50 daily, after skillopt-night (03:30). It runs
+     `claude -p "/context"` in each configured directory (no model request), writes
+     ~/.local/state/context-budget/<date>.json and sends one hermes-ping line on a budget breach
+     or a rise of 2k tokens or more in any row. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.context-budget</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/djbclark/src/djbclark-ade/bin/context-budget-check</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/djbclark/.local/bin:/Users/djbclark/.opencodex/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/Users/djbclark/src/djbclark-ade</string>
+  <key>RunAtLoad</key><false/>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>3</integer>
+    <key>Minute</key><integer>50</integer>
+  </dict>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>StandardOutPath</key><string>/Users/djbclark/.local/state/context-budget/launchd.out</string>
+  <key>StandardErrorPath</key><string>/Users/djbclark/.local/state/context-budget/launchd.err</string>
+</dict>
+</plist>

@@ -1,0 +1,437 @@
+#!/usr/bin/env python3
+"""context-budget-check: the nightly guard on what a fresh Claude Code session costs before the first prompt.
+
+    context-budget-check [--from-file PATH [--dir LABEL]] [--dry-run] [--config PATH]
+                         [--state-dir DIR] [--date YYYY-MM-DD] [--json]
+    context-budget-check install | uninstall
+
+Runs `claude -p "/context"` in each directory of config/context-budget.toml (default
+~/src/djbclark-ade and ~; a /context call makes no model request), parses the category table plus
+the Memory files, MCP tools, Skills and Custom agents sub-tables, writes
+~/.local/state/context-budget/<YYYY-MM-DD>.json, and compares each directory with
+
+1. its budget (total, memory, skills, mcp_tools, mcp_instructions, in tokens), and
+2. the most recent earlier file: any watched row (or the total) up >= grow_alert tokens.
+
+On a breach or a rise it sends one `hermes-ping` line per run, naming the biggest offender:
+
+    djbclark-ade: fresh-session context 46.5k (budget 32k) in ~/src/djbclark-ade: memory +3k since 2026-10-17, top: ~/.claude/CLAUDE.md
+
+Why it exists: the 2026-10-10 preamble trim regrew by 2026-10-18 through three channels at once
+(CLAUDE.md edits, `bl skill update` re-linking skills, new MCP servers); nobody notices a 2k rise.
+
+--from-file parses a saved /context output instead of running claude (tests, dry runs); --dir names
+the directory it stands for (default the first in the config). --dry-run prints the ping instead of
+sending it and writes no state. The `claude` and `hermes-ping` paths come from CONTEXT_BUDGET_CLAUDE
+and CONTEXT_BUDGET_PING. install/uninstall load or remove the launchd job
+(launchd/com.djbclark.context-budget.plist, 03:50 daily, after skillopt-night at 03:30);
+CONTEXT_BUDGET_NO_INSTALL=1 only prints the plan.
+
+Exit: 0 every directory within budget and not grown, 1 a breach or a rise (pinged), 2 bad usage,
+3 a directory could not be measured (claude failed or the output did not parse). A directory that
+cannot be measured pings too when nothing else does, so a broken job is not silent.
+"""
+import argparse
+import contextlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tomllib
+from datetime import date as _date
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+CONFIG = REPO / "config" / "context-budget.toml"
+LABEL = "com.djbclark.context-budget"
+PLIST_SRC = REPO / "launchd" / f"{LABEL}.plist"
+CLAUDE_TIMEOUT_S = 180
+PING_PREFIX = "djbclark-ade"
+
+# Category-table rows that are not part of the fresh-session total, or are not worth growth alerts.
+# Deferred rows cost names only and sit outside the total; "messages" is the /context prompt itself.
+NOT_COUNTED = {"free_space", "autocompact_buffer"}
+NOT_WATCHED = NOT_COUNTED | {"messages"}
+# /context category name (lower-cased) -> row key; budget keys in the config use these.
+ROW_KEYS = {
+    "system prompt": "system_prompt",
+    "mcp tools": "mcp_tools",
+    "mcp server instructions": "mcp_instructions",
+    "custom agents": "custom_agents",
+    "memory files": "memory",
+    "skills": "skills",
+    "system tools": "system_tools",
+    "messages": "messages",
+    "free space": "free_space",
+    "autocompact buffer": "autocompact_buffer",
+}
+BUDGET_KEYS = ("total", "memory", "skills", "mcp_tools", "mcp_instructions")
+DEFAULT_BUDGET = {"total": 32000, "memory": 9000, "skills": 7500, "mcp_tools": 6500,
+                  "mcp_instructions": 5000, "grow_alert": 2000}
+
+
+class ParseError(Exception):
+    pass
+
+
+# ---------------------------------------------------------------- parsing
+
+def tokens(cell: str) -> int:
+    """'2.5k' -> 2500, '875' -> 875, '~170' -> 170, '< 20' -> 0, '1.2M' -> 1200000."""
+    s = cell.strip().lstrip("~").strip()
+    if s.startswith("<"):
+        return 0
+    m = re.fullmatch(r"([\d,]*\.?\d+)\s*([kKmM]?)", s)
+    if not m:
+        raise ParseError(f"not a token count: {cell!r}")
+    n = float(m.group(1).replace(",", ""))
+    return round(n * {"": 1, "k": 1_000, "m": 1_000_000}[m.group(2).lower()])
+
+
+def row_key(name: str) -> str:
+    n = name.strip().lower()
+    deferred = n.endswith("(deferred)")
+    n = n.removesuffix("(deferred)").strip()
+    key = ROW_KEYS.get(n) or re.sub(r"[^a-z0-9]+", "_", n).strip("_")
+    return key + "_deferred" if deferred else key
+
+
+def tables(text: str) -> dict[str, list[list[str]]]:
+    """'### Heading' -> its table body rows (header and separator dropped), cells stripped."""
+    out: dict[str, list[list[str]]] = {}
+    head = None
+    for line in text.splitlines():
+        if line.startswith("### "):
+            head = line[4:].strip()
+            out[head] = []
+        elif head is not None and line.startswith("|"):
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if all(re.fullmatch(r":?-{2,}:?", c) for c in cells):
+                continue
+            out[head].append(cells)
+    return {h: rows[1:] for h, rows in out.items() if rows}  # rows[0] is the header
+
+
+def shorten(path: str) -> str:
+    h = str(Path.home())
+    return "~" + path[len(h):] if path == h or path.startswith(h + "/") else path
+
+
+def parse_context(text: str) -> dict:
+    """A /context text output -> the entry stored per directory. ParseError when it is not one."""
+    m = re.search(r"\*\*Tokens:\*\*\s*([\d.,]+[kKmM]?)\s*/\s*([\d.,]+[kKmM]?)", text)
+    if not m:
+        raise ParseError("no '**Tokens:** N / WINDOW' line: not /context output")
+    mm = re.search(r"\*\*Model:\*\*\s*(\S+)", text)
+    tb = tables(text)
+    cat = tb.get("Estimated usage by category")
+    if not cat:
+        raise ParseError("no 'Estimated usage by category' table")
+    categories = {row_key(r[0]): tokens(r[1]) for r in cat if len(r) >= 2}
+    # /context omits a row that is zero (no always-loaded MCP tools: no "MCP tools" row), so a
+    # missing row reads as 0; a table without any of the rows that matter is not /context's.
+    if not {"memory", "skills", "system_prompt"} & categories.keys():
+        raise ParseError("category table has none of the Memory files, Skills or System prompt rows")
+
+    def sub(heading: str, ncols: int) -> list[list[str]]:
+        return [r for r in tb.get(heading, []) if len(r) >= ncols]
+
+    return {
+        "model": mm.group(1) if mm else None,
+        "total": tokens(m.group(1)),
+        "window": tokens(m.group(2)),
+        "categories": categories,
+        "memory_files": [{"type": r[0], "path": shorten(r[1]), "tokens": tokens(r[2])}
+                         for r in sub("Memory Files", 3)],
+        "mcp_tools": [{"tool": r[0], "server": r[1], "tokens": tokens(r[2])}
+                      for r in sub("MCP Tools", 3)],
+        "skills": [{"skill": r[0], "source": r[1], "tokens": tokens(r[2])}
+                   for r in sub("Skills", 3)],
+        "agents": [{"agent": r[0], "source": r[1], "tokens": tokens(r[2])}
+                   for r in sub("Custom Agents", 3)],
+    }
+
+
+# ---------------------------------------------------------------- measuring
+
+def expand(label: str) -> Path:
+    return Path(os.path.expanduser(label))
+
+
+def measure(label: str) -> dict:
+    claude = os.environ.get("CONTEXT_BUDGET_CLAUDE") or shutil.which("claude") or "claude"
+    cwd = expand(label)
+    if not cwd.is_dir():
+        raise ParseError(f"{cwd} is not a directory")
+    try:
+        # --no-session-persistence: no transcript file per night. stderr holds the connector warnings.
+        r = subprocess.run([claude, "-p", "/context", "--output-format", "text",
+                            "--no-session-persistence"], cwd=cwd, capture_output=True, text=True,
+                           timeout=CLAUDE_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise ParseError(f"claude did not run in {label}: {e}") from e
+    if r.returncode != 0:
+        raise ParseError(f"claude exited {r.returncode} in {label}: {(r.stderr or r.stdout).strip()[-200:]}")
+    entry = parse_context(r.stdout)
+    entry["cwd"] = str(cwd)
+    return entry
+
+
+# ---------------------------------------------------------------- config and state
+
+def load_config(path: Path) -> dict:
+    cfg = tomllib.loads(path.read_text()) if path.exists() else {}
+    return {"dirs": cfg.get("dirs") or ["~/src/djbclark-ade", "~"], "budget": cfg.get("budget") or {}}
+
+
+def budget_for(cfg: dict, label: str) -> dict:
+    """Defaults, then [budget], then [budget."<dir>"] (a table under [budget] keyed by the dir)."""
+    b = dict(DEFAULT_BUDGET)
+    top = cfg["budget"]
+    b.update({k: v for k, v in top.items() if not isinstance(v, dict)})
+    b.update(top.get(label) or {})
+    return b
+
+
+def state_dir(arg: str | None) -> Path:
+    return Path(arg or os.environ.get("CONTEXT_BUDGET_STATE_DIR")
+                or Path.home() / ".local" / "state" / "context-budget")
+
+
+def previous(sdir: Path, today: str) -> tuple[str | None, dict]:
+    """The latest state file dated before today: (its date, its content)."""
+    days = sorted(p.stem for p in sdir.glob("????-??-??.json") if p.stem < today) if sdir.is_dir() else []
+    for d in reversed(days):
+        with contextlib.suppress(OSError, ValueError):
+            return d, json.loads((sdir / f"{d}.json").read_text())
+    return None, {}
+
+
+def write_state(sdir: Path, today: str, dirs: dict) -> Path:
+    sdir.mkdir(parents=True, exist_ok=True)
+    dest = sdir / f"{today}.json"
+    # A same-day rerun keeps the directories it did not remeasure this time.
+    old = {}
+    with contextlib.suppress(OSError, ValueError):
+        old = json.loads(dest.read_text()).get("dirs", {})
+    tmp = dest.with_name(dest.name + ".tmp")
+    tmp.write_text(json.dumps({"date": today, "dirs": {**old, **dirs}}, indent=1) + "\n")
+    os.replace(tmp, dest)
+    return dest
+
+
+# ---------------------------------------------------------------- comparison
+
+def rows(entry: dict) -> dict[str, int]:
+    """The rows that add up to the fresh-session total, plus the total itself."""
+    r = {k: v for k, v in entry["categories"].items()
+         if k not in NOT_WATCHED and not k.endswith("_deferred")}
+    r["total"] = entry["total"]
+    return r
+
+
+def items(entry: dict, row: str) -> dict[str, int]:
+    """Name -> tokens of what makes up a row, for the 'top:' clause."""
+    if row == "memory":
+        return {m["path"]: m["tokens"] for m in entry["memory_files"]}
+    if row == "skills":
+        return {s["skill"]: s["tokens"] for s in entry["skills"]}
+    if row == "custom_agents":
+        return {a["agent"]: a["tokens"] for a in entry["agents"]}
+    if row in ("mcp_tools", "mcp_instructions"):
+        # The table lists deferred tools too and instructions are not itemised, so the best
+        # per-server figure is the sum of the table: the growth comparison is what narrows it.
+        by: dict[str, int] = {}
+        for t in entry["mcp_tools"]:
+            by[t["server"]] = by.get(t["server"], 0) + t["tokens"]
+        return by
+    return {}
+
+
+def top_item(cur: dict, prev: dict | None, row: str) -> str:
+    now = items(cur, row)
+    if not now:
+        return row
+    if prev is not None:
+        before = items(prev, row)
+        grown = {k: v - before.get(k, 0) for k, v in now.items()}
+        k, d = max(grown.items(), key=lambda kv: kv[1])
+        if d > 0:
+            return f"{k} +{fmt(d)}"
+    k, v = max(now.items(), key=lambda kv: kv[1])
+    return f"{k} {fmt(v)}"
+
+
+def fmt(n: int) -> str:
+    """4500 -> '4.5k', 32000 -> '32k', 875 -> '875'."""
+    if abs(n) < 1000:
+        return str(n)
+    s = f"{n / 1000:.1f}".removesuffix(".0")
+    return s + "k"
+
+
+def compare(label: str, cur: dict, prev: dict | None, prev_date: str | None, budget: dict) -> list[dict]:
+    """Alerts for one directory: breaches (budgeted rows) and rises (watched rows and total)."""
+    alerts: list[dict] = []
+    now = rows(cur)
+    before = rows(prev) if prev else {}
+    for key in BUDGET_KEYS:
+        if key in budget and now.get(key, 0) > budget[key]:
+            alerts.append({"dir": label, "row": key, "kind": "breach", "value": now.get(key, 0),
+                           "budget": budget[key], "over": now.get(key, 0) - budget[key]})
+    if prev:
+        for key, v in now.items():
+            d = v - before.get(key, 0)
+            if d >= budget["grow_alert"]:
+                alerts.append({"dir": label, "row": key, "kind": "growth", "value": v, "delta": d,
+                               "since": prev_date})
+    return alerts
+
+
+def explain(alert: dict, cur: dict, prev: dict | None) -> tuple[str, str]:
+    """('<row> clause', '<top item>') for one alert; a total alert names its biggest row."""
+    row = alert["row"]
+    named = row
+    if row == "total":
+        now, before = rows(cur), (rows(prev) if prev else {})
+        cand = {k: v - before.get(k, 0) for k, v in now.items() if k != "total"} if prev else \
+               {k: v for k, v in now.items() if k != "total"}
+        named = max(cand, key=cand.get)
+    top = top_item(cur, prev, named)
+    if row != named:
+        top = f"{named}: {top}"
+    return named, top
+
+
+# ---------------------------------------------------------------- pinging
+
+def ping_text(alerts: list[dict], results: dict, prevs: dict, budgets: dict, failures: dict) -> str:
+    if not alerts:
+        label, why = next(iter(failures.items()))
+        return f"{PING_PREFIX}: could not measure fresh-session context in {label}: {why[:160]}"
+    # Worst first: breaches by overage, then rises by size.
+    # A named row beats the total, which the headline already shows.
+    first = sorted(alerts, key=lambda a: (a["kind"] != "breach", a["row"] == "total",
+                                          -a.get("over", a.get("delta", 0))))[0]
+    label = first["dir"]
+    cur, prev = results[label], prevs.get(label)
+    _, top = explain(first, cur, prev)
+    parts = []
+    if first["kind"] == "growth":
+        parts.append(f"{first['row']} +{fmt(first['delta'])} since {first['since']}")
+        if first["row"] in budgets[label] and first["value"] > budgets[label][first["row"]]:
+            parts[0] += f" ({fmt(first['value'])} > {fmt(budgets[label][first['row']])})"
+    else:
+        parts.append(f"{first['row']} {fmt(first['value'])} > {fmt(first['budget'])}")
+    extra = len(alerts) - 1
+    tail = f" (+{extra} more)" if extra else ""
+    return (f"{PING_PREFIX}: fresh-session context {fmt(cur['total'])} (budget {fmt(budgets[label]['total'])}) "
+            f"in {label}: {parts[0]}, top: {top}{tail}")
+
+
+def send_ping(text: str) -> int:
+    ping = os.environ.get("CONTEXT_BUDGET_PING") or str(Path.home() / ".local" / "bin" / "hermes-ping")
+    try:
+        return subprocess.run([ping, text], capture_output=True, timeout=120).returncode
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"context-budget-check: ping failed: {e}", file=sys.stderr)
+        return 1
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_run(a: argparse.Namespace) -> int:
+    cfg = load_config(Path(a.config) if a.config else CONFIG)
+    today = a.date or _date.today().isoformat()
+    sdir = state_dir(a.state_dir)
+    pdate, pstate = previous(sdir, today)
+    results: dict[str, dict] = {}
+    failures: dict[str, str] = {}
+    labels = [a.dir or cfg["dirs"][0]] if a.from_file else cfg["dirs"]
+    for label in labels:
+        try:
+            text = Path(a.from_file).read_text() if a.from_file else None
+            results[label] = parse_context(text) if text is not None else measure(label)
+            results[label].setdefault("cwd", str(expand(label)))
+        except (ParseError, OSError) as e:
+            failures[label] = str(e)
+            print(f"context-budget-check: {label}: {e}", file=sys.stderr)
+    budgets = {k: budget_for(cfg, k) for k in labels}
+    prevs = {k: pstate.get("dirs", {}).get(k) for k in labels}
+    alerts: list[dict] = []
+    for label, entry in results.items():
+        alerts += compare(label, entry, prevs[label], pdate, budgets[label])
+    for label, entry in results.items():
+        b = budgets[label]
+        print(f"{label}: total {fmt(entry['total'])}/{fmt(b['total'])} "
+              + " ".join(f"{k} {fmt(rows(entry).get(k, 0))}/{fmt(b[k])}" for k in BUDGET_KEYS[1:]))
+    for al in alerts:
+        what = (f"+{fmt(al['delta'])} since {al['since']}" if al["kind"] == "growth"
+                else f"{fmt(al['value'])} > budget {fmt(al['budget'])}")
+        print(f"  {al['kind'].upper()} {al['dir']}: {al['row']} {what}")
+    for label, why in failures.items():
+        print(f"  UNMEASURED {label}: {why}")
+    text = ping_text(alerts, results, prevs, budgets, failures) if (alerts or failures) else None
+    if text:
+        if a.dry_run:
+            print(f"would ping: {text}")
+        else:
+            send_ping(text)
+    if results and not a.dry_run:
+        print(f"wrote {write_state(sdir, today, results)}")
+    if a.json:
+        print(json.dumps({"date": today, "dirs": results, "alerts": alerts, "failures": failures}, indent=1))
+    return 3 if failures else (1 if alerts else 0)
+
+
+def launch_agents() -> Path:
+    return Path(os.environ.get("CONTEXT_BUDGET_LAUNCH_AGENTS") or Path.home() / "Library" / "LaunchAgents")
+
+
+def _launchctl(*argv: str) -> int:
+    return subprocess.run(["launchctl", *argv], check=False, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode
+
+
+def cmd_install(a: argparse.Namespace) -> int:
+    dest = launch_agents() / PLIST_SRC.name
+    domain = f"gui/{os.getuid()}"
+    if os.environ.get("CONTEXT_BUDGET_NO_INSTALL") == "1":
+        verb = f"launchctl bootstrap {domain} {dest}" if a.command == "install" else f"launchctl bootout {domain}/{LABEL}; remove {dest}"
+        print(f"would {'copy ' + str(PLIST_SRC) + ' -> ' + str(dest) + '; ' if a.command == 'install' else ''}{verb}")
+        return 0
+    _launchctl("bootout", f"{domain}/{LABEL}")
+    if a.command == "uninstall":
+        dest.unlink(missing_ok=True)
+        print(f"removed {dest}")
+        return 0
+    state_dir(None).mkdir(parents=True, exist_ok=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".tmp")
+    shutil.copyfile(PLIST_SRC, tmp)
+    os.replace(tmp, dest)
+    rc = _launchctl("bootstrap", domain, str(dest))
+    print(f"installed {dest}; bootstrap rc={rc}")
+    return rc
+
+
+def main(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="context-budget-check", description=__doc__.split("\n\n")[0])
+    p.add_argument("command", nargs="?", choices=["run", "install", "uninstall"], default="run")
+    p.add_argument("--from-file", help="parse this saved /context output instead of running claude")
+    p.add_argument("--dir", help="config directory label the --from-file output stands for")
+    p.add_argument("--dry-run", action="store_true", help="print the ping, send nothing, write no state")
+    p.add_argument("--config", help=f"budget file (default {CONFIG})")
+    p.add_argument("--state-dir", help="where <date>.json files live (default ~/.local/state/context-budget)")
+    p.add_argument("--date", help="today's date, YYYY-MM-DD (tests)")
+    p.add_argument("--json", action="store_true", help="also print the parsed entries and alerts as JSON")
+    a = p.parse_args(argv)
+    if a.command in ("install", "uninstall"):
+        return cmd_install(a)
+    return cmd_run(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
