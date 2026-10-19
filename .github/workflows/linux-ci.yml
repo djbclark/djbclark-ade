@@ -26,6 +26,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - name: GNU tool aliases (the Mac code calls gsed, gdate, ghead, ...; Linux's own tools are the GNU ones)
+        run: |
+          for t in sed grep awk date stat tr wc head tail seq id sort cp tee readlink realpath du split cut touch mktemp ls find; do
+            p=$(command -v "$t") && sudo ln -sf "$p" "/usr/local/bin/g$t"
+          done
+          sudo ln -sf "$(command -v timeout)" /usr/local/bin/gtimeout
       - name: Git identity (tests make commits)
         run: |
           git config --global user.name "ci"
