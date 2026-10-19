@@ -10,6 +10,12 @@ description: >-
 
 # Baton — resume a task workspace from its Tier 1 pointer
 
+Since 2026-10-19 `bin/self-slash "/new"` (also `/clear`, `/reset`) queues
+`/baton` into the fresh session itself (`--then`, default `/baton`; `--no-then`
+turns it off), so after a handoff nobody types this; a `/baton` that arrives
+right after a `/clear` is that follow-up (`~/.local/state/self-slash.log`
+shows `then: /baton` and `sent /baton`), not a request for anything else.
+
 This is a thin entry point, not a separate protocol. Follow the
 `session-handoff` skill's **Reader protocol** section exactly (read
 `SESSION_LOG.md` if present, check sidecars newer than `updated_at`, run

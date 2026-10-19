@@ -646,7 +646,8 @@ method that runs the waves.
     2026-10-15; the PreCompact hook writes the Tier 1 checkpoint). In a herdr
     pane or Orca terminal compact earlier, at a natural boundary, with
     `self-slash "/compact <focus>"`; on a topic change run the `handoff` skill,
-    then `/new`. Never ask the operator to do either unless `self-slash`
+    then `self-slash "/new"`, which also sends `/baton` into the fresh session
+    (2026-10-19). Never ask the operator to do either unless `self-slash`
     refuses (`effort-routing`, *What actually dominates cost*).
 
 **Where the numbers live (2026-10-18).** The routing policy is data, and

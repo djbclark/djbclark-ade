@@ -941,5 +941,6 @@ single lookup goes to a minimum-spec Agent sub-agent instead (`effort-routing`).
 The orchestrator's own context is also a cost: Claude Code compacts it by itself
 at 400k tokens (`autoCompactWindow`), and in a herdr pane, Orca terminal or Paseo agent the
 orchestrator compacts earlier at a wave boundary with `self-slash "/compact
-<focus>"`, or runs the `handoff` skill then `/new` on a topic change, without
+<focus>"`, or runs the `handoff` skill then `self-slash "/new"` on a topic change
+(the fresh session gets `/baton` from self-slash itself, 2026-10-19), without
 asking.

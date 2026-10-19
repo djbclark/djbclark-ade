@@ -221,6 +221,8 @@ def _boundary_message(total):
         f"{new} instead of /compact: a fresh session re-writes ~46k, a "
         "compaction re-writes ~72k plus a summariser call and leaves ~104k "
         "behind. Do not compact mid-task."
+        + (" self-slash then sends /baton into the fresh session itself (2026-10-19)."
+           if _can_self_slash() else "")
     )
 
 
@@ -237,7 +239,8 @@ def _ask_message(total, growth, repeat):
             "current task is finished, same topic or not: run the `handoff` "
             "skill (it writes the Tier 2 document), then "
             "~/src/djbclark-ade/bin/self-slash \"/new\" ONCE and end the turn "
-            "(a fresh session re-writes ~46k). Only if the work must continue "
+            "(a fresh session re-writes ~46k; self-slash then sends /baton into "
+            "the fresh session itself, 2026-10-19). Only if the work must continue "
             "in-context: save what the next turn needs, run self-slash "
             "\"/compact <focus>\" ONCE and end the turn. Only if self-slash "
             "refuses (a draft on the input line) ask the operator for /new or "

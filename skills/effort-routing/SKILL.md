@@ -110,8 +110,9 @@ it. Verified against
   `~/.claude/settings.json` (every model, every host; the PreCompact hook
   writes the Tier 1 checkpoint first), and `context_size_nudge.py` tells a
   herdr or Orca session to compact itself earlier at a natural boundary via
-  `self-slash "/compact <focus>"`, or to run the `handoff` skill then `/new`
-  on a topic change. Do not ask the operator for either.
+  `self-slash "/compact <focus>"`, or to run the `handoff` skill then
+  `self-slash "/new"` on a topic change (it sends `/baton` into the fresh
+  session itself, 2026-10-19). Do not ask the operator for either.
 - **Subagents isolate verbose work.** Test runs, log processing and doc
   fetches keep their output in the subagent's context and return only a
   summary. This is why dispatch beats doing rote work inline, independent of
