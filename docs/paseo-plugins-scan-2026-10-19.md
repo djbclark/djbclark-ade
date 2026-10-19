@@ -177,9 +177,13 @@ then `paseo daemon reload`. Status from `paseo plugin ls --json` afterwards:
 | twofado | `npm:@xpufx/paseo-twofado` 0.1.5 (same) | running |
 | continuity | registry and `npm:paseo-continuity` 0.2.1 | build failed: esbuild `paseo-plugin-server-runtime-boundary` cannot resolve type dependency `@getpaseo/client` from `server/failover.ts` |
 | agents-dash-list | registry and `git:panrafal/paseo-plugins:agents-dash-list` | build failed: same error from `client/dash-surface.tsx` |
-| fresh-worktrees | registry and `npm:@omercnet/paseo-fresh-worktrees` 3.0.0 | refused: requires Paseo `^0.11.0`, daemon is 0.12.0 |
+| fresh-worktrees | registry and `npm:@omercnet/paseo-fresh-worktrees` 3.0.0 refused (requires Paseo `^0.11.0`); `npm:@omercnet/paseo-fresh-worktrees@next` 3.0.0-next.266.1 allows `^0.12.0` | running (from the `next` tag) |
 | telegram | registry `daaaaave/telegram` | refused: requires Paseo `>=0.11.2 <0.12.0` |
 
-The two build failures look like one Paseo 0.12.0 issue (plugins that import `@getpaseo/client`
-types without declaring it); the two refusals are plugin version pins. Both are upstream
-items, see `docs/upstream-issues.md` candidates and the queue.
+The two build failures are plugin-side: both declare `@getpaseo/client` only in
+`devDependencies` with no `build` step, and getpaseo/paseo#5405 and #4957 (closed) say the
+daemon rejects that deliberately; the fix is `"build": [["npm", "ci"]]` in the plugin manifest.
+Issues filed 2026-10-19 (none existed): keefeere/paseo-continuity#2, panrafal/paseo-plugins#13,
+omercnet/paseo-plugins#361 (stable 3.0.0 pin; `main` and the npm `next` tag already allow
+0.12), Daaaaave/paseo-telegram#1. Drafts and URLs in `docs/upstream-issues.md`. Seven of the
+ten trial plugins run.
