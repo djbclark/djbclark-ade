@@ -976,7 +976,7 @@ list. Found one unrelated closed question ("docker的siyuan如何配置？") and
 (#2, English README). Nothing on either defect. **Filed 2026-10-12:**
 [zhiluop/siyuan-skills#3](https://github.com/zhiluop/siyuan-skills/issues/3).
 
-## graft — the per-prompt pack has no opt-out, and `graft init` re-adds it (draft comment for trailhq/Trail-Code#497, not posted)
+## graft — the per-prompt pack has no opt-out, and `graft init` re-adds it (posted 2026-10-18: https://github.com/trailhq/Trail-Code/issues/497#issuecomment-6257408007)
 
 **Where:** a comment on https://github.com/trailhq/Trail-Code/issues/497 ("graft init wires Claude Code hooks
 at user and project level, so every hook runs twice"). Searched 2026-10-18 in `trailhq/Trail-Code`:
@@ -1006,4 +1006,4 @@ the per-prompt pack itself.
 > `graft-hooks.cjs` entries from a project's `.claude/settings.json` when the user level already has
 > them.
 
-**Status:** draft; post only with djbclark's yes.
+**Status:** posted 2026-10-18 with djbclark's yes: https://github.com/trailhq/Trail-Code/issues/497#issuecomment-6257408007
