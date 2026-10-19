@@ -16,8 +16,8 @@ mcp_instructions = 5000
 grow_alert = 2000       # a rise of this many tokens in any row (or the total) since the last file pages
 
 # Overrides for one directory (any key above; the rest are inherited from [budget]).
-# "~" carries its own auto-memory index (site-private/memory/MEMORY.md, 8.1k) on top of the 5.7k
-# global CLAUDE.md: memory 13.8k measured 2026-10-18, after claudeMdExcludes stopped ~/AGENTS.md
-# loading the same file a second time. Lower it once that MEMORY.md is condensed.
+# "~" also loads its auto-memory index (site-private/memory/MEMORY.md): memory 9.8k measured
+# 2026-10-18 after that index was condensed (8.1k -> 4.1k) and claudeMdExcludes stopped ~/AGENTS.md
+# loading the global instructions a second time. A little headroom over the 10k default.
 [budget."~"]
-memory = 15000
+memory = 12000
