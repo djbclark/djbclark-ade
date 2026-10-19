@@ -3,6 +3,35 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Cloud-agent readiness: Codex Cloud environment, Cursor API key (ruling 2026-10-19)
+
+`docs/ade-everywhere-proposal.md` §11.5 rules that paid-for cloud agents are used first for
+slices that can leave the Mac. Two need djbclark once: (1) create a Codex Cloud environment for
+`djbclark-ade` on the web (no non-interactive path; then `codex cloud exec --env <ID>` works);
+(2) a Cursor user API key into the secret backend (`sudo-secretspec`), or install the Cursor
+GitHub app on the repo so `@cursor` on an issue launches a Cloud Agent. Also verify the Max
+plan's monthly API credits and whether anything draws them.
+
+## Buy a Jev plan before the factory's merge gate goes live (SF-Q10, 2026-10-19)
+
+`bin/jev` runs in shadow mode. Phase F's automatic merge (proposal §8 item 9.5) needs a live
+`merge_gate` decision; before F2b the lead prompts djbclark to buy a Jev or equivalent plan and
+set up access (`TYPESAFE_API_KEY` via `sudo-secretspec`).
+
+## Paseo Telegram plugin replaces Hermes's relay (SF-Q16, 2026-10-19)
+
+Decided: the Paseo Telegram plugin (`daaaaave/telegram`) becomes the phone surface. Blocked
+today: its registry version requires Paseo `>=0.11.2 <0.12.0` and the daemon is 0.12.0; wait
+for a compatible release, then one Phase F item re-points `hermes-ping`, the approval buttons
+and home rule 12, with Hermes's relay as the rollback.
+
+## Software factory, Phase F (decided 2026-10-19)
+
+Proposal §8 item 9 and §9.3. Starts after Phase 1's first PR. First slices: `bin/factory` F1
+orchestrator (claude sonnet, high), Jev `pick-seat`/`stuck-check`/`merge-gate` sites in shadow,
+the workspace adapter (cow + worktree). Pilot repo `djbclark-ade`, allowlist of small
+non-security tasks.
+
 ## A read-only codex advisor ends on its first refused escalation (found 2026-10-19)
 
 Under `acp-run codex --perm read-only` a shell command that needs network or writes is an

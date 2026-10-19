@@ -146,6 +146,9 @@ installed into `ade/skills` and carry uncommitted edits from Paseo's own refresh
    trusted host since Q18, off the Mac entirely (11.3). A local run goes through `bg` and never overlaps another
    heavy job (djbclark, 2026-10-19).
 
+**Paid-for capacity (added 2026-10-19).** Every entitlement already paid for is used, and
+cloud agents are preferred for slices that can run away from the Mac (§11.5).
+
 ## 4. Target shape
 
 ### 4.1 Repos
@@ -1129,6 +1132,37 @@ antigravity, auto against third-party inside Cursor), pace projections, state (`
 list, operator gates). The routing table therefore reads `aiuse`; Paseo's usage view is the
 operator's glance and the ADE plugin's quota pill should read `aiuse` rather than duplicate it
 (§7.3).
+
+### 11.5 Paid-for capacity: use all of it, cloud agents included (ruling 2026-10-19)
+
+Ruling (djbclark, 2026-10-19): make optimal use of every resource already paid for, cloud
+agents in particular, during this project and from now on. "Optimal" means: a slice goes to the
+cheapest eligible tier (§11.2) **and** to the execution place that costs the Mac nothing when
+one is included in the plan. Entitlements checked 2026-10-19 against the vendors' pages; re-probe
+monthly, they change.
+
+| Plan | Cloud execution included | How a slice is launched | Draws | Ready here? |
+|---|---|---|---|---|
+| Claude Max 20x | cloud sessions (`claude --cloud`, claude.ai/code, mobile, Routines); no VM charge | `claude --cloud --model <m> "<task>"` from the repo (clones the GitHub remote at the current branch, or uploads the checkout when no remote or no GitHub App); `claude -p "<msg>" --cloud <session-id>` to follow up; `--teleport` pulls it local | the same 5h and weekly windows as local use | yes: first session started 2026-10-19 (Linux pytest job, branch `ci/linux-pytest-job`) |
+| Claude Max | monthly API credits for the Claude API | the SDK or `ANTHROPIC_API_KEY` paths; an unused pool today | its own monthly credit | to verify: amount and whether anything draws it |
+| Codex, ChatGPT $100 plan | Codex Cloud tasks, no VM charge; cloud tasks use the allowance faster than local turns | `codex cloud exec --env <ENV_ID> --attempts 1-4 "<task>"`; `codex cloud list --json`, `status`, `diff`, `apply`; also `@codex` on a GitHub issue or PR | the Codex weekly window | needs one cloud environment created on the web for `djbclark-ade` (no non-interactive way to create one); `codex cloud list` returns none today |
+| Cursor Pro+ | Cloud Agents on every paid plan, API v1 in public beta; billed at API price for the chosen model against the included usage, then on-demand (on-demand must be enabled) | `POST https://api.cursor.com/v1/agents` with a user API key (`autoCreatePR`, `startingRef`); `@cursor` on a GitHub issue or PR; Automations on a schedule | the Cursor pool at API price, not the `auto` rate, so it drains faster than local `auto` | needs an API key in the secret backend or the Cursor GitHub app on the repo |
+| GitHub Copilot | coding agent (`gh agent-task`, preview) | off by ruling (§11.1); reserve only | premium requests | not used |
+| antigravity, z.ai GLM, Grok, OpenCode Go, omp | no included cloud agent found | local ACP only | | |
+
+Rules that follow:
+
+1. **A builder slice with a pushed base and a CI-verifiable result goes to a cloud session
+   first** (Claude cloud for `code`, Codex Cloud once its environment exists, Cursor Cloud
+   Agents for mechanical work when the pool allows), then to vps-primary, then to the Mac.
+   The factory's `paused-load` state (§8 item 9.6) re-routes to a cloud place before it waits.
+2. **Local-only work stays local**: anything that reads this machine's stores (Phase 0's
+   inventory, session capture, `aiuse` probes, Paseo daemon work).
+3. **The cloud agent never opens the PR**: it pushes a named branch; the lead runs the
+   `adversary` review and opens the PR (home rule 28), until the factory's PR opener takes over.
+4. `aiuse` learns a `cloud` field per provider (included or metered, launch command, ready
+   state) so `route_agent.py plan` can prefer a cloud place; until then this table is the
+   source and is dated.
 
 ## 12. Responses to the reviews
 
