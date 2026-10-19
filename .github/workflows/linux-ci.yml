@@ -37,7 +37,5 @@ jobs:
           git config --global user.name "ci"
           git config --global user.email "ci@example.invalid"
           git config --global init.defaultBranch master
-      - name: DEBUG
-        run: |
-          env | sort | grep -E "XDG|HOME|OPENCODE|PATH" || true
-          uv run --no-project --with pytest python -m pytest -q -vv -p no:cacheprovider tests/test_acp_run_strip.py -k opencode_deny_gets 2>&1 | tail -60
+      - name: Run pytest
+        run: uv run --no-project --with pytest python -m pytest -q tests/ -p no:cacheprovider
