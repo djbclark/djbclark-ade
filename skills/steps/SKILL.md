@@ -68,6 +68,11 @@ Shared rules for every prompt, whichever tool:
 4. **Say what it is.** The question is not a title. Lead with position (`2/4`),
    then one or two sentences: what the item is, what it does, and why a choice
    is needed. Longer background is a short prose line *before* the call.
+5. **Anything he may click, copy or paste goes in that prose line, as a
+   markdown link** (`[label](url)`), never inside the question or an option:
+   Paseo's question card is neither selectable nor linkified
+   ([getpaseo/paseo#3164](https://github.com/getpaseo/paseo/issues/3164);
+   djbclark, 2026-10-19). The card carries only the decision text.
 
 ### 2a. `AskUserQuestion` (arrow keys)
 
