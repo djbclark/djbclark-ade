@@ -62,9 +62,9 @@ def probe_tool_calls() -> dict[str, object]:
         out = {k: mod.reply_failure(v[0], v[1], "", "deny") for k, v in cases.items()}
         out["msg_read_only"] = mod.reply_failure(cases["fable_final"][0], 0, "", "read-only")
         # the tripwire and the permission answer per perm mode and tool kind
-        def trips(perm, kind, status="completed"):
+        def trips(perm, kind, status="completed", agent="claude"):
             c = mod.RunClient(io.StringIO(), perm, "/tmp")
-            c.exempt_kinds = frozenset(mod.READONLY_KINDS) if perm == "read-only" else frozenset()
+            c.exempt_kinds = mod.tripwire_exempt_kinds(agent, perm)
             c.check_tripwire(types.SimpleNamespace(
                 tool_call_id="1", kind=kind, status=status, title=kind))
             return bool(c.tripped)
@@ -73,6 +73,11 @@ def probe_tool_calls() -> dict[str, object]:
             return c.decide(types.SimpleNamespace(kind=kind, title=title))
         out["trip"] = {f"{p}/{k}": trips(p, k) for p in ("deny", "read-only", "all")
                        for k in ("read", "search", "fetch", "execute", "edit", "other")}
+        # codex's read-only session mode runs shell commands inside its own read-only sandbox
+        # without asking (2026-10-19: `graft ask` tripped a research slice); only execute is contained
+        out["trip_codex"] = {f"{p}/{k}": trips(p, k, agent="codex") for p in ("deny", "read-only")
+                             for k in ("execute", "edit", "other", "read")}
+        out["exempt_extra"] = sorted(mod.tripwire_exempt_kinds("agy", "all", "read,search"))
         out["decide"] = {"ro_read": allows("read-only", "read", "Read x"),
                          "ro_fetch": allows("read-only", "fetch", "WebFetch x"),
                          "ro_edit": allows("read-only", "edit", "Edit x"),
@@ -155,6 +160,16 @@ class TestReadOnlyPolicy(unittest.TestCase):
             self.assertTrue(trip[f"read-only/{kind}"], kind)
         self.assertTrue(trip["deny/read"])  # deny still trips on a read
         self.assertFalse(trip["all/execute"])
+
+    def test_codex_sandboxed_execute_does_not_trip_under_read_only(self):
+        trip = self.res["trip_codex"]
+        assert isinstance(trip, dict)
+        self.assertFalse(trip["read-only/execute"])  # contained by codex's read-only sandbox
+        self.assertFalse(trip["read-only/read"])
+        for kind in ("edit", "other"):
+            self.assertTrue(trip[f"read-only/{kind}"], kind)
+        self.assertTrue(trip["deny/execute"])  # deny gives codex no sandbox to lean on
+        self.assertEqual(self.res["exempt_extra"], ["read", "search"])
 
     def test_permission_requests_are_answered_by_kind(self):
         d = self.res["decide"]

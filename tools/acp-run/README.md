@@ -38,7 +38,8 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    any other tool trips the tripwire (exit 77) and any other request is refused.
    claude gets a session whose built-in tools are only Read, Grep, Glob, LS,
    WebFetch and WebSearch (`_meta.claudeCode.options.tools`; no user settings, no
-   MCP servers, mode `default`); codex the `read-only` mode; opencode a
+   MCP servers, mode `default`); codex the `read-only` mode (its sandbox runs shell commands
+   unasked, so an unasked `execute` does not trip there, 2026-10-19); opencode a
    `permission` block (`OPENCODE_CONFIG_CONTENT`) allowing read, glob, grep, list,
    webfetch, websearch and denying the rest; zcode `plan` mode with
    `ZCODE_DISALLOWED_TOOLS` naming only the mutating tools. Every other agent is

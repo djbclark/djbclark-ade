@@ -566,6 +566,21 @@ READONLY_ENV = {
     },
 }
 READONLY_AGENTS = ("claude", "codex", "opencode", "zcode")
+# Kinds that run unasked under --perm read-only because the agent's own read-only mode contains
+# them: codex's "read-only" session mode runs shell commands inside its read-only sandbox (no
+# writes, no network) without a permission request, so an unasked "execute" there is the sandbox
+# doing its job, not an escape (2026-10-19: `graft ask` tripped a research slice in 14 s, exit
+# 77). A permission request for an execute is still refused (decide()).
+READONLY_UNASKED_KINDS = {"codex": ("execute",)}
+
+
+def tripwire_exempt_kinds(agent, perm, extra=""):
+    """The ACP tool kinds that never trip this run: --tripwire-exempt-kinds (extra, comma
+    separated) plus, under --perm read-only, the reading kinds and the agent's contained kinds."""
+    kinds = frozenset(k for k in extra.split(",") if k)
+    if perm == "read-only":
+        kinds |= frozenset(READONLY_KINDS) | frozenset(READONLY_UNASKED_KINDS.get(agent, ()))
+    return kinds
 READONLY_UNSUPPORTED = ("no read-only mode verified for this agent; use --perm all with a read-only"
                         " brief and a diff check")
 
@@ -3916,9 +3931,8 @@ async def run(a, log, err, log_path):
             client = RunClient(
                 log, a.perm, root, live=a.interactive, thinking=a.show_thinking
             )
-            client.exempt_kinds = frozenset(
-                k for k in getattr(a, "tripwire_exempt_kinds", "").split(",") if k
-            ) | (frozenset(READONLY_KINDS) if a.perm == "read-only" else frozenset())
+            client.exempt_kinds = tripwire_exempt_kinds(
+                a.agent, a.perm, getattr(a, "tripwire_exempt_kinds", ""))
             client.err_path = err.name
             conn = connect_to_agent(client, proc.stdin, proc.stdout)
             phase = "initialize"  # the handshake step a failure is reported against
