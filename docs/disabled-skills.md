@@ -122,6 +122,7 @@ in `~/.claude/settings.json` (takes effect at once, even mid-session).
 | `claude.ai Google Drive` | 11 | Drive files; 0 calls in 14 days. Blocked 2026-10-18. |
 | `claude.ai Google Calendar` | 9 | Calendar events; 1 call in 14 days, and its tool fetch timed out in `claude mcp list`. Blocked 2026-10-18. |
 | `bezalel` (local, `~/.claude.json`) | ~80 | djbclark's capability plane (email, cards, finance, memory, computer, connectors). The longest server instructions (~1.5k tokens/session); 8 calls in 14 days. Blocked 2026-10-18 by djbclark, pending a scope trim (Basic Memory todo "Trim bezalel MCP sub-services"); still used from other agents. |
+| `siyuan` (local) | - | SiYuan notes. Fails to connect at every start (ECONNREFUSED) and had 0 calls; its skills were already `user-invocable-only`. Blocked 2026-10-18 (/doctor). |
 
 Still on: Beeper (re-enabled 2026-10-16 by djbclark to watch the Hyades room), Gmail, Context7, Firecrawl (self-hosted, shared),
 claude-in-chrome, basic-memory, arxiv, hermes, cow (token-savior and
@@ -134,6 +135,8 @@ graft's MCP server were removed 2026-10-18).
 | `adhd@adhd` | `enabledPlugins: false` | set it to `true` |
 | `mattpocock-skills@mattpocock` | `enabledPlugins: false` | set it to `true` |
 | `engineering`, `cowork-plugin-management` (synced from the claude.ai organization) | `"syncClaudeAiPlugins": false` (stops all claude.ai plugin sync; these were the only two) | remove the key or set it `true` |
+| `composio@composio` | `enabledPlugins: false` (2026-10-18, /doctor). Its SessionStart hook (`composio dev toolkits list` plus `composio whoami` on every startup, resume, clear and compact) had a 3.8 s median, 48.8 s max, and 153 of 405 runs (38%) cut off at its 8 s cap; 0 `composio` CLI uses in 6 days. Its UserPromptSubmit hook goes with it; the `composio-cli` skill is `"off"` | set it to `true` and drop the `composio-cli` skillOverride |
+| `claude-powerline@claude-powerline` | `enabledPlugins: false` (2026-10-18, /doctor): unused, since `statusLine` is `site-private/bin/claude-statusline`. The npm global `@owloops/claude-powerline` stays | set it to `true` |
 
 ## Hooks removed or narrowed (`~/.claude/settings.json` `hooks`)
 
@@ -146,7 +149,8 @@ old entries are quoted here so they can be pasted back.
 | graft per-prompt pack (UserPromptSubmit `node ~/.claude/helpers/graft-hooks.cjs prompt`) | removed: ~150-300 tokens on every prompt, kept in history, often unrelated to the prompt. **`graft init` re-added it; removed again 2026-10-18** (measured ~120 tokens, two of three hits off-target), and site-djbclark's `macos/graft-hook-timeout-fix/graft-hook-guard.sh`, which `graft-hook-timeout-fix.py` keeps on every graft hook, now skips the `prompt` event | add the entry back under UserPromptSubmit and set `GRAFT_PROMPT_HOOK=1` in `env` |
 | graft alwaysLoad keeper (SessionStart `python3 ~/.claude/hooks/graft_mcp_alwaysload.py`) | removed, and `"alwaysLoad": true` dropped from the graft entry in `.mcp.json` of aiuse, djbclark-ade and tendcf: graft's 6 tool schemas (~880 tokens) now load on demand via ToolSearch. Measured: graft called in 6% of sessions, 64% of its answers followed by a read of the same file anyway | re-add the hook and the flag |
 | rtk Bash rewrite (PreToolUse Bash `rtk hook claude`) | now `python3 "$HOME/.claude/hooks/rtk_hook.py"` (symlink to `claude/hooks/rtk_hook.py`), which skips the rewrite when cwd is under `.claude/worktrees/`: Claude Code's worktree-isolation guard refuses rewritten commands, so a worktree sub-agent couldn't run plain `git` (2026-10-12) | set the command back to `rtk hook claude` |
-| cswap quota table (SessionStart `~/.claude/hooks/cswap_quota_context.sh`, ~950 tokens) | now `matcher: "^(startup|resume|clear)$"`: no longer re-injected after each compaction | drop the matcher |
+| cswap quota table (SessionStart `~/.claude/hooks/cswap_quota_context.sh`, ~950 tokens) | now `matcher: "^(startup|resume|clear)$"`: no longer re-injected after each compaction. Since 2026-10-18 it reuses `cswap list` output for 5 minutes (`~/.cache/cswap_quota_context.txt`; median was 2.4 s, 27 of 337 runs hit the 10 s cap) | drop the matcher; delete the cache block |
+| graft project-scope hooks (djbclark-ade `.claude/settings.json`, written by `graft init` 2026-10-16 in aef5f51) | removed 2026-10-18: they ran every graft hook a second time next to the guarded user-level ones, and their UserPromptSubmit `prompt` hook bypassed the guard. site-djbclark's `graft-hook-guard.sh` now runs `graft-hook-timeout-fix.py strip-project "$CLAUDE_PROJECT_DIR"` on session-start, so a re-init in any repo is stripped at the next session (logged to `~/.local/state/graft-hook-timeout-fix.log`; skips `~/src/Graft`, and does nothing unless the user settings route graft through the guard) | `git revert` the djbclark-ade commit; add the repo to `KEEP_PROJECTS` in the fixer |
 
 ## Skills hidden by setting (2026-10-18)
 
@@ -154,14 +158,17 @@ Moving folders does not hold: `bl skill update` re-created the `bailian-*`
 links and the paseo CLI the `paseo*` ones, both on 2026-10-18. `skillOverrides`
 in `~/.claude/settings.json` does hold, whatever re-links the folder:
 
-1. `"off"` (gone for the model and from `/`): the nine `bailian-*` skills.
+1. `"off"` (gone for the model and from `/`): the nine `bailian-*` skills,
+   and `composio-cli` (its plugin is off too; /doctor 2026-10-18).
 2. `"user-invocable-only"` (you can still type `/name`; the model no longer
    sees the description): `paseo`, `paseo-advisor`, `paseo-committee`,
    `paseo-handoff`, `paseo-help`, `paseo-plugin`, the five `ralph-tui-*`,
    `siyuan`, `siyuan-article-import`, `siyuan-excalidraw`, `siyuan-markdown`,
    `skillopt-sleep`, `skillopt-sleep-learned`, `terminus-kira`, `reorg-orca`,
    `setup-modern-cli`, `teach`. None was invoked by the Skill tool in the 14
-   days to 2026-10-18.
+   days to 2026-10-18. Added after /doctor the same day, also unused by the
+   model: `dialogue`, `effort-routing`, `coderabbit-feeder`, `graft` (the
+   `graft` CLI and its hooks stay) and `herdr-tidy`.
 
 `"skillListingBudgetFraction": 0.007` caps the listing at 7k tokens. Past the
 cap, descriptions are dropped least-used first; names stay. `/doctor` shows
