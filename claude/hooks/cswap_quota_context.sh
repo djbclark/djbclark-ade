@@ -67,16 +67,29 @@ fi
 
 command -v cswap >/dev/null 2>&1 || exit 0
 
-raw="$(cswap list 2>/dev/null | ggrep -v 'A newer version of claude-swap')" || exit 0
-[ -n "${raw//[[:space:]]/}" ] || exit 0
+# `cswap list` is the slow part (median 2.4 s, max 46 s, 27 of 337 runs cut off at the
+# 10 s cap; /doctor 2026-10-18), and resume/clear fire it back to back. Reuse its output
+# for 5 minutes; the context says how old a cached table is.
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/cswap_quota_context.txt"
+age=$(( $(gdate +%s) - $(gstat -c %Y "$cache" 2>/dev/null || echo 0) ))
+if [ "$age" -lt 300 ] && raw="$(<"$cache")" && [ -n "${raw//[[:space:]]/}" ]; then
+  export CSWAP_CACHE_AGE="$age"
+else
+  raw="$(cswap list 2>/dev/null | ggrep -v 'A newer version of claude-swap')" || exit 0
+  [ -n "${raw//[[:space:]]/}" ] || exit 0
+  mkdir -p "${cache%/*}"
+  tmp="$(mktemp "$cache.XXXXXX")" && printf '%s\n' "$raw" >"$tmp" && mv -f "$tmp" "$cache"
+fi
 
 python3 -c '
-import json, sys
+import json, os, sys
 raw = sys.stdin.read().strip()
 if not raw:
     sys.exit(0)
+age = os.environ.get("CSWAP_CACHE_AGE")
+when = f"(cached, {age} s old)" if age else "at session start"
 ctx = (
-    "Current Claude quota, from `cswap list` at session start. These are the "
+    f"Current Claude quota, from `cswap list` {when}. These are the "
     "authoritative numbers for any go/no-go decision about how much work to "
     "run.\n\n"
     + raw
