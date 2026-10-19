@@ -79,7 +79,9 @@ any raw number from another source.
    100` was read as "100% free" and a review was sent to an exhausted codex.
 2. **An account is usable only if every one of its windows has headroom.** The
    fullest window binds: codex at 100% used on its 5-hour window is unusable for
-   ~5 hours even with its weekly window at 35% used.
+   ~5 hours even with its weekly window at 35% used. (Example from the Plus
+   plan; since 2026-10-19 codex is on the $100 plan and `aiuse` may show no
+   5-hour window at all. The rule itself stands.)
 3. **One TUI can hold several independent pools, one per model family.** agy:
    Gemini and Claude/GPT are separate pools (`agy models`); Cursor: Auto vs
    third-party (the `cursor-auto` and `cursor` services in `route_agent.py`).
@@ -208,7 +210,8 @@ Rules for any agent that dispatches to agy:
 
 - **Monthly subscription windows**: claude (5h/weekly, with Fable a <=50%
   sublimit of the same weekly, not a separate bucket), codex (ChatGPT Plus
-  weekly; spend it on `gpt-6-astra`), antigravity/agy (Google AI Pro — also
+  weekly until 2026-10-18, the $100 plan, aiuse `prolite`, since 2026-10-19;
+  spend it on `gpt-6-astra`), antigravity/agy (Google AI Pro — also
   exposes Claude/GPT windows), copilot (premium requests; **reserve, floor
   60%**), cursor Pro (Auto and third-party sublimits; GrokBot has its own
   separate Cursor pool since 2026-10-18, never a target), grok (SuperGrok; an
@@ -476,7 +479,11 @@ method that runs the waves.
    them** (operator 2026-10-18, narrowing 2026-10-15's "use them fully"). That
    night a lead put four plektra "small issues" slices on `gpt-6-astra` at
    high/xhigh together. Codex's 5-hour window ran out and all four stopped
-   waiting for the reset, although the weekly still had 82% left. So:
+   waiting for the reset, although the weekly still had 82% left. (2026-10-19:
+   Codex is now on the $100 plan, `aiuse` plan label `prolite`, weekly window
+   resetting 2026-10-26; the 5-hour scarcity above, the in-flight limits and
+   the estimate floor predate the upgrade and await re-calibration from
+   `route_agent.py calibrate`. The routing policy itself is unchanged.) So:
    1a. **Judgment** (review, design, adjudication) is `acp-dispatch claude
        --model opus --kind judgment --effort high`. It is not Fable and not
        codex.

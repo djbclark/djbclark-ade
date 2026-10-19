@@ -112,6 +112,8 @@ extra = { crush = " --acp-arg=--strip-user-config" }
 
 # When there is no measured history, floor the brief-size default (operator 2026-10-18:
 # gpt-6-astra median 65% of codex's 5-hour window across 4 measured slices).
+# 2026-10-19: the codex plan changed (Plus to the $100 plan, aiuse "prolite"); this
+# floor awaits re-calibration from `route_agent.py calibrate`. Value unchanged.
 [dispatch.estimate_floor]
 codex = 60.0
 claude = 8.0
@@ -171,7 +173,9 @@ access = "cli-only"
 # fall-through let plan, and leads copying it, put whole waves on
 # astra; its 5-hour window holds about one hard slice. acp-dispatch
 # also refuses a second codex slice while one is in flight.
-models = { frontier = "gpt-6-astra --effort high" }
+# 2026-10-19: the plan changed to the $100 plan (aiuse "prolite"); max_parallel = 1
+# and the in-flight rule await re-calibration from `route_agent.py calibrate`.
+models ={ frontier = "gpt-6-astra --effort high" }
 
 # agy's second pool: Claude Opus/Sonnet 5.5 and GPT via the same Google AI
 # Pro subscription, a separate 5h/weekly window from Gemini. Operator

@@ -12,6 +12,15 @@ Failure chains (what runs when a chosen model fails) are a different
 document: `skills/fallback-chains/`. Re-read its live sources before
 quoting a chain, and update its snapshot if you change one.
 
+> **Update 2026-10-19 (operator): Codex is now on the $100 plan.** `aiuse`
+> reports plan label `prolite`, billing `subscription_window`, one window
+> "Codex weekly quota (2)" at 100% left, resetting 2026-10-26T17:41Z (no
+> 5-hour window in that snapshot; it may reappear). The 5-hour scarcity notes
+> dated 2026-10-18 below (the 5-hour window, "one slice at a time", the codex
+> `estimate_floor`) predate the upgrade and await re-calibration from
+> `route_agent.py calibrate`; routing policy (which model does what) is
+> unchanged.
+>
 > **Update 2026-10-18 (operator): the frontier models are scarce.** A lead put
 > four plektra "small issues" slices on codex `gpt-6-astra` at high/xhigh
 > together; codex's 5-hour window ran out and all four stopped waiting for the
@@ -96,7 +105,7 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 |---|---|---|---|---|
 | `claude` (gmail) | `claude` (Claude Code; cswap acct 2; Orca/ralph-tui drive it) | Max-class | monthly sub | 5h + weekly; **Fable is a <=50% sublimit of the same weekly** (aiuse `max_share_of_parent_percent`), not a separate pool (corrected 2026-10-15) |
 | `claude` (mit) | **permanently gone** (operator, 2026-08-23) — removed from cswap | — | — | — |
-| `codex` | `codex` (v0.149) | ChatGPT Plus | monthly sub | weekly |
+| `codex` | `codex` (v0.149) | ChatGPT Plus until 2026-10-18; **$100 plan (aiuse `prolite`) since 2026-10-19** | monthly sub | weekly (resets 2026-10-26; a 5-hour window may reappear) |
 | `antigravity` | `agy` (v1.1.18; ralph-tui-antigravity-plugin exists) | Google AI Pro | monthly sub | Gemini 5h/weekly **plus Claude/GPT 5h/weekly** |
 | `copilot` | `copilot` (v1.0.77; broke 2026-08-23 on stale pkg cache — fix: `rm -rf ~/Library/Caches/copilot/pkg`) | Individual Pro | monthly sub | premium requests (monthly) |
 | `cursor` | `cursor` (v3.17.8) | Cursor Pro | monthly sub | included / Auto / other-models (monthly) |
@@ -287,7 +296,9 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
   security-relevant or concurrency fix's final review, debugging that
   defeated real attempts). Its in-flight slices reserve quota against a new
   one (2026-10-18): its 5-hour window holds about one hard slice. Everyday slices go to the everyday pools, not
-  to `gpt-6-luna` on this window.
+  to `gpt-6-luna` on this window. (2026-10-19: the account is now the $100
+  plan, `prolite`; the 5-hour note predates the upgrade, so re-calibrate with
+  `route_agent.py calibrate` before relying on "one hard slice".)
 - **Gemini via agy** — big-context reading, summarization, multimodal,
   bulk research; the most-wasted subscription → default overflow for
   non-critical bulk. Its Claude/GPT windows are unexplored.

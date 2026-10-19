@@ -703,7 +703,8 @@ walk on 2026-10-19; the answer follows each question.
 Snapshot 2026-10-19 16:17 UTC from `aiuse --available --json` (remaining share of each window)
 and `paseo usage --json`; re-probe before each batch, the numbers date fast. The $200 Claude plan
 (Max 20x) is the deep pool: its weekly window is the one to pace, the 5-hour window turns over
-by itself. Rulings for this project (djbclark, 2026-10-19): antigravity (`agy`) is allowed on
+by itself. Codex moved to the $100 plan on 2026-10-19 (aiuse plan label `prolite`), so the
+Codex gate no longer waits on a 5-hour window. Rulings for this project (djbclark, 2026-10-19): antigravity (`agy`) is allowed on
 both its pools, whichever is usable; Paseo's `glm-acp-agent` draws the `zai` pool; copilot,
 gemini CLI and qwen-code are configured in Paseo but off; cline only for Hermes and
 techno-euphora; hermes is never a target; omp needs an explicit yes per run.
@@ -714,7 +715,7 @@ techno-euphora; hermes is never a target; omp needs an explicit yes per run.
 |---|---|---|---|
 | Claude Max 20x, default (`claude`) | 73% 5h, 51% weekly | 5h 19:10 UTC; weekly 2026-10-23 | judgment, integration, code |
 | Claude Max 20x, Fable (`claude`) | 68% weekly | 2026-10-23 | one frontier gate per phase |
-| Codex Plus (`codex`) | 14% 5h (tight), 69% weekly | 5h 20:39 UTC; weekly 2026-10-24 | the other frontier gate; wait for the 5h reset |
+| Codex $100 plan (`codex`, aiuse plan "prolite") | 100% weekly (upgraded 2026-10-19) | weekly 2026-10-26 | the other frontier gate; no longer the scarce pool |
 | antigravity Gemini (`agy`) | 96% weekly, 100% 5h; argon weekly 100% | 2026-10-25 | research, bulk, mechanical (aiuse's top "burn" suggestion) |
 | antigravity Claude/GPT (`agy`) | 1% weekly, exhausted | 2026-10-24 18:18 UTC | nothing until the reset, then code |
 | Cursor (`cursor`) | 70% auto, 8% third-party | 2026-11-10 | mechanical and bulk on `auto` only |
@@ -731,7 +732,7 @@ otherwise, because a 1M-token Claude window costs the weekly pool several times 
 
 | Phase | Slice kind | Agent and model | Effort | Context | Pool | Why |
 |---|---|---|---|---|---|---|
-| every phase gate | frontier review, advise only | codex `gpt-6-astra` | high | default | Codex weekly 69% | the review that found F1 and F2; one per gate, after the 5h window resets |
+| every phase gate | frontier review, advise only | codex `gpt-6-astra` | high | default | Codex weekly 69% | the review that found F1 and F2; one per gate |
 | every phase gate | second frontier read | claude `fable` 5.1 | high | 200k | Fable 68% | independent of Codex; `xhigh` only with a yes for that run |
 | every phase | lead, design, integration, decisions | claude `opus` 5.5 | high | 200k | Claude weekly 51% | the session that owns the plan and the merges |
 | every PR | security review | `adversary` agent (Claude) | high | 200k | Claude weekly | required before any PR (home rules item 28) |
