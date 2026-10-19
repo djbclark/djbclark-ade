@@ -1,6 +1,7 @@
 # ADE everywhere: one repo that recreates the whole agent environment on any machine
 
-Proposal, version 2, 2026-10-19. Status: **draft for djbclark's decisions** (section 9).
+Proposal, version 2.1, 2026-10-19. Status: **decided** (section 9 records djbclark's answer to every
+question, same day); implementation starts with Phase 0.
 Version 1 (commit 8d1cad5) was reviewed the same day by Codex `gpt-6-astra`
 ([ade-everywhere-codex-review-2026-10-19.md](ade-everywhere-codex-review-2026-10-19.md)); this
 version answers all twenty findings (section 12), fixes two wrong citations, and adds a routing
@@ -34,8 +35,7 @@ Written as tests the finished project must pass:
    `djbclark-ade`, run one command (or paste one prompt into any agent), answer the interactive
    questions once (private repo URL, secret backend sign-in, vendor logins), and every tool,
    skill, hook, service, plugin and project checkout is present and `ade doctor` is green.
-   Running it again changes nothing (idempotent), and `ade unlink` restores the backed-up
-   originals.
+   Running it again changes nothing (idempotent), and chezmoi keeps the originals it replaced.
 2. **T2 any project.** `ade clone <project>` (or `--all`) puts every listed project at
    `~/src/<name>` with the right remotes, and the project's own agent wiring (graft, hooks, Tier 1
    pointer) works unchanged.
@@ -111,10 +111,11 @@ installed into `ade/skills` and carry uncommitted edits from Paseo's own refresh
    machine where possible. Claude Code keys transcripts by the working directory and embeds
    absolute paths inside them<sup>[4](#C1) [5](#C3)</sup>; identical layouts avoid rewriting, and a Mac-to-Linux
    round trip (`/Users` to `/home`) is an acceptance test, not an assumption.
-4. **Declare, then link, then diff.** A manifest says what exists; a linker makes the symlinks
-   and merges owned keys into files other tools also write; a doctor compares. Every apply has a
-   plan, a backup of what it replaces, and an undo. Hand-made links are the bug class that
-   produced today's five broken rules files.
+4. **Declare, then apply, then diff.** chezmoi owns every dotfile and config template (Q4): its
+   source state says what exists, `chezmoi diff` shows the plan, `chezmoi apply` makes it so,
+   with templates, prompt-once data and a password-manager hook; `ade doctor` compares the
+   rest (services, tools, sessions). Hand-made links are the bug class that produced today's
+   five broken rules files.
 5. **Secrets never touch git, and the trust model is stated.** `sudo-secretspec` grants secrets
    to the authorized operator identity, not per process<sup>[6](#C44)</sup>; 1Password is the default backend
    behind an interface that also admits `age` files or none (T6).
@@ -157,13 +158,15 @@ and per-OS stuff go". Proposed:
 ```
 djbclark-ade/
   AGENTS.md  CLAUDE.md -> AGENTS.md  README.md  LICENSE
-  ade/                 # the bootstrap CLI (Python, uv): plan, apply, link, unlink, doctor, clone, sessions, services
+  home/                # the chezmoi source state (Q4): every dotfile, per-TUI config template and rules link,
+                       # with .chezmoi.toml.tmpl prompting once for the companion URL and operator data
+  ade/                 # the ADE CLI (Python, uv): doctor, clone, sessions, services; it calls chezmoi, mise and Ansible
   manifest/
     tools.toml         # every external tool: source repo, install method per OS, version pin, PATH entry
     agents.toml        # every TUI: config dir, skills dir, commands dir, rules file, session store, store class, export and resume commands
     packages.toml      # brew/apt/nix/npm/uv/cargo/pipx package lists, by OS and by role; runtimes via mise
     services.toml      # every long-running job: command, schedule, scope (per-host | per-account | fleet-coordinator), OS
-    overlay.toml       # the overlay contract: precedence public < private < role < machine; keyed merges; unknown keys fail
+  schema/              # JSON schemas for every manifest and companion file (Q10: product framing)
   skills/              # unchanged; the canonical skills
   bin/                 # orchestration CLIs, unchanged
   tools/acp-run/       # unchanged
@@ -172,13 +175,13 @@ djbclark-ade/
     codex/             # config.toml template, hooks.json, rules/
     opencode/          # opencode.json template, plugins/, commands/
     gemini/  zcode/  cursor/  copilot/  hermes/  qwen/  grok/  cline/  omp/
-    paseo/             # owned keys for config.json (merged, never symlinked), provider catalog entries, profiles generated from routing.toml, plugin list
+    paseo/             # owned keys for config.json (a chezmoi `modify_` script merges them, never a symlink), provider catalog entries, profiles generated from routing.toml, plugin list
     rules/home-agents.md   # the one home rules file; every TUI's rules file links here
   services/
     units/             # one TOML per service; launchd plists and systemd user units are generated
   paseo-plugin/        # the ADE Paseo plugin (section 7.3)
-  private-template/    # what `ade init-private` creates in a new companion repo
-  docs/                # design records; handoffs move to the private companion
+  private-template/    # what `ade init-private` creates in a new companion repo: a chezmoi overlay plus the TOML files
+  docs/                # design records and the product docs (Q10); handoffs move to the private companion
   tests/               # pytest, the container smoke test, and the Linux-user gate script
   vendor/              # pointers only
 ```
@@ -208,6 +211,7 @@ ade-private/
     secretspec.toml    # declarations only; values live in the backend
     backend.toml       # which backend (1password | age | none) and the item references
   agents/              # private per-TUI overrides merged over the public templates
+  home/                # the companion's chezmoi overlay (Q4, Q11): personal shell, gradle, anything not agent-needed
 ```
 
 Tier 1 chains are **not** in git: they are hot, written every session, and belong to the
@@ -217,28 +221,31 @@ session archive (section 6.3), where each host's copy is single-writer. Leaves:
 shims (deleted once `ade link` owns every path); `.codex-runtime/` (Codex's own store; it stays
 where Codex expects it, section 6.1).
 
-### 4.4 Bootstrap: `ade` CLI plus one prompt
+### 4.4 Bootstrap: chezmoi plus a small `ade` CLI
 
-The bootstrap is a small Python CLI in the public repo, run by `uv`, so the only prerequisites
-are git and a shell. It owns the ADE concepts (manifest, links, overlay, sessions, doctor) and
-delegates what already has an owner:
+djbclark chose chezmoi over a home-grown linker (Q4, 2026-10-19): chezmoi owns dotfiles and
+templates from the start, and `ade` shrinks to what chezmoi does not do (doctor, clone,
+sessions, services). The only prerequisites are git and a shell.
 
-1. `ade install`: runtimes (uv, Python, Node) through `mise`, pinned in `packages.toml`<sup>[7](#C56)</sup>, so
-   Node no longer comes from Hermes's private copy (inventory §5); packages per OS from
-   `packages.toml` (Homebrew on Mac, apt or Nix on Linux); external tools from `tools.toml`
-   (clone or tap, pinned); agent CLIs from their vendors. Where a `site-djbclark` Ansible role
-   already installs something, `ade install` calls the role rather than re-implementing it.
-2. `ade init-private <url>`: clone the companion; if absent, offer to create it (GitHub or
-   Forgejo) from `private-template/` and ask the operator questions once (the chezmoi
-   `promptStringOnce` pattern<sup>[8](#C15)</sup>, done in our own tool so there is no second config language
-   for ADE concepts).
-3. `ade plan` then `ade link`: every symlink in `agents.toml` (rules files, commands, hooks,
-   agents, skills, Codex home, opencode plugins and commands); and for files other tools also
-   write (`~/.claude/settings.json`, `~/.paseo/config.json`), a keyed merge of only the keys
-   the manifest owns. `plan` shows the diff; `link` backs up what it replaces and is idempotent;
-   `unlink` restores. Paseo's settings writer replaces a symlinked `config.json` with a plain
-   file (fixed in 0.12.0 but a warning about ownership)<sup>[9](#C52)</sup>, and its `agentProfiles` schema
-   changed between releases; owned-key merging is the only safe contract.
+1. `chezmoi init --apply <public repo>` (or `ade bootstrap`, which runs it): the public source
+   state under `home/` lands in `$HOME`. Its `.chezmoi.toml.tmpl` prompts once for the
+   companion URL and operator data (`promptStringOnce`)<sup>[7](#C15)</sup>, then
+   `.chezmoiexternal` pulls the companion's `home/` overlay so private files win where both
+   define a path. Rules files, commands, hooks, agents, skills, Codex home, opencode plugins
+   are chezmoi-managed symlinks or files; files other tools also write
+   (`~/.claude/settings.json`, `~/.paseo/config.json`) get a `modify_` script that merges only
+   the keys the kit owns. Paseo's settings writer replaces a symlinked `config.json` with a
+   plain file (fixed in 0.12.0, but a warning about ownership)<sup>[8](#C52)</sup>, and its
+   `agentProfiles` schema changed between releases; owned-key merging is the only safe
+   contract. `chezmoi diff` is the plan, `chezmoi apply` is idempotent, chezmoi keeps the
+   replaced originals.
+2. `ade install`: runtimes (uv, Python, Node) through `mise`, pinned in
+   `packages.toml`<sup>[9](#C56)</sup>, so Node no longer comes from Hermes's private copy
+   (inventory §5); packages per OS from `packages.toml`; external tools from `tools.toml`
+   (pinned); agent CLIs from their vendors. Where a `site-djbclark` Ansible role already
+   installs something, `ade install` calls the role rather than re-implementing it.
+3. `ade init-private <url>`: create the companion from `private-template/` on GitHub or
+   Forgejo if it does not exist, then re-run the chezmoi external pull.
 4. `ade secrets`: sign in to the chosen backend, declare every secret from `secretspec.toml`
    into `sudo-secretspec`, run each vendor's login that cannot be scripted and say so.
 5. `ade services`: generate launchd plists or systemd user units from `services.toml` with this
@@ -246,8 +253,9 @@ delegates what already has an owner:
    Linux, `loginctl enable-linger` so user units survive logout<sup>[10](#C58)</sup>.
 6. `ade clone --all`: every project from `projects.toml` to `~/src/<name>`.
 7. `ade sessions join`: attach this machine to the session archive (section 6).
-8. `ade doctor`: diff manifest against reality, including the deny-list grep for the operator's
-   names in the public tree.
+8. `ade doctor`: `chezmoi verify` plus a diff of the manifest against reality (tools,
+   services, session stores) and the deny-list grep for the operator's names in the public
+   tree.
 
 The prompt for an agent is then one paragraph: "clone djbclark-ade, read AGENTS.md, run `ade
 bootstrap`, answer its questions, run `ade doctor` until green". `docs/apply-toolchain-prompt.md`
@@ -257,20 +265,22 @@ stays as the per-repo toolchain prompt; it is not a machine bootstrap (inventory
 therefore (a) is a tagged release whose tag is signed with the operator's key, and the
 one-paragraph prompt names the tag; (b) pins every external tool by version or commit in
 `tools.toml`, with the checksum recorded for tarball installs; (c) never curl-pipes an
-installer. For a newcomer (T6) the trust anchor is the public repo's signed tags; they re-sign
-with their own key after forking.
+installer, chezmoi's own included (it is installed from the pinned package list). For a
+newcomer (T6) the trust anchor is the public repo's signed tags; they re-sign with their own
+key after forking.
 
-**Why our own CLI and not chezmoi, Nix or more Ansible.** The review was right that "one fewer
-config language" is a weak argument; the real costs are file ownership, adoption of existing
-files, diffing and rollback, and those are what `ade link` is scoped to. chezmoi is the
-lowest-friction dotfiles manager and has the prompt-once and secret-manager hooks we
-want<sup>[8](#C15)</sup>, but adding it on top of Ansible and our manifests would give some files two
-owners; it is recorded as the switch-to if templating needs outgrow `ade link`. Nix with
+**Why chezmoi, and not a home-grown linker, Nix or more Ansible.** v1 proposed its own
+`ade link`; the review (F15) noted that "one fewer config language" was a weak argument and
+that ownership, adoption, diff and rollback are the costly parts. chezmoi has all four
+already, plus templates, the prompt-once pattern and the password-manager
+hook<sup>[7](#C15)</sup>, and the product framing (Q10) makes a well-known tool a better
+answer for a newcomer than a bespoke one. The cost is a second owner of some files next to
+Ansible; the rule is that Ansible never touches `$HOME` once chezmoi does. Nix with
 nix-darwin and home-manager gives the strongest pin at the highest cost, and still needs
-Homebrew for casks<sup>[11](#C16)</sup>; vps-primary keeps its flake. Ansible stays for system-level roles.
-The public/private split follows the companion-overlay pattern with precedence and "works
-without the overlay"<sup>[12](#C17) [13](#C18)</sup>, with secrets pulled from the backend at apply time rather
-than age-encrypted in git<sup>[14](#C19)</sup>.
+Homebrew for casks<sup>[11](#C16)</sup>; vps-primary keeps its flake. The public/private split
+follows the companion-overlay pattern with precedence and "works without the
+overlay"<sup>[12](#C17) [13](#C18)</sup>, with secrets pulled from the backend at apply time
+rather than age-encrypted in git<sup>[14](#C19)</sup>.
 
 ### 4.5 Secrets and private data
 
@@ -363,7 +373,7 @@ is the thing `agents.toml` encodes (adapters pinned to the version checked).
 | Cursor | SQLite | canonical SQLite | none verified (third-party exporters only) | backup API | `--resume`, `ls`, `resume` | none | `worker` (private cloud) |
 | Hermes | `~/.hermes/state.db`, the canonical store of all session messages and routing<sup>[27](#C41)</sup> | canonical SQLite | `hermes sessions export` (JSONL, full metadata and every stored message, `--redact` available)<sup>[27](#C41)</sup> | backup API plus nightly export | yes | import restores rows as archived history, not live context<sup>[27](#C41)</sup> | Telegram gateway |
 | zcode, Crush, omp | SQLite | canonical SQLite | third-party or none | backup API | yes | none | none |
-| Paseo | per-agent JSON under `~/.paseo/agents` | derived (points at provider stores) | history search, Import session (Claude, Codex, omp)<sup>[9](#C52)</sup> | copy | n/a | yes | per-host history only |
+| Paseo | per-agent JSON under `~/.paseo/agents` | derived (points at provider stores) | history search, Import session (Claude, Codex, omp)<sup>[8](#C52)</sup> | copy | n/a | yes | per-host history only |
 
 The lesson of the table: "readable everywhere" (T3a) is achievable for every provider by
 collecting the native files or a vendor export; "native continuation" (T3b) is a Claude Code
@@ -378,7 +388,7 @@ between machines.
 | Dolt with a git remote | Yes for tables, since Dolt now pushes to plain git remotes<sup>[32](#C12)</sup>, but it is a new engine for data that is files. | Not now; revisit if we want a git-hosted catalogue. |
 | git for transcripts (clync-style UUID merge plus LFS)<sup>[33](#C6)</sup> | Append-only jsonl merges, but 10 GB and growing bloats history and LFS costs on GitHub; clync picks between divergent runs. | Rejected for transcripts; kept for memory and Tier 2 handoffs. |
 | git-annex with Forgejo or Hyades as special remote | Not a folder mirror by its own account<sup>[34](#C34)</sup>, but its `numcopies` and preferred-content rules are exactly the "two copies before deletion" policy<sup>[35](#C57)</sup>. | Adopted for the cold tier (Phase 5). |
-| CASS (coding_agent_session_search) pulling over SSH | Already collects from remote hosts over SSH or rsync with per-source provenance and path maps, indexes twenty-plus agents, and has a JSON API<sup>[36](#C23)</sup>. Pull-based, so an offline laptop is unsearchable until it is back. Licence has a rider excluding Anthropic, OpenAI and anyone acting for them (Q12). | **Spike first** (Phase 2) before writing any index of our own. |
+| CASS (coding_agent_session_search) pulling over SSH | Already collects from remote hosts over SSH or rsync with per-source provenance and path maps, indexes twenty-plus agents, and has a JSON API<sup>[36](#C23)</sup>. Pull-based, so an offline laptop is unsearchable until it is back. Licence has a rider excluding Anthropic, OpenAI and anyone acting for them; djbclark accepts it as inapplicable to this personal use (Q12). | **Adopted** as the index over the archive (Phase 2); the FTS5 index stays only as a fallback for a store CASS cannot read. |
 | Syncthing over the tailnet | Peer-to-peer, no central node, fine for unique-named append-only files with one writer per file; concurrent writes to one file produce a `.sync-conflict` copy, never a refusal<sup>[37](#C40)</sup>; untrusted "receive-encrypted" peers exist but are marked beta, and recovery needs both the folder ID and the password<sup>[38](#C20b)</sup>. | **Chosen** for the live tier; it is sync, not backup. |
 | Mutagen, rclone bisync, rsync over Tailscale SSH | Pairwise, no ownership semantics<sup>[39](#C21)</sup>. | Fallback for a machine that cannot run Syncthing. |
 | Taildrive | Alpha WebDAV mount, not sync<sup>[40](#C22)</sup>. | Rejected. |
@@ -410,12 +420,14 @@ rewrite (Claude's compaction, Codex's fork) is detected by hash, not by size.
    and password are stored in the secret backend. Syncthing's file versioning is on, so a
    deletion on one workstation is recoverable from the others' version folders; a
    restore-from-ciphertext drill is part of Phase 3.
-4. **The index.** First choice is CASS, pointed at the archive instead of at remote hosts, if
-   the Phase 2 spike shows it reads our stores (its OpenCode adapter looks for `.opencode/`
-   directories, ours is `~/.local/share/opencode/opencode.db`) and Q12 allows it. Otherwise
-   `session-finder`'s FTS5 database (`history.v2.sqlite`) is rebuilt per machine from the archive
-   with a `device` column. Either way `session-finder` keeps live sessions and file claims,
-   which no archive can know. Orca's cross-host `orca search`<sup>[42](#C24)</sup> is the retired equivalent.
+4. **The index.** CASS (Q12), pointed at the archive instead of at remote hosts, with a
+   per-provider path map per device; where an adapter cannot read one of our stores (its
+   OpenCode adapter looks for `.opencode/` directories, ours is
+   `~/.local/share/opencode/opencode.db`) the collector's export feeds it, and only a store
+   with no readable export falls back to `session-finder`'s FTS5 database
+   (`history.v2.sqlite`) with a `device` column. `session-finder` keeps live sessions and file
+   claims, which no archive can know, and fronts CASS's JSON API. Orca's cross-host
+   `orca search`<sup>[42](#C24)</sup> is the retired equivalent.
 5. **Continuation on another machine.** `ade sessions pull <id>` copies a Claude or Codex
    session's latest complete generation into this machine's native store at the path the local
    checkout implies, creates the checkout directory if absent<sup>[17](#C4)</sup>, rewrites only cwd fields
@@ -478,7 +490,7 @@ runs the daemon headless<sup>[51](#C30)</sup>.
 What it already has that v1 proposed to build: a **Usage** dialog with pinned summaries and a
 plugin usage-source API (0.11.0), `paseo usage` on the CLI (0.12.0), history search and
 **Import session** for Claude, Codex and omp, background workspaces, and a fix for parents
-being told a child finished when its task was stopped<sup>[9](#C52)</sup>. Registry plugins add a cross-host
+being told a child finished when its task was stopped<sup>[8](#C52)</sup>. Registry plugins add a cross-host
 workspace list ordered by attention (Agents Dash List)<sup>[52](#C53)</sup>, an LLM-summarised feed of waiting
 questions and permissions (Herald)<sup>[53](#C54)</sup>, and archived-conversation search for file-backed
 providers on that daemon (Agents History)<sup>[54](#C55)</sup>. Custom providers accept per-provider `env` and
@@ -505,7 +517,7 @@ pilot has exercised it".
 | `self-slash` types a slash command into a pane | Prompt the agent through the API | Replace. |
 | `autorename`, `herdr_place.py` | `rename_workspace`, agent title | Replace; keep the title derivation. |
 | `fleet-watch` pings Hermes on fleet changes | `notifyOnFinish`, push notifications to the phone app | Keep the Hermes ping for Telegram; feed it from Paseo events. |
-| `acp-run` / `acp-dispatch` / `bigteam` / `route_agent.py` headless dispatch | `paseo run --provider X --no-wait`, SDK, agent profiles | Keep the engine, which owns its processes; add `--via paseo` so slices appear as subagents; generate profiles from `routing.toml`. |
+| `acp-run` / `acp-dispatch` / `bigteam` / `route_agent.py` headless dispatch | `paseo run --provider X --no-wait`, SDK (`agents.create`, `waitForFinish`, `send`, `stop`, `--output-schema`), agent profiles | Keep the engine, which owns its processes and the policy layer (routing, quota-stop resume, reports, `BLOCKED:`, escalation, calibration); add `--via paseo` so slices appear as subagents; generate profiles from `routing.toml`; re-compare after the pilot (Q9). |
 | `aiuse` quota probes and `route_agent.py` | Usage dialog, `paseo usage`, usage-source plugin API | Keep `aiuse` as the source of policy (disabled list, gates, pace); the plugin registers it as a usage source (section 11.4). |
 | `cow-pasture` APFS workspaces | Worktree isolation | Keep cow for non-git and Mac-only speed; Paseo worktrees are the portable default. |
 | launchd jobs that run agents (skillopt-night) | Schedules and heartbeats | Move agent-shaped jobs to Paseo schedules on their owning host only; system jobs stay units. |
@@ -546,18 +558,20 @@ then prove a thin slice end to end, then widen, and only then retire or delete.
    JSONL export; scan `~/.local/state/bigteam` and the Orca checkouts for unique reports,
    dirty trees and unpushed commits and bundle them; fix the five broken rules links; track the
    four untracked config files as templates. Nothing is deleted.
-2. **Phase 1, thin vertical slice (1 to 2 weeks).** `manifest/*.toml` for Claude Code and
-   Codex only; `ade plan`, `link`, `unlink`, `doctor`, `services`, `install` with mise; the
+2. **Phase 1, thin vertical slice (1 to 2 weeks).** The chezmoi source state under `home/`
+   for Claude Code and Codex only, with the companion overlay and the `modify_` merges;
+   `manifest/*.toml` for the same two; `ade doctor`, `services`, `install` with mise; the
    signed-tag root of trust; `private-template/` and `ade init-private` with an empty companion.
    The first PR adds the GitHub Actions workflow (pytest plus the container smoke test) so
    every later PR is tested off the Mac; the companion test gets its own workflow on the
    private repo, moved to Forgejo CI if private work needs it. Gate: apply, reapply and doctor
    pass on this Mac **and** on a real Linux user account that survives a reboot, with a Forgejo
    remote and the `none` secret backend (so T6 is tested before djbclark's own companion is).
-3. **Phase 2, sessions spike (1 week).** Evaluate CASS on the real stores (adapter coverage,
-   the OpenCode path, the licence rider for Q12); implement the capture protocol (generations,
-   completion marker, APFS clone) for Claude Code and Codex; a cross-home resume test (Mac to
-   Linux, `/Users` to `/home`) that forks by default; the takeover handshake. Gate: a session
+3. **Phase 2, sessions spike (1 week).** Stand up CASS over the real stores (adapter coverage,
+   the OpenCode path map, the export feed for stores it cannot read); implement the capture
+   protocol (generations, completion marker, APFS clone) for Claude Code and Codex; a
+   cross-home resume test (Mac to Linux, `/Users` to `/home`) that forks by default; the
+   takeover handshake. Gate: a session
    started on A is read, forked and continued on B, and B's work bundle comes back to A.
 4. **Phase 3, sessions for everyone (1 to 2 weeks).** Syncthing folder with versioning, the
    receive-encrypted peer (Q2), the restore-from-ciphertext drill, every other provider's
@@ -575,63 +589,86 @@ then prove a thin slice end to end, then widen, and only then retire or delete.
    nothing with the one prompt; T1 to T5 pass on three machines.
 7. **Phase 6, retire and delete (days).** Capability-map sign-off with both frontier reads
    (section 11); retire Orca and herdr's agent plugins (Q5); delete the scratch and duplicate
-   stores whose preservation Phase 0 proved; the newcomer walkthrough from a fresh account (T6
-   again, with the README written for them).
+   stores whose preservation Phase 0 proved.
+8. **Phase 7, product (2 to 3 weeks, can start after Phase 2).** djbclark chose full product
+   framing (Q10): JSON schemas for every manifest and companion file, `ade doctor` validating
+   against them, a documented config surface, templates and docs written for an arbitrary
+   operator, the newcomer walkthrough from a fresh account with no 1Password, no Hyades, no
+   Mac and a Forgejo remote (Q17), and a release process (signed tags, changelog). The
+   optional features (sessions sync, cold tier, Hermes gateway) are documented as add-ons.
 
-## 9. Decisions needed from djbclark
+## 9. Decisions, with djbclark's answers (2026-10-19)
 
 Numbering continues from v1 so earlier references stay valid; Q1 to Q11 are restated where the
-review changed the recommendation, Q12 to Q17 are new.
+review changed the recommendation, Q12 to Q17 are new. Every item was answered in a `/steps`
+walk on 2026-10-19; the answer follows each question.
 
 1. **Q1 Rename `site-private` to `ade-private`?** Now recommended: **later** (Phase 5), after
    every consumer of the name is mapped; the template creates a newcomer's companion as
    `ade-private` from day one.
+   **Decided 2026-10-19: later, Phase 5.**
 2. **Q2 Always-on Syncthing peer: Hyades or vps-primary?** Recommended: vps-primary if it stays
    (NixOS, already on the tailnet, a flake we control); Hyades if vps-primary is going away.
    Either runs receive-encrypted and is not an introducer.
+   **Decided: vps-primary.**
 3. **Q3 Move the agent-service Ansible roles (`shared_mcp`, `basic_memory_mcp`, `litellm`,
    `paseo_desktop`, the agent half of `site_agents`) from `site-djbclark` into
    `djbclark-ade/services`?** Recommended: yes, in Phase 5; until then `ade install` calls them
    where they are.
+   **Decided: yes, Phase 5.**
 4. **Q4 Provisioner.** Recommended as written in 4.4: a narrow `ade` CLI for ADE concepts,
    mise for runtimes, existing Ansible for system roles, chezmoi recorded as the switch-to, no
    Nix for Macs.
+   **Decided: chezmoi now; `ade` keeps doctor, clone, sessions, services (section 4.4 rewritten).**
 5. **Q5 Retire Orca and herdr's agent plugins once the Phase 4 pilot passes?** This discards
    `herdr-sleeper`, `herdr-jump`, `herdr-ai`, `reorg-orca`, `orca-reorg-watch` and the Orca docs.
    Recommended: yes for Orca after the pilot; herdr stays as the plain-terminal fallback.
+   **Decided: yes, after the pilot.**
 6. **Q6 Scope of native continuation (T3b): Claude Code and Codex now, Gemini and OpenCode
    when their export and import prove lossless, everything else read-only?** Recommended: yes.
+   **Decided: as recommended.**
 7. **Q7 Retention and at-rest policy**: hot tier a year on every workstation, cold tier
    git-annex with two copies; are encrypted transcripts allowed on a Hyades volume?
+   **Decided: hot one year; cold on vps-primary plus one Mac; no Hyades volume.**
 8. **Q8 Which machines are the fleet?** Macs, vps-primary, Hyades containers, Android phones?
    The bootstrap targets Mac and Linux; Termux is out unless you say otherwise.
+   **Decided: Macs plus vps-primary; Hyades containers run services only; phones are clients.**
 9. **Q9 Dispatch engine**: keep `acp-run` as the engine with a Paseo route (recommended), or
    move `acp-dispatch` onto the Paseo SDK and retire `acp-run`.
+   **Decided: keep `acp-run`, add the Paseo route, re-compare after the pilot (capabilities, robustness and maintenance cost were compared in the decision walk).**
 10. **Q10 Public-kit genericity**: how far to go for T6? Recommended: the operator's login,
     hosts and accounts out of the public tree via the deny-list, nothing more (no multi-tenant
     abstractions).
+    **Decided: full product framing (Phase 7).**
 11. **Q11 Shell and dotfiles**: `site-djbclark/shell` and `gradle/` are "my environment" but
     not the agent environment. Recommended: `ade` ships the shell fragments agents need (PATH,
     rtk, `bg`), the rest stays in site-djbclark.
+    **Decided: agent-needed fragments public; personal shell and gradle in the companion's chezmoi overlay.**
 12. **Q12 CASS licence.** Its MIT licence carries a rider granting no rights to Anthropic,
     OpenAI or anyone acting on their behalf, with "use" including indexing in automated
     pipelines<sup>[36](#C23)</sup>. Agents running on those vendors' models would be the ones invoking it.
     Whether that rider applies to this use is your call (this is not legal advice); if no, the
     FTS5 index path in 6.3.4 is the default and the spike is skipped.
+    **Decided: adopt CASS; the rider is accepted as inapplicable to this personal use.**
 13. **Q13 Deletion scope.** Is "future access only" (revoke the device, rotate the folder
     password) enough when a device is lost or a person leaves, or do you want a deletion
     requirement that spans local indexes, backups and the cold tier?
+    **Decided: future access only.**
 14. **Q14 Partition behaviour.** When the origin machine is unreachable, is a labelled fork
     the right default for continuation (recommended), or should `ade sessions pull` refuse
     until the origin answers?
+    **Decided: fork by default, labelled.**
 15. **Q15 Loss window.** Is "what a sleeping laptop collected since its last sync" acceptable
     (recommended), or must every turn be remotely durable before it is acknowledged (which
     would need a synchronous write to the peer and changes the design)?
+    **Decided: the last-collection window is acceptable.**
 16. **Q16 Memory governance.** Lock-and-push with tombstones and a ping on conflict
     (recommended), or a designated curator machine that is the only writer?
+    **Decided: lock-and-push, tombstones, ping on conflict.**
 17. **Q17 Newcomer minimum.** Confirm T6's floor: no 1Password, no Hyades, no Mac, a Forgejo
     remote; which optional features may be absent in that mode (recommended: sessions sync,
     cold tier, the Hermes gateway).
+    **Decided: all four absent must work; sessions sync, cold tier and the Hermes gateway are optional add-ons.**
 
 ## 10. Risks
 
@@ -642,7 +679,7 @@ review changed the recommendation, Q12 to Q17 are new.
    prototype, not the default, until its effect on credentials, plugins and settings is
    measured<sup>[4](#C1)</sup>.
 2. **Paseo moves fast.** 0.12.0 today; the config schema and plugin contracts have changed
-   between releases<sup>[9](#C52)</sup>. Mitigation: owned-key merges instead of symlinks, daemon, clients and
+   between releases<sup>[8](#C52)</sup>. Mitigation: owned-key merges instead of symlinks, daemon, clients and
    plugin pinned together in `tools.toml`, the plugin kept small.
 3. **Syncthing is sync, not backup.** Deletions propagate; the encrypted peer is beta<sup>[38](#C20b)</sup>.
    Mitigation: versioning on, the cold tier's two-copy rule, the restore drill.
@@ -701,7 +738,8 @@ otherwise, because a 1M-token Claude window costs the weekly pool several times 
 | 0 hygiene | link fixes, config templating, duplicate resolution | cursor `auto` | low | default | Cursor auto 70% | mechanical, file-scoped, cheap |
 | 0 hygiene | privacy sweep of `docs/handoffs`, `queue.md` | agy `gemini-3.8-flash` | medium | default | Gemini 96% | read-heavy, no judgment needed beyond a list |
 | 1 manifest and `ade` CLI | manifest rows from the inventory | agy `gemini-3.8-flash` | low | default | Gemini 96% | bulk transcription with a schema |
-| 1 manifest and `ade` CLI | `ade link`, `ade doctor`, `ade services` (Python, uv) | claude `sonnet` 5.5 | high | 200k | Claude weekly 51% | code that must be right first time; tests included |
+| 1 manifest and `ade` CLI | chezmoi source state, `modify_` merges, companion overlay | claude `sonnet` 5.5 | high | 200k | Claude weekly 51% | templates and merge scripts against real config files; chezmoi docs re-read per slice |
+| 1 manifest and `ade` CLI | `ade doctor`, `ade services`, `ade install` (Python, uv) | claude `sonnet` 5.5 | high | 200k | Claude weekly 51% | code that must be right first time; tests included |
 | 1 manifest and `ade` CLI | root of trust: signed bootstrap, pinned tool versions | claude `opus` 5.5 then codex gate | high | 200k | Claude, Codex | security design, then an outside read |
 | 1 manifest and `ade` CLI | Linux container CI (T7) | claude `sonnet` 5.5 | medium | 200k | Claude weekly | small, iterative on GitHub runners |
 | 2 private companion | `private-template/`, `ade init-private`, newcomer trial | claude `sonnet` 5.5 | high | 200k | Claude weekly | code plus the empty-companion test |
@@ -710,12 +748,16 @@ otherwise, because a 1M-token Claude window costs the weekly pool several times 
 | 3 sessions | collector over every adapter (`s1_*`, session-finder) | claude `sonnet` 5.5 | high | **1M** | Claude weekly | the one whole-archive refactor; budget it as several ordinary slices |
 | 3 sessions | per-store exporters (OpenCode, Cursor, zcode, Hermes) | zai `GLM-5.3` | high | default | z.ai 36% | isolated modules with a fixed contract |
 | 3 sessions | Syncthing units, receive-encrypted peer, two-machine trial | claude `sonnet` 5.5 | high | 200k | Claude weekly | ops plus a real trial on two hosts |
-| 3 sessions | CASS evaluation and SQLite backup checks | grok `grok-4.7` | high | 256k | Grok 59% | realtime web plus repo reading |
+| 2 sessions spike | CASS deployment, path maps, export feed | claude `sonnet` 5.5 | high | 200k | Claude weekly | Rust tool, our adapters; the index runs on the Linux peer |
+| 3 sessions | SQLite backup checks and exporter research | grok `grok-4.7` | high | 256k | Grok 59% | realtime web plus repo reading |
 | 4 Paseo delta | ADE plugin (Helm panel, dispatch rows, session panel) | claude `sonnet` 5.5 | high | 200k | Claude weekly | TypeScript against a moving API; re-read `llms.txt` each slice |
 | 4 Paseo delta | `launch.py`, `fleet.py`, `acp-dispatch --via paseo` | claude `sonnet` 5.5 | high | 200k | Claude weekly | touches the dispatch engine; tests first |
 | 4 Paseo delta | profile and provider catalog entries | cursor `auto` | low | default | Cursor auto | mechanical JSON |
 | 5 second machine | bootstrap a Linux box and a second Mac | claude `opus` 5.5 (driving `ade`) | high | 200k | Claude weekly | judgment under failure; fixes go back as Sonnet slices |
 | 6 retire and clean | capability-map sign-off, retire Orca and herdr plugins | claude `opus` 5.5, then both gates | high | 200k | Claude, Codex, Fable | the irreversible step gets both frontier reads |
+| 7 product | JSON schemas, `ade doctor` validation, release process | claude `sonnet` 5.5 | high | 200k | Claude weekly | schema work needs exactness |
+| 7 product | docs and templates for an arbitrary operator | agy `gemini-3.8-flash` draft, claude `sonnet` 5.5 edit | medium | default | Gemini 96%, Claude | bulk prose first on the cheap pool, one careful pass after |
+| 7 product | newcomer walkthrough from a fresh account | agy `gemini-4-argon` | high | default | argon 100% | an agent with none of this machine's context is the right tester |
 
 ### 11.3 Where the work runs: CI first, the Mac last
 
@@ -767,7 +809,7 @@ six with a change of remedy. The table says what moved.
 | F12 Paseo presence is not orchestration parity | accept | adapter contract; DAG, claims and resume stay in `acp-dispatch`; herdr fallback; retirements moved to Phase 6 |
 | F13 Paseo already has usage, attention, history | accept | 7.1 lists what 0.12.0 and registry plugins have; the plugin builds the delta (7.3) |
 | F14 config ownership | accept | owned-key merge, never a symlinked `config.json`; profiles generated; versions pinned together |
-| F15 CLI justified, general provisioner not | accept with change | narrow `ade` with plan, backup, idempotent reapply, unlink; mise; chezmoi recorded as switch-to |
+| F15 CLI justified, general provisioner not | accept with change | v2 proposed a narrow `ade link`; djbclark then chose chezmoi outright (Q4), so `ade` keeps only doctor, clone, sessions, services; mise for runtimes |
 | F16 overlay needs a contract | accept | `overlay.toml`: precedence, keyed merges, unknown keys fail; rename deferred (Q1) |
 | F17 Linux and root of trust too late | accept | both in Phase 1; signed tags, pins, no curl-pipe; real Linux user as the gate |
 | F18 retention must include derived copies | accept with change | 6.5: index permissions, redacted exports, lost-device procedure, deny-list from `operator.toml` |
@@ -799,9 +841,9 @@ Macs, devbox, sops-nix and agenix (vps-primary only).
 4. <a id="C1"></a>C1 — transcript path derivation, `CLAUDE_CODE_PROJECT_DIR_NAME` with `CLAUDE_CONFIG_DIR` (v2.1.234+, launching shell only), `cleanupPeriodDays`, `--resume` lookup order and the "more than one other project" rule — Claude Code sessions (vendor docs; code.claude.com). <https://code.claude.com/docs/en/sessions>
 5. <a id="C3"></a>C3 — moving a session to another computer needs the jsonl, side folder and path rewrites — Move a Claude Code session to another computer (guide; codonic.dev). <https://codonic.dev/guides/move-claude-code-session-to-another-computer>
 6. <a id="C44"></a>C44 — sudo-secretspec authorizes the operator identity, not per-secret confidentiality among callers; client-family labels are correlation metadata — sudo-secretspec AI-GUIDANCE (repo docs; GitHub). <https://github.com/frdminc/sudo-secretspec/blob/sudo-main/sudo-secretspec/AI-GUIDANCE.md>
-7. <a id="C56"></a>C56 — mise installs and pins runtimes (Python, Node, uv) per project and globally — mise dev tools (project docs; mise.jdx.dev). <https://mise.jdx.dev/dev-tools/>
-8. <a id="C15"></a>C15 — `chezmoi init --apply`, `promptStringOnce`, password-manager and age secrets — chezmoi setup user guide (project docs; chezmoi.io). <https://www.chezmoi.io/user-guide/setup/>
-9. <a id="C52"></a>C52 — 0.11.0 Usage dialog, pinned summaries and plugin usage sources; 0.12.0 `paseo usage`, background workspaces, symlinked `config.json` fix, `agentProfiles` schema fix, parent-told-child-finished fix; Import session — Paseo CHANGELOG (repo; GitHub). <https://github.com/getpaseo/paseo/blob/main/CHANGELOG.md>
+7. <a id="C15"></a>C15 — `chezmoi init --apply`, `promptStringOnce`, password-manager and age secrets — chezmoi setup user guide (project docs; chezmoi.io). <https://www.chezmoi.io/user-guide/setup/>
+8. <a id="C52"></a>C52 — 0.11.0 Usage dialog, pinned summaries and plugin usage sources; 0.12.0 `paseo usage`, background workspaces, symlinked `config.json` fix, `agentProfiles` schema fix, parent-told-child-finished fix; Import session — Paseo CHANGELOG (repo; GitHub). <https://github.com/getpaseo/paseo/blob/main/CHANGELOG.md>
+9. <a id="C56"></a>C56 — mise installs and pins runtimes (Python, Node, uv) per project and globally — mise dev tools (project docs; mise.jdx.dev). <https://mise.jdx.dev/dev-tools/>
 10. <a id="C58"></a>C58 — `loginctl enable-linger` keeps user services running without a login session — loginctl (reference; freedesktop.org). <https://www.freedesktop.org/software/systemd/man/latest/loginctl.html>
 11. <a id="C16"></a>C16 — nix-darwin plus home-manager pins the stack; casks still via Homebrew — Nixifying my dotfiles (blog, 2026-02; mattmichie.com). <https://mattmichie.com/2026/02/14/nixifying-my-dotfiles/>
 12. <a id="C17"></a>C17 — public installer with optional private overlay clones and precedence — ithinkihaveacat/dotfiles (repo; GitHub). <https://github.com/ithinkihaveacat/dotfiles/>
