@@ -15,9 +15,9 @@ slices that can leave the Mac. Two need djbclark once: (1) environment `ccarenv_
 first task is https://github.com/djbclark/djbclark-ade/issues/4 (re-trigger with an `@codex` comment if the body mention predates the
 install). Then a `codex-cloud` place in
 `acp-dispatch`/`route_agent.py` so the router can pick it (§11.5 rule 4);
-(2) a Cursor user API key into the secret backend (`sudo-secretspec`): decided 2026-10-19
-(round 2), djbclark creates the key at the Cursor dashboard and stores it; then `acp-dispatch`
-gets a `cursor-cloud` place that POSTs to `api.cursor.com/v1/agents`. (3) The Max plan's
+(2) DONE 2026-10-19: the Cursor user API key is `CURSOR_API_KEY` in `sudo-secretspec`
+(runtime declaration, optional; read it only through `sudo-secretspec run`); next a
+`cursor-cloud` launcher that POSTs to `api.cursor.com/v1/agents`, then a place in `acp-dispatch`. (3) The Max plan's
 monthly API credits are the `omp credits` pool in `aiuse` (djbclark, 2026-10-19): rename the
 pool, verify the balance on the Anthropic console, and route one API-key workload at it.
 
