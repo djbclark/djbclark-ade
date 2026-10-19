@@ -331,6 +331,12 @@ follows the public-kit-plus-private-companion pattern, which works with no compa
 present<sup>[18](#C17) [19](#C18)</sup>, with secrets pulled from the backend at apply time
 rather than age-encrypted in git<sup>[20](#C19)</sup>.
 
+**Bundle manifest (SF-Q13, 2026-10-19).** The Phase 1 manifest carries four fields borrowed
+from OpenRig's rig bundles: the pinned commit, the package digest, a "what it writes to your
+machine" list (every path `ade install` creates or edits, by owner), and a tested-configuration
+ladder (macOS arm64, NixOS, Ubuntu; each with the date and commit last verified). `ade doctor`
+compares the ladder entry for the host against what it finds.
+
 ### 4.5 Secrets and private data
 
 1. **Trust model, stated.** `sudo-secretspec` authorizes the operator identity; every process
@@ -639,8 +645,30 @@ version it was built against:
    "pull here" offering fork, take, and with-work.
 5. **Tidy and handoff commands**: Command Center items that run `/handoff` then archive, writing
    the close ledger.
+6. **Factory board** (Phase F, F3): factory jobs as rows, needs-you first, running with last
+   activity text; `rework` and `abandon` as Command Center items writing the job's
+   `commands.jsonl`.
 
-### 7.4 What stays outside Paseo
+### 7.4 Third-party plugins (decided 2026-10-19)
+
+The registry had 312 plugins at 0.12.0; the scan is
+[paseo-plugins-scan-2026-10-19.md](paseo-plugins-scan-2026-10-19.md). Decisions:
+
+1. **Trust rule (SF-Q15): plugins are ordinary dev dependencies.** Registry, `git:` and `npm:`
+   sources are all allowed; each installed plugin and its revision is recorded in `ade-private`
+   so `ade install` reproduces the set, and `paseo plugin ls` is the artifact to verify against.
+2. **Trial tier, installed now (SF-Q14):** Usage Auto Resume, Continuity (fallback order from
+   the routing policy), Agent Monitor, Herald, Agents Dash List, TokenLedger, forges, Fresh
+   Worktrees, twofado. They cover quota resume, attention, cost and Forgejo for interactive
+   chats, which the ADE scripts cover only for dispatched slices.
+3. **Telegram (SF-Q16): the Paseo Telegram plugin replaces Hermes's relay as the phone
+   surface.** Until the re-point lands (a Phase F item: `hermes-ping`, the approval buttons and
+   home rule 12 move to it), Hermes keeps alerting; both are never active for the same event.
+4. **After Phase 4's ADE plugin:** Agents History, Recap, Turn report, Session triage,
+   paseo-next-check, Mesh or Cross Daemon, worktreeinclude, PR Radar, Review Deck, Turn Changes.
+   The ADE plugin depends on them where it can instead of re-implementing them.
+
+### 7.5 What stays outside Paseo
 
 Dispatch to agents that Paseo cannot host, the quota probes, the load watcher, the nightly
 skill-edit cycle's non-agent parts, `sudo-secretspec`, and herdr as the plain-terminal
@@ -713,6 +741,73 @@ then prove a thin slice end to end, then widen, and only then retire or delete.
    third parties, so the page names it. The distribution is `ade-kit` (Q24), since `ade` is
    taken on PyPI<sup>[74](#C73)</sup>; it ships for macOS arm64 and Linux x86_64. The optional features
    (sessions sync, cold tier, Hermes gateway) are documented as add-ons.
+9. **Phase F, the software factory (parallel track; decided 2026-10-19, §9.3).** A brief or
+   an issue label goes in; a spec, a branch, two independent reviews, a CI run and a merged
+   pull request come out. The factory is a state machine over `acp-dispatch` records, not a
+   new runner: every role is one slice with the report contract, routed by `route_agent.py
+   plan`, resumed and reaped by the engine, admitted only when `load-watch` allows and the
+   job's caps hold. It starts after Phase 1's first PR (the GitHub Actions workflow) and runs
+   beside Phases 2-3. Sources: `docs/software-factory-design.md` v2 as corrected by
+   [software-factory-research-digest-2026-10-19.md](software-factory-research-digest-2026-10-19.md).
+   1. **Scope.** `bin/factory run <brief.md> | --issue <url>`, `status`, `rework`, `abandon`,
+      `retry`, `gc`; `config/factory.toml` (kinds, perms, caps, allowlist); role prompts in
+      `config/factory/roles/`; state under `~/.local/state/factory/<repo>/<job>/`
+      (`events.jsonl` as the source of truth, `job.json`, `commands.jsonl`, the dispatch
+      records, per-round `diff.patch`, `verdict.json`, and `spec.md`, `progress.md`,
+      `proof.md`). Nothing is written into the target repo. Job identity is repository, host
+      owner and attempt, never a bare path (Codex 6.2.1).
+   2. **Roles.** spec-writer (Opus `judgment`, SF-Q3), builder (`code` via `plan`; cloud agents
+      allowed, see 6), reviewer-security (the `adversary` prompt, Opus, `--perm read-only`),
+      reviewer-code (`code`, `--perm read-only`, a vendor different from the builder's,
+      SF-Q8). Reviewers write `verdict.json`; a missing or malformed verdict is an infra
+      failure: one retry, then `needs-human`, never `CHANGES`.
+   3. **Intake and spec.** `factory run` and an issue label from day one (SF-Q9; GitHub via
+      `gh`, Forgejo via its API), with issue state reconciled on resume. The admitted spec is
+      hashed; no human click when it stays inside the brief; scope expansion refuses; an
+      unresolved product decision stops with `BLOCKED:` (SF-Q18). Silence never approves.
+   4. **Workspace.** cow pasture on Macs, `git worktree` plus a per-repo setup command
+      elsewhere and for cloud agents, one adapter (SF-Q5); root outside the checkout;
+      `base_sha` pinned; a primary checkout is refused. **Unattended on the Mac from v1**
+      (SF-Q17, chosen knowingly over the two reads' supervised pilot; risk 12 in §10): the
+      builder runs yolo in a scrubbed pasture with a minimal environment and no push token;
+      the orchestrator pushes.
+   5. **Verify and merge.** `verify` is a CI run on the pushed head. States: `queued → spec →
+      build → verify → review(N) → ready → approved → merged`, with `needs-human`, `failed`,
+      `paused-quota`, `paused-load`, `cancelled`; `max_rounds` 3. `ready` = a PR opened by
+      the orchestrator with CI, adversary `APPROVE` and code `PASS` quoted, each naming the
+      exact head sha. **The factory merges** (`gh pr merge --squash --match-head-commit`)
+      after djbclark's explicit, revision-bound approval, and on its own once a user-defined
+      certainty threshold is met: a Jev `merge_gate` decision in the act band over those
+      inputs (SF-Q7, SF-Q10). Branch rulesets and required checks on the target repo are the
+      precondition for the automatic path; a Jev plan is bought before it goes live
+      (`docs/queue.md`). A security `BLOCK` at round 3 is `needs-human`, no PR.
+   6. **Caps and load (SF-Q4).** Before every dispatch and every resume (resumes, canaries
+      and wrap-ups count): at most 12 model calls and 4 h per job, 3 jobs per day, 1 job at a
+      time, 2 ready PRs awaiting review; `load-watch` must allow a new slice, else
+      `paused-load`; builder slices may go to a vendor's cloud agents (Cursor Cloud Agents
+      first, Codex cloud tasks next) when the plan includes them, so a loaded Mac is not the
+      bottleneck. USD is advisory.
+   7. **Surfaces.** `factory status` and Telegram until F3 (SF-Q6); no static dashboard. One
+      alert per transition into needs-you (title, why-line, diffstat, PR URL) and approval
+      buttons on the phone, through the Paseo Telegram plugin once it replaces Hermes's relay
+      (§7.4). The board is the §7.3 panel.
+   8. **Borrowed from OpenRig and agent-stack (SF-Q10, SF-Q11):** exact-head verification and
+      `--match-head-commit`; Jev decision sites `pick-seat`, `stuck-check` and `merge-gate` in
+      `bin/jev`, shadow first; spec, progress and proof per job; an optional witness slice
+      after merge for repos that declare a witness command (SF-Q12, Phase 5+); one time-boxed
+      OpenRig spike on a Linux host after F1, never as a third fabric.
+   9. **Pilot (SF-Q2):** `djbclark-ade` itself, an allowlist of small non-security tasks (docs,
+      skills, `bin/` fixes); the factory cannot touch `config/factory*`, CI, auth, deploy or
+      its own gates.
+   10. **Gates.** F1 orchestrator (1 week): one job, sequential; the kill test (`kill -9` in
+       every state, restart, one PR and one alert, `acp-dispatch reap` clean). F2 reviews,
+       merge and intake (1-2 weeks): parallel reviewers, rework loop, CI verify, PR opener,
+       approval-driven merge, issue-label intake, Telegram alert and buttons; gate: one issue
+       on `djbclark-ade` runs to merged from the phone. F2b automatic merge: rulesets on the
+       pilot repo, Jev `merge_gate` live, a negative test (a planted failing check never
+       merges). F3 Paseo panel, in Phase 4; gate: the T5 pilot includes one factory job.
+       Cut from v1: approver LLM, UX/UI reviewers, spec-kit or OpenSpec, parallel jobs,
+       kanban, SSE, `fs`, pre-commit hook, `jj`, containers.
 
 ## 9. Decisions, with djbclark's answers (2026-10-19)
 
@@ -854,6 +949,42 @@ express instead of falling back (7.2).
     **Decided: (a)**: all generations for 30 days, then the latest per session plus every
     generation a fork or transfer record names; provisional until Phase 2 measures (6.5.1).
 
+### 9.3 Round 3: the software factory, OpenRig and Paseo plugins (decided 2026-10-19)
+
+Questions from the two frontier reads, the OpenRig study and the plugin scan
+([software-factory-research-digest-2026-10-19.md](software-factory-research-digest-2026-10-19.md)
+§5-6); walked with `/steps` on 2026-10-19. The answer follows each question.
+
+1. **SF-Q1 Placement.** **Decided: a parallel Phase F after Phase 1's CI PR** (§8 item 9).
+2. **SF-Q2 Pilot repo and change class.** **Decided: `djbclark-ade`, small non-security tasks**
+   on an allowlist; no factory policy, CI, auth or deploy changes.
+3. **SF-Q3 Spec-writer tier.** **Decided: Opus `judgment`, high.**
+4. **SF-Q4 Caps.** **Decided: 12 calls, 4 h, 3 jobs/day, 1 parallel, 2 ready PRs waiting**, and
+   two riders: every dispatch also passes the `load-watch` gate (running many slices on a
+   30+ load helps nothing), and builder slices may use vendor cloud agents (Cursor Cloud
+   Agents, Codex cloud tasks) included in the monthly plans. The session that monitors load is
+   consulted when the gate is written.
+5. **SF-Q5 Workspace primitive.** **Decided: cow on Macs, `git worktree` elsewhere, one adapter.**
+6. **SF-Q6 Dashboard before Phase 4.** **Decided: none**; `factory status` plus Telegram.
+7. **SF-Q7 Merge authority.** **Decided: the factory merges after djbclark's explicit,
+   revision-bound approval, and automatically once a user-defined certainty threshold is met**
+   (a Jev `merge_gate` band). Supersedes both the zero-click goal of `coding-factory.md` and
+   the v2 design's human-only merge.
+8. **SF-Q8 Reviewer-code vendor.** **Decided: must differ from the builder's.**
+9. **SF-Q9 Intake.** **Decided: brief file and an issue label from day one.**
+10. **SF-Q10 OpenRig.** **Decided: borrow the five ideas now, a time-boxed Linux spike after
+    F1**; djbclark is prompted to buy a Jev or equivalent plan and set up access before the
+    `merge_gate` goes live.
+11. **SF-Q11 agent-stack.** Settled by SF-Q7 and SF-Q10: mine its merge gate and three Jev
+    decision sites; never run it as-is.
+12. **SF-Q12 Witness step.** **Decided: optional post-merge check, Phase 5+.**
+13. **SF-Q13 ade-kit bundle manifest.** **Decided: adopt in Phase 1** (§4.4).
+14. **SF-Q14 Paseo plugins to trial.** **Decided: the nine-plugin trial tier** (§7.4).
+15. **SF-Q15 Plugin trust rule.** **Decided: anything**; plugins are ordinary dev dependencies.
+16. **SF-Q16 Telegram surface.** **Decided: the Paseo Telegram plugin replaces Hermes's relay.**
+17. **SF-Q17 Supervised or unattended v1.** **Decided: unattended on the Mac now** (risk 12).
+18. **SF-Q18 Spec approval click.** **Decided: none when the spec stays inside the brief.**
+
 ## 10. Risks
 
 1. **Transcript path coupling.** Claude Code's slug and embedded paths make Linux continuation
@@ -887,6 +1018,18 @@ express instead of falling back (7.2).
 11. **The `claude`/`codex` shim breaks on a vendor flag change** (Q20). Mitigation: it parses
     only `--resume`/`resume` and session ids and passes everything else through; `ade doctor`
     checks the shim still resolves first on PATH and reaches the vendor binary.
+
+12. **An unattended builder on the Mac has the daemon user's credentials** (SF-Q17, chosen
+    knowingly). Scrubbed pastures and config stripping are reliability switches, not a boundary
+    (acp-run README; Codex 3.6). Mitigations: no push token in the builder's environment, the
+    allowlist of SF-Q2, reviewers read-only, exact-head verdicts, and the F2b negative test; a
+    Linux VM or container host for the builder is the Phase 5 improvement, not a v1 gate.
+13. **The Paseo Telegram plugin replaces a working relay** (SF-Q16). Hermes's buttons and
+    `hermes-ping` are in daily use; the cut-over is one Phase F item with a rollback (re-enable
+    Hermes's relay) and both are never live for the same event.
+14. **Plugins as ordinary dependencies** (SF-Q15) means a compromised plugin update runs as the
+    daemon user. Mitigation: `paseo plugin update` is run by hand and its revision line read;
+    the installed set is recorded in `ade-private` and diffed by `ade doctor`.
 
 ## 11. Routing per phase: which AI does which step
 
@@ -950,6 +1093,13 @@ otherwise, because a 1M-token Claude window costs the weekly pool several times 
 | 7 product | remaining schemas, licence and notice page, release notes | claude `sonnet` 5.5 | medium | 200k | Claude weekly | the contracts already exist (Phase 1) |
 | 7 product | docs and templates for an arbitrary operator | agy `gemini-3.8-flash` draft, claude `sonnet` 5.5 edit | medium | default | Gemini 96%, Claude | bulk prose first on the cheap pool, one careful pass after |
 | 7 product | newcomer walkthrough from a fresh account | agy `gemini-4-argon` | high | default | argon 100% | an agent with none of this machine's context is the right tester |
+
+| F factory | spec-writer | claude `opus` 5.5 | high | 200k | Claude weekly | planning is Opus's listed use (SF-Q3); one call per job |
+| F factory | builder | `plan --kinds code`: agy Claude pool when ≥40%, else cursor `auto`, zcode `GLM-5.3`, claude `sonnet` 5.5; or a vendor cloud agent (Cursor Cloud Agents, Codex cloud) | high | default | per `plan` | cheapest eligible tier; cloud agents keep the Mac's load down (SF-Q4) |
+| F factory | reviewer-security | `adversary` prompt, claude `opus` 5.5 `--perm read-only` | high | 200k | Claude weekly | the verdict quoted in every PR |
+| F factory | reviewer-code | zcode `GLM-5.3` or claude `sonnet` 5.5, `--perm read-only`, whichever differs from the builder's vendor | high | default | z.ai, Claude | independence (SF-Q8) |
+| F factory | `bin/factory`, adapters, Jev sites, PR opener | claude `sonnet` 5.5 | high | 200k | Claude weekly | code that touches the dispatch engine; tests first |
+| F factory gate | whole-factory read before F2 merges | codex `gpt-6-astra`, advise | high | default | Codex weekly | the phase-gate row applies |
 
 ### 11.3 Where the work runs: CI first, the Mac last
 
