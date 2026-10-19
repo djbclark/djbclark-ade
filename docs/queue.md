@@ -8,9 +8,11 @@ when they ship (into the relevant doc) or when they're dropped (say why).
 `docs/ade-everywhere-proposal.md` §11.5 rules that paid-for cloud agents are used first for
 slices that can leave the Mac. Two need djbclark once: (1) create a Codex Cloud environment for
 `djbclark-ade` on the web (no non-interactive path; then `codex cloud exec --env <ID>` works);
-(2) a Cursor user API key into the secret backend (`sudo-secretspec`), or install the Cursor
-GitHub app on the repo so `@cursor` on an issue launches a Cloud Agent. Also verify the Max
-plan's monthly API credits and whether anything draws them.
+(2) a Cursor user API key into the secret backend (`sudo-secretspec`): decided 2026-10-19
+(round 2), djbclark creates the key at the Cursor dashboard and stores it; then `acp-dispatch`
+gets a `cursor-cloud` place that POSTs to `api.cursor.com/v1/agents`. (3) The Max plan's
+monthly API credits are the `omp credits` pool in `aiuse` (djbclark, 2026-10-19): rename the
+pool, verify the balance on the Anthropic console, and route one API-key workload at it.
 
 ## Buy a Jev plan before the factory's merge gate goes live (SF-Q10, 2026-10-19)
 
