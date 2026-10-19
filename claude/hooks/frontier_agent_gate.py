@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """PreToolUse (Agent): log and ask before an Agent-tool sub-agent runs on a frontier model.
 
-Operator 2026-10-18: Fable and codex's gpt-6-astra are scarce. acp-dispatch gates them, but an
-Agent-tool sub-agent never passes through acp-dispatch: `fable-deep`, `model: fable`, `ocx-self`
-(the opencodex self-clone, pinned to the main model, Fable) and `ocx-gpt-6-astra` reached them
-unseen. Each such call is appended to ~/.local/state/frontier-gate/agent-calls.jsonl and returns
+Operator 2026-10-18: Fable is scarce. acp-dispatch gates it, but an Agent-tool sub-agent never
+passes through acp-dispatch: `fable-deep` and `model: fable` reached it unseen (the opencodex
+`ocx-*` sub-agents that also did were retired with the proxy on 2026-10-19). Each such call is appended to ~/.local/state/frontier-gate/agent-calls.jsonl and returns
 "ask", so the operator confirms it. Skipped when ACP_OPERATOR_APPROVED names `fable-deep` (any
 frontier sub-agent this session) or FRONTIER_GATE_OFF=1. Fails open on any error.
 """
@@ -15,8 +14,7 @@ import sys
 import time
 from pathlib import Path
 
-FRONTIER_AGENTS = {"fable-deep": "Fable", "ocx-self": "Fable (main-model clone)",
-                   "ocx-gpt-6-astra": "gpt-6-astra (codex pool)"}
+FRONTIER_AGENTS = {"fable-deep": "Fable"}
 LOG = Path.home() / ".local/state/frontier-gate/agent-calls.jsonl"
 
 try:

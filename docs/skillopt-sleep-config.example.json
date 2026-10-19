@@ -28,5 +28,5 @@
   "opencode_db": "/Users/djbclark/.local/share/opencode/opencode.db",
   "opencode_path": "/Users/djbclark/.local/bin/opencode",
   "cursor_path": "/Users/djbclark/.local/bin/cursor-agent",
-  "codex_path": "/Users/djbclark/.opencodex/bin/codex"
+  "codex_path": "/Users/djbclark/.local/bin/codex"
 }

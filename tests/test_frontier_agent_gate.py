@@ -25,11 +25,18 @@ class TestFrontierAgentGate(unittest.TestCase):
         row = json.loads(log.read_text())
         self.assertEqual(row["subagent_type"], "fable-deep")
 
-    def test_model_fable_and_ocx_agents_ask(self):
+    def test_model_fable_asks(self):
         for tool_input in ({"subagent_type": "general-purpose", "model": "fable"},
-                           {"subagent_type": "ocx-self"}, {"subagent_type": "ocx-gpt-6-astra"}):
+                           {"subagent_type": "backend", "model": "Fable"}):
             out, _ = self.run_hook(tool_input)
             self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask", tool_input)
+
+    def test_retired_ocx_agents_no_longer_gate(self):
+        # the opencodex proxy and its ocx-* sub-agents were uninstalled 2026-10-19
+        for tool_input in ({"subagent_type": "ocx-self"}, {"subagent_type": "ocx-gpt-6-astra"}):
+            out, log = self.run_hook(tool_input)
+            self.assertIsNone(out, tool_input)
+            self.assertFalse(log.exists())
 
     def test_ordinary_agents_pass_silently(self):
         for tool_input in ({"subagent_type": "Explore"}, {"subagent_type": "general-purpose", "model": "opus"}):

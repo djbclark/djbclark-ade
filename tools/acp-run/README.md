@@ -283,9 +283,9 @@ Landed 2026-10-15 (6528ccf, 77bd2bf, 0221561, faead67, ada7620). Value lists are
 5. `--meta JSON` deep-merges into `session/new` `_meta` over `systemPrompt` and the deny meta. `--agent-arg ARG` (repeatable) appends to the launch command. `--agent-env K=V` (repeatable; one argument may be `K=V,K2=V2`, split only before another `NAME=`) appends to the child environment. Per host, `~/.config/acp-run.env` or `$ACP_RUN_ENV_FILE`: `ACP_RUN_ARGS_<AGENT>` (shell-split), `ACP_RUN_ENV_<AGENT>="K=V,K=V"`.
 6. `HERDR_PANE_ID` and `HERDR_ENV` are removed on every run. Under `--perm deny`, grok starts without `--always-approve` on a per-run `GROK_HOME`: symlinks to `~/.grok` except `hooks/`, `skills/`, `plugins/`, `installed-plugins/` and `config.toml`. The copy drops `[[hooks.*]]`, `[plugins]`, `[mcp_servers.*]`, `ui.permission_mode`, `ui.yolo`, and ends with `[permission] ask = ["*"]` (deny > ask > allow). tomllib requires the copy to equal the original minus exactly those parts; otherwise grok keeps the user's home and the run says so. A token rewritten as a regular file in the temp home is copied back. `--strip-user-config` is the same strip without the permission table. Every other non-interactive grok run (`--perm all`, what `acp-dispatch` uses) also starts on a stripped `GROK_HOME` without the user's hooks, skills and plugins (2026-10-15), keeping MCP servers, the permission mode and auth (no `ask` rule); the `user_config` log record names the `home`. `ACP_RUN_GROK_USER_HOOKS=1` (or `--keep-user-config`) keeps `~/.grok`; `--interactive` always does.
 7. `acp-dispatch --effort` and `--context` are first-class. Checked with the model before anything is written (`acp-run <agent> --info --model M --effort E --context C`), stored on the job record, kept by `resume`. `--acp-arg` still forwards other flags; a dash-leading value needs `--acp-arg=--meta`. zcode `--model` is accepted and still optional.
-8. No `--fast`. Use `--set fast=on|off` (claude Opus only), `--set fast=true|false` (cursor), `--set fast-mode=on|off` (codex), or a model id (`grok-4.7-build-fast`, copilot `claude-opus-4.8-fast`). Thinking budget: `--agent-env MAX_THINKING_TOKENS=N` or `ACP_RUN_ENV_CLAUDE`. Not implemented (exit 2, or not a flag): hermes shadow home for effort/context, crush `/set_reasoning_effort`, opencode/qwen context caps (`OPENCODE_CONFIG_CONTENT` `limit.context` untested; a cap cannot raise a window), agy `--auth-method` (`AGY_ACP_DEFAULT_MODEL` via `ACP_RUN_ENV_AGY`), `ZCODE_ACP_QUOTA_AUTO_RESUME=0` (operator's choice). Claude `--context 1m` does not add `[1m]`. No warning yet for opencodex GPT rows in claude's model list.
+8. No `--fast`. Use `--set fast=on|off` (claude Opus only), `--set fast=true|false` (cursor), `--set fast-mode=on|off` (codex), or a model id (`grok-4.7-build-fast`, copilot `claude-opus-4.8-fast`). Thinking budget: `--agent-env MAX_THINKING_TOKENS=N` or `ACP_RUN_ENV_CLAUDE`. Not implemented (exit 2, or not a flag): hermes shadow home for effort/context, crush `/set_reasoning_effort`, opencode/qwen context caps (`OPENCODE_CONFIG_CONTENT` `limit.context` untested; a cap cannot raise a window), agy `--auth-method` (`AGY_ACP_DEFAULT_MODEL` via `ACP_RUN_ENV_AGY`), `ZCODE_ACP_QUOTA_AUTO_RESUME=0` (operator's choice). Claude `--context 1m` does not add `[1m]`.
 
-`ocx-*` grok ids are OpenAI via the opencodex proxy `127.0.0.1:10100` (provider `openai`, ChatGPT auth to `https://chatgpt.com/backend-api/codex`). Billed to the ChatGPT plan, not xAI. Cursor `--set reasoning_effort=LEVEL` hits only option id `reasoning_effort`: `grok-4.7`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `gemini-4-argon`, `gemini-3.8-flash`. Other cursor models use option `effort` or `reasoning`; use `--effort`.
+(The `ocx-*` grok ids, OpenAI models via the opencodex proxy on `127.0.0.1:10100`, went with the proxy on 2026-10-19.) Cursor `--set reasoning_effort=LEVEL` hits only option id `reasoning_effort`: `grok-4.7`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `gemini-4-argon`, `gemini-3.8-flash`. Other cursor models use option `effort` or `reasoning`; use `--effort`.
 
 `pick_config` tries every option of a category and ignores a trailing `(openai)` or `[1m]` (`--model qwen3.8-max` selects `qwen3.8-max(openai)`). An ambiguous short name exits 2 (hermes `claude-sonnet-5.5`). `--info` without `--model` is the default model's options only. hermes and crush `--info` include `session/new`'s `models`.
 
@@ -293,7 +293,7 @@ Landed 2026-10-15 (6528ccf, 77bd2bf, 0221561, faead67, ada7620). Value lists are
 
 https://code.claude.com/docs/en/model-config — claude-agent-acp 0.90.0, Claude Code 2.1.300.
 
-Provider is inherited env only (`ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`). No `--provider`. This Mac's `HTTPS_PROXY` is the opencodex intercept `127.0.0.1:10200`. A description starting `opencodex` is OpenAI: `claude-opus-4-8-cuk` (GPT 6 Astra), `-bs8` (6.1 Sol), `-f1a` (6 Sol), `-plv` (6 Luna), `-ncb` (5.6 Sol), `-myc` (5.6 Terra, set fails "Internal error"), `-j97` (5.6 Luna), `-teq` (5.5, "Internal error").
+Provider is inherited env only (`ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`). No `--provider`. Until 2026-10-19 this Mac's `HTTPS_PROXY` was the opencodex intercept `127.0.0.1:10200`, which added GPT rows (descriptions starting `opencodex`) to claude's model list; the proxy is uninstalled and the list is Anthropic-only again.
 
 `--model` (unique-token match): `default`/`opus` = Opus 5.5, `fable` = Fable 5.1, `sonnet` = Sonnet 5.5, `haiku` = Haiku 5.5, `claude-sonnet-5`, `claude-opus-5`, `claude-fable-5`, `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`. TUI also `best`, `opusplan`, full ids, `[1m]`.
 
@@ -301,7 +301,7 @@ Effort option `effort`: `low` `medium` `high` `xhigh` `max`, plus `default`. No 
 
 Context: Fable 5.1, Fable 5, Sonnet 5, Sonnet 5.5, Haiku 5.5, Opus 4.7+ are 1M native. Opus 4.6 and Sonnet 4.6 are 200K, 1M only via `[1m]` (plan dependent) — `--context 1m` does not add that suffix. `--context 200k` sets child `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` (haiku `usage_update.size` 1000000 to 200000). `--context 1m` leaves the model's own window. Other sizes exit 2. A 1m request that comes back 200k is `FAILED config`. Auto-compact 100K–1M: `--autocompact`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. Gateway: `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
 
-Fast option `fast` `on`/`off` only on `opus`, `claude-opus-5`, `claude-opus-4-8`, and the opencodex GPT rows. Not on fable, sonnet, haiku, Opus 4.7, Opus 4.6. Extended thinking is always on for 5.5 and Fable.
+Fast option `fast` `on`/`off` only on `opus`, `claude-opus-5`, `claude-opus-4-8`. Not on fable, sonnet, haiku, Opus 4.7, Opus 4.6. Extended thinking is always on for 5.5 and Fable.
 
 ### codex
 
@@ -417,11 +417,11 @@ agy 1.4.1 (2026-10-18) lists bare ids (`gemini-4-argon`, `gemini-3.8-flash`, `cl
 
 https://docs.x.ai/developers/grok-4-7 , https://docs.x.ai/developers/pricing — 1.0.52.
 
-`cli-chat-proxy.grok.com/v1` (grok.com, `XAI_API_KEY`, or `cached_token`). `[model_providers.X]` / `[model.Y]` in `~/.grok/config.toml`. `GROK_MODELS_BASE_URL`, `GROK_MODELS_LIST_URL`. Models: `grok-4.7` (default; server `grok-4.7-build`, fingerprint `fp_5719f1aec35dd73c`), `grok-4.7-build-fast` (same fingerprint, 2×, 1.5× on long context, not free), `grok-4.6`, `grok-4.5`, `ocx-gpt-6-astra`, `ocx-gpt-6-1-sol`, `ocx-gpt-6-sol`, `ocx-gpt-6-luna`, `ocx-gpt-5-6-sol`, `ocx-gpt-5-6-terra`, `ocx-gpt-5-6-luna`, `ocx-gpt-5-5`. No `--fast`.
+`cli-chat-proxy.grok.com/v1` (grok.com, `XAI_API_KEY`, or `cached_token`). `[model_providers.X]` / `[model.Y]` in `~/.grok/config.toml`. `GROK_MODELS_BASE_URL`, `GROK_MODELS_LIST_URL`. Models: `grok-4.7` (default; server `grok-4.7-build`, fingerprint `fp_5719f1aec35dd73c`), `grok-4.7-build-fast` (same fingerprint, 2×, 1.5× on long context, not free), `grok-4.6`, `grok-4.5` (the `ocx-gpt-*` ids left with the opencodex proxy, 2026-10-19). No `--fast`.
 
-Effort `reasoning_effort`, also sent as `reasoningEffort` on the window's `session/set_model`. `low medium high` (default high) `xhigh` on 4.7, 4.7-build-fast, 4.6. 4.5 stops at `high`. `ocx-*` add `max`, except `ocx-gpt-5-5`. Docs also list menu ids `none`, `minimal`.
+Effort `reasoning_effort`, also sent as `reasoningEffort` on the window's `session/set_model`. `low medium high` (default high) `xhigh` on 4.7, 4.7-build-fast, 4.6. 4.5 stops at `high`. Docs also list menu ids `none`, `minimal`.
 
-Context: `session/set_model` `_meta.contextWindow`. Must be in initialize `modelState.availableModels[]._meta.contextWindows`. Measured: four xAI ids 256000 (default) and 500000; `ocx-gpt-6-1-sol` 500000 only; other `ocx-*` 272000 only. `300k` on 4.7 exits 2 (`valid: 256k, 500k`). Config ids `context_window` / `context` / `contextWindow` return "Invalid params". Read-back: `_x.ai/session/info` `context.total`. Live `grok-4.7` low + 500k → `acp-run: applied: model=grok-4.7 effort=low ctx=500k`. TUI `/context-window`, `[model.X] context_window`, `context_windows=[256000,500000]`. Session-scoped; follows a model that lists it; smaller triggers auto-compact. Long-context price from a 200k prompt.
+Context: `session/set_model` `_meta.contextWindow`. Must be in initialize `modelState.availableModels[]._meta.contextWindows`. Measured: four xAI ids 256000 (default) and 500000. `300k` on 4.7 exits 2 (`valid: 256k, 500k`). Config ids `context_window` / `context` / `contextWindow` return "Invalid params". Read-back: `_x.ai/session/info` `context.total`. Live `grok-4.7` low + 500k → `acp-run: applied: model=grok-4.7 effort=low ctx=500k`. TUI `/context-window`, `[model.X] context_window`, `context_windows=[256000,500000]`. Session-scoped; follows a model that lists it; smaller triggers auto-compact. Long-context price from a 200k prompt.
 
 ### crush
 
@@ -627,8 +627,8 @@ server from `~/.local/share/agy-acp-server/`); edit `AGENTS`, `DEFAULT_SET` and
 `mode=yolo` (`default | auto_edit | yolo`), set automatically. agy runs
 commands in whichever of its workspaces sorts first, often its own skills
 dir rather than `-C`, so acp-run names the working directory at the top of
-the prompt. It also drops `HTTPS_PROXY` for agy (Claude Code's opencodex
-proxy answers it with 407).
+the prompt. It also drops any inherited `HTTPS_PROXY` for agy (the opencodex
+proxy, uninstalled 2026-10-19, answered it with 407).
 
 **The clientInfo gate (2026-10-10).** agy_acp_server 1.3.0 offers its
 non-Gemini models (`claude-opus-5-5-*`, `claude-sonnet-5-5-*`,

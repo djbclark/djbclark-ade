@@ -3730,8 +3730,9 @@ async def run(a, log, err, log_path):
             env["ZCODE_BIN"] = zcode_bin()
         if a.agent == "agy":
             env["GEMINI_HOME"] = str(deny_dir) if deny_dir else ensure_agy_home()
-            # Claude Code's settings point HTTPS_PROXY at the opencodex intercept
-            # proxy, which answers agy with 407 (2026-10-09).
+            # Claude Code's settings used to point HTTPS_PROXY at the opencodex
+            # intercept proxy, which answered agy with 407 (2026-10-09); the proxy
+            # was uninstalled 2026-10-19 but any inherited proxy stays scrubbed.
             for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
                 env.pop(k, None)
             # agy lists its skills dirs as workspaces too and runs commands in

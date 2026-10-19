@@ -14,7 +14,7 @@
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>/Users/djbclark/.local/bin:/Users/djbclark/.opencodex/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PATH</key><string>/Users/djbclark/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>WorkingDirectory</key><string>/Users/djbclark/src/djbclark-ade</string>
   <key>RunAtLoad</key><false/>

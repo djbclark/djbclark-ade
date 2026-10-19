@@ -176,8 +176,7 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    `model-routing` skill and the `aiuse` rules in `~/CLAUDE.md` give the
    mechanics). Reasons: the reads stay out of the lead's context, the
    quota spreads across vendors, and the reviewer gets a genuinely different
-   model family (an Agent-tool `ocx-gpt-6-*` sub-agent also counts, with
-   the condition in item 1a). A Claude Agent-tool sub-agent is the fallback
+   model family. A Claude Agent-tool sub-agent is the fallback
    for a small lookup or when no other agent has quota; its prompt then
    carries the footer in item 2. Both routes are exercised: `grok-brain-loop`
    (2026-10-09) used Agent-tool sub-agents; `ai-heaven` (2026-10-09) ran all
@@ -227,22 +226,12 @@ pages. On a host with `model-routing` / `effort-routing` skills, follow them.
    per `feedback_quota_wait_dont_lose_work`). Grok's window is invisible to
    `aiuse` and shared with GrokBot, so a Grok slice that stalls or returns
    a rate-limit line is re-run after the next hour, not re-routed.
-   1a. **`ocx-gpt-6-*` sub-agents only work when this Claude Code process
-   routes through the opencodex intercept.** That is true when the session
-   was launched with `ocx claude`, or when CLI first-party routing is on
-   (`ocx claude config status` shows `cliFirstPartyApplied: true`; it writes
-   `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS` into `~/.claude/settings.json`
-   env, read at launch, so a session older than the switch is not routed).
-   Otherwise the sub-agent fails at once with "issue with the selected
-   model ocx-claude-native--gpt-6-…" (seen 2026-10-09; first-party was
-   turned on that day). Before relying on one, preflight from a fresh
-   process: `claude -p "Reply with exactly: OK" --model
-   ocx-claude-native--gpt-6-astra` (the "isn't described by this version's
-   model catalog" line is a warning, not a failure). If it fails or the
-   Codex pool is out (`aiuse --available --live --json`), use `acp-dispatch codex --model
-   gpt-6-astra --kind frontier`, and if that is out too, the next family with quota
-   (`acp-dispatch zcode --kind research`, no `--model`), labelling the review
-   non-independent for any slice that family worked on.
+   1a. **GPT reviewers go through `acp-dispatch codex --model gpt-6-astra
+   --kind frontier`** (the `ocx-gpt-6-*` Agent-tool sub-agents and the
+   opencodex proxy behind them were uninstalled 2026-10-19). If the Codex
+   pool is out (`aiuse --available --live --json`), the next family with
+   quota (`acp-dispatch zcode --kind research`, no `--model`), labelling the
+   review non-independent for any slice that family worked on.
 2. Sub-agent prompts carry the delivery contract: `acp-dispatch` appends it
    itself; for an Agent-tool sub-agent paste the output of
    `acp-dispatch footer --report <scratchpad>/<name>-report.md`. Read the

@@ -243,7 +243,7 @@ REGISTRY: dict[str, Tui] = {t.name: t for t in (
         models=("qwen3-coder:30b", "deepseek-r1:32b"),
         endpoint="http://127.0.0.1:8890/api", secret="MIT_SIPB_API_KEY",
         note="free, slow shared GPU via the loopback sipb-llms-proxy; aiuse has no windows"),
-    Tui("codex", "acp", "codex", "OpenAI", "codex", None, note="opencodex GPT pool"),
+    Tui("codex", "acp", "codex", "OpenAI", "codex", None, note="codex pool (OpenAI subscription)"),
     Tui("copilot", "acp", "copilot", "GitHub", "copilot", None),
     Tui("grok", "acp", "grok", "xAI", "grok", None, note="ordinary pool (GrokBot moved to its own Cursor pool 2026-10-18)"),
     Tui("qwen", "acp", "qwen", "Alibaba", None, None),

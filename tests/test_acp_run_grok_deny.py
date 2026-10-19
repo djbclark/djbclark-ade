@@ -64,10 +64,10 @@ CONFIG = textwrap.dedent("""\
       type = "command"
       command = "/opt/guard.sh"
 
-    [model_providers.opencodex]
+    [model_providers.localproxy]
     base_url = "http://127.0.0.1:10100/v1"
 
-    [model.ocx-gpt-6-astra]
+    [model.local-gpt-6-astra]
     model = "gpt-6-astra"
     """)
 
@@ -280,8 +280,8 @@ class TestGrokDenyAndScrub(unittest.TestCase):
         self.assertEqual(parsed["ui"], {"max_thoughts_width": 120})
         self.assertEqual(parsed["models"], {"default": "grok-4.7"})
         self.assertEqual(parsed["compat"]["claude"], {"hooks": False})
-        self.assertIn("ocx-gpt-6-astra", parsed["model"])
-        self.assertEqual(parsed["model_providers"]["opencodex"]["base_url"], "http://127.0.0.1:10100/v1")
+        self.assertIn("local-gpt-6-astra", parsed["model"])
+        self.assertEqual(parsed["model_providers"]["localproxy"]["base_url"], "http://127.0.0.1:10100/v1")
         self.assertEqual(sorted(d["dropped"]), ["hooks", "mcp_servers", "permission", "plugins", "ui.permission_mode", "ui.yolo"])
 
     def test_strip_outside_deny_keeps_the_users_permissions(self):
@@ -347,7 +347,7 @@ class TestGrokDenyAndScrub(unittest.TestCase):
         self.assertEqual(c["ui"]["permission_mode"], "always-approve")
         self.assertEqual(sorted(c["mcp_servers"]), ["basic-memory", "graft"])
         self.assertEqual(c["models"], {"default": "grok-4.7"})
-        self.assertIn("ocx-gpt-6-astra", c["model"])
+        self.assertIn("local-gpt-6-astra", c["model"])
         self.assertEqual(sorted(s["info"]["dropped"]), ["hooks", "plugins"])
         self.assertTrue(self.r["hooks_tmpl"]["ok"])
 
