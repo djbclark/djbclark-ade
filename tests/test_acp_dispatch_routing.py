@@ -139,8 +139,9 @@ exit 0
         self.assertEqual(r.returncode, 0, r.stderr)
         rec = self.record()
         self.assertTrue(rec.get("advisor_edited"), rec)
+        self.assertEqual(rec.get("advisor_changed_paths"), ["edited-by-advisor"], rec)
         chk = run(["check", str(self.out / "jobs" / "s1.json")], env=env)
-        self.assertIn("ADVISOR EDITED THE TREE", chk.stdout)
+        self.assertIn("ADVISOR EDITED THE TREE: edited-by-advisor", chk.stdout)
 
     def test_lead_commit_during_a_read_only_advise_is_not_an_edit(self):
         # Only HEAD moves (the lead commits in the same checkout); the tree shape is unchanged.

@@ -770,6 +770,17 @@ def reserved_usage(busy: list[Path],
     return total, windows
 
 
+def tree_changed_paths(before: dict, after: dict) -> list[str]:
+    """Status entries (`XY path`) present in only one of two advisor_tree_snap results; empty
+    when the same paths are listed and only their content differs."""
+    b = set(before.get("paths") or [])
+    a = set(after.get("paths") or [])
+    diff = sorted(a ^ b)
+    if diff:
+        return [e[3:] if len(e) > 3 and e[2] == " " else e for e in diff]
+    return ["(content of already-listed paths)"] if (a or b) else []
+
+
 def advisor_tree_snap(repo: Path) -> dict | None:
     """HEAD + hash of porcelain status (all untracked) plus `git diff HEAD --binary`."""
     def _b(data: bytes | str | None) -> bytes:
@@ -794,8 +805,13 @@ def advisor_tree_snap(repo: Path) -> dict | None:
         if diff.returncode not in (0, 1):  # 1 = differences (still a valid snap)
             return None
         blob = _b(status.stdout) + b"\0" + _b(diff.stdout)
+        # Paths with their XY code, so a later diff of two snaps can name what changed
+        # (2026-10-19: a `--perm all` Codex advise was flagged only because the lead added
+        # untracked docs during the run; the record now says which paths differ).
+        paths = sorted(e.decode("utf-8", "replace") for e in _b(status.stdout).split(b"\0") if e)
         return {"head": head.stdout.strip(),
-                "status_hash": hashlib.sha256(blob).hexdigest()}
+                "status_hash": hashlib.sha256(blob).hexdigest(),
+                "paths": paths}
     except (OSError, subprocess.SubprocessError, TypeError, UnicodeError):
         return None
 
@@ -2839,7 +2855,12 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
             rec = note_checkpoint_stale_seen(path, rec)
             det = f"{det}; {stale_msg}" if det else stale_msg
     if rec.get("advisor_edited"):
-        det = f"{det}; ADVISOR EDITED THE TREE" if det else "ADVISOR EDITED THE TREE"
+        edited = "ADVISOR EDITED THE TREE"
+        changed = rec.get("advisor_changed_paths")
+        if changed:
+            shown = ", ".join(changed[:6]) + (f" (+{len(changed) - 6} more)" if len(changed) > 6 else "")
+            edited = f"{edited}: {shown}"
+        det = f"{det}; {edited}" if det else edited
     elif rec.get("head_moved_during_run"):
         b, a_ = (str(x or "")[:8] for x in rec["head_moved_during_run"])
         moved = f"HEAD moved during the run ({b} -> {a_}, a lead commit; the tree is unchanged)"
@@ -2924,6 +2945,7 @@ def finalize_locked(record_path: Path, rc: int | None, finished_at: float | None
                     rec["advisor_edited"] = True
             else:
                 rec["advisor_edited"] = True
+                rec["advisor_changed_paths"] = tree_changed_paths(before_tree, after_tree)
     try:
         _, age = route_module().load_snapshot()
         after, after_reading = pool_reading(rec.get("agent", ""), rec.get("model"))
