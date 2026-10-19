@@ -36,12 +36,18 @@ Use the native chooser your runtime actually has. Do not invent a second UX.
    Discord/Slack get the same card on those adapters. CLI/TUI get numbered
    text. If the card fails to render, Hermes already falls back to a numbered
    list — do not pre-empt that with prose options of your own.
-3. **Codex:** use `request_user_input_async` when available. Send one question
-   with 2–4 options, the recommendation first, and position in the question title.
-   The call returns immediately: keep the decision pending until the operator
-   replies and continue only independent work. A preselected option or elapsed
-   time is not an answer. If only `request_user_input` is available, use it only
-   in a mode where the tool permits it; honor its question schema and limits.
+3. **Codex:** for the terminal arrow-key picklist, use the native
+   `request_user_input` chooser when the current mode permits it. It rejects
+   calls in Default mode with `request_user_input is unavailable in Default
+   mode`; explain that Plan mode is required and wait for the operator to
+   switch modes. The agent cannot switch collaboration mode itself.
+   `request_user_input_async` is a different surface: an `accepted` response
+   establishes submission, not a visible arrow-key picklist. Use it only when
+   the client is known to display its question UI. If the operator reports no
+   chooser, report the mode limitation rather than reissuing asynchronous
+   questions, sleeping, or claiming a choice is waiting in a visible picker.
+   Keep unanswered decisions pending. A preselected option or elapsed time is
+   not an answer. Honor the native tool's question schema and limits.
 4. **No usable chooser:** one short sentence that you cannot prompt, then
    wait. Do not fake buttons as a numbered list in chat.
 
