@@ -1055,3 +1055,84 @@ model as prose. A self-send is the case `bin/self-slash` needs, so it strips `PA
 
 **Evidence:** scratch Haiku agent fe96fd29, timeline and `~/.claude/projects/.../585afa3c-*.jsonl`
 (one `compact_boundary`); `bin/self-slash` Paseo backend, verified the same day.
+
+## Paseo plugins that fail to install on Paseo 0.12.0 (four filed 2026-10-19)
+
+Found in the 2026-10-19 plugin trial (`/tmp/paseo-install.log`, `/tmp/paseo-install2.log`, `docs/paseo-plugin-scan` install log
+commit 7e92320). Daemon and desktop 0.12.0, macOS; installed with `paseo plugin add <registry id>` and
+`paseo plugin install <npm:|git: source>`. Existing issues searched first (each plugin repo, open and closed, with
+"0.12", "requires Paseo", "@getpaseo/client"; and `getpaseo/paseo` for "@getpaseo/client", "0.12.0 plugin requires",
+"Could not resolve type dependency", "plugin install"): none on any of the four. The two build failures declare
+`@getpaseo/client` only under `devDependencies` and have no `build` step, which getpaseo/paseo#5405 and #4957 (both
+closed) call deliberate and answer with `"build": [["npm", "ci"]]`; so they went to the plugin repos, not to
+getpaseo/paseo (#7145 and #6257 are open but about other packages' type imports).
+
+### 1. keefeere/paseo-continuity — `@getpaseo/client` unresolved in `server/failover.ts` (filed 2026-10-19: https://github.com/keefeere/paseo-continuity/issues/2)
+
+**Draft title:** Install fails on Paseo 0.12.0: Could not resolve type dependency "@getpaseo/client" (server/failover.ts)
+
+> **Versions:** registry `keefeere/continuity` and npm `paseo-continuity` 0.2.1; `paseo-plugin.json` requires `>=0.10.1`.
+> **Commands:** `paseo plugin add keefeere/continuity`; `paseo plugin install npm:paseo-continuity`.
+>
+> ```
+> Error: Request failed: Build failed with 1 error:
+> .../esbuild/lib/main.js:1267:21: ERROR: [plugin: paseo-plugin-server-runtime-boundary] Could not resolve type dependency "@getpaseo/client" imported by /Users/djbclark/.paseo/plugins/paseo-continuity/<id>/node_modules/paseo-continuity/server/failover.ts requestType=plugin.source.install.
+> ```
+>
+> `server/failover.ts:1` is `import type { PaseoApi } from "@getpaseo/client";`; `package.json` has the package (0.10.1) only in
+> `devDependencies`; `paseo-plugin.json` has no `build`. See getpaseo/paseo#5405 and #4957.
+
+**Status:** filed 2026-10-19: https://github.com/keefeere/paseo-continuity/issues/2
+
+### 2. panrafal/paseo-plugins — agents-dash-list: `@getpaseo/client` unresolved in `client/dash-surface.tsx` (filed 2026-10-19: https://github.com/panrafal/paseo-plugins/issues/13)
+
+**Draft title:** agents-dash-list: install fails on Paseo 0.12.0: Could not resolve type dependency "@getpaseo/client" (client/dash-surface.tsx)
+
+> **Versions:** git source (registry `panrafal/agents-dash-list`, no npm artifact), plugin 0.1.0 on `main`;
+> `paseo-plugin.json` requires `>=0.7.2-0`.
+> **Commands:** `paseo plugin add panrafal/agents-dash-list`; `paseo plugin install git:panrafal/paseo-plugins:agents-dash-list`.
+>
+> ```
+> Error: Request failed: Build failed with 1 error:
+> .../esbuild/lib/main.js:1267:21: ERROR: [plugin: paseo-plugin-client-runtime-boundary] Could not resolve type dependency "@getpaseo/client" imported by /Users/djbclark/.paseo/plugins/agents-dash-list/<id>/checkout/agents-dash-list/client/dash-surface.tsx requestType=plugin.source.install.
+> ```
+>
+> `client/dash-surface.tsx:1` imports types from `@getpaseo/client`; `package.json` has it (`^0.7.1`) only in
+> `devDependencies`; `paseo-plugin.json` has no `build`. See getpaseo/paseo#5405 and #4957.
+
+**Status:** filed 2026-10-19: https://github.com/panrafal/paseo-plugins/issues/13 (this repo's #7 is a similar
+"chat-resume build fails on paseo 0.9", a different plugin; not linked).
+
+### 3. omercnet/paseo-plugins — fresh-worktrees stable 3.0.0 pinned `^0.11.0` (filed 2026-10-19: https://github.com/omercnet/paseo-plugins/issues/361)
+
+**Draft title:** fresh-worktrees: stable 3.0.0 and registry install refused on Paseo 0.12.0 (requires ^0.11.0); next tag already allows ^0.12.0
+
+> **Versions:** registry `omercnet/fresh-worktrees` and npm `@omercnet/paseo-fresh-worktrees` `latest` 3.0.0
+> (2026-10-11), `requirements.paseo` `^0.11.0`. `next` 3.0.0-next.266.1 (2026-10-18) and `main` (7dbbe2a1) say
+> `^0.11.0 || ^0.12.0`.
+> **Commands:** `paseo plugin add omercnet/fresh-worktrees`; `paseo plugin install npm:@omercnet/paseo-fresh-worktrees`.
+>
+> ```
+> Error: Request failed: Plugin "fresh-worktrees" requires Paseo ^0.11.0. Your daemon is 0.12.0. Use a compatible plugin version or update the daemon. requestType=plugin.source.install.request code=handler_error
+> ```
+>
+> **Request:** publish a stable release with the `^0.12.0` range. A workaround until then:
+> `paseo plugin install npm:@omercnet/paseo-fresh-worktrees@next` (not tried).
+
+**Status:** filed 2026-10-19: https://github.com/omercnet/paseo-plugins/issues/361
+
+### 4. Daaaaave/paseo-telegram — pinned `>=0.11.2 <0.12.0` (filed 2026-10-19: https://github.com/Daaaaave/paseo-telegram/issues/1)
+
+**Draft title:** Install refused on Paseo 0.12.0: requires >=0.11.2 <0.12.0
+
+> **Versions:** registry `daaaaave/telegram` and npm `paseo-telegram` 0.2.0; `main` (pushed 2026-10-18) has the same range
+> and pins `@getpaseo/client`/`@getpaseo/plugin` 0.11.2.
+> **Command:** `paseo plugin add daaaaave/telegram`.
+>
+> ```
+> Error: Request failed: Plugin "telegram" requires Paseo >=0.11.2 <0.12.0. Your daemon is 0.12.0. Use a compatible plugin version or update the daemon. requestType=plugin.source.install.request code=handler_error
+> ```
+>
+> **Request:** a release declaring Paseo 0.12.x support, or a note on whether 0.12 is expected to work.
+
+**Status:** filed 2026-10-19: https://github.com/Daaaaave/paseo-telegram/issues/1
