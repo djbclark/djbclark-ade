@@ -23,7 +23,13 @@ continuously hot samples it attributes the mean CPU of the samples in that windo
 to the session whose pid is its ancestor, a daemonised one such as a Gradle daemon to the only session
 in its git repo) and, for each session above LW_MIN_CORES (1.5) cores, writes a brief, types one line
 naming it into the session (relay.py), and sends one hermes-ping (with a ready `acp-dispatch cursor` line for a fixer when the relay fails). A session or repo is not told again
-for LW_COOLDOWN_H (6) hours. The agent is asked to finish what is running (never to kill paid-for
+for LW_COOLDOWN_H (6) hours (by session, and by the repos its processes worked in). The brief names the
+work's own repo, not the session's cwd (2026-10-18, `work_repos`): each top process's cwd, else its nearest
+ancestor's (brew and cargo children run in temp dirs), mapped to a git top-level, with that repo's `ci` decision,
+its Forgejo remote and whether an ancestor was `bg` (and which exception let it through: release or targeted
+test). Several repos are listed with their share of the cores; with none mapped it falls back to the session's
+cwd and says that is a guess. That lsof/ancestor work runs only when a brief is written, never per sample.
+The agent is asked to finish what is running (never to kill paid-for
 work), ask djbclark before creating a CI copy of a repo that is not on GitHub, and, once CI runs, `load-watch ci-only add`
 the repo so `bg` refuses local builds and tests in it.
 
@@ -208,6 +214,113 @@ def forgejo_remote(top):
     return next((ln.split()[1] for ln in r.stdout.splitlines() if "forgejo" in ln), "")
 
 
+BG_REAL = os.path.realpath(HOME / "ops/site-djbclark/bin/bg")
+BG_PATH = re.compile(r"(^|/)site-[^/]+/bin/bg$")
+SHELLS = {"bash", "sh", "zsh", "env"}
+
+
+def proc_cmds(st, table):
+    """pid -> command, from the window's samples (processes that have exited since) and the current table."""
+    out = {pid: r[2] for s in st["samples"] for pid, r in s["d"].items()}
+    out.update({pid: row[3] for pid, row in table.items()})
+    return out
+
+
+def proc_cwds(pids):
+    """pid -> working directory for every live pid in `pids`, one lsof call."""
+    pids = sorted({str(p) for p in pids if p})
+    if not pids:
+        return {}
+    try:
+        r = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(pids)], capture_output=True,
+                           text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    out, cur = {}, None
+    for ln in r.stdout.splitlines():
+        if ln.startswith("p"):
+            cur = ln[1:]
+        elif ln.startswith("n") and cur:
+            out[cur] = ln[1:]
+    return out
+
+
+def bg_args(cmd):
+    """The words after `bg` when `cmd` is a run of ops/site-*/bin/bg (the script or the interpreter running it),
+    else None."""
+    words = cmd.split()
+    for i, w in enumerate(words[:4]):
+        if w.endswith("/bin/bg") and (BG_PATH.search(w) or os.path.realpath(w) == BG_REAL) and (
+                i == 0 or os.path.basename(words[i - 1]) in SHELLS or words[i - 1].startswith("-")):
+            return words[i + 1:]
+    return None
+
+
+def bg_rule(args):
+    """Which of bg's `ci`-mode exceptions (`ci_release`, `ci_targeted` in site-djbclark/bin/bg) these arguments
+    match; '' when neither. A cheap re-reading of those rules, so a hint, not a verdict."""
+    if "--local-tests" not in args:
+        for i, a in enumerate(args):
+            base = os.path.basename(a)
+            if base == "release.py" or (base == "just" and next((x for x in args[i + 1:] if not x.startswith("-")),
+                                                                  "").startswith(("release", "release-"))):
+                return "release"
+    if any(os.path.basename(a) in ("pytest", "py.test", "gradle", "gradlew") or a in ("pytest", "unittest")
+           for a in args) and any(a.startswith(("-k", "--tests")) or "::" in a or re.search(r"test\w*\.py$", a)
+                                  for a in args):
+        return "targeted test"
+    return ""
+
+
+def work_repos(g, session_top, parent, cmds):
+    """Where the group's processes really worked, for an incident brief only (lsof and git: never per sample).
+    A process belongs to the repo of its own working directory, else of its nearest ancestor's (a brew or cargo
+    child runs in a temp or build dir), stopping below the session's TUI. Whether an ancestor is `bg` is read
+    from the same chain. 2026-10-18 incident 20261018-2056-82c4844a blamed the session's cwd for rustc under
+    `brew reinstall`, started by `just release` in another repo through bg. Falls back to the session's repo,
+    labelled a guess, when nothing maps."""
+    owner = str(g["session"].get("pid") or "")
+    procs = sorted(g["procs"], key=lambda p: -p["cores"])[:40]
+    chains = {}
+    for p in procs:
+        chain, q = [], str(p["pid"])
+        while q and q not in ("0", "1", owner) and len(chain) < 64:
+            chain.append(q)
+            q = str(parent.get(q, ""))
+        chains[p["pid"]] = chain
+    cwds = proc_cwds({q for c in chains.values() for q in c})
+    tops = {}
+    repos, unmapped = {}, 0.0
+    for p in procs:
+        chain = chains[p["pid"]]
+        top = ""
+        for q in chain:
+            if cwds.get(q):
+                tops.setdefault(cwds[q], git_top(cwds[q]))
+                top = tops[cwds[q]]
+                if top:
+                    break
+        args = next((a for a in (bg_args(cmds.get(q, "")) for q in chain) if a is not None), None)
+        if not top:
+            unmapped += p["cores"]
+            continue
+        r = repos.setdefault(top, {"top": top, "cores": 0.0, "bg_cores": 0.0, "rule": ""})
+        r["cores"] += p["cores"]
+        if args is not None:
+            r["bg_cores"] += p["cores"]
+            r["rule"] = r["rule"] or bg_rule(args)
+    guess = not repos
+    if guess and session_top:
+        repos[session_top] = {"top": session_top, "cores": g["cores"], "bg_cores": 0.0, "rule": ""}
+        unmapped = 0.0
+    rows = registry()
+    out = sorted(repos.values(), key=lambda r: -r["cores"])
+    for r in out:
+        r["ci"] = decision(r["top"], rows)[1]
+        r["remote"] = forgejo_remote(r["top"])
+    return {"repos": out, "unmapped": round(unmapped, 2), "guess": guess}
+
+
 MODES = ("ci", "local", "pending")
 
 
@@ -268,13 +381,56 @@ def decision(top, rows):
     return "", None
 
 
-def brief(inc, g, top, remote, load1, ncpu):
+def repo_line(r):
+    """One repo's Forgejo remote, CI decision and whether it ran under bg."""
+    where = (f"It has a Forgejo remote: `{r['remote']}` (MIT/SIPB CI)." if r["remote"] else
+             "It has no Forgejo remote (a GitHub-sourced repo uses GitHub runners).")
+    mode, text = (r["ci"] or ["", ""])[:2]
+    if r["bg_cores"] and r["bg_cores"] >= r["cores"] - 0.05:
+        ran = "It ran under `bg`" + (f" (through bg's {r['rule']} rule)" if r["rule"] and mode == "ci" else "")
+    elif r["bg_cores"]:
+        ran = f"{r['bg_cores']:.1f} of its {r['cores']:.1f} cores ran under `bg`, the rest outside it"
+    else:
+        ran = "It ran outside `bg`"
+    if mode == "ci":
+        verdict = f"Registered CI-first (`ci`: `{text}`). {ran}" + (
+            ", which lets a targeted test or a release through; if this was neither, tell djbclark." if r["bg_cores"]
+            and not r["rule"] else "." if r["bg_cores"] else ", which refuses builds there; something bypassed it.")
+    elif mode:
+        verdict = f"Decision: `{mode}` ({text}). {ran}."
+    else:
+        verdict = f"No CI decision yet. {ran}."
+    return f"{where} {verdict}"
+
+
+def brief(inc, g, work, load1, ncpu):
     s = g["session"]
     procs = "\n".join(f"{i}. pid {p['pid']}, {p['cores']} cores: `{p['cmd'][:200]}`"
                       for i, p in enumerate(sorted(g["procs"], key=lambda p: -p["cores"])[:8], 1))
-    listed = top in registry()
-    where = (f"It has a Forgejo remote: `{remote}` (MIT/SIPB CI)." if remote else
-             "It has no Forgejo remote (a GitHub-sourced repo uses GitHub runners).") if top else "The work ran outside any git repo."
+    repos, stop = work["repos"], s.get("cwd")
+    if work["guess"]:
+        r = repos[0] if repos else None
+        where = (f"Repo (a guess: no process's working directory, nor its ancestors', is in a git repo, so this is "
+                 f"the session's cwd): `{r['top']}`. {repo_line(r)}" if r else "The work ran outside any git repo.")
+    elif len(repos) == 1:
+        where = f"Repo (from the processes' working directories): `{repos[0]['top']}`. {repo_line(repos[0])}"
+    else:
+        where = ("The work ran in several repos (from the processes' working directories):\n\n" + "\n".join(
+            f"{chr(96 + i)}. `{r['top']}`, {r['cores']:.1f} of those cores. {repo_line(r)}"
+            for i, r in enumerate(repos, 1)))
+    if not work["guess"] and work["unmapped"] >= 0.1:
+        where += f"\n{work['unmapped']:.1f} cores ran in no git repo."
+    if not work["guess"] and stop and all(not str(stop).startswith(r["top"]) for r in repos):
+        where += f"\nYour session's cwd (`{stop}`) is outside {'it' if len(repos) == 1 else 'them'}."
+    todo = [r for r in repos if (r["ci"] or [""])[0] not in ("ci", "local")]
+    if todo:
+        adds = "\n".join(f"   `~/src/djbclark-ade/bin/load-watch ci-only add {r['top']} \"<the command that runs it on CI>\"`"
+                         for r in todo)
+        step4 = f"""4. Once a CI job runs, register the repo so `bg` refuses heavy local runs and names your command:
+{adds}"""
+    else:
+        step4 = ("4. Nothing to register: every repo above already has a decision (`ci` or `local`). If `bg` let "
+                 "heavy work through that it should have refused, say so in your ack.")
     return f"""# load-watch incident {inc}
 
 Written {stamp()} by `~/src/djbclark-ade/bin/load-watch` (no model). Load was {load1:.1f} on {ncpu} cores
@@ -283,7 +439,7 @@ Written {stamp()} by `~/src/djbclark-ade/bin/load-watch` (no model). Load was {l
 
 {procs}
 
-Repo: `{top or '-'}`. {where}{' It is already registered CI-only, so this ran outside `bg`.' if listed else ''}
+{where}
 
 ## What to do
 
@@ -296,8 +452,7 @@ Repo: `{top or '-'}`. {where}{' It is already registered CI-only, so this ran ou
 3. Pushing branches to a repo djbclark does not own, or creating a Forgejo repo, is outward-facing: ask
    djbclark first (one AskUserQuestion, or hermes-ping if no one is at your pane). Light work that
    cannot move (a single small test file) goes through `~/ops/site-private/bin/bg` instead.
-4. Once a CI job runs, register the repo so `bg` refuses heavy local runs and names your command:
-   `~/src/djbclark-ade/bin/load-watch ci-only add {top or '<repo top>'} "<the command that runs it on CI>"`.
+{step4}
 5. If you are a fresh agent dispatched on this brief, the session that ran the work is gone: djbclark
    dispatched you after agreeing to a CI copy, so steps 2-4 are yours.
 6. Answer this brief in one line: `~/src/djbclark-ade/bin/load-watch ack {inc} "<what you did or plan>"`.
@@ -624,25 +779,36 @@ def cmd_sample(a):
         print(f"load {load1:.1f}/{ncpu} hot={hot} streak={st['streak']}")
     if hot and t - st["hot_since"] >= SUSTAIN_S:
         use, span = window(st)
-        groups, loose = attribute(use, span, ppids(st, table))
+        parent = ppids(st, table)
+        groups, loose = attribute(use, span, parent)
         told = 0
         for g in sorted(groups.values(), key=lambda g: -g["cores"]):
             s = g["session"]
             if g["cores"] < MIN_CORES or not g["procs"]:
                 continue
-            top = git_top(s["cwd"]) if s.get("cwd") else ""
-            keys = [f"sid:{s.get('sid') or s['id']}"] + ([f"repo:{top}"] if top else [])
-            if any(k in st["cooldown"] for k in keys):
+            sid_key = f"sid:{s.get('sid') or s['id']}"
+            if sid_key in st["cooldown"] or t - st["cooldown"].get("skip:" + sid_key, 0) < 600:
                 continue
+            # the repo is the work's, not the session's cwd (2026-10-18): lsof and git, so only for a session
+            # about to be told, never per sample
+            work = work_repos(g, git_top(s["cwd"]) if s.get("cwd") else "", parent, proc_cmds(st, table))
+            top = work["repos"][0]["top"] if work["repos"] else ""
+            repo_keys = [f"repo:{r['top']}" for r in work["repos"]]
+            if repo_keys and all(k in st["cooldown"] for k in repo_keys):
+                st["cooldown"]["skip:" + sid_key] = t  # do not redo the lsof every 20 s sample
+                continue
+            keys = [sid_key] + repo_keys
             inc = time.strftime("%Y%m%d-%H%M", time.localtime(t)) + f"-{s['id'][:8]}"
             path = STATE_DIR / "briefs" / f"{inc}.md"
             if not a.dry_run:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(brief(inc, g, top, forgejo_remote(top) if top else "", load1, ncpu))
+                path.write_text(brief(inc, g, work, load1, ncpu))
             relayed, ping = notify(inc, g, top, path, load1, ncpu, a.dry_run)
             rec = {"id": inc, "t": stamp(t), "load1": round(load1, 1), "ncpu": ncpu, "cores": round(g["cores"], 2),
                    "agent": s.get("agent"), "session": s.get("name") or s["id"], "sid": s.get("sid"),
-                   "cwd": s.get("cwd"), "repo": top, "procs": g["procs"][:8], "relayed": relayed,
+                   "cwd": s.get("cwd"), "repo": top, "repo_guess": work["guess"],
+                   "repos": [{k: r[k] for k in ("top", "cores", "bg_cores", "rule")} for r in work["repos"]],
+                   "procs": g["procs"][:8], "relayed": relayed,
                    "brief": str(path), "dry_run": a.dry_run}
             if a.dry_run:
                 print(json.dumps(rec, indent=1))

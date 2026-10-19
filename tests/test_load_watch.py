@@ -195,3 +195,103 @@ def test_guard_catches_a_crash_loop_on_any_job(tmp_path, monkeypatch):
     lw.guard(st, {}, 1000.0 + lw.LOOP_CHECK_S, False)
     s = st["guard"]["com.y.loop"]
     assert s["state"] == "cooldown" and "crash loop: 30 restarts" in s["trip"]
+
+
+# ---- brief attribution: the work's repo, and whether it ran under bg (incident 20261018-2056-82c4844a) -----------
+BG = str(Path.home() / "ops/site-private/bin/bg")
+
+
+def _work(monkeypatch, procs, parent, cmds, cwds, tops, rows=None, session_top="/r/ade"):
+    lw = load_module()
+    monkeypatch.setattr(lw, "proc_cwds", lambda pids: {str(p): cwds[str(p)] for p in pids if str(p) in cwds})
+    monkeypatch.setattr(lw, "git_top", lambda path: tops.get(path, ""))
+    monkeypatch.setattr(lw, "forgejo_remote", lambda top: "")
+    monkeypatch.setattr(lw, "main_worktree", lambda top: "")
+    monkeypatch.setattr(lw, "pasture_source", lambda top: "")
+    monkeypatch.setattr(lw, "registry", lambda: rows or {})
+    session = {"id": "s1", "pid": 1000, "agent": "claude", "name": "ade-87", "cwd": "/r/ade"}
+    g = {"session": session, "cores": sum(c for _, c in procs),
+         "procs": [{"pid": pid, "cores": c, "cmd": "rustc x"} for pid, c in procs]}
+    return lw, g, lw.work_repos(g, session_top, parent, cmds)
+
+
+def test_work_repo_is_the_process_cwd_not_the_sessions(monkeypatch):
+    _, _, w = _work(monkeypatch, [(100, 1.0)], {"100": 1000}, {"100": "rustc"}, {"100": "/r/sudo"},
+                    {"/r/sudo": "/r/sudo"})
+    assert not w["guess"] and [r["top"] for r in w["repos"]] == ["/r/sudo"]
+
+
+def test_brew_child_in_a_temp_dir_takes_its_ancestors_repo(monkeypatch):
+    parent = {"300": 250, "250": 200, "200": 150, "150": 1000}
+    cwds = {"300": "/tmp/build", "250": "/tmp", "200": "/r/sudo", "150": "/r/ade"}
+    _, _, w = _work(monkeypatch, [(300, 0.8)], parent, {}, cwds, {"/r/sudo": "/r/sudo", "/r/ade": "/r/ade"})
+    assert [r["top"] for r in w["repos"]] == ["/r/sudo"]  # nearest ancestor inside a repo, not the farther one
+
+
+def test_under_bg_and_outside_bg(monkeypatch):
+    parent = {"300": 200, "200": 150, "150": 1000, "400": 1000}
+    cmds = {"150": f"/bin/bash {BG} just release", "200": "just release"}
+    cwds = {"300": "/r/sudo", "400": "/r/sudo"}
+    _, _, w = _work(monkeypatch, [(300, 1.0), (400, 0.5)], parent, cmds, cwds, {"/r/sudo": "/r/sudo"})
+    r = w["repos"][0]
+    assert r["cores"] == 1.5 and r["bg_cores"] == 1.0 and r["rule"] == "release"
+    _, _, w = _work(monkeypatch, [(400, 0.5)], parent, cmds, cwds, {"/r/sudo": "/r/sudo"})
+    assert w["repos"][0]["bg_cores"] == 0.0
+
+
+def test_bg_rules_and_lookalikes():
+    lw = load_module()
+    assert lw.bg_args(f"/bin/bash {BG} pytest tests/test_x.py") == ["pytest", "tests/test_x.py"]
+    assert lw.bg_args(f"{BG} just release") == ["just", "release"]
+    assert lw.bg_args("cat /Users/x/ops/site-private/bin/bg") is None  # reading it is not running it
+    assert lw.bg_args("python other/bin/bg") is None
+    assert lw.bg_rule(["just", "release-all"]) == "release"
+    assert lw.bg_rule(["just", "build"]) == ""
+    assert lw.bg_rule(["just", "release", "--local-tests"]) == ""
+    assert lw.bg_rule(["uv", "run", "pytest", "tests/test_x.py"]) == "targeted test"
+    assert lw.bg_rule(["pytest", "tests/", "-k", "foo"]) == "targeted test"
+    assert lw.bg_rule(["pytest", "tests/"]) == ""
+
+
+def test_nothing_maps_falls_back_to_the_session_and_says_guess(monkeypatch):
+    lw, g, w = _work(monkeypatch, [(100, 1.0)], {"100": 1000}, {}, {"100": "/tmp/x"}, {})
+    assert w["guess"] and [r["top"] for r in w["repos"]] == ["/r/ade"]
+    text = lw.brief("inc1", g, w, 30.0, 8)
+    assert "a guess" in text and "`/r/ade`" in text
+
+
+def test_two_repos_are_listed_with_their_shares(monkeypatch):
+    cwds = {"100": "/r/a", "101": "/r/b", "102": "/tmp/x"}
+    lw, g, w = _work(monkeypatch, [(100, 1.2), (101, 0.6), (102, 0.2)], {}, {}, cwds,
+                     {"/r/a": "/r/a", "/r/b": "/r/b"})
+    assert [(r["top"], round(r["cores"], 1)) for r in w["repos"]] == [("/r/a", 1.2), ("/r/b", 0.6)]
+    assert w["unmapped"] == 0.2
+    text = lw.brief("inc2", g, w, 30.0, 8)
+    assert "a. `/r/a`, 1.2 of those cores" in text and "b. `/r/b`, 0.6" in text
+    assert "0.2 cores ran in no git repo" in text and "ci-only add /r/a" in text and "ci-only add /r/b" in text
+    assert "ci-only add /r/ade" not in text
+
+
+def test_brief_for_the_2056_incident(monkeypatch):
+    rows = {"/r/sudo": ["ci", "scripts/github-test-ref", "2026-10-18"]}
+    parent = {"35811": 35000, "35000": 34000, "34000": 1000}
+    cmds = {"34000": f"/bin/bash {BG} just release"}
+    cwds = {"35811": "/private/tmp/secretspec-x", "35000": "/private/tmp", "34000": "/r/sudo"}
+    lw, g, w = _work(monkeypatch, [(35811, 0.61)], parent, cmds, cwds, {"/r/sudo": "/r/sudo", "/r/ade": "/r/ade"},
+                     rows)
+    text = lw.brief("20261018-2056-82c4844a", g, w, 39.9, 8)
+    assert "`/r/sudo`" in text and "It ran under `bg` (through bg's release rule)." in text
+    assert "Your session's cwd (`/r/ade`) is outside it." in text
+    assert "ci-only add" not in text and "Nothing to register" in text
+    assert "no Forgejo remote" in text and "outside `bg`" not in text
+
+
+def test_proc_cwds_parses_one_lsof_call(monkeypatch):
+    lw = load_module()
+    calls = []
+    out = "p100\nn/r/a\np101\nn/tmp/x y\n"
+    monkeypatch.setattr(lw.subprocess, "run", lambda argv, **kw: calls.append(argv) or
+                        subprocess.CompletedProcess(argv, 1, out, ""))
+    assert lw.proc_cwds([101, 100, 100, 0]) == {"100": "/r/a", "101": "/tmp/x y"}
+    assert len(calls) == 1 and calls[0][-1] == "100,101"
+    assert lw.proc_cwds([]) == {} and len(calls) == 1
