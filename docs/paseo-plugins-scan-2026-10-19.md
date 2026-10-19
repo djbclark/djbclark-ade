@@ -161,3 +161,25 @@ Installs are registry counts on 2026-10-19; "source" is the registry id unless m
    answer is vps-primary and Hyades (Q18), so these are references only.
 5. `npx skills add getpaseo/paseo`: already applied; the three skills under `skills/paseo-*`
    carry `.paseo-managed-files.json` markers (untracked at the time of this scan).
+
+## 6. Install log, 2026-10-19 (SF-Q14 and SF-Q15 decided: trial tier, any source)
+
+`pluginsEnabled` set to true in `~/.paseo/config.json` (backup `config.json.bak-2026-10-19`),
+then `paseo daemon reload`. Status from `paseo plugin ls --json` afterwards:
+
+| Plugin | Source used | Result |
+|---|---|---|
+| usage-auto-resume | registry `babo-jeonguk/usage-auto-resume` | running |
+| herald | registry `gpambrozio/herald` 0.6.0 | running |
+| token-ledger | registry `stv1024/token-ledger` 0.7.0 | running |
+| agent-monitor | `npm:@omercnet/paseo-agent-monitor` 3.0.0 (registry copy pinned `^0.11.0`, refused on 0.12.0) | running |
+| forges | `npm:@xpufx/paseo-forges` 0.1.4 (not in the registry under `xpufx/forges`) | running |
+| twofado | `npm:@xpufx/paseo-twofado` 0.1.5 (same) | running |
+| continuity | registry and `npm:paseo-continuity` 0.2.1 | build failed: esbuild `paseo-plugin-server-runtime-boundary` cannot resolve type dependency `@getpaseo/client` from `server/failover.ts` |
+| agents-dash-list | registry and `git:panrafal/paseo-plugins:agents-dash-list` | build failed: same error from `client/dash-surface.tsx` |
+| fresh-worktrees | registry and `npm:@omercnet/paseo-fresh-worktrees` 3.0.0 | refused: requires Paseo `^0.11.0`, daemon is 0.12.0 |
+| telegram | registry `daaaaave/telegram` | refused: requires Paseo `>=0.11.2 <0.12.0` |
+
+The two build failures look like one Paseo 0.12.0 issue (plugins that import `@getpaseo/client`
+types without declaring it); the two refusals are plugin version pins. Both are upstream
+items, see `docs/upstream-issues.md` candidates and the queue.
