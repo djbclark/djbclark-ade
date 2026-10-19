@@ -341,8 +341,9 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
    **Exception, 2026-10-03:** antigravity's CLI has a burst limit (roughly 60
    generation requests an hour per login) that `aiuse` cannot see, so spread its
    work over hours, prefer `acp-run agy`, and never fan out a batch at it.
-3. **Reserves, floor 60% left, one small slice, only when that vendor is the
-   point:** grok (GrokBot) and copilot (GitHub-side Copilot review).
+3. **Reserve, floor 60% left, one small slice, only when that vendor is the
+   point:** copilot (GitHub-side Copilot review). grok is an ordinary pool since
+   2026-10-18 (GrokBot has its own Cursor pool).
 4. **Never:** hermes as a target; omp without `ACP_OPERATOR_APPROVED=omp` after
    a specific yes; clinepass (Hindsight/hermes lifeline); prepaid or
    credits-backed models without a fresh operator decision; devin; an
