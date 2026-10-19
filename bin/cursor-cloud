@@ -19,7 +19,8 @@ Usage:
   cursor-cloud status AGENT_ID
   cursor-cloud list [--limit N]
   cursor-cloud models
-  cursor-cloud conversation AGENT_ID
+  cursor-cloud run AGENT_ID [RUN_ID]      # result text and pushed branches of a run
+  cursor-cloud usage AGENT_ID
 
 API: https://cursor.com/docs/cloud-agent/api/endpoints (v1, public beta; re-check on error).
 """
@@ -101,7 +102,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--dry-run", action="store_true", help="print the request body and exit")
     s = sub.add_parser("status", help="GET /v1/agents/{id}")
     s.add_argument("agent_id")
-    s = sub.add_parser("conversation", help="GET /v1/agents/{id}/conversation")
+    s = sub.add_parser("run", help="GET /v1/agents/{id}/runs/{runId}: status, result text, pushed branches")
+    s.add_argument("agent_id")
+    s.add_argument("run_id", nargs="?", help="defaults to the agent's latestRunId")
+    s = sub.add_parser("usage", help="GET /v1/agents/{id}/usage")
     s.add_argument("agent_id")
     s = sub.add_parser("list", help="GET /v1/agents")
     s.add_argument("--limit", type=int, default=20)
@@ -118,8 +122,13 @@ def main(argv: list[str] | None = None) -> int:
         out = request("POST", "/v1/agents", launch_body(a))
     elif a.cmd == "status":
         out = request("GET", f"/v1/agents/{a.agent_id}")
-    elif a.cmd == "conversation":
-        out = request("GET", f"/v1/agents/{a.agent_id}/conversation")
+    elif a.cmd == "run":
+        run_id = a.run_id or request("GET", f"/v1/agents/{a.agent_id}").get("latestRunId")
+        if not run_id:
+            sys.exit("cursor-cloud: the agent has no run yet")
+        out = request("GET", f"/v1/agents/{a.agent_id}/runs/{run_id}")
+    elif a.cmd == "usage":
+        out = request("GET", f"/v1/agents/{a.agent_id}/usage")
     elif a.cmd == "list":
         out = request("GET", f"/v1/agents?limit={int(a.limit)}")
     else:
