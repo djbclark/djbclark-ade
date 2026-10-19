@@ -27,4 +27,45 @@ jobs:
         run: brew install coreutils findutils gnu-sed grep gawk
 
       - name: Run the test suite
-        run: uv run --with pytest python -m pytest tests/ -q
+        run: uv run --with pytest --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q
+
+  pytest-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      # On Linux the GNU tools are native under their plain names, but the repo's scripts
+      # and the tests' fake agents call the g-prefixed names the Mac needs. Make one
+      # g-prefixed symlink per tool that exists, in a directory put on PATH.
+      - name: Create the g-prefixed GNU tool symlinks
+        run: |
+          set -eu
+          # Ubuntu's default awk is mawk; the scripts want real GNU awk.
+          if ! command -v gawk >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq gawk
+          fi
+          bindir="$HOME/.local/bin"
+          mkdir -p "$bindir"
+          for tool in sed grep head wc date awk find xargs mktemp stat realpath timeout tail cut sort tr; do
+            target="$(command -v "$tool" 2>/dev/null || true)"
+            if [ -z "$target" ]; then
+              echo "skip g$tool: no $tool on PATH"
+              continue
+            fi
+            if [ "$tool" = awk ] && command -v gawk >/dev/null 2>&1; then
+              continue  # gawk is already a real GNU awk under its own name
+            fi
+            ln -sf "$target" "$bindir/g$tool"
+            echo "g$tool -> $target"
+          done
+          echo "$bindir" >> "$GITHUB_PATH"
+
+      - name: Run the test suite
+        run: uv run --with pytest --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q
