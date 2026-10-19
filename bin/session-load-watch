@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""session-load-watch — ask a busy agent session to offload work; never kill it. No model calls.
+
+    session-load-watch <PID> <relay-target> [--threshold PCT] [--window N] [--interval S]
+                       [--cooldown S] [--once] [--dry-run]
+
+  PID           the agent TUI's process id; its whole child tree is summed (ps %cpu, 100 = one core).
+  relay-target  what relay.py takes: a session id, name, or herdr pane (w34:p4).
+  Trigger       every one of the last --window samples (spaced --interval s) is >= --threshold.
+  Action        one relay.py line asking the session to hand the slice to acp-dispatch or defer it,
+                then quiet for --cooldown s. The session is never signalled.
+  Exit          --once: 0 quiet, 2 would-trigger (asked, or dry-run), 3 target process gone.
+"""
+import argparse
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+RELAY = Path.home() / "src/djbclark-ade/skills/session-finder/relay.py"
+PS = "/bin/ps"
+
+
+def tree_cpu(root):
+    """Sum %cpu over root and its descendants from one ps call. None when root is gone."""
+    out = subprocess.run([PS, "-axo", "pid=,ppid=,pcpu="], capture_output=True, text=True).stdout
+    kids, cpu, seen = {}, {}, set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        pid, ppid, pct = int(parts[0]), int(parts[1]), float(parts[2])
+        kids.setdefault(ppid, []).append(pid)
+        cpu[pid] = pct
+    if root not in cpu:
+        return None
+    total, stack = 0.0, [root]
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        total += cpu.get(pid, 0.0)
+        stack.extend(kids.get(pid, []))
+    return total
+
+
+def ask(target, pct, minutes, dry_run):
+    msg = (f"load watch: sustained ~{pct:.0f}% CPU for {minutes:.0f} min. Please offload or defer the heavy "
+           "work instead of stopping this session: hand the slice to acp-dispatch or park it with a note. "
+           "Do not kill the session.")
+    if dry_run:
+        print(f"DRY-RUN relay to {target}: {msg}", flush=True)
+        return 0
+    return subprocess.run([sys.executable, str(RELAY), target, msg]).returncode
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("pid", type=int)
+    ap.add_argument("target")
+    ap.add_argument("--threshold", type=float, default=150.0)
+    ap.add_argument("--window", type=int, default=6)
+    ap.add_argument("--interval", type=float, default=10.0)
+    ap.add_argument("--cooldown", type=float, default=1800.0)
+    ap.add_argument("--once", action="store_true", help="take one window of samples and exit")
+    ap.add_argument("--dry-run", action="store_true", help="print the relay instead of sending it")
+    a = ap.parse_args()
+
+    samples, last_ask = [], None
+    while True:
+        pct = tree_cpu(a.pid)
+        if pct is None:
+            print(f"pid {a.pid} gone", flush=True)
+            return 3
+        samples = (samples + [pct])[-a.window:]
+        hot = len(samples) == a.window and min(samples) >= a.threshold
+        if a.once:
+            if len(samples) < a.window:
+                time.sleep(a.interval)
+                continue
+            if hot:
+                print(f"would trigger: samples={[round(s) for s in samples]}", flush=True)
+                ask(a.target, sum(samples) / len(samples), a.window * a.interval / 60, a.dry_run)
+                return 2
+            print(f"quiet: samples={[round(s) for s in samples]}", flush=True)
+            return 0
+        now = time.time()
+        if hot and (last_ask is None or now - last_ask >= a.cooldown):
+            rc = ask(a.target, sum(samples) / len(samples), a.window * a.interval / 60, a.dry_run)
+            print(f"asked {a.target} rc={rc} at {time.strftime('%H:%M:%S')}", flush=True)
+            last_ask = now
+        time.sleep(a.interval)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
