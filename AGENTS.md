@@ -65,13 +65,11 @@ Each doc carries its own summary.
    stable within a conversation.
 6. **Flag best-practice deviations** and propose the improvement, but don't
    relitigate decisions the operator made knowingly.
-7. **Routing discipline**: free and chronically-unused pools first for bulk
-   work; claude/codex for judgment (tier inside them); the prepaid tier is
-   retired until an explicit operator top-up. The blanket "never bulk-route
-   to clinepass" rule was **retired 2026-08-24**; Hermes runs free-first with
-   a paid fallback chain, and a burn-rate alert (`agent_stats.py burn`, every
-   6h) warns when a Hermes-usable pool will run out within 48h. Watch the
-   alert, not the rule.
+7. **Routing discipline**: route per `skills/model-routing/SKILL.md`
+   *Routing policy* (`route_agent.py policy --md`), the one copy. The prepaid
+   tier stays retired until an operator top-up; the `agent_stats.py burn`
+   alert (every 6h, 48h ahead) governs pool exhaustion: the blanket
+   clinepass rule was **retired 2026-08-24**. Watch the alert, not the rule.
 
 ## Machine context
 
