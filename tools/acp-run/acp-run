@@ -35,7 +35,11 @@ the agent's file tools to access paths outside -C (e.g. bigteam report folders).
 
 --perm decides each session/request_permission the agent sends:
     all              allow everything (default; also under --interactive)
-    deny             refuse everything (read-only review)
+    deny             refuse everything (no tools at all; a pure-text answer)
+    read-only        the agent may read (tool kinds read, search, fetch) and nothing else:
+                     what an advisory review needs (claude, codex, opencode, zcode; every
+                     other agent is refused with exit 2); any other tool call trips the
+                     tripwire (exit 77)
 acp-run runs yolo for every agent (operator 2026-10-14): there is no other
 permission-gating policy. The old --perm scoped:PATHS and --perm ask are still
 accepted but deprecated: they print one warning on stderr and run as --perm all.
@@ -179,12 +183,13 @@ the id itself and hands it to Claude as its --session-id, so the new_session
 record is already Claude's own id.
 
 Exit codes: 0 end_turn with some output; 1 other stop reason, agent error,
-an empty reply (no text, no tool calls; or no text under --perm deny or after
-a denied permission), a delivery-check failure (quota/plan/auth/provider
-error or truncated reply) or a requested model/effort/context the agent did
+an empty reply (no text, no tool calls; or no text under --perm deny or read-only
+or after a denied permission), a delivery-check failure (quota/plan/auth/provider
+error, truncated reply, or FAILED fake-tool-calls: a reply of tool calls printed as
+text when no tool ran) or a requested model/effort/context the agent did
 not apply (FAILED config); 2 usage error (including an --effort/--context the
 agent or model cannot take); 5 empty reply and every permission
-request was denied; 75 refused by --max-load; 77 under --perm deny a tool ran
+request was denied; 75 refused by --max-load; 77 under --perm deny or read-only a tool ran
 without a permission request (tripwire; turn cancelled); 124 timed out (session/cancel
 sent first, then the process is killed); 130/143 interrupted by SIGINT/SIGTERM
 (session/cancel sent, agent stopped); with --interactive also 129 on SIGHUP,
@@ -478,6 +483,13 @@ TRIP_GRACE_S = 2.0
 # failover for agy alone (djbclark, 2026-10-12): agy's default mode runs reads such as
 # view_file (kind "read") without asking; its shell commands are kind "execute".
 TRIPWIRE_EXEMPTABLE = ("read", "search")
+# --perm read-only (2026-10-19): the agent may use tools of these ACP kinds without asking; any
+# other tool call trips (EXIT_TRIPWIRE) exactly as under --perm deny, and a permission request for
+# any other kind is refused. "deny" gives the agent no tools at all: a review slice run under it
+# printed its tool calls as text and ended in 26 s (see FAKE_TOOL_CALL_PATTERNS).
+READONLY_KINDS = ("read", "search", "fetch")
+RESTRICTED_PERMS = ("deny", "read-only")  # the tripwire and the stripped user config apply
+PERMS = ("all", "deny", "read-only")
 
 # --perm deny made real per agent (adversary review 2026-10-12, C1). Each agent's
 # own defaults can run tools without ever sending session/request_permission:
@@ -528,6 +540,46 @@ DENY_ENV = {
         " mcp__*",
     },
 }
+# --perm read-only per agent (2026-10-19): a session that can read and cannot change anything.
+# Only agents with a verified equivalent are listed; main() refuses the rest with exit 2.
+#   claude   session/new _meta (READONLY_META): only the read-only built-in tools, the other
+#            options as under deny; mode "default".
+#   codex    the "read-only" session mode (codex-acp 2.2.2 `--info`: sandbox read-only).
+#   opencode OPENCODE_CONFIG_CONTENT permission block: read/glob/grep/list/webfetch/websearch
+#            allow, everything else deny (schema https://opencode.ai/config.json).
+#   zcode    plan mode and ZCODE_DISALLOWED_TOOLS naming only the mutating tools.
+READONLY_SET = {
+    "claude": {"mode": "default"},
+    "codex": {"mode": "read-only"},
+    "zcode": {"mode": "plan"},
+}
+READONLY_ENV = {
+    "opencode": {"OPENCODE_CONFIG_CONTENT": json.dumps({"permission": {
+        "*": "deny", "read": "allow", "glob": "allow", "grep": "allow", "list": "allow",
+        "webfetch": "allow", "websearch": "allow",
+        "edit": "deny", "bash": "deny", "task": "deny", "skill": "deny", "todowrite": "deny",
+        "external_directory": "deny", "lsp": "deny", "question": "deny"}})},
+    "zcode": {
+        "ZCODE_ACP_MODE": "plan",
+        "ZCODE_DISALLOWED_TOOLS": "Bash Write Edit MultiEdit Task Agent Skill SendMessage"
+        " TaskOutput TaskStop NotebookEdit TodoWrite mcp__*",
+    },
+}
+READONLY_AGENTS = ("claude", "codex", "opencode", "zcode")
+READONLY_UNSUPPORTED = ("no read-only mode verified for this agent; use --perm all with a read-only"
+                        " brief and a diff check")
+
+
+def perm_modes(agent):
+    """The --perm values this agent supports (acp-run <agent> --info)."""
+    modes = ["all"]
+    if agent not in DENY_UNSUPPORTED or os.environ.get(DENY_UNSUPPORTED_OVERRIDE_ENV.get(agent, "")):
+        modes.append("deny")
+    if agent in READONLY_AGENTS:
+        modes.append("read-only")
+    return modes
+
+
 # Per-run --perm deny temp dirs are named <DENY_DIR_PREFIX><agent>-deny-<pid>-<random>
 # under tempfile.gettempdir(). run() removes its own; a run killed with SIGKILL cannot,
 # so each deny run first sweeps this user's dirs older than DENY_DIR_MAX_AGE whose pid
@@ -630,6 +682,12 @@ def zcode_deny_settings():
     return _zcode_settings(deny=True)
 
 
+def zcode_readonly_settings():
+    """zcode_deny_settings for --perm read-only: the same stripped settings, but the disallowed
+    tools are only the mutating ones (READONLY_ENV), so Read/Glob/Grep/LS/Web* stay."""
+    return _zcode_settings(deny=True, readonly=True)
+
+
 def zcode_strip_settings():
     """The --strip-user-config settings dir for zcode outside --perm deny (2026-10-13):
     like zcode_deny_settings, MCP servers, plugins, skills and hooks off, but the
@@ -638,7 +696,7 @@ def zcode_strip_settings():
     return _zcode_settings(deny=False)
 
 
-def _zcode_settings(deny):
+def _zcode_settings(deny, readonly=False):
     try:
         base = json.loads((Path.home() / ".zcode" / "cli" / "setting.json").read_text())
     except (OSError, ValueError):
@@ -654,8 +712,9 @@ def _zcode_settings(deny):
     if deny:
         base["permission"] = {**(base.get("permission") or {}), "mode": "plan", "allowedTools": [],
                               "autoApproveHighRisk": False, "allowMediumRiskInAuto": False,
-                              "disallowedTools": DENY_ENV["zcode"]["ZCODE_DISALLOWED_TOOLS"].split()}
-    tag = "deny" if deny else "strip"
+                              "disallowedTools": (READONLY_ENV if readonly else DENY_ENV)["zcode"][
+                                  "ZCODE_DISALLOWED_TOOLS"].split()}
+    tag = "deny" if deny else "strip"  # read-only dirs are named deny too (DENY_DIR_RE sweeps them)
     d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}zcode-{tag}-{os.getpid()}-"))
     (d / "cli").mkdir()
     (d / "cli" / "setting.json").write_text(json.dumps(base, indent=1))
@@ -708,7 +767,7 @@ def strip_requested(a):
 
 def strips_outside_deny(a):
     """--strip-user-config applies to this run beyond what --perm deny already does."""
-    return (a.perm != "deny" and not getattr(a, "interactive", False)
+    return (a.perm not in RESTRICTED_PERMS and not getattr(a, "interactive", False)
             and a.agent in STRIP_ANY_PERM and strip_requested(a))
 
 
@@ -1266,7 +1325,7 @@ def crush_strip_config(env, d, why="--perm deny"):
 
 
 def strip_user_config(a, env, deny_dir):
-    """Apply STRIP_USER_CONFIG to env (in place) for a --perm deny, non-interactive run
+    """Apply STRIP_USER_CONFIG to env (in place) for a --perm deny or read-only, non-interactive run
     of opencode, agy or crush (crush builds inside deny_dir, run()'s crush_deny_dir). Returns (deny_dir, log info or None): deny_dir is the temp dir
     the caller removes. Anything else (--perm all, --interactive, other
     agents) is untouched and logs nothing. If the temp config cannot be built the run
@@ -1286,9 +1345,9 @@ def strip_user_config(a, env, deny_dir):
     outside = strips_outside_deny(a)
     # grok, every non-interactive run not already stripped above (operator 2026-10-15): no
     # user hooks, skills or plugins, MCP servers and permission mode kept (tag "hooks").
-    grok_hooks = (a.agent == "grok" and not outside and a.perm != "deny"
+    grok_hooks = (a.agent == "grok" and not outside and a.perm not in RESTRICTED_PERMS
                   and not getattr(a, "interactive", False))
-    if not outside and not grok_hooks and (a.perm != "deny" or getattr(a, "interactive", False)
+    if not outside and not grok_hooks and (a.perm not in RESTRICTED_PERMS or getattr(a, "interactive", False)
                                            or a.agent not in STRIP_USER_CONFIG):
         return deny_dir, None
     why = keep_user_config(a)
@@ -1356,6 +1415,24 @@ DENY_META = {
             }
         },
         "disableBuiltInTools": True,
+    },
+}
+
+# --perm read-only for claude-agent-acp: the same options as DENY_META except `tools`, which
+# names only the read-only built-ins (the SDK's `tools` option takes tool names; the ACP
+# adapter passes _meta.claudeCode.options.tools through, acp-agent.js `tools =
+# userProvidedOptions?.tools`, claude-agent-acp 0.93.0). No Edit, Write, Bash, NotebookEdit or
+# Task; disallowedTools repeats them so a user alias cannot bring one back.
+CLAUDE_READONLY_TOOLS = ["Read", "Grep", "Glob", "LS", "WebFetch", "WebSearch"]
+READONLY_META = {
+    "claude": {
+        "claudeCode": {
+            "options": {
+                **DENY_META["claude"]["claudeCode"]["options"],
+                "tools": CLAUDE_READONLY_TOOLS,
+                "disallowedTools": ["Edit", "Write", "MultiEdit", "Bash", "NotebookEdit", "Task", "Agent"],
+            }
+        },
     },
 }
 
@@ -1428,9 +1505,52 @@ FAILURE_TEXT = {
     "transient": "transient provider/transport error",
     "refused": "model refused the task",
     "provider": "provider error",
-    "tripwire": "a tool ran without a permission request under --perm deny",
+    "tripwire": "a tool ran without a permission request under --perm deny or read-only",
     "config": "a requested model, effort or context was not applied",
+    "fake-tool-calls": "the reply is tool calls printed as text, not an answer",
 }
+# A reply made of pseudo tool-call markup. A model that has no tools (--perm deny gives claude none)
+# and was told to read files prints the calls it would have made as text and ends its turn
+# (2026-10-19: two frontier review slices, 26 s, stop=end_turn, exit 0, then recovered as "done").
+# The text is judged only when the turn made no real tool call (a report that quotes the markup
+# after real calls passes); XML-style markup inside a fenced block or an inline code span is
+# a quotation and is ignored; a fenced tool_call / json block counts only with a tool name and
+# its arguments.
+FAKE_TOOL_CALL_PATTERNS = [
+    r"<invoke\b[^>]*\bname\s*=",
+    r"<function_calls>",
+    r"<invoke\b",
+    r"\bprint\(\s*default_api\.",
+]
+FENCED_BLOCK = re.compile(r"```[ \t]*([\w-]*)[^\n]*\n(.*?)```", re.DOTALL)
+INLINE_CODE = re.compile(r"`[^`\n]*`")
+
+
+def _fake_call_object(o):
+    """A JSON value that looks like one tool call: a tool/name key and an arguments/parameters key."""
+    if isinstance(o, list):
+        return bool(o) and all(_fake_call_object(x) for x in o)
+    return (isinstance(o, dict) and ("tool" in o or "name" in o)
+            and ("arguments" in o or "parameters" in o))
+
+
+def fake_tool_calls(text, tools):
+    """True when a turn with no real tool call (tools == 0) replied with pseudo tool-call markup:
+    XML invoke / function_calls blocks, Gemini's print(default_api...), or a fenced
+    tool_call / json block holding a tool call object (FAKE_TOOL_CALL_PATTERNS)."""
+    if tools or not text or not text.strip():
+        return False
+    for lang, body in FENCED_BLOCK.findall(text):
+        if lang.lower() in ("tool_call", "tool_calls", "json"):
+            try:
+                if _fake_call_object(json.loads(body)):
+                    return True
+            except ValueError:
+                if lang.lower() != "json" and re.search(
+                        r'"(tool|name)"\s*:.*"(arguments|parameters)"\s*:', body, re.DOTALL):
+                    return True
+    bare = INLINE_CODE.sub("", FENCED_BLOCK.sub("", text))
+    return any(re.search(rx, bare) for rx in FAKE_TOOL_CALL_PATTERNS)
 # A whole reply of at most SHORT_REPLY characters that starts like this is a
 # refusal, not an answer. Anchored at the start so a report that merely
 # mentions quotas is not one. The same patterns, anchored at the start of the
@@ -1545,7 +1665,7 @@ def classify(text):
     return None
 
 
-def reply_failure(text, tools, stderr=""):
+def reply_failure(text, tools, stderr="", perm=None):
     """(class, message) when a reply is a provider refusal, ends in a refusal
     paragraph or a provider error line, else None. stderr is the agent's stderr
     since the prompt was sent: a 429 there backs a quota-looking last paragraph, and an
@@ -1553,6 +1673,11 @@ def reply_failure(text, tools, stderr=""):
     s = (text or "").strip()
     if not s:
         return None
+    if fake_tool_calls(s, tools):
+        hint = ("--perm deny gives the agent no tools; use --perm read-only so it can read"
+                if perm == "deny" else
+                "--perm read-only lets the agent read (claude, codex, opencode, zcode), --perm all also act")
+        return "fake-tool-calls", f"{FAILURE_TEXT['fake-tool-calls']}: no tool ran; {hint}"
     lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
     if len(s) <= MODEL_REFUSAL_REPLY and any(
         re.match(rx, s.replace("\u2019", "'"), re.IGNORECASE) for rx in MODEL_REFUSALS
@@ -1609,8 +1734,8 @@ def select_exit(stop_reason, text, tools, allowed, denied, perm, failure):
         return 1, f"empty reply; {denied} of {allowed + denied} permission(s) denied"
     if tools == 0:
         return 1, "empty reply: end_turn with no text and no tool calls"
-    if perm == "deny":
-        return 1, "empty reply under --perm deny: nothing changed, nothing reported"
+    if perm in RESTRICTED_PERMS:
+        return 1, f"empty reply under --perm {perm}: nothing changed, nothing reported"
     return 0, None
 
 
@@ -1710,12 +1835,16 @@ class RunClient(Client):
     def decide(self, tool_call):
         # yolo for every agent (operator 2026-10-14): only --perm deny refuses;
         # main() maps the deprecated scoped:/ask to "all" before this runs.
+        # --perm read-only answers yes to read, search and fetch tools and no to the rest.
+        if self.perm == "read-only":
+            return infer_kind(getattr(tool_call, "kind", None), getattr(tool_call, "title", None)) in READONLY_KINDS
         return self.perm != "deny"
 
     def check_tripwire(self, update):
-        """Under --perm deny, any non-think tool call that starts or completes
-        without a permission request trips the run (EXIT_TRIPWIRE)."""
-        if self.perm != "deny" or self.tripped:
+        """Under --perm deny or read-only, any non-think tool call (read-only: of a kind outside
+        READONLY_KINDS) that starts or completes without a permission request trips the run
+        (EXIT_TRIPWIRE)."""
+        if self.perm not in RESTRICTED_PERMS or self.tripped:
             return
         tid = getattr(update, "tool_call_id", None)
         kind = getattr(update, "kind", None)
@@ -1724,7 +1853,8 @@ class RunClient(Client):
         kind = self.tool_kinds.get(tid)
         status = getattr(update, "status", None)
         kind_s = str(getattr(kind, "value", kind))
-        if kind_s == "think" or kind_s in self.exempt_kinds:
+        if kind_s == "think" or kind_s in self.exempt_kinds or (
+                self.perm == "read-only" and kind_s in READONLY_KINDS):
             return
         status = str(getattr(status, "value", status))
         if tid in self.requested or status not in ("in_progress", "completed"):
@@ -1737,13 +1867,13 @@ class RunClient(Client):
             self.started_unasked.setdefault(tid, (time.monotonic(), title))
 
     def trip(self, tid, title, status):
-        self.tripped = f"tool {title!r} ran without a permission request under --perm deny"
+        self.tripped = f"tool {title!r} ran without a permission request under --perm {self.perm}"
         self.rec("tripwire", {"tool_call_id": tid, "title": title, "status": status})
 
     def check_started(self, grace=TRIP_GRACE_S):
         """Trip on a tool that started and has not asked within grace seconds
         (grace 0 at the end of a turn: it never asked)."""
-        if self.perm != "deny" or self.tripped:
+        if self.perm not in RESTRICTED_PERMS or self.tripped:
             return
         now = time.monotonic()
         for tid, (t0, title) in list(self.started_unasked.items()):
@@ -2593,6 +2723,10 @@ def fallback_cli(a, client=None) -> int:
         env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "1"
     if a.perm == "all":
         cmd.append("--dangerously-skip-permissions")
+    elif a.perm == "read-only":
+        cmd += ["--tools", ",".join(CLAUDE_READONLY_TOOLS), "--strict-mcp-config", "--permission-mode",
+                "default", "--disallowedTools", "Edit,Write,MultiEdit,Bash,NotebookEdit,Task",
+                "--setting-sources", "project"]
     elif a.perm == "deny":
         # Same as upstream SkillOpt's claude backend, plus no built-in tools and
         # no user MCP servers (adversary review 2026-10-12, C1a).
@@ -2749,7 +2883,7 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
                         client.check_started()
                     if getattr(client, "tripped", None):
                         break  # handled below, where the turn's reply is judged
-                    deny = getattr(a, "perm", None) == "deny"
+                    deny = getattr(a, "perm", None) in ("deny", "read-only")  # tests exec this function bare
                     try:
                         resp = await wait(prompt_task, min(1 if deny else 30, left))
                         break
@@ -2814,6 +2948,7 @@ async def prompt_turn(a, conn, sess, client, text, out, wait=None):
                     stderr_since(client.err_path, client.err_mark)
                     if client.err_path
                     else "",
+                    getattr(a, "perm", None),
                 )
                 if not (can_retry and failure and failure[0] == "transient"):
                     finished = True
@@ -3015,6 +3150,8 @@ async def open_session(a, conn, init, client, root, timeout):
             kw["systemPrompt"] = rules  # sent as session/new _meta
         if getattr(a, "perm", None) == "deny":
             kw.update(DENY_META.get(a.agent, {}))  # sent as session/new _meta
+        elif getattr(a, "perm", None) == "read-only":
+            kw.update(READONLY_META.get(a.agent, {}))
         if getattr(a, "meta", None):
             kw = deep_merge(kw, a.meta)  # --meta JSON, merged over the above
         if add_dirs:
@@ -3696,7 +3833,12 @@ async def run(a, log, err, log_path):
         # The temp config dirs are built inside the try, after the signal handlers,
         # so an exception or SIGTERM from here on always reaches drop_deny_dir()
         # (adversary review 2026-10-13, finding 1).
-        if a.perm == "deny":
+        if a.perm == "read-only":
+            env.update(READONLY_ENV.get(a.agent, {}))
+            if a.agent == "zcode":
+                deny_dir = zcode_readonly_settings()
+                env["ZCODE_CLI_SETTINGS_FILE"] = str(deny_dir / "cli" / "setting.json")
+        elif a.perm == "deny":
             env.update(DENY_ENV.get(a.agent, {}))
             if a.agent == "zcode":
                 deny_dir = zcode_deny_settings()
@@ -3776,7 +3918,7 @@ async def run(a, log, err, log_path):
             )
             client.exempt_kinds = frozenset(
                 k for k in getattr(a, "tripwire_exempt_kinds", "").split(",") if k
-            )
+            ) | (frozenset(READONLY_KINDS) if a.perm == "read-only" else frozenset())
             client.err_path = err.name
             conn = connect_to_agent(client, proc.stdin, proc.stdout)
             phase = "initialize"  # the handshake step a failure is reported against
@@ -3892,6 +4034,7 @@ async def run(a, log, err, log_path):
                                              per_run_data=bool(deny_dir or os.environ.get("ACP_RUN_CRUSH_DATA")))
             info = {
                 "agent": dump(init.agent_info),
+                "perm_modes": perm_modes(a.agent),
                 "auth_methods": dump(init.auth_methods),
                 "capabilities": {
                     "loadSession": bool(caps and caps.load_session),
@@ -3927,6 +4070,8 @@ async def run(a, log, err, log_path):
                 sets.update(YOLO_SET.get(a.agent, {}))
             if a.perm == "deny" and not a.mode:
                 sets.update(DENY_SET.get(a.agent, {}))
+            if a.perm == "read-only" and not a.mode:
+                sets.update(READONLY_SET.get(a.agent, {}))
             sets.update(kv.split("=", 1) for kv in a.set)
             if a.model:
                 sets["model"] = a.model
@@ -4178,8 +4323,9 @@ def main():
     ap.add_argument(
         "--perm",
         default="all",
-        help="all (default, yolo) or deny (read-only); the deprecated scoped:PATHS"
-        " and ask warn and run as all",
+        help="all (default, yolo), read-only (may read, changes nothing; claude, codex, opencode,"
+        " zcode) or deny (no tools: a text-only answer); the deprecated scoped:PATHS and ask warn"
+        " and run as all",
     )
     ap.add_argument(
         "--keep-user-config",
@@ -4384,13 +4530,15 @@ def main():
                  f" ({OPERATOR_GATED[a.agent]}); once given, set {APPROVAL_ENV}={a.agent}")
     if a.agent not in AGENTS:
         ap.error(f"agent must be one of: {', '.join(AGENTS)}")
-    if not (a.perm in ("all", "deny", "ask") or a.perm.startswith("scoped:")):
-        ap.error("--perm must be all or deny")
+    if not (a.perm in (*PERMS, "ask") or a.perm.startswith("scoped:")):
+        ap.error("--perm must be all, read-only or deny")
+    if a.perm == "read-only" and a.agent not in READONLY_AGENTS:
+        ap.error(f"--perm read-only: {a.agent}: {READONLY_UNSUPPORTED}")
     if a.perm == "ask" or a.perm.startswith("scoped:"):
         # operator 2026-10-14: acp-run runs yolo for every agent; the old scoped:/ask
         # policies are accepted for old callers but no longer enforced.
         print(f"acp-run: warning: --perm {a.perm} is no longer enforced: acp-run runs yolo"
-              " for every agent (treated as --perm all); use --perm deny for a read-only run",
+              " for every agent (treated as --perm all); use --perm read-only for a read-only run",
               file=sys.stderr)
         a.perm = "all"
     if (a.inbox or a.show_thinking) and not a.interactive:
@@ -4439,7 +4587,7 @@ def main():
         if why:
             print(f"acp-run: refusing to start: {why}", file=sys.stderr)
             return EXIT_LOAD
-    if a.perm == "deny" or strips_outside_deny(a):
+    if a.perm in RESTRICTED_PERMS or strips_outside_deny(a):
         safe_sweep_stale_deny_dirs()  # dirs a SIGKILLed deny/strip run could not remove
     state = Path.home() / ".local/state/acp-run"
     state.mkdir(parents=True, exist_ok=True)

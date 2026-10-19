@@ -510,7 +510,7 @@ class TestCrushDenyEndToEnd(unittest.TestCase):
                 self.assertEqual(r["rc"], 0, r["stderr"])
                 self.assertEqual(r["stdout"].strip(), "ok")
                 warn = (f"acp-run: warning: --perm {perm} is no longer enforced: acp-run runs yolo for"
-                        " every agent (treated as --perm all); use --perm deny for a read-only run")
+                        " every agent (treated as --perm all); use --perm read-only for a read-only run")
                 self.assertEqual(r["stderr"].count(warn), 1, r["stderr"])
                 self.assertEqual(r["stderr"].count("warning: --perm"), 1, r["stderr"])
                 s = r["seen"]
@@ -522,7 +522,7 @@ class TestCrushDenyEndToEnd(unittest.TestCase):
     def test_unknown_perm_is_a_usage_error(self):
         r = self.run_acp("--perm", "bogus")
         self.assertEqual(r["rc"], 2, r["stderr"])
-        self.assertIn("--perm must be all or deny", r["stderr"])
+        self.assertIn("--perm must be all, read-only or deny", r["stderr"])
 
 
 if __name__ == "__main__":

@@ -106,6 +106,11 @@ FAKE = textwrap.dedent("""\
                 echo "acp-run: FAILED refused: model refused the task: reply was 'Sorry, I cannot fulfill your request.'" >&2
                 echo "acp-run: agent=agy stop=end_turn secs=4.2 tools=0 fail=refused" >&2
                 exit 1;;
+      fake_tool_calls)  # claude, fable, --perm deny, 2026-10-19: tool calls printed as text, no tools ran
+                printf 'I will read the files.\\n\\n<invoke name="Read">\\n<parameter name="file_path">/x/README.md</parameter>\\n</invoke>\\n'
+                echo "acp-run: FAILED fake-tool-calls: the reply is tool calls printed as text, not an answer: no tool ran" >&2
+                echo "acp-run: agent=claude stop=end_turn secs=26.0 tools=0 perm=0+/0- fail=fake-tool-calls" >&2
+                exit 1;;
       quotes_refusal)
                 printf 'The model answered "Sorry, I cannot fulfill your request" to the first brief.\\nThe second brief fixed that.\\n'; exit 0;;
       agent_metrics)
@@ -356,7 +361,7 @@ class TestDispatch(Base):
     def test_unknown_perm_is_refused(self):
         r = self.dispatch("--perm", "ask")
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("--perm must be all or deny", r.stderr)
+        self.assertIn("--perm must be all, read-only or deny", r.stderr)
 
     def test_dispatch_passes_add_dir_for_out(self):
         r = self.dispatch()
@@ -365,7 +370,8 @@ class TestDispatch(Base):
 
     def test_deny_perm_brief_says_the_final_message_is_the_report(self):
         # --perm deny refuses the report's Write too; the brief must not ask for the impossible.
-        r = self.dispatch("--perm", "deny")
+        # frontier defaults to --role advise, which refuses deny (2026-10-19); exec is the old shape
+        r = self.dispatch("--perm", "deny", "--role", "exec", env={"ACP_OPERATOR_APPROVED": "frontier-exec"})
         self.assertEqual(r.returncode, 0, r.stderr)
         brief = (self.out / "s1-brief.md").read_text()
         self.assertIn("read-only (`--perm deny`)", brief)

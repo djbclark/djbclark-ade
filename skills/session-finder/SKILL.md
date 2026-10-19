@@ -234,7 +234,7 @@ get `herdr agent start --kind` plus `agent prompt` — the fragile way; say so.
    You audit and close it.
 3. Always `--model`. Default `--timeout` is four hours per turn (an hour cut a
    real deploy short); acp-run runs yolo for every agent (operator 2026-10-14),
-   so the only gate is `--perm deny` for a review-only session (`scoped:` and
+   so the only gate is `--perm read-only` for a review-only session (`deny` gives claude no tools) (`scoped:` and
    `ask` are deprecated: a warning, then `--perm all`); `--files` lists the
    paths the claim owns, and the diff afterwards is the check that it kept to
    them. On herdr 0.9.1 `herdr agent prompt` does not reach a session that

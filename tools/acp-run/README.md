@@ -31,11 +31,24 @@ acp-run codex -C ~/src/repo --interactive --inbox /tmp/codex-in   # a session yo
    config options (`DEFAULT_SET`), each agent's own auto-approve mode (`YOLO_SET`),
    and environment set-up where an agent needs it.
 2. **A permission policy** answering every `session/request_permission`.
-   acp-run runs yolo for every agent (operator 2026-10-14): there are two
-   policies, `all` and `deny`. The old `scoped:P1,P2` and `ask` are still
+   acp-run runs yolo for every agent (operator 2026-10-14): there are three
+   policies, `all`, `read-only` (2026-10-19) and `deny`. `read-only`: the agent
+   may read and change nothing. Its read-only tools (ACP kinds `read`, `search`,
+   `fetch`) run without a permission request and are answered yes if they ask;
+   any other tool trips the tripwire (exit 77) and any other request is refused.
+   claude gets a session whose built-in tools are only Read, Grep, Glob, LS,
+   WebFetch and WebSearch (`_meta.claudeCode.options.tools`; no user settings, no
+   MCP servers, mode `default`); codex the `read-only` mode; opencode a
+   `permission` block (`OPENCODE_CONFIG_CONTENT`) allowing read, glob, grep, list,
+   webfetch, websearch and denying the rest; zcode `plan` mode with
+   `ZCODE_DISALLOWED_TOOLS` naming only the mutating tools. Every other agent is
+   refused with exit 2 and a one-line reason (no equivalent mode verified);
+   `acp-run <agent> --info` lists the `perm_modes` an agent supports. `deny` gives
+   claude no tools at all, so it is for a text-only answer, never a review that
+   has to read. The old `scoped:P1,P2` and `ask` are still
    accepted for old callers but are not enforced: each prints one line,
    `acp-run: warning: --perm <value> is no longer enforced: acp-run runs yolo
-   for every agent (treated as --perm all); use --perm deny for a read-only
+   for every agent (treated as --perm all); use --perm read-only for a read-only
    run`, and the run is exactly `--perm all` (`ask` no longer needs
    `--interactive`).
    - `all` (default): allow everything, including under `--interactive`.
@@ -441,11 +454,20 @@ Not installed (`devin-cli` 3000.11.3 via `brew install --cask devin-cli`). Regis
 
 ## Dispatch slice controls (2026-10-11)
 
-An advisory review that must *read* the repo runs with `--perm all` (the brief
-says "do not edit"; `--role advise` records it): under `--perm deny` claude gets
-a session with no built-in tools at all, so a reading review emits its tool
-calls as text and ends in seconds with an empty report (2026-10-19, two
-frontier slices lost). `--perm deny` is for a run that must not touch anything.
+An advisory review that must *read* the repo runs with `--perm read-only`
+(claude, codex, opencode, zcode; elsewhere `--perm all` with a brief that says "do
+not edit" and a diff check). Under `--perm deny` claude gets a session with no
+built-in tools at all, so a reading review printed its tool calls as text and
+ended in seconds (2026-10-19, two frontier slices lost, then recovered as
+"done"). Since then (a) `acp-dispatch --role advise --perm deny` is refused with
+exit 2; (b) acp-run fails a turn that made no tool call and replied with pseudo
+tool-call markup (`<invoke name=`, `<function_calls>`, a fenced `tool_call` or
+`json` block holding a tool and its arguments, `print(default_api.`) as
+`FAILED fake-tool-calls`, exit 1, with a line naming `--perm read-only`; (c)
+acp-dispatch never recovers such a run's final message: the record is
+`no-report` with `NO-REPORT: fake-tool-calls` and no DONE. XML markup quoted in a
+code block, or in a run that made real tool calls, passes. `--perm deny` is for
+a run that must not touch anything and needs no tools.
 `acp-dispatch <agent> ... --timeout 0` starts a slice without a time limit.
 Its record-based rearm waiter and detached wait have no deadline, even with an
 explicit `--wait-timeout`. For finite slices, the existing default remains
@@ -595,10 +617,11 @@ acp-run claude -C ~/src/repo -i --resume SESSION_ID          # reopen an earlier
 | Code | Meaning |
 | ---- | ------- |
 | 0 | `end_turn` with some output |
-| 1 | another stop reason, an agent error, an empty reply (no text and no tool calls; or no text under `--perm deny` or after a denied permission), or a delivery-check failure (quota, plan, auth, provider error, truncated reply) |
+| 1 | another stop reason, an agent error, an empty reply (no text and no tool calls; or no text under `--perm deny` or `read-only`, or after a denied permission), or a delivery-check failure (quota, plan, auth, provider error, truncated reply, or `FAILED fake-tool-calls`: no tool ran and the reply is tool calls printed as text) |
 | 2 | usage error |
 | 5 | empty reply and every permission request was denied (the code acpx uses) |
 | 75 | refused to start by `--max-load` |
+| 77 | under `--perm deny` or `read-only` a tool ran without a permission request (tripwire; the turn is cancelled) |
 | 124 | timed out (`session/cancel` sent first, then the agent is killed) |
 | 130, 143 | interrupted by SIGINT, SIGTERM (with `--interactive` also 129 on SIGHUP; Ctrl-C cancels a running turn instead of exiting) |
 

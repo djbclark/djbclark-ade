@@ -498,7 +498,7 @@ arrive first. **For every agent that speaks ACP, dispatch through
 `acp-run`, whose agent list, flags and current status are in `model-routing`):
 
     acp-dispatch <agent> --model <m> --kind <kind> --name <name> --task <task> -C <repo> \
-        -f "$OUT/brief-<name>.md" [--perm deny] [--timeout 2400]
+        -f "$OUT/brief-<name>.md" [--perm read-only|deny] [--timeout 2400]
 
 It enforces what this step used to spell out in prose (2026-10-08): `--model`
 is mandatory except for zcode, where it is accepted and still optional (item 2);
@@ -534,11 +534,15 @@ until the work is committed or recorded in a repo.
    post-run check**: as each slice finishes, run `git -C <slice dir> status
    --short` and `git -C <slice dir> diff --stat`, and flag every changed or new
    path outside that slice's owned files before integrating it (revert or
-   re-assign it; never let it ride along silently). `--perm deny` is for
-   security-sensitive slices only, not for every review (operator 2026-10-15:
-   subagents run yolo unless clearly security-sensitive); where it is used it
-   stays enforced (every request refused, tripwire on),
-   and on an agent that reads without asking (crush, agy) add
+   re-assign it; never let it ride along silently). A security-sensitive or
+   advisory slice that must read but not change anything runs `--perm read-only`
+   (2026-10-19; claude, codex, opencode, zcode: reads allowed, any other tool
+   trips, exit 77); `--role advise --perm deny` is refused, because `deny`
+   gives claude no tools and the review prints fake tool calls (acp-run
+   `FAILED fake-tool-calls`). `--perm deny` is for a text-only slice needing no
+   tools. Neither is for every review (operator 2026-10-15: subagents run yolo
+   unless clearly security-sensitive); where used they stay enforced,
+   and on an agent that reads without asking under `deny` (crush, agy) add
    `--acp-arg=--tripwire-exempt-kinds=read,search`, or the first `grep` ends the
    slice with exit 77 and no report. cursor cannot deny at all (it takes
    permissions from its own config's `approvalMode`, never from ACP; acp-run

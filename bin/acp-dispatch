@@ -7,7 +7,7 @@
                   inherit it from the record; a pre-change record with no kind still continues)
                  [--role advise|exec]   (frontier only; default advise; other kinds record exec)
                  [--effort LEVEL] [--context SIZE]
-                 [--task TASK | --out DIR] [--perm all|deny] [--timeout S]
+                 [--task TASK | --out DIR] [--perm all|read-only|deny] [--timeout S]
                  [--lead NAME] [--detach [--no-wait] [--wait-timeout S]] [--dry-run] [--json]
                  [--min-headroom PCT] [--est-pct PCT] [--checkpoint] [--no-preflight]
                  [--no-auto-resume]
@@ -84,7 +84,8 @@ For an ACP agent the final message (acp-run's stdout) is saved to $OUT/<name>-fi
 the agent did not write the report file but its final message carries the content, the report
 is recovered from it and the record says so (`report_source: final-message`) — stdout from
 acp-run is never truncated, so nothing is lost; the warning tells you the brief was not followed.
-Not when acp-run itself failed that turn (`FAILED <class>` on its stderr or a non-zero exit): the
+Not when acp-run itself failed that turn (`FAILED <class>` on its stderr or a non-zero exit; a reply
+of tool calls printed as text is `FAILED fake-tool-calls`, class `fake-tool-calls`, 2026-10-19): the
 final message is then kept above a `NO-REPORT:` line and never gets a DONE (`report_source:
 final-message-failed`). A model refusal is such a failure: acp-run classifies a short reply that
 starts "Sorry, I cannot ..." / "I must decline ..." as `FAILED refused` (2026-10-10: agy
@@ -262,7 +263,7 @@ Exit codes (dispatch and check):
          also `running`, `pending` and `resume-scheduled` (a quota stop whose in-place resume is
          scheduled: still running, wait for the rearm waiter)
     2    usage (missing --kind/--model, ineligible kind, frontier model without --kind frontier,
-         frontier --role exec without approval, bad name, report basename Claude Code would refuse, ...)
+         frontier --role exec without approval, --role advise with --perm deny (use read-only), bad name, report basename Claude Code would refuse, ...)
     3    delivery failure: the agent finished (or died) and there is no report, or its report
          ends in a NO-REPORT: line (acp-run failed before the agent wrote DONE) and no automatic
          resume is pending; for a quota stop the line carries the manual resume command
@@ -306,6 +307,14 @@ including writing `{report}` and creating its `.done` marker, so do not try. Put
 report, in the shape the delivery contract describes, in your final message instead: an
 `acp-run` final message is not cut at 4,000 characters, and acp-dispatch saves it to the report
 path and marks it done for you. This overrides items 1, 2 and 7 of the delivery contract.
+"""
+READONLY_NOTE = """
+**This run is read-only (`--perm read-only`).** You can read (Read, Grep, Glob, LS, web fetch and
+search where the agent has them) and you cannot change anything: you have no tool that writes
+`{report}` or creates its `.done` marker, so do not try, and a call to any other tool stops the
+run. Put the whole report, in the shape the delivery contract describes, in your final message
+instead: an `acp-run` final message is not cut at 4,000 characters, and acp-dispatch saves it to
+the report path and marks it done for you. This overrides items 1, 2 and 7 of the delivery contract.
 """
 ADVISOR_NOTE = """
 ## Advisor role
@@ -437,9 +446,10 @@ WAKE_LEAD_SECONDS = 120
 PLACEHOLDER_MODELS = frozenset({"m1"})  # test placeholders; skipped in machine-wide history
 # Claude Code 2.1.295 refuses a sub-agent's Write for this basename (tengu_subagent_md_report_blocked).
 CLAUDE_REFUSED_BASENAME = re.compile(r"^(REPORT|SUMMARY|FINDINGS|ANALYSIS).*\.md$", re.IGNORECASE)
-# acp-run runs yolo for every agent (operator 2026-10-14): all or deny. A scoped:... value from an
-# old caller or job record is still accepted, with a warning, and runs as all.
-PERM_RE = re.compile(r"^(all|deny|scoped:.+)$")
+# acp-run runs yolo for every agent (operator 2026-10-14): all, deny (no tools) or read-only (may
+# read, changes nothing; since 2026-10-19). A scoped:... value from an old caller or job record is
+# still accepted, with a warning, and runs as all.
+PERM_RE = re.compile(r"^(all|deny|read-only|scoped:.+)$")
 
 STATUS_EXIT = {"done": 0, "partial": 1, "no-report": 3, "blocked": 4, "unavailable": 5,
                "quota-checkpointed": 5, "running": 1, "pending": 1, "resume-scheduled": 1}
@@ -2627,6 +2637,9 @@ def failure_note(stderr: Path, rc: int | None, agent: str, model: str | None,
         _, extra = record_quota_refusal_in_aiuse(agent, model, text, rc, when)
     elif cls in ("outage", "transient"):
         note_outage_in_aiuse(agent, model, text)
+    if cls == "fake-tool-calls":
+        extra = ("; the reply was tool calls printed as text because the agent had no tools: a slice that"
+                 " must read needs --perm read-only (--perm deny gives it none)")
     if "stop=cancelled" in text and not extra:
         extra = (" [stop=cancelled before the time limit: a foreground command that ran about an hour"
                  " is a known cause, see dispatch-footer item 10]")
@@ -3300,10 +3313,10 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     if not NAME_RE.match(a.name or ""):
         die("--name must be 1-64 chars of letters, digits, . _ - (it names every output file)")
     if a.perm and not PERM_RE.match(a.perm):
-        die("--perm must be all or deny")
+        die("--perm must be all, read-only or deny")
     if a.perm and a.perm.startswith("scoped:"):
         print(f"acp-dispatch: warning: --perm {a.perm} is no longer enforced: acp-run runs yolo for every"
-              " agent (treated as --perm all); use --perm deny for a read-only run", file=sys.stderr)
+              " agent (treated as --perm all); use --perm read-only for a read-only run", file=sys.stderr)
         a.perm = "all"
     if bool(a.prompt) == bool(a.prompt_file):
         die("give exactly one of -p PROMPT or -f BRIEF")
@@ -3351,6 +3364,12 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     else:
         role = "exec"  # --role ignored for non-frontier
     a.role = role
+    if role == "advise" and (a.perm or "all") == "deny" and not is_resume:
+        # --perm deny gives claude-agent-acp no tools at all: a review slice told to read files
+        # printed its tool calls as text and was recovered as "done" (2026-10-19, two frontier
+        # slices). An advisory run reads, so it needs --perm read-only.
+        die("--role advise with --perm deny is refused: deny gives the agent no tools, so it cannot"
+            " read what it is asked to review; use --perm read-only (claude, codex, opencode, zcode)")
 
     acp_run = a.acp_run or shutil.which("acp-run")
     if not acp_run:
@@ -3475,7 +3494,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     # --perm deny refuses every permission request, the report's Write included, so the footer's
     # "write the report" cannot be followed (2026-10-11: an agy review was refused that Write and
     # had to be recovered from its final message). Tell the agent the final message is the report.
-    deny_note = DENY_NOTE.format(report=agent_report) if perm == "deny" else ""
+    deny_note = {"deny": DENY_NOTE, "read-only": READONLY_NOTE}.get(perm, "").format(report=agent_report)
     advisor_note = ("\n" + ADVISOR_NOTE.strip() + "\n") if role == "advise" else ""
     checkpoint_note = CHECKPOINT_TEXT.format(report=agent_report) if checkpoint else ""
     # Advisor section sits after the prompt and before the footer (operator 2026-10-18). The inbox
@@ -3745,7 +3764,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="acp-run --effort: none|minimal|low|medium|high|xhigh|max|ultra|default; checked with the model")
     ap.add_argument("--context", metavar="SIZE",
                     help="acp-run --context: 200k|256k|272k|400k|500k|1m or a token count; checked with the model")
-    ap.add_argument("--perm", default="all", help="all (default) | deny: every permission request refused and a tripwire (exit 77) on any "
+    ap.add_argument("--perm", default="all", help="all (default) | read-only: the agent may read and nothing else, any other tool trips (exit 77); "
+                         "claude, codex, opencode, zcode; an advisory review needs it | "
+                         "deny: no tools at all (--role advise refuses it): every permission request refused and a tripwire (exit 77) on any "
                          "tool that runs without asking, reads included (crush and agy read unasked: add "
                          "--acp-arg=--tripwire-exempt-kinds=read,search; cursor cannot deny at all, acp-run "
                          "refuses it: review it under all with a read-only brief and a diff check). "
