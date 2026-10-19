@@ -46,6 +46,7 @@ def hook(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(nudge, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.delenv("HERDR_PANE_ID", raising=False)
     monkeypatch.delenv("ORCA_TERMINAL_HANDLE", raising=False)
+    monkeypatch.delenv("PASEO_AGENT_ID", raising=False)
     pings = []
     monkeypatch.setattr(
         subprocess, "Popen", lambda cmd, **kwargs: pings.append(cmd),
@@ -135,7 +136,7 @@ def test_ask_message_at_300k_total(hook, tmp_path):
     assert "Context is large" in out
 
 
-@pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE"])
+@pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE", "PASEO_AGENT_ID"])
 def test_ask_message_in_herdr_or_orca_puts_new_before_compact(hook, tmp_path, monkeypatch, var):
     monkeypatch.setenv(var, "w1:p1")
     out, _ = hook("s-herdr-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
@@ -256,6 +257,42 @@ def _self_slash(tmp_path, text, handle="th1", log_lines=()):
     env.update(HOME=str(tmp_path), ORCA_TERMINAL_HANDLE=handle)
     return subprocess.run([str(SELF_SLASH), "--dry-run", text], env=env,
                           capture_output=True, text=True, timeout=30)
+
+
+def _self_slash_paseo(tmp_path, text, agent="ag1"):
+    """The Paseo host: $PASEO_AGENT_ID and a CLI path; a dry run never calls the CLI."""
+    log = tmp_path / ".local" / "state" / "self-slash.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("HERDR_ENV", "HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE", "CURSOR_AGENT",
+                        "SELF_SLASH_COMPACT_GAP")}
+    env.update(HOME=str(tmp_path), PASEO_AGENT_ID=agent, PASEO_CLI="/usr/bin/true")
+    return subprocess.run([str(SELF_SLASH), "--dry-run", text], env=env,
+                          capture_output=True, text=True, timeout=30)
+
+
+@pytest.mark.skipif(not (shutil.which("gdate") and shutil.which("ggrep")),
+                    reason="self-slash dry run needs gdate and ggrep on PATH")
+def test_self_slash_paseo_host_maps_new_to_clear(tmp_path):
+    r = _self_slash_paseo(tmp_path, "/new")
+    assert r.returncode == 0, r.stderr
+    assert "would send to paseo ag1" in r.stdout and ": /clear" in r.stdout
+    r = _self_slash_paseo(tmp_path, "/compact keep the open items")
+    assert r.returncode == 0, r.stderr
+    assert ": /compact keep the open items" in r.stdout
+
+
+@pytest.mark.skipif(not (shutil.which("gdate") and shutil.which("ggrep")),
+                    reason="self-slash dry run needs gdate and ggrep on PATH")
+def test_self_slash_paseo_needs_a_cli(tmp_path):
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("HERDR_ENV", "HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE", "PASEO_CLI")}
+    # The script prepends /opt/homebrew/bin to PATH, so a bare PATH cannot hide a real
+    # paseo; a non-executable PASEO_CLI is the refusal path.
+    env.update(HOME=str(tmp_path), PASEO_AGENT_ID="ag1", PASEO_CLI="/nonexistent/paseo")
+    r = subprocess.run([str(SELF_SLASH), "--dry-run", "/compact"], env=env,
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 3 and "no paseo CLI" in r.stderr
 
 
 def _now():

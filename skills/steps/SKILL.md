@@ -108,10 +108,10 @@ strings **are** the Telegram button labels.
 5. **If he picks `/compact`** (or the context prompt's compact tier, +200k since
    the start or last compaction, fires mid-walk with nobody at the keyboard; he
    pre-approved it standing, 2026-10-09; never compact earlier, it costs more
-   than it saves, 2026-10-10), a Claude session in a herdr pane or an
-   Orca terminal queues it itself: note the remaining queue, run
+   than it saves, 2026-10-10), a Claude session in a herdr pane, an
+   Orca terminal or a Paseo agent queues it itself: note the remaining queue, run
    `~/src/djbclark-ade/bin/self-slash "/compact <focus: the open items>"`, and
-   end the turn at once. Outside herdr and Orca, or if it refuses (a draft in
+   end the turn at once. Outside those three hosts, or if it refuses (a draft in
    his input box), ask him to type it.
 
 ## 4. Keep going until nothing is left

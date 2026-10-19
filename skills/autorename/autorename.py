@@ -867,8 +867,27 @@ def main() -> int:
 
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text(title + "\n", encoding="utf-8")
+    live += paseo_set_name(title)
     print(f"renamed: {title}{live}")
     return 0
+
+
+def paseo_set_name(title: str) -> str:
+    """A session hosted by a Paseo agent ($PASEO_AGENT_ID) also gets its sidebar name
+    set, through `paseo agent update --name` (2026-10-19). Never fatal: the
+    provider-side title above is the one every other reader uses."""
+    agent = os.environ.get("PASEO_AGENT_ID")
+    if not agent:
+        return ""
+    cli = os.environ.get("PASEO_CLI") or shutil.which("paseo")
+    if not cli:
+        return " (paseo: no CLI, name not set)"
+    try:
+        r = subprocess.run([cli, "agent", "update", agent, "--name", title, "--json"],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f" (paseo: {exc})"
+    return " (paseo name set)" if r.returncode == 0 else f" (paseo: rc {r.returncode})"
 
 
 if __name__ == "__main__":

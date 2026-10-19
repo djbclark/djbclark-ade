@@ -1037,3 +1037,21 @@ auto-injected). None covers the label.
 > policy until it checked the settings files.
 
 **Status:** filed 2026-10-18 with djbclark's yes: https://github.com/anthropics/claude-code/issues/103330
+
+## Paseo — a self-send of a root-only slash command is enveloped and reaches Claude as text (not filed, 2026-10-19)
+
+**Repo:** getpaseo/paseo. **Version seen:** Paseo 0.12.0 (desktop, 2026-10-19), Claude provider.
+
+**What happens:** from inside a Claude agent (`PASEO_AGENT_ID` set), `paseo send <own id> "/compact"`
+is delivered as agent-originated text: the timeline shows `[Message received] <agent title>` then
+`/compact`, and the model answers "I can't run /compact". The same send with `PASEO_AGENT_ID` unset
+runs the built-in (`[User] /compact` → `[Compacted]`, a `compact_boundary` record in the Claude
+session file). `/clear` behaves the same way and rebinds the agent to a fresh Claude session.
+
+**Expected:** `resolveSlashCommandInvocation` treats clear/compact/context/usage as root-only
+built-ins; a send from an agent should either run them out of band (PR #7072, merged as #7169 on
+2026-10-16, says it restores exactly that for agent-to-agent sends) or refuse, never hand them to the
+model as prose. A self-send is the case `bin/self-slash` needs, so it strips `PASEO_AGENT_ID` first.
+
+**Evidence:** scratch Haiku agent fe96fd29, timeline and `~/.claude/projects/.../585afa3c-*.jsonl`
+(one `compact_boundary`); `bin/self-slash` Paseo backend, verified the same day.

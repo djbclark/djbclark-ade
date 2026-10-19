@@ -205,11 +205,14 @@ def _early_message(total, growth):
 
 
 def _can_self_slash():
-    return bool(os.environ.get("HERDR_PANE_ID") or os.environ.get("ORCA_TERMINAL_HANDLE"))
+    # The hosts bin/self-slash can type into: a herdr pane, an Orca terminal, or a
+    # Paseo agent (2026-10-19: `paseo wait` then `paseo send` of the root-only built-ins).
+    return bool(os.environ.get("HERDR_PANE_ID") or os.environ.get("ORCA_TERMINAL_HANDLE")
+                or os.environ.get("PASEO_AGENT_ID"))
 
 
 def _boundary_message(total):
-    # self-slash refuses outside herdr/Orca: there the operator types /new.
+    # self-slash refuses outside herdr, Orca and Paseo: there the operator types /new.
     new = ("~/src/djbclark-ade/bin/self-slash \"/new\"" if _can_self_slash()
            else "tell the operator /new is ready")
     return (
@@ -224,7 +227,7 @@ def _boundary_message(total):
 def _ask_message(total, growth, repeat):
     lead = "Context is still growing" if repeat else "Context is large"
     if _can_self_slash():
-        # A herdr pane or Orca terminal can queue its own /new or /compact
+        # A herdr pane, Orca terminal or Paseo agent can queue its own /new or /compact
         # (standing operator ruling 2026-10-09, memory/feedback_self_compact.md).
         return (
             f"{lead}: {total:,} tokens (+{growth:,} since the session started "

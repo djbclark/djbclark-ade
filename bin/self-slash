@@ -6,10 +6,19 @@
 #
 #   self-slash [--delay S] [--dry-run] "/compact <focus>"   (--dry-run: validate only, never test against a live pane without it)
 #
-# Hosts: a herdr pane ($HERDR_PANE_ID, via `herdr agent read` / `herdr pane run`)
-# or an Orca terminal ($ORCA_TERMINAL_HANDLE, via `orca terminal read --screen` /
-# `orca terminal send --enter`).  herdr wins when both are set (a herdr pane
-# inside an Orca tab).  Anywhere else it refuses.
+# Hosts: a herdr pane ($HERDR_PANE_ID, via `herdr agent read` / `herdr pane run`),
+# an Orca terminal ($ORCA_TERMINAL_HANDLE, via `orca terminal read --screen` /
+# `orca terminal send --enter`), or a Paseo agent ($PASEO_AGENT_ID, via `paseo wait`
+# then `paseo send`).  herdr wins when both it and Orca are set (a herdr pane
+# inside an Orca tab); Paseo only when neither is.  Anywhere else it refuses.
+# Paseo (verified 2026-10-19, Paseo 0.12.0, Claude provider): the daemon runs the
+# built-ins it lists as root-only (clear, compact, context, usage, ...) when the
+# prompt is sent to an IDLE agent, so the child waits with `paseo wait` and then
+# sends.  The send runs with PASEO_AGENT_ID unset: an agent-originated send gets a
+# "[Message received] <parent>" envelope and reaches Claude as plain text (the
+# model answers "I can't run /compact"; upstream getpaseo/paseo#7169 did not cover
+# a self-send on 0.12.0).  Paseo has no /new: /new and /reset are sent as /clear,
+# which rebinds the agent to a fresh Claude session (verified the same day).
 #
 # Rules: only ever targets this session's own pane/terminal (never another);
 # waits --delay seconds (default 6) so the current turn can end, then refuses if
@@ -63,14 +72,22 @@ elif [ -n "${ORCA_TERMINAL_HANDLE:-}" ] && command -v orca >/dev/null 2>&1; then
   if [ "${CURSOR_AGENT:-}" = "1" ]; then
     echo "self-slash: cursor-agent in an Orca terminal is not supported (prompt detection is herdr-only); ask the operator to type: $text" >&2; exit 3
   fi
+elif [ -n "${PASEO_AGENT_ID:-}" ]; then
+  host=paseo; pane="$PASEO_AGENT_ID"; tui=""
+  paseo_cli="${PASEO_CLI:-$(command -v paseo || true)}"
+  [ -n "$paseo_cli" ] && [ -x "$paseo_cli" ] || { echo "self-slash: PASEO_AGENT_ID is set but no paseo CLI (PASEO_CLI unset, none on PATH); ask the operator to type: $text" >&2; exit 3; }
 else
-  echo "self-slash: not inside a herdr pane or an Orca terminal (HERDR_PANE_ID and ORCA_TERMINAL_HANDLE unset); ask the operator to type: $text" >&2; exit 3
+  echo "self-slash: not inside a herdr pane, an Orca terminal or a Paseo agent (HERDR_PANE_ID, ORCA_TERMINAL_HANDLE and PASEO_AGENT_ID unset); ask the operator to type: $text" >&2; exit 3
 fi
 case "$text" in /*) ;; *) echo "self-slash: only slash commands are sent (got: $text)" >&2; exit 2;; esac
+if [ "$host" = paseo ]; then
+  # Paseo's Claude provider knows /clear, not Claude Code's /new or /reset aliases.
+  case "$text" in /new|/reset) text="/clear";; "/new "*|"/reset "*) text="/clear";; esac
+fi
 if [ "$tui" = cursor ]; then marker="→"; else marker="❯"; fi
 # herdr and Orca both send a long argument as a bracketed paste and Claude Code then
 # treats it as pasted content, not a command (seen 2026-10-09 with ~900 chars): keep it short.
-if [ "${#text}" -gt "${SELF_SLASH_MAX:-300}" ]; then
+if [ "$host" != paseo ] && [ "${#text}" -gt "${SELF_SLASH_MAX:-300}" ]; then
   echo "self-slash: argument is ${#text} chars; anything over ~300 is pasted and the command is not run. Shorten it (or SELF_SLASH_MAX=N)." >&2; exit 2
 fi
 log="$HOME/.local/state/self-slash.log"
@@ -130,7 +147,10 @@ fi
 # 17:03: the suggestion ("did the compact fire this time?") arrived as plain dim
 # (ESC[2m, no RGB grey), was classified EMPTY, and the /compact was sent over it.
 classify_prompt() {
-  if [ "$host" = herdr ]; then
+  if [ "$host" = paseo ]; then
+    # No terminal input line: the GUI composer's draft is untouched by a CLI send.
+    echo EMPTY
+  elif [ "$host" = herdr ]; then
     # The rules (dim, grey, reverse video, known hints) live in prompt_line.py, shared with relay.py.
     herdr agent read "$pane" --source visible --lines 12 --format ansi 2>/dev/null \
       | python3 "$prompt_line" "$marker" 2>>"$log"
@@ -153,7 +173,13 @@ print("\n".join(t.get("tail") or []))'
   fi
 }
 send_text() {
-  if [ "$host" = herdr ]; then
+  if [ "$host" = paseo ]; then
+    # PASEO_AGENT_ID unset so the daemon does not envelope the send as agent-to-agent
+    # text; --behavior steer so a turn that began meanwhile is never torn down.
+    out=$(env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD "$paseo_cli" send "$pane" --no-wait --behavior steer --json "$text" 2>&1) || { echo "$(gdate '+%F %T') $host $pane: paseo send failed: ${out:0:200}"; return 1; }
+    echo "$(gdate '+%F %T') $host $pane: paseo send: $(printf '%s' "$out" | gtr -s ' \n' ' ' | cut -c1-160)"
+    return 0
+  elif [ "$host" = herdr ]; then
     herdr pane run "$pane" "$text" || return 1
     # The last → line may be the still-open autocomplete row ("→ /quit   Exit",
     # seen 2026-10-10) rather than the input line, so match the text as a prefix.
@@ -188,6 +214,16 @@ sleep "$delay"
 # herdr: never send while the session is mid-turn (status "working"); the input is
 # accepted but Claude Code never runs it.  Wait for idle, bounded by SELF_SLASH_WAIT.
 wait_idle() {
+  if [ "$host" = paseo ]; then
+    # Idle is the daemon's own state; a root-only command sent to a running agent
+    # is either enveloped into the turn as text or interrupts it, never run.
+    st=$("$paseo_cli" agent inspect "$pane" --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("Status",""))' 2>/dev/null)
+    [ "$st" = idle ] && return 0
+    echo "$(gdate '+%F %T') $host $pane: agent is ${st:-unknown}, waiting for idle before sending"
+    "$paseo_cli" wait "$pane" --timeout "${SELF_SLASH_WAIT:-900}" --json >/dev/null 2>&1 \
+      || { echo "$(gdate '+%F %T') $host $pane: gave up after ${SELF_SLASH_WAIT:-900}s, agent still running; NOT sent: ${text:0:80}"; exit 6; }
+    return 0
+  fi
   [ "$host" = herdr ] || return 0
   waited=0; said=0
   while :; do
