@@ -1146,7 +1146,7 @@ monthly, they change.
 | Claude Max 20x | cloud sessions (`claude --cloud`, claude.ai/code, mobile, Routines); no VM charge | `claude --cloud --model <m> "<task>"` from the repo (clones the GitHub remote at the current branch, or uploads the checkout when no remote or no GitHub App); `claude -p "<msg>" --cloud <session-id>` to follow up; `--teleport` pulls it local | the same 5h and weekly windows as local use | yes: first session started 2026-10-19 (Linux pytest job, branch `ci/linux-pytest-job`) |
 | Claude Max | monthly API credits for the Claude API: this is the pool `aiuse` labels `omp credits` (djbclark, 2026-10-19), 100% unused, resets 2026-11-05 | the omp TUI was set up on it (`acp-run omp`); also any `ANTHROPIC_API_KEY` path (the Claude SDK in `bin/failover.py`, a verdict classifier) | its own monthly credit, wasted when unspent | yes via omp once its per-run gate is settled (§9.3 round 2); rename the pool in `aiuse` |
 | Codex, ChatGPT $100 plan | Codex Cloud tasks, no VM charge; cloud tasks use the allowance faster than local turns | `codex cloud exec --env <ENV_ID> --attempts 1-4 "<task>"`; `codex cloud list --json`, `status`, `diff`, `apply`; also `@codex` on a GitHub issue or PR | the Codex weekly window | needs one cloud environment created on the web for `djbclark-ade` (no non-interactive way to create one); `codex cloud list` returns none today |
-| Cursor Pro+ | Cloud Agents on every paid plan, API v1 in public beta; billed at API price for the chosen model against the included usage, then on-demand (on-demand must be enabled) | `POST https://api.cursor.com/v1/agents` with a user API key (`autoCreatePR`, `startingRef`); `@cursor` on a GitHub issue or PR; Automations on a schedule | the Cursor pool at API price, not the `auto` rate, so it drains faster than local `auto` | needs an API key in the secret backend or the Cursor GitHub app on the repo |
+| Cursor Pro+ | Cloud Agents on every paid plan, API v1 in public beta; billed at API price for the chosen model against the included usage, then on-demand (on-demand must be enabled) | `POST https://api.cursor.com/v1/agents` with a user API key (`autoCreatePR`, `startingRef`); `@cursor` on a GitHub issue or PR; Automations on a schedule | the Cursor pool at API price, not the `auto` rate, so it drains faster than local `auto` | the Cursor GitHub app is already on `djbclark-ade`: its Security Agent and Approval Agent ran as checks on PR 3 (2026-10-19); the API key goes into `sudo-secretspec` (round 2 ruling), the launch is scripted by the lead |
 | GitHub Copilot | coding agent (`gh agent-task`, preview) | off by ruling (§11.1); reserve only | premium requests | not used |
 | antigravity, z.ai GLM, Grok, OpenCode Go, omp | no included cloud agent found | local ACP only | | |
 
@@ -1163,6 +1163,11 @@ Rules that follow:
 4. `aiuse` learns a `cloud` field per provider (included or metered, launch command, ready
    state) so `route_agent.py plan` can prefer a cloud place; until then this table is the
    source and is dated.
+5. **Verify the place, not the label** (standing order 4). Claude Code's Agent tool with
+   `isolation: "remote"` ran both 2026-10-19 slices locally, in `.claude/worktrees/agent-<id>`
+   on the Mac, with no warning; and `claude --cloud` refuses without a TTY. A cloud launch is
+   one that `codex cloud list`, the Cursor agents API or claude.ai/code shows as a session;
+   from a headless lead the Claude route is a herdr pane (`self-slash`) running `claude --cloud`.
 
 ## 12. Responses to the reviews
 
