@@ -252,8 +252,65 @@ class CliTests(Base):
     def test_status(self) -> None:
         _ = self.check_call(["status", "bc-123"], ("GET", "/v1/agents/bc-123"))
 
-    def test_conversation(self) -> None:
-        _ = self.check_call(["conversation", "bc-123"], ("GET", "/v1/agents/bc-123/conversation"))
+    def test_conversation_subcommand_is_gone(self) -> None:
+        with patch.dict(os.environ, {"CURSOR_API_KEY": FAKE_KEY}), patch.object(
+            self.cc, "request", side_effect=AssertionError("must not call the API")
+        ), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            _ = self.cc.main(["conversation", "bc-123"])
+        self.assertNotEqual(cm.exception.code, 0)
+
+    def test_usage(self) -> None:
+        _ = self.check_call(["usage", "bc-123"], ("GET", "/v1/agents/bc-123/usage"))
+
+    def test_run_with_explicit_run_id(self) -> None:
+        _ = self.check_call(["run", "bc-123", "run-7"], ("GET", "/v1/agents/bc-123/runs/run-7"))
+
+    def test_run_uses_latest_run_id(self) -> None:
+        responses = [{"id": "bc-123", "latestRunId": "run-42"}, {"status": "FINISHED"}]
+        with patch.object(self.cc, "request", side_effect=responses) as req:
+            rc, out = self.run_main(["run", "bc-123"], env={"CURSOR_API_KEY": FAKE_KEY})
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            [c.args for c in req.call_args_list],
+            [("GET", "/v1/agents/bc-123"), ("GET", "/v1/agents/bc-123/runs/run-42")],
+        )
+        self.assertEqual(json.loads(out), {"status": "FINISHED"})
+
+    def test_run_without_any_run_exits_nonzero(self) -> None:
+        for agent in ({"id": "bc-123"}, {"id": "bc-123", "latestRunId": None}, {"id": "bc-123", "latestRunId": ""}):
+            with self.subTest(agent=agent):
+                with patch.object(self.cc, "request", return_value=agent) as req, self.assertRaises(SystemExit) as cm:
+                    _ = self.run_main(["run", "bc-123"], env={"CURSOR_API_KEY": FAKE_KEY})
+                self.assertNotIn(cm.exception.code, (0, None))
+                self.assertIn("has no run yet", str(cm.exception.code))
+                req.assert_called_once_with("GET", "/v1/agents/bc-123")
+
+    def test_followup_posts_prompt_body(self) -> None:
+        with patch.object(self.cc, "request", return_value={"id": "run-8"}) as req:
+            rc, out = self.run_main(["followup", "bc-123", "--prompt", "more please"], env={"CURSOR_API_KEY": FAKE_KEY})
+        self.assertEqual(rc, 0)
+        req.assert_called_once_with("POST", "/v1/agents/bc-123/runs", {"prompt": {"text": "more please"}})
+        self.assertEqual(json.loads(out), {"id": "run-8"})
+
+    def test_followup_prompt_from_file(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "p.txt"
+            _ = f.write_text("from a file\n")
+            with patch.object(self.cc, "request", return_value={}) as req:
+                rc, _ = self.run_main(["followup", "bc-123", "--prompt-file", str(f)], env={"CURSOR_API_KEY": FAKE_KEY})
+        self.assertEqual(rc, 0)
+        req.assert_called_once_with("POST", "/v1/agents/bc-123/runs", {"prompt": {"text": "from a file\n"}})
+
+    def test_followup_empty_prompt_exits_nonzero(self) -> None:
+        for text in ("", "  \n"):
+            with self.subTest(text=text):
+                with patch.object(self.cc, "request", side_effect=AssertionError("must not call the API")), \
+                        self.assertRaises(SystemExit) as cm:
+                    _ = self.run_main(["followup", "bc-123", "--prompt", text], env={"CURSOR_API_KEY": FAKE_KEY})
+                self.assertNotIn(cm.exception.code, (0, None))
+                self.assertIn("empty prompt", str(cm.exception.code))
 
     def test_list_with_limit(self) -> None:
         _ = self.check_call(["list", "--limit", "5"], ("GET", "/v1/agents?limit=5"))
