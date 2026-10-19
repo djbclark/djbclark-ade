@@ -1,6 +1,6 @@
 # Cutting Claude Code's cache cost: what the data says (2026-10-18)
 
-Scope: item 3a of the graphify answer ("cache reads are most of the cost; shorter sessions and earlier delegation"). Research only: nothing on the machine was changed except the new measuring tool, `bin/claude-cost-mix` (djbclark-ade `b117768`, `24bfc5d`).
+Scope: item 3a of the graphify answer ("cache reads are most of the cost; shorter sessions and earlier delegation"). Written as research only (the changes that followed are in the Outcome section): nothing on the machine was changed except the new measuring tool, `bin/claude-cost-mix` (djbclark-ade `b117768`, `24bfc5d`).
 
 Data: the last 7 days of Claude Code transcripts on this Mac: 667 transcripts, 25,408 API requests, 77 compactions. Costs are API list-price dollars, priced by each request's own model. On the subscription this is a quota equivalent, not a bill.
 
@@ -80,6 +80,26 @@ The "auto-compact skill" here is `claude/hooks/context_size_nudge.py` plus `bin/
    3. Check which MCP servers load tools up front (11k).
    4. Review the claude.ai connectors in interactive sessions: Gmail, Calendar, Drive, and the cloud Firecrawl that rule 7 already forbids.
 7. **Leave the TTL alone**, and record why: we measured that both 5-minute variants cost more.
+
+## Outcome (2026-10-18, same day)
+
+A Fable 5.1 review checked this report, and everything it accepted or modified was then applied. It corrected the evidence in places: the 11k "MCP tools" row was exactly two Firecrawl servers; the skills row is a 1%-of-window budget, not a sum; idle compaction already fires at 200k.
+
+1. 5.1 (handoff and `/new`): applied. `context_size_nudge.py` prints a once-per-session note at 150k. `self-slash` refuses a `/new` or `/compact` within 30 minutes of either.
+2. 5.2 (300k ceiling): applied. `autoCompactWindow` and the hook are at 300k; compaction fires at ~267k, the window less its 33k buffer.
+3. 5.3 (idle compaction from 100k): **rejected**. It loses money below ~127k, given the ~104k floor.
+4. 5.4 (short summaries): changed to a structured Compact Instructions section in the global `CLAUDE.md`.
+5. 5.5 (budget guard): `bin/context-budget-check`, launchd at 03:50, budgets in `config/context-budget.toml`.
+6. 5.6 (preamble trim), all of it:
+   1. Denied the cloud Firecrawl, Drive, Calendar, bezalel and siyuan servers.
+   2. Set `alwaysLoad: false` on the shared Firecrawl server.
+   3. `skillOverrides`, with the listing budget at 0.7%.
+   4. Condensed the global `CLAUDE.md`, this repo's `AGENTS.md`, the home `MEMORY.md` index and Cursor's `.mdc`.
+   5. `claudeMdExcludes` stops `~` loading the global file twice.
+   6. Removed the graft per-prompt hook, with a guard against re-adding it, and turned off the composio plugin.
+7. 5.7 (TTL): left alone and recorded.
+
+Fresh session measured after the changes, including the /doctor cleanup: **22.9k** in this repo (was 46.3k) and **22.7k** in `~` (was 39.9k). The details, and how to undo each change, are in `docs/disabled-skills.md`.
 
 ## 6. Caveats and next measurement
 
