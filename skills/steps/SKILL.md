@@ -36,7 +36,13 @@ Use the native chooser your runtime actually has. Do not invent a second UX.
    Discord/Slack get the same card on those adapters. CLI/TUI get numbered
    text. If the card fails to render, Hermes already falls back to a numbered
    list — do not pre-empt that with prose options of your own.
-3. **No chooser at all:** one short sentence that you cannot prompt, then
+3. **Codex:** use `request_user_input_async` when available. Send one question
+   with 2–4 options, the recommendation first, and position in the question title.
+   The call returns immediately: keep the decision pending until the operator
+   replies and continue only independent work. A preselected option or elapsed
+   time is not an answer. If only `request_user_input` is available, use it only
+   in a mode where the tool permits it; honor its question schema and limits.
+4. **No usable chooser:** one short sentence that you cannot prompt, then
    wait. Do not fake buttons as a numbered list in chat.
 
 Do not call `AskUserQuestion` on Hermes (it is not a tool here). Do not call
