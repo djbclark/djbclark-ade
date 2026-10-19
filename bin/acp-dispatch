@@ -10,7 +10,7 @@
                  [--task TASK | --out DIR] [--perm all|read-only|deny] [--timeout S]
                  [--lead NAME] [--detach [--no-wait] [--wait-timeout S]] [--dry-run] [--json]
                  [--min-headroom PCT] [--est-pct PCT] [--checkpoint] [--no-preflight]
-                 [--no-auto-resume]
+                 [--load-wait SECONDS | --no-load-gate] [--no-auto-resume]
     acp-dispatch footer --report PATH [--lead NAME]      the shared footer, filled in, for an
                                                          Agent-tool prompt (paste it verbatim)
     acp-dispatch check (PATH)...                         classify reports: PATH is a report file,
@@ -257,6 +257,17 @@ in the record JSON; every 60 s, and the moment that check trips, it runs `wait -
 `acp-dispatch check RECORD` with its exit code. route_agent is imported lazily (load_policy), so
 wait, reap, check, footer, extend and finalize invocations pay nothing for the routing module.
 
+Load gate (operator 2026-10-19): before a fresh slice launches, right before the live preflight,
+acp-dispatch runs `bin/load-watch admit --wait N --json` (N: --load-wait SECONDS, else
+ACP_DISPATCH_LOAD_WAIT, else 1800; --no-load-gate or ACP_DISPATCH_NO_LOAD_GATE=1 skips it;
+ACP_DISPATCH_LOAD_WATCH names another binary). admit polls every 15 s while the per-core load is
+above 1.5, staggers 5-30 s once it drops, and the dispatch records `load_gate: {load1, per_core,
+waited_s}`. Exit 75 from admit makes the dispatch exit 75 with the load and the wait named and no
+launch (the record is `unavailable`, class `load`). A missing or broken load-watch only warns. The
+gate decides whether to START work: it never kills or throttles anything running, and a resume of an
+already-running slice and --dry-run skip it. (execute_record's older wait_for_capacity stays as the
+backstop at 4x cpus or critical memory pressure.)
+
 Exit codes (dispatch and check):
     0    report delivered and ends in DONE (dispatch: and acp-run exited 0)
     1    report present but unfinished (no DONE), or delivered with a non-zero acp-run exit;
@@ -270,6 +281,8 @@ Exit codes (dispatch and check):
     4    BLOCKED: the report's first line is a question for the lead; answer it, then resume
     5    pool unavailable before launch (headroom, wont-fit, inflight reservation/cap, preflight);
          re-plan with --exclude (no slice attempt consumed)
+    75   machine still too hot to start (EX_TEMPFAIL): `load-watch admit` found the 1-minute load per
+         core above 1.5 for the whole --load-wait budget; nothing was launched, retry later
     124  timed out waiting for the .done marker (--detach without --no-wait)
     (a reaped record's acp-run exit is 255 `lost` when neither an exit file nor launchd knows it;
      a signalled runner's is 128+signal, e.g. 143 for SIGTERM)
@@ -493,6 +506,8 @@ AUTO_RESUME_TEXT = (
     "steps, then write the complete report and touch its `.done` marker as the brief says.\n\n"
     "Original brief:\n")
 UNAVAILABLE_EXIT = 5
+LOAD_WAIT_DEFAULT = 1800       # seconds the load gate may wait (--load-wait / ACP_DISPATCH_LOAD_WAIT)
+LOAD_GATE_EXIT = 75            # EX_TEMPFAIL, what `load-watch admit` returns when still too hot
 LOG_ACTIVE_SEC = 5 * 60
 PREFLIGHT_TTL = 10 * 60
 PREFLIGHT_TIMEOUT = 90
@@ -907,7 +922,8 @@ def keep_record_note_refusal(record: Path, reason: str, cls: str) -> bool:
 
 def unavailable_record(out: Path, a: argparse.Namespace, reason: str, cls: str,
                        remaining: float | None = None, estimate: float | None = None,
-                       previous: dict | None = None) -> int:
+                       previous: dict | None = None, exit_code: int = UNAVAILABLE_EXIT,
+                       extra: dict | None = None) -> int:
     jobs = out / "jobs"
     jobs.mkdir(parents=True, exist_ok=True)
     report = out / f"{a.name}-report.md"
@@ -921,10 +937,10 @@ def unavailable_record(out: Path, a: argparse.Namespace, reason: str, cls: str,
            "detail": reason, "remaining_percent": remaining, "estimated_usage_pct": estimate,
            "kind": getattr(a, "kind", None), "service": getattr(a, "service", None),
            "role": getattr(a, "role", None),
-           "started": time.time(), "finished": time.time(), "exit": UNAVAILABLE_EXIT, "pid": None}
+           "started": time.time(), "finished": time.time(), "exit": exit_code, "pid": None, **(extra or {})}
     write_record(record, rec)
     print(f"unavailable\t{a.name}\tclass={cls} agent={a.agent} model={a.model or '(default)'} {reason}")
-    return UNAVAILABLE_EXIT
+    return exit_code
 
 
 def load_footer() -> str:
@@ -2517,6 +2533,50 @@ def note_outage_in_aiuse(agent: str, model: str | None, error: str) -> str:
         return "failed"
 
 
+def load_wait_seconds(a: argparse.Namespace) -> int:
+    """The load gate's wait budget: --load-wait, else ACP_DISPATCH_LOAD_WAIT, else LOAD_WAIT_DEFAULT."""
+    given = getattr(a, "load_wait", None)
+    if given is not None:
+        return max(0, int(given))
+    try:
+        return max(0, int(os.environ.get("ACP_DISPATCH_LOAD_WAIT", LOAD_WAIT_DEFAULT)))
+    except ValueError:
+        return LOAD_WAIT_DEFAULT
+
+
+def load_gate(wait: int) -> tuple[bool, dict | None, str]:
+    """Ask `load-watch admit --wait WAIT --json` whether a slice may start (never throttles anything).
+    Returns (admitted, info, why): info is {"load1", "per_core", "waited_s"} when load-watch answered. Only
+    its exit 75 refuses; a missing, broken or timed-out load-watch warns and admits, since a dispatcher
+    that cannot read the load must not stop all work. admit's progress lines go to our stderr."""
+    path = os.environ.get("ACP_DISPATCH_LOAD_WATCH") or str(HERE / "load-watch")
+    if not Path(path).exists():
+        print(f"acp-dispatch: warning: {path} not found; starting without the load gate", file=sys.stderr)
+        return True, None, "load-watch missing"
+    try:
+        proc = subprocess.run([path, "admit", "--wait", str(wait), "--json"], check=False, stdout=subprocess.PIPE,
+                              stderr=None, text=True, timeout=wait + 180)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"acp-dispatch: warning: load-watch admit failed ({e}); starting without the load gate",
+              file=sys.stderr)
+        return True, None, f"load-watch admit failed: {e}"
+    try:
+        data = json.loads(proc.stdout.strip().splitlines()[-1])
+        info = {"load1": data["load1"], "per_core": data["per_core"], "waited_s": data.get("waited_s", 0)}
+    except (IndexError, KeyError, TypeError, ValueError):
+        info = None
+    if proc.returncode == 0:
+        return True, info, "ok"
+    if proc.returncode == LOAD_GATE_EXIT:
+        if info is None:
+            info = {"load1": None, "per_core": None, "waited_s": wait}
+        return False, info, (f"machine too hot to start: load1={info['load1']} per_core={info['per_core']} "
+                             f"after waiting {info['waited_s']}s of the {wait}s --load-wait budget; not launched")
+    print(f"acp-dispatch: warning: load-watch admit exited {proc.returncode}; starting without the load gate",
+          file=sys.stderr)
+    return True, info, f"load-watch admit exited {proc.returncode}"
+
+
 def preflight_state(agent: str, model: str | None) -> Path:
     key = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{agent}--{model or 'default'}")
     return PREFLIGHT_ROOT / f"{key}.json"
@@ -3314,6 +3374,7 @@ def reroute_record(a: argparse.Namespace) -> int:
         prompt=prompt, prompt_file=None, detach=a.detach, no_wait=a.no_wait, wait_timeout=None,
         force=False, dry_run=False, json=False, tee=False, no_model_check=False,
         no_preflight=a.no_preflight, min_headroom=a.min_headroom,
+        load_wait=getattr(a, "load_wait", None), no_load_gate=getattr(a, "no_load_gate", False),
         est_pct=est,
         checkpoint=True, acp_run=a.acp_run, acp_arg=[], effort=effort,
         kind=kind, role=role, from_record=True)
@@ -3497,6 +3558,14 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
                 out, a, f"{len(busy)} {label} slice(s) already in flight (cap {cap}): "
                 f"{', '.join(p.stem for p in busy[:3])}; wait for one, or route elsewhere "
                 f"(route_agent.py plan)", "inflight", remaining, estimate)
+    gate_info = (previous or {}).get("load_gate")
+    if (not a.dry_run and not previous and not getattr(a, "no_load_gate", False)
+            and os.environ.get("ACP_DISPATCH_NO_LOAD_GATE") != "1"):
+        wait = load_wait_seconds(a)
+        admitted, gate_info, why = load_gate(wait)
+        if not admitted:
+            return unavailable_record(out, a, why, "load", remaining, estimate, previous,
+                                      exit_code=LOAD_GATE_EXIT, extra={"load_gate": gate_info})
     if not a.dry_run and not a.no_preflight:
         ok, detail, cls, reset = preflight(acp_run, a.agent, a.model)
         if not ok:
@@ -3579,6 +3648,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         "estimated_usage_pct": estimate, "estimated_usage_windows": per_window,
         "estimate_source": estimate_source,
         "snapshot_remaining_before": remaining, "snapshot_reading": reading,
+        "load_gate": gate_info,
         "checkpoint": checkpoint,
         "advisor_tree_before": tree_before,
         # Automatic in-place resume after a quota stop (finalize schedules it); "off" is the
@@ -3738,6 +3808,8 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--detach", action="store_true")
             sub.add_argument("--no-wait", action="store_true")
             sub.add_argument("--no-preflight", action="store_true")
+            sub.add_argument("--load-wait", type=int, metavar="SECONDS")
+            sub.add_argument("--no-load-gate", action="store_true")
             sub.add_argument("--min-headroom", type=float, default=10.0)
             sub.add_argument("--est-pct", type=float)
             sub.add_argument("--acp-run")
@@ -3827,6 +3899,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-model-check", action="store_true",
                     help="skip checking --model against `acp-run <agent> --info` before dispatch")
     ap.add_argument("--no-preflight", action="store_true", help="skip the cached live pool probe")
+    ap.add_argument("--load-wait", type=int, metavar="SECONDS",
+                    help="load gate: wait up to SECONDS for `load-watch admit` (1-minute load per core "
+                         f"<= 1.5) before launching; exit 75 if still too hot (default "
+                         f"ACP_DISPATCH_LOAD_WAIT or {LOAD_WAIT_DEFAULT}; 0 is a pure check)")
+    ap.add_argument("--no-load-gate", action="store_true",
+                    help="skip the load gate (or ACP_DISPATCH_NO_LOAD_GATE=1)")
     ap.add_argument("--min-headroom", type=float, default=10.0,
                     help="refuse a measured pool below this percent left (default 10; 0 disables)")
     ap.add_argument("--est-pct", type=float, help="estimated percent of the binding quota window this slice uses")

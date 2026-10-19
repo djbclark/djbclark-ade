@@ -9,6 +9,8 @@
     load-watch ci decide DIR ci "CI CMD"|local "why"|pending "note"
     load-watch ci-only list|add DIR "CMD"|rm DIR|check DIR   (older form of `ci`, kept for scripts)
     load-watch guard status|list|add LABEL [KEY=VALUE...] [--note N]|rm LABEL|reset LABEL
+    load-watch admit [--max-per-core N] [--wait SECONDS] [--json]
+                                            may new work START now? exit 0 yes, 75 still too hot, 2 usage
     load-watch install|uninstall            the launchd job (launchd/com.djbclark.load-watch.plist)
 
 Why (2026-10-18): agents keep starting heavy builds and tests on this 8-core Mac (load 24-41 that
@@ -46,11 +48,23 @@ through `load-watch ci check`. CI-first (djbclark, 2026-10-18): every repo `bg` 
 No row: `bg` refuses (exit 3) until the agent investigates offloading (GitHub runners: `forgejo-ci` skill section 6 item 6) and decides.
 A git worktree or cow pasture with no row of its own takes its main repo's row; a key ending in `/*`
 covers every repo under that directory. Older 3-column rows (repo, CI command, date) read as `ci`.
-Exit: 0 ok, 1 nothing found (check, ack of an unknown id), 2 usage.
+Admission (operator, 2026-10-19): `admit` is the dispatcher-facing predicate acp-dispatch calls before it
+launches a slice (`--load-wait`, `--no-load-gate`). It reads os.getloadavg()[0] / os.cpu_count() and says
+`admit ok load1=X per_core=Y cores=N` (exit 0) when the per-core load is at most --max-per-core (default
+1.5, the threshold `bg` uses; the 2.0 above is only this watcher's blame step and is untouched), else
+`admit hot ...` (exit 75, EX_TEMPFAIL). When state.json is fresh the line also carries the watcher's
+`streak` and `hot_for_s`, so a sustained-hot machine reads as such. `--wait 0` (default) is a pure check;
+`--wait S` polls every 15 s for up to S seconds, prints one line per waited minute to stderr, and once the
+load drops below the threshold sleeps a random 5-30 s (so queued dispatchers do not all start together)
+and re-checks. `--json` prints one JSON object with the same fields. It only decides whether to START work:
+it never kills, throttles or signals anything. Test hooks: LW_FAKE_LOAD1 (a load, or a comma list read one
+per poll with the last value repeating), LW_ADMIT_POLL_S (15), LW_ADMIT_STAGGER_S ("5,30" min,max).
+Exit: 0 ok, 1 nothing found (check, ack of an unknown id), 2 usage; `admit` also 75 (still too hot).
 """
 import argparse
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -960,6 +974,82 @@ def cmd_ci_only(a):
     return 0
 
 
+ADMIT_PER_CORE = 1.5  # the threshold ~/ops/site-private/bin/bg uses; LOAD_PER_CORE (2.0) is only the blame step
+ADMIT_FRESH_S = 120   # state.json older than this says nothing about the machine now
+EX_TEMPFAIL = 75
+
+
+def _fake_loads():
+    """LW_FAKE_LOAD1 (tests): one load, or a comma list read one per poll with the last value repeating."""
+    raw = os.environ.get("LW_FAKE_LOAD1", "").strip()
+    return [float(x) for x in raw.split(",") if x.strip()] if raw else []
+
+
+def admit_reading(fake, polls):
+    """(load1, cores, per_core) now; `fake` is _fake_loads() and `polls` how many reads came before."""
+    load1 = fake[min(polls, len(fake) - 1)] if fake else os.getloadavg()[0]
+    cores = os.cpu_count() or 1
+    return load1, cores, load1 / cores
+
+
+def admit_record(load1, cores, per_core, limit, waited):
+    """The admit result fields; adds the watcher's streak and hot_for_s when its state.json is fresh."""
+    rec = {"status": "ok" if per_core <= limit else "hot", "load1": round(load1, 2), "per_core": round(per_core, 2),
+           "cores": cores, "max_per_core": limit, "waited_s": int(waited)}
+    st = load_state()
+    if now() - st.get("t", 0) <= ADMIT_FRESH_S and st.get("hot_since"):
+        rec["streak"] = st.get("streak", 0)
+        rec["hot_for_s"] = int(now() - st["hot_since"])
+    return rec
+
+
+def admit_line(rec):
+    line = f"admit {rec['status']} load1={rec['load1']:g} per_core={rec['per_core']:.2f} cores={rec['cores']}"
+    if rec["status"] == "hot":
+        line += f" max_per_core={rec['max_per_core']:g}"
+    if "hot_for_s" in rec:
+        line += f" streak={rec['streak']} hot_for_s={rec['hot_for_s']}"
+    if rec["waited_s"]:
+        line += f" waited_s={rec['waited_s']}"
+    return line
+
+
+def cmd_admit(a):
+    """May new work start now? Only ever decides; never kills, throttles or signals anything."""
+    if a.wait < 0 or a.max_per_core <= 0:
+        print("load-watch admit: --wait must be 0 or more and --max-per-core above 0", file=sys.stderr)
+        return 2
+    try:
+        lo, hi = (float(x) for x in os.environ.get("LW_ADMIT_STAGGER_S", "5,30").split(","))
+        poll = float(os.environ.get("LW_ADMIT_POLL_S", "15"))
+        fake = _fake_loads()
+    except ValueError:
+        print("load-watch admit: bad LW_FAKE_LOAD1, LW_ADMIT_POLL_S or LW_ADMIT_STAGGER_S", file=sys.stderr)
+        return 2
+    start, polls, next_note = time.monotonic(), 0, 60.0
+    while True:
+        load1, cores, per_core = admit_reading(fake, polls)
+        polls += 1
+        waited = time.monotonic() - start
+        if per_core <= a.max_per_core and polls > 1:
+            # the load fell while we waited: stagger so queued dispatchers do not all start in the same second,
+            # then look again (someone else may have started in the meantime)
+            time.sleep(random.uniform(lo, hi))
+            load1, cores, per_core = admit_reading(fake, polls)
+            polls += 1
+            waited = time.monotonic() - start
+        if per_core <= a.max_per_core or waited >= a.wait:
+            break
+        if waited >= next_note:
+            print(f"load-watch admit: waiting, load1={load1:g} per_core={per_core:.2f} (limit {a.max_per_core:g}), "
+                  f"{int(waited)}s of {a.wait:g}s", file=sys.stderr)
+            next_note += 60.0
+        time.sleep(max(0.0, min(poll, a.wait - waited)))
+    rec = admit_record(load1, cores, per_core, a.max_per_core, waited)
+    print(json.dumps(rec) if a.json else admit_line(rec))
+    return 0 if rec["status"] == "ok" else EX_TEMPFAIL
+
+
 def cmd_install(a):
     dest = HOME / "Library/LaunchAgents" / PLIST.name
     dom = f"gui/{os.getuid()}"
@@ -1003,6 +1093,12 @@ def main():
     p.add_argument("dir", nargs="?")
     p.add_argument("mode", nargs="?", choices=MODES)
     p.add_argument("text", nargs="?", metavar="CMD_OR_REASON")
+    p = sub.add_parser("admit")
+    p.add_argument("--max-per-core", type=float, default=ADMIT_PER_CORE, metavar="N",
+                   help=f"admit when 1-minute load per core is at most N (default {ADMIT_PER_CORE:g})")
+    p.add_argument("--wait", type=float, default=0, metavar="SECONDS",
+                   help="poll every 15 s for up to SECONDS before giving up with exit 75 (0: a pure check)")
+    p.add_argument("--json", action="store_true")
     sub.add_parser("install")
     sub.add_parser("uninstall")
     a = ap.parse_args()
@@ -1010,7 +1106,7 @@ def main():
         ap.print_usage(sys.stderr)
         return 2
     return {"sample": cmd_sample, "status": cmd_status, "incidents": cmd_incidents, "ack": cmd_ack,
-            "guard": cmd_guard, "ci": cmd_ci, "ci-only": cmd_ci_only, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
+            "guard": cmd_guard, "admit": cmd_admit, "ci": cmd_ci, "ci-only": cmd_ci_only, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
 
 
 if __name__ == "__main__":
