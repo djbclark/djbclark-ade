@@ -1377,7 +1377,8 @@ FAILURE_CLASSES = [
             r"quota",
             r"rate[ _-]?limit",
             r"resource[ _-]?exhausted",
-            r"\b429\b",
+            # a bare 429 is a metric too ("processed 429 files"): only as an HTTP status
+            r"(?:\bhttp|\bstatus|\bcode|\berror)[\s:=\"]*429\b",
             r"insufficient (credit|balance|funds)",
             r"out of credits",
         ],
@@ -1414,7 +1415,9 @@ FAILURE_CLASSES = [
             r"retriable",
             r"connection (reset|closed|refused|error)",
             r"internal (server )?error",
-            r"\b5\d\d\b",
+            # likewise a bare 5xx ("tools=536", "512 files"): only as an HTTP status
+            r"(?:\bhttp|\bstatus|\bcode|\berror)[\s:=\"]*5\d\d\b",
+            r"\b5\d\d\s+service\b",
         ],
     ),
 ]
