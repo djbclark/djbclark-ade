@@ -6,8 +6,10 @@ when they ship (into the relevant doc) or when they're dropped (say why).
 ## Cloud-agent readiness: Codex Cloud environment, Cursor API key (ruling 2026-10-19)
 
 `docs/ade-everywhere-proposal.md` §11.5 rules that paid-for cloud agents are used first for
-slices that can leave the Mac. Two need djbclark once: (1) create a Codex Cloud environment for
-`djbclark-ade` on the web (no non-interactive path; then `codex cloud exec --env <ID>` works);
+slices that can leave the Mac. Two need djbclark once: (1) DONE 2026-10-19: Codex Cloud
+environment `ccarenv_02c6721d65dc4191b57a76a84baa4121` for `djbclark-ade` (`codex cloud exec
+--env <ID> --branch <b> "<task>"`; first slice launched the same day); still open: a `codex-cloud`
+place in `acp-dispatch`/`route_agent.py` so the router can pick it (§11.5 rule 4);
 (2) a Cursor user API key into the secret backend (`sudo-secretspec`): decided 2026-10-19
 (round 2), djbclark creates the key at the Cursor dashboard and stores it; then `acp-dispatch`
 gets a `cursor-cloud` place that POSTs to `api.cursor.com/v1/agents`. (3) The Max plan's
