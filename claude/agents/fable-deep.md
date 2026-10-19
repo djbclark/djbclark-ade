@@ -1,6 +1,7 @@
 ---
 name: fable-deep
-description: The latest Anthropic frontier model at high effort, for the rare single-shot judgment calls that really need it — architectural adjudications, whole-corpus analysis where a 1M context earns its keep, and unsolved design problems. Invoke explicitly and rarely (operator 2026-10-18: Fable is scarce; xhigh only with the operator's yes for that run); do not auto-select for routine work or ordinary judgment, which is Opus at high. Not for security/red-team material (see below).
+description: >-
+  The latest Anthropic frontier model at high effort, for the rare single-shot judgment calls that really need it — architectural adjudications, whole-corpus analysis where a 1M context earns its keep, and unsolved design problems. Invoke explicitly and rarely (operator 2026-10-18: Fable is scarce; xhigh only with the operator's yes for that run); do not auto-select for routine work or ordinary judgment, which is Opus at high. Not for security/red-team material (see below).
 model: fable
 effort: high
 ---
