@@ -732,7 +732,7 @@ otherwise, because a 1M-token Claude window costs the weekly pool several times 
 
 | Phase | Slice kind | Agent and model | Effort | Context | Pool | Why |
 |---|---|---|---|---|---|---|
-| every phase gate | frontier review, advise only | codex `gpt-6-astra` | high | default | Codex weekly 69% | the review that found F1 and F2; one per gate |
+| every phase gate | frontier review, advise only | codex `gpt-6-astra` | high | default | Codex weekly 100% | the review that found F1 and F2; one per gate |
 | every phase gate | second frontier read | claude `fable` 5.1 | high | 200k | Fable 68% | independent of Codex; `xhigh` only with a yes for that run |
 | every phase | lead, design, integration, decisions | claude `opus` 5.5 | high | 200k | Claude weekly 51% | the session that owns the plan and the merges |
 | every PR | security review | `adversary` agent (Claude) | high | 200k | Claude weekly | required before any PR (home rules item 28) |
