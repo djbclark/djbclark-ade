@@ -27,6 +27,10 @@
 # behind a /compact is refused too. --dry-run reports the same refusal. Any other
 # command queues behind the pending one (2026-10-14: /quit after autorename's
 # /rename at the end of /loose + /handoff was refused).
+# Queue it as the turn's LAST action: an AskUserQuestion/clarify prompt opened after it
+# puts its text on the input line, which reads as a draft, and the command is refused
+# unsent after 900 s (2026-10-18: a /reload-plugins meant to unload agent-radar never
+# ran, and the session kept its scans for 2 h). Check the log before saying it ran.
 # Runs detached (nohup) so it survives the Bash tool returning; the log
 # is ~/.local/state/self-slash.log.  First verified 2026-10-09 (ClaudeHelm, herdr);
 # Orca backend verified 2026-10-09.
