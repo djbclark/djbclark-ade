@@ -618,6 +618,18 @@ until the work is committed or recorded in a repo.
    headroom-gated), once even with concurrent sweeps, never for a closed,
    manually resumed, rerouted or superseded record; `reap` prints a
    `resubmitted` line and the record gets `auto_resume.resubmitted`.
+   **A restart/logout kill is attributed and resumed (2026-10-19):** a detached
+   slice SIGTERMed within 180 s before `kern.boottime` gets
+   `killed_by: system restart/logout (boot HH:MM)` and its failure reads
+   `killed: SIGTERM (system restart)`; the same login sweep then resumes it in
+   place (`resume RECORD --detach --no-wait`, a "the Mac restarted" prompt),
+   once per boot (`restart_resume.boot`), never for a closed record, a DONE or
+   BLOCKED report, `--no-auto-resume`, no session id or an agent that cannot
+   reopen it. `reap` prints `restart-killed`, then `restart-resumed` /
+   `restart-resume-skipped` / `restart-resume-failed`. A lead whose waiter
+   ended on the restart re-arms it on the same record. Any `killed: SIG*`
+   slice with a session also gets the `resume RECORD` command in its finalize
+   detail.
    `wait` returns only once the record is finalized, not on the agent's own
    `.done` touch, so `wait && resume` never races finalize; `resume` passes
    the model acp-run actually applied (`model_applied`), not the alias.

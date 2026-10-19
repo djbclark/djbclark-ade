@@ -214,6 +214,20 @@ label is a newer one) is never revived. `auto_resume.resubmitted` lists the epoc
 `auto_resume.resubmit_failed` and retried by the next sweep. `reap` prints
 `resubmitted<TAB>name<TAB>record<TAB>label attempt N (...)` per re-submission (or `resubmit-failed`).
 
+A restart or logout kills a detached slice with SIGTERM (2026-10-19, ime-listener: the record said only
+"killed: SIGTERM"). The same login sweep reads `sysctl -n kern.boottime` (ACP_DISPATCH_BOOTTIME
+overrides it) and tags a finished record that TERM/HUP ended within 180 s before the boot with
+`killed_by: "system restart/logout (boot HH:MM)"`, so the failure reads `killed: SIGTERM (system
+restart)` (`reap` prints `restart-killed`). It then resumes that slice in place, detached
+(`resume RECORD --detach --no-wait --after-restart`, a prompt saying the Mac restarted), once per boot:
+`restart_resume.boot` is written under the record's lock before the resume starts, and the kill must
+sit in this boot's window, so a second sweep, a refused resume (`restart-resume-failed`, with the
+manual command) or a later boot never loops. Skipped (`restart-resume-skipped`, reason in the
+record): a closed record, a DONE or BLOCKED report, `--no-auto-resume` / ACP_DISPATCH_NO_AUTO_RESUME=1,
+a pending quota auto-resume, no session id, an agent that cannot reopen the session. `reap` prints
+`restart-resumed<TAB>name<TAB>record<TAB>in place, session ID` on success. finalize also appends the
+`resume RECORD` command to any `killed: SIG*` slice that has a session.
+
 `wait` returns only once the record is finalized (or reaped), not when `.done` appears: the agent
 itself touches `.done` as its last act, so acp-run and finalize may still be running (2026-10-18:
 `wait && resume` hit "slice process is still running"). `resume` also waits up to 120 s
@@ -457,6 +471,11 @@ REAP_STAMP = Path(os.environ.get(
 RESTART_WINDOW = 180
 RESTART_SIGNALS = ("SIGTERM", "SIGHUP")
 RESTART_EXITS = (143, 129)
+AUTO_RESTART_TEXT = (
+    "The previous turn was cut short because the Mac was restarted or logged out, not by anything you "
+    "did. Continue the brief from where you left off in this same session: do not redo finished work "
+    "(check `git status` and `git diff` for what is already there), finish the remaining steps, then "
+    "write the complete report and touch its `.done` marker as the brief says.\n\nOriginal brief:\n")
 AUTO_RESUME_TEXT = (
     "The previous turn was stopped by the provider's usage limit, not by anything you did, and the "
     "limit has reset. Continue the brief from where you left off in this same session: do not redo "
@@ -1173,6 +1192,58 @@ def attribute_restart(path: Path, boot: float | None = None) -> str | None:
         return rec["killed_by"]
 
 
+def restart_resume(path: Path, boot: float | None) -> tuple[str, str] | None:
+    """The login sweep resumes, in place and detached, a slice a system restart/logout killed
+    (operator 2026-10-19; killed_by is set by attribute_restart). (verb, detail) when it acted.
+    Once per boot: the marker `restart_resume.boot` is written under the record's lock before the
+    resume starts, and the killed slice must have finished in this boot's window (a resume rewrites
+    the record, so a later sweep or boot never sees an old kill). Skipped: a closed record, one with
+    a DONE/BLOCKED report, a slice that opted out (`--no-auto-resume`, ACP_DISPATCH_NO_AUTO_RESUME=1), a pending
+    quota auto-resume, no session id, or a session the agent cannot reopen. Not retried this boot
+    when the resume is refused: the detail stays in the record."""
+    if boot is None:
+        return None
+    with record_lock(path):
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        if not rec.get("killed_by") or not rec.get("finished") or rec.get("closed"):
+            return None
+        if not boot - RESTART_WINDOW <= float(rec["finished"]) <= boot:
+            return None
+        if int((rec.get("restart_resume") or {}).get("boot") or 0) == int(boot):
+            return None
+
+        def skip(why: str) -> tuple[str, str]:
+            rec["restart_resume"] = {"boot": int(boot), "at": time.time(), "state": "skipped", "detail": why}
+            write_record(path, rec)
+            return "restart-resume-skipped", why
+
+        ar = rec.get("auto_resume") or {}
+        if os.environ.get("ACP_DISPATCH_NO_AUTO_RESUME") == "1" or ar.get("state") == "off":
+            return skip("auto-resume is off for this slice")
+        if ar.get("state") in AUTO_RESUME_PENDING:
+            return skip(f"a quota auto-resume is already {ar['state']}")
+        # finalize touches `.done` itself, so a marker alone says nothing: the report must have delivered
+        if classify(Path(rec["report"]), Path(rec["done"]), finished=True)[0] in ("done", "blocked"):
+            return skip("the slice delivered (DONE or BLOCKED report)")
+        sid, supported = session_info(rec)
+        if not sid:
+            return skip("no ACP session id in the record or log")
+        if supported is False or resume_unsupported(rec):
+            return skip(f"{rec.get('agent')} cannot reopen the session")
+        rec["restart_resume"] = {"boot": int(boot), "at": time.time(), "state": "resuming"}
+        write_record(path, rec)
+    r = subprocess.run([sys.executable, str(Path(__file__).resolve()), "resume", str(path), "--detach",
+                        "--no-wait", "--after-restart"], capture_output=True, text=True, check=False, timeout=300)
+    if r.returncode == 0:
+        return "restart-resumed", f"in place, session {sid}"
+    detail = (r.stderr.strip().splitlines() or r.stdout.strip().splitlines() or [f"exit {r.returncode}"])[-1]
+    update_record(path, restart_resume={"boot": int(boot), "at": time.time(), "state": "failed", "detail": detail})
+    return "restart-resume-failed", f"{detail}; {manual_resume_hint(rec, path)}"
+
+
 def resubmit_auto_resume(path: Path) -> tuple[str, str] | None:
     """A scheduled auto-resume that a reboot or logout removed from launchd (`launchctl submit` jobs
     do not survive either): submit the same attempt again. (verb, detail) when it acted, else None.
@@ -1249,6 +1320,11 @@ def reap_items(items: list[str], quiet: bool = False) -> int:
         if why:
             n += 1
             print(f"restart-killed\t{path.stem}\t{path}\t{why}")
+        resumed = restart_resume(path, boot)
+        if resumed:
+            n += 1
+            print(f"{resumed[0]}\t{path.stem}\t{path}\t{resumed[1]}")
+            continue                 # the resume rewrote the record: the next sweep looks again
         again = resubmit_auto_resume(path)
         if again:
             n += 1
@@ -3057,7 +3133,9 @@ def checkpoint_context(rec: dict, tools: int = 20) -> str:
 
 def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
     """Reopen the record's ACP session and continue. quota_stop selects the usage-limit prompt (the
-    stop was the provider's limit, not the agent; redo nothing finished)."""
+    stop was the provider's limit, not the agent; redo nothing finished); a.after_restart (the login
+    sweep's `resume --after-restart`) the restart prompt."""
+    after_restart = getattr(a, "after_restart", False)
     record = Path(a.record).expanduser().resolve()
     rec = json.loads(record.read_text())
     deadline = time.time() + FINALIZE_WAIT
@@ -3091,7 +3169,7 @@ def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
 
     original = rec.get("prompt") or Path(rec["brief"]).read_text().split("## Delivery contract", 1)[0]
     prompt = (Path(a.prompt_file).read_text() if a.prompt_file else a.prompt) or (
-        AUTO_RESUME_TEXT + original if quota_stop else
+        AUTO_RESUME_TEXT + original if quota_stop else AUTO_RESTART_TEXT + original if after_restart else
         "The previous turn was stopped by a time limit. Continue the brief from where it left off, "
         "and rewrite the report with the complete result.\n\nOriginal brief:\n" + original)
     resume_arg = ["--resume", sid]
@@ -3586,6 +3664,7 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--wait-timeout", type=int)
             sub.add_argument("--no-auto-resume", action="store_true",
                              help="no automatic in-place resume if this run stops on quota")
+            sub.add_argument("--after-restart", action="store_true", help=argparse.SUPPRESS)
         elif argv[0] == "reroute":
             pick = sub.add_mutually_exclusive_group(required=True)
             pick.add_argument("--agent")

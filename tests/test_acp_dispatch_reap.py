@@ -367,10 +367,7 @@ class TestReapInstall(ReapBase):
         self.assertTrue(any(c.startswith("bootout gui/") for c in self.launchctl()))
 
 
-class TestRestartAttribution(ReapBase):
-    """A slice SIGTERMed by a Mac restart/logout says so (2026-10-19, ime-listener: the record said
-    only "killed: SIGTERM" and sent the lead hunting for a harness bug). `reap` at login compares
-    `finished` with kern.boottime; ACP_DISPATCH_BOOTTIME stands in for the sysctl."""
+class RestartBase(ReapBase):
     BOOT = 1_760_880_691.0
 
     def killed(self, name: str = "s1", before_boot: float = 60, signame: str = "SIGTERM", rc: int = 143,
@@ -386,10 +383,19 @@ class TestRestartAttribution(ReapBase):
         self.write_record(rec, name)
         return path
 
-    def reap(self, path: Path, boot: float | None = BOOT) -> subprocess.CompletedProcess[str]:
+    def reap(self, path: Path, boot: float | None = BOOT, resume: bool = False) -> subprocess.CompletedProcess[str]:
+        """`reap PATH` as the login sweep. The attribution tests run it with the auto-resume off (the
+        resume rewrites the record); TestRestartResume asks for it."""
         extra = {} if boot is None else {"ACP_DISPATCH_BOOTTIME": str(boot)}
+        if not resume:
+            extra["ACP_DISPATCH_NO_AUTO_RESUME"] = "1"
         return run(["reap", str(path)], env=self.base_env(**extra))
 
+
+class TestRestartAttribution(RestartBase):
+    """A slice SIGTERMed by a Mac restart/logout says so (2026-10-19, ime-listener: the record said
+    only "killed: SIGTERM" and sent the lead hunting for a harness bug). `reap` at login compares
+    `finished` with kern.boottime; ACP_DISPATCH_BOOTTIME stands in for the sysctl."""
     def test_sigterm_just_before_boot_is_attributed_to_the_restart(self):
         path = self.killed()
         r = self.reap(path)
@@ -484,6 +490,85 @@ class TestSignalResumeHint(ReapBase):
         hint = self.mod()["manual_resume_hint"]({"failure": "NO-REPORT: quota (codex, m1, retry at Oct 18th 9am)",
                                                 "record": "/x/s1.json"}, Path("/x/s1.json"))
         self.assertTrue(hint.startswith("resume in place after Oct 18th 9am: "), hint)
+
+
+class TestRestartResume(RestartBase):
+    """The login sweep resumes a restart-killed slice in place, once per boot (operator 2026-10-19)."""
+
+    def test_restart_killed_slice_is_resumed_once(self):
+        path = self.killed()
+        r = self.reap(path, resume=True)
+        self.assertTrue(r.stdout.splitlines()[0].startswith("restart-killed\ts1\t"), r.stdout)
+        self.assertRegex(r.stdout, r"restart-resumed\ts1\t\S+\tin place, session fake-session")
+        rec = self.record()
+        self.assertEqual(rec["resume_count"], 1)
+        self.assertEqual(rec["session_id"], "fake-session")      # the fake agent's log names it
+        self.assertIsNone(rec["finished"])
+        self.assertIn("--resume fake-session", rec["cmd"])
+        self.assertIn("Mac was restarted or logged out", Path(rec["brief"]).read_text())
+        self.assertTrue(any(c.startswith("submit") for c in self.launchctl()), self.launchctl())
+        # a second sweep in the same boot does nothing: the resumed slice is running again
+        calls = len(self.launchctl())
+        self.assertEqual(self.reap(path, resume=True).stdout, "")
+        self.assertEqual(len(self.launchctl()), calls)
+
+    def test_the_marker_blocks_a_second_try_this_boot_and_an_old_kill_is_not_revived(self):
+        path = self.killed()
+        rec = json.loads(path.read_text())
+        rec["restart_resume"] = {"boot": int(self.BOOT), "state": "failed", "detail": "x"}
+        self.write_record(rec)
+        self.assertNotIn("restart-resume", self.reap(path, resume=True).stdout)
+        self.assertFalse(any(c.startswith("submit") for c in self.launchctl()), self.launchctl())
+        # a later boot: this kill finished before that boot's window
+        r = self.reap(path, boot=self.BOOT + 3600, resume=True)
+        self.assertNotIn("restart-resume", r.stdout)
+        self.assertFalse(any(c.startswith("submit") for c in self.launchctl()), self.launchctl())
+
+    def test_skips(self):
+        cases = {
+            "off": ({"auto_resume": {"state": "off", "detail": "--no-auto-resume"}}, "auto-resume is off"),
+            "pending": ({"auto_resume": {"state": "scheduled", "attempt": 1}}, "quota auto-resume is already scheduled"),
+            "closed": ({"closed": True}, None),
+            "nosession": ({"log": "/nonexistent/log.jsonl", "session_id": None}, "no ACP session id"),
+        }
+        for name, (fields, why) in cases.items():
+            path = self.killed(name=name, session_id=None if name == "nosession" else "sess-1")
+            rec = json.loads(path.read_text())
+            rec.update(fields)
+            self.write_record(rec, name)
+            r = self.reap(path, resume=True)
+            self.assertNotIn("restart-resumed", r.stdout, (name, r.stdout))
+            if why:
+                self.assertIn(why, r.stdout, name)
+            after = self.record(name)
+            self.assertIsNotNone(after["finished"], name)
+            self.assertNotIn("resume_count", {k: v for k, v in after.items() if v}, name)
+        self.assertFalse(any(c.startswith("submit") for c in self.launchctl()), self.launchctl())
+
+    def test_a_delivered_report_skips(self):
+        path = self.killed()
+        _ = Path(self.record()["report"]).write_text("the result\nDONE\n")
+        r = self.reap(path, resume=True)
+        self.assertIn("restart-resume-skipped", r.stdout)
+        self.assertIn("slice delivered", r.stdout)
+        self.assertFalse(any(c.startswith("submit") for c in self.launchctl()))
+
+    def test_env_opt_out(self):
+        path = self.killed()
+        r = run(["reap", str(path)], env=self.base_env(ACP_DISPATCH_BOOTTIME=str(self.BOOT),
+                                                        ACP_DISPATCH_NO_AUTO_RESUME="1"))
+        self.assertIn("auto-resume is off", r.stdout)
+
+    def test_a_refused_resume_is_recorded_not_retried(self):
+        path = self.killed()
+        rec = json.loads(path.read_text())
+        rec["cmd"] = ""                                   # resume dies: nothing to rebuild the command from
+        self.write_record(rec)
+        r = self.reap(path, resume=True)
+        self.assertIn("restart-resume-failed", r.stdout)
+        self.assertIn("resume in place: ", r.stdout)
+        self.assertEqual(self.record()["restart_resume"]["state"], "failed")
+        self.assertNotIn("restart-resume", self.reap(path, resume=True).stdout)
 
 
 if __name__ == "__main__":
