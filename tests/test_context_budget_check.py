@@ -147,8 +147,10 @@ def test_real_config_parses_and_overrides_home():
     assert cfg["dirs"] == [DIR, "~"]
     base = cbc.budget_for(cfg, DIR)
     assert (base["total"], base["memory"], base["skills"], base["mcp_tools"],
-            base["mcp_instructions"], base["grow_alert"]) == (32000, 9000, 7500, 6500, 5000, 2000)
-    assert cbc.budget_for(cfg, "~")["total"] > base["total"]
+            base["mcp_instructions"], base["grow_alert"]) == (30000, 10000, 7500, 6500, 5000, 2000)
+    home = cbc.budget_for(cfg, "~")
+    assert home["memory"] > base["memory"]
+    assert home["total"] == base["total"]
 
 
 # ---------------------------------------------------------------- growth

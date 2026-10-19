@@ -8,19 +8,16 @@
 dirs = ["~/src/djbclark-ade", "~"]
 
 [budget]
-total = 32000
-memory = 9000
+total = 30000           # measured after the 2026-10-18 trims: 25k here, 27.3k in ~
+memory = 10000          # 9.1k here (global CLAUDE.md 5.7k + this repo's AGENTS.md ~3k)
 skills = 7500
 mcp_tools = 6500
 mcp_instructions = 5000
 grow_alert = 2000       # a rise of this many tokens in any row (or the total) since the last file pages
 
 # Overrides for one directory (any key above; the rest are inherited from [budget]).
-# "~" loads djbclark's home instructions twice: ~/.claude/CLAUDE.md and ~/AGENTS.md are the same
-# file (home-agents.md, 8.4k each), plus a 8.1k auto-memory MEMORY.md of its own. That is the
-# measured 2026-10-18 floor (memory 25k, total 45.9k) less what the planned trim of home-agents.md
-# should save (about 2.8k each). Lower these to the [budget] defaults once the duplicate load and
-# the home MEMORY.md are fixed; until then the growth alert is what guards "~".
+# "~" carries its own auto-memory index (site-private/memory/MEMORY.md, 8.1k) on top of the 5.7k
+# global CLAUDE.md: memory 13.8k measured 2026-10-18, after claudeMdExcludes stopped ~/AGENTS.md
+# loading the same file a second time. Lower it once that MEMORY.md is condensed.
 [budget."~"]
-total = 42000
-memory = 20000
+memory = 15000
