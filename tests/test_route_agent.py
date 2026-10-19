@@ -203,7 +203,8 @@ class TestDiscovery(unittest.TestCase):
     def test_unmeasured_agents_remain_reachable_as_fallback(self):
         """All available agents should stay routable, just ranked last."""
         drained = {k: {"remaining": 0.0} for k in IDLE}
-        choice = r.route("bulk", quota=drained)
+        with sources(acp=ACP_LIST):                       # not whatever agents the host has installed
+            choice = r.route("bulk", quota=drained)
         self.assertIsNotNone(choice, "roster agents should still provide a fallback")
         self.assertNotEqual(choice.service.name, "clinepass")
 

@@ -289,7 +289,9 @@ class TestWaitResumeRace(ReapBase):
         Path(rec["done"]).touch()
         ticks = [0]
 
-        def tick(_: float) -> None:
+        def tick(seconds: float) -> None:
+            if seconds < 1:                                   # subprocess.run(timeout=) polls with
+                return                                        # sub-second sleeps; only wait_record's count
             ticks[0] += 1
             if ticks[0] == 2:                                 # finalize lands
                 r = self.record()

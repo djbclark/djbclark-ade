@@ -621,7 +621,8 @@ class TestStripEndToEnd(unittest.TestCase):
         e = {**os.environ, "HOME": str(self.home), "UV_CACHE_DIR": self.cache,
              **hermetic_env(self.bin), "FAKE_OUT": str(out), "FAKE_MODE": mode,
              "ACP_RUN_AGY_SERVER": str(self.bin / fake), "TMPDIR": str(d)}
-        for k in ("ACP_RUN_KEEP_USER_CONFIG", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR",
+        # XDG_CONFIG_HOME too: a host that sets it (GitHub runners) would hide the fake HOME's config
+        for k in ("ACP_RUN_KEEP_USER_CONFIG", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME",
                   "HERDR_PANE_ID", "HERDR_ENV"):
             e.pop(k, None)
         e.update(env or {})
