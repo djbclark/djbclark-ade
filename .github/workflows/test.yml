@@ -21,5 +21,10 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
 
+      # The repo's scripts and the tests' fake agents call the g-prefixed GNU tools
+      # (gwc, ghead, gdate, ggrep, gsed, gawk, ...); the runner has the BSD ones only.
+      - name: Install the GNU tools
+        run: brew install coreutils findutils gnu-sed grep gawk
+
       - name: Run the test suite
         run: uv run --with pytest python -m pytest tests/ -q
