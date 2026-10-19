@@ -597,8 +597,8 @@ consequences).
 | `helm` answers every waiting session from one window | Herald (LLM-paraphrased items, child agents off by default); permission prompts per host; mobile approvals | Build the **Helm panel** as the delta: verbatim questions, request ids, ranking by work unlocked, one-tap relay, child agents included (section 7.3). | ADE plugin |
 | `herdr-tidy` closes idle panes with a close ledger | `archive_workspace`; agents keep their transcripts | Replace with a plugin RPC that writes the same ledger. | ADE plugin |
 | `herdr-sleeper`, `herdr-jump`, `herdr-ai` | Daemon manages idle agents; Command Center; chat | Retire after the pilot, not before (section 8, Phase 6). | Paseo daemon |
-| `self-slash` types a slash command into a pane | Prompt the agent through the API | Replace. | Paseo API |
-| `autorename`, `herdr_place.py` | `rename_workspace`, agent title | Replace; keep the title derivation. | Paseo; ADE title logic |
+| `self-slash` types a slash command into a pane | `paseo wait`, then `paseo send` of a root-only built-in (`/clear`, `/compact`, `/context`, `/usage`) to the idle agent; sent with `PASEO_AGENT_ID` unset, because an agent-originated send is enveloped as text (0.12.0) | **Done 2026-10-19**: `self-slash` has a Paseo host (`/new` and `/reset` go as `/clear`); verified on a scratch agent. The context hook tells a Paseo-hosted session to compact and hand off itself. | ADE `bin/self-slash`; Paseo CLI |
+| `autorename`, `herdr_place.py` | `rename_workspace`, agent title (`paseo agent update --name`) | Replace; keep the title derivation. Since 2026-10-19 `autorename` also sets the Paseo agent name. | Paseo; ADE title logic |
 | `fleet-watch` pings Hermes on fleet changes | `notifyOnFinish`, push notifications to the phone app | Keep the Hermes ping for Telegram; feed it from Paseo events. | fleet-watch |
 | `acp-run` / `acp-dispatch` / `bigteam` / `route_agent.py` headless dispatch | `paseo run --provider X --no-wait`, SDK (`agents.create`, `waitForFinish`, `send`), `paseo stop`, agent profiles | Keep the engine for job policy (routing, quota-stop resume, reports, `BLOCKED:`, escalation, calibration); Paseo runs the routed agent. `--via paseo` maps controls per the table below and refuses, before launch, any it cannot express; re-compare after the pilot (Q9). | `acp-run` (policy); Paseo (runtime) |
 | `aiuse` quota probes and `route_agent.py` | Usage dialog, `paseo usage`, usage-source plugin API | Keep `aiuse` as the source of policy (disabled list, gates, pace); the plugin registers it as a usage source (section 11.4). | `aiuse` |
@@ -694,7 +694,9 @@ then prove a thin slice end to end, then widen, and only then retire or delete.
    `fleet.py` over the adapter contract, `acp-dispatch --via paseo` after its state machine
    (7.2), and either the DAG's restart-and-replay proof or a decision to keep Orca's. Gate: the T5 pilot workflow
    (fan-out with questions, permissions, a quota stop and resume, a rollback) from desktop and
-   phone, with Orca and herdr still installed as the fallback.
+   phone, with Orca and herdr still installed as the fallback; the lead session, hosted by
+   Paseo, compacts itself and hands off into a fresh session without the operator typing
+   (the `self-slash` Paseo host, done 2026-10-19, 7.2).
 6. **Phase 5, widen (1 to 2 weeks).** The remaining providers, services and memory into the
    manifest; the agent-service Ansible roles (Q3); cold tier with git-annex (encrypted special
    remote, `mincopies`); a second Mac from
