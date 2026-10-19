@@ -101,7 +101,8 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 3. **One level of delegation.** Workers launch no agents; only the
    orchestrator dispatches.⁵
 4. **Every dispatch passes the load gate before it starts** (`acp-dispatch` runs
-   `load-watch admit --wait N`, default 1800 s, exit 75 when the machine is still too hot; operator 2026-10-19).
+   `load-watch admit --wait N`, default 1800 s, exit 75 when the machine is still too hot; operator 2026-10-19),
+   before its quota and cap checks; `--detach --no-wait` returns at once and the detached runner waits instead.
    The gate only decides whether to *start*: it never kills, throttles or slows running work.
 
 ## 5. Failure handling: kill criteria in code

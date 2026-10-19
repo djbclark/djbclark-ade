@@ -177,7 +177,9 @@ class Base(unittest.TestCase):
                 # skip must not fire for them (D2's own tests cover the rule)
                 "ACP_DISPATCH_MAX_WAIT_HOURS": "876576",
                 # never the real pmset: a cached sudo ticket would wake the Mac for a fixture
-                "ACP_DISPATCH_PMSET": "/usr/bin/false", **extra}
+                "ACP_DISPATCH_PMSET": "/usr/bin/false",
+                # the load gate (load-watch admit, up to 30 min on a hot host) is off unless a test turns it on
+                "ACP_DISPATCH_NO_LOAD_GATE": "1", **extra}
 
     def dispatch(self, *extra: str, mode: str = "writes", name: str = "s1",
                  env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:

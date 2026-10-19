@@ -257,16 +257,27 @@ in the record JSON; every 60 s, and the moment that check trips, it runs `wait -
 `acp-dispatch check RECORD` with its exit code. route_agent is imported lazily (load_policy), so
 wait, reap, check, footer, extend and finalize invocations pay nothing for the routing module.
 
-Load gate (operator 2026-10-19): before a fresh slice launches, right before the live preflight,
-acp-dispatch runs `bin/load-watch admit --wait N --json` (N: --load-wait SECONDS, else
-ACP_DISPATCH_LOAD_WAIT, else 1800; --no-load-gate or ACP_DISPATCH_NO_LOAD_GATE=1 skips it;
-ACP_DISPATCH_LOAD_WATCH names another binary). admit polls every 15 s while the per-core load is
-above 1.5, staggers 5-30 s once it drops, and the dispatch records `load_gate: {load1, per_core,
-waited_s}`. Exit 75 from admit makes the dispatch exit 75 with the load and the wait named and no
-launch (the record is `unavailable`, class `load`). A missing or broken load-watch only warns. The
-gate decides whether to START work: it never kills or throttles anything running, and a resume of an
-already-running slice and --dry-run skip it. (execute_record's older wait_for_capacity stays as the
-backstop at 4x cpus or critical memory pressure.)
+Load gate (operator 2026-10-19): before a slice launches, acp-dispatch runs `bin/load-watch admit
+--wait N --json` (N: --load-wait SECONDS, else ACP_DISPATCH_LOAD_WAIT, else 1800; --no-load-gate or
+ACP_DISPATCH_NO_LOAD_GATE=1 skips it; ACP_DISPATCH_LOAD_WATCH names another binary; load-watch's
+LW_* test hooks are scrubbed from the environment it gets). admit polls every 15 s while the
+per-core load is above 1.5, staggers 5-30 s once it drops, and the dispatch records `load_gate:
+{load1, per_core, waited_s}`. The gate runs BEFORE the pool reading, in-flight reservation, headroom
+and cap checks, so those are evaluated against the machine as it is after admission, not a snapshot
+up to --load-wait old. Exit 75 from admit makes the dispatch exit 75 with the load and the wait
+named and no launch (the record is `unavailable`, class `load`; `check` says "machine too hot; retry
+later" and exits 75, never "re-plan with --exclude"). A missing, crashed or timed-out load-watch
+warns on stderr, is recorded as `load_gate.error` and the slice starts (a dispatcher that cannot read
+the load must not stop all work). The gate decides whether to START work: it never kills or throttles
+anything running. --dry-run skips it. A resume is gated like a fresh dispatch: `resume` refuses a
+still-running slice before it gets here, so every resume that reaches the gate starts a new agent
+process (an auto-resume that is refused ends as `failed` with the retry hint).
+--detach --no-wait must return at once, so it cannot wait here: the record is written first with
+`load_gate: {"state": "pending"}` and the detached runner (`execute`) does the full wait before the
+agent starts (waiting-load note in the record; the waiter's wait_timeout grows by --load-wait). That
+one path therefore checks quota, reservation and caps BEFORE the wait; other paths check them after.
+A refusal in the runner finalizes the record as `unavailable`/`load` with exit 75, no agent started.
+(execute_record's older wait_for_capacity stays as the backstop at 4x cpus or critical memory pressure.)
 
 Exit codes (dispatch and check):
     0    report delivered and ends in DONE (dispatch: and acp-run exited 0)
@@ -283,6 +294,7 @@ Exit codes (dispatch and check):
          re-plan with --exclude (no slice attempt consumed)
     75   machine still too hot to start (EX_TEMPFAIL): `load-watch admit` found the 1-minute load per
          core above 1.5 for the whole --load-wait budget; nothing was launched, retry later
+         (`check` on such a record exits 75 too)
     124  timed out waiting for the .done marker (--detach without --no-wait)
     (a reaped record's acp-run exit is 255 `lost` when neither an exit file nor launchd knows it;
      a signalled runner's is 128+signal, e.g. 143 for SIGTERM)
@@ -508,6 +520,8 @@ AUTO_RESUME_TEXT = (
 UNAVAILABLE_EXIT = 5
 LOAD_WAIT_DEFAULT = 1800       # seconds the load gate may wait (--load-wait / ACP_DISPATCH_LOAD_WAIT)
 LOAD_GATE_EXIT = 75            # EX_TEMPFAIL, what `load-watch admit` returns when still too hot
+LOAD_RETRY_TEXT = "machine too hot; retry later"
+LOAD_SCRUB_ENV = ("LW_FAKE_LOAD1", "LW_ADMIT_POLL_S", "LW_ADMIT_STAGGER_S")   # load-watch test hooks
 LOG_ACTIVE_SEC = 5 * 60
 PREFLIGHT_TTL = 10 * 60
 PREFLIGHT_TIMEOUT = 90
@@ -930,7 +944,7 @@ def unavailable_record(out: Path, a: argparse.Namespace, reason: str, cls: str,
     record = jobs / f"{a.name}.json"
     if previous and keep_record_note_refusal(record, reason, cls):
         print(f"unavailable\t{a.name}\tclass={cls} agent={a.agent} model={a.model or '(default)'} {reason}")
-        return UNAVAILABLE_EXIT
+        return exit_code
     rec = {"name": a.name, "agent": a.agent, "model": a.model, "dir": str(Path(a.dir).resolve()),
            "task": a.task, "out": str(out), "record": str(record), "report": str(report),
            "done": str(done_path(report)), "status": "unavailable", "unavailable_class": cls,
@@ -2436,7 +2450,13 @@ def auto_resume_record(record: Path, attempt: int) -> int:
     ns = argparse.Namespace(record=str(record), timeout=None, prompt=None, prompt_file=None, detach=False,
                             no_wait=False, wait_timeout=None, no_auto_resume=False)
     try:
-        return resume_record(ns, quota_stop=True)
+        rc = resume_record(ns, quota_stop=True)
+        if rc == LOAD_GATE_EXIT:
+            rec, ar = current()
+            if ar.get("state") == "resuming":
+                update_record(record, auto_resume={**ar, "state": "failed",
+                                                   "detail": f"{LOAD_RETRY_TEXT}; {manual_resume_hint(rec, record)}"})
+        return rc
     except SystemExit as e:
         rec, ar = current()
         if ar.get("state") == "resuming":
@@ -2546,20 +2566,26 @@ def load_wait_seconds(a: argparse.Namespace) -> int:
 
 def load_gate(wait: int) -> tuple[bool, dict | None, str]:
     """Ask `load-watch admit --wait WAIT --json` whether a slice may start (never throttles anything).
-    Returns (admitted, info, why): info is {"load1", "per_core", "waited_s"} when load-watch answered. Only
-    its exit 75 refuses; a missing, broken or timed-out load-watch warns and admits, since a dispatcher
-    that cannot read the load must not stop all work. admit's progress lines go to our stderr."""
+    Returns (admitted, info, why): info is {"load1", "per_core", "waited_s"} when load-watch answered, or
+    {"load1": None, "per_core": None, "waited_s": 0, "error": why} when it could not (missing, crashed, timed
+    out: warned on stderr and admitted, since a dispatcher that cannot read the load must not stop all work;
+    the error is kept in the record). Only its exit 75 refuses. load-watch gets a scrubbed environment: its
+    LW_FAKE_LOAD1 / LW_ADMIT_* test hooks must never steer a production gate. Its progress lines go to our
+    stderr."""
+    def unknown(why: str) -> tuple[bool, dict | None, str]:
+        print(f"acp-dispatch: warning: {why}; starting without the load gate", file=sys.stderr)
+        return True, {"load1": None, "per_core": None, "waited_s": 0, "error": why}, why
+
     path = os.environ.get("ACP_DISPATCH_LOAD_WATCH") or str(HERE / "load-watch")
+    path = str(Path(path).expanduser().resolve())
     if not Path(path).exists():
-        print(f"acp-dispatch: warning: {path} not found; starting without the load gate", file=sys.stderr)
-        return True, None, "load-watch missing"
+        return unknown(f"{path} not found")
+    env = {k: v for k, v in os.environ.items() if k not in LOAD_SCRUB_ENV}
     try:
         proc = subprocess.run([path, "admit", "--wait", str(wait), "--json"], check=False, stdout=subprocess.PIPE,
-                              stderr=None, text=True, timeout=wait + 180)
+                              stderr=None, text=True, timeout=wait + 180, env=env)
     except (OSError, subprocess.SubprocessError) as e:
-        print(f"acp-dispatch: warning: load-watch admit failed ({e}); starting without the load gate",
-              file=sys.stderr)
-        return True, None, f"load-watch admit failed: {e}"
+        return unknown(f"load-watch admit failed ({e})")
     try:
         data = json.loads(proc.stdout.strip().splitlines()[-1])
         info = {"load1": data["load1"], "per_core": data["per_core"], "waited_s": data.get("waited_s", 0)}
@@ -2570,11 +2596,9 @@ def load_gate(wait: int) -> tuple[bool, dict | None, str]:
     if proc.returncode == LOAD_GATE_EXIT:
         if info is None:
             info = {"load1": None, "per_core": None, "waited_s": wait}
-        return False, info, (f"machine too hot to start: load1={info['load1']} per_core={info['per_core']} "
+        return False, info, (f"{LOAD_RETRY_TEXT}: load1={info['load1']} per_core={info['per_core']} "
                              f"after waiting {info['waited_s']}s of the {wait}s --load-wait budget; not launched")
-    print(f"acp-dispatch: warning: load-watch admit exited {proc.returncode}; starting without the load gate",
-          file=sys.stderr)
-    return True, info, f"load-watch admit exited {proc.returncode}"
+    return unknown(f"load-watch admit exited {proc.returncode}")
 
 
 def preflight_state(agent: str, model: str | None) -> Path:
@@ -2836,7 +2860,8 @@ def check_items(items: list[str]) -> int:
     for st, name, path, det in rows:
         print(f"{st}\t{name}\t{path}\t{det}")
         # a DONE report from a run acp-run failed (a timeout's wrap-up report) exits 1, as dispatch does
-        worst = max(worst, 1 if st == "done" and ACP_EXIT_NOTE in det else STATUS_EXIT.get(st, 1))
+        worst = max(worst, 1 if st == "done" and ACP_EXIT_NOTE in det else
+                    LOAD_GATE_EXIT if st == "unavailable" and det.startswith(LOAD_RETRY_TEXT) else STATUS_EXIT.get(st, 1))
     if not rows:
         print("check: nothing to check", file=sys.stderr)
         return 2
@@ -2860,6 +2885,9 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
         rec = json.loads(path.read_text())
     except (OSError, ValueError) as e:
         return ("no-report", path.stem, str(path), f"unreadable record: {e}")
+    if rec.get("status") == "unavailable" and rec.get("unavailable_class") == "load":
+        return ("unavailable", rec.get("name", path.stem), str(rec.get("report", path)),
+                f"{LOAD_RETRY_TEXT} ({rec.get('detail', '')})")
     if rec.get("status") == "unavailable":
         return ("unavailable", rec.get("name", path.stem), str(rec.get("report", path)),
                 rec.get("detail", "pool unavailable; re-plan with --exclude"))
@@ -2944,6 +2972,8 @@ def finalize(record_path: Path, rc: int | None) -> tuple[str, str, dict]:
 
 def finalize_locked(record_path: Path, rc: int | None, finished_at: float | None = None) -> tuple[str, str, dict]:
     rec = json.loads(record_path.read_text())
+    if rec.get("status") == "unavailable" and rec.get("unavailable_class") == "load":
+        return "unavailable", f"{LOAD_RETRY_TEXT} ({rec.get('detail', '')})", rec   # the runner never started an agent
     report, final, done = Path(rec["report"]), Path(rec["final"]), Path(rec["done"])
     inner = Path(rec.get("agent_report", rec["report"]))
     if inner != report:
@@ -3071,6 +3101,8 @@ def finalize_locked(record_path: Path, rc: int | None, finished_at: float | None
 
 def exit_for(st: str, rc: int | None) -> int:
     code = STATUS_EXIT.get(st, 1)
+    if st == "unavailable" and rc == LOAD_GATE_EXIT:
+        return LOAD_GATE_EXIT
     if st == "done" and rc not in (None, 0):
         return 1
     if st == "no-report" and rc == 124:
@@ -3146,7 +3178,29 @@ def wait_for_capacity(record: Path) -> None:
     update_record(record, gate=f"waited {waited}s" + (f", started anyway: {why}" if why else ""))
 
 
+def runner_load_gate(record: Path) -> int | None:
+    """The detached runner's load gate (--detach --no-wait wrote the record with load_gate_pending: the caller
+    had to return at once). None when the agent may start; LOAD_GATE_EXIT after finalizing the record as
+    unavailable/load (finalize leaves such a record alone) when the machine stayed too hot."""
+    rec = json.loads(record.read_text())
+    if not rec.get("load_gate_pending"):
+        return None
+    wait = int(rec.get("load_gate_wait") or 0)
+    update_record(record, gate=f"waiting-load: up to {wait}s for load-watch admit")
+    admitted, info, why = load_gate(wait)
+    if admitted:
+        update_record(record, load_gate=info, load_gate_pending=False, gate=f"load ok after {info and info.get('waited_s')}s")
+        return None
+    print(f"acp-dispatch: {rec.get('name')}: {why}", file=sys.stderr)
+    update_record(record, load_gate=info, load_gate_pending=False, status="unavailable", unavailable_class="load",
+                  detail=why, exit=LOAD_GATE_EXIT, finished=time.time(), pid=None)
+    return LOAD_GATE_EXIT
+
+
 def execute_record(record: Path, tee: bool = False) -> int:
+    refused = runner_load_gate(record)
+    if refused is not None:
+        return refused
     wait_for_capacity(record)
     rec = json.loads(record.read_text())
     got: dict = {}
@@ -3504,6 +3558,21 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     estimate, estimate_source = estimate_pct(out, a.agent, a.model, prompt, a.est_pct, service)
     if estimate < 0:
         die("--est-pct must be 0 or more")
+    # Load gate (2026-10-19) BEFORE any quota or capacity reading: it may wait up to --load-wait, and the
+    # pool reading, in-flight reservation, headroom and cap checks below must describe the machine after
+    # admission, not a snapshot that old (adversary review of e6c538c, finding 1). --detach --no-wait must
+    # return at once, so its wait is deferred to the detached runner (runner_load_gate).
+    gate_info, gate_wait, gate_deferred = None, 0, False
+    if (not a.dry_run and not getattr(a, "no_load_gate", False)
+            and os.environ.get("ACP_DISPATCH_NO_LOAD_GATE") != "1"):
+        gate_wait = load_wait_seconds(a)
+        if a.detach and a.no_wait:
+            gate_deferred, gate_info = True, {"state": "pending", "wait_s": gate_wait}
+        else:
+            admitted, gate_info, why = load_gate(gate_wait)
+            if not admitted:
+                return unavailable_record(out, a, why, "load", None, estimate, previous,
+                                          exit_code=LOAD_GATE_EXIT, extra={"load_gate": gate_info})
     remaining, reading = pool_reading(a.agent, a.model)
     windows = (reading or {}).get("windows") or {}
     if previous is not None:
@@ -3558,14 +3627,6 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
                 out, a, f"{len(busy)} {label} slice(s) already in flight (cap {cap}): "
                 f"{', '.join(p.stem for p in busy[:3])}; wait for one, or route elsewhere "
                 f"(route_agent.py plan)", "inflight", remaining, estimate)
-    gate_info = (previous or {}).get("load_gate")
-    if (not a.dry_run and not previous and not getattr(a, "no_load_gate", False)
-            and os.environ.get("ACP_DISPATCH_NO_LOAD_GATE") != "1"):
-        wait = load_wait_seconds(a)
-        admitted, gate_info, why = load_gate(wait)
-        if not admitted:
-            return unavailable_record(out, a, why, "load", remaining, estimate, previous,
-                                      exit_code=LOAD_GATE_EXIT, extra={"load_gate": gate_info})
     if not a.dry_run and not a.no_preflight:
         ok, detail, cls, reset = preflight(acp_run, a.agent, a.model)
         if not ok:
@@ -3625,6 +3686,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     slice_secs = a.timeout + max(a.wrapup_grace, 0)
     wait_timeout = (0 if a.timeout == 0 else
                     a.wait_timeout if a.wait_timeout is not None else slice_secs + 300)
+    if gate_deferred and wait_timeout:
+        wait_timeout += gate_wait      # the runner's load wait comes out of the lead's waiter budget otherwise
     if previous is not None and role == "advise" and previous.get("advisor_tree_before") is not None:
         tree_before = previous.get("advisor_tree_before")
     else:
@@ -3663,6 +3726,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     }
     if previous and previous.get("advisor_edited"):
         rec["advisor_edited"] = True
+    if gate_deferred:
+        rec["load_gate_pending"], rec["load_gate_wait"] = True, gate_wait
     identity = git_identity_warning(Path(a.dir).resolve())
     if identity:
         rec["git_identity_warning"] = identity

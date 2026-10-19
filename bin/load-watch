@@ -57,12 +57,15 @@ launches a slice (`--load-wait`, `--no-load-gate`). It reads os.getloadavg()[0] 
 `--wait S` polls every 15 s for up to S seconds, prints one line per waited minute to stderr, and once the
 load drops below the threshold sleeps a random 5-30 s (so queued dispatchers do not all start together)
 and re-checks. `--json` prints one JSON object with the same fields. It only decides whether to START work:
-it never kills, throttles or signals anything. Test hooks: LW_FAKE_LOAD1 (a load, or a comma list read one
-per poll with the last value repeating), LW_ADMIT_POLL_S (15), LW_ADMIT_STAGGER_S ("5,30" min,max).
+it never kills, throttles or signals anything. Test hooks (acp-dispatch scrubs them from the environment it
+gives admit): LW_FAKE_LOAD1 (a load, or a comma list read one per poll with the last value repeating),
+LW_ADMIT_POLL_S (15, floored at 1), LW_ADMIT_STAGGER_S ("5,30" min,max; 0 <= min <= max <= 60). A state.json
+that is not a dict with numeric `t` and `hot_since` counts as no state. Non-finite --wait or --max-per-core: exit 2.
 Exit: 0 ok, 1 nothing found (check, ack of an unknown id), 2 usage; `admit` also 75 (still too hot).
 """
 import argparse
 import json
+import math
 import os
 import random
 import re
@@ -996,11 +999,28 @@ def admit_record(load1, cores, per_core, limit, waited):
     """The admit result fields; adds the watcher's streak and hot_for_s when its state.json is fresh."""
     rec = {"status": "ok" if per_core <= limit else "hot", "load1": round(load1, 2), "per_core": round(per_core, 2),
            "cores": cores, "max_per_core": limit, "waited_s": int(waited)}
-    st = load_state()
-    if now() - st.get("t", 0) <= ADMIT_FRESH_S and st.get("hot_since"):
-        rec["streak"] = st.get("streak", 0)
-        rec["hot_for_s"] = int(now() - st["hot_since"])
+    rec.update(watcher_fields())
     return rec
+
+
+def _num(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def watcher_fields():
+    """streak and hot_for_s from the watcher's state.json, only when it is a dict with numeric, fresh `t` and
+    `hot_since`; anything else (a list, a string time, a torn write) is "no state", never an error: a crash here
+    used to end a wait that had measured a hot machine."""
+    try:
+        st = load_state()
+        if not isinstance(st, dict) or not (_num(st.get("t")) and _num(st.get("hot_since"))):
+            return {}
+        if abs(now() - st["t"]) > ADMIT_FRESH_S:
+            return {}
+        streak = st.get("streak", 0)
+        return {"streak": int(streak) if _num(streak) else 0, "hot_for_s": int(max(0.0, now() - st["hot_since"]))}
+    except (AttributeError, TypeError, ValueError, OverflowError, RecursionError):
+        return {}
 
 
 def admit_line(rec):
@@ -1016,16 +1036,22 @@ def admit_line(rec):
 
 def cmd_admit(a):
     """May new work start now? Only ever decides; never kills, throttles or signals anything."""
-    if a.wait < 0 or a.max_per_core <= 0:
-        print("load-watch admit: --wait must be 0 or more and --max-per-core above 0", file=sys.stderr)
+    if not (math.isfinite(a.wait) and math.isfinite(a.max_per_core)) or a.wait < 0 or a.max_per_core <= 0:
+        print("load-watch admit: --wait must be a finite number, 0 or more, and --max-per-core finite and above 0",
+              file=sys.stderr)
         return 2
     try:
         lo, hi = (float(x) for x in os.environ.get("LW_ADMIT_STAGGER_S", "5,30").split(","))
         poll = float(os.environ.get("LW_ADMIT_POLL_S", "15"))
         fake = _fake_loads()
+        if not (math.isfinite(lo) and math.isfinite(hi) and math.isfinite(poll) and 0 <= lo <= hi <= 60
+                and all(math.isfinite(x) for x in fake)):
+            raise ValueError("out of range")
     except ValueError:
-        print("load-watch admit: bad LW_FAKE_LOAD1, LW_ADMIT_POLL_S or LW_ADMIT_STAGGER_S", file=sys.stderr)
+        print("load-watch admit: bad LW_FAKE_LOAD1, LW_ADMIT_POLL_S or LW_ADMIT_STAGGER_S (finite, stagger "
+              "0 <= min <= max <= 60)", file=sys.stderr)
         return 2
+    poll = max(1.0, poll)  # never a busy loop on a machine that is already hot
     start, polls, next_note = time.monotonic(), 0, 60.0
     while True:
         load1, cores, per_core = admit_reading(fake, polls)

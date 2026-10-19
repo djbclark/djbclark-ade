@@ -3,17 +3,23 @@
 A fake load-watch stands in (ACP_DISPATCH_LOAD_WATCH); conftest turns the gate off for every other suite."""
 from __future__ import annotations
 
+import json
+import subprocess
 import textwrap
 import unittest
 from pathlib import Path
 from typing import override
 
+from test_acp_dispatch import run
 from test_acp_dispatch_routing import RoutingDispatch
 
 FAKE_LW = textwrap.dedent("""\
     #!/bin/bash
     # fake load-watch: records its arguments, prints FAKE_LW_OUT, exits FAKE_LW_RC
     echo "$@" >> "$FAKE_LW_ARGS"
+    env | grep -E '^LW_' >> "$FAKE_LW_ARGS.env"
+    # while "waiting", the machine changes: write a file (a new quota snapshot, a competing in-flight row)
+    [ -n "$FAKE_LW_WRITE" ] && { mkdir -p "$(dirname "$FAKE_LW_WRITE")"; printf '%s' "$FAKE_LW_BODY" > "$FAKE_LW_WRITE"; }
     [ -n "$FAKE_LW_OUT" ] && echo "$FAKE_LW_OUT"
     exit "${FAKE_LW_RC:-0}"
     """)
@@ -102,12 +108,135 @@ class TestLoadGateDegrades(LoadGate):
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertIn("warning", r.stderr)
         self.assertIn("load gate", r.stderr)
-        self.assertIsNone(self.record()["load_gate"])
+        self.assertIn("not found", self.record()["load_gate"]["error"])   # said so in the record, not just stderr
 
     def test_broken_load_watch_warns_and_continues(self):
         r = self.dispatch("--no-model-check", env=self.gate_env(1, "boom"))
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         self.assertIn("load-watch admit exited 1", r.stderr)
+        self.assertEqual(self.record()["load_gate"]["error"], "load-watch admit exited 1")
+
+
+class TestLoadGateScrubsTestHooks(LoadGate):
+    def test_lw_hooks_never_reach_load_watch(self):
+        env = self.gate_env(0, OK, LW_FAKE_LOAD1="0", LW_ADMIT_POLL_S="0", LW_ADMIT_STAGGER_S="0,0")
+        self.assertEqual(self.dispatch("--no-model-check", env=env).returncode, 0)
+        seen = Path(str(self.lw_args) + ".env")
+        self.assertTrue(not seen.exists() or seen.read_text() == "", seen.read_text() if seen.exists() else "")
+
+
+class TestLoadGateBeforeQuotaChecks(LoadGate):
+    """Adversary review of e6c538c, finding 1: the pool reading, in-flight reservation, headroom and cap
+    checks must describe the machine AFTER the wait, so they run after the gate."""
+
+    def test_headroom_is_read_after_the_wait(self):
+        env = {**self.snap_codex(90.0)}
+        snap = Path(env["AIUSE_SNAPSHOT"])
+        low = json.dumps({"collected_at": "2099-01-01T00:00:00+00:00", "snapshot": {"accounts": [
+            {"provider": "codex", "windows": [{"label": "5h", "remaining_percent": 3.0}]}]}})
+        gate = self.gate_env(0, OK, FAKE_LW_WRITE=str(snap), FAKE_LW_BODY=low, **env)
+        r = self.dispatch("--no-model-check", "--no-preflight", env=gate)
+        self.assertEqual(r.returncode, 5, r.stderr + r.stdout)       # refused on the post-wait 3%, not the 90% before
+        self.assertIn("class=headroom", r.stdout)
+        self.assertEqual(self.calls(), ["admit --wait 1800 --json"])
+
+    def test_competing_slice_started_during_the_wait_counts_against_the_cap(self):
+        planted = self.tmp / "state" / "other-task" / "jobs" / "busy.json"
+        gate = self.gate_env(0, OK, FAKE_LW_WRITE=str(planted), FAKE_LW_BODY=json.dumps(self.busy_row()),
+                             **self.snap_codex(70.0))
+        r = self.dispatch("--no-model-check", "--no-preflight", env=gate)
+        self.assertEqual(r.returncode, 5, r.stderr + r.stdout)
+        self.assertIn("class=inflight", r.stdout)
+        self.assertFalse((self.out / "s1-report.md").exists())
+
+    def test_hot_machine_refuses_before_any_quota_reading(self):
+        # a 3% pool would refuse as headroom; the load refusal must win because the gate comes first
+        r = self.dispatch("--no-model-check", "--no-preflight", env=self.gate_env(75, HOT, **self.snap_codex(3.0)))
+        self.assertEqual(r.returncode, 75, r.stderr + r.stdout)
+        self.assertIn("class=load", r.stdout)
+
+
+class TestLoadGateCheck(LoadGate):
+    def test_check_says_retry_later_and_never_exclude(self):
+        self.assertEqual(self.dispatch("--no-model-check", env=self.gate_env(75, HOT)).returncode, 75)
+        r = run(["check", str(self.out / "jobs" / "s1.json")], env=self.base_env())
+        self.assertEqual(r.returncode, 75, r.stdout + r.stderr)
+        self.assertIn("machine too hot; retry later", r.stdout)
+        self.assertNotIn("--exclude", r.stdout)
+
+
+class TestLoadGateResume(LoadGate):
+    """A resume that reaches dispatch() starts a new agent process (resume refuses a running slice first),
+    so it passes the gate too (finding 9)."""
+
+    def land(self) -> Path:
+        self.assertEqual(self.dispatch("--no-model-check", "--no-preflight").returncode, 0)
+        return self.out / "jobs" / "s1.json"
+
+    def test_resume_is_refused_while_hot_and_the_record_survives(self):
+        rec = self.land()
+        env = {**self.base_env(), **self.gate_env(75, HOT)}
+        r = run(["resume", str(rec), "--timeout", "0"], env=env)
+        self.assertEqual(r.returncode, 75, r.stdout + r.stderr)
+        self.assertEqual(self.calls(), ["admit --wait 1800 --json"])
+        kept = json.loads(rec.read_text())
+        self.assertIn("log", kept)                                       # not overwritten by the refusal
+        self.assertIn("cmd", kept)
+        self.assertEqual(kept["refusals"][-1]["class"], "load")
+
+    def test_resume_is_gated_and_records_load_gate_when_cool(self):
+        rec = self.land()
+        env = {**self.base_env(), **self.gate_env(0, OK)}
+        r = run(["resume", str(rec), "--timeout", "0"], env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.calls(), ["admit --wait 1800 --json"])
+        self.assertEqual(json.loads(rec.read_text())["load_gate"], {"load1": 2.4, "per_core": 0.3, "waited_s": 12})
+
+
+class TestLoadGateDetachNoWait(LoadGate):
+    """--detach --no-wait must return at once: the wait moves into the detached runner (finding 5)."""
+
+    def detach(self, **extra: str) -> subprocess.CompletedProcess[str]:
+        return self.dispatch("--no-model-check", "--no-preflight", "--detach", "--no-wait",
+                             env=self.gate_env(75, HOT, **extra))
+
+    def test_returns_at_once_without_calling_load_watch(self):
+        r = self.detach()
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.calls(), [])                              # no synchronous wait
+        rec = self.record()
+        self.assertTrue(rec["load_gate_pending"])
+        self.assertEqual(rec["load_gate"], {"state": "pending", "wait_s": 1800})
+        self.assertEqual(rec["load_gate_wait"], 1800)
+        self.assertGreaterEqual(rec["wait_timeout"], 1800 + 300)        # the wait comes out of nobody's budget
+
+    def test_runner_refuses_when_still_hot_and_finalize_leaves_it_alone(self):
+        self.assertEqual(self.detach().returncode, 0)
+        path = str(self.out / "jobs" / "s1.json")
+        env = {**self.base_env(), **self.gate_env(75, HOT)}
+        r = run(["execute", path], env=env)
+        self.assertEqual(r.returncode, 75, r.stdout + r.stderr)
+        self.assertEqual(self.calls(), ["admit --wait 1800 --json"])
+        self.assertFalse((self.out / "s1-report.md").exists())          # no agent started
+        rec = self.record()
+        self.assertEqual((rec["status"], rec["unavailable_class"], rec["exit"]), ("unavailable", "load", 75))
+        self.assertFalse(rec["load_gate_pending"])
+        f = run(["finalize", path, "--exit", "75"], env=env)
+        self.assertEqual(f.returncode, 75, f.stdout + f.stderr)
+        self.assertEqual(self.record()["status"], "unavailable")
+        c = run(["check", path], env=env)
+        self.assertEqual(c.returncode, 75)
+        self.assertIn("machine too hot; retry later", c.stdout)
+
+    def test_runner_starts_the_agent_when_cool(self):
+        self.assertEqual(self.detach().returncode, 0)
+        path = str(self.out / "jobs" / "s1.json")
+        r = run(["execute", path], env={**self.base_env(), **self.gate_env(0, OK)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rec = self.record()
+        self.assertEqual(rec["load_gate"], {"load1": 2.4, "per_core": 0.3, "waited_s": 12})
+        self.assertFalse(rec["load_gate_pending"])
+        self.assertTrue(rec.get("pid"))                                  # the agent really ran
 
 
 if __name__ == "__main__":
