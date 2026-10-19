@@ -21,8 +21,41 @@ every skill's description, into every session, and loads them again after every
 | Deferred MCP tool schemas (loaded only on ToolSearch, but their names are always listed) | 751k | 107k | 105.5k |
 
 The skills listing did not move although ~40 skill folders were moved out and 19
-descriptions were shortened (10,958 → 6,706 chars): it looks like a fixed
-budget that Claude Code fills and truncates (assumed, not confirmed).
+descriptions were shortened (10,958 → 6,706 chars). It is a budget: 1% of the
+context window (10k on a 1M model), filled and then cut, least-used descriptions
+first (confirmed 2026-10-18, code.claude.com/docs/en/skills).
+
+### Second pass (2026-10-18)
+
+The 10-10 trim grew back to 46.3k in eight days: CLAUDE.md edits, `bl skill
+update` and the paseo CLI re-linking their skills, and two always-loaded
+Firecrawl servers. Basis: `docs/claude-cache-cost-research-report.md` plus a
+Fable review of it; the preamble was 17% of a week's Claude Code cost.
+
+| | 2026-10-18 before | After settings changes |
+|---|---|---|
+| Fresh session total (in this repo) | 46.3k | 31.2k |
+| MCP tools loaded up front | 11.0k | 0 |
+| MCP server instructions | 4.8k | 3.4k |
+| Skills listing | 10k | 7k |
+| Memory files (global `CLAUDE.md` + this repo's `AGENTS.md`) | 14.5k | 14.7k (condense in progress) |
+
+What changed, all in `~/.claude/settings.json` unless noted:
+
+1. `deniedMcpServers` gained `claude.ai Firecrawl`, `claude.ai Google Drive`
+   and `claude.ai Google Calendar` (table below).
+2. `~/.claude.json` `mcpServers.firecrawl` has `"alwaysLoad": false`. The shared
+   server marks `firecrawl_scrape`/`firecrawl_search` `alwaysLoad` in `_meta`; the
+   client-side key overrides it (−6.1k). The first Firecrawl call in a session now
+   needs one ToolSearch. Revert: delete the key.
+3. `skillOverrides` and `skillListingBudgetFraction: 0.007` (section "Skills
+   hidden by setting" below).
+4. `autoCompactWindow` 400000 → 300000 (compaction fires at ~267k, the window less
+   the 33k buffer). Simulated −1.6% of cost; a 200k window costs +1%, 150k +17%.
+5. The graft per-prompt hook was back (table "Hooks removed"); removed again.
+
+Kept: `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` at its 200k default. Idle compaction
+at 100k loses money below ~127k, given the ~104k floor a compaction leaves.
 
 ### Kept on purpose (2026-10-10)
 
@@ -32,7 +65,9 @@ budget that Claude Code fills and truncates (assumed, not confirmed).
    `ENABLE_TOOL_SEARCH=true` was tested and changed nothing (the server most
    likely marks them `alwaysLoad` in `_meta`). The only untried route is a local
    http server entry with `"alwaysLoad": false` shadowing the claude.ai
-   connector, which needs its own API key and sign-in.
+   connector, which needs its own API key and sign-in. **Done 2026-10-18**: the
+   shared self-hosted `firecrawl` entry got `"alwaysLoad": false` (honoured), and
+   the claude.ai connector is denied.
 2. **Context7** (~0.2k): agent-friendly library docs; re-check its use on or
    after 2026-10-24 (docs/queue.md).
 3. **token-savior**: djbclark kept it although transcripts show 0 calls ever. **Removed 2026-10-18** (0 real calls in 14 days of 1,458 transcripts): deregistered from every agent CLI, `uv tool uninstall token-savior-recall`, launcher deleted.
@@ -53,6 +88,11 @@ pins the 1-hour prompt cache for main conversations even when a session draws
 on extra-usage credits, where Claude Code would otherwise drop to 5 minutes and
 re-write the whole context after every 5-minute wait
 (code.claude.com/docs/en/prompt-caching, "Which TTL each request gets").
+`ENABLE_PROMPT_CACHING_1H=1` covers sub-agents and compaction too. **Do not
+move anything to the 5-minute TTL** (simulated on 7 days of transcripts,
+2026-10-18, `bin/claude-cost-whatif`): 5 minutes everywhere +30%, sub-agents
+only (`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL=5m`) +2.8%, because 3.2% of
+requests follow a 5-60 minute gap and would re-write their whole context.
 
 ## MCP servers blocked in Claude Code (`deniedMcpServers`)
 
@@ -74,8 +114,11 @@ in `~/.claude/settings.json` (takes effect at once, even mid-session).
 | `ghost-os` (local, `~/.claude.json`) | 29 | macOS accessibility-tree + vision computer use; overlaps cua-driver. |
 | `claude.ai Claude Docs` | 8 | Anthropic's doc-authoring connector ("living docs you create and edit"), not API-doc lookup; 0 calls in all transcripts since 2026-08-03, ~1.3k tokens/session. Blocked 2026-10-10. |
 | `paper-search` (local) | 57 | Academic search/download across arXiv, PubMed, SSRN, Semantic Scholar, OpenAlex and more; ~0.65k tokens/session, 3 calls in the week to 2026-10-10, all doable with the `arxiv` MCP, Firecrawl `firecrawl_research_*` or an OpenAlex `curl`. Blocked 2026-10-10. |
+| `claude.ai Firecrawl` | 10 | The paid cloud Firecrawl, which global rule 7 already forbids (credits ran out 2026-10-15), yet it took 506 calls in the 14 days to 2026-10-18. ~5.4k tokens/session, two tools always loaded. The shared self-hosted `firecrawl` server does the same work for free. Blocked 2026-10-18. |
+| `claude.ai Google Drive` | 11 | Drive files; 0 calls in 14 days. Blocked 2026-10-18. |
+| `claude.ai Google Calendar` | 9 | Calendar events; 1 call in 14 days, and its tool fetch timed out in `claude mcp list`. Blocked 2026-10-18. |
 
-Still on: Beeper (re-enabled 2026-10-16 by djbclark to watch the Hyades room), Gmail, Google Calendar, Google Drive, Context7, Firecrawl,
+Still on: Beeper (re-enabled 2026-10-16 by djbclark to watch the Hyades room), Gmail, Context7, Firecrawl (self-hosted, shared),
 claude-in-chrome, basic-memory, bezalel, arxiv, hermes, cow (token-savior and
 graft's MCP server were removed 2026-10-18).
 
@@ -95,12 +138,34 @@ old entries are quoted here so they can be pasted back.
 | Hook | Change | Re-enable |
 |---|---|---|
 | Superset notify (8 entries: SessionStart, UserPromptSubmit, PostToolUse, Stop) | removed; Superset's skills are off too | re-add `[ -n "$SUPERSET_HOME_DIR" ] && [ -x "$SUPERSET_HOME_DIR/hooks/notify.sh" ] && SUPERSET_AGENT_ID=claude "$SUPERSET_HOME_DIR/hooks/notify.sh"`-style entries (Superset's installer writes them) |
-| graft per-prompt pack (UserPromptSubmit `node ~/.claude/helpers/graft-hooks.cjs prompt`) | removed: ~150-300 tokens on every prompt, kept in history, often unrelated to the prompt | add `{"type":"command","command":"node \"/Users/djbclark/.claude/helpers/graft-hooks.cjs\" prompt"}` back under UserPromptSubmit |
+| graft per-prompt pack (UserPromptSubmit `node ~/.claude/helpers/graft-hooks.cjs prompt`) | removed: ~150-300 tokens on every prompt, kept in history, often unrelated to the prompt. **`graft init` re-added it; removed again 2026-10-18** (measured ~120 tokens, two of three hits off-target), and site-djbclark's `macos/graft-hook-timeout-fix/graft-hook-guard.sh`, which `graft-hook-timeout-fix.py` keeps on every graft hook, now skips the `prompt` event | add the entry back under UserPromptSubmit and set `GRAFT_PROMPT_HOOK=1` in `env` |
 | graft alwaysLoad keeper (SessionStart `python3 ~/.claude/hooks/graft_mcp_alwaysload.py`) | removed, and `"alwaysLoad": true` dropped from the graft entry in `.mcp.json` of aiuse, djbclark-ade and tendcf: graft's 6 tool schemas (~880 tokens) now load on demand via ToolSearch. Measured: graft called in 6% of sessions, 64% of its answers followed by a read of the same file anyway | re-add the hook and the flag |
 | rtk Bash rewrite (PreToolUse Bash `rtk hook claude`) | now `python3 "$HOME/.claude/hooks/rtk_hook.py"` (symlink to `claude/hooks/rtk_hook.py`), which skips the rewrite when cwd is under `.claude/worktrees/`: Claude Code's worktree-isolation guard refuses rewritten commands, so a worktree sub-agent couldn't run plain `git` (2026-10-12) | set the command back to `rtk hook claude` |
 | cswap quota table (SessionStart `~/.claude/hooks/cswap_quota_context.sh`, ~950 tokens) | now `matcher: "^(startup|resume|clear)$"`: no longer re-injected after each compaction | drop the matcher |
 
-## Skill folders moved aside
+## Skills hidden by setting (2026-10-18)
+
+Moving folders does not hold: `bl skill update` re-created the `bailian-*`
+links and the paseo CLI the `paseo*` ones, both on 2026-10-18. `skillOverrides`
+in `~/.claude/settings.json` does hold, whatever re-links the folder:
+
+1. `"off"` (gone for the model and from `/`): the nine `bailian-*` skills.
+2. `"user-invocable-only"` (you can still type `/name`; the model no longer
+   sees the description): `paseo`, `paseo-advisor`, `paseo-committee`,
+   `paseo-handoff`, `paseo-help`, `paseo-plugin`, the five `ralph-tui-*`,
+   `siyuan`, `siyuan-article-import`, `siyuan-excalidraw`, `siyuan-markdown`,
+   `skillopt-sleep`, `skillopt-sleep-learned`, `terminus-kira`, `reorg-orca`,
+   `setup-modern-cli`, `teach`. None was invoked by the Skill tool in the 14
+   days to 2026-10-18.
+
+`"skillListingBudgetFraction": 0.007` caps the listing at 7k tokens. Past the
+cap, descriptions are dropped least-used first; names stay. `/doctor` shows
+which descriptions were dropped.
+
+Re-enable a skill globally by deleting its key. For one repo only, add
+`"skillOverrides": {"<name>": "on"}` to that repo's `.claude/settings.json`.
+
+## Skill folders moved aside (2026-10-10, superseded above for bailian)
 
 Moved from `~/.claude/skills/` to `~/.claude/skills-disabled/` (symlinks and
 the `superset` folder, untouched otherwise). The targets under
