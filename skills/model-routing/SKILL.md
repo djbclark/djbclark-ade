@@ -226,12 +226,26 @@ Rules for any agent that dispatches to agy:
   provider `sipb`).
 - **Prepaid real money, gated**: opencode-zen, openrouter, deepseek —
   only via the `opencode-ralph-tui-*` gate scripts, never by default.
-- **Operator-gated (2026-10-15)**: omp (oh-my-pi), every route (`omp`,
-  `omp -p`, `omp acp`, acp-run/acp-dispatch, Orca, herdr): never without the
-  operator's specific, explicit approval for that run; `aiuse` flags it
-  `requires_operator_approval`. Rules: `bigteam`'s *Operator-gated agents*.
+- **The Claude API credits, omp (operator 2026-10-19; gate lifted)**: the pool
+  `aiuse` labels "omp credits" is the Claude Max plan's monthly API credits (an
+  expiring dollar grant, resets 2026-11-05). It is a **normal tier, used with
+  discernment**: first for work that needs API access and cannot run through a TUI
+  or ACP (kind **`api-only`**: SDK paths such as the Claude route in
+  `bin/failover.py`, a verdict classifier, batch/API-only jobs; omp is the only
+  pool in that kind and ranks first), otherwise for ordinary `code` and `bulk`
+  slices via `acp-run omp --model anthropic/claude-sonnet-5-5 [--effort L]`, so the
+  credits are **fully used before they expire each month, never left unspent**.
+  No `ACP_OPERATOR_APPROVED=omp` any more. **burn-before-reset:** `route_agent.py`
+  treats the credits as an expiring grant (`grant_days = 30`): while the balance
+  sits 30+ points above an even spend over the month it earns the burn-first bonus
+  and the route line says "burn before reset". Cautions: omp's own default model is
+  `github-copilot/gpt-5.6-luna`, which would spend the Copilot **reserve**, so
+  `acp-run omp` refuses a run without `--model anthropic/claude-...`; and the router
+  skips omp for dispatch kinds while omp holds no enabled Anthropic login
+  (`omp_anthropic_ready`; 2026-10-19 the OAuth refresh token had expired, `omp login`
+  fixes it). Rules: `bigteam`'s *Operator-gated agents*.
   **cline (2026-10-17)**: the TUI and Cline.app are uninstalled; acp-run,
-  acp-dispatch and `route_agent.py` gate it like omp so nothing calls it until
+  acp-dispatch and `route_agent.py` gate it so nothing calls it until
   the operator re-enables it on purpose. Hermes keeps using Cline through its
   own ClinePass API key; that pool stays.
 
@@ -522,7 +536,12 @@ method that runs the waves.
    reads, crush/SIPB (free, 30B-class) for light bulk. Claude's own pool
    codes on Sonnet 5.5 (`claude --model sonnet --effort high`, rank 12, right
    after agy's Claude pool; operator 2026-10-18: only Fable stays out of
-   code); Haiku only as Agent-tool sub-agents for small lookups. Gemini Flash
+   code); Haiku only as Agent-tool sub-agents for small lookups. **The Claude
+   API credits (omp, operator 2026-10-19)** are a pool here too, used with
+   discernment: kind `api-only` first (SDK paths and batch jobs that cannot run
+   through a TUI or ACP), else `code`/`bulk` slices (rank 13, ahead of Cursor)
+   so the monthly grant is spent before it expires; never left unspent, and
+   no per-run approval (cautions under *Operator-gated agents* above). Gemini Flash
    is not a code pool (2026-10-18: GLM-5.3 tier on hard agentic coding), and
    **quota never buys a much weaker pool into code or judgment**: `plan`
    only picks pools within `[routing].quality_max_rank_gap` (10) rank steps
@@ -621,14 +640,13 @@ method that runs the waves.
    lifeline; aiuse `[disabled_services]`). Claude itself: keep enough 5h headroom to finish
    integrating what is in flight, because orchestration runs from it.
 7. **Never:** **hermes** as a delegation target (the operator's own assistant;
-   `acp-run` and `acp-dispatch` refuse it the way they refuse omp); **omp**
-   without the operator's specific, explicit yes for that run
-   (`ACP_OPERATOR_APPROVED=omp`; `bigteam`'s *Operator-gated agents*); **cline**,
+   `acp-run` and `acp-dispatch` refuse it by an approval gate); **cline**,
    uninstalled 2026-10-17 and gated the same way (Hermes's ClinePass pool is
    separate and stays); the
    prepaid pools (opencode-zen paid, openrouter, deepseek) without a fresh
    operator decision; a credits-backed model (Claude usage credits, Codex
-   credits, OpenCode Go "Use balance") or re-enabling a disabled toggle to reach
+   credits, OpenCode Go "Use balance"; **not** the Claude Max plan's monthly API
+   credits, the omp tier of 2026-10-19) or re-enabling a disabled toggle to reach
    a better model; `devin` (dormant by choice); an all-vendor fan-out.
 8. **Probes over memory, per batch:** `aiuse --available` (exit 3 = nothing
    usable), `cswap list`, then `route_agent.py plan --kinds ...`; re-plan at

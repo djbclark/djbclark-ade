@@ -40,7 +40,9 @@ review and rework. Concretely:
 3. **The reserve is never depleted** (copilot: floor 60% left, one small
    slice, only for `github` slices; grok has been an ordinary pool since
    2026-10-18); **hermes is never a target**;
-   **omp only with the operator's explicit yes**; never an all-vendor fan-out.
+   **omp (the Claude API credits) is a normal tier since 2026-10-19**: `api-only`
+   work first, else `code`/`bulk` slices so the credits are spent before the
+   monthly expiry; never an all-vendor fan-out.
 4. **Use this skill proactively**, even when not asked: any discrete,
    separable work leaves this session's context.
 
@@ -128,12 +130,13 @@ Classify every pool before assigning anything:
 | **frontier** | Claude Fable 5.1 and codex `gpt-6-astra` | only a slice that really needs a frontier model to look it over (a security-relevant or concurrency fix's final review, debugging that defeated real attempts, a whole-corpus read); one per pool per wave, in-flight slices reserve quota (2026-10-18); see *Pool policy* below |
 | **lifeline** | another agent runs on it | use with care and never let it run out; see *Reserve pools* below (clinepass and Claude itself) |
 | **reserve** | copilot (GitHub-side review) | hard floor 60% left (`route_agent.py` `reserve_floor`), one small slice at a time, only for kind `github`; a missing or stale reading means do not use. Grok was one until 2026-10-18 (GrokBot moved to its own Cursor pool): now an ordinary subscription pool for `realtime-web`, `research` and `bulk`, behind the burn-first pools |
-| **never** | hermes; the prepaid pools; credits-backed models | not a target by any route; `acp-run`/`acp-dispatch` refuse hermes like omp |
+| **never** | hermes; the prepaid pools; credits-backed models (not the Max plan's API credits: omp, below) | not a target by any route; `acp-run`/`acp-dispatch` refuse hermes behind an approval gate |
+| **api credits** | omp: the Claude Max plan's monthly API credits (expiring grant, operator 2026-10-19) | kind `api-only` first (SDK paths, verdict classifiers, batch jobs), else `code`/`bulk` via `acp-run omp --model anthropic/claude-sonnet-5-5` so they are spent before each expiry; `route_agent.py` marks it "burn before reset" when far above an even spend; needs a working omp Anthropic login (`omp login`) |
 | **burn-first** | a pool whose window resets and the allowance is lost, with >= 40% left on every window (`aiuse` raises a `kind:"burn"` alert). Today: **agy's Claude/GPT pool** (`acp-run agy --model claude-opus-5-5 --effort high` / `--model claude-sonnet-5-5 --effort high`, agy 1.4.1 (2026-10-18) dropped the effort-suffixed ids), and any provider's idle second pool | assign it first for code, review and research, 2-3 slices at once (judgment goes to the frontier pools); see *agy Claude/GPT pool* below |
 | **shared allowance** | a GitHub-side feature draws on the same subscription | usable, but spend modestly and keep a margin; see *Copilot* under *Reserve pools* below |
 | **prepaid** | real money | never without a fresh explicit operator decision |
 | **excluded** | operator has ruled it out | respect it, with its end condition (below) |
-| **operator-gated** | the operator must approve each use | never plan, probe or dispatch it without the operator's specific, explicit yes for this run; see *Operator-gated agents* below |
+| **operator-gated** | the operator must approve each use (hermes, cline; omp until 2026-10-19) | never plan, probe or dispatch it without the operator's specific, explicit yes for this run; see *Operator-gated agents* below |
 
 ### Pool policy — who gets which slice (operator, 2026-10-15)
 
@@ -184,9 +187,8 @@ a fan-out needs from it:
    floor; `gh` from any other agent covers most GitHub work. **Grok** takes
    `realtime-web` slices first and `research`/`bulk` behind the burn-first
    pools; it has no floor (an ordinary subscription pool since 2026-10-18).
-5. **Never**: hermes (gated like omp in `acp-run`/`acp-dispatch`), omp
-   without `ACP_OPERATOR_APPROVED=omp` after a specific yes, prepaid or
-   credits-backed models, clinepass (never a bigteam target: `NEVER_ROUTE` in
+5. **Never**: hermes (gated in `acp-run`/`acp-dispatch`), cline, prepaid or
+   credits-backed models (the Claude API credits via omp are a pool, item 3), clinepass (never a bigteam target: `NEVER_ROUTE` in
    `route_agent.py`; it stays in Hermes's chain), devin, an all-vendor fan-out.
 6. **Start on the cheap eligible tier and escalate on a verified failure**
    (operator, 2026-10-18; it replaces "route up when unsure"): move the slice
@@ -268,26 +270,36 @@ means do not use it. It is no longer a reserve: GrokBot moved to its own Cursor 
 in `~/.config/aiuse/config.toml` `[disabled_services]` is commented out, and
 Hermes's `fallback_providers` do not name `grok-sub` (operator's call).
 
-### Operator-gated agents — ask first, every time (operator, 2026-10-15)
+### Operator-gated agents: hermes and cline ask first, every time (omp left the list 2026-10-19)
 
-"Not use omp or omp acp without specific explicit operator approval." This is a
-standing gate, not an exclusion with an end date:
+"Not use omp or omp acp without specific explicit operator approval" (operator,
+2026-10-15) was a standing gate until **2026-10-19**, when djbclark lifted it
+(round 2 of the software-factory `/steps` walk): the pool `aiuse` labels "omp
+credits" is the Claude Max plan's monthly API credits, an expiring grant, and
+**the Claude API credits are a normal tier, used with discernment: first for work
+that needs API access and cannot run through a TUI or ACP (kind `api-only`), and
+otherwise for ordinary `code`/`bulk` slices via `acp-run omp`, so the credits are
+fully used before they expire each month, never left unspent.** `acp-run` and
+`acp-dispatch` no longer ask for `ACP_OPERATOR_APPROVED=omp`; the `aiuse`
+`requires_operator_approval` flag on that row is stale (queue item: aiuse). Two
+cautions stay: omp's configured default is `github-copilot/gpt-5.6-luna`, so
+`acp-run omp` refuses a run without `--model anthropic/claude-...` (a bare omp run
+would spend the Copilot reserve), and `route_agent.py` skips omp for dispatch kinds
+while omp has no enabled Anthropic login (`omp login`).
 
-1. **omp (oh-my-pi)**, by every route: `omp`, `omp -p`, `omp acp`, an `acp-run` or
-   `acp-dispatch` slice, an Orca `--agent omp` worker, a herdr pane, and any model
-   reached through omp. `aiuse` marks the omp row `requires_operator_approval`
-   ("AI: Do not use without asking operator"); headroom on it is not permission.
+1. **hermes**: never a delegation target (operator 2026-10-15), gated in
+   `acp-run`/`acp-dispatch`.
 1a. **cline (operator 2026-10-17)**: the CLI and Cline.app are uninstalled. The
    machinery (`acp-run cline`, `acp-dispatch cline`, the `route_agent.py` alias)
    stays, gated behind `ACP_OPERATOR_APPROVED=cline`, so it is re-enabled only on
    purpose: reinstall, then the operator names it. Hermes still uses Cline through
    its own ClinePass API key; that is Hermes's pool, not a bigteam target.
-2. Approval is specific: the operator names omp for this run or this slice. A
+2. Approval is specific: the operator names the agent for this run or this slice. A
    general "use every agent", "bigteam this" or a peer's routing plan does not
    count, and one approval does not carry over to the next batch.
 3. To ask, put it in the wave plan as its own AskUserQuestion option, with the
-   slice and why omp. After a yes, set `ACP_OPERATOR_APPROVED=omp` for that call:
-   `acp-run` and `acp-dispatch` refuse an omp slice without it.
+   slice and why. After a yes, set `ACP_OPERATOR_APPROVED=<agent>` for that call:
+   `acp-run` and `acp-dispatch` refuse a gated slice without it.
 
 ### Reserve pools — never run them out
 

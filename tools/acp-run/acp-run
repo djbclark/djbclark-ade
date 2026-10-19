@@ -330,6 +330,9 @@ AGENTS = {
     "devin": (["devin", "acp"], None),
     "cline": ([CLINE_CMD, "--acp"], None),
     "hermes": (["hermes", "acp"], None),
+    # omp (oh-my-pi) native ACP server (`omp acp`, omp 18.12.2 verified 2026-10-19). Its Claude
+    # API credits are a normal tier since 2026-10-19 (operator): no per-run approval.
+    "omp": (["omp", "acp"], None),
     # zcode has no ACP mode of its own; william0wang/zcode-acp (npm -g
     # zcode-acp-server) wraps `zcode app-server --stdio`. Model switches work when
     # the server gets ZCODE_BIN=<pkg>/vendor/zcode.cjs (zcode_bin(), set in run()); until
@@ -2213,7 +2216,10 @@ CONTEXT_IDS = ("context", "context_window", "context_size")
 
 def effort_options(options):
     return [o for o in opt_dicts(options)
-            if o.get("id") != "thinking" and (o.get("id") in EFFORT_IDS or o.get("category") == "thought_level")]
+            # a `thinking` switch is on/off (cline, copilot) unless it lists levels: omp's lists
+            # low..max for a Claude model (2026-10-19), and that is its effort
+            if (o.get("id") != "thinking" or len(flat_values(o)) > 3)
+            and (o.get("id") in EFFORT_IDS or o.get("category") == "thought_level")]
 
 
 def resolve_effort(options, level, who):
@@ -2365,6 +2371,11 @@ def launch_tweaks(a, cmd, env):
             cmd += ["--model", a.model]
     if a.agent == "cline" and effort and effort != "default":
         cmd += ["--thinking", effort]
+    if a.agent == "omp" and a.model:
+        # omp's ACP session has no `model` config option; the model is the root flag
+        # (`omp --model M acp`, M like anthropic/claude-sonnet-5-5; verified 2026-10-19: it also widens the `thinking` option to
+        # low..max for a Claude model). Its configured default is github-copilot/gpt-5.6-luna.
+        cmd = cmd[:1] + ["--model", a.model] + cmd[1:]
     cmd += shlex.split(os.environ.get(f"ACP_RUN_ARGS_{a.agent.upper()}", "")) + list(getattr(a, "agent_arg", None) or [])
     env.update(env_pairs(os.environ.get(f"ACP_RUN_ENV_{a.agent.upper()}", "")))
     for kv in getattr(a, "agent_env", None) or []:
@@ -4042,7 +4053,7 @@ async def run(a, log, err, log_path):
                 # choices are visible (R1 6.6)
                 sets = dict(DEFAULT_SET.get(a.agent, {}))
                 sets.update(kv.split("=", 1) for kv in a.set)
-                if a.model:
+                if a.model and a.agent != "omp":
                     sets["model"] = a.model
                 options = await apply_config(a, conn, sess, init, client, order_sets(sets), applied,
                                              per_run_data=bool(deny_dir or os.environ.get("ACP_RUN_CRUSH_DATA")))
@@ -4087,7 +4098,7 @@ async def run(a, log, err, log_path):
             if a.perm == "read-only" and not a.mode:
                 sets.update(READONLY_SET.get(a.agent, {}))
             sets.update(kv.split("=", 1) for kv in a.set)
-            if a.model:
+            if a.model and a.agent != "omp":
                 sets["model"] = a.model
             sets = order_sets(sets)
             if a.resume and not sess.config_options and (sets or getattr(a, "effort", None) or getattr(a, "context", None)):
@@ -4293,16 +4304,16 @@ def env_float(name):
 
 
 # Agents nothing may run without the operator's specific, explicit approval for that run
-# (operator 2026-10-15: "not use omp or omp acp without specific explicit operator approval";
-# same day: "hermes should never be used" as a delegation target, it is the operator's own
-# assistant and aiuse lists it under [disabled_services]).
+# (operator 2026-10-15: "hermes should never be used" as a delegation target, it is the operator's
+# own assistant and aiuse lists it under [disabled_services]). omp was gated the same day and left
+# this table on 2026-10-19 (operator): its Claude API credits are a normal tier, first for work
+# that needs API access and otherwise for code/bulk slices (skills/model-routing/SKILL.md).
 # The caller sets ACP_OPERATOR_APPROVED=<agent>[,<agent>] only after the operator said yes;
-# acp-dispatch applies the same gate. omp has no AGENTS entry yet, so approval alone is not enough.
+# acp-dispatch applies the same gate.
 # cline (operator 2026-10-17): the CLI and Cline.app were uninstalled; the machinery stays so it can
 # be re-enabled on purpose (reinstall, then approve). Only Hermes still uses Cline, through its own
 # ClinePass API key, never through this.
 OPERATOR_GATED = {
-    "omp": "oh-my-pi bills Claude cloud credits; aiuse marks it requires_operator_approval",
     "hermes": "the operator's own assistant, never a delegation target (operator 2026-10-15)",
     "cline": "uninstalled 2026-10-17; only Hermes uses Cline (its ClinePass API pool)",
 }
@@ -4544,6 +4555,15 @@ def main():
                  f" ({OPERATOR_GATED[a.agent]}); once given, set {APPROVAL_ENV}={a.agent}")
     if a.agent not in AGENTS:
         ap.error(f"agent must be one of: {', '.join(AGENTS)}")
+    if (a.agent == "omp" and not a.info and not a.resume
+            and not (a.model and "claude" in a.model.lower())
+            and not os.environ.get("ACP_RUN_OMP_ANY_MODEL")):
+        # omp's own default is github-copilot/gpt-5.6-luna, which spends the Copilot reserve, not
+        # the Claude API credits omp is routed for (operator 2026-10-19); the credits need
+        # `--model anthropic/claude-...` and a one-time `omp login` for Anthropic.
+        ap.error("omp needs --model anthropic/<claude model> (its configured default is"
+                 " github-copilot/gpt-5.6-luna, which would spend the Copilot reserve, not the"
+                 " Claude API credits); ACP_RUN_OMP_ANY_MODEL=1 overrides")
     if not (a.perm in (*PERMS, "ask") or a.perm.startswith("scoped:")):
         ap.error("--perm must be all, read-only or deny")
     if a.perm == "read-only" and a.agent not in READONLY_AGENTS:

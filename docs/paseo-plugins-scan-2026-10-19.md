@@ -115,7 +115,7 @@ Installs are registry counts on 2026-10-19; "source" is the registry id unless m
 
 | Plugin | Installs | Against the ADE |
 |---|---|---|
-| omercnet/omp | 118 | omp is gated behind an explicit yes per run (`~/CLAUDE.md` item 26); install only if that changes |
+| omercnet/omp | 118 | the omp per-run gate was lifted 2026-10-19 (its Claude API credits are a normal tier, `skills/model-routing/SKILL.md`), so this plugin is no longer blocked on it |
 | lefos13/antigravity-cli, 3ae3ae/agy-provider | 34, 7 | agy as a Paseo provider; agy pools are at 1% this week, and `acp-run agy` is the only sanctioned route |
 | geoqiao/deepseek-harness | 114 | not in the routing policy |
 | supermomonga/zcode-provider (`git:`) | 16 | zcode is in the policy (GLM-5.3); scan `failed`; Paseo may already run zcode through ACP |

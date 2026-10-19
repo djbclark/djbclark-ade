@@ -987,6 +987,13 @@ Questions from the two frontier reads, the OpenRig study and the plugin scan
 16. **SF-Q16 Telegram surface.** **Decided: the Paseo Telegram plugin replaces Hermes's relay.**
 17. **SF-Q17 Supervised or unattended v1.** **Decided: unattended on the Mac now** (risk 12).
 18. **SF-Q18 Spec approval click.** **Decided: none when the spec stays inside the brief.**
+19. **SF-Q19 The Claude API credits (the pool `aiuse` labels "omp credits").** **Decided
+    (round 2, 2026-10-19): the per-run omp gate is lifted; the Claude Max plan's monthly API
+    credits are a normal tier, used with discernment: first for work that needs API access and
+    cannot run through a TUI or ACP (kind `api-only`), otherwise for ordinary `code`/`bulk`
+    slices via `acp-run omp`, so they are fully used before they expire each month.** One copy
+    of the rule: `skills/model-routing/SKILL.md`; `config/routing.toml` carries it as the `omp`
+    service (`grant_days = 30` gives it the "burn before reset" bonus).
 
 ## 10. Risks
 
@@ -1043,7 +1050,7 @@ by itself. Codex moved to the $100 plan on 2026-10-19 (aiuse plan label `prolite
 Codex gate no longer waits on a 5-hour window. Rulings for this project (djbclark, 2026-10-19): antigravity (`agy`) is allowed on
 both its pools, whichever is usable; Paseo's `glm-acp-agent` draws the `zai` pool; copilot,
 gemini CLI and qwen-code are configured in Paseo but off; cline only for Hermes and
-techno-euphora; hermes is never a target; omp needs an explicit yes per run.
+techno-euphora; hermes is never a target; the Claude API credits (omp) are a normal tier (SF-Q19, 2026-10-19).
 
 ### 11.1 Pools, as of the snapshot
 
@@ -1058,7 +1065,7 @@ techno-euphora; hermes is never a target; omp needs an explicit yes per run.
 | z.ai GLM (`zcode`, Paseo `glm-acp-agent`) | 36% weekly | 2026-10-21 | isolated code modules, bulk |
 | Grok (`grok`) | 59% | 2026-10-22 | realtime web research |
 | OpenCode Go (`opencode`) | 2% monthly | 2026-11-10 | nothing this month |
-| omp credits = Claude Max monthly API credits (`omp`, or any API-key path) | 100% | 2026-11-05 | a Claude-pool code slice, only with an explicit yes (gate under review, §9.3 round 2) |
+| omp credits = Claude Max monthly API credits (`omp`, or any API-key path) | 100% | 2026-11-05 | `api-only` work first, else `code`/`bulk` slices, no per-run yes (SF-Q19, decided 2026-10-19, §9.3) |
 | copilot, gemini CLI, qwen-code, cline, hermes | off by ruling | | never |
 
 ### 11.2 The table
@@ -1144,7 +1151,7 @@ monthly, they change.
 | Plan | Cloud execution included | How a slice is launched | Draws | Ready here? |
 |---|---|---|---|---|
 | Claude Max 20x | cloud sessions (`claude --cloud`, claude.ai/code, mobile, Routines); no VM charge | `claude --cloud --model <m> "<task>"` from the repo (clones the GitHub remote at the current branch, or uploads the checkout when no remote or no GitHub App); `claude -p "<msg>" --cloud <session-id>` to follow up; `--teleport` pulls it local | the same 5h and weekly windows as local use | yes: first session started 2026-10-19 (Linux pytest job, branch `ci/linux-pytest-job`) |
-| Claude Max | monthly API credits for the Claude API: this is the pool `aiuse` labels `omp credits` (djbclark, 2026-10-19), 100% unused, resets 2026-11-05 | the omp TUI was set up on it (`acp-run omp`); also any `ANTHROPIC_API_KEY` path (the Claude SDK in `bin/failover.py`, a verdict classifier) | its own monthly credit, wasted when unspent | yes via omp once its per-run gate is settled (§9.3 round 2); rename the pool in `aiuse` |
+| Claude Max | monthly API credits for the Claude API: this is the pool `aiuse` labels `omp credits` (djbclark, 2026-10-19), 100% unused, resets 2026-11-05 | the omp TUI was set up on it (`acp-run omp`); also any `ANTHROPIC_API_KEY` path (the Claude SDK in `bin/failover.py`, a verdict classifier) | its own monthly credit, wasted when unspent | yes via omp, no per-run gate (SF-Q19, decided 2026-10-19; needs `omp login` for Anthropic first, `docs/queue.md`); rename the pool in `aiuse` |
 | Codex, ChatGPT $100 plan | Codex Cloud tasks, no VM charge; cloud tasks use the allowance faster than local turns | `codex cloud exec --env <ENV_ID> --attempts 1-4 "<task>"`; `codex cloud list --json`, `status`, `diff`, `apply`; also `@codex` on a GitHub issue or PR | the Codex weekly window | needs one cloud environment created on the web for `djbclark-ade` (no non-interactive way to create one); `codex cloud list` returns none today |
 | Cursor Pro+ | Cloud Agents on every paid plan, API v1 in public beta; billed at API price for the chosen model against the included usage, then on-demand (on-demand must be enabled) | `POST https://api.cursor.com/v1/agents` with a user API key (`autoCreatePR`, `startingRef`); `@cursor` on a GitHub issue or PR; Automations on a schedule | the Cursor pool at API price, not the `auto` rate, so it drains faster than local `auto` | the Cursor GitHub app is already on `djbclark-ade`: its Security Agent and Approval Agent ran as checks on PR 3 (2026-10-19); the API key goes into `sudo-secretspec` (round 2 ruling), the launch is scripted by the lead |
 | GitHub Copilot | coding agent (`gh agent-task`, preview) | off by ruling (§11.1); reserve only | premium requests | not used |

@@ -7,14 +7,20 @@
 # Opus 5.5 at high; everyday work goes to the OTHER pools; copilot is the one
 # reserve, with a hard floor (GitHub-side Copilot review runs on it; grok is an
 # ordinary pool since 2026-10-18, when GrokBot moved to its own Cursor pool);
-# hermes is never a target; omp is operator-gated.
+# hermes is never a target; omp (the Claude API credits) is an ordinary tier since
+# 2026-10-19, API-only work first and then code/bulk slices, so the credits are spent
+# before they expire each month; cline stays operator-gated.
 # `models` is the acp-run `--model [--effort L]` suggestion per kind; `agent`
 # is the acp-run agent name when it differs from the aiuse provider id.
 
 [routing]
 # Kinds of work. Deliberately few — a taxonomy nobody can apply is worse than
 # a coarse one that gets used.
-kinds = ["judgment", "frontier", "code", "bulk", "research", "mechanical", "github", "realtime-web"]
+# `api-only` (operator 2026-10-19): work that needs the Claude API and cannot run through a
+# TUI or ACP (SDK paths such as the Claude route in bin/failover.py, a verdict classifier,
+# a batch or API-only job). Only omp's credits pool is eligible; the caller makes the API
+# call itself and `route_agent.py route --kind api-only` says whether the credits have room.
+kinds = ["judgment", "frontier", "code", "bulk", "research", "mechanical", "github", "realtime-web", "api-only"]
 # burn_first services (use-it-or-lose-it pools) win a tie-sized margin while
 # they hold at least this much headroom. Static `burn_first = true` on a
 # [[service]] is only a fallback when expected waste at reset is unknown
@@ -65,15 +71,14 @@ suggest_better_delta = 3
 
 [discovery]
 # Never a routable service, whatever aiuse or acp-run lists (operator 2026-10-15):
-# hermes is the operator's own assistant; omp needs a per-run operator approval
-# (acp-run/acp-dispatch gate both behind ACP_OPERATOR_APPROVED). Discovery would
-# otherwise hand them DEFAULT_PROFILE bulk work: omp sat in `aiuse --available`
-# with 100% headroom on 2026-10-15.
+# hermes is the operator's own assistant. omp was gated behind a per-run operator approval
+# 2026-10-15..19; the gate is lifted (operator 2026-10-19, see the omp [[service]] below),
+# so omp is a curated service now and discovery never needs to guess its profile.
 # clinepass: Hermes's lifeline, never a slice target
 never_route = ["hermes", "clinepass"]
 # cline (operator 2026-10-17): the TUI is uninstalled; gated so a reinstall does not put it back
 # into discovery by accident (ALIASES folds it into clinepass, which NEVER_ROUTE covers).
-operator_gated = ["omp", "cline"]
+operator_gated = ["cline"]
 # Discovery names the TUI; aiuse names the account behind it. Without this
 # map, discovery would surface `cline` as a brand-new service and hand it bulk
 # work — silently defeating the never-bulk rule that protects clinepass, which
@@ -84,12 +89,13 @@ aliases = { cline = "clinepass", agy = "antigravity", claude-agent-teams = "clau
 [dispatch]
 # Never dispatched without the operator's specific, explicit approval for that run (operator 2026-10-15);
 # the same gate is in acp-run.
-# omp (operator 2026-10-15) and hermes (same day: "hermes should never be used" as a
-# delegation target) need ACP_OPERATOR_APPROVED=<agent>; acp-run applies the same gate.
+# hermes (operator 2026-10-15: "hermes should never be used" as a delegation target) needs
+# ACP_OPERATOR_APPROVED=<agent>; acp-run applies the same gate. omp left this list on
+# 2026-10-19 (its Claude API credits are a normal tier).
 # cline (operator 2026-10-17): uninstalled, left in place for a deliberate re-enable; Hermes
 # keeps its own ClinePass API pool.
 # Distinct from [discovery].operator_gated (dispatch also gates hermes).
-operator_gated = ["omp", "hermes", "cline"]
+operator_gated = ["hermes", "cline"]
 # Fable at xhigh/max should almost never run (operator 2026-10-18): the same approval gate, keyed
 # ACP_OPERATOR_APPROVED=fable-xhigh. Fable at high is the frontier route_agent.py suggests.
 fable_gated_efforts = ["xhigh", "max"]
@@ -152,6 +158,29 @@ access = "cli-only"
 # Haiku lookups go through the Agent tool, not acp-dispatch. Fable at xhigh is never suggested:
 # acp-dispatch makes it an operator-approved run (2026-10-18).
 models = { judgment = "opus --effort high", frontier = "fable --effort high", code = "sonnet --effort high" }
+
+# The Claude Max plan's monthly API credits (an expiring dollar grant; aiuse labels the pool
+# "omp credits", provider `omp`), reached through the omp TUI (`acp-run omp`, `omp acp`) or
+# any ANTHROPIC_API_KEY path. Operator 2026-10-19 lifted the 2026-10-15 per-run gate: a normal
+# tier, used with discernment. First for `api-only` work (rank 1, the only pool in that kind),
+# otherwise `code` and `bulk` slices so the grant is fully spent before it expires; never left
+# unspent. Code ranks behind the use-it-or-lose-it agy pool (11) and claude (12) and ahead of
+# Cursor. `grant_days` makes the router treat the pool as an expiring grant: it earns the
+# burn-first bonus while it holds more than burn_first_waste_min points above an even spend
+# over the grant period (a pool far from exhausted late in the month), see route_agent.py.
+[[service]]
+name = "omp"
+cli = "omp (Claude API credits: acp-run omp --model anthropic/claude-sonnet-5-5)"
+good_at = { api-only = 1, code = 13, bulk = 35 }
+billing = "credits"
+note = "Claude Max monthly API credits (expiring grant); API-only work first, else code/bulk so the credits are spent before the reset"
+grant_days = 30
+# Skipped for acp-dispatch kinds while omp has no enabled Anthropic login (route_agent.py
+# omp_anthropic_ready: 2026-10-19 the OAuth refresh token had expired, `omp login` needed).
+ready_probe = "omp-anthropic"
+max_parallel = 2
+access = "cli-only"
+models = { api-only = "anthropic/claude-sonnet-5-5 --effort high", code = "anthropic/claude-sonnet-5-5 --effort high", bulk = "anthropic/claude-haiku-5-5 --effort low" }
 
 [[service]]
 name = "codex"

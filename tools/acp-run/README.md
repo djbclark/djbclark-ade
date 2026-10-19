@@ -427,6 +427,16 @@ Ids: `gemini-3.8-flash-{high,medium,low}`, `claude-opus-5-5-{low,medium,high}`, 
 
 agy 1.4.1 (2026-10-18) lists bare ids (`gemini-4-argon`, `gemini-3.8-flash`, `claude-opus-5-5`, `claude-sonnet-5-5`, `gpt-oss-120b-medium`) plus a `thinking_level` option (low/medium/high, default high), which `--effort` sets like any other effort option. Before 1.4.1, `--effort low|medium|high` picked `<base>-<level>` (`claude-opus-5-5` + high → `claude-opus-5-5-high`); acp-run still does that when no thought-level option is offered. `xhigh` and `max` exit 2, not rewritten to high. `agy -p --effort max` can reach them; acp-run does not call it. `gpt-oss-120b` is fixed `-medium`. ThinkingLevel: 1 LOW, 2 MEDIUM, 3 HIGH, 4 MINIMAL, 5 EXTRA_HIGH. Options: `model`, `mode` only. `--context` exits 2. Gemini 3.x Flash and 3.1 Pro: 1048576. OAuth `maxTokens` from CCPA `fetchAvailableModels`. Claude and GPT-OSS windows not measured.
 
+### omp
+
+`omp acp` (omp 18.12.2, added to the table 2026-10-19 when the per-run gate was lifted: its Claude
+API credits are a normal tier). The session has no `model` config option, so `--model M` becomes
+the root flag (`omp --model M acp`, M like `anthropic/claude-sonnet-5-5`); `--effort` drives its
+`thinking` option, which lists low..max once a Claude model is set. A run without a Claude `--model`
+exits 2: omp's configured default is `github-copilot/gpt-5.6-luna` and would spend the Copilot
+reserve (`ACP_RUN_OMP_ANY_MODEL=1` overrides). Needs an enabled Anthropic login in omp
+(`omp login`); with an expired one the run ends `No API key found for anthropic` (2026-10-19).
+
 ### grok
 
 https://docs.x.ai/developers/grok-4-7 , https://docs.x.ai/developers/pricing — 1.0.52.

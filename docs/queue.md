@@ -14,6 +14,25 @@ gets a `cursor-cloud` place that POSTs to `api.cursor.com/v1/agents`. (3) The Ma
 monthly API credits are the `omp credits` pool in `aiuse` (djbclark, 2026-10-19): rename the
 pool, verify the balance on the Anthropic console, and route one API-key workload at it.
 
+## The Claude API credits (omp): finish the wiring (decided 2026-10-19)
+
+The per-run omp gate is lifted (`skills/model-routing/SKILL.md`, proposal SF-Q19): the credits
+are a normal tier, `api-only` work first, else `code`/`bulk` via `acp-run omp --model
+anthropic/claude-sonnet-5-5`. Open, in order: (1) **`omp login` for Anthropic** (djbclark, an
+interactive OAuth): omp's Anthropic credential in `~/.omp/agent/agent.db` has been disabled since
+2026-10-13 ("Refresh token expired"), so every `acp-run omp --model anthropic/...` run ends "No
+API key found for anthropic" (verified 2026-10-19) and `route_agent.py` skips omp for dispatch
+kinds until the login works (`omp_anthropic_ready`). Then confirm one slice's cost lands on the
+credits pool in `aiuse`, not on a Claude plan window, and that the omp login is the pool the
+operator means. (2) **aiuse** (`~/src/aiuse`, another repo, not edited here): drop the stale
+`requires_operator_approval: true` and the "AI: Do not use without asking operator" notice on the
+omp row, rename the pool, and let its suggestion engine propose omp ("burn before reset") when
+the credits sit far above an even spend over the month late in the grant period; the same rule
+lives in `route_agent.py` (`grant_days`, `grant_waste`) for `plan`/`route`. (3) The `api-only`
+callers (`bin/failover.py` Claude SDK route, a verdict classifier) take their key from the
+secret backend, not from omp: check that key draws these credits, then have them ask
+`route_agent.py route --kind api-only` for the balance before a batch.
+
 ## Buy a Jev plan before the factory's merge gate goes live (SF-Q10, 2026-10-19)
 
 `bin/jev` runs in shadow mode. Phase F's automatic merge (proposal §8 item 9.5) needs a live
