@@ -1008,7 +1008,7 @@ the per-prompt pack itself.
 
 **Status:** posted 2026-10-18 with djbclark's yes: https://github.com/trailhq/Trail-Code/issues/497#issuecomment-6257408007
 
-## Claude Code — user-level `deniedMcpServers` reported as "enterprise policy" (draft for anthropics/claude-code, not filed)
+## Claude Code — user-level `deniedMcpServers` reported as "enterprise policy" (filed 2026-10-18: https://github.com/anthropics/claude-code/issues/103330)
 
 Searched 2026-10-18 in `anthropics/claude-code` for "blocked by enterprise policy", "deniedMcpServers
 enterprise policy" and "deniedMcpServers user settings". Nearest threads: #96408 (remote managed
@@ -1036,4 +1036,4 @@ auto-injected). None covers the label.
 > administrator. An agent auditing the setup on this machine took the user's own deny list for an org
 > policy until it checked the settings files.
 
-**Status:** draft; file only with djbclark's yes.
+**Status:** filed 2026-10-18 with djbclark's yes: https://github.com/anthropics/claude-code/issues/103330
