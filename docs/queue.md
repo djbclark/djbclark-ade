@@ -10,8 +10,10 @@ slices that can leave the Mac. Two need djbclark once: (1) environment `ccarenv_
 2026-10-19, but codex-cli 0.163.0 cannot see new-style environments (`codex cloud exec` exits 1,
 "no cloud environments are available for this workspace"; upstream openai/codex#50182 and
 #51585, open). Re-probe after each codex-cli release (`codex cloud exec --env <ID> --branch
-<b> "<task>"`); meanwhile launch from the web/desktop composer or via `@codex` on a GitHub
-issue/PR (needs the Codex GitHub app on the repo). Then a `codex-cloud` place in
+<b> "<task>"`); route chosen (round 3, 2026-10-19): `@codex` on a GitHub issue, scriptable with
+`gh` and the factory's intake path; djbclark installs the Codex GitHub app on `djbclark-ade`,
+first task is https://github.com/djbclark/djbclark-ade/issues/4 (re-trigger with an `@codex` comment if the body mention predates the
+install). Then a `codex-cloud` place in
 `acp-dispatch`/`route_agent.py` so the router can pick it (§11.5 rule 4);
 (2) a Cursor user API key into the secret backend (`sudo-secretspec`): decided 2026-10-19
 (round 2), djbclark creates the key at the Cursor dashboard and stores it; then `acp-dispatch`
