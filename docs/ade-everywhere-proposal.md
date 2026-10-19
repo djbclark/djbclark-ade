@@ -1,8 +1,8 @@
 # ADE everywhere: one repo that recreates the whole agent environment on any machine
 
-Proposal, version 2.2, 2026-10-19. Status: **decided, round 3 open**: the seventeen decisions
-of section 9.1 stand; eight new questions (Q18-Q25, section 9.2) await djbclark. Implementation
-starts with Phase 0, whose preservation steps need none of them.
+Proposal, version 2.3, 2026-10-19. Status: **decided**: all twenty-five questions answered
+(section 9). v2.3 applies djbclark's round-3 answers (section 9.2), two of them against the
+recommendation (Q20, Q22). Implementation starts with Phase 0.
 v2.1 was reviewed the same day by Claude Fable 5.1
 ([ade-everywhere-v21-review-fable-2026-10-19.md](ade-everywhere-v21-review-fable-2026-10-19.md))
 and Codex `gpt-6-astra`
@@ -17,11 +17,15 @@ today, measured) and [ade-everywhere-prior-art-2026-10-19.md](ade-everywhere-pri
 (web research; three of its lines are corrected in section 12). Citations are numbered
 superscripts resolved under "Citation footnotes".
 
-What changed from v2.1: the companion is data, not a chezmoi "overlay" (chezmoi has one source
-state), and an adoption snapshot stands in for the originals chezmoi never kept; plaintext indexing moves off the blind peer; CASS reads a
-native-shaped view at a pinned build; takeover becomes a serialised transfer record and every
-generation carries a manifest; the Paseo route's real contracts, the DAG's owner, a bootstrap
-stage zero and the Phase 1 product contracts are written down.
+What v2.2 changed from v2.1: the companion is data, not a chezmoi "overlay" (chezmoi has one
+source state), and an adoption snapshot stands in for the originals chezmoi never kept; storage
+and plaintext work are split; CASS reads a native-shaped view at a pinned build; takeover becomes
+a serialised transfer record and every generation carries a manifest; the Paseo route's real
+contracts, the DAG's owner, a bootstrap stage zero and the Phase 1 product contracts are written
+down. What v2.3 changed: vps-primary is a trusted peer that holds the key and runs the index
+builds (Q18); `claude` and `codex` are shimmed so every launch honours a transfer (Q20); Homebrew
+installs the standard way (Q22); the release matrix, key and name (Q24) and the generation budget
+(Q25) are fixed.
 
 ## 1. Goal, restated as acceptance tests
 
@@ -47,15 +51,15 @@ Written as tests the finished project must pass:
 3. **T3 any session, at three levels.** From machine B, for a session that ran on machine A:
    (a) *readable*: `session-finder` finds it, live or ended, and shows it in full; (b) *native
    continuation*: for Claude Code and Codex it can be continued on B, as a fork by default, or
-   in place after A has acknowledged a transfer (ADE-managed launches, Q20); (c) *workspace*: the dirty or unpushed work the
+   in place after A has acknowledged a transfer (every launch, through the ADE shim, Q20); (c) *workspace*: the dirty or unpushed work the
    session left behind can be carried over with one command. Level (a) is required for every
    provider, (b) for Claude Code and Codex, (c) for git projects.
 4. **T4 no indispensable machine, with a stated loss window.** Each workstation holds a full
-   copy of the shared state; the always-on peer holds ciphertext. Losing any one device loses at
+   copy of the shared state, and so does the always-on peer, vps-primary. Losing any one device loses at
    most what no surviving device holds: the recovery point is the latest complete generation
    verified on a surviving device (minutes when online, longer when a laptop is asleep or
-   offline), and `ade doctor` shows last-captured and last-replicated separately. Whether dirty
-   or unpushed work is inside that window is Q21. Two retained copies
+   offline), and `ade doctor` shows last-captured and last-replicated separately. Dirty or
+   unpushed work is outside that window (Q21). Two retained copies
    exist before any original is deleted. GitHub, Forgejo, Hyades, the tailnet coordinator and the
    secret backend are outside dependencies the design accepts; no personal machine is one.
 5. **T5 Paseo parity, proven by a pilot.** One real delegated workflow (a `bigteam` fan-out
@@ -126,9 +130,9 @@ installed into `ade/skills` and carry uncommitted edits from Paseo's own refresh
 5. **Secrets never touch git, and the trust model is stated.** `sudo-secretspec` grants secrets
    to the authorized operator identity, not per process<sup>[7](#C44)</sup>; 1Password is the default backend
    behind an interface that also admits `age` files or none (T6).
-6. **Every workstation is a full peer; the always-on peer is blind.** Replication is
-   peer-to-peer over the tailnet; the Hyades or vps-primary peer stores ciphertext it cannot
-   read and is not an introducer.
+6. **Every workstation is a full peer, and so is the always-on peer.** Replication is
+   peer-to-peer over the tailnet; vps-primary is a trusted peer that holds the key (Q18) and is
+   not an introducer.
 7. **Paseo is the front end, not the engine.** Headless dispatch keeps its tested engine
    (`acp-run`/`acp-dispatch`); Paseo gets visibility and control of it through its CLI, SDK and a
    plugin. It replaces herdr and Orca only after the pilot in T5 passes, and herdr stays as the
@@ -138,8 +142,8 @@ installed into `ade/skills` and carry uncommitted edits from Paseo's own refresh
    (section 8).
 9. **CI does the heavy lifting; the Mac stays responsive.** Every build, test suite and
    container run goes to CI first (GitHub runners for GitHub-sourced repos, Forgejo CI on Hyades
-   when private work needs it). Index rebuilds need plaintext, so they run off-hours on a Mac,
-   never on the blind peer (11.3, Q18). A local run goes through `bg` and never overlaps another
+   when private work needs it). Index rebuilds need plaintext, so they run on vps-primary, a
+   trusted host since Q18, off the Mac entirely (11.3). A local run goes through `bg` and never overlaps another
    heavy job (djbclark, 2026-10-19).
 
 ## 4. Target shape
@@ -245,7 +249,8 @@ snapshot and restore, doctor, clone, sessions, services). Stage zero (below) com
 2. `ade install`: runtimes (uv, Python, Node) through `mise`, pinned in
    `packages.toml`<sup>[9](#C56)</sup>, so Node no longer comes from Hermes's private copy
    (inventory §5); packages per OS from `packages.toml`; external tools from `tools.toml`
-   (pinned); agent CLIs from their vendors. Where a `site-djbclark` Ansible role already
+   (pinned); agent CLIs from their vendors, with the `claude` and `codex` shims ahead of them
+   on PATH (6.3.6). Where a `site-djbclark` Ansible role already
    installs something, `ade install` calls the role rather than re-implementing it.
 3. `ade init-private <url>`: create the companion from `private-template/` on GitHub or
    Forgejo if it does not exist, clone it to the fixed path, and apply again.
@@ -269,11 +274,12 @@ stays as the per-repo toolchain prompt; it is not a machine bootstrap (inventory
 tag from an unknown key proves nothing, so before step 1: (a) platform prerequisites (macOS
 with the Command Line Tools, or a Linux account with git, a shell and sudo); (b) the release
 key's fingerprint, given out of band, and a prompt naming the signed tag; (c) a chezmoi binary
-whose cosign-signed checksums verify<sup>[11](#C72)</sup>; (d) Homebrew from its
-Apple-Silicon-only `.pkg`, not the documented curl-pipe<sup>[12](#C71)</sup> (Q22), distro
-packages on Linux; (e) companion and credentials only after the public-only apply passes.
+whose cosign-signed checksums verify<sup>[11](#C72)</sup>; (d) Homebrew by its standard
+installer, `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`,
+trusting TLS to raw.githubusercontent.com<sup>[12](#C71)</sup> (Q22), distro packages on Linux; (e) companion and credentials only after the public-only apply passes.
 `tools.toml` pins every external tool, with checksums for tarballs. A newcomer (T6) takes the
-fingerprint from their fork's publisher and re-signs; who holds djbclark's key is Q24.
+fingerprint from their fork's publisher and re-signs; djbclark's is a dedicated release key in
+the secret backend (Q24).
 
 **The companion is data, not an overlay.** chezmoi has one source state per config and errors
 when two sources name one target (only directories coalesce)<sup>[13](#C61)</sup>; externals
@@ -357,8 +363,8 @@ Things the single-Mac design assumes that a fleet breaks:
    servers, LiteLLM, the Paseo daemon, `acp-dispatch reap` (it recovers local slices, so it
    runs everywhere), the session collector. *Per-account-or-bot*: the Hermes Telegram gateway
    (two pollers on one bot token fight over `getUpdates`<sup>[21](#C45)</sup>), anything else holding a
-   single-consumer credential. *Fleet-coordinator*: fleet-watch, skillopt-night, the downstream
-   session ingest. `services.toml` carries the scope; `machines/<host>.toml` names the owner of
+   single-consumer credential. *Fleet-coordinator*, on vps-primary (a trusted host since Q18):
+   fleet-watch, skillopt-night, the downstream session ingest and the index builds. `services.toml` carries the scope; `machines/<host>.toml` names the owner of
    each non-per-host service; other machines install them disabled. Handover is manual
    (disable here, enable there); there is no automatic failover, because a split brain costs
    more than a few hours without fleet-watch.
@@ -434,7 +440,7 @@ and Antigravity, which this table does not yet cover.
 | git for transcripts (clync-style UUID merge plus LFS)<sup>[40](#C6)</sup> | Append-only jsonl merges, but 10 GB and growing bloats history and LFS costs on GitHub; clync picks between divergent runs. | Rejected for transcripts; kept for memory and Tier 2 handoffs. |
 | git-annex with Forgejo or Hyades as special remote | Not a folder mirror by its own account<sup>[41](#C34)</sup>, but its `numcopies` and preferred-content rules, with `mincopies` as the hard floor, are the "two copies before deletion" policy<sup>[42](#C57) [43](#C74)</sup>. | Adopted for the cold tier (Phase 5). |
 | CASS (coding_agent_session_search) pulling over SSH | Already collects from remote hosts over SSH or rsync with per-source provenance and path maps, indexes twenty-plus agents, and has a JSON API<sup>[44](#C23)</sup>. Pull-based: an offline laptop's new sessions wait until it is back, but its mirrored history stays searchable. Licence has a rider excluding Anthropic, OpenAI and anyone acting for them; djbclark accepts it as inapplicable to this personal use (Q12). | **Adopted** as the index over a native-shaped view of the archive (6.3.4, Phase 2); the FTS5 index stays only as a fallback for a store CASS cannot read. |
-| Syncthing over the tailnet | Peer-to-peer, no central node, fine for unique-named append-only files with one writer per file; concurrent writes to one file produce a `.sync-conflict` copy, never a refusal<sup>[45](#C40)</sup>; untrusted "receive-encrypted" peers exist but are marked beta, and recovery needs both the folder ID and the password<sup>[46](#C20b)</sup>. | **Chosen** for the live tier; it is sync, not backup. |
+| Syncthing over the tailnet | Peer-to-peer, no central node, fine for unique-named append-only files with one writer per file; concurrent writes to one file produce a `.sync-conflict` copy, never a refusal<sup>[45](#C40)</sup>; its untrusted-device encryption is beta<sup>[46](#C20b)</sup> and unused, since every peer here is trusted (Q18). | **Chosen** for the live tier; it is sync, not backup. |
 | Mutagen, rclone bisync, rsync over Tailscale SSH | Pairwise, no ownership semantics<sup>[47](#C21)</sup>. | Fallback for a machine that cannot run Syncthing. |
 | Taildrive | Alpha WebDAV mount, not sync<sup>[48](#C22)</sup>. | Rejected. |
 
@@ -463,18 +469,18 @@ fork) is detected by hash, not by size.
    plain copy elsewhere; never a hardlink, which shares the inode) new generations into this
    device's subtree, trims a partial last jsonl line, runs the exporters, and writes each
    generation's manifest. It never writes into another device's subtree. The existing `s1_*` ingesters and `session-finder`'s adapters become this collector.
-3. **The peers.** Every workstation plus one always-on peer (vps-primary, Q2) in
-   Syncthing's receive-encrypted mode, so the peer stores ciphertext only. It is **not** an
-   introducer (an untrusted device must not be able to add devices to trusted ones). Folder ID
-   and password are stored in the secret backend. The peer never indexes (11.3). Each device's versioning type and retention are named in
-   `machines/<host>.toml`. Syncthing versions only changes received from other devices, and is
+3. **The peers.** Every workstation plus one always-on peer, vps-primary (Q2), a normal
+   trusted Syncthing peer that receives plaintext over the encrypted transport and runs the
+   index builds (Q18, 11.3). It is **not** an introducer (a compromised device must not be able
+   to add devices to the others); device IDs are pinned per host. Each device's versioning type
+   and retention are named in `machines/<host>.toml`. Syncthing versions only changes received from other devices, and is
    off by default<sup>[51](#C77)</sup>: a deletion on one workstation is recoverable from the
    others' version folders, but a local edit is never versioned on its own device. A
-   restore-from-ciphertext drill is part of Phase 3.
+   restore-from-peer drill is part of Phase 3.
 4. **The index.** CASS (Q12) cannot read the generation tree: `path_mappings` rewrite
    workspace paths only, the Claude connector takes a conversation's id from the relative path
    (every generation would be a new conversation), and structural connectors find nothing in
-   wrapped layouts<sup>[52](#C64)</sup>. Each indexing host (11.3) keeps a materialised view,
+   wrapped layouts<sup>[52](#C64)</sup>. The indexing host, vps-primary (11.3), keeps a materialised view,
    `<device>/<native layout>`, one current file per session, plus the `.backup` SQLite copies
    via `OPENCODE_SQLITE_DB` and `HERMES_SQLITE_DB`<sup>[53](#C66)</sup>. CASS is pinned to a
    main commit with the #520 and #522 fixes, which v0.10.0 lacks<sup>[52](#C64) [54](#C65)</sup>
@@ -498,8 +504,11 @@ fork) is detected by hash, not by size.
    serialised transfer: under a local lock its collector writes a transfer record (owner,
    epoch, recipient, transfer id, final generation), freezes its reaper and `acp-dispatch`'s
    auto-resume for that session, and acknowledges one recipient; later requests are refused,
-   and the old origin never resumes a transferred id. The guarantee covers ADE-managed launches only (Q20); an unreachable origin
-   means a fork (Q14). No file-based lease: a synced lease cannot exclude anything, because
+   and the old origin never resumes a transferred id. The guarantee covers every launch (Q20):
+   `ade install` puts thin `claude` and `codex` shims on PATH ahead of the vendor binaries. A
+   shim parses nothing beyond `--resume`/`resume` and a session id, refuses a transferred id
+   with the new owner's name, and otherwise `exec`s the vendor binary unchanged, so vendor
+   updates pass through it. An unreachable origin means a fork (Q14). No file-based lease: a synced lease cannot exclude anything, because
    Syncthing reconciles after the fact<sup>[45](#C40)</sup>; `.lease` survives only as an
    advisory marker in `session-finder`.
 7. **Workspace carry-over (T3c).** `ade sessions pull --with-work` fetches a work manifest the
@@ -507,8 +516,8 @@ fork) is detected by hash, not by size.
    objects and refs only, not the worktree<sup>[56](#C46)</sup>; the staged and unstaged diffs
    kept apart, binary-safe; untracked files under a policy that excludes secrets and ignored
    paths; submodules and LFS objects listed, not carried. It restores into a fresh worktree and
-   needs a live origin; whether a lost machine's dirty work must be captured periodically is
-   Q21.
+   needs a live origin: a convenience, with a lost machine's dirty work outside the loss window
+   (Q21, revisited after Phase 2).
 8. **Tier 1 pointers.** `~/.local/state/handoffs` joins the archive the same way (per device)
    and `session-handoff` reads all devices; chain keys are already unique. Tier 2 handoffs stay
    in git.
@@ -522,18 +531,20 @@ lock-and-push rule of section 4.6.
 
 ### 6.5 Retention, privacy and the loss window
 
-1. **Hot tier**: every workstation, one year; its generation budget is Q25. **Cold tier**:
-   git-annex with `numcopies 2` plus a `mincopies` floor, since `numcopies` alone can be
-   breached by concurrent drops<sup>[42](#C57) [43](#C74)</sup>, across the peer and one Mac (Q7),
-   in a `hybrid` or `pubkey` encrypted special remote whose key is never on the peer
-   (`encryption=shared` keeps the cipher in git<sup>[58](#C75)</sup>); `ade sessions archive`
+1. **Hot tier**: every peer keeps all generations for 30 days, then the latest per session
+   plus every generation a fork or transfer record names, for a year (Q7, Q25; provisional
+   until Phase 2 measures). **Cold tier**: git-annex with `numcopies 2` plus a `mincopies`
+   floor, since `numcopies` alone can be breached by concurrent drops<sup>[42](#C57) [43](#C74)</sup>,
+   across vps-primary and one Mac (Q7), in a `hybrid` or `pubkey` encrypted special remote whose
+   key is in the secret backend, present on trusted hosts (Q18), never in git
+   (`encryption=shared` keeps the cipher there<sup>[58](#C75)</sup>); `ade sessions archive`
    moves sessions older than a year and refuses to drop the hot copy until two annex copies
    verify.
 2. **Copies are plaintext in more places than the archive**: the materialised view, the CASS or FTS5 index, Paseo's
    history, the Hermes export. Index files are mode 0600; exports used for sharing are made with
-   `--redact` or `--sanitize`; full-fidelity copies never leave operator-owned devices or the
-   ciphertext peer.
-3. **Lost device**: remove it from Syncthing, rotate the receive-encrypted folder password, and
+   `--redact` or `--sanitize`; full-fidelity copies never leave operator-owned devices (the
+   Macs and vps-primary).
+3. **Lost device**: remove its device ID from every peer, rotate any key it held, and
    accept that copies already on the device are not erased. Deletion scope is future access
    only unless djbclark asks for more (Q13).
 4. **Loss window**: the recovery point is the latest complete generation verified on a
@@ -653,8 +664,11 @@ then prove a thin slice end to end, then widen, and only then retire or delete.
    `manifest/*.toml` for the same two; `ade doctor`, `services`, `install` with mise and the
    package-only Ansible split; stage zero and the signed-tag root of trust; `private-template/`
    and `ade init-private` with an empty companion; the contracts this slice consumes (schema
-   versions and namespaces, 4.4's precedence and deletion rules, signing, a platform matrix,
-   Q24).
+   versions and namespaces, 4.4's precedence and deletion rules, signing with a dedicated
+   release key in the secret backend, and the platform matrix, Q24): macOS arm64 and Linux
+   x86_64. vps-primary is x86_64 (`uname -m`, Linux 6.18.56, checked locally 2026-10-19), so
+   one Linux target covers it and GitHub's default runners; Linux arm64 is not in the first
+   matrix.
    The first PR adds the GitHub Actions workflow (pytest plus the container smoke test) so
    every later PR is tested off the Mac; the companion test gets its own workflow on the
    private repo, moved to Forgejo CI if private work needs it. Gate: apply, reapply, restore and
@@ -665,17 +679,16 @@ then prove a thin slice end to end, then widen, and only then retire or delete.
    materialised native view and the `.backup` copies (6.3.4), and measure a full rebuild (wall
    time, RSS, bytes); implement the capture protocol (manifested generations, APFS clone) for
    Claude Code and Codex; native fork; a cross-home resume test (Mac to Linux, `/Users` to
-   `/home`); the transfer-record takeover; the work manifest. Gate: a session started on A is
+   `/home`); the transfer-record takeover and the `claude`/`codex` shims; the work manifest. Gate: a session started on A is
    read, forked and continued on B, and B's work comes back to A; the manifest survives
    marker-first arrival, a missing sidecar, truncation and compaction during capture; the work
-   manifest carries an untracked file, a binary edit and a staged/unstaged split.
+   manifest carries an untracked file, a binary edit and a staged/unstaged split; a
+   hand-typed resume of a transferred id is refused.
 4. **Phase 3, sessions for everyone (1 to 2 weeks).** Syncthing folder with per-device
-   versioning, the receive-encrypted peer (Q2), the restore-from-ciphertext drill, every other
+   versioning, vps-primary as a trusted peer (Q2, Q18), the restore-from-peer drill, every other
    provider's exporter, Tier 1 chains in the archive, `session-finder` over all devices,
    retention, the lost-device procedure and a lost-origin drill (6.5.4). Capture and export run
-   on each origin; the peer stores and scans ciphertext only; the first full index build runs
-   on a Mac off-hours through `bg` (or a trusted Linux worker, if Q18 names one), never while
-   the operator is working.
+   on each origin; the index builds run on vps-primary, off the Mac entirely (Q18).
 5. **Phase 4, Paseo pilot (2 to 3 weeks).** Owned-key config merge, profiles generated from
    `routing.toml`, the plugin (Helm panel first, then the usage source), `launch.py` and
    `fleet.py` over the adapter contract, `acp-dispatch --via paseo` after its state machine
@@ -695,8 +708,8 @@ then prove a thin slice end to end, then widen, and only then retire or delete.
    arbitrary operator, the newcomer walkthrough from a fresh account with no 1Password, no
    Hyades, no Mac and a Forgejo remote (Q17), changelog and release notes, and a
    dependency-notice and licence page. The repo is MIT, but CASS's rider does not pass to
-   third parties, so the page names it. The distribution needs a name other than `ade`, which
-   is taken on PyPI<sup>[74](#C73)</sup>, for example `ade-kit` (Q24). The optional features
+   third parties, so the page names it. The distribution is `ade-kit` (Q24), since `ade` is
+   taken on PyPI<sup>[74](#C73)</sup>; it ships for macOS arm64 and Linux x86_64. The optional features
    (sessions sync, cold tier, Hermes gateway) are documented as add-ons.
 
 ## 9. Decisions, with djbclark's answers (2026-10-19)
@@ -714,7 +727,7 @@ walk on 2026-10-19; the answer follows each question.
 2. **Q2 Always-on Syncthing peer: Hyades or vps-primary?** Recommended: vps-primary if it stays
    (NixOS, already on the tailnet, a flake we control); Hyades if vps-primary is going away.
    Either runs receive-encrypted and is not an introducer.
-   **Decided: vps-primary.**
+   **Decided: vps-primary.** **Superseded by Q18 (2026-10-19):** vps-primary is trusted.
 3. **Q3 Move the agent-service Ansible roles (`shared_mcp`, `basic_memory_mcp`, `litellm`,
    `paseo_desktop`, the agent half of `site_agents`) from `site-djbclark` into
    `djbclark-ade/services`?** Recommended: yes, in Phase 5; until then `ade install` calls them
@@ -734,6 +747,8 @@ walk on 2026-10-19; the answer follows each question.
 7. **Q7 Retention and at-rest policy**: hot tier a year on every workstation, cold tier
    git-annex with two copies; are encrypted transcripts allowed on a Hyades volume?
    **Decided: hot one year; cold on vps-primary plus one Mac; no Hyades volume.**
+   Note (v2.3): vps-primary now holds plaintext-capable keys (Q18), so the cold tier's "key off
+   the peer" rule (G13) becomes "key in the secret backend, present on trusted hosts".
 8. **Q8 Which machines are the fleet?** Macs, vps-primary, Hyades containers, Android phones?
    The bootstrap targets Mac and Linux; Termux is out unless you say otherwise.
    **Decided: Macs plus vps-primary; Hyades containers run services only; phones are clients.**
@@ -774,50 +789,68 @@ walk on 2026-10-19; the answer follows each question.
     cold tier, the Hermes gateway).
     **Decided: all four absent must work; sessions sync, cold tier and the Hermes gateway are optional add-ons.**
 
-### 9.2 Round 3 (open, 2026-10-19)
+### 9.2 Round 3 (decided)
 
-Raised by the v2.1 reviews (12.2); none blocks Phase 0. Already ruled, so not asked:
-`--via paseo` refuses what it cannot express instead of falling back (7.2).
+Raised by the v2.1 reviews (12.2) and answered by djbclark on 2026-10-19; Q20 and Q22 go
+against the recommendation. Already ruled, so not asked: `--via paseo` refuses what it cannot
+express instead of falling back (7.2).
 
 18. **Q18 Plaintext indexing host.** May one Linux host hold decrypted transcripts for
-    indexing, or does it all stay on the Macs off-hours? Open: the blind peer cannot read what
-    v2.1 gave it (G3). Options: (a) Macs only, via `bg`; (b) a new trusted Linux worker;
+    indexing, or does it all stay on the Macs off-hours? Open: v2.1 gave plaintext work to a
+    peer that held only ciphertext (G3). Options: (a) Macs only, via `bg`; (b) a new trusted Linux worker;
     (c) make vps-primary trusted, reversing Q2.
     **Recommended: (a)**: Q2 holds and no new host sees plaintext.
+    **Decided: (c), reversing Q2.** vps-primary is trusted: it holds the key, receives plaintext
+    over the encrypted transport and runs the index builds (risk 10.10).
 19. **Q19 Companion delivery.** Template `include` plus an optional second chezmoi instance on
     disjoint paths, dropping "private overrides any public file"? Open: chezmoi cannot layer
     two source states (G1). Options: (a) data, templates and the second instance (4.4); (b) data
     and templates only; (c) a source tree composed by `ade` before each apply.
     **Recommended: (a)**: Q11's personal files keep chezmoi semantics, in that second instance.
+    **Decided: (a)**: data, templates and an optional second instance on disjoint paths, which
+    `ade doctor` checks.
 20. **Q20 Takeover scope.** Same-id takeover for ADE-managed launches only, direct launches
     always forking? Open: no handshake sees a launch ADE never made (G5). Options: (a) yes;
     (b) also shim `claude` and `codex` to check the transfer record.
     **Recommended: (a)**: a shim around vendor CLIs breaks on their updates.
+    **Decided: (b), against the recommendation**: `claude` and `codex` are shimmed, so every
+    launch, hand-typed included, consults the transfer record (6.3.6, risk 10.11).
 21. **Q21 Dirty work and the loss window.** Is a lost machine's dirty and unpushed work inside
     the window, or is `--with-work` a convenience needing a live origin? Open: an on-request
     bundle dies with its origin (G15). Options: (a) convenience only; (b) periodic work capture.
     **Recommended: (a)**, revisited after Phase 2: periodic capture of untracked files widens
     the secrets surface.
+    **Decided: (a)**: a live-origin convenience; dirty work is outside the loss window;
+    revisited after Phase 2.
 22. **Q22 Fresh-Mac installer.** Homebrew's Apple-Silicon `.pkg` as the one sanctioned
     installer, or the curl-pipe as a documented exception? Open: Homebrew's default is a
     curl-pipe (G10). Options: (a) `.pkg` only, Intel Macs unsupported; (b) `.pkg` plus a
     checksum-pinned curl-pipe exception.
     **Recommended: (a)**: the fleet is Apple Silicon; the exception would be the one unverified step.
+    **Decided, against the recommendation: the regular Homebrew curl-pipe install**, trusting the
+    site's TLS certificate; no `.pkg` requirement, and the installer does not exclude Intel Macs (4.4).
 23. **Q23 CASS build and view.** CASS from a pinned main commit, over a native-per-device view
     instead of the generation tree? Open: v0.10.0 lacks #520 and #522 (G4). Options: (a) yes;
     (b) wait for a release, FTS5 meanwhile.
     **Recommended: (a)**: the fixes exist and the generation tree stays the record.
+    **Decided: (a)**: CASS from a pinned main commit over a native-per-device view; the
+    generation tree is the record.
 24. **Q24 Release boundary.** Which OS and architecture pairs does the first release promise,
     who holds the signing key, and what is the distribution name? Open: Phase 1 now consumes
     these (G11). Options: (a) macOS arm64 and Linux x86_64, a dedicated release key in the
     secret backend, `ade-kit`; (b) macOS arm64 only, the operator's own key, name later.
     **Recommended: (a)**: T1 and T7 test both, and a dedicated key rotates without touching
     the operator's identity.
+    **Decided: (a)**: macOS arm64 and Linux x86_64, a dedicated release key in the secret
+    backend, `ade-kit`. vps-primary is x86_64 (checked locally), so Linux arm64 is not in the
+    first matrix (Phase 1).
 25. **Q25 Generation budget.** What storage and transfer budget bounds a year of immutable
     generations? Open: full generations multiply storage (G4, Codex F8). Options: (a) all
     generations for 30 days, then the latest per session plus any a fork or transfer names;
     (b) all for the year; (c) a per-device byte cap, oldest pruned first.
     **Recommended: (a)**, provisional until Phase 2 measures: it keeps every point a fork names.
+    **Decided: (a)**: all generations for 30 days, then the latest per session plus every
+    generation a fork or transfer record names; provisional until Phase 2 measures (6.5.1).
 
 ## 10. Risks
 
@@ -830,8 +863,7 @@ Raised by the v2.1 reviews (12.2); none blocks Phase 0. Already ruled, so not as
 2. **Paseo moves fast.** 0.12.0 today; its published config schema wrongly rejected valid
    `agentProfiles` until 0.12.0<sup>[16](#C52)</sup>, and the plugin API is young. Mitigation: owned-key merges instead of symlinks, daemon, clients and
    plugin pinned together in `tools.toml`, the plugin kept small.
-3. **Syncthing is sync, not backup.** Deletions propagate; the encrypted peer is beta<sup>[46](#C20b)</sup>.
-   Mitigation: per-device versioning, the cold tier's two-copy floor, the restore drill.
+3. **Syncthing is sync, not backup.** Deletions propagate. Mitigation: per-device versioning, the cold tier's two-copy floor, the restore drill.
 4. **Two machines editing memory** produce occasional git conflicts and, more quietly,
    semantically inconsistent facts that merged cleanly. Mitigation: lock-and-push, tombstones,
    a ping on conflict, and a periodic consistency pass by an agent.
@@ -846,7 +878,14 @@ Raised by the v2.1 reviews (12.2); none blocks Phase 0. Already ruled, so not as
    (section 11); the plan spends the near-full Gemini pool on research and bulk first.
 9. **Mac load.** Container tests, index rebuilds and parallel agent fan-outs would make the
    workstation unusable. Mitigation: section 11.3; every PR is tested in CI before any local
-   run, and the blind peer does storage only; plaintext work stays on operator Macs (Q18).
+   run, and index builds run on vps-primary (Q18).
+10. **A vps-primary compromise exposes every session**, since Q18 gives it plaintext and the
+    keys. Mitigation: full-disk encryption, keys in the secret backend, pinned Syncthing device
+    IDs with no introducer, and an audit of who can ssh in.
+11. **The `claude`/`codex` shim breaks on a vendor flag change** (Q20). Mitigation: it parses
+    only `--resume`/`resume` and session ids and passes everything else through; `ade doctor`
+    checks the shim still resolves first on PATH and reaches the vendor binary.
+
 ## 11. Routing per phase: which AI does which step
 
 Snapshot 2026-10-19 16:17 UTC from `aiuse --available --json` (remaining share of each window)
@@ -895,11 +934,11 @@ otherwise, because a 1M-token Claude window costs the weekly pool several times 
 | 1 manifest and `ade` CLI | Linux container CI (T7) | claude `sonnet` 5.5 | medium | 200k | Claude weekly | small, iterative on GitHub runners |
 | 1 private companion | `private-template/`, `ade init-private`, newcomer trial | claude `sonnet` 5.5 | high | 200k | Claude weekly | code plus the empty-companion test |
 | 1 contracts | schemas, precedence and deletion rules, signing, platform matrix | claude `sonnet` 5.5 | high | 200k | Claude weekly | schema work needs exactness |
-| 2 sessions spike | identity model, generation manifests, transfer record (§6) | claude `opus` 5.5, codex gate | high | 200k | Claude, Codex | the blocker findings live here |
-| 2 sessions spike | CASS at a pinned commit, materialised view, rebuild measurement | claude `sonnet` 5.5 | high | 200k | Claude weekly | Rust tool, our view; the index runs on a Mac off-hours (11.3) |
+| 2 sessions spike | identity model, generation manifests, transfer record and shims (§6) | claude `opus` 5.5, codex gate | high | 200k | Claude, Codex | the blocker findings live here |
+| 2 sessions spike | CASS at a pinned commit, materialised view, rebuild measurement | claude `sonnet` 5.5 | high | 200k | Claude weekly | Rust tool, our view; the index runs on vps-primary (11.3) |
 | 3 sessions | collector over every adapter (`s1_*`, session-finder) | claude `sonnet` 5.5 | high | **1M** | Claude weekly | the one whole-archive refactor; budget it as several ordinary slices |
 | 3 sessions | per-store exporters (OpenCode, Cursor, zcode, Hermes) | zai `GLM-5.3` | high | default | z.ai 36% | isolated modules with a fixed contract |
-| 3 sessions | Syncthing units, receive-encrypted peer, two-machine trial | claude `sonnet` 5.5 | high | 200k | Claude weekly | ops plus a real trial on two hosts |
+| 3 sessions | Syncthing units, vps-primary as a trusted peer, two-machine trial | claude `sonnet` 5.5 | high | 200k | Claude weekly | ops plus a real trial on two hosts |
 | 3 sessions | SQLite backup checks and exporter research | grok `grok-4.7` | high | 256k | Grok 59% | realtime web plus repo reading |
 | 4 Paseo delta | ADE plugin (Helm panel, dispatch rows, session panel) | claude `sonnet` 5.5 | high | 200k | Claude weekly | TypeScript against a moving API; re-read `llms.txt` each slice |
 | 4 Paseo delta | `launch.py`, `fleet.py`, `acp-dispatch --via paseo` | claude `sonnet` 5.5 | high | 200k | Claude weekly | touches the dispatch engine; tests first |
@@ -920,9 +959,8 @@ needs it, during this project and in general; avoid high Mac load.
 | pytest, lint, the `ade` container smoke test, plugin build | GitHub Actions on `djbclark-ade` | free runners for a GitHub-sourced repo; the first PR of Phase 1 adds the workflow; `load-watch ci decide` is the check before any local run |
 | private companion template test, `ade doctor` against a real companion | GitHub Actions on the private repo, or Forgejo CI on Hyades when the data or the minutes require it | secrets via the `none` backend in CI; never the operator's 1Password |
 | the real-Linux-user gate (reboot, linger, services) | vps-primary or a VM, not CI | the one test a container cannot run |
-| capture and export (collector, Hermes `.backup` and export, exporters) | the origin device, always | the plaintext source exists only there; Hermes and its `state.db` live on the Mac |
-| ciphertext storage and the encrypted folder's Syncthing scan | vps-primary, the blind peer (Q2) | it holds encrypted names and contents and cannot read them<sup>[46](#C20b)</sup> |
-| plaintext indexing (materialised view, CASS or FTS5 builds) | a Mac off-hours through `bg`, unless Q18 names a trusted Linux worker | 10 GB of small files; never while the operator is working |
+| capture and export (collector, Hermes `.backup` and export, exporters) | the origin device, always | the native store exists only there; Hermes and its `state.db` live on the Mac |
+| archive storage, its Syncthing scan and plaintext indexing (materialised view, CASS or FTS5 builds) | vps-primary, a trusted host since Q18, off the Mac entirely | 10 GB of small files; it holds plaintext (risk 10.10) |
 | agent fan-outs during the project (`bigteam`, `acp-dispatch`) | Paseo daemon or `acp-run` on vps-primary where the agent's tools allow; the Mac runs the lead session | Paseo's one-daemon-per-machine model is what makes this a client choice, not a redesign |
 | local runs that cannot be avoided | `~/ops/site-private/bin/bg`, one heavy job at a time | never `BG_LOAD_WAIT=0`, never two builds |
 
@@ -966,7 +1004,7 @@ six with a change of remedy. The table says what moved.
 | F14 config ownership | accept | owned-key merge, never a symlinked `config.json`; profiles generated; versions pinned together |
 | F15 CLI justified, general provisioner not | accept with change | v2 proposed a narrow home-grown linker; djbclark then chose chezmoi outright (Q4), so `ade` keeps only doctor, clone, sessions, services; mise for runtimes |
 | F16 companion needs a contract | accept | v2 named a contract file it never defined; v2.2 writes the contract out (4.4): precedence, keyed merges, tombstones, unknown keys fail; rename deferred (Q1) |
-| F17 Linux and root of trust too late | accept | both in Phase 1; signed tags, pins, no curl-pipe (stage zero in v2.2); real Linux user as the gate |
+| F17 Linux and root of trust too late | accept | both in Phase 1; signed tags, pins (stage zero in v2.2; Homebrew's curl-pipe allowed by Q22 in v2.3); real Linux user as the gate |
 | F18 retention must include derived copies | accept with change | 6.5: index permissions, redacted exports, lost-device procedure, deny-list from `operator.toml` |
 | F19 cleanup before proving preservation | accept | phases reordered as gates; deletion is Phase 6 |
 | F20 "no central node" too broad | accept | T4 names the accepted outside dependencies and claims only "no indispensable personal machine" |
@@ -995,17 +1033,17 @@ evaluation file).
 |---|---|---|---|---|
 | G1 no chezmoi overlay | blocker | F1 / F2 | accept with change | companion as data plus a disjoint second instance; data contract (4.2-4.4, Q19) |
 | G2 no originals kept | blocker | F4 / F1 | accept | adoption snapshot, `ade restore`, restore test (T1, 4.4, Phases 0-1) |
-| G3 plaintext on the blind peer | blocker | F2 / F9 | accept | three kinds of work split (principle 9, 6.3.3, 11.3, Phase 3, Q18) |
+| G3 plaintext on the blind peer | blocker | F2 / F9 | accept | three kinds of work split (principle 9, 6.3.3, 11.3, Phase 3, Q18); superseded by Q18 in v2.3 |
 | G4 CASS input and build | major | F3 / F7, F8 | accept with change | materialised view, pinned commit, rebuild measured (6.3.4, Phase 2, Q23, Q25) |
-| G5 takeover not exclusive | major | F10g in part / F5 | accept | serialised transfer record, ADE-managed only (T3, 6.3.6, Q20) |
+| G5 takeover not exclusive | major | F10g in part / F5 | accept | serialised transfer record, ADE-managed only (T3, 6.3.6, Q20); v2.3 shims `claude` and `codex`, so it covers every launch |
 | G6 completion marker | major | none / F6 | accept | per-generation manifest; arrival tests (6.3, Phase 2) |
 | G7 fork natively | major | F7 / Q6 row | accept | `--fork-session`, `codex fork`, sidecar parentage (6.1, 6.3.5) |
 | G8 Paseo route contracts | major | F5, F12 / F12 | accept with change | control table, refusal before launch, state machine (7.1, 7.2) |
 | G9 the DAG is Orca's | major | none / F15 | accept | owner column; herdr adapter kept (7.2, Phase 4) |
-| G10 bootstrap stage zero | major | F6 / F3 | accept with change | stage-zero contract (T1, 4.4, Q22) |
+| G10 bootstrap stage zero | major | F6 / F3 | accept with change | stage-zero contract (T1, 4.4, Q22); installer: curl-pipe by ruling |
 | G11 contracts too late | major | F9 / F16 | accept with change | contracts in Phase 1; `doctor` states; licence page (4.4, 8, Q24) |
 | G12 loss window | major | none / F10 | accept | recovery point restated; lost-origin drill (T4, 6.5.4, Phase 3) |
-| G13 cold tier | major | F10a / F11 | accept | encrypted remote, `mincopies`, per-device versioning (6.2, 6.3.3, 6.5.1) |
+| G13 cold tier | major | F10a / F11 | accept | encrypted remote, `mincopies`, per-device versioning (6.2, 6.3.3, 6.5.1); superseded by Q18 in v2.3 |
 | G14 `modify_` and HOME ownership | major | none / F4 | accept with change | ownership table; writer quiesced; Ansible split (4.4, Phase 1) |
 | G15 work bundle | major | none / F13 | accept | work manifest and tests (6.3.7, Phase 2, Q21) |
 | G16 store table gaps | major | F10e, F10f / F14 | accept | Hermes limit, omp, Paseo, Codex symlink, inventory (6.1, Phase 0) |
@@ -1048,7 +1086,7 @@ Citation corrections (id: old claim, corrected claim):
 9. <a id="C56"></a>C56 — mise installs and pins runtimes (Python, Node, uv) per project and globally — mise dev tools (project docs; mise.jdx.dev). <https://mise.jdx.dev/dev-tools/>
 10. <a id="C58"></a>C58 — `loginctl enable-linger` keeps user services running without a login session — loginctl (reference; freedesktop.org). <https://www.freedesktop.org/software/systemd/man/latest/loginctl.html>
 11. <a id="C72"></a>C72 — release checksums are cosign-signed — Install chezmoi (chezmoi.io). <https://www.chezmoi.io/install/>
-12. <a id="C71"></a>C71 — the documented install is a curl-pipe; the `.pkg` is for Apple Silicon — Homebrew installation (brew.sh). <https://docs.brew.sh/Installation>
+12. <a id="C71"></a>C71 — the documented install is a curl-pipe of `install.sh` from raw.githubusercontent.com — Homebrew installation (brew.sh). <https://docs.brew.sh/Installation>
 13. <a id="C61"></a>C61 — two sources for one target are an inconsistent-state error; only directories coalesce — chezmoi issue 3131 (GitHub). <https://github.com/twpayne/chezmoi/issues/3131>
 14. <a id="C62"></a>C62 — externals name targets; archive members land as literal names; `git-repo` externals are plain clones — .chezmoiexternal format (chezmoi.io). <https://www.chezmoi.io/reference/special-files/chezmoiexternal-format/>
 15. <a id="C76"></a>C76 — `modify_` scripts get the current contents and write new contents — Manage different types of file (chezmoi.io). <https://www.chezmoi.io/user-guide/manage-different-types-of-file/>
@@ -1082,7 +1120,7 @@ Citation corrections (id: old claim, corrected claim):
 43. <a id="C74"></a>C74 — `mincopies` is the floor at all times; `numcopies` can be breached by concurrent drops — git-annex mincopies (branchable.com). <https://git-annex.branchable.com/git-annex-mincopies/>
 44. <a id="C23"></a>C23 — remote sources over SSH/rsync with `cass sources setup|add|sync|doctor`, per-source provenance and path maps, 20+ agents, JSON API; mirrored history stays searchable offline; OpenCode `opencode.db` and Hermes `state.db` are native connectors; MIT plus a rider granting no rights to Anthropic, OpenAI or anyone acting on their behalf — coding_agent_session_search (repo; GitHub). <https://github.com/Dicklesworthstone/coding_agent_session_search>
 45. <a id="C40"></a>C40 — concurrent changes to one file are kept as a `.sync-conflict` copy, never refused; synchronisation is asynchronous — Understanding Synchronization (project docs; syncthing.net). <https://docs.syncthing.net/users/syncing.html>
-46. <a id="C20b"></a>C20b — receive-encrypted folders on untrusted devices are beta / testing only; recovery needs the folder ID and the password — Syncthing untrusted device encryption (project docs; syncthing.net). <https://docs.syncthing.net/users/untrusted.html>
+46. <a id="C20b"></a>C20b — encrypted folders on untrusted devices are beta / testing only; recovery needs the folder ID and the password — Syncthing untrusted device encryption (project docs; syncthing.net). <https://docs.syncthing.net/users/untrusted.html>
 47. <a id="C21"></a>C21 — two-way low-latency sync over SSH with conflict policies — Mutagen synchronization (project docs; mutagen.io). <https://mutagen.io/documentation/synchronization>
 48. <a id="C22"></a>C22 — Taildrive is an alpha WebDAV share, a mount not a sync — Taildrive (vendor docs; tailscale.com). <https://tailscale.com/docs/features/taildrive>
 49. <a id="C67"></a>C67 — pull `order` defaults to `random`; other orders sort within a batch — Syncthing configuration (syncthing.net). <https://docs.syncthing.net/users/config.html>
