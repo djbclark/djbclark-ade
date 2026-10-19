@@ -26,6 +26,14 @@ History:
   net loss. Growth now counts from the floor after the latest compaction, the
   compact tier is +200k (or 400k total), and the early tier no longer
   recommends /compact. memory/feedback_self_compact.md.
+- 2026-10-18 (Fable cache-cost review, operator-approved): autoCompactWindow
+  400k -> 300k (simulated -1.6% cost; Claude Code compacts at the window less
+  its ~33k buffer, so ~267k), ASK_TOTAL follows it, PAGE_TOTAL 500k -> 400k.
+  A fresh session (/new) re-writes ~46k; a compaction re-writes ~72k plus a
+  summariser call and leaves ~104k behind, so at a finished task the first
+  choice is now the `handoff` skill + /new, and /compact only when the work
+  must continue in-context. A once-per-session note at BOUNDARY_TOTAL says so
+  early. Never compact at <=200k (simulated +0.9% at 200k, +17.1% at 150k).
 
 Measure: input + cache_creation + cache_read tokens of the newest usage block,
 i.e. the real context size (cache_read alone reads 0 after a cache miss).
@@ -36,9 +44,12 @@ session started in ~ carries ~90k before any work, and a compacted one ~100k.
 An absolute backstop still asks at ASK_TOTAL.
 
 Levels: 1 = early (delegate from now on; no compaction yet);
-2+ = compact (self-slash in herdr/Orca) or ask the operator at the next natural
+2+ = handoff + /new at a finished task, /compact only to continue in-context
+(self-slash in herdr/Orca; elsewhere auto-compaction), at the next natural
 boundary, again every REPEAT_EVERY of further growth. A compaction resets the
 floor and the level, so the tiers fire again only after the same growth.
+Separately, once per session at BOUNDARY_TOTAL: prefer handoff + /new over
+/compact at the next task completion.
 
 MUST always exit 0 -- never fail or delay a prompt. Python 3 stdlib only.
 Fail-fast: reads only a head window (baseline, once per session) and a tail
@@ -60,14 +71,18 @@ STATE_PATH = Path.home() / ".claude" / "state" / "context-nudges.json"
 # context has grown enough above the post-compaction floor to pay it back.
 EARLY_GROWTH = 40_000   # level 1: start delegating
 ASK_GROWTH = 200_000    # level 2: compact / ask the operator
-ASK_TOTAL = 400_000     # level 2 regardless of floor
-# ~/.claude/settings.json "autoCompactWindow" (set 2026-10-15): Claude Code
-# compacts by itself at this size, on every host, so outside herdr/Orca the
-# level-2 note no longer asks the operator. Keep the two numbers equal.
-AUTO_COMPACT_WINDOW = 400_000
+ASK_TOTAL = 300_000     # level 2 regardless of floor
+# ~/.claude/settings.json "autoCompactWindow" (set 2026-10-15, 300k since
+# 2026-10-18): Claude Code compacts by itself near this size, on every host, so
+# outside herdr/Orca the level-2 note no longer asks the operator. Keep
+# ASK_TOTAL and this equal. The real trigger is the window less the
+# "Autocompact buffer" /context shows (~33k): ~267k.
+AUTO_COMPACT_WINDOW = 300_000
+AUTO_COMPACT_BUFFER = 33_000
+BOUNDARY_TOTAL = 150_000  # once per session: handoff + /new beats /compact
 REPEAT_EVERY = 100_000  # level 3, 4, ...: again per this much more
 PAGE_GROWTH = 300_000   # Hermes ping (once per climb), whichever comes first
-PAGE_TOTAL = 500_000
+PAGE_TOTAL = 400_000
 SHRINK_RATIO = 0.75     # a size below this share of the last one = compacted
 COMPACTED = "compacted"  # _last_context_tokens: boundary newer than any usage
 # Unescaped quotes only: the same text inside a tool result is JSON-escaped.
@@ -172,8 +187,8 @@ def _level(total, growth):
 
 
 _COST_NOTE = (
-    "A compaction is not free: it re-writes ~70k tokens at the 1-hour cache's "
-    "2x rate plus the summary and leaves ~100k behind, so it pays back only "
+    "A compaction is not free: it re-writes ~72k tokens at the 1-hour cache's "
+    "2x rate plus a summariser call and leaves ~104k behind, so it pays back only "
     "after dozens of further requests on the same work."
 )
 
@@ -189,33 +204,55 @@ def _early_message(total, growth):
     )
 
 
+def _can_self_slash():
+    return bool(os.environ.get("HERDR_PANE_ID") or os.environ.get("ORCA_TERMINAL_HANDLE"))
+
+
+def _boundary_message(total):
+    # self-slash refuses outside herdr/Orca: there the operator types /new.
+    new = ("~/src/djbclark-ade/bin/self-slash \"/new\"" if _can_self_slash()
+           else "tell the operator /new is ready")
+    return (
+        f"Context is {total:,}. At the next task completion, if the following "
+        f"work is not a direct continuation, run the `handoff` skill and then "
+        f"{new} instead of /compact: a fresh session re-writes ~46k, a "
+        "compaction re-writes ~72k plus a summariser call and leaves ~104k "
+        "behind. Do not compact mid-task."
+    )
+
+
 def _ask_message(total, growth, repeat):
     lead = "Context is still growing" if repeat else "Context is large"
-    if os.environ.get("HERDR_PANE_ID") or os.environ.get("ORCA_TERMINAL_HANDLE"):
-        # A herdr pane or Orca terminal can queue its own /compact (standing
-        # operator ruling 2026-10-09, memory/feedback_self_compact.md).
+    if _can_self_slash():
+        # A herdr pane or Orca terminal can queue its own /new or /compact
+        # (standing operator ruling 2026-10-09, memory/feedback_self_compact.md).
         return (
             f"{lead}: {total:,} tokens (+{growth:,} since the session started "
             "or last compacted). Handle it yourself, without asking (operator "
             "2026-10-15): at the next natural boundary (a task done, never "
-            "mid-edit or with a sub-agent result unread), if you are continuing "
-            "the same work, save what the next turn needs, run "
-            "~/src/djbclark-ade/bin/self-slash \"/compact <focus>\" ONCE and end "
-            "the turn. If the next task is a different topic, run the `handoff` "
-            "skill now (it writes the Tier 2 document), then self-slash \"/new\" "
-            "and end the turn. Only if self-slash refuses (a draft on the input "
-            "line) ask the operator for /compact or /new. "
+            "mid-edit or with a sub-agent result unread), first choice when the "
+            "current task is finished, same topic or not: run the `handoff` "
+            "skill (it writes the Tier 2 document), then "
+            "~/src/djbclark-ade/bin/self-slash \"/new\" ONCE and end the turn "
+            "(a fresh session re-writes ~46k). Only if the work must continue "
+            "in-context: save what the next turn needs, run self-slash "
+            "\"/compact <focus>\" ONCE and end the turn. Only if self-slash "
+            "refuses (a draft on the input line) ask the operator for /new or "
+            "/compact. "
             + _COST_NOTE
         )
     return (
         f"{lead}: {total:,} tokens (+{growth:,} since the session started or "
         "last compacted). Do not ask: Claude Code compacts this session by "
-        f"itself at {AUTO_COMPACT_WINDOW:,} tokens (autoCompactWindow in "
-        "~/.claude/settings.json; the PreCompact hook writes the Tier 1 "
-        "checkpoint first). Until then start no new heavy work inline: send it "
-        "through /bigteam or a minimum-spec sub-agent. If the next task is a "
-        "different topic, run the `handoff` skill now (Tier 2 document) and "
-        "tell the operator /new is ready; otherwise keep going. "
+        f"itself at about {AUTO_COMPACT_WINDOW - AUTO_COMPACT_BUFFER:,} tokens "
+        f"(autoCompactWindow {AUTO_COMPACT_WINDOW:,} in ~/.claude/settings.json "
+        "less its buffer; the PreCompact hook writes the Tier 1 checkpoint "
+        "first). Until then start no new heavy work inline: send it through "
+        "/bigteam or a minimum-spec sub-agent. When the current task is "
+        "finished, same topic or not, run the `handoff` skill (Tier 2 "
+        "document) and tell the operator /new is ready (a fresh session "
+        "re-writes ~46k); keep going in-context only when the work must "
+        "continue. "
         + _COST_NOTE
     )
 
@@ -309,14 +346,19 @@ def main():
             print(_ask_message(total, growth, repeat=fired >= 2), flush=True)
     session_state["level"] = level
 
+    # Once per session id, not per compaction: a /new starts a new id.
+    if total >= BOUNDARY_TOTAL and not session_state.get("boundary"):
+        session_state["boundary"] = True
+        print(_boundary_message(total), flush=True)
+
     if growth >= PAGE_GROWTH or total >= PAGE_TOTAL:
         if not session_state.get("paged"):
             session_state["paged"] = True
             repo = os.path.basename((data.get("cwd") or "").rstrip("/")) or "claude"
             _send_ping(
                 f"{repo}: Claude Code context at ~{total // 1000}k "
-                f"(+{growth // 1000}k since start or last compact); agent will ask you to "
-                "/compact, or /handoff then /new, at its next boundary.",
+                f"(+{growth // 1000}k since start or last compact); agent will "
+                "/handoff then /new, or /compact, at its next boundary.",
                 data.get("cwd"),
             )
     elif level < 2:

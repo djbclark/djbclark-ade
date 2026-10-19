@@ -19,9 +19,13 @@
 # pane's agent_status is "working": a command sent mid-turn is swallowed, never run
 # (seen 2026-10-09: a /rename sent while the session worked left no trace).
 # A stale $HERDR_PANE_ID (pane moved between workspaces) is resolved via `herdr pane get`.
-# Refuses (exit 7) a /compact while another command is queued for the same pane, or
-# within SELF_SLASH_COMPACT_GAP (default 1800 s) of the last one sent there. Any
-# other command queues behind the pending one (2026-10-14: /quit after autorename's
+# Refuses (exit 7) a /compact while another command is queued for the same pane.
+# Refuses (exit 7) a /compact, /new, /clear or /reset within SELF_SLASH_COMPACT_GAP
+# (default 1800 s) of any of those four sent there (2026-10-18: the context hook now
+# recommends handoff + /new at a finished task, so a model that misjudges "done"
+# must not loop); checked again by the waiter just before sending, so a /new queued
+# behind a /compact is refused too. --dry-run reports the same refusal. Any other
+# command queues behind the pending one (2026-10-14: /quit after autorename's
 # /rename at the end of /loose + /handoff was refused).
 # Runs detached (nohup) so it survives the Bash tool returning; the log
 # is ~/.local/state/self-slash.log.  First verified 2026-10-09 (ClaudeHelm, herdr);
@@ -65,13 +69,31 @@ if [ "$tui" = cursor ]; then marker="→"; else marker="❯"; fi
 if [ "${#text}" -gt "${SELF_SLASH_MAX:-300}" ]; then
   echo "self-slash: argument is ${#text} chars; anything over ~300 is pasted and the command is not run. Shorten it (or SELF_SLASH_MAX=N)." >&2; exit 2
 fi
-[ "$dry" = 1 ] && { echo "self-slash: dry run, would send to $host $pane after ${delay}s: ${text:0:80}"; exit 0; }
-log="$HOME/.local/state/self-slash.log"; mkdir -p "$(dirname "$log")"
-prompt_line="$(dirname "$(realpath "$0")")/../skills/session-finder/prompt_line.py"
+log="$HOME/.local/state/self-slash.log"
 # One waiter per pane, and no second /compact soon after one: on 2026-10-10 the
 # log showed five pairs sent to one pane within 1-3 minutes, and one compacted a
 # freshly compacted 37k context into 126k (the queued second /compact ran after
-# the first, and each one costs ~150k+ base-input-equivalent tokens).
+# the first, and each one costs ~150k+ base-input-equivalent tokens). /new,
+# /clear and /reset (aliases) count too: each throws the cached context away.
+# The patterns match the child's "<date> <time> $host $pane: sent <text>" line.
+gap_check() {
+  case "$text" in /compact*|/new*|/clear*|/reset*) ;; *) return 0;; esac
+  gap="${SELF_SLASH_COMPACT_GAP:-1800}"
+  prev=$(ggrep -F -e " $host $pane: sent /compact" -e " $host $pane: sent /new" \
+    -e " $host $pane: sent /clear" -e " $host $pane: sent /reset" "$log" 2>/dev/null | gtail -1)
+  [ -n "$prev" ] || return 0
+  ago=$(( $(gdate +%s) - $(gdate -d "${prev:0:19}" +%s 2>/dev/null || echo 0) ))
+  [ "$ago" -lt "$gap" ] || return 0
+  cmd=${prev#*: sent }; cmd=${cmd%% *}
+  echo "self-slash: $cmd was already sent to $host $pane ${ago}s ago (< ${gap}s); not sending ${text%% *}. Compaction and a fresh session are not free; keep working (SELF_SLASH_COMPACT_GAP=N to override)."
+  return 7
+}
+if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
+  gap_check >&2 || exit 7
+fi
+[ "$dry" = 1 ] && { echo "self-slash: dry run, would send to $host $pane after ${delay}s: ${text:0:80}"; exit 0; }
+mkdir -p "$(dirname "$log")"
+prompt_line="$(dirname "$(realpath "$0")")/../skills/session-finder/prompt_line.py"
 lockdir="$HOME/.local/state/self-slash"; mkdir -p "$lockdir"
 lock="$lockdir/$(printf '%s' "$pane" | gtr -c 'A-Za-z0-9_.-' '_').pid"
 if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
@@ -86,16 +108,6 @@ if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
         echo "self-slash: $host $pane already has a queued command (pid $after); this one runs after it" >&2;;
     esac
   fi
-  case "$text" in /compact*)
-    gap="${SELF_SLASH_COMPACT_GAP:-1800}"
-    last=$(ggrep -F " $host $pane: sent /compact" "$log" 2>/dev/null | gtail -1 | gcut -c1-19)
-    if [ -n "$last" ]; then
-      ago=$(( $(gdate +%s) - $(gdate -d "$last" +%s 2>/dev/null || echo 0) ))
-      if [ "$ago" -lt "$gap" ]; then
-        echo "self-slash: /compact was already sent to $host $pane ${ago}s ago (< ${gap}s); not compacting again. Compaction is not free; keep working (SELF_SLASH_COMPACT_GAP=N to override)." >&2; exit 7
-      fi
-    fi;;
-  esac
 fi
 if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   SELF_SLASH_CHILD=1 SELF_SLASH_AFTER="$after" nohup "$0" --delay "$delay" "$text" >>"$log" 2>&1 </dev/null &
@@ -160,6 +172,8 @@ if [ -n "${SELF_SLASH_AFTER:-}" ]; then
     [ "$(gdate +%s)" -lt "$end" ] || { echo "$(gdate '+%F %T') $host $pane: waiter $SELF_SLASH_AFTER still queued after ${SELF_SLASH_WAIT:-900}s; NOT sent: ${text:0:80}"; exit 7; }
     sleep 2
   done
+  # The one ahead may have been a /compact or /new: re-check the gap.
+  msg=$(gap_check) || { echo "$(gdate '+%F %T') $host $pane: NOT sent: ${msg#self-slash: }"; exit 7; }
 fi
 # Two parents can pass the check above before either child writes the lock.
 if [ -s "$lock" ] && [ "$(cat "$lock")" != "$$" ] && kill -0 "$(cat "$lock")" 2>/dev/null; then
