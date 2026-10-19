@@ -53,6 +53,10 @@ What changed, all in `~/.claude/settings.json` unless noted:
 4. `autoCompactWindow` 400000 → 300000 (compaction fires at ~267k, the window less
    the 33k buffer). Simulated −1.6% of cost; a 200k window costs +1%, 150k +17%.
 5. The graft per-prompt hook was back (table "Hooks removed"); removed again.
+6. `claudeMdExcludes: ["/Users/djbclark/CLAUDE.md", "/Users/djbclark/AGENTS.md"]`:
+   in `~`, `~/AGENTS.md` is the same file as `~/.claude/CLAUDE.md`, and it loaded
+   twice (~8.4k extra). A fresh session in `~` fell from 39.9k to 27.4k.
+   (`~/CLAUDE.md` is a dangling link to the removed `site-private/home-agents.md`.)
 
 Kept: `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` at its 200k default. Idle compaction
 at 100k loses money below ~127k, given the ~104k floor a compaction leaves.
