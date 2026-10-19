@@ -975,3 +975,35 @@ index lags by seconds; a short retry would make it meaningful.
 list. Found one unrelated closed question ("docker的siyuan如何配置？") and one open PR
 (#2, English README). Nothing on either defect. **Filed 2026-10-12:**
 [zhiluop/siyuan-skills#3](https://github.com/zhiluop/siyuan-skills/issues/3).
+
+## graft — the per-prompt pack has no opt-out, and `graft init` re-adds it (draft comment for trailhq/Trail-Code#497, not posted)
+
+**Where:** a comment on https://github.com/trailhq/Trail-Code/issues/497 ("graft init wires Claude Code hooks
+at user and project level, so every hook runs twice"). Searched 2026-10-18 in `trailhq/Trail-Code`:
+"prompt hook", "UserPromptSubmit", "init hooks settings", "project settings.json". Nearest threads:
+#628 (opt-outs for credit/speed lines and the Stop-hook prompt), #500 (prompt hook fires on
+`<task-notification>` prompts), #635 (prompt-hook child outlives its timeout). None asks for an opt-out of
+the per-prompt pack itself.
+
+**Draft:**
+
+> One more consequence of the project-level wiring: the `UserPromptSubmit` `graft-hooks.cjs prompt` hook
+> has no opt-out, so removing it doesn't stick. We removed it from `~/.claude/settings.json` on
+> 2026-10-10 and again on 2026-10-18. Both times a later `graft init` (also `reconcileWiring()` after a
+> version bump) wrote it back. The second time it came back in the project's `.claude/settings.json`,
+> where it bypasses any wrapper the user puts around the user-level hooks.
+>
+> What it costs: on our sample prompt the pack injected ~120 tokens of `additionalContext`, and two of its
+> three hits were unrelated to the prompt. That text stays in the conversation history and is re-read
+> on every later request. Over a week of Claude Code transcripts on this machine, the fixed per-session
+> preamble was ~17% of list-price cost, so per-prompt injections add up.
+>
+> Request: an opt-out that `init` and upkeep respect, e.g. `GRAFT_PROMPT_HOOK=0` or a `hooks.prompt:
+> false` config key, with `init` not writing the prompt hook when it is set. Writing hooks at one level
+> only, as #497 asks, would also stop the project copy from bypassing user-level wrappers.
+>
+> Workaround we run: a wrapper that exits 0 on the `prompt` event, plus a session-start step that strips
+> `graft-hooks.cjs` entries from a project's `.claude/settings.json` when the user level already has
+> them.
+
+**Status:** draft; post only with djbclark's yes.
