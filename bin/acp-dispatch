@@ -1168,7 +1168,8 @@ def record_paths(items: list[str]) -> list[Path]:
 
 def boot_time() -> float | None:
     """Epoch seconds of the last boot: ACP_DISPATCH_BOOTTIME, else `sysctl -n kern.boottime`
-    (`{ sec = 1760880691, usec = 123456 } Mon Oct 19 09:31:31 2026`). None when unreadable."""
+    (macOS/BSD: `{ sec = 1760880691, usec = 123456 } Mon Oct 19 09:31:31 2026`), else the
+    `btime` line of /proc/stat (Linux, where kern.boottime does not exist). None when unreadable."""
     env = os.environ.get("ACP_DISPATCH_BOOTTIME")
     if env:
         try:
@@ -1179,8 +1180,15 @@ def boot_time() -> float | None:
         out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True,
                              timeout=10, check=False).stdout
     except (OSError, subprocess.SubprocessError):
-        return None
+        out = ""
     m = re.search(r"\bsec\s*=\s*(\d+)", out)
+    if m:
+        return float(m.group(1))
+    try:
+        stat = Path("/proc/stat").read_text()
+    except OSError:
+        return None
+    m = re.search(r"^btime\s+(\d+)\s*$", stat, re.M)
     return float(m.group(1)) if m else None
 
 

@@ -452,13 +452,19 @@ class TestRestartAttribution(RestartBase):
                 patch.object(subprocess, "run", return_value=done) as sysctl:
             self.assertEqual(mod["boot_time"](), 1760880691.0)
         self.assertEqual(sysctl.call_args.args[0], ["sysctl", "-n", "kern.boottime"])
+        no_sysctl = subprocess.CompletedProcess([], 1, stdout="")   # Linux: kern.boottime is unknown
         with patch.dict(os.environ, {"ACP_DISPATCH_BOOTTIME": ""}), \
-                patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="")):
+                patch.object(subprocess, "run", return_value=no_sysctl), \
+                patch.object(Path, "read_text", side_effect=OSError("no /proc/stat")):
             self.assertIsNone(mod["boot_time"]())
+        with patch.dict(os.environ, {"ACP_DISPATCH_BOOTTIME": ""}), \
+                patch.object(subprocess, "run", return_value=no_sysctl), \
+                patch.object(Path, "read_text", return_value="cpu  1 2 3\nbtime 1760880691\nprocesses 9\n"):
+            self.assertEqual(mod["boot_time"](), 1760880691.0)   # /proc/stat on Linux
         with patch.dict(os.environ, {"ACP_DISPATCH_BOOTTIME": "1700000000"}):
             self.assertEqual(mod["boot_time"](), 1700000000.0)
         with patch.dict(os.environ, {"ACP_DISPATCH_BOOTTIME": ""}):
-            real = mod["boot_time"]()                        # the machine's own sysctl really parses
+            real = mod["boot_time"]()                        # the machine's own sysctl or /proc/stat really parses
         self.assertTrue(real is not None and 0 < real <= time.time(), real)
 
 
