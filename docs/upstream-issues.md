@@ -1058,8 +1058,7 @@ model as prose. A self-send is the case `bin/self-slash` needs, so it strips `PA
 
 ## Paseo plugins that fail to install on Paseo 0.12.0 (four filed 2026-10-19)
 
-Found in the 2026-10-19 plugin trial (`/tmp/paseo-install.log`, `/tmp/paseo-install2.log`, `docs/paseo-plugin-scan` install log
-commit 7e92320). Daemon and desktop 0.12.0, macOS; installed with `paseo plugin add <registry id>` and
+Found in the 2026-10-19 plugin trial (`/tmp/paseo-install.log`, `/tmp/paseo-install2.log`; see also commit 7e92320). Daemon and desktop 0.12.0, macOS; installed with `paseo plugin add <registry id>` and
 `paseo plugin install <npm:|git: source>`. Existing issues searched first (each plugin repo, open and closed, with
 "0.12", "requires Paseo", "@getpaseo/client"; and `getpaseo/paseo` for "@getpaseo/client", "0.12.0 plugin requires",
 "Could not resolve type dependency", "plugin install"): none on any of the four. The two build failures declare
