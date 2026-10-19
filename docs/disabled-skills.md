@@ -117,9 +117,10 @@ in `~/.claude/settings.json` (takes effect at once, even mid-session).
 | `claude.ai Firecrawl` | 10 | The paid cloud Firecrawl, which global rule 7 already forbids (credits ran out 2026-10-15), yet it took 506 calls in the 14 days to 2026-10-18. ~5.4k tokens/session, two tools always loaded. The shared self-hosted `firecrawl` server does the same work for free. Blocked 2026-10-18. |
 | `claude.ai Google Drive` | 11 | Drive files; 0 calls in 14 days. Blocked 2026-10-18. |
 | `claude.ai Google Calendar` | 9 | Calendar events; 1 call in 14 days, and its tool fetch timed out in `claude mcp list`. Blocked 2026-10-18. |
+| `bezalel` (local, `~/.claude.json`) | ~80 | djbclark's capability plane (email, cards, finance, memory, computer, connectors). The longest server instructions (~1.5k tokens/session); 8 calls in 14 days. Blocked 2026-10-18 by djbclark, pending a scope trim (Basic Memory todo "Trim bezalel MCP sub-services"); still used from other agents. |
 
 Still on: Beeper (re-enabled 2026-10-16 by djbclark to watch the Hyades room), Gmail, Context7, Firecrawl (self-hosted, shared),
-claude-in-chrome, basic-memory, bezalel, arxiv, hermes, cow (token-savior and
+claude-in-chrome, basic-memory, arxiv, hermes, cow (token-savior and
 graft's MCP server were removed 2026-10-18).
 
 ## Plugins disabled
