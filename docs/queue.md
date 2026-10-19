@@ -3,6 +3,18 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## A read-only codex advisor ends on its first refused escalation (found 2026-10-19)
+
+Under `acp-run codex --perm read-only` a shell command that needs network or writes is an
+escalation request; acp-run refuses it (correct) and codex-acp then ends the turn with
+`stopReason: cancelled` (exit 1, no report; `sf-research-codex2`: 520 s, 47 tools, 5.0M tokens
+lost when it asked to run `gh api repos/... rulesets`). Claude under read-only simply gets no
+Bash tool and carries on. Candidates: (1) on a refused request under `--perm read-only`, acp-run
+sends one follow-up prompt ("that command was refused; continue without it") instead of ending;
+(2) the read-only brief footer tells codex that any escalation ends the run; (3) both. Until
+decided, codex advisory reads run `--perm all` with the advisor tree check as the guard (as on
+2026-10-19 for sf-research-codex3).
+
 ## self-slash cannot drive omp (found 2026-10-13, needs an operator decision)
 
 `bin/self-slash "/quit"` from an omp session in herdr pane w34:p2 queued, waited, and gave
