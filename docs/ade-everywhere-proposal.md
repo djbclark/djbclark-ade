@@ -58,8 +58,11 @@ Written as tests the finished project must pass:
    prompted to create their own private companion, and gets a working environment with none of
    djbclark's hosts, accounts or memory; it works with no 1Password, no Hyades and a Forgejo
    remote.
-7. **T7 reproducibility is tested.** CI runs the bootstrap into a clean container on every push
-   as a fast check; the gate is a real Linux user account that survives a reboot.
+7. **T7 reproducibility is tested, in CI.** GitHub Actions runs the bootstrap into a clean
+   container on every push to the public repo as the fast check; the private companion's
+   template test runs on the private repo's Actions, or on Forgejo CI (Hyades) when private
+   work needs it; the gate is a real Linux user account that survives a reboot. None of this
+   runs on the Mac.
 
 ## 2. What exists today, in one paragraph each
 
@@ -125,6 +128,10 @@ installed into `ade/skills` and carry uncommitted edits from Paseo's own refresh
 8. **Flag before building.** Where this proposal would discard paid-for work (herdr plugins, Orca
    docs, the hub-era scripts), it asks first (section 9) and schedules the discard last
    (section 8).
+9. **CI does the heavy lifting; the Mac stays responsive.** Every build, test suite, container
+   run and index rebuild goes to CI first (GitHub runners for GitHub-sourced repos, Forgejo CI
+   on Hyades when private work needs it) or to the Linux peer; a local run is the exception,
+   goes through `bg`, and never overlaps another heavy job (djbclark, 2026-10-19).
 ## 4. Target shape
 
 ### 4.1 Repos
@@ -499,7 +506,7 @@ pilot has exercised it".
 | `autorename`, `herdr_place.py` | `rename_workspace`, agent title | Replace; keep the title derivation. |
 | `fleet-watch` pings Hermes on fleet changes | `notifyOnFinish`, push notifications to the phone app | Keep the Hermes ping for Telegram; feed it from Paseo events. |
 | `acp-run` / `acp-dispatch` / `bigteam` / `route_agent.py` headless dispatch | `paseo run --provider X --no-wait`, SDK, agent profiles | Keep the engine, which owns its processes; add `--via paseo` so slices appear as subagents; generate profiles from `routing.toml`. |
-| `aiuse` quota probes and `route_agent.py` | Usage dialog, `paseo usage`, usage-source plugin API | Keep `aiuse` as the source of policy (disabled list, gates, pace); the plugin registers it as a usage source (section 11.3). |
+| `aiuse` quota probes and `route_agent.py` | Usage dialog, `paseo usage`, usage-source plugin API | Keep `aiuse` as the source of policy (disabled list, gates, pace); the plugin registers it as a usage source (section 11.4). |
 | `cow-pasture` APFS workspaces | Worktree isolation | Keep cow for non-git and Mac-only speed; Paseo worktrees are the portable default. |
 | launchd jobs that run agents (skillopt-night) | Schedules and heartbeats | Move agent-shaped jobs to Paseo schedules on their owning host only; system jobs stay units. |
 | Hermes Telegram gateway | Paseo mobile app for approvals and chat | Keep both; Hermes is the always-on assistant, Paseo the workbench. |
@@ -542,9 +549,11 @@ then prove a thin slice end to end, then widen, and only then retire or delete.
 2. **Phase 1, thin vertical slice (1 to 2 weeks).** `manifest/*.toml` for Claude Code and
    Codex only; `ade plan`, `link`, `unlink`, `doctor`, `services`, `install` with mise; the
    signed-tag root of trust; `private-template/` and `ade init-private` with an empty companion.
-   Gate: apply, reapply and doctor pass on this Mac **and** on a real Linux user account that
-   survives a reboot, with a Forgejo remote and the `none` secret backend (so T6 is tested
-   before djbclark's own companion is).
+   The first PR adds the GitHub Actions workflow (pytest plus the container smoke test) so
+   every later PR is tested off the Mac; the companion test gets its own workflow on the
+   private repo, moved to Forgejo CI if private work needs it. Gate: apply, reapply and doctor
+   pass on this Mac **and** on a real Linux user account that survives a reboot, with a Forgejo
+   remote and the `none` secret backend (so T6 is tested before djbclark's own companion is).
 3. **Phase 2, sessions spike (1 week).** Evaluate CASS on the real stores (adapter coverage,
    the OpenCode path, the licence rider for Q12); implement the capture protocol (generations,
    completion marker, APFS clone) for Claude Code and Codex; a cross-home resume test (Mac to
@@ -553,7 +562,9 @@ then prove a thin slice end to end, then widen, and only then retire or delete.
 4. **Phase 3, sessions for everyone (1 to 2 weeks).** Syncthing folder with versioning, the
    receive-encrypted peer (Q2), the restore-from-ciphertext drill, every other provider's
    exporter, Tier 1 chains in the archive, `session-finder` over all devices, retention and the
-   lost-device procedure.
+   lost-device procedure. The initial Syncthing scan and the first full index build run on
+   the Linux peer and off-hours on the Mac at low priority; the Mac never rebuilds the whole
+   index while the operator is working.
 5. **Phase 4, Paseo pilot (2 to 3 weeks).** Owned-key config merge, profiles generated from
    `routing.toml`, the plugin (Helm panel first, then the usage source), `launch.py` and
    `fleet.py` over the adapter contract, `acp-dispatch --via paseo`. Gate: the T5 pilot workflow
@@ -647,6 +658,9 @@ review changed the recommendation, Q12 to Q17 are new.
    ready.
 8. **Quota.** The work itself competes with everything else for the Claude weekly window
    (section 11); the plan spends the near-full Gemini pool on research and bulk first.
+9. **Mac load.** Container tests, index rebuilds and parallel agent fan-outs would make the
+   workstation unusable. Mitigation: section 11.3; every PR is tested in CI before any local
+   run, and the Linux peer hosts the heavy daemons.
 ## 11. Routing per phase: which AI does which step
 
 Snapshot 2026-10-19 16:17 UTC from `aiuse --available --json` (remaining share of each window)
@@ -703,7 +717,21 @@ otherwise, because a 1M-token Claude window costs the weekly pool several times 
 | 5 second machine | bootstrap a Linux box and a second Mac | claude `opus` 5.5 (driving `ade`) | high | 200k | Claude weekly | judgment under failure; fixes go back as Sonnet slices |
 | 6 retire and clean | capability-map sign-off, retire Orca and herdr plugins | claude `opus` 5.5, then both gates | high | 200k | Claude, Codex, Fable | the irreversible step gets both frontier reads |
 
-### 11.3 Reading the two quota sources
+### 11.3 Where the work runs: CI first, the Mac last
+
+Ruling (djbclark, 2026-10-19): make full use of GitHub CI, and of Forgejo CI when private work
+needs it, during this project and in general; avoid high Mac load.
+
+| Work | Runs on | Notes |
+|---|---|---|
+| pytest, lint, the `ade` container smoke test, plugin build | GitHub Actions on `djbclark-ade` | free runners for a GitHub-sourced repo; the first PR of Phase 1 adds the workflow; `load-watch ci decide` is the check before any local run |
+| private companion template test, `ade doctor` against a real companion | GitHub Actions on the private repo, or Forgejo CI on Hyades when the data or the minutes require it | secrets via the `none` backend in CI; never the operator's 1Password |
+| the real-Linux-user gate (reboot, linger, services) | vps-primary or a VM, not CI | the one test a container cannot run |
+| archive index builds (CASS or FTS5), Syncthing initial scan, Hermes export | the Linux peer; on the Mac only off-hours, low priority, through `bg` | 10 GB of small files; never while the operator is working |
+| agent fan-outs during the project (`bigteam`, `acp-dispatch`) | Paseo daemon or `acp-run` on vps-primary where the agent's tools allow; the Mac runs the lead session | Paseo's one-daemon-per-machine model is what makes this a client choice, not a redesign |
+| local runs that cannot be avoided | `~/ops/site-private/bin/bg`, one heavy job at a time | never `BG_LOAD_WAIT=0`, never two builds |
+
+### 11.4 Reading the two quota sources
 
 `paseo usage --json` (0.12.0) and `aiuse --available --json` agree to within one point on every
 window they both report (Claude 5h, weekly and Fable; Codex 5h and weekly; Grok weekly) and
