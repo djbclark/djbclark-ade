@@ -1,8 +1,9 @@
 name: Linux CI
 
 # Overlay-only on ci/base. Runs djbclark-ade's pytest suite on ubuntu-latest.
-# Mac-only tests (launchd, Keychain, this Mac's state) are skipped here only
-# through DJBCLARK_ADE_CI=1 / the --deselect list below, never by editing tests.
+# No test is deselected or skipped for CI. Only tests that skip themselves when a
+# host tool is missing stay skipped: the two crush-acp ones (no crush source or
+# binary on a runner). launchd is stubbed through ACP_DISPATCH_LAUNCHCTL.
 
 on:
   push:
@@ -13,7 +14,6 @@ permissions:
   contents: read
 
 env:
-  DJBCLARK_ADE_CI: "1"
   # conftest.py also sets these; exported so subprocesses of tests see them too.
   ACP_DISPATCH_LAUNCHCTL: /usr/bin/true
   ACP_DISPATCH_NO_GATE: "1"
@@ -32,6 +32,8 @@ jobs:
             p=$(command -v "$t") && sudo ln -sf "$p" "/usr/local/bin/g$t"
           done
           sudo ln -sf "$(command -v timeout)" /usr/local/bin/gtimeout
+      - name: poppler (test_web_get runs pdftotext)
+        run: sudo apt-get install -y -qq poppler-utils
       - name: Git identity (tests make commits)
         run: |
           git config --global user.name "ci"
