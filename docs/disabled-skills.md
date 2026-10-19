@@ -103,6 +103,9 @@ requests follow a 5-60 minute gap and would re-write their whole context.
 They stay available on claude.ai web and desktop; only Claude Code skips them.
 Re-enable one: delete its `{"serverName": ...}` entry from `deniedMcpServers`
 in `~/.claude/settings.json` (takes effect at once, even mid-session).
+Claude Code reports these as "blocked by enterprise policy" / "blocked by the
+organization's managed policy", at startup and in the model's context. That is
+only its label for this user-level list; there is no org policy here (v2.1.303).
 
 | Server | Tools | What it is |
 |---|---|---|

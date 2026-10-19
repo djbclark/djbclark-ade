@@ -1007,3 +1007,33 @@ the per-prompt pack itself.
 > them.
 
 **Status:** posted 2026-10-18 with djbclark's yes: https://github.com/trailhq/Trail-Code/issues/497#issuecomment-6257408007
+
+## Claude Code — user-level `deniedMcpServers` reported as "enterprise policy" (draft for anthropics/claude-code, not filed)
+
+Searched 2026-10-18 in `anthropics/claude-code` for "blocked by enterprise policy", "deniedMcpServers
+enterprise policy" and "deniedMcpServers user settings". Nearest threads: #96408 (remote managed
+`allowedMcpServers` not enforced when the fetch is slow) and #94803 (plugin MCP servers ignored under
+`allowManagedMcpServersOnly`), both about real managed policy, plus #20412 (closed; claude.ai servers
+auto-injected). None covers the label.
+
+**Draft title:** `deniedMcpServers` in user settings is reported as "blocked by enterprise policy"
+
+> **Version:** 2.1.303, macOS. No managed settings and no organization MCP policy.
+>
+> **Steps:** add `"deniedMcpServers": [{"serverName": "claude.ai Firecrawl"}]` to `~/.claude/settings.json`,
+> then run `claude -p "/context"`, or start a session.
+>
+> **Observed:** stderr prints `Warning: claude.ai MCP servers blocked by enterprise policy: claude.ai
+> Firecrawl, ...`. Mid-session, the system context tells the model the servers are "blocked by the
+> organization's managed policy ... an administrator manages this setting", and tells it to say so to the
+> user.
+>
+> **Expected:** the message names the source the deny came from: "denied in your user settings
+> (`~/.claude/settings.json` deniedMcpServers)". "Enterprise" or "managed policy" should only appear
+> when the entry comes from managed settings.
+>
+> **Why it matters:** the user configured this themselves, but the model is told to send them to an
+> administrator. An agent auditing the setup on this machine took the user's own deny list for an org
+> policy until it checked the settings files.
+
+**Status:** draft; file only with djbclark's yes.
