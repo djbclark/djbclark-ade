@@ -1,0 +1,43 @@
+name: Linux CI
+
+# Overlay-only on ci/base. Runs djbclark-ade's pytest suite on ubuntu-latest.
+# No test is deselected or skipped for CI. Only tests that skip themselves when a
+# host tool is missing stay skipped: the two crush-acp ones (no crush source or
+# binary on a runner). launchd is stubbed through ACP_DISPATCH_LAUNCHCTL.
+
+on:
+  push:
+    branches: ['ci/run/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # conftest.py also sets these; exported so subprocesses of tests see them too.
+  ACP_DISPATCH_LAUNCHCTL: /usr/bin/true
+  ACP_DISPATCH_NO_GATE: "1"
+
+jobs:
+  pytest:
+    name: pytest (tests/)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: GNU tool aliases (the Mac code calls gsed, gdate, ghead, ...; Linux's own tools are the GNU ones)
+        run: |
+          for t in sed grep awk date stat tr wc head tail seq id sort cp tee readlink realpath du split cut touch mktemp ls find; do
+            p=$(command -v "$t") && sudo ln -sf "$p" "/usr/local/bin/g$t"
+          done
+          sudo ln -sf "$(command -v timeout)" /usr/local/bin/gtimeout
+      - name: poppler (test_web_get runs pdftotext)
+        run: sudo apt-get install -y -qq poppler-utils
+      - name: Git identity (tests make commits)
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@example.invalid"
+          git config --global init.defaultBranch master
+      - name: Run pytest
+        run: uv run --no-project --with pytest python -m pytest -q tests/ -p no:cacheprovider
