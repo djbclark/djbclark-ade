@@ -2319,7 +2319,7 @@ def failure_class(text: str, rc: int | None, *, preflight: bool = False) -> tupl
     # reported as fail=transient and silently rerouted, which is the opposite of what was wanted.
     if any(term in low for term in AUTH_TERMS):
         return "auth", when
-    m = re.search(r"\bfail=(\S+)", text) or re.search(r"FAILED (\S+?):?(?:\s|$)", text)
+    m = re.search(r"\bfail=([\w-]+)", text) or re.search(r"FAILED ([\w-]+)", text)
     if m:
         return m.group(1), when
     if rc == 124 and not preflight:

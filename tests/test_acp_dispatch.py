@@ -1077,6 +1077,16 @@ class TestAiuseNoteExhausted(Base):
             "acp-run: agent=codex stop=error secs=514.8 tools=536 fail=agent", 1)
         self.assertEqual(cls, "agent")
 
+    def test_failure_class_label_stops_at_punctuation(self):
+        # acp-run prints "FAILED <class>: <error>" and "fail=<class> error=..."; a class glued to
+        # a colon or a parenthesis must not carry the punctuation into the class name.
+        mod = runpy.run_path(str(SCRIPT))
+        fc = mod["failure_class"]
+        self.assertEqual(fc("FAILED quota:Individual quota reached", 1)[0], "quota")
+        self.assertEqual(fc("FAILED transient (http/2 CANCEL)", 1)[0], "transient")
+        self.assertEqual(fc("acp-run: agent=codex fail=transient: reply truncated", 1)[0], "transient")
+        self.assertEqual(fc("FAILED agent-error: boom", 1)[0], "agent-error")
+
 
 class TestCheckpointStale(Base):
     stale_env: ClassVar[dict[str, str]] = {"ACP_DISPATCH_STALE_CHECKPOINT_MIN": "1", "ACP_DISPATCH_AIUSE": "off"}
