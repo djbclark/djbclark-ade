@@ -441,6 +441,11 @@ Not installed (`devin-cli` 3000.11.3 via `brew install --cask devin-cli`). Regis
 
 ## Dispatch slice controls (2026-10-11)
 
+An advisory review that must *read* the repo runs with `--perm all` (the brief
+says "do not edit"; `--role advise` records it): under `--perm deny` claude gets
+a session with no built-in tools at all, so a reading review emits its tool
+calls as text and ends in seconds with an empty report (2026-10-19, two
+frontier slices lost). `--perm deny` is for a run that must not touch anything.
 `acp-dispatch <agent> ... --timeout 0` starts a slice without a time limit.
 Its record-based rearm waiter and detached wait have no deadline, even with an
 explicit `--wait-timeout`. For finite slices, the existing default remains
