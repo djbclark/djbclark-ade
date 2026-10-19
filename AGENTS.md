@@ -1,211 +1,88 @@
 # AGENTS.md — djbclark-ade
 
-You are an AI agent working on djbclark's machine. This repo is the
-operating guide for running AI agents as **graphs** here — read this file,
-then follow the pointers. Everything in it applies to any agent (Claude
-Code, Codex, OpenCode, Cline, Copilot, Grok, Cursor, …), not just
-the one that wrote it.
+You are an AI agent on djbclark's machine. This repo is the operating guide
+for running AI agents as **graphs** here: read this file, then follow the
+pointers. It applies to any agent (Claude Code, Codex, OpenCode, Cline,
+Copilot, Grok, Cursor, …).
 
 ## What this repo is
 
-The agentic development environment (ADE) for this machine: one
-operator, many agent TUIs, herdr/Orca as the terminal fabric, ACP for
-agent-to-agent control. Since 2026-10-08 it is the git home of the
-orchestration and session-hygiene skills and tools (see
-[README.md](README.md) for the loop and a table of every skill). It began
-as a reference architecture plus live operating knowledge for two
-altitudes of agent-graph work, verified by real runs on 2026-08-23:
-
-- **Micro graph** — Claude Code dynamic workflows: in-process subagent
-  fan-out coordinated by plain JavaScript, zero-token orchestration.
-- **Macro graph** — Orca orchestration: a task DAG across separate agent
-  CLI processes in their own git worktrees, CLI-agnostic lifecycle
-  (`worker_done`, ask/reply, escalation).
-
-Start with [README.md](README.md) for the architecture and how the
-altitudes compose (a macro node can run a micro graph as its body).
+The agentic development environment (ADE) for this machine: one operator,
+many agent TUIs, herdr/Orca as the terminal fabric, ACP for agent-to-agent
+control; since 2026-10-08 also the git home of the orchestration and
+session-hygiene skills and tools. Two altitudes, verified by real runs on
+2026-08-23: the **micro graph** (Claude Code dynamic workflows, in-process
+fan-out) and the **macro graph** (an Orca task DAG across agent CLIs in their
+own worktrees). [README.md](README.md): architecture, how they compose, every skill.
 
 ## Read before acting
 
-- [docs/model-routing.md](docs/model-routing.md) — **which AI/service to
-  use for what work**: every service on this machine mapped to its
-  TUI/CLI, monthly-subscription vs prepaid vs free, chronic-waste pools
-  worth burning, per-service effort levers. Numbers are dated snapshots —
-  always re-probe (`aiuse --json`, ~1 min, JSON starts after two preamble
-  lines; `cswap list` for Claude windows).
-- [docs/orchestration-practices.md](docs/orchestration-practices.md) — the
-  rules every orchestration skill follows, with sources: decide in code (or a
-  typed decider) and reason in the judgment tier, risk-set thresholds that
-  route up when unsure, brief shape, run sizing, a 3-attempt cap, focused
-  checks before the full suite, and the standing requirement that every
-  orchestration skill reach several TUIs through ACP.
-- [docs/jev.md](docs/jev.md) — `bin/jev`, the TypeSafe Jev decision layer:
-  off/shadow/act switch (`~/.config/jev/mode`), the call log, `jev report`, the
-  two shadow sites (prompt-effort hook; agent-choice via `route_agent.py
-  --brief`; acp-dispatch verdicts retired), the offline Jev-vs-Haiku
-  evaluation and how to remove it all. Shadow since 2026-10-11. Review
-  `dual-1` asks Jev and Fastino GLiDE the same questions side by side and
-  ends itself by 2026-10-23 (`bin/jev review status`).
-- [docs/orca-integration.md](docs/orca-integration.md) — runnable macro-
-  graph command sequences plus hard-won live-run lessons (stall false
-  deaths, rejected-late `worker_done` semantics, the retry recipe, the
-  ack loop). The authoritative command reference is served by the binary:
-  `orca skills get orchestration` — never trust a cached copy.
-- [docs/queue.md](docs/queue.md) — work the operator has explicitly
-  queued but not started, plus outstanding blockers. Check it before
-  proposing new work; add to it rather than starting something big
-  unasked.
-- [docs/ai-memory-landscape.md](docs/ai-memory-landscape.md) — the six
-  levels of AI memory this machine is building toward, their source, live
-  per-area status, and how they map onto the published CoALA/7-type
-  taxonomies and the 2026 cross-vendor portability work. The plans
-  themselves live in the ops repos; this is the orientation layer.
-- [docs/coding-factory.md](docs/coding-factory.md) — the unattended
-  issue→PR→auto-merge "coding factory" question, answered 2026-09-21:
-  what this machine already has (Hermes front door, nine coders, Orca;
-  no trigger, no merge gate, Ralph dormant), OpenHands and twenty
-  alternatives checked against live docs, GitHub's auto-merge 422
-  regression, a recommendation, and a coder-agnostic prompt to run it.
-- [docs/agent-sleep.md](docs/agent-sleep.md) — idle agents eating RAM:
-  Orca's built-in Agent hibernation (GUI-only, how to use it), and
-  `bin/herdr-sleeper`, which gives Herdr panes the same sleep/`--resume`
-  wake policy on a 12 h window via launchd. Check `herdr-sleeper list`
-  before assuming a Herdr pane with a bare shell is dead.
-- [docs/helm.md](docs/helm.md) — `/helm`: answer every waiting agent
-  session from one window. A no-model collector (`helm.py`, in
-  [skills/helm/](skills/helm/)) reads each blocked session's pending
-  question from herdr and its transcript; the skill relays it and sends the
-  pick back as keys; idle sessions get `/loose`. Prior art, what was
-  verified, limits.
-- [docs/herdr-tidy.md](docs/herdr-tidy.md) — `/herdr-tidy`: close idle
-  herdr panes without losing anything (every TUI, Hermes, shells, sleeping
-  stubs). `tidy.py` classifies, performs the `/handoff` precondition, writes
-  the close ledger `~/.local/state/session-finder/closed.jsonl`, closes the
-  tab; `/helm-all` lists what was closed with its resume command. Never
-  closes the helm/`coord` panes, claimed or `busy-background` sessions.
-- [docs/skillopt-sleep.md](docs/skillopt-sleep.md) — the nightly
-  SkillOpt-Sleep cycle (`bin/skillopt-night`, launchd 03:30): mines every
-  agent's transcripts, stages gated skill edits for review, never adopts by
-  itself; model calls go through a failover chain (`~/.skillopt-sleep/night.json`),
-  inert until the operator enables it. `/skillopt-sleep` reviews and adopts.
-- [docs/failover.md](docs/failover.md) — `bin/failover.py`: run any task
-  through an ordered chain of agent routes (deny list, allowlist, aiuse
-  preflight, attempt log). Reuse it instead of hand-rolling a fallback.
-- [docs/upstream-issues.md](docs/upstream-issues.md) — filed-nowhere-yet
-  bug drafts for third-party projects (graft statusline, hindsight config
-  docs), written from problems verified here.
-- [docs/mcp-servers.md](docs/mcp-servers.md) — the MCP server roster for
-  Claude Code sessions on this machine: what each server is, where it's
-  configured, the Hermes Agent MCP registration, the Beeper re-auth recipe,
-  and why this repo's graft statusline says "not built" (cosmetic).
-  Re-probe with `claude mcp list`.
-- [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) —
-  runnable micro-graph example (schema-validated fan-out → adversarial
-  verify → synthesize). Claude Code sessions in this repo can invoke it
-  as `/graph-audit`. It has audited this repo itself, twice; its
-  confirmed findings are fixed.
-- [skills/](skills/) — **the canonical git copies** (since 2026-10-08)
-  of the orchestration and session-hygiene skills: `bigteam`,
-  `model-routing`, `effort-routing`, `helm`, `session-finder`,
-  `ralph-tui-orchestration`, `cow-workspaces`,
-  `handoff`, `baton`, `session-handoff`, `steps`, `loose`, and since
-  2026-10-08 `herdr-tidy` (safe pane close) and `autorename` (session title
-  and herdr placement; its nudge hooks are Claude `UserPromptSubmit` in
-  `~/.claude/settings.json` (cursor-agent runs that one too, as
-  `beforeSubmitPrompt`) and Grok `Stop` in `~/.grok/hooks/autorename.json`
-  (Grok discards UserPromptSubmit context))
-  (README.md has a one-line table; `/helm-all`, `/session-finder-all`,
-  `/resume`, `/herdr-tidy` and `/orca-tidy` are thin command wrappers in
-  [claude/commands/](claude/commands/)).
-  Every TUI links each skill **directly** as
-  `~/<tui>/skills/<name>` → `~/src/djbclark-ade/skills/<name>` (collapsed
-  2026-10-14; no hub, no chains), so **edit them here**, never through a TUI
-  path. Since 2026-10-09
-  **every** hand-written skill lives here, including `gmail-search`, `reorg-orca`,
-  `book-to-kb`, `graft`, `todo`, `research`, `terminus-kira` and
-  `coderabbit-feeder`, and since 2026-10-14 also `tell-chief-of-staff`
-  ([docs/skills.md](docs/skills.md) lists all of them);
-  **a new skill always goes here** (operator standing rule, 2026-10-09), except
-  the private `1password`, which stays in `site-private/skills/`.
-- [tools/acp-run/](tools/acp-run/README.md) — the ACP client every
-  launcher uses (`~/.local/bin/acp-run` resolves here).
-  [bin/fleet-watch](bin/fleet-watch) — launchd fleet change notices to
-  Hermes (its plist runs `~/ops/site-private/bin/fleet-watch`, which
-  resolves here).
-- [vendor/README.md](vendor/README.md) — sidecar index of everything this
-  repo references that lives elsewhere on the system: vendored copies
-  (prepaid gate scripts, a dated Orca orchestration guide snapshot) and
-  pointers to things with their own homes (aiuse, cswap, the Orca fork,
-  hooks, the LiteLLM proxy).
+Each doc carries its own summary.
+
+| Doc | For |
+|---|---|
+| [docs/model-routing.md](docs/model-routing.md) | which AI/service for what work; numbers are dated, re-probe (`aiuse --json`) |
+| [docs/orchestration-practices.md](docs/orchestration-practices.md) | rules every orchestration skill follows |
+| [docs/jev.md](docs/jev.md) | `bin/jev`, the TypeSafe Jev decision layer (shadow since 2026-10-11) |
+| [docs/orca-integration.md](docs/orca-integration.md) | macro-graph commands, live-run lessons; `orca skills get orchestration` is authoritative |
+| [docs/queue.md](docs/queue.md) | queued work and blockers: check it before proposing new work |
+| [docs/ai-memory-landscape.md](docs/ai-memory-landscape.md) | the six levels of AI memory and their status |
+| [docs/coding-factory.md](docs/coding-factory.md) | unattended issue→PR→auto-merge (2026-09-21) |
+| [docs/agent-sleep.md](docs/agent-sleep.md) | idle-agent sleep; run `bin/herdr-sleeper list` before calling a pane dead |
+| [docs/helm.md](docs/helm.md) | `/helm` ([skills/helm/](skills/helm/)): answer every waiting session from one window |
+| [docs/herdr-tidy.md](docs/herdr-tidy.md) | `/herdr-tidy`: close idle panes without losing anything |
+| [docs/skillopt-sleep.md](docs/skillopt-sleep.md) | nightly skill-edit cycle, `bin/skillopt-night` |
+| [docs/failover.md](docs/failover.md) | `bin/failover.py`: reuse it, never hand-roll a fallback |
+| [docs/upstream-issues.md](docs/upstream-issues.md) | unfiled bug drafts for third-party projects |
+| [docs/mcp-servers.md](docs/mcp-servers.md) | MCP server roster (`claude mcp list`) |
+| [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |
+| [skills/](skills/), [docs/skills.md](docs/skills.md) | canonical copy of every hand-written skill: **edit and add skills here**, never via a TUI path; wrappers in [claude/commands/](claude/commands/) |
+| [tools/acp-run/](tools/acp-run/README.md) | the ACP client every launcher uses (`~/.local/bin/acp-run`) |
+| [bin/fleet-watch](bin/fleet-watch) | launchd fleet change notices to Hermes |
+| [vendor/README.md](vendor/README.md) | what this repo references that lives elsewhere |
 
 ## Standing orders (operator-issued; they bind every agent here)
 
 1. **Continuous operation — never stop work because context is large.**
-   Externalize heavy work (subagents, background workflows, Orca
-   workers), keep state on disk continuously, and let the harness's
-   compaction bridge context windows. A handoff document is an artifact
-   you write *without stopping*, reserved for work where the conversation
+   Externalize heavy work (subagents, background workflows, Orca workers),
+   keep state on disk, let compaction bridge context windows. A handoff
+   document is written *without stopping*, for work where the conversation
    itself is the state.
-2. **Commit AND push at opportune moments.** After each coherent unit of
-   work. On a sweep, also catch artifacts living outside any repo that
-   should be tracked. Never push secrets or ignored local state.
+2. **Commit AND push at opportune moments**, after each coherent unit of
+   work; on a sweep, also catch artifacts outside any repo that should be
+   tracked. Never push secrets or ignored local state.
 3. **Never idle on a long-running process — start parallel work by
-   default.** When something is backgrounded (a backfill, a build, a
-   fleet dispatch, a subagent), immediately pick up the next
-   parallelizable task rather than waiting or asking whether to. Choose
-   work that cannot contend with what is running — different files,
-   different databases, different repos — and say what you started. The
-   only reasons not to: the next step genuinely depends on the running
-   result, or the parallel work would touch the same resource.
-4. **Verify against the artifact, not a proxy — and retract loudly.**
-   Every wrong claim made here on 2026-08-23 came from trusting a proxy:
-   grepping output for a substring and calling it a status check (the
-   "graft not built" retraction), reading a bank's *name* instead of an
-   agent's provider config (deleting a live bank), and repeating an
-   auto-generated page that said PRs awaited merge weeks after they
-   merged. Before asserting a fact, check the thing itself — exit codes
-   and structured output over string matching, config files over
-   filenames, `gh pr view` over memory. When you do get one wrong, say so
-   plainly and correct the record in the same breath; a retraction
-   written down is worth more than the original claim.
-5. **Number every set of options, hierarchically and uniquely.** When
-   you offer choices, next steps, or findings the operator might act on
-   selectively, number them — and if a single reply contains more than
-   one list, **never restart at 1**. Number the sets and use dotted
-   labels: the first set is `1.1`, `1.2`, …, the second `2.1`, `2.2`, …
-   Two bare `3.`s in one message is ambiguous and wastes a round trip
-   asking which was meant. Keep labels stable within a conversation — if
-   you re-present a list, silently renumbering invalidates any
-   instruction already given against the old numbers. This binds every
-   agent here.
-6. **Flag best-practice deviations.** If a request or existing config
-   conflicts with current best practices, say so and propose the
-   improvement — but don't relitigate decisions the operator made
-   knowingly.
-7. **Routing discipline**: free and chronically-unused pools first for
-   bulk work; claude/codex for judgment (tier inside them); the prepaid
-   tier is retired until an explicit operator top-up. The old blanket
-   "never bulk-route to clinepass" rule was **retired 2026-08-24** — it
-   was a standing guess replacing a measurement. Hermes now runs
-   free-first with a paid fallback chain, and a burn-rate alert
-   (`agent_stats.py burn`, every 6h) warns when any Hermes-usable pool is
-   projected to run out within 48h. Watch the alert, not the rule.
+   default**, on something that cannot contend with it (different files,
+   databases, repos), and say what you started. Only exceptions: the next
+   step depends on the result, or it would touch the same resource.
+4. **Verify against the artifact, not a proxy — and retract loudly.** Check
+   the thing itself: exit codes and structured output over string matching,
+   config files over filenames, `gh pr view` over memory. When wrong, say so
+   plainly and correct the record in the same breath.
+5. **Number every set of options, hierarchically and uniquely.** Choices,
+   next steps and findings get numbers; with more than one list in a reply,
+   **never restart at 1**: `1.1`, `1.2`, … then `2.1`, `2.2`, …. Keep labels
+   stable within a conversation.
+6. **Flag best-practice deviations** and propose the improvement, but don't
+   relitigate decisions the operator made knowingly.
+7. **Routing discipline**: free and chronically-unused pools first for bulk
+   work; claude/codex for judgment (tier inside them); the prepaid tier is
+   retired until an explicit operator top-up. The blanket "never bulk-route
+   to clinepass" rule was **retired 2026-08-24**; Hermes runs free-first with
+   a paid fallback chain, and a burn-rate alert (`agent_stats.py burn`, every
+   6h) warns when a Hermes-usable pool will run out within 48h. Watch the
+   alert, not the rule.
 
-## Machine context you should know
+## Machine context
 
 - **`acp-run --list` is the agent registry** (since 2026-10-08):
-  `bin/route_agent.py` discovers agents from it plus installed headless
-  TUIs. Orca's roster (~28 names, 12 not installed here) is a GUI list
-  for `orca orchestration worker-start --agent <name>` only, opt-in via
-  `ROUTE_AGENT_INCLUDE_ORCA=1` (see docs/model-routing.md, "Orca's roster
-  is a GUI list, not the registry").
-- The broader ops-suite conventions (worktree/PR/release flow, memory
-  rules) live in `~/CLAUDE.md` and the site-private repo — they govern
-  `~/ops` and are not duplicated here. This repo itself is an ordinary
-  repo: commit to master, push to `djbclark/djbclark-ade`.
-- Facts in this repo carry snapshot dates. Probes beat memory; when you
-  verify something has changed, update the doc in the same breath
-  (standing order 2).
+  `bin/route_agent.py` discovers agents from it plus installed headless TUIs;
+  Orca's roster is a GUI list only (docs/model-routing.md).
+- Ops-suite conventions live in `~/CLAUDE.md` and site-private and govern
+  `~/ops`. This repo is ordinary: commit to master, push to
+  `djbclark/djbclark-ade`.
+- Facts here carry snapshot dates; probes beat memory. When you verify a
+  change, update the doc in the same breath (standing order 2).
 
 <!-- graft:start -->
 ## Graft — repo context graph

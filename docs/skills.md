@@ -31,11 +31,19 @@ directory in `~/ops/site-private/skills/` (this repo is public).
 Tool-managed skills (bailian-*, composio-cli, herdr, orca-*,
 sudo-secretspec, ralph-tui-create-*, ...) stay where their installer put them.
 
+**Since when, and the rule.** This repo has been the canonical git copy of the
+orchestration and session-hygiene skills since 2026-10-08 (`herdr-tidy` and
+`autorename` joined that day) and of every hand-written skill since 2026-10-09.
+**A new skill always goes here** (operator standing rule, 2026-10-09). **Edit a
+skill here, never through a TUI path.** `/helm-all`, `/session-finder-all`,
+`/resume`, `/herdr-tidy` and `/orca-tidy` are thin Claude command wrappers in
+[`claude/commands/`](../claude/commands/).
+
 ## Sessions and handoffs
 
 | Skill | What it does | How to use |
 |---|---|---|
-| `autorename` | Titles the current Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex (in a herdr pane) or omp session like `/rename`, then offers to move its tab out of a generic herdr workspace. omp needs the `omp-bridge.ts` extension symlinked into `~/.omp/agent/extensions/` and an omp restart. A once-per-session nudge asks for that title (Claude Code and zcode on UserPromptSubmit, Grok on Stop in `~/.grok/hooks/autorename.json`, cursor-agent via the `~/.claude/settings.json` hook it also loads). Also owns the full herdr layout pass (`workspace-layout.md`). | `/autorename`; `/autorename all` runs the full herdr reorg (workspaces, tabs, panes: create, rename, move); "name this session". Special workspaces and their top-of-herdr order come from `~/.config/autorename/workspaces.conf`. Runs by itself as the last step of `/handoff`. |
+| `autorename` | Titles the current Claude Code, zcode, Grok, cursor-agent, OpenCode, Codex (in a herdr pane) or omp session like `/rename`, then offers to move its tab out of a generic herdr workspace. omp needs the `omp-bridge.ts` extension symlinked into `~/.omp/agent/extensions/` and an omp restart. A once-per-session nudge asks for that title (Claude Code and zcode on UserPromptSubmit, Grok on Stop in `~/.grok/hooks/autorename.json`, cursor-agent via the `~/.claude/settings.json` hook it also loads, as `beforeSubmitPrompt`; Grok discards UserPromptSubmit context, hence Stop). Also owns the full herdr layout pass (`workspace-layout.md`). | `/autorename`; `/autorename all` runs the full herdr reorg (workspaces, tabs, panes: create, rename, move); "name this session". Special workspaces and their top-of-herdr order come from `~/.config/autorename/workspaces.conf`. Runs by itself as the last step of `/handoff`. |
 | `handoff` | Deep Tier 2 handoff document, chain-tagged and mined from the whole conversation. | `/handoff`; "do a handoff"; before ending a long session. |
 | `session-handoff` | Reads and writes the Tier 1 pointer (`SESSION_LOG.md`) for any git repo. | Runs at session start and end; "update session log". |
 | `baton` | Resumes a workspace from its Tier 1 pointer. | `/baton` or `/resume` at the start of a session. |
