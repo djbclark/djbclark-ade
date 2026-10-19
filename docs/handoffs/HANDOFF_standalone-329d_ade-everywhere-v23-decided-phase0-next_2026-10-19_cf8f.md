@@ -7,7 +7,7 @@ chain: [standalone-329d]
 repo: djbclark-ade
 workspace: djbclark-ade
 branch: master
-head_sha: 0bcae91
+head_sha: 2d528aa
 created_at: 2026-10-19T15:16:22-04:00
 writer: claude-code
 ---
@@ -33,6 +33,12 @@ Phase 0 (§8 item 1) **from a fresh session, as a PR set** (djbclark, 2026-10-19
    text fails the delivery check (`FAILED fake-tool-calls`, exit 1, never recovered as done). Live
    smoke on all four agents in its report; 481 tests green. `graft build` run after it.
 4. No detached jobs open. Nothing of Phase 0 implemented.
+5. **self-slash works in Paseo** (2d528aa, same day, on djbclark's "super important" ask): a
+   Paseo-hosted session compacts itself and hands off then `/new` (sent as `/clear`) through
+   `paseo wait` + `paseo send` with `PASEO_AGENT_ID` unset; the context hook and autorename know
+   the host; proposal 7.2 rows and the Phase 4 gate record it. Verified on a scratch agent; this
+   session's own `/new` after this handoff is the first live use on a real session (check
+   `~/.local/state/self-slash.log` for "paseo … sent /clear").
 
 ## What We Tried
 1. Both v2.1 reviews first dispatched with `--perm deny`: Fable printed tool calls as text in 26 s and
