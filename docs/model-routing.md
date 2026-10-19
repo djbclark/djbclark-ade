@@ -170,6 +170,12 @@ monthly 42% — monthly is the real constraint; still never bulk-route
 there (Hindsight + hermes lifeline). **deepseek** prepaid $0.00 (retired,
 as policy says); openrouter $1.13 remaining.
 
+**Superseded (2026-10-18):** two claims in that snapshot no longer hold. Fable is a
+≤50% sublimit of the one Claude weekly, not a separate budget (global rule 32;
+`skills/model-routing/SKILL.md` *Routing policy*). The blanket "never bulk-route to
+clinepass" was retired 2026-08-24: the burn alert governs it (AGENTS.md standing
+order 7), and the `cline` CLI is uninstalled and operator-gated since 2026-10-17.
+
 Parsing gotcha: `aiuse --json` prints two preamble lines *and* the JSON's
 opening `{` is part of what a naive `tail -n +3` strips. Take everything
 from the first `{` instead, or the parse fails with "Extra data".
