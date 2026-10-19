@@ -450,6 +450,13 @@ REAP_PLIST = HERE.parent / "launchd" / f"{REAP_LABEL}.plist"
 REAP_MIN_INTERVAL = float(os.environ.get("ACP_DISPATCH_REAP_MIN_INTERVAL", "60"))
 REAP_STAMP = Path(os.environ.get(
     "ACP_DISPATCH_REAP_STAMP", str(Path.home() / ".local/state/acp-dispatch/reap.stamp")))
+# Restart attribution (2026-10-19): a slice SIGTERMed by a Mac restart/logout finalizes as
+# "killed: SIGTERM" and nothing says who sent it. The next `reap` (login, RunAtLoad) marks a record
+# killed by TERM/HUP that finished within this many seconds before kern.boottime as a restart kill.
+# ACP_DISPATCH_BOOTTIME (epoch seconds) replaces the sysctl read (tests).
+RESTART_WINDOW = 180
+RESTART_SIGNALS = ("SIGTERM", "SIGHUP")
+RESTART_EXITS = (143, 129)
 AUTO_RESUME_TEXT = (
     "The previous turn was stopped by the provider's usage limit, not by anything you did, and the "
     "limit has reset. Continue the brief from where you left off in this same session: do not redo "
@@ -1114,6 +1121,58 @@ def record_paths(items: list[str]) -> list[Path]:
     return paths
 
 
+def boot_time() -> float | None:
+    """Epoch seconds of the last boot: ACP_DISPATCH_BOOTTIME, else `sysctl -n kern.boottime`
+    (`{ sec = 1760880691, usec = 123456 } Mon Oct 19 09:31:31 2026`). None when unreadable."""
+    env = os.environ.get("ACP_DISPATCH_BOOTTIME")
+    if env:
+        try:
+            return float(env)
+        except ValueError:
+            return None
+    try:
+        out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True,
+                             timeout=10, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"\bsec\s*=\s*(\d+)", out)
+    return float(m.group(1)) if m else None
+
+
+def restart_killed_candidate(rec: dict) -> bool:
+    """A finished record a TERM/HUP ended that nobody has attributed yet (cheap, no sysctl)."""
+    return (bool(rec.get("finished")) and not rec.get("killed_by")
+            and (rec.get("signal") in RESTART_SIGNALS or rec.get("exit") in RESTART_EXITS))
+
+
+def attribute_restart(path: Path, boot: float | None = None) -> str | None:
+    """Mark a record killed by a system restart/logout: finished by SIGTERM/SIGHUP (exit 143/129)
+    within RESTART_WINDOW seconds before the boot. Sets `killed_by` and writes "(system restart)"
+    into the record's `failure` and the report's NO-REPORT line, so `check` says it. The detail
+    string, or None when the record does not qualify. Idempotent, under the record's lock."""
+    with record_lock(path):
+        try:
+            rec = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        if not restart_killed_candidate(rec):
+            return None
+        boot = boot if boot is not None else boot_time()
+        if boot is None or not boot - RESTART_WINDOW <= float(rec["finished"]) <= boot:
+            return None
+        sig = rec.get("signal") or ("SIGHUP" if rec.get("exit") == 129 else "SIGTERM")
+        label = f"killed: {sig}"
+        rec["killed_by"] = f"system restart/logout (boot {datetime.fromtimestamp(boot):%H:%M})"
+        mark = f"{label} (system restart)"
+        if label in str(rec.get("failure", "")):
+            rec["failure"] = rec["failure"].replace(label, mark, 1)
+        report = Path(rec.get("report", ""))
+        if report.is_file() and f"{NO_REPORT_PREFIX} {label}" in report.read_text():
+            write_atomic(report, report.read_text().replace(f"{NO_REPORT_PREFIX} {label}", f"{NO_REPORT_PREFIX} {mark}", 1))
+        write_record(path, rec)
+        return rec["killed_by"]
+
+
 def resubmit_auto_resume(path: Path) -> tuple[str, str] | None:
     """A scheduled auto-resume that a reboot or logout removed from launchd (`launchctl submit` jobs
     do not survive either): submit the same attempt again. (verb, detail) when it acted, else None.
@@ -1178,6 +1237,7 @@ def reap_items(items: list[str], quiet: bool = False) -> int:
     """`acp-dispatch reap`: safe any time; prints one line per record it finalized and one per
     auto-resume it re-submitted to launchd; exit 0."""
     n = 0
+    boot = boot_time()
     for path in record_paths(items):
         got = reap_record(path)
         if got:
@@ -1185,6 +1245,10 @@ def reap_items(items: list[str], quiet: bool = False) -> int:
             st, det = got
             print(f"reaped\t{path.stem}\t{path}\t{st}: {det}")
             continue                 # finalize may have just scheduled a resume: the next sweep checks it
+        why = attribute_restart(path, boot)
+        if why:
+            n += 1
+            print(f"restart-killed\t{path.stem}\t{path}\t{why}")
         again = resubmit_auto_resume(path)
         if again:
             n += 1
@@ -2099,14 +2163,17 @@ launchctl remove {q(label)}
 
 
 def manual_resume_hint(rec: dict, record_path: Path) -> str:
-    """The command a lead runs to continue a quota-stopped slice by hand, with the retry time."""
+    """The command a lead runs to continue a quota-stopped slice by hand, with the retry time (a
+    signal-killed slice has no reset to wait for)."""
     ar = rec.get("auto_resume") or {}
     when = ar.get("not_before_iso")
     if not when:
         m = re.search(r"retry (?:at|in|after) ([^)]+)\)", str(rec.get("failure", "")))
         when = m.group(1) if m else None
     script = shlex.quote(str(Path(__file__).resolve()))
-    return (f"resume in place after {when or 'the reset'}: {script} resume "
+    killed = str(rec.get("failure", "")).startswith(f"{NO_REPORT_PREFIX} killed:")
+    after = "" if killed else f" after {when or 'the reset'}"
+    return (f"resume in place{after}: {script} resume "
             f"{shlex.quote(str(rec.get('record') or record_path))} --detach --no-wait")
 
 
@@ -2418,7 +2485,7 @@ def fallback_class(rec: dict) -> str | None:
     """The class for a slice that acp-run's stderr cannot explain: the runner was signalled, or
     the record was reaped after its process vanished."""
     if rec.get("signal"):
-        return f"killed: {rec['signal']}"
+        return f"killed: {rec['signal']}" + (" (system restart)" if rec.get("killed_by") else "")
     if rec.get("reaped"):
         return f"lost ({rec['reaped'].get('reason', '?')})"
     return None
@@ -2807,6 +2874,9 @@ def finalize_locked(record_path: Path, rc: int | None, finished_at: float | None
             st, det = "resume-scheduled", auto_resume_detail(rec["auto_resume"])
         else:
             det = f"{det}; {manual_resume_hint(rec, record_path)}"
+    elif (st in ("no-report", "partial") and rec.get("session_id")
+            and str(rec.get("failure", "")).startswith(f"{NO_REPORT_PREFIX} killed: SIG")):
+        det = f"{det}; {manual_resume_hint(rec, record_path)}"      # a signal kill keeps its session
     rec["status"] = st
     write_record(record_path, rec)      # before .done: the rearm waiter's check reads the exit code
     done.touch()

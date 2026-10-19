@@ -367,5 +367,124 @@ class TestReapInstall(ReapBase):
         self.assertTrue(any(c.startswith("bootout gui/") for c in self.launchctl()))
 
 
+class TestRestartAttribution(ReapBase):
+    """A slice SIGTERMed by a Mac restart/logout says so (2026-10-19, ime-listener: the record said
+    only "killed: SIGTERM" and sent the lead hunting for a harness bug). `reap` at login compares
+    `finished` with kern.boottime; ACP_DISPATCH_BOOTTIME stands in for the sysctl."""
+    BOOT = 1_760_880_691.0
+
+    def killed(self, name: str = "s1", before_boot: float = 60, signame: str = "SIGTERM", rc: int = 143,
+               session_id: str | None = "sess-1") -> Path:
+        """A slice a signal ended and finalize recorded, `finished` set `before_boot` s before BOOT."""
+        self.dispatch(name=name)
+        _ = self.unfinished(name=name, signal=signame, session_id=session_id)
+        path = self.record_path(name)
+        r = run(["finalize", str(path), "--exit", str(rc)], env=self.base_env())
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        rec = json.loads(path.read_text())
+        rec["finished"] = self.BOOT - before_boot
+        self.write_record(rec, name)
+        return path
+
+    def reap(self, path: Path, boot: float | None = BOOT) -> subprocess.CompletedProcess[str]:
+        extra = {} if boot is None else {"ACP_DISPATCH_BOOTTIME": str(boot)}
+        return run(["reap", str(path)], env=self.base_env(**extra))
+
+    def test_sigterm_just_before_boot_is_attributed_to_the_restart(self):
+        path = self.killed()
+        r = self.reap(path)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.startswith(f"restart-killed\ts1\t{path}\tsystem restart/logout (boot "), r.stdout)
+        rec = self.record()
+        self.assertRegex(rec["killed_by"], r"^system restart/logout \(boot \d\d:\d\d\)$")
+        self.assertTrue(rec["failure"].startswith("NO-REPORT: killed: SIGTERM (system restart) (codex, m1)"), rec["failure"])
+        self.assertIn("NO-REPORT: killed: SIGTERM (system restart) (codex, m1)", Path(rec["report"]).read_text())
+        c = run(["check", str(path)])
+        self.assertEqual(c.returncode, 3, c.stdout)
+        self.assertIn("killed: SIGTERM (system restart)", c.stdout)
+        # idempotent: the second sweep finds the mark and says nothing
+        before = path.read_text()
+        r2 = self.reap(path)
+        self.assertEqual(r2.stdout, "")
+        self.assertEqual(path.read_text(), before)
+        self.assertEqual(Path(rec["report"]).read_text().count("(system restart)"), 1)
+
+    def test_sighup_counts_too(self):
+        path = self.killed(signame="SIGHUP", rc=129)
+        self.assertIn("restart-killed", self.reap(path).stdout)
+        self.assertIn("killed: SIGHUP (system restart)", self.record()["failure"])
+
+    def test_outside_the_window_or_not_a_signal_is_left_alone(self):
+        for name, kw in (("early", {"before_boot": 400}), ("after", {"before_boot": -30}),
+                         ("plain", {"signame": "SIGKILL", "rc": 137})):
+            path = self.killed(name=name, **kw)
+            r = self.reap(path)
+            self.assertEqual(r.stdout, "", (name, r.stdout))
+            self.assertNotIn("killed_by", self.record(name), name)
+            self.assertNotIn("system restart", self.record(name)["failure"], name)
+        # an unreadable boot time attributes nothing either
+        path = self.killed(name="noboot")
+        self.assertEqual(run(["reap", str(path)], env=self.base_env(ACP_DISPATCH_BOOTTIME="garbage")).stdout, "")
+        self.assertNotIn("killed_by", self.record("noboot"))
+
+    def test_a_done_slice_is_never_marked(self):
+        self.dispatch()
+        self.assertEqual(self.reap(self.record_path()).stdout, "")
+        self.assertNotIn("killed_by", self.record())
+
+    def test_fallback_class_renders_the_attribution(self):
+        fc = self.mod()["fallback_class"]
+        self.assertEqual(fc({"signal": "SIGTERM"}), "killed: SIGTERM")
+        self.assertEqual(fc({"signal": "SIGTERM", "killed_by": "system restart/logout (boot 09:31)"}),
+                         "killed: SIGTERM (system restart)")
+
+    def test_boot_time_parses_sysctl_output(self):
+        mod = self.mod()
+        out = "{ sec = 1760880691, usec = 262310 } Mon Oct 19 09:31:31 2026\n"
+        done = subprocess.CompletedProcess([], 0, stdout=out)
+        with patch.dict(os.environ, {"ACP_DISPATCH_BOOTTIME": ""}), \
+                patch.object(subprocess, "run", return_value=done) as sysctl:
+            self.assertEqual(mod["boot_time"](), 1760880691.0)
+        self.assertEqual(sysctl.call_args.args[0], ["sysctl", "-n", "kern.boottime"])
+        with patch.dict(os.environ, {"ACP_DISPATCH_BOOTTIME": ""}), \
+                patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="")):
+            self.assertIsNone(mod["boot_time"]())
+        with patch.dict(os.environ, {"ACP_DISPATCH_BOOTTIME": "1700000000"}):
+            self.assertEqual(mod["boot_time"](), 1700000000.0)
+        with patch.dict(os.environ, {"ACP_DISPATCH_BOOTTIME": ""}):
+            real = mod["boot_time"]()                        # the machine's own sysctl really parses
+        self.assertTrue(real is not None and 0 < real <= time.time(), real)
+
+
+class TestSignalResumeHint(ReapBase):
+    """finalize appends the resume command to a signal kill that has a session (2026-10-19)."""
+
+    def finalize(self, signame: str | None, session_id: str | None, rc: int = 143) -> str:
+        self.dispatch()
+        extra: dict[str, str] = {} if session_id else {"log": str(self.tmp / "no-session.jsonl")}  # the fake's log names one
+        _ = self.unfinished(session_id=session_id, **extra, **({"signal": signame} if signame else {}))
+        r = run(["finalize", str(self.record_path()), "--exit", str(rc)], env=self.base_env())
+        return r.stdout
+
+    def test_killed_with_a_session_gets_the_resume_command(self):
+        out = self.finalize("SIGTERM", "sess-1")
+        self.assertTrue(out.startswith("no-report\t"), out)
+        self.assertRegex(out, r"; resume in place: \S+acp-dispatch resume \S+s1\.json --detach --no-wait")
+        self.assertNotIn("after the reset", out)
+
+    def test_killed_without_a_session_gets_none(self):
+        out = self.finalize("SIGTERM", None)
+        self.assertNotIn("resume in place", out)
+
+    def test_an_ordinary_failure_gets_none(self):
+        out = self.finalize(None, "sess-1", rc=1)
+        self.assertNotIn("resume in place", out)
+
+    def test_the_quota_hint_keeps_its_wording(self):
+        hint = self.mod()["manual_resume_hint"]({"failure": "NO-REPORT: quota (codex, m1, retry at Oct 18th 9am)",
+                                                "record": "/x/s1.json"}, Path("/x/s1.json"))
+        self.assertTrue(hint.startswith("resume in place after Oct 18th 9am: "), hint)
+
+
 if __name__ == "__main__":
     unittest.main()
