@@ -140,6 +140,16 @@ Directory `~/.local/state/agent-reports/ee9e515d-a74a-42f3-ba7f-3289a2417457/v21
 
 The brief for both is `<dir>/ade-everywhere-v21-review-brief.md`.
 
+3. acp-run fix (djbclark 2026-10-19: "We should fix acp-run"): job
+   `~/.local/state/agent-reports/ee9e515d-a74a-42f3-ba7f-3289a2417457/acp-run-readonly/jobs/acp-run-readonly-perm.json`;
+   report `<that dir>/acp-run-readonly-perm-report.md`; done marker `<report>.done` (absent at
+   dispatch, 13:58 EDT); rearm `~/src/djbclark-ade/bin/acp-dispatch-wait <job> <done>`. Sonnet
+   high code slice, brief `<that dir>/brief.md`: adds `--perm read-only` (claude, codex, opencode,
+   zcode; others refuse), a `FAILED fake-tool-calls` delivery check, acp-dispatch refusing
+   `--role advise --perm deny` and never recovering a failed run's report, tests, README. It
+   commits and pushes itself; review its diff (`git log -p -3 -- tools/acp-run bin/acp-dispatch`)
+   and the live smoke results in its report before relying on `--perm read-only`.
+
 ## Quick Start
 
 ```bash
