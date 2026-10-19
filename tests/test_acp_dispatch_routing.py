@@ -142,6 +142,44 @@ exit 0
         chk = run(["check", str(self.out / "jobs" / "s1.json")], env=env)
         self.assertIn("ADVISOR EDITED THE TREE", chk.stdout)
 
+    def test_lead_commit_during_a_read_only_advise_is_not_an_edit(self):
+        # Only HEAD moves (the lead commits in the same checkout); the tree shape is unchanged.
+        fake = self.tmp / "acp-run-lead-commit"
+        fake.write_text("""#!/bin/bash
+for x in "$@"; do [ "$x" = --info ] && {
+  echo '{"agent": {"name": "fake"}, "config_options": [{"id": "model", "category": "model",'
+  echo ' "options": [{"value": "m1", "name": "Model One"}]}]}'
+  exit 0
+}; done
+cwd=""; brief=""; log=""
+while [ $# -gt 0 ]; do case "$1" in
+  -C) cwd="$2"; shift;; -f) brief="$2"; shift;; --log) log="$2"; shift;; esac; shift
+done
+printf '%s\\n' '{"kind":"initialize","data":{"agentCapabilities":{"loadSession":true}}}' > "$log"
+printf '%s\\n' '{"kind":"new_session","data":{"sessionId":"fake-session"}}' >> "$log"
+report=$(ggrep -o 'deliverable to `[^`]*`' "$brief" | ghead -1 | gsed 's/.*`\\(.*\\)`/\\1/')
+git -C "$cwd" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "lead commit"
+printf 'STATUS: working\\nfound it\\nDONE\\n' > "$report"
+echo "written: $report"
+exit 0
+""")
+        fake.chmod(0o755)
+        env = self.base_env()
+        for name, perm, edited in (("s1", "read-only", False), ("s2", "all", True)):
+            r = run(["codex", "--model", "m1", "--kind", "frontier", "--name", name,
+                     "--perm", perm, "-p", "review", "-C", str(self.repo), "--out", str(self.out),
+                     "--acp-run", str(fake), "--no-model-check", "--no-preflight"], env=env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            rec = self.record(name)
+            self.assertEqual(bool(rec.get("advisor_edited")), edited, rec)
+            self.assertEqual(len(rec.get("head_moved_during_run") or []), 2, rec)
+            chk = run(["check", str(self.out / "jobs" / f"{name}.json")], env=env)
+            if edited:
+                self.assertIn("ADVISOR EDITED THE TREE", chk.stdout)
+            else:
+                self.assertNotIn("ADVISOR EDITED", chk.stdout)
+                self.assertIn("HEAD moved during the run", chk.stdout)
+
 
 class TestMachineHistory(RoutingDispatch):
     def test_machine_wide_history_drives_estimate(self):

@@ -2840,6 +2840,10 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
             det = f"{det}; {stale_msg}" if det else stale_msg
     if rec.get("advisor_edited"):
         det = f"{det}; ADVISOR EDITED THE TREE" if det else "ADVISOR EDITED THE TREE"
+    elif rec.get("head_moved_during_run"):
+        b, a_ = (str(x or "")[:8] for x in rec["head_moved_during_run"])
+        moved = f"HEAD moved during the run ({b} -> {a_}, a lead commit; the tree is unchanged)"
+        det = f"{det}; {moved}" if det else moved
     msgs = inbox_messages(path)
     if msgs:
         answered = sum(1 for m in msgs if m[0] in answered_ids(path))
@@ -2907,8 +2911,19 @@ def finalize_locked(record_path: Path, rc: int | None, finished_at: float | None
     if rec.get("role") == "advise" and rec.get("advisor_tree_before"):
         after_tree = advisor_tree_snap(Path(rec.get("dir") or "."))
         rec["advisor_tree_after"] = after_tree
-        if after_tree is not None and after_tree != rec.get("advisor_tree_before"):
-            rec["advisor_edited"] = True
+        before_tree = rec.get("advisor_tree_before") or {}
+        if after_tree is not None and after_tree != before_tree:
+            if (after_tree.get("status_hash") == before_tree.get("status_hash")
+                    and after_tree.get("head") != before_tree.get("head")):
+                # Only HEAD moved and the working tree is the same shape: the lead committed in
+                # this checkout while the advisor ran (2026-10-19: a read-only Fable read was
+                # flagged after the lead's acp-run fix landed). A read-only advisor cannot
+                # commit; any other perm could have, so that still counts as an edit.
+                rec["head_moved_during_run"] = [before_tree.get("head"), after_tree.get("head")]
+                if rec.get("perm") != "read-only":
+                    rec["advisor_edited"] = True
+            else:
+                rec["advisor_edited"] = True
     try:
         _, age = route_module().load_snapshot()
         after, after_reading = pool_reading(rec.get("agent", ""), rec.get("model"))
