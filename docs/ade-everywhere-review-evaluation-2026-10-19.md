@@ -1,6 +1,6 @@
+# Codex review of ADE everywhere v1: accept/reject digest (2026-10-19)
 
 Source: Opus sub-agent digest of the Codex review, written for proposal v2 (session ee9e515d). Each finding was re-verified against its primary source on 2026-10-19 unless marked review-only.
-# Codex review of ADE everywhere v1: accept/reject digest (2026-10-19)
 
 Baseline: Paseo **0.12.0** is now installed (coordinator update), so F13 uses 0.12.0. "Verified" means I opened the primary source today. "Review-only" means I relied on the review's evidence without re-checking it.
 
