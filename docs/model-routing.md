@@ -51,9 +51,10 @@ quoting a chain, and update its snapshot if you change one.
 > them (`github` for copilot, `realtime-web` for grok), a stale or missing
 > reading fails closed, `acp-dispatch claude` is judgment-only (Fable xhigh;
 > Haiku lookups go through the Agent tool), and clinepass is `NEVER_ROUTE`;
-> (5) **hermes is never a delegation target** (gated in acp-run/acp-dispatch
-> like omp); omp only with the operator's explicit per-run yes; never an
-> all-vendor fan-out; (6) the context window is a per-slice choice (`--context`),
+> (5) **hermes is never a delegation target** (gated in acp-run/acp-dispatch);
+> **omp, the Claude API credits, is a normal tier since 2026-10-19** (operator:
+> `api-only` work first, else `code`/`bulk` slices so the credits are spent before
+> each monthly expiry); never an all-vendor fan-out; (6) the context window is a per-slice choice (`--context`),
 > default unless a whole-corpus read; (7) compaction is automatic
 > (`autoCompactWindow` 400000 in `~/.claude/settings.json`; herdr/Orca sessions
 > compact earlier via `self-slash`; a topic change runs the `handoff` skill then
@@ -352,12 +353,23 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
    **Exception, 2026-10-03:** antigravity's CLI has a burst limit (roughly 60
    generation requests an hour per login) that `aiuse` cannot see, so spread its
    work over hours, prefer `acp-run agy`, and never fan out a batch at it.
+2a. **The Claude API credits (omp, operator 2026-10-19)**: the pool `aiuse` labels
+   "omp credits" is the Claude Max plan's monthly API credits, an expiring grant. A
+   normal tier used with discernment: first for work that needs API access and cannot
+   run through a TUI or ACP (kind `api-only`: SDK paths such as the Claude route in
+   `bin/failover.py`, a verdict classifier, batch jobs), otherwise ordinary `code` and
+   `bulk` slices via `acp-run omp --model anthropic/claude-sonnet-5-5`, so the credits
+   are fully used before they expire each month and never left unspent. No
+   `ACP_OPERATOR_APPROVED=omp`. `route_agent.py` tags the route "burn before reset"
+   while the balance is 30+ points above an even spend over the month; omp's own
+   default model is Copilot's, so `acp-run omp` insists on `--model anthropic/...`.
+   One copy of the rule: `skills/model-routing/SKILL.md`.
 3. **Reserve, floor 60% left, one small slice, only when that vendor is the
    point:** copilot (GitHub-side Copilot review). grok is an ordinary pool since
    2026-10-18 (GrokBot has its own Cursor pool).
-4. **Never:** hermes as a target; omp without `ACP_OPERATOR_APPROVED=omp` after
-   a specific yes; clinepass (Hindsight/hermes lifeline); prepaid or
-   credits-backed models without a fresh operator decision; devin; an
+4. **Never:** hermes as a target; clinepass (Hindsight/hermes lifeline); prepaid or
+   credits-backed models without a fresh operator decision (the Claude Max plan's
+   monthly API credits, run through omp, are the exception: see 2a); devin; an
    all-vendor fan-out.
 5. **Probes over memory**: `aiuse --available` (exit 3 = nothing usable;
    ignore `kind:"conserve"` pace alerts for go/no-go), `cswap list` (Claude:

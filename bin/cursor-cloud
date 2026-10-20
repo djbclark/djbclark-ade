@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""cursor-cloud: launch and inspect Cursor Cloud Agents from the terminal (2026-10-19).
+
+Cloud Agents are included in every paid Cursor plan and billed at API price against the
+included usage (docs/ade-everywhere-proposal.md §11.5). This is the launch place the lead
+uses for a mechanical slice that can leave the Mac. Rules it enforces:
+
+1. The API key is CURSOR_API_KEY from sudo-secretspec. When it is not in the environment the
+   script re-executes itself under `sudo-secretspec run`, so the value never touches a file,
+   an argument or a log.
+2. A cloud agent never opens the pull request: `autoCreatePR` is always false. The agent
+   pushes to a `cursor/...` branch (or the starting ref with --work-on-branch); the lead runs
+   the adversary review and opens the PR (home rule 28).
+3. Output is JSON on stdout so a caller can read `agent.id`, the branch and the status.
+
+Usage:
+  cursor-cloud launch --repo URL --ref BRANCH (--prompt TEXT | --prompt-file F)
+                      [--model ID] [--name N] [--work-on-branch] [--plan]
+  cursor-cloud status AGENT_ID
+  cursor-cloud list [--limit N]
+  cursor-cloud models
+  cursor-cloud run AGENT_ID [RUN_ID]      # result text and pushed branches of a run
+  cursor-cloud usage AGENT_ID
+
+API: https://cursor.com/docs/cloud-agent/api/endpoints (v1, public beta; re-check on error).
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+API = os.environ.get("CURSOR_CLOUD_API", "https://api.cursor.com")
+KEY_NAME = "CURSOR_API_KEY"
+REASON = "cursor cloud agents launch"
+
+
+def reexec_with_key(argv: list[str]) -> None:
+    """Run this script again under sudo-secretspec so CURSOR_API_KEY is in the environment."""
+    if os.environ.get("CURSOR_CLOUD_NO_REEXEC"):
+        sys.exit(f"cursor-cloud: {KEY_NAME} is not set")
+    cmd = ["sudo-secretspec", "run", "--reason", REASON, "--", sys.executable, str(Path(__file__).resolve()), *argv]
+    env = {**os.environ, "CURSOR_CLOUD_NO_REEXEC": "1"}
+    os.execvpe(cmd[0], cmd, env)
+
+
+def request(method: str, path: str, body: dict | None = None, key: str | None = None) -> dict:
+    key = key or os.environ.get(KEY_NAME, "")
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(API + path, data=data, method=method)
+    req.add_header("Authorization", "Basic " + base64.b64encode(f"{key}:".encode()).decode())
+    req.add_header("Accept", "application/json")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:2000]
+        sys.exit(f"cursor-cloud: {method} {path} -> HTTP {e.code}: {detail}")
+    return json.loads(raw) if raw else {}
+
+
+def launch_body(a: argparse.Namespace) -> dict:
+    text = Path(a.prompt_file).read_text() if a.prompt_file else a.prompt
+    if not text or not text.strip():
+        sys.exit("cursor-cloud: an empty prompt")
+    body: dict = {
+        "prompt": {"text": text},
+        "repos": [{"url": a.repo, "startingRef": a.ref}],
+        "workOnCurrentBranch": bool(a.work_on_branch),
+        "autoCreatePR": False,            # rule 2: the lead opens the PR
+    }
+    if a.model:
+        body["model"] = {"id": a.model}
+    if a.name:
+        body["name"] = a.name[:100]
+    if a.plan:
+        body["mode"] = "plan"
+    return body
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    p = argparse.ArgumentParser(prog="cursor-cloud", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("launch", help="create an agent and start its first run")
+    s.add_argument("--repo", required=True, help="repository URL, e.g. https://github.com/djbclark/djbclark-ade")
+    s.add_argument("--ref", required=True, help="starting branch or commit")
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--prompt")
+    g.add_argument("--prompt-file")
+    s.add_argument("--model", help="model id from `cursor-cloud models`; omit for the account default")
+    s.add_argument("--name")
+    s.add_argument("--work-on-branch", action="store_true", help="push to --ref itself instead of a new cursor/... branch")
+    s.add_argument("--plan", action="store_true", help="start in plan mode")
+    s.add_argument("--dry-run", action="store_true", help="print the request body and exit")
+    s = sub.add_parser("status", help="GET /v1/agents/{id}")
+    s.add_argument("agent_id")
+    s = sub.add_parser("run", help="GET /v1/agents/{id}/runs/{runId}: status, result text, pushed branches")
+    s.add_argument("agent_id")
+    s.add_argument("run_id", nargs="?", help="defaults to the agent's latestRunId")
+    s = sub.add_parser("usage", help="GET /v1/agents/{id}/usage")
+    s.add_argument("agent_id")
+    s = sub.add_parser("followup", help="POST /v1/agents/{id}/runs: a new run on the same agent and branch")
+    s.add_argument("agent_id")
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--prompt")
+    g.add_argument("--prompt-file")
+    s = sub.add_parser("list", help="GET /v1/agents")
+    s.add_argument("--limit", type=int, default=20)
+    sub.add_parser("models", help="GET /v1/models")
+    a = p.parse_args(argv)
+
+    if a.cmd == "launch" and a.dry_run:
+        print(json.dumps(launch_body(a), indent=2))
+        return 0
+    if not os.environ.get(KEY_NAME):
+        reexec_with_key(argv)
+
+    if a.cmd == "launch":
+        out = request("POST", "/v1/agents", launch_body(a))
+    elif a.cmd == "status":
+        out = request("GET", f"/v1/agents/{a.agent_id}")
+    elif a.cmd == "run":
+        run_id = a.run_id or request("GET", f"/v1/agents/{a.agent_id}").get("latestRunId")
+        if not run_id:
+            sys.exit("cursor-cloud: the agent has no run yet")
+        out = request("GET", f"/v1/agents/{a.agent_id}/runs/{run_id}")
+    elif a.cmd == "usage":
+        out = request("GET", f"/v1/agents/{a.agent_id}/usage")
+    elif a.cmd == "followup":
+        text = Path(a.prompt_file).read_text() if a.prompt_file else a.prompt
+        if not text or not text.strip():
+            sys.exit("cursor-cloud: an empty prompt")
+        out = request("POST", f"/v1/agents/{a.agent_id}/runs", {"prompt": {"text": text}})
+    elif a.cmd == "list":
+        out = request("GET", f"/v1/agents?limit={int(a.limit)}")
+    else:
+        out = request("GET", "/v1/models")
+    print(json.dumps(out, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

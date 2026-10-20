@@ -54,9 +54,12 @@ preferences, because they encode consequences a score cannot see:
 - copilot is the one reserve, with a hard floor (`reserve_floor`): GitHub-side
   Copilot review runs on it; never deplete it (grok was a reserve until
   2026-10-18, when GrokBot moved to its own Cursor pool);
-- hermes is never a delegation target; omp only with the operator's explicit
-  per-run approval (`ACP_OPERATOR_APPROVED=omp`); neither is ever discovered
-  as a routable service here;
+- hermes is never a delegation target (gated, never discovered as a routable
+  service here); omp is an ordinary tier since 2026-10-19 (operator): its Claude
+  API credits are an expiring grant, first for `api-only` work (it is the only
+  pool in that kind) and otherwise for `code`/`bulk` slices, so they are spent
+  before each monthly reset; `grant_days` gives it the burn-first bonus while the
+  balance is far above an even spend over the month;
 - **never** route a slice to clinepass (NEVER_ROUTE) — it is the Hindsight/hermes
   lifeline and stays only in `hermes_chain`;
 - the prepaid tier (opencode-zen, openrouter, deepseek) is retired until an
@@ -172,6 +175,16 @@ class Service:
     # of its binding window left, whatever `min_headroom` says (copilot:
     # GitHub-side Copilot review draws on it; grok was one until 2026-10-18).
     reserve_floor: float = 0.0
+    # Days in the grant period when this pool is an expiring dollar grant rather than a
+    # rolling window (omp's Claude API credits, 2026-10-19): aiuse reports an expiry
+    # (`resets_at`) but no `window_minutes` or pace, so expected_waste() cannot compute
+    # waste and the pool would never earn the burn-first bonus. With grant_days set,
+    # grant_waste() measures the balance against an even spend over the period instead.
+    grant_days: int = 0
+    # Name of a readiness probe in READY_PROBES. A service whose probe fails is skipped by
+    # route() for every kind that goes through acp-dispatch (not `api-only`, which is the
+    # caller's own API call), so the router never hands out a slice that cannot start.
+    ready_probe: str = ""
 
     @property
     def acp_agent(self) -> str:
@@ -369,6 +382,7 @@ def policy_public() -> dict[str, Any]:
             "pool": list(s.pool) if s.pool else None,
             "max_parallel": s.max_parallel, "agent": s.agent,
             "models": dict(s.models), "reserve_floor": s.reserve_floor,
+            "grant_days": s.grant_days, "ready_probe": s.ready_probe,
         }
     return {
         "path": str(POLICY_PATH),
@@ -654,6 +668,62 @@ def expected_waste(remaining: float | None, pace_ratio: Any,
         return None
 
 
+def grant_waste(remaining: float | None, resets_at: Any, grant_days: int,
+                *, now: datetime | None = None) -> float | None:
+    """Percent points of an expiring grant held above an even spend over its period.
+
+    omp's Claude API credits (operator 2026-10-19: spend them before each monthly reset)
+    have an expiry and no window or pace, so expected_waste() returns None for them. An
+    even spend leaves 100 x (hours left / period hours) percent; anything above that is
+    ahead of schedule and, at the reset, wasted if nothing burns it. Unknown balance or
+    expiry, or no grant period, gives None.
+    """
+    if remaining is None or not grant_days or grant_days <= 0:
+        return None
+    t = hours_to_reset(resets_at, now=now)
+    if t is None:
+        return None
+    fair_left = 100.0 * min(1.0, t / (grant_days * 24.0))
+    return max(0.0, float(remaining) - fair_left)
+
+
+def omp_anthropic_ready() -> bool:
+    """True when omp holds an enabled Anthropic credential (the Claude API credits path).
+
+    omp's agent.db keeps one row per login; a refresh failure sets `disabled_cause` and the
+    login needs `omp login` again (2026-10-19: the Anthropic OAuth refresh token had expired
+    on 2026-10-13, so every `omp --model anthropic/...` run ended "No API key found for
+    anthropic"). Reads only provider and disabled_cause, never the credential. Env
+    ROUTE_AGENT_OMP_READY=1/0 forces the answer (tests, a deliberate override)."""
+    forced = os.environ.get("ROUTE_AGENT_OMP_READY", "").strip().lower()
+    if forced:
+        return forced in ("1", "true", "yes")
+    base = Path(os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".omp" / "agent")
+    db = base / "agent.db"
+    if not db.is_file():
+        return False
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        try:
+            row = con.execute("select count(*) from auth_credentials where "
+                              "provider = 'anthropic' and disabled_cause is null").fetchone()
+        finally:
+            con.close()
+        return bool(row and row[0])
+    except Exception:  # noqa: BLE001 - an unreadable db means not ready
+        return False
+
+
+READY_PROBES = {"omp-anthropic": omp_anthropic_ready}
+
+
+def service_ready(svc: Service) -> bool:
+    """False when the service names a readiness probe that fails now."""
+    probe = READY_PROBES.get(svc.ready_probe) if svc.ready_probe else None
+    return True if probe is None else bool(probe())
+
+
 def acp_list_output() -> str:
     """`acp-run --list`, or "" when it cannot run. Never raises; never hangs."""
     try:
@@ -816,6 +886,8 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
     for svc in services:
         if not svc.eligible(kind) or svc.name in exclude:
             continue
+        if kind != "api-only" and not service_ready(svc):
+            continue                       # e.g. omp without a working Anthropic login
         if gap is not None and best is not None and svc.rank_for(kind) - best.rank_for(kind) > gap:
             continue                       # outside the quality band: quota never buys this pool in
         info = quota.get(svc.name) or {}
@@ -840,12 +912,20 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         tags: list[str] = []
         waste = expected_waste(remaining, info.get("pace_ratio"),
                                info.get("resets_at"), info.get("window_minutes"))
+        grant = False
+        if waste is None and svc.grant_days:
+            waste = grant_waste(remaining, info.get("resets_at"), svc.grant_days)
+            grant = waste is not None
         if waste is not None:
             # Reserves keep their floor gate; never boost them to burn unused
             # quota (2026-10-18 review finding 6c).
             if waste >= BURN_FIRST_WASTE_MIN and not svc.reserve_floor:
                 rank -= BURN_FIRST_BONUS
-                tags.append(f"would waste {waste:.0f}% at reset")
+                if grant:
+                    tags.append(f"burn before reset: {waste:.0f}% of the grant is ahead "
+                                "of an even spend and expires unspent otherwise")
+                else:
+                    tags.append(f"would waste {waste:.0f}% at reset")
         elif svc.burn_first and remaining is not None and remaining >= BURN_FIRST_MIN:
             # Static TOML fallback only when waste cannot be computed.
             rank -= BURN_FIRST_BONUS
@@ -1455,6 +1535,8 @@ def main(argv: list[str] | None = None) -> int:
             hrs = hours_to_reset(info.get("resets_at"))
             waste = expected_waste(rem, pace, info.get("resets_at"),
                                    info.get("window_minutes"))
+            if waste is None and svc and svc.grant_days:
+                waste = grant_waste(rem, info.get("resets_at"), svc.grant_days)
             extra = []
             if pace is not None:
                 try:

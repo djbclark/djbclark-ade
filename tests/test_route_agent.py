@@ -544,14 +544,13 @@ class TestRoutingPolicy2026_10_15(unittest.TestCase):
     with a floor, hermes/omp never routable, Fable a sublimit of the shared pool,
     a model suggestion on every route."""
 
-    def test_hermes_and_omp_are_never_discovered(self):
+    def test_hermes_is_never_discovered(self):
         q = {**IDLE, "hermes": {"remaining": 100.0}, "omp": {"remaining": 99.7}}
         names = {s.name for s in r.discover(q)}
         self.assertNotIn("hermes", names)
-        self.assertNotIn("omp", names)
         for kind in r.KINDS:
             c = r.route(kind, quota=q)
-            self.assertNotIn(c.service.name if c else None, {"hermes", "omp"})
+            self.assertNotEqual(c.service.name if c else None, "hermes")
 
     def test_reserve_floor_blocks_copilot_below_sixty_percent(self):
         q = {name: {"remaining": 0.0} for name in (*IDLE, "antigravity-claude")}
@@ -1042,3 +1041,117 @@ class TestQualityBand(unittest.TestCase):
         nxt = r.quality_best("code", services, {best.name})
         self.assertIsNotNone(nxt)
         self.assertNotEqual(nxt.name, best.name)
+
+
+class TestOmpCreditsTier(unittest.TestCase):
+    """Operator 2026-10-19: omp (the Claude Max plan's monthly API credits) is a normal tier, no
+    per-run approval: `api-only` work first, code/bulk so the grant is spent before it expires."""
+
+    # Credits 100% left, expiring 16 days out of a 30-day grant (omp's real snapshot shape: a
+    # reset date, no window_minutes, no pace). Relative to now: the router reads the clock.
+    @property
+    def EXPIRY(self):
+        return (datetime.now(UTC) + timedelta(days=16)).isoformat()
+
+    def quota(self, remaining=99.7, **over):
+        q = {**IDLE, "omp": {"remaining": remaining, "resets_at": self.EXPIRY,
+                             "window_minutes": None, "pace_ratio": None}}
+        q.update(over)
+        return q
+
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_omp_is_no_longer_gated_anywhere(self):
+        self.assertNotIn("omp", r.OPERATOR_GATED)
+        self.assertNotIn("omp", r.POLICY["dispatch"]["operator_gated"])
+        self.assertIn("hermes", r.POLICY["dispatch"]["operator_gated"])
+        self.assertIn("cline", r.OPERATOR_GATED)
+
+    def test_omp_is_eligible_for_code_and_bulk_without_operator_approval(self):
+        env = {k: v for k, v in os.environ.items() if k != "ACP_OPERATOR_APPROVED"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            svc = r.BY_NAME["omp"]
+            self.assertTrue(svc.eligible("code"))
+            self.assertTrue(svc.eligible("bulk"))
+            self.assertTrue(svc.eligible("api-only"))
+            self.assertFalse(svc.eligible("judgment"))
+            self.assertFalse(svc.eligible("frontier"))
+            self.assertIn("omp", {s.name for s in r.discover(self.quota())})
+
+    def test_api_only_is_a_kind_and_only_omp_takes_it(self):
+        self.assertIn("api-only", r.KINDS)
+        self.assertEqual([s.name for s in r.SERVICES if s.eligible("api-only")], ["omp"])
+        c = r.route("api-only", quota=self.quota())
+        self.assertIsNotNone(c)
+        self.assertEqual(c.service.name, "omp")
+        self.assertIn("claude", c.model)
+        self.assertEqual(c.kind, "api-only")
+
+    def test_api_only_ignores_the_acp_readiness_probe(self):
+        """api-only is the caller's own API call, so a broken omp login does not block it."""
+        with mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "0"}):
+            self.assertEqual(r.route("api-only", quota=self.quota()).service.name, "omp")
+
+    def test_omp_gets_code_slices_so_the_credits_are_spent(self):
+        # Every other code pool at its floor: omp, with the grant untouched, takes the slice.
+        q = {name: {"remaining": 0.0} for name in IDLE}
+        q["claude"] = {"remaining": 10.0}
+        q = self.quota(**{k: v for k, v in q.items()})
+        c = r.route("code", quota=q)
+        self.assertEqual(c.service.name, "omp")
+        self.assertEqual(c.model, "anthropic/claude-sonnet-5-5 --effort high")
+
+    def test_unspent_grant_far_ahead_of_an_even_spend_earns_the_burn_bonus(self):
+        # 16 days of 30 left means an even spend leaves 53.3%; 99.7% is about 46 points ahead.
+        waste = r.grant_waste(99.7, self.EXPIRY, 30)
+        self.assertAlmostEqual(waste, 99.7 - 100 * 16 / 30, delta=1.0)
+        c = r.route("code", quota=self.quota())
+        self.assertEqual(c.service.name, "omp")
+        self.assertIn("burn before reset", c.why)
+
+    def test_grant_waste_is_zero_when_spending_on_schedule_and_none_when_unknown(self):
+        soon = (datetime.now(UTC) + timedelta(days=3)).isoformat()
+        self.assertAlmostEqual(r.grant_waste(10.0, soon, 30), 0.0, places=3)  # 3/30 left, holds 10%: on schedule
+        self.assertGreater(r.grant_waste(60.0, soon, 30), 30.0)    # late in the month, far from spent
+        self.assertIsNone(r.grant_waste(None, soon, 30))
+        self.assertIsNone(r.grant_waste(50.0, None, 30))
+        self.assertIsNone(r.grant_waste(50.0, soon, 0))
+
+    def test_late_month_unspent_credits_win_code_over_a_healthy_pool(self):
+        soon = (datetime.now(UTC) + timedelta(days=3)).isoformat()
+        q = self.quota(**{"omp": {"remaining": 90.0, "resets_at": soon,
+                                  "window_minutes": None, "pace_ratio": None}})
+        q["claude"] = {"remaining": 60.0}
+        q["antigravity-claude"] = {"remaining": 0.0}
+        c = r.route("code", quota=q)
+        self.assertEqual(c.service.name, "omp")
+        self.assertIn("burn before reset", c.why)
+
+    def test_not_ready_omp_is_skipped_for_dispatch_kinds_but_not_for_api_only(self):
+        with mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "0"}):
+            for kind in ("code", "bulk"):
+                c = r.route(kind, quota=self.quota())
+                self.assertNotEqual(c.service.name if c else None, "omp", kind)
+
+    def test_readiness_probe_reads_only_an_enabled_anthropic_login(self):
+        import sqlite3
+        import tempfile
+        env = {k: v for k, v in os.environ.items() if k != "ROUTE_AGENT_OMP_READY"}
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, env, clear=True):
+            os.environ["PI_CODING_AGENT_DIR"] = d
+            self.assertFalse(r.omp_anthropic_ready())            # no agent.db
+            con = sqlite3.connect(Path(d) / "agent.db")
+            con.execute("create table auth_credentials (id integer primary key, provider text,"
+                        " disabled_cause text)")
+            con.execute("insert into auth_credentials(provider, disabled_cause) values"
+                        " ('anthropic', 'oauth refresh failed')")
+            con.commit()
+            self.assertFalse(r.omp_anthropic_ready())            # disabled
+            con.execute("insert into auth_credentials(provider, disabled_cause) values"
+                        " ('anthropic', null)")
+            con.commit()
+            con.close()
+            self.assertTrue(r.omp_anthropic_ready())

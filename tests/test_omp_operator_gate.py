@@ -1,5 +1,5 @@
-"""omp is operator-gated (operator 2026-10-15): acp-run and acp-dispatch refuse it unless
-ACP_OPERATOR_APPROVED names it."""
+"""Operator gates in acp-run and acp-dispatch: hermes and cline are refused unless
+ACP_OPERATOR_APPROVED names them; omp left the gate on 2026-10-19 (operator)."""
 import os
 import subprocess
 import unittest
@@ -19,30 +19,33 @@ def run(argv: list[Path | str], approved: str | None) -> subprocess.CompletedPro
                           timeout=120, stdin=subprocess.DEVNULL)
 
 
-class OmpGateTest(unittest.TestCase):
-    def test_acp_run_refuses_omp_without_approval(self):
+class OmpIsNotGatedTest(unittest.TestCase):
+    """omp (the Claude API credits) was gated 2026-10-15 and is an ordinary tier since
+    2026-10-19 (operator): neither acp-run nor acp-dispatch asks for ACP_OPERATOR_APPROVED."""
+
+    def test_acp_run_does_not_gate_omp(self):
+        # No --model: acp-run's own omp check (default would spend the Copilot reserve) answers.
         r = run([ACP_RUN, "omp", "-p", "hi"], None)
         self.assertEqual(r.returncode, 2)
-        self.assertIn(GATE_MSG, r.stderr)
-
-    def test_acp_run_approval_for_another_agent_does_not_count(self):
-        r = run([ACP_RUN, "omp", "-p", "hi"], "grok")
-        self.assertIn(GATE_MSG, r.stderr)
-
-    def test_acp_run_passes_the_gate_with_approval(self):
-        # omp has no AGENTS entry yet, so the run stops at the next check instead.
-        r = run([ACP_RUN, "omp", "-p", "hi"], "grok, omp")
         self.assertNotIn(GATE_MSG, r.stderr)
-        self.assertIn("agent must be one of", r.stderr)
+        self.assertIn("omp needs --model anthropic/", r.stderr)
 
-    def test_acp_dispatch_refuses_omp_without_approval(self):
-        r = run([ACP_DISPATCH, "omp", "--model", "m", "--name", "bad name!", "-p", "hi"], None)
+    def test_acp_run_omp_refuses_a_non_claude_model(self):
+        r = run([ACP_RUN, "omp", "-p", "hi", "--model", "github-copilot/gpt-5.6-luna"], None)
         self.assertEqual(r.returncode, 2)
-        self.assertIn(GATE_MSG, r.stderr)
+        self.assertIn("omp needs --model anthropic/", r.stderr)
 
-    def test_acp_dispatch_passes_the_gate_with_approval(self):
+    def test_acp_run_omp_passes_the_model_check_for_claude(self):
+        # The bad --perm stops the run at the check after the omp one.
+        r = run([ACP_RUN, "omp", "-p", "hi", "--model", "anthropic/claude-sonnet-5-5",
+                 "--perm", "bogus"], None)
+        self.assertNotIn(GATE_MSG, r.stderr)
+        self.assertNotIn("omp needs --model", r.stderr)
+        self.assertIn("--perm must be", r.stderr)
+
+    def test_acp_dispatch_does_not_gate_omp(self):
         # The invalid --name makes dispatch stop at the check right after the gate.
-        r = run([ACP_DISPATCH, "omp", "--model", "m", "--name", "bad name!", "-p", "hi"], "omp")
+        r = run([ACP_DISPATCH, "omp", "--model", "m", "--name", "bad name!", "-p", "hi"], None)
         self.assertNotIn(GATE_MSG, r.stderr)
         self.assertIn("--name must be", r.stderr)
 

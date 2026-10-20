@@ -6,11 +6,41 @@ when they ship (into the relevant doc) or when they're dropped (say why).
 ## Cloud-agent readiness: Codex Cloud environment, Cursor API key (ruling 2026-10-19)
 
 `docs/ade-everywhere-proposal.md` §11.5 rules that paid-for cloud agents are used first for
-slices that can leave the Mac. Two need djbclark once: (1) create a Codex Cloud environment for
-`djbclark-ade` on the web (no non-interactive path; then `codex cloud exec --env <ID>` works);
-(2) a Cursor user API key into the secret backend (`sudo-secretspec`), or install the Cursor
-GitHub app on the repo so `@cursor` on an issue launches a Cloud Agent. Also verify the Max
-plan's monthly API credits and whether anything draws them.
+slices that can leave the Mac. Two need djbclark once: (1) environment `ccarenv_02c6721d65dc4191b57a76a84baa4121` for `djbclark-ade` created
+2026-10-19, but codex-cli 0.163.0 cannot see new-style environments (`codex cloud exec` exits 1,
+"no cloud environments are available for this workspace"; upstream openai/codex#50182 and
+#51585, open). Re-probe after each codex-cli release (`codex cloud exec --env <ID> --branch
+<b> "<task>"`); route chosen (round 3, 2026-10-19): `@codex` on a GitHub issue, scriptable with
+`gh` and the factory's intake path. The Codex GitHub app is installed; the first task is
+https://github.com/djbclark/djbclark-ade/issues/4, but the connector answered twice "To use
+Codex here, create an environment for this repo" even after djbclark re-checked the
+environment's binding, so the connector reads the same catalog the CLI does. Blocked on both
+routes until OpenAI fixes new-style environment discovery (openai/codex#50182); the load-admit
+fix went to the local builder instead. Re-trigger issue 4 with an `@codex` comment after the
+next Codex release or when the connector's reply changes. Then a `codex-cloud` place in
+`acp-dispatch`/`route_agent.py` so the router can pick it (§11.5 rule 4);
+(2) DONE 2026-10-19: the Cursor user API key is `CURSOR_API_KEY` in `sudo-secretspec`
+(runtime declaration, optional; read it only through `sudo-secretspec run`); next a
+`cursor-cloud` launcher that POSTs to `api.cursor.com/v1/agents`, then a place in `acp-dispatch`. (3) The Max plan's
+monthly API credits are the `omp credits` pool in `aiuse` (djbclark, 2026-10-19): rename the
+pool, verify the balance on the Anthropic console, and route one API-key workload at it.
+
+## The Claude API credits (omp): finish the wiring (decided 2026-10-19)
+
+The per-run omp gate is lifted (`skills/model-routing/SKILL.md`, proposal SF-Q19): the credits
+are a normal tier, `api-only` work first, else `code`/`bulk` via `acp-run omp --model
+anthropic/claude-sonnet-5-5`. Open, in order: (1) DONE 2026-10-19 (round 3): djbclark ran `omp login` for Anthropic; the
+credential row is clean and `acp-run omp --model anthropic/claude-sonnet-5-5 -p ...` answered.
+Still to confirm: that a slice's cost lands on the credits pool in `aiuse` (console 2026-10-19:
+$95.57 of $200 left, expires 2026-11-08; `aiuse` showed 100% unused, so its CodexBar reading is
+stale or another row: fix in `~/src/aiuse`). (2) DONE 2026-10-19 in `~/src/aiuse` (8a9dc43):
+`requires_operator_approval` dropped on the omp row, the row keeps the name `omp` (tools look it
+up), `--json` carries `credits_label: "Claude API credits"`; still open there: the "burn before
+reset" suggestion late in the grant period, which `route_agent.py` already has (`grant_days`,
+`grant_waste`). (3) The `api-only`
+callers (`bin/failover.py` Claude SDK route, a verdict classifier) take their key from the
+secret backend, not from omp: check that key draws these credits, then have them ask
+`route_agent.py route --kind api-only` for the balance before a batch.
 
 ## Buy a Jev plan before the factory's merge gate goes live (SF-Q10, 2026-10-19)
 

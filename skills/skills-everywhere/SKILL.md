@@ -29,3 +29,19 @@ Run `--check` first when diagnosing a missing client, and preserve links owned
 by another installer. In link mode any chained link (same realpath, different
 readlink) is collapsed to the direct link. A link being present does not prove
 that a running TUI has reloaded its skills; start a new session when needed.
+
+## Codex access diagnosis
+
+Check the current skill catalog and read the listed `SKILL.md` before declaring
+access broken. On this machine, Codex skills link through `~/.agents/skills/`
+to the canonical ADE directory. If `/name` reaches the agent as literal text,
+load that named skill and follow it; resolve a missing catalog entry at
+`~/src/djbclark-ade/skills/<name>/SKILL.md` before asking for a restart.
+Loading a named skill to diagnose access does not execute its workflow.
+
+Also check `~/.codex/AGENTS.md` (or `$CODEX_HOME/AGENTS.md` when set), following
+all symlinks. A healthy skills directory can coexist with a dangling global
+instruction link. The shared home instructions live at
+`~/ops/site-djbclark/home-agents.md`; repair a stale runtime link to that file.
+Verify readability through the original Codex path after the repair. A running
+session can read it immediately; automatic startup loading needs a new session.

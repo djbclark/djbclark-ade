@@ -36,7 +36,19 @@ Use the native chooser your runtime actually has. Do not invent a second UX.
    Discord/Slack get the same card on those adapters. CLI/TUI get numbered
    text. If the card fails to render, Hermes already falls back to a numbered
    list — do not pre-empt that with prose options of your own.
-3. **No chooser at all:** one short sentence that you cannot prompt, then
+3. **Codex:** for the terminal arrow-key picklist, use the native
+   `request_user_input` chooser when the current mode permits it. It rejects
+   calls in Default mode with `request_user_input is unavailable in Default
+   mode`; explain that Plan mode is required and wait for the operator to
+   switch modes. The agent cannot switch collaboration mode itself.
+   `request_user_input_async` is a different surface: an `accepted` response
+   establishes submission, not a visible arrow-key picklist. Use it only when
+   the client is known to display its question UI. If the operator reports no
+   chooser, report the mode limitation rather than reissuing asynchronous
+   questions, sleeping, or claiming a choice is waiting in a visible picker.
+   Keep unanswered decisions pending. A preselected option or elapsed time is
+   not an answer. Honor the native tool's question schema and limits.
+4. **No usable chooser:** one short sentence that you cannot prompt, then
    wait. Do not fake buttons as a numbered list in chat.
 
 Do not call `AskUserQuestion` on Hermes (it is not a tool here). Do not call
@@ -68,6 +80,11 @@ Shared rules for every prompt, whichever tool:
 4. **Say what it is.** The question is not a title. Lead with position (`2/4`),
    then one or two sentences: what the item is, what it does, and why a choice
    is needed. Longer background is a short prose line *before* the call.
+5. **Anything he may click, copy or paste goes in that prose line, as a
+   markdown link** (`[label](url)`), never inside the question or an option:
+   Paseo's question card is neither selectable nor linkified
+   ([getpaseo/paseo#3164](https://github.com/getpaseo/paseo/issues/3164);
+   djbclark, 2026-10-19). The card carries only the decision text.
 
 ### 2a. `AskUserQuestion` (arrow keys)
 

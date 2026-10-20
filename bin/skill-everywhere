@@ -57,6 +57,14 @@ case "${1:-}" in --check) mode=check; shift ;; --remove) mode=remove; shift ;; e
 [[ $# -gt 0 ]] || { gsed -n '2,7p' "$0" >&2; exit 2; }
 
 rc=0
+# Skill links can be healthy while Codex's shared instructions point at a
+# retired home-agents.md location. Report that separately in read-only checks.
+codex_instructions="${CODEX_HOME:-$HOME/.codex}/AGENTS.md"
+if [[ $mode == check && -L $codex_instructions && ! -e $codex_instructions ]]; then
+  printf 'warning: codex global instructions dangling: %s -> %s\n' \
+    "$codex_instructions" "$(greadlink "$codex_instructions")" >&2
+  rc=1
+fi
 for name in "$@"; do
   if [[ -f $ade_root/$name/SKILL.md ]]; then src="$ade_root/$name"
   elif [[ -f $priv_root/$name/SKILL.md ]]; then src="$priv_root/$name"

@@ -395,8 +395,8 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MODEL_OPTIONAL_AGENTS = {"zcode"}
 # Never dispatched without the operator's specific, explicit approval for that run (operator 2026-10-15);
 # the same gate is in acp-run.
-# omp (operator 2026-10-15) and hermes (same day: "hermes should never be used" as a
-# delegation target) need ACP_OPERATOR_APPROVED=<agent>; acp-run applies the same gate.
+# hermes (operator 2026-10-15: "hermes should never be used" as a delegation target) needs
+# ACP_OPERATOR_APPROVED=<agent>; acp-run applies the same gate. omp left the gate 2026-10-19.
 # cline (operator 2026-10-17): uninstalled, left in place for a deliberate re-enable; Hermes
 # keeps its own ClinePass API pool.
 # Values from config/routing.toml [dispatch] (via route_agent.POLICY), filled in place by
@@ -1198,7 +1198,8 @@ def record_paths(items: list[str]) -> list[Path]:
 
 def boot_time() -> float | None:
     """Epoch seconds of the last boot: ACP_DISPATCH_BOOTTIME, else `sysctl -n kern.boottime`
-    (`{ sec = 1760880691, usec = 123456 } Mon Oct 19 09:31:31 2026`). None when unreadable."""
+    (macOS/BSD: `{ sec = 1760880691, usec = 123456 } Mon Oct 19 09:31:31 2026`), else the
+    `btime` line of /proc/stat (Linux, where kern.boottime does not exist). None when unreadable."""
     env = os.environ.get("ACP_DISPATCH_BOOTTIME")
     if env:
         try:
@@ -1209,8 +1210,15 @@ def boot_time() -> float | None:
         out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True,
                              timeout=10, check=False).stdout
     except (OSError, subprocess.SubprocessError):
-        return None
+        out = ""
     m = re.search(r"\bsec\s*=\s*(\d+)", out)
+    if m:
+        return float(m.group(1))
+    try:
+        stat = Path("/proc/stat").read_text()
+    except OSError:
+        return None
+    m = re.search(r"^btime\s+(\d+)\s*$", stat, re.M)
     return float(m.group(1)) if m else None
 
 
