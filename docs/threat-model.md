@@ -29,8 +29,10 @@ What an attacker would want, in order of damage:
    (`skills/sudo-secretspec/SKILL.md`, Pitfalls); `run` injects them into a child.
 2. **Code execution as the operator.** acp-run runs every agent yolo by default (all tool calls
    auto-approved, operator 2026-10-14); `--perm read-only` restricts an agent to non-mutating tools, or refuses
-   an agent without a verified equivalent, and `--perm deny` gates every call (`tools/acp-run/README.md`
-   Permissions); both are reserved for a security-sensitive slice (4.1). The proposal says
+   an agent without a verified equivalent, and `--perm deny` gates every call except, for agy, the read-only
+   `read` and `search` kinds that `bin/failover.py` passes as `--tripwire-exempt-kinds` (so an agy deny run
+   can still read data; `tools/acp-run/README.md` Permissions); both are reserved for a security-sensitive
+   slice (4.1). The proposal says
    an unattended builder has the daemon user's credentials and that scrubbed pastures and config stripping
    are reliability switches, not a boundary (proposal 10, risk 12).
 3. **GitHub write access** through the operator's `gh` login: push to this public repo, open and merge

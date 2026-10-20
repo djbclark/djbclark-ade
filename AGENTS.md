@@ -163,3 +163,9 @@ pull request here is expected to meet these; flag any it misses.
 8. **Docs move with the code**: a flag, exit code or subcommand added or
    changed appears in the tool's usage text and in the doc that lists it
    (`README.md` roster, `docs/*.md`, `skills/*/SKILL.md`).
+9. **Read Codex's result by commit, never by clock**: its findings are
+   inline comments whose `commit_id` is the reviewed head
+   (`gh api repos/.../pulls/N/comments --jq '.[] | select(.commit_id ==
+   "<head>")'`), and the summary comment's `codex-review-state` names the
+   `commit_sha` it covers. A waiter that filters comments by a timestamp
+   missed two findings on PR 10 (2026-10-20) and the PR merged past them.
