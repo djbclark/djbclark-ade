@@ -67,6 +67,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `acp-run` classifies a `login failed` / `token login` error (zcode's `project_token_login_failed` inside an "Internal error" envelope) as `auth`, never retried, instead of `transient` (#TBD).
 - `diskfree` skill: the idle check for deleting a cache runs in the same command as the delete; a
   `target-shared` delete approved minutes earlier broke a live maturin build (2026-10-20).
 - `load-watch` job guard: a slow crash loop (60 failed restarts in 2 h) now trips too; litellm restarted

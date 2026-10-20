@@ -38,6 +38,10 @@ HTTP_STATUSES = [
     ('{"code": 500, "message": "internal"}', "transient"),
     ("status 502 from the gateway", "transient"),
     ("503 Service Unavailable", "transient"),
+    # zcode, 2026-10-16..18: an auth wall inside an "Internal error" envelope was transient and retried
+    ('RequestError: Internal error {"details": "model_request_failed project_token_login_failed (Turn execution failed)"}', "auth"),
+    ("project_token_login_failed", "auth"),
+    ("Login failed: please sign in again", "auth"),
 ]
 
 

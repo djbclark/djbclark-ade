@@ -118,7 +118,7 @@ are the FAILURE_CLASSES, REPLY_REFUSALS, MODEL_REFUSALS and TAIL_ERROR tables in
     refused    the model declined the task (never retried; not a deliverable)
     quota      usage/rate limit or quota exhausted
     plan       model not available on the account's plan
-    auth       not logged in / authentication required
+    auth       not logged in / authentication required / a login or token-login failure
     transient  timeout, unavailable, overloaded, connection reset, 5xx
 A reply cut off by such an error line is reported as "reply truncated; edits
 may be present". ACP errors are classified the same way.
@@ -1548,6 +1548,10 @@ FAILURE_CLASSES = [
             r"invalid api[ _-]?key",
             r"unauthori[sz]ed",
             r"\b401\b",
+            # zcode (2026-10-16..18): "model_request_failed project_token_login_failed" inside an
+            # "Internal error" envelope read as transient and was retried into the auth wall
+            r"login[ _-]?failed",
+            r"token[ _-]?login",
         ],
     ),
     (
