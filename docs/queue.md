@@ -18,7 +18,7 @@ environment's binding, so the connector reads the same catalog the CLI does. Blo
 routes until OpenAI fixes new-style environment discovery (openai/codex#50182; non-review
 mentions are a separate open bug); the load-admit fix went to the local builder instead (three adversary rounds, PR 7 opened 2026-10-20). What
 works today: `@codex review` on a PR (PR 5 reviewed clean, 2026-10-19), so Codex is a third
-reviewer next to the adversary and Cursor's Security Agent. Re-trigger issue 4 with an `@codex`
+reviewer next to the adversary and Cursor's Security Agent (auto review on PR open since 2026-10-19, repo and personal settings; Codex's first review of PR 7 gave two valid P2s). Cursor's Bugbot is *disabled* for this repo (`bugbot run verbose=true` on PR 7, 2026-10-20: "Bugbot is disabled for this repository"); enabling it is djbclark's call at https://www.cursor.com/dashboard/bugbot, not needed while three reviewers already run. Re-trigger issue 4 with an `@codex`
 comment after the next Codex release or when the connector's reply changes. Then a `codex-cloud` place in
 `acp-dispatch`/`route_agent.py` so the router can pick it (§11.5 rule 4);
 (2) DONE 2026-10-19: the Cursor user API key is `CURSOR_API_KEY` in `sudo-secretspec`
