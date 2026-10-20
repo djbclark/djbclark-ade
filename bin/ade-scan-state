@@ -98,6 +98,9 @@ then `local_only_tags` a list of {tag, count}, one per local tag; at most 100 re
 (branches first), the rest in `local_only_branches_uncounted`: one extra git call per
 checkout when nothing is local-only and at most 104 otherwise. The summary counts these as `with_local_only_commits`.
 Extra flag `local-only commits: <branch> <n>, tag <tag> <n>, ...`: the same lists, first five refs.
+With --remote, a local tag origin does not list (or lists at another object) whose commit origin does have is
+in `local_only_tags` with count 0 and flagged `unpushed tags: <names>` (a primary flag: the tag object, its
+annotation and signature are unpushed work).
 Extra flag `detached`: HEAD is detached and commits lie outside origin; `origin unknown`: the branch
 is not detached but origin's branch list could not be read at all (the verdict is `unpushed commits`,
 never `clean and pushed`).
@@ -1046,6 +1049,16 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
                     local_only_tags.append({"tag": name, "count": n})
             branches_uncounted = (max(len(names) - MAX_BRANCH_COUNTS, 0)
                                   + max(len(tag_names) - tag_budget, 0))
+        if live:
+            # a local tag whose commit origin already has is still local work: its name, annotation and signature
+            # exist nowhere else, and no commit count sees a tag object (Codex pass 31 on PR 27). Only a live
+            # origin answer lists origin's tags, so without --remote nothing is claimed about them
+            local_tags = local_tag_refs(path)
+            if local_tags is None:
+                return incomplete_record(path, "for-each-ref refs/tags", 1)
+            counted = {t["tag"] for t in local_only_tags}
+            local_only_tags += [{"tag": name, "count": 0} for name, oid in sorted(local_tags.items())
+                                if name not in counted and tags.get(name, ("", ""))[0] != oid]
     if live and on_origin is False and ahead_of_origin and not unborn:
         # the branch is not on origin but its commits may be, under a live tag or a branch with no local tracking
         # ref: count HEAD against the live tips, like the local-only count, before calling it an orphan (Codex pass 19)
@@ -1066,11 +1079,16 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         elif on_origin is None:
             flags.append("origin unknown")
         entries = ([f"{b['branch']} {b['count']}" for b in local_only_branches]
-                   + [f"tag {t['tag']} {t['count']}" for t in local_only_tags])
+                   + [f"tag {t['tag']} {t['count']}" for t in local_only_tags if t["count"]])
         shown = ", ".join(entries[:5])
         more = len(entries) - 5
         flags.append("local-only commits: " + (shown or f"{local_only} in total")
                      + (f", +{more} more" if more > 0 else ""))
+    zero_tags = [t["tag"] for t in local_only_tags if not t["count"]]
+    if zero_tags:
+        # the tag object is unpushed although its commit is not: a primary flag, never `clean and pushed`
+        flags.append("unpushed tags: " + ", ".join(zero_tags[:5])
+                     + (f", +{len(zero_tags) - 5} more" if len(zero_tags) > 5 else ""))
     if credential and remote:
         flags.append(ORIGIN_CREDENTIAL)  # not queried: unreachable in every respect
     elif origin_unreachable:
