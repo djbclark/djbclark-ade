@@ -504,9 +504,11 @@ def operator_disabled(path: Path | None = None) -> set[str]:
 
     try:
         with (path or AIUSE_CONFIG).open("rb") as fh:
-            return set((tomllib.load(fh).get("disabled_services") or {}).keys())
+            off = set((tomllib.load(fh).get("disabled_services") or {}).keys())
     except (OSError, tomllib.TOMLDecodeError):
         return set()
+    # a service that draws on a disabled provider's pool is off with it (cursor-cloud on cursor)
+    return off | {s.name for s in SERVICES if s.shares_pool and s.shares_pool in off}
 
 
 def load_snapshot() -> tuple[dict[str, Any], float | None]:

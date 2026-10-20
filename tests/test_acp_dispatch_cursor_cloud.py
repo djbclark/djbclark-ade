@@ -319,12 +319,112 @@ class TestAdversaryFindings(CloudBase):
         self.assertTrue(chk.stdout.startswith("blocked"))
 
     # 2. branch name
+    def on_origin(self, *names: str) -> None:
+        """ls-remote answers from the second call on (after the run) include these cursor/* heads."""
+        text = f"{self.head}\trefs/heads/feat/slice-base\n" + "".join(f"c0ffee\trefs/heads/{n}\n" for n in names)
+        for n in (2, 3):
+            (self.cc / f"ls-remote-{n}.txt").write_text(text)
+
     def test_branch_from_result_text_when_api_has_only_repo_url(self):
+        self.on_origin("cursor/document-cursor-cloud-8526")
         self.run_json("run-1.json", "FINISHED", result=REAL_RESULT, git=REAL_BRANCHES)
         self.assertEqual(self.cloud().returncode, 0)
         lines = self.report().splitlines()
         self.assertIn("BRANCH: cursor/document-cursor-cloud-8526", lines)
-        self.assertTrue(any(ln.startswith("BRANCH-SOURCE: result text") for ln in lines))
+        self.assertTrue(any(ln.startswith("BRANCH-SOURCE: result text, confirmed on origin") for ln in lines))
+
+    def test_result_text_branch_absent_from_origin_is_not_accepted(self):
+        self.run_json("run-1.json", "FINISHED", result=REAL_RESULT, git=REAL_BRANCHES)
+        self.assertEqual(self.cloud().returncode, 0)
+        lines = self.report().splitlines()
+        self.assertNotIn("BRANCH: cursor/document-cursor-cloud-8526", lines)
+        self.assertTrue(any(ln.startswith("BRANCH: unknown") for ln in lines))
+
+    def test_branch_regex_ignores_paths_and_prefixed_words(self):
+        mod = self.load_module()
+        found = mod.CLOUD_BRANCH_RE.findall("see docs/cursor/x and ./cursor/y and mycursor/z and `cursor/real-1`.")
+        self.assertEqual(found, ["cursor/real-1"])
+
+    def test_ambiguous_ls_remote_candidates_are_unknown(self):
+        (self.cc / "ls-remote-2.txt").write_text(
+            f"{self.head}\trefs/heads/feat/slice-base\nd1\trefs/heads/cursor/one\nd2\trefs/heads/cursor/two\n")
+        (self.cc / "fetch-ct").write_text("99999999999\n")
+        self.run_json("run-1.json", "FINISHED", result="Done.", git=REAL_BRANCHES)
+        self.assertEqual(self.cloud().returncode, 0)
+        self.assertTrue(any(ln.startswith("BRANCH: unknown") for ln in self.report().splitlines()))
+
+    def write_peer(self, finished: float | None) -> None:
+        import time
+        jobs = self.out / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        (jobs / "peer.json").write_text(json.dumps({
+            "name": "peer", "cloud_provider": "cursor", "cloud_repo": "https://github.com/djbclark/some-repo",
+            "launched_at": time.time() - 5, "started": time.time() - 5, "finished": finished,
+            "status": "running" if finished is None else "done"}))
+
+    def ls_remote_one_new(self) -> None:
+        (self.cc / "ls-remote-2.txt").write_text(
+            f"{self.head}\trefs/heads/feat/slice-base\nd1\trefs/heads/cursor/mine-or-theirs\n")
+        (self.cc / "fetch-ct").write_text("99999999999\n")
+        self.run_json("run-1.json", "FINISHED", result="Done.", git=REAL_BRANCHES)
+
+    def test_ls_remote_fallback_unknown_while_another_cloud_slice_overlaps(self):
+        self.ls_remote_one_new()
+        self.write_peer(None)
+        self.assertEqual(self.cloud().returncode, 0)
+        self.assertTrue(any(ln.startswith("BRANCH: unknown") for ln in self.report().splitlines()))
+
+    def test_ls_remote_fallback_ignores_a_peer_that_ended_before_the_launch(self):
+        self.ls_remote_one_new()
+        self.write_peer(1000.0)
+        self.assertEqual(self.cloud().returncode, 0)
+        self.assertIn("BRANCH: cursor/mine-or-theirs", self.report().splitlines())
+
+    def load_module(self):
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader(
+            "acpd_cc2", str(Path(__file__).resolve().parent.parent / "bin" / "acp-dispatch"))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(mod)
+        return mod
+
+    def test_perm_read_only_and_deny_refused(self):
+        for perm in ("read-only", "deny"):
+            with self.subTest(perm=perm):
+                res = self.cloud("--perm", perm, name=f"p-{perm}")
+                self.assertEqual(res.returncode, 2, res.stderr)
+                self.assertIn("cannot enforce --perm", res.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_extend_takes_effect_in_a_running_poller(self):
+        import time
+        self.run_json("run-1.json", "RUNNING")
+        res = self.cloud("--detach", "--no-wait", "--timeout", "2")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        rec_path = self.out / "jobs" / "s1.json"
+        script = Path(__file__).resolve().parent.parent / "bin" / "acp-dispatch"
+        proc = subprocess.Popen([sys.executable, str(script), "execute", str(rec_path)],
+                                env={**os.environ, **self.fenv(ACP_DISPATCH_CLOUD_POLL="0.2")},
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            for _ in range(100):
+                if json.loads(rec_path.read_text()).get("pid") == proc.pid:
+                    break
+                time.sleep(0.1)
+            ext = run(["extend", str(rec_path), "600"], env=self.fenv())
+            self.assertEqual(ext.returncode, 0, ext.stderr)
+            time.sleep(4)                      # past the original 2 s limit
+            self.assertIsNone(proc.poll(), "the poller stopped at the original limit")
+        finally:
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=30)
+
+    def test_deadline_counts_from_the_launch_not_from_a_repoll(self):
+        self.run_json("run-1.json", "RUNNING")
+        res = self.cloud("--timeout", "1", env={"ACP_DISPATCH_CLOUD_POLL": "0.3"})
+        self.assertEqual(res.returncode, 124, res.stderr)
+        self.assertIn("acp-dispatch --timeout 1 s reached", self.report())
 
     def test_branch_from_ls_remote_when_result_names_none(self):
         self.ls_remote(f"{self.head}\trefs/heads/feat/slice-base\nabc\trefs/heads/cursor/old-one\n")
@@ -391,6 +491,7 @@ class TestAdversaryFindings(CloudBase):
         rec_path = self.detached_record()
         self.kill_poller(rec_path)
         self.run_json("run-1.json", "FINISHED", result=REAL_RESULT, git=REAL_BRANCHES)
+        self.on_origin("cursor/document-cursor-cloud-8526")
         res = run(["reap", str(rec_path)], env=self.fenv())
         self.assertEqual(res.returncode, 0, res.stderr)
         rec = json.loads(rec_path.read_text())
@@ -456,13 +557,12 @@ class TestAdversaryFindings(CloudBase):
         self.assertEqual(self.record()["cloud_run_id"], "run-9")
         self.assertIn(["run", "bc-test1", "run-9"], self.calls())
 
-    def test_unknown_status_ends_as_error_and_says_agent_may_run(self):
+    def test_unknown_status_counts_as_running_until_the_deadline(self):
         self.run_json("run-1.json", "SOMETHING_NEW")
-        res = self.cloud()
-        self.assertEqual(res.returncode, 3, res.stderr)
-        text = self.report()
-        self.assertIn("unexpected run status 'SOMETHING_NEW'", text)
-        self.assertIn("may still be running in Cursor", text)
+        res = self.cloud("--timeout", "1", env={"ACP_DISPATCH_CLOUD_POLL": "0.3"})
+        self.assertEqual(res.returncode, 124, res.stderr)
+        self.assertEqual(self.record()["cloud_last_status"], "SOMETHING_NEW")
+        self.assertIn("may still be running in Cursor", self.report())
 
     def test_unpushed_branch_refused_unless_allowed(self):
         self.ls_remote("deadbeef\trefs/heads/feat/slice-base\n")

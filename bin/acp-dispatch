@@ -54,11 +54,12 @@ ordinary runner (`execute`, launchd under --detach) then polls `cursor-cloud run
 (ACP_DISPATCH_CLOUD_POLL; the run id is pinned from the launch, so a later followup is not read as
 this slice) instead of running acp-run, and writes the report: the run's result text, a `BRANCH:`
 line (never missing: the API's git.branches[] often has only a repoUrl, so the name comes from the
-result text, else from the cursor/* head that appeared on origin since the launch, else
-`BRANCH: unknown`; a `BRANCH-SOURCE:` line says which) and a `COST:` line from `cursor-cloud usage`
+result text (only a name `git ls-remote` shows on origin), else the one cursor/* head that appeared
+on origin since the launch (never with another cloud slice on the same repo overlapping: no guess),
+else `BRANCH: unknown`; a `BRANCH-SOURCE:` line says which) and a `COST:` line from `cursor-cloud usage`
 (`$1.04 (104.49 cents charged; N tokens)`). The report ends DONE on FINISHED (exit 0); a result with
 a `BLOCKED:` line puts it first, so check says blocked (exit 4); ERROR, CANCELLED, EXPIRED, --timeout
-(24 h cap when --timeout is 0) or an unknown status end in a NO-REPORT line (exit 1; 124 on timeout)
+(24 h cap when --timeout is 0; re-read from the record every poll, so `extend` works) end in a NO-REPORT line (exit 1; 124 on timeout)
 and say the cloud agent may still run (no cancel: use the Cursor dashboard). check, wait and the
 rearm waiter work unchanged. If the poller dies while the cloud run continues, `reap`, `check` and
 `acp-dispatch resume RECORD` re-poll the same agent instead of finalizing it lost (a new launchd job,
@@ -66,7 +67,9 @@ rearm waiter work unchanged. If the poller dies while the cloud run continues, `
 shutdown writes a report that names the agent and this command. A cloud slice runs off the Mac, so
 it skips the local load gate, the in-flight cap (max_parallel is a `plan` hint only) and the acp-run
 preflight; the Cursor pool's --min-headroom still applies, but running cloud slices are not reserved
-against the local `cursor` pool. It refuses (exit 2) unless HEAD equals origin's branch
+against the local `cursor` pool; a status other than the four terminal ones counts as running
+(the raw value is kept as `cloud_last_status`). `--perm read-only` and `--perm deny` are refused
+(exit 2): a cloud run always commits and pushes. It refuses (exit 2) unless HEAD equals origin's branch
 (`git ls-remote`; --allow-unpushed overrides). It never opens a pull request (autoCreatePR is
 always false); the lead reviews the pushed branch and opens the PR. `cursor-cloud followup`
 continues the agent with a new prompt.
@@ -3940,9 +3943,8 @@ CLOUD_AGENT = "cursor-cloud"
 CLOUD_TERMINAL = ("FINISHED", "ERROR", "CANCELLED", "EXPIRED")
 CLOUD_ACTIVE = ("RUNNING", "CREATING", "PENDING", "QUEUED", "STARTING", "ACTIVE")
 CLOUD_MAX_POLL_FAILURES = 10
-CLOUD_MAX_UNKNOWN_STATUS = 20          # polls in a row with a status that is neither active nor terminal
 CLOUD_MAX_SECONDS = 24 * 3600          # the cap when --timeout is 0 (unlimited)
-CLOUD_BRANCH_RE = re.compile(r"\bcursor/[A-Za-z0-9._/-]*[A-Za-z0-9]")
+CLOUD_BRANCH_RE = re.compile(r"(?<![./\w])cursor/[A-Za-z0-9._/-]*[A-Za-z0-9]")
 CLOUD_NOTE = (
     "\n## Cloud run (acp-dispatch)\n\nYou run in Cursor's cloud, not on the lead's Mac: the report and "
     ".done paths above do not exist for you and nothing needs writing there. Commit and push your work "
@@ -4034,17 +4036,44 @@ def cloud_heads(repo: str, ref: str | None = None) -> dict[str, str] | None:
     return heads
 
 
+def cloud_overlapping(rec: dict) -> list[str]:
+    """Other cloud slices on the same repo whose run overlapped this one's (launched before this one
+    ended, ended after this one launched): any cursor/* head created in that window may be theirs."""
+    mine = Path(rec["record"]).resolve()
+    since = float(rec.get("launched_at") or rec.get("started") or 0)
+    names = []
+    for jobs in {Path(rec["out"]) / "jobs", *STATE_ROOT.glob("*/jobs")}:
+        for f in jobs.glob("*.json"):
+            if f.resolve() == mine:
+                continue
+            try:
+                other = json.loads(f.read_text())
+            except (OSError, ValueError):
+                continue
+            if not other.get("cloud_provider") or other.get("cloud_repo") != rec.get("cloud_repo"):
+                continue
+            if other.get("status") in ("unavailable", "dry-run"):
+                continue
+            ended = other.get("finished")
+            if (ended is None or float(ended) > since) and float(other.get("launched_at") or other.get("started") or 0) < time.time():
+                names.append(other.get("name") or f.stem)
+    return names
+
+
 def cloud_ls_remote_branch(rec: dict) -> str | None:
-    """The cursor/* head that is new or moved since the launch, newest commit first. Only a head whose
-    commit date is not before `launched_at` counts; with no readable date a single candidate is used."""
+    """The one cursor/* head that is new or moved since the launch and was committed after `launched_at`.
+    Never a guess: another cloud slice on the same repo overlapping this one, no readable commit date or
+    more than one candidate all give None (the report then says unknown)."""
+    if cloud_overlapping(rec):
+        return None
     repo = rec.get("dir") or "."
     after = cloud_heads(repo)
     if not after:
         return None
     before = rec.get("cloud_heads_before") or {}
-    cands = [name for name, sha in after.items() if before.get(name) != sha]
+    cands = [name for name, sha in after.items() if name.startswith("cursor/") and before.get(name) != sha]
     since = float(rec.get("launched_at") or rec.get("started") or 0) - 120
-    best, best_ct = None, 0
+    found = []
     for name in cands:
         f = subprocess.run(["git", "-C", repo, "fetch", "-q", "--no-tags", "origin", f"refs/heads/{name}"],
                            check=False, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
@@ -4056,11 +4085,9 @@ def cloud_ls_remote_branch(rec: dict) -> str | None:
             ct = int(t.stdout.strip())
         except ValueError:
             continue
-        if ct >= since and ct >= best_ct:
-            best, best_ct = name, ct
-    if best:
-        return best
-    return cands[0] if len(cands) == 1 and before else None
+        if ct >= since:
+            found.append(name)
+    return found[0] if len(found) == 1 else None
 
 
 def cloud_branches(rec: dict, run: dict) -> tuple[list[str], str]:
@@ -4076,7 +4103,10 @@ def cloud_branches(rec: dict, run: dict) -> tuple[list[str], str]:
         return named, "api"
     seen = list(dict.fromkeys(CLOUD_BRANCH_RE.findall(str(run.get("result") or ""))))
     if seen:
-        return seen, "result text"
+        on_origin = cloud_heads(rec.get("dir") or ".") or {}
+        confirmed = [b for b in seen if b in on_origin]
+        if confirmed:
+            return confirmed, "result text, confirmed on origin"
     got = cloud_ls_remote_branch(rec)
     return ([got], "ls-remote") if got else ([], "")
 
@@ -4145,15 +4175,24 @@ def cloud_poll(record: Path) -> int:
     running in Cursor and `acp-dispatch resume RECORD` (or reap) re-polls it."""
     rec = update_record(record, pid=os.getpid(), pid_start=proc_start(os.getpid()))
     interval = float(os.environ.get("ACP_DISPATCH_CLOUD_POLL", "30"))
-    limit = rec["timeout"] if rec.get("timeout") else CLOUD_MAX_SECONDS
-    deadline = time.time() + limit
+    launched = float(rec.get("launched_at") or rec.get("started") or time.time())
+
+    def limit_now() -> tuple[float, float]:
+        """(deadline, seconds): re-read from the record every loop, from the launch time, so
+        `acp-dispatch extend` takes effect and a re-poll does not restart the clock."""
+        try:
+            secs = json.loads(record.read_text()).get("timeout")
+        except (OSError, ValueError):
+            secs = rec.get("timeout")
+        secs = secs if secs else CLOUD_MAX_SECONDS
+        return launched + secs, secs
 
     def stop(signum, _frame):
         raise CloudStop(signum)
 
     old = {s: signal.signal(s, stop) for s in (signal.SIGTERM, signal.SIGHUP)}
     binp = rec.get("cloud_bin") or cloud_bin()
-    status, run, detail, fails, unknown = "", None, "", 0, 0
+    status, run, detail, fails, last_raw = "", None, "", 0, None
     may_run = (f"; the cloud agent {rec['cloud_agent_id']} may still be running in Cursor "
                f"(`{binp} status {rec['cloud_agent_id']}`)")
     try:
@@ -4167,16 +4206,16 @@ def cloud_poll(record: Path) -> int:
             else:
                 fails, run = 0, got
                 status = str(got.get("status") or "").upper()
-                unknown = 0 if status in CLOUD_ACTIVE else unknown + 1
                 if status in CLOUD_TERMINAL:
                     break
-                if unknown >= CLOUD_MAX_UNKNOWN_STATUS:
-                    status, detail = "ERROR", f"unexpected run status {got.get('status')!r} {unknown} polls in a row{may_run}"
-                    break
+                # any other status is active (bounded by the deadline); the raw value is kept in the record
+                if got.get("status") != last_raw:
+                    last_raw = got.get("status")
+                    update_record(record, cloud_last_status=last_raw)
+            deadline, secs = limit_now()
             if time.time() > deadline:
                 status = "EXPIRED"
-                detail = (f"acp-dispatch --timeout {rec['timeout'] if rec.get('timeout') else limit} s reached"
-                          f"{may_run}")
+                detail = f"acp-dispatch --timeout {secs} s reached{may_run}"
                 break
             time.sleep(interval)
     except CloudStop as e:
@@ -4264,6 +4303,9 @@ def dispatch_cloud(a: argparse.Namespace, previous: dict | None, kind: str | Non
     if previous is not None:
         die("a cursor-cloud slice is resumed through its record: `acp-dispatch resume RECORD` re-polls the "
             "same cloud agent; `cursor-cloud followup` continues it with a new prompt")
+    if (a.perm or "all") != "all":
+        die(f"cursor-cloud cannot enforce --perm {a.perm}: a cloud run always commits and pushes, and the launch "
+            "request has no permission control; use --perm all, or a local agent for a read-only slice", 2)
     out = Path(a.out).expanduser().resolve() if a.out else STATE_ROOT / (a.task or f"adhoc-{date.today().isoformat()}")
     (out / "jobs").mkdir(parents=True, exist_ok=True)
     report = out / f"{a.name}-report.md"
