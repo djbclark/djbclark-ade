@@ -61,6 +61,7 @@ an alarm at DEADLINE_SECONDS exits 0 with no output.
 import json
 import os
 import re
+import shutil
 import signal
 import sys
 from pathlib import Path
@@ -204,25 +205,66 @@ def _early_message(total, growth):
     )
 
 
+def _which(name):
+    # The same PATH bin/self-slash searches: it exports PATH="/opt/homebrew/bin:$PATH" before
+    # choosing a host (self-slash line ~87), and a hook's inherited PATH may lack that prefix
+    # (Codex on PR 19, 2026-10-20).  Tests replace this; the hook never spawns orca itself.
+    return shutil.which(name, path="/opt/homebrew/bin:" + os.environ.get("PATH", os.defpath))
+
+
+def _self_slash_host():
+    # The same host selection as bin/self-slash, in its order (2026-10-20, Codex on PR 19):
+    # a herdr pane only with HERDR_ENV=1 (a stale HERDR_PANE_ID alone is not one), an Orca
+    # terminal only when the orca CLI is on PATH, else a Paseo agent (2026-10-19: `paseo
+    # wait` then `paseo send` of the root-only built-ins).  None: self-slash would refuse.
+    if os.environ.get("HERDR_ENV") == "1" and os.environ.get("HERDR_PANE_ID"):
+        return "herdr"
+    if os.environ.get("ORCA_TERMINAL_HANDLE") and _which("orca"):
+        return "orca"
+    if os.environ.get("PASEO_AGENT_ID") and _paseo_cli():
+        return "paseo"
+    return None
+
+
+def _paseo_cli():
+    # self-slash (lines ~141-142): PASEO_CLI, else paseo on PATH, and it must be executable;
+    # otherwise it exits 3 and the operator types the command (Codex on PR 19, 2026-10-20).
+    cli = os.environ.get("PASEO_CLI") or _which("paseo")
+    return bool(cli) and os.access(cli, os.X_OK)
+
+
 def _can_self_slash():
-    # The hosts bin/self-slash can type into: a herdr pane, an Orca terminal, or a
-    # Paseo agent (2026-10-19: `paseo wait` then `paseo send` of the root-only built-ins).
-    return bool(os.environ.get("HERDR_PANE_ID") or os.environ.get("ORCA_TERMINAL_HANDLE")
-                or os.environ.get("PASEO_AGENT_ID"))
+    return _self_slash_host() is not None
+
+
+def _paseo_finish_note():
+    # On Paseo /quit is not a command (it reaches Claude as plain text), so ending a
+    # session there is --finish, which archives the agent once idle (2026-10-20).
+    # Archiving is the operator's choice (loose Rule 4), never something the model
+    # decides alone.
+    if _self_slash_host() != "paseo":
+        return ""
+    return (" On Paseo, a finished task with nothing to continue: offer the `loose` Rule 4 "
+            "choices (handoff and continue, or finish and archive, which is "
+            "~/src/djbclark-ade/bin/self-slash --finish as the last action; it archives "
+            "this agent once idle, and /quit does nothing there) rather than archiving "
+            "yourself.")
 
 
 def _boundary_message(total):
     # self-slash refuses outside herdr, Orca and Paseo: there the operator types /new.
-    new = ("~/src/djbclark-ade/bin/self-slash \"/new\"" if _can_self_slash()
-           else "tell the operator /new is ready")
+    new = ("(its Step 9 runs ~/src/djbclark-ade/bin/self-slash \"/new\" and queues /baton)"
+           if _can_self_slash() else "and then tell the operator /new is ready")
     return (
         f"Context is {total:,}. At the next task completion, if the following "
-        f"work is not a direct continuation, run the `handoff` skill and then "
+        f"work is not a direct continuation, run the `handoff` skill "
         f"{new} instead of /compact: a fresh session re-writes ~46k, a "
         "compaction re-writes ~72k plus a summariser call and leaves ~104k "
         "behind. Do not compact mid-task."
-        + (" self-slash then sends /baton into the fresh session itself (2026-10-19)."
-           if _can_self_slash() else "")
+        + (" Do not run /new yourself as well: self-slash refuses the second one. Only the "
+           "top-level session does this; a sub-agent or dispatched slice treats a handoff "
+           "as document-only." if _can_self_slash() else "")
+        + _paseo_finish_note()
     )
 
 
@@ -237,14 +279,17 @@ def _ask_message(total, growth, repeat):
             "2026-10-15): at the next natural boundary (a task done, never "
             "mid-edit or with a sub-agent result unread), first choice when the "
             "current task is finished, same topic or not: run the `handoff` "
-            "skill (it writes the Tier 2 document), then "
-            "~/src/djbclark-ade/bin/self-slash \"/new\" ONCE and end the turn "
-            "(a fresh session re-writes ~46k; self-slash then sends /baton into "
-            "the fresh session itself, 2026-10-19). Only if the work must continue "
+            "skill (it writes the Tier 2 document; its Step 9 runs "
+            "~/src/djbclark-ade/bin/self-slash \"/new\" ONCE and queues /baton into "
+            "the fresh session, so do not run /new yourself as well) and end the turn "
+            "(a fresh session re-writes ~46k). Only the top-level session does this; "
+            "a sub-agent or dispatched slice treats a handoff as document-only. "
+            "Only if the work must continue "
             "in-context: save what the next turn needs, run self-slash "
             "\"/compact <focus>\" ONCE and end the turn. Only if self-slash "
             "refuses (a draft on the input line) ask the operator for /new or "
-            "/compact. "
+            "/compact."
+            + _paseo_finish_note() + " "
             + _COST_NOTE
         )
     return (

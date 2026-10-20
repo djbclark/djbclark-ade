@@ -19,6 +19,12 @@ agent what changed and what is new. Entries end with the pull request number.
 - `CHANGELOG.md`, this file, and the rule that every pull request adds a line to it; README
   "Update (this machine)"; proposal v2.4 with `ade update` as a Phase 1 command and acceptance
   test T8 (2026-10-20).
+- `self-slash --finish`: end the session; on Paseo it waits for idle and archives the agent without
+  `--force`, and `self-slash "/quit"` there is mapped to it (Paseo runs no `/quit`); `/new`, `/clear`,
+  `/reset`, `/quit`, `/exit` and `--finish` take a per-agent lifecycle lock, keyed on pid and start
+  time (#19).
+- `self-slash` exit 9: a dispatched agent (`ACP_RUN_AGENT=1`, set by `acp-run`) is refused every
+  lifecycle action and `/compact` (#19).
 - `docs/threat-model.md`, the threat model Codex's security review reads (#10).
 - AGENTS.md "Code review" section: what a reviewer checks on every pull request here (#9).
 - `bin/cursor-cloud`: launch and inspect Cursor Cloud Agents from the terminal, with unit tests
@@ -32,6 +38,15 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
+- `acp-run` removes `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `ORCA_TERMINAL_HANDLE` from every agent's
+  environment and sets `ACP_RUN_AGENT=1`; `self-slash --finish` and `--then /quit` on Paseo are
+  rejected with `--then`, and `paseo agent archive` gets `--` before the id (#19).
+- The context-size nudge tells a session to run the `handoff` skill (Step 9 does the `/new`) and, on
+  Paseo, to offer the `loose` Rule 4 choices instead of archiving itself; the dispatch footer, `handoff`
+  Step 9 and `loose` Rule 4 say lifecycle actions run only in the top-level session (#19).
+- `handoff` ends in a new Step 9 that clears the session and starts `/baton` by itself; `loose`
+  Rule 4 offers handoff and continue, finish and archive, or keep working; `baton` never clears
+  a session itself (#19).
 - `acp-dispatch check`: a slice whose recorded class is `killed:` or `lost` gets the `resume` hint (no
   "after the reset") and no `--escalate`; a missing agent binary is `NO-REPORT: not-installed` (exit 127
   plus acp-run's own line) with a re-dispatch hint; `acp-run` waits up to 90 s (`ACP_RUN_BIN_WAIT`, clamped
