@@ -726,9 +726,13 @@ def copy_file_store(store, run, excluder):
             if not os.path.lexists(real):
                 run.absent(src)
                 continue
+            exc = root_type_problem(store, label, real)
+            if exc:  # a configured type that changed: recorded, never copied as whatever it is now
+                run.error(src, exc)
+                continue
             anchored, base = home_anchor(real, excluder)
             parts = anchored.relative_to(base).parts
-            if real.is_dir():
+            if label not in store.get("file_labels", ()):
                 rfd = open_dir_chain(base, parts)  # the walk starts from this descriptor, every component O_NOFOLLOW
                 try:
                     copy_dir_fd(rfd, real, dst, run, excluder)
@@ -769,24 +773,28 @@ def copy_sqlite_store(store, run, excluder):
             run.error(src, exc)
 
 
-def tree_dbs(store, root=None):
-    """The databases a sqlite-tree store matches below `root` (default: its configured root). Path-based: the
-    dry run's estimate only; the real copy and --check-schemas list through `tree_db_entries`. Like them it
-    never enters a symlinked directory: the link itself is the match (one `symlink` skip)."""
+def tree_dbs(store, root=None, errors=None):
+    """The databases a sqlite-tree store matches below `root` (default: its configured root). Path-based:
+    the dry run's estimate only; the real copy and --check-schemas list through `tree_db_entries`. Like them it
+    never enters a symlinked directory: the link itself is the match (one `symlink` skip). A directory that
+    cannot be listed is appended to `errors` as (path, OSError) when a list is given."""
     root = root or store["root"]
     found = []
     for pat in store["dbs"]:
-        found.extend(sorted(tree_glob(Path(root), tuple(pat.split("/")))))
+        found.extend(sorted(tree_glob(Path(root), tuple(pat.split("/")), errors)))
     return found
 
 
-def tree_glob(directory, comps):
+def tree_glob(directory, comps, errors=None):
     """Paths matching `comps` below `directory`; a symlink to a directory above the last component is returned
-    itself and not descended."""
+    itself and not descended. A directory that cannot be listed (unreadable, or pruned since its parent was
+    listed) matches nothing and is appended to `errors` as (directory, OSError), like the copy's error for it."""
     comp, rest = comps[0], comps[1:]
     try:
         names = sorted(os.listdir(directory))
-    except OSError:
+    except OSError as exc:
+        if errors is not None:
+            errors.append((directory, exc))
         return []
     found = []
     for name in names:
@@ -800,7 +808,7 @@ def tree_glob(directory, comps):
             if path.is_dir():
                 found.append(path)
         elif path.is_dir():
-            found.extend(tree_glob(path, rest))
+            found.extend(tree_glob(path, rest, errors))
     return found
 
 
@@ -1099,7 +1107,11 @@ def plan_store(store, excluder, strict=False):
         run.sources.append(str(store["root"]))
         root = tree_root(store, run, excluder)
         if root is not None:
-            for db in tree_dbs(store, root):
+            listing_errors = []
+            dbs = tree_dbs(store, root, listing_errors)
+            for where, exc in listing_errors:  # an unreadable or pruned directory: the copy's error, not an empty match
+                run.error(where, exc)
+            for db in dbs:
                 if under_symlink(db, root):
                     run.skip(db, "symlink")
                     continue
@@ -1134,8 +1146,16 @@ def plan_store(store, excluder, strict=False):
                 real = follow_link(src, label, run, excluder)
                 if real is None:
                     continue
+            if not os.path.lexists(real):
+                run.absent(src)
+                continue
+            exc = root_type_problem(store, label, real)
+            if exc:  # the copy records the same error and copies nothing
+                run.error(src, exc)
+                continue
             if real.is_dir():
-                for dirpath, dirnames, filenames in os.walk(real):
+                # a subdirectory that cannot be listed is a store error, as in the copy (Codex on PR 24, pass 18)
+                for dirpath, dirnames, filenames in os.walk(real, onerror=lambda exc: run.error(exc.filename, exc)):
                     ig = set(make_ignore(run, excluder)(dirpath, dirnames + filenames))
                     dirnames[:] = [d for d in dirnames if d not in ig]
                     for fn in filenames:
@@ -1145,13 +1165,12 @@ def plan_store(store, excluder, strict=False):
                                 count += 1
                             except OSError as exc:
                                 run.error(os.path.join(dirpath, fn), exc)
-            elif real.is_file():
-                count += 1
-                size += real.stat().st_size
-            elif not os.path.lexists(src):
-                run.absent(src)
             else:
-                run.error(src, OSError("not a regular file"))
+                try:
+                    size += real.stat().st_size
+                    count += 1
+                except OSError as exc:
+                    run.error(real, exc)
     return {"store": store["name"], "kind": store["kind"], "status": store_status(run), "sources": run.sources,
             "missing": run.missing, "root_symlinks": run.root_symlinks, "file_count": count, "bytes": size,
             "skipped_count": run.skipped_count, "skipped": run.skipped, "errors": run.errors,
@@ -1402,11 +1421,32 @@ def report_sidecars(entries):
                   file=sys.stderr)
 
 
+def root_type_problem(store, label, path):
+    """None when the existing configured root `path` has the type the configuration gives it (a `file_labels`
+    root a regular file, every other root a directory), else the OSError that is the store error: a directory
+    that became a file, or a single file that became a directory, is never copied as whatever it now is
+    (Codex on PR 24, pass 18). `stat` follows no link here: the caller has passed the root-link gate, so `path`
+    is the resolved target."""
+    try:
+        mode = os.stat(path).st_mode
+    except OSError as exc:
+        return exc
+    if label in store.get("file_labels", ()):
+        if stat.S_ISREG(mode):
+            return None
+        if stat.S_ISDIR(mode):
+            return IsADirectoryError(f"configured single file {label} is a directory, not a regular file")
+        return OSError(f"configured single file {label} is not a regular file")
+    if stat.S_ISDIR(mode):
+        return None
+    return NotADirectoryError(f"configured directory root {label} is not a directory")
+
+
 def check_file_roots(store, excluder):
-    """--check-schemas for a file store: each configured root is looked at with lstat only (never opened), through
-    the same exclusion and root-link gates the copy applies. Returns (present, missing, excluded, link_problems);
-    prints one line per absent, excluded or refused root."""
-    present = missing = excluded = link_problems = 0
+    """--check-schemas for a file store: each configured root is looked at with lstat/stat only (never opened),
+    through the same exclusion and root-link gates the copy applies. Returns (present, missing, excluded,
+    link_problems, type_problems); prints one line per absent, excluded, refused or wrongly typed root."""
+    present = missing = excluded = link_problems = type_problems = 0
     for label, src in store["roots"]:
         linked = is_linked(src, excluder)
         if excluder.path(src, follow=not linked):
@@ -1421,13 +1461,18 @@ def check_file_roots(store, excluder):
                 link_problems += 1
                 continue
             print(f"{store['name']}: {src}: symlink -> {real}")
-        if os.path.lexists(real):
-            present += 1
-        else:
+        if not os.path.lexists(real):
             print(f"{store['name']}: {src}: missing")
             missing += 1
+            continue
+        exc = root_type_problem(store, label, real)
+        if exc:
+            print(f"{store['name']}: {src}: ERROR {type(exc).__name__}: {exc}")
+            type_problems += 1
+            continue
+        present += 1
     print(f"{store['name']}: {present} of {len(store['roots'])} configured path(s) present")
-    return present, missing, excluded, link_problems
+    return present, missing, excluded, link_problems, type_problems
 
 
 def check_schemas(stores, excluder, strict=False):
@@ -1474,10 +1519,11 @@ def check_schemas(stores, excluder, strict=False):
                 dbs = [search.joinpath(*parts) for parts, _ in entries]
                 linked_dbs = {search.joinpath(*parts) for parts, linked in entries if linked}
         else:
-            _, m, e, lp = check_file_roots(store, excluder)
+            _, m, e, lp, tp = check_file_roots(store, excluder)
             missing += m
             excluded += e
             link_problems += lp
+            unopenable += tp
             continue
         for db in dbs:
             target = db

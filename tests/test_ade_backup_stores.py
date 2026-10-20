@@ -1356,8 +1356,8 @@ def test_a_db_pruned_between_listing_and_stat_is_an_error_and_the_dry_run_goes_o
     make_cursor_session(home, sub="chats/hashA/uuid2")
     real_dbs = mod.tree_dbs
 
-    def pruning(store, root):
-        dbs = sorted(real_dbs(store, root))
+    def pruning(store, root, errors=None):
+        dbs = sorted(real_dbs(store, root, errors))
         (gone / "store.db").unlink()  # a session pruned after the listing
         return dbs
 
@@ -2150,3 +2150,76 @@ def test_hermes_dry_run_reports_the_same_missing_binary_error_as_the_real_run(re
     assert not (home / "dry").exists()
     assert mod.main(["--only", "hermes-export", "--dry-run", "--dest", str(home / "dry")]) == 1
     assert "would run" not in capsys.readouterr().out
+
+
+# --- configured root types and dry-run traversal failures (Codex on PR 24, pass 18) ---
+
+def wrong_typed_claude(home, which):
+    """A claude store whose single-file root `history.jsonl` is a directory, or whose directory root `projects` is a file."""
+    if which == "dir-for-file":
+        (home / ".claude/history.jsonl").mkdir(parents=True)
+        (home / ".claude/history.jsonl/prompts.txt").write_text("SENTINEL-NOT-A-HISTORY-FILE")
+        return home / ".claude/history.jsonl", "IsADirectoryError"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude/projects").write_text("SENTINEL-NOT-A-TREE")
+    return home / ".claude/projects", "NotADirectoryError"
+
+
+@pytest.mark.parametrize("which", ["dir-for-file", "file-for-dir"])
+def test_a_configured_root_of_the_wrong_type_is_an_error_in_the_copy_the_dry_run_and_the_schema_check(
+        real, capsys, which):
+    mod, home, _ = real
+    bad, kind = wrong_typed_claude(home, which)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "claude", "--dest", str(dest)]) == 1
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial"
+    assert [(e["source"], e["error"].split(":")[0]) for e in entry["errors"]] == [(str(bad), kind)]
+    assert b"SENTINEL" not in all_bytes(dest)
+    assert not (dest / "claude" / bad.name).exists()
+    capsys.readouterr()
+    assert mod.main(["--only", "claude", "--dry-run", "--json", "--dest", str(home / "dry")]) == 1
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    assert plan["status"] == "partial" and plan["errors"] == entry["errors"] and plan["file_count"] == 0
+    assert mod.main(["--check-schemas", "--only", "claude", "--strict-stores"]) == 1
+    out = capsys.readouterr().out
+    assert f"claude: {bad}: ERROR {kind}" in out
+    assert re.search(r"[1-9]\d* unopenable", out.strip().splitlines()[-1])
+
+
+@pytest.fixture
+def unreadable(real):
+    """Make a directory unreadable for the test (skipped as root, which ignores modes); restored after it."""
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory modes")
+    held = []
+
+    def lock(path):
+        os.chmod(path, 0)
+        held.append(path)
+    yield lock
+    for path in held:
+        os.chmod(path, 0o700)
+
+
+@pytest.mark.parametrize("only, relative", [("cursor-chats", ".cursor/chats/hashA"), ("grok", ".grok/sessions/p1")])
+def test_an_unreadable_subdirectory_is_a_store_error_in_the_dry_run_like_the_copy(
+        real, unreadable, capsys, only, relative):
+    mod, home, _ = real
+    if only == "grok":
+        (home / ".grok/sessions/p1").mkdir(parents=True)
+        (home / ".grok/sessions/p1/chat.jsonl").write_text("hidden\n")
+        (home / ".grok/sessions/p2").mkdir()
+        (home / ".grok/sessions/p2/ok.jsonl").write_text("kept\n")
+    else:
+        make_cursor_session(home)
+    locked = home / relative
+    unreadable(locked)
+    assert mod.main(["--only", only, "--dry-run", "--json", "--dest", str(home / "dry")]) == 1
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    assert plan["status"] == "partial" and [e["source"] for e in plan["errors"]] == [str(locked)]
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", only, "--dest", str(dest)]) == 1
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial" and [e["source"] for e in entry["errors"]] == [str(locked)]
+    assert plan["errors"][0]["store"] == entry["errors"][0]["store"] == only
