@@ -59,7 +59,7 @@ session-bearing item found (`fd … -x stat -f '%m %N' | sort -rn | head -1`) or
 | Copilot CLI | `data.db` 1.2M (accounts, app_state) + `config.json` 812B + `mcp-config.json` 156B + `settings.json` | sqlite + json | 1.2M + ~1K | 2026-10-20 | config/app state | itself | `data.db` holds account credentials (`accounts`): exclude or vault (5.5); copy the json | n/a | n/a | n/a |
 | Cursor | `~/.cursor/chats/<md5-workspace>/<uuid>/{meta.json,store.db}` (39 workspace hashes); `store.db` tables `blobs, meta` | sqlite per session (WAL, live shm/wal) | 2.2G (`~/.cursor` total) | 2026-10-20 02:41 (`store.db-shm`) | canonical SQLite (fragmented per session) | none verified (third-party exporters only, 6.1) | backup API per db | `--resume`, `ls`, `resume` (6.1) | none | `worker` (private cloud) |
 | Cursor | `~/.cursor/acp-sessions/<uuid>/{meta.json,store.db}` (266 dirs, same `blobs, meta` schema) | sqlite per session | within the 2.2G | 2026-10-20 02:41 | canonical SQLite (ACP-launched chats) | none verified | backup API per db | yes (via agent CLI) | none | as above |
-| Cursor | `~/.cursor/projects/<slug>/{canvases,terminals,…}` (140 dirs) | files | within the 2.2G | 2026-10-20 02:12 | mixed (sidecars) | none | clone | n/a | none | n/a |
+| Cursor | `~/.cursor/projects/<slug>/{agent-transcripts,canvases,terminals,…}` (140 dirs; `agent-transcripts/*/*.jsonl` = 108 IDE conversations in 39 dirs) | files | within the 2.2G | 2026-10-20 02:12 | mixed (canonical IDE transcripts + sidecars) | the jsonl | clone (section 3 item 3) | n/a | none | n/a |
 | Cursor | `~/.cursor/mcp.json` 867B (plaintext MCP keys, not opened) + `cli-config.json` 9.7K + `hooks.json` 6.6K | json | ~17K | 2026-10-18/20 | config | themselves | copy `cli-config.json` and `hooks.json`; `mcp.json` is a 5.5 credential file: exclude or vault | n/a | n/a | n/a |
 | Qwen | `~/.qwen/projects/<slug>/chats/<uuid>.jsonl` (+ `.runtime.json`); keys `cwd,message,parentUuid,provenance,sessionId,timestamp,type,uuid,version` (id and cwd inside) | jsonl per session | 488K (`~/.qwen` total; `sessions/` empty) | 2026-10-20 00:35 | canonical files | the jsonl itself | copy | in-tool session picker (not verified) | none verified | none |
 | Qwen | `~/.qwen/settings.json` 47K + `usage_record.jsonl` + `memories/` | json | 47K+ | 2026-10-20 | config + usage log | itself | copy | n/a | n/a | n/a |
@@ -125,7 +125,10 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
    `~/.omp/agent/sessions` (+ `history.db` via backup API), `~/.local/share/muse/sessions`,
    `~/.paseo/{agents,projects,agent-requests}`, `~/.config/herdr/{session.json,session-history.json,session-snapshots}`,
    `~/.copilot/session-state` (whole tree: `events.jsonl` transcripts, `workspace.yaml`, checkpoints, files; `session-store.db`
-   alone is only the index), `~/hermes-memory`, `~/.local/state/handoffs` (whole dir).
+   alone is only the index), `~/.cursor/projects` (whole tree: `*/agent-transcripts/*/*.jsonl` are IDE conversations the
+   session-finder adapter counts as sessions when their id is not in `chats`, skills/session-finder/adapters/cursor.py:88-94;
+   108 files under 39 project dirs on 2026-10-20), zcode `~/.zcode/cli/rollout/model-io-sess_*.jsonl` (the raw transcript
+   sidecars of `db.sqlite`; 3 files), `~/hermes-memory`, `~/.local/state/handoffs` (whole dir).
 4. **Exporters verified to exist in docs on disk (none run):** `opencode session export <id>
    [--sanitize]` / `opencode session import <file> --directory`; `hermes sessions export` (JSONL,
    `--redact`, capped by `max_export_messages` = 20,000 stored rows — oversized sessions need the
