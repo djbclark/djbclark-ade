@@ -31,7 +31,8 @@ exclusions in MANIFEST.json) are not copied; credential tables are scrubbed from
 `session_share.secret`; rows deleted, then `VACUUM` with `secure_delete`); and a schema guard turns any
 other table or column named like credential/account/auth/oauth/secret/token (counters such as
 `input_tokens` aside) into an error and drops that copy, so a tool update that adds one fails the run.
-`--check-schemas` runs the guard read-only on the live databases and prints table and column names only.
+`--check-schemas` runs the guard read-only on the live databases and prints table and column names only; a missing
+database is printed and counted, and fails the check (exit 1) only with `--strict-stores`.
 Transcripts and other session content are copied as they are and can hold secrets pasted into them:
 treat a generation as secret-bearing.
 
@@ -231,7 +232,9 @@ def build_stores(home):
         files("gemini-cli", ("tmp", ".gemini/tmp")),
         files("omp", ("sessions", ".omp/agent/sessions")),
         sqlite("omp-db", ".omp/agent/history.db"),
-        files("muse", ("sessions", ".local/share/muse/sessions")),
+        files("muse", ("sessions", ".local/share/muse/sessions"),
+              ("tui-history.jsonl", ".local/share/muse/tui-history.jsonl"),
+              file_labels=["tui-history.jsonl"]),
         sqlite("muse-db", ".local/share/muse/session-index.db"),
         files("paseo", ("agents", ".paseo/agents"), ("projects", ".paseo/projects"),
               ("agent-requests", ".paseo/agent-requests")),
@@ -745,6 +748,9 @@ def plan_store(store, excluder):
                 if under_symlink(db, root):
                     run.skip(db, "symlink")
                     continue
+                if is_excluded_name(db.name) or excluder.path(db):
+                    run.skip(db, "excluded credential path")
+                    continue
                 try:
                     size += db.stat().st_size + wal_size(db)
                 except OSError as exc:
@@ -791,7 +797,8 @@ def plan_store(store, excluder):
             else:
                 run.error(src, OSError("not a regular file"))
     return {"store": store["name"], "kind": store["kind"], "status": store_status(run), "sources": run.sources,
-            "missing": run.missing, "root_symlinks": run.root_symlinks, "file_count": count, "bytes": size, "skipped_count": run.skipped_count, "errors": run.errors}
+            "missing": run.missing, "root_symlinks": run.root_symlinks, "file_count": count, "bytes": size,
+            "skipped_count": run.skipped_count, "skipped": run.skipped, "errors": run.errors}
 
 
 def resolve_dest(arg):
@@ -993,13 +1000,13 @@ def report_empty(entries):
             print(f"ade-backup-stores: {e['store']}: 0 files copied although its roots exist", file=sys.stderr)
 
 
-def check_schemas(stores, excluder):
+def check_schemas(stores, excluder, strict=False):
     """--check-schemas: the schema guard on the live databases, read-only; prints names only. A database
     inside a per-session tree that is a symlink or sits under a symlinked directory is never opened; a
     configured SQLite path that is a symlink is opened through its target when the root-link rule allows
     it (`symlink -> target`, information) and refused otherwise (`symlink refused`). Both refusals count as
     symlink problems, apart from the credential-looking names."""
-    problems = link_problems = 0
+    problems = link_problems = missing = 0
     for store in stores:
         if store["kind"] == "sqlite":
             dbs = list(store["files"])
@@ -1030,6 +1037,7 @@ def check_schemas(stores, excluder):
                 print(f"{store['name']}: {db}: symlink -> {target}")
             if not target.is_file():
                 print(f"{store['name']}: {db}: missing")
+                missing += 1
                 continue
             try:
                 con = ro_connect(target)
@@ -1047,8 +1055,9 @@ def check_schemas(stores, excluder):
                 if not why:
                     problems += 1
                 print(f"{store['name']}: {db.name}: {name}: {why or 'UNEXPLAINED'}")
-    print(f"schema check: {problems} unexplained credential-looking name(s), {link_problems} symlink problem(s)")
-    return 1 if problems or link_problems else 0
+    print(f"schema check: {problems} unexplained credential-looking name(s), {link_problems} symlink problem(s), "
+          f"{missing} missing")
+    return 1 if problems or link_problems or (strict and missing) else 0
 
 
 def main(argv=None):
@@ -1083,7 +1092,7 @@ def run_main(argv):
         return 2
     selected = [s for s in stores if s["name"] in wanted]
     if args.check_schemas:
-        return check_schemas(selected, Excluder(home))
+        return check_schemas(selected, Excluder(home), args.strict_stores)
     dest = resolve_dest(args.dest)
     reason = refuse_reason(dest, stores)
     if reason:

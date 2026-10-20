@@ -1199,3 +1199,57 @@ def test_copy_regular_refuses_a_fifo_without_blocking(real):
     threading.Thread(target=attempt, daemon=True).start()
     assert done.wait(5), "copy_regular blocked on the FIFO"
     assert "not a regular file" in result["error"] and not (tmp / "out").exists()
+
+
+# --- Codex pass 8 on PR 24 (2026-10-20): Muse tui-history.jsonl, dry-run exclusion parity, strict schema check ---
+
+def test_muse_backs_up_tui_history_and_records_it_missing_when_absent(real):
+    mod, home, _ = real
+    muse = home / ".local/share/muse"
+    (muse / "sessions").mkdir(parents=True)
+    (muse / "sessions/s1.jsonl").write_text('{"m": 1}\n')
+    (muse / "tui-history.jsonl").write_text('{"h": 1}\n')
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "muse", "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["file_count"] == 2 and entry["status"] == "ok" and entry["missing"] == []
+    assert (dest / "muse/tui-history.jsonl").read_text() == '{"h": 1}\n'
+    assert (dest / "muse/sessions/s1.jsonl").is_file()
+    (muse / "tui-history.jsonl").unlink()
+    dest2 = home / "out" / "bk2"
+    assert mod.main(["--only", "muse", "--dest", str(dest2)]) == 0
+    entry = manifest_of(dest2)["stores"][0]
+    assert entry["status"] == "ok" and entry["file_count"] == 1
+    assert entry["missing"] == [str(muse / "tui-history.jsonl")]
+
+
+def test_dry_run_skips_an_excluded_sqlite_tree_db_like_the_real_copy(real, capsys):
+    mod, home, _ = real
+    db_dir = home / ".cline/data/db"
+    make_wal_db(db_dir / "ok.db", ["row"]).close()
+    make_wal_db(db_dir / "data.db", ["SENTINEL-EXCLUDED-DB"]).close()  # data.db is an excluded credential name
+    assert mod.main(["--only", "cline-db", "--dry-run", "--json", "--dest", str(home / "o")]) == 0
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cline-db", "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    assert "SENTINEL-EXCLUDED-DB" not in contents(dest)
+    assert plan["file_count"] == entry["file_count"] == 1
+    assert plan["skipped_count"] == entry["skipped_count"] == 1
+    assert plan["skipped"] == entry["skipped"] == [{"path": str(db_dir / "data.db"), "why": "excluded credential path"}]
+    ok = db_dir / "ok.db"
+    assert plan["bytes"] == ok.stat().st_size + mod.wal_size(ok)  # only the kept db: data.db's bytes are not counted
+
+
+def test_check_schemas_counts_a_missing_database_and_fails_only_with_strict_stores(real, capsys):
+    mod, home, _ = real
+    assert mod.main(["--check-schemas", "--only", "grok-db"]) == 0  # ~/.grok/worktrees.db does not exist
+    out = capsys.readouterr().out
+    assert f"grok-db: {home / '.grok/worktrees.db'}: missing" in out
+    assert "0 unexplained credential-looking name(s), 0 symlink problem(s), 1 missing" in out
+    assert mod.main(["--check-schemas", "--strict-stores", "--only", "grok-db"]) == 1
+    out = capsys.readouterr().out
+    assert "0 symlink problem(s), 1 missing" in out
+    make_wal_db(home / ".grok/worktrees.db", ["x"]).close()
+    assert mod.main(["--check-schemas", "--strict-stores", "--only", "grok-db"]) == 0
+    assert "0 symlink problem(s), 0 missing" in capsys.readouterr().out
