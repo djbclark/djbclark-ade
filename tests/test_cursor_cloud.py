@@ -16,6 +16,7 @@ import importlib.util
 import io
 import json
 import os
+import sys
 import http.server
 import threading
 import types
@@ -129,7 +130,7 @@ class LaunchBodyTests(Base):
 
 class RequestTests(Base):
     def call(self, resp_or_exc: Any, *args: Any, **kw: Any) -> tuple[Any, MagicMock]:
-        env = {k: v for k, v in os.environ.items() if k not in ("CURSOR_CLOUD_API", "CURSOR_CLOUD_ALLOW_HTTP")}
+        env = {k: v for k, v in os.environ.items() if k != "CURSOR_CLOUD_API"}
         with patch.dict(os.environ, env, clear=True), patch("urllib.request.build_opener") as build_opener:
             urlopen = build_opener.return_value.open
             if isinstance(resp_or_exc, BaseException):
@@ -191,7 +192,7 @@ class RequestTests(Base):
 class Capture:
     """A loopback server that records the Authorization header of each request; optionally redirects."""
 
-    def __init__(self, redirect_to: str | None = None) -> None:
+    def __init__(self, redirect_to: str | None = None, code: int = 302) -> None:
         self.seen: list[tuple[str, str | None]] = []
         cap = self
 
@@ -202,7 +203,7 @@ class Capture:
             def do_GET(self) -> None:
                 cap.seen.append((self.path, self.headers.get("Authorization")))
                 if redirect_to:
-                    self.send_response(302)
+                    self.send_response(code)
                     self.send_header("Location", redirect_to + self.path)
                     self.send_header("Content-Length", "0")
                     self.end_headers()
@@ -223,12 +224,10 @@ class Capture:
 
 
 class EndpointTests(Base):
-    def base(self, api: str | None, allow: str | None = None) -> str:
-        env = {}
+    def base(self, api: str | None, **extra: str) -> str:
+        env = dict(extra)
         if api is not None:
             env["CURSOR_CLOUD_API"] = api
-        if allow is not None:
-            env["CURSOR_CLOUD_ALLOW_HTTP"] = allow
         return self.cc.api_base(env)
 
     def test_default_and_exact_host_ok(self) -> None:
@@ -236,29 +235,33 @@ class EndpointTests(Base):
             with self.subTest(api=api):
                 self.assertEqual(self.base(api), "https://api.cursor.com")
 
-    def test_other_hosts_refused_naming_the_variable(self) -> None:
-        for api in ("https://other.example", "http://evil.example", "http://127.0.0.1:9", "http://localhost",
-                    "https://api.cursor.com.evil.example", "https://api.cursor.com@evil.example"):
+    def test_other_hosts_refused_naming_the_variable_and_origin_only(self) -> None:
+        for api, shown in (("https://other.example", "https://other.example"),
+                           ("http://evil.example", "http://evil.example"),
+                           ("http://127.0.0.1:9", "http://127.0.0.1:9"),
+                           ("http://localhost", "http://localhost"),
+                           ("https://api.cursor.com.evil.example", "https://api.cursor.com.evil.example"),
+                           ("https://api.cursor.com@evil.example", "https://evil.example"),
+                           ("https://KEY123:PW456@evil.example/v1?k=SECRET789", "https://evil.example")):
+            with self.subTest(api=api), self.assertRaises(SystemExit) as cm:
+                self.base(api)
+            msg = str(cm.exception.code)
+            self.assertIn("CURSOR_CLOUD_API", msg)
+            self.assertTrue(msg.endswith(f"not {shown}"), msg)
+            for secret in ("KEY123", "PW456", "SECRET789"):
+                self.assertNotIn(secret, msg)
+
+    def test_unparseable_value_is_not_echoed(self) -> None:
+        for api in ("evil.example", "file:///etc/passwd", "https://[bad", " https://api.cursor.com"):
             with self.subTest(api=api), self.assertRaises(SystemExit) as cm:
                 self.base(api)
             self.assertIn("CURSOR_CLOUD_API", str(cm.exception.code))
-            self.assertIn(api.rstrip("/"), str(cm.exception.code))
 
-    def test_flag_allows_plain_http_and_other_hosts(self) -> None:
-        for api in ("http://evil.example", "http://127.0.0.1:9", "https://other.example"):
-            with self.subTest(api=api):
-                self.assertEqual(self.base(api, "1"), api)
-
-    def test_flag_must_be_exactly_one(self) -> None:
-        for flag in ("0", "", "true", "yes"):
+    def test_no_variable_lifts_the_pin(self) -> None:
+        # CURSOR_CLOUD_ALLOW_HTTP was removed (2026-10-20): the same actor that sets the API variable could set it
+        for flag in ("1", "0", "", "true"):
             with self.subTest(flag=flag), self.assertRaises(SystemExit):
-                self.base("http://evil.example", flag)
-
-    def test_flag_still_needs_an_http_url(self) -> None:
-        for api in ("file:///etc/passwd", "ftp://x.example", "evil.example"):
-            with self.subTest(api=api), self.assertRaises(SystemExit) as cm:
-                self.base(api, "1")
-            self.assertIn("CURSOR_CLOUD_API", str(cm.exception.code))
+                self.base("http://evil.example", CURSOR_CLOUD_ALLOW_HTTP=flag)
 
     def test_request_refuses_a_bad_base_before_sending(self) -> None:
         with patch.dict(os.environ, {"CURSOR_CLOUD_API": "http://evil.example"}), patch(
@@ -277,21 +280,19 @@ class EndpointTests(Base):
 
 
 class RedirectTests(Base):
-    def setUp(self) -> None:
-        super().setUp()
-        self.target = Capture()
-        self.origin = Capture(redirect_to=self.target.base)
-        self.addCleanup(self.target.close)
-        self.addCleanup(self.origin.close)
-
     def test_redirect_is_not_followed_and_key_not_sent_on(self) -> None:
-        env = {"CURSOR_CLOUD_API": self.origin.base, "CURSOR_CLOUD_ALLOW_HTTP": "1"}
-        with patch.dict(os.environ, env, clear=True), self.assertRaises(SystemExit) as cm:
-            self.cc.request("GET", "/v1/models", key=FAKE_KEY)
-        self.assertIn("HTTP 302", str(cm.exception.code))
-        expected = "Basic " + base64.b64encode(f"{FAKE_KEY}:".encode()).decode()
-        self.assertEqual(self.origin.seen, [("/v1/models", expected)])  # the key reached the configured base
-        self.assertEqual(self.target.seen, [])                           # and nothing followed it
+        for code in (301, 302, 303, 307, 308):
+            with self.subTest(code=code):
+                target = Capture()
+                origin = Capture(redirect_to=target.base, code=code)
+                self.addCleanup(target.close)
+                self.addCleanup(origin.close)
+                with patch.object(self.cc, "api_base", return_value=origin.base), self.assertRaises(SystemExit) as cm:
+                    self.cc.request("GET", "/v1/models", key=FAKE_KEY)
+                self.assertIn(f"HTTP {code}", str(cm.exception.code))
+                expected = "Basic " + base64.b64encode(f"{FAKE_KEY}:".encode()).decode()
+                self.assertEqual(origin.seen, [("/v1/models", expected)])  # the key reached the configured base
+                self.assertEqual(target.seen, [])                           # and nothing followed it
 
 
 class CliTests(Base):
@@ -352,6 +353,18 @@ class CliTests(Base):
         self.assertEqual(argv[:2], ["sudo-secretspec", "run"])
         self.assertEqual(argv[-1], "models")
         self.assertEqual(env["CURSOR_CLOUD_NO_REEXEC"], "1")
+        self.assertEqual(argv[argv.index(sys.executable) + 1], "-I")  # isolated: no PYTHONPATH, no cwd on sys.path
+
+    def test_reexec_environment_drops_proxy_ca_and_python_variables(self) -> None:
+        env = {"PATH": "/usr/bin", "HOME": "/h", "HTTPS_PROXY": "p", "https_proxy": "p", "http_proxy": "p",
+               "ALL_PROXY": "p", "SSL_CERT_FILE": "f", "SSL_CERT_DIR": "d", "PYTHONPATH": "x",
+               "PYTHONSTARTUP": "y", "NO_PROXY": "z", "CURSOR_CLOUD_API": "https://api.cursor.com"}
+        out = self.cc.reexec_env(env)
+        self.assertEqual(out, {"PATH": "/usr/bin", "HOME": "/h", "CURSOR_CLOUD_API": "https://api.cursor.com",
+                               "CURSOR_CLOUD_NO_REEXEC": "1"})
+
+    def test_shebang_isolates_python(self) -> None:
+        self.assertEqual(SCRIPT.read_text().splitlines()[0], "#!/usr/bin/env -S python3 -I")
 
     def check_call(self, argv: list[str], expected: tuple[Any, ...]) -> str:
         env = {"CURSOR_API_KEY": FAKE_KEY}

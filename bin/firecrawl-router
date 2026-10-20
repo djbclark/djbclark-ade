@@ -54,12 +54,14 @@ Environment:
                                gemini-free-lite (…_LITELLM_BASE, …_LITELLM_MODELS, comma list)
   FIRECRAWL_ROUTER_LLM_DEADLINE seconds to spend on one scrape's extraction (default 240: under
                                Claude Code's 300 s MCP idle limit with room for the scrape itself)
-  FIRECRAWL_ROUTER_ALLOW_HTTP  1 = test only: let the four base URLs above (SELFHOST, FALLBACK, SIPB, LITELLM)
-                               be plain http on a non-loopback host. Without it each must be https:// or
-                               loopback (127.0.0.1, localhost, ::1), checked at startup. Never set by default.
+
+The four base URLs above (SELFHOST, FALLBACK, SIPB, LITELLM) must each be https:// or loopback http
+(127.0.0.1, localhost, ::1) with a plain host[:port] (no userinfo), checked at startup; no variable lifts that.
 
 A bearer key is set as an unredirected header and no request follows a redirect: a 3xx from a backend is
-a failure (fallback reason "redirect refused"), so a key never reaches a host the base URL did not name.
+a failure (fallback reason "redirect refused"), and a client's request target must start with "/" and leave
+the base URL's host unchanged (else HTTP 400), so a key never reaches a host the base URL did not name
+(https to whatever host a repointed base names is still allowed).
 
 --open drops the bearer token, so local programs that speak the Firecrawl API
 (Hermes' firecrawl web backend) can use the router at a fixed --listen address;
@@ -142,27 +144,57 @@ def _open(req, timeout):
     return urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout)
 
 
-LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+LOOPBACK_URL_HOSTS = ("127.0.0.1", "localhost", "::1")  # hostnames in a base URL; --listen spellings are separate
 
 
-def _check_base(name: str, url: str, allow_http: bool) -> str:
-    """A base URL that receives a key: https, or http to loopback; allow_http lifts the rule (tests only)."""
-    u = urllib.parse.urlparse(url)
-    ok = u.scheme == "https" or (u.scheme == "http" and u.hostname in LOOPBACK_HOSTS)
-    if not u.hostname or not (ok or (allow_http and u.scheme == "http")):
+def _origin(url: str) -> str:
+    """scheme://host[:port] of a rejected or logged URL: never its userinfo, path or query, which may carry a key."""
+    try:
+        u = urllib.parse.urlsplit(url.strip())
+        host = f"[{u.hostname}]" if u.hostname and ":" in u.hostname else u.hostname
+        if not (u.scheme and host):
+            return "(not a URL)"
+        return f"{u.scheme}://{host}" + (f":{u.port}" if u.port else "")
+    except ValueError:
+        return "(not a URL)"
+
+
+def _check_base(name: str, url: str) -> str:
+    """A base URL that receives a key: https, or http to loopback; no userinfo, backslash or whitespace.
+
+    urllib dials Request.host, which keeps userinfo and backslashes that urlparse().hostname drops
+    (`http://evil.example@127.0.0.1` parses as 127.0.0.1), so the netloc is held to a plain host[:port].
+    """
+    try:
+        u = urllib.parse.urlsplit(url)
+        _ = u.port  # raises ValueError on a bad port
+    except ValueError:
+        u = None
+    ok = (u is not None and u.hostname
+          and not any(c.isspace() for c in url)
+          and "@" not in u.netloc and "\\" not in u.netloc
+          and u.username is None and u.password is None
+          and (u.scheme == "https" or (u.scheme == "http" and u.hostname in LOOPBACK_URL_HOSTS)))
+    if not ok:
         sys.exit(f"firecrawl-router: {name} must be https:// or a loopback http:// URL "
-                 f"(FIRECRAWL_ROUTER_ALLOW_HTTP=1 allows other http in tests), not {url}")
+                 f"(host[:port] only: no userinfo, backslash or whitespace), not {_origin(url)}")
     return url
-
-
-def _allow_http(env) -> bool:
-    return env.get("FIRECRAWL_ROUTER_ALLOW_HTTP") == "1"
 
 
 def call(backend: Backend, method: str, path: str, headers: dict, body: bytes | None,
          timeout: float) -> Reply:
+    # `path` is a client's raw request target: ".evil.example/x" or ":1/x" appended to a base URL changes the
+    # host the key goes to, so it must start with "/" and leave the base's netloc as it was.
+    url = backend.base + path
+    try:
+        same_host = path.startswith("/") and (urllib.parse.urlsplit(url).netloc
+                                              == urllib.parse.urlsplit(backend.base).netloc)
+    except ValueError:
+        same_host = False
+    if not same_host:
+        return Reply(0, {}, b"", "refused: the request target must be a path on the configured backend")
     hdrs = {k: v for k, v in headers.items() if k.lower() not in HOP_HEADERS}
-    req = urllib.request.Request(backend.base + path, data=body, headers=hdrs, method=method)
+    req = urllib.request.Request(url, data=body, headers=hdrs, method=method)
     if backend.key:
         req.add_unredirected_header("Authorization", f"Bearer {backend.key}")
     try:
@@ -450,15 +482,14 @@ class Extractor:
 def build_extractor(env) -> Extractor | None:
     if (env.get("FIRECRAWL_ROUTER_LLM") or "").lower() == "off":
         return None
-    allow = _allow_http(env)
     sipb_base = _check_base("FIRECRAWL_ROUTER_SIPB_BASE",
-                            (env.get("FIRECRAWL_ROUTER_SIPB_BASE") or "http://127.0.0.1:8890/api").rstrip("/"), allow)
+                            (env.get("FIRECRAWL_ROUTER_SIPB_BASE") or "http://127.0.0.1:8890/api").rstrip("/"))
     rungs = [Rung("sipb", sipb_base,
                   env.get("FIRECRAWL_ROUTER_SIPB_KEY", ""),
                   env.get("FIRECRAWL_ROUTER_SIPB_MODEL") or "qwen3.6:35b-a3b-q4_K_M",
                   SIPB_ONE_SHOT_CHARS, SIPB_CHUNK_CHARS, check_truncation=True)]
     lite_base = _check_base("FIRECRAWL_ROUTER_LITELLM_BASE",
-                            (env.get("FIRECRAWL_ROUTER_LITELLM_BASE") or "http://127.0.0.1:4000/v1").rstrip("/"), allow)
+                            (env.get("FIRECRAWL_ROUTER_LITELLM_BASE") or "http://127.0.0.1:4000/v1").rstrip("/"))
     for m in (env.get("FIRECRAWL_ROUTER_LITELLM_MODELS") or "gemini-free,gemini-free-lite").split(","):
         if m.strip():
             rungs.append(Rung(m.strip(), lite_base, env.get("FIRECRAWL_ROUTER_LITELLM_KEY", ""), m.strip(),
@@ -608,6 +639,10 @@ def make_handler(router: Router):
                 return
             n = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(n) if n else None
+            if not self.path.startswith("/"):  # ".evil.example/x" appended to a base URL names another host
+                self._send(400, {"Content-Type": "application/json"},
+                           b'{"success":false,"error":"firecrawl-router: request target must start with /"}')
+                return
             reply, backend = router.handle(self.command, self.path, dict(self.headers), body)
             if reply.status == 0:
                 self._send(502, {"Content-Type": "application/json"},
@@ -635,14 +670,13 @@ def build_router(env, token: str) -> Router:
     primary_url = (env.get("FIRECRAWL_SELFHOST_URL") or "").rstrip("/")
     if not primary_url:
         sys.exit("firecrawl-router: FIRECRAWL_SELFHOST_URL is not set")
-    allow = _allow_http(env)
-    primary = Backend("primary", _check_base("FIRECRAWL_SELFHOST_URL", primary_url, allow),
+    primary = Backend("primary", _check_base("FIRECRAWL_SELFHOST_URL", primary_url),
                       env.get("FIRECRAWL_SELFHOST_API_KEY", ""))
     fallback = None
     fb_key = env.get("FIRECRAWL_API_KEY", "")
     if fb_key and env.get("FIRECRAWL_ROUTER_FALLBACK", "").lower() != "off":
         fb_url = (env.get("FIRECRAWL_FALLBACK_URL") or "https://api.firecrawl.dev").rstrip("/")
-        fallback = Backend("fallback", _check_base("FIRECRAWL_FALLBACK_URL", fb_url, allow), fb_key)
+        fallback = Backend("fallback", _check_base("FIRECRAWL_FALLBACK_URL", fb_url), fb_key)
     return Router(primary, fallback, float(env.get("FIRECRAWL_ROUTER_TIMEOUT") or 120), token,
                   extractor=build_extractor(env))
 
@@ -672,8 +706,8 @@ def main(argv=None) -> int:
     token = secrets.token_urlsafe(32) if child and not args.open else ""
     router = build_router(os.environ, token)
     srv = serve(router, args.listen)
-    fb = router.fallback.base if router.fallback else "none"
-    print(f"firecrawl-router: {router.public_base} primary={router.primary.base} fallback={fb}",
+    fb = _origin(router.fallback.base) if router.fallback else "none"
+    print(f"firecrawl-router: {router.public_base} primary={_origin(router.primary.base)} fallback={fb}",
           file=sys.stderr, flush=True)
 
     if not child:
