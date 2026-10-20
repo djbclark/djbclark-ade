@@ -145,7 +145,8 @@ def test_ask_message_in_herdr_or_orca_puts_new_before_compact(hook, tmp_path, mo
     assert out.index("`handoff` skill") < out.index('"/compact <focus>"')
     assert "must continue in-context" in out
     # The boundary note fires in the same call (total >= 150k) and names self-slash here.
-    assert 'and then ~/src/djbclark-ade/bin/self-slash "/new" instead of /compact' in out
+    assert 'the `handoff` skill (its Step 9 runs ~/src/djbclark-ade/bin/self-slash "/new" and queues /baton) instead of /compact' in out
+    assert "Do not run /new yourself as well" in out
 
 
 def test_repeat_ask_every_100k(hook, tmp_path):
@@ -327,7 +328,11 @@ def test_paseo_host_gets_the_finish_note(hook, tmp_path, monkeypatch):
     monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
     out, _ = hook("s-paseo", _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
     assert "self-slash --finish" in out and "archives this agent" in out
+    # the model offers the loose Rule 4 choices; it does not archive itself
+    assert "offer the `loose` Rule 4 choices" in out and "rather than archiving yourself" in out
+    assert "finish as the last action instead" not in out
     assert 'self-slash "/new" ONCE' in out
+    assert "so do not run /new yourself as well" in out
 
 
 @pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE"])

@@ -213,29 +213,33 @@ def _can_self_slash():
 
 def _paseo_finish_note():
     # bin/self-slash picks herdr, then Orca, then Paseo.  On Paseo /quit is not a command
-    # (it reaches Claude as plain text), so a finished task with nothing to continue ends
-    # with --finish, which archives the agent once idle (2026-10-20).
+    # (it reaches Claude as plain text), so ending a session there is --finish, which
+    # archives the agent once idle (2026-10-20).  Archiving is the operator's choice (loose
+    # Rule 4), never something the model decides alone.
     if os.environ.get("HERDR_PANE_ID") or os.environ.get("ORCA_TERMINAL_HANDLE"):
         return ""
     if not os.environ.get("PASEO_AGENT_ID"):
         return ""
-    return (" On Paseo, a finished task with nothing to continue ends with "
-            "~/src/djbclark-ade/bin/self-slash --finish as the last action instead "
-            "(it archives this agent once idle; /quit does nothing there).")
+    return (" On Paseo, a finished task with nothing to continue: offer the `loose` Rule 4 "
+            "choices (handoff and continue, or finish and archive, which is "
+            "~/src/djbclark-ade/bin/self-slash --finish as the last action; it archives "
+            "this agent once idle, and /quit does nothing there) rather than archiving "
+            "yourself.")
 
 
 def _boundary_message(total):
     # self-slash refuses outside herdr, Orca and Paseo: there the operator types /new.
-    new = ("~/src/djbclark-ade/bin/self-slash \"/new\"" if _can_self_slash()
-           else "tell the operator /new is ready")
+    new = ("(its Step 9 runs ~/src/djbclark-ade/bin/self-slash \"/new\" and queues /baton)"
+           if _can_self_slash() else "and then tell the operator /new is ready")
     return (
         f"Context is {total:,}. At the next task completion, if the following "
-        f"work is not a direct continuation, run the `handoff` skill and then "
+        f"work is not a direct continuation, run the `handoff` skill "
         f"{new} instead of /compact: a fresh session re-writes ~46k, a "
         "compaction re-writes ~72k plus a summariser call and leaves ~104k "
         "behind. Do not compact mid-task."
-        + (" self-slash then sends /baton into the fresh session itself (2026-10-19)."
-           if _can_self_slash() else "")
+        + (" Do not run /new yourself as well: self-slash refuses the second one. Only the "
+           "top-level session does this; a sub-agent or dispatched slice treats a handoff "
+           "as document-only." if _can_self_slash() else "")
         + _paseo_finish_note()
     )
 
@@ -251,10 +255,12 @@ def _ask_message(total, growth, repeat):
             "2026-10-15): at the next natural boundary (a task done, never "
             "mid-edit or with a sub-agent result unread), first choice when the "
             "current task is finished, same topic or not: run the `handoff` "
-            "skill (it writes the Tier 2 document), then "
-            "~/src/djbclark-ade/bin/self-slash \"/new\" ONCE and end the turn "
-            "(a fresh session re-writes ~46k; self-slash then sends /baton into "
-            "the fresh session itself, 2026-10-19). Only if the work must continue "
+            "skill (it writes the Tier 2 document; its Step 9 runs "
+            "~/src/djbclark-ade/bin/self-slash \"/new\" ONCE and queues /baton into "
+            "the fresh session, so do not run /new yourself as well) and end the turn "
+            "(a fresh session re-writes ~46k). Only the top-level session does this; "
+            "a sub-agent or dispatched slice treats a handoff as document-only. "
+            "Only if the work must continue "
             "in-context: save what the next turn needs, run self-slash "
             "\"/compact <focus>\" ONCE and end the turn. Only if self-slash "
             "refuses (a draft on the input line) ask the operator for /new or "
