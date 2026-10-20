@@ -1801,7 +1801,10 @@ def test_url_holds_credential_reads_any_userinfo_or_query_on_a_non_ssh_scheme():
                       # adversary round 23: a remote-helper prefix wraps the real address
                       ("https::https://ghp_FAKE0000@github.com/o/r.git", True),
                       ("ext::sh -c 'echo x'", False), ("https::https://host/x.git", False),
-                      ("https::https://host/x.git?t=FAKE", True)):
+                      ("https::https://host/x.git?t=FAKE", True),
+                      # round 24: git splits at the first `::`; the helper gets the rest whole, whatever it looks like
+                      ("https::https::https://ghp_FAKE0000@host/x.git", True),
+                      ("https::ssh://ghp_FAKE0000@host/x.git", True), ("https::ssh://host/x.git", False)):
         assert mod.url_holds_credential(url) is want, url
 
 
@@ -2000,7 +2003,10 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
     rows = section_3_2(text).splitlines()
     row = next(r for r in rows if r.startswith("| /p/sup "))
     assert "submodules not inspected: their modified, untracked or unpushed content is in no count here" in row
-    assert "git -C /p/sup config --file .gitmodules --get-regexp" in row and "--git-root <path>/<sub>" in row
+    assert "git -C /p/sup config --file .gitmodules --get-regexp" in row
+    assert "git -C /p/sup/<sub> status --porcelain" in row and "git -C /p/sup/<sub> log --oneline --branches --tags --not --remotes" in row
+    assert "git -C /p/sup/<sub> bundle create <DEST>/checkouts/abs/p/sup/<sub>/all.bundle --all" in row
+    assert "the scanner skips absorbed submodules" in row
     assert row.rstrip().endswith("| yes: inspect each submodule first |")
     both = next(r for r in rows if r.startswith("| /p/both "))
     assert "1 modified tracked file(s)" in both and "submodules not inspected" in both

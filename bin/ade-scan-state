@@ -674,13 +674,14 @@ def url_holds_credential(url: str) -> bool:
     `host:path` (no `://`) is ssh and has none; `ssh://git@host` is a username, not a credential, but any
     password (`ssh://git:secret@host`) is one. For every other scheme (http, https, ...) ANY userinfo counts
     (`https://<token>@github.com/x` is how a token is used as the username; adversary round 22) and so does
-    a query string (`?private_token=...`); a `<transport>::<address>` prefix is stripped first and the address
-    judged. An unparsable authority is read by hand."""
-    # `<transport>::<address>` names a remote helper for an arbitrary address (`https::https://t@host`):
-    # the address after the `::` is what git hands to the helper, so that is what is checked (round 23)
+    a query string (`?private_token=...`); a `<transport>::<address>` prefix names a helper that gets the whole
+    address in argv, so any `@` or `?` in it counts, whatever its scheme. An unparsable authority is read by hand."""
+    # `<transport>::<address>` names a remote helper for an arbitrary address (`https::https://t@host`): git
+    # splits at the FIRST `::` and hands everything after it to git-remote-<transport> as one argument, so a
+    # second prefix or an ssh-looking inner scheme changes nothing (rounds 23 and 24): no parsing, any `@` or `?`
     head, sep, rest = url.partition("::")
     if sep and head and re.fullmatch(r"[A-Za-z0-9+.-]+", head):
-        url = rest
+        return "@" in rest or "?" in rest
     if "://" not in url:
         return False
     scheme = url.partition("://")[0].lower()
