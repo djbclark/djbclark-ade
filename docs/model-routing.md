@@ -307,6 +307,10 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
   Q&A) on the premium-request pool.
 - **Cursor Pro** — IDE-centric composer sessions; its "Auto" pool for
   cheap interactive edits.
+  Cursor Cloud Agents are launched with `bin/cursor-cloud launch --repo <url>
+  --ref <branch> --prompt-file F` (key from `sudo-secretspec`, `autoCreatePR`
+  always false, the lead opens the PR after the adversary review), inspected
+  with `status`, `run`, `usage`, and continued with `followup`.
 - **Grok (SuperGrok, 45% left)** — realtime X/news/web angle, quick
   standalone questions.
 - **z.ai GLM (lite) via zcode** — budget bulk coding on its own
