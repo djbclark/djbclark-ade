@@ -105,7 +105,7 @@ added." Done the same day: `CHANGELOG.md` (Keep a Changelog form, seeded from th
 since 2026-10-09), AGENTS.md code-review rule 10 (every PR adds its line), README "Update
 (this machine)" (the manual procedure today), proposal v2.4 (T8, 4.4 item 9, §9.4 Q26). Queued:
 
-1. **`bin/ade-update`, the interim one command** (one small PR, Sonnet `code` slice): `git -C
+1. **Done 2026-10-20** (PR #TBD) **`bin/ade-update`, the interim one command** (one small PR, Sonnet `code` slice): `git -C
    ~/src/djbclark-ade pull --ff-only` (stop and print `git status` on a dirty tree or a diverged
    branch; never stash another agent's edits), then `bin/skill-everywhere --check` over every
    `skills/*` (relink what is missing), the `~/.claude/{commands,agents,hooks}` symlink check,

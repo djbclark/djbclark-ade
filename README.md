@@ -65,7 +65,7 @@ their old paths are symlinks into this checkout).
 |---|---|
 | [`skills/`](skills/) | The skills (table below). |
 | [`tools/acp-run/`](tools/acp-run/) | `acp-run`, the ACP client every launcher uses. |
-| [`bin/`](bin/) | `acp-dispatch` (hand a slice to an agent and get its report back: wraps `acp-run`, appends [`docs/dispatch-footer.md`](docs/dispatch-footer.md), checks `--model` against the agent's live list before it starts, writes report/`.done`/record, exit codes for no-report and `BLOCKED:`, a `rearm` waiter that exits with the `check` verdict, and since 2026-10-18 an automatic in-place resume of a quota-stopped slice: a launchd one-shot reopens the same ACP session after the reset, gated on live headroom, up to 3 attempts; `--no-auto-resume` opts out; a slice a Mac restart/logout killed is tagged `killed: SIGTERM (system restart)` and resumed in place once per boot by the login sweep; and `acp-dispatch reap`, which finalizes a slice whose process died without finalize so no reader shows it running, with a launchd sweep [`launchd/com.djbclark.acp-dispatch-reap.plist`](launchd/com.djbclark.acp-dispatch-reap.plist) installed by `reap --install`), `fleet-watch` (fleet change notices), `load-watch` (no-model launchd monitor, every 20 s: after 5 minutes at load >= 2 per core it finds the agent session whose processes used the CPU, writes it a brief, types one line into its pane and pings Hermes, so heavy builds move to Forgejo CI; `load-watch ci-only add` then makes `bg` refuse local builds in that repo; [`launchd/com.djbclark.load-watch.plist`](launchd/com.djbclark.load-watch.plist), `load-watch install`), `cow-pasture` (APFS copy-on-write workspaces), `herdr-sleeper` (idle-pane sleep), `herdr-jump` (focus a `w22:t4` address from a `prefix+:` popup), `herdr-ai` (natural language to Herdr commands from a `prefix+alt+i` popup), `orca-reorg-watch`, `skillopt-night` (nightly SkillOpt-Sleep cycle over every agent's transcripts; launchd job in [`launchd/`](launchd/)), `failover.py` (run a task through an ordered chain of agent routes with policy, preflight and an attempt log; [`docs/failover.md`](docs/failover.md)), `route_agent.py` (`route`/`plan`: pick a vendor, or spread a wave of slice kinds over pools by live headroom; bigteam re-plans at every slice boundary), `cursor-cloud` (launch and inspect Cursor Cloud Agents: `launch --repo <url> --ref <branch> --prompt-file F`, then `status`/`run`/`usage`/`followup`; key from `sudo-secretspec`, `autoCreatePR` always false; since 2026-10-20 also `acp-dispatch cursor-cloud --kind code|bulk|mechanical`, a slice with record, poller and report, and a `cursor-cloud` row in `route_agent.py`). |
+| [`bin/`](bin/) | `acp-dispatch` (hand a slice to an agent and get its report back: wraps `acp-run`, appends [`docs/dispatch-footer.md`](docs/dispatch-footer.md), checks `--model` against the agent's live list before it starts, writes report/`.done`/record, exit codes for no-report and `BLOCKED:`, a `rearm` waiter that exits with the `check` verdict, and since 2026-10-18 an automatic in-place resume of a quota-stopped slice: a launchd one-shot reopens the same ACP session after the reset, gated on live headroom, up to 3 attempts; `--no-auto-resume` opts out; a slice a Mac restart/logout killed is tagged `killed: SIGTERM (system restart)` and resumed in place once per boot by the login sweep; and `acp-dispatch reap`, which finalizes a slice whose process died without finalize so no reader shows it running, with a launchd sweep [`launchd/com.djbclark.acp-dispatch-reap.plist`](launchd/com.djbclark.acp-dispatch-reap.plist) installed by `reap --install`), `fleet-watch` (fleet change notices), `load-watch` (no-model launchd monitor, every 20 s: after 5 minutes at load >= 2 per core it finds the agent session whose processes used the CPU, writes it a brief, types one line into its pane and pings Hermes, so heavy builds move to Forgejo CI; `load-watch ci-only add` then makes `bg` refuse local builds in that repo; [`launchd/com.djbclark.load-watch.plist`](launchd/com.djbclark.load-watch.plist), `load-watch install`), `cow-pasture` (APFS copy-on-write workspaces), `herdr-sleeper` (idle-pane sleep), `herdr-jump` (focus a `w22:t4` address from a `prefix+:` popup), `herdr-ai` (natural language to Herdr commands from a `prefix+alt+i` popup), `orca-reorg-watch`, `skillopt-night` (nightly SkillOpt-Sleep cycle over every agent's transcripts; launchd job in [`launchd/`](launchd/)), `failover.py` (run a task through an ordered chain of agent routes with policy, preflight and an attempt log; [`docs/failover.md`](docs/failover.md)), `route_agent.py` (`route`/`plan`: pick a vendor, or spread a wave of slice kinds over pools by live headroom; bigteam re-plans at every slice boundary), `cursor-cloud` (launch and inspect Cursor Cloud Agents: `launch --repo <url> --ref <branch> --prompt-file F`, then `status`/`run`/`usage`/`followup`; key from `sudo-secretspec`, `autoCreatePR` always false; since 2026-10-20 also `acp-dispatch cursor-cloud --kind code|bulk|mechanical`, a slice with record, poller and report, and a `cursor-cloud` row in `route_agent.py`), `ade-update` (keep this machine current: `git pull --ff-only`, relink missing skills, check the `CLAUDE.md` and `~/.claude` symlinks, print the `CHANGELOG.md` entries new since the revision recorded in `~/.local/state/ade/applied`; `--check` reports only and exits 10 when behind; see "Update (this machine)" below). |
 | [`claude/commands/`](claude/commands/) | Claude Code slash commands: the thin wrappers `/helm-all`, `/session-finder-all`, `/resume`, `/herdr-tidy`, `/orca-tidy` (herdr-tidy over Orca terminals), `/skillopt-sleep`. |
 | [`docs/`](docs/) | Design records and dated operating knowledge (list below). |
 | [`plugins/`](plugins/) | `herdr-sleeper` herdr plugin (dev source of djbclark/herdr-sleeper). agent-radar, a Claude Code mod, was removed on 2026-10-18 (docs/apply-toolchain-prompt.md says how to uninstall it). |
@@ -134,8 +134,9 @@ way. `helm.py` imports `fleet` from the sibling `skills/session-finder/`.
 
 ### Update (this machine)
 
-Until `ade update` exists (proposal 4.4 item 9, T8), this is the procedure; it is
-idempotent and safe to run daily:
+Run `~/src/djbclark-ade/bin/ade-update` (`--check` first to see what it would do, `--json` for a
+machine-readable report; `--repo` and `--state` override the checkout and the record). It is
+idempotent and safe to run daily. It does, in order, what this section used to list by hand:
 
 ```sh
 git -C ~/src/djbclark-ade status --short        # another agent's edits? leave them; never stash
@@ -144,10 +145,20 @@ for s in ~/src/djbclark-ade/skills/*/; do ~/src/djbclark-ade/bin/skill-everywher
 ls -l ~/.claude/commands ~/.claude/agents ~/.claude/hooks | grep -c djbclark-ade   # symlinks still point here
 ```
 
-Then read [CHANGELOG.md](CHANGELOG.md) from the entry after the commit you last applied:
-every pull request adds its line there (AGENTS.md code-review rule 10), so the changelog is
-the one place that says what changed and what is new. `bin/ade-update` (queued,
-`docs/queue.md`) will do all of this in one command and print that delta itself.
+1. **Pull.** A local modification to a file the pull would change stops it (exit 2, nothing
+   pulled); a diverged branch stops it (exit 3); it never merges, stashes or resets.
+2. **Skills.** `skill-everywhere --check` over every `skills/*`; a missing, dangling or chained
+   link is relinked, anything the script leaves alone is printed with the command to run.
+3. **Symlinks.** `CLAUDE.md` is a symlink to `AGENTS.md`, and every file in `claude/{commands,agents,
+   hooks}` is linked from `~/.claude/`; a gap is reported with the `ln` command (not changed).
+4. **Changelog.** It prints the [CHANGELOG.md](CHANGELOG.md) entries new since the commit recorded
+   in `~/.local/state/ade/applied` (every Unreleased entry the first time), then records the new
+   HEAD there. Every pull request adds its line to the changelog (AGENTS.md code-review rule 10),
+   so that is the one place that says what changed and what is new.
+
+Exit codes: 0 current, 10 behind (`--check`) or a link unresolved, 2 dirty, 3 diverged, 4 git or
+network failure. It becomes `ade update` in Phase 1 (proposal 4.4 item 9); a daily `--check` timer
+is queued in `docs/queue.md`.
 
 ## Docs
 
