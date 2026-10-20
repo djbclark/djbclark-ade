@@ -1461,11 +1461,11 @@ def test_a_single_file_root_is_copied_through_copy_regular_and_a_swapped_link_is
     marker.write_text("SENTINEL-SWAPPED-HISTORY")
     real_copy = mod.copy_regular
 
-    def swapping(src, dst):
-        if Path(src) == history:
+    def swapping(src, dst, **kw):
+        if Path(kw.get("shown") or src) == history:
             history.unlink()  # the root passed every check: now it becomes a link
             os.symlink(marker, history)
-        return real_copy(src, dst)
+        return real_copy(src, dst, **kw)
 
     monkeypatch.setattr(mod, "copy_regular", swapping)
     dest2 = home / "out" / "bk2"
@@ -1532,11 +1532,11 @@ def test_a_linked_sqlite_source_is_refused_when_swapped_after_the_check_through_
     make_wal_db(db, ["live"]).close()
     real_backup = mod.backup_sqlite
 
-    def swapping(src, dst, store_name):
+    def swapping(src, dst, store_name, base=None):
         if Path(src) == db:
             db.unlink()  # the store passed its checks: now the db becomes a link
             os.symlink(outside, db)
-        return real_backup(src, dst, store_name)
+        return real_backup(src, dst, store_name, base)
 
     monkeypatch.setattr(mod, "backup_sqlite", swapping)
     dest = home / "out" / "bk"
@@ -1774,3 +1774,120 @@ def test_an_optional_sidecar_that_is_a_symlink_is_a_recorded_skip_and_the_store_
     assert (dest / "antigravity-cli-db/conversations/c1.db").is_file()
     assert not (dest / "antigravity-cli-db/conversations/c1.meta").exists()
     assert b"SENTINEL-META-TARGET" not in all_bytes(dest)
+
+
+def swap_parent_after_gate(mod, monkeypatch, gated, parent, outside_parent, tmp):
+    """Wrap `is_linked`: once the real gate has approved `gated`, replace the directory `parent` with a symlink to
+    `outside_parent` (the check passed, then the filesystem changed)."""
+    real_gate = mod.is_linked
+    swaps = []
+
+    def gate(src, excluder):
+        linked = real_gate(src, excluder)
+        if Path(src) == gated and not parent.is_symlink():
+            shutil.move(parent, tmp / f"moved-{parent.name}")
+            os.symlink(outside_parent, parent)
+            swaps.append(src)
+        return linked
+
+    monkeypatch.setattr(mod, "is_linked", gate)
+    return swaps
+
+
+def test_a_standalone_sqlite_parent_swapped_for_a_symlink_after_the_gate_is_an_error_not_copied(real, monkeypatch):
+    mod, home, tmp = real
+    db = home / ".local/share/crush-acp/crush.db"
+    make_wal_db(db, ["inside"]).close()
+    outside = tmp / "outside-crush"
+    make_wal_db(outside / "crush.db", ["SENTINEL-OUTSIDE-STANDALONE-ROW"]).close()
+    swaps = swap_parent_after_gate(mod, monkeypatch, db, db.parent, outside, tmp)
+    store = next(s for s in mod.build_stores(home) if s["name"] == "crush-acp")
+    run = mod.StoreRun(store, tmp / "out" / "crush-acp")
+    mod.copy_sqlite_store(store, run, mod.Excluder(home))
+    assert swaps == [db]
+    assert b"SENTINEL-OUTSIDE-STANDALONE-ROW" not in all_bytes(tmp / "out")
+    assert not run.source_of and len(run.errors) == 1 and "symlink" in run.errors[0]["error"]
+
+
+def test_a_file_store_directory_root_with_a_parent_swapped_after_the_gate_is_an_error_not_walked(real, monkeypatch):
+    mod, home, tmp = real
+    root = home / ".local/state/handoffs"
+    root.mkdir(parents=True)
+    (root / "inside.txt").write_text("inside")
+    outside = tmp / "outside-state"
+    (outside / "handoffs").mkdir(parents=True)
+    (outside / "handoffs/marker.txt").write_text("SENTINEL-OUTSIDE-TREE")
+    swaps = swap_parent_after_gate(mod, monkeypatch, root, root.parent, outside, tmp)
+    store = next(s for s in mod.build_stores(home) if s["name"] == "handoffs")
+    run = mod.StoreRun(store, tmp / "out" / "handoffs")
+    mod.copy_file_store(store, run, mod.Excluder(home))
+    assert swaps == [root]
+    assert b"SENTINEL-OUTSIDE-TREE" not in all_bytes(tmp / "out")
+    assert len(run.errors) == 1 and "symlink" in run.errors[0]["error"]
+
+
+def test_a_file_store_single_file_root_with_a_parent_swapped_after_the_gate_is_an_error_not_copied(real, monkeypatch):
+    mod, home, tmp = real
+    history = home / ".local/share/muse/tui-history.jsonl"
+    history.parent.mkdir(parents=True)
+    history.write_text('{"h": 1}\n')
+    outside = tmp / "outside-muse"
+    outside.mkdir()
+    (outside / "tui-history.jsonl").write_text("SENTINEL-OUTSIDE-FILE-ROOT")
+    swaps = swap_parent_after_gate(mod, monkeypatch, history, history.parent, outside, tmp)
+    store = next(s for s in mod.build_stores(home) if s["name"] == "muse")
+    run = mod.StoreRun(store, tmp / "out" / "muse")
+    mod.copy_file_store(store, run, mod.Excluder(home))
+    assert swaps == [history]
+    assert b"SENTINEL-OUTSIDE-FILE-ROOT" not in all_bytes(tmp / "out")
+    assert any("symlink" in e["error"] for e in run.errors)
+
+
+def test_copy_regular_leaves_no_partial_destination_when_the_read_fails_midway(real, monkeypatch):
+    mod, home, tmp = real
+    src = home / "src.bin"
+    src.write_bytes(b"x" * 100)
+    dst = tmp / "copies" / "dst.bin"
+    dst.parent.mkdir()
+
+    def failing(fin, fout, *a):
+        fout.write(b"partial")
+        raise OSError(5, "read failed midway")
+
+    monkeypatch.setattr(mod.shutil, "copyfileobj", failing)
+    with pytest.raises(OSError, match="read failed midway"):
+        mod.copy_regular(src, dst)
+    assert list(dst.parent.iterdir()) == []  # neither dst nor a temporary survives
+    monkeypatch.undo()
+    mod.copy_regular(src, dst)
+    assert dst.read_bytes() == b"x" * 100
+    with pytest.raises(FileExistsError):
+        mod.copy_regular(src, dst)  # an existing destination is still refused, never overwritten
+    assert dst.read_bytes() == b"x" * 100
+
+
+def test_a_file_whose_read_fails_midway_is_an_error_and_is_not_in_the_manifest(real, monkeypatch):
+    mod, home, _ = real
+    root = home / ".local/state/handoffs"
+    root.mkdir(parents=True)
+    (root / "bad.txt").write_text("BAD-CONTENT")
+    (root / "ok.txt").write_text("fine")
+    real_copy = mod.shutil.copyfileobj
+
+    def flaky(fin, fout, *a):
+        data = fin.read()
+        if b"BAD" in data:
+            fout.write(data[:3])
+            raise OSError(5, "read failed midway")
+        fout.write(data)
+
+    monkeypatch.setattr(mod.shutil, "copyfileobj", flaky)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "handoffs", "--dest", str(dest)]) == 1
+    monkeypatch.setattr(mod.shutil, "copyfileobj", real_copy)
+    assert not (dest / "handoffs/handoffs/bad.txt").exists()
+    assert sorted(p.name for p in (dest / "handoffs/handoffs").iterdir()) == ["ok.txt"]  # no temporary survives either
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial"
+    assert [f["path"].rsplit("/", 1)[-1] for f in entry["files"]] == ["ok.txt"]
+    assert [e["source"] for e in entry["errors"]] == [str(root / "bad.txt")]

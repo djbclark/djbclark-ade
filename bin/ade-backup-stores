@@ -90,6 +90,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from urllib.parse import quote
@@ -324,7 +325,10 @@ def ro_connect(path, base=None):
     store root the path lies under (default: the file's own resolved parent directory), every component opened
     O_NOFOLLOW relative to the previous descriptor, so a directory swapped for a symlink between the check and
     here is refused instead of redirecting the expected (device, inode) to a file outside the store (adversary
-    round 13). A caller that may follow a root link passes the resolved target. The URI keeps `?`, `#`, `%` and
+    round 13). Callers holding a gate approval from `is_linked` pass `home_anchor(path, excluder)`: the real $HOME
+    as `base`, so the chain starts at the approved home and no parent is re-resolved from the filesystem (Codex on
+    PR 24, pass 14); the identity check compares the connection's path with `os.fstat` of that chain's descriptor.
+    A caller that may follow a root link passes the resolved target. The URI keeps `?`, `#`, `%` and
     spaces in the path safe."""
     path = os.path.abspath(path)
     try:
@@ -611,10 +615,19 @@ def copy_regular(src, dst, dir_fd=None, shown=None):
         if not stat.S_ISREG(held.st_mode):
             raise OSError(f"source is not a regular file: {shown}")
         os.set_blocking(fin.fileno(), True)  # O_NONBLOCK was for the open only; a regular file reads normally
-        dfd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(dfd, "wb") as fout:
-            shutil.copyfileobj(fin, fout)
-    os.utime(dst, ns=(held.st_atime_ns, held.st_mtime_ns), follow_symlinks=False)  # the mode is sealed to 0600 later
+        if os.path.lexists(dst):
+            raise FileExistsError(f"destination exists: {dst}")
+        # Copied into a temporary name beside dst and renamed on success: a read that fails midway must leave no
+        # truncated dst for the manifest to list (Codex on PR 24, pass 14).
+        tfd, tmp = tempfile.mkstemp(dir=os.path.dirname(dst) or ".", prefix=".bk-", suffix=".part")
+        try:
+            with os.fdopen(tfd, "wb") as fout:
+                shutil.copyfileobj(fin, fout)
+            os.utime(tmp, ns=(held.st_atime_ns, held.st_mtime_ns), follow_symlinks=False)  # the mode is sealed later
+            os.replace(tmp, dst)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
     return dst
 
 
@@ -640,6 +653,20 @@ def open_dir_chain(base, parts):
         os.close(fd)
         raise
     return fd
+
+
+def home_anchor(path, excluder):
+    """(`path` rewritten below the run's real $HOME, that real $HOME): the descriptor chain every post-gate open
+    starts from (`open_dir_chain(real_home, parts)`), so no component is resolved from the mutable filesystem
+    after `is_linked` approved the path (Codex on PR 24, pass 14). $HOME itself is the operator's own and never
+    a link. A path outside $HOME is refused: no store lies there."""
+    for root in (excluder.home, excluder.real_home):
+        try:
+            rel = Path(path).relative_to(root)
+        except ValueError:
+            continue
+        return excluder.real_home / rel, excluder.real_home
+    raise OSError(f"path is not below $HOME: {path}")
 
 
 def copy_dir_fd(dfd, src_dir, dst_dir, run, excluder):
@@ -695,15 +722,21 @@ def copy_file_store(store, run, excluder):
             if not os.path.lexists(real):
                 run.absent(src)
                 continue
+            anchored, base = home_anchor(real, excluder)
+            parts = anchored.relative_to(base).parts
             if real.is_dir():
-                rfd = os.open(real, DIR_FLAGS)  # the walk starts from this one descriptor, never from a path again
+                rfd = open_dir_chain(base, parts)  # the walk starts from this descriptor, every component O_NOFOLLOW
                 try:
                     copy_dir_fd(rfd, real, dst, run, excluder)
                 finally:
                     os.close(rfd)
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                copy_regular(real, dst)
+                pfd = open_dir_chain(base, parts[:-1])
+                try:
+                    copy_regular(parts[-1], dst, dir_fd=pfd, shown=real)
+                finally:
+                    os.close(pfd)
         except OSError as exc:
             run.error(src, exc)
 
@@ -725,7 +758,8 @@ def copy_sqlite_store(store, run, excluder):
             if not os.path.lexists(real):
                 run.absent(src)
                 continue
-            run.scrubbed_of[dst] = backup_sqlite(real, dst, store["name"])
+            anchored, base = home_anchor(real, excluder)
+            run.scrubbed_of[dst] = backup_sqlite(anchored, dst, store["name"], base)
             run.source_of[dst] = str(src)
         except (OSError, sqlite3.Error, SchemaGuardError) as exc:
             run.error(src, exc)
@@ -1085,7 +1119,8 @@ def make_hermes_scratch(home, scratch, state_backup, limit, excluder):
             real_db, why = root_link_target(real_db, excluder)
             if why:
                 raise RootSymlinkError(f"{why}: {link_note(home / '.hermes/state.db')}")
-        backup_sqlite(real_db, scratch / "state.db", "hermes-state")
+        anchored, base = home_anchor(real_db, excluder)
+        backup_sqlite(anchored, scratch / "state.db", "hermes-state", base)
     (scratch / "config.yaml").write_text(f"sessions:\n  max_export_messages: {limit}\n")
 
 
@@ -1306,7 +1341,7 @@ def check_schemas(stores, excluder, strict=False):
                 missing += 1
                 continue
             try:
-                con = ro_connect(target, search if store["kind"] == "sqlite-tree" else None)
+                con = ro_connect(*(home_anchor(target, excluder) if store["kind"] == "sqlite" else (target, search)))
                 try:
                     hits = schema_hits(con)
                 finally:
