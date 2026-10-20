@@ -11,7 +11,10 @@ This repo is **personal tooling for one operator's machine, published as a publi
 loopback by default (`--listen` defaults to `127.0.0.1:0`). With a child command it requires a random
 per-process bearer token. `--open` drops the token and refuses a non-loopback address. The serve-only form
 (no child, "for tests") checks no token and binds whatever `--listen` names. While it runs, any process that
-can reach it can spend Firecrawl/LLM quota through it. It holds no secret values. What makes it
+can reach it can spend Firecrawl/LLM quota through it. With fallback or LLM extraction configured, the live
+router process holds `FIRECRAWL_API_KEY`, `FIRECRAWL_SELFHOST_API_KEY` and the SIPB/LiteLLM keys in memory
+(`build_router`, `build_extractor`); the child and the logs never receive them, but a compromise of the router
+process does. What makes the repo
 security-relevant is that it launches AI agents that run commands as the operator, unattended, and moves
 their output around.
 
@@ -99,8 +102,10 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 
 ### 4.1 Prompt injection of an agent (local or cloud)
 
-* **Control.** Briefs are scoped (`docs/orchestration-practices.md` section 2); reviewers are read-only and
-  `--perm deny` exists for a security-sensitive slice (operator rule); the `adversary` reviews on request
+* **Control.** Briefs are scoped (`docs/orchestration-practices.md` section 2); the `adversary` and factory
+  reviews run read-only, but an ordinary review runs yolo with only a read-only brief and a post-run diff
+  check (`skills/model-routing/SKILL.md`), and `--perm deny`/`--perm read-only` is reserved for a
+  security-sensitive slice (operator rule); the `adversary` reviews on request
   before a PR is opened. Cloud agents run off the Mac with no vault.
 * **Gap.** A local agent reading a hostile page or third-party file runs yolo with the operator's rights;
   nothing screens tool output for instructions. A cloud agent reading this public repo's issue or PR text
@@ -134,8 +139,9 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 * **Control (procedure only).** AGENTS.md, Code review section (PR 9, 2026-10-20, not yet on master), rule
   1 asks the PR body to quote the adversary verdict with the head SHA, and whoever merges to use
   `gh pr merge --squash --match-head-commit <reviewed sha>`. The adversary runs on request before a PR is
-  opened, never on PR open. Automatic reviews on PR open: Codex auto review and Cursor's Security Agent
-  (`docs/queue.md`).
+  opened, never on PR open. Automatic on PR open: Cursor's Security Agent and Approval Agent only. Codex reviews when a
+  `@codex review` comment asks; its automatic review hits the environment-catalog bug (`docs/queue.md`,
+  2026-10-20).
 * **Gap 1 (verified 2026-10-20 01:05Z).** `master` has no branch protection
   (`gh api repos/djbclark/djbclark-ade/branches/master/protection` returns 404 "Branch not protected") and
   the repo has no rulesets. Nothing on GitHub requires a pull request, a review, a status check or
