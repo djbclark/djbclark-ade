@@ -98,7 +98,11 @@ What an attacker would want, in order of damage:
     reach it can call it.
 11. **Hermes to Claude delegation** (`delegate_task`, `claude-sub`; `docs/mcp-servers.md`): a message Hermes
     acts on can become a headless agent run.
-12. **`bin/skillopt-night`**, the nightly launchd job: it feeds agent transcripts (which hold fetched web
+12. **`bin/ade-update`** (2026-10-20): after its fast-forward pull it runs `<repo>/bin/skill-everywhere` from the
+    freshly pulled code, so upstream code executes without review; inherent to a self-updater, bounded by the
+    pull being fast-forward only from the configured remote, skill-directory names restricted to
+    `[A-Za-z0-9][A-Za-z0-9._-]*`, and links changed only in the canonical checkout.
+13. **`bin/skillopt-night`**, the nightly launchd job: it feeds agent transcripts (which hold fetched web
     text and third-party content) to a model and stages edits to SKILL.md / CLAUDE.md files "for review"
     (file header). Injected text can become a staged instruction-file edit that every agent then follows.
 

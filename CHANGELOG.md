@@ -11,9 +11,10 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
-- `bin/ade-update`: one command that keeps a machine current: fast-forward pull, relink missing skills, check the
-  `CLAUDE.md` and `~/.claude` symlinks, and print the changelog entries new since the revision it last recorded; `--check`
-  reports only and exits 10 when behind (#TBD).
+- Added `bin/ade-update`, one command that keeps a machine current: it fast-forward pulls, relinks missing skills
+  (only in the canonical checkout; any other `--repo` is report-only), checks the `CLAUDE.md` and `~/.claude` symlinks,
+  and prints the changelog entries new since the revision it last recorded; `--check` reports only and exits 10 when
+  behind (2026-10-20, #TBD).
 - `CHANGELOG.md`, this file, and the rule that every pull request adds a line to it; README
   "Update (this machine)"; proposal v2.4 with `ade update` as a Phase 1 command and acceptance
   test T8 (2026-10-20).
