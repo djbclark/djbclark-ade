@@ -185,6 +185,10 @@ class Service:
     # route() for every kind that goes through acp-dispatch (not `api-only`, which is the
     # caller's own API call), so the router never hands out a slice that cannot start.
     ready_probe: str = ""
+    # Name of another service whose aiuse row this one draws on (cursor-cloud bills at API
+    # price against the Cursor pool, 2026-10-20): load_snapshot copies that row's reading
+    # to this name unless aiuse reports one of its own.
+    shares_pool: str = ""
 
     @property
     def acp_agent(self) -> str:
@@ -383,6 +387,7 @@ def policy_public() -> dict[str, Any]:
             "max_parallel": s.max_parallel, "agent": s.agent,
             "models": dict(s.models), "reserve_floor": s.reserve_floor,
             "grant_days": s.grant_days, "ready_probe": s.ready_probe,
+            "shares_pool": s.shares_pool,
         }
     return {
         "path": str(POLICY_PATH),
@@ -499,9 +504,11 @@ def operator_disabled(path: Path | None = None) -> set[str]:
 
     try:
         with (path or AIUSE_CONFIG).open("rb") as fh:
-            return set((tomllib.load(fh).get("disabled_services") or {}).keys())
+            off = set((tomllib.load(fh).get("disabled_services") or {}).keys())
     except (OSError, tomllib.TOMLDecodeError):
         return set()
+    # a service that draws on a disabled provider's pool is off with it (cursor-cloud on cursor)
+    return off | {s.name for s in SERVICES if s.shares_pool and s.shares_pool in off}
 
 
 def load_snapshot() -> tuple[dict[str, Any], float | None]:
@@ -620,6 +627,9 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
                 "resets_at": bind.get("resets_at"),
                 "window_minutes": bind.get("window_minutes"),
             }
+    for svc in SERVICES:
+        if svc.shares_pool and svc.name not in providers and svc.shares_pool in providers:
+            providers[svc.name] = dict(providers[svc.shares_pool])
     if age is not None and age > STALE_HARD:
         return {}, age
     return providers, age
@@ -1072,6 +1082,7 @@ _AGENT_PROVIDER_MAP: dict[str, tuple[str, str | None]] = {
     "codex": ("codex", None),
     "copilot": ("copilot", None),
     "cursor": ("cursor", None),
+    "cursor-cloud": ("cursor-cloud", None),
     "cline": ("clinepass", None),
     "opencode": ("opencode-go", None),
     "zcode": ("zai", None),
