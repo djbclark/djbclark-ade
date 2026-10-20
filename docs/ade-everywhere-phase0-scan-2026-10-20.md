@@ -353,7 +353,7 @@ Checkouts not listed are `clean and pushed` (branch on origin or no commits orig
 3. `du` totals ~64 GB here against ~61 GB in the slice 1 inventory: a different tool and a later moment (sessions kept writing during both).
 4. `ls-remote` needs the remote to answer; a checkout whose origin refused would show `on origin: unknown`. None did in this run.
 5. A pasture that was clean when created can become dirty or ahead later; this is a snapshot at 2026-10-20T04:38:17-0400.
-6. The scan ran with the first version of the tool, which did not look at a checkout's own config before running git there. The config of the scanned checkouts was not read afterwards for command-naming keys (`core.fsmonitor`, `core.sshCommand`, `remote.*.uploadpack`, `filter.*`, `credential.*`, `core.hooksPath`, `include.*`), so this document cannot say none of them ran something. The current tool lists such a checkout as `skipped: repo config runs commands`.
+6. The scan ran with the first version of the tool, which did not look at a checkout's own config before running git there. The config of the scanned checkouts was not read afterwards for command-naming keys (`core.fsmonitor`, `core.sshCommand`, `remote.*.uploadpack`, `filter.*`, `credential.*`, `core.hooksPath`, `include.*`), so this document cannot say none of them ran something. The current tool scans only a checkout whose config uses allowlisted keys and lists any other as `skipped: unrecognised config <key>`.
 7. The run's `--fetch` could have moved `refs/remotes/origin/<branch>` and `FETCH_HEAD` in the checkouts where it fetched; which ones it touched was not recorded.
 
 ## 5. Commands run

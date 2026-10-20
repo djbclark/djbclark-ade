@@ -351,7 +351,7 @@ def render(d):
       "before running git there. The config of the scanned checkouts was not read afterwards for "
       "command-naming keys (`core.fsmonitor`, `core.sshCommand`, `remote.*.uploadpack`, `filter.*`, "
       "`credential.*`, `core.hooksPath`, `include.*`), so this document cannot say none of them ran "
-      "something. The current tool lists such a checkout as `skipped: repo config runs commands`.")
+      "something. The current tool scans only a checkout whose config uses allowlisted keys and lists any other as `skipped: unrecognised config <key>`.")
     w("7. The run's `--fetch` could have moved `refs/remotes/origin/<branch>` and `FETCH_HEAD` in the "
       "checkouts where it fetched; which ones it touched was not recorded.\n")
 
