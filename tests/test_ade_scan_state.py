@@ -2147,6 +2147,36 @@ def test_stash_capture_command_really_saves_every_stash_with_its_untracked_files
         assert subprocess.run([shell, "-c", cmd], capture_output=True).returncode != 0  # no entries left: fails
 
 
+def test_a_cow_pasture_gets_its_own_patch_and_archive_rows():
+    """Codex pass 24 on PR 27: a path containing `djbclark-ade` or `forgejo-ci-2026-10` used to get "preserved in the
+    primary checkout" with no command, and the phase0-scan pasture no row at all; names prove nothing."""
+    mod = load_doc()
+    rows = []
+    for p in ("/h/.cow/pastures/djbclark-ade/phase0-scan", "/h/.cow/pastures/hermes-agent/forgejo-ci-2026-10", "/h/src/djbclark-ade"):
+        co = doc_checkout(p, flags=["dirty"], verdict="dirty", modified=1, untracked=1, untracked_sample=["x.txt"])
+        rows += [r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith(f"| {p} ")]
+    assert len(rows) == 3
+    for row in rows:
+        assert "preserve once there" not in row and "preserved there" not in row
+        assert "diff --binary > <DEST>/checkouts/abs" in row and "untracked.tar" in row
+
+
+def test_stash_count_treats_only_a_missing_ref_as_zero(monkeypatch, tmp_path):
+    """Codex pass 24 on PR 27: on the reftable path every nonzero `rev-parse --verify refs/stash` read as no stash."""
+    mod = load()
+    answers = {}
+    monkeypatch.setattr(mod, "git", lambda path, *args, **kw: answers[args[0]])
+    answers["rev-parse"] = (1, "")
+    assert mod.stash_count(tmp_path, None) == 0
+    for rc in (124, 128):
+        answers["rev-parse"] = (rc, "")
+        assert mod.stash_count(tmp_path, None) is None
+    answers["rev-parse"], answers["stash"] = (0, "abc\n"), (0, "a\nb\n")
+    assert mod.stash_count(tmp_path, None) == 2
+    answers["stash"] = (128, "")
+    assert mod.stash_count(tmp_path, None) is None
+
+
 def test_section_1_verdict_rows_sum_to_the_checkout_count():
     """Adversary round 21, INFO 5: three verdicts appeared in no row."""
     mod = load_doc()

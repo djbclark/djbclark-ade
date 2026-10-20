@@ -412,8 +412,6 @@ def render(d):
         raw_p = tilde(c["path"])
         p = esc(raw_p)
         ck = checkout_dir(c["path"])  # one directory per checkout below <DEST>/checkouts/: two with one basename never share a file
-        if c["path"].endswith("/djbclark-ade/phase0-scan"):
-            continue  # this slice's own pasture: its dirt is the files this slice is writing
         if c["verdict"].startswith(("skipped", "scan incomplete")):
             # no counts (null): anything may be in there, so the row demands a re-scan or a whole-directory archive,
             # never "nothing to capture" (Codex pass 19 on PR 27); no git command runs in a checkout the scan refused
@@ -494,39 +492,34 @@ def render(d):
             need = need if need.startswith(("yes", "**yes")) else "yes: pushing a branch publishes it; pick push or bundle"
         if modified:
             what.append(f"{modified} modified tracked file(s)")
-            if "djbclark-ade" in c["path"]:
-                cmd.append("same modified files as the primary checkout (cow copy; other agents' edits): "
-                           "preserved there")
-            else:
-                # `status` counts staged changes too; a plain `diff` is worktree against index and misses them, so
-                # the index gets its own patch (`--cached` works in an unborn repository too; Codex pass 20 on PR 27);
-                # `--binary` keeps a changed binary file's bytes, a plain diff says only "Binary files differ" (pass 21)
-                cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} diff --binary > <DEST>/{} && git -C {} diff --binary --cached > <DEST>/{}",
-                                  ck, raw_p, f"{ck}/modified.patch", raw_p, f"{ck}/staged.patch"))
-                need = need if need != "no" else "yes: decide whether they are work"
+            # `status` counts staged changes too; a plain `diff` is worktree against index and misses them, so
+            # the index gets its own patch (`--cached` works in an unborn repository too; Codex pass 20 on PR 27);
+            # `--binary` keeps a changed binary file's bytes, a plain diff says only "Binary files differ" (pass 21).
+            # Every checkout gets its own patch: that a path names a cow pasture of another checkout proves nothing
+            # about its content (Codex pass 24; the generator used to infer "preserved in the primary" from the name)
+            cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} diff --binary > <DEST>/{} && git -C {} diff --binary --cached > <DEST>/{}",
+                              ck, raw_p, f"{ck}/modified.patch", raw_p, f"{ck}/staged.patch"))
+            need = need if need != "no" else "yes: decide whether they are work"
         if stashes:
             what.append(f"{stashes} stash" + ("es" if stashes > 1 else ""))
             # every stash entry, not stash@{0} alone, each with its untracked files (Codex pass 20, adversary round 26)
             cmd.append(shcode(STASH_FMT, *stash_values(raw_p, ck))
                        + " (one patch per entry; restore with " + code("git apply <patch>") + ")")
         if real_untr > 0:
-            shared = "djbclark-ade" in c["path"] or "forgejo-ci-2026-10" in c["path"]
             what.append(f"{real_untr} untracked ({', '.join(code('{}', visible(u)) for u in untr[:3])}"
                         f"{', ...' if len(untr) > 3 else ''})")
-            if shared:
-                cmd.append("same paths as the primary / sibling checkout (cow copy): preserve once there")
-            else:
-                # every untracked path, not the sample shown: an archive from `ls-files`, or `add -A` (which also
-                # stages the modified tracked files) on a branch (Codex pass 7 on PR 27). Two commands joined by
-                # `&&`, the list in a file: `ls-files | gtar` exits 0 when ls-files fails (Codex pass 9)
-                cmd.append("archive every untracked path: "
-                           + shcode("mkdir -p <DEST>/{} && git -C {} ls-files -z --others --exclude-standard > <DEST>/{} "
-                                    "&& \"$GTAR\" -C {} --null -T <DEST>/{} -cf <DEST>/{}",
-                                    ck, raw_p, f"{ck}/untracked.list", raw_p, f"{ck}/untracked.list",
-                                    f"{ck}/untracked.tar")
-                           + " or " + shcode("git -C {} add -A -- .", raw_p)
-                           + " on a branch, commit and push (stages the modified tracked files too)")
-                need = need if need != "no" else "yes: decide whether they are work"
+            # every untracked path, not the sample shown: an archive from `ls-files`, or `add -A` (which also
+            # stages the modified tracked files) on a branch (Codex pass 7 on PR 27). Two commands joined by
+            # `&&`, the list in a file: `ls-files | gtar` exits 0 when ls-files fails (Codex pass 9). Every checkout,
+            # a cow pasture of another one included: the name proves nothing about the content (Codex pass 24)
+            cmd.append("archive every untracked path: "
+                       + shcode("mkdir -p <DEST>/{} && git -C {} ls-files -z --others --exclude-standard > <DEST>/{} "
+                                "&& \"$GTAR\" -C {} --null -T <DEST>/{} -cf <DEST>/{}",
+                                ck, raw_p, f"{ck}/untracked.list", raw_p, f"{ck}/untracked.list",
+                                f"{ck}/untracked.tar")
+                       + " or " + shcode("git -C {} add -A -- .", raw_p)
+                       + " on a branch, commit and push (stages the modified tracked files too)")
+            need = need if need != "no" else "yes: decide whether they are work"
         if unreachable:
             # origin did not answer: the count trusted the local `refs/remotes/origin/*`, which a deleted or
             # force-pushed branch leaves stale, so even a 0 hides commits (adversary round 21, 1)

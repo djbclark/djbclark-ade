@@ -600,8 +600,10 @@ def stash_count(path: Path, common: Path | None) -> int | None:
         except OSError:
             return None
     rc, _ = git(path, "rev-parse", "--verify", "--quiet", "refs/stash")
-    if rc != 0:
+    if rc == 1:  # `--verify --quiet`: 1 is "no such ref", git's documented answer; anything else is a failure
         return 0
+    if rc != 0:  # a timeout (124) or a repository error (128) is not "no stash" (Codex pass 24)
+        return None
     rc, n = git(path, "stash", "list", "--format=%H")  # reftable: no reflog file; log.showSignature is off
     return max(len(n.splitlines()), 1) if rc == 0 else None
 
