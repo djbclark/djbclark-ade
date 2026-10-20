@@ -17,7 +17,7 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    2026-10-20** (aiuse PRs 38 and 40, main 5b0b9f9: `aiuse refresh-credits omp`, hourly launchd template
    `packaging/launchd/com.djbclark.aiuse-credits-refresh.plist`); **not live on this Mac until aiuse 3.8.0 is
    released** (`just release 3.8.0` in `~/src/aiuse`, publishes PyPI and Homebrew; this Mac runs the Homebrew 3.7.2)
-   and the launchd job is loaded per the aiuse README. The figure is a lower bound (it counts all org spend).
+   and the launchd job is loaded per the aiuse README. **Done 2026-10-20**: aiuse 3.8.0 released (PyPI, GitHub release, Homebrew tap; this Mac upgraded) and `com.djbclark.aiuse-credits-refresh` bootstrapped, hourly, run-at-load. Codex's "Path to threat model file" set to `docs/threat-model.md` the same day (djbclark, GUI). The figure is a lower bound (it counts all org spend).
    Also (adversary on the aiuse branch, finding 5, 2026-10-20): `bin/route_agent.py` reads aiuse's `latest.json`
    directly, so it never sees the operator credits override; make it read `aiuse --available --json` (or the
    same resolver aiuse uses) so routing and the quota gate agree. Small djbclark-ade PR after the aiuse branch merges.
