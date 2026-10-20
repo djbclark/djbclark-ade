@@ -64,9 +64,13 @@ agent what changed and what is new. Entries end with the pull request number.
   `clarify` (Hermes) / `request_user_input` (Codex). Universal skills `/loose`,
   `/handoff`, `/baton`, `/steps` were already reachable from every installed TUI
   (`skill-everywhere --check` all green); the change wires the chain on OpenCode.
+- `bin/skill-everywhere --check` ends with a `== end` line, which `bin/ade-update` requires (a cut-short check
+  is exit 4, "skill check incomplete"); `bin/ade-update` warns on stderr when it runs from a path other than
+  the canonical checkout (#20).
 
 ### Fixed
 
+- `bin/ade-update` exits 10 naming a stuck link on the first apply instead of 4 with an empty error (#20).
 - `bin/skill-everywhere` runs on Linux: `greadlink`/`grealpath` fall back to `readlink`/`realpath` (#20).
 - `bin/skill-everywhere`: the Hermes plugin nudge falls back from `ghead`/`ggrep`/`gsed` to `head`/`grep`/`sed`
   and no longer aborts the script when the Hermes wrapper has no `exec` line (#20).

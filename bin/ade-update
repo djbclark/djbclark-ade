@@ -24,8 +24,12 @@ Steps, in order:
    checkout `<repo>/bin/skill-everywhere` and then PATH follow if that sibling is missing. For any other --repo
    (a pasture, a second clone, an untrusted PR branch) no candidate inside that checkout is ever executed, and
    PATH is not consulted, so the skill step is skipped with a note when the sibling lives in it. A nonzero exit from `--check` (other than the script's own
-   "warning:" exit 1), a requested skill with no `== name` header or with a header and no TUI rows, or a nonzero
-   exit from the link call, is an error (exit 4; links already made stay). Links are
+   "warning:" exit 1), a `--check` that does not end with its `== end` sentinel line ("skill check incomplete"; a
+   crash after some rows), a requested skill with no `== name` header or with a header and no TUI rows, or a
+   failing link call, is an error (exit 4; links already made stay). The script's own link-mode exit 1 ("left
+   alone", empty stderr or only `warning:`/`error:` lines) is not a failure: the follow-up check decides, and
+   a stuck link is exit 10 naming the row, on the first run too. When ade-update runs from a path other than
+   the canonical checkout it warns on stderr (its sibling skill-everywhere is the one that runs). Links are
    only changed when --repo is the canonical skills home (~/src/djbclark-ade, or the parent of
    $SKILL_EVERYWHERE_ADE when that is set): any other checkout (a pasture, a second clone) gets a
    report-only skill step, since linking would repoint every TUI's live skills into it. A skills/
@@ -39,7 +43,7 @@ Steps, in order:
    new), or every Unreleased entry when nothing is recorded. Then the new HEAD is written to the
    state file (temp file beside, `os.replace`), unless a skill link stayed unresolved.
 
-Exit codes: 0 current (and nothing wrong), 10 behind (--check) or a skill link, CLAUDE.md or
+Exit codes: 0 current (and nothing wrong), 10 behind (--check) or a skill link (a link skill-everywhere leaves alone included, on the first run), CLAUDE.md or
 ~/.claude link is missing/unresolved, 2 usage or a local modification blocks the pull, 3 the branch
 cannot fast-forward (git's explicit non-fast-forward refusal only), 4 git, the network, skill-everywhere
 or the state file failed (no repo, --repo is not the top of its work tree, no upstream, fetch/pull error
@@ -67,6 +71,7 @@ LINK_TIMEOUT = 300  # skill-everywhere link mode nudges the Hermes gateway (up t
 CLAUDE_KINDS = ("commands", "agents", "hooks")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 OK_LINK_STATES = ("linked", "not installed")
+CHECK_SENTINEL = "== end"  # last line of `skill-everywhere --check`
 SKILL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # fullmatch: `$` would admit a trailing newline
 # Repository-location variables that would make git act on another repo than --repo.
 GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
@@ -265,6 +270,13 @@ def check_skills(script, repo, names):
     warned = rc == 1 and err.strip() and all(ln.startswith("warning:") for ln in err.splitlines() if ln.strip())
     if rc != 0 and not warned:
         raise Stop(EXIT_ERROR, f"{script} --check failed (rc={rc}): {err.strip()[:300]}")
+    # R5-2: --check ends with "== end"; without it the report was cut short (a crash after some rows, which the
+    # script's own codex warning exit 1 would otherwise hide) and the TUIs after the cut are unknown
+    lines = out.rstrip().splitlines()
+    if not lines or lines[-1].strip() != CHECK_SENTINEL:
+        raise Stop(EXIT_ERROR, f"skill check incomplete: {script} --check ended without its `{CHECK_SENTINEL}` line "
+                   f"(rc={rc}): {err.strip()[:300]}")
+    out = "\n".join(lines[:-1])
     rows = parse_skill_check(out)
     seen = {ln[3:].strip() for ln in out.splitlines() if ln.startswith("== ")}
     absent = [n for n in names if n not in seen]
@@ -281,6 +293,23 @@ def check_skills(script, repo, names):
 def link_skills(script, repo, names):
     env = dict(os.environ, SKILL_EVERYWHERE_ADE=str(Path(repo) / "skills"))
     return run([script, *names], env=env, timeout=LINK_TIMEOUT)
+
+
+def link_left_alone(rc, err):
+    """skill-everywhere's ordinary link-mode exit 1 ("left alone", "no SKILL.md"): its stderr is empty or only
+    `warning:`/`error:` lines. The follow-up check_skills stays authoritative for it (R5-1); any other rc or a
+    crash-like stderr (a traceback, a `bash:` line) is a failed helper."""
+    return rc == 1 and all(ln.startswith(("warning:", "error:")) for ln in err.splitlines() if ln.strip())
+
+
+def stuck_rows_hint(script, repo, names):
+    """"; not in place: skill/tui state, ..." from a fresh check, or "" when the check cannot list them."""
+    try:
+        rows, _ = check_skills(script, repo, names)
+    except Stop:
+        return ""
+    bad = [f"{s}/{tui} {st}" for s, tui, st in rows if classify(st) != "ok"]
+    return "; not in place: " + ", ".join(bad) if bad else ""
 
 
 # --- symlinks -----------------------------------------------------------------------------
@@ -484,9 +513,9 @@ def update(rep, args, repo):
             rep.say("  would run: " + shlex.join([script, *fixable]))
         elif fixable:
             rc, _, lerr = link_skills(script, repo, fixable)
-            if rc != 0:  # it may have made some links before failing (Hermes nudge): never accept the resulting state
-                raise Stop(EXIT_ERROR, f"{shlex.join([script, *fixable])} failed (rc={rc}): {lerr.strip()[:300]}; "
-                           "links may be partly made; rerun after fixing")
+            if rc != 0 and not link_left_alone(rc, lerr):  # it may have made some links before failing (Hermes nudge)
+                raise Stop(EXIT_ERROR, f"{shlex.join([script, *fixable])} failed (rc={rc}): {lerr.strip()[:300]}"
+                           f"{stuck_rows_hint(script, repo, fixable)}; links may be partly made; rerun after fixing")
             after, _ = check_skills(script, repo, fixable)
             left = {(s, tui) for s, tui, st in after if classify(st) != "ok"}
             skills["linked_now"] = sorted(set(fixable) - {s for s, _ in left})
@@ -591,6 +620,10 @@ def main(argv=None):
     ap.add_argument("--state", default=DEFAULT_STATE, help=f"applied-revision record (default {DEFAULT_STATE})")
     args = ap.parse_args(argv)
     repo = Path(os.path.expanduser(args.repo)).resolve()
+    here = Path(__file__).resolve().parent.parent
+    if here != canonical_repo():  # R5-3: the trust root is wherever the running ade-update resolves to
+        print(f"ade-update: warning: ade-update runs from {here}, not the canonical checkout {canonical_repo()}; "
+              "its sibling skill-everywhere is the one that runs", file=sys.stderr)
     rep = Report(repo, os.path.expanduser(args.state), args.check)
     try:
         code = update(rep, args, repo)

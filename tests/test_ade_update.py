@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "bin" / "ade-update"
+REAL_SE = SCRIPT.parent / "skill-everywhere"
 
 CHANGELOG_V1 = """# Changelog
 
@@ -58,6 +59,7 @@ if check:
         print("== " + n)
         for tui, st in table.get(n, [["claude", "linked"]]):
             print("  %-13s %s" % (tui, st))
+    print("== end")
 else:
     for n in names:
         table[n] = [[t, "linked" if s in ("missing",) or s.startswith(("dangling", "chained")) else s]
@@ -626,7 +628,7 @@ def test_a_crashing_skill_everywhere_check_is_exit_4_and_records_no_state(env):
 
 def test_a_skill_missing_from_the_check_output_is_exit_4(env):
     env.publish({"skills/beta/SKILL.md": "---\nname: beta\n---\n"})
-    plant_helper(env.trusted, "#!/bin/sh\necho '== alpha'\necho '  claude        linked'\nexit 0\n")
+    plant_helper(env.trusted, "#!/bin/sh\necho '== alpha'\necho '  claude        linked'\necho '== end'\nexit 0\n")
     r = env.run()
     assert r.returncode == 4, r.stdout + r.stderr
     assert "returned no result for: beta" in r.stdout
@@ -634,7 +636,7 @@ def test_a_skill_missing_from_the_check_output_is_exit_4(env):
 
 
 def test_the_scripts_own_warning_exit_is_not_a_crash(env):
-    plant_helper(env.trusted, "#!/bin/sh\necho '== alpha'\necho '  claude        linked'\n"
+    plant_helper(env.trusted, "#!/bin/sh\necho '== alpha'\necho '  claude        linked'\necho '== end'\n"
                               "echo 'warning: codex global instructions dangling: x -> y' >&2\nexit 1\n")
     r = env.run()
     assert r.returncode == 0, r.stdout + r.stderr
@@ -646,7 +648,7 @@ def test_the_scripts_own_warning_exit_is_not_a_crash(env):
 def test_a_header_without_rows_is_exit_4_even_with_the_warning_exit(env):  # adversary R4-3
     warn = "echo 'warning: codex global instructions dangling: x -> y' >&2\n"
     for tail in ("exit 1\n", "exit 0\n"):
-        plant_helper(env.trusted, "#!/bin/sh\n" + warn + "echo '== alpha'\n" + tail)
+        plant_helper(env.trusted, "#!/bin/sh\n" + warn + "echo '== alpha'\necho '== end'\n" + tail)
         r = env.run()
         assert r.returncode == 4, r.stdout + r.stderr
         assert "returned no rows for: alpha" in r.stdout
@@ -680,3 +682,80 @@ def test_pull_failure_code_ignores_text_the_remote_sends():  # adversary R4-4
                                  "fatal: unable to access 'https://x/r.git/': Could not resolve host: x") == 4
     assert mod.pull_failure_code("remote: error: would be overwritten\nfatal: Authentication failed") == 4
     assert mod.pull_failure_code("remote: hello\nfatal: Not possible to fast-forward, aborting.") == 3
+
+
+# --- adversary round 5 (head 6e707c6) ---------------------------------------------------------------
+
+def test_a_left_alone_link_is_exit_10_naming_the_stuck_row_on_the_first_apply(env):  # adversary R5-1 (probe Q6)
+    env.skills({"alpha": [["claude", "real dir/file (not ours)"], ["cline", "missing"]]})
+    r = env.run()
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert "alpha/claude is real dir/file (not ours): skill-everywhere leaves it alone" in r.stdout
+    assert "failed (rc" not in r.stdout and not env.state.exists()
+    assert env.calls() == [["--check", "alpha"], ["alpha"], ["--check", "alpha"]]
+    # the stuck row is what remains; the fixable one was linked
+    assert json.loads(env.run("--check", "--json").stdout)["skills"]["missing"] == [
+        {"skill": "alpha", "tui": "claude", "state": "real dir/file (not ours)"}]
+
+
+def test_link_left_alone_accepts_only_the_scripts_own_exit_1_wording():
+    mod = load_module()
+    ok = ("", "warning: x\n", "error: no SKILL.md under a or b\nwarning: y\n")
+    assert all(mod.link_left_alone(1, e) for e in ok)
+    assert not mod.link_left_alone(127, "") and not mod.link_left_alone(2, "")
+    assert not mod.link_left_alone(1, "Traceback (most recent call last):\n")
+    assert not mod.link_left_alone(1, "bash: line 3: ghead: command not found\n")
+    assert not mod.link_left_alone(1, "warning: x\nbash: boom\n")
+
+
+def test_a_failing_link_call_exit_4_names_the_stuck_rows_it_can_list(env):  # adversary R5-1
+    env.skills({"alpha": [["claude", "real dir/file (not ours)"], ["cline", "missing"]]})
+    plant_helper(env.trusted, FAKE_SKILL_EVERYWHERE.format(python=sys.executable).replace(
+        "sys.exit(0)", """if not check:
+    sys.stderr.write("bash: boom\\n")
+    sys.exit(1)
+sys.exit(0)"""))
+    r = env.run()
+    assert r.returncode == 4, r.stdout + r.stderr  # rc 1, but the stderr is not the script's own wording
+    assert "bash: boom" in r.stdout and "not in place: alpha/claude real dir/file (not ours);" in r.stdout  # cline was linked before the failure
+    assert not env.state.exists()
+
+
+def test_a_check_without_the_end_sentinel_is_exit_4_even_with_every_row(env):  # adversary R5-2
+    plant_helper(env.trusted, "#!/bin/sh\necho '== alpha'\necho '  claude        linked'\nexit 0\n")
+    r = env.run()
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "skill check incomplete" in r.stdout and "== end" in r.stdout
+    assert not env.state.exists()
+    # a crash after N rows of a later skill: the warning exit 1 and a good first skill must not hide it
+    env.publish({"skills/beta/SKILL.md": "---\nname: beta\n---\n"})
+    plant_helper(env.trusted, "#!/bin/sh\necho 'warning: codex global instructions dangling: x -> y' >&2\n"
+                              "echo '== alpha'\necho '  claude        linked'\necho '== beta'\n"
+                              "echo '  claude        linked'\nexit 1\n")
+    r = env.run()
+    assert r.returncode == 4 and "skill check incomplete" in r.stdout, r.stdout + r.stderr
+    assert not env.state.exists()
+    out = json.loads(env.run("--json").stdout)
+    assert out["exit"] == 4 and out["error"].startswith("skill check incomplete")
+
+
+def test_the_real_skill_everywhere_check_ends_with_the_sentinel(tmp_path):  # adversary R5-2
+    src = tmp_path / "skills" / "alpha"
+    src.mkdir(parents=True)
+    (src / "SKILL.md").write_text("---\nname: alpha\n---\n")
+    home = tmp_path / "home"
+    home.mkdir()
+    r = subprocess.run([str(REAL_SE), "--check", "alpha"], capture_output=True, text=True, cwd=tmp_path,
+                       env=dict(os.environ, HOME=str(home), SKILL_EVERYWHERE_ADE=str(tmp_path / "skills"),
+                                CODEX_HOME=str(home / ".codex")))
+    assert r.returncode in (0, 1), r.stdout + r.stderr
+    assert r.stdout.splitlines()[0] == "== alpha" and r.stdout.splitlines()[-1] == "== end"
+
+
+def test_a_copy_outside_the_canonical_checkout_warns_on_stderr(env):  # adversary R5-3
+    for flags in (("--check",), ()):
+        r = env.run(*flags, script=env.lone / "bin" / "ade-update")
+        assert f"ade-update runs from {env.lone}, not the canonical checkout {env.machine}" in r.stderr, r.stderr
+        assert "its sibling skill-everywhere is the one that runs" in r.stderr
+    r = env.run("--check", "--json", script=env.lone / "bin" / "ade-update")
+    assert json.loads(r.stdout)["mode"] == "check"  # stdout stays one JSON object

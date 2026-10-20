@@ -2,7 +2,7 @@
 # Make a shared skill visible to every agent TUI on this machine by
 # symlinking it into each TUI's user-level skills dir.
 #     skill-everywhere <name>...            link (idempotent, collapses chains)
-#     skill-everywhere --check <name>...    report per-TUI status, change nothing
+#     skill-everywhere --check <name>...    report per-TUI status, change nothing; ends with a "== end" line
 #     skill-everywhere --remove <name>...   remove links this script would make
 # Content lives in exactly one place (2026-10-14 chain collapse):
 #   ~/src/djbclark-ade/skills/<name>            public skills (default)
@@ -122,6 +122,8 @@ for name in "$@"; do
     esac
   done <<<"$targets"
 done
+# --check ends with a sentinel so a caller (bin/ade-update) can tell a complete report from one cut short by a crash
+if [[ $mode == check ]]; then echo "== end"; fi
 
 if command -v hermes >/dev/null \
    && ! _grep -qF skill-everywhere/skills ~/.hermes/config.yaml 2>/dev/null; then

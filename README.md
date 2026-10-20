@@ -159,8 +159,13 @@ ls -l ~/.claude/commands ~/.claude/agents ~/.claude/hooks | grep -c djbclark-ade
    with the canonical checkout's `bin/` and then `PATH` as fallbacks in the canonical checkout only, else the
    step is skipped with a note: a checkout given by `--repo` (a pasture, a second clone, an untrusted PR
    branch) never has its own `bin/` executed, not even under `--check`. A `skill-everywhere --check` that crashes
-   (nonzero exit, bar its own `warning:` status) or leaves a skill without a header or without any TUI row, or
-   a link call that exits nonzero, is an error (exit 4), never a partial success.
+   (nonzero exit, bar its own `warning:` status), does not end with its `== end` sentinel line, or leaves a skill
+   without a header or without any TUI row, is an error (exit 4: "skill check incomplete"), never a partial
+   success. A link call that exits 1 with an empty stderr or only `warning:`/`error:` lines is the script's own
+   "left alone": the follow-up check decides, so a link it cannot fix is exit 10 naming the row, on the first
+   run too, with no state recorded; any other nonzero exit or crash-like stderr is exit 4 (naming the rows
+   still not in place when the check can list them). When `ade-update` itself runs from a path other than the
+   canonical checkout it warns on stderr: the `skill-everywhere` beside it is the one that runs.
 3. **Symlinks.** `CLAUDE.md` is a symlink to `AGENTS.md`, and every file in `claude/{commands,agents,
    hooks}` is linked from `~/.claude/`; a gap is reported with the `ln` command (not changed; outside the
    canonical checkout the rows are counted only).
@@ -169,7 +174,7 @@ ls -l ~/.claude/commands ~/.claude/agents ~/.claude/hooks | grep -c djbclark-ade
    HEAD there. Every pull request adds its line to the changelog (AGENTS.md code-review rule 10),
    so that is the one place that says what changed and what is new.
 
-Exit codes: 0 current, 10 behind (`--check`) or a link unresolved, 2 dirty, 3 diverged (git's explicit
+Exit codes: 0 current, 10 behind (`--check`) or a link unresolved (including one `skill-everywhere` leaves alone, on the first run), 2 dirty, 3 diverged (git's explicit
 non-fast-forward refusal only), 4 git, network, `skill-everywhere` or state-file failure (including a `--repo`
 that is not the top of its work tree, and any other `git pull --ff-only` failure such as a timeout or lost
 authentication). It becomes `ade update` in Phase 1 (proposal 4.4 item 9); a daily `--check` timer
