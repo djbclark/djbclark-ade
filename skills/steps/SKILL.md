@@ -94,6 +94,13 @@ Shared rules for every prompt, whichever tool:
 1. **One question per call.** Never batch.
 2. **Recommended option first.** Distinct outcomes. Include "Leave it as is"
    or "Skip for now" where that is a real choice. 2–4 options.
+2a. **Every option label starts with its number** — `1. Client swap only`,
+   `2. Full upgrade`, … — so he can answer "do the 3rd option, then the 2nd"
+   and be understood (djbclark, 2026-10-20: "from now on, number options so it
+   is easy to refer to them from here"). The number is part of the label text
+   the tool shows, not something you add only in the prose; keep the numbering
+   stable if you re-ask the same item, and in your reply refer back by the
+   same number.
 3. **"Other" is added by the tool.** He can type `stop` there to end the walk.
 4. **Say what it is.** The question is not a title. Lead with position (`2/4`),
    then one or two sentences: what the item is, what it does, and why a choice
