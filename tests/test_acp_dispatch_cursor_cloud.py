@@ -358,7 +358,7 @@ class TestAdversaryFindings(CloudBase):
         jobs = self.out / "jobs"
         jobs.mkdir(parents=True, exist_ok=True)
         (jobs / "peer.json").write_text(json.dumps({
-            "name": "peer", "cloud_provider": "cursor", "cloud_repo": "https://github.com/djbclark/some-repo",
+            "name": "peer", "cloud_provider": "cursor", "cloud_repo": "https://github.com/djbclark/some-repo", "cloud_agent_id": "bc-peer",
             "launched_at": time.time() - 5, "started": time.time() - 5, "finished": finished,
             "status": "running" if finished is None else "done"}))
 
@@ -585,6 +585,153 @@ class TestAdversaryFindings(CloudBase):
         self.assertEqual(res.returncode, 2)
         self.assertNotIn("SECRETTOKEN", res.stderr)
         self.assertIn("forgejo.example/o/r.git", res.stderr)
+
+    # pass 4: Codex P2s and adversary lows S1 to S3
+    def poll_in_process(self, rec_path: Path) -> list[float]:
+        """Run cloud_poll in this process with cloud_call wrapped; the timeouts given to `run` polls."""
+        from unittest import mock
+        mod = self.load_module()
+        seen: list[float] = []
+        real = mod.cloud_call
+
+        def spy(binp, *args, **kw):
+            if args and args[0] == "run":
+                seen.append(kw.get("timeout", 180))
+            return real(binp, *args, **kw)
+        with mock.patch.dict(os.environ, self.fenv(ACP_DISPATCH_CLOUD_POLL="0.3")), \
+                mock.patch.object(mod, "cloud_call", spy):
+            self.poll_rc = mod.cloud_poll(rec_path)
+        return seen
+
+    def test_each_poll_call_is_bounded_by_the_time_left(self):
+        self.run_json("run-1.json", "RUNNING")
+        rec_path = self.detached_record()
+        rec = json.loads(rec_path.read_text())
+        rec["timeout"] = 2
+        rec_path.write_text(json.dumps(rec))
+        seen = self.poll_in_process(rec_path)
+        self.assertTrue(seen)
+        self.assertTrue(all(t <= 2.01 for t in seen), seen)
+        self.assertLess(min(seen), 2.0, seen)          # later polls get less than the first
+
+    def test_cloud_limit_clamps_and_survives_junk(self):
+        mod = self.load_module()
+        cap = float(mod.CLOUD_MAX_SECONDS)
+        self.assertEqual(mod.cloud_limit(30), 30.0)
+        self.assertEqual(mod.cloud_limit(10 ** 9), cap)
+        for junk in (0, None, "soon", [], -5, "nan-ish"):
+            self.assertEqual(mod.cloud_limit(junk), cap, junk)
+
+    def test_poller_with_a_non_numeric_or_huge_timeout_does_not_crash(self):
+        self.run_json("run-1.json", "FINISHED", result="ok")
+        rec_path = self.detached_record()
+        rec = json.loads(rec_path.read_text())
+        rec["timeout"] = "soon"
+        rec_path.write_text(json.dumps(rec))
+        self.poll_in_process(rec_path)
+        self.assertEqual(self.poll_rc, 0)
+
+    def test_resume_timeout_is_honored_for_a_cloud_record(self):
+        self.run_json("run-1.json", "RUNNING")
+        rec_path = self.detached_record()
+        self.kill_poller(rec_path)
+        res = run(["resume", str(rec_path), "--timeout", "77"], env=self.fenv())
+        self.assertEqual(res.returncode, 0, res.stderr)
+        rec = json.loads(rec_path.read_text())
+        self.assertEqual(rec["timeout"], 77)
+        self.assertGreater(rec["poll_base"], rec["launched_at"])
+        self.assertEqual(self.repoll_submits(), 1)
+
+    def test_resume_negative_timeout_is_refused(self):
+        self.run_json("run-1.json", "RUNNING")
+        rec_path = self.detached_record()
+        self.kill_poller(rec_path)
+        res = run(["resume", str(rec_path), "--timeout", "-3"], env=self.fenv())
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(self.repoll_submits(), 0)
+
+    def test_without_launchctl_reap_and_resume_use_a_background_process(self):
+        import time
+        self.run_json("run-1.json", "RUNNING")
+        rec_path = self.detached_record()
+        self.kill_poller(rec_path)
+        env = self.fenv(ACP_DISPATCH_LAUNCHCTL="/nonexistent/launchctl", ACP_DISPATCH_CLOUD_POLL="0.2")
+        res = run(["reap", str(rec_path)], env=env)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(self.repoll_submits(), 0)       # nothing went to launchctl
+        self.assertTrue((self.out / "s1-repoll1-run.sh").exists())
+        self.assertEqual(json.loads(rec_path.read_text())["repolls"], 1)
+        self.run_json("run-1.json", "FINISHED", result="ok", git=REAL_BRANCHES)
+        for _ in range(150):                              # the background poller finalizes it
+            if json.loads(rec_path.read_text()).get("finished"):
+                break
+            time.sleep(0.2)
+        rec = json.loads(rec_path.read_text())
+        self.assertEqual(rec["status"], "done", rec)
+        self.assertTrue((self.out / "s1-report.md.done").exists())
+
+    def test_without_launchctl_detached_dispatch_still_starts(self):
+        import time
+        self.run_json("run-1.json", "FINISHED", result="ok", git=REAL_BRANCHES)
+        res = self.cloud("--detach", "--no-wait",
+                         env={"ACP_DISPATCH_LAUNCHCTL": "/nonexistent/launchctl"})
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        rec_path = self.out / "jobs" / "s1.json"
+        for _ in range(150):
+            if json.loads(rec_path.read_text()).get("finished"):
+                break
+            time.sleep(0.2)
+        self.assertEqual(json.loads(rec_path.read_text())["status"], "done")
+
+    def peer_rec(self, **over) -> dict:
+        import time
+        base = {"name": "peer", "cloud_provider": "cursor", "cloud_agent_id": "bc-peer",
+                "cloud_repo": "https://github.com/djbclark/some-repo", "launched_at": time.time() - 5,
+                "started": time.time() - 5, "finished": None, "status": "running", "timeout": 600}
+        return {**base, **over}
+
+    def overlapping(self, peer: dict) -> list[str]:
+        import time
+        mod = self.load_module()
+        jobs = self.out / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        (jobs / "peer.json").write_text(json.dumps(peer))
+        me = {"name": "me", "cloud_provider": "cursor", "cloud_repo": peer["cloud_repo"],
+              "launched_at": time.time() - 1, "started": time.time() - 1, "cloud_agent_id": "bc-me",
+              "record": str(jobs / "me.json"), "out": str(self.out)}
+        (jobs / "me.json").write_text(json.dumps(me))
+        return mod.cloud_overlapping(me)
+
+    def test_overlap_counts_a_live_peer_and_skips_the_unusable(self):
+        self.assertEqual(self.overlapping(self.peer_rec()), ["peer"])
+        self.assertEqual(self.overlapping(self.peer_rec(cloud_agent_id=None)), [])
+        self.assertEqual(self.overlapping(self.peer_rec(cloud_agent_id="")), [])
+        self.assertEqual(self.overlapping(self.peer_rec(launched_at=1000.0, started=1000.0)), [])
+        for junk in ("soon", [1], {"a": 1}):
+            with self.subTest(junk=junk):
+                self.assertEqual(self.overlapping(self.peer_rec(launched_at=junk)), [])
+                self.assertEqual(self.overlapping(self.peer_rec(finished=junk)), [])
+        self.assertEqual(self.overlapping(self.peer_rec(timeout="soon")), ["peer"])   # junk timeout: the cap
+
+    def test_result_text_branch_unchanged_since_launch_is_not_confirmed(self):
+        # cursor/document-cursor-cloud-8526 already existed at the same head before the launch
+        text = f"{self.head}\trefs/heads/feat/slice-base\nc0ffee\trefs/heads/cursor/document-cursor-cloud-8526\n"
+        for n in (1, 2, 3):
+            (self.cc / f"ls-remote-{n}.txt").write_text(text)
+        self.run_json("run-1.json", "FINISHED", result=REAL_RESULT, git=REAL_BRANCHES)
+        self.assertEqual(self.cloud().returncode, 0)
+        self.assertTrue(any(ln.startswith("BRANCH: unknown") for ln in self.report().splitlines()),
+                        self.report())
+
+    def test_result_text_branch_moved_since_launch_is_confirmed(self):
+        before = f"{self.head}\trefs/heads/feat/slice-base\nc0ffee\trefs/heads/cursor/document-cursor-cloud-8526\n"
+        after = f"{self.head}\trefs/heads/feat/slice-base\nbeef01\trefs/heads/cursor/document-cursor-cloud-8526\n"
+        (self.cc / "ls-remote-1.txt").write_text(before)
+        for n in (2, 3):
+            (self.cc / f"ls-remote-{n}.txt").write_text(after)
+        self.run_json("run-1.json", "FINISHED", result=REAL_RESULT, git=REAL_BRANCHES)
+        self.assertEqual(self.cloud().returncode, 0)
+        self.assertIn("BRANCH: cursor/document-cursor-cloud-8526", self.report().splitlines())
 
 
 class TestRouteRegistration(unittest.TestCase):

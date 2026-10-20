@@ -59,11 +59,14 @@ on origin since the launch (never with another cloud slice on the same repo over
 else `BRANCH: unknown`; a `BRANCH-SOURCE:` line says which) and a `COST:` line from `cursor-cloud usage`
 (`$1.04 (104.49 cents charged; N tokens)`). The report ends DONE on FINISHED (exit 0); a result with
 a `BLOCKED:` line puts it first, so check says blocked (exit 4); ERROR, CANCELLED, EXPIRED, --timeout
-(24 h cap when --timeout is 0; re-read from the record every poll, so `extend` works) end in a NO-REPORT line (exit 1; 124 on timeout)
+(24 h ceiling, also for --timeout 0; re-read from the record every poll, so `extend` works; a poll call is
+bounded by the time left) end in a NO-REPORT line (exit 1; 124 on timeout)
 and say the cloud agent may still run (no cancel: use the Cursor dashboard). check, wait and the
 rearm waiter work unchanged. If the poller dies while the cloud run continues, `reap`, `check` and
 `acp-dispatch resume RECORD` re-poll the same agent instead of finalizing it lost (a new launchd job,
-`<name>-repollN-run.sh`; a run that already ended is finalized from its real status); a TERM or
+`<name>-repollN-run.sh`, or a detached background process where launchctl is absent (Linux); a run that
+already ended is finalized from its real status; `resume RECORD --timeout S` gives the new poller S seconds
+from now, `resume` alone on a finished record a fresh allowance); a TERM or
 shutdown writes a report that names the agent and this command. A cloud slice runs off the Mac, so
 it skips the local load gate, the in-flight cap (max_parallel is a `plan` hint only) and the acp-run
 preflight; the Cursor pool's --min-headroom still applies, but running cloud slices are not reserved
@@ -3415,7 +3418,7 @@ def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
     record = Path(a.record).expanduser().resolve()
     rec = json.loads(record.read_text())
     if rec.get("cloud_provider"):
-        return cloud_resume(record)
+        return cloud_resume(record, a.timeout)
     deadline = time.time() + FINALIZE_WAIT
     while not rec.get("finished"):
         if dead_reason(rec):
@@ -4036,6 +4039,16 @@ def cloud_heads(repo: str, ref: str | None = None) -> dict[str, str] | None:
     return heads
 
 
+def cloud_limit(raw) -> float:
+    """Seconds a cloud slice may poll for: the record's timeout, never more than CLOUD_MAX_SECONDS; 0, a
+    missing, negative or non-numeric value gives the cap."""
+    try:
+        secs = float(raw)
+    except (TypeError, ValueError):
+        return float(CLOUD_MAX_SECONDS)
+    return min(secs, float(CLOUD_MAX_SECONDS)) if secs > 0 else float(CLOUD_MAX_SECONDS)
+
+
 def cloud_overlapping(rec: dict) -> list[str]:
     """Other cloud slices on the same repo whose run overlapped this one's (launched before this one
     ended, ended after this one launched): any cursor/* head created in that window may be theirs."""
@@ -4052,10 +4065,18 @@ def cloud_overlapping(rec: dict) -> list[str]:
                 continue
             if not other.get("cloud_provider") or other.get("cloud_repo") != rec.get("cloud_repo"):
                 continue
-            if other.get("status") in ("unavailable", "dry-run"):
+            if other.get("status") in ("unavailable", "dry-run") or not other.get("cloud_agent_id"):
+                continue            # a launch that never produced an agent cannot own a branch
+            try:
+                ended = other.get("finished")
+                ended = None if ended is None else float(ended)
+                began = float(other.get("launched_at") or other.get("started") or 0)
+                span = cloud_limit(other.get("timeout"))
+            except (TypeError, ValueError):
                 continue
-            ended = other.get("finished")
-            if (ended is None or float(ended) > since) and float(other.get("launched_at") or other.get("started") or 0) < time.time():
+            if began < time.time() - span - CLOUD_MAX_SECONDS:
+                continue            # older than its own limit plus the cap: a stale record, not a live run
+            if (ended is None or ended > since) and began < time.time():
                 names.append(other.get("name") or f.stem)
     return names
 
@@ -4104,7 +4125,9 @@ def cloud_branches(rec: dict, run: dict) -> tuple[list[str], str]:
     seen = list(dict.fromkeys(CLOUD_BRANCH_RE.findall(str(run.get("result") or ""))))
     if seen:
         on_origin = cloud_heads(rec.get("dir") or ".") or {}
-        confirmed = [b for b in seen if b in on_origin]
+        before = rec.get("cloud_heads_before") or {}
+        # on origin AND new or moved since the launch (an older branch the result merely mentions is not this run's)
+        confirmed = [b for b in seen if b in on_origin and before.get(b) != on_origin[b]]
         if confirmed:
             return confirmed, "result text, confirmed on origin"
     got = cloud_ls_remote_branch(rec)
@@ -4155,7 +4178,7 @@ def cloud_report(rec: dict, status: str, run: dict | None, usage: dict | None, d
 
 def cloud_finish(rec: dict, status: str, run: dict | None, detail: str) -> int:
     """Write the report and final files for a terminal status; the runner's exit code."""
-    usage, _ = cloud_call(rec.get("cloud_bin") or cloud_bin(), "usage", rec["cloud_agent_id"])
+    usage, _ = cloud_call(rec.get("cloud_bin") or cloud_bin(), "usage", rec["cloud_agent_id"], timeout=60)
     report = Path(rec["report"])
     write_atomic(report, cloud_report(rec, status, run, usage, detail))
     write_atomic(Path(rec["final"]), f"written: {report}\n")
@@ -4175,17 +4198,20 @@ def cloud_poll(record: Path) -> int:
     running in Cursor and `acp-dispatch resume RECORD` (or reap) re-polls it."""
     rec = update_record(record, pid=os.getpid(), pid_start=proc_start(os.getpid()))
     interval = float(os.environ.get("ACP_DISPATCH_CLOUD_POLL", "30"))
-    launched = float(rec.get("launched_at") or rec.get("started") or time.time())
-
     def limit_now() -> tuple[float, float]:
-        """(deadline, seconds): re-read from the record every loop, from the launch time, so
-        `acp-dispatch extend` takes effect and a re-poll does not restart the clock."""
+        """(deadline, seconds): re-read from the record every loop, counted from the launch (or from the
+        last `resume`, poll_base), so `acp-dispatch extend` takes effect and a re-poll after a reap does
+        not restart the clock. Clamped to CLOUD_MAX_SECONDS; a non-numeric value gives the cap."""
         try:
-            secs = json.loads(record.read_text()).get("timeout")
+            cur = json.loads(record.read_text())
         except (OSError, ValueError):
-            secs = rec.get("timeout")
-        secs = secs if secs else CLOUD_MAX_SECONDS
-        return launched + secs, secs
+            cur = rec
+        try:
+            base = float(cur.get("poll_base") or cur.get("launched_at") or cur.get("started") or time.time())
+        except (TypeError, ValueError):
+            base = time.time()
+        secs = cloud_limit(cur.get("timeout"))
+        return base + secs, secs
 
     def stop(signum, _frame):
         raise CloudStop(signum)
@@ -4197,7 +4223,9 @@ def cloud_poll(record: Path) -> int:
                f"(`{binp} status {rec['cloud_agent_id']}`)")
     try:
         while True:
-            got, err = cloud_call(binp, *cloud_run_args(rec))
+            deadline, secs = limit_now()
+            # a poll never outlives the slice's deadline (a stalled call used to hold it up to 180 s)
+            got, err = cloud_call(binp, *cloud_run_args(rec), timeout=max(1.0, min(180.0, deadline - time.time())))
             if got is None:
                 fails += 1
                 if fails >= CLOUD_MAX_POLL_FAILURES:
@@ -4215,7 +4243,7 @@ def cloud_poll(record: Path) -> int:
             deadline, secs = limit_now()
             if time.time() > deadline:
                 status = "EXPIRED"
-                detail = f"acp-dispatch --timeout {secs} s reached{may_run}"
+                detail = f"acp-dispatch --timeout {secs:g} s reached{may_run}"
                 break
             time.sleep(interval)
     except CloudStop as e:
@@ -4234,6 +4262,20 @@ def cloud_poll(record: Path) -> int:
     return rc
 
 
+def cloud_spawn(label: str, runner: Path, out_log: Path, err_log: Path) -> str | None:
+    """Start RUNNER detached: a launchd job where launchctl exists, else (Linux) a session-leader subprocess
+    that outlives this command. The error text, or None."""
+    if shutil.which(launchctl_bin()):
+        return submit_launchd(label, runner, out_log, err_log)
+    try:
+        with open(out_log, "ab") as o, open(err_log, "ab") as e:
+            subprocess.Popen(["/bin/bash", str(runner)], stdin=subprocess.DEVNULL, stdout=o, stderr=e,
+                             start_new_session=True)
+    except OSError as ex:
+        return str(ex)
+    return None
+
+
 def cloud_repoll(path: Path, rec: dict) -> str:
     """Submit a fresh poller (a new launchd job) for a cloud record whose poller is gone while the
     cloud run may continue. The caller holds the record's lock. Returns a note for the lead."""
@@ -4245,13 +4287,12 @@ def cloud_repoll(path: Path, rec: dict) -> str:
     rec.update(label=label, runner=str(runner), pid=None, pid_start=None, repolls=n,
                first_started=rec.get("first_started") or rec.get("started"), started=time.time())
     write_record(path, rec)
-    r = subprocess.run([launchctl_bin(), "submit", "-l", label, "-o", str(Path(rec["out"]) / f"{rec['name']}.out"),
-                        "-e", str(Path(rec["out"]) / f"{rec['name']}.err"), "--", "/bin/bash", str(runner)],
-                       check=False, capture_output=True, text=True)
-    if r.returncode != 0:
-        return f"could not re-submit the poller ({r.stderr.strip()}); run `acp-dispatch resume {path}`"
-    return (f"poller was gone, cloud agent {rec['cloud_agent_id']} still active: re-polling under launchd "
-            f"job {label}; wait with `{rec.get('rearm') or 'acp-dispatch wait ' + str(path)}`")
+    err = cloud_spawn(label, runner, Path(rec["out"]) / f"{rec['name']}.out", Path(rec["out"]) / f"{rec['name']}.err")
+    if err:
+        return f"could not start the poller ({err}); run `acp-dispatch resume {path}`"
+    how = "under launchd job" if shutil.which(launchctl_bin()) else "in a background process"
+    return (f"poller was gone, cloud agent {rec['cloud_agent_id']} still active: re-polling {how} "
+            f"{label}; wait with `{rec.get('rearm') or 'acp-dispatch wait ' + str(path)}`")
 
 
 def cloud_reap(path: Path, rec: dict) -> tuple[str, str] | None:
@@ -4270,12 +4311,18 @@ def cloud_reap(path: Path, rec: dict) -> tuple[str, str] | None:
     return None
 
 
-def cloud_resume(record: Path) -> int:
-    """`acp-dispatch resume RECORD` for a cloud slice: re-poll the same cloud agent (no ACP session)."""
+def cloud_resume(record: Path, timeout: int | None = None) -> int:
+    """`acp-dispatch resume RECORD [--timeout S]` for a cloud slice: re-poll the same cloud agent (no ACP
+    session). --timeout S is a fresh allowance from now (0 = the 24 h cap). Without it a finished record gets
+    a fresh allowance of its old timeout; a dead unfinished poller keeps its original deadline."""
+    if timeout is not None and timeout < 0:
+        die("--timeout must be 0 or more")
     with record_lock(record):
         rec = json.loads(record.read_text())
         if not rec.get("cloud_agent_id"):
             die("this cloud record never launched an agent; dispatch the slice again")
+        if timeout is not None:
+            rec.update(timeout=timeout, poll_base=time.time())
         if not rec.get("finished"):
             if not dead_reason(rec):
                 die("the poller is still running; use wait")
@@ -4286,7 +4333,8 @@ def cloud_resume(record: Path) -> int:
             die(f"the slice finished as {rec.get('status')}; nothing to re-poll")
         for p in (Path(rec["done"]), Path(rec["report"]), Path(rec["final"])):
             p.unlink(missing_ok=True)
-        rec.update(finished=None, exit=None, status="running", report_source=None, pid=None)
+        rec.update(finished=None, exit=None, status="running", report_source=None, pid=None,
+                   poll_base=time.time())
         rec.pop("failure", None)
         print(f"acp-dispatch: {rec['name']}: {cloud_repoll(record, rec)}", file=sys.stderr)
     return 0
@@ -4395,17 +4443,15 @@ def dispatch_cloud(a: argparse.Namespace, previous: dict | None, kind: str | Non
         label = f"acp-dispatch.{(a.task or out.name)}.{a.name}"
         runner = out / f"{a.name}-run.sh"
         write_atomic(runner, runner_script(rec, [], label, self_path), mode=0o700)
-        sub = [launchctl_bin(), "submit", "-l", label, "-o", str(out / f"{a.name}.out"),
-               "-e", str(out / f"{a.name}.err"), "--", "/bin/bash", str(runner)]
         rec = update_record(record, label=label, runner=str(runner))
-        r = subprocess.run(sub, check=False, capture_output=True, text=True)
-        if r.returncode != 0:
-            die(f"launchctl submit failed ({r.returncode}): {r.stderr.strip()}", 1)
+        err = cloud_spawn(label, runner, out / f"{a.name}.out", out / f"{a.name}.err")
+        if err:
+            die(f"could not start the detached poller: {err}", 1)
         if a.no_wait:
             print(f"detached\t{a.name}\t{report}\nrecord: {record}\nrearm: {rec['rearm']}")
             return 0
         if wait_record(record) == 124:
-            print(f"timeout\t{a.name}\t{report}\nstill running under launchd; rearm: {rec['rearm']}")
+            print(f"timeout\t{a.name}\t{report}\nstill running in the background; rearm: {rec['rearm']}")
             return 124
         rec = json.loads(record.read_text())
         st, _, _, det = check_record(record)
