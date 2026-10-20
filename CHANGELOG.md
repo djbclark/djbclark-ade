@@ -20,11 +20,20 @@ agent what changed and what is new. Entries end with the pull request number.
   symlinks out of a `--git-root`, always excludes the scan docs from the reference search, and `--fetch` writes
   no refs and does not recurse into submodules; `bin/ade-scan-state-doc` renders the doc from the scan JSON and
   refuses to overwrite its input, a non-`.md` path or an existing file without `--force` (#TBD).
+- `loadwatch` skill and `load-watch watcher set|show|clear|test`: one registered agent session (a Paseo
+  agent by `paseo send`, else relay.py) also hears every load incident, unexplained sustained load and
+  job-guard trip, and investigates; `set` replaces the old watcher and tells it (2026-10-20).
 - `docs/ade-everywhere-inventory-2026-10-20-stores.md`: Phase 0 slice 1, every installed agent
   session store classified (52 stores, backup plan per store, differences from proposal §6.1) (#16).
 - `CHANGELOG.md`, this file, and the rule that every pull request adds a line to it; README
   "Update (this machine)"; proposal v2.4 with `ade update` as a Phase 1 command and acceptance
   test T8 (2026-10-20).
+- `self-slash --finish`: end the session; on Paseo it waits for idle and archives the agent without
+  `--force`, and `self-slash "/quit"` there is mapped to it (Paseo runs no `/quit`); `/new`, `/clear`,
+  `/reset`, `/quit`, `/exit` and `--finish` take a per-agent lifecycle lock, keyed on pid and start
+  time (#19).
+- `self-slash` exit 9: a dispatched agent (`ACP_RUN_AGENT=1`, set by `acp-run`) is refused every
+  lifecycle action and `/compact` (#19).
 - `docs/threat-model.md`, the threat model Codex's security review reads (#10).
 - AGENTS.md "Code review" section: what a reviewer checks on every pull request here (#9).
 - `bin/cursor-cloud`: launch and inspect Cursor Cloud Agents from the terminal, with unit tests
@@ -38,6 +47,15 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
+- `acp-run` removes `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `ORCA_TERMINAL_HANDLE` from every agent's
+  environment and sets `ACP_RUN_AGENT=1`; `self-slash --finish` and `--then /quit` on Paseo are
+  rejected with `--then`, and `paseo agent archive` gets `--` before the id (#19).
+- The context-size nudge tells a session to run the `handoff` skill (Step 9 does the `/new`) and, on
+  Paseo, to offer the `loose` Rule 4 choices instead of archiving itself; the dispatch footer, `handoff`
+  Step 9 and `loose` Rule 4 say lifecycle actions run only in the top-level session (#19).
+- `handoff` ends in a new Step 9 that clears the session and starts `/baton` by itself; `loose`
+  Rule 4 offers handoff and continue, finish and archive, or keep working; `baton` never clears
+  a session itself (#19).
 - `acp-dispatch check`: a slice whose recorded class is `killed:` or `lost` gets the `resume` hint (no
   "after the reset") and no `--escalate`; a missing agent binary is `NO-REPORT: not-installed` (exit 127
   plus acp-run's own line) with a re-dispatch hint; `acp-run` waits up to 90 s (`ACP_RUN_BIN_WAIT`, clamped
@@ -54,6 +72,14 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `diskfree` skill: the idle check for deleting a cache runs in the same command as the delete; a
+  `target-shared` delete approved minutes earlier broke a live maturin build (2026-10-20).
+- `load-watch` job guard: a slow crash loop (60 failed restarts in 2 h) now trips too; litellm restarted
+  every ~32 s for 19 h, just under the 20-in-10-min rule, and was never stopped (2026-10-20).
+- `load-watch`: the registered watcher hears an unexplained sustained load at most hourly; Hermes keeps
+  its 6 h cooldown (2026-10-20).
+- `skill-everywhere`: the Hermes gateway nudge follows `hermes` wrappers to the real python; since `hermes`
+  became a `/bin/sh` wrapper it ran the snippet under sh, where `import os, sys` was ImageMagick (2026-10-20).
 - `tests/conftest.py` pins `ROUTE_AGENT_OMP_READY=0`, so the route_agent suite passes on a host with
   an omp login as it does on CI; the omp-ready roster has its own tests (queue item 6) (#17).
 - `acp-dispatch`: an unmeasured (stale) quota window is skipped instead of crashing the dispatch
