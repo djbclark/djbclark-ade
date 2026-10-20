@@ -1218,9 +1218,9 @@ def test_doc_generator_survives_skipped_and_incomplete_records():
         # Codex pass 26: a `.git` file's target directory and its common directory are archived too
         assert f'{{ IFS= read -r l || [ -n "$l" ]; }} < {path_}/.git && case "$l" in "gitdir: "*) g=${{l#gitdir: }}' in row
         assert f"g={path_}/$g" in row and "gitdir capture FAILED" in row  # adversary round 32: git's gitfile rules, loud failure
-        assert (f'[ -f "$g/HEAD" ] && [ -d "$g/refs" ] && {{ [ -d "$g/objects" ] || [ -f "$g/commondir" ]; }} '
-                f'&& "$GTAR" -C "$g" -cf <DEST>/checkouts/abs{path_}/gitdir.tar .') in row  # round 34: git's is_git_directory
-        assert f'[ -d "$c/objects" ] && "$GTAR" -C "$c" -cf <DEST>/checkouts/abs{path_}/commondir.tar .' in row
+        assert (f'[ -f "$g/HEAD" ] && {{ [ -f "$g/commondir" ] || {{ [ -d "$g/objects" ] && [ -d "$g/refs" ]; }}; }} '
+                f'&& "$GTAR" -C "$g" -cf <DEST>/checkouts/abs{path_}/gitdir.tar .') in row  # round 35, Codex pass 30: git checks `refs` in the COMMON dir
+        assert f'[ -d "$c/objects" ] && [ -d "$c/refs" ] && "$GTAR" -C "$c" -cf <DEST>/checkouts/abs{path_}/commondir.tar .' in row
         assert '&& [ -n "$g" ] && case "$g" in /*)' in row and "$g/commondir" in row  # round 33: a git directory only
     assert "is listed with a whole-directory archive" in section_3_2(text)
     assert "t-incomplete" in text.split("### 1.3")[1].split("## 2.")[0]
@@ -1886,7 +1886,13 @@ def test_url_holds_credential_reads_any_userinfo_or_query_on_a_non_ssh_scheme():
                       ("https://host/x.git#", False), ("/tmp/a#b", False),
                       # Codex pass 28: a control character anywhere: git hands the value on whole
                       ("ssh://git@host/repo\n?private_token=FAKE", True), ("https://host/x.git\n", True),
-                      ("git@host:repo\t", True), ("/tmp/o\n", True)):
+                      ("git@host:repo\t", True), ("/tmp/o\n", True),
+                      # Cursor security review (2026-10-20): git decodes a percent-encoded separator on the transport
+                      # side, so `%3F`, `%23`, `%40`, `%3A` and an encoded control character count on every form
+                      ("ssh://git@127.0.0.1/repo%3Ftoken=FAKE", True), ("https://host/x.git%3Fprivate_token=FAKE", True),
+                      ("ssh://git%3Apw@host/x", True), ("https://host/x%23t", True), ("git@host:a%3fb", True),
+                      ("https://host/x%40y.git", True), ("https://host/x%0a.git", True), ("https::https://host/x%3Ft", True),
+                      ("https://host/x%20y.git", False), ("https://host/x%2Fy.git", False), ("/tmp/o%3F", True)):
         assert mod.url_holds_credential(url) is want, url
 
 
@@ -2177,8 +2183,10 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
     assert "git -C /p/sup/<sub> status --porcelain" in row and "git -C /p/sup/<sub> log --oneline --branches --tags --not --remotes" in row
     assert "git -C /p/sup/<sub> bundle create <DEST>/checkouts/abs/p/sup/<sub>/all.bundle --all" in row
     # Codex pass 26: a bundle holds commits only; the dirty worktree needs the patches and the untracked archive
-    assert "git -C /p/sup/<sub> diff --binary > <DEST>/checkouts/abs/p/sup/<sub>/modified.patch" in row
-    assert "git -C /p/sup/<sub> diff --binary --cached > <DEST>/checkouts/abs/p/sup/<sub>/staged.patch" in row
+    assert "git -C /p/sup/<sub> diff --no-ext-diff --no-textconv --no-color --binary > <DEST>/checkouts/abs/p/sup/<sub>/modified.patch" in row
+    assert "git -C /p/sup/<sub> diff --no-ext-diff --no-textconv --no-color --binary --cached > <DEST>/checkouts/abs/p/sup/<sub>/staged.patch" in row
+    assert "-C /p/sup/<sub> --null --ignore-failed-read -T <DEST>/checkouts/abs/p/sup/<sub>/modified.list" in row  # Codex pass 30
+    assert '"$(git -C /p/sup/<sub> rev-parse --absolute-git-dir)/index" <DEST>/checkouts/abs/p/sup/<sub>/index' in row
     assert ("git -C /p/sup/<sub> ls-files -z --others --exclude-standard > <DEST>/checkouts/abs/p/sup/<sub>/untracked.list "
             "&& \"$GTAR\" -C /p/sup/<sub> --null -T <DEST>/checkouts/abs/p/sup/<sub>/untracked.list -cf <DEST>/checkouts/abs/p/sup/<sub>/untracked.tar") in row
     assert "the scanner skips absorbed submodules" in row
@@ -2212,10 +2220,15 @@ def test_capture_plan_keeps_staged_changes_and_every_stash():
     mod = load_doc()
     co = doc_checkout("/p/w", flags=["dirty", "stash"], verdict="dirty", modified=2, stashes=3)
     row = next(r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith("| /p/w "))
-    assert "git -C /p/w diff --binary > <DEST>/checkouts/abs/p/w/modified.patch && git -C /p/w diff --binary --cached > " \
-           "<DEST>/checkouts/abs/p/w/staged.patch" in row  # Codex pass 21: a plain diff drops a binary file's bytes
+    assert "git -C /p/w diff --no-ext-diff --no-textconv --no-color --binary > <DEST>/checkouts/abs/p/w/modified.patch && " \
+           "git -C /p/w diff --no-ext-diff --no-textconv --no-color --binary --cached > <DEST>/checkouts/abs/p/w/staged.patch" in row
+    # Codex pass 21: a plain diff drops a binary file's bytes; pass 30: a textconv filter replaces them, and an
+    # unmerged entry's bytes are in no patch at all, so the changed files and the index are archived too
+    assert ('"$GTAR" -cf <DEST>/checkouts/abs/p/w/modified.tar -C <DEST>/checkouts/abs/p/w modified.list -C /p/w --null '
+            '--ignore-failed-read -T <DEST>/checkouts/abs/p/w/modified.list') in row
+    assert '"$GCP" -- "$(git -C /p/w rev-parse --absolute-git-dir)/index" <DEST>/checkouts/abs/p/w/index' in row
     assert "3 stashes" in row and "stash0.patch" not in row and "bundle create <DEST>/checkouts/abs/p/w/stashes" not in row
-    assert "log -g --format=%gd refs/stash" in row and "stash show -p --binary --include-untracked" in row
+    assert "log -g --format=%gd refs/stash" in row and "stash show -p --no-ext-diff --no-textconv --no-color --binary --include-untracked" in row
 
 
 def test_stash_capture_command_really_saves_every_stash_with_its_untracked_files(tmp_path):
@@ -2260,6 +2273,95 @@ def test_stash_capture_command_really_saves_every_stash_with_its_untracked_files
         assert subprocess.run([shell, "-c", cmd], capture_output=True).returncode != 0  # no entries left: fails
 
 
+def test_gitdir_capture_archives_a_linked_worktree_without_its_own_refs(tmp_path):
+    """Adversary round 35 and Codex pass 30 on PR 27: the round-34 guard wanted `refs/` in the per-worktree git
+    directory, which a linked worktree made before git 2.44 does not have (git checks `refs` and `objects` in the
+    COMMON directory); it refused such a worktree with `gitdir capture FAILED`. A `.git` file naming a directory
+    that is no git directory still fails, loudly, with no archive."""
+    import tarfile
+    mod = load_doc()
+    main = make_repo(tmp_path / "main")
+    wt = tmp_path / "wt"
+    git(main, "worktree", "add", str(wt), "-b", "side")
+    (wt / "a.txt").write_text("worktree only\n")
+    git(wt, "commit", "-am", "local-only in the worktree")
+    admin = Path(git(wt, "rev-parse", "--absolute-git-dir").strip())
+    shutil.rmtree(admin / "refs", ignore_errors=True)  # the pre-2.44 layout: HEAD and commondir, no refs/
+    assert not (admin / "refs").exists() and (admin / "commondir").is_file()
+    assert git(wt, "status", "--porcelain") == ""  # git itself still accepts the worktree
+    ck = mod.checkout_dir(str(wt))
+    prefix = "GTAR=$(command -v gtar || command -v tar); "
+    cmd = prefix + mod.GITDIR_FMT.format(*map(mod.shquote, mod.gitdir_values(str(wt), ck))).replace("<DEST>", str(tmp_path / "dest"))
+    for shell in ("bash", "zsh"):
+        if shutil.which(shell) is None:
+            continue
+        shutil.rmtree(tmp_path / "dest", ignore_errors=True)
+        (tmp_path / "dest" / ck).mkdir(parents=True)
+        run = subprocess.run([shell, "-c", cmd], capture_output=True, text=True)
+        assert run.returncode == 0, (shell, run.stderr)
+        names = set(tarfile.open(tmp_path / "dest" / ck / "gitdir.tar").getnames())
+        assert "./HEAD" in names and "./commondir" in names
+        common = set(tarfile.open(tmp_path / "dest" / ck / "commondir.tar").getnames())
+        assert "./refs/heads/side" in common and any(n.startswith("./objects/") for n in common)
+    # a `.git` file naming a directory with a HEAD file but no objects, refs or commondir is not a git directory
+    fake = tmp_path / "fake"
+    (fake / "gd").mkdir(parents=True)
+    (fake / "gd" / "HEAD").write_text("ref: refs/heads/main\n")
+    (fake / ".git").write_text("gitdir: gd\n")
+    ck2 = mod.checkout_dir(str(fake))
+    bad = prefix + mod.GITDIR_FMT.format(*map(mod.shquote, mod.gitdir_values(str(fake), ck2))).replace("<DEST>", str(tmp_path / "dest2"))
+    (tmp_path / "dest2" / ck2).mkdir(parents=True)
+    run = subprocess.run(["bash", "-c", bad], capture_output=True, text=True)
+    assert run.returncode != 0 and "gitdir capture FAILED" in run.stderr
+    assert not list((tmp_path / "dest2" / ck2).iterdir())
+
+
+def test_modified_capture_archives_an_unmerged_binary_file_and_ignores_textconv(tmp_path):
+    """Codex pass 30 on PR 27: an unresolved binary conflict's worktree bytes are in neither patch (`Binary files
+    differ` / `* Unmerged path`), and an attribute-selected textconv turned a changed binary file into an empty
+    patch. The row now archives every changed worktree file with the index and diffs with `--no-textconv`."""
+    import tarfile
+    mod = load_doc()
+    repo = make_repo(tmp_path / "w")
+    (repo / "b.bin").write_bytes(b"\x00A\n")
+    (repo / "c.bin").write_bytes(b"\x00C0\n")
+    git(repo, "add", "b.bin", "c.bin")
+    git(repo, "commit", "-m", "binaries")
+    git(repo, "checkout", "-b", "side")
+    (repo / "b.bin").write_bytes(b"\x00B\n")
+    git(repo, "commit", "-am", "side")
+    git(repo, "checkout", "main")
+    (repo / "b.bin").write_bytes(b"\x00M\n")
+    git(repo, "commit", "-am", "main")
+    merge = subprocess.run(["git", "merge", "side"], cwd=repo, env=GIT_ENV, capture_output=True, text=True)
+    assert merge.returncode != 0 and "UU b.bin" in git(repo, "status", "--porcelain")
+    (repo / "b.bin").write_bytes(b"\x00RESOLVED\n")  # a resolution typed into the worktree, not yet added
+    (repo / "c.bin").write_bytes(b"\x00C1\n")
+    git(repo, "config", "diff.const.textconv", "echo constant;true")
+    (repo / ".gitattributes").write_text("*.bin diff=const\n")
+    ck = mod.checkout_dir(str(repo))
+    prefix = "GTAR=$(command -v gtar || command -v tar); GCP=$(command -v gcp || command -v cp); "
+    cmd = prefix + mod.modified_fmt().format(*map(mod.shquote, mod.modified_values(str(repo), ck))).replace("<DEST>", str(tmp_path / "dest"))
+    for shell in ("bash", "zsh"):
+        if shutil.which(shell) is None:
+            continue
+        shutil.rmtree(tmp_path / "dest", ignore_errors=True)
+        run = subprocess.run([shell, "-c", cmd], capture_output=True, text=True)
+        assert run.returncode == 0, (shell, run.stderr)
+        dest = tmp_path / "dest" / ck
+        assert "GIT binary patch" in (dest / "modified.patch").read_text()  # c.bin's bytes, textconv ignored
+        tar = tarfile.open(dest / "modified.tar")
+        names = set(tar.getnames())
+        assert {"modified.list", "b.bin", "c.bin"} <= names
+        assert tar.extractfile("b.bin").read() == b"\x00RESOLVED\n" and tar.extractfile("c.bin").read() == b"\x00C1\n"
+        assert (dest / "index").stat().st_size > 0 and (dest / "staged.patch").exists()
+    # a worktree deletion has no bytes to keep and must not fail the archive; an all-deletions list still archives
+    (repo / "c.bin").unlink()
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    assert "b.bin" in tarfile.open(tmp_path / "dest" / ck / "modified.tar").getnames()
+
+
 def test_a_cow_pasture_gets_its_own_patch_and_archive_rows():
     """Codex pass 24 on PR 27: a path containing `djbclark-ade` or `forgejo-ci-2026-10` used to get "preserved in the
     primary checkout" with no command, and the phase0-scan pasture no row at all; names prove nothing."""
@@ -2271,7 +2373,7 @@ def test_a_cow_pasture_gets_its_own_patch_and_archive_rows():
     assert len(rows) == 3
     for row in rows:
         assert "preserve once there" not in row and "preserved there" not in row
-        assert "diff --binary > <DEST>/checkouts/abs" in row and "untracked.tar" in row
+        assert "diff --no-ext-diff --no-textconv --no-color --binary > <DEST>/checkouts/abs" in row and "untracked.tar" in row
 
 
 def test_a_checkout_named_one_offs_hermes_gets_its_own_bundle_row():

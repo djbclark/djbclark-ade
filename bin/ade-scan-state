@@ -693,12 +693,19 @@ def url_holds_credential(url: str) -> bool:
     (`https://<token>@github.com/x` is how a token is used as the username; adversary round 22) and so does
     a query string (`?private_token=...`) or a fragment (`#token=...`, Codex pass 27; on the scp-like and
     `<transport>::` forms, which are not parsed, a bare `?` or `#` counts too: the safe direction, round 33); a `<transport>::<address>` prefix names a helper that gets the whole
-    address in argv, so any `@` or `?` in it counts, whatever its scheme. An unparsable authority is read by hand."""
+    address in argv, so any `@` or `?` in it counts, whatever its scheme. An unparsable authority is read by hand.
+    A percent-encoded separator or control character (`%3F`, `%23`, `%40`, `%3A`, `%0A`, ...) counts on every form:
+    git decodes it before the value reaches the helper or ssh (Cursor security review, 2026-10-20)."""
     # `<transport>::<address>` names a remote helper for an arbitrary address (`https::https://t@host`): git
     # splits at the FIRST `::` and hands everything after it to git-remote-<transport> as one argument, so a
     # second prefix or an ssh-looking inner scheme changes nothing (rounds 23 and 24): no parsing, any `@` or `?`
     if any(ord(ch) < 0x20 or ch == "\x7f" for ch in url):
         return True  # a newline or other control character: git passes the value on whole (Codex pass 28)
+    if re.search(r"%(?:[01][0-9A-Fa-f]|7[Ff]|3[Ff]|23|40|3[Aa])", url):
+        # a percent-encoded `?`, `#`, `@`, `:` or control character: git decodes the path on the transport side,
+        # so `ssh://git@host/repo%3Ftoken=x` still becomes `git-upload-pack '/repo?token=x'` in ssh's argv and
+        # an encoded https query reaches git-remote-https (Cursor security review on PR 27, 2026-10-20)
+        return True
     head, sep, rest = url.partition("::")
     if sep and head and re.fullmatch(r"[A-Za-z0-9+.-]+", head):
         return "@" in rest or "?" in rest or "#" in rest

@@ -40,8 +40,48 @@ SUBMODULES_FLAG = "submodules not inspected"  # same: no count above covers a su
 # "every stash saved" (Codex pass 23 on PR 27); an empty list is a failure too, since this row exists only when the
 # scan saw a stash. `$(printf '%s\n' "$l")`, not a bare `$l`: zsh does not word-split a parameter expansion, it
 # does split a command substitution.
+# `--no-ext-diff --no-textconv --no-color`: a configured external diff driver, textconv filter or `color.ui=always`
+# would replace the bytes a patch is meant to keep (an attribute-selected textconv turned a changed binary file
+# into an empty patch; Codex pass 30 on PR 27); `--binary` keeps a binary file's content (pass 21)
+DIFF_OPTS = "diff --no-ext-diff --no-textconv --no-color --binary"
 STASH_FMT = ("mkdir -p <DEST>/{} && ( l=$(git -C {} log -g --format=%gd refs/stash) && [ -n \"$l\" ] && for r in $(printf '%s\\n' \"$l\"); do "
-             "git -C {} stash show -p --binary --include-untracked \"$r\" > <DEST>/{}/stash${{r//[^0-9]/}}.patch || exit 1; done )")
+             "git -C {} stash show -p --no-ext-diff --no-textconv --no-color --binary --include-untracked \"$r\" > <DEST>/{}/stash${{r//[^0-9]/}}.patch || exit 1; done )")
+# a `.git` FILE's target (a linked worktree's admin directory, an absorbed submodule's git dir) and its common
+# directory, archived only when they are git directories by git's own test (`HEAD` here; `objects` and `refs` in
+# the common directory, which is `$g` itself unless `commondir` names another; a linked worktree made before git
+# 2.44 has no `refs/` of its own); every failure is loud. The parse follows git's gitfile reader (round 32).
+GITDIR_FMT = ("if [ -f {}/.git ]; then {{ {{ IFS= read -r l || [ -n \"$l\" ]; }} < {}/.git "
+              "&& case \"$l\" in \"gitdir: \"*) g=${{l#gitdir: }}; g=${{g%$'\\r'}} ;; *) false ;; esac "
+              "&& [ -n \"$g\" ] && case \"$g\" in /*) ;; *) g={}/$g ;; esac "
+              "&& [ -f \"$g/HEAD\" ] && {{ [ -f \"$g/commondir\" ] || {{ [ -d \"$g/objects\" ] && [ -d \"$g/refs\" ]; }}; }} "
+              "&& \"$GTAR\" -C \"$g\" -cf <DEST>/{} . "
+              "&& if [ -f \"$g/commondir\" ]; then {{ IFS= read -r c || [ -n \"$c\" ]; }} < \"$g/commondir\" "
+              "&& c=${{c%$'\\r'}} && case \"$c\" in /*) ;; *) c=\"$g/$c\" ;; esac "
+              "&& [ -d \"$c/objects\" ] && [ -d \"$c/refs\" ] && \"$GTAR\" -C \"$c\" -cf <DEST>/{} .; fi; }} "
+              "|| {{ echo 'gitdir capture FAILED' >&2; false; }}; fi")
+
+
+def gitdir_values(raw_p, ck):
+    return (raw_p, raw_p, raw_p, f"{ck}/gitdir.tar", f"{ck}/commondir.tar")
+
+
+def modified_fmt(sub=""):
+    """The modified-files capture for one checkout (`sub` is `/<sub>` on a submodule row): a worktree patch and an
+    index patch (DIFF_OPTS), then an archive of every changed worktree file with its manifest, and a copy of the
+    index file. An unmerged entry's bytes are in no patch (`git diff` prints `Binary files differ` or `* Unmerged
+    path` for it), so the files themselves are archived too (Codex pass 30 on PR 27): `ls-files --modified` lists
+    every tracked path whose worktree differs from the index (unmerged ones included), `diff --cached --diff-filter=d`
+    every staged path still present; a path deleted from the worktree has no bytes to keep (`--ignore-failed-read`),
+    and the archive always holds `modified.list` so an all-deletions list never makes gtar refuse an empty archive."""
+    w, d = "git -C {}" + sub, "<DEST>/{}" + sub
+    return (f"mkdir -p {d} && {w} {DIFF_OPTS} > {d}/modified.patch && {w} {DIFF_OPTS} --cached > {d}/staged.patch "
+            f"&& {w} ls-files -z --modified > {d}/modified.list && {w} diff --cached -z --name-only --diff-filter=d >> {d}/modified.list "
+            f"&& \"$GTAR\" -cf {d}/modified.tar -C {d} modified.list -C {{}}{sub} --null --ignore-failed-read -T {d}/modified.list "
+            f"&& \"$GCP\" -- \"$({w} rev-parse --absolute-git-dir)/index\" {d}/index")
+
+
+def modified_values(raw_p, ck):
+    return (ck, raw_p, ck, raw_p, ck, raw_p, ck, raw_p, ck, ck, ck, raw_p, ck, raw_p, ck)
 
 
 def stash_values(raw_p, ck):
@@ -423,18 +463,11 @@ def render(d):
             # (anything else is `false`), a missing final newline is accepted (`read` returns 1 at EOF, `$l` is
             # set), a CRLF is stripped; every failure prints a message and leaves a nonzero status. `-C "$g" ... .`
             # archives the directory's contents without gtar's "Removing leading ../" when commondir is `../..`.
-            # Only a git directory is archived (`HEAD` in it, `objects` in the common one; git's own test): a
-            # `.git` file naming `/` or a home directory must not make the paste copy the disk (round 33)
-            gitdir = shcode("if [ -f {}/.git ]; then {{ {{ IFS= read -r l || [ -n \"$l\" ]; }} < {}/.git "
-                            "&& case \"$l\" in \"gitdir: \"*) g=${{l#gitdir: }}; g=${{g%$'\\r'}} ;; *) false ;; esac "
-                            "&& [ -n \"$g\" ] && case \"$g\" in /*) ;; *) g={}/$g ;; esac "
-                            "&& [ -f \"$g/HEAD\" ] && [ -d \"$g/refs\" ] && {{ [ -d \"$g/objects\" ] || [ -f \"$g/commondir\" ]; }} "
-                            "&& \"$GTAR\" -C \"$g\" -cf <DEST>/{} . "
-                            "&& if [ -f \"$g/commondir\" ]; then {{ IFS= read -r c || [ -n \"$c\" ]; }} < \"$g/commondir\" "
-                            "&& c=${{c%$'\\r'}} && case \"$c\" in /*) ;; *) c=\"$g/$c\" ;; esac "
-                            "&& [ -d \"$c/objects\" ] && \"$GTAR\" -C \"$c\" -cf <DEST>/{} .; fi; }} "
-                            "|| {{ echo 'gitdir capture FAILED' >&2; false; }}; fi",
-                            raw_p, raw_p, raw_p, f"{ck}/gitdir.tar", f"{ck}/commondir.tar")
+            # Only a git directory is archived, by git's own `is_git_directory` test: `HEAD` in it, `objects` and
+            # `refs` in the COMMON directory, so a linked worktree's own directory (`HEAD` and `commondir` only,
+            # before git 2.44) passes; a `.git` file naming `/` or a home directory must not make the paste copy
+            # the disk (rounds 33 and 35, Codex pass 30). The command text is GITDIR_FMT, run live by the tests
+            gitdir = shcode(GITDIR_FMT, *gitdir_values(raw_p, ck))
             w(f"| {p} | counts unknown ({esc(c['verdict'])}) | re-scan once the cause is fixed, or archive the whole "
               f"directory: {shcode('mkdir -p <DEST>/{} && \"$GTAR\" -C {} -cf <DEST>/{} -- {}', ck, parent or '/', f'{ck}/whole.tar', base)}"
               " (no git command: the scan did not run one there either); when `.git` is a file the directory it "
@@ -516,8 +549,8 @@ def render(d):
             # `--binary` keeps a changed binary file's bytes, a plain diff says only "Binary files differ" (pass 21).
             # Every checkout gets its own patch: that a path names a cow pasture of another checkout proves nothing
             # about its content (Codex pass 24; the generator used to infer "preserved in the primary" from the name)
-            cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} diff --binary > <DEST>/{} && git -C {} diff --binary --cached > <DEST>/{}",
-                              ck, raw_p, f"{ck}/modified.patch", raw_p, f"{ck}/staged.patch"))
+            # (Codex pass 30: `--no-textconv` and friends, and an archive of the changed files: see `modified_fmt`)
+            cmd.append(shcode(modified_fmt(), *modified_values(raw_p, ck)))
             need = need if need != "no" else "yes: decide whether they are work"
         if stashes:
             what.append(f"{stashes} stash" + ("es" if stashes > 1 else ""))
@@ -566,8 +599,7 @@ def render(d):
                                 ck, raw_p, ck)
                        # a bundle holds committed objects only: the modified, staged and untracked files need the
                        # same patches and archive as an ordinary checkout (Codex pass 26 on PR 27)
-                       + ", " + shcode("git -C {}/<sub> diff --binary > <DEST>/{}/<sub>/modified.patch && git -C {}/<sub> diff --binary --cached > <DEST>/{}/<sub>/staged.patch",
-                                       raw_p, ck, raw_p, ck)
+                       + ", " + shcode(modified_fmt("/<sub>"), *modified_values(raw_p, ck))
                        + " and " + shcode("git -C {}/<sub> ls-files -z --others --exclude-standard > <DEST>/{}/<sub>/untracked.list "
                                           "&& \"$GTAR\" -C {}/<sub> --null -T <DEST>/{}/<sub>/untracked.list -cf <DEST>/{}/<sub>/untracked.tar",
                                           raw_p, ck, raw_p, ck, ck)
