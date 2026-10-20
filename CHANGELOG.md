@@ -54,7 +54,7 @@ agent what changed and what is new. Entries end with the pull request number.
   footer template, so a constraint a lead added to or edited in a pasted footer is kept; a `-f` file that is
   only a footer is refused ("no task is left"); the preflight probe and the slice's waiter deadline allow for
   acp-run's binary wait plus its settle polls (`bin_poll_seconds`); a probe that finds an agent not installed
-  is remembered for 120 s; `check` gives an `auth` stop the login hint, not `--escalate` (#PR).
+  is remembered for 120 s; `check` gives an `auth` stop the login hint, not `--escalate` (#22).
 - `tests/conftest.py` pins `ROUTE_AGENT_OMP_READY=0`, so the route_agent suite passes on a host with
   an omp login as it does on CI; the omp-ready roster has its own tests (queue item 6) (#17).
 - `acp-dispatch`: an unmeasured (stale) quota window is skipped instead of crashing the dispatch
