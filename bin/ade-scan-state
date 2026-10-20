@@ -1007,6 +1007,13 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
                     local_only_tags.append({"tag": name, "count": n})
             branches_uncounted = (max(len(names) - MAX_BRANCH_COUNTS, 0)
                                   + max(len(tag_names) - tag_budget, 0))
+    if live and on_origin is False and ahead_of_origin and not unborn:
+        # the branch is not on origin but its commits may be, under a live tag or a branch with no local tracking
+        # ref: count HEAD against the live tips, like the local-only count, before calling it an orphan (Codex pass 19)
+        n, rc = local_only_count(path, ["HEAD"], tips, live, has_origin)
+        if n is None:
+            return incomplete_record(path, "rev-list --count HEAD --not <live tips>", rc)
+        ahead_of_origin = n
     flags = []
     if unpushed or (on_origin and (ahead_of_origin or 0) > 0):
         flags.append("unpushed commits")  # includes a branch on origin with no upstream set

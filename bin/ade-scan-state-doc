@@ -399,7 +399,13 @@ def render(d):
         if c["path"].endswith("/djbclark-ade/phase0-scan"):
             continue  # this slice's own pasture: its dirt is the files this slice is writing
         if c["verdict"].startswith(("skipped", "scan incomplete")):
-            continue  # no counts (null): listed in the section 2 table with their verdict, nothing to capture
+            # no counts (null): anything may be in there, so the row demands a re-scan or a whole-directory archive,
+            # never "nothing to capture" (Codex pass 19 on PR 27); no git command runs in a checkout the scan refused
+            parent, base = os.path.split(raw_p.rstrip("/"))
+            w(f"| {p} | counts unknown ({esc(c['verdict'])}) | re-scan once the cause is fixed, or archive the whole "
+              f"directory: {shcode('mkdir -p <DEST>/{} && \"$GTAR\" -C {} -cf <DEST>/{} {}', ck, parent or '/', f'{ck}/whole.tar', base)}"
+              " (no git command: the scan did not run one there either) | yes: counts unknown; re-scan or archive whole |")
+            continue
         untr = [u for u in (c.get("untracked_sample") or []) if u != "graft/"]
         real_untr = num(c["untracked"]) - (1 if "graft/" in (c.get("untracked_sample") or []) else 0)
         modified, stashes, local_n = num(c["modified"]), num(c["stashes"]), num(c.get("local_only_commits"))
@@ -530,8 +536,9 @@ def render(d):
         w(f"| {p} | {'; '.join(what)} | {'; '.join(cmd)} | {need} |")
     w("")
     w("Checkouts not listed are `clean and pushed` (branch on origin or no commits origin lacks, HEAD only; "
-      "see limit 9), hold only the reproducible `graft/` index, or are `skipped` / `scan incomplete` "
-      "(no counts: see their verdict in the section 2 table). A checkout flagged `origin unreachable` is "
+      "see limit 9) or hold only the reproducible `graft/` index. A `skipped` / `scan incomplete` checkout has "
+      "no counts (its verdict is in the section 2 table) and is listed with a whole-directory archive: anything "
+      "may be in there. A checkout flagged `origin unreachable` is "
       "always listed, whatever its counts: its local-only count came from stale tracking refs and is "
       "unverified, so a 0 there is not `clean and pushed`. A checkout flagged `submodules not inspected` is "
       "always listed too: no count here covers a submodule's content.\n")

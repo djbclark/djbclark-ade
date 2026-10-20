@@ -704,6 +704,23 @@ def test_origin_tips_from_ls_remote_are_not_local_only(tmp_path):
     assert c["verdict"] == "clean and pushed" and c["local_only_commits"] == 0, c["flags"]
 
 
+def test_remote_scan_does_not_call_a_branch_preserved_by_a_live_tag_an_orphan(tmp_path):
+    """Codex pass 19 on PR 27, P2: HEAD pushed only as an origin tag; the branch is not on origin, the local
+    tracking refs hold nothing, so `ahead_of_origin` said 1 and the verdict was `orphan branch` while the
+    live count was a verified 0 (the plan then asked for a needless branch push)."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    git(work, "checkout", "-b", "kept")
+    commit_file(work, "k.txt")
+    git(work, "push", "origin", "HEAD:refs/tags/kept-tag")
+    c = scan_one(mod, roots)  # no live answer: the local refs/remotes/origin/* do not hold the tag
+    assert c["verdict"] == "orphan branch" and c["ahead_of_origin"] == 1
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True)
+    assert c["ahead_of_origin"] == 0 and c["local_only_commits"] == 0 and c["local_only_verified"] is True
+    assert c["on_origin"] is False and "orphan branch" not in c["flags"], c
+
+
 def test_remote_scan_trusts_live_tips_over_a_stale_tracking_ref(tmp_path):
     """Codex pass 9 (4324741577): a branch deleted on origin keeps its `refs/remotes/origin/x`; with --remote
     its commits are local-only, without it the stale ref still hides them (the documented caveat)."""
@@ -1151,7 +1168,14 @@ def test_doc_generator_survives_skipped_and_incomplete_records():
             "reference_search": "incomplete: rc=2"}
     text = mod.render(doc_scan([skipped, broken], [task], skipped=1, incomplete=1))
     assert "| /p/skipped |" in text and "| /p/broken |" in text  # listed in the section 2 table
-    assert "/p/skipped" not in section_3_2(text) and "/p/broken" not in section_3_2(text)
+    rows = section_3_2(text).splitlines()  # Codex pass 19, P1: no counts is not "nothing to capture"
+    for path_, verdict in (("/p/skipped", "skipped: worktree redirected"), ("/p/broken", "scan incomplete: status rc=124")):
+        row = next(r for r in rows if r.startswith(f"| {path_} "))
+        assert f"counts unknown ({verdict})" in row and "re-scan once the cause is fixed" in row
+        assert f"\"$GTAR\" -C /p -cf <DEST>/checkouts/abs{path_}/whole.tar {path_.rsplit('/', 1)[1]}" in row
+        assert "git" not in row.split("| re-scan")[1].split("(no git command")[0]
+        assert row.rstrip().endswith("| yes: counts unknown; re-scan or archive whole |")
+    assert "is listed with a whole-directory archive" in section_3_2(text)
     assert "t-incomplete" in text.split("### 1.3")[1].split("## 2.")[0]
     assert "reference search failed" in text and "never `unique`, `mixed` or `scratch`" in text
 
