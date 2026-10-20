@@ -363,6 +363,8 @@ def check_claude_links(repo, upstream_rev=None):
                     ok += 1
                     continue
                 ln = shlex.join(["ln", "-sfn", str(src), str(dest)])
+                if not (home / kind).is_dir():  # a fresh machine: ln does not create the parent (Codex pass 10)
+                    ln = shlex.join(["mkdir", "-p", str(home / kind)]) + " && " + ln
                 fix = ln
                 if dest.is_symlink():
                     state = "dangling" if not dest.exists() else f"points to {os.readlink(dest)}"
@@ -505,7 +507,11 @@ def update(rep, args, repo):
             # `up` is the commit the collision check covered; no second fetch, so a newer upstream commit with
             # unchecked paths is never brought in (the next run fetches and checks it)
             rc, out, err = git(repo, "merge", "--ff-only", up, timeout=MERGE_TIMEOUT)
-            if rc != 0:
+            if rc != 0 and git_out(repo, "rev-parse", "HEAD") == up:
+                # the fast-forward itself landed; a post-merge hook timed out or failed afterwards (Codex pass 10)
+                rep.say(f"  fast-forward applied, then git exited {rc} (a post-merge hook?): {(err or out).strip()[:300]}")
+                d["merge_warning"] = (err or out).strip()[:300]
+            elif rc != 0:
                 raise Stop(pull_failure_code(err or out),
                            f"git merge --ff-only {short(up)} failed; nothing merged or reset:\n{(err or out).strip()}")
             d["pulled"] = True

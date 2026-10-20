@@ -259,7 +259,7 @@ def test_missing_claude_link_is_reported_with_the_fix(env):
     assert r.returncode == 10
     (problem,) = out["claude_links"]["problems"]
     assert problem["path"] == str(env.home / ".claude" / "commands" / "demo.md")
-    assert problem["fix"].startswith("ln -sfn ")
+    assert problem["fix"].startswith("mkdir -p ") and " && ln -sfn " in problem["fix"]  # no ~/.claude/commands yet
     # linking it makes the check pass
     dest = env.home / ".claude" / "commands" / "demo.md"
     dest.parent.mkdir(parents=True)
@@ -919,3 +919,44 @@ def test_apply_pulls_first_so_the_new_claude_entry_is_a_reported_problem_not_new
     (problem,) = out["claude_links"]["problems"]  # ade-update never links ~/.claude entries itself
     assert problem["path"] == str(env.home / ".claude" / "commands" / "newcmd.md") and problem["state"] == "missing"
     assert r.returncode == 10 and "~/.claude links" in out["problems"]
+
+
+def test_symlink_fix_without_a_parent_directory_starts_with_mkdir(env):  # Codex P2 on ffad15a
+    env.publish({"claude/commands/demo.md": "demo\n"})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    (env.home / ".claude" / "commands").mkdir(parents=True)
+    r = env.run("--check", "--json")
+    (problem,) = json.loads(r.stdout)["claude_links"]["problems"]
+    assert problem["fix"].startswith("ln -sfn ")  # the parent exists: no mkdir
+    shutil.rmtree(env.home / ".claude" / "commands")
+    r = env.run("--check", "--json")
+    (problem,) = json.loads(r.stdout)["claude_links"]["problems"]
+    assert problem["fix"] == shlex.join(["mkdir", "-p", str(env.home / ".claude" / "commands")]) + " && " + shlex.join(
+        ["ln", "-sfn", str(env.machine / "claude" / "commands" / "demo.md"), str(env.home / ".claude" / "commands" / "demo.md")])
+
+
+def test_a_fast_forward_that_landed_before_git_timed_out_still_counts_as_applied(env, monkeypatch, capsys):
+    # Codex P2 on ffad15a: a post-merge hook longer than MERGE_TIMEOUT makes run() return 124 AFTER HEAD moved
+    # (git ignores the hook's own exit status, so only a timeout can produce this). Run in-process so the merge
+    # call can be wrapped: the real merge happens, then the wrapper reports the timeout.
+    mod = load_module()
+    real_run = mod.run
+
+    def run_then_time_out(argv, **kw):
+        rc, out, err = real_run(argv, **kw)
+        if "merge" in argv:
+            return 124, out, f"timed out after {kw.get('timeout')}s: {shlex.join(argv)}"
+        return rc, out, err
+
+    monkeypatch.setattr(mod, "run", run_then_time_out)
+    for k, v in dict(HOME=str(env.home), PATH=f"{env.bin}{os.pathsep}{os.environ['PATH']}",
+                     FAKE_SE_STATE=str(env.se_state), FAKE_SE_LOG=str(env.se_log),
+                     SKILL_EVERYWHERE_ADE=str(env.machine / "skills")).items():
+        monkeypatch.setenv(k, v)
+    new = env.publish()
+    rc = mod.main(["--repo", str(env.machine), "--state", str(env.state), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert env.head(env.machine) == new
+    assert out["pulled"] is True and "timed out" in out["merge_warning"]
+    assert out["head_after"] == new
+    assert rc in (0, 10)
