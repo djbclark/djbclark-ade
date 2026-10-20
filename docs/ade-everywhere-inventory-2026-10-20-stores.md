@@ -98,6 +98,12 @@ session-bearing item found (`fd … -x stat -f '%m %N' | sort -rn | head -1`) or
 `~/.local/state/ade/backups/<UTC>/` with a `MANIFEST.json` (sha256 per file, exclusions, errors) and the Hermes export
 (`hermes-export/`; sessions above `max_export_messages` are listed in the manifest, not exported, and are whole in the
 `hermes-state/` copy). Config-only rows (section 2 rows of class config) are not copied by it.
+The tool scrubs OpenCode's credential tables from the copy and refuses (as an error entry, the copy is dropped)
+any backed-up database with another credential-looking table or column name (`--check-schemas`, 2026-10-20: 0
+unexplained across all live databases; 20 token-metric, account-id and lease-marker names are allowlisted with
+reasons in the script). Opening a source `mode=ro` can create zero-length `-wal`/`-shm` files beside a quiet database; no
+data in a source changes. Transcript content is copied as it is and can hold pasted secrets: a generation is
+secret-bearing.
 
 **Two rules for slice 2 (adversary review, 2026-10-20).** (a) Every path in section 5 item 5 is excluded from
 every backup generation: a backup that carries a live key or account blob puts the credential in more places
@@ -204,6 +210,12 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
    `~/.gemini/antigravity-acp/acp_token.json`, `~/.hermes/.env`, `~/.cline/data/settings/providers.json`,
    `~/.omp/agent/agent.db` (`auth_credential_blocks` table), `~/.local/share/crush/hyper.json`,
    `~/.copilot/data.db` (`accounts`), Orca `Cookies` (Electron dir), `~/.orca/jira-tokens/`, `~/.orca/jira-sites.json`,
+   the credential tables inside `~/.local/share/opencode/opencode.db` (not only `auth.json`; found by the adversary
+   review of `bin/ade-backup-stores`, 2026-10-20: `credential` held 4 rows with API keys and an OAuth refresh/access
+   token; `account`, `control_account` (`access_token`, `refresh_token`, `token_expiry`) and `account_state` were
+   empty, `session_share.secret` was empty), scrubbed from the backup copy rather than excluded as a file,
+   `mcp-auth.json` under `~/.cursor/projects/<slug>/` (68 files on 2026-10-20: MCP dynamic-client-registration
+   records, 36 of them with a non-empty `client_secret`; the 12 `mcp_auth.json` files are tool descriptors and are copied),
    and the three MCP configs that hold plaintext Jina and Exa keys (skills/fallback-chains/references/web-access.md
    5.3 and 5.6.2) with every dated `.bak` copy beside them (3-5 each, 2026-10-12 to 10-18, same keys):
    `~/.config/opencode/opencode.json`, `opencode.json.bak*` and `opencode.bak` (not `opencode.jsonc`, which row 2

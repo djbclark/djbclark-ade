@@ -12,8 +12,13 @@ agent what changed and what is new. Entries end with the pull request number.
 ### Added
 
 - `bin/ade-backup-stores`: Phase 0 backups, a SQLite online-backup copy of every live agent session database, the
-  per-session trees and file stores (credential paths, the `credential-bak` vault and symlinks excluded) and the
-  Hermes JSONL export, with a hashed `MANIFEST.json`; `--dry-run`, `--only`, `--json` (#TBD).
+  per-session trees and file stores and the Hermes JSONL export (run against a scratch copy of the Hermes
+  database), with a hashed `MANIFEST.json`, built in `<dest>.part/` and renamed when complete; `--dry-run`,
+  `--only`, `--json`, `--check-schemas`. Credential file names and paths (inventory 5.5, plus `mcp-auth.json`),
+  the `credential-bak` vault and symlinks are not copied, OpenCode's credential tables are scrubbed from its
+  database copy, and a schema guard fails the run on any other credential-looking table or column; session
+  transcripts are copied as they are and can hold pasted secrets. Refuses a destination that exists, holds
+  a source store or sits inside one (#TBD).
 - `docs/ade-everywhere-inventory-2026-10-20-stores.md`: Phase 0 slice 1, every installed agent
   session store classified (52 stores, backup plan per store, differences from proposal §6.1) (#16).
 - `CHANGELOG.md`, this file, and the rule that every pull request adds a line to it; README

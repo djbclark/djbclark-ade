@@ -112,7 +112,9 @@ when they ship (into the relevant doc) or when they're dropped (say why).
 
 1. **Backups: done 2026-10-20 (PR #TBD).** `bin/ade-backup-stores` takes the `.backup`-API copy of every live session
    database, the per-session trees and file stores of inventory section 3, and the Hermes JSONL export, into
-   `~/.local/state/ade/backups/<UTC>/` with a `MANIFEST.json`. Nothing is deleted from any store. Open: run it on a
+   `~/.local/state/ade/backups/<UTC>/` with a `MANIFEST.json`. Nothing is deleted from any store. The first real
+   generation, `20261020T081802Z`, predates the credential scrub: it holds OpenCode's `credential` rows and 68 Cursor
+   `mcp-auth.json` files, so the operator scrubs or deletes it and takes a new one. Open: run it on a
    schedule (no launchd job yet), and decide how long generations are kept; each is ~10 GB.
 
 ## Keep every machine current, and a changelog (djbclark, 2026-10-20; proposal Q26, T8)
