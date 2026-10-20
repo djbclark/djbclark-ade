@@ -15,6 +15,14 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    parameters stay in the `set-credits` override, a launchd/`fleet-watch` job refreshes it (never a model prompt,
    home rule 13). Blocked on the key.
 
+3. **Load gate follow-ups** (adversary final pass on PR 7, 2026-10-20, informational): (a) on `--detach
+   --no-wait` a missing `ACP_DISPATCH_LOAD_WATCH` is only visible in the runner log and the record; warn at
+   dispatch and have `check` mention `load_gate.error`; (b) resolving symlinks stores a Homebrew override as its
+   versioned Cellar path, so a `brew upgrade` during the wait makes the runner start without the gate (store the
+   unresolved absolute path, resolve at run time); (c) exit 0 is trusted over the JSON `status`, so a wrapper that
+   exits 0 while printing "hot" is admitted. Deferred by design from the same review: a machine-wide admission
+   token (N3) and recording `ACP_DISPATCH_LOAD_WATCH`/`ACP_DISPATCH_STATE` for the runner beyond the cap (N5/I1).
+
 ## Cloud-agent readiness: Codex Cloud environment, Cursor API key (ruling 2026-10-19)
 
 `docs/ade-everywhere-proposal.md` §11.5 rules that paid-for cloud agents are used first for
