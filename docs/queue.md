@@ -26,6 +26,19 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    unresolved absolute path, resolve at run time); (c) exit 0 is trusted over the JSON `status`, so a wrapper that
    exits 0 while printing "hot" is admitted. Deferred by design from the same review: a machine-wide admission
    token (N3) and recording `ACP_DISPATCH_LOAD_WATCH`/`ACP_DISPATCH_STATE` for the runner beyond the cap (N5/I1).
+4. **`cursor-cloud` place in `acp-dispatch`, not done in the first slice** (adversary APPROVE on 270a7f5,
+   2026-10-20, shipped on condition that this entry exists): (a) no reboot auto-resume for cloud records: the
+   login sweep skips them, the SIGTERM report names the agent and the `acp-dispatch resume RECORD` to run;
+   (b) no cancel on timeout or ERROR: Cursor's API has `POST /v1/agents/{id}/runs/{runId}/cancel`, only
+   `bin/cursor-cloud` lacks a `cancel` subcommand; add it and call it from the poller, until then a timed-out run
+   spends until Cursor ends it; (c) the 24 h poll cap (`CLOUD_MAX_SECONDS`) is read, not unit-tested; (d) nothing
+   ran against the live API: watch the first live slice and record its in-progress run status and whether
+   `git.branches[].branch` is filled in. Lows from the same review: (R1) the result-text branch step matches
+   `.cursor/...` paths (`BRANCH: cursor/rules/foo.mdc`) and never checks the name against origin; keep only names
+   in `git ls-remote` and tighten the regex to `(?<![./\w])cursor/`; (R2) `CLOUD_ACTIVE` is a guessed status list,
+   so a healthy run longer than 20 polls can end as ERROR; treat any non-terminal status as active, bounded by
+   the deadline, and record the raw status; (R3, info) the ls-remote fallback runs `git fetch` in the operator's
+   checkout from the poller and from `check`/`reap`.
 
 ## Cloud-agent readiness: Codex Cloud environment, Cursor API key (ruling 2026-10-19)
 
