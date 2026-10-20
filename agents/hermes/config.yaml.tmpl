@@ -1,0 +1,388 @@
+# Template of ~/.hermes/config.yaml (Phase 0 item 4.4, 2026-10-20). See agents/README.md for every
+# placeholder (dotted fields and secret calls). ${NAME} values are Hermes's own references to ~/.hermes/.env
+# and stay as they are.
+model:
+  provider: xai-oauth
+  default: grok-4.7
+providers:
+  sipb-llms:
+    # via the local sipb-llms-proxy (launchd land.charm.sipb-llms-proxy, 127.0.0.1:8890): fixes
+    # finish_reason on tool calls, retries, per-model queue, latency log. Upstream is {{ .sipb_llm_upstream_host }}.
+    base_url: http://127.0.0.1:8890/api
+    api_key_env: MIT_SIPB_API_KEY
+    api_key: ${MIT_SIPB_API_KEY}
+    api_mode: chat_completions
+    name: SIPB LLMs
+    discover_models: false
+    models:
+      - aya:35b
+      - aya:8b
+      - bespoke-minicheck:7b
+      - codegemma:7b
+      - deepseek-r1:32b
+      - deepseek-r1:14b
+      - deepseek-r1:8b
+      - deepseek-r1:7b
+      - deepseek-r1:1.5b
+      - devstral:24b
+      - exaone3.5:32b
+      - exaone-deep:32b
+      - gemma3:27b
+      - gemma3:12b
+      - gemma3:4b
+      - gemma3:1b
+      - gemma3n:e4b
+      - gemma3n:e2b
+      - gemma4:26b
+      - gemma4:e4b
+      - gemma4:e2b
+      - gpt-oss:20b
+      - granite3.2-vision:2b
+      - llava:34b
+      - llava:13b
+      - llava:7b
+      - magistral:24b
+      - mathstral:7b
+      - qwen3-coder:30b
+      - qwen3.5:35b
+      - qwen3.5:27b
+      - qwen3.5:9b
+      - qwen3.5:4b
+      - qwen3.5:2b
+      - qwen3.5:0.8b
+      - qwen3.6:35b-a3b-q4_K_M
+      - qwq:32b
+      - shieldgemma:9b
+      - solar:10.7b
+  cline:
+    api: https://api.cline.bot/api/v1
+    key_env: HERMES_CLINE_API_KEY
+    transport: chat_completions
+    name: Cline
+    default_model: cline-pass/deepseek-v4-flash
+    discover_models: false
+    models:
+      - cline-pass/kimi-k3
+      - cline-pass/kimi-k2.7-code
+      - cline-pass/kimi-k2.6
+      - cline-pass/deepseek-v4-pro
+      - cline-pass/deepseek-v4-flash
+      - cline-pass/glm-5.2
+      - cline-pass/mimo-v2.5-pro
+      - cline-pass/mimo-v2.5
+      - cline-pass/minimax-m3
+      - cline-pass/qwen3.7-max
+      - cline-pass/qwen3.7-plus
+  litellm-local:
+    base_url: http://127.0.0.1:4000/v1
+    api_key: '{{ secret "TODO_LITELLM_HERMES_KEY" }}'
+    api_mode: chat_completions
+    name: LiteLLM Local (ClinePass proxy)
+    discover_models: false
+    models:
+      - grok-sub
+      - clinepass-deepseek
+      - clinepass-minimax-m3
+      - clinepass-kimi-k3
+      - cline2-pass/deepseek-v4-flash
+      - cline2-pass/deepseek-v4-pro
+      - cline2-pass/kimi-k3
+      - cline2-pass/minimax-m3
+      - cline2-pass/glm-5.2
+      - cline2-pass/mimo-v2.5-pro
+      - cline2-pass/mimo-v2.5
+      - cline2-pass/kimi-k2.7-code
+      - cline2-pass/kimi-k2.6
+      - cline2-pass/qwen3.7-max
+      - cline2-pass/qwen3.7-plus
+  cline2:
+    key_env: CLINE_PASS_KEY_2_TE
+    api: https://api.cline.bot/api/v1
+    transport: chat_completions
+    name: Cline 2
+    default_model: cline2-pass/deepseek-v4-flash
+    discover_models: false
+    models:
+      - cline2-pass/kimi-k3
+      - cline2-pass/kimi-k2.7-code
+      - cline2-pass/kimi-k2.6
+      - cline2-pass/deepseek-v4-pro
+      - cline2-pass/deepseek-v4-flash
+      - cline2-pass/glm-5.2
+      - cline2-pass/mimo-v2.5-pro
+      - cline2-pass/mimo-v2.5
+      - cline2-pass/minimax-m3
+      - cline2-pass/qwen3.7-max
+      - cline2-pass/qwen3.7-plus
+  grok-sub:
+    enabled: false
+  xai:
+    enabled: false
+fallback_providers:
+  - provider: litellm-local
+    model: gemini-free-lite
+  - provider: xai-oauth
+    model: grok-4.7
+  # grok-sub / xai-oauth removed 2026-10-06: operator excluded the grok vendor
+  # (SuperGrok) from use until the operator lifts it (bigteam skill, Current exclusions).
+agent:
+  verify_on_stop: false
+  reasoning_effort: medium
+web:
+  search_backend: firecrawl
+  extract_backend: exa
+  provider_tier:
+    exa: paid
+compression:
+  progress_notices: true
+  threshold: 0.4
+  threshold_tokens: 65000
+  target_ratio: 0.28
+  protect_last_n: 20
+  min_tail_user_messages: 3
+  proactive_prune_min_result_chars: 2500
+  proactive_prune_tokens: 48000
+  idle_compact_after_seconds: 900
+auxiliary:
+  compression:
+    provider: cline2
+    model: cline2-pass/deepseek-v4-flash
+    timeout: 300
+  background_review:
+    enabled: true
+    max_input_tokens: 250000
+display:
+  personality: technical
+  busy_input_mode: steer
+  pet:
+    enabled: false
+    slug: ''
+    scale: 0.33
+  tool_progress: all
+  message_reactions: true
+dashboard:
+  basic_auth:
+    username: '{{ .hermes_dashboard_user }}'
+    password_hash: '{{ secret "TODO_HERMES_DASHBOARD_PASSWORD_HASH" }}'
+    password: ''
+memory:
+  memory_char_limit: 5000
+  user_char_limit: 5000
+  nudge_interval: 10
+  provider: ''
+moa:
+  default_preset: default
+  presets:
+    default:
+      reference_models:
+        - provider: litellm-local
+          model: gemini-free-lite
+          enabled: true
+      degraded_reference_policy: loud
+      reference_cooldown_seconds: 600
+      fanout: user_turn
+      aggregator:
+        provider: litellm-local
+        model: gemini-free
+      enabled: true
+  reference_models:
+    - provider: litellm-local
+      model: gemini-free-lite
+      enabled: true
+  aggregator:
+    provider: litellm-local
+    model: gemini-free
+  reference_timeout: 30
+  degraded_reference_policy: loud
+  reference_cooldown_seconds: 600
+  max_tokens: 4096
+  fanout: user_turn
+  active_preset: default
+  enabled: true
+curator:
+  consolidate: true
+timezone: America/New_York
+approvals:
+  destructive_slash_confirm: false
+  timeout: 600
+  mode: "off"
+command_allowlist:
+  - git force push (rewrites remote history)
+  - docker compose restart/stop/kill/down (container lifecycle)
+  - shell execution via heredoc
+  - command parser limit or malformed executable payload
+  - overwrite system file via redirection
+  - copy/move file into system config path
+  - git branch force delete
+  - script execution via heredoc
+  - sudo with privilege flag (stdin/askpass/shell/list)
+  - delete in root path
+  - execute_code
+  - script execution via -e/-c flag
+  - shell command via -c/-lc flag
+  - recursive delete
+plugins:
+  enabled:
+    - gateway-restart
+    - orca-status
+    - memory-journal
+    - hindsight-memory
+    - disk-cleanup
+    - image-gen
+    - rl-training
+    - web-eval
+    - mcporter
+    - extra-body
+    - browser
+    - honcho-session-memory
+    - honcho
+    - honcho-recall
+    - basic-memory
+    - skill-slash
+  disabled:
+    - basic-memory
+  entries:
+    web/jina_reader:
+      allow_tool_override: false
+    herdr-agent-state:
+      allow_tool_override: false
+    moshi-hooks:
+      allow_tool_override: false
+hooks:
+  pre_llm_call:
+    - command: '{{ .home }}/.hermes/agent-hooks/graft-nudge.py'
+      timeout: 5
+gateway:
+  platforms:
+    telegram:
+      extra:
+        rich_messages_all: false
+        rich_messages: true
+    signal:
+      enabled: true
+      home_channel: '{{ .signal_account }}'
+      extra:
+        http_url: http://127.0.0.1:18765
+        account: '{{ .signal_account }}'
+onboarding:
+  seen:
+    busy_input_prompt: true
+    tool_progress_prompt: true
+    profile_build_offered: true
+lsp:
+  wait_timeout: 20
+  servers:
+    pyright:
+      command:
+        - /opt/homebrew/bin/basedpyright-langserver
+        - --stdio
+    typescript:
+      command:
+        - /opt/homebrew/bin/typescript-language-server
+        - --stdio
+      initialization_options:
+        tsserver:
+          path: '{{ .home }}/.hermes/lsp/node_modules/typescript/lib/tsserver.js'
+    gopls:
+      command:
+        - /opt/homebrew/bin/gopls
+    rust-analyzer:
+      command:
+        - /opt/homebrew/opt/rustup/bin/rust-analyzer
+_config_version: 50
+image_gen:
+  model: dall-e-3
+  provider: openai
+openai:
+  api_key: ${OPENAI_API_KEY}
+spotify:
+  client_id: ${SPOTIFY_CLIENT_ID}
+  client_secret: ${SPOTIFY_CLIENT_SECRET}
+mcp_servers:
+  fieldy:
+    url: https://api.fieldy.ai/mcp
+    connect_timeout: 60
+    auth: oauth
+    enabled: false
+  cloudflare:
+    url: https://mcp.cloudflare.com/mcp
+    connect_timeout: 60
+    auth: oauth
+    enabled: false
+  bezalel:
+    url: https://mcp.bezalel.sh/mcp
+    headers:
+      Authorization: Bearer ${MCP_BEZALEL_API_KEY}
+    enabled: true
+  basic-memory:
+    url: http://127.0.0.1:18796/mcp
+    connect_timeout: 60
+  paper-search:
+    url: http://127.0.0.1:18802/mcp
+    connect_timeout: 60
+    enabled: true
+    tools:
+      include:
+        - search_papers
+        - search_openalex
+        - search_semantic
+        - search_europepmc
+        - search_crossref
+        - get_crossref_paper_by_doi
+        - download_with_fallback
+        - read_arxiv_paper
+        - read_pubmed_paper
+        - read_openalex_paper
+        - read_semantic_paper
+      resources: false
+      prompts: false
+  arxiv:
+    url: http://127.0.0.1:18800/mcp/
+    connect_timeout: 60
+    enabled: true
+  # SiYuan's built-in MCP (kernel 3.8.6, loopback, no auth code); only up while the app runs.
+  # Hermes is Discord-reachable: leave out the tools that reach the host or the web.
+  siyuan:
+    url: http://127.0.0.1:6806/mcp
+    connect_timeout: 60
+    enabled: true
+    tools:
+      exclude:
+        - file
+        - http_request
+        - web_fetch
+        - web_search
+        - unzip
+platforms:
+  discord:
+    enabled: true
+    home_channel:
+      platform: discord
+      chat_id: '{{ .discord_home_channel_id }}'
+      name: '{{ .discord_home_channel_name }}'
+      user_id: '{{ .discord_user_id }}'
+    extra:
+      free_response_channels: '{{ .discord_home_channel_id }}'
+      rate_limit_retry_base_seconds: 120
+terminal:
+  cwd: '~'
+cron:
+  model: grok-4.7
+  model_provider: xai-oauth
+  provider: xai-oauth
+skills:
+  external_dirs:
+    - '{{ .home }}/.local/share/skill-everywhere/skills'
+litellm:
+  model_list:
+    - cline2-pass/deepseek-v4-flash
+    - cline2-pass/deepseek-v4-pro
+    - cline2-pass/kimi-k3
+    - cline2-pass/minimax-m3
+    - cline2-pass/glm-5.2
+    - cline2-pass/mimo-v2.5-pro
+    - cline2-pass/mimo-v2.5
+    - cline2-pass/kimi-k2.7-code
+    - cline2-pass/kimi-k2.6
+    - cline2-pass/qwen3.7-max
+    - cline2-pass/qwen3.7-plus

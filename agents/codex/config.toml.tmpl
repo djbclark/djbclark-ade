@@ -1,0 +1,383 @@
+# Template of ~/.codex/config.toml (Phase 0 item 4.4, 2026-10-20). See agents/README.md for every
+# placeholder (dotted fields and secret calls). Left out on purpose: [hooks.state.*] (Codex-written trust
+# hashes of the hook files, recomputed on first run), [projects.*] entries under /private/tmp
+# (session scratch) and marketplace last_revision lines (Codex-written git SHAs).
+model = "gpt-6.1-sol"
+model_reasoning_effort = "high"
+approvals_reviewer = "user"
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+personality = "pragmatic"
+service_tier = "default"
+notify = [
+    "{{ .home }}/ops/site-private/.codex-runtime/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient",
+    "turn-ended",
+    "--previous-notify",
+    '["{{ .home_escaped }}\/.config\/openusage\/hooks\/codex-notify-fanout.sh"]',
+]
+
+[marketplaces.openai-bundled]
+last_updated = "2026-07-20T13:35:59Z"
+source_type = "local"
+source = "{{ .home }}/.codex/.tmp/bundled-marketplaces/openai-bundled"
+
+[marketplaces.openai-primary-runtime]
+source_type = "local"
+source = "{{ .home }}/.cache/codex-runtimes/codex-primary-runtime/plugins/openai-primary-runtime"
+
+[marketplaces.composio]
+last_updated = "2026-07-30T14:40:37Z"
+source_type = "git"
+source = "https://github.com/ComposioHQ/composio-plugin-openai.git"
+
+[marketplaces.adhd]
+source_type = "git"
+source = "https://github.com/UditAkhourii/adhd.git"
+
+[marketplaces.claude-plugins-official]
+source_type = "git"
+source = "https://github.com/anthropics/claude-plugins-official.git"
+
+[marketplaces.mattpocock]
+source_type = "git"
+source = "https://github.com/mattpocock/skills.git"
+
+[marketplaces.claude-cowork]
+source_type = "local"
+source = "{{ .home }}/ops/site-private/.codex-runtime/plugins/cache/claude-cowork"
+
+[marketplaces.local]
+source_type = "local"
+source = "{{ .home }}/ops/site-djbclark/claude/local-marketplace"
+
+[marketplaces.claude-code-mods]
+source_type = "git"
+source = "https://github.com/hamzafer/claude-code-mods.git"
+
+[marketplaces.typesafe-ai]
+source_type = "git"
+source = "https://github.com/typesafe-ai/skills.git"
+
+[plugins."documents@openai-primary-runtime"]
+enabled = true
+
+[plugins."spreadsheets@openai-primary-runtime"]
+enabled = true
+
+[plugins."presentations@openai-primary-runtime"]
+enabled = true
+
+[plugins."computer-use@openai-bundled"]
+enabled = true
+
+[plugins."chrome@openai-bundled"]
+enabled = true
+
+[plugins."pdf@openai-primary-runtime"]
+enabled = true
+
+[plugins."template-creator@openai-primary-runtime"]
+enabled = true
+
+[plugins."visualize@openai-bundled"]
+enabled = true
+
+[plugins."composio@composio"]
+enabled = true
+
+[plugins."browser@openai-bundled"]
+enabled = true
+
+[plugins."adhd@adhd"]
+enabled = true
+
+[plugins."clangd-lsp@claude-plugins-official"]
+enabled = true
+
+[plugins."rust-analyzer-lsp@claude-plugins-official"]
+enabled = true
+
+[plugins."mattpocock-skills@mattpocock"]
+enabled = true
+
+[plugins."cowork-plugin-management@claude-cowork"]
+enabled = true
+
+[plugins."engineering@claude-cowork"]
+enabled = true
+
+[plugins."local-lsp@local"]
+enabled = true
+
+[plugins."context-bar@claude-code-mods"]
+enabled = true
+
+[plugins."typesafe@typesafe-ai"]
+enabled = true
+
+[projects."{{ .home }}/Documents/Maestro"]
+trust_level = "trusted"
+
+[projects."{{ .home }}"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/Downloads"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/Documents/Codex/2026-07-18/files-mentioned-by-the-user-next"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/Documents/Codex/2026-07-18/files-mentioned-by-the-user-you"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/Documents/Codex/2026-07-18/automate"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/Documents/Codex/2026-07-19/no"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/Documents/Codex/2026-07-19/als"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/Documents/Codex/2026-07-19/files-mentioned-by-the-user-next"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/Documents/Codex/2026-07-20/u"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/ai"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/aiuse"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/.superbrain-server"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/tgt"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/.tgt"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/Documents/Codex/2026-07-31/nee"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/ops-worktrees/.store"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/ops/site-private"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/vendor/ralph-tui"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/coderabbit-feeder"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/.claude/hooks/handoff-tools"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/tendcf"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/.hermes"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/sudo-secretspec"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/orca/projects/djbclark-ade"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/mobile"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/orca/projects/one-offs"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/.cow/pastures/cowsrc/cowexp-1"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/ExrtraBar"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/ops/stayturgid"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/ops/site-djbclark"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/ShizukuTendCF"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/techno-euphora"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/djbclark-ade"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/pastiera"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/get"]
+trust_level = "trusted"
+
+[projects."{{ .home }}/src/ci-image-plektra"]
+trust_level = "trusted"
+
+[desktop]
+ambient-suggestions-enabled = true
+sansFontSize = 14
+codeFontSize = 13
+preventSleepWhileRunning = true
+keepRemoteControlAwakeWhilePluggedIn = true
+conversationDetailMode = "STEPS_PROSE"
+followUpQueueMode = "steer"
+dock-icon-preference = "app-default"
+show-context-window-usage = true
+composerEnterBehavior = "cmdAlways"
+hotkey-window-projectless-default-enabled = true
+notifications-turn-mode = "always"
+enabled-reasoning-efforts = [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "ultra",
+    "max",
+]
+show-ultra-in-model-picker-slider = false
+toys-confetti-enabled = true
+toys-audio-visualizer-enabled = true
+external-agent-import-sync-enabled = true
+external-agent-import-sync-item-types = "all"
+usePointerCursors = true
+
+[desktop.open-in-target-preferences]
+global = "zed"
+
+[features]
+daemon_auto_start = false
+hooks = true
+js_repl = false
+memories = true
+
+[mcp_servers.node_repl]
+args = []
+command = "{{ .chatgpt_app }}/Contents/Resources/cua_node/bin/node_repl"
+startup_timeout_sec = 120
+
+[mcp_servers.node_repl.env]
+NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS = "1000"
+NODE_REPL_NODE_MODULE_DIRS = "{{ .chatgpt_app }}/Contents/Resources/cua_node/lib/node_modules"
+NODE_REPL_NODE_PATH = "{{ .chatgpt_app }}/Contents/Resources/cua_node/bin/node"
+NODE_REPL_TRUSTED_CODE_PATHS = "{{ .home }}/.codex:{{ .chatgpt_app }}/Contents/Resources/cua_node/lib/node_modules"
+CODEX_HOME = "{{ .home }}/.codex"
+BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab"
+BROWSER_USE_TINYSKY_ENABLED = "1"
+NODE_REPL_INSTRUCTIONS_USE_CASE_BROWSER = "Control the in-app browser in conjunction with the Browser Plugin."
+NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME = "Control the Chrome browser in conjunction with the Chrome Plugin. Prefer this method of controlling Chrome over alternatives (such as Computer Use) unless the user explicitly mentions an alternative."
+NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE = "Control desktop apps on macOS through Computer Use."
+BROWSER_USE_CODEX_APP_BUILD_FLAVOR = "prod"
+BROWSER_USE_CODEX_APP_VERSION = "26.915.31945"
+NODE_REPL_TRUSTED_SERVICES = '{"browser":"{{ .home }}/.codex/plugins/cache/openai-bundled/browser/26.915.31945/scripts/browser-service.mjs","sky":"@oai/sky/service"}'
+SKY_CUA_SERVICE_PATH = "{{ .home }}/.codex/computer-use/Codex Computer Use.app"
+CODEX_CLI_PATH = "{{ .chatgpt_app }}/Contents/Resources/codex"
+
+[mcp_servers.computer-use]
+command = "./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient"
+args = ["mcp"]
+cwd = "."
+enabled = false
+
+[mcp_servers.ghost-os]
+command = "/opt/homebrew/bin/ghost"
+args = ["mcp"]
+
+[mcp_servers.maestro]
+command = "maestro"
+args = ["mcp"]
+
+[mcp_servers.beeper]
+url = "http://127.0.0.1:23373/v0/mcp"
+
+[mcp_servers.cua_repl]
+command = "{{ .chatgpt_app }}/Contents/MacOS/ChatGPT"
+enabled = false
+
+[mcp_servers.basic-memory]
+url = "http://127.0.0.1:18796/mcp"
+
+[mcp_servers.cow]
+command = "cow"
+args = ["mcp"]
+
+[mcp_servers.hermes]
+url = "http://127.0.0.1:18790/mcp"
+
+[mcp_servers.extrabar]
+command = "/Applications/ExtraBar.app/Contents/Helpers/extrabar-mcp"
+
+[mcp_servers.paper-search]
+url = "http://127.0.0.1:18802/mcp"
+
+[mcp_servers.arxiv]
+url = "http://127.0.0.1:18800/mcp/"
+
+[mcp_servers.exa]
+url = "https://mcp.exa.ai/mcp"
+http_headers_helper = '''sudo-secretspec run --reason 'exa mcp auth header' -- /bin/sh -c 'printf "{\"x-api-key\":\"%s\"}" "$EXA_API_KEY"''''
+
+[mcp_servers.parallel-search]
+url = "https://search.parallel.ai/mcp"
+
+[mcp_servers.jina]
+url = "https://mcp.jina.ai/v1"
+http_headers_helper = '''sudo-secretspec run --reason 'jina mcp auth header' -- /bin/sh -c 'printf "{\"Authorization\":\"Bearer %s\"}" "$JINA_API_KEY"''''
+
+[mcp_servers.crawl4ai]
+url = "http://127.0.0.1:18798/mcp"
+tool_timeout_sec = 180
+
+[mcp_servers.firecrawl]
+url = "http://127.0.0.1:18804/mcp"
+tool_timeout_sec = 180
+
+[mcp_servers.bezalel]
+url = "https://mcp.bezalel.sh/mcp"
+
+[mcp_servers.bezalel.http_headers]
+Authorization = "Bearer {{ secret "TODO_BEZALEL_API_KEY" }}"
+
+[mcp_servers.cua-driver]
+command = "{{ .home }}/.local/bin/cua-driver"
+args = ["mcp"]
+
+[mcp_servers.siyuan]
+url = "http://127.0.0.1:6806/mcp"
+
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.set]
+NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "{{ .codex_browser_client_sha256s }}"
+BASH_ENV = "{{ .home }}/.bashrc"
+ENABLE_PROMPT_CACHING_1H = "1"
+CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1"
+MCP_TIMEOUT = "300000"
+CLAUDE_CODE_HARBOR_KITE = "1"
+GRAFT_NO_GITIGNORE = "1"
+
+[memories]
+generate_memories = true
+use_memories = true
+
+[tui]
+screen_reader_detection_done = true
+
+[tui.model_availability_nux]
+"gpt-5.5" = 3
+"gpt-5.6-sol" = 4
+gpt-6-astra = 4
+"gpt-6.1-sol" = 4

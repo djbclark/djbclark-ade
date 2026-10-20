@@ -12,6 +12,10 @@ agent what changed and what is new. Entries end with the pull request number.
 ### Added
 
 - `session-finder/relay.py` reaches Paseo-hosted agents (`paseo send --behavior steer -- <id> <text>`, labelled as an agent message from the sender; takes a `PASEO_AGENT_ID` as the ident, `--idle S` waits for idle first; refuses archived agents, pending permissions and text starting with `/`) and `where.py` reports `host=paseo agent=<id>` for them, so the "no terminal channel (unknown terminal)" refusal no longer hits a Paseo agent (#25).
+- `agents/` templates for `~/.claude/settings.json`, `~/.codex/config.toml`, opencode's `opencode.json` and
+  `~/.hermes/config.yaml` (secrets, home paths and host or account ids as placeholders, listed in
+  `agents/README.md`), `bin/ade-template-check` (credential scan, render-and-parse with plain and hostile values, `--diff` by key path) and its
+  tests; CI now installs PyYAML for them (#23).
 - `loadwatch` skill and `load-watch watcher set|show|clear|test`: one registered agent session (a Paseo
   agent by `paseo send`, else relay.py) also hears every load incident, unexplained sustained load and
   job-guard trip, and investigates; `set` replaces the old watcher and tells it (2026-10-20).
@@ -76,6 +80,9 @@ agent what changed and what is new. Entries end with the pull request number.
   an omp login as it does on CI; the omp-ready roster has its own tests (queue item 6) (#17).
 - `acp-dispatch`: an unmeasured (stale) quota window is skipped instead of crashing the dispatch
   with a `float(None)` error (#13).
+- `self-slash` (herdr): a slash command left on the input line after the first Enter is Entered again, up to 3 times,
+  for every TUI and not only cursor-agent; if it never leaves the line the waiter exits 8 and logs "NOT confirmed
+  run" instead of "sent" (2026-10-20).
 
 ### Security
 

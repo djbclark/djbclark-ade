@@ -107,6 +107,34 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    `~/.local/state/ade/credential-bak/` (0700; 13 `.bak` key copies moved there from the agent config dirs on
    2026-10-20, manifest `MANIFEST-2026-10-20.txt`, see docs/ade-everywhere-inventory-2026-10-20-stores.md 5.5).
    Nothing reads it; once the 30-day keep lapses, `rm -r` it and drop this item.
+9. **Phase 0 item 4.4: track the four untracked config files as templates** (proposal §8 item 1, djbclark
+   2026-10-20). **Done 2026-10-20 (PR #23):** `agents/{claude,codex,opencode,hermes}/` hold
+   `settings.json.tmpl`, `config.toml.tmpl`, `opencode.json.tmpl` and `config.yaml.tmpl` (secrets as
+   `{{ secret "NAME" }}`, home paths as `{{ .home }}`, host and account ids as `{{ .field }}`, all listed in
+   `agents/README.md`); `bin/ade-template-check` scans them for credentials, renders and parses them, and with
+   `--diff` names the keys that differ from the live file; `tests/test_ade_template_check.py` runs in CI. Open
+   for Phase 1: declare the `TODO_*` secret names in `secrets/secretspec.toml`, give each field a place in
+   `operator.toml` or `machines/<host>.toml`, and turn the Codex and Claude templates into `modify_` merges.
+   Scanner LOWs from the adversary's round 3 on PR #23 (all measured, none blocking): the scheme-word group
+   in `bin/ade-template-check` can take a short letter-initial key for the scheme (fix: letters-only scheme
+   word or a closed list); the `]` terminator lets a tail after a placeholder or env ref through (accept
+   `]` only when it closes the value); `_FLAG` misses `--key` and `--access-key` (end the rule with
+   `key`); `headers: - name: X / value: <key>` lists: the nearest key is `value`, so the parsed-scalar pass should
+   use the sibling `name` (adversary round 6, R6-3). Operator items: the public templates publish Hermes's
+   approvals, Claude's allowlist and Codex's trust list.
+
+## Paseo workspace names after a handoff (djbclark, 2026-10-20)
+
+djbclark, 2026-10-20: "we should change the new automatic handoff -> new/clear -> baton system so that Paseo
+workspace windows get an informative, short name (only the first few words show) so they are easy to identify
+in Workspaces. Currently they all get named 'Resume session from baton handoff'." Paseo titles an agent from
+its first prompt, and after `self-slash "/new"` (PR #19) that prompt is the bare `/baton` the `--then` waiter
+sends. Queued (one Sonnet `code` slice after PR #19 merges): (1) read Paseo's bundled CLI
+(`cli/dist/commands/agent/`) for a title or rename command and use it from `bin/self-slash` when one exists;
+(2) otherwise, or as well, have `--then` send `/baton <repo>: <first words of the Tier 1 active_work>` so the
+first words name the task (the `baton` skill ignores the trailing text as a label), and have `handoff` Step 8's
+autorename cover the Paseo host; (3) a test with the fake `paseo` asserting the sent prompt starts with the
+label. Never rename or send to a live agent in tests.
 
 ## `bin/load-watch` `send_to` has the relay's round-1 exposure (adversary on PR #25, 2026-10-20)
 
