@@ -189,6 +189,9 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
    5.3 and 5.6.2) with every dated `.bak` copy beside them (3-5 each, 2026-10-12 to 10-18, same keys):
    `~/.config/opencode/opencode.json`, `opencode.json.bak*` and `opencode.bak` (not `opencode.jsonc`, which row 2
    copies), `~/.cursor/mcp.json` and `mcp.json.bak*`, `~/.gemini/config/mcp_config.json` and `mcp_config.json.bak*`;
+   On 2026-10-20 (djbclark, /steps item 5) the 13 dated `.bak` copies were moved to `~/.local/state/ade/credential-bak/`
+   (0700, files 0600, `MANIFEST-2026-10-20.txt` with the original paths; delete after 2026-11-19); `opencode.bak` is a
+   directory from 2026-07-30 and stays excluded. Slice 2 excludes that vault directory too.
    and `~/.config/crush/crushrc*` (the SIPB provider key, tools/acp-run/README.md; two `.bak` copies).
 6. **Exporter claims** for tools other than OpenCode/Hermes/Gemini rest on the proposal's §6.1
    (verified 2026-10-19), not on a fresh `--help` run (avoided per the no-`--help`-on-live-CLIs rule).
