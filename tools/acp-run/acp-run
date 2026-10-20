@@ -189,7 +189,8 @@ error, truncated reply, or FAILED fake-tool-calls: a reply of tool calls printed
 text when no tool ran) or a requested model/effort/context the agent did
 not apply (FAILED config); 2 usage error (including an --effort/--context the
 agent or model cannot take); 5 empty reply and every permission
-request was denied; 75 refused by --max-load; 77 under --perm deny or read-only a tool ran
+request was denied; 75 refused by --max-load; 127 the agent binary is not on PATH (after
+waiting ACP_RUN_BIN_WAIT seconds, default 90, 0 disables, for an upgrade to relink it); 77 under --perm deny or read-only a tool ran
 without a permission request (tripwire; turn cancelled); 124 timed out (session/cancel
 sent first, then the process is killed); 130/143 interrupted by SIGINT/SIGTERM
 (session/cancel sent, agent stopped); with --interactive also 129 on SIGHUP,
@@ -477,6 +478,11 @@ AFTER_KILL_DROP = ("agy", "grok")
 EXIT_ALL_DENIED = 5
 EXIT_LOAD = 75  # EX_TEMPFAIL: try again later
 EXIT_TRIPWIRE = 77  # EX_NOPERM: a tool ran without a permission request under --perm deny
+EXIT_NOT_INSTALLED = 127  # the shell's "command not found": the agent binary is not on PATH
+# How long to keep looking for a missing agent binary (an upgrade may be relinking it:
+# 2026-10-20 03:25, `npm i -g` replaced claude-agent-acp as ime-onstart started), and how often.
+BIN_WAIT = 90.0
+BIN_POLL = 2.0
 # A tool may report in_progress a moment before it asks: crush-acp sends in_progress,
 # then session/request_permission 1 ms later (canary, 2026-10-12). A started tool
 # trips only if its permission request has not arrived within this grace.
@@ -4615,7 +4621,17 @@ def main():
             ap.error("give a prompt with -p, -f or stdin")
     cmd = YOLO_CMD.get(a.agent, AGENTS[a.agent][0])
     if not shutil.which(cmd[0]):
-        raise SystemExit(f"acp-run: {cmd[0]} not installed")
+        wait = float(os.environ.get("ACP_RUN_BIN_WAIT", BIN_WAIT))        # 0 disables
+        poll = max(0.05, float(os.environ.get("ACP_RUN_BIN_POLL", BIN_POLL)))
+        if wait > 0:
+            print(f"acp-run: {cmd[0]} not found on PATH; waiting up to {wait:g} s in case an upgrade "
+                  f"is relinking it (ACP_RUN_BIN_WAIT=0 disables)", file=sys.stderr)
+            deadline = time.monotonic() + wait
+            while not shutil.which(cmd[0]) and time.monotonic() < deadline:
+                time.sleep(min(poll, max(0.0, deadline - time.monotonic())))
+        if not shutil.which(cmd[0]):
+            print(f"acp-run: {cmd[0]} not installed", file=sys.stderr)
+            sys.exit(EXIT_NOT_INSTALLED)
     if a.max_load is not None and not a.info:
         why = load_guard(a.max_load, a.load_wait)
         if why:

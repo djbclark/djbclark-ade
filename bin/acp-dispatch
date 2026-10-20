@@ -171,6 +171,11 @@ Otherwise `transient` stays. For transient and outage `check` suggests `reroute 
 `resume in place: acp-dispatch resume RECORD --detach --no-wait` (or, while the login sweep's
 restart-resume is running, `resume-scheduled`; or `no resumable session` when the session cannot be
 reopened) and never `--escalate`. Exit codes are unchanged.
+A slice whose agent binary was missing (`acp-run: ... not installed`, acp-run exit 127) is classified
+`NO-REPORT: not-installed` (2026-10-20): infrastructure like a transport error, so `check` says to
+re-dispatch the same slice and never offers `--escalate`. A brief file that an earlier dispatch already
+footed (`-f NAME-brief.md` under a new `--name`) is cut at its old "Delivery contract" / "Time budget"
+sections before the new ones are appended, so the prompt carries exactly one contract.
 
 Quota-stop refinements (2026-10-18): (1) a reset further out than `[dispatch].
 auto_resume_max_wait_hours` (default 6) is not waited for — agy's weekly cap resets ~148 h out
@@ -1012,6 +1017,18 @@ def load_footer() -> str:
         return FOOTER_FILE.read_text()
     except OSError as e:
         die(f"footer missing: {FOOTER_FILE} ({e})")
+
+
+def strip_generated_sections(text: str) -> str:
+    """A brief written by an earlier dispatch ends with its shared footer and time budget. Cut from
+    the first of those headings so a re-dispatch of the same -f file under a new name carries one
+    contract, the new name's (2026-10-20: ime-onstart2 got two, naming different report paths)."""
+    cut = len(text)
+    for m in (re.search(r"(?m)^## Delivery contract \(shared footer", text),
+              re.search(r"(?m)^## Time budget \(acp-dispatch\)", text)):
+        if m:
+            cut = min(cut, m.start())
+    return text[:cut].rstrip() + "\n" if cut < len(text) else text
 
 
 def footer_text(report: Path, lead: str, inbox: Path | None = None,
@@ -2586,6 +2603,8 @@ def failure_class(text: str, rc: int | None, *, preflight: bool = False) -> tupl
     # reported as fail=transient and silently rerouted, which is the opposite of what was wanted.
     if any(term in low for term in AUTH_TERMS):
         return "auth", when
+    if re.search(r"acp-run: \S+ not installed", text):
+        return "not-installed", when       # the binary was missing: infrastructure, not the slice
     m = re.search(r"\bfail=([\w-]+)", text) or re.search(r"FAILED ([\w-]+)", text)
     if m:
         return m.group(1), when
@@ -2757,6 +2776,7 @@ def fallback_class(rec: dict) -> str | None:
 # `--min-headroom` default: the same bar a fresh dispatch or resume is refused at.
 TRANSIENT_QUOTA_HEADROOM = 10.0
 # NO-REPORT classes that are a transport or service error, not a verdict on the slice's tier.
+INSTALL_FAILURES = (f"{NO_REPORT_PREFIX} not-installed".lower(),)    # the agent binary was not on PATH
 TRANSPORT_FAILURES = tuple(f"{NO_REPORT_PREFIX} {c}".lower() for c in ("transient", "outage"))   # `check` lowercases
 
 
@@ -3021,7 +3041,9 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
         # transport error (transient, outage) says nothing about the tier: reroute to the
         # next pool route_agent plans for the kind, and never suggest climbing the ladder
         # (2026-10-18: a cursor slice's CANCEL was offered `--escalate (-> judgment)`).
-        if failure.startswith(TRANSPORT_FAILURES):
+        if failure.startswith(INSTALL_FAILURES):
+            det = f"{det}; re-dispatch the same slice (the agent binary was missing; nothing ran)"
+        elif failure.startswith(TRANSPORT_FAILURES):
             cmd = reroute_command(rec, path)
             det = f"{det}; reroute: {cmd}" if cmd else f"{det}; no other pool eligible for kind {rec.get('kind')!r}"
         else:
@@ -3699,7 +3721,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
                     "(load_gate pending); use a new --name or --force")
         except (OSError, ValueError):
             pass
-    prompt = Path(a.prompt_file).read_text() if a.prompt_file else a.prompt
+    prompt = strip_generated_sections(Path(a.prompt_file).read_text()) if a.prompt_file else a.prompt
     estimate, estimate_source = estimate_pct(out, a.agent, a.model, prompt, a.est_pct, service)
     if estimate < 0:
         die("--est-pct must be 0 or more")
@@ -4405,7 +4427,7 @@ def dispatch_cloud(a: argparse.Namespace, previous: dict | None, kind: str | Non
                 f"continue it with `acp-dispatch resume {record}` (or --force to start a second agent)")
         if isinstance(old, dict) and pid_alive(old.get("pid")):
             die(f"{record} says a process is still polling this slice (--force to ignore)")
-    prompt = Path(a.prompt_file).read_text() if a.prompt_file else a.prompt
+    prompt = strip_generated_sections(Path(a.prompt_file).read_text()) if a.prompt_file else a.prompt
     repo = Path(a.dir).resolve()
     url, ref = cloud_repo_url(repo), cloud_ref(repo)
     remaining, reading = pool_reading(a.agent, a.model)

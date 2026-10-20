@@ -632,6 +632,7 @@ acp-run claude -C ~/src/repo -i --resume SESSION_ID          # reopen an earlier
 | 2 | usage error |
 | 5 | empty reply and every permission request was denied (the code acpx uses) |
 | 75 | refused to start by `--max-load` |
+| 127 | the agent binary is not on `PATH` after `ACP_RUN_BIN_WAIT` seconds (default 90, `0` disables; an upgrade may be relinking it, 2026-10-20) |
 | 77 | under `--perm deny` or `read-only` a tool ran without a permission request (tripwire; the turn is cancelled) |
 | 124 | timed out (`session/cancel` sent first, then the agent is killed) |
 | 130, 143 | interrupted by SIGINT, SIGTERM (with `--interactive` also 129 on SIGHUP; Ctrl-C cancels a running turn instead of exiting) |
