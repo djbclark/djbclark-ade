@@ -75,6 +75,9 @@ agent what changed and what is new. Entries end with the pull request number.
   an omp login as it does on CI; the omp-ready roster has its own tests (queue item 6) (#17).
 - `acp-dispatch`: an unmeasured (stale) quota window is skipped instead of crashing the dispatch
   with a `float(None)` error (#13).
+- `self-slash` (herdr): a slash command left on the input line after the first Enter is Entered again, up to 3 times,
+  for every TUI and not only cursor-agent; if it never leaves the line the waiter exits 8 and logs "NOT confirmed
+  run" instead of "sent" (2026-10-20).
 
 ### Security
 
