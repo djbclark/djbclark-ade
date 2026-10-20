@@ -1210,14 +1210,58 @@ def part_dir(dest):
     return dest.with_name(dest.name + ".part")
 
 
-def hermes_limit(home):
-    """sessions.max_export_messages from config.yaml; the Hermes default (20,000) when unset."""
+HERMES_CONFIG_CAP = 64 * 1024
+HERMES_DEFAULT_LIMIT = 20000
+
+
+def read_hermes_config(home, excluder):
+    """The text of ~/.hermes/config.yaml, read the way `copy_regular` reads a source (the adversary's round 20):
+    every directory opened relative to the previous descriptor from the real $HOME (`home_anchor`), the file
+    O_NOFOLLOW|O_NONBLOCK so a FIFO cannot block the run, `fstat` must say regular file, at most
+    HERMES_CONFIG_CAP bytes read. Raises FileNotFoundError when it is absent and OSError (with the reason) for
+    every other refusal: a link, a non-regular file, a too-large file, an unreadable or non-UTF-8 one."""
+    anchored, base = home_anchor(home / ".hermes/config.yaml", excluder)
     try:
-        text = (home / ".hermes/config.yaml").read_text()
-    except OSError:
-        return 20000
+        dfd = open_dir_chain(base, anchored.parent.relative_to(base).parts)
+    except OSError as exc:
+        if not os.path.lexists(home / ".hermes"):
+            raise FileNotFoundError(str(anchored)) from exc
+        raise
+    try:
+        try:
+            fd = os.open(anchored.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise OSError(f"is a symlink or unreadable: {exc.strerror}") from exc
+    finally:
+        os.close(dfd)
+    with os.fdopen(fd, "rb") as fin:
+        if not stat.S_ISREG(os.fstat(fin.fileno()).st_mode):
+            raise OSError("not a regular file")
+        os.set_blocking(fin.fileno(), True)  # O_NONBLOCK was for the open only
+        data = fin.read(HERMES_CONFIG_CAP + 1)
+    if len(data) > HERMES_CONFIG_CAP:
+        raise OSError(f"larger than {HERMES_CONFIG_CAP} bytes")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise OSError("not UTF-8 text") from exc
+
+
+def hermes_limit(home, excluder):
+    """sessions.max_export_messages from config.yaml; the Hermes default (20,000) when unset, when the file is
+    absent, or when it cannot be read safely (then one warning line on stderr; the manifest has no warnings list)."""
+    try:
+        text = read_hermes_config(home, excluder)
+    except FileNotFoundError:
+        return HERMES_DEFAULT_LIMIT
+    except OSError as exc:
+        print(f"ade-backup-stores: warning: {home / '.hermes/config.yaml'} not read ({exc}); "
+              f"using the default export limit {HERMES_DEFAULT_LIMIT}", file=sys.stderr)
+        return HERMES_DEFAULT_LIMIT
     m = re.search(r"^\s*max_export_messages:\s*(\d+)", text, re.M)
-    return int(m.group(1)) if m else 20000
+    return int(m.group(1)) if m else HERMES_DEFAULT_LIMIT
 
 
 def hermes_session_counts(db_path):
@@ -1298,7 +1342,7 @@ def export_hermes(home, work, final, state_backup, excluder):
     out = work / "hermes-export"
     run = StoreRun({"name": "hermes-export", "kind": "hermes-export"}, out)
     run.sources.append(str(home / ".hermes/state.db"))
-    info = {"mode": None, "limit": hermes_limit(home), "truncated": False, "oversize": [], "failed": [],
+    info = {"mode": None, "limit": hermes_limit(home, excluder), "truncated": False, "oversize": [], "failed": [],
             "sessions_total": None, "sessions_exported": 0, "snapshot": "scratch HERMES_HOME holding a copy of hermes-state"}
     hermes = os.environ.get("ADE_BACKUP_HERMES") or shutil.which("hermes")
     out.mkdir(parents=True, exist_ok=True)

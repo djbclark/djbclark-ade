@@ -303,6 +303,71 @@ def test_hermes_export_bulk_and_unparsable_output(env, monkeypatch):
     assert mod.exported_count("Exported sessions") is None and mod.exported_count("") is None
 
 
+def hermes_config_case(home, kind):
+    cfg = home / ".hermes/config.yaml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "fifo":
+        os.mkfifo(cfg)
+    elif kind == "symlink":
+        target = home / "elsewhere.yaml"
+        target.write_text("sessions:\n  max_export_messages: 7\n")
+        os.symlink(target, cfg)
+    elif kind == "oversize":
+        cfg.write_text("sessions:\n  max_export_messages: 7\n" + "# pad\n" * 20000)
+    elif kind == "binary":
+        cfg.write_bytes(b"\xff\xfe max_export_messages: 7\n")
+    elif kind == "linked-dir":
+        real = home / "hermes-real"
+        real.mkdir()
+        (real / "config.yaml").write_text("sessions:\n  max_export_messages: 7\n")
+        cfg.parent.rmdir()
+        os.symlink(real, home / ".hermes")
+    return cfg
+
+
+@pytest.mark.parametrize("kind", ["fifo", "symlink", "oversize", "binary", "linked-dir"])
+def test_hermes_limit_refuses_unsafe_config_with_default_and_warning(env, capsys, kind):
+    mod, home, _, _ = env
+    hermes_config_case(home, kind)
+    import signal
+    signal.alarm(10)  # a FIFO that blocks the open fails the test instead of hanging it
+    try:
+        assert mod.hermes_limit(home, mod.Excluder(home)) == 20000
+    finally:
+        signal.alarm(0)
+    err = capsys.readouterr().err
+    assert err.count("warning") == 1 and "default export limit 20000" in err and "config.yaml" in err
+
+
+def test_hermes_limit_reads_a_normal_or_absent_config(env, capsys):
+    mod, home, _, _ = env
+    assert mod.hermes_limit(home, mod.Excluder(home)) == 20000  # no ~/.hermes at all
+    (home / ".hermes").mkdir()
+    assert mod.hermes_limit(home, mod.Excluder(home)) == 20000  # no config.yaml
+    (home / ".hermes/config.yaml").write_text("sessions:\n  max_export_messages: 3\n")
+    assert mod.hermes_limit(home, mod.Excluder(home)) == 3
+    (home / ".hermes/config.yaml").write_text("sessions:\n  other: 1\n")
+    assert mod.hermes_limit(home, mod.Excluder(home)) == 20000
+    assert capsys.readouterr().err == ""
+
+
+def test_run_with_a_fifo_hermes_config_finishes_promptly_with_the_default(tmp_path):
+    home = tmp_path / "h"
+    make_hermes_db(home, (("s1", 2),))
+    os.mkfifo(home / ".hermes/config.yaml")
+    fake = tmp_path / "hermes"
+    write_fake_hermes(fake, "none")
+    proc = subprocess.run([sys.executable, str(SCRIPT), "--only", "hermes-export", "--json", "--dest", str(tmp_path / "d" / "x")],
+                          capture_output=True, text=True, timeout=30,
+                          env={**os.environ, "HOME": str(home), "ADE_BACKUP_HERMES": str(fake)})
+    assert "warning" in proc.stderr and "config.yaml" in proc.stderr
+    assert proc.returncode == 0
+    manifest = json.loads((tmp_path / "d/x/MANIFEST.json").read_text())
+    entry = next(s for s in manifest["stores"] if s["store"] == "hermes-export")
+    assert entry["hermes_export"]["limit"] == 20000
+    assert not list((tmp_path / "d").glob("*.part"))
+
+
 def test_cli_dry_run_runs_as_a_program(tmp_path):
     home = tmp_path / "h"
     home.mkdir()
