@@ -107,6 +107,14 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    `~/.local/state/ade/credential-bak/` (0700; 13 `.bak` key copies moved there from the agent config dirs on
    2026-10-20, manifest `MANIFEST-2026-10-20.txt`, see docs/ade-everywhere-inventory-2026-10-20-stores.md 5.5).
    Nothing reads it; once the 30-day keep lapses, `rm -r` it and drop this item.
+9. **Phase 0 item 4.4: track the four untracked config files as templates** (proposal §8 item 1, djbclark
+   2026-10-20). **Done 2026-10-20 (PR #TBD):** `agents/{claude,codex,opencode,hermes}/` hold
+   `settings.json.tmpl`, `config.toml.tmpl`, `opencode.json.tmpl` and `config.yaml.tmpl` (secrets as
+   `{{ secret "NAME" }}`, home paths as `{{ .home }}`, host and account ids as `{{ .field }}`, all listed in
+   `agents/README.md`); `bin/ade-template-check` scans them for credentials, renders and parses them, and with
+   `--diff` names the keys that differ from the live file; `tests/test_ade_template_check.py` runs in CI. Open
+   for Phase 1: declare the `TODO_*` secret names in `secrets/secretspec.toml`, give each field a place in
+   `operator.toml` or `machines/<host>.toml`, and turn the Codex and Claude templates into `modify_` merges.
 
 ## Keep every machine current, and a changelog (djbclark, 2026-10-20; proposal Q26, T8)
 

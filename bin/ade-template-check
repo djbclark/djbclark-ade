@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""Check the agents/ config templates (Phase 0 item 4.4, 2026-10-20).
+
+    ade-template-check [--diff] [--root DIR] [TEMPLATE ...]
+
+With no TEMPLATE it checks every agents/*/*.tmpl under the repo (or --root). For each one:
+
+  1. scan: the credential patterns of the inventory adversary (docs/ade-everywhere-inventory-2026-10-20-stores.md
+     section 5 item 5) run over the template text with the `{{ ... }}` tags masked; any hit is a finding.
+     Also flagged: an absolute home path (/Users/<name>, /home/<name>) that is not `{{ .home }}`, and a
+     long numeric id (account, chat, Telegram or Discord id).
+  2. render: `{{ .field }}` and `{{ secret "NAME" }}` are filled from a dummy context and the result must parse
+     (.json, .toml or .yaml by the name before `.tmpl`). Every field used must be documented in
+     agents/README.md (a table row starting with the field in backticks).
+  3. --diff: render with `{{ .home }}` = $HOME, every other placeholder a wildcard, and print the key paths
+     whose live file (the same path under $HOME, listed in LIVE below) differs. Paths only, never values.
+
+Exit 0 clean, 1 findings, 2 usage. YAML needs PyYAML (`uv run --with pyyaml`); without it a .yaml template
+is reported as a finding rather than skipped.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import re
+import sys
+import tomllib
+from collections import Counter
+from hashlib import sha256
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+
+# Template (relative to agents/) -> the live file it describes (relative to $HOME).
+LIVE = {
+    "claude/settings.json.tmpl": ".claude/settings.json",
+    "codex/config.toml.tmpl": ".codex/config.toml",
+    "opencode/opencode.json.tmpl": ".config/opencode/opencode.json",
+    "hermes/config.yaml.tmpl": ".hermes/config.yaml",
+}
+
+TAG = re.compile(r"\{\{\s*(?:(?P<secret>secret\s+\"(?P<name>[A-Za-z0-9_]+)\")|(?P<field>\.[A-Za-z_][A-Za-z0-9_]*))\s*\}\}")
+ANY_TAG = re.compile(r"\{\{.*?\}\}")
+MASK = "\x00TAG\x00"
+
+# Known benign blobs matching the 40+ character rule, by sha256 of the matched text. The one entry is the
+# Orca PowerShell hook in claude/settings.json: a UTF-16LE -EncodedCommand that only runs ~/.orca/agent-hooks
+# (decoded and read 2026-10-20). Orca rewrites it on upgrade; a new blob is a finding until someone decodes it.
+ALLOW_BLOBS = {
+    "1716558189baf6eacd0b1429e2b78470c5044658b54110f1d02e796e8c56c4f8": "Orca claude-hook PowerShell -EncodedCommand",
+}
+
+PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("sk- key", re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{6,}")),
+    ("ghp_/gho_ token", re.compile(r"(?<![A-Za-z0-9])gh[po]_[A-Za-z0-9]{6,}")),
+    ("github_pat_ token", re.compile(r"github_pat_[A-Za-z0-9_]{6,}")),
+    ("Slack token", re.compile(r"xox[bpas]-[A-Za-z0-9-]{6,}")),
+    ("AWS key id", re.compile(r"AKIA[0-9A-Z]{8,}")),
+    ("Bearer value", re.compile(r"Bearer\s+(?!" + re.escape(MASK) + r"|\$|%s|<)\S{4,}")),
+    ("PEM block", re.compile(r"-----BEGIN")),
+    ("password=", re.compile(r"password=\S+", re.I)),
+    ("api_key=", re.compile(r"api_key=\S+", re.I)),
+    ("token=", re.compile(r"(?<![A-Za-z_])token=(?!" + re.escape(MASK) + r"|\$)\S+", re.I)),
+    ("secret-looking key: value", re.compile(
+        r"""["']?(?:password|passwd|api_key|apikey|secret|client_secret|access_token|auth_token)["']?\s*[:=]\s*["']?"""
+        r"""(?!""" + re.escape(MASK) + r"""|\$|%|["']|\s|$|<)[^\s"',]{4,}""", re.I)),
+    ("email address", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")),
+    ("phone number", re.compile(r"(?<![\w.])\+1[\s().-]?\d{3}[\s().-]?\d{3}[\s().-]?\d{4}(?!\d)")),
+    ("UUID", re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)),
+    ("long numeric id", re.compile(r"(?<![\w.])\d{10,}(?![\w.])")),
+    ("literal home path", re.compile(r"(?:/Users|/home)/(?!\{\{)[A-Za-z0-9._-]+|\\/Users\\/[A-Za-z0-9._-]+")),
+]
+BLOB = re.compile(r"[A-Za-z0-9+/=_-]{40,}")
+
+
+def _entropy(s: str) -> float:
+    c = Counter(s)
+    return -sum(n / len(s) * math.log2(n / len(s)) for n in c.values())
+
+
+def scan(text: str) -> list[tuple[int, str]]:
+    """(line number, rule) for every credential-looking token; never the value itself."""
+    masked = ANY_TAG.sub(MASK, text)
+    hits: list[tuple[int, str]] = []
+    for lineno, line in enumerate(masked.splitlines(), 1):
+        for rule, pat in PATTERNS:
+            if pat.search(line):
+                hits.append((lineno, rule))
+        for m in BLOB.finditer(line):
+            blob = m.group(0)
+            if sha256(blob.encode()).hexdigest() in ALLOW_BLOBS:
+                continue
+            # A long path or a dash-separated word run is not a key: a key mixes cases and digits and is not path-shaped.
+            if blob.count("/") >= 2 or blob.startswith(("/", "~", ".")):
+                continue
+            if re.search(r"[a-z]", blob) and re.search(r"[A-Z0-9]", blob) and re.search(r"\d", blob) and _entropy(blob) > 3.6:
+                hits.append((lineno, "40+ character base64-like string"))
+            elif re.fullmatch(r"[0-9a-f]{40,}", blob):
+                hits.append((lineno, "40+ character hex string"))
+    return hits
+
+
+def fields_used(text: str) -> tuple[set[str], set[str]]:
+    fields, secrets = set(), set()
+    for m in TAG.finditer(text):
+        if m.group("secret"):
+            secrets.add(m.group("name"))
+        else:
+            fields.add(m.group("field")[1:])
+    if "{{" in TAG.sub("", text):
+        raise ValueError("a {{ ... }} tag other than `.field` or `secret \"NAME\"`")
+    return fields, secrets
+
+
+def render(text: str, ctx: dict[str, str], secret_value: str) -> str:
+    def fill(m: re.Match[str]) -> str:
+        if m.group("secret"):
+            return secret_value
+        return ctx[m.group("field")[1:]]
+    return TAG.sub(fill, text)
+
+
+def parse(kind: str, text: str):
+    if kind == "json":
+        return json.loads(text)
+    if kind == "toml":
+        return tomllib.loads(text)
+    if kind == "yaml":
+        try:
+            import yaml
+        except ImportError:
+            raise RuntimeError("PyYAML is not importable (run with `uv run --with pyyaml`)") from None
+        return yaml.safe_load(text)
+    raise ValueError(kind)
+
+
+def kind_of(path: Path) -> str:
+    ext = path.name.removesuffix(".tmpl").rsplit(".", 1)[-1]
+    return {"json": "json", "jsonc": "json", "toml": "toml", "yaml": "yaml", "yml": "yaml"}.get(ext, ext)
+
+
+def documented_fields(readme: Path) -> set[str]:
+    if not readme.is_file():
+        return set()
+    return set(re.findall(r"^\|\s*`([A-Za-z_][A-Za-z0-9_]*)`\s*\|", readme.read_text(), re.M))
+
+
+def flatten(o, prefix: str = "") -> dict[str, object]:
+    out: dict[str, object] = {}
+    if isinstance(o, dict):
+        for k, v in o.items():
+            out.update(flatten(v, f"{prefix}.{k}" if prefix else str(k)))
+        if not o and prefix:
+            out[prefix] = {}
+    elif isinstance(o, list):
+        for i, v in enumerate(o):
+            out.update(flatten(v, f"{prefix}[{i}]"))
+        if not o and prefix:
+            out[prefix] = []
+    else:
+        out[prefix] = o
+    return out
+
+
+WILD = ""
+
+
+def diff_keys(tmpl_text: str, live_text: str, kind: str, home: str) -> tuple[list[str], list[str], list[str]]:
+    """(only in template, only in live file, value differs): key paths only."""
+    def fill(m: re.Match[str]) -> str:
+        if m.group("field") == ".home":
+            return home
+        if m.group("field") == ".home_escaped":
+            return home.replace("/", "\\/")
+        return WILD
+    rendered = TAG.sub(fill, tmpl_text)
+    # A wildcard inside a quoted scalar is a plain character for every parser.
+    t = flatten(parse(kind, rendered))
+    live = flatten(parse(kind, live_text))
+    only_t = sorted(set(t) - set(live))
+    only_l = sorted(set(live) - set(t))
+    differs = []
+    for k in sorted(set(t) & set(live)):
+        tv, lv = t[k], live[k]
+        if isinstance(tv, str) and WILD in tv:
+            rx = re.compile("".join(".*" if ch == WILD else re.escape(ch) for ch in tv), re.S)
+            if isinstance(lv, str) and rx.fullmatch(lv):
+                continue
+            differs.append(k)
+        elif tv != lv or type(tv) is not type(lv):
+            differs.append(k)
+    return only_t, only_l, differs
+
+
+def check_one(path: Path, root: Path, do_diff: bool, out) -> int:
+    rel = path.name
+    text = path.read_text()
+    findings = 0
+    try:
+        label = str(path.relative_to(root))
+    except ValueError:
+        label = str(path)
+
+    for lineno, rule in scan(text):
+        print(f"{label}:{lineno}: credential scan: {rule}", file=out)
+        findings += 1
+
+    kind = kind_of(path)
+    try:
+        fields, secrets = fields_used(text)
+    except ValueError as e:
+        print(f"{label}: {e}", file=out)
+        return findings + 1
+    doc = documented_fields(root / "agents" / "README.md")
+    for f in sorted(fields - doc):
+        print(f"{label}: field `{f}` is not in the agents/README.md table", file=out)
+        findings += 1
+    for s in sorted(secrets - doc):
+        print(f"{label}: secret `{s}` is not in the agents/README.md table", file=out)
+        findings += 1
+
+    ctx = {f: f"dummy-{f}" for f in fields}
+    ctx.update({"home": "/home/dummy", "home_escaped": "\\/home\\/dummy"})
+    try:
+        parse(kind, render(text, ctx, "dummy-secret-value"))
+    except Exception as e:  # noqa: BLE001 - any parser error is a finding; its message names a position, not a value
+        print(f"{label}: rendered output does not parse as {kind}: {type(e).__name__}", file=out)
+        findings += 1
+
+    if do_diff:
+        try:
+            rel_t = str(path.relative_to(root / "agents"))
+        except ValueError:
+            rel_t = ""
+        live_rel = LIVE.get(rel_t)
+        live = Path(os.environ.get("HOME", str(Path.home()))) / live_rel if live_rel else None
+        if live is None or not live.is_file():
+            print(f"{label}: --diff: no live file to compare", file=out)
+        else:
+            try:
+                only_t, only_l, differs = diff_keys(text, live.read_text(), kind, os.environ.get("HOME", str(Path.home())))
+            except Exception as e:  # noqa: BLE001
+                print(f"{label}: --diff: cannot compare ({type(e).__name__})", file=out)
+                findings += 1
+            else:
+                for k in only_t:
+                    print(f"{label}: diff: only in template: {k}", file=out)
+                for k in only_l:
+                    print(f"{label}: diff: only in live file: {k}", file=out)
+                for k in differs:
+                    print(f"{label}: diff: differs: {k}", file=out)
+                print(f"{label}: diff: {len(only_t)} only in template, {len(only_l)} only in live, {len(differs)} differ", file=out)
+    return findings
+
+
+def main(argv: list[str] | None = None, out=None) -> int:
+    out = out or sys.stdout
+    ap = argparse.ArgumentParser(prog="ade-template-check", description=__doc__.split("\n")[0])
+    ap.add_argument("templates", nargs="*", type=Path)
+    ap.add_argument("--diff", action="store_true", help="also compare each rendered template with the live file (key paths only)")
+    ap.add_argument("--root", type=Path, default=REPO, help="repo root holding agents/ (default: this repo)")
+    args = ap.parse_args(argv)
+    root = args.root.resolve()
+    paths = args.templates or sorted((root / "agents").glob("*/*.tmpl"))
+    if not paths:
+        print(f"ade-template-check: no templates under {root}/agents", file=sys.stderr)
+        return 2
+    total = 0
+    for p in paths:
+        if not p.is_file():
+            print(f"ade-template-check: {p}: not a file", file=sys.stderr)
+            return 2
+        total += check_one(p.resolve(), root, args.diff, out)
+    print(f"ade-template-check: {len(paths)} template(s), {total} finding(s)", file=out)
+    return 1 if total else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
