@@ -37,6 +37,9 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Security
 
+- `bin/firecrawl-router` and `bin/cursor-cloud`: an endpoint must be `https` (`http` only on loopback),
+  a redirect is never followed with the key, the request target is checked against the backend origin,
+  and cursor-cloud re-executes with `python3 -I` and drops proxy, CA and `PYTHON*` variables (queue item 5).
 - `firecrawl-router`: the serve-only form refuses a non-loopback `--listen` like `--open` does,
   and the address actually bound is checked before the first request is served (#14, in review).
 - `cursor-cloud` and `firecrawl-router`: endpoint variables must be https or loopback, bearer
