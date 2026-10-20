@@ -45,11 +45,13 @@ referenced verdict is a lead, not a proof. `size` is `du -sk`; `newest_mtime` lo
            out (rc=124): the task is never `unique`, `mixed` or `scratch`, its record has
            `reference_search: "incomplete: rc=<n>"` (null otherwise), and the summary counts it under
            `bigteam.incomplete`. The exit status stays 0, as for an incomplete checkout.
-  scan incomplete: scandir <ERRNO> <relative path>  a subtree of the task could not be listed (it may
-           hold the only report): same rule, the record has `traversal: "incomplete: scandir ..."`
-           (null otherwise; the first failure by path), counted under `bigteam.incomplete`.
+  scan incomplete: scandir <ERRNO> <relative path>  a subtree of the task could not be listed, or its
+           `CLAIM` or `jobs` could not be read or listed (it may hold the only report): same rule, the
+           record has `traversal: "incomplete: scandir ..."` (null otherwise; the first failure by
+           path), counted under `bigteam.incomplete`.
 
-A --git-root that is not a directory is a usage error (exit 2) before anything is scanned.
+A --git-root that is not a directory, and a --bigteam that is not a directory or cannot be listed, is a
+usage error (exit 2) before anything is scanned.
 
 Git checkout verdicts (a checkout is a dir holding `.git`, found up to two levels under each
 --git-root, symlinks not followed, deduplicated):
@@ -69,9 +71,10 @@ Git checkout verdicts (a checkout is a dir holding `.git`, found up to two level
                     600 s, every other git call 60 s. A repository counts as unborn (no commit yet) only
                     when `refs/heads` and `refs/tags` hold nothing; a HEAD that names no ref while
                     refs exist is `scan incomplete: rev-parse --abbrev-ref HEAD rc=<n>`.
-  scan incomplete: scandir <ERRNO>  a directory inside a --git-root could not be listed, so checkouts
-                    below it may be missing: one record for that dir (path, found_via, counts null),
-                    counted under `checkouts.incomplete`; the exit status stays 0.
+  scan incomplete: scandir <ERRNO>  a directory inside a --git-root could not be listed, or its `.git`
+                    could not be inspected (a directory that is listable but not searchable), so
+                    checkouts below it may be missing: one record for that dir (path, found_via,
+                    counts null), counted under `checkouts.incomplete`; the exit status stays 0.
 Local-only commits: `local_only_commits` is `git rev-list --count HEAD --branches --not
 --remotes=origin` (plus every origin tip `ls-remote` returned with --remote; tips whose objects are
 missing here are ignored, which can only overcount). When it is above 0, `local_only_branches` is a
@@ -104,6 +107,7 @@ import os
 import atexit
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -205,8 +209,14 @@ def du_bytes(path: Path) -> int:
 
 
 def is_checkout(path: Path) -> bool:
-    git_dir = path / ".git"
-    return git_dir.exists() and not git_dir.is_symlink()
+    """True when `path` holds a `.git` that is not a symlink. lstat is used instead of `Path.exists()`,
+    which since Python 3.13 turns any OSError into False: only ENOENT/ENOTDIR mean "no .git here";
+    any other error (EACCES on a directory that is listable but not searchable) is raised."""
+    try:
+        mode = os.lstat(path / ".git").st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return not stat.S_ISLNK(mode)
 
 
 def errno_name(exc: OSError) -> str:
@@ -264,25 +274,38 @@ def newest_mtime(path: Path) -> float:
     return best
 
 
-def claim_state(task: Path) -> str:
+def claim_state(task: Path, failures: list[tuple[Path, str]] | None = None) -> str:
     claim = task / "CLAIM"
     try:
         lines = [ln.strip() for ln in claim.read_text(errors="replace").splitlines() if ln.strip()]
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
+        return "no CLAIM"
+    except OSError as exc:
+        if failures is not None:
+            failures.append((claim, errno_name(exc)))
         return "no CLAIM"
     return "DONE" if lines and lines[-1].startswith("DONE") else "open"
 
 
-def open_job_records(task: Path) -> list[str]:
+def open_job_records(task: Path, failures: list[tuple[Path, str]] | None = None) -> list[str]:
+    jobs = task / "jobs"
+    try:
+        names = sorted(e.name for e in os.scandir(jobs) if e.name.endswith(".json"))
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    except OSError as exc:
+        if failures is not None:
+            failures.append((jobs, errno_name(exc)))
+        return []
     out = []
-    for rec in sorted((task / "jobs").glob("*.json")) if (task / "jobs").is_dir() else []:
+    for name in names:
         try:
-            data = json.loads(rec.read_text(errors="replace"))
+            data = json.loads((jobs / name).read_text(errors="replace"))
         except (OSError, ValueError):
-            out.append(f"{rec.name} (unreadable)")
+            out.append(f"{name} (unreadable)")
             continue
         if isinstance(data, dict) and "closed" not in data:
-            out.append(rec.name)
+            out.append(name)
     return out
 
 
@@ -346,6 +369,8 @@ def scan_bigteam(root: Path, ref_roots: list[Path], exclude: list[str], unique_m
         size = du_bytes(task)
         traversal: list[tuple[Path, str]] = []
         reports = report_files(task, traversal)
+        claim = claim_state(task, traversal)
+        open_jobs = open_job_records(task, traversal)
         refs, search_rc = referenced(task.name, ref_roots, exclude) if reports else ([], None)
         traversal_note = None
         if traversal:
@@ -366,8 +391,8 @@ def scan_bigteam(root: Path, ref_roots: list[Path], exclude: list[str], unique_m
             verdict = "unique" if size <= unique_max else "mixed"
         tasks.append({
             "task": task.name, "bytes": size, "newest_mtime": newest_mtime(task),
-            "claim": claim_state(task), "reports": reports,
-            "open_job_records": open_job_records(task), "referenced_in": refs[:5],
+            "claim": claim, "reports": reports,
+            "open_job_records": open_jobs, "referenced_in": refs[:5],
             "verdict": verdict, "unique_bytes": unique_bytes,
             "reference_search": None if search_rc is None else f"incomplete: rc={search_rc}",
             "traversal": traversal_note,
@@ -388,7 +413,12 @@ def find_checkouts(root: Path, failures: list[tuple[Path, str]] | None = None) -
             failures.append((p, errno_name(exc)))
 
     def rec(p: Path, depth: int):
-        if is_checkout(p):
+        try:
+            checkout = is_checkout(p)
+        except OSError as exc:  # .git cannot be inspected: a checkout in here may be missing
+            fail(p, exc)
+            return
+        if checkout:
             found.append(p)
             return
         if depth == 0:
@@ -882,6 +912,11 @@ def main(argv=None) -> int:
     if args.bigteam:
         if not args.bigteam.is_dir():
             ap.error(f"--bigteam {args.bigteam} is not a directory")
+        try:
+            with os.scandir(args.bigteam):
+                pass
+        except OSError as exc:
+            ap.error(f"--bigteam {args.bigteam} cannot be listed ({errno_name(exc)})")
         result["bigteam"] = scan_bigteam(args.bigteam, args.ref_root, args.exclude,
                                          args.unique_max_bytes, args.top)
     if args.git_root:

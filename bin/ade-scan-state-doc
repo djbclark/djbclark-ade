@@ -223,7 +223,7 @@ def render(d):
     w("| # | task | size | verdict | largest children |\n|---|---|---|---|---|")
     for i, t in enumerate(tasks[:10], 1):
         fills = ", ".join(f"{code('{}', f['name'])} {human(f['bytes'])}" for f in t.get("fills", []))
-        w(f"| {i} | {esc(t['task'])} | {human(t['bytes'])} | {t['verdict']} | {fills} |")
+        w(f"| {i} | {esc(t['task'])} | {human(t['bytes'])} | {esc(t['verdict'])} | {fills} |")
     w("")
     w("`adhoc-2026-10-18` is 91% of the total: `hm-promo-rehearsal/` holds the rehearsal copies "
       "`homeB`, `homeC`, `home`, `snap-step1`, `backups-C` and `tmp` (a few GiB each, all derived from a "
@@ -238,7 +238,7 @@ def render(d):
                          for r in t["reports"][:3])
         if len(t["reports"]) > 3:
             reps += f" +{len(t['reports']) - 3}"
-        w(f"| {esc(t['task'])} | {t['verdict']} | {human(t['bytes'])} | {day(t['newest_mtime'])} | "
+        w(f"| {esc(t['task'])} | {esc(t['verdict'])} | {human(t['bytes'])} | {day(t['newest_mtime'])} | "
           f"{esc(t['claim'])} | {reps} | {t['unique_bytes']:,} | {len(t['open_job_records'])} |")
     w("")
 
@@ -246,7 +246,7 @@ def render(d):
     w("| task | size | newest | CLAIM | report files | open jobs | verdict |\n|---|---|---|---|---|---|---|")
     for t in tasks:
         w(f"| {esc(t['task'])} | {human(t['bytes'])} | {day(t['newest_mtime'])} | {esc(t['claim'])} | "
-          f"{len(t['reports'])} | {len(t['open_job_records'])} | {t['verdict']} |")
+          f"{len(t['reports'])} | {len(t['open_job_records'])} | {esc(t['verdict'])} |")
     w("")
     if incomplete_tasks:
         w("Task dirs whose reference search failed (`rg`/`grep` exited with an error or timed out, "

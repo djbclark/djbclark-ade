@@ -1104,3 +1104,126 @@ def test_an_unlistable_task_subtree_is_scan_incomplete_never_scratch(tmp_path):
     assert by["t-locked"]["unique_bytes"] == 0
     assert by["t-ok"]["verdict"] == "unique" and by["t-ok"]["traversal"] is None
     assert out["summary"]["bigteam"]["incomplete"] == 1
+
+
+def run_main(mod, capsys, *argv: Path | str) -> tuple[int, str, str]:
+    """`mod.main` in this interpreter, so the Python version under test is the one that scans."""
+    try:
+        rc = mod.main([str(a) for a in argv])
+    except SystemExit as exc:
+        rc = int(exc.code)
+    cap = capsys.readouterr()
+    return rc, cap.out, cap.err
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 directory")
+def test_a_checkout_under_a_listable_but_unsearchable_directory_is_scan_incomplete(tmp_path, capsys):
+    """Adversary round 11, 1 (MEDIUM): `Path.exists()` is False on any OSError from Python 3.13, so a
+    checkout under a `r--` directory (listable, not searchable) vanished and `incomplete` stayed 0."""
+    mod = load()
+    roots = tmp_path / "roots"
+    locked = roots / "locked"
+    make_repo(locked / "repo")
+    locked.chmod(0o444)
+    try:
+        rc, out, err = run_main(mod, capsys, "--git-root", roots, "--json")
+    finally:
+        locked.chmod(0o755)
+    assert rc == 0, err
+    res = json.loads(out)
+    assert [c["verdict"] for c in res["checkouts"]] == ["scan incomplete: scandir EACCES"], res["checkouts"]
+    assert res["checkouts"][0]["path"] == str(locked.resolve())
+    assert res["summary"]["checkouts"]["incomplete"] == 1
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 directory")
+def test_a_git_root_that_cannot_be_searched_is_scan_incomplete_not_a_crash(tmp_path, capsys):
+    """Adversary round 11, 2A: a mode 000 --git-root made Python 3.12 exit 1 with a traceback."""
+    mod = load()
+    roots = tmp_path / "roots"
+    make_repo(roots / "repo")
+    roots.chmod(0)
+    try:
+        rc, out, err = run_main(mod, capsys, "--git-root", roots, "--json")
+    finally:
+        roots.chmod(0o755)
+    assert rc == 0, err
+    res = json.loads(out)
+    assert [c["verdict"] for c in res["checkouts"]] == ["scan incomplete: scandir EACCES"], res["checkouts"]
+    assert res["summary"]["checkouts"]["incomplete"] == 1
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 directory")
+def test_an_unlistable_bigteam_root_is_a_usage_error(tmp_path, capsys):
+    """Adversary round 11, 2C: `scan_bigteam` used to raise out of `os.scandir(root)` (exit 1, traceback)."""
+    mod = load()
+    root = tmp_path / "bigteam"
+    (root / "t-1").mkdir(parents=True)
+    root.chmod(0)
+    try:
+        rc, out, err = run_main(mod, capsys, "--bigteam", root, "--json")
+    finally:
+        root.chmod(0o755)
+    assert rc == 2 and out == "", (rc, out)
+    assert f"--bigteam {root}" in err and "cannot be listed" in err, err
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 directory")
+def test_a_task_dir_that_cannot_be_searched_is_scan_incomplete_not_a_crash(tmp_path, capsys):
+    """Adversary round 11, 2D: the `jobs` and `CLAIM` probes of a `r--` task dir raised on Python 3.12 and
+    read as "absent" on 3.13+; both now give the traversal-incomplete verdict."""
+    mod = load()
+    root, refs = tmp_path / "bigteam", tmp_path / "refs"
+    task = root / "t-locked"
+    (task / "jobs").mkdir(parents=True)
+    claim_only = root / "t-claim-only"  # no jobs/ subdirectory for the walk to trip on: only the CLAIM probe
+    claim_only.mkdir()
+    (claim_only / "CLAIM").write_text("session: x\n")
+    (root / "t-ok").mkdir()
+    refs.mkdir()
+    task.chmod(0o444)
+    claim_only.chmod(0o444)
+    try:
+        rc, out, err = run_main(mod, capsys, "--bigteam", root, "--ref-root", refs, "--json")
+    finally:
+        task.chmod(0o755)
+        claim_only.chmod(0o755)
+    assert rc == 0, err
+    by = {t["task"]: t for t in json.loads(out)["bigteam"]["tasks"]}
+    for name in ("t-locked", "t-claim-only"):
+        assert by[name]["verdict"].startswith("scan incomplete: scandir EACCES "), by[name]["verdict"]
+        assert by[name]["unique_bytes"] == 0
+    assert by["t-ok"]["verdict"] == "scratch"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 directory")
+def test_a_verdict_naming_a_hostile_directory_is_escaped_in_every_doc_table(tmp_path, capsys):
+    """Adversary round 11, 3: the verdict now carries a directory name from the disk."""
+    mod = load()
+    nasty = "s|<i>x"
+    root, refs = tmp_path / "bigteam", tmp_path / "refs"
+    sub = root / "t|<b>" / nasty
+    sub.mkdir(parents=True)
+    refs.mkdir()
+    make_repo(tmp_path / "roots" / "r")
+    sub.chmod(0)
+    try:
+        rc, out, err = run_main(mod, capsys, "--bigteam", root, "--ref-root", refs, "--git-root",
+                                tmp_path / "roots", "--json")
+    finally:
+        sub.chmod(0o755)
+    assert rc == 0, err
+    (tmp_path / "scan.json").write_text(out)
+    doc = tmp_path / "doc.md"
+    gen = subprocess.run([str(SCRIPT.parent / "ade-scan-state-doc"), str(tmp_path / "scan.json"), str(doc)],
+                         capture_output=True, text=True)
+    assert gen.returncode == 0, gen.stderr
+    text = doc.read_text()
+    assert "<i>" not in text and "<b>" not in text
+    rows = [ln for ln in text.splitlines() if "scandir EACCES" in ln and ln.startswith("| ")]
+    # the 1.1 top-children table and the 1.3 every-task table; 1.2 lists only unique/mixed dirs
+    assert len(rows) == 2, rows
+    for ln in rows:
+        assert "s\\|&lt;i&gt;x" in ln, ln
+    cells = sorted(ln.replace("\\|", "").count("|") for ln in rows)
+    assert cells == [6, 8], cells  # 5 and 7 columns: no extra cell from the name's `|`
