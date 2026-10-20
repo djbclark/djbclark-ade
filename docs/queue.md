@@ -41,7 +41,15 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    in `git ls-remote` and tighten the regex to `(?<![./\w])cursor/`; (R2) `CLOUD_ACTIVE` is a guessed status list,
    so a healthy run longer than 20 polls can end as ERROR; treat any non-terminal status as active, bounded by
    the deadline, and record the raw status; (R3, info) the ls-remote fallback runs `git fetch` in the operator's
-   checkout from the poller and from `check`/`reap`.
+   checkout from the poller and from `check`/`reap`. Added at 9319d57 (adversary APPROVE, 2026-10-20): (e) the
+   overlap scan that refuses to attribute a branch while another cloud slice on the same repo is in flight sees
+   only this machine's STATE_ROOT; (S1) `CLOUD_MAX_SECONDS` is a default, not a ceiling: `extend`, a huge
+   `--timeout` or a hand-edited `timeout` pushes the re-read deadline without limit, and a non-numeric value
+   crashes the poller (clamp to the cap, `try/except` the conversion); (S2) a record whose dispatcher died during
+   the launch call (status running, `cloud_agent_id` null, no pid) is never reaped and overlaps every later slice
+   on that repo, and a peer with a non-numeric `finished` raises in `cloud_overlapping` (skip peers without
+   `cloud_agent_id`, ignore peers older than timeout + cap, guard the conversions); (S3) a result-text branch
+   confirmed on origin may predate the launch (also require the head to differ from `cloud_heads_before`).
 5. **Endpoint variables can send keys anywhere** (adversary and Codex, threat-model review 2026-10-20):
    `CURSOR_CLOUD_API` in `bin/cursor-cloud`; `FIRECRAWL_SELFHOST_URL`, `FIRECRAWL_FALLBACK_URL`,
    `FIRECRAWL_ROUTER_SIPB_BASE` and `FIRECRAWL_ROUTER_LITELLM_BASE` in `bin/firecrawl-router`. Require https
