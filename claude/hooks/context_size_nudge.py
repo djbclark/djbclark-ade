@@ -205,7 +205,11 @@ def _early_message(total, growth):
     )
 
 
-_which = shutil.which  # tests replace it; the hook never spawns orca itself
+def _which(name):
+    # The same PATH bin/self-slash searches: it exports PATH="/opt/homebrew/bin:$PATH" before
+    # choosing a host (self-slash line ~87), and a hook's inherited PATH may lack that prefix
+    # (Codex on PR 19, 2026-10-20).  Tests replace this; the hook never spawns orca itself.
+    return shutil.which(name, path="/opt/homebrew/bin:" + os.environ.get("PATH", os.defpath))
 
 
 def _self_slash_host():

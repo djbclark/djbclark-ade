@@ -366,6 +366,22 @@ def test_finish_note_when_the_other_host_var_is_stale(hook, tmp_path, monkeypatc
     assert "self-slash --finish" in out
 
 
+def test_orca_lookup_searches_self_slash_path(monkeypatch, tmp_path):
+    # self-slash prepends /opt/homebrew/bin to PATH before picking the host; the hook's
+    # lookup must see the same prefix even when the hook's own PATH lacks it.
+    seen = {}
+
+    def fake_which(name, path=None):
+        seen["path"] = path
+        return None
+
+    monkeypatch.setattr(nudge.shutil, "which", fake_which)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert nudge._which("orca") is None
+    assert seen["path"].split(os.pathsep)[0] == "/opt/homebrew/bin"
+    assert str(tmp_path) in seen["path"].split(os.pathsep)
+
+
 @pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE"])
 def test_stale_host_var_alone_means_no_self_slash(hook, tmp_path, monkeypatch, var):
     monkeypatch.setenv(var, "w1:p1")
