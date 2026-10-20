@@ -103,8 +103,9 @@ Primary flag `origin unreachable: local-only count unverified` (--remote only): 
 local `refs/remotes/origin/*` stood in for it; the checkout is never `clean and pushed` (`local_only_verified`
 false), whatever the local refs say, since a stale tracking ref would hide commits.
 Primary flag `origin url holds a credential: not queried` (--remote only): the first `remote.origin.url` has a
-password (`https://user:secret@host/x`; a username alone, `ssh://git@host` or scp-like `git@host:x`, is none),
-so `ls-remote` is not run and `--fetch` does not fetch; the checkout is treated exactly like `origin
+password, or (any scheme but ssh) a username or a query string (`https://user:secret@host/x`,
+`https://<token>@github.com/x`, `https://host/x?private_token=...`; `ssh://git@host` and scp-like
+`git@host:x` are usernames git never hands to a helper, so they are none), so `ls-remote` is not run and `--fetch` does not fetch; the checkout is treated exactly like `origin
 unreachable` (never `clean and pushed`, `local_only_verified` false). The url is in no record, flag, message
 or doc, and the query cache is keyed by its sha256 prefix. For any other url `ls-remote` is run as `git
 ls-remote --heads --tags -- origin` with the url in GIT_CONFIG_COUNT=1, GIT_CONFIG_KEY_0=remote.origin.url,
@@ -666,17 +667,25 @@ def git_takes_env_config() -> bool:
 
 
 def url_holds_credential(url: str) -> bool:
-    """Whether `url` carries a password (`https://user:secret@host/x`). A scp-like `host:path` (no `://`) is
-    ssh and has none; a username alone (`https://user@host`, `ssh://git@host`) is not a credential. An
-    unparsable authority is read by hand: anything before the last `@` that holds a `:` counts."""
+    """Whether `url` may carry a credential git would hand to a transport helper's argv. A scp-like
+    `host:path` (no `://`) is ssh and has none; `ssh://git@host` is a username, not a credential, but any
+    password (`ssh://git:secret@host`) is one. For every other scheme (http, https, ...) ANY userinfo counts
+    (`https://<token>@github.com/x` is how a token is used as the username; adversary round 22) and so does
+    a query string (`?private_token=...`). An unparsable authority is read by hand."""
     if "://" not in url:
         return False
+    scheme = url.partition("://")[0].lower()
     try:
         parts = urlsplit(url)
-        netloc, password = parts.netloc, parts.password
+        netloc, password, query = parts.netloc, parts.password, parts.query
     except ValueError:
-        netloc, password = url.partition("://")[2].split("/", 1)[0], None
-    return password is not None or ("@" in netloc and ":" in netloc.rpartition("@")[0])
+        rest = url.partition("://")[2]
+        netloc, password, query = rest.split("/", 1)[0], None, (rest.partition("?")[2] if "?" in rest else "")
+    userinfo = "@" in netloc
+    has_password = password is not None or (userinfo and ":" in netloc.rpartition("@")[0])
+    if scheme in ("ssh", "git+ssh", "ssh+git"):
+        return has_password
+    return userinfo or has_password or bool(query)
 
 
 def ls_remote_refs(url: str) -> tuple[dict[str, str], dict[str, tuple[str, str]], int] | None:
@@ -1162,7 +1171,7 @@ def main(argv=None) -> int:
                          "checkout; the first `remote.origin.url`, a path resolved against the checkout, "
                          "reaches git through GIT_CONFIG_COUNT/KEY_0/VALUE_0 (git 2.31+), never argv; an "
                          "older git is not asked and the checkout is `origin unreachable`); an origin url "
-                         "with a password is never queried (`origin url holds a credential: not queried`, "
+                         "with a password, or a username or query string on a non-ssh scheme, is never queried (`origin url holds a credential: not queried`, "
                          "treated like `origin unreachable`); "
                          "its live tips, not the local refs/remotes/origin/* (stale after a "
                          "branch is deleted there), then decide what is pushed; an origin that does not "

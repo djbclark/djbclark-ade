@@ -1771,14 +1771,19 @@ def test_a_url_with_a_password_is_never_queried_and_never_leaks(tmp_path, monkey
     assert "origin url holds a credential" in text and mod.ORIGIN_CREDENTIAL in text
 
 
-def test_url_holds_credential_reads_the_password_not_the_user():
+def test_url_holds_credential_reads_any_userinfo_or_query_on_a_non_ssh_scheme():
+    """Adversary round 22 on PR 27: a token used as the username (`https://<token>@github.com/x`) reaches
+    git-remote-https' argv like a password does; a query-string token too. ssh usernames are not secrets."""
     mod = load()
     for url, want in (("https://u:pw@host/x.git", True), ("https://u:@host/x.git", True),
-                      ("ssh://git:pw@host/x", True), ("https://user@host/x.git", False),
-                      ("ssh://git@host/x", False), ("git@host:x/y.git", False), ("host:x/y.git", False),
-                      ("https://host:8443/x.git", False), ("https://host/x?a=b@c:d", False),
+                      ("ssh://git:pw@host/x", True), ("https://user@host/x.git", True),
+                      ("https://ghp_FAKE0000@github.com/o/r.git", True), ("http://x@host/x.git", True),
+                      ("https://host/x.git?private_token=FAKE", True), ("https://host/x?a=b@c:d", True),
+                      ("ssh://git@host/x", False), ("git+ssh://git@host/x", False),
+                      ("git@host:x/y.git", False), ("host:x/y.git", False), ("user:pw@host:x/y.git", False),
+                      ("https://host:8443/x.git", False), ("https://host/x.git#frag", False),
                       ("/tmp/some/origin.git", False), ("file:///tmp/o.git", False),
-                      ("https://u:pw@[::1/x", True)):
+                      ("https://u:pw@[::1/x", True), ("https://u@[::1/x", True)):
         assert mod.url_holds_credential(url) is want, url
 
 

@@ -325,7 +325,7 @@ def render(d):
       "flags (`detached`, `origin unknown`, `local-only commits: <branch> <n>, tag <tag> <n>`) and the primary "
       "flag `origin unreachable: local-only count unverified` (`--remote` got no answer from origin, so the "
       "checkout is never `clean and pushed`) or `origin url holds a credential: not queried` (the url has a "
-      "password, so it is never queried: the same, the url is in no record). "
+      "password, or a username or query string on a non-ssh scheme, so it is never queried: the same, the url is in no record). "
       "A checkout whose `status`, `rev-parse --abbrev-ref HEAD`, `for-each-ref`, `rev-list --count` or `remote get-url origin` call (only git's exit 2 `No such remote` means no origin) "
       "fails or times out is `scan incomplete: <call> rc=<n>` (`rc=124` is a timeout; `status` gets "
       "600 s, other calls 60 s) with null counts, and is never `clean and pushed`; a repository whose "
