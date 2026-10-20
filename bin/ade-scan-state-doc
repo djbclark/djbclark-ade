@@ -59,7 +59,16 @@ def shcode(fmt, *values):
     """A code span holding a shell command: every value is `shlex.quote`d before `code()` escapes it for markdown,
     so a checkout path or branch name shaped like `side$(touch x)` cannot run anything when the cell is pasted
     (adversary round 8 on PR 27, 2026-10-20)."""
-    return code(fmt, *[shlex.quote(str(v)) for v in values])
+    return code(fmt, *[shquote(v) for v in values])
+
+
+def shquote(v):
+    """`shlex.quote`, except that a leading `~/` (the generator's own home abbreviation, `tilde()`) stays
+    outside the quotes so the shell still expands it: `~/'a b'/c`, never `'~/a b/c'` (adversary round 9)."""
+    v = str(v)
+    if v.startswith("~/"):
+        return "~/" + shlex.quote(v[2:]) if v[2:] else "~/"
+    return shlex.quote(v)
 
 
 def code(fmt, *values):
@@ -306,7 +315,7 @@ def render(d):
             need.append("mixed: say whether the logs/worktrees beside it matter")
         if t["open_job_records"]:
             need.append(f"{len(t['open_job_records'])} job record(s) unclosed")
-        w(f"| {esc(t['task'])} | {code('cp ~/.local/state/bigteam/{}/', t['task'])} {shown} -> "
+        w(f"| {esc(t['task'])} | {shcode('cp ~/.local/state/bigteam/{}/', t['task'])} {shown} -> "
           f"{code('<DEST>/{}/', t['task'])} | "
           f"{'yes: ' + '; '.join(need) if any(not n.endswith('unclosed') for n in need) else 'no (only DEST)'} |")
     w("")
@@ -388,7 +397,7 @@ def render(d):
                 cmd.append("same paths as the primary / sibling checkout (cow copy): preserve once there")
             else:
                 cmd.append(f"copy the paths to {code('<DEST>/{}-untracked/', name)} (`cp -R`), or "
-                           f"{code('git -C {} add', raw_p)} them on a branch and push")
+                           f"{shcode('git -C {} add', raw_p)} them on a branch and push")
                 need = need if need != "no" else "yes: decide whether they are work"
         w(f"| {p} | {'; '.join(what)} | {'; '.join(cmd)} | {need} |")
     w("")

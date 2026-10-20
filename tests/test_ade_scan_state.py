@@ -1041,3 +1041,13 @@ def test_capture_plan_commands_shell_quote_paths_and_branch_names():
     row = next(r for r in rows if r.startswith("| /p/evil dir ") or r.startswith("| /p/evil\\ dir "))
     assert "git -C '/p/evil dir' push origin 'side$(touch${IFS}PWNED)'" in row.replace("\\$", "$").replace("\\{", "{").replace("\\}", "}").replace("\\(", "(").replace("\\)", ")")
     assert "push origin side$(touch" not in row
+
+
+def test_shquote_keeps_a_leading_tilde_outside_the_quotes():
+    mod = load_doc()
+    assert mod.shquote("~/src/plain") == "~/src/plain"
+    assert mod.shquote("~/src/a b") == "~/'src/a b'"
+    assert mod.shquote("~/") == "~/"
+    assert mod.shquote("/abs/a b") == "'/abs/a b'"
+    assert mod.shquote("x$(y)") == "'x$(y)'"
+    assert mod.shcode("git -C {} add", "~/src/a b") == "`git -C ~/'src/a b' add`"
