@@ -958,5 +958,6 @@ def test_a_fast_forward_that_landed_before_git_timed_out_still_counts_as_applied
     out = json.loads(capsys.readouterr().out)
     assert env.head(env.machine) == new
     assert out["pulled"] is True and "timed out" in out["merge_warning"]
+    assert "merge warning" in out["problems"]  # adv round 14: a timed-out hook may still run or hold index.lock
     assert out["head_after"] == new
     assert rc in (0, 10)

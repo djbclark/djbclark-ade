@@ -511,6 +511,7 @@ def update(rep, args, repo):
                 # the fast-forward itself landed; a post-merge hook timed out or failed afterwards (Codex pass 10)
                 rep.say(f"  fast-forward applied, then git exited {rc} (a post-merge hook?): {(err or out).strip()[:300]}")
                 d["merge_warning"] = (err or out).strip()[:300]
+                problems.append("merge warning")  # the hook may still be running or hold .git/index.lock (adv round 14)
             elif rc != 0:
                 raise Stop(pull_failure_code(err or out),
                            f"git merge --ff-only {short(up)} failed; nothing merged or reset:\n{(err or out).strip()}")
