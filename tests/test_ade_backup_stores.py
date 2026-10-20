@@ -2341,3 +2341,132 @@ def test_an_unreadable_subdirectory_is_a_store_error_in_the_dry_run_like_the_cop
     entry = manifest_of(dest)["stores"][0]
     assert entry["status"] == "partial" and [e["source"] for e in entry["errors"]] == [str(locked)]
     assert plan["errors"][0]["store"] == entry["errors"][0]["store"] == only
+
+
+# --- Codex pass 19 on PR 24 (2026-10-20): glob_fd's lstat failures are errors; --json --check-schemas is JSON ---
+
+def fail_first_lstat_of(monkeypatch, name, exc):
+    """Make the descriptor-relative lstat of the directory entry `name` raise `exc` (the entry vanished or became
+    unreadable after the scandir that listed it); every other stat call is untouched."""
+    real_stat = os.stat
+    hits = []
+
+    def stat(path, *a, **k):
+        if path == name and k.get("dir_fd") is not None and k.get("follow_symlinks") is False:
+            hits.append(path)
+            raise exc
+        return real_stat(path, *a, **k)
+
+    monkeypatch.setattr(os, "stat", stat)
+    return hits
+
+
+@pytest.mark.parametrize("exc", [PermissionError(13, "Permission denied"), FileNotFoundError(2, "No such file")])
+def test_a_tree_db_whose_lstat_fails_after_the_listing_is_an_error_not_an_omission(real, monkeypatch, capsys, exc):
+    mod, home, _ = real
+    make_cursor_session(home)
+    hits = fail_first_lstat_of(monkeypatch, "store.db", exc)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 1
+    assert hits == ["store.db"]
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial" and entry["file_count"] == 0
+    assert [e["source"] for e in entry["errors"]] == [str(home / ".cursor/chats/hashA/uuid1/store.db")]
+    capsys.readouterr()
+    assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 1
+    out = capsys.readouterr().out
+    assert f"cursor-chats: {home / '.cursor/chats/hashA/uuid1/store.db'}: ERROR {type(exc).__name__}" in out
+    assert out.strip().splitlines()[-1].endswith("0 missing, 1 unopenable, 0 excluded")
+
+
+def test_a_matched_directory_whose_lstat_fails_after_the_listing_is_an_error(real, monkeypatch, capsys):
+    mod, home, _ = real
+    make_cursor_session(home)
+    fail_first_lstat_of(monkeypatch, "hashA", PermissionError(13, "Permission denied"))
+    assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 1
+    out = capsys.readouterr().out
+    assert f"cursor-chats: {home / '.cursor/chats/hashA'}: ERROR PermissionError" in out
+    assert out.strip().splitlines()[-1].endswith("0 missing, 1 unopenable, 0 excluded")
+
+
+def test_a_dangling_symlink_at_the_last_glob_component_is_still_a_silent_non_match(real, capsys):
+    mod, home, _ = real
+    sdir = home / ".cursor/chats/hashA/uuid1"
+    sdir.mkdir(parents=True)
+    (sdir / "store.db").symlink_to(home / "nowhere.db")
+    store = next(s for s in mod.build_stores(home) if s["name"] == "cursor-chats")
+    rfd = os.open(home / ".cursor/chats", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert mod.tree_db_entries(store, rfd) == ([], [])
+    finally:
+        os.close(rfd)
+    assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 0
+    assert "0 missing, 0 unopenable, 0 excluded" in capsys.readouterr().out
+
+
+def test_a_symlink_that_cannot_be_statted_for_another_reason_is_an_error(real, monkeypatch):
+    mod, home, _ = real
+    sdir = home / ".cursor/chats/hashA/uuid1"
+    sdir.mkdir(parents=True)
+    (sdir / "store.db").symlink_to(home / "nowhere.db")
+    real_stat = os.stat
+
+    def stat(path, *a, **k):
+        if path == "store.db" and k.get("dir_fd") is not None and k.get("follow_symlinks", True):
+            raise PermissionError(13, "Permission denied")
+        return real_stat(path, *a, **k)
+
+    monkeypatch.setattr(os, "stat", stat)
+    store = next(s for s in mod.build_stores(home) if s["name"] == "cursor-chats")
+    rfd = os.open(home / ".cursor/chats", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        found, errors = mod.tree_db_entries(store, rfd)
+    finally:
+        os.close(rfd)
+    assert found == [] and [(p, type(e).__name__) for p, e in errors] == [(("hashA", "uuid1", "store.db"), "PermissionError")]
+
+
+def run_json(mod, capsys, *args):
+    code = mod.main(["--json", "--check-schemas", *args])
+    cap = capsys.readouterr()
+    return code, json.loads(cap.out), cap.err
+
+
+def test_json_check_schemas_names_the_missing_store_and_keeps_the_exit_code(real, capsys):
+    mod, home, _ = real
+    assert mod.main(["--check-schemas", "--only", "grok-db"]) == 0
+    text = capsys.readouterr().out
+    code, doc, err = run_json(mod, capsys, "--only", "grok-db")
+    assert code == 0 and doc["ok"] is True and doc["exit_code"] == 0 and doc["reasons"] == []
+    assert doc["totals"]["missing"] == 1 and doc["strict_stores"] is False
+    (store,) = doc["stores"]
+    assert store["name"] == "grok-db" and store["state"] == "missing" and store["missing"] == 1
+    assert store["findings"] == [{"state": "missing", "path": str(home / ".grok/worktrees.db"),
+                                  "message": f"grok-db: {home / '.grok/worktrees.db'}: missing"}]
+    assert err == text  # the human lines moved to stderr unchanged; stdout is only the document
+    code, doc, _ = run_json(mod, capsys, "--only", "grok-db", "--strict-stores")
+    assert code == 1 and doc["ok"] is False and doc["exit_code"] == 1
+    assert doc["reasons"] == ["missing stores or paths (--strict-stores)"]
+
+
+def test_json_check_schemas_reports_problems_and_checked_databases(real, capsys):
+    mod, home, _ = real
+    make_cursor_session(home)
+    code, doc, _ = run_json(mod, capsys, "--only", "cursor-chats")
+    (store,) = doc["stores"]
+    assert code == 0 and store["state"] == "ok" and store["dbs_checked"] == 1 and store["findings"] == []
+    (home / ".cursor/chats/hashA/uuid1/store.db").unlink()
+    (home / ".cursor/chats/hashA/uuid1/store.db").symlink_to(home / "elsewhere.db")
+    (home / "elsewhere.db").write_bytes(b"")
+    code, doc, _ = run_json(mod, capsys, "--only", "cursor-chats")
+    (store,) = doc["stores"]
+    assert code == 1 and doc["ok"] is False and doc["reasons"] == ["symlink problems"]
+    assert store["state"] == "problem" and store["link_problems"] == 1
+    assert [f["state"] for f in store["findings"]] == ["symlink_not_opened"]
+
+
+def test_json_check_schemas_on_hermes_export_covers_the_state_db_source(real, capsys):
+    mod, home, _ = real
+    code, doc, _ = run_json(mod, capsys, "--only", "hermes-export", "--strict-stores")
+    assert code == 1 and [s["name"] for s in doc["stores"]] == ["hermes-state"]
+    assert doc["stores"][0]["state"] == "missing"

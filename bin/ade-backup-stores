@@ -67,7 +67,9 @@ file opened relative to its parent's descriptor with O_NOFOLLOW (a SQLite source
 from its store root), never through a path string that could be re-pointed. An optional sidecar that is
 present but a symlink, an excluded path or not a regular file is skipped and listed under `skipped`. The dry run's bytes
 for a SQLite file are the main file plus its `-wal` file, an upper bound on the snapshot the online backup
-writes. `--check-schemas` counts an absent tree root or database as `missing`.
+writes. `--check-schemas` counts an absent tree root or database as `missing`. `--json --check-schemas` prints one JSON
+document on stdout (`ok`, `exit_code`, `reasons`, `totals` and, per store, its `state` (`ok`, `missing`, `problem`),
+counts and `findings` of state, path and the line text) and the human lines on stderr; the exit status is unchanged.
 
 Default dest: ~/.local/state/ade/backups/<UTC timestamp>/ (0700, files 0600). The generation is built in
 <dest>.part/ and renamed to <dest>/ at the end: a <dest>.part/ directory, or a generation without
@@ -79,6 +81,7 @@ the handoffs `chains/` are pruned by something else, so those stores come first.
 import argparse
 import concurrent.futures
 import datetime
+import errno
 import fnmatch
 import hashlib
 import json
@@ -821,6 +824,9 @@ def exists_at(name, dir_fd):
     return True
 
 
+DANGLING_ERRNOS = (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)
+
+
 def glob_fd(dfd, comps, prefix, found, errors):
     """Match the glob components `comps` below the open directory `dfd`, appending (parts, linked) to `found` and
     (parts, OSError) to `errors`. Everything is relative to a descriptor: a directory is entered with
@@ -828,21 +834,29 @@ def glob_fd(dfd, comps, prefix, found, errors):
     as one skipped symlink) on an `lstat` alone: it is never followed, so a link to a hung mount cannot block
     here, and never entered (nothing behind a link is listed), whatever it points to or whether it dangles. At
     the last component a symlink is classified with one `stat` and, when it leads to a regular file, is the match
-    (`linked` true, never opened)."""
+    (`linked` true, never opened); a link that dangles or loops (`DANGLING_ERRNOS`) is no match. An entry whose
+    `lstat` fails (gone or unreadable since the listing) and any other `stat` failure is an error, never a silent
+    omission."""
     comp, rest = comps[0], comps[1:]
     with os.scandir(dfd) as it:
         names = sorted(e.name for e in it)
     for name in names:
         if not fnmatch.fnmatchcase(name, comp):
             continue
+        here = prefix + (name,)
         try:
             mode = os.stat(name, dir_fd=dfd, follow_symlinks=False).st_mode
-            is_link = stat.S_ISLNK(mode)
-            if is_link and not rest:
-                mode = os.stat(name, dir_fd=dfd).st_mode  # a dangling link raises and is not a match
-        except OSError:
+        except OSError as exc:  # gone or unreadable since the listing: an error, never a silent omission
+            errors.append((here, exc))
             continue
-        here = prefix + (name,)
+        is_link = stat.S_ISLNK(mode)
+        if is_link and not rest:
+            try:
+                mode = os.stat(name, dir_fd=dfd).st_mode
+            except OSError as exc:
+                if exc.errno not in DANGLING_ERRNOS:  # a dangling or looping link is no match; the rest is an error
+                    errors.append((here, exc))
+                continue
         if not rest:
             if stat.S_ISREG(mode):
                 found.append((here, is_link))
@@ -1510,49 +1524,95 @@ def root_type_problem(store, label, path):
     return NotADirectoryError(f"configured directory root {label} is not a directory")
 
 
-def check_file_roots(store, excluder):
+class SchemaReport:
+    """What --check-schemas found, per store: counters and findings (state, path, the printed line), names only.
+    With `json_out` the human lines go to stderr, so stdout carries only the one JSON document `finish` prints."""
+    COUNTS = ("problems", "link_problems", "missing", "unopenable", "excluded")
+
+    def __init__(self, stores, json_out=False):
+        self.json_out = json_out
+        self.stores = {s["name"]: {"name": s["name"], "state": "ok", "dbs_checked": 0, "paths_present": 0,
+                                   **dict.fromkeys(self.COUNTS, 0), "findings": []} for s in stores}
+
+    def say(self, text):
+        print(text, file=sys.stderr if self.json_out else sys.stdout)
+
+    def note(self, store, state, path, text):
+        """One printed line about `path` of `store`, recorded as a finding in `state`."""
+        self.say(text)
+        self.stores[store]["findings"].append({"state": state, "path": str(path), "message": text})
+
+    def count(self, store, key, n=1):
+        self.stores[store][key] += n
+
+    def total(self, key):
+        return sum(s[key] for s in self.stores.values())
+
+    def finish(self, strict):
+        """Print the summary line (and, with --json, the JSON document); return the exit status."""
+        problems, link_problems, missing, unopenable, excluded = (self.total(k) for k in self.COUNTS)
+        self.say(f"schema check: {problems} unexplained credential-looking name(s), {link_problems} symlink problem(s), "
+                 f"{missing} missing, {unopenable} unopenable, {excluded} excluded")
+        reasons = [why for n, why in ((problems, "unexplained credential-looking names"),
+                                      (link_problems, "symlink problems"), (unopenable, "unopenable databases or paths"),
+                                      (strict and missing, "missing stores or paths (--strict-stores)")) if n]
+        code = 1 if reasons else 0
+        if self.json_out:
+            for s in self.stores.values():
+                s["state"] = ("problem" if s["problems"] or s["link_problems"] or s["unopenable"]
+                              else "missing" if s["missing"] else "ok")
+            print(json.dumps({"check_schemas": True, "ok": code == 0, "exit_code": code, "strict_stores": strict,
+                              "reasons": reasons, "totals": dict(zip(self.COUNTS, (problems, link_problems, missing,
+                                                                                  unopenable, excluded))),
+                              "stores": list(self.stores.values())}, indent=1))
+        return code
+
+
+def check_file_roots(store, excluder, rep):
     """--check-schemas for a file store: each configured root is looked at with lstat/stat only (never opened),
-    through the same exclusion and root-link gates the copy applies. Returns (present, missing, excluded,
-    link_problems, type_problems); prints one line per absent, excluded, refused or wrongly typed root."""
-    present = missing = excluded = link_problems = type_problems = 0
+    through the same exclusion and root-link gates the copy applies. Records into `rep` (one line per absent,
+    excluded, refused or wrongly typed root, then the present count)."""
+    name = store["name"]
     for label, src in store["roots"]:
         linked = is_linked(src, excluder)
         if excluder.path(src, follow=not linked):
-            print(f"{store['name']}: {src}: skipped (excluded credential path)")
-            excluded += 1
+            rep.note(name, "excluded", src, f"{name}: {src}: skipped (excluded credential path)")
+            rep.count(name, "excluded")
             continue
         real = src
         if linked:
             real, why = root_link_target(src, excluder)
             if why:
-                print(f"{store['name']}: {src}: symlink refused: {why}")
-                link_problems += 1
+                rep.note(name, "symlink_refused", src, f"{name}: {src}: symlink refused: {why}")
+                rep.count(name, "link_problems")
                 continue
-            print(f"{store['name']}: {src}: symlink -> {real}")
+            rep.note(name, "symlink_followed", src, f"{name}: {src}: symlink -> {real}")
         if not os.path.lexists(real):
-            print(f"{store['name']}: {src}: missing")
-            missing += 1
+            rep.note(name, "missing", src, f"{name}: {src}: missing")
+            rep.count(name, "missing")
             continue
         exc = root_type_problem(store, label, real)
         if exc:
-            print(f"{store['name']}: {src}: ERROR {type(exc).__name__}: {exc}")
-            type_problems += 1
+            rep.note(name, "error", src, f"{name}: {src}: ERROR {type(exc).__name__}: {exc}")
+            rep.count(name, "unopenable")
             continue
-        present += 1
-    print(f"{store['name']}: {present} of {len(store['roots'])} configured path(s) present")
-    return present, missing, excluded, link_problems, type_problems
+        rep.count(name, "paths_present")
+    rep.say(f"{name}: {rep.stores[name]['paths_present']} of {len(store['roots'])} configured path(s) present")
 
 
-def check_schemas(stores, excluder, strict=False):
+def check_schemas(stores, excluder, strict=False, json_out=False):
     """--check-schemas: the schema guard on the live databases, read-only; prints names only. A database
     inside a per-session tree that is a symlink or sits under a symlinked directory is never opened; a
     configured SQLite path that is a symlink is opened through its target when the root-link rule allows
     it (`symlink -> target`, information) and refused otherwise (`symlink refused`). Both refusals count as
     symlink problems, apart from the credential-looking names. A database with a credential name or path
     (the copy's exclusions) is never opened (`skipped`, counted as `excluded`). A file store is not opened
-    either: each configured root is checked to exist (absent counts as `missing`, a strict failure)."""
-    problems = link_problems = missing = unopenable = excluded = 0
+    either: each configured root is checked to exist (absent counts as `missing`, a strict failure). With
+    `json_out` stdout is one JSON document (`SchemaReport.finish`) and the human lines go to stderr; the exit
+    status is the same either way."""
+    rep = SchemaReport(stores, json_out)
     for store in stores:
+        sname = store["name"]
         if store["kind"] == "sqlite":
             dbs = list(store["files"])
         elif store["kind"] == "sqlite-tree":
@@ -1560,13 +1620,13 @@ def check_schemas(stores, excluder, strict=False):
             if is_linked(search, excluder):
                 search, why = root_link_target(store["root"], excluder)
                 if why:
-                    print(f"{store['name']}: {store['root']}: symlink refused: {why}")
-                    link_problems += 1
+                    rep.note(sname, "symlink_refused", store["root"], f"{sname}: {store['root']}: symlink refused: {why}")
+                    rep.count(sname, "link_problems")
                     continue
-                print(f"{store['name']}: {store['root']}: symlink -> {search}")
+                rep.note(sname, "symlink_followed", store["root"], f"{sname}: {store['root']}: symlink -> {search}")
             if not os.path.lexists(store["root"]):
-                print(f"{store['name']}: {store['root']}: missing")
-                missing += 1
+                rep.note(sname, "missing", store["root"], f"{sname}: {store['root']}: missing")
+                rep.count(sname, "missing")
                 continue
             dbs, linked_dbs = [], set()
             if search.is_dir():
@@ -1578,50 +1638,48 @@ def check_schemas(stores, excluder, strict=False):
                     finally:
                         os.close(rfd)
                 except OSError as exc:
-                    print(f"{store['name']}: {store['root']}: ERROR {type(exc).__name__}: {exc}")
-                    unopenable += 1
+                    rep.note(sname, "error", store["root"],
+                             f"{sname}: {store['root']}: ERROR {type(exc).__name__}: {exc}")
+                    rep.count(sname, "unopenable")
                     continue
                 for parts, exc in errors:
-                    print(f"{store['name']}: {search.joinpath(*parts)}: ERROR {type(exc).__name__}: {exc}")
-                    unopenable += 1
+                    rep.note(sname, "error", search.joinpath(*parts),
+                             f"{sname}: {search.joinpath(*parts)}: ERROR {type(exc).__name__}: {exc}")
+                    rep.count(sname, "unopenable")
                 dbs = [search.joinpath(*parts) for parts, _ in entries]
                 linked_dbs = {search.joinpath(*parts) for parts, linked in entries if linked}
         else:
-            _, m, e, lp, tp = check_file_roots(store, excluder)
-            missing += m
-            excluded += e
-            link_problems += lp
-            unopenable += tp
+            check_file_roots(store, excluder, rep)
             continue
         for db in dbs:
             target = db
             if store["kind"] == "sqlite-tree":
                 if db in linked_dbs:
-                    print(f"{store['name']}: {db}: symlink, not opened")
-                    link_problems += 1
+                    rep.note(sname, "symlink_not_opened", db, f"{sname}: {db}: symlink, not opened")
+                    rep.count(sname, "link_problems")
                     continue
                 is_excl = is_excluded_name(db.name) or excluder.path(db)
             else:
                 is_excl = excluder.path(db, follow=not is_linked(db, excluder))
             if is_excl:  # never opened: a read-only open can still create -wal/-shm beside it
-                print(f"{store['name']}: {db}: skipped (excluded credential path)")
-                excluded += 1
+                rep.note(sname, "excluded", db, f"{sname}: {db}: skipped (excluded credential path)")
+                rep.count(sname, "excluded")
                 continue
             if store["kind"] == "sqlite" and is_linked(db, excluder):
                 target, why = root_link_target(db, excluder)
                 if why:
-                    print(f"{store['name']}: {db}: symlink refused: {why}")
-                    link_problems += 1
+                    rep.note(sname, "symlink_refused", db, f"{sname}: {db}: symlink refused: {why}")
+                    rep.count(sname, "link_problems")
                     continue
-                print(f"{store['name']}: {db}: symlink -> {target}")
+                rep.note(sname, "symlink_followed", db, f"{sname}: {db}: symlink -> {target}")
             if store["kind"] == "sqlite" and not target.is_file():
                 refusal = non_regular_source(target, excluder)  # present but not a regular file: the run's refusal
                 if refusal:
-                    print(f"{store['name']}: {db}: ERROR {type(refusal).__name__}: {refusal}")
-                    unopenable += 1
+                    rep.note(sname, "error", db, f"{sname}: {db}: ERROR {type(refusal).__name__}: {refusal}")
+                    rep.count(sname, "unopenable")
                 else:
-                    print(f"{store['name']}: {db}: missing")
-                    missing += 1
+                    rep.note(sname, "missing", db, f"{sname}: {db}: missing")
+                    rep.count(sname, "missing")
                 continue
             try:
                 con = ro_connect(*home_anchor(target, excluder))
@@ -1630,18 +1688,18 @@ def check_schemas(stores, excluder, strict=False):
                 finally:
                     con.close()
             except (OSError, sqlite3.Error) as exc:
-                print(f"{store['name']}: {db}: ERROR {type(exc).__name__}: {exc}")
-                unopenable += 1
+                rep.note(sname, "error", db, f"{sname}: {db}: ERROR {type(exc).__name__}: {exc}")
+                rep.count(sname, "unopenable")
                 continue
+            rep.count(sname, "dbs_checked")
             for table, col in hits:
                 name = table if col is None else f"{table}.{col}"
-                why = explained(store["name"], table, col)
+                why = explained(sname, table, col)
                 if not why:
-                    problems += 1
-                print(f"{store['name']}: {db.name}: {name}: {why or 'UNEXPLAINED'}")
-    print(f"schema check: {problems} unexplained credential-looking name(s), {link_problems} symlink problem(s), "
-          f"{missing} missing, {unopenable} unopenable, {excluded} excluded")
-    return 1 if problems or link_problems or unopenable or (strict and missing) else 0
+                    rep.count(sname, "problems")
+                rep.note(sname, "explained" if why else "unexplained", db,
+                         f"{sname}: {db.name}: {name}: {why or 'UNEXPLAINED'}")
+    return rep.finish(strict)
 
 
 def main(argv=None):
@@ -1658,7 +1716,8 @@ def run_main(argv):
     ap.add_argument("--dest", help="new backup directory (default ~/.local/state/ade/backups/<UTC timestamp>/)")
     ap.add_argument("--dry-run", action="store_true", help="print what would be backed up; write nothing")
     ap.add_argument("--only", help="comma-separated store names (hermes-export is one)")
-    ap.add_argument("--json", action="store_true", help="print a machine-readable summary on stdout")
+    ap.add_argument("--json", action="store_true", help="print a machine-readable summary on stdout (with "
+                    "--check-schemas: the schema check result as one JSON document, the text lines on stderr)")
     ap.add_argument("--check-schemas", action="store_true",
                     help="run the credential schema guard on the live databases (read-only, names only); write nothing")
     ap.add_argument("--strict-stores", action="store_true",
@@ -1679,7 +1738,7 @@ def run_main(argv):
         if "hermes-export" in wanted and "hermes-state" not in wanted:
             # the export reads a copy of ~/.hermes/state.db (the hermes-state store): check that source like it
             selected += [s for s in stores if s["name"] == "hermes-state"]
-        return check_schemas(selected, Excluder(home), args.strict_stores)
+        return check_schemas(selected, Excluder(home), args.strict_stores, args.json)
     dest = resolve_dest(args.dest)
     reason = refuse_reason(dest, stores)
     if reason:
