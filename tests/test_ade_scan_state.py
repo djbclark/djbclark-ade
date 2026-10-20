@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import time
 import types
 from pathlib import Path
 
@@ -221,3 +222,202 @@ def test_branch_on_origin_without_upstream_but_ahead_is_unpushed(tmp_path):
     c = mod.scan_git([roots], remote=True)[0]
     assert c["on_origin"] is True and c["unpushed"] == "no upstream"
     assert c["ahead_of_origin"] == 1 and c["verdict"] == "unpushed commits"
+
+
+def make_repo(path: Path, name: str = "a.txt") -> Path:
+    path.mkdir(parents=True)
+    git(path, "init", "-b", "main")
+    (path / name).write_text("a\n")
+    git(path, "add", name)
+    git(path, "commit", "-m", "first")
+    return path
+
+
+def test_config_that_runs_commands_is_skipped_and_never_run(tmp_path):
+    mod = load()
+    roots = tmp_path / "roots"
+    fsm = make_repo(roots / "fsm")
+    upl = make_repo(roots / "upl")
+    ok = make_repo(roots / "ok")
+    m_fsm, m_upl = tmp_path / "PWNED-fsmonitor", tmp_path / "PWNED-uploadpack"
+    git(fsm, "config", "core.fsmonitor", f"touch {m_fsm}; false")
+    git(upl, "remote", "add", "origin", str(ok))
+    git(upl, "config", "remote.origin.uploadpack", f"touch {m_upl}; git-upload-pack")
+    res = {Path(c["path"]).name: c for c in mod.scan_git([roots], remote=True)}
+    assert not m_fsm.exists() and not m_upl.exists()
+    for name, key in (("fsm", "core.fsmonitor"), ("upl", "remote.origin.uploadpack")):
+        assert res[name]["verdict"] == "skipped: repo config runs commands"
+        assert res[name]["config_keys"] == [key]
+        assert res[name]["untracked"] is None
+    assert res["ok"]["verdict"] != res["fsm"]["verdict"]
+    # second layer: even a call that bypasses the config check does not run fsmonitor
+    (fsm / "new.txt").write_text("x\n")
+    mod.git(fsm, "status", "--porcelain")
+    assert not m_fsm.exists()
+    summary = mod.summarize({"checkouts": list(res.values())})
+    assert summary["checkouts"]["skipped"] == 2
+    assert "| - |" in mod.markdown({"checkouts": [res["fsm"]]})
+
+
+def test_runs_commands_keys(tmp_path):
+    mod = load()
+    for key, value in (("core.fsmonitor", "/x/hook"), ("core.sshCommand", "ssh -i k"),
+                       ("remote.origin.uploadpack", "x"), ("remote.o.receivepack", "x"),
+                       ("filter.lfs.clean", "x"), ("credential.helper", "!x"),
+                       ("core.hooksPath", "/h"), ("include.path", "../x"),
+                       ("includeIf.gitdir:/a/.path", "x"), ("remote.o.vcs", "x")):
+        assert mod.runs_commands(key, value), key
+    for key, value in (("core.fsmonitor", "false"), ("core.fsmonitor", "true"),
+                       ("remote.origin.url", "x"), ("user.name", "x"), ("core.bare", "false")):
+        assert not mod.runs_commands(key, value), key
+    repo = make_repo(tmp_path / "r")
+    git(repo, "config", "core.fsmonitor", "false")
+    git(repo, "config", "filter.x.clean", "cat")
+    assert mod.unsafe_config(repo) == ["filter.x.clean"]
+    git(repo, "config", "--unset", "filter.x.clean")
+    assert mod.unsafe_config(repo) == []
+
+
+def test_config_included_from_a_file_is_caught(tmp_path):
+    mod = load()
+    repo = make_repo(tmp_path / "roots" / "inc")
+    extra = tmp_path / "extra.cfg"
+    extra.write_text("[core]\n\tsshCommand = touch /nonexistent/x\n")
+    git(repo, "config", "include.path", str(extra))
+    c = mod.scan_git([tmp_path / "roots"], remote=False)[0]
+    assert c["verdict"] == "skipped: repo config runs commands"
+    assert "include.path" in c["config_keys"]
+
+
+def test_symlinks_out_of_a_root_are_not_followed(tmp_path):
+    mod = load()
+    outside = make_repo(tmp_path / "elsewhere" / "repo")
+    roots = tmp_path / "roots"
+    roots.mkdir()
+    (roots / "link").symlink_to(outside.parent)
+    make_repo(roots / "real")
+    (roots / "gitlink").mkdir()
+    (roots / "gitlink" / ".git").symlink_to(outside / ".git")
+    found = [p.name for p in mod.find_checkouts(roots)]
+    assert found == ["real"]
+
+
+def test_ambient_git_variables_are_ignored(tmp_path, monkeypatch):
+    mod = load()
+    decoy = make_repo(tmp_path / "decoy")
+    roots = tmp_path / "roots"
+    work = make_repo(roots / "work")
+    (work / "untracked.txt").write_text("u\n")
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.fsmonitor=touch /nonexistent/x'")
+    env = mod.git_env()
+    assert {k for k in env if k.startswith("GIT_")} == {
+        "GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"}
+    assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+    c = mod.scan_git([roots], remote=False)[0]
+    assert c["untracked"] == 1 and "dirty" in c["flags"]
+
+
+def test_network_env_is_batch_only(monkeypatch):
+    mod = load()
+    monkeypatch.setenv("SSH_ASKPASS", "/bin/x")
+    monkeypatch.setenv("GIT_ASKPASS", "/bin/x")
+    env = mod.git_env(network=True)
+    assert env["GIT_SSH_COMMAND"] == "ssh -o BatchMode=yes"
+    assert "SSH_ASKPASS" not in env and "GIT_ASKPASS" not in env
+
+
+def test_run_closes_stdin_and_kills_the_process_group_on_timeout(tmp_path):
+    mod = load()
+    assert mod.run(["cat"], timeout=10) == (0, "")  # stdin is /dev/null, not the caller's
+    pidfile = tmp_path / "child.pid"
+    rc, _ = mod.run(["sh", "-c", f"sleep 60 & echo $! > {pidfile}; wait"], timeout=1)
+    assert rc == 124
+    pid = int(pidfile.read_text())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(pid, 9)
+        raise AssertionError("the grandchild survived the timeout")
+
+
+def test_fetch_downloads_the_tip_and_writes_no_refs(tmp_path):
+    mod = load()
+    origin = tmp_path / "origin.git"
+    git(tmp_path, "init", "--bare", "-b", "main", str(origin))
+    roots = tmp_path / "roots"
+    roots.mkdir()
+    work, other = roots / "work", tmp_path / "other"
+    git(tmp_path, "clone", str(origin), str(work))
+    git(work, "checkout", "-b", "main")
+    (work / "a.txt").write_text("a\n")
+    git(work, "add", "a.txt")
+    git(work, "commit", "-m", "first")
+    git(work, "push", "-u", "origin", "main")
+    git(tmp_path, "clone", str(origin), str(other))
+    (other / "o.txt").write_text("o\n")
+    git(other, "add", "o.txt")
+    git(other, "commit", "-m", "elsewhere")
+    git(other, "push", "origin", "main")
+    tip = git(other, "rev-parse", "HEAD").strip()
+    (work / "w.txt").write_text("w\n")
+    git(work, "add", "w.txt")
+    git(work, "commit", "-m", "local, unpushed")  # diverged: origin's tip is not an ancestor
+    refs_before = git(work, "for-each-ref")
+    c = mod.scan_git([roots], remote=True, fetch=False)[0]
+    assert "origin tip not fetched" in c["flags"]
+    mod._remote_cache.clear()
+    c = mod.scan_git([roots], remote=True, fetch=True)[0]
+    assert "origin tip not fetched" not in c["flags"]
+    assert c["ahead_of_origin"] == 1
+    git(work, "cat-file", "-e", tip)  # the objects arrived
+    assert git(work, "for-each-ref") == refs_before  # no ref moved
+    assert not (work / ".git" / "FETCH_HEAD").exists()
+
+
+def test_phase0_scan_doc_never_makes_a_unique_report_scratch(tmp_path):
+    doc = SCRIPT.parent.parent / "docs" / "ade-everywhere-phase0-scan-2026-10-20.md"
+    names = []
+    for line in doc.read_text().splitlines():
+        cells = [c.strip() for c in line.split("|")]
+        if len(cells) > 3 and cells[2] == "unique" and cells[1] not in names:
+            names.append(cells[1])
+    assert len(names) >= 6
+    refs = tmp_path / "docs"
+    refs.mkdir()
+    (refs / doc.name).write_text(doc.read_text())
+    root = tmp_path / "bigteam"
+    for n in names[:6]:
+        (root / n).mkdir(parents=True)
+        (root / n / "r-report.md").write_text("x\n")
+    p = subprocess.run([str(SCRIPT), "--bigteam", str(root), "--ref-root", str(refs), "--json"],
+                       capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    assert json.loads(p.stdout)["summary"]["bigteam"]["verdicts"] == {"unique": 6}
+    # --exclude adds to the built-in glob; it does not replace it
+    p = subprocess.run([str(SCRIPT), "--bigteam", str(root), "--ref-root", str(refs),
+                        "--exclude", "other-*.md", "--json"], capture_output=True, text=True)
+    assert json.loads(p.stdout)["summary"]["bigteam"]["verdicts"] == {"unique": 6}
+
+
+def test_markdown_cells_are_escaped(tmp_path):
+    mod = load()
+    nasty = "a|b`c<img src=x>&d"
+    res = {"checkouts": [{"path": f"/p/{nasty}", "branch": nasty, "modified": 0, "untracked": 0,
+                          "unpushed": 0, "stashes": 0, "on_origin": True, "flags": ["dirty", nasty],
+                          "verdict": "dirty"}],
+           "bigteam": {"tasks": [{"task": nasty, "bytes": 1, "newest_mtime": 0.0, "claim": "open",
+                                  "reports": [{"path": f"{nasty}-report.md", "bytes": 1,
+                                               "done": False}],
+                                  "open_job_records": [], "verdict": "unique"}]}}
+    out = mod.markdown(res)
+    for line in out.splitlines():
+        if line.startswith("| /p/") or line.startswith("| a"):
+            assert "<img" not in line and "&lt;img src=x&gt;&amp;d" in line
+            assert line.replace("\\|", "").count("|") == (9 if line.startswith("| /p/") else 8)
+            assert "\\`" in line and "`c" not in line.replace("\\`", "")

@@ -1,17 +1,29 @@
 #!/usr/bin/env python3
-"""ade-scan-state: read-only scan of bigteam task dirs and git checkouts.
+"""ade-scan-state: scan of bigteam task dirs and git checkouts that changes no work.
 
 Phase 0 item 4.3 of docs/ade-everywhere-proposal.md (djbclark, 2026-10-20): find unique reports,
 dirty trees, untracked files and unpushed commits before anything is cleaned up. Nothing is moved,
-deleted, committed, stashed or checked out; the only network calls are `git ls-remote` (read-only; --remote)
-and a refs-only `git fetch origin <branch>` (--fetch) when the origin tip cannot be compared.
+deleted, committed, stashed or checked out; the only network calls are `git ls-remote` (--remote)
+and `git fetch` of one branch (--fetch) when the origin tip cannot be compared: it downloads that
+branch's objects, writes no refs and no FETCH_HEAD, and runs no auto-maintenance.
+
+A checkout's own git config can name commands (core.fsmonitor, core.sshCommand, remote.*.uploadpack,
+filter.*, credential.*, hooksPath, include.*). The tool reads that config without running anything
+first and skips such a checkout (`skipped: repo config runs commands`); every later git call also
+turns fsmonitor and hooks off, drops every GIT_* variable from the environment, reads no global or
+system config, and `ls-remote` runs from a neutral directory. Symlinks out of a --git-root are not
+followed: name each root you want scanned.
 
   ade-scan-state --bigteam ~/.local/state/bigteam \\
       --ref-root ~/src/djbclark-ade/docs --ref-root ~/ops/site-private/memory \\
       --ref-root ~/.local/state/handoffs \\
+      --exclude 'extra-doc-*.md' \\
       --git-root ~/orca/workspaces --git-root ~/orca/projects --git-root ~/.cow/pastures \\
       --remote --json > scan.json
-  ade-scan-state --bigteam DIR --markdown        # the tables of the Phase 0 scan doc
+  ade-scan-state --bigteam DIR --markdown        # raw tables (bin/ade-scan-state-doc builds the doc)
+
+`ade-everywhere-phase0-scan-*` is always excluded from the reference search (the scan doc names every
+task it lists, so it would make every report look cited); --exclude adds globs, it never replaces it.
 
 Bigteam verdicts (per task dir, ~/.local/state/bigteam/<task>/):
   scratch  no report file, or every report is already referenced under a --ref-root
@@ -24,16 +36,18 @@ checkout. "Referenced" is a whole-word match of the task name in any file under 
 referenced verdict is a lead, not a proof. `size` is `du -sk`; `newest_mtime` looks two levels deep.
 
 Git checkout verdicts (a checkout is a dir holding `.git`, found up to two levels under each
---git-root, symlinks resolved and deduplicated):
+--git-root, symlinks not followed, deduplicated):
   unpushed commits  the upstream exists and HEAD is ahead of it
   orphan branch     the branch is on no origin ref and HEAD has commits origin lacks
   dirty             modified or untracked non-ignored paths
   clean and pushed  none of the above
+  skipped: repo config runs commands   the checkout's config names a command; nothing else was run
 Extra flag `origin tip not fetched`: the branch is on origin at a commit this checkout cannot
 compare with HEAD (add --fetch); `ahead_of_origin` then still counts those commits.
 A checkout with no `origin` remote at all has every commit "ahead of origin": it is an orphan
 branch and carries the extra flag `no origin remote`. `stash` is a flag, never a primary verdict.
-The primary verdict is the first that applies in that order; `flags` lists every one.
+The primary verdict is the first that applies in that order; `flags` lists every one. A skipped
+checkout has no counts (null) and `config_keys` names the offending keys, never their values.
 
 Exit codes: 0 scan completed; 2 usage error. Pass --json for machine-readable output.
 """
@@ -42,9 +56,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import atexit
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -52,17 +69,53 @@ REPORT_DEPTH = 3
 MTIME_DEPTH = 2
 GIT_SCAN_DEPTH = 2
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "target"}
-GIT_ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
+# Always excluded from the "is this task name cited" search; --exclude adds to this list.
+DEFAULT_EXCLUDES = ["ade-everywhere-phase0-scan-*"]
+SKIPPED = "skipped: repo config runs commands"
+# Prefix of every git call: no index lock, and the config-named programs that run on any command off.
+GIT_SAFE = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+            "-c", "protocol.ext.allow=never"]
+# Config that makes git run a program (read from the checkout's local / worktree scope).
+RUNS_COMMANDS = ("core.sshcommand", "core.hookspath", "core.gitproxy", "core.askpass",
+                 "core.alternaterefscommand")
+RUNS_COMMANDS_PREFIX = ("include.", "includeif.", "filter.", "credential.")
+RUNS_COMMANDS_SECTION_SUFFIX = {"remote": (".uploadpack", ".receivepack", ".vcs", ".proxy")}
+BOOLEAN_WORDS = {"true", "false", "yes", "no", "on", "off", "1", "0", ""}
+
+
+def git_env(network: bool = False) -> dict:
+    """The caller's environment minus every GIT_* key, plus this tool's own; no global/system config."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull, "LC_ALL": "C"})
+    if network:
+        env.pop("SSH_ASKPASS", None)
+        env.update({"GIT_SSH_COMMAND": "ssh -o BatchMode=yes",
+                    "GIT_ALLOW_PROTOCOL": "file:git:http:https:ssh"})
+    return env
 
 
 def run(argv, timeout=120, cwd=None, env=None):
-    """argv list in, (rc, stdout); never raises on a missing tool or timeout."""
+    """argv list in, (rc, stdout); never raises on a missing tool or timeout.
+
+    stdin is /dev/null and the child leads its own process group, so a timeout kills git together
+    with the ssh / git-remote-https children it started."""
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd,
-                           env=env, errors="replace")
-        return p.returncode, p.stdout
-    except (OSError, subprocess.TimeoutExpired):
+        p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, text=True, errors="replace", cwd=cwd,
+                             env=env, start_new_session=True)
+    except OSError:
         return 124, ""
+    try:
+        out, _ = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        p.communicate()
+        return 124, ""
+    return p.returncode, out
 
 
 def du_bytes(path: Path) -> int:
@@ -76,7 +129,8 @@ def du_bytes(path: Path) -> int:
 
 
 def is_checkout(path: Path) -> bool:
-    return (path / ".git").exists()
+    git_dir = path / ".git"
+    return git_dir.exists() and not git_dir.is_symlink()
 
 
 def walk(path: Path, depth: int, skip_checkouts: bool = True):
@@ -163,13 +217,14 @@ def referenced(name: str, ref_roots: list[Path], exclude: list[str]) -> list[str
     roots = [str(r) for r in ref_roots if r.exists()]
     if not roots:
         return []
+    globs = [*DEFAULT_EXCLUDES, *exclude]
     if shutil.which("rg"):
         argv = ["rg", "-l", "-F", "-w", "--no-messages"]
-        for g in exclude:
+        for g in globs:
             argv += ["-g", f"!{g}"]
         argv += ["--", name, *roots]
     else:
-        argv = ["grep", "-rlFw", "--", name, *roots]
+        argv = ["grep", "-rlFw", *[f"--exclude={g}" for g in globs], "--", name, *roots]
     rc, out = run(argv, timeout=120)
     return out.split("\n")[:-1] if rc == 0 else []
 
@@ -228,7 +283,7 @@ def find_checkouts(root: Path) -> list[Path]:
             return
         for e in kids:
             try:
-                if e.is_dir():  # follows symlinks: ~/orca/projects entries are links
+                if e.is_dir(follow_symlinks=False):  # a link may lead anywhere: name that root instead
                     rec(Path(e.path), depth - 1)
             except OSError:
                 pass
@@ -237,15 +292,73 @@ def find_checkouts(root: Path) -> list[Path]:
     return found
 
 
-def git(path: Path, *args, timeout=60):
-    return run(["git", "-C", str(path), *args], timeout=timeout, env=GIT_ENV)
+def git(path: Path, *args, timeout=60, network=False):
+    return run(["git", *GIT_SAFE, "-C", str(path), *args], timeout=timeout, env=git_env(network))
+
+
+def runs_commands(key: str, value: str) -> bool:
+    """True when this config entry makes git execute a program."""
+    key = key.lower()
+    if key == "core.fsmonitor":
+        return value.strip().lower() not in BOOLEAN_WORDS
+    if key in RUNS_COMMANDS or key.startswith(RUNS_COMMANDS_PREFIX):
+        return True
+    section, _, rest = key.partition(".")
+    return any(rest.endswith(sfx) for sfx in RUNS_COMMANDS_SECTION_SUFFIX.get(section, ()))
+
+
+def unsafe_config(path: Path) -> list[str] | None:
+    """Names of the checkout's own config keys that run commands (never their values); None when
+    the config cannot be read. Reading it executes nothing."""
+    rc, out = git(path, "config", "--list", "--show-scope", "--includes", "-z")
+    if rc != 0:
+        return None
+    tokens = out.split("\0")
+    bad = []
+    for scope, entry in zip(tokens[0::2], tokens[1::2]):
+        if scope not in ("local", "worktree"):
+            continue
+        key, _, value = entry.partition("\n")
+        if runs_commands(key, value) and key.lower() not in bad:
+            bad.append(key.lower())
+    return bad
+
+
+_neutral_cwd: list[str] = []
+
+
+def neutral_cwd() -> str:
+    """An empty dir outside any repo: ls-remote started here loads no checkout's config."""
+    if not _neutral_cwd:
+        d = tempfile.mkdtemp(prefix="ade-scan-state-")
+        atexit.register(lambda: shutil.rmtree(d, ignore_errors=True))
+        _neutral_cwd.append(d)
+    return _neutral_cwd[0]
+
+
+def ls_remote_heads(path: Path) -> dict[str, str] | None:
+    rc, url = git(path, "config", "--get", "remote.origin.url")
+    url = url.strip()
+    if rc != 0 or not url or url.startswith("-"):
+        return None
+    if url.startswith("."):  # a relative path means relative to the checkout, not to our cwd
+        url = str((path / url).resolve())
+    env = git_env(network=True)
+    # the temp dir's parent is a ceiling: git must not discover a repository above the neutral dir
+    env["GIT_CEILING_DIRECTORIES"] = str(Path(neutral_cwd()).parent)
+    rc, out = run(["git", *GIT_SAFE, "ls-remote", "--heads", "--", url], timeout=120,
+                  cwd=neutral_cwd(), env=env)
+    if rc != 0:
+        return None
+    return {ln.split("refs/heads/", 1)[1]: ln.split()[0]
+            for ln in out.splitlines() if "refs/heads/" in ln}
 
 
 _remote_cache: dict[str, dict[str, str] | None] = {}
 
 
 def origin_branches(path: Path, remote: bool) -> dict[str, str] | None:
-    """Branch name -> tip sha on origin: `ls-remote` (read-only) with --remote, else the local remote refs."""
+    """Branch name -> tip sha on origin: `ls-remote` with --remote, else the local remote refs."""
     rc, common = git(path, "rev-parse", "--git-common-dir")
     key = str((path / common.strip()).resolve()) if rc == 0 and common.strip() else str(path)
     if key in _remote_cache:
@@ -254,9 +367,7 @@ def origin_branches(path: Path, remote: bool) -> dict[str, str] | None:
     if rc != 0:
         result = None
     elif remote:
-        rc, out = git(path, "ls-remote", "--heads", "origin", timeout=120)
-        result = {ln.split("refs/heads/", 1)[1]: ln.split()[0]
-                  for ln in out.splitlines() if "refs/heads/" in ln} if rc == 0 else None
+        result = ls_remote_heads(path)
     else:
         rc, out = git(path, "for-each-ref", "--format=%(refname:strip=3) %(objectname)",
                       "refs/remotes/origin")
@@ -266,7 +377,20 @@ def origin_branches(path: Path, remote: bool) -> dict[str, str] | None:
     return result
 
 
+def skipped_record(path: Path, keys: list[str] | None) -> dict:
+    reason = SKIPPED if keys else "skipped: git config unreadable"
+    return {
+        "path": str(path), "branch": "?", "modified": None, "untracked": None,
+        "untracked_sample": [], "modified_sample": [], "upstream": None, "unpushed": None,
+        "ahead_of_origin": None, "stashes": None, "has_origin": None, "on_origin": "unknown",
+        "config_keys": keys or [], "flags": [reason], "verdict": reason,
+    }
+
+
 def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
+    keys = unsafe_config(path)  # before any other git call: reading config runs nothing
+    if keys is None or keys:
+        return skipped_record(path, keys)
     rc, branch = git(path, "rev-parse", "--abbrev-ref", "HEAD")
     branch = branch.strip() if rc == 0 else "?"
     detached = branch == "HEAD"
@@ -299,8 +423,10 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
             rc, n = git(path, "rev-list", "--count", "HEAD", "--not", "--remotes=origin", tip)
             return int(n) if rc == 0 and n.strip().isdigit() else None
         n = ahead_of_tip()
-        if n is None and fetch:  # the tip's objects are not here: refs-only fetch
-            git(path, "fetch", "--quiet", "origin", branch, timeout=120)
+        if n is None and fetch:  # the tip's objects are not here: download them, write no refs
+            git(path, "-c", "maintenance.auto=false", "-c", "gc.auto=0", "fetch", "--quiet",
+                "--no-auto-maintenance", "--no-write-fetch-head", "--no-tags", "--refmap=",
+                "origin", f"refs/heads/{branch}", timeout=120, network=True)
             n = ahead_of_tip()
         if n is None:
             tip_unverified = True  # origin has a tip we cannot compare with HEAD
@@ -376,8 +502,18 @@ def summarize(result: dict) -> dict:
                                       if "unpushed commits" in c["flags"]
                                       or "orphan branch" in c["flags"]),
             "with_untracked": sum(1 for c in result["checkouts"] if c["untracked"]),
-            "with_stash": sum(1 for c in result["checkouts"] if c["stashes"])}
+            "with_stash": sum(1 for c in result["checkouts"] if c["stashes"]),
+            "skipped": sum(1 for c in result["checkouts"] if c["verdict"].startswith("skipped"))}
     return s
+
+
+def esc(value) -> str:
+    """One markdown table cell: `|` and backticks escaped, `<`, `>`, `&` HTML-escaped, no newlines."""
+    if value is None:
+        return "-"
+    text = str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = text.replace("|", "\\|").replace("`", "\\`")
+    return " ".join(text.split("\n"))
 
 
 def markdown(result: dict) -> str:
@@ -387,20 +523,21 @@ def markdown(result: dict) -> str:
         out += ["| task | size | newest | CLAIM | reports (.done) | open jobs | verdict |",
                 "|---|---|---|---|---|---|---|"]
         for t in sorted(bt["tasks"], key=lambda t: -t["bytes"]):
-            reps = ", ".join(f"{Path(r['path']).name}{'' if r['done'] else ' (no .done)'}"
+            reps = ", ".join(f"{esc(Path(r['path']).name)}{'' if r['done'] else ' (no .done)'}"
                              for r in t["reports"][:3]) + (" +%d" % (len(t["reports"]) - 3)
                                                             if len(t["reports"]) > 3 else "")
             when = time.strftime("%Y-%m-%d", time.localtime(t["newest_mtime"]))
-            out.append(f"| {t['task']} | {human(t['bytes'])} | {when} | {t['claim']} | "
-                       f"{reps or '-'} | {len(t['open_job_records'])} | {t['verdict']} |")
+            out.append(f"| {esc(t['task'])} | {human(t['bytes'])} | {when} | {esc(t['claim'])} | "
+                       f"{reps or '-'} | {len(t['open_job_records'])} | {esc(t['verdict'])} |")
         out.append("")
     if "checkouts" in result:
         out += ["| path | branch | modified | untracked | unpushed | stash | on origin | verdict |",
                 "|---|---|---|---|---|---|---|---|"]
         for c in result["checkouts"]:
-            out.append(f"| {c['path']} | {c['branch']} | {c['modified']} | {c['untracked']} | "
-                       f"{c['unpushed']} | {c['stashes']} | {c['on_origin']} | {c['verdict']}"
-                       f"{' + ' + ', '.join(f for f in c['flags'][1:]) if len(c['flags']) > 1 else ''}"
+            also = ", ".join(c["flags"][1:])
+            out.append(f"| {esc(c['path'])} | {esc(c['branch'])} | {esc(c['modified'])} | "
+                       f"{esc(c['untracked'])} | {esc(c['unpushed'])} | {esc(c['stashes'])} | "
+                       f"{esc(c['on_origin'])} | {esc(c['verdict'])}{esc(' + ' + also) if also else ''}"
                        f" |")
     return "\n".join(out)
 
@@ -411,14 +548,18 @@ def main(argv=None) -> int:
     ap.add_argument("--ref-root", type=Path, action="append", default=[],
                     help="where a task name counts as referenced (repeatable)")
     ap.add_argument("--exclude", action="append", default=[],
-                    help="rg glob (no leading !) to ignore under --ref-root, e.g. the scan doc")
+                    help="rg glob (no leading !) to ignore under --ref-root, added to the built-in "
+                         "%s (the scan docs)" % ", ".join(DEFAULT_EXCLUDES))
     ap.add_argument("--git-root", type=Path, action="append", default=[],
-                    help="a dir whose checkouts (up to 2 levels down) are scanned (repeatable)")
+                    help="a dir whose checkouts (up to 2 levels down) are scanned; symlinks under "
+                         "it are not followed (repeatable)")
     ap.add_argument("--remote", action="store_true",
-                    help="ask origin with `git ls-remote --heads` (read-only network call)")
+                    help="ask origin with `git ls-remote --heads` (network call, run outside the "
+                         "checkout)")
     ap.add_argument("--fetch", action="store_true",
-                    help="with --remote: `timeout 120 git fetch origin <branch>` (refs only) when "
-                         "the origin tip's objects are missing locally, to compare it with HEAD")
+                    help="with --remote: `git fetch origin refs/heads/<branch>` (120 s limit) when the "
+                         "origin tip's objects are missing locally, to compare it with HEAD; downloads "
+                         "the branch's objects, writes no refs and no FETCH_HEAD")
     ap.add_argument("--unique-max-bytes", type=int, default=5 * 1024 * 1024)
     ap.add_argument("--top", type=int, default=10, help="largest bigteam dirs to break down")
     fmt = ap.add_mutually_exclusive_group()
