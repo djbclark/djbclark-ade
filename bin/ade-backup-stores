@@ -13,10 +13,11 @@ database; no data changes), and the live Hermes `state.db` is never handed to `h
   2. per-session SQLite trees (Cursor, Antigravity): each db the same way, its sidecar (`meta.json`,
      `<uuid>.meta`) copied beside it;
   3. file stores: an own directory walk (no `shutil.copytree`) that drops every credential file name and path
-     (inventory section 5 item 5), the `credential-bak` vault, symlinks inside a store and non-regular files; a configured store root that is
-     itself a symlink is followed only when it resolves to an existing path under $HOME that is no credential
+     (inventory section 5 item 5), the `credential-bak` vault, symlinks inside a store and non-regular files; a configured
+     store root reached through any symlinked component (the root itself or a parent directory below $HOME) is
+     followed only when its resolved path is under $HOME and is no credential
      path (copied as the target, recorded in the manifest as `root_symlinks`, links inside it still never
-     followed): a dangling root, one resolving outside $HOME or to a credential path is an error;
+     followed): a dangling link, a root resolving outside $HOME or to a credential path is an error;
   4. `hermes sessions export` (JSONL) into <dest>/hermes-export/, run with HERMES_HOME pointing at a scratch
      copy of the hermes-state backup (removed afterwards), so `hermes` never opens the live state.db and the
      session ids, counts and exports all come from one snapshot. The export refuses a session above
@@ -172,6 +173,7 @@ def is_excluded_name(name):
 
 class Excluder:
     def __init__(self, home):
+        self.home = Path(home)
         self.real_home = Path(home).resolve()
         self.patterns = [str(base / rel) for base in dict.fromkeys([home, self.real_home])
                          for rel in EXCLUDE_PATHS]
@@ -445,7 +447,11 @@ def backup_sqlite(src, dst, store_name, base=None):
 
 
 class RootSymlinkError(OSError):
-    """A configured store root that is a symlink and must not be followed (the reason leads the message)."""
+    """A configured store root reached through a symlink that must not be followed (the reason leads the message)."""
+
+
+class SidecarError(OSError):
+    """A required sidecar the copy cannot take (the reason is in the message: a symlink, excluded, absent, ...)."""
 
 
 class StoreRun:
@@ -515,32 +521,58 @@ def make_ignore(run, excluder):
     return ignore
 
 
+def is_linked(src, excluder):
+    """True when `src` or any component between $HOME and it is a symlink (adversary round 9, again in round 14):
+    its realpath is not where the same home-relative path sits under the real $HOME. $HOME itself and what lies
+    above it are the operator's own and never count. A path outside $HOME is never linked (no store is)."""
+    try:
+        rel = Path(src).relative_to(excluder.home)
+    except ValueError:
+        return False
+    return os.path.realpath(src) != str(excluder.real_home / rel)
+
+
+def link_dangles(src):
+    """True when `src`, or a directory above it, is a symlink that points nowhere (lexists, yet does not exist)."""
+    cur = Path(src)
+    return any(os.path.lexists(p) and not os.path.exists(p) for p in (cur, *cur.parents))
+
+
+def link_note(src):
+    """`src -> where it leads`, for an error message."""
+    try:
+        return f"{src} -> {os.readlink(src)}"
+    except OSError:  # a linked parent: the root itself is no link
+        return f"{src} -> {os.path.realpath(src)}"
+
+
 def root_link_target(src, excluder):
-    """A configured store root that is a symlink: (resolved target, None) when it may be followed, else
-    (None, reason). Followed only when every link resolves to an existing path under the run's real $HOME and
-    the target is not a credential path (the caller tests the link itself). Links *inside* the tree are never
-    followed."""
+    """A configured store root reached through a symlink (the root itself or any component above it below $HOME):
+    (resolved target, None) when it may be followed, else (None, reason). Followed only when every link resolves
+    to a path under the run's real $HOME that is no credential path and, where it exists, a regular file or
+    directory (the caller tests `is_linked` first). A root that does not exist below a link that works comes back
+    as its (absent) target: the caller reports it missing. Links *inside* the tree are never followed."""
+    if link_dangles(src):
+        return None, "dangling symlink"
     try:
         target = Path(src).resolve()
     except (OSError, RuntimeError):
-        return None, "dangling symlink"
-    if not os.path.lexists(target):
         return None, "dangling symlink"
     if target != excluder.real_home and excluder.real_home not in target.parents:
         return None, "symlink target outside HOME"
     if excluder.path(target):
         return None, "symlink target excluded"
-    if not (target.is_dir() or target.is_file()):
+    if os.path.lexists(target) and not (target.is_dir() or target.is_file()):
         return None, "symlink target is not a regular file or directory"
     return target, None
 
 
 def follow_link(src, label, run, excluder):
-    """A configured path that is a symlink: its target when `root_link_target` allows it (recorded in
+    """A configured path reached through a symlink: its target when `root_link_target` allows it (recorded in
     run.root_symlinks), else None after an error that names the reason (the store is then partial)."""
     real, why = root_link_target(src, excluder)
     if why:
-        run.error(src, RootSymlinkError(f"{why}: {src} -> {os.readlink(src)}"))
+        run.error(src, RootSymlinkError(f"{why}: {link_note(src)}"))
         return None
     run.root_symlinks.append({"root": label, "link": str(src), "target": str(real)})
     return real
@@ -648,17 +680,18 @@ def copy_file_store(store, run, excluder):
         dst = run.out / label
         run.sources.append(str(src))
         try:
-            if excluder.path(src, follow=not src.is_symlink()):
+            linked = is_linked(src, excluder)
+            if excluder.path(src, follow=not linked):
                 run.skip(src, "excluded credential path")
                 continue
-            if not os.path.lexists(src):
-                run.absent(src)
-                continue
             real = src
-            if src.is_symlink():
+            if linked:
                 real = follow_link(src, label, run, excluder)
                 if real is None:
                     continue
+            if not os.path.lexists(real):
+                run.absent(src)
+                continue
             if real.is_dir():
                 rfd = os.open(real, DIR_FLAGS)  # the walk starts from this one descriptor, never from a path again
                 try:
@@ -677,17 +710,18 @@ def copy_sqlite_store(store, run, excluder):
         run.sources.append(str(src))
         dst = run.out / src.name
         try:
-            if excluder.path(src, follow=not src.is_symlink()):
+            linked = is_linked(src, excluder)
+            if excluder.path(src, follow=not linked):
                 run.skip(src, "excluded credential path")
                 continue
-            if not os.path.lexists(src):
-                run.absent(src)
-                continue
             real = src
-            if src.is_symlink():
+            if linked:
                 real = follow_link(src, src.name, run, excluder)
                 if real is None:
                     continue
+            if not os.path.lexists(real):
+                run.absent(src)
+                continue
             run.scrubbed_of[dst] = backup_sqlite(real, dst, store["name"])
             run.source_of[dst] = str(src)
         except (OSError, sqlite3.Error, SchemaGuardError) as exc:
@@ -708,14 +742,14 @@ def tree_root(store, run, excluder):
     root is a symlink and the root-link rule allows it (recorded in run.root_symlinks, labelled with the root as
     configured). None after `run.absent` or `run.error`: nothing is searched."""
     root = store["root"]
-    if not os.path.lexists(root):
-        run.absent(root)
-        return None
     real = root
-    if root.is_symlink():
+    if is_linked(root, excluder):
         real = follow_link(root, str(root), run, excluder)
         if real is None:
             return None
+    if not os.path.lexists(real):
+        run.absent(root)
+        return None
     if not real.is_dir():
         run.error(root, NotADirectoryError("store root is not a directory"))
         return None
@@ -758,7 +792,7 @@ def sidecar_gap(side, excluder):
 
 
 def required_sidecar_error(side, why):
-    return FileNotFoundError(f"required sidecar {side.name} {why}: the session's db copy is not lossless")
+    return SidecarError(f"required sidecar {side.name} {why}: the session's db copy is not lossless")
 
 
 SIDECAR_SKIP_WHY = {"is a symlink": "symlink", "is an excluded path": "excluded credential path",
@@ -892,10 +926,11 @@ def plan_store(store, excluder, strict=False):
     if store["kind"] == "sqlite":
         for f in store["files"]:
             run.sources.append(str(f))
-            if excluder.path(f, follow=not f.is_symlink()):
+            linked = is_linked(f, excluder)
+            if excluder.path(f, follow=not linked):
                 continue
             real = f
-            if f.is_symlink():
+            if linked:
                 real = follow_link(f, f.name, run, excluder)
                 if real is None:
                     continue
@@ -940,10 +975,11 @@ def plan_store(store, excluder, strict=False):
     else:
         for label, src in store["roots"]:
             run.sources.append(str(src))
-            if excluder.path(src, follow=not src.is_symlink()):
+            linked = is_linked(src, excluder)
+            if excluder.path(src, follow=not linked):
                 continue
             real = src
-            if src.is_symlink():
+            if linked:
                 real = follow_link(src, label, run, excluder)
                 if real is None:
                     continue
@@ -1042,10 +1078,10 @@ def make_hermes_scratch(home, scratch, state_backup, limit, excluder):
         shutil.copyfile(state_backup, scratch / "state.db")
     else:
         real_db = home / ".hermes/state.db"
-        if real_db.is_symlink():  # the gate copy_sqlite_store applies to a linked store file
+        if is_linked(real_db, excluder):  # the gate copy_sqlite_store applies to a linked store file
             real_db, why = root_link_target(real_db, excluder)
             if why:
-                raise RootSymlinkError(f"{why}: {home / '.hermes/state.db'} -> {os.readlink(home / '.hermes/state.db')}")
+                raise RootSymlinkError(f"{why}: {link_note(home / '.hermes/state.db')}")
         backup_sqlite(real_db, scratch / "state.db", "hermes-state")
     (scratch / "config.yaml").write_text(f"sessions:\n  max_export_messages: {limit}\n")
 
@@ -1060,7 +1096,7 @@ def export_hermes(home, work, final, state_backup, excluder):
     hermes = os.environ.get("ADE_BACKUP_HERMES") or shutil.which("hermes")
     out.mkdir(parents=True, exist_ok=True)
     scratch = work / ".hermes-scratch"
-    if not os.path.lexists(home / ".hermes/state.db"):
+    if not os.path.lexists(home / ".hermes/state.db") and not link_dangles(home / ".hermes/state.db"):
         run.absent(home / ".hermes/state.db")
     elif not hermes:
         run.error("hermes", FileNotFoundError("no hermes on PATH (set ADE_BACKUP_HERMES)"))
@@ -1193,7 +1229,7 @@ def check_schemas(stores, excluder, strict=False):
             dbs = list(store["files"])
         elif store["kind"] == "sqlite-tree":
             search = store["root"]
-            if search.is_symlink():
+            if is_linked(search, excluder):
                 search, why = root_link_target(store["root"], excluder)
                 if why:
                     print(f"{store['name']}: {store['root']}: symlink refused: {why}")
@@ -1213,7 +1249,7 @@ def check_schemas(stores, excluder, strict=False):
                 print(f"{store['name']}: {db}: symlink, not opened")
                 link_problems += 1
                 continue
-            if store["kind"] == "sqlite" and db.is_symlink():
+            if store["kind"] == "sqlite" and is_linked(db, excluder):
                 target, why = root_link_target(db, excluder)
                 if why:
                     print(f"{store['name']}: {db}: symlink refused: {why}")

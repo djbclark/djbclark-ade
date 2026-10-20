@@ -1124,6 +1124,114 @@ def test_destination_inside_a_followed_tree_root_target_is_refused(real, capsys)
     assert "source store" in capsys.readouterr().err and not inside.exists()
 
 
+# --- adversary round 9 / 14 on PR 24: a root reached through a linked PARENT gets the root-link gate ---
+
+PARENT_MARK = "SENTINEL-PARENT-LINK-ROW"
+PARENT_LAYOUTS = {  # store -> (the linked parent below HOME, what it holds)
+    "cursor-chats": (".cursor", "chats/hashA/uuid1/store.db"),
+    "grok": (".grok", "sessions/s1/chat.jsonl"),
+    "codex-db": (".codex", "state_5.sqlite"),
+}
+
+
+def parent_link(home, tmp, store, where):
+    """~/<parent> is a link to a directory that holds the store's data; returns that directory."""
+    parent, rel = PARENT_LAYOUTS[store]
+    target = {"home": home / "data/linked", "outside": tmp / "outside-linked",
+              "excluded": home / "credential-bak/linked"}[where]
+    data = target / rel
+    if rel.endswith((".db", ".sqlite")):
+        make_wal_db(data, [PARENT_MARK]).close()
+        if store == "cursor-chats":
+            (data.parent / "meta.json").write_text("{}")
+    else:
+        data.parent.mkdir(parents=True)
+        data.write_text(PARENT_MARK)
+    os.symlink(target, home / parent)
+    return target
+
+
+@pytest.mark.parametrize("store", sorted(PARENT_LAYOUTS))
+def test_a_root_below_a_linked_parent_under_home_is_followed_and_recorded(real, capsys, store):
+    mod, home, tmp = real
+    target = parent_link(home, tmp, store, "home")
+    assert mod.main(["--only", store, "--dry-run", "--json", "--dest", str(home / "o")]) == 0
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", store, "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == plan["status"] == "ok" and entry["errors"] == plan["errors"] == []
+    assert entry["file_count"] == plan["file_count"] > 0
+    assert entry["root_symlinks"] == plan["root_symlinks"] != []
+    parent = PARENT_LAYOUTS[store][0]
+    for rec in entry["root_symlinks"]:
+        assert rec["link"].startswith(str(home / parent) + os.sep)  # the configured root, as configured
+        assert rec["target"].startswith(str(target) + os.sep)  # where it really is
+    assert PARENT_MARK.encode() in all_bytes(dest)
+    assert not any(p.is_symlink() for p in dest.rglob("*"))
+
+
+@pytest.mark.parametrize("where, reason", [("outside", "symlink target outside HOME"),
+                                           ("excluded", "symlink target excluded")])
+@pytest.mark.parametrize("store", sorted(PARENT_LAYOUTS))
+def test_a_root_below_a_linked_parent_that_may_not_be_followed_is_an_error_and_nothing_is_copied(
+        real, capsys, store, where, reason):
+    mod, home, tmp = real
+    parent_link(home, tmp, store, where)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", store, "--dest", str(dest)]) == 1
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial" and entry["file_count"] == 0 and entry["root_symlinks"] == []
+    assert entry["errors"] and all("RootSymlinkError" in e["error"] and reason in e["error"] for e in entry["errors"])
+    assert all(str(home / PARENT_LAYOUTS[store][0]) in e["source"] for e in entry["errors"])
+    assert PARENT_MARK.encode() not in all_bytes(dest)
+    capsys.readouterr()
+    assert mod.main(["--only", store, "--dry-run", "--json", "--dest", str(home / "o")]) == 1
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    assert plan["status"] == "partial" and plan["file_count"] == 0 and plan["root_symlinks"] == []
+    assert plan["errors"] == entry["errors"]
+
+
+def test_a_dangling_linked_parent_is_an_error_not_a_missing_store(real, capsys):
+    mod, home, _ = real
+    os.symlink(home / "nowhere", home / ".cursor")
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 1
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial" and entry["missing"] == []
+    assert "dangling symlink" in entry["errors"][0]["error"]
+
+
+def test_a_missing_root_below_a_working_linked_parent_is_missing_not_an_error(real, capsys):
+    mod, home, _ = real
+    (home / "data/cursor").mkdir(parents=True)
+    os.symlink(home / "data/cursor", home / ".cursor")
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "missing" and entry["errors"] == [] and entry["file_count"] == 0
+    assert capsys.readouterr().err.count("store cursor-chats: missing") == 1
+
+
+def test_destination_inside_a_followed_parent_link_target_is_refused(real, capsys):
+    mod, home, tmp = real
+    target = parent_link(home, tmp, "cursor-chats", "home")
+    inside = target / "chats/newdir"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(inside)]) == 2
+    assert "source store" in capsys.readouterr().err and not inside.exists()
+
+
+def test_check_schemas_gates_a_linked_parent_like_a_linked_root(real, capsys):
+    mod, home, tmp = real
+    target = parent_link(home, tmp, "cursor-chats", "home")
+    assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 0
+    assert f"cursor-chats: {home / '.cursor/chats'}: symlink -> {target / 'chats'}" in capsys.readouterr().out
+    (home / ".cursor").unlink()
+    parent_link(home, tmp, "cursor-chats", "outside")
+    assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 1
+    assert "symlink refused: symlink target outside HOME" in capsys.readouterr().out
+
+
 # --- Codex passes 5-6 on PR 24 (2026-10-20): a source that turns into a symlink, the Hermes fallback, a pruned db ---
 
 def test_a_file_that_becomes_a_symlink_after_listing_is_refused_not_dereferenced(real, monkeypatch):
@@ -1176,6 +1284,18 @@ def test_hermes_export_does_not_follow_a_state_db_link_outside_home(real, monkey
     assert entry["store"] == "hermes-export" and entry["status"] == "partial"
     assert "symlink target outside HOME" in entry["errors"][0]["error"]
     assert b"SENTINEL-HERMES-OUTSIDE-SESSION" not in all_bytes(dest)
+
+
+def test_hermes_export_gates_a_linked_hermes_directory_like_a_linked_state_db(real, monkeypatch):
+    mod, home, tmp = real
+    outside = make_hermes_db(tmp / "outside-home", (("SENTINEL-HERMES-PARENT-OUTSIDE", 2),))
+    os.symlink(outside.parent, home / ".hermes")
+    dest, log, rc = hermes_only(mod, home, tmp, monkeypatch)
+    assert rc == 1 and not log.exists()  # hermes never ran
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["store"] == "hermes-export" and entry["status"] == "partial"
+    assert "symlink target outside HOME" in entry["errors"][0]["error"]
+    assert b"SENTINEL-HERMES-PARENT-OUTSIDE" not in all_bytes(dest)
 
 
 def test_hermes_export_follows_a_state_db_link_that_stays_under_home(real, monkeypatch):
