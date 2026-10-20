@@ -42,6 +42,12 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    so a healthy run longer than 20 polls can end as ERROR; treat any non-terminal status as active, bounded by
    the deadline, and record the raw status; (R3, info) the ls-remote fallback runs `git fetch` in the operator's
    checkout from the poller and from `check`/`reap`.
+5. **Endpoint variables can send keys anywhere** (adversary and Codex, threat-model review 2026-10-20):
+   `CURSOR_CLOUD_API` in `bin/cursor-cloud`; `FIRECRAWL_SELFHOST_URL`, `FIRECRAWL_FALLBACK_URL`,
+   `FIRECRAWL_ROUTER_SIPB_BASE` and `FIRECRAWL_ROUTER_LITELLM_BASE` in `bin/firecrawl-router`. Require https
+   (Cursor: https://api.cursor.com only) or loopback unless a test flag is set, and stop the Authorization header
+   following a redirect: urllib copies every header onto the redirected request, to any host; `bin/failover.py`
+   already avoids this with `_NoRedirect` and `add_unredirected_header`. One PR with tests.
 
 ## Cloud-agent readiness: Codex Cloud environment, Cursor API key (ruling 2026-10-19)
 
