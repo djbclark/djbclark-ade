@@ -1,0 +1,114 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "experimental": {
+    "max_retries": 1
+  },
+  "provider": {
+    "sipb": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "SIPB LLMs",
+      "options": {
+        "baseURL": "http://127.0.0.1:8890/api"
+      },
+      "models": {
+        "deepseek-r1:32b": {
+          "name": "DeepSeek R1 32B (reasoning)"
+        },
+        "deepseek-r1:14b": {
+          "name": "DeepSeek R1 14B (reasoning)"
+        },
+        "deepseek-r1:8b": {
+          "name": "DeepSeek R1 8B (reasoning)"
+        },
+        "qwen3-coder:30b": {
+          "name": "Qwen3 Coder 30B"
+        },
+        "qwen3.5:35b": {
+          "name": "Qwen3.5 35B"
+        },
+        "qwen3.5:27b": {
+          "name": "Qwen3.5 27B"
+        },
+        "qwen3.5:9b": {
+          "name": "Qwen3.5 9B"
+        },
+        "qwen3.6:35b-a3b-q4_K_M": {
+          "name": "Qwen3.6 35B-A3B"
+        },
+        "qwq:32b": {
+          "name": "QwQ 32B (reasoning)"
+        },
+        "gemma3:27b": {
+          "name": "Gemma 3 27B"
+        },
+        "gemma3:12b": {
+          "name": "Gemma 3 12B"
+        },
+        "gemma4:26b": {
+          "name": "Gemma 4 26B"
+        },
+        "codegemma:7b": {
+          "name": "CodeGemma 7B"
+        },
+        "gpt-oss:20b": {
+          "name": "GPT-OSS 20B"
+        },
+        "devstral:24b": {
+          "name": "Devstral 24B"
+        },
+        "exaone-deep:32b": {
+          "name": "EXAONE Deep 32B (reasoning)"
+        },
+        "aya:35b": {
+          "name": "Aya 35B"
+        },
+        "magistral:24b": {
+          "name": "Magistral 24B"
+        },
+        "granite3.2-vision:2b": {
+          "name": "Granite 3.2 Vision 2B"
+        }
+      }
+    }
+  },
+  "mcp": {
+    "basic-memory": {
+      "type": "remote",
+      "url": "http://127.0.0.1:18796/mcp",
+      "enabled": true
+    },
+    "exa": {
+      "type": "remote",
+      "url": "https://mcp.exa.ai/mcp",
+      "enabled": true,
+      "headers": {
+        "x-api-key": "{{ secret "EXA_API_KEY" }}"
+      }
+    },
+    "parallel-search": {
+      "type": "remote",
+      "url": "https://search.parallel.ai/mcp",
+      "enabled": true
+    },
+    "jina": {
+      "type": "remote",
+      "url": "https://mcp.jina.ai/v1",
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer {{ secret "JINA_API_KEY" }}"
+      }
+    },
+    "crawl4ai": {
+      "type": "remote",
+      "url": "http://127.0.0.1:18798/mcp",
+      "enabled": true,
+      "timeout": 120000
+    },
+    "firecrawl": {
+      "type": "remote",
+      "url": "http://127.0.0.1:18804/mcp",
+      "enabled": true,
+      "timeout": 180000
+    }
+  }
+}
