@@ -3717,7 +3717,9 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     busy = inflight_records(service, record, out, agent=None if service else a.agent)
     reserved, reserved_win = (0.0, {}) if previous else reserved_usage(busy, list(windows))
     fit_remaining = (float(remaining) - reserved) if remaining is not None else None
-    fit_windows = {k: float(v) - reserved_win.get(k, 0.0) for k, v in windows.items()}
+    # A window the reading could not measure is None (route_agent: a stale row, 2026-10-20 agy at
+    # 1658 s old); it is unmeasured, never a crash, and window_fit already skips it.
+    fit_windows = {k: float(v) - reserved_win.get(k, 0.0) for k, v in windows.items() if v is not None}
     window_refusal, window_near = window_fit(per_window, fit_windows)
     unreserved_window_refusal, _ = window_fit(per_window, windows)
     unreserved_ok = not (
