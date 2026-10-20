@@ -76,6 +76,9 @@
 # puts its text on the input line, which reads as a draft, and the command is refused
 # unsent after 900 s (2026-10-18: a /reload-plugins meant to unload agent-radar never
 # ran, and the session kept its scans for 2 h). Check the log before saying it ran.
+# herdr: after the send, Enter is pressed again (up to 3 times) while the command is still
+# on the input line; if it never leaves the line the waiter exits 8 and logs "NOT confirmed
+# run" rather than typing it a second time (2026-10-20).
 # Runs detached (nohup) so it survives the Bash tool returning; the log
 # is ~/.local/state/self-slash.log.  First verified 2026-10-09 (ClaudeHelm, herdr);
 # Orca backend verified 2026-10-09.
@@ -341,14 +344,21 @@ send_text() {
     return 0
   elif [ "$host" = herdr ]; then
     herdr pane run "$pane" "$text" || return 1
-    # The last → line may be the still-open autocomplete row ("→ /quit   Exit",
-    # seen 2026-10-10) rather than the input line, so match the text as a prefix.
-    if [ "$tui" = cursor ]; then
-      for _ in 1 2; do
-        sleep 2
-        case "$(classify_prompt)" in "$text"*) herdr agent send-keys "$pane" enter >/dev/null ;; *) break ;; esac
-      done
-    fi
+    # The first Enter after a slash command can only accept the autocomplete row, and the
+    # command stays on the input line unrun (Claude Code too: /reload-plugins was logged
+    # "sent" on 2026-10-18 and never ran). So for every TUI, press Enter again while the
+    # typed text is still on the input line. The last → line may be the still-open
+    # autocomplete row ("→ /quit   Exit", seen 2026-10-10), so match the text as a prefix.
+    for _ in 1 2 3; do
+      sleep 2
+      case "$(classify_prompt)" in "$text"*) herdr agent send-keys "$pane" enter >/dev/null ;; *) return 0 ;; esac
+    done
+    sleep 2
+    case "$(classify_prompt)" in "$text"*)
+      # Still on the line: do not type it again (that would append a second copy). Stop here.
+      echo "$(gdate '+%F %T') $host $pane: $text is still on the input line after 3 Enters; NOT confirmed run, left for the operator"
+      exit 8;;
+    esac
     return 0
   else
     orca terminal send --terminal "$pane" --text "$text" --enter --wait-submit 10 --json
