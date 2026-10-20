@@ -1526,6 +1526,9 @@ def run_main(argv):
         return 2
     selected = [s for s in stores if s["name"] in wanted]
     if args.check_schemas:
+        if "hermes-export" in wanted and "hermes-state" not in wanted:
+            # the export reads a copy of ~/.hermes/state.db (the hermes-state store): check that source like it
+            selected += [s for s in stores if s["name"] == "hermes-state"]
         return check_schemas(selected, Excluder(home), args.strict_stores)
     dest = resolve_dest(args.dest)
     reason = refuse_reason(dest, stores)

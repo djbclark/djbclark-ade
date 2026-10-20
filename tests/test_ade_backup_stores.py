@@ -1991,8 +1991,32 @@ def test_hermes_dry_run_still_says_would_run_for_a_state_db_link_the_run_follows
     inside = make_hermes_db(home / "data", (("linked-session", 2),))
     (home / ".hermes").mkdir()
     os.symlink(inside, home / ".hermes/state.db")
+    fake = tmp / "hermes"  # CI has no hermes on PATH: the dry run needs one named, as the neighbouring tests do
+    write_fake_hermes(fake, "none")
+    monkeypatch.setenv("ADE_BACKUP_HERMES", str(fake))
     assert mod.main(["--only", "hermes-export", "--dry-run", "--json", "--dest", str(home / "dry")]) == 0
     assert json.loads(capsys.readouterr().out)["errors"] == []
+
+
+def test_check_schemas_on_hermes_export_validates_its_state_db_source(real, capsys):
+    mod, home, tmp = real
+    args = ["--only", "hermes-export", "--check-schemas", "--strict-stores"]
+    assert mod.main(args) == 1  # empty home: the source is missing
+    assert capsys.readouterr().out.strip().splitlines()[-1].endswith("1 missing, 0 unopenable, 0 excluded")
+    assert mod.main(["--only", "hermes-export", "--check-schemas"]) == 0  # not strict: reported only
+    assert "1 missing" in capsys.readouterr().out
+    make_hermes_db(home, (("s1", 2),))
+    assert mod.main(args) == 0
+    assert "0 symlink problem(s), 0 missing" in capsys.readouterr().out
+
+
+def test_check_schemas_on_hermes_export_refuses_a_state_db_link_outside_home(real, capsys):
+    mod, home, tmp = real
+    (home / ".hermes").mkdir()
+    os.symlink(make_hermes_db(tmp / "outside", (("s", 1),)), home / ".hermes/state.db")
+    assert mod.main(["--only", "hermes-export", "--check-schemas", "--strict-stores"]) == 1
+    out = capsys.readouterr().out
+    assert "symlink refused" in out and "1 symlink problem(s), 0 missing" in out
 
 
 @pytest.mark.parametrize("failure", ["exit", "timeout"])
