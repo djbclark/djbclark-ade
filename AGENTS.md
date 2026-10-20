@@ -123,3 +123,30 @@ re-read whole files.
 After big code changes, refresh the graph with `graft build` (deterministic,
 no API key, $0).
 <!-- graft:end -->
+
+## Code review (what a reviewer checks here)
+
+Read by Codex (`@codex review`, auto on PR open since 2026-10-19), Cursor's
+Bugbot and Security Agent, and the `adversary` sub-agent. A pull request here
+is expected to meet these; flag any it misses.
+
+1. **An adversary verdict is quoted in the PR body** (home rule 28), or "no
+   findings"; the head reviewed is the head merged (`--match-head-commit`).
+2. **No exit status or result through a pipe**: `cmd > out.log 2>&1; echo
+   "rc=$?" > out.rc`, never `cmd | x; $?`. Tests run through
+   `~/ops/site-private/bin/bg`.
+3. **Secrets only via `sudo-secretspec run`**: a key never appears in an
+   argument, a file, a log or a test fixture; presence is proved by length.
+4. **No `shell=True`, no string-built commands**: argv lists, and anything
+   interpolated into a launchd runner script is quoted by `shlex.quote`.
+5. **macOS and Linux both**: BSD-only calls (`sysctl kern.boottime`, bare
+   `sed`) have a Linux path or use the GNU `g*` tool; CI runs `pytest` on
+   both.
+6. **Records and state files change atomically** (temp file beside, then
+   `os.replace`), and every new record field is read with `.get` so older
+   records still load.
+7. **Dates, not "now"**: a new fact in a doc carries its snapshot date; a
+   claim about behaviour matches the code in the same PR (standing order 4).
+8. **Docs move with the code**: a flag, exit code or subcommand added or
+   changed appears in the tool's usage text and in the doc that lists it
+   (`README.md` roster, `docs/*.md`, `skills/*/SKILL.md`).
