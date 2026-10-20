@@ -76,6 +76,12 @@ agent what changed and what is new. Entries end with the pull request number.
   its 6 h cooldown (2026-10-20).
 - `skill-everywhere`: the Hermes gateway nudge follows `hermes` wrappers to the real python; since `hermes`
   became a `/bin/sh` wrapper it ran the snippet under sh, where `import os, sys` was ImageMagick (2026-10-20).
+- `acp-dispatch`: re-dispatching a footed brief cuts a footer only when each of its items is a line of the
+  footer template and its heading is the template's own, so a constraint a lead added to or edited in a
+  pasted footer or its heading is kept, in linear time; a `-f` file that is
+  only a footer is refused ("no task is left"); the preflight probe and the slice's waiter deadline allow for
+  acp-run's binary wait plus its settle polls (`bin_poll_seconds`); a probe that finds an agent not installed
+  is remembered for 120 s, and an `ok` entry dated in the future is not trusted; `check` gives an `auth` stop the login hint, not `--escalate` (#22).
 - `tests/conftest.py` pins `ROUTE_AGENT_OMP_READY=0`, so the route_agent suite passes on a host with
   an omp login as it does on CI; the omp-ready roster has its own tests (queue item 6) (#17).
 - `acp-dispatch`: an unmeasured (stale) quota window is skipped instead of crashing the dispatch
