@@ -1216,7 +1216,8 @@ def test_doc_generator_survives_skipped_and_incomplete_records():
         # Codex pass 26: a `.git` file's target directory and its common directory are archived too
         assert f'{{ IFS= read -r l || [ -n "$l" ]; }} < {path_}/.git && case "$l" in "gitdir: "*) g=${{l#gitdir: }}' in row
         assert f"g={path_}/$g" in row and "gitdir capture FAILED" in row  # adversary round 32: git's gitfile rules, loud failure
-        assert f'[ -f "$g/HEAD" ] && "$GTAR" -C "$g" -cf <DEST>/checkouts/abs{path_}/gitdir.tar .' in row
+        assert (f'[ -f "$g/HEAD" ] && [ -d "$g/refs" ] && {{ [ -d "$g/objects" ] || [ -f "$g/commondir" ]; }} '
+                f'&& "$GTAR" -C "$g" -cf <DEST>/checkouts/abs{path_}/gitdir.tar .') in row  # round 34: git's is_git_directory
         assert f'[ -d "$c/objects" ] && "$GTAR" -C "$c" -cf <DEST>/checkouts/abs{path_}/commondir.tar .' in row
         assert '&& [ -n "$g" ] && case "$g" in /*)' in row and "$g/commondir" in row  # round 33: a git directory only
     assert "is listed with a whole-directory archive" in section_3_2(text)
@@ -2149,7 +2150,7 @@ def test_an_unreachable_origin_checkout_always_gets_a_capture_row_even_with_zero
     rows = section_3_2(text).splitlines()
     row = next(r for r in rows if r.startswith("| /p/gone "))
     assert "local-only count unverified: origin did not answer" in row
-    assert "mkdir -p <DEST>/checkouts/abs/p/gone && GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C /p/gone bundle create " \
+    assert "mkdir -p <DEST>/checkouts/abs/p/gone && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C /p/gone bundle create " \
            "<DEST>/checkouts/abs/p/gone/local-only.bundle --all" in row
     assert "re-scan with `--remote` once origin answers" in row and row.rstrip().endswith("| yes: origin did not answer; bundle, or re-scan |")
     assert "local-only count unverified" in next(r for r in rows if r.startswith("| /p/dirt "))

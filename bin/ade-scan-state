@@ -636,7 +636,7 @@ def queried_origin_url(path: Path) -> str | None:
     # to ssh (Codex pass 28 on PR 27); `url_holds_credential` refuses any control character
     rc, out = git(path, "config", "-z", "--get-all", "remote.origin.url")
     url = out.split("\0")[0] if rc == 0 and out else ""
-    if not url.strip() or url.startswith("-"):
+    if not url.strip() or url.lstrip().startswith("-"):  # `lstrip`: a leading space hides nothing (round 34)
         return None
     if not os.path.isabs(url) and (url.startswith(".") or ":" not in url):
         url = str((path / url).resolve())
