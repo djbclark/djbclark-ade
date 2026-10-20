@@ -672,15 +672,14 @@ def test_cursor_meta_json_symlink_is_an_error(real):
 def test_cursor_meta_json_vanishing_between_listing_and_copy_is_an_error(real, monkeypatch):
     mod, home, _ = real
     make_cursor_session(home)
-    real_copy2 = shutil.copy2
+    real_copy = mod.copy_regular
 
-    def vanishing(src, dst, **kw):
+    def vanishing(src, dst):
         if Path(src).name == "meta.json":
             Path(src).unlink()
-            raise FileNotFoundError(2, "No such file or directory", str(src))
-        return real_copy2(src, dst, **kw)
+        return real_copy(src, dst)
 
-    monkeypatch.setattr(mod.shutil, "copy2", vanishing)
+    monkeypatch.setattr(mod, "copy_regular", vanishing)
     dest = home / "out" / "bk"
     assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 1
     entry = manifest_of(dest)["stores"][0]
@@ -1253,3 +1252,158 @@ def test_check_schemas_counts_a_missing_database_and_fails_only_with_strict_stor
     make_wal_db(home / ".grok/worktrees.db", ["x"]).close()
     assert mod.main(["--check-schemas", "--strict-stores", "--only", "grok-db"]) == 0
     assert "0 symlink problem(s), 0 missing" in capsys.readouterr().out
+
+
+# --- Codex pass 10 on PR 24 (2026-10-20): absent tree root in --check-schemas, sidecar/single-file/sqlite no-follow ---
+
+def test_check_schemas_counts_an_absent_tree_root_as_missing(real, capsys):
+    mod, home, _ = real
+    assert not (home / ".cursor/chats").exists()
+    assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 0
+    out = capsys.readouterr().out
+    assert f"cursor-chats: {home / '.cursor/chats'}: missing" in out
+    assert out.strip().splitlines()[-1].endswith("1 missing")
+    assert mod.main(["--check-schemas", "--strict-stores", "--only", "cursor-chats"]) == 1
+    assert capsys.readouterr().out.strip().splitlines()[-1].endswith("1 missing")
+    make_cursor_session(home)
+    assert mod.main(["--check-schemas", "--strict-stores", "--only", "cursor-chats"]) == 0
+    assert capsys.readouterr().out.strip().splitlines()[-1].endswith("0 missing")
+
+
+@pytest.mark.parametrize("required", [True, False])
+def test_a_sidecar_swapped_for_a_symlink_after_the_check_is_an_error_not_followed(real, monkeypatch, required):
+    mod, home, tmp = real
+    sdir = make_cursor_session(home)
+    marker = tmp / "marker.json"
+    marker.write_text("SENTINEL-SWAPPED-SIDECAR-TARGET")
+    real_gap = mod.sidecar_gap
+
+    def swapping(side, excluder):
+        why = real_gap(side, excluder)  # the check passed: now the sidecar becomes a link
+        if not why and side.is_file() and not side.is_symlink():
+            side.unlink()
+            os.symlink(marker, side)
+        return why
+
+    monkeypatch.setattr(mod, "sidecar_gap", swapping)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 1
+    assert b"SENTINEL-SWAPPED-SIDECAR-TARGET" not in all_bytes(dest)
+    assert not (dest / "cursor-chats/hashA/uuid1/meta.json").exists()
+    assert (dest / "cursor-chats/hashA/uuid1/store.db").is_file()  # the db itself is still backed up
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial"
+    assert [e["source"] for e in entry["errors"]] == [str(sdir / "meta.json")]
+    assert "became a symlink" in entry["errors"][0]["error"]
+
+
+def test_a_single_file_root_is_copied_through_copy_regular_and_a_swapped_link_is_refused(real, monkeypatch):
+    mod, home, tmp = real
+    muse = home / ".local/share/muse"
+    (muse / "sessions").mkdir(parents=True)
+    history = muse / "tui-history.jsonl"
+    history.write_text('{"h": 1}\n')
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "muse", "--dest", str(dest)]) == 0
+    assert (dest / "muse/tui-history.jsonl").read_text() == '{"h": 1}\n'
+    assert stat.S_IMODE((dest / "muse/tui-history.jsonl").stat().st_mode) == 0o600
+    marker = tmp / "marker.jsonl"
+    marker.write_text("SENTINEL-SWAPPED-HISTORY")
+    real_copy = mod.copy_regular
+
+    def swapping(src, dst):
+        if Path(src) == history:
+            history.unlink()  # the root passed every check: now it becomes a link
+            os.symlink(marker, history)
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(mod, "copy_regular", swapping)
+    dest2 = home / "out" / "bk2"
+    assert mod.main(["--only", "muse", "--dest", str(dest2)]) == 1
+    assert b"SENTINEL-SWAPPED-HISTORY" not in all_bytes(dest2)
+    assert not (dest2 / "muse/tui-history.jsonl").exists()
+    entry = manifest_of(dest2)["stores"][0]
+    assert entry["status"] == "partial" and "became a symlink" in entry["errors"][0]["error"]
+
+
+def test_a_followed_single_file_root_link_is_copied_from_its_target(real):
+    mod, home, _ = real
+    muse = home / ".local/share/muse"
+    (muse / "sessions").mkdir(parents=True)
+    (home / "data").mkdir()
+    (home / "data/hist.jsonl").write_text('{"linked": 1}\n')
+    os.symlink(home / "data/hist.jsonl", muse / "tui-history.jsonl")
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "muse", "--dest", str(dest)]) == 0
+    assert (dest / "muse/tui-history.jsonl").read_text() == '{"linked": 1}\n'
+    assert manifest_of(dest)["stores"][0]["root_symlinks"][0]["link"] == str(muse / "tui-history.jsonl")
+
+
+def test_backup_sqlite_refuses_a_source_swapped_for_a_symlink_and_still_copies_a_plain_db(real, tmp_path):
+    mod, home, tmp = real
+    outside = tmp / "outside.db"
+    make_wal_db(outside, ["SENTINEL-SWAPPED-DB-ROW"]).close()
+    plain = home / "plain.db"
+    make_wal_db(plain, ["plain-row"]).close()
+    swapped = home / "swapped.db"
+    os.symlink(outside, swapped)
+    dst = tmp / "copies" / "swapped.db"
+    with pytest.raises(OSError, match="symlink"):
+        mod.backup_sqlite(swapped, dst, "anything")
+    assert not dst.exists() and not list(dst.parent.glob("*.part*"))
+    ok = tmp / "copies" / "plain.db"
+    mod.backup_sqlite(plain, ok, "anything")
+    assert [r[0] for r in sqlite3.connect(str(ok)).execute("SELECT v FROM t")] == ["plain-row"]
+
+
+def test_ro_connect_refuses_a_swap_between_the_nofollow_open_and_sqlite_opening_the_path(real, monkeypatch):
+    mod, home, tmp = real
+    outside = tmp / "outside3.db"
+    make_wal_db(outside, ["SENTINEL-RACED-DB-ROW"]).close()
+    db = home / "raced.db"
+    make_wal_db(db, ["row"]).close()
+    real_connect = sqlite3.connect
+
+    def racing(*args, **kw):
+        db.unlink()  # after the O_NOFOLLOW open, before SQLite opens the path
+        os.symlink(outside, db)
+        return real_connect(*args, **kw)
+
+    monkeypatch.setattr(mod.sqlite3, "connect", racing)
+    with pytest.raises(OSError, match="symlink or was replaced"):
+        mod.ro_connect(db)
+
+
+def test_a_linked_sqlite_source_is_refused_when_swapped_after_the_check_through_the_store_path(real, monkeypatch):
+    mod, home, tmp = real
+    outside = tmp / "outside2.db"
+    make_wal_db(outside, ["SENTINEL-SWAPPED-STORE-ROW"]).close()
+    db = home / ".local/share/crush-acp/crush.db"
+    make_wal_db(db, ["live"]).close()
+    real_backup = mod.backup_sqlite
+
+    def swapping(src, dst, store_name):
+        if Path(src) == db:
+            db.unlink()  # the store passed its checks: now the db becomes a link
+            os.symlink(outside, db)
+        return real_backup(src, dst, store_name)
+
+    monkeypatch.setattr(mod, "backup_sqlite", swapping)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "crush-acp", "--dest", str(dest)]) == 1
+    assert b"SENTINEL-SWAPPED-STORE-ROW" not in all_bytes(dest)
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial" and entry["errors"]
+
+
+def test_wal_size_ignores_a_symlinked_wal(real):
+    mod, home, tmp = real
+    db = home / "x.db"
+    db.write_bytes(b"")
+    big = tmp / "big-wal"
+    big.write_bytes(b"x" * 4096)
+    os.symlink(big, home / "x.db-wal")
+    assert mod.wal_size(db) == 0
+    (home / "x.db-wal").unlink()
+    (home / "x.db-wal").write_bytes(b"x" * 10)
+    assert mod.wal_size(db) == 10

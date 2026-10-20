@@ -53,8 +53,10 @@ this Mac) is followed under the same rule as a store root link (under $HOME, not
 `root_symlinks`; `--check-schemas` opens the target read-only and prints `symlink -> target`, or `symlink refused`
 and exit 1); so is a per-session tree root that is a symlink (same rule as a file-store root: refused is an error,
 the store `partial`). Every symlink skip prints `<store>: skipped <path>: symlink` on stderr and leaves the store
-`ok`. The dry run's bytes for a SQLite file are the main file plus its `-wal` file, an upper bound on the
-snapshot the online backup writes.
+`ok`. A source that turns into a symlink after its check is never followed: files, sidecars, single-file roots
+and SQLite databases are opened O_NOFOLLOW and refused with an error (the store `partial`). The dry run's bytes
+for a SQLite file are the main file plus its `-wal` file, an upper bound on the snapshot the online backup
+writes. `--check-schemas` counts an absent tree root or database as `missing`.
 
 Default dest: ~/.local/state/ade/backups/<UTC timestamp>/ (0700, files 0600). The generation is built in
 <dest>.part/ and renamed to <dest>/ at the end: a <dest>.part/ directory, or a generation without
@@ -295,8 +297,34 @@ class SchemaGuardError(Exception):
 
 
 def ro_connect(path):
-    """A read-only connection (the URI keeps `?`, `#`, `%` and spaces in the path safe)."""
-    return sqlite3.connect("file:" + quote(os.path.realpath(path), safe="/") + "?mode=ro", uri=True, timeout=30)
+    """A read-only connection to a regular file that is not, and does not become, a symlink (Codex on PR 24).
+    SQLite's URI has no nofollow parameter (`nofollow=1` is silently ignored, checked on 3.53.1), so the path
+    is opened O_NOFOLLOW and that fd held while SQLite opens the same path and reads the schema; the path is
+    then lstat'ed again and must still be the very file the fd names (same device and inode, not a link), or
+    the connection is closed and refused. A swap after that point cannot redirect the backup: SQLite already
+    holds the file. The path is never realpath'ed here: a caller that may follow a root link passes the
+    resolved target. The URI keeps `?`, `#`, `%` and spaces in the path safe."""
+    path = os.path.abspath(path)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # a FIFO swapped in must not block the run
+    except OSError as exc:
+        raise OSError(f"source became a symlink or is unreadable: {path}: {exc.strerror}") from exc
+    try:
+        held = os.fstat(fd)
+        if not stat.S_ISREG(held.st_mode):
+            raise OSError(f"source is not a regular file: {path}")
+        con = sqlite3.connect("file:" + quote(path, safe="/") + "?mode=ro", uri=True, timeout=30)
+        try:
+            con.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()  # SQLite opens the file lazily: force it
+            now = os.lstat(path)
+            if not stat.S_ISREG(now.st_mode) or (now.st_dev, now.st_ino) != (held.st_dev, held.st_ino):
+                raise OSError(f"source became a symlink or was replaced while opening: {path}")
+        except BaseException:
+            con.close()
+            raise
+        return con
+    finally:
+        os.close(fd)
 
 
 def schema_hits(con):
@@ -533,7 +561,7 @@ def copy_file_store(store, run, excluder):
                         run.error(item[0], OSError(item[2]))
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(real, dst, follow_symlinks=False)
+                copy_regular(real, dst)
         except OSError as exc:
             run.error(src, exc)
 
@@ -594,7 +622,8 @@ def wal_size(db):
     since committed pages may still live only in the WAL (Codex on PR 24)."""
     wal = db.with_name(db.name + "-wal")
     try:
-        return wal.stat().st_size if wal.is_file() and not wal.is_symlink() else 0
+        st = os.lstat(wal)
+        return st.st_size if stat.S_ISREG(st.st_mode) else 0
     except OSError:
         return 0
 
@@ -653,13 +682,13 @@ def copy_tree_store(store, run, excluder):
             why = sidecar_gap(side, excluder)
             if not why:
                 try:
-                    shutil.copy2(side, dst.parent / side.name)
+                    copy_regular(side, dst.parent / side.name)
                     continue
-                except FileNotFoundError:
-                    why = "vanished during the copy"
                 except OSError as exc:
-                    run.error(side, exc)
-                    continue
+                    if os.path.lexists(side):  # swapped for a link or non-regular file after sidecar_gap: an error
+                        run.error(side, exc)
+                        continue
+                    why = "vanished during the copy"
             if pat in store.get("required", []):
                 run.error(src.parent.relative_to(root), required_sidecar_error(side, why))
 
@@ -873,9 +902,9 @@ def make_hermes_scratch(home, scratch, state_backup, limit, excluder):
     else:
         real_db = home / ".hermes/state.db"
         if real_db.is_symlink():  # the gate copy_sqlite_store applies to a linked store file
-            _, why = root_link_target(real_db, excluder)
+            real_db, why = root_link_target(real_db, excluder)
             if why:
-                raise RootSymlinkError(f"{why}: {real_db} -> {os.readlink(real_db)}")
+                raise RootSymlinkError(f"{why}: {home / '.hermes/state.db'} -> {os.readlink(home / '.hermes/state.db')}")
         backup_sqlite(real_db, scratch / "state.db", "hermes-state")
     (scratch / "config.yaml").write_text(f"sessions:\n  max_export_messages: {limit}\n")
 
@@ -1019,6 +1048,10 @@ def check_schemas(stores, excluder, strict=False):
                     link_problems += 1
                     continue
                 print(f"{store['name']}: {store['root']}: symlink -> {search}")
+            if not os.path.lexists(store["root"]):
+                print(f"{store['name']}: {store['root']}: missing")
+                missing += 1
+                continue
             dbs = tree_dbs(store, search) if search.is_dir() else []
         else:
             continue
