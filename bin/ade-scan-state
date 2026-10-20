@@ -41,6 +41,10 @@ A "report file" is *report*.md (not *.done) within three levels of the dir, not 
 checkout. "Referenced" is a whole-word match of the task name in any file under a --ref-root
 (`rg -l -F -w`, or `grep -rlFw` without rg); a short common name can match by accident, so a
 referenced verdict is a lead, not a proof. `size` is `du -sk`; `newest_mtime` looks two levels deep.
+  scan incomplete: reference search rc=<n>  the `rg`/`grep` search exited above 1 (an error) or timed
+           out (rc=124): the task is never `unique`, `mixed` or `scratch`, its record has
+           `reference_search: "incomplete: rc=<n>"` (null otherwise), and the summary counts it under
+           `bigteam.incomplete`. The exit status stays 0, as for an incomplete checkout.
 
 Git checkout verdicts (a checkout is a dir holding `.git`, found up to two levels under each
 --git-root, symlinks not followed, deduplicated):
@@ -276,10 +280,14 @@ def report_files(task: Path) -> list[dict]:
     return sorted(found, key=lambda r: r["path"])
 
 
-def referenced(name: str, ref_roots: list[Path], exclude: list[str]) -> list[str]:
+def referenced(name: str, ref_roots: list[Path], exclude: list[str]) -> tuple[list[str], int | None]:
+    """(files under a ref root that mention `name`, None) or ([], rc) when the search itself failed.
+
+    rg and grep exit 1 for "no match" and above 1 for an error (an unreadable root, a bad pattern);
+    `run` returns 124 for a timeout or a missing tool. Only 0 and 1 are answers."""
     roots = [str(r) for r in ref_roots if r.exists()]
     if not roots:
-        return []
+        return [], None
     globs = [*DEFAULT_EXCLUDES, *exclude]
     if shutil.which("rg"):
         argv = ["rg", "-l", "-F", "-w", "--no-messages"]
@@ -289,7 +297,9 @@ def referenced(name: str, ref_roots: list[Path], exclude: list[str]) -> list[str
     else:
         argv = ["grep", "-rlFw", *[f"--exclude={g}" for g in globs], "--", name, *roots]
     rc, out = run(argv, timeout=120)
-    return out.split("\n")[:-1] if rc == 0 else []
+    if rc == 0:
+        return out.split("\n")[:-1], None
+    return ([], None) if rc == 1 else ([], rc)
 
 
 def top_children(task: Path, n: int = 4) -> list[dict]:
@@ -313,8 +323,12 @@ def scan_bigteam(root: Path, ref_roots: list[Path], exclude: list[str], unique_m
         task = Path(e.path)
         size = du_bytes(task)
         reports = report_files(task)
-        refs = referenced(task.name, ref_roots, exclude) if reports else []
-        if not reports or refs:
+        refs, search_rc = referenced(task.name, ref_roots, exclude) if reports else ([], None)
+        if search_rc is not None:
+            # the search did not run to an answer: never read it as "unreferenced" (unique/mixed)
+            # or as "nothing to keep" (scratch)
+            verdict, unique_bytes = f"{INCOMPLETE_PREFIX}reference search rc={search_rc}", 0
+        elif not reports or refs:
             verdict, unique_bytes = "scratch", 0
         else:
             unique_bytes = sum(r["bytes"] for r in reports)
@@ -324,6 +338,7 @@ def scan_bigteam(root: Path, ref_roots: list[Path], exclude: list[str], unique_m
             "claim": claim_state(task), "reports": reports,
             "open_job_records": open_job_records(task), "referenced_in": refs[:5],
             "verdict": verdict, "unique_bytes": unique_bytes,
+            "reference_search": None if search_rc is None else f"incomplete: rc={search_rc}",
         })
     for t in sorted(tasks, key=lambda t: -t["bytes"])[:top]:
         t["fills"] = top_children(root / t["task"])
@@ -728,7 +743,9 @@ def summarize(result: dict) -> dict:
         total = sum(t["bytes"] for t in bt["tasks"])
         uniq = sum(t["unique_bytes"] for t in bt["tasks"])
         s["bigteam"] = {"tasks": len(bt["tasks"]), "verdicts": verdicts, "total_bytes": total,
-                        "unique_bytes": uniq, "scratch_bytes": total - uniq}
+                        "unique_bytes": uniq, "scratch_bytes": total - uniq,
+                        "incomplete": sum(1 for t in bt["tasks"]
+                                          if t["verdict"].startswith(INCOMPLETE_PREFIX))}
     if "checkouts" in result:
         v: dict[str, int] = {}
         for c in result["checkouts"]:

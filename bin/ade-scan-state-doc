@@ -30,6 +30,11 @@ def tilde(p):
     return p.replace(HOME, "~")
 
 
+def num(v):
+    """A scan count as an int: the null of a skipped or incomplete record (no counts) is 0."""
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
+
+
 def human(n):
     v = float(n)
     for u in ("B", "K", "M", "G"):
@@ -153,6 +158,10 @@ def render(d):
     w(f"| checkouts with unpushed work (unpushed commits or orphan branch) | **{cs['with_unpushed_work']}** |")
     w(f"| checkouts with untracked non-ignored paths | {cs['with_untracked']} |")
     w(f"| checkouts with a stash | {cs['with_stash']} |")
+    incomplete_tasks = [t for t in tasks if t["verdict"].startswith("scan incomplete")]
+    w(f"| bigteam task dirs with `scan incomplete` (reference search failed) | {len(incomplete_tasks)} |")
+    w(f"| checkouts `skipped` or `scan incomplete` (no counts, not in 3.2) | "
+      f"{num(cs.get('skipped')) + num(cs.get('incomplete'))} |")
     w("")
     w("The three items that most need a human decision:\n")
     w("1. **`~/src/one-offs` has no `origin` remote at all** and 37 commits (plus the Orca worktree "
@@ -186,7 +195,10 @@ def render(d):
       "dir is larger (logs, worktrees, caches around the reports); `scratch` = no report file, or every "
       "report's task name is already referenced elsewhere. **A reference proves a mention, not a copy**, "
       "and a short common task name can match by accident, so `scratch` for a dir that has reports means "
-      "\"cited somewhere\", not \"safe to delete\"; the 93 scratch dirs have not been read.\n")
+      "\"cited somewhere\", not \"safe to delete\"; the 93 scratch dirs have not been read. A fresh scan with the "
+      "current tool marks a task dir whose `rg`/`grep` search failed (exit above 1, or a timeout) "
+      "`scan incomplete`, never `scratch`, `unique` or `mixed`; the run above read such a failure as "
+      "\"no reference\".\n")
     w(f"{bs['tasks']} dirs; {len(bt['loose_files'])} loose files at the root "
       f"({', '.join(bt['loose_files'][:6])}{'...' if len(bt['loose_files']) > 6 else ''}).\n")
 
@@ -219,6 +231,11 @@ def render(d):
         w(f"| {esc(t['task'])} | {human(t['bytes'])} | {day(t['newest_mtime'])} | {esc(t['claim'])} | "
           f"{len(t['reports'])} | {len(t['open_job_records'])} | {t['verdict']} |")
     w("")
+    if incomplete_tasks:
+        w("Task dirs whose reference search failed (`rg`/`grep` exited with an error or timed out, "
+          "`reference_search: incomplete: rc=<n>`) are `scan incomplete`, never `unique`, `mixed` or "
+          "`scratch`: " + ", ".join(esc(t["task"]) for t in incomplete_tasks) + ". They are not in 1.2 "
+          "or 3.1; rescan them before deciding anything.\n")
 
     # ---- 2 checkouts
     w("## 2. Orca and cow checkouts\n")
@@ -294,41 +311,66 @@ def render(d):
         raw_p = tilde(c["path"])
         p = esc(raw_p)
         name = Path(c["path"]).name
-        untr = [u for u in c["untracked_sample"] if u != "graft/"]
-        real_untr = c["untracked"] - (1 if "graft/" in c["untracked_sample"] else 0)
         if c["path"].endswith("/djbclark-ade/phase0-scan"):
             continue  # this slice's own pasture: its dirt is the files this slice is writing
-        if not (c["ahead_of_origin"] or (c["unpushed"] not in (0, "no upstream"))) and real_untr <= 0 \
-                and not c["stashes"] and not c["modified"]:
+        if c["verdict"].startswith(("skipped", "scan incomplete")):
+            continue  # no counts (null): listed in the section 2 table with their verdict, nothing to capture
+        untr = [u for u in (c.get("untracked_sample") or []) if u != "graft/"]
+        real_untr = num(c["untracked"]) - (1 if "graft/" in (c.get("untracked_sample") or []) else 0)
+        modified, stashes, local_n = num(c["modified"]), num(c["stashes"]), num(c.get("local_only_commits"))
+        head_ahead = next((v for v in (c["ahead_of_origin"], c["unpushed"])
+                           if isinstance(v, int) and v > 0), 0)
+        if not head_ahead and real_untr <= 0 and not stashes and not modified and not local_n:
             continue
         what, cmd, need = [], [], "no"
+        head_row = False
+        covered_by_bundle = False
         if p.endswith("/one-offs/Hermes"):
+            covered_by_bundle = True
             what.append(f"{c['ahead_of_origin']} commits on branch `Hermes` (no remote)")
             cmd.append("same repo as `~/src/one-offs`: its `--all` bundle (the `~/src/one-offs` row below) includes "
                        "branch `Hermes`")
             need = "**yes**: see `~/src/one-offs`"
         elif "no origin remote" in c["flags"]:
+            covered_by_bundle = True
             what.append(f"all {c['ahead_of_origin']} commits (no remote)")
             cmd.append(code("git -C {} bundle create ~/ops/site-private/bundles/{}.bundle --all", raw_p, name)
                        + " or add a remote and `git push -u origin <branch>`")
             need = "**yes**: only copy; hosting or bundle destination"
-        elif "orphan branch" in c["flags"] or "unpushed commits" in c["flags"]:
-            n = c["ahead_of_origin"] or c["unpushed"]
-            what.append(f"{n} commit(s) on {code('{}', c['branch'])}")
+        elif ("orphan branch" in c["flags"] or "unpushed commits" in c["flags"]) and head_ahead:
+            head_row = True
+            what.append(f"{head_ahead} commit(s) on {code('{}', c['branch'])}")
             cmd.append(code("git -C {} push -u origin {}", raw_p, c["branch"]) + " or "
                        + code("git -C {} bundle create <DEST>/{}-{}.bundle {}", raw_p, name,
                               c["branch"].replace("/", "_"), c["branch"]))
             need = "yes: pushing a branch publishes it; pick push or bundle"
-        if c["modified"]:
-            what.append(f"{c['modified']} modified tracked file(s)")
+        if local_n and not covered_by_bundle:
+            # commits on other local branches (or a detached HEAD) that no origin ref holds, whatever HEAD's own state
+            others = [b for b in (c.get("local_only_branches") or [])
+                      if not (head_row and b["branch"] == c["branch"])]
+            more = num(c.get("local_only_branches_uncounted"))
+            names = ", ".join(f"{code('{}', b['branch'])} ({num(b['count'])})" for b in others)
+            tail = f" and {more} more branches" if more > 0 else ""
+            if others:
+                what.append((f"local-only commits on other branches: {names}" if head_row
+                             else f"{local_n} local-only commits on {names}") + tail)
+            else:
+                what.append(f"{local_n} local-only commits (branches not itemised)" + tail)
+            lo_cmd = [code("git -C {} push origin {}", raw_p, b["branch"])
+                      for b in others if b["branch"] != "HEAD"]
+            lo_cmd.append(code("git -C {} bundle create <DEST>/{}-local-only.bundle --all", raw_p, name))
+            cmd.append(" or ".join(lo_cmd) if len(lo_cmd) == 1 else "; ".join(lo_cmd[:-1]) + " or " + lo_cmd[-1])
+            need = need if need.startswith(("yes", "**yes")) else "yes: pushing a branch publishes it; pick push or bundle"
+        if modified:
+            what.append(f"{modified} modified tracked file(s)")
             if "djbclark-ade" in c["path"]:
                 cmd.append("same modified files as the primary checkout (cow copy; other agents' edits): "
                            "preserved there")
             else:
                 cmd.append(code("git -C {} diff > <DEST>/{}-modified.patch", raw_p, name))
                 need = need if need != "no" else "yes: decide whether they are work"
-        if c["stashes"]:
-            what.append(f"{c['stashes']} stash")
+        if stashes:
+            what.append(f"{stashes} stash")
             cmd.append(code("git -C {} stash show -p stash@{{0}} > <DEST>/{}-stash0.patch", raw_p, name))
         if real_untr > 0:
             shared = "djbclark-ade" in c["path"] or "forgejo-ci-2026-10" in c["path"]
@@ -343,7 +385,8 @@ def render(d):
         w(f"| {p} | {'; '.join(what)} | {'; '.join(cmd)} | {need} |")
     w("")
     w("Checkouts not listed are `clean and pushed` (branch on origin or no commits origin lacks, HEAD only; "
-      "see limit 9) or hold only the reproducible `graft/` index.\n")
+      "see limit 9), hold only the reproducible `graft/` index, or are `skipped` / `scan incomplete` "
+      "(no counts: see their verdict in the section 2 table).\n")
 
     # ---- 4 caveats
     w("## 4. Limits of this scan\n")

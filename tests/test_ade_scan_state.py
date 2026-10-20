@@ -920,3 +920,112 @@ def test_scan_doc_generator_code_spans_survive_backticks():
     for span in ("`` c`h ``", "`` r`eport.md ``", "`` u`n.txt ``", "`` b`r ``"):
         assert span in text, span
     assert "`` git -C /p/c`o push -u origin b`r `` or " in text
+
+
+def doc_scan(checkouts, tasks=(), **summary):
+    """A minimal scan JSON for the doc generator."""
+    return {"scanned_at": "x",
+            "bigteam": {"tasks": list(tasks), "loose_files": []},
+            "checkouts": checkouts,
+            "summary": {"bigteam": {"tasks": len(tasks), "verdicts": {}, "total_bytes": 0,
+                                    "unique_bytes": 0, "scratch_bytes": 0},
+                        "checkouts": {"count": len(checkouts), "verdicts": {}, "with_unpushed_work": 0,
+                                      "with_untracked": 0, "with_stash": 0, **summary}}}
+
+
+def doc_checkout(path, **kw):
+    return {"path": path, "branch": "main", "modified": 0, "untracked": 0, "untracked_sample": [],
+            "modified_sample": [], "unpushed": 0, "ahead_of_origin": 0, "stashes": 0,
+            "on_origin": True, "flags": ["clean and pushed"], "verdict": "clean and pushed",
+            "local_only_commits": 0, "local_only_branches": [], "local_only_branches_uncounted": 0,
+            **kw}
+
+
+def section_3_2(text: str) -> str:
+    return text.split("### 3.2")[1].split("## 4.")[0]
+
+
+def test_capture_plan_keeps_a_checkout_whose_only_unpushed_work_is_on_another_branch():
+    """Codex PR 27, P1: main is pushed, branch `side` holds commits no origin ref has."""
+    mod = load_doc()
+    side = doc_checkout("/p/work", flags=["unpushed commits", "local-only commits: side 2"],
+                        verdict="unpushed commits", local_only_commits=2,
+                        local_only_branches=[{"branch": "side", "count": 2}])
+    many = doc_checkout("/p/many", flags=["unpushed commits", "local-only commits: a 1"],
+                        verdict="unpushed commits", local_only_commits=4,
+                        local_only_branches=[{"branch": "a", "count": 1}],
+                        local_only_branches_uncounted=3)
+    clean = doc_checkout("/p/clean")
+    rows = section_3_2(mod.render(doc_scan([side, many, clean]))).splitlines()
+    row = next(r for r in rows if r.startswith("| /p/work "))
+    assert "2 local-only commits on `side` (2)" in row and "`git -C /p/work push origin side`" in row
+    assert "commit(s) on `main`" not in row  # HEAD's own branch is pushed: no "0 commit(s)" row
+    assert "and 3 more branches" in next(r for r in rows if r.startswith("| /p/many "))
+    assert not [r for r in rows if r.startswith("| /p/clean ")]
+
+
+def test_doc_generator_survives_skipped_and_incomplete_records():
+    """Codex PR 27, P2: their counts are null; the generator used to raise TypeError."""
+    mod = load_doc()
+    nulls = dict(modified=None, untracked=None, unpushed=None, ahead_of_origin=None, stashes=None,
+                 local_only_commits=None, on_origin=None, untracked_sample=[], modified_sample=[])
+    skipped = doc_checkout("/p/skipped", flags=["skipped: worktree redirected"],
+                           verdict="skipped: worktree redirected", **nulls)
+    broken = doc_checkout("/p/broken", flags=["scan incomplete: status rc=124"],
+                          verdict="scan incomplete: status rc=124", **nulls)
+    task = {"task": "t-incomplete", "bytes": 1, "newest_mtime": 0.0, "claim": "no CLAIM",
+            "reports": [{"path": "a-report.md", "bytes": 1, "done": True}], "open_job_records": [],
+            "verdict": "scan incomplete: reference search rc=2", "unique_bytes": 0,
+            "reference_search": "incomplete: rc=2"}
+    text = mod.render(doc_scan([skipped, broken], [task], skipped=1, incomplete=1))
+    assert "| /p/skipped |" in text and "| /p/broken |" in text  # listed in the section 2 table
+    assert "/p/skipped" not in section_3_2(text) and "/p/broken" not in section_3_2(text)
+    assert "t-incomplete" in text.split("### 1.3")[1].split("## 2.")[0]
+    assert "reference search failed" in text and "never `unique`, `mixed` or `scratch`" in text
+
+
+def bigteam_with_one_report(tmp_path: Path) -> tuple[Path, Path]:
+    root, refs = tmp_path / "bigteam", tmp_path / "refs"
+    (root / "t-1").mkdir(parents=True)
+    (root / "t-1" / "a-report.md").write_text("x\n")
+    refs.mkdir()
+    return root, refs
+
+
+def test_a_failed_reference_search_is_scan_incomplete_not_unique_or_scratch(tmp_path, monkeypatch):
+    """Codex PR 27, P2: rg/grep exit 1 = no match, above 1 = error, 124 = timeout."""
+    mod = load()
+    root, refs = bigteam_with_one_report(tmp_path)
+    real = mod.run
+
+    def search_exits(rc):
+        def fake(argv, timeout=120, cwd=None, env=None):
+            if argv[0] in ("rg", "grep"):
+                return rc, ""
+            return real(argv, timeout=timeout, cwd=cwd, env=env)
+        return fake
+
+    for rc in (2, 124):
+        monkeypatch.setattr(mod, "run", search_exits(rc))
+        res = mod.scan_bigteam(root, [refs], [], 5 * 1024 * 1024, 1)
+        t = res["tasks"][0]
+        assert t["verdict"] == f"scan incomplete: reference search rc={rc}", t["verdict"]
+        assert t["reference_search"] == f"incomplete: rc={rc}" and t["unique_bytes"] == 0
+        assert mod.summarize({"bigteam": res})["bigteam"]["incomplete"] == 1
+    monkeypatch.setattr(mod, "run", search_exits(1))  # no match: the plain unreferenced answer
+    res = mod.scan_bigteam(root, [refs], [], 5 * 1024 * 1024, 1)
+    assert res["tasks"][0]["verdict"] == "unique" and res["tasks"][0]["reference_search"] is None
+    assert mod.summarize({"bigteam": res})["bigteam"]["incomplete"] == 0
+    # a real `rg` that errors out, through the CLI: the scan completes (exit 0) and says it is incomplete
+    monkeypatch.undo()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "rg").write_text("#!/bin/sh\nexit 2\n")
+    (fake_bin / "rg").chmod(0o755)
+    p = subprocess.run([str(SCRIPT), "--bigteam", str(root), "--ref-root", str(refs), "--json"],
+                       capture_output=True, text=True,
+                       env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"})
+    assert p.returncode == 0, p.stderr
+    out = json.loads(p.stdout)
+    assert out["bigteam"]["tasks"][0]["verdict"] == "scan incomplete: reference search rc=2"
+    assert out["summary"]["bigteam"]["incomplete"] == 1
