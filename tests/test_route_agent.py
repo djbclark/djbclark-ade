@@ -1165,6 +1165,8 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.tmp = Path(self._tmp.name)
+        r._reset_aiuse_cache()
+        self.addCleanup(r._reset_aiuse_cache)
         now = datetime.now(UTC)
         self.accounts = [
             {"provider": "codex", "age_seconds": 30,
@@ -1208,7 +1210,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         path = self.write("a.json", self.payload([row]))
         quota, age, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
         self.assertEqual(quota["omp"]["remaining"], 80.0)
-        self.assertEqual(r.QuotaSource.kind, "aiuse")
+        self.assertEqual(r.QuotaSource.kind, "canned")
         self.assertEqual(age, 20.0)
         self.assertIsNone(r.quota_source_info()["fallback_reason"])
 
@@ -1276,3 +1278,134 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
             self.load({"AIUSE_SNAPSHOT": str(self.tmp / "x.json")})
         run.assert_not_called()
         self.assertEqual(r.QuotaSource.kind, "snapshot")
+
+    # -- hardening (adversary review 2026-10-20) --------------------------------
+
+    def rows_payload(self, rows, **extra):
+        return self.write("rows.json", self.payload(rows, **extra))
+
+    def test_aiuse_off_never_spawns(self):
+        marker = self.tmp / "spawned"
+        script = self.tmp / "aiuse"
+        script.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\necho '{{}}'\n")
+        script.chmod(0o755)
+        import io
+        with mock.patch.dict(os.environ, {"ROUTE_AGENT_AIUSE": "off",
+                                          "ROUTE_AGENT_AIUSE_BIN": str(script)}), \
+                mock.patch.object(r, "_read_snapshot_file", return_value=([], None)), \
+                contextlib.redirect_stderr(io.StringIO()):
+            os.environ.pop("AIUSE_SNAPSHOT", None)
+            os.environ.pop("ROUTE_AGENT_AIUSE_JSON", None)
+            r.load_snapshot()
+        self.assertFalse(marker.exists())
+
+    def test_unparseable_shapes_fall_back_to_the_file(self):
+        good_w = {"label": "w", "headroom_percent": 50.0}
+        shapes = {
+            "windows non-dict": [{"provider": "codex", "windows": [5]}],
+            "windows object": [{"provider": "codex", "windows": {"a": 1}}],
+            "provider list": [{"provider": ["codex"], "windows": [good_w]}],
+        }
+        for name, rows in shapes.items():
+            with self.subTest(name):
+                path = self.rows_payload(rows)
+                quota, _, err = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+                self.assertEqual(r.QuotaSource.kind, "snapshot")
+                self.assertIn("unparseable rows", r.quota_source_info()["fallback_reason"])
+                self.assertEqual(quota["codex"]["remaining"], 60.0)
+
+    def test_non_numeric_percentage_reads_unknown_not_a_crash(self):
+        row = {"provider": "codex", "windows": [{"label": "w", "headroom_percent": "lots",
+                                                 "remaining_percent": "plenty"}]}
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
+        self.assertIsNone(quota["codex"]["remaining"])
+
+    def test_invalid_utf8_falls_back(self):
+        bad = self.tmp / "bad.json"
+        bad.write_bytes(b'{"available": [], "x": "\xff\xfe"}')
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(bad)})
+        self.assertEqual(r.QuotaSource.kind, "snapshot")
+        self.assertIn("malformed JSON", r.quota_source_info()["fallback_reason"])
+        script = self.tmp / "aiuse"
+        script.write_bytes(b"#!/bin/sh\nprintf '{\"available\": [], \"x\": \"\\377\"}'\n")
+        script.chmod(0o755)
+        self.load({"ROUTE_AGENT_AIUSE_BIN": str(script)})
+        self.assertEqual(r.QuotaSource.kind, "snapshot")
+
+    def test_non_finite_percentages_never_read_as_headroom(self):
+        for bad in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(bad):
+                body = ('{"age_seconds": 5, "available": [{"provider": "copilot", "windows": '
+                        f'[{{"label": "premium", "headroom_percent": {bad}}}]}}]}}')
+                path = self.write("nan.json", body)
+                quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+                self.assertIsNone(quota["copilot"]["remaining"])
+                for kind in r.KINDS:
+                    choice = r.route(kind, quota={**IDLE, **quota})
+                    self.assertFalse(choice and choice.service.name == "copilot", kind)
+
+    def test_percentages_are_clamped(self):
+        row = {"provider": "codex", "windows": [{"label": "w", "headroom_percent": 250}]}
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
+        self.assertEqual(quota["codex"]["remaining"], 100.0)
+
+    def test_unknown_or_nonfinite_age_does_not_zero_absent_pools_and_rows_are_stale(self):
+        row = {"provider": "omp", "windows": [{"label": "c", "headroom_percent": 70.0}]}
+        for name, extra in (("nan", {"age_seconds": float("nan")}),
+                            ("none", {"age_seconds": None}),
+                            ("negative", {"age_seconds": -5})):
+            with self.subTest(name):
+                payload = {"available": [row], **extra}
+                path = self.write("age.json", r.json.dumps(payload))
+                quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+                self.assertEqual(quota["codex"]["remaining"], 60.0)   # not zeroed
+                self.assertIsNone(quota["omp"]["remaining"])           # stale row
+
+    def test_stale_payload_does_not_zero_absent_pools(self):
+        path = self.write("old.json", self.payload([], age_seconds=r.STALE_SOFT + 100))
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["codex"]["remaining"], 60.0)
+
+    def test_canned_is_labelled_and_logged_and_beats_off_and_pin(self):
+        path = self.write("a.json", self.payload([]))
+        quota, _, err = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path),
+                                   "ROUTE_AGENT_AIUSE": "off",
+                                   "AIUSE_SNAPSHOT": str(self.tmp / "pin.json")})
+        self.assertEqual(r.QuotaSource.kind, "canned")
+        self.assertIn("canned", err)
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    def test_subprocess_with_valid_rows(self):
+        body = r.json.dumps(self.payload([{"provider": "omp", "windows": [
+            {"label": "c", "headroom_percent": 42.0, "state": "ok"}]}]))
+        quota, age, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": self.fake_aiuse(body, 0)})
+        self.assertEqual(r.QuotaSource.kind, "aiuse")
+        self.assertEqual(quota["omp"]["remaining"], 42.0)
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    def test_timeout_falls_back_quickly(self):
+        import time as _t
+        script = self.tmp / "aiuse"
+        script.write_text("#!/bin/sh\nexec sleep 5\n")
+        script.chmod(0o755)
+        t0 = _t.monotonic()
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": str(script),
+                                 "ROUTE_AGENT_AIUSE_TIMEOUT": "0.5"})
+        self.assertLess(_t.monotonic() - t0, 4.0)
+        self.assertIn("timed out", r.quota_source_info()["fallback_reason"])
+        self.assertEqual(quota["codex"]["remaining"], 60.0)
+
+    def test_timeout_env_is_clamped(self):
+        for bad in ("inf", "nan", "0", "-3", "999", "x"):
+            with self.subTest(bad), mock.patch.dict(os.environ, {"ROUTE_AGENT_AIUSE_TIMEOUT": bad}):
+                self.assertEqual(r._aiuse_timeout(), 20.0)
+        with mock.patch.dict(os.environ, {"ROUTE_AGENT_AIUSE_TIMEOUT": "7"}):
+            self.assertEqual(r._aiuse_timeout(), 7.0)
+
+    def test_spawn_is_memoised(self):
+        body = r.json.dumps(self.payload([]))
+        exe = self.fake_aiuse(body, 0)
+        with mock.patch.object(r.subprocess, "run", wraps=r.subprocess.run) as run:
+            self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+        self.assertEqual(run.call_count, 1)

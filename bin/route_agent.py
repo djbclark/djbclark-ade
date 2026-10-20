@@ -25,8 +25,11 @@ a fresh `--available` leaves out reads 0% left (exhausted, excluded or hidden). 
 is missing, fails, times out or prints malformed JSON, routing logs that on stderr,
 falls back to the snapshot file (surfaced as `quota_source` in plan/route JSON and a
 WARNING in plan text) and a stale or missing snapshot degrades to capability-only routing
-rather than hanging. Env: `ROUTE_AGENT_AIUSE_JSON=<path>` feeds canned output (tests),
-`ROUTE_AGENT_AIUSE=off` or `AIUSE_SNAPSHOT` pins the file-only read.
+rather than hanging. Env: `ROUTE_AGENT_AIUSE_JSON=<path>` feeds canned output (tests; reported
+as source `canned`, logged on stderr each use, and it takes precedence over
+`ROUTE_AGENT_AIUSE=off` and `AIUSE_SNAPSHOT`), `ROUTE_AGENT_AIUSE=off` or `AIUSE_SNAPSHOT`
+pins the file-only read, `ROUTE_AGENT_AIUSE_BIN` names the binary,
+`ROUTE_AGENT_AIUSE_TIMEOUT` is seconds in (0, 60] (default 20). The spawn is memoised per process.
 
 **Services are discovered, not hardcoded.** The roster changes — agents gain
 an ACP mode, providers appear in aiuse, plans lapse. So the service list is
@@ -89,6 +92,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import math
 import os
 import shlex
 import shutil
@@ -546,6 +550,29 @@ def _read_snapshot_file() -> tuple[list[Any], float | None]:
     return list(snap.get("accounts", []) or []), age
 
 
+def _pct(value: Any) -> float | None:
+    """A percentage clamped to [0, 100]; None for anything non-numeric or non-finite
+    (NaN and Infinity must never read as headroom)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        x = float(value)
+    except (ValueError, TypeError):
+        return None
+    return min(100.0, max(0.0, x)) if math.isfinite(x) else None
+
+
+def _clean_age(value: Any) -> float | None:
+    """Seconds as a finite, non-negative float, else None (unknown)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        x = float(value)
+    except (ValueError, TypeError):
+        return None
+    return x if math.isfinite(x) and x >= 0 else None
+
+
 def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str, Any]:
     """Fold aiuse account rows (snapshot accounts or `--available` rows) into per-service pools."""
     providers: dict[str, Any] = {}
@@ -556,11 +583,7 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
 
         # Account freshness: use account's age_seconds or collected_at
         acct_age = None
-        if acct.get("age_seconds") is not None:
-            try:
-                acct_age = float(acct["age_seconds"])
-            except (ValueError, TypeError):
-                pass
+        acct_age = _clean_age(acct.get("age_seconds"))
         if acct_age is None and acct.get("collected_at"):
             try:
                 acct_stamp = datetime.fromisoformat(str(acct["collected_at"]))
@@ -585,8 +608,8 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
             label = w.get("label") or "?"
 
             state = w.get("state")
-            headroom = w.get("headroom_percent")
-            if state == "exhausted" or (headroom is not None and float(headroom) == 0):
+            headroom = _pct(w.get("headroom_percent"))
+            if state == "exhausted" or (headroom is not None and headroom == 0):
                 remaining = 0.0
             elif is_old:
                 remaining = None
@@ -594,7 +617,7 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
                 # headroom_percent is the least applicable headroom (a model
                 # sublimit's ceiling included); remaining_percent is the
                 # window's own share. Prefer the ceiling-aware one.
-                remaining = headroom if headroom is not None else w.get("remaining_percent")
+                remaining = headroom if headroom is not None else _pct(w.get("remaining_percent"))
 
             rem_val = None if remaining is None else round(float(remaining), 1)
             detail[label] = rem_val
@@ -659,7 +682,8 @@ def _aiuse_wanted() -> bool:
     """Ask aiuse itself, not the snapshot file, unless something pins the file.
 
     AIUSE_SNAPSHOT (tests, a replayed snapshot), a patched SNAPSHOT, or
-    ROUTE_AGENT_AIUSE=off keep the old file-only read."""
+    ROUTE_AGENT_AIUSE=off keep the old file-only read (ROUTE_AGENT_AIUSE_JSON, canned
+    output, overrides all three; load_snapshot checks it first)."""
     if os.environ.get("ROUTE_AGENT_AIUSE", "").strip().lower() in ("off", "0", "no", "false"):
         return False
     if os.environ.get("AIUSE_SNAPSHOT") or SNAPSHOT != DEFAULT_SNAPSHOT:
@@ -667,56 +691,83 @@ def _aiuse_wanted() -> bool:
     return True
 
 
-def aiuse_available() -> tuple[dict[str, Any] | None, str]:
-    """`aiuse --available --json` as (payload, source label); (None, reason) on any failure.
+_AIUSE_MEMO: dict[tuple[Any, ...], tuple[dict[str, Any] | None, str]] = {}
 
-    Applies aiuse's own read-time overlays (operator credits override, Admin API readings,
-    grant expiry) that the snapshot file never carries (2026-10-20, aiuse PRs 38 and 40).
-    ROUTE_AGENT_AIUSE_JSON=<path> reads canned output instead (tests); ROUTE_AGENT_AIUSE_BIN
-    names the binary; ROUTE_AGENT_AIUSE_TIMEOUT is in seconds (default 20; the cache read is
-    well under one second). Exit 3 means nothing is usable and still prints the JSON."""
-    canned = os.environ.get("ROUTE_AGENT_AIUSE_JSON")
-    if canned:
-        try:
-            raw = Path(canned).read_text()
-        except OSError as exc:
-            return None, f"ROUTE_AGENT_AIUSE_JSON unreadable ({exc.__class__.__name__})"
-        label = f"ROUTE_AGENT_AIUSE_JSON={canned}"
-    else:
-        exe = os.environ.get("ROUTE_AGENT_AIUSE_BIN") or shutil.which("aiuse")
-        if not exe:
-            return None, "aiuse not on PATH"
-        try:
-            timeout = float(os.environ.get("ROUTE_AGENT_AIUSE_TIMEOUT") or 20)
-        except ValueError:
-            timeout = 20.0
-        try:
-            proc = subprocess.run([exe, "--available", "--json"], capture_output=True,
-                                  text=True, timeout=timeout, check=False)
-        except subprocess.TimeoutExpired:
-            return None, f"aiuse --available --json timed out after {timeout:g}s"
-        except OSError as exc:
-            return None, f"aiuse could not start ({exc.__class__.__name__})"
-        if proc.returncode not in (0, 3):
-            return None, f"aiuse --available --json exited {proc.returncode}"
-        raw = proc.stdout
-        label = "aiuse --available --json"
+
+def _reset_aiuse_cache() -> None:
+    """Forget memoised `aiuse --available --json` results (tests; one spawn per process otherwise)."""
+    _AIUSE_MEMO.clear()
+
+
+def _aiuse_timeout() -> float:
     try:
-        # --json can follow preamble lines on some builds: start at the first brace
-        payload = json.loads(raw[raw.index("{"):])
+        t = float(os.environ.get("ROUTE_AGENT_AIUSE_TIMEOUT") or 20)
     except ValueError:
+        return 20.0
+    return t if math.isfinite(t) and 0 < t <= 60 else 20.0
+
+
+def _parse_available(raw: bytes, label: str) -> tuple[dict[str, Any] | None, str]:
+    try:
+        text = raw.decode("utf-8")        # strict: invalid bytes are malformed output
+        # --json can follow preamble lines on some builds: start at the first brace
+        payload = json.loads(text[text.index("{"):])
+    except ValueError:                    # includes UnicodeDecodeError and a missing brace
         return None, f"{label}: malformed JSON"
     if not isinstance(payload, dict) or not isinstance(payload.get("available"), list):
         return None, f"{label}: no `available` array"
     return payload, label
 
 
-def _payload_age(payload: dict[str, Any]) -> float | None:
+def aiuse_available() -> tuple[dict[str, Any] | None, str]:
+    """`aiuse --available --json` as (payload, source label); (None, reason) on any failure.
+
+    Applies aiuse's own read-time overlays (operator credits override, Admin API readings,
+    grant expiry) that the snapshot file never carries (2026-10-20, aiuse PRs 38 and 40).
+    ROUTE_AGENT_AIUSE_JSON=<path> reads canned output instead (tests) and takes precedence
+    over ROUTE_AGENT_AIUSE=off and AIUSE_SNAPSHOT; ROUTE_AGENT_AIUSE_BIN names the binary;
+    ROUTE_AGENT_AIUSE_TIMEOUT is in seconds, (0, 60], default 20 (the cache read is well
+    under one second). Exit 3 means nothing is usable and still prints the JSON. The
+    subprocess result is memoised for the life of the process (`_reset_aiuse_cache`)."""
+    canned = os.environ.get("ROUTE_AGENT_AIUSE_JSON")
+    if canned:
+        try:
+            raw = Path(canned).read_bytes()
+        except OSError as exc:
+            return None, f"ROUTE_AGENT_AIUSE_JSON unreadable ({exc.__class__.__name__})"
+        return _parse_available(raw, f"ROUTE_AGENT_AIUSE_JSON={canned}")
+    exe = os.environ.get("ROUTE_AGENT_AIUSE_BIN") or shutil.which("aiuse")
+    if not exe:
+        return None, "aiuse not on PATH"
+    timeout = _aiuse_timeout()
+    key = (exe, timeout)
+    if key in _AIUSE_MEMO:
+        return _AIUSE_MEMO[key]
+    label = "aiuse --available --json"
     try:
-        if payload.get("age_seconds") is not None:
-            return float(payload["age_seconds"])
-        return (datetime.now(UTC) - datetime.fromisoformat(
-            str(payload.get("generated_at")))).total_seconds()
+        proc = subprocess.run([exe, "--available", "--json"], capture_output=True,
+                              timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        result: tuple[dict[str, Any] | None, str] = (
+            None, f"{label} timed out after {timeout:g}s")
+    except OSError as exc:
+        result = (None, f"aiuse could not start ({exc.__class__.__name__})")
+    else:
+        if proc.returncode not in (0, 3):
+            result = (None, f"{label} exited {proc.returncode}")
+        else:
+            result = _parse_available(proc.stdout, label)
+    _AIUSE_MEMO[key] = result
+    return result
+
+
+def _payload_age(payload: dict[str, Any]) -> float | None:
+    age = _clean_age(payload.get("age_seconds"))
+    if age is not None:
+        return age
+    try:
+        return _clean_age((datetime.now(UTC) - datetime.fromisoformat(
+            str(payload.get("generated_at")))).total_seconds())
     except (ValueError, TypeError):
         return None
 
@@ -738,19 +789,34 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
     QuotaSource.kind, QuotaSource.detail, QuotaSource.fallback_reason = "snapshot", "", ""
     accounts, age = _read_snapshot_file()
     providers = _providers_from_accounts(accounts, age)
-    if _aiuse_wanted() or os.environ.get("ROUTE_AGENT_AIUSE_JSON"):
+    canned = bool(os.environ.get("ROUTE_AGENT_AIUSE_JSON"))
+    if canned or _aiuse_wanted():
         payload, label = aiuse_available()
-        if payload is None:
+        fresh: dict[str, Any] | None = None
+        p_age: float | None = None
+        if payload is not None:
+            p_age = _payload_age(payload)
+            try:
+                # a row without a usable age is stale, never fresh
+                rows = [dict(row, age_seconds=(_clean_age(row.get("age_seconds"))
+                                               if _clean_age(row.get("age_seconds")) is not None
+                                               else (p_age if p_age is not None
+                                                     else STALE_HARD + 1)))
+                        for row in payload["available"]
+                        if isinstance(row, dict) and row.get("provider")]
+                fresh = _providers_from_accounts(rows, p_age)
+            except (ValueError, TypeError, AttributeError):
+                label = f"{label}: unparseable rows"
+        if canned:
+            _log(f"quota from canned ROUTE_AGENT_AIUSE_JSON={os.environ['ROUTE_AGENT_AIUSE_JSON']}"
+                 " (overrides ROUTE_AGENT_AIUSE=off and AIUSE_SNAPSHOT)")
+        if fresh is None:
             QuotaSource.fallback_reason = label
             _log(f"{label}; using the snapshot file {SNAPSHOT}")
         else:
-            QuotaSource.kind, QuotaSource.detail = "aiuse", label
-            p_age = _payload_age(payload)
-            rows = [dict(row, age_seconds=row.get("age_seconds", p_age))
-                    for row in payload["available"]
-                    if isinstance(row, dict) and row.get("provider")]
-            fresh = _providers_from_accounts(rows, p_age)
-            if p_age is None or p_age <= STALE_SOFT:
+            QuotaSource.kind = "canned" if canned else "aiuse"
+            QuotaSource.detail = label
+            if p_age is not None and p_age <= STALE_SOFT:
                 for key, info in providers.items():
                     if key not in fresh:
                         providers[key] = dict(info, remaining=0.0,

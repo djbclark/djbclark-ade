@@ -107,8 +107,12 @@ snapshot knows that a fresh `--available` omits (exhausted, excluded, hidden) re
 If aiuse is missing, fails, times out or prints malformed JSON, it logs on stderr, falls back
 to `latest.json`, and says so as `quota_source` in `plan --json` / `route --json` and a
 WARNING in `plan` text (`show` prints a `quota source:` line). `ROUTE_AGENT_AIUSE_JSON=<path>`
-feeds canned output (tests); `ROUTE_AGENT_AIUSE=off` or `AIUSE_SNAPSHOT` pins the file-only
-read; `ROUTE_AGENT_AIUSE_BIN` and `ROUTE_AGENT_AIUSE_TIMEOUT` override the binary and timeout.
+feeds canned output (tests; reported as source `canned`, logged on stderr every use, and it
+takes precedence over `ROUTE_AGENT_AIUSE=off` and `AIUSE_SNAPSHOT`); `ROUTE_AGENT_AIUSE=off` or
+`AIUSE_SNAPSHOT` pins the file-only read (tests/conftest.py sets `off`); `ROUTE_AGENT_AIUSE_BIN`
+and `ROUTE_AGENT_AIUSE_TIMEOUT` (seconds, 0 to 60, default 20) override the binary and timeout.
+The spawn is memoised per process. Unparseable rows, non-finite percentages and unknown ages
+never read as headroom: the first falls back to the file, the others read unknown or stale.
 
 `aiuse --json` (JSON starts after two preamble lines) reports one
 `snapshot.accounts[]` entry per provider; `alerts[]`/`suggestion` rank
