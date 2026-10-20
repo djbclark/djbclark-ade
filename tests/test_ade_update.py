@@ -370,7 +370,11 @@ def test_non_canonical_repo_reports_skills_but_never_links(env):
         assert "missing x1" in r.stdout and "alpha:" not in r.stdout  # counted, no per-row hint to copy
         assert "would run:" not in r.stdout and "ran:" not in r.stdout
     assert env.calls() == [["--check", "alpha"], ["--check", "alpha"]]  # no link call, in either mode
-    assert json.loads(env.run("--check", "--json", repo=other).stdout)["skills"]["link_mode"] == "report-only"
+    out = json.loads(env.run("--check", "--json", repo=other).stdout)
+    assert out["skills"]["link_mode"] == "report-only"
+    assert out["notes"] and "not verified" in out["notes"][0]  # adversary R2-1: never a bare "current"
+    assert "result: current (report-only" in r.stdout
+    assert all("fix" not in p for p in out["claude_links"]["problems"])  # adversary R2-3: no repointing hint in JSON
     # the canonical clone, same table, does link
     r = env.run()
     assert r.returncode == 0, r.stdout + r.stderr
@@ -391,11 +395,11 @@ def test_skill_directory_named_like_a_flag_is_skipped_and_reported(env):
     hostile = env.machine / "skills" / "--remove"
     hostile.mkdir()
     (hostile / "SKILL.md").write_text("---\nname: x\n---\n")
-    for name in ("-dash", ".hidden", "sp ace"):
+    for name in ("-dash", ".hidden", "sp ace", "beta\n"):
         (env.machine / "skills" / name).mkdir()
         (env.machine / "skills" / name / "SKILL.md").write_text("x\n")
     names, skipped = mod.skill_names(env.machine)
-    assert names == ["alpha"] and skipped == ["--remove", "-dash", ".hidden", "sp ace"]
+    assert names == ["alpha"] and skipped == ["--remove", "-dash", ".hidden", "beta\n", "sp ace"]  # R2-2: fullmatch
     env.skills({"alpha": [["claude", "missing"]]})
     r = env.run()
     assert r.returncode == 0, r.stdout + r.stderr

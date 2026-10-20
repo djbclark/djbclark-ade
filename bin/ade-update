@@ -59,7 +59,7 @@ LINK_TIMEOUT = 300  # skill-everywhere link mode nudges the Hermes gateway (up t
 CLAUDE_KINDS = ("commands", "agents", "hooks")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 OK_LINK_STATES = ("linked", "not installed")
-SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+SKILL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # fullmatch: `$` would admit a trailing newline
 # Repository-location variables that would make git act on another repo than --repo.
 GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
                      "GIT_NAMESPACE")
@@ -89,6 +89,7 @@ def run(argv, cwd=None, env=None, timeout=LOCAL_TIMEOUT):
 def git(repo, *args, timeout=LOCAL_TIMEOUT):
     env = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_VARS}
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env["LC_ALL"] = "C"  # pull_failure_code matches git's English messages
     return run(["git", "-C", str(repo), *args], env=env, timeout=timeout)
 
 
@@ -187,7 +188,7 @@ def skill_names(repo):
     if not root.is_dir():
         return [], []
     found = sorted(d.name for d in root.iterdir() if d.is_dir() and (d / "SKILL.md").is_file())
-    return [n for n in found if SKILL_NAME_RE.match(n)], [n for n in found if not SKILL_NAME_RE.match(n)]
+    return [n for n in found if SKILL_NAME_RE.fullmatch(n)], [n for n in found if not SKILL_NAME_RE.fullmatch(n)]
 
 
 def upstream_skill_names(repo, rev):
@@ -196,7 +197,7 @@ def upstream_skill_names(repo, rev):
     if rc != 0:
         return [], []
     found = sorted(n for n in out.split("\n") if n and git(repo, "cat-file", "-e", f"{rev}:skills/{n}/SKILL.md")[0] == 0)
-    return [n for n in found if SKILL_NAME_RE.match(n)], [n for n in found if not SKILL_NAME_RE.match(n)]
+    return [n for n in found if SKILL_NAME_RE.fullmatch(n)], [n for n in found if not SKILL_NAME_RE.fullmatch(n)]
 
 
 def canonical_repo():
@@ -477,8 +478,10 @@ def update(rep, args, repo):
             rep.say(f"    {p['path']}: {p['state']}; fix: {p['fix']}")
         if links["problems"]:
             problems.append("~/.claude links")
-    elif links["problems"]:  # the links belong to the canonical checkout; a fix printed here would repoint them
-        rep.say("  report-only: not the canonical checkout, so these are neither counted nor given a fix (rows in --json)")
+    elif links["problems"]:  # the links belong to the canonical checkout; a fix printed or in the JSON would repoint them
+        for p in links["problems"]:
+            p.pop("fix", None)
+        rep.say("  report-only: not the canonical checkout, so they are not counted and carry no fix (rows in --json)")
 
     # 4. changelog and state
     base = read_state(state_path, repo)
@@ -521,7 +524,12 @@ def update(rep, args, repo):
         d["state_written"] = True
 
     d["problems"] = problems
-    rep.say("result: " + ("needs attention: " + ", ".join(problems) if problems else "current"))
+    notes = [] if can_link else ["report-only: skill and ~/.claude links not verified (not the canonical checkout)"]
+    d["notes"] = notes
+    result = "needs attention: " + ", ".join(problems) if problems else "current"
+    if notes:
+        result += " (" + "; ".join(notes) + ")"
+    rep.say("result: " + result)
     return EXIT_BEHIND if problems else EXIT_OK
 
 
