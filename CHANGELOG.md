@@ -14,11 +14,14 @@ agent what changed and what is new. Entries end with the pull request number.
 - `bin/ade-backup-stores`: Phase 0 backups, a SQLite online-backup copy of every live agent session database, the
   per-session trees and file stores and the Hermes JSONL export (run against a scratch copy of the Hermes
   database), with a hashed `MANIFEST.json`, built in `<dest>.part/` and renamed when complete; `--dry-run`,
-  `--only`, `--json`, `--check-schemas`. Credential file names and paths (inventory 5.5, plus `mcp-auth.json`),
+  `--only`, `--json`, `--check-schemas`, `--strict-stores`. A configured store that does not exist is
+  `"status": "missing"` in the manifest and on stderr (exit 0, so a partly provisioned machine still gets a
+  generation; `--strict-stores` exits 1) and a Cursor session whose required `meta.json` is absent, symlinked,
+  excluded or gone during the copy is an error that marks its store `partial`. Credential file names and paths (inventory 5.5, plus `mcp-auth.json`),
   the `credential-bak` vault and symlinks are not copied, OpenCode's credential tables are scrubbed from its
   database copy, and a schema guard fails the run on any other credential-looking table or column; session
   transcripts are copied as they are and can hold pasted secrets. Refuses a destination that exists, holds
-  a source store or sits inside one (#24).
+  a source store or sits inside one, a configured store counting whether or not it exists (#24).
 - `loadwatch` skill and `load-watch watcher set|show|clear|test`: one registered agent session (a Paseo
   agent by `paseo send`, else relay.py) also hears every load incident, unexplained sustained load and
   job-guard trip, and investigates; `set` replaces the old watcher and tells it (2026-10-20).

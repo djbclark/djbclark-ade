@@ -206,11 +206,13 @@ def test_unreadable_db_lands_in_errors_and_exit_1(env):
     tree_db.close()
 
 
-def test_missing_store_is_an_error_not_a_crash(env):
+def test_missing_store_is_recorded_as_missing_not_an_error(env):
     mod, home, dest, _ = env
-    assert run_main(mod, "--dest", str(dest)) == 1
+    assert run_main(mod, "--dest", str(dest)) == 0
     manifest = json.loads((dest / "MANIFEST.json").read_text())
-    assert {e["store"] for e in manifest["errors"]} == {"walstore", "tree", "filestore"}
+    assert manifest["errors"] == []
+    assert {e["store"]: e["status"] for e in manifest["stores"]} == {
+        "walstore": "missing", "tree": "missing", "filestore": "missing"}
 
 
 def test_unknown_only_name_is_usage_error(env):
@@ -303,9 +305,11 @@ def test_cli_dry_run_runs_as_a_program(tmp_path):
     proc = subprocess.run([sys.executable, str(SCRIPT), "--dry-run", "--only", "handoffs", "--json",
                            "--dest", str(tmp_path / "d" / "x")],
                           capture_output=True, text=True, env={**os.environ, "HOME": str(home)})
-    assert proc.returncode == 1  # the handoffs store is missing in the empty home
+    assert proc.returncode == 0  # the handoffs store is missing in the empty home: recorded, not an error
     data = json.loads(proc.stdout)
-    assert data["dry_run"] is True and data["errors"][0]["store"] == "handoffs"
+    assert data["dry_run"] is True and data["errors"] == []
+    assert data["stores"][0]["store"] == "handoffs" and data["stores"][0]["status"] == "missing"
+    assert "store handoffs: missing" in proc.stderr
     assert not (tmp_path / "d").exists()
 
 
@@ -542,3 +546,149 @@ def test_help_documents_exit_codes_exclusions_and_the_hermes_override():
     assert proc.returncode == 0
     for needle in ("ADE_BACKUP_HERMES", "Exit: 0 clean", "MANIFEST.json", "scrubbed", "--check-schemas", ".part"):
         assert needle in proc.stdout, needle
+
+
+# --- missing stores and required sidecars (Codex review of PR 24, 2026-10-20) ---
+
+@pytest.fixture
+def real(tmp_path, monkeypatch):
+    """The real store list under a temporary HOME (nothing outside tmp_path is read or written)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return load(), home, tmp_path
+
+
+def default_generation(home):
+    gens = [p for p in (home / ".local/state/ade/backups").iterdir() if not p.name.endswith(".part")]
+    assert len(gens) == 1
+    return gens[0]
+
+
+def test_missing_handoffs_store_keeps_its_own_root_so_the_default_dest_is_accepted(real, capsys):
+    mod, home, _ = real
+    assert mod.main(["--only", "handoffs"]) == 0
+    manifest = json.loads((default_generation(home) / "MANIFEST.json").read_text())
+    entry = manifest["stores"][0]
+    assert entry["store"] == "handoffs" and entry["status"] == "missing"
+    assert entry["missing"] == [str(home / ".local/state/handoffs")] and manifest["errors"] == []
+    assert "store handoffs: missing" in capsys.readouterr().err
+
+
+def test_missing_hermes_memory_store_does_not_make_home_a_root(real, capsys):
+    mod, home, _ = real
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "hermes-memory", "--dest", str(dest)]) == 0
+    entry = json.loads((dest / "MANIFEST.json").read_text())["stores"][0]
+    assert entry["status"] == "missing"
+    assert mod.main(["--only", "hermes-memory"]) == 0  # the default dest under ~/.local/state too
+
+
+def test_strict_stores_exits_1_on_a_missing_store_and_still_writes_the_generation(real, capsys):
+    mod, home, _ = real
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "handoffs", "--dest", str(dest), "--strict-stores"]) == 1
+    assert json.loads((dest / "MANIFEST.json").read_text())["stores"][0]["status"] == "missing"
+    assert mod.main(["--only", "handoffs", "--dry-run", "--strict-stores", "--dest", str(home / "o2")]) == 1
+    assert mod.main(["--only", "handoffs", "--dry-run", "--dest", str(home / "o2")]) == 0
+
+
+def test_a_store_with_some_paths_missing_is_recorded_per_path(real):
+    mod, home, _ = real
+    con = make_wal_db(home / ".zcode/cli/db/db.sqlite", ["x"])
+    con.close()  # .zcode/v2/tasks-index.sqlite is absent
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "zcode-db", "--dest", str(dest)]) == 0
+    entry = json.loads((dest / "MANIFEST.json").read_text())["stores"][0]
+    assert entry["status"] == "ok" and entry["missing"] == [str(home / ".zcode/v2/tasks-index.sqlite")]
+    assert entry["file_count"] == 1
+
+
+def test_refuse_reason_still_refuses_around_existing_and_missing_stores(real):
+    mod, home, _ = real
+    (home / ".local/state/handoffs").mkdir(parents=True)
+    stores = mod.build_stores(home)
+    inside = (home / ".local/state/handoffs/x").resolve()
+    holds = (home / ".local/state").resolve()
+    assert "inside the handoffs" in mod.refuse_reason(inside, stores)
+    assert "holds the handoffs" in mod.refuse_reason(holds, stores)
+    # hermes-memory does not exist: its own path is still a root
+    assert "inside the hermes-memory" in mod.refuse_reason((home / "hermes-memory/x").resolve(), stores)
+    assert mod.refuse_reason((home / ".local/state/ade/backups/s").resolve(), stores) is None
+
+
+def make_cursor_session(home, with_meta=True, sub="chats/hashA/uuid1"):
+    sdir = home / ".cursor" / sub
+    sdir.mkdir(parents=True)
+    con = make_wal_db(sdir / "store.db", ["row"])
+    con.close()
+    if with_meta:
+        (sdir / "meta.json").write_text('{"name": "kept"}')
+    return sdir
+
+
+def manifest_of(dest):
+    return json.loads((dest / "MANIFEST.json").read_text())
+
+
+def test_cursor_session_with_its_meta_is_clean(real):
+    mod, home, _ = real
+    make_cursor_session(home)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "ok" and (dest / "cursor-chats/hashA/uuid1/meta.json").is_file()
+
+
+def test_cursor_store_db_without_meta_json_is_an_error_and_the_store_partial(real, capsys):
+    mod, home, _ = real
+    make_cursor_session(home, with_meta=False)
+    ok = make_cursor_session(home, sub="chats/hashA/uuid2")
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 1
+    manifest = manifest_of(dest)
+    entry = manifest["stores"][0]
+    assert entry["status"] == "partial"
+    assert [e["source"] for e in entry["errors"]] == ["hashA/uuid1"]  # the session dir, relative, no content
+    assert "meta.json" in entry["errors"][0]["error"] and "kept" not in json.dumps(manifest["errors"])
+    # the generation still completed: both dbs and the other session's sidecar are in it
+    assert (dest / "cursor-chats/hashA/uuid1/store.db").is_file()
+    assert (dest / "cursor-chats/hashA/uuid2/meta.json").is_file()
+    assert ok.name == "uuid2"
+
+
+def test_cursor_meta_json_symlink_is_an_error(real):
+    mod, home, _ = real
+    sdir = make_cursor_session(home, with_meta=False)
+    (home / "elsewhere.json").write_text("{}")
+    os.symlink(home / "elsewhere.json", sdir / "meta.json")
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 1
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial" and "symlink" in entry["errors"][0]["error"]
+    assert not (dest / "cursor-chats/hashA/uuid1/meta.json").exists()
+
+
+def test_cursor_meta_json_vanishing_between_listing_and_copy_is_an_error(real, monkeypatch):
+    mod, home, _ = real
+    make_cursor_session(home)
+    real_copy2 = shutil.copy2
+
+    def vanishing(src, dst, **kw):
+        if Path(src).name == "meta.json":
+            Path(src).unlink()
+            raise FileNotFoundError(2, "No such file or directory", str(src))
+        return real_copy2(src, dst, **kw)
+
+    monkeypatch.setattr(mod.shutil, "copy2", vanishing)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 1
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial" and entry["errors"][0]["source"] == "hashA/uuid1"
+    assert "vanished" in entry["errors"][0]["error"]
+
+
+def test_dry_run_reports_a_missing_required_sidecar(real):
+    mod, home, _ = real
+    make_cursor_session(home, with_meta=False)
+    assert mod.main(["--only", "cursor-chats", "--dry-run", "--dest", str(home / "o")]) == 1

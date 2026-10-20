@@ -115,7 +115,9 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    `~/.local/state/ade/backups/<UTC>/` with a `MANIFEST.json`. Nothing is deleted from any store. The first real
    generation, `20261020T081802Z`, predates the credential scrub: it holds OpenCode's `credential` rows and 68 Cursor
    `mcp-auth.json` files, so the operator scrubs or deletes it and takes a new one. Open: run it on a
-   schedule (no launchd job yet), and decide how long generations are kept; each is ~10 GB.
+   schedule (no launchd job yet), and decide how long generations are kept; each is ~10 GB. A configured store that does not exist is `"status": "missing"` in the manifest and on
+   stderr, exit 0 (`--strict-stores`: exit 1); a Cursor session without its required `meta.json` is an error, store
+   `partial` (Codex review of PR #24, 2026-10-20).
    Adversary round 2 on PR #24 (LOW/INFO, queued): a trigger on a scrubbed OpenCode table could copy the
    deleted values into another table on the copy (refuse or `DROP TRIGGER` on the copy, then count the scrubbed
    values in the copy's bytes after `VACUUM`); the schema guard misses `authorization`, `cookie`, `jwt`,

@@ -102,7 +102,8 @@ The tool scrubs OpenCode's credential tables from the copy and refuses (as an er
 any backed-up database with another credential-looking table or column name (`--check-schemas`, 2026-10-20: 0
 unexplained across all live databases; 20 token-metric, account-id and lease-marker names are allowlisted with
 reasons in the script). Opening a source `mode=ro` can create zero-length `-wal`/`-shm` files beside a quiet database; no
-data in a source changes. Transcript content is copied as it is and can hold pasted secrets: a generation is
+data in a source changes. A configured store or path that does not exist (a partly provisioned machine) is
+`"status": "missing"` in the manifest and on stderr, exit 0; `--strict-stores` makes it exit 1. Transcript content is copied as it is and can hold pasted secrets: a generation is
 secret-bearing.
 
 **Two rules for slice 2 (adversary review, 2026-10-20).** (a) Every path in section 5 item 5 is excluded from
@@ -131,7 +132,8 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
    each `conversation_summaries.db` and, for the ACP store, the `conversations/<uuid>.meta` sidecar beside each db
    (268 files, some 0600, not opened); Cursor `~/.cursor/chats/<md5>/<uuid>/store.db` and
    `~/.cursor/acp-sessions/<uuid>/store.db`, each with its `meta.json` sidecar copied beside the backup (the
-   resume picker reads it, skills/autorename/SKILL.md; a db without it is not a lossless copy).
+   resume picker reads it, skills/autorename/SKILL.md; a db without it is not a lossless copy: the tool reports a session whose `meta.json` is absent, a symlink,
+   excluded or gone during the copy as an error naming the session directory and marks the store `partial`, 2026-10-20).
 3. **File stores — clone the directory:** `~/.claude/projects` (+ sidecar dirs `file-history`,
    `session-env`, `tasks`, `teams`; `sessions` only without its `*.key` files), Codex runtime `sessions/` tree,
    `~/.qwen/projects/*/chats`, `~/.cline/data/sessions`, `~/.grok/sessions`, `~/.gemini/tmp/*/chats`,
