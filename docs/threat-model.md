@@ -27,8 +27,10 @@ What an attacker would want, in order of damage:
    operator that passes it can read every declared secret; client-family labels are correlation metadata,
    not principals (proposal 4.5 item 1). `get` and `export` print values to stdout
    (`skills/sudo-secretspec/SKILL.md`, Pitfalls); `run` injects them into a child.
-2. **Code execution as the operator.** acp-run runs every agent yolo (all tool calls auto-approved; only
-   `--perm deny` is a gate, operator 2026-10-14; `tools/acp-run/README.md` Permissions). The proposal says
+2. **Code execution as the operator.** acp-run runs every agent yolo by default (all tool calls
+   auto-approved, operator 2026-10-14); `--perm read-only` restricts an agent to non-mutating tools, or refuses
+   an agent without a verified equivalent, and `--perm deny` gates every call (`tools/acp-run/README.md`
+   Permissions); both are reserved for a security-sensitive slice (4.1). The proposal says
    an unattended builder has the daemon user's credentials and that scrubbed pastures and config stripping
    are reliability switches, not a boundary (proposal 10, risk 12).
 3. **GitHub write access** through the operator's `gh` login: push to this public repo, open and merge
