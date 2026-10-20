@@ -175,6 +175,7 @@ class TestDiscovery(unittest.TestCase):
         self.assertIn("clinepass", names)
         self.assertNotIn("cline", names)
 
+    @mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "0"})   # omp-ready: TestOmpReadyRoster
     def test_measured_idle_capacity_beats_unmeasured(self):
         """Between two unprofiled pools, the one we can see is idle should win."""
         # Drain every curated pool so the comparison is strictly between two
@@ -390,6 +391,7 @@ class TestPlanWave(unittest.TestCase):
         self.assertIsNotNone(c)
         self.assertNotEqual(c.service.name, "codex")
 
+    @mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "0"})   # omp-ready: TestOmpReadyRoster
     def test_no_room_comes_back_as_none_not_an_error(self):
         drained = {k: {"remaining": 1.0} for k in {*IDLE, "antigravity-claude"}}
         rows = r.plan(["code"], quota=drained)
@@ -998,6 +1000,7 @@ class TestQualityBand(unittest.TestCase):
     def test_flash_is_not_a_code_pool(self):
         self.assertFalse(r.BY_NAME["antigravity"].eligible("code"))
 
+    @mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "0"})   # omp-ready: TestOmpReadyRoster
     def test_the_2026_10_18_case_queues_code_instead_of_routing_far_down(self):
         best = r.quality_best("code", list(r.discover(self.CASE)))
         self.assertIsNotNone(best)
@@ -1041,6 +1044,47 @@ class TestQualityBand(unittest.TestCase):
         nxt = r.quality_best("code", services, {best.name})
         self.assertIsNotNone(nxt)
         self.assertNotEqual(nxt.name, best.name)
+
+
+class TestOmpReadyRoster(unittest.TestCase):
+    """With a working omp login (ROUTE_AGENT_OMP_READY=1) omp is a code/bulk pool. conftest pins the
+    probe off so the suite does not depend on the host; these are the omp-ready counterparts of
+    test_measured_idle_capacity_beats_unmeasured, test_no_room_comes_back_as_none_not_an_error and
+    test_the_2026_10_18_case_queues_code_instead_of_routing_far_down (docs/queue.md item 6, 2026-10-20).
+    Left out on purpose: omp ready with NO quota reading (the state this Mac was in). There an unmeasured
+    omp outranks a measured pool in all three scenarios, which is the open follow-up carried from item 6,
+    not behaviour to pin (adversary, 2026-10-20)."""
+
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_measured_full_omp_pool_beats_another_measured_idle_pool_for_bulk(self):
+        q = {**{k: {"remaining": 0.0} for k in IDLE},
+             "fresh-pool": {"remaining": 99.0}, "murky-pool": {}, "omp": {"remaining": 100.0}}
+        self.assertEqual(r.route("bulk", quota=q).service.name, "omp")
+        # ...and a drained omp leaves the original ordering alone.
+        q["omp"] = {"remaining": 0.0}
+        self.assertEqual(r.route("bulk", quota=q).service.name, "fresh-pool")
+
+    def test_omp_is_the_room_when_every_other_code_pool_is_drained(self):
+        drained = {k: {"remaining": 1.0} for k in {*IDLE, "antigravity-claude"}}
+        self.assertIsNone(r.plan(["code"], quota={**drained, "omp": {"remaining": 1.0}})[0][1])
+        c = r.plan(["code"], quota={**drained, "omp": {"remaining": 100.0}})[0][1]
+        self.assertIsNotNone(c)
+        self.assertEqual(c.service.name, "omp")
+
+    def test_omp_with_room_is_inside_the_2026_10_18_quality_band(self):
+        """omp (code r13) is within quality_max_rank_gap of the band's best (r11), so with credits
+        left the case no longer queues; with omp drained it still does."""
+        case = TestQualityBand.CASE
+        c = r.route("code", quota={**case, "omp": {"remaining": 100.0}})
+        self.assertIsNotNone(c)
+        self.assertEqual(c.service.name, "omp")
+        self.assertIsNone(r.route("code", quota={**case, "omp": {"remaining": 1.0}}))
+        self.assertIn("quality_max_rank_gap",
+                      r.unrouted_why("code", {**case, "omp": {"remaining": 1.0}}))
 
 
 class TestOmpCreditsTier(unittest.TestCase):
