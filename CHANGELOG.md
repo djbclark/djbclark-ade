@@ -15,6 +15,10 @@ agent what changed and what is new. Entries end with the pull request number.
   (only in the canonical checkout; any other `--repo` is report-only), checks the `CLAUDE.md` and `~/.claude` symlinks,
   and prints the changelog entries new since the revision it last recorded; `--check` reports only and exits 10 when
   behind (2026-10-20, #20).
+- `agents/` templates for `~/.claude/settings.json`, `~/.codex/config.toml`, opencode's `opencode.json` and
+  `~/.hermes/config.yaml` (secrets, home paths and host or account ids as placeholders, listed in
+  `agents/README.md`), `bin/ade-template-check` (credential scan, render-and-parse with plain and hostile values, `--diff` by key path) and its
+  tests; CI now installs PyYAML for them (#23).
 - `loadwatch` skill and `load-watch watcher set|show|clear|test`: one registered agent session (a Paseo
   agent by `paseo send`, else relay.py) also hears every load incident, unexplained sustained load and
   job-guard trip, and investigates; `set` replaces the old watcher and tells it (2026-10-20).
@@ -86,6 +90,9 @@ agent what changed and what is new. Entries end with the pull request number.
   an omp login as it does on CI; the omp-ready roster has its own tests (queue item 6) (#17).
 - `acp-dispatch`: an unmeasured (stale) quota window is skipped instead of crashing the dispatch
   with a `float(None)` error (#13).
+- `self-slash` (herdr): a slash command left on the input line after the first Enter is Entered again, up to 3 times,
+  for every TUI and not only cursor-agent; if it never leaves the line the waiter exits 8 and logs "NOT confirmed
+  run" instead of "sent" (2026-10-20).
 
 ### Security
 
