@@ -14,6 +14,9 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    `sudo-secretspec` (djbclark creates the key in the console, Organization settings > Admin keys), grant
    parameters stay in the `set-credits` override, a launchd/`fleet-watch` job refreshes it (never a model prompt,
    home rule 13). Blocked on the key.
+   Also (adversary on the aiuse branch, finding 5, 2026-10-20): `bin/route_agent.py` reads aiuse's `latest.json`
+   directly, so it never sees the operator credits override; make it read `aiuse --available --json` (or the
+   same resolver aiuse uses) so routing and the quota gate agree. Small djbclark-ade PR after the aiuse branch merges.
 
 3. **Load gate follow-ups** (adversary final pass on PR 7, 2026-10-20, informational): (a) on `--detach
    --no-wait` a missing `ACP_DISPATCH_LOAD_WATCH` is only visible in the runner log and the record; warn at
