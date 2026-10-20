@@ -148,9 +148,10 @@ class RouterTest(unittest.TestCase):
         self.assertIn("needs a loopback --listen address", err.getvalue())
 
     def test_loopback_listen_check(self):
-        for ok in ("127.0.0.1:0", "localhost:8805", "[::1]:8805"):
+        for ok in ("127.0.0.1:0", "localhost:8805"):
             self.assertTrue(fr.is_loopback_listen(ok), ok)
-        for bad in ("0.0.0.0:8805", "192.168.1.5:8805", ":8805", "example.com:80"):
+        # IPv6 spellings are refused: serve() binds AF_INET and could never honour them
+        for bad in ("0.0.0.0:8805", "192.168.1.5:8805", ":8805", "example.com:80", "[::1]:8805", "::1:8805"):
             self.assertFalse(fr.is_loopback_listen(bad), bad)
 
     def test_plain_404_page_does_not_fall_back(self):
