@@ -14,14 +14,18 @@ slices that can leave the Mac. Two need djbclark once: (1) environment `ccarenv_
 `gh` and the factory's intake path. The Codex GitHub app is installed; the first task is
 https://github.com/djbclark/djbclark-ade/issues/4, but the connector answered twice "To use
 Codex here, create an environment for this repo" even after djbclark re-checked the
-environment's binding, so the connector reads the same catalog the CLI does. Blocked on both
-routes until OpenAI fixes new-style environment discovery (openai/codex#50182); the load-admit
-fix went to the local builder instead. Re-trigger issue 4 with an `@codex` comment after the
-next Codex release or when the connector's reply changes. Then a `codex-cloud` place in
+environment's binding, so the connector reads the same catalog the CLI does. Blocked as a builder on both
+routes until OpenAI fixes new-style environment discovery (openai/codex#50182; non-review
+mentions are a separate open bug); the load-admit fix went to the local builder instead. What
+works today: `@codex review` on a PR (PR 5 reviewed clean, 2026-10-19), so Codex is a third
+reviewer next to the adversary and Cursor's Security Agent. Re-trigger issue 4 with an `@codex`
+comment after the next Codex release or when the connector's reply changes. Then a `codex-cloud` place in
 `acp-dispatch`/`route_agent.py` so the router can pick it (§11.5 rule 4);
 (2) DONE 2026-10-19: the Cursor user API key is `CURSOR_API_KEY` in `sudo-secretspec`
-(runtime declaration, optional; read it only through `sudo-secretspec run`); next a
-`cursor-cloud` launcher that POSTs to `api.cursor.com/v1/agents`, then a place in `acp-dispatch`. (3) The Max plan's
+(runtime declaration, optional; read it only through `sudo-secretspec run`); `bin/cursor-cloud`
+launches, inspects and follows up agents (first slice merged as PR 5, 2026-10-19; `@cursor` on
+issue 6 is the GitHub-mention test); still open: a `cursor-cloud` place in `acp-dispatch` and
+`route_agent.py` so the router can pick it. (3) The Max plan's
 monthly API credits are the `omp credits` pool in `aiuse` (djbclark, 2026-10-19): rename the
 pool, verify the balance on the Anthropic console, and route one API-key workload at it.
 
