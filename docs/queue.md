@@ -88,7 +88,9 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    `latest.json` directly (item 2); (e) **lead ruling to confirm with djbclark**: the aiuse path reports Fable as the
    row's least-applicable headroom (22 live where the file read gave the sublimit window's own 44), so
    `FABLE_MIN_LEFT=10` now switches to Opus at roughly 20 % of the cap rather than 10 %; kept because it is the
-   contract value and the conservative one.
+   contract value and the conservative one. **Ruled 2026-10-20 (djbclark): keep 10.** It is aiuse's contract unit (the same
+   `headroom_percent` every pool's threshold uses) and the only option that protects the shared weekly as well as
+   the sublimit; Opus takes over at 20 % of the Fable sublimit or 10 % of the shared weekly, whichever first.
 
 ## Cloud-agent readiness: Codex Cloud environment, Cursor API key (ruling 2026-10-19)
 
