@@ -295,3 +295,73 @@ def test_proc_cwds_parses_one_lsof_call(monkeypatch):
     assert lw.proc_cwds([101, 100, 100, 0]) == {"100": "/r/a", "101": "/tmp/x y"}
     assert len(calls) == 1 and calls[0][-1] == "100,101"
     assert lw.proc_cwds([]) == {} and len(calls) == 1
+
+
+def fake_paseo(tmp_path, rc=0):
+    """A `paseo` stand-in that appends its argv (one JSON list per line) to sent.jsonl."""
+    log = tmp_path / "sent.jsonl"
+    cli = tmp_path / "paseo"
+    cli.write_text(f"#!{sys.executable}\nimport json, sys\nopen({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                   f"sys.exit({rc})\n")
+    cli.chmod(0o755)
+    return cli, log
+
+
+def run_env(tmp_path, env, *args):
+    base = {k: v for k, v in os.environ.items() if k not in ("PASEO_AGENT_ID", "PASEO_CLI", "CLAUDE_CODE_SESSION_ID")}
+    base.update(LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"), **env)
+    return subprocess.run([sys.executable, str(LW), *args], capture_output=True, text=True, env=base, timeout=30)
+
+
+def test_watcher_set_from_paseo_env_show_clear(tmp_path):
+    cli, log = fake_paseo(tmp_path)
+    env = {"PASEO_AGENT_ID": "agent-a", "PASEO_CLI": str(cli), "CLAUDE_CODE_SESSION_ID": "sid-a"}
+    assert run_env(tmp_path, {}, "watcher", "show").returncode == 1
+    r = run_env(tmp_path, env, "watcher", "set", "--name", "lw", "--chain", "load-spike-monitor-t")
+    assert r.returncode == 0 and "paseo agent-a" in r.stdout
+    w = json.loads(run_env(tmp_path, {}, "watcher", "show", "--json").stdout)
+    assert (w["channel"], w["target"], w["sid"], w["paseo_cli"], w["chain"]) == \
+        ("paseo", "agent-a", "sid-a", str(cli), "load-spike-monitor-t")
+    assert not log.exists()  # nobody to tell on a first set
+    assert run_env(tmp_path, {}, "watcher", "clear", "someone-else").returncode == 1
+    assert run_env(tmp_path, {}, "watcher", "clear", "sid-a").returncode == 0
+    assert run_env(tmp_path, {}, "watcher", "show").returncode == 1
+
+
+def test_watcher_set_replaces_and_tells_the_old_one(tmp_path):
+    cli, log = fake_paseo(tmp_path)
+    assert run_env(tmp_path, {"PASEO_AGENT_ID": "old", "PASEO_CLI": str(cli)}, "watcher", "set").returncode == 0
+    r = run_env(tmp_path, {"PASEO_AGENT_ID": "new", "PASEO_CLI": str(cli)}, "watcher", "set", "--name", "B")
+    assert r.returncode == 0 and "replaced paseo old" in r.stdout and "told the old watcher" in r.stdout
+    sent = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert len(sent) == 1 and sent[0][:6] == ["send", "old", "--no-wait", "--behavior", "steer", sent[0][5]]
+    assert "no longer the load watcher" in sent[0][5] and "B took over" in sent[0][5]
+    assert json.loads((tmp_path / "state" / "watcher.json").read_text())["target"] == "new"
+
+
+def test_watcher_set_needs_a_session(tmp_path):
+    assert run_env(tmp_path, {}, "watcher", "set").returncode == 2
+
+
+def test_tell_watcher_skips_relayed_offender_and_stamps(tmp_path, monkeypatch):
+    lw = load_module()
+    monkeypatch.setattr(lw, "STATE_DIR", tmp_path)
+    sent = []
+    monkeypatch.setattr(lw, "send_to", lambda w, text: sent.append((w["target"], text)) or True)
+    assert lw.tell_watcher("x.", False) is None  # no watcher registered
+    lw.save_watcher({"channel": "paseo", "target": "agent-a", "sid": "sid-a"})
+    assert lw.tell_watcher("x.", False, skip={"sid-a"}) is None and not sent
+    assert lw.tell_watcher("load 30.", False) is True
+    assert sent[0][0] == "agent-a" and "load 30." in sent[0][1] and "loadwatch skill" in sent[0][1]
+    assert "last_ok" in json.loads((tmp_path / "watcher.json").read_text())
+    monkeypatch.setattr(lw, "send_to", lambda w, text: False)
+    assert lw.tell_watcher("y.", False) is False
+    assert "last_fail" in json.loads((tmp_path / "watcher.json").read_text())
+
+
+def test_watcher_record_must_be_well_formed(tmp_path, monkeypatch):
+    lw = load_module()
+    monkeypatch.setattr(lw, "STATE_DIR", tmp_path)
+    for bad in ("[]", "{}", '{"channel": "smoke", "target": "x"}', "not json"):
+        (tmp_path / "watcher.json").write_text(bad)
+        assert lw.watcher() is None

@@ -133,9 +133,19 @@ fi
 # for a manual gateway restart from Terminal. Idempotent and cheap. Does nothing
 # when the gateway is not running or predates the verb.
 if [[ $mode == link ]] && command -v hermes >/dev/null; then
-  hpy="$(ghead -1 "$(command -v hermes)")"     # shebang = the venv python
-  hpy="${hpy#\#!}"
-  if [[ ! -x $hpy ]]; then hpy="$(command -v python3)"; fi
+  # The interpreter: the shebang when it is a python, else the python a wrapper execs. `hermes` became a
+  # /bin/sh wrapper around a /bin/sh closure launcher (2026-10-20), and taking its shebang ran this
+  # snippet under sh: `import os, sys` invoked ImageMagick's `import`. Never run it under a non-python.
+  hpy="" hfile="$(command -v hermes)"
+  for _ in 1 2 3; do
+    shebang="$(ghead -1 "$hfile")"; shebang="${shebang#\#!}"; shebang="${shebang%% *}"
+    if [[ $(basename "$shebang") == python* && -x $shebang ]]; then hpy=$shebang; break; fi
+    next="$(ggrep -oE "exec +/[^ \"']+" "$hfile" | ghead -1 | gsed -E 's/^exec +//')"
+    if [[ $(basename "$next") == python* && -x $next ]]; then hpy=$next; break; fi
+    [[ -n $next && -f $next ]] || break
+    hfile=$next
+  done
+  if [[ -z $hpy ]]; then hpy="$(command -v python3)"; fi
   # Pipeline through python must run from a cwd inside the agent project, else
   # the editable install's __editable___hermes_agent_finder still needs the
   # project root on sys.path. Inject it so the nudge works from any directory.
@@ -144,8 +154,9 @@ import os, sys
 from pathlib import Path
 bin_dir = Path(sys.executable).parent
 root = bin_dir.parent.parent.resolve() if bin_dir.name == ".venv" else bin_dir.parent.parent
-if str(root) not in sys.path:
-    sys.path.insert(0, str(root))
+for r in (Path(os.environ["HERMES_HOME"]) / "hermes-agent", root):  # a pinned tools python is not in the tree
+    if r.is_dir() and str(r) not in sys.path:
+        sys.path.insert(0, str(r))
 try:
     from gateway.control_socket import reload_gateway_plugins
 except Exception:

@@ -15,6 +15,9 @@ agent what changed and what is new. Entries end with the pull request number.
   (only in the canonical checkout; any other `--repo` is report-only), checks the `CLAUDE.md` and `~/.claude` symlinks,
   and prints the changelog entries new since the revision it last recorded; `--check` reports only and exits 10 when
   behind (2026-10-20, #20).
+- `loadwatch` skill and `load-watch watcher set|show|clear|test`: one registered agent session (a Paseo
+  agent by `paseo send`, else relay.py) also hears every load incident, unexplained sustained load and
+  job-guard trip, and investigates; `set` replaces the old watcher and tells it (2026-10-20).
 - `docs/ade-everywhere-inventory-2026-10-20-stores.md`: Phase 0 slice 1, every installed agent
   session store classified (52 stores, backup plan per store, differences from proposal §6.1) (#16).
 - `CHANGELOG.md`, this file, and the rule that every pull request adds a line to it; README
@@ -33,6 +36,12 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
+- `acp-dispatch check`: a slice whose recorded class is `killed:` or `lost` gets the `resume` hint (no
+  "after the reset") and no `--escalate`; a missing agent binary is `NO-REPORT: not-installed` (exit 127
+  plus acp-run's own line) with a re-dispatch hint; `acp-run` waits up to 90 s (`ACP_RUN_BIN_WAIT`, clamped
+  to 0..600, junk is the default) for a missing binary and preflight allows for that wait; re-dispatching a
+  footed brief under a new `--name` carries one delivery contract, cutting only a provably generated tail
+  and saying so on stderr (#18).
 - `route_agent`: pool state comes from `aiuse --available --json`, with the snapshot file as the
   fallback (#12).
 - `steps` skill: prompt-tool table and §2c cover the `question` tool so `/loose → /steps`
@@ -43,6 +52,8 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `skill-everywhere`: the Hermes gateway nudge follows `hermes` wrappers to the real python; since `hermes`
+  became a `/bin/sh` wrapper it ran the snippet under sh, where `import os, sys` was ImageMagick (2026-10-20).
 - `tests/conftest.py` pins `ROUTE_AGENT_OMP_READY=0`, so the route_agent suite passes on a host with
   an omp login as it does on CI; the omp-ready roster has its own tests (queue item 6) (#17).
 - `acp-dispatch`: an unmeasured (stale) quota window is skipped instead of crashing the dispatch
