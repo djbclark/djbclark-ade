@@ -648,7 +648,7 @@ def test_remote_scan_with_an_origin_that_does_not_answer_is_not_clean_and_pushed
     assert c["local_only_branches"] == [{"branch": "feature", "count": 1}]
     # no origin branch list at all (not even local refs): the verdict is still not clean
     mod = load()
-    monkeypatch.setattr(mod, "origin_branches", lambda path, remote: (None, False))
+    monkeypatch.setattr(mod, "origin_branches", lambda path, remote: (None, False, 0))
     c = scan_one(mod, roots, remote=True)
     assert c["verdict"] == "unpushed commits" and "origin unknown" in c["flags"], c["flags"]
     assert c["local_only_branches"] == [{"branch": "feature", "count": 1}]
@@ -1598,3 +1598,95 @@ def test_tilde_abbreviates_only_home_itself_or_a_path_below_it(monkeypatch):
     assert mod.shquote(mod.tilde("/root")) == "~"
     assert mod.shcode("git -C {} status", mod.tilde("/root")) == "`git -C ~ status`"
     assert mod.shquote("~") == "~"
+
+
+GOOD_BRANCH_NAMES = ["main", "feature/x", "a-b_c.d", "v1.2.3", "x@y", "@x", "a@", "HEAD", "-dash", "\u00e9t\u00e9",
+                     "a/b/c", "lock", "a.lock.b", "x{y}", "a'b"]
+BAD_BRANCH_NAMES = ["", "x:refs/heads/side", "x:y", "a b", "a\tb", "a\x01b", "a\x7fb", "a..b", "a@{b", "a?b", "a*b",
+                    "a[b", "a\\b", "a^b", "a~b", "/a", "a/", "a//b", ".a", "a/.b", "a.", "a/b.", "x.lock", "a/x.lock/b",
+                    "a/.", "..", "a\nb"]
+
+
+@pytest.mark.parametrize("name", GOOD_BRANCH_NAMES + BAD_BRANCH_NAMES)
+def test_valid_branch_name_agrees_with_git_check_ref_format(name):
+    """Round 17, 1: the Python rule is git's, for names origin advertises (`@` alone is also refused here,
+    as `git branch` does, though check-ref-format accepts `refs/heads/@`)."""
+    mod = load()
+    p = subprocess.run(["git", "check-ref-format", f"refs/heads/{name}"], env=GIT_ENV, capture_output=True)
+    assert mod.valid_branch_name(name) is (p.returncode == 0), name
+    assert (name in GOOD_BRANCH_NAMES) is (p.returncode == 0), name
+
+
+def test_an_at_sign_alone_is_not_a_branch_name():
+    assert load().valid_branch_name("@") is False
+
+
+def test_a_hostile_origin_cannot_make_fetch_write_local_refs(tmp_path):
+    """Adversary round 17, 1 (probe23): origin advertises `refs/heads/x:refs/heads/side` (a loose ref file) and
+    `refs/heads/x:refs/remotes/origin/keep` (a packed-refs line), both at a commit this checkout lacks. A
+    refspec built from those names would fast-forward `side` and create the tracking ref `keep`; the names
+    are dropped and flagged instead, and every local ref is byte-identical after `--remote --fetch`."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    git(work, "branch", "side")
+    git(work, "branch", "keep")
+    attacker = tmp_path / "attacker"
+    git(tmp_path, "clone", str(origin), str(attacker))
+    commit_file(attacker, "evil.txt")
+    git(attacker, "push", "origin", "main:refs/heads/x")
+    evil = git(attacker, "rev-parse", "HEAD").strip()
+    loose = origin / "refs" / "heads" / "x:refs" / "heads"
+    loose.mkdir(parents=True)
+    (loose / "side").write_text(evil + "\n")
+    packed = origin / "packed-refs"
+    if not packed.exists():
+        packed.write_text("# pack-refs with: peeled fully-peeled sorted\n")
+    with packed.open("a") as fh:
+        fh.write(f"{evil} refs/heads/x:refs/remotes/origin/keep\n")
+    advertised = git(tmp_path, "ls-remote", "--heads", str(origin))
+    if "refs/heads/x:refs/heads/side" not in advertised or "refs/heads/x:refs/remotes/origin/keep" not in advertised:
+        pytest.skip("this git does not advertise ref names it would refuse to create")
+    refs_before = git(work, "for-each-ref", "--format=%(refname) %(objectname)")
+    c = scan_one(mod, roots, remote=True, fetch=True)
+    assert git(work, "for-each-ref", "--format=%(refname) %(objectname)") == refs_before
+    assert not (work / ".git" / "FETCH_HEAD").exists()
+    assert "origin advertised invalid ref names: 2" in c["flags"] and c["invalid_origin_refs"] == 2, c
+    assert c["verdict"] != "clean and pushed"
+    # a plain scan never asked origin: no invalid names counted, nothing verified
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots)
+    assert c["invalid_origin_refs"] == 0 and not any(f.startswith("origin advertised") for f in c["flags"])
+
+
+def test_ls_remote_drops_malformed_oids_and_names(monkeypatch):
+    """Round 17, 1: a null or short oid, an uppercase one, a line with no tab and a name with a `:` are all
+    dropped and counted; sha-256 object ids (64 hex digits) pass."""
+    mod = load()
+    good, sha256, zero = "a" * 40, "b" * 64, "0" * 40
+    out = "\n".join([f"{good}\trefs/heads/main", f"{sha256}\trefs/heads/long", f"{zero}\trefs/heads/null",
+                     f"{'A' * 40}\trefs/heads/upper", f"{'c' * 39}\trefs/heads/short",
+                     f"{good}\trefs/heads/x:refs/heads/side", f"{good} refs/heads/notab", "refs/heads/bare"]) + "\n"
+    monkeypatch.setattr(mod, "run", lambda argv, **kw: (0, out))
+    heads, invalid = mod.ls_remote_heads("/nowhere")
+    assert heads == {"main": good, "long": sha256} and invalid == 6
+
+
+def test_local_only_verified_needs_a_live_origin_answer(tmp_path):
+    """Round 17, 2: null for a scan that asked origin nothing (plain, origin down, no origin), true or false
+    only after `--remote` got an answer."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    assert scan_one(mod, roots)["local_only_verified"] is None
+    mod._remote_cache.clear()
+    assert scan_one(mod, roots, remote=True)["local_only_verified"] is True
+    push_from_another_clone(tmp_path, origin, "main")
+    mod._remote_cache.clear()
+    assert scan_one(mod, roots, remote=True)["local_only_verified"] is False
+    mod._remote_cache.clear()
+    git(work, "config", "remote.origin.url", str(tmp_path / "gone.git"))
+    c = scan_one(mod, roots, remote=True)
+    assert "origin unreachable" in c["flags"] and c["local_only_verified"] is None
+    git(work, "remote", "remove", "origin")
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True)
+    assert "no origin remote" in c["flags"] and c["local_only_verified"] is None

@@ -82,9 +82,11 @@ Local-only commits: `local_only_commits` is `git rev-list --count HEAD --branche
 --remotes=origin`; with --remote and an answering `ls-remote` it is `--not <every live origin tip>`
 alone: a stale local tracking ref of a live branch proves nothing (origin may have force-pushed it) and
 one of a deleted branch is stale (a live tip whose objects are missing here excludes nothing, so the
-count can only overcount; --fetch downloads those tips first). `local_only_verified` is false when
-live tips are still missing, i.e. the count is an upper bound (true otherwise, null for a skipped
-checkout). When it is above 0, `local_only_branches` is a
+count can only overcount; --fetch downloads those tips first). `local_only_verified` is true only when
+--remote got a live `ls-remote` answer and no live tip is missing; false when it did and tips are still
+missing, i.e. the count is an upper bound; null (JSON) when origin was not asked or did not answer (the
+count trusts the local `refs/remotes/origin/*` then, so nothing was verified) and for a skipped
+checkout. When it is above 0, `local_only_branches` is a
 list of {branch, count}, one `rev-list --count` per local branch (at most 100 of them, the rest in
 `local_only_branches_uncounted`; a detached HEAD appears as branch `HEAD`): one extra git call per
 checkout when nothing is local-only and at most 103 otherwise. The summary counts these as `with_local_only_commits`.
@@ -100,6 +102,10 @@ compare with HEAD (add --fetch); `ahead_of_origin` then still counts those commi
 Flag `origin tips not fetched: <n>` (--remote): n live origin tips whose objects are not here (the
 checkout is behind origin, or origin was force-pushed, on those branches; add --fetch). It is a primary
 flag: the verdict is never `clean and pushed` while any is missing.
+Flag `origin advertised invalid ref names: <n>` (--remote, `invalid_origin_refs` in the record): n entries
+of origin's answer dropped because their name is not one git creates (`:`, `..`, a control character,
+...) or their object id is malformed or all zeros. They are never used in a fetch refspec, so a hostile
+origin cannot make --fetch write a local ref. It is a primary flag: never `clean and pushed`.
 A checkout with no `origin` remote at all has every commit "ahead of origin": it is an orphan
 branch and carries the extra flag `no origin remote`. `stash`, `no origin remote`, `detached`,
 `origin unknown` and `origin unreachable` are flags, never a primary verdict.
@@ -114,6 +120,7 @@ import argparse
 import errno
 import json
 import os
+import re
 import atexit
 import shutil
 import signal
@@ -140,6 +147,7 @@ MAX_BRANCH_COUNTS = 100  # `rev-list --count` calls for the per-branch report; t
 # Flags that qualify a verdict but never are one.
 INFO_FLAGS = ("stash", "no origin remote", "origin unreachable", "detached", "origin unknown")
 TIPS_NOT_FETCHED = "origin tips not fetched: "  # flag + count: live tips whose objects are not here
+INVALID_REFS = "origin advertised invalid ref names: "  # flag + count: ls-remote entries git would refuse
 INCOMPLETE_PREFIX = "scan incomplete: "
 STATUS_TIMEOUT = 600  # `git status` on a large or cold tree under load; every other git call gets 60 s
 NO_SUCH_REMOTE_RC = 2  # `git remote get-url origin` on a repository without origin: exit 2, "error: No such remote 'origin'"
@@ -586,7 +594,27 @@ def queried_origin_url(path: Path) -> str | None:
     return url
 
 
-def ls_remote_heads(url: str) -> dict[str, str] | None:
+_BAD_REF_CHARS = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
+_OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+
+def valid_branch_name(name: str) -> bool:
+    """Whether `refs/heads/<name>` passes `git check-ref-format` (plus: `@` alone is refused, as for a
+    branch). origin is not trusted to advertise only names git itself would create: upload-pack lists
+    `refs/heads/x:refs/heads/side` as it finds it on disk, and such a name pasted into a fetch refspec
+    writes to its destination (adversary round 17, 1)."""
+    if not name or name == "@" or name.endswith(("/", ".")):
+        return False
+    if _BAD_REF_CHARS.search(name) or ".." in name or "@{" in name:
+        return False
+    return all(part and not part.startswith(".") and not part.endswith(".lock")
+               for part in name.split("/"))
+
+
+def ls_remote_heads(url: str) -> tuple[dict[str, str], int] | None:
+    """({branch name: tip oid}, the number of advertised entries dropped as invalid), None when `ls-remote`
+    failed. An entry is dropped when its name fails `valid_branch_name`, its oid is not 40 or 64
+    lowercase hex digits or is all zeros, or the line is not `<oid> TAB refs/heads/<name>`."""
     env = git_env(network=True)
     # the temp dir's parent is a ceiling: git must not discover a repository above the neutral dir
     env["GIT_CEILING_DIRECTORIES"] = str(Path(neutral_cwd()).parent)
@@ -594,11 +622,22 @@ def ls_remote_heads(url: str) -> dict[str, str] | None:
                   cwd=neutral_cwd(), env=env)
     if rc != 0:
         return None
-    return {ln.split("refs/heads/", 1)[1]: ln.split()[0]
-            for ln in out.splitlines() if "refs/heads/" in ln}
+    heads: dict[str, str] = {}
+    invalid = 0
+    for ln in out.splitlines():
+        if not ln.strip():
+            continue
+        oid, _, ref = ln.partition("\t")
+        name = ref[len("refs/heads/"):]
+        if (not ref.startswith("refs/heads/") or not valid_branch_name(name)
+                or not _OID.fullmatch(oid) or not oid.strip("0")):
+            invalid += 1
+            continue
+        heads[name] = oid
+    return heads, invalid
 
 
-_remote_cache: dict[tuple[str, str], tuple[dict[str, str] | None, bool]] = {}
+_remote_cache: dict[tuple[str, str], tuple[dict[str, str] | None, bool, int]] = {}
 
 
 def local_origin_refs(path: Path) -> dict[str, str] | None:
@@ -608,15 +647,16 @@ def local_origin_refs(path: Path) -> dict[str, str] | None:
     return dict(ln.split() for ln in out.splitlines() if len(ln.split()) == 2)
 
 
-def origin_branches(path: Path, remote: bool) -> tuple[dict[str, str] | None, bool]:
-    """(branch name -> tip sha on origin, whether `ls-remote` answered).
+def origin_branches(path: Path, remote: bool) -> tuple[dict[str, str] | None, bool, int]:
+    """(branch name -> tip sha on origin, whether `ls-remote` answered, advertised entries dropped as
+    invalid names or oids).
 
     With --remote the tips come from `ls-remote`; when origin does not answer they come from the local
     remote refs instead (adversary round 4: None read as "unknown" and hid unpushed work) and the
     second value is False, as it is without --remote. None: no origin, or no readable local refs."""
     rc, _ = git(path, "remote", "get-url", "origin")
     if rc != 0:
-        return (None, False)
+        return (None, False, 0)
     # Worktrees share a git dir but may carry worktree-scoped remote.origin.url values
     # (extensions.worktreeConfig): the cache key is (git dir, the url ls-remote is given), never the
     # git dir alone (Codex pass 9)
@@ -624,8 +664,9 @@ def origin_branches(path: Path, remote: bool) -> tuple[dict[str, str] | None, bo
     rc, common = git(path, "rev-parse", "--git-common-dir")
     key = (str((path / common.strip()).resolve()) if rc == 0 and common.strip() else str(path), url or "")
     if key not in _remote_cache:
-        live = ls_remote_heads(url) if remote and url else None
-        _remote_cache[key] = (live, True) if live is not None else (local_origin_refs(path), False)
+        answer = ls_remote_heads(url) if remote and url else None
+        _remote_cache[key] = ((answer[0], True, answer[1]) if answer is not None
+                              else (local_origin_refs(path), False, 0))
     return _remote_cache[key]
 
 
@@ -634,7 +675,7 @@ def skipped_record(path: Path, reason: str, keys: list[str] | None = None) -> di
         "path": str(path), "branch": "?", "modified": None, "untracked": None,
         "untracked_sample": [], "modified_sample": [], "upstream": None, "unpushed": None,
         "ahead_of_origin": None, "stashes": None, "has_origin": None, "on_origin": "unknown",
-        "local_only_commits": None, "local_only_verified": None,
+        "local_only_commits": None, "local_only_verified": None, "invalid_origin_refs": 0,
         "local_only_branches": [], "local_only_branches_uncounted": 0,
         "config_keys": keys or [], "flags": [reason], "verdict": reason,
     }
@@ -729,7 +770,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     if rc not in (0, NO_SUCH_REMOTE_RC):
         return incomplete_record(path, "remote get-url origin", rc)
     has_origin = rc == 0
-    branches, live = origin_branches(path, remote) if has_origin else (None, False)
+    branches, live, invalid_refs = origin_branches(path, remote) if has_origin else (None, False, 0)
     origin_unreachable = bool(remote and has_origin and not live)
     on_origin = False if not has_origin else (None if branches is None or detached
                                               else branch in branches)
@@ -746,7 +787,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         if n is None and fetch:  # the tip's objects are not here: download them, write no refs
             git(path, "-c", "maintenance.auto=false", "-c", "gc.auto=0", "fetch", "--quiet",
                 "--no-auto-maintenance", "--no-write-fetch-head", "--no-tags", "--refmap=",
-                "--no-recurse-submodules", "--no-prune",
+                "--no-recurse-submodules", "--no-prune", "--",
                 "origin", f"refs/heads/{branch}", timeout=120, network=True)
             n = ahead_of_tip()
         if n is None:
@@ -774,10 +815,13 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
             local_refs = local_origin_refs(path) or {}
             stale = [b for b, sha in sorted(branches.items()) if local_refs.get(b) != sha]
             if stale:
+                # belt and braces: `ls_remote_heads` already dropped such names; a `:` or whitespace in
+                # one would make it a `<src>:<dst>` refspec that writes a local ref
+                names = [b for b in stale if ":" not in b and not any(c.isspace() for c in b)]
                 git(path, "-c", "maintenance.auto=false", "-c", "gc.auto=0", "fetch", "--quiet",
                     "--no-auto-maintenance", "--no-write-fetch-head", "--no-tags", "--refmap=",
-                    "--no-recurse-submodules", "--no-prune", "origin",
-                    *[f"refs/heads/{b}" for b in stale[:MAX_BRANCH_COUNTS]],
+                    "--no-recurse-submodules", "--no-prune", "--", "origin",
+                    *[f"refs/heads/{b}" for b in names[:MAX_BRANCH_COUNTS]],
                     timeout=120, network=True)
                 tips_missing = count_missing_tips()
     local_only: int | None = 0
@@ -828,6 +872,8 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         flags.append("origin tip not fetched")
     if tips_missing:
         flags.append(f"{TIPS_NOT_FETCHED}{tips_missing}")
+    if invalid_refs:
+        flags.append(f"{INVALID_REFS}{invalid_refs}")
     if not has_origin:
         flags.append("no origin remote")
     if lines:
@@ -842,7 +888,11 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         "untracked_sample": untracked[:8], "modified_sample": modified[:8],
         "upstream": upstream, "unpushed": unpushed if upstream else "no upstream",
         "ahead_of_origin": ahead_of_origin, "stashes": stashes,
-        "local_only_commits": local_only, "local_only_verified": tips_missing == 0,
+        "local_only_commits": local_only,
+        # only a live `--remote` answer verifies anything: true when no live tip is missing, false when
+        # one is, null when origin was not asked or did not answer (the count then trusts the local refs)
+        "local_only_verified": (tips_missing == 0) if live else None,
+        "invalid_origin_refs": invalid_refs,
         "local_only_branches": local_only_branches,
         "local_only_branches_uncounted": branches_uncounted,
         "has_origin": has_origin,
