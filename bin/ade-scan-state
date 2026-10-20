@@ -79,10 +79,12 @@ Git checkout verdicts (a checkout is a dir holding `.git`, found up to two level
                     checkouts below it may be missing: one record for that dir (path, found_via,
                     counts null), counted under `checkouts.incomplete`; the exit status stays 0.
 Local-only commits: `local_only_commits` is `git rev-list --count HEAD --branches --not
---remotes=origin`; with --remote and an answering `ls-remote` it is `--not <every live origin tip>` plus
-the local tracking ref of every branch `ls-remote` still lists, since a tracking ref of a branch deleted on
-origin is stale (a live tip whose objects are missing here is ignored, its tracking ref covers what origin
-had at the last fetch; the rest can only overcount). When it is above 0, `local_only_branches` is a
+--remotes=origin`; with --remote and an answering `ls-remote` it is `--not <every live origin tip>`
+alone: a stale local tracking ref of a live branch proves nothing (origin may have force-pushed it) and
+one of a deleted branch is stale (a live tip whose objects are missing here excludes nothing, so the
+count can only overcount; --fetch downloads those tips first). `local_only_verified` is false when
+live tips are still missing, i.e. the count is an upper bound (true otherwise, null for a skipped
+checkout). When it is above 0, `local_only_branches` is a
 list of {branch, count}, one `rev-list --count` per local branch (at most 100 of them, the rest in
 `local_only_branches_uncounted`; a detached HEAD appears as branch `HEAD`): one extra git call per
 checkout when nothing is local-only and at most 103 otherwise. The summary counts these as `with_local_only_commits`.
@@ -95,8 +97,9 @@ Extra flag `submodules not inspected`: the checkout has submodules; `status` ign
 the verdict says nothing about them (it is that flag, not `clean and pushed`, when nothing else applies).
 Extra flag `origin tip not fetched`: the branch is on origin at a commit this checkout cannot
 compare with HEAD (add --fetch); `ahead_of_origin` then still counts those commits.
-Extra flag `origin tips not fetched: <n>` (--remote): n live origin tips whose objects are not here (the
-checkout is behind origin on those branches); it never changes the verdict.
+Flag `origin tips not fetched: <n>` (--remote): n live origin tips whose objects are not here (the
+checkout is behind origin, or origin was force-pushed, on those branches; add --fetch). It is a primary
+flag: the verdict is never `clean and pushed` while any is missing.
 A checkout with no `origin` remote at all has every commit "ahead of origin": it is an orphan
 branch and carries the extra flag `no origin remote`. `stash`, `no origin remote`, `detached`,
 `origin unknown` and `origin unreachable` are flags, never a primary verdict.
@@ -136,7 +139,7 @@ MAX_TIPS = 2000  # ls-remote tips passed as `--not` arguments (argv size); extra
 MAX_BRANCH_COUNTS = 100  # `rev-list --count` calls for the per-branch report; the rest are only summed
 # Flags that qualify a verdict but never are one.
 INFO_FLAGS = ("stash", "no origin remote", "origin unreachable", "detached", "origin unknown")
-TIPS_NOT_FETCHED = "origin tips not fetched: "  # info flag + count: live tips whose objects are not here
+TIPS_NOT_FETCHED = "origin tips not fetched: "  # flag + count: live tips whose objects are not here
 INCOMPLETE_PREFIX = "scan incomplete: "
 STATUS_TIMEOUT = 600  # `git status` on a large or cold tree under load; every other git call gets 60 s
 NO_SUCH_REMOTE_RC = 2  # `git remote get-url origin` on a repository without origin: exit 2, "error: No such remote 'origin'"
@@ -631,7 +634,8 @@ def skipped_record(path: Path, reason: str, keys: list[str] | None = None) -> di
         "path": str(path), "branch": "?", "modified": None, "untracked": None,
         "untracked_sample": [], "modified_sample": [], "upstream": None, "unpushed": None,
         "ahead_of_origin": None, "stashes": None, "has_origin": None, "on_origin": "unknown",
-        "local_only_commits": None, "local_only_branches": [], "local_only_branches_uncounted": 0,
+        "local_only_commits": None, "local_only_verified": None,
+        "local_only_branches": [], "local_only_branches_uncounted": 0,
         "config_keys": keys or [], "flags": [reason], "verdict": reason,
     }
 
@@ -641,21 +645,20 @@ def incomplete_record(path: Path, call: str, rc: int) -> dict:
     return skipped_record(path, f"{INCOMPLETE_PREFIX}{call} rc={rc}")
 
 
-def local_only_count(path: Path, revs: list[str], tips: list[str], live: bool = False,
-                     tracking: list[str] | None = None) -> tuple[int | None, int]:
+def local_only_count(path: Path, revs: list[str], tips: list[str],
+                     live: bool = False) -> tuple[int | None, int]:
     """(commits reachable from `revs` and from no origin ref, rc); None when git failed.
 
     Without a live answer origin's refs are the local `refs/remotes/origin/*`. With one (`live`, --remote
-    and `ls-remote` answered) they are `tips` plus `tracking`, the local tracking refs of the branches
-    `ls-remote` still lists: a tracking ref whose branch was deleted on origin holds nothing there (Codex
-    pass 9), while a stale one of a live branch holds what origin had at the last fetch, which covers a
-    live tip whose objects are not here (adversary round 15). Missing tips are ignored
-    (`--ignore-missing`): a tip whose objects are not here only overcounts."""
+    and `ls-remote` answered) they are `tips` alone: a local tracking ref proves nothing about a live
+    branch (origin may have force-pushed it) and one of a deleted branch holds nothing there (Codex
+    passes 9 and 11). Tips whose objects are not here are ignored (`--ignore-missing`): the count then
+    only overcounts, and the caller flags it unverified."""
     argv = ["rev-list", "--count", *revs, "--not"]
     if not live:
         argv.append("--remotes=origin")
-    if tips or tracking:
-        argv += ["--ignore-missing", *tips, *(tracking or [])]
+    if tips:
+        argv += ["--ignore-missing", *tips]
     rc, n = git(path, *argv)
     return (int(n) if rc == 0 and n.strip().isdigit() else None), rc
 
@@ -752,28 +755,41 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
             ahead_of_origin = n
     # Commits on no origin ref, over HEAD and every local branch (adversary round 4, 1): the verdict
     # `clean and pushed` needs this to be 0 whatever `on_origin` says. ls-remote tips (when origin
-    # answered) are excluded, and so are the local tracking refs of the branches it still lists (a tip
-    # whose objects are not fetched here is ignored by rev-list, its tracking ref holds what origin had
-    # at the last fetch; a branch deleted on origin keeps no exclusion, Codex pass 9).
+    # answered) are excluded. A live tip whose objects are not here excludes nothing, and neither does
+    # the stale tracking ref of that branch: origin may have force-pushed it, and the ancestry check
+    # needs the tip's objects (Codex pass 11). With --fetch those tips are downloaded first; whatever
+    # is still missing makes the count an overcount (`local_only_verified` false) and the verdict not
+    # clean.
     tips = sorted(set(branches.values()))[:MAX_TIPS] if branches and live else []
-    tracking: list[str] = []
     tips_missing = 0
-    if tips:
-        local_refs = local_origin_refs(path) or {}
-        tracking = sorted({local_refs[b] for b in branches if b in local_refs})[:MAX_TIPS]
+
+    def count_missing_tips() -> int:
         rc, n = git(path, "rev-list", "--count", "--no-walk", "--ignore-missing", *tips)
-        if rc == 0 and n.strip().isdigit():
-            tips_missing = max(len(tips) - int(n), 0)
+        return max(len(tips) - int(n), 0) if rc == 0 and n.strip().isdigit() else 0
+
+    if tips:
+        tips_missing = count_missing_tips()
+        if tips_missing and fetch:
+            # only a branch whose local tracking ref differs from its live tip can be missing
+            local_refs = local_origin_refs(path) or {}
+            stale = [b for b, sha in sorted(branches.items()) if local_refs.get(b) != sha]
+            if stale:
+                git(path, "-c", "maintenance.auto=false", "-c", "gc.auto=0", "fetch", "--quiet",
+                    "--no-auto-maintenance", "--no-write-fetch-head", "--no-tags", "--refmap=",
+                    "--no-recurse-submodules", "--no-prune", "origin",
+                    *[f"refs/heads/{b}" for b in stale[:MAX_BRANCH_COUNTS]],
+                    timeout=120, network=True)
+                tips_missing = count_missing_tips()
     local_only: int | None = 0
     local_only_branches: list[dict] = []
     branches_uncounted = 0
     if not unborn:
-        local_only, rc = local_only_count(path, ["HEAD", "--branches"], tips, live, tracking)
+        local_only, rc = local_only_count(path, ["HEAD", "--branches"], tips, live)
         if local_only is None:
             return incomplete_record(path, "rev-list --count HEAD --branches --not --remotes=origin", rc)
         if local_only:
             if detached:
-                n, rc = local_only_count(path, ["HEAD"], tips, live, tracking)
+                n, rc = local_only_count(path, ["HEAD"], tips, live)
                 if n is None:
                     return incomplete_record(path, "rev-list --count HEAD --not --remotes=origin", rc)
                 if n:
@@ -783,7 +799,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
                 return incomplete_record(path, "for-each-ref refs/heads", rc)
             names = out.splitlines()
             for name in names[:MAX_BRANCH_COUNTS]:
-                n, rc = local_only_count(path, [f"refs/heads/{name}"], tips, live, tracking)
+                n, rc = local_only_count(path, [f"refs/heads/{name}"], tips, live)
                 if n is None:
                     return incomplete_record(path, f"rev-list --count refs/heads/{name} "
                                                    "--not --remotes=origin", rc)
@@ -820,14 +836,14 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         flags.append(SUBMODULES_FLAG)
     if stashes:
         flags.append("stash")
-    primary = next((f for f in flags if f not in INFO_FLAGS and not f.startswith(TIPS_NOT_FETCHED)),
-                   "clean and pushed")
+    primary = next((f for f in flags if f not in INFO_FLAGS), "clean and pushed")
     return {
         "path": str(path), "branch": branch, "modified": len(modified), "untracked": len(untracked),
         "untracked_sample": untracked[:8], "modified_sample": modified[:8],
         "upstream": upstream, "unpushed": unpushed if upstream else "no upstream",
         "ahead_of_origin": ahead_of_origin, "stashes": stashes,
-        "local_only_commits": local_only, "local_only_branches": local_only_branches,
+        "local_only_commits": local_only, "local_only_verified": tips_missing == 0,
+        "local_only_branches": local_only_branches,
         "local_only_branches_uncounted": branches_uncounted,
         "has_origin": has_origin,
         "on_origin": "unknown" if on_origin is None else on_origin,

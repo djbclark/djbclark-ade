@@ -742,9 +742,11 @@ def push_from_another_clone(tmp_path: Path, origin: Path, *branches: str, name: 
         git(other, "push", "origin", b)
 
 
-def test_remote_scan_of_a_clone_that_is_behind_origin_is_clean_and_pushed(tmp_path):
-    """Adversary round 15, 1 (L2): 5 commits pushed, someone else pushes 1 more to origin, not fetched here:
-    the live tip's objects are missing, the stale tracking ref still excludes the 5."""
+def test_remote_scan_of_a_clone_that_is_behind_origin_is_not_clean_until_fetched(tmp_path):
+    """Adversary round 15, 1 (L2), revised for Codex pass 11: 5 commits pushed, someone else pushes 1 more to
+    origin, not fetched here. The live tip's objects are missing, so the stale tracking ref cannot be
+    verified as an ancestor of it: the verdict is not clean (it was `clean and pushed` before pass 11);
+    --fetch downloads the tip, proves the ancestry and the checkout is clean again."""
     mod = load()
     roots, work, origin = make_pushed_checkout(tmp_path)
     for i in range(4):
@@ -752,11 +754,46 @@ def test_remote_scan_of_a_clone_that_is_behind_origin_is_clean_and_pushed(tmp_pa
     git(work, "push", "origin", "main")
     push_from_another_clone(tmp_path, origin, "main")
     c = scan_one(mod, roots, remote=True)
-    assert c["verdict"] == "clean and pushed", c["flags"]
-    assert c["local_only_commits"] == 0 and c["local_only_branches"] == []
-    assert c["flags"] == ["origin tips not fetched: 1"], c["flags"]
+    assert c["verdict"] != "clean and pushed" and "origin tips not fetched: 1" in c["flags"], c["flags"]
+    assert c["local_only_verified"] is False
     mod._remote_cache.clear()
     assert "origin tips not fetched: 1" not in scan_one(mod, roots)["flags"]  # no --remote: no live tips
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True, fetch=True)
+    assert c["verdict"] == "clean and pushed", c["flags"]
+    assert c["local_only_commits"] == 0 and c["local_only_branches"] == [] and c["flags"] == []
+    assert c["local_only_verified"] is True
+
+
+def force_push_unrelated_main(tmp_path: Path, origin: Path) -> None:
+    """Another clone replaces origin's `main` with a commit unrelated to anything here (never fetched here)."""
+    other = tmp_path / "forcer"
+    git(tmp_path, "clone", str(origin), str(other))
+    git(other, "checkout", "--orphan", "rewritten")
+    git(other, "rm", "-rf", "--quiet", ".")
+    commit_file(other, "rewritten.txt")
+    git(other, "push", "--force", "origin", "rewritten:main")
+
+
+def test_remote_scan_does_not_trust_the_tracking_ref_of_a_force_pushed_live_branch(tmp_path):
+    """Codex pass 11 (4324923677): origin force-pushed a still-live branch; the stale tracking ref equals HEAD
+    but none of those commits remain on origin. Not `clean and pushed`; --fetch counts HEAD as local-only."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    commit_file(work, "b.txt")
+    git(work, "push", "origin", "main")
+    assert git(work, "rev-parse", "HEAD") == git(work, "rev-parse", "refs/remotes/origin/main")
+    force_push_unrelated_main(tmp_path, origin)
+    c = scan_one(mod, roots, remote=True)
+    assert c["verdict"] != "clean and pushed", c
+    assert "origin tips not fetched: 1" in c["flags"] and "unpushed commits" in c["flags"], c["flags"]
+    assert c["local_only_commits"] == 2 and c["local_only_verified"] is False
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True, fetch=True)
+    assert c["verdict"] == "unpushed commits", c["flags"]
+    assert c["local_only_commits"] == 2 and c["local_only_branches"] == [{"branch": "main", "count": 2}], c
+    assert any(f.startswith("local-only commits: main 2") for f in c["flags"])
+    assert c["local_only_verified"] is True and not any(f.startswith("origin tips not fetched") for f in c["flags"])
 
 
 def test_remote_scan_of_a_clone_behind_origin_on_two_branches_still_counts_the_deleted_one(tmp_path):
@@ -771,9 +808,12 @@ def test_remote_scan_of_a_clone_behind_origin_on_two_branches_still_counts_the_d
     git(origin, "branch", "-D", "gone")
     push_from_another_clone(tmp_path, origin, "main", "side")
     c = scan_one(mod, roots, remote=True)
+    assert "origin tips not fetched: 2" in c["flags"] and c["local_only_verified"] is False, c
+    assert c["verdict"] == "unpushed commits"  # unfetched tips exclude nothing: an overcount, never clean
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True, fetch=True)
     assert c["local_only_branches"] == [{"branch": "gone", "count": 1}], c
-    assert c["flags"][-1] == "origin tips not fetched: 2" and "local-only commits: gone 1" in c["flags"]
-    assert c["verdict"] == "unpushed commits"
+    assert c["local_only_verified"] is True and c["verdict"] == "unpushed commits"
 
 
 def test_remote_scan_asks_the_first_origin_url_like_git_fetch(tmp_path):
