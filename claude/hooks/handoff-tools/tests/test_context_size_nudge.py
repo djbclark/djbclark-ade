@@ -44,9 +44,11 @@ def _append(path, text):
 def hook(monkeypatch, tmp_path, capsys):
     """Run the hook once per call; returns (stdout, pings sent)."""
     monkeypatch.setattr(nudge, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.delenv("HERDR_ENV", raising=False)
     monkeypatch.delenv("HERDR_PANE_ID", raising=False)
     monkeypatch.delenv("ORCA_TERMINAL_HANDLE", raising=False)
     monkeypatch.delenv("PASEO_AGENT_ID", raising=False)
+    monkeypatch.setattr(nudge, "_which", lambda name: None)  # no orca CLI unless a test says so
     pings = []
     monkeypatch.setattr(
         subprocess, "Popen", lambda cmd, **kwargs: pings.append(cmd),
@@ -136,9 +138,19 @@ def test_ask_message_at_300k_total(hook, tmp_path):
     assert "Context is large" in out
 
 
+def _host(monkeypatch, var):
+    """Set one self-slash host the way bin/self-slash selects it: a herdr pane needs
+    HERDR_ENV=1 as well, an Orca terminal needs the orca CLI on PATH."""
+    monkeypatch.setenv(var, "w1:p1")
+    if var == "HERDR_PANE_ID":
+        monkeypatch.setenv("HERDR_ENV", "1")
+    if var == "ORCA_TERMINAL_HANDLE":
+        monkeypatch.setattr(nudge, "_which", lambda name: "/usr/local/bin/orca" if name == "orca" else None)
+
+
 @pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE", "PASEO_AGENT_ID"])
 def test_ask_message_in_herdr_or_orca_puts_new_before_compact(hook, tmp_path, monkeypatch, var):
-    monkeypatch.setenv(var, "w1:p1")
+    _host(monkeypatch, var)
     out, _ = hook("s-herdr-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
     assert "Handle it yourself" in out
     assert out.index('self-slash "/new"') < out.index('"/compact <focus>"')
@@ -337,7 +349,26 @@ def test_paseo_host_gets_the_finish_note(hook, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE"])
 def test_finish_note_is_paseo_only(hook, tmp_path, monkeypatch, var):
-    monkeypatch.setenv(var, "w1:p1")
+    _host(monkeypatch, var)
     monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")  # herdr and Orca win in self-slash
     out, _ = hook("s-nofinish-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
+    assert "--finish" not in out
+
+
+@pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE"])
+def test_finish_note_when_the_other_host_var_is_stale(hook, tmp_path, monkeypatch, var):
+    # A HERDR_PANE_ID without HERDR_ENV=1, or an ORCA_TERMINAL_HANDLE with no orca CLI,
+    # is not a host for self-slash: it falls through to Paseo, and so does the note
+    # (Codex P2 on PR 19, 2026-10-20).
+    monkeypatch.setenv(var, "w1:p1")
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
+    out, _ = hook("s-stale-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
+    assert "self-slash --finish" in out
+
+
+@pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE"])
+def test_stale_host_var_alone_means_no_self_slash(hook, tmp_path, monkeypatch, var):
+    monkeypatch.setenv(var, "w1:p1")
+    out, _ = hook("s-stale-alone-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
+    assert "tell the operator /new is ready" in out
     assert "--finish" not in out

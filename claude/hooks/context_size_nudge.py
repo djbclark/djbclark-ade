@@ -61,6 +61,7 @@ an alarm at DEADLINE_SECONDS exits 0 with no output.
 import json
 import os
 import re
+import shutil
 import signal
 import sys
 from pathlib import Path
@@ -204,21 +205,33 @@ def _early_message(total, growth):
     )
 
 
+_which = shutil.which  # tests replace it; the hook never spawns orca itself
+
+
+def _self_slash_host():
+    # The same host selection as bin/self-slash, in its order (2026-10-20, Codex on PR 19):
+    # a herdr pane only with HERDR_ENV=1 (a stale HERDR_PANE_ID alone is not one), an Orca
+    # terminal only when the orca CLI is on PATH, else a Paseo agent (2026-10-19: `paseo
+    # wait` then `paseo send` of the root-only built-ins).  None: self-slash would refuse.
+    if os.environ.get("HERDR_ENV") == "1" and os.environ.get("HERDR_PANE_ID"):
+        return "herdr"
+    if os.environ.get("ORCA_TERMINAL_HANDLE") and _which("orca"):
+        return "orca"
+    if os.environ.get("PASEO_AGENT_ID"):
+        return "paseo"
+    return None
+
+
 def _can_self_slash():
-    # The hosts bin/self-slash can type into: a herdr pane, an Orca terminal, or a
-    # Paseo agent (2026-10-19: `paseo wait` then `paseo send` of the root-only built-ins).
-    return bool(os.environ.get("HERDR_PANE_ID") or os.environ.get("ORCA_TERMINAL_HANDLE")
-                or os.environ.get("PASEO_AGENT_ID"))
+    return _self_slash_host() is not None
 
 
 def _paseo_finish_note():
-    # bin/self-slash picks herdr, then Orca, then Paseo.  On Paseo /quit is not a command
-    # (it reaches Claude as plain text), so ending a session there is --finish, which
-    # archives the agent once idle (2026-10-20).  Archiving is the operator's choice (loose
-    # Rule 4), never something the model decides alone.
-    if os.environ.get("HERDR_PANE_ID") or os.environ.get("ORCA_TERMINAL_HANDLE"):
-        return ""
-    if not os.environ.get("PASEO_AGENT_ID"):
+    # On Paseo /quit is not a command (it reaches Claude as plain text), so ending a
+    # session there is --finish, which archives the agent once idle (2026-10-20).
+    # Archiving is the operator's choice (loose Rule 4), never something the model
+    # decides alone.
+    if _self_slash_host() != "paseo":
         return ""
     return (" On Paseo, a finished task with nothing to continue: offer the `loose` Rule 4 "
             "choices (handoff and continue, or finish and archive, which is "
