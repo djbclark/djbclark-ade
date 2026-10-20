@@ -27,10 +27,20 @@
 # on Paseo is mapped to --finish and says so on stderr (djbclark, 2026-10-20: "the goal is
 # for handoffs to immediately clear context and then start a baton ..., or if there is
 # nothing to continue to just clear context but in a way that the human can still read
-# the final results").  Lifecycle actions (--finish, /new, /clear, /reset) also take a
-# per-agent lock, ~/.local/state/self-slash/<host>_<pane>.lifecycle holding the waiter's
-# pid: a second lifecycle for the same agent is refused (exit 7) while the first waiter
-# lives; a lock whose pid is dead is removed.
+# the final results").  Lifecycle actions (--finish, /new, /clear, /reset, /quit, /exit) also
+# take a per-agent lock, ~/.local/state/self-slash/<host>_<pane>.lifecycle holding the
+# waiter's pid and its start time (ps lstart): a second lifecycle for the same agent is
+# refused (exit 7) while the first waiter lives.  A lock is stale (and broken by moving it
+# aside, never rm) when its pid is dead, was reused by another process (start time differs),
+# or, for a lock without a start time, is not a self-slash process.
+#
+# Never in a sub-agent or a dispatched slice (2026-10-20): they inherit the parent's
+# PASEO_AGENT_ID, so a lifecycle action there would clear or archive the PARENT's agent.
+# acp-run scrubs PASEO_AGENT_ID, PASEO_AGENT_CWD and ORCA_TERMINAL_HANDLE and sets
+# ACP_RUN_AGENT=1; self-slash refuses every lifecycle action and /compact when it sees that
+# marker (exit 9).  An Agent-tool sub-agent shares the parent's environment with no
+# marker of its own (checked 2026-10-20), so the skills (handoff Step 9, loose Rule 4,
+# docs/dispatch-footer.md) also say a sub-agent treats a handoff as document-only.
 #
 # Hosts: a herdr pane ($HERDR_PANE_ID, via `herdr agent read` / `herdr pane run`),
 # an Orca terminal ($ORCA_TERMINAL_HANDLE, via `orca terminal read --screen` /
@@ -86,10 +96,28 @@ while :; do case "${1:-}" in
   *) break;;
 esac; done
 text="${1:-}"
+finish_flag=$finish
 [ "$finish" = 1 ] && [ -z "$text" ] && text="/quit"
 [ -n "$text" ] || { echo "usage: self-slash [--delay S] [--dry-run] [--then \"/cmd\" | --no-then] \"/command args\"
-       self-slash [--delay S] [--dry-run] --finish   (end the session; Paseo: archive this agent)" >&2; exit 2; }
+       self-slash [--delay S] [--dry-run] --finish   (end the session; Paseo: archive this agent)
+       exit codes: 2 usage, 3 no host, 4 draft in the input box, 5 no prompt, 6 session still working,
+       7 refused (gap check or lifecycle already queued), 8 archive refused, 9 dispatched agent
+       (ACP_RUN_AGENT=1): lifecycle actions and /compact run only in the top-level session" >&2; exit 2; }
 if [ "$finish" = 1 ] && [ "$text" != /quit ]; then echo "self-slash: --finish takes no command (got: $text)" >&2; exit 2; fi
+# --finish ends the session, so a follow-up would be typed into whatever is left (a shell prompt).
+if [ "$finish" = 1 ] && [ -n "$then" ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then echo "self-slash: --finish takes no --then (got: $then)" >&2; exit 2; fi
+# Lifecycle actions end the session or throw its context away.
+lifecycle=0
+case "$text" in /new|/clear|/reset|/quit|/exit|"/new "*|"/clear "*|"/reset "*|"/quit "*|"/exit "*) lifecycle=1;; esac
+[ "$finish" = 1 ] && lifecycle=1
+# Not for a dispatched slice or a sub-agent: see the header.  The waiter child skips this, so a
+# chain the top-level session started is never cut off.
+if [ "${SELF_SLASH_CHILD:-}" != "1" ] && [ "${ACP_RUN_AGENT:-}" = "1" ]; then
+  case "$text" in /compact|"/compact "*) guarded=1;; *) guarded=$lifecycle;; esac
+  if [ "$guarded" = 1 ]; then
+    echo "self-slash: refused ($text): this is a dispatched agent (ACP_RUN_AGENT=1); lifecycle actions and /compact run only in the top-level session. Treat a handoff as document-only and say what the operator should type." >&2; exit 9
+  fi
+fi
 if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
   host=herdr; pane="$HERDR_PANE_ID"
   # $HERDR_PANE_ID is fixed at launch; after the tab is moved to another workspace
@@ -128,12 +156,16 @@ if [ "$host" = paseo ]; then
   # ... and no /quit or /exit at all: sent as text they do nothing.  End = archive.
   case "$text" in
     /quit|/exit|"/quit "*|"/exit "*)
-      [ "${SELF_SLASH_CHILD:-}" = "1" ] || echo "self-slash: $text is not a Paseo command (it would reach Claude as plain text); mapping to --finish: archive this agent once idle, no --force" >&2
+      [ "${SELF_SLASH_CHILD:-}" = "1" ] || [ "$finish_flag" = 1 ] || echo "self-slash: $text is not a Paseo command (it would reach Claude as plain text); mapping to --finish: archive this agent once idle, no --force" >&2
       finish=1;;
   esac
 fi
+# ... and a follow-up /quit or /exit would be sent as plain text, or end the fresh session.
+if [ "$host" = paseo ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
+  case "$then" in /quit|/exit|"/quit "*|"/exit "*) echo "self-slash: --then $then is not a Paseo command; use --finish after the turn instead" >&2; exit 2;; esac
+fi
+if [ "$finish" = 1 ] && [ -n "$then" ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then echo "self-slash: $text ends the session and takes no --then (got: $then)" >&2; exit 2; fi
 if [ "${SELF_SLASH_CHILD:-}" = "1" ]; then finish="${SELF_SLASH_FINISH:-0}"; fi
-[ "$finish" = 1 ] && [ "$host" = paseo ] && then=""
 if [ "$tui" = cursor ]; then marker="→"; else marker="❯"; fi
 # herdr and Orca both send a long argument as a bracketed paste and Claude Code then
 # treats it as pasted content, not a command (seen 2026-10-09 with ~900 chars): keep it short.
@@ -168,21 +200,42 @@ lock="$lockdir/$safe_pane.pid"
 # Lifecycle actions (end the session, or throw its context away) hold a per-agent lock for
 # the whole transition, /new -> /baton included, so two waiters cannot race (a /clear
 # racing an archive).  The parent checks and takes it; the lock holds the waiter's pid.
-lifecycle=0
-if [ "$finish" = 1 ]; then lifecycle=1
-else case "$text" in /new|/clear|/reset|"/new "*|"/clear "*|"/reset "*) lifecycle=1;; esac; fi
 tlock="$lockdir/${host}_$safe_pane.lifecycle"
-# tlock_state: print "free", "stale" (dead pid, or an empty file that stayed empty) or
-# "held <pid>".
-tlock_state() {
-  [ -e "$tlock" ] || { echo free; return; }
-  holder=$(cat "$tlock" 2>/dev/null)
-  [ -n "$holder" ] || { sleep 0.3; holder=$(cat "$tlock" 2>/dev/null); }
-  if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then echo "held $holder"; else echo stale; fi
+self_name=$(basename "$0")
+# A lock file holds "<pid><TAB><ps lstart>".  Held means the pid lives AND is still the process
+# that took the lock (same start time; a bare-pid lock, from before this check, must at least
+# be a self-slash process): a pid freed by a SIGKILL or a reboot and reused by any other
+# long-lived process of the user is stale, not held (adversary 2026-10-20, finding 5).
+proc_start() { ps -o lstart= -p "$1" 2>/dev/null | gtr -s ' ' ' ' | gsed 's/ *$//'; }
+lock_stamp() { printf '%s\t%s\n' "$1" "$(proc_start "$1")"; }
+lock_pid() { local c; c=$(cat "$1" 2>/dev/null); printf '%s' "${c%%$'\t'*}"; }
+# lock_state FILE: print "free", "stale" (dead or reused pid, or an empty file that stayed
+# empty) or "held <pid>".
+lock_state() {
+  local f="$1" c pid start now
+  [ -e "$f" ] || { echo free; return; }
+  c=$(cat "$f" 2>/dev/null)
+  [ -n "$c" ] || { sleep 0.3; c=$(cat "$f" 2>/dev/null); }
+  pid=${c%%$'\t'*}; start=""; case "$c" in *$'\t'*) start=${c#*$'\t'};; esac
+  case "$pid" in ""|*[!0-9]*) echo stale; return;; esac
+  kill -0 "$pid" 2>/dev/null || { echo stale; return; }
+  if [ -n "$start" ]; then
+    now=$(proc_start "$pid")
+    [ "$now" = "$start" ] || { echo stale; return; }
+  else
+    case "$(ps -o command= -p "$pid" 2>/dev/null)" in *"$self_name"*) ;; *) echo stale; return;; esac
+  fi
+  echo "held $pid"
+}
+tlock_state() { lock_state "$tlock"; }
+# The .pid lock names only a pid: alive and still a self-slash process (not a reused pid).
+waiter_alive() {
+  kill -0 "$1" 2>/dev/null || return 1
+  case "$(ps -o command= -p "$1" 2>/dev/null)" in *"$self_name"*) return 0;; *) return 1;; esac
 }
 if [ "${SELF_SLASH_CHILD:-}" != "1" ] && [ "$lifecycle" = 1 ]; then
   case "$(tlock_state)" in
-    held*) holder=$(cat "$tlock"); echo "self-slash: a lifecycle action (/new, /clear, /reset or --finish) is already queued for $host $pane (pid $holder); not queuing another. See $log." >&2; exit 7;;
+    held*) holder=$(lock_pid "$tlock"); echo "self-slash: a lifecycle action (/new, /clear, /reset, /quit, /exit or --finish) is already queued for $host $pane (pid $holder); not queuing another. See $log." >&2; exit 7;;
   esac
 fi
 if [ "$dry" = 1 ]; then
@@ -197,7 +250,7 @@ mkdir -p "$(dirname "$log")" "$lockdir"
 prompt_line="$(dirname "$(realpath "$0")")/../skills/session-finder/prompt_line.py"
 if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   after=""
-  if [ -s "$lock" ] && kill -0 "$(cat "$lock")" 2>/dev/null; then
+  if [ -s "$lock" ] && waiter_alive "$(cat "$lock")"; then
     case "$text" in
       /compact*)
         echo "self-slash: a command is already queued for $host $pane (pid $(cat "$lock")); not queuing another. See $log." >&2; exit 7;;
@@ -211,16 +264,32 @@ fi
 if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   if [ "$lifecycle" = 1 ]; then
     # Atomic create (noclobber) with our own pid as the placeholder; the waiter's pid
-    # replaces it below.  A dead holder's lock is removed first.
-    [ "$(tlock_state)" = stale ] && rm -f "$tlock"
-    if ! ( set -C; echo $$ > "$tlock" ) 2>/dev/null; then
-      echo "self-slash: another lifecycle action won the lock for $host $pane (pid $(cat "$tlock" 2>/dev/null)); not queuing." >&2; exit 7
+    # replaces it below.  A stale lock is moved aside (never rm: two callers that both read
+    # "stale" would each delete the other's fresh lock), then looked at again: if what we
+    # moved turns out to be held after all, it goes back (ln fails if a lock exists) and we stop.
+    if [ "$(tlock_state)" = stale ]; then
+      aside="$tlock.stale.$$"
+      if mv "$tlock" "$aside" 2>/dev/null; then
+        case "$(lock_state "$aside")" in
+          held*) ln "$aside" "$tlock" 2>/dev/null; rm -f "$aside"
+                 echo "self-slash: another lifecycle action won the lock for $host $pane (pid $(lock_pid "$tlock")); not queuing." >&2; exit 7;;
+        esac
+        rm -f "$aside"
+      fi
+    fi
+    if ! ( set -C; lock_stamp $$ > "$tlock" ) 2>/dev/null; then
+      echo "self-slash: another lifecycle action won the lock for $host $pane (pid $(lock_pid "$tlock")); not queuing." >&2; exit 7
     fi
   fi
   SELF_SLASH_CHILD=1 SELF_SLASH_AFTER="$after" SELF_SLASH_THEN="$then" SELF_SLASH_FINISH="$finish" \
     SELF_SLASH_TLOCK="$([ "$lifecycle" = 1 ] && echo "$tlock")" \
     nohup "$0" --delay "$delay" "$text" >>"$log" 2>&1 </dev/null &
-  if [ "$lifecycle" = 1 ]; then echo $! > "$tlock.$$" && mv -f "$tlock.$$" "$tlock"; fi
+  if [ "$lifecycle" = 1 ]; then
+    child=$!
+    # Replace the placeholder only while it is still ours; if not, the child must not run.
+    if [ "$(lock_pid "$tlock")" = "$$" ]; then lock_stamp "$child" > "$tlock.$$" && mv -f "$tlock.$$" "$tlock"
+    else kill "$child" 2>/dev/null; echo "self-slash: the lifecycle lock for $host $pane changed hands; not queuing." >&2; exit 7; fi
+  fi
   echo "self-slash: queued for $host $pane in ${delay}s${then:+, then $then once the session is idle again} (log: $log)"
   exit 0
 fi
@@ -295,7 +364,7 @@ if [ -n "${SELF_SLASH_AFTER:-}" ]; then
   msg=$(gap_check) || { echo "$(gdate '+%F %T') $host $pane: NOT sent: ${msg#self-slash: }"; exit 7; }
 fi
 # Two parents can pass the check above before either child writes the lock.
-if [ -s "$lock" ] && [ "$(cat "$lock")" != "$$" ] && kill -0 "$(cat "$lock")" 2>/dev/null; then
+if [ -s "$lock" ] && [ "$(cat "$lock")" != "$$" ] && waiter_alive "$(cat "$lock")"; then
   echo "$(gdate '+%F %T') $host $pane: another waiter (pid $(cat "$lock")) already queued; NOT sent: ${text:0:80}"; exit 7
 fi
 echo $$ > "$lock"
@@ -304,7 +373,7 @@ echo $$ > "$lock"
 release() {
   rm -f "$lock"
   tl="${SELF_SLASH_TLOCK:-}"
-  [ -n "$tl" ] && [ "$(cat "$tl" 2>/dev/null)" = "$$" ] && rm -f "$tl"
+  [ -n "$tl" ] && [ "$(lock_pid "$tl")" = "$$" ] && rm -f "$tl"
   return 0
 }
 trap release EXIT
@@ -352,11 +421,12 @@ for p in json.load(sys.stdin).get("result", {}).get("panes", []):
 # agent is idle (the turn that queued this has ended), so the final message is in the
 # timeline that archive snapshots.  An agent that became busy again is refused by archive
 # itself; never escalate to --force (it interrupts the running turn).  The env -u keeps
-# the daemon from treating the call as agent-originated, as in send_text.
+# the daemon from treating the call as agent-originated, as in send_text.  The `--` ends option
+# parsing (the CLI is commander 12, which honours it; read from the Paseo.app bundle 2026-10-20).
 finish_paseo() {
   env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD "$paseo_cli" wait "$pane" --timeout "${SELF_SLASH_WAIT:-900}" --json >/dev/null 2>&1 \
     || { echo "$(gdate '+%F %T') $host $pane: finish: gave up after ${SELF_SLASH_WAIT:-900}s, agent still running; NOT archived"; exit 6; }
-  out=$(env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD "$paseo_cli" agent archive "$pane" 2>&1); rc=$?
+  out=$(env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD "$paseo_cli" agent archive -- "$pane" 2>&1); rc=$?
   if [ "$rc" = 0 ]; then
     echo "$(gdate '+%F %T') $host $pane: finish: archived $pane"; exit 0
   fi

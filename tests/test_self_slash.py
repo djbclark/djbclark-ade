@@ -70,7 +70,7 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.log = self.home / ".local" / "state" / "self-slash.log"
         self.lockdir = self.home / ".local" / "state" / "self-slash"
         env = {k: v for k, v in os.environ.items()
-               if not k.startswith(("HERDR_", "ORCA_", "PASEO_", "SELF_SLASH_", "FAKE_"))}
+               if not k.startswith(("HERDR_", "ORCA_", "PASEO_", "SELF_SLASH_", "FAKE_", "ACP_RUN_AGENT"))}
         env.update(HOME=str(self.home), PATH=f"{bindir}:{os.environ['PATH']}",
                    PASEO_AGENT_ID="test-agent", PASEO_CLI=str(fake), FAKE_LOG=str(self.calls),
                    SELF_SLASH_THEN_DELAY="0", SELF_SLASH_WAIT="30")
@@ -115,6 +115,12 @@ class SelfSlashPaseoTests(unittest.TestCase):
     def lifecycle_lock(self) -> Path:
         return self.lockdir / "paseo_test-agent.lifecycle"
 
+    @staticmethod
+    def stamp(pid: int) -> str:
+        """The lock file content self-slash writes: pid, TAB, ps lstart squeezed to single spaces."""
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, check=False)
+        return f"{pid}\t{' '.join(out.stdout.split())}\n"
+
     # (a)
     def test_finish_waits_then_archives_without_force(self) -> None:
         r = self.run_ss("--finish")
@@ -125,7 +131,7 @@ class SelfSlashPaseoTests(unittest.TestCase):
         archives = [i for i, c in enumerate(calls) if c.startswith("agent archive")]
         self.assertTrue(waits and archives, calls)
         self.assertLess(waits[0], archives[0])
-        self.assertEqual([calls[i] for i in archives], ["agent archive test-agent"])
+        self.assertEqual([calls[i] for i in archives], ["agent archive -- test-agent"])
         self.assertFalse(any("--force" in c for c in calls), calls)
         self.assertFalse(any(c.startswith("send") for c in calls), calls)
         self.wait_lock_gone()
@@ -137,7 +143,7 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertIn("mapping to --finish", r.stderr)
         self.wait_log("finish: archived test-agent")
         calls = self.paseo_calls()
-        self.assertIn("agent archive test-agent", calls)
+        self.assertIn("agent archive -- test-agent", calls)
         self.assertFalse(any(c.startswith("send") for c in calls), calls)
         self.assertNotIn("sent /quit", self.log_text())
 
@@ -150,7 +156,7 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertNotIn("archived test-agent", text)
         self.wait_lock_gone()
         calls = self.paseo_calls()
-        self.assertEqual([c for c in calls if c.startswith("agent archive")], ["agent archive test-agent"])
+        self.assertEqual([c for c in calls if c.startswith("agent archive")], ["agent archive -- test-agent"])
         self.assertFalse(any("--force" in c for c in calls), calls)
 
     def test_archive_refusal_exits_8(self) -> None:
@@ -166,13 +172,13 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.lockdir.mkdir(parents=True)
         holder = subprocess.Popen(["sleep", "60"])
         self.children.append(holder.pid)
-        self.lifecycle_lock().write_text(f"{holder.pid}\n")
-        for args in (["--finish"], ["/quit"], ["/new"], ["/clear"]):
+        self.lifecycle_lock().write_text(self.stamp(holder.pid))
+        for args in (["--finish"], ["/quit"], ["/exit"], ["/new"], ["/clear"]):
             r = self.run_ss(*args)
             self.assertEqual(r.returncode, 7, f"{args}: {r.stdout}{r.stderr}")
             self.assertIn("already queued", r.stderr)
         self.assertEqual(self.paseo_calls(), [])
-        self.assertEqual(self.lifecycle_lock().read_text().strip(), str(holder.pid))
+        self.assertEqual(self.lifecycle_lock().read_text(), self.stamp(holder.pid))
 
     def test_concurrent_finish_archives_once(self) -> None:
         first = self.run_ss("--finish", FAKE_WAIT_SLEEP="2")
@@ -180,7 +186,7 @@ class SelfSlashPaseoTests(unittest.TestCase):
         second = self.run_ss("--finish")
         self.assertEqual(second.returncode, 7, second.stdout + second.stderr)
         self.wait_log("finish: archived test-agent")
-        self.assertEqual([c for c in self.paseo_calls() if c.startswith("agent archive")], ["agent archive test-agent"])
+        self.assertEqual([c for c in self.paseo_calls() if c.startswith("agent archive")], ["agent archive -- test-agent"])
         self.wait_lock_gone()
 
     def test_stale_lock_is_cleared(self) -> None:
@@ -192,6 +198,27 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.wait_log("finish: archived test-agent")
         self.wait_lock_gone()
+        self.assertEqual(list(self.lockdir.glob("*.stale.*")), [])
+
+    def test_lock_naming_a_live_pid_that_is_not_self_slash_is_stale(self) -> None:
+        # a pid reused after a SIGKILL or reboot: alive, but not the process that took the lock
+        self.lockdir.mkdir(parents=True)
+        self.lifecycle_lock().write_text(f"{os.getpid()}\n")  # bare pid (old format): the test runner
+        r = self.run_ss("--finish")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.wait_log("finish: archived test-agent")
+        self.wait_lock_gone()
+
+    def test_lock_with_a_different_start_time_is_stale(self) -> None:
+        self.lockdir.mkdir(parents=True)
+        holder = subprocess.Popen(["sleep", "60"])
+        self.children.append(holder.pid)
+        self.lifecycle_lock().write_text(f"{holder.pid}\tMon Jan  1 00:00:00 2001\n")
+        r = self.run_ss("--finish")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.wait_log("finish: archived test-agent")
+        self.wait_lock_gone()
+        self.assertEqual(list(self.lockdir.glob("*.stale.*")), [])
 
     # (e)
     def test_new_is_sent_as_clear_then_one_baton(self) -> None:
@@ -231,6 +258,73 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertFalse(self.lockdir.exists() and list(self.lockdir.iterdir()))
         r = self.run_ss("--dry-run", "--finish")
         self.assertIn("never --force", r.stdout)
+
+    # adversary 2026-10-20, finding 1b: a dispatched agent (acp-run sets ACP_RUN_AGENT=1) must
+    # never run a lifecycle action; it would reach the parent's agent
+    def test_dispatched_agent_is_refused_every_lifecycle_action(self) -> None:
+        for args in (["/new"], ["/clear"], ["/reset"], ["/compact x"], ["--finish"],
+                     ["/quit"], ["/exit"], ["--dry-run", "/clear"], ["--dry-run", "--finish"]):
+            r = self.run_ss(*args, ACP_RUN_AGENT="1")
+            self.assertEqual(r.returncode, 9, f"{args}: {r.stdout}{r.stderr}")
+            self.assertIn("dispatched agent", r.stderr)
+        self.assertEqual(self.paseo_calls(), [])
+        self.assertFalse(self.log.exists())
+        self.assertFalse(self.lockdir.exists() and list(self.lockdir.iterdir()))
+
+    def test_dispatched_agent_marker_does_not_block_other_commands(self) -> None:
+        r = self.run_ss("--dry-run", "/context", ACP_RUN_AGENT="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_top_level_session_without_the_marker_is_not_refused(self) -> None:
+        r = self.run_ss("--dry-run", "/new", ACP_RUN_AGENT="")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # finding 4
+    def test_paseo_then_quit_or_exit_is_rejected(self) -> None:
+        for then in ("/quit", "/exit", "/quit now"):
+            r = self.run_ss("--then", then, "/compact x")
+            self.assertEqual(r.returncode, 2, f"{then}: {r.stdout}{r.stderr}")
+            self.assertIn("not a Paseo command", r.stderr)
+        self.assertEqual(self.paseo_calls(), [])
+        self.assertFalse(self.lockdir.exists() and list(self.lockdir.iterdir()))
+
+    def test_finish_with_a_then_is_rejected(self) -> None:
+        for args in (["--finish", "--then", "/baton"], ["--then", "/baton", "--finish"],
+                     ["--then", "/baton", "/quit"]):
+            r = self.run_ss(*args)
+            self.assertEqual(r.returncode, 2, f"{args}: {r.stdout}{r.stderr}")
+            self.assertIn("no --then", r.stderr)
+        self.assertEqual(self.paseo_calls(), [])
+        r = self.run_ss("--dry-run", "--finish", "--no-then")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_finish_with_a_then_is_rejected_on_orca_too(self) -> None:
+        r = self.run_ss("--finish", "--then", "/baton", ORCA_TERMINAL_HANDLE="t1")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("no --then", r.stderr)
+
+    # finding 6: /quit and /exit are lifecycle actions on herdr and Orca too
+    def test_quit_and_exit_take_the_lifecycle_lock_on_orca(self) -> None:
+        fake_orca = Path(self.env["PATH"].split(":")[0]) / "orca"
+        _ = fake_orca.write_text("#!/bin/bash\nexit 0\n")
+        fake_orca.chmod(0o755)
+        self.lockdir.mkdir(parents=True)
+        holder = subprocess.Popen(["sleep", "60"])
+        self.children.append(holder.pid)
+        (self.lockdir / "orca_t1.lifecycle").write_text(self.stamp(holder.pid))
+        for text in ("/quit", "/exit", "/quit now", "/exit now"):
+            r = self.run_ss(text, ORCA_TERMINAL_HANDLE="t1")
+            self.assertEqual(r.returncode, 7, f"{text}: {r.stdout}{r.stderr}")
+        r = self.run_ss("--dry-run", "/rename x", ORCA_TERMINAL_HANDLE="t1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    # INFO 2: the mapping notice is for a typed /quit or /exit, not for --finish
+    def test_mapping_notice_only_when_quit_was_typed(self) -> None:
+        r = self.run_ss("--dry-run", "--finish")
+        self.assertNotIn("mapping to --finish", r.stderr)
+        for text in ("/quit", "/exit"):
+            r = self.run_ss("--dry-run", text)
+            self.assertIn("mapping to --finish", r.stderr)
 
     def test_finish_rejects_a_command(self) -> None:
         r = self.run_ss("--finish", "/compact")
