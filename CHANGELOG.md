@@ -19,7 +19,11 @@ agent what changed and what is new. Entries end with the pull request number.
   submodules in `status` (flag `submodules not inspected`), drops every `GIT_*` variable, does not follow
   symlinks out of a `--git-root`, always excludes the scan docs from the reference search, reports a
   checkout whose `status` or `rev-list` call failed or timed out as `scan incomplete: <call> rc=<n>`
-  (never `clean and pushed`; `status` gets 600 s), sets `GIT_NO_LAZY_FETCH=1` so a partial clone
+  (never `clean and pushed`; `status` gets 600 s), counts commits on no origin ref over HEAD and every
+  local branch (`local_only_commits`, `local_only_branches`; a detached HEAD, an origin that did not
+  answer or a side branch is never `clean and pushed`, flags `detached`, `origin unknown`,
+  `origin unreachable`), reports a garbage `.git/HEAD` as `skipped: HEAD unreadable`, sets
+  `GIT_NO_LAZY_FETCH=1` so a partial clone
   downloads nothing during a `--remote` scan, and `--fetch` writes no refs and does not recurse into
   submodules; `bin/ade-scan-state-doc` renders the doc from the scan JSON and refuses to overwrite its
   input, a directory, a non-`.md` path or an existing file without `--force` (#TBD).

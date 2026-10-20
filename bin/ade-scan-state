@@ -44,22 +44,40 @@ referenced verdict is a lead, not a proof. `size` is `du -sk`; `newest_mtime` lo
 
 Git checkout verdicts (a checkout is a dir holding `.git`, found up to two levels under each
 --git-root, symlinks not followed, deduplicated):
-  unpushed commits  the upstream exists and HEAD is ahead of it
+  unpushed commits  the upstream exists and HEAD is ahead of it; or origin lists the branch and HEAD
+                    is ahead; or any local branch (or a detached HEAD) holds a commit that is on no
+                    origin ref, whatever the origin state
   orphan branch     the branch is on no origin ref and HEAD has commits origin lacks
   dirty             modified or untracked non-ignored paths
-  clean and pushed  none of the above
-  skipped: <reason>  a config key outside the allowlist, a redirected work tree, or an unreadable
-                    config (reasons above); nothing else was run
+  clean and pushed  none of the above: no commit on any local branch or on HEAD lies outside the
+                    origin refs (the local `refs/remotes/origin/*`, plus origin's own tips with --remote)
+  skipped: <reason>  a config key outside the allowlist, a redirected work tree, an unreadable
+                    config or an unreadable `.git/HEAD` (`skipped: HEAD unreadable`: git does not
+                    recognise the repository); nothing else was run
   scan incomplete: <call> rc=<n>  a git call (`status`, `rev-parse --abbrev-ref HEAD`, `rev-list
-                    --count ...`) failed or timed out (rc=124); the state is unknown, so the
-                    checkout is never `clean and pushed`; counts are null. `git status` gets 600 s,
-                    every other git call 60 s.
+                    --count ...`, `for-each-ref`) failed or timed out (rc=124); the state is unknown,
+                    so the checkout is never `clean and pushed`; counts are null. `git status` gets
+                    600 s, every other git call 60 s. A repository counts as unborn (no commit yet) only
+                    when `refs/heads` and `refs/tags` hold nothing; a HEAD that names no ref while
+                    refs exist is `scan incomplete: rev-parse --abbrev-ref HEAD rc=<n>`.
+Local-only commits: `local_only_commits` is `git rev-list --count HEAD --branches --not
+--remotes=origin` (plus every origin tip `ls-remote` returned with --remote; tips whose objects are
+missing here are ignored, which can only overcount). When it is above 0, `local_only_branches` is a
+list of {branch, count}, one `rev-list --count` per local branch (at most 100 of them, the rest in
+`local_only_branches_uncounted`; a detached HEAD appears as branch `HEAD`): one extra git call per
+checkout when nothing is local-only and at most 103 otherwise. The summary counts these as `with_local_only_commits`.
+Extra flag `local-only commits: <branch> <n>, ...`: the same list, first five branches.
+Extra flag `detached`: HEAD is detached and commits lie outside origin; `origin unknown`: the branch
+is not detached but origin's branch list could not be read at all (the verdict is `unpushed commits`,
+never `clean and pushed`). `origin unreachable`: --remote's `ls-remote` failed, so the local
+`refs/remotes/origin/*` stood in for it (a clean verdict still means no commit outside those refs).
 Extra flag `submodules not inspected`: the checkout has submodules; `status` ignores their state, so
 the verdict says nothing about them (it is that flag, not `clean and pushed`, when nothing else applies).
 Extra flag `origin tip not fetched`: the branch is on origin at a commit this checkout cannot
 compare with HEAD (add --fetch); `ahead_of_origin` then still counts those commits.
 A checkout with no `origin` remote at all has every commit "ahead of origin": it is an orphan
-branch and carries the extra flag `no origin remote`. `stash` is a flag, never a primary verdict.
+branch and carries the extra flag `no origin remote`. `stash`, `no origin remote`, `detached`,
+`origin unknown` and `origin unreachable` are flags, never a primary verdict.
 The primary verdict is the first that applies in that order; `flags` lists every one. A skipped
 checkout has no counts (null) and `config_keys` names the offending keys, never their values.
 
@@ -89,6 +107,11 @@ SKIP_UNREADABLE = "skipped: git config unreadable"
 SKIP_WORKTREE = "skipped: worktree redirected"
 SKIP_NO_WORKTREE = "skipped: no work tree"
 SUBMODULES_FLAG = "submodules not inspected"
+SKIP_HEAD_UNREADABLE = "skipped: HEAD unreadable"
+MAX_TIPS = 2000  # ls-remote tips passed as `--not` arguments (argv size); extra tips only overcount
+MAX_BRANCH_COUNTS = 100  # `rev-list --count` calls for the per-branch report; the rest are only summed
+# Flags that qualify a verdict but never are one.
+INFO_FLAGS = ("stash", "no origin remote", "origin unreachable", "detached", "origin unknown")
 INCOMPLETE_PREFIX = "scan incomplete: "
 STATUS_TIMEOUT = 600  # `git status` on a large or cold tree under load; every other git call gets 60 s
 MODULE_INTERNAL_DIRS = ("objects", "refs", "logs", "hooks", "lfs")  # pruned inside a module's git dir
@@ -458,25 +481,32 @@ def ls_remote_heads(path: Path) -> dict[str, str] | None:
             for ln in out.splitlines() if "refs/heads/" in ln}
 
 
-_remote_cache: dict[str, dict[str, str] | None] = {}
+_remote_cache: dict[str, tuple[dict[str, str] | None, bool]] = {}
 
 
-def origin_branches(path: Path, remote: bool) -> dict[str, str] | None:
-    """Branch name -> tip sha on origin: `ls-remote` with --remote, else the local remote refs."""
+def local_origin_refs(path: Path) -> dict[str, str] | None:
+    rc, out = git(path, "for-each-ref", "--format=%(refname:strip=3) %(objectname)", "refs/remotes/origin")
+    if rc != 0:
+        return None
+    return dict(ln.split() for ln in out.splitlines() if len(ln.split()) == 2)
+
+
+def origin_branches(path: Path, remote: bool) -> tuple[dict[str, str] | None, bool]:
+    """(branch name -> tip sha on origin, whether `ls-remote` answered).
+
+    With --remote the tips come from `ls-remote`; when origin does not answer they come from the local
+    remote refs instead (adversary round 4: None read as "unknown" and hid unpushed work) and the
+    second value is False, as it is without --remote. None: no origin, or no readable local refs."""
     rc, common = git(path, "rev-parse", "--git-common-dir")
     key = str((path / common.strip()).resolve()) if rc == 0 and common.strip() else str(path)
     if key in _remote_cache:
         return _remote_cache[key]
     rc, url = git(path, "remote", "get-url", "origin")
     if rc != 0:
-        result = None
-    elif remote:
-        result = ls_remote_heads(path)
+        result: tuple[dict[str, str] | None, bool] = (None, False)
     else:
-        rc, out = git(path, "for-each-ref", "--format=%(refname:strip=3) %(objectname)",
-                      "refs/remotes/origin")
-        result = dict(ln.split() for ln in out.splitlines() if len(ln.split()) == 2) \
-            if rc == 0 else None
+        live = ls_remote_heads(path) if remote else None
+        result = (live, True) if live is not None else (local_origin_refs(path), False)
     _remote_cache[key] = result
     return result
 
@@ -486,6 +516,7 @@ def skipped_record(path: Path, reason: str, keys: list[str] | None = None) -> di
         "path": str(path), "branch": "?", "modified": None, "untracked": None,
         "untracked_sample": [], "modified_sample": [], "upstream": None, "unpushed": None,
         "ahead_of_origin": None, "stashes": None, "has_origin": None, "on_origin": "unknown",
+        "local_only_commits": None, "local_only_branches": [], "local_only_branches_uncounted": 0,
         "config_keys": keys or [], "flags": [reason], "verdict": reason,
     }
 
@@ -493,6 +524,17 @@ def skipped_record(path: Path, reason: str, keys: list[str] | None = None) -> di
 def incomplete_record(path: Path, call: str, rc: int) -> dict:
     """A git call failed (rc 124 = timed out): the checkout's state is unknown, never `clean and pushed`."""
     return skipped_record(path, f"{INCOMPLETE_PREFIX}{call} rc={rc}")
+
+
+def local_only_count(path: Path, revs: list[str], tips: list[str]) -> tuple[int | None, int]:
+    """(commits reachable from `revs` and from no origin ref nor `tips`, rc); None when git failed.
+
+    Missing tips are ignored (`--ignore-missing`): a tip whose objects are not here only overcounts."""
+    argv = ["rev-list", "--count", *revs, "--not", "--remotes=origin"]
+    if tips:
+        argv += ["--ignore-missing", *tips]
+    rc, n = git(path, *argv)
+    return (int(n) if rc == 0 and n.strip().isdigit() else None), rc
 
 
 def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
@@ -505,6 +547,9 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         return skipped_record(path, f"skipped: unrecognised config {keys[0]}", keys)
     rc, top = git(path, "rev-parse", "--show-toplevel")
     if rc != 0 or not top.strip():
+        rc_dir, _ = git(path, "rev-parse", "--git-dir")
+        if rc_dir != 0 and (path / ".git" / "HEAD").is_file():
+            return skipped_record(path, SKIP_HEAD_UNREADABLE)  # git does not recognise the repository
         return skipped_record(path, SKIP_NO_WORKTREE)
     if Path(top.strip()).resolve() != path.resolve():
         return skipped_record(path, SKIP_WORKTREE)
@@ -514,13 +559,18 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         return skipped_record(path, f"skipped: submodule config unrecognised {bad_key}", [bad_key])
     rc, branch = git(path, "rev-parse", "--abbrev-ref", "HEAD")
     unborn = False
-    if rc != 0:  # a repository with no commit yet fails here and is still a valid, scannable checkout
+    if rc != 0:
+        rc_branch = rc
+        # A repository with no commit yet fails here and is still a valid, scannable checkout; one that
+        # has refs but whose HEAD names none of them is damaged, not unborn (adversary round 4, 2).
         rc_head, _ = git(path, "rev-parse", "--verify", "--quiet", "HEAD")
         if rc_head == 1:
-            rc, branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
-            unborn = rc == 0
+            rc_refs, refs = git(path, "for-each-ref", "--count=1", "refs/heads", "refs/tags")
+            if rc_refs == 0 and not refs.strip():
+                rc, branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
+                unborn = rc == 0
         if not unborn:
-            return incomplete_record(path, "rev-parse --abbrev-ref HEAD", rc)
+            return incomplete_record(path, "rev-parse --abbrev-ref HEAD", rc_branch)
     branch = branch.strip()
     detached = branch == "HEAD"
     # A git call that fails or times out must never read as "nothing found" (adversary round 3, 1).
@@ -548,7 +598,8 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     stashes = stash_count(path, common)
     rc, _ = git(path, "remote", "get-url", "origin")
     has_origin = rc == 0
-    branches = origin_branches(path, remote) if has_origin else None
+    branches, live = origin_branches(path, remote) if has_origin else (None, False)
+    origin_unreachable = bool(remote and has_origin and not live)
     on_origin = False if not has_origin else (None if branches is None or detached
                                               else branch in branches)
     # Local origin/* refs can be stale: a branch whose origin tip is HEAD, or contains HEAD,
@@ -571,11 +622,55 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
             tip_unverified = True  # origin has a tip we cannot compare with HEAD
         else:
             ahead_of_origin = n
+    # Commits on no origin ref, over HEAD and every local branch (adversary round 4, 1): the verdict
+    # `clean and pushed` needs this to be 0 whatever `on_origin` says. ls-remote tips (when origin
+    # answered) are excluded too; a tip whose objects are missing here is ignored, which can only
+    # overcount.
+    tips = sorted(set(branches.values()))[:MAX_TIPS] if branches and live else []
+    local_only: int | None = 0
+    local_only_branches: list[dict] = []
+    branches_uncounted = 0
+    if not unborn:
+        local_only, rc = local_only_count(path, ["HEAD", "--branches"], tips)
+        if local_only is None:
+            return incomplete_record(path, "rev-list --count HEAD --branches --not --remotes=origin", rc)
+        if local_only:
+            if detached:
+                n, rc = local_only_count(path, ["HEAD"], tips)
+                if n is None:
+                    return incomplete_record(path, "rev-list --count HEAD --not --remotes=origin", rc)
+                if n:
+                    local_only_branches.append({"branch": "HEAD", "count": n})
+            rc, out = git(path, "for-each-ref", "--format=%(refname:strip=2)", "refs/heads")
+            if rc != 0:
+                return incomplete_record(path, "for-each-ref refs/heads", rc)
+            names = out.splitlines()
+            for name in names[:MAX_BRANCH_COUNTS]:
+                n, rc = local_only_count(path, [f"refs/heads/{name}"], tips)
+                if n is None:
+                    return incomplete_record(path, f"rev-list --count refs/heads/{name} "
+                                                   "--not --remotes=origin", rc)
+                if n:
+                    local_only_branches.append({"branch": name, "count": n})
+            branches_uncounted = max(len(names) - MAX_BRANCH_COUNTS, 0)
     flags = []
     if unpushed or (on_origin and (ahead_of_origin or 0) > 0):
         flags.append("unpushed commits")  # includes a branch on origin with no upstream set
     if on_origin is False and (ahead_of_origin or 0) > 0 and not unpushed:
         flags.append("orphan branch")
+    if local_only:
+        if not flags:
+            flags.append("unpushed commits")  # only on another branch, or origin not known
+        if detached:
+            flags.append("detached")
+        elif on_origin is None:
+            flags.append("origin unknown")
+        shown = ", ".join(f"{b['branch']} {b['count']}" for b in local_only_branches[:5])
+        more = len(local_only_branches) - 5
+        flags.append("local-only commits: " + (shown or f"{local_only} in total")
+                     + (f", +{more} more" if more > 0 else ""))
+    if origin_unreachable:
+        flags.append("origin unreachable")
     if tip_unverified:
         flags.append("origin tip not fetched")
     if not has_origin:
@@ -586,13 +681,14 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         flags.append(SUBMODULES_FLAG)
     if stashes:
         flags.append("stash")
-    primary = next((f for f in flags if f not in ("stash", "no origin remote")),
-                   "clean and pushed")
+    primary = next((f for f in flags if f not in INFO_FLAGS), "clean and pushed")
     return {
         "path": str(path), "branch": branch, "modified": len(modified), "untracked": len(untracked),
         "untracked_sample": untracked[:8], "modified_sample": modified[:8],
         "upstream": upstream, "unpushed": unpushed if upstream else "no upstream",
         "ahead_of_origin": ahead_of_origin, "stashes": stashes,
+        "local_only_commits": local_only, "local_only_branches": local_only_branches,
+        "local_only_branches_uncounted": branches_uncounted,
         "has_origin": has_origin,
         "on_origin": "unknown" if on_origin is None else on_origin,
         "flags": flags, "verdict": primary,
@@ -642,6 +738,8 @@ def summarize(result: dict) -> dict:
             "with_unpushed_work": sum(1 for c in result["checkouts"]
                                       if "unpushed commits" in c["flags"]
                                       or "orphan branch" in c["flags"]),
+            "with_local_only_commits": sum(1 for c in result["checkouts"]
+                                           if (c.get("local_only_commits") or 0) > 0),
             "with_untracked": sum(1 for c in result["checkouts"] if c["untracked"]),
             "with_stash": sum(1 for c in result["checkouts"] if c["stashes"]),
             "skipped": sum(1 for c in result["checkouts"] if c["verdict"].startswith("skipped")),

@@ -606,6 +606,109 @@ def test_a_repository_with_no_commit_yet_is_not_scan_incomplete(tmp_path):
     assert c["branch"] == "main" and c["verdict"] == "dirty" and c["untracked"] == 1
 
 
+def commit_file(repo: Path, name: str) -> None:
+    (repo / name).write_text(name + "\n")
+    git(repo, "add", name)
+    git(repo, "commit", "-m", name)
+
+
+def scan_one(mod, roots: Path, **kw) -> dict:
+    recs = mod.scan_git([roots], **{"remote": False, **kw})
+    assert len(recs) == 1
+    return recs[0]
+
+
+def test_detached_head_with_local_commits_is_not_clean_and_pushed(tmp_path):
+    """Round 4, 1a (S1)."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    git(work, "checkout", "--detach")
+    commit_file(work, "detached.txt")
+    c = scan_one(mod, roots)
+    assert c["branch"] == "HEAD" and c["on_origin"] == "unknown"
+    assert c["verdict"] == "unpushed commits" and "detached" in c["flags"]
+    assert c["local_only_commits"] == 1
+    assert {"branch": "HEAD", "count": 1} in c["local_only_branches"]
+    assert any(f.startswith("local-only commits: HEAD 1") for f in c["flags"])
+    assert mod.summarize({"checkouts": [c]})["checkouts"]["with_local_only_commits"] == 1
+
+
+def test_remote_scan_with_an_origin_that_does_not_answer_is_not_clean_and_pushed(tmp_path, monkeypatch):
+    """Round 4, 1b (S2): ls-remote fails, the branch has no upstream and a commit origin lacks."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    git(work, "checkout", "-b", "feature")
+    commit_file(work, "f.txt")
+    git(work, "remote", "set-url", "origin", str(tmp_path / "does-not-exist.git"))
+    c = scan_one(mod, roots, remote=True)
+    assert c["verdict"] != "clean and pushed" and c["verdict"] == "orphan branch"
+    assert "origin unreachable" in c["flags"]  # fell back to the local refs/remotes/origin/*
+    assert c["local_only_commits"] == 1
+    assert c["local_only_branches"] == [{"branch": "feature", "count": 1}]
+    # no origin branch list at all (not even local refs): the verdict is still not clean
+    mod = load()
+    monkeypatch.setattr(mod, "origin_branches", lambda path, remote: (None, False))
+    c = scan_one(mod, roots, remote=True)
+    assert c["verdict"] == "unpushed commits" and "origin unknown" in c["flags"], c["flags"]
+    assert c["local_only_branches"] == [{"branch": "feature", "count": 1}]
+
+
+def test_a_commit_on_another_local_branch_is_not_clean_and_pushed(tmp_path):
+    """Round 4, 1c (S3): HEAD is on a pushed main, branch `side` holds 2 commits no origin ref has."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    git(work, "checkout", "-b", "side")
+    commit_file(work, "s1.txt")
+    commit_file(work, "s2.txt")
+    git(work, "checkout", "main")
+    c = scan_one(mod, roots)
+    assert c["branch"] == "main" and c["ahead_of_origin"] == 0
+    assert c["verdict"] == "unpushed commits" != "clean and pushed"
+    assert c["local_only_commits"] == 2 and c["local_only_branches"] == [{"branch": "side", "count": 2}]
+    assert "local-only commits: side 2" in c["flags"]
+    # the same branch, once pushed, makes the checkout clean again
+    git(work, "push", "origin", "side")
+    c = scan_one(mod, roots)
+    assert c["verdict"] == "clean and pushed", c["flags"]
+    assert c["local_only_commits"] == 0 and c["local_only_branches"] == []
+
+
+def test_origin_tips_from_ls_remote_are_not_local_only(tmp_path):
+    """A branch pushed from here whose remote-tracking ref is gone is only local-only without --remote."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    git(work, "checkout", "-b", "x")
+    commit_file(work, "x.txt")
+    git(work, "push", "origin", "x")
+    git(work, "update-ref", "-d", "refs/remotes/origin/x")
+    git(work, "checkout", "main")
+    assert scan_one(mod, roots)["local_only_branches"] == [{"branch": "x", "count": 1}]
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True)
+    assert c["verdict"] == "clean and pushed" and c["local_only_commits"] == 0, c["flags"]
+
+
+def test_a_head_naming_no_ref_while_refs_exist_is_not_unborn(tmp_path):
+    """Round 4, 2 (S4): HEAD -> refs/heads/gone, a branch holds a commit origin lacks."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    git(work, "checkout", "-b", "work")
+    commit_file(work, "w.txt")
+    git(work, "symbolic-ref", "HEAD", "refs/heads/gone")
+    c = scan_one(mod, roots)
+    assert c["verdict"].startswith("scan incomplete: rev-parse --abbrev-ref HEAD rc="), c["verdict"]
+    assert c["verdict"] != "clean and pushed" and c["local_only_commits"] is None
+
+
+def test_a_garbage_head_file_is_reported_as_unreadable_not_as_no_work_tree(tmp_path):
+    """Round 4, 3a (S6)."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    (work / ".git" / "HEAD").write_text("garbage\n")
+    c = scan_one(mod, roots)
+    assert c["verdict"] == "skipped: HEAD unreadable" and c["local_only_commits"] is None
+
+
 def test_remote_scan_of_a_partial_clone_downloads_nothing(tmp_path):
     """Round 3, 2: promisor lazy fetch ran during `rev-list --count HEAD --not --remotes=origin <tip>`."""
     mod = load()

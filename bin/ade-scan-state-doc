@@ -232,11 +232,15 @@ def render(d):
       "or `no upstream`. *Ahead of origin* is commits reachable from HEAD and from no `origin/*` ref "
       "(with a check that the branch tip on origin does not already contain HEAD, because the local "
       "remote refs can be stale; `--fetch` downloads that branch's objects when they are missing, writing no refs). *On origin* comes from `git ls-remote --heads origin`. Verdict "
-      "precedence: `unpushed commits`, `orphan branch` (branch not on origin and commits origin lacks), "
-      "`dirty`, `clean and pushed`; the *also* column lists the other flags. A checkout whose `status`, "
-      "`rev-parse --abbrev-ref HEAD` or `rev-list --count` call fails or times out is "
-      "`scan incomplete: <call> rc=<n>` (`rc=124` is a timeout; `status` gets 600 s, other calls 60 s) "
-      "with null counts, and is never `clean and pushed`.\n")
+      "precedence: `unpushed commits` (also any local branch or a detached HEAD holding a commit on no "
+      "origin ref), `orphan branch` (branch not on origin and commits origin lacks), `dirty`, "
+      "`clean and pushed` (no local-only commit on any local branch); the *also* column lists the other "
+      "flags (`detached`, `origin unknown`, `origin unreachable`, `local-only commits: <branch> <n>`). "
+      "A checkout whose `status`, `rev-parse --abbrev-ref HEAD`, `for-each-ref` or `rev-list --count` call "
+      "fails or times out is `scan incomplete: <call> rc=<n>` (`rc=124` is a timeout; `status` gets "
+      "600 s, other calls 60 s) with null counts, and is never `clean and pushed`; a repository whose "
+      "`.git/HEAD` git cannot read is `skipped: HEAD unreadable`, and one whose HEAD names no ref while "
+      "other refs exist is `scan incomplete`, never a fresh repository.\n")
     w("| path | branch | mod | untr | unpushed | ahead of origin | stash | on origin | verdict | also |\n"
       "|---|---|---|---|---|---|---|---|---|---|")
     for c in cos:
@@ -338,8 +342,8 @@ def render(d):
                 need = need if need != "no" else "yes: decide whether they are work"
         w(f"| {p} | {'; '.join(what)} | {'; '.join(cmd)} | {need} |")
     w("")
-    w("Checkouts not listed are `clean and pushed` (branch on origin or no commits origin lacks) "
-      "or hold only the reproducible `graft/` index.\n")
+    w("Checkouts not listed are `clean and pushed` (branch on origin or no commits origin lacks, HEAD only; "
+      "see limit 9) or hold only the reproducible `graft/` index.\n")
 
     # ---- 4 caveats
     w("## 4. Limits of this scan\n")
@@ -352,7 +356,8 @@ def render(d):
     w("3. `du` totals ~64 GB here against ~61 GB in the slice 1 inventory: a different tool and a "
       "later moment (sessions kept writing during both).")
     w("4. `ls-remote` needs the remote to answer; a checkout whose origin refused would show "
-      "`on origin: unknown`. None did in this run.")
+      "`on origin: unknown` in the run's tool. None did in this run. The current tool falls back to the "
+      "local `refs/remotes/origin/*` and adds the flag `origin unreachable`.")
     w("5. A pasture that was clean when created can become dirty or ahead later; this is a snapshot "
       f"at {d['scanned_at']}.")
     w("6. The scan ran with the first version of the tool, which did not look at a checkout's own config "
@@ -366,7 +371,12 @@ def render(d):
       "row above is only as good as every git call in that run having succeeded; failures were not "
       "recorded. A fresh scan with the current tool reports such a checkout as "
       "`scan incomplete: <call> rc=<n>`. Likewise whether any scanned checkout was a partial clone "
-      "that downloaded objects during the run was not checked.\n")
+      "that downloaded objects during the run was not checked.")
+    w("9. The run's tool counted only the commits of HEAD that lie on no origin ref, so a `clean and pushed` "
+      "row above can still hold commits on another local branch, and a checkout on a detached HEAD or "
+      "with an origin that did not answer was never checked against that. A fresh scan with the current "
+      "tool counts them over HEAD and every local branch (`local_only_commits`, `local_only_branches`) "
+      "and reports any as `unpushed commits`; none of the rows above was re-checked this way.\n")
 
     # ---- 5 commands
     w("## 5. Commands run\n")
