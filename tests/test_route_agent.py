@@ -1402,10 +1402,74 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         with mock.patch.dict(os.environ, {"ROUTE_AGENT_AIUSE_TIMEOUT": "7"}):
             self.assertEqual(r._aiuse_timeout(), 7.0)
 
-    def test_spawn_is_memoised(self):
+    def test_spawn_is_memoised_only_within_the_ttl(self):
         body = r.json.dumps(self.payload([]))
         exe = self.fake_aiuse(body, 0)
-        with mock.patch.object(r.subprocess, "run", wraps=r.subprocess.run) as run:
+        clock = [1000.0]
+        with mock.patch.object(r.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(r.subprocess, "run", wraps=r.subprocess.run) as run:
+            self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            clock[0] += r.AIUSE_MEMO_TTL - 1
+            self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            self.assertEqual(run.call_count, 1)
+            clock[0] += 2
+            self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            self.assertEqual(run.call_count, 2)
+
+    def counting_aiuse(self):
+        counter = self.tmp / "count"
+        counter.write_text("0")
+        script = self.tmp / "aiuse"
+        script.write_text(
+            "#!/bin/sh\n"
+            f"n=$(cat {shlex.quote(str(counter))}); n=$((n+1)); echo $n > {shlex.quote(str(counter))}\n"
+            "cat <<EOF\n"
+            '{"age_seconds": 5, "available": [{"provider": "omp", "age_seconds": 5, "windows": '
+            '[{"label": "c", "headroom_percent": $((n*10))}]}]}\n'
+            "EOF\n")
+        script.chmod(0o755)
+        return str(script)
+
+    def test_changing_reading_is_new_after_the_ttl_and_aged_within_it(self):
+        exe = self.counting_aiuse()
+        clock = [1000.0]
+        with mock.patch.object(r.time, "monotonic", side_effect=lambda: clock[0]):
+            q1, age1, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            self.assertEqual(q1["omp"]["remaining"], 10.0)
+            self.assertEqual(age1, 5.0)
+            clock[0] += 20
+            q2, age2, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            self.assertEqual(q2["omp"]["remaining"], 10.0)      # the old reading ...
+            self.assertEqual(age2, 25.0)                         # ... aged by the elapsed time
+            clock[0] += 20
+            q3, age3, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            self.assertEqual(q3["omp"]["remaining"], 20.0)      # a fresh spawn
+            self.assertEqual(age3, 5.0)
+
+    def test_cached_reading_goes_stale_as_it_ages(self):
+        r._AIUSE_MEMO.clear()
+        cached = {"age_seconds": r.STALE_SOFT - 5, "available": [
+            {"provider": "omp", "age_seconds": r.STALE_SOFT - 5,
+             "windows": [{"label": "c", "headroom_percent": 70.0}]}]}
+        aged, _ = r._aged_copy((cached, "x"), 10)
+        self.assertEqual(aged["available"][0]["age_seconds"], r.STALE_SOFT + 5)
+        self.assertEqual(cached["available"][0]["age_seconds"], r.STALE_SOFT - 5)  # untouched
+
+    def test_failures_are_memoised_no_longer_than_the_ttl(self):
+        clock = [1000.0]
+        exe = self.fake_aiuse("boom", 1)
+        with mock.patch.object(r.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(r.subprocess, "run", wraps=r.subprocess.run) as run:
             self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
             self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
-        self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_count, 1)
+            clock[0] += r.AIUSE_MEMO_TTL + 1
+            self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            self.assertEqual(run.call_count, 2)
+
+    def test_huge_integer_percentage_reads_unknown_not_a_crash(self):
+        body = ('{"age_seconds": 5, "available": [{"provider": "codex", "age_seconds": 1' + "0" * 400
+                + ', "windows": [{"label": "w", "headroom_percent": 1' + "0" * 400 + "}]}]}")
+        path = self.write("huge.json", body)
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertIsNone(quota["codex"]["remaining"])

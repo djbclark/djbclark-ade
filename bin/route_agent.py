@@ -29,7 +29,7 @@ rather than hanging. Env: `ROUTE_AGENT_AIUSE_JSON=<path>` feeds canned output (t
 as source `canned`, logged on stderr each use, and it takes precedence over
 `ROUTE_AGENT_AIUSE=off` and `AIUSE_SNAPSHOT`), `ROUTE_AGENT_AIUSE=off` or `AIUSE_SNAPSHOT`
 pins the file-only read, `ROUTE_AGENT_AIUSE_BIN` names the binary,
-`ROUTE_AGENT_AIUSE_TIMEOUT` is seconds in (0, 60] (default 20). The spawn is memoised per process.
+`ROUTE_AGENT_AIUSE_TIMEOUT` is seconds in (0, 60] (default 20). The spawn is memoised for 30 s.
 
 **Services are discovered, not hardcoded.** The roster changes — agents gain
 an ACP mode, providers appear in aiuse, plans lapse. So the service list is
@@ -557,7 +557,7 @@ def _pct(value: Any) -> float | None:
         return None
     try:
         x = float(value)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return None
     return min(100.0, max(0.0, x)) if math.isfinite(x) else None
 
@@ -568,7 +568,7 @@ def _clean_age(value: Any) -> float | None:
         return None
     try:
         x = float(value)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return None
     return x if math.isfinite(x) and x >= 0 else None
 
@@ -691,7 +691,25 @@ def _aiuse_wanted() -> bool:
     return True
 
 
-_AIUSE_MEMO: dict[tuple[Any, ...], tuple[dict[str, Any] | None, str]] = {}
+AIUSE_MEMO_TTL = 30.0   # seconds a spawn result is reused (a blocking dispatch re-reads at finalize)
+_AIUSE_MEMO: dict[tuple[Any, ...], tuple[float, tuple[dict[str, Any] | None, str]]] = {}
+
+
+def _aged_copy(result: tuple[dict[str, Any] | None, str],
+               elapsed: float) -> tuple[dict[str, Any] | None, str]:
+    """A memoised result as it reads now: deep copy with `elapsed` added to every age_seconds
+    (top level and per row), so staleness keeps advancing. Never mutates the cached object."""
+    import copy
+    payload, label = result
+    if payload is None:
+        return result
+    out = copy.deepcopy(payload)
+    holders = [out] + [row for row in out.get("available", []) if isinstance(row, dict)]
+    for holder in holders:
+        age = _clean_age(holder.get("age_seconds"))
+        if age is not None:
+            holder["age_seconds"] = age + elapsed
+    return out, label
 
 
 def _reset_aiuse_cache() -> None:
@@ -728,7 +746,8 @@ def aiuse_available() -> tuple[dict[str, Any] | None, str]:
     over ROUTE_AGENT_AIUSE=off and AIUSE_SNAPSHOT; ROUTE_AGENT_AIUSE_BIN names the binary;
     ROUTE_AGENT_AIUSE_TIMEOUT is in seconds, (0, 60], default 20 (the cache read is well
     under one second). Exit 3 means nothing is usable and still prints the JSON. The
-    subprocess result is memoised for the life of the process (`_reset_aiuse_cache`)."""
+    subprocess result (success or failure) is memoised for AIUSE_MEMO_TTL = 30 s, with elapsed
+    seconds added to its ages on reuse (`_reset_aiuse_cache` clears it)."""
     canned = os.environ.get("ROUTE_AGENT_AIUSE_JSON")
     if canned:
         try:
@@ -741,8 +760,11 @@ def aiuse_available() -> tuple[dict[str, Any] | None, str]:
         return None, "aiuse not on PATH"
     timeout = _aiuse_timeout()
     key = (exe, timeout)
-    if key in _AIUSE_MEMO:
-        return _AIUSE_MEMO[key]
+    hit = _AIUSE_MEMO.get(key)
+    if hit is not None:
+        elapsed = time.monotonic() - hit[0]
+        if 0 <= elapsed < AIUSE_MEMO_TTL:
+            return _aged_copy(hit[1], elapsed)
     label = "aiuse --available --json"
     try:
         proc = subprocess.run([exe, "--available", "--json"], capture_output=True,
@@ -757,7 +779,7 @@ def aiuse_available() -> tuple[dict[str, Any] | None, str]:
             result = (None, f"{label} exited {proc.returncode}")
         else:
             result = _parse_available(proc.stdout, label)
-    _AIUSE_MEMO[key] = result
+    _AIUSE_MEMO[key] = (time.monotonic(), result)
     return result
 
 
@@ -805,7 +827,7 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
                         for row in payload["available"]
                         if isinstance(row, dict) and row.get("provider")]
                 fresh = _providers_from_accounts(rows, p_age)
-            except (ValueError, TypeError, AttributeError):
+            except (ValueError, TypeError, AttributeError, OverflowError):
                 label = f"{label}: unparseable rows"
         if canned:
             _log(f"quota from canned ROUTE_AGENT_AIUSE_JSON={os.environ['ROUTE_AGENT_AIUSE_JSON']}"

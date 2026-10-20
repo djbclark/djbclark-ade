@@ -111,7 +111,7 @@ feeds canned output (tests; reported as source `canned`, logged on stderr every 
 takes precedence over `ROUTE_AGENT_AIUSE=off` and `AIUSE_SNAPSHOT`); `ROUTE_AGENT_AIUSE=off` or
 `AIUSE_SNAPSHOT` pins the file-only read (tests/conftest.py sets `off`); `ROUTE_AGENT_AIUSE_BIN`
 and `ROUTE_AGENT_AIUSE_TIMEOUT` (seconds, 0 to 60, default 20) override the binary and timeout.
-The spawn is memoised per process. Unparseable rows, non-finite percentages and unknown ages
+The spawn result is memoised for 30 s (elapsed seconds are added to its ages on reuse, so a blocking dispatch's finalize never reads a start-time quota as current). Unparseable rows, non-finite percentages and unknown ages
 never read as headroom: the first falls back to the file, the others read unknown or stale.
 
 `aiuse --json` (JSON starts after two preamble lines) reports one
