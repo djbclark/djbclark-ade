@@ -609,10 +609,13 @@ def test_non_canonical_checkout_with_no_trusted_helper_skips_the_skill_step(env)
     assert note in out["notes"]
     r = env.run(repo=other, extra_env=bare, script=lone)  # apply: nothing unresolved, so the state is still recorded
     assert r.returncode == 0 and env.state.read_text().strip() == env.first and not marker.exists()
-    # the canonical checkout with no helper anywhere is still a problem (exit 10, no state)
+    # the canonical checkout with no helper anywhere is a dependency failure (exit 4 like every other
+    # skill-everywhere failure, never 10 which means link drift; Codex on PR 20), no state
     env.state.unlink()
     r = env.run(extra_env=bare, script=lone)
-    assert r.returncode == 10 and "skill-everywhere not found" in r.stdout and not env.state.exists()
+    assert r.returncode == 4 and "skill-everywhere not found" in r.stdout and not env.state.exists()
+    out = json.loads(env.run("--json", extra_env=bare, script=lone).stdout)
+    assert out["exit"] == 4 and "skill-everywhere not found" in out["error"] and not env.state.exists()
 
 
 def test_a_crashing_skill_everywhere_check_is_exit_4_and_records_no_state(env):

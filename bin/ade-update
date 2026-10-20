@@ -47,7 +47,7 @@ Exit codes: 0 current (and nothing wrong), 10 behind (--check) or a skill link (
 ~/.claude link is missing/unresolved, 2 usage or a local modification blocks the pull, 3 the branch
 cannot fast-forward (git's explicit non-fast-forward refusal only), 4 git, the network, skill-everywhere
 or the state file failed (no repo, --repo is not the top of its work tree, no upstream, fetch/pull error
-or timeout, any other `git pull --ff-only` failure, `skill-everywhere --check` failed or returned no
+or timeout, any other `git pull --ff-only` failure, `skill-everywhere` not found from the canonical checkout, `--check` failed or returned no
 result for a skill, the state file cannot be written).
 """
 import argparse
@@ -490,9 +490,8 @@ def update(rep, args, repo):
     if no_helper:
         rep.say(f"skills: skipped: {repo} is not the canonical checkout and no skill-everywhere exists beside this "
                 "ade-update outside it; its own bin/ is never run")
-    elif script is None:
-        problems.append("skill-everywhere not found")
-        rep.say("skills: skill-everywhere not found (not beside ade-update, <repo>/bin or PATH); cannot check links")
+    elif script is None:  # the canonical checkout's own dependency is gone: exit 4, like every other helper failure
+        raise Stop(EXIT_ERROR, "skill-everywhere not found (not beside ade-update, <repo>/bin or PATH); cannot check links")
     else:
         rows, _ = check_skills(script, repo, names) if names else ([], "")
         bad = [(s, tui, st) for s, tui, st in rows if classify(st) != "ok"]
@@ -613,7 +612,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="ade-update", description="Keep this machine's djbclark-ade checkout current.",
                                  epilog="Exit: 0 current, 10 behind/missing links (--check) or unresolved, 2 dirty tree, "
                                         "3 diverged (git's explicit non-fast-forward refusal), 4 git, network, "
-                                        "skill-everywhere or state-file error.")
+                                        "skill-everywhere (not found, failed or incomplete) or state-file error.")
     ap.add_argument("--repo", default=DEFAULT_REPO, help=f"the checkout (default {DEFAULT_REPO})")
     ap.add_argument("--check", action="store_true", help="report only; change nothing, exit 10 when behind or links missing")
     ap.add_argument("--json", action="store_true", help="print the report as JSON")

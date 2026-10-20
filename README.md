@@ -175,7 +175,7 @@ ls -l ~/.claude/commands ~/.claude/agents ~/.claude/hooks | grep -c djbclark-ade
    so that is the one place that says what changed and what is new.
 
 Exit codes: 0 current, 10 behind (`--check`) or a link unresolved (including one `skill-everywhere` leaves alone, on the first run), 2 dirty, 3 diverged (git's explicit
-non-fast-forward refusal only), 4 git, network, `skill-everywhere` or state-file failure (including a `--repo`
+non-fast-forward refusal only), 4 git, network, `skill-everywhere` (not found from the canonical checkout, failed or incomplete) or state-file failure (including a `--repo`
 that is not the top of its work tree, and any other `git pull --ff-only` failure such as a timeout or lost
 authentication). It becomes `ade update` in Phase 1 (proposal 4.4 item 9); a daily `--check` timer
 is queued in `docs/queue.md`.
