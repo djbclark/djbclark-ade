@@ -11,6 +11,9 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- `loadwatch` skill and `load-watch watcher set|show|clear|test`: one registered agent session (a Paseo
+  agent by `paseo send`, else relay.py) also hears every load incident, unexplained sustained load and
+  job-guard trip, and investigates; `set` replaces the old watcher and tells it (2026-10-20).
 - `docs/ade-everywhere-inventory-2026-10-20-stores.md`: Phase 0 slice 1, every installed agent
   session store classified (52 stores, backup plan per store, differences from proposal §6.1) (#16).
 - `CHANGELOG.md`, this file, and the rule that every pull request adds a line to it; README
@@ -45,6 +48,8 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `skill-everywhere`: the Hermes gateway nudge follows `hermes` wrappers to the real python; since `hermes`
+  became a `/bin/sh` wrapper it ran the snippet under sh, where `import os, sys` was ImageMagick (2026-10-20).
 - `tests/conftest.py` pins `ROUTE_AGENT_OMP_READY=0`, so the route_agent suite passes on a host with
   an omp login as it does on CI; the omp-ready roster has its own tests (queue item 6) (#17).
 - `acp-dispatch`: an unmeasured (stale) quota window is skipped instead of crashing the dispatch
