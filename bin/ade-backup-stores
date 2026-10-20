@@ -2,29 +2,46 @@
 """ade-backup-stores: one consistent copy of every agent session store, plus the Hermes JSONL export.
 
 ADE-everywhere Phase 0 (docs/ade-everywhere-proposal.md section 8 item 1), implementing section 3 of
-docs/ade-everywhere-inventory-2026-10-20-stores.md. Reads only: nothing in any source store is deleted
-or modified (SQLite sources are opened `mode=ro`).
+docs/ade-everywhere-inventory-2026-10-20-stores.md. Nothing in any source store is deleted or modified:
+SQLite sources are opened `mode=ro` (which can still create zero-length `-wal`/`-shm` files beside a quiet
+database; no data changes), and the live Hermes `state.db` is never handed to `hermes` (see item 4).
 
-  ade-backup-stores [--dest DIR] [--dry-run] [--only NAME[,NAME]] [--json]
+  ade-backup-stores [--dest DIR] [--dry-run] [--only NAME[,NAME]] [--json] [--check-schemas]
 
   1. single live SQLite files: the SQLite online backup API (`Connection.backup`), never a `cp` of a
      WAL database;
   2. per-session SQLite trees (Cursor, Antigravity): each db the same way, its sidecar (`meta.json`,
      `<uuid>.meta`) copied beside it;
-  3. file stores: `shutil.copytree` with an ignore function that drops every credential path and name
+  3. file stores: `shutil.copytree` with an ignore function that drops every credential file name and path
      (inventory section 5 item 5), the `credential-bak` vault, symlinks and non-regular files;
-  4. `hermes sessions export` (JSONL) into <dest>/hermes-export/. The export refuses a session above
+  4. `hermes sessions export` (JSONL) into <dest>/hermes-export/, run with HERMES_HOME pointing at a scratch
+     copy of the hermes-state backup (removed afterwards), so `hermes` never opens the live state.db and the
+     session ids, counts and exports all come from one snapshot. The export refuses a session above
      `sessions.max_export_messages` (20,000 by default) and the bulk form refuses everything when any
      session is over it: then each session under the limit is exported alone and the oversize ones are
      listed in the manifest (`hermes_export.truncated`); the hermes-state copy holds them whole.
+     ADE_BACKUP_HERMES names the `hermes` binary to run (default: `hermes` on PATH).
+
+What the tool guarantees about credentials: files and directories with a credential name or path (the
+exclusions in MANIFEST.json) are not copied; credential tables are scrubbed from the SQLite copies
+(manifest `scrubbed`: OpenCode's `credential`, `account`, `control_account`, `account_state` tables and
+`session_share.secret`; rows deleted, then `VACUUM` with `secure_delete`); and a schema guard turns any
+other table or column named like credential/account/auth/oauth/secret/token (counters such as
+`input_tokens` aside) into an error and drops that copy, so a tool update that adds one fails the run.
+`--check-schemas` runs the guard read-only on the live databases and prints table and column names only.
+Transcripts and other session content are copied as they are and can hold secrets pasted into them:
+treat a generation as secret-bearing.
 
 <dest>/MANIFEST.json records, per store, the source, destination, bytes, sha256 of each file produced,
-start and end time, the exclusions applied and the errors. A missing, locked or unreadable store is an
-error in the manifest, the run goes on, and the exit status is 1 at the end.
+start and end time, the exclusions applied, the scrubbed tables and the errors. A missing, locked or
+unreadable store is an error in the manifest, the run goes on, and the exit status is 1 at the end.
 
-Default dest: ~/.local/state/ade/backups/<UTC timestamp>/ (0700, files 0600). Refuses (exit 2) a dest
-inside a source store or inside a git repo. Exit: 0 clean, 1 at least one error, 2 refused or bad usage.
-Cursor `acp-sessions` and the handoffs `chains/` are pruned by something else, so those stores come first.
+Default dest: ~/.local/state/ade/backups/<UTC timestamp>/ (0700, files 0600). The generation is built in
+<dest>.part/ and renamed to <dest>/ at the end: a <dest>.part/ directory, or a generation without
+MANIFEST.json, is an interrupted run and incomplete. Refuses (exit 2) a dest that exists, that sits
+inside a source store or holds one, or that is inside a git repo. Exit: 0 clean, 1 at least one error,
+2 refused or bad usage. Cursor `acp-sessions` and the handoffs `chains/` are pruned by something else,
+so those stores come first.
 """
 import argparse
 import concurrent.futures
@@ -55,7 +72,7 @@ EXCLUDE_NAMES = [
     "acp_token.json", "daemon-keypair.json", "local-credential", "hyper.json", "providers.json",
     ".env", ".env.*", "jira-sites.json", "jira-tokens", "Cookies", "agent.db", "data.db",
     "mcp_config.json", "mcp.json", "opencode.json", "opencode.bak", "crushrc*",
-    "credential-bak",
+    "credential-bak", "mcp-auth.json",
 ]
 # The same list as home-relative paths (the files the inventory names, checked on the resolved path too).
 EXCLUDE_PATHS = [
@@ -68,6 +85,49 @@ EXCLUDE_PATHS = [
     ".gemini/config/mcp_config.json", ".config/crush/crushrc*", ".local/state/ade/credential-bak",
 ]
 OTHER_SKIPS = ["symlinks", "sockets and other non-regular files", "antigravity brain/*/.system_generated/worktrees"]
+
+# Credential tables scrubbed from the copy of a SQLite db (inventory section 5 item 5), per store name:
+# "delete" tables lose every row, "null" (table, column) pairs are set to NULL; then VACUUM with
+# secure_delete=ON so freed pages do not keep the bytes. A table or column that is absent is skipped.
+SCRUB = {
+    "opencode": {"delete": ["credential", "account", "control_account", "account_state"],
+                 "null": [("session_share", "secret")]},
+}
+# Schema guard: a table or column name matching this is a possible credential store ...
+CRED_RE = re.compile(r"credential|account|auth(?!or)|oauth|secret|token|password|passwd|api_?key|private_?key|bearer",
+                     re.I)
+# ... unless it is a token counter (`input_tokens`, `tokens_used`, `tokens`) ...
+COUNTER_RE = re.compile(
+    r"^(?:(?:input|output|cache|cached|creation|read|write|reasoning|total|prompt|completion|max|context|used|est|estimated)_?)*"
+    r"tokens(?:_?(?:input|output|cache|cached|creation|read|write|reasoning|total|prompt|completion|max|used|count|limit|in|out))*$",
+    re.I)
+# ... or listed here: (store glob, table glob, column glob or None for the table and all its columns, reason).
+# Each entry was reviewed on 2026-10-20 against the live schemas (`--check-schemas`, names only); none holds
+# a credential. A tool update that adds another matching name fails the run until someone reads it.
+ALLOW = [
+    # token usage metrics and budgets, not credentials
+    ("hermes-state", "messages", "token_count", "count of tokens in a message"),
+    ("zcode-db", "dwf_run", "spent_tokens", "tokens spent by a workflow run"),
+    ("zcode-db", "model_usage", "computed_total_tokens", "token usage counter"),
+    ("zcode-db", "model_usage", "provider_total_tokens", "token usage counter"),
+    ("zcode-db", "model_usage", "first_token_at", "timestamp of the first streamed token"),
+    ("zcode-db", "model_usage", "time_to_first_token_ms", "latency metric"),
+    ("zcode-db", "turn_usage", "computed_total_tokens", "token usage counter"),
+    ("zcode-db", "turn_usage", "first_token_at", "timestamp of the first streamed token"),
+    ("zcode-db", "turn_usage", "time_to_first_token_ms", "latency metric"),
+    ("zcode-db", "session_target", "token_budget", "token budget of a session target"),
+    ("codex-db", "thread_goals", "token_budget", "token budget of a thread goal"),
+    ("copilot-db", "assistant_usage_events", "inter_token_latency_ms", "latency metric"),
+    ("copilot-db", "assistant_usage_events", "time_to_first_token_ms", "latency metric"),
+    ("copilot-db", "assistant_usage_events", "token_details_json", "per-event token usage breakdown (a usage-event row)"),
+    # identifiers and job leases, not secrets
+    ("codex-db", "remote_control_enrollments", "account_id", "account identifier; the table has no secret column"),
+    ("codex-db", "threads", "creator_account_id", "account identifier of the thread creator"),
+    ("codex-db", "jobs", "ownership_token", "work-queue lease marker for a memories job"),
+    ("cline-db", "cron_runs", "claim_token", "work-queue lease marker for a cron run"),
+    ("cline-db", "schedules", "claim_token", "work-queue lease marker for a schedule"),
+    ("cline-db", "agenda_task_runs", "claim_token", "work-queue lease marker for a task run"),
+]
 
 
 def is_excluded_name(name):
@@ -174,18 +234,89 @@ def sha256_of(path):
     return h.hexdigest()
 
 
-def backup_sqlite(src, dst):
-    """Online backup of one SQLite db: a consistent copy while the writer lives."""
-    uri = "file:" + quote(os.path.realpath(src), safe="/") + "?mode=ro"
+class SchemaGuardError(Exception):
+    """A backed-up database holds a credential-looking table or column nobody has explained."""
+
+
+def ro_connect(path):
+    """A read-only connection (the URI keeps `?`, `#`, `%` and spaces in the path safe)."""
+    return sqlite3.connect("file:" + quote(os.path.realpath(path), safe="/") + "?mode=ro", uri=True, timeout=30)
+
+
+def schema_hits(con):
+    """(table, column) pairs whose names look like credentials; column None = the table's own name."""
+    hits = []
+    for table, kind in con.execute("SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view')").fetchall():
+        if CRED_RE.search(table) and not COUNTER_RE.match(table):
+            hits.append((table, None))
+        for col in con.execute(f'PRAGMA table_info("{table}")'):
+            if CRED_RE.search(col[1]) and not COUNTER_RE.match(col[1]):
+                hits.append((table, col[1]))
+    return sorted(hits, key=lambda h: (h[0], h[1] or ""))
+
+
+def explained(store_name, table, column):
+    """Why (table, column) may stay in a copy: it is scrubbed, or an ALLOW entry says why; else None."""
+    spec = SCRUB.get(store_name, {})
+    if table in spec.get("delete", []) or (table, column) in [tuple(x) for x in spec.get("null", [])]:
+        return "scrubbed"
+    for store_glob, table_glob, col_glob, reason in ALLOW:
+        if fnmatch.fnmatchcase(store_name, store_glob) and fnmatch.fnmatchcase(table, table_glob) \
+                and (col_glob is None or (column is not None and fnmatch.fnmatchcase(column, col_glob))):
+            return reason
+    return None
+
+
+def scrub_copy(path, spec):
+    """Delete the credential rows from the copy at path and VACUUM it; returns what was scrubbed."""
+    con = sqlite3.connect(str(path), isolation_level=None)
+    done = []
+    try:
+        con.execute("PRAGMA journal_mode=DELETE")
+        con.execute("PRAGMA secure_delete=ON")
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in spec.get("delete", []):
+            if table in tables:
+                con.execute(f'DELETE FROM "{table}"')
+                done.append(table)
+        for table, col in spec.get("null", []):
+            if table in tables and col in [c[1] for c in con.execute(f'PRAGMA table_info("{table}")')]:
+                con.execute(f'UPDATE "{table}" SET "{col}" = NULL')
+                done.append(f"{table}.{col}")
+        con.execute("VACUUM")
+    finally:
+        con.close()
+    return done
+
+
+def guard_copy(store_name, path):
+    """Raise SchemaGuardError when the copy at path has an unexplained credential-looking name."""
+    con = sqlite3.connect(f"file:{quote(str(path), safe='/')}?mode=ro", uri=True)
+    try:
+        bad = [h for h in schema_hits(con) if not explained(store_name, *h)]
+    finally:
+        con.close()
+    if bad:
+        names = ", ".join(t if c is None else f"{t}.{c}" for t, c in bad)
+        raise SchemaGuardError(f"credential-looking table/column name(s) not on the scrub list or allowlist: {names}")
+
+
+def backup_sqlite(src, dst, store_name):
+    """Online backup of one SQLite db: a consistent copy while the writer lives. The copy is scrubbed
+    (SCRUB) and schema-checked before it replaces dst; returns the scrubbed tables."""
     tmp = dst.with_name(dst.name + ".part")
     dst.parent.mkdir(parents=True, exist_ok=True)
-    source = sqlite3.connect(uri, uri=True, timeout=30)
+    source = ro_connect(src)
+    scrubbed = []
     try:
         target = sqlite3.connect(str(tmp))
         try:
             source.backup(target)
         finally:
             target.close()
+        if store_name in SCRUB:
+            scrubbed = scrub_copy(tmp, SCRUB[store_name])
+        guard_copy(store_name, tmp)
     except BaseException:
         for suffix in ("", "-wal", "-shm", "-journal"):
             Path(str(tmp) + suffix).unlink(missing_ok=True)
@@ -195,6 +326,7 @@ def backup_sqlite(src, dst):
     for suffix in ("-wal", "-shm", "-journal"):
         Path(str(tmp) + suffix).unlink(missing_ok=True)
     os.replace(tmp, dst)
+    return scrubbed
 
 
 class StoreRun:
@@ -210,6 +342,7 @@ class StoreRun:
         self.skipped_count = 0
         self.sources = []
         self.source_of = {}
+        self.scrubbed_of = {}
 
     def error(self, source, exc):
         msg = f"{type(exc).__name__}: {exc}"
@@ -252,7 +385,8 @@ def copy_file_store(store, run, excluder):
                 continue
             if src.is_dir():
                 try:
-                    shutil.copytree(src, dst, ignore=make_ignore(run, excluder), copy_function=shutil.copy2)
+                    shutil.copytree(src, dst, symlinks=True, ignore=make_ignore(run, excluder),
+                                    copy_function=shutil.copy2)
                 except shutil.Error as exc:
                     for item in exc.args[0]:
                         run.error(item[0], OSError(item[2]))
@@ -271,9 +405,9 @@ def copy_sqlite_store(store, run, excluder):
             if excluder.path(src):
                 run.skip(src, "excluded credential path")
                 continue
-            backup_sqlite(src, dst)
+            run.scrubbed_of[dst] = backup_sqlite(src, dst, store["name"])
             run.source_of[dst] = str(src)
-        except (OSError, sqlite3.Error) as exc:
+        except (OSError, sqlite3.Error, SchemaGuardError) as exc:
             run.error(src, exc)
 
 
@@ -302,9 +436,9 @@ def copy_tree_store(store, run, excluder):
             continue
         dst = run.out / src.relative_to(root)
         try:
-            backup_sqlite(src, dst)
+            run.scrubbed_of[dst] = backup_sqlite(src, dst, store["name"])
             run.source_of[dst] = str(src)
-        except (OSError, sqlite3.Error) as exc:
+        except (OSError, sqlite3.Error, SchemaGuardError) as exc:
             run.error(src, exc)
             continue
         for pat in store["sidecars"]:
@@ -317,12 +451,22 @@ def copy_tree_store(store, run, excluder):
 
 
 def seal_and_hash(run):
-    """Set 0700/0600 on everything produced and hash each file; returns (entries, bytes)."""
+    """Drop symlinks a race let into the copy, set 0700/0600 on everything produced and hash each file;
+    returns (entries, bytes)."""
     entries = []
     total = 0
     if not run.out.exists():
         return entries, total
     for dirpath, dirnames, filenames in os.walk(run.out):
+        for name in list(dirnames) + list(filenames):
+            link = Path(dirpath) / name
+            if link.is_symlink():
+                link.unlink()
+                run.skip(link, "symlink (appeared after the check)")
+                if name in dirnames:
+                    dirnames.remove(name)
+                else:
+                    filenames.remove(name)
         os.chmod(dirpath, 0o700)
         for fn in sorted(filenames):
             p = Path(dirpath) / fn
@@ -332,6 +476,8 @@ def seal_and_hash(run):
                 entry = {"path": str(p.relative_to(run.out.parent)), "bytes": size, "sha256": sha256_of(p)}
                 if p in run.source_of:
                     entry["source"] = run.source_of[p]
+                if run.scrubbed_of.get(p):
+                    entry["scrubbed"] = run.scrubbed_of[p]
                 entries.append(entry)
                 total += size
             except OSError as exc:
@@ -339,16 +485,18 @@ def seal_and_hash(run):
     return entries, total
 
 
-def run_store(store, dest, excluder):
-    run = StoreRun(store, dest / store["name"])
+def run_store(store, work, excluder, final):
+    """Copy one store into work/<name>; the manifest entry names it under final/<name>."""
+    run = StoreRun(store, work / store["name"])
     {"sqlite": copy_sqlite_store, "sqlite-tree": copy_tree_store, "files": copy_file_store}[store["kind"]](
         store, run, excluder)
     entries, total = seal_and_hash(run)
+    scrubbed = sorted({t for v in run.scrubbed_of.values() for t in v})
     return run, {
-        "store": store["name"], "kind": store["kind"], "sources": run.sources, "destination": str(run.out),
-        "bytes": total, "file_count": len(entries), "files": entries, "started": run.started, "ended": utcnow(),
-        "seconds": round(time.monotonic() - run.t0, 1), "skipped_count": run.skipped_count,
-        "skipped": run.skipped, "errors": run.errors,
+        "store": store["name"], "kind": store["kind"], "sources": run.sources,
+        "destination": str(final / store["name"]), "bytes": total, "file_count": len(entries), "files": entries,
+        "started": run.started, "ended": utcnow(), "seconds": round(time.monotonic() - run.t0, 1),
+        "skipped_count": run.skipped_count, "skipped": run.skipped, "scrubbed": scrubbed, "errors": run.errors,
     }
 
 
@@ -410,10 +558,21 @@ def refuse_reason(dest, stores):
             r = root.resolve()
             if dest == r or r in dest.parents:
                 return f"destination {dest} is inside the {store['name']} source store {r}"
+            if dest in r.parents:
+                return f"destination {dest} holds the {store['name']} source store {r}"
     for p in [dest, *dest.parents]:
         if (p / ".git").exists():
             return f"destination {dest} is inside the git repository {p}"
+    part = part_dir(dest)
+    for p in (dest, part):
+        if os.path.lexists(p):
+            return f"{p} already exists (--dest must name a new directory; a leftover .part is an interrupted run)"
     return None
+
+
+def part_dir(dest):
+    """Where the generation is built until it is complete."""
+    return dest.with_name(dest.name + ".part")
 
 
 def hermes_limit(home):
@@ -427,8 +586,7 @@ def hermes_limit(home):
 
 
 def hermes_session_counts(db_path):
-    uri = "file:" + quote(os.path.realpath(db_path), safe="/") + "?mode=ro"
-    con = sqlite3.connect(uri, uri=True, timeout=30)
+    con = ro_connect(db_path)
     try:
         ids = [r[0] for r in con.execute("SELECT id FROM sessions")]
         counts = dict(con.execute("SELECT session_id, COUNT(*) FROM messages GROUP BY session_id"))
@@ -437,51 +595,72 @@ def hermes_session_counts(db_path):
     return ids, counts
 
 
-def hermes_run(hermes, args, cwd):
-    proc = subprocess.run([hermes, "sessions", "export", *args], capture_output=True, text=True,
-                          timeout=HERMES_TIMEOUT, cwd=cwd)
+def hermes_run(hermes, args, cwd, env):
+    proc = subprocess.run([hermes, "sessions", "export", *args], capture_output=True, text=True, errors="replace",
+                          timeout=HERMES_TIMEOUT, cwd=cwd, env=env)
     return proc.returncode, (proc.stdout + proc.stderr).strip()
 
 
-def export_hermes(home, dest, selected_state_backup):
-    """The documented `hermes sessions export` JSONL, into <dest>/hermes-export/."""
-    out = dest / "hermes-export"
+def exported_count(text):
+    """N from "Exported N session(s) ...", or None."""
+    m = re.match(r"Exported (\d+)", text)
+    return int(m.group(1)) if m else None
+
+
+def make_hermes_scratch(home, scratch, state_backup, limit):
+    """A HERMES_HOME that holds only a copy of the hermes-state backup (taken here, scrubbed and guarded like
+    any other copy, when the backup step did not produce one) and a config.yaml with the export limit."""
+    scratch.mkdir(mode=0o700)
+    if state_backup and state_backup.is_file():
+        shutil.copyfile(state_backup, scratch / "state.db")
+    else:
+        backup_sqlite(home / ".hermes/state.db", scratch / "state.db", "hermes-state")
+    (scratch / "config.yaml").write_text(f"sessions:\n  max_export_messages: {limit}\n")
+
+
+def export_hermes(home, work, final, state_backup):
+    """The documented `hermes sessions export` JSONL, into <dest>/hermes-export/, read from a scratch copy."""
+    out = work / "hermes-export"
     run = StoreRun({"name": "hermes-export", "kind": "hermes-export"}, out)
     run.sources.append(str(home / ".hermes/state.db"))
     info = {"mode": None, "limit": hermes_limit(home), "truncated": False, "oversize": [], "failed": [],
-            "sessions_total": None, "sessions_exported": 0}
+            "sessions_total": None, "sessions_exported": 0, "snapshot": "scratch HERMES_HOME holding a copy of hermes-state"}
     hermes = os.environ.get("ADE_BACKUP_HERMES") or shutil.which("hermes")
     out.mkdir(parents=True, exist_ok=True)
+    scratch = work / ".hermes-scratch"
     if not hermes:
         run.error("hermes", FileNotFoundError("no hermes on PATH (set ADE_BACKUP_HERMES)"))
     else:
         try:
+            make_hermes_scratch(home, scratch, state_backup, info["limit"])
+            env = {**os.environ, "HERMES_HOME": str(scratch)}
             bulk = out / "hermes_sessions.jsonl"
-            rc, text = hermes_run(hermes, [str(bulk)], str(out))
-            if rc == 0 and bulk.is_file() and text.startswith("Exported"):
+            rc, text = hermes_run(hermes, [str(bulk)], str(out), env)
+            n = exported_count(text)
+            if rc == 0 and bulk.is_file() and n is not None:
                 info["mode"] = "bulk"
-                info["sessions_exported"] = int(re.match(r"Exported (\d+)", text).group(1))
-                info["sessions_total"] = info["sessions_exported"]
+                info["sessions_exported"] = info["sessions_total"] = n
             elif "more than" in text:
                 info["mode"] = "per-session"
-                per_session_export(hermes, home, out, info, run, selected_state_backup)
+                per_session_export(hermes, scratch, out, info, run, env)
             else:
                 run.error("hermes sessions export", RuntimeError(f"rc={rc}: {text[:300]}"))
-        except (OSError, subprocess.SubprocessError, sqlite3.Error) as exc:
+        except (OSError, subprocess.SubprocessError, sqlite3.Error, SchemaGuardError) as exc:
             run.error("hermes sessions export", exc)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
     info["truncated"] = bool(info["oversize"])
     entries, total = seal_and_hash(run)
     return run, {
-        "store": "hermes-export", "kind": "hermes-export", "sources": run.sources, "destination": str(out),
-        "bytes": total, "file_count": len(entries), "files": entries, "started": run.started, "ended": utcnow(),
-        "seconds": round(time.monotonic() - run.t0, 1), "skipped_count": 0, "skipped": [],
-        "errors": run.errors, "hermes_export": info,
+        "store": "hermes-export", "kind": "hermes-export", "sources": run.sources,
+        "destination": str(final / "hermes-export"), "bytes": total, "file_count": len(entries), "files": entries,
+        "started": run.started, "ended": utcnow(), "seconds": round(time.monotonic() - run.t0, 1),
+        "skipped_count": run.skipped_count, "skipped": run.skipped, "errors": run.errors, "hermes_export": info,
     }
 
 
-def per_session_export(hermes, home, out, info, run, state_backup):
-    db = state_backup if state_backup and state_backup.is_file() else home / ".hermes/state.db"
-    ids, counts = hermes_session_counts(db)
+def per_session_export(hermes, scratch, out, info, run, env):
+    ids, counts = hermes_session_counts(scratch / "state.db")
     info["sessions_total"] = len(ids)
     limit = info["limit"]
     todo = []
@@ -489,7 +668,7 @@ def per_session_export(hermes, home, out, info, run, state_backup):
         n = counts.get(sid, 0)
         if limit and n > limit:
             info["oversize"].append({"id": sid, "messages": n})
-        elif re.fullmatch(r"[A-Za-z0-9_.-]+", sid):
+        elif re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", sid):
             todo.append(sid)
         else:
             info["failed"].append({"id": sid, "error": "unsafe session id"})
@@ -499,10 +678,10 @@ def per_session_export(hermes, home, out, info, run, state_backup):
     def one(sid):
         path = target / f"{sid}.jsonl"
         try:
-            rc, text = hermes_run(hermes, [str(path), "--session-id", sid], str(out))
+            rc, text = hermes_run(hermes, [str(path), f"--session-id={sid}"], str(out), env)
         except (OSError, subprocess.SubprocessError) as exc:
             return sid, None, f"{type(exc).__name__}: {exc}"
-        if rc == 0 and path.is_file() and text.startswith("Exported"):
+        if rc == 0 and path.is_file() and exported_count(text) is not None:
             return sid, True, None
         return sid, False, text[:300]
 
@@ -536,15 +715,59 @@ def summary_line(entry):
             + (f", {errs} error(s)" if errs else ""))
 
 
+def check_schemas(stores):
+    """--check-schemas: the schema guard on the live databases, read-only; prints names only."""
+    problems = 0
+    for store in stores:
+        if store["kind"] == "sqlite":
+            dbs = list(store["files"])
+        elif store["kind"] == "sqlite-tree":
+            dbs = tree_dbs(store) if store["root"].is_dir() else []
+        else:
+            continue
+        for db in dbs:
+            if not db.is_file():
+                print(f"{store['name']}: {db}: missing")
+                continue
+            try:
+                con = ro_connect(db)
+                try:
+                    hits = schema_hits(con)
+                finally:
+                    con.close()
+            except (OSError, sqlite3.Error) as exc:
+                print(f"{store['name']}: {db}: ERROR {type(exc).__name__}: {exc}")
+                problems += 1
+                continue
+            for table, col in hits:
+                name = table if col is None else f"{table}.{col}"
+                why = explained(store["name"], table, col)
+                if not why:
+                    problems += 1
+                print(f"{store['name']}: {db.name}: {name}: {why or 'UNEXPLAINED'}")
+    print(f"schema check: {problems} unexplained credential-looking name(s)")
+    return 1 if problems else 0
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="ade-backup-stores", description=__doc__.split("\n\n")[0])
-    ap.add_argument("--dest", help="backup directory (default ~/.local/state/ade/backups/<UTC timestamp>/)")
+    old_umask = os.umask(0o077)
+    try:
+        return run_main(argv)
+    finally:
+        os.umask(old_umask)
+
+
+def run_main(argv):
+    ap = argparse.ArgumentParser(prog="ade-backup-stores", description=__doc__.split("\n\n")[0], epilog=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dest", help="new backup directory (default ~/.local/state/ade/backups/<UTC timestamp>/)")
     ap.add_argument("--dry-run", action="store_true", help="print what would be backed up; write nothing")
     ap.add_argument("--only", help="comma-separated store names (hermes-export is one)")
     ap.add_argument("--json", action="store_true", help="print a machine-readable summary on stdout")
+    ap.add_argument("--check-schemas", action="store_true",
+                    help="run the credential schema guard on the live databases (read-only, names only); write nothing")
     args = ap.parse_args(argv)
 
-    os.umask(0o077)
     home = Path(os.path.expanduser("~"))
     stores = build_stores(home)
     names = [s["name"] for s in stores] + ["hermes-export"]
@@ -553,13 +776,15 @@ def main(argv=None):
     if unknown:
         print(f"ade-backup-stores: unknown store(s): {', '.join(unknown)}", file=sys.stderr)
         return 2
+    selected = [s for s in stores if s["name"] in wanted]
+    if args.check_schemas:
+        return check_schemas(selected)
     dest = resolve_dest(args.dest)
     reason = refuse_reason(dest, stores)
     if reason:
         print(f"ade-backup-stores: refusing: {reason}", file=sys.stderr)
         return 2
     excluder = Excluder(home)
-    selected = [s for s in stores if s["name"] in wanted]
     say = (lambda *a: None) if args.json else print
 
     if args.dry_run:
@@ -578,17 +803,25 @@ def main(argv=None):
 
     started = utcnow()
     t0 = time.monotonic()
-    dest.mkdir(parents=True, exist_ok=True)
-    os.chmod(dest, 0o700)
+    work = part_dir(dest)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        work.mkdir(mode=0o700)
+    except FileExistsError:
+        print(f"ade-backup-stores: refusing: {work} already exists", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"ade-backup-stores: cannot create {work}: {exc}", file=sys.stderr)
+        return 2
     entries, errors = [], []
     for store in selected:
-        run, entry = run_store(store, dest, excluder)
+        run, entry = run_store(store, work, excluder, dest)
         entries.append(entry)
         errors.extend(entry["errors"])
         say(summary_line(entry))
     if "hermes-export" in wanted:
-        state_backup = dest / "hermes-state" / "state.db"
-        run, entry = export_hermes(home, dest, state_backup)
+        state_backup = work / "hermes-state" / "state.db"
+        run, entry = export_hermes(home, work, dest, state_backup)
         entries.append(entry)
         errors.extend(entry["errors"])
         info = entry["hermes_export"]
@@ -597,10 +830,19 @@ def main(argv=None):
     manifest = {
         "version": VERSION, "tool": "bin/ade-backup-stores", "host": socket.gethostname(), "dest": str(dest),
         "started": started, "ended": utcnow(), "seconds": round(time.monotonic() - t0, 1), "total_bytes": total,
-        "exclusions": {"names": EXCLUDE_NAMES, "paths": [f"~/{p}" for p in EXCLUDE_PATHS], "other": OTHER_SKIPS},
+        "exclusions": {"names": EXCLUDE_NAMES, "paths": [f"~/{p}" for p in EXCLUDE_PATHS], "other": OTHER_SKIPS,
+                       "scrubbed_tables": {k: v["delete"] + [f"{t}.{c}" for t, c in v["null"]]
+                                           for k, v in SCRUB.items()}},
         "errors": errors, "stores": entries,
     }
-    path = write_manifest(dest, manifest)
+    write_manifest(work, manifest)
+    try:
+        os.rename(work, dest)
+    except OSError as exc:
+        print(f"ade-backup-stores: could not rename {work} to {dest}: {exc}; the generation stays in {work}",
+              file=sys.stderr)
+        return 1
+    path = dest / "MANIFEST.json"
     say(f"total: {total} bytes in {sum(e['file_count'] for e in entries)} files, {len(errors)} error(s), manifest {path}")
     if args.json:
         print(json.dumps({"dest": str(dest), "manifest": str(path), "total_bytes": total, "errors": errors,
