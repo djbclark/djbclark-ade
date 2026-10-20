@@ -155,6 +155,29 @@ is composed by load-watch, so lower risk, but fix before it ever sends untrusted
 `skills/session-finder/relay.py` instead of its own `paseo send`, or copy relay.py's `--`, label and `paseo_gate`.
 One small Sonnet `code` slice with the fake `paseo`.
 
+## ADE-everywhere Phase 0, preserve and classify (djbclark, 2026-10-20; proposal section 8 item 1)
+
+1. **Backups: done 2026-10-20 (PR #24).** `bin/ade-backup-stores` takes the `.backup`-API copy of every live session
+   database, the per-session trees and file stores of inventory section 3, and the Hermes JSONL export, into
+   `~/.local/state/ade/backups/<UTC>/` with a `MANIFEST.json`. Nothing is deleted from any store. The first real
+   generation, `20261020T081802Z`, predates the credential scrub: it holds OpenCode's `credential` rows and 68 Cursor
+   `mcp-auth.json` files, so the operator scrubs or deletes it and takes a new one. Open: run it on a
+   schedule (no launchd job yet), and decide how long generations are kept; each is ~10 GB. A configured store that does not exist is `"status": "missing"` in the manifest and on
+   stderr, exit 0 (`--strict-stores`: exit 1); a Cursor session without any `meta.json` (14 of 101 on 2026-10-20) is
+   a `sidecar_missing` warning, store `ok`, an error only under `--strict-stores` (Codex review of PR #24, 2026-10-20;
+   relaxed on adversary round 13, since every real run would otherwise be `partial`); a `meta.json` that is a symlink,
+   excluded or gone during the copy is an error, store `partial`.
+   Adversary round 2 on PR #24 (LOW/INFO, queued): a trigger on a scrubbed OpenCode table could copy the
+   deleted values into another table on the copy (refuse or `DROP TRIGGER` on the copy, then count the scrubbed
+   values in the copy's bytes after `VACUUM`); the schema guard misses `authorization`, `cookie`, `jwt`,
+   `refresh`, `pwd`, `session_key`, `api-key` and exempts a table named `tokens` (apply the counter exemption to
+   numeric columns only); SQLite files inside file stores (copilot `session.db`, muse `cron.db`, grok
+   `session_search.sqlite`) get no guard at run time (route them through `backup_sqlite`); a killed run leaves an
+   unscrubbed `<stamp>.part` that nothing reports; `seal_and_hash` should open with `O_NOFOLLOW`; `hermes`
+   children should get `stdin=DEVNULL`. Operator: OpenCode's three API keys also sit in its transcript rows (317
+   occurrences in `part.data` and `session_message`), so every generation is secret-bearing; if one ever leaves
+   the Mac, rotate those keys.
+
 ## Keep every machine current, and a changelog (djbclark, 2026-10-20; proposal Q26, T8)
 
 djbclark, 2026-10-20: "We need a clear way to keep all of djbclark-ade up-to-date on new
