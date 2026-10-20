@@ -76,7 +76,7 @@ session-bearing item found (`fd … -x stat -f '%m %N' | sort -rn | head -1`) or
 | zcode | `~/.zcode/cli/setting.json` 2.1K, `cli/config.json` 4.1K, `v2/config.json` 8.3K; `v2/credentials.json` (credential, not opened); `cli/setting.json.bak-2026-10-18-mcp-trim` matched key patterns (count only, not opened) and was vaulted on 2026-10-20 (5.5); `cli/config.json.bak` matched none | json | ~15K | 2026-10-18 | config | themselves | copy, minus the 5.5 credential files | n/a | n/a | n/a |
 | Crush (ACP) | `~/.local/share/crush-acp/crush.db` 978,944 B + shm/wal; tables `sessions, messages, files, read_files, mcp_*` (the ACP instance: `CRUSH_GLOBAL_DATA` per `acp-run --list`) | sqlite (WAL) | 2.0M | 2026-10-14 13:37 (db), 2026-10-20 02:39 (shm) | canonical SQLite | third-party or none (6.1) | backup API | yes | none | none |
 | Crush (TUI) | `~/.config/crush/.crush/crush.db` 2,789,376 B + shm (live 2026-10-20 02:42)/wal | sqlite (WAL) | 2.8M | 2026-10-20 02:42 | canonical SQLite (second, default-XDG store) | none | backup API | yes | none | none |
-| Crush | `~/src/djbclark-ade/.crush` exists (repo-local instance; not opened); `~/.local/share/crush/` holds `crush.json`, `projects.json`, `providers.json` (563K catalog) and `hyper.json` (a Charm Hyper login: exclude or vault, 5.5) | mixed | 584K | 2026-10-19 | config / repo-local sessions db (`crush.db` + wal, WAL touched 2026-10-20) | n/a | `.crush/crush.db` via backup API (section 3 item 1); copy the json minus `hyper.json` | n/a | n/a | n/a |
+| Crush | `~/src/djbclark-ade/.crush` exists (repo-local instance; not opened); `~/.local/share/crush/` holds `crush.json`, `projects.json`, `providers.json` (563K catalog) and `hyper.json` (a Charm Hyper login: exclude or vault, 5.5) | mixed | 584K | 2026-10-19 | config / repo-local sessions db (`crush.db` + wal/shm, `-shm` touched 2026-10-20) | n/a | `.crush/crush.db` via backup API (section 3 item 1); copy the json minus `hyper.json` | n/a | n/a | n/a |
 | Grok | `~/.grok/sessions/<urlencoded-cwd>/<uuid>/{chat_history.jsonl, events.jsonl, updates.jsonl, summary.json, prompt_context.json, system_prompt.txt}`; `chat_history` keys `content,type` | jsonl per session + sidecars | 176M (`~/.grok`) | 2026-10-20 02:12 | canonical files | the jsonl | copy | in-tool (not verified) | none verified | none |
 | Grok | `~/.grok/worktrees.db` 40K WAL (`meta, worktrees`), `memory-v2/`, `memtrace/` (162 dirs), `config.toml` 953B | sqlite + files | within 176M | 2026-10-20 01:36 | config + memory/traces | n/a | copy / backup API | n/a | n/a | n/a |
 | Muse | `~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl` (newest 2026/10/04) + `session-index.db` 168K WAL (`rewind_catalog_*`, `sessions`) + `tui-history.jsonl` 10K | jsonl per session + sqlite rewind index | 53M | 2026-10-04 06:49 | canonical files plus derived index | the jsonl | copy + backup API for the index | in-tool (not verified) | none verified | none |
@@ -109,7 +109,7 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
 1. **Single canonical SQLite — `.backup` API copy each:**
    `~/.hermes/state.db`, `~/.local/share/opencode/opencode.db`, `~/.zcode/cli/db/db.sqlite`,
    `~/.local/share/crush-acp/crush.db`, `~/.config/crush/.crush/crush.db`, the repo-local
-   `~/src/djbclark-ade/.crush/crush.db` (0700 dir, gitignored, WAL touched 2026-10-20; row 79), Codex
+   `~/src/djbclark-ade/.crush/crush.db` (0700 dir, gitignored, `-shm` touched 2026-10-20; row 79), Codex
    `state_5.sqlite`/`logs_2.sqlite`/`memories_1.sqlite`/`goals_1.sqlite`, `~/.copilot/session-store.db`.
    Form: Python `sqlite3.connect(src).backup(sqlite3.connect(dest))` with both paths as arguments (the
    documented SQLite online backup; runs while the writer lives). Not the `sqlite3 <db> ".backup '<dest>'"`
@@ -134,7 +134,8 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
    rebuildable; `log/` and `exec/` are derived and may be skipped), Antigravity `brain/` under each of
    `~/.gemini/antigravity-cli` (299M, 265 dirs), `~/.gemini/antigravity-acp` (270M, 173 dirs) and `~/.gemini/antigravity`
    (IDE, 72M, 15 dirs): one dir per conversation db, holding `.user_uploaded/`, `.system_generated/logs/` and `scratch/`
-   (a `.backup` of the db alone drops ~641M of uploads, logs and artifacts), plus antigravity-cli `history.jsonl`,
+   (a `.backup` of the db alone drops ~641M of uploads, logs and artifacts; `.system_generated/worktrees/` inside them are
+   git checkouts of the item 5 duplicate class and may be skipped), plus antigravity-cli `history.jsonl`,
    `annotations/`, `implicit/`, `jetbox_summaries_proto.pb` and the IDE's `agyhub_summaries_proto.pb` and
    `antigravity_state.pbtxt` (small; copy rather than classify), `~/hermes-memory`, `~/.local/state/handoffs` (whole dir).
    **Items 1-3 name the canonical transcript stores and their sidecars; every other row (indexes, config, app state)
@@ -204,7 +205,7 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
    copies), `~/.cursor/mcp.json` and `mcp.json.bak*`, `~/.gemini/config/mcp_config.json` and `mcp_config.json.bak*`;
    On 2026-10-20 (djbclark, /steps item 5) the 13 dated `.bak` copies were moved to `~/.local/state/ade/credential-bak/`
    (0700, files 0600, `MANIFEST-2026-10-20.txt` with the original paths; delete after 2026-11-19), joined later that day
-   by `~/.zcode/cli/setting.json.bak-2026-10-18-mcp-trim` (14 files; it matched key patterns by count); `opencode.bak` is a
+   by `~/.zcode/cli/setting.json.bak-2026-10-18-mcp-trim` (14 copies plus the manifest; it matched key patterns by count); `opencode.bak` is a
    directory from 2026-07-30 and stays excluded. Slice 2 excludes that vault directory too.
    and `~/.config/crush/crushrc*` (the SIPB provider key, tools/acp-run/README.md; two `.bak` copies).
 6. **Exporter claims** for tools other than OpenCode/Hermes/Gemini rest on the proposal's §6.1
