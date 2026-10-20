@@ -709,12 +709,16 @@ def test_remote_scan_trusts_live_tips_over_a_stale_tracking_ref(tmp_path):
 
 
 def test_worktrees_with_different_worktree_scoped_origins_are_judged_by_their_own(tmp_path):
-    """Codex pass 9 (4324741588): the remote cache was keyed by the shared git dir only."""
+    """Codex pass 9 (4324741588): the remote cache was keyed by the shared git dir only. Each worktree has
+    only its own worktree-scoped url (git uses the FIRST url in config order, so a worktree url under a
+    local one is never fetched from: scan-fix-11)."""
     mod = load()
     roots, work, origin = make_pushed_checkout(tmp_path)
     empty = tmp_path / "empty.git"
     git(tmp_path, "init", "--bare", "-b", "main", str(empty))
     git(work, "config", "extensions.worktreeConfig", "true")
+    git(work, "config", "--worktree", "remote.origin.url", str(origin))
+    git(work, "config", "--unset-all", "remote.origin.url")  # the local file keeps no url
     wt = roots / "wt"
     git(work, "worktree", "add", "-b", "side", str(wt))
     git(wt, "config", "--worktree", "remote.origin.url", str(empty))
@@ -726,6 +730,76 @@ def test_worktrees_with_different_worktree_scoped_origins_are_judged_by_their_ow
         assert recs["work"]["verdict"] == "clean and pushed", recs["work"]
         assert recs["wt"]["verdict"] == "unpushed commits", recs["wt"]
         assert recs["wt"]["local_only_commits"] > 0 and "origin unreachable" not in recs["wt"]["flags"]
+
+
+def push_from_another_clone(tmp_path: Path, origin: Path, *branches: str, name: str = "other") -> None:
+    """Another clone of origin pushes one more commit to each branch (this checkout never fetches it)."""
+    other = tmp_path / name
+    git(tmp_path, "clone", str(origin), str(other))
+    for b in branches:
+        git(other, "checkout", b)
+        commit_file(other, f"{name}-{b}.txt")
+        git(other, "push", "origin", b)
+
+
+def test_remote_scan_of_a_clone_that_is_behind_origin_is_clean_and_pushed(tmp_path):
+    """Adversary round 15, 1 (L2): 5 commits pushed, someone else pushes 1 more to origin, not fetched here:
+    the live tip's objects are missing, the stale tracking ref still excludes the 5."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    for i in range(4):
+        commit_file(work, f"c{i}.txt")
+    git(work, "push", "origin", "main")
+    push_from_another_clone(tmp_path, origin, "main")
+    c = scan_one(mod, roots, remote=True)
+    assert c["verdict"] == "clean and pushed", c["flags"]
+    assert c["local_only_commits"] == 0 and c["local_only_branches"] == []
+    assert c["flags"] == ["origin tips not fetched: 1"], c["flags"]
+    mod._remote_cache.clear()
+    assert "origin tips not fetched: 1" not in scan_one(mod, roots)["flags"]  # no --remote: no live tips
+
+
+def test_remote_scan_of_a_clone_behind_origin_on_two_branches_still_counts_the_deleted_one(tmp_path):
+    """Adversary round 15, 1 (probe20): origin is ahead on main and side; `gone` was deleted on origin."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    for b in ("side", "gone"):
+        git(work, "checkout", "-b", b, "main")
+        commit_file(work, f"{b}.txt")
+        git(work, "push", "origin", b)
+    git(work, "checkout", "main")
+    git(origin, "branch", "-D", "gone")
+    push_from_another_clone(tmp_path, origin, "main", "side")
+    c = scan_one(mod, roots, remote=True)
+    assert c["local_only_branches"] == [{"branch": "gone", "count": 1}], c
+    assert c["flags"][-1] == "origin tips not fetched: 2" and "local-only commits: gone 1" in c["flags"]
+    assert c["verdict"] == "unpushed commits"
+
+
+def test_remote_scan_asks_the_first_origin_url_like_git_fetch(tmp_path):
+    """Adversary round 15, 2 (L5): two urls in one file, git fetches from the first (a: has main; b: empty)."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    empty = tmp_path / "empty.git"
+    git(tmp_path, "init", "--bare", "-b", "main", str(empty))
+    git(work, "config", "--add", "remote.origin.url", str(empty))
+    assert git(work, "config", "--get", "remote.origin.url").strip() == str(empty)  # the last, not queried
+    assert git(work, "ls-remote", "--heads", "origin").split()[1] == "refs/heads/main"  # git fetches the first
+    c = scan_one(mod, roots, remote=True)
+    assert c["verdict"] == "clean and pushed" and c["local_only_commits"] == 0, c["flags"]
+
+
+def test_remote_scan_resolves_a_bare_relative_origin_url_against_the_checkout(tmp_path):
+    """Adversary round 15, 3: `sib.git` (no `./`) used to resolve against the neutral cwd: origin unreachable."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    git(tmp_path, "clone", "--bare", str(origin), str(work / "sib.git"))
+    (work / ".git" / "info" / "exclude").write_text("sib.git/\n")
+    git(work, "remote", "set-url", "origin", "sib.git")
+    git(work, "commit", "--allow-empty", "-m", "local only")  # not on sib.git
+    c = scan_one(mod, roots, remote=True)
+    assert "origin unreachable" not in c["flags"], c["flags"]
+    assert c["verdict"] == "unpushed commits" and c["local_only_commits"] == 1, c
 
 
 def test_a_head_naming_no_ref_while_refs_exist_is_not_unborn(tmp_path):
