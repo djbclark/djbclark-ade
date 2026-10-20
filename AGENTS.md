@@ -123,3 +123,40 @@ re-read whole files.
 After big code changes, refresh the graph with `graft build` (deterministic,
 no API key, $0).
 <!-- graft:end -->
+
+## Code review (what a reviewer checks here)
+
+Readers as of 2026-10-20: Codex (`@codex review`; its automatic review on PR
+open is blocked by the same environment-catalog bug as task mentions), Cursor's
+Security Agent and Approval Agent checks, and the `adversary` sub-agent. A
+pull request here is expected to meet these; flag any it misses.
+
+1. **The PR body quotes the adversary's verdict line** (`APPROVE`, `APPROVE,
+   no findings` or `BLOCK ...`) together with the head SHA it reviewed. Flag
+   the PR if the quote is missing, says BLOCK, or names a SHA other than the
+   PR's current head. Whoever merges uses `gh pr merge --squash
+   --match-head-commit <reviewed sha>`, so the head reviewed is the head
+   merged.
+2. **No exit status or result through a pipe**: `cmd > out.log 2>&1; echo
+   "rc=$?" > out.rc`, never `cmd | x; $?`. Local test runs go through the
+   operator's `bg` wrapper; CI runs `pytest` directly.
+3. **Secrets only via `sudo-secretspec run`**: a key never appears in argv, a
+   log, a tracked file or a test fixture. The one place a key is written is a
+   third-party tool's own credential store (`bin/zcode-key-auth`); presence
+   is proved by length or hash, never by printing the value.
+4. **`subprocess` gets argv lists, never `shell=True`** (sole exception:
+   acp-run's `--verify`, an operator-supplied command). Where a shell string
+   is unavoidable (launchd runner scripts, text typed into a pane, printed
+   resume and rearm hints) every interpolated value goes through
+   `shlex.quote` or `shlex.join`.
+5. **macOS and Linux both**: BSD-only calls (`sysctl kern.boottime`, bare
+   `sed`) have a Linux path or use the GNU `g*` tool; CI runs `pytest` on
+   both.
+6. **Records and state files change atomically** (temp file beside, then
+   `os.replace`), and every new record field is read with `.get` so older
+   records still load.
+7. **Dates, not "now"**: a new fact in a doc carries its snapshot date; a
+   claim about behaviour matches the code in the same PR (standing order 4).
+8. **Docs move with the code**: a flag, exit code or subcommand added or
+   changed appears in the tool's usage text and in the doc that lists it
+   (`README.md` roster, `docs/*.md`, `skills/*/SKILL.md`).
