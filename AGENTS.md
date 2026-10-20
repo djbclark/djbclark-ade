@@ -171,4 +171,12 @@ pull request here is expected to meet these; flag any it misses.
    and read every one). GitHub re-anchors `commit_id` to the newest head when
    the line is unchanged, so `commit_id` alone cannot tell old from new. A
    waiter that filtered by a hard-coded timestamp missed two findings on
-   PR 10 (2026-10-20) and the PR merged past them.
+   PR 10 (2026-10-20) and the PR merged past them. The state marker's exact
+   form (2026-10-20): `<!-- codex-review-state:v1 {"code_review":
+   {"commit_sha":…,"status":"completed",…},"security_review":{…}} -->` on
+   the comment that also carries `<!-- codex-pull-request-review-summary -->`;
+   that comment is posted at request time and edited in place, so match the
+   marker with its `:v1` suffix and read `code_review.commit_sha`, never the
+   comment's `created_at`. Each inline finding ends with
+   `<!-- codex-code-review-finding:v1 -->`. A waiter whose regex lacked the
+   `:v1` suffix saw no state on PR 12 and ran its full 30 min.
