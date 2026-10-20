@@ -919,7 +919,7 @@ def test_scan_doc_generator_code_spans_survive_backticks():
     text = mod.render(scan_text)
     for span in ("`` c`h ``", "`` r`eport.md ``", "`` u`n.txt ``", "`` b`r ``"):
         assert span in text, span
-    assert "`` git -C /p/c`o push -u origin b`r `` or " in text
+    assert "`` git -C '/p/c`o' push -u origin 'b`r' `` or " in text  # shell-quoted since round 8 on PR 27
 
 
 def doc_scan(checkouts, tasks=(), **summary):
@@ -1029,3 +1029,15 @@ def test_a_failed_reference_search_is_scan_incomplete_not_unique_or_scratch(tmp_
     out = json.loads(p.stdout)
     assert out["bigteam"]["tasks"][0]["verdict"] == "scan incomplete: reference search rc=2"
     assert out["summary"]["bigteam"]["incomplete"] == 1
+
+
+def test_capture_plan_commands_shell_quote_paths_and_branch_names():
+    """Adversary round 8 on PR 27: a branch or path shaped like a shell expansion must not run when pasted."""
+    mod = load_doc()
+    evil = doc_checkout("/p/evil dir", flags=["unpushed commits", "local-only commits: side$(touch${IFS}PWNED) 1"],
+                        verdict="unpushed commits", local_only_commits=1,
+                        local_only_branches=[{"branch": "side$(touch${IFS}PWNED)", "count": 1}])
+    rows = section_3_2(mod.render(doc_scan([evil]))).splitlines()
+    row = next(r for r in rows if r.startswith("| /p/evil dir ") or r.startswith("| /p/evil\\ dir "))
+    assert "git -C '/p/evil dir' push origin 'side$(touch${IFS}PWNED)'" in row.replace("\\$", "$").replace("\\{", "{").replace("\\}", "}").replace("\\(", "(").replace("\\)", ")")
+    assert "push origin side$(touch" not in row

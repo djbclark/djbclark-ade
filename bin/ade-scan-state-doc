@@ -18,6 +18,7 @@ written to a temp file beside it and moved into place, so a failed run leaves OU
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -52,6 +53,13 @@ def esc(value, in_code=False):
     if not in_code:
         text = text.replace("`", "\\`")
     return " ".join(text.split("\n"))
+
+
+def shcode(fmt, *values):
+    """A code span holding a shell command: every value is `shlex.quote`d before `code()` escapes it for markdown,
+    so a checkout path or branch name shaped like `side$(touch x)` cannot run anything when the cell is pasted
+    (adversary round 8 on PR 27, 2026-10-20)."""
+    return code(fmt, *[shlex.quote(str(v)) for v in values])
 
 
 def code(fmt, *values):
@@ -334,14 +342,14 @@ def render(d):
         elif "no origin remote" in c["flags"]:
             covered_by_bundle = True
             what.append(f"all {c['ahead_of_origin']} commits (no remote)")
-            cmd.append(code("git -C {} bundle create ~/ops/site-private/bundles/{}.bundle --all", raw_p, name)
+            cmd.append(shcode("git -C {} bundle create ~/ops/site-private/bundles/{}.bundle --all", raw_p, name)
                        + " or add a remote and `git push -u origin <branch>`")
             need = "**yes**: only copy; hosting or bundle destination"
         elif ("orphan branch" in c["flags"] or "unpushed commits" in c["flags"]) and head_ahead:
             head_row = True
             what.append(f"{head_ahead} commit(s) on {code('{}', c['branch'])}")
-            cmd.append(code("git -C {} push -u origin {}", raw_p, c["branch"]) + " or "
-                       + code("git -C {} bundle create <DEST>/{}-{}.bundle {}", raw_p, name,
+            cmd.append(shcode("git -C {} push -u origin {}", raw_p, c["branch"]) + " or "
+                       + shcode("git -C {} bundle create <DEST>/{}-{}.bundle {}", raw_p, name,
                               c["branch"].replace("/", "_"), c["branch"]))
             need = "yes: pushing a branch publishes it; pick push or bundle"
         if local_n and not covered_by_bundle:
@@ -356,9 +364,9 @@ def render(d):
                              else f"{local_n} local-only commits on {names}") + tail)
             else:
                 what.append(f"{local_n} local-only commits (branches not itemised)" + tail)
-            lo_cmd = [code("git -C {} push origin {}", raw_p, b["branch"])
+            lo_cmd = [shcode("git -C {} push origin {}", raw_p, b["branch"])
                       for b in others if b["branch"] != "HEAD"]
-            lo_cmd.append(code("git -C {} bundle create <DEST>/{}-local-only.bundle --all", raw_p, name))
+            lo_cmd.append(shcode("git -C {} bundle create <DEST>/{}-local-only.bundle --all", raw_p, name))
             cmd.append(" or ".join(lo_cmd) if len(lo_cmd) == 1 else "; ".join(lo_cmd[:-1]) + " or " + lo_cmd[-1])
             need = need if need.startswith(("yes", "**yes")) else "yes: pushing a branch publishes it; pick push or bundle"
         if modified:
@@ -367,11 +375,11 @@ def render(d):
                 cmd.append("same modified files as the primary checkout (cow copy; other agents' edits): "
                            "preserved there")
             else:
-                cmd.append(code("git -C {} diff > <DEST>/{}-modified.patch", raw_p, name))
+                cmd.append(shcode("git -C {} diff > <DEST>/{}-modified.patch", raw_p, name))
                 need = need if need != "no" else "yes: decide whether they are work"
         if stashes:
             what.append(f"{stashes} stash")
-            cmd.append(code("git -C {} stash show -p stash@{{0}} > <DEST>/{}-stash0.patch", raw_p, name))
+            cmd.append(shcode("git -C {} stash show -p stash@{{0}} > <DEST>/{}-stash0.patch", raw_p, name))
         if real_untr > 0:
             shared = "djbclark-ade" in c["path"] or "forgejo-ci-2026-10" in c["path"]
             what.append(f"{real_untr} untracked ({', '.join(code('{}', u) for u in untr[:3])}"
