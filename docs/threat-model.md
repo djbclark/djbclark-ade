@@ -74,8 +74,10 @@ What an attacker would want, in order of damage:
    item 13). The one deliberate shell path; the string is whatever the caller supplies.
 4. **Load gate.** Today `acp-dispatch` gates on `machine_overloaded()` (`os.getloadavg`, wait capped by
    `ACP_DISPATCH_GATE_MAX`, default 900 s, then starts anyway), and since PR 7 (merged 2026-10-20, 776ecda)
-   on `load-watch admit`, whose stdout line (`admit ok ...` exit 0, `admit hot ...` exit 75) the dispatcher
-   parses; unreadable output does not read as admission.
+   on `load-watch admit --wait N --json`, whose exit 75 is the only refusal. The gate fails open by design: a
+   missing or crashed load-watch, a timeout, any other exit, or exit 0 with output it cannot parse starts the
+   slice anyway with a stderr warning and `load_gate.error` in the record (`bin/acp-dispatch` `load_gate`),
+   and exit 0 is trusted over the JSON status (`docs/queue.md` item 3c).
 5. **PR bodies, review comments and issue text** written by agents or third parties, which other agents
    and reviewers read as instructions.
 6. **Mentions**: `@codex review`, `@cursor` on a comment (`docs/queue.md`). Whether a third party's
@@ -240,7 +242,7 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   capped at 3 attempts and gated on live pool headroom.
 * **Gap.** The overload gate starts the slice anyway after the cap. PR 7's `admit` (merged 2026-10-20) adds
   admission with stagger and pending-runner accounting before that gate; the overload hold itself is still
-  outside the deferred deadline (`docs/queue.md` item 3d). A wave of dispatches overloaded the Mac on
+  outside the deferred deadline (`docs/queue.md` item 3d), and the `admit` gate fails open (entry point 4). A wave of dispatches overloaded the Mac on
   2026-10-12, before either existed.
 
 ## 5. Out of scope and accepted risks
