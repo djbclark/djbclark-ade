@@ -422,14 +422,16 @@ def render(d):
             # the parse matches git's gitfile reader (adversary round 32): the first line must read `gitdir: <path>`
             # (anything else is `false`), a missing final newline is accepted (`read` returns 1 at EOF, `$l` is
             # set), a CRLF is stripped; every failure prints a message and leaves a nonzero status. `-C "$g" ... .`
-            # archives the directory's contents without gtar's "Removing leading ../" when commondir is `../..`
+            # archives the directory's contents without gtar's "Removing leading ../" when commondir is `../..`.
+            # Only a git directory is archived (`HEAD` in it, `objects` in the common one; git's own test): a
+            # `.git` file naming `/` or a home directory must not make the paste copy the disk (round 33)
             gitdir = shcode("if [ -f {}/.git ]; then {{ {{ IFS= read -r l || [ -n \"$l\" ]; }} < {}/.git "
                             "&& case \"$l\" in \"gitdir: \"*) g=${{l#gitdir: }}; g=${{g%$'\\r'}} ;; *) false ;; esac "
-                            "&& case \"$g\" in /*) ;; *) g={}/$g ;; esac "
-                            "&& \"$GTAR\" -C \"$g\" -cf <DEST>/{} . "
+                            "&& [ -n \"$g\" ] && case \"$g\" in /*) ;; *) g={}/$g ;; esac "
+                            "&& [ -f \"$g/HEAD\" ] && \"$GTAR\" -C \"$g\" -cf <DEST>/{} . "
                             "&& if [ -f \"$g/commondir\" ]; then {{ IFS= read -r c || [ -n \"$c\" ]; }} < \"$g/commondir\" "
                             "&& c=${{c%$'\\r'}} && case \"$c\" in /*) ;; *) c=\"$g/$c\" ;; esac "
-                            "&& \"$GTAR\" -C \"$c\" -cf <DEST>/{} .; fi; }} "
+                            "&& [ -d \"$c/objects\" ] && \"$GTAR\" -C \"$c\" -cf <DEST>/{} .; fi; }} "
                             "|| {{ echo 'gitdir capture FAILED' >&2; false; }}; fi",
                             raw_p, raw_p, raw_p, f"{ck}/gitdir.tar", f"{ck}/commondir.tar")
             w(f"| {p} | counts unknown ({esc(c['verdict'])}) | re-scan once the cause is fixed, or archive the whole "

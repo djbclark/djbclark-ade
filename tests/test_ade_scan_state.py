@@ -1216,8 +1216,9 @@ def test_doc_generator_survives_skipped_and_incomplete_records():
         # Codex pass 26: a `.git` file's target directory and its common directory are archived too
         assert f'{{ IFS= read -r l || [ -n "$l" ]; }} < {path_}/.git && case "$l" in "gitdir: "*) g=${{l#gitdir: }}' in row
         assert f"g={path_}/$g" in row and "gitdir capture FAILED" in row  # adversary round 32: git's gitfile rules, loud failure
-        assert f'"$GTAR" -C "$g" -cf <DEST>/checkouts/abs{path_}/gitdir.tar .' in row
-        assert f'"$GTAR" -C "$c" -cf <DEST>/checkouts/abs{path_}/commondir.tar .' in row and "$g/commondir" in row
+        assert f'[ -f "$g/HEAD" ] && "$GTAR" -C "$g" -cf <DEST>/checkouts/abs{path_}/gitdir.tar .' in row
+        assert f'[ -d "$c/objects" ] && "$GTAR" -C "$c" -cf <DEST>/checkouts/abs{path_}/commondir.tar .' in row
+        assert '&& [ -n "$g" ] && case "$g" in /*)' in row and "$g/commondir" in row  # round 33: a git directory only
     assert "is listed with a whole-directory archive" in section_3_2(text)
     assert "t-incomplete" in text.split("### 1.3")[1].split("## 2.")[0]
     assert "reference search failed" in text and "never `unique`, `mixed` or `scratch`" in text
