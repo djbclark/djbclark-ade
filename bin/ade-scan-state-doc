@@ -434,13 +434,9 @@ def render(d):
         what, cmd, need = [], [], "no"
         head_row = False
         covered_by_bundle = False
-        if p.endswith("/one-offs/Hermes"):
-            covered_by_bundle = True
-            what.append(f"{c['ahead_of_origin']} commits on branch `Hermes` (no remote)")
-            cmd.append("same repo as `~/src/one-offs`: its `--all` bundle (the `~/src/one-offs` row below) includes "
-                       "branch `Hermes`")
-            need = "**yes**: see `~/src/one-offs`"
-        elif "no origin remote" in c["flags"]:
+        # no rule keyed on a path name: a checkout called `one-offs/Hermes` used to get "see `~/src/one-offs`" and no
+        # command of its own, whatever repository it was (adversary round 30 on PR 27)
+        if "no origin remote" in c["flags"]:
             covered_by_bundle = True
             what.append(f"all {c['ahead_of_origin']} commits (no remote)")
             bd = "~/ops/site-private/bundles/" + ck.removeprefix("checkouts/")

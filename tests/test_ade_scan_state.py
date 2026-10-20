@@ -2161,6 +2161,18 @@ def test_a_cow_pasture_gets_its_own_patch_and_archive_rows():
         assert "diff --binary > <DEST>/checkouts/abs" in row and "untracked.tar" in row
 
 
+def test_a_checkout_named_one_offs_hermes_gets_its_own_bundle_row():
+    """Adversary round 30 on PR 27: a path ending in `/one-offs/Hermes` used to get "see `~/src/one-offs`" and no
+    command, whatever repository it was; its unpushed commits had no capture command."""
+    mod = load_doc()
+    co = doc_checkout("/srv/other/one-offs/Hermes", flags=["orphan branch", "no origin remote"], verdict="orphan branch",
+                      ahead_of_origin=5, unpushed=5, on_origin=False)
+    rows = [r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith("| /srv/other/one-offs/Hermes ")]
+    assert len(rows) == 1
+    assert "see `~/src/one-offs`" not in rows[0] and "branch `Hermes`" not in rows[0]
+    assert "bundle create" in rows[0] and "--all" in rows[0] and "all 5 commits (no remote)" in rows[0]
+
+
 def test_stash_count_treats_only_a_missing_ref_as_zero(monkeypatch, tmp_path):
     """Codex pass 24 on PR 27: on the reftable path every nonzero `rev-parse --verify refs/stash` read as no stash."""
     mod = load()
