@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import subprocess
 import textwrap
+import time
 import unittest
 from pathlib import Path
 from typing import override
@@ -119,10 +120,19 @@ class TestLoadGateDegrades(LoadGate):
 
 class TestLoadGateScrubsTestHooks(LoadGate):
     def test_lw_hooks_never_reach_load_watch(self):
-        env = self.gate_env(0, OK, LW_FAKE_LOAD1="0", LW_ADMIT_POLL_S="0", LW_ADMIT_STAGGER_S="0,0")
+        env = self.gate_env(0, OK, LW_FAKE_LOAD1="0", LW_ADMIT_POLL_S="0", LW_ADMIT_STAGGER_S="0,0",
+                            LW_LOAD_PER_CORE="abc", LW_STATE_DIR=str(self.tmp / "lw-state"))
         self.assertEqual(self.dispatch("--no-model-check", env=env).returncode, 0)
         seen = Path(str(self.lw_args) + ".env")
         self.assertTrue(not seen.exists() or seen.read_text() == "", seen.read_text() if seen.exists() else "")
+
+    def test_a_bad_lw_setting_cannot_crash_the_real_load_watch(self):
+        # N4: LW_LOAD_PER_CORE=abc made load-watch die at import (exit 1), which the gate read as "warn and start"
+        real = str(Path(__file__).resolve().parent.parent / "bin" / "load-watch")
+        env = self.gate_env(0, OK, ACP_DISPATCH_LOAD_WATCH=real, LW_LOAD_PER_CORE="abc", LW_FAKE_LOAD1="80")
+        r = self.dispatch("--no-model-check", "--load-wait", "0", env=env)
+        self.assertNotIn("admit exited", r.stderr)               # it ran and answered: 0 (cool) or 75 (hot host)
+        self.assertIn(r.returncode, (0, 75), r.stderr + r.stdout)
 
 
 class TestLoadGateBeforeQuotaChecks(LoadGate):
@@ -237,6 +247,82 @@ class TestLoadGateDetachNoWait(LoadGate):
         self.assertEqual(rec["load_gate"], {"load1": 2.4, "per_core": 0.3, "waited_s": 12})
         self.assertFalse(rec["load_gate_pending"])
         self.assertTrue(rec.get("pid"))                                  # the agent really ran
+
+
+class TestPendingRunnersHoldTheCap(LoadGate):
+    """Re-review N1: a runner waiting for the load has no pid; it must count as in flight however long it waits."""
+
+    def plant(self, name: str, **fields: object) -> None:
+        jobs = self.tmp / "state" / "other-task" / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        row = self.busy_row(name=name, **fields)
+        row.update({k: v for k, v in fields.items()})
+        (jobs / f"{name}.json").write_text(json.dumps(row))
+
+    def test_pending_record_older_than_the_spawn_grace_counts_against_the_reservation(self):
+        self.plant("waiting", pid=None, pid_start=None, started=time.time() - 2000, load_gate_pending=True)
+        r = self.dispatch("--no-model-check", "--no-preflight", env=self.snap_codex(70.0))
+        self.assertEqual(r.returncode, 5, r.stderr + r.stdout)
+        self.assertIn("class=inflight", r.stdout)
+        self.assertIn("waiting", r.stdout)
+
+    def test_a_pid_less_record_that_is_not_pending_stops_counting_after_the_grace(self):
+        self.plant("stale", pid=None, pid_start=None, started=time.time() - 2000)
+        r = self.dispatch("--no-model-check", "--no-preflight", env=self.snap_codex(70.0))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+
+    def deferred(self, **extra: str) -> str:
+        r = self.dispatch("--no-model-check", "--no-preflight", "--detach", "--no-wait",
+                          env=self.gate_env(0, OK, ACP_DISPATCH_INFLIGHT="codex=1", **extra))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        return str(self.out / "jobs" / "s1.json")
+
+    def test_runner_refuses_when_the_cap_filled_during_the_wait(self):
+        path = self.deferred()
+        self.plant("started-meanwhile", started=time.time())                 # running, has a pid
+        r = run(["execute", path], env={**self.base_env(), **self.gate_env(0, OK, ACP_DISPATCH_INFLIGHT="codex=1")})
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        rec = self.record()
+        self.assertEqual((rec["status"], rec["unavailable_class"], rec["exit"]), ("unavailable", "inflight", 5))
+        self.assertFalse(rec["load_gate_pending"])
+        self.assertFalse((self.out / "s1-report.md").exists())               # nothing started
+        f = run(["finalize", path, "--exit", "5"], env=self.base_env())
+        self.assertEqual(f.returncode, 5, f.stdout + f.stderr)
+        self.assertEqual(self.record()["status"], "unavailable")
+
+    def test_queued_ahead_blocks_but_queued_behind_does_not(self):
+        path = self.deferred()
+        mine = self.record()["started"]
+        env = {**self.base_env(), **self.gate_env(0, OK, ACP_DISPATCH_INFLIGHT="codex=1")}
+        self.plant("behind", pid=None, pid_start=None, started=mine + 100, load_gate_pending=True)
+        r = run(["execute", path], env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)                # the later runner does not block us
+        self.assertTrue(self.record().get("pid"))
+
+
+class TestRecordWaitingOnTheGateIsNotOverwritten(LoadGate):
+    """Re-review N2: re-dispatching the --name of a waiting runner must not overwrite its record."""
+
+    def test_same_name_is_refused_while_the_runner_waits(self):
+        env = self.gate_env(75, HOT)
+        first = self.dispatch("--no-model-check", "--no-preflight", "--detach", "--no-wait", env=env)
+        self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
+        before = (self.out / "jobs" / "s1.json").read_text()
+        again = self.dispatch("--no-model-check", "--no-preflight", "--detach", "--no-wait", env=env)
+        self.assertEqual(again.returncode, 2, again.stderr + again.stdout)
+        self.assertIn("waiting for the load to drop", again.stderr)
+        self.assertEqual((self.out / "jobs" / "s1.json").read_text(), before)
+
+    def test_force_still_overrides(self):
+        env = self.gate_env(75, HOT)
+        self.dispatch("--no-model-check", "--no-preflight", "--detach", "--no-wait", env=env)
+        again = self.dispatch("--no-model-check", "--no-preflight", "--detach", "--no-wait", "--force", env=env)
+        self.assertEqual(again.returncode, 0, again.stderr + again.stdout)
+
+    def test_a_refused_record_can_be_redispatched(self):
+        self.assertEqual(self.dispatch("--no-model-check", env=self.gate_env(75, HOT)).returncode, 75)
+        again = self.dispatch("--no-model-check", env=self.gate_env(0, OK))
+        self.assertEqual(again.returncode, 0, again.stderr + again.stdout)
 
 
 if __name__ == "__main__":
