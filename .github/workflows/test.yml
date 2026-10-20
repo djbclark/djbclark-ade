@@ -27,7 +27,7 @@ jobs:
         run: brew install coreutils findutils gnu-sed grep gawk
 
       - name: Run the test suite
-        run: uv run --with pytest --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q
+        run: uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q
 
   pytest-linux:
     runs-on: ubuntu-latest
@@ -68,4 +68,4 @@ jobs:
           echo "$bindir" >> "$GITHUB_PATH"
 
       - name: Run the test suite
-        run: uv run --with pytest --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q
+        run: uv run --with pytest --with pyyaml --with 'agent-client-protocol>=0.9,<1.0' python -m pytest tests/ -q
