@@ -35,9 +35,13 @@ SUBMODULES_FLAG = "submodules not inspected"  # same: no count above covers a su
 # cannot be made without writing refs into the checkout (adversary round 26 on PR 27). The entries are listed when
 # the command runs, not counted at scan time (a stash pushed since would be skipped), and the loop sits in a
 # subshell so a failing `exit 1` ends the loop, not a pasted-into interactive shell (round 27). Slots: <ck>, <path>,
-# <path>, <ck>. `${r//[^0-9]/}` (bash and zsh) turns `stash@{3}` into the file name `stash3.patch`.
-STASH_FMT = ("mkdir -p <DEST>/{} && ( for r in $(git -C {} log -g --format=%gd refs/stash); do git -C {} stash show -p "
-             "--binary --include-untracked \"$r\" > <DEST>/{}/stash${{r//[^0-9]/}}.patch || exit 1; done )")
+# <path>, <ck>. `${r//[^0-9]/}` (bash and zsh) turns `stash@{3}` into the file name `stash3.patch`. The entries are
+# listed into a variable first, `&&`-guarded: `for r in $(false)` is an empty loop that exits 0, which would read as
+# "every stash saved" (Codex pass 23 on PR 27); an empty list is a failure too, since this row exists only when the
+# scan saw a stash. `$(printf '%s\n' "$l")`, not a bare `$l`: zsh does not word-split a parameter expansion, it
+# does split a command substitution.
+STASH_FMT = ("mkdir -p <DEST>/{} && ( l=$(git -C {} log -g --format=%gd refs/stash) && [ -n \"$l\" ] && for r in $(printf '%s\\n' \"$l\"); do "
+             "git -C {} stash show -p --binary --include-untracked \"$r\" > <DEST>/{}/stash${{r//[^0-9]/}}.patch || exit 1; done )")
 
 
 def stash_values(raw_p, ck):

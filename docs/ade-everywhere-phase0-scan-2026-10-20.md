@@ -272,6 +272,16 @@ A fourth finding that is not a decision yet: **54.5 GiB of the 60 GiB is one scr
 
 ## 3. Capture (how each item would be preserved; none of this was run)
 
+**Do not run the commands in this snapshot (2026-10-20, PR 27).** They were rendered by the first version of
+[`bin/ade-scan-state-doc`](../bin/ade-scan-state-doc); the generator has since changed what a row must do, and these
+rows were not re-rendered: the modified-files row now also saves the index (`diff --binary --cached`) and binary
+content, the stash row saves every stash entry with its untracked files (one `stash show -p --binary
+--include-untracked` patch per entry, listed at run time) instead of `stash show -p stash@{0}`, the untracked row
+archives every path from `ls-files -z --others` through `"$GTAR"` (never `gtar` bare or a sample), branches and tags
+are pushed by full ref name, every artifact lands in its own `<DEST>/checkouts/<path>/` directory, and a `skipped`,
+`scan incomplete`, `origin unreachable` or `submodules not inspected` checkout gets a row of its own. Before any
+capture, rerun the scan (section 5) and render a fresh plan; this snapshot is kept for its counts and verdicts only.
+
 ### 3.1 `unique` and `mixed` bigteam dirs
 
 Proposed rule for all of them: copy the report files (not the dir) to one destination, `<DEST>/<task>/`, preserving names. `<DEST>` is the one decision (the repo question, rule 23; `~/ops/site-private` is private and fits unreviewed AI reports). Per item the file set is below; `needs decision` is `yes` only where a session may still be writing (open `CLAIM`, an unclosed job record with status running) or the dir is `mixed` (the logs next to the report may matter).

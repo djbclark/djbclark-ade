@@ -2137,6 +2137,14 @@ def test_stash_capture_command_really_saves_every_stash_with_its_untracked_files
     bad = cmd.replace("--include-untracked", "--no-such-option")
     run = subprocess.run(["bash", "-c", bad + "; echo still-here"], capture_output=True, text=True)
     assert "still-here" in run.stdout and run.returncode == 0
+    # Codex pass 23: a failed or empty enumeration must fail the command, never run an empty loop with rc 0
+    for shell in ("bash", "zsh"):
+        if shutil.which(shell) is None:
+            continue
+        gone = cmd.replace("refs/stash", "refs/no-such-ref")  # `log -g` fails: nothing to iterate
+        assert subprocess.run([shell, "-c", gone], capture_output=True).returncode != 0
+        git(repo, "stash", "clear")
+        assert subprocess.run([shell, "-c", cmd], capture_output=True).returncode != 0  # no entries left: fails
 
 
 def test_section_1_verdict_rows_sum_to_the_checkout_count():
