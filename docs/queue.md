@@ -136,6 +136,15 @@ first words name the task (the `baton` skill ignores the trailing text as a labe
 autorename cover the Paseo host; (3) a test with the fake `paseo` asserting the sent prompt starts with the
 label. Never rename or send to a live agent in tests.
 
+## `bin/load-watch` `send_to` has the relay's round-1 exposure (adversary on PR #25, 2026-10-20)
+
+`send_to` (bin/load-watch, around line 536) still scrubs `PASEO_AGENT_ID`/`PASEO_AGENT_CWD` and runs `paseo send
+<target> --no-wait --behavior steer <text>` without `--` and without the archived/permission gate: the text it
+sends is unlabelled (arrives as the operator's turn) and a target or text starting with `-` is an option. Its text
+is composed by load-watch, so lower risk, but fix before it ever sends untrusted text: call
+`skills/session-finder/relay.py` instead of its own `paseo send`, or copy relay.py's `--`, label and `paseo_gate`.
+One small Sonnet `code` slice with the fake `paseo`.
+
 ## Keep every machine current, and a changelog (djbclark, 2026-10-20; proposal Q26, T8)
 
 djbclark, 2026-10-20: "We need a clear way to keep all of djbclark-ade up-to-date on new
