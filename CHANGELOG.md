@@ -16,7 +16,7 @@ agent what changed and what is new. Entries end with the pull request number.
   child path of one), relinks missing skills
   (only in the canonical checkout; any other `--repo` is report-only), checks the `CLAUDE.md` and `~/.claude` symlinks,
   and prints the changelog entries new since the revision it last recorded; `--check` reports only and exits 10 when
-  behind (2026-10-20, #20); `--check` also lists `claude/{commands,agents,hooks}` entries that upstream adds as "new upstream" links, and apply fast-forwards to the exact commit it checked instead of pulling again (#20).
+  behind (2026-10-20, #20); `--check` also lists `claude/{commands,agents,hooks}` entries that upstream adds as "new upstream" links, and apply fast-forwards to the exact commit it checked instead of pulling again; a fast-forward that landed before a post-merge hook timed out is recorded as a `merge warning` problem (exit 10), and a non-canonical `--repo` without `--state` records under its own `~/.local/state/ade/applied-<12 hex>` instead of the shared record (#20).
 - `session-finder/relay.py` reaches Paseo-hosted agents (`paseo send --behavior steer -- <id> <text>`, labelled as an agent message from the sender; takes a `PASEO_AGENT_ID` as the ident, `--idle S` waits for idle first; refuses archived agents, pending permissions and text starting with `/`) and `where.py` reports `host=paseo agent=<id>` for them, so the "no terminal channel (unknown terminal)" refusal no longer hits a Paseo agent (#25).
 - `agents/` templates for `~/.claude/settings.json`, `~/.codex/config.toml`, opencode's `opencode.json` and
   `~/.hermes/config.yaml` (secrets, home paths and host or account ids as placeholders, listed in
