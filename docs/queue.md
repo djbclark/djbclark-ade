@@ -8,6 +8,11 @@ when they ship (into the relevant doc) or when they're dropped (say why).
 1. **`bin/firecrawl-router` serve-only form binds any `--listen` with no token** (adversary, threat-model
    review 2026-10-20: `--open` refuses a non-loopback address, serve-only does not). Make serve-only refuse a
    non-loopback `--listen` the same way; one small PR with a test.
+   **Done 2026-10-20** (PR 14): both tokenless forms refuse a non-loopback `--listen` (exit 2) and `serve()`
+   checks the address it actually bound before it accepts a request. Carried from that review (adversary
+   INFO, non-blocking): (a) the tokenless loopback handler does not check the `Host` header, so a page in a
+   local browser could reach it by DNS rebinding; add a `Host` allow-list (`127.0.0.1`, `localhost`, the bound
+   port); (b) the bearer compare at the handler uses `!=`; use `hmac.compare_digest`. One small PR for both.
 2. **Claude API credits from the Admin API, not by hand** (djbclark, 2026-10-20): the Admin API has no balance
    endpoint, but `/v1/organizations/cost_report` gives spend; remaining promo = grant ($200, 2026-10-13, expires
    2026-11-08) minus cost since the grant. Plan: an `aiuse` collector behind `ANTHROPIC_ADMIN_KEY` in

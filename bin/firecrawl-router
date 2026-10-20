@@ -3,7 +3,7 @@
 
 Usage:
   firecrawl-router [--listen HOST:PORT] -- firecrawl-mcp [ARGS...]
-  firecrawl-router [--listen HOST:PORT]            # serve only, for tests: no token check
+  firecrawl-router [--listen HOST:PORT]            # serve only, for tests: no token check, loopback --listen only
 
 With a child command, the router listens on a loopback port (ephemeral by
 default), starts the child with FIRECRAWL_API_URL pointing at itself and
@@ -56,8 +56,9 @@ Environment:
                                Claude Code's 300 s MCP idle limit with room for the scrape itself)
 
 --open drops the bearer token, so local programs that speak the Firecrawl API
-(Hermes' firecrawl web backend) can use the router at a fixed --listen address;
-it refuses a non-loopback address.
+(Hermes' firecrawl web backend) can use the router at a fixed --listen address.
+Every run without a token (--open, or serve only with no child command) refuses a
+non-loopback --listen address: the router holds the backend keys.
 
 One log line per request on stderr: method, path, backend, status, seconds and
 the fallback reason. Keys are never logged.
@@ -66,6 +67,7 @@ the fallback reason. Keys are never logged.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import http.server
 import json
 import os
@@ -603,13 +605,29 @@ def build_router(env, token: str) -> Router:
                   extractor=build_extractor(env))
 
 
-def serve(router: Router, listen: str) -> http.server.ThreadingHTTPServer:
+def serve(router: Router, listen: str, require_loopback: bool = False) -> http.server.ThreadingHTTPServer:
+    """Bind and start serving. With require_loopback, the address actually bound must be loopback: the
+    check runs after bind and before the first request can be accepted (2026-10-20), so a resolver that
+    maps "localhost" elsewhere gets no window at all; the socket is closed and SystemExit(2) raised."""
     host, _, port = listen.rpartition(":")
     srv = http.server.ThreadingHTTPServer((host or "127.0.0.1", int(port or 0)), make_handler(router))
     srv.daemon_threads = True
+    if require_loopback and not ipaddress.ip_address(srv.server_address[0]).is_loopback:
+        bound = srv.server_address[0]
+        srv.server_close()
+        print(f"firecrawl-router: refusing to serve without a token on {bound}", file=sys.stderr, flush=True)
+        raise SystemExit(2)
     router.public_base = f"http://{srv.server_address[0]}:{srv.server_address[1]}"
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
+
+
+# serve() binds AF_INET, so IPv6 spellings can never bind here; they are refused (fail closed).
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
+
+
+def is_loopback_listen(listen: str) -> bool:
+    return listen.rpartition(":")[0] in LOOPBACK_HOSTS
 
 
 def main(argv=None) -> int:
@@ -622,12 +640,14 @@ def main(argv=None) -> int:
     ap.add_argument("--listen", default="127.0.0.1:0", help="HOST:PORT (default 127.0.0.1:0, ephemeral)")
     ap.add_argument("--open", action="store_true", help="no bearer token (loopback --listen only)")
     args = ap.parse_args(argv)
-    if args.open and args.listen.rpartition(":")[0] not in ("127.0.0.1", "localhost", "::1", "[::1]"):
-        ap.error("--open needs a loopback --listen address")
+    if (args.open or not child) and not is_loopback_listen(args.listen):
+        ap.error("a run without a bearer token (--open, or no child command) needs a loopback --listen address")
 
     token = secrets.token_urlsafe(32) if child and not args.open else ""
     router = build_router(os.environ, token)
-    srv = serve(router, args.listen)
+    # defence in depth: the string check above passed; the address actually bound is checked before
+    # the server accepts anything (a resolver could map "localhost" elsewhere)
+    srv = serve(router, args.listen, require_loopback=not token)
     fb = router.fallback.base if router.fallback else "none"
     print(f"firecrawl-router: {router.public_base} primary={router.primary.base} fallback={fb}",
           file=sys.stderr, flush=True)
