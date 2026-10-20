@@ -34,7 +34,8 @@ other table or column named like credential/account/auth/oauth/secret/token (cou
 `input_tokens` aside) into an error and drops that copy, so a tool update that adds one fails the run.
 `--check-schemas` runs the guard read-only on the live databases and prints table and column names only; a missing
 database is printed and counted, and fails the check (exit 1) only with `--strict-stores`; a database that cannot be
-opened is counted apart (`J unopenable`) and fails the check.
+opened is counted apart (`J unopenable`) and fails the check; a database with a credential name or path is never
+opened (`skipped`, counted `E excluded`), and a file store's configured paths are checked to exist (absent: `missing`).
 Transcripts and other session content are copied as they are and can hold secrets pasted into them:
 treat a generation as secret-bearing.
 
@@ -113,7 +114,8 @@ EXCLUDE_PATHS = [
     ".gemini/oauth_creds.json", ".local/share/opencode/auth.json", ".grok/auth.json",
     ".zcode/v2/credentials.json", ".paseo/daemon-keypair.json", ".paseo/local-credential",
     ".gemini/antigravity-acp/acp_token.json", ".hermes/.env", ".cline/data/settings/providers.json",
-    ".omp/agent/agent.db", ".local/share/crush/hyper.json", ".copilot/data.db", ".orca/jira-tokens",
+    ".omp/agent/agent.db", ".local/share/crush/hyper.json", ".local/share/crush/crush.json", ".copilot/data.db",
+    ".orca/jira-tokens",
     ".orca/jira-sites.json", ".config/opencode/opencode.json", ".cursor/mcp.json",
     ".gemini/config/mcp_config.json", ".config/crush/crushrc*", ".local/state/ade/credential-bak",
 ]
@@ -215,9 +217,8 @@ def build_stores(home):
         sqlite("crush-acp", ".local/share/crush-acp/crush.db"),
         sqlite("crush-tui", ".config/crush/.crush/crush.db"),
         sqlite("crush-repo", "src/djbclark-ade/.crush/crush.db"),
-        files("crush-files", ("crush.json", ".local/share/crush/crush.json"),
-              ("projects.json", ".local/share/crush/projects.json"),
-              file_labels=["crush.json", "projects.json"]),
+        files("crush-files", ("projects.json", ".local/share/crush/projects.json"),
+              file_labels=["projects.json"]),
         sqlite("codex-db", ".codex/state_5.sqlite", ".codex/logs_2.sqlite", ".codex/memories_1.sqlite",
                ".codex/goals_1.sqlite"),
         files("codex-files", ("sessions", ".codex/sessions"), ("session_index.jsonl", ".codex/session_index.jsonl"),
@@ -511,8 +512,10 @@ def make_ignore(run, excluder):
             p = os.path.join(directory, n)
             try:
                 mode = os.lstat(p).st_mode
-            except OSError:
-                mode = 0
+            except OSError as exc:  # the copy records this as a store error too (dry-run parity)
+                run.error(p, exc)
+                out.append(n)
+                continue
             why = skip_reason(directory, n, mode, excluder)
             if why:
                 out.append(n)
@@ -1217,13 +1220,43 @@ def report_sidecars(entries):
                   file=sys.stderr)
 
 
+def check_file_roots(store, excluder):
+    """--check-schemas for a file store: each configured root is looked at with lstat only (never opened), through
+    the same exclusion and root-link gates the copy applies. Returns (present, missing, excluded, link_problems);
+    prints one line per absent, excluded or refused root."""
+    present = missing = excluded = link_problems = 0
+    for label, src in store["roots"]:
+        linked = is_linked(src, excluder)
+        if excluder.path(src, follow=not linked):
+            print(f"{store['name']}: {src}: skipped (excluded credential path)")
+            excluded += 1
+            continue
+        real = src
+        if linked:
+            real, why = root_link_target(src, excluder)
+            if why:
+                print(f"{store['name']}: {src}: symlink refused: {why}")
+                link_problems += 1
+                continue
+            print(f"{store['name']}: {src}: symlink -> {real}")
+        if os.path.lexists(real):
+            present += 1
+        else:
+            print(f"{store['name']}: {src}: missing")
+            missing += 1
+    print(f"{store['name']}: {present} of {len(store['roots'])} configured path(s) present")
+    return present, missing, excluded, link_problems
+
+
 def check_schemas(stores, excluder, strict=False):
     """--check-schemas: the schema guard on the live databases, read-only; prints names only. A database
     inside a per-session tree that is a symlink or sits under a symlinked directory is never opened; a
     configured SQLite path that is a symlink is opened through its target when the root-link rule allows
     it (`symlink -> target`, information) and refused otherwise (`symlink refused`). Both refusals count as
-    symlink problems, apart from the credential-looking names."""
-    problems = link_problems = missing = unopenable = 0
+    symlink problems, apart from the credential-looking names. A database with a credential name or path
+    (the copy's exclusions) is never opened (`skipped`, counted as `excluded`). A file store is not opened
+    either: each configured root is checked to exist (absent counts as `missing`, a strict failure)."""
+    problems = link_problems = missing = unopenable = excluded = 0
     for store in stores:
         if store["kind"] == "sqlite":
             dbs = list(store["files"])
@@ -1242,12 +1275,24 @@ def check_schemas(stores, excluder, strict=False):
                 continue
             dbs = tree_dbs(store, search) if search.is_dir() else []
         else:
+            _, m, e, lp = check_file_roots(store, excluder)
+            missing += m
+            excluded += e
+            link_problems += lp
             continue
         for db in dbs:
             target = db
-            if store["kind"] == "sqlite-tree" and under_symlink(db, search):
-                print(f"{store['name']}: {db}: symlink, not opened")
-                link_problems += 1
+            if store["kind"] == "sqlite-tree":
+                if under_symlink(db, search):
+                    print(f"{store['name']}: {db}: symlink, not opened")
+                    link_problems += 1
+                    continue
+                is_excl = is_excluded_name(db.name) or excluder.path(db)
+            else:
+                is_excl = excluder.path(db, follow=not is_linked(db, excluder))
+            if is_excl:  # never opened: a read-only open can still create -wal/-shm beside it
+                print(f"{store['name']}: {db}: skipped (excluded credential path)")
+                excluded += 1
                 continue
             if store["kind"] == "sqlite" and is_linked(db, excluder):
                 target, why = root_link_target(db, excluder)
@@ -1277,7 +1322,7 @@ def check_schemas(stores, excluder, strict=False):
                     problems += 1
                 print(f"{store['name']}: {db.name}: {name}: {why or 'UNEXPLAINED'}")
     print(f"schema check: {problems} unexplained credential-looking name(s), {link_problems} symlink problem(s), "
-          f"{missing} missing, {unopenable} unopenable")
+          f"{missing} missing, {unopenable} unopenable, {excluded} excluded")
     return 1 if problems or link_problems or unopenable or (strict and missing) else 0
 
 

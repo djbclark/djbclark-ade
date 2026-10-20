@@ -724,7 +724,7 @@ def test_check_schemas_counts_an_unopenable_database_apart_from_credential_names
     assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 1
     out = capsys.readouterr().out
     assert "ERROR" in out
-    assert "0 unexplained credential-looking name(s), 0 symlink problem(s), 0 missing, 1 unopenable" in out
+    assert "0 unexplained credential-looking name(s), 0 symlink problem(s), 0 missing, 1 unopenable, 0 excluded" in out
 
 
 # --- Codex pass 2 on PR 24 (2026-10-20): grok memory roots, symlinked roots, dry-run sidecars ---
@@ -1412,12 +1412,12 @@ def test_check_schemas_counts_an_absent_tree_root_as_missing(real, capsys):
     assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 0
     out = capsys.readouterr().out
     assert f"cursor-chats: {home / '.cursor/chats'}: missing" in out
-    assert out.strip().splitlines()[-1].endswith("1 missing, 0 unopenable")
+    assert out.strip().splitlines()[-1].endswith("1 missing, 0 unopenable, 0 excluded")
     assert mod.main(["--check-schemas", "--strict-stores", "--only", "cursor-chats"]) == 1
-    assert capsys.readouterr().out.strip().splitlines()[-1].endswith("1 missing, 0 unopenable")
+    assert capsys.readouterr().out.strip().splitlines()[-1].endswith("1 missing, 0 unopenable, 0 excluded")
     make_cursor_session(home)
     assert mod.main(["--check-schemas", "--strict-stores", "--only", "cursor-chats"]) == 0
-    assert capsys.readouterr().out.strip().splitlines()[-1].endswith("0 missing, 0 unopenable")
+    assert capsys.readouterr().out.strip().splitlines()[-1].endswith("0 missing, 0 unopenable, 0 excluded")
 
 
 @pytest.mark.parametrize("required", [True, False])
@@ -1561,28 +1561,110 @@ def test_wal_size_ignores_a_symlinked_wal(real):
 
 # --- Codex pass 11 on PR 24 (2026-10-20): Crush files, a walk that never trusts a path string, optional sidecars ---
 
-def test_crush_json_files_are_backed_up_and_hyper_json_and_providers_are_not(real):
+def test_crush_json_is_never_backed_up_and_projects_json_is(real):
     mod, home, _ = real
     crush = home / ".local/share/crush"
     crush.mkdir(parents=True)
-    (crush / "crush.json").write_text('{"c": 1}')
+    (crush / "crush.json").write_text('{"api_key": "SENTINEL-CRUSH-API-KEY", "refresh_token": "SENTINEL-CRUSH-REFRESH"}')
     (crush / "projects.json").write_text('{"p": 1}')
     (crush / "hyper.json").write_text("SENTINEL-HYPER-LOGIN")
     (crush / "providers.json").write_text("SENTINEL-PROVIDERS")
     dest = home / "out" / "bk"
     assert mod.main(["--only", "crush-files", "--dest", str(dest)]) == 0
-    entry = manifest_of(dest)["stores"][0]
-    assert entry["status"] == "ok" and entry["errors"] == [] and entry["file_count"] == 2
-    assert (dest / "crush-files/crush.json").read_text() == '{"c": 1}'
+    manifest = manifest_of(dest)
+    entry = manifest["stores"][0]
+    assert entry["status"] == "ok" and entry["errors"] == [] and entry["file_count"] == 1
     assert (dest / "crush-files/projects.json").read_text() == '{"p": 1}'
-    assert not (dest / "crush-files/hyper.json").exists()
-    assert b"SENTINEL-HYPER-LOGIN" not in all_bytes(dest) and b"SENTINEL-PROVIDERS" not in all_bytes(dest)
-    (crush / "crush.json").unlink()
+    assert not (dest / "crush-files/crush.json").exists() and not (dest / "crush-files/hyper.json").exists()
+    blob = all_bytes(dest)
+    for marker in (b"SENTINEL-CRUSH-API-KEY", b"SENTINEL-CRUSH-REFRESH", b"SENTINEL-HYPER-LOGIN", b"SENTINEL-PROVIDERS"):
+        assert marker not in blob
+    assert "~/.local/share/crush/crush.json" in manifest["exclusions"]["paths"]  # listed with the other credential paths
+    assert mod.Excluder(home).path(crush / "crush.json")
     (crush / "projects.json").unlink()
     dest2 = home / "out" / "bk2"
     assert mod.main(["--only", "crush-files", "--dest", str(dest2)]) == 0
     entry = manifest_of(dest2)["stores"][0]
-    assert entry["status"] == "missing" and len(entry["missing"]) == 2 and entry["file_count"] == 0
+    assert entry["status"] == "missing" and len(entry["missing"]) == 1 and entry["file_count"] == 0
+
+
+def test_dry_run_records_an_entry_whose_lstat_fails_as_an_error_like_the_copy(real, monkeypatch):
+    mod, home, _ = real
+    root = home / ".grok/sessions"
+    root.mkdir(parents=True)
+    (root / "a.jsonl").write_text("x")
+    (root / "b.jsonl").write_text("y")
+    real_lstat = os.lstat
+
+    def flaky(p, *a, **k):
+        if str(p).endswith("a.jsonl"):
+            raise PermissionError(13, "denied", str(p))
+        return real_lstat(p, *a, **k)
+
+    monkeypatch.setattr(mod.os, "lstat", flaky)
+    plan = mod.plan_store(next(s for s in mod.build_stores(home) if s["name"] == "grok"), mod.Excluder(home))
+    assert plan["file_count"] == 1 and plan["skipped_count"] == 0
+    assert len(plan["errors"]) == 1 and "a.jsonl" in plan["errors"][0]["source"]
+
+
+def test_check_schemas_never_opens_an_excluded_tree_database(real, capsys, monkeypatch):
+    mod, home, _ = real
+    db_dir = home / ".cline/data/db"
+    make_wal_db(db_dir / "ok.db", ["row"]).close()
+    make_wal_db(db_dir / "data.db", ["SENTINEL-EXCLUDED-DB"]).close()
+    real_ro = mod.ro_connect
+    opened = []
+    monkeypatch.setattr(mod, "ro_connect", lambda p, base=None: (opened.append(Path(p).name), real_ro(p, base))[1])
+    assert mod.main(["--check-schemas", "--only", "cline-db"]) == 0
+    out = capsys.readouterr().out
+    assert opened == ["ok.db"]  # data.db is never opened, so no -wal/-shm can appear beside it
+    assert f"cline-db: {db_dir / 'data.db'}: skipped (excluded credential path)" in out
+    assert out.strip().splitlines()[-1].endswith("0 missing, 0 unopenable, 1 excluded")
+
+
+def test_check_schemas_never_opens_an_excluded_single_file_database(real, capsys, monkeypatch):
+    mod, home, _ = real
+    db = home / ".copilot/data.db"  # an excluded credential path
+    make_wal_db(db, ["SENTINEL-EXCLUDED-DB"]).close()
+    stores = [{"name": "copilot-x", "kind": "sqlite", "files": [db]}]
+    monkeypatch.setattr(mod, "ro_connect", lambda *a, **k: pytest.fail("an excluded database was opened"))
+    assert mod.check_schemas(stores, mod.Excluder(home)) == 0
+    out = capsys.readouterr().out
+    assert f"copilot-x: {db}: skipped (excluded credential path)" in out
+    assert out.strip().splitlines()[-1].endswith("0 missing, 0 unopenable, 1 excluded")
+
+
+def test_check_schemas_strict_stores_counts_a_missing_file_store_root(real, capsys):
+    mod, home, _ = real
+    assert mod.main(["--check-schemas", "--only", "claude", "--strict-stores"]) == 1
+    out = capsys.readouterr().out
+    assert re.search(r"[1-9]\d* missing", out.strip().splitlines()[-1])
+    assert f"claude: {home / '.claude/projects'}: missing" in out
+    assert mod.main(["--check-schemas", "--only", "claude"]) == 0  # not strict: reported, exit unchanged
+    capsys.readouterr()
+    store = next(s for s in mod.build_stores(home) if s["name"] == "claude")
+    for label, root in store["roots"]:
+        if label in store["file_labels"]:
+            root.parent.mkdir(parents=True, exist_ok=True)
+            root.write_text("x")
+        else:
+            root.mkdir(parents=True)
+    assert mod.main(["--check-schemas", "--only", "claude", "--strict-stores"]) == 0
+    out = capsys.readouterr().out
+    assert out.strip().splitlines()[-1].endswith("0 missing, 0 unopenable, 0 excluded")
+    n = len(store["roots"])
+    assert f"claude: {n} of {n} configured path(s) present" in out
+
+
+def test_check_schemas_gates_a_file_store_root_link_like_the_copy(real, capsys):
+    mod, home, tmp = real
+    outside = tmp / "outside-dir"
+    outside.mkdir()
+    (home / ".grok").mkdir()
+    os.symlink(outside, home / ".grok/sessions")
+    assert mod.main(["--check-schemas", "--only", "grok"]) == 1
+    out = capsys.readouterr().out
+    assert f"grok: {home / '.grok/sessions'}: symlink refused: symlink target outside HOME" in out
 
 
 def test_a_subdirectory_swapped_for_a_symlink_after_listing_is_a_store_error_and_nothing_is_copied(real, monkeypatch):
