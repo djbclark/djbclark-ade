@@ -24,7 +24,7 @@ comment after the next Codex release or when the connector's reply changes. Then
 (2) DONE 2026-10-19: the Cursor user API key is `CURSOR_API_KEY` in `sudo-secretspec`
 (runtime declaration, optional; read it only through `sudo-secretspec run`); `bin/cursor-cloud`
 launches, inspects and follows up agents (first slice merged as PR 5, 2026-10-19; `@cursor` on
-issue 6 is the GitHub-mention test); still open: a `cursor-cloud` place in `acp-dispatch` and
+issue 6 is the GitHub-mention test: it fires on a *comment*, not the issue body, 2026-10-20, agent bc-614266a6); still open: a `cursor-cloud` place in `acp-dispatch` and
 `route_agent.py` so the router can pick it. (3) The Max plan's
 monthly API credits are the `omp credits` pool in `aiuse` (djbclark, 2026-10-19): rename the
 pool, verify the balance on the Anthropic console, and route one API-key workload at it.
