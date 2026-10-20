@@ -16,6 +16,12 @@ turns it off), so after a handoff nobody types this; a `/baton` that arrives
 right after a `/clear` is that follow-up (`~/.local/state/self-slash.log`
 shows `then: /baton` and `sent /baton`), not a request for anything else.
 
+`/baton` never clears, compacts or starts a new session itself: `/new` queues
+`/baton`, so a `/baton` that started a `/new` would recurse. If the pointer
+has nothing to resume (no open work, `latest_handoff` already finished), say
+so and offer the `loose` Rule 4 choices (handoff and continue, finish and
+archive, keep working); never write another handoff automatically.
+
 This is a thin entry point, not a separate protocol. Follow the
 `session-handoff` skill's **Reader protocol** section exactly (read
 `SESSION_LOG.md` if present, check sidecars newer than `updated_at`, run
