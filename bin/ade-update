@@ -19,7 +19,11 @@ Steps, in order:
 2. `skill-everywhere --check` over every `skills/*/SKILL.md`; a skill with a missing, dangling or
    chained link is re-linked with `skill-everywhere NAME...` (the script's own link form). A link
    the script leaves alone (a real directory, another link) is reported with the command and counts
-   as unresolved. skill-everywhere is `<repo>/bin/skill-everywhere`, else the one on PATH. Links are
+   as unresolved. skill-everywhere is `<repo>/bin/skill-everywhere`, else the one on PATH, but only in the
+   canonical checkout: any other --repo (a pasture, a second clone, an untrusted PR branch) never gets its own
+   helper executed, so the helper is `<canonical>/bin/skill-everywhere`, else the one on PATH, else the
+   skill step is skipped with a note. A nonzero exit from `--check` (other than the script's own
+   "warning:" exit 1), or a requested skill with no `== name` result, is an error (exit 4). Links are
    only changed when --repo is the canonical skills home (~/src/djbclark-ade, or the parent of
    $SKILL_EVERYWHERE_ADE when that is set): any other checkout (a pasture, a second clone) gets a
    report-only skill step, since linking would repoint every TUI's live skills into it. A skills/
@@ -35,8 +39,10 @@ Steps, in order:
 
 Exit codes: 0 current (and nothing wrong), 10 behind (--check) or a skill link, CLAUDE.md or
 ~/.claude link is missing/unresolved, 2 usage or a local modification blocks the pull, 3 the branch
-cannot fast-forward, 4 git, the network or the state file failed (no repo, --repo is not the top of
-its work tree, no upstream, fetch/pull error or timeout, the state file cannot be written).
+cannot fast-forward (git's explicit non-fast-forward refusal only), 4 git, the network, skill-everywhere
+or the state file failed (no repo, --repo is not the top of its work tree, no upstream, fetch/pull error
+or timeout, any other `git pull --ff-only` failure, `skill-everywhere --check` failed or returned no
+result for a skill, the state file cannot be written).
 """
 import argparse
 import json
@@ -208,12 +214,17 @@ def canonical_repo():
 
 
 def find_skill_everywhere(repo):
-    own = Path(repo) / "bin" / "skill-everywhere"
-    if own.is_file() and os.access(own, os.X_OK):
-        return str(own)
+    """The helper to execute. Code from a checkout is only run when it is the canonical one: any other
+    --repo may hold an attacker's branch, so it gets the canonical checkout's helper, else the one on PATH."""
+    home = Path(repo).resolve()
+    canonical = canonical_repo()
+    for base in ([home] if home == canonical else [canonical]):
+        own = base / "bin" / "skill-everywhere"
+        if own.is_file() and os.access(own, os.X_OK):
+            return str(own)
     for d in os.environ.get("PATH", "").split(os.pathsep):
         cand = Path(d) / "skill-everywhere"
-        if d and cand.is_file() and os.access(cand, os.X_OK):
+        if d and os.path.isabs(d) and cand.is_file() and os.access(cand, os.X_OK):
             return str(cand)
     return None
 
@@ -242,9 +253,16 @@ def classify(state):
 def check_skills(script, repo, names):
     env = dict(os.environ, SKILL_EVERYWHERE_ADE=str(Path(repo) / "skills"))
     rc, out, err = run([script, "--check", *names], env=env, timeout=LINK_TIMEOUT)
+    # exit 1 is the script's own "warning: ..." status (e.g. a dangling Codex AGENTS.md); anything else is a crash
+    # (127 for a missing greadlink on Linux) and its partial output must not be taken for a complete result.
+    warned = rc == 1 and err.strip() and all(ln.startswith("warning:") for ln in err.splitlines() if ln.strip())
+    if rc != 0 and not warned:
+        raise Stop(EXIT_ERROR, f"{script} --check failed (rc={rc}): {err.strip()[:300]}")
     rows = parse_skill_check(out)
-    if not rows and names:
-        raise Stop(EXIT_ERROR, f"{script} --check printed no skill rows (rc={rc}): {(err or out).strip()[:300]}")
+    seen = {ln[3:].strip() for ln in out.splitlines() if ln.startswith("== ")}
+    absent = [n for n in names if n not in seen]
+    if absent:
+        raise Stop(EXIT_ERROR, f"skill-everywhere --check returned no result for: {', '.join(absent)}")
     return rows, err
 
 
@@ -317,9 +335,17 @@ class Report:
             print("\n".join(self.lines))
 
 
+NON_FF_MARKERS = ("not possible to fast-forward", "diverging branches", "cannot fast-forward",
+                  "can't be fast-forwarded")  # git 2.56 wording, LC_ALL=C
+
+
 def pull_failure_code(text):
-    """git refusing to overwrite a local file (a race with the pre-check) is dirty (2), else not fast-forward (3)."""
-    return EXIT_DIRTY if "would be overwritten" in text else EXIT_NON_FF
+    """Dirty (2) when git refuses to overwrite a local file (a race with the pre-check), not fast-forward (3) only
+    on git's explicit refusal, else 4: pull has its own fetch, so a timeout or lost auth can fail after ours."""
+    low = text.lower()
+    if "would be overwritten" in low:
+        return EXIT_DIRTY
+    return EXIT_NON_FF if any(m in low for m in NON_FF_MARKERS) else EXIT_ERROR
 
 
 def short(sha):
@@ -411,15 +437,19 @@ def update(rep, args, repo):
     script = find_skill_everywhere(repo)
     canonical = canonical_repo()
     can_link = Path(repo).resolve() == canonical
+    no_helper = script is None and not can_link  # report-only and nothing trusted to run: skip, not a problem
     skills = {"checked": len(names), "script": script, "missing": [], "linked_now": [], "unresolved": [],
-              "new_upstream": new_upstream, "skipped": skipped, "link_mode": "link" if can_link else "report-only"}
+              "new_upstream": new_upstream, "skipped": skipped, "link_mode": "link" if can_link else "skipped" if no_helper else "report-only"}
     d["skills"] = skills
     if skipped:
         rep.say(f"skills: skipped (name not [A-Za-z0-9][A-Za-z0-9._-]*): {', '.join(skipped)}")
     if not can_link:
         rep.say(f"skills: report-only: {repo} is not the canonical skills home {canonical}; "
                 "linking from here would repoint every TUI's live skills into this checkout")
-    if script is None:
+    if no_helper:
+        rep.say(f"skills: skipped: {repo} is not the canonical checkout and no trusted skill-everywhere exists "
+                f"(neither {canonical}/bin nor PATH); its own bin/ is never run")
+    elif script is None:
         problems.append("skill-everywhere not found")
         rep.say("skills: skill-everywhere not found (neither <repo>/bin nor PATH); cannot check links")
     else:
@@ -503,7 +533,7 @@ def update(rep, args, repo):
                 last = h
             rep.say(wrap_entry(t))
 
-    unresolved_links = bool(d["skills"]["unresolved"]) or script is None
+    unresolved_links = bool(d["skills"]["unresolved"]) or (script is None and not no_helper)
     state_note = f"state file {state_path}"
     if check:
         rep.say(f"{state_note}: would record {short(target)}" if base != target else f"{state_note}: already {short(base)}")
@@ -525,6 +555,8 @@ def update(rep, args, repo):
 
     d["problems"] = problems
     notes = [] if can_link else ["report-only: skill and ~/.claude links not verified (not the canonical checkout)"]
+    if no_helper:
+        notes.append("skill-everywhere: no trusted helper (canonical checkout has none, none on PATH)")
     d["notes"] = notes
     result = "needs attention: " + ", ".join(problems) if problems else "current"
     if notes:
@@ -536,7 +568,8 @@ def update(rep, args, repo):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="ade-update", description="Keep this machine's djbclark-ade checkout current.",
                                  epilog="Exit: 0 current, 10 behind/missing links (--check) or unresolved, 2 dirty tree, "
-                                        "3 diverged, 4 git, network or state-file error.")
+                                        "3 diverged (git's explicit non-fast-forward refusal), 4 git, network, "
+                                        "skill-everywhere or state-file error.")
     ap.add_argument("--repo", default=DEFAULT_REPO, help=f"the checkout (default {DEFAULT_REPO})")
     ap.add_argument("--check", action="store_true", help="report only; change nothing, exit 10 when behind or links missing")
     ap.add_argument("--json", action="store_true", help="print the report as JSON")

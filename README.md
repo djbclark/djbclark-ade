@@ -153,7 +153,11 @@ ls -l ~/.claude/commands ~/.claude/agents ~/.claude/hooks | grep -c djbclark-ade
    only when `--repo` is the canonical skills home (`~/src/djbclark-ade`, or the parent of
    `$SKILL_EVERYWHERE_ADE`); any other checkout (a pasture, a second clone) gets a report-only skill
    step, since linking would repoint every TUI's live skills into it. A skill directory whose name is
-   not `[A-Za-z0-9][A-Za-z0-9._-]*` is skipped and reported.
+   not `[A-Za-z0-9][A-Za-z0-9._-]*` is skipped and reported. The `skill-everywhere` it runs is the
+   canonical checkout's own `bin/skill-everywhere`, else the one on `PATH`, else the step is skipped with a
+   note: a checkout given by `--repo` (a pasture, a second clone, an untrusted PR branch) never has its own
+   `bin/` executed, not even under `--check`. A `skill-everywhere --check` that crashes (nonzero exit, bar its
+   own `warning:` status) or leaves a skill out of its output is an error (exit 4), never a partial success.
 3. **Symlinks.** `CLAUDE.md` is a symlink to `AGENTS.md`, and every file in `claude/{commands,agents,
    hooks}` is linked from `~/.claude/`; a gap is reported with the `ln` command (not changed; outside the
    canonical checkout the rows are counted only).
@@ -162,8 +166,10 @@ ls -l ~/.claude/commands ~/.claude/agents ~/.claude/hooks | grep -c djbclark-ade
    HEAD there. Every pull request adds its line to the changelog (AGENTS.md code-review rule 10),
    so that is the one place that says what changed and what is new.
 
-Exit codes: 0 current, 10 behind (`--check`) or a link unresolved, 2 dirty, 3 diverged, 4 git,
-network or state-file failure (including a `--repo` that is not the top of its work tree). It becomes `ade update` in Phase 1 (proposal 4.4 item 9); a daily `--check` timer
+Exit codes: 0 current, 10 behind (`--check`) or a link unresolved, 2 dirty, 3 diverged (git's explicit
+non-fast-forward refusal only), 4 git, network, `skill-everywhere` or state-file failure (including a `--repo`
+that is not the top of its work tree, and any other `git pull --ff-only` failure such as a timeout or lost
+authentication). It becomes `ade update` in Phase 1 (proposal 4.4 item 9); a daily `--check` timer
 is queued in `docs/queue.md`.
 
 ## Docs

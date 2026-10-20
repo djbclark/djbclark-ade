@@ -26,6 +26,9 @@
 # 2026-10-03 (see skills/model-routing, "agy has a burst limit").
 export PATH="/opt/homebrew/bin:$PATH"
 set -euo pipefail
+# BSD/GNU portability: Homebrew coreutils on the Mac, plain tools on Linux.
+_readlink() { if command -v greadlink >/dev/null 2>&1; then greadlink "$@"; else readlink "$@"; fi; }
+_realpath() { if command -v grealpath >/dev/null 2>&1; then grealpath "$@"; else realpath "$@"; fi; }
 ade_root="${SKILL_EVERYWHERE_ADE:-$HOME/src/djbclark-ade/skills}"
 priv_root="${SKILL_EVERYWHERE_PRIVATE:-${OPS_ROOT:-$HOME/ops}/site-private/skills}"
 
@@ -62,7 +65,7 @@ rc=0
 codex_instructions="${CODEX_HOME:-$HOME/.codex}/AGENTS.md"
 if [[ $mode == check && -L $codex_instructions && ! -e $codex_instructions ]]; then
   printf 'warning: codex global instructions dangling: %s -> %s\n' \
-    "$codex_instructions" "$(greadlink "$codex_instructions")" >&2
+    "$codex_instructions" "$(_readlink "$codex_instructions")" >&2
   rc=1
 fi
 for name in "$@"; do
@@ -84,11 +87,11 @@ for name in "$@"; do
     if ! command -v "$bin" >/dev/null; then printf '  %-13s not installed\n' "$bin"; continue; fi
     if [[ $dir == via* || $dir == x* ]]; then printf '  %-13s %s\n' "$bin" "${dir#x }"; continue; fi
     dir="${dir/#\~/$HOME}"; link="$dir/$name"
-    if [[ -L $link && "$(greadlink "$link")" == "$src" ]]; then state=linked
-    elif [[ -L $link && -e $src && "$(grealpath "$link" 2>/dev/null)" == "$(grealpath "$src")" ]]; then
-      state="chained via $(greadlink "$link")"
-    elif [[ -L $link && ! -e $link ]]; then state="dangling -> $(greadlink "$link")"
-    elif [[ -L $link ]]; then state="other link -> $(greadlink "$link")"
+    if [[ -L $link && "$(_readlink "$link")" == "$src" ]]; then state=linked
+    elif [[ -L $link && -e $src && "$(_realpath "$link" 2>/dev/null)" == "$(_realpath "$src")" ]]; then
+      state="chained via $(_readlink "$link")"
+    elif [[ -L $link && ! -e $link ]]; then state="dangling -> $(_readlink "$link")"
+    elif [[ -L $link ]]; then state="other link -> $(_readlink "$link")"
     elif [[ -e $link ]]; then state="real dir/file (not ours)"
     else state=missing; fi
     case $mode in

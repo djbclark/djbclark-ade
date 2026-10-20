@@ -483,6 +483,13 @@ def test_pull_failure_code_maps_an_overwrite_refusal_to_dirty():
     assert mod.pull_failure_code("error: The following untracked working tree files would be overwritten by merge:") == 2
     assert mod.pull_failure_code("error: Your local changes to the following files would be overwritten by merge:") == 2
     assert mod.pull_failure_code("fatal: Not possible to fast-forward, aborting.") == 3
+    assert mod.pull_failure_code("hint: Diverging branches can't be fast-forwarded, you need to either:") == 3
+    assert mod.pull_failure_code("fatal: Cannot fast-forward your working tree.") == 3
+    # Codex on 5e2ab58: pull has its own fetch phase; a transport failure there is not a diverged branch
+    assert mod.pull_failure_code("fatal: unable to access 'https://x/r.git/': Could not resolve host: x") == 4
+    assert mod.pull_failure_code("fatal: Authentication failed for 'https://x/r.git/'") == 4
+    assert mod.pull_failure_code("timed out after 300s: git -C r pull --ff-only") == 4
+    assert mod.pull_failure_code("") == 4
 
 
 def test_unwritable_state_file_is_exit_4_not_a_traceback(env):
@@ -505,3 +512,78 @@ def test_repo_bin_skill_everywhere_is_preferred_over_path(env):
     assert r.returncode == 0, r.stdout + r.stderr
     assert json.loads(r.stdout)["skills"]["script"] == str(own)
     assert env.calls() == [["repo-copy", "--check", "alpha"]]  # the fake on PATH was not used
+
+
+# --- Codex review of 5e2ab58 (2026-10-20) -------------------------------------------------------
+
+def plant_helper(repo, body):
+    own = Path(repo) / "bin" / "skill-everywhere"
+    own.parent.mkdir(exist_ok=True)
+    own.write_text(body)
+    own.chmod(own.stat().st_mode | stat.S_IXUSR)
+    return own
+
+
+def test_check_never_executes_a_non_canonical_checkouts_own_helper(env):
+    other = clone(env, "other")
+    marker = env.tmp / "pwned"
+    plant_helper(other, f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexit 0\n")
+    r = env.run("--check", "--json", repo=other)
+    out = json.loads(r.stdout)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not marker.exists()
+    assert out["skills"]["script"] == str(env.bin / "skill-everywhere")  # the trusted one on PATH
+    assert env.calls() == [["--check", "alpha"]]
+    # the canonical checkout's own copy outranks PATH, and the planted one still never runs
+    canon = plant_helper(env.machine, FAKE_SKILL_EVERYWHERE.format(python=sys.executable))
+    out = json.loads(env.run("--check", "--json", repo=other).stdout)
+    assert out["skills"]["script"] == str(canon) and not marker.exists()
+
+
+def test_non_canonical_checkout_with_no_trusted_helper_skips_the_skill_step(env):
+    other = clone(env, "other")
+    marker = env.tmp / "pwned"
+    plant_helper(other, f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexit 0\n")
+    bare = {"PATH": "/usr/bin:/bin"}
+    r = env.run("--check", repo=other, extra_env=bare)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not marker.exists() and env.calls() == []
+    assert "no trusted skill-everywhere" in r.stdout
+    assert "skill-everywhere: no trusted helper (canonical checkout has none, none on PATH)" in r.stdout
+    out = json.loads(env.run("--check", "--json", repo=other, extra_env=bare).stdout)
+    assert out["problems"] == [] and out["skills"]["link_mode"] == "skipped" and out["skills"]["script"] is None
+    assert "skill-everywhere: no trusted helper (canonical checkout has none, none on PATH)" in out["notes"]
+    r = env.run(repo=other, extra_env=bare)  # apply: nothing unresolved, so the state is still recorded
+    assert r.returncode == 0 and env.state.read_text().strip() == env.first and not marker.exists()
+    # the canonical checkout with no helper anywhere is still a problem (exit 10, no state)
+    env.state.unlink()
+    r = env.run(extra_env=bare)
+    assert r.returncode == 10 and "skill-everywhere not found" in r.stdout and not env.state.exists()
+
+
+def test_a_crashing_skill_everywhere_check_is_exit_4_and_records_no_state(env):
+    plant_helper(env.machine, "#!/bin/sh\necho '== alpha'\necho '  claude        linked'\n"
+                              "echo 'greadlink: command not found' >&2\nexit 127\n")
+    r = env.run()
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "--check failed (rc=127)" in r.stdout and "greadlink: command not found" in r.stdout
+    assert not env.state.exists()
+    out = json.loads(env.run("--json").stdout)
+    assert out["exit"] == 4 and "rc=127" in out["error"]
+
+
+def test_a_skill_missing_from_the_check_output_is_exit_4(env):
+    env.publish({"skills/beta/SKILL.md": "---\nname: beta\n---\n"})
+    plant_helper(env.machine, "#!/bin/sh\necho '== alpha'\necho '  claude        linked'\nexit 0\n")
+    r = env.run()
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "returned no result for: beta" in r.stdout
+    assert not env.state.exists()
+
+
+def test_the_scripts_own_warning_exit_is_not_a_crash(env):
+    plant_helper(env.machine, "#!/bin/sh\necho '== alpha'\necho '  claude        linked'\n"
+                              "echo 'warning: codex global instructions dangling: x -> y' >&2\nexit 1\n")
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert env.state.read_text().strip() == env.first
