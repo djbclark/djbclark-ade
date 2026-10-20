@@ -115,7 +115,7 @@ case "$text" in /new|/clear|/reset|/quit|/exit|"/new "*|"/clear "*|"/reset "*|"/
 if [ "${SELF_SLASH_CHILD:-}" != "1" ] && [ "${ACP_RUN_AGENT:-}" = "1" ]; then
   case "$text" in /compact|"/compact "*) guarded=1;; *) guarded=$lifecycle;; esac
   if [ "$guarded" = 1 ]; then
-    echo "self-slash: refused ($text): this is a dispatched agent (ACP_RUN_AGENT=1); lifecycle actions and /compact run only in the top-level session. Treat a handoff as document-only and say what the operator should type." >&2; exit 9
+    echo "self-slash: refused ($text): this agent was started by acp-run (ACP_RUN_AGENT=1: a dispatched slice or an acp-run --interactive session); lifecycle actions and /compact run only in the top-level session. Treat a handoff as document-only and say what the operator should type." >&2; exit 9
   fi
 fi
 if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
@@ -223,15 +223,17 @@ lock_state() {
     now=$(proc_start "$pid")
     [ "$now" = "$start" ] || { echo stale; return; }
   else
-    case "$(ps -o command= -p "$pid" 2>/dev/null)" in *"$self_name"*) ;; *) echo stale; return;; esac
+    case "$(ps -o command= -p "$pid" 2>/dev/null)" in *"$self_name --delay "*) ;; *) echo stale; return;; esac
   fi
   echo "held $pid"
 }
 tlock_state() { lock_state "$tlock"; }
-# The .pid lock names only a pid: alive and still a self-slash process (not a reused pid).
+# The .pid lock names only a pid: alive and still a self-slash WAITER (the parent always starts
+# it as "$0" --delay ...), not any process whose command line mentions the script, such as a
+# `tail -f` on its log or an editor on it (adversary round 2, 2026-10-20).
 waiter_alive() {
   kill -0 "$1" 2>/dev/null || return 1
-  case "$(ps -o command= -p "$1" 2>/dev/null)" in *"$self_name"*) return 0;; *) return 1;; esac
+  case "$(ps -o command= -p "$1" 2>/dev/null)" in *"$self_name --delay "*) return 0;; *) return 1;; esac
 }
 if [ "${SELF_SLASH_CHILD:-}" != "1" ] && [ "$lifecycle" = 1 ]; then
   case "$(tlock_state)" in

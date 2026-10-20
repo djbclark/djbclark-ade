@@ -171,7 +171,10 @@ PROBE = textwrap.dedent("""\
         env = seen["env"]
         return {"rc": rc, "cmd": seen["cmd"],
                 "herdr": sorted(k for k in env if k.startswith("HERDR_")),
-                "host_vars": sorted(k for k in env if k.startswith(("PASEO_", "ORCA_TERMINAL", "ACP_RUN_AGENT"))),
+                # Only the names the scrub is about: a Paseo-hosted test run also carries PASEO_CLI and
+                # PASEO_HOME, which acp-run rightly leaves alone (adversary round 2, 2026-10-20).
+                "host_vars": sorted(k for k in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ORCA_TERMINAL_HANDLE",
+                                                "ACP_RUN_AGENT") if k in env),
                 "grok_home": env.get("GROK_HOME"), "zcode_bin": env.get("ZCODE_BIN"),
                 "user_config": [r["data"] for r in rows if r["kind"] == "user_config"]}
 

@@ -209,6 +209,19 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.wait_log("finish: archived test-agent")
         self.wait_lock_gone()
 
+    def test_pid_lock_naming_a_process_that_only_mentions_self_slash_is_stale(self) -> None:
+        # adversary round 2 (2026-10-20): a reused pid now running `tail -f .../self-slash.log` must not
+        # count as the queued waiter; only a "<script> --delay ..." process does
+        self.lockdir.mkdir(parents=True)
+        self.log.parent.mkdir(parents=True, exist_ok=True)
+        self.log.touch()
+        holder = subprocess.Popen(["tail", "-f", str(self.log)], stdout=subprocess.DEVNULL)
+        self.children.append(holder.pid)
+        (self.lockdir / "test-agent.pid").write_text(f"{holder.pid}\n")
+        r = self.run_ss("/compact x")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.wait_log("sent /compact x")
+
     def test_lock_with_a_different_start_time_is_stale(self) -> None:
         self.lockdir.mkdir(parents=True)
         holder = subprocess.Popen(["sleep", "60"])
@@ -266,7 +279,7 @@ class SelfSlashPaseoTests(unittest.TestCase):
                      ["/quit"], ["/exit"], ["--dry-run", "/clear"], ["--dry-run", "--finish"]):
             r = self.run_ss(*args, ACP_RUN_AGENT="1")
             self.assertEqual(r.returncode, 9, f"{args}: {r.stdout}{r.stderr}")
-            self.assertIn("dispatched agent", r.stderr)
+            self.assertIn("ACP_RUN_AGENT=1", r.stderr)
         self.assertEqual(self.paseo_calls(), [])
         self.assertFalse(self.log.exists())
         self.assertFalse(self.lockdir.exists() and list(self.lockdir.iterdir()))
