@@ -4,6 +4,7 @@ A fake load-watch stands in (ACP_DISPATCH_LOAD_WATCH); conftest turns the gate o
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import textwrap
 import time
@@ -233,6 +234,24 @@ class TestLoadGateDetachNoWait(LoadGate):
         self.assertEqual(rec["load_gate_wait"], 1800)
         self.assertGreaterEqual(rec["wait_timeout"], 1800 + 300)        # the wait comes out of nobody's budget
 
+    def test_a_relative_load_watch_override_is_stored_absolute(self):
+        # Codex P2: the launchd runner has another cwd, so a relative string read as "missing" and failed open
+        rel = os.path.relpath(self.lw, os.getcwd())
+        self.assertFalse(os.path.isabs(rel))
+        r = self.detach(ACP_DISPATCH_LOAD_WATCH=rel)
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        stored = self.record()["load_watch"]
+        self.assertTrue(os.path.isabs(stored), stored)
+        self.assertTrue(os.path.exists(stored), stored)
+        self.assertEqual(stored, str(self.lw.resolve()))
+
+    def test_a_bare_load_watch_name_is_looked_up_on_path_and_stored_absolute(self):
+        r = self.detach(ACP_DISPATCH_LOAD_WATCH="load-watch", PATH=f"{self.tmp}{os.pathsep}{os.environ['PATH']}")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        stored = self.record()["load_watch"]
+        self.assertTrue(os.path.isabs(stored), stored)
+        self.assertEqual(stored, str(self.lw.resolve()))
+
     def test_runner_refuses_when_still_hot_and_finalize_leaves_it_alone(self):
         self.assertEqual(self.detach().returncode, 0)
         path = str(self.out / "jobs" / "s1.json")
@@ -318,7 +337,7 @@ class TestPendingRunnersHoldTheCap(LoadGate):
         rec = self.record()
         self.assertEqual(rec["inflight_cap"], 1)
         self.assertEqual(rec["state_root"], str(self.tmp / "state"))
-        self.assertEqual(rec["load_watch"], str(self.lw))
+        self.assertEqual(rec["load_watch"], str(self.lw.resolve()))
 
     def test_a_resume_record_is_exempt_from_the_recheck(self):
         path = self.deferred()

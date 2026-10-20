@@ -2584,6 +2584,18 @@ def load_wait_seconds(a: argparse.Namespace) -> int:
         return LOAD_WAIT_DEFAULT
 
 
+def resolve_load_watch(path: str) -> str:
+    """The load-watch override as an absolute path: a bare name is looked up on PATH, anything else is made
+    absolute against this process's cwd (what the synchronous gate always did). Stored in a --detach --no-wait
+    record so the launchd runner, which has another cwd, finds the same executable."""
+    expanded = os.path.expanduser(path)
+    if os.sep not in expanded:
+        found = shutil.which(expanded)
+        if found:
+            expanded = found
+    return str(Path(expanded).resolve())
+
+
 def load_gate(wait: int, path: str | None = None) -> tuple[bool, dict | None, str]:
     """Ask `load-watch admit --wait WAIT --json` whether a slice may start (never throttles anything).
     Returns (admitted, info, why): info is {"load1", "per_core", "waited_s"} when load-watch answered, or
@@ -2596,8 +2608,7 @@ def load_gate(wait: int, path: str | None = None) -> tuple[bool, dict | None, st
         print(f"acp-dispatch: warning: {why}; starting without the load gate", file=sys.stderr)
         return True, {"load1": None, "per_core": None, "waited_s": 0, "error": why}, why
 
-    path = path or os.environ.get("ACP_DISPATCH_LOAD_WATCH") or str(HERE / "load-watch")
-    path = str(Path(path).expanduser().resolve())
+    path = resolve_load_watch(path or os.environ.get("ACP_DISPATCH_LOAD_WATCH") or str(HERE / "load-watch"))
     if not Path(path).exists():
         return unknown(f"{path} not found")
     env = {k: v for k, v in os.environ.items() if not k.startswith(LOAD_SCRUB_PREFIX)}
@@ -3804,7 +3815,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         rec["load_gate_pending"], rec["load_gate_wait"] = True, gate_wait
         rec["inflight_cap"], rec["state_root"] = cap, str(STATE_ROOT)
         if os.environ.get("ACP_DISPATCH_LOAD_WATCH"):
-            rec["load_watch"] = os.environ["ACP_DISPATCH_LOAD_WATCH"]
+            # absolute: the runner's cwd is not ours, and a relative path there reads as "missing" and fails open
+            rec["load_watch"] = resolve_load_watch(os.environ["ACP_DISPATCH_LOAD_WATCH"])
     identity = git_identity_warning(Path(a.dir).resolve())
     if identity:
         rec["git_identity_warning"] = identity
