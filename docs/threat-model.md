@@ -7,9 +7,11 @@ Every claim names the file that shows it; a claim without a file is the operator
 "operator". Re-read the code before relying on a line here: facts rot.
 
 This repo is **personal tooling for one operator's machine, published as a public GitHub repo by choice**
-(`djbclark/djbclark-ade`). It runs no internet-facing service; `bin/firecrawl-router` listens on loopback
-only (random per-process token, or none under `--open` or serve-only; file header), so any local process can
-use it, and spend Firecrawl/LLM quota through it, while it runs. It holds no secret values. What makes it
+(`djbclark/djbclark-ade`). It runs no internet-facing service. `bin/firecrawl-router` is an HTTP listener, on
+loopback by default (`--listen` defaults to `127.0.0.1:0`). With a child command it requires a random
+per-process bearer token. `--open` drops the token and refuses a non-loopback address. The serve-only form
+(no child, "for tests") checks no token and binds whatever `--listen` names. While it runs, any process that
+can reach it can spend Firecrawl/LLM quota through it. It holds no secret values. What makes it
 security-relevant is that it launches AI agents that run commands as the operator, unattended, and moves
 their output around.
 
@@ -82,7 +84,8 @@ What an attacker would want, in order of damage:
 8. **Web content and repo files** fetched by an agent mid-session (prompt-injection carrier).
 9. **`load-watch` pane typing**: it writes a brief and types one line into an agent session's pane via
    `session-finder/relay.py` (`bin/load-watch` header), so text the tool composes becomes input to an agent.
-10. **`bin/firecrawl-router`**: a loopback HTTP listener (see the intro); any local process can call it.
+10. **`bin/firecrawl-router`**: an HTTP listener, loopback by default (see the intro); any process that can
+    reach it can call it.
 11. **Hermes to Claude delegation** (`delegate_task`, `claude-sub`; `docs/mcp-servers.md`): a message Hermes
     acts on can become a headless agent run.
 12. **`bin/skillopt-night`**, the nightly launchd job: it feeds agent transcripts (which hold fetched web
@@ -138,7 +141,7 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   the repo has no rulesets. Nothing on GitHub requires a pull request, a review, a status check or
   `--match-head-commit`. Any token that can push (the operator's `gh` login, a local agent running as the
   operator, a cloud agent's app token if it has contents: write) can push straight to `master`, and the
-  launchd jobs run `master`'s scripts from the live checkout (4.6). The adversary verdict and the
+  launchd jobs run whatever is checked out in the live tree (normally `master`) (4.6). The adversary verdict and the
   exact-head merge are procedure, not enforcement.
 * **Gap 2 (verified 2026-10-20).** Cursor's Approval Agent (GitHub login `cursor`) submitted an APPROVED
   review on PRs 7, 8 and 9 within about a minute of each one opening, before any other review. It approves
@@ -159,7 +162,7 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 
 ### 4.5 Hermes/Telegram as a command channel
 
-* **Control.** `hermes-ping` is one-way and used for notices (`bin/load-watch`, `bin/zcode-key-auth`).
+* **Control.** `hermes-ping` (operator) is one-way and used for notices (`bin/load-watch`, `bin/zcode-key-auth`).
 * **Gap.** `mcp__hermes__messages_send`, `events_wait` and `permissions_respond` (`docs/mcp-servers.md`)
   are two-way: an injected agent can message the operator and can answer Hermes's pending exec or plugin
   approval prompts. Text read through Hermes comes from whoever can message the operator on a connected
@@ -171,7 +174,7 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 
 * **Control.** Plists are installed by tools' own subcommands (`acp-dispatch reap --install`,
   `load-watch install`, `zcode-key-auth install`, `context-budget-check` and `skillopt-night install`),
-  copied from `launchd/` to `~/Library/LaunchAgents`. I found no installer for
+  copied from `launchd/` to `~/Library/LaunchAgents`. No installer was found (2026-10-20) for
   `launchd/com.djbclark.routing-recalibrate.plist`; how it is installed is unverified. Per-slice jobs remove
   their own label on exit; a sweep reaps dead ones.
 * **Gap.** A plist in a PR is code that runs as the operator at every login: review label,
@@ -229,7 +232,7 @@ tampered state file can do is still a finding (section 6 item 6).
    (4.2 gap 1, 4.9). Operator-accepted (proposal 4.5 item 1).
 2. **Yolo agents** (operator 2026-10-14): the mitigation is reviewing outputs, not restricting tools.
 3. **The repo is public by choice** (since 2026-10-08). Anything committed is world-readable; secrets
-   policy depends on rule 3, not on privacy.
+   policy depends on rule 3 (PR 9), not on privacy.
 4. **vps-primary is trusted**; a compromise there is accepted as total (proposal Q18, risk 10).
 5. **Vendor and platform risk**: GitHub, Forgejo, Hyades, model vendors, Cursor and Codex services
    (proposal T4 lists these as accepted outside dependencies).
