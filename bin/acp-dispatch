@@ -166,7 +166,11 @@ and the ordinary quota path follows (auto-resume at the reset, or the reroute fo
 Otherwise `transient` stays. For transient and outage `check` suggests `reroute RECORD --agent A
 --model M` (route_agent's top route for the record's kind, this pool excluded) and never
 `--escalate`: a transport error says nothing about the tier. Other failures keep the one-rung
-`--escalate` hint.
+`--escalate` hint. A slice a signal killed (a restart's SIGTERM, SIGKILL) or that was reaped lost
+(power loss) says nothing about the tier either (2026-10-20): `check` prints
+`resume in place: acp-dispatch resume RECORD --detach --no-wait` (or, while the login sweep's
+restart-resume is running, `resume-scheduled`; or `no resumable session` when the session cannot be
+reopened) and never `--escalate`. Exit codes are unchanged.
 
 Quota-stop refinements (2026-10-18): (1) a reset further out than `[dispatch].
 auto_resume_max_wait_hours` (default 6) is not waited for — agy's weekly cap resets ~148 h out
@@ -2996,7 +3000,22 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
     if reroute:
         st = "quota-checkpointed"
         det = f"checkpoint preserved; reroute: {reroute}; or {manual_resume_hint(rec, path)}"
-    if finished and st in ("no-report", "partial") and "quota" not in failure:
+    signal_killed = bool(finished and st in ("no-report", "partial") and not rec.get("closed")
+                         and (rec.get("signal") or failure.startswith(f"{NO_REPORT_PREFIX} lost".lower())))
+    if signal_killed:
+        # A signal kill (restart SIGTERM, SIGKILL) or a vanished process (power loss) says nothing about
+        # the tier, the same as a transport error: no `--escalate`, resume in place when the session can
+        # be reopened (2026-10-20; the record path of 4be8684 and the login sweep of 180d8b8 do the same).
+        sid, supported = session_info(rec)
+        rr = rec.get("restart_resume") or {}
+        if not sid or supported is False or resume_unsupported(rec):
+            det = f"{det}; no resumable session (re-dispatch the slice)"
+        elif rr.get("state") == "resuming":
+            det = f"{det}; resume-scheduled: the login sweep is resuming it in place (restart-resume)"
+        else:
+            note = f" (the login sweep's restart-resume {rr['state']}: {rr.get('detail', '')})" if rr.get("state") else ""
+            det = f"{det}; {manual_resume_hint(rec, path)}{note}"
+    elif finished and st in ("no-report", "partial") and "quota" not in failure:
         # a slice that failed on its tier climbs one rung (operator decision 1.4, 2026-10-18);
         # quota stops carry their own reroute rule above, BLOCKED asks the lead instead. A
         # transport error (transient, outage) says nothing about the tier: reroute to the
