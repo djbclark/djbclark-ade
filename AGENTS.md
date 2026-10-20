@@ -126,9 +126,11 @@ no API key, $0).
 
 ## Code review (what a reviewer checks here)
 
-Readers as of 2026-10-20: Codex (`@codex review`; its automatic review on PR
-open is blocked by the same environment-catalog bug as task mentions), Cursor's
-Security Agent and Approval Agent checks, and the `adversary` sub-agent. A
+Readers as of 2026-10-20: Codex (`@codex review`; its Security Review runs with
+each code review; on PR 9 its automatic review on PR open answered "create an
+environment", the environment-catalog bug that also blocks task mentions),
+Cursor's Security Agent and Approval Agent checks, and the `adversary`
+sub-agent. A
 pull request here is expected to meet these; flag any it misses.
 
 1. **The PR body quotes the adversary's verdict line** (`APPROVE`, `APPROVE,
