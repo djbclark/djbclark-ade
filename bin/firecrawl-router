@@ -605,10 +605,18 @@ def build_router(env, token: str) -> Router:
                   extractor=build_extractor(env))
 
 
-def serve(router: Router, listen: str) -> http.server.ThreadingHTTPServer:
+def serve(router: Router, listen: str, require_loopback: bool = False) -> http.server.ThreadingHTTPServer:
+    """Bind and start serving. With require_loopback, the address actually bound must be loopback: the
+    check runs after bind and before the first request can be accepted (2026-10-20), so a resolver that
+    maps "localhost" elsewhere gets no window at all; the socket is closed and SystemExit(2) raised."""
     host, _, port = listen.rpartition(":")
     srv = http.server.ThreadingHTTPServer((host or "127.0.0.1", int(port or 0)), make_handler(router))
     srv.daemon_threads = True
+    if require_loopback and not ipaddress.ip_address(srv.server_address[0]).is_loopback:
+        bound = srv.server_address[0]
+        srv.server_close()
+        print(f"firecrawl-router: refusing to serve without a token on {bound}", file=sys.stderr, flush=True)
+        raise SystemExit(2)
     router.public_base = f"http://{srv.server_address[0]}:{srv.server_address[1]}"
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
@@ -637,12 +645,9 @@ def main(argv=None) -> int:
 
     token = secrets.token_urlsafe(32) if child and not args.open else ""
     router = build_router(os.environ, token)
-    srv = serve(router, args.listen)
-    if not token and not ipaddress.ip_address(srv.server_address[0]).is_loopback:
-        # defence in depth: the string check above passed, the resolver bound something else
-        srv.shutdown()
-        srv.server_close()
-        sys.exit(f"firecrawl-router: refusing to serve without a token on {srv.server_address[0]}")
+    # defence in depth: the string check above passed; the address actually bound is checked before
+    # the server accepts anything (a resolver could map "localhost" elsewhere)
+    srv = serve(router, args.listen, require_loopback=not token)
     fb = router.fallback.base if router.fallback else "none"
     print(f"firecrawl-router: {router.public_base} primary={router.primary.base} fallback={fb}",
           file=sys.stderr, flush=True)
