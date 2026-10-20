@@ -14,6 +14,9 @@ agent what changed and what is new. Entries end with the pull request number.
 - `CHANGELOG.md`, this file, and the rule that every pull request adds a line to it; README
   "Update (this machine)"; proposal v2.4 with `ade update` as a Phase 1 command and acceptance
   test T8 (2026-10-20).
+- `self-slash --finish`: end the session; on Paseo it waits for idle and archives the agent without
+  `--force`, and `self-slash "/quit"` there is mapped to it (Paseo runs no `/quit`); `/new`, `/clear`,
+  `/reset` and `--finish` take a per-agent lifecycle lock (#TBD).
 - `docs/threat-model.md`, the threat model Codex's security review reads (#10).
 - AGENTS.md "Code review" section: what a reviewer checks on every pull request here (#9).
 - `bin/cursor-cloud`: launch and inspect Cursor Cloud Agents from the terminal, with unit tests
@@ -27,6 +30,9 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
+- `handoff` ends in a new Step 9 that clears the session and starts `/baton` by itself; `loose`
+  Rule 4 offers handoff and continue, finish and archive, or keep working; `baton` never clears
+  a session itself (#TBD).
 - `route_agent`: pool state comes from `aiuse --available --json`, with the snapshot file as the
   fallback (#12).
 

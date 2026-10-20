@@ -211,6 +211,19 @@ def _can_self_slash():
                 or os.environ.get("PASEO_AGENT_ID"))
 
 
+def _paseo_finish_note():
+    # bin/self-slash picks herdr, then Orca, then Paseo.  On Paseo /quit is not a command
+    # (it reaches Claude as plain text), so a finished task with nothing to continue ends
+    # with --finish, which archives the agent once idle (2026-10-20).
+    if os.environ.get("HERDR_PANE_ID") or os.environ.get("ORCA_TERMINAL_HANDLE"):
+        return ""
+    if not os.environ.get("PASEO_AGENT_ID"):
+        return ""
+    return (" On Paseo, a finished task with nothing to continue ends with "
+            "~/src/djbclark-ade/bin/self-slash --finish as the last action instead "
+            "(it archives this agent once idle; /quit does nothing there).")
+
+
 def _boundary_message(total):
     # self-slash refuses outside herdr, Orca and Paseo: there the operator types /new.
     new = ("~/src/djbclark-ade/bin/self-slash \"/new\"" if _can_self_slash()
@@ -223,6 +236,7 @@ def _boundary_message(total):
         "behind. Do not compact mid-task."
         + (" self-slash then sends /baton into the fresh session itself (2026-10-19)."
            if _can_self_slash() else "")
+        + _paseo_finish_note()
     )
 
 
@@ -244,7 +258,8 @@ def _ask_message(total, growth, repeat):
             "in-context: save what the next turn needs, run self-slash "
             "\"/compact <focus>\" ONCE and end the turn. Only if self-slash "
             "refuses (a draft on the input line) ask the operator for /new or "
-            "/compact. "
+            "/compact."
+            + _paseo_finish_note() + " "
             + _COST_NOTE
         )
     return (

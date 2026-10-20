@@ -321,3 +321,18 @@ def test_self_slash_not_sent_lines_do_not_count(tmp_path):
     lines = [f"{_now()} orca th1: NOT sent: /compact was already sent to orca th1 5s ago",
              f"{_now()} orca th1: waiter 123 still queued after 900s; NOT sent: /new"]
     assert _self_slash(tmp_path, "/new", log_lines=lines).returncode == 0
+
+
+def test_paseo_host_gets_the_finish_note(hook, tmp_path, monkeypatch):
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
+    out, _ = hook("s-paseo", _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
+    assert "self-slash --finish" in out and "archives this agent" in out
+    assert 'self-slash "/new" ONCE' in out
+
+
+@pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE"])
+def test_finish_note_is_paseo_only(hook, tmp_path, monkeypatch, var):
+    monkeypatch.setenv(var, "w1:p1")
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")  # herdr and Orca win in self-slash
+    out, _ = hook("s-nofinish-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
+    assert "--finish" not in out

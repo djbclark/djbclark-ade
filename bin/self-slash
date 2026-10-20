@@ -5,6 +5,7 @@
 # (memory/reference_claude_code_model_cannot_run_builtin_slash_commands.md).
 #
 #   self-slash [--delay S] [--dry-run] [--then "/cmd" | --no-then] "/compact <focus>"
+#   self-slash [--delay S] [--dry-run] --finish
 #   (--dry-run: validate only, never test against a live pane without it)
 #
 # --then "/cmd": after the command has been sent, the same waiter waits for the
@@ -14,6 +15,22 @@
 # resuming from its Tier 1 pointer with nobody typing; --no-then (or --then "")
 # turns it off.  The follow-up starts SELF_SLASH_THEN_DELAY (default 10) seconds
 # after the first send so the fresh session is up; it is logged as "then: ...".
+#
+# --finish: end this session after the turn.  On herdr and Orca that is the real built-in
+# /quit.  On Paseo /quit is not a command (the daemon runs only clear, compact, context,
+# ... itself; /quit, /exit and /new reach Claude as plain text and do nothing, seen twice
+# 2026-10-20), so --finish waits for the agent to be idle (`paseo wait`, bounded by
+# SELF_SLASH_WAIT) and then runs `paseo agent archive <id>` WITHOUT --force: the agent
+# is soft-deleted (kept under `paseo ls -a` and the UI's "Archived agents"), and if it
+# became busy again the archive is refused and logged ("finish: archive refused", exit
+# 8), never escalated to --force (that interrupts a running turn).  `self-slash "/quit"`
+# on Paseo is mapped to --finish and says so on stderr (djbclark, 2026-10-20: "the goal is
+# for handoffs to immediately clear context and then start a baton ..., or if there is
+# nothing to continue to just clear context but in a way that the human can still read
+# the final results").  Lifecycle actions (--finish, /new, /clear, /reset) also take a
+# per-agent lock, ~/.local/state/self-slash/<host>_<pane>.lifecycle holding the waiter's
+# pid: a second lifecycle for the same agent is refused (exit 7) while the first waiter
+# lives; a lock whose pid is dead is removed.
 #
 # Hosts: a herdr pane ($HERDR_PANE_ID, via `herdr agent read` / `herdr pane run`),
 # an Orca terminal ($ORCA_TERMINAL_HANDLE, via `orca terminal read --screen` /
@@ -59,16 +76,20 @@
 # /rename; /quit left its menu row open, cursor-agent 2026.10.01).
 export PATH="/opt/homebrew/bin:$PATH"
 set -u
-delay=6; dry=0; then=""; then_set=0
+delay=6; dry=0; then=""; then_set=0; finish=0
 while :; do case "${1:-}" in
   --delay) delay="$2"; shift 2;;
   --dry-run) dry=1; shift;;
   --then) then="$2"; then_set=1; shift 2;;
   --no-then) then=""; then_set=1; shift;;
+  --finish) finish=1; shift;;
   *) break;;
 esac; done
 text="${1:-}"
-[ -n "$text" ] || { echo "usage: self-slash [--delay S] [--dry-run] [--then \"/cmd\" | --no-then] \"/command args\"" >&2; exit 2; }
+[ "$finish" = 1 ] && [ -z "$text" ] && text="/quit"
+[ -n "$text" ] || { echo "usage: self-slash [--delay S] [--dry-run] [--then \"/cmd\" | --no-then] \"/command args\"
+       self-slash [--delay S] [--dry-run] --finish   (end the session; Paseo: archive this agent)" >&2; exit 2; }
+if [ "$finish" = 1 ] && [ "$text" != /quit ]; then echo "self-slash: --finish takes no command (got: $text)" >&2; exit 2; fi
 if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
   host=herdr; pane="$HERDR_PANE_ID"
   # $HERDR_PANE_ID is fixed at launch; after the tab is moved to another workspace
@@ -104,7 +125,15 @@ case "$then" in ""|/*) ;; *) echo "self-slash: --then takes a slash command (got
 if [ "$host" = paseo ]; then
   # Paseo's Claude provider knows /clear, not Claude Code's /new or /reset aliases.
   case "$text" in /new|/reset) text="/clear";; "/new "*|"/reset "*) text="/clear";; esac
+  # ... and no /quit or /exit at all: sent as text they do nothing.  End = archive.
+  case "$text" in
+    /quit|/exit|"/quit "*|"/exit "*)
+      [ "${SELF_SLASH_CHILD:-}" = "1" ] || echo "self-slash: $text is not a Paseo command (it would reach Claude as plain text); mapping to --finish: archive this agent once idle, no --force" >&2
+      finish=1;;
+  esac
 fi
+if [ "${SELF_SLASH_CHILD:-}" = "1" ]; then finish="${SELF_SLASH_FINISH:-0}"; fi
+[ "$finish" = 1 ] && [ "$host" = paseo ] && then=""
 if [ "$tui" = cursor ]; then marker="→"; else marker="❯"; fi
 # herdr and Orca both send a long argument as a bracketed paste and Claude Code then
 # treats it as pasted content, not a command (seen 2026-10-09 with ~900 chars): keep it short.
@@ -133,11 +162,39 @@ gap_check() {
 if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   gap_check >&2 || exit 7
 fi
-[ "$dry" = 1 ] && { echo "self-slash: dry run, would send to $host $pane after ${delay}s: ${text:0:80}${then:+; then, once idle again: $then}"; exit 0; }
-mkdir -p "$(dirname "$log")"
+lockdir="$HOME/.local/state/self-slash"
+safe_pane=$(printf '%s' "$pane" | gtr -c 'A-Za-z0-9_.-' '_')
+lock="$lockdir/$safe_pane.pid"
+# Lifecycle actions (end the session, or throw its context away) hold a per-agent lock for
+# the whole transition, /new -> /baton included, so two waiters cannot race (a /clear
+# racing an archive).  The parent checks and takes it; the lock holds the waiter's pid.
+lifecycle=0
+if [ "$finish" = 1 ]; then lifecycle=1
+else case "$text" in /new|/clear|/reset|"/new "*|"/clear "*|"/reset "*) lifecycle=1;; esac; fi
+tlock="$lockdir/${host}_$safe_pane.lifecycle"
+# tlock_state: print "free", "stale" (dead pid, or an empty file that stayed empty) or
+# "held <pid>".
+tlock_state() {
+  [ -e "$tlock" ] || { echo free; return; }
+  holder=$(cat "$tlock" 2>/dev/null)
+  [ -n "$holder" ] || { sleep 0.3; holder=$(cat "$tlock" 2>/dev/null); }
+  if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then echo "held $holder"; else echo stale; fi
+}
+if [ "${SELF_SLASH_CHILD:-}" != "1" ] && [ "$lifecycle" = 1 ]; then
+  case "$(tlock_state)" in
+    held*) holder=$(cat "$tlock"); echo "self-slash: a lifecycle action (/new, /clear, /reset or --finish) is already queued for $host $pane (pid $holder); not queuing another. See $log." >&2; exit 7;;
+  esac
+fi
+if [ "$dry" = 1 ]; then
+  if [ "$finish" = 1 ] && [ "$host" = paseo ]; then
+    echo "self-slash: dry run, would wait ${delay}s, wait for $pane to be idle, then archive it (paseo agent archive $pane, never --force)"
+  else
+    echo "self-slash: dry run, would send to $host $pane after ${delay}s: ${text:0:80}${then:+; then, once idle again: $then}"
+  fi
+  exit 0
+fi
+mkdir -p "$(dirname "$log")" "$lockdir"
 prompt_line="$(dirname "$(realpath "$0")")/../skills/session-finder/prompt_line.py"
-lockdir="$HOME/.local/state/self-slash"; mkdir -p "$lockdir"
-lock="$lockdir/$(printf '%s' "$pane" | gtr -c 'A-Za-z0-9_.-' '_').pid"
 if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   after=""
   if [ -s "$lock" ] && kill -0 "$(cat "$lock")" 2>/dev/null; then
@@ -152,7 +209,18 @@ if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   fi
 fi
 if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
-  SELF_SLASH_CHILD=1 SELF_SLASH_AFTER="$after" SELF_SLASH_THEN="$then" nohup "$0" --delay "$delay" "$text" >>"$log" 2>&1 </dev/null &
+  if [ "$lifecycle" = 1 ]; then
+    # Atomic create (noclobber) with our own pid as the placeholder; the waiter's pid
+    # replaces it below.  A dead holder's lock is removed first.
+    [ "$(tlock_state)" = stale ] && rm -f "$tlock"
+    if ! ( set -C; echo $$ > "$tlock" ) 2>/dev/null; then
+      echo "self-slash: another lifecycle action won the lock for $host $pane (pid $(cat "$tlock" 2>/dev/null)); not queuing." >&2; exit 7
+    fi
+  fi
+  SELF_SLASH_CHILD=1 SELF_SLASH_AFTER="$after" SELF_SLASH_THEN="$then" SELF_SLASH_FINISH="$finish" \
+    SELF_SLASH_TLOCK="$([ "$lifecycle" = 1 ] && echo "$tlock")" \
+    nohup "$0" --delay "$delay" "$text" >>"$log" 2>&1 </dev/null &
+  if [ "$lifecycle" = 1 ]; then echo $! > "$tlock.$$" && mv -f "$tlock.$$" "$tlock"; fi
   echo "self-slash: queued for $host $pane in ${delay}s${then:+, then $then once the session is idle again} (log: $log)"
   exit 0
 fi
@@ -230,7 +298,16 @@ fi
 if [ -s "$lock" ] && [ "$(cat "$lock")" != "$$" ] && kill -0 "$(cat "$lock")" 2>/dev/null; then
   echo "$(gdate '+%F %T') $host $pane: another waiter (pid $(cat "$lock")) already queued; NOT sent: ${text:0:80}"; exit 7
 fi
-echo $$ > "$lock"; trap 'rm -f "$lock"' EXIT
+echo $$ > "$lock"
+# The lifecycle lock, when this chain holds one, names this pid (the parent wrote it):
+# release it with the pid lock, but only if it is still ours.
+release() {
+  rm -f "$lock"
+  tl="${SELF_SLASH_TLOCK:-}"
+  [ -n "$tl" ] && [ "$(cat "$tl" 2>/dev/null)" = "$$" ] && rm -f "$tl"
+  return 0
+}
+trap release EXIT
 sleep "$delay"
 # herdr: never send while the session is mid-turn (status "working"); the input is
 # accepted but Claude Code never runs it.  Wait for idle, bounded by SELF_SLASH_WAIT.
@@ -271,6 +348,21 @@ for p in json.load(sys.stdin).get("result", {}).get("panes", []):
     sleep 5; waited=$((waited+5))
   done
 }
+# Paseo --finish: archive this agent, without --force.  `paseo wait` blocks until the
+# agent is idle (the turn that queued this has ended), so the final message is in the
+# timeline that archive snapshots.  An agent that became busy again is refused by archive
+# itself; never escalate to --force (it interrupts the running turn).  The env -u keeps
+# the daemon from treating the call as agent-originated, as in send_text.
+finish_paseo() {
+  env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD "$paseo_cli" wait "$pane" --timeout "${SELF_SLASH_WAIT:-900}" --json >/dev/null 2>&1 \
+    || { echo "$(gdate '+%F %T') $host $pane: finish: gave up after ${SELF_SLASH_WAIT:-900}s, agent still running; NOT archived"; exit 6; }
+  out=$(env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD "$paseo_cli" agent archive "$pane" 2>&1); rc=$?
+  if [ "$rc" = 0 ]; then
+    echo "$(gdate '+%F %T') $host $pane: finish: archived $pane"; exit 0
+  fi
+  echo "$(gdate '+%F %T') $host $pane: finish: archive refused (rc=$rc): $(printf '%s' "$out" | gtr -s ' \n' ' ' | cut -c1-200)"; exit 8
+}
+if [ "$finish" = 1 ] && [ "$host" = paseo ]; then finish_paseo; fi
 wait_idle
 noprompt=0; sendfail=0; drafted=0; last_prompt=""; same=0
 while :; do
@@ -308,7 +400,7 @@ while :; do
     # whole wait (delay, idle, empty prompt) against the fresh session.
     echo "$(gdate '+%F %T') $host $pane: then: ${then:0:80} once the session is idle again (in ${SELF_SLASH_THEN_DELAY:-10}s at the earliest)"
     trap - EXIT
-    SELF_SLASH_THEN= SELF_SLASH_AFTER= SELF_SLASH_CHILD=1 exec "$0" --delay "${SELF_SLASH_THEN_DELAY:-10}" "$then"
+    SELF_SLASH_THEN= SELF_SLASH_AFTER= SELF_SLASH_FINISH=0 SELF_SLASH_CHILD=1 exec "$0" --delay "${SELF_SLASH_THEN_DELAY:-10}" "$then"
   fi
   sendfail=$((sendfail+1)); [ "$sendfail" -le 6 ] || break
   echo "$(gdate '+%F %T') $host $pane: send failed (attempt $sendfail)"; sleep 5

@@ -3,9 +3,9 @@ name: loose
 description: >-
   Audit the current session for loose ends (unfinished work, unverified claims,
   leftover test artifacts, unreported upstream bugs), step the operator through
-  each with /steps, then ask whether to /handoff or /quit. Use for /loose, "any
-  loose ends?", "did we finish everything?", or unprompted before a handoff or
-  at the end of a long session.
+  each with /steps, then ask whether to hand off and continue, finish and
+  archive, or keep working. Use for /loose, "any loose ends?", "did we finish
+  everything?", or unprompted before a handoff or at the end of a long session.
 ---
 
 # loose — find what is unfinished, then make it decidable
@@ -86,28 +86,38 @@ you found. Not for the choosing.
 
 Categories 9 and 10 are **not** questions. Report them and move on.
 
-## Rule 4 — close by asking: /handoff or /quit
+## Rule 4 — close by asking: handoff and continue, finish and archive, or keep working
 
 Once `/steps` has finished (its summary table, and any queued work done), end
 with one more prompt using the **same tool as `/steps`**, every time, even when
 the audit found nothing:
 
-1. **`/handoff`** — write a Tier 2 handoff so a later session can resume.
-   Recommend it when anything is still open or deferred, or the session was long
-   or produced context that is not already durable.
-2. **`/quit`** — end the session. Recommend it when the audit closed everything
+1. **Handoff and continue** — the `handoff` skill: write a Tier 2 handoff, then
+   (its Step 9) clear the context of this same session and start `/baton`, so work
+   carries on with nobody typing. Recommend it when anything is still open or
+   deferred, or the session was long or produced context that is not already
+   durable.
+2. **Finish and archive this session** — write the final results as the last
+   message, then end the session. Recommend it when the audit closed everything
    and all work is committed and pushed.
 3. **Keep working** — stay in the session; nothing else happens.
 
 Put the recommended one first with `(Recommended)` and give the reason in its
 description, e.g. "2 items deferred; a handoff keeps them findable".
 
-Then act on the answer. For `/handoff`, invoke the `handoff` skill. A built-in
-like `/quit` is not a skill, but you can queue it yourself (operator, 2026-10-09:
-"you should actually be able to run /quit yourself"): when he picks `/quit`, finish
+Then act on the answer. For handoff and continue, invoke the `handoff` skill. A
+built-in like `/quit` is not a skill, but you can queue it yourself (operator,
+2026-10-09: "you should actually be able to run /quit yourself"): when he picks
+finish, write the final results as the last message so they stay readable, finish
 everything first (commits pushed, no pending reads), then run
-`~/src/djbclark-ade/bin/self-slash "/quit"` as the last action and end the turn at
-once. If the handoff was chosen, offer the same quit prompt again once it is written.
+`~/src/djbclark-ade/bin/self-slash --finish` as the last action and end the turn
+at once. On herdr and Orca that is the old `/quit`; on Paseo `/quit` does nothing
+(it reaches Claude as plain text, seen twice 2026-10-20), so `--finish` waits for
+idle and archives this agent without `--force` (it stays under "Archived agents",
+and the operator can still read the final message). djbclark, 2026-10-20: "if there
+is nothing to continue to just clear context but in a way that the human can still
+read the final results". If the handoff was chosen and it was run document-only,
+offer the finish prompt again once it is written.
 
 `/compact` works the same way, but only when the context prompt's compact tier
 fires (+200k since the start or last compaction) or he picked it, never just

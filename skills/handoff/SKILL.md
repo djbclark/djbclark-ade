@@ -236,3 +236,26 @@ It keeps a title the operator set by hand. It works in Claude Code, zcode, Grok,
 cursor-agent, OpenCode, Codex in a herdr pane, and omp (once its bridge extension is
 installed and omp restarted), and exits 2 without harm where it finds no supported
 session; in that case skip it silently. Add its one-line result to the report.
+
+## Step 9 — Clear and continue
+
+Last action, after Step 8 (djbclark, 2026-10-20: "handoffs [should] immediately clear context and
+then start a baton and continue running without human intervention"). Run
+
+```bash
+~/src/djbclark-ade/bin/self-slash "/new"
+```
+
+**once**, and end the turn at once (no further tool call, no question). On Paseo that sends `/clear`
+to this same agent and then exactly one `/baton` into the fresh session; on herdr and Orca it sends
+`/new` and then `/baton` (`self-slash` queues the `/baton` itself, `--then`, so never type or queue
+one yourself). The fresh session resumes from the Tier 1 pointer Step 7 just wrote.
+
+If `self-slash` refuses (exit 7: the 30-minute gap check or a lifecycle already queued; or a draft
+on the input line; or exit 3 outside herdr, Orca and Paseo), do not retry or loop: tell the operator
+`/new` is ready and stop.
+
+**Document only:** skip this step when the handoff skill is run as a sub-step of another skill (for
+example `loose` Rule 4 or a skill that clears the session itself), or when the operator says "doc
+only" or otherwise asks for the document without a restart. Say in the report that Step 9 was
+skipped and why.
