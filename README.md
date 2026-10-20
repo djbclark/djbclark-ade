@@ -148,8 +148,9 @@ for s in ~/src/djbclark-ade/skills/*/; do ~/src/djbclark-ade/bin/skill-everywher
 ls -l ~/.claude/commands ~/.claude/agents ~/.claude/hooks | grep -c djbclark-ade   # symlinks still point here
 ```
 
-1. **Pull.** A local modification to a file the pull would change, or an untracked file it would
-   create, stops it (exit 2, nothing pulled); a diverged branch stops it (exit 3); it never merges, stashes or resets.
+1. **Pull.** A path the pull would change or create that has a local modification, an untracked file or an
+   ignored file (or collides with one as a parent or child path, `foo` against `foo/bar`) stops it (exit 2,
+   nothing pulled); a diverged branch stops it (exit 3); it never merges, stashes or resets.
 2. **Skills.** `skill-everywhere --check` over every `skills/*`; a missing, dangling or chained
    link is relinked, anything the script leaves alone is printed with the command to run. Links change
    only when `--repo` is the canonical skills home (`~/src/djbclark-ade`, or the parent of

@@ -488,6 +488,72 @@ def test_untracked_file_the_pull_would_create_is_exit_2_not_3(env):
     assert r.returncode == 10 and "would refuse (exit 2)" in r.stdout
 
 
+def _refused_and_untouched(env, path, content, blocked_path):
+    r = env.run("--check", "--json")
+    out = json.loads(r.stdout)
+    assert r.returncode == 10 and out["blocked_by"] == [blocked_path], r.stdout + r.stderr
+    r = env.run()
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert blocked_path in r.stdout
+    assert env.head(env.machine) == env.first
+    assert (env.machine / path).read_text() == content
+    assert not env.state.exists()
+
+
+def test_ignored_file_the_pull_would_create_is_exit_2_and_kept(env):  # Codex P1 on d3ece30
+    (env.machine / ".git" / "info" / "exclude").write_text("local.txt\n")
+    (env.machine / "local.txt").write_text("mine\n")
+    env.publish({"local.txt": "theirs\n"})
+    _refused_and_untouched(env, "local.txt", "mine\n", "local.txt")
+
+
+def test_a_file_inside_an_ignored_directory_blocks_only_the_path_the_pull_would_overwrite(env):  # Codex P1 on d3ece30
+    # `status -uall --ignored` lists the files of an ignored directory one by one (no `build/` entry); git
+    # overwrites only build/out.bin, so a new build/x beside it is not a collision.
+    (env.machine / ".git" / "info" / "exclude").write_text("build/\n")
+    (env.machine / "build").mkdir()
+    (env.machine / "build" / "out.bin").write_text("mine\n")
+    env.publish({"build/out.bin": "theirs\n", "build/x": "theirs\n"})
+    r = env.run("--check", "--json")
+    assert json.loads(r.stdout)["blocked_by"] == ["build/out.bin"], r.stdout + r.stderr
+    r = env.run()
+    assert r.returncode == 2 and "build/out.bin" in r.stdout, r.stdout + r.stderr
+    assert env.head(env.machine) == env.first
+    assert (env.machine / "build" / "out.bin").read_text() == "mine\n"
+
+
+def test_an_ignored_file_the_pull_does_not_touch_does_not_block(env):
+    (env.machine / ".git" / "info" / "exclude").write_text("scratch/\n")
+    (env.machine / "scratch").mkdir()
+    (env.machine / "scratch" / "a").write_text("mine\n")
+    new = env.publish()
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert env.head(env.machine) == new
+
+
+def test_a_local_file_where_the_pull_needs_a_directory_is_exit_2(env):  # Codex P2 on d3ece30
+    (env.machine / "foo").write_text("mine\n")
+    env.publish({"foo/bar": "theirs\n"})
+    _refused_and_untouched(env, "foo", "mine\n", "foo/bar")
+    assert "foo/bar (local foo)" in env.run().stdout
+
+
+def test_a_local_directory_where_the_pull_needs_a_file_is_exit_2(env):  # Codex P2 on d3ece30
+    (env.machine / "foo").mkdir()
+    (env.machine / "foo" / "x").write_text("mine\n")
+    env.publish({"foo": "theirs\n"})
+    _refused_and_untouched(env, "foo/x", "mine\n", "foo")
+    assert "foo (local foo/x)" in env.run().stdout
+
+
+def test_collides_covers_equal_ancestor_and_descendant_paths():
+    mod = load_module()
+    assert mod.collides({"a", "b/c", "d/e/f", "g", "h/i"}, {"a", "b", "d/", "g/x", "z"}) == {
+        "a": "a", "b/c": "b", "d/e/f": "d", "g": "g/x"}
+    assert mod.collides({"a"}, set()) == {}
+
+
 def test_pull_failure_code_maps_an_overwrite_refusal_to_dirty():
     mod = load_module()
     assert mod.pull_failure_code("error: The following untracked working tree files would be overwritten by merge:") == 2

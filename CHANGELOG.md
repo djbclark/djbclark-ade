@@ -11,7 +11,9 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
-- Added `bin/ade-update`, one command that keeps a machine current: it fast-forward pulls, relinks missing skills
+- Added `bin/ade-update`, one command that keeps a machine current: it fast-forward pulls (refusing with exit 2 when a
+  path the pull would change or create has a local modification, an untracked or an ignored file, or a parent or
+  child path of one), relinks missing skills
   (only in the canonical checkout; any other `--repo` is report-only), checks the `CLAUDE.md` and `~/.claude` symlinks,
   and prints the changelog entries new since the revision it last recorded; `--check` reports only and exits 10 when
   behind (2026-10-20, #20).

@@ -13,8 +13,9 @@ acceptance test T8). It automates README "Update (this machine)":
 Steps, in order:
 
 1. `git fetch`, then `git pull --ff-only` when behind. The only thing --check does to the repo is the
-   fetch (remote-tracking refs, never the working tree). A tracked file the pull would change that
-   has local modifications stops it (exit 2, nothing pulled); a diverged branch stops it (exit 3).
+   fetch (remote-tracking refs, never the working tree). A path the pull would change or create that
+   collides with a local modification, an untracked or an ignored file (or a local path above or below
+   it: `foo` against `foo/bar`) stops it (exit 2, nothing pulled); a diverged branch stops it (exit 3).
    Never a merge, rebase, stash or reset.
 2. `skill-everywhere --check` over every `skills/*/SKILL.md`; a skill with a missing, dangling or
    chained link is re-linked with `skill-everywhere NAME...` (the script's own link form). A link
@@ -389,6 +390,24 @@ def pull_failure_code(text):
     return EXIT_NON_FF if any(m in low for m in NON_FF_MARKERS) else EXIT_ERROR
 
 
+def collides(changed, dirty):
+    """The changed paths a pull cannot apply over the working tree, as {changed path: the colliding local path}: the
+    same path, a local file or ignored directory above it (upstream adds foo/bar, `foo` is a local file; an ignored
+    `build/` and upstream's build/x), or a local path below it (upstream adds file foo, local foo/x exists)."""
+    local = {p.rstrip("/") for p in dirty}
+    above = {}  # every ancestor directory of a local path -> one local path under it
+    for p in sorted(local):
+        parts = p.split("/")
+        for n in range(1, len(parts)):
+            above.setdefault("/".join(parts[:n]), p)
+    hits = {}
+    for c in changed:
+        parts = c.split("/")
+        mine = next(("/".join(parts[:n]) for n in range(1, len(parts) + 1) if "/".join(parts[:n]) in local), None)
+        hits[c] = mine or above.get(c)
+    return {c: p for c, p in sorted(hits.items()) if p}
+
+
 def short(sha):
     return sha[:8] if sha else "none"
 
@@ -432,8 +451,9 @@ def update(rep, args, repo):
     if behind:
         d["repo_state"] = "behind"
         changed = set(git_out(repo, "diff", "--name-only", "-z", "--no-renames", "HEAD", "@{u}").split("\0")) - {""}
-        # tracked modifications, and untracked files the pull would create (git refuses to overwrite those)
-        rc, out, _ = git(repo, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all")
+        # tracked modifications, untracked files and ignored files (`!!`; git pull overwrites those silently)
+        rc, out, _ = git(repo, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all",
+                         "--ignored")
         dirty = set()
         parts = out.split("\0")
         i = 0
@@ -441,15 +461,19 @@ def update(rep, args, repo):
             code, path = parts[i][:2], parts[i][3:]
             dirty.add(path)
             i += 2 if "R" in code or "C" in code else 1  # a rename carries its old path as the next field
-        blocked = sorted(changed & dirty)
+        hits = collides(changed, dirty)
+        blocked = sorted(hits)
         d["blocked_by"] = blocked
         rep.say(f"repo: behind {upstream} by {behind} commit{'s' if behind != 1 else ''} ({short(head)} -> {short(up)})")
+        shown_hits = [p if hits[p] == p else f"{p} (local {hits[p]})" for p in blocked]
         if blocked and not check:
-            shown = "\n".join(f"  {p}" for p in blocked)
-            raise Stop(EXIT_DIRTY, "the pull would change or create files with local modifications; nothing pulled. "
+            shown = "\n".join(f"  {p}" for p in shown_hits)
+            raise Stop(EXIT_DIRTY, "the pull would change or create paths with local modifications or untracked/"
+                       "ignored files; nothing pulled. "
                        f"Commit or set them aside (never stash another agent's edits), then rerun:\n{shown}")
         if blocked:
-            rep.say("  the apply would refuse (exit 2): local modifications in " + ", ".join(blocked))
+            rep.say("  the apply would refuse (exit 2): local modifications or untracked/ignored files in "
+                    + ", ".join(shown_hits))
         if check:
             rep.say("  would run: " + shlex.join(["git", "-C", str(repo), "pull", "--ff-only"]))
             problems.append("behind")
