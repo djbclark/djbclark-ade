@@ -33,7 +33,7 @@ agent what changed and what is new. Entries end with the pull request number.
 ### Fixed
 
 - `tests/conftest.py` pins `ROUTE_AGENT_OMP_READY=0`, so the route_agent suite passes on a host with
-  an omp login as it does on CI; the omp-ready roster has its own tests (queue item 6).
+  an omp login as it does on CI; the omp-ready roster has its own tests (queue item 6) (#17).
 - `acp-dispatch`: an unmeasured (stale) quota window is skipped instead of crashing the dispatch
   with a `float(None)` error (#13).
 
