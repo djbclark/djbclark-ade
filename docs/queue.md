@@ -260,9 +260,38 @@ this repo on or after 2026-10-14 raises these three first, one `/steps` prompt e
    and the new Hermes/grok/muse/cline/acp-dispatch adapters run? Measure prompts and tokens
    per source. Token capture landed 2026-10-13: attempts.jsonl attempt rows and
    nights.jsonl rows carry `tokens` (backend-reported counts, never estimates; see
-   docs/failover.md). opencode, claude and direct sipb report counts; agy and crush are
-   unmetered (`tokens: null`, only the prompt count); zcode and hermes are unmetered
-   until a log shows `result.usage`. Still to do: read the first night's rows.
+   docs/failover.md).
+
+   **READ 2026-10-20 — sub-item 1 is done.** Source: `nights.jsonl` (101 rows, 49 nights)
+   and `attempts.jsonl` (288 rows) for 2026-10-14 onward, plus `~/.local/bin/skillopt-sleep
+   status` (it is on PATH; there is no `bin/skillopt-sleep` in this repo).
+   1. **Metering is wider than this item claimed.** "agy and crush are unmetered
+      (`tokens: null`)" and "zcode and hermes are unmetered until a log shows `result.usage`"
+      were already false on the 2026-10-14 night: agy reported 126 metered / 1.21M total,
+      crush 53 / 623k, hermes 46 / 824k; zcode reported on 10-16 (13 / 2.90M) and 10-17
+      (1 / 23k). `tokens: null` now means only that the source got 0 prompts.
+   2. **`source` is the transcript source; `tui` is the backend that answered it.** opencode's
+      night rows read `prompts: 0` while `attempts.jsonl` carries 45 successful opencode
+      answers since 10-14 — opencode-go is the workhorse, not idle. A 0 in a night row is not
+      a dead backend.
+   3. **Two accepted proposals in seven nights**, both from the new adapters: acp_dispatch
+      (10-14) and codex (10-18). Every other night produced 0 and the gate rejected.
+   4. **The 10-19 night did not finish**: `status: "stopped: deadline 06:30 passed"`, rc null,
+      after 247 prompts and 25.7M tokens for 0 proposals — the most expensive night of the set.
+      On 10-19 and 10-20 only the `claude` source ran; the rest of the chain did not execute.
+   5. **Night 49 (10-20) establishes nothing about the real chain**: `backend: handoff`,
+      `replay: mock`, 0 sessions harvested, 5 mined tasks, gate reject (held-out 0.257 ->
+      0.257).
+   6. **Backend faults worth fixing**, from `attempts.jsonl` `why`:
+      a. agy builds an invalid model id — `acp-run: no model 'gemini-3.8-flash-medium'`; the
+         `@medium` effort is glued onto the name while the runner offers `gemini-3.8-flash`.
+      b. agy pools `antigravity/claude_gpt` (7 refusals) and `antigravity/gemini` (6) report
+         "not in `aiuse --available`".
+      c. zcode `project_token_login_failed` x4, classified `transient` so it retries into the
+         same wall, plus one rc=124 after 914s with 41 tool calls.
+      d. claude was refused 6 times at `headroom 4.0% <= floor 5.0%` — the floor working as
+         designed, not a fault.
+      e. opencode-go answers at 2.8-5.2% headroom against a 0.0% floor.
 2. **Denied backends** (`hermes`, `cursor`, `cline`, `clinepass`, `opus`, `fable` in
    `failover.DENY`; `muse`, `pi`, `grok`, `codex`, `copilot` in night.json/skillopt-night):
    the operator kept them denied on 2026-10-13 ("revisit after tonight"). With the night's real
