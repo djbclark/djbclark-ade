@@ -75,7 +75,7 @@ providers:
       - cline-pass/qwen3.7-plus
   litellm-local:
     base_url: http://127.0.0.1:4000/v1
-    api_key: {{ secret "TODO_LITELLM_HERMES_KEY" }}
+    api_key: '{{ secret "TODO_LITELLM_HERMES_KEY" }}'
     api_mode: chat_completions
     name: LiteLLM Local (ClinePass proxy)
     discover_models: false
@@ -162,8 +162,8 @@ display:
   message_reactions: true
 dashboard:
   basic_auth:
-    username: {{ .hermes_dashboard_user }}
-    password_hash: {{ secret "TODO_HERMES_DASHBOARD_PASSWORD_HASH" }}
+    username: '{{ .hermes_dashboard_user }}'
+    password_hash: '{{ secret "TODO_HERMES_DASHBOARD_PASSWORD_HASH" }}'
     password: ''
 memory:
   memory_char_limit: 5000
@@ -250,7 +250,7 @@ plugins:
       allow_tool_override: false
 hooks:
   pre_llm_call:
-    - command: {{ .home }}/.hermes/agent-hooks/graft-nudge.py
+    - command: '{{ .home }}/.hermes/agent-hooks/graft-nudge.py'
       timeout: 5
 gateway:
   platforms:
@@ -282,7 +282,7 @@ lsp:
         - --stdio
       initialization_options:
         tsserver:
-          path: {{ .home }}/.hermes/lsp/node_modules/typescript/lib/tsserver.js
+          path: '{{ .home }}/.hermes/lsp/node_modules/typescript/lib/tsserver.js'
     gopls:
       command:
         - /opt/homebrew/bin/gopls
@@ -372,7 +372,7 @@ cron:
   provider: xai-oauth
 skills:
   external_dirs:
-    - {{ .home }}/.local/share/skill-everywhere/skills
+    - '{{ .home }}/.local/share/skill-everywhere/skills'
 litellm:
   model_list:
     - cline2-pass/deepseek-v4-flash

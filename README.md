@@ -157,10 +157,12 @@ the one place that says what changed and what is new. `bin/ade-update` (queued,
 `~/.hermes/config.yaml`. Each is the live file's structure and key order with every secret as
 `{{ secret "NAME" }}` (a `sudo-secretspec` entry), every home path as `{{ .home }}` and every host name,
 account or chat id as `{{ .field }}`; [`agents/README.md`](agents/README.md) lists each placeholder and what
-was kept as machine-specific. Nothing applies them yet (the chezmoi source state is Phase 1). A secret never
-enters the repo: `bin/ade-template-check` scans every template for the credential patterns, renders it with a
-dummy context to prove it still parses, and with `--diff` names the keys that differ from the live file (paths,
-never values); CI runs it through `tests/test_ade_template_check.py`.
+was kept as machine-specific. Nothing applies them yet (the chezmoi source state is Phase 1). `bin/ade-template-check` is
+the gate: it scans every template for credential patterns and shapes (a heuristic that catches the key
+forms it knows, not every secret, so a person still reads a regenerated template before it is pushed), renders
+it with plain and with hostile dummy values to prove it still parses, and with `--diff` names the keys that
+differ from the live file (paths, never values, though a path can hold a home path or session id); CI runs it
+through `tests/test_ade_template_check.py`.
 
 ## Docs
 

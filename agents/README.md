@@ -25,6 +25,24 @@ these with the companion's data, as a `modify_` merge and never a symlink, becau
    and stays as it is.
 4. No other `{{ }}` form is allowed. `bin/ade-template-check` enforces all of this.
 
+## Quoting (2026-10-20)
+
+Every placeholder sits inside a quoted scalar, so a value with `#`, `: `, a quote or a leading `*`, `&` or `!`
+cannot truncate itself or add keys. The renderer escapes the value for the quote it sits in:
+
+1. JSON `"..."` and TOML basic `"..."`: JSON escapes of the value, without the outer quotes (chezmoi `toJson` with
+   the outer quotes trimmed, or `quote`). TOML also forbids a raw DEL, which the escape must write as `\u007f`.
+2. YAML `'...'`: every `'` doubled. A value with a newline or other control character cannot be single-quoted
+   faithfully (YAML folds a newline to a space), and one in a comment (`sipb_llm_upstream_host`) would end the
+   comment: the Phase 1 renderer refuses a value with a control character for any YAML placeholder.
+3. TOML literal strings (`'...'`) and unquoted YAML or TOML values cannot carry a placeholder.
+4. `home` and `home_escaped` are filled as they are (a home path is assumed to have none of these characters, and `home_escaped`
+   is already escaped for the JSON string inside TOML).
+
+`bin/ade-template-check` enforces it: it renders a second time with `a'b"c: #d\e` in every placeholder but the home
+ones, escaped as above, and each parsed string must equal that value; an unquoted placeholder fails to parse or
+parses to something else.
+
 ## Fields
 
 | Field | Meaning | Example shape | Companion provides it from |
@@ -34,7 +52,7 @@ these with the companion's data, as a `modify_` merge and never a symlink, becau
 | `chatgpt_app` | where `ChatGPT.app` lives (Codex's node_repl, CLI path and notify helper point inside it) | `/Applications/ChatGPT.app` | `machines/<host>.toml` `chatgpt_app` |
 | `codex_browser_client_sha256s` | comma-separated SHA-256 digests of the browser clients Codex trusts (app-bundle specific) | two 64-hex digests joined by a comma | `machines/<host>.toml`, copied from a working install |
 | `discord_home_channel_id` | Hermes's Discord home channel id; also the free-response channel | 19-digit string | `operator.toml` `[discord]` |
-| `discord_home_channel_name` | display name of that channel, inserted raw inside single quotes: double any `'` | `Alex's server / #bot-inbox` | `operator.toml` `[discord]` |
+| `discord_home_channel_name` | display name of that channel, inside single quotes (see Quoting) | `Example server / #general` | `operator.toml` `[discord]` |
 | `discord_user_id` | the operator's Discord user id | 19-digit string | `operator.toml` `[discord]` |
 | `hermes_dashboard_user` | Hermes dashboard basic-auth user name | `alex` | `operator.toml` `[hermes]` |
 | `signal_account` | the phone number Hermes's Signal gateway runs as, also its home channel | `+15555550100` | `machines/<host>.toml` `[signal]` |

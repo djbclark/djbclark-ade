@@ -12,8 +12,14 @@ With no TEMPLATE it checks every agents/*/*.tmpl under the repo (or --root). For
   2. render: `{{ .field }}` and `{{ secret "NAME" }}` are filled from a dummy context and the result must parse
      (.json, .toml or .yaml by the name before `.tmpl`). Every field used must be documented in
      agents/README.md (a table row starting with the field in backticks).
+     The render runs twice: with plain dummies, and with a hostile value (quotes, `: `, `#`, backslash) in every
+     placeholder but the home ones, escaped the way Phase 1's renderer must (JSON and TOML: `toJson` inside
+     "..."; YAML: `'` doubled inside '...'); each parsed string must equal the hostile value. A placeholder that
+     is not inside a quoted scalar therefore fails.
   3. --diff: render with `{{ .home }}` = $HOME, every other placeholder a wildcard, and print the key paths
-     whose live file (the same path under $HOME, listed in LIVE below) differs. Paths only, never values.
+     whose live file (the same path under $HOME, listed in LIVE below) differs. Paths only, never values, but a
+     key path can hold a home path or a session id (Codex's `hooks.state.*` and `/private/tmp` keys): keep
+     --diff output out of a public log or pull request.
 
 Exit 0 clean, 1 findings, 2 usage. YAML needs PyYAML (`uv run --with pyyaml`); without it a .yaml template
 is reported as a finding rather than skipped.
@@ -45,39 +51,89 @@ TAG = re.compile(r"\{\{\s*(?:(?P<secret>secret\s+\"(?P<name>[A-Za-z0-9_]+)\")|(?
 ANY_TAG = re.compile(r"\{\{.*?\}\}")
 MASK = "\x00TAG\x00"
 
-# Known benign blobs matching the 40+ character rule, by sha256 of the matched text. The one entry is the
+# Known benign blobs matching the 32+ character rule, by sha256 of the matched text. The one entry is the
 # Orca PowerShell hook in claude/settings.json: a UTF-16LE -EncodedCommand that only runs ~/.orca/agent-hooks
 # (decoded and read 2026-10-20). Orca rewrites it on upgrade; a new blob is a finding until someone decodes it.
 ALLOW_BLOBS = {
     "1716558189baf6eacd0b1429e2b78470c5044658b54110f1d02e796e8c56c4f8": "Orca claude-hook PowerShell -EncodedCommand",
 }
 
+# A placeholder tag (masked) must be the whole value: `{{ secret "X" }}<leaked tail>` is a hit.
+_MASKED = re.escape(MASK) + r"""(?:["'\s,]|$)"""
+_ENVREF = r"""\$\{?[A-Za-z_]\w*\}?(?:["'\s,]|$)"""
+# Key names that hold a credential, in JSON ("x-api-key": "v"), YAML (token: v) and TOML (token = "v") forms.
+_KEYNAME = (r"""(?<![A-Za-z0-9])["']?(?:(?:x-)?api[-_]?key|apikey|(?:auth|access|refresh|bot)?[-_]?token|secret|"""
+            r"""client[-_]?secret|private[-_]?key|credential|passw(?:or)?d\w*)["']?""")
+
 PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("sk- key", re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{6,}")),
-    ("ghp_/gho_ token", re.compile(r"(?<![A-Za-z0-9])gh[po]_[A-Za-z0-9]{6,}")),
+    ("xai- key", re.compile(r"(?<![A-Za-z0-9])xai-[A-Za-z0-9_-]{16,}")),
+    ("GitHub gh?_ token", re.compile(r"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{6,}")),
     ("github_pat_ token", re.compile(r"github_pat_[A-Za-z0-9_]{6,}")),
+    ("GitLab glpat- token", re.compile(r"glpat-[A-Za-z0-9_-]{16,}")),
+    ("Google AIza key", re.compile(r"AIza[A-Za-z0-9_-]{30,}")),
+    ("Telegram bot token", re.compile(r"(?<![\w.])\d{8,10}:[A-Za-z0-9_-]{30,}")),
     ("Slack token", re.compile(r"xox[bpas]-[A-Za-z0-9-]{6,}")),
     ("AWS key id", re.compile(r"AKIA[0-9A-Z]{8,}")),
-    ("Bearer value", re.compile(r"Bearer\s+(?!" + re.escape(MASK) + r"|\$|%s|<)\S{4,}")),
+    ("Bearer value", re.compile(r"Bearer\s+(?!" + _MASKED + r"|" + _ENVREF + r"|%s|<)\S{4,}")),
     ("PEM block", re.compile(r"-----BEGIN")),
     ("password=", re.compile(r"password=\S+", re.I)),
     ("api_key=", re.compile(r"api_key=\S+", re.I)),
-    ("token=", re.compile(r"(?<![A-Za-z_])token=(?!" + re.escape(MASK) + r"|\$)\S+", re.I)),
+    ("token=", re.compile(r"(?<![A-Za-z_])token=(?!" + _MASKED + r"|" + _ENVREF + r")\S+", re.I)),
     ("secret-looking key: value", re.compile(
-        r"""["']?(?:password|passwd|api_key|apikey|secret|client_secret|access_token|auth_token)["']?\s*[:=]\s*["']?"""
-        r"""(?!""" + re.escape(MASK) + r"""|\$|%|["']|\s|$|<)[^\s"',]{4,}""", re.I)),
+        _KEYNAME + r"""\s*[:=]\s*["']?(?!""" + _MASKED + r"""|""" + _ENVREF + r"""|%|["']|\s|$|<)[^\s"',]{4,}""", re.I)),
     ("email address", re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")),
-    ("phone number", re.compile(r"(?<![\w.])\+1[\s().-]?\d{3}[\s().-]?\d{3}[\s().-]?\d{4}(?!\d)")),
+    ("phone number", re.compile(r"(?<![\w.])\+\d[\d\s().-]{6,16}\d(?!\d)")),
     ("UUID", re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)),
     ("long numeric id", re.compile(r"(?<![\w.])\d{10,}(?![\w.])")),
     ("literal home path", re.compile(r"(?:/Users|/home)/(?!\{\{)[A-Za-z0-9._-]+|\\/Users\\/[A-Za-z0-9._-]+")),
 ]
-BLOB = re.compile(r"[A-Za-z0-9+/=_-]{40,}")
+BLOB = re.compile(r"[A-Za-z0-9+/=_-]{32,}")
+SEGMENT_MIN = 20  # a path segment this long is tested as a key on its own
 
 
 def _entropy(s: str) -> float:
     c = Counter(s)
     return -sum(n / len(s) * math.log2(n / len(s)) for n in c.values())
+
+
+_WORD_PART = re.compile(r"[A-Za-z]*(?:\d{1,4}[A-Za-z]*)?")
+
+
+def _cased_like_a_word(part: str) -> bool:
+    """No lowercase (UPPER_SNAKE), or capitals are at most a third of the letters (camelCase, Pascal): random
+    letters are about half capitals."""
+    letters = re.sub(r"[^A-Za-z]", "", part)
+    upper = sum(c.isupper() for c in letters)
+    return upper == len(letters) or upper <= len(letters) / 3
+
+
+def _word_run(s: str) -> bool:
+    """Words, camelCase, UPPER_SNAKE, dashes and `/` with at most one short digit run in each part and three in
+    all (`SHA256S`, `2026-07-18`, `python3`): an identifier or a path, not a key. Base64's `+` and `=` are not
+    word characters, a random key puts about six digit runs in 43 characters and its letters are half capitals."""
+    parts = re.split(r"[/_-]", s)
+    return (len(re.findall(r"\d+", s)) <= 3
+            and all(_WORD_PART.fullmatch(part) and _cased_like_a_word(part) for part in parts))
+
+
+def _key_like(s: str) -> bool:
+    """Hex of 32 or more; else a letter and a digit with entropy above 3.5 bits that is not a word run. A key of
+    letters only (one random 40-character string in a thousand) is not caught here; the key-name rules and the
+    prefixes catch most of those."""
+    if re.fullmatch(r"[0-9a-fA-F]{32,}", s):
+        return True
+    if not (re.search(r"[0-9]", s) and re.search(r"[A-Za-z]", s)):
+        return False
+    return _entropy(s) > 3.5 and not _word_run(s)
+
+
+def _blob_is_key(blob: str) -> bool:
+    """A blob is tested whole and, when it has `/`, segment by segment (SEGMENT_MIN or more characters each), so a
+    real path passes but a base64 key does not, whether or not its `/` cut it into short pieces."""
+    if _key_like(blob):
+        return True
+    return "/" in blob and any(len(seg) >= SEGMENT_MIN and _key_like(seg) for seg in blob.split("/"))
 
 
 def scan(text: str) -> list[tuple[int, str]]:
@@ -92,13 +148,9 @@ def scan(text: str) -> list[tuple[int, str]]:
             blob = m.group(0)
             if sha256(blob.encode()).hexdigest() in ALLOW_BLOBS:
                 continue
-            # A long path or a dash-separated word run is not a key: a key mixes cases and digits and is not path-shaped.
-            if blob.count("/") >= 2 or blob.startswith(("/", "~", ".")):
-                continue
-            if re.search(r"[a-z]", blob) and re.search(r"[A-Z0-9]", blob) and re.search(r"\d", blob) and _entropy(blob) > 3.6:
-                hits.append((lineno, "40+ character base64-like string"))
-            elif re.fullmatch(r"[0-9a-f]{40,}", blob):
-                hits.append((lineno, "40+ character hex string"))
+            if _blob_is_key(blob):
+                hits.append((lineno, "32+ character hex string" if re.fullmatch(r"[0-9a-fA-F]+", blob)
+                             else "32+ character base64-like string"))
     return hits
 
 
@@ -134,6 +186,39 @@ def parse(kind: str, text: str):
             raise RuntimeError("PyYAML is not importable (run with `uv run --with pyyaml`)") from None
         return yaml.safe_load(text)
     raise ValueError(kind)
+
+
+HOSTILE = "a'b\"c: #d\\e"  # quote, double quote, `: `, `#` and a backslash: each breaks a naive insertion
+
+
+def escape_for(kind: str, value: str) -> str:
+    """What Phase 1's renderer must do to a value before it goes inside a quoted scalar of this format:
+    JSON and TOML basic strings take JSON escapes (no DEL; TOML also forbids it), YAML single quotes double `'`."""
+    if kind in ("json", "toml"):
+        return json.dumps(value, ensure_ascii=False)[1:-1]
+    return value.replace("'", "''")
+
+
+def hostile_roundtrip(kind: str, text: str, fields: set[str], secrets: set[str]) -> bool:
+    """Render with plain dummies and with hostile escaped values; every string leaf of the first, with each dummy
+    replaced by its hostile value, must be the same leaf in the second."""
+    plain = {f: f"dummy-{f}" for f in fields}
+    hostile = {f: f"{HOSTILE}-{f}" for f in fields}
+    fixed = {"home": "/home/dummy", "home_escaped": "\\/home\\/dummy"}
+    plain.update(fixed)
+    hostile.update(fixed)
+    base = flatten(parse(kind, render(text, plain, "dummy-secret-value")))
+    ctx = {k: (v if k in fixed else escape_for(kind, v)) for k, v in hostile.items()}
+    got = flatten(parse(kind, render(text, ctx, escape_for(kind, f"{HOSTILE}-secret"))))
+    swaps = sorted(((plain[f], hostile[f]) for f in fields if f not in fixed), key=lambda t: -len(t[0]))
+    swaps.append(("dummy-secret-value", f"{HOSTILE}-secret"))
+
+    def expect(v):
+        if isinstance(v, str):
+            for a, b in swaps:
+                v = v.replace(a, b)
+        return v
+    return set(base) == set(got) and all(expect(base[k]) == got[k] for k in base)
 
 
 def kind_of(path: Path) -> str:
@@ -228,6 +313,18 @@ def check_one(path: Path, root: Path, do_diff: bool, out) -> int:
     except Exception as e:  # noqa: BLE001 - any parser error is a finding; its message names a position, not a value
         print(f"{label}: rendered output does not parse as {kind}: {type(e).__name__}", file=out)
         findings += 1
+    else:
+        try:
+            ok = hostile_roundtrip(kind, text, fields, secrets)
+        except Exception as e:  # noqa: BLE001
+            print(f"{label}: rendered with hostile values does not parse as {kind}: {type(e).__name__} "
+                  f"(a placeholder is not inside a quoted scalar)", file=out)
+            findings += 1
+        else:
+            if not ok:
+                print(f"{label}: a hostile value does not round-trip through {kind} (a placeholder changes the structure "
+                      f"or is not inside a quoted scalar)", file=out)
+                findings += 1
 
     if do_diff:
         try:

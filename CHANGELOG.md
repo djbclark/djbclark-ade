@@ -13,7 +13,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 - `agents/` templates for `~/.claude/settings.json`, `~/.codex/config.toml`, opencode's `opencode.json` and
   `~/.hermes/config.yaml` (secrets, home paths and host or account ids as placeholders, listed in
-  `agents/README.md`), `bin/ade-template-check` (credential scan, render-and-parse, `--diff` by key path) and its
+  `agents/README.md`), `bin/ade-template-check` (credential scan, render-and-parse with plain and hostile values, `--diff` by key path) and its
   tests; CI now installs PyYAML for them (#TBD).
 - `docs/ade-everywhere-inventory-2026-10-20-stores.md`: Phase 0 slice 1, every installed agent
   session store classified (52 stores, backup plan per store, differences from proposal §6.1) (#16).

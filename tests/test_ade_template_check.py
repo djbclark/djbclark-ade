@@ -7,8 +7,10 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import io
+import base64
 import json
 import os
+import random
 import tempfile
 import unittest
 from pathlib import Path
@@ -78,10 +80,14 @@ class RealTemplatesTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("4 template(s), 0 finding(s)", out)
 
-    def test_no_template_leaks_a_home_path_or_dollar_secret(self):
+    def test_no_template_keeps_a_literal_home_path(self):
         for rel in atc.LIVE:
             text = (REPO / "agents" / rel).read_text()
-            self.assertNotIn("/Users/", text.replace("{{ .home }}", ""), rel)
+            bare = text.replace("{{ .home }}", "").replace("{{ .home_escaped }}", "")
+            with self.subTest(rel):
+                self.assertNotIn("/Users/", bare)
+                self.assertNotIn("/home/", bare)
+                self.assertNotIn("literal home path", {rule for _, rule in atc.scan(text)})
 
 
 class ScanTest(unittest.TestCase):
@@ -89,37 +95,100 @@ class ScanTest(unittest.TestCase):
         return {rule for _, rule in atc.scan(text)}
 
     def test_planted_values_fail(self):
-        cases = {
-            "sk- key": 'x = "sk-abcdef123456"',
-            "ghp_/gho_ token": "t = ghp_abcdefgh12345678",
-            "github_pat_ token": "t = github_pat_11ABCDEFG0abcdefgh",
-            "Slack token": "t = xoxb-123456-abcdef",
-            "AWS key id": "k = AKIAABCDEFGHIJKLMNOP",
-            "Bearer value": '"Authorization": "Bearer abcdefghijkl"',
-            "PEM block": "-----BEGIN PRIVATE KEY-----",
-            "password=": "psql password=hunter22",
-            "api_key=": "curl api_key=abc123",
-            "token=": "url?token=abc123",
-            "secret-looking key: value": "client_secret: abcdefgh",
-            "email address": "mail a.b@example.org",
-            "phone number": "n: +15555550100",
-            "UUID": "id 123e4567-e89b-12d3-a456-426614174000",
-            "long numeric id": "chat: 1234567890123456789",
-            "literal home path": 'p = "/Users/alex/bin"',
-        }
-        for rule, text in cases.items():
-            with self.subTest(rule):
+        # every value is synthetic: repeated or counted characters, example.org, a 555-01xx number
+        hex32 = "0123456789abcdef" * 2
+        cases = [
+            ("sk- key", 'x = "sk-abcdef123456"'),
+            ("xai- key", 'x = "xai-' + "yz" * 15 + '"'),
+            ("GitHub gh?_ token", "t = ghp_abcdefgh12345678"),
+            ("GitHub gh?_ token", "t = ghs_abcdefgh12345678"),
+            ("GitHub gh?_ token", "t = ghu_abcdefgh12345678"),
+            ("GitHub gh?_ token", "t = ghr_abcdefgh12345678"),
+            ("github_pat_ token", "t = github_pat_11ABCDEFG0abcdefgh"),
+            ("GitLab glpat- token", "t = glpat-" + "ab12" * 5),
+            ("Google AIza key", "k = AIza" + "Ab0" * 11 + "A"),
+            ("Telegram bot token", "bot = 123456789:" + "AAF" * 11),
+            ("Slack token", "t = xoxb-123456-abcdef"),
+            ("AWS key id", "k = AKIAABCDEFGHIJKLMNOP"),
+            ("Bearer value", '"Authorization": "Bearer abcdefghijkl"'),
+            ("Bearer value", '"Authorization": "Bearer {{ secret "X" }}abcdefgh12345"'),
+            ("Bearer value", "Authorization: Bearer ${X}abcdefgh12345"),
+            ("PEM block", "-----BEGIN PRIVATE KEY-----"),
+            ("password=", "psql password=hunter22"),
+            ("api_key=", "curl api_key=abc123"),
+            ("token=", "url?token=abc123"),
+            ("token=", "url?token={{ .x }}abc123"),
+            ("secret-looking key: value", "client_secret: abcdefgh"),
+            ("secret-looking key: value", f'"x-api-key": "{hex32}"'),
+            ("secret-looking key: value", f"api-key: {hex32}"),
+            ("secret-looking key: value", f'"token": "{hex32}"'),
+            ("secret-looking key: value", f"token: {hex32}"),
+            ("secret-looking key: value", f'token = "{hex32}"'),
+            ("secret-looking key: value", '"X-Auth-Token": "abcd1234"'),
+            ("secret-looking key: value", 'bot_token = "abcd1234"'),
+            ("secret-looking key: value", "password_hash: abcd1234"),
+            ("secret-looking key: value", 'private_key = "abcd1234"'),
+            ("secret-looking key: value", "credential: abcd1234"),
+            ("secret-looking key: value", '"x-api-key": "{{ secret "X" }}abcd1234"'),
+            ("email address", "mail a.b@example.org"),
+            ("phone number", "n: +15555550100"),
+            ("phone number", "n: +44 20 7946 0958"),
+            ("phone number", "n: +49 30 901820"),
+            ("UUID", "id 123e4567-e89b-12d3-a456-426614174000"),
+            ("long numeric id", "chat: 1234567890123456789"),
+            ("literal home path", 'p = "/Users/alex/bin"'),
+            ("32+ character hex string", "h = " + hex32),
+            ("32+ character base64-like string", "k = " + "A1B2C3D4E5F6G7H8I9J0" + "KkLlMmNnOoPpQq"),
+            # a key whose `/` cut it into segments under SEGMENT_MIN is not a path
+            ("32+ character base64-like string", 'v = "Ab3dE6gH9jK2/mN5pQ8sT1vW4yZ7/bC0eF3hI6kL9/nP2qR5tU8w"'),
+            ("32+ character base64-like string", 'v = "/Ab3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6kL9nP2qR5tU8w"'),
+            # a long key between path pieces
+            ("32+ character base64-like string", 'v = "/opt/x/Ab3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6kL9nP2/bin"'),
+        ]
+        for rule, text in cases:
+            with self.subTest(text[:40]):
                 self.assertIn(rule, self.rules(text))
+
+    def test_random_base64_keys_never_pass_under_a_key_name(self):
+        # 1a of the 2026-10-20 adversary review: 15-38% of base64 keys passed through the old `/` exemption
+        rng = random.Random(20261020)
+        for nbytes in (32, 48, 64):
+            keys = [base64.b64encode(rng.randbytes(nbytes)).decode() for _ in range(500)]
+            with self.subTest(nbytes):
+                passed = [k for k in keys if not atc.scan(f'"x-api-key": "{k}"')]
+                self.assertEqual(passed, [])
+                # with a neutral key name only the generic rule applies; a letters-only or digit-free key can
+                # slip through (about 1 in 1000), a `/` exemption must not
+                bare = [k for k in keys if not atc.scan(f'"v": "{k}"')]
+                self.assertLessEqual(len(bare), 2)
+
+    def test_random_hex_and_alnum_keys_under_key_names(self):
+        rng = random.Random(7)
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        for name in ("x-api-key", "api-key", "token", "X-Auth-Token"):
+            for _ in range(100):
+                for value in (rng.randbytes(16).hex(), "".join(rng.choice(alphabet) for _ in range(40))):
+                    with self.subTest(name):
+                        self.assertTrue(atc.scan(f'"{name}": "{value}"'))
 
     def test_literal_escaped_home_path_fails(self):
         self.assertIn("literal home path", self.rules(r'p = "\/Users\/alex\/bin"'))
 
     def test_base64_like_blob_fails_but_a_path_does_not(self):
         key = "Zm9vYmFyQmF6MTIzNDU2Nzg5MEFCQ0RFRkdISUpLTE1OT1BRUg"
-        self.assertIn("40+ character base64-like string", self.rules(f'k = "{key}"'))
+        self.assertIn("32+ character base64-like string", self.rules(f'k = "{key}"'))
         long_path = "{{ .home }}/ops/site-private/bin/graft-hook-guard-wrapper-for-claude-code.sh"
         self.assertEqual(self.rules(f'p = "{long_path}"'), set())
-        self.assertIn("40+ character hex string", self.rules("h = " + "ab12" * 12))
+        self.assertIn("32+ character hex string", self.rules("h = " + "ab12" * 12))
+        # identifiers and dated paths of 32+ characters are not keys
+        for text in (
+            '"skipDangerousModePermissionPrompt": true',
+            'NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "{{ .x }}"',
+            'p = "{{ .home }}/Documents/Codex/2026-07-18/files-mentioned-by-the-user-next"',
+            "keepRemoteControlAwakeWhilePluggedIn = true",
+        ):
+            with self.subTest(text):
+                self.assertEqual(self.rules(text), set())
 
     def test_placeholders_and_references_are_clean(self):
         for text in (
@@ -130,6 +199,11 @@ class ScanTest(unittest.TestCase):
             "api_key_env: MIT_SIPB_API_KEY",
             'home_channel: \'{{ .signal_account }}\'',
             'printf "Bearer %s" "$KEY"',
+            '"x-api-key": "{{ secret "EXA_API_KEY" }}"',
+            'token = "{{ secret "X" }}"',
+            "password_hash: '{{ secret \"X\" }}'",
+            "Authorization: Bearer $KEY",
+            '"max_tokens": 4096',
             "plugins: disk-cleanup task-runner",
         ):
             with self.subTest(text):
@@ -140,7 +214,7 @@ class ScanTest(unittest.TestCase):
             b for b in atc.BLOB.findall((REPO / "agents/claude/settings.json.tmpl").read_text()) if len(b) > 1000
         ))
         self.assertEqual(self.rules(f'"command": "x {blob}"'), set())
-        self.assertIn("40+ character base64-like string", self.rules(f'"command": "x {blob}AAAAqwerty1Z"'))
+        self.assertIn("32+ character base64-like string", self.rules(f'"command": "x {blob}AAAAqwerty1Z"'))
 
     def test_findings_never_print_the_value(self):
         secret = "sk-SUPERSECRETVALUE99"
@@ -186,6 +260,31 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         rc, out = Root(self, "a: [unclosed\n", name="t/c.yaml.tmpl").check()
         self.assertEqual(rc, 1)
+
+    @unittest.skipUnless(HAVE_YAML, "PyYAML not importable")
+    def test_yaml_placeholder_must_be_quoted(self):
+        rc, out = Root(self, "a: {{ .host }}\n", name="t/c.yaml.tmpl").check()
+        self.assertEqual(rc, 1)
+        self.assertIn("hostile", out)
+        rc, out = Root(self, "a: '{{ .host }}'\nb: '{{ secret \"JINA_API_KEY\" }}'\n", name="t/c.yaml.tmpl").check()
+        self.assertEqual(rc, 0, out)
+
+    def test_json_and_toml_placeholders_survive_a_hostile_value(self):
+        rc, out = Root(self, '{"h": "x{{ .host }}y", "a": "Bearer {{ secret "JINA_API_KEY" }}"}').check()
+        self.assertEqual(rc, 0, out)
+        rc, out = Root(self, 'a = "{{ .host }}"\nb = "{{ secret "JINA_API_KEY" }}"\n', name="t/c.toml.tmpl").check()
+        self.assertEqual(rc, 0, out)
+        # a TOML literal string cannot hold a quote escape: the hostile value breaks it
+        rc, out = Root(self, "a = '{{ .host }}'\n", name="t/c.toml.tmpl").check()
+        self.assertEqual(rc, 1)
+        self.assertIn("hostile", out)
+
+    def test_hostile_roundtrip_helper(self):
+        for kind, body in (("json", '{"a": "{{ .host }}"}'), ("toml", 'a = "{{ .host }}"\n')):
+            with self.subTest(kind):
+                self.assertTrue(atc.hostile_roundtrip(kind, body, {"host"}, set()))
+        self.assertEqual(atc.escape_for("yaml", "a'b"), "a''b")
+        self.assertEqual(atc.escape_for("json", 'a"b\\c'), 'a\\"b\\\\c')
 
     def test_no_templates_is_usage_error(self):
         d = Path(tempfile.mkdtemp())
