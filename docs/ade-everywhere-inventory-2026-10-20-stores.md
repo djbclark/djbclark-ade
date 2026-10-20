@@ -117,7 +117,8 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
    with the tool stopped):** Antigravity `~/.gemini/antigravity-cli/conversations/*.db` (582M),
    `~/.gemini/antigravity/conversations/`, `~/.gemini/antigravity-acp/conversations/` (781M), plus
    each `conversation_summaries.db`; Cursor `~/.cursor/chats/<md5>/<uuid>/store.db` and
-   `~/.cursor/acp-sessions/<uuid>/store.db`.
+   `~/.cursor/acp-sessions/<uuid>/store.db`, each with its `meta.json` sidecar copied beside the backup (the
+   resume picker reads it, skills/autorename/SKILL.md; a db without it is not a lossless copy).
 3. **File stores — clone the directory:** `~/.claude/projects` (+ sidecar dirs `file-history`,
    `session-env`, `tasks`, `teams`; `sessions` only without its `*.key` files), Codex runtime `sessions/` tree,
    `~/.qwen/projects/*/chats`, `~/.cline/data/sessions`, `~/.grok/sessions`, `~/.gemini/tmp/*/chats`,
@@ -185,7 +186,8 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
    `~/.copilot/data.db` (`accounts`), Orca `Cookies` (Electron dir), `~/.orca/jira-tokens/`, `~/.orca/jira-sites.json`,
    and the three MCP configs that hold plaintext Jina and Exa keys (skills/fallback-chains/references/web-access.md
    5.3 and 5.6.2) with every dated `.bak` copy beside them (3-5 each, 2026-10-12 to 10-18, same keys):
-   `~/.config/opencode/opencode.json*` and `opencode.bak`, `~/.cursor/mcp.json*`, `~/.gemini/config/mcp_config.json*`;
+   `~/.config/opencode/opencode.json`, `opencode.json.bak*` and `opencode.bak` (not `opencode.jsonc`, which row 2
+   copies), `~/.cursor/mcp.json` and `mcp.json.bak*`, `~/.gemini/config/mcp_config.json` and `mcp_config.json.bak*`;
    and `~/.config/crush/crushrc*` (the SIPB provider key, tools/acp-run/README.md; two `.bak` copies).
 6. **Exporter claims** for tools other than OpenCode/Hermes/Gemini rest on the proposal's §6.1
    (verified 2026-10-19), not on a fresh `--help` run (avoided per the no-`--help`-on-live-CLIs rule).
