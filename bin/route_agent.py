@@ -578,6 +578,14 @@ def _clean_age(value: Any) -> float | None:
 SUBLIMIT_FAMILIES = ("fable",)
 
 
+def _merge_caps(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str, Any]:
+    """Per-key tighter of two sublimit maps (a cap never loosens by merge order)."""
+    out = dict(a or {})
+    for k, v in (b or {}).items():
+        out[k] = _tighter(out.get(k), v) if k in out else v
+    return out
+
+
 def _merge_pool(into: dict[str, Any], key: str, entry: dict[str, Any]) -> None:
     """Fold one pool entry into `into`: the tightest known remaining wins and carries its bind."""
     prior = into.get(key)
@@ -588,7 +596,7 @@ def _merge_pool(into: dict[str, Any], key: str, entry: dict[str, Any]) -> None:
     take_new = e_rem is not None and (p_rem is None or e_rem < p_rem)
     merged = dict(entry if take_new else prior)
     merged["windows"] = {**prior.get("windows", {}), **entry.get("windows", {})}
-    merged["sublimits"] = {**prior.get("sublimits", {}), **entry.get("sublimits", {})}
+    merged["sublimits"] = _merge_caps(prior.get("sublimits"), entry.get("sublimits"))
     merged["remaining"] = e_rem if take_new else p_rem
     into[key] = merged
 
@@ -608,6 +616,7 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
     present it fills `windows`, `sublimits` and the bind fields and can only tighten the
     row's `remaining`, never loosen it. Malformed rows raise (the caller falls back)."""
     pools: dict[str, Any] = {}
+    foreign: list[tuple[str, float]] = []
     for row in rows:
         name = row.get("provider")
         if not name or row.get("error"):
@@ -620,12 +629,12 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
         stale = ((row_age is None or row_age > STALE_SOFT)
                  or row.get("reading_expired") is True)
         head = _pct(row.get("headroom_percent"))
-        if row.get("usable_now") is False or head == 0:
+        if ("usable_now" in row and row["usable_now"] is not True) or head == 0:
             top: float | None = 0.0
         elif stale:
             top = None
         else:
-            top = head
+            top = None if head is None else round(head, 1)
         entry: dict[str, Any] = {
             "remaining": top, "windows": {}, "sublimits": {},
             "billing_kind": row.get("billing_kind"),
@@ -642,7 +651,7 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
         for fkey, finfo in folded.items():
             if fkey == key:
                 entry["windows"].update(finfo.get("windows") or {})
-                entry["sublimits"].update(finfo.get("sublimits") or {})
+                entry["sublimits"] = _merge_caps(entry["sublimits"], finfo.get("sublimits"))
                 for k in ("pace_ratio", "resets_at", "window_minutes"):
                     if finfo.get(k) is not None:
                         entry[k] = finfo[k]
@@ -650,8 +659,11 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
                     entry["remaining"] = finfo.get("remaining")   # row gave no headroom
                 elif top is not None:
                     entry["remaining"] = _tighter(top, finfo.get("remaining"))
-            else:
-                _merge_pool(pools, fkey, finfo)
+                elif finfo.get("remaining") == 0.0:
+                    entry["remaining"] = 0.0      # a stale row's exhausted window still binds
+            elif finfo.get("remaining") is not None:
+                # another family's window inside this row: never creates or loosens that pool
+                foreign.append((fkey, finfo["remaining"]))
         if family in SUBLIMIT_FAMILIES and key == name:
             # a model cap inside the shared pool: bounds that model only (sublimits), and
             # must not drag the whole account down
@@ -659,6 +671,10 @@ def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, A
             entry = {**entry, "remaining": None, "windows": {},
                      "sublimits": {family: cap}}
         _merge_pool(pools, key, entry)
+    for fkey, rem in foreign:
+        cur = pools.get(fkey)
+        if cur is not None and cur.get("remaining") is not None and rem < cur["remaining"]:
+            cur["remaining"] = rem
     return pools
 
 

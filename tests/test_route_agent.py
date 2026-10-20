@@ -1530,6 +1530,10 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         self.assertTrue(quota["omp"]["requires_operator_approval"])
 
     def test_live_aiuse_matches_the_file_read(self):
+        # opt-in: spawns the host's real aiuse and reads ~/.cache/aiuse (conftest keeps the
+        # suite off both), and an hourly refresh between the two reads can differ
+        if os.environ.get("ROUTE_AGENT_LIVE_TESTS") != "1":
+            self.skipTest("set ROUTE_AGENT_LIVE_TESTS=1 to compare against the live aiuse")
         import shutil as _sh
         import subprocess as _sp
         exe = _sh.which("aiuse")
@@ -1541,13 +1545,87 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
             self.skipTest("aiuse --available failed")
         live = self.tmp / "live.json"
         live.write_bytes(proc.stdout)
+        payload = r.json.loads(proc.stdout)
+        in_payload = {r.pool_service(row["provider"], row.get("pool_family"))
+                      for row in payload.get("available", [])}
+        noted = {n.get("provider") for n in payload.get("agent_notes") or []}
         got, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(live)})
         want, _ = self.fileonly(snap)
         for key, info in want.items():
-            if key in got and got[key].get("remaining") is not None \
-                    and info.get("remaining") is not None and key != "cursor-auto":
+            if key in in_payload and key not in noted and got[key].get("remaining") is not None \
+                    and info.get("remaining") is not None:
                 self.assertAlmostEqual(got[key]["remaining"], info["remaining"], delta=3.0,
                                        msg=key)
+
+    # -- adversary round 4 ------------------------------------------------------------------
+
+    def test_foreign_family_windows_never_create_or_loosen_another_pool(self):
+        exhausted = {"state": "exhausted", "headroom_percent": 0.0}
+        self.accounts = [
+            {"provider": "cursor", "age_seconds": 30, "windows": [
+                {"label": "auto", "pool_family": "auto", **exhausted},
+                {"label": "tp", "pool_family": "third_party", "headroom_percent": 50.0}]},
+            {"provider": "antigravity", "age_seconds": 30, "windows": [
+                {"label": "g", "pool_family": "gemini", "headroom_percent": 80.0},
+                {"label": "cg", "pool_family": "claude_gpt", **exhausted}]},
+        ]
+        rows = [
+            {"provider": "cursor", "pool_family": "third_party", "usable_now": True,
+             "headroom_percent": 50.0, "windows": [
+                 {"label": "tp", "pool_family": "third_party", "headroom_percent": 50.0},
+                 {"label": "auto", "pool_family": "auto", "headroom_percent": 63.5}]},
+            {"provider": "antigravity", "pool_family": "gemini", "usable_now": True,
+             "headroom_percent": 80.0, "windows": [
+                 {"label": "g", "pool_family": "gemini", "headroom_percent": 80.0},
+                 {"label": "cg", "pool_family": "claude_gpt", "headroom_percent": 70.0}]},
+        ]
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
+        self.assertEqual(quota["cursor-auto"]["remaining"], 0.0)
+        self.assertEqual(quota["antigravity-claude"]["remaining"], 0.0)
+
+    def test_foreign_window_may_tighten_an_existing_pool(self):
+        rows = [
+            {"provider": "antigravity", "pool_family": "gemini", "usable_now": True,
+             "headroom_percent": 80.0, "windows": [
+                 {"label": "cg", "pool_family": "claude_gpt", "headroom_percent": 10.0}]},
+            {"provider": "antigravity", "pool_family": "claude_gpt", "usable_now": True,
+             "headroom_percent": 60.0},
+        ]
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
+        self.assertEqual(quota["antigravity-claude"]["remaining"], 10.0)
+
+    def test_fable_cap_merges_to_the_tighter_in_either_order(self):
+        fable = {"provider": "claude", "pool_family": "fable", "usable_now": True,
+                 "headroom_percent": 2.0}
+        default = {"provider": "claude", "pool_family": "default", "usable_now": True,
+                   "headroom_percent": 30.0, "windows": [
+                       {"label": "w", "pool_family": "default", "headroom_percent": 30.0},
+                       {"label": "fable", "pool_family": "fable",
+                        "quota_scope": "model_sublimit", "max_share_of_parent_percent": 50,
+                        "headroom_percent": 45.0}]}
+        for rows in ([fable, default], [default, fable]):
+            quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
+            self.assertEqual(quota["claude"]["sublimits"], {"fable": 2.0})
+            self.assertEqual(quota["claude"]["remaining"], 30.0)
+
+    def test_stale_row_with_an_exhausted_window_reads_zero(self):
+        row = {"provider": "codex", "age_seconds": r.STALE_SOFT + 100, "windows": [
+            {"label": "w", "state": "exhausted", "headroom_percent": 0.0}]}
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    def test_non_true_usable_now_reads_zero(self):
+        for val in ("false", 0, None, "no"):
+            with self.subTest(val):
+                row = {"provider": "codex", "usable_now": val, "headroom_percent": 60.0}
+                quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON":
+                                         str(self.rows_payload([row]))})
+                self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    def test_windowless_headroom_is_rounded_like_the_windowed_form(self):
+        row = {"provider": "codex", "usable_now": True, "headroom_percent": 5.345454545}
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
+        self.assertEqual(quota["codex"]["remaining"], 5.3)
 
     def fileonly(self, snap):
         import io
