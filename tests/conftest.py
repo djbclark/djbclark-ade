@@ -32,3 +32,8 @@ os.environ.setdefault("ACP_DISPATCH_REAP_MIN_INTERVAL", "0")
 # Off in tests so the suite never depends on, or spawns, the host's real aiuse;
 # test_route_agent.py's TestQuotaFromAiuseAvailable turns it on per test.
 os.environ.setdefault("ROUTE_AGENT_AIUSE", "off")
+# route_agent.omp_anthropic_ready() reads the host's omp login (~/.omp/agent/agent.db) unless forced (2026-10-20,
+# docs/queue.md item 6). With a working login omp joins every roster as an unmeasured code/bulk pool and changed
+# the answer of three tests that pass on CI, which has no login. Off in tests; TestOmpCreditsTier and
+# TestOmpReadyRoster turn it on per test with mock.patch.dict.
+os.environ.setdefault("ROUTE_AGENT_OMP_READY", "0")
