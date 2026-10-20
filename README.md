@@ -91,6 +91,7 @@ their old paths are symlinks into this checkout).
 | [`session-handoff`](skills/session-handoff/SKILL.md) | Read/write the out-of-tree Tier 1 session pointer for any git repo. |
 | [`baton`](skills/baton/SKILL.md) | Start-of-session resume from the Tier 1 pointer (`/baton`, `/resume`). |
 | [`loose`](skills/loose/SKILL.md) | Audit the session for loose ends, step through them, then offer `/handoff` or quit. |
+| [`loadwatch`](skills/loadwatch/SKILL.md) | Make this session the machine's one load watcher (`load-watch watcher set`): every load incident, unexplained spike and job-guard trip comes here; investigates when the load is abnormal. |
 | [`steps`](skills/steps/SKILL.md) | Walk open items one multiple-choice prompt at a time, recommendation first. |
 | [`research`](skills/research/SKILL.md) | Evidence-grounded research: verbatim-quote claim log, counter-evidence pass, `research_check.py` verifies quotes and citations. |
 | [`dialogue`](skills/dialogue/SKILL.md) | Multi-model dialogue that produces one artifact with a final-word model; `dialogue.py` runs pinned routes, checks footers and gates the final word. |
