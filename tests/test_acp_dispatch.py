@@ -292,6 +292,18 @@ class TestDispatch(Base):
         self.assertIn("## Checkpoint mode", (self.out / "s1-brief.md").read_text())
         self.assertTrue(self.record()["checkpoint"])
 
+    def test_stale_snapshot_window_is_unmeasured_not_a_crash(self):
+        # 2026-10-20: agy's aiuse row was 1658 s old, route_agent stored its binding window as
+        # None (unmeasured) and dispatch died in the window fit with
+        # "float() argument must be ... not 'NoneType'" before launching anything.
+        snap = self.tmp / "latest.json"
+        snap.write_text(json.dumps({"collected_at": "2001-01-01T00:00:00+00:00", "snapshot": {"accounts": [{
+            "provider": "codex", "windows": [{"label": "weekly", "remaining_percent": 12.0}]}]}}))
+        r = self.dispatch("--est-pct", "9", env={"AIUSE_SNAPSHOT": str(snap)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertTrue(self.record()["checkpoint"])
+
     def test_wont_fit_refuses_without_launching(self):
         snap = self.tmp / "latest.json"
         snap.write_text(json.dumps({"collected_at": "2099-01-01T00:00:00+00:00", "snapshot": {"accounts": [{
