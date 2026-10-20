@@ -365,9 +365,9 @@ def render(d):
       "`skills/paseo*/.paseo-managed-files.json` (untracked). They belong to other agents' in-flight "
       "work in the primary checkout; this scan does not touch them. The two `forgejo-ci-2026-10` rows "
       "likewise share `.forgejo/`, `apps/desktop/release-new/` and `scripts/forgejo-test-ref`. "
-      "Untracked `graft/` directories are the reproducible graft index (`graft build`), not work. "
-      "The `phase0-scan` pasture itself is dirty with this slice's own files while the scan ran, and "
-      "is left out of 3.2.\n")
+      "An untracked `graft/` directory is usually the reproducible graft index (`graft build`), but it is "
+      "archived like any other untracked path: nothing verifies the name. Every checkout gets its own rows, "
+      "the `phase0-scan` pasture included.\n")
 
     # ---- 3 capture
     w("## 3. Capture (how each item would be preserved; none of this was run)\n")
@@ -440,8 +440,10 @@ def render(d):
               f"points to and that one's common directory hold the history, archive them too: {gitdir}"
               " | yes: counts unknown; re-scan or archive whole |")
             continue
-        untr = [u for u in (c.get("untracked_sample") or []) if u != "graft/"]
-        real_untr = num(c["untracked"]) - (1 if "graft/" in (c.get("untracked_sample") or []) else 0)
+        # every untracked path counts, a `graft/` directory included: nothing verifies that one is the reproducible
+        # graft index rather than work under an ordinary name (Codex pass 28 on PR 27)
+        untr = list(c.get("untracked_sample") or [])
+        real_untr = num(c["untracked"])
         modified, stashes, local_n = num(c["modified"]), num(c["stashes"]), num(c.get("local_only_commits"))
         head_ahead = next((v for v in (c["ahead_of_origin"], c["unpushed"])
                            if isinstance(v, int) and v > 0), 0)
@@ -460,7 +462,7 @@ def render(d):
             covered_by_bundle = True
             what.append(f"all {c['ahead_of_origin']} commits (no remote)")
             bd = "~/ops/site-private/bundles/" + ck.removeprefix("checkouts/")
-            cmd.append(shcode("mkdir -p {} && git -C {} bundle create {} --all", bd, raw_p, f"{bd}/all.bundle")
+            cmd.append(shcode("mkdir -p {} && GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create {} --all", bd, raw_p, f"{bd}/all.bundle")
                        + " or add a remote and `git push -u origin <branch>`")
             need = "**yes**: only copy; hosting or bundle destination"
         elif ("orphan branch" in c["flags"] or "unpushed commits" in c["flags"]) and head_ahead:
@@ -468,7 +470,7 @@ def render(d):
             if c["branch"] == "HEAD":
                 # detached: `refs/heads/HEAD` does not exist, a push of it fails (adversary round 13, Codex pass 8)
                 what.append(f"{head_ahead} commit(s) on a detached HEAD")
-                cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} bundle create <DEST>/{} HEAD",
+                cmd.append(shcode("mkdir -p <DEST>/{} && GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} HEAD",
                                   ck, raw_p, f"{ck}/HEAD.bundle")
                            + " (detached HEAD: bundle, or create a branch first: "
                            + shcode("git -C {} switch -c <name>", raw_p) + ")")
@@ -479,7 +481,7 @@ def render(d):
                 # parser, and shell quoting does not stop that (Codex pass 7 on PR 27); the bundle's file name is the
                 # percent-encoded branch, so `a/b` and `a_b` stay distinct
                 cmd.append(shcode("git -C {} push -u origin refs/heads/{}:refs/heads/{}", raw_p, c["branch"], c["branch"])
-                           + " or " + shcode("mkdir -p <DEST>/{} && git -C {} bundle create <DEST>/{} refs/heads/{}",
+                           + " or " + shcode("mkdir -p <DEST>/{} && GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} refs/heads/{}",
                                              ck, raw_p, f"{ck}/branch-{quote(c['branch'], safe='')}.bundle", c["branch"]))
                 need = "yes: pushing a branch publishes it; pick push or bundle"
         tag_others = c.get("local_only_tags") or []
@@ -502,7 +504,7 @@ def render(d):
             # a tag is pushed by its full ref name, like a branch: a tag named like an option never reaches git's parser
             lo_cmd += [shcode("git -C {} push origin refs/tags/{}:refs/tags/{}", raw_p, t["tag"], t["tag"])
                        for t in tag_others]
-            lo_cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} bundle create <DEST>/{} --all",
+            lo_cmd.append(shcode("mkdir -p <DEST>/{} && GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
                                  ck, raw_p, f"{ck}/local-only.bundle"))
             cmd.append(" or ".join(lo_cmd) if len(lo_cmd) == 1 else "; ".join(lo_cmd[:-1]) + " or " + lo_cmd[-1])
             need = need if need.startswith(("yes", "**yes")) else "yes: pushing a branch publishes it; pick push or bundle"
@@ -546,7 +548,7 @@ def render(d):
             if local_n and not covered_by_bundle:  # the local-only branch above already printed the bundle command
                 cmd.append(again)
             else:
-                cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} bundle create <DEST>/{} --all",
+                cmd.append(shcode("mkdir -p <DEST>/{} && GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
                                   ck, raw_p, f"{ck}/local-only.bundle")
                            + " " + again)
             need = need if need.startswith(("yes", "**yes")) else "yes: origin did not answer; bundle, or re-scan"
@@ -559,7 +561,7 @@ def render(d):
             cmd.append("list them with " + shcode("git -C {} config --file .gitmodules --get-regexp '^submodule\\..*\\.path$'", raw_p)
                        + ", then in each: " + shcode("git -C {}/<sub> status --porcelain", raw_p) + ", "
                        + shcode("git -C {}/<sub> log --oneline --branches --tags --not --remotes", raw_p) + ", "
-                       + shcode("mkdir -p <DEST>/{}/<sub> && git -C {}/<sub> bundle create <DEST>/{}/<sub>/all.bundle --all",
+                       + shcode("mkdir -p <DEST>/{}/<sub> && GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {}/<sub> bundle create <DEST>/{}/<sub>/all.bundle --all",
                                 ck, raw_p, ck)
                        # a bundle holds committed objects only: the modified, staged and untracked files need the
                        # same patches and archive as an ordinary checkout (Codex pass 26 on PR 27)
@@ -573,7 +575,9 @@ def render(d):
         w(f"| {p} | {'; '.join(what)} | {'; '.join(cmd)} | {need} |")
     w("")
     w("Checkouts not listed are `clean and pushed` (branch on origin or no commits origin lacks, HEAD only; "
-      "see limit 9) or hold only the reproducible `graft/` index. A `skipped` / `scan incomplete` checkout has "
+      "see limit 9). Every emitted `bundle create` runs with `GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1`, "
+      "like the scan's own counts: a grafts file or replace ref would otherwise leave real objects out of the "
+      "bundle. A `skipped` / `scan incomplete` checkout has "
       "no counts (its verdict is in the section 2 table) and is listed with a whole-directory archive: anything "
       "may be in there. A checkout flagged `origin unreachable` is "
       "always listed, whatever its counts: its local-only count came from stale tracking refs and is "

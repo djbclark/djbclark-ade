@@ -631,9 +631,12 @@ def queried_origin_url(path: Path) -> str | None:
     file, or a worktree-scoped one after the local one, is not fetched from). A url that is a path (no
     scheme, no `:`) is relative to the checkout, not to our neutral cwd. None when it is unset or shaped
     like an option."""
-    rc, out = git(path, "config", "--get-all", "remote.origin.url")
-    url = out.splitlines()[0].strip() if rc == 0 and out.strip() else ""
-    if not url or url.startswith("-"):
+    # `-z`: the value whole, NUL-terminated. `splitlines()[0]` cut an embedded newline off, so a url such as
+    # `ssh://git@host/repo<LF>?private_token=...` was judged on its first line and git handed the whole value
+    # to ssh (Codex pass 28 on PR 27); `url_holds_credential` refuses any control character
+    rc, out = git(path, "config", "-z", "--get-all", "remote.origin.url")
+    url = out.split("\0")[0] if rc == 0 and out else ""
+    if not url.strip() or url.startswith("-"):
         return None
     if not os.path.isabs(url) and (url.startswith(".") or ":" not in url):
         url = str((path / url).resolve())
@@ -694,6 +697,8 @@ def url_holds_credential(url: str) -> bool:
     # `<transport>::<address>` names a remote helper for an arbitrary address (`https::https://t@host`): git
     # splits at the FIRST `::` and hands everything after it to git-remote-<transport> as one argument, so a
     # second prefix or an ssh-looking inner scheme changes nothing (rounds 23 and 24): no parsing, any `@` or `?`
+    if any(ord(ch) < 0x20 or ch == "\x7f" for ch in url):
+        return True  # a newline or other control character: git passes the value on whole (Codex pass 28)
     head, sep, rest = url.partition("::")
     if sep and head and re.fullmatch(r"[A-Za-z0-9+.-]+", head):
         return "@" in rest or "?" in rest or "#" in rest

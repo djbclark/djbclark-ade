@@ -1880,7 +1880,10 @@ def test_url_holds_credential_reads_any_userinfo_or_query_on_a_non_ssh_scheme():
                       ("git@host:repo?token=FAKE", True), ("host:x?y", True), ("/tmp/o?x", False), ("x/y:z?q", False),
                       # Codex pass 27: a fragment, on every form; an empty one carries nothing
                       ("ssh://git@host/x#t=FAKE", True), ("git@host:repo#FAKE", True), ("https::https://host/x.git#t", True),
-                      ("https://host/x.git#", False), ("/tmp/a#b", False)):
+                      ("https://host/x.git#", False), ("/tmp/a#b", False),
+                      # Codex pass 28: a control character anywhere: git hands the value on whole
+                      ("ssh://git@host/repo\n?private_token=FAKE", True), ("https://host/x.git\n", True),
+                      ("git@host:repo\t", True), ("/tmp/o\n", True)):
         assert mod.url_holds_credential(url) is want, url
 
 
@@ -1995,6 +1998,26 @@ def test_a_replace_ref_does_not_hide_a_local_commit(tmp_path):
     assert c["verdict"] == "unpushed commits" and c["local_only_commits"] == 1, c
     assert c["local_only_branches"] == [{"branch": "main", "count": 1}], c
     assert git(work, "rev-parse", "origin/main").strip() == pushed
+
+
+def test_an_origin_url_with_an_embedded_newline_is_read_whole_and_never_queried(tmp_path):
+    """Codex pass 28 on PR 27: `splitlines()[0]` judged only the first line of `remote.origin.url`."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    url = "ssh://git@127.0.0.1:9/repo\n?private_token=FAKE"
+    git(work, "config", "remote.origin.url", url)
+    assert mod.queried_origin_url(work) == url
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True)
+    assert mod.ORIGIN_CREDENTIAL in c["flags"] and c["local_only_verified"] is False, c["flags"]
+
+
+def test_an_untracked_graft_directory_counts_like_any_other_path():
+    """Codex pass 28 on PR 27: a checkout whose only untracked path was `graft/` left the capture plan by name."""
+    mod = load_doc()
+    co = doc_checkout("/p/g", flags=["dirty"], verdict="dirty", untracked=1, untracked_sample=["graft/"])
+    rows = [r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith("| /p/g ")]
+    assert len(rows) == 1 and "1 untracked (`graft/`)" in rows[0] and "untracked.tar" in rows[0]
 
 
 def test_a_grafts_file_does_not_hide_a_local_commit(tmp_path):
@@ -2126,7 +2149,7 @@ def test_an_unreachable_origin_checkout_always_gets_a_capture_row_even_with_zero
     rows = section_3_2(text).splitlines()
     row = next(r for r in rows if r.startswith("| /p/gone "))
     assert "local-only count unverified: origin did not answer" in row
-    assert "mkdir -p <DEST>/checkouts/abs/p/gone && git -C /p/gone bundle create " \
+    assert "mkdir -p <DEST>/checkouts/abs/p/gone && GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C /p/gone bundle create " \
            "<DEST>/checkouts/abs/p/gone/local-only.bundle --all" in row
     assert "re-scan with `--remote` once origin answers" in row and row.rstrip().endswith("| yes: origin did not answer; bundle, or re-scan |")
     assert "local-only count unverified" in next(r for r in rows if r.startswith("| /p/dirt "))
