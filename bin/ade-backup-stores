@@ -1238,9 +1238,20 @@ def export_hermes(home, work, final, state_backup, excluder):
             make_hermes_scratch(home, scratch, state_backup, info["limit"], excluder)
             env = {**os.environ, "HERMES_HOME": str(scratch)}
             bulk = out / "hermes_sessions.jsonl"
-            rc, text = hermes_run(hermes, [str(bulk)], str(out), env)
-            n = exported_count(text)
-            if rc == 0 and bulk.is_file() and n is not None:
+            # Exported into a temporary name beside `bulk` and renamed once verified, as per_session_export does: a
+            # failed or timed-out run that wrote part of the JSONL leaves no file for the manifest to list.
+            tfd, tmp = tempfile.mkstemp(dir=out, prefix=".bk-", suffix=".jsonl")
+            os.close(tfd)
+            os.unlink(tmp)
+            try:
+                rc, text = hermes_run(hermes, [tmp], str(out), env)
+                n = exported_count(text)
+                verified = rc == 0 and os.path.isfile(tmp) and n is not None
+                if verified:
+                    os.replace(tmp, bulk)
+            finally:
+                Path(tmp).unlink(missing_ok=True)
+            if verified:
                 info["mode"] = "bulk"
                 info["sessions_exported"] = info["sessions_total"] = n
             elif "more than" in text:
@@ -1532,12 +1543,16 @@ def run_main(argv):
         hermes_missing = "hermes-export" in wanted and hermes_db_absent(hermes_db)
         hermes_errors = []
         if "hermes-export" in wanted and not hermes_missing:
-            try:  # the gate the real export applies before it opens state.db: a refusal is an error, not "would run"
-                hermes_state_gate(home, excluder)
-            except RootSymlinkError as exc:
-                run = StoreRun({"name": "hermes-export", "kind": "hermes-export"}, Path("/nonexistent"))
-                run.error("hermes sessions export", exc)
-                hermes_errors = run.errors
+            run = StoreRun({"name": "hermes-export", "kind": "hermes-export"}, Path("/nonexistent"))
+            if not (os.environ.get("ADE_BACKUP_HERMES") or shutil.which("hermes")):
+                # the check export_hermes makes before it builds the scratch copy: same source, wording and entry
+                run.error("hermes", FileNotFoundError("no hermes on PATH (set ADE_BACKUP_HERMES)"))
+            else:
+                try:  # the gate the real export applies before it opens state.db: a refusal is an error, not "would run"
+                    hermes_state_gate(home, excluder)
+                except RootSymlinkError as exc:
+                    run.error("hermes sessions export", exc)
+            hermes_errors = run.errors
         if "hermes-export" in wanted:
             say(f"hermes-export: would skip, {hermes_db} is missing (dry run)" if hermes_missing else
                 f"hermes-export: would refuse, {hermes_errors[0]['error']} (dry run)" if hermes_errors else

@@ -2025,3 +2025,65 @@ echo "Error: Session 'x' has more than 20,000 exportable messages; capped"; exit
     assert b"mess" not in all_bytes(dest / "hermes-export")
     assert [f["path"].rsplit("/", 1)[-1] for f in entry["files"]] == ["good.jsonl"]
     assert [e["source"] for e in entry["errors"]] == ["hermes session bad"]
+
+
+# --- backups-fix-17 (PR 24 follow-up, 2026-10-20): the bulk export is renamed on success; the dry run knows hermes is missing ---
+
+@pytest.mark.parametrize("failure", ["exit", "timeout"])
+def test_a_failed_bulk_export_leaves_no_partial_file_and_no_manifest_entry(real, monkeypatch, failure):
+    mod, home, tmp = real
+    make_hermes_db(home, (("a", 2),))
+    fake = tmp / "hermes"
+    fake.write_text(f"""#!/bin/sh
+out="$3"
+printf '{{"id": "a", "mess' > "$out"
+if [ "{failure}" = timeout ]; then exec sleep 5; fi
+echo "boom"; exit 1
+""")
+    fake.chmod(0o755)
+    monkeypatch.setenv("ADE_BACKUP_HERMES", str(fake))
+    monkeypatch.setattr(mod, "HERMES_TIMEOUT", 1)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "hermes-export", "--dest", str(dest)]) == 1
+    entry = manifest_of(dest)["stores"][0]
+    assert [e["source"] for e in entry["errors"]] == ["hermes sessions export"]
+    assert entry["files"] == [] and entry["hermes_export"]["mode"] is None
+    assert list((dest / "hermes-export").iterdir()) == []  # neither hermes_sessions.jsonl nor a temporary
+    assert b"mess" not in all_bytes(dest / "hermes-export")
+
+
+def test_a_bulk_export_is_renamed_into_place_when_verified(real, monkeypatch):
+    mod, home, tmp = real
+    make_hermes_db(home, (("a", 2),))
+    fake = tmp / "hermes"
+    fake.write_text("""#!/bin/sh
+out="$3"
+echo '{"id": "a"}' > "$out"; printf 'Exported 1 session to %s\\n' "$out"; exit 0
+""")
+    fake.chmod(0o755)
+    monkeypatch.setenv("ADE_BACKUP_HERMES", str(fake))
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "hermes-export", "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["hermes_export"]["mode"] == "bulk" and entry["hermes_export"]["sessions_exported"] == 1
+    assert [p.name for p in (dest / "hermes-export").iterdir()] == ["hermes_sessions.jsonl"]
+    assert [f["path"].rsplit("/", 1)[-1] for f in entry["files"]] == ["hermes_sessions.jsonl"]
+
+
+def test_hermes_dry_run_reports_the_same_missing_binary_error_as_the_real_run(real, monkeypatch, capsys):
+    mod, home, tmp = real
+    make_hermes_db(home, (("a", 2),))
+    empty = tmp / "empty-path"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    monkeypatch.delenv("ADE_BACKUP_HERMES", raising=False)
+    assert mod.main(["--only", "hermes-export", "--dry-run", "--json", "--dest", str(home / "dry")]) == 1
+    dry = json.loads(capsys.readouterr().out)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "hermes-export", "--dest", str(dest)]) == 1
+    real_errors = manifest_of(dest)["stores"][0]["errors"]
+    assert len(real_errors) == 1 and dry["errors"] == real_errors
+    assert real_errors[0]["source"] == "hermes" and "no hermes on PATH" in real_errors[0]["error"]
+    assert not (home / "dry").exists()
+    assert mod.main(["--only", "hermes-export", "--dry-run", "--dest", str(home / "dry")]) == 1
+    assert "would run" not in capsys.readouterr().out
