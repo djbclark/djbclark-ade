@@ -13,14 +13,18 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    2026-11-08) minus cost since the grant. Plan: an `aiuse` collector behind `ANTHROPIC_ADMIN_KEY` in
    `sudo-secretspec` (djbclark creates the key in the console, Organization settings > Admin keys), grant
    parameters stay in the `set-credits` override, a launchd/`fleet-watch` job refreshes it (never a model prompt,
-   home rule 13). Key stored as `ANTHROPIC_ADMIN_KEY` 2026-10-20 (runtime declaration, optional); the collector
-   slice is in flight on `aiuse` branch `feat/omp-cost-report`.
+   home rule 13). Key stored as `ANTHROPIC_ADMIN_KEY` 2026-10-20 (runtime declaration, optional). **Collector merged
+   2026-10-20** (aiuse PRs 38 and 40, main 5b0b9f9: `aiuse refresh-credits omp`, hourly launchd template
+   `packaging/launchd/com.djbclark.aiuse-credits-refresh.plist`); **not live on this Mac until aiuse 3.8.0 is
+   released** (`just release 3.8.0` in `~/src/aiuse`, publishes PyPI and Homebrew; this Mac runs the Homebrew 3.7.2)
+   and the launchd job is loaded per the aiuse README. The figure is a lower bound (it counts all org spend).
    Also (adversary on the aiuse branch, finding 5, 2026-10-20): `bin/route_agent.py` reads aiuse's `latest.json`
    directly, so it never sees the operator credits override; make it read `aiuse --available --json` (or the
    same resolver aiuse uses) so routing and the quota gate agree. Small djbclark-ade PR after the aiuse branch merges.
-   **Done 2026-10-20** on branch `feat/route-agent-aiuse-available` (not yet a PR): `route_agent.py` runs
-   `aiuse --available --json`, falls back to the snapshot file with a stderr log and `quota_source` in the output;
-   `ROUTE_AGENT_AIUSE_JSON` feeds canned output. Not done: `acp-dispatch`'s `aiuse_reset_time` (bin/acp-dispatch ~2210)
+   **Done 2026-10-20, PR 12 merged (72252da)**: `route_agent.py` runs `aiuse --available --json` (available-row
+   contract fields; `windows[]` only tightens; `excluded[]` and absent pools read 0 on a fresh payload), falls back
+   to the snapshot file with a stderr log and `quota_source` in the output; `ROUTE_AGENT_AIUSE_JSON` feeds canned
+   output, `ROUTE_AGENT_AIUSE=off` pins the file read (set by `tests/conftest.py`). Not done: `acp-dispatch`'s `aiuse_reset_time` (bin/acp-dispatch ~2210)
    still reads `latest.json` directly for a refusal's reset time; the quota gate itself (`load_snapshot()`) moved.
 
 3. **Load gate follow-ups** (adversary final pass on PR 7, 2026-10-20, informational): (a) on `--detach
@@ -68,6 +72,23 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    (Cursor: https://api.cursor.com only) or loopback unless a test flag is set, and stop the Authorization header
    following a redirect: urllib copies every header onto the redirected request, to any host; `bin/failover.py`
    already avoids this with `_NoRedirect` and `add_unredirected_header`. One PR with tests.
+
+6. **Three `tests/test_route_agent.py` tests fail on a host where omp is ready** (pre-existing on master,
+   confirmed 2026-10-20 at d6c27da): `TestDiscovery::test_measured_idle_capacity_beats_unmeasured`,
+   `TestPlanWave::test_no_room_comes_back_as_none_not_an_error`,
+   `TestQualityBand::test_the_2026_10_18_case_queues_code_instead_of_routing_far_down`. They pass with
+   `ROUTE_AGENT_OMP_READY=0`, so CI (no omp login) is green while a local `bg` run is red. Fix: pin the probe in
+   `tests/conftest.py` (`os.environ.setdefault("ROUTE_AGENT_OMP_READY", "0")`) and give the omp case its own test.
+7. **Carried from the PR 12 reviews** (adversary rounds 1-6 and Codex, 2026-10-20, none blocking): (a) the
+   available-row fields `binding_window`, `available_at` and `requires_operator_approval` are stored on the pool
+   entry but nothing in `route()`/`plan()` reads them (the live omp row says `requires_operator_approval: true`;
+   omp is gated by its ready probe and the credits ruling instead); (b) the 30 s aiuse memo's first, spawning
+   serve returns the stored object rather than a copy (no caller mutates it); (c) `excluded: true` is set on the
+   whole entry when only the `fable` sublimit was excluded; (d) `acp-dispatch`'s `aiuse_reset_time` still reads
+   `latest.json` directly (item 2); (e) **lead ruling to confirm with djbclark**: the aiuse path reports Fable as the
+   row's least-applicable headroom (22 live where the file read gave the sublimit window's own 44), so
+   `FABLE_MIN_LEFT=10` now switches to Opus at roughly 20 % of the cap rather than 10 %; kept because it is the
+   contract value and the conservative one.
 
 ## Cloud-agent readiness: Codex Cloud environment, Cursor API key (ruling 2026-10-19)
 
