@@ -13,7 +13,7 @@ database; no data changes), and the live Hermes `state.db` is never handed to `h
   2. per-session SQLite trees (Cursor, Antigravity): each db the same way, its sidecar (`meta.json`,
      `<uuid>.meta`) copied beside it;
   3. file stores: `shutil.copytree` with an ignore function that drops every credential file name and path
-     (inventory section 5 item 5), the `credential-bak` vault, symlinks and non-regular files;
+     (inventory section 5 item 5), the `credential-bak` vault, symlinks (a symlinked store root too) and non-regular files;
   4. `hermes sessions export` (JSONL) into <dest>/hermes-export/, run with HERMES_HOME pointing at a scratch
      copy of the hermes-state backup (removed afterwards), so `hermes` never opens the live state.db and the
      session ids, counts and exports all come from one snapshot. The export refuses a session above
@@ -210,7 +210,7 @@ def build_stores(home):
         files("qwen", ("projects", ".qwen/projects")),
         files("cline", ("sessions", ".cline/data/sessions")),
         tree("cline-db", ".cline/data/db", ["*.db"], []),
-        files("grok", ("sessions", ".grok/sessions")),
+        files("grok", ("sessions", ".grok/sessions"), ("memory-v2", ".grok/memory-v2"), ("memtrace", ".grok/memtrace")),
         sqlite("grok-db", ".grok/worktrees.db"),
         files("gemini-cli", ("tmp", ".gemini/tmp")),
         files("omp", ("sessions", ".omp/agent/sessions")),
@@ -407,6 +407,9 @@ def copy_file_store(store, run, excluder):
             if not os.path.lexists(src):
                 run.absent(src)
                 continue
+            if src.is_symlink():  # a symlinked root (file or directory) is never followed, like any link inside
+                run.skip(src, "symlink")
+                continue
             if src.is_dir():
                 try:
                     shutil.copytree(src, dst, symlinks=True, ignore=make_ignore(run, excluder),
@@ -589,12 +592,18 @@ def plan_store(store, excluder):
                 for pat in store["sidecars"]:
                     side = db.parent / pat.format(stem=db.stem, name=db.name)
                     why = sidecar_gap(side, excluder)
-                    if why and pat in store.get("required", []):
+                    if not why:
+                        count += 1
+                        size += side.stat().st_size
+                    elif pat in store.get("required", []):
                         run.error(db.parent.relative_to(store["root"]), required_sidecar_error(side, why))
     else:
         for _, src in store["roots"]:
             run.sources.append(str(src))
             if excluder.path(src):
+                continue
+            if src.is_symlink():
+                run.skip(src, "symlink")
                 continue
             if src.is_dir():
                 for dirpath, dirnames, filenames in os.walk(src):

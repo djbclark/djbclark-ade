@@ -692,3 +692,74 @@ def test_dry_run_reports_a_missing_required_sidecar(real):
     mod, home, _ = real
     make_cursor_session(home, with_meta=False)
     assert mod.main(["--only", "cursor-chats", "--dry-run", "--dest", str(home / "o")]) == 1
+
+
+# --- Codex pass 2 on PR 24 (2026-10-20): grok memory roots, symlinked roots, dry-run sidecars ---
+
+def test_grok_memory_v2_and_memtrace_are_backed_up_and_counted_by_the_dry_run(real, capsys):
+    mod, home, _ = real
+    (home / ".grok/memory-v2").mkdir(parents=True)
+    (home / ".grok/memory-v2/x.json").write_text('{"m": 1}')
+    (home / ".grok/memtrace/t1").mkdir(parents=True)
+    (home / ".grok/memtrace/t1/trace.jsonl").write_text('{"t": 1}\n')
+    assert mod.main(["--only", "grok", "--dry-run", "--json", "--dest", str(home / "dry")]) == 0
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "grok", "--dest", str(dest)]) == 0
+    assert (dest / "grok/memory-v2/x.json").read_text() == '{"m": 1}'
+    assert (dest / "grok/memtrace/t1/trace.jsonl").is_file()
+    entry = manifest_of(dest)["stores"][0]
+    assert plan["file_count"] == entry["file_count"] == 2 and plan["bytes"] == entry["bytes"]
+    # sessions is absent: recorded per path, the store stays ok because other roots exist
+    assert entry["status"] == "ok" and entry["missing"] == [str(home / ".grok/sessions")]
+
+
+def test_a_symlinked_file_root_is_skipped_not_copied(real, capsys):
+    mod, home, tmp = real
+    outside = tmp / "outside.json"
+    outside.write_text("SENTINEL-SYMLINK-ROOT-TARGET")
+    (home / ".config/herdr").mkdir(parents=True)
+    link = home / ".config/herdr/session.json"
+    os.symlink(outside, link)
+    assert mod.main(["--only", "herdr", "--dry-run", "--json", "--dest", str(home / "dry")]) == 0
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    assert plan["file_count"] == 0 and plan["skipped_count"] == 1
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "herdr", "--dest", str(dest)]) == 0
+    assert not any("SENTINEL-SYMLINK-ROOT-TARGET" in p.read_text(errors="replace")
+                   for p in dest.rglob("*") if p.is_file())
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["file_count"] == 0
+    assert {"path": str(link), "why": "symlink"} in entry["skipped"]
+
+
+def test_a_symlinked_directory_root_is_skipped_not_walked(real, capsys):
+    mod, home, tmp = real
+    outside = tmp / "outside-dir"
+    outside.mkdir()
+    (outside / "chat.jsonl").write_text("SENTINEL-SYMLINK-DIR-TARGET")
+    (home / ".grok").mkdir()
+    link = home / ".grok/sessions"
+    os.symlink(outside, link)
+    assert mod.main(["--only", "grok", "--dry-run", "--json", "--dest", str(home / "dry")]) == 0
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    assert plan["file_count"] == 0 and plan["skipped_count"] == 1
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "grok", "--dest", str(dest)]) == 0
+    assert not any("SENTINEL-SYMLINK-DIR-TARGET" in p.read_text(errors="replace")
+                   for p in dest.rglob("*") if p.is_file())
+    assert not (dest / "grok/sessions").exists()
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["file_count"] == 0 and {"path": str(link), "why": "symlink"} in entry["skipped"]
+
+
+def test_dry_run_counts_the_sidecar_a_cursor_store_would_copy(real, capsys):
+    mod, home, _ = real
+    make_cursor_session(home)
+    assert mod.main(["--only", "cursor-chats", "--dry-run", "--json", "--dest", str(home / "o")]) == 0
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    assert plan["file_count"] == entry["file_count"] == 2
+    assert plan["bytes"] == entry["bytes"]
