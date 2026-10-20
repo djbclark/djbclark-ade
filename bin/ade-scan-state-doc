@@ -419,12 +419,18 @@ def render(d):
             # a `.git` FILE (a linked worktree, an absorbed submodule) points at a git directory elsewhere, which holds
             # the refs, reflogs and perhaps the only copy of local commits; a linked worktree's objects are one step
             # further, in its `commondir`. The whole-directory archive alone misses both (Codex pass 26 on PR 27).
-            # `read -r _ g` takes the rest of the `gitdir: <path>` line, spaces included; no git command runs
-            gitdir = shcode("if [ -f {}/.git ]; then read -r _ g < {}/.git && case \"$g\" in /*) ;; *) g={}/$g ;; esac "
-                            "&& \"$GTAR\" -C \"$(dirname -- \"$g\")\" -cf <DEST>/{} -- \"$(basename -- \"$g\")\" "
-                            "&& if [ -f \"$g/commondir\" ]; then read -r c < \"$g/commondir\" "
-                            "&& case \"$c\" in /*) ;; *) c=\"$g/$c\" ;; esac "
-                            "&& \"$GTAR\" -C \"$(dirname -- \"$c\")\" -cf <DEST>/{} -- \"$(basename -- \"$c\")\"; fi; fi",
+            # the parse matches git's gitfile reader (adversary round 32): the first line must read `gitdir: <path>`
+            # (anything else is `false`), a missing final newline is accepted (`read` returns 1 at EOF, `$l` is
+            # set), a CRLF is stripped; every failure prints a message and leaves a nonzero status. `-C "$g" ... .`
+            # archives the directory's contents without gtar's "Removing leading ../" when commondir is `../..`
+            gitdir = shcode("if [ -f {}/.git ]; then {{ {{ IFS= read -r l || [ -n \"$l\" ]; }} < {}/.git "
+                            "&& case \"$l\" in \"gitdir: \"*) g=${{l#gitdir: }}; g=${{g%$'\\r'}} ;; *) false ;; esac "
+                            "&& case \"$g\" in /*) ;; *) g={}/$g ;; esac "
+                            "&& \"$GTAR\" -C \"$g\" -cf <DEST>/{} . "
+                            "&& if [ -f \"$g/commondir\" ]; then {{ IFS= read -r c || [ -n \"$c\" ]; }} < \"$g/commondir\" "
+                            "&& c=${{c%$'\\r'}} && case \"$c\" in /*) ;; *) c=\"$g/$c\" ;; esac "
+                            "&& \"$GTAR\" -C \"$c\" -cf <DEST>/{} .; fi; }} "
+                            "|| {{ echo 'gitdir capture FAILED' >&2; false; }}; fi",
                             raw_p, raw_p, raw_p, f"{ck}/gitdir.tar", f"{ck}/commondir.tar")
             w(f"| {p} | counts unknown ({esc(c['verdict'])}) | re-scan once the cause is fixed, or archive the whole "
               f"directory: {shcode('mkdir -p <DEST>/{} && \"$GTAR\" -C {} -cf <DEST>/{} -- {}', ck, parent or '/', f'{ck}/whole.tar', base)}"

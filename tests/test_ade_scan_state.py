@@ -523,7 +523,7 @@ def test_ambient_git_variables_are_ignored(tmp_path, monkeypatch):
     env = mod.git_env()
     assert {k for k in env if k.startswith("GIT_")} == {
         "GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
-        "GIT_NO_LAZY_FETCH", "GIT_NO_REPLACE_OBJECTS"}
+        "GIT_NO_LAZY_FETCH", "GIT_NO_REPLACE_OBJECTS", "GIT_GRAFT_FILE"}
     assert env["GIT_CONFIG_GLOBAL"] == os.devnull
     c = mod.scan_git([roots], remote=False)[0]
     assert c["untracked"] == 1 and "dirty" in c["flags"]
@@ -1214,9 +1214,10 @@ def test_doc_generator_survives_skipped_and_incomplete_records():
         assert "git" not in row.split("| re-scan")[1].split("(no git command")[0]
         assert row.rstrip().endswith("| yes: counts unknown; re-scan or archive whole |")
         # Codex pass 26: a `.git` file's target directory and its common directory are archived too
-        assert f"read -r _ g < {path_}/.git" in row and f"g={path_}/$g" in row
-        assert f"-cf <DEST>/checkouts/abs{path_}/gitdir.tar -- " in row
-        assert f"-cf <DEST>/checkouts/abs{path_}/commondir.tar -- " in row and "$g/commondir" in row
+        assert f'{{ IFS= read -r l || [ -n "$l" ]; }} < {path_}/.git && case "$l" in "gitdir: "*) g=${{l#gitdir: }}' in row
+        assert f"g={path_}/$g" in row and "gitdir capture FAILED" in row  # adversary round 32: git's gitfile rules, loud failure
+        assert f'"$GTAR" -C "$g" -cf <DEST>/checkouts/abs{path_}/gitdir.tar .' in row
+        assert f'"$GTAR" -C "$c" -cf <DEST>/checkouts/abs{path_}/commondir.tar .' in row and "$g/commondir" in row
     assert "is listed with a whole-directory archive" in section_3_2(text)
     assert "t-incomplete" in text.split("### 1.3")[1].split("## 2.")[0]
     assert "reference search failed" in text and "never `unique`, `mixed` or `scratch`" in text
@@ -1861,7 +1862,7 @@ def test_url_holds_credential_reads_any_userinfo_or_query_on_a_non_ssh_scheme():
                       ("https://host/x.git?private_token=FAKE", True), ("https://host/x?a=b@c:d", True),
                       ("ssh://git@host/x", False), ("git+ssh://git@host/x", False),
                       ("git@host:x/y.git", False), ("host:x/y.git", False), ("user:pw@host:x/y.git", False),
-                      ("https://host:8443/x.git", False), ("https://host/x.git#frag", False),
+                      ("https://host:8443/x.git", False), ("https://host/x.git#frag", True),  # Codex pass 27: a fragment reaches argv too
                       ("/tmp/some/origin.git", False), ("file:///tmp/o.git", False),
                       ("https://u:pw@[::1/x", True), ("https://u@[::1/x", True),
                       # adversary round 23: a remote-helper prefix wraps the real address
@@ -1875,7 +1876,10 @@ def test_url_holds_credential_reads_any_userinfo_or_query_on_a_non_ssh_scheme():
                       ("ssh://git@host/repo?private_token=FAKE", True), ("git+ssh://git@host/x?t=FAKE", True),
                       ("ssh://git@host/x?", False),  # an empty query carries nothing
                       # adversary round 31: an scp-like url hands its path to ssh verbatim, `?` and all
-                      ("git@host:repo?token=FAKE", True), ("host:x?y", True), ("/tmp/o?x", False), ("x/y:z?q", False)):
+                      ("git@host:repo?token=FAKE", True), ("host:x?y", True), ("/tmp/o?x", False), ("x/y:z?q", False),
+                      # Codex pass 27: a fragment, on every form; an empty one carries nothing
+                      ("ssh://git@host/x#t=FAKE", True), ("git@host:repo#FAKE", True), ("https::https://host/x.git#t", True),
+                      ("https://host/x.git#", False), ("/tmp/a#b", False)):
         assert mod.url_holds_credential(url) is want, url
 
 
@@ -1990,6 +1994,29 @@ def test_a_replace_ref_does_not_hide_a_local_commit(tmp_path):
     assert c["verdict"] == "unpushed commits" and c["local_only_commits"] == 1, c
     assert c["local_only_branches"] == [{"branch": "main", "count": 1}], c
     assert git(work, "rev-parse", "origin/main").strip() == pushed
+
+
+def test_a_grafts_file_does_not_hide_a_local_commit(tmp_path):
+    """Adversary round 32 on PR 27: a `.git/info/grafts` line can give origin's tip a local commit as a parent with no
+    ref at all, so `--all` sees nothing and the checkout read `clean and pushed`; GIT_GRAFT_FILE=/dev/null."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    pushed = git(work, "rev-parse", "HEAD").strip()
+    other = tmp_path / "other"
+    git(tmp_path, "clone", "-q", str(origin), str(other))
+    git(other, "checkout", "-q", "main")
+    commit_file(other, "o2.txt")
+    git(other, "push", "-q", "origin", "main")
+    o2 = git(other, "rev-parse", "HEAD").strip()
+    commit_file(work, "local.txt")  # one unpushed commit on main
+    local = git(work, "rev-parse", "HEAD").strip()
+    git(work, "fetch", "-q", "origin")
+    info = work / ".git" / "info"
+    info.mkdir(exist_ok=True)
+    (info / "grafts").write_text(f"{o2} {pushed} {local}\n")  # origin's tip "merged" the local commit
+    c = scan_one(mod, roots)
+    assert c["verdict"] == "unpushed commits" and c["local_only_commits"] == 1, c
+    assert c["local_only_branches"] == [{"branch": "main", "count": 1}], c
 
 
 def test_a_local_tag_of_a_pushed_commit_is_not_local_only(tmp_path):
