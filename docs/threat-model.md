@@ -138,12 +138,13 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 
 ### 4.3 Unenforced review and merge
 
-* **Control (procedure only).** AGENTS.md, Code review section (PR 9, 2026-10-20, not yet on master), rule
+* **Control (procedure only).** AGENTS.md, Code review section (PR 9, merged 2026-10-20), rule
   1 asks the PR body to quote the adversary verdict with the head SHA, and whoever merges to use
   `gh pr merge --squash --match-head-commit <reviewed sha>`. The adversary runs on request before a PR is
-  opened, never on PR open. Automatic on PR open: Cursor's Security Agent and Approval Agent, and Codex's Security Review
-  (PR 10, 2026-10-20: "Codex Security Review · Automatically triggered"). Codex's code review ("Codex Review")
-  ran after an `@codex review` comment on PR 10; whether it also runs unasked is unverified.
+  opened, never on PR open. Automatic on PR open: Cursor's Security Agent and Approval Agent. Codex's code review ("Codex Review")
+  ran after an `@codex review` comment on PR 10, and Codex's Security Review ran with it, labelled
+  "Automatically triggered" (the repo setting is "whenever code review runs"); whether either runs unasked on
+  PR open is unverified (on PR 9 the automatic review answered "create an environment", `docs/queue.md`).
 * **Gap 1 (verified 2026-10-20 01:05Z).** `master` has no branch protection
   (`gh api repos/djbclark/djbclark-ade/branches/master/protection` returns 404 "Branch not protected") and
   the repo has no rulesets. Nothing on GitHub requires a pull request, a review, a status check or
@@ -252,8 +253,7 @@ tampered state file can do is still a finding (section 6 item 6).
 
 ## 6. What a reviewer should check on a PR
 
-Follow the **Code review** section of [AGENTS.md](../AGENTS.md) (added by PR 9; until it merges, see branch
-`docs/code-review-rules`): rules 1-8 cover the adversary verdict with head SHA, no result through a pipe,
+Follow the **Code review** section of [AGENTS.md](../AGENTS.md) (PR 9, merged 2026-10-20): rules 1-8 cover the adversary verdict with head SHA, no result through a pipe,
 secrets only via `sudo-secretspec`, argv lists and `shlex.quote`, macOS and Linux, atomic records, dated
 facts, docs moving with code. Beyond them, raise these for this threat model:
 
