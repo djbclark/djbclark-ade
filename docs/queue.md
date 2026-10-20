@@ -71,12 +71,16 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    `cursor-cloud list` and `--force` when there is no agent id; (U2) `--force` drops the first agent's id from
    the record (carry it as `prior_cloud_agent_ids`); (U3) no lock between the same-name check and the write,
    so two simultaneous dispatches can still launch two agents (the race exists for local slices too).
-5. **Endpoint variables can send keys anywhere** (adversary and Codex, threat-model review 2026-10-20):
+5. **Done 2026-10-20** (PR 15). Endpoint variables could send keys anywhere (adversary and Codex, threat-model review 2026-10-20):
    `CURSOR_CLOUD_API` in `bin/cursor-cloud`; `FIRECRAWL_SELFHOST_URL`, `FIRECRAWL_FALLBACK_URL`,
    `FIRECRAWL_ROUTER_SIPB_BASE` and `FIRECRAWL_ROUTER_LITELLM_BASE` in `bin/firecrawl-router`. Require https
    (Cursor: https://api.cursor.com only) or loopback unless a test flag is set, and stop the Authorization header
    following a redirect: urllib copies every header onto the redirected request, to any host; `bin/failover.py`
    already avoids this with `_NoRedirect` and `add_unredirected_header`. One PR with tests.
+   Carried (adversary round 2 on PR 15, both LOW): (a) `reexec_env()` in `bin/cursor-cloud` is a deny-list; it
+   does not drop `DYLD_INSERT_LIBRARIES`, `LD_PRELOAD` or `OPENSSL_*`; (b) `build_opener` in both tools still
+   installs urllib's default `ProxyHandler`, so an `*_proxy` variable set after the re-exec would still route the
+   call; pass an empty `ProxyHandler({})` explicitly.
 
 6. **Three `tests/test_route_agent.py` tests fail on a host where omp is ready** (pre-existing on master,
    confirmed 2026-10-20 at d6c27da): `TestDiscovery::test_measured_idle_capacity_beats_unmeasured`,
