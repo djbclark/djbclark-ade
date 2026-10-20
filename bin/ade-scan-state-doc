@@ -416,9 +416,21 @@ def render(d):
             # no counts (null): anything may be in there, so the row demands a re-scan or a whole-directory archive,
             # never "nothing to capture" (Codex pass 19 on PR 27); no git command runs in a checkout the scan refused
             parent, base = os.path.split(raw_p.rstrip("/"))
+            # a `.git` FILE (a linked worktree, an absorbed submodule) points at a git directory elsewhere, which holds
+            # the refs, reflogs and perhaps the only copy of local commits; a linked worktree's objects are one step
+            # further, in its `commondir`. The whole-directory archive alone misses both (Codex pass 26 on PR 27).
+            # `read -r _ g` takes the rest of the `gitdir: <path>` line, spaces included; no git command runs
+            gitdir = shcode("if [ -f {}/.git ]; then read -r _ g < {}/.git && case \"$g\" in /*) ;; *) g={}/$g ;; esac "
+                            "&& \"$GTAR\" -C \"$(dirname -- \"$g\")\" -cf <DEST>/{} -- \"$(basename -- \"$g\")\" "
+                            "&& if [ -f \"$g/commondir\" ]; then read -r c < \"$g/commondir\" "
+                            "&& case \"$c\" in /*) ;; *) c=\"$g/$c\" ;; esac "
+                            "&& \"$GTAR\" -C \"$(dirname -- \"$c\")\" -cf <DEST>/{} -- \"$(basename -- \"$c\")\"; fi; fi",
+                            raw_p, raw_p, raw_p, f"{ck}/gitdir.tar", f"{ck}/commondir.tar")
             w(f"| {p} | counts unknown ({esc(c['verdict'])}) | re-scan once the cause is fixed, or archive the whole "
               f"directory: {shcode('mkdir -p <DEST>/{} && \"$GTAR\" -C {} -cf <DEST>/{} -- {}', ck, parent or '/', f'{ck}/whole.tar', base)}"
-              " (no git command: the scan did not run one there either) | yes: counts unknown; re-scan or archive whole |")
+              " (no git command: the scan did not run one there either); when `.git` is a file the directory it "
+              f"points to and that one's common directory hold the history, archive them too: {gitdir}"
+              " | yes: counts unknown; re-scan or archive whole |")
             continue
         untr = [u for u in (c.get("untracked_sample") or []) if u != "graft/"]
         real_untr = num(c["untracked"]) - (1 if "graft/" in (c.get("untracked_sample") or []) else 0)
@@ -538,9 +550,16 @@ def render(d):
             # adversary round 24), so the inspection is by hand, inside each submodule
             cmd.append("list them with " + shcode("git -C {} config --file .gitmodules --get-regexp '^submodule\\..*\\.path$'", raw_p)
                        + ", then in each: " + shcode("git -C {}/<sub> status --porcelain", raw_p) + ", "
-                       + shcode("git -C {}/<sub> log --oneline --branches --tags --not --remotes", raw_p) + " and "
+                       + shcode("git -C {}/<sub> log --oneline --branches --tags --not --remotes", raw_p) + ", "
                        + shcode("mkdir -p <DEST>/{}/<sub> && git -C {}/<sub> bundle create <DEST>/{}/<sub>/all.bundle --all",
                                 ck, raw_p, ck)
+                       # a bundle holds committed objects only: the modified, staged and untracked files need the
+                       # same patches and archive as an ordinary checkout (Codex pass 26 on PR 27)
+                       + ", " + shcode("git -C {}/<sub> diff --binary > <DEST>/{}/<sub>/modified.patch && git -C {}/<sub> diff --binary --cached > <DEST>/{}/<sub>/staged.patch",
+                                       raw_p, ck, raw_p, ck)
+                       + " and " + shcode("git -C {}/<sub> ls-files -z --others --exclude-standard > <DEST>/{}/<sub>/untracked.list "
+                                          "&& \"$GTAR\" -C {}/<sub> --null -T <DEST>/{}/<sub>/untracked.list -cf <DEST>/{}/<sub>/untracked.tar",
+                                          raw_p, ck, raw_p, ck, ck)
                        + " before any cleanup (the scanner skips absorbed submodules: `core.worktree`)")
             need = need if need.startswith(("yes", "**yes")) else "yes: inspect each submodule first"
         w(f"| {p} | {'; '.join(what)} | {'; '.join(cmd)} | {need} |")

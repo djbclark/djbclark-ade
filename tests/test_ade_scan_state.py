@@ -1213,6 +1213,10 @@ def test_doc_generator_survives_skipped_and_incomplete_records():
         assert f"\"$GTAR\" -C /p -cf <DEST>/checkouts/abs{path_}/whole.tar -- {path_.rsplit('/', 1)[1]}" in row
         assert "git" not in row.split("| re-scan")[1].split("(no git command")[0]
         assert row.rstrip().endswith("| yes: counts unknown; re-scan or archive whole |")
+        # Codex pass 26: a `.git` file's target directory and its common directory are archived too
+        assert f"read -r _ g < {path_}/.git" in row and f"g={path_}/$g" in row
+        assert f"-cf <DEST>/checkouts/abs{path_}/gitdir.tar -- " in row
+        assert f"-cf <DEST>/checkouts/abs{path_}/commondir.tar -- " in row and "$g/commondir" in row
     assert "is listed with a whole-directory archive" in section_3_2(text)
     assert "t-incomplete" in text.split("### 1.3")[1].split("## 2.")[0]
     assert "reference search failed" in text and "never `unique`, `mixed` or `scratch`" in text
@@ -2118,6 +2122,11 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
     assert "git -C /p/sup config --file .gitmodules --get-regexp" in row
     assert "git -C /p/sup/<sub> status --porcelain" in row and "git -C /p/sup/<sub> log --oneline --branches --tags --not --remotes" in row
     assert "git -C /p/sup/<sub> bundle create <DEST>/checkouts/abs/p/sup/<sub>/all.bundle --all" in row
+    # Codex pass 26: a bundle holds commits only; the dirty worktree needs the patches and the untracked archive
+    assert "git -C /p/sup/<sub> diff --binary > <DEST>/checkouts/abs/p/sup/<sub>/modified.patch" in row
+    assert "git -C /p/sup/<sub> diff --binary --cached > <DEST>/checkouts/abs/p/sup/<sub>/staged.patch" in row
+    assert ("git -C /p/sup/<sub> ls-files -z --others --exclude-standard > <DEST>/checkouts/abs/p/sup/<sub>/untracked.list "
+            "&& \"$GTAR\" -C /p/sup/<sub> --null -T <DEST>/checkouts/abs/p/sup/<sub>/untracked.list -cf <DEST>/checkouts/abs/p/sup/<sub>/untracked.tar") in row
     assert "the scanner skips absorbed submodules" in row
     assert row.rstrip().endswith("| yes: inspect each submodule first |")
     both = next(r for r in rows if r.startswith("| /p/both "))
