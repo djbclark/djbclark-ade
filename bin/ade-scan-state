@@ -217,8 +217,11 @@ def git_env(network: bool = False) -> dict:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     # GIT_NO_LAZY_FETCH (git 2.45+): a partial clone must not download objects on a count/compare;
     # it stays set for the explicit --fetch too (that one is a real fetch and needs no lazy help).
+    # GIT_NO_REPLACE_OBJECTS: a `refs/replace/*` entry can make origin's tip appear to contain a local commit, so
+    # every count would read the fake graph (adversary round 31 on PR 27); the counts read the real objects
     env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_GLOBAL": os.devnull, "GIT_NO_LAZY_FETCH": "1", "LC_ALL": "C"})
+                "GIT_CONFIG_GLOBAL": os.devnull, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+                "LC_ALL": "C"})
     if network:
         env.pop("SSH_ASKPASS", None)
         env.update({"GIT_SSH_COMMAND": "ssh -o BatchMode=yes",
@@ -680,7 +683,7 @@ def git_takes_env_config() -> bool:
 
 def url_holds_credential(url: str) -> bool:
     """Whether `url` may carry a credential git would hand to a transport helper's argv. A scp-like
-    `host:path` (no `://`) is ssh and has none; `ssh://git@host` is a username, not a credential, but any
+    `host:path` (no `://`) is ssh and has none unless its path holds a `?`; `ssh://git@host` is a username, not a credential, but any
     password (`ssh://git:secret@host`) is one, and so is a query string: git puts the path and query into
     `git-upload-pack '/repo?token=...'` in the ssh process's argv (Codex pass 25). For every other scheme (http, https, ...) ANY userinfo counts
     (`https://<token>@github.com/x` is how a token is used as the username; adversary round 22) and so does
@@ -693,7 +696,10 @@ def url_holds_credential(url: str) -> bool:
     if sep and head and re.fullmatch(r"[A-Za-z0-9+.-]+", head):
         return "@" in rest or "?" in rest
     if "://" not in url:
-        return False
+        # scp-like `[user@]host:path`: ssh gets the path verbatim, so a `?token=` in it reaches its argv like the
+        # `ssh://` case (adversary round 31); a local path has no `:` before its first `/`
+        host, sep, path = url.partition(":")
+        return bool(sep) and "/" not in host and "?" in path
     scheme = url.partition("://")[0].lower()
     try:
         parts = urlsplit(url)

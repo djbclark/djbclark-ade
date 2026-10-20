@@ -523,7 +523,7 @@ def test_ambient_git_variables_are_ignored(tmp_path, monkeypatch):
     env = mod.git_env()
     assert {k for k in env if k.startswith("GIT_")} == {
         "GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
-        "GIT_NO_LAZY_FETCH"}
+        "GIT_NO_LAZY_FETCH", "GIT_NO_REPLACE_OBJECTS"}
     assert env["GIT_CONFIG_GLOBAL"] == os.devnull
     c = mod.scan_git([roots], remote=False)[0]
     assert c["untracked"] == 1 and "dirty" in c["flags"]
@@ -1869,7 +1869,9 @@ def test_url_holds_credential_reads_any_userinfo_or_query_on_a_non_ssh_scheme():
                       ("https::ssh://ghp_FAKE0000@host/x.git", True), ("https::ssh://host/x.git", False),
                       # Codex pass 25: an ssh query string lands in `git-upload-pack '/repo?...'` in the ssh argv
                       ("ssh://git@host/repo?private_token=FAKE", True), ("git+ssh://git@host/x?t=FAKE", True),
-                      ("ssh://git@host/x?", False)):  # an empty query carries nothing
+                      ("ssh://git@host/x?", False),  # an empty query carries nothing
+                      # adversary round 31: an scp-like url hands its path to ssh verbatim, `?` and all
+                      ("git@host:repo?token=FAKE", True), ("host:x?y", True), ("/tmp/o?x", False), ("x/y:z?q", False)):
         assert mod.url_holds_credential(url) is want, url
 
 
@@ -1969,6 +1971,21 @@ def test_a_commit_reachable_only_from_a_note_or_another_local_ref_is_local_only(
     c = scan_one(mod, roots)
     assert c["local_only_commits"] == 0 and c["stashes"] == 1 and "stash" in c["flags"], c
     assert c["verdict"] == "clean and pushed"  # the stash is an informational flag with its own capture row
+
+
+def test_a_replace_ref_does_not_hide_a_local_commit(tmp_path):
+    """Adversary round 31 on PR 27: `git replace` can make origin's tip appear to contain a local commit, so
+    every count read the fake graph; GIT_NO_REPLACE_OBJECTS=1 makes the counts read the real objects."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    pushed = git(work, "rev-parse", "HEAD").strip()
+    commit_file(work, "local.txt")  # one unpushed commit on main
+    local = git(work, "rev-parse", "HEAD").strip()
+    git(work, "replace", "--force", "origin/main", local)  # origin/main now "is" the local commit
+    c = scan_one(mod, roots)
+    assert c["verdict"] == "unpushed commits" and c["local_only_commits"] == 1, c
+    assert c["local_only_branches"] == [{"branch": "main", "count": 1}], c
+    assert git(work, "rev-parse", "origin/main").strip() == pushed
 
 
 def test_a_local_tag_of_a_pushed_commit_is_not_local_only(tmp_path):
