@@ -1178,3 +1178,24 @@ def test_a_db_pruned_between_listing_and_stat_is_an_error_and_the_dry_run_goes_o
     plan = json.loads(capsys.readouterr().out)["stores"][0]
     assert plan["status"] == "partial" and [e["source"] for e in plan["errors"]] == [str(gone / "store.db")]
     assert plan["file_count"] == 2  # the other session's db and meta.json
+
+
+def test_copy_regular_refuses_a_fifo_without_blocking(real):
+    """Adversary round 10 on PR 24: a FIFO swapped in after listing must raise, not hang the run."""
+    import threading
+    mod, home, tmp = real
+    fifo = tmp / "fifo"
+    os.mkfifo(fifo)
+    done = threading.Event()
+    result = {}
+
+    def attempt():
+        try:
+            mod.copy_regular(fifo, tmp / "out")
+        except OSError as exc:
+            result["error"] = str(exc)
+        done.set()
+
+    threading.Thread(target=attempt, daemon=True).start()
+    assert done.wait(5), "copy_regular blocked on the FIFO"
+    assert "not a regular file" in result["error"] and not (tmp / "out").exists()

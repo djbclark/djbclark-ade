@@ -491,12 +491,13 @@ def copy_regular(src, dst):
     became a symlink after `make_ignore` listed it is refused rather than dereferenced (Codex on PR 24).
     Raises OSError, which copytree collects into shutil.Error and the caller records."""
     try:
-        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # a FIFO swapped in must not block the run
     except OSError as exc:
         raise OSError(f"source became a symlink or is unreadable: {src}: {exc.strerror}") from exc
     with os.fdopen(fd, "rb") as fin:
         if not stat.S_ISREG(os.fstat(fin.fileno()).st_mode):
             raise OSError(f"source is not a regular file: {src}")
+        os.set_blocking(fin.fileno(), True)  # O_NONBLOCK was for the open only; a regular file reads normally
         dfd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(dfd, "wb") as fout:
             shutil.copyfileobj(fin, fout)
