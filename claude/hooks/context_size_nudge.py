@@ -221,9 +221,16 @@ def _self_slash_host():
         return "herdr"
     if os.environ.get("ORCA_TERMINAL_HANDLE") and _which("orca"):
         return "orca"
-    if os.environ.get("PASEO_AGENT_ID"):
+    if os.environ.get("PASEO_AGENT_ID") and _paseo_cli():
         return "paseo"
     return None
+
+
+def _paseo_cli():
+    # self-slash (lines ~141-142): PASEO_CLI, else paseo on PATH, and it must be executable;
+    # otherwise it exits 3 and the operator types the command (Codex on PR 19, 2026-10-20).
+    cli = os.environ.get("PASEO_CLI") or _which("paseo")
+    return bool(cli) and os.access(cli, os.X_OK)
 
 
 def _can_self_slash():

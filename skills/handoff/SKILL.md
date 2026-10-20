@@ -263,8 +263,12 @@ handoff document, the Tier 1 pointer and the hermes-ping (`~/.local/bin/hermes-p
 step's `self-slash`), not only into the final message.
 
 If `self-slash` refuses (exit 7: the 30-minute gap check or a lifecycle already queued; or a draft
-on the input line; or exit 3 outside herdr, Orca and Paseo), do not retry or loop: tell the operator
-`/new` is ready and stop.
+on the input line; or exit 3 outside herdr, Orca and Paseo, or on Paseo without a usable `paseo`
+CLI), do not retry or loop: tell the operator the handoff is written and stop. In herdr or Orca say
+`/new` is ready. On Paseo `/new` typed into the composer reaches Claude as plain text and does
+nothing (only self-slash's mapping to `/clear` works), so say instead: once this agent is idle,
+send `/clear`, then `/baton` (or run `~/src/djbclark-ade/bin/self-slash "/new"` again after the
+gap or lock clears, which does both).
 
 **Document only:** skip this step when a skill that clears the session itself runs the handoff, when
 the operator says "doc only" or otherwise asks for the document without a restart, or when you are a

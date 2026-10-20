@@ -49,6 +49,7 @@ def hook(monkeypatch, tmp_path, capsys):
     monkeypatch.delenv("ORCA_TERMINAL_HANDLE", raising=False)
     monkeypatch.delenv("PASEO_AGENT_ID", raising=False)
     monkeypatch.setattr(nudge, "_which", lambda name: None)  # no orca CLI unless a test says so
+    monkeypatch.setenv("PASEO_CLI", "/usr/bin/true")  # a Paseo host needs an executable CLI
     pings = []
     monkeypatch.setattr(
         subprocess, "Popen", lambda cmd, **kwargs: pings.append(cmd),
@@ -364,6 +365,25 @@ def test_finish_note_when_the_other_host_var_is_stale(hook, tmp_path, monkeypatc
     monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
     out, _ = hook("s-stale-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
     assert "self-slash --finish" in out
+
+
+@pytest.mark.parametrize("cli", ["unset", "/nonexistent/paseo", "not-executable"])
+def test_paseo_host_needs_an_executable_cli(hook, tmp_path, monkeypatch, cli):
+    # self-slash exits 3 when PASEO_AGENT_ID is set but no paseo CLI is usable (PASEO_CLI
+    # unset and none on PATH, or not executable); the hook must not promise Step 9 there.
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
+    if cli == "unset":
+        monkeypatch.delenv("PASEO_CLI", raising=False)
+    elif cli == "not-executable":
+        f = tmp_path / "paseo"
+        f.write_text("")
+        f.chmod(0o600)
+        monkeypatch.setenv("PASEO_CLI", str(f))
+    else:
+        monkeypatch.setenv("PASEO_CLI", cli)
+    out, _ = hook("s-nocli-" + cli.replace("/", "_"), _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
+    assert "tell the operator /new is ready" in out
+    assert "--finish" not in out
 
 
 def test_orca_lookup_searches_self_slash_path(monkeypatch, tmp_path):
