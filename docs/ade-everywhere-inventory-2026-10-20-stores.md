@@ -13,17 +13,17 @@ section 6. No file on disk was modified by this slice (the only writes were this
   qwen, cline, hermes, omp, zcode, agy, grok, crush. Without ACP: muse, gemini (Gemini CLI), paseo,
   orca, herdr. **devin is registered but not installed** (`--` in `acp-run --list`; no `~/.devin`,
   no `devin` on PATH).
-- **Stores found: 46 session/config stores** (section 2 table; 24 hold session content, the rest
+- **Stores found: 51 session/config stores** (one per row of the section 2 table; 24 hold session content, the rest
   are config, index, scratch or duplicate stores belonging to the same tools).
 - **Total bytes:** ~31 GB of session-bearing stores, plus ~61 GB `~/.local/state/bigteam` scratch,
-  ~14 GB Orca (checkouts + app data), ~0.5 GB derived indexes, ~28 MB Tier 1 handoffs.
+  ~6.1 GB Orca (3.8 GB checkouts + 2.3 GB app data), ~0.5 GB derived indexes, ~28 MB Tier 1 handoffs.
 - **Unique data at risk (no second copy anywhere):** every row in section 2 marked "synced: no" in
   the 2026-10-19 inventory is still single-copy — in particular `~/.hermes/state.db` (1.6 GB,
   canonical SQLite, only stale local `.bak` files), `~/.local/share/opencode/opencode.db` (946 MB),
   Cursor's per-session `store.db` files (2.2 GB tree), `~/.zcode/cli/db/db.sqlite` (105 MB),
   Antigravity conversations (582 MB + 781 MB + IDE copy), and
   `~/.local/state/handoffs` (3.0 MB, 215 `SESSION_LOG.md` — the most valuable small item).
-  Syncthing was running with only an empty placeholder folder on 2026-10-19; not re-verified today.
+  Syncthing was running with only an empty placeholder folder on 2026-10-19; not re-verified on 2026-10-20.
 - **Changed versus the 2026-10-19 inventory (its section 6):** Cursor 1.1G→2.2G (266
   `acp-sessions` dirs are new-ish bulk); Claude Code 1.7G→2.2G, 553→563 project dirs; Qwen
   39M→488K (`~/.qwen/sessions` now empty; only `projects/*/chats/*.jsonl` remain); zcode db
@@ -41,8 +41,8 @@ session-bearing item found (`fd … -x stat -f '%m %N' | sort -rn | head -1`) or
 |---|---|---|---|---|---|---|---|---|---|---|
 | Claude Code | `~/.claude/projects/<slug>/*.jsonl` (563 dirs, 2405 jsonl) | jsonl per session; first-line keys `customTitle,sessionId,type` | 2.2G (`~/.claude` total) | 2026-10-20 02:51 | canonical files | the jsonl itself | manifested generation (6.3) | `--resume`, `--continue`, `--fork-session` | copy into the project dir (target cwd must exist) | cloud sessions; SDK `SessionStore` mirror |
 | Claude Code | `~/.claude/history.jsonl` | jsonl prompt history | 2.9M | 2026-10-19 22:46 | derived index | the jsonl itself | copy | n/a | none | none |
-| Claude Code | sidecars: `~/.claude/file-history` (185), `session-env` (1580), `sessions` (session-server `.key`/`.json`), `tasks` (784), `teams` (36) | mixed files | within the 2.2G | 2026-10-20 02:48 (dirs) | mixed (sidecars of the canonical tree) | none verified | clone with `projects/` | n/a | none | none |
-| Claude Code | `~/.claude.json` + `~/.claude/settings.json` (52K) + `settings.local.json` (6.9K) | json | 236K + 52K + 6.9K | 2026-10-20 | config | themselves | copy | n/a | n/a | n/a |
+| Claude Code | sidecars: `~/.claude/file-history` (185), `session-env` (1580), `sessions` (session-server `.key`/`.json`), `tasks` (784), `teams` (36) | mixed files | within the 2.2G | 2026-10-20 02:48 (dirs) | mixed (sidecars of the canonical tree) | none verified | clone with `projects/`, excluding `sessions/*.key` (live session-server keys, 5.5) | n/a | none | none |
+| Claude Code | `~/.claude.json` + `~/.claude/settings.json` (52K) + `settings.local.json` (6.9K) | json | 236K + 52K + 6.9K | 2026-10-20 | config | themselves | copy the two `settings*.json`; `~/.claude.json` holds account credentials: exclude or vault (5.5) | n/a | n/a | n/a |
 | Codex | `~/.codex/sessions` → `~/ops/site-private/.codex-runtime/sessions` (`readlink -f`), `YYYY/MM/DD/rollout-*.jsonl`, 840 files | jsonl rollouts; first-line keys `ordinal,payload,timestamp,type` | 1.1G (runtime tree total, incl 73M `logs_2.sqlite`) | 2026-10-20 02:51 | canonical files plus derived index | the rollout | copy after completion | `codex resume`, `codex fork`, `exec resume` | `/import` from Claude Code and Cursor; no first-party rollout import | remote connections continue a chat on its host |
 | Codex | `~/.codex/session_index.jsonl` → runtime copy (4,441 B, 35 rows; keys `id,thread_name,updated_at`) | jsonl index | 4.4K | 2026-10-19 19:59 | derived index | the jsonl itself | copy | (feeds resume picker) | n/a | n/a |
 | Codex | `~/.codex/state_5.sqlite` → runtime `state_5.sqlite` (WAL) + `logs_2.sqlite` 73M + `memories_1.sqlite` 389K + `goals_1.sqlite` 32K + `memories-git/` (git) | sqlite (WAL; header 18-19 = 2,2) | ~74M | 2026-10-20 02:54 (wal) | derived index (tables `_sqlx_migrations`, `rollout_migration_*`, `thread_attachments`, `external_agent_session_imports`); role of `thread_*` tables not fully classified | none verified | backup API | (index of rollouts) | n/a | n/a |
@@ -56,7 +56,7 @@ session-bearing item found (`fd … -x stat -f '%m %N' | sort -rn | head -1`) or
 | OpenCode | `~/.local/share/opencode/opencode.db` (+`-shm`/`-wal`; `PRAGMA journal_mode` = wal) | sqlite; tables `session`, `session_v2`, `message`, `part`, `session_message`, … | 946M (991,563,776 B) | 2026-10-20 02:12 (db), 02:45 (shm) | canonical SQLite | `opencode session export <id> [--sanitize]` (proposal 6.1, C49) | online backup API plus export | yes | `opencode session import <file> --directory` | none |
 | OpenCode | `~/.config/opencode/opencode.json` 2.7K (+ `.jsonc`, plugins, skills); `~/.local/share/opencode/auth.json` (credential, not opened) | json | 2.7K | 2026-10-18 | config | itself | copy | n/a | n/a | n/a |
 | Copilot CLI | `~/.copilot/session-state/<uuid>/{workspace.yaml,checkpoints,files,research}` (313 dirs) + `session-store.db` 2.5M + `-wal` 4.1M (tables `sessions`, `session_files`, `session_refs`, `turns`, `checkpoints`, `search_index` FTS) | files per session plus sqlite index | 58M (`~/.copilot` total) | 2026-10-20 02:39 (`session-store.db-shm`) | mixed | `/share file\|html\|gist`, `--remote-export` (6.1) | copy plus backup API | `--resume`, `--remote --resume` | none | account-bound |
-| Copilot CLI | `data.db` 1.2M (accounts, app_state) + `config.json` 812B + `mcp-config.json` 156B + `settings.json` | sqlite + json | 1.2M + ~1K | 2026-10-20 | config/app state | itself | backup API | n/a | n/a | n/a |
+| Copilot CLI | `data.db` 1.2M (accounts, app_state) + `config.json` 812B + `mcp-config.json` 156B + `settings.json` | sqlite + json | 1.2M + ~1K | 2026-10-20 | config/app state | itself | `data.db` holds account credentials (`accounts`): exclude or vault (5.5); copy the json | n/a | n/a | n/a |
 | Cursor | `~/.cursor/chats/<md5-workspace>/<uuid>/{meta.json,store.db}` (39 workspace hashes); `store.db` tables `blobs, meta` | sqlite per session (WAL, live shm/wal) | 2.2G (`~/.cursor` total) | 2026-10-20 02:41 (`store.db-shm`) | canonical SQLite (fragmented per session) | none verified (third-party exporters only, 6.1) | backup API per db | `--resume`, `ls`, `resume` (6.1) | none | `worker` (private cloud) |
 | Cursor | `~/.cursor/acp-sessions/<uuid>/{meta.json,store.db}` (266 dirs, same `blobs, meta` schema) | sqlite per session | within the 2.2G | 2026-10-20 02:41 | canonical SQLite (ACP-launched chats) | none verified | backup API per db | yes (via agent CLI) | none | as above |
 | Cursor | `~/.cursor/projects/<slug>/{canvases,terminals,…}` (140 dirs) | files | within the 2.2G | 2026-10-20 02:12 | mixed (sidecars) | none | clone | n/a | none | n/a |
@@ -76,13 +76,14 @@ session-bearing item found (`fd … -x stat -f '%m %N' | sort -rn | head -1`) or
 | zcode | `~/.zcode/cli/setting.json` 2.1K, `cli/config.json` 4.1K, `v2/config.json` 8.3K; `v2/credentials.json` (credential, not opened) | json | ~15K | 2026-10-18 | config | themselves | copy | n/a | n/a | n/a |
 | Crush (ACP) | `~/.local/share/crush-acp/crush.db` 978,944 B + shm/wal; tables `sessions, messages, files, read_files, mcp_*` (the ACP instance: `CRUSH_GLOBAL_DATA` per `acp-run --list`) | sqlite (WAL) | 2.0M | 2026-10-14 13:37 (db), 2026-10-20 02:39 (shm) | canonical SQLite | third-party or none (6.1) | backup API | yes | none | none |
 | Crush (TUI) | `~/.config/crush/.crush/crush.db` 2,789,376 B + shm (live 2026-10-20 02:42)/wal | sqlite (WAL) | 2.8M | 2026-10-20 02:42 | canonical SQLite (second, default-XDG store) | none | backup API | yes | none | none |
-| Crush | `~/src/djbclark-ade/.crush` exists (repo-local instance; not opened); `~/.local/share/crush/` holds only `crush.json` + `providers.json` 563K catalog | mixed | 584K | 2026-10-19 | config / repo-local | n/a | n/a | n/a | n/a | n/a |
+| Crush | `~/src/djbclark-ade/.crush` exists (repo-local instance; not opened); `~/.local/share/crush/` holds `crush.json`, `projects.json`, `providers.json` (563K catalog) and `hyper.json` (a Charm Hyper login: exclude or vault, 5.5) | mixed | 584K | 2026-10-19 | config / repo-local | n/a | n/a | n/a | n/a | n/a |
 | Grok | `~/.grok/sessions/<urlencoded-cwd>/<uuid>/{chat_history.jsonl, events.jsonl, updates.jsonl, summary.json, prompt_context.json, system_prompt.txt}`; `chat_history` keys `content,type` | jsonl per session + sidecars | 176M (`~/.grok`) | 2026-10-20 02:12 | canonical files | the jsonl | copy | in-tool (not verified) | none verified | none |
 | Grok | `~/.grok/worktrees.db` 40K WAL (`meta, worktrees`), `memory-v2/`, `memtrace/` (162 dirs), `config.toml` 953B | sqlite + files | within 176M | 2026-10-20 01:36 | config + memory/traces | n/a | copy / backup API | n/a | n/a | n/a |
 | Muse | `~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl` (newest 2026/10/04) + `session-index.db` 168K WAL (`rewind_catalog_*`, `sessions`) + `tui-history.jsonl` 10K | jsonl per session + sqlite rewind index | 53M | 2026-10-04 06:49 | canonical files plus derived index | the jsonl | copy + backup API for the index | in-tool (not verified) | none verified | none |
 | Paseo | `~/.paseo/agents/<workspace-slug>/<uuid>.json` (6 slugs, small json per agent session) | json per agent session | ~50K | 2026-10-20 02:55 | mixed: titles, parent links and labels exist only here | history search, Import session (Claude, Codex, omp) (6.1) | copy | n/a | yes | per-host history only |
 | Paseo | `agent-requests/*.json` (81), `projects/{projects,workspaces}.json`, `runtime/managed-processes`, `creations/` (452), `config.json` 4.4K, `models/` 984M voice models, `daemon-keypair.json` + `local-credential` (credentials, not opened) | json + assets | 1.0G total | 2026-10-20 02:49 | config + state + assets | n/a | copy (agents/, projects/, agent-requests/ only) | n/a | n/a | n/a |
 | Orca | `~/orca/workspaces` (8 checkouts: Graft, aiuse, djbclark-ade, …) + `~/orca/projects` | git worktrees | 3.8G | 2026-10-06 | duplicate (of the repos) | n/a | nothing extra (repos are remote-backed) | n/a | n/a | n/a |
+| Orca | `~/.orca` (`jira-sites.json` 0600, `jira-tokens/`, `agent-hooks/`, `claude-agent-teams-bin/`) | config + credentials | 76K | 2026-10-20 | config | n/a | copy `agent-hooks/` only; `jira-tokens/` and `jira-sites.json` are credentials (5.5) | n/a | n/a | n/a |
 | Orca | `~/Library/Application Support/Orca` (IndexedDB, Session Storage, Local Storage, Cookies, DIPS; Electron) | Electron app data | 2.3G | 2026-10-18 | mixed (app state; which part holds DAG state could not be classified) | none verified | clone dir with app stopped | n/a | n/a | n/a |
 | herdr | `~/.config/herdr/{session.json 2.1K, session-history.json 39K, session-snapshots/session-<epoch>-*.json (50), sessions/sleeper-plugin-lab}` + `config.toml` 11K | json snapshots + toml | 9.8M | 2026-10-20 02:44 | canonical files (snapshots) + config | the json | copy | n/a (snapshots are post-hoc) | n/a | n/a |
 | herdr | `~/.local/state/herdr` (agent-detection, client-shell, plugins) 704K; `~/.herdr/worktrees` 84M | state + worktrees | 85M | 2026-10-17 | config/duplicate | n/a | copy (state dir) | n/a | n/a | n/a |
@@ -92,6 +93,12 @@ session-bearing item found (`fd … -x stat -f '%m %N' | sort -rn | head -1`) or
 | ADE toolchain | `~/.local/state/session-index/history.v2.sqlite` (FTS5: `files, msgs, msgs_*`) + shm 32K | sqlite | 142M | 2026-10-20 02:49 | derived index (rebuildable) | n/a | rebuild, don't back up | n/a | n/a | n/a |
 
 ## 3. Backup plan per store (feeds Phase 0 slice 2)
+
+**Two rules for slice 2 (adversary review, 2026-10-20).** (a) Every path in section 5 item 5 is excluded from
+every backup generation: a backup that carries a live key or account blob puts the credential in more places
+than docs/threat-model.md allows once a generation syncs or leaves the Mac. (b) Cursor `acp-sessions` and the
+handoffs `chains/` shrank within an hour on 2026-10-20 (266 → 264 dirs, 103 → 101): something prunes them, so
+back them up before the pruning runs.
 
 **Every live database found is WAL** (`PRAGMA journal_mode` = wal, or header bytes 18-19 = `2,2`
 when a plain `-readonly` open was refused): a bare `cp` of the main file silently misses `-wal`
@@ -103,14 +110,16 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
    `~/.hermes/state.db`, `~/.local/share/opencode/opencode.db`, `~/.zcode/cli/db/db.sqlite`,
    `~/.local/share/crush-acp/crush.db`, `~/.config/crush/.crush/crush.db`, Codex
    `state_5.sqlite`/`logs_2.sqlite`/`memories_1.sqlite`/`goals_1.sqlite`, `~/.copilot/session-store.db`.
-   Form: `sqlite3 <db> ".backup '<dest>'"` (documented SQLite online backup; runs while the writer lives).
+   Form: Python `sqlite3.connect(src).backup(sqlite3.connect(dest))` with both paths as arguments (the
+   documented SQLite online backup; runs while the writer lives). Not the `sqlite3 <db> ".backup '<dest>'"`
+   dot-command: a `'` or a space in the path (`~/Library/Application Support`) breaks it.
 2. **Per-conversation / per-session SQLite trees — walk and `.backup` each db (or copy db+wal+shm
    with the tool stopped):** Antigravity `~/.gemini/antigravity-cli/conversations/*.db` (582M),
    `~/.gemini/antigravity/conversations/`, `~/.gemini/antigravity-acp/conversations/` (781M), plus
    each `conversation_summaries.db`; Cursor `~/.cursor/chats/<md5>/<uuid>/store.db` and
    `~/.cursor/acp-sessions/<uuid>/store.db`.
 3. **File stores — clone the directory:** `~/.claude/projects` (+ sidecar dirs `file-history`,
-   `session-env`, `sessions`, `tasks`, `teams`), Codex runtime `sessions/` tree,
+   `session-env`, `tasks`, `teams`; `sessions` only without its `*.key` files), Codex runtime `sessions/` tree,
    `~/.qwen/projects/*/chats`, `~/.cline/data/sessions`, `~/.grok/sessions`, `~/.gemini/tmp/*/chats`,
    `~/.omp/agent/sessions` (+ `history.db` via backup API), `~/.local/share/muse/sessions`,
    `~/.paseo/{agents,projects,agent-requests}`, `~/.config/herdr/{session.json,session-history.json,session-snapshots}`,
@@ -167,11 +176,13 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
 4. **Codex `state_5.sqlite` exact role** — `.tables` shows migration/thread tables (listed in
    section 2) but classifying which tables are canonical thread data vs derived index was out of
    scope for a read-only pass; treat as "derived index until proven otherwise".
-5. **Credentials never opened** (existence recorded only): `~/.claude/.credentials.json`,
+5. **Credentials never opened** (existence recorded only; every path here is excluded from the section 3
+   backups): `~/.claude/.credentials.json`, `~/.claude.json` (account), `~/.claude/sessions/*.key`,
    `~/.codex/auth.json`, `~/.gemini/oauth_creds.json`, `~/.local/share/opencode/auth.json`,
    `~/.grok/auth.json`, `~/.zcode/v2/credentials.json`, `~/.paseo/{daemon-keypair.json,local-credential}`,
    `~/.gemini/antigravity-acp/acp_token.json`, `~/.hermes/.env`, `~/.cline/data/settings/providers.json`,
-   `~/.omp/agent/agent.db` (`auth_credential_blocks` table), Orca `Cookies`/`jira-tokens`.
+   `~/.omp/agent/agent.db` (`auth_credential_blocks` table), `~/.local/share/crush/hyper.json`,
+   `~/.copilot/data.db` (`accounts`), Orca `Cookies` (Electron dir), `~/.orca/jira-tokens/`, `~/.orca/jira-sites.json`.
 6. **Exporter claims** for tools other than OpenCode/Hermes/Gemini rest on the proposal's §6.1
    (verified 2026-10-19), not on a fresh `--help` run (avoided per the no-`--help`-on-live-CLIs rule).
 
