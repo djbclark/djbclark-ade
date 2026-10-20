@@ -89,7 +89,11 @@ What an attacker would want, in order of damage:
    `ACP_DISPATCH_STATE` (the state root), `ACP_DISPATCH_LAUNCHCTL`, `ACP_DISPATCH_AIUSE`,
    `ACP_DISPATCH_NO_GATE`, `ACP_OPERATOR_APPROVED`, `CURSOR_CLOUD_API`, `ZCODE_CREDENTIAL_SECRET`,
    `LW_STATE_DIR`, `LW_REGISTRY`, and the plist-install overrides `ACP_DISPATCH_LAUNCH_AGENTS`,
-   `CONTEXT_BUDGET_LAUNCH_AGENTS`, `SKILLOPT_NIGHT_LAUNCH_AGENTS`. An agent that sets one for a child it
+   `CONTEXT_BUDGET_LAUNCH_AGENTS`, `SKILLOPT_NIGHT_LAUNCH_AGENTS`; `bin/firecrawl-router` reads
+   `FIRECRAWL_SELFHOST_URL`, `FIRECRAWL_FALLBACK_URL`, `FIRECRAWL_ROUTER_SIPB_BASE` and
+   `FIRECRAWL_ROUTER_LITELLM_BASE` (each held to https or loopback http, 2026-10-20), and both tools honour
+   `HTTPS_PROXY`/`http_proxy` and `SSL_CERT_FILE` (cursor-cloud drops them only when it re-execs for the key).
+   An agent that sets one for a child it
    launches repoints a binary, an endpoint or an install directory.
 8. **Web content and repo files** fetched by an agent mid-session (prompt-injection carrier).
 9. **`load-watch` pane typing**: it writes a brief and types one line into an agent session's pane via
@@ -138,17 +142,27 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   key is written.
 * **Gap 3.** Cloud agents get the repo and prompt, not secrets, but a secret in a prompt file or repo file
   leaves the Mac; no scanner runs on prompts.
-* **Gap 4.** `CURSOR_CLOUD_API` (`bin/cursor-cloud`) repoints the endpoint that receives `CURSOR_API_KEY`
-  in a Basic auth header, and plain http is accepted. An agent that sets it for a child sends the Cursor
-  key to that host. The same shape in `bin/firecrawl-router`: `FIRECRAWL_SELFHOST_URL`,
+* **Gap 4 (narrowed 2026-10-20).** `CURSOR_CLOUD_API` (`bin/cursor-cloud`) repoints the endpoint that receives
+  `CURSOR_API_KEY` in a Basic auth header. The same shape in `bin/firecrawl-router`: `FIRECRAWL_SELFHOST_URL`,
   `FIRECRAWL_FALLBACK_URL`, `FIRECRAWL_ROUTER_SIPB_BASE` and `FIRECRAWL_ROUTER_LITELLM_BASE` choose where
-  `call()` and `Extractor._post()` send the matching bearer keys, and plain http is accepted, so an agent that
-  starts a router with those variables repointed sends all four router keys to its host. Both tools also
-  re-send the key on a redirect, to any host, because urllib copies Authorization onto the redirected request
-  (`bin/failover.py` avoids this with `_NoRedirect`). (Code follow-up for a separate PR, `docs/queue.md`
-  "Follow-ups from the 2026-10-20 reviews" item 5: refuse anything but https://api.cursor.com in
-  `bin/cursor-cloud`, require https or loopback for the router's four endpoints unless a test flag is set, and
-  refuse redirects.)
+  `call()` and `Extractor._post()` send the matching bearer keys. An agent that sets one for a child, or starts
+  a router with them repointed, sends the key to that host. *Closed (2026-10-20):* cleartext to a non-loopback
+  host (cursor-cloud takes exactly `https://api.cursor.com`; the router's four bases must be https or loopback
+  http with a plain `host[:port]`: no userinfo, backslash or whitespace); replay on a redirect (keys are
+  unredirected headers behind a `_NoRedirect` opener, and a 3xx from a backend is a refused request, for 301,
+  302, 303, 307 and 308); a client-chosen request target (the router answers HTTP 400 to a target that does not
+  start with `/`, and `call()` refuses any target that changes the base URL's netloc, so `.evil.example/x`,
+  `:1/x` and `@evil.example/x` no longer move the key); the two test flags `CURSOR_CLOUD_ALLOW_HTTP` and
+  `FIRECRAWL_ROUTER_ALLOW_HTTP` (removed: an actor who can set the endpoint variable could set the flag);
+  `PYTHONPATH` and a planted `sitecustomize.py` for cursor-cloud (shebang and re-exec use `python3 -I`); proxy,
+  `SSL_CERT_*` and `PYTHON*` variables on the re-exec that fetches the key (dropped). *Remains:* the router
+  accepts https to any host, so an actor who starts a router with a base repointed to `https://evil.example`
+  still receives that backend's key; `bin/cursor-cloud` run with `CURSOR_API_KEY` already in the environment
+  (no re-exec) still honours `HTTPS_PROXY` and `SSL_CERT_FILE` from the caller's environment, as does the
+  router for its own process (an environment-controlling actor can read the keys off the wire); and any actor
+  that can edit the launch environment of the LaunchAgent (Ansible `shared_mcp` role) or the scripts
+  themselves. Reviews: adversary BLOCK on c63694e (the request-target flaw above, which predated the diff),
+  fixed on this branch.
 
 ### 4.3 Unenforced review and merge
 
