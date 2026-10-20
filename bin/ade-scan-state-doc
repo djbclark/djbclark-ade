@@ -365,9 +365,11 @@ def render(d):
         elif ("orphan branch" in c["flags"] or "unpushed commits" in c["flags"]) and head_ahead:
             head_row = True
             what.append(f"{head_ahead} commit(s) on {code('{}', c['branch'])}")
-            cmd.append(shcode("git -C {} push -u origin {}", raw_p, c["branch"]) + " or "
-                       + shcode("git -C {} bundle create <DEST>/{}-{}.bundle {}", raw_p, name,
-                              c["branch"].replace("/", "_"), c["branch"]))
+            # fully qualified refspecs: a branch named like an option (`--mirror`) must never reach git's option
+            # parser, and shell quoting does not stop that (Codex pass 7 on PR 27)
+            cmd.append(shcode("git -C {} push -u origin refs/heads/{}:refs/heads/{}", raw_p, c["branch"], c["branch"])
+                       + " or " + shcode("git -C {} bundle create <DEST>/{}-{}.bundle refs/heads/{}", raw_p, name,
+                                         c["branch"].replace("/", "_"), c["branch"]))
             need = "yes: pushing a branch publishes it; pick push or bundle"
         if local_n and not covered_by_bundle:
             # commits on other local branches (or a detached HEAD) that no origin ref holds, whatever HEAD's own state
@@ -381,7 +383,7 @@ def render(d):
                              else f"{local_n} local-only commits on {names}") + tail)
             else:
                 what.append(f"{local_n} local-only commits (branches not itemised)" + tail)
-            lo_cmd = [shcode("git -C {} push origin {}", raw_p, b["branch"])
+            lo_cmd = [shcode("git -C {} push origin refs/heads/{}:refs/heads/{}", raw_p, b["branch"], b["branch"])
                       for b in others if b["branch"] != "HEAD"]
             lo_cmd.append(shcode("git -C {} bundle create <DEST>/{}-local-only.bundle --all", raw_p, name))
             cmd.append(" or ".join(lo_cmd) if len(lo_cmd) == 1 else "; ".join(lo_cmd[:-1]) + " or " + lo_cmd[-1])
@@ -404,8 +406,13 @@ def render(d):
             if shared:
                 cmd.append("same paths as the primary / sibling checkout (cow copy): preserve once there")
             else:
-                cmd.append(f"copy the paths to {code('<DEST>/{}-untracked/', name)} (`cp -R`), or "
-                           f"{shcode('git -C {} add', raw_p)} them on a branch and push")
+                # every untracked path, not the sample shown: an archive from `ls-files`, or `add -A` (which also
+                # stages the modified tracked files) on a branch (Codex pass 7 on PR 27)
+                cmd.append("archive every untracked path: "
+                           + shcode("git -C {} ls-files -z --others --exclude-standard \\| "
+                                    "gtar -C {} --null -T - -cf <DEST>/{}-untracked.tar", raw_p, raw_p, name)
+                           + " or " + shcode("git -C {} add -A -- .", raw_p)
+                           + " on a branch, commit and push (stages the modified tracked files too)")
                 need = need if need != "no" else "yes: decide whether they are work"
         w(f"| {p} | {'; '.join(what)} | {'; '.join(cmd)} | {need} |")
     w("")

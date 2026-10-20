@@ -919,7 +919,7 @@ def test_scan_doc_generator_code_spans_survive_backticks():
     text = mod.render(scan_text)
     for span in ("`` c`h ``", "`` r`eport.md ``", "`` u`n.txt ``", "`` b`r ``"):
         assert span in text, span
-    assert "`` git -C '/p/c`o' push -u origin 'b`r' `` or " in text  # shell-quoted since round 8 on PR 27
+    assert "`` git -C '/p/c`o' push -u origin refs/heads/'b`r':refs/heads/'b`r' `` or " in text  # shell-quoted since round 8
 
 
 def doc_scan(checkouts, tasks=(), **summary):
@@ -958,7 +958,8 @@ def test_capture_plan_keeps_a_checkout_whose_only_unpushed_work_is_on_another_br
     clean = doc_checkout("/p/clean")
     rows = section_3_2(mod.render(doc_scan([side, many, clean]))).splitlines()
     row = next(r for r in rows if r.startswith("| /p/work "))
-    assert "2 local-only commits on `side` (2)" in row and "`git -C /p/work push origin side`" in row
+    assert "2 local-only commits on `side` (2)" in row
+    assert "`git -C /p/work push origin refs/heads/side:refs/heads/side`" in row
     assert "commit(s) on `main`" not in row  # HEAD's own branch is pushed: no "0 commit(s)" row
     assert "and 3 more branches" in next(r for r in rows if r.startswith("| /p/many "))
     assert not [r for r in rows if r.startswith("| /p/clean ")]
@@ -1039,8 +1040,35 @@ def test_capture_plan_commands_shell_quote_paths_and_branch_names():
                         local_only_branches=[{"branch": "side$(touch${IFS}PWNED)", "count": 1}])
     rows = section_3_2(mod.render(doc_scan([evil]))).splitlines()
     row = next(r for r in rows if r.startswith("| /p/evil dir ") or r.startswith("| /p/evil\\ dir "))
-    assert "git -C '/p/evil dir' push origin 'side$(touch${IFS}PWNED)'" in row.replace("\\$", "$").replace("\\{", "{").replace("\\}", "}").replace("\\(", "(").replace("\\)", ")")
+    assert "git -C '/p/evil dir' push origin refs/heads/'side$(touch${IFS}PWNED)':refs/heads/'side$(touch${IFS}PWNED)'" in row.replace("\\$", "$").replace("\\{", "{").replace("\\}", "}").replace("\\(", "(").replace("\\)", ")")
     assert "push origin side$(touch" not in row
+
+
+def test_option_shaped_branch_names_never_reach_gits_option_parser():
+    # Codex pass 7 on PR 27: `git push -u origin --mirror` exits 0 and pushes every ref
+    mod = load_doc()
+    co = doc_checkout("/p/opt", branch="--mirror", flags=["unpushed commits"], verdict="unpushed commits",
+                      ahead_of_origin=1, local_only_commits=2,
+                      local_only_branches=[{"branch": "--mirror", "count": 1}, {"branch": "-f", "count": 1}])
+    rows = section_3_2(mod.render(doc_scan([co]))).splitlines()
+    row = next(r for r in rows if r.startswith("| /p/opt "))
+    assert "push -u origin refs/heads/--mirror:refs/heads/--mirror" in row
+    assert "bundle create <DEST>/opt---mirror.bundle refs/heads/--mirror" in row
+    assert "push origin refs/heads/-f:refs/heads/-f" in row
+    assert "push -u origin --mirror" not in row and "push origin -f" not in row and "bundle --mirror" not in row
+
+
+def test_untracked_files_get_a_lossless_archive_command_not_a_bare_git_add():
+    # Codex pass 7 on PR 27: `git add` without a pathspec stages nothing, and the row shows three of N paths
+    mod = load_doc()
+    co = doc_checkout("/p/u dir", flags=["untracked"], verdict="untracked", untracked=5,
+                      untracked_sample=["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"])
+    rows = section_3_2(mod.render(doc_scan([co]))).splitlines()
+    row = next(r for r in rows if r.startswith("| /p/u dir ") or r.startswith("| /p/u\\ dir "))
+    assert "git -C '/p/u dir' ls-files -z --others --exclude-standard \\| gtar -C '/p/u dir' --null -T - -cf <DEST>/'u dir'-untracked.tar`" in row
+    assert row.count("|") - row.count("\\|") == 5  # the pipe inside the command is escaped: the table row still has 4 cells
+    assert "git -C '/p/u dir' add -A -- ." in row
+    assert "add` them" not in row
 
 
 def test_shquote_keeps_a_leading_tilde_outside_the_quotes():
