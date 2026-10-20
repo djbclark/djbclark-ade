@@ -11,9 +11,13 @@ slices that can leave the Mac. Two need djbclark once: (1) environment `ccarenv_
 "no cloud environments are available for this workspace"; upstream openai/codex#50182 and
 #51585, open). Re-probe after each codex-cli release (`codex cloud exec --env <ID> --branch
 <b> "<task>"`); route chosen (round 3, 2026-10-19): `@codex` on a GitHub issue, scriptable with
-`gh` and the factory's intake path; djbclark installs the Codex GitHub app on `djbclark-ade`,
-first task is https://github.com/djbclark/djbclark-ade/issues/4 (re-trigger with an `@codex` comment if the body mention predates the
-install). Then a `codex-cloud` place in
+`gh` and the factory's intake path. The Codex GitHub app is installed; the first task is
+https://github.com/djbclark/djbclark-ade/issues/4, but the connector answered twice "To use
+Codex here, create an environment for this repo" even after djbclark re-checked the
+environment's binding, so the connector reads the same catalog the CLI does. Blocked on both
+routes until OpenAI fixes new-style environment discovery (openai/codex#50182); the load-admit
+fix went to the local builder instead. Re-trigger issue 4 with an `@codex` comment after the
+next Codex release or when the connector's reply changes. Then a `codex-cloud` place in
 `acp-dispatch`/`route_agent.py` so the router can pick it (§11.5 rule 4);
 (2) DONE 2026-10-19: the Cursor user API key is `CURSOR_API_KEY` in `sudo-secretspec`
 (runtime declaration, optional; read it only through `sudo-secretspec run`); next a
