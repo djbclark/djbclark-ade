@@ -17,7 +17,9 @@
 #
 # Exit: `wait --once`'s verdict — loops on 75 (EX_TEMPFAIL, still running); on 0 execs
 # `acp-dispatch check RECORD` and exits with its code (0 done, 1 partial, 3 no-report,
-# 4 BLOCKED); 124 (the record's wait_timeout) and any unexpected exit pass straight through.
+# 4 BLOCKED, 5 pool unavailable, 75 machine too hot: nothing ran, re-dispatch later: that final 75 is
+# `check`'s, not "still running"); 124 (the record's wait_timeout) and any unexpected exit pass
+# straight through.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 dispatch=${ACP_DISPATCH_BIN:-$here/acp-dispatch}

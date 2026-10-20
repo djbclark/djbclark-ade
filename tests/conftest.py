@@ -17,6 +17,9 @@ tempfile.tempdir = None
 # load: with it on, a busy machine made dispatch tests wait and fail
 # (2026-10-12). test_acp_dispatch_gate.py exercises the gate directly.
 os.environ.setdefault("ACP_DISPATCH_NO_GATE", "1")
+# The same for the load gate (`load-watch admit`, 2026-10-19): it waits up to 30 min on a hot host and
+# refuses with 75. test_acp_dispatch_load_gate.py turns it on per test with a fake load-watch.
+os.environ["ACP_DISPATCH_NO_LOAD_GATE"] = "1"  # unconditional: an outer "" or "0" must not turn the real 30-min gate on
 # A quota stop schedules an in-place resume with `launchctl submit` (2026-10-18). No test may
 # leave a real launchd job behind: test_acp_dispatch.py gives finalize a fake launchctl that
 # records its arguments; anything else gets a no-op.
