@@ -94,7 +94,7 @@ session-bearing item found (`fd … -x stat -f '%m %N' | sort -rn | head -1`) or
 
 ## 3. Backup plan per store (feeds Phase 0 slice 2)
 
-2026-10-20: `bin/ade-backup-stores` implements this section (PR #TBD): `--dry-run` first, then a run into
+2026-10-20: `bin/ade-backup-stores` implements this section (PR #24): `--dry-run` first, then a run into
 `~/.local/state/ade/backups/<UTC>/` with a `MANIFEST.json` (sha256 per file, exclusions, errors) and the Hermes export
 (`hermes-export/`; sessions above `max_export_messages` are listed in the manifest, not exported, and are whole in the
 `hermes-state/` copy). Config-only rows (section 2 rows of class config) are not copied by it.
