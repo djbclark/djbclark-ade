@@ -640,21 +640,33 @@ def test_cursor_session_with_its_meta_is_clean(real):
     assert entry["status"] == "ok" and (dest / "cursor-chats/hashA/uuid1/meta.json").is_file()
 
 
-def test_cursor_store_db_without_meta_json_is_an_error_and_the_store_partial(real, capsys):
+def test_cursor_session_without_meta_json_is_a_warning_and_the_store_stays_ok(real, capsys):
     mod, home, _ = real
     make_cursor_session(home, with_meta=False)
-    ok = make_cursor_session(home, sub="chats/hashA/uuid2")
+    make_cursor_session(home, sub="chats/hashA/uuid2")
     dest = home / "out" / "bk"
-    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 1
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 0
     manifest = manifest_of(dest)
     entry = manifest["stores"][0]
-    assert entry["status"] == "partial"
+    assert entry["status"] == "ok" and entry["errors"] == [] and manifest["errors"] == []
+    assert entry["sidecar_missing"] == ["hashA/uuid1/meta.json"]
+    assert "ade-backup-stores: cursor-chats: 1 session(s) without meta.json (copied without it)" in capsys.readouterr().err
+    assert (dest / "cursor-chats/hashA/uuid1/store.db").is_file()  # the db is copied without it
+    assert not (dest / "cursor-chats/hashA/uuid1/meta.json").exists()
+    assert (dest / "cursor-chats/hashA/uuid2/meta.json").is_file()
+
+
+def test_strict_stores_makes_an_absent_meta_json_an_error_and_the_store_partial(real):
+    mod, home, _ = real
+    make_cursor_session(home, with_meta=False)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest), "--strict-stores"]) == 1
+    manifest = manifest_of(dest)
+    entry = manifest["stores"][0]
+    assert entry["status"] == "partial" and entry["sidecar_missing"] == ["hashA/uuid1/meta.json"]
     assert [e["source"] for e in entry["errors"]] == ["hashA/uuid1"]  # the session dir, relative, no content
     assert "meta.json" in entry["errors"][0]["error"] and "kept" not in json.dumps(manifest["errors"])
-    # the generation still completed: both dbs and the other session's sidecar are in it
-    assert (dest / "cursor-chats/hashA/uuid1/store.db").is_file()
-    assert (dest / "cursor-chats/hashA/uuid2/meta.json").is_file()
-    assert ok.name == "uuid2"
+    assert (dest / "cursor-chats/hashA/uuid1/store.db").is_file()  # the generation still completed
 
 
 def test_cursor_meta_json_symlink_is_an_error(real):
@@ -687,10 +699,31 @@ def test_cursor_meta_json_vanishing_between_listing_and_copy_is_an_error(real, m
     assert "vanished" in entry["errors"][0]["error"]
 
 
-def test_dry_run_reports_a_missing_required_sidecar(real):
+def test_dry_run_reports_the_same_absent_sidecars_as_the_copy(real, capsys):
     mod, home, _ = real
     make_cursor_session(home, with_meta=False)
-    assert mod.main(["--only", "cursor-chats", "--dry-run", "--dest", str(home / "o")]) == 1
+    make_cursor_session(home, sub="chats/hashA/uuid2")
+    assert mod.main(["--only", "cursor-chats", "--dry-run", "--json", "--dest", str(home / "o")]) == 0
+    cap = capsys.readouterr()
+    plan = json.loads(cap.out)["stores"][0]
+    assert plan["status"] == "ok" and plan["errors"] == [] and plan["sidecar_missing"] == ["hashA/uuid1/meta.json"]
+    assert "cursor-chats: 1 session(s) without meta.json (copied without it)" in cap.err
+    assert plan["file_count"] == 3  # both dbs and the one sidecar that exists
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 0
+    assert manifest_of(dest)["stores"][0]["sidecar_missing"] == plan["sidecar_missing"]
+    assert mod.main(["--only", "cursor-chats", "--dry-run", "--strict-stores", "--dest", str(home / "o")]) == 1
+    capsys.readouterr()
+
+
+def test_check_schemas_counts_an_unopenable_database_apart_from_credential_names(real, capsys):
+    mod, home, _ = real
+    sdir = make_cursor_session(home)
+    (sdir / "store.db").write_bytes(b"this is not a sqlite database" * 100)
+    assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 1
+    out = capsys.readouterr().out
+    assert "ERROR" in out
+    assert "0 unexplained credential-looking name(s), 0 symlink problem(s), 0 missing, 1 unopenable" in out
 
 
 # --- Codex pass 2 on PR 24 (2026-10-20): grok memory roots, symlinked roots, dry-run sidecars ---
@@ -1262,12 +1295,12 @@ def test_check_schemas_counts_an_absent_tree_root_as_missing(real, capsys):
     assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 0
     out = capsys.readouterr().out
     assert f"cursor-chats: {home / '.cursor/chats'}: missing" in out
-    assert out.strip().splitlines()[-1].endswith("1 missing")
+    assert out.strip().splitlines()[-1].endswith("1 missing, 0 unopenable")
     assert mod.main(["--check-schemas", "--strict-stores", "--only", "cursor-chats"]) == 1
-    assert capsys.readouterr().out.strip().splitlines()[-1].endswith("1 missing")
+    assert capsys.readouterr().out.strip().splitlines()[-1].endswith("1 missing, 0 unopenable")
     make_cursor_session(home)
     assert mod.main(["--check-schemas", "--strict-stores", "--only", "cursor-chats"]) == 0
-    assert capsys.readouterr().out.strip().splitlines()[-1].endswith("0 missing")
+    assert capsys.readouterr().out.strip().splitlines()[-1].endswith("0 missing, 0 unopenable")
 
 
 @pytest.mark.parametrize("required", [True, False])

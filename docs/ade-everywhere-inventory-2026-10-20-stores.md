@@ -132,7 +132,7 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
    each `conversation_summaries.db` and, for the ACP store, the `conversations/<uuid>.meta` sidecar beside each db
    (268 files, some 0600, not opened); Cursor `~/.cursor/chats/<md5>/<uuid>/store.db` and
    `~/.cursor/acp-sessions/<uuid>/store.db`, each with its `meta.json` sidecar copied beside the backup (the
-   resume picker reads it, skills/autorename/SKILL.md; a db without it is not a lossless copy: the tool reports a session whose `meta.json` is absent, a symlink,
+   resume picker reads it, skills/autorename/SKILL.md; a db without it is not a lossless copy: the tool lists a session whose `meta.json` does not exist under `sidecar_missing` and warns on stderr (db copied, store `ok`; 14 of 101 chat sessions never had one, 2026-10-20; an error under `--strict-stores`), and reports one whose `meta.json` is a symlink,
    excluded or gone during the copy as an error naming the session directory and marks the store `partial`, 2026-10-20).
 3. **File stores — clone the directory:** `~/.claude/projects` (+ sidecar dirs `file-history`,
    `session-env`, `tasks`, `teams`; `sessions` only without its `*.key` files), Codex runtime `sessions/` tree
