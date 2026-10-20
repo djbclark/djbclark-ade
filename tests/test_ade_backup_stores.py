@@ -929,6 +929,9 @@ def test_a_database_under_a_symlinked_session_directory_is_skipped_not_copied(re
     link_session_dir(home, tmp)
     dest = home / "out" / "bk"
     assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 0
+    err = capsys.readouterr().err
+    skipped = home / ".cursor/chats/hashB/uuid2/store.db"
+    assert err.splitlines().count(f"ade-backup-stores: cursor-chats: skipped {skipped}: symlink") == 1  # DECIDED: a skip stays ok, but is printed
     entry = manifest_of(dest)["stores"][0]
     assert entry["status"] == "ok" and entry["errors"] == [] and (dest / "cursor-chats/hashA/uuid1/store.db").is_file()
     assert not (dest / "cursor-chats/hashB").exists()
@@ -1022,3 +1025,67 @@ def test_check_schemas_follows_an_allowed_sqlite_link_and_refuses_the_rest(real,
     assert mod.main(["--check-schemas", "--only", "codex-db"]) == 1
     out = capsys.readouterr().out
     assert "symlink refused: symlink target outside HOME" in out and "1 symlink problem(s)" in out
+
+
+def link_tree_root(home, tmp, where, marker="SECRET-LINKED-ROOT-ROW"):
+    """~/.cursor/chats is a link to a tree holding one session (a marker db and its meta.json)."""
+    target = (tmp / "outside-chats") if where == "outside" else (home / "data/chats")
+    sdir = target / "hashA/uuid1"
+    make_wal_db(sdir / "store.db", [marker]).close()
+    (sdir / "meta.json").write_text("{}")
+    (home / ".cursor").mkdir(exist_ok=True)
+    os.symlink(target, home / ".cursor/chats")
+    return target
+
+
+def test_a_tree_root_link_outside_home_is_an_error_and_nothing_is_searched(real, capsys):
+    mod, home, tmp = real
+    link_tree_root(home, tmp, "outside")
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 1
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial" and entry["file_count"] == 0 and entry["root_symlinks"] == []
+    assert len(entry["errors"]) == 1 and "symlink target outside HOME" in entry["errors"][0]["error"]
+    assert not (dest / "cursor-chats/hashA").exists() and b"SECRET-LINKED-ROOT-ROW" not in all_bytes(dest)
+    capsys.readouterr()
+    assert mod.main(["--only", "cursor-chats", "--dry-run", "--json", "--dest", str(home / "o")]) == 1
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    assert plan["file_count"] == 0 and plan["status"] == "partial" and len(plan["errors"]) == 1
+    assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 1
+    out = capsys.readouterr().out
+    assert f"cursor-chats: {home / '.cursor/chats'}: symlink refused: symlink target outside HOME" in out
+    assert "0 unexplained credential-looking name(s), 1 symlink problem(s)" in out
+
+
+def test_a_tree_root_link_under_home_is_followed_and_recorded(real, capsys, monkeypatch):
+    mod, home, tmp = real
+    target = link_tree_root(home, tmp, "home")
+    link = {"root": str(home / ".cursor/chats"), "link": str(home / ".cursor/chats"), "target": str(target)}
+    assert mod.main(["--only", "cursor-chats", "--dry-run", "--json", "--dest", str(home / "o")]) == 0
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    assert plan["file_count"] == 2 and plan["skipped_count"] == 0 and plan["root_symlinks"] == [link]
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "ok" and entry["errors"] == [] and entry["file_count"] == 2
+    assert entry["root_symlinks"] == [link] and entry["skipped"] == []
+    assert b"SECRET-LINKED-ROOT-ROW" in (dest / "cursor-chats/hashA/uuid1/store.db").read_bytes()
+    assert (dest / "cursor-chats/hashA/uuid1/meta.json").is_file()
+    assert not any(p.is_symlink() for p in dest.rglob("*"))
+    opened = []
+    real_ro = mod.ro_connect
+    monkeypatch.setattr(mod, "ro_connect", lambda p: (opened.append(Path(p)), real_ro(p))[1])
+    capsys.readouterr()
+    assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 0
+    out = capsys.readouterr().out
+    assert f"cursor-chats: {home / '.cursor/chats'}: symlink -> {target}" in out
+    assert "0 unexplained credential-looking name(s), 0 symlink problem(s)" in out
+    assert opened == [target / "hashA/uuid1/store.db"]
+
+
+def test_destination_inside_a_followed_tree_root_target_is_refused(real, capsys):
+    mod, home, tmp = real
+    target = link_tree_root(home, tmp, "home")
+    inside = target / "newdir"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(inside)]) == 2
+    assert "source store" in capsys.readouterr().err and not inside.exists()

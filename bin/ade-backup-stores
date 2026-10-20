@@ -50,7 +50,9 @@ a symlink, or sits under a symlinked directory, is skipped (`symlink`), never op
 `symlink, not opened` and counts it a problem, exit 1). A configured database path that is a symlink (Codex's on
 this Mac) is followed under the same rule as a store root link (under $HOME, not a credential path; recorded in
 `root_symlinks`; `--check-schemas` opens the target read-only and prints `symlink -> target`, or `symlink refused`
-and exit 1). The dry run's bytes for a SQLite file are the main file plus its `-wal` file, an upper bound on the
+and exit 1); so is a per-session tree root that is a symlink (same rule as a file-store root: refused is an error,
+the store `partial`). Every symlink skip prints `<store>: skipped <path>: symlink` on stderr and leaves the store
+`ok`. The dry run's bytes for a SQLite file are the main file plus its `-wal` file, an upper bound on the
 snapshot the online backup writes.
 
 Default dest: ~/.local/state/ade/backups/<UTC timestamp>/ (0700, files 0600). The generation is built in
@@ -254,7 +256,12 @@ def store_roots(store):
                     roots.append(target.parent)
         return roots
     if store["kind"] == "sqlite-tree":
-        return [store["root"]]
+        roots = [store["root"]]
+        if store["root"].is_symlink():  # a root link that may be followed: its target is a source too
+            target = Path(os.path.realpath(store["root"]))
+            if Path(os.path.expanduser("~")).resolve() in target.parents:
+                roots.append(target)
+        return roots
     home = Path(os.path.expanduser("~")).resolve()
     roots = []
     for label, p in store["roots"]:
@@ -401,6 +408,8 @@ class StoreRun:
 
     def skip(self, path, why):
         self.skipped_count += 1
+        if why.startswith("symlink"):  # a skip is deliberate and leaves the store ok; stderr keeps it visible
+            print(f"ade-backup-stores: {self.store['name']}: skipped {path}: symlink", file=sys.stderr)
         if len(self.skipped) < SKIPPED_CAP:
             self.skipped.append({"path": str(path), "why": why})
 
@@ -527,12 +536,32 @@ def copy_sqlite_store(store, run, excluder):
             run.error(src, exc)
 
 
-def tree_dbs(store):
-    root = store["root"]
+def tree_dbs(store, root=None):
+    """The databases a sqlite-tree store matches below `root` (default: its configured root)."""
+    root = root or store["root"]
     found = []
     for pat in store["dbs"]:
         found.extend(p for p in sorted(root.glob(pat)) if p.is_file())
     return found
+
+
+def tree_root(store, run, excluder):
+    """The directory a sqlite-tree store is searched from: its configured root, or that root's target when the
+    root is a symlink and the root-link rule allows it (recorded in run.root_symlinks, labelled with the root as
+    configured). None after `run.absent` or `run.error`: nothing is searched."""
+    root = store["root"]
+    if not os.path.lexists(root):
+        run.absent(root)
+        return None
+    real = root
+    if root.is_symlink():
+        real = follow_link(root, str(root), run, excluder)
+        if real is None:
+            return None
+    if not real.is_dir():
+        run.error(root, NotADirectoryError("store root is not a directory"))
+        return None
+    return real
 
 
 def wal_size(db):
@@ -571,18 +600,15 @@ def store_status(run):
 
 
 def copy_tree_store(store, run, excluder):
-    root = store["root"]
-    run.sources.append(str(root))
+    configured = store["root"]
+    run.sources.append(str(configured))
+    root = tree_root(store, run, excluder)
+    if root is None:
+        return
     try:
-        dbs = tree_dbs(store)
+        dbs = tree_dbs(store, root)
     except OSError as exc:
-        run.error(root, exc)
-        return
-    if not os.path.lexists(root):
-        run.absent(root)
-        return
-    if not root.is_dir():
-        run.error(root, NotADirectoryError("store root is not a directory"))
+        run.error(configured, exc)
         return
     for src in dbs:
         if under_symlink(src, root):  # tree_dbs globs through linked directories and Path.is_file() follows links
@@ -689,13 +715,10 @@ def plan_store(store, excluder):
                 run.error(f, OSError("not a regular file"))
     elif store["kind"] == "sqlite-tree":
         run.sources.append(str(store["root"]))
-        if not os.path.lexists(store["root"]):
-            run.absent(store["root"])
-        elif not store["root"].is_dir():
-            run.error(store["root"], NotADirectoryError("store root is not a directory"))
-        else:
-            for db in tree_dbs(store):
-                if under_symlink(db, store["root"]):
+        root = tree_root(store, run, excluder)
+        if root is not None:
+            for db in tree_dbs(store, root):
+                if under_symlink(db, root):
                     run.skip(db, "symlink")
                     continue
                 count += 1
@@ -707,7 +730,7 @@ def plan_store(store, excluder):
                         count += 1
                         size += side.stat().st_size
                     elif pat in store.get("required", []):
-                        run.error(db.parent.relative_to(store["root"]), required_sidecar_error(side, why))
+                        run.error(db.parent.relative_to(root), required_sidecar_error(side, why))
     else:
         for label, src in store["roots"]:
             run.sources.append(str(src))
@@ -945,12 +968,20 @@ def check_schemas(stores, excluder):
         if store["kind"] == "sqlite":
             dbs = list(store["files"])
         elif store["kind"] == "sqlite-tree":
-            dbs = tree_dbs(store) if store["root"].is_dir() else []
+            search = store["root"]
+            if search.is_symlink():
+                search, why = root_link_target(store["root"], excluder)
+                if why:
+                    print(f"{store['name']}: {store['root']}: symlink refused: {why}")
+                    link_problems += 1
+                    continue
+                print(f"{store['name']}: {store['root']}: symlink -> {search}")
+            dbs = tree_dbs(store, search) if search.is_dir() else []
         else:
             continue
         for db in dbs:
             target = db
-            if store["kind"] == "sqlite-tree" and under_symlink(db, store["root"]):
+            if store["kind"] == "sqlite-tree" and under_symlink(db, search):
                 print(f"{store['name']}: {db}: symlink, not opened")
                 link_problems += 1
                 continue
