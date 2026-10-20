@@ -138,7 +138,10 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   key is written.
 * **Gap 3.** Cloud agents get the repo and prompt, not secrets, but a secret in a prompt file or repo file
   leaves the Mac; no scanner runs on prompts.
-* **Gap 4.** `CURSOR_CLOUD_API` (`bin/cursor-cloud`) repoints the endpoint that receives `CURSOR_API_KEY`
+* **Gap 4 (closed 2026-10-20).** `CURSOR_CLOUD_API` is now held to exactly `https://api.cursor.com`, the four
+  router bases to https or loopback (`CURSOR_CLOUD_ALLOW_HTTP=1` / `FIRECRAWL_ROUTER_ALLOW_HTTP=1` lift that, for
+  tests only), bearer and Basic keys are unredirected headers behind a `_NoRedirect` opener, and a 3xx from a
+  backend is a refused request. As found: `CURSOR_CLOUD_API` (`bin/cursor-cloud`) repointed the endpoint that receives `CURSOR_API_KEY`
   in a Basic auth header, and plain http is accepted. An agent that sets it for a child sends the Cursor
   key to that host. The same shape in `bin/firecrawl-router`: `FIRECRAWL_SELFHOST_URL`,
   `FIRECRAWL_FALLBACK_URL`, `FIRECRAWL_ROUTER_SIPB_BASE` and `FIRECRAWL_ROUTER_LITELLM_BASE` choose where

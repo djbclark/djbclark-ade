@@ -187,9 +187,9 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(self.req("POST", "/v2/scrape", {"url": "u"})[:2], (500, "primary"))
 
     def test_build_router_env(self):
-        r = fr.build_router({"FIRECRAWL_SELFHOST_URL": "http://a/", "FIRECRAWL_API_KEY": "k"}, "")
-        self.assertEqual((r.primary.base, r.fallback.base), ("http://a", "https://api.firecrawl.dev"))
-        r = fr.build_router({"FIRECRAWL_SELFHOST_URL": "http://a", "FIRECRAWL_API_KEY": "k",
+        r = fr.build_router({"FIRECRAWL_SELFHOST_URL": "https://a/", "FIRECRAWL_API_KEY": "k"}, "")
+        self.assertEqual((r.primary.base, r.fallback.base), ("https://a", "https://api.firecrawl.dev"))
+        r = fr.build_router({"FIRECRAWL_SELFHOST_URL": "https://a", "FIRECRAWL_API_KEY": "k",
                              "FIRECRAWL_ROUTER_FALLBACK": "off"}, "")
         self.assertIsNone(r.fallback)
 
@@ -434,6 +434,139 @@ class LLMFormatsTest(unittest.TestCase):
         self.assertEqual([r.name for r in ex.rungs], ["sipb", "gemini-free", "gemini-free-lite"])
         self.assertTrue(ex.rungs[0].check_truncation)
         self.assertEqual(ex.rungs[0].base, "http://127.0.0.1:8890/api")
+
+
+class EndpointTest(unittest.TestCase):
+    """The four base URLs that receive a key must be https or loopback (2026-10-20)."""
+
+    VARS = ("FIRECRAWL_SELFHOST_URL", "FIRECRAWL_FALLBACK_URL",
+            "FIRECRAWL_ROUTER_SIPB_BASE", "FIRECRAWL_ROUTER_LITELLM_BASE")
+
+    def build(self, var, url, **extra):
+        env = {"FIRECRAWL_SELFHOST_URL": "https://primary.example", "FIRECRAWL_API_KEY": "k", **extra, var: url}
+        return fr.build_router(env, "")
+
+    def test_https_and_loopback_http_are_accepted(self):
+        for var in self.VARS:
+            for url in ("https://ok.example/v1", "http://127.0.0.1:9", "http://localhost:9/api",
+                        "http://[::1]:9", "https://ok.example"):
+                with self.subTest(var=var, url=url):
+                    self.build(var, url)
+
+    def test_plain_http_to_another_host_is_refused_naming_the_variable(self):
+        for var in self.VARS:
+            for url in ("http://evil.example", "http://evil.example/v1", "http://127.0.0.1.evil.example",
+                        "http://127.0.0.1@evil.example", "ftp://x.example", "file:///etc/passwd", "evil.example"):
+                with self.subTest(var=var, url=url), self.assertRaises(SystemExit) as cm:
+                    self.build(var, url)
+                self.assertIn(var, str(cm.exception.code))
+                self.assertIn("FIRECRAWL_ROUTER_ALLOW_HTTP", str(cm.exception.code))
+
+    def test_allow_flag_lets_plain_http_through_but_not_other_schemes(self):
+        for var in self.VARS:
+            with self.subTest(var=var):
+                self.build(var, "http://evil.example", FIRECRAWL_ROUTER_ALLOW_HTTP="1")
+                with self.assertRaises(SystemExit):
+                    self.build(var, "file:///etc/passwd", FIRECRAWL_ROUTER_ALLOW_HTTP="1")
+
+    def test_flag_must_be_exactly_one(self):
+        for flag in ("0", "", "true"):
+            with self.subTest(flag=flag), self.assertRaises(SystemExit):
+                self.build("FIRECRAWL_SELFHOST_URL", "http://evil.example", FIRECRAWL_ROUTER_ALLOW_HTTP=flag)
+
+    def test_unused_fallback_url_is_not_checked_without_a_key(self):
+        # no FIRECRAWL_API_KEY: the fallback is off, so its URL never receives anything
+        fr.build_router({"FIRECRAWL_SELFHOST_URL": "https://p.example",
+                         "FIRECRAWL_FALLBACK_URL": "http://evil.example"}, "")
+
+    def test_defaults_pass(self):
+        fr.build_router({"FIRECRAWL_SELFHOST_URL": "https://p.example", "FIRECRAWL_API_KEY": "k"}, "")
+
+
+class Redirector:
+    """A loopback server that records Authorization and answers every request with a 302 to `to`."""
+
+    def __init__(self, to=None):
+        self.seen = []
+        me = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def _any(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                if n:
+                    self.rfile.read(n)
+                me.seen.append((self.path, self.headers.get("Authorization")))
+                self.send_response(302 if to else 200)
+                if to:
+                    self.send_header("Location", to + self.path)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            do_GET = do_POST = _any
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+class NoRedirectTest(unittest.TestCase):
+    def setUp(self):
+        self.target = Redirector()
+        self.origin = Redirector(to=self.target.base)
+        self.addCleanup(self.target.close)
+        self.addCleanup(self.origin.close)
+
+    def test_backend_call_does_not_follow_a_redirect(self):
+        reply = fr.call(fr.Backend("primary", self.origin.base, "secret-pk"), "POST", "/v2/scrape",
+                        {"Content-Type": "application/json"}, b"{}", 5)
+        self.assertEqual(reply.status, 0)
+        self.assertIn("redirect refused", reply.error)
+        self.assertEqual(self.origin.seen, [("/v2/scrape", "Bearer secret-pk")])
+        self.assertEqual(self.target.seen, [])
+
+    def test_backend_key_is_an_unredirected_header(self):
+        seen = []
+
+        class Spy(fr.urllib.request.OpenerDirector):
+            def open(self, req, data=None, timeout=None):
+                seen.append(req)
+                raise OSError("stop")
+
+        from unittest import mock
+        with mock.patch.object(fr.urllib.request, "build_opener", return_value=Spy()) as bo:
+            fr.call(fr.Backend("primary", "https://x.example", "secret-pk"), "GET", "/", {}, None, 5)
+        self.assertIn(fr._NoRedirect, bo.call_args.args)
+        self.assertNotIn("Authorization", seen[0].headers)
+        self.assertEqual(seen[0].unredirected_hdrs.get("Authorization"), "Bearer secret-pk")
+
+    def test_llm_rung_does_not_follow_a_redirect(self):
+        ex = fr.Extractor([fr.Rung("sipb", self.origin.base, "secret-llm", "m", 10, 10)], deadline=30, call_timeout=5)
+        with self.assertRaises(fr.LLMError) as cm:
+            ex._post(ex.rungs[0], {"model": "m", "messages": []})
+        self.assertIn("302", str(cm.exception))
+        self.assertEqual(self.origin.seen, [("/chat/completions", "Bearer secret-llm")])
+        self.assertEqual(self.target.seen, [])
+
+    def test_router_does_not_leak_a_redirect_to_its_client(self):
+        router = fr.Router(fr.Backend("primary", self.origin.base, "pk"), None, timeout=5, token="tok",
+                           log=io.StringIO())
+        srv = fr.serve(router, "127.0.0.1:0")
+        self.addCleanup(srv.shutdown)
+        r = urllib.request.Request(router.public_base + "/v2/scrape", data=b"{}", method="POST",
+                                   headers={"Authorization": "Bearer tok", "Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(r, timeout=10)
+        self.assertGreaterEqual(cm.exception.code, 500)
+        self.assertIsNone(cm.exception.headers.get("Location"))
+        self.assertEqual(self.target.seen, [])
 
 
 class ChildEnvTest(unittest.TestCase):

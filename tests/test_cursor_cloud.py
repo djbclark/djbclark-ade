@@ -2,8 +2,8 @@
 """Tests for bin/cursor-cloud, the Cursor Cloud Agents launcher (2026-10-19).
 
 Covers the request body (`launch_body`), the HTTP wrapper (`request`) and the CLI (`main`). No
-test makes a network call or reads a real secret: `urllib.request.urlopen` and `request` are
-patched, the API key is a fake string, and `os.execvpe` (the sudo-secretspec re-exec) is patched
+test makes a network call or reads a real secret: `urllib.request.build_opener` and `request` are
+patched (the two redirect tests talk to loopback servers only), the API key is a fake string, and `os.execvpe` (the sudo-secretspec re-exec) is patched
 to fail if reached.
 """
 from __future__ import annotations
@@ -16,6 +16,8 @@ import importlib.util
 import io
 import json
 import os
+import http.server
+import threading
 import types
 import unittest
 import urllib.error
@@ -127,12 +129,15 @@ class LaunchBodyTests(Base):
 
 class RequestTests(Base):
     def call(self, resp_or_exc: Any, *args: Any, **kw: Any) -> tuple[Any, MagicMock]:
-        with patch("urllib.request.urlopen") as urlopen:
+        env = {k: v for k, v in os.environ.items() if k not in ("CURSOR_CLOUD_API", "CURSOR_CLOUD_ALLOW_HTTP")}
+        with patch.dict(os.environ, env, clear=True), patch("urllib.request.build_opener") as build_opener:
+            urlopen = build_opener.return_value.open
             if isinstance(resp_or_exc, BaseException):
                 urlopen.side_effect = resp_or_exc
             else:
                 urlopen.return_value = resp_or_exc
             out = self.cc.request(*args, **kw)
+        self.assertIn(self.cc._NoRedirect, build_opener.call_args.args)
         return out, urlopen
 
     def test_authorization_is_basic_key_colon(self) -> None:
@@ -143,6 +148,8 @@ class RequestTests(Base):
         self.assertEqual(req.get_header("Accept"), "application/json")
         self.assertEqual(req.get_method(), "GET")
         self.assertTrue(req.full_url.endswith("/v1/models"))
+        self.assertNotIn("Authorization", req.headers)  # unredirected: the key never rides a redirect
+        self.assertIn("Authorization", req.unredirected_hdrs)
 
     def test_key_defaults_to_environment(self) -> None:
         with patch.dict(os.environ, {"CURSOR_API_KEY": FAKE_KEY}):
@@ -179,6 +186,112 @@ class RequestTests(Base):
     def test_json_body_is_parsed(self) -> None:
         out, _ = self.call(fake_response(b'{"id": "bc-1"}'), "GET", "/v1/agents/bc-1", key=FAKE_KEY)
         self.assertEqual(out, {"id": "bc-1"})
+
+
+class Capture:
+    """A loopback server that records the Authorization header of each request; optionally redirects."""
+
+    def __init__(self, redirect_to: str | None = None) -> None:
+        self.seen: list[tuple[str, str | None]] = []
+        cap = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_: Any) -> None:
+                pass
+
+            def do_GET(self) -> None:
+                cap.seen.append((self.path, self.headers.get("Authorization")))
+                if redirect_to:
+                    self.send_response(302)
+                    self.send_header("Location", redirect_to + self.path)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                body = b"{}"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
+
+    def close(self) -> None:
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+class EndpointTests(Base):
+    def base(self, api: str | None, allow: str | None = None) -> str:
+        env = {}
+        if api is not None:
+            env["CURSOR_CLOUD_API"] = api
+        if allow is not None:
+            env["CURSOR_CLOUD_ALLOW_HTTP"] = allow
+        return self.cc.api_base(env)
+
+    def test_default_and_exact_host_ok(self) -> None:
+        for api in (None, "https://api.cursor.com", "https://api.cursor.com/"):
+            with self.subTest(api=api):
+                self.assertEqual(self.base(api), "https://api.cursor.com")
+
+    def test_other_hosts_refused_naming_the_variable(self) -> None:
+        for api in ("https://other.example", "http://evil.example", "http://127.0.0.1:9", "http://localhost",
+                    "https://api.cursor.com.evil.example", "https://api.cursor.com@evil.example"):
+            with self.subTest(api=api), self.assertRaises(SystemExit) as cm:
+                self.base(api)
+            self.assertIn("CURSOR_CLOUD_API", str(cm.exception.code))
+            self.assertIn(api.rstrip("/"), str(cm.exception.code))
+
+    def test_flag_allows_plain_http_and_other_hosts(self) -> None:
+        for api in ("http://evil.example", "http://127.0.0.1:9", "https://other.example"):
+            with self.subTest(api=api):
+                self.assertEqual(self.base(api, "1"), api)
+
+    def test_flag_must_be_exactly_one(self) -> None:
+        for flag in ("0", "", "true", "yes"):
+            with self.subTest(flag=flag), self.assertRaises(SystemExit):
+                self.base("http://evil.example", flag)
+
+    def test_flag_still_needs_an_http_url(self) -> None:
+        for api in ("file:///etc/passwd", "ftp://x.example", "evil.example"):
+            with self.subTest(api=api), self.assertRaises(SystemExit) as cm:
+                self.base(api, "1")
+            self.assertIn("CURSOR_CLOUD_API", str(cm.exception.code))
+
+    def test_request_refuses_a_bad_base_before_sending(self) -> None:
+        with patch.dict(os.environ, {"CURSOR_CLOUD_API": "http://evil.example"}), patch(
+            "urllib.request.build_opener", side_effect=AssertionError("must not send")
+        ), self.assertRaises(SystemExit) as cm:
+            self.cc.request("GET", "/v1/models", key=FAKE_KEY)
+        self.assertIn("CURSOR_CLOUD_API", str(cm.exception.code))
+
+    def test_main_refuses_a_bad_base_before_fetching_the_key(self) -> None:
+        env = {"CURSOR_CLOUD_API": "http://evil.example"}
+        with patch.dict(os.environ, env, clear=True), patch(
+            "os.execvpe", side_effect=AssertionError("must not re-exec")
+        ), self.assertRaises(SystemExit) as cm:
+            _ = self.cc.main(["models"])
+        self.assertIn("CURSOR_CLOUD_API", str(cm.exception.code))
+
+
+class RedirectTests(Base):
+    def setUp(self) -> None:
+        super().setUp()
+        self.target = Capture()
+        self.origin = Capture(redirect_to=self.target.base)
+        self.addCleanup(self.target.close)
+        self.addCleanup(self.origin.close)
+
+    def test_redirect_is_not_followed_and_key_not_sent_on(self) -> None:
+        env = {"CURSOR_CLOUD_API": self.origin.base, "CURSOR_CLOUD_ALLOW_HTTP": "1"}
+        with patch.dict(os.environ, env, clear=True), self.assertRaises(SystemExit) as cm:
+            self.cc.request("GET", "/v1/models", key=FAKE_KEY)
+        self.assertIn("HTTP 302", str(cm.exception.code))
+        expected = "Basic " + base64.b64encode(f"{FAKE_KEY}:".encode()).decode()
+        self.assertEqual(self.origin.seen, [("/v1/models", expected)])  # the key reached the configured base
+        self.assertEqual(self.target.seen, [])                           # and nothing followed it
 
 
 class CliTests(Base):

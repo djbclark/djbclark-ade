@@ -54,6 +54,12 @@ Environment:
                                gemini-free-lite (…_LITELLM_BASE, …_LITELLM_MODELS, comma list)
   FIRECRAWL_ROUTER_LLM_DEADLINE seconds to spend on one scrape's extraction (default 240: under
                                Claude Code's 300 s MCP idle limit with room for the scrape itself)
+  FIRECRAWL_ROUTER_ALLOW_HTTP  1 = test only: let the four base URLs above (SELFHOST, FALLBACK, SIPB, LITELLM)
+                               be plain http on a non-loopback host. Without it each must be https:// or
+                               loopback (127.0.0.1, localhost, ::1), checked at startup. Never set by default.
+
+A bearer key is set as an unredirected header and no request follows a redirect: a 3xx from a backend is
+a failure (fallback reason "redirect refused"), so a key never reaches a host the base URL did not name.
 
 --open drops the bearer token, so local programs that speak the Firecrawl API
 (Hermes' firecrawl web backend) can use the router at a fixed --listen address;
@@ -77,6 +83,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
@@ -124,16 +131,46 @@ class Reply:
             return None
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A request with a bearer key must never follow a redirect to another host or path."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open(req, timeout):
+    return urllib.request.build_opener(_NoRedirect).open(req, timeout=timeout)
+
+
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _check_base(name: str, url: str, allow_http: bool) -> str:
+    """A base URL that receives a key: https, or http to loopback; allow_http lifts the rule (tests only)."""
+    u = urllib.parse.urlparse(url)
+    ok = u.scheme == "https" or (u.scheme == "http" and u.hostname in LOOPBACK_HOSTS)
+    if not u.hostname or not (ok or (allow_http and u.scheme == "http")):
+        sys.exit(f"firecrawl-router: {name} must be https:// or a loopback http:// URL "
+                 f"(FIRECRAWL_ROUTER_ALLOW_HTTP=1 allows other http in tests), not {url}")
+    return url
+
+
+def _allow_http(env) -> bool:
+    return env.get("FIRECRAWL_ROUTER_ALLOW_HTTP") == "1"
+
+
 def call(backend: Backend, method: str, path: str, headers: dict, body: bytes | None,
          timeout: float) -> Reply:
     hdrs = {k: v for k, v in headers.items() if k.lower() not in HOP_HEADERS}
-    if backend.key:
-        hdrs["Authorization"] = f"Bearer {backend.key}"
     req = urllib.request.Request(backend.base + path, data=body, headers=hdrs, method=method)
+    if backend.key:
+        req.add_unredirected_header("Authorization", f"Bearer {backend.key}")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _open(req, timeout) as r:
             return Reply(r.status, dict(r.headers), r.read())
     except urllib.error.HTTPError as e:
+        if 300 <= e.code < 400:
+            return Reply(0, {}, b"", f"redirect refused (HTTP {e.code})")
         return Reply(e.code, dict(e.headers or {}), e.read() or b"")
     except Exception as e:  # noqa: BLE001 - any transport failure is a fallback reason
         return Reply(0, {}, b"", f"{type(e).__name__}: {e}")
@@ -310,17 +347,17 @@ class Extractor:
         return text
 
     def _post(self, rung: Rung, body: dict):
-        hdrs = {"Content-Type": "application/json"}
+        req = urllib.request.Request(rung.base + "/chat/completions", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
         if rung.key:
-            hdrs["Authorization"] = f"Bearer {rung.key}"
-        req = urllib.request.Request(rung.base + "/chat/completions", data=json.dumps(body).encode(), headers=hdrs)
+            req.add_unredirected_header("Authorization", f"Bearer {rung.key}")
         # No call outlives the scrape's deadline: a SIPB call that hung for its full 240 s after a slow start
         # finished a scrape at 322 s, after Claude Code had dropped the MCP call at 300 s (2026-10-18).
         left = getattr(self._tl, "t_end", float("inf")) - time.monotonic()
         if left <= 0:
             raise LLMError("deadline")
         try:
-            with urllib.request.urlopen(req, timeout=max(1.0, min(self.call_timeout, left))) as r:
+            with _open(req, max(1.0, min(self.call_timeout, left))) as r:
                 d = json.loads(r.read())
         except urllib.error.HTTPError as e:
             if e.code in (400, 422) and "response_format" in body:
@@ -413,11 +450,15 @@ class Extractor:
 def build_extractor(env) -> Extractor | None:
     if (env.get("FIRECRAWL_ROUTER_LLM") or "").lower() == "off":
         return None
-    rungs = [Rung("sipb", (env.get("FIRECRAWL_ROUTER_SIPB_BASE") or "http://127.0.0.1:8890/api").rstrip("/"),
+    allow = _allow_http(env)
+    sipb_base = _check_base("FIRECRAWL_ROUTER_SIPB_BASE",
+                            (env.get("FIRECRAWL_ROUTER_SIPB_BASE") or "http://127.0.0.1:8890/api").rstrip("/"), allow)
+    rungs = [Rung("sipb", sipb_base,
                   env.get("FIRECRAWL_ROUTER_SIPB_KEY", ""),
                   env.get("FIRECRAWL_ROUTER_SIPB_MODEL") or "qwen3.6:35b-a3b-q4_K_M",
                   SIPB_ONE_SHOT_CHARS, SIPB_CHUNK_CHARS, check_truncation=True)]
-    lite_base = (env.get("FIRECRAWL_ROUTER_LITELLM_BASE") or "http://127.0.0.1:4000/v1").rstrip("/")
+    lite_base = _check_base("FIRECRAWL_ROUTER_LITELLM_BASE",
+                            (env.get("FIRECRAWL_ROUTER_LITELLM_BASE") or "http://127.0.0.1:4000/v1").rstrip("/"), allow)
     for m in (env.get("FIRECRAWL_ROUTER_LITELLM_MODELS") or "gemini-free,gemini-free-lite").split(","):
         if m.strip():
             rungs.append(Rung(m.strip(), lite_base, env.get("FIRECRAWL_ROUTER_LITELLM_KEY", ""), m.strip(),
@@ -594,11 +635,14 @@ def build_router(env, token: str) -> Router:
     primary_url = (env.get("FIRECRAWL_SELFHOST_URL") or "").rstrip("/")
     if not primary_url:
         sys.exit("firecrawl-router: FIRECRAWL_SELFHOST_URL is not set")
-    primary = Backend("primary", primary_url, env.get("FIRECRAWL_SELFHOST_API_KEY", ""))
+    allow = _allow_http(env)
+    primary = Backend("primary", _check_base("FIRECRAWL_SELFHOST_URL", primary_url, allow),
+                      env.get("FIRECRAWL_SELFHOST_API_KEY", ""))
     fallback = None
     fb_key = env.get("FIRECRAWL_API_KEY", "")
     if fb_key and env.get("FIRECRAWL_ROUTER_FALLBACK", "").lower() != "off":
-        fallback = Backend("fallback", (env.get("FIRECRAWL_FALLBACK_URL") or "https://api.firecrawl.dev").rstrip("/"), fb_key)
+        fb_url = (env.get("FIRECRAWL_FALLBACK_URL") or "https://api.firecrawl.dev").rstrip("/")
+        fallback = Backend("fallback", _check_base("FIRECRAWL_FALLBACK_URL", fb_url, allow), fb_key)
     return Router(primary, fallback, float(env.get("FIRECRAWL_ROUTER_TIMEOUT") or 120), token,
                   extractor=build_extractor(env))
 
