@@ -641,9 +641,10 @@ def open_dir_at(name, parent_fd):
 
 
 def open_dir_chain(base, parts):
-    """A descriptor for `base`/`parts...`: `base` (a resolved, gate-approved directory, opened O_NOFOLLOW) and then
-    each part relative to the previous descriptor with `open_dir_at`. The caller closes it."""
-    fd = os.open(base, DIR_FLAGS)
+    """A descriptor for `base`/`parts...`: `base` (a resolved, gate-approved directory, opened O_NOFOLLOW; or an
+    open directory descriptor, duplicated) and then each part relative to the previous descriptor with
+    `open_dir_at`. The caller closes it."""
+    fd = os.dup(base) if isinstance(base, int) else os.open(base, DIR_FLAGS)
     try:
         for part in parts:
             nfd = open_dir_at(part, fd)
@@ -766,12 +767,69 @@ def copy_sqlite_store(store, run, excluder):
 
 
 def tree_dbs(store, root=None):
-    """The databases a sqlite-tree store matches below `root` (default: its configured root)."""
+    """The databases a sqlite-tree store matches below `root` (default: its configured root). Path-based: the
+    dry run's estimate only; the real copy and --check-schemas list through `tree_db_entries`."""
     root = root or store["root"]
     found = []
     for pat in store["dbs"]:
         found.extend(p for p in sorted(root.glob(pat)) if p.is_file())
     return found
+
+
+def exists_at(name, dir_fd):
+    """True when `name` exists (as itself, never followed) inside the open directory `dir_fd`."""
+    try:
+        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    return True
+
+
+def glob_fd(dfd, comps, prefix, linked, found, errors):
+    """Match the glob components `comps` below the open directory `dfd`, appending (parts, linked) to `found` and
+    (parts, OSError) to `errors`. Everything is relative to a descriptor: a directory is entered with
+    `open_dir_at` (O_NOFOLLOW), a symlink is classified with one `stat` and, when it leads to a directory, entered
+    only to name what lies behind it so those databases are recorded as skipped symlinks (never read), and
+    `linked` says whether the match, or a directory above it, was a link."""
+    comp, rest = comps[0], comps[1:]
+    with os.scandir(dfd) as it:
+        names = sorted(e.name for e in it)
+    for name in names:
+        if not fnmatch.fnmatchcase(name, comp):
+            continue
+        try:
+            mode = os.stat(name, dir_fd=dfd, follow_symlinks=False).st_mode
+            is_link = stat.S_ISLNK(mode)
+            if is_link:
+                mode = os.stat(name, dir_fd=dfd).st_mode  # a dangling link raises and is not a match
+        except OSError:
+            continue
+        here = prefix + (name,)
+        if not rest:
+            if stat.S_ISREG(mode):
+                found.append((here, linked or is_link))
+            continue
+        if not stat.S_ISDIR(mode):
+            continue
+        try:
+            sub = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=dfd) if is_link else open_dir_at(name, dfd)
+            try:
+                glob_fd(sub, rest, here, linked or is_link, found, errors)
+            finally:
+                os.close(sub)
+        except OSError as exc:
+            errors.append((here, exc))
+
+
+def tree_db_entries(store, rfd):
+    """The databases a sqlite-tree store matches below the open directory `rfd`: ([(parts, linked)], [(parts,
+    OSError)]), the parts relative to that directory. Raises OSError when the root itself cannot be listed."""
+    found, errors = [], []
+    for pat in store["dbs"]:
+        part = []
+        glob_fd(rfd, tuple(pat.split("/")), (), False, part, errors)
+        found.extend(sorted(part))
+    return found, errors
 
 
 def tree_root(store, run, excluder):
@@ -808,13 +866,14 @@ def wal_size(db):
 SIDECAR_ABSENT = "is absent"
 
 
-def sidecar_gap(side, excluder):
+def sidecar_gap(side, excluder, dir_fd=None):
     """Why the sidecar at `side` cannot be copied, or None when it can; SIDECAR_ABSENT only when lstat says the
-    name does not exist (a session that never had one: a warning for a required sidecar, not an error). Callers
-    reach it only for a db that already passed `under_symlink`, and a sidecar sits in that db's directory, so no
-    linked directory component can lie above it; the sidecar file itself may still be a link."""
+    name does not exist (a session that never had one: a warning for a required sidecar, not an error). With
+    `dir_fd` (the open directory the sidecar sits in) the lstat is relative to it, so no path component is
+    resolved again; the dry run passes none. A sidecar sits in its db's directory, so no linked directory
+    component can lie above it; the sidecar file itself may still be a link."""
     try:
-        st = os.lstat(side)
+        st = os.lstat(side if dir_fd is None else side.name, dir_fd=dir_fd)
     except FileNotFoundError:
         return SIDECAR_ABSENT
     except OSError as exc:
@@ -865,42 +924,66 @@ def copy_tree_store(store, run, excluder):
     root = tree_root(store, run, excluder)
     if root is None:
         return
-    try:
-        dbs = tree_dbs(store, root)
+    try:  # every open below starts from the real $HOME's descriptor chain (adversary round 17, on PR 24)
+        anchored, base = home_anchor(root, excluder)
+        parts = anchored.relative_to(base).parts
+        rfd = open_dir_chain(base, parts)
     except OSError as exc:
         run.error(configured, exc)
         return
-    for src in dbs:
-        if under_symlink(src, root):  # tree_dbs globs through linked directories and Path.is_file() follows links
-            run.skip(src, "symlink")
-            continue
-        if is_excluded_name(src.name) or excluder.path(src):
-            run.skip(src, "excluded credential path")
-            continue
-        dst = run.out / src.relative_to(root)
+    try:
         try:
-            run.scrubbed_of[dst] = backup_sqlite(src, dst, store["name"], root)
-            run.source_of[dst] = str(src)
-        except (OSError, sqlite3.Error, SchemaGuardError) as exc:
-            run.error(src, exc)
-            continue
+            entries, errors = tree_db_entries(store, rfd)
+        except OSError as exc:
+            run.error(configured, exc)
+            return
+        for eparts, exc in errors:
+            run.error(root.joinpath(*eparts), exc)
+        for eparts, linked in entries:
+            copy_tree_session(store, run, excluder, root, anchored, base, rfd, eparts, linked)
+    finally:
+        os.close(rfd)
+
+
+def copy_tree_session(store, run, excluder, root, anchored, base, rfd, eparts, linked):
+    """One session database of a sqlite-tree store, then its sidecars. `root` is the tree root as shown,
+    `anchored`/`base` its home-anchored form, `rfd` the descriptor opened on it; the database is read through
+    `ro_connect`'s walk from `base` and every sidecar relative to a descriptor chain from `rfd`."""
+    src = root.joinpath(*eparts)
+    if linked:  # the listing reached it through a symlink (itself or a directory above it)
+        run.skip(src, "symlink")
+        return
+    if is_excluded_name(src.name) or excluder.path(src):
+        run.skip(src, "excluded credential path")
+        return
+    dst = run.out / src.relative_to(root)
+    try:
+        run.scrubbed_of[dst] = backup_sqlite(anchored.joinpath(*eparts), dst, store["name"], base)
+        run.source_of[dst] = str(src)
+    except (OSError, sqlite3.Error, SchemaGuardError) as exc:
+        run.error(src, exc)
+        return
+    try:
+        pfd = open_dir_chain(rfd, eparts[:-1])
+    except OSError as exc:
+        run.error(src.parent, exc)
+        return
+    try:
         for pat in store["sidecars"]:
             side = src.parent / pat.format(stem=src.stem, name=src.name)
-            why = sidecar_gap(side, excluder)
+            why = sidecar_gap(side, excluder, pfd)
             if not why:
                 try:
-                    pfd = open_dir_chain(root, src.relative_to(root).parent.parts)  # never the path string again
-                    try:
-                        copy_regular(side.name, dst.parent / side.name, dir_fd=pfd, shown=side)
-                    finally:
-                        os.close(pfd)
+                    copy_regular(side.name, dst.parent / side.name, dir_fd=pfd, shown=side)
                     continue
                 except OSError as exc:
-                    if os.path.lexists(side):  # swapped for a link or non-regular file after sidecar_gap: an error
+                    if exists_at(side.name, pfd):  # swapped for a link or non-regular file after sidecar_gap: an error
                         run.error(side, exc)
                         continue
                     why = "vanished during the copy"
             sidecar_problem(run, root, side, why, pat in store.get("required", []))
+    finally:
+        os.close(pfd)
 
 
 def seal_and_hash(run):
@@ -1308,7 +1391,24 @@ def check_schemas(stores, excluder, strict=False):
                 print(f"{store['name']}: {store['root']}: missing")
                 missing += 1
                 continue
-            dbs = tree_dbs(store, search) if search.is_dir() else []
+            dbs, linked_dbs = [], set()
+            if search.is_dir():
+                try:  # listed and opened from the real $HOME's descriptor chain, never from the path string
+                    anchored, base = home_anchor(search, excluder)
+                    rfd = open_dir_chain(base, anchored.relative_to(base).parts)
+                    try:
+                        entries, errors = tree_db_entries(store, rfd)
+                    finally:
+                        os.close(rfd)
+                except OSError as exc:
+                    print(f"{store['name']}: {store['root']}: ERROR {type(exc).__name__}: {exc}")
+                    unopenable += 1
+                    continue
+                for parts, exc in errors:
+                    print(f"{store['name']}: {search.joinpath(*parts)}: ERROR {type(exc).__name__}: {exc}")
+                    unopenable += 1
+                dbs = [search.joinpath(*parts) for parts, _ in entries]
+                linked_dbs = {search.joinpath(*parts) for parts, linked in entries if linked}
         else:
             _, m, e, lp = check_file_roots(store, excluder)
             missing += m
@@ -1318,7 +1418,7 @@ def check_schemas(stores, excluder, strict=False):
         for db in dbs:
             target = db
             if store["kind"] == "sqlite-tree":
-                if under_symlink(db, search):
+                if db in linked_dbs:
                     print(f"{store['name']}: {db}: symlink, not opened")
                     link_problems += 1
                     continue
@@ -1336,12 +1436,12 @@ def check_schemas(stores, excluder, strict=False):
                     link_problems += 1
                     continue
                 print(f"{store['name']}: {db}: symlink -> {target}")
-            if not target.is_file():
+            if store["kind"] == "sqlite" and not target.is_file():
                 print(f"{store['name']}: {db}: missing")
                 missing += 1
                 continue
             try:
-                con = ro_connect(*(home_anchor(target, excluder) if store["kind"] == "sqlite" else (target, search)))
+                con = ro_connect(*home_anchor(target, excluder))
                 try:
                     hits = schema_hits(con)
                 finally:

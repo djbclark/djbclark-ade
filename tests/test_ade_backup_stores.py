@@ -1428,8 +1428,8 @@ def test_a_sidecar_swapped_for_a_symlink_after_the_check_is_an_error_not_followe
     marker.write_text("SENTINEL-SWAPPED-SIDECAR-TARGET")
     real_gap = mod.sidecar_gap
 
-    def swapping(side, excluder):
-        why = real_gap(side, excluder)  # the check passed: now the sidecar becomes a link
+    def swapping(side, excluder, dir_fd=None):  # the copy now passes the sidecar's directory descriptor
+        why = real_gap(side, excluder, dir_fd)  # the check passed: now the sidecar becomes a link
         if not why and side.is_file() and not side.is_symlink():
             side.unlink()
             os.symlink(marker, side)
@@ -1841,6 +1841,70 @@ def test_a_file_store_single_file_root_with_a_parent_swapped_after_the_gate_is_a
     assert swaps == [history]
     assert b"SENTINEL-OUTSIDE-FILE-ROOT" not in all_bytes(tmp / "out")
     assert any("symlink" in e["error"] for e in run.errors)
+
+
+def outside_cursor_tree(tmp):
+    """A `.cursor` stand-in outside HOME: a Cursor session holding a marker row and a marker sidecar."""
+    outside = tmp / "outside-cursor"
+    sdir = outside / "chats/hashA/uuid1"
+    sdir.mkdir(parents=True)
+    make_wal_db(sdir / "store.db", ["SENTINEL-OUTSIDE-TREE-ROW"]).close()
+    (sdir / "meta.json").write_text("SENTINEL-OUTSIDE-TREE-SIDECAR")
+    return outside
+
+
+def test_a_tree_store_vendor_directory_swapped_for_a_symlink_after_the_gate_is_an_error_not_copied(real, monkeypatch):
+    """Adversary round 17 on PR 24: `~/.cursor` (above the approved tree root) became a link to a directory outside
+    $HOME after the root check; the database open used to re-resolve it and copy the outside store.db."""
+    mod, home, tmp = real
+    make_cursor_session(home)
+    swaps = swap_parent_after_gate(mod, monkeypatch, home / ".cursor/chats", home / ".cursor",
+                                   outside_cursor_tree(tmp), tmp)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 1
+    assert swaps == [home / ".cursor/chats"]
+    assert b"SENTINEL-OUTSIDE-TREE" not in all_bytes(dest)
+    assert not (dest / "cursor-chats/hashA").exists()
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial" and entry["file_count"] == 0
+    assert entry["errors"] and all("symlink" in e["error"] for e in entry["errors"])
+
+
+def test_check_schemas_reports_a_tree_store_vendor_directory_swapped_after_the_gate_and_reads_nothing_outside(
+        real, monkeypatch, capsys):
+    mod, home, tmp = real
+    make_cursor_session(home)
+    swaps = swap_parent_after_gate(mod, monkeypatch, home / ".cursor/chats", home / ".cursor",
+                                   outside_cursor_tree(tmp), tmp)
+    opened = []
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(mod.sqlite3, "connect", lambda *a, **k: (opened.append(a), real_connect(*a, **k))[1])
+    assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 1
+    out = capsys.readouterr().out
+    assert swaps == [home / ".cursor/chats"] and opened == []
+    assert "ERROR OSError" in out and "symlink" in out
+    assert out.strip().splitlines()[-1].endswith("0 missing, 1 unopenable, 0 excluded")
+
+
+def test_a_tree_store_sidecar_is_read_through_the_held_directory_descriptor_when_its_directory_is_swapped(
+        real, monkeypatch):
+    mod, home, tmp = real
+    sdir = make_cursor_session(home)
+    outside = outside_cursor_tree(tmp) / "chats/hashA/uuid1"
+    real_gap = mod.sidecar_gap
+
+    def swapping(side, excluder, dir_fd=None):
+        if not sdir.is_symlink():  # the db is copied; now the session directory becomes a link
+            shutil.move(sdir, tmp / "moved-uuid1")
+            os.symlink(outside, sdir)
+        return real_gap(side, excluder, dir_fd)
+
+    monkeypatch.setattr(mod, "sidecar_gap", swapping)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 0
+    assert b"SENTINEL-OUTSIDE-TREE" not in all_bytes(dest)
+    assert (dest / "cursor-chats/hashA/uuid1/meta.json").read_text() == '{"name": "kept"}'  # the original, not the link
+    assert (dest / "cursor-chats/hashA/uuid1/store.db").is_file() and sdir.is_symlink()
 
 
 def test_copy_regular_leaves_no_partial_destination_when_the_read_fails_midway(real, monkeypatch):
