@@ -11,11 +11,11 @@ This repo is **personal tooling for one operator's machine, published as a publi
 loopback by default (`--listen` defaults to `127.0.0.1:0`). With a child command it requires a random
 per-process bearer token. `--open` drops the token and refuses a non-loopback address. The serve-only form
 (no child, "for tests") checks no token and binds whatever `--listen` names. While it runs, any process that
-can reach it can spend Firecrawl/LLM quota through it. With fallback or LLM extraction configured, the live
-router process holds `FIRECRAWL_API_KEY`, `FIRECRAWL_SELFHOST_API_KEY` and the SIPB/LiteLLM keys in memory
-(`build_router`, `build_extractor`); the child and the logs never receive them, but a compromise of the router
-process does. What makes the repo
-security-relevant is that it launches AI agents that run commands as the operator, unattended, and moves
+can reach it can spend Firecrawl/LLM quota through it. The live router process holds whichever of
+`FIRECRAWL_SELFHOST_API_KEY`, `FIRECRAWL_API_KEY` (fallback) and the SIPB/LiteLLM keys (LLM extraction, on
+unless `FIRECRAWL_ROUTER_LLM=off`) are set, in memory (`build_router`, `build_extractor`); the child and the
+logs never receive them, but a compromise of the router process does. The repo itself holds no secret values.
+What makes the repo security-relevant is that it launches AI agents that run commands as the operator, unattended, and moves
 their output around.
 
 ## 1. Scope and assets
@@ -102,8 +102,10 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 
 ### 4.1 Prompt injection of an agent (local or cloud)
 
-* **Control.** Briefs are scoped (`docs/orchestration-practices.md` section 2); the `adversary` and factory
-  reviews run read-only, but an ordinary review runs yolo with only a read-only brief and a post-run diff
+* **Control.** Briefs are scoped (`docs/orchestration-practices.md` section 2); the `adversary` is instructed
+  not to edit (its agent definition lives outside this repo and includes Bash, so that is an instruction, not a
+  sandbox); the factory's `--perm read-only` security reviewer is a proposal design (proposal 11.2), not built;
+  an ordinary review runs yolo with only a read-only brief and a post-run diff
   check (`skills/model-routing/SKILL.md`), and `--perm deny`/`--perm read-only` is reserved for a
   security-sensitive slice (operator rule); the `adversary` reviews on request
   before a PR is opened. Cloud agents run off the Mac with no vault.
@@ -139,9 +141,9 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 * **Control (procedure only).** AGENTS.md, Code review section (PR 9, 2026-10-20, not yet on master), rule
   1 asks the PR body to quote the adversary verdict with the head SHA, and whoever merges to use
   `gh pr merge --squash --match-head-commit <reviewed sha>`. The adversary runs on request before a PR is
-  opened, never on PR open. Automatic on PR open: Cursor's Security Agent and Approval Agent only. Codex reviews when a
-  `@codex review` comment asks; its automatic review hits the environment-catalog bug (`docs/queue.md`,
-  2026-10-20).
+  opened, never on PR open. Automatic on PR open: Cursor's Security Agent and Approval Agent, and Codex's Security Review
+  (PR 10, 2026-10-20: "Codex Security Review · Automatically triggered"). Codex's code review ("Codex Review")
+  ran after an `@codex review` comment on PR 10; whether it also runs unasked is unverified.
 * **Gap 1 (verified 2026-10-20 01:05Z).** `master` has no branch protection
   (`gh api repos/djbclark/djbclark-ade/branches/master/protection` returns 404 "Branch not protected") and
   the repo has no rulesets. Nothing on GitHub requires a pull request, a review, a status check or
@@ -150,7 +152,7 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   launchd jobs run whatever is checked out in the live tree (normally `master`) (4.6). The adversary verdict and the
   exact-head merge are procedure, not enforcement.
 * **Gap 2 (verified 2026-10-20).** Cursor's Approval Agent (GitHub login `cursor`) submitted an APPROVED
-  review on PRs 7, 8 and 9 within about a minute of each one opening, before any other review. It approves
+  review on PRs 7, 8, 9 and 10 within about a minute of each one opening, before any other review. It approves
   automatically. It is not a review: do not count it as a control, do not read GitHub's "Approved" badge as
   human approval, and do not add a ruleset whose required-approval count it could satisfy.
 * **Gap 3.** The PR body is written by the author, so a verdict line is self-asserted: nothing fetches
