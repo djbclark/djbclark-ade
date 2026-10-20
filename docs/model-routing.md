@@ -98,6 +98,18 @@ quoting a chain, and update its snapshot if you change one.
 
 ## The service matrix: aiuse line ↔ TUI/CLI ↔ billing
 
+**How `bin/route_agent.py` reads pool state (2026-10-20):** it runs `aiuse --available --json`
+(argv list, 20 s timeout, exit 0 or 3 accepted), not the snapshot file, so routing and the
+quota gate see what `aiuse` itself reports: the operator credits override (`aiuse set-credits`,
+`aiuse refresh-credits omp`), Admin API readings, grant expiry and `reading_expired` (aiuse
+3.8; those fields are read with `.get`, so the Homebrew 3.7.2 output works too). A pool the
+snapshot knows that a fresh `--available` omits (exhausted, excluded, hidden) reads 0% left.
+If aiuse is missing, fails, times out or prints malformed JSON, it logs on stderr, falls back
+to `latest.json`, and says so as `quota_source` in `plan --json` / `route --json` and a
+WARNING in `plan` text (`show` prints a `quota source:` line). `ROUTE_AGENT_AIUSE_JSON=<path>`
+feeds canned output (tests); `ROUTE_AGENT_AIUSE=off` or `AIUSE_SNAPSHOT` pins the file-only
+read; `ROUTE_AGENT_AIUSE_BIN` and `ROUTE_AGENT_AIUSE_TIMEOUT` override the binary and timeout.
+
 `aiuse --json` (JSON starts after two preamble lines) reports one
 `snapshot.accounts[]` entry per provider; `alerts[]`/`suggestion` rank
 where quota is going to waste. Mapping, verified 2026-08-23:

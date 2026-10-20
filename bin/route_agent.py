@@ -17,8 +17,16 @@ The headroom half has a hard constraint: a full `aiuse --json` probe takes
 decision — so this never runs it. `aiuse` already persists every run as JSON
 under `~/.cache/aiuse/snapshots/`, keeping `latest.json` current, and a
 launchd job (`com.djbclark.aiuse`, StartInterval 900) refreshes it every 15
-minutes. Routing reads that file. A routing call is a file read, and a stale
-or missing snapshot degrades to capability-only routing rather than hanging.
+minutes. Since 2026-10-20 routing asks `aiuse --available --json` instead (argv list,
+20 s timeout; it reads that same cache in well under a second), because aiuse applies
+the operator credits override (`aiuse set-credits`), Admin API readings and grant
+expiry at read time and the file never carries them. A pool the snapshot knows that
+a fresh `--available` leaves out reads 0% left (exhausted, excluded or hidden). If aiuse
+is missing, fails, times out or prints malformed JSON, routing logs that on stderr,
+falls back to the snapshot file (surfaced as `quota_source` in plan/route JSON and a
+WARNING in plan text) and a stale or missing snapshot degrades to capability-only routing
+rather than hanging. Env: `ROUTE_AGENT_AIUSE_JSON=<path>` feeds canned output (tests),
+`ROUTE_AGENT_AIUSE=off` or `AIUSE_SNAPSHOT` pins the file-only read.
 
 **Services are discovered, not hardcoded.** The roster changes — agents gain
 an ACP mode, providers appear in aiuse, plans lapse. So the service list is
@@ -94,8 +102,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-SNAPSHOT = Path(os.environ.get("AIUSE_SNAPSHOT") or
-                (Path.home() / ".cache" / "aiuse" / "snapshots" / "latest.json"))
+DEFAULT_SNAPSHOT = Path.home() / ".cache" / "aiuse" / "snapshots" / "latest.json"
+SNAPSHOT = Path(os.environ.get("AIUSE_SNAPSHOT") or DEFAULT_SNAPSHOT)
 ORCA_DATA = Path.home() / ("Library/Application Support/orca/profiles/"
                            "local-default/orca-data.json")
 # The ACP client every launcher uses; its agent table is the primary source of
@@ -511,20 +519,20 @@ def operator_disabled(path: Path | None = None) -> set[str]:
     return off | {s.name for s in SERVICES if s.shares_pool and s.shares_pool in off}
 
 
-def load_snapshot() -> tuple[dict[str, Any], float | None]:
-    """Read aiuse's own latest snapshot. Never probes; never blocks."""
+def _read_snapshot_file() -> tuple[list[Any], float | None]:
+    """aiuse's own latest snapshot file as (accounts, age). Never probes; never blocks."""
     path = Path(os.environ.get("AIUSE_SNAPSHOT") or SNAPSHOT)
     if not path.exists():
         if os.environ.get("AIUSE_SNAPSHOT"):
-            return {}, None
+            return [], None
         candidates = sorted(path.parent.glob("20*.json"), reverse=True) if path.parent.is_dir() else []
         if not candidates:
-            return {}, None
+            return [], None
         path = candidates[0]
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
-        return {}, None
+        return [], None
 
     collected = data.get("collected_at") or data.get("started_at") or ""
     age = None
@@ -535,8 +543,13 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
         age = time.time() - path.stat().st_mtime
 
     snap = data.get("snapshot", data)
+    return list(snap.get("accounts", []) or []), age
+
+
+def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str, Any]:
+    """Fold aiuse account rows (snapshot accounts or `--available` rows) into per-service pools."""
     providers: dict[str, Any] = {}
-    for acct in snap.get("accounts", []) or []:
+    for acct in accounts:
         name = acct.get("provider")
         if not name or acct.get("error"):
             continue
@@ -556,7 +569,8 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
                 pass
         if acct_age is None:
             acct_age = age
-        is_old = acct_age is not None and acct_age > STALE_SOFT
+        is_old = ((acct_age is not None and acct_age > STALE_SOFT)
+                  or acct.get("reading_expired") is True)
 
         # One account can hold several independent model-family pools; agy's
         # Claude/GPT pool is its own service, so its windows must not drag
@@ -627,6 +641,124 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
                 "resets_at": bind.get("resets_at"),
                 "window_minutes": bind.get("window_minutes"),
             }
+    return providers
+
+
+class QuotaSource:
+    """Where the last load_snapshot() got its pool state (surfaced by plan/show/route)."""
+    kind = "snapshot"          # "aiuse" | "snapshot"
+    detail = ""
+    fallback_reason = ""
+
+
+def _log(msg: str) -> None:
+    print(f"route_agent: {msg}", file=sys.stderr)
+
+
+def _aiuse_wanted() -> bool:
+    """Ask aiuse itself, not the snapshot file, unless something pins the file.
+
+    AIUSE_SNAPSHOT (tests, a replayed snapshot), a patched SNAPSHOT, or
+    ROUTE_AGENT_AIUSE=off keep the old file-only read."""
+    if os.environ.get("ROUTE_AGENT_AIUSE", "").strip().lower() in ("off", "0", "no", "false"):
+        return False
+    if os.environ.get("AIUSE_SNAPSHOT") or SNAPSHOT != DEFAULT_SNAPSHOT:
+        return False
+    return True
+
+
+def aiuse_available() -> tuple[dict[str, Any] | None, str]:
+    """`aiuse --available --json` as (payload, source label); (None, reason) on any failure.
+
+    Applies aiuse's own read-time overlays (operator credits override, Admin API readings,
+    grant expiry) that the snapshot file never carries (2026-10-20, aiuse PRs 38 and 40).
+    ROUTE_AGENT_AIUSE_JSON=<path> reads canned output instead (tests); ROUTE_AGENT_AIUSE_BIN
+    names the binary; ROUTE_AGENT_AIUSE_TIMEOUT is in seconds (default 20; the cache read is
+    well under one second). Exit 3 means nothing is usable and still prints the JSON."""
+    canned = os.environ.get("ROUTE_AGENT_AIUSE_JSON")
+    if canned:
+        try:
+            raw = Path(canned).read_text()
+        except OSError as exc:
+            return None, f"ROUTE_AGENT_AIUSE_JSON unreadable ({exc.__class__.__name__})"
+        label = f"ROUTE_AGENT_AIUSE_JSON={canned}"
+    else:
+        exe = os.environ.get("ROUTE_AGENT_AIUSE_BIN") or shutil.which("aiuse")
+        if not exe:
+            return None, "aiuse not on PATH"
+        try:
+            timeout = float(os.environ.get("ROUTE_AGENT_AIUSE_TIMEOUT") or 20)
+        except ValueError:
+            timeout = 20.0
+        try:
+            proc = subprocess.run([exe, "--available", "--json"], capture_output=True,
+                                  text=True, timeout=timeout, check=False)
+        except subprocess.TimeoutExpired:
+            return None, f"aiuse --available --json timed out after {timeout:g}s"
+        except OSError as exc:
+            return None, f"aiuse could not start ({exc.__class__.__name__})"
+        if proc.returncode not in (0, 3):
+            return None, f"aiuse --available --json exited {proc.returncode}"
+        raw = proc.stdout
+        label = "aiuse --available --json"
+    try:
+        # --json can follow preamble lines on some builds: start at the first brace
+        payload = json.loads(raw[raw.index("{"):])
+    except ValueError:
+        return None, f"{label}: malformed JSON"
+    if not isinstance(payload, dict) or not isinstance(payload.get("available"), list):
+        return None, f"{label}: no `available` array"
+    return payload, label
+
+
+def _payload_age(payload: dict[str, Any]) -> float | None:
+    try:
+        if payload.get("age_seconds") is not None:
+            return float(payload["age_seconds"])
+        return (datetime.now(UTC) - datetime.fromisoformat(
+            str(payload.get("generated_at")))).total_seconds()
+    except (ValueError, TypeError):
+        return None
+
+
+def quota_source_info() -> dict[str, Any]:
+    """Where the last load_snapshot() read pool state, for plan/show/route output."""
+    return {"source": QuotaSource.kind, "detail": QuotaSource.detail,
+            "fallback_reason": QuotaSource.fallback_reason or None}
+
+
+def load_snapshot() -> tuple[dict[str, Any], float | None]:
+    """Pool state per service: `aiuse --available --json`, else the snapshot file.
+
+    Never probes live (the `--available` form reads aiuse's cache, well under a second).
+    `--available` lists only usable pools, so a pool the snapshot file knows that is
+    missing from a fresh payload is exhausted, excluded or hidden: it reads 0% left rather
+    than unknown. Fields 3.8 adds (`expires_at`, `burn_before_reset`, `reading_expired`,
+    `source`) are tolerated when absent; the row's own `resets_at` and windows carry them."""
+    QuotaSource.kind, QuotaSource.detail, QuotaSource.fallback_reason = "snapshot", "", ""
+    accounts, age = _read_snapshot_file()
+    providers = _providers_from_accounts(accounts, age)
+    if _aiuse_wanted() or os.environ.get("ROUTE_AGENT_AIUSE_JSON"):
+        payload, label = aiuse_available()
+        if payload is None:
+            QuotaSource.fallback_reason = label
+            _log(f"{label}; using the snapshot file {SNAPSHOT}")
+        else:
+            QuotaSource.kind, QuotaSource.detail = "aiuse", label
+            p_age = _payload_age(payload)
+            rows = [dict(row, age_seconds=row.get("age_seconds", p_age))
+                    for row in payload["available"]
+                    if isinstance(row, dict) and row.get("provider")]
+            fresh = _providers_from_accounts(rows, p_age)
+            if p_age is None or p_age <= STALE_SOFT:
+                for key, info in providers.items():
+                    if key not in fresh:
+                        providers[key] = dict(info, remaining=0.0,
+                                              absent_from_available=True)
+            providers.update(fresh)
+            age = p_age if p_age is not None else age
+    else:
+        QuotaSource.detail = str(os.environ.get("AIUSE_SNAPSHOT") or SNAPSHOT)
     for svc in SERVICES:
         if svc.shares_pool and svc.name not in providers and svc.shares_pool in providers:
             providers[svc.name] = dict(providers[svc.shares_pool])
@@ -1507,6 +1639,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps({
                 "snapshot_age_s": age, "stale": stale,
+                "quota_source": quota_source_info(),
                 "slices": [{"kind": k, "service": c.service.name if c else None,
                             "cli": c.service.cli if c else None,
                             "agent": c.service.acp_agent if c else None,
@@ -1516,6 +1649,10 @@ def main(argv: list[str] | None = None) -> int:
                             "why": c.why if c else unrouted_why(k, quota, skip)}
                            for k, c in rows]}, indent=1))
         else:
+            if QuotaSource.fallback_reason:
+                print(f"WARNING: {QuotaSource.fallback_reason}; quota below is from the "
+                      "snapshot file and misses aiuse's credits override and Admin API "
+                      "readings", file=sys.stderr)
             if stale:
                 print("WARNING: quota snapshot "
                       + ("empty" if not quota else f"{(age or 0) / 60:.0f} min old")
@@ -1532,6 +1669,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "show":
+        print(f"quota source: {quota_source_info()['source']}"
+              + (f" (aiuse unavailable: {QuotaSource.fallback_reason})"
+                 if QuotaSource.fallback_reason else ""))
         print(f"snapshot: {SNAPSHOT}")
         print(f"age: {'absent' if age is None else f'{age / 60:.1f} min'}"
               f"  (refreshed by launchd com.djbclark.aiuse every 15 min)")
@@ -1611,6 +1751,7 @@ def main(argv: list[str] | None = None) -> int:
             "remaining_percent": choice.remaining, "why": choice.why,
             "alternatives": choice.alternatives,
             "snapshot_age_seconds": None if age is None else round(age),
+            "quota_source": quota_source_info(),
         }, indent=2))
     else:
         print(f"{choice.service.cli}   — {choice.why}")

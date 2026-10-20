@@ -1155,3 +1155,124 @@ class TestOmpCreditsTier(unittest.TestCase):
             con.commit()
             con.close()
             self.assertTrue(r.omp_anthropic_ready())
+
+
+class TestQuotaFromAiuseAvailable(unittest.TestCase):
+    """Pool state comes from `aiuse --available --json`, not the snapshot file (2026-10-20)."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        now = datetime.now(UTC)
+        self.accounts = [
+            {"provider": "codex", "age_seconds": 30,
+             "windows": [{"label": "weekly", "remaining_percent": 60.0,
+                          "headroom_percent": 60.0, "state": "ok"}]},
+            {"provider": "omp", "age_seconds": 30, "windows": [
+                {"label": "omp credits", "remaining_percent": 2.0, "headroom_percent": 2.0,
+                 "state": "tight", "resets_at": (now + timedelta(days=19)).isoformat()}]},
+        ]
+
+    def payload(self, rows, **extra):
+        return {"schema_version": "1.3", "age_seconds": 20.0, "fresh": True,
+                "available": rows, **extra}
+
+    def write(self, name, obj):
+        path = self.tmp / name
+        path.write_text(obj if isinstance(obj, str) else r.json.dumps(obj))
+        return path
+
+    def load(self, env):
+        import io
+        env = {"ROUTE_AGENT_OMP_READY": "0", **env}
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("AIUSE_SNAPSHOT", "ROUTE_AGENT_AIUSE_JSON", "ROUTE_AGENT_AIUSE",
+                              "ROUTE_AGENT_AIUSE_BIN")}
+        with mock.patch.dict(os.environ, {**clean, **env}, clear=True), \
+                mock.patch.object(r, "_read_snapshot_file",
+                                  return_value=(self.accounts, 60.0)), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            quota, age = r.load_snapshot()
+        return quota, age, err.getvalue()
+
+    def test_override_row_wins_over_the_snapshot_file(self):
+        # the file says omp is nearly empty; aiuse's read-time override says 80% left,
+        # and 3.8-only fields (expires_at, burn_before_reset, source) are tolerated
+        row = {"provider": "omp", "age_seconds": 5, "expires_at": "2026-11-08T00:00:00Z",
+               "burn_before_reset": True, "source": "override",
+               "windows": [{"label": "omp credits", "remaining_percent": 80.0,
+                            "headroom_percent": 80.0, "state": "ok", "source": "override",
+                            "resets_at": "2026-11-08T00:00:00+00:00"}]}
+        path = self.write("a.json", self.payload([row]))
+        quota, age, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["omp"]["remaining"], 80.0)
+        self.assertEqual(r.QuotaSource.kind, "aiuse")
+        self.assertEqual(age, 20.0)
+        self.assertIsNone(r.quota_source_info()["fallback_reason"])
+
+    def test_row_without_3_8_fields_still_loads(self):
+        row = {"provider": "omp", "windows": [{"label": "omp credits", "headroom_percent": 55.0}]}
+        path = self.write("a.json", self.payload([row]))
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["omp"]["remaining"], 55.0)
+
+    def test_pool_missing_from_available_reads_exhausted_not_unknown(self):
+        path = self.write("a.json", self.payload([]))
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+        self.assertEqual(quota["omp"]["remaining"], 0.0)
+
+    def test_reading_expired_row_is_unknown(self):
+        row = {"provider": "omp", "age_seconds": 5, "reading_expired": True,
+               "windows": [{"label": "omp credits", "remaining_percent": 90.0,
+                            "headroom_percent": 90.0, "state": "ok"}]}
+        path = self.write("a.json", self.payload([row]))
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertIsNone(quota["omp"]["remaining"])
+
+    def test_missing_aiuse_falls_back_to_the_file_and_says_so(self):
+        with mock.patch.object(r.shutil, "which", return_value=None):
+            quota, age, err = self.load({})
+        self.assertEqual(quota["codex"]["remaining"], 60.0)
+        self.assertEqual(r.QuotaSource.kind, "snapshot")
+        self.assertIn("aiuse not on PATH", r.quota_source_info()["fallback_reason"])
+        self.assertIn("aiuse not on PATH", err)
+
+    def test_malformed_json_falls_back(self):
+        path = self.write("bad.json", "not json {")
+        quota, _, err = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["codex"]["remaining"], 60.0)
+        self.assertIn("malformed JSON", r.quota_source_info()["fallback_reason"])
+        self.assertIn("malformed JSON", err)
+
+    def test_payload_without_available_array_falls_back(self):
+        path = self.write("odd.json", {"schema_version": "1.3"})
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["codex"]["remaining"], 60.0)
+        self.assertEqual(r.QuotaSource.kind, "snapshot")
+
+    def fake_aiuse(self, body, rc):
+        script = self.tmp / "aiuse"
+        script.write_text(f"#!/bin/sh\ncat <<'EOF'\n{body}\nEOF\nexit {rc}\n")
+        script.chmod(0o755)
+        return str(script)
+
+    def test_subprocess_path_runs_argv_and_accepts_exit_3(self):
+        body = r.json.dumps(self.payload([]))
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": self.fake_aiuse(body, 3)})
+        self.assertEqual(r.QuotaSource.kind, "aiuse")
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    def test_failing_aiuse_falls_back(self):
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": self.fake_aiuse("boom", 1)})
+        self.assertEqual(r.QuotaSource.kind, "snapshot")
+        self.assertIn("exited 1", r.quota_source_info()["fallback_reason"])
+        self.assertEqual(quota["codex"]["remaining"], 60.0)
+
+    def test_pinned_snapshot_never_spawns_aiuse(self):
+        with mock.patch.object(r.subprocess, "run") as run:
+            self.load({"AIUSE_SNAPSHOT": str(self.tmp / "x.json")})
+        run.assert_not_called()
+        self.assertEqual(r.QuotaSource.kind, "snapshot")
