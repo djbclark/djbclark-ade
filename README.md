@@ -170,7 +170,9 @@ ls -l ~/.claude/commands ~/.claude/agents ~/.claude/hooks | grep -c djbclark-ade
    canonical checkout it warns on stderr: the `skill-everywhere` beside it is the one that runs.
 3. **Symlinks.** `CLAUDE.md` is a symlink to `AGENTS.md`, and every file in `claude/{commands,agents,
    hooks}` is linked from `~/.claude/`; a gap is reported with the `ln` command (not changed; outside the
-   canonical checkout the rows are counted only).
+   canonical checkout the rows are counted only). `--check` on a checkout that is behind also lists the entries
+   upstream adds under `claude/{commands,agents,hooks}` as "new upstream" links (not counted as problems; apply
+   pulls first and then reports them with the fix).
 4. **Changelog.** It prints the [CHANGELOG.md](CHANGELOG.md) entries new since the commit recorded
    in `~/.local/state/ade/applied` (every Unreleased entry the first time), then records the new
    HEAD there. Every pull request adds its line to the changelog (AGENTS.md code-review rule 10),

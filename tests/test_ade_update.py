@@ -828,3 +828,36 @@ def test_a_copy_outside_the_canonical_checkout_warns_on_stderr(env):  # adversar
         assert "its sibling skill-everywhere is the one that runs" in r.stderr
     r = env.run("--check", "--json", script=env.lone / "bin" / "ade-update")
     assert json.loads(r.stdout)["mode"] == "check"  # stdout stays one JSON object
+
+
+def test_check_lists_the_claude_entries_upstream_adds_without_counting_them(env):  # Codex P2 on 68f5ef5
+    env.publish({"claude/commands/newcmd.md": "new\n"})
+    r = env.run("--check", "--json")
+    out = json.loads(r.stdout)
+    assert r.returncode == 10, r.stdout + r.stderr  # behind, nothing else
+    assert out["claude_links"]["new_upstream"] == ["claude/commands/newcmd.md"]
+    assert out["claude_links"]["problems"] == [] and out["problems"] == ["behind"]
+    assert not (env.machine / "claude").exists()  # --check never touches the tree
+    text = env.run("--check").stdout
+    assert "new upstream ~/.claude links" in text and "claude/commands/newcmd.md" in text
+    assert "~/.claude links (commands, agents, hooks): 0 ok, 0 not in place" in text
+
+
+def test_no_new_upstream_claude_links_when_current(env):
+    env.publish({"claude/commands/newcmd.md": "new\n"})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    r = env.run("--check", "--json")
+    out = json.loads(r.stdout)
+    assert out["claude_links"]["new_upstream"] == []
+    assert len(out["claude_links"]["problems"]) == 1  # a local file, so a real problem as before
+    assert "new upstream ~/.claude links" not in env.run("--check").stdout
+
+
+def test_apply_pulls_first_so_the_new_claude_entry_is_a_reported_problem_not_new_upstream(env):
+    env.publish({"claude/commands/newcmd.md": "new\n"})
+    r = env.run("--json")
+    out = json.loads(r.stdout)
+    assert out["claude_links"]["new_upstream"] == []
+    (problem,) = out["claude_links"]["problems"]  # ade-update never links ~/.claude entries itself
+    assert problem["path"] == str(env.home / ".claude" / "commands" / "newcmd.md") and problem["state"] == "missing"
+    assert r.returncode == 10 and "~/.claude links" in out["problems"]

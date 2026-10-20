@@ -38,7 +38,11 @@ Steps, in order:
    reads a leading `-` as a mode flag).
 3. `CLAUDE.md` is a symlink to `AGENTS.md` in the repo, and every entry of `claude/{commands,agents,
    hooks}` is linked from `~/.claude/<kind>/`. Reported with the fix, never changed here; outside the
-   canonical checkout the `~/.claude` rows are counted only (they belong to the canonical one).
+   canonical checkout the `~/.claude` rows are counted only (they belong to the canonical one). `--check` on a
+   checkout that is behind also lists the entries upstream adds under `claude/{commands,agents,hooks}` as
+   "new upstream" links (JSON `claude_links.new_upstream`; not counted as problems, no fix yet), the same as
+   upstream-only skills; apply pulls first, so it reports them with their fix. `CLAUDE.md` is a property of the
+   checkout (symlink state), not of upstream, and is not evaluated at the upstream revision.
 4. The CHANGELOG.md entries new since the revision recorded in the state file (parsed from
    `git show <rev>:CHANGELOG.md` at both revisions; an entry moved under a release heading is not
    new), or every Unreleased entry when nothing is recorded. Then the new HEAD is written to the
@@ -327,32 +331,40 @@ def check_claude_md(repo):
     return {"ok": True, "detail": "CLAUDE.md -> AGENTS.md"}
 
 
-def check_claude_links(repo):
-    """Every entry of <repo>/claude/{commands,agents,hooks} linked from ~/.claude/<kind>/."""
+def check_claude_links(repo, upstream_rev=None):
+    """Every entry of <repo>/claude/{commands,agents,hooks} linked from ~/.claude/<kind>/. With `upstream_rev`
+    (a --check run that is behind) the entries that revision adds are listed as `new_upstream`
+    (`claude/<kind>/<name>`): nothing is wrong with the checkout and they have no local file to fix yet."""
     home = Path(os.path.expanduser("~/.claude"))
-    ok, problems = 0, []
+    ok, problems, new_upstream = 0, [], []
     for kind in CLAUDE_KINDS:
         src_dir = Path(repo) / "claude" / kind
-        if not src_dir.is_dir():
-            continue
-        for src in sorted(src_dir.iterdir()):
-            if src.name.startswith(".") or src.name == "__pycache__":
-                continue
-            dest = home / kind / src.name
-            if dest.is_symlink() and dest.exists() and dest.resolve() == src.resolve():
-                ok += 1
-                continue
-            ln = shlex.join(["ln", "-sfn", str(src), str(dest)])
-            fix = ln
-            if dest.is_symlink():
-                state = "dangling" if not dest.exists() else f"points to {os.readlink(dest)}"
-            elif dest.exists():
-                state = "a real file (not ours)"
-                fix = f"inspect {shlex.quote(str(dest))}, move it aside, then: {ln}"
-            else:
-                state = "missing"
-            problems.append({"path": str(dest), "state": state, "fix": fix})
-    return {"ok": ok, "problems": problems}
+        local = set()
+        if src_dir.is_dir():
+            for src in sorted(src_dir.iterdir()):
+                if src.name.startswith(".") or src.name == "__pycache__":
+                    continue
+                local.add(src.name)
+                dest = home / kind / src.name
+                if dest.is_symlink() and dest.exists() and dest.resolve() == src.resolve():
+                    ok += 1
+                    continue
+                ln = shlex.join(["ln", "-sfn", str(src), str(dest)])
+                fix = ln
+                if dest.is_symlink():
+                    state = "dangling" if not dest.exists() else f"points to {os.readlink(dest)}"
+                elif dest.exists():
+                    state = "a real file (not ours)"
+                    fix = f"inspect {shlex.quote(str(dest))}, move it aside, then: {ln}"
+                else:
+                    state = "missing"
+                problems.append({"path": str(dest), "state": state, "fix": fix})
+        if upstream_rev:
+            rc, out, _ = git(repo, "ls-tree", "-z", "--name-only", f"{upstream_rev}:claude/{kind}")
+            for name in sorted(out.split("\0") if rc == 0 else []):
+                if name and not name.startswith(".") and name != "__pycache__" and name not in local:
+                    new_upstream.append(f"claude/{kind}/{name}")
+    return {"ok": ok, "problems": problems, "new_upstream": new_upstream}
 
 
 # --- report -------------------------------------------------------------------------------
@@ -567,9 +579,12 @@ def update(rep, args, repo):
     if not cm["ok"]:
         rep.say(f"  fix: {cm['fix']}")
         problems.append("CLAUDE.md")
-    links = check_claude_links(repo)
+    links = check_claude_links(repo, target if check and behind else None)
     d["claude_links"] = links
     rep.say(f"~/.claude links (commands, agents, hooks): {links['ok']} ok, {len(links['problems'])} not in place")
+    if links["new_upstream"]:  # apply pulls them, then reports each with its ln fix (it never links these itself)
+        rep.say(f"  new upstream ~/.claude links ({'reported with the fix at apply, never linked by ade-update' if can_link else 'report-only'}): "
+                f"{', '.join(links['new_upstream'])}")
     if can_link:
         for p in links["problems"]:
             rep.say(f"    {p['path']}: {p['state']}; fix: {p['fix']}")
