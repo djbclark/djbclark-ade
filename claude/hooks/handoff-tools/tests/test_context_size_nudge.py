@@ -44,9 +44,12 @@ def _append(path, text):
 def hook(monkeypatch, tmp_path, capsys):
     """Run the hook once per call; returns (stdout, pings sent)."""
     monkeypatch.setattr(nudge, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.delenv("HERDR_ENV", raising=False)
     monkeypatch.delenv("HERDR_PANE_ID", raising=False)
     monkeypatch.delenv("ORCA_TERMINAL_HANDLE", raising=False)
     monkeypatch.delenv("PASEO_AGENT_ID", raising=False)
+    monkeypatch.setattr(nudge, "_which", lambda name: None)  # no orca CLI unless a test says so
+    monkeypatch.setenv("PASEO_CLI", "/usr/bin/true")  # a Paseo host needs an executable CLI
     pings = []
     monkeypatch.setattr(
         subprocess, "Popen", lambda cmd, **kwargs: pings.append(cmd),
@@ -136,16 +139,27 @@ def test_ask_message_at_300k_total(hook, tmp_path):
     assert "Context is large" in out
 
 
+def _host(monkeypatch, var):
+    """Set one self-slash host the way bin/self-slash selects it: a herdr pane needs
+    HERDR_ENV=1 as well, an Orca terminal needs the orca CLI on PATH."""
+    monkeypatch.setenv(var, "w1:p1")
+    if var == "HERDR_PANE_ID":
+        monkeypatch.setenv("HERDR_ENV", "1")
+    if var == "ORCA_TERMINAL_HANDLE":
+        monkeypatch.setattr(nudge, "_which", lambda name: "/usr/local/bin/orca" if name == "orca" else None)
+
+
 @pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE", "PASEO_AGENT_ID"])
 def test_ask_message_in_herdr_or_orca_puts_new_before_compact(hook, tmp_path, monkeypatch, var):
-    monkeypatch.setenv(var, "w1:p1")
+    _host(monkeypatch, var)
     out, _ = hook("s-herdr-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
     assert "Handle it yourself" in out
     assert out.index('self-slash "/new"') < out.index('"/compact <focus>"')
     assert out.index("`handoff` skill") < out.index('"/compact <focus>"')
     assert "must continue in-context" in out
     # The boundary note fires in the same call (total >= 150k) and names self-slash here.
-    assert 'and then ~/src/djbclark-ade/bin/self-slash "/new" instead of /compact' in out
+    assert 'the `handoff` skill (its Step 9 runs ~/src/djbclark-ade/bin/self-slash "/new" and queues /baton) instead of /compact' in out
+    assert "Do not run /new yourself as well" in out
 
 
 def test_repeat_ask_every_100k(hook, tmp_path):
@@ -321,3 +335,76 @@ def test_self_slash_not_sent_lines_do_not_count(tmp_path):
     lines = [f"{_now()} orca th1: NOT sent: /compact was already sent to orca th1 5s ago",
              f"{_now()} orca th1: waiter 123 still queued after 900s; NOT sent: /new"]
     assert _self_slash(tmp_path, "/new", log_lines=lines).returncode == 0
+
+
+def test_paseo_host_gets_the_finish_note(hook, tmp_path, monkeypatch):
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
+    out, _ = hook("s-paseo", _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
+    assert "self-slash --finish" in out and "archives this agent" in out
+    # the model offers the loose Rule 4 choices; it does not archive itself
+    assert "offer the `loose` Rule 4 choices" in out and "rather than archiving yourself" in out
+    assert "finish as the last action instead" not in out
+    assert 'self-slash "/new" ONCE' in out
+    assert "so do not run /new yourself as well" in out
+
+
+@pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE"])
+def test_finish_note_is_paseo_only(hook, tmp_path, monkeypatch, var):
+    _host(monkeypatch, var)
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")  # herdr and Orca win in self-slash
+    out, _ = hook("s-nofinish-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
+    assert "--finish" not in out
+
+
+@pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE"])
+def test_finish_note_when_the_other_host_var_is_stale(hook, tmp_path, monkeypatch, var):
+    # A HERDR_PANE_ID without HERDR_ENV=1, or an ORCA_TERMINAL_HANDLE with no orca CLI,
+    # is not a host for self-slash: it falls through to Paseo, and so does the note
+    # (Codex P2 on PR 19, 2026-10-20).
+    monkeypatch.setenv(var, "w1:p1")
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
+    out, _ = hook("s-stale-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
+    assert "self-slash --finish" in out
+
+
+@pytest.mark.parametrize("cli", ["unset", "/nonexistent/paseo", "not-executable"])
+def test_paseo_host_needs_an_executable_cli(hook, tmp_path, monkeypatch, cli):
+    # self-slash exits 3 when PASEO_AGENT_ID is set but no paseo CLI is usable (PASEO_CLI
+    # unset and none on PATH, or not executable); the hook must not promise Step 9 there.
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
+    if cli == "unset":
+        monkeypatch.delenv("PASEO_CLI", raising=False)
+    elif cli == "not-executable":
+        f = tmp_path / "paseo"
+        f.write_text("")
+        f.chmod(0o600)
+        monkeypatch.setenv("PASEO_CLI", str(f))
+    else:
+        monkeypatch.setenv("PASEO_CLI", cli)
+    out, _ = hook("s-nocli-" + cli.replace("/", "_"), _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
+    assert "tell the operator /new is ready" in out
+    assert "--finish" not in out
+
+
+def test_orca_lookup_searches_self_slash_path(monkeypatch, tmp_path):
+    # self-slash prepends /opt/homebrew/bin to PATH before picking the host; the hook's
+    # lookup must see the same prefix even when the hook's own PATH lacks it.
+    seen = {}
+
+    def fake_which(name, path=None):
+        seen["path"] = path
+        return None
+
+    monkeypatch.setattr(nudge.shutil, "which", fake_which)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert nudge._which("orca") is None
+    assert seen["path"].split(os.pathsep)[0] == "/opt/homebrew/bin"
+    assert str(tmp_path) in seen["path"].split(os.pathsep)
+
+
+@pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE"])
+def test_stale_host_var_alone_means_no_self_slash(hook, tmp_path, monkeypatch, var):
+    monkeypatch.setenv(var, "w1:p1")
+    out, _ = hook("s-stale-alone-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
+    assert "tell the operator /new is ready" in out
+    assert "--finish" not in out

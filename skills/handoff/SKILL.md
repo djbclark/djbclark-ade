@@ -236,3 +236,41 @@ It keeps a title the operator set by hand. It works in Claude Code, zcode, Grok,
 cursor-agent, OpenCode, Codex in a herdr pane, and omp (once its bridge extension is
 installed and omp restarted), and exits 2 without harm where it finds no supported
 session; in that case skip it silently. Add its one-line result to the report.
+
+## Step 9 — Clear and continue
+
+Last action, after Step 8 (djbclark, 2026-10-20: "handoffs [should] immediately clear context and
+then start a baton and continue running without human intervention"). Run
+
+```bash
+~/src/djbclark-ade/bin/self-slash "/new"
+```
+
+**once**, and end the turn at once (no further tool call, no question). On Paseo that sends `/clear`
+to this same agent and then exactly one `/baton` into the fresh session; on herdr and Orca it sends
+`/new` and then `/baton` (`self-slash` queues the `/baton` itself, `--then`, so never type or queue
+one yourself). The fresh session resumes from the Tier 1 pointer Step 7 just wrote.
+
+**Top-level session only.** A sub-agent (Agent tool, `/bigteam`, an `acp-dispatch` or `acp-run` slice)
+shares or inherits the parent's agent id, so a `/new` from it would clear the PARENT's session
+(2026-10-20; `acp-run` now scrubs the id and `self-slash` exits 9 when `ACP_RUN_AGENT=1`, but an
+Agent-tool sub-agent carries no marker). A sub-agent or dispatched slice always treats the handoff as
+document-only and never runs this step.
+
+**What the operator can read afterwards** (2026-10-20): on Paseo the pre-`/clear` transcript is not kept
+by `paseo logs` once `/baton` runs (the UI is unverified). Anything the operator must read goes into the
+handoff document, the Tier 1 pointer and the hermes-ping (`~/.local/bin/hermes-ping`, sent **before** this
+step's `self-slash`), not only into the final message.
+
+If `self-slash` refuses (exit 7: the 30-minute gap check or a lifecycle already queued; or a draft
+on the input line; or exit 3 outside herdr, Orca and Paseo, or on Paseo without a usable `paseo`
+CLI), do not retry or loop: tell the operator the handoff is written and stop. In herdr or Orca say
+`/new` is ready. On Paseo `/new` typed into the composer reaches Claude as plain text and does
+nothing (only self-slash's mapping to `/clear` works), so say instead: once this agent is idle,
+send `/clear`, then `/baton` (or run `~/src/djbclark-ade/bin/self-slash "/new"` again after the
+gap or lock clears, which does both).
+
+**Document only:** skip this step when a skill that clears the session itself runs the handoff, when
+the operator says "doc only" or otherwise asks for the document without a restart, or when you are a
+sub-agent or a dispatched slice (above). `loose` Rule 4 option 1 wants this step to run: it does not
+make a handoff document-only. Say in the report that Step 9 was skipped and why.
