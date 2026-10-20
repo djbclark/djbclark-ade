@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import unittest
+import unittest.mock
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -138,6 +139,19 @@ class RouterTest(unittest.TestCase):
     def test_open_refuses_non_loopback_listen(self):
         with self.assertRaises(SystemExit):
             fr.main(["--listen", "0.0.0.0:18805", "--open"])
+
+    def test_serve_only_refuses_non_loopback_listen(self):
+        err = io.StringIO()
+        with unittest.mock.patch.object(sys, "stderr", err), self.assertRaises(SystemExit) as cm:
+            fr.main(["--listen", "0.0.0.0:18805"])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("needs a loopback --listen address", err.getvalue())
+
+    def test_loopback_listen_check(self):
+        for ok in ("127.0.0.1:0", "localhost:8805", "[::1]:8805"):
+            self.assertTrue(fr.is_loopback_listen(ok), ok)
+        for bad in ("0.0.0.0:8805", "192.168.1.5:8805", ":8805", "example.com:80"):
+            self.assertFalse(fr.is_loopback_listen(bad), bad)
 
     def test_plain_404_page_does_not_fall_back(self):
         self.p.routes[("POST", "/v2/scrape")] = self.ok_scrape(404)

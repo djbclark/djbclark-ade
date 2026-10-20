@@ -3,7 +3,7 @@
 
 Usage:
   firecrawl-router [--listen HOST:PORT] -- firecrawl-mcp [ARGS...]
-  firecrawl-router [--listen HOST:PORT]            # serve only, for tests: no token check
+  firecrawl-router [--listen HOST:PORT]            # serve only, for tests: no token check, loopback --listen only
 
 With a child command, the router listens on a loopback port (ephemeral by
 default), starts the child with FIRECRAWL_API_URL pointing at itself and
@@ -56,8 +56,9 @@ Environment:
                                Claude Code's 300 s MCP idle limit with room for the scrape itself)
 
 --open drops the bearer token, so local programs that speak the Firecrawl API
-(Hermes' firecrawl web backend) can use the router at a fixed --listen address;
-it refuses a non-loopback address.
+(Hermes' firecrawl web backend) can use the router at a fixed --listen address.
+Every run without a token (--open, or serve only with no child command) refuses a
+non-loopback --listen address: the router holds the backend keys.
 
 One log line per request on stderr: method, path, backend, status, seconds and
 the fallback reason. Keys are never logged.
@@ -612,6 +613,13 @@ def serve(router: Router, listen: str) -> http.server.ThreadingHTTPServer:
     return srv
 
 
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def is_loopback_listen(listen: str) -> bool:
+    return listen.rpartition(":")[0] in LOOPBACK_HOSTS
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     child = []
@@ -622,8 +630,8 @@ def main(argv=None) -> int:
     ap.add_argument("--listen", default="127.0.0.1:0", help="HOST:PORT (default 127.0.0.1:0, ephemeral)")
     ap.add_argument("--open", action="store_true", help="no bearer token (loopback --listen only)")
     args = ap.parse_args(argv)
-    if args.open and args.listen.rpartition(":")[0] not in ("127.0.0.1", "localhost", "::1", "[::1]"):
-        ap.error("--open needs a loopback --listen address")
+    if (args.open or not child) and not is_loopback_listen(args.listen):
+        ap.error("a run without a bearer token (--open, or no child command) needs a loopback --listen address")
 
     token = secrets.token_urlsafe(32) if child and not args.open else ""
     router = build_router(os.environ, token)
