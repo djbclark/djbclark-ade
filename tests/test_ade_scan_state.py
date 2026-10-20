@@ -1783,7 +1783,11 @@ def test_url_holds_credential_reads_any_userinfo_or_query_on_a_non_ssh_scheme():
                       ("git@host:x/y.git", False), ("host:x/y.git", False), ("user:pw@host:x/y.git", False),
                       ("https://host:8443/x.git", False), ("https://host/x.git#frag", False),
                       ("/tmp/some/origin.git", False), ("file:///tmp/o.git", False),
-                      ("https://u:pw@[::1/x", True), ("https://u@[::1/x", True)):
+                      ("https://u:pw@[::1/x", True), ("https://u@[::1/x", True),
+                      # adversary round 23: a remote-helper prefix wraps the real address
+                      ("https::https://ghp_FAKE0000@github.com/o/r.git", True),
+                      ("ext::sh -c 'echo x'", False), ("https::https://host/x.git", False),
+                      ("https::https://host/x.git?t=FAKE", True)):
         assert mod.url_holds_credential(url) is want, url
 
 

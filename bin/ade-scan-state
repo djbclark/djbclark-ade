@@ -105,7 +105,8 @@ false), whatever the local refs say, since a stale tracking ref would hide commi
 Primary flag `origin url holds a credential: not queried` (--remote only): the first `remote.origin.url` has a
 password, or (any scheme but ssh) a username or a query string (`https://user:secret@host/x`,
 `https://<token>@github.com/x`, `https://host/x?private_token=...`; `ssh://git@host` and scp-like
-`git@host:x` are usernames git never hands to a helper, so they are none), so `ls-remote` is not run and `--fetch` does not fetch; the checkout is treated exactly like `origin
+`git@host:x` are usernames git never hands to a helper, so they are none; a `<transport>::<address>` prefix is
+stripped and the address judged), so `ls-remote` is not run and `--fetch` does not fetch; the checkout is treated exactly like `origin
 unreachable` (never `clean and pushed`, `local_only_verified` false). The url is in no record, flag, message
 or doc, and the query cache is keyed by its sha256 prefix. For any other url `ls-remote` is run as `git
 ls-remote --heads --tags -- origin` with the url in GIT_CONFIG_COUNT=1, GIT_CONFIG_KEY_0=remote.origin.url,
@@ -671,7 +672,13 @@ def url_holds_credential(url: str) -> bool:
     `host:path` (no `://`) is ssh and has none; `ssh://git@host` is a username, not a credential, but any
     password (`ssh://git:secret@host`) is one. For every other scheme (http, https, ...) ANY userinfo counts
     (`https://<token>@github.com/x` is how a token is used as the username; adversary round 22) and so does
-    a query string (`?private_token=...`). An unparsable authority is read by hand."""
+    a query string (`?private_token=...`); a `<transport>::<address>` prefix is stripped first and the address
+    judged. An unparsable authority is read by hand."""
+    # `<transport>::<address>` names a remote helper for an arbitrary address (`https::https://t@host`):
+    # the address after the `::` is what git hands to the helper, so that is what is checked (round 23)
+    head, sep, rest = url.partition("::")
+    if sep and head and re.fullmatch(r"[A-Za-z0-9+.-]+", head):
+        url = rest
     if "://" not in url:
         return False
     scheme = url.partition("://")[0].lower()
@@ -1171,7 +1178,7 @@ def main(argv=None) -> int:
                          "checkout; the first `remote.origin.url`, a path resolved against the checkout, "
                          "reaches git through GIT_CONFIG_COUNT/KEY_0/VALUE_0 (git 2.31+), never argv; an "
                          "older git is not asked and the checkout is `origin unreachable`); an origin url "
-                         "with a password, or a username or query string on a non-ssh scheme, is never queried (`origin url holds a credential: not queried`, "
+                         "with a password, or a username or query string on a non-ssh scheme (a `<transport>::` prefix stripped first), is never queried (`origin url holds a credential: not queried`, "
                          "treated like `origin unreachable`); "
                          "its live tips, not the local refs/remotes/origin/* (stale after a "
                          "branch is deleted there), then decide what is pushed; an origin that does not "
