@@ -78,7 +78,7 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    `TestPlanWave::test_no_room_comes_back_as_none_not_an_error`,
    `TestQualityBand::test_the_2026_10_18_case_queues_code_instead_of_routing_far_down`. They pass with
    `ROUTE_AGENT_OMP_READY=0`, so CI (no omp login) is green while a local `bg` run is red. Fix: pin the probe in
-   `tests/conftest.py` (`os.environ.setdefault("ROUTE_AGENT_OMP_READY", "0")`) and give the omp case its own test.
+   `tests/conftest.py` (`ROUTE_AGENT_OMP_READY` is `0` unless the shell sets `0` or `1`) and give the omp case its own test.
    Carried (adversary, 2026-10-20): (a) with omp ready and no quota reading, an unmeasured omp outranks a measured
    pool in all three scenarios (`TestOmpReadyRoster` names the case as left out); (b) `_merge_pool` in
    `bin/route_agent.py` lets a stale `None` reading overwrite a measured one (adversary LOW on PR 13).
