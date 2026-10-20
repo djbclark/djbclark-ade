@@ -2061,8 +2061,8 @@ def test_capture_plan_keeps_staged_changes_and_every_stash():
     mod = load_doc()
     co = doc_checkout("/p/w", flags=["dirty", "stash"], verdict="dirty", modified=2, stashes=3)
     row = next(r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith("| /p/w "))
-    assert "git -C /p/w diff > <DEST>/checkouts/abs/p/w/modified.patch && git -C /p/w diff --cached > " \
-           "<DEST>/checkouts/abs/p/w/staged.patch" in row
+    assert "git -C /p/w diff --binary > <DEST>/checkouts/abs/p/w/modified.patch && git -C /p/w diff --binary --cached > " \
+           "<DEST>/checkouts/abs/p/w/staged.patch" in row  # Codex pass 21: a plain diff drops a binary file's bytes
     assert "3 stashes" in row and "stash0.patch" not in row and "bundle create <DEST>/checkouts/abs/p/w/stashes" not in row
     assert "seq 0 2" in row and "stash show -p --binary --include-untracked" in row and "stash$i.patch" in row.replace("\\$", "$")
 

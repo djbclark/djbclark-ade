@@ -492,8 +492,9 @@ def render(d):
                            "preserved there")
             else:
                 # `status` counts staged changes too; a plain `diff` is worktree against index and misses them, so
-                # the index gets its own patch (`--cached` works in an unborn repository too; Codex pass 20 on PR 27)
-                cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} diff > <DEST>/{} && git -C {} diff --cached > <DEST>/{}",
+                # the index gets its own patch (`--cached` works in an unborn repository too; Codex pass 20 on PR 27);
+                # `--binary` keeps a changed binary file's bytes, a plain diff says only "Binary files differ" (pass 21)
+                cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} diff --binary > <DEST>/{} && git -C {} diff --binary --cached > <DEST>/{}",
                                   ck, raw_p, f"{ck}/modified.patch", raw_p, f"{ck}/staged.patch"))
                 need = need if need != "no" else "yes: decide whether they are work"
         if stashes:
