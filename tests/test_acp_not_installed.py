@@ -31,23 +31,42 @@ FAKE_MISSING = FAKE.replace(
 
 
 class TestAcpRunWaits(unittest.TestCase):
-    def run_acp(self, wait: str, appear_after: float | None) -> subprocess.CompletedProcess[str]:
+    def run_acp(self, wait: str, appears: bool) -> subprocess.CompletedProcess[str]:
+        """acp-run with the agent binary missing. With `appears`, the binary is installed only once
+        acp-run has printed that it is waiting, so a slow start (uv, a loaded runner) cannot let the
+        binary appear before the check and skip the wait."""
         with tempfile.TemporaryDirectory() as td:
             bindir = Path(td)
-            def install() -> None:
-                time.sleep(appear_after or 0)
-                exe = bindir / "claude-agent-acp"
-                _ = exe.write_text("#!/bin/sh\nexit 3\n")
-                exe.chmod(0o755)
-            if appear_after is not None:
-                threading.Thread(target=install, daemon=True).start()
             env = {**os.environ, "PATH": f"{bindir}:/usr/bin:/bin", "ACP_RUN_BIN_WAIT": wait,
                    "ACP_RUN_BIN_POLL": "0.1"}
-            return subprocess.run([UV, "run", "--quiet", "--script", str(ACP_RUN), "claude", "-p", "hi", "--timeout", "5"],
-                                  env=env, capture_output=True, text=True, check=False, timeout=60)
+            proc = subprocess.Popen([UV, "run", "--quiet", "--script", str(ACP_RUN), "claude", "-p", "hi", "--timeout", "5"],
+                                    env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True)
+            seen: list[str] = []
+            installed = threading.Event()
+
+            def watch() -> None:
+                assert proc.stderr is not None
+                for line in proc.stderr:
+                    seen.append(line)
+                    if appears and "waiting up to" in line and not installed.is_set():
+                        time.sleep(0.5)
+                        exe = bindir / "claude-agent-acp"
+                        _ = exe.write_text("#!/bin/sh\nexit 3\n")
+                        exe.chmod(0o755)
+                        installed.set()
+            reader = threading.Thread(target=watch, daemon=True)
+            reader.start()
+            try:
+                _ = proc.wait(timeout=60)
+                out = proc.stdout.read() if proc.stdout else ""
+            finally:
+                proc.kill()
+            reader.join(timeout=10)
+            return subprocess.CompletedProcess(proc.args, proc.returncode, out, "".join(seen))
 
     def test_binary_that_appears_is_found(self):
-        r = self.run_acp("10", 1.0)
+        r = self.run_acp("10", True)
         self.assertIn("waiting up to 10 s", r.stderr)
         self.assertNotIn("not installed", r.stderr)
         self.assertNotEqual(r.returncode, 127, r.stderr)        # it went on to start the (fake) agent
@@ -55,24 +74,24 @@ class TestAcpRunWaits(unittest.TestCase):
     def test_junk_and_unbounded_waits_fall_back_or_clamp(self):
         # the default is 90 s: the binary appears at once, so each run proves the wait value, not a long wait
         for value, shown in (("abc", "90"), ("nan", "90"), ("inf", "90"), ("1e9", "600")):
-            r = self.run_acp(value, 0.5)
+            r = self.run_acp(value, True)
             self.assertIn(f"waiting up to {shown} s", r.stderr, (value, r.stderr))
             self.assertNotIn("Traceback", r.stderr, value)
             self.assertNotEqual(r.returncode, 127, (value, r.stderr))
 
     def test_a_negative_wait_does_not_wait(self):
-        r = self.run_acp("-5", None)
+        r = self.run_acp("-5", False)
         self.assertEqual(r.returncode, 127, r.stderr)
         self.assertNotIn("waiting", r.stderr)
 
     def test_binary_that_never_appears_exits_127(self):
-        r = self.run_acp("0.5", None)
+        r = self.run_acp("0.5", False)
         self.assertEqual(r.returncode, 127, r.stderr)
         self.assertIn("claude-agent-acp not installed", r.stderr)
 
     def test_wait_zero_does_not_wait(self):
         t0 = time.monotonic()
-        r = self.run_acp("0", None)
+        r = self.run_acp("0", False)
         self.assertEqual(r.returncode, 127, r.stderr)
         self.assertNotIn("waiting", r.stderr)
         self.assertLess(time.monotonic() - t0, 5)
