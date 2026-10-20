@@ -5,7 +5,9 @@ Phase 0 item 4.3 of docs/ade-everywhere-proposal.md (djbclark, 2026-10-20): find
 dirty trees, untracked files and unpushed commits before anything is cleaned up. Nothing is moved,
 deleted, committed, stashed or checked out; the only network calls are `git ls-remote` (--remote)
 and `git fetch` of one branch (--fetch) when the origin tip cannot be compared: it downloads that
-branch's objects, writes no refs and no FETCH_HEAD, and runs no auto-maintenance.
+branch's objects, writes no refs and no FETCH_HEAD, and runs no auto-maintenance. GIT_NO_LAZY_FETCH=1
+is set on every git call, so a partial clone never downloads objects as a side effect of a count
+(the tip then stays uncompared: `origin tip not fetched`) unless --fetch asks for it.
 
 A checkout's own git config can name commands (core.fsmonitor, core.sshCommand, remote.*.uploadpack,
 filter.*, gpg.program with log.showSignature, credential.*, hooksPath, include.*, ...). The tool reads
@@ -48,6 +50,10 @@ Git checkout verdicts (a checkout is a dir holding `.git`, found up to two level
   clean and pushed  none of the above
   skipped: <reason>  a config key outside the allowlist, a redirected work tree, or an unreadable
                     config (reasons above); nothing else was run
+  scan incomplete: <call> rc=<n>  a git call (`status`, `rev-parse --abbrev-ref HEAD`, `rev-list
+                    --count ...`) failed or timed out (rc=124); the state is unknown, so the
+                    checkout is never `clean and pushed`; counts are null. `git status` gets 600 s,
+                    every other git call 60 s.
 Extra flag `submodules not inspected`: the checkout has submodules; `status` ignores their state, so
 the verdict says nothing about them (it is that flag, not `clean and pushed`, when nothing else applies).
 Extra flag `origin tip not fetched`: the branch is on origin at a commit this checkout cannot
@@ -83,6 +89,9 @@ SKIP_UNREADABLE = "skipped: git config unreadable"
 SKIP_WORKTREE = "skipped: worktree redirected"
 SKIP_NO_WORKTREE = "skipped: no work tree"
 SUBMODULES_FLAG = "submodules not inspected"
+INCOMPLETE_PREFIX = "scan incomplete: "
+STATUS_TIMEOUT = 600  # `git status` on a large or cold tree under load; every other git call gets 60 s
+MODULE_INTERNAL_DIRS = ("objects", "refs", "logs", "hooks", "lfs")  # pruned inside a module's git dir
 # Prefix of every git call: no index lock, and the config-named programs that run on any command off
 # (log.showSignature=false: `stash list` / `log` would run gpg.program on a signed commit otherwise).
 GIT_SAFE = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
@@ -115,8 +124,10 @@ SAFE_SUBSECTION_CONFIG = {
 def git_env(network: bool = False) -> dict:
     """The caller's environment minus every GIT_* key, plus this tool's own; no global/system config."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    # GIT_NO_LAZY_FETCH (git 2.45+): a partial clone must not download objects on a count/compare;
+    # it stays set for the explicit --fetch too (that one is a real fetch and needs no lazy help).
     env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_GLOBAL": os.devnull, "LC_ALL": "C"})
+                "GIT_CONFIG_GLOBAL": os.devnull, "GIT_NO_LAZY_FETCH": "1", "LC_ALL": "C"})
     if network:
         env.pop("SSH_ASKPASS", None)
         env.update({"GIT_SSH_COMMAND": "ssh -o BatchMode=yes",
@@ -383,7 +394,10 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
     env = git_env()
     env["GIT_CEILING_DIRECTORIES"] = str(Path(neutral_cwd()).parent)
     for root, dirs, files in os.walk(modules, followlinks=False):
-        dirs[:] = sorted(d for d in dirs if d not in ("objects", "refs", "logs", "hooks", "lfs"))
+        if "HEAD" in files or "config" in files:  # a module's git dir: skip its object store and logs
+            dirs[:] = sorted(d for d in dirs if d not in MODULE_INTERNAL_DIRS)
+        else:  # `modules/` itself or a dir that only groups nested modules: every name is a module
+            dirs[:] = sorted(dirs)
         cfg = Path(root) / "config"
         if "config" not in files or cfg.is_symlink():
             continue
@@ -476,6 +490,11 @@ def skipped_record(path: Path, reason: str, keys: list[str] | None = None) -> di
     }
 
 
+def incomplete_record(path: Path, call: str, rc: int) -> dict:
+    """A git call failed (rc 124 = timed out): the checkout's state is unknown, never `clean and pushed`."""
+    return skipped_record(path, f"{INCOMPLETE_PREFIX}{call} rc={rc}")
+
+
 def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     keys = unsafe_config(path)  # before any other git call: reading config runs nothing
     if keys is None:
@@ -494,21 +513,38 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     if bad_key:
         return skipped_record(path, f"skipped: submodule config unrecognised {bad_key}", [bad_key])
     rc, branch = git(path, "rev-parse", "--abbrev-ref", "HEAD")
-    branch = branch.strip() if rc == 0 else "?"
+    unborn = False
+    if rc != 0:  # a repository with no commit yet fails here and is still a valid, scannable checkout
+        rc_head, _ = git(path, "rev-parse", "--verify", "--quiet", "HEAD")
+        if rc_head == 1:
+            rc, branch = git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
+            unborn = rc == 0
+        if not unborn:
+            return incomplete_record(path, "rev-parse --abbrev-ref HEAD", rc)
+    branch = branch.strip()
     detached = branch == "HEAD"
+    # A git call that fails or times out must never read as "nothing found" (adversary round 3, 1).
     rc, status = git(path, "status", "--porcelain", "--ignore-submodules=all",
-                     "--untracked-files=normal")
-    lines = status.splitlines() if rc == 0 else []
+                     "--untracked-files=normal", timeout=STATUS_TIMEOUT)
+    if rc != 0:
+        return incomplete_record(path, "status", rc)
+    lines = status.splitlines()
     untracked = [ln[3:] for ln in lines if ln.startswith("??")]
     modified = [ln[3:] for ln in lines if not ln.startswith("??")]
     rc, up = git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     upstream = up.strip() if rc == 0 else None
     unpushed = None
-    if upstream:
+    if upstream and not unborn:
         rc, n = git(path, "rev-list", "--count", "@{u}..HEAD")
-        unpushed = int(n) if rc == 0 and n.strip().isdigit() else None
-    rc, n = git(path, "rev-list", "--count", "HEAD", "--not", "--remotes=origin")
-    ahead_of_origin = int(n) if rc == 0 and n.strip().isdigit() else None
+        if rc != 0 or not n.strip().isdigit():
+            return incomplete_record(path, "rev-list --count @{u}..HEAD", rc)
+        unpushed = int(n)
+    ahead_of_origin = 0
+    if not unborn:
+        rc, n = git(path, "rev-list", "--count", "HEAD", "--not", "--remotes=origin")
+        if rc != 0 or not n.strip().isdigit():
+            return incomplete_record(path, "rev-list --count HEAD --not --remotes=origin", rc)
+        ahead_of_origin = int(n)
     stashes = stash_count(path, common)
     rc, _ = git(path, "remote", "get-url", "origin")
     has_origin = rc == 0
@@ -608,7 +644,9 @@ def summarize(result: dict) -> dict:
                                       or "orphan branch" in c["flags"]),
             "with_untracked": sum(1 for c in result["checkouts"] if c["untracked"]),
             "with_stash": sum(1 for c in result["checkouts"] if c["stashes"]),
-            "skipped": sum(1 for c in result["checkouts"] if c["verdict"].startswith("skipped"))}
+            "skipped": sum(1 for c in result["checkouts"] if c["verdict"].startswith("skipped")),
+            "incomplete": sum(1 for c in result["checkouts"]
+                              if c["verdict"].startswith(INCOMPLETE_PREFIX))}
     return s
 
 

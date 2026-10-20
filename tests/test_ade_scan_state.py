@@ -469,7 +469,8 @@ def test_ambient_git_variables_are_ignored(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.fsmonitor=touch /nonexistent/x'")
     env = mod.git_env()
     assert {k for k in env if k.startswith("GIT_")} == {
-        "GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"}
+        "GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
+        "GIT_NO_LAZY_FETCH"}
     assert env["GIT_CONFIG_GLOBAL"] == os.devnull
     c = mod.scan_git([roots], remote=False)[0]
     assert c["untracked"] == 1 and "dirty" in c["flags"]
@@ -534,6 +535,132 @@ def test_fetch_downloads_the_tip_and_writes_no_refs(tmp_path):
     git(work, "cat-file", "-e", tip)  # the objects arrived
     assert git(work, "for-each-ref") == refs_before  # no ref moved
     assert not (work / ".git" / "FETCH_HEAD").exists()
+
+
+def make_pushed_checkout(tmp_path: Path):
+    """(roots, work, origin): a checkout whose branch is pushed and whose upstream is set."""
+    origin = tmp_path / "origin.git"
+    git(tmp_path, "init", "--bare", "-b", "main", str(origin))
+    roots = tmp_path / "roots"
+    roots.mkdir()
+    work = roots / "work"
+    git(tmp_path, "clone", str(origin), str(work))
+    git(work, "checkout", "-b", "main")
+    (work / "a.txt").write_text("a\n")
+    git(work, "add", "a.txt")
+    git(work, "commit", "-m", "first")
+    git(work, "push", "-u", "origin", "main")
+    return roots, work, origin
+
+
+def test_a_failed_or_timed_out_git_call_is_never_clean_and_pushed(tmp_path, monkeypatch):
+    """Round 3, 1: a garbage index or a timed-out `status` read as "nothing found"."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    c = mod.scan_git([roots], remote=False)[0]
+    assert c["verdict"] == "clean and pushed"  # a healthy repo is unchanged
+    assert mod.summarize({"checkouts": [c]})["checkouts"]["incomplete"] == 0
+    (work / "precious-untracked.txt").write_text("keep\n")
+    (work / "a.txt").write_text("changed\n")
+    (work / ".git" / "index").write_bytes(b"junk" * 64)
+    c = mod.scan_git([roots], remote=False)[0]
+    assert c["verdict"].startswith("scan incomplete: status rc="), c["verdict"]
+    assert c["flags"] == [c["verdict"]] and c["verdict"] != "clean and pushed"
+    assert c["modified"] is None and c["untracked"] is None and c["ahead_of_origin"] is None
+    assert mod.summarize({"checkouts": [c]})["checkouts"]["incomplete"] == 1
+    assert mod.summarize({"checkouts": [c]})["checkouts"]["skipped"] == 0
+    assert "scan incomplete" in mod.markdown({"checkouts": [c]})
+
+    (work / ".git" / "index").unlink()  # rebuild a healthy index, then fail each call in turn
+    git(work, "reset", "-q")
+    git(work, "checkout", "--", "a.txt")
+    (work / "precious-untracked.txt").unlink()
+    assert mod.scan_git([roots], remote=False)[0]["verdict"] == "clean and pushed"
+    real, seen = mod.run, {}
+
+    def failing(word, rc):
+        def fake(argv, timeout=120, cwd=None, env=None):
+            if word in argv:
+                seen[word] = timeout
+                return rc, ""
+            return real(argv, timeout=timeout, cwd=cwd, env=env)
+        return fake
+
+    for word, rc, want in (("status", 124, "scan incomplete: status rc=124"),
+                           ("rev-list", 128, "scan incomplete: rev-list --count @{u}..HEAD rc=128")):
+        monkeypatch.setattr(mod, "run", failing(word, rc))
+        c = mod.scan_git([roots], remote=False)[0]
+        assert c["verdict"] == want and c["unpushed"] is None, c["verdict"]
+    assert seen["status"] == 600 and seen["rev-list"] == 60  # status has its own, longer limit
+    monkeypatch.setattr(mod, "run", failing("--abbrev-ref", 128))
+    assert mod.scan_git([roots], remote=False)[0]["verdict"].startswith("scan incomplete: rev-parse")
+
+
+def test_a_repository_with_no_commit_yet_is_not_scan_incomplete(tmp_path):
+    mod = load()
+    roots = tmp_path / "roots"
+    (roots / "fresh").mkdir(parents=True)
+    git(roots / "fresh", "init", "-b", "main")
+    (roots / "fresh" / "f.txt").write_text("x\n")
+    c = mod.scan_git([roots], remote=False)[0]
+    assert c["branch"] == "main" and c["verdict"] == "dirty" and c["untracked"] == 1
+
+
+def test_remote_scan_of_a_partial_clone_downloads_nothing(tmp_path):
+    """Round 3, 2: promisor lazy fetch ran during `rev-list --count HEAD --not --remotes=origin <tip>`."""
+    mod = load()
+    origin = tmp_path / "origin.git"
+    git(tmp_path, "init", "--bare", "-b", "main", str(origin))
+    git(origin, "config", "uploadpack.allowFilter", "true")
+    git(origin, "config", "uploadpack.allowAnySHA1InWant", "true")
+    seed = tmp_path / "seed"
+    git(tmp_path, "clone", str(origin), str(seed))
+    git(seed, "checkout", "-b", "main")
+    (seed / "a.txt").write_text("a\n")
+    git(seed, "add", "a.txt")
+    git(seed, "commit", "-m", "first")
+    git(seed, "push", "-u", "origin", "main")
+    roots = tmp_path / "roots"
+    roots.mkdir()
+    work = roots / "work"
+    git(tmp_path, "clone", "--filter=blob:none", f"file://{origin}", str(work))
+    (work / "w.txt").write_text("w\n")
+    git(work, "add", "w.txt")
+    git(work, "commit", "-m", "local, unpushed")
+    (seed / "o.txt").write_text("o\n")
+    git(seed, "add", "o.txt")
+    git(seed, "commit", "-m", "elsewhere")
+    git(seed, "push", "origin", "main")
+    tip = git(seed, "rev-parse", "HEAD").strip()
+    probe = {**GIT_ENV, "GIT_NO_LAZY_FETCH": "1"}  # the check itself must not download either
+
+    def has_tip() -> bool:
+        return subprocess.run(["git", "cat-file", "-e", tip], cwd=work, env=probe,
+                              capture_output=True).returncode == 0
+
+    assert not has_tip()
+    c = mod.scan_git([roots], remote=True, fetch=False)[0]
+    assert not has_tip(), "the scan downloaded the origin tip"
+    # the tip cannot be compared, so the count stays the local one and the flag says so
+    assert "origin tip not fetched" in c["flags"] and c["verdict"] == "unpushed commits"
+    assert c["ahead_of_origin"] == 1
+
+
+def test_a_submodule_named_like_a_git_internal_dir_is_inspected(tmp_path):
+    """Round 3, 3: the walk pruned `objects`, `refs`, ... at every level, `modules/objects` included."""
+    mod = load()
+    roots, sup, moddir = make_super_with_submodule(tmp_path)
+    # a directory below a module's git dir named `refs` is still pruned: nothing is read there
+    (moddir / "refs" / "heads").mkdir(parents=True, exist_ok=True)
+    git(moddir / "refs" / "heads", "config", "--file", "config", "filter.x.clean", "evil")
+    assert mod.scan_git([roots], remote=False)[0]["verdict"] != \
+        "skipped: submodule config unrecognised filter.x.clean"
+    named = sup / ".git" / "modules" / "objects"
+    named.mkdir()
+    (named / "HEAD").write_text("ref: refs/heads/main\n")
+    git(named, "config", "--file", "config", "filter.y.clean", "evil")
+    c = mod.scan_git([roots], remote=False)[0]
+    assert c["verdict"] == "skipped: submodule config unrecognised filter.y.clean"
 
 
 def test_phase0_scan_doc_never_makes_a_unique_report_scratch(tmp_path):
@@ -633,6 +760,14 @@ def test_scan_doc_generator_refuses_to_clobber(tmp_path):
     assert p.returncode == 0, p.stderr
     assert existing.read_text().startswith("# Phase 0 scan")
     assert doc_cli(scan, tmp_path / "new.md").returncode == 0
+    adir = tmp_path / "adir.md"
+    adir.mkdir()
+    (adir / "keep.txt").write_text("keep\n")
+    for extra in ((), ("--force",)):
+        p = doc_cli(scan, adir, *extra)
+        assert p.returncode == 1 and "refusing: OUT" in p.stderr and "is a directory" in p.stderr
+        assert "Traceback" not in p.stderr
+        assert (adir / "keep.txt").read_text() == "keep\n"
     assert not [f for f in tmp_path.iterdir() if f.name.endswith(".tmp")]
 
 

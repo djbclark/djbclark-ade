@@ -71,6 +71,8 @@ def check_paths(src, out, force):
         sys.exit(f"refusing: OUT is the input {src}")
     if out.suffix != ".md":
         sys.exit(f"refusing: OUT {out} does not end in .md")
+    if out.is_dir():
+        sys.exit(f"refusing: OUT {out} is a directory")
     if out.exists() and not force:
         sys.exit(f"refusing: {out} exists (--force replaces it)")
 
@@ -120,7 +122,10 @@ def render(d):
       "writes no refs, section 5). The first version also ran git inside each checkout with that "
       "checkout's own config in force, so a `core.fsmonitor` or `remote.*.uploadpack` line there would "
       "have run (the tool now skips such a checkout, section 5); whether any scanned checkout carried one "
-      "was not checked (section 4). Numbers below come from one real run of "
+      "was not checked (section 4). The first version also treated a git call that failed or timed out as "
+      "\"nothing found\" and had no guard against a partial clone downloading objects during a count; the "
+      "tool now reports `scan incomplete: <call> rc=<n>` for the first and sets `GIT_NO_LAZY_FETCH=1` on "
+      "every git call for the second (section 4). Numbers below come from one real run of "
       "[`bin/ade-scan-state`](../bin/ade-scan-state) at "
       f"{d['scanned_at']} (commands in section 5); rerun it for a fresh scan. This document is "
       "rendered from that run's JSON by [`bin/ade-scan-state-doc`](../bin/ade-scan-state-doc). Slice 1 context: "
@@ -228,7 +233,10 @@ def render(d):
       "(with a check that the branch tip on origin does not already contain HEAD, because the local "
       "remote refs can be stale; `--fetch` downloads that branch's objects when they are missing, writing no refs). *On origin* comes from `git ls-remote --heads origin`. Verdict "
       "precedence: `unpushed commits`, `orphan branch` (branch not on origin and commits origin lacks), "
-      "`dirty`, `clean and pushed`; the *also* column lists the other flags.\n")
+      "`dirty`, `clean and pushed`; the *also* column lists the other flags. A checkout whose `status`, "
+      "`rev-parse --abbrev-ref HEAD` or `rev-list --count` call fails or times out is "
+      "`scan incomplete: <call> rc=<n>` (`rc=124` is a timeout; `status` gets 600 s, other calls 60 s) "
+      "with null counts, and is never `clean and pushed`.\n")
     w("| path | branch | mod | untr | unpushed | ahead of origin | stash | on origin | verdict | also |\n"
       "|---|---|---|---|---|---|---|---|---|---|")
     for c in cos:
@@ -353,7 +361,12 @@ def render(d):
       "`credential.*`, `core.hooksPath`, `include.*`), so this document cannot say none of them ran "
       "something. The current tool scans only a checkout whose config uses allowlisted keys and lists any other as `skipped: unrecognised config <key>`.")
     w("7. The run's `--fetch` could have moved `refs/remotes/origin/<branch>` and `FETCH_HEAD` in the "
-      "checkouts where it fetched; which ones it touched was not recorded.\n")
+      "checkouts where it fetched; which ones it touched was not recorded.")
+    w("8. The run's tool read a failed or timed-out git call as \"nothing found\", so a `clean and pushed` "
+      "row above is only as good as every git call in that run having succeeded; failures were not "
+      "recorded. A fresh scan with the current tool reports such a checkout as "
+      "`scan incomplete: <call> rc=<n>`. Likewise whether any scanned checkout was a partial clone "
+      "that downloaded objects during the run was not checked.\n")
 
     # ---- 5 commands
     w("## 5. Commands run\n")
@@ -372,8 +385,9 @@ def render(d):
     w("The first command is the run as executed. With the current tool the same scan adds "
       "`--git-root ~/src/djbclark-ade --git-root ~/src/one-offs` (symlinks under a root are not followed), "
       "its `--fetch` is `git -c maintenance.auto=false -c gc.auto=0 fetch --no-auto-maintenance "
-      "--no-write-fetch-head --no-tags --refmap= origin refs/heads/<branch>`, and a checkout whose config "
-      "names a command is listed as skipped.\n")
+      "--no-write-fetch-head --no-tags --refmap= origin refs/heads/<branch>`, every git call runs with "
+      "`GIT_NO_LAZY_FETCH=1` (so the only network calls remain `ls-remote` and that fetch), and a "
+      "checkout whose config names a command is listed as skipped.\n")
     w("Inside the tool: `du -sk <dir>`; `rg -l -F -w --no-messages -g '!<exclude>' -- <task> <roots>`; "
       "per checkout `git -C <path>` (in the run as executed, with `GIT_OPTIONAL_LOCKS=0` and the caller's "
       "other `GIT_*` variables; now `git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null "

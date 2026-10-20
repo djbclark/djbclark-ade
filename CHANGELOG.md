@@ -17,9 +17,12 @@ agent what changed and what is new. Entries end with the pull request number.
   when its own git config uses allowlisted keys (otherwise `skipped: unrecognised config <key>`; also for
   submodule configs, and `skipped: worktree redirected`), counts stashes from the reflog file, ignores
   submodules in `status` (flag `submodules not inspected`), drops every `GIT_*` variable, does not follow
-  symlinks out of a `--git-root`, always excludes the scan docs from the reference search, and `--fetch` writes
-  no refs and does not recurse into submodules; `bin/ade-scan-state-doc` renders the doc from the scan JSON and
-  refuses to overwrite its input, a non-`.md` path or an existing file without `--force` (#TBD).
+  symlinks out of a `--git-root`, always excludes the scan docs from the reference search, reports a
+  checkout whose `status` or `rev-list` call failed or timed out as `scan incomplete: <call> rc=<n>`
+  (never `clean and pushed`; `status` gets 600 s), sets `GIT_NO_LAZY_FETCH=1` so a partial clone
+  downloads nothing during a `--remote` scan, and `--fetch` writes no refs and does not recurse into
+  submodules; `bin/ade-scan-state-doc` renders the doc from the scan JSON and refuses to overwrite its
+  input, a directory, a non-`.md` path or an existing file without `--force` (#TBD).
 - `loadwatch` skill and `load-watch watcher set|show|clear|test`: one registered agent session (a Paseo
   agent by `paseo send`, else relay.py) also hears every load incident, unexplained sustained load and
   job-guard trip, and investigates; `set` replaces the old watcher and tells it (2026-10-20).
