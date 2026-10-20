@@ -247,7 +247,7 @@ def render(d):
     w(f"| checkouts with a stash | {cs['with_stash']} |")
     incomplete_tasks = [t for t in tasks if t["verdict"].startswith("scan incomplete")]
     w(f"| bigteam task dirs with `scan incomplete` (reference search failed) | {len(incomplete_tasks)} |")
-    w(f"| checkouts `skipped` or `scan incomplete` (no counts, not in 3.2) | "
+    w(f"| checkouts `skipped` or `scan incomplete` (no counts; listed in 3.2 with a whole-directory archive) | "
       f"{num(cs.get('skipped')) + num(cs.get('incomplete'))} |")
     w("")
     w("The three items that most need a human decision:\n")

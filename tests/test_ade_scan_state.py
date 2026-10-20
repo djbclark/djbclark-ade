@@ -1206,6 +1206,8 @@ def test_doc_generator_survives_skipped_and_incomplete_records():
             "reference_search": "incomplete: rc=2"}
     text = mod.render(doc_scan([skipped, broken], [task], skipped=1, incomplete=1))
     assert "| /p/skipped |" in text and "| /p/broken |" in text  # listed in the section 2 table
+    assert "(no counts; listed in 3.2 with a whole-directory archive) | 2 |" in text  # Codex pass 29, P2
+    assert "not in 3.2" not in text
     rows = section_3_2(text).splitlines()  # Codex pass 19, P1: no counts is not "nothing to capture"
     for path_, verdict in (("/p/skipped", "skipped: worktree redirected"), ("/p/broken", "scan incomplete: status rc=124")):
         row = next(r for r in rows if r.startswith(f"| {path_} "))
