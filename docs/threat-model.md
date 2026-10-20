@@ -73,9 +73,9 @@ What an attacker would want, in order of damage:
 3. **`acp-run --verify CMD`**: runs `CMD` with a shell after an agent turn (`tools/acp-run/README.md`,
    item 13). The one deliberate shell path; the string is whatever the caller supplies.
 4. **Load gate.** Today `acp-dispatch` gates on `machine_overloaded()` (`os.getloadavg`, wait capped by
-   `ACP_DISPATCH_GATE_MAX`, default 900 s, then starts anyway). PR 7 (branch `origin/feat/load-admit-gate`,
-   open, unmerged) adds `load-watch admit`, whose stdout line (`admit ok ...` exit 0, `admit hot ...`
-   exit 75) the dispatcher parses; unreadable output must not read as admission (that branch's last commit).
+   `ACP_DISPATCH_GATE_MAX`, default 900 s, then starts anyway), and since PR 7 (merged 2026-10-20, 776ecda)
+   on `load-watch admit`, whose stdout line (`admit ok ...` exit 0, `admit hot ...` exit 75) the dispatcher
+   parses; unreadable output does not read as admission.
 5. **PR bodies, review comments and issue text** written by agents or third parties, which other agents
    and reviewers read as instructions.
 6. **Mentions**: `@codex review`, `@cursor` on a comment (`docs/queue.md`). Whether a third party's
@@ -138,9 +138,12 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   key to that host. The same shape in `bin/firecrawl-router`: `FIRECRAWL_SELFHOST_URL`,
   `FIRECRAWL_FALLBACK_URL`, `FIRECRAWL_ROUTER_SIPB_BASE` and `FIRECRAWL_ROUTER_LITELLM_BASE` choose where
   `call()` and `Extractor._post()` send the matching bearer keys, and plain http is accepted, so an agent that
-  starts a router with those variables repointed sends all four router keys to its host. (Code follow-up for
-  a separate PR, `docs/queue.md` item 1: refuse anything but https://api.cursor.com in `bin/cursor-cloud`,
-  and require https or loopback for the router's four endpoints, unless a test flag is set.)
+  starts a router with those variables repointed sends all four router keys to its host. Both tools also
+  re-send the key on a redirect, to any host, because urllib copies Authorization onto the redirected request
+  (`bin/failover.py` avoids this with `_NoRedirect`). (Code follow-up for a separate PR, `docs/queue.md`
+  "Follow-ups from the 2026-10-20 reviews" item 5: refuse anything but https://api.cursor.com in
+  `bin/cursor-cloud`, require https or loopback for the router's four endpoints unless a test flag is set, and
+  refuse redirects.)
 
 ### 4.3 Unenforced review and merge
 
@@ -235,8 +238,10 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   900 s (`wait_for_capacity`); `load-watch` finds the session behind sustained load and tells it to move
   heavy work to CI; `ci-only` makes `bg` refuse local builds (`bin/load-watch` header). Auto-resume is
   capped at 3 attempts and gated on live pool headroom.
-* **Gap.** The gate starts the slice anyway after the cap. PR 7's `admit` adds admission with stagger and
-  pending-runner accounting; until it merges, a wave of dispatches can overload the Mac, as on 2026-10-12.
+* **Gap.** The overload gate starts the slice anyway after the cap. PR 7's `admit` (merged 2026-10-20) adds
+  admission with stagger and pending-runner accounting before that gate; the overload hold itself is still
+  outside the deferred deadline (`docs/queue.md` item 3d). A wave of dispatches overloaded the Mac on
+  2026-10-12, before either existed.
 
 ## 5. Out of scope and accepted risks
 
