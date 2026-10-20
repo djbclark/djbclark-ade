@@ -963,12 +963,12 @@ def test_a_database_under_a_symlinked_session_directory_is_skipped_not_copied(re
     dest = home / "out" / "bk"
     assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 0
     err = capsys.readouterr().err
-    skipped = home / ".cursor/chats/hashB/uuid2/store.db"
+    skipped = home / ".cursor/chats/hashB/uuid2"  # the link itself: nothing behind it is listed
     assert err.splitlines().count(f"ade-backup-stores: cursor-chats: skipped {skipped}: symlink") == 1  # DECIDED: a skip stays ok, but is printed
     entry = manifest_of(dest)["stores"][0]
     assert entry["status"] == "ok" and entry["errors"] == [] and (dest / "cursor-chats/hashA/uuid1/store.db").is_file()
     assert not (dest / "cursor-chats/hashB").exists()
-    assert any(s["why"] == "symlink" and s["path"].endswith("hashB/uuid2/store.db") for s in entry["skipped"])
+    assert [s["path"] for s in entry["skipped"] if s["why"] == "symlink"] == [str(skipped)]  # one skip, not one per db behind it
     assert b"SECRET-LINKED-DIR-ROW" not in all_bytes(dest)
     capsys.readouterr()
     assert mod.main(["--only", "cursor-chats", "--dry-run", "--json", "--dest", str(home / "o")]) == 0
@@ -999,8 +999,47 @@ def test_check_schemas_does_not_open_a_database_under_a_linked_directory(real, c
     link_session_dir(home, tmp)
     assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 1  # DECIDED: a linked tree db is a problem
     out = capsys.readouterr().out
-    assert "hashB/uuid2/store.db: symlink, not opened" in out
+    assert f"{home}/.cursor/chats/hashB/uuid2: symlink, not opened" in out and "uuid2/store.db" not in out
     assert "0 unexplained credential-looking name(s), 1 symlink problem(s)" in out
+
+
+def test_a_symlinked_session_directory_is_never_entered(real, monkeypatch):
+    mod, home, tmp = real
+    make_cursor_session(home)
+    link = link_session_dir(home, tmp)
+    entered = []
+    real_open, real_listdir = mod.open_dir_at, os.listdir
+    monkeypatch.setattr(mod, "open_dir_at", lambda name, fd: (entered.append(name), real_open(name, fd))[1])
+    monkeypatch.setattr(os, "listdir", lambda p=".": (entered.append(os.fspath(p)), real_listdir(p))[1])
+    store = next(s for s in mod.build_stores(home) if s["name"] == "cursor-chats")
+    assert mod.tree_dbs(store, store["root"]) == [store["root"] / "hashA/uuid1/store.db", link]
+    rfd = os.open(store["root"], os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        entries, errors = mod.tree_db_entries(store, rfd)
+    finally:
+        os.close(rfd)
+    assert errors == []
+    assert entries == [(("hashA", "uuid1", "store.db"), False), (("hashB", "uuid2"), True)]
+    assert not [e for e in entered if "uuid2" in e]  # neither listing opened or listed the link
+
+
+def test_a_wal_mode_source_is_copied_self_contained_and_passes_the_guard_with_no_shm(real, tmp_path):
+    mod, home, tmp = real
+    src = home / "wal.db"
+    live = make_wal_db(src, ["one", "two"])
+    live.execute("INSERT INTO t VALUES ('wal-only-row')")
+    assert (home / "wal.db-wal").stat().st_size > 0
+    dst = tmp / "copies" / "wal.db"
+    mod.backup_sqlite(src, dst, "anything")
+    assert sorted(p.name for p in dst.parent.iterdir()) == ["wal.db"]  # no -wal/-shm/.part left beside the copy
+    assert dst.read_bytes()[18:20] == b"\x01\x01"  # the file header says rollback journal, not WAL
+    mod.guard_copy("anything", dst)  # opened read-only with no -shm beside it
+    con = sqlite3.connect(str(dst))
+    assert con.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+    assert [r[0] for r in con.execute("SELECT v FROM t ORDER BY rowid")] == ["one", "two", "wal-only-row"]
+    con.close()
+    live.close()
+
 
 
 def link_codex_db(home, tmp, target="in-home"):

@@ -54,7 +54,7 @@ or gone during the copy is always an error naming the session directory (relativ
 content), and the store is `partial`: the resume picker reads it, so the db copy alone is not lossless.
 A store that exists but produced no file prints `<store>: 0 files copied although its roots exist` on stderr
 (not an error, not `partial`: an empty store is real). Inside a per-session tree a database or sidecar that is
-a symlink, or sits under a symlinked directory, is skipped (`symlink`), never opened (`--check-schemas` prints
+a symlink, or a directory above it that is a symlink (the link is one skip, never entered), is skipped (`symlink`), never opened (`--check-schemas` prints
 `symlink, not opened` and counts it a problem, exit 1). A configured database path that is a symlink (Codex's on
 this Mac) is followed under the same rule as a store root link (under $HOME, not a credential path; recorded in
 `root_symlinks`; `--check-schemas` opens the target read-only and prints `symlink -> target`, or `symlink refused`
@@ -434,6 +434,9 @@ def backup_sqlite(src, dst, store_name, base=None):
         target = sqlite3.connect(str(tmp))
         try:
             source.backup(target)
+            # The copy keeps the source's WAL header bytes; make it self-contained so it needs no -wal/-shm
+            # (the guard opens it read-only, and some SQLite builds cannot without a -shm).
+            target.execute("PRAGMA journal_mode=DELETE")
         finally:
             target.close()
         if store_name in SCRUB:
@@ -768,11 +771,36 @@ def copy_sqlite_store(store, run, excluder):
 
 def tree_dbs(store, root=None):
     """The databases a sqlite-tree store matches below `root` (default: its configured root). Path-based: the
-    dry run's estimate only; the real copy and --check-schemas list through `tree_db_entries`."""
+    dry run's estimate only; the real copy and --check-schemas list through `tree_db_entries`. Like them it
+    never enters a symlinked directory: the link itself is the match (one `symlink` skip)."""
     root = root or store["root"]
     found = []
     for pat in store["dbs"]:
-        found.extend(p for p in sorted(root.glob(pat)) if p.is_file())
+        found.extend(sorted(tree_glob(Path(root), tuple(pat.split("/")))))
+    return found
+
+
+def tree_glob(directory, comps):
+    """Paths matching `comps` below `directory`; a symlink to a directory above the last component is returned
+    itself and not descended."""
+    comp, rest = comps[0], comps[1:]
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        if not fnmatch.fnmatchcase(name, comp):
+            continue
+        path = directory / name
+        if not rest:
+            if path.is_file():
+                found.append(path)
+        elif path.is_symlink():
+            if path.is_dir():
+                found.append(path)
+        elif path.is_dir():
+            found.extend(tree_glob(path, rest))
     return found
 
 
@@ -785,12 +813,12 @@ def exists_at(name, dir_fd):
     return True
 
 
-def glob_fd(dfd, comps, prefix, linked, found, errors):
+def glob_fd(dfd, comps, prefix, found, errors):
     """Match the glob components `comps` below the open directory `dfd`, appending (parts, linked) to `found` and
     (parts, OSError) to `errors`. Everything is relative to a descriptor: a directory is entered with
-    `open_dir_at` (O_NOFOLLOW), a symlink is classified with one `stat` and, when it leads to a directory, entered
-    only to name what lies behind it so those databases are recorded as skipped symlinks (never read), and
-    `linked` says whether the match, or a directory above it, was a link."""
+    `open_dir_at` (O_NOFOLLOW); a symlink is classified with one `stat` and, when it leads to a regular file at
+    the last component or to a directory above it, is itself the match (`linked` true, recorded as one skipped
+    symlink, never opened and never entered: nothing behind a link is listed)."""
     comp, rest = comps[0], comps[1:]
     with os.scandir(dfd) as it:
         names = sorted(e.name for e in it)
@@ -807,14 +835,17 @@ def glob_fd(dfd, comps, prefix, linked, found, errors):
         here = prefix + (name,)
         if not rest:
             if stat.S_ISREG(mode):
-                found.append((here, linked or is_link))
+                found.append((here, is_link))
             continue
         if not stat.S_ISDIR(mode):
             continue
+        if is_link:
+            found.append((here, True))
+            continue
         try:
-            sub = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=dfd) if is_link else open_dir_at(name, dfd)
+            sub = open_dir_at(name, dfd)
             try:
-                glob_fd(sub, rest, here, linked or is_link, found, errors)
+                glob_fd(sub, rest, here, found, errors)
             finally:
                 os.close(sub)
         except OSError as exc:
@@ -827,7 +858,7 @@ def tree_db_entries(store, rfd):
     found, errors = [], []
     for pat in store["dbs"]:
         part = []
-        glob_fd(rfd, tuple(pat.split("/")), (), False, part, errors)
+        glob_fd(rfd, tuple(pat.split("/")), (), part, errors)
         found.extend(sorted(part))
     return found, errors
 
