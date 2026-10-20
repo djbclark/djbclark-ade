@@ -135,8 +135,12 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   leaves the Mac; no scanner runs on prompts.
 * **Gap 4.** `CURSOR_CLOUD_API` (`bin/cursor-cloud`) repoints the endpoint that receives `CURSOR_API_KEY`
   in a Basic auth header, and plain http is accepted. An agent that sets it for a child sends the Cursor
-  key to that host. (Code follow-up for a separate PR: refuse anything but https://api.cursor.com unless a
-  test flag is set.)
+  key to that host. The same shape in `bin/firecrawl-router`: `FIRECRAWL_SELFHOST_URL`,
+  `FIRECRAWL_FALLBACK_URL`, `FIRECRAWL_ROUTER_SIPB_BASE` and `FIRECRAWL_ROUTER_LITELLM_BASE` choose where
+  `call()` and `Extractor._post()` send the matching bearer keys, and plain http is accepted, so an agent that
+  starts a router with those variables repointed sends all four router keys to its host. (Code follow-up for
+  a separate PR, `docs/queue.md` item 1: refuse anything but https://api.cursor.com in `bin/cursor-cloud`,
+  and require https or loopback for the router's four endpoints, unless a test flag is set.)
 
 ### 4.3 Unenforced review and merge
 
