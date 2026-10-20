@@ -139,6 +139,35 @@ class ScanTest(unittest.TestCase):
             ("literal home path", 'p = "/Users/alex/bin"'),
             ("32+ character hex string", "h = " + hex32),
             ("32+ character base64-like string", "k = " + "A1B2C3D4E5F6G7H8I9J0" + "KkLlMmNnOoPpQq"),
+            # round 2 of the adversary review: Authorization with any scheme or none, in JSON, YAML and TOML
+            ("Authorization header", '"Authorization": "Basic dXNlcjpwYXNzd29yZDEyMw=="'),
+            ("Authorization header", '"Authorization": "Token abcdefgh12345678"'),
+            ("Authorization header", '"Authorization": "abcdefgh12345678"'),
+            ("Authorization header", '"Authorization": "Bot abcdefgh12345678"'),
+            ("Authorization header", "Authorization: Basic dXNlcjpwYXNzd29yZDEyMw=="),
+            ("Authorization header", 'Authorization = "Digest abcdefgh12345678"'),
+            ("Authorization header", 'http_headers = { "authorization" = "Token abcdefgh12345678" }'),
+            ("Authorization header", "Proxy-Authorization: Basic dXNlcjpwYXNzd29yZDEyMw=="),
+            ("Authorization header", r'printf "{\"Authorization\":\"Basic dXNlcjpwYXNzd29yZDEyMw==\"}"'),
+            ("Authorization header", '"Authorization": "Basic {{ secret "X" }}dXNlcjpw"'),
+            # a Discord bot token, bare and as a dot-joined run that is no Discord shape
+            ("Discord bot token", '  - "' + "MTIzNDU2Nzg5MDEyMzQ1Njc4" + ".Ab3-_x." + "q1W2e3R4t5Y6u7I8o9P0a1S2d3F4" + '"'),
+            ("dot-joined token", "jwt: " + "eyJhbGci1Xy9k" + ".eyJzdWIi2Zq7mA" + ".SflKxwRJ3SMeKKF2"),
+            # key names ending in _KEY, _SECRET, _TOKEN or _PASSWORD, any case
+            ("secret-looking key: value", 'SERVICE_KEY = "abcd1234"'),
+            ("secret-looking key: value", "svc_secret: abcd1234"),
+            ("secret-looking key: value", '"slack-token": "abcd1234"'),
+            ("secret-looking key: value", "DB_PASSWORD=abcd1234"),
+            # argv pairs and query parameters
+            ("credential flag argument", 'args = ["--token", "abcd1234"]'),
+            ("credential flag argument", "args: [--api-key, abcd1234]"),
+            ("credential flag argument", "  - --password\n  - abcd1234"),
+            ("credential flag argument", 'args = [\n  "--secret",\n  "abcd1234",\n]'),
+            ("credential flag argument", "command: tool --api-key abcd1234"),
+            ("password=", 'args = ["--password=abcd1234"]'),
+            ("credential in a URL query", 'u = "https://x.example/api?key=abcd1234"'),
+            ("credential in a URL query", 'u = "https://x.example/api?a=1&access_token=abcd1234"'),
+            ("credential in a URL query", 'u = "https://x.example/api?sig=abcd1234"'),
             # a key whose `/` cut it into segments under SEGMENT_MIN is not a path
             ("32+ character base64-like string", 'v = "Ab3dE6gH9jK2/mN5pQ8sT1vW4yZ7/bC0eF3hI6kL9/nP2qR5tU8w"'),
             ("32+ character base64-like string", 'v = "/Ab3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6kL9nP2qR5tU8w"'),
@@ -170,6 +199,51 @@ class ScanTest(unittest.TestCase):
                 for value in (rng.randbytes(16).hex(), "".join(rng.choice(alphabet) for _ in range(40))):
                     with self.subTest(name):
                         self.assertTrue(atc.scan(f'"{name}": "{value}"'))
+
+    def test_authorization_headers_and_dotted_tokens_never_pass(self):
+        # R2-1 of the 2026-10-20 adversary review: every scheme, and Discord's dotted shape, bare and under Bot
+        rng = random.Random(20261021)
+        alnum = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        url = alnum + "_-"
+
+        def pick(alphabet, n):
+            return "".join(rng.choice(alphabet) for _ in range(n))
+
+        def discord():
+            ident = base64.b64encode(str(rng.randint(10**17, 10**19)).encode()).decode().rstrip("=")
+            return f"{ident}.{pick(url, rng.choice((6, 7)))}.{pick(url, rng.randint(27, 38))}"
+
+        def basic():
+            return base64.b64encode(f"user:{pick(alnum, rng.randint(8, 24))}".encode()).decode()
+
+        shapes = {
+            "Basic": (basic, '"Authorization": "Basic %s"'),
+            "Token": (lambda: pick(alnum, 24), '"Authorization": "Token %s"'),
+            "no scheme": (lambda: pick(alnum, 24), '"Authorization": "%s"'),
+            "Bot": (discord, '"Authorization": "Bot %s"'),
+            "Bearer": (lambda: pick(alnum, 24), '"Authorization": "Bearer %s"'),
+            "yaml": (basic, "Authorization: Basic %s"),
+            "toml": (basic, 'Authorization = "Basic %s"'),
+            "discord bare in a list": (discord, '  - "%s"'),
+            "discord bare in yaml": (discord, "x: %s"),
+        }
+        for name, (gen, ctx) in shapes.items():
+            with self.subTest(name):
+                passed = [v for v in (gen() for _ in range(2000)) if not atc.scan(ctx % v)]
+                self.assertEqual(passed, [])
+
+    def test_key_names_flags_and_query_parameters_never_pass(self):
+        rng = random.Random(20261022)
+        alnum = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        contexts = (
+            'SERVICE_KEY = "%s"', "svc_secret: %s", '"bot-token": "%s"', "DB_PASSWORD = '%s'",
+            'args = ["--token", "%s"]', 'args = ["--api-key=%s"]', "run: tool --password %s",
+            "  - --secret\n  - %s", 'url = "https://x.example/api?key=%s"', 'url = "https://x.example/a?x=1&token=%s"',
+        )
+        for ctx in contexts:
+            with self.subTest(ctx):
+                values = ("".join(rng.choice(alnum) for _ in range(24)) for _ in range(500))
+                self.assertEqual([v for v in values if not atc.scan(ctx % v)], [])
 
     def test_literal_escaped_home_path_fails(self):
         self.assertIn("literal home path", self.rules(r'p = "\/Users\/alex\/bin"'))
@@ -203,6 +277,19 @@ class ScanTest(unittest.TestCase):
             'token = "{{ secret "X" }}"',
             "password_hash: '{{ secret \"X\" }}'",
             "Authorization: Bearer $KEY",
+            '"Authorization": "Bearer {{ secret "X" }}"',
+            "Authorization: Basic ${X}",
+            'Authorization = "Basic {{ secret "X" }}"',
+            "Authorization: $X",
+            'authorization: ""',
+            'args = ["--token", "{{ secret "X" }}"]',
+            "args: [--token, ${T}]",
+            'args = ["--password-file", "/etc/pw"]',
+            'args = ["--max-tokens", "40000"]',
+            'url = "https://x.example/api?key={{ secret "X" }}"',
+            "key_env: HERMES_CLINE_API_KEY",
+            'SERVICE_KEY = "{{ secret "X" }}"',
+            "plugin: com.example.long-service-name.region1.v2.node3",
             '"max_tokens": 4096',
             "plugins: disk-cleanup task-runner",
         ):

@@ -9,6 +9,9 @@ With no TEMPLATE it checks every agents/*/*.tmpl under the repo (or --root). For
      section 5 item 5) run over the template text with the `{{ ... }}` tags masked; any hit is a finding.
      Also flagged: an absolute home path (/Users/<name>, /home/<name>) that is not `{{ .home }}`, and a
      long numeric id (account, chat, Telegram or Discord id).
+     Credential shapes (2026-10-20, adversary round 2): an Authorization header with any scheme or none, a
+     Discord bot token or any `.`-joined key, key names ending in `_KEY`/`_SECRET`/`_TOKEN`/`_PASSWORD`, a
+     `--token`/`--api-key`/`--password`/`--secret` argument and its value, and `?key=`/`&token=` URL parameters.
   2. render: `{{ .field }}` and `{{ secret "NAME" }}` are filled from a dummy context and the result must parse
      (.json, .toml or .yaml by the name before `.tmpl`). Every field used must be documented in
      agents/README.md (a table row starting with the field in backticks).
@@ -59,11 +62,24 @@ ALLOW_BLOBS = {
 }
 
 # A placeholder tag (masked) must be the whole value: `{{ secret "X" }}<leaked tail>` is a hit.
-_MASKED = re.escape(MASK) + r"""(?:["'\s,]|$)"""
-_ENVREF = r"""\$\{?[A-Za-z_]\w*\}?(?:["'\s,]|$)"""
+_MASKED = re.escape(MASK) + r"""(?:["'\s,\]]|$)"""
+_ENVREF = r"""\$\{?[A-Za-z_]\w*\}?(?:["'\s,\]]|$)"""
 # Key names that hold a credential, in JSON ("x-api-key": "v"), YAML (token: v) and TOML (token = "v") forms.
 _KEYNAME = (r"""(?<![A-Za-z0-9])["']?(?:(?:x-)?api[-_]?key|apikey|(?:auth|access|refresh|bot)?[-_]?token|secret|"""
-            r"""client[-_]?secret|private[-_]?key|credential|passw(?:or)?d\w*)["']?""")
+            r"""client[-_]?secret|private[-_]?key|credential|passw(?:or)?d\w*|\w*[-_](?:key|secret|token|password))["']?""")
+# An Authorization (or Proxy-Authorization) header with any scheme or none: the possessive group eats one scheme
+# word (`Bearer`, `Basic`, `Token`, `Bot`, ...) so `Bearer {{ secret "X" }}` and `Basic ${X}` stay clean while
+# `Basic <base64>` and a bare value do not. `\\?["']` lets it match inside an escaped JSON string in a command.
+_AUTH = (r"""(?<![A-Za-z0-9])(?:proxy-)?authorization\\?["']?\s*[:=]\s*\\?["']?(?:[A-Za-z][\w-]*[ \t]+)?+"""
+         + r"""(?!""" + _MASKED + r"""|""" + _ENVREF + r"""|%|\\?["']|\s|$|<)[^\s"',\\]{4,}""")
+# A credential-named flag followed by its value: `["--token", "v"]`, `- --token` / `- v` on two lines, `--api-key v`.
+# `--password-file` and `--max-tokens` are not matched: the flag name must be followed by `,`, `"` or whitespace.
+_FLAG = r"""--(?:\w+-)*(?:token|api-?key|secret|password|passwd)"""
+ARGV = re.compile(r"""(?<![\w-])""" + _FLAG + r"""["']?\s*(?:,|\s)\s*(?:-\s+)?["']?(?!""" + _MASKED + r"""|""" + _ENVREF
+         + r"""|%|-|\s|<)[^\s"',\]]{4,}""", re.I)
+# A query parameter that carries a credential, in a URL.
+_QUERY = (r"""[?&](?:key|api[-_]?key|apikey|sig|signature|(?:access|auth|refresh)[-_]token|token|client[-_]secret|secret|"""
+          r"""password|passwd)=(?!""" + _MASKED + r"""|""" + _ENVREF + r"""|%|<)[^\s&"']+""")
 
 PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("sk- key", re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{6,}")),
@@ -76,6 +92,9 @@ PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("Slack token", re.compile(r"xox[bpas]-[A-Za-z0-9-]{6,}")),
     ("AWS key id", re.compile(r"AKIA[0-9A-Z]{8,}")),
     ("Bearer value", re.compile(r"Bearer\s+(?!" + _MASKED + r"|" + _ENVREF + r"|%s|<)\S{4,}")),
+    ("Discord bot token", re.compile(r"[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,38}")),
+    ("Authorization header", re.compile(_AUTH, re.I)),
+    ("credential in a URL query", re.compile(_QUERY, re.I)),
     ("PEM block", re.compile(r"-----BEGIN")),
     ("password=", re.compile(r"password=\S+", re.I)),
     ("api_key=", re.compile(r"api_key=\S+", re.I)),
@@ -89,6 +108,8 @@ PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("literal home path", re.compile(r"(?:/Users|/home)/(?!\{\{)[A-Za-z0-9._-]+|\\/Users\\/[A-Za-z0-9._-]+")),
 ]
 BLOB = re.compile(r"[A-Za-z0-9+/=_-]{32,}")
+# `.`-joined runs of pieces of 6 or more (a Discord bot token, a JWT): scored as one blob as well as piece by piece
+DOTTED = re.compile(r"[A-Za-z0-9+/=_-]{6,}(?:\.[A-Za-z0-9+/=_-]{6,})+")
 SEGMENT_MIN = 20  # a path segment this long is tested as a key on its own
 
 
@@ -136,14 +157,27 @@ def _blob_is_key(blob: str) -> bool:
     return "/" in blob and any(len(seg) >= SEGMENT_MIN and _key_like(seg) for seg in blob.split("/"))
 
 
+def _dotted_is_key(run: str) -> bool:
+    """A dotted run of 32 or more characters (dots not counted) that scores as a key whole: with the dots as
+    word breaks (so a dotted identifier is a word run) or removed (a dotted hex string)."""
+    if len(run.replace(".", "")) < 32:
+        return False
+    return _blob_is_key(run.replace(".", "_")) or _key_like(run.replace(".", ""))
+
+
 def scan(text: str) -> list[tuple[int, str]]:
     """(line number, rule) for every credential-looking token; never the value itself."""
     masked = ANY_TAG.sub(MASK, text)
     hits: list[tuple[int, str]] = []
+    # the flag and its value may sit on two lines (a YAML list, a multi-line TOML array), so this one runs on the text
+    hits.extend((masked.count("\n", 0, m.start()) + 1, "credential flag argument") for m in ARGV.finditer(masked))
     for lineno, line in enumerate(masked.splitlines(), 1):
         for rule, pat in PATTERNS:
             if pat.search(line):
                 hits.append((lineno, rule))
+        for m in DOTTED.finditer(line):
+            if _dotted_is_key(m.group(0)):
+                hits.append((lineno, "dot-joined token"))
         for m in BLOB.finditer(line):
             blob = m.group(0)
             if sha256(blob.encode()).hexdigest() in ALLOW_BLOBS:
