@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I
 """cursor-cloud: launch and inspect Cursor Cloud Agents from the terminal (2026-10-19).
 
 Cloud Agents are included in every paid Cursor plan and billed at API price against the
@@ -23,6 +23,10 @@ Usage:
   cursor-cloud usage AGENT_ID
 
 API: https://cursor.com/docs/cloud-agent/api/endpoints (v1, public beta; re-check on error).
+
+Environment:
+  CURSOR_CLOUD_API         API base (default https://api.cursor.com); the Basic key goes there, so it
+                           must be exactly https://api.cursor.com, and a redirect is never followed
 """
 from __future__ import annotations
 
@@ -32,10 +36,11 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
-API = os.environ.get("CURSOR_CLOUD_API", "https://api.cursor.com")
+DEFAULT_API = "https://api.cursor.com"
 KEY_NAME = "CURSOR_API_KEY"
 REASON = "cursor cloud agents launch"
 
@@ -44,21 +49,60 @@ def reexec_with_key(argv: list[str]) -> None:
     """Run this script again under sudo-secretspec so CURSOR_API_KEY is in the environment."""
     if os.environ.get("CURSOR_CLOUD_NO_REEXEC"):
         sys.exit(f"cursor-cloud: {KEY_NAME} is not set")
-    cmd = ["sudo-secretspec", "run", "--reason", REASON, "--", sys.executable, str(Path(__file__).resolve()), *argv]
-    env = {**os.environ, "CURSOR_CLOUD_NO_REEXEC": "1"}
-    os.execvpe(cmd[0], cmd, env)
+    cmd = ["sudo-secretspec", "run", "--reason", REASON, "--", sys.executable, "-I", str(Path(__file__).resolve()), *argv]
+    os.execvpe(cmd[0], cmd, reexec_env(os.environ))
+
+
+def reexec_env(env) -> dict:
+    """The environment for the process that holds the key: no proxy, CA-bundle or PYTHON* variable.
+
+    An agent that sets HTTPS_PROXY plus SSL_CERT_FILE could read the Basic key off the wire, and PYTHONPATH
+    plus a planted sitecustomize.py would run inside the process (adversary, 2026-10-20). -I ignores PYTHON*
+    already; the variables go too so the child holds none of them.
+    """
+    drop = ("SSL_CERT_", "PYTHON")
+    kept = {k: v for k, v in env.items() if not k.startswith(drop) and not k.lower().endswith("_proxy")}
+    return {**kept, "CURSOR_CLOUD_NO_REEXEC": "1"}
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """The Basic key goes with the request: never follow a redirect to another host or path."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _origin(url: str) -> str:
+    """scheme://host[:port] of a rejected URL: never its userinfo, path or query, which may carry a key."""
+    try:
+        u = urllib.parse.urlsplit(url.strip())
+        host = f"[{u.hostname}]" if u.hostname and ":" in u.hostname else u.hostname
+        if not (u.scheme and host):
+            return "(not a URL)"
+        return f"{u.scheme}://{host}" + (f":{u.port}" if u.port else "")
+    except ValueError:
+        return "(not a URL)"
+
+
+def api_base(env: dict | None = None) -> str:
+    """CURSOR_CLOUD_API, held to exactly https://api.cursor.com. No variable lifts that: tests patch this function."""
+    env = os.environ if env is None else env
+    base = (env.get("CURSOR_CLOUD_API") or DEFAULT_API).rstrip("/")
+    if base != DEFAULT_API:
+        sys.exit(f"cursor-cloud: CURSOR_CLOUD_API must be exactly {DEFAULT_API} (the key goes there), not {_origin(base)}")
+    return base
 
 
 def request(method: str, path: str, body: dict | None = None, key: str | None = None) -> dict:
     key = key or os.environ.get(KEY_NAME, "")
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(API + path, data=data, method=method)
-    req.add_header("Authorization", "Basic " + base64.b64encode(f"{key}:".encode()).decode())
+    req = urllib.request.Request(api_base() + path, data=data, method=method)
+    req.add_unredirected_header("Authorization", "Basic " + base64.b64encode(f"{key}:".encode()).decode())
     req.add_header("Accept", "application/json")
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.build_opener(_NoRedirect).open(req, timeout=60) as resp:
             raw = resp.read()
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")[:2000]
@@ -120,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "launch" and a.dry_run:
         print(json.dumps(launch_body(a), indent=2))
         return 0
+    api_base()                            # a bad CURSOR_CLOUD_API stops here, before the key is fetched
     if not os.environ.get(KEY_NAME):
         reexec_with_key(argv)
 
