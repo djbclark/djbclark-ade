@@ -1246,6 +1246,12 @@ def test_bigteam_rows_copy_every_report_never_a_plus_n_more():
     assert "\"$GCP\" --parents -t <DEST>/bigteam/big -- " in row and "| 6 |" in row
     assert "GCP=$(command -v gcp || command -v cp); GTAR=$(command -v gtar || command -v tar)" in text  # Codex pass 12
     assert "(cd ~/.local/state/bigteam/big && " in row
+    # Codex pass 14 on PR 27: the rows read the scanned root (`--bigteam`), not a hard-coded default
+    other = doc_scan([], tasks=[task]); other["bigteam"]["root"] = "/srv/bt root"
+    text = mod.render(other)
+    row = next(r for r in text.split("### 3.1")[1].split("### 3.2")[0].splitlines() if r.startswith("| big "))
+    assert "(cd '/srv/bt root/big' && " in row and "~/.local/state/bigteam" not in row
+    assert "## 1. bigteam (`/srv/bt root/<task>/`)" in text
     # Codex pass 13 on PR 27: an unclosed job record alone (no CLAIM, not mixed) is a decision, never "no (only DEST)"
     busy = dict(task, task="busy", open_job_records=["w.json"])
     text = mod.render(doc_scan([], tasks=[task, busy]))

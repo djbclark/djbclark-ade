@@ -141,6 +141,9 @@ def write_atomic(out, text):
 
 def render(d):
     bt, cos, sm = d["bigteam"], d["checkouts"], d["summary"]
+    # the scanned root (`--bigteam`), never a hard-coded default: the capture rows must read the tree that was
+    # scanned (Codex pass 14 on PR 27); `.get` for a scan written before the key existed
+    bt_root = tilde(bt.get("root") or os.path.join(HOME, ".local/state/bigteam"))
     tasks = sorted(bt["tasks"], key=lambda t: -t["bytes"])
     uniq = [t for t in tasks if t["verdict"] == "unique"]
     mixed = [t for t in tasks if t["verdict"] == "mixed"]
@@ -220,7 +223,7 @@ def render(d):
       "Deleting it is a later cleanup decision, not part of Phase 0.\n")
 
     # ---- 1 bigteam
-    w("## 1. bigteam (`~/.local/state/bigteam/<task>/`)\n")
+    w(f"## 1. bigteam (`{bt_root}/<task>/`)\n")
     w("**Method.** One row per task dir. *Size* is `du -sk`; *newest* is the newest mtime within two "
       "levels; *CLAIM* is `DONE` when the last non-blank line of `CLAIM` starts with `DONE`, `open` "
       "when a `CLAIM` exists without it, `no CLAIM` otherwise; *reports* are `*report*.md` files within "
@@ -344,7 +347,7 @@ def render(d):
         # (Codex pass 8 on PR 27: a row showing four of 22 paths could not be followed)
         slots = " ".join("{}" for _ in files)
         cmd = shcode("mkdir -p <DEST>/bigteam/{} && (cd {} && \"$GCP\" --parents -t <DEST>/bigteam/{} -- " + slots + ")",
-                     t["task"], "~/.local/state/bigteam/" + t["task"], t["task"], *files) if files else "no reports"
+                     t["task"], bt_root + "/" + t["task"], t["task"], *files) if files else "no reports"
         w(f"| {esc(t['task'])} | {len(files)} | {cmd} | "
           f"{'yes: ' + '; '.join(need) if need else 'no (only DEST)'} |")  # any unclosed job: yes (Codex pass 13)
     w("")
