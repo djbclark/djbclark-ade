@@ -53,7 +53,7 @@ Steps, in order:
 Exit codes: 0 current (and nothing wrong), 10 behind (--check) or a skill link (a link skill-everywhere leaves alone included, on the first run), CLAUDE.md or
 ~/.claude link is missing/unresolved, 2 usage or a local modification blocks the pull, 3 the branch
 cannot fast-forward (git's explicit non-fast-forward refusal only), 4 git, the network, skill-everywhere
-or the state file failed (no repo, --repo is not the top of its work tree, no upstream, fetch/pull error
+or the state file failed (no repo, --repo is not the top of its work tree, no upstream, fetch or merge error
 or timeout, any other `git merge --ff-only` failure, `skill-everywhere` not found from the canonical checkout, `--check` failed or returned no
 result for a skill, the state file cannot be written).
 """
@@ -72,7 +72,8 @@ from pathlib import Path
 EXIT_OK, EXIT_DIRTY, EXIT_NON_FF, EXIT_ERROR, EXIT_BEHIND = 0, 2, 3, 4, 10
 DEFAULT_REPO = "~/src/djbclark-ade"
 DEFAULT_STATE = "~/.local/state/ade/applied"
-NET_TIMEOUT = 300  # seconds, fetch and pull
+NET_TIMEOUT = 300  # seconds, the one fetch
+MERGE_TIMEOUT = 300  # seconds, the fast-forward: a large checkout or a post-merge hook (adversary round 12)
 LOCAL_TIMEOUT = 60
 LINK_TIMEOUT = 300  # skill-everywhere link mode nudges the Hermes gateway (up to 20 s)
 CLAUDE_KINDS = ("commands", "agents", "hooks")
@@ -407,7 +408,7 @@ NON_FF_MARKERS = ("not possible to fast-forward", "diverging branches", "cannot 
 
 def pull_failure_code(text):
     """Dirty (2) when git refuses to overwrite a local file (a race with the pre-check), not fast-forward (3) only
-    on git's explicit refusal, else 4: pull has its own fetch, so a timeout or lost auth can fail after ours."""
+    on git's explicit refusal, else 4: the fast-forward can still fail on a hook, a timeout or a damaged object."""
     low = "\n".join(ln for ln in text.lower().splitlines() if not ln.startswith("remote:"))  # R4-4: server text
     if "would be overwritten" in low:
         return EXIT_DIRTY
@@ -503,7 +504,7 @@ def update(rep, args, repo):
         else:
             # `up` is the commit the collision check covered; no second fetch, so a newer upstream commit with
             # unchecked paths is never brought in (the next run fetches and checks it)
-            rc, out, err = git(repo, "merge", "--ff-only", up)
+            rc, out, err = git(repo, "merge", "--ff-only", up, timeout=MERGE_TIMEOUT)
             if rc != 0:
                 raise Stop(pull_failure_code(err or out),
                            f"git merge --ff-only {short(up)} failed; nothing merged or reset:\n{(err or out).strip()}")
