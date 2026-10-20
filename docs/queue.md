@@ -119,7 +119,9 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    in `bin/ade-template-check` can take a short letter-initial key for the scheme (fix: letters-only scheme
    word or a closed list); the `]` terminator lets a tail after a placeholder or env ref through (accept
    `]` only when it closes the value); `_FLAG` misses `--key` and `--access-key` (end the rule with
-   `key`). Operator items: the public templates publish Hermes's approvals, Claude's allowlist and Codex's trust list.
+   `key`); `headers: - name: X / value: <key>` lists: the nearest key is `value`, so the parsed-scalar pass should
+   use the sibling `name` (adversary round 6, R6-3). Operator items: the public templates publish Hermes's
+   approvals, Claude's allowlist and Codex's trust list.
 
 ## Paseo workspace names after a handoff (djbclark, 2026-10-20)
 

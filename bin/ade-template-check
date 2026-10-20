@@ -168,6 +168,7 @@ def _dotted_is_key(run: str) -> bool:
 # One or more backslashes before a quote: a JSON or TOML string holding escaped JSON or a shell word (`\"`, `\\\"`).
 _ESCAPED_QUOTE = re.compile(r"""\\+(["'])""")
 _KEYED = dict(PATTERNS)["secret-looking key: value"]
+_AUTH_RULE = dict(PATTERNS)["Authorization header"]
 _STANDIN = "TAGSTANDIN0"
 
 
@@ -189,38 +190,90 @@ def _line_hits(line: str) -> list[str]:
     return rules
 
 
-def _yaml_value_hits(text: str, seen: set[tuple[int, str]]) -> list[tuple[int, str]]:
-    """The key-name rule over every parsed scalar of a YAML document, with its nearest mapping key as the name: a
-    block scalar (`api_key: >-` and an indented value on the next line) is invisible to the line scan, which
-    reads the key's line only. Reported at the key's line. A document that does not parse is the render check's
-    finding, not this one's."""
+def _scalar_pairs(text: str, kind: str) -> list[tuple[str, str, int | None]]:
+    """(nearest key, scalar text, key line or None) for every scalar of the parsed document, tags standing in
+    as a placeholder word. A list item takes the enclosing key. YAML carries marks, so its line is known; TOML and
+    JSON parsers give none (None). A document that does not parse yields nothing: that is the render check's
+    finding, not this pass's."""
+    src = ANY_TAG.sub(_STANDIN, text)
+    pairs: list[tuple[str, str, int | None]] = []
     try:
-        import yaml
-        root = yaml.compose(ANY_TAG.sub(_STANDIN, text))
+        if kind == "yaml":
+            import yaml
+            root = yaml.compose(src)
+            # An alias is the very node it names: a self-referencing alias or an alias tree would recurse or
+            # blow up without this. A node is walked once per key, since an alias under a credential key must
+            # be read under that key.
+            visited: set[tuple[int, str | None]] = set()
+
+            def walk(node, key: str | None, line: int) -> None:
+                if node is None or (id(node), key) in visited:
+                    return
+                visited.add((id(node), key))
+                if isinstance(node, yaml.MappingNode):
+                    for k, v in node.value:
+                        walk(v, k.value if isinstance(k, yaml.ScalarNode) else key, k.start_mark.line + 1)
+                elif isinstance(node, yaml.SequenceNode):
+                    for item in node.value:
+                        walk(item, key, line)
+                elif isinstance(node, yaml.ScalarNode) and key is not None:
+                    pairs.append((key, node.value, line))
+
+            walk(root, None, 0)
+        else:
+            def walk_obj(o, key: str | None) -> None:
+                if isinstance(o, dict):
+                    for k, v in o.items():
+                        walk_obj(v, str(k))
+                elif isinstance(o, list):
+                    for item in o:
+                        walk_obj(item, key)
+                elif o is not None and key is not None:
+                    pairs.append((key, json.dumps(o) if isinstance(o, bool) else str(o), None))
+
+            walk_obj(tomllib.loads(src) if kind == "toml" else json.loads(src), None)
     except Exception:  # noqa: BLE001 - PyYAML missing or a parse error: reported by the render step
         return []
+    return pairs
+
+
+def _parsed_value_hits(text: str, kind: str, seen: set[tuple[int, str]]) -> list[tuple[int, str]]:
+    """The key-name and Authorization rules over every parsed scalar, with its nearest key as the name, as
+    `key: value` with whitespace collapsed. The line scan reads one line, so it misses a value that does not sit on
+    its key's line: a YAML block scalar, a TOML `\"\"\"`/`'''` string or multi-line array, a JSON value on the next
+    line. A hit is reported at the key's line; TOML and JSON have no marks, so it goes to the first line holding the
+    key's text that the line scan has not already reported (all of them reported: the line scan caught it; none: line
+    0)."""
+    pairs = _scalar_pairs(text, kind)
+    if not pairs:
+        return []
+    lines = ANY_TAG.sub(MASK, text).splitlines()
+    taken = set(seen)
     hits: list[tuple[int, str]] = []
-
-    def walk(node, key: str | None, line: int) -> None:
-        if isinstance(node, yaml.MappingNode):
-            for k, v in node.value:
-                walk(v, k.value if isinstance(k, yaml.ScalarNode) else key, k.start_mark.line + 1)
-        elif isinstance(node, yaml.SequenceNode):
-            for item in node.value:
-                walk(item, key, line)
-        elif isinstance(node, yaml.ScalarNode) and key is not None:
-            value = " ".join(node.value.replace(_STANDIN, MASK).split())
-            if (line, "secret-looking key: value") not in seen and _KEYED.search(f"{key}: {value}"):
-                hits.append((line, "secret-looking key: value"))
-
-    walk(root, None, 0)
+    for key, raw, line in pairs:
+        pair = f"{key}: {' '.join(raw.replace(_STANDIN, MASK).split())}"
+        for rule, pat in (("secret-looking key: value", _KEYED), ("Authorization header", _AUTH_RULE)):
+            if not pat.search(pair):
+                continue
+            if line is None:
+                cands = [i for i, ln in enumerate(lines, 1) if key in ln]
+                free = [i for i in cands if (i, rule) not in taken]
+                if cands and not free:
+                    continue
+                line_no = free[0] if free else 0
+            else:
+                line_no = line
+                if (line_no, rule) in taken:
+                    continue
+            taken.add((line_no, rule))
+            hits.append((line_no, rule))
     return hits
 
 
 def scan(text: str, kind: str | None = None) -> list[tuple[int, str]]:
     """(line number, rule) for every credential-looking token; never the value itself. Each line is also scanned
-    with its backslash-escaped quotes unescaped (a command string holding escaped header JSON); `kind` "yaml"
-    adds the parsed-scalar pass."""
+    with its backslash-escaped quotes unescaped (a command string holding escaped header JSON); `kind` "yaml",
+    "toml" or "json" adds the parsed-scalar pass."""
     masked = ANY_TAG.sub(MASK, text)
     hits: list[tuple[int, str]] = []
     # the flag and its value may sit on two lines (a YAML list, a multi-line TOML array), so this one runs on the text
@@ -234,8 +287,8 @@ def scan(text: str, kind: str | None = None) -> list[tuple[int, str]]:
         if plain != line:
             rules.extend(r for r in _line_hits(plain) if r not in rules)
         hits.extend((lineno, r) for r in rules)
-    if kind == "yaml":
-        hits.extend(_yaml_value_hits(text, set(hits)))
+    if kind in ("yaml", "json", "toml"):
+        hits.extend(_parsed_value_hits(text, kind, set(hits)))
     return hits
 
 

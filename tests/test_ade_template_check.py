@@ -12,6 +12,7 @@ import json
 import os
 import random
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -297,6 +298,70 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("t/c.yaml.tmpl:2: credential scan: secret-looking key: value", out)
         self.assertNotIn("Zq7Lm2Xw9Rt4Vb8Nc3Hd6Fk1", out)
+
+    def test_values_off_the_keys_line_are_scanned_in_toml_and_json(self):
+        # adversary round 6 R6-1: the YAML pass's gap in the other two formats, 20-character synthetic keys
+        value = "Zq7Lm2Xw9Rt4Vb8Nc3Hd"
+        planted = {
+            "T1 basic multi-line string": ("toml", f'[a]\napi_key = """\n{value}"""\n', 2),
+            "T2 literal multi-line string": ("toml", f"[a]\napi_key = '''\n{value}'''\n", 2),
+            "T3 multi-line array": ("toml", f'[a]\ntoken = [\n  "{value}",\n]\n', 2),
+            "J1 next-line value": ("json", f'{{\n  "x-api-key":\n    "{value}"\n}}\n', 2),
+            "J2 array": ("json", f'{{"token": [\n  "{value}"\n]}}\n', 1),
+        }
+        for name, (kind, text, line) in planted.items():
+            with self.subTest(name):
+                self.assertEqual(atc.scan(text, kind), [(line, "secret-looking key: value")])
+        clean = {
+            "T1 secret tag": ("toml", 'api_key = """\n{{ secret "X" }}"""\n'),
+            "T2 secret tag": ("toml", "api_key = '''\n{{ secret \"X\" }}'''\n"),
+            "T2 env ref": ("toml", "api_key = '''\n${X}'''\n"),
+            "T3 secret tag": ("toml", 'token = [\n  "{{ secret "X" }}",\n]\n'),
+            "T3 env ref": ("toml", 'token = [\n  "${X}",\n]\n'),
+            "J1 secret tag": ("json", '{"x-api-key":\n  "{{ secret "X" }}"}\n'),
+            "J1 env ref": ("json", '{"x-api-key":\n  "${X}"}\n'),
+            "not a credential key": ("toml", f"note = '''\n{value}'''\n"),
+        }
+        for name, (kind, text) in clean.items():
+            with self.subTest(name):
+                self.assertEqual(atc.scan(text, kind), [])
+
+    def test_a_toml_or_json_hit_is_reported_once_and_at_the_keys_line(self):
+        value = "Zq7Lm2Xw9Rt4Vb8Nc3Hd"
+        # the line scan already reports a same-line value: the parsed pass adds nothing
+        self.assertEqual(atc.scan(f'api_key = "{value}"\n', "toml"), [(1, "secret-looking key: value")])
+        self.assertEqual(atc.scan(f'{{"api_key": "{value}"}}\n', "json"), [(1, "secret-looking key: value")])
+        # two entries with one key name: the same-line one is reported once, the multi-line one at its own line
+        text = f'a = {{ token = "{value}" }}\nb = {{ token = """\n{value}""" }}\n'
+        self.assertEqual(sorted(atc.scan(text, "toml")), [(1, "secret-looking key: value"), (2, "secret-looking key: value")])
+
+    @unittest.skipUnless(HAVE_YAML, "PyYAML not importable")
+    def test_authorization_block_scalar_is_scanned_in_every_format(self):
+        # adversary round 6 R6-2: the parsed pass runs the Authorization rule too
+        value = "Zq7Lm2Xw9Rt4Vb8Nc3Hd"
+        for kind, text in {
+            "yaml": f"Authorization: >-\n  Basic {value}\n",
+            "toml": f"Authorization = '''\nBasic {value}'''\n",
+            "json": f'{{"Authorization":\n  "Basic {value}"}}\n',
+        }.items():
+            with self.subTest(kind):
+                self.assertIn("Authorization header", {r for _, r in atc.scan(text, kind)})
+        self.assertEqual(atc.scan('Authorization: >-\n  Basic {{ secret "X" }}\n', "yaml"), [])
+        self.assertEqual(atc.scan("Authorization: >-\n  Bearer ${X}\n", "yaml"), [])
+
+    @unittest.skipUnless(HAVE_YAML, "PyYAML not importable")
+    def test_yaml_aliases_do_not_recurse_or_blow_up(self):
+        # adversary round 6 R6-4.1: a self-referencing alias and a 2**10 alias tree
+        value = "Zq7Lm2Xw9Rt4Vb8Nc3Hd"
+        self.assertEqual(atc.scan("a: &a [*a]\n", "yaml"), [])
+        self.assertEqual(atc.scan("a: &a {x: *a}\n", "yaml"), [])
+        # an alias reached under a credential key is still read under that key, even in a cycle
+        self.assertTrue(atc.scan(f"d: &d [{value}]\napi_key: *d\n", "yaml"))
+        tree = ["l0: &l0 [x]"] + [f"l{i}: &l{i} [*l{i - 1}, *l{i - 1}]" for i in range(1, 11)]
+        tree.append("api_key: *l10\n")
+        start = time.monotonic()
+        atc.scan("\n".join(tree), "yaml")
+        self.assertLess(time.monotonic() - start, 5)
 
     def test_literal_escaped_home_path_fails(self):
         self.assertIn("literal home path", self.rules(r'p = "\/Users\/alex\/bin"'))
