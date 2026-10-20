@@ -26,7 +26,7 @@ agent what changed and what is new. Entries end with the pull request number.
   `GIT_NO_LAZY_FETCH=1` so a partial clone
   downloads nothing during a `--remote` scan, and `--fetch` writes no refs and does not recurse into
   submodules; `bin/ade-scan-state-doc` renders the doc from the scan JSON and refuses to overwrite its
-  input, a directory, a non-`.md` path or an existing file without `--force` (#TBD).
+  input, a directory, a non-`.md` path or an existing file without `--force` (#27).
 - `agents/` templates for `~/.claude/settings.json`, `~/.codex/config.toml`, opencode's `opencode.json` and
   `~/.hermes/config.yaml` (secrets, home paths and host or account ids as placeholders, listed in
   `agents/README.md`), `bin/ade-template-check` (credential scan, render-and-parse with plain and hostile values, `--diff` by key path) and its
