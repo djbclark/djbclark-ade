@@ -57,7 +57,7 @@ A --git-root or --ref-root that is not a directory (a --ref-root must also be se
 that is not a directory or cannot be listed, is a usage error (exit 2) before anything is scanned.
 
 Git checkout verdicts (a checkout is a dir holding `.git`, found up to two levels under each
---git-root, symlinks not followed, deduplicated):
+--git-root, a repository nested inside a checkout included, symlinks not followed, deduplicated):
   unpushed commits  the upstream exists and HEAD is ahead of it; or origin lists the branch and HEAD
                     is ahead; or any local branch (or a detached HEAD) holds a commit that is on no
                     origin ref, whatever the origin state
@@ -468,8 +468,9 @@ def scan_bigteam(root: Path, ref_roots: list[Path], exclude: list[str], unique_m
 
 
 def find_checkouts(root: Path, failures: list[tuple[Path, str]] | None = None) -> list[Path]:
-    """Checkouts up to GIT_SCAN_DEPTH levels under `root`; a directory that cannot be listed goes to
-    `failures` as (path, errno name) instead of reading as "no checkouts"."""
+    """Checkouts up to GIT_SCAN_DEPTH levels under `root`, repositories nested inside a checkout included
+    (not its `.git` or dependency directories); a directory that cannot be listed goes to `failures` as
+    (path, errno name) instead of reading as "no checkouts"."""
     found = []
 
     def fail(p: Path, exc: OSError):
@@ -484,7 +485,8 @@ def find_checkouts(root: Path, failures: list[tuple[Path, str]] | None = None) -
             return
         if checkout:
             found.append(p)
-            return
+            # and keep going: an ordinary repository nested inside a checkout (not a submodule, which is a
+            # `.git` file plus `core.worktree` and is skipped as such) holds its own work (Codex pass 22 on PR 27)
         if depth == 0:
             return
         try:
@@ -493,6 +495,8 @@ def find_checkouts(root: Path, failures: list[tuple[Path, str]] | None = None) -
             fail(p, exc)
             return
         for e in kids:
+            if checkout and e.name in SKIP_DIRS:
+                continue  # `.git` itself and dependency trees inside a checkout
             try:
                 if e.is_dir(follow_symlinks=False):  # a link may lead anywhere: name that root instead
                     rec(Path(e.path), depth - 1)
@@ -584,20 +588,22 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
     return present, None
 
 
-def stash_count(path: Path, common: Path | None) -> int:
-    """Stashes = lines of the stash reflog file; no log machinery (no gpg, no pager) is involved."""
+def stash_count(path: Path, common: Path | None) -> int | None:
+    """Stashes = lines of the stash reflog file; no log machinery (no gpg, no pager) is involved. None when
+    the count could not be taken (an unreadable reflog, a failed `stash list`): the caller records the scan as
+    incomplete rather than inventing a count (Codex pass 22 on PR 27)."""
     if common:
         try:
             return len((common / "logs" / "refs" / "stash").read_bytes().splitlines())
         except FileNotFoundError:
             pass
         except OSError:
-            return 1  # unreadable reflog: report that something is there
+            return None
     rc, _ = git(path, "rev-parse", "--verify", "--quiet", "refs/stash")
     if rc != 0:
         return 0
     rc, n = git(path, "stash", "list", "--format=%H")  # reftable: no reflog file; log.showSignature is off
-    return max(len(n.splitlines()), 1) if rc == 0 else 1
+    return max(len(n.splitlines()), 1) if rc == 0 else None
 
 
 _neutral_cwd: list[str] = []
@@ -892,6 +898,8 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
             return incomplete_record(path, "rev-list --count HEAD --not --remotes=origin", rc)
         ahead_of_origin = int(n)
     stashes = stash_count(path, common)
+    if stashes is None:
+        return incomplete_record(path, "stash list", 1)
     branches, live, invalid_refs, tags, credential = (origin_branches(path, remote) if has_origin
                                                       else (None, False, 0, {}, False))
     origin_unreachable = bool(remote and has_origin and not live)
@@ -1185,8 +1193,8 @@ def main(argv=None) -> int:
                     help="rg glob (no leading !) to ignore under --ref-root, added to the built-in "
                          "%s (the scan docs)" % ", ".join(DEFAULT_EXCLUDES))
     ap.add_argument("--git-root", type=Path, action="append", default=[],
-                    help="a dir whose checkouts (up to 2 levels down) are scanned; symlinks under "
-                         "it are not followed (repeatable)")
+                    help="a dir whose checkouts (up to 2 levels down, repositories nested in a checkout "
+                         "included) are scanned; symlinks under it are not followed (repeatable)")
     ap.add_argument("--remote", action="store_true",
                     help="ask origin with `git ls-remote --heads --tags origin` (network call, run outside the "
                          "checkout; the first `remote.origin.url`, a path resolved against the checkout, "

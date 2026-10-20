@@ -337,6 +337,43 @@ def test_config_included_from_a_file_is_caught(tmp_path):
     assert "include.path" in c["config_keys"]
 
 
+def test_a_repository_nested_inside_a_checkout_is_scanned_too(tmp_path):
+    """Codex pass 22 on PR 27: discovery stopped at the outer checkout, so an ordinary repository nested in it
+    (no submodule, no flag) was in no record and no capture row."""
+    mod = load()
+    roots = tmp_path / "roots"
+    outer = make_repo(roots / "outer")
+    inner = make_repo(outer / "inner")
+    (inner / "work.txt").write_text("only here\n")
+    (outer / "node_modules").mkdir()
+    make_repo(outer / "node_modules" / "dep")  # a dependency tree's repository is not scanned
+    recs = {r["path"]: r for r in mod.scan_git([roots], remote=False)}
+    assert set(recs) == {str(outer), str(inner)}
+    assert recs[str(inner)]["untracked"] == 1 and recs[str(inner)]["verdict"] != "clean and pushed"
+    assert recs[str(outer)]["untracked"] == 2  # `inner/` and `node_modules/` show as untracked in the outer checkout
+
+
+def test_an_unreadable_stash_reflog_is_a_scan_incomplete_not_one_stash(tmp_path):
+    """Codex pass 22 on PR 27: an OSError on the reflog used to report exactly one stash."""
+    if os.geteuid() == 0:
+        pytest.skip("root reads anything")
+    mod = load()
+    repo = make_repo(tmp_path / "roots" / "stashy")
+    (repo / "a.txt").write_text("x\n")
+    git(repo, "stash", "push", "-m", "one")
+    (repo / "a.txt").write_text("y\n")
+    git(repo, "stash", "push", "-m", "two")
+    reflog = repo / ".git" / "logs" / "refs" / "stash"
+    assert reflog.is_file()
+    reflog.chmod(0)
+    try:
+        c = scan_one(mod, tmp_path / "roots")
+    finally:
+        reflog.chmod(0o644)
+    assert c["verdict"] == "scan incomplete: stash list rc=1" and c["stashes"] is None
+    assert scan_one(mod, tmp_path / "roots")["stashes"] == 2
+
+
 def test_stash_count_runs_no_gpg_program(tmp_path):
     """R2-1a: log.showSignature + gpg.program ran during `stash list` on a signed stash commit."""
     mod = load()
