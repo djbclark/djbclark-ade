@@ -391,6 +391,28 @@ def test_non_canonical_repo_reports_skills_but_never_links(env):
     assert ["alpha"] in env.calls() and "report-only" not in r.stdout
 
 
+def test_a_non_canonical_repo_never_writes_the_shared_state_record(env, monkeypatch, capsys):
+    """Codex pass 11 on PR 20: `--repo <other clone>` without --state wrote that clone's HEAD into the canonical
+    record, so the next canonical run saw base == target and hid (or replayed) changelog entries."""
+    mod = load_module()
+    other = clone(env, "other")
+    for k, v in dict(HOME=str(env.home), PATH=f"{env.bin}{os.pathsep}{os.environ['PATH']}",
+                     FAKE_SE_STATE=str(env.se_state), FAKE_SE_LOG=str(env.se_log),
+                     SKILL_EVERYWHERE_ADE=str(env.machine / "skills")).items():
+        monkeypatch.setenv(k, v)
+    shared = env.home / ".local" / "state" / "ade" / "applied"
+    rc = mod.main(["--repo", str(other), "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0, out
+    assert not shared.exists()  # the canonical checkout's record is untouched
+    own = Path(out["state_file"])
+    assert own.parent == shared.parent and own.name.startswith("applied-") and own != shared
+    assert own.read_text().strip() == sh("git", "-C", str(other), "rev-parse", "HEAD")
+    assert mod.default_state(other) == str(own) and mod.default_state(env.machine) == str(shared)
+    # the same clone gets the same record next time; a different clone gets another
+    assert mod.default_state(clone(env, "third")) != str(own)
+
+
 def test_canonical_repo_follows_skill_everywhere_ade_then_the_default(tmp_path, monkeypatch):
     mod = load_module()
     monkeypatch.setenv("HOME", str(tmp_path))

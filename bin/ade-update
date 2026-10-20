@@ -8,7 +8,9 @@ acceptance test T8). It automates README "Update (this machine)":
     ade-update --check          report only ("would" wording); changes nothing in the tree, links or state
     ade-update --json           the same report as one JSON object on stdout
     ade-update --repo PATH      the checkout (default ~/src/djbclark-ade); must be the top of its work tree
-    ade-update --state PATH     where the applied revision is recorded (default ~/.local/state/ade/applied)
+    ade-update --state PATH     where the applied revision is recorded (default ~/.local/state/ade/applied for the
+                                canonical checkout; a non-canonical --repo gets its own default,
+                                ~/.local/state/ade/applied-<12 hex of its path>, never the shared record)
 
 Steps, in order:
 
@@ -58,6 +60,7 @@ or timeout, any other `git merge --ff-only` failure, `skill-everywhere` not foun
 result for a skill, the state file cannot be written).
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -236,6 +239,15 @@ def canonical_repo():
     ade = os.environ.get("SKILL_EVERYWHERE_ADE")
     home = Path(os.path.expanduser(ade)).parent if ade else Path(os.path.expanduser(DEFAULT_REPO))
     return home.resolve()
+
+
+def default_state(repo):
+    """The shared record is the canonical checkout's; any other --repo (a pasture, a second clone) records under
+    its own name, so its HEAD never becomes the canonical baseline (Codex pass 11 on PR 20, 2026-10-20)."""
+    base = os.path.expanduser(DEFAULT_STATE)
+    if Path(repo).resolve() == canonical_repo():
+        return base
+    return base + "-" + hashlib.sha256(str(Path(repo).resolve()).encode()).hexdigest()[:12]
 
 
 def find_skill_everywhere(repo):
@@ -676,9 +688,12 @@ def main(argv=None):
     ap.add_argument("--repo", default=DEFAULT_REPO, help=f"the checkout (default {DEFAULT_REPO})")
     ap.add_argument("--check", action="store_true", help="report only; change nothing, exit 10 when behind or links missing")
     ap.add_argument("--json", action="store_true", help="print the report as JSON")
-    ap.add_argument("--state", default=DEFAULT_STATE, help=f"applied-revision record (default {DEFAULT_STATE})")
+    ap.add_argument("--state", default=None, help=f"applied-revision record (default {DEFAULT_STATE}; a non-canonical "
+                    "--repo defaults to its own record beside it)")
     args = ap.parse_args(argv)
     repo = Path(os.path.expanduser(args.repo)).resolve()
+    if args.state is None:
+        args.state = default_state(repo)
     here = Path(__file__).resolve().parent.parent
     if here != canonical_repo():  # R5-3: the trust root is wherever the running ade-update resolves to
         print(f"ade-update: warning: ade-update runs from {here}, not the canonical checkout {canonical_repo()}; "
