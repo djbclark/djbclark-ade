@@ -28,3 +28,7 @@ os.environ.setdefault("ACP_DISPATCH_LAUNCHCTL", "/usr/bin/true")
 # Off in tests: dir sweeps must always run and must never touch the real machine's stamp;
 # test_acp_dispatch_waiter.py turns the throttle on explicitly per test.
 os.environ.setdefault("ACP_DISPATCH_REAP_MIN_INTERVAL", "0")
+# route_agent.load_snapshot() runs `aiuse --available --json` unless a snapshot is pinned (2026-10-20).
+# Off in tests so the suite never depends on, or spawns, the host's real aiuse;
+# test_route_agent.py's TestQuotaFromAiuseAvailable turns it on per test.
+os.environ.setdefault("ROUTE_AGENT_AIUSE", "off")

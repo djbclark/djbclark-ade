@@ -1155,3 +1155,580 @@ class TestOmpCreditsTier(unittest.TestCase):
             con.commit()
             con.close()
             self.assertTrue(r.omp_anthropic_ready())
+
+
+class TestQuotaFromAiuseAvailable(unittest.TestCase):
+    """Pool state comes from `aiuse --available --json`, not the snapshot file (2026-10-20)."""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        r._reset_aiuse_cache()
+        self.addCleanup(r._reset_aiuse_cache)
+        now = datetime.now(UTC)
+        self.accounts = [
+            {"provider": "codex", "age_seconds": 30,
+             "windows": [{"label": "weekly", "remaining_percent": 60.0,
+                          "headroom_percent": 60.0, "state": "ok"}]},
+            {"provider": "omp", "age_seconds": 30, "windows": [
+                {"label": "omp credits", "remaining_percent": 2.0, "headroom_percent": 2.0,
+                 "state": "tight", "resets_at": (now + timedelta(days=19)).isoformat()}]},
+        ]
+
+    def payload(self, rows, **extra):
+        return {"schema_version": "1.3", "age_seconds": 20.0, "fresh": True,
+                "available": rows, **extra}
+
+    def write(self, name, obj):
+        path = self.tmp / name
+        path.write_text(obj if isinstance(obj, str) else r.json.dumps(obj))
+        return path
+
+    def load(self, env):
+        import io
+        env = {"ROUTE_AGENT_OMP_READY": "0", **env}
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("AIUSE_SNAPSHOT", "ROUTE_AGENT_AIUSE_JSON", "ROUTE_AGENT_AIUSE",
+                              "ROUTE_AGENT_AIUSE_BIN")}
+        with mock.patch.dict(os.environ, {**clean, **env}, clear=True), \
+                mock.patch.object(r, "_read_snapshot_file",
+                                  return_value=(self.accounts, 60.0)), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            quota, age = r.load_snapshot()
+        return quota, age, err.getvalue()
+
+    def test_override_row_wins_over_the_snapshot_file(self):
+        # the file says omp is nearly empty; aiuse's read-time override says 80% left,
+        # and 3.8-only fields (expires_at, burn_before_reset, source) are tolerated
+        row = {"provider": "omp", "age_seconds": 5, "expires_at": "2026-11-08T00:00:00Z",
+               "burn_before_reset": True, "source": "override",
+               "windows": [{"label": "omp credits", "remaining_percent": 80.0,
+                            "headroom_percent": 80.0, "state": "ok", "source": "override",
+                            "resets_at": "2026-11-08T00:00:00+00:00"}]}
+        path = self.write("a.json", self.payload([row]))
+        quota, age, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["omp"]["remaining"], 80.0)
+        self.assertEqual(r.QuotaSource.kind, "canned")
+        self.assertEqual(age, 20.0)
+        self.assertIsNone(r.quota_source_info()["fallback_reason"])
+
+    def test_row_without_3_8_fields_still_loads(self):
+        row = {"provider": "omp", "windows": [{"label": "omp credits", "headroom_percent": 55.0}]}
+        path = self.write("a.json", self.payload([row]))
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["omp"]["remaining"], 55.0)
+
+    def test_pool_missing_from_available_reads_exhausted_not_unknown(self):
+        path = self.write("a.json", self.payload([]))
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+        self.assertEqual(quota["omp"]["remaining"], 0.0)
+
+    def test_reading_expired_row_is_unknown(self):
+        row = {"provider": "omp", "age_seconds": 5, "reading_expired": True,
+               "windows": [{"label": "omp credits", "remaining_percent": 90.0,
+                            "headroom_percent": 90.0, "state": "ok"}]}
+        path = self.write("a.json", self.payload([row]))
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertIsNone(quota["omp"]["remaining"])
+
+    def test_missing_aiuse_falls_back_to_the_file_and_says_so(self):
+        with mock.patch.object(r.shutil, "which", return_value=None):
+            quota, age, err = self.load({})
+        self.assertEqual(quota["codex"]["remaining"], 60.0)
+        self.assertEqual(r.QuotaSource.kind, "snapshot")
+        self.assertIn("aiuse not on PATH", r.quota_source_info()["fallback_reason"])
+        self.assertIn("aiuse not on PATH", err)
+
+    def test_malformed_json_falls_back(self):
+        path = self.write("bad.json", "not json {")
+        quota, _, err = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["codex"]["remaining"], 60.0)
+        self.assertIn("malformed JSON", r.quota_source_info()["fallback_reason"])
+        self.assertIn("malformed JSON", err)
+
+    def test_payload_without_available_array_falls_back(self):
+        path = self.write("odd.json", {"schema_version": "1.3"})
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["codex"]["remaining"], 60.0)
+        self.assertEqual(r.QuotaSource.kind, "snapshot")
+
+    def fake_aiuse(self, body, rc):
+        script = self.tmp / "aiuse"
+        script.write_text(f"#!/bin/sh\ncat <<'EOF'\n{body}\nEOF\nexit {rc}\n")
+        script.chmod(0o755)
+        return str(script)
+
+    def test_subprocess_path_runs_argv_and_accepts_exit_3(self):
+        body = r.json.dumps(self.payload([]))
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": self.fake_aiuse(body, 3)})
+        self.assertEqual(r.QuotaSource.kind, "aiuse")
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    def test_failing_aiuse_falls_back(self):
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": self.fake_aiuse("boom", 1)})
+        self.assertEqual(r.QuotaSource.kind, "snapshot")
+        self.assertIn("exited 1", r.quota_source_info()["fallback_reason"])
+        self.assertEqual(quota["codex"]["remaining"], 60.0)
+
+    def test_pinned_snapshot_never_spawns_aiuse(self):
+        with mock.patch.object(r.subprocess, "run") as run:
+            self.load({"AIUSE_SNAPSHOT": str(self.tmp / "x.json")})
+        run.assert_not_called()
+        self.assertEqual(r.QuotaSource.kind, "snapshot")
+
+    # -- hardening (adversary review 2026-10-20) --------------------------------
+
+    def rows_payload(self, rows, **extra):
+        return self.write("rows.json", self.payload(rows, **extra))
+
+    def test_aiuse_off_never_spawns(self):
+        marker = self.tmp / "spawned"
+        script = self.tmp / "aiuse"
+        script.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\necho '{{}}'\n")
+        script.chmod(0o755)
+        import io
+        with mock.patch.dict(os.environ, {"ROUTE_AGENT_AIUSE": "off",
+                                          "ROUTE_AGENT_AIUSE_BIN": str(script)}), \
+                mock.patch.object(r, "_read_snapshot_file", return_value=([], None)), \
+                contextlib.redirect_stderr(io.StringIO()):
+            os.environ.pop("AIUSE_SNAPSHOT", None)
+            os.environ.pop("ROUTE_AGENT_AIUSE_JSON", None)
+            r.load_snapshot()
+        self.assertFalse(marker.exists())
+
+    def test_unparseable_shapes_fall_back_to_the_file(self):
+        good_w = {"label": "w", "headroom_percent": 50.0}
+        shapes = {
+            "windows non-dict": [{"provider": "codex", "windows": [5]}],
+            "windows object": [{"provider": "codex", "windows": {"a": 1}}],
+            "provider list": [{"provider": ["codex"], "windows": [good_w]}],
+        }
+        for name, rows in shapes.items():
+            with self.subTest(name):
+                path = self.rows_payload(rows)
+                quota, _, err = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+                self.assertEqual(r.QuotaSource.kind, "snapshot")
+                self.assertRegex(r.quota_source_info()["fallback_reason"], "unparseable rows|invalid row")
+                self.assertEqual(quota["codex"]["remaining"], 60.0)
+
+    def test_non_numeric_percentage_reads_unknown_not_a_crash(self):
+        row = {"provider": "codex", "windows": [{"label": "w", "headroom_percent": "lots",
+                                                 "remaining_percent": "plenty"}]}
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
+        self.assertIsNone(quota["codex"]["remaining"])
+
+    def test_invalid_utf8_falls_back(self):
+        bad = self.tmp / "bad.json"
+        bad.write_bytes(b'{"available": [], "x": "\xff\xfe"}')
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(bad)})
+        self.assertEqual(r.QuotaSource.kind, "snapshot")
+        self.assertIn("malformed JSON", r.quota_source_info()["fallback_reason"])
+        script = self.tmp / "aiuse"
+        script.write_bytes(b"#!/bin/sh\nprintf '{\"available\": [], \"x\": \"\\377\"}'\n")
+        script.chmod(0o755)
+        self.load({"ROUTE_AGENT_AIUSE_BIN": str(script)})
+        self.assertEqual(r.QuotaSource.kind, "snapshot")
+
+    def test_non_finite_percentages_never_read_as_headroom(self):
+        for bad in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(bad):
+                body = ('{"age_seconds": 5, "available": [{"provider": "copilot", "windows": '
+                        f'[{{"label": "premium", "headroom_percent": {bad}}}]}}]}}')
+                path = self.write("nan.json", body)
+                quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+                self.assertIsNone(quota["copilot"]["remaining"])
+                for kind in r.KINDS:
+                    choice = r.route(kind, quota={**IDLE, **quota})
+                    self.assertFalse(choice and choice.service.name == "copilot", kind)
+
+    def test_percentages_are_clamped(self):
+        row = {"provider": "codex", "windows": [{"label": "w", "headroom_percent": 250}]}
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
+        self.assertEqual(quota["codex"]["remaining"], 100.0)
+
+    def test_unknown_or_nonfinite_age_does_not_zero_absent_pools_and_rows_are_stale(self):
+        row = {"provider": "omp", "windows": [{"label": "c", "headroom_percent": 70.0}]}
+        for name, extra in (("nan", {"age_seconds": float("nan")}),
+                            ("none", {"age_seconds": None}),
+                            ("negative", {"age_seconds": -5})):
+            with self.subTest(name):
+                payload = {"available": [row], **extra}
+                path = self.write("age.json", r.json.dumps(payload))
+                quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+                self.assertEqual(quota["codex"]["remaining"], 60.0)   # not zeroed
+                self.assertIsNone(quota["omp"]["remaining"])           # stale row
+
+    def test_stale_payload_does_not_zero_absent_pools(self):
+        path = self.write("old.json", self.payload([], age_seconds=r.STALE_SOFT + 100))
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["codex"]["remaining"], 60.0)
+
+    def test_canned_is_labelled_and_logged_and_beats_off_and_pin(self):
+        path = self.write("a.json", self.payload([]))
+        quota, _, err = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path),
+                                   "ROUTE_AGENT_AIUSE": "off",
+                                   "AIUSE_SNAPSHOT": str(self.tmp / "pin.json")})
+        self.assertEqual(r.QuotaSource.kind, "canned")
+        self.assertIn("canned", err)
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    def test_subprocess_with_valid_rows(self):
+        body = r.json.dumps(self.payload([{"provider": "omp", "windows": [
+            {"label": "c", "headroom_percent": 42.0, "state": "ok"}]}]))
+        quota, age, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": self.fake_aiuse(body, 0)})
+        self.assertEqual(r.QuotaSource.kind, "aiuse")
+        self.assertEqual(quota["omp"]["remaining"], 42.0)
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    def test_timeout_falls_back_quickly(self):
+        import time as _t
+        script = self.tmp / "aiuse"
+        script.write_text("#!/bin/sh\nexec sleep 5\n")
+        script.chmod(0o755)
+        t0 = _t.monotonic()
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": str(script),
+                                 "ROUTE_AGENT_AIUSE_TIMEOUT": "0.5"})
+        self.assertLess(_t.monotonic() - t0, 4.0)
+        self.assertIn("timed out", r.quota_source_info()["fallback_reason"])
+        self.assertEqual(quota["codex"]["remaining"], 60.0)
+
+    def test_timeout_env_is_clamped(self):
+        for bad in ("inf", "nan", "0", "-3", "999", "x"):
+            with self.subTest(bad), mock.patch.dict(os.environ, {"ROUTE_AGENT_AIUSE_TIMEOUT": bad}):
+                self.assertEqual(r._aiuse_timeout(), 20.0)
+        with mock.patch.dict(os.environ, {"ROUTE_AGENT_AIUSE_TIMEOUT": "7"}):
+            self.assertEqual(r._aiuse_timeout(), 7.0)
+
+    def test_spawn_is_memoised_only_within_the_ttl(self):
+        body = r.json.dumps(self.payload([]))
+        exe = self.fake_aiuse(body, 0)
+        clock = [1000.0]
+        with mock.patch.object(r.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(r.subprocess, "run", wraps=r.subprocess.run) as run:
+            self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            clock[0] += r.AIUSE_MEMO_TTL - 1
+            self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            self.assertEqual(run.call_count, 1)
+            clock[0] += 2
+            self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            self.assertEqual(run.call_count, 2)
+
+    def counting_aiuse(self):
+        counter = self.tmp / "count"
+        counter.write_text("0")
+        script = self.tmp / "aiuse"
+        script.write_text(
+            "#!/bin/sh\n"
+            f"n=$(cat {shlex.quote(str(counter))}); n=$((n+1)); echo $n > {shlex.quote(str(counter))}\n"
+            "cat <<EOF\n"
+            '{"age_seconds": 5, "available": [{"provider": "omp", "age_seconds": 5, "windows": '
+            '[{"label": "c", "headroom_percent": $((n*10))}]}]}\n'
+            "EOF\n")
+        script.chmod(0o755)
+        return str(script)
+
+    def test_changing_reading_is_new_after_the_ttl_and_aged_within_it(self):
+        exe = self.counting_aiuse()
+        clock = [1000.0]
+        with mock.patch.object(r.time, "monotonic", side_effect=lambda: clock[0]):
+            q1, age1, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            self.assertEqual(q1["omp"]["remaining"], 10.0)
+            self.assertEqual(age1, 5.0)
+            clock[0] += 20
+            q2, age2, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            self.assertEqual(q2["omp"]["remaining"], 10.0)      # the old reading ...
+            self.assertEqual(age2, 25.0)                         # ... aged by the elapsed time
+            clock[0] += 20
+            q3, age3, _ = self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            self.assertEqual(q3["omp"]["remaining"], 20.0)      # a fresh spawn
+            self.assertEqual(age3, 5.0)
+
+    def test_cached_reading_goes_stale_as_it_ages(self):
+        r._AIUSE_MEMO.clear()
+        cached = {"age_seconds": r.STALE_SOFT - 5, "available": [
+            {"provider": "omp", "age_seconds": r.STALE_SOFT - 5,
+             "windows": [{"label": "c", "headroom_percent": 70.0}]}]}
+        aged, _ = r._aged_copy((cached, "x"), 10)
+        self.assertEqual(aged["available"][0]["age_seconds"], r.STALE_SOFT + 5)
+        self.assertEqual(cached["available"][0]["age_seconds"], r.STALE_SOFT - 5)  # untouched
+
+    def test_failures_are_memoised_no_longer_than_the_ttl(self):
+        clock = [1000.0]
+        exe = self.fake_aiuse("boom", 1)
+        with mock.patch.object(r.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(r.subprocess, "run", wraps=r.subprocess.run) as run:
+            self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            self.assertEqual(run.call_count, 1)
+            clock[0] += r.AIUSE_MEMO_TTL + 1
+            self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
+            self.assertEqual(run.call_count, 2)
+
+    # -- the available-row contract: top-level fields, windows[] optional (Codex P1) ----------
+
+    FAILOVER_FIXTURE_ROWS = [   # tests/test_failover.py AIUSE, no windows[]; age added (see below)
+        {"provider": "opencode-go", "pool_family": None, "usable_now": True,
+         "headroom_percent": 8.0},
+        {"provider": "claude", "pool_family": "default", "usable_now": True,
+         "headroom_percent": 20.0},
+        {"provider": "claude", "pool_family": "fable", "usable_now": True,
+         "headroom_percent": 2.5},
+        {"provider": "antigravity", "pool_family": "gemini", "usable_now": True,
+         "headroom_percent": 16.0},
+        {"provider": "antigravity", "pool_family": "claude_gpt", "usable_now": False,
+         "headroom_percent": 0},
+    ]
+
+    def test_rows_without_windows_follow_the_contract_fields(self):
+        # a payload with no age at all reads stale by design, so the fixture carries one
+        path = self.rows_payload(self.FAILOVER_FIXTURE_ROWS)
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["claude"]["remaining"], 20.0)
+        self.assertEqual(quota["claude"]["sublimits"], {"fable": 2.5})
+        self.assertEqual(quota["opencode-go"]["remaining"], 8.0)
+        self.assertEqual(quota["antigravity"]["remaining"], 16.0)
+        self.assertEqual(quota["antigravity-claude"]["remaining"], 0.0)
+
+    def test_plan_refuses_the_pools_under_min_headroom(self):
+        path = self.rows_payload(self.FAILOVER_FIXTURE_ROWS)
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        quota = {**{k: v for k, v in quota.items()}}
+        for kind in ("code", "bulk"):
+            choice = r.route(kind, quota=quota, min_headroom=25)
+            for refused in ("claude", "opencode-go", "antigravity", "antigravity-claude"):
+                self.assertFalse(choice and choice.service.name == refused, (kind, refused))
+
+    def test_row_with_windows_keeps_detail_and_the_tighter_remaining(self):
+        row = {"provider": "codex", "usable_now": True, "headroom_percent": 40.0,
+               "binding_window": "weekly",
+               "windows": [{"label": "5-hour", "headroom_percent": 55.0, "pace_ratio": 0.5,
+                            "resets_at": "2026-10-25T00:00:00+00:00", "window_minutes": 300},
+                           {"label": "weekly", "headroom_percent": 40.0}]}
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
+        self.assertEqual(quota["codex"]["remaining"], 40.0)
+        self.assertEqual(quota["codex"]["windows"], {"weekly": 40.0, "5-hour": 55.0})
+        # windows tighter than the top-level field tighten, never loosen
+        row2 = dict(row, headroom_percent=90.0)
+        quota2, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row2]))})
+        self.assertEqual(quota2["codex"]["remaining"], 40.0)
+
+    def test_usable_now_false_reads_zero_whatever_the_headroom(self):
+        row = {"provider": "codex", "usable_now": False, "headroom_percent": 60.0}
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    def test_row_carries_binding_window_and_operator_gate(self):
+        row = {"provider": "omp", "usable_now": True, "headroom_percent": 33.0,
+               "binding_window": "omp credits", "available_at": None,
+               "requires_operator_approval": True}
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
+        self.assertEqual(quota["omp"]["remaining"], 33.0)
+        self.assertEqual(quota["omp"]["binding_window"], "omp credits")
+        self.assertTrue(quota["omp"]["requires_operator_approval"])
+
+    def test_live_aiuse_matches_the_file_read(self):
+        # opt-in: spawns the host's real aiuse and reads ~/.cache/aiuse (conftest keeps the
+        # suite off both), and an hourly refresh between the two reads can differ
+        if os.environ.get("ROUTE_AGENT_LIVE_TESTS") != "1":
+            self.skipTest("set ROUTE_AGENT_LIVE_TESTS=1 to compare against the live aiuse")
+        import shutil as _sh
+        import subprocess as _sp
+        exe = _sh.which("aiuse")
+        snap = Path.home() / ".cache/aiuse/snapshots/latest.json"
+        if not exe or not snap.is_file():
+            self.skipTest("no live aiuse on this host")
+        proc = _sp.run([exe, "--available", "--json"], capture_output=True, timeout=30)
+        if proc.returncode not in (0, 3):
+            self.skipTest("aiuse --available failed")
+        live = self.tmp / "live.json"
+        live.write_bytes(proc.stdout)
+        payload = r.json.loads(proc.stdout)
+        in_payload = {r.pool_service(row["provider"], row.get("pool_family"))
+                      for row in payload.get("available", [])}
+        noted = {n.get("provider") for n in payload.get("agent_notes") or []}
+        got, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(live)})
+        want, _ = self.fileonly(snap)
+        for key, info in want.items():
+            if key in in_payload and key not in noted and got[key].get("remaining") is not None \
+                    and info.get("remaining") is not None:
+                self.assertAlmostEqual(got[key]["remaining"], info["remaining"], delta=3.0,
+                                       msg=key)
+
+    # -- adversary round 4 ------------------------------------------------------------------
+
+    def test_foreign_family_windows_never_create_or_loosen_another_pool(self):
+        exhausted = {"state": "exhausted", "headroom_percent": 0.0}
+        self.accounts = [
+            {"provider": "cursor", "age_seconds": 30, "windows": [
+                {"label": "auto", "pool_family": "auto", **exhausted},
+                {"label": "tp", "pool_family": "third_party", "headroom_percent": 50.0}]},
+            {"provider": "antigravity", "age_seconds": 30, "windows": [
+                {"label": "g", "pool_family": "gemini", "headroom_percent": 80.0},
+                {"label": "cg", "pool_family": "claude_gpt", **exhausted}]},
+        ]
+        rows = [
+            {"provider": "cursor", "pool_family": "third_party", "usable_now": True,
+             "headroom_percent": 50.0, "windows": [
+                 {"label": "tp", "pool_family": "third_party", "headroom_percent": 50.0},
+                 {"label": "auto", "pool_family": "auto", "headroom_percent": 63.5}]},
+            {"provider": "antigravity", "pool_family": "gemini", "usable_now": True,
+             "headroom_percent": 80.0, "windows": [
+                 {"label": "g", "pool_family": "gemini", "headroom_percent": 80.0},
+                 {"label": "cg", "pool_family": "claude_gpt", "headroom_percent": 70.0}]},
+        ]
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
+        self.assertEqual(quota["cursor-auto"]["remaining"], 0.0)
+        self.assertEqual(quota["antigravity-claude"]["remaining"], 0.0)
+
+    def test_foreign_window_may_tighten_an_existing_pool(self):
+        rows = [
+            {"provider": "antigravity", "pool_family": "gemini", "usable_now": True,
+             "headroom_percent": 80.0, "windows": [
+                 {"label": "cg", "pool_family": "claude_gpt", "headroom_percent": 10.0}]},
+            {"provider": "antigravity", "pool_family": "claude_gpt", "usable_now": True,
+             "headroom_percent": 60.0},
+        ]
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
+        self.assertEqual(quota["antigravity-claude"]["remaining"], 10.0)
+
+    def test_fable_cap_merges_to_the_tighter_in_either_order(self):
+        fable = {"provider": "claude", "pool_family": "fable", "usable_now": True,
+                 "headroom_percent": 2.0}
+        default = {"provider": "claude", "pool_family": "default", "usable_now": True,
+                   "headroom_percent": 30.0, "windows": [
+                       {"label": "w", "pool_family": "default", "headroom_percent": 30.0},
+                       {"label": "fable", "pool_family": "fable",
+                        "quota_scope": "model_sublimit", "max_share_of_parent_percent": 50,
+                        "headroom_percent": 45.0}]}
+        for rows in ([fable, default], [default, fable]):
+            quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload(rows))})
+            self.assertEqual(quota["claude"]["sublimits"], {"fable": 2.0})
+            self.assertEqual(quota["claude"]["remaining"], 30.0)
+
+    def test_stale_row_with_an_exhausted_window_reads_zero(self):
+        row = {"provider": "codex", "age_seconds": r.STALE_SOFT + 100, "windows": [
+            {"label": "w", "state": "exhausted", "headroom_percent": 0.0}]}
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    def test_non_true_usable_now_reads_zero(self):
+        for val in ("false", 0, None, "no"):
+            with self.subTest(val):
+                row = {"provider": "codex", "usable_now": val, "headroom_percent": 60.0}
+                quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON":
+                                         str(self.rows_payload([row]))})
+                self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    # -- Codex P2: excluded[] ------------------------------------------------------------
+
+    def test_excluded_pool_without_a_snapshot_row_reads_zero_and_is_never_routed(self):
+        path = self.rows_payload([self.GOOD_ROW], excluded=[
+            {"provider": "zai", "pool_family": None, "reason": "operator"}])
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["zai"]["remaining"], 0.0)
+        self.assertTrue(quota["zai"]["excluded"])
+        for kind in r.KINDS:
+            choice = r.route(kind, quota={**IDLE, **quota})
+            self.assertFalse(choice and choice.service.name == "zai", kind)
+
+    def test_excluded_pool_with_a_snapshot_row_reads_zero(self):
+        path = self.rows_payload([{"provider": "codex", "usable_now": True,
+                                   "headroom_percent": 60.0}],
+                                 excluded=[{"provider": "codex"}])
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    def test_excluded_sublimit_family_caps_only_that_model(self):
+        path = self.rows_payload(
+            [{"provider": "claude", "pool_family": "default", "usable_now": True,
+              "headroom_percent": 30.0}],
+            excluded=[{"provider": "claude", "pool_family": "fable"}])
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["claude"]["remaining"], 30.0)
+        self.assertEqual(quota["claude"]["sublimits"]["fable"], 0.0)
+
+    def test_invalid_excluded_rows_are_ignored_not_a_fallback(self):
+        path = self.rows_payload([self.GOOD_ROW], excluded=[
+            "junk", {"provider": 3}, {"provider": ""}, {"provider": "zai", "pool_family": 7}])
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(r.QuotaSource.kind, "canned")
+        self.assertEqual(quota["omp"]["remaining"], 70.0)
+        self.assertNotIn("zai", quota)
+
+    def test_excluded_is_not_consulted_on_the_file_fallback(self):
+        path = self.rows_payload(["junk"], excluded=[{"provider": "zai"}])
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(r.QuotaSource.kind, "snapshot")
+        self.assertNotIn("zai", quota)
+
+    def test_excluded_is_not_applied_from_a_stale_payload(self):
+        path = self.rows_payload([], excluded=[{"provider": "zai"}], fresh=False)
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertNotIn("zai", quota)
+
+    def test_windowless_headroom_is_rounded_like_the_windowed_form(self):
+        row = {"provider": "codex", "usable_now": True, "headroom_percent": 5.345454545}
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
+        self.assertEqual(quota["codex"]["remaining"], 5.3)
+
+    def fileonly(self, snap):
+        import io
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("ROUTE_AGENT_AIUSE_JSON", "ROUTE_AGENT_AIUSE")}
+        with mock.patch.dict(os.environ, {**clean, "AIUSE_SNAPSHOT": str(snap),
+                                          "ROUTE_AGENT_OMP_READY": "0"}, clear=True), \
+                contextlib.redirect_stderr(io.StringIO()):
+            return r.load_snapshot()
+
+    # -- Codex P2s: the payload's `fresh` marker, and row validation ------------------------
+
+    GOOD_ROW = {"provider": "omp", "usable_now": True, "headroom_percent": 70.0}
+
+    def test_fresh_false_reads_every_row_unknown_and_zeroes_nothing(self):
+        path = self.write("f.json", self.payload([self.GOOD_ROW], fresh=False, age_seconds=5))
+        quota, age, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertIsNone(quota["omp"]["remaining"])
+        self.assertEqual(quota["codex"]["remaining"], 60.0)        # absent pool not zeroed
+        self.assertGreater(age, r.STALE_SOFT)
+        self.assertIn("fresh=False", r.quota_source_info()["detail"])
+
+    def test_fresh_true_with_young_age_behaves_as_before(self):
+        path = self.write("f.json", self.payload([self.GOOD_ROW], fresh=True, age_seconds=5))
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["omp"]["remaining"], 70.0)
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    def test_no_fresh_key_uses_the_age_rule(self):
+        base = {"available": [self.GOOD_ROW]}
+        young = self.write("y.json", r.json.dumps({**base, "age_seconds": 5}))
+        old = self.write("o.json", r.json.dumps({**base, "age_seconds": r.STALE_SOFT + 60}))
+        q_young, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(young)})
+        q_old, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(old)})
+        self.assertEqual(q_young["omp"]["remaining"], 70.0)
+        self.assertIsNone(q_old["omp"]["remaining"])
+
+    def test_invalid_row_falls_back_to_the_file_with_nothing_zeroed(self):
+        bad_rows = {
+            "string row": [self.GOOD_ROW, "junk"],
+            "no provider": [self.GOOD_ROW, {"usable_now": True, "headroom_percent": 50}],
+            "empty provider": [self.GOOD_ROW, {"provider": ""}],
+            "list provider": [self.GOOD_ROW, {"provider": ["codex"]}],
+            "bad family": [self.GOOD_ROW, {"provider": "codex", "pool_family": 3}],
+        }
+        for name, rows in bad_rows.items():
+            with self.subTest(name):
+                quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON":
+                                         str(self.rows_payload(rows))})
+                self.assertEqual(r.QuotaSource.kind, "snapshot")
+                self.assertIn("invalid row", r.quota_source_info()["fallback_reason"])
+                self.assertEqual(quota["codex"]["remaining"], 60.0)
+
+    def test_huge_integer_percentage_reads_unknown_not_a_crash(self):
+        body = ('{"age_seconds": 5, "available": [{"provider": "codex", "age_seconds": 1' + "0" * 400
+                + ', "windows": [{"label": "w", "headroom_percent": 1' + "0" * 400 + "}]}]}")
+        path = self.write("huge.json", body)
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertIsNone(quota["codex"]["remaining"])

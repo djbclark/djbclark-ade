@@ -18,6 +18,10 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    Also (adversary on the aiuse branch, finding 5, 2026-10-20): `bin/route_agent.py` reads aiuse's `latest.json`
    directly, so it never sees the operator credits override; make it read `aiuse --available --json` (or the
    same resolver aiuse uses) so routing and the quota gate agree. Small djbclark-ade PR after the aiuse branch merges.
+   **Done 2026-10-20** on branch `feat/route-agent-aiuse-available` (not yet a PR): `route_agent.py` runs
+   `aiuse --available --json`, falls back to the snapshot file with a stderr log and `quota_source` in the output;
+   `ROUTE_AGENT_AIUSE_JSON` feeds canned output. Not done: `acp-dispatch`'s `aiuse_reset_time` (bin/acp-dispatch ~2210)
+   still reads `latest.json` directly for a refusal's reset time; the quota gate itself (`load_snapshot()`) moved.
 
 3. **Load gate follow-ups** (adversary final pass on PR 7, 2026-10-20, informational): (a) on `--detach
    --no-wait` a missing `ACP_DISPATCH_LOAD_WATCH` is only visible in the runner log and the record; warn at

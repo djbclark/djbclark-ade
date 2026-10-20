@@ -17,8 +17,19 @@ The headroom half has a hard constraint: a full `aiuse --json` probe takes
 decision — so this never runs it. `aiuse` already persists every run as JSON
 under `~/.cache/aiuse/snapshots/`, keeping `latest.json` current, and a
 launchd job (`com.djbclark.aiuse`, StartInterval 900) refreshes it every 15
-minutes. Routing reads that file. A routing call is a file read, and a stale
-or missing snapshot degrades to capability-only routing rather than hanging.
+minutes. Since 2026-10-20 routing asks `aiuse --available --json` instead (argv list,
+20 s timeout; it reads that same cache in well under a second), because aiuse applies
+the operator credits override (`aiuse set-credits`), Admin API readings and grant
+expiry at read time and the file never carries them. A pool the snapshot knows that
+a fresh `--available` leaves out reads 0% left (exhausted, excluded or hidden). If aiuse
+is missing, fails, times out or prints malformed JSON, routing logs that on stderr,
+falls back to the snapshot file (surfaced as `quota_source` in plan/route JSON and a
+WARNING in plan text) and a stale or missing snapshot degrades to capability-only routing
+rather than hanging. Env: `ROUTE_AGENT_AIUSE_JSON=<path>` feeds canned output (tests; reported
+as source `canned`, logged on stderr each use, and it takes precedence over
+`ROUTE_AGENT_AIUSE=off` and `AIUSE_SNAPSHOT`), `ROUTE_AGENT_AIUSE=off` or `AIUSE_SNAPSHOT`
+pins the file-only read, `ROUTE_AGENT_AIUSE_BIN` names the binary,
+`ROUTE_AGENT_AIUSE_TIMEOUT` is seconds in (0, 60] (default 20). The spawn is memoised for 30 s.
 
 **Services are discovered, not hardcoded.** The roster changes — agents gain
 an ACP mode, providers appear in aiuse, plans lapse. So the service list is
@@ -81,6 +92,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import math
 import os
 import shlex
 import shutil
@@ -94,8 +106,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-SNAPSHOT = Path(os.environ.get("AIUSE_SNAPSHOT") or
-                (Path.home() / ".cache" / "aiuse" / "snapshots" / "latest.json"))
+DEFAULT_SNAPSHOT = Path.home() / ".cache" / "aiuse" / "snapshots" / "latest.json"
+SNAPSHOT = Path(os.environ.get("AIUSE_SNAPSHOT") or DEFAULT_SNAPSHOT)
 ORCA_DATA = Path.home() / ("Library/Application Support/orca/profiles/"
                            "local-default/orca-data.json")
 # The ACP client every launcher uses; its agent table is the primary source of
@@ -511,20 +523,20 @@ def operator_disabled(path: Path | None = None) -> set[str]:
     return off | {s.name for s in SERVICES if s.shares_pool and s.shares_pool in off}
 
 
-def load_snapshot() -> tuple[dict[str, Any], float | None]:
-    """Read aiuse's own latest snapshot. Never probes; never blocks."""
+def _read_snapshot_file() -> tuple[list[Any], float | None]:
+    """aiuse's own latest snapshot file as (accounts, age). Never probes; never blocks."""
     path = Path(os.environ.get("AIUSE_SNAPSHOT") or SNAPSHOT)
     if not path.exists():
         if os.environ.get("AIUSE_SNAPSHOT"):
-            return {}, None
+            return [], None
         candidates = sorted(path.parent.glob("20*.json"), reverse=True) if path.parent.is_dir() else []
         if not candidates:
-            return {}, None
+            return [], None
         path = candidates[0]
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
-        return {}, None
+        return [], None
 
     collected = data.get("collected_at") or data.get("started_at") or ""
     age = None
@@ -535,19 +547,148 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
         age = time.time() - path.stat().st_mtime
 
     snap = data.get("snapshot", data)
+    return list(snap.get("accounts", []) or []), age
+
+
+def _pct(value: Any) -> float | None:
+    """A percentage clamped to [0, 100]; None for anything non-numeric or non-finite
+    (NaN and Infinity must never read as headroom)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        x = float(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return min(100.0, max(0.0, x)) if math.isfinite(x) else None
+
+
+def _clean_age(value: Any) -> float | None:
+    """Seconds as a finite, non-negative float, else None (unknown)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        x = float(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return x if math.isfinite(x) and x >= 0 else None
+
+
+# pool_family values that are a model cap inside the provider's shared pool, not a pool of
+# their own (Claude's `fable` is at most 50% of the shared weekly, aiuse schema 1.1).
+SUBLIMIT_FAMILIES = ("fable",)
+
+
+def _merge_caps(a: dict[str, Any] | None, b: dict[str, Any] | None) -> dict[str, Any]:
+    """Per-key tighter of two sublimit maps (a cap never loosens by merge order)."""
+    out = dict(a or {})
+    for k, v in (b or {}).items():
+        out[k] = _tighter(out.get(k), v) if k in out else v
+    return out
+
+
+def _merge_pool(into: dict[str, Any], key: str, entry: dict[str, Any]) -> None:
+    """Fold one pool entry into `into`: the tightest known remaining wins and carries its bind."""
+    prior = into.get(key)
+    if prior is None:
+        into[key] = entry
+        return
+    p_rem, e_rem = prior.get("remaining"), entry.get("remaining")
+    take_new = e_rem is not None and (p_rem is None or e_rem < p_rem)
+    merged = dict(entry if take_new else prior)
+    merged["windows"] = {**prior.get("windows", {}), **entry.get("windows", {})}
+    merged["sublimits"] = _merge_caps(prior.get("sublimits"), entry.get("sublimits"))
+    merged["remaining"] = e_rem if take_new else p_rem
+    into[key] = merged
+
+
+def _tighter(a: float | None, b: float | None) -> float | None:
+    vals = [v for v in (a, b) if v is not None]
+    return min(vals) if vals else None
+
+
+def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, Any]:
+    """Fold `aiuse --available --json` rows into per-service pools.
+
+    The row's own top-level fields are the contract (`aiuse schema`): `provider`,
+    `pool_family`, `usable_now`, `headroom_percent` (the least applicable headroom),
+    `binding_window`, `available_at`, plus 3.8's `reading_expired` and
+    `requires_operator_approval`. `windows[]` is optional detail (3.7.2 attaches it): when
+    present it fills `windows`, `sublimits` and the bind fields and can only tighten the
+    row's `remaining`, never loosen it. Malformed rows raise (the caller falls back)."""
+    pools: dict[str, Any] = {}
+    foreign: list[tuple[str, float]] = []
+    for row in rows:
+        name = row.get("provider")
+        if not name or row.get("error"):
+            continue
+        family = row.get("pool_family")
+        key = pool_service(name, family)
+        row_age = _clean_age(row.get("age_seconds"))
+        if row_age is None:
+            row_age = age
+        stale = ((row_age is None or row_age > STALE_SOFT)
+                 or row.get("reading_expired") is True)
+        head = _pct(row.get("headroom_percent"))
+        if ("usable_now" in row and row["usable_now"] is not True) or head == 0:
+            top: float | None = 0.0
+        elif stale:
+            top = None
+        else:
+            top = None if head is None else round(head, 1)
+        entry: dict[str, Any] = {
+            "remaining": top, "windows": {}, "sublimits": {},
+            "billing_kind": row.get("billing_kind"),
+            "pace_ratio": None, "resets_at": row.get("available_at"), "window_minutes": None,
+            "binding_window": row.get("binding_window"),
+            "available_at": row.get("available_at"),
+            "requires_operator_approval": row.get("requires_operator_approval"),
+        }
+        if row.get("binding_window"):
+            entry["windows"][row["binding_window"]] = None if top is None else round(top, 1)
+        folded: dict[str, Any] = {}
+        if row.get("windows"):
+            folded = _providers_from_accounts([row], age)
+        for fkey, finfo in folded.items():
+            if fkey == key:
+                entry["windows"].update(finfo.get("windows") or {})
+                entry["sublimits"] = _merge_caps(entry["sublimits"], finfo.get("sublimits"))
+                for k in ("pace_ratio", "resets_at", "window_minutes"):
+                    if finfo.get(k) is not None:
+                        entry[k] = finfo[k]
+                if top is None and not stale:
+                    entry["remaining"] = finfo.get("remaining")   # row gave no headroom
+                elif top is not None:
+                    entry["remaining"] = _tighter(top, finfo.get("remaining"))
+                elif finfo.get("remaining") == 0.0:
+                    entry["remaining"] = 0.0      # a stale row's exhausted window still binds
+            elif finfo.get("remaining") is not None:
+                # another family's window inside this row: never creates or loosens that pool
+                foreign.append((fkey, finfo["remaining"]))
+        if family in SUBLIMIT_FAMILIES and key == name:
+            # a model cap inside the shared pool: bounds that model only (sublimits), and
+            # must not drag the whole account down
+            cap = _tighter(entry["remaining"], entry["sublimits"].get(family))
+            entry = {**entry, "remaining": None, "windows": {},
+                     "sublimits": {family: cap}}
+        _merge_pool(pools, key, entry)
+    for fkey, rem in foreign:
+        cur = pools.get(fkey)
+        if cur is not None and cur.get("remaining") is not None and rem < cur["remaining"]:
+            cur["remaining"] = rem
+    return pools
+
+
+def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str, Any]:
+    """Fold aiuse account rows (snapshot accounts or `--available` rows) into per-service pools."""
     providers: dict[str, Any] = {}
-    for acct in snap.get("accounts", []) or []:
+    for acct in accounts:
         name = acct.get("provider")
         if not name or acct.get("error"):
             continue
 
         # Account freshness: use account's age_seconds or collected_at
         acct_age = None
-        if acct.get("age_seconds") is not None:
-            try:
-                acct_age = float(acct["age_seconds"])
-            except (ValueError, TypeError):
-                pass
+        acct_age = _clean_age(acct.get("age_seconds"))
         if acct_age is None and acct.get("collected_at"):
             try:
                 acct_stamp = datetime.fromisoformat(str(acct["collected_at"]))
@@ -556,7 +697,8 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
                 pass
         if acct_age is None:
             acct_age = age
-        is_old = acct_age is not None and acct_age > STALE_SOFT
+        is_old = ((acct_age is not None and acct_age > STALE_SOFT)
+                  or acct.get("reading_expired") is True)
 
         # One account can hold several independent model-family pools; agy's
         # Claude/GPT pool is its own service, so its windows must not drag
@@ -571,8 +713,8 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
             label = w.get("label") or "?"
 
             state = w.get("state")
-            headroom = w.get("headroom_percent")
-            if state == "exhausted" or (headroom is not None and float(headroom) == 0):
+            headroom = _pct(w.get("headroom_percent"))
+            if state == "exhausted" or (headroom is not None and headroom == 0):
                 remaining = 0.0
             elif is_old:
                 remaining = None
@@ -580,7 +722,7 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
                 # headroom_percent is the least applicable headroom (a model
                 # sublimit's ceiling included); remaining_percent is the
                 # window's own share. Prefer the ceiling-aware one.
-                remaining = headroom if headroom is not None else w.get("remaining_percent")
+                remaining = headroom if headroom is not None else _pct(w.get("remaining_percent"))
 
             rem_val = None if remaining is None else round(float(remaining), 1)
             detail[label] = rem_val
@@ -627,6 +769,227 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
                 "resets_at": bind.get("resets_at"),
                 "window_minutes": bind.get("window_minutes"),
             }
+    return providers
+
+
+class QuotaSource:
+    """Where the last load_snapshot() got its pool state (surfaced by plan/show/route)."""
+    kind = "snapshot"          # "aiuse" | "snapshot"
+    detail = ""
+    fallback_reason = ""
+
+
+def _log(msg: str) -> None:
+    print(f"route_agent: {msg}", file=sys.stderr)
+
+
+def _aiuse_wanted() -> bool:
+    """Ask aiuse itself, not the snapshot file, unless something pins the file.
+
+    AIUSE_SNAPSHOT (tests, a replayed snapshot), a patched SNAPSHOT, or
+    ROUTE_AGENT_AIUSE=off keep the old file-only read (ROUTE_AGENT_AIUSE_JSON, canned
+    output, overrides all three; load_snapshot checks it first)."""
+    if os.environ.get("ROUTE_AGENT_AIUSE", "").strip().lower() in ("off", "0", "no", "false"):
+        return False
+    if os.environ.get("AIUSE_SNAPSHOT") or SNAPSHOT != DEFAULT_SNAPSHOT:
+        return False
+    return True
+
+
+AIUSE_MEMO_TTL = 30.0   # seconds a spawn result is reused (a blocking dispatch re-reads at finalize)
+_AIUSE_MEMO: dict[tuple[Any, ...], tuple[float, tuple[dict[str, Any] | None, str]]] = {}
+
+
+def _aged_copy(result: tuple[dict[str, Any] | None, str],
+               elapsed: float) -> tuple[dict[str, Any] | None, str]:
+    """A memoised result as it reads now: deep copy with `elapsed` added to every age_seconds
+    (top level and per row), so staleness keeps advancing. Never mutates the cached object."""
+    import copy
+    payload, label = result
+    if payload is None:
+        return result
+    out = copy.deepcopy(payload)
+    holders = [out] + [row for row in out.get("available", []) if isinstance(row, dict)]
+    for holder in holders:
+        age = _clean_age(holder.get("age_seconds"))
+        if age is not None:
+            holder["age_seconds"] = age + elapsed
+    return out, label
+
+
+def _reset_aiuse_cache() -> None:
+    """Forget memoised `aiuse --available --json` results (tests; one spawn per process otherwise)."""
+    _AIUSE_MEMO.clear()
+
+
+def _aiuse_timeout() -> float:
+    try:
+        t = float(os.environ.get("ROUTE_AGENT_AIUSE_TIMEOUT") or 20)
+    except ValueError:
+        return 20.0
+    return t if math.isfinite(t) and 0 < t <= 60 else 20.0
+
+
+def _parse_available(raw: bytes, label: str) -> tuple[dict[str, Any] | None, str]:
+    try:
+        text = raw.decode("utf-8")        # strict: invalid bytes are malformed output
+        # --json can follow preamble lines on some builds: start at the first brace
+        payload = json.loads(text[text.index("{"):])
+    except ValueError:                    # includes UnicodeDecodeError and a missing brace
+        return None, f"{label}: malformed JSON"
+    if not isinstance(payload, dict) or not isinstance(payload.get("available"), list):
+        return None, f"{label}: no `available` array"
+    return payload, label
+
+
+def aiuse_available() -> tuple[dict[str, Any] | None, str]:
+    """`aiuse --available --json` as (payload, source label); (None, reason) on any failure.
+
+    Applies aiuse's own read-time overlays (operator credits override, Admin API readings,
+    grant expiry) that the snapshot file never carries (2026-10-20, aiuse PRs 38 and 40).
+    ROUTE_AGENT_AIUSE_JSON=<path> reads canned output instead (tests) and takes precedence
+    over ROUTE_AGENT_AIUSE=off and AIUSE_SNAPSHOT; ROUTE_AGENT_AIUSE_BIN names the binary;
+    ROUTE_AGENT_AIUSE_TIMEOUT is in seconds, (0, 60], default 20 (the cache read is well
+    under one second). Exit 3 means nothing is usable and still prints the JSON. The
+    subprocess result (success or failure) is memoised for AIUSE_MEMO_TTL = 30 s, with elapsed
+    seconds added to its ages on reuse (`_reset_aiuse_cache` clears it)."""
+    canned = os.environ.get("ROUTE_AGENT_AIUSE_JSON")
+    if canned:
+        try:
+            raw = Path(canned).read_bytes()
+        except OSError as exc:
+            return None, f"ROUTE_AGENT_AIUSE_JSON unreadable ({exc.__class__.__name__})"
+        return _parse_available(raw, f"ROUTE_AGENT_AIUSE_JSON={canned}")
+    exe = os.environ.get("ROUTE_AGENT_AIUSE_BIN") or shutil.which("aiuse")
+    if not exe:
+        return None, "aiuse not on PATH"
+    timeout = _aiuse_timeout()
+    key = (exe, timeout)
+    hit = _AIUSE_MEMO.get(key)
+    if hit is not None:
+        elapsed = time.monotonic() - hit[0]
+        if 0 <= elapsed < AIUSE_MEMO_TTL:
+            return _aged_copy(hit[1], elapsed)
+    label = "aiuse --available --json"
+    try:
+        proc = subprocess.run([exe, "--available", "--json"], capture_output=True,
+                              timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        result: tuple[dict[str, Any] | None, str] = (
+            None, f"{label} timed out after {timeout:g}s")
+    except OSError as exc:
+        result = (None, f"aiuse could not start ({exc.__class__.__name__})")
+    else:
+        if proc.returncode not in (0, 3):
+            result = (None, f"{label} exited {proc.returncode}")
+        else:
+            result = _parse_available(proc.stdout, label)
+    _AIUSE_MEMO[key] = (time.monotonic(), result)
+    return result
+
+
+def _payload_age(payload: dict[str, Any]) -> float | None:
+    age = _clean_age(payload.get("age_seconds"))
+    if age is not None:
+        return age
+    try:
+        return _clean_age((datetime.now(UTC) - datetime.fromisoformat(
+            str(payload.get("generated_at")))).total_seconds())
+    except (ValueError, TypeError):
+        return None
+
+
+def quota_source_info() -> dict[str, Any]:
+    """Where the last load_snapshot() read pool state, for plan/show/route output."""
+    return {"source": QuotaSource.kind, "detail": QuotaSource.detail,
+            "fallback_reason": QuotaSource.fallback_reason or None}
+
+
+def _apply_excluded(providers: dict[str, Any], excluded: Any) -> None:
+    """Pools the operator ruled out (`excluded[]`) read 0% left, even with no snapshot row.
+
+    Same conditions as the absent-pool rule (the caller applies it only for a valid, fresh
+    payload), and the merge only tightens. An invalid excluded row is ignored rather than a
+    fallback trigger: `excluded` is advisory, and one bad entry must not discard a good
+    `available` list. An excluded sublimit family (`fable`) caps that model only."""
+    if not isinstance(excluded, list):
+        return
+    for row in excluded:
+        if not (isinstance(row, dict) and isinstance(row.get("provider"), str)
+                and row["provider"] and isinstance(row.get("pool_family"), (str, type(None)))):
+            continue
+        name, family = row["provider"], row.get("pool_family")
+        key = pool_service(name, family)
+        prior = providers.get(key) or {"windows": {}, "sublimits": {}, "remaining": None}
+        entry = dict(prior, excluded=True, reason=row.get("reason"))
+        if family in SUBLIMIT_FAMILIES and key == name:
+            entry["sublimits"] = _merge_caps(prior.get("sublimits"), {family: 0.0})
+        else:
+            entry["remaining"] = _tighter(prior.get("remaining"), 0.0)
+        providers[key] = entry
+
+
+def load_snapshot() -> tuple[dict[str, Any], float | None]:
+    """Pool state per service: `aiuse --available --json`, else the snapshot file.
+
+    Never probes live (the `--available` form reads aiuse's cache, well under a second).
+    `--available` lists only usable pools, so a pool the snapshot file knows that is
+    missing from a fresh payload is exhausted, excluded or hidden: it reads 0% left rather
+    than unknown. Fields 3.8 adds (`expires_at`, `burn_before_reset`, `reading_expired`,
+    `source`) are tolerated when absent; the row's own `resets_at` and windows carry them."""
+    QuotaSource.kind, QuotaSource.detail, QuotaSource.fallback_reason = "snapshot", "", ""
+    accounts, age = _read_snapshot_file()
+    providers = _providers_from_accounts(accounts, age)
+    canned = bool(os.environ.get("ROUTE_AGENT_AIUSE_JSON"))
+    if canned or _aiuse_wanted():
+        payload, label = aiuse_available()
+        fresh: dict[str, Any] | None = None
+        p_age: float | None = None
+        marked_stale = False
+        if payload is not None:
+            p_age = _payload_age(payload)
+            # the contract's own staleness signal: `fresh` present and not True means stale
+            marked_stale = payload.get("fresh") is not None and payload.get("fresh") is not True
+            if marked_stale:
+                label = f"{label} (payload fresh={payload.get('fresh')!r}: read as stale)"
+                if p_age is None or p_age <= STALE_SOFT:
+                    p_age = STALE_SOFT + 1
+            if not all(isinstance(row, dict) and isinstance(row.get("provider"), str)
+                       and row["provider"] and isinstance(row.get("pool_family"), (str, type(None)))
+                       for row in payload["available"]):
+                label = f"{label}: invalid row"
+            else:
+                try:
+                    # a row without a usable age is stale, never fresh
+                    rows = [dict(row, age_seconds=(
+                        STALE_HARD + 1 if marked_stale
+                        else _clean_age(row.get("age_seconds"))
+                        if _clean_age(row.get("age_seconds")) is not None
+                        else (p_age if p_age is not None else STALE_HARD + 1)))
+                        for row in payload["available"]]
+                    fresh = _providers_from_available(rows, p_age)
+                except (ValueError, TypeError, AttributeError, OverflowError):
+                    label = f"{label}: unparseable rows"
+        if canned:
+            _log(f"quota from canned ROUTE_AGENT_AIUSE_JSON={os.environ['ROUTE_AGENT_AIUSE_JSON']}"
+                 " (overrides ROUTE_AGENT_AIUSE=off and AIUSE_SNAPSHOT)")
+        if fresh is None:
+            QuotaSource.fallback_reason = label
+            _log(f"{label}; using the snapshot file {SNAPSHOT}")
+        else:
+            QuotaSource.kind = "canned" if canned else "aiuse"
+            QuotaSource.detail = label
+            if p_age is not None and p_age <= STALE_SOFT:
+                for key, info in providers.items():
+                    if key not in fresh:
+                        providers[key] = dict(info, remaining=0.0,
+                                              absent_from_available=True)
+            providers.update(fresh)
+            if p_age is not None and p_age <= STALE_SOFT:
+                _apply_excluded(providers, payload.get("excluded"))
+            age = p_age if p_age is not None else age
+    else:
+        QuotaSource.detail = str(os.environ.get("AIUSE_SNAPSHOT") or SNAPSHOT)
     for svc in SERVICES:
         if svc.shares_pool and svc.name not in providers and svc.shares_pool in providers:
             providers[svc.name] = dict(providers[svc.shares_pool])
@@ -1507,6 +1870,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps({
                 "snapshot_age_s": age, "stale": stale,
+                "quota_source": quota_source_info(),
                 "slices": [{"kind": k, "service": c.service.name if c else None,
                             "cli": c.service.cli if c else None,
                             "agent": c.service.acp_agent if c else None,
@@ -1516,6 +1880,10 @@ def main(argv: list[str] | None = None) -> int:
                             "why": c.why if c else unrouted_why(k, quota, skip)}
                            for k, c in rows]}, indent=1))
         else:
+            if QuotaSource.fallback_reason:
+                print(f"WARNING: {QuotaSource.fallback_reason}; quota below is from the "
+                      "snapshot file and misses aiuse's credits override and Admin API "
+                      "readings", file=sys.stderr)
             if stale:
                 print("WARNING: quota snapshot "
                       + ("empty" if not quota else f"{(age or 0) / 60:.0f} min old")
@@ -1532,6 +1900,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "show":
+        print(f"quota source: {quota_source_info()['source']}"
+              + (f" (aiuse unavailable: {QuotaSource.fallback_reason})"
+                 if QuotaSource.fallback_reason else ""))
         print(f"snapshot: {SNAPSHOT}")
         print(f"age: {'absent' if age is None else f'{age / 60:.1f} min'}"
               f"  (refreshed by launchd com.djbclark.aiuse every 15 min)")
@@ -1611,6 +1982,7 @@ def main(argv: list[str] | None = None) -> int:
             "remaining_percent": choice.remaining, "why": choice.why,
             "alternatives": choice.alternatives,
             "snapshot_age_seconds": None if age is None else round(age),
+            "quota_source": quota_source_info(),
         }, indent=2))
     else:
         print(f"{choice.service.cli}   — {choice.why}")

@@ -98,6 +98,31 @@ quoting a chain, and update its snapshot if you change one.
 
 ## The service matrix: aiuse line ↔ TUI/CLI ↔ billing
 
+**How `bin/route_agent.py` reads pool state (2026-10-20):** it runs `aiuse --available --json`
+(argv list, 20 s timeout, exit 0 or 3 accepted), not the snapshot file, so routing and the
+quota gate see what `aiuse` itself reports: the operator credits override (`aiuse set-credits`,
+`aiuse refresh-credits omp`), Admin API readings, grant expiry and `reading_expired` (aiuse
+3.8; those fields are read with `.get`, so the Homebrew 3.7.2 output works too). A pool the
+snapshot knows that a fresh `--available` omits (exhausted, excluded, hidden) reads 0% left.
+If aiuse is missing, fails, times out or prints malformed JSON, it logs on stderr, falls back
+to `latest.json`, and says so as `quota_source` in `plan --json` / `route --json` and a
+WARNING in `plan` text (`show` prints a `quota source:` line). `ROUTE_AGENT_AIUSE_JSON=<path>`
+feeds canned output (tests; reported as source `canned`, logged on stderr every use, and it
+takes precedence over `ROUTE_AGENT_AIUSE=off` and `AIUSE_SNAPSHOT`); `ROUTE_AGENT_AIUSE=off` or
+`AIUSE_SNAPSHOT` pins the file-only read (tests/conftest.py sets `off`); `ROUTE_AGENT_AIUSE_BIN`
+and `ROUTE_AGENT_AIUSE_TIMEOUT` (seconds, 0 to 60, default 20) override the binary and timeout.
+The spawn result is memoised for 30 s (elapsed seconds are added to its ages on reuse, so a blocking dispatch's finalize never reads a start-time quota as current). Unparseable rows, non-finite percentages and unknown ages
+never read as headroom: the first falls back to the file, the others read unknown or stale.
+
+The aiuse path reads the `--available` row contract: each row's top-level `provider`,
+`pool_family`, `usable_now`, `headroom_percent`, `binding_window`, `available_at`,
+`reading_expired` and `requires_operator_approval`. `windows[]` (which 3.7.2 attaches) is detail
+only, filling the per-window labels, the Fable sublimit and the pace and reset fields; it can
+tighten a pool's `remaining` but never loosen it, and a payload without `windows[]` (the
+documented minimal form) routes the same. `usable_now: false` or zero headroom reads 0% left.
+A `fable` family row is a sublimit of the shared Claude pool, not a pool of its own.
+Pools in the payload's `excluded[]` (operator-ruled-out, or an auth-failed account) read 0% left under the same fresh-payload condition as the absent-pool rule, even when the snapshot file has no row for them, so `route()` never treats them as unmeasured; an invalid excluded row is ignored, and the file fallback does not consult `excluded[]`.
+
 `aiuse --json` (JSON starts after two preamble lines) reports one
 `snapshot.accounts[]` entry per provider; `alerts[]`/`suggestion` rank
 where quota is going to waste. Mapping, verified 2026-08-23:
