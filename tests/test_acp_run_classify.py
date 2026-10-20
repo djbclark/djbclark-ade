@@ -41,7 +41,11 @@ HTTP_STATUSES = [
     # zcode, 2026-10-16..18: an auth wall inside an "Internal error" envelope was transient and retried
     ('RequestError: Internal error {"details": "model_request_failed project_token_login_failed (Turn execution failed)"}', "auth"),
     ("project_token_login_failed", "auth"),
-    ("Login failed: please sign in again", "auth"),
+    # code names and prose that merely mention a login must not become auth (adversary, 2026-10-20)
+    ("All green; test_login_failed now passes", None),
+    ("Traceback: LoginFailedError raised in onLoginFailed", None),
+    ("token login ok", None),
+    ("login failed: connection timed out", "transient"),
 ]
 
 
