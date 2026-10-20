@@ -12,7 +12,7 @@ database; no data changes), and the live Hermes `state.db` is never handed to `h
      WAL database;
   2. per-session SQLite trees (Cursor, Antigravity): each db the same way, its sidecar (`meta.json`,
      `<uuid>.meta`) copied beside it;
-  3. file stores: `shutil.copytree` with an ignore function that drops every credential file name and path
+  3. file stores: an own directory walk (no `shutil.copytree`) that drops every credential file name and path
      (inventory section 5 item 5), the `credential-bak` vault, symlinks inside a store and non-regular files; a configured store root that is
      itself a symlink is followed only when it resolves to an existing path under $HOME that is no credential
      path (copied as the target, recorded in the manifest as `root_symlinks`, links inside it still never
@@ -59,7 +59,11 @@ this Mac) is followed under the same rule as a store root link (under $HOME, not
 and exit 1); so is a per-session tree root that is a symlink (same rule as a file-store root: refused is an error,
 the store `partial`). Every symlink skip prints `<store>: skipped <path>: symlink` on stderr and leaves the store
 `ok`. A source that turns into a symlink after its check is never followed: files, sidecars, single-file roots
-and SQLite databases are opened O_NOFOLLOW and refused with an error (the store `partial`). The dry run's bytes
+and SQLite databases are opened O_NOFOLLOW and refused with an error (the store `partial`), and so is a
+directory swapped for a symlink mid-walk: a store is walked from one descriptor of its root, each directory and
+file opened relative to its parent's descriptor with O_NOFOLLOW (a SQLite source is reached the same way
+from its store root), never through a path string that could be re-pointed. An optional sidecar that is
+present but a symlink, an excluded path or not a regular file is skipped and listed under `skipped`. The dry run's bytes
 for a SQLite file are the main file plus its `-wal` file, an upper bound on the snapshot the online backup
 writes. `--check-schemas` counts an absent tree root or database as `missing`.
 
@@ -209,6 +213,9 @@ def build_stores(home):
         sqlite("crush-acp", ".local/share/crush-acp/crush.db"),
         sqlite("crush-tui", ".config/crush/.crush/crush.db"),
         sqlite("crush-repo", "src/djbclark-ade/.crush/crush.db"),
+        files("crush-files", ("crush.json", ".local/share/crush/crush.json"),
+              ("projects.json", ".local/share/crush/projects.json"),
+              file_labels=["crush.json", "projects.json"]),
         sqlite("codex-db", ".codex/state_5.sqlite", ".codex/logs_2.sqlite", ".codex/memories_1.sqlite",
                ".codex/goals_1.sqlite"),
         files("codex-files", ("sessions", ".codex/sessions"), ("session_index.jsonl", ".codex/session_index.jsonl"),
@@ -301,19 +308,36 @@ class SchemaGuardError(Exception):
     """A backed-up database holds a credential-looking table or column nobody has explained."""
 
 
-def ro_connect(path):
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def ro_connect(path, base=None):
     """A read-only connection to a regular file that is not, and does not become, a symlink (Codex on PR 24).
-    SQLite's URI has no nofollow parameter (`nofollow=1` is silently ignored, checked on 3.53.1), so the path
-    is opened O_NOFOLLOW and that fd held while SQLite opens the same path and reads the schema; the path is
+    SQLite's URI has no nofollow parameter (`nofollow=1` is silently ignored, checked on 3.53.1), so the file is
+    opened O_NOFOLLOW and that fd held while SQLite opens the same path and reads the schema; the path is
     then lstat'ed again and must still be the very file the fd names (same device and inode, not a link), or
     the connection is closed and refused. A swap after that point cannot redirect the backup: SQLite already
-    holds the file. The path is never realpath'ed here: a caller that may follow a root link passes the
-    resolved target. The URI keeps `?`, `#`, `%` and spaces in the path safe."""
+    holds the file. The fd is reached component by component (`open_dir_chain`) from `base`, the gate-approved
+    store root the path lies under (default: the file's own resolved parent directory), every component opened
+    O_NOFOLLOW relative to the previous descriptor, so a directory swapped for a symlink between the check and
+    here is refused instead of redirecting the expected (device, inode) to a file outside the store (adversary
+    round 13). A caller that may follow a root link passes the resolved target. The URI keeps `?`, `#`, `%` and
+    spaces in the path safe."""
     path = os.path.abspath(path)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # a FIFO swapped in must not block the run
-    except OSError as exc:
-        raise OSError(f"source became a symlink or is unreadable: {path}: {exc.strerror}") from exc
+        if base is None:
+            base, parts = os.path.realpath(os.path.dirname(path)), (os.path.basename(path),)
+        else:
+            base = os.path.abspath(base)
+            parts = Path(path).relative_to(base).parts
+        pfd = open_dir_chain(base, parts[:-1])
+        try:
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)  # a FIFO must not block
+        finally:
+            os.close(pfd)
+    except (OSError, ValueError) as exc:
+        why = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
+        raise OSError(f"source became a symlink or is unreadable: {path}: {why}") from exc
     try:
         held = os.fstat(fd)
         if not stat.S_ISREG(held.st_mode):
@@ -392,12 +416,12 @@ def guard_copy(store_name, path):
         raise SchemaGuardError(f"credential-looking table/column name(s) not on the scrub list or allowlist: {names}")
 
 
-def backup_sqlite(src, dst, store_name):
+def backup_sqlite(src, dst, store_name, base=None):
     """Online backup of one SQLite db: a consistent copy while the writer lives. The copy is scrubbed
     (SCRUB) and schema-checked before it replaces dst; returns the scrubbed tables."""
     tmp = dst.with_name(dst.name + ".part")
     dst.parent.mkdir(parents=True, exist_ok=True)
-    source = ro_connect(src)
+    source = ro_connect(src, base)
     scrubbed = []
     try:
         target = sqlite3.connect(str(tmp))
@@ -459,23 +483,34 @@ class StoreRun:
         self.missing.append(str(path))
 
 
+def skip_reason(directory, name, mode, excluder):
+    """Why the entry `name` of `directory` (its lstat mode `mode`) is not copied, or None when it is."""
+    p = os.path.join(directory, name)
+    if is_excluded_name(name) or excluder.path(p):
+        return "excluded credential path"
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+        return "not a regular file"
+    if name == "worktrees" and os.path.basename(directory) == ".system_generated":
+        return "git checkout inside an antigravity brain dir"
+    return None
+
+
 def make_ignore(run, excluder):
+    """The dry run's ignore function for `os.walk` listings (the real copy classifies through `skip_reason` too)."""
     def ignore(directory, names):
         out = []
         for n in names:
             p = os.path.join(directory, n)
-            if is_excluded_name(n) or excluder.path(p):
+            try:
+                mode = os.lstat(p).st_mode
+            except OSError:
+                mode = 0
+            why = skip_reason(directory, n, mode, excluder)
+            if why:
                 out.append(n)
-                run.skip(p, "excluded credential path")
-            elif os.path.islink(p):
-                out.append(n)
-                run.skip(p, "symlink")
-            elif not (os.path.isfile(p) or os.path.isdir(p)):
-                out.append(n)
-                run.skip(p, "not a regular file")
-            elif n == "worktrees" and os.path.basename(directory) == ".system_generated":
-                out.append(n)
-                run.skip(p, "git checkout inside an antigravity brain dir")
+                run.skip(p, why)
         return out
     return ignore
 
@@ -526,23 +561,86 @@ def under_symlink(path, root):
     return False
 
 
-def copy_regular(src, dst):
-    """copytree's copy function: a regular file copied from an fd opened with O_NOFOLLOW, so a source that
-    became a symlink after `make_ignore` listed it is refused rather than dereferenced (Codex on PR 24).
-    Raises OSError, which copytree collects into shutil.Error and the caller records."""
+def copy_regular(src, dst, dir_fd=None, shown=None):
+    """A regular file copied from an fd opened with O_NOFOLLOW, so a source that became a symlink after it was
+    listed is refused rather than dereferenced (Codex on PR 24). `src` is a path, or with `dir_fd` a name inside
+    that open directory (then the path component walk is not repeated: only the descriptor is trusted); `shown`
+    is the path put in error messages. Raises OSError, which the caller records."""
+    shown = shown or src
     try:
-        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # a FIFO swapped in must not block the run
+        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)  # a FIFO must not block the run
     except OSError as exc:
-        raise OSError(f"source became a symlink or is unreadable: {src}: {exc.strerror}") from exc
+        raise OSError(f"source became a symlink or is unreadable: {shown}: {exc.strerror}") from exc
     with os.fdopen(fd, "rb") as fin:
-        if not stat.S_ISREG(os.fstat(fin.fileno()).st_mode):
-            raise OSError(f"source is not a regular file: {src}")
+        held = os.fstat(fin.fileno())
+        if not stat.S_ISREG(held.st_mode):
+            raise OSError(f"source is not a regular file: {shown}")
         os.set_blocking(fin.fileno(), True)  # O_NONBLOCK was for the open only; a regular file reads normally
         dfd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(dfd, "wb") as fout:
             shutil.copyfileobj(fin, fout)
-    shutil.copystat(src, dst, follow_symlinks=False)
+    os.utime(dst, ns=(held.st_atime_ns, held.st_mtime_ns), follow_symlinks=False)  # the mode is sealed to 0600 later
     return dst
+
+
+def open_dir_at(name, parent_fd):
+    """A descriptor for the directory `name` inside the open directory `parent_fd`: O_NOFOLLOW, so a directory
+    swapped for a symlink after it was listed fails here (ELOOP or ENOTDIR) and is a store error."""
+    try:
+        return os.open(name, DIR_FLAGS, dir_fd=parent_fd)
+    except OSError as exc:
+        raise OSError(f"directory became a symlink or is unreadable: {name}: {exc.strerror}") from exc
+
+
+def open_dir_chain(base, parts):
+    """A descriptor for `base`/`parts...`: `base` (a resolved, gate-approved directory, opened O_NOFOLLOW) and then
+    each part relative to the previous descriptor with `open_dir_at`. The caller closes it."""
+    fd = os.open(base, DIR_FLAGS)
+    try:
+        for part in parts:
+            nfd = open_dir_at(part, fd)
+            os.close(fd)
+            fd = nfd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def copy_dir_fd(dfd, src_dir, dst_dir, run, excluder):
+    """Copy the directory open as `dfd` (shown as `src_dir`) into `dst_dir`, replacing `shutil.copytree` (Codex on
+    PR 24, pass 11, and the adversary's round 13): copytree recurses on cached DirEntry types and opens each
+    child by path, so a subdirectory swapped for a symlink after it was listed was followed. Here every entry is
+    classified with `fstat`-style `lstat` relative to `dfd` and opened O_NOFOLLOW relative to it, so a swap fails
+    with an OSError that is recorded as a store error. Symlinks, credential paths and non-regular files are
+    skipped as before; a failing entry never stops its siblings."""
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    with os.scandir(dfd) as it:
+        names = sorted(e.name for e in it)
+    for name in names:
+        p = os.path.join(src_dir, name)
+        try:
+            mode = os.stat(name, dir_fd=dfd, follow_symlinks=False).st_mode
+        except OSError as exc:
+            run.error(p, exc)
+            continue
+        why = skip_reason(src_dir, name, mode, excluder)
+        if why:
+            run.skip(p, why)
+            continue
+        try:
+            if stat.S_ISDIR(mode):
+                sub = open_dir_at(name, dfd)
+                try:
+                    copy_dir_fd(sub, p, dst_dir / name, run, excluder)
+                finally:
+                    os.close(sub)
+            else:
+                copy_regular(name, dst_dir / name, dir_fd=dfd, shown=p)
+        except OSError as exc:
+            run.error(p, exc)
+    held = os.fstat(dfd)
+    os.utime(dst_dir, ns=(held.st_atime_ns, held.st_mtime_ns))
 
 
 def copy_file_store(store, run, excluder):
@@ -562,12 +660,11 @@ def copy_file_store(store, run, excluder):
                 if real is None:
                     continue
             if real.is_dir():
+                rfd = os.open(real, DIR_FLAGS)  # the walk starts from this one descriptor, never from a path again
                 try:
-                    shutil.copytree(real, dst, symlinks=True, ignore=make_ignore(run, excluder),
-                                    copy_function=copy_regular)
-                except shutil.Error as exc:
-                    for item in exc.args[0]:
-                        run.error(item[0], OSError(item[2]))
+                    copy_dir_fd(rfd, real, dst, run, excluder)
+                finally:
+                    os.close(rfd)
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 copy_regular(real, dst)
@@ -664,9 +761,19 @@ def required_sidecar_error(side, why):
     return FileNotFoundError(f"required sidecar {side.name} {why}: the session's db copy is not lossless")
 
 
-def sidecar_problem(run, root, side, why):
-    """A required sidecar the copy or the plan could not take: absent on disk is recorded in
-    run.sidecar_missing (an error only under --strict-stores), anything else is an error."""
+SIDECAR_SKIP_WHY = {"is a symlink": "symlink", "is an excluded path": "excluded credential path",
+                    "is not a regular file": "not a regular file"}
+
+
+def sidecar_problem(run, root, side, why, required=True):
+    """A sidecar the copy or the plan could not take. Required: absent on disk is recorded in
+    run.sidecar_missing (an error only under --strict-stores), anything else is an error. Optional: absent is
+    nothing, anything else that is present is a recorded skip (`run.skip`, so the manifest `skipped` list and, for
+    a symlink, stderr show it, as for every other skipped link; Codex on PR 24, pass 11)."""
+    if not required:
+        if why != SIDECAR_ABSENT:
+            run.skip(side, SIDECAR_SKIP_WHY.get(why, f"sidecar {why}"))
+        return
     if why == SIDECAR_ABSENT:
         run.sidecar_missing.append(str(side.relative_to(root)))
         if not run.strict:
@@ -701,7 +808,7 @@ def copy_tree_store(store, run, excluder):
             continue
         dst = run.out / src.relative_to(root)
         try:
-            run.scrubbed_of[dst] = backup_sqlite(src, dst, store["name"])
+            run.scrubbed_of[dst] = backup_sqlite(src, dst, store["name"], root)
             run.source_of[dst] = str(src)
         except (OSError, sqlite3.Error, SchemaGuardError) as exc:
             run.error(src, exc)
@@ -711,15 +818,18 @@ def copy_tree_store(store, run, excluder):
             why = sidecar_gap(side, excluder)
             if not why:
                 try:
-                    copy_regular(side, dst.parent / side.name)
+                    pfd = open_dir_chain(root, src.relative_to(root).parent.parts)  # never the path string again
+                    try:
+                        copy_regular(side.name, dst.parent / side.name, dir_fd=pfd, shown=side)
+                    finally:
+                        os.close(pfd)
                     continue
                 except OSError as exc:
                     if os.path.lexists(side):  # swapped for a link or non-regular file after sidecar_gap: an error
                         run.error(side, exc)
                         continue
                     why = "vanished during the copy"
-            if pat in store.get("required", []):
-                sidecar_problem(run, root, side, why)
+            sidecar_problem(run, root, side, why, pat in store.get("required", []))
 
 
 def seal_and_hash(run):
@@ -825,8 +935,8 @@ def plan_store(store, excluder, strict=False):
                             count += 1
                         except OSError as exc:
                             run.error(side, exc)
-                    elif pat in store.get("required", []):
-                        sidecar_problem(run, root, side, why)
+                    else:
+                        sidecar_problem(run, root, side, why, pat in store.get("required", []))
     else:
         for label, src in store["roots"]:
             run.sources.append(str(src))
@@ -1115,7 +1225,7 @@ def check_schemas(stores, excluder, strict=False):
                 missing += 1
                 continue
             try:
-                con = ro_connect(target)
+                con = ro_connect(target, search if store["kind"] == "sqlite-tree" else None)
                 try:
                     hits = schema_hits(con)
                 finally:

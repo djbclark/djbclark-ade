@@ -523,21 +523,21 @@ def test_a_link_that_slips_past_the_check_is_dropped_not_followed(env, monkeypat
     secret.write_text("SENTINEL-LINK-TARGET")
     os.symlink(secret, home / ".fake/sessions/p1/racelink")
     os.symlink(home / ".fake", home / ".fake/sessions/racedir")
-    orig = mod.make_ignore
+    real_skip = mod.skip_reason
 
-    def racy(run, excluder):  # the links appear after the check: the ignore function does not see them
-        inner = orig(run, excluder)
-        return lambda directory, names: [n for n in inner(directory, names) if n not in ("racelink", "racedir")]
+    def racy(directory, name, mode, excluder):  # the links appear after the check: the walk's check does not see them
+        return None if name in ("racelink", "racedir") else real_skip(directory, name, mode, excluder)
 
-    monkeypatch.setattr(mod, "make_ignore", racy)
-    assert run_main(mod, "--dest", str(dest)) == 0
+    monkeypatch.setattr(mod, "skip_reason", racy)
+    assert run_main(mod, "--dest", str(dest)) == 1  # opened O_NOFOLLOW: refused with an error, never followed
     assert not list(dest.rglob("racelink")) and not list(dest.rglob("racedir"))
     assert b"SENTINEL-LINK-TARGET" not in all_bytes(dest)
     assert not any(p.is_symlink() for p in dest.rglob("*"))
     manifest = json.loads((dest / "MANIFEST.json").read_text())
     fs_store = next(s for s in manifest["stores"] if s["store"] == "filestore")
-    raced = [x for x in fs_store["skipped"] if x["why"].startswith("symlink (appeared")]
-    assert {Path(x["path"]).name for x in raced} == {"racelink", "racedir"}
+    assert fs_store["status"] == "partial"
+    assert {Path(e["source"]).name for e in fs_store["errors"]} == {"racelink", "racedir"}
+    assert all("became a symlink" in e["error"] for e in fs_store["errors"])
     assert secret.read_text() == "SENTINEL-LINK-TARGET"
 
 
@@ -686,10 +686,11 @@ def test_cursor_meta_json_vanishing_between_listing_and_copy_is_an_error(real, m
     make_cursor_session(home)
     real_copy = mod.copy_regular
 
-    def vanishing(src, dst):
-        if Path(src).name == "meta.json":
-            Path(src).unlink()
-        return real_copy(src, dst)
+    def vanishing(src, dst, **kw):
+        victim = Path(kw.get("shown") or src)
+        if victim.name == "meta.json":
+            victim.unlink()
+        return real_copy(src, dst, **kw)
 
     monkeypatch.setattr(mod, "copy_regular", vanishing)
     dest = home / "out" / "bk"
@@ -1106,7 +1107,7 @@ def test_a_tree_root_link_under_home_is_followed_and_recorded(real, capsys, monk
     assert not any(p.is_symlink() for p in dest.rglob("*"))
     opened = []
     real_ro = mod.ro_connect
-    monkeypatch.setattr(mod, "ro_connect", lambda p: (opened.append(Path(p)), real_ro(p))[1])
+    monkeypatch.setattr(mod, "ro_connect", lambda p, base=None: (opened.append(Path(p)), real_ro(p, base))[1])
     capsys.readouterr()
     assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 0
     out = capsys.readouterr().out
@@ -1132,21 +1133,17 @@ def test_a_file_that_becomes_a_symlink_after_listing_is_refused_not_dereferenced
     (home / ".grok/sessions/p1").mkdir(parents=True)
     (home / ".grok/sessions/p1/chat.jsonl").write_text("swapped\n")
     (home / ".grok/sessions/p1/other.jsonl").write_text("kept\n")
-    real_make_ignore = mod.make_ignore
+    real_skip = mod.skip_reason
 
-    def swapping(run, excluder):
-        ignore = real_make_ignore(run, excluder)
+    def swapping(directory, name, mode, excluder):
+        why = real_skip(directory, name, mode, excluder)  # the listing check passed: now the file becomes a link
+        victim = Path(directory) / "chat.jsonl"
+        if name == "chat.jsonl" and victim.is_file() and not victim.is_symlink():
+            victim.unlink()
+            os.symlink(marker, victim)
+        return why
 
-        def wrapped(directory, names):
-            out = ignore(directory, names)  # the listing check passed: now the file becomes a link
-            victim = Path(directory) / "chat.jsonl"
-            if victim.is_file() and not victim.is_symlink():
-                victim.unlink()
-                os.symlink(marker, victim)
-            return out
-        return wrapped
-
-    monkeypatch.setattr(mod, "make_ignore", swapping)
+    monkeypatch.setattr(mod, "skip_reason", swapping)
     dest = home / "out" / "bk"
     assert mod.main(["--only", "grok", "--dest", str(dest)]) == 1
     assert b"SENTINEL-SWAPPED-IN-TARGET" not in all_bytes(dest)
@@ -1440,3 +1437,138 @@ def test_wal_size_ignores_a_symlinked_wal(real):
     (home / "x.db-wal").unlink()
     (home / "x.db-wal").write_bytes(b"x" * 10)
     assert mod.wal_size(db) == 10
+
+
+# --- Codex pass 11 on PR 24 (2026-10-20): Crush files, a walk that never trusts a path string, optional sidecars ---
+
+def test_crush_json_files_are_backed_up_and_hyper_json_and_providers_are_not(real):
+    mod, home, _ = real
+    crush = home / ".local/share/crush"
+    crush.mkdir(parents=True)
+    (crush / "crush.json").write_text('{"c": 1}')
+    (crush / "projects.json").write_text('{"p": 1}')
+    (crush / "hyper.json").write_text("SENTINEL-HYPER-LOGIN")
+    (crush / "providers.json").write_text("SENTINEL-PROVIDERS")
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "crush-files", "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "ok" and entry["errors"] == [] and entry["file_count"] == 2
+    assert (dest / "crush-files/crush.json").read_text() == '{"c": 1}'
+    assert (dest / "crush-files/projects.json").read_text() == '{"p": 1}'
+    assert not (dest / "crush-files/hyper.json").exists()
+    assert b"SENTINEL-HYPER-LOGIN" not in all_bytes(dest) and b"SENTINEL-PROVIDERS" not in all_bytes(dest)
+    (crush / "crush.json").unlink()
+    (crush / "projects.json").unlink()
+    dest2 = home / "out" / "bk2"
+    assert mod.main(["--only", "crush-files", "--dest", str(dest2)]) == 0
+    entry = manifest_of(dest2)["stores"][0]
+    assert entry["status"] == "missing" and len(entry["missing"]) == 2 and entry["file_count"] == 0
+
+
+def test_a_subdirectory_swapped_for_a_symlink_after_listing_is_a_store_error_and_nothing_is_copied(real, monkeypatch):
+    mod, home, tmp = real
+    outside = tmp / "outside-dir"
+    outside.mkdir()
+    (outside / "secret.jsonl").write_text("SENTINEL-OUTSIDE-DIR")
+    sessions = home / ".grok/sessions"
+    (sessions / "p1").mkdir(parents=True)
+    (sessions / "p1/chat.jsonl").write_text("inside\n")
+    (sessions / "p2").mkdir()
+    (sessions / "p2/ok.jsonl").write_text("kept\n")
+    real_open = mod.open_dir_at
+
+    def swapping(name, parent_fd):
+        victim = sessions / name
+        if name == "p1" and victim.is_dir() and not victim.is_symlink():  # listed as a directory, now a link
+            shutil.rmtree(victim)
+            os.symlink(outside, victim)
+        return real_open(name, parent_fd)
+
+    monkeypatch.setattr(mod, "open_dir_at", swapping)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "grok", "--dest", str(dest)]) == 1
+    assert b"SENTINEL-OUTSIDE-DIR" not in all_bytes(dest)
+    assert not (dest / "grok/sessions/p1/secret.jsonl").exists()
+    assert (dest / "grok/sessions/p2/ok.jsonl").read_text() == "kept\n"
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial"
+    assert [e["source"] for e in entry["errors"]] == [str(sessions / "p1")]
+    assert "became a symlink" in entry["errors"][0]["error"]
+
+
+def test_a_session_directory_swapped_for_a_symlink_before_the_db_open_is_refused_and_not_copied(real, monkeypatch):
+    mod, home, tmp = real
+    sdir = make_cursor_session(home)
+    outside = tmp / "outside-tree" / "uuid1"
+    outside.mkdir(parents=True)
+    make_wal_db(outside / "store.db", ["SENTINEL-OUTSIDE-DB-ROW"]).close()
+    real_open = mod.open_dir_at
+
+    def swapping(name, parent_fd):
+        victim = home / ".cursor/chats" / name
+        if name == "hashA" and not victim.is_symlink():  # listed and checked as a directory, now a link
+            shutil.move(victim, tmp / "moved-hashA")
+            os.symlink(outside.parent, victim)
+        return real_open(name, parent_fd)
+
+    monkeypatch.setattr(mod, "open_dir_at", swapping)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 1
+    assert b"SENTINEL-OUTSIDE-DB-ROW" not in all_bytes(dest)
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial" and "symlink" in entry["errors"][0]["error"]
+    assert sdir.name == "uuid1"
+
+
+def test_ro_connect_refuses_a_parent_directory_swapped_for_a_symlink_and_reads_nothing_outside(real, monkeypatch):
+    mod, home, tmp = real
+    root = home / "root"
+    (root / "a").mkdir(parents=True)
+    db = root / "a/store.db"
+    make_wal_db(db, ["inside"]).close()
+    outside = tmp / "outside-parent"
+    outside.mkdir()
+    make_wal_db(outside / "store.db", ["SENTINEL-OUTSIDE-PARENT-ROW"]).close()
+    real_open = mod.open_dir_at
+
+    def swapping(name, parent_fd):
+        if name == "a":
+            shutil.move(root / "a", tmp / "moved-a")
+            os.symlink(outside, root / "a")
+        return real_open(name, parent_fd)
+
+    monkeypatch.setattr(mod, "open_dir_at", swapping)
+    opened = []
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(mod.sqlite3, "connect", lambda *a, **k: (opened.append(a), real_connect(*a, **k))[1])
+    with pytest.raises(OSError, match="symlink"):
+        mod.ro_connect(db, root)
+    assert opened == []
+    monkeypatch.setattr(mod, "open_dir_at", real_open)
+    (root / "a").unlink()
+    shutil.move(tmp / "moved-a", root / "a")
+    con = mod.ro_connect(db, root)  # the same call without a swap works
+    assert [r[0] for r in con.execute("SELECT v FROM t")] == ["inside"]
+    con.close()
+
+
+def test_an_optional_sidecar_that_is_a_symlink_is_a_recorded_skip_and_the_store_stays_ok(real, capsys):
+    mod, home, _ = real
+    conv = home / ".gemini/antigravity-cli/conversations"
+    conv.mkdir(parents=True)
+    make_wal_db(conv / "c1.db", ["row"]).close()
+    (home / "target.meta").write_text("SENTINEL-META-TARGET")
+    os.symlink(home / "target.meta", conv / "c1.meta")
+    skipped = [{"path": str(conv / "c1.meta"), "why": "symlink"}]
+    assert mod.main(["--only", "antigravity-cli-db", "--dry-run", "--json", "--dest", str(home / "o")]) == 0
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    assert plan["file_count"] == 1 and plan["skipped"] == skipped and plan["errors"] == []
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "antigravity-cli-db", "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "ok" and entry["errors"] == [] and entry["skipped"] == skipped
+    assert entry["skipped_count"] == 1 and entry["file_count"] == 1
+    assert f"skipped {conv / 'c1.meta'}: symlink" in capsys.readouterr().err
+    assert (dest / "antigravity-cli-db/conversations/c1.db").is_file()
+    assert not (dest / "antigravity-cli-db/conversations/c1.meta").exists()
+    assert b"SENTINEL-META-TARGET" not in all_bytes(dest)
