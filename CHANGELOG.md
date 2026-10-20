@@ -27,6 +27,7 @@ agent what changed and what is new. Entries end with the pull request number.
   downloads nothing during a `--remote` scan, and `--fetch` writes no refs and does not recurse into
   submodules; `bin/ade-scan-state-doc` renders the doc from the scan JSON and refuses to overwrite its
   input, a directory, a non-`.md` path or an existing file without `--force` (#27).
+- `session-finder/relay.py` reaches Paseo-hosted agents (`paseo send --behavior steer -- <id> <text>`, labelled as an agent message from the sender; takes a `PASEO_AGENT_ID` as the ident, `--idle S` waits for idle first; refuses archived agents, pending permissions and text starting with `/`) and `where.py` reports `host=paseo agent=<id>` for them, so the "no terminal channel (unknown terminal)" refusal no longer hits a Paseo agent (#25).
 - `agents/` templates for `~/.claude/settings.json`, `~/.codex/config.toml`, opencode's `opencode.json` and
   `~/.hermes/config.yaml` (secrets, home paths and host or account ids as placeholders, listed in
   `agents/README.md`), `bin/ade-template-check` (credential scan, render-and-parse with plain and hostile values, `--diff` by key path) and its
@@ -91,6 +92,12 @@ agent what changed and what is new. Entries end with the pull request number.
   its 6 h cooldown (2026-10-20).
 - `skill-everywhere`: the Hermes gateway nudge follows `hermes` wrappers to the real python; since `hermes`
   became a `/bin/sh` wrapper it ran the snippet under sh, where `import os, sys` was ImageMagick (2026-10-20).
+- `acp-dispatch`: re-dispatching a footed brief cuts a footer only when each of its items is a line of the
+  footer template and its heading is the template's own, so a constraint a lead added to or edited in a
+  pasted footer or its heading is kept, in linear time; a `-f` file that is
+  only a footer is refused ("no task is left"); the preflight probe and the slice's waiter deadline allow for
+  acp-run's binary wait plus its settle polls (`bin_poll_seconds`); a probe that finds an agent not installed
+  is remembered for 120 s, and an `ok` entry dated in the future is not trusted; `check` gives an `auth` stop the login hint, not `--escalate` (#22).
 - `tests/conftest.py` pins `ROUTE_AGENT_OMP_READY=0`, so the route_agent suite passes on a host with
   an omp login as it does on CI; the omp-ready roster has its own tests (queue item 6) (#17).
 - `acp-dispatch`: an unmeasured (stale) quota window is skipped instead of crashing the dispatch

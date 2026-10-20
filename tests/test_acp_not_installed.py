@@ -30,6 +30,20 @@ FAKE_MISSING = FAKE.replace(
     'missing)  echo "acp-run: claude-agent-acp not installed" >&2; exit 127;;\n  quota)    echo "FAILED quota"', 1)
 
 
+def acp_run_bin_settings() -> dict:
+    """acp-run's own env_seconds and bin_wait_settings, compiled from its source (the script needs the
+    `acp` package, which only `uv run --script` provides)."""
+    import ast
+    import math
+    tree = ast.parse(ACP_RUN.read_text())
+    keep = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in ("env_seconds", "bin_wait_settings"))
+            or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in ("BIN_WAIT", "BIN_WAIT_MAX", "BIN_POLL")
+                                                  for t in n.targets))]
+    ns: dict = {"os": os, "math": math}
+    exec(compile(ast.Module(keep, []), str(ACP_RUN), "exec"), ns)     # noqa: S102 - the repo's own file
+    return ns
+
+
 class TestAcpRunWaits(unittest.TestCase):
     def run_acp(self, wait: str, appears: bool) -> subprocess.CompletedProcess[str]:
         """acp-run with the agent binary missing. With `appears`, the binary is installed only once
@@ -130,8 +144,30 @@ class TestPreflightWaitsForTheBinary(Base):
             with unittest.mock.patch("subprocess.run", fake_run):
                 ok, _, _, _ = mod["preflight"]("acp-run", "codex", "m1")
         self.assertTrue(ok)
-        self.assertEqual(seen["timeout"], mod["PREFLIGHT_TIMEOUT"] + 30 + 10)
+        # 30 s of waiting, then bin_settle's up to 10 polls of the default 2 s, then 10 s of margin
+        self.assertEqual(seen["timeout"], mod["PREFLIGHT_TIMEOUT"] + 30 + 10 * 2 + 10)
         self.assertEqual(seen["env"]["ACP_RUN_BIN_WAIT"], "30")
+        self.assertEqual(seen["env"]["ACP_RUN_BIN_POLL"], "2")
+
+    def probe_timeout(self, **env: str) -> float:
+        seen: dict = {}
+        self.pf_runs = getattr(self, "pf_runs", 0) + 1       # a fresh state dir: an ok probe is cached
+
+        def fake_run(cmd, **kw):
+            seen.update(kw)
+            return subprocess.CompletedProcess(cmd, 0, stdout="OK\n", stderr="")
+        with unittest.mock.patch.dict(os.environ, {"ACP_DISPATCH_PREFLIGHT": str(self.tmp / f"pf{self.pf_runs}"), **env}):
+            mod = runpy.run_path(str(SCRIPT))
+            with unittest.mock.patch("subprocess.run", fake_run):
+                _ = mod["preflight"]("acp-run", "codex", "m1")
+        return seen["timeout"] - mod["PREFLIGHT_TIMEOUT"]
+
+    def test_probe_timeout_covers_bin_settle(self):
+        # adversary PR 18 follow-up C: settle polls ACP_RUN_BIN_POLL up to 10 times after the binary appears
+        self.assertEqual(self.probe_timeout(ACP_RUN_BIN_WAIT="30", ACP_RUN_BIN_POLL="5"), 30 + 50 + 10)
+        self.assertEqual(self.probe_timeout(ACP_RUN_BIN_WAIT="30", ACP_RUN_BIN_POLL="999"), 30 + 300 + 10)  # clamped to 30
+        self.assertEqual(self.probe_timeout(ACP_RUN_BIN_WAIT="30", ACP_RUN_BIN_POLL="0"), 30 + 0.5 + 10)    # clamped to 0.05
+        self.assertEqual(self.probe_timeout(ACP_RUN_BIN_WAIT="0", ACP_RUN_BIN_POLL="5"), 10)                # no wait, no settle
 
     def test_default_and_junk_waits(self):
         fn = runpy.run_path(str(SCRIPT))["bin_wait_seconds"]
@@ -142,6 +178,89 @@ class TestPreflightWaitsForTheBinary(Base):
                 if value is None:
                     os.environ.pop("ACP_RUN_BIN_WAIT", None)
                 self.assertEqual(fn(), want, value)
+
+    def test_default_and_junk_polls_mirror_acp_run(self):
+        mod = runpy.run_path(str(SCRIPT))
+        acp = acp_run_bin_settings()
+        for value in (None, "abc", "nan", "inf", "-inf", "", "-5", "0", "0.01", "0.05", "1.5", "30", "31", "1e9"):
+            env = {} if value is None else {"ACP_RUN_BIN_POLL": value}
+            with unittest.mock.patch.dict(os.environ, env, clear=False):
+                if value is None:
+                    os.environ.pop("ACP_RUN_BIN_POLL", None)
+                self.assertEqual(mod["bin_poll_seconds"](), acp["bin_wait_settings"]()[1], value)
+        for value in ("abc", "nan", "inf", "-5", "0", "12.5", "9999", ""):
+            with unittest.mock.patch.dict(os.environ, {"ACP_RUN_BIN_WAIT": value}, clear=False):
+                self.assertEqual(mod["bin_wait_seconds"](), acp["bin_wait_settings"]()[0], value)
+
+
+class TestPreflightRemembersANotInstalledAgent(Base):
+    """adversary PR 18 follow-up D: acp-run waits 90 s for a missing binary, so a wave of dispatches to an
+    agent that is not installed must pay that once, not once each (nor hold the pool's flock that long)."""
+
+    MISSING = "acp-run: claude-agent-acp not installed\n"
+
+    def run_preflight(self, results: list, **env: str):
+        calls: list = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            rc, out, err = results[min(len(calls), len(results)) - 1]
+            return subprocess.CompletedProcess(cmd, rc, stdout=out, stderr=err)
+        with unittest.mock.patch.dict(os.environ, {"ACP_DISPATCH_PREFLIGHT": str(self.tmp / "pf"), **env}):
+            mod = runpy.run_path(str(SCRIPT))
+            with unittest.mock.patch("subprocess.run", fake_run), \
+                    unittest.mock.patch.dict(mod["preflight"].__globals__, {"note_outage_in_aiuse": lambda *a: "off"}):
+                first = mod["preflight"]("acp-run", "claude", "m1")
+                second = mod["preflight"]("acp-run", "claude", "m1")
+                state = mod["preflight_state"]("claude", "m1")
+                ttl = mod["NOT_INSTALLED_TTL"]
+                # age the negative entry past its TTL: the next dispatch probes again
+                rec = json.loads(state.read_text()) if state.exists() else None
+                if rec:
+                    rec["time"] -= ttl + 1
+                    _ = state.write_text(json.dumps(rec))
+                third = mod["preflight"]("acp-run", "claude", "m1")
+        return calls, first, second, third, ttl
+
+    def test_a_second_dispatch_does_not_probe_again_until_the_ttl(self):
+        calls, first, second, third, ttl = self.run_preflight([(127, "", self.MISSING)])
+        self.assertFalse(first[0])
+        self.assertEqual(first[2], "not-installed")
+        self.assertEqual(second[0], False)
+        self.assertEqual(second[2], "not-installed")
+        self.assertIn("claude-agent-acp not installed", second[1])
+        self.assertIn("retry after", second[1])
+        self.assertEqual(len(calls), 2, calls)          # probe 1, (cached), probe 3 after the TTL
+        self.assertEqual(ttl, 120)
+
+    def test_other_failures_and_successes_are_not_negatively_cached(self):
+        calls, first, second, third, _ = self.run_preflight([(1, "", "boom: connection reset\n")])
+        self.assertFalse(first[0])
+        self.assertNotEqual(first[2], "not-installed")
+        self.assertEqual(len(calls), 3, calls)          # every call probed
+        calls, first, second, third, _ = self.run_preflight([(0, "OK\n", "")])
+        self.assertTrue(first[0])
+        self.assertEqual(second[1], "cached")
+
+    def test_an_ok_entry_from_the_future_is_not_trusted(self):
+        # PR 22 review: a clock step back or a crafted `time` must not keep `ok` cached forever
+        calls: list = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="OK\n", stderr="")
+        with unittest.mock.patch.dict(os.environ, {"ACP_DISPATCH_PREFLIGHT": str(self.tmp / "pf")}):
+            mod = runpy.run_path(str(SCRIPT))
+            with unittest.mock.patch("subprocess.run", fake_run):
+                self.assertTrue(mod["preflight"]("acp-run", "claude", "m1")[0])
+                state = mod["preflight_state"]("claude", "m1")
+                rec = json.loads(state.read_text())
+                rec["time"] += 10 ** 6
+                _ = state.write_text(json.dumps(rec))
+                again = mod["preflight"]("acp-run", "claude", "m1")
+        self.assertTrue(again[0])
+        self.assertNotEqual(again[1], "cached")
+        self.assertEqual(len(calls), 2, calls)
 
 
 class TestCheck(Base):

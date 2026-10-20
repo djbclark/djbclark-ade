@@ -2,7 +2,7 @@
 name: session-finder
 description: >-
   Find which agent session (any TUI, running or ended) is or was on a topic,
-  with its handoff chains, where it lives (herdr/Orca/tmux/Ghostty) and how to
+  with its handoff chains, where it lives (herdr/Orca/tmux/Paseo/Ghostty) and how to
   continue: message it, /baton from its handoff, resume it, or brief a clean
   agent. Use for "tell the agent doing X ...", "which session is on X", "did we
   ever look at X", "find the session where we did X", /session-finder-all, or
@@ -83,8 +83,10 @@ here (`/session-finder-all` loads this skill for it).
 `where.py <pid>` reads the process's environment and prints the same facts
 `hermes-ping` prints for itself: `herdr · ws shells#6 · tab 11#78 · pane claude ·
 "<title>" · ~/src/one-offs` plus `focus: herdr tab focus <id>` (herdr, Orca
-worktree/terminal, tmux, Ghostty/iTerm/Terminal.app/VS Code; ssh flagged). The
-finders call it and cache the result an hour (`locations` table in the history DB).
+worktree/terminal, tmux, Ghostty/iTerm/Terminal.app/VS Code; ssh flagged). A Claude
+the Paseo daemon spawned has no terminal: `where.py` says `host=paseo agent=<PASEO_AGENT_ID>` (JSON key
+`paseo_agent`; recognised by that variable plus the daemon as its direct parent, 2026-10-20).
+The finders call it and cache the result an hour (`locations` table in the history DB).
 
 **Give three things:** the session name, its title, and the `where:` line with the
 `focus:` command. `one-offs-91 "CCC slow performance" — herdr ws shells#6 · tab
@@ -273,7 +275,7 @@ flips to false turns peer messaging off in running Claude sessions (2026-10-13; 
 
 | Agent / host | Running session | Ended session |
 |---|---|---|
-| claude (TUI) | `SendMessage({to: "<name>"})`; read its latest prompt line first. Not in your `ListAgents`, no messaging socket (`fleet.py` then says so in `reach:`), or a delivery notice says SendMessage was refused → `relay.py <id> "<one line>"` (keys into its herdr/Orca/tmux pane; queued while it works; refused on a typed draft or an open question; a dim/grey suggested prompt is not a draft). Finished (`/handoff`) → rung 3b, never SendMessage | `claude --resume <id>` (rung 3d) or `launch.py --baton` |
+| claude (TUI) | `SendMessage({to: "<name>"})`; read its latest prompt line first. Not in your `ListAgents`, no messaging socket (`fleet.py` then says so in `reach:`), or a delivery notice says SendMessage was refused → `relay.py <id> "<one line>"` (keys into its herdr/Orca/tmux pane; queued while it works; refused on a typed draft or an open question; a dim/grey suggested prompt is not a draft). A Paseo-hosted one (`where: host=paseo agent=<id>`, or you were handed a `PASEO_AGENT_ID`): `relay.py <sid|name|agent-id> "<text>"` runs `paseo send --behavior steer -- <id> <text>` with your own `PASEO_AGENT_ID` kept, so Paseo labels it an agent message from you (a caller that is not a Paseo agent gets a `[relay from <name>] ` prefix), never the operator's turn. It re-runs `paseo agent inspect` first and refuses an archived agent, a pending permission or question (helm answers it), a status other than idle/running, and text starting with `/`; `--idle S` (finite, > 0) waits for idle first; no draft check, there is no input box. Exit 0 means "accepted" (the daemon's acknowledgement), or "delivered" once a Claude transcript shows the text (2026-10-20). Finished (`/handoff`) → rung 3b, never SendMessage | `claude --resume <id>` (rung 3d) or `launch.py --baton` |
 | any ACP launch (`host acp`, id `YYYYMMDD-…`) | `launch.py reply <id> "<text>"`, then `launch.py wait <id>` | `launch.py list`; its log under `~/.local/state/session-finder/` |
 | a headless `acp-dispatch` slice (a bigteam/lead worker: `where: unknown terminal`, no pane) | `acp-dispatch tell <jobs/NAME.json> "<text>"`; `fleet.py show` and `relay.py` name the record (2026-10-18) | `acp-dispatch resume <record>` |
 | an `acp-dispatch` / `acp-run claude` slice (headless; `fleet.py` shows no channel) | `SendMessage({to: "<name>"})`: it is in `ListAgents` as a peer (2026-10-18: hermes-agent-1e, unreachable by relay, listed there). Any agent's slice: `acp-dispatch tell RECORD "<msg>"` (2026-10-18; appends to `jobs/<name>.inbox.md`, also writes to a Claude slice's live socket; the slice answers in `jobs/<name>.replies.md`, `acp-dispatch check` shows them). Slices dispatched before 051a269 lack the footer item that makes them read the inbox: go through their lead | `acp-dispatch resume RECORD` |
