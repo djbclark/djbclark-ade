@@ -45,6 +45,11 @@ referenced verdict is a lead, not a proof. `size` is `du -sk`; `newest_mtime` lo
            out (rc=124): the task is never `unique`, `mixed` or `scratch`, its record has
            `reference_search: "incomplete: rc=<n>"` (null otherwise), and the summary counts it under
            `bigteam.incomplete`. The exit status stays 0, as for an incomplete checkout.
+  scan incomplete: scandir <ERRNO> <relative path>  a subtree of the task could not be listed (it may
+           hold the only report): same rule, the record has `traversal: "incomplete: scandir ..."`
+           (null otherwise; the first failure by path), counted under `bigteam.incomplete`.
+
+A --git-root that is not a directory is a usage error (exit 2) before anything is scanned.
 
 Git checkout verdicts (a checkout is a dir holding `.git`, found up to two levels under each
 --git-root, symlinks not followed, deduplicated):
@@ -64,6 +69,9 @@ Git checkout verdicts (a checkout is a dir holding `.git`, found up to two level
                     600 s, every other git call 60 s. A repository counts as unborn (no commit yet) only
                     when `refs/heads` and `refs/tags` hold nothing; a HEAD that names no ref while
                     refs exist is `scan incomplete: rev-parse --abbrev-ref HEAD rc=<n>`.
+  scan incomplete: scandir <ERRNO>  a directory inside a --git-root could not be listed, so checkouts
+                    below it may be missing: one record for that dir (path, found_via, counts null),
+                    counted under `checkouts.incomplete`; the exit status stays 0.
 Local-only commits: `local_only_commits` is `git rev-list --count HEAD --branches --not
 --remotes=origin` (plus every origin tip `ls-remote` returned with --remote; tips whose objects are
 missing here are ignored, which can only overcount). When it is above 0, `local_only_branches` is a
@@ -90,6 +98,7 @@ Exit codes: 0 scan completed; 2 usage error. Pass --json for machine-readable ou
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import atexit
@@ -200,11 +209,21 @@ def is_checkout(path: Path) -> bool:
     return git_dir.exists() and not git_dir.is_symlink()
 
 
-def walk(path: Path, depth: int, skip_checkouts: bool = True):
-    """Yield (file path, DirEntry stat-free) up to `depth` levels below path."""
+def errno_name(exc: OSError) -> str:
+    return errno.errorcode.get(exc.errno, "EIO") if exc.errno else "EIO"
+
+
+def walk(path: Path, depth: int, skip_checkouts: bool = True,
+         failures: list[tuple[Path, str]] | None = None):
+    """Yield file paths up to `depth` levels below path.
+
+    A directory that cannot be listed is appended to `failures` as (path, errno name) when the caller
+    passes a list; it is never silently dropped from what the caller concludes (adversary/Codex pass 5)."""
     try:
         entries = list(os.scandir(path))
-    except OSError:
+    except OSError as exc:
+        if failures is not None:
+            failures.append((Path(path), errno_name(exc)))
         return
     for e in entries:
         try:
@@ -215,11 +234,12 @@ def walk(path: Path, depth: int, skip_checkouts: bool = True):
                     continue
                 if skip_checkouts and os.path.exists(os.path.join(e.path, ".git")):
                     continue
-                yield from walk(Path(e.path), depth - 1, skip_checkouts)
+                yield from walk(Path(e.path), depth - 1, skip_checkouts, failures)
             elif e.is_file(follow_symlinks=False):
                 yield Path(e.path)
-        except OSError:
-            continue
+        except OSError as exc:
+            if failures is not None:
+                failures.append((Path(e.path), errno_name(exc)))
 
 
 def newest_mtime(path: Path) -> float:
@@ -266,14 +286,16 @@ def open_job_records(task: Path) -> list[str]:
     return out
 
 
-def report_files(task: Path) -> list[dict]:
+def report_files(task: Path, failures: list[tuple[Path, str]] | None = None) -> list[dict]:
     found = []
-    for f in walk(task, REPORT_DEPTH + 1):
+    for f in walk(task, REPORT_DEPTH + 1, failures=failures):
         n = f.name
         if n.endswith(".md") and "report" in n.lower():
             try:
                 size = f.stat().st_size
-            except OSError:
+            except OSError as exc:
+                if failures is not None:
+                    failures.append((f, errno_name(exc)))
                 continue
             found.append({"path": str(f.relative_to(task)), "bytes": size,
                           "done": Path(str(f) + ".done").exists()})
@@ -322,9 +344,18 @@ def scan_bigteam(root: Path, ref_roots: list[Path], exclude: list[str], unique_m
             continue
         task = Path(e.path)
         size = du_bytes(task)
-        reports = report_files(task)
+        traversal: list[tuple[Path, str]] = []
+        reports = report_files(task, traversal)
         refs, search_rc = referenced(task.name, ref_roots, exclude) if reports else ([], None)
-        if search_rc is not None:
+        traversal_note = None
+        if traversal:
+            # a subtree that could not be listed may hold the only report: never `scratch`/`unique`
+            bad, err = min(traversal)  # scandir order is arbitrary: the first by path
+            where = " ".join(os.path.relpath(bad, task).split("\n"))
+            reason = f"scandir {err} {where}"
+            traversal_note = f"incomplete: {reason}"
+            verdict, unique_bytes = f"{INCOMPLETE_PREFIX}{reason}", 0
+        elif search_rc is not None:
             # the search did not run to an answer: never read it as "unreferenced" (unique/mixed)
             # or as "nothing to keep" (scratch)
             verdict, unique_bytes = f"{INCOMPLETE_PREFIX}reference search rc={search_rc}", 0
@@ -339,6 +370,7 @@ def scan_bigteam(root: Path, ref_roots: list[Path], exclude: list[str], unique_m
             "open_job_records": open_job_records(task), "referenced_in": refs[:5],
             "verdict": verdict, "unique_bytes": unique_bytes,
             "reference_search": None if search_rc is None else f"incomplete: rc={search_rc}",
+            "traversal": traversal_note,
         })
     for t in sorted(tasks, key=lambda t: -t["bytes"])[:top]:
         t["fills"] = top_children(root / t["task"])
@@ -346,8 +378,14 @@ def scan_bigteam(root: Path, ref_roots: list[Path], exclude: list[str], unique_m
     return {"root": str(root), "tasks": tasks, "loose_files": loose}
 
 
-def find_checkouts(root: Path) -> list[Path]:
+def find_checkouts(root: Path, failures: list[tuple[Path, str]] | None = None) -> list[Path]:
+    """Checkouts up to GIT_SCAN_DEPTH levels under `root`; a directory that cannot be listed goes to
+    `failures` as (path, errno name) instead of reading as "no checkouts"."""
     found = []
+
+    def fail(p: Path, exc: OSError):
+        if failures is not None:
+            failures.append((p, errno_name(exc)))
 
     def rec(p: Path, depth: int):
         if is_checkout(p):
@@ -357,14 +395,15 @@ def find_checkouts(root: Path) -> list[Path]:
             return
         try:
             kids = sorted(os.scandir(p), key=lambda e: e.name)
-        except OSError:
+        except OSError as exc:
+            fail(p, exc)
             return
         for e in kids:
             try:
                 if e.is_dir(follow_symlinks=False):  # a link may lead anywhere: name that root instead
                     rec(Path(e.path), depth - 1)
-            except OSError:
-                pass
+            except OSError as exc:
+                fail(Path(e.path), exc)
 
     rec(root, GIT_SCAN_DEPTH)
     return found
@@ -713,7 +752,17 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
 def scan_git(roots: list[Path], remote: bool, fetch: bool = False) -> list[dict]:
     seen, out = set(), []
     for root in roots:
-        for co in find_checkouts(root):
+        unreadable: list[tuple[Path, str]] = []
+        found = find_checkouts(root, unreadable)
+        for bad, err in unreadable:
+            real = bad.resolve()
+            if real in seen:
+                continue
+            seen.add(real)
+            rec = skipped_record(real, f"{INCOMPLETE_PREFIX}scandir {err}")
+            rec["found_via"] = str(bad)
+            out.append(rec)
+        for co in found:
             real = co.resolve()
             if real in seen:
                 continue
@@ -826,6 +875,9 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     if not args.bigteam and not args.git_root:
         ap.error("give --bigteam and/or --git-root")
+    for root in args.git_root:
+        if not root.is_dir():
+            ap.error(f"--git-root {root} is not a directory")
     result: dict = {"scanned_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     if args.bigteam:
         if not args.bigteam.is_dir():

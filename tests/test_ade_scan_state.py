@@ -1051,3 +1051,56 @@ def test_shquote_keeps_a_leading_tilde_outside_the_quotes():
     assert mod.shquote("/abs/a b") == "'/abs/a b'"
     assert mod.shquote("x$(y)") == "'x$(y)'"
     assert mod.shcode("git -C {} add", "~/src/a b") == "`git -C ~/'src/a b' add`"
+
+
+def test_a_missing_git_root_is_a_usage_error_not_zero_checkouts(tmp_path):
+    """Codex PR 27 pass 5, P1 (4324259451): `--git-root /nowhere` used to exit 0 with count 0."""
+    for bad in (tmp_path / "definitely-not-a-root", tmp_path / "a-file"):
+        (tmp_path / "a-file").write_text("x\n")
+        p = subprocess.run([str(SCRIPT), "--git-root", str(bad), "--json"], capture_output=True, text=True)
+        assert p.returncode == 2 and p.stdout == "", (p.returncode, p.stdout)
+        assert f"--git-root {bad}" in p.stderr, p.stderr
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 directory")
+def test_an_unlistable_directory_under_a_git_root_is_scan_incomplete(tmp_path):
+    """Codex PR 27 pass 5, P1 (4324259451): a directory scandir cannot open is not "no checkouts"."""
+    roots = tmp_path / "roots"
+    locked = roots / "locked"
+    locked.mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        p = subprocess.run([str(SCRIPT), "--git-root", str(roots), "--json"], capture_output=True, text=True)
+    finally:
+        locked.chmod(0o755)
+    assert p.returncode == 0, p.stderr
+    out = json.loads(p.stdout)
+    assert [c["verdict"] for c in out["checkouts"]] == ["scan incomplete: scandir EACCES"], out["checkouts"]
+    assert out["checkouts"][0]["path"] == str(locked.resolve()) and out["checkouts"][0]["flags"] == [
+        "scan incomplete: scandir EACCES"]
+    assert out["summary"]["checkouts"]["incomplete"] == 1
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 directory")
+def test_an_unlistable_task_subtree_is_scan_incomplete_never_scratch(tmp_path):
+    """Codex PR 27 pass 5, P1 (4324259461): the only report may sit in the subtree that could not be listed."""
+    root, refs = tmp_path / "bigteam", tmp_path / "refs"
+    sub = root / "t-locked" / "sub"
+    sub.mkdir(parents=True)
+    (root / "t-ok").mkdir()
+    (root / "t-ok" / "a-report.md").write_text("x\n")
+    refs.mkdir()
+    sub.chmod(0)
+    try:
+        p = subprocess.run([str(SCRIPT), "--bigteam", str(root), "--ref-root", str(refs), "--json"],
+                           capture_output=True, text=True)
+    finally:
+        sub.chmod(0o755)
+    assert p.returncode == 0, p.stderr
+    out = json.loads(p.stdout)
+    by = {t["task"]: t for t in out["bigteam"]["tasks"]}
+    assert by["t-locked"]["verdict"] == "scan incomplete: scandir EACCES sub", by["t-locked"]["verdict"]
+    assert by["t-locked"]["traversal"] == "incomplete: scandir EACCES sub"
+    assert by["t-locked"]["unique_bytes"] == 0
+    assert by["t-ok"]["verdict"] == "unique" and by["t-ok"]["traversal"] is None
+    assert out["summary"]["bigteam"]["incomplete"] == 1
