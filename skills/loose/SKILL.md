@@ -96,7 +96,10 @@ the audit found nothing:
    (its Step 9) clear the context of this same session and start `/baton`, so work
    carries on with nobody typing. Recommend it when anything is still open or
    deferred, or the session was long or produced context that is not already
-   durable.
+   durable. On Paseo the pre-`/clear` transcript is not kept by `paseo logs` once
+   `/baton` runs (2026-10-20; the UI is unverified), so anything he must read goes
+   into the handoff document, the Tier 1 pointer and the hermes-ping, not only the
+   final message.
 2. **Finish and archive this session** — write the final results as the last
    message, then end the session. Recommend it when the audit closed everything
    and all work is committed and pushed.
@@ -105,8 +108,13 @@ the audit found nothing:
 Put the recommended one first with `(Recommended)` and give the reason in its
 description, e.g. "2 items deferred; a handoff keeps them findable".
 
-Then act on the answer. For handoff and continue, invoke the `handoff` skill. A
-built-in like `/quit` is not a skill, but you can queue it yourself (operator,
+Then act on the answer. For handoff and continue, invoke the `handoff` skill (its Step 9
+runs here). **Lifecycle actions run only in the top-level session** (2026-10-20): a
+sub-agent or a dispatched slice shares or inherits the parent's agent id, so it never runs
+Rule 4's `self-slash`, `--finish` or Step 9; it treats a handoff as document-only and
+reports.
+
+A built-in like `/quit` is not a skill, but you can queue it yourself (operator,
 2026-10-09: "you should actually be able to run /quit yourself"): when he picks
 finish, write the final results as the last message so they stay readable, finish
 everything first (commits pushed, no pending reads), then run

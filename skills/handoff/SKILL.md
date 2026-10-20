@@ -251,11 +251,22 @@ to this same agent and then exactly one `/baton` into the fresh session; on herd
 `/new` and then `/baton` (`self-slash` queues the `/baton` itself, `--then`, so never type or queue
 one yourself). The fresh session resumes from the Tier 1 pointer Step 7 just wrote.
 
+**Top-level session only.** A sub-agent (Agent tool, `/bigteam`, an `acp-dispatch` or `acp-run` slice)
+shares or inherits the parent's agent id, so a `/new` from it would clear the PARENT's session
+(2026-10-20; `acp-run` now scrubs the id and `self-slash` exits 9 when `ACP_RUN_AGENT=1`, but an
+Agent-tool sub-agent carries no marker). A sub-agent or dispatched slice always treats the handoff as
+document-only and never runs this step.
+
+**What the operator can read afterwards** (2026-10-20): on Paseo the pre-`/clear` transcript is not kept
+by `paseo logs` once `/baton` runs (the UI is unverified). Anything the operator must read goes into the
+handoff document, the Tier 1 pointer and the hermes-ping (`~/.local/bin/hermes-ping`, sent **before** this
+step's `self-slash`), not only into the final message.
+
 If `self-slash` refuses (exit 7: the 30-minute gap check or a lifecycle already queued; or a draft
 on the input line; or exit 3 outside herdr, Orca and Paseo), do not retry or loop: tell the operator
 `/new` is ready and stop.
 
-**Document only:** skip this step when the handoff skill is run as a sub-step of another skill (for
-example `loose` Rule 4 or a skill that clears the session itself), or when the operator says "doc
-only" or otherwise asks for the document without a restart. Say in the report that Step 9 was
-skipped and why.
+**Document only:** skip this step when a skill that clears the session itself runs the handoff, when
+the operator says "doc only" or otherwise asks for the document without a restart, or when you are a
+sub-agent or a dispatched slice (above). `loose` Rule 4 option 1 wants this step to run: it does not
+make a handoff document-only. Say in the report that Step 9 was skipped and why.
