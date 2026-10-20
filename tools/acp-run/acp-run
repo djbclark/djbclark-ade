@@ -1551,7 +1551,7 @@ FAILURE_CLASSES = [
             # zcode (2026-10-16..18): "model_request_failed project_token_login_failed" inside an
             # "Internal error" envelope read as transient and was retried into the auth wall; the exact
             # code only (a prose "login failed", test_login_failed, LoginFailedError stay unmatched)
-            r"\btoken_login_failed\b",
+            r"token_login_failed",  # no \b: it follows "project_" (an underscore is a word character)
         ],
     ),
     (
