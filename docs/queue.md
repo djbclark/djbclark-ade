@@ -13,7 +13,8 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    2026-11-08) minus cost since the grant. Plan: an `aiuse` collector behind `ANTHROPIC_ADMIN_KEY` in
    `sudo-secretspec` (djbclark creates the key in the console, Organization settings > Admin keys), grant
    parameters stay in the `set-credits` override, a launchd/`fleet-watch` job refreshes it (never a model prompt,
-   home rule 13). Blocked on the key.
+   home rule 13). Key stored as `ANTHROPIC_ADMIN_KEY` 2026-10-20 (runtime declaration, optional); the collector
+   slice is in flight on `aiuse` branch `feat/omp-cost-report`.
    Also (adversary on the aiuse branch, finding 5, 2026-10-20): `bin/route_agent.py` reads aiuse's `latest.json`
    directly, so it never sees the operator credits override; make it read `aiuse --available --json` (or the
    same resolver aiuse uses) so routing and the quota gate agree. Small djbclark-ade PR after the aiuse branch merges.
