@@ -136,6 +136,25 @@ first words name the task (the `baton` skill ignores the trailing text as a labe
 autorename cover the Paseo host; (3) a test with the fake `paseo` asserting the sent prompt starts with the
 label. Never rename or send to a live agent in tests.
 
+Also (djbclark, 2026-10-20, in the `/steps` session running as Paseo agent 6ebd939): he renamed that session's
+workspace to `djbclark-ade-rework-p` in the Paseo GUI, and another agent looking for it by that name could not find
+it; it saw the old name. Verified the same day: `paseo ls -g` lists the agent under its first-prompt NAME
+("I want to move my entire AI development environment to djbcl..."), the GUI workspace name appears nowhere in that
+listing, and `session-finder` (`fleet.py`) names a Paseo-hosted session from the agent record, so a GUI rename is
+invisible to every agent that looks sessions up by name. The slice above must (4) find where Paseo keeps a
+workspace's GUI name (the daemon API or its store under `~/.paseo`), have `session-finder` show both the workspace
+name and the agent name, and make its rename path (1) set the name the GUI shows, so a manual GUI rename and an
+agent rename are the same thing.
+
+## `bin/load-watch` `send_to` has the relay's round-1 exposure (adversary on PR #25, 2026-10-20)
+
+`send_to` (bin/load-watch, around line 536) still scrubs `PASEO_AGENT_ID`/`PASEO_AGENT_CWD` and runs `paseo send
+<target> --no-wait --behavior steer <text>` without `--` and without the archived/permission gate: the text it
+sends is unlabelled (arrives as the operator's turn) and a target or text starting with `-` is an option. Its text
+is composed by load-watch, so lower risk, but fix before it ever sends untrusted text: call
+`skills/session-finder/relay.py` instead of its own `paseo send`, or copy relay.py's `--`, label and `paseo_gate`.
+One small Sonnet `code` slice with the fake `paseo`.
+
 ## ADE-everywhere Phase 0, preserve and classify (djbclark, 2026-10-20; proposal section 8 item 1)
 
 1. **Backups: done 2026-10-20 (PR #24).** `bin/ade-backup-stores` takes the `.backup`-API copy of every live session
@@ -322,8 +341,13 @@ this repo on or after 2026-10-14 raises these three first, one `/steps` prompt e
       `replay: mock`, 0 sessions harvested, 5 mined tasks, gate reject (held-out 0.257 ->
       0.257).
    6. **Backend faults worth fixing**, from `attempts.jsonl` `why`:
-      a. agy builds an invalid model id — `acp-run: no model 'gemini-3.8-flash-medium'`; the
-         `@medium` effort is glued onto the name while the runner offers `gemini-3.8-flash`.
+      a. agy's invalid model id — **closed 2026-10-20, it was already fixed.** The two
+         `acp-run: no model 'gemini-3.8-flash-medium'` rows are 2026-10-18 04:15 and 05:04;
+         `2dab22e` (2026-10-18 06:15 local) stopped gluing the effort onto the id, because
+         agy 1.4.1 lists bare model ids and takes a `thinking_level` option. The rows predate
+         the fix, so there is no code change here. (Raised by `djbclark-ade-db`, which read the
+         rows as 10-12/13; the dates above are the verified ones. The entry as first written
+         read as a live fault and was not one.)
       b. agy pools `antigravity/claude_gpt` (7 refusals) and `antigravity/gemini` (6) report
          "not in `aiuse --available`".
       c. zcode `project_token_login_failed` x4, classified `transient` so it retries into the
