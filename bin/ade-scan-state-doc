@@ -8,9 +8,10 @@ doc). The tables and counts come from the JSON; the prose, the section 3 capture
 findings about named checkouts are the 2026-10-20 snapshot's and are written here, so a scan taken
 on another day needs its own copy of this script. `bin/ade-scan-state --markdown` prints the raw
 tables only. The committed doc was rendered from the 2026-10-20 scan, whose JSON was not kept; later
-scans regenerate their own doc. Every table cell goes through `esc` (same rule as ade-scan-state's
-`esc`); a value inside a code span goes through `code`, whose fence is longer than any backtick run
-in the value.
+scans regenerate their own doc. Every table cell goes through `esc` (control characters as backslash text,
+never a raw CR or newline); a value inside a code span goes through `code`, whose fence is longer than any
+backtick run in the value. Section 0 has one row per checkout verdict present (the rows sum to the checkout
+count); section 3.2 lists every `origin unreachable` checkout, whatever its counts.
 
 OUT must end in `.md`, must not be SCAN.json, and must not exist unless --force is given; it is
 written to a temp file beside it and moved into place, so a failed run leaves OUT as it was.
@@ -26,6 +27,7 @@ from urllib.parse import quote
 from pathlib import Path
 
 HOME = str(Path.home())
+ORIGIN_UNREACHABLE = "origin unreachable: local-only count unverified"  # ade-scan-state's flag text
 
 
 def tilde(p):
@@ -64,13 +66,14 @@ def human(n):
 
 def esc(value, in_code=False):
     """One markdown table cell: `|` escaped, `<`, `>`, `&` HTML-escaped; backticks escaped outside
-    a code span (CommonMark ignores a backslash inside one, `code` fences instead)."""
+    a code span (CommonMark ignores a backslash inside one, `code` fences instead); every control
+    character (a bare CR ends a line in CommonMark) shown as `visible()` text, never the raw byte."""
     text = "-" if value is None else str(value)
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     text = text.replace("|", "\\|")
     if not in_code:
         text = text.replace("`", "\\`")
-    return " ".join(text.split("\n"))
+    return visible(text)
 
 
 _CTRL = re.compile(r"[\x00-\x1f\x7f]")
@@ -217,8 +220,10 @@ def render(d):
       f"({bs['scratch_bytes'] / 2**30:.1f} GiB) |")
     w(f"| job records with no `closed` key | {open_jobs} in {tasks_open_jobs} task dirs |")
     w(f"| git checkouts scanned | {cs['count']} |")
-    for k in ("clean and pushed", "unpushed commits", "orphan branch", "dirty"):
-        w(f"| checkouts, verdict `{k}` | {cs['verdicts'].get(k, 0)} |")
+    shown = ("clean and pushed", "unpushed commits", "orphan branch", "dirty")
+    for k in (*shown, *sorted(k for k in cs["verdicts"] if k not in shown)):
+        # one row per verdict present, so the rows sum to the checkout count (adversary round 21, INFO 5)
+        w(f"| checkouts, verdict {code('{}', visible(k))} | {cs['verdicts'].get(k, 0)} |")
     w(f"| checkouts with unpushed work (unpushed commits or orphan branch) | **{cs['with_unpushed_work']}** |")
     w(f"| checkouts with untracked non-ignored paths | {cs['with_untracked']} |")
     w(f"| checkouts with a stash | {cs['with_stash']} |")
@@ -397,7 +402,8 @@ def render(d):
         modified, stashes, local_n = num(c["modified"]), num(c["stashes"]), num(c.get("local_only_commits"))
         head_ahead = next((v for v in (c["ahead_of_origin"], c["unpushed"])
                            if isinstance(v, int) and v > 0), 0)
-        if not head_ahead and real_untr <= 0 and not stashes and not modified and not local_n:
+        unreachable = ORIGIN_UNREACHABLE in c["flags"]  # `local_only_verified` is false with it, whatever the counts
+        if not unreachable and not head_ahead and real_untr <= 0 and not stashes and not modified and not local_n:
             continue
         what, cmd, need = [], [], "no"
         head_row = False
@@ -488,11 +494,24 @@ def render(d):
                            + " or " + shcode("git -C {} add -A -- .", raw_p)
                            + " on a branch, commit and push (stages the modified tracked files too)")
                 need = need if need != "no" else "yes: decide whether they are work"
+        if unreachable:
+            # origin did not answer: the count trusted the local `refs/remotes/origin/*`, which a deleted or
+            # force-pushed branch leaves stale, so even a 0 hides commits (adversary round 21, 1)
+            what.append("local-only count unverified: origin did not answer")
+            if local_n and not covered_by_bundle:  # the local-only branch above already printed the bundle command
+                cmd.append("or re-scan with `--remote` once origin answers")
+            else:
+                cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} bundle create <DEST>/{} --all",
+                                  ck, raw_p, f"{ck}/local-only.bundle")
+                           + " or re-scan with `--remote` once origin answers")
+            need = need if need.startswith(("yes", "**yes")) else "yes: origin did not answer; bundle, or re-scan"
         w(f"| {p} | {'; '.join(what)} | {'; '.join(cmd)} | {need} |")
     w("")
     w("Checkouts not listed are `clean and pushed` (branch on origin or no commits origin lacks, HEAD only; "
       "see limit 9), hold only the reproducible `graft/` index, or are `skipped` / `scan incomplete` "
-      "(no counts: see their verdict in the section 2 table).\n")
+      "(no counts: see their verdict in the section 2 table). A checkout flagged `origin unreachable` is "
+      "always listed, whatever its counts: its local-only count came from stale tracking refs and is "
+      "unverified, so a 0 there is not `clean and pushed`.\n")
 
     # ---- 4 caveats
     w("## 4. Limits of this scan\n")

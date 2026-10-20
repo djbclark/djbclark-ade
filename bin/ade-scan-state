@@ -108,7 +108,12 @@ Extra flag `origin tip not fetched`: the branch is on origin at a commit this ch
 compare with HEAD (add --fetch); `ahead_of_origin` then still counts those commits.
 Flag `origin tips not fetched: <n>` (--remote): n live origin tips whose objects are not here (the
 checkout is behind origin, or origin was force-pushed, on those branches; add --fetch). It is a primary
-flag: the verdict is never `clean and pushed` while any is missing.
+flag: the verdict is never `clean and pushed` while any is missing. Presence and type come from `git cat-file
+--batch-check`: a tag whose peeled object is a tree or a blob (git.git `junio-gpg-pub`, linux `v2.6.11-tree`)
+reaches no commit, so it is neither counted missing nor fetched (a tip whose commit is really absent still
+counts, and --fetch clears it).
+--remote trusts origin's answer as given: a lying origin can hide any local commit by naming it as a branch,
+tag or peeled tip.
 Flag `origin advertised invalid ref names: <n>` (--remote, `invalid_origin_refs` in the record): n entries
 of origin's answer dropped because their name is not one git creates (`:`, `..`, a control character,
 ...) or their object id is malformed or all zeros. They are never used in a fetch refspec, so a hostile
@@ -117,7 +122,8 @@ A checkout with no `origin` remote at all has every commit "ahead of origin": it
 branch and carries the extra flag `no origin remote`. `stash`, `no origin remote`, `detached` and
 `origin unknown` are flags, never a primary verdict.
 The primary verdict is the first that applies in that order; `flags` lists every one. A skipped
-checkout has no counts (null) and `config_keys` names the offending keys, never their values.
+checkout has no counts (null) and `config_keys` names the offending keys, never their values. `--markdown`
+cells show every control character (newline, a bare CR, tab, ...) as backslash text, never the raw byte.
 
 Exit codes: 0 scan completed; 2 usage error. Pass --json for machine-readable output.
 """
@@ -203,19 +209,19 @@ def git_env(network: bool = False) -> dict:
     return env
 
 
-def run(argv, timeout=120, cwd=None, env=None):
+def run(argv, timeout=120, cwd=None, env=None, stdin_text=None):
     """argv list in, (rc, stdout); never raises on a missing tool or timeout.
 
-    stdin is /dev/null and the child leads its own process group, so a timeout kills git together
-    with the ssh / git-remote-https children it started."""
+    stdin is /dev/null (or `stdin_text`, written whole) and the child leads its own process group, so a
+    timeout kills git together with the ssh / git-remote-https children it started."""
     try:
-        p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, text=True, errors="replace", cwd=cwd,
-                             env=env, start_new_session=True)
+        p = subprocess.Popen(argv, stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace",
+                             cwd=cwd, env=env, start_new_session=True)
     except OSError:
         return 124, ""
     try:
-        out, _ = p.communicate(timeout=timeout)
+        out, _ = p.communicate(input=stdin_text, timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(p.pid, signal.SIGKILL)
@@ -481,8 +487,9 @@ def find_checkouts(root: Path, failures: list[tuple[Path, str]] | None = None) -
     return found
 
 
-def git(path: Path, *args, timeout=60, network=False):
-    return run(["git", *GIT_SAFE, "-C", str(path), *args], timeout=timeout, env=git_env(network))
+def git(path: Path, *args, timeout=60, network=False, stdin_text=None):
+    kw = {} if stdin_text is None else {"stdin_text": stdin_text}
+    return run(["git", *GIT_SAFE, "-C", str(path), *args], timeout=timeout, env=git_env(network), **kw)
 
 
 def key_is_safe(key: str, value: str, in_submodule: bool = False) -> bool:
@@ -846,18 +853,29 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
                   if branches is not None and live else [])
     tips_missing = 0
 
-    def count_missing_tips() -> int:
-        rc, n = git(path, "rev-list", "--count", "--no-walk", "--ignore-missing", *check_tips)
-        return max(len(check_tips) - int(n), 0) if rc == 0 and n.strip().isdigit() else 0
+    def tip_state() -> tuple[int | None, set[str], int]:
+        """(live tips whose object is missing here, present tips that are not commits, rc). A tag on a tree
+        or blob reaches no commit: nothing to exclude, nothing to fetch, never "missing" for good
+        (git.git `junio-gpg-pub`, linux `v2.6.11-tree`; adversary round 21, 2). None when git failed."""
+        rc, out = git(path, "cat-file", "--batch-check", stdin_text="".join(f"{o}\n" for o in check_tips))
+        rows = out.splitlines()
+        if rc != 0 or len(rows) != len(check_tips):
+            return None, set(), rc
+        kinds = [r.split() for r in rows]
+        return (sum(1 for k in kinds if k[-1] == "missing"),
+                {o for o, k in zip(check_tips, kinds) if len(k) >= 2 and k[1] != "commit" and k[-1] != "missing"}, rc)
 
     if check_tips:
-        tips_missing = count_missing_tips()
+        tips_missing, noncommit, rc = tip_state()
+        if tips_missing is None:
+            return incomplete_record(path, "cat-file --batch-check", rc)
         if tips_missing and fetch:
             # only a ref whose local copy differs from its live tip can be missing
             local_refs = local_origin_refs(path) or {}
             local_tags = local_tag_refs(path) or {}
             stale = ([f"refs/heads/{b}" for b, sha in sorted(branches.items()) if local_refs.get(b) != sha]
-                     + [f"refs/tags/{t}" for t, (oid, _) in sorted(tags.items()) if local_tags.get(t) != oid])
+                     + [f"refs/tags/{t}" for t, (oid, eff) in sorted(tags.items())
+                        if local_tags.get(t) != oid and eff not in noncommit])
             if stale:
                 # belt and braces: `ls_remote_refs` already dropped such names; a `:` or whitespace in
                 # one would make it a `<src>:<dst>` refspec that writes a local ref
@@ -866,7 +884,9 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
                     "--no-auto-maintenance", "--no-write-fetch-head", "--no-tags", "--refmap=",
                     "--no-recurse-submodules", "--no-prune", "--", "origin",
                     *refspecs[:MAX_BRANCH_COUNTS], timeout=120, network=True)
-                tips_missing = count_missing_tips()
+                tips_missing, _, rc = tip_state()
+                if tips_missing is None:
+                    return incomplete_record(path, "cat-file --batch-check", rc)
     local_only: int | None = 0
     local_only_branches: list[dict] = []
     local_only_tags: list[dict] = []
@@ -1027,13 +1047,18 @@ def summarize(result: dict) -> dict:
     return s
 
 
+_CTRL = re.compile(r"[\x00-\x1f\x7f]")
+
+
 def esc(value) -> str:
-    """One markdown table cell: `|` and backticks escaped, `<`, `>`, `&` HTML-escaped, no newlines."""
+    """One markdown table cell: `|` and backticks escaped, `<`, `>`, `&` HTML-escaped, every control character
+    (newline, a bare CR that CommonMark ends a line at, tab, ...) shown as backslash-n, -r, -t or -xNN text."""
     if value is None:
         return "-"
     text = str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     text = text.replace("|", "\\|").replace("`", "\\`")
-    return " ".join(text.split("\n"))
+    named = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+    return _CTRL.sub(lambda m: named.get(m.group()) or f"\\x{ord(m.group()):02x}", text)
 
 
 def markdown(result: dict) -> str:
@@ -1078,7 +1103,9 @@ def main(argv=None) -> int:
                          "checkout, at the first `remote.origin.url`, a path resolved against the "
                          "checkout); its live tips, not the local refs/remotes/origin/* (stale after a "
                          "branch is deleted there), then decide what is pushed; an origin that does not "
-                         "answer makes the checkout `origin unreachable`, never clean and pushed")
+                         "answer makes the checkout `origin unreachable`, never clean and pushed; origin's "
+                         "answer is trusted as given: a lying origin can hide any local commit by naming "
+                         "it as a branch, tag or peeled tip")
     ap.add_argument("--fetch", action="store_true",
                     help="with --remote: `git fetch origin refs/heads/<branch>` (120 s limit) when the "
                          "origin tip's objects are missing locally, to compare it with HEAD; downloads "

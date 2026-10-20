@@ -1821,7 +1821,7 @@ def test_a_newline_in_a_path_is_ansi_c_quoted_in_every_generated_command():
     row = next(r for r in text.split("### 3.1")[1].split("### 3.2")[0].splitlines() if r.startswith("| t-nl "))
     assert "-- $'a\\nb-report.md')" in row and row.count("|") == 5
     rows = section_3_2(text).splitlines()
-    row = next(r for r in rows if r.startswith("| /p/a b "))
+    row = next(r for r in rows if r.startswith("| /p/a\\nb "))  # esc: the newline is shown as text, never a space
     assert "git -C $'/p/a\\nb' push origin refs/heads/side:refs/heads/side" in row
     assert not any(ln.startswith("b'") for ln in rows)  # no row was split at the newline
     with pytest.raises(ValueError):
@@ -1846,3 +1846,95 @@ def test_capture_plan_pushes_a_local_only_tag_by_its_full_ref_name():
     assert "2 local-only commits on tag `v1` (1), tag `--force` (1)" in row
     assert "git -C /p/tg push origin refs/tags/v1:refs/tags/v1" in row
     assert "push origin refs/tags/--force:refs/tags/--force" in row
+
+
+def test_an_unreachable_origin_checkout_always_gets_a_capture_row_even_with_zero_counts():
+    """Adversary round 21, 1: origin down, a pushed branch deleted there, the stale tracking ref hides the
+    commits and the count is 0; the plan used to list nothing and call the checkout `clean and pushed`."""
+    mod = load_doc()
+    flag = "origin unreachable: local-only count unverified"
+    gone = doc_checkout("/p/gone", flags=[flag], verdict=flag, local_only_verified=False)
+    dirty = doc_checkout("/p/dirt", flags=[flag, "dirty"], verdict=flag, local_only_verified=False,
+                         modified=2)
+    side = doc_checkout("/p/side", flags=["unpushed commits", "local-only commits: side 1", flag],
+                        verdict="unpushed commits", local_only_commits=1, local_only_verified=False,
+                        local_only_branches=[{"branch": "side", "count": 1}])
+    clean = doc_checkout("/p/clean", local_only_verified=True)
+    text = mod.render(doc_scan([gone, dirty, side, clean]))
+    rows = section_3_2(text).splitlines()
+    row = next(r for r in rows if r.startswith("| /p/gone "))
+    assert "local-only count unverified: origin did not answer" in row
+    assert "mkdir -p <DEST>/checkouts/abs/p/gone && git -C /p/gone bundle create " \
+           "<DEST>/checkouts/abs/p/gone/local-only.bundle --all" in row
+    assert "re-scan with `--remote` once origin answers" in row and row.rstrip().endswith("| yes: origin did not answer; bundle, or re-scan |")
+    assert "local-only count unverified" in next(r for r in rows if r.startswith("| /p/dirt "))
+    both = next(r for r in rows if r.startswith("| /p/side "))
+    assert "local-only count unverified" in both and both.count("local-only.bundle") == 1
+    assert not [r for r in rows if r.startswith("| /p/clean ")]
+    assert "A checkout flagged `origin unreachable` is always listed, whatever its counts" in section_3_2(text)
+
+
+def test_section_1_verdict_rows_sum_to_the_checkout_count():
+    """Adversary round 21, INFO 5: three verdicts appeared in no row."""
+    mod = load_doc()
+    verdicts = {"clean and pushed": 4, "dirty": 2, "origin tips not fetched: 2": 3,
+                "origin advertised invalid ref names: 1": 1, "origin unreachable: local-only count unverified": 5,
+                "skipped: unrecognised config core.x": 1}
+    cos = [doc_checkout(f"/p/{i}") for i in range(sum(verdicts.values()))]
+    scan = doc_scan(cos)
+    scan["summary"]["checkouts"]["verdicts"] = verdicts
+    rows = [r for r in mod.render(scan).split("## 1.")[0].splitlines() if r.startswith("| checkouts, verdict ")]
+    total = sum(int(r.rstrip(" |").rsplit("|", 1)[1]) for r in rows)
+    assert total == len(cos) == 16, rows
+    assert any("origin unreachable: local-only count unverified" in r and r.endswith("| 5 |") for r in rows)
+    assert any("unpushed commits" in r and r.endswith("| 0 |") for r in rows)  # the four fixed rows stay
+
+
+def test_esc_renders_every_control_character_as_text_so_a_cr_cannot_split_a_row():
+    """Adversary round 21, 3: CommonMark ends a line at a bare CR."""
+    doc, scan_mod = load_doc(), load()
+    for esc in (doc.esc, scan_mod.esc):
+        text = esc("a\rb\nc\td\x0be\x01f\x7fg")
+        assert text == "a\\rb\\nc\\td\\x0be\\x01f\\x7fg" and not re.search(r"[\x00-\x1f\x7f]", text)
+    co = doc_checkout("/p/a\rb", flags=["unpushed commits"], verdict="unpushed commits", local_only_commits=1,
+                      local_only_branches=[{"branch": "side", "count": 1}])
+    text = doc.render(doc_scan([co]))
+    assert "\r" not in text.replace("\r\n", "")  # no raw CR anywhere in the rendered doc
+    assert not [ln for ln in text.splitlines() if ln.startswith("b")]
+    assert len([ln for ln in text.splitlines() if ln.startswith("| /p/a\\rb |")]) == 2  # section 2 and 3.2 rows
+    md = scan_mod.markdown({"checkouts": [{"path": "/p/a\rb", "branch": "main", "modified": 0, "untracked": 0,
+                                           "unpushed": 0, "stashes": 0, "on_origin": True, "flags": ["x"],
+                                           "verdict": "x"}]})
+    assert "\r" not in md and "| /p/a\\rb |" in md
+
+
+def test_a_tag_on_a_tree_or_blob_is_not_an_unfetched_tip_but_an_absent_commit_still_is(tmp_path):
+    """Adversary round 21, 2: `rev-list --count --no-walk` counts commits only, so a tag on a tree or blob
+    (git.git `junio-gpg-pub`, linux `v2.6.11-tree`) left `origin tips not fetched` on for good."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    other = tmp_path / "other"
+    git(tmp_path, "clone", str(origin), str(other))
+    git(other, "checkout", "main")
+    git(other, "tag", "-a", "-m", "tree", "treetag", "HEAD^{tree}")
+    git(other, "tag", "blobtag", git(other, "rev-parse", "HEAD:a.txt").strip())
+    git(other, "tag", "-a", "-m", "blob", "annblob", git(other, "rev-parse", "HEAD:a.txt").strip())
+    git(other, "push", "origin", "refs/tags/treetag", "refs/tags/blobtag", "refs/tags/annblob")
+    assert git(work, "cat-file", "-t", git(work, "rev-parse", "HEAD^{tree}").strip()).strip() == "tree"
+    c = scan_one(mod, roots, remote=True)
+    assert c["verdict"] == "clean and pushed" and c["flags"] == [], c["flags"]
+    assert c["local_only_verified"] is True
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True, fetch=True)  # nothing to fetch for them, and no flag after
+    assert c["verdict"] == "clean and pushed" and c["local_only_verified"] is True, c["flags"]
+    assert git(work, "tag", "--list").strip() == ""
+    # a tag whose commit is really absent here still counts, next to the tree and blob tags, and --fetch clears it
+    commit_file(other, "tagged.txt")
+    git(other, "tag", "-a", "-m", "v9", "v9")
+    git(other, "push", "origin", "refs/tags/v9:refs/tags/v9")
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True)
+    assert "origin tips not fetched: 1" in c["flags"] and c["local_only_verified"] is False, c["flags"]
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True, fetch=True)
+    assert c["verdict"] == "clean and pushed" and c["flags"] == [] and c["local_only_verified"] is True, c["flags"]
