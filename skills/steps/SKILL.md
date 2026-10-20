@@ -27,9 +27,10 @@ walk.
 
 Use the native chooser your runtime actually has. Do not invent a second UX.
 
-1. **Claude Code, Copilot, Cursor, and any agent with `AskUserQuestion`:**
-   `AskUserQuestion`. Arrow-key list. Keep using it even if you also have
-   something else.
+1. **Claude Code, Copilot, Cursor, OpenCode, and any agent with
+   `AskUserQuestion` / `question`:** the native arrow-key chooser
+   (`AskUserQuestion` on Claude-class agents, `question` on OpenCode).
+   Keep using it even if you also have something else.
 2. **Hermes:** `clarify`. On Telegram that is a native card: the **question**
    in the message, and **one full-width button per choice whose label is the
    choice text** (not `1`/`2`/`3`), plus "✏️ Other (type answer)".
@@ -110,6 +111,20 @@ strings **are** the Telegram button labels.
    them. Put the consequence in the string (`Skip — leave pager as-is`).
 4. Artifacts go in the prose line before the call, not inside `choices`.
 5. One entry in `questions`. `multi_select` stays off.
+
+### 2c. `question` (OpenCode)
+
+`question` is the OpenCode analogue of `AskUserQuestion`: an arrow-key chooser
+with 2–4 options, descriptions, optional `multiple`. There is no `header` chip,
+so the position (`2/4`) goes at the start of `question`.
+
+1. Lead with the position, then one or two sentences on what it is and what it
+   does — same shape as `2a`.
+2. First option is the recommendation; label it `(Recommended)` and put the
+   reason in its description. Each option's description carries the consequence.
+3. Leave `multiple` unset (off).
+4. The "Other (type answer)" line is added by the tool; he types `stop` there
+   to end the walk.
 
 ## 3. Act, then move on
 
