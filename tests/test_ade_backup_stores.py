@@ -145,7 +145,11 @@ def test_sources_are_untouched(env):
 def test_read_only_open_of_a_quiet_db_adds_only_empty_wal_and_shm(env):
     mod, home, dest, _ = env
     con = make_wal_db(home / ".fake/state.db", ["quiet"])
-    con.close()  # the last connection closing removes -wal and -shm
+    con.close()  # the last connection closing removes -wal and -shm ...
+    if any((home / ".fake" / side).exists() for side in ("state.db-wal", "state.db-shm")):
+        # ... except in Apple's SQLite (/usr/bin/python3), which keeps them; deleting them makes that build unable to
+        # open the database read-only at all, so the setup this test needs cannot exist there
+        pytest.skip("this SQLite build keeps -wal/-shm after the last close")
     src_dir = home / ".fake"
     before = {p.name for p in src_dir.iterdir()}
     assert before == {"state.db"}
@@ -974,6 +978,26 @@ def test_a_database_under_a_symlinked_session_directory_is_skipped_not_copied(re
     assert mod.main(["--only", "cursor-chats", "--dry-run", "--json", "--dest", str(home / "o")]) == 0
     plan = json.loads(capsys.readouterr().out)["stores"][0]
     assert plan["file_count"] == 2 and plan["skipped_count"] == 1
+
+
+def test_links_above_the_last_glob_component_are_one_skip_each_whatever_they_lead_to(real, capsys):
+    mod, home, tmp = real
+    make_cursor_session(home)
+    chats = home / ".cursor/chats"
+    (tmp / "plain-file").write_text("not a directory")
+    os.symlink(tmp / "plain-file", chats / "linkToFile")  # first component: leads to a file
+    os.symlink(tmp / "gone", chats / "dangling")  # first component: leads nowhere
+    os.symlink(tmp / "plain-file", chats / "hashA/linkToFile")  # second component: leads to a file
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    skipped = sorted(s["path"] for s in entry["skipped"] if s["why"] == "symlink")
+    assert skipped == sorted(str(chats / p) for p in ("dangling", "hashA/linkToFile", "linkToFile"))
+    assert entry["status"] == "ok" and entry["errors"] == [] and entry["file_count"] == 2
+    capsys.readouterr()
+    assert mod.main(["--only", "cursor-chats", "--dry-run", "--json", "--dest", str(home / "o")]) == 0
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    assert plan["file_count"] == 2 and plan["skipped_count"] == 3
 
 
 def test_antigravity_conversations_behind_a_linked_directory_are_skipped(real):
@@ -2056,6 +2080,35 @@ def test_check_schemas_on_hermes_export_refuses_a_state_db_link_outside_home(rea
     assert mod.main(["--only", "hermes-export", "--check-schemas", "--strict-stores"]) == 1
     out = capsys.readouterr().out
     assert "symlink refused" in out and "1 symlink problem(s), 0 missing" in out
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_a_state_db_that_is_not_a_regular_file_is_refused_alike_by_dry_run_run_and_check_schemas(real, monkeypatch, capsys, kind):
+    mod, home, tmp = real
+    (home / ".hermes").mkdir()
+    if kind == "fifo":
+        os.mkfifo(home / ".hermes/state.db")
+    else:
+        (home / ".hermes/state.db").mkdir()
+    fake = tmp / "hermes"
+    write_fake_hermes(fake, "none")
+    log = tmp / "hermes.log"
+    monkeypatch.setenv("ADE_BACKUP_HERMES", str(fake))
+    monkeypatch.setenv("FAKE_HERMES_LOG", str(log))
+    assert mod.main(["--only", "hermes-export", "--dry-run", "--json", "--dest", str(home / "dry")]) == 1
+    dry = json.loads(capsys.readouterr().out)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "hermes-export", "--dest", str(dest)]) == 1
+    real_errors = manifest_of(dest)["stores"][0]["errors"]
+    assert len(real_errors) == 1 and dry["errors"] == real_errors
+    assert "source is not a regular file" in real_errors[0]["error"]
+    assert not log.exists()  # hermes ran in neither
+    assert not (home / "dry").exists()
+    assert mod.main(["--only", "hermes-export", "--dry-run", "--dest", str(home / "dry")]) == 1
+    assert "would refuse" in capsys.readouterr().out
+    assert mod.main(["--only", "hermes-export", "--check-schemas", "--strict-stores"]) == 1
+    out = capsys.readouterr().out
+    assert "source is not a regular file" in out and "0 missing, 1 unopenable" in out
 
 
 @pytest.mark.parametrize("failure", ["exit", "timeout"])

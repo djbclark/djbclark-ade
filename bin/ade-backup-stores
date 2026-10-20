@@ -786,9 +786,10 @@ def tree_dbs(store, root=None, errors=None):
 
 
 def tree_glob(directory, comps, errors=None):
-    """Paths matching `comps` below `directory`; a symlink to a directory above the last component is returned
-    itself and not descended. A directory that cannot be listed (unreadable, or pruned since its parent was
-    listed) matches nothing and is appended to `errors` as (directory, OSError), like the copy's error for it."""
+    """Paths matching `comps` below `directory`; a symlink above the last component is returned itself (judged by
+    `lstat`, never followed) and not descended. A directory that cannot be listed (unreadable, or pruned since
+    its parent was listed) matches nothing and is appended to `errors` as (directory, OSError), like the copy's
+    error for it."""
     comp, rest = comps[0], comps[1:]
     try:
         names = sorted(os.listdir(directory))
@@ -805,8 +806,7 @@ def tree_glob(directory, comps, errors=None):
             if path.is_file():
                 found.append(path)
         elif path.is_symlink():
-            if path.is_dir():
-                found.append(path)
+            found.append(path)
         elif path.is_dir():
             found.extend(tree_glob(path, rest, errors))
     return found
@@ -824,9 +824,11 @@ def exists_at(name, dir_fd):
 def glob_fd(dfd, comps, prefix, found, errors):
     """Match the glob components `comps` below the open directory `dfd`, appending (parts, linked) to `found` and
     (parts, OSError) to `errors`. Everything is relative to a descriptor: a directory is entered with
-    `open_dir_at` (O_NOFOLLOW); a symlink is classified with one `stat` and, when it leads to a regular file at
-    the last component or to a directory above it, is itself the match (`linked` true, recorded as one skipped
-    symlink, never opened and never entered: nothing behind a link is listed)."""
+    `open_dir_at` (O_NOFOLLOW). Above the last component a symlink is itself the match (`linked` true, recorded
+    as one skipped symlink) on an `lstat` alone: it is never followed, so a link to a hung mount cannot block
+    here, and never entered (nothing behind a link is listed), whatever it points to or whether it dangles. At
+    the last component a symlink is classified with one `stat` and, when it leads to a regular file, is the match
+    (`linked` true, never opened)."""
     comp, rest = comps[0], comps[1:]
     with os.scandir(dfd) as it:
         names = sorted(e.name for e in it)
@@ -836,7 +838,7 @@ def glob_fd(dfd, comps, prefix, found, errors):
         try:
             mode = os.stat(name, dir_fd=dfd, follow_symlinks=False).st_mode
             is_link = stat.S_ISLNK(mode)
-            if is_link:
+            if is_link and not rest:
                 mode = os.stat(name, dir_fd=dfd).st_mode  # a dangling link raises and is not a match
         except OSError:
             continue
@@ -845,10 +847,10 @@ def glob_fd(dfd, comps, prefix, found, errors):
             if stat.S_ISREG(mode):
                 found.append((here, is_link))
             continue
-        if not stat.S_ISDIR(mode):
-            continue
         if is_link:
             found.append((here, True))
+            continue
+        if not stat.S_ISDIR(mode):
             continue
         try:
             sub = open_dir_at(name, dfd)
@@ -1245,15 +1247,37 @@ def hermes_db_absent(db):
     return not os.path.lexists(db) and not link_dangles(db)
 
 
+def non_regular_source(path, excluder):
+    """The OSError `ro_connect` raises for a SQLite source that exists but is not a regular file (a FIFO, a
+    directory, a device), or None when `path` is absent or a regular file. Judged by `lstat`: nothing is opened,
+    so a FIFO cannot block. The dry run and --check-schemas ask this to refuse what the real run refuses."""
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError:
+        return None
+    if stat.S_ISREG(mode):
+        return None
+    try:
+        shown = home_anchor(path, excluder)[0]
+    except OSError:
+        shown = path
+    return OSError(f"source is not a regular file: {shown}")
+
+
 def hermes_state_gate(home, excluder):
     """The state.db path the export may read: the configured one, or where a link leads when `root_link_target`
-    allows it (the gate copy_sqlite_store applies to a linked store file). Raises RootSymlinkError otherwise.
-    The real run and the dry-run plan both ask this one question (Codex on PR 24, pass 15)."""
+    allows it (the gate copy_sqlite_store applies to a linked store file). Raises RootSymlinkError for a refused
+    link, and the OSError the real run's open would raise for a state.db that exists but is not a regular file.
+    The real run and the dry-run plan both ask this one question (Codex on PR 24, pass 15; the adversary's
+    round 19)."""
     real_db = home / ".hermes/state.db"
     if is_linked(real_db, excluder):
         real_db, why = root_link_target(real_db, excluder)
         if why:
             raise RootSymlinkError(f"{why}: {link_note(home / '.hermes/state.db')}")
+    refusal = non_regular_source(real_db, excluder)
+    if refusal:
+        raise refusal
     return real_db
 
 
@@ -1547,8 +1571,13 @@ def check_schemas(stores, excluder, strict=False):
                     continue
                 print(f"{store['name']}: {db}: symlink -> {target}")
             if store["kind"] == "sqlite" and not target.is_file():
-                print(f"{store['name']}: {db}: missing")
-                missing += 1
+                refusal = non_regular_source(target, excluder)  # present but not a regular file: the run's refusal
+                if refusal:
+                    print(f"{store['name']}: {db}: ERROR {type(refusal).__name__}: {refusal}")
+                    unopenable += 1
+                else:
+                    print(f"{store['name']}: {db}: missing")
+                    missing += 1
                 continue
             try:
                 con = ro_connect(*home_anchor(target, excluder))
@@ -1630,7 +1659,7 @@ def run_main(argv):
             else:
                 try:  # the gate the real export applies before it opens state.db: a refusal is an error, not "would run"
                     hermes_state_gate(home, excluder)
-                except RootSymlinkError as exc:
+                except OSError as exc:  # RootSymlinkError, or a state.db that is not a regular file
                     run.error("hermes sessions export", exc)
             hermes_errors = run.errors
         if "hermes-export" in wanted:
