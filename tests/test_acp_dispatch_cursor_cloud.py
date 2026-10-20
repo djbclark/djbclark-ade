@@ -733,6 +733,52 @@ class TestAdversaryFindings(CloudBase):
         self.assertEqual(self.cloud().returncode, 0)
         self.assertIn("BRANCH: cursor/document-cursor-cloud-8526", self.report().splitlines())
 
+    # pass 5: Codex P1 (same-name re-dispatch) and P2 (deadline before the call)
+    def launches(self) -> int:
+        return len([c for c in self.calls() if c and c[0] == "launch"])
+
+    def test_redispatch_of_an_unfinished_cloud_record_is_refused_whatever_the_pid(self):
+        self.run_json("run-1.json", "RUNNING")
+        rec_path = self.detached_record()
+        for label, pid in (("no pid yet", None), ("dead poller", 999999)):
+            with self.subTest(label):
+                rec = json.loads(rec_path.read_text())
+                rec.update(pid=pid, pid_start=None)
+                rec_path.write_text(json.dumps(rec))
+                res = self.cloud("--detach", "--no-wait")
+                self.assertNotEqual(res.returncode, 0, res.stdout)
+                self.assertIn("resume", res.stderr)
+                self.assertIn("bc-test1", res.stderr)
+                self.assertEqual(self.launches(), 1)
+                self.assertEqual(json.loads(rec_path.read_text())["cloud_agent_id"], "bc-test1")
+
+    def test_redispatch_force_still_overrides_an_unfinished_cloud_record(self):
+        self.run_json("run-1.json", "RUNNING")
+        rec_path = self.detached_record()
+        res = self.cloud("--detach", "--no-wait", "--force")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.launches(), 2)
+        self.assertTrue(rec_path.exists())
+
+    def test_a_finished_cloud_record_may_be_redispatched_with_force_only_for_done(self):
+        # a record that ended (finished set) is not "unfinished": the .done rule applies, not the new refusal
+        self.run_json("run-1.json", "FINISHED", result="ok", git=REAL_BRANCHES)
+        self.assertEqual(self.cloud().returncode, 0)
+        res = self.cloud()
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("already finished", res.stderr)
+
+    def test_no_poll_after_the_deadline_and_the_sleep_is_capped(self):
+        import time
+        self.run_json("run-1.json", "RUNNING")
+        self.run_json("run-2.json", "FINISHED", result="late", git=REAL_BRANCHES)   # ends just after the limit
+        t0 = time.time()
+        res = self.cloud("--timeout", "1", env={"ACP_DISPATCH_CLOUD_POLL": "6"})
+        self.assertEqual(res.returncode, 124, res.stdout + res.stderr)
+        self.assertLess(time.time() - t0, 5.5)          # not a full 6 s interval
+        self.assertEqual(len([c for c in self.calls() if c and c[0] == "run"]), 1)
+        self.assertIn("acp-dispatch --timeout 1 s reached", self.report())
+
 
 class TestRouteRegistration(unittest.TestCase):
     def test_registered_for_code_bulk_mechanical_only(self):

@@ -316,7 +316,8 @@ started or queued before it, ordered by (started, record path): a full cap final
 `unavailable`/`inflight` with exit 5, nothing started. The record also carries the dispatcher's
 ACP_DISPATCH_STATE root and ACP_DISPATCH_LOAD_WATCH path for the runner. Only that path's quota snapshot (headroom) can be stale, since it was
 read before the wait. A refusal for load finalizes the record as `unavailable`/`load` with exit 75.
-Re-dispatching the --name of a record whose runner is still waiting is refused (use --force).
+Re-dispatching the --name of a record whose runner is still waiting is refused (use --force); so is a
+name whose cloud record is unfinished (status running, any pid): `resume RECORD` it instead.
 (execute_record's older wait_for_capacity stays as the backstop at 4x cpus or critical memory pressure.)
 
 Exit codes (dispatch and check):
@@ -4222,8 +4223,15 @@ def cloud_poll(record: Path) -> int:
     may_run = (f"; the cloud agent {rec['cloud_agent_id']} may still be running in Cursor "
                f"(`{binp} status {rec['cloud_agent_id']}`)")
     try:
+        first = True
         while True:
             deadline, secs = limit_now()
+            if not first and time.time() >= deadline:
+                # the sleep ended at the deadline: no further poll, a run that finishes after it is not accepted
+                status = "EXPIRED"
+                detail = f"acp-dispatch --timeout {secs:g} s reached{may_run}"
+                break
+            first = False
             # a poll never outlives the slice's deadline (a stalled call used to hold it up to 180 s)
             got, err = cloud_call(binp, *cloud_run_args(rec), timeout=max(1.0, min(180.0, deadline - time.time())))
             if got is None:
@@ -4245,7 +4253,7 @@ def cloud_poll(record: Path) -> int:
                 status = "EXPIRED"
                 detail = f"acp-dispatch --timeout {secs:g} s reached{may_run}"
                 break
-            time.sleep(interval)
+            time.sleep(max(0.0, min(interval, deadline - time.time())))
     except CloudStop as e:
         name = signal.Signals(e.args[0]).name
         report = Path(rec["report"])
@@ -4365,10 +4373,17 @@ def dispatch_cloud(a: argparse.Namespace, previous: dict | None, kind: str | Non
         die(f"{done} exists: this slice already finished. Use a new --name or --force to redo it.")
     if record.exists() and not a.force:
         try:
-            if pid_alive(json.loads(record.read_text()).get("pid")):
-                die(f"{record} says a process is still polling this slice (--force to ignore)")
+            old = json.loads(record.read_text())
         except (OSError, ValueError):
-            pass
+            old = {}
+        # any unfinished cloud record, whatever its pid: a poller that has not written its pid yet, or one that
+        # died while the remote agent still runs, must not be overwritten by a second paid agent
+        if isinstance(old, dict) and old.get("cloud_provider") and not old.get("finished") \
+                and old.get("status") == "running":
+            die(f"{record} is an unfinished cloud slice (agent {old.get('cloud_agent_id') or 'not launched yet'}); "
+                f"continue it with `acp-dispatch resume {record}` (or --force to start a second agent)")
+        if isinstance(old, dict) and pid_alive(old.get("pid")):
+            die(f"{record} says a process is still polling this slice (--force to ignore)")
     prompt = Path(a.prompt_file).read_text() if a.prompt_file else a.prompt
     repo = Path(a.dir).resolve()
     url, ref = cloud_repo_url(repo), cloud_ref(repo)
