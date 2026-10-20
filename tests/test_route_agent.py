@@ -1311,7 +1311,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
                 path = self.rows_payload(rows)
                 quota, _, err = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
                 self.assertEqual(r.QuotaSource.kind, "snapshot")
-                self.assertIn("unparseable rows", r.quota_source_info()["fallback_reason"])
+                self.assertRegex(r.quota_source_info()["fallback_reason"], "unparseable rows|invalid row")
                 self.assertEqual(quota["codex"]["remaining"], 60.0)
 
     def test_non_numeric_percentage_reads_unknown_not_a_crash(self):
@@ -1557,6 +1557,49 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
                                           "ROUTE_AGENT_OMP_READY": "0"}, clear=True), \
                 contextlib.redirect_stderr(io.StringIO()):
             return r.load_snapshot()
+
+    # -- Codex P2s: the payload's `fresh` marker, and row validation ------------------------
+
+    GOOD_ROW = {"provider": "omp", "usable_now": True, "headroom_percent": 70.0}
+
+    def test_fresh_false_reads_every_row_unknown_and_zeroes_nothing(self):
+        path = self.write("f.json", self.payload([self.GOOD_ROW], fresh=False, age_seconds=5))
+        quota, age, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertIsNone(quota["omp"]["remaining"])
+        self.assertEqual(quota["codex"]["remaining"], 60.0)        # absent pool not zeroed
+        self.assertGreater(age, r.STALE_SOFT)
+        self.assertIn("fresh=False", r.quota_source_info()["detail"])
+
+    def test_fresh_true_with_young_age_behaves_as_before(self):
+        path = self.write("f.json", self.payload([self.GOOD_ROW], fresh=True, age_seconds=5))
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["omp"]["remaining"], 70.0)
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    def test_no_fresh_key_uses_the_age_rule(self):
+        base = {"available": [self.GOOD_ROW]}
+        young = self.write("y.json", r.json.dumps({**base, "age_seconds": 5}))
+        old = self.write("o.json", r.json.dumps({**base, "age_seconds": r.STALE_SOFT + 60}))
+        q_young, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(young)})
+        q_old, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(old)})
+        self.assertEqual(q_young["omp"]["remaining"], 70.0)
+        self.assertIsNone(q_old["omp"]["remaining"])
+
+    def test_invalid_row_falls_back_to_the_file_with_nothing_zeroed(self):
+        bad_rows = {
+            "string row": [self.GOOD_ROW, "junk"],
+            "no provider": [self.GOOD_ROW, {"usable_now": True, "headroom_percent": 50}],
+            "empty provider": [self.GOOD_ROW, {"provider": ""}],
+            "list provider": [self.GOOD_ROW, {"provider": ["codex"]}],
+            "bad family": [self.GOOD_ROW, {"provider": "codex", "pool_family": 3}],
+        }
+        for name, rows in bad_rows.items():
+            with self.subTest(name):
+                quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON":
+                                         str(self.rows_payload(rows))})
+                self.assertEqual(r.QuotaSource.kind, "snapshot")
+                self.assertIn("invalid row", r.quota_source_info()["fallback_reason"])
+                self.assertEqual(quota["codex"]["remaining"], 60.0)
 
     def test_huge_integer_percentage_reads_unknown_not_a_crash(self):
         body = ('{"age_seconds": 5, "available": [{"provider": "codex", "age_seconds": 1' + "0" * 400

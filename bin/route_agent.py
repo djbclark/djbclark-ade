@@ -905,19 +905,31 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
         payload, label = aiuse_available()
         fresh: dict[str, Any] | None = None
         p_age: float | None = None
+        marked_stale = False
         if payload is not None:
             p_age = _payload_age(payload)
-            try:
-                # a row without a usable age is stale, never fresh
-                rows = [dict(row, age_seconds=(_clean_age(row.get("age_seconds"))
-                                               if _clean_age(row.get("age_seconds")) is not None
-                                               else (p_age if p_age is not None
-                                                     else STALE_HARD + 1)))
-                        for row in payload["available"]
-                        if isinstance(row, dict) and row.get("provider")]
-                fresh = _providers_from_available(rows, p_age)
-            except (ValueError, TypeError, AttributeError, OverflowError):
-                label = f"{label}: unparseable rows"
+            # the contract's own staleness signal: `fresh` present and not True means stale
+            marked_stale = payload.get("fresh") is not None and payload.get("fresh") is not True
+            if marked_stale:
+                label = f"{label} (payload fresh={payload.get('fresh')!r}: read as stale)"
+                if p_age is None or p_age <= STALE_SOFT:
+                    p_age = STALE_SOFT + 1
+            if not all(isinstance(row, dict) and isinstance(row.get("provider"), str)
+                       and row["provider"] and isinstance(row.get("pool_family"), (str, type(None)))
+                       for row in payload["available"]):
+                label = f"{label}: invalid row"
+            else:
+                try:
+                    # a row without a usable age is stale, never fresh
+                    rows = [dict(row, age_seconds=(
+                        STALE_HARD + 1 if marked_stale
+                        else _clean_age(row.get("age_seconds"))
+                        if _clean_age(row.get("age_seconds")) is not None
+                        else (p_age if p_age is not None else STALE_HARD + 1)))
+                        for row in payload["available"]]
+                    fresh = _providers_from_available(rows, p_age)
+                except (ValueError, TypeError, AttributeError, OverflowError):
+                    label = f"{label}: unparseable rows"
         if canned:
             _log(f"quota from canned ROUTE_AGENT_AIUSE_JSON={os.environ['ROUTE_AGENT_AIUSE_JSON']}"
                  " (overrides ROUTE_AGENT_AIUSE=off and AIUSE_SNAPSHOT)")
