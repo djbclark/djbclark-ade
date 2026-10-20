@@ -11,6 +11,8 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- `docs/ade-everywhere-inventory-2026-10-20-stores.md`: Phase 0 slice 1, every installed agent
+  session store classified (52 stores, backup plan per store, differences from proposal §6.1) (#16).
 - `CHANGELOG.md`, this file, and the rule that every pull request adds a line to it; README
   "Update (this machine)"; proposal v2.4 with `ade update` as a Phase 1 command and acceptance
   test T8 (2026-10-20).
