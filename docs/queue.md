@@ -116,10 +116,10 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    for Phase 1: declare the `TODO_*` secret names in `secrets/secretspec.toml`, give each field a place in
    `operator.toml` or `machines/<host>.toml`, and turn the Codex and Claude templates into `modify_` merges.
    Scanner LOWs from the adversary's round 3 on PR #23 (all measured, none blocking): the scheme-word group
-   in `bin/ade-template-check` can take a short letter-only key for the scheme (fix: letters-only scheme
+   in `bin/ade-template-check` can take a short letter-initial key for the scheme (fix: letters-only scheme
    word or a closed list); the `]` terminator lets a tail after a placeholder or env ref through (accept
    `]` only when it closes the value); `_FLAG` misses `--key` and `--access-key` (end the rule with
-   `key`). Operator items: the public templates publish Claude's approvals, allowlist and trust list.
+   `key`). Operator items: the public templates publish Hermes's approvals, Claude's allowlist and Codex's trust list.
 
 ## Keep every machine current, and a changelog (djbclark, 2026-10-20; proposal Q26, T8)
 
