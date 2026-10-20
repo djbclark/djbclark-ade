@@ -14,7 +14,7 @@ agent what changed and what is new. Entries end with the pull request number.
 - Added `bin/ade-update`, one command that keeps a machine current: it fast-forward pulls, relinks missing skills
   (only in the canonical checkout; any other `--repo` is report-only), checks the `CLAUDE.md` and `~/.claude` symlinks,
   and prints the changelog entries new since the revision it last recorded; `--check` reports only and exits 10 when
-  behind (2026-10-20, #TBD).
+  behind (2026-10-20, #20).
 - `docs/ade-everywhere-inventory-2026-10-20-stores.md`: Phase 0 slice 1, every installed agent
   session store classified (52 stores, backup plan per store, differences from proposal §6.1) (#16).
 - `CHANGELOG.md`, this file, and the rule that every pull request adds a line to it; README
