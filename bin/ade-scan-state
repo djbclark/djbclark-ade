@@ -78,10 +78,11 @@ Git checkout verdicts (a checkout is a dir holding `.git`, found up to two level
                     could not be inspected (a directory that is listable but not searchable), so
                     checkouts below it may be missing: one record for that dir (path, found_via,
                     counts null), counted under `checkouts.incomplete`; the exit status stays 0.
-Local-only commits: `local_only_commits` is `git rev-list --count HEAD --branches --tags --not
---remotes=origin` (a commit reachable only from a local tag counts: the branch it was on may be reset or
-deleted; with no origin remote nothing is excluded, a leftover `refs/remotes/origin/*` ref proves
-nothing); with --remote and an answering `ls-remote` it is `--not <every live origin head and tag tip>`
+Local-only commits: `local_only_commits` is `git rev-list --count HEAD --exclude=refs/remotes/*
+--exclude=refs/stash --all --not --remotes=origin` (a commit reachable only from a local tag, a note
+(`refs/notes/*`) or any other local ref counts: the branch it was on may be reset or deleted; a
+remote-tracking ref is no local work and the stash has its own count; with no origin remote nothing is
+excluded, a leftover `refs/remotes/origin/*` ref proves nothing); with --remote and an answering `ls-remote` it is `--not <every live origin head and tag tip>`
 alone (a tag origin has is not local-only; an annotated tag contributes its tag object and its peeled
 commit): a stale local tracking ref of a live branch proves nothing (origin may have force-pushed it) and
 one of a deleted branch is stale (a live tip whose objects are missing here excludes nothing, so the
@@ -680,7 +681,8 @@ def git_takes_env_config() -> bool:
 def url_holds_credential(url: str) -> bool:
     """Whether `url` may carry a credential git would hand to a transport helper's argv. A scp-like
     `host:path` (no `://`) is ssh and has none; `ssh://git@host` is a username, not a credential, but any
-    password (`ssh://git:secret@host`) is one. For every other scheme (http, https, ...) ANY userinfo counts
+    password (`ssh://git:secret@host`) is one, and so is a query string: git puts the path and query into
+    `git-upload-pack '/repo?token=...'` in the ssh process's argv (Codex pass 25). For every other scheme (http, https, ...) ANY userinfo counts
     (`https://<token>@github.com/x` is how a token is used as the username; adversary round 22) and so does
     a query string (`?private_token=...`); a `<transport>::<address>` prefix names a helper that gets the whole
     address in argv, so any `@` or `?` in it counts, whatever its scheme. An unparsable authority is read by hand."""
@@ -702,7 +704,7 @@ def url_holds_credential(url: str) -> bool:
     userinfo = "@" in netloc
     has_password = password is not None or (userinfo and ":" in netloc.rpartition("@")[0])
     if scheme in ("ssh", "git+ssh", "ssh+git"):
-        return has_password
+        return has_password or bool(query)
     return userinfo or has_password or bool(query)
 
 
@@ -982,9 +984,13 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     local_only_tags: list[dict] = []
     branches_uncounted = 0
     if not unborn:
-        local_only, rc = local_only_count(path, ["HEAD", "--branches", "--tags"], tips, live, has_origin)
+        # every local ref, not only heads and tags: a commit reachable only from `refs/notes/*`, `refs/replace/*` or
+        # any other namespace is local work too (Codex pass 25 on PR 27). Remote-tracking refs are no local work
+        # and the stash is counted and captured on its own (`--exclude` binds to the `--all` that follows it)
+        local_only, rc = local_only_count(path, ["HEAD", "--exclude=refs/remotes/*", "--exclude=refs/stash", "--all"],
+                                          tips, live, has_origin)
         if local_only is None:
-            return incomplete_record(path, "rev-list --count HEAD --branches --tags --not --remotes=origin", rc)
+            return incomplete_record(path, "rev-list --count HEAD --all --not --remotes=origin", rc)
         if local_only:
             if detached:
                 n, rc = local_only_count(path, ["HEAD"], tips, live, has_origin)

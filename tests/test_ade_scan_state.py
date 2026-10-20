@@ -1866,7 +1866,10 @@ def test_url_holds_credential_reads_any_userinfo_or_query_on_a_non_ssh_scheme():
                       ("https::https://host/x.git?t=FAKE", True),
                       # round 24: git splits at the first `::`; the helper gets the rest whole, whatever it looks like
                       ("https::https::https://ghp_FAKE0000@host/x.git", True),
-                      ("https::ssh://ghp_FAKE0000@host/x.git", True), ("https::ssh://host/x.git", False)):
+                      ("https::ssh://ghp_FAKE0000@host/x.git", True), ("https::ssh://host/x.git", False),
+                      # Codex pass 25: an ssh query string lands in `git-upload-pack '/repo?...'` in the ssh argv
+                      ("ssh://git@host/repo?private_token=FAKE", True), ("git+ssh://git@host/x?t=FAKE", True),
+                      ("ssh://git@host/x?", False)):  # an empty query carries nothing
         assert mod.url_holds_credential(url) is want, url
 
 
@@ -1936,6 +1939,36 @@ def test_a_commit_reachable_only_from_a_local_tag_is_local_only_until_origin_has
     c = scan_one(mod, roots, remote=True)  # origin has it (an annotated tag through its peeled commit)
     assert c["verdict"] == "clean and pushed" and c["local_only_commits"] == 0, c
     assert c["local_only_tags"] == [] and c["local_only_verified"] is True and c["flags"] == []
+
+
+def test_a_commit_reachable_only_from_a_note_or_another_local_ref_is_local_only(tmp_path):
+    """Codex pass 25 on PR 27: `HEAD --branches --tags` ignored `refs/notes/*` and every other local namespace, so a
+    checkout whose only unpushed work was a `git notes add` read `clean and pushed` and left the capture plan."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    git(work, "stash", "list")  # no stash yet
+    git(work, "notes", "add", "-m", "a note", "HEAD")
+    c = scan_one(mod, roots)
+    assert c["verdict"] == "unpushed commits" and c["local_only_commits"] == 1, c
+    assert c["local_only_branches"] == [] and c["local_only_tags"] == []
+    assert "local-only commits: 1 in total" in c["flags"], c["flags"]
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True)  # live tips are heads and tags only: the note stays local-only
+    assert c["local_only_commits"] == 1 and c["verdict"] == "unpushed commits"
+    # the stash is counted on its own and a remote-tracking ref of another remote is no local work
+    git(work, "update-ref", "-d", "refs/notes/commits")  # `notes remove` would add one more notes commit
+    (work / "s.txt").write_text("s\n")
+    git(work, "add", "s.txt")
+    git(work, "stash", "push", "-m", "wip")
+    git(work, "checkout", "-q", "-b", "side")
+    commit_file(work, "side.txt")
+    side = git(work, "rev-parse", "HEAD").strip()
+    git(work, "checkout", "-q", "main")
+    git(work, "branch", "-D", "side")
+    git(work, "update-ref", "refs/remotes/other/x", side)  # the only ref holding that commit
+    c = scan_one(mod, roots)
+    assert c["local_only_commits"] == 0 and c["stashes"] == 1 and "stash" in c["flags"], c
+    assert c["verdict"] == "clean and pushed"  # the stash is an informational flag with its own capture row
 
 
 def test_a_local_tag_of_a_pushed_commit_is_not_local_only(tmp_path):

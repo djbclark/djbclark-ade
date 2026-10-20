@@ -584,7 +584,7 @@ def render(d):
     w("9. The run's tool counted only the commits of HEAD that lie on no origin ref, so a `clean and pushed` "
       "row above can still hold commits on another local branch, and a checkout on a detached HEAD or "
       "with an origin that did not answer was never checked against that. A fresh scan with the current "
-      "tool counts them over HEAD and every local branch (`local_only_commits`, `local_only_branches`) "
+      "tool counts them over HEAD and every local ref (notes and replace refs included) (`local_only_commits`, `local_only_branches`) "
       "and reports any as `unpushed commits`; none of the rows above was re-checked this way.\n")
 
     # ---- 5 commands
