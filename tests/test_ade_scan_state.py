@@ -3,6 +3,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import time
 import types
@@ -917,8 +918,10 @@ def test_scan_doc_generator_code_spans_survive_backticks():
                                            "with_unpushed_work": 1, "with_untracked": 1,
                                            "with_stash": 0}}}
     text = mod.render(scan_text)
-    for span in ("`` c`h ``", "`` r`eport.md ``", "`` u`n.txt ``", "`` b`r ``"):
+    for span in ("`` c`h ``", "`` u`n.txt ``", "`` b`r ``"):
         assert span in text, span
+    # a report path is an argument of the row's copy command now: shell-quoted, inside one double-backtick span
+    assert "&& gcp --parents -t <DEST>/bigteam/'t`k' -- 'r`eport.md') ``" in text
     assert "`` git -C '/p/c`o' push -u origin refs/heads/'b`r':refs/heads/'b`r' `` or " in text  # shell-quoted since round 8
 
 
@@ -1053,7 +1056,7 @@ def test_option_shaped_branch_names_never_reach_gits_option_parser():
     rows = section_3_2(mod.render(doc_scan([co]))).splitlines()
     row = next(r for r in rows if r.startswith("| /p/opt "))
     assert "push -u origin refs/heads/--mirror:refs/heads/--mirror" in row
-    assert "bundle create <DEST>/opt---mirror.bundle refs/heads/--mirror" in row
+    assert ("bundle create <DEST>/checkouts/abs/p/opt/branch---mirror.bundle refs/heads/--mirror") in row
     assert "push origin refs/heads/-f:refs/heads/-f" in row
     assert "push -u origin --mirror" not in row and "push origin -f" not in row and "bundle --mirror" not in row
 
@@ -1065,10 +1068,89 @@ def test_untracked_files_get_a_lossless_archive_command_not_a_bare_git_add():
                       untracked_sample=["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"])
     rows = section_3_2(mod.render(doc_scan([co]))).splitlines()
     row = next(r for r in rows if r.startswith("| /p/u dir ") or r.startswith("| /p/u\\ dir "))
-    assert "git -C '/p/u dir' ls-files -z --others --exclude-standard \\| gtar -C '/p/u dir' --null -T - -cf <DEST>/'u dir'-untracked.tar`" in row
+    assert ("git -C '/p/u dir' ls-files -z --others --exclude-standard \\| gtar -C '/p/u dir' --null -T - "
+            "-cf <DEST>/'checkouts/abs/p/u dir/untracked.tar'`") in row
     assert row.count("|") - row.count("\\|") == 5  # the pipe inside the command is escaped: the table row still has 4 cells
     assert "git -C '/p/u dir' add -A -- ." in row
     assert "add` them" not in row
+
+
+def test_bigteam_rows_copy_every_report_never_a_plus_n_more():
+    # Codex pass 8 on PR 27 (4324602317): the row listed four paths and "+N more"
+    mod = load_doc()
+    files = [f"r{i}-report.md" for i in range(5)] + ["sub dir/last report.md"]
+    task = {"task": "big", "verdict": "unique", "claim": "no CLAIM", "bytes": 1, "reports": [
+        {"path": f, "bytes": 1, "done": False} for f in files], "open_job_records": [], "fills": [],
+        "unique_bytes": 1, "referenced_in": [], "newest_mtime": 0}
+    text = mod.render(doc_scan([], tasks=[task]))
+    row = next(r for r in text.split("### 3.1")[1].split("### 3.2")[0].splitlines() if r.startswith("| big "))
+    assert "more" not in row
+    for f in files:
+        assert mod.shquote(f) in row
+    assert "gcp --parents -t <DEST>/bigteam/big -- " in row and "| 6 |" in row
+    assert "(cd ~/.local/state/bigteam/big && " in row
+
+
+def test_checkouts_with_one_basename_never_share_an_artifact_path():
+    # Codex pass 8 on PR 27 (4324602321): `~/src/foo` and `~/.cow/pastures/x/foo` both produced <DEST>/foo-*.patch
+    mod = load_doc()
+    home = mod.HOME
+    paths = [f"{home}/src/foo", f"{home}/.cow/pastures/x/foo", "/srv/foo", "/home/foo"]
+    cos = [doc_checkout(p, flags=["unpushed commits"], verdict="unpushed commits", ahead_of_origin=1,
+                        modified=1, stashes=1, untracked=1, untracked_sample=["u.txt"],
+                        local_only_commits=1, local_only_branches=[{"branch": "side/x", "count": 1}])
+           for p in paths]
+    rows = section_3_2(mod.render(doc_scan(cos))).splitlines()
+    dests = []
+    for p in paths:
+        row = next(r for r in rows if r.startswith(f"| {mod.esc(mod.tilde(p))} "))
+        found = re.findall(r"<DEST>/(?:'([^']+)'|(\S+?))[`\s;]", row)
+        arts = [a or b for a, b in found if "." in (a or b).rsplit("/", 1)[-1]]
+        assert len(arts) >= 5 and all("/foo/" in "/" + a for a in arts), (row, arts)
+        dests.append(set(arts))
+    for i, a in enumerate(dests):
+        for b in dests[i + 1:]:
+            assert not a & b
+
+
+def test_a_detached_head_gets_a_bundle_of_head_never_a_push_of_refs_heads_head():
+    # adversary round 13 / Codex pass 8 (4324602329): `git push origin refs/heads/HEAD:refs/heads/HEAD` fails
+    mod = load_doc()
+    co = doc_checkout("/p/det", branch="HEAD", flags=["unpushed commits", "detached"], verdict="unpushed commits",
+                      ahead_of_origin=2, local_only_commits=2,
+                      local_only_branches=[{"branch": "HEAD", "count": 2}])
+    row = next(r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith("| /p/det "))
+    assert "refs/heads/HEAD" not in row and "push" not in row
+    assert "git -C /p/det bundle create <DEST>/checkouts/abs/p/det/HEAD.bundle HEAD" in row
+    assert "detached HEAD: bundle, or create a branch first" in row and "git -C /p/det switch -c <name>" in row
+
+
+def test_branch_bundles_of_slash_and_underscore_branches_do_not_collide():
+    mod = load_doc()
+    a = doc_checkout("/p/a", branch="feat/x", flags=["unpushed commits"], verdict="unpushed commits", ahead_of_origin=1)
+    b = doc_checkout("/p/b", branch="feat_x", flags=["unpushed commits"], verdict="unpushed commits", ahead_of_origin=1)
+    rows = section_3_2(mod.render(doc_scan([a, b]))).splitlines()
+    assert "branch-feat%2Fx.bundle" in next(r for r in rows if r.startswith("| /p/a "))
+    assert "branch-feat_x.bundle" in next(r for r in rows if r.startswith("| /p/b "))
+
+
+def test_a_repo_without_origin_stays_an_orphan_but_a_failed_origin_lookup_is_scan_incomplete(tmp_path, monkeypatch):
+    # Codex pass 8 on PR 27 (4324602334): rc 124 / 128 of `git remote get-url origin` read as "no origin"
+    mod = load()
+    roots = tmp_path / "roots"
+    (roots / "w").mkdir(parents=True)
+    git(roots / "w", "init", "-b", "main")
+    commit_file(roots / "w", "a.txt")
+    c = scan_one(mod, roots)
+    assert c["verdict"] == "orphan branch" and "no origin remote" in c["flags"]
+    real = mod.run
+    for rc in (124, 128, 1):
+        def fake(argv, timeout=120, cwd=None, env=None, rc=rc):
+            return (rc, "") if "get-url" in argv else real(argv, timeout=timeout, cwd=cwd, env=env)
+        monkeypatch.setattr(mod, "run", fake)
+        c = scan_one(mod, roots)
+        assert c["verdict"] == f"scan incomplete: remote get-url origin rc={rc}", c["verdict"]
+        assert "no origin remote" not in c["flags"]
 
 
 def test_shquote_keeps_a_leading_tilde_outside_the_quotes():

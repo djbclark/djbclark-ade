@@ -69,7 +69,7 @@ Git checkout verdicts (a checkout is a dir holding `.git`, found up to two level
                     config or an unreadable `.git/HEAD` (`skipped: HEAD unreadable`: git does not
                     recognise the repository); nothing else was run
   scan incomplete: <call> rc=<n>  a git call (`status`, `rev-parse --abbrev-ref HEAD`, `rev-list
-                    --count ...`, `for-each-ref`) failed or timed out (rc=124); the state is unknown,
+                    --count ...`, `for-each-ref`, `remote get-url origin`: only exit 2 "No such remote" means no origin) failed or timed out (rc=124); the state is unknown,
                     so the checkout is never `clean and pushed`; counts are null. `git status` gets
                     600 s, every other git call 60 s. A repository counts as unborn (no commit yet) only
                     when `refs/heads` and `refs/tags` hold nothing; a HEAD that names no ref while
@@ -134,6 +134,7 @@ MAX_BRANCH_COUNTS = 100  # `rev-list --count` calls for the per-branch report; t
 INFO_FLAGS = ("stash", "no origin remote", "origin unreachable", "detached", "origin unknown")
 INCOMPLETE_PREFIX = "scan incomplete: "
 STATUS_TIMEOUT = 600  # `git status` on a large or cold tree under load; every other git call gets 60 s
+NO_SUCH_REMOTE_RC = 2  # `git remote get-url origin` on a repository without origin: exit 2, "error: No such remote 'origin'"
 MODULE_INTERNAL_DIRS = ("objects", "refs", "logs", "hooks", "lfs")  # pruned inside a module's git dir
 # Prefix of every git call: no index lock, and the config-named programs that run on any command off
 # (log.showSignature=false: `stash list` / `log` would run gpg.program on a signed commit otherwise).
@@ -695,7 +696,12 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
             return incomplete_record(path, "rev-list --count HEAD --not --remotes=origin", rc)
         ahead_of_origin = int(n)
     stashes = stash_count(path, common)
+    # `git remote get-url` exits 2 with "error: No such remote 'origin'" (observed, git's own answer) when
+    # origin is not configured; a timeout (124), a damaged config (128) or anything else is unknown, never
+    # "no origin", which would turn the checkout into an orphan instead of `scan incomplete` (Codex pass 8)
     rc, _ = git(path, "remote", "get-url", "origin")
+    if rc not in (0, NO_SUCH_REMOTE_RC):
+        return incomplete_record(path, "remote get-url origin", rc)
     has_origin = rc == 0
     branches, live = origin_branches(path, remote) if has_origin else (None, False)
     origin_unreachable = bool(remote and has_origin and not live)
