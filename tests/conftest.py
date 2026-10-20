@@ -36,4 +36,7 @@ os.environ.setdefault("ROUTE_AGENT_AIUSE", "off")
 # docs/queue.md item 6). With a working login omp joins every roster as an unmeasured code/bulk pool and changed
 # the answer of three tests that pass on CI, which has no login. Off in tests; TestOmpCreditsTier and
 # TestOmpReadyRoster turn it on per test with mock.patch.dict.
-os.environ.setdefault("ROUTE_AGENT_OMP_READY", "0")
+# An outer "0" or "1" wins on purpose (a full-suite run with ROUTE_AGENT_OMP_READY=1 is the omp-ready
+# check; adversary 2026-10-20). Any other value, "" included, would send the probe to the real login.
+if os.environ.get("ROUTE_AGENT_OMP_READY", "").strip().lower() not in ("0", "1"):
+    os.environ["ROUTE_AGENT_OMP_READY"] = "0"

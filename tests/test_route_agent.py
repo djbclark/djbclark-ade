@@ -1050,7 +1050,10 @@ class TestOmpReadyRoster(unittest.TestCase):
     """With a working omp login (ROUTE_AGENT_OMP_READY=1) omp is a code/bulk pool. conftest pins the
     probe off so the suite does not depend on the host; these are the omp-ready counterparts of
     test_measured_idle_capacity_beats_unmeasured, test_no_room_comes_back_as_none_not_an_error and
-    test_the_2026_10_18_case_queues_code_instead_of_routing_far_down (docs/queue.md item 6, 2026-10-20)."""
+    test_the_2026_10_18_case_queues_code_instead_of_routing_far_down (docs/queue.md item 6, 2026-10-20).
+    Left out on purpose: omp ready with NO quota reading (the state this Mac was in). There an unmeasured
+    omp outranks a measured pool in all three scenarios, which is the open follow-up carried from item 6,
+    not behaviour to pin (adversary, 2026-10-20)."""
 
     def setUp(self):
         patcher = mock.patch.dict(os.environ, {"ROUTE_AGENT_OMP_READY": "1"})
