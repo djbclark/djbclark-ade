@@ -73,6 +73,15 @@ def esc(value, in_code=False):
     return " ".join(text.split("\n"))
 
 
+_CTRL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def visible(v):
+    """A value that is shown, never pasted, in a code span: control characters as backslash-n, -r, -t or -xNN text."""
+    named = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+    return _CTRL.sub(lambda m: named.get(m.group()) or f"\\x{ord(m.group()):02x}", str(v))
+
+
 def shcode(fmt, *values):
     """A code span holding a shell command: every value is `shlex.quote`d before `code()` escapes it for markdown,
     so a checkout path or branch name shaped like `side$(touch x)` cannot run anything when the cell is pasted
@@ -83,18 +92,32 @@ def shcode(fmt, *values):
 def shquote(v):
     """`shlex.quote`, except that a leading `~/` (the generator's own home abbreviation, `tilde()`) stays
     outside the quotes so the shell still expands it: `~/'a b'/c`, never `'~/a b/c'`; a bare `~` (the home
-    directory itself) stays unquoted too (adversary round 9, Codex pass 6)."""
+    directory itself) stays unquoted too (adversary round 9, Codex pass 6). A value with a control character
+    (newline, carriage return, tab, ...) is ANSI-C quoted, `$'a\\nb'`, which bash and zsh accept: `shlex.quote`
+    keeps a raw newline, a markdown table row cannot, and turning it into a space would paste a different path
+    (Codex pass 15 on PR 27)."""
     v = str(v)
     if v == "~":
         return "~"
     if v.startswith("~/"):
-        return "~/" + shlex.quote(v[2:]) if v[2:] else "~/"
-    return shlex.quote(v)
+        return "~/" + _quote(v[2:]) if v[2:] else "~/"
+    return _quote(v)
+
+
+def _quote(v):
+    if not _CTRL.search(v):
+        return shlex.quote(v)
+    named = {"\n": "\\n", "\r": "\\r", "\t": "\\t", "\\": "\\\\", "'": "\\'"}
+    return "$'" + "".join(named.get(ch) or (f"\\x{ord(ch):02x}" if _CTRL.match(ch) else ch) for ch in v) + "'"
 
 
 def code(fmt, *values):
     """A code span: `fmt` (literal text, `{}` slots) with each value escaped, fenced with more
-    backticks than the longest run in the result."""
+    backticks than the longest run in the result. A control character in a value is refused (ValueError)
+    rather than turned into a space: shell values come through `shquote`, display values through `visible`."""
+    for v in values:
+        if _CTRL.search(str(v)):
+            raise ValueError(f"control character in a code span value: {str(v)!r}")
     text = fmt.format(*[esc(v, in_code=True) for v in values])
     runs = re.findall(r"`+", text)
     if not runs:
@@ -223,7 +246,7 @@ def render(d):
       "Deleting it is a later cleanup decision, not part of Phase 0.\n")
 
     # ---- 1 bigteam
-    w(f"## 1. bigteam (`{bt_root}/<task>/`)\n")
+    w(f"## 1. bigteam ({code('{}/<task>/', visible(bt_root))})\n")
     w("**Method.** One row per task dir. *Size* is `du -sk`; *newest* is the newest mtime within two "
       "levels; *CLAIM* is `DONE` when the last non-blank line of `CLAIM` starts with `DONE`, `open` "
       "when a `CLAIM` exists without it, `no CLAIM` otherwise; *reports* are `*report*.md` files within "
@@ -246,7 +269,7 @@ def render(d):
     w("### 1.1 The ten largest dirs and what fills them\n")
     w("| # | task | size | verdict | largest children |\n|---|---|---|---|---|")
     for i, t in enumerate(tasks[:10], 1):
-        fills = ", ".join(f"{code('{}', f['name'])} {human(f['bytes'])}" for f in t.get("fills", []))
+        fills = ", ".join(f"{code('{}', visible(f['name']))} {human(f['bytes'])}" for f in t.get("fills", []))
         w(f"| {i} | {esc(t['task'])} | {human(t['bytes'])} | {esc(t['verdict'])} | {fills} |")
     w("")
     w("`adhoc-2026-10-18` is 91% of the total: `hm-promo-rehearsal/` holds the rehearsal copies "
@@ -293,7 +316,9 @@ def render(d):
       "precedence: `unpushed commits` (also any local branch or a detached HEAD holding a commit on no "
       "origin ref), `orphan branch` (branch not on origin and commits origin lacks), `dirty`, "
       "`clean and pushed` (no local-only commit on any local branch); the *also* column lists the other "
-      "flags (`detached`, `origin unknown`, `origin unreachable`, `local-only commits: <branch> <n>`). "
+      "flags (`detached`, `origin unknown`, `local-only commits: <branch> <n>, tag <tag> <n>`) and the primary "
+      "flag `origin unreachable: local-only count unverified` (`--remote` got no answer from origin, so the "
+      "checkout is never `clean and pushed`). "
       "A checkout whose `status`, `rev-parse --abbrev-ref HEAD`, `for-each-ref`, `rev-list --count` or `remote get-url origin` call (only git's exit 2 `No such remote` means no origin) "
       "fails or times out is `scan incomplete: <call> rc=<n>` (`rc=124` is a timeout; `status` gets "
       "600 s, other calls 60 s) with null counts, and is never `clean and pushed`; a repository whose "
@@ -409,20 +434,26 @@ def render(d):
                            + " or " + shcode("mkdir -p <DEST>/{} && git -C {} bundle create <DEST>/{} refs/heads/{}",
                                              ck, raw_p, f"{ck}/branch-{quote(c['branch'], safe='')}.bundle", c["branch"]))
                 need = "yes: pushing a branch publishes it; pick push or bundle"
+        tag_others = c.get("local_only_tags") or []
         if local_n and not covered_by_bundle:
-            # commits on other local branches (or a detached HEAD) that no origin ref holds, whatever HEAD's own state
+            # commits on other local branches, tags (or a detached HEAD) that no origin ref holds, whatever HEAD's own state
             others = [b for b in (c.get("local_only_branches") or [])
                       if not (head_row and b["branch"] == c["branch"])]
             more = num(c.get("local_only_branches_uncounted"))
-            names = ", ".join(f"{code('{}', b['branch'])} ({num(b['count'])})" for b in others)
-            tail = f" and {more} more branches" if more > 0 else ""
-            if others:
-                what.append((f"local-only commits on other branches: {names}" if head_row
+            names = ", ".join([f"{code('{}', b['branch'])} ({num(b['count'])})" for b in others]
+                              + [f"tag {code('{}', t['tag'])} ({num(t['count'])})" for t in tag_others])
+            tail = f" and {more} more branches or tags" if more > 0 else ""
+            if others or tag_others:
+                kind = "branches and tags" if tag_others else "branches"
+                what.append((f"local-only commits on other {kind}: {names}" if head_row
                              else f"{local_n} local-only commits on {names}") + tail)
             else:
                 what.append(f"{local_n} local-only commits (branches not itemised)" + tail)
             lo_cmd = [shcode("git -C {} push origin refs/heads/{}:refs/heads/{}", raw_p, b["branch"], b["branch"])
                       for b in others if b["branch"] != "HEAD"]
+            # a tag is pushed by its full ref name, like a branch: a tag named like an option never reaches git's parser
+            lo_cmd += [shcode("git -C {} push origin refs/tags/{}:refs/tags/{}", raw_p, t["tag"], t["tag"])
+                       for t in tag_others]
             lo_cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} bundle create <DEST>/{} --all",
                                  ck, raw_p, f"{ck}/local-only.bundle"))
             cmd.append(" or ".join(lo_cmd) if len(lo_cmd) == 1 else "; ".join(lo_cmd[:-1]) + " or " + lo_cmd[-1])
@@ -441,7 +472,7 @@ def render(d):
                               ck, raw_p, f"{ck}/stash0.patch"))
         if real_untr > 0:
             shared = "djbclark-ade" in c["path"] or "forgejo-ci-2026-10" in c["path"]
-            what.append(f"{real_untr} untracked ({', '.join(code('{}', u) for u in untr[:3])}"
+            what.append(f"{real_untr} untracked ({', '.join(code('{}', visible(u)) for u in untr[:3])}"
                         f"{', ...' if len(untr) > 3 else ''})")
             if shared:
                 cmd.append("same paths as the primary / sibling checkout (cow copy): preserve once there")
@@ -475,7 +506,8 @@ def render(d):
       "later moment (sessions kept writing during both).")
     w("4. `ls-remote` needs the remote to answer; a checkout whose origin refused would show "
       "`on origin: unknown` in the run's tool. None did in this run. The current tool falls back to the "
-      "local `refs/remotes/origin/*` and adds the flag `origin unreachable`.")
+      "local `refs/remotes/origin/*` for the count and makes the checkout `origin unreachable: local-only "
+      "count unverified`, never `clean and pushed`.")
     w("5. A pasture that was clean when created can become dirty or ahead later; this is a snapshot "
       f"at {d['scanned_at']}.")
     w("6. The scan ran with the first version of the tool, which did not look at a checkout's own config "

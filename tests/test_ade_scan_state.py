@@ -643,12 +643,13 @@ def test_remote_scan_with_an_origin_that_does_not_answer_is_not_clean_and_pushed
     git(work, "remote", "set-url", "origin", str(tmp_path / "does-not-exist.git"))
     c = scan_one(mod, roots, remote=True)
     assert c["verdict"] != "clean and pushed" and c["verdict"] == "orphan branch"
-    assert "origin unreachable" in c["flags"]  # fell back to the local refs/remotes/origin/*
+    assert mod.ORIGIN_UNREACHABLE in c["flags"]  # fell back to the local refs/remotes/origin/* for the count
+    assert c["local_only_verified"] is False
     assert c["local_only_commits"] == 1
     assert c["local_only_branches"] == [{"branch": "feature", "count": 1}]
     # no origin branch list at all (not even local refs): the verdict is still not clean
     mod = load()
-    monkeypatch.setattr(mod, "origin_branches", lambda path, remote: (None, False, 0))
+    monkeypatch.setattr(mod, "origin_branches", lambda path, remote: (None, False, 0, {}))
     c = scan_one(mod, roots, remote=True)
     assert c["verdict"] == "unpushed commits" and "origin unknown" in c["flags"], c["flags"]
     assert c["local_only_branches"] == [{"branch": "feature", "count": 1}]
@@ -704,7 +705,7 @@ def test_remote_scan_trusts_live_tips_over_a_stale_tracking_ref(tmp_path):
     mod._remote_cache.clear()
     c = scan_one(mod, roots, remote=True)
     assert c["local_only_commits"] == 1 and c["local_only_branches"] == [{"branch": "x", "count": 1}], c
-    assert c["verdict"] == "unpushed commits" != "clean and pushed" and "origin unreachable" not in c["flags"]
+    assert c["verdict"] == "unpushed commits" != "clean and pushed" and mod.ORIGIN_UNREACHABLE not in c["flags"]
     assert c["on_origin"] is False
 
 
@@ -729,7 +730,7 @@ def test_worktrees_with_different_worktree_scoped_origins_are_judged_by_their_ow
         recs = {Path(r["path"]).name: r for r in mod.scan_git(list(order), remote=True)}
         assert recs["work"]["verdict"] == "clean and pushed", recs["work"]
         assert recs["wt"]["verdict"] == "unpushed commits", recs["wt"]
-        assert recs["wt"]["local_only_commits"] > 0 and "origin unreachable" not in recs["wt"]["flags"]
+        assert recs["wt"]["local_only_commits"] > 0 and mod.ORIGIN_UNREACHABLE not in recs["wt"]["flags"]
 
 
 def push_from_another_clone(tmp_path: Path, origin: Path, *branches: str, name: str = "other") -> None:
@@ -838,7 +839,7 @@ def test_remote_scan_resolves_a_bare_relative_origin_url_against_the_checkout(tm
     git(work, "remote", "set-url", "origin", "sib.git")
     git(work, "commit", "--allow-empty", "-m", "local only")  # not on sib.git
     c = scan_one(mod, roots, remote=True)
-    assert "origin unreachable" not in c["flags"], c["flags"]
+    assert mod.ORIGIN_UNREACHABLE not in c["flags"], c["flags"]
     assert c["verdict"] == "unpushed commits" and c["local_only_commits"] == 1, c
 
 
@@ -1680,8 +1681,8 @@ def test_ls_remote_drops_malformed_oids_and_names(monkeypatch):
                      f"{'A' * 40}\trefs/heads/upper", f"{'c' * 39}\trefs/heads/short",
                      f"{good}\trefs/heads/x:refs/heads/side", f"{good} refs/heads/notab", "refs/heads/bare"]) + "\n"
     monkeypatch.setattr(mod, "run", lambda argv, **kw: (0, out))
-    heads, invalid = mod.ls_remote_heads("/nowhere")
-    assert heads == {"main": good, "long": sha256} and invalid == 6
+    heads, tags, invalid = mod.ls_remote_refs("/nowhere")
+    assert heads == {"main": good, "long": sha256} and tags == {} and invalid == 6
 
 
 def test_local_only_verified_needs_a_live_origin_answer(tmp_path):
@@ -1698,8 +1699,150 @@ def test_local_only_verified_needs_a_live_origin_answer(tmp_path):
     mod._remote_cache.clear()
     git(work, "config", "remote.origin.url", str(tmp_path / "gone.git"))
     c = scan_one(mod, roots, remote=True)
-    assert "origin unreachable" in c["flags"] and c["local_only_verified"] is None
+    assert mod.ORIGIN_UNREACHABLE in c["flags"] and c["local_only_verified"] is False
+    assert c["verdict"] == mod.ORIGIN_UNREACHABLE != "clean and pushed"
     git(work, "remote", "remove", "origin")
     mod._remote_cache.clear()
     c = scan_one(mod, roots, remote=True)
     assert "no origin remote" in c["flags"] and c["local_only_verified"] is None
+
+
+def test_remote_scan_with_an_unreachable_origin_is_never_clean_even_with_a_stale_tracking_ref(tmp_path):
+    """Codex pass 15, P1 (4325359328): branch `x` was pushed, then deleted on origin before an outage; its stale
+    `refs/remotes/origin/x` hides the only commit. `--remote` that cannot reach origin must not say clean."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    git(work, "checkout", "-b", "x")
+    commit_file(work, "x.txt")
+    git(work, "push", "origin", "x")
+    git(work, "checkout", "main")
+    git(origin, "branch", "-D", "x")
+    git(work, "config", "remote.origin.url", str(tmp_path / "moved-away.git"))
+    c = scan_one(mod, roots)  # plain scan: the documented caveat, the stale ref hides it, nothing was asked
+    assert c["verdict"] == "clean and pushed" and c["local_only_verified"] is None
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True)
+    assert c["verdict"] == mod.ORIGIN_UNREACHABLE != "clean and pushed", c
+    assert c["flags"] == [mod.ORIGIN_UNREACHABLE]
+    assert c["local_only_verified"] is False
+    assert c["local_only_commits"] == 0  # an undercount, which is what the primary flag says
+
+
+def make_tag_only_commit(work: Path, tag: str = "v1", annotated: bool = False) -> None:
+    """A commit no branch holds any more: reachable from a local tag only."""
+    git(work, "checkout", "-b", "tmp-side")
+    commit_file(work, f"{tag}.txt")
+    git(work, "tag", *(["-a", "-m", tag] if annotated else []), tag)
+    git(work, "checkout", "main")
+    git(work, "branch", "-D", "tmp-side")
+
+
+@pytest.mark.parametrize("annotated", [False, True])
+def test_a_commit_reachable_only_from_a_local_tag_is_local_only_until_origin_has_the_tag(tmp_path, annotated):
+    """Codex pass 15, P1 (4325359341): the branch was reset or deleted, the tag keeps the unpushed commit."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    make_tag_only_commit(work, "v1", annotated)
+    c = scan_one(mod, roots)
+    assert c["verdict"] == "unpushed commits" != "clean and pushed", c
+    assert c["local_only_commits"] == 1 and c["local_only_tags"] == [{"tag": "v1", "count": 1}]
+    assert c["local_only_branches"] == []
+    assert any(f == "local-only commits: tag v1 1" for f in c["flags"]), c["flags"]
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True)  # origin does not have the tag
+    assert c["local_only_commits"] == 1 and c["local_only_verified"] is True and c["verdict"] != "clean and pushed"
+    git(work, "push", "origin", "refs/tags/v1:refs/tags/v1")
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True)  # origin has it (an annotated tag through its peeled commit)
+    assert c["verdict"] == "clean and pushed" and c["local_only_commits"] == 0, c
+    assert c["local_only_tags"] == [] and c["local_only_verified"] is True and c["flags"] == []
+
+
+def test_a_local_tag_of_a_pushed_commit_is_not_local_only(tmp_path):
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    git(work, "tag", "release")
+    assert scan_one(mod, roots)["verdict"] == "clean and pushed"
+
+
+def test_a_live_origin_tag_whose_objects_are_missing_is_one_more_unfetched_tip(tmp_path):
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    other = tmp_path / "other"
+    git(tmp_path, "clone", str(origin), str(other))
+    git(other, "checkout", "main")
+    commit_file(other, "tagged.txt")
+    git(other, "tag", "-a", "-m", "v9", "v9")
+    git(other, "push", "origin", "refs/tags/v9:refs/tags/v9")
+    c = scan_one(mod, roots, remote=True)
+    assert c["verdict"] != "clean and pushed" and "origin tips not fetched: 1" in c["flags"], c["flags"]
+    assert c["local_only_verified"] is False
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True, fetch=True)
+    assert c["verdict"] == "clean and pushed" and c["local_only_verified"] is True, c["flags"]
+    assert git(work, "tag", "--list").strip() == ""  # --fetch wrote no local tag
+
+
+def test_ls_remote_reads_tags_and_their_peeled_commits(monkeypatch):
+    mod = load()
+    a, b, c = "a" * 40, "b" * 40, "c" * 40
+    out = "\n".join([f"{a}\trefs/heads/main", f"{b}\trefs/tags/light", f"{c}\trefs/tags/ann",
+                     f"{a}\trefs/tags/ann^{{}}", f"{b}\trefs/tags/orphan^{{}}", f"{b}\trefs/tags/bad:name",
+                     f"{b}\trefs/other/x"]) + "\n"
+    monkeypatch.setattr(mod, "run", lambda argv, **kw: (0, out))
+    heads, tags, invalid = mod.ls_remote_refs("/nowhere")
+    assert heads == {"main": a} and tags == {"light": (b, b), "ann": (c, a)} and invalid == 3
+
+
+def test_a_relative_bigteam_root_is_stored_absolute(tmp_path, monkeypatch):
+    """Adversary round 20, LOW 4b: the rows rendered from `root` must not depend on the scan's cwd."""
+    mod = load()
+    (tmp_path / "bt" / "t").mkdir(parents=True)
+    (tmp_path / "bt" / "t" / "r-report.md").write_text("x\n")
+    monkeypatch.chdir(tmp_path)
+    res = mod.scan_bigteam(Path("bt"), [], [], 10_000, 1)
+    assert res["root"] == str(tmp_path / "bt")
+    res = mod.scan_bigteam(Path("bt/../bt/"), [], [], 10_000, 1)
+    assert res["root"] == str(tmp_path / "bt")
+
+
+def test_a_newline_in_a_path_is_ansi_c_quoted_in_every_generated_command():
+    """Codex pass 15, P2 (4325359354): `esc()` turned the newline `shlex.quote` kept into a space."""
+    mod = load_doc()
+    assert mod.shquote("a\nb") == "$'a\\nb'" and mod.shquote("~/a\nb") == "~/$'a\\nb'"
+    assert mod.shquote("it's\r\t\\\x01") == "$'it\\'s\\r\\t\\\\\\x01'"
+    assert mod.shquote("plain path") == "'plain path'"
+    task = {"task": "t-nl", "verdict": "unique", "claim": "no CLAIM", "bytes": 1, "reports": [
+        {"path": "a\nb-report.md", "bytes": 1, "done": False}], "open_job_records": [], "fills": [],
+        "unique_bytes": 1, "referenced_in": [], "newest_mtime": 0}
+    co = doc_checkout("/p/a\nb", flags=["unpushed commits"], verdict="unpushed commits", local_only_commits=1,
+                      local_only_branches=[{"branch": "side", "count": 1}])
+    text = mod.render(doc_scan([co], tasks=[task]))
+    row = next(r for r in text.split("### 3.1")[1].split("### 3.2")[0].splitlines() if r.startswith("| t-nl "))
+    assert "-- $'a\\nb-report.md')" in row and row.count("|") == 5
+    rows = section_3_2(text).splitlines()
+    row = next(r for r in rows if r.startswith("| /p/a b "))
+    assert "git -C $'/p/a\\nb' push origin refs/heads/side:refs/heads/side" in row
+    assert not any(ln.startswith("b'") for ln in rows)  # no row was split at the newline
+    with pytest.raises(ValueError):
+        mod.code("{}", "a\nb")  # refused, never turned into a space
+    assert mod.visible("a\nb\x01") == "a\\nb\\x01"
+
+
+def test_the_section_1_heading_escapes_the_bigteam_root():
+    """Adversary round 20, LOW 4a: a root with a backtick must not close the code span."""
+    mod = load_doc()
+    scan = doc_scan([], tasks=[])
+    scan["bigteam"]["root"] = "/srv/bt`x"
+    text = mod.render(scan)
+    assert "## 1. bigteam (`` /srv/bt`x/<task>/ ``)" in text
+
+
+def test_capture_plan_pushes_a_local_only_tag_by_its_full_ref_name():
+    mod = load_doc()
+    co = doc_checkout("/p/tg", flags=["unpushed commits"], verdict="unpushed commits", local_only_commits=2,
+                      local_only_tags=[{"tag": "v1", "count": 1}, {"tag": "--force", "count": 1}])
+    row = next(r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith("| /p/tg "))
+    assert "2 local-only commits on tag `v1` (1), tag `--force` (1)" in row
+    assert "git -C /p/tg push origin refs/tags/v1:refs/tags/v1" in row
+    assert "push origin refs/tags/--force:refs/tags/--force" in row
