@@ -13,7 +13,10 @@ database; no data changes), and the live Hermes `state.db` is never handed to `h
   2. per-session SQLite trees (Cursor, Antigravity): each db the same way, its sidecar (`meta.json`,
      `<uuid>.meta`) copied beside it;
   3. file stores: `shutil.copytree` with an ignore function that drops every credential file name and path
-     (inventory section 5 item 5), the `credential-bak` vault, symlinks (a symlinked store root too) and non-regular files;
+     (inventory section 5 item 5), the `credential-bak` vault, symlinks inside a store and non-regular files; a configured store root that is
+     itself a symlink is followed only when it resolves to an existing path under $HOME that is no credential
+     path (copied as the target, recorded in the manifest as `root_symlinks`, links inside it still never
+     followed): a dangling root, one resolving outside $HOME or to a credential path is an error;
   4. `hermes sessions export` (JSONL) into <dest>/hermes-export/, run with HERMES_HOME pointing at a scratch
      copy of the hermes-state backup (removed afterwards), so `hermes` never opens the live state.db and the
      session ids, counts and exports all come from one snapshot. The export refuses a session above
@@ -41,6 +44,8 @@ store or store path exit 1. A locked or unreadable store is an error in the mani
 the exit status is 1 at the end. A Cursor session whose required `meta.json` is absent, a symlink, excluded
 or gone during the copy is an error naming the session directory (relative to the store root, no content),
 and the store is `partial`: the resume picker reads it, so the db copy alone is not lossless.
+A store that exists but produced no file prints `<store>: 0 files copied although its roots exist` on stderr
+(not an error, not `partial`: an empty store is real).
 
 Default dest: ~/.local/state/ade/backups/<UTC timestamp>/ (0700, files 0600). The generation is built in
 <dest>.part/ and renamed to <dest>/ at the end: a <dest>.part/ directory, or a generation without
@@ -146,11 +151,13 @@ def is_excluded_name(name):
 
 class Excluder:
     def __init__(self, home):
-        self.patterns = [str(home / rel) for rel in EXCLUDE_PATHS]
+        self.real_home = Path(home).resolve()
+        self.patterns = [str(base / rel) for base in dict.fromkeys([home, self.real_home])
+                         for rel in EXCLUDE_PATHS]
 
-    def path(self, p):
-        """True when p (or its resolved target) is a credential path or has an excluded name."""
-        for cand in {str(p), os.path.realpath(p)}:
+    def path(self, p, follow=True):
+        """True when p (or, with follow, its resolved target) is a credential path or has an excluded name."""
+        for cand in {str(p), os.path.realpath(p)} if follow else {str(p)}:
             if any(is_excluded_name(part) for part in Path(cand).parts[1:]):
                 return True
             for pat in self.patterns:
@@ -235,7 +242,16 @@ def store_roots(store):
         return [f.parent for f in store["files"]]
     if store["kind"] == "sqlite-tree":
         return [store["root"]]
-    return [p.parent if label in store.get("file_labels", []) else p for label, p in store["roots"]]
+    home = Path(os.path.expanduser("~")).resolve()
+    roots = []
+    for label, p in store["roots"]:
+        is_file = label in store.get("file_labels", [])
+        roots.append(p.parent if is_file else p)
+        if p.is_symlink():  # a root link that may be followed: its target (its directory, for a file) is a source too
+            target = Path(os.path.realpath(p))
+            if home in target.parents:  # a target outside HOME is never copied, so it is no source
+                roots.append(target.parent if is_file else target)
+    return roots
 
 
 def utcnow():
@@ -345,6 +361,10 @@ def backup_sqlite(src, dst, store_name):
     return scrubbed
 
 
+class RootSymlinkError(OSError):
+    """A configured store root that is a symlink and must not be followed (the reason leads the message)."""
+
+
 class StoreRun:
     """One store's progress: skipped paths, errors, and (after finish) the files produced."""
 
@@ -358,6 +378,7 @@ class StoreRun:
         self.skipped_count = 0
         self.sources = []
         self.missing = []
+        self.root_symlinks = []
         self.source_of = {}
         self.scrubbed_of = {}
 
@@ -396,30 +417,53 @@ def make_ignore(run, excluder):
     return ignore
 
 
+def root_link_target(src, excluder):
+    """A configured store root that is a symlink: (resolved target, None) when it may be followed, else
+    (None, reason). Followed only when every link resolves to an existing path under the run's real $HOME and
+    neither the link nor the target is a credential path. Links *inside* the tree are never followed."""
+    try:
+        target = Path(src).resolve()
+    except (OSError, RuntimeError):
+        return None, "dangling symlink"
+    if not os.path.lexists(target):
+        return None, "dangling symlink"
+    if target != excluder.real_home and excluder.real_home not in target.parents:
+        return None, "symlink target outside HOME"
+    if excluder.path(target):
+        return None, "symlink target excluded"
+    if not (target.is_dir() or target.is_file()):
+        return None, "symlink target is not a regular file or directory"
+    return target, None
+
+
 def copy_file_store(store, run, excluder):
     for label, src in store["roots"]:
         dst = run.out / label
         run.sources.append(str(src))
         try:
-            if excluder.path(src):
+            if excluder.path(src, follow=not src.is_symlink()):
                 run.skip(src, "excluded credential path")
                 continue
             if not os.path.lexists(src):
                 run.absent(src)
                 continue
-            if src.is_symlink():  # a symlinked root (file or directory) is never followed, like any link inside
-                run.skip(src, "symlink")
-                continue
-            if src.is_dir():
+            real = src
+            if src.is_symlink():
+                real, why = root_link_target(src, excluder)
+                if why:
+                    run.error(src, RootSymlinkError(f"{why}: {src} -> {os.readlink(src)}"))
+                    continue
+                run.root_symlinks.append({"root": label, "link": str(src), "target": str(real)})
+            if real.is_dir():
                 try:
-                    shutil.copytree(src, dst, symlinks=True, ignore=make_ignore(run, excluder),
+                    shutil.copytree(real, dst, symlinks=True, ignore=make_ignore(run, excluder),
                                     copy_function=shutil.copy2)
                 except shutil.Error as exc:
                     for item in exc.args[0]:
                         run.error(item[0], OSError(item[2]))
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)
+                shutil.copy2(real, dst, follow_symlinks=False)
         except OSError as exc:
             run.error(src, exc)
 
@@ -556,7 +600,8 @@ def run_store(store, work, excluder, final):
     scrubbed = sorted({t for v in run.scrubbed_of.values() for t in v})
     return run, {
         "store": store["name"], "kind": store["kind"], "status": store_status(run), "sources": run.sources,
-        "missing": run.missing, "destination": str(final / store["name"]), "bytes": total,
+        "missing": run.missing, "root_symlinks": run.root_symlinks, "destination": str(final / store["name"]),
+        "bytes": total,
         "file_count": len(entries), "files": entries,
         "started": run.started, "ended": utcnow(), "seconds": round(time.monotonic() - run.t0, 1),
         "skipped_count": run.skipped_count, "skipped": run.skipped, "scrubbed": scrubbed, "errors": run.errors,
@@ -598,15 +643,19 @@ def plan_store(store, excluder):
                     elif pat in store.get("required", []):
                         run.error(db.parent.relative_to(store["root"]), required_sidecar_error(side, why))
     else:
-        for _, src in store["roots"]:
+        for label, src in store["roots"]:
             run.sources.append(str(src))
-            if excluder.path(src):
+            if excluder.path(src, follow=not src.is_symlink()):
                 continue
+            real = src
             if src.is_symlink():
-                run.skip(src, "symlink")
-                continue
-            if src.is_dir():
-                for dirpath, dirnames, filenames in os.walk(src):
+                real, why = root_link_target(src, excluder)
+                if why:
+                    run.error(src, RootSymlinkError(f"{why}: {src} -> {os.readlink(src)}"))
+                    continue
+                run.root_symlinks.append({"root": label, "link": str(src), "target": str(real)})
+            if real.is_dir():
+                for dirpath, dirnames, filenames in os.walk(real):
                     ig = set(make_ignore(run, excluder)(dirpath, dirnames + filenames))
                     dirnames[:] = [d for d in dirnames if d not in ig]
                     for fn in filenames:
@@ -616,15 +665,15 @@ def plan_store(store, excluder):
                                 count += 1
                             except OSError as exc:
                                 run.error(os.path.join(dirpath, fn), exc)
-            elif src.is_file():
+            elif real.is_file():
                 count += 1
-                size += src.stat().st_size
+                size += real.stat().st_size
             elif not os.path.lexists(src):
                 run.absent(src)
             else:
                 run.error(src, OSError("not a regular file"))
-    return {"store": store["name"], "kind": store["kind"], "status": store_status(run), "missing": run.missing,
-            "file_count": count, "bytes": size, "skipped_count": run.skipped_count, "errors": run.errors}
+    return {"store": store["name"], "kind": store["kind"], "status": store_status(run), "sources": run.sources,
+            "missing": run.missing, "root_symlinks": run.root_symlinks, "file_count": count, "bytes": size, "skipped_count": run.skipped_count, "errors": run.errors}
 
 
 def resolve_dest(arg):
@@ -812,6 +861,15 @@ def report_missing(entries):
     return n
 
 
+def report_empty(entries):
+    """One stderr line per store with a configured path that exists and no error but no file produced: a store
+    whose roots all vanished from the copy must not look like success. Not an error (an empty store is real)."""
+    for e in entries:
+        sources = e.get("sources", [])
+        if e["file_count"] == 0 and not e["errors"] and len(e["missing"]) < len(sources):
+            print(f"ade-backup-stores: {e['store']}: 0 files copied although its roots exist", file=sys.stderr)
+
+
 def check_schemas(stores):
     """--check-schemas: the schema guard on the live databases, read-only; prints names only."""
     problems = 0
@@ -896,6 +954,7 @@ def run_main(argv):
         if "hermes-export" in wanted:
             say(f"hermes-export: would skip, {hermes_db} is missing (dry run)" if hermes_missing else
                 f"hermes-export: would run `hermes sessions export` into {dest / 'hermes-export'} (dry run)")
+        report_empty(plans)
         n_missing = report_missing(plans + ([{"store": "hermes-export", "missing": [str(hermes_db)]}]
                                             if hermes_missing else []))
         total = sum(p["bytes"] for p in plans)
@@ -931,6 +990,7 @@ def run_main(argv):
         errors.extend(entry["errors"])
         info = entry["hermes_export"]
         say(summary_line(entry) + (f", {len(info['oversize'])} oversize session(s) not exported" if info["truncated"] else ""))
+    report_empty(entries)
     n_missing = report_missing(entries)
     total = sum(e["bytes"] for e in entries)
     manifest = {

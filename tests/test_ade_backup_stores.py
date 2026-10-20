@@ -714,26 +714,91 @@ def test_grok_memory_v2_and_memtrace_are_backed_up_and_counted_by_the_dry_run(re
     assert entry["status"] == "ok" and entry["missing"] == [str(home / ".grok/sessions")]
 
 
-def test_a_symlinked_file_root_is_skipped_not_copied(real, capsys):
+def codex_layout(home):
+    """This Mac's layout: ~/.codex/sessions and ~/.codex/session_index.jsonl are links into a runtime dir under HOME."""
+    runtime = home / "ops-private/.codex-runtime"
+    (runtime / "sessions/2026/10").mkdir(parents=True)
+    (runtime / "sessions/2026/10/rollout-a.jsonl").write_text('{"codex": "rollout-a"}\n')
+    (runtime / "sessions/x").mkdir()
+    (runtime / "session_index.jsonl").write_text('{"codex": "index"}\n')
+    (home / ".codex").mkdir()
+    (home / ".codex/auth.json").write_text("SENTINEL-CODEX-AUTH")
+    os.symlink(home / ".codex/auth.json", runtime / "sessions/x/leak.jsonl")
+    os.symlink(runtime / "sessions", home / ".codex/sessions")
+    os.symlink(runtime / "session_index.jsonl", home / ".codex/session_index.jsonl")
+    return runtime
+
+
+def contents(dest):
+    return "".join(p.read_text(errors="replace") for p in dest.rglob("*") if p.is_file() and not p.is_symlink())
+
+
+def test_codex_root_links_into_home_are_followed_and_recorded(real, capsys):
+    mod, home, _ = real
+    runtime = codex_layout(home)
+    assert mod.main(["--only", "codex-files", "--dry-run", "--json", "--dest", str(home / "dry")]) == 0
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "codex-files", "--dest", str(dest)]) == 0
+    assert (dest / "codex-files/sessions/2026/10/rollout-a.jsonl").read_text() == '{"codex": "rollout-a"}\n'
+    index = dest / "codex-files/session_index.jsonl"
+    assert index.is_file() and not index.is_symlink() and index.read_text() == '{"codex": "index"}\n'
+    assert not any(p.is_symlink() for p in dest.rglob("*"))
+    assert "SENTINEL-CODEX-AUTH" not in contents(dest) and not (dest / "codex-files/sessions/x/leak.jsonl").exists()
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "ok" and entry["errors"] == []
+    assert entry["root_symlinks"] == [
+        {"root": "sessions", "link": str(home / ".codex/sessions"), "target": str(runtime / "sessions")},
+        {"root": "session_index.jsonl", "link": str(home / ".codex/session_index.jsonl"),
+         "target": str(runtime / "session_index.jsonl")}]
+    assert entry["file_count"] == plan["file_count"] == 2
+    assert entry["bytes"] == plan["bytes"] and plan["root_symlinks"] == entry["root_symlinks"]
+    assert any(s["path"].endswith("leak.jsonl") for s in entry["skipped"])  # the inner link is still dropped
+
+
+def test_destination_inside_a_followed_root_target_is_refused(real, capsys):
+    mod, home, _ = real
+    runtime = codex_layout(home)
+    for inside in (runtime / "sessions/new-gen", runtime / "new-gen"):  # a directory root, a file root's directory
+        assert mod.main(["--only", "codex-files", "--dest", str(inside)]) == 2
+        assert "source store" in capsys.readouterr().err and not inside.exists()
+
+
+def test_a_chain_of_root_links_inside_home_is_followed_and_recorded_with_the_final_target(real):
+    mod, home, _ = real
+    final = home / "data/final"
+    final.mkdir(parents=True)
+    (final / "chat.jsonl").write_text("CHAIN-FILE")
+    os.symlink(final, home / "data/hop")
+    (home / ".grok").mkdir()
+    os.symlink(home / "data/hop", home / ".grok/sessions")
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "grok", "--dest", str(dest)]) == 0
+    assert (dest / "grok/sessions/chat.jsonl").read_text() == "CHAIN-FILE"
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["root_symlinks"] == [{"root": "sessions", "link": str(home / ".grok/sessions"), "target": str(final)}]
+
+
+def test_a_symlinked_file_root_outside_home_is_an_error_not_copied(real, capsys):
     mod, home, tmp = real
     outside = tmp / "outside.json"
     outside.write_text("SENTINEL-SYMLINK-ROOT-TARGET")
     (home / ".config/herdr").mkdir(parents=True)
     link = home / ".config/herdr/session.json"
     os.symlink(outside, link)
-    assert mod.main(["--only", "herdr", "--dry-run", "--json", "--dest", str(home / "dry")]) == 0
+    assert mod.main(["--only", "herdr", "--dry-run", "--json", "--dest", str(home / "dry")]) == 1
     plan = json.loads(capsys.readouterr().out)["stores"][0]
-    assert plan["file_count"] == 0 and plan["skipped_count"] == 1
+    assert plan["file_count"] == 0 and "symlink target outside HOME" in plan["errors"][0]["error"]
     dest = home / "out" / "bk"
-    assert mod.main(["--only", "herdr", "--dest", str(dest)]) == 0
-    assert not any("SENTINEL-SYMLINK-ROOT-TARGET" in p.read_text(errors="replace")
-                   for p in dest.rglob("*") if p.is_file())
+    assert mod.main(["--only", "herdr", "--dest", str(dest)]) == 1
+    assert "SENTINEL-SYMLINK-ROOT-TARGET" not in contents(dest)
     entry = manifest_of(dest)["stores"][0]
-    assert entry["file_count"] == 0
-    assert {"path": str(link), "why": "symlink"} in entry["skipped"]
+    assert entry["file_count"] == 0 and entry["status"] == "partial" and entry["root_symlinks"] == []
+    assert entry["errors"][0]["source"] == str(link)
+    assert "symlink target outside HOME" in entry["errors"][0]["error"] and str(link) in entry["errors"][0]["error"]
 
 
-def test_a_symlinked_directory_root_is_skipped_not_walked(real, capsys):
+def test_a_symlinked_directory_root_outside_home_is_an_error_not_walked(real, capsys):
     mod, home, tmp = real
     outside = tmp / "outside-dir"
     outside.mkdir()
@@ -741,16 +806,54 @@ def test_a_symlinked_directory_root_is_skipped_not_walked(real, capsys):
     (home / ".grok").mkdir()
     link = home / ".grok/sessions"
     os.symlink(outside, link)
-    assert mod.main(["--only", "grok", "--dry-run", "--json", "--dest", str(home / "dry")]) == 0
+    assert mod.main(["--only", "grok", "--dry-run", "--json", "--dest", str(home / "dry")]) == 1
     plan = json.loads(capsys.readouterr().out)["stores"][0]
-    assert plan["file_count"] == 0 and plan["skipped_count"] == 1
+    assert plan["file_count"] == 0 and "symlink target outside HOME" in plan["errors"][0]["error"]
     dest = home / "out" / "bk"
-    assert mod.main(["--only", "grok", "--dest", str(dest)]) == 0
-    assert not any("SENTINEL-SYMLINK-DIR-TARGET" in p.read_text(errors="replace")
-                   for p in dest.rglob("*") if p.is_file())
-    assert not (dest / "grok/sessions").exists()
+    assert mod.main(["--only", "grok", "--dest", str(dest)]) == 1
+    assert "SENTINEL-SYMLINK-DIR-TARGET" not in contents(dest) and not (dest / "grok/sessions").exists()
     entry = manifest_of(dest)["stores"][0]
-    assert entry["file_count"] == 0 and {"path": str(link), "why": "symlink"} in entry["skipped"]
+    assert entry["status"] == "partial" and "symlink target outside HOME" in entry["errors"][0]["error"]
+
+
+def test_a_dangling_root_link_is_an_error_not_a_missing_store(real, capsys):
+    mod, home, _ = real
+    (home / ".grok").mkdir()
+    link = home / ".grok/sessions"
+    os.symlink(home / "gone", link)
+    assert mod.main(["--only", "grok", "--dry-run", "--json", "--dest", str(home / "dry")]) == 1
+    assert "dangling symlink" in json.loads(capsys.readouterr().out)["stores"][0]["errors"][0]["error"]
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "grok", "--dest", str(dest)]) == 1
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial" and str(link) not in entry["missing"]
+    assert entry["errors"][0]["source"] == str(link) and "dangling symlink" in entry["errors"][0]["error"]
+
+
+def test_a_root_link_to_a_credential_path_inside_home_is_an_error(real):
+    mod, home, _ = real
+    (home / ".codex").mkdir()
+    (home / ".codex/auth.json").write_text("SENTINEL-LINKED-CREDENTIAL")
+    (home / ".config/herdr").mkdir(parents=True)
+    os.symlink(home / ".codex/auth.json", home / ".config/herdr/session.json")
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "herdr", "--dest", str(dest)]) == 1
+    assert "SENTINEL-LINKED-CREDENTIAL" not in contents(dest)
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial" and "symlink target excluded" in entry["errors"][0]["error"]
+
+
+def test_a_store_with_existing_roots_and_no_files_says_so_on_stderr(real, capsys):
+    mod, home, _ = real
+    (home / ".local/state/handoffs").mkdir(parents=True)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "handoffs", "--dest", str(dest)]) == 0
+    assert "handoffs: 0 files copied although its roots exist" in capsys.readouterr().err
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "ok" and entry["file_count"] == 0
+    assert mod.main(["--only", "herdr", "--dest", str(home / "out2")]) == 0  # nothing exists: "missing", not this line
+    assert "0 files copied" not in capsys.readouterr().err
+
 
 
 def test_dry_run_counts_the_sidecar_a_cursor_store_would_copy(real, capsys):
