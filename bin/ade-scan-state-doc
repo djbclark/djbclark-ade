@@ -346,7 +346,7 @@ def render(d):
         cmd = shcode("mkdir -p <DEST>/bigteam/{} && (cd {} && \"$GCP\" --parents -t <DEST>/bigteam/{} -- " + slots + ")",
                      t["task"], "~/.local/state/bigteam/" + t["task"], t["task"], *files) if files else "no reports"
         w(f"| {esc(t['task'])} | {len(files)} | {cmd} | "
-          f"{'yes: ' + '; '.join(need) if any(not n.endswith('unclosed') for n in need) else 'no (only DEST)'} |")
+          f"{'yes: ' + '; '.join(need) if need else 'no (only DEST)'} |")  # any unclosed job: yes (Codex pass 13)
     w("")
     w("The two open-claim `mixed` dirs and `research-brain-emulation-agent-teams` (22 reports, 88 MiB "
       "with no CLAIM) are the ones to read first.\n")

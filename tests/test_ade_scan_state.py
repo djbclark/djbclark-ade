@@ -1246,6 +1246,12 @@ def test_bigteam_rows_copy_every_report_never_a_plus_n_more():
     assert "\"$GCP\" --parents -t <DEST>/bigteam/big -- " in row and "| 6 |" in row
     assert "GCP=$(command -v gcp || command -v cp); GTAR=$(command -v gtar || command -v tar)" in text  # Codex pass 12
     assert "(cd ~/.local/state/bigteam/big && " in row
+    # Codex pass 13 on PR 27: an unclosed job record alone (no CLAIM, not mixed) is a decision, never "no (only DEST)"
+    busy = dict(task, task="busy", open_job_records=["w.json"])
+    text = mod.render(doc_scan([], tasks=[task, busy]))
+    rows = text.split("### 3.1")[1].split("### 3.2")[0].splitlines()
+    assert next(r for r in rows if r.startswith("| busy ")).rstrip().endswith("| yes: 1 job record(s) unclosed |")
+    assert next(r for r in rows if r.startswith("| big ")).rstrip().endswith("| no (only DEST) |")
 
 
 def test_checkouts_with_one_basename_never_share_an_artifact_path():
