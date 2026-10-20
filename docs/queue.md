@@ -121,6 +121,19 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    `]` only when it closes the value); `_FLAG` misses `--key` and `--access-key` (end the rule with
    `key`). Operator items: the public templates publish Hermes's approvals, Claude's allowlist and Codex's trust list.
 
+## Paseo workspace names after a handoff (djbclark, 2026-10-20)
+
+djbclark, 2026-10-20: "we should change the new automatic handoff -> new/clear -> baton system so that Paseo
+workspace windows get an informative, short name (only the first few words show) so they are easy to identify
+in Workspaces. Currently they all get named 'Resume session from baton handoff'." Paseo titles an agent from
+its first prompt, and after `self-slash "/new"` (PR #19) that prompt is the bare `/baton` the `--then` waiter
+sends. Queued (one Sonnet `code` slice after PR #19 merges): (1) read Paseo's bundled CLI
+(`cli/dist/commands/agent/`) for a title or rename command and use it from `bin/self-slash` when one exists;
+(2) otherwise, or as well, have `--then` send `/baton <repo>: <first words of the Tier 1 active_work>` so the
+first words name the task (the `baton` skill ignores the trailing text as a label), and have `handoff` Step 8's
+autorename cover the Paseo host; (3) a test with the fake `paseo` asserting the sent prompt starts with the
+label. Never rename or send to a live agent in tests.
+
 ## Keep every machine current, and a changelog (djbclark, 2026-10-20; proposal Q26, T8)
 
 djbclark, 2026-10-20: "We need a clear way to keep all of djbclark-ade up-to-date on new
