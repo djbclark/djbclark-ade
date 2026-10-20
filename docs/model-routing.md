@@ -121,6 +121,7 @@ only, filling the per-window labels, the Fable sublimit and the pace and reset f
 tighten a pool's `remaining` but never loosen it, and a payload without `windows[]` (the
 documented minimal form) routes the same. `usable_now: false` or zero headroom reads 0% left.
 A `fable` family row is a sublimit of the shared Claude pool, not a pool of its own.
+Pools in the payload's `excluded[]` (operator-ruled-out, or an auth-failed account) read 0% left under the same fresh-payload condition as the absent-pool rule, even when the snapshot file has no row for them, so `route()` never treats them as unmeasured; an invalid excluded row is ignored, and the file fallback does not consult `excluded[]`.
 
 `aiuse --json` (JSON starts after two preamble lines) reports one
 `snapshot.accounts[]` entry per provider; `alerts[]`/`suggestion` rank

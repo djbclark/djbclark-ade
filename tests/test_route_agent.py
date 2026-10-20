@@ -1622,6 +1622,53 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
                                          str(self.rows_payload([row]))})
                 self.assertEqual(quota["codex"]["remaining"], 0.0)
 
+    # -- Codex P2: excluded[] ------------------------------------------------------------
+
+    def test_excluded_pool_without_a_snapshot_row_reads_zero_and_is_never_routed(self):
+        path = self.rows_payload([self.GOOD_ROW], excluded=[
+            {"provider": "zai", "pool_family": None, "reason": "operator"}])
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["zai"]["remaining"], 0.0)
+        self.assertTrue(quota["zai"]["excluded"])
+        for kind in r.KINDS:
+            choice = r.route(kind, quota={**IDLE, **quota})
+            self.assertFalse(choice and choice.service.name == "zai", kind)
+
+    def test_excluded_pool_with_a_snapshot_row_reads_zero(self):
+        path = self.rows_payload([{"provider": "codex", "usable_now": True,
+                                   "headroom_percent": 60.0}],
+                                 excluded=[{"provider": "codex"}])
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    def test_excluded_sublimit_family_caps_only_that_model(self):
+        path = self.rows_payload(
+            [{"provider": "claude", "pool_family": "default", "usable_now": True,
+              "headroom_percent": 30.0}],
+            excluded=[{"provider": "claude", "pool_family": "fable"}])
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["claude"]["remaining"], 30.0)
+        self.assertEqual(quota["claude"]["sublimits"]["fable"], 0.0)
+
+    def test_invalid_excluded_rows_are_ignored_not_a_fallback(self):
+        path = self.rows_payload([self.GOOD_ROW], excluded=[
+            "junk", {"provider": 3}, {"provider": ""}, {"provider": "zai", "pool_family": 7}])
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(r.QuotaSource.kind, "canned")
+        self.assertEqual(quota["omp"]["remaining"], 70.0)
+        self.assertNotIn("zai", quota)
+
+    def test_excluded_is_not_consulted_on_the_file_fallback(self):
+        path = self.rows_payload(["junk"], excluded=[{"provider": "zai"}])
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(r.QuotaSource.kind, "snapshot")
+        self.assertNotIn("zai", quota)
+
+    def test_excluded_is_not_applied_from_a_stale_payload(self):
+        path = self.rows_payload([], excluded=[{"provider": "zai"}], fresh=False)
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertNotIn("zai", quota)
+
     def test_windowless_headroom_is_rounded_like_the_windowed_form(self):
         row = {"provider": "codex", "usable_now": True, "headroom_percent": 5.345454545}
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})

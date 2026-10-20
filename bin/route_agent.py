@@ -905,6 +905,30 @@ def quota_source_info() -> dict[str, Any]:
             "fallback_reason": QuotaSource.fallback_reason or None}
 
 
+def _apply_excluded(providers: dict[str, Any], excluded: Any) -> None:
+    """Pools the operator ruled out (`excluded[]`) read 0% left, even with no snapshot row.
+
+    Same conditions as the absent-pool rule (the caller applies it only for a valid, fresh
+    payload), and the merge only tightens. An invalid excluded row is ignored rather than a
+    fallback trigger: `excluded` is advisory, and one bad entry must not discard a good
+    `available` list. An excluded sublimit family (`fable`) caps that model only."""
+    if not isinstance(excluded, list):
+        return
+    for row in excluded:
+        if not (isinstance(row, dict) and isinstance(row.get("provider"), str)
+                and row["provider"] and isinstance(row.get("pool_family"), (str, type(None)))):
+            continue
+        name, family = row["provider"], row.get("pool_family")
+        key = pool_service(name, family)
+        prior = providers.get(key) or {"windows": {}, "sublimits": {}, "remaining": None}
+        entry = dict(prior, excluded=True, reason=row.get("reason"))
+        if family in SUBLIMIT_FAMILIES and key == name:
+            entry["sublimits"] = _merge_caps(prior.get("sublimits"), {family: 0.0})
+        else:
+            entry["remaining"] = _tighter(prior.get("remaining"), 0.0)
+        providers[key] = entry
+
+
 def load_snapshot() -> tuple[dict[str, Any], float | None]:
     """Pool state per service: `aiuse --available --json`, else the snapshot file.
 
@@ -961,6 +985,8 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
                         providers[key] = dict(info, remaining=0.0,
                                               absent_from_available=True)
             providers.update(fresh)
+            if p_age is not None and p_age <= STALE_SOFT:
+                _apply_excluded(providers, payload.get("excluded"))
             age = p_age if p_age is not None else age
     else:
         QuotaSource.detail = str(os.environ.get("AIUSE_SNAPSHOT") or SNAPSHOT)
