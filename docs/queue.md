@@ -25,17 +25,15 @@ pool, verify the balance on the Anthropic console, and route one API-key workloa
 
 The per-run omp gate is lifted (`skills/model-routing/SKILL.md`, proposal SF-Q19): the credits
 are a normal tier, `api-only` work first, else `code`/`bulk` via `acp-run omp --model
-anthropic/claude-sonnet-5-5`. Open, in order: (1) **`omp login` for Anthropic** (djbclark, an
-interactive OAuth): omp's Anthropic credential in `~/.omp/agent/agent.db` has been disabled since
-2026-10-13 ("Refresh token expired"), so every `acp-run omp --model anthropic/...` run ends "No
-API key found for anthropic" (verified 2026-10-19) and `route_agent.py` skips omp for dispatch
-kinds until the login works (`omp_anthropic_ready`). Then confirm one slice's cost lands on the
-credits pool in `aiuse`, not on a Claude plan window, and that the omp login is the pool the
-operator means. (2) **aiuse** (`~/src/aiuse`, another repo, not edited here): drop the stale
-`requires_operator_approval: true` and the "AI: Do not use without asking operator" notice on the
-omp row, rename the pool, and let its suggestion engine propose omp ("burn before reset") when
-the credits sit far above an even spend over the month late in the grant period; the same rule
-lives in `route_agent.py` (`grant_days`, `grant_waste`) for `plan`/`route`. (3) The `api-only`
+anthropic/claude-sonnet-5-5`. Open, in order: (1) DONE 2026-10-19 (round 3): djbclark ran `omp login` for Anthropic; the
+credential row is clean and `acp-run omp --model anthropic/claude-sonnet-5-5 -p ...` answered.
+Still to confirm: that a slice's cost lands on the credits pool in `aiuse` (console 2026-10-19:
+$95.57 of $200 left, expires 2026-11-08; `aiuse` showed 100% unused, so its CodexBar reading is
+stale or another row: fix in `~/src/aiuse`). (2) DONE 2026-10-19 in `~/src/aiuse` (8a9dc43):
+`requires_operator_approval` dropped on the omp row, the row keeps the name `omp` (tools look it
+up), `--json` carries `credits_label: "Claude API credits"`; still open there: the "burn before
+reset" suggestion late in the grant period, which `route_agent.py` already has (`grant_days`,
+`grant_waste`). (3) The `api-only`
 callers (`bin/failover.py` Claude SDK route, a verdict classifier) take their key from the
 secret backend, not from omp: check that key draws these credits, then have them ask
 `route_agent.py route --kind api-only` for the balance before a batch.
