@@ -126,19 +126,28 @@ no API key, $0).
 
 ## Code review (what a reviewer checks here)
 
-Read by Codex (`@codex review`, auto on PR open since 2026-10-19), Cursor's
-Bugbot and Security Agent, and the `adversary` sub-agent. A pull request here
-is expected to meet these; flag any it misses.
+Read by Codex (`@codex review`, or its automatic review on PR open), Cursor's
+Security Agent and Approval Agent checks, and the `adversary` sub-agent. A
+pull request here is expected to meet these; flag any it misses.
 
-1. **An adversary verdict is quoted in the PR body** (home rule 28), or "no
-   findings"; the head reviewed is the head merged (`--match-head-commit`).
+1. **The PR body quotes the adversary's verdict line** (`APPROVE`, `APPROVE,
+   no findings` or `BLOCK ...`) together with the head SHA it reviewed. Flag
+   the PR if the quote is missing, says BLOCK, or names a SHA other than the
+   PR's current head. Whoever merges uses `gh pr merge --squash
+   --match-head-commit <reviewed sha>`, so the head reviewed is the head
+   merged.
 2. **No exit status or result through a pipe**: `cmd > out.log 2>&1; echo
-   "rc=$?" > out.rc`, never `cmd | x; $?`. Tests run through
-   `~/ops/site-private/bin/bg`.
-3. **Secrets only via `sudo-secretspec run`**: a key never appears in an
-   argument, a file, a log or a test fixture; presence is proved by length.
-4. **No `shell=True`, no string-built commands**: argv lists, and anything
-   interpolated into a launchd runner script is quoted by `shlex.quote`.
+   "rc=$?" > out.rc`, never `cmd | x; $?`. Local test runs go through the
+   operator's `bg` wrapper; CI runs `pytest` directly.
+3. **Secrets only via `sudo-secretspec run`**: a key never appears in argv, a
+   log, a tracked file or a test fixture. The one place a key is written is a
+   third-party tool's own credential store (`bin/zcode-key-auth`); presence
+   is proved by length or hash, never by printing the value.
+4. **`subprocess` gets argv lists, never `shell=True`** (sole exception:
+   acp-run's `--verify`, an operator-supplied command). Where a shell string
+   is unavoidable (launchd runner scripts, text typed into a pane, printed
+   resume and rearm hints) every interpolated value goes through
+   `shlex.quote` or `shlex.join`.
 5. **macOS and Linux both**: BSD-only calls (`sysctl kern.boottime`, bare
    `sed`) have a Linux path or use the GNU `g*` tool; CI runs `pytest` on
    both.
