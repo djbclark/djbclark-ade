@@ -1955,3 +1955,73 @@ def test_a_file_whose_read_fails_midway_is_an_error_and_is_not_in_the_manifest(r
     assert entry["status"] == "partial"
     assert [f["path"].rsplit("/", 1)[-1] for f in entry["files"]] == ["ok.txt"]
     assert [e["source"] for e in entry["errors"]] == [str(root / "bad.txt")]
+
+
+# --- Codex pass 15 on PR 24 (2026-10-20): the hermes dry-run applies the root-link gate; a failed export leaves no file ---
+
+@pytest.mark.parametrize("kind", ["outside", "dangling"])
+def test_hermes_dry_run_reports_the_same_state_db_link_refusal_as_the_real_run(real, monkeypatch, capsys, kind):
+    mod, home, tmp = real
+    (home / ".hermes").mkdir()
+    if kind == "outside":
+        outside = make_hermes_db(tmp / "outside", (("SENTINEL-HERMES-DRY", 2),))
+        os.symlink(outside, home / ".hermes/state.db")
+    else:
+        os.symlink(tmp / "gone", home / ".hermes/state.db")
+    fake = tmp / "hermes"
+    write_fake_hermes(fake, "none")
+    log = tmp / "hermes.log"
+    monkeypatch.setenv("ADE_BACKUP_HERMES", str(fake))
+    monkeypatch.setenv("FAKE_HERMES_LOG", str(log))
+    assert mod.main(["--only", "hermes-export", "--dry-run", "--json", "--dest", str(home / "dry")]) == 1
+    dry = json.loads(capsys.readouterr().out)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "hermes-export", "--dest", str(dest)]) == 1
+    real_errors = manifest_of(dest)["stores"][0]["errors"]
+    assert len(real_errors) == 1 and dry["errors"] == real_errors  # same source, wording and count
+    assert ("symlink target outside HOME" if kind == "outside" else "dangling symlink") in real_errors[0]["error"]
+    assert not log.exists()  # hermes ran in neither
+    assert not (home / "dry").exists()
+    assert mod.main(["--only", "hermes-export", "--dry-run", "--dest", str(home / "dry")]) == 1
+    assert "would refuse" in capsys.readouterr().out
+
+
+def test_hermes_dry_run_still_says_would_run_for_a_state_db_link_the_run_follows(real, monkeypatch, capsys):
+    mod, home, tmp = real
+    inside = make_hermes_db(home / "data", (("linked-session", 2),))
+    (home / ".hermes").mkdir()
+    os.symlink(inside, home / ".hermes/state.db")
+    assert mod.main(["--only", "hermes-export", "--dry-run", "--json", "--dest", str(home / "dry")]) == 0
+    assert json.loads(capsys.readouterr().out)["errors"] == []
+
+
+@pytest.mark.parametrize("failure", ["exit", "timeout"])
+def test_a_failed_per_session_export_leaves_no_partial_file_and_no_manifest_entry(real, monkeypatch, failure):
+    mod, home, tmp = real
+    make_hermes_db(home, (("good", 2), ("bad", 2)))
+    fake = tmp / "hermes"
+    fake.write_text(f"""#!/bin/sh
+out="$3"
+case "$4" in
+  --session-id=bad)
+    printf '{{"id": "bad", "mess' > "$out"
+    if [ "{failure}" = timeout ]; then exec sleep 5; fi
+    echo "boom"; exit 1;;
+  --session-id=*)
+    echo '{{"id": "good"}}' > "$out"; printf 'Exported 1 session to %s\\n' "$out"; exit 0;;
+esac
+echo "Error: Session 'x' has more than 20,000 exportable messages; capped"; exit 0
+""")
+    fake.chmod(0o755)
+    monkeypatch.setenv("ADE_BACKUP_HERMES", str(fake))
+    monkeypatch.setattr(mod, "HERMES_TIMEOUT", 1)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "hermes-export", "--dest", str(dest)]) == 1
+    entry = manifest_of(dest)["stores"][0]
+    info = entry["hermes_export"]
+    assert [f["id"] for f in info["failed"]] == ["bad"] and info["sessions_exported"] == 1
+    sessions = dest / "hermes-export/sessions"
+    assert sorted(p.name for p in sessions.iterdir()) == ["good.jsonl"]  # no bad.jsonl, no temporary
+    assert b"mess" not in all_bytes(dest / "hermes-export")
+    assert [f["path"].rsplit("/", 1)[-1] for f in entry["files"]] == ["good.jsonl"]
+    assert [e["source"] for e in entry["errors"]] == ["hermes session bad"]

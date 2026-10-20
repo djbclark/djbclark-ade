@@ -1190,6 +1190,23 @@ def exported_count(text):
     return int(m.group(1)) if m else None
 
 
+def hermes_db_absent(db):
+    """True when the configured state.db is not there at all (a dangling link is not absent: the gate reports it)."""
+    return not os.path.lexists(db) and not link_dangles(db)
+
+
+def hermes_state_gate(home, excluder):
+    """The state.db path the export may read: the configured one, or where a link leads when `root_link_target`
+    allows it (the gate copy_sqlite_store applies to a linked store file). Raises RootSymlinkError otherwise.
+    The real run and the dry-run plan both ask this one question (Codex on PR 24, pass 15)."""
+    real_db = home / ".hermes/state.db"
+    if is_linked(real_db, excluder):
+        real_db, why = root_link_target(real_db, excluder)
+        if why:
+            raise RootSymlinkError(f"{why}: {link_note(home / '.hermes/state.db')}")
+    return real_db
+
+
 def make_hermes_scratch(home, scratch, state_backup, limit, excluder):
     """A HERMES_HOME that holds only a copy of the hermes-state backup (taken here, scrubbed and guarded like
     any other copy, when the backup step did not produce one) and a config.yaml with the export limit."""
@@ -1197,12 +1214,7 @@ def make_hermes_scratch(home, scratch, state_backup, limit, excluder):
     if state_backup and state_backup.is_file():
         shutil.copyfile(state_backup, scratch / "state.db")
     else:
-        real_db = home / ".hermes/state.db"
-        if is_linked(real_db, excluder):  # the gate copy_sqlite_store applies to a linked store file
-            real_db, why = root_link_target(real_db, excluder)
-            if why:
-                raise RootSymlinkError(f"{why}: {link_note(home / '.hermes/state.db')}")
-        anchored, base = home_anchor(real_db, excluder)
+        anchored, base = home_anchor(hermes_state_gate(home, excluder), excluder)
         backup_sqlite(anchored, scratch / "state.db", "hermes-state", base)
     (scratch / "config.yaml").write_text(f"sessions:\n  max_export_messages: {limit}\n")
 
@@ -1217,7 +1229,7 @@ def export_hermes(home, work, final, state_backup, excluder):
     hermes = os.environ.get("ADE_BACKUP_HERMES") or shutil.which("hermes")
     out.mkdir(parents=True, exist_ok=True)
     scratch = work / ".hermes-scratch"
-    if not os.path.lexists(home / ".hermes/state.db") and not link_dangles(home / ".hermes/state.db"):
+    if hermes_db_absent(home / ".hermes/state.db"):
         run.absent(home / ".hermes/state.db")
     elif not hermes:
         run.error("hermes", FileNotFoundError("no hermes on PATH (set ADE_BACKUP_HERMES)"))
@@ -1269,13 +1281,23 @@ def per_session_export(hermes, scratch, out, info, run, env):
 
     def one(sid):
         path = target / f"{sid}.jsonl"
+        # Exported into a temporary name beside `path` and renamed once verified: a run that writes part of the
+        # JSONL and then fails or times out must leave neither file, so the manifest cannot list a partial session
+        # that is also recorded as failed (Codex on PR 24, pass 15). mkstemp picks the name; hermes creates the file.
+        tfd, tmp = tempfile.mkstemp(dir=target, prefix=".bk-", suffix=".jsonl")
+        os.close(tfd)
+        os.unlink(tmp)
         try:
-            rc, text = hermes_run(hermes, [str(path), f"--session-id={sid}"], str(out), env)
-        except (OSError, subprocess.SubprocessError) as exc:
-            return sid, None, f"{type(exc).__name__}: {exc}"
-        if rc == 0 and path.is_file() and exported_count(text) is not None:
-            return sid, True, None
-        return sid, False, text[:300]
+            try:
+                rc, text = hermes_run(hermes, [tmp, f"--session-id={sid}"], str(out), env)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return sid, None, f"{type(exc).__name__}: {exc}"
+            if rc == 0 and os.path.isfile(tmp) and exported_count(text) is not None:
+                os.replace(tmp, path)
+                return sid, True, None
+            return sid, False, text[:300]
+        finally:
+            Path(tmp).unlink(missing_ok=True)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=HERMES_WORKERS) as pool:
         for sid, ok, why in pool.map(one, todo):
@@ -1507,16 +1529,25 @@ def run_main(argv):
         for p in plans:
             say(summary_line(p) + " (dry run)")
         hermes_db = home / ".hermes/state.db"
-        hermes_missing = "hermes-export" in wanted and not os.path.lexists(hermes_db)
+        hermes_missing = "hermes-export" in wanted and hermes_db_absent(hermes_db)
+        hermes_errors = []
+        if "hermes-export" in wanted and not hermes_missing:
+            try:  # the gate the real export applies before it opens state.db: a refusal is an error, not "would run"
+                hermes_state_gate(home, excluder)
+            except RootSymlinkError as exc:
+                run = StoreRun({"name": "hermes-export", "kind": "hermes-export"}, Path("/nonexistent"))
+                run.error("hermes sessions export", exc)
+                hermes_errors = run.errors
         if "hermes-export" in wanted:
             say(f"hermes-export: would skip, {hermes_db} is missing (dry run)" if hermes_missing else
+                f"hermes-export: would refuse, {hermes_errors[0]['error']} (dry run)" if hermes_errors else
                 f"hermes-export: would run `hermes sessions export` into {dest / 'hermes-export'} (dry run)")
         report_empty(plans)
         report_sidecars(plans)
         n_missing = report_missing(plans + ([{"store": "hermes-export", "missing": [str(hermes_db)]}]
                                             if hermes_missing else []))
         total = sum(p["bytes"] for p in plans)
-        errors = [e for p in plans for e in p["errors"]]
+        errors = [e for p in plans for e in p["errors"]] + hermes_errors
         say(f"total: {total} bytes would be copied to {dest} (dry run, nothing written)")
         if args.json:
             print(json.dumps({"dry_run": True, "dest": str(dest), "total_bytes": total, "stores": plans,
