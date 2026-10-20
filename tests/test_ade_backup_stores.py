@@ -2470,3 +2470,95 @@ def test_json_check_schemas_on_hermes_export_covers_the_state_db_source(real, ca
     code, doc, _ = run_json(mod, capsys, "--only", "hermes-export", "--strict-stores")
     assert code == 1 and [s["name"] for s in doc["stores"]] == ["hermes-state"]
     assert doc["stores"][0]["state"] == "missing"
+
+
+# --- Codex pass 20 and adversary round 21 on PR 24 (2026-10-20) ---
+
+def test_check_schemas_validates_a_required_sidecar_like_the_dry_run_and_the_copy(real, capsys):
+    mod, home, _ = real
+    make_cursor_session(home, with_meta=False)
+    only = ["--only", "cursor-chats"]
+    code, doc, err = run_json(mod, capsys, *only)
+    (store,) = doc["stores"]
+    assert code == 0 and doc["reasons"] == [] and doc["totals"]["sidecar_missing"] == 1
+    assert store["state"] == "missing" and store["sidecar_missing"] == 1 and store["dbs_checked"] == 1
+    assert [f["state"] for f in store["findings"]] == ["sidecar_missing"]
+    assert store["findings"][0]["path"] == str(home / ".cursor/chats/hashA/uuid1/meta.json")
+    assert "hashA/uuid1/meta.json: required sidecar is absent" in err and "1 sidecar(s) missing" in err
+    assert mod.main(["--check-schemas", *only]) == 0  # reported, not a failure: as the real run
+    assert "1 sidecar(s) missing" in capsys.readouterr().out
+    code, doc, _ = run_json(mod, capsys, *only, "--strict-stores")
+    assert code == 1 and doc["reasons"] == ["missing required sidecars (--strict-stores)"]
+    assert mod.main(["--check-schemas", "--strict-stores", *only]) == 1
+    capsys.readouterr()
+    # the dry run and the real run give the same verdicts on the same tree
+    assert mod.main([*only, "--dry-run", "--dest", str(home / "o1")]) == 0
+    assert mod.main([*only, "--dry-run", "--strict-stores", "--dest", str(home / "o2")]) == 1
+    assert mod.main([*only, "--dest", str(home / "o3")]) == 0
+    assert mod.main([*only, "--strict-stores", "--dest", str(home / "o4")]) == 1
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_check_schemas_fails_on_a_symlinked_required_sidecar_in_both_modes_like_the_copy(real, capsys, strict):
+    mod, home, _ = real
+    sdir = make_cursor_session(home, with_meta=False)
+    (home / "target.json").write_text("SENTINEL-META-TARGET")
+    os.symlink(home / "target.json", sdir / "meta.json")
+    flags = ["--only", "cursor-chats", *(["--strict-stores"] if strict else [])]
+    code, doc, err = run_json(mod, capsys, *flags)
+    (store,) = doc["stores"]
+    assert code == 1 and doc["reasons"] == ["required sidecar errors"]
+    assert store["state"] == "problem" and store["sidecar_problems"] == 1 and store["sidecar_missing"] == 0
+    assert [f["state"] for f in store["findings"]] == ["sidecar_error"]
+    assert "required sidecar meta.json is a symlink" in store["findings"][0]["message"]
+    assert "SENTINEL-META-TARGET" not in err
+    assert mod.main([*flags, "--dry-run", "--dest", str(home / "o1")]) == code
+    assert mod.main([*flags, "--dest", str(home / "o2")]) == code
+    capsys.readouterr()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_dry_run_records_an_entry_it_cannot_lstat_like_the_real_run(real, capsys):
+    mod, home, _ = real
+    sdir = make_cursor_session(home)
+    only = ["--only", "cursor-chats"]
+    sdir.chmod(0o444)  # listable, not searchable: store.db is listed and cannot be examined
+    try:
+        assert mod.main([*only, "--dry-run", "--json", "--dest", str(home / "o1")]) == 1
+        plan = json.loads(capsys.readouterr().out)["stores"][0]
+        assert plan["status"] == "partial" and plan["file_count"] == 0
+        assert [e["source"] for e in plan["errors"]] == [str(sdir / "store.db")]
+        assert "Permission" in plan["errors"][0]["error"]
+        dest = home / "out" / "bk"
+        assert mod.main([*only, "--dest", str(dest)]) == 1
+        entry = manifest_of(dest)["stores"][0]
+        assert entry["status"] == "partial" and [e["source"] for e in entry["errors"]] == [str(sdir / "store.db")]
+    finally:
+        sdir.chmod(0o755)
+    capsys.readouterr()
+
+
+def open_fd_count():
+    return len(os.listdir("/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"))
+
+
+def test_a_directory_config_yaml_leaves_no_descriptor_open(real):
+    mod, home, _ = real
+    (home / ".hermes/config.yaml").mkdir(parents=True)
+    excluder = mod.Excluder(home)
+    before = open_fd_count()
+    for _ in range(50):
+        with pytest.raises(OSError, match="not a regular file"):
+            mod.read_hermes_config(home, excluder)
+    assert open_fd_count() == before
+
+
+def test_copy_regular_leaves_no_descriptor_open_on_a_directory_source(real, tmp_path):
+    mod, home, _ = real
+    (home / "adir").mkdir()
+    before = open_fd_count()
+    for _ in range(50):
+        with pytest.raises(OSError, match="not a regular file"):
+            mod.copy_regular(home / "adir", tmp_path / "dst")
+    assert open_fd_count() == before

@@ -67,7 +67,7 @@ file opened relative to its parent's descriptor with O_NOFOLLOW (a SQLite source
 from its store root), never through a path string that could be re-pointed. An optional sidecar that is
 present but a symlink, an excluded path or not a regular file is skipped and listed under `skipped`. The dry run's bytes
 for a SQLite file are the main file plus its `-wal` file, an upper bound on the snapshot the online backup
-writes. `--check-schemas` counts an absent tree root or database as `missing`. `--json --check-schemas` prints one JSON
+writes. `--check-schemas` counts an absent tree root or database as `missing`, and applies the copy's sidecar rules to each checked tree database: an absent required sidecar is `sidecar_missing` (a failure only under `--strict-stores`), a linked or non-regular one a `sidecar_problems` error in both modes. `--json --check-schemas` prints one JSON
 document on stdout (`ok`, `exit_code`, `reasons`, `totals` and, per store, its `state` (`ok`, `missing`, `problem`),
 counts and `findings` of state, path and the line text) and the human lines on stderr; the exit status is unchanged.
 
@@ -616,10 +616,15 @@ def copy_regular(src, dst, dir_fd=None, shown=None):
         fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)  # a FIFO must not block the run
     except OSError as exc:
         raise OSError(f"source became a symlink or is unreadable: {shown}: {exc.strerror}") from exc
-    with os.fdopen(fd, "rb") as fin:
-        held = os.fstat(fin.fileno())
+    try:  # the descriptor is ours until the file object owns it: every refusal below closes it
+        held = os.fstat(fd)
         if not stat.S_ISREG(held.st_mode):
             raise OSError(f"source is not a regular file: {shown}")
+        fin = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    with fin:
         os.set_blocking(fin.fileno(), True)  # O_NONBLOCK was for the open only; a regular file reads normally
         if os.path.lexists(dst):
             raise FileExistsError(f"destination exists: {dst}")
@@ -789,10 +794,13 @@ def tree_dbs(store, root=None, errors=None):
 
 
 def tree_glob(directory, comps, errors=None):
-    """Paths matching `comps` below `directory`; a symlink above the last component is returned itself (judged by
-    `lstat`, never followed) and not descended. A directory that cannot be listed (unreadable, or pruned since
-    its parent was listed) matches nothing and is appended to `errors` as (directory, OSError), like the copy's
-    error for it."""
+    """Paths matching `comps` below `directory`, judged the way `glob_fd` judges them (the dry run and the copy
+    must agree): a symlink above the last component is returned itself (`lstat`, never followed) and not
+    descended; at the last component a symlink is classified with one `stat` and matches when it leads to a
+    regular file, and is no match when it dangles or loops (`DANGLING_ERRNOS`). A directory that cannot be listed
+    (unreadable, or pruned since its parent was listed), an entry whose `lstat` fails and any other `stat`
+    failure match nothing and are appended to `errors` as (path, OSError), like the copy's error for them: never
+    a silent omission."""
     comp, rest = comps[0], comps[1:]
     try:
         names = sorted(os.listdir(directory))
@@ -805,12 +813,26 @@ def tree_glob(directory, comps, errors=None):
         if not fnmatch.fnmatchcase(name, comp):
             continue
         path = directory / name
+        try:
+            mode = os.lstat(path).st_mode
+        except OSError as exc:  # gone or unreadable since the listing
+            if errors is not None:
+                errors.append((path, exc))
+            continue
+        is_link = stat.S_ISLNK(mode)
+        if is_link and not rest:
+            try:
+                mode = os.stat(path).st_mode
+            except OSError as exc:
+                if exc.errno not in DANGLING_ERRNOS and errors is not None:
+                    errors.append((path, exc))
+                continue
         if not rest:
-            if path.is_file():
+            if stat.S_ISREG(mode):
                 found.append(path)
-        elif path.is_symlink():
+        elif is_link:
             found.append(path)
-        elif path.is_dir():
+        elif stat.S_ISDIR(mode):
             found.extend(tree_glob(path, rest, errors))
     return found
 
@@ -1250,9 +1272,14 @@ def read_hermes_config(home, excluder):
             raise OSError(f"is a symlink or unreadable: {exc.strerror}") from exc
     finally:
         os.close(dfd)
-    with os.fdopen(fd, "rb") as fin:
-        if not stat.S_ISREG(os.fstat(fin.fileno()).st_mode):
+    try:  # the descriptor is ours until the file object owns it: every refusal below closes it
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("not a regular file")
+        fin = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    with fin:
         os.set_blocking(fin.fileno(), True)  # O_NONBLOCK was for the open only
         data = fin.read(HERMES_CONFIG_CAP + 1)
     if len(data) > HERMES_CONFIG_CAP:
@@ -1527,7 +1554,7 @@ def root_type_problem(store, label, path):
 class SchemaReport:
     """What --check-schemas found, per store: counters and findings (state, path, the printed line), names only.
     With `json_out` the human lines go to stderr, so stdout carries only the one JSON document `finish` prints."""
-    COUNTS = ("problems", "link_problems", "missing", "unopenable", "excluded")
+    COUNTS = ("problems", "link_problems", "missing", "unopenable", "excluded", "sidecar_missing", "sidecar_problems")
 
     def __init__(self, stores, json_out=False):
         self.json_out = json_out
@@ -1550,20 +1577,25 @@ class SchemaReport:
 
     def finish(self, strict):
         """Print the summary line (and, with --json, the JSON document); return the exit status."""
-        problems, link_problems, missing, unopenable, excluded = (self.total(k) for k in self.COUNTS)
+        (problems, link_problems, missing, unopenable, excluded, side_missing, side_problems) = (
+            self.total(k) for k in self.COUNTS)
+        sidecars = "".join(f", {n} {what}" for n, what in ((side_missing, "sidecar(s) missing"),
+                                                          (side_problems, "sidecar problem(s)")) if n)
         self.say(f"schema check: {problems} unexplained credential-looking name(s), {link_problems} symlink problem(s), "
-                 f"{missing} missing, {unopenable} unopenable, {excluded} excluded")
+                 f"{missing} missing, {unopenable} unopenable, {excluded} excluded{sidecars}")
         reasons = [why for n, why in ((problems, "unexplained credential-looking names"),
                                       (link_problems, "symlink problems"), (unopenable, "unopenable databases or paths"),
-                                      (strict and missing, "missing stores or paths (--strict-stores)")) if n]
+                                      (side_problems, "required sidecar errors"),
+                                      (strict and missing, "missing stores or paths (--strict-stores)"),
+                                      (strict and side_missing, "missing required sidecars (--strict-stores)")) if n]
         code = 1 if reasons else 0
         if self.json_out:
             for s in self.stores.values():
-                s["state"] = ("problem" if s["problems"] or s["link_problems"] or s["unopenable"]
-                              else "missing" if s["missing"] else "ok")
+                s["state"] = ("problem" if s["problems"] or s["link_problems"] or s["unopenable"] or s["sidecar_problems"]
+                              else "missing" if s["missing"] or s["sidecar_missing"] else "ok")
             print(json.dumps({"check_schemas": True, "ok": code == 0, "exit_code": code, "strict_stores": strict,
-                              "reasons": reasons, "totals": dict(zip(self.COUNTS, (problems, link_problems, missing,
-                                                                                  unopenable, excluded))),
+                              "reasons": reasons, "totals": dict(zip(self.COUNTS, (
+                                  problems, link_problems, missing, unopenable, excluded, side_missing, side_problems))),
                               "stores": list(self.stores.values())}, indent=1))
         return code
 
@@ -1600,6 +1632,26 @@ def check_file_roots(store, excluder, rep):
     rep.say(f"{name}: {rep.stores[name]['paths_present']} of {len(store['roots'])} configured path(s) present")
 
 
+def check_tree_sidecars(store, db, root, excluder, rep):
+    """The required sidecars of one checked session database, judged by `sidecar_gap` like the copy and the dry
+    run (`sidecar_problem`): absent on disk is recorded as `sidecar_missing` (a failure only under
+    --strict-stores, see `SchemaReport.finish`); a link, an excluded or non-regular file or an unexaminable name
+    is an error in both modes. Optional sidecars never fail the copy and are not looked at. Names only."""
+    sname = store["name"]
+    for pat in store.get("required", []):
+        side = db.parent / pat.format(stem=db.stem, name=db.name)
+        why = sidecar_gap(side, excluder)
+        if not why:
+            continue
+        shown = side.relative_to(root)
+        if why == SIDECAR_ABSENT:
+            rep.note(sname, "sidecar_missing", side, f"{sname}: {shown}: required sidecar is absent (copied without it)")
+            rep.count(sname, "sidecar_missing")
+        else:
+            rep.note(sname, "sidecar_error", side, f"{sname}: {shown}: ERROR {required_sidecar_error(side, why)}")
+            rep.count(sname, "sidecar_problems")
+
+
 def check_schemas(stores, excluder, strict=False, json_out=False):
     """--check-schemas: the schema guard on the live databases, read-only; prints names only. A database
     inside a per-session tree that is a symlink or sits under a symlinked directory is never opened; a
@@ -1607,7 +1659,8 @@ def check_schemas(stores, excluder, strict=False, json_out=False):
     it (`symlink -> target`, information) and refused otherwise (`symlink refused`). Both refusals count as
     symlink problems, apart from the credential-looking names. A database with a credential name or path
     (the copy's exclusions) is never opened (`skipped`, counted as `excluded`). A file store is not opened
-    either: each configured root is checked to exist (absent counts as `missing`, a strict failure). With
+    either: each configured root is checked to exist (absent counts as `missing`, a strict failure). Each checked
+    tree database also has its required sidecars judged by `check_tree_sidecars`. With
     `json_out` stdout is one JSON document (`SchemaReport.finish`) and the human lines go to stderr; the exit
     status is the same either way."""
     rep = SchemaReport(stores, json_out)
@@ -1692,13 +1745,17 @@ def check_schemas(stores, excluder, strict=False, json_out=False):
                 rep.count(sname, "unopenable")
                 continue
             rep.count(sname, "dbs_checked")
+            clean = True
             for table, col in hits:
                 name = table if col is None else f"{table}.{col}"
                 why = explained(sname, table, col)
                 if not why:
                     rep.count(sname, "problems")
+                    clean = False
                 rep.note(sname, "explained" if why else "unexplained", db,
                          f"{sname}: {db.name}: {name}: {why or 'UNEXPLAINED'}")
+            if store["kind"] == "sqlite-tree" and clean:  # the copy takes sidecars only after the db copy succeeded
+                check_tree_sidecars(store, db, search, excluder, rep)
     return rep.finish(strict)
 
 
