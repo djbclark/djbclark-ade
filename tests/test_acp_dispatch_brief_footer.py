@@ -106,5 +106,98 @@ class TestBriefFooter(Base):
         self.assertNotIn("## Advisor role", (self.out / "third-brief.md").read_text())
 
 
+class TestFooterMatchesTheTemplate(Base):
+    """The cut stands only when every footer item is a line of docs/dispatch-footer.md (adversary PR 18
+    follow-up A, issue 21): a constraint a lead added to or edited in a pasted footer is not generated."""
+
+    dispatch_file = TestBriefFooter.dispatch_file
+
+    def footed_copy(self, name: str = "copy.md"):
+        """A footed brief that is not a record's own file, so the last-footer-heading path (ii) decides."""
+        src = self.tmp / "src.md"
+        _ = src.write_text("Do the thing.\n")
+        self.assertEqual(self.dispatch_file(src, "first").returncode, 0)
+        copy = self.tmp / name
+        _ = copy.write_text((self.out / "first-brief.md").read_text())
+        return copy
+
+    def second(self, copy, name: str = "second"):
+        r = self.dispatch_file(copy, name)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r, (self.out / f"{name}-brief.md").read_text()
+
+    def test_a_stock_footer_is_still_stripped(self):
+        r, sent = self.second(self.footed_copy())
+        self.assertEqual(sent.count("## Delivery contract (shared footer"), 1, sent)
+        self.assertIn("second-report.md", sent)
+        self.assertNotIn("first-report.md", sent)
+        self.assertIn("stripped", r.stderr)
+
+    def test_an_item_appended_to_the_footer_survives(self):
+        copy = self.footed_copy()
+        text = copy.read_text()
+        at = text.index("\n14. ")
+        end = text.index("\n", at + 1)
+        _ = copy.write_text(text[:end + 1] + "15. Read-only: never push, never edit /prod.\n" + text[end + 1:])
+        r, sent = self.second(copy)
+        self.assertIn("15. Read-only: never push, never edit /prod.", sent)
+        self.assertIn("nothing was stripped", r.stderr)
+        self.assertNotIn("stripped 0", r.stderr)
+
+    def test_an_edited_footer_item_survives(self):
+        copy = self.footed_copy()
+        text = copy.read_text()
+        self.assertIn("Never change anything outside the folders", text)
+        _ = copy.write_text(text.replace("Never change anything outside the folders", "Do NOT push or merge. Never change anything outside the folders"))
+        r, sent = self.second(copy)
+        self.assertIn("Do NOT push or merge.", sent)
+        self.assertIn("nothing was stripped", r.stderr)
+
+    def test_a_user_written_list_under_a_footer_heading_survives(self):
+        brief = self.tmp / "own.md"
+        text = ("Task.\n\n## Delivery contract (shared footer; v2)\n\n1. Push to prod when done.\n"
+                "2. Delete old branches.\n")
+        _ = brief.write_text(text)
+        r, sent = self.second(brief)
+        self.assertTrue(sent.startswith(text), sent)
+        self.assertIn("nothing was stripped", r.stderr)
+
+    def test_a_footer_with_some_template_items_dropped_is_still_generated(self):
+        copy = self.footed_copy()
+        lines = [ln for ln in copy.read_text().splitlines(keepends=True) if not ln.startswith(("9. ", "10. "))]
+        _ = copy.write_text("".join(lines))
+        r, sent = self.second(copy)
+        self.assertEqual(sent.count("## Delivery contract (shared footer"), 1, sent)
+        self.assertIn("stripped", r.stderr)
+
+    def test_a_near_miss_footer_is_matched_in_linear_time(self):
+        import time
+        brief = self.tmp / "big.md"
+        item = "1. " + "x" * 200 + "\n"
+        _ = brief.write_text("Task.\n\n## Delivery contract (shared footer)\n\n" + item * 20000)
+        t0 = time.monotonic()
+        r, sent = self.second(brief)
+        self.assertLess(time.monotonic() - t0, 30)
+        self.assertIn("nothing was stripped", r.stderr)
+
+
+class TestFooterOnlyFile(Base):
+    dispatch_file = TestBriefFooter.dispatch_file
+
+    def test_a_file_that_is_only_a_footer_has_no_task_left(self):
+        src = self.tmp / "src.md"
+        _ = src.write_text("Do the thing.\n")
+        self.assertEqual(self.dispatch_file(src, "first").returncode, 0)
+        text = (self.out / "first-brief.md").read_text()
+        only = self.tmp / "only.md"
+        _ = only.write_text(text[text.index("## Delivery contract"):])
+        r = self.dispatch_file(only, "second")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("only an earlier dispatch's footer", r.stderr)
+        self.assertIn("no task is left", r.stderr)
+        self.assertFalse((self.out / "second-brief.md").exists())
+        self.assertFalse((self.out / "jobs" / "second.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -173,16 +173,22 @@ or, while the login sweep's restart-resume is running, `resume-scheduled`; or `n
 when `resume` itself would refuse: no log or command in the record, no session id, an agent that can
 neither load nor resume; an agy session on a non-Gemini model is resumed in a new session with a
 checkpoint, as `resume` does) and never `--escalate`. Only a recorded `killed:` or `lost` class gets it: a
-refused, auth or quota stop that a signal also ended keeps its own hint. Exit codes are unchanged.
+refused, auth or quota stop that a signal also ended keeps its own hint, and an `auth` class gets the login
+hint (`codex login`, ...) instead of `--escalate` (2026-10-20). Exit codes are unchanged.
 A slice whose agent binary was missing (`acp-run: ... not installed` on its own line, acp-run exit 127) is
 classified `NO-REPORT: not-installed` (2026-10-20): infrastructure like a transport error, so `check`
 says to re-dispatch the same slice and never offers `--escalate`. acp-run waits `ACP_RUN_BIN_WAIT`
-seconds (default 90, 0..600, junk is the default) for the binary first; preflight gives its probe that wait
-on top of its own timeout, so a late binary is never a recorded outage. A brief file that an earlier
-dispatch already footed (`-f NAME-brief.md` under a new `--name`) comes back to one contract only when
-the cut is provably generated (`read_brief`): the record's own stored prompt, or the last footer heading
-with nothing after the footer and notes but the time budget; the advisor section goes with it. A footer
-pasted mid-document, or text after the footer, is left whole; every cut or refusal to cut is on stderr.
+seconds (default 90, 0..600, junk is the default; then `bin_settle` up to 10 polls of `ACP_RUN_BIN_POLL`,
+default 2, 0.05..30) for the binary first; preflight gives its probe that wait and settle on top of its own
+timeout, so a late binary is never a recorded outage, and the slice's waiter deadline (`wait_timeout`,
+unless `--wait-timeout` is given) grows by the same. A probe that finds the binary not installed is
+remembered for 120 s (`NOT_INSTALLED_TTL`): a wave of dispatches pays the wait once. A brief file that an
+earlier dispatch already footed (`-f NAME-brief.md` under a new `--name`) comes back to one contract only
+when the cut is provably generated (`read_brief`): the record's own stored prompt, or the last footer heading
+with nothing after the footer and notes but the time budget, where every footer item is a line of
+`docs/dispatch-footer.md` (an item a lead edited or added is not generated, so it stays); the advisor
+section goes with it. A footer pasted mid-document, or text after the footer, is left whole; every cut or
+refusal to cut is on stderr. A file that is nothing but a footer is refused: no task is left.
 
 Quota-stop refinements (2026-10-18): (1) a reset further out than `[dispatch].
 auto_resume_max_wait_hours` (default 6) is not waited for — agy's weekly cap resets ~148 h out
@@ -586,6 +592,11 @@ LOG_ACTIVE_SEC = 5 * 60
 PREFLIGHT_TTL = 10 * 60
 PREFLIGHT_TIMEOUT = 90
 BIN_WAIT_DEFAULT, BIN_WAIT_MAX = 90.0, 600.0     # acp-run's own constants (tools/acp-run/acp-run)
+BIN_POLL_DEFAULT, BIN_POLL_MIN, BIN_POLL_MAX = 2.0, 0.05, 30.0
+BIN_SETTLE_POLLS = 10                            # bin_settle's cap on extra polls once the binary appears
+# How long a probe's "not installed" is remembered (DECIDED 2026-10-20, adversary PR 18 follow-up D): a
+# wave of dispatches to an agent that is not installed pays acp-run's ACP_RUN_BIN_WAIT once, not once each.
+NOT_INSTALLED_TTL = 120
 PREFLIGHT_ROOT = Path(os.environ.get(
     "ACP_DISPATCH_PREFLIGHT", str(Path.home() / ".local/state/acp-dispatch/preflight")))
 MODEL_CACHE = Path(os.environ.get("ACP_DISPATCH_MODEL_CACHE", str(Path.home() / ".cache/acp-dispatch")))
@@ -1038,17 +1049,35 @@ def _template_re(template: str, **fields: str) -> str:
     return "".join(re.escape(p) if i % 2 == 0 else fields.get(p, r"[^\n]*?") for i, p in enumerate(parts))
 
 
+def footer_items_re() -> str:
+    """A regex for the numbered items of the footer TEMPLATE (docs/dispatch-footer.md): each item is its
+    template line, with `{report}`, `{lead}`, `{done}`, `{inbox}` and `{replies}` as one-line wildcards,
+    so an item that a lead edited or added matches none of them. Each item is judged on its own, so a
+    footer that dropped some of the template's items still matches. Matches nothing when the template
+    cannot be read: then no footer is provably generated and none is cut. Only the CURRENT template is
+    known to be what dispatch writes (DECIDED 2026-10-20, issue 21): a footer of an older revision is
+    refused with the "nothing was stripped" notice, which costs a second contract in the brief, where
+    guessing at old wording could cost a constraint of the lead's."""
+    try:
+        template = FOOTER_FILE.read_text()
+    except OSError:
+        return r"(?!)"
+    items = [re.fullmatch(r"(\d+)\. (.*)", line) for line in template.splitlines()]
+    alts = [re.escape(f"{m.group(1)}. ") + _template_re(m.group(2)) + r"\n" for m in items if m]
+    return "(?:" + "|".join(alts) + ")+" if alts else r"(?!)"
+
+
 def generated_tail_re() -> re.Pattern:
-    """What dispatch appends to a brief: the shared footer (numbered one-line items, whatever their
-    count), then optionally a deny or read-only note, a checkpoint note, the time budget, and a cloud
-    note, and nothing else. A footer from an older acp-dispatch still matches; a tail with any other
-    text in it does not."""
+    """What dispatch appends to a brief: the shared footer (items matching the footer template line for
+    line, footer_items_re), then optionally a deny or read-only note, a checkpoint note, the time budget,
+    and a cloud note, and nothing else. A tail with any other text in it, an edited or added footer
+    item included, does not match."""
     budget_text = ("There is no time limit for this slice. Write the report as soon as the work is verified.\n"
                    "|" + _template_re(BUDGET_TEXT.split("\n\n", 1)[1], minutes=r"\S+",
                                       wrapup="(?:" + _template_re(WRAPUP_BUDGET, grace=r"\d+") + ")?"))
     notes = "|".join(_template_re(n) for n in (DENY_NOTE, READONLY_NOTE))
     return re.compile(
-        r"\n*## Delivery contract \(shared footer[^\n]*\n\n(?:\d+\. [^\n]*\n)+"
+        rf"\n*## Delivery contract \(shared footer[^\n]*\n\n{footer_items_re()}"
         rf"(?:{notes})?"
         rf"(?:\n*{_template_re(CHECKPOINT_TEXT.lstrip(chr(10)))})?"
         rf"(?:\n*## Time budget \(acp-dispatch\)\n\n(?:{budget_text}))?"
@@ -1089,7 +1118,7 @@ def read_brief(path: str | Path) -> str:
     naming different report paths), and a caller's own text must never be cut. So what an earlier
     dispatch added comes off only when it is provably its own, and everything from the cut to the end
     of the file is exactly the generated block (the advisor section, footer and notes of
-    generated_tail_re): (1) when the record that wrote this file stores its prompt and the file
+    generated_tail_re, whose footer items must match the footer template line for line): (1) when the record that wrote this file stores its prompt and the file
     starts with it, the cut is right after that prompt; (2) otherwise it is the LAST footer heading.
     Anything else is left whole: a footer pasted mid-document, text after the footer, a file that
     merely mentions the heading. Every cut is announced on stderr, and so is a refusal to cut."""
@@ -1111,6 +1140,8 @@ def read_brief(path: str | Path) -> str:
             print(f"acp-dispatch: {p} has a '{FOOTER_HEADING}' heading that is not followed only by a "
                   "dispatch footer, so nothing was stripped from it", file=sys.stderr)
             return text
+    if not head.strip():
+        die(f"{p} is only an earlier dispatch's footer: no task is left to dispatch")
     print(f"acp-dispatch: stripped {len(text[len(head):].encode())} bytes of an earlier dispatch's footer "
           f"from {p}", file=sys.stderr)
     return head + "\n"
@@ -2794,14 +2825,33 @@ def forget_preflight(agent: str, model: str | None) -> None:
         pass
 
 
+def _env_seconds(name: str, default: float, low: float, high: float) -> float:
+    """acp-run's env_seconds: a seconds value from the environment; junk, nan or inf is the default,
+    the rest is clamped to low..high."""
+    try:
+        value = float(os.environ.get(name, default))
+    except ValueError:
+        return default
+    return min(max(value, low), high) if math.isfinite(value) else default
+
+
 def bin_wait_seconds() -> float:
     """How long acp-run waits for a missing agent binary: its ACP_RUN_BIN_WAIT, parsed the way
     acp-run parses it (default 90, junk or non-finite is the default, clamped to 0..600)."""
-    try:
-        wait = float(os.environ.get("ACP_RUN_BIN_WAIT", BIN_WAIT_DEFAULT))
-    except ValueError:
-        return BIN_WAIT_DEFAULT
-    return min(max(wait, 0.0), BIN_WAIT_MAX) if math.isfinite(wait) else BIN_WAIT_DEFAULT
+    return _env_seconds("ACP_RUN_BIN_WAIT", BIN_WAIT_DEFAULT, 0.0, BIN_WAIT_MAX)
+
+
+def bin_poll_seconds() -> float:
+    """acp-run's ACP_RUN_BIN_POLL, parsed the way acp-run parses it (default 2, clamped to 0.05..30)."""
+    return _env_seconds("ACP_RUN_BIN_POLL", BIN_POLL_DEFAULT, BIN_POLL_MIN, BIN_POLL_MAX)
+
+
+def bin_prestart_seconds() -> float:
+    """The most time acp-run can spend on a missing agent binary BEFORE its own --timeout starts: the
+    wait, plus bin_settle's up to BIN_SETTLE_POLLS polls once the binary appears. 0 when the wait is
+    disabled (acp-run then neither waits nor settles)."""
+    wait = bin_wait_seconds()
+    return wait + BIN_SETTLE_POLLS * bin_poll_seconds() if wait > 0 else 0.0
 
 
 def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, str, str | None]:
@@ -2813,9 +2863,15 @@ def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, s
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
             cached = json.loads(state.read_text())
-            if cached.get("ok") and time.time() - float(cached.get("time", 0)) < PREFLIGHT_TTL:
+            age = time.time() - float(cached.get("time", 0))
+            if cached.get("ok") and age < PREFLIGHT_TTL:
                 return True, "cached", "ok", None
-        except (OSError, ValueError, TypeError):
+            if cached.get("class") == "not-installed" and 0 <= age < NOT_INSTALLED_TTL:
+                # a wave to an agent that is not installed must not pay the binary wait once each, nor hold
+                # this flock that long; the slice's own acp-run still waits normally
+                return (False, f"{cached.get('detail', 'agent binary not installed')} (probe cached "
+                        f"{age:.0f}s ago; retry after {NOT_INSTALLED_TTL - age:.0f}s)", "not-installed", None)
+        except (OSError, ValueError, TypeError, AttributeError):
             pass
         with tempfile.TemporaryDirectory(prefix="acp-dispatch-preflight-") as td:
             log = Path(td) / "probe.jsonl"
@@ -2827,7 +2883,8 @@ def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, s
             # acp-run waits up to ACP_RUN_BIN_WAIT for a missing agent binary BEFORE its own --timeout
             # starts, so the probe is given that wait on top: a binary that reappears late must not
             # surface as a timeout, which the classifier reads as a provider outage (adversary, PR 18).
-            bin_wait = bin_wait_seconds()
+            # That includes bin_settle's up to 10 polls once the binary appears (follow-up C).
+            bin_wait = bin_prestart_seconds()
 
             def run_probe(perm: str) -> subprocess.CompletedProcess:
                 cmd = [acp_run, agent, "-C", td, "-p", "Reply with exactly: OK",
@@ -2836,7 +2893,8 @@ def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, s
                     cmd += ["--model", model]
                 return subprocess.run(cmd, check=False, capture_output=True, text=True,
                                       stdin=subprocess.DEVNULL, timeout=PREFLIGHT_TIMEOUT + bin_wait + 10,
-                                      env={**os.environ, "ACP_RUN_BIN_WAIT": f"{bin_wait:g}"})
+                                      env={**os.environ, "ACP_RUN_BIN_WAIT": f"{bin_wait_seconds():g}",
+                                           "ACP_RUN_BIN_POLL": f"{bin_poll_seconds():g}"})
             try:
                 proc = run_probe("deny")
                 if proc.returncode == 2 and "--perm deny" in proc.stderr:
@@ -2859,6 +2917,8 @@ def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, s
         detail = " ".join(combined.split())[-400:] or f"exit {None if proc is None else proc.returncode}"
         if cls == "auth":
             detail = f"{auth_hint(agent)} | {detail}"
+        elif cls == "not-installed":
+            write_atomic(state, json.dumps({"ok": False, "class": cls, "detail": detail, "time": time.time()}) + "\n")
         reset_text = reset[1] if reset else None
         return False, detail, cls, reset_text
 
@@ -2878,6 +2938,7 @@ def fallback_class(rec: dict) -> str | None:
 TRANSIENT_QUOTA_HEADROOM = 10.0
 # NO-REPORT classes that are a transport or service error, not a verdict on the slice's tier.
 INSTALL_FAILURES = (f"{NO_REPORT_PREFIX} not-installed".lower(),)    # the agent binary was not on PATH
+AUTH_FAILURES = (f"{NO_REPORT_PREFIX} auth".lower(),)                  # a stored login the agent cannot refresh
 # NO-REPORT classes with no quota reset to wait for: a signal kill, or a process that vanished (power loss).
 NO_RESET_FAILURES = tuple(f"{NO_REPORT_PREFIX} {c}".lower() for c in ("killed:", "lost"))
 TRANSPORT_FAILURES = tuple(f"{NO_REPORT_PREFIX} {c}".lower() for c in ("transient", "outage"))   # `check` lowercases
@@ -3155,6 +3216,10 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
         # (2026-10-18: a cursor slice's CANCEL was offered `--escalate (-> judgment)`).
         if failure.startswith(INSTALL_FAILURES):
             det = f"{det}; re-dispatch the same slice (the agent binary was missing; nothing ran)"
+        elif failure.startswith(AUTH_FAILURES):
+            # a login the agent cannot refresh says nothing about the tier either (a signal-killed
+            # slice with this class used to be offered `--escalate`, adversary PR 18 follow-up, 2026-10-20)
+            det = f"{det}; {auth_hint(str(rec.get('agent') or ''))}, then resume or re-dispatch the slice"
         elif failure.startswith(TRANSPORT_FAILURES):
             cmd = reroute_command(rec, path)
             det = f"{det}; reroute: {cmd}" if cmd else f"{det}; no other pool eligible for kind {rec.get('kind')!r}"
@@ -3965,8 +4030,11 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
                     WRAPUP_TEXT.format(timeout=a.timeout, report=agent_report, done=agent_done)]
     acp_cmd += a.acp_arg or []
     slice_secs = a.timeout + max(a.wrapup_grace, 0)
+    # acp-run's wait for a missing agent binary (and bin_settle) runs before its --timeout starts, so it is
+    # on top of the slice, not inside it (adversary PR 18 follow-up E)
     wait_timeout = (0 if a.timeout == 0 else
-                    a.wait_timeout if a.wait_timeout is not None else slice_secs + 300)
+                    a.wait_timeout if a.wait_timeout is not None
+                    else slice_secs + 300 + math.ceil(bin_prestart_seconds()))
     if gate_deferred and wait_timeout:
         # a hung load-watch holds the runner for load_wait + the subprocess grace before the gate fails open
         wait_timeout += gate_wait + LOAD_GATE_SUBPROCESS_GRACE
