@@ -3,6 +3,16 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Phase 0 scan of bigteam and the Orca checkouts (proposal §8 item 1, djbclark 2026-10-20)
+
+1. **Scan, capture list and tool: done 2026-10-20 (PR #TBD).** `bin/ade-scan-state` and
+   `docs/ade-everywhere-phase0-scan-2026-10-20.md` list the unique bigteam reports, dirty trees, untracked
+   files and unpushed commits. Nothing was copied, pushed or deleted. Open, each needs djbclark: (a) where the
+   41 unreferenced bigteam report sets are copied (one destination); (b) `~/src/one-offs` (37 commits, no
+   remote) and its Orca worktree `Hermes`: host it or bundle it; (c) push or bundle the branches with commits on
+   no origin branch (doc section 3.2). The 54.5 GiB `adhoc-2026-10-18/hm-promo-rehearsal/` is scratch; deleting
+   it is a later cleanup decision.
+
 ## Follow-ups from the 2026-10-20 reviews
 
 1. **`bin/firecrawl-router` serve-only form binds any `--listen` with no token** (adversary, threat-model

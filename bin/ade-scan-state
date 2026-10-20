@@ -1,0 +1,450 @@
+#!/usr/bin/env python3
+"""ade-scan-state: read-only scan of bigteam task dirs and git checkouts.
+
+Phase 0 item 4.3 of docs/ade-everywhere-proposal.md (djbclark, 2026-10-20): find unique reports,
+dirty trees, untracked files and unpushed commits before anything is cleaned up. Nothing is moved,
+deleted, committed, stashed or checked out; the only network calls are `git ls-remote` (read-only; --remote)
+and a refs-only `git fetch origin <branch>` (--fetch) when the origin tip cannot be compared.
+
+  ade-scan-state --bigteam ~/.local/state/bigteam \\
+      --ref-root ~/src/djbclark-ade/docs --ref-root ~/ops/site-private/memory \\
+      --ref-root ~/.local/state/handoffs \\
+      --git-root ~/orca/workspaces --git-root ~/orca/projects --git-root ~/.cow/pastures \\
+      --remote --json > scan.json
+  ade-scan-state --bigteam DIR --markdown        # the tables of the Phase 0 scan doc
+
+Bigteam verdicts (per task dir, ~/.local/state/bigteam/<task>/):
+  scratch  no report file, or every report is already referenced under a --ref-root
+  unique   an unreferenced report file and the dir is at most --unique-max-bytes (5 MiB): the
+           reports are the dir
+  mixed    an unreferenced report file inside a larger dir (logs, worktrees, caches)
+A "report file" is *report*.md (not *.done) within three levels of the dir, not inside a git
+checkout. "Referenced" is a whole-word match of the task name in any file under a --ref-root
+(`rg -l -F -w`, or `grep -rlFw` without rg); a short common name can match by accident, so a
+referenced verdict is a lead, not a proof. `size` is `du -sk`; `newest_mtime` looks two levels deep.
+
+Git checkout verdicts (a checkout is a dir holding `.git`, found up to two levels under each
+--git-root, symlinks resolved and deduplicated):
+  unpushed commits  the upstream exists and HEAD is ahead of it
+  orphan branch     the branch is on no origin ref and HEAD has commits origin lacks
+  dirty             modified or untracked non-ignored paths
+  clean and pushed  none of the above
+Extra flag `origin tip not fetched`: the branch is on origin at a commit this checkout cannot
+compare with HEAD (add --fetch); `ahead_of_origin` then still counts those commits.
+A checkout with no `origin` remote at all has every commit "ahead of origin": it is an orphan
+branch and carries the extra flag `no origin remote`. `stash` is a flag, never a primary verdict.
+The primary verdict is the first that applies in that order; `flags` lists every one.
+
+Exit codes: 0 scan completed; 2 usage error. Pass --json for machine-readable output.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+REPORT_DEPTH = 3
+MTIME_DEPTH = 2
+GIT_SCAN_DEPTH = 2
+SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "target"}
+GIT_ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
+
+
+def run(argv, timeout=120, cwd=None, env=None):
+    """argv list in, (rc, stdout); never raises on a missing tool or timeout."""
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd,
+                           env=env, errors="replace")
+        return p.returncode, p.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return 124, ""
+
+
+def du_bytes(path: Path) -> int:
+    rc, out = run(["du", "-sk", str(path)], timeout=900)
+    if rc in (0, 1) and out.split():
+        try:
+            return int(out.split()[0]) * 1024
+        except ValueError:
+            pass
+    return 0
+
+
+def is_checkout(path: Path) -> bool:
+    return (path / ".git").exists()
+
+
+def walk(path: Path, depth: int, skip_checkouts: bool = True):
+    """Yield (file path, DirEntry stat-free) up to `depth` levels below path."""
+    try:
+        entries = list(os.scandir(path))
+    except OSError:
+        return
+    for e in entries:
+        try:
+            if e.is_symlink():
+                continue
+            if e.is_dir(follow_symlinks=False):
+                if e.name in SKIP_DIRS or depth <= 1:
+                    continue
+                if skip_checkouts and os.path.exists(os.path.join(e.path, ".git")):
+                    continue
+                yield from walk(Path(e.path), depth - 1, skip_checkouts)
+            elif e.is_file(follow_symlinks=False):
+                yield Path(e.path)
+        except OSError:
+            continue
+
+
+def newest_mtime(path: Path) -> float:
+    best = 0.0
+    try:
+        best = path.stat().st_mtime
+    except OSError:
+        return best
+    for f in walk(path, MTIME_DEPTH + 1, skip_checkouts=False):
+        try:
+            best = max(best, f.lstat().st_mtime)
+        except OSError:
+            pass
+    try:
+        for e in os.scandir(path):
+            try:
+                best = max(best, e.stat(follow_symlinks=False).st_mtime)
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return best
+
+
+def claim_state(task: Path) -> str:
+    claim = task / "CLAIM"
+    try:
+        lines = [ln.strip() for ln in claim.read_text(errors="replace").splitlines() if ln.strip()]
+    except OSError:
+        return "no CLAIM"
+    return "DONE" if lines and lines[-1].startswith("DONE") else "open"
+
+
+def open_job_records(task: Path) -> list[str]:
+    out = []
+    for rec in sorted((task / "jobs").glob("*.json")) if (task / "jobs").is_dir() else []:
+        try:
+            data = json.loads(rec.read_text(errors="replace"))
+        except (OSError, ValueError):
+            out.append(f"{rec.name} (unreadable)")
+            continue
+        if isinstance(data, dict) and "closed" not in data:
+            out.append(rec.name)
+    return out
+
+
+def report_files(task: Path) -> list[dict]:
+    found = []
+    for f in walk(task, REPORT_DEPTH + 1):
+        n = f.name
+        if n.endswith(".md") and "report" in n.lower():
+            try:
+                size = f.stat().st_size
+            except OSError:
+                continue
+            found.append({"path": str(f.relative_to(task)), "bytes": size,
+                          "done": Path(str(f) + ".done").exists()})
+    return sorted(found, key=lambda r: r["path"])
+
+
+def referenced(name: str, ref_roots: list[Path], exclude: list[str]) -> list[str]:
+    roots = [str(r) for r in ref_roots if r.exists()]
+    if not roots:
+        return []
+    if shutil.which("rg"):
+        argv = ["rg", "-l", "-F", "-w", "--no-messages"]
+        for g in exclude:
+            argv += ["-g", f"!{g}"]
+        argv += ["--", name, *roots]
+    else:
+        argv = ["grep", "-rlFw", "--", name, *roots]
+    rc, out = run(argv, timeout=120)
+    return out.split("\n")[:-1] if rc == 0 else []
+
+
+def top_children(task: Path, n: int = 4) -> list[dict]:
+    kids = []
+    try:
+        entries = list(os.scandir(task))
+    except OSError:
+        return kids
+    for e in entries:
+        kids.append({"name": e.name + ("/" if e.is_dir(follow_symlinks=False) else ""),
+                     "bytes": du_bytes(Path(e.path))})
+    return sorted(kids, key=lambda k: -k["bytes"])[:n]
+
+
+def scan_bigteam(root: Path, ref_roots: list[Path], exclude: list[str], unique_max: int,
+                 top: int) -> dict:
+    tasks = []
+    for e in sorted(os.scandir(root), key=lambda e: e.name):
+        if not e.is_dir(follow_symlinks=False):
+            continue
+        task = Path(e.path)
+        size = du_bytes(task)
+        reports = report_files(task)
+        refs = referenced(task.name, ref_roots, exclude) if reports else []
+        if not reports or refs:
+            verdict, unique_bytes = "scratch", 0
+        else:
+            unique_bytes = sum(r["bytes"] for r in reports)
+            verdict = "unique" if size <= unique_max else "mixed"
+        tasks.append({
+            "task": task.name, "bytes": size, "newest_mtime": newest_mtime(task),
+            "claim": claim_state(task), "reports": reports,
+            "open_job_records": open_job_records(task), "referenced_in": refs[:5],
+            "verdict": verdict, "unique_bytes": unique_bytes,
+        })
+    for t in sorted(tasks, key=lambda t: -t["bytes"])[:top]:
+        t["fills"] = top_children(root / t["task"])
+    loose = [e.name for e in os.scandir(root) if not e.is_dir(follow_symlinks=False)]
+    return {"root": str(root), "tasks": tasks, "loose_files": loose}
+
+
+def find_checkouts(root: Path) -> list[Path]:
+    found = []
+
+    def rec(p: Path, depth: int):
+        if is_checkout(p):
+            found.append(p)
+            return
+        if depth == 0:
+            return
+        try:
+            kids = sorted(os.scandir(p), key=lambda e: e.name)
+        except OSError:
+            return
+        for e in kids:
+            try:
+                if e.is_dir():  # follows symlinks: ~/orca/projects entries are links
+                    rec(Path(e.path), depth - 1)
+            except OSError:
+                pass
+
+    rec(root, GIT_SCAN_DEPTH)
+    return found
+
+
+def git(path: Path, *args, timeout=60):
+    return run(["git", "-C", str(path), *args], timeout=timeout, env=GIT_ENV)
+
+
+_remote_cache: dict[str, dict[str, str] | None] = {}
+
+
+def origin_branches(path: Path, remote: bool) -> dict[str, str] | None:
+    """Branch name -> tip sha on origin: `ls-remote` (read-only) with --remote, else the local remote refs."""
+    rc, common = git(path, "rev-parse", "--git-common-dir")
+    key = str((path / common.strip()).resolve()) if rc == 0 and common.strip() else str(path)
+    if key in _remote_cache:
+        return _remote_cache[key]
+    rc, url = git(path, "remote", "get-url", "origin")
+    if rc != 0:
+        result = None
+    elif remote:
+        rc, out = git(path, "ls-remote", "--heads", "origin", timeout=120)
+        result = {ln.split("refs/heads/", 1)[1]: ln.split()[0]
+                  for ln in out.splitlines() if "refs/heads/" in ln} if rc == 0 else None
+    else:
+        rc, out = git(path, "for-each-ref", "--format=%(refname:strip=3) %(objectname)",
+                      "refs/remotes/origin")
+        result = dict(ln.split() for ln in out.splitlines() if len(ln.split()) == 2) \
+            if rc == 0 else None
+    _remote_cache[key] = result
+    return result
+
+
+def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
+    rc, branch = git(path, "rev-parse", "--abbrev-ref", "HEAD")
+    branch = branch.strip() if rc == 0 else "?"
+    detached = branch == "HEAD"
+    rc, status = git(path, "status", "--porcelain")
+    lines = status.splitlines() if rc == 0 else []
+    untracked = [ln[3:] for ln in lines if ln.startswith("??")]
+    modified = [ln[3:] for ln in lines if not ln.startswith("??")]
+    rc, up = git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    upstream = up.strip() if rc == 0 else None
+    unpushed = None
+    if upstream:
+        rc, n = git(path, "rev-list", "--count", "@{u}..HEAD")
+        unpushed = int(n) if rc == 0 and n.strip().isdigit() else None
+    rc, n = git(path, "rev-list", "--count", "HEAD", "--not", "--remotes=origin")
+    ahead_of_origin = int(n) if rc == 0 and n.strip().isdigit() else None
+    rc, n = git(path, "stash", "list")
+    stashes = len(n.splitlines()) if rc == 0 else 0
+    rc, _ = git(path, "remote", "get-url", "origin")
+    has_origin = rc == 0
+    branches = origin_branches(path, remote) if has_origin else None
+    on_origin = False if not has_origin else (None if branches is None or detached
+                                              else branch in branches)
+    # Local origin/* refs can be stale: a branch whose origin tip is HEAD, or contains HEAD,
+    # has nothing unpushed whatever the local remote-tracking refs say.
+    tip = branches.get(branch) if branches and on_origin else None
+    tip_unverified = False
+    if tip and ahead_of_origin:
+        # count again against the real origin tip: HEAD may already be inside it
+        def ahead_of_tip():
+            rc, n = git(path, "rev-list", "--count", "HEAD", "--not", "--remotes=origin", tip)
+            return int(n) if rc == 0 and n.strip().isdigit() else None
+        n = ahead_of_tip()
+        if n is None and fetch:  # the tip's objects are not here: refs-only fetch
+            git(path, "fetch", "--quiet", "origin", branch, timeout=120)
+            n = ahead_of_tip()
+        if n is None:
+            tip_unverified = True  # origin has a tip we cannot compare with HEAD
+        else:
+            ahead_of_origin = n
+    flags = []
+    if unpushed or (on_origin and (ahead_of_origin or 0) > 0):
+        flags.append("unpushed commits")  # includes a branch on origin with no upstream set
+    if on_origin is False and (ahead_of_origin or 0) > 0 and not unpushed:
+        flags.append("orphan branch")
+    if tip_unverified:
+        flags.append("origin tip not fetched")
+    if not has_origin:
+        flags.append("no origin remote")
+    if lines:
+        flags.append("dirty")
+    if stashes:
+        flags.append("stash")
+    primary = next((f for f in flags if f not in ("stash", "no origin remote")),
+                   "clean and pushed")
+    return {
+        "path": str(path), "branch": branch, "modified": len(modified), "untracked": len(untracked),
+        "untracked_sample": untracked[:8], "modified_sample": modified[:8],
+        "upstream": upstream, "unpushed": unpushed if upstream else "no upstream",
+        "ahead_of_origin": ahead_of_origin, "stashes": stashes,
+        "has_origin": has_origin,
+        "on_origin": "unknown" if on_origin is None else on_origin,
+        "flags": flags, "verdict": primary,
+    }
+
+
+def scan_git(roots: list[Path], remote: bool, fetch: bool = False) -> list[dict]:
+    seen, out = set(), []
+    for root in roots:
+        for co in find_checkouts(root):
+            real = co.resolve()
+            if real in seen:
+                continue
+            seen.add(real)
+            rec = scan_checkout(real, remote, fetch)
+            rec["found_via"] = str(co)
+            out.append(rec)
+    return out
+
+
+def human(n: int) -> str:
+    v = float(n)
+    for unit in ("B", "K", "M", "G", "T"):
+        if v < 1024 or unit == "T":
+            return f"{v:.0f}{unit}" if unit == "B" else f"{v:.1f}{unit}"
+        v /= 1024
+    return str(n)
+
+
+def summarize(result: dict) -> dict:
+    s = {}
+    bt = result.get("bigteam")
+    if bt:
+        verdicts: dict[str, int] = {}
+        for t in bt["tasks"]:
+            verdicts[t["verdict"]] = verdicts.get(t["verdict"], 0) + 1
+        total = sum(t["bytes"] for t in bt["tasks"])
+        uniq = sum(t["unique_bytes"] for t in bt["tasks"])
+        s["bigteam"] = {"tasks": len(bt["tasks"]), "verdicts": verdicts, "total_bytes": total,
+                        "unique_bytes": uniq, "scratch_bytes": total - uniq}
+    if "checkouts" in result:
+        v: dict[str, int] = {}
+        for c in result["checkouts"]:
+            v[c["verdict"]] = v.get(c["verdict"], 0) + 1
+        s["checkouts"] = {
+            "count": len(result["checkouts"]), "verdicts": v,
+            "with_unpushed_work": sum(1 for c in result["checkouts"]
+                                      if "unpushed commits" in c["flags"]
+                                      or "orphan branch" in c["flags"]),
+            "with_untracked": sum(1 for c in result["checkouts"] if c["untracked"]),
+            "with_stash": sum(1 for c in result["checkouts"] if c["stashes"])}
+    return s
+
+
+def markdown(result: dict) -> str:
+    out = []
+    bt = result.get("bigteam")
+    if bt:
+        out += ["| task | size | newest | CLAIM | reports (.done) | open jobs | verdict |",
+                "|---|---|---|---|---|---|---|"]
+        for t in sorted(bt["tasks"], key=lambda t: -t["bytes"]):
+            reps = ", ".join(f"{Path(r['path']).name}{'' if r['done'] else ' (no .done)'}"
+                             for r in t["reports"][:3]) + (" +%d" % (len(t["reports"]) - 3)
+                                                            if len(t["reports"]) > 3 else "")
+            when = time.strftime("%Y-%m-%d", time.localtime(t["newest_mtime"]))
+            out.append(f"| {t['task']} | {human(t['bytes'])} | {when} | {t['claim']} | "
+                       f"{reps or '-'} | {len(t['open_job_records'])} | {t['verdict']} |")
+        out.append("")
+    if "checkouts" in result:
+        out += ["| path | branch | modified | untracked | unpushed | stash | on origin | verdict |",
+                "|---|---|---|---|---|---|---|---|"]
+        for c in result["checkouts"]:
+            out.append(f"| {c['path']} | {c['branch']} | {c['modified']} | {c['untracked']} | "
+                       f"{c['unpushed']} | {c['stashes']} | {c['on_origin']} | {c['verdict']}"
+                       f"{' + ' + ', '.join(f for f in c['flags'][1:]) if len(c['flags']) > 1 else ''}"
+                       f" |")
+    return "\n".join(out)
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="ade-scan-state", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--bigteam", type=Path, help="bigteam root, one dir per task")
+    ap.add_argument("--ref-root", type=Path, action="append", default=[],
+                    help="where a task name counts as referenced (repeatable)")
+    ap.add_argument("--exclude", action="append", default=[],
+                    help="rg glob (no leading !) to ignore under --ref-root, e.g. the scan doc")
+    ap.add_argument("--git-root", type=Path, action="append", default=[],
+                    help="a dir whose checkouts (up to 2 levels down) are scanned (repeatable)")
+    ap.add_argument("--remote", action="store_true",
+                    help="ask origin with `git ls-remote --heads` (read-only network call)")
+    ap.add_argument("--fetch", action="store_true",
+                    help="with --remote: `timeout 120 git fetch origin <branch>` (refs only) when "
+                         "the origin tip's objects are missing locally, to compare it with HEAD")
+    ap.add_argument("--unique-max-bytes", type=int, default=5 * 1024 * 1024)
+    ap.add_argument("--top", type=int, default=10, help="largest bigteam dirs to break down")
+    fmt = ap.add_mutually_exclusive_group()
+    fmt.add_argument("--json", action="store_true")
+    fmt.add_argument("--markdown", action="store_true")
+    args = ap.parse_args(argv)
+    if not args.bigteam and not args.git_root:
+        ap.error("give --bigteam and/or --git-root")
+    result: dict = {"scanned_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    if args.bigteam:
+        if not args.bigteam.is_dir():
+            ap.error(f"--bigteam {args.bigteam} is not a directory")
+        result["bigteam"] = scan_bigteam(args.bigteam, args.ref_root, args.exclude,
+                                         args.unique_max_bytes, args.top)
+    if args.git_root:
+        result["checkouts"] = scan_git(args.git_root, args.remote, args.fetch)
+    result["summary"] = summarize(result)
+    if args.json:
+        json.dump(result, sys.stdout, indent=1)
+        print()
+    elif args.markdown:
+        print(markdown(result))
+    else:
+        print(json.dumps(result["summary"], indent=1))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
