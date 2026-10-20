@@ -50,6 +50,9 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    on that repo, and a peer with a non-numeric `finished` raises in `cloud_overlapping` (skip peers without
    `cloud_agent_id`, ignore peers older than timeout + cap, guard the conversions); (S3) a result-text branch
    confirmed on origin may predate the launch (also require the head to differ from `cloud_heads_before`).
+   S1-S3 fixed at ee66114 (adversary APPROVE, 2026-10-20); info left: (T1) a hand-edited future `launched_at`
+   still moves the deadline base; (T2) on Linux a cloud record whose background poller died before writing its
+   pid is never reaped.
 5. **Endpoint variables can send keys anywhere** (adversary and Codex, threat-model review 2026-10-20):
    `CURSOR_CLOUD_API` in `bin/cursor-cloud`; `FIRECRAWL_SELFHOST_URL`, `FIRECRAWL_FALLBACK_URL`,
    `FIRECRAWL_ROUTER_SIPB_BASE` and `FIRECRAWL_ROUTER_LITELLM_BASE` in `bin/firecrawl-router`. Require https
