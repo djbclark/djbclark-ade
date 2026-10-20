@@ -9,16 +9,18 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import subprocess
 import shutil
 import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 from typing import override
 
-from test_acp_dispatch import FAKE, Base, run
+from test_acp_dispatch import FAKE, SCRIPT, Base, run
 
 ACP_RUN = Path(os.environ.get("ACP_RUN_SCRIPT", str(Path(__file__).resolve().parent.parent
                                                     / "tools" / "acp-run" / "acp-run")))
@@ -48,6 +50,20 @@ class TestAcpRunWaits(unittest.TestCase):
         r = self.run_acp("10", 1.0)
         self.assertIn("waiting up to 10 s", r.stderr)
         self.assertNotIn("not installed", r.stderr)
+        self.assertNotEqual(r.returncode, 127, r.stderr)        # it went on to start the (fake) agent
+
+    def test_junk_and_unbounded_waits_fall_back_or_clamp(self):
+        # the default is 90 s: the binary appears at once, so each run proves the wait value, not a long wait
+        for value, shown in (("abc", "90"), ("nan", "90"), ("inf", "90"), ("1e9", "600")):
+            r = self.run_acp(value, 0.5)
+            self.assertIn(f"waiting up to {shown} s", r.stderr, (value, r.stderr))
+            self.assertNotIn("Traceback", r.stderr, value)
+            self.assertNotEqual(r.returncode, 127, (value, r.stderr))
+
+    def test_a_negative_wait_does_not_wait(self):
+        r = self.run_acp("-5", None)
+        self.assertEqual(r.returncode, 127, r.stderr)
+        self.assertNotIn("waiting", r.stderr)
 
     def test_binary_that_never_appears_exits_127(self):
         r = self.run_acp("0.5", None)
@@ -60,6 +76,53 @@ class TestAcpRunWaits(unittest.TestCase):
         self.assertEqual(r.returncode, 127, r.stderr)
         self.assertNotIn("waiting", r.stderr)
         self.assertLess(time.monotonic() - t0, 5)
+
+
+class TestClassify(unittest.TestCase):
+    """The not-installed class needs acp-run's own line and exit 127, not text that merely quotes it."""
+
+    def cls(self, text: str, rc: int | None) -> str | None:
+        return runpy.run_path(str(SCRIPT))["failure_class"](text, rc)[0]
+
+    def test_the_line_with_exit_127(self):
+        self.assertEqual(self.cls("acp-run: claude-agent-acp not installed\n", 127), "not-installed")
+
+    def test_a_quoted_line_or_another_exit_is_something_else(self):
+        quoted = "acp-run: FAILED x: error='acp-run: claude-agent-acp not installed' fail=transient\n"
+        self.assertEqual(self.cls(quoted, 1), "transient")
+        self.assertEqual(self.cls(quoted, 127), "transient")          # not at the start of a line
+        self.assertNotEqual(self.cls("acp-run: claude-agent-acp not installed\n", 1), "not-installed")
+        self.assertNotEqual(self.cls("acp-run: claude-agent-acp not installed\n", None), "not-installed")
+
+
+class TestPreflightWaitsForTheBinary(Base):
+    """acp-run waits up to ACP_RUN_BIN_WAIT before its own --timeout starts: the probe gets that on top
+    (a binary that reappears late must not surface as a timeout, which reads as a provider outage)."""
+
+    def test_probe_timeout_and_env_include_the_binary_wait(self):
+        seen: dict = {}
+
+        def fake_run(cmd, **kw):
+            seen.update(kw)
+            return subprocess.CompletedProcess(cmd, 0, stdout="OK\n", stderr="")
+        with unittest.mock.patch.dict(os.environ, {"ACP_DISPATCH_PREFLIGHT": str(self.tmp / "pf"),
+                                                   "ACP_RUN_BIN_WAIT": "30"}):
+            mod = runpy.run_path(str(SCRIPT))
+            with unittest.mock.patch("subprocess.run", fake_run):
+                ok, _, _, _ = mod["preflight"]("acp-run", "codex", "m1")
+        self.assertTrue(ok)
+        self.assertEqual(seen["timeout"], mod["PREFLIGHT_TIMEOUT"] + 30 + 10)
+        self.assertEqual(seen["env"]["ACP_RUN_BIN_WAIT"], "30")
+
+    def test_default_and_junk_waits(self):
+        fn = runpy.run_path(str(SCRIPT))["bin_wait_seconds"]
+        cases = {None: 90.0, "abc": 90.0, "nan": 90.0, "inf": 90.0, "-5": 0.0, "0": 0.0, "12.5": 12.5, "9999": 600.0}
+        for value, want in cases.items():
+            env = {} if value is None else {"ACP_RUN_BIN_WAIT": value}
+            with unittest.mock.patch.dict(os.environ, env, clear=False):
+                if value is None:
+                    os.environ.pop("ACP_RUN_BIN_WAIT", None)
+                self.assertEqual(fn(), want, value)
 
 
 class TestCheck(Base):

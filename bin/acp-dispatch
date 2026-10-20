@@ -168,14 +168,21 @@ Otherwise `transient` stays. For transient and outage `check` suggests `reroute 
 `--escalate`: a transport error says nothing about the tier. Other failures keep the one-rung
 `--escalate` hint. A slice a signal killed (a restart's SIGTERM, SIGKILL) or that was reaped lost
 (power loss) says nothing about the tier either (2026-10-20): `check` prints
-`resume in place: acp-dispatch resume RECORD --detach --no-wait` (or, while the login sweep's
-restart-resume is running, `resume-scheduled`; or `no resumable session` when the session cannot be
-reopened) and never `--escalate`. Exit codes are unchanged.
-A slice whose agent binary was missing (`acp-run: ... not installed`, acp-run exit 127) is classified
-`NO-REPORT: not-installed` (2026-10-20): infrastructure like a transport error, so `check` says to
-re-dispatch the same slice and never offers `--escalate`. A brief file that an earlier dispatch already
-footed (`-f NAME-brief.md` under a new `--name`) is cut at its old "Delivery contract" / "Time budget"
-sections before the new ones are appended, so the prompt carries exactly one contract.
+`resume in place: acp-dispatch resume RECORD --detach --no-wait` (no "after the reset": there is none;
+or, while the login sweep's restart-resume is running, `resume-scheduled`; or `no resumable session`
+when `resume` itself would refuse: no log or command in the record, no session id, an agent that can
+neither load nor resume; an agy session on a non-Gemini model is resumed in a new session with a
+checkpoint, as `resume` does) and never `--escalate`. Only a recorded `killed:` or `lost` class gets it: a
+refused, auth or quota stop that a signal also ended keeps its own hint. Exit codes are unchanged.
+A slice whose agent binary was missing (`acp-run: ... not installed` on its own line, acp-run exit 127) is
+classified `NO-REPORT: not-installed` (2026-10-20): infrastructure like a transport error, so `check`
+says to re-dispatch the same slice and never offers `--escalate`. acp-run waits `ACP_RUN_BIN_WAIT`
+seconds (default 90, 0..600, junk is the default) for the binary first; preflight gives its probe that wait
+on top of its own timeout, so a late binary is never a recorded outage. A brief file that an earlier
+dispatch already footed (`-f NAME-brief.md` under a new `--name`) comes back to one contract only when
+the cut is provably generated (`read_brief`): the record's own stored prompt, or the last footer heading
+with nothing after the footer and notes but the time budget; the advisor section goes with it. A footer
+pasted mid-document, or text after the footer, is left whole; every cut or refusal to cut is on stderr.
 
 Quota-stop refinements (2026-10-18): (1) a reset further out than `[dispatch].
 auto_resume_max_wait_hours` (default 6) is not waited for — agy's weekly cap resets ~148 h out
@@ -356,6 +363,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -577,6 +585,7 @@ LOAD_SCRUB_PREFIX = "LW_"      # every LW_* variable is dropped from load-watch'
 LOG_ACTIVE_SEC = 5 * 60
 PREFLIGHT_TTL = 10 * 60
 PREFLIGHT_TIMEOUT = 90
+BIN_WAIT_DEFAULT, BIN_WAIT_MAX = 90.0, 600.0     # acp-run's own constants (tools/acp-run/acp-run)
 PREFLIGHT_ROOT = Path(os.environ.get(
     "ACP_DISPATCH_PREFLIGHT", str(Path.home() / ".local/state/acp-dispatch/preflight")))
 MODEL_CACHE = Path(os.environ.get("ACP_DISPATCH_MODEL_CACHE", str(Path.home() / ".cache/acp-dispatch")))
@@ -1019,16 +1028,92 @@ def load_footer() -> str:
         die(f"footer missing: {FOOTER_FILE} ({e})")
 
 
-def strip_generated_sections(text: str) -> str:
-    """A brief written by an earlier dispatch ends with its shared footer and time budget. Cut from
-    the first of those headings so a re-dispatch of the same -f file under a new name carries one
-    contract, the new name's (2026-10-20: ime-onstart2 got two, naming different report paths)."""
-    cut = len(text)
-    for m in (re.search(r"(?m)^## Delivery contract \(shared footer", text),
-              re.search(r"(?m)^## Time budget \(acp-dispatch\)", text)):
-        if m:
-            cut = min(cut, m.start())
-    return text[:cut].rstrip() + "\n" if cut < len(text) else text
+FOOTER_HEADING = "## Delivery contract (shared footer"
+
+
+def _template_re(template: str, **fields: str) -> str:
+    """A regex for `template.format(...)`: its literal text escaped, each {field} a one-line wildcard
+    unless `fields` gives its own pattern."""
+    parts = re.split(r"\{(\w+)\}", template)
+    return "".join(re.escape(p) if i % 2 == 0 else fields.get(p, r"[^\n]*?") for i, p in enumerate(parts))
+
+
+def generated_tail_re() -> re.Pattern:
+    """What dispatch appends to a brief: the shared footer (numbered one-line items, whatever their
+    count), then optionally a deny or read-only note, a checkpoint note, the time budget, and a cloud
+    note, and nothing else. A footer from an older acp-dispatch still matches; a tail with any other
+    text in it does not."""
+    budget_text = ("There is no time limit for this slice. Write the report as soon as the work is verified.\n"
+                   "|" + _template_re(BUDGET_TEXT.split("\n\n", 1)[1], minutes=r"\S+",
+                                      wrapup="(?:" + _template_re(WRAPUP_BUDGET, grace=r"\d+") + ")?"))
+    notes = "|".join(_template_re(n) for n in (DENY_NOTE, READONLY_NOTE))
+    return re.compile(
+        r"\n*## Delivery contract \(shared footer[^\n]*\n\n(?:\d+\. [^\n]*\n)+"
+        rf"(?:{notes})?"
+        rf"(?:\n*{_template_re(CHECKPOINT_TEXT.lstrip(chr(10)))})?"
+        rf"(?:\n*## Time budget \(acp-dispatch\)\n\n(?:{budget_text}))?"
+        rf"(?:\n*{_template_re(CLOUD_NOTE.lstrip(chr(10)))})?\s*\Z")
+
+
+def own_brief_prompt(path: Path, text: str) -> str | None:
+    """The prompt stored in the record that wrote this very file (`<out>/<name>-brief.md` named by
+    `<out>/jobs/<name>.json`), when the file still starts with it; else None."""
+    if not path.name.endswith("-brief.md"):
+        return None
+    try:
+        resolved = path.resolve()
+        rec = json.loads((resolved.parent / "jobs" / (resolved.name[:-len("-brief.md")] + ".json")).read_text())
+        if Path(rec["brief"]).resolve() != resolved:
+            return None
+        prompt = rec["prompt"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if isinstance(prompt, str) and prompt.strip() and text.startswith(prompt.rstrip()):
+        return prompt
+    return None
+
+
+def only_generated(rest: str) -> bool:
+    """True when `rest` is nothing but what dispatch appends to a prompt: an optional advisor
+    section, then the footer and notes (generated_tail_re)."""
+    rest = rest.lstrip()
+    note = ADVISOR_NOTE.strip()
+    if rest.startswith(note):
+        rest = rest[len(note):]
+    return bool(generated_tail_re().fullmatch(rest.lstrip()))
+
+
+def read_brief(path: str | Path) -> str:
+    """The prompt text of a `-f` file. A brief an earlier dispatch already footed (`-f NAME-brief.md`
+    under a new `--name`) must carry one contract, the new name's (2026-10-20: ime-onstart2 got two,
+    naming different report paths), and a caller's own text must never be cut. So what an earlier
+    dispatch added comes off only when it is provably its own, and everything from the cut to the end
+    of the file is exactly the generated block (the advisor section, footer and notes of
+    generated_tail_re): (1) when the record that wrote this file stores its prompt and the file
+    starts with it, the cut is right after that prompt; (2) otherwise it is the LAST footer heading.
+    Anything else is left whole: a footer pasted mid-document, text after the footer, a file that
+    merely mentions the heading. Every cut is announced on stderr, and so is a refusal to cut."""
+    p = Path(path)
+    text = p.read_text()
+    prompt = own_brief_prompt(p, text)
+    if prompt is not None and only_generated(text[len(prompt.rstrip()):]):
+        head = prompt.rstrip()
+    else:
+        at = text.rfind("\n" + FOOTER_HEADING)
+        start = at + 1 if at >= 0 else 0 if text.startswith(FOOTER_HEADING) else -1
+        if start < 0:
+            return text
+        head = text[:start].rstrip()
+        note = ADVISOR_NOTE.strip()
+        if head.endswith(note) and only_generated(text[len(head) - len(note):]):
+            head = head[:-len(note)].rstrip()
+        elif not only_generated(text[start:]):
+            print(f"acp-dispatch: {p} has a '{FOOTER_HEADING}' heading that is not followed only by a "
+                  "dispatch footer, so nothing was stripped from it", file=sys.stderr)
+            return text
+    print(f"acp-dispatch: stripped {len(text[len(head):].encode())} bytes of an earlier dispatch's footer "
+          f"from {p}", file=sys.stderr)
+    return head + "\n"
 
 
 def footer_text(report: Path, lead: str, inbox: Path | None = None,
@@ -2382,7 +2467,7 @@ def manual_resume_hint(rec: dict, record_path: Path) -> str:
         m = re.search(r"retry (?:at|in|after) ([^)]+)\)", str(rec.get("failure", "")))
         when = m.group(1) if m else None
     script = shlex.quote(str(Path(__file__).resolve()))
-    killed = str(rec.get("failure", "")).startswith(f"{NO_REPORT_PREFIX} killed:")
+    killed = str(rec.get("failure", "")).lower().startswith(NO_RESET_FAILURES)   # a kill or a lost process
     after = "" if killed else f" after {when or 'the reset'}"
     return (f"resume in place{after}: {script} resume "
             f"{shlex.quote(str(rec.get('record') or record_path))} --detach --no-wait")
@@ -2603,7 +2688,7 @@ def failure_class(text: str, rc: int | None, *, preflight: bool = False) -> tupl
     # reported as fail=transient and silently rerouted, which is the opposite of what was wanted.
     if any(term in low for term in AUTH_TERMS):
         return "auth", when
-    if re.search(r"acp-run: \S+ not installed", text):
+    if rc == 127 and re.search(r"(?m)^acp-run: \S+ not installed$", text):
         return "not-installed", when       # the binary was missing: infrastructure, not the slice
     m = re.search(r"\bfail=([\w-]+)", text) or re.search(r"FAILED ([\w-]+)", text)
     if m:
@@ -2709,6 +2794,16 @@ def forget_preflight(agent: str, model: str | None) -> None:
         pass
 
 
+def bin_wait_seconds() -> float:
+    """How long acp-run waits for a missing agent binary: its ACP_RUN_BIN_WAIT, parsed the way
+    acp-run parses it (default 90, junk or non-finite is the default, clamped to 0..600)."""
+    try:
+        wait = float(os.environ.get("ACP_RUN_BIN_WAIT", BIN_WAIT_DEFAULT))
+    except ValueError:
+        return BIN_WAIT_DEFAULT
+    return min(max(wait, 0.0), BIN_WAIT_MAX) if math.isfinite(wait) else BIN_WAIT_DEFAULT
+
+
 def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, str, str | None]:
     """Probe an exact pool once per TTL. The flock serializes concurrent waves."""
     PREFLIGHT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -2729,13 +2824,19 @@ def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, s
             # "--perm deny:" message; until 2026-10-16 that killed every such dispatch in preflight.
             # The probe prompt needs no tools, so on that refusal rerun it with --perm all in the
             # empty temp dir.
+            # acp-run waits up to ACP_RUN_BIN_WAIT for a missing agent binary BEFORE its own --timeout
+            # starts, so the probe is given that wait on top: a binary that reappears late must not
+            # surface as a timeout, which the classifier reads as a provider outage (adversary, PR 18).
+            bin_wait = bin_wait_seconds()
+
             def run_probe(perm: str) -> subprocess.CompletedProcess:
                 cmd = [acp_run, agent, "-C", td, "-p", "Reply with exactly: OK",
                        "--perm", perm, "--timeout", str(PREFLIGHT_TIMEOUT), "--log", str(log)]
                 if model:
                     cmd += ["--model", model]
                 return subprocess.run(cmd, check=False, capture_output=True, text=True,
-                                      stdin=subprocess.DEVNULL, timeout=PREFLIGHT_TIMEOUT + 10)
+                                      stdin=subprocess.DEVNULL, timeout=PREFLIGHT_TIMEOUT + bin_wait + 10,
+                                      env={**os.environ, "ACP_RUN_BIN_WAIT": f"{bin_wait:g}"})
             try:
                 proc = run_probe("deny")
                 if proc.returncode == 2 and "--perm deny" in proc.stderr:
@@ -2777,6 +2878,8 @@ def fallback_class(rec: dict) -> str | None:
 TRANSIENT_QUOTA_HEADROOM = 10.0
 # NO-REPORT classes that are a transport or service error, not a verdict on the slice's tier.
 INSTALL_FAILURES = (f"{NO_REPORT_PREFIX} not-installed".lower(),)    # the agent binary was not on PATH
+# NO-REPORT classes with no quota reset to wait for: a signal kill, or a process that vanished (power loss).
+NO_RESET_FAILURES = tuple(f"{NO_REPORT_PREFIX} {c}".lower() for c in ("killed:", "lost"))
 TRANSPORT_FAILURES = tuple(f"{NO_REPORT_PREFIX} {c}".lower() for c in ("transient", "outage"))   # `check` lowercases
 
 
@@ -3020,21 +3123,30 @@ def check_record(path: Path) -> tuple[str, str, str, str]:
     if reroute:
         st = "quota-checkpointed"
         det = f"checkpoint preserved; reroute: {reroute}; or {manual_resume_hint(rec, path)}"
+    # Gate on the failure class actually recorded (failure_note ranks a classified stderr class above
+    # the signal), so a refused, auth or transient stop keeps its own hint and quota is not hinted twice.
     signal_killed = bool(finished and st in ("no-report", "partial") and not rec.get("closed")
-                         and (rec.get("signal") or failure.startswith(f"{NO_REPORT_PREFIX} lost".lower())))
+                         and (failure.startswith(NO_RESET_FAILURES)
+                              or (not failure and (rec.get("signal") or rec.get("reaped")))))
     if signal_killed:
         # A signal kill (restart SIGTERM, SIGKILL) or a vanished process (power loss) says nothing about
         # the tier, the same as a transport error: no `--escalate`, resume in place when the session can
         # be reopened (2026-10-20; the record path of 4be8684 and the login sweep of 180d8b8 do the same).
+        # "Can be reopened" is what resume_record accepts: a record with log and cmd and a session id
+        # the agent can load, or an agy session on a non-Gemini model, which continues in a new session.
         sid, supported = session_info(rec)
+        broken = resume_unsupported(rec)
         rr = rec.get("restart_resume") or {}
-        if not sid or supported is False or resume_unsupported(rec):
+        if not rec.get("log") or not rec.get("cmd"):
+            det = f"{det}; no resumable session (the record has no log or command; re-dispatch the slice)"
+        elif not broken and (not sid or supported is False):
             det = f"{det}; no resumable session (re-dispatch the slice)"
         elif rr.get("state") == "resuming":
             det = f"{det}; resume-scheduled: the login sweep is resuming it in place (restart-resume)"
         else:
             note = f" (the login sweep's restart-resume {rr['state']}: {rr.get('detail', '')})" if rr.get("state") else ""
-            det = f"{det}; {manual_resume_hint(rec, path)}{note}"
+            new_session = " (continues in a new session with a checkpoint: its own cannot be reopened)" if broken else ""
+            det = f"{det}; {manual_resume_hint(rec, path)}{new_session}{note}"
     elif finished and st in ("no-report", "partial") and "quota" not in failure:
         # a slice that failed on its tier climbs one rung (operator decision 1.4, 2026-10-18);
         # quota stops carry their own reroute rule above, BLOCKED asks the lead instead. A
@@ -3721,7 +3833,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
                     "(load_gate pending); use a new --name or --force")
         except (OSError, ValueError):
             pass
-    prompt = strip_generated_sections(Path(a.prompt_file).read_text()) if a.prompt_file else a.prompt
+    prompt = read_brief(a.prompt_file) if a.prompt_file else a.prompt
     estimate, estimate_source = estimate_pct(out, a.agent, a.model, prompt, a.est_pct, service)
     if estimate < 0:
         die("--est-pct must be 0 or more")
@@ -4427,7 +4539,7 @@ def dispatch_cloud(a: argparse.Namespace, previous: dict | None, kind: str | Non
                 f"continue it with `acp-dispatch resume {record}` (or --force to start a second agent)")
         if isinstance(old, dict) and pid_alive(old.get("pid")):
             die(f"{record} says a process is still polling this slice (--force to ignore)")
-    prompt = strip_generated_sections(Path(a.prompt_file).read_text()) if a.prompt_file else a.prompt
+    prompt = read_brief(a.prompt_file) if a.prompt_file else a.prompt
     repo = Path(a.dir).resolve()
     url, ref = cloud_repo_url(repo), cloud_ref(repo)
     remaining, reading = pool_reading(a.agent, a.model)

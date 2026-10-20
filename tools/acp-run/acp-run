@@ -190,7 +190,7 @@ text when no tool ran) or a requested model/effort/context the agent did
 not apply (FAILED config); 2 usage error (including an --effort/--context the
 agent or model cannot take); 5 empty reply and every permission
 request was denied; 75 refused by --max-load; 127 the agent binary is not on PATH (after
-waiting ACP_RUN_BIN_WAIT seconds, default 90, 0 disables, for an upgrade to relink it); 77 under --perm deny or read-only a tool ran
+waiting ACP_RUN_BIN_WAIT seconds, default 90, 0 disables, at most 600, for an upgrade to relink it); 77 under --perm deny or read-only a tool ran
 without a permission request (tripwire; turn cancelled); 124 timed out (session/cancel
 sent first, then the process is killed); 130/143 interrupted by SIGINT/SIGTERM
 (session/cancel sent, agent stopped); with --interactive also 129 on SIGHUP,
@@ -203,6 +203,7 @@ import contextlib
 import fcntl
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -482,7 +483,44 @@ EXIT_NOT_INSTALLED = 127  # the shell's "command not found": the agent binary is
 # How long to keep looking for a missing agent binary (an upgrade may be relinking it:
 # 2026-10-20 03:25, `npm i -g` replaced claude-agent-acp as ime-onstart started), and how often.
 BIN_WAIT = 90.0
+BIN_WAIT_MAX = 600.0
 BIN_POLL = 2.0
+
+
+def env_seconds(name: str, default: float, low: float, high: float) -> float:
+    """A seconds value from the environment: junk, nan or inf is the default; the rest is clamped to
+    low..high (an unbounded ACP_RUN_BIN_WAIT=inf would wait forever, junk used to crash with exit 1)."""
+    try:
+        value = float(os.environ.get(name, default))
+    except ValueError:
+        return default
+    return min(max(value, low), high) if math.isfinite(value) else default
+
+
+def bin_wait_settings() -> tuple[float, float]:
+    """(wait, poll) seconds for a missing agent binary: ACP_RUN_BIN_WAIT 0..600 (0 disables),
+    ACP_RUN_BIN_POLL 0.05..30."""
+    return (env_seconds("ACP_RUN_BIN_WAIT", BIN_WAIT, 0.0, BIN_WAIT_MAX),
+            env_seconds("ACP_RUN_BIN_POLL", BIN_POLL, 0.05, 30.0))
+
+
+def bin_settle(found: str, poll: float) -> None:
+    """A binary that just appeared may still be relinking (an npm package shows its bin symlink
+    before its files are all extracted): wait one more poll and, if its real path or mtime moved
+    meanwhile, keep waiting up to ten polls for it to hold still."""
+    def stamp() -> tuple[str, float] | None:
+        try:
+            real = os.path.realpath(found)
+            return real, os.stat(real).st_mtime
+        except OSError:
+            return None
+    seen = stamp()
+    for _ in range(10):
+        time.sleep(poll)
+        now = stamp()
+        if now == seen:
+            return
+        seen = now
 # A tool may report in_progress a moment before it asks: crush-acp sends in_progress,
 # then session/request_permission 1 ms later (canary, 2026-10-12). A started tool
 # trips only if its permission request has not arrived within this grace.
@@ -4621,14 +4659,16 @@ def main():
             ap.error("give a prompt with -p, -f or stdin")
     cmd = YOLO_CMD.get(a.agent, AGENTS[a.agent][0])
     if not shutil.which(cmd[0]):
-        wait = float(os.environ.get("ACP_RUN_BIN_WAIT", BIN_WAIT))        # 0 disables
-        poll = max(0.05, float(os.environ.get("ACP_RUN_BIN_POLL", BIN_POLL)))
+        wait, poll = bin_wait_settings()
         if wait > 0:
             print(f"acp-run: {cmd[0]} not found on PATH; waiting up to {wait:g} s in case an upgrade "
                   f"is relinking it (ACP_RUN_BIN_WAIT=0 disables)", file=sys.stderr)
             deadline = time.monotonic() + wait
             while not shutil.which(cmd[0]) and time.monotonic() < deadline:
                 time.sleep(min(poll, max(0.0, deadline - time.monotonic())))
+            found = shutil.which(cmd[0])
+            if found:
+                bin_settle(found, poll)
         if not shutil.which(cmd[0]):
             print(f"acp-run: {cmd[0]} not installed", file=sys.stderr)
             sys.exit(EXIT_NOT_INSTALLED)

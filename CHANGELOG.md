@@ -27,10 +27,12 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
-- `acp-dispatch check`: a slice killed by a signal (restart SIGTERM, SIGKILL) or reaped lost gets the
-  `resume` hint and no `--escalate`; a missing agent binary is `NO-REPORT: not-installed` with a
-  re-dispatch hint; `acp-run` waits up to 90 s (`ACP_RUN_BIN_WAIT`) for a missing binary and exits 127;
-  re-dispatching a footed brief under a new `--name` carries one delivery contract (#18).
+- `acp-dispatch check`: a slice whose recorded class is `killed:` or `lost` gets the `resume` hint (no
+  "after the reset") and no `--escalate`; a missing agent binary is `NO-REPORT: not-installed` (exit 127
+  plus acp-run's own line) with a re-dispatch hint; `acp-run` waits up to 90 s (`ACP_RUN_BIN_WAIT`, clamped
+  to 0..600, junk is the default) for a missing binary and preflight allows for that wait; re-dispatching a
+  footed brief under a new `--name` carries one delivery contract, cutting only a provably generated tail
+  and saying so on stderr (#18).
 - `route_agent`: pool state comes from `aiuse --available --json`, with the snapshot file as the
   fallback (#12).
 
