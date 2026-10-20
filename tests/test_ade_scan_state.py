@@ -689,6 +689,45 @@ def test_origin_tips_from_ls_remote_are_not_local_only(tmp_path):
     assert c["verdict"] == "clean and pushed" and c["local_only_commits"] == 0, c["flags"]
 
 
+def test_remote_scan_trusts_live_tips_over_a_stale_tracking_ref(tmp_path):
+    """Codex pass 9 (4324741577): a branch deleted on origin keeps its `refs/remotes/origin/x`; with --remote
+    its commits are local-only, without it the stale ref still hides them (the documented caveat)."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    git(work, "checkout", "-b", "x")
+    commit_file(work, "x.txt")
+    git(work, "push", "origin", "x")
+    git(origin, "branch", "-D", "x")
+    assert git(work, "rev-parse", "--verify", "refs/remotes/origin/x").strip()  # the stale ref stays
+    c = scan_one(mod, roots)  # without --remote: origin's refs are the local ones
+    assert c["local_only_commits"] == 0 and c["on_origin"] is True  # the stale ref still says x is on origin
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True)
+    assert c["local_only_commits"] == 1 and c["local_only_branches"] == [{"branch": "x", "count": 1}], c
+    assert c["verdict"] == "unpushed commits" != "clean and pushed" and "origin unreachable" not in c["flags"]
+    assert c["on_origin"] is False
+
+
+def test_worktrees_with_different_worktree_scoped_origins_are_judged_by_their_own(tmp_path):
+    """Codex pass 9 (4324741588): the remote cache was keyed by the shared git dir only."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    empty = tmp_path / "empty.git"
+    git(tmp_path, "init", "--bare", "-b", "main", str(empty))
+    git(work, "config", "extensions.worktreeConfig", "true")
+    wt = roots / "wt"
+    git(work, "worktree", "add", "-b", "side", str(wt))
+    git(wt, "config", "--worktree", "remote.origin.url", str(empty))
+    assert git(wt, "config", "--get", "remote.origin.url").strip() == str(empty)  # what ls-remote is given
+    assert git(work, "config", "--get", "remote.origin.url").strip() == str(origin)
+    for order in (roots / "work", roots / "wt"), (roots / "wt", roots / "work"):
+        mod._remote_cache.clear()
+        recs = {Path(r["path"]).name: r for r in mod.scan_git(list(order), remote=True)}
+        assert recs["work"]["verdict"] == "clean and pushed", recs["work"]
+        assert recs["wt"]["verdict"] == "unpushed commits", recs["wt"]
+        assert recs["wt"]["local_only_commits"] > 0 and "origin unreachable" not in recs["wt"]["flags"]
+
+
 def test_a_head_naming_no_ref_while_refs_exist_is_not_unborn(tmp_path):
     """Round 4, 2 (S4): HEAD -> refs/heads/gone, a branch holds a commit origin lacks."""
     mod = load()
@@ -1068,9 +1107,12 @@ def test_untracked_files_get_a_lossless_archive_command_not_a_bare_git_add():
                       untracked_sample=["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"])
     rows = section_3_2(mod.render(doc_scan([co]))).splitlines()
     row = next(r for r in rows if r.startswith("| /p/u dir ") or r.startswith("| /p/u\\ dir "))
-    assert ("git -C '/p/u dir' ls-files -z --others --exclude-standard \\| gtar -C '/p/u dir' --null -T - "
-            "-cf <DEST>/'checkouts/abs/p/u dir/untracked.tar'`") in row
-    assert row.count("|") - row.count("\\|") == 5  # the pipe inside the command is escaped: the table row still has 4 cells
+    assert ("mkdir -p <DEST>/'checkouts/abs/p/u dir' && git -C '/p/u dir' ls-files -z --others --exclude-standard "
+            "> <DEST>/'checkouts/abs/p/u dir/untracked.list' && gtar -C '/p/u dir' --null "
+            "-T <DEST>/'checkouts/abs/p/u dir/untracked.list' -cf <DEST>/'checkouts/abs/p/u dir/untracked.tar'`") in row
+    # Codex pass 9: no pipe, so ls-files' own status decides (`ls-files | gtar` exits 0 when ls-files fails)
+    assert "|" not in row.replace("|", "", 5) and "\\|" not in row
+    assert row.count("|") == 5  # leading, three inner, trailing: four cells
     assert "git -C '/p/u dir' add -A -- ." in row
     assert "add` them" not in row
 

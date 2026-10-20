@@ -440,10 +440,13 @@ def render(d):
                 cmd.append("same paths as the primary / sibling checkout (cow copy): preserve once there")
             else:
                 # every untracked path, not the sample shown: an archive from `ls-files`, or `add -A` (which also
-                # stages the modified tracked files) on a branch (Codex pass 7 on PR 27)
+                # stages the modified tracked files) on a branch (Codex pass 7 on PR 27). Two commands joined by
+                # `&&`, the list in a file: `ls-files | gtar` exits 0 when ls-files fails (Codex pass 9)
                 cmd.append("archive every untracked path: "
-                           + shcode("mkdir -p <DEST>/{} && git -C {} ls-files -z --others --exclude-standard \\| "
-                                    "gtar -C {} --null -T - -cf <DEST>/{}", ck, raw_p, raw_p, f"{ck}/untracked.tar")
+                           + shcode("mkdir -p <DEST>/{} && git -C {} ls-files -z --others --exclude-standard > <DEST>/{} "
+                                    "&& gtar -C {} --null -T <DEST>/{} -cf <DEST>/{}",
+                                    ck, raw_p, f"{ck}/untracked.list", raw_p, f"{ck}/untracked.list",
+                                    f"{ck}/untracked.tar")
                            + " or " + shcode("git -C {} add -A -- .", raw_p)
                            + " on a branch, commit and push (stages the modified tracked files too)")
                 need = need if need != "no" else "yes: decide whether they are work"

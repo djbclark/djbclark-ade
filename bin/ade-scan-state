@@ -64,7 +64,7 @@ Git checkout verdicts (a checkout is a dir holding `.git`, found up to two level
   orphan branch     the branch is on no origin ref and HEAD has commits origin lacks
   dirty             modified or untracked non-ignored paths
   clean and pushed  none of the above: no commit on any local branch or on HEAD lies outside the
-                    origin refs (the local `refs/remotes/origin/*`, plus origin's own tips with --remote)
+                    origin refs (the local `refs/remotes/origin/*`; with --remote, only origin's own live tips)
   skipped: <reason>  a config key outside the allowlist, a redirected work tree, an unreadable
                     config or an unreadable `.git/HEAD` (`skipped: HEAD unreadable`: git does not
                     recognise the repository); nothing else was run
@@ -79,7 +79,8 @@ Git checkout verdicts (a checkout is a dir holding `.git`, found up to two level
                     checkouts below it may be missing: one record for that dir (path, found_via,
                     counts null), counted under `checkouts.incomplete`; the exit status stays 0.
 Local-only commits: `local_only_commits` is `git rev-list --count HEAD --branches --not
---remotes=origin` (plus every origin tip `ls-remote` returned with --remote; tips whose objects are
+--remotes=origin`; with --remote and an answering `ls-remote` it is `--not <every live origin tip>`
+instead, since a tracking ref of a branch deleted on origin is stale (tips whose objects are
 missing here are ignored, which can only overcount). When it is above 0, `local_only_branches` is a
 list of {branch, count}, one `rev-list --count` per local branch (at most 100 of them, the rest in
 `local_only_branches_uncounted`; a detached HEAD appears as branch `HEAD`): one extra git call per
@@ -563,13 +564,20 @@ def neutral_cwd() -> str:
     return _neutral_cwd[0]
 
 
-def ls_remote_heads(path: Path) -> dict[str, str] | None:
+def queried_origin_url(path: Path) -> str | None:
+    """The url `ls-remote` is given: `config --get remote.origin.url`, the last value in config order, so a
+    worktree-scoped one wins over the local one (`git remote get-url` prints the first, not that one).
+    None when it is unset or shaped like an option."""
     rc, url = git(path, "config", "--get", "remote.origin.url")
     url = url.strip()
     if rc != 0 or not url or url.startswith("-"):
         return None
     if url.startswith("."):  # a relative path means relative to the checkout, not to our cwd
         url = str((path / url).resolve())
+    return url
+
+
+def ls_remote_heads(url: str) -> dict[str, str] | None:
     env = git_env(network=True)
     # the temp dir's parent is a ceiling: git must not discover a repository above the neutral dir
     env["GIT_CEILING_DIRECTORIES"] = str(Path(neutral_cwd()).parent)
@@ -581,7 +589,7 @@ def ls_remote_heads(path: Path) -> dict[str, str] | None:
             for ln in out.splitlines() if "refs/heads/" in ln}
 
 
-_remote_cache: dict[str, tuple[dict[str, str] | None, bool]] = {}
+_remote_cache: dict[tuple[str, str], tuple[dict[str, str] | None, bool]] = {}
 
 
 def local_origin_refs(path: Path) -> dict[str, str] | None:
@@ -597,18 +605,19 @@ def origin_branches(path: Path, remote: bool) -> tuple[dict[str, str] | None, bo
     With --remote the tips come from `ls-remote`; when origin does not answer they come from the local
     remote refs instead (adversary round 4: None read as "unknown" and hid unpushed work) and the
     second value is False, as it is without --remote. None: no origin, or no readable local refs."""
-    rc, common = git(path, "rev-parse", "--git-common-dir")
-    key = str((path / common.strip()).resolve()) if rc == 0 and common.strip() else str(path)
-    if key in _remote_cache:
-        return _remote_cache[key]
-    rc, url = git(path, "remote", "get-url", "origin")
+    rc, _ = git(path, "remote", "get-url", "origin")
     if rc != 0:
-        result: tuple[dict[str, str] | None, bool] = (None, False)
-    else:
-        live = ls_remote_heads(path) if remote else None
-        result = (live, True) if live is not None else (local_origin_refs(path), False)
-    _remote_cache[key] = result
-    return result
+        return (None, False)
+    # Worktrees share a git dir but may carry worktree-scoped remote.origin.url values
+    # (extensions.worktreeConfig): the cache key is (git dir, the url ls-remote is given), never the
+    # git dir alone (Codex pass 9)
+    url = queried_origin_url(path)
+    rc, common = git(path, "rev-parse", "--git-common-dir")
+    key = (str((path / common.strip()).resolve()) if rc == 0 and common.strip() else str(path), url or "")
+    if key not in _remote_cache:
+        live = ls_remote_heads(url) if remote and url else None
+        _remote_cache[key] = (live, True) if live is not None else (local_origin_refs(path), False)
+    return _remote_cache[key]
 
 
 def skipped_record(path: Path, reason: str, keys: list[str] | None = None) -> dict:
@@ -626,11 +635,16 @@ def incomplete_record(path: Path, call: str, rc: int) -> dict:
     return skipped_record(path, f"{INCOMPLETE_PREFIX}{call} rc={rc}")
 
 
-def local_only_count(path: Path, revs: list[str], tips: list[str]) -> tuple[int | None, int]:
-    """(commits reachable from `revs` and from no origin ref nor `tips`, rc); None when git failed.
+def local_only_count(path: Path, revs: list[str], tips: list[str], live: bool = False) -> tuple[int | None, int]:
+    """(commits reachable from `revs` and from no origin ref, rc); None when git failed.
 
-    Missing tips are ignored (`--ignore-missing`): a tip whose objects are not here only overcounts."""
-    argv = ["rev-list", "--count", *revs, "--not", "--remotes=origin"]
+    Without a live answer origin's refs are the local `refs/remotes/origin/*`. With one (`live`, --remote
+    and `ls-remote` answered) they are exactly `tips`: a tracking ref whose branch was deleted on origin
+    holds nothing there (Codex pass 9). Missing tips are ignored (`--ignore-missing`): a tip whose objects
+    are not here only overcounts."""
+    argv = ["rev-list", "--count", *revs, "--not"]
+    if not live:
+        argv.append("--remotes=origin")
     if tips:
         argv += ["--ignore-missing", *tips]
     rc, n = git(path, *argv)
@@ -736,12 +750,12 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     local_only_branches: list[dict] = []
     branches_uncounted = 0
     if not unborn:
-        local_only, rc = local_only_count(path, ["HEAD", "--branches"], tips)
+        local_only, rc = local_only_count(path, ["HEAD", "--branches"], tips, live)
         if local_only is None:
             return incomplete_record(path, "rev-list --count HEAD --branches --not --remotes=origin", rc)
         if local_only:
             if detached:
-                n, rc = local_only_count(path, ["HEAD"], tips)
+                n, rc = local_only_count(path, ["HEAD"], tips, live)
                 if n is None:
                     return incomplete_record(path, "rev-list --count HEAD --not --remotes=origin", rc)
                 if n:
@@ -751,7 +765,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
                 return incomplete_record(path, "for-each-ref refs/heads", rc)
             names = out.splitlines()
             for name in names[:MAX_BRANCH_COUNTS]:
-                n, rc = local_only_count(path, [f"refs/heads/{name}"], tips)
+                n, rc = local_only_count(path, [f"refs/heads/{name}"], tips, live)
                 if n is None:
                     return incomplete_record(path, f"rev-list --count refs/heads/{name} "
                                                    "--not --remotes=origin", rc)
@@ -913,7 +927,8 @@ def main(argv=None) -> int:
                          "it are not followed (repeatable)")
     ap.add_argument("--remote", action="store_true",
                     help="ask origin with `git ls-remote --heads` (network call, run outside the "
-                         "checkout)")
+                         "checkout); its live tips, not the local refs/remotes/origin/* (stale after a "
+                         "branch is deleted there), then decide what is pushed")
     ap.add_argument("--fetch", action="store_true",
                     help="with --remote: `git fetch origin refs/heads/<branch>` (120 s limit) when the "
                          "origin tip's objects are missing locally, to compare it with HEAD; downloads "
