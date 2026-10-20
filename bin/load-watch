@@ -11,6 +11,8 @@
     load-watch guard status|list|add LABEL [KEY=VALUE...] [--note N]|rm LABEL|reset LABEL
     load-watch admit [--max-per-core N] [--wait SECONDS] [--json]
                                             may new work START now? exit 0 yes, 75 still too hot, 2 usage
+    load-watch watcher set [--paseo ID|--relay T] [--name N] [--chain C]|show [--json]|clear [T]|test [TEXT]
+                                            the one session told about every spike (`loadwatch` skill)
     load-watch install|uninstall            the launchd job (launchd/com.djbclark.load-watch.plist)
 
 Why (2026-10-18): agents keep starting heavy builds and tests on this 8-core Mac (load 24-41 that
@@ -36,11 +38,18 @@ work), ask djbclark before creating a CI copy of a repo that is not on GitHub, a
 the repo so `bg` refuses local builds and tests in it.
 
 Job guard (2026-10-18): each sample also checks launchd jobs (see the `job guard` section): a crash loop in
-any non-Apple job, and hangs, CPU, memory or run time in the jobs listed in ~/.config/load-watch/guard.tsv.
+any non-Apple job (20 failed restarts in 10 min, or 60 in 2 h), and hangs, CPU, memory or run time in the jobs listed in ~/.config/load-watch/guard.tsv.
 A trip boots the job out, kills its processes, pings Hermes and cools it down 90 min, then re-tests it; a
 5th round in 24 h disables it for good (`load-watch guard reset LABEL` brings it back). Events: guard.jsonl.
 
-State: ~/.local/state/load-watch/ (state.json, incidents.jsonl, guard.jsonl, briefs/, sample.log).
+Load watcher (djbclark, 2026-10-20): `watcher set` registers one agent session (the `loadwatch` skill does it;
+a Paseo agent by `paseo send`, anything else by relay.py). Every incident, every sustained load no agent
+explains, and every guard trip is also sent to it, so a session with a model investigates. One record
+(watcher.json): `set` replaces the last watcher and tells it so. A failed send is stamped `last_fail`, never
+fatal; the watcher is skipped for an incident only when it is the blamed session and the relay reached it.
+Unexplained sustained load reaches the watcher at most hourly (WATCHER_NOCPU_S), Hermes every LW_COOLDOWN_H.
+
+State: ~/.local/state/load-watch/ (state.json, incidents.jsonl, guard.jsonl, briefs/, sample.log, watcher.json).
 Registry: ~/.config/load-watch/ci-only.tsv (repo TAB mode TAB CI command or reason TAB date), read by `bg`
 through `load-watch ci check`. CI-first (djbclark, 2026-10-18): every repo `bg` builds in needs a decision.
 `ci`: `bg` refuses and names the CI command. `local`: runs here, with the reason (macOS-only, ...).
@@ -88,6 +97,7 @@ SUSTAIN_S = float(os.environ.get("LW_SUSTAIN_S", "300"))  # seconds of continuou
 MAX_GAP_S = 900  # a longer gap between samples is a sleep, not load
 MIN_CORES = float(os.environ.get("LW_MIN_CORES", "1.5"))
 COOLDOWN_S = float(os.environ.get("LW_COOLDOWN_H", "6")) * 3600
+WATCHER_NOCPU_S = 3600  # the watcher is told of unexplained sustained load at most this often
 MY_UID = os.getuid()
 STUCK = []  # commands ps saw in state U this sample
 PSTATE = {}  # pid -> (ps state, rss in KB) this sample, for the job guard
@@ -503,6 +513,113 @@ def notify(inc, g, top, path, load1, ncpu, dry):
     return relayed, ping
 
 
+# ---- the load watcher (djbclark, 2026-10-20) -------------------------------------------------------------
+# One agent session at a time owns the load loop (the `loadwatch` skill registers it). It hears about every
+# incident, every sustained load no agent explains, and every job-guard trip, on top of the blamed session and
+# Hermes, so someone with a model investigates. One record, so there is never a second watcher: `set`
+# replaces it and tells the one it replaced.
+
+def watcher():
+    try:
+        w = json.loads((STATE_DIR / "watcher.json").read_text())
+        return w if isinstance(w, dict) and w.get("target") and w.get("channel") in ("paseo", "relay") else None
+    except (OSError, ValueError):
+        return None
+
+
+def save_watcher(w):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_DIR / "watcher.json.tmp"
+    tmp.write_text(json.dumps(w, indent=1) + "\n")
+    tmp.replace(STATE_DIR / "watcher.json")
+
+
+def send_to(w, text):
+    """One line into the watcher's session: `paseo send` for a Paseo agent (relay.py cannot reach one: no pane),
+    else relay.py. True only when the channel says it delivered or queued it."""
+    if w["channel"] == "paseo":
+        cli = w.get("paseo_cli") or "paseo"
+        # PASEO_AGENT_ID unset so the daemon does not wrap it as agent-to-agent text; steer so a running turn
+        # takes it without being torn down (bin/self-slash, 2026-10-20)
+        env = {k: v for k, v in os.environ.items() if k not in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD")}
+        if w.get("paseo_home"):
+            env["PASEO_HOME"] = w["paseo_home"]
+        argv = [cli, "send", w["target"], "--no-wait", "--behavior", "steer", text]
+    else:
+        env, argv = None, [sys.executable, str(SF / "relay.py"), w["target"], text]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def tell_watcher(text, dry, skip=()):
+    """Tell the registered watcher, unless it is one of `skip` (the blamed session already got the brief).
+    Returns True/False for sent or failed, None when there is no watcher or it was skipped."""
+    w = watcher()
+    if not w or w["target"] in skip or (w.get("sid") and w["sid"] in skip):
+        return None
+    if dry:
+        print(f"watcher {w['channel']} {w['target']}: {text}")
+        return None
+    ok = send_to(w, f"load-watch, to the load watcher: {text} Investigate per the loadwatch skill.")
+    w["last_ok" if ok else "last_fail"] = stamp()
+    save_watcher(w)
+    log(f"watcher {w['target']} told={ok}")
+    return ok
+
+
+def cmd_watcher(a):
+    w = watcher()
+    if a.op == "show":
+        if not w:
+            print("no load watcher registered", file=sys.stderr)
+            return 1
+        print(json.dumps(w, indent=1) if a.json else
+              f"{w['channel']} {w['target']} ({w.get('name') or '-'}, cwd {w.get('cwd') or '-'}) since {w.get('since')}"
+              + (f"; last told {w['last_ok']}" if w.get("last_ok") else "")
+              + (f"; last failed {w['last_fail']}" if w.get("last_fail") else ""))
+        return 0
+    if a.op == "clear":
+        if not w:
+            print("no load watcher registered")
+            return 0
+        if a.target and a.target not in (w["target"], w.get("sid")):
+            print(f"load-watch: the watcher is {w['target']}, not {a.target}; left it", file=sys.stderr)
+            return 1
+        (STATE_DIR / "watcher.json").unlink(missing_ok=True)
+        print(f"cleared load watcher {w['target']}")
+        return 0
+    if a.op == "test":
+        if not w:
+            print("no load watcher registered", file=sys.stderr)
+            return 1
+        ok = send_to(w, a.target or "load-watch test: this session is the registered load watcher.")
+        print(f"{'sent to' if ok else 'could not reach'} {w['channel']} {w['target']}")
+        return 0 if ok else 1
+    # set: from flags, else this process's own session (a Paseo agent first: relay.py cannot reach one)
+    paseo = a.paseo or (None if a.relay else os.environ.get("PASEO_AGENT_ID"))
+    sid = a.sid or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    target = paseo or a.relay or sid or a.target
+    if not target:
+        print("load-watch watcher set: no session to register (pass --paseo ID or --relay TARGET)", file=sys.stderr)
+        return 2
+    new = {"channel": "paseo" if paseo else "relay", "target": target, "sid": sid, "name": a.name,
+           "cwd": a.cwd or os.getcwd(), "chain": a.chain, "since": stamp()}
+    if paseo:
+        new["paseo_cli"] = os.environ.get("PASEO_CLI") or "paseo"
+        new["paseo_home"] = os.environ.get("PASEO_HOME")
+    save_watcher(new)
+    print(f"load watcher: {new['channel']} {target}")
+    if w and w["target"] != target:
+        print(f"replaced {w['channel']} {w['target']} ({w.get('name') or '-'}, since {w.get('since')})")
+        told = send_to(w, f"load-watch: you are no longer the load watcher; {new['name'] or target} took over at "
+                          f"{new['since']}. Stop any load-watch follow-up you were running; nothing else changes.")
+        print(f"{'told' if told else 'could not reach'} the old watcher")
+    return 0
+
+
 # ---- job guard (djbclark, 2026-10-18) -------------------------------------------------------------------
 # A frequent watchdog for launchd jobs: stop a job that hangs, eats resources, or crash-loops, cool it down,
 # re-test it, and stop it for good after GUARD_MAX_ROUNDS rounds in a day. Why: that day three jobs had
@@ -515,6 +632,9 @@ GUARD_COOLDOWN_S = float(os.environ.get("LW_GUARD_COOLDOWN_S", "5400"))  # 90 mi
 GUARD_TEST_S = 1800        # a re-enabled job that trips within this window starts the next round
 GUARD_MAX_ROUNDS = 5       # rounds in 24 h before the job is disabled for good
 LOOP_RUNS, LOOP_WINDOW_S = 20, 600   # crash loop: this many failed restarts within this window
+# a slow crash loop (2026-10-20): litellm failed every ~32 s for 19 h after a half-finished upstream merge,
+# ~19 restarts per 10 min, just under the fast rule, 2,169 restarts and never tripped
+SLOW_LOOP_RUNS, SLOW_LOOP_WINDOW_S = 60, 7200
 LOOP_CHECK_S = 120         # `launchctl print` failing jobs at most this often
 LIMIT_KEYS = {"hang_s": 120.0, "max_cores": 0.0, "cores_s": 60.0, "max_rss_mb": 0.0, "max_runtime_s": 0.0}
 GUARD_EXEMPT = {LABEL}
@@ -599,6 +719,7 @@ def gevent(label, kind, detail):
 def gping(msg, dry):
     if not dry and HERMES_PING.exists():
         subprocess.run([str(HERMES_PING), f"djbclark-ade: load-watch guard: {msg}"], capture_output=True, timeout=60)
+    tell_watcher(f"job guard: {msg}.", dry)
 
 
 def guard_stop(label, reason, s, pids, table, t, dry):
@@ -682,11 +803,14 @@ def guard(st, table, t, dry):
         if loop_check and status not in ("0", "-"):
             runs = job_info(label)[0]
             if runs is not None:
-                hist = [h for h in s.get("loop", []) if t - h[0] <= LOOP_WINDOW_S] + [[t, runs]]
+                hist = [h for h in s.get("loop", []) if t - h[0] <= SLOW_LOOP_WINDOW_S] + [[t, runs]]
                 s["loop"] = hist
-                if runs - hist[0][1] >= LOOP_RUNS:
-                    reason = (f"crash loop: {runs - hist[0][1]} restarts in {(t - hist[0][0]) / 60:.0f} min, "
-                              f"last exit {status}")
+                fast = next(h for h in hist if t - h[0] <= LOOP_WINDOW_S)
+                for base, need in ((fast, LOOP_RUNS), (hist[0], SLOW_LOOP_RUNS)):
+                    if runs - base[1] >= need:
+                        reason = (f"crash loop: {runs - base[1]} restarts in {(t - base[0]) / 60:.0f} min, "
+                                  f"last exit {status}")
+                        break
         elif status in ("0", "-"):
             s.pop("loop", None)
         lim = rows.get(label, {}).get("limits")
@@ -821,11 +945,13 @@ def cmd_sample(a):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(brief(inc, g, work, load1, ncpu))
             relayed, ping = notify(inc, g, top, path, load1, ncpu, a.dry_run)
+            watched = tell_watcher(ping.removeprefix("djbclark-ade: ") + ".", a.dry_run,
+                                   skip=({s.get("sid"), s["id"]} - {None}) if relayed else ())
             rec = {"id": inc, "t": stamp(t), "load1": round(load1, 1), "ncpu": ncpu, "cores": round(g["cores"], 2),
                    "agent": s.get("agent"), "session": s.get("name") or s["id"], "sid": s.get("sid"),
                    "cwd": s.get("cwd"), "repo": top, "repo_guess": work["guess"],
                    "repos": [{k: r[k] for k in ("top", "cores", "bg_cores", "rule")} for r in work["repos"]],
-                   "procs": g["procs"][:8], "relayed": relayed,
+                   "procs": g["procs"][:8], "relayed": relayed, "watcher_told": watched,
                    "brief": str(path), "dry_run": a.dry_run}
             if a.dry_run:
                 print(json.dumps(rec, indent=1))
@@ -846,11 +972,16 @@ def cmd_sample(a):
                 "; ".join(f"{r['cores']} {r['cmd'][:60]}" for r in loose[:3]))
             st["loose_logged"] = True
             # 2026-10-18: load 90 from memory starvation and a hung AFS aklog blamed no agent and told no one
-            if "nocpu" not in st["cooldown"] and not a.dry_run and HERMES_PING.exists():
-                subprocess.run([str(HERMES_PING), f"djbclark-ade: load-watch: load {load1:.0f} on {ncpu} cores for "
-                                f"{SUSTAIN_S / 60:g}+ min and no agent build behind it; {why}"],
-                               capture_output=True, timeout=60)
+            msg = f"load {load1:.0f} on {ncpu} cores for {SUSTAIN_S / 60:g}+ min and no agent build behind it; {why}"
+            if "nocpu" not in st["cooldown"] and not a.dry_run:
+                if HERMES_PING.exists():
+                    subprocess.run([str(HERMES_PING), f"djbclark-ade: load-watch: {msg}"], capture_output=True, timeout=60)
                 st["cooldown"]["nocpu"] = t
+            # the watcher hears a recurrence hourly, Hermes only every COOLDOWN_S (djbclark, 2026-10-20)
+            last = st["cooldown"].get("nocpu-watcher")
+            if not a.dry_run and (last is None or t - last >= WATCHER_NOCPU_S):
+                if tell_watcher(msg + ".", a.dry_run) is not None:
+                    st["cooldown"]["nocpu-watcher"] = t
     elif not hot:
         st.pop("loose_logged", None)
     save_state(st)
@@ -884,7 +1015,7 @@ def cmd_status(a):
     for pid, (secs, _, cmd) in sorted(use.items(), key=lambda kv: -kv[1][0])[:8]:
         print(f"  {secs / span if span else 0:5.2f} cores  pid {pid}  {cmd[:110]}")
     for k, v in st.get("cooldown", {}).items():
-        print(f"  cooldown {k} until {stamp(v + COOLDOWN_S)}")
+        print(f"  cooldown {k} until {stamp(v + (WATCHER_NOCPU_S if k == 'nocpu-watcher' else COOLDOWN_S))}")
     return 0
 
 
@@ -1128,6 +1259,16 @@ def main():
     p.add_argument("--wait", type=float, default=0, metavar="SECONDS",
                    help="poll every 15 s for up to SECONDS before giving up with exit 75 (0: a pure check)")
     p.add_argument("--json", action="store_true")
+    p = sub.add_parser("watcher", help="the one agent session that hears about every spike (loadwatch skill)")
+    p.add_argument("op", choices=["set", "show", "clear", "test"])
+    p.add_argument("target", nargs="?", help="clear: only if it is this target; test: the text to send")
+    p.add_argument("--paseo", metavar="AGENT_ID", help="set: a Paseo agent (default: $PASEO_AGENT_ID)")
+    p.add_argument("--relay", metavar="TARGET", help="set: a relay.py target (default: $CLAUDE_CODE_SESSION_ID)")
+    p.add_argument("--sid", help="set: the agent's own session id, kept for matching")
+    p.add_argument("--name", help="set: a label for the session")
+    p.add_argument("--cwd", help="set: the session's directory (default: the current one)")
+    p.add_argument("--chain", help="set: its session-handoff chain, for /baton")
+    p.add_argument("--json", action="store_true", help="show: the record as JSON")
     sub.add_parser("install")
     sub.add_parser("uninstall")
     a = ap.parse_args()
@@ -1135,7 +1276,7 @@ def main():
         ap.print_usage(sys.stderr)
         return 2
     return {"sample": cmd_sample, "status": cmd_status, "incidents": cmd_incidents, "ack": cmd_ack,
-            "guard": cmd_guard, "admit": cmd_admit, "ci": cmd_ci, "ci-only": cmd_ci_only, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
+            "guard": cmd_guard, "watcher": cmd_watcher, "admit": cmd_admit, "ci": cmd_ci, "ci-only": cmd_ci_only, "install": cmd_install, "uninstall": cmd_install}[a.cmd](a)
 
 
 if __name__ == "__main__":

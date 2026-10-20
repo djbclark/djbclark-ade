@@ -83,6 +83,7 @@ def _sampler(tmp_path, monkeypatch):
         clock["t"] = t
         lw.cmd_sample(A())
         return (tmp_path / "sample.log").read_text() if (tmp_path / "sample.log").exists() else ""
+    at.lw = lw
     return at
 
 
@@ -92,6 +93,31 @@ def test_sustain_is_time_based_and_tolerates_slow_samples(tmp_path, monkeypatch)
     assert at(1200) == ""            # 200 s hot: not yet
     assert "sustained load" in at(1400)  # 400 s hot, samples 200 s apart (a stalled launchd)
 
+
+
+def test_unexplained_load_reaches_the_watcher_hourly(tmp_path, monkeypatch):
+    """Hermes hears an unexplained sustained load every 6 h; the watcher every hour (djbclark, 2026-10-20)."""
+    at = _sampler(tmp_path, monkeypatch)
+    lw = at.lw
+    load = {"v": 40.0}
+    monkeypatch.setattr(lw.os, "getloadavg", lambda: (load["v"],) * 3)
+    sent = []
+    monkeypatch.setattr(lw, "send_to", lambda w, text: sent.append(text) or True)
+    lw.save_watcher({"channel": "paseo", "target": "agent-a"})
+
+    def episode(start):
+        load["v"] = 40.0
+        at(start)
+        at(start + 400)
+        load["v"] = 1.0
+        at(start + 500)  # cools off: the next spike is a new episode
+
+    episode(1000)
+    assert len(sent) == 1 and "no agent build behind it" in sent[0]
+    episode(2000)                      # 1000 s later: inside the hour
+    assert len(sent) == 1
+    episode(1000 + lw.WATCHER_NOCPU_S + 100)
+    assert len(sent) == 2
 
 def test_long_gap_restarts_the_clock(tmp_path, monkeypatch):
     at = _sampler(tmp_path, monkeypatch)
@@ -197,6 +223,24 @@ def test_guard_catches_a_crash_loop_on_any_job(tmp_path, monkeypatch):
     assert s["state"] == "cooldown" and "crash loop: 30 restarts" in s["trip"]
 
 
+
+def test_guard_catches_a_slow_crash_loop(tmp_path, monkeypatch):
+    """litellm, 2026-10-20: a restart every ~32 s stays under the fast rule (20 per 10 min) for ever; the slow
+    rule (60 in 2 h) must trip it."""
+    runs = {"n": 100}
+    lw, calls = _guard(tmp_path, monkeypatch, {"com.y.slow": (None, "1")}, runs)
+    lw.PSTATE.clear()
+    st, t, checks = {}, 1000.0, 0
+    while st.get("guard", {}).get("com.y.slow", {}).get("state") != "cooldown":
+        assert checks < 60, "slow loop never tripped"
+        lw.guard(st, {}, t, False)
+        t += lw.LOOP_CHECK_S
+        runs["n"] += 3  # 15 per 10 min: under the fast rule
+        checks += 1
+    s = st["guard"]["com.y.slow"]
+    assert "crash loop: 60 restarts in 40 min" in s["trip"]
+    assert ["launchctl", "bootout", f"gui/{lw.MY_UID}/com.y.slow"] in calls
+
 # ---- brief attribution: the work's repo, and whether it ran under bg (incident 20261018-2056-82c4844a) -----------
 BG = str(Path.home() / "ops/site-private/bin/bg")
 
@@ -295,3 +339,73 @@ def test_proc_cwds_parses_one_lsof_call(monkeypatch):
     assert lw.proc_cwds([101, 100, 100, 0]) == {"100": "/r/a", "101": "/tmp/x y"}
     assert len(calls) == 1 and calls[0][-1] == "100,101"
     assert lw.proc_cwds([]) == {} and len(calls) == 1
+
+
+def fake_paseo(tmp_path, rc=0):
+    """A `paseo` stand-in that appends its argv (one JSON list per line) to sent.jsonl."""
+    log = tmp_path / "sent.jsonl"
+    cli = tmp_path / "paseo"
+    cli.write_text(f"#!{sys.executable}\nimport json, sys\nopen({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                   f"sys.exit({rc})\n")
+    cli.chmod(0o755)
+    return cli, log
+
+
+def run_env(tmp_path, env, *args):
+    base = {k: v for k, v in os.environ.items() if k not in ("PASEO_AGENT_ID", "PASEO_CLI", "CLAUDE_CODE_SESSION_ID")}
+    base.update(LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"), **env)
+    return subprocess.run([sys.executable, str(LW), *args], capture_output=True, text=True, env=base, timeout=30)
+
+
+def test_watcher_set_from_paseo_env_show_clear(tmp_path):
+    cli, log = fake_paseo(tmp_path)
+    env = {"PASEO_AGENT_ID": "agent-a", "PASEO_CLI": str(cli), "CLAUDE_CODE_SESSION_ID": "sid-a"}
+    assert run_env(tmp_path, {}, "watcher", "show").returncode == 1
+    r = run_env(tmp_path, env, "watcher", "set", "--name", "lw", "--chain", "load-spike-monitor-t")
+    assert r.returncode == 0 and "paseo agent-a" in r.stdout
+    w = json.loads(run_env(tmp_path, {}, "watcher", "show", "--json").stdout)
+    assert (w["channel"], w["target"], w["sid"], w["paseo_cli"], w["chain"]) == \
+        ("paseo", "agent-a", "sid-a", str(cli), "load-spike-monitor-t")
+    assert not log.exists()  # nobody to tell on a first set
+    assert run_env(tmp_path, {}, "watcher", "clear", "someone-else").returncode == 1
+    assert run_env(tmp_path, {}, "watcher", "clear", "sid-a").returncode == 0
+    assert run_env(tmp_path, {}, "watcher", "show").returncode == 1
+
+
+def test_watcher_set_replaces_and_tells_the_old_one(tmp_path):
+    cli, log = fake_paseo(tmp_path)
+    assert run_env(tmp_path, {"PASEO_AGENT_ID": "old", "PASEO_CLI": str(cli)}, "watcher", "set").returncode == 0
+    r = run_env(tmp_path, {"PASEO_AGENT_ID": "new", "PASEO_CLI": str(cli)}, "watcher", "set", "--name", "B")
+    assert r.returncode == 0 and "replaced paseo old" in r.stdout and "told the old watcher" in r.stdout
+    sent = [json.loads(ln) for ln in log.read_text().splitlines()]
+    assert len(sent) == 1 and sent[0][:6] == ["send", "old", "--no-wait", "--behavior", "steer", sent[0][5]]
+    assert "no longer the load watcher" in sent[0][5] and "B took over" in sent[0][5]
+    assert json.loads((tmp_path / "state" / "watcher.json").read_text())["target"] == "new"
+
+
+def test_watcher_set_needs_a_session(tmp_path):
+    assert run_env(tmp_path, {}, "watcher", "set").returncode == 2
+
+
+def test_tell_watcher_skips_relayed_offender_and_stamps(tmp_path, monkeypatch):
+    lw = load_module()
+    monkeypatch.setattr(lw, "STATE_DIR", tmp_path)
+    sent = []
+    monkeypatch.setattr(lw, "send_to", lambda w, text: sent.append((w["target"], text)) or True)
+    assert lw.tell_watcher("x.", False) is None  # no watcher registered
+    lw.save_watcher({"channel": "paseo", "target": "agent-a", "sid": "sid-a"})
+    assert lw.tell_watcher("x.", False, skip={"sid-a"}) is None and not sent
+    assert lw.tell_watcher("load 30.", False) is True
+    assert sent[0][0] == "agent-a" and "load 30." in sent[0][1] and "loadwatch skill" in sent[0][1]
+    assert "last_ok" in json.loads((tmp_path / "watcher.json").read_text())
+    monkeypatch.setattr(lw, "send_to", lambda w, text: False)
+    assert lw.tell_watcher("y.", False) is False
+    assert "last_fail" in json.loads((tmp_path / "watcher.json").read_text())
+
+
+def test_watcher_record_must_be_well_formed(tmp_path, monkeypatch):
+    lw = load_module()
+    monkeypatch.setattr(lw, "STATE_DIR", tmp_path)
+    for bad in ("[]", "{}", '{"channel": "smoke", "target": "x"}', "not json"):
+        (tmp_path / "watcher.json").write_text(bad)
+        assert lw.watcher() is None
