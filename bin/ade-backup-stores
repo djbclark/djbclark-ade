@@ -45,7 +45,9 @@ the exit status is 1 at the end. A Cursor session whose required `meta.json` is 
 or gone during the copy is an error naming the session directory (relative to the store root, no content),
 and the store is `partial`: the resume picker reads it, so the db copy alone is not lossless.
 A store that exists but produced no file prints `<store>: 0 files copied although its roots exist` on stderr
-(not an error, not `partial`: an empty store is real).
+(not an error, not `partial`: an empty store is real). Inside a Cursor tree a `store.db` that is a symlink
+is skipped (`symlink`), never opened. The dry run's bytes for a SQLite file are the main file plus its `-wal`
+file, an upper bound on the snapshot the online backup writes.
 
 Default dest: ~/.local/state/ade/backups/<UTC timestamp>/ (0700, files 0600). The generation is built in
 <dest>.part/ and renamed to <dest>/ at the end: a <dest>.part/ directory, or a generation without
@@ -493,6 +495,17 @@ def tree_dbs(store):
     return found
 
 
+def wal_size(db):
+    """Bytes of the database's -wal file when one exists (a regular file): the dry run's estimate of a
+    SQLite snapshot is the main file plus its WAL, an upper bound on what the online backup produces,
+    since committed pages may still live only in the WAL (Codex on PR 24)."""
+    wal = db.with_name(db.name + "-wal")
+    try:
+        return wal.stat().st_size if wal.is_file() and not wal.is_symlink() else 0
+    except OSError:
+        return 0
+
+
 def sidecar_gap(side, excluder):
     """Why the sidecar at `side` cannot be copied, or None when it can."""
     if side.is_symlink():
@@ -530,6 +543,9 @@ def copy_tree_store(store, run, excluder):
         run.error(root, NotADirectoryError("store root is not a directory"))
         return
     for src in dbs:
+        if src.is_symlink():  # Path.is_file() in tree_dbs follows links; a linked db must never be opened
+            run.skip(src, "symlink")
+            continue
         if is_excluded_name(src.name) or excluder.path(src):
             run.skip(src, "excluded credential path")
             continue
@@ -619,7 +635,7 @@ def plan_store(store, excluder):
                 continue
             if f.is_file():
                 count += 1
-                size += f.stat().st_size
+                size += f.stat().st_size + wal_size(f)
             elif not os.path.lexists(f):
                 run.absent(f)
             else:
@@ -632,8 +648,11 @@ def plan_store(store, excluder):
             run.error(store["root"], NotADirectoryError("store root is not a directory"))
         else:
             for db in tree_dbs(store):
+                if db.is_symlink():
+                    run.skip(db, "symlink")
+                    continue
                 count += 1
-                size += db.stat().st_size
+                size += db.stat().st_size + wal_size(db)
                 for pat in store["sidecars"]:
                     side = db.parent / pat.format(stem=db.stem, name=db.name)
                     why = sidecar_gap(side, excluder)
@@ -883,6 +902,10 @@ def check_schemas(stores):
         for db in dbs:
             if not db.is_file():
                 print(f"{store['name']}: {db}: missing")
+                continue
+            if db.is_symlink():
+                print(f"{store['name']}: {db}: symlink, not opened")
+                problems += 1
                 continue
             try:
                 con = ro_connect(db)

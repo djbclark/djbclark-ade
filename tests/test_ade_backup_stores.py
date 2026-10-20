@@ -709,7 +709,7 @@ def test_grok_memory_v2_and_memtrace_are_backed_up_and_counted_by_the_dry_run(re
     assert (dest / "grok/memory-v2/x.json").read_text() == '{"m": 1}'
     assert (dest / "grok/memtrace/t1/trace.jsonl").is_file()
     entry = manifest_of(dest)["stores"][0]
-    assert plan["file_count"] == entry["file_count"] == 2 and plan["bytes"] == entry["bytes"]
+    assert plan["file_count"] == entry["file_count"] == 2 and plan["bytes"] >= entry["bytes"]  # plan counts the -wal too
     # sessions is absent: recorded per path, the store stays ok because other roots exist
     assert entry["status"] == "ok" and entry["missing"] == [str(home / ".grok/sessions")]
 
@@ -865,4 +865,47 @@ def test_dry_run_counts_the_sidecar_a_cursor_store_would_copy(real, capsys):
     assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 0
     entry = manifest_of(dest)["stores"][0]
     assert plan["file_count"] == entry["file_count"] == 2
-    assert plan["bytes"] == entry["bytes"]
+    assert plan["bytes"] >= entry["bytes"]  # the estimate adds the -wal file
+
+
+def test_a_symlinked_store_db_inside_a_cursor_tree_is_skipped_not_opened(real, capsys):
+    mod, home, tmp = real
+    sdir = make_cursor_session(home)  # a real session, copied
+    link_dir = home / ".cursor/chats/hashB/uuid2"
+    link_dir.mkdir(parents=True)
+    outside = tmp / "outside.db"
+    con = make_wal_db(outside, ["SECRET-OUTSIDE-ROW"])
+    con.close()
+    os.symlink(outside, link_dir / "store.db")
+    (link_dir / "meta.json").write_text("{}")
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "ok" and (dest / "cursor-chats/hashA/uuid1/store.db").is_file()
+    assert not (dest / "cursor-chats/hashB/uuid2/store.db").exists()
+    assert any(s["why"] == "symlink" and s["path"].endswith("hashB/uuid2/store.db") for s in entry["skipped"])
+    assert b"SECRET-OUTSIDE-ROW" not in all_bytes(dest)
+    capsys.readouterr()  # drop the real run's stdout before the JSON dry run
+    assert mod.main(["--only", "cursor-chats", "--dry-run", "--json", "--dest", str(home / "o")]) == 0
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    assert plan["file_count"] == 2 and plan["skipped_count"] == 1
+    assert sdir.name == "uuid1"
+
+
+def test_dry_run_sqlite_estimate_includes_the_wal_file(real, capsys):
+    mod, home, _ = real
+    sdir = home / ".cursor/chats/hashA/uuid1"
+    con = make_wal_db(sdir / "store.db", ["x" * 4096] * 64)  # the rows live only in -wal while the writer is open
+    (sdir / "meta.json").write_text("{}")
+    main_size = (sdir / "store.db").stat().st_size
+    wal_size = (sdir / "store.db-wal").stat().st_size
+    assert wal_size > main_size
+    assert mod.main(["--only", "cursor-chats", "--dry-run", "--json", "--dest", str(home / "o")]) == 0
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    assert plan["bytes"] == main_size + wal_size + (sdir / "meta.json").stat().st_size
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["bytes"] <= plan["bytes"]  # the snapshot folds the WAL pages in: the estimate is an upper bound
+    assert entry["bytes"] > main_size  # and the WAL rows did reach the copy
+    con.close()
