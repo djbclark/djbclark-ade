@@ -403,7 +403,7 @@ def render(d):
             # never "nothing to capture" (Codex pass 19 on PR 27); no git command runs in a checkout the scan refused
             parent, base = os.path.split(raw_p.rstrip("/"))
             w(f"| {p} | counts unknown ({esc(c['verdict'])}) | re-scan once the cause is fixed, or archive the whole "
-              f"directory: {shcode('mkdir -p <DEST>/{} && \"$GTAR\" -C {} -cf <DEST>/{} {}', ck, parent or '/', f'{ck}/whole.tar', base)}"
+              f"directory: {shcode('mkdir -p <DEST>/{} && \"$GTAR\" -C {} -cf <DEST>/{} -- {}', ck, parent or '/', f'{ck}/whole.tar', base)}"
               " (no git command: the scan did not run one there either) | yes: counts unknown; re-scan or archive whole |")
             continue
         untr = [u for u in (c.get("untracked_sample") or []) if u != "graft/"]
@@ -527,8 +527,8 @@ def render(d):
             # an absorbed submodule carries `core.worktree`, which this scanner refuses (`skipped: worktree redirected`,
             # adversary round 24), so the inspection is by hand, inside each submodule
             cmd.append("list them with " + shcode("git -C {} config --file .gitmodules --get-regexp '^submodule\\..*\\.path$'", raw_p)
-                       + ", then in each: " + code("git -C {}/<sub> status --porcelain", raw_p) + ", "
-                       + code("git -C {}/<sub> log --oneline --branches --tags --not --remotes", raw_p) + " and "
+                       + ", then in each: " + shcode("git -C {}/<sub> status --porcelain", raw_p) + ", "
+                       + shcode("git -C {}/<sub> log --oneline --branches --tags --not --remotes", raw_p) + " and "
                        + shcode("mkdir -p <DEST>/{}/<sub> && git -C {}/<sub> bundle create <DEST>/{}/<sub>/all.bundle --all",
                                 ck, raw_p, ck)
                        + " before any cleanup (the scanner skips absorbed submodules: `core.worktree`)")

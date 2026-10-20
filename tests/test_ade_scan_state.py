@@ -1172,7 +1172,7 @@ def test_doc_generator_survives_skipped_and_incomplete_records():
     for path_, verdict in (("/p/skipped", "skipped: worktree redirected"), ("/p/broken", "scan incomplete: status rc=124")):
         row = next(r for r in rows if r.startswith(f"| {path_} "))
         assert f"counts unknown ({verdict})" in row and "re-scan once the cause is fixed" in row
-        assert f"\"$GTAR\" -C /p -cf <DEST>/checkouts/abs{path_}/whole.tar {path_.rsplit('/', 1)[1]}" in row
+        assert f"\"$GTAR\" -C /p -cf <DEST>/checkouts/abs{path_}/whole.tar -- {path_.rsplit('/', 1)[1]}" in row
         assert "git" not in row.split("| re-scan")[1].split("(no git command")[0]
         assert row.rstrip().endswith("| yes: counts unknown; re-scan or archive whole |")
     assert "is listed with a whole-directory archive" in section_3_2(text)
@@ -2037,6 +2037,22 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
     assert both.rstrip().endswith("| yes: decide whether they are work |")
     assert not [r for r in rows if r.startswith("| /p/clean ")]
     assert "A checkout flagged `submodules not inspected` is always listed too" in section_3_2(text)
+    # adversary round 25 (MEDIUM): the by-hand commands went through code(), not shcode(); a path shaped like a
+    # shell expansion ran when pasted
+    evil = doc_checkout("/p/sub$(touch PWNED_SUB)", flags=[flag], verdict=flag)
+    rows = section_3_2(mod.render(doc_scan([evil]))).splitlines()
+    row = next(r for r in rows if r.startswith("| /p/sub"))
+    plain = row.replace("\\$", "$").replace("\\(", "(").replace("\\)", ")")
+    assert "git -C '/p/sub$(touch PWNED_SUB)'/<sub> status --porcelain" in plain
+    assert "git -C '/p/sub$(touch PWNED_SUB)'/<sub> log --oneline" in plain
+    assert "git -C '/p/sub$(touch PWNED_SUB)'/<sub> bundle create" in plain
+    assert "-C /p/sub$(touch" not in plain
+    # round 25 (LOW): a basename starting with `-` was read by tar as an option; `--` ends the options
+    dash = doc_checkout("/p/-opt", flags=["scan incomplete: status rc=124"], verdict="scan incomplete: status rc=124",
+                        modified=None, untracked=None, unpushed=None, ahead_of_origin=None, stashes=None,
+                        local_only_commits=None, on_origin=None)
+    row = next(r for r in section_3_2(mod.render(doc_scan([dash]))).splitlines() if r.startswith("| /p/-opt "))
+    assert "-cf <DEST>/checkouts/abs/p/-opt/whole.tar -- -opt" in row
 
 
 def test_section_1_verdict_rows_sum_to_the_checkout_count():
