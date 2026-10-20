@@ -108,6 +108,13 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    2026-10-20, manifest `MANIFEST-2026-10-20.txt`, see docs/ade-everywhere-inventory-2026-10-20-stores.md 5.5).
    Nothing reads it; once the 30-day keep lapses, `rm -r` it and drop this item.
 
+## ADE-everywhere Phase 0, preserve and classify (djbclark, 2026-10-20; proposal section 8 item 1)
+
+1. **Backups: done 2026-10-20 (PR #TBD).** `bin/ade-backup-stores` takes the `.backup`-API copy of every live session
+   database, the per-session trees and file stores of inventory section 3, and the Hermes JSONL export, into
+   `~/.local/state/ade/backups/<UTC>/` with a `MANIFEST.json`. Nothing is deleted from any store. Open: run it on a
+   schedule (no launchd job yet), and decide how long generations are kept; each is ~10 GB.
+
 ## Keep every machine current, and a changelog (djbclark, 2026-10-20; proposal Q26, T8)
 
 djbclark, 2026-10-20: "We need a clear way to keep all of djbclark-ade up-to-date on new

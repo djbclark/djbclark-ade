@@ -1,0 +1,613 @@
+#!/usr/bin/env python3
+"""ade-backup-stores: one consistent copy of every agent session store, plus the Hermes JSONL export.
+
+ADE-everywhere Phase 0 (docs/ade-everywhere-proposal.md section 8 item 1), implementing section 3 of
+docs/ade-everywhere-inventory-2026-10-20-stores.md. Reads only: nothing in any source store is deleted
+or modified (SQLite sources are opened `mode=ro`).
+
+  ade-backup-stores [--dest DIR] [--dry-run] [--only NAME[,NAME]] [--json]
+
+  1. single live SQLite files: the SQLite online backup API (`Connection.backup`), never a `cp` of a
+     WAL database;
+  2. per-session SQLite trees (Cursor, Antigravity): each db the same way, its sidecar (`meta.json`,
+     `<uuid>.meta`) copied beside it;
+  3. file stores: `shutil.copytree` with an ignore function that drops every credential path and name
+     (inventory section 5 item 5), the `credential-bak` vault, symlinks and non-regular files;
+  4. `hermes sessions export` (JSONL) into <dest>/hermes-export/. The export refuses a session above
+     `sessions.max_export_messages` (20,000 by default) and the bulk form refuses everything when any
+     session is over it: then each session under the limit is exported alone and the oversize ones are
+     listed in the manifest (`hermes_export.truncated`); the hermes-state copy holds them whole.
+
+<dest>/MANIFEST.json records, per store, the source, destination, bytes, sha256 of each file produced,
+start and end time, the exclusions applied and the errors. A missing, locked or unreadable store is an
+error in the manifest, the run goes on, and the exit status is 1 at the end.
+
+Default dest: ~/.local/state/ade/backups/<UTC timestamp>/ (0700, files 0600). Refuses (exit 2) a dest
+inside a source store or inside a git repo. Exit: 0 clean, 1 at least one error, 2 refused or bad usage.
+Cursor `acp-sessions` and the handoffs `chains/` are pruned by something else, so those stores come first.
+"""
+import argparse
+import concurrent.futures
+import datetime
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import shutil
+import socket
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+from urllib.parse import quote
+
+VERSION = 1
+SKIPPED_CAP = 100
+HERMES_WORKERS = 4
+HERMES_TIMEOUT = 300
+
+# Inventory section 5 item 5: basenames that never enter a backup, wherever they sit in a copied
+# tree. Each pattern also matches its dated `.bak` copies (`mcp.json.bak-2026-10-12`).
+EXCLUDE_NAMES = [
+    "*.key", ".credentials.json", ".claude.json", "auth.json", "oauth_creds.json", "credentials.json",
+    "acp_token.json", "daemon-keypair.json", "local-credential", "hyper.json", "providers.json",
+    ".env", ".env.*", "jira-sites.json", "jira-tokens", "Cookies", "agent.db", "data.db",
+    "mcp_config.json", "mcp.json", "opencode.json", "opencode.bak", "crushrc*",
+    "credential-bak",
+]
+# The same list as home-relative paths (the files the inventory names, checked on the resolved path too).
+EXCLUDE_PATHS = [
+    ".claude/.credentials.json", ".claude.json", ".claude/sessions/*.key", ".codex/auth.json",
+    ".gemini/oauth_creds.json", ".local/share/opencode/auth.json", ".grok/auth.json",
+    ".zcode/v2/credentials.json", ".paseo/daemon-keypair.json", ".paseo/local-credential",
+    ".gemini/antigravity-acp/acp_token.json", ".hermes/.env", ".cline/data/settings/providers.json",
+    ".omp/agent/agent.db", ".local/share/crush/hyper.json", ".copilot/data.db", ".orca/jira-tokens",
+    ".orca/jira-sites.json", ".config/opencode/opencode.json", ".cursor/mcp.json",
+    ".gemini/config/mcp_config.json", ".config/crush/crushrc*", ".local/state/ade/credential-bak",
+]
+OTHER_SKIPS = ["symlinks", "sockets and other non-regular files", "antigravity brain/*/.system_generated/worktrees"]
+
+
+def is_excluded_name(name):
+    for pat in EXCLUDE_NAMES:
+        if fnmatch.fnmatchcase(name, pat) or fnmatch.fnmatchcase(name, pat + ".bak*") \
+                or fnmatch.fnmatchcase(name, pat + "-*.bak"):
+            return True
+    return False
+
+
+class Excluder:
+    def __init__(self, home):
+        self.patterns = [str(home / rel) for rel in EXCLUDE_PATHS]
+
+    def path(self, p):
+        """True when p (or its resolved target) is a credential path or has an excluded name."""
+        for cand in {str(p), os.path.realpath(p)}:
+            if any(is_excluded_name(part) for part in Path(cand).parts[1:]):
+                return True
+            for pat in self.patterns:
+                if fnmatch.fnmatchcase(cand, pat) or cand.startswith(pat + os.sep):
+                    return True
+        return False
+
+
+def build_stores(home):
+    """Inventory section 3, in backup order: the stores something else prunes come first."""
+    h = home
+    def sqlite(name, *files):
+        return {"name": name, "kind": "sqlite", "files": [h / f for f in files]}
+    def tree(name, root, dbs, sidecars):
+        return {"name": name, "kind": "sqlite-tree", "root": h / root, "dbs": dbs, "sidecars": sidecars}
+    def files(name, *roots):
+        return {"name": name, "kind": "files", "roots": [(label, h / rel) for label, rel in roots]}
+    agy = ".gemini/antigravity"
+    return [
+        files("handoffs", ("handoffs", ".local/state/handoffs")),
+        tree("cursor-acp-sessions", ".cursor/acp-sessions", ["*/store.db"], ["meta.json"]),
+        tree("cursor-chats", ".cursor/chats", ["*/*/store.db"], ["meta.json"]),
+        files("cursor-projects", ("projects", ".cursor/projects")),
+        sqlite("hermes-state", ".hermes/state.db"),
+        sqlite("opencode", ".local/share/opencode/opencode.db"),
+        sqlite("zcode-db", ".zcode/cli/db/db.sqlite", ".zcode/v2/tasks-index.sqlite"),
+        files("zcode-files", ("rollout", ".zcode/cli/rollout"), ("artifacts", ".zcode/cli/artifacts"),
+              ("memories", ".zcode/cli/memories"), ("acp-lazy-sessions.json", ".zcode/v2/acp-lazy-sessions.json")),
+        sqlite("crush-acp", ".local/share/crush-acp/crush.db"),
+        sqlite("crush-tui", ".config/crush/.crush/crush.db"),
+        sqlite("crush-repo", "src/djbclark-ade/.crush/crush.db"),
+        sqlite("codex-db", ".codex/state_5.sqlite", ".codex/logs_2.sqlite", ".codex/memories_1.sqlite",
+               ".codex/goals_1.sqlite"),
+        files("codex-files", ("sessions", ".codex/sessions"), ("session_index.jsonl", ".codex/session_index.jsonl")),
+        sqlite("copilot-db", ".copilot/session-store.db"),
+        files("copilot-files", ("session-state", ".copilot/session-state")),
+        tree("antigravity-cli-db", f"{agy}-cli", ["conversations/*.db", "conversation_summaries.db"], ["{stem}.meta"]),
+        tree("antigravity-ide-db", agy, ["conversations/*.db", "conversation_summaries.db"], ["{stem}.meta"]),
+        tree("antigravity-acp-db", f"{agy}-acp", ["conversations/*.db", "conversation_summaries.db"], ["{stem}.meta"]),
+        files("antigravity-cli-files", ("brain", f"{agy}-cli/brain"), ("history.jsonl", f"{agy}-cli/history.jsonl"),
+              ("annotations", f"{agy}-cli/annotations"), ("implicit", f"{agy}-cli/implicit"),
+              ("jetbox_summaries_proto.pb", f"{agy}-cli/jetbox_summaries_proto.pb")),
+        files("antigravity-ide-files", ("brain", f"{agy}/brain"),
+              ("agyhub_summaries_proto.pb", f"{agy}/agyhub_summaries_proto.pb"),
+              ("antigravity_state.pbtxt", f"{agy}/antigravity_state.pbtxt")),
+        files("antigravity-acp-files", ("brain", f"{agy}-acp/brain")),
+        files("claude", ("projects", ".claude/projects"), ("file-history", ".claude/file-history"),
+              ("session-env", ".claude/session-env"), ("tasks", ".claude/tasks"), ("teams", ".claude/teams"),
+              ("sessions", ".claude/sessions"), ("history.jsonl", ".claude/history.jsonl")),
+        files("qwen", ("projects", ".qwen/projects")),
+        files("cline", ("sessions", ".cline/data/sessions")),
+        tree("cline-db", ".cline/data/db", ["*.db"], []),
+        files("grok", ("sessions", ".grok/sessions")),
+        sqlite("grok-db", ".grok/worktrees.db"),
+        files("gemini-cli", ("tmp", ".gemini/tmp")),
+        files("omp", ("sessions", ".omp/agent/sessions")),
+        sqlite("omp-db", ".omp/agent/history.db"),
+        files("muse", ("sessions", ".local/share/muse/sessions")),
+        sqlite("muse-db", ".local/share/muse/session-index.db"),
+        files("paseo", ("agents", ".paseo/agents"), ("projects", ".paseo/projects"),
+              ("agent-requests", ".paseo/agent-requests")),
+        files("herdr", ("session.json", ".config/herdr/session.json"),
+              ("session-history.json", ".config/herdr/session-history.json"),
+              ("session-snapshots", ".config/herdr/session-snapshots")),
+        files("hermes-memory", ("hermes-memory", "hermes-memory")),
+    ]
+
+
+def store_roots(store):
+    """Directories a destination must not sit inside."""
+    if store["kind"] == "sqlite":
+        return [f.parent for f in store["files"]]
+    if store["kind"] == "sqlite-tree":
+        return [store["root"]]
+    return [p if p.is_dir() else p.parent for _, p in store["roots"]]
+
+
+def utcnow():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def sha256_of(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def backup_sqlite(src, dst):
+    """Online backup of one SQLite db: a consistent copy while the writer lives."""
+    uri = "file:" + quote(os.path.realpath(src), safe="/") + "?mode=ro"
+    tmp = dst.with_name(dst.name + ".part")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    source = sqlite3.connect(uri, uri=True, timeout=30)
+    try:
+        target = sqlite3.connect(str(tmp))
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    except BaseException:
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            Path(str(tmp) + suffix).unlink(missing_ok=True)
+        raise
+    finally:
+        source.close()
+    for suffix in ("-wal", "-shm", "-journal"):
+        Path(str(tmp) + suffix).unlink(missing_ok=True)
+    os.replace(tmp, dst)
+
+
+class StoreRun:
+    """One store's progress: skipped paths, errors, and (after finish) the files produced."""
+
+    def __init__(self, store, out_dir):
+        self.store = store
+        self.out = out_dir
+        self.started = utcnow()
+        self.t0 = time.monotonic()
+        self.errors = []
+        self.skipped = []
+        self.skipped_count = 0
+        self.sources = []
+        self.source_of = {}
+
+    def error(self, source, exc):
+        msg = f"{type(exc).__name__}: {exc}"
+        self.errors.append({"store": self.store["name"], "source": str(source), "error": msg})
+
+    def skip(self, path, why):
+        self.skipped_count += 1
+        if len(self.skipped) < SKIPPED_CAP:
+            self.skipped.append({"path": str(path), "why": why})
+
+
+def make_ignore(run, excluder):
+    def ignore(directory, names):
+        out = []
+        for n in names:
+            p = os.path.join(directory, n)
+            if is_excluded_name(n) or excluder.path(p):
+                out.append(n)
+                run.skip(p, "excluded credential path")
+            elif os.path.islink(p):
+                out.append(n)
+                run.skip(p, "symlink")
+            elif not (os.path.isfile(p) or os.path.isdir(p)):
+                out.append(n)
+                run.skip(p, "not a regular file")
+            elif n == "worktrees" and os.path.basename(directory) == ".system_generated":
+                out.append(n)
+                run.skip(p, "git checkout inside an antigravity brain dir")
+        return out
+    return ignore
+
+
+def copy_file_store(store, run, excluder):
+    for label, src in store["roots"]:
+        dst = run.out / label
+        run.sources.append(str(src))
+        try:
+            if excluder.path(src):
+                run.skip(src, "excluded credential path")
+                continue
+            if src.is_dir():
+                try:
+                    shutil.copytree(src, dst, ignore=make_ignore(run, excluder), copy_function=shutil.copy2)
+                except shutil.Error as exc:
+                    for item in exc.args[0]:
+                        run.error(item[0], OSError(item[2]))
+            else:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+        except OSError as exc:
+            run.error(src, exc)
+
+
+def copy_sqlite_store(store, run, excluder):
+    for src in store["files"]:
+        run.sources.append(str(src))
+        dst = run.out / src.name
+        try:
+            if excluder.path(src):
+                run.skip(src, "excluded credential path")
+                continue
+            backup_sqlite(src, dst)
+            run.source_of[dst] = str(src)
+        except (OSError, sqlite3.Error) as exc:
+            run.error(src, exc)
+
+
+def tree_dbs(store):
+    root = store["root"]
+    found = []
+    for pat in store["dbs"]:
+        found.extend(p for p in sorted(root.glob(pat)) if p.is_file())
+    return found
+
+
+def copy_tree_store(store, run, excluder):
+    root = store["root"]
+    run.sources.append(str(root))
+    try:
+        dbs = tree_dbs(store)
+    except OSError as exc:
+        run.error(root, exc)
+        return
+    if not root.is_dir():
+        run.error(root, FileNotFoundError("store missing"))
+        return
+    for src in dbs:
+        if is_excluded_name(src.name) or excluder.path(src):
+            run.skip(src, "excluded credential path")
+            continue
+        dst = run.out / src.relative_to(root)
+        try:
+            backup_sqlite(src, dst)
+            run.source_of[dst] = str(src)
+        except (OSError, sqlite3.Error) as exc:
+            run.error(src, exc)
+            continue
+        for pat in store["sidecars"]:
+            side = src.parent / pat.format(stem=src.stem, name=src.name)
+            if side.is_file() and not side.is_symlink() and not excluder.path(side):
+                try:
+                    shutil.copy2(side, dst.parent / side.name)
+                except OSError as exc:
+                    run.error(side, exc)
+
+
+def seal_and_hash(run):
+    """Set 0700/0600 on everything produced and hash each file; returns (entries, bytes)."""
+    entries = []
+    total = 0
+    if not run.out.exists():
+        return entries, total
+    for dirpath, dirnames, filenames in os.walk(run.out):
+        os.chmod(dirpath, 0o700)
+        for fn in sorted(filenames):
+            p = Path(dirpath) / fn
+            try:
+                os.chmod(p, 0o600)
+                size = p.stat().st_size
+                entry = {"path": str(p.relative_to(run.out.parent)), "bytes": size, "sha256": sha256_of(p)}
+                if p in run.source_of:
+                    entry["source"] = run.source_of[p]
+                entries.append(entry)
+                total += size
+            except OSError as exc:
+                run.error(p, exc)
+    return entries, total
+
+
+def run_store(store, dest, excluder):
+    run = StoreRun(store, dest / store["name"])
+    {"sqlite": copy_sqlite_store, "sqlite-tree": copy_tree_store, "files": copy_file_store}[store["kind"]](
+        store, run, excluder)
+    entries, total = seal_and_hash(run)
+    return run, {
+        "store": store["name"], "kind": store["kind"], "sources": run.sources, "destination": str(run.out),
+        "bytes": total, "file_count": len(entries), "files": entries, "started": run.started, "ended": utcnow(),
+        "seconds": round(time.monotonic() - run.t0, 1), "skipped_count": run.skipped_count,
+        "skipped": run.skipped, "errors": run.errors,
+    }
+
+
+def plan_store(store, excluder):
+    """--dry-run: what the store would produce, without writing anything."""
+    run = StoreRun(store, Path("/nonexistent"))
+    count = size = 0
+    if store["kind"] == "sqlite":
+        for f in store["files"]:
+            if excluder.path(f):
+                continue
+            if f.is_file():
+                count += 1
+                size += f.stat().st_size
+            else:
+                run.error(f, FileNotFoundError("store missing"))
+    elif store["kind"] == "sqlite-tree":
+        if not store["root"].is_dir():
+            run.error(store["root"], FileNotFoundError("store missing"))
+        else:
+            for db in tree_dbs(store):
+                count += 1
+                size += db.stat().st_size
+    else:
+        for _, src in store["roots"]:
+            if excluder.path(src):
+                continue
+            if src.is_dir():
+                for dirpath, dirnames, filenames in os.walk(src):
+                    ig = set(make_ignore(run, excluder)(dirpath, dirnames + filenames))
+                    dirnames[:] = [d for d in dirnames if d not in ig]
+                    for fn in filenames:
+                        if fn not in ig:
+                            try:
+                                size += os.stat(os.path.join(dirpath, fn)).st_size
+                                count += 1
+                            except OSError as exc:
+                                run.error(os.path.join(dirpath, fn), exc)
+            elif src.is_file():
+                count += 1
+                size += src.stat().st_size
+            else:
+                run.error(src, FileNotFoundError("store missing"))
+    return {"store": store["name"], "kind": store["kind"], "file_count": count, "bytes": size,
+            "skipped_count": run.skipped_count, "errors": run.errors}
+
+
+def resolve_dest(arg):
+    if arg:
+        return Path(os.path.abspath(os.path.expanduser(arg))).resolve()
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return Path(os.path.expanduser("~/.local/state/ade/backups")).resolve() / stamp
+
+
+def refuse_reason(dest, stores):
+    """Why dest must not be written to, or None."""
+    for store in stores:
+        for root in store_roots(store):
+            r = root.resolve()
+            if dest == r or r in dest.parents:
+                return f"destination {dest} is inside the {store['name']} source store {r}"
+    for p in [dest, *dest.parents]:
+        if (p / ".git").exists():
+            return f"destination {dest} is inside the git repository {p}"
+    return None
+
+
+def hermes_limit(home):
+    """sessions.max_export_messages from config.yaml; the Hermes default (20,000) when unset."""
+    try:
+        text = (home / ".hermes/config.yaml").read_text()
+    except OSError:
+        return 20000
+    m = re.search(r"^\s*max_export_messages:\s*(\d+)", text, re.M)
+    return int(m.group(1)) if m else 20000
+
+
+def hermes_session_counts(db_path):
+    uri = "file:" + quote(os.path.realpath(db_path), safe="/") + "?mode=ro"
+    con = sqlite3.connect(uri, uri=True, timeout=30)
+    try:
+        ids = [r[0] for r in con.execute("SELECT id FROM sessions")]
+        counts = dict(con.execute("SELECT session_id, COUNT(*) FROM messages GROUP BY session_id"))
+    finally:
+        con.close()
+    return ids, counts
+
+
+def hermes_run(hermes, args, cwd):
+    proc = subprocess.run([hermes, "sessions", "export", *args], capture_output=True, text=True,
+                          timeout=HERMES_TIMEOUT, cwd=cwd)
+    return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+
+def export_hermes(home, dest, selected_state_backup):
+    """The documented `hermes sessions export` JSONL, into <dest>/hermes-export/."""
+    out = dest / "hermes-export"
+    run = StoreRun({"name": "hermes-export", "kind": "hermes-export"}, out)
+    run.sources.append(str(home / ".hermes/state.db"))
+    info = {"mode": None, "limit": hermes_limit(home), "truncated": False, "oversize": [], "failed": [],
+            "sessions_total": None, "sessions_exported": 0}
+    hermes = os.environ.get("ADE_BACKUP_HERMES") or shutil.which("hermes")
+    out.mkdir(parents=True, exist_ok=True)
+    if not hermes:
+        run.error("hermes", FileNotFoundError("no hermes on PATH (set ADE_BACKUP_HERMES)"))
+    else:
+        try:
+            bulk = out / "hermes_sessions.jsonl"
+            rc, text = hermes_run(hermes, [str(bulk)], str(out))
+            if rc == 0 and bulk.is_file() and text.startswith("Exported"):
+                info["mode"] = "bulk"
+                info["sessions_exported"] = int(re.match(r"Exported (\d+)", text).group(1))
+                info["sessions_total"] = info["sessions_exported"]
+            elif "more than" in text:
+                info["mode"] = "per-session"
+                per_session_export(hermes, home, out, info, run, selected_state_backup)
+            else:
+                run.error("hermes sessions export", RuntimeError(f"rc={rc}: {text[:300]}"))
+        except (OSError, subprocess.SubprocessError, sqlite3.Error) as exc:
+            run.error("hermes sessions export", exc)
+    info["truncated"] = bool(info["oversize"])
+    entries, total = seal_and_hash(run)
+    return run, {
+        "store": "hermes-export", "kind": "hermes-export", "sources": run.sources, "destination": str(out),
+        "bytes": total, "file_count": len(entries), "files": entries, "started": run.started, "ended": utcnow(),
+        "seconds": round(time.monotonic() - run.t0, 1), "skipped_count": 0, "skipped": [],
+        "errors": run.errors, "hermes_export": info,
+    }
+
+
+def per_session_export(hermes, home, out, info, run, state_backup):
+    db = state_backup if state_backup and state_backup.is_file() else home / ".hermes/state.db"
+    ids, counts = hermes_session_counts(db)
+    info["sessions_total"] = len(ids)
+    limit = info["limit"]
+    todo = []
+    for sid in ids:
+        n = counts.get(sid, 0)
+        if limit and n > limit:
+            info["oversize"].append({"id": sid, "messages": n})
+        elif re.fullmatch(r"[A-Za-z0-9_.-]+", sid):
+            todo.append(sid)
+        else:
+            info["failed"].append({"id": sid, "error": "unsafe session id"})
+    target = out / "sessions"
+    target.mkdir(parents=True, exist_ok=True)
+
+    def one(sid):
+        path = target / f"{sid}.jsonl"
+        try:
+            rc, text = hermes_run(hermes, [str(path), "--session-id", sid], str(out))
+        except (OSError, subprocess.SubprocessError) as exc:
+            return sid, None, f"{type(exc).__name__}: {exc}"
+        if rc == 0 and path.is_file() and text.startswith("Exported"):
+            return sid, True, None
+        return sid, False, text[:300]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=HERMES_WORKERS) as pool:
+        for sid, ok, why in pool.map(one, todo):
+            if ok:
+                info["sessions_exported"] += 1
+            elif why and "more than" in why:
+                info["oversize"].append({"id": sid, "messages": counts.get(sid, 0)})
+            else:
+                info["failed"].append({"id": sid, "error": why})
+    for item in info["failed"]:
+        run.error(f"hermes session {item['id']}", RuntimeError(item["error"]))
+
+
+def write_manifest(dest, manifest):
+    path = dest / "MANIFEST.json"
+    tmp = dest / "MANIFEST.json.part"
+    with open(tmp, "w") as f:
+        json.dump(manifest, f, indent=1)
+        f.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return path
+
+
+def summary_line(entry):
+    errs = len(entry["errors"])
+    return (f"{entry['store']}: {entry['file_count']} files, {entry['bytes']} bytes"
+            + (f", {entry.get('seconds', 0)}s" if "seconds" in entry else "")
+            + (f", {errs} error(s)" if errs else ""))
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="ade-backup-stores", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--dest", help="backup directory (default ~/.local/state/ade/backups/<UTC timestamp>/)")
+    ap.add_argument("--dry-run", action="store_true", help="print what would be backed up; write nothing")
+    ap.add_argument("--only", help="comma-separated store names (hermes-export is one)")
+    ap.add_argument("--json", action="store_true", help="print a machine-readable summary on stdout")
+    args = ap.parse_args(argv)
+
+    os.umask(0o077)
+    home = Path(os.path.expanduser("~"))
+    stores = build_stores(home)
+    names = [s["name"] for s in stores] + ["hermes-export"]
+    wanted = [n.strip() for n in args.only.split(",") if n.strip()] if args.only else names
+    unknown = [n for n in wanted if n not in names]
+    if unknown:
+        print(f"ade-backup-stores: unknown store(s): {', '.join(unknown)}", file=sys.stderr)
+        return 2
+    dest = resolve_dest(args.dest)
+    reason = refuse_reason(dest, stores)
+    if reason:
+        print(f"ade-backup-stores: refusing: {reason}", file=sys.stderr)
+        return 2
+    excluder = Excluder(home)
+    selected = [s for s in stores if s["name"] in wanted]
+    say = (lambda *a: None) if args.json else print
+
+    if args.dry_run:
+        plans = [plan_store(s, excluder) for s in selected]
+        for p in plans:
+            say(summary_line(p) + " (dry run)")
+        if "hermes-export" in wanted:
+            say(f"hermes-export: would run `hermes sessions export` into {dest / 'hermes-export'} (dry run)")
+        total = sum(p["bytes"] for p in plans)
+        errors = [e for p in plans for e in p["errors"]]
+        say(f"total: {total} bytes would be copied to {dest} (dry run, nothing written)")
+        if args.json:
+            print(json.dumps({"dry_run": True, "dest": str(dest), "total_bytes": total, "stores": plans,
+                              "errors": errors}, indent=1))
+        return 1 if errors else 0
+
+    started = utcnow()
+    t0 = time.monotonic()
+    dest.mkdir(parents=True, exist_ok=True)
+    os.chmod(dest, 0o700)
+    entries, errors = [], []
+    for store in selected:
+        run, entry = run_store(store, dest, excluder)
+        entries.append(entry)
+        errors.extend(entry["errors"])
+        say(summary_line(entry))
+    if "hermes-export" in wanted:
+        state_backup = dest / "hermes-state" / "state.db"
+        run, entry = export_hermes(home, dest, state_backup)
+        entries.append(entry)
+        errors.extend(entry["errors"])
+        info = entry["hermes_export"]
+        say(summary_line(entry) + (f", {len(info['oversize'])} oversize session(s) not exported" if info["truncated"] else ""))
+    total = sum(e["bytes"] for e in entries)
+    manifest = {
+        "version": VERSION, "tool": "bin/ade-backup-stores", "host": socket.gethostname(), "dest": str(dest),
+        "started": started, "ended": utcnow(), "seconds": round(time.monotonic() - t0, 1), "total_bytes": total,
+        "exclusions": {"names": EXCLUDE_NAMES, "paths": [f"~/{p}" for p in EXCLUDE_PATHS], "other": OTHER_SKIPS},
+        "errors": errors, "stores": entries,
+    }
+    path = write_manifest(dest, manifest)
+    say(f"total: {total} bytes in {sum(e['file_count'] for e in entries)} files, {len(errors)} error(s), manifest {path}")
+    if args.json:
+        print(json.dumps({"dest": str(dest), "manifest": str(path), "total_bytes": total, "errors": errors,
+                          "stores": [{k: e[k] for k in ("store", "file_count", "bytes", "seconds")} for e in entries]},
+                         indent=1))
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

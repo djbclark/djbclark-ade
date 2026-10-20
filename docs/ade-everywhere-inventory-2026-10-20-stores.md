@@ -94,6 +94,11 @@ session-bearing item found (`fd … -x stat -f '%m %N' | sort -rn | head -1`) or
 
 ## 3. Backup plan per store (feeds Phase 0 slice 2)
 
+2026-10-20: `bin/ade-backup-stores` implements this section (PR #TBD): `--dry-run` first, then a run into
+`~/.local/state/ade/backups/<UTC>/` with a `MANIFEST.json` (sha256 per file, exclusions, errors) and the Hermes export
+(`hermes-export/`; sessions above `max_export_messages` are listed in the manifest, not exported, and are whole in the
+`hermes-state/` copy). Config-only rows (section 2 rows of class config) are not copied by it.
+
 **Two rules for slice 2 (adversary review, 2026-10-20).** (a) Every path in section 5 item 5 is excluded from
 every backup generation: a backup that carries a live key or account blob puts the credential in more places
 than docs/threat-model.md allows once a generation syncs or leaves the Mac. (b) Cursor `acp-sessions` and the
