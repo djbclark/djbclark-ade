@@ -98,6 +98,10 @@ What an attacker would want, in order of damage:
 8. **Web content and repo files** fetched by an agent mid-session (prompt-injection carrier).
 9. **`load-watch` pane typing**: it writes a brief and types one line into an agent session's pane via
    `session-finder/relay.py` (`bin/load-watch` header), so text the tool composes becomes input to an agent.
+   Since 2026-10-20 relay.py also reaches Paseo-hosted agents (`paseo send --behavior steer -- <id> <text>`).
+   Paseo labels such a message `kind="agent-message"` with the sender's `PASEO_AGENT_ID` (a caller that is not a
+   Paseo agent prefixes `[relay from <name>] `), so a receiving agent sees a peer, not the operator; relay.py
+   refuses text starting with `/`, an archived agent, and one with a pending permission or question.
 10. **`bin/firecrawl-router`**: an HTTP listener, loopback by default (see the intro); any process that can
     reach it can call it.
 11. **Hermes to Claude delegation** (`delegate_task`, `claude-sub`; `docs/mcp-servers.md`): a message Hermes
@@ -119,7 +123,9 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
   an ordinary review runs yolo with only a read-only brief and a post-run diff
   check (`skills/model-routing/SKILL.md`), and `--perm deny`/`--perm read-only` is reserved for a
   security-sensitive slice (operator rule); the `adversary` reviews on request
-  before a PR is opened. Cloud agents run off the Mac with no vault.
+  before a PR is opened. Cloud agents run off the Mac with no vault. An agent can relay a line to a Paseo-hosted
+  peer (`session-finder/relay.py`, 2026-10-20): Paseo labels it as an agent message from the sender, relay.py
+  puts `--` before the text so it cannot become a `paseo send` option, and it refuses a leading `/`.
 * **Gap.** A local agent reading a hostile page or third-party file runs yolo with the operator's rights;
   nothing screens tool output for instructions. A cloud agent reading this public repo's issue or PR text
   can be steered by a third-party commenter if a mention triggers it. Staged skill edits from
