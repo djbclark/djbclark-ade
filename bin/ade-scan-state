@@ -99,8 +99,12 @@ then `local_only_tags` a list of {tag, count}, one per local tag; at most 100 re
 checkout when nothing is local-only and at most 104 otherwise. The summary counts these as `with_local_only_commits`.
 Extra flag `local-only commits: <branch> <n>, tag <tag> <n>, ...`: the same lists, first five refs.
 With --remote, a local tag origin does not list (or lists at another object) whose commit origin does have is
-in `local_only_tags` with count 0 and flagged `unpushed tags: <names>` (a primary flag: the tag object, its
-annotation and signature are unpushed work).
+in `local_only_tags` with count 0 (at most 100; the rest add to `local_only_branches_uncounted`, and a tag past
+the counting budget is never listed as count 0) and flagged `unpushed tags` (a primary flag, counted in
+`with_unpushed_work`: the tag, its annotation and signature are unpushed work) with `unpushed tag names: <names>`.
+Extra flags `index-hidden paths: <n>` (record key `index_hidden`: tracked paths marked assume-unchanged or
+skip-worktree, whose edits `status` cannot see) and `reflog-only commits: <n>` (`reflog_only_commits`: commits a
+reset, amend or rebase left reachable from a reflog alone, stash entries excluded); both are primary flags.
 Extra flag `detached`: HEAD is detached and commits lie outside origin; `origin unknown`: the branch
 is not detached but origin's branch list could not be read at all (the verdict is `unpushed commits`,
 never `clean and pushed`).
@@ -903,6 +907,12 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     lines = status.splitlines()
     untracked = [ln[3:] for ln in lines if ln.startswith("??")]
     modified = [ln[3:] for ln in lines if not ln.startswith("??")]
+    # a tracked path marked assume-unchanged (`ls-files -v` tag in lowercase) or skip-worktree (`S`) is invisible to
+    # `status`, so its edits are in no count above: it is counted and captured on its own (Codex pass 32 on PR 27)
+    rc, out = git(path, "ls-files", "-z", "-v")
+    if rc != 0:
+        return incomplete_record(path, "ls-files -v", rc)
+    index_hidden = sum(1 for e in out.split("\0") if len(e) > 2 and e[1] == " " and (e[0].islower() or e[0] == "S"))
     rc, up = git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     upstream = up.strip() if rc == 0 else None
     unpushed = None
@@ -1009,6 +1019,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     local_only_branches: list[dict] = []
     local_only_tags: list[dict] = []
     branches_uncounted = 0
+    uncounted_tags: set[str] = set()
     if not unborn:
         # every local ref, not only heads and tags: a commit reachable only from `refs/notes/*`, `refs/replace/*` or
         # any other namespace is local work too (Codex pass 25 on PR 27). Remote-tracking refs are no local work
@@ -1040,6 +1051,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
                 return incomplete_record(path, "for-each-ref refs/tags", rc)
             tag_names = out.splitlines()
             tag_budget = max(MAX_BRANCH_COUNTS - len(names[:MAX_BRANCH_COUNTS]), 0)  # one cap for both lists
+            uncounted_tags = set(tag_names[tag_budget:])  # their commits are unknown: never "count 0" (round 37)
             for name in tag_names[:tag_budget]:
                 n, rc = local_only_count(path, [f"refs/tags/{name}"], tips, live, has_origin)
                 if n is None:
@@ -1056,9 +1068,13 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
             local_tags = local_tag_refs(path)
             if local_tags is None:
                 return incomplete_record(path, "for-each-ref refs/tags", 1)
-            counted = {t["tag"] for t in local_only_tags}
-            local_only_tags += [{"tag": name, "count": 0} for name, oid in sorted(local_tags.items())
-                                if name not in counted and tags.get(name, ("", ""))[0] != oid]
+            counted = {t["tag"] for t in local_only_tags} | uncounted_tags
+            zero = [{"tag": name, "count": 0} for name, oid in sorted(local_tags.items())
+                    if name not in counted and tags.get(name, ("", ""))[0] != oid]
+            # bounded like the counted refs: a fork that fetched an upstream's 3000 tags must not itemise them all
+            # (adversary round 37); the rest is a count, as for branches
+            local_only_tags += zero[:MAX_BRANCH_COUNTS]
+            branches_uncounted += max(len(zero) - MAX_BRANCH_COUNTS, 0)
     if live and on_origin is False and ahead_of_origin and not unborn:
         # the branch is not on origin but its commits may be, under a live tag or a branch with no local tracking
         # ref: count HEAD against the live tips, like the local-only count, before calling it an orphan (Codex pass 19)
@@ -1066,6 +1082,21 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         if n is None:
             return incomplete_record(path, "rev-list --count HEAD --not <live tips>", rc)
         ahead_of_origin = n
+    # a commit a reset, amend or rebase left behind is reachable from a reflog alone: no ref holds it, so no count
+    # above sees it, yet `git reflog` recovers it until expiry (Codex pass 32 on PR 27). Stash entries have their
+    # own count and capture: every entry of the stash reflog is excluded with its ancestors
+    reflog_only: int | None = 0
+    if not unborn:
+        rc, stash_shas = git(path, "log", "-g", "--format=%H", "refs/stash") if stashes else (0, "")
+        if rc != 0:
+            return incomplete_record(path, "log -g refs/stash", rc)
+        argv = ["rev-list", "--count", "--reflog", "--not", "--all", *stash_shas.split()]
+        if live and tips:
+            argv += ["--ignore-missing", *tips]
+        rc, n = git(path, *argv)
+        if rc != 0 or not n.strip().isdigit():
+            return incomplete_record(path, "rev-list --count --reflog --not --all", rc)
+        reflog_only = int(n)
     flags = []
     if unpushed or (on_origin and (ahead_of_origin or 0) > 0):
         flags.append("unpushed commits")  # includes a branch on origin with no upstream set
@@ -1086,9 +1117,15 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
                      + (f", +{more} more" if more > 0 else ""))
     zero_tags = [t["tag"] for t in local_only_tags if not t["count"]]
     if zero_tags:
-        # the tag object is unpushed although its commit is not: a primary flag, never `clean and pushed`
-        flags.append("unpushed tags: " + ", ".join(zero_tags[:5])
+        # the tag is unpushed although its commit is not: a primary flag, never `clean and pushed`; the names go
+        # in a second flag so the verdict histogram keeps one bucket (adversary round 37)
+        flags.append("unpushed tags")
+        flags.append("unpushed tag names: " + ", ".join(zero_tags[:5])
                      + (f", +{len(zero_tags) - 5} more" if len(zero_tags) > 5 else ""))
+    if index_hidden:
+        flags.append(f"index-hidden paths: {index_hidden}")  # primary: `status` cannot see edits there
+    if reflog_only:
+        flags.append(f"reflog-only commits: {reflog_only}")  # primary: recoverable only until the reflog expires
     if credential and remote:
         flags.append(ORIGIN_CREDENTIAL)  # not queried: unreachable in every respect
     elif origin_unreachable:
@@ -1113,6 +1150,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         "untracked_sample": untracked[:8], "modified_sample": modified[:8],
         "upstream": upstream, "unpushed": unpushed if upstream else "no upstream",
         "ahead_of_origin": ahead_of_origin, "stashes": stashes,
+        "index_hidden": index_hidden, "reflog_only_commits": reflog_only,
         "local_only_commits": local_only,
         # only a live `--remote` answer verifies anything: true when no live tip is missing, false when
         # one is or when `--remote` asked and origin did not answer (a failed query is unverified, not "not
@@ -1182,7 +1220,8 @@ def summarize(result: dict) -> dict:
             "count": len(result["checkouts"]), "verdicts": v,
             "with_unpushed_work": sum(1 for c in result["checkouts"]
                                       if "unpushed commits" in c["flags"]
-                                      or "orphan branch" in c["flags"]),
+                                      or "orphan branch" in c["flags"]
+                                      or "unpushed tags" in c["flags"]),
             "with_local_only_commits": sum(1 for c in result["checkouts"]
                                            if (c.get("local_only_commits") or 0) > 0),
             "with_untracked": sum(1 for c in result["checkouts"] if c["untracked"]),

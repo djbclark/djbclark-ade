@@ -2054,6 +2054,81 @@ def test_a_grafts_file_does_not_hide_a_local_commit(tmp_path):
     assert c["local_only_branches"] == [{"branch": "main", "count": 1}], c
 
 
+def test_an_assume_unchanged_or_skip_worktree_edit_is_counted_and_archived(tmp_path):
+    """Codex pass 32 on PR 27: `update-index --assume-unchanged f` (or `--skip-worktree`) then an edit of `f` gave
+    `modified: 0`, no flags and `clean and pushed`; the bytes were in no patch and the checkout had no row."""
+    import tarfile
+    mod, doc = load(), load_doc()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    (work / "a.txt").write_text("hidden edit\n")
+    git(work, "update-index", "--assume-unchanged", "a.txt")
+    assert git(work, "status", "--porcelain") == ""
+    c = scan_one(mod, roots)
+    assert c["verdict"] == "index-hidden paths: 1" and c["modified"] == 0 and c["index_hidden"] == 1, c
+    git(work, "update-index", "--no-assume-unchanged", "a.txt")
+    assert scan_one(mod, roots)["verdict"] == "dirty"
+    git(work, "update-index", "--skip-worktree", "a.txt")
+    c = scan_one(mod, roots)
+    assert c["index_hidden"] == 1 and c["verdict"] == "index-hidden paths: 1", c
+    row = next(r for r in section_3_2(doc.render(doc_scan([doc_checkout("/p/h", flags=["index-hidden paths: 1"],
+                                                                        verdict="index-hidden paths: 1", index_hidden=1)]))).splitlines()
+               if r.startswith("| /p/h "))
+    assert "1 tracked path(s) marked assume-unchanged or skip-worktree" in row
+    assert "\"$GSED\" -z -n 's/^[a-z] //p; s/^S //p' <DEST>/checkouts/abs/p/h/hidden.raw > <DEST>/checkouts/abs/p/h/hidden.list" in row
+    assert "-C /p/h --null --no-recursion --ignore-failed-read -T <DEST>/checkouts/abs/p/h/hidden.list" in row
+    ck = doc.checkout_dir(str(work))
+    prefix = "GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); "
+    cmd = prefix + doc.HIDDEN_FMT.format(*map(doc.shquote, doc.hidden_values(str(work), ck))).replace("<DEST>", str(tmp_path / "dest"))
+    for shell in ("bash", "zsh"):
+        if shutil.which(shell) is None:
+            continue
+        shutil.rmtree(tmp_path / "dest", ignore_errors=True)
+        run = subprocess.run([shell, "-c", cmd], capture_output=True, text=True)
+        assert run.returncode == 0, (shell, run.stderr)
+        tar = tarfile.open(tmp_path / "dest" / ck / "hidden.tar")
+        assert set(tar.getnames()) == {"hidden.list", "a.txt"} and tar.extractfile("a.txt").read() == b"hidden edit\n"
+
+
+def test_a_reflog_only_commit_is_counted_and_packed(tmp_path):
+    """Codex pass 32 on PR 27: a local commit followed by `reset --hard origin/main` stays at `HEAD@{1}` only; the
+    scanner read `clean and pushed` and the capture plan had no row, so cleanup lost it."""
+    mod, doc = load(), load_doc()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    commit_file(work, "lost.txt")
+    lost = git(work, "rev-parse", "HEAD").strip()
+    git(work, "reset", "--hard", "origin/main")
+    c = scan_one(mod, roots)
+    assert c["verdict"] == "reflog-only commits: 1" and c["reflog_only_commits"] == 1 and c["local_only_commits"] == 0, c
+    mod._remote_cache.clear()
+    assert scan_one(mod, roots, remote=True)["reflog_only_commits"] == 1
+    # stash entries are their own count: two stashes add nothing here, even though only stash@{0} is a ref
+    (work / "a.txt").write_text("s1\n")
+    git(work, "stash", "push", "-m", "one")
+    (work / "a.txt").write_text("s2\n")
+    git(work, "stash", "push", "-m", "two")
+    c = scan_one(mod, roots)
+    assert c["reflog_only_commits"] == 1 and c["stashes"] == 2, c
+    row = next(r for r in section_3_2(doc.render(doc_scan([doc_checkout("/p/r", flags=["reflog-only commits: 3"],
+                                                                        verdict="reflog-only commits: 3", reflog_only_commits=3)]))).splitlines()
+               if r.startswith("| /p/r "))
+    assert "3 reflog-only commit(s)" in row and "rev-list --objects --reflog --not --all > <DEST>/checkouts/abs/p/r/reflog-only.list" in row
+    assert "git -C /p/r pack-objects <DEST>/checkouts/abs/p/r/reflog-only < <DEST>/checkouts/abs/p/r/reflog-only.list" in row
+    ck = doc.checkout_dir(str(work))
+    cmd = doc.REFLOG_FMT.format(*map(doc.shquote, doc.reflog_values(str(work), ck))).replace("<DEST>", str(tmp_path / "dest"))
+    for shell in ("bash", "zsh"):
+        if shutil.which(shell) is None:
+            continue
+        shutil.rmtree(tmp_path / "dest", ignore_errors=True)
+        run = subprocess.run([shell, "-c", cmd], capture_output=True, text=True)
+        assert run.returncode == 0, (shell, run.stderr)
+        idx = list((tmp_path / "dest" / ck).glob("reflog-only-*.idx"))
+        assert len(idx) == 1
+        assert lost in git(work, "verify-pack", "-v", str(idx[0]))
+    # once the reflog has expired the commit is gone for good and the count says so
+    git(work, "reflog", "expire", "--expire=now", "--all")
+    assert scan_one(mod, roots)["reflog_only_commits"] == 0
+
+
 def test_a_local_tag_of_a_pushed_commit_is_not_local_only(tmp_path):
     mod = load()
     roots, work, _ = make_pushed_checkout(tmp_path)
@@ -2070,13 +2145,15 @@ def test_a_local_tag_of_a_pushed_commit_is_unpushed_work_once_origin_is_asked(tm
     git(work, "tag", "plain")
     mod._remote_cache.clear()
     c = scan_one(mod, roots, remote=True)
-    assert c["verdict"] == "unpushed tags: plain, release" and c["local_only_commits"] == 0, c
+    assert c["verdict"] == "unpushed tags" and c["local_only_commits"] == 0, c
+    assert "unpushed tag names: plain, release" in c["flags"]  # round 37: one verdict bucket, the names in a second flag
     assert c["local_only_tags"] == [{"tag": "plain", "count": 0}, {"tag": "release", "count": 0}]
     assert c["local_only_verified"] is True
     git(work, "push", "origin", "refs/tags/release:refs/tags/release")
     mod._remote_cache.clear()
     c = scan_one(mod, roots, remote=True)
-    assert c["verdict"] == "unpushed tags: plain" and c["local_only_tags"] == [{"tag": "plain", "count": 0}], c
+    assert c["verdict"] == "unpushed tags" and c["local_only_tags"] == [{"tag": "plain", "count": 0}], c
+    assert "unpushed tag names: plain" in c["flags"]
     git(work, "push", "origin", "refs/tags/plain:refs/tags/plain")
     mod._remote_cache.clear()
     c = scan_one(mod, roots, remote=True)
@@ -2086,24 +2163,46 @@ def test_a_local_tag_of_a_pushed_commit_is_unpushed_work_once_origin_is_asked(tm
     git(work, "tag", "-a", "-m", "moved", "plain")
     mod._remote_cache.clear()
     c = scan_one(mod, roots, remote=True)
-    assert c["verdict"] == "unpushed tags: plain", c
+    assert c["verdict"] == "unpushed tags", c
+
+
+def test_a_tag_past_the_counting_budget_is_never_listed_as_count_zero(tmp_path, monkeypatch):
+    """Adversary round 37 on PR 27: a tag the shared 100-ref budget left uncounted carries unknown commits; it was
+    added as count 0 ("tag only") and counted again in the uncounted remainder."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    git(work, "checkout", "-b", "side")
+    commit_file(work, "side.txt")
+    git(work, "checkout", "main")
+    make_tag_only_commit(work, "has-local-commit", annotated=True)
+    monkeypatch.setattr(mod, "MAX_BRANCH_COUNTS", 1)  # the one slot goes to the first branch
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True)
+    assert c["local_only_commits"] == 2 and c["local_only_tags"] == [] and c["local_only_branches_uncounted"] == 2, c
+    assert "unpushed tags" not in c["flags"] and c["verdict"] == "unpushed commits"
 
 
 def test_capture_plan_pushes_or_bundles_a_tag_object_on_a_pushed_commit():
     """Codex pass 31 on PR 27: count 0, no local-only commits, yet the tag must be pushed or bundled."""
     mod = load_doc()
-    co = doc_checkout("/p/t", flags=["unpushed tags: release"], verdict="unpushed tags: release",
+    co = doc_checkout("/p/t", flags=["unpushed tags", "unpushed tag names: release, --force"], verdict="unpushed tags",
                       local_only_tags=[{"tag": "release", "count": 0}, {"tag": "--force", "count": 0}])
     row = next(r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith("| /p/t "))
-    assert "local tag(s) origin lacks: `release`, `--force`" in row
-    assert "`git -C /p/t push origin refs/tags/release:refs/tags/release`; `git -C /p/t push origin refs/tags/--force:refs/tags/--force` or `mkdir" in row
-    assert "git -C /p/t bundle create <DEST>/checkouts/abs/p/t/tags.bundle refs/tags/release refs/tags/--force" in row
+    assert "2 local tag(s) origin lacks: `release`, `--force`" in row
+    # round 37: every tag in one push and one bundle, however many there are; no per-tag argv
+    assert "`git -C /p/t push origin --tags` or `mkdir" in row and "refs/tags/--force" not in row
+    assert "git -C /p/t bundle create <DEST>/checkouts/abs/p/t/tags.bundle --tags" in row
+    assert "rejected by the push: bundle it, or decide to force" in row
     assert row.rstrip().endswith("| yes: pushing a tag publishes it; pick push or bundle |")
+    many = doc_checkout("/p/m", flags=["unpushed tags"], verdict="unpushed tags",
+                        local_only_tags=[{"tag": f"t{i}", "count": 0} for i in range(9)])
+    row = next(r for r in section_3_2(mod.render(doc_scan([many]))).splitlines() if r.startswith("| /p/m "))
+    assert "9 local tag(s) origin lacks: `t0`, `t1`, `t2`, `t3`, `t4` and 4 more" in row and "t8" not in row
     # with local-only commits on other branches the existing push-or-bundle-all row carries the tag already
     both = doc_checkout("/p/b", flags=["unpushed commits"], verdict="unpushed commits", local_only_commits=2,
                         local_only_branches=[{"branch": "side", "count": 2}], local_only_tags=[{"tag": "v0", "count": 0}])
     row = next(r for r in section_3_2(mod.render(doc_scan([both]))).splitlines() if r.startswith("| /p/b "))
-    assert "tag `v0` (tag object only)" in row and "refs/tags/v0:refs/tags/v0" in row and "tags.bundle" not in row
+    assert "tag `v0` (tag only)" in row and "refs/tags/v0:refs/tags/v0" in row and "tags.bundle" not in row
 
 
 def test_stash_capture_command_keeps_each_entry_index_tree(tmp_path):
@@ -2126,9 +2225,23 @@ def test_stash_capture_command_keeps_each_entry_index_tree(tmp_path):
         index = (tmp_path / "dest" / ck / "stash0-index.patch").read_text()
         assert "worktree-only" in work and "stage-only" in index and "worktree-only" not in index
     # the documented restore: the index patch into the index, the worktree patch into the worktree
-    git(repo, "apply", "--cached", str(tmp_path / "dest" / ck / "stash0-index.patch"))
-    git(repo, "apply", str(tmp_path / "dest" / ck / "stash0.patch"))
+    git(repo, "apply", "--allow-empty", "--cached", str(tmp_path / "dest" / ck / "stash0-index.patch"))
+    git(repo, "apply", "--allow-empty", str(tmp_path / "dest" / ck / "stash0.patch"))
     assert "stage-only" in git(repo, "diff", "--cached") and (repo / "a.txt").read_text() == "worktree-only\n"
+    # adversary round 37: the ordinary stash (unstaged edits only) has an EMPTY index patch; without `--allow-empty`
+    # the first `git apply` exits 128 and the `&&` skips the worktree patch that holds the edits
+    git(repo, "reset", "--hard")
+    (repo / "a.txt").write_text("plain\n")
+    git(repo, "stash", "push", "-m", "plain")
+    shutil.rmtree(tmp_path / "dest")
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    assert (tmp_path / "dest" / ck / "stash0-index.patch").stat().st_size == 0
+    restore = (f"git -C {mod.shquote(str(repo))} apply --allow-empty --cached {tmp_path / 'dest' / ck}/stash0-index.patch "
+               f"&& git -C {mod.shquote(str(repo))} apply --allow-empty {tmp_path / 'dest' / ck}/stash0.patch")
+    run = subprocess.run(["bash", "-c", restore], capture_output=True, text=True, env=GIT_ENV)
+    assert run.returncode == 0, run.stderr
+    assert (repo / "a.txt").read_text() == "plain\n" and git(repo, "diff", "--cached") == ""
 
 
 def test_a_live_origin_tag_whose_objects_are_missing_is_one_more_unfetched_tip(tmp_path):
@@ -2298,13 +2411,15 @@ def test_capture_plan_keeps_staged_changes_and_every_stash():
     # unmerged entry's bytes are in no patch at all, so the changed files and the index are archived too
     assert ('"$GTAR" -cf <DEST>/checkouts/abs/p/w/modified.tar -C <DEST>/checkouts/abs/p/w modified.list -C /p/w --null '
             '--no-recursion --ignore-failed-read -T <DEST>/checkouts/abs/p/w/modified.list') in row
-    assert "2> <DEST>/checkouts/abs/p/w/modified.err" in row and "[ ! -s <DEST>/checkouts/abs/p/w/modified.err ]" in row  # round 36
+    assert "2> <DEST>/checkouts/abs/p/w/modified.err" in row  # round 36
+    assert "{ ! grep -qv '^warning: ' <DEST>/checkouts/abs/p/w/modified.err || { cat <DEST>/checkouts/abs/p/w/modified.err >&2; " \
+           "echo 'modified capture FAILED' >&2; false; }; }" in row  # round 37: loud, and a plain warning is no failure
     assert mod.modified_fmt().count("{}") == len(mod.modified_values("/p", "c")) == mod.modified_fmt("/<sub>").count("{}")
     assert '"$GCP" -- "$(git -C /p/w rev-parse --absolute-git-dir)/index" <DEST>/checkouts/abs/p/w/index' in row
     assert "3 stashes" in row and "stash0.patch" not in row and "bundle create <DEST>/checkouts/abs/p/w/stashes" not in row
     assert "log -g --format=%gd refs/stash" in row and "stash show -p --no-ext-diff --no-textconv --no-color --binary --include-untracked" in row
     assert 'diff --no-ext-diff --no-textconv --no-color --binary "$r^1" "$r^2" > <DEST>/checkouts/abs/p/w/stash${r//[^0-9]/}-index.patch' in row
-    assert "git apply --cached <index patch> && git apply <patch>" in row  # Codex pass 31: the index tree per entry
+    assert "git apply --allow-empty --cached <index patch> && git apply --allow-empty <patch>" in row  # Codex pass 31, round 37
 
 
 def test_stash_capture_command_really_saves_every_stash_with_its_untracked_files(tmp_path):
@@ -2465,6 +2580,12 @@ def test_modified_capture_archives_an_unmerged_binary_file_and_ignores_textconv(
         finally:
             (repo / "d").chmod(0o755)
         assert run.returncode != 0 and (tmp_path / "dest" / ck / "modified.err").stat().st_size > 0, run.stderr
+        assert "modified capture FAILED" in run.stderr and "cannot lstat" in run.stderr  # round 37: says why
+    # round 37: a plain `warning:` line on stderr (an ambiguous ref name) is not a read error and must not fail the row
+    git(repo, "update-ref", "refs/heads/HEAD", "HEAD")
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    assert "warning:" in (tmp_path / "dest" / ck / "modified.err").read_text()
 
 
 def test_a_cow_pasture_gets_its_own_patch_and_archive_rows():

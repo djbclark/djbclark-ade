@@ -78,24 +78,49 @@ def modified_fmt(sub=""):
     every tracked path whose worktree differs from the index (unmerged ones included), `diff --cached --diff-filter=d`
     every staged path still present; a path deleted from the worktree has no bytes to keep (`--ignore-failed-read`),
     and the archive always holds `modified.list` so an all-deletions list never makes gtar refuse an empty archive.
-    Git's own read errors (`cannot lstat`: an unsearchable directory) go to `modified.err` and a non-empty one
-    fails the row, since `--ignore-failed-read` would otherwise turn them into rc 0 (adversary round 36); a listed
+    Git's own read errors (`cannot lstat`: an unsearchable directory) go to `modified.err` and any line there that
+    is not a plain `warning:` fails the row, printing the file and a message, since `--ignore-failed-read` would
+    otherwise turn them into rc 0 (adversary rounds 36 and 37: an ambiguous-refname warning is not a loss); a listed
     directory (a submodule gitlink whose HEAD moved, a file replaced by a directory) is not recursed into: the
     submodule row covers its content, and its ignored files must not be copied (round 36)."""
     w, d = "git -C {}" + sub, "<DEST>/{}" + sub
     return (f"mkdir -p {d} && {w} {DIFF_OPTS} > {d}/modified.patch && {w} {DIFF_OPTS} --cached > {d}/staged.patch "
             f"&& {w} ls-files -z --modified > {d}/modified.list 2> {d}/modified.err "
-            f"&& {w} diff --cached -z --name-only --diff-filter=d >> {d}/modified.list 2>> {d}/modified.err && [ ! -s {d}/modified.err ] "
+            f"&& {w} diff --cached -z --name-only --diff-filter=d >> {d}/modified.list 2>> {d}/modified.err "
+            f"&& {{{{ ! grep -qv '^warning: ' {d}/modified.err || {{{{ cat {d}/modified.err >&2; echo 'modified capture FAILED' >&2; false; }}}}; }}}} "
             f"&& \"$GTAR\" -cf {d}/modified.tar -C {d} modified.list -C {{}}{sub} --null --no-recursion --ignore-failed-read -T {d}/modified.list "
             f"&& \"$GCP\" -- \"$({w} rev-parse --absolute-git-dir)/index\" {d}/index")
 
 
 def modified_values(raw_p, ck):
-    return (ck, raw_p, ck, raw_p, ck, raw_p, ck, ck, raw_p, ck, ck, ck, ck, ck, raw_p, ck, raw_p, ck)
+    return (ck, raw_p, ck, raw_p, ck, raw_p, ck, ck, raw_p, ck, ck, ck, ck, ck, ck, raw_p, ck, raw_p, ck)
 
 
 def stash_values(raw_p, ck):
     return (ck, raw_p, raw_p, ck, raw_p, ck)
+
+
+# a tracked path marked assume-unchanged (lowercase `ls-files -v` tag) or skip-worktree (`S`): `status` reports
+# nothing for it, so its edits are in no count and in no patch; the files themselves are archived with their
+# manifest (Codex pass 32 on PR 27). GNU sed's `-z` keeps the NUL-separated names whole, like the untracked archive
+HIDDEN_FMT = ("mkdir -p <DEST>/{} && git -C {} ls-files -z -v > <DEST>/{}/hidden.raw "
+              "&& \"$GSED\" -z -n 's/^[a-z] //p; s/^S //p' <DEST>/{}/hidden.raw > <DEST>/{}/hidden.list "
+              "&& \"$GTAR\" -cf <DEST>/{}/hidden.tar -C <DEST>/{} hidden.list -C {} --null --no-recursion --ignore-failed-read -T <DEST>/{}/hidden.list")
+
+
+def hidden_values(raw_p, ck):
+    return (ck, raw_p, ck, ck, ck, ck, ck, raw_p, ck)
+
+
+# a commit reachable from a reflog alone (a reset, amend or rebase left it): no ref holds it, no bundle above
+# carries it, and `git reflog` recovers it only until expiry (Codex pass 32 on PR 27). Its objects go into one
+# pack: `rev-list --objects` lists everything the reflogs reach that no ref does, `pack-objects` packs that list
+REFLOG_FMT = ("mkdir -p <DEST>/{} && GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} rev-list --objects --reflog --not --all > <DEST>/{}/reflog-only.list "
+              "&& GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} pack-objects <DEST>/{}/reflog-only < <DEST>/{}/reflog-only.list")
+
+
+def reflog_values(raw_p, ck):
+    return (ck, raw_p, ck, raw_p, ck, ck)
 
 
 def tilde(p):
@@ -292,7 +317,7 @@ def render(d):
     for k in (*shown, *sorted(k for k in cs["verdicts"] if k not in shown)):
         # one row per verdict present, so the rows sum to the checkout count (adversary round 21, INFO 5)
         w(f"| checkouts, verdict {code('{}', visible(k))} | {cs['verdicts'].get(k, 0)} |")
-    w(f"| checkouts with unpushed work (unpushed commits or orphan branch) | **{cs['with_unpushed_work']}** |")
+    w(f"| checkouts with unpushed work (unpushed commits, orphan branch or unpushed tags) | **{cs['with_unpushed_work']}** |")
     w(f"| checkouts with untracked non-ignored paths | {cs['with_untracked']} |")
     w(f"| checkouts with a stash | {cs['with_stash']} |")
     incomplete_tasks = [t for t in tasks if t["verdict"].startswith("scan incomplete")]
@@ -421,10 +446,10 @@ def render(d):
 
     # ---- 3 capture
     w("## 3. Capture (how each item would be preserved; none of this was run)\n")
-    w("Every command below uses GNU `cp` and `tar` through two variables, so the same row runs on this Mac "
-      "(coreutils installed as `g*`) and on Linux (bare names; Codex pass 12 on PR 27): set "
-      "`GCP=$(command -v gcp || command -v cp); GTAR=$(command -v gtar || command -v tar)` first, and "
-      "`<DEST>` to an absolute path.\n")
+    w("Every command below uses GNU `cp`, `tar` and `sed` through three variables, so the same row runs on this Mac "
+      "(coreutils and gnu-sed installed as `g*`) and on Linux (bare names; Codex pass 12 on PR 27): set "
+      "`GCP=$(command -v gcp || command -v cp); GTAR=$(command -v gtar || command -v tar); "
+      "GSED=$(command -v gsed || command -v sed)` first, and `<DEST>` to an absolute path.\n")
     w("### 3.1 `unique` and `mixed` bigteam dirs\n")
     w("Proposed rule for all of them: copy the report files (not the dir) to one destination, "
       "`<DEST>/bigteam/<task>/`, keeping each file's path below the task dir. `<DEST>` is the one decision "
@@ -496,8 +521,9 @@ def render(d):
         submodules = SUBMODULES_FLAG in c["flags"]  # `status --ignore-submodules=all`: the counts see nothing in there
         tag_others = c.get("local_only_tags") or []
         zero_tags = [t for t in tag_others if not num(t["count"])]  # tag objects on pushed commits (Codex pass 31)
+        hidden, reflog = num(c.get("index_hidden")), num(c.get("reflog_only_commits"))  # Codex pass 32; older records lack both
         if (not unreachable and not submodules and not head_ahead and real_untr <= 0 and not stashes and not modified
-                and not local_n and not zero_tags):
+                and not local_n and not zero_tags and not hidden and not reflog):
             continue
         what, cmd, need = [], [], "no"
         head_row = False
@@ -536,7 +562,7 @@ def render(d):
                       if not (head_row and b["branch"] == c["branch"])]
             more = num(c.get("local_only_branches_uncounted"))
             names = ", ".join([f"{code('{}', b['branch'])} ({num(b['count'])})" for b in others]
-                              + [f"tag {code('{}', t['tag'])} ({num(t['count']) or 'tag object only'})" for t in tag_others])
+                              + [f"tag {code('{}', t['tag'])} ({num(t['count']) or 'tag only'})" for t in tag_others])
             tail = f" and {more} more branches or tags" if more > 0 else ""
             if others or tag_others:
                 kind = "branches and tags" if tag_others else "branches"
@@ -556,13 +582,26 @@ def render(d):
         if zero_tags and not (local_n and not covered_by_bundle):
             # a local tag origin lacks on a commit origin has: no commit count sees the tag object and no branch
             # bundle holds it; its name, annotation and signature are lost with the checkout (Codex pass 31 on PR 27)
-            what.append("local tag(s) origin lacks: " + ", ".join(code("{}", t["tag"]) for t in zero_tags))
-            cmd.append("; ".join(shcode("git -C {} push origin refs/tags/{}:refs/tags/{}", raw_p, t["tag"], t["tag"])
-                                 for t in zero_tags)
+            shown = ", ".join(code("{}", t["tag"]) for t in zero_tags[:5])
+            more = max(len(zero_tags) - 5, 0)
+            what.append(f"{len(zero_tags)} local tag(s) origin lacks: {shown}" + (f" and {more} more" if more else ""))
+            # every tag at once, bounded whatever their number (adversary round 37): one origin already has at the
+            # same object is up to date; one it has at another object is rejected, loudly
+            cmd.append(shcode("git -C {} push origin --tags", raw_p)
                        + " or " + shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} "
-                                         "bundle create <DEST>/{} " + " ".join("refs/tags/{}" for _ in zero_tags),
-                                         ck, raw_p, f"{ck}/tags.bundle", *[t["tag"] for t in zero_tags]))
+                                         "bundle create <DEST>/{} --tags", ck, raw_p, f"{ck}/tags.bundle")
+                       + " (a tag origin has at another object is rejected by the push: bundle it, or decide to force)")
             need = need if need.startswith(("yes", "**yes")) else "yes: pushing a tag publishes it; pick push or bundle"
+        if hidden:
+            what.append(f"{hidden} tracked path(s) marked assume-unchanged or skip-worktree (`status` cannot see their edits)")
+            cmd.append(shcode(HIDDEN_FMT, *hidden_values(raw_p, ck)))
+            need = need if need != "no" else "yes: decide whether their edits are work"
+        if reflog:
+            what.append(f"{reflog} reflog-only commit(s) (left by a reset, amend or rebase; no ref holds them)")
+            cmd.append(shcode(REFLOG_FMT, *reflog_values(raw_p, ck))
+                       + " (restore by copying the `.pack` and `.idx` into `.git/objects/pack/`; "
+                       + shcode("git -C {} reflog", raw_p) + " then names the commits)")
+            need = need if need != "no" else "yes: decide whether they are work"
         if modified:
             what.append(f"{modified} modified tracked file(s)")
             # `status` counts staged changes too; a plain `diff` is worktree against index and misses them, so
@@ -578,7 +617,9 @@ def render(d):
             # every stash entry, not stash@{0} alone, each with its untracked files (Codex pass 20, adversary round 26)
             cmd.append(shcode(STASH_FMT, *stash_values(raw_p, ck))
                        + " (a worktree patch and an index patch per entry; restore with "
-                       + code("git apply --cached <index patch> && git apply <patch>") + ")")
+                       + code("git apply --allow-empty --cached <index patch> && git apply --allow-empty <patch>") + ")")
+# `--allow-empty` (git 2.35+): a plain `git stash` of unstaged edits has an index equal to the base, so its index patch
+# is empty and a bare `git apply` of it exits 128, skipping the worktree patch behind the `&&` (adversary round 37)
         if real_untr > 0:
             what.append(f"{real_untr} untracked ({', '.join(code('{}', visible(u)) for u in untr[:3])}"
                         f"{', ...' if len(untr) > 3 else ''})")
