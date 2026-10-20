@@ -30,6 +30,15 @@ HOME = str(Path.home())
 ORIGIN_UNREACHABLE = "origin unreachable: local-only count unverified"  # ade-scan-state's flag text
 ORIGIN_CREDENTIAL = "origin url holds a credential: not queried"  # same: never queried, treated as unreachable
 SUBMODULES_FLAG = "submodules not inspected"  # same: no count above covers a submodule's content
+# One patch per stash entry, untracked files and binary content included (`git stash show --include-untracked`,
+# git 2.32+): `bundle create` takes ref names, not the reflog's commit ids, so a bundle of `stash@{n}` entries
+# cannot be made without writing refs into the checkout (adversary round 26 on PR 27). Slots: <ck>, <n-1>, <path>, <ck>.
+STASH_FMT = ("mkdir -p <DEST>/{} && for i in $(seq 0 {}); do git -C {} stash show -p --binary --include-untracked "
+             "\"stash@{{$i}}\" > <DEST>/{}/stash$i.patch || exit 1; done")
+
+
+def stash_values(raw_p, ck, stashes):
+    return (ck, stashes - 1, raw_p, ck)
 
 
 def tilde(p):
@@ -489,11 +498,9 @@ def render(d):
                 need = need if need != "no" else "yes: decide whether they are work"
         if stashes:
             what.append(f"{stashes} stash" + ("es" if stashes > 1 else ""))
-            # every stash entry, not stash@{0} alone, with its untracked-files commit (`stash -u`'s third parent):
-            # the reflog lists every entry's commit and a bundle of them keeps all three parents (Codex pass 20)
-            cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} bundle create <DEST>/{} $(git -C {} log -g --format=%H refs/stash)",
-                              ck, raw_p, f"{ck}/stashes.bundle", raw_p)
-                       + " (restore one with " + code("git stash store <sha>") + " after fetching the bundle)")
+            # every stash entry, not stash@{0} alone, each with its untracked files (Codex pass 20, adversary round 26)
+            cmd.append(shcode(STASH_FMT, *stash_values(raw_p, ck, stashes))
+                       + " (one patch per entry; restore with " + code("git apply <patch>") + ")")
         if real_untr > 0:
             shared = "djbclark-ade" in c["path"] or "forgejo-ci-2026-10" in c["path"]
             what.append(f"{real_untr} untracked ({', '.join(code('{}', visible(u)) for u in untr[:3])}"

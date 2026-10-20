@@ -2063,9 +2063,30 @@ def test_capture_plan_keeps_staged_changes_and_every_stash():
     row = next(r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith("| /p/w "))
     assert "git -C /p/w diff > <DEST>/checkouts/abs/p/w/modified.patch && git -C /p/w diff --cached > " \
            "<DEST>/checkouts/abs/p/w/staged.patch" in row
-    assert "3 stashes" in row and "stash0.patch" not in row and "stash show" not in row
-    assert "git -C /p/w bundle create <DEST>/checkouts/abs/p/w/stashes.bundle $(git -C /p/w log -g --format=%H refs/stash)" \
-           in row.replace("\\$", "$").replace("\\(", "(").replace("\\)", ")")
+    assert "3 stashes" in row and "stash0.patch" not in row and "bundle create <DEST>/checkouts/abs/p/w/stashes" not in row
+    assert "seq 0 2" in row and "stash show -p --binary --include-untracked" in row and "stash$i.patch" in row.replace("\\$", "$")
+
+
+def test_stash_capture_command_really_saves_every_stash_with_its_untracked_files(tmp_path):
+    """Adversary round 26 on PR 27: the bundle form failed (`bundle create` wants refs, not reflog ids), so no stash
+    was saved and the text-only test did not notice. This one runs the row's command against a real checkout."""
+    mod = load_doc()
+    repo = make_repo(tmp_path / "w")
+    (repo / "a.txt").write_text("first stash\n")
+    git(repo, "stash", "push", "-m", "older")
+    (repo / "a.txt").write_text("second stash\n")
+    (repo / "new file.bin").write_bytes(b"\x00\x01binary\n")
+    git(repo, "stash", "push", "-u", "-m", "newer")
+    assert git(repo, "stash", "list").count("\n") == 2
+    ck = mod.checkout_dir(str(repo))
+    cmd = mod.STASH_FMT.format(*map(mod.shquote, mod.stash_values(str(repo), ck, 2))).replace("<DEST>", str(tmp_path / "dest"))
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    p0 = (tmp_path / "dest" / ck / "stash0.patch").read_text()
+    p1 = (tmp_path / "dest" / ck / "stash1.patch").read_text()
+    assert "second stash" in p0 and "new file.bin" in p0 and "GIT binary patch" in p0  # newest, untracked and binary kept
+    assert "first stash" in p1 and "new file.bin" not in p1
+    assert not list((tmp_path / "dest" / ck).glob("stash2.patch"))
 
 
 def test_section_1_verdict_rows_sum_to_the_checkout_count():
