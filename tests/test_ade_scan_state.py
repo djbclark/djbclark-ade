@@ -421,3 +421,21 @@ def test_markdown_cells_are_escaped(tmp_path):
             assert "<img" not in line and "&lt;img src=x&gt;&amp;d" in line
             assert line.replace("\\|", "").count("|") == (9 if line.startswith("| /p/") else 8)
             assert "\\`" in line and "`c" not in line.replace("\\`", "")
+
+
+def test_scan_doc_generator_renders_a_scan_json(tmp_path):
+    root = tmp_path / "bigteam"
+    (root / "t|1").mkdir(parents=True)
+    (root / "t|1" / "r-report.md").write_text("x\n")
+    make_repo(tmp_path / "roots" / "r")
+    scan = subprocess.run([str(SCRIPT), "--bigteam", str(root), "--git-root", str(tmp_path / "roots"),
+                           "--json"], capture_output=True, text=True)
+    assert scan.returncode == 0, scan.stderr
+    (tmp_path / "scan.json").write_text(scan.stdout)
+    out = tmp_path / "doc.md"
+    gen = subprocess.run([str(SCRIPT.parent / "ade-scan-state-doc"), str(tmp_path / "scan.json"),
+                          str(out)], capture_output=True, text=True)
+    assert gen.returncode == 0, gen.stderr
+    text = out.read_text()
+    assert text.startswith("# Phase 0 scan") and "| t\\|1 |" in text
+    assert subprocess.run([str(SCRIPT.parent / "ade-scan-state-doc")], capture_output=True).returncode == 1

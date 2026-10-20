@@ -13,7 +13,10 @@ agent what changed and what is new. Entries end with the pull request number.
 
 - `bin/ade-scan-state` and `docs/ade-everywhere-phase0-scan-2026-10-20.md`: Phase 0 scan of the bigteam
   task dirs (134, ~60 GiB, 41 with unreferenced reports) and 23 Orca / cow checkouts (7 with unpushed work,
-  including `~/src/one-offs`, which has no remote); read-only, `--json`, with tests (#TBD).
+  including `~/src/one-offs`, which has no remote); `--json`, with tests. It skips a checkout whose own git
+  config names a command (`skipped: repo config runs commands`), drops every `GIT_*` variable, does not follow
+  symlinks out of a `--git-root`, always excludes the scan docs from the reference search, and `--fetch` writes
+  no refs; `bin/ade-scan-state-doc` renders the doc from the scan JSON (#TBD).
 - `docs/ade-everywhere-inventory-2026-10-20-stores.md`: Phase 0 slice 1, every installed agent
   session store classified (52 stores, backup plan per store, differences from proposal §6.1) (#16).
 - `CHANGELOG.md`, this file, and the rule that every pull request adds a line to it; README

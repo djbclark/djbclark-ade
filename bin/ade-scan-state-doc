@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""ade-scan-state-doc: render docs/ade-everywhere-phase0-scan-2026-10-20.md from a scan JSON.
+
+  ade-scan-state-doc SCAN.json OUT.md
+
+SCAN.json is the output of one `bin/ade-scan-state --json` run (the command is in section 5 of the
+doc). The tables and counts come from the JSON; the prose, the section 3 capture commands and the
+findings about named checkouts are the 2026-10-20 snapshot's and are written here, so a scan taken
+on another day needs its own copy of this script. `bin/ade-scan-state --markdown` prints the raw
+tables only. The committed doc is this script's output for the committed 2026-10-20 scan.json.
+Every table cell goes through `esc` (same rule as ade-scan-state's `esc`).
+"""
+import json
+import sys
+import time
+from pathlib import Path
+
+if len(sys.argv) != 3:
+    sys.exit(__doc__)
+d = json.load(open(sys.argv[1]))
+HOME = str(Path.home())
+bt, cos, sm = d["bigteam"], d["checkouts"], d["summary"]
+
+
+def tilde(p):
+    return p.replace(HOME, "~")
+
+
+def human(n):
+    v = float(n)
+    for u in ("B", "K", "M", "G"):
+        if v < 1024 or u == "G":
+            return f"{v:.0f}{u}" if u == "B" else f"{v:.1f}{u}"
+        v /= 1024
+
+
+def esc(value):
+    """One markdown table cell: `|` and backticks escaped, `<`, `>`, `&` HTML-escaped."""
+    text = "-" if value is None else str(value)
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return " ".join(text.replace("|", "\\|").replace("`", "\\`").split("\n"))
+
+
+def day(t):
+    return time.strftime("%Y-%m-%d", time.localtime(t))
+
+
+tasks = sorted(bt["tasks"], key=lambda t: -t["bytes"])
+uniq = [t for t in tasks if t["verdict"] == "unique"]
+mixed = [t for t in tasks if t["verdict"] == "mixed"]
+scr = [t for t in tasks if t["verdict"] == "scratch"]
+open_jobs = sum(len(t["open_job_records"]) for t in tasks)
+tasks_open_jobs = sum(1 for t in tasks if t["open_job_records"])
+bs = sm["bigteam"]
+cs = sm["checkouts"]
+unpushed = [c for c in cos if "unpushed commits" in c["flags"] or "orphan branch" in c["flags"]]
+out = []
+w = out.append
+
+w("# Phase 0 scan: bigteam task dirs and Orca / cow checkouts (2026-10-20)\n")
+w("Phase 0, slice 3 of [ade-everywhere-proposal.md](ade-everywhere-proposal.md) §8 item 1 "
+  "(djbclark, 2026-10-20: \"Scan `~/.local/state/bigteam` and the Orca checkouts for unique reports, "
+  "dirty trees, untracked files and unpushed commits and capture them. Nothing is deleted.\"). "
+  "Nothing was moved, committed, stashed, checked out or deleted outside this pasture. The network "
+  "calls were `git ls-remote --heads origin` and, only where an origin tip could not be compared "
+  "with HEAD, `git fetch origin <branch>`: that run used the first version of `--fetch`, which "
+  "downloaded the branch's objects but also rewrote `FETCH_HEAD`, may have updated "
+  "`refs/remotes/origin/<branch>` and may have run auto-maintenance in that checkout (the tool now "
+  "writes no refs, section 5). The first version also ran git inside each checkout with that "
+  "checkout's own config in force, so a `core.fsmonitor` or `remote.*.uploadpack` line there would "
+  "have run (the tool now skips such a checkout, section 5); whether any scanned checkout carried one "
+  "was not checked (section 4). Numbers below come from one real run of "
+  "[`bin/ade-scan-state`](../bin/ade-scan-state) at "
+  f"{d['scanned_at']} (commands in section 5); rerun it for a fresh scan. This document is "
+  "rendered from that run's JSON by [`bin/ade-scan-state-doc`](../bin/ade-scan-state-doc). Slice 1 context: "
+  "[ade-everywhere-inventory-2026-10-20-stores.md](ade-everywhere-inventory-2026-10-20-stores.md) "
+  "§2 rows for bigteam and Orca, and the Orca section of "
+  "[ade-everywhere-inventory-2026-10-19.md](ade-everywhere-inventory-2026-10-19.md).\n")
+
+w("## 0. Summary\n")
+w("| Measure | Value |\n|---|---|")
+w(f"| bigteam task dirs scanned | {bs['tasks']} ({human(bs['total_bytes'])} by `du -sk`) |")
+w(f"| verdict `unique` | {bs['verdicts'].get('unique', 0)} dirs, "
+  f"{sum(t['bytes'] for t in uniq) / 2**20:.1f} MiB whole-dir |")
+w(f"| verdict `mixed` | {bs['verdicts'].get('mixed', 0)} dirs, "
+  f"{sum(t['bytes'] for t in mixed) / 2**20:.0f} MiB whole-dir |")
+w(f"| verdict `scratch` | {bs['verdicts'].get('scratch', 0)} dirs, "
+  f"{sum(t['bytes'] for t in scr) / 2**30:.1f} GiB whole-dir |")
+w(f"| bytes `unique` (report files no other document references) | {bs['unique_bytes']:,} B "
+  f"({bs['unique_bytes'] / 2**20:.2f} MiB) |")
+w(f"| bytes `scratch` (everything else under bigteam) | {bs['scratch_bytes']:,} B "
+  f"({bs['scratch_bytes'] / 2**30:.1f} GiB) |")
+w(f"| job records with no `closed` key | {open_jobs} in {tasks_open_jobs} task dirs |")
+w(f"| git checkouts scanned | {cs['count']} |")
+for k in ("clean and pushed", "unpushed commits", "orphan branch", "dirty"):
+    w(f"| checkouts, verdict `{k}` | {cs['verdicts'].get(k, 0)} |")
+w(f"| checkouts with unpushed work (unpushed commits or orphan branch) | **{cs['with_unpushed_work']}** |")
+w(f"| checkouts with untracked non-ignored paths | {cs['with_untracked']} |")
+w(f"| checkouts with a stash | {cs['with_stash']} |")
+w("")
+w("The three items that most need a human decision:\n")
+w("1. **`~/src/one-offs` has no `origin` remote at all** and 37 commits (plus the Orca worktree "
+  "`~/orca/workspaces/one-offs/Hermes`, 2 commits, same repo). Nothing outside this Mac holds them; "
+  "the only copy is this disk. Decide where it is hosted (a new repo needs the where-does-it-go "
+  "question, rule 23) or take a bundle (section 3).")
+w("2. **Where the 41 `unique`/`mixed` bigteam report sets are preserved** "
+  f"({bs['unique_bytes'] / 2**20:.1f} MiB of report markdown; the rest of those dirs is logs and "
+  "worktrees). One destination answers all of them; two dirs (`emufix`, `wdfollow`) and several "
+  "`unique` ones have an open `CLAIM`, so a session may still be writing there.")
+w("3. **Five more checkouts hold commits that exist on no origin branch** "
+  "(`you-can-compact-yourself` 2, `aiuse-integration` 2, `crush-merge-v0981` 8, "
+  "`opencode-v2` 1, `clinepass-pr44379` 2 plus a stash). Pushing a branch is outward-facing, so "
+  "djbclark picks push or bundle per repo (section 3).")
+w("")
+w("A fourth finding that is not a decision yet: **54.5 GiB of the 60 GiB is one scratch tree**, "
+  "`adhoc-2026-10-18/hm-promo-rehearsal/` (Hermes promotion rehearsal homes and snapshots). "
+  "Deleting it is a later cleanup decision, not part of Phase 0.\n")
+
+# ---- 1 bigteam
+w("## 1. bigteam (`~/.local/state/bigteam/<task>/`)\n")
+w("**Method.** One row per task dir. *Size* is `du -sk`; *newest* is the newest mtime within two "
+  "levels; *CLAIM* is `DONE` when the last non-blank line of `CLAIM` starts with `DONE`, `open` "
+  "when a `CLAIM` exists without it, `no CLAIM` otherwise; *reports* are `*report*.md` files within "
+  "three levels (not inside a git checkout) and whether `<file>.done` exists; *open jobs* counts "
+  "`jobs/*.json` records with no `closed` key (a record written by `acp-dispatch` before it is "
+  "reaped or closed; most are finished slices nobody closed, so this is a loose end, not lost "
+  "data). Verdicts: `unique` = at least one report file and no document under "
+  "`~/src/djbclark-ade/docs`, `~/ops/site-private/memory` or `~/.local/state/handoffs` mentions the "
+  "task name (whole word, `rg -l -F -w`), and the dir is at most 5 MiB; `mixed` = the same but the "
+  "dir is larger (logs, worktrees, caches around the reports); `scratch` = no report file, or every "
+  "report's task name is already referenced elsewhere. **A reference proves a mention, not a copy**, "
+  "and a short common task name can match by accident, so `scratch` for a dir that has reports means "
+  "\"cited somewhere\", not \"safe to delete\"; the 93 scratch dirs have not been read.\n")
+w(f"{bs['tasks']} dirs; {len(bt['loose_files'])} loose files at the root "
+  f"({', '.join(bt['loose_files'][:6])}{'...' if len(bt['loose_files']) > 6 else ''}).\n")
+
+w("### 1.1 The ten largest dirs and what fills them\n")
+w("| # | task | size | verdict | largest children |\n|---|---|---|---|---|")
+for i, t in enumerate(tasks[:10], 1):
+    fills = ", ".join(f"`{esc(f['name'])}` {human(f['bytes'])}" for f in t.get("fills", []))
+    w(f"| {i} | {esc(t['task'])} | {human(t['bytes'])} | {t['verdict']} | {fills} |")
+w("")
+w("`adhoc-2026-10-18` is 91% of the total: `hm-promo-rehearsal/` holds the rehearsal copies "
+  "`homeB`, `homeC`, `home`, `snap-step1`, `backups-C` and `tmp` (a few GiB each, all derived from a "
+  "Hermes home). The `plektra-*` dirs are Android `*.apk` builds and git worktrees (`wt/`, "
+  "`graft-wt/`); every one of them is reproducible from its repo.\n")
+
+w("### 1.2 `unique` and `mixed` dirs (the preservation list)\n")
+w("| task | verdict | size | newest | CLAIM | reports (.done?) | report bytes | open jobs |\n"
+  "|---|---|---|---|---|---|---|---|")
+for t in uniq + mixed:
+    reps = ", ".join(f"{esc(Path(r['path']).name)}{'' if r['done'] else ' (no .done)'}"
+                     for r in t["reports"][:3])
+    if len(t["reports"]) > 3:
+        reps += f" +{len(t['reports']) - 3}"
+    w(f"| {esc(t['task'])} | {t['verdict']} | {human(t['bytes'])} | {day(t['newest_mtime'])} | "
+      f"{esc(t['claim'])} | {reps} | {t['unique_bytes']:,} | {len(t['open_job_records'])} |")
+w("")
+
+w("### 1.3 Every task dir\n")
+w("| task | size | newest | CLAIM | report files | open jobs | verdict |\n|---|---|---|---|---|---|---|")
+for t in tasks:
+    w(f"| {esc(t['task'])} | {human(t['bytes'])} | {day(t['newest_mtime'])} | {esc(t['claim'])} | "
+      f"{len(t['reports'])} | {len(t['open_job_records'])} | {t['verdict']} |")
+w("")
+
+# ---- 2 checkouts
+w("## 2. Orca and cow checkouts\n")
+w("**Method.** A checkout is a directory holding `.git` (file or directory) found up to two levels "
+  "under `~/orca/workspaces`, `~/orca/projects` and `~/.cow/pastures`; in this run symlinks were "
+  "followed, resolved and deduplicated (`~/orca/projects/djbclark-ade` and `one-offs` are links to "
+  "`~/src/...`, so they appear under `~/src`); the tool no longer follows symlinks under a root, so "
+  "a fresh scan names `--git-root ~/src/djbclark-ade --git-root ~/src/one-offs` itself. `~/orca/workspaces/{aiuse,mobile,wristchess,.orca-preparing}` are empty "
+  "dirs. *Modified* and *untracked* count `git status --porcelain` lines (`??` = untracked, "
+  "non-ignored; an untracked directory counts once). *Unpushed* is `git rev-list --count @{u}..HEAD`, "
+  "or `no upstream`. *Ahead of origin* is commits reachable from HEAD and from no `origin/*` ref "
+  "(with a check that the branch tip on origin does not already contain HEAD, because the local "
+  "remote refs can be stale; `--fetch` downloads that branch's objects when they are missing, writing no refs). *On origin* comes from `git ls-remote --heads origin`. Verdict "
+  "precedence: `unpushed commits`, `orphan branch` (branch not on origin and commits origin lacks), "
+  "`dirty`, `clean and pushed`; the *also* column lists the other flags.\n")
+w("| path | branch | mod | untr | unpushed | ahead of origin | stash | on origin | verdict | also |\n"
+  "|---|---|---|---|---|---|---|---|---|---|")
+for c in cos:
+    also = ", ".join(f for f in c["flags"] if f != c["verdict"])
+    w(f"| {esc(tilde(c['path']))} | {esc(c['branch'])} | {esc(c['modified'])} | {esc(c['untracked'])} | "
+      f"{esc(c['unpushed'])} | {esc(c['ahead_of_origin'])} | {esc(c['stashes'])} | "
+      f"{esc(c['on_origin'])} | **{esc(c['verdict'])}** | {esc(also)} |")
+w("")
+dirt = [c for c in cos if "djbclark-ade" in c["path"] and c["verdict"] == "dirty"]
+w("**What the dirt is.** The seven `djbclark-ade` rows (the primary checkout and six pastures) "
+  "show the same 7 untracked paths and about 4 modified ones (6 in `paseo-lifecycle`, 13 in the "
+  "primary, which other agents kept editing during the scan) because `cow` copies the working tree, "
+  "dirt included: `skills/graft/SKILL.md` and `skills/paseo-*/SKILL.md` (modified), and "
+  "`.agents/skills/fastino-glide/`, `bin/graft/`, `docs/handoffs/HANDOFF_standalone-32c0_...`, "
+  "`skills/paseo*/.paseo-managed-files.json` (untracked). They belong to other agents' in-flight "
+  "work in the primary checkout; this scan does not touch them. The two `forgejo-ci-2026-10` rows "
+  "likewise share `.forgejo/`, `apps/desktop/release-new/` and `scripts/forgejo-test-ref`. "
+  "Untracked `graft/` directories are the reproducible graft index (`graft build`), not work. "
+  "The `phase0-scan` pasture itself is dirty with this slice's own files while the scan ran, and "
+  "is left out of 3.2.\n")
+
+# ---- 3 capture
+w("## 3. Capture (how each item would be preserved; none of this was run)\n")
+w("### 3.1 `unique` and `mixed` bigteam dirs\n")
+w("Proposed rule for all of them: copy the report files (not the dir) to one destination, "
+  "`<DEST>/<task>/`, preserving names. `<DEST>` is the one decision (the repo question, rule 23; "
+  "`~/ops/site-private` is private and fits unreviewed AI reports). Per item the file set is below; "
+  "`needs decision` is `yes` only where a session may still be writing (open `CLAIM`, an unclosed "
+  "job record with status running) or the dir is `mixed` (the logs next to the report may matter).\n")
+w("| task | copy | needs decision |\n|---|---|---|")
+for t in uniq + mixed:
+    files = [r["path"] for r in t["reports"]]
+    shown = ", ".join(f"`{esc(f)}`" for f in files[:4]) + (f" +{len(files) - 4} more" if len(files) > 4 else "")
+    need = []
+    if t["claim"] == "open":
+        need.append("CLAIM open: confirm the session is finished")
+    if t["verdict"] == "mixed":
+        need.append("mixed: say whether the logs/worktrees beside it matter")
+    if t["open_job_records"]:
+        need.append(f"{len(t['open_job_records'])} job record(s) unclosed")
+    w(f"| {esc(t['task'])} | `cp ~/.local/state/bigteam/{esc(t['task'])}/` {shown} -> `<DEST>/{esc(t['task'])}/` | "
+      f"{'yes: ' + '; '.join(need) if any(not n.endswith('unclosed') for n in need) else 'no (only DEST)'} |")
+w("")
+w("The two open-claim `mixed` dirs and `research-brain-emulation-agent-teams` (22 reports, 88 MiB "
+  "with no CLAIM) are the ones to read first.\n")
+
+w("### 3.2 Checkouts with unpushed commits or untracked non-ignored files\n")
+w("| checkout | what is not preserved | command | needs decision |\n|---|---|---|---|")
+for c in cos:
+    p = esc(tilde(c["path"]))
+    untr = [u for u in c["untracked_sample"] if u != "graft/"]
+    real_untr = c["untracked"] - (1 if "graft/" in c["untracked_sample"] else 0)
+    if c["path"].endswith("/djbclark-ade/phase0-scan"):
+        continue  # this slice's own pasture: its dirt is the files this slice is writing
+    if not (c["ahead_of_origin"] or (c["unpushed"] not in (0, "no upstream"))) and real_untr <= 0 \
+            and not c["stashes"] and not c["modified"]:
+        continue
+    what, cmd, need = [], [], "no"
+    if p.endswith("/one-offs/Hermes"):
+        what.append(f"{c['ahead_of_origin']} commits on branch `Hermes` (no remote)")
+        cmd.append("same repo as `~/src/one-offs`: its `--all` bundle (the `~/src/one-offs` row below) includes "
+                   "branch `Hermes`")
+        need = "**yes**: see `~/src/one-offs`"
+    elif "no origin remote" in c["flags"]:
+        what.append(f"all {c['ahead_of_origin']} commits (no remote)")
+        cmd.append(f"`git -C {p} bundle create ~/ops/site-private/bundles/{esc(Path(c['path']).name)}.bundle --all`"
+                   " or add a remote and `git push -u origin <branch>`")
+        need = "**yes**: only copy; hosting or bundle destination"
+    elif "orphan branch" in c["flags"] or "unpushed commits" in c["flags"]:
+        n = c["ahead_of_origin"] or c["unpushed"]
+        what.append(f"{n} commit(s) on `{esc(c['branch'])}`")
+        cmd.append(f"`git -C {p} push -u origin {esc(c['branch'])}` or `git -C {p} bundle create "
+                   f"<DEST>/{esc(Path(c['path']).name)}-{esc(c['branch'].replace('/', '_'))}.bundle {esc(c['branch'])}`")
+        need = "yes: pushing a branch publishes it; pick push or bundle"
+    if c["modified"]:
+        what.append(f"{c['modified']} modified tracked file(s)")
+        if "djbclark-ade" in c["path"]:
+            cmd.append("same modified files as the primary checkout (cow copy; other agents' edits): "
+                       "preserved there")
+        else:
+            cmd.append(f"`git -C {p} diff > <DEST>/{esc(Path(c['path']).name)}-modified.patch`")
+            need = need if need != "no" else "yes: decide whether they are work"
+    if c["stashes"]:
+        what.append(f"{c['stashes']} stash")
+        cmd.append(f"`git -C {p} stash show -p stash@{{0}} > <DEST>/{esc(Path(c['path']).name)}-stash0.patch`")
+    if real_untr > 0:
+        shared = "djbclark-ade" in c["path"] or "forgejo-ci-2026-10" in c["path"]
+        what.append(f"{real_untr} untracked ({', '.join('`'+esc(u)+'`' for u in untr[:3])}"
+                    f"{', ...' if len(untr) > 3 else ''})")
+        if shared:
+            cmd.append("same paths as the primary / sibling checkout (cow copy): preserve once there")
+        else:
+            cmd.append(f"copy the paths to `<DEST>/{esc(Path(c['path']).name)}-untracked/` "
+                       f"(`cp -R`), or `git -C {p} add` them on a branch and push")
+            need = need if need != "no" else "yes: decide whether they are work"
+    w(f"| {p} | {'; '.join(what)} | {'; '.join(cmd)} | {need} |")
+w("")
+w("Checkouts not listed are `clean and pushed` (branch on origin or no commits origin lacks) "
+  "or hold only the reproducible `graft/` index.\n")
+
+# ---- 4 caveats
+w("## 4. Limits of this scan\n")
+w("1. Bigteam `unique` means \"no document under three roots mentions the task name\"; it does not "
+  "read the reports. A mention in `site-private/memory` is counted as preserved even if the report "
+  "itself is only here.")
+w("2. Directories are classified by name, not content: the 93 `scratch` dirs were not opened, so a "
+  "decision note in a file not named `*report*.md` (for example `findings.md`, `decision.md`, "
+  "`out.txt`, `final.txt`) is not detected. Count of such files was not measured.")
+w("3. `du` totals ~64 GB here against ~61 GB in the slice 1 inventory: a different tool and a "
+  "later moment (sessions kept writing during both).")
+w("4. `ls-remote` needs the remote to answer; a checkout whose origin refused would show "
+  "`on origin: unknown`. None did in this run.")
+w("5. A pasture that was clean when created can become dirty or ahead later; this is a snapshot "
+  f"at {d['scanned_at']}.")
+w("6. The scan ran with the first version of the tool, which did not look at a checkout's own config "
+  "before running git there. The config of the scanned checkouts was not read afterwards for "
+  "command-naming keys (`core.fsmonitor`, `core.sshCommand`, `remote.*.uploadpack`, `filter.*`, "
+  "`credential.*`, `core.hooksPath`, `include.*`), so this document cannot say none of them ran "
+  "something. The current tool lists such a checkout as `skipped: repo config runs commands`.")
+w("7. The run's `--fetch` could have moved `refs/remotes/origin/<branch>` and `FETCH_HEAD` in the "
+  "checkouts where it fetched; which ones it touched was not recorded.\n")
+
+# ---- 5 commands
+w("## 5. Commands run\n")
+w("`W` is the slice's scratch dir under "
+  "`~/.local/state/bigteam/ade-2026-10-20-phase0-queue/phase0-scan-work`. Besides writing `W`, the "
+  "run's only effects outside this pasture were the `fetch` calls described above.\n")
+w("```sh")
+w("python3 -I bin/ade-scan-state --json \\")
+w("  --bigteam ~/.local/state/bigteam \\")
+w("  --ref-root ~/src/djbclark-ade/docs --ref-root ~/ops/site-private/memory \\")
+w("  --ref-root ~/.local/state/handoffs --exclude 'ade-everywhere-phase0-scan-*.md' \\")
+w("  --git-root ~/orca/workspaces --git-root ~/orca/projects --git-root ~/.cow/pastures \\")
+w("  --remote --fetch > $W/scan.json 2> $W/scan.err; echo rc=$? > $W/scan.rc")
+w("python3 -I bin/ade-scan-state-doc $W/scan.json docs/ade-everywhere-phase0-scan-2026-10-20.md")
+w("```\n")
+w("The first command is the run as executed. With the current tool the same scan adds "
+  "`--git-root ~/src/djbclark-ade --git-root ~/src/one-offs` (symlinks under a root are not followed), "
+  "its `--fetch` is `git -c maintenance.auto=false -c gc.auto=0 fetch --no-auto-maintenance "
+  "--no-write-fetch-head --no-tags --refmap= origin refs/heads/<branch>`, and a checkout whose config "
+  "names a command is listed as skipped.\n")
+w("Inside the tool: `du -sk <dir>`; `rg -l -F -w --no-messages -g '!<exclude>' -- <task> <roots>`; "
+  "per checkout `git -C <path>` (in the run as executed, with `GIT_OPTIONAL_LOCKS=0` and the caller's "
+  "other `GIT_*` variables; now `git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null "
+  "-c protocol.ext.allow=never` with every `GIT_*` variable dropped, preceded by `config --list "
+  "--show-scope --includes -z`): `rev-parse --abbrev-ref HEAD`, "
+  "`status --porcelain`, `rev-parse --abbrev-ref --symbolic-full-name @{u}`, "
+  "`rev-list --count @{u}..HEAD`, `rev-list --count HEAD --not --remotes=origin`, `stash list`, "
+  "`remote get-url origin`, `ls-remote --heads origin` (now `ls-remote --heads -- <url>` from an empty "
+  "directory outside any repository), `rev-list --count HEAD --not --remotes=origin <tip>`, "
+  "`fetch --quiet origin <branch>` (only when the tip's objects are missing). "
+  "`bin/ade-scan-state ... --markdown` prints the raw tables; this document's tables and prose come from "
+  "`bin/ade-scan-state-doc`. Before the run: `ls -la ~/orca/projects`, "
+  "`ls -A ~/orca/workspaces/*`, `fd -H .git -d 4 ~/orca/workspaces`, `git -C ~/src/one-offs remote -v` "
+  "(no output: no remote), and `du -sk ~/.local/state/bigteam/adhoc-2026-10-18/hm-promo-rehearsal/*` "
+  "for 1.1.")
+Path(sys.argv[2]).write_text("\n".join(out) + "\n")
