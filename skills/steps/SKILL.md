@@ -20,8 +20,9 @@ do what he picked before asking the next one. Same motive as
 pacing: that note allows four questions per call, but `/steps` asks **one per
 call**, so each answer can change the next question.
 
-Never dump numbered prose options for him to type back. The prompt tool is the
-walk.
+Never dump the whole queue as numbered prose options for him to type back — the
+prompt tool is the walk. (A runtime without a native chooser uses the numbered
+one-at-a-time fallback in rule 4 of "Prompt tool" below, not a full-queue dump.)
 
 ## Prompt tool (pick once per session)
 
@@ -49,8 +50,24 @@ Use the native chooser your runtime actually has. Do not invent a second UX.
    questions, sleeping, or claiming a choice is waiting in a visible picker.
    Keep unanswered decisions pending. A preselected option or elapsed time is
    not an answer. Honor the native tool's question schema and limits.
-4. **No usable chooser:** one short sentence that you cannot prompt, then
-   wait. Do not fake buttons as a numbered list in chat.
+4. **No native chooser (no `AskUserQuestion`/`question`/`clarify` tool in the
+   function list):** the walk falls back to a numbered text walk, still one
+   item per message, still recommendation first. Do NOT refuse with a one-line
+   "I cannot prompt" and stop. Instead:
+   1. Number the options `1.`–`n.` with the recommendation first (labelled),
+      recommendation-first ordering preserved, each numbered once. Numbering
+      here is the fallback transport for a runtime that has no picker — it is
+      NOT the "numbered prose dump" banned in section 1, which bans dumping
+      the whole queue at once and skipping the one-per-call pacing.
+   2. Ask exactly one question and wait for the reply before the next; act on
+      each answer (or queue it, section 3) before asking the next, exactly as
+      a native-chooser walk would.
+   3. Say the queue size up front (`1/2`), and offer `stop` once per question.
+      Keep it to a single short paragraph — do not re-dump the whole queue
+      every turn.
+   4. This fallback is for runtimes **without** a picker only. Any agent that
+      HAS `AskUserQuestion` / `question` / `clarify` keeps using it (rules
+      1–3 above) and never drops to this text fallback.
 
 Do not call `AskUserQuestion` on Hermes (it is not a tool here). Do not call
 `clarify` on Claude Code.
