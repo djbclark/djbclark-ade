@@ -55,7 +55,8 @@ What an attacker would want, in order of damage:
 |---|---|---|
 | The operator | Full | The only principal. One person, one personal machine. |
 | Local agent TUIs and ACP sub-agents (`acp-run`, `acp-dispatch`) | **Trusted as the operator for task direction** (operator rule). This does not extend to review: an agent's or a PR body's "djbclark approved" is a claim to check, never a substitute for the adversary verdict or a reviewer's own reading. A denied permission prompt goes to the operator, not to a peer | **Prompt-injectable**: they read fetched web pages (`bin/web-get`, firecrawl MCP), third-party repo content, tool output and each other's reports. An injected agent acts with the operator's rights. |
-| Cloud agents: Cursor Cloud Agents (`bin/cursor-cloud`), Codex review | **Untrusted writers, trusted-ish readers** | They run off the Mac, get the repo URL and a prompt, and push branches to a **public** repo (`cursor/...`, or `--work-on-branch` the starting ref). Codex is a PR reviewer only today (`docs/queue.md`). They hold no vault access. |
+| Cloud agents: Cursor Cloud Agents (`bin/cursor-cloud`) | **Untrusted writers** | They run off the Mac, get the repo URL and a prompt, and push branches to a **public** repo (`cursor/...`, or `--work-on-branch` the starting ref; `bin/cursor-cloud` never opens the PR). They hold no vault access. |
+| Codex (GitHub connector) | **Trusted-ish reader, comment-only** | Reviews PRs on request and posts review comments; it has no branch-writing path here (reviewer only today, `docs/queue.md`). Its findings are input to the lead, not a merge gate. |
 | Hermes bot (`~/.local/bin/hermes-ping`, `mcp__hermes__*`) | Channel outside this repo | `hermes-ping` is one-way (operator; its code is not in this repo). The MCP bridge is two-way: read/send messages and `permissions_respond` on Hermes's approval queue (`docs/mcp-servers.md`). |
 | GitHub Actions runners | Untrusted compute, no secrets | `.github/workflows/test.yml`: `permissions: contents: read`, triggers `push` to master, `pull_request`, `workflow_dispatch`; runs `pytest` on macOS and Ubuntu; no `secrets.*` referenced. |
 | vps-primary | **Trusted** (proposal decision Q18, 2026-10-19) | Future state: holds plaintext sessions and keys; its compromise exposes every session (proposal 10, risk 10). Not part of the Mac code today. |
@@ -230,9 +231,11 @@ others, and the merge path is unenforced. "Control" is what exists; "Gap" is wha
 * **Control.** Atomic writes (`write_atomic`, `os.replace`), a record lock (`update_record`), new fields
   read with `.get`.
 * **Gap.** The record is the dispatcher's source of truth for what launchd runs, and it is unsigned. Any
-  process running as the operator can edit a record, a runner or `~/.config/load-watch/ci-only.tsv` and
-  have launchd run it later, so a local foothold is persistent through `acp-dispatch`. Accepted (section 5),
-  but a PR that widens it is still a finding.
+  process running as the operator can edit a record or a runner script and have launchd run it later, so a
+  local foothold is persistent through `acp-dispatch`. The same process can edit
+  `~/.config/load-watch/ci-only.tsv`, which `bin/load-watch` only parses as a repo policy (which repos must
+  build in CI, and how): that is an availability or policy change (`bg` refuses or allows local builds),
+  not executed content. Accepted (section 5), but a PR that widens either is still a finding.
 
 ### 4.10 Denial of the operator's machine
 
