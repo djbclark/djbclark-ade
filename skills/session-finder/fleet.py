@@ -450,7 +450,11 @@ def _claude_sessions(agents_by_sid, used, anc, launch_panes=None, launch_sids=No
         elif _where:
             w = _where.lookup(pid, d.get("procStart", "")) or {}
             s.update(where=w.get("where", ""), focus=w.get("focus", ""), title=w.get("title", ""), host="terminal")
-            if _in_orca(env):
+            if w.get("paseo_agent"):
+                # the Paseo daemon spawned it: no terminal, `paseo send` is its channel (relay.py; 2026-10-20)
+                s.update(host="paseo", chan=("paseo", w["paseo_agent"]), paseo=w["paseo_agent"],
+                         reach=s["reach"].replace("types it into its pane", "`paseo send --behavior steer` into its Paseo agent"))
+            elif _in_orca(env):
                 chan = _orca_chan(env)
                 s.update(host="orca", **({"chan": chan} if chan else {"reach": ORCA_STALE}))
             elif env.get("TMUX_PANE"):

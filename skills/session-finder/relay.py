@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """relay — type a one-line message into a running agent's terminal, when SendMessage cannot reach it. No model.
 
-    relay.py <id|name|sid|pane> "<text>" [--wait S] [--json]    (pane: a herdr pane id such as w34:p4)
+    relay.py <id|name|sid|pane|paseo-agent-id> "<text>" [--wait S] [--idle S] [--json]
+                                           (pane: a herdr pane id such as w34:p4; a Paseo agent id is the
+                                           PASEO_AGENT_ID uuid, as `paseo ls -g` and where.py show it)
 
 The fallback for session-finder's rung 3a (2026-10-11): a workflow sub-agent's ListAgents often lists only
 its teammates, so `SendMessage({to: "<name>"})` to a running Claude TUI fails with "No agent named … is
@@ -11,6 +13,11 @@ send-text` + `agent send-keys enter`, Orca `terminal send`, tmux `send-keys`), t
   * Claude Code queues text typed while it works ("Press up to edit queued messages") and takes it at its
     next tool round, so a working Claude session is fine; an idle one gets it as its next prompt.
   * Other TUIs: idle only (keys into a working codex/opencode/... are not reliably queued).
+  * A Paseo-hosted agent (where: `host=paseo agent=<id>`; Paseo's daemon spawns it, so it has no pane) is
+    reached with `paseo send <id> --behavior steer`, run without PASEO_AGENT_ID so it is plain text like
+    the operator's (bin/self-slash does the same). `--idle S` waits up to S seconds for it to go idle
+    first (`paseo wait`); another TUI that is working is refused without it. Delivery is what the daemon
+    acknowledges, upgraded to "delivered" once a Claude transcript shows the text (2026-10-20).
   * Refused: this session; an ACP launch (`launch.py reply` is its channel); a finished session (`/handoff`
     or `/quit`: start a /baton session instead); one blocked on a question or permission (`helm.py answer`);
     one with no channel (Ghostty/iTerm/headless: say its `where:` line); and any input box that already
@@ -27,6 +34,9 @@ Exit: 0 delivered or queued (verified), 1 refused or unverified, 2 usage.
 import argparse
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -46,7 +56,74 @@ RETRY_AFTER = 2.0
 # Messages this relay typed whose Enter never landed, per session id. A later relay to that session finds the
 # text in the input box and used to refuse it as someone's draft (2026-10-18: a proposal to djbclark-ade-87
 # sat unsent there and blocked the next relay); now it submits its own leftover first.
+UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+PASEO_OWN_ENV = ("PASEO_AGENT_ID", "PASEO_AGENT_CWD")
 UNSENT = Path(os.environ.get("RELAY_UNSENT", Path.home() / ".local/state/session-finder/relay-unsent.json"))
+
+
+def paseo_run(*args, timeout=30):
+    """(rc, stdout, stderr) of the paseo CLI ($PASEO_CLI, else PATH) with this agent's own PASEO_AGENT_ID
+    unset: an agent-originated send is wrapped in a "[Message received] <parent>" envelope and reaches
+    Claude as plain text, so a relay would not read as the operator's message (bin/self-slash, 2026-10-19)."""
+    cli = os.environ.get("PASEO_CLI") or shutil.which("paseo")
+    if not cli:
+        return 127, "", "no paseo CLI (PASEO_CLI unset, none on PATH)"
+    env = {k: v for k, v in os.environ.items() if k not in PASEO_OWN_ENV}
+    try:
+        p = subprocess.run([cli, *args], capture_output=True, text=True, timeout=timeout, env=env, check=False)
+        return p.returncode, p.stdout, p.stderr
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 127, "", str(e)
+
+
+def paseo_session(agent_id):
+    """A session record for Paseo agent AGENT_ID straight from `paseo agent inspect`, or None when Paseo does
+    not know it. For an agent fleet.sessions() does not list (not a Claude Code TUI, or no registry entry)."""
+    rc, out, _ = paseo_run("agent", "inspect", agent_id, "--json")
+    try:
+        info = json.loads(out) if rc == 0 else None
+    except ValueError:
+        info = None
+    if not isinstance(info, dict) or info.get("Id") != agent_id:
+        return None
+    state = info.get("Status") or "unknown"
+    return fleet._rec(id=agent_id[:8], agent=info.get("Provider") or "paseo", name=info.get("Name") or "",
+                      cwd=info.get("Cwd") or "", host="paseo", chan=("paseo", agent_id), paseo=agent_id,
+                      paseo_state=state, status={"idle": "idle", "running": "working"}.get(state, state),
+                      self=agent_id == os.environ.get("PASEO_AGENT_ID"), where=f"host=paseo agent={agent_id}")
+
+
+def paseo_idle(s, seconds):
+    """Wait up to SECONDS for Paseo agent S to go idle (`paseo wait`); True when it is."""
+    if s.get("status") == "idle":
+        return True
+    rc = paseo_run("wait", s["chan"][1], "--timeout", str(max(1, int(seconds))), "--json", timeout=seconds + 15)[0]
+    if rc == 0:
+        s["status"] = "idle"
+    return rc == 0
+
+
+def send_paseo(s, text, wait):
+    """Send TEXT to Paseo agent S: 'delivered' (seen in its Claude transcript), 'accepted' (the daemon took
+    it) or None (send failed; the reason is printed). --behavior steer so a turn that began meanwhile is
+    never torn down; --no-wait so this returns at once (the transcript poll below is the verification)."""
+    agent = s["chan"][1]
+    tx = Path(s["transcript"]) if s.get("transcript") else None
+    mark = tx.stat().st_size if tx and tx.is_file() else 0
+    rc, out, err = paseo_run("send", agent, "--no-wait", "--behavior", "steer", "--json", text)
+    if rc != 0:
+        print(f"relay: [{s['id']}] paseo send to {agent} failed (rc={rc}): {fleet.clip((err or out).strip(), 200)}",
+              file=sys.stderr)
+        return None
+    probe = json.dumps(text[:40], ensure_ascii=False)[1:-1]
+    deadline = time.time() + wait
+    while tx and tx.is_file() and time.time() < deadline:
+        with tx.open("rb") as fh:
+            fh.seek(mark)
+            if probe in fh.read().decode("utf-8", "replace"):
+                return "delivered"
+        time.sleep(1)
+    return "accepted"
 
 
 def screen(chan, lines=20):
@@ -142,7 +219,7 @@ def ours(d, text):
 
 
 def find(ident, ss):
-    hits = [s for s in ss if ident in (s["id"], s["name"], s.get("sid"), s.get("pane"))]
+    hits = [s for s in ss if ident in (s["id"], s["name"], s.get("sid"), s.get("pane"), s.get("paseo"))]
     if not hits and len(ident) >= 8:
         hits = [s for s in ss if (s.get("sid") or "").startswith(ident)]
     return hits
@@ -157,11 +234,14 @@ def refusal(s):
     if s.get("finished"):
         return (f"finished ({s['finished']}): never continue there; start a fresh session from its handoff "
                 "(session-finder rung 3b, launch.py --baton)")
+    if s.get("host") == "paseo" and s.get("paseo_state") not in (None, "idle", "running"):
+        return f"its Paseo agent is {s['paseo_state']}, not idle or running"
     if not s.get("chan"):
         rec = fleet.dispatch_record(s.get("sid"))
         if rec:
             return f"a headless acp-dispatch slice (no pane): acp-dispatch tell {rec} \"<text>\""
-        return f"no terminal channel ({s.get('where') or 'unknown terminal'}); tell the operator its where: line"
+        return (f"no terminal channel ({s.get('where') or 'unknown terminal'}); tell the operator its where: line. "
+                "If it runs under Paseo (a PASEO_AGENT_ID it was handed, or `paseo ls -g`), pass that agent id as the ident")
     st = s.get("status")
     if st == "blocked":
         return "blocked on a question or permission prompt: typed text would land in that dialog (helm.py answer)"
@@ -175,6 +255,7 @@ def main():
     ap.add_argument("ident")
     ap.add_argument("text")
     ap.add_argument("--wait", type=float, default=20, help="seconds to verify delivery (default 20)")
+    ap.add_argument("--idle", type=float, metavar="S", help="Paseo agents: wait up to S seconds for it to go idle first")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
     text = " ".join(a.text.split())
@@ -182,16 +263,33 @@ def main():
         print("relay: empty text", file=sys.stderr)
         return 2
     hits = find(a.ident, fleet.sessions())
+    if not hits and UUID.match(a.ident):
+        hits = [s for s in [paseo_session(a.ident)] if s]    # a PASEO_AGENT_ID fleet does not list
     if len(hits) != 1:
         print(f"relay: {'no' if not hits else len(hits)} session(s) match {a.ident!r} (fleet.py list shows ids and names)",
               file=sys.stderr)
         return 1
     s = hits[0]
+    if s.get("host") == "paseo" and a.idle and not s.get("self") and not paseo_idle(s, a.idle):
+        print(f"relay: [{s['id']}] not sent: its Paseo agent is still running after {a.idle:g}s", file=sys.stderr)
+        return 1
     why = refusal(s)
     if why:
         print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
         return 1
     chan = tuple(s["chan"])
+    if chan[0] == "paseo":
+        seen = send_paseo(s, text, a.wait)
+        if not seen:
+            return 1
+        out = {"id": s["id"], "name": s["name"], "status": s["status"], "via": f"paseo {chan[1]}", "result": seen,
+               "text": text}
+        if a.json:
+            print(json.dumps(out, ensure_ascii=False))
+        else:
+            when = "now" if s["status"] == "idle" else "steered into its running turn"
+            print(f"relayed to [{s['id']}] {s['name']} via {out['via']}: {seen}; it takes the message {when}")
+        return 0
     d = draft(chan) if s["agent"] == "claude" else ""
     left = _unsent().get(s["id"])
     if d and ours(d, left):
