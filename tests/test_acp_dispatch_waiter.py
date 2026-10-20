@@ -121,6 +121,9 @@ class TestRearmLine(WaiterBase):
         # record sits running while the waiter polls
         r = self.dispatch("--detach", "--no-wait", mode="slow", name="e2e")
         self.assertEqual(r.returncode, 0, r.stderr)
+        lines = r.stdout.strip().splitlines()           # the waiter hint sits above `rearm:` (2026-10-20)
+        self.assertTrue(lines[-1].startswith("rearm: "), r.stdout)
+        self.assertIn("timeout 7200000", lines[-2])
         rec = self.record("e2e")
         self.assertIsNone(rec["finished"])
         proc = subprocess.Popen(["bash", "-c", rec["rearm"]], stdout=subprocess.PIPE,

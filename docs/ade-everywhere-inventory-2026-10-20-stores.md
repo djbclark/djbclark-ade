@@ -43,8 +43,8 @@ session-bearing item found (`fd … -x stat -f '%m %N' | sort -rn | head -1`) or
 | Claude Code | `~/.claude/history.jsonl` | jsonl prompt history | 2.9M | 2026-10-19 22:46 | derived index | the jsonl itself | copy | n/a | none | none |
 | Claude Code | sidecars: `~/.claude/file-history` (185), `session-env` (1580), `sessions` (session-server `.key`/`.json`), `tasks` (784), `teams` (36) | mixed files | within the 2.2G | 2026-10-20 02:48 (dirs) | mixed (sidecars of the canonical tree) | none verified | clone with `projects/`, excluding `sessions/*.key` (live session-server keys, 5.5) | n/a | none | none |
 | Claude Code | `~/.claude.json` + `~/.claude/settings.json` (52K) + `settings.local.json` (6.9K) | json | 236K + 52K + 6.9K | 2026-10-20 | config | themselves | copy the two `settings*.json`; `~/.claude.json` holds account credentials: exclude or vault (5.5) | n/a | n/a | n/a |
-| Codex | `~/.codex/sessions` → `~/ops/site-private/.codex-runtime/sessions` (`readlink -f`), `YYYY/MM/DD/rollout-*.jsonl`, 840 files | jsonl rollouts; first-line keys `ordinal,payload,timestamp,type` | 1.1G (runtime tree total, incl 73M `logs_2.sqlite`) | 2026-10-20 02:51 | canonical files plus derived index | the rollout | copy after completion | `codex resume`, `codex fork`, `exec resume` | `/import` from Claude Code and Cursor; no first-party rollout import | remote connections continue a chat on its host |
-| Codex | `~/.codex/session_index.jsonl` → runtime copy (4,441 B, 35 rows; keys `id,thread_name,updated_at`) | jsonl index | 4.4K | 2026-10-19 19:59 | derived index | the jsonl itself | copy | (feeds resume picker) | n/a | n/a |
+| Codex | `~/.codex/sessions` → `~/ops/site-private/.codex-runtime/sessions` (`readlink -f`; a symlinked root, followed by `ade-backup-stores` and recorded under `root_symlinks`), `YYYY/MM/DD/rollout-*.jsonl`, 840 files | jsonl rollouts; first-line keys `ordinal,payload,timestamp,type` | 1.1G (runtime tree total, incl 73M `logs_2.sqlite`) | 2026-10-20 02:51 | canonical files plus derived index | the rollout | copy after completion | `codex resume`, `codex fork`, `exec resume` | `/import` from Claude Code and Cursor; no first-party rollout import | remote connections continue a chat on its host |
+| Codex | `~/.codex/session_index.jsonl` → runtime copy (a symlink into `~/ops/site-private/.codex-runtime/`, followed as a store root by `ade-backup-stores`; 4,441 B, 35 rows; keys `id,thread_name,updated_at`) | jsonl index | 4.4K | 2026-10-19 19:59 | derived index | the jsonl itself | copy | (feeds resume picker) | n/a | n/a |
 | Codex | `~/.codex/state_5.sqlite` → runtime `state_5.sqlite` (WAL) + `logs_2.sqlite` 73M + `memories_1.sqlite` 389K + `goals_1.sqlite` 32K + `memories-git/` (git) | sqlite (WAL; header 18-19 = 2,2) | ~74M | 2026-10-20 02:54 (wal) | derived index (tables `_sqlx_migrations`, `rollout_migration_*`, `thread_attachments`, `external_agent_session_imports`); role of `thread_*` tables not fully classified | none verified | backup API | (index of rollouts) | n/a | n/a |
 | Codex | `~/.codex/config.toml` (0600) + `auth.json` (contains a credential; not opened) | toml | 15K | 2026-10-19 19:58 | config | itself | copy, minus the 5.5 credential file | n/a | n/a | n/a |
 | Gemini CLI | `~/.gemini/tmp/<project-name>/chats/session-<ts>-<id>.jsonl` (4 files; keys `kind,lastUpdated,projectHash,sessionId,startTime`) | jsonl per session, keyed by project-name dir with `projectHash` inside | <1M | 2026-10-20 02:46 | canonical files | `/export-session <path>` (v0.43.0, per proposal 6.1) | export | `--session-file` | `--session-file` | none |
@@ -76,9 +76,9 @@ session-bearing item found (`fd … -x stat -f '%m %N' | sort -rn | head -1`) or
 | zcode | `~/.zcode/cli/setting.json` 2.1K, `cli/config.json` 4.1K, `v2/config.json` 8.3K; `v2/credentials.json` (credential, not opened); `cli/setting.json.bak-2026-10-18-mcp-trim` matched key patterns (count only, not opened) and was vaulted on 2026-10-20 (5.5); `cli/config.json.bak` matched none | json | ~15K | 2026-10-18 | config | themselves | copy, minus the 5.5 credential files | n/a | n/a | n/a |
 | Crush (ACP) | `~/.local/share/crush-acp/crush.db` 978,944 B + shm/wal; tables `sessions, messages, files, read_files, mcp_*` (the ACP instance: `CRUSH_GLOBAL_DATA` per `acp-run --list`) | sqlite (WAL) | 2.0M | 2026-10-14 13:37 (db), 2026-10-20 02:39 (shm) | canonical SQLite | third-party or none (6.1) | backup API | yes | none | none |
 | Crush (TUI) | `~/.config/crush/.crush/crush.db` 2,789,376 B + shm (live 2026-10-20 02:42)/wal | sqlite (WAL) | 2.8M | 2026-10-20 02:42 | canonical SQLite (second, default-XDG store) | none | backup API | yes | none | none |
-| Crush | `~/src/djbclark-ade/.crush` exists (repo-local instance; not opened); `~/.local/share/crush/` holds `crush.json`, `projects.json`, `providers.json` (563K catalog) and `hyper.json` (a Charm Hyper login: exclude or vault, 5.5) | mixed | 584K | 2026-10-19 | config / repo-local sessions db (`crush.db` + wal/shm, `-shm` touched 2026-10-20) | n/a | `.crush/crush.db` via backup API (section 3 item 1); copy the json minus `hyper.json` | n/a | n/a | n/a |
+| Crush | `~/src/djbclark-ade/.crush` exists (repo-local instance; not opened); `~/.local/share/crush/` holds `crush.json` (0600: the provider API key and OAuth access and refresh tokens, found by the adversary 2026-10-20; excluded), `projects.json`, `providers.json` (563K catalog) and `hyper.json` (a Charm Hyper login: exclude or vault, 5.5) | mixed | 584K | 2026-10-19 | config / repo-local sessions db (`crush.db` + wal/shm, `-shm` touched 2026-10-20) | n/a | `.crush/crush.db` via backup API (section 3 item 1); copy `projects.json` only (`crush.json`, `hyper.json` and `providers.json` are excluded) | n/a | n/a | n/a |
 | Grok | `~/.grok/sessions/<urlencoded-cwd>/<uuid>/{chat_history.jsonl, events.jsonl, updates.jsonl, summary.json, prompt_context.json, system_prompt.txt}`; `chat_history` keys `content,type` | jsonl per session + sidecars | 176M (`~/.grok`) | 2026-10-20 02:12 | canonical files | the jsonl | copy | in-tool (not verified) | none verified | none |
-| Grok | `~/.grok/worktrees.db` 40K WAL (`meta, worktrees`), `memory-v2/`, `memtrace/` (162 dirs), `config.toml` 953B | sqlite + files | within 176M | 2026-10-20 01:36 | config + memory/traces | n/a | copy / backup API | n/a | n/a | n/a |
+| Grok | `~/.grok/worktrees.db` 40K WAL (`meta, worktrees`), `memory-v2/`, `memtrace/` (162 dirs), `config.toml` 953B | sqlite + files | within 176M | 2026-10-20 01:36 | config + memory/traces | n/a | copy (ade-backup-stores: `worktrees.db` by backup API, `memory-v2/` and `memtrace/` as file roots; `config.toml` is config, not copied) | n/a | n/a | n/a |
 | Muse | `~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl` (newest 2026/10/04) + `session-index.db` 168K WAL (`rewind_catalog_*`, `sessions`) + `tui-history.jsonl` 10K | jsonl per session + sqlite rewind index | 53M | 2026-10-04 06:49 | canonical files plus derived index | the jsonl | copy + backup API for the index | in-tool (not verified) | none verified | none |
 | Paseo | `~/.paseo/agents/<workspace-slug>/<uuid>.json` (6 slugs, small json per agent session) | json per agent session | ~50K | 2026-10-20 02:55 | mixed: titles, parent links and labels exist only here | history search, Import session (Claude, Codex, omp) (6.1) | copy | n/a | yes | per-host history only |
 | Paseo | `agent-requests/*.json` (81), `projects/{projects,workspaces}.json`, `runtime/managed-processes`, `creations/` (452), `config.json` 4.4K, `models/` 984M voice models, `daemon-keypair.json` + `local-credential` (credentials, not opened) | json + assets | 1.0G total | 2026-10-20 02:49 | config + state + assets | n/a | copy (agents/, projects/, agent-requests/ only) | n/a | n/a | n/a |
@@ -93,6 +93,18 @@ session-bearing item found (`fd … -x stat -f '%m %N' | sort -rn | head -1`) or
 | ADE toolchain | `~/.local/state/session-index/history.v2.sqlite` (FTS5: `files, msgs, msgs_*`) + shm 32K | sqlite | 142M | 2026-10-20 02:49 | derived index (rebuildable) | n/a | rebuild, don't back up | n/a | n/a | n/a |
 
 ## 3. Backup plan per store (feeds Phase 0 slice 2)
+
+2026-10-20: `bin/ade-backup-stores` implements this section (PR #24): `--dry-run` first, then a run into
+`~/.local/state/ade/backups/<UTC>/` with a `MANIFEST.json` (sha256 per file, exclusions, errors) and the Hermes export
+(`hermes-export/`; sessions above `max_export_messages` are listed in the manifest, not exported, and are whole in the
+`hermes-state/` copy). Config-only rows (section 2 rows of class config) are not copied by it.
+The tool scrubs OpenCode's credential tables from the copy and refuses (as an error entry, the copy is dropped)
+any backed-up database with another credential-looking table or column name (`--check-schemas`, 2026-10-20: 0
+unexplained across all live databases; 20 token-metric, account-id and lease-marker names are allowlisted with
+reasons in the script). Opening a source `mode=ro` can create zero-length `-wal`/`-shm` files beside a quiet database; no
+data in a source changes. A configured store or path that does not exist (a partly provisioned machine) is
+`"status": "missing"` in the manifest and on stderr, exit 0; `--strict-stores` makes it exit 1. Transcript content is copied as it is and can hold pasted secrets: a generation is
+secret-bearing.
 
 **Two rules for slice 2 (adversary review, 2026-10-20).** (a) Every path in section 5 item 5 is excluded from
 every backup generation: a backup that carries a live key or account blob puts the credential in more places
@@ -120,10 +132,14 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
    each `conversation_summaries.db` and, for the ACP store, the `conversations/<uuid>.meta` sidecar beside each db
    (268 files, some 0600, not opened); Cursor `~/.cursor/chats/<md5>/<uuid>/store.db` and
    `~/.cursor/acp-sessions/<uuid>/store.db`, each with its `meta.json` sidecar copied beside the backup (the
-   resume picker reads it, skills/autorename/SKILL.md; a db without it is not a lossless copy).
+   resume picker reads it, skills/autorename/SKILL.md; a db without it is not a lossless copy: the tool lists a session whose `meta.json` does not exist under `sidecar_missing` and warns on stderr (db copied, store `ok`; 14 of 101 chat sessions never had one, 2026-10-20; an error under `--strict-stores`), and reports one whose `meta.json` is a symlink,
+   excluded or gone during the copy as an error naming the session directory and marks the store `partial`, 2026-10-20).
 3. **File stores — clone the directory:** `~/.claude/projects` (+ sidecar dirs `file-history`,
-   `session-env`, `tasks`, `teams`; `sessions` only without its `*.key` files), Codex runtime `sessions/` tree,
-   `~/.qwen/projects/*/chats`, `~/.cline/data/sessions`, `~/.grok/sessions`, `~/.gemini/tmp/*/chats`,
+   `session-env`, `tasks`, `teams`; `sessions` only without its `*.key` files), Codex runtime `sessions/` tree
+   (`~/.codex/sessions` and `~/.codex/session_index.jsonl` are symlinks into `~/ops/site-private/.codex-runtime/`; the tool
+   follows a configured store root that is a link when it resolves under `$HOME` and is no credential path, records it as
+   `root_symlinks`, and errors on a dangling, outside-`$HOME` or excluded one, 2026-10-20),
+   `~/.qwen/projects/*/chats`, `~/.cline/data/sessions`, `~/.grok/{sessions,memory-v2,memtrace}`, `~/.gemini/tmp/*/chats`,
    `~/.omp/agent/sessions` (+ `history.db` via backup API), `~/.local/share/muse/sessions`,
    `~/.paseo/{agents,projects,agent-requests}`, `~/.config/herdr/{session.json,session-history.json,session-snapshots}`,
    `~/.copilot/session-state` (whole tree: `events.jsonl` transcripts, `workspace.yaml`, checkpoints, files; `session-store.db`
@@ -197,8 +213,14 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
    `~/.codex/auth.json`, `~/.gemini/oauth_creds.json`, `~/.local/share/opencode/auth.json`,
    `~/.grok/auth.json`, `~/.zcode/v2/credentials.json`, `~/.paseo/{daemon-keypair.json,local-credential}`,
    `~/.gemini/antigravity-acp/acp_token.json`, `~/.hermes/.env`, `~/.cline/data/settings/providers.json`,
-   `~/.omp/agent/agent.db` (`auth_credential_blocks` table), `~/.local/share/crush/hyper.json`,
+   `~/.omp/agent/agent.db` (`auth_credential_blocks` table), `~/.local/share/crush/hyper.json`, `~/.local/share/crush/crush.json`,
    `~/.copilot/data.db` (`accounts`), Orca `Cookies` (Electron dir), `~/.orca/jira-tokens/`, `~/.orca/jira-sites.json`,
+   the credential tables inside `~/.local/share/opencode/opencode.db` (not only `auth.json`; found by the adversary
+   review of `bin/ade-backup-stores`, 2026-10-20: `credential` held 4 rows with API keys and an OAuth refresh/access
+   token; `account`, `control_account` (`access_token`, `refresh_token`, `token_expiry`) and `account_state` were
+   empty, `session_share.secret` was empty), scrubbed from the backup copy rather than excluded as a file,
+   `mcp-auth.json` under `~/.cursor/projects/<slug>/` (68 files on 2026-10-20: MCP dynamic-client-registration
+   records, 36 of them with a non-empty `client_secret`; the 12 `mcp_auth.json` files are tool descriptors and are copied),
    and the three MCP configs that hold plaintext Jina and Exa keys (skills/fallback-chains/references/web-access.md
    5.3 and 5.6.2) with every dated `.bak` copy beside them (3-5 each, 2026-10-12 to 10-18, same keys):
    `~/.config/opencode/opencode.json`, `opencode.json.bak*` and `opencode.bak` (not `opencode.jsonc`, which row 2

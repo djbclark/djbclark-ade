@@ -1,0 +1,1896 @@
+#!/usr/bin/env python3
+"""ade-backup-stores: one consistent copy of every agent session store, plus the Hermes JSONL export.
+
+ADE-everywhere Phase 0 (docs/ade-everywhere-proposal.md section 8 item 1), implementing section 3 of
+docs/ade-everywhere-inventory-2026-10-20-stores.md. Nothing in any source store is deleted or modified:
+SQLite sources are opened `mode=ro` (which can still create zero-length `-wal`/`-shm` files beside a quiet
+database; no data changes), and the live Hermes `state.db` is never handed to `hermes` (see item 4).
+
+  ade-backup-stores [--dest DIR] [--dry-run] [--only NAME[,NAME]] [--json] [--check-schemas] [--strict-stores]
+
+  1. single live SQLite files: the SQLite online backup API (`Connection.backup`), never a `cp` of a
+     WAL database;
+  2. per-session SQLite trees (Cursor, Antigravity): each db the same way, its sidecar (`meta.json`,
+     `<uuid>.meta`) copied beside it;
+  3. file stores: an own directory walk (no `shutil.copytree`) that drops every credential file name and path
+     (inventory section 5 item 5), the `credential-bak` vault, symlinks inside a store and non-regular files; a configured
+     store root reached through any symlinked component (the root itself or a parent directory below $HOME) is
+     followed only when its resolved path is under $HOME and is no credential
+     path (copied as the target, recorded in the manifest as `root_symlinks`, links inside it still never
+     followed): a dangling link, a root resolving outside $HOME or to a credential path is an error;
+  4. `hermes sessions export` (JSONL) into <dest>/hermes-export/, run with HERMES_HOME pointing at a scratch
+     copy of the hermes-state backup (removed afterwards), so `hermes` never opens the live state.db and the
+     session ids, counts and exports all come from one snapshot. The export refuses a session above
+     `sessions.max_export_messages` (20,000 by default) and the bulk form refuses everything when any
+     session is over it: then each session under the limit is exported alone and the oversize ones are
+     listed in the manifest (`hermes_export.truncated`); the hermes-state copy holds them whole.
+     ADE_BACKUP_HERMES names the `hermes` binary to run (default: `hermes` on PATH).
+
+What the tool guarantees about credentials: files and directories with a credential name or path (the
+exclusions in MANIFEST.json) are not copied; credential tables are scrubbed from the SQLite copies
+(manifest `scrubbed`: OpenCode's `credential`, `account`, `control_account`, `account_state` tables and
+`session_share.secret`; rows deleted, then `VACUUM` with `secure_delete`); and a schema guard turns any
+other table or column named like credential/account/auth/oauth/secret/token (counters such as
+`input_tokens` aside) into an error and drops that copy, so a tool update that adds one fails the run.
+`--check-schemas` runs the guard read-only on the live databases and prints table and column names only; a missing
+database is printed and counted, and fails the check (exit 1) only with `--strict-stores`; a database that cannot be
+opened is counted apart (`J unopenable`) and fails the check; a database with a credential name or path is never
+opened (`skipped`, counted `E excluded`), and a file store's configured paths are checked to exist (absent: `missing`).
+Transcripts and other session content are copied as they are and can hold secrets pasted into them:
+treat a generation as secret-bearing.
+
+<dest>/MANIFEST.json records, per store, a `status` (`ok`; `missing`: no configured path of the store exists,
+listed under `missing`; `partial`: the store has errors), the source, destination, bytes, sha256 of each file
+produced, start and end time, the exclusions applied, the scrubbed tables and the errors. A configured store
+that does not exist is not an error (a partially provisioned machine still gets a generation): it is
+`missing` in the manifest and on stderr, and the exit status stays 0; `--strict-stores` makes any missing
+store or store path exit 1. A locked or unreadable store is an error in the manifest, the run goes on, and
+the exit status is 1 at the end. A Cursor session whose required `meta.json` does not exist (14 of 101 chat
+sessions on this Mac never had one, 2026-10-20) is a warning, not an error: its db is copied, the store entry lists it
+under `sidecar_missing` (paths relative to the store root), stderr prints `<store>: <n> session(s) without
+meta.json (copied without it)`, the store stays `ok` and the exit status 0; with `--strict-stores` it is an
+error and the store `partial`. A required sidecar that exists but is a symlink, excluded, not a regular file
+or gone during the copy is always an error naming the session directory (relative to the store root, no
+content), and the store is `partial`: the resume picker reads it, so the db copy alone is not lossless.
+A store that exists but produced no file prints `<store>: 0 files copied although its roots exist` on stderr
+(not an error, not `partial`: an empty store is real). Inside a per-session tree a database or sidecar that is
+a symlink, or a directory above it that is a symlink (the link is one skip, never entered), is skipped (`symlink`), never opened (`--check-schemas` prints
+`symlink, not opened` and counts it a problem, exit 1). A configured database path that is a symlink (Codex's on
+this Mac) is followed under the same rule as a store root link (under $HOME, not a credential path; recorded in
+`root_symlinks`; `--check-schemas` opens the target read-only and prints `symlink -> target`, or `symlink refused`
+and exit 1); so is a per-session tree root that is a symlink (same rule as a file-store root: refused is an error,
+the store `partial`). Every symlink skip prints `<store>: skipped <path>: symlink` on stderr and leaves the store
+`ok`. A source that turns into a symlink after its check is never followed: files, sidecars, single-file roots
+and SQLite databases are opened O_NOFOLLOW and refused with an error (the store `partial`), and so is a
+directory swapped for a symlink mid-walk: a store is walked from one descriptor of its root, each directory and
+file opened relative to its parent's descriptor with O_NOFOLLOW (a SQLite source is reached the same way
+from its store root), never through a path string that could be re-pointed. An optional sidecar that is
+present but a symlink, an excluded path or not a regular file is skipped and listed under `skipped`. The dry run's bytes
+for a SQLite file are the main file plus its `-wal` file, an upper bound on the snapshot the online backup
+writes. `--check-schemas` counts an absent tree root or database as `missing`, and applies the copy's sidecar rules to each checked tree database: an absent required sidecar is `sidecar_missing` (a failure only under `--strict-stores`), a linked or non-regular one a `sidecar_problems` error in both modes. `--json --check-schemas` prints one JSON
+document on stdout (`ok`, `exit_code`, `reasons`, `totals` and, per store, its `state` (`ok`, `missing`, `problem`),
+counts and `findings` of state, path and the line text) and the human lines on stderr; the exit status is unchanged.
+
+Default dest: ~/.local/state/ade/backups/<UTC timestamp>/ (0700, files 0600). The generation is built in
+<dest>.part/ and renamed to <dest>/ at the end: a <dest>.part/ directory, or a generation without
+MANIFEST.json, is an interrupted run and incomplete. Refuses (exit 2) a dest that exists, that sits
+inside a source store or holds one (a configured store's path counts whether or not it exists), or that is
+inside a git repo. Exit: 0 clean, 1 at least one error, 2 refused or bad usage. Cursor `acp-sessions` and
+the handoffs `chains/` are pruned by something else, so those stores come first.
+"""
+import argparse
+import concurrent.futures
+import datetime
+import errno
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import shutil
+import socket
+import sqlite3
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from urllib.parse import quote
+
+VERSION = 1
+SKIPPED_CAP = 100
+HERMES_WORKERS = 4
+HERMES_TIMEOUT = 300
+
+# Inventory section 5 item 5: basenames that never enter a backup, wherever they sit in a copied
+# tree. Each pattern also matches its dated `.bak` copies (`mcp.json.bak-2026-10-12`).
+EXCLUDE_NAMES = [
+    "*.key", ".credentials.json", ".claude.json", "auth.json", "oauth_creds.json", "credentials.json",
+    "acp_token.json", "daemon-keypair.json", "local-credential", "hyper.json", "providers.json",
+    ".env", ".env.*", "jira-sites.json", "jira-tokens", "Cookies", "agent.db", "data.db",
+    "mcp_config.json", "mcp.json", "opencode.json", "opencode.bak", "crushrc*",
+    "credential-bak", "mcp-auth.json",
+]
+# The same list as home-relative paths (the files the inventory names, checked on the resolved path too).
+EXCLUDE_PATHS = [
+    ".claude/.credentials.json", ".claude.json", ".claude/sessions/*.key", ".codex/auth.json",
+    ".gemini/oauth_creds.json", ".local/share/opencode/auth.json", ".grok/auth.json",
+    ".zcode/v2/credentials.json", ".paseo/daemon-keypair.json", ".paseo/local-credential",
+    ".gemini/antigravity-acp/acp_token.json", ".hermes/.env", ".cline/data/settings/providers.json",
+    ".omp/agent/agent.db", ".local/share/crush/hyper.json", ".local/share/crush/crush.json", ".copilot/data.db",
+    ".orca/jira-tokens",
+    ".orca/jira-sites.json", ".config/opencode/opencode.json", ".cursor/mcp.json",
+    ".gemini/config/mcp_config.json", ".config/crush/crushrc*", ".local/state/ade/credential-bak",
+]
+OTHER_SKIPS = ["symlinks", "sockets and other non-regular files", "antigravity brain/*/.system_generated/worktrees"]
+
+# Credential tables scrubbed from the copy of a SQLite db (inventory section 5 item 5), per store name:
+# "delete" tables lose every row, "null" (table, column) pairs are set to NULL; then VACUUM with
+# secure_delete=ON so freed pages do not keep the bytes. A table or column that is absent is skipped.
+SCRUB = {
+    "opencode": {"delete": ["credential", "account", "control_account", "account_state"],
+                 "null": [("session_share", "secret")]},
+}
+# Schema guard: a table or column name matching this is a possible credential store ...
+CRED_RE = re.compile(r"credential|account|auth(?!or)|oauth|secret|token|password|passwd|api_?key|private_?key|bearer",
+                     re.I)
+# ... unless it is a token counter (`input_tokens`, `tokens_used`, `tokens`) ...
+COUNTER_RE = re.compile(
+    r"^(?:(?:input|output|cache|cached|creation|read|write|reasoning|total|prompt|completion|max|context|used|est|estimated)_?)*"
+    r"tokens(?:_?(?:input|output|cache|cached|creation|read|write|reasoning|total|prompt|completion|max|used|count|limit|in|out))*$",
+    re.I)
+# ... or listed here: (store glob, table glob, column glob or None for the table and all its columns, reason).
+# Each entry was reviewed on 2026-10-20 against the live schemas (`--check-schemas`, names only); none holds
+# a credential. A tool update that adds another matching name fails the run until someone reads it.
+ALLOW = [
+    # token usage metrics and budgets, not credentials
+    ("hermes-state", "messages", "token_count", "count of tokens in a message"),
+    ("zcode-db", "dwf_run", "spent_tokens", "tokens spent by a workflow run"),
+    ("zcode-db", "model_usage", "computed_total_tokens", "token usage counter"),
+    ("zcode-db", "model_usage", "provider_total_tokens", "token usage counter"),
+    ("zcode-db", "model_usage", "first_token_at", "timestamp of the first streamed token"),
+    ("zcode-db", "model_usage", "time_to_first_token_ms", "latency metric"),
+    ("zcode-db", "turn_usage", "computed_total_tokens", "token usage counter"),
+    ("zcode-db", "turn_usage", "first_token_at", "timestamp of the first streamed token"),
+    ("zcode-db", "turn_usage", "time_to_first_token_ms", "latency metric"),
+    ("zcode-db", "session_target", "token_budget", "token budget of a session target"),
+    ("codex-db", "thread_goals", "token_budget", "token budget of a thread goal"),
+    ("copilot-db", "assistant_usage_events", "inter_token_latency_ms", "latency metric"),
+    ("copilot-db", "assistant_usage_events", "time_to_first_token_ms", "latency metric"),
+    ("copilot-db", "assistant_usage_events", "token_details_json", "per-event token usage breakdown (a usage-event row)"),
+    # identifiers and job leases, not secrets
+    ("codex-db", "remote_control_enrollments", "account_id", "account identifier; the table has no secret column"),
+    ("codex-db", "threads", "creator_account_id", "account identifier of the thread creator"),
+    ("codex-db", "jobs", "ownership_token", "work-queue lease marker for a memories job"),
+    ("cline-db", "cron_runs", "claim_token", "work-queue lease marker for a cron run"),
+    ("cline-db", "schedules", "claim_token", "work-queue lease marker for a schedule"),
+    ("cline-db", "agenda_task_runs", "claim_token", "work-queue lease marker for a task run"),
+]
+
+
+def is_excluded_name(name):
+    for pat in EXCLUDE_NAMES:
+        if fnmatch.fnmatchcase(name, pat) or fnmatch.fnmatchcase(name, pat + ".bak*") \
+                or fnmatch.fnmatchcase(name, pat + "-*.bak"):
+            return True
+    return False
+
+
+class Excluder:
+    def __init__(self, home):
+        self.home = Path(home)
+        self.real_home = Path(home).resolve()
+        self.patterns = [str(base / rel) for base in dict.fromkeys([home, self.real_home])
+                         for rel in EXCLUDE_PATHS]
+
+    def path(self, p, follow=True):
+        """True when p (or, with follow, its resolved target) is a credential path or has an excluded name."""
+        for cand in {str(p), os.path.realpath(p)} if follow else {str(p)}:
+            if any(is_excluded_name(part) for part in Path(cand).parts[1:]):
+                return True
+            for pat in self.patterns:
+                if fnmatch.fnmatchcase(cand, pat) or cand.startswith(pat + os.sep):
+                    return True
+        return False
+
+
+def build_stores(home):
+    """Inventory section 3, in backup order: the stores something else prunes come first."""
+    h = home
+    def sqlite(name, *files):
+        return {"name": name, "kind": "sqlite", "files": [h / f for f in files]}
+    def tree(name, root, dbs, sidecars, required=()):
+        return {"name": name, "kind": "sqlite-tree", "root": h / root, "dbs": dbs, "sidecars": sidecars,
+                "required": list(required)}
+    def files(name, *roots, file_labels=()):
+        return {"name": name, "kind": "files", "roots": [(label, h / rel) for label, rel in roots],
+                "file_labels": list(file_labels)}
+    agy = ".gemini/antigravity"
+    return [
+        files("handoffs", ("handoffs", ".local/state/handoffs")),
+        tree("cursor-acp-sessions", ".cursor/acp-sessions", ["*/store.db"], ["meta.json"], required=["meta.json"]),
+        tree("cursor-chats", ".cursor/chats", ["*/*/store.db"], ["meta.json"], required=["meta.json"]),
+        files("cursor-projects", ("projects", ".cursor/projects")),
+        sqlite("hermes-state", ".hermes/state.db"),
+        sqlite("opencode", ".local/share/opencode/opencode.db"),
+        sqlite("zcode-db", ".zcode/cli/db/db.sqlite", ".zcode/v2/tasks-index.sqlite"),
+        files("zcode-files", ("rollout", ".zcode/cli/rollout"), ("artifacts", ".zcode/cli/artifacts"),
+              ("memories", ".zcode/cli/memories"), ("acp-lazy-sessions.json", ".zcode/v2/acp-lazy-sessions.json"),
+              file_labels=["acp-lazy-sessions.json"]),
+        sqlite("crush-acp", ".local/share/crush-acp/crush.db"),
+        sqlite("crush-tui", ".config/crush/.crush/crush.db"),
+        sqlite("crush-repo", "src/djbclark-ade/.crush/crush.db"),
+        files("crush-files", ("projects.json", ".local/share/crush/projects.json"),
+              file_labels=["projects.json"]),
+        sqlite("codex-db", ".codex/state_5.sqlite", ".codex/logs_2.sqlite", ".codex/memories_1.sqlite",
+               ".codex/goals_1.sqlite"),
+        files("codex-files", ("sessions", ".codex/sessions"), ("session_index.jsonl", ".codex/session_index.jsonl"),
+              file_labels=["session_index.jsonl"]),
+        sqlite("copilot-db", ".copilot/session-store.db"),
+        files("copilot-files", ("session-state", ".copilot/session-state")),
+        tree("antigravity-cli-db", f"{agy}-cli", ["conversations/*.db", "conversation_summaries.db"], ["{stem}.meta"]),
+        tree("antigravity-ide-db", agy, ["conversations/*.db", "conversation_summaries.db"], ["{stem}.meta"]),
+        tree("antigravity-acp-db", f"{agy}-acp", ["conversations/*.db", "conversation_summaries.db"], ["{stem}.meta"]),
+        files("antigravity-cli-files", ("brain", f"{agy}-cli/brain"), ("history.jsonl", f"{agy}-cli/history.jsonl"),
+              ("annotations", f"{agy}-cli/annotations"), ("implicit", f"{agy}-cli/implicit"),
+              ("jetbox_summaries_proto.pb", f"{agy}-cli/jetbox_summaries_proto.pb"),
+              file_labels=["history.jsonl", "jetbox_summaries_proto.pb"]),
+        files("antigravity-ide-files", ("brain", f"{agy}/brain"),
+              ("agyhub_summaries_proto.pb", f"{agy}/agyhub_summaries_proto.pb"),
+              ("antigravity_state.pbtxt", f"{agy}/antigravity_state.pbtxt"),
+              file_labels=["agyhub_summaries_proto.pb", "antigravity_state.pbtxt"]),
+        files("antigravity-acp-files", ("brain", f"{agy}-acp/brain")),
+        files("claude", ("projects", ".claude/projects"), ("file-history", ".claude/file-history"),
+              ("session-env", ".claude/session-env"), ("tasks", ".claude/tasks"), ("teams", ".claude/teams"),
+              ("sessions", ".claude/sessions"), ("history.jsonl", ".claude/history.jsonl"),
+              file_labels=["history.jsonl"]),
+        files("qwen", ("projects", ".qwen/projects")),
+        files("cline", ("sessions", ".cline/data/sessions")),
+        tree("cline-db", ".cline/data/db", ["*.db"], []),
+        files("grok", ("sessions", ".grok/sessions"), ("memory-v2", ".grok/memory-v2"), ("memtrace", ".grok/memtrace")),
+        sqlite("grok-db", ".grok/worktrees.db"),
+        files("gemini-cli", ("tmp", ".gemini/tmp")),
+        files("omp", ("sessions", ".omp/agent/sessions")),
+        sqlite("omp-db", ".omp/agent/history.db"),
+        files("muse", ("sessions", ".local/share/muse/sessions"),
+              ("tui-history.jsonl", ".local/share/muse/tui-history.jsonl"),
+              file_labels=["tui-history.jsonl"]),
+        sqlite("muse-db", ".local/share/muse/session-index.db"),
+        files("paseo", ("agents", ".paseo/agents"), ("projects", ".paseo/projects"),
+              ("agent-requests", ".paseo/agent-requests")),
+        files("herdr", ("session.json", ".config/herdr/session.json"),
+              ("session-history.json", ".config/herdr/session-history.json"),
+              ("session-snapshots", ".config/herdr/session-snapshots"),
+              file_labels=["session.json", "session-history.json"]),
+        files("hermes-memory", ("hermes-memory", "hermes-memory")),
+    ]
+
+
+def store_roots(store):
+    """Directories a destination must not sit inside. Taken from the configuration, never from what exists:
+    a missing directory store still keeps its own path as its root (a missing ~/hermes-memory must not turn
+    $HOME into a root). A file root is guarded by its parent directory."""
+    if store["kind"] == "sqlite":
+        roots = []
+        for f in store["files"]:
+            roots.append(f.parent)
+            if f.is_symlink():  # a link that may be followed: its target's directory is a source too
+                target = Path(os.path.realpath(f))
+                if Path(os.path.expanduser("~")).resolve() in target.parents:
+                    roots.append(target.parent)
+        return roots
+    if store["kind"] == "sqlite-tree":
+        roots = [store["root"]]
+        if store["root"].is_symlink():  # a root link that may be followed: its target is a source too
+            target = Path(os.path.realpath(store["root"]))
+            if Path(os.path.expanduser("~")).resolve() in target.parents:
+                roots.append(target)
+        return roots
+    home = Path(os.path.expanduser("~")).resolve()
+    roots = []
+    for label, p in store["roots"]:
+        is_file = label in store.get("file_labels", [])
+        roots.append(p.parent if is_file else p)
+        if p.is_symlink():  # a root link that may be followed: its target (its directory, for a file) is a source too
+            target = Path(os.path.realpath(p))
+            if home in target.parents:  # a target outside HOME is never copied, so it is no source
+                roots.append(target.parent if is_file else target)
+    return roots
+
+
+def utcnow():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def sha256_of(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+class SchemaGuardError(Exception):
+    """A backed-up database holds a credential-looking table or column nobody has explained."""
+
+
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def ro_connect(path, base=None):
+    """A read-only connection to a regular file that is not, and does not become, a symlink (Codex on PR 24).
+    SQLite's URI has no nofollow parameter (`nofollow=1` is silently ignored, checked on 3.53.1), so the file is
+    opened O_NOFOLLOW and that fd held while SQLite opens the same path and reads the schema; the path is
+    then lstat'ed again and must still be the very file the fd names (same device and inode, not a link), or
+    the connection is closed and refused. A swap after that point cannot redirect the backup: SQLite already
+    holds the file. The fd is reached component by component (`open_dir_chain`) from `base`, the gate-approved
+    store root the path lies under (default: the file's own resolved parent directory), every component opened
+    O_NOFOLLOW relative to the previous descriptor, so a directory swapped for a symlink between the check and
+    here is refused instead of redirecting the expected (device, inode) to a file outside the store (adversary
+    round 13). Callers holding a gate approval from `is_linked` pass `home_anchor(path, excluder)`: the real $HOME
+    as `base`, so the chain starts at the approved home and no parent is re-resolved from the filesystem (Codex on
+    PR 24, pass 14); the identity check compares the connection's path with `os.fstat` of that chain's descriptor.
+    A caller that may follow a root link passes the resolved target. The URI keeps `?`, `#`, `%` and
+    spaces in the path safe."""
+    path = os.path.abspath(path)
+    try:
+        if base is None:
+            base, parts = os.path.realpath(os.path.dirname(path)), (os.path.basename(path),)
+        else:
+            base = os.path.abspath(base)
+            parts = Path(path).relative_to(base).parts
+        pfd = open_dir_chain(base, parts[:-1])
+        try:
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)  # a FIFO must not block
+        finally:
+            os.close(pfd)
+    except (OSError, ValueError) as exc:
+        why = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
+        raise OSError(f"source became a symlink or is unreadable: {path}: {why}") from exc
+    try:
+        held = os.fstat(fd)
+        if not stat.S_ISREG(held.st_mode):
+            raise OSError(f"source is not a regular file: {path}")
+        con = sqlite3.connect("file:" + quote(path, safe="/") + "?mode=ro", uri=True, timeout=30)
+        try:
+            cur = con.execute("SELECT COUNT(*) FROM sqlite_master")  # SQLite opens the file lazily: force it
+            cur.fetchone()
+            cur.close()  # no statement stays open when our fd goes: SQLite's locks are never dropped under one
+            now = os.lstat(path)
+            if not stat.S_ISREG(now.st_mode) or (now.st_dev, now.st_ino) != (held.st_dev, held.st_ino):
+                raise OSError(f"source became a symlink or was replaced while opening: {path}")
+        except BaseException:
+            con.close()
+            raise
+        return con
+    finally:
+        os.close(fd)
+
+
+def schema_hits(con):
+    """(table, column) pairs whose names look like credentials; column None = the table's own name."""
+    hits = []
+    for table, kind in con.execute("SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view')").fetchall():
+        if CRED_RE.search(table) and not COUNTER_RE.match(table):
+            hits.append((table, None))
+        for col in con.execute(f'PRAGMA table_info("{table}")'):
+            if CRED_RE.search(col[1]) and not COUNTER_RE.match(col[1]):
+                hits.append((table, col[1]))
+    return sorted(hits, key=lambda h: (h[0], h[1] or ""))
+
+
+def explained(store_name, table, column):
+    """Why (table, column) may stay in a copy: it is scrubbed, or an ALLOW entry says why; else None."""
+    spec = SCRUB.get(store_name, {})
+    if table in spec.get("delete", []) or (table, column) in [tuple(x) for x in spec.get("null", [])]:
+        return "scrubbed"
+    for store_glob, table_glob, col_glob, reason in ALLOW:
+        if fnmatch.fnmatchcase(store_name, store_glob) and fnmatch.fnmatchcase(table, table_glob) \
+                and (col_glob is None or (column is not None and fnmatch.fnmatchcase(column, col_glob))):
+            return reason
+    return None
+
+
+def scrub_copy(path, spec):
+    """Delete the credential rows from the copy at path and VACUUM it; returns what was scrubbed."""
+    con = sqlite3.connect(str(path), isolation_level=None)
+    done = []
+    try:
+        con.execute("PRAGMA journal_mode=DELETE")
+        con.execute("PRAGMA secure_delete=ON")
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in spec.get("delete", []):
+            if table in tables:
+                con.execute(f'DELETE FROM "{table}"')
+                done.append(table)
+        for table, col in spec.get("null", []):
+            if table in tables and col in [c[1] for c in con.execute(f'PRAGMA table_info("{table}")')]:
+                con.execute(f'UPDATE "{table}" SET "{col}" = NULL')
+                done.append(f"{table}.{col}")
+        con.execute("VACUUM")
+    finally:
+        con.close()
+    return done
+
+
+def guard_copy(store_name, path):
+    """Raise SchemaGuardError when the copy at path has an unexplained credential-looking name."""
+    con = sqlite3.connect(f"file:{quote(str(path), safe='/')}?mode=ro", uri=True)
+    try:
+        bad = [h for h in schema_hits(con) if not explained(store_name, *h)]
+    finally:
+        con.close()
+    if bad:
+        names = ", ".join(t if c is None else f"{t}.{c}" for t, c in bad)
+        raise SchemaGuardError(f"credential-looking table/column name(s) not on the scrub list or allowlist: {names}")
+
+
+def backup_sqlite(src, dst, store_name, base=None):
+    """Online backup of one SQLite db: a consistent copy while the writer lives. The copy is scrubbed
+    (SCRUB) and schema-checked before it replaces dst; returns the scrubbed tables."""
+    tmp = dst.with_name(dst.name + ".part")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    source = ro_connect(src, base)
+    scrubbed = []
+    try:
+        target = sqlite3.connect(str(tmp))
+        try:
+            source.backup(target)
+            # The copy keeps the source's WAL header bytes; make it self-contained so it needs no -wal/-shm
+            # (the guard opens it read-only, and some SQLite builds cannot without a -shm).
+            target.execute("PRAGMA journal_mode=DELETE")
+        finally:
+            target.close()
+        if store_name in SCRUB:
+            scrubbed = scrub_copy(tmp, SCRUB[store_name])
+        guard_copy(store_name, tmp)
+    except BaseException:
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            Path(str(tmp) + suffix).unlink(missing_ok=True)
+        raise
+    finally:
+        source.close()
+    for suffix in ("-wal", "-shm", "-journal"):
+        Path(str(tmp) + suffix).unlink(missing_ok=True)
+    os.replace(tmp, dst)
+    return scrubbed
+
+
+class RootSymlinkError(OSError):
+    """A configured store root reached through a symlink that must not be followed (the reason leads the message)."""
+
+
+class SidecarError(OSError):
+    """A required sidecar the copy cannot take (the reason is in the message: a symlink, excluded, absent, ...)."""
+
+
+class StoreRun:
+    """One store's progress: skipped paths, errors, and (after finish) the files produced."""
+
+    def __init__(self, store, out_dir, strict=False):
+        self.store = store
+        self.out = out_dir
+        self.started = utcnow()
+        self.t0 = time.monotonic()
+        self.errors = []
+        self.strict = strict  # --strict-stores: an absent required sidecar is then an error
+        self.sidecar_missing = []  # required sidecars (relative to the store root) that do not exist on disk
+        self.skipped = []
+        self.skipped_count = 0
+        self.sources = []
+        self.missing = []
+        self.root_symlinks = []
+        self.source_of = {}
+        self.scrubbed_of = {}
+
+    def error(self, source, exc):
+        msg = f"{type(exc).__name__}: {exc}"
+        self.errors.append({"store": self.store["name"], "source": str(source), "error": msg})
+
+    def skip(self, path, why):
+        self.skipped_count += 1
+        if why.startswith("symlink"):  # a skip is deliberate and leaves the store ok; stderr keeps it visible
+            print(f"ade-backup-stores: {self.store['name']}: skipped {path}: symlink", file=sys.stderr)
+        if len(self.skipped) < SKIPPED_CAP:
+            self.skipped.append({"path": str(path), "why": why})
+
+    def absent(self, path):
+        """A configured source that does not exist (a partially provisioned machine): not an error."""
+        self.missing.append(str(path))
+
+
+def skip_reason(directory, name, mode, excluder):
+    """Why the entry `name` of `directory` (its lstat mode `mode`) is not copied, or None when it is."""
+    p = os.path.join(directory, name)
+    if is_excluded_name(name) or excluder.path(p):
+        return "excluded credential path"
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+        return "not a regular file"
+    if name == "worktrees" and os.path.basename(directory) == ".system_generated":
+        return "git checkout inside an antigravity brain dir"
+    return None
+
+
+def make_ignore(run, excluder):
+    """The dry run's ignore function for `os.walk` listings (the real copy classifies through `skip_reason` too)."""
+    def ignore(directory, names):
+        out = []
+        for n in names:
+            p = os.path.join(directory, n)
+            try:
+                mode = os.lstat(p).st_mode
+            except OSError as exc:  # the copy records this as a store error too (dry-run parity)
+                run.error(p, exc)
+                out.append(n)
+                continue
+            why = skip_reason(directory, n, mode, excluder)
+            if why:
+                out.append(n)
+                run.skip(p, why)
+        return out
+    return ignore
+
+
+def is_linked(src, excluder):
+    """True when `src` or any component between $HOME and it is a symlink (adversary round 9, again in round 14):
+    its realpath is not where the same home-relative path sits under the real $HOME. $HOME itself and what lies
+    above it are the operator's own and never count. A path outside $HOME is never linked (no store is)."""
+    try:
+        rel = Path(src).relative_to(excluder.home)
+    except ValueError:
+        return False
+    return os.path.realpath(src) != str(excluder.real_home / rel)
+
+
+def link_dangles(src):
+    """True when `src`, or a directory above it, is a symlink that points nowhere (lexists, yet does not exist)."""
+    cur = Path(src)
+    return any(os.path.lexists(p) and not os.path.exists(p) for p in (cur, *cur.parents))
+
+
+def link_note(src):
+    """`src -> where it leads`, for an error message."""
+    try:
+        return f"{src} -> {os.readlink(src)}"
+    except OSError:  # a linked parent: the root itself is no link
+        return f"{src} -> {os.path.realpath(src)}"
+
+
+def root_link_target(src, excluder):
+    """A configured store root reached through a symlink (the root itself or any component above it below $HOME):
+    (resolved target, None) when it may be followed, else (None, reason). Followed only when every link resolves
+    to a path under the run's real $HOME that is no credential path and, where it exists, a regular file or
+    directory (the caller tests `is_linked` first). A root that does not exist below a link that works comes back
+    as its (absent) target: the caller reports it missing. Links *inside* the tree are never followed."""
+    if link_dangles(src):
+        return None, "dangling symlink"
+    try:
+        target = Path(src).resolve()
+    except (OSError, RuntimeError):
+        return None, "dangling symlink"
+    if target != excluder.real_home and excluder.real_home not in target.parents:
+        return None, "symlink target outside HOME"
+    if excluder.path(target):
+        return None, "symlink target excluded"
+    if os.path.lexists(target) and not (target.is_dir() or target.is_file()):
+        return None, "symlink target is not a regular file or directory"
+    return target, None
+
+
+def follow_link(src, label, run, excluder):
+    """A configured path reached through a symlink: its target when `root_link_target` allows it (recorded in
+    run.root_symlinks), else None after an error that names the reason (the store is then partial)."""
+    real, why = root_link_target(src, excluder)
+    if why:
+        run.error(src, RootSymlinkError(f"{why}: {link_note(src)}"))
+        return None
+    run.root_symlinks.append({"root": label, "link": str(src), "target": str(real)})
+    return real
+
+
+def under_symlink(path, root):
+    """True when `path` or any directory between `root` and it is a symlink. `root` itself is taken as
+    configured and never tested; a path outside it counts as linked."""
+    try:
+        parts = Path(path).relative_to(root).parts
+    except ValueError:
+        return True
+    cur = Path(root)
+    for part in parts:
+        cur = cur / part
+        if cur.is_symlink():
+            return True
+    return False
+
+
+def copy_regular(src, dst, dir_fd=None, shown=None):
+    """A regular file copied from an fd opened with O_NOFOLLOW, so a source that became a symlink after it was
+    listed is refused rather than dereferenced (Codex on PR 24). `src` is a path, or with `dir_fd` a name inside
+    that open directory (then the path component walk is not repeated: only the descriptor is trusted); `shown`
+    is the path put in error messages. Raises OSError, which the caller records."""
+    shown = shown or src
+    try:
+        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)  # a FIFO must not block the run
+    except OSError as exc:
+        raise OSError(f"source became a symlink or is unreadable: {shown}: {exc.strerror}") from exc
+    try:  # the descriptor is ours until the file object owns it: every refusal below closes it
+        held = os.fstat(fd)
+        if not stat.S_ISREG(held.st_mode):
+            raise OSError(f"source is not a regular file: {shown}")
+        fin = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    with fin:
+        os.set_blocking(fin.fileno(), True)  # O_NONBLOCK was for the open only; a regular file reads normally
+        if os.path.lexists(dst):
+            raise FileExistsError(f"destination exists: {dst}")
+        # Copied into a temporary name beside dst and renamed on success: a read that fails midway must leave no
+        # truncated dst for the manifest to list (Codex on PR 24, pass 14).
+        tfd, tmp = tempfile.mkstemp(dir=os.path.dirname(dst) or ".", prefix=".bk-", suffix=".part")
+        try:
+            with os.fdopen(tfd, "wb") as fout:
+                shutil.copyfileobj(fin, fout)
+            os.utime(tmp, ns=(held.st_atime_ns, held.st_mtime_ns), follow_symlinks=False)  # the mode is sealed later
+            os.replace(tmp, dst)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+    return dst
+
+
+def open_dir_at(name, parent_fd):
+    """A descriptor for the directory `name` inside the open directory `parent_fd`: O_NOFOLLOW, so a directory
+    swapped for a symlink after it was listed fails here (ELOOP or ENOTDIR) and is a store error."""
+    try:
+        return os.open(name, DIR_FLAGS, dir_fd=parent_fd)
+    except OSError as exc:
+        raise OSError(f"directory became a symlink or is unreadable: {name}: {exc.strerror}") from exc
+
+
+def open_dir_chain(base, parts):
+    """A descriptor for `base`/`parts...`: `base` (a resolved, gate-approved directory, opened O_NOFOLLOW; or an
+    open directory descriptor, duplicated) and then each part relative to the previous descriptor with
+    `open_dir_at`. The caller closes it."""
+    fd = os.dup(base) if isinstance(base, int) else os.open(base, DIR_FLAGS)
+    try:
+        for part in parts:
+            nfd = open_dir_at(part, fd)
+            os.close(fd)
+            fd = nfd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def home_anchor(path, excluder):
+    """(`path` rewritten below the run's real $HOME, that real $HOME): the descriptor chain every post-gate open
+    starts from (`open_dir_chain(real_home, parts)`), so no component is resolved from the mutable filesystem
+    after `is_linked` approved the path (Codex on PR 24, pass 14). $HOME itself is the operator's own and never
+    a link. A path outside $HOME is refused: no store lies there."""
+    for root in (excluder.home, excluder.real_home):
+        try:
+            rel = Path(path).relative_to(root)
+        except ValueError:
+            continue
+        return excluder.real_home / rel, excluder.real_home
+    raise OSError(f"path is not below $HOME: {path}")
+
+
+def copy_dir_fd(dfd, src_dir, dst_dir, run, excluder):
+    """Copy the directory open as `dfd` (shown as `src_dir`) into `dst_dir`, replacing `shutil.copytree` (Codex on
+    PR 24, pass 11, and the adversary's round 13): copytree recurses on cached DirEntry types and opens each
+    child by path, so a subdirectory swapped for a symlink after it was listed was followed. Here every entry is
+    classified with `fstat`-style `lstat` relative to `dfd` and opened O_NOFOLLOW relative to it, so a swap fails
+    with an OSError that is recorded as a store error. Symlinks, credential paths and non-regular files are
+    skipped as before; a failing entry never stops its siblings."""
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    with os.scandir(dfd) as it:
+        names = sorted(e.name for e in it)
+    for name in names:
+        p = os.path.join(src_dir, name)
+        try:
+            mode = os.stat(name, dir_fd=dfd, follow_symlinks=False).st_mode
+        except OSError as exc:
+            run.error(p, exc)
+            continue
+        why = skip_reason(src_dir, name, mode, excluder)
+        if why:
+            run.skip(p, why)
+            continue
+        try:
+            if stat.S_ISDIR(mode):
+                sub = open_dir_at(name, dfd)
+                try:
+                    copy_dir_fd(sub, p, dst_dir / name, run, excluder)
+                finally:
+                    os.close(sub)
+            else:
+                copy_regular(name, dst_dir / name, dir_fd=dfd, shown=p)
+        except OSError as exc:
+            run.error(p, exc)
+    held = os.fstat(dfd)
+    os.utime(dst_dir, ns=(held.st_atime_ns, held.st_mtime_ns))
+
+
+def copy_file_store(store, run, excluder):
+    for label, src in store["roots"]:
+        dst = run.out / label
+        run.sources.append(str(src))
+        try:
+            linked = is_linked(src, excluder)
+            if excluder.path(src, follow=not linked):
+                run.skip(src, "excluded credential path")
+                continue
+            real = src
+            if linked:
+                real = follow_link(src, label, run, excluder)
+                if real is None:
+                    continue
+            if not os.path.lexists(real):
+                run.absent(src)
+                continue
+            exc = root_type_problem(store, label, real)
+            if exc:  # a configured type that changed: recorded, never copied as whatever it is now
+                run.error(src, exc)
+                continue
+            anchored, base = home_anchor(real, excluder)
+            parts = anchored.relative_to(base).parts
+            if label not in store.get("file_labels", ()):
+                rfd = open_dir_chain(base, parts)  # the walk starts from this descriptor, every component O_NOFOLLOW
+                try:
+                    copy_dir_fd(rfd, real, dst, run, excluder)
+                finally:
+                    os.close(rfd)
+            else:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                pfd = open_dir_chain(base, parts[:-1])
+                try:
+                    copy_regular(parts[-1], dst, dir_fd=pfd, shown=real)
+                finally:
+                    os.close(pfd)
+        except OSError as exc:
+            run.error(src, exc)
+
+
+def copy_sqlite_store(store, run, excluder):
+    for src in store["files"]:
+        run.sources.append(str(src))
+        dst = run.out / src.name
+        try:
+            linked = is_linked(src, excluder)
+            if excluder.path(src, follow=not linked):
+                run.skip(src, "excluded credential path")
+                continue
+            real = src
+            if linked:
+                real = follow_link(src, src.name, run, excluder)
+                if real is None:
+                    continue
+            if not os.path.lexists(real):
+                run.absent(src)
+                continue
+            anchored, base = home_anchor(real, excluder)
+            run.scrubbed_of[dst] = backup_sqlite(anchored, dst, store["name"], base)
+            run.source_of[dst] = str(src)
+        except (OSError, sqlite3.Error, SchemaGuardError) as exc:
+            run.error(src, exc)
+
+
+def tree_dbs(store, root=None, errors=None):
+    """The databases a sqlite-tree store matches below `root` (default: its configured root). Path-based:
+    the dry run's estimate only; the real copy and --check-schemas list through `tree_db_entries`. Like them it
+    never enters a symlinked directory: the link itself is the match (one `symlink` skip). A directory that
+    cannot be listed is appended to `errors` as (path, OSError) when a list is given."""
+    root = root or store["root"]
+    found = []
+    for pat in store["dbs"]:
+        found.extend(sorted(tree_glob(Path(root), tuple(pat.split("/")), errors)))
+    return found
+
+
+def tree_glob(directory, comps, errors=None):
+    """Paths matching `comps` below `directory`, judged the way `glob_fd` judges them (the dry run and the copy
+    must agree): a symlink above the last component is returned itself (`lstat`, never followed) and not
+    descended; at the last component a symlink is classified with one `stat` and matches when it leads to a
+    regular file, and is no match when it dangles or loops (`DANGLING_ERRNOS`). A directory that cannot be listed
+    (unreadable, or pruned since its parent was listed), an entry whose `lstat` fails and any other `stat`
+    failure match nothing and are appended to `errors` as (path, OSError), like the copy's error for them: never
+    a silent omission."""
+    comp, rest = comps[0], comps[1:]
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError as exc:
+        if errors is not None:
+            errors.append((directory, exc))
+        return []
+    found = []
+    for name in names:
+        if not fnmatch.fnmatchcase(name, comp):
+            continue
+        path = directory / name
+        try:
+            mode = os.lstat(path).st_mode
+        except OSError as exc:  # gone or unreadable since the listing
+            if errors is not None:
+                errors.append((path, exc))
+            continue
+        is_link = stat.S_ISLNK(mode)
+        if is_link and not rest:
+            try:
+                mode = os.stat(path).st_mode
+            except OSError as exc:
+                if exc.errno not in DANGLING_ERRNOS and errors is not None:
+                    errors.append((path, exc))
+                continue
+        if not rest:
+            if stat.S_ISREG(mode):
+                found.append(path)
+        elif is_link:
+            found.append(path)
+        elif stat.S_ISDIR(mode):
+            found.extend(tree_glob(path, rest, errors))
+    return found
+
+
+def exists_at(name, dir_fd):
+    """True when `name` exists (as itself, never followed) inside the open directory `dir_fd`."""
+    try:
+        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    return True
+
+
+DANGLING_ERRNOS = (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)
+
+
+def glob_fd(dfd, comps, prefix, found, errors):
+    """Match the glob components `comps` below the open directory `dfd`, appending (parts, linked) to `found` and
+    (parts, OSError) to `errors`. Everything is relative to a descriptor: a directory is entered with
+    `open_dir_at` (O_NOFOLLOW). Above the last component a symlink is itself the match (`linked` true, recorded
+    as one skipped symlink) on an `lstat` alone: it is never followed, so a link to a hung mount cannot block
+    here, and never entered (nothing behind a link is listed), whatever it points to or whether it dangles. At
+    the last component a symlink is classified with one `stat` and, when it leads to a regular file, is the match
+    (`linked` true, never opened); a link that dangles or loops (`DANGLING_ERRNOS`) is no match. An entry whose
+    `lstat` fails (gone or unreadable since the listing) and any other `stat` failure is an error, never a silent
+    omission."""
+    comp, rest = comps[0], comps[1:]
+    with os.scandir(dfd) as it:
+        names = sorted(e.name for e in it)
+    for name in names:
+        if not fnmatch.fnmatchcase(name, comp):
+            continue
+        here = prefix + (name,)
+        try:
+            mode = os.stat(name, dir_fd=dfd, follow_symlinks=False).st_mode
+        except OSError as exc:  # gone or unreadable since the listing: an error, never a silent omission
+            errors.append((here, exc))
+            continue
+        is_link = stat.S_ISLNK(mode)
+        if is_link and not rest:
+            try:
+                mode = os.stat(name, dir_fd=dfd).st_mode
+            except OSError as exc:
+                if exc.errno not in DANGLING_ERRNOS:  # a dangling or looping link is no match; the rest is an error
+                    errors.append((here, exc))
+                continue
+        if not rest:
+            if stat.S_ISREG(mode):
+                found.append((here, is_link))
+            continue
+        if is_link:
+            found.append((here, True))
+            continue
+        if not stat.S_ISDIR(mode):
+            continue
+        try:
+            sub = open_dir_at(name, dfd)
+            try:
+                glob_fd(sub, rest, here, found, errors)
+            finally:
+                os.close(sub)
+        except OSError as exc:
+            errors.append((here, exc))
+
+
+def tree_db_entries(store, rfd):
+    """The databases a sqlite-tree store matches below the open directory `rfd`: ([(parts, linked)], [(parts,
+    OSError)]), the parts relative to that directory. Raises OSError when the root itself cannot be listed."""
+    found, errors = [], []
+    for pat in store["dbs"]:
+        part = []
+        glob_fd(rfd, tuple(pat.split("/")), (), part, errors)
+        found.extend(sorted(part))
+    return found, errors
+
+
+def tree_root(store, run, excluder):
+    """The directory a sqlite-tree store is searched from: its configured root, or that root's target when the
+    root is a symlink and the root-link rule allows it (recorded in run.root_symlinks, labelled with the root as
+    configured). None after `run.absent` or `run.error`: nothing is searched."""
+    root = store["root"]
+    real = root
+    if is_linked(root, excluder):
+        real = follow_link(root, str(root), run, excluder)
+        if real is None:
+            return None
+    if not os.path.lexists(real):
+        run.absent(root)
+        return None
+    if not real.is_dir():
+        run.error(root, NotADirectoryError("store root is not a directory"))
+        return None
+    return real
+
+
+def wal_size(db):
+    """Bytes of the database's -wal file when one exists (a regular file): the dry run's estimate of a
+    SQLite snapshot is the main file plus its WAL, an upper bound on what the online backup produces,
+    since committed pages may still live only in the WAL (Codex on PR 24)."""
+    wal = db.with_name(db.name + "-wal")
+    try:
+        st = os.lstat(wal)
+        return st.st_size if stat.S_ISREG(st.st_mode) else 0
+    except OSError:
+        return 0
+
+
+SIDECAR_ABSENT = "is absent"
+
+
+def sidecar_gap(side, excluder, dir_fd=None):
+    """Why the sidecar at `side` cannot be copied, or None when it can; SIDECAR_ABSENT only when lstat says the
+    name does not exist (a session that never had one: a warning for a required sidecar, not an error). With
+    `dir_fd` (the open directory the sidecar sits in) the lstat is relative to it, so no path component is
+    resolved again; the dry run passes none. A sidecar sits in its db's directory, so no linked directory
+    component can lie above it; the sidecar file itself may still be a link."""
+    try:
+        st = os.lstat(side if dir_fd is None else side.name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return SIDECAR_ABSENT
+    except OSError as exc:
+        return f"cannot be examined ({exc.strerror})"
+    if stat.S_ISLNK(st.st_mode):
+        return "is a symlink"
+    if excluder.path(side):
+        return "is an excluded path"
+    if not stat.S_ISREG(st.st_mode):
+        return "is not a regular file"
+    return None
+
+
+def required_sidecar_error(side, why):
+    return SidecarError(f"required sidecar {side.name} {why}: the session's db copy is not lossless")
+
+
+SIDECAR_SKIP_WHY = {"is a symlink": "symlink", "is an excluded path": "excluded credential path",
+                    "is not a regular file": "not a regular file"}
+
+
+def sidecar_problem(run, root, side, why, required=True):
+    """A sidecar the copy or the plan could not take. Required: absent on disk is recorded in
+    run.sidecar_missing (an error only under --strict-stores), anything else is an error. Optional: absent is
+    nothing, anything else that is present is a recorded skip (`run.skip`, so the manifest `skipped` list and, for
+    a symlink, stderr show it, as for every other skipped link; Codex on PR 24, pass 11)."""
+    if not required:
+        if why != SIDECAR_ABSENT:
+            run.skip(side, SIDECAR_SKIP_WHY.get(why, f"sidecar {why}"))
+        return
+    if why == SIDECAR_ABSENT:
+        run.sidecar_missing.append(str(side.relative_to(root)))
+        if not run.strict:
+            return
+    run.error(side.parent.relative_to(root), required_sidecar_error(side, why))
+
+
+def store_status(run):
+    """missing: no configured source exists; partial: the store has errors; else ok."""
+    if run.missing and len(run.missing) == len(run.sources):
+        return "missing"
+    return "partial" if run.errors else "ok"
+
+
+def copy_tree_store(store, run, excluder):
+    configured = store["root"]
+    run.sources.append(str(configured))
+    root = tree_root(store, run, excluder)
+    if root is None:
+        return
+    try:  # every open below starts from the real $HOME's descriptor chain (adversary round 17, on PR 24)
+        anchored, base = home_anchor(root, excluder)
+        parts = anchored.relative_to(base).parts
+        rfd = open_dir_chain(base, parts)
+    except OSError as exc:
+        run.error(configured, exc)
+        return
+    try:
+        try:
+            entries, errors = tree_db_entries(store, rfd)
+        except OSError as exc:
+            run.error(configured, exc)
+            return
+        for eparts, exc in errors:
+            run.error(root.joinpath(*eparts), exc)
+        for eparts, linked in entries:
+            copy_tree_session(store, run, excluder, root, anchored, base, rfd, eparts, linked)
+    finally:
+        os.close(rfd)
+
+
+def copy_tree_session(store, run, excluder, root, anchored, base, rfd, eparts, linked):
+    """One session database of a sqlite-tree store, then its sidecars. `root` is the tree root as shown,
+    `anchored`/`base` its home-anchored form, `rfd` the descriptor opened on it; the database is read through
+    `ro_connect`'s walk from `base` and every sidecar relative to a descriptor chain from `rfd`."""
+    src = root.joinpath(*eparts)
+    if linked:  # the listing reached it through a symlink (itself or a directory above it)
+        run.skip(src, "symlink")
+        return
+    if is_excluded_name(src.name) or excluder.path(src):
+        run.skip(src, "excluded credential path")
+        return
+    dst = run.out / src.relative_to(root)
+    try:
+        run.scrubbed_of[dst] = backup_sqlite(anchored.joinpath(*eparts), dst, store["name"], base)
+        run.source_of[dst] = str(src)
+    except (OSError, sqlite3.Error, SchemaGuardError) as exc:
+        run.error(src, exc)
+        return
+    try:
+        pfd = open_dir_chain(rfd, eparts[:-1])
+    except OSError as exc:
+        run.error(src.parent, exc)
+        return
+    try:
+        for pat in store["sidecars"]:
+            side = src.parent / pat.format(stem=src.stem, name=src.name)
+            why = sidecar_gap(side, excluder, pfd)
+            if not why:
+                try:
+                    copy_regular(side.name, dst.parent / side.name, dir_fd=pfd, shown=side)
+                    continue
+                except OSError as exc:
+                    if exists_at(side.name, pfd):  # swapped for a link or non-regular file after sidecar_gap: an error
+                        run.error(side, exc)
+                        continue
+                    why = "vanished during the copy"
+            sidecar_problem(run, root, side, why, pat in store.get("required", []))
+    finally:
+        os.close(pfd)
+
+
+def seal_and_hash(run):
+    """Drop symlinks a race let into the copy, set 0700/0600 on everything produced and hash each file;
+    returns (entries, bytes)."""
+    entries = []
+    total = 0
+    if not run.out.exists():
+        return entries, total
+    for dirpath, dirnames, filenames in os.walk(run.out):
+        for name in list(dirnames) + list(filenames):
+            link = Path(dirpath) / name
+            if link.is_symlink():
+                link.unlink()
+                run.skip(link, "symlink (appeared after the check)")
+                if name in dirnames:
+                    dirnames.remove(name)
+                else:
+                    filenames.remove(name)
+        os.chmod(dirpath, 0o700)
+        for fn in sorted(filenames):
+            p = Path(dirpath) / fn
+            try:
+                os.chmod(p, 0o600)
+                size = p.stat().st_size
+                entry = {"path": str(p.relative_to(run.out.parent)), "bytes": size, "sha256": sha256_of(p)}
+                if p in run.source_of:
+                    entry["source"] = run.source_of[p]
+                if run.scrubbed_of.get(p):
+                    entry["scrubbed"] = run.scrubbed_of[p]
+                entries.append(entry)
+                total += size
+            except OSError as exc:
+                run.error(p, exc)
+    return entries, total
+
+
+def run_store(store, work, excluder, final, strict=False):
+    """Copy one store into work/<name>; the manifest entry names it under final/<name>."""
+    run = StoreRun(store, work / store["name"], strict)
+    {"sqlite": copy_sqlite_store, "sqlite-tree": copy_tree_store, "files": copy_file_store}[store["kind"]](
+        store, run, excluder)
+    entries, total = seal_and_hash(run)
+    scrubbed = sorted({t for v in run.scrubbed_of.values() for t in v})
+    return run, {
+        "store": store["name"], "kind": store["kind"], "status": store_status(run), "sources": run.sources,
+        "missing": run.missing, "root_symlinks": run.root_symlinks, "destination": str(final / store["name"]),
+        "bytes": total,
+        "file_count": len(entries), "files": entries,
+        "started": run.started, "ended": utcnow(), "seconds": round(time.monotonic() - run.t0, 1),
+        "skipped_count": run.skipped_count, "skipped": run.skipped, "scrubbed": scrubbed, "errors": run.errors,
+        "sidecar_missing": run.sidecar_missing,
+    }
+
+
+def plan_store(store, excluder, strict=False):
+    """--dry-run: what the store would produce, without writing anything."""
+    run = StoreRun(store, Path("/nonexistent"), strict)
+    count = size = 0
+    if store["kind"] == "sqlite":
+        for f in store["files"]:
+            run.sources.append(str(f))
+            linked = is_linked(f, excluder)
+            if excluder.path(f, follow=not linked):
+                continue
+            real = f
+            if linked:
+                real = follow_link(f, f.name, run, excluder)
+                if real is None:
+                    continue
+            if real.is_file():
+                try:
+                    size += real.stat().st_size + wal_size(real)
+                    count += 1
+                except OSError as exc:
+                    run.error(real, exc)
+            elif not os.path.lexists(f):
+                run.absent(f)
+            else:
+                run.error(f, OSError("not a regular file"))
+    elif store["kind"] == "sqlite-tree":
+        run.sources.append(str(store["root"]))
+        root = tree_root(store, run, excluder)
+        if root is not None:
+            listing_errors = []
+            dbs = tree_dbs(store, root, listing_errors)
+            for where, exc in listing_errors:  # an unreadable or pruned directory: the copy's error, not an empty match
+                run.error(where, exc)
+            for db in dbs:
+                if under_symlink(db, root):
+                    run.skip(db, "symlink")
+                    continue
+                if is_excluded_name(db.name) or excluder.path(db):
+                    run.skip(db, "excluded credential path")
+                    continue
+                try:
+                    size += db.stat().st_size + wal_size(db)
+                except OSError as exc:
+                    run.error(db, exc)
+                    continue
+                count += 1
+                for pat in store["sidecars"]:
+                    side = db.parent / pat.format(stem=db.stem, name=db.name)
+                    why = sidecar_gap(side, excluder)
+                    if not why:
+                        try:
+                            size += side.stat().st_size
+                            count += 1
+                        except OSError as exc:
+                            run.error(side, exc)
+                    else:
+                        sidecar_problem(run, root, side, why, pat in store.get("required", []))
+    else:
+        for label, src in store["roots"]:
+            run.sources.append(str(src))
+            linked = is_linked(src, excluder)
+            if excluder.path(src, follow=not linked):
+                continue
+            real = src
+            if linked:
+                real = follow_link(src, label, run, excluder)
+                if real is None:
+                    continue
+            if not os.path.lexists(real):
+                run.absent(src)
+                continue
+            exc = root_type_problem(store, label, real)
+            if exc:  # the copy records the same error and copies nothing
+                run.error(src, exc)
+                continue
+            if real.is_dir():
+                # a subdirectory that cannot be listed is a store error, as in the copy (Codex on PR 24, pass 18)
+                for dirpath, dirnames, filenames in os.walk(real, onerror=lambda exc: run.error(exc.filename, exc)):
+                    ig = set(make_ignore(run, excluder)(dirpath, dirnames + filenames))
+                    dirnames[:] = [d for d in dirnames if d not in ig]
+                    for fn in filenames:
+                        if fn not in ig:
+                            try:
+                                size += os.stat(os.path.join(dirpath, fn)).st_size
+                                count += 1
+                            except OSError as exc:
+                                run.error(os.path.join(dirpath, fn), exc)
+            else:
+                try:
+                    size += real.stat().st_size
+                    count += 1
+                except OSError as exc:
+                    run.error(real, exc)
+    return {"store": store["name"], "kind": store["kind"], "status": store_status(run), "sources": run.sources,
+            "missing": run.missing, "root_symlinks": run.root_symlinks, "file_count": count, "bytes": size,
+            "skipped_count": run.skipped_count, "skipped": run.skipped, "errors": run.errors,
+            "sidecar_missing": run.sidecar_missing}
+
+
+def resolve_dest(arg):
+    if arg:
+        return Path(os.path.abspath(os.path.expanduser(arg))).resolve()
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return Path(os.path.expanduser("~/.local/state/ade/backups")).resolve() / stamp
+
+
+def refuse_reason(dest, stores):
+    """Why dest must not be written to, or None."""
+    for store in stores:
+        for root in store_roots(store):
+            r = root.resolve()
+            if dest == r or r in dest.parents:
+                return f"destination {dest} is inside the {store['name']} source store {r}"
+            if dest in r.parents:
+                return f"destination {dest} holds the {store['name']} source store {r}"
+    for p in [dest, *dest.parents]:
+        if (p / ".git").exists():
+            return f"destination {dest} is inside the git repository {p}"
+    part = part_dir(dest)
+    for p in (dest, part):
+        if os.path.lexists(p):
+            return f"{p} already exists (--dest must name a new directory; a leftover .part is an interrupted run)"
+    return None
+
+
+def part_dir(dest):
+    """Where the generation is built until it is complete."""
+    return dest.with_name(dest.name + ".part")
+
+
+HERMES_CONFIG_CAP = 64 * 1024
+HERMES_DEFAULT_LIMIT = 20000
+
+
+def read_hermes_config(home, excluder):
+    """The text of ~/.hermes/config.yaml, read the way `copy_regular` reads a source (the adversary's round 20):
+    every directory opened relative to the previous descriptor from the real $HOME (`home_anchor`), the file
+    O_NOFOLLOW|O_NONBLOCK so a FIFO cannot block the run, `fstat` must say regular file, at most
+    HERMES_CONFIG_CAP bytes read. Raises FileNotFoundError when it is absent and OSError (with the reason) for
+    every other refusal: a link, a non-regular file, a too-large file, an unreadable or non-UTF-8 one."""
+    anchored, base = home_anchor(home / ".hermes/config.yaml", excluder)
+    try:
+        dfd = open_dir_chain(base, anchored.parent.relative_to(base).parts)
+    except OSError as exc:
+        if not os.path.lexists(home / ".hermes"):
+            raise FileNotFoundError(str(anchored)) from exc
+        raise
+    try:
+        try:
+            fd = os.open(anchored.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise OSError(f"is a symlink or unreadable: {exc.strerror}") from exc
+    finally:
+        os.close(dfd)
+    try:  # the descriptor is ours until the file object owns it: every refusal below closes it
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("not a regular file")
+        fin = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    with fin:
+        os.set_blocking(fin.fileno(), True)  # O_NONBLOCK was for the open only
+        data = fin.read(HERMES_CONFIG_CAP + 1)
+    if len(data) > HERMES_CONFIG_CAP:
+        raise OSError(f"larger than {HERMES_CONFIG_CAP} bytes")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise OSError("not UTF-8 text") from exc
+
+
+def hermes_limit(home, excluder):
+    """sessions.max_export_messages from config.yaml; the Hermes default (20,000) when unset, when the file is
+    absent, or when it cannot be read safely (then one warning line on stderr; the manifest has no warnings list)."""
+    try:
+        text = read_hermes_config(home, excluder)
+    except FileNotFoundError:
+        return HERMES_DEFAULT_LIMIT
+    except OSError as exc:
+        print(f"ade-backup-stores: warning: {home / '.hermes/config.yaml'} not read ({exc}); "
+              f"using the default export limit {HERMES_DEFAULT_LIMIT}", file=sys.stderr)
+        return HERMES_DEFAULT_LIMIT
+    m = re.search(r"^\s*max_export_messages:\s*(\d+)", text, re.M)
+    return int(m.group(1)) if m else HERMES_DEFAULT_LIMIT
+
+
+def hermes_session_counts(db_path):
+    con = ro_connect(db_path)
+    try:
+        ids = [r[0] for r in con.execute("SELECT id FROM sessions")]
+        counts = dict(con.execute("SELECT session_id, COUNT(*) FROM messages GROUP BY session_id"))
+    finally:
+        con.close()
+    return ids, counts
+
+
+def hermes_run(hermes, args, cwd, env):
+    proc = subprocess.run([hermes, "sessions", "export", *args], capture_output=True, text=True, errors="replace",
+                          timeout=HERMES_TIMEOUT, cwd=cwd, env=env)
+    return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+
+def exported_count(text):
+    """N from "Exported N session(s) ...", or None."""
+    m = re.match(r"Exported (\d+)", text)
+    return int(m.group(1)) if m else None
+
+
+def hermes_db_absent(db):
+    """True when the configured state.db is not there at all (a dangling link is not absent: the gate reports it)."""
+    return not os.path.lexists(db) and not link_dangles(db)
+
+
+def non_regular_source(path, excluder):
+    """The OSError `ro_connect` raises for a SQLite source that exists but is not a regular file (a FIFO, a
+    directory, a device), or None when `path` is absent or a regular file. Judged by `lstat`: nothing is opened,
+    so a FIFO cannot block. The dry run and --check-schemas ask this to refuse what the real run refuses."""
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError:
+        return None
+    if stat.S_ISREG(mode):
+        return None
+    try:
+        shown = home_anchor(path, excluder)[0]
+    except OSError:
+        shown = path
+    return OSError(f"source is not a regular file: {shown}")
+
+
+def hermes_state_gate(home, excluder):
+    """The state.db path the export may read: the configured one, or where a link leads when `root_link_target`
+    allows it (the gate copy_sqlite_store applies to a linked store file). Raises RootSymlinkError for a refused
+    link, and the OSError the real run's open would raise for a state.db that exists but is not a regular file.
+    The real run and the dry-run plan both ask this one question (Codex on PR 24, pass 15; the adversary's
+    round 19)."""
+    real_db = home / ".hermes/state.db"
+    if is_linked(real_db, excluder):
+        real_db, why = root_link_target(real_db, excluder)
+        if why:
+            raise RootSymlinkError(f"{why}: {link_note(home / '.hermes/state.db')}")
+    refusal = non_regular_source(real_db, excluder)
+    if refusal:
+        raise refusal
+    return real_db
+
+
+def make_hermes_scratch(home, scratch, state_backup, limit, excluder):
+    """A HERMES_HOME that holds only a copy of the hermes-state backup (taken here, scrubbed and guarded like
+    any other copy, when the backup step did not produce one) and a config.yaml with the export limit."""
+    scratch.mkdir(mode=0o700)
+    if state_backup and state_backup.is_file():
+        shutil.copyfile(state_backup, scratch / "state.db")
+    else:
+        anchored, base = home_anchor(hermes_state_gate(home, excluder), excluder)
+        backup_sqlite(anchored, scratch / "state.db", "hermes-state", base)
+    (scratch / "config.yaml").write_text(f"sessions:\n  max_export_messages: {limit}\n")
+
+
+def export_hermes(home, work, final, state_backup, excluder):
+    """The documented `hermes sessions export` JSONL, into <dest>/hermes-export/, read from a scratch copy."""
+    out = work / "hermes-export"
+    run = StoreRun({"name": "hermes-export", "kind": "hermes-export"}, out)
+    run.sources.append(str(home / ".hermes/state.db"))
+    info = {"mode": None, "limit": hermes_limit(home, excluder), "truncated": False, "oversize": [], "failed": [],
+            "sessions_total": None, "sessions_exported": 0, "snapshot": "scratch HERMES_HOME holding a copy of hermes-state"}
+    hermes = os.environ.get("ADE_BACKUP_HERMES") or shutil.which("hermes")
+    out.mkdir(parents=True, exist_ok=True)
+    scratch = work / ".hermes-scratch"
+    if hermes_db_absent(home / ".hermes/state.db"):
+        run.absent(home / ".hermes/state.db")
+    elif not hermes:
+        run.error("hermes", FileNotFoundError("no hermes on PATH (set ADE_BACKUP_HERMES)"))
+    else:
+        try:
+            make_hermes_scratch(home, scratch, state_backup, info["limit"], excluder)
+            env = {**os.environ, "HERMES_HOME": str(scratch)}
+            bulk = out / "hermes_sessions.jsonl"
+            # Exported into a temporary name beside `bulk` and renamed once verified, as per_session_export does: a
+            # failed or timed-out run that wrote part of the JSONL leaves no file for the manifest to list.
+            tfd, tmp = tempfile.mkstemp(dir=out, prefix=".bk-", suffix=".jsonl")
+            os.close(tfd)
+            os.unlink(tmp)
+            try:
+                rc, text = hermes_run(hermes, [tmp], str(out), env)
+                n = exported_count(text)
+                verified = rc == 0 and os.path.isfile(tmp) and n is not None
+                if verified:
+                    os.replace(tmp, bulk)
+            finally:
+                Path(tmp).unlink(missing_ok=True)
+            if verified:
+                info["mode"] = "bulk"
+                info["sessions_exported"] = info["sessions_total"] = n
+            elif "more than" in text:
+                info["mode"] = "per-session"
+                per_session_export(hermes, scratch, out, info, run, env)
+            else:
+                run.error("hermes sessions export", RuntimeError(f"rc={rc}: {text[:300]}"))
+        except (OSError, subprocess.SubprocessError, sqlite3.Error, SchemaGuardError) as exc:
+            run.error("hermes sessions export", exc)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+    info["truncated"] = bool(info["oversize"])
+    entries, total = seal_and_hash(run)
+    return run, {
+        "store": "hermes-export", "kind": "hermes-export", "status": store_status(run), "sources": run.sources,
+        "missing": run.missing, "destination": str(final / "hermes-export"), "bytes": total,
+        "file_count": len(entries), "files": entries,
+        "started": run.started, "ended": utcnow(), "seconds": round(time.monotonic() - run.t0, 1),
+        "skipped_count": run.skipped_count, "skipped": run.skipped, "errors": run.errors, "hermes_export": info,
+    }
+
+
+def per_session_export(hermes, scratch, out, info, run, env):
+    ids, counts = hermes_session_counts(scratch / "state.db")
+    info["sessions_total"] = len(ids)
+    limit = info["limit"]
+    todo = []
+    for sid in ids:
+        n = counts.get(sid, 0)
+        if limit and n > limit:
+            info["oversize"].append({"id": sid, "messages": n})
+        elif re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", sid):
+            todo.append(sid)
+        else:
+            info["failed"].append({"id": sid, "error": "unsafe session id"})
+    target = out / "sessions"
+    target.mkdir(parents=True, exist_ok=True)
+
+    def one(sid):
+        path = target / f"{sid}.jsonl"
+        # Exported into a temporary name beside `path` and renamed once verified: a run that writes part of the
+        # JSONL and then fails or times out must leave neither file, so the manifest cannot list a partial session
+        # that is also recorded as failed (Codex on PR 24, pass 15). mkstemp picks the name; hermes creates the file.
+        tfd, tmp = tempfile.mkstemp(dir=target, prefix=".bk-", suffix=".jsonl")
+        os.close(tfd)
+        os.unlink(tmp)
+        try:
+            try:
+                rc, text = hermes_run(hermes, [tmp, f"--session-id={sid}"], str(out), env)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return sid, None, f"{type(exc).__name__}: {exc}"
+            if rc == 0 and os.path.isfile(tmp) and exported_count(text) is not None:
+                os.replace(tmp, path)
+                return sid, True, None
+            return sid, False, text[:300]
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=HERMES_WORKERS) as pool:
+        for sid, ok, why in pool.map(one, todo):
+            if ok:
+                info["sessions_exported"] += 1
+            elif why and "more than" in why:
+                info["oversize"].append({"id": sid, "messages": counts.get(sid, 0)})
+            else:
+                info["failed"].append({"id": sid, "error": why})
+    for item in info["failed"]:
+        run.error(f"hermes session {item['id']}", RuntimeError(item["error"]))
+
+
+def write_manifest(dest, manifest):
+    path = dest / "MANIFEST.json"
+    tmp = dest / "MANIFEST.json.part"
+    with open(tmp, "w") as f:
+        json.dump(manifest, f, indent=1)
+        f.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return path
+
+
+def summary_line(entry):
+    errs = len(entry["errors"])
+    return (f"{entry['store']}: {entry['file_count']} files, {entry['bytes']} bytes"
+            + (f", {entry.get('seconds', 0)}s" if "seconds" in entry else "")
+            + (", store missing" if entry.get("status") == "missing" else "")
+            + (f", {errs} error(s)" if errs else ""))
+
+
+def report_missing(entries):
+    """One stderr line per store with a configured path that does not exist; returns how many stores."""
+    n = 0
+    for e in entries:
+        if e["missing"]:
+            n += 1
+            print(f"ade-backup-stores: store {e['store']}: missing: {', '.join(e['missing'])}", file=sys.stderr)
+    return n
+
+
+def report_empty(entries):
+    """One stderr line per store with a configured path that exists and no error but no file produced: a store
+    whose roots all vanished from the copy must not look like success. Not an error (an empty store is real)."""
+    for e in entries:
+        sources = e.get("sources", [])
+        if e["file_count"] == 0 and not e["errors"] and len(e["missing"]) < len(sources):
+            print(f"ade-backup-stores: {e['store']}: 0 files copied although its roots exist", file=sys.stderr)
+
+
+def report_sidecars(entries):
+    """One stderr line per store with required sidecars that do not exist on disk: a warning, the sessions' dbs are
+    copied without them (an error only under --strict-stores, which the entry's errors already carry)."""
+    for e in entries:
+        gone = e.get("sidecar_missing", [])
+        if gone:
+            names = ", ".join(sorted({Path(p).name for p in gone}))
+            print(f"ade-backup-stores: {e['store']}: {len(gone)} session(s) without {names} (copied without it)",
+                  file=sys.stderr)
+
+
+def root_type_problem(store, label, path):
+    """None when the existing configured root `path` has the type the configuration gives it (a `file_labels`
+    root a regular file, every other root a directory), else the OSError that is the store error: a directory
+    that became a file, or a single file that became a directory, is never copied as whatever it now is
+    (Codex on PR 24, pass 18). `stat` follows no link here: the caller has passed the root-link gate, so `path`
+    is the resolved target."""
+    try:
+        mode = os.stat(path).st_mode
+    except OSError as exc:
+        return exc
+    if label in store.get("file_labels", ()):
+        if stat.S_ISREG(mode):
+            return None
+        if stat.S_ISDIR(mode):
+            return IsADirectoryError(f"configured single file {label} is a directory, not a regular file")
+        return OSError(f"configured single file {label} is not a regular file")
+    if stat.S_ISDIR(mode):
+        return None
+    return NotADirectoryError(f"configured directory root {label} is not a directory")
+
+
+class SchemaReport:
+    """What --check-schemas found, per store: counters and findings (state, path, the printed line), names only.
+    With `json_out` the human lines go to stderr, so stdout carries only the one JSON document `finish` prints."""
+    COUNTS = ("problems", "link_problems", "missing", "unopenable", "excluded", "sidecar_missing", "sidecar_problems")
+
+    def __init__(self, stores, json_out=False):
+        self.json_out = json_out
+        self.stores = {s["name"]: {"name": s["name"], "state": "ok", "dbs_checked": 0, "paths_present": 0,
+                                   **dict.fromkeys(self.COUNTS, 0), "findings": []} for s in stores}
+
+    def say(self, text):
+        print(text, file=sys.stderr if self.json_out else sys.stdout)
+
+    def note(self, store, state, path, text):
+        """One printed line about `path` of `store`, recorded as a finding in `state`."""
+        self.say(text)
+        self.stores[store]["findings"].append({"state": state, "path": str(path), "message": text})
+
+    def count(self, store, key, n=1):
+        self.stores[store][key] += n
+
+    def total(self, key):
+        return sum(s[key] for s in self.stores.values())
+
+    def finish(self, strict):
+        """Print the summary line (and, with --json, the JSON document); return the exit status."""
+        (problems, link_problems, missing, unopenable, excluded, side_missing, side_problems) = (
+            self.total(k) for k in self.COUNTS)
+        sidecars = "".join(f", {n} {what}" for n, what in ((side_missing, "sidecar(s) missing"),
+                                                          (side_problems, "sidecar problem(s)")) if n)
+        self.say(f"schema check: {problems} unexplained credential-looking name(s), {link_problems} symlink problem(s), "
+                 f"{missing} missing, {unopenable} unopenable, {excluded} excluded{sidecars}")
+        reasons = [why for n, why in ((problems, "unexplained credential-looking names"),
+                                      (link_problems, "symlink problems"), (unopenable, "unopenable databases or paths"),
+                                      (side_problems, "required sidecar errors"),
+                                      (strict and missing, "missing stores or paths (--strict-stores)"),
+                                      (strict and side_missing, "missing required sidecars (--strict-stores)")) if n]
+        code = 1 if reasons else 0
+        if self.json_out:
+            for s in self.stores.values():
+                s["state"] = ("problem" if s["problems"] or s["link_problems"] or s["unopenable"] or s["sidecar_problems"]
+                              else "missing" if s["missing"] or s["sidecar_missing"] else "ok")
+            print(json.dumps({"check_schemas": True, "ok": code == 0, "exit_code": code, "strict_stores": strict,
+                              "reasons": reasons, "totals": dict(zip(self.COUNTS, (
+                                  problems, link_problems, missing, unopenable, excluded, side_missing, side_problems))),
+                              "stores": list(self.stores.values())}, indent=1))
+        return code
+
+
+def check_file_roots(store, excluder, rep):
+    """--check-schemas for a file store: each configured root is looked at with lstat/stat only (never opened),
+    through the same exclusion and root-link gates the copy applies. Records into `rep` (one line per absent,
+    excluded, refused or wrongly typed root, then the present count)."""
+    name = store["name"]
+    for label, src in store["roots"]:
+        linked = is_linked(src, excluder)
+        if excluder.path(src, follow=not linked):
+            rep.note(name, "excluded", src, f"{name}: {src}: skipped (excluded credential path)")
+            rep.count(name, "excluded")
+            continue
+        real = src
+        if linked:
+            real, why = root_link_target(src, excluder)
+            if why:
+                rep.note(name, "symlink_refused", src, f"{name}: {src}: symlink refused: {why}")
+                rep.count(name, "link_problems")
+                continue
+            rep.note(name, "symlink_followed", src, f"{name}: {src}: symlink -> {real}")
+        if not os.path.lexists(real):
+            rep.note(name, "missing", src, f"{name}: {src}: missing")
+            rep.count(name, "missing")
+            continue
+        exc = root_type_problem(store, label, real)
+        if exc:
+            rep.note(name, "error", src, f"{name}: {src}: ERROR {type(exc).__name__}: {exc}")
+            rep.count(name, "unopenable")
+            continue
+        rep.count(name, "paths_present")
+    rep.say(f"{name}: {rep.stores[name]['paths_present']} of {len(store['roots'])} configured path(s) present")
+
+
+def check_tree_sidecars(store, db, root, excluder, rep):
+    """The required sidecars of one checked session database, judged by `sidecar_gap` like the copy and the dry
+    run (`sidecar_problem`): absent on disk is recorded as `sidecar_missing` (a failure only under
+    --strict-stores, see `SchemaReport.finish`); a link, an excluded or non-regular file or an unexaminable name
+    is an error in both modes. Optional sidecars never fail the copy and are not looked at. Names only."""
+    sname = store["name"]
+    for pat in store.get("required", []):
+        side = db.parent / pat.format(stem=db.stem, name=db.name)
+        why = sidecar_gap(side, excluder)
+        if not why:
+            continue
+        shown = side.relative_to(root)
+        if why == SIDECAR_ABSENT:
+            rep.note(sname, "sidecar_missing", side, f"{sname}: {shown}: required sidecar is absent (copied without it)")
+            rep.count(sname, "sidecar_missing")
+        else:
+            rep.note(sname, "sidecar_error", side, f"{sname}: {shown}: ERROR {required_sidecar_error(side, why)}")
+            rep.count(sname, "sidecar_problems")
+
+
+def check_schemas(stores, excluder, strict=False, json_out=False):
+    """--check-schemas: the schema guard on the live databases, read-only; prints names only. A database
+    inside a per-session tree that is a symlink or sits under a symlinked directory is never opened; a
+    configured SQLite path that is a symlink is opened through its target when the root-link rule allows
+    it (`symlink -> target`, information) and refused otherwise (`symlink refused`). Both refusals count as
+    symlink problems, apart from the credential-looking names. A database with a credential name or path
+    (the copy's exclusions) is never opened (`skipped`, counted as `excluded`). A file store is not opened
+    either: each configured root is checked to exist (absent counts as `missing`, a strict failure). Each checked
+    tree database also has its required sidecars judged by `check_tree_sidecars`. With
+    `json_out` stdout is one JSON document (`SchemaReport.finish`) and the human lines go to stderr; the exit
+    status is the same either way."""
+    rep = SchemaReport(stores, json_out)
+    for store in stores:
+        sname = store["name"]
+        if store["kind"] == "sqlite":
+            dbs = list(store["files"])
+        elif store["kind"] == "sqlite-tree":
+            search = store["root"]
+            if is_linked(search, excluder):
+                search, why = root_link_target(store["root"], excluder)
+                if why:
+                    rep.note(sname, "symlink_refused", store["root"], f"{sname}: {store['root']}: symlink refused: {why}")
+                    rep.count(sname, "link_problems")
+                    continue
+                rep.note(sname, "symlink_followed", store["root"], f"{sname}: {store['root']}: symlink -> {search}")
+            if not os.path.lexists(store["root"]):
+                rep.note(sname, "missing", store["root"], f"{sname}: {store['root']}: missing")
+                rep.count(sname, "missing")
+                continue
+            dbs, linked_dbs = [], set()
+            if search.is_dir():
+                try:  # listed and opened from the real $HOME's descriptor chain, never from the path string
+                    anchored, base = home_anchor(search, excluder)
+                    rfd = open_dir_chain(base, anchored.relative_to(base).parts)
+                    try:
+                        entries, errors = tree_db_entries(store, rfd)
+                    finally:
+                        os.close(rfd)
+                except OSError as exc:
+                    rep.note(sname, "error", store["root"],
+                             f"{sname}: {store['root']}: ERROR {type(exc).__name__}: {exc}")
+                    rep.count(sname, "unopenable")
+                    continue
+                for parts, exc in errors:
+                    rep.note(sname, "error", search.joinpath(*parts),
+                             f"{sname}: {search.joinpath(*parts)}: ERROR {type(exc).__name__}: {exc}")
+                    rep.count(sname, "unopenable")
+                dbs = [search.joinpath(*parts) for parts, _ in entries]
+                linked_dbs = {search.joinpath(*parts) for parts, linked in entries if linked}
+        else:
+            check_file_roots(store, excluder, rep)
+            continue
+        for db in dbs:
+            target = db
+            if store["kind"] == "sqlite-tree":
+                if db in linked_dbs:
+                    rep.note(sname, "symlink_not_opened", db, f"{sname}: {db}: symlink, not opened")
+                    rep.count(sname, "link_problems")
+                    continue
+                is_excl = is_excluded_name(db.name) or excluder.path(db)
+            else:
+                is_excl = excluder.path(db, follow=not is_linked(db, excluder))
+            if is_excl:  # never opened: a read-only open can still create -wal/-shm beside it
+                rep.note(sname, "excluded", db, f"{sname}: {db}: skipped (excluded credential path)")
+                rep.count(sname, "excluded")
+                continue
+            if store["kind"] == "sqlite" and is_linked(db, excluder):
+                target, why = root_link_target(db, excluder)
+                if why:
+                    rep.note(sname, "symlink_refused", db, f"{sname}: {db}: symlink refused: {why}")
+                    rep.count(sname, "link_problems")
+                    continue
+                rep.note(sname, "symlink_followed", db, f"{sname}: {db}: symlink -> {target}")
+            if store["kind"] == "sqlite" and not target.is_file():
+                refusal = non_regular_source(target, excluder)  # present but not a regular file: the run's refusal
+                if refusal:
+                    rep.note(sname, "error", db, f"{sname}: {db}: ERROR {type(refusal).__name__}: {refusal}")
+                    rep.count(sname, "unopenable")
+                else:
+                    rep.note(sname, "missing", db, f"{sname}: {db}: missing")
+                    rep.count(sname, "missing")
+                continue
+            try:
+                con = ro_connect(*home_anchor(target, excluder))
+                try:
+                    hits = schema_hits(con)
+                finally:
+                    con.close()
+            except (OSError, sqlite3.Error) as exc:
+                rep.note(sname, "error", db, f"{sname}: {db}: ERROR {type(exc).__name__}: {exc}")
+                rep.count(sname, "unopenable")
+                continue
+            rep.count(sname, "dbs_checked")
+            clean = True
+            for table, col in hits:
+                name = table if col is None else f"{table}.{col}"
+                why = explained(sname, table, col)
+                if not why:
+                    rep.count(sname, "problems")
+                    clean = False
+                rep.note(sname, "explained" if why else "unexplained", db,
+                         f"{sname}: {db.name}: {name}: {why or 'UNEXPLAINED'}")
+            if store["kind"] == "sqlite-tree" and clean:  # the copy takes sidecars only after the db copy succeeded
+                check_tree_sidecars(store, db, search, excluder, rep)
+    return rep.finish(strict)
+
+
+def main(argv=None):
+    old_umask = os.umask(0o077)
+    try:
+        return run_main(argv)
+    finally:
+        os.umask(old_umask)
+
+
+def run_main(argv):
+    ap = argparse.ArgumentParser(prog="ade-backup-stores", description=__doc__.split("\n\n")[0], epilog=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dest", help="new backup directory (default ~/.local/state/ade/backups/<UTC timestamp>/)")
+    ap.add_argument("--dry-run", action="store_true", help="print what would be backed up; write nothing")
+    ap.add_argument("--only", help="comma-separated store names (hermes-export is one)")
+    ap.add_argument("--json", action="store_true", help="print a machine-readable summary on stdout (with "
+                    "--check-schemas: the schema check result as one JSON document, the text lines on stderr)")
+    ap.add_argument("--check-schemas", action="store_true",
+                    help="run the credential schema guard on the live databases (read-only, names only); write nothing")
+    ap.add_argument("--strict-stores", action="store_true",
+                    help="exit 1 when any configured store or store path is missing, or a required sidecar does not "
+                         "exist (default: recorded as \"missing\" / `sidecar_missing` in the manifest and on stderr, exit 0)")
+    args = ap.parse_args(argv)
+
+    home = Path(os.path.expanduser("~"))
+    stores = build_stores(home)
+    names = [s["name"] for s in stores] + ["hermes-export"]
+    wanted = [n.strip() for n in args.only.split(",") if n.strip()] if args.only else names
+    unknown = [n for n in wanted if n not in names]
+    if unknown:
+        print(f"ade-backup-stores: unknown store(s): {', '.join(unknown)}", file=sys.stderr)
+        return 2
+    selected = [s for s in stores if s["name"] in wanted]
+    if args.check_schemas:
+        if "hermes-export" in wanted and "hermes-state" not in wanted:
+            # the export reads a copy of ~/.hermes/state.db (the hermes-state store): check that source like it
+            selected += [s for s in stores if s["name"] == "hermes-state"]
+        return check_schemas(selected, Excluder(home), args.strict_stores, args.json)
+    dest = resolve_dest(args.dest)
+    reason = refuse_reason(dest, stores)
+    if reason:
+        print(f"ade-backup-stores: refusing: {reason}", file=sys.stderr)
+        return 2
+    excluder = Excluder(home)
+    say = (lambda *a: None) if args.json else print
+
+    if args.dry_run:
+        plans = [plan_store(s, excluder, args.strict_stores) for s in selected]
+        for p in plans:
+            say(summary_line(p) + " (dry run)")
+        hermes_db = home / ".hermes/state.db"
+        hermes_missing = "hermes-export" in wanted and hermes_db_absent(hermes_db)
+        hermes_errors = []
+        if "hermes-export" in wanted and not hermes_missing:
+            run = StoreRun({"name": "hermes-export", "kind": "hermes-export"}, Path("/nonexistent"))
+            if not (os.environ.get("ADE_BACKUP_HERMES") or shutil.which("hermes")):
+                # the check export_hermes makes before it builds the scratch copy: same source, wording and entry
+                run.error("hermes", FileNotFoundError("no hermes on PATH (set ADE_BACKUP_HERMES)"))
+            else:
+                try:  # the gate the real export applies before it opens state.db: a refusal is an error, not "would run"
+                    hermes_state_gate(home, excluder)
+                except OSError as exc:  # RootSymlinkError, or a state.db that is not a regular file
+                    run.error("hermes sessions export", exc)
+            hermes_errors = run.errors
+        if "hermes-export" in wanted:
+            say(f"hermes-export: would skip, {hermes_db} is missing (dry run)" if hermes_missing else
+                f"hermes-export: would refuse, {hermes_errors[0]['error']} (dry run)" if hermes_errors else
+                f"hermes-export: would run `hermes sessions export` into {dest / 'hermes-export'} (dry run)")
+        report_empty(plans)
+        report_sidecars(plans)
+        n_missing = report_missing(plans + ([{"store": "hermes-export", "missing": [str(hermes_db)]}]
+                                            if hermes_missing else []))
+        total = sum(p["bytes"] for p in plans)
+        errors = [e for p in plans for e in p["errors"]] + hermes_errors
+        say(f"total: {total} bytes would be copied to {dest} (dry run, nothing written)")
+        if args.json:
+            print(json.dumps({"dry_run": True, "dest": str(dest), "total_bytes": total, "stores": plans,
+                              "errors": errors}, indent=1))
+        return 1 if errors or (args.strict_stores and n_missing) else 0
+
+    started = utcnow()
+    t0 = time.monotonic()
+    work = part_dir(dest)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        work.mkdir(mode=0o700)
+    except FileExistsError:
+        print(f"ade-backup-stores: refusing: {work} already exists", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"ade-backup-stores: cannot create {work}: {exc}", file=sys.stderr)
+        return 2
+    entries, errors = [], []
+    for store in selected:
+        run, entry = run_store(store, work, excluder, dest, args.strict_stores)
+        entries.append(entry)
+        errors.extend(entry["errors"])
+        say(summary_line(entry))
+    if "hermes-export" in wanted:
+        state_backup = work / "hermes-state" / "state.db"
+        run, entry = export_hermes(home, work, dest, state_backup, excluder)
+        entries.append(entry)
+        errors.extend(entry["errors"])
+        info = entry["hermes_export"]
+        say(summary_line(entry) + (f", {len(info['oversize'])} oversize session(s) not exported" if info["truncated"] else ""))
+    report_empty(entries)
+    report_sidecars(entries)
+    n_missing = report_missing(entries)
+    total = sum(e["bytes"] for e in entries)
+    manifest = {
+        "version": VERSION, "tool": "bin/ade-backup-stores", "host": socket.gethostname(), "dest": str(dest),
+        "started": started, "ended": utcnow(), "seconds": round(time.monotonic() - t0, 1), "total_bytes": total,
+        "exclusions": {"names": EXCLUDE_NAMES, "paths": [f"~/{p}" for p in EXCLUDE_PATHS], "other": OTHER_SKIPS,
+                       "scrubbed_tables": {k: v["delete"] + [f"{t}.{c}" for t, c in v["null"]]
+                                           for k, v in SCRUB.items()}},
+        "errors": errors, "stores": entries,
+    }
+    write_manifest(work, manifest)
+    try:
+        os.rename(work, dest)
+    except OSError as exc:
+        print(f"ade-backup-stores: could not rename {work} to {dest}: {exc}; the generation stays in {work}",
+              file=sys.stderr)
+        return 1
+    path = dest / "MANIFEST.json"
+    say(f"total: {total} bytes in {sum(e['file_count'] for e in entries)} files, {len(errors)} error(s), manifest {path}")
+    if args.json:
+        print(json.dumps({"dest": str(dest), "manifest": str(path), "total_bytes": total, "errors": errors,
+                          "stores": [{k: e[k] for k in ("store", "status", "missing", "file_count", "bytes", "seconds")}
+                                     for e in entries]},
+                         indent=1))
+    return 1 if errors or (args.strict_stores and n_missing) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
