@@ -103,6 +103,10 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    contract value and the conservative one. **Ruled 2026-10-20 (djbclark): keep 10.** It is aiuse's contract unit (the same
    `headroom_percent` every pool's threshold uses) and the only option that protects the shared weekly as well as
    the sublimit; Opus takes over at 20 % of the Fable sublimit or 10 % of the shared weekly, whichever first.
+8. **Delete the credential vault after 2026-11-19** (owner: djbclark; adversary round 8 on PR 16, 2026-10-20):
+   `~/.local/state/ade/credential-bak/` (0700; 13 `.bak` key copies moved there from the agent config dirs on
+   2026-10-20, manifest `MANIFEST-2026-10-20.txt`, see docs/ade-everywhere-inventory-2026-10-20-stores.md 5.5).
+   Nothing reads it; once the 30-day keep lapses, `rm -r` it and drop this item.
 
 ## Keep every machine current, and a changelog (djbclark, 2026-10-20; proposal Q26, T8)
 
