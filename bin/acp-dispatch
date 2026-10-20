@@ -274,7 +274,7 @@ still-running slice before it gets here, so every resume that reaches the gate s
 process (an auto-resume that is refused ends as `failed` with the retry hint).
 --detach --no-wait must return at once, so it cannot wait here: the record is written first with
 `load_gate: {"state": "pending"}` and the detached runner (`execute`) does the full wait before the
-agent starts (waiting-load note in the record; the waiter's wait_timeout grows by --load-wait). A
+agent starts (waiting-load note in the record; the waiter's wait_timeout grows by --load-wait plus LOAD_GATE_SUBPROCESS_GRACE, which a hung load-watch can add before the gate fails open). A
 pending runner counts as in flight for the per-service cap and the quota reservation however long it
 waits (`load_gate_pending` rows skip INFLIGHT_SPAWN_GRACE, and stay pending until the agent's pid is
 written), and after admission it re-checks the cap that dispatch recorded in the record (the launchd runner
@@ -527,6 +527,7 @@ AUTO_RESUME_TEXT = (
 UNAVAILABLE_EXIT = 5
 LOAD_WAIT_DEFAULT = 1800       # seconds the load gate may wait (--load-wait / ACP_DISPATCH_LOAD_WAIT)
 LOAD_GATE_EXIT = 75            # EX_TEMPFAIL, what `load-watch admit` returns when still too hot
+LOAD_GATE_SUBPROCESS_GRACE = 180   # seconds past --load-wait before a hung load-watch is abandoned (and the gate fails open)
 LOAD_RETRY_TEXT = "machine too hot; retry later"
 LOAD_SCRUB_PREFIX = "LW_"      # every LW_* variable is dropped from load-watch's environment: its test hooks
                                # and its float()-at-import settings (LW_LOAD_PER_CORE=abc crashed it, failing open)
@@ -2614,7 +2615,7 @@ def load_gate(wait: int, path: str | None = None) -> tuple[bool, dict | None, st
     env = {k: v for k, v in os.environ.items() if not k.startswith(LOAD_SCRUB_PREFIX)}
     try:
         proc = subprocess.run([path, "admit", "--wait", str(wait), "--json"], check=False, stdout=subprocess.PIPE,
-                              stderr=None, text=True, timeout=wait + 180, env=env)
+                              stderr=None, text=True, timeout=wait + LOAD_GATE_SUBPROCESS_GRACE, env=env)
     except (OSError, subprocess.SubprocessError) as e:
         return unknown(f"load-watch admit failed ({e})")
     try:
@@ -3771,7 +3772,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     wait_timeout = (0 if a.timeout == 0 else
                     a.wait_timeout if a.wait_timeout is not None else slice_secs + 300)
     if gate_deferred and wait_timeout:
-        wait_timeout += gate_wait      # the runner's load wait comes out of the lead's waiter budget otherwise
+        # a hung load-watch holds the runner for load_wait + the subprocess grace before the gate fails open
+        wait_timeout += gate_wait + LOAD_GATE_SUBPROCESS_GRACE
     if previous is not None and role == "advise" and previous.get("advisor_tree_before") is not None:
         tree_before = previous.get("advisor_tree_before")
     else:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import textwrap
 import time
@@ -12,7 +13,7 @@ import unittest
 from pathlib import Path
 from typing import override
 
-from test_acp_dispatch import run
+from test_acp_dispatch import SCRIPT, run
 from test_acp_dispatch_routing import RoutingDispatch
 
 FAKE_LW = textwrap.dedent("""\
@@ -233,6 +234,43 @@ class TestLoadGateDetachNoWait(LoadGate):
         self.assertEqual(rec["load_gate"], {"state": "pending", "wait_s": 1800})
         self.assertEqual(rec["load_gate_wait"], 1800)
         self.assertGreaterEqual(rec["wait_timeout"], 1800 + 300)        # the wait comes out of nobody's budget
+
+    def deadline_record(self) -> tuple[str, dict]:
+        r = self.dispatch("--no-model-check", "--no-preflight", "--detach", "--no-wait", "--wait-timeout", "600",
+                          "--load-wait", "100", env=self.gate_env(75, HOT))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        return str(self.out / "jobs" / "s1.json"), self.record()
+
+    def test_deadline_covers_the_load_wait_and_the_hung_load_watch_grace(self):
+        # Codex P2: a hung load-watch holds the runner for load_wait + LOAD_GATE_SUBPROCESS_GRACE before the
+        # gate fails open; the record deadline (what the rearm waiter reads) must outlast that
+        grace = int(re.search(r"^LOAD_GATE_SUBPROCESS_GRACE = (\d+)", SCRIPT.read_text(), re.M).group(1))
+        self.assertGreater(grace, 0)
+        _, rec = self.deadline_record()
+        self.assertGreaterEqual(rec["wait_timeout"], 600 + 100 + grace)
+        self.assertGreaterEqual(rec["started"] + rec["wait_timeout"], rec["started"] + 600 + 100 + grace)
+        self.assertEqual(rec["load_gate_wait"], 100)
+
+    def test_the_waiter_does_not_time_out_while_the_gate_can_still_be_waiting(self):
+        path, rec = self.deadline_record()
+        loaded = self.tmp / "launchctl-loaded"                          # the runner's launchd job is still loaded
+        loaded.write_text("#!/bin/bash\necho loaded\n")
+        loaded.chmod(0o755)
+        env = {**self.base_env(), "ACP_DISPATCH_LAUNCHCTL": str(loaded)}
+        # a runner stuck in a hung load-watch: load_wait + grace into the gate, past the old deadline (600 + 100)
+        self.set_started(path, time.time() - (600 + 100 + 60))
+        # the rearm waiter loops on `wait --once`: 75 is "still running", 124 its wait_timeout
+        c = run(["wait", "--once", path], env=env)
+        self.assertEqual(c.returncode, 75, c.stdout + c.stderr)
+        # and the deadline is still a real one
+        self.set_started(path, time.time() - rec["wait_timeout"] - 30)
+        c = run(["wait", "--once", path], env=env)
+        self.assertEqual(c.returncode, 124, c.stdout + c.stderr)
+
+    def set_started(self, path: str, started: float) -> None:
+        rec = json.loads(Path(path).read_text())
+        rec["started"] = started
+        Path(path).write_text(json.dumps(rec))
 
     def test_a_relative_load_watch_override_is_stored_absolute(self):
         # Codex P2: the launchd runner has another cwd, so a relative string read as "missing" and failed open
