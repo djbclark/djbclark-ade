@@ -12,11 +12,13 @@ acceptance test T8). It automates README "Update (this machine)":
 
 Steps, in order:
 
-1. `git fetch`, then `git pull --ff-only` when behind. The only thing --check does to the repo is the
-   fetch (remote-tracking refs, never the working tree). A path the pull would change or create that
-   collides with a local modification, an untracked or an ignored file (or a local path above or below
-   it: `foo` against `foo/bar`) stops it (exit 2, nothing pulled); a diverged branch stops it (exit 3).
-   Never a merge, rebase, stash or reset.
+1. `git fetch`, then, when behind, `git merge --ff-only <the fetched upstream commit>`: the commit the collision check
+   covered, never a second fetch, so a newer upstream commit is picked up (and checked) by the next run. The only
+   thing --check does to the repo is the fetch (remote-tracking refs, never the working tree). A path the update
+   would change or create that collides with a local modification, an untracked or an ignored file (or a local
+   path above or below it: `foo` against `foo/bar`) stops it (exit 2, nothing merged); a diverged branch stops it
+   (exit 3).
+   Never a merge commit, rebase, stash or reset.
 2. `skill-everywhere --check` over every `skills/*/SKILL.md`; a skill with a missing, dangling or
    chained link is re-linked with `skill-everywhere NAME...` (the script's own link form). A link
    the script leaves alone (a real directory, another link) is reported with the command and counts
@@ -52,7 +54,7 @@ Exit codes: 0 current (and nothing wrong), 10 behind (--check) or a skill link (
 ~/.claude link is missing/unresolved, 2 usage or a local modification blocks the pull, 3 the branch
 cannot fast-forward (git's explicit non-fast-forward refusal only), 4 git, the network, skill-everywhere
 or the state file failed (no repo, --repo is not the top of its work tree, no upstream, fetch/pull error
-or timeout, any other `git pull --ff-only` failure, `skill-everywhere` not found from the canonical checkout, `--check` failed or returned no
+or timeout, any other `git merge --ff-only` failure, `skill-everywhere` not found from the canonical checkout, `--check` failed or returned no
 result for a skill, the state file cannot be written).
 """
 import argparse
@@ -116,6 +118,16 @@ def git_out(repo, *args):
     if rc != 0:
         raise Stop(EXIT_ERROR, f"git {' '.join(args)} failed: {(err or out).strip()}")
     return out.strip()
+
+
+def git_z(repo, *args):
+    """The NUL-separated fields of a `-z` git command, from the raw stdout: a filename's leading or trailing
+    whitespace is part of the name, so never the stripped git_out. Only the final terminator is dropped."""
+    rc, out, err = git(repo, *args)
+    if rc != 0:
+        raise Stop(EXIT_ERROR, f"git {' '.join(args)} failed: {(err or out).strip()}")
+    fields = out.split("\0")
+    return fields[:-1] if fields and fields[-1] == "" else fields
 
 
 # --- CHANGELOG ----------------------------------------------------------------------------
@@ -448,9 +460,9 @@ def update(rep, args, repo):
     rc, _, err = git(repo, "fetch", "--quiet", timeout=NET_TIMEOUT)
     if rc != 0:
         raise Stop(EXIT_ERROR, f"git fetch failed: {err.strip()}")
-    up = git_out(repo, "rev-parse", "@{u}")
-    behind = int(git_out(repo, "rev-list", "--count", "HEAD..@{u}"))
-    ahead = int(git_out(repo, "rev-list", "--count", "@{u}..HEAD"))
+    up = git_out(repo, "rev-parse", "@{u}")  # the one commit this run checks, reports on and fast-forwards to
+    behind = int(git_out(repo, "rev-list", "--count", f"HEAD..{up}"))
+    ahead = int(git_out(repo, "rev-list", "--count", f"{up}..HEAD"))
     d.update(branch=branch, upstream=upstream, head_before=head, upstream_head=up, behind=behind, ahead=ahead,
              pulled=False, blocked_by=[])
     rep.say(f"ade-update{' --check' if check else ''}: {repo} ({branch}, upstream {upstream})")
@@ -462,14 +474,12 @@ def update(rep, args, repo):
                    "ade-update never merges or resets: resolve by hand, then rerun")
     if behind:
         d["repo_state"] = "behind"
-        changed = set(git_out(repo, "diff", "--name-only", "-z", "--no-renames", "HEAD", "@{u}").split("\0")) - {""}
-        # tracked modifications, untracked files and ignored files (`!!`; git pull overwrites those silently)
-        rc, out, _ = git(repo, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all",
-                         "--ignored")
+        changed = set(git_z(repo, "diff", "--name-only", "-z", "--no-renames", "HEAD", up))
+        # tracked modifications, untracked files and ignored files (`!!`; a pull overwrites those silently)
+        parts = git_z(repo, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all", "--ignored")
         dirty = set()
-        parts = out.split("\0")
         i = 0
-        while i < len(parts) and parts[i]:
+        while i < len(parts):
             code, path = parts[i][:2], parts[i][3:]
             dirty.add(path)
             i += 2 if "R" in code or "C" in code else 1  # a rename carries its old path as the next field
@@ -480,22 +490,25 @@ def update(rep, args, repo):
         shown_hits = [p if hits[p] == p else f"{p} (local {hits[p]})" for p in blocked]
         if blocked and not check:
             shown = "\n".join(f"  {p}" for p in shown_hits)
-            raise Stop(EXIT_DIRTY, "the pull would change or create paths with local modifications or untracked/"
-                       "ignored files; nothing pulled. "
+            raise Stop(EXIT_DIRTY, "the update would change or create paths with local modifications or untracked/"
+                       "ignored files; nothing merged. "
                        f"Commit or set them aside (never stash another agent's edits), then rerun:\n{shown}")
         if blocked:
             rep.say("  the apply would refuse (exit 2): local modifications or untracked/ignored files in "
                     + ", ".join(shown_hits))
         if check:
-            rep.say("  would run: " + shlex.join(["git", "-C", str(repo), "pull", "--ff-only"]))
+            if not blocked:
+                rep.say("  would run: " + shlex.join(["git", "-C", str(repo), "merge", "--ff-only", up]))
             problems.append("behind")
         else:
-            rc, out, err = git(repo, "pull", "--ff-only", timeout=NET_TIMEOUT)
+            # `up` is the commit the collision check covered; no second fetch, so a newer upstream commit with
+            # unchecked paths is never brought in (the next run fetches and checks it)
+            rc, out, err = git(repo, "merge", "--ff-only", up)
             if rc != 0:
                 raise Stop(pull_failure_code(err or out),
-                           f"git pull --ff-only failed; nothing merged or reset:\n{(err or out).strip()}")
+                           f"git merge --ff-only {short(up)} failed; nothing merged or reset:\n{(err or out).strip()}")
             d["pulled"] = True
-            rep.say(f"  pulled (fast-forward) to {short(git_out(repo, 'rev-parse', 'HEAD'))}")
+            rep.say(f"  fast-forwarded to {short(git_out(repo, 'rev-parse', 'HEAD'))}")
     else:
         d["repo_state"] = "current"
         extra = f" (ahead of {upstream} by {ahead}, unpushed)" if ahead else ""

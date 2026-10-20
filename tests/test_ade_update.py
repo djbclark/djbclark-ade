@@ -454,7 +454,8 @@ def test_a_pull_hint_with_a_space_in_the_path_is_quoted(env):
     env.publish()
     r = env.run("--check", repo=spaced)
     line = next(l for l in r.stdout.splitlines() if "would run: git" in l)
-    assert shlex.split(line.split("would run: ")[1]) == ["git", "-C", str(spaced), "pull", "--ff-only"]
+    assert shlex.split(line.split("would run: ")[1]) == ["git", "-C", str(spaced), "merge", "--ff-only",
+                                                         env.head(env.seed)]
 
 
 def test_repo_inside_a_subdirectory_is_refused_with_exit_4(env):
@@ -545,6 +546,63 @@ def test_a_local_directory_where_the_pull_needs_a_file_is_exit_2(env):  # Codex 
     env.publish({"foo": "theirs\n"})
     _refused_and_untouched(env, "foo/x", "mine\n", "foo")
     assert "foo (local foo/x)" in env.run().stdout
+
+
+def test_a_changed_path_with_leading_whitespace_still_collides(env):  # Codex P2 on a1f7ffd
+    # git_out() stripped the whole -z output, so " victim" lost its space before the NUL split and no longer
+    # matched the porcelain path of the ignored local file.
+    (env.machine / ".git" / "info" / "exclude").write_text("/ victim\n")
+    (env.machine / " victim").write_text("mine\n")
+    env.publish({" victim": "theirs\n"})
+    r = env.run("--check", "--json")
+    assert json.loads(r.stdout)["blocked_by"] == [" victim"], r.stdout + r.stderr
+    r = env.run()
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert env.head(env.machine) == env.first
+    assert (env.machine / " victim").read_text() == "mine\n"
+
+
+def test_a_blocked_check_does_not_print_a_would_run_line(env):  # Codex P2 on a1f7ffd
+    (env.machine / "added.txt").write_text("mine\n")
+    env.publish({"added.txt": "theirs\n"})
+    r = env.run("--check")
+    assert r.returncode == 10 and "would refuse (exit 2)" in r.stdout, r.stdout + r.stderr
+    assert "would run: git" not in r.stdout
+
+
+def test_apply_fast_forwards_to_the_commit_it_checked_not_to_a_newer_upstream(env):  # Codex P1 on a1f7ffd
+    # A `git` shim first on PATH pushes commit B to origin the moment the apply reaches its merge/pull step,
+    # i.e. after the tool's own fetch and collision check at A. The old `git pull --ff-only` fetched B and
+    # overwrote the ignored local file B adds; the apply must stay at A and leave the file alone.
+    real = shutil.which("git")
+    (env.machine / ".git" / "info" / "exclude").write_text("late.txt\n")
+    (env.machine / "late.txt").write_text("mine\n")
+    a = env.publish()
+    commit(env.seed, "third", {"late.txt": "theirs\n"})
+    shim = env.bin / "git"
+    shim.write_text(f"""#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    merge|pull)
+      if [ ! -e "{env.tmp}/pushed" ]; then
+        touch "{env.tmp}/pushed"
+        {real} -C "{env.seed}" push -q origin master || exit 99
+      fi;;
+  esac
+done
+exec {real} "$@"
+""")
+    shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
+    r = env.run()
+    assert (env.tmp / "pushed").exists(), "the shim never saw the merge step"
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert env.head(env.machine) == a
+    assert (env.machine / "late.txt").read_text() == "mine\n"
+    # the next run fetches B, re-checks it, and refuses
+    r = env.run()
+    assert r.returncode == 2 and "late.txt" in r.stdout, r.stdout + r.stderr
+    assert env.head(env.machine) == a
+    assert (env.machine / "late.txt").read_text() == "mine\n"
 
 
 def test_collides_covers_equal_ancestor_and_descendant_paths():

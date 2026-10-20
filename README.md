@@ -148,9 +148,11 @@ for s in ~/src/djbclark-ade/skills/*/; do ~/src/djbclark-ade/bin/skill-everywher
 ls -l ~/.claude/commands ~/.claude/agents ~/.claude/hooks | grep -c djbclark-ade   # symlinks still point here
 ```
 
-1. **Pull.** A path the pull would change or create that has a local modification, an untracked file or an
+1. **Pull.** It fetches once, checks that commit, and fast-forwards to exactly that commit
+   (`git merge --ff-only <sha>`; no second fetch, so a newer upstream commit waits for the next run). A path the
+   update would change or create that has a local modification, an untracked file or an
    ignored file (or collides with one as a parent or child path, `foo` against `foo/bar`) stops it (exit 2,
-   nothing pulled); a diverged branch stops it (exit 3); it never merges, stashes or resets.
+   nothing merged); a diverged branch stops it (exit 3); it never makes a merge commit, stashes or resets.
 2. **Skills.** `skill-everywhere --check` over every `skills/*`; a missing, dangling or chained
    link is relinked, anything the script leaves alone is printed with the command to run. Links change
    only when `--repo` is the canonical skills home (`~/src/djbclark-ade`, or the parent of
@@ -180,7 +182,7 @@ ls -l ~/.claude/commands ~/.claude/agents ~/.claude/hooks | grep -c djbclark-ade
 
 Exit codes: 0 current, 10 behind (`--check`) or a link unresolved (including one `skill-everywhere` leaves alone, on the first run), 2 dirty, 3 diverged (git's explicit
 non-fast-forward refusal only), 4 git, network, `skill-everywhere` (not found from the canonical checkout, failed or incomplete) or state-file failure (including a `--repo`
-that is not the top of its work tree, and any other `git pull --ff-only` failure such as a timeout or lost
+that is not the top of its work tree, and any other `git merge --ff-only` failure such as a timeout or lost
 authentication). It becomes `ade update` in Phase 1 (proposal 4.4 item 9); a daily `--check` timer
 is queued in `docs/queue.md`.
 
