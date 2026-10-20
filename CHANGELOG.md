@@ -52,6 +52,10 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `load-watch` job guard: a slow crash loop (60 failed restarts in 2 h) now trips too; litellm restarted
+  every ~32 s for 19 h, just under the 20-in-10-min rule, and was never stopped (2026-10-20).
+- `load-watch`: the registered watcher hears an unexplained sustained load at most hourly; Hermes keeps
+  its 6 h cooldown (2026-10-20).
 - `skill-everywhere`: the Hermes gateway nudge follows `hermes` wrappers to the real python; since `hermes`
   became a `/bin/sh` wrapper it ran the snippet under sh, where `import os, sys` was ImageMagick (2026-10-20).
 - `tests/conftest.py` pins `ROUTE_AGENT_OMP_READY=0`, so the route_agent suite passes on a host with
