@@ -50,15 +50,26 @@ from `git -C REPO remote get-url origin` (ssh or https, normalised to https://gi
 and the ref from REPO's current branch (push it first: the agent clones from GitHub), writes the
 brief plus the footer as the prompt file, runs `bin/cursor-cloud launch` (override with
 CURSOR_CLOUD_BIN) and stores `cloud_agent_id` and `cloud_provider: cursor` in the record. The
-ordinary runner (`execute`, launchd under --detach) then polls `cursor-cloud run ID` every 30 s
-(ACP_DISPATCH_CLOUD_POLL) instead of running acp-run, and writes the report: the run's result text,
-a `BRANCH:` line per pushed branch and a `COST:` line from `cursor-cloud usage`, ending DONE on
-FINISHED (exit 0) or a NO-REPORT line on ERROR, CANCELLED, EXPIRED or --timeout (exit 1; 124 on
-timeout). check, wait, reap and the rearm waiter work unchanged. A cloud slice runs off the Mac, so
-it skips the local load gate, the in-flight cap and the acp-run preflight (the Cursor pool's
---min-headroom still applies). It never opens a pull request (autoCreatePR is always false); the
-lead reviews the pushed branch and opens the PR. No resume (no ACP session): use
-`cursor-cloud followup`.
+ordinary runner (`execute`, launchd under --detach) then polls `cursor-cloud run ID RUNID` every 30 s
+(ACP_DISPATCH_CLOUD_POLL; the run id is pinned from the launch, so a later followup is not read as
+this slice) instead of running acp-run, and writes the report: the run's result text, a `BRANCH:`
+line (never missing: the API's git.branches[] often has only a repoUrl, so the name comes from the
+result text, else from the cursor/* head that appeared on origin since the launch, else
+`BRANCH: unknown`; a `BRANCH-SOURCE:` line says which) and a `COST:` line from `cursor-cloud usage`
+(`$1.04 (104.49 cents charged; N tokens)`). The report ends DONE on FINISHED (exit 0); a result with
+a `BLOCKED:` line puts it first, so check says blocked (exit 4); ERROR, CANCELLED, EXPIRED, --timeout
+(24 h cap when --timeout is 0) or an unknown status end in a NO-REPORT line (exit 1; 124 on timeout)
+and say the cloud agent may still run (no cancel: use the Cursor dashboard). check, wait and the
+rearm waiter work unchanged. If the poller dies while the cloud run continues, `reap`, `check` and
+`acp-dispatch resume RECORD` re-poll the same agent instead of finalizing it lost (a new launchd job,
+`<name>-repollN-run.sh`; a run that already ended is finalized from its real status); a TERM or
+shutdown writes a report that names the agent and this command. A cloud slice runs off the Mac, so
+it skips the local load gate, the in-flight cap (max_parallel is a `plan` hint only) and the acp-run
+preflight; the Cursor pool's --min-headroom still applies, but running cloud slices are not reserved
+against the local `cursor` pool. It refuses (exit 2) unless HEAD equals origin's branch
+(`git ls-remote`; --allow-unpushed overrides). It never opens a pull request (autoCreatePR is
+always false); the lead reviews the pushed branch and opens the PR. `cursor-cloud followup`
+continues the agent with a new prompt.
 
 What it replaces: the dispatch recipe that bigteam, model-routing and home-agents.md used to
 spell out in prose and every dispatcher retyped — the report-file naming, "write the full
@@ -1191,6 +1202,8 @@ def reap_record(path: Path) -> tuple[str, str] | None:
         reason = dead_reason(rec)
         if not reason:
             return None
+        if rec.get("cloud_provider") and rec.get("cloud_agent_id"):
+            return cloud_reap(path, rec)      # the cloud run may outlive its poller (2026-10-20)
         report, done = Path(rec["report"]), Path(rec["done"])
         rc, src = None, "lost"
         try:
@@ -3398,6 +3411,8 @@ def resume_record(a: argparse.Namespace, quota_stop: bool = False) -> int:
     after_restart = getattr(a, "after_restart", False)
     record = Path(a.record).expanduser().resolve()
     rec = json.loads(record.read_text())
+    if rec.get("cloud_provider"):
+        return cloud_resume(record)
     deadline = time.time() + FINALIZE_WAIT
     while not rec.get("finished"):
         if dead_reason(rec):
@@ -3923,13 +3938,23 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
 
 CLOUD_AGENT = "cursor-cloud"
 CLOUD_TERMINAL = ("FINISHED", "ERROR", "CANCELLED", "EXPIRED")
+CLOUD_ACTIVE = ("RUNNING", "CREATING", "PENDING", "QUEUED", "STARTING", "ACTIVE")
 CLOUD_MAX_POLL_FAILURES = 10
+CLOUD_MAX_UNKNOWN_STATUS = 20          # polls in a row with a status that is neither active nor terminal
+CLOUD_MAX_SECONDS = 24 * 3600          # the cap when --timeout is 0 (unlimited)
+CLOUD_BRANCH_RE = re.compile(r"\bcursor/[A-Za-z0-9._/-]*[A-Za-z0-9]")
 CLOUD_NOTE = (
     "\n## Cloud run (acp-dispatch)\n\nYou run in Cursor's cloud, not on the lead's Mac: the report and "
     ".done paths above do not exist for you and nothing needs writing there. Commit and push your work "
     "to a branch (do not open a pull request). Your final message is the report: first line "
-    "`STATUS: <one line>` (or `BLOCKED: <question>`), then what you did, what you verified and what "
-    "is left. acp-dispatch writes the report file from it and adds the branch and cost lines.\n")
+    "`STATUS: <one line>` (or `BLOCKED: <question>` as its own line if you cannot finish), then what you "
+    "did, what you verified and what is left, and name the branch you pushed (for example "
+    "`cursor/my-slice-1234`) in the text. acp-dispatch writes the report file from it, adds the cost "
+    "line and checks the branch name against the repository.\n")
+
+
+def redact_url(url: str) -> str:
+    return re.sub(r"//[^/@\s]+@", "//", url)
 
 
 def cloud_bin() -> str:
@@ -3946,7 +3971,8 @@ def cloud_repo_url(repo: Path) -> str:
         die(f"cursor-cloud: {repo} has no `origin` remote (git remote get-url origin failed)")
     m = re.match(r"^(?:git@|ssh://git@|https?://(?:[^/@]+@)?|git://)github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", url)
     if not m:
-        die(f"cursor-cloud: origin {url!r} is not a github.com repository (Cursor Cloud Agents clone from GitHub)")
+        die(f"cursor-cloud: origin {redact_url(url)!r} is not a github.com repository "
+            "(Cursor Cloud Agents clone from GitHub)")
     return f"https://github.com/{m.group(1)}/{m.group(2)}"
 
 
@@ -3980,73 +4006,251 @@ def cloud_agent_id(launched: dict) -> str | None:
     return str(got) if got else None
 
 
-def cloud_branches(run: dict) -> list[str]:
-    out = []
+def cloud_run_id(launched: dict) -> str | None:
+    """The run the launch started (pinned so a later `cursor-cloud followup` is not read as this slice)."""
+    got = (launched.get("run") or {}).get("id") or (launched.get("agent") or {}).get("latestRunId")
+    return str(got) if got else None
+
+
+def cloud_run_args(rec: dict) -> list[str]:
+    return ["run", rec["cloud_agent_id"], *([rec["cloud_run_id"]] if rec.get("cloud_run_id") else [])]
+
+
+def cloud_heads(repo: str, ref: str | None = None) -> dict[str, str] | None:
+    """{ref: sha} for origin's cursor/* heads (and `ref`), or None when ls-remote fails."""
+    pats = [*([f"refs/heads/{ref}"] if ref else []), "refs/heads/cursor/*"]
+    try:
+        r = subprocess.run(["git", "-C", repo, "ls-remote", "--heads", "origin", *pats], check=False,
+                           capture_output=True, text=True, timeout=90, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    heads = {}
+    for line in r.stdout.splitlines():
+        sha, _, name = line.partition("\t")
+        if sha and name.startswith("refs/heads/"):
+            heads[name.removeprefix("refs/heads/")] = sha.strip()
+    return heads
+
+
+def cloud_ls_remote_branch(rec: dict) -> str | None:
+    """The cursor/* head that is new or moved since the launch, newest commit first. Only a head whose
+    commit date is not before `launched_at` counts; with no readable date a single candidate is used."""
+    repo = rec.get("dir") or "."
+    after = cloud_heads(repo)
+    if not after:
+        return None
+    before = rec.get("cloud_heads_before") or {}
+    cands = [name for name, sha in after.items() if before.get(name) != sha]
+    since = float(rec.get("launched_at") or rec.get("started") or 0) - 120
+    best, best_ct = None, 0
+    for name in cands:
+        f = subprocess.run(["git", "-C", repo, "fetch", "-q", "--no-tags", "origin", f"refs/heads/{name}"],
+                           check=False, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+        if f.returncode != 0:
+            continue
+        t = subprocess.run(["git", "-C", repo, "log", "-1", "--format=%ct", "FETCH_HEAD"], check=False,
+                           capture_output=True, text=True, timeout=30)
+        try:
+            ct = int(t.stdout.strip())
+        except ValueError:
+            continue
+        if ct >= since and ct >= best_ct:
+            best, best_ct = name, ct
+    if best:
+        return best
+    return cands[0] if len(cands) == 1 and before else None
+
+
+def cloud_branches(rec: dict, run: dict) -> tuple[list[str], str]:
+    """(pushed branches, where they came from). The API's git.branches[] often carries only a
+    repoUrl (2026-10-20, real run), so: named entries, else a cursor/<slug> in the result text, else
+    the cursor/* head that appeared on origin since the launch. ([], "") when none is found."""
+    named = []
     for b in (run.get("git") or {}).get("branches") or []:
-        name = b if isinstance(b, str) else (b.get("name") or b.get("branch") or b.get("ref") or "")
+        name = b if isinstance(b, str) else (b.get("branch") or b.get("name") or b.get("ref") or "")
         if name:
-            out.append(str(name))
-    return out
+            named.append(str(name))
+    if named:
+        return named, "api"
+    seen = list(dict.fromkeys(CLOUD_BRANCH_RE.findall(str(run.get("result") or ""))))
+    if seen:
+        return seen, "result text"
+    got = cloud_ls_remote_branch(rec)
+    return ([got], "ls-remote") if got else ([], "")
 
 
 def cloud_cost_line(usage: dict | None) -> str:
     if not usage:
         return "COST: unavailable"
-    for k, v in usage.items():
-        if "cost" in k.lower() and isinstance(v, (int, float)):
-            return f"COST: {v} ({k}); usage {json.dumps(usage, sort_keys=True)[:300]}"
+    cost = usage.get("cost")
+    if isinstance(cost, dict):
+        cents = cost.get("chargedCents", cost.get("rawCostCents"))
+        if isinstance(cents, (int, float)):
+            tokens = (usage.get("totalUsage") or {}).get("totalTokens")
+            return (f"COST: ${cents / 100:.2f} ({cents:.2f} cents charged"
+                    + (f"; {tokens} tokens" if tokens is not None else "") + ")")
     return f"COST: usage {json.dumps(usage, sort_keys=True)[:300]}"
 
 
 def cloud_report(rec: dict, status: str, run: dict | None, usage: dict | None, detail: str) -> str:
-    """The report file: result text, a BRANCH line per pushed branch, a COST line. FINISHED ends
-    in DONE; anything else ends in a NO-REPORT line (so check says no-report, exit 3)."""
+    """The report file. A `BLOCKED:` line in the result becomes line 1 (classify reads line 1), so a
+    blocked agent checks as blocked, exit 4. Then the result text, a BRANCH line (never missing:
+    `unknown` says so), a COST line, and DONE on FINISHED or a NO-REPORT line otherwise."""
     run = run or {}
     result = str(run.get("result") or "").strip()
-    lines = [f"STATUS: cursor cloud run {status} (agent {rec.get('cloud_agent_id')})"]
+    lines = []
+    blocked = next((ln.strip() for ln in result.splitlines() if ln.strip().upper().startswith("BLOCKED:")), None)
+    if blocked and status == "FINISHED":
+        lines.append(blocked)
+    lines.append(f"STATUS: cursor cloud run {status} (agent {rec.get('cloud_agent_id')})")
     if detail:
         lines.append(detail)
     if result:
         lines += ["", result, ""]
-    lines += [f"BRANCH: {b}" for b in cloud_branches(run)]
+    branches, source = cloud_branches(rec, run) if status != "" else ([], "")
+    if branches:
+        lines += [f"BRANCH: {b}" for b in branches]
+        lines.append(f"BRANCH-SOURCE: {source}" + ("" if source == "api" else " (not reported by the API; check it)"))
+    else:
+        lines.append("BRANCH: unknown (check git ls-remote origin 'cursor/*')")
+        lines.append("The API gave no branch name, the result text named none and no new cursor/* head "
+                     "was found on origin since the launch.")
     lines.append(cloud_cost_line(usage))
     lines.append("DONE" if status == "FINISHED" else
-                 f"{NO_REPORT_PREFIX} cursor-cloud run {status.lower()} ({rec.get('cloud_agent_id')})")
+                 f"{NO_REPORT_PREFIX} cursor-cloud run {status.lower() or 'unknown'} ({rec.get('cloud_agent_id')})")
     return "\n".join(lines) + "\n"
 
 
-def cloud_poll(record: Path) -> int:
-    """Poll `cursor-cloud run AGENT` until a terminal status, then write the report and return 0
-    (FINISHED) or 1 (ERROR, CANCELLED, EXPIRED, repeated poll failures) or 124 (--timeout)."""
-    rec = update_record(record, pid=os.getpid(), pid_start=proc_start(os.getpid()))
-    interval = float(os.environ.get("ACP_DISPATCH_CLOUD_POLL", "30"))
-    deadline = time.time() + rec["timeout"] if rec.get("timeout") else None
-    binp, agent_id = rec.get("cloud_bin") or cloud_bin(), rec["cloud_agent_id"]
-    status, run, detail, fails = "", None, "", 0
-    while True:
-        got, err = cloud_call(binp, "run", agent_id)
-        if got is None:
-            fails += 1
-            if fails >= CLOUD_MAX_POLL_FAILURES:
-                status, detail = "ERROR", f"polling failed {fails} times in a row: {err}"
-                break
-        else:
-            fails, run = 0, got
-            status = str(got.get("status") or "").upper()
-            if status in CLOUD_TERMINAL:
-                break
-        if deadline and time.time() > deadline:
-            status, detail = "EXPIRED", f"acp-dispatch --timeout {rec['timeout']} s reached; the cloud agent may still run"
-            break
-        time.sleep(interval)
-    usage, _ = cloud_call(binp, "usage", agent_id)
+def cloud_finish(rec: dict, status: str, run: dict | None, detail: str) -> int:
+    """Write the report and final files for a terminal status; the runner's exit code."""
+    usage, _ = cloud_call(rec.get("cloud_bin") or cloud_bin(), "usage", rec["cloud_agent_id"])
     report = Path(rec["report"])
     write_atomic(report, cloud_report(rec, status, run, usage, detail))
     write_atomic(Path(rec["final"]), f"written: {report}\n")
-    update_record(record, cloud_status=status)
     if status == "FINISHED":
         return 0
     return 124 if detail.startswith("acp-dispatch --timeout") else 1
+
+
+class CloudStop(Exception):
+    pass
+
+
+def cloud_poll(record: Path) -> int:
+    """Poll `cursor-cloud run AGENT RUN` until a terminal status, then write the report and return 0
+    (FINISHED) or 1 (ERROR, CANCELLED, EXPIRED, repeated poll failures, an unknown status) or 124
+    (--timeout). A TERM/HUP (shutdown, launchd unload) writes a report naming the agent: it keeps
+    running in Cursor and `acp-dispatch resume RECORD` (or reap) re-polls it."""
+    rec = update_record(record, pid=os.getpid(), pid_start=proc_start(os.getpid()))
+    interval = float(os.environ.get("ACP_DISPATCH_CLOUD_POLL", "30"))
+    limit = rec["timeout"] if rec.get("timeout") else CLOUD_MAX_SECONDS
+    deadline = time.time() + limit
+
+    def stop(signum, _frame):
+        raise CloudStop(signum)
+
+    old = {s: signal.signal(s, stop) for s in (signal.SIGTERM, signal.SIGHUP)}
+    binp = rec.get("cloud_bin") or cloud_bin()
+    status, run, detail, fails, unknown = "", None, "", 0, 0
+    may_run = (f"; the cloud agent {rec['cloud_agent_id']} may still be running in Cursor "
+               f"(`{binp} status {rec['cloud_agent_id']}`)")
+    try:
+        while True:
+            got, err = cloud_call(binp, *cloud_run_args(rec))
+            if got is None:
+                fails += 1
+                if fails >= CLOUD_MAX_POLL_FAILURES:
+                    status, detail = "ERROR", f"polling failed {fails} times in a row: {err}{may_run}"
+                    break
+            else:
+                fails, run = 0, got
+                status = str(got.get("status") or "").upper()
+                unknown = 0 if status in CLOUD_ACTIVE else unknown + 1
+                if status in CLOUD_TERMINAL:
+                    break
+                if unknown >= CLOUD_MAX_UNKNOWN_STATUS:
+                    status, detail = "ERROR", f"unexpected run status {got.get('status')!r} {unknown} polls in a row{may_run}"
+                    break
+            if time.time() > deadline:
+                status = "EXPIRED"
+                detail = (f"acp-dispatch --timeout {rec['timeout'] if rec.get('timeout') else limit} s reached"
+                          f"{may_run}")
+                break
+            time.sleep(interval)
+    except CloudStop as e:
+        name = signal.Signals(e.args[0]).name
+        report = Path(rec["report"])
+        write_atomic(report, f"STATUS: poller stopped by {name}\n"
+                     f"{NO_REPORT_PREFIX} killed: {name}: cloud agent {rec['cloud_agent_id']} may still be "
+                     f"running in Cursor; `acp-dispatch resume {record}` re-polls it\n")
+        write_atomic(Path(rec["final"]), f"written: {report}\n")
+        return 128 + e.args[0]
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+    rc = cloud_finish(rec, status, run, detail)
+    update_record(record, cloud_status=status)
+    return rc
+
+
+def cloud_repoll(path: Path, rec: dict) -> str:
+    """Submit a fresh poller (a new launchd job) for a cloud record whose poller is gone while the
+    cloud run may continue. The caller holds the record's lock. Returns a note for the lead."""
+    n = int(rec.get("repolls") or 0) + 1
+    label = f"acp-dispatch.{rec.get('task') or Path(rec['out']).name}.{rec['name']}.repoll{n}"
+    runner = Path(rec["out"]) / f"{rec['name']}-repoll{n}-run.sh"
+    write_atomic(runner, runner_script(rec, [], label, Path(__file__).resolve()), mode=0o700)
+    Path(rec["log"]).with_suffix(".exit").unlink(missing_ok=True)
+    rec.update(label=label, runner=str(runner), pid=None, pid_start=None, repolls=n,
+               first_started=rec.get("first_started") or rec.get("started"), started=time.time())
+    write_record(path, rec)
+    r = subprocess.run([launchctl_bin(), "submit", "-l", label, "-o", str(Path(rec["out"]) / f"{rec['name']}.out"),
+                        "-e", str(Path(rec["out"]) / f"{rec['name']}.err"), "--", "/bin/bash", str(runner)],
+                       check=False, capture_output=True, text=True)
+    if r.returncode != 0:
+        return f"could not re-submit the poller ({r.stderr.strip()}); run `acp-dispatch resume {path}`"
+    return (f"poller was gone, cloud agent {rec['cloud_agent_id']} still active: re-polling under launchd "
+            f"job {label}; wait with `{rec.get('rearm') or 'acp-dispatch wait ' + str(path)}`")
+
+
+def cloud_reap(path: Path, rec: dict) -> tuple[str, str] | None:
+    """reap_record's hook for a cloud record whose poller died (lock held). A run that already ended is
+    finalized from its real status; one still active gets a new poller and the record stays running
+    (None). An unreachable API also re-polls: the new poller owns the failure rule."""
+    got, _ = cloud_call(rec.get("cloud_bin") or cloud_bin(), *cloud_run_args(rec))
+    status = str((got or {}).get("status") or "").upper()
+    if status in CLOUD_TERMINAL:
+        rc = cloud_finish(rec, status, got, "")
+        rec["cloud_status"] = status
+        write_record(path, rec)
+        st, det, _ = finalize_locked(path, rc)
+        return st, det
+    print(f"acp-dispatch: {rec['name']}: {cloud_repoll(path, rec)}", file=sys.stderr)
+    return None
+
+
+def cloud_resume(record: Path) -> int:
+    """`acp-dispatch resume RECORD` for a cloud slice: re-poll the same cloud agent (no ACP session)."""
+    with record_lock(record):
+        rec = json.loads(record.read_text())
+        if not rec.get("cloud_agent_id"):
+            die("this cloud record never launched an agent; dispatch the slice again")
+        if not rec.get("finished"):
+            if not dead_reason(rec):
+                die("the poller is still running; use wait")
+            note = cloud_reap(record, rec)
+            print(note[1] if note else "re-polling", file=sys.stderr)
+            return 0
+        if rec.get("status") not in ("no-report", "partial"):
+            die(f"the slice finished as {rec.get('status')}; nothing to re-poll")
+        for p in (Path(rec["done"]), Path(rec["report"]), Path(rec["final"])):
+            p.unlink(missing_ok=True)
+        rec.update(finished=None, exit=None, status="running", report_source=None, pid=None)
+        rec.pop("failure", None)
+        print(f"acp-dispatch: {rec['name']}: {cloud_repoll(record, rec)}", file=sys.stderr)
+    return 0
 
 
 def execute_dispatch(record: Path) -> int:
@@ -4058,8 +4262,8 @@ def execute_dispatch(record: Path) -> int:
 
 def dispatch_cloud(a: argparse.Namespace, previous: dict | None, kind: str | None, service: str | None) -> int:
     if previous is not None:
-        die("a cursor-cloud slice cannot be resumed (no ACP session): re-dispatch it, or poll the record's "
-            "cloud_agent_id with `bin/cursor-cloud run`; `cursor-cloud followup` continues the same agent")
+        die("a cursor-cloud slice is resumed through its record: `acp-dispatch resume RECORD` re-polls the "
+            "same cloud agent; `cursor-cloud followup` continues it with a new prompt")
     out = Path(a.out).expanduser().resolve() if a.out else STATE_ROOT / (a.task or f"adhoc-{date.today().isoformat()}")
     (out / "jobs").mkdir(parents=True, exist_ok=True)
     report = out / f"{a.name}-report.md"
@@ -4082,11 +4286,19 @@ def dispatch_cloud(a: argparse.Namespace, previous: dict | None, kind: str | Non
     if not a.dry_run and a.min_headroom > 0 and remaining is not None and remaining < a.min_headroom:
         return unavailable_record(out, a, f"headroom {remaining:.1f}% < minimum {a.min_headroom:.1f}% "
                                   "(the Cursor pool)", "headroom", remaining, 0.0)
-    pushed = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD", f"origin/{ref}"], check=False,
-                            capture_output=True, text=True, timeout=30).stdout.split()
-    if len(pushed) == 2 and pushed[0] != pushed[1]:
-        print(f"acp-dispatch: warning: {ref} is not what origin/{ref} has: the cloud agent clones "
-              f"{url} at {ref} from GitHub, so unpushed commits are invisible to it", file=sys.stderr)
+    heads_before = None
+    if not a.dry_run:
+        # The agent clones <ref> from GitHub: unpushed commits are invisible to it, and it bills anyway.
+        heads_before = cloud_heads(str(repo), ref)
+        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=False,
+                              capture_output=True, text=True, timeout=30).stdout.strip()
+        if not getattr(a, "allow_unpushed", False):
+            if heads_before is None:
+                die(f"cursor-cloud: could not read origin's branches (git ls-remote failed): cannot confirm "
+                    f"{ref} is pushed; fix the remote or pass --allow-unpushed", 2)
+            if heads_before.get(ref) != head:
+                die(f"cursor-cloud: {ref} at {head[:10]} is not what origin has ({(heads_before.get(ref) or 'no such branch')[:10]}): "
+                    f"push it first (the agent works on {url} at {ref} from GitHub), or pass --allow-unpushed", 2)
     for p in (done, final, stderr, log):
         p.unlink(missing_ok=True)
     write_atomic(brief, prompt.rstrip() + "\n\n"
@@ -4110,8 +4322,10 @@ def dispatch_cloud(a: argparse.Namespace, previous: dict | None, kind: str | Non
         "role": "exec", "estimated_usage_pct": 0.0, "estimated_usage_windows": {}, "estimate_source": "cloud",
         "snapshot_remaining_before": remaining, "snapshot_reading": reading, "checkpoint": False,
         "advisor_tree_before": None, "auto_resume": {"state": "off", "detail": "cloud slice"},
-        "cloud_provider": "cursor", "cloud_agent_id": None, "cloud_repo": url, "cloud_ref": ref,
-        "cloud_bin": cloud_bin(), "cloud_launch_cmd": " ".join(shlex.quote(c) for c in launch_cmd),
+        "cloud_provider": "cursor", "cloud_agent_id": None, "cloud_run_id": None, "cloud_repo": url,
+        "cloud_ref": ref, "cloud_bin": cloud_bin(), "cloud_launch_cmd": " ".join(shlex.quote(c) for c in launch_cmd),
+        "cloud_heads_before": {k: v for k, v in (heads_before or {}).items() if k.startswith("cursor/")},
+        "launched_at": None,
     }
     if a.dry_run:
         rec["status"] = "dry-run"
@@ -4120,12 +4334,20 @@ def dispatch_cloud(a: argparse.Namespace, previous: dict | None, kind: str | Non
         else:
             print(f"dry-run\t{a.name}\t{report}\nbrief: {brief}\nlaunch: {rec['cloud_launch_cmd']}")
         return 0
+    # The record exists before the launch, so a launch that times out after Cursor created the agent
+    # still leaves something that names the slice (and the raw answer) to find it with `cursor-cloud list`.
+    rec["launched_at"] = time.time()
+    write_record(record, rec)
     launched, err = cloud_call(cloud_bin(), *launch_cmd[1:])
     agent_id = cloud_agent_id(launched) if launched else None
     if not agent_id:
-        die(f"cursor-cloud launch failed: {err or 'no agent id in ' + json.dumps(launched)[:200]}", 1)
-    rec["cloud_agent_id"] = agent_id
-    write_record(record, rec)
+        raw = err or json.dumps(launched)[:300]
+        write_atomic(report, f"STATUS: cursor cloud launch failed\n{raw}\nCheck `cursor-cloud list` for an agent "
+                     f"named {a.name} before launching again.\n{NO_REPORT_PREFIX} cursor-cloud launch failed\n")
+        update_record(record, launch_response=raw)
+        finalize(record, 1)
+        die(f"cursor-cloud launch failed: {raw}", 1)
+    rec = update_record(record, cloud_agent_id=agent_id, cloud_run_id=cloud_run_id(launched))
     print(f"acp-dispatch: cursor cloud agent {agent_id} launched on {url} at {ref}", file=sys.stderr)
     if a.detach:
         label = f"acp-dispatch.{(a.task or out.name)}.{a.name}"
@@ -4331,6 +4553,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="a quota stop is not resumed in place automatically (the default since 2026-10-18); "
                          "check then prints the manual `acp-dispatch resume` command")
     ap.add_argument("--acp-run", help="path to acp-run (default: PATH)")
+    ap.add_argument("--allow-unpushed", action="store_true",
+                    help="cursor-cloud only: start even though HEAD is not what origin has for the branch")
     ap.add_argument("--acp-arg", action="append", help="extra argument passed through to acp-run (repeatable)")
     a = ap.parse_args(argv)
     return dispatch(a)

@@ -313,8 +313,10 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
   with `status`, `run`, `usage`, and continued with `followup`. Since 2026-10-20
   a cloud slice is also an ordinary dispatch: `acp-dispatch cursor-cloud --model ID
   --kind code|bulk|mechanical --name N -f BRIEF -C REPO` (repo and ref from the
-  checkout's `origin` and branch, so push first; record with `cloud_agent_id`, a
-  30 s poller, report with `BRANCH:` and `COST:` lines; no local load gate or cap).
+  checkout's `origin` and branch; refused unless HEAD is pushed; record with
+  `cloud_agent_id`, a 30 s poller that `reap`/`resume` restart if it dies, report with
+  `BRANCH:` (from the API, the result text or `ls-remote`, else `unknown`), `COST:`, and a
+  `BLOCKED:` first line when the agent is blocked; no local load gate or cap).
   `route_agent.py` carries a `cursor-cloud` service (code 24, bulk 26, mechanical 18;
   never frontier or judgment) that reads the aiuse `cursor` row (`shares_pool`):
   eligible after every local Cursor row, never a kind's default.
