@@ -136,6 +136,16 @@ first words name the task (the `baton` skill ignores the trailing text as a labe
 autorename cover the Paseo host; (3) a test with the fake `paseo` asserting the sent prompt starts with the
 label. Never rename or send to a live agent in tests.
 
+Also (djbclark, 2026-10-20, in the `/steps` session running as Paseo agent 6ebd939): he renamed that session's
+workspace to `djbclark-ade-rework-p` in the Paseo GUI, and another agent looking for it by that name could not find
+it; it saw the old name. Verified the same day: `paseo ls -g` lists the agent under its first-prompt NAME
+("I want to move my entire AI development environment to djbcl..."), the GUI workspace name appears nowhere in that
+listing, and `session-finder` (`fleet.py`) names a Paseo-hosted session from the agent record, so a GUI rename is
+invisible to every agent that looks sessions up by name. The slice above must (4) find where Paseo keeps a
+workspace's GUI name (the daemon API or its store under `~/.paseo`), have `session-finder` show both the workspace
+name and the agent name, and make its rename path (1) set the name the GUI shows, so a manual GUI rename and an
+agent rename are the same thing.
+
 ## `bin/load-watch` `send_to` has the relay's round-1 exposure (adversary on PR #25, 2026-10-20)
 
 `send_to` (bin/load-watch, around line 536) still scrubs `PASEO_AGENT_ID`/`PASEO_AGENT_CWD` and runs `paseo send
