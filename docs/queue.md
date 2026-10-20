@@ -52,7 +52,12 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    confirmed on origin may predate the launch (also require the head to differ from `cloud_heads_before`).
    S1-S3 fixed at ee66114 (adversary APPROVE, 2026-10-20); info left: (T1) a hand-edited future `launched_at`
    still moves the deadline base; (T2) on Linux a cloud record whose background poller died before writing its
-   pid is never reaped.
+   pid is never reaped. From the 8f881ee pass (Codex P1 fixed: an unfinished cloud record is refused unless
+   `--force`): (U1) for a record left by a crash during the launch call (no `cloud_agent_id`) the refusal
+   says "resume", but resume dies with "never launched an agent", so only `--force` works; point at
+   `cursor-cloud list` and `--force` when there is no agent id; (U2) `--force` drops the first agent's id from
+   the record (carry it as `prior_cloud_agent_ids`); (U3) no lock between the same-name check and the write,
+   so two simultaneous dispatches can still launch two agents (the race exists for local slices too).
 5. **Endpoint variables can send keys anywhere** (adversary and Codex, threat-model review 2026-10-20):
    `CURSOR_CLOUD_API` in `bin/cursor-cloud`; `FIRECRAWL_SELFHOST_URL`, `FIRECRAWL_FALLBACK_URL`,
    `FIRECRAWL_ROUTER_SIPB_BASE` and `FIRECRAWL_ROUTER_LITELLM_BASE` in `bin/firecrawl-router`. Require https
