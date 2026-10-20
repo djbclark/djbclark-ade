@@ -184,7 +184,9 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
    `~/.omp/agent/agent.db` (`auth_credential_blocks` table), `~/.local/share/crush/hyper.json`,
    `~/.copilot/data.db` (`accounts`), Orca `Cookies` (Electron dir), `~/.orca/jira-tokens/`, `~/.orca/jira-sites.json`,
    and the three MCP configs that hold plaintext Jina and Exa keys (skills/fallback-chains/references/web-access.md
-   5.3 and 5.6.2): `~/.config/opencode/opencode.json`, `~/.cursor/mcp.json`, `~/.gemini/config/mcp_config.json`.
+   5.3 and 5.6.2) with every dated `.bak` copy beside them (3-5 each, 2026-10-12 to 10-18, same keys):
+   `~/.config/opencode/opencode.json*` and `opencode.bak`, `~/.cursor/mcp.json*`, `~/.gemini/config/mcp_config.json*`;
+   and `~/.config/crush/crushrc*` (the SIPB provider key, tools/acp-run/README.md; two `.bak` copies).
 6. **Exporter claims** for tools other than OpenCode/Hermes/Gemini rest on the proposal's §6.1
    (verified 2026-10-19), not on a fresh `--help` run (avoided per the no-`--help`-on-live-CLIs rule).
 
