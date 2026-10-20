@@ -1063,8 +1063,23 @@ def footer_items_re() -> str:
     except OSError:
         return r"(?!)"
     items = [re.fullmatch(r"(\d+)\. (.*)", line) for line in template.splitlines()]
-    alts = [re.escape(f"{m.group(1)}. ") + _template_re(m.group(2)) + r"\n" for m in items if m]
+    # Every placeholder sits inside backticks, so its wildcard stops at one. The default lazy `[^\n]*?`
+    # lets an item with two placeholders parse two ways, and a crafted tail of such lines backtracked
+    # 2^N (20 lines: 3.5 s, doubling per line; PR 22 review).
+    slot = {k: r"[^`\n]*" for k in re.findall(r"\{(\w+)\}", template)}
+    alts = [re.escape(f"{m.group(1)}. ") + _template_re(m.group(2), **slot) + r"\n" for m in items if m]
     return "(?:" + "|".join(alts) + ")+" if alts else r"(?!)"
+
+
+def footer_heading_re() -> str:
+    """The footer TEMPLATE's heading line, exactly, so a constraint a lead wrote into a pasted heading
+    ("(shared footer; READ-ONLY, never push)") is not cut with the footer. Matches nothing when the
+    template cannot be read."""
+    try:
+        first = FOOTER_FILE.read_text().splitlines()[0]
+    except (OSError, IndexError):
+        return r"(?!)"
+    return re.escape(first) if first.startswith(FOOTER_HEADING) else r"(?!)"
 
 
 def generated_tail_re() -> re.Pattern:
@@ -1077,7 +1092,7 @@ def generated_tail_re() -> re.Pattern:
                                       wrapup="(?:" + _template_re(WRAPUP_BUDGET, grace=r"\d+") + ")?"))
     notes = "|".join(_template_re(n) for n in (DENY_NOTE, READONLY_NOTE))
     return re.compile(
-        rf"\n*## Delivery contract \(shared footer[^\n]*\n\n{footer_items_re()}"
+        rf"\n*{footer_heading_re()}\n\n{footer_items_re()}"
         rf"(?:{notes})?"
         rf"(?:\n*{_template_re(CHECKPOINT_TEXT.lstrip(chr(10)))})?"
         rf"(?:\n*## Time budget \(acp-dispatch\)\n\n(?:{budget_text}))?"
@@ -2864,7 +2879,7 @@ def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, s
         try:
             cached = json.loads(state.read_text())
             age = time.time() - float(cached.get("time", 0))
-            if cached.get("ok") and age < PREFLIGHT_TTL:
+            if cached.get("ok") and 0 <= age < PREFLIGHT_TTL:
                 return True, "cached", "ok", None
             if cached.get("class") == "not-installed" and 0 <= age < NOT_INSTALLED_TTL:
                 # a wave to an agent that is not installed must not pay the binary wait once each, nor hold

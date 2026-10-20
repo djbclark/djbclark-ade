@@ -242,6 +242,26 @@ class TestPreflightRemembersANotInstalledAgent(Base):
         self.assertTrue(first[0])
         self.assertEqual(second[1], "cached")
 
+    def test_an_ok_entry_from_the_future_is_not_trusted(self):
+        # PR 22 review: a clock step back or a crafted `time` must not keep `ok` cached forever
+        calls: list = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="OK\n", stderr="")
+        with unittest.mock.patch.dict(os.environ, {"ACP_DISPATCH_PREFLIGHT": str(self.tmp / "pf")}):
+            mod = runpy.run_path(str(SCRIPT))
+            with unittest.mock.patch("subprocess.run", fake_run):
+                self.assertTrue(mod["preflight"]("acp-run", "claude", "m1")[0])
+                state = mod["preflight_state"]("claude", "m1")
+                rec = json.loads(state.read_text())
+                rec["time"] += 10 ** 6
+                _ = state.write_text(json.dumps(rec))
+                again = mod["preflight"]("acp-run", "claude", "m1")
+        self.assertTrue(again[0])
+        self.assertNotEqual(again[1], "cached")
+        self.assertEqual(len(calls), 2, calls)
+
 
 class TestCheck(Base):
     @override

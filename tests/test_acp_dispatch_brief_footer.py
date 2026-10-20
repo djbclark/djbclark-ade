@@ -180,6 +180,33 @@ class TestFooterMatchesTheTemplate(Base):
         self.assertLess(time.monotonic() - t0, 30)
         self.assertIn("nothing was stripped", r.stderr)
 
+    def test_items_with_two_placeholders_do_not_backtrack(self):
+        # PR 22 review: item 7 has two placeholders; a line repeating the text between them parsed two
+        # ways under a lazy wildcard, so 24 such lines plus a near-miss took minutes (2^N).
+        import time
+        copy = self.footed_copy()
+        text = copy.read_text()
+        line = next(ln for ln in text.splitlines() if ln.startswith("7. "))
+        mid = "` as your very last act. Waiters watch `"
+        self.assertIn(mid, line)
+        at = line.index(mid)
+        crafted = line[:at] + mid + "x" + line[at:] + "\n"
+        head = text[:text.index("\n7. ") + 1]
+        _ = copy.write_text(head + crafted * 24 + "x\n")
+        t0 = time.monotonic()
+        r, sent = self.second(copy)
+        self.assertLess(time.monotonic() - t0, 30)
+        self.assertIn("nothing was stripped", r.stderr)
+
+    def test_a_constraint_in_the_pasted_heading_survives(self):
+        copy = self.footed_copy()
+        text = copy.read_text()
+        heading = next(ln for ln in text.splitlines() if ln.startswith("## Delivery contract (shared footer"))
+        _ = copy.write_text(text.replace(heading, "## Delivery contract (shared footer; READ-ONLY, never push)"))
+        r, sent = self.second(copy)
+        self.assertIn("READ-ONLY, never push", sent)
+        self.assertIn("nothing was stripped", r.stderr)
+
 
 class TestFooterOnlyFile(Base):
     dispatch_file = TestBriefFooter.dispatch_file
