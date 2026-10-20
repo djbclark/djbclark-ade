@@ -280,7 +280,7 @@ class TestPendingRunnersHoldTheCap(LoadGate):
     def test_runner_refuses_when_the_cap_filled_during_the_wait(self):
         path = self.deferred()
         self.plant("started-meanwhile", started=time.time())                 # running, has a pid
-        r = run(["execute", path], env={**self.base_env(), **self.gate_env(0, OK, ACP_DISPATCH_INFLIGHT="codex=1")})
+        r = run(["execute", path], env={**self.base_env(), **self.gate_env(0, OK, ACP_DISPATCH_INFLIGHT="")})
         self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
         rec = self.record()
         self.assertEqual((rec["status"], rec["unavailable_class"], rec["exit"]), ("unavailable", "inflight", 5))
@@ -293,11 +293,85 @@ class TestPendingRunnersHoldTheCap(LoadGate):
     def test_queued_ahead_blocks_but_queued_behind_does_not(self):
         path = self.deferred()
         mine = self.record()["started"]
-        env = {**self.base_env(), **self.gate_env(0, OK, ACP_DISPATCH_INFLIGHT="codex=1")}
+        env = {**self.base_env(), **self.gate_env(0, OK, ACP_DISPATCH_INFLIGHT="")}
         self.plant("behind", pid=None, pid_start=None, started=mine + 100, load_gate_pending=True)
         r = run(["execute", path], env=env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)                # the later runner does not block us
         self.assertTrue(self.record().get("pid"))
+
+    def test_dispatch_records_what_the_launchd_runner_cannot_see(self):
+        # L1/I1: the runner has no load_policy(), ACP_DISPATCH_INFLIGHT, ACP_DISPATCH_STATE or our load-watch path
+        self.deferred()
+        rec = self.record()
+        self.assertEqual(rec["inflight_cap"], 1)
+        self.assertEqual(rec["state_root"], str(self.tmp / "state"))
+        self.assertEqual(rec["load_watch"], str(self.lw))
+
+    def test_a_resume_record_is_exempt_from_the_recheck(self):
+        path = self.deferred()
+        self.plant("started-meanwhile", started=time.time())
+        p = Path(path)
+        rec = json.loads(p.read_text())
+        p.write_text(json.dumps({**rec, "resume_count": 1}))               # dispatch exempts a resume from the cap
+        r = run(["execute", path], env={**self.base_env(), **self.gate_env(0, OK, ACP_DISPATCH_INFLIGHT="")})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def twin_run(self, twin: str) -> subprocess.CompletedProcess[str]:
+        """A pending runner with the very same `started`, in the same out dir; only the record path orders them."""
+        path = self.deferred()
+        mine = self.record()["started"]
+        jobs = self.out / "jobs"
+        (jobs / f"{twin}.json").write_text(json.dumps(self.busy_row(
+            name=twin, pid=None, pid_start=None, started=mine, load_gate_pending=True)))
+        return run(["execute", path], env={**self.base_env(), **self.gate_env(0, OK, ACP_DISPATCH_INFLIGHT="")})
+
+    def test_equal_started_is_broken_by_the_record_path(self):
+        # I2: with cap 1 exactly one of two equal-`started` runners launches
+        behind = self.twin_run("z-twin")                                    # sorts after s1.json: we go first
+        self.assertEqual(behind.returncode, 0, behind.stdout + behind.stderr)
+
+    def test_equal_started_the_other_way_refuses_us(self):
+        ahead = self.twin_run("a-twin")                                     # sorts before s1.json: it goes first
+        self.assertEqual(ahead.returncode, 5, ahead.stdout + ahead.stderr)
+        self.assertEqual(self.record()["unavailable_class"], "inflight")
+
+
+class TestPendingStaysUntilThePidIsWritten(LoadGate):
+    """Re-review 3, L2: between admission and the pid write (wait_for_capacity can hold 900 s) the row must
+    still count as in flight; a pid-less row that is not pending drops out after the 600 s spawn grace."""
+
+    def load_module(self):
+        import importlib.machinery
+        import importlib.util
+        script = Path(__file__).resolve().parent.parent / "bin" / "acp-dispatch"
+        loader = importlib.machinery.SourceFileLoader("acp_dispatch_under_test", str(script))
+        spec = importlib.util.spec_from_loader("acp_dispatch_under_test", loader)
+        assert spec is not None
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod
+
+    def test_admitted_runner_is_still_pending_and_counted_before_its_pid(self):
+        from unittest.mock import patch
+        r = self.dispatch("--no-model-check", "--no-preflight", "--detach", "--no-wait", env=self.gate_env(0, OK))
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        path = self.out / "jobs" / "s1.json"
+        rec = json.loads(path.read_text())
+        path.write_text(json.dumps({**rec, "started": time.time() - 1700}))      # it waited ~28 minutes for the load
+        loaded = self.tmp / "launchctl-loaded"                                   # the launchd job is still loaded
+        loaded.write_text("#!/bin/bash\necho loaded\n")
+        loaded.chmod(0o755)
+        env = {**self.gate_env(0, OK), "ACP_DISPATCH_STATE": str(self.tmp / "state"),
+               "ACP_DISPATCH_LAUNCHCTL": str(loaded)}
+        with patch.dict("os.environ", env):
+            mod = self.load_module()
+            self.assertIsNone(mod.runner_load_gate(path))                      # admitted; wait_for_capacity is next
+            row = json.loads(path.read_text())
+            self.assertTrue(row["load_gate_pending"])                          # not cleared until the pid is written
+            self.assertIsNone(row["pid"])
+            counted = mod.inflight_records("codex", self.tmp / "someone-else.json", self.out, agent="codex")
+        self.assertEqual([p.name for p in counted], ["s1.json"])
+
 
 
 class TestRecordWaitingOnTheGateIsNotOverwritten(LoadGate):
