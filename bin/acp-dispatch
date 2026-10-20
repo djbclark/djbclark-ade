@@ -2612,6 +2612,9 @@ def load_gate(wait: int, path: str | None = None) -> tuple[bool, dict | None, st
     except (IndexError, KeyError, TypeError, ValueError):
         info = None
     if proc.returncode == 0:
+        if info is None:   # empty, non-JSON or schema-incompatible output (a wrapper that is not load-watch)
+            return unknown("load-watch admit exited 0 with output the gate cannot read "
+                           f"({proc.stdout.strip()[:80]!r})")
         return True, info, "ok"
     if proc.returncode == LOAD_GATE_EXIT:
         if info is None:

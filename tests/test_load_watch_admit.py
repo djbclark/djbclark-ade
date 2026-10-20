@@ -95,6 +95,17 @@ def test_admit_waits_until_the_load_drops(tmp_path):
     assert json.loads(r.stdout)["status"] == "ok"
 
 
+def test_admit_stagger_never_runs_past_the_wait_budget(tmp_path):
+    # a hot read, then cool: the 5-30 s stagger would have reported waited_s >= 6 for a --wait of 3
+    for wait in ("1", "3"):
+        t0 = time.monotonic()
+        r = admit(tmp_path, "--json", "--wait", wait, load1=f"{CORES * 9},0.1", LW_ADMIT_STAGGER_S="5,30")
+        assert r.returncode == 0, r.stderr
+        rec = json.loads(r.stdout)
+        assert rec["status"] == "ok" and rec["waited_s"] <= int(wait), (wait, rec)
+        assert time.monotonic() - t0 < int(wait) + 5  # and it really did not sleep the stagger
+
+
 def test_admit_gives_up_after_the_wait_budget(tmp_path):
     r = admit(tmp_path, "--json", "--wait", "1", load1=CORES * 9)
     assert r.returncode == 75

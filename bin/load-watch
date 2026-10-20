@@ -55,7 +55,7 @@ launches a slice (`--load-wait`, `--no-load-gate`). It reads os.getloadavg()[0] 
 `admit hot ...` (exit 75, EX_TEMPFAIL). When state.json is fresh the line also carries the watcher's
 `streak` and `hot_for_s`, so a sustained-hot machine reads as such. `--wait 0` (default) is a pure check;
 `--wait S` polls every 15 s for up to S seconds, prints one line per waited minute to stderr, and once the
-load drops below the threshold sleeps a random 5-30 s (so queued dispatchers do not all start together)
+load drops below the threshold sleeps a random 5-30 s, never past --wait (so queued dispatchers do not all start together)
 and re-checks. `--json` prints one JSON object with the same fields. It only decides whether to START work:
 it never kills, throttles or signals anything. Test hooks (acp-dispatch scrubs them from the environment it
 gives admit): LW_FAKE_LOAD1 (a load, or a comma list read one per poll with the last value repeating),
@@ -1060,7 +1060,10 @@ def cmd_admit(a):
         if per_core <= a.max_per_core and polls > 1:
             # the load fell while we waited: stagger so queued dispatchers do not all start in the same second,
             # then look again (someone else may have started in the meantime)
-            time.sleep(random.uniform(lo, hi))
+            # (never past the --wait budget: deferred records and rearm timeouts only budget that much)
+            left = a.wait - waited
+            if left > 0:
+                time.sleep(min(random.uniform(lo, hi), left))
             load1, cores, per_core = admit_reading(fake, polls)
             polls += 1
             waited = time.monotonic() - start

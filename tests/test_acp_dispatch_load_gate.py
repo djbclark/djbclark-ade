@@ -111,6 +111,19 @@ class TestLoadGateDegrades(LoadGate):
         self.assertIn("load gate", r.stderr)
         self.assertIn("not found", self.record()["load_gate"]["error"])   # said so in the record, not just stderr
 
+    def test_exit_0_with_unreadable_output_is_an_unknown_result_not_a_silent_admit(self):
+        # a wrapper that exits 0 but is not load-watch: empty, non-JSON, or JSON without the admit fields
+        for n, out in enumerate(("", "all good, go ahead", '{"status": "ok"}', "[1, 2]")):
+            with self.subTest(stdout=out):
+                r = self.dispatch("--no-model-check", name=f"u{n}", env=self.gate_env(0, out))
+                self.assertEqual(r.returncode, 0, r.stderr + r.stdout)           # same unknown behaviour: warn, start
+                self.assertIn("warning", r.stderr)
+                self.assertIn("output the gate cannot read", r.stderr)
+                gate = self.record(f"u{n}")["load_gate"]
+                self.assertIsNotNone(gate)                                       # never `load_gate: null`
+                self.assertIn("cannot read", gate["error"])
+                self.assertIsNone(gate["load1"])
+
     def test_broken_load_watch_warns_and_continues(self):
         r = self.dispatch("--no-model-check", env=self.gate_env(1, "boom"))
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
