@@ -909,3 +909,116 @@ def test_dry_run_sqlite_estimate_includes_the_wal_file(real, capsys):
     assert entry["bytes"] <= plan["bytes"]  # the snapshot folds the WAL pages in: the estimate is an upper bound
     assert entry["bytes"] > main_size  # and the WAL rows did reach the copy
     con.close()
+
+
+def link_session_dir(home, tmp, marker="SECRET-LINKED-DIR-ROW"):
+    """~/.cursor/chats/hashB/uuid2 is a link to a session directory outside HOME holding a marker db and meta.json."""
+    outside = tmp / "sess"
+    con = make_wal_db(outside / "store.db", [marker])
+    con.close()
+    (outside / "meta.json").write_text("{}")
+    link = home / ".cursor/chats/hashB/uuid2"
+    link.parent.mkdir(parents=True)
+    os.symlink(outside, link)
+    return link
+
+
+def test_a_database_under_a_symlinked_session_directory_is_skipped_not_copied(real, capsys):
+    mod, home, tmp = real
+    make_cursor_session(home)
+    link_session_dir(home, tmp)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "cursor-chats", "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "ok" and entry["errors"] == [] and (dest / "cursor-chats/hashA/uuid1/store.db").is_file()
+    assert not (dest / "cursor-chats/hashB").exists()
+    assert any(s["why"] == "symlink" and s["path"].endswith("hashB/uuid2/store.db") for s in entry["skipped"])
+    assert b"SECRET-LINKED-DIR-ROW" not in all_bytes(dest)
+    capsys.readouterr()
+    assert mod.main(["--only", "cursor-chats", "--dry-run", "--json", "--dest", str(home / "o")]) == 0
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    assert plan["file_count"] == 2 and plan["skipped_count"] == 1
+
+
+def test_antigravity_conversations_behind_a_linked_directory_are_skipped(real):
+    mod, home, tmp = real
+    outside = tmp / "convs"
+    make_wal_db(outside / "c1.db", ["SECRET-LINKED-CONV-ROW"]).close()
+    (outside / "c1.meta").write_text("{}")
+    agy = home / ".gemini/antigravity"
+    agy.mkdir(parents=True)
+    os.symlink(outside, agy / "conversations")
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "antigravity-ide-db", "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    assert any(s["why"] == "symlink" for s in entry["skipped"]) and entry["file_count"] == 0
+    assert b"SECRET-LINKED-CONV-ROW" not in all_bytes(dest)
+
+
+def test_check_schemas_does_not_open_a_database_under_a_linked_directory(real, capsys):
+    mod, home, tmp = real
+    make_cursor_session(home)
+    assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 0  # nothing linked: clean
+    assert "0 symlink problem(s)" in capsys.readouterr().out
+    link_session_dir(home, tmp)
+    assert mod.main(["--check-schemas", "--only", "cursor-chats"]) == 1  # DECIDED: a linked tree db is a problem
+    out = capsys.readouterr().out
+    assert "hashB/uuid2/store.db: symlink, not opened" in out
+    assert "0 unexplained credential-looking name(s), 1 symlink problem(s)" in out
+
+
+def link_codex_db(home, tmp, target="in-home"):
+    """~/.codex/state_5.sqlite as a link; this Mac's four codex databases are links into a runtime dir under HOME."""
+    paths = {"in-home": home / "ops-private/.codex-runtime/state_5.sqlite", "outside": tmp / "outside-state.sqlite",
+             "excluded": home / ".codex/auth.json", "dangling": home / "nowhere/state_5.sqlite"}
+    if target != "dangling":
+        make_wal_db(paths[target], ["CODEX-ROW"]).close()
+    (home / ".codex").mkdir(exist_ok=True)
+    os.symlink(paths[target], home / ".codex/state_5.sqlite")
+    return paths[target]
+
+
+def test_a_linked_sqlite_path_under_home_is_backed_up_and_recorded(real, capsys):
+    mod, home, tmp = real
+    target = link_codex_db(home, tmp)
+    assert mod.main(["--only", "codex-db", "--dry-run", "--json", "--dest", str(home / "o")]) == 0
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "codex-db", "--dest", str(dest)]) == 0
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "ok" and entry["errors"] == [] and entry["file_count"] == plan["file_count"] == 1
+    link = {"root": "state_5.sqlite", "link": str(home / ".codex/state_5.sqlite"), "target": str(target)}
+    assert entry["root_symlinks"] == plan["root_symlinks"] == [link]
+    copy = dest / "codex-db/state_5.sqlite"
+    assert not copy.is_symlink() and b"CODEX-ROW" in copy.read_bytes()
+    assert plan["bytes"] >= entry["bytes"] > 0
+
+
+@pytest.mark.parametrize("kind", ["outside", "excluded", "dangling"])
+def test_a_linked_sqlite_path_that_may_not_be_followed_is_an_error(real, capsys, kind):
+    mod, home, tmp = real
+    link_codex_db(home, tmp, kind)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "codex-db", "--dest", str(dest)]) == 1
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial" and entry["file_count"] == 0 and entry["root_symlinks"] == []
+    assert len(entry["errors"]) == 1 and "RootSymlinkError" in entry["errors"][0]["error"]
+    assert not list(dest.rglob("*.sqlite")) and b"CODEX-ROW" not in all_bytes(dest)
+    capsys.readouterr()
+    assert mod.main(["--only", "codex-db", "--dry-run", "--json", "--dest", str(home / "o")]) == 1
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    assert plan["file_count"] == 0 and plan["status"] == "partial" and len(plan["errors"]) == 1
+
+
+def test_check_schemas_follows_an_allowed_sqlite_link_and_refuses_the_rest(real, capsys):
+    mod, home, tmp = real
+    target = link_codex_db(home, tmp)
+    assert mod.main(["--check-schemas", "--only", "codex-db"]) == 0
+    out = capsys.readouterr().out
+    assert f"codex-db: {home / '.codex/state_5.sqlite'}: symlink -> {target}" in out
+    assert "0 unexplained credential-looking name(s), 0 symlink problem(s)" in out
+    (home / ".codex/state_5.sqlite").unlink()
+    link_codex_db(home, tmp, "outside")
+    assert mod.main(["--check-schemas", "--only", "codex-db"]) == 1
+    out = capsys.readouterr().out
+    assert "symlink refused: symlink target outside HOME" in out and "1 symlink problem(s)" in out
