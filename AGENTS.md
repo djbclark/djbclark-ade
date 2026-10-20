@@ -180,3 +180,9 @@ pull request here is expected to meet these; flag any it misses.
    comment's `created_at`. Each inline finding ends with
    `<!-- codex-code-review-finding:v1 -->`. A waiter whose regex lacked the
    `:v1` suffix saw no state on PR 12 and ran its full 30 min.
+10. **The PR adds its line to `CHANGELOG.md` under `Unreleased`** (since 2026-10-20, djbclark:
+    "people should know what changes or new features are added"): one line per user-visible
+    change (a new or changed command, flag, skill, exit code, service or rule), in the past
+    tense, ending with the PR number; `Added`, `Changed`, `Fixed`, `Removed` or `Security`.
+    Internal refactors and doc-only edits may skip it; flag a PR that changes behaviour and
+    carries no entry.

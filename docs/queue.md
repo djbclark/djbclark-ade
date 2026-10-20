@@ -8,6 +8,11 @@ when they ship (into the relevant doc) or when they're dropped (say why).
 1. **`bin/firecrawl-router` serve-only form binds any `--listen` with no token** (adversary, threat-model
    review 2026-10-20: `--open` refuses a non-loopback address, serve-only does not). Make serve-only refuse a
    non-loopback `--listen` the same way; one small PR with a test.
+   **Done 2026-10-20** (PR 14): both tokenless forms refuse a non-loopback `--listen` (exit 2) and `serve()`
+   checks the address it actually bound before it accepts a request. Carried from that review (adversary
+   INFO, non-blocking): (a) the tokenless loopback handler does not check the `Host` header, so a page in a
+   local browser could reach it by DNS rebinding; add a `Host` allow-list (`127.0.0.1`, `localhost`, the bound
+   port); (b) the bearer compare at the handler uses `!=`; use `hmac.compare_digest`. One small PR for both.
 2. **Claude API credits from the Admin API, not by hand** (djbclark, 2026-10-20): the Admin API has no balance
    endpoint, but `/v1/organizations/cost_report` gives spend; remaining promo = grant ($200, 2026-10-13, expires
    2026-11-08) minus cost since the grant. Plan: an `aiuse` collector behind `ANTHROPIC_ADMIN_KEY` in
@@ -91,6 +96,28 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    contract value and the conservative one. **Ruled 2026-10-20 (djbclark): keep 10.** It is aiuse's contract unit (the same
    `headroom_percent` every pool's threshold uses) and the only option that protects the shared weekly as well as
    the sublimit; Opus takes over at 20 % of the Fable sublimit or 10 % of the shared weekly, whichever first.
+
+## Keep every machine current, and a changelog (djbclark, 2026-10-20; proposal Q26, T8)
+
+djbclark, 2026-10-20: "We need a clear way to keep all of djbclark-ade up-to-date on new
+systems, and also we should have a changelog so people know what changes or new features are
+added." Done the same day: `CHANGELOG.md` (Keep a Changelog form, seeded from the merged PRs
+since 2026-10-09), AGENTS.md code-review rule 10 (every PR adds its line), README "Update
+(this machine)" (the manual procedure today), proposal v2.4 (T8, 4.4 item 9, §9.4 Q26). Queued:
+
+1. **`bin/ade-update`, the interim one command** (one small PR, Sonnet `code` slice): `git -C
+   ~/src/djbclark-ade pull --ff-only` (stop and print `git status` on a dirty tree or a diverged
+   branch; never stash another agent's edits), then `bin/skill-everywhere --check` over every
+   `skills/*` (relink what is missing), the `~/.claude/{commands,agents,hooks}` symlink check,
+   and print the `CHANGELOG.md` entries between `~/.local/state/ade/applied` (written at the end)
+   and the new head; `--check` only reports. A test with a temp repo. README's section then
+   names it. It becomes `ade update` in Phase 1 (proposal 4.4 item 9).
+2. **A daily `--check` timer** (launchd here, systemd user unit on Linux) that writes a
+   "behind by N commits" line Hermes's dashboard and `ade doctor` can show; a `fleet-watch`
+   notice when a machine is more than a week behind. After item 1.
+3. **Tag the first release** once CI, the changelog rule and `bin/ade-update` have landed:
+   `v0.1.0`, `Unreleased` moved under it, so `ade update` has a delta to print and `ade-kit`
+   (Phase 7) has a starting point.
 
 ## Cloud-agent readiness: Codex Cloud environment, Cursor API key (ruling 2026-10-19)
 

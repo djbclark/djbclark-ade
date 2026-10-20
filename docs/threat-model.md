@@ -9,8 +9,8 @@ Every claim names the file that shows it; a claim without a file is the operator
 This repo is **personal tooling for one operator's machine, published as a public GitHub repo by choice**
 (`djbclark/djbclark-ade`). It runs no internet-facing service. `bin/firecrawl-router` is an HTTP listener, on
 loopback by default (`--listen` defaults to `127.0.0.1:0`). With a child command it requires a random
-per-process bearer token. `--open` drops the token and refuses a non-loopback address. The serve-only form
-(no child, "for tests") checks no token and binds whatever `--listen` names. While it runs, any process that
+per-process bearer token. `--open` drops the token and refuses a non-loopback address, and since 2026-10-20 so
+does the serve-only form (no child, "for tests", no token): every tokenless run is loopback-only. While it runs, any process that
 can reach it can spend Firecrawl/LLM quota through it. The live router process holds whichever of
 `FIRECRAWL_SELFHOST_API_KEY`, `FIRECRAWL_API_KEY` (fallback) and the SIPB/LiteLLM keys (LLM extraction, on
 unless `FIRECRAWL_ROUTER_LLM=off`) are set, in memory (`build_router`, `build_extractor`); the child and the

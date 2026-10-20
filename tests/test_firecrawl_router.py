@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import unittest
+import unittest.mock
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -138,6 +139,35 @@ class RouterTest(unittest.TestCase):
     def test_open_refuses_non_loopback_listen(self):
         with self.assertRaises(SystemExit):
             fr.main(["--listen", "0.0.0.0:18805", "--open"])
+
+    def test_serve_only_refuses_non_loopback_listen(self):
+        err = io.StringIO()
+        with unittest.mock.patch.object(sys, "stderr", err), self.assertRaises(SystemExit) as cm:
+            fr.main(["--listen", "0.0.0.0:18805"])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("needs a loopback --listen address", err.getvalue())
+
+    def test_bound_address_is_checked_before_serving(self):
+        # the string check lets "0.0.0.0" through here on purpose (a resolver mapping "localhost"
+        # elsewhere is the real case); the bound address is then refused before any request is served
+        router = fr.Router(fr.Backend("primary", "http://127.0.0.1:9", ""), None, 1.0, "")
+        with unittest.mock.patch.object(fr, "LOOPBACK_HOSTS", ("127.0.0.1", "localhost", "0.0.0.0")):
+            with self.assertRaises(SystemExit) as cm:
+                fr.serve(router, "0.0.0.0:0", require_loopback=True)
+        self.assertEqual(cm.exception.code, 2)
+        self.assertEqual(router.public_base, "")  # never started
+        srv = fr.serve(router, "0.0.0.0:0", require_loopback=False)  # a tokened run may bind it
+        try:
+            self.assertTrue(router.public_base.startswith("http://0.0.0.0:"))
+        finally:
+            srv.shutdown(); srv.server_close()
+
+    def test_loopback_listen_check(self):
+        for ok in ("127.0.0.1:0", "localhost:8805"):
+            self.assertTrue(fr.is_loopback_listen(ok), ok)
+        # IPv6 spellings are refused: serve() binds AF_INET and could never honour them
+        for bad in ("0.0.0.0:8805", "192.168.1.5:8805", ":8805", "example.com:80", "[::1]:8805", "::1:8805"):
+            self.assertFalse(fr.is_loopback_listen(bad), bad)
 
     def test_plain_404_page_does_not_fall_back(self):
         self.p.routes[("POST", "/v2/scrape")] = self.ok_scrape(404)
