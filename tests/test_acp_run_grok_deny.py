@@ -151,6 +151,7 @@ PROBE = textwrap.dedent("""\
         mod.connect_to_agent = lambda client, i, o: Conn()
         old = dict(os.environ)
         os.environ.update({"HERDR_PANE_ID": "w1:p1", "HERDR_ENV": "1", "HERDR_TAB_ID": "w1:t1",
+                           "PASEO_AGENT_ID": "agent-1", "PASEO_AGENT_CWD": "/x", "ORCA_TERMINAL_HANDLE": "term-1",
                            **(extra_env or {})})
         try:
             with tempfile.TemporaryDirectory() as d:
@@ -170,6 +171,10 @@ PROBE = textwrap.dedent("""\
         env = seen["env"]
         return {"rc": rc, "cmd": seen["cmd"],
                 "herdr": sorted(k for k in env if k.startswith("HERDR_")),
+                # Only the names the scrub is about: a Paseo-hosted test run also carries PASEO_CLI and
+                # PASEO_HOME, which acp-run rightly leaves alone (adversary round 2, 2026-10-20).
+                "host_vars": sorted(k for k in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ORCA_TERMINAL_HANDLE",
+                                                "ACP_RUN_AGENT") if k in env),
                 "grok_home": env.get("GROK_HOME"), "zcode_bin": env.get("ZCODE_BIN"),
                 "user_config": [r["data"] for r in rows if r["kind"] == "user_config"]}
 
@@ -376,12 +381,19 @@ class TestGrokDenyAndScrub(unittest.TestCase):
         self.assertNotIn("mcp_servers", s["config"])
 
     def test_herdr_pane_vars_never_reach_the_agent(self):
-        self.assertEqual(self.r["scrub"], ["HERDR_PANE_ID", "HERDR_ENV"])
+        self.assertEqual(self.r["scrub"], ["HERDR_PANE_ID", "HERDR_ENV", "PASEO_AGENT_ID", "PASEO_AGENT_CWD",
+                                           "ORCA_TERMINAL_HANDLE"])
         for name in ("spawn_grok_deny", "spawn_grok_all", "spawn_codex", "spawn_zcode"):
             with self.subTest(name=name):
                 self.assertNotIn("HERDR_PANE_ID", self.r[name]["herdr"])
                 self.assertNotIn("HERDR_ENV", self.r[name]["herdr"])
                 self.assertIn("HERDR_TAB_ID", self.r[name]["herdr"])  # only the pane is scrubbed
+
+    def test_paseo_and_orca_self_ids_never_reach_the_agent_and_a_marker_does(self):
+        # 2026-10-20: PASEO_AGENT_ID in a dispatched slice let its self-slash clear/archive the caller's agent.
+        for name in ("spawn_grok_deny", "spawn_grok_all", "spawn_codex", "spawn_zcode"):
+            with self.subTest(name=name):
+                self.assertEqual(self.r[name]["host_vars"], ["ACP_RUN_AGENT"])
 
     def test_zcode_gets_its_cli_entry(self):
         self.assertTrue(self.r["zcode"]["found"], self.r["zcode"])
