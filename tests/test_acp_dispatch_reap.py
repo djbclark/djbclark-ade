@@ -225,7 +225,9 @@ class TestReap(ReapBase):
             self.dispatch(name=name)
         self.unfinished(name="a", pid=2**22 - 17, pid_start="x")
         self.unfinished(name="b", pid=2**22 - 19, pid_start="x")
-        env = {**os.environ, **self.base_env()}
+        # a private stamp and no throttle: two reapers must not share (or be skipped by) the machine's stamp
+        env = {**os.environ, **self.base_env(ACP_DISPATCH_REAP_STAMP=str(self.tmp / "reap.stamp"),
+                                             ACP_DISPATCH_REAP_MIN_INTERVAL="0")}
         procs = [subprocess.Popen([sys.executable, str(SCRIPT), "reap", str(self.out)], env=env,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
         outs = [p.communicate(timeout=60)[0] for p in procs]
@@ -496,6 +498,83 @@ class TestSignalResumeHint(ReapBase):
         hint = self.mod()["manual_resume_hint"]({"failure": "NO-REPORT: quota (codex, m1, retry at Oct 18th 9am)",
                                                 "record": "/x/s1.json"}, Path("/x/s1.json"))
         self.assertTrue(hint.startswith("resume in place after Oct 18th 9am: "), hint)
+
+
+class TestCheckSignalHint(ReapBase):
+    """`check` on a signal-killed or lost slice (2026-10-20): resume in place, never `--escalate`;
+    the hint follows the failure class actually recorded (adversary, PR 18)."""
+
+    def checked(self, failure: str | None = None, session: str | None = "sess-1", **fields: Any) -> str:
+        """Finalize a signal-killed slice, then rewrite the record as asked and run `check`."""
+        self.dispatch()
+        extra: dict[str, Any] = {} if session else {"log": str(self.tmp / "no-session.jsonl")}
+        _ = self.unfinished(session_id=session, signal="SIGTERM", kind="code", **extra)
+        r = run(["finalize", str(self.record_path()), "--exit", "143"], env=self.base_env())
+        self.assertTrue(r.stdout.startswith("no-report\t"), r.stdout)
+        rec = json.loads(self.record_path().read_text())
+        if failure:
+            rec["failure"] = failure
+        rec.update(fields)
+        self.write_record(rec)
+        return run(["check", str(self.record_path())], env=self.base_env()).stdout
+
+    def test_signal_with_a_session_resumes_and_never_escalates(self):
+        out = self.checked()
+        self.assertRegex(out, r"; resume in place: \S+acp-dispatch resume \S+s1\.json --detach --no-wait")
+        self.assertNotIn("after the reset", out)
+        self.assertNotIn("escalate", out)
+
+    def test_a_lost_slice_resumes_with_no_reset_wording(self):
+        self.dispatch()
+        _ = self.unfinished(session_id="sess-1", kind="code", pid=2**22 - 41, pid_start="x")
+        out = run(["check", str(self.record_path())], env=self.base_env()).stdout
+        self.assertIn("lost (pid", out)
+        self.assertRegex(out, r"; resume in place: \S+acp-dispatch resume ")
+        self.assertNotIn("after the reset", out)
+        self.assertNotIn("escalate", out)
+
+    def test_signal_without_a_session_says_so(self):
+        out = self.checked(session=None)
+        self.assertIn("no resumable session", out)
+        self.assertNotIn("resume in place", out)
+        self.assertNotIn("escalate", out)
+
+    def test_a_record_without_log_or_command_cannot_be_resumed(self):
+        out = self.checked(cmd="")
+        self.assertIn("no resumable session (the record has no log or command", out)
+
+    def test_the_login_sweep_resuming_it_is_said(self):
+        out = self.checked(restart_resume={"state": "resuming"})
+        self.assertIn("resume-scheduled: the login sweep is resuming it in place", out)
+        self.assertNotIn("escalate", out)
+
+    def test_a_failed_restart_resume_is_noted_beside_the_command(self):
+        out = self.checked(restart_resume={"state": "failed", "detail": "boom"})
+        self.assertIn("resume in place", out)
+        self.assertIn("restart-resume failed: boom", out)
+
+    def test_agy_on_a_non_gemini_model_resumes_in_a_new_session(self):
+        # resume_record continues such a slice with a checkpoint instead of refusing it
+        out = self.checked(agent="agy", model="claude-sonnet-4-5")
+        self.assertIn("resume in place", out)
+        self.assertIn("continues in a new session with a checkpoint", out)
+        self.assertNotIn("no resumable session", out)
+
+    def test_refused_and_auth_keep_their_own_hint(self):
+        for failure in ("NO-REPORT: refused (the model declined)", "NO-REPORT: auth (login expired)"):
+            out = self.checked(failure)
+            self.assertNotIn("resume in place", out, failure)
+            self.assertIn("escalate", out, failure)        # an ordinary class keeps the one-rung hint
+
+    def test_a_quota_stop_with_a_signal_prints_the_resume_hint_once(self):
+        out = self.checked("NO-REPORT: quota (codex, m1, retry at Oct 18th 9am)")
+        self.assertEqual(out.count("resume in place"), 1, out)
+        self.assertIn("after Oct 18th 9am", out)
+
+    def test_manual_hint_for_a_lost_record_has_no_reset(self):
+        hint = self.mod()["manual_resume_hint"]({"failure": "NO-REPORT: lost (pid 9 gone)", "record": "/x/s1.json"},
+                                               Path("/x/s1.json"))
+        self.assertTrue(hint.startswith("resume in place: "), hint)
 
 
 class TestRestartResume(RestartBase):
