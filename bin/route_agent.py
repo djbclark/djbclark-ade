@@ -573,6 +573,95 @@ def _clean_age(value: Any) -> float | None:
     return x if math.isfinite(x) and x >= 0 else None
 
 
+# pool_family values that are a model cap inside the provider's shared pool, not a pool of
+# their own (Claude's `fable` is at most 50% of the shared weekly, aiuse schema 1.1).
+SUBLIMIT_FAMILIES = ("fable",)
+
+
+def _merge_pool(into: dict[str, Any], key: str, entry: dict[str, Any]) -> None:
+    """Fold one pool entry into `into`: the tightest known remaining wins and carries its bind."""
+    prior = into.get(key)
+    if prior is None:
+        into[key] = entry
+        return
+    p_rem, e_rem = prior.get("remaining"), entry.get("remaining")
+    take_new = e_rem is not None and (p_rem is None or e_rem < p_rem)
+    merged = dict(entry if take_new else prior)
+    merged["windows"] = {**prior.get("windows", {}), **entry.get("windows", {})}
+    merged["sublimits"] = {**prior.get("sublimits", {}), **entry.get("sublimits", {})}
+    merged["remaining"] = e_rem if take_new else p_rem
+    into[key] = merged
+
+
+def _tighter(a: float | None, b: float | None) -> float | None:
+    vals = [v for v in (a, b) if v is not None]
+    return min(vals) if vals else None
+
+
+def _providers_from_available(rows: list[Any], age: float | None) -> dict[str, Any]:
+    """Fold `aiuse --available --json` rows into per-service pools.
+
+    The row's own top-level fields are the contract (`aiuse schema`): `provider`,
+    `pool_family`, `usable_now`, `headroom_percent` (the least applicable headroom),
+    `binding_window`, `available_at`, plus 3.8's `reading_expired` and
+    `requires_operator_approval`. `windows[]` is optional detail (3.7.2 attaches it): when
+    present it fills `windows`, `sublimits` and the bind fields and can only tighten the
+    row's `remaining`, never loosen it. Malformed rows raise (the caller falls back)."""
+    pools: dict[str, Any] = {}
+    for row in rows:
+        name = row.get("provider")
+        if not name or row.get("error"):
+            continue
+        family = row.get("pool_family")
+        key = pool_service(name, family)
+        row_age = _clean_age(row.get("age_seconds"))
+        if row_age is None:
+            row_age = age
+        stale = ((row_age is None or row_age > STALE_SOFT)
+                 or row.get("reading_expired") is True)
+        head = _pct(row.get("headroom_percent"))
+        if row.get("usable_now") is False or head == 0:
+            top: float | None = 0.0
+        elif stale:
+            top = None
+        else:
+            top = head
+        entry: dict[str, Any] = {
+            "remaining": top, "windows": {}, "sublimits": {},
+            "billing_kind": row.get("billing_kind"),
+            "pace_ratio": None, "resets_at": row.get("available_at"), "window_minutes": None,
+            "binding_window": row.get("binding_window"),
+            "available_at": row.get("available_at"),
+            "requires_operator_approval": row.get("requires_operator_approval"),
+        }
+        if row.get("binding_window"):
+            entry["windows"][row["binding_window"]] = None if top is None else round(top, 1)
+        folded: dict[str, Any] = {}
+        if row.get("windows"):
+            folded = _providers_from_accounts([row], age)
+        for fkey, finfo in folded.items():
+            if fkey == key:
+                entry["windows"].update(finfo.get("windows") or {})
+                entry["sublimits"].update(finfo.get("sublimits") or {})
+                for k in ("pace_ratio", "resets_at", "window_minutes"):
+                    if finfo.get(k) is not None:
+                        entry[k] = finfo[k]
+                if top is None and not stale:
+                    entry["remaining"] = finfo.get("remaining")   # row gave no headroom
+                elif top is not None:
+                    entry["remaining"] = _tighter(top, finfo.get("remaining"))
+            else:
+                _merge_pool(pools, fkey, finfo)
+        if family in SUBLIMIT_FAMILIES and key == name:
+            # a model cap inside the shared pool: bounds that model only (sublimits), and
+            # must not drag the whole account down
+            cap = _tighter(entry["remaining"], entry["sublimits"].get(family))
+            entry = {**entry, "remaining": None, "windows": {},
+                     "sublimits": {family: cap}}
+        _merge_pool(pools, key, entry)
+    return pools
+
+
 def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str, Any]:
     """Fold aiuse account rows (snapshot accounts or `--available` rows) into per-service pools."""
     providers: dict[str, Any] = {}
@@ -826,7 +915,7 @@ def load_snapshot() -> tuple[dict[str, Any], float | None]:
                                                      else STALE_HARD + 1)))
                         for row in payload["available"]
                         if isinstance(row, dict) and row.get("provider")]
-                fresh = _providers_from_accounts(rows, p_age)
+                fresh = _providers_from_available(rows, p_age)
             except (ValueError, TypeError, AttributeError, OverflowError):
                 label = f"{label}: unparseable rows"
         if canned:

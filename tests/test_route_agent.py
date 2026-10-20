@@ -1467,6 +1467,97 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
             self.load({"ROUTE_AGENT_AIUSE_BIN": exe})
             self.assertEqual(run.call_count, 2)
 
+    # -- the available-row contract: top-level fields, windows[] optional (Codex P1) ----------
+
+    FAILOVER_FIXTURE_ROWS = [   # tests/test_failover.py AIUSE, no windows[]; age added (see below)
+        {"provider": "opencode-go", "pool_family": None, "usable_now": True,
+         "headroom_percent": 8.0},
+        {"provider": "claude", "pool_family": "default", "usable_now": True,
+         "headroom_percent": 20.0},
+        {"provider": "claude", "pool_family": "fable", "usable_now": True,
+         "headroom_percent": 2.5},
+        {"provider": "antigravity", "pool_family": "gemini", "usable_now": True,
+         "headroom_percent": 16.0},
+        {"provider": "antigravity", "pool_family": "claude_gpt", "usable_now": False,
+         "headroom_percent": 0},
+    ]
+
+    def test_rows_without_windows_follow_the_contract_fields(self):
+        # a payload with no age at all reads stale by design, so the fixture carries one
+        path = self.rows_payload(self.FAILOVER_FIXTURE_ROWS)
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        self.assertEqual(quota["claude"]["remaining"], 20.0)
+        self.assertEqual(quota["claude"]["sublimits"], {"fable": 2.5})
+        self.assertEqual(quota["opencode-go"]["remaining"], 8.0)
+        self.assertEqual(quota["antigravity"]["remaining"], 16.0)
+        self.assertEqual(quota["antigravity-claude"]["remaining"], 0.0)
+
+    def test_plan_refuses_the_pools_under_min_headroom(self):
+        path = self.rows_payload(self.FAILOVER_FIXTURE_ROWS)
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
+        quota = {**{k: v for k, v in quota.items()}}
+        for kind in ("code", "bulk"):
+            choice = r.route(kind, quota=quota, min_headroom=25)
+            for refused in ("claude", "opencode-go", "antigravity", "antigravity-claude"):
+                self.assertFalse(choice and choice.service.name == refused, (kind, refused))
+
+    def test_row_with_windows_keeps_detail_and_the_tighter_remaining(self):
+        row = {"provider": "codex", "usable_now": True, "headroom_percent": 40.0,
+               "binding_window": "weekly",
+               "windows": [{"label": "5-hour", "headroom_percent": 55.0, "pace_ratio": 0.5,
+                            "resets_at": "2026-10-25T00:00:00+00:00", "window_minutes": 300},
+                           {"label": "weekly", "headroom_percent": 40.0}]}
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
+        self.assertEqual(quota["codex"]["remaining"], 40.0)
+        self.assertEqual(quota["codex"]["windows"], {"weekly": 40.0, "5-hour": 55.0})
+        # windows tighter than the top-level field tighten, never loosen
+        row2 = dict(row, headroom_percent=90.0)
+        quota2, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row2]))})
+        self.assertEqual(quota2["codex"]["remaining"], 40.0)
+
+    def test_usable_now_false_reads_zero_whatever_the_headroom(self):
+        row = {"provider": "codex", "usable_now": False, "headroom_percent": 60.0}
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
+        self.assertEqual(quota["codex"]["remaining"], 0.0)
+
+    def test_row_carries_binding_window_and_operator_gate(self):
+        row = {"provider": "omp", "usable_now": True, "headroom_percent": 33.0,
+               "binding_window": "omp credits", "available_at": None,
+               "requires_operator_approval": True}
+        quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(self.rows_payload([row]))})
+        self.assertEqual(quota["omp"]["remaining"], 33.0)
+        self.assertEqual(quota["omp"]["binding_window"], "omp credits")
+        self.assertTrue(quota["omp"]["requires_operator_approval"])
+
+    def test_live_aiuse_matches_the_file_read(self):
+        import shutil as _sh
+        import subprocess as _sp
+        exe = _sh.which("aiuse")
+        snap = Path.home() / ".cache/aiuse/snapshots/latest.json"
+        if not exe or not snap.is_file():
+            self.skipTest("no live aiuse on this host")
+        proc = _sp.run([exe, "--available", "--json"], capture_output=True, timeout=30)
+        if proc.returncode not in (0, 3):
+            self.skipTest("aiuse --available failed")
+        live = self.tmp / "live.json"
+        live.write_bytes(proc.stdout)
+        got, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(live)})
+        want, _ = self.fileonly(snap)
+        for key, info in want.items():
+            if key in got and got[key].get("remaining") is not None \
+                    and info.get("remaining") is not None and key != "cursor-auto":
+                self.assertAlmostEqual(got[key]["remaining"], info["remaining"], delta=3.0,
+                                       msg=key)
+
+    def fileonly(self, snap):
+        import io
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("ROUTE_AGENT_AIUSE_JSON", "ROUTE_AGENT_AIUSE")}
+        with mock.patch.dict(os.environ, {**clean, "AIUSE_SNAPSHOT": str(snap),
+                                          "ROUTE_AGENT_OMP_READY": "0"}, clear=True), \
+                contextlib.redirect_stderr(io.StringIO()):
+            return r.load_snapshot()
+
     def test_huge_integer_percentage_reads_unknown_not_a_crash(self):
         body = ('{"age_seconds": 5, "available": [{"provider": "codex", "age_seconds": 1' + "0" * 400
                 + ', "windows": [{"label": "w", "headroom_percent": 1' + "0" * 400 + "}]}]}")

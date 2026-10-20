@@ -114,6 +114,14 @@ and `ROUTE_AGENT_AIUSE_TIMEOUT` (seconds, 0 to 60, default 20) override the bina
 The spawn result is memoised for 30 s (elapsed seconds are added to its ages on reuse, so a blocking dispatch's finalize never reads a start-time quota as current). Unparseable rows, non-finite percentages and unknown ages
 never read as headroom: the first falls back to the file, the others read unknown or stale.
 
+The aiuse path reads the `--available` row contract: each row's top-level `provider`,
+`pool_family`, `usable_now`, `headroom_percent`, `binding_window`, `available_at`,
+`reading_expired` and `requires_operator_approval`. `windows[]` (which 3.7.2 attaches) is detail
+only, filling the per-window labels, the Fable sublimit and the pace and reset fields; it can
+tighten a pool's `remaining` but never loosen it, and a payload without `windows[]` (the
+documented minimal form) routes the same. `usable_now: false` or zero headroom reads 0% left.
+A `fable` family row is a sublimit of the shared Claude pool, not a pool of its own.
+
 `aiuse --json` (JSON starts after two preamble lines) reports one
 `snapshot.accounts[]` entry per provider; `alerts[]`/`suggestion` rank
 where quota is going to waste. Mapping, verified 2026-08-23:
