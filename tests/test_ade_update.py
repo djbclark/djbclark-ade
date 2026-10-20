@@ -2,12 +2,15 @@
 
 Every test builds a real git repo pair in tmp_path: a bare `origin`, a `seed` clone that publishes
 commits, and the `machine` clone ade-update runs on. skill-everywhere is a fake on PATH that records
-its argv and answers from a JSON file, so no real TUI directory is touched. HOME is tmp_path/home.
+its argv and answers from a JSON file, so no real TUI directory is touched. HOME is tmp_path/home, and
+SKILL_EVERYWHERE_ADE names the `machine` clone's skills/ so that clone is the canonical skills home (the
+only checkout whose skill links ade-update may change).
 """
 import importlib.machinery
 import importlib.util
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -119,11 +122,13 @@ class Env:
     def calls(self):
         return [json.loads(line) for line in self.se_log.read_text().splitlines()]
 
-    def run(self, *flags):
+    def run(self, *flags, repo=None, state=None, extra_env=None):
         env = dict(os.environ, HOME=str(self.home), PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
-                   FAKE_SE_STATE=str(self.se_state), FAKE_SE_LOG=str(self.se_log))
-        r = subprocess.run([sys.executable, str(SCRIPT), "--repo", str(self.machine), "--state", str(self.state),
-                            *flags], capture_output=True, text=True, env=env)
+                   FAKE_SE_STATE=str(self.se_state), FAKE_SE_LOG=str(self.se_log),
+                   SKILL_EVERYWHERE_ADE=str(self.machine / "skills"))
+        env.update(extra_env or {})
+        r = subprocess.run([sys.executable, str(SCRIPT), "--repo", str(repo or self.machine),
+                            "--state", str(state or self.state), *flags], capture_output=True, text=True, env=env)
         return r
 
 
@@ -306,6 +311,13 @@ def test_read_state_tolerates_absent_empty_garbage_and_unknown(env, tmp_path):
         assert mod.read_state(p, env.machine) is None, text
     p.write_text(env.first.upper() + "  extra words\n")
     assert mod.read_state(p, env.machine) == env.first
+    for raw in (b"\xff\xfe\x00garbage", b"\xff" * 40, env.first.encode() + b"\n\xff\xfe"):
+        p.write_bytes(raw)
+        assert mod.read_state(p, env.machine) in (None, env.first), raw  # never raises
+    p.write_bytes(b"\xff\xfe\x00garbage")
+    assert mod.read_state(p, env.machine) is None
+    r = env.run("--check", state=p)
+    assert r.returncode == 0, r.stdout + r.stderr  # a non-UTF-8 record is read as none, not a traceback
 
 
 def test_changelog_delta_ignores_entries_moved_under_a_release():
@@ -338,3 +350,154 @@ def test_json_output_is_one_object(env):
     out = json.loads(r.stdout)
     assert out["mode"] == "check" and out["repo_state"] == "current" and out["exit"] == 0
     assert out["head_before"] == env.first and out["changelog"]["since"] is None
+
+
+# --- adversary review of 231712f (2026-10-20) ---------------------------------------------------
+
+def clone(env, name):
+    dest = env.tmp / name
+    sh("git", "clone", "-q", str(env.origin), str(dest))
+    return dest
+
+
+def test_non_canonical_repo_reports_skills_but_never_links(env):
+    other = clone(env, "other")
+    env.skills({"alpha": [["claude", "missing"], ["codex", "linked"]]})
+    for flags in (("--check",), ()):
+        r = env.run(*flags, repo=other)
+        assert r.returncode == 0, r.stdout + r.stderr  # nothing this run could fix counts as a problem
+        assert "report-only" in r.stdout and "not the canonical skills home" in r.stdout
+        assert "missing x1" in r.stdout and "alpha:" not in r.stdout  # counted, no per-row hint to copy
+        assert "would run:" not in r.stdout and "ran:" not in r.stdout
+    assert env.calls() == [["--check", "alpha"], ["--check", "alpha"]]  # no link call, in either mode
+    assert json.loads(env.run("--check", "--json", repo=other).stdout)["skills"]["link_mode"] == "report-only"
+    # the canonical clone, same table, does link
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert ["alpha"] in env.calls() and "report-only" not in r.stdout
+
+
+def test_canonical_repo_follows_skill_everywhere_ade_then_the_default(tmp_path, monkeypatch):
+    mod = load_module()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("SKILL_EVERYWHERE_ADE", raising=False)
+    assert mod.canonical_repo() == (tmp_path / "src" / "djbclark-ade").resolve()
+    monkeypatch.setenv("SKILL_EVERYWHERE_ADE", str(tmp_path / "elsewhere" / "skills"))
+    assert mod.canonical_repo() == (tmp_path / "elsewhere").resolve()
+
+
+def test_skill_directory_named_like_a_flag_is_skipped_and_reported(env):
+    mod = load_module()
+    hostile = env.machine / "skills" / "--remove"
+    hostile.mkdir()
+    (hostile / "SKILL.md").write_text("---\nname: x\n---\n")
+    for name in ("-dash", ".hidden", "sp ace"):
+        (env.machine / "skills" / name).mkdir()
+        (env.machine / "skills" / name / "SKILL.md").write_text("x\n")
+    names, skipped = mod.skill_names(env.machine)
+    assert names == ["alpha"] and skipped == ["--remove", "-dash", ".hidden", "sp ace"]
+    env.skills({"alpha": [["claude", "missing"]]})
+    r = env.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "skipped" in r.stdout and "--remove" in r.stdout
+    assert all(call[0] in ("--check", "alpha") for call in env.calls()), env.calls()  # never a flag from a directory
+    assert not any("--remove" in call for call in env.calls())
+
+
+def test_upstream_flag_named_skill_is_skipped_in_check(env):
+    env.publish({"skills/--remove/SKILL.md": "x\n", "skills/beta/SKILL.md": "y\n"})
+    r = env.run("--check", "--json")
+    out = json.loads(r.stdout)
+    assert out["skills"]["new_upstream"] == ["beta"] and out["skills"]["skipped"] == ["--remove"]
+
+
+def test_printed_hints_are_shell_quoted_and_a_real_file_is_not_clobbered(env):
+    spaced = env.tmp / "machine sp"
+    sh("git", "clone", "-q", str(env.origin), str(spaced))
+    env.publish({"claude/commands/demo.md": "demo\n"})
+    sh("git", "pull", "-q", "--ff-only", cwd=spaced)
+    (spaced / "CLAUDE.md").unlink()
+    (spaced / "CLAUDE.md").write_text("plain\n")
+    mine = env.home / ".claude" / "commands" / "demo.md"
+    mine.parent.mkdir(parents=True)
+    mine.write_text("my own file\n")
+    r = env.run("--check", "--json", repo=spaced, extra_env={"SKILL_EVERYWHERE_ADE": str(spaced / "skills")})
+    out = json.loads(r.stdout)
+    assert r.returncode == 10, r.stdout + r.stderr
+    fix = out["claude_md"]["fix"]
+    assert shlex.split(fix.split("then: ")[1]) == ["ln", "-sfn", "AGENTS.md", str(spaced / "CLAUDE.md")]
+    (problem,) = out["claude_links"]["problems"]
+    assert problem["state"] == "a real file (not ours)"
+    assert problem["fix"].startswith("inspect ") and "move it aside" in problem["fix"]
+    assert shlex.split(problem["fix"].split("then: ")[1]) == [
+        "ln", "-sfn", str(spaced / "claude" / "commands" / "demo.md"), str(mine)]
+    assert mine.read_text() == "my own file\n"
+
+
+def test_a_pull_hint_with_a_space_in_the_path_is_quoted(env):
+    spaced = env.tmp / "machine sp"
+    sh("git", "clone", "-q", str(env.origin), str(spaced))
+    env.publish()
+    r = env.run("--check", repo=spaced)
+    line = next(l for l in r.stdout.splitlines() if "would run: git" in l)
+    assert shlex.split(line.split("would run: ")[1]) == ["git", "-C", str(spaced), "pull", "--ff-only"]
+
+
+def test_repo_inside_a_subdirectory_is_refused_with_exit_4(env):
+    r = env.run("--check", repo=env.machine / "skills" / "alpha")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "not the top of a git work tree" in r.stdout
+    assert not env.state.exists()
+
+
+def test_inherited_git_location_variables_are_not_passed_to_git(env):
+    decoy = env.tmp / "decoy"
+    sh("git", "init", "-q", str(decoy))
+    env.publish()
+    r = env.run("--check", "--json", extra_env={"GIT_DIR": str(decoy / ".git"), "GIT_WORK_TREE": str(decoy),
+                                                "GIT_INDEX_FILE": str(decoy / "idx")})
+    out = json.loads(r.stdout)
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert out["head_before"] == env.first and out["behind"] == 1  # the machine clone, not the decoy
+
+
+def test_untracked_file_the_pull_would_create_is_exit_2_not_3(env):
+    (env.machine / "added.txt").write_text("mine\n")
+    env.publish({"added.txt": "theirs\n"})
+    r = env.run()
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "added.txt" in r.stdout
+    assert env.head(env.machine) == env.first
+    assert (env.machine / "added.txt").read_text() == "mine\n"
+    assert not env.state.exists()
+    r = env.run("--check")
+    assert r.returncode == 10 and "would refuse (exit 2)" in r.stdout
+
+
+def test_pull_failure_code_maps_an_overwrite_refusal_to_dirty():
+    mod = load_module()
+    assert mod.pull_failure_code("error: The following untracked working tree files would be overwritten by merge:") == 2
+    assert mod.pull_failure_code("error: Your local changes to the following files would be overwritten by merge:") == 2
+    assert mod.pull_failure_code("fatal: Not possible to fast-forward, aborting.") == 3
+
+
+def test_unwritable_state_file_is_exit_4_not_a_traceback(env):
+    env.state.mkdir(parents=True)  # --state names a directory
+    r = env.run()
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "cannot write the state file" in r.stdout and "Traceback" not in r.stderr
+    assert sorted(p.name for p in env.state.parent.iterdir()) == ["applied"]  # temp file cleaned up
+    out = json.loads(env.run("--json", state=env.state).stdout)
+    assert out["exit"] == 4 and out["error"].startswith("cannot write the state file")
+
+
+def test_repo_bin_skill_everywhere_is_preferred_over_path(env):
+    own = env.machine / "bin" / "skill-everywhere"
+    own.parent.mkdir()
+    own.write_text(FAKE_SKILL_EVERYWHERE.format(python=sys.executable).replace(
+        "json.dumps(sys.argv[1:])", 'json.dumps(["repo-copy"] + sys.argv[1:])'))
+    own.chmod(own.stat().st_mode | stat.S_IXUSR)
+    r = env.run("--check", "--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads(r.stdout)["skills"]["script"] == str(own)
+    assert env.calls() == [["repo-copy", "--check", "alpha"]]  # the fake on PATH was not used

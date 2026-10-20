@@ -7,7 +7,7 @@ acceptance test T8). It automates README "Update (this machine)":
     ade-update                  apply: pull, relink missing skills, check symlinks, print the changelog delta
     ade-update --check          report only ("would" wording); changes nothing in the tree, links or state
     ade-update --json           the same report as one JSON object on stdout
-    ade-update --repo PATH      the checkout (default ~/src/djbclark-ade)
+    ade-update --repo PATH      the checkout (default ~/src/djbclark-ade); must be the top of its work tree
     ade-update --state PATH     where the applied revision is recorded (default ~/.local/state/ade/applied)
 
 Steps, in order:
@@ -19,9 +19,15 @@ Steps, in order:
 2. `skill-everywhere --check` over every `skills/*/SKILL.md`; a skill with a missing, dangling or
    chained link is re-linked with `skill-everywhere NAME...` (the script's own link form). A link
    the script leaves alone (a real directory, another link) is reported with the command and counts
-   as unresolved. skill-everywhere is `<repo>/bin/skill-everywhere`, else the one on PATH.
+   as unresolved. skill-everywhere is `<repo>/bin/skill-everywhere`, else the one on PATH. Links are
+   only changed when --repo is the canonical skills home (~/src/djbclark-ade, or the parent of
+   $SKILL_EVERYWHERE_ADE when that is set): any other checkout (a pasture, a second clone) gets a
+   report-only skill step, since linking would repoint every TUI's live skills into it. A skills/
+   directory whose name is not [A-Za-z0-9][A-Za-z0-9._-]* is skipped and reported (skill-everywhere
+   reads a leading `-` as a mode flag).
 3. `CLAUDE.md` is a symlink to `AGENTS.md` in the repo, and every entry of `claude/{commands,agents,
-   hooks}` is linked from `~/.claude/<kind>/`. Reported with the fix, never changed here.
+   hooks}` is linked from `~/.claude/<kind>/`. Reported with the fix, never changed here; outside the
+   canonical checkout the `~/.claude` rows are counted only (they belong to the canonical one).
 4. The CHANGELOG.md entries new since the revision recorded in the state file (parsed from
    `git show <rev>:CHANGELOG.md` at both revisions; an entry moved under a release heading is not
    new), or every Unreleased entry when nothing is recorded. Then the new HEAD is written to the
@@ -29,16 +35,19 @@ Steps, in order:
 
 Exit codes: 0 current (and nothing wrong), 10 behind (--check) or a skill link, CLAUDE.md or
 ~/.claude link is missing/unresolved, 2 usage or a local modification blocks the pull, 3 the branch
-cannot fast-forward, 4 git or the network failed (no repo, no upstream, fetch/pull error or timeout).
+cannot fast-forward, 4 git, the network or the state file failed (no repo, --repo is not the top of
+its work tree, no upstream, fetch/pull error or timeout, the state file cannot be written).
 """
 import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
 import textwrap
+from collections import Counter
 from pathlib import Path
 
 EXIT_OK, EXIT_DIRTY, EXIT_NON_FF, EXIT_ERROR, EXIT_BEHIND = 0, 2, 3, 4, 10
@@ -50,6 +59,10 @@ LINK_TIMEOUT = 300  # skill-everywhere link mode nudges the Hermes gateway (up t
 CLAUDE_KINDS = ("commands", "agents", "hooks")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 OK_LINK_STATES = ("linked", "not installed")
+SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# Repository-location variables that would make git act on another repo than --repo.
+GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
+                     "GIT_NAMESPACE")
 
 
 class Stop(Exception):
@@ -68,13 +81,14 @@ def run(argv, cwd=None, env=None, timeout=LOCAL_TIMEOUT):
                            stdin=subprocess.DEVNULL)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
-        return 124, "", f"timed out after {timeout}s: {' '.join(argv)}"
+        return 124, "", f"timed out after {timeout}s: {shlex.join(argv)}"
     except OSError as e:
         return 127, "", f"{argv[0]}: {e}"
 
 
 def git(repo, *args, timeout=LOCAL_TIMEOUT):
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    env = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_VARS}
+    env["GIT_TERMINAL_PROMPT"] = "0"
     return run(["git", "-C", str(repo), *args], env=env, timeout=timeout)
 
 
@@ -136,8 +150,8 @@ def changelog_delta(old_text, new_text):
 def read_state(path, repo):
     """The recorded commit, or None: absent, unreadable, malformed or unknown to this repo all mean none."""
     try:
-        words = Path(path).read_text().split()
-    except OSError:
+        words = Path(path).read_text(errors="replace").split()
+    except (OSError, ValueError):
         return None
     sha = words[0].lower() if words else ""
     if not SHA_RE.match(sha):
@@ -168,17 +182,28 @@ def write_state(path, sha):
 # --- skills -------------------------------------------------------------------------------
 
 def skill_names(repo):
+    """(names, skipped): skills/*/SKILL.md directories, split by whether the name is safe to pass on."""
     root = Path(repo) / "skills"
     if not root.is_dir():
-        return []
-    return sorted(d.name for d in root.iterdir() if d.is_dir() and (d / "SKILL.md").is_file())
+        return [], []
+    found = sorted(d.name for d in root.iterdir() if d.is_dir() and (d / "SKILL.md").is_file())
+    return [n for n in found if SKILL_NAME_RE.match(n)], [n for n in found if not SKILL_NAME_RE.match(n)]
 
 
 def upstream_skill_names(repo, rev):
+    """The same split for skills/ at `rev`."""
     rc, out, _ = git(repo, "ls-tree", "--name-only", f"{rev}:skills")
     if rc != 0:
-        return []
-    return sorted(n for n in out.split("\n") if n and git(repo, "cat-file", "-e", f"{rev}:skills/{n}/SKILL.md")[0] == 0)
+        return [], []
+    found = sorted(n for n in out.split("\n") if n and git(repo, "cat-file", "-e", f"{rev}:skills/{n}/SKILL.md")[0] == 0)
+    return [n for n in found if SKILL_NAME_RE.match(n)], [n for n in found if not SKILL_NAME_RE.match(n)]
+
+
+def canonical_repo():
+    """The one checkout whose skills the TUIs link to: $SKILL_EVERYWHERE_ADE's parent, else ~/src/djbclark-ade."""
+    ade = os.environ.get("SKILL_EVERYWHERE_ADE")
+    home = Path(os.path.expanduser(ade)).parent if ade else Path(os.path.expanduser(DEFAULT_REPO))
+    return home.resolve()
 
 
 def find_skill_everywhere(repo):
@@ -234,10 +259,10 @@ def check_claude_md(repo):
     if not link.is_symlink():
         what = "a regular file" if link.exists() else "missing"
         return {"ok": False, "detail": f"CLAUDE.md is {what}, not a symlink to AGENTS.md",
-                "fix": f"merge into AGENTS.md first if both are files, then: ln -sfn AGENTS.md {link}"}
+                "fix": f"inspect it, merge it into AGENTS.md and move it aside, then: {shlex.join(['ln', '-sfn', 'AGENTS.md', str(link)])}"}
     if not agents.exists() or link.resolve() != agents.resolve():
         return {"ok": False, "detail": f"CLAUDE.md -> {os.readlink(link)}, not AGENTS.md",
-                "fix": f"ln -sfn AGENTS.md {link}"}
+                "fix": shlex.join(["ln", "-sfn", "AGENTS.md", str(link)])}
     return {"ok": True, "detail": "CLAUDE.md -> AGENTS.md"}
 
 
@@ -256,13 +281,16 @@ def check_claude_links(repo):
             if dest.is_symlink() and dest.exists() and dest.resolve() == src.resolve():
                 ok += 1
                 continue
+            ln = shlex.join(["ln", "-sfn", str(src), str(dest)])
+            fix = ln
             if dest.is_symlink():
                 state = "dangling" if not dest.exists() else f"points to {os.readlink(dest)}"
             elif dest.exists():
                 state = "a real file (not ours)"
+                fix = f"inspect {shlex.quote(str(dest))}, move it aside, then: {ln}"
             else:
                 state = "missing"
-            problems.append({"path": str(dest), "state": state, "fix": f"ln -sfn {src} {dest}"})
+            problems.append({"path": str(dest), "state": state, "fix": fix})
     return {"ok": ok, "problems": problems}
 
 
@@ -288,6 +316,11 @@ class Report:
             print("\n".join(self.lines))
 
 
+def pull_failure_code(text):
+    """git refusing to overwrite a local file (a race with the pre-check) is dirty (2), else not fast-forward (3)."""
+    return EXIT_DIRTY if "would be overwritten" in text else EXIT_NON_FF
+
+
 def short(sha):
     return sha[:8] if sha else "none"
 
@@ -303,6 +336,10 @@ def update(rep, args, repo):
     # 1. the repo
     if git(repo, "rev-parse", "--git-dir")[0] != 0:
         raise Stop(EXIT_ERROR, f"{repo} is not a git checkout")
+    rc, top, _ = git(repo, "rev-parse", "--show-toplevel")
+    if rc != 0 or Path(top.strip()).resolve() != Path(repo).resolve():
+        raise Stop(EXIT_ERROR, f"{repo} is not the top of a git work tree"
+                   + (f" (it is inside {top.strip()})" if rc == 0 and top.strip() else ""))
     head = git_out(repo, "rev-parse", "HEAD")
     branch = git_out(repo, "rev-parse", "--abbrev-ref", "HEAD")
     rc, upstream, _ = git(repo, "rev-parse", "--abbrev-ref", "@{u}")
@@ -327,7 +364,8 @@ def update(rep, args, repo):
     if behind:
         d["repo_state"] = "behind"
         changed = set(git_out(repo, "diff", "--name-only", "-z", "--no-renames", "HEAD", "@{u}").split("\0")) - {""}
-        rc, out, _ = git(repo, "status", "--porcelain", "-z", "--untracked-files=no")
+        # tracked modifications, and untracked files the pull would create (git refuses to overwrite those)
+        rc, out, _ = git(repo, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all")
         dirty = set()
         parts = out.split("\0")
         i = 0
@@ -340,17 +378,18 @@ def update(rep, args, repo):
         rep.say(f"repo: behind {upstream} by {behind} commit{'s' if behind != 1 else ''} ({short(head)} -> {short(up)})")
         if blocked and not check:
             shown = "\n".join(f"  {p}" for p in blocked)
-            raise Stop(EXIT_DIRTY, "the pull would change files with local modifications; nothing pulled. "
+            raise Stop(EXIT_DIRTY, "the pull would change or create files with local modifications; nothing pulled. "
                        f"Commit or set them aside (never stash another agent's edits), then rerun:\n{shown}")
         if blocked:
             rep.say("  the apply would refuse (exit 2): local modifications in " + ", ".join(blocked))
         if check:
-            rep.say(f"  would run: git -C {repo} pull --ff-only")
+            rep.say("  would run: " + shlex.join(["git", "-C", str(repo), "pull", "--ff-only"]))
             problems.append("behind")
         else:
             rc, out, err = git(repo, "pull", "--ff-only", timeout=NET_TIMEOUT)
             if rc != 0:
-                raise Stop(EXIT_NON_FF, f"git pull --ff-only failed; nothing merged or reset:\n{(err or out).strip()}")
+                raise Stop(pull_failure_code(err or out),
+                           f"git pull --ff-only failed; nothing merged or reset:\n{(err or out).strip()}")
             d["pulled"] = True
             rep.say(f"  pulled (fast-forward) to {short(git_out(repo, 'rev-parse', 'HEAD'))}")
     else:
@@ -362,12 +401,23 @@ def update(rep, args, repo):
     target = up if (check and behind) else new_head  # the revision whose tree this run reports on
 
     # 2. skills
-    names = skill_names(repo)
-    new_upstream = [n for n in upstream_skill_names(repo, target) if n not in names] if check and behind else []
+    names, skipped = skill_names(repo)
+    new_upstream = []
+    if check and behind:
+        up_names, up_skipped = upstream_skill_names(repo, target)
+        new_upstream = [n for n in up_names if n not in names]
+        skipped = sorted(set(skipped) | set(up_skipped))
     script = find_skill_everywhere(repo)
+    canonical = canonical_repo()
+    can_link = Path(repo).resolve() == canonical
     skills = {"checked": len(names), "script": script, "missing": [], "linked_now": [], "unresolved": [],
-              "new_upstream": new_upstream}
+              "new_upstream": new_upstream, "skipped": skipped, "link_mode": "link" if can_link else "report-only"}
     d["skills"] = skills
+    if skipped:
+        rep.say(f"skills: skipped (name not [A-Za-z0-9][A-Za-z0-9._-]*): {', '.join(skipped)}")
+    if not can_link:
+        rep.say(f"skills: report-only: {repo} is not the canonical skills home {canonical}; "
+                "linking from here would repoint every TUI's live skills into this checkout")
     if script is None:
         problems.append("skill-everywhere not found")
         rep.say("skills: skill-everywhere not found (neither <repo>/bin nor PATH); cannot check links")
@@ -379,29 +429,38 @@ def update(rep, args, repo):
             rep.say(f"skills: {len(names)} checked, every link in place")
         else:
             rep.say(f"skills: {len(names)} checked, {len(bad)} link(s) not in place")
-            for s, tui, st in bad:
-                rep.say(f"    {s}: {tui} {st}")
-        if fixable and check:
-            rep.say(f"  would run: {script} {' '.join(fixable)}")
+            if can_link:
+                for s, tui, st in bad:
+                    rep.say(f"    {s}: {tui} {st}")
+            else:  # rows would mostly be "other link" to the canonical checkout: count them, rows are in --json
+                kinds = Counter(re.split(r" -> | via ", st)[0] for _, _, st in bad)
+                rep.say("    " + ", ".join(f"{k} x{n}" for k, n in sorted(kinds.items())) + " (rows in --json)")
+        if fixable and not can_link:
+            pass  # report-only: no command is printed, it would link from this checkout
+        elif fixable and check:
+            rep.say("  would run: " + shlex.join([script, *fixable]))
         elif fixable:
             rc, _, _ = link_skills(script, repo, fixable)
             after, _ = check_skills(script, repo, fixable)
             left = {(s, tui) for s, tui, st in after if classify(st) != "ok"}
             skills["linked_now"] = sorted(set(fixable) - {s for s, _ in left})
-            rep.say(f"  ran: {script} {' '.join(fixable)} (rc={rc}); linked now: {', '.join(skills['linked_now']) or 'none'}")
+            rep.say(f"  ran: {shlex.join([script, *fixable])} (rc={rc}); linked now: {', '.join(skills['linked_now']) or 'none'}")
             bad = [b for b in bad if b[0] not in fixable or (b[0], b[1]) in left]
             for s, tui, st in bad:
                 if classify(st) == "fixable":
                     rep.say(f"    still not linked: {s} ({tui})")
-        for s, tui, st in bad:
+        for s, tui, st in bad if can_link else []:
             if classify(st) == "stuck":
-                rep.say(f"    {s}/{tui} is {st}: skill-everywhere leaves it alone; inspect it, then run: {script} {s}")
+                rep.say(f"    {s}/{tui} is {st}: skill-everywhere leaves it alone; inspect it, then run: "
+                        + shlex.join([script, s]))
         skills["missing"] = [{"skill": s, "tui": tui, "state": st} for s, tui, st in bad]
-        skills["unresolved"] = sorted({b[0] for b in bad}) if not check else []
-        if bad:
-            problems.append("skill links")
+        if can_link:  # a report-only run cannot fix these, so they neither fail the run nor hold back the state record
+            skills["unresolved"] = sorted({b[0] for b in bad}) if not check else []
+            if bad:
+                problems.append("skill links")
     if new_upstream:
-        rep.say(f"  new upstream skills (linked at apply): {', '.join(new_upstream)}")
+        rep.say(f"  new upstream skills ({'linked at apply' if can_link else 'not linked, report-only'}): "
+                f"{', '.join(new_upstream)}")
 
     # 3. symlinks
     cm = check_claude_md(repo)
@@ -413,10 +472,13 @@ def update(rep, args, repo):
     links = check_claude_links(repo)
     d["claude_links"] = links
     rep.say(f"~/.claude links (commands, agents, hooks): {links['ok']} ok, {len(links['problems'])} not in place")
-    for p in links["problems"]:
-        rep.say(f"    {p['path']}: {p['state']}; fix: {p['fix']}")
-    if links["problems"]:
-        problems.append("~/.claude links")
+    if can_link:
+        for p in links["problems"]:
+            rep.say(f"    {p['path']}: {p['state']}; fix: {p['fix']}")
+        if links["problems"]:
+            problems.append("~/.claude links")
+    elif links["problems"]:  # the links belong to the canonical checkout; a fix printed here would repoint them
+        rep.say("  report-only: not the canonical checkout, so these are neither counted nor given a fix (rows in --json)")
 
     # 4. changelog and state
     base = read_state(state_path, repo)
@@ -450,7 +512,11 @@ def update(rep, args, repo):
         rep.say(f"{state_note}: already {short(base)}")
         d["state_written"] = False
     else:
-        write_state(state_path, new_head)
+        try:
+            write_state(state_path, new_head)
+        except OSError as e:
+            d["state_written"] = False
+            raise Stop(EXIT_ERROR, f"cannot write the state file {state_path}: {e}")
         rep.say(f"{state_note}: recorded {short(new_head)}")
         d["state_written"] = True
 
@@ -462,7 +528,7 @@ def update(rep, args, repo):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="ade-update", description="Keep this machine's djbclark-ade checkout current.",
                                  epilog="Exit: 0 current, 10 behind/missing links (--check) or unresolved, 2 dirty tree, "
-                                        "3 diverged, 4 git/network error.")
+                                        "3 diverged, 4 git, network or state-file error.")
     ap.add_argument("--repo", default=DEFAULT_REPO, help=f"the checkout (default {DEFAULT_REPO})")
     ap.add_argument("--check", action="store_true", help="report only; change nothing, exit 10 when behind or links missing")
     ap.add_argument("--json", action="store_true", help="print the report as JSON")
