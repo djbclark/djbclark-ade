@@ -649,7 +649,7 @@ def test_remote_scan_with_an_origin_that_does_not_answer_is_not_clean_and_pushed
     assert c["local_only_branches"] == [{"branch": "feature", "count": 1}]
     # no origin branch list at all (not even local refs): the verdict is still not clean
     mod = load()
-    monkeypatch.setattr(mod, "origin_branches", lambda path, remote: (None, False, 0, {}))
+    monkeypatch.setattr(mod, "origin_branches", lambda path, remote: (None, False, 0, {}, False))
     c = scan_one(mod, roots, remote=True)
     assert c["verdict"] == "unpushed commits" and "origin unknown" in c["flags"], c["flags"]
     assert c["local_only_branches"] == [{"branch": "feature", "count": 1}]
@@ -1705,6 +1705,98 @@ def test_local_only_verified_needs_a_live_origin_answer(tmp_path):
     mod._remote_cache.clear()
     c = scan_one(mod, roots, remote=True)
     assert "no origin remote" in c["flags"] and c["local_only_verified"] is None
+
+
+def test_ls_remote_gets_the_url_through_the_environment_never_argv(tmp_path, monkeypatch):
+    """Codex pass 16, P1 (4325538238): the url sits in GIT_CONFIG_VALUE_0, the call names `origin`."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    real, calls = mod.run, []
+
+    def spy(argv, timeout=120, cwd=None, env=None, stdin_text=None):
+        if "ls-remote" in argv:
+            calls.append((list(argv), dict(env or {})))
+        return real(argv, timeout=timeout, cwd=cwd, env=env, stdin_text=stdin_text)
+    monkeypatch.setattr(mod, "run", spy)
+    c = scan_one(mod, roots, remote=True)
+    assert c["verdict"] == "clean and pushed" and c["local_only_verified"] is True, c["flags"]
+    (argv, env), = calls
+    assert env["GIT_CONFIG_COUNT"] == "1" and env["GIT_CONFIG_KEY_0"] == "remote.origin.url"
+    assert env["GIT_CONFIG_VALUE_0"] == str(origin)
+    assert argv[-2:] == ["--", "origin"] and not any(str(origin) in a for a in argv), argv
+    assert [k for k in env if k.startswith("GIT_CONFIG_KEY_") or k.startswith("GIT_CONFIG_VALUE_")] == [
+        "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"]
+
+
+def test_a_url_with_a_password_is_never_queried_and_never_leaks(tmp_path, monkeypatch):
+    """Codex pass 16, P1: `https://u:FAKE-SECRET@...` makes the checkout unverified; the secret is in no
+    argv, no environment of a spawned call, no JSON, no stderr and no rendered doc."""
+    secret = "FAKE-SECRET"
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    git(work, "config", "remote.origin.url", f"https://u:{secret}@127.0.0.1:9/x.git")
+    real, seen = mod.run, []
+
+    def spy(argv, timeout=120, cwd=None, env=None, stdin_text=None):
+        seen.append((list(argv), dict(env or {})))
+        return real(argv, timeout=timeout, cwd=cwd, env=env, stdin_text=stdin_text)
+    monkeypatch.setattr(mod, "run", spy)
+    c = scan_one(mod, roots, remote=True, fetch=True)
+    assert mod.ORIGIN_CREDENTIAL in c["flags"] and c["verdict"] == mod.ORIGIN_CREDENTIAL != "clean and pushed"
+    assert c["local_only_verified"] is False and mod.ORIGIN_UNREACHABLE not in c["flags"]
+    assert not any("ls-remote" in argv or "fetch" in argv for argv, _ in seen), "origin was asked"
+    assert not any(secret in a for argv, env in seen for a in argv) and not any(
+        secret in v for _, env in seen for v in env.values())
+    assert secret not in json.dumps(c) and secret not in repr(list(mod._remote_cache))
+    # without --remote the flag is not raised (nothing was asked), but --fetch still never fetches
+    mod._remote_cache.clear()
+    assert mod.ORIGIN_CREDENTIAL not in scan_one(mod, roots, fetch=True)["flags"]
+    assert not any("fetch" in argv for argv, _ in seen)
+    # through the CLI: stdout (JSON), stderr and the rendered doc
+    bigteam = tmp_path / "bigteam"
+    bigteam.mkdir()
+    p = subprocess.run([str(SCRIPT), "--bigteam", str(bigteam), "--git-root", str(roots), "--remote",
+                        "--fetch", "--json"], capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    assert secret not in p.stdout and secret not in p.stderr
+    rec = json.loads(p.stdout)["checkouts"][0]
+    assert rec["verdict"] == mod.ORIGIN_CREDENTIAL and rec["local_only_verified"] is False
+    scan = tmp_path / "scan.json"
+    scan.write_text(p.stdout)
+    out = tmp_path / "doc.md"
+    gen = doc_cli(scan, out)
+    assert gen.returncode == 0, gen.stderr
+    text = out.read_text()
+    assert secret not in text and secret not in gen.stderr and secret not in gen.stdout
+    assert "origin url holds a credential" in text and mod.ORIGIN_CREDENTIAL in text
+
+
+def test_url_holds_credential_reads_the_password_not_the_user():
+    mod = load()
+    for url, want in (("https://u:pw@host/x.git", True), ("https://u:@host/x.git", True),
+                      ("ssh://git:pw@host/x", True), ("https://user@host/x.git", False),
+                      ("ssh://git@host/x", False), ("git@host:x/y.git", False), ("host:x/y.git", False),
+                      ("https://host:8443/x.git", False), ("https://host/x?a=b@c:d", False),
+                      ("/tmp/some/origin.git", False), ("file:///tmp/o.git", False),
+                      ("https://u:pw@[::1/x", True)):
+        assert mod.url_holds_credential(url) is want, url
+
+
+def test_an_old_git_is_never_given_the_url_in_argv(tmp_path, monkeypatch):
+    """Before git 2.31 GIT_CONFIG_COUNT is ignored: the query is refused, the checkout is unreachable."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    real, asked = mod.run, []
+
+    def old_git(argv, timeout=120, cwd=None, env=None, stdin_text=None):
+        if argv[:2] == ["git", "--version"]:
+            return 0, "git version 2.30.9\n"
+        asked.append(argv)
+        return real(argv, timeout=timeout, cwd=cwd, env=env, stdin_text=stdin_text)
+    monkeypatch.setattr(mod, "run", old_git)
+    c = scan_one(mod, roots, remote=True)
+    assert mod.ORIGIN_UNREACHABLE in c["flags"] and c["local_only_verified"] is False
+    assert c["verdict"] != "clean and pushed" and not any("ls-remote" in a for a in asked)
 
 
 def test_remote_scan_with_an_unreachable_origin_is_never_clean_even_with_a_stale_tracking_ref(tmp_path):

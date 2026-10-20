@@ -28,6 +28,7 @@ from pathlib import Path
 
 HOME = str(Path.home())
 ORIGIN_UNREACHABLE = "origin unreachable: local-only count unverified"  # ade-scan-state's flag text
+ORIGIN_CREDENTIAL = "origin url holds a credential: not queried"  # same: never queried, treated as unreachable
 
 
 def tilde(p):
@@ -323,7 +324,8 @@ def render(d):
       "`clean and pushed` (no local-only commit on any local branch); the *also* column lists the other "
       "flags (`detached`, `origin unknown`, `local-only commits: <branch> <n>, tag <tag> <n>`) and the primary "
       "flag `origin unreachable: local-only count unverified` (`--remote` got no answer from origin, so the "
-      "checkout is never `clean and pushed`). "
+      "checkout is never `clean and pushed`) or `origin url holds a credential: not queried` (the url has a "
+      "password, so it is never queried: the same, the url is in no record). "
       "A checkout whose `status`, `rev-parse --abbrev-ref HEAD`, `for-each-ref`, `rev-list --count` or `remote get-url origin` call (only git's exit 2 `No such remote` means no origin) "
       "fails or times out is `scan incomplete: <call> rc=<n>` (`rc=124` is a timeout; `status` gets "
       "600 s, other calls 60 s) with null counts, and is never `clean and pushed`; a repository whose "
@@ -402,7 +404,8 @@ def render(d):
         modified, stashes, local_n = num(c["modified"]), num(c["stashes"]), num(c.get("local_only_commits"))
         head_ahead = next((v for v in (c["ahead_of_origin"], c["unpushed"])
                            if isinstance(v, int) and v > 0), 0)
-        unreachable = ORIGIN_UNREACHABLE in c["flags"]  # `local_only_verified` is false with it, whatever the counts
+        credential = ORIGIN_CREDENTIAL in c["flags"]  # the url is in no record: only the flag says so
+        unreachable = credential or ORIGIN_UNREACHABLE in c["flags"]  # `local_only_verified` is false with it, whatever the counts
         if not unreachable and not head_ahead and real_untr <= 0 and not stashes and not modified and not local_n:
             continue
         what, cmd, need = [], [], "no"
@@ -497,13 +500,16 @@ def render(d):
         if unreachable:
             # origin did not answer: the count trusted the local `refs/remotes/origin/*`, which a deleted or
             # force-pushed branch leaves stale, so even a 0 hides commits (adversary round 21, 1)
-            what.append("local-only count unverified: origin did not answer")
+            what.append("local-only count unverified: origin url holds a credential, not queried" if credential
+                        else "local-only count unverified: origin did not answer")
+            again = ("or remove the password from the origin url (ssh or a credential helper) and re-scan with "
+                     "`--remote`" if credential else "or re-scan with `--remote` once origin answers")
             if local_n and not covered_by_bundle:  # the local-only branch above already printed the bundle command
-                cmd.append("or re-scan with `--remote` once origin answers")
+                cmd.append(again)
             else:
                 cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} bundle create <DEST>/{} --all",
                                   ck, raw_p, f"{ck}/local-only.bundle")
-                           + " or re-scan with `--remote` once origin answers")
+                           + " " + again)
             need = need if need.startswith(("yes", "**yes")) else "yes: origin did not answer; bundle, or re-scan"
         w(f"| {p} | {'; '.join(what)} | {'; '.join(cmd)} | {need} |")
     w("")
