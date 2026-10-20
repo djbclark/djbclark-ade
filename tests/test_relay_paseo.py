@@ -73,9 +73,10 @@ class RelayPaseo(unittest.TestCase):
             os.environ.pop(k, None)
         self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved_env)))
         saved_attrs = [(relay.fleet, "sessions", relay.fleet.sessions), (relay.fleet, "ancestors", relay.fleet.ancestors),
-                       (relay.where, "real_cwd", relay.where.real_cwd)]
+                       (relay.where, "real_cwd", relay.where.real_cwd), (relay, "hosted_by", relay.hosted_by)]
         self.addCleanup(lambda: [setattr(o, n, v) for o, n, v in saved_attrs])
         relay.fleet.ancestors = lambda: set()    # hermetic: the test runner's real ancestry is not under test
+        relay.hosted_by = lambda agent_id: agent_id == CALLER    # the test runner "is" the CALLER agent
 
     def calls(self) -> list[str]:
         return self.log.read_text().splitlines() if self.log.exists() else []
@@ -114,6 +115,19 @@ class RelayPaseo(unittest.TestCase):
         sends = [e for e in self.envs() if e.startswith("send ")]
         self.assertEqual(sends, [f"send {CALLER}"], self.envs())
         self.assertFalse([e for e in self.envs() if e.endswith("NOID")], self.envs())
+
+    def test_an_inherited_or_acp_run_paseo_agent_id_still_gets_the_sender_tag(self) -> None:
+        # CALLER is set but no process in our ancestry is hosted by Paseo for it: an inherited id must not pose
+        # as the agent (Codex on PR 25); an acp-run slice (ACP_RUN_AGENT=1) is tagged even when hosted
+        relay.hosted_by = lambda agent_id: False
+        rc, _out, err = self.main([sess()], SID, "ping", "--wait", "1")
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(self.sends() and all("[relay from " in s_ for s_ in self.sends()), self.sends())
+        relay.hosted_by = lambda agent_id: agent_id == CALLER
+        os.environ["ACP_RUN_AGENT"] = "1"
+        rc, _out, err = self.main([sess()], SID, "ping again", "--wait", "1")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("[relay from ", self.sends()[-1])
 
     def test_a_caller_that_is_not_a_paseo_agent_prefixes_a_sender_tag(self) -> None:
         del os.environ["PASEO_AGENT_ID"]

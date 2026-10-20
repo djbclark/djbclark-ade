@@ -148,6 +148,12 @@ def paseo_gate(s):
     return None
 
 
+def hosted_by(agent_id):
+    """True when this process, or one of its ancestors, is the process Paseo's daemon hosts for AGENT_ID
+    (parent titled Paseo Daemon, the id in its environment): an inherited PASEO_AGENT_ID alone does not count."""
+    return any(where.paseo_agent(pid, where.env_of(pid)) == agent_id for pid in (os.getpid(), *fleet.ancestors()))
+
+
 def paseo_is_self(agent_id):
     """True when AGENT_ID is the Paseo agent this process runs in: the PASEO_AGENT_ID it was handed, or
     (a child env scrubbed of it) the agent hosting one of its ancestors."""
@@ -183,8 +189,10 @@ def paseo_idle(s, seconds):
 def sender_tag(listed):
     """'[relay from NAME] ' for a caller that is not a Paseo agent (Paseo labels only an agent sender): the
     caller's session name, else the first 8 characters of its session id."""
-    if UUID.fullmatch((os.environ.get("PASEO_AGENT_ID") or "").strip()):
-        return ""    # a real agent id: Paseo labels the message itself (an empty or junk value does not count)
+    own = (os.environ.get("PASEO_AGENT_ID") or "").strip()
+    if UUID.fullmatch(own) and not os.environ.get("ACP_RUN_AGENT") and hosted_by(own):
+        return ""    # genuinely this agent: Paseo labels the message itself. An empty or junk value, an acp-run
+                     # slice, or an inherited id with no Paseo-hosted ancestor (Codex, PR 25) gets the tag
     me = next((x for x in listed if x.get("self")), None) or {}
     name = me.get("name") or me.get("id") or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "")[:8] or "unknown"
     return f"[relay from {fleet.clip(re.sub(r'[^A-Za-z0-9._ -]', '', name), 40) or 'unknown'}] "
