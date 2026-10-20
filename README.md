@@ -173,6 +173,8 @@ way. `helm.py` imports `fleet` from the sibling `skills/session-finder/`.
     chain library: route registry, deny list and allowlists, preflight against
     `aiuse --available`, ordered attempts with a JSONL log, fresh-context `ask`. `bin/skillopt_sources.py`
     reads zcode, agy and crush session stores into SessionDigest JSON for it.
+16. [`docs/threat-model.md`](docs/threat-model.md) — the threat model (2026-10-20): assets, trust
+    boundaries, entry points and ranked threats; what a security review of a PR reads.
 
 ## Architecture: agent graphs at two altitudes
 
