@@ -83,6 +83,7 @@ def _sampler(tmp_path, monkeypatch):
         clock["t"] = t
         lw.cmd_sample(A())
         return (tmp_path / "sample.log").read_text() if (tmp_path / "sample.log").exists() else ""
+    at.lw = lw
     return at
 
 
@@ -92,6 +93,31 @@ def test_sustain_is_time_based_and_tolerates_slow_samples(tmp_path, monkeypatch)
     assert at(1200) == ""            # 200 s hot: not yet
     assert "sustained load" in at(1400)  # 400 s hot, samples 200 s apart (a stalled launchd)
 
+
+
+def test_unexplained_load_reaches_the_watcher_hourly(tmp_path, monkeypatch):
+    """Hermes hears an unexplained sustained load every 6 h; the watcher every hour (djbclark, 2026-10-20)."""
+    at = _sampler(tmp_path, monkeypatch)
+    lw = at.lw
+    load = {"v": 40.0}
+    monkeypatch.setattr(lw.os, "getloadavg", lambda: (load["v"],) * 3)
+    sent = []
+    monkeypatch.setattr(lw, "send_to", lambda w, text: sent.append(text) or True)
+    lw.save_watcher({"channel": "paseo", "target": "agent-a"})
+
+    def episode(start):
+        load["v"] = 40.0
+        at(start)
+        at(start + 400)
+        load["v"] = 1.0
+        at(start + 500)  # cools off: the next spike is a new episode
+
+    episode(1000)
+    assert len(sent) == 1 and "no agent build behind it" in sent[0]
+    episode(2000)                      # 1000 s later: inside the hour
+    assert len(sent) == 1
+    episode(1000 + lw.WATCHER_NOCPU_S + 100)
+    assert len(sent) == 2
 
 def test_long_gap_restarts_the_clock(tmp_path, monkeypatch):
     at = _sampler(tmp_path, monkeypatch)
@@ -196,6 +222,24 @@ def test_guard_catches_a_crash_loop_on_any_job(tmp_path, monkeypatch):
     s = st["guard"]["com.y.loop"]
     assert s["state"] == "cooldown" and "crash loop: 30 restarts" in s["trip"]
 
+
+
+def test_guard_catches_a_slow_crash_loop(tmp_path, monkeypatch):
+    """litellm, 2026-10-20: a restart every ~32 s stays under the fast rule (20 per 10 min) for ever; the slow
+    rule (60 in 2 h) must trip it."""
+    runs = {"n": 100}
+    lw, calls = _guard(tmp_path, monkeypatch, {"com.y.slow": (None, "1")}, runs)
+    lw.PSTATE.clear()
+    st, t, checks = {}, 1000.0, 0
+    while st.get("guard", {}).get("com.y.slow", {}).get("state") != "cooldown":
+        assert checks < 60, "slow loop never tripped"
+        lw.guard(st, {}, t, False)
+        t += lw.LOOP_CHECK_S
+        runs["n"] += 3  # 15 per 10 min: under the fast rule
+        checks += 1
+    s = st["guard"]["com.y.slow"]
+    assert "crash loop: 60 restarts in 40 min" in s["trip"]
+    assert ["launchctl", "bootout", f"gui/{lw.MY_UID}/com.y.slow"] in calls
 
 # ---- brief attribution: the work's repo, and whether it ran under bg (incident 20261018-2056-82c4844a) -----------
 BG = str(Path.home() / "ops/site-private/bin/bg")

@@ -38,7 +38,7 @@ work), ask djbclark before creating a CI copy of a repo that is not on GitHub, a
 the repo so `bg` refuses local builds and tests in it.
 
 Job guard (2026-10-18): each sample also checks launchd jobs (see the `job guard` section): a crash loop in
-any non-Apple job, and hangs, CPU, memory or run time in the jobs listed in ~/.config/load-watch/guard.tsv.
+any non-Apple job (20 failed restarts in 10 min, or 60 in 2 h), and hangs, CPU, memory or run time in the jobs listed in ~/.config/load-watch/guard.tsv.
 A trip boots the job out, kills its processes, pings Hermes and cools it down 90 min, then re-tests it; a
 5th round in 24 h disables it for good (`load-watch guard reset LABEL` brings it back). Events: guard.jsonl.
 
@@ -47,6 +47,7 @@ a Paseo agent by `paseo send`, anything else by relay.py). Every incident, every
 explains, and every guard trip is also sent to it, so a session with a model investigates. One record
 (watcher.json): `set` replaces the last watcher and tells it so. A failed send is stamped `last_fail`, never
 fatal; the watcher is skipped for an incident only when it is the blamed session and the relay reached it.
+Unexplained sustained load reaches the watcher at most hourly (WATCHER_NOCPU_S), Hermes every LW_COOLDOWN_H.
 
 State: ~/.local/state/load-watch/ (state.json, incidents.jsonl, guard.jsonl, briefs/, sample.log, watcher.json).
 Registry: ~/.config/load-watch/ci-only.tsv (repo TAB mode TAB CI command or reason TAB date), read by `bg`
@@ -96,6 +97,7 @@ SUSTAIN_S = float(os.environ.get("LW_SUSTAIN_S", "300"))  # seconds of continuou
 MAX_GAP_S = 900  # a longer gap between samples is a sleep, not load
 MIN_CORES = float(os.environ.get("LW_MIN_CORES", "1.5"))
 COOLDOWN_S = float(os.environ.get("LW_COOLDOWN_H", "6")) * 3600
+WATCHER_NOCPU_S = 3600  # the watcher is told of unexplained sustained load at most this often
 MY_UID = os.getuid()
 STUCK = []  # commands ps saw in state U this sample
 PSTATE = {}  # pid -> (ps state, rss in KB) this sample, for the job guard
@@ -630,6 +632,9 @@ GUARD_COOLDOWN_S = float(os.environ.get("LW_GUARD_COOLDOWN_S", "5400"))  # 90 mi
 GUARD_TEST_S = 1800        # a re-enabled job that trips within this window starts the next round
 GUARD_MAX_ROUNDS = 5       # rounds in 24 h before the job is disabled for good
 LOOP_RUNS, LOOP_WINDOW_S = 20, 600   # crash loop: this many failed restarts within this window
+# a slow crash loop (2026-10-20): litellm failed every ~32 s for 19 h after a half-finished upstream merge,
+# ~19 restarts per 10 min, just under the fast rule, 2,169 restarts and never tripped
+SLOW_LOOP_RUNS, SLOW_LOOP_WINDOW_S = 60, 7200
 LOOP_CHECK_S = 120         # `launchctl print` failing jobs at most this often
 LIMIT_KEYS = {"hang_s": 120.0, "max_cores": 0.0, "cores_s": 60.0, "max_rss_mb": 0.0, "max_runtime_s": 0.0}
 GUARD_EXEMPT = {LABEL}
@@ -798,11 +803,14 @@ def guard(st, table, t, dry):
         if loop_check and status not in ("0", "-"):
             runs = job_info(label)[0]
             if runs is not None:
-                hist = [h for h in s.get("loop", []) if t - h[0] <= LOOP_WINDOW_S] + [[t, runs]]
+                hist = [h for h in s.get("loop", []) if t - h[0] <= SLOW_LOOP_WINDOW_S] + [[t, runs]]
                 s["loop"] = hist
-                if runs - hist[0][1] >= LOOP_RUNS:
-                    reason = (f"crash loop: {runs - hist[0][1]} restarts in {(t - hist[0][0]) / 60:.0f} min, "
-                              f"last exit {status}")
+                fast = next(h for h in hist if t - h[0] <= LOOP_WINDOW_S)
+                for base, need in ((fast, LOOP_RUNS), (hist[0], SLOW_LOOP_RUNS)):
+                    if runs - base[1] >= need:
+                        reason = (f"crash loop: {runs - base[1]} restarts in {(t - base[0]) / 60:.0f} min, "
+                                  f"last exit {status}")
+                        break
         elif status in ("0", "-"):
             s.pop("loop", None)
         lim = rows.get(label, {}).get("limits")
@@ -964,12 +972,16 @@ def cmd_sample(a):
                 "; ".join(f"{r['cores']} {r['cmd'][:60]}" for r in loose[:3]))
             st["loose_logged"] = True
             # 2026-10-18: load 90 from memory starvation and a hung AFS aklog blamed no agent and told no one
+            msg = f"load {load1:.0f} on {ncpu} cores for {SUSTAIN_S / 60:g}+ min and no agent build behind it; {why}"
             if "nocpu" not in st["cooldown"] and not a.dry_run:
-                msg = f"load {load1:.0f} on {ncpu} cores for {SUSTAIN_S / 60:g}+ min and no agent build behind it; {why}"
                 if HERMES_PING.exists():
                     subprocess.run([str(HERMES_PING), f"djbclark-ade: load-watch: {msg}"], capture_output=True, timeout=60)
-                tell_watcher(msg + ".", a.dry_run)
                 st["cooldown"]["nocpu"] = t
+            # the watcher hears a recurrence hourly, Hermes only every COOLDOWN_S (djbclark, 2026-10-20)
+            last = st["cooldown"].get("nocpu-watcher")
+            if not a.dry_run and (last is None or t - last >= WATCHER_NOCPU_S):
+                if tell_watcher(msg + ".", a.dry_run) is not None:
+                    st["cooldown"]["nocpu-watcher"] = t
     elif not hot:
         st.pop("loose_logged", None)
     save_state(st)
@@ -1003,7 +1015,7 @@ def cmd_status(a):
     for pid, (secs, _, cmd) in sorted(use.items(), key=lambda kv: -kv[1][0])[:8]:
         print(f"  {secs / span if span else 0:5.2f} cores  pid {pid}  {cmd[:110]}")
     for k, v in st.get("cooldown", {}).items():
-        print(f"  cooldown {k} until {stamp(v + COOLDOWN_S)}")
+        print(f"  cooldown {k} until {stamp(v + (WATCHER_NOCPU_S if k == 'nocpu-watcher' else COOLDOWN_S))}")
     return 0
 
 

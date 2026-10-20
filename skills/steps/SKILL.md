@@ -86,6 +86,13 @@ Shared rules for every prompt, whichever tool:
    Paseo's question card is neither selectable nor linkified
    ([getpaseo/paseo#3164](https://github.com/getpaseo/paseo/issues/3164);
    djbclark, 2026-10-19). The card carries only the decision text.
+6. **Text he must read before deciding goes in the reply as wrapped markdown**
+   (a PR or issue body, a draft message, a quoted document): a blockquote or
+   plain prose, never `cat` output. Tool-output blocks do not word-wrap
+   (Paseo shows a horizontal scrollbar); reply markdown does (djbclark,
+   2026-10-20: "you should always do it that way"). Fixed-width only for
+   diffs, commands and transcripts. The file stays the source of truth for
+   `--body-file`. Memory: `feedback_long_text_as_wrapped_prose.md`.
 
 ### 2a. `AskUserQuestion` (arrow keys)
 
