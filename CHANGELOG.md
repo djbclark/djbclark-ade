@@ -22,6 +22,10 @@ agent what changed and what is new. Entries end with the pull request number.
   database copy, and a schema guard fails the run on any other credential-looking table or column; session
   transcripts are copied as they are and can hold pasted secrets. Refuses a destination that exists, holds
   a source store or sits inside one, a configured store counting whether or not it exists (#24).
+- `agents/` templates for `~/.claude/settings.json`, `~/.codex/config.toml`, opencode's `opencode.json` and
+  `~/.hermes/config.yaml` (secrets, home paths and host or account ids as placeholders, listed in
+  `agents/README.md`), `bin/ade-template-check` (credential scan, render-and-parse with plain and hostile values, `--diff` by key path) and its
+  tests; CI now installs PyYAML for them (#23).
 - `loadwatch` skill and `load-watch watcher set|show|clear|test`: one registered agent session (a Paseo
   agent by `paseo send`, else relay.py) also hears every load incident, unexplained sustained load and
   job-guard trip, and investigates; `set` replaces the old watcher and tells it (2026-10-20).
