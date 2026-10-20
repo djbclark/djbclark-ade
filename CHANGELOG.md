@@ -48,6 +48,8 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `diskfree` skill: the idle check for deleting a cache runs in the same command as the delete; a
+  `target-shared` delete approved minutes earlier broke a live maturin build (2026-10-20).
 - `load-watch` job guard: a slow crash loop (60 failed restarts in 2 h) now trips too; litellm restarted
   every ~32 s for 19 h, just under the 20-in-10-min rule, and was never stopped (2026-10-20).
 - `load-watch`: the registered watcher hears an unexplained sustained load at most hourly; Hermes keeps
