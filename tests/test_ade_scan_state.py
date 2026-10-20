@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 import types
@@ -2064,7 +2065,7 @@ def test_capture_plan_keeps_staged_changes_and_every_stash():
     assert "git -C /p/w diff --binary > <DEST>/checkouts/abs/p/w/modified.patch && git -C /p/w diff --binary --cached > " \
            "<DEST>/checkouts/abs/p/w/staged.patch" in row  # Codex pass 21: a plain diff drops a binary file's bytes
     assert "3 stashes" in row and "stash0.patch" not in row and "bundle create <DEST>/checkouts/abs/p/w/stashes" not in row
-    assert "seq 0 2" in row and "stash show -p --binary --include-untracked" in row and "stash$i.patch" in row.replace("\\$", "$")
+    assert "log -g --format=%gd refs/stash" in row and "stash show -p --binary --include-untracked" in row
 
 
 def test_stash_capture_command_really_saves_every_stash_with_its_untracked_files(tmp_path):
@@ -2079,14 +2080,26 @@ def test_stash_capture_command_really_saves_every_stash_with_its_untracked_files
     git(repo, "stash", "push", "-u", "-m", "newer")
     assert git(repo, "stash", "list").count("\n") == 2
     ck = mod.checkout_dir(str(repo))
-    cmd = mod.STASH_FMT.format(*map(mod.shquote, mod.stash_values(str(repo), ck, 2))).replace("<DEST>", str(tmp_path / "dest"))
-    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
-    assert run.returncode == 0, run.stderr
-    p0 = (tmp_path / "dest" / ck / "stash0.patch").read_text()
-    p1 = (tmp_path / "dest" / ck / "stash1.patch").read_text()
-    assert "second stash" in p0 and "new file.bin" in p0 and "GIT binary patch" in p0  # newest, untracked and binary kept
-    assert "first stash" in p1 and "new file.bin" not in p1
-    assert not list((tmp_path / "dest" / ck).glob("stash2.patch"))
+    cmd = mod.STASH_FMT.format(*map(mod.shquote, mod.stash_values(str(repo), ck))).replace("<DEST>", str(tmp_path / "dest"))
+    # adversary round 27: a stash pushed after the scan must be saved too (the entries are listed at run time)
+    (repo / "a.txt").write_text("third stash\n")
+    git(repo, "stash", "push", "-m", "newest")
+    for shell in ("bash", "zsh"):
+        if shutil.which(shell) is None:
+            continue
+        run = subprocess.run([shell, "-c", cmd], capture_output=True, text=True)
+        assert run.returncode == 0, (shell, run.stderr)
+        p0 = (tmp_path / "dest" / ck / "stash0.patch").read_text()
+        p1 = (tmp_path / "dest" / ck / "stash1.patch").read_text()
+        p2 = (tmp_path / "dest" / ck / "stash2.patch").read_text()
+        assert "third stash" in p0
+        assert "second stash" in p1 and "new file.bin" in p1 and "GIT binary patch" in p1  # untracked and binary kept
+        assert "first stash" in p2 and "new file.bin" not in p2
+        assert not list((tmp_path / "dest" / ck).glob("stash3.patch"))
+    # the loop runs in a subshell: a failure ends the loop with rc 1 and nothing else (no `exit` of the caller)
+    bad = cmd.replace("--include-untracked", "--no-such-option")
+    run = subprocess.run(["bash", "-c", bad + "; echo still-here"], capture_output=True, text=True)
+    assert "still-here" in run.stdout and run.returncode == 0
 
 
 def test_section_1_verdict_rows_sum_to_the_checkout_count():
