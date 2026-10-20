@@ -245,6 +245,59 @@ class ScanTest(unittest.TestCase):
                 values = ("".join(rng.choice(alnum) for _ in range(24)) for _ in range(500))
                 self.assertEqual([v for v in values if not atc.scan(ctx % v)], [])
 
+    def test_escaped_quotes_around_keys_and_values_are_scanned(self):
+        # Codex PR 23 finding 2: a TOML or JSON command string holding escaped header JSON
+        value = "Zq7Lm2Xw9Rt4Vb8Nc3Hd6Fk1"
+        for name, text in {
+            "toml single escape": r"""command = "printf '{\"x-api-key\":\"%s\"}'" """ % value,
+            "toml double-quoted header": r"""command = "printf \"{\"x-api-key\":\"%s\"}\"" """ % value,
+            "json single escape": r'''"command": "printf '{\"x-api-key\":\"%s\"}'"''' % value,
+            "triple escape": r"""command = "printf '{\\\"x-api-key\\\":\\\"%s\\\"}'" """ % value,
+            "short value": r"""command = "printf '{\"x-api-key\":\"abcd1234\"}'" """,
+            "single-quoted escape": r"""command = "printf \'{\'api_key\':\'%s\'}\'" """ % value,
+        }.items():
+            with self.subTest(name):
+                self.assertIn("secret-looking key: value", self.rules(text))
+        for name, text in {
+            "env ref": r"""command = "printf '{\"x-api-key\":\"${X}\"}'" """,
+            "secret tag": r"""command = "printf '{\"x-api-key\":\"{{ secret "X" }}\"}'" """,
+            "triple escape tag": r"""command = "printf '{\\\"x-api-key\\\":\\\"{{ secret "X" }}\\\"}'" """,
+            "printf arg": r"""command = "printf '{\"x-api-key\":\"%s\"}' \"$KEY\"" """,
+        }.items():
+            with self.subTest(name):
+                self.assertEqual(self.rules(text), set())
+
+    @unittest.skipUnless(HAVE_YAML, "PyYAML not importable")
+    def test_yaml_block_scalar_values_are_scanned(self):
+        # Codex PR 23 finding 1: `api_key: >-` and the value on the next line, under the 32-character blob floor
+        value = "Zq7Lm2Xw9Rt4Vb8Nc3Hd6Fk1"
+        for indicator in ("|", "|-", ">", ">-", "|+"):
+            with self.subTest(indicator):
+                hits = atc.scan(f"hermes:\n  api_key: {indicator}\n    {value}\n", "yaml")
+                self.assertEqual(hits, [(2, "secret-looking key: value")])
+        self.assertTrue(atc.scan(f"- token: |\n    {value}\n", "yaml"))
+        self.assertTrue(atc.scan(f"token:\n  - >-\n    {value}\n", "yaml"))
+        for name, text in {
+            "secret tag": 'api_key: >-\n  {{ secret "X" }}\n',
+            "literal secret tag": 'api_key: |\n  {{ secret "X" }}\n',
+            "env ref": "api_key: |-\n  ${X}\n",
+            "env ref folded": "api_key: >\n  ${X}\n",
+            "not a credential key": f"note: |\n  {value}\n",
+            "comment block": "# api_key is set in the vault\n# token handling:\n#   see the docs\nname: x\n",
+            "empty block": "api_key: |\n\nname: x\n",
+        }.items():
+            with self.subTest(name):
+                self.assertEqual(atc.scan(text, "yaml"), [])
+        # a tag with a tail after it is a hit, as on one line
+        self.assertTrue(atc.scan('api_key: >-\n  {{ secret "X" }}tail1234\n', "yaml"))
+
+    @unittest.skipUnless(HAVE_YAML, "PyYAML not importable")
+    def test_yaml_block_scalar_is_a_finding_through_the_cli(self):
+        rc, out = Root(self, "a:\n  api_key: >-\n    Zq7Lm2Xw9Rt4Vb8Nc3Hd6Fk1\n", name="t/c.yaml.tmpl").check()
+        self.assertEqual(rc, 1)
+        self.assertIn("t/c.yaml.tmpl:2: credential scan: secret-looking key: value", out)
+        self.assertNotIn("Zq7Lm2Xw9Rt4Vb8Nc3Hd6Fk1", out)
+
     def test_literal_escaped_home_path_fails(self):
         self.assertIn("literal home path", self.rules(r'p = "\/Users\/alex\/bin"'))
 

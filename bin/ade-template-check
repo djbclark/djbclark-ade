@@ -165,26 +165,77 @@ def _dotted_is_key(run: str) -> bool:
     return _blob_is_key(run.replace(".", "_")) or _key_like(run.replace(".", ""))
 
 
-def scan(text: str) -> list[tuple[int, str]]:
-    """(line number, rule) for every credential-looking token; never the value itself."""
+# One or more backslashes before a quote: a JSON or TOML string holding escaped JSON or a shell word (`\"`, `\\\"`).
+_ESCAPED_QUOTE = re.compile(r"""\\+(["'])""")
+_KEYED = dict(PATTERNS)["secret-looking key: value"]
+_STANDIN = "TAGSTANDIN0"
+
+
+def _line_hits(line: str) -> list[str]:
+    rules: list[str] = []
+    for rule, pat in PATTERNS:
+        if pat.search(line):
+            rules.append(rule)
+    for m in DOTTED.finditer(line):
+        if _dotted_is_key(m.group(0)):
+            rules.append("dot-joined token")
+    for m in BLOB.finditer(line):
+        blob = m.group(0)
+        if sha256(blob.encode()).hexdigest() in ALLOW_BLOBS:
+            continue
+        if _blob_is_key(blob):
+            rules.append("32+ character hex string" if re.fullmatch(r"[0-9a-fA-F]+", blob)
+                         else "32+ character base64-like string")
+    return rules
+
+
+def _yaml_value_hits(text: str, seen: set[tuple[int, str]]) -> list[tuple[int, str]]:
+    """The key-name rule over every parsed scalar of a YAML document, with its nearest mapping key as the name: a
+    block scalar (`api_key: >-` and an indented value on the next line) is invisible to the line scan, which
+    reads the key's line only. Reported at the key's line. A document that does not parse is the render check's
+    finding, not this one's."""
+    try:
+        import yaml
+        root = yaml.compose(ANY_TAG.sub(_STANDIN, text))
+    except Exception:  # noqa: BLE001 - PyYAML missing or a parse error: reported by the render step
+        return []
+    hits: list[tuple[int, str]] = []
+
+    def walk(node, key: str | None, line: int) -> None:
+        if isinstance(node, yaml.MappingNode):
+            for k, v in node.value:
+                walk(v, k.value if isinstance(k, yaml.ScalarNode) else key, k.start_mark.line + 1)
+        elif isinstance(node, yaml.SequenceNode):
+            for item in node.value:
+                walk(item, key, line)
+        elif isinstance(node, yaml.ScalarNode) and key is not None:
+            value = " ".join(node.value.replace(_STANDIN, MASK).split())
+            if (line, "secret-looking key: value") not in seen and _KEYED.search(f"{key}: {value}"):
+                hits.append((line, "secret-looking key: value"))
+
+    walk(root, None, 0)
+    return hits
+
+
+def scan(text: str, kind: str | None = None) -> list[tuple[int, str]]:
+    """(line number, rule) for every credential-looking token; never the value itself. Each line is also scanned
+    with its backslash-escaped quotes unescaped (a command string holding escaped header JSON); `kind` "yaml"
+    adds the parsed-scalar pass."""
     masked = ANY_TAG.sub(MASK, text)
     hits: list[tuple[int, str]] = []
     # the flag and its value may sit on two lines (a YAML list, a multi-line TOML array), so this one runs on the text
-    hits.extend((masked.count("\n", 0, m.start()) + 1, "credential flag argument") for m in ARGV.finditer(masked))
+    for variant in dict.fromkeys((masked, _ESCAPED_QUOTE.sub(r"\1", masked))):
+        seen = {h[0] for h in hits}
+        hits.extend((variant.count("\n", 0, m.start()) + 1, "credential flag argument")
+                    for m in ARGV.finditer(variant) if variant.count("\n", 0, m.start()) + 1 not in seen)
     for lineno, line in enumerate(masked.splitlines(), 1):
-        for rule, pat in PATTERNS:
-            if pat.search(line):
-                hits.append((lineno, rule))
-        for m in DOTTED.finditer(line):
-            if _dotted_is_key(m.group(0)):
-                hits.append((lineno, "dot-joined token"))
-        for m in BLOB.finditer(line):
-            blob = m.group(0)
-            if sha256(blob.encode()).hexdigest() in ALLOW_BLOBS:
-                continue
-            if _blob_is_key(blob):
-                hits.append((lineno, "32+ character hex string" if re.fullmatch(r"[0-9a-fA-F]+", blob)
-                             else "32+ character base64-like string"))
+        rules = _line_hits(line)
+        plain = _ESCAPED_QUOTE.sub(r"\1", line)
+        if plain != line:
+            rules.extend(r for r in _line_hits(plain) if r not in rules)
+        hits.extend((lineno, r) for r in rules)
+    if kind == "yaml":
+        hits.extend(_yaml_value_hits(text, set(hits)))
     return hits
 
 
@@ -322,11 +373,11 @@ def check_one(path: Path, root: Path, do_diff: bool, out) -> int:
     except ValueError:
         label = str(path)
 
-    for lineno, rule in scan(text):
+    kind = kind_of(path)
+    for lineno, rule in scan(text, kind):
         print(f"{label}:{lineno}: credential scan: {rule}", file=out)
         findings += 1
 
-    kind = kind_of(path)
     try:
         fields, secrets = fields_used(text)
     except ValueError as e:
