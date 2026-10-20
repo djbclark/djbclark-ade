@@ -3,6 +3,18 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Follow-ups from the 2026-10-20 reviews
+
+1. **`bin/firecrawl-router` serve-only form binds any `--listen` with no token** (adversary, threat-model
+   review 2026-10-20: `--open` refuses a non-loopback address, serve-only does not). Make serve-only refuse a
+   non-loopback `--listen` the same way; one small PR with a test.
+2. **Claude API credits from the Admin API, not by hand** (djbclark, 2026-10-20): the Admin API has no balance
+   endpoint, but `/v1/organizations/cost_report` gives spend; remaining promo = grant ($200, 2026-10-13, expires
+   2026-11-08) minus cost since the grant. Plan: an `aiuse` collector behind `ANTHROPIC_ADMIN_KEY` in
+   `sudo-secretspec` (djbclark creates the key in the console, Organization settings > Admin keys), grant
+   parameters stay in the `set-credits` override, a launchd/`fleet-watch` job refreshes it (never a model prompt,
+   home rule 13). Blocked on the key.
+
 ## Cloud-agent readiness: Codex Cloud environment, Cursor API key (ruling 2026-10-19)
 
 `docs/ade-everywhere-proposal.md` §11.5 rules that paid-for cloud agents are used first for
