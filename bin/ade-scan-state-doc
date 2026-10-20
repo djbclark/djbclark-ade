@@ -29,6 +29,7 @@ from pathlib import Path
 HOME = str(Path.home())
 ORIGIN_UNREACHABLE = "origin unreachable: local-only count unverified"  # ade-scan-state's flag text
 ORIGIN_CREDENTIAL = "origin url holds a credential: not queried"  # same: never queried, treated as unreachable
+SUBMODULES_FLAG = "submodules not inspected"  # same: no count above covers a submodule's content
 
 
 def tilde(p):
@@ -406,7 +407,9 @@ def render(d):
                            if isinstance(v, int) and v > 0), 0)
         credential = ORIGIN_CREDENTIAL in c["flags"]  # the url is in no record: only the flag says so
         unreachable = credential or ORIGIN_UNREACHABLE in c["flags"]  # `local_only_verified` is false with it, whatever the counts
-        if not unreachable and not head_ahead and real_untr <= 0 and not stashes and not modified and not local_n:
+        submodules = SUBMODULES_FLAG in c["flags"]  # `status --ignore-submodules=all`: the counts see nothing in there
+        if (not unreachable and not submodules and not head_ahead and real_untr <= 0 and not stashes and not modified
+                and not local_n):
             continue
         what, cmd, need = [], [], "no"
         head_row = False
@@ -511,13 +514,22 @@ def render(d):
                                   ck, raw_p, f"{ck}/local-only.bundle")
                            + " " + again)
             need = need if need.startswith(("yes", "**yes")) else "yes: origin did not answer; bundle, or re-scan"
+        if submodules:
+            # the scan's status and local-only counts ignore submodules and discovery stops at the superproject: a
+            # submodule's modified, untracked or unpushed work is in no count above (Codex pass 18 on PR 27)
+            what.append("submodules not inspected: their modified, untracked or unpushed content is in no count here")
+            cmd.append("list them with " + shcode("git -C {} config --file .gitmodules --get-regexp '^submodule\\..*\\.path$'", raw_p)
+                       + ", then scan each as its own checkout (`ade-scan-state --git-root <path>/<sub>`) and capture "
+                         "it like a row here before any cleanup")
+            need = need if need.startswith(("yes", "**yes")) else "yes: inspect each submodule first"
         w(f"| {p} | {'; '.join(what)} | {'; '.join(cmd)} | {need} |")
     w("")
     w("Checkouts not listed are `clean and pushed` (branch on origin or no commits origin lacks, HEAD only; "
       "see limit 9), hold only the reproducible `graft/` index, or are `skipped` / `scan incomplete` "
       "(no counts: see their verdict in the section 2 table). A checkout flagged `origin unreachable` is "
       "always listed, whatever its counts: its local-only count came from stale tracking refs and is "
-      "unverified, so a 0 there is not `clean and pushed`.\n")
+      "unverified, so a 0 there is not `clean and pushed`. A checkout flagged `submodules not inspected` is "
+      "always listed too: no count here covers a submodule's content.\n")
 
     # ---- 4 caveats
     w("## 4. Limits of this scan\n")

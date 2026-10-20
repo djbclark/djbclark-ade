@@ -80,7 +80,8 @@ Git checkout verdicts (a checkout is a dir holding `.git`, found up to two level
                     counts null), counted under `checkouts.incomplete`; the exit status stays 0.
 Local-only commits: `local_only_commits` is `git rev-list --count HEAD --branches --tags --not
 --remotes=origin` (a commit reachable only from a local tag counts: the branch it was on may be reset or
-deleted); with --remote and an answering `ls-remote` it is `--not <every live origin head and tag tip>`
+deleted; with no origin remote nothing is excluded, a leftover `refs/remotes/origin/*` ref proves
+nothing); with --remote and an answering `ls-remote` it is `--not <every live origin head and tag tip>`
 alone (a tag origin has is not local-only; an annotated tag contributes its tag object and its peeled
 commit): a stale local tracking ref of a live branch proves nothing (origin may have force-pushed it) and
 one of a deleted branch is stale (a live tip whose objects are missing here excludes nothing, so the
@@ -113,7 +114,8 @@ ls-remote --heads --tags -- origin` with the url in GIT_CONFIG_COUNT=1, GIT_CONF
 GIT_CONFIG_VALUE_0=<url> (git 2.31+): never in argv, where any process could read it; an older git is not
 asked (`origin unreachable`, one line on stderr). `--fetch` runs inside the checkout as `fetch origin`.
 Extra flag `submodules not inspected`: the checkout has submodules; `status` ignores their state, so
-the verdict says nothing about them (it is that flag, not `clean and pushed`, when nothing else applies).
+the verdict says nothing about them (it is that flag, not `clean and pushed`, when nothing else applies)
+and the capture plan always lists the checkout with an instruction to scan each submodule as its own checkout.
 Extra flag `origin tip not fetched`: the branch is on origin at a commit this checkout cannot
 compare with HEAD (add --fetch); `ahead_of_origin` then still counts those commits.
 Flag `origin tips not fetched: <n>` (--remote): n live origin tips whose objects are not here (the
@@ -802,16 +804,17 @@ def incomplete_record(path: Path, call: str, rc: int) -> dict:
 
 
 def local_only_count(path: Path, revs: list[str], tips: list[str],
-                     live: bool = False) -> tuple[int | None, int]:
+                     live: bool = False, has_origin: bool = True) -> tuple[int | None, int]:
     """(commits reachable from `revs` and from no origin ref, rc); None when git failed.
 
     Without a live answer origin's refs are the local `refs/remotes/origin/*`. With one (`live`, --remote
     and `ls-remote` answered) they are `tips` alone: a local tracking ref proves nothing about a live
     branch (origin may have force-pushed it) and one of a deleted branch holds nothing there (Codex
     passes 9 and 11). Tips whose objects are not here are ignored (`--ignore-missing`): the count then
-    only overcounts, and the caller flags it unverified."""
+    only overcounts, and the caller flags it unverified. With no origin remote (`has_origin` false) a
+    leftover `refs/remotes/origin/*` excludes nothing (Codex pass 18)."""
     argv = ["rev-list", "--count", *revs, "--not"]
-    if not live:
+    if not live and has_origin:
         argv.append("--remotes=origin")
     if tips:
         argv += ["--ignore-missing", *tips]
@@ -871,13 +874,6 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         if rc != 0 or not n.strip().isdigit():
             return incomplete_record(path, "rev-list --count @{u}..HEAD", rc)
         unpushed = int(n)
-    ahead_of_origin = 0
-    if not unborn:
-        rc, n = git(path, "rev-list", "--count", "HEAD", "--not", "--remotes=origin")
-        if rc != 0 or not n.strip().isdigit():
-            return incomplete_record(path, "rev-list --count HEAD --not --remotes=origin", rc)
-        ahead_of_origin = int(n)
-    stashes = stash_count(path, common)
     # `git remote get-url` exits 2 with "error: No such remote 'origin'" (observed, git's own answer) when
     # origin is not configured; a timeout (124), a damaged config (128) or anything else is unknown, never
     # "no origin", which would turn the checkout into an orphan instead of `scan incomplete` (Codex pass 8)
@@ -885,6 +881,16 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     if rc not in (0, NO_SUCH_REMOTE_RC):
         return incomplete_record(path, "remote get-url origin", rc)
     has_origin = rc == 0
+    # Without an origin remote, leftover `refs/remotes/origin/*` (the config edited instead of `git remote
+    # remove`) prove nothing: every commit is local-only (Codex pass 18 on PR 27)
+    not_origin = ["--not", "--remotes=origin"] if has_origin else []
+    ahead_of_origin = 0
+    if not unborn:
+        rc, n = git(path, "rev-list", "--count", "HEAD", *not_origin)
+        if rc != 0 or not n.strip().isdigit():
+            return incomplete_record(path, "rev-list --count HEAD --not --remotes=origin", rc)
+        ahead_of_origin = int(n)
+    stashes = stash_count(path, common)
     branches, live, invalid_refs, tags, credential = (origin_branches(path, remote) if has_origin
                                                       else (None, False, 0, {}, False))
     origin_unreachable = bool(remote and has_origin and not live)
@@ -965,12 +971,12 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     local_only_tags: list[dict] = []
     branches_uncounted = 0
     if not unborn:
-        local_only, rc = local_only_count(path, ["HEAD", "--branches", "--tags"], tips, live)
+        local_only, rc = local_only_count(path, ["HEAD", "--branches", "--tags"], tips, live, has_origin)
         if local_only is None:
             return incomplete_record(path, "rev-list --count HEAD --branches --tags --not --remotes=origin", rc)
         if local_only:
             if detached:
-                n, rc = local_only_count(path, ["HEAD"], tips, live)
+                n, rc = local_only_count(path, ["HEAD"], tips, live, has_origin)
                 if n is None:
                     return incomplete_record(path, "rev-list --count HEAD --not --remotes=origin", rc)
                 if n:
@@ -980,7 +986,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
                 return incomplete_record(path, "for-each-ref refs/heads", rc)
             names = out.splitlines()
             for name in names[:MAX_BRANCH_COUNTS]:
-                n, rc = local_only_count(path, [f"refs/heads/{name}"], tips, live)
+                n, rc = local_only_count(path, [f"refs/heads/{name}"], tips, live, has_origin)
                 if n is None:
                     return incomplete_record(path, f"rev-list --count refs/heads/{name} "
                                                    "--not --remotes=origin", rc)
@@ -992,7 +998,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
             tag_names = out.splitlines()
             tag_budget = max(MAX_BRANCH_COUNTS - len(names[:MAX_BRANCH_COUNTS]), 0)  # one cap for both lists
             for name in tag_names[:tag_budget]:
-                n, rc = local_only_count(path, [f"refs/tags/{name}"], tips, live)
+                n, rc = local_only_count(path, [f"refs/tags/{name}"], tips, live, has_origin)
                 if n is None:
                     return incomplete_record(path, f"rev-list --count refs/tags/{name} "
                                                    "--not --remotes=origin", rc)

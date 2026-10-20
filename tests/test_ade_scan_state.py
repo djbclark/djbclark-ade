@@ -186,6 +186,20 @@ def test_repo_without_origin_is_an_orphan_branch(tmp_path):
     assert c["verdict"] == "orphan branch" and "no origin remote" in c["flags"]
 
 
+def test_a_leftover_origin_ref_without_an_origin_remote_hides_nothing(tmp_path):
+    """Codex pass 18 on PR 27, P1: origin removed from the config but `refs/remotes/origin/main` left behind at
+    HEAD; the count excluded it and the only commit read as `clean and pushed`."""
+    mod = load()
+    roots = tmp_path / "roots"
+    repo = make_repo(roots / "leftover")
+    git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    for remote in (False, True):
+        c = mod.scan_git([roots], remote=remote)[0]
+        assert c["has_origin"] is False and "no origin remote" in c["flags"]
+        assert c["ahead_of_origin"] == 1 and c["local_only_commits"] == 1
+        assert c["verdict"] == "orphan branch"
+
+
 def test_stale_remote_refs_do_not_make_a_pushed_branch_an_orphan(tmp_path):
     mod = load()
     origin = tmp_path / "origin.git"
@@ -1973,6 +1987,26 @@ def test_an_unreachable_origin_checkout_always_gets_a_capture_row_even_with_zero
     assert "local-only count unverified" in both and both.count("local-only.bundle") == 1
     assert not [r for r in rows if r.startswith("| /p/clean ")]
     assert "A checkout flagged `origin unreachable` is always listed, whatever its counts" in section_3_2(text)
+
+
+def test_a_checkout_with_submodules_always_gets_a_capture_row():
+    """Codex pass 18 on PR 27, P1: every count is 0 for a superproject whose only work is inside a submodule;
+    the plan listed nothing and discovery never reaches the submodule."""
+    mod = load_doc()
+    flag = "submodules not inspected"
+    quiet = doc_checkout("/p/sup", flags=[flag], verdict=flag)
+    dirty = doc_checkout("/p/both", flags=["dirty", flag], verdict="dirty", modified=1)
+    text = mod.render(doc_scan([quiet, dirty, doc_checkout("/p/clean")]))
+    rows = section_3_2(text).splitlines()
+    row = next(r for r in rows if r.startswith("| /p/sup "))
+    assert "submodules not inspected: their modified, untracked or unpushed content is in no count here" in row
+    assert "git -C /p/sup config --file .gitmodules --get-regexp" in row and "--git-root <path>/<sub>" in row
+    assert row.rstrip().endswith("| yes: inspect each submodule first |")
+    both = next(r for r in rows if r.startswith("| /p/both "))
+    assert "1 modified tracked file(s)" in both and "submodules not inspected" in both
+    assert both.rstrip().endswith("| yes: decide whether they are work |")
+    assert not [r for r in rows if r.startswith("| /p/clean ")]
+    assert "A checkout flagged `submodules not inspected` is always listed too" in section_3_2(text)
 
 
 def test_section_1_verdict_rows_sum_to_the_checkout_count():
