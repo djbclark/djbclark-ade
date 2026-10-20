@@ -29,6 +29,11 @@ agent what changed and what is new. Entries end with the pull request number.
 
 - `route_agent`: pool state comes from `aiuse --available --json`, with the snapshot file as the
   fallback (#12).
+- `steps` skill: prompt-tool table and §2c cover the `question` tool so `/loose → /steps`
+  walks via `question` on OpenCode, not just `AskUserQuestion` (Claude class) /
+  `clarify` (Hermes) / `request_user_input` (Codex). Universal skills `/loose`,
+  `/handoff`, `/baton`, `/steps` were already reachable from every installed TUI
+  (`skill-everywhere --check` all green); the change wires the chain on OpenCode.
 
 ### Fixed
 
