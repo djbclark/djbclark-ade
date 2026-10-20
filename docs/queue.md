@@ -71,19 +71,26 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    `cursor-cloud list` and `--force` when there is no agent id; (U2) `--force` drops the first agent's id from
    the record (carry it as `prior_cloud_agent_ids`); (U3) no lock between the same-name check and the write,
    so two simultaneous dispatches can still launch two agents (the race exists for local slices too).
-5. **Endpoint variables can send keys anywhere** (adversary and Codex, threat-model review 2026-10-20):
+5. **Done 2026-10-20** (PR 15). Endpoint variables could send keys anywhere (adversary and Codex, threat-model review 2026-10-20):
    `CURSOR_CLOUD_API` in `bin/cursor-cloud`; `FIRECRAWL_SELFHOST_URL`, `FIRECRAWL_FALLBACK_URL`,
    `FIRECRAWL_ROUTER_SIPB_BASE` and `FIRECRAWL_ROUTER_LITELLM_BASE` in `bin/firecrawl-router`. Require https
    (Cursor: https://api.cursor.com only) or loopback unless a test flag is set, and stop the Authorization header
    following a redirect: urllib copies every header onto the redirected request, to any host; `bin/failover.py`
    already avoids this with `_NoRedirect` and `add_unredirected_header`. One PR with tests.
+   Carried (adversary round 2 on PR 15, both LOW): (a) `reexec_env()` in `bin/cursor-cloud` is a deny-list; it
+   does not drop `DYLD_INSERT_LIBRARIES`, `LD_PRELOAD` or `OPENSSL_*`; (b) `build_opener` in both tools still
+   installs urllib's default `ProxyHandler`, so an `*_proxy` variable set after the re-exec would still route the
+   call; pass an empty `ProxyHandler({})` explicitly.
 
-6. **Three `tests/test_route_agent.py` tests fail on a host where omp is ready** (pre-existing on master,
+6. **Done 2026-10-20** (PR 17). Three `tests/test_route_agent.py` tests failed on a host where omp is ready (pre-existing on master,
    confirmed 2026-10-20 at d6c27da): `TestDiscovery::test_measured_idle_capacity_beats_unmeasured`,
    `TestPlanWave::test_no_room_comes_back_as_none_not_an_error`,
    `TestQualityBand::test_the_2026_10_18_case_queues_code_instead_of_routing_far_down`. They pass with
    `ROUTE_AGENT_OMP_READY=0`, so CI (no omp login) is green while a local `bg` run is red. Fix: pin the probe in
-   `tests/conftest.py` (`os.environ.setdefault("ROUTE_AGENT_OMP_READY", "0")`) and give the omp case its own test.
+   `tests/conftest.py` (`ROUTE_AGENT_OMP_READY` is `0` unless the shell sets `0` or `1`) and give the omp case its own test.
+   Carried (adversary, 2026-10-20): (a) with omp ready and no quota reading, an unmeasured omp outranks a measured
+   pool in all three scenarios (`TestOmpReadyRoster` names the case as left out); (b) `_merge_pool` in
+   `bin/route_agent.py` lets a stale `None` reading overwrite a measured one (adversary LOW on PR 13).
 7. **Carried from the PR 12 reviews** (adversary rounds 1-6 and Codex, 2026-10-20, none blocking): (a) the
    available-row fields `binding_window`, `available_at` and `requires_operator_approval` are stored on the pool
    entry but nothing in `route()`/`plan()` reads them (the live omp row says `requires_operator_approval: true`;
@@ -96,6 +103,10 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    contract value and the conservative one. **Ruled 2026-10-20 (djbclark): keep 10.** It is aiuse's contract unit (the same
    `headroom_percent` every pool's threshold uses) and the only option that protects the shared weekly as well as
    the sublimit; Opus takes over at 20 % of the Fable sublimit or 10 % of the shared weekly, whichever first.
+8. **Delete the credential vault after 2026-11-19** (owner: djbclark; adversary round 8 on PR 16, 2026-10-20):
+   `~/.local/state/ade/credential-bak/` (0700; 13 `.bak` key copies moved there from the agent config dirs on
+   2026-10-20, manifest `MANIFEST-2026-10-20.txt`, see docs/ade-everywhere-inventory-2026-10-20-stores.md 5.5).
+   Nothing reads it; once the 30-day keep lapses, `rm -r` it and drop this item.
 
 ## Keep every machine current, and a changelog (djbclark, 2026-10-20; proposal Q26, T8)
 
