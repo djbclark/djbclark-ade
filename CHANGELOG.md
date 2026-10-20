@@ -11,7 +11,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
-- `session-finder/relay.py` reaches Paseo-hosted agents (`paseo send --behavior steer -- <id> <text>`, labelled as an agent message from the sender; takes a `PASEO_AGENT_ID` as the ident, `--idle S` waits for idle first; refuses archived agents, pending permissions and text starting with `/`) and `where.py` reports `host=paseo agent=<id>` for them, so the "no terminal channel (unknown terminal)" refusal no longer hits a Paseo agent (#TBD).
+- `session-finder/relay.py` reaches Paseo-hosted agents (`paseo send --behavior steer -- <id> <text>`, labelled as an agent message from the sender; takes a `PASEO_AGENT_ID` as the ident, `--idle S` waits for idle first; refuses archived agents, pending permissions and text starting with `/`) and `where.py` reports `host=paseo agent=<id>` for them, so the "no terminal channel (unknown terminal)" refusal no longer hits a Paseo agent (#25).
 - `loadwatch` skill and `load-watch watcher set|show|clear|test`: one registered agent session (a Paseo
   agent by `paseo send`, else relay.py) also hears every load incident, unexplained sustained load and
   job-guard trip, and investigates; `set` replaces the old watcher and tells it (2026-10-20).

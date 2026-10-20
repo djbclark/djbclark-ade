@@ -183,8 +183,8 @@ def paseo_idle(s, seconds):
 def sender_tag(listed):
     """'[relay from NAME] ' for a caller that is not a Paseo agent (Paseo labels only an agent sender): the
     caller's session name, else the first 8 characters of its session id."""
-    if os.environ.get("PASEO_AGENT_ID"):
-        return ""
+    if UUID.fullmatch((os.environ.get("PASEO_AGENT_ID") or "").strip()):
+        return ""    # a real agent id: Paseo labels the message itself (an empty or junk value does not count)
     me = next((x for x in listed if x.get("self")), None) or {}
     name = me.get("name") or me.get("id") or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "")[:8] or "unknown"
     return f"[relay from {fleet.clip(re.sub(r'[^A-Za-z0-9._ -]', '', name), 40) or 'unknown'}] "
@@ -367,7 +367,9 @@ def main():
     s = hits[0]
     is_paseo = s.get("host") == "paseo" or (s.get("chan") or (None,))[0] == "paseo"
     if is_paseo:
-        if text.startswith("/"):
+        if text.lstrip(" \t\r\n\u00a0\u200b\u200c\u200d\u2060\ufeff").startswith(("/", "\uff0f")):
+            # Paseo trims the prompt (JS trim, which drops U+FEFF) before its slash-command parser: strip the same
+            # and the zero-width characters first, and refuse the full-width slash too (adversary round 2)
             print(f"relay: [{s['id']}] not sent: text starting with '/' would run a built-in; peers do not run another "
                   "session's built-ins", file=sys.stderr)
             return 2

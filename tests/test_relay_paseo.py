@@ -305,6 +305,20 @@ class RelayPaseo(unittest.TestCase):
             self.assertIn("built-ins", err)
         self.assertEqual(self.calls(), [f"agent inspect --json -- {AGENT}"])    # only the ident resolution
 
+    def test_slash_text_hidden_behind_zero_width_or_full_width_characters_is_refused(self) -> None:
+        for text in ("\ufeff/clear", " \u200b/clear", "\n/clear", "\uff0fclear"):
+            rc, _out, err = self.main([sess()], SID, text)
+            self.assertEqual(rc, 2, text)
+            self.assertIn("built-ins", err)
+        self.assertFalse(self.sends())
+
+    def test_an_empty_or_junk_paseo_agent_id_still_gets_the_sender_tag(self) -> None:
+        for value in (" ", "", "not-a-uuid"):
+            os.environ["PASEO_AGENT_ID"] = value
+            rc, _out, err = self.main([sess()], SID, "ping", "--wait", "1")
+            self.assertEqual(rc, 0, err)
+            self.assertTrue(all("[relay from " in s_ for s_ in self.sends()), (value, self.sends()))
+
     def test_slash_text_is_not_refused_in_the_middle_of_a_message(self) -> None:
         rc, _out, err = self.main([sess()], SID, "see /tmp/x and /clear", "--wait", "1")
         self.assertEqual(rc, 0, err)
