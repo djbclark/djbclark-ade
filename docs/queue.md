@@ -280,8 +280,18 @@ this repo on or after 2026-10-14 raises these three first, one `/steps` prompt e
          the fix, so there is no code change here. (Raised by `djbclark-ade-db`, which read the
          rows as 10-12/13; the dates above are the verified ones. The entry as first written
          read as a live fault and was not one.)
-      b. agy pools `antigravity/claude_gpt` (7 refusals) and `antigravity/gemini` (6) report
-         "not in `aiuse --available`".
+      b. agy pools `antigravity/claude_gpt` and `antigravity/gemini` report "not in `aiuse
+         --available`" (rows 2026-10-12 to 10-14; 7 and 6 of them inside the 10-14 window).
+         **Checked 2026-10-20: not a fault, the same class as (d).** `antigravity/claude_gpt`
+         really is exhausted -- Claude/GPT weekly 99% used, resets Sat Oct 24 2:18pm -- so the
+         refusal is correct, and `antigravity/gemini` is listed in `aiuse --available` today at
+         32% headroom, with `hidden_pools` and `excluded` both empty. The pool keys match the
+         ones `--available` emits, so the mechanism works and the rows record exhaustion, not a
+         lookup bug. One loose thread, not reproducible: at 10:46 today `--available` omitted
+         gemini while `aiuse --json` showed all three of its windows `ok`, and four minutes
+         later it listed it with the identical headroom figure; `apply_frozen_measurements` is
+         the plausible mechanism (a frozen measurement deliberately suppresses a pool). If the
+         night rows show agy skipped while gemini has headroom, look there first.
       c. zcode `project_token_login_failed` x4, classified `transient` so it retries into the
          same wall, plus one rc=124 after 914s with 41 tool calls.
       d. claude was refused 6 times at `headroom 4.0% <= floor 5.0%` — the floor working as
