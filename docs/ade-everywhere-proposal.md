@@ -1,6 +1,6 @@
 # ADE everywhere: one repo that recreates the whole agent environment on any machine
 
-Proposal, version 2.3, 2026-10-19. Status: **decided**: all twenty-five questions answered
+Proposal, version 2.4, 2026-10-20 (v2.3 of 2026-10-19 plus Q26, section 9.4). Status: **decided**: all twenty-six questions answered
 (section 9). v2.3 applies djbclark's round-3 answers (section 9.2), two of them against the
 recommendation (Q20, Q22). Implementation starts with Phase 0.
 v2.1 was reviewed the same day by Claude Fable 5.1
@@ -74,6 +74,14 @@ Written as tests the finished project must pass:
    template test runs on the private repo's Actions, or on Forgejo CI (Hyades) when private
    work needs it; the gate is a real Linux user account that survives a reboot. None of it runs
    on the Mac except the Phase 1 gate's apply, reapply and restore on this Mac.
+8. **T8 every machine stays current (added 2026-10-20, Q26).** On any machine that already has
+   the environment, one command, `ade update`, brings it to the pushed head of the public repo
+   (and of the companion): pulls both, re-applies chezmoi, installs or upgrades every pinned tool
+   from `tools.toml` and `packages.toml`, relinks skills, commands, agents and hooks, regenerates
+   and reloads changed services, and ends with `ade doctor` green. It prints the `CHANGELOG.md`
+   entries between the commit last applied on this machine and the new head, so the operator
+   (or an agent) knows what changed and what is new. Running it twice changes nothing. Until
+   `ade update` exists, the README's "Update (this machine)" section is the manual procedure.
 
 ## 2. What exists today, in one paragraph each
 
@@ -268,6 +276,14 @@ snapshot and restore, doctor, clone, sessions, services). Stage zero (below) com
    session stores), the data-contract validation, the managed-set intersection check, and the
    deny-list grep for the operator's names in the public tree. Each check reports pass, fail,
    unsupported, disabled or untested.
+9. `ade update` (Q26, 2026-10-20): `git pull --ff-only` of the public repo and the companion
+   (a local change or a diverged branch stops it with the exact `git` state printed), then steps
+   1, 2, 5 and 8 again on the new head: the apply after a snapshot of any newly managed target,
+   `install` for every pin that changed, `services` for every unit whose rendered output
+   changed, and `doctor`. It records the applied commit per machine (`~/.local/state/ade/applied`)
+   and prints the `CHANGELOG.md` entries since that commit before touching anything, with
+   `--check` to stop there. The same command is what a launchd or systemd timer may run daily
+   in `--check` mode, so a machine that fell behind says so in `ade doctor` and in Hermes.
 
 The prompt for an agent is then one paragraph: "clone djbclark-ade, read AGENTS.md, run `ade
 bootstrap`, answer its questions, run `ade doctor` until green". `docs/apply-toolchain-prompt.md`
@@ -692,7 +708,7 @@ then prove a thin slice end to end, then widen, and only then retire or delete.
 2. **Phase 1, thin vertical slice (1 to 2 weeks).** The chezmoi source state under `home/`
    for Claude Code and Codex only: companion data through `stat`-guarded templates, the
    `modify_` merges under the ownership table, `ade snapshot` and `ade restore`;
-   `manifest/*.toml` for the same two; `ade doctor`, `services`, `install` with mise and the
+   `manifest/*.toml` for the same two; `ade doctor`, `update` (T8), `services`, `install` with mise and the
    package-only Ansible split; stage zero and the signed-tag root of trust; `private-template/`
    and `ade init-private` with an empty companion; the contracts this slice consumes (schema
    versions and namespaces, 4.4's precedence and deletion rules, signing with a dedicated
@@ -739,7 +755,8 @@ then prove a thin slice end to end, then widen, and only then retire or delete.
    framing (Q10); the contracts are Phase 1's, so this phase is the rest: schemas for the
    remaining manifests, a documented config surface, templates and docs written for an
    arbitrary operator, the newcomer walkthrough from a fresh account with no 1Password, no
-   Hyades, no Mac and a Forgejo remote (Q17), changelog and release notes, and a
+   Hyades, no Mac and a Forgejo remote (Q17), release notes cut from `CHANGELOG.md` (kept
+   since 2026-10-20, Q26), and a
    dependency-notice and licence page. The repo is MIT, but CASS's rider does not pass to
    third parties, so the page names it. The distribution is `ade-kit` (Q24), since `ade` is
    taken on PyPI<sup>[74](#C73)</sup>; it ships for macOS arm64 and Linux x86_64. The optional features
@@ -994,6 +1011,23 @@ Questions from the two frontier reads, the OpenRig study and the plugin scan
     slices via `acp-run omp`, so they are fully used before they expire each month.** One copy
     of the rule: `skills/model-routing/SKILL.md`; `config/routing.toml` carries it as the `omp`
     service (`grant_days = 30` gives it the "burn before reset" bonus).
+
+### 9.4 Round 4 (decided 2026-10-20)
+
+26. **Q26 Keeping every machine current, and a changelog.** djbclark (2026-10-20): "we need a
+    clear way to keep all of djbclark-ade up-to-date on new systems, and also we should have a
+    changelog so people know what changes or new features are added." Decided:
+    1. `ade update` is a Phase 1 command (4.4 item 9, acceptance test T8), not a later nicety:
+       a machine that cannot be brought to the current head with one idempotent command is
+       not reproducible either. Until it exists, `README.md` "Update (this machine)" is the
+       manual procedure, and `docs/queue.md` carries an interim `bin/ade-update` script
+       (pull, relink, changelog delta) as the first slice.
+    2. `CHANGELOG.md` at the repo root, Keep a Changelog form (an `Unreleased` section, then
+       one section per tag), started 2026-10-20 from the merged pull requests of 2026-10-09
+       onward. Every pull request adds its line under `Unreleased` (AGENTS.md code-review
+       rule 10); a tag moves `Unreleased` into a dated section and is what `ade-kit` ships
+       and what `ade update` prints the delta from. Release notes (Phase 7) are cut from it,
+       never written separately.
 
 ## 10. Risks
 

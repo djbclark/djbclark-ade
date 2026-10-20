@@ -132,6 +132,23 @@ How each TUI finds skills, and how to prove one loaded: the script's
 job runs `~/ops/site-private/bin/fleet-watch`, which resolves here the same
 way. `helm.py` imports `fleet` from the sibling `skills/session-finder/`.
 
+### Update (this machine)
+
+Until `ade update` exists (proposal 4.4 item 9, T8), this is the procedure; it is
+idempotent and safe to run daily:
+
+```sh
+git -C ~/src/djbclark-ade status --short        # another agent's edits? leave them; never stash
+git -C ~/src/djbclark-ade pull --ff-only         # a diverged branch stops here: resolve by hand
+for s in ~/src/djbclark-ade/skills/*/; do ~/src/djbclark-ade/bin/skill-everywhere --check "$(basename "$s")"; done
+ls -l ~/.claude/commands ~/.claude/agents ~/.claude/hooks | grep -c djbclark-ade   # symlinks still point here
+```
+
+Then read [CHANGELOG.md](CHANGELOG.md) from the entry after the commit you last applied:
+every pull request adds its line there (AGENTS.md code-review rule 10), so the changelog is
+the one place that says what changed and what is new. `bin/ade-update` (queued,
+`docs/queue.md`) will do all of this in one command and print that delta itself.
+
 ## Docs
 
 1. [`docs/model-routing.md`](docs/model-routing.md) — every service on this
