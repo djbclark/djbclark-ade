@@ -1074,7 +1074,7 @@ def test_scan_doc_generator_code_spans_survive_backticks():
     for span in ("`` c`h ``", "`` u`n.txt ``", "`` b`r ``"):
         assert span in text, span
     # a report path is an argument of the row's copy command now: shell-quoted, inside one double-backtick span
-    assert "&& gcp --parents -t <DEST>/bigteam/'t`k' -- 'r`eport.md') ``" in text
+    assert "&& \"$GCP\" --parents -t <DEST>/bigteam/'t`k' -- 'r`eport.md') ``" in text
     assert "`` git -C '/p/c`o' push -u origin refs/heads/'b`r':refs/heads/'b`r' `` or " in text  # shell-quoted since round 8
 
 
@@ -1222,7 +1222,7 @@ def test_untracked_files_get_a_lossless_archive_command_not_a_bare_git_add():
     rows = section_3_2(mod.render(doc_scan([co]))).splitlines()
     row = next(r for r in rows if r.startswith("| /p/u dir ") or r.startswith("| /p/u\\ dir "))
     assert ("mkdir -p <DEST>/'checkouts/abs/p/u dir' && git -C '/p/u dir' ls-files -z --others --exclude-standard "
-            "> <DEST>/'checkouts/abs/p/u dir/untracked.list' && gtar -C '/p/u dir' --null "
+            "> <DEST>/'checkouts/abs/p/u dir/untracked.list' && \"$GTAR\" -C '/p/u dir' --null "
             "-T <DEST>/'checkouts/abs/p/u dir/untracked.list' -cf <DEST>/'checkouts/abs/p/u dir/untracked.tar'`") in row
     # Codex pass 9: no pipe, so ls-files' own status decides (`ls-files | gtar` exits 0 when ls-files fails)
     assert "|" not in row.replace("|", "", 5) and "\\|" not in row
@@ -1243,7 +1243,8 @@ def test_bigteam_rows_copy_every_report_never_a_plus_n_more():
     assert "more" not in row
     for f in files:
         assert mod.shquote(f) in row
-    assert "gcp --parents -t <DEST>/bigteam/big -- " in row and "| 6 |" in row
+    assert "\"$GCP\" --parents -t <DEST>/bigteam/big -- " in row and "| 6 |" in row
+    assert "GCP=$(command -v gcp || command -v cp); GTAR=$(command -v gtar || command -v tar)" in text  # Codex pass 12
     assert "(cd ~/.local/state/bigteam/big && " in row
 
 

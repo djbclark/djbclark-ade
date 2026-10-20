@@ -319,6 +319,10 @@ def render(d):
 
     # ---- 3 capture
     w("## 3. Capture (how each item would be preserved; none of this was run)\n")
+    w("Every command below uses GNU `cp` and `tar` through two variables, so the same row runs on this Mac "
+      "(coreutils installed as `g*`) and on Linux (bare names; Codex pass 12 on PR 27): set "
+      "`GCP=$(command -v gcp || command -v cp); GTAR=$(command -v gtar || command -v tar)` first, and "
+      "`<DEST>` to an absolute path.\n")
     w("### 3.1 `unique` and `mixed` bigteam dirs\n")
     w("Proposed rule for all of them: copy the report files (not the dir) to one destination, "
       "`<DEST>/bigteam/<task>/`, keeping each file's path below the task dir. `<DEST>` is the one decision "
@@ -336,10 +340,10 @@ def render(d):
             need.append("mixed: say whether the logs/worktrees beside it matter")
         if t["open_job_records"]:
             need.append(f"{len(t['open_job_records'])} job record(s) unclosed")
-        # one gcp over the whole set, paths relative to the task dir: nothing is dropped from what the plan keeps
+        # one cp over the whole set, paths relative to the task dir: nothing is dropped from what the plan keeps
         # (Codex pass 8 on PR 27: a row showing four of 22 paths could not be followed)
         slots = " ".join("{}" for _ in files)
-        cmd = shcode("mkdir -p <DEST>/bigteam/{} && (cd {} && gcp --parents -t <DEST>/bigteam/{} -- " + slots + ")",
+        cmd = shcode("mkdir -p <DEST>/bigteam/{} && (cd {} && \"$GCP\" --parents -t <DEST>/bigteam/{} -- " + slots + ")",
                      t["task"], "~/.local/state/bigteam/" + t["task"], t["task"], *files) if files else "no reports"
         w(f"| {esc(t['task'])} | {len(files)} | {cmd} | "
           f"{'yes: ' + '; '.join(need) if any(not n.endswith('unclosed') for n in need) else 'no (only DEST)'} |")
@@ -444,7 +448,7 @@ def render(d):
                 # `&&`, the list in a file: `ls-files | gtar` exits 0 when ls-files fails (Codex pass 9)
                 cmd.append("archive every untracked path: "
                            + shcode("mkdir -p <DEST>/{} && git -C {} ls-files -z --others --exclude-standard > <DEST>/{} "
-                                    "&& gtar -C {} --null -T <DEST>/{} -cf <DEST>/{}",
+                                    "&& \"$GTAR\" -C {} --null -T <DEST>/{} -cf <DEST>/{}",
                                     ck, raw_p, f"{ck}/untracked.list", raw_p, f"{ck}/untracked.list",
                                     f"{ck}/untracked.tar")
                            + " or " + shcode("git -C {} add -A -- .", raw_p)
