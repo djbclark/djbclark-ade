@@ -28,7 +28,12 @@ HOME = str(Path.home())
 
 
 def tilde(p):
-    return p.replace(HOME, "~")
+    """`~` for HOME itself, `~/rest` below it; never a substring match (`/tmp/root/x` with HOME `/root`)."""
+    if p == HOME:
+        return "~"
+    if p.startswith(HOME + os.sep):
+        return "~" + p[len(HOME):]
+    return p
 
 
 def num(v):
@@ -64,8 +69,11 @@ def shcode(fmt, *values):
 
 def shquote(v):
     """`shlex.quote`, except that a leading `~/` (the generator's own home abbreviation, `tilde()`) stays
-    outside the quotes so the shell still expands it: `~/'a b'/c`, never `'~/a b/c'` (adversary round 9)."""
+    outside the quotes so the shell still expands it: `~/'a b'/c`, never `'~/a b/c'`; a bare `~` (the home
+    directory itself) stays unquoted too (adversary round 9, Codex pass 6)."""
     v = str(v)
+    if v == "~":
+        return "~"
     if v.startswith("~/"):
         return "~/" + shlex.quote(v[2:]) if v[2:] else "~/"
     return shlex.quote(v)

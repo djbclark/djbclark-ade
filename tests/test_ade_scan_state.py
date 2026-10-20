@@ -1227,3 +1227,108 @@ def test_a_verdict_naming_a_hostile_directory_is_escaped_in_every_doc_table(tmp_
         assert "s\\|&lt;i&gt;x" in ln, ln
     cells = sorted(ln.replace("\\|", "").count("|") for ln in rows)
     assert cells == [6, 8], cells  # 5 and 7 columns: no extra cell from the name's `|`
+
+
+def _task_with_a_locked_big_subdir(tmp_path):
+    root, refs = tmp_path / "bigteam", tmp_path / "refs"
+    task = root / "t-big"
+    (task / "sub").mkdir(parents=True)
+    (task / "a-report.md").write_text("x\n")
+    (task / "sub" / "blob").write_bytes(b"\0" * (2 * 1024 * 1024))
+    refs.mkdir()
+    return root, refs, task / "sub"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 directory")
+def test_a_failed_du_is_scan_incomplete_even_when_its_partial_total_is_small(tmp_path, capsys, monkeypatch):
+    """Codex PR 27 pass 6, P1 (4324328054): `du` exits nonzero on an unreadable subtree but still prints a
+    partial total; that total sat under --unique-max-bytes, so a `mixed` task read `unique`. `walk` is masked
+    so that `du` is the only thing that notices the locked directory."""
+    mod = load()
+    root, refs, sub = _task_with_a_locked_big_subdir(tmp_path)
+    real_walk = mod.walk
+    monkeypatch.setattr(mod, "walk", lambda p, d, skip_checkouts=True, failures=None: real_walk(p, d, skip_checkouts, None))
+    sub.chmod(0)
+    try:
+        rc, out, err = run_main(mod, capsys, "--bigteam", root, "--ref-root", refs, "--unique-max-bytes", 1024 * 1024,
+                                "--json")
+    finally:
+        sub.chmod(0o755)
+    assert rc == 0, err
+    res = json.loads(out)
+    t = res["bigteam"]["tasks"][0]
+    assert t["bytes"] < 1024 * 1024, t["bytes"]  # the partial total that used to decide `unique`
+    assert t["verdict"].startswith("scan incomplete: du rc=") and t["verdict"] != "scan incomplete: du rc=0", t["verdict"]
+    assert t["traversal"] == "incomplete: " + t["verdict"][len("scan incomplete: "):]
+    assert t["unique_bytes"] == 0
+    assert res["summary"]["bigteam"]["incomplete"] == 1
+
+
+def test_only_a_zero_du_exit_is_a_complete_size(tmp_path, monkeypatch):
+    mod = load()
+    monkeypatch.setattr(mod, "run", lambda argv, timeout=120, cwd=None, env=None: (0, "12\t/x\n"))
+    assert mod.du_bytes(tmp_path) == (12 * 1024, None)
+    monkeypatch.setattr(mod, "run", lambda argv, timeout=120, cwd=None, env=None: (1, "12\t/x\n"))
+    assert mod.du_bytes(tmp_path) == (12 * 1024, 1)
+    monkeypatch.setattr(mod, "run", lambda argv, timeout=120, cwd=None, env=None: (124, ""))
+    assert mod.du_bytes(tmp_path) == (0, 124)
+
+
+def test_a_missing_ref_root_is_a_usage_error_not_a_narrower_search(tmp_path, capsys):
+    """Codex PR 27 pass 6, P2 (4324328066): a missing --ref-root was dropped, so a task cited only there read `unique`."""
+    mod = load()
+    root, refs = tmp_path / "bigteam", tmp_path / "refs"
+    (root / "t-1").mkdir(parents=True)
+    refs.mkdir()
+    gone = tmp_path / "nowhere"
+    (tmp_path / "a-file").write_text("x\n")
+    for bad in (gone, tmp_path / "a-file"):
+        rc, out, err = run_main(mod, capsys, "--bigteam", root, "--ref-root", refs, "--ref-root", bad, "--json")
+        assert rc == 2 and out == "", (rc, out)
+        assert f"--ref-root {bad} is not a directory" in err, err
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 directory")
+def test_an_unsearchable_ref_root_is_a_usage_error(tmp_path, capsys):
+    mod = load()
+    root, refs = tmp_path / "bigteam", tmp_path / "refs"
+    (root / "t-1").mkdir(parents=True)
+    refs.mkdir()
+    refs.chmod(0o444)
+    try:
+        rc, out, err = run_main(mod, capsys, "--bigteam", root, "--ref-root", refs, "--json")
+    finally:
+        refs.chmod(0o755)
+    assert rc == 2 and out == "", (rc, out)
+    assert f"--ref-root {refs} cannot be searched" in err, err
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 directory")
+def test_an_unsearchable_checkout_inside_a_task_tree_is_scan_incomplete(tmp_path, capsys):
+    """Codex PR 27 pass 6, P2 (4324328066): `os.path.exists(<dir>/.git)` in `walk` read EACCES as "no checkout"
+    on Python 3.13+ and descended; it is a traversal failure naming the directory whose `.git` could not be inspected."""
+    mod = load()
+    root, refs = tmp_path / "bigteam", tmp_path / "refs"
+    locked = root / "t-1" / "sub"
+    (locked / "child").mkdir(parents=True)
+    refs.mkdir()
+    locked.chmod(0o444)
+    try:
+        rc, out, err = run_main(mod, capsys, "--bigteam", root, "--ref-root", refs, "--json")
+    finally:
+        locked.chmod(0o755)
+    assert rc == 0, err
+    t = json.loads(out)["bigteam"]["tasks"][0]
+    assert t["verdict"] == "scan incomplete: scandir EACCES sub", t["verdict"]
+
+
+def test_tilde_abbreviates_only_home_itself_or_a_path_below_it(monkeypatch):
+    mod = load_doc()
+    monkeypatch.setattr(mod, "HOME", "/root")
+    assert mod.tilde("/root") == "~"
+    assert mod.tilde("/root/repo") == "~/repo"
+    assert mod.tilde("/tmp/root/repo") == "/tmp/root/repo"
+    assert mod.tilde("/rootfs/x") == "/rootfs/x"
+    assert mod.shquote(mod.tilde("/root")) == "~"
+    assert mod.shcode("git -C {} status", mod.tilde("/root")) == "`git -C ~ status`"
+    assert mod.shquote("~") == "~"

@@ -41,6 +41,9 @@ A "report file" is *report*.md (not *.done) within three levels of the dir, not 
 checkout. "Referenced" is a whole-word match of the task name in any file under a --ref-root
 (`rg -l -F -w`, or `grep -rlFw` without rg); a short common name can match by accident, so a
 referenced verdict is a lead, not a proof. `size` is `du -sk`; `newest_mtime` looks two levels deep.
+  scan incomplete: du rc=<n>  `du` exited nonzero (an unreadable subtree: it still prints a partial total,
+           which must not decide `unique` against `mixed`): same rule, `traversal: "incomplete: du rc=<n>"`
+           unless a `scandir` failure is also present (that one is named); `bytes` stays as `du` printed it.
   scan incomplete: reference search rc=<n>  the `rg`/`grep` search exited above 1 (an error) or timed
            out (rc=124): the task is never `unique`, `mixed` or `scratch`, its record has
            `reference_search: "incomplete: rc=<n>"` (null otherwise), and the summary counts it under
@@ -50,8 +53,8 @@ referenced verdict is a lead, not a proof. `size` is `du -sk`; `newest_mtime` lo
            record has `traversal: "incomplete: scandir ..."` (null otherwise; the first failure by
            path), counted under `bigteam.incomplete`.
 
-A --git-root that is not a directory, and a --bigteam that is not a directory or cannot be listed, is a
-usage error (exit 2) before anything is scanned.
+A --git-root or --ref-root that is not a directory (a --ref-root must also be searchable), and a --bigteam
+that is not a directory or cannot be listed, is a usage error (exit 2) before anything is scanned.
 
 Git checkout verdicts (a checkout is a dir holding `.git`, found up to two levels under each
 --git-root, symlinks not followed, deduplicated):
@@ -198,14 +201,20 @@ def run(argv, timeout=120, cwd=None, env=None):
     return p.returncode, out
 
 
-def du_bytes(path: Path) -> int:
+def du_bytes(path: Path) -> tuple[int, int | None]:
+    """(bytes as reported, None) or (bytes as reported, rc) when `du` failed: an unreadable subtree makes
+    `du` exit nonzero yet print a partial total, so only rc 0 is a complete number (Codex pass 6)."""
     rc, out = run(["du", "-sk", str(path)], timeout=900)
-    if rc in (0, 1) and out.split():
+    nbytes = 0
+    if out.split():
         try:
-            return int(out.split()[0]) * 1024
+            nbytes = int(out.split()[0]) * 1024
         except ValueError:
-            pass
-    return 0
+            if rc == 0:
+                rc = 65  # exited 0 but printed no size: not an answer
+    elif rc == 0:
+        rc = 65
+    return nbytes, (rc or None)
 
 
 def is_checkout(path: Path) -> bool:
@@ -242,7 +251,7 @@ def walk(path: Path, depth: int, skip_checkouts: bool = True,
             if e.is_dir(follow_symlinks=False):
                 if e.name in SKIP_DIRS or depth <= 1:
                     continue
-                if skip_checkouts and os.path.exists(os.path.join(e.path, ".git")):
+                if skip_checkouts and is_checkout(Path(e.path)):
                     continue
                 yield from walk(Path(e.path), depth - 1, skip_checkouts, failures)
             elif e.is_file(follow_symlinks=False):
@@ -330,7 +339,9 @@ def referenced(name: str, ref_roots: list[Path], exclude: list[str]) -> tuple[li
 
     rg and grep exit 1 for "no match" and above 1 for an error (an unreadable root, a bad pattern);
     `run` returns 124 for a timeout or a missing tool. Only 0 and 1 are answers."""
-    roots = [str(r) for r in ref_roots if r.exists()]
+    # every --ref-root was checked to be a listable directory in main(); one that vanished since
+    # makes rg/grep exit 2, which is `scan incomplete`, never a silent drop from the search
+    roots = [str(r) for r in ref_roots]
     if not roots:
         return [], None
     globs = [*DEFAULT_EXCLUDES, *exclude]
@@ -355,7 +366,7 @@ def top_children(task: Path, n: int = 4) -> list[dict]:
         return kids
     for e in entries:
         kids.append({"name": e.name + ("/" if e.is_dir(follow_symlinks=False) else ""),
-                     "bytes": du_bytes(Path(e.path))})
+                     "bytes": du_bytes(Path(e.path))[0]})
     return sorted(kids, key=lambda k: -k["bytes"])[:n]
 
 
@@ -366,18 +377,22 @@ def scan_bigteam(root: Path, ref_roots: list[Path], exclude: list[str], unique_m
         if not e.is_dir(follow_symlinks=False):
             continue
         task = Path(e.path)
-        size = du_bytes(task)
+        size, du_rc = du_bytes(task)
         traversal: list[tuple[Path, str]] = []
         reports = report_files(task, traversal)
         claim = claim_state(task, traversal)
         open_jobs = open_job_records(task, traversal)
         refs, search_rc = referenced(task.name, ref_roots, exclude) if reports else ([], None)
         traversal_note = None
-        if traversal:
-            # a subtree that could not be listed may hold the only report: never `scratch`/`unique`
-            bad, err = min(traversal)  # scandir order is arbitrary: the first by path
-            where = " ".join(os.path.relpath(bad, task).split("\n"))
-            reason = f"scandir {err} {where}"
+        if traversal or du_rc is not None:
+            # a subtree that could not be listed may hold the only report, and a `du` that failed
+            # printed a partial total that could slip under --unique-max-bytes: never `scratch`/`unique`/`mixed`
+            if traversal:
+                bad, err = min(traversal)  # scandir order is arbitrary: the first by path
+                where = " ".join(os.path.relpath(bad, task).split("\n"))
+                reason = f"scandir {err} {where}"
+            else:
+                reason = f"du rc={du_rc}"
             traversal_note = f"incomplete: {reason}"
             verdict, unique_bytes = f"{INCOMPLETE_PREFIX}{reason}", 0
         elif search_rc is not None:
@@ -908,6 +923,13 @@ def main(argv=None) -> int:
     for root in args.git_root:
         if not root.is_dir():
             ap.error(f"--git-root {root} is not a directory")
+    for root in args.ref_root:
+        # a root that is missing, unlistable or not searchable (r-- is listable) would silently narrow the
+        # reference search, so a task cited only there would read `unique` (Codex pass 6)
+        if not root.is_dir():
+            ap.error(f"--ref-root {root} is not a directory")
+        if not os.access(root, os.R_OK | os.X_OK):
+            ap.error(f"--ref-root {root} cannot be searched")
     result: dict = {"scanned_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     if args.bigteam:
         if not args.bigteam.is_dir():
