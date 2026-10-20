@@ -1089,3 +1089,92 @@ def test_destination_inside_a_followed_tree_root_target_is_refused(real, capsys)
     inside = target / "newdir"
     assert mod.main(["--only", "cursor-chats", "--dest", str(inside)]) == 2
     assert "source store" in capsys.readouterr().err and not inside.exists()
+
+
+# --- Codex passes 5-6 on PR 24 (2026-10-20): a source that turns into a symlink, the Hermes fallback, a pruned db ---
+
+def test_a_file_that_becomes_a_symlink_after_listing_is_refused_not_dereferenced(real, monkeypatch):
+    mod, home, tmp = real
+    marker = tmp / "marker.txt"
+    marker.write_text("SENTINEL-SWAPPED-IN-TARGET")
+    (home / ".grok/sessions/p1").mkdir(parents=True)
+    (home / ".grok/sessions/p1/chat.jsonl").write_text("swapped\n")
+    (home / ".grok/sessions/p1/other.jsonl").write_text("kept\n")
+    real_make_ignore = mod.make_ignore
+
+    def swapping(run, excluder):
+        ignore = real_make_ignore(run, excluder)
+
+        def wrapped(directory, names):
+            out = ignore(directory, names)  # the listing check passed: now the file becomes a link
+            victim = Path(directory) / "chat.jsonl"
+            if victim.is_file() and not victim.is_symlink():
+                victim.unlink()
+                os.symlink(marker, victim)
+            return out
+        return wrapped
+
+    monkeypatch.setattr(mod, "make_ignore", swapping)
+    dest = home / "out" / "bk"
+    assert mod.main(["--only", "grok", "--dest", str(dest)]) == 1
+    assert b"SENTINEL-SWAPPED-IN-TARGET" not in all_bytes(dest)
+    assert not (dest / "grok/sessions/p1/chat.jsonl").exists()
+    assert (dest / "grok/sessions/p1/other.jsonl").read_text() == "kept\n"
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "partial"
+    assert [e["source"] for e in entry["errors"]] == [str(home / ".grok/sessions/p1/chat.jsonl")]
+    assert "became a symlink" in entry["errors"][0]["error"]
+
+
+def hermes_only(mod, home, tmp, monkeypatch):
+    fake = tmp / "hermes"
+    write_fake_hermes(fake, "none")
+    log = tmp / "hermes.log"
+    monkeypatch.setenv("ADE_BACKUP_HERMES", str(fake))
+    monkeypatch.setenv("FAKE_HERMES_LOG", str(log))
+    dest = home / "out" / "bk"
+    return dest, log, mod.main(["--only", "hermes-export", "--dest", str(dest)])
+
+
+def test_hermes_export_does_not_follow_a_state_db_link_outside_home(real, monkeypatch):
+    mod, home, tmp = real
+    outside = make_hermes_db(tmp / "outside", (("SENTINEL-HERMES-OUTSIDE-SESSION", 2),))
+    (home / ".hermes").mkdir()
+    os.symlink(outside, home / ".hermes/state.db")
+    dest, log, rc = hermes_only(mod, home, tmp, monkeypatch)
+    assert rc == 1 and not log.exists()  # hermes never ran
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["store"] == "hermes-export" and entry["status"] == "partial"
+    assert "symlink target outside HOME" in entry["errors"][0]["error"]
+    assert b"SENTINEL-HERMES-OUTSIDE-SESSION" not in all_bytes(dest)
+
+
+def test_hermes_export_follows_a_state_db_link_that_stays_under_home(real, monkeypatch):
+    mod, home, tmp = real
+    inside = make_hermes_db(home / "data", (("linked-session", 2),))
+    (home / ".hermes").mkdir()
+    os.symlink(inside, home / ".hermes/state.db")
+    dest, log, rc = hermes_only(mod, home, tmp, monkeypatch)
+    assert rc == 0
+    assert log.read_text().splitlines()[0].endswith(" has-state")  # exported from the scratch copy
+    assert (dest / "hermes-export/sessions/linked-session.jsonl").is_file()
+    entry = manifest_of(dest)["stores"][0]
+    assert entry["status"] == "ok" and entry["errors"] == []
+
+
+def test_a_db_pruned_between_listing_and_stat_is_an_error_and_the_dry_run_goes_on(real, monkeypatch, capsys):
+    mod, home, _ = real
+    gone = make_cursor_session(home)
+    make_cursor_session(home, sub="chats/hashA/uuid2")
+    real_dbs = mod.tree_dbs
+
+    def pruning(store, root):
+        dbs = sorted(real_dbs(store, root))
+        (gone / "store.db").unlink()  # a session pruned after the listing
+        return dbs
+
+    monkeypatch.setattr(mod, "tree_dbs", pruning)
+    assert mod.main(["--only", "cursor-chats", "--dry-run", "--json", "--dest", str(home / "o")]) == 1
+    plan = json.loads(capsys.readouterr().out)["stores"][0]
+    assert plan["status"] == "partial" and [e["source"] for e in plan["errors"]] == [str(gone / "store.db")]
+    assert plan["file_count"] == 2  # the other session's db and meta.json

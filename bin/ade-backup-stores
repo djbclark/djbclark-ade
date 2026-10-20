@@ -73,6 +73,7 @@ import re
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -442,7 +443,8 @@ def make_ignore(run, excluder):
 def root_link_target(src, excluder):
     """A configured store root that is a symlink: (resolved target, None) when it may be followed, else
     (None, reason). Followed only when every link resolves to an existing path under the run's real $HOME and
-    neither the link nor the target is a credential path. Links *inside* the tree are never followed."""
+    the target is not a credential path (the caller tests the link itself). Links *inside* the tree are never
+    followed."""
     try:
         target = Path(src).resolve()
     except (OSError, RuntimeError):
@@ -484,6 +486,24 @@ def under_symlink(path, root):
     return False
 
 
+def copy_regular(src, dst):
+    """copytree's copy function: a regular file copied from an fd opened with O_NOFOLLOW, so a source that
+    became a symlink after `make_ignore` listed it is refused rather than dereferenced (Codex on PR 24).
+    Raises OSError, which copytree collects into shutil.Error and the caller records."""
+    try:
+        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise OSError(f"source became a symlink or is unreadable: {src}: {exc.strerror}") from exc
+    with os.fdopen(fd, "rb") as fin:
+        if not stat.S_ISREG(os.fstat(fin.fileno()).st_mode):
+            raise OSError(f"source is not a regular file: {src}")
+        dfd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(dfd, "wb") as fout:
+            shutil.copyfileobj(fin, fout)
+    shutil.copystat(src, dst, follow_symlinks=False)
+    return dst
+
+
 def copy_file_store(store, run, excluder):
     for label, src in store["roots"]:
         dst = run.out / label
@@ -503,7 +523,7 @@ def copy_file_store(store, run, excluder):
             if real.is_dir():
                 try:
                     shutil.copytree(real, dst, symlinks=True, ignore=make_ignore(run, excluder),
-                                    copy_function=shutil.copy2)
+                                    copy_function=copy_regular)
                 except shutil.Error as exc:
                     for item in exc.args[0]:
                         run.error(item[0], OSError(item[2]))
@@ -707,8 +727,11 @@ def plan_store(store, excluder):
                 if real is None:
                     continue
             if real.is_file():
-                count += 1
-                size += real.stat().st_size + wal_size(real)
+                try:
+                    size += real.stat().st_size + wal_size(real)
+                    count += 1
+                except OSError as exc:
+                    run.error(real, exc)
             elif not os.path.lexists(f):
                 run.absent(f)
             else:
@@ -721,14 +744,21 @@ def plan_store(store, excluder):
                 if under_symlink(db, root):
                     run.skip(db, "symlink")
                     continue
+                try:
+                    size += db.stat().st_size + wal_size(db)
+                except OSError as exc:
+                    run.error(db, exc)
+                    continue
                 count += 1
-                size += db.stat().st_size + wal_size(db)
                 for pat in store["sidecars"]:
                     side = db.parent / pat.format(stem=db.stem, name=db.name)
                     why = sidecar_gap(side, excluder)
                     if not why:
-                        count += 1
-                        size += side.stat().st_size
+                        try:
+                            size += side.stat().st_size
+                            count += 1
+                        except OSError as exc:
+                            run.error(side, exc)
                     elif pat in store.get("required", []):
                         run.error(db.parent.relative_to(root), required_sidecar_error(side, why))
     else:
@@ -826,18 +856,23 @@ def exported_count(text):
     return int(m.group(1)) if m else None
 
 
-def make_hermes_scratch(home, scratch, state_backup, limit):
+def make_hermes_scratch(home, scratch, state_backup, limit, excluder):
     """A HERMES_HOME that holds only a copy of the hermes-state backup (taken here, scrubbed and guarded like
     any other copy, when the backup step did not produce one) and a config.yaml with the export limit."""
     scratch.mkdir(mode=0o700)
     if state_backup and state_backup.is_file():
         shutil.copyfile(state_backup, scratch / "state.db")
     else:
-        backup_sqlite(home / ".hermes/state.db", scratch / "state.db", "hermes-state")
+        real_db = home / ".hermes/state.db"
+        if real_db.is_symlink():  # the gate copy_sqlite_store applies to a linked store file
+            _, why = root_link_target(real_db, excluder)
+            if why:
+                raise RootSymlinkError(f"{why}: {real_db} -> {os.readlink(real_db)}")
+        backup_sqlite(real_db, scratch / "state.db", "hermes-state")
     (scratch / "config.yaml").write_text(f"sessions:\n  max_export_messages: {limit}\n")
 
 
-def export_hermes(home, work, final, state_backup):
+def export_hermes(home, work, final, state_backup, excluder):
     """The documented `hermes sessions export` JSONL, into <dest>/hermes-export/, read from a scratch copy."""
     out = work / "hermes-export"
     run = StoreRun({"name": "hermes-export", "kind": "hermes-export"}, out)
@@ -853,7 +888,7 @@ def export_hermes(home, work, final, state_backup):
         run.error("hermes", FileNotFoundError("no hermes on PATH (set ADE_BACKUP_HERMES)"))
     else:
         try:
-            make_hermes_scratch(home, scratch, state_backup, info["limit"])
+            make_hermes_scratch(home, scratch, state_backup, info["limit"], excluder)
             env = {**os.environ, "HERMES_HOME": str(scratch)}
             bulk = out / "hermes_sessions.jsonl"
             rc, text = hermes_run(hermes, [str(bulk)], str(out), env)
@@ -1096,7 +1131,7 @@ def run_main(argv):
         say(summary_line(entry))
     if "hermes-export" in wanted:
         state_backup = work / "hermes-state" / "state.db"
-        run, entry = export_hermes(home, work, dest, state_backup)
+        run, entry = export_hermes(home, work, dest, state_backup, excluder)
         entries.append(entry)
         errors.extend(entry["errors"])
         info = entry["hermes_export"]
