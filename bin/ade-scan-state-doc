@@ -482,12 +482,18 @@ def render(d):
                 cmd.append("same modified files as the primary checkout (cow copy; other agents' edits): "
                            "preserved there")
             else:
-                cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} diff > <DEST>/{}", ck, raw_p, f"{ck}/modified.patch"))
+                # `status` counts staged changes too; a plain `diff` is worktree against index and misses them, so
+                # the index gets its own patch (`--cached` works in an unborn repository too; Codex pass 20 on PR 27)
+                cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} diff > <DEST>/{} && git -C {} diff --cached > <DEST>/{}",
+                                  ck, raw_p, f"{ck}/modified.patch", raw_p, f"{ck}/staged.patch"))
                 need = need if need != "no" else "yes: decide whether they are work"
         if stashes:
-            what.append(f"{stashes} stash")
-            cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} stash show -p stash@{{0}} > <DEST>/{}",
-                              ck, raw_p, f"{ck}/stash0.patch"))
+            what.append(f"{stashes} stash" + ("es" if stashes > 1 else ""))
+            # every stash entry, not stash@{0} alone, with its untracked-files commit (`stash -u`'s third parent):
+            # the reflog lists every entry's commit and a bundle of them keeps all three parents (Codex pass 20)
+            cmd.append(shcode("mkdir -p <DEST>/{} && git -C {} bundle create <DEST>/{} $(git -C {} log -g --format=%H refs/stash)",
+                              ck, raw_p, f"{ck}/stashes.bundle", raw_p)
+                       + " (restore one with " + code("git stash store <sha>") + " after fetching the bundle)")
         if real_untr > 0:
             shared = "djbclark-ade" in c["path"] or "forgejo-ci-2026-10" in c["path"]
             what.append(f"{real_untr} untracked ({', '.join(code('{}', visible(u)) for u in untr[:3])}"

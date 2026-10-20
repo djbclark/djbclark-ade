@@ -2055,6 +2055,19 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
     assert "-cf <DEST>/checkouts/abs/p/-opt/whole.tar -- -opt" in row
 
 
+def test_capture_plan_keeps_staged_changes_and_every_stash():
+    """Codex pass 20 on PR 27, two P1s: `git diff` alone misses the index; `stash show -p stash@{0}` kept one
+    stash without its untracked files and dropped the older entries."""
+    mod = load_doc()
+    co = doc_checkout("/p/w", flags=["dirty", "stash"], verdict="dirty", modified=2, stashes=3)
+    row = next(r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith("| /p/w "))
+    assert "git -C /p/w diff > <DEST>/checkouts/abs/p/w/modified.patch && git -C /p/w diff --cached > " \
+           "<DEST>/checkouts/abs/p/w/staged.patch" in row
+    assert "3 stashes" in row and "stash0.patch" not in row and "stash show" not in row
+    assert "git -C /p/w bundle create <DEST>/checkouts/abs/p/w/stashes.bundle $(git -C /p/w log -g --format=%H refs/stash)" \
+           in row.replace("\\$", "$").replace("\\(", "(").replace("\\)", ")")
+
+
 def test_section_1_verdict_rows_sum_to_the_checkout_count():
     """Adversary round 21, INFO 5: three verdicts appeared in no row."""
     mod = load_doc()
