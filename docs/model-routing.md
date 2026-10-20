@@ -310,7 +310,14 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
   Cursor Cloud Agents are launched with `bin/cursor-cloud launch --repo <url>
   --ref <branch> --prompt-file F` (key from `sudo-secretspec`, `autoCreatePR`
   always false, the lead opens the PR after the adversary review), inspected
-  with `status`, `run`, `usage`, and continued with `followup`.
+  with `status`, `run`, `usage`, and continued with `followup`. Since 2026-10-20
+  a cloud slice is also an ordinary dispatch: `acp-dispatch cursor-cloud --model ID
+  --kind code|bulk|mechanical --name N -f BRIEF -C REPO` (repo and ref from the
+  checkout's `origin` and branch, so push first; record with `cloud_agent_id`, a
+  30 s poller, report with `BRANCH:` and `COST:` lines; no local load gate or cap).
+  `route_agent.py` carries a `cursor-cloud` service (code 24, bulk 26, mechanical 18;
+  never frontier or judgment) that reads the aiuse `cursor` row (`shares_pool`):
+  eligible after every local Cursor row, never a kind's default.
 - **Grok (SuperGrok, 45% left)** — realtime X/news/web angle, quick
   standalone questions.
 - **z.ai GLM (lite) via zcode** — budget bulk coding on its own

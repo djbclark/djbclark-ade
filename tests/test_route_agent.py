@@ -34,7 +34,7 @@ IDLE = {
     # the aiuse-disabled Alibaba plan; present so "drain every pool" fixtures
     # drain them too instead of leaving them unmeasured and routable.
     "cursor-auto": {"remaining": 56.0}, "crush": {"remaining": 100.0},
-    "alibaba": {"remaining": 50.0},
+    "alibaba": {"remaining": 50.0}, "cursor-cloud": {"remaining": 56.0},
 }
 
 

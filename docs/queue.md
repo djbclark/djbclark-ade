@@ -78,8 +78,9 @@ comment after the next Codex release or when the connector's reply changes. Then
 (2) DONE 2026-10-19: the Cursor user API key is `CURSOR_API_KEY` in `sudo-secretspec`
 (runtime declaration, optional; read it only through `sudo-secretspec run`); `bin/cursor-cloud`
 launches, inspects and follows up agents (first slice merged as PR 5, 2026-10-19; `@cursor` on
-issue 6 is the GitHub-mention test: it fires on a *comment*, not the issue body, 2026-10-20, agent bc-614266a6, docs slice as PR 8, $1.04 at API price); still open: a `cursor-cloud` place in `acp-dispatch` and
-`route_agent.py` so the router can pick it. (3) The Max plan's
+issue 6 is the GitHub-mention test: it fires on a *comment*, not the issue body, 2026-10-20, agent bc-614266a6, docs slice as PR 8, $1.04 at API price); DONE 2026-10-20: the `cursor-cloud` place in `acp-dispatch`
+(record, 30 s poller, report with `BRANCH:`/`COST:`, no PR) and a `cursor-cloud` service in `route_agent.py`/`config/routing.toml`
+(branch `feat/cursor-cloud-route`); `codex-cloud` stays open on the upstream catalog bug. (3) The Max plan's
 monthly API credits are the `omp credits` pool in `aiuse` (djbclark, 2026-10-19): rename the
 pool, verify the balance on the Anthropic console, and route one API-key workload at it.
 

@@ -362,6 +362,22 @@ note = "Cursor third-party pool"
 agent = "cursor"
 models = { code = "claude-sonnet-5-5 --effort medium", mechanical = "claude-haiku-5-5 --effort low" }
 
+# Cursor Cloud Agents (bin/cursor-cloud, `acp-dispatch cursor-cloud`, 2026-10-20): the slice
+# runs in Cursor's cloud and pushes a cursor/... branch; the lead reviews and opens the PR
+# (never autoCreatePR). Billed at API price against the same Cursor pool as the third-party
+# row (aiuse reports one `cursor` provider; shares_pool copies that reading). Ranked behind
+# every local Cursor row and never frontier or judgment: eligible after local agents at the
+# same cost tier, and it is no kind's default. Model ids: `bin/cursor-cloud models`.
+[[service]]
+name = "cursor-cloud"
+cli = "cursor-cloud (Cursor Cloud Agents)"
+good_at = { code = 24, bulk = 26, mechanical = 18 }
+billing = "subscription"
+note = "Cursor Cloud Agent: leaves the Mac, pushes a branch, lead opens the PR; API price on the Cursor pool"
+shares_pool = "cursor"
+max_parallel = 2
+models = { code = "claude-sonnet-5-5", bulk = "claude-haiku-5-5", mechanical = "claude-haiku-5-5" }
+
 # Ordinary subscription pool (SuperGrok). It was a reserve 2026-10-15..18 because GrokBot
 # drew on it; GrokBot moved to its own Cursor pool 2026-10-18 (operator), so the floor and
 # the one-slice cap are gone. Ranked behind the burn-first pools (antigravity, cursor-auto).
