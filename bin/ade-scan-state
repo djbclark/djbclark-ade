@@ -8,11 +8,16 @@ and `git fetch` of one branch (--fetch) when the origin tip cannot be compared: 
 branch's objects, writes no refs and no FETCH_HEAD, and runs no auto-maintenance.
 
 A checkout's own git config can name commands (core.fsmonitor, core.sshCommand, remote.*.uploadpack,
-filter.*, credential.*, hooksPath, include.*). The tool reads that config without running anything
-first and skips such a checkout (`skipped: repo config runs commands`); every later git call also
-turns fsmonitor and hooks off, drops every GIT_* variable from the environment, reads no global or
-system config, and `ls-remote` runs from a neutral directory. Symlinks out of a --git-root are not
-followed: name each root you want scanned.
+filter.*, gpg.program with log.showSignature, credential.*, hooksPath, include.*, ...). The tool reads
+that config without running anything first and accepts only an allowlist of keys (SAFE_CONFIG below);
+a checkout with any other key is `skipped: unrecognised config <key>`, one with core.worktree or a
+work tree that is not the scanned dir is `skipped: worktree redirected`. The same allowlist is applied
+to every submodule's config under the git dir (`skipped: submodule config unrecognised <key>`).
+Every later git call also turns fsmonitor, hooks and signature display off, drops every GIT_*
+variable from the environment, reads no global or system config, ignores submodules in `status`
+(so a checkout with submodules carries the flag `submodules not inspected`, never a bare
+`clean and pushed`), counts stashes from the reflog file, and `ls-remote` runs from a neutral
+directory. Symlinks out of a --git-root are not followed: name each root you want scanned.
 
   ade-scan-state --bigteam ~/.local/state/bigteam \\
       --ref-root ~/src/djbclark-ade/docs --ref-root ~/ops/site-private/memory \\
@@ -41,7 +46,10 @@ Git checkout verdicts (a checkout is a dir holding `.git`, found up to two level
   orphan branch     the branch is on no origin ref and HEAD has commits origin lacks
   dirty             modified or untracked non-ignored paths
   clean and pushed  none of the above
-  skipped: repo config runs commands   the checkout's config names a command; nothing else was run
+  skipped: <reason>  a config key outside the allowlist, a redirected work tree, or an unreadable
+                    config (reasons above); nothing else was run
+Extra flag `submodules not inspected`: the checkout has submodules; `status` ignores their state, so
+the verdict says nothing about them (it is that flag, not `clean and pushed`, when nothing else applies).
 Extra flag `origin tip not fetched`: the branch is on origin at a commit this checkout cannot
 compare with HEAD (add --fetch); `ahead_of_origin` then still counts those commits.
 A checkout with no `origin` remote at all has every commit "ahead of origin": it is an orphan
@@ -71,16 +79,37 @@ GIT_SCAN_DEPTH = 2
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "target"}
 # Always excluded from the "is this task name cited" search; --exclude adds to this list.
 DEFAULT_EXCLUDES = ["ade-everywhere-phase0-scan-*"]
-SKIPPED = "skipped: repo config runs commands"
-# Prefix of every git call: no index lock, and the config-named programs that run on any command off.
+SKIP_UNREADABLE = "skipped: git config unreadable"
+SKIP_WORKTREE = "skipped: worktree redirected"
+SKIP_NO_WORKTREE = "skipped: no work tree"
+SUBMODULES_FLAG = "submodules not inspected"
+# Prefix of every git call: no index lock, and the config-named programs that run on any command off
+# (log.showSignature=false: `stash list` / `log` would run gpg.program on a signed commit otherwise).
 GIT_SAFE = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-            "-c", "protocol.ext.allow=never"]
-# Config that makes git run a program (read from the checkout's local / worktree scope).
-RUNS_COMMANDS = ("core.sshcommand", "core.hookspath", "core.gitproxy", "core.askpass",
-                 "core.alternaterefscommand")
-RUNS_COMMANDS_PREFIX = ("include.", "includeif.", "filter.", "credential.")
-RUNS_COMMANDS_SECTION_SUFFIX = {"remote": (".uploadpack", ".receivepack", ".vcs", ".proxy")}
-BOOLEAN_WORDS = {"true", "false", "yes", "no", "on", "off", "1", "0", ""}
+            "-c", "protocol.ext.allow=never", "-c", "log.showSignature=false"]
+# Allowlist of the checkout's own config (local and worktree scope), 2026-10-20 (adversary round 2,
+# R2-1: the deny list missed three paths in two rounds). Keys are lower-cased on section and variable,
+# the subsection is kept verbatim. Anything else, `core.worktree` included, makes the checkout skipped.
+# None of these runs a program: no gpg.*, filter.*, diff.*, credential.*, alias.*, url.*, include.*,
+# core.sshCommand / hooksPath / pager / editor, fetch.recurseSubmodules, remote.*.uploadpack.
+SAFE_CONFIG = frozenset({
+    "core.repositoryformatversion", "core.filemode", "core.bare", "core.logallrefupdates",
+    "core.ignorecase", "core.precomposeunicode", "core.symlinks", "core.autocrlf", "core.eol",
+    "core.safecrlf", "core.quotepath", "core.excludesfile", "core.sparsecheckout",
+    "core.sparsecheckoutcone", "core.untrackedcache", "core.fsmonitor",  # fsmonitor: true/false only
+    "user.name", "user.email", "user.signingkey", "commit.gpgsign",  # a key id: executes nothing
+    "extensions.worktreeconfig", "extensions.objectformat", "extensions.refstorage",
+    "submodule.active", "pull.rebase", "pull.ff", "push.default", "push.autosetupremote",
+    "merge.conflictstyle", "rerere.enabled", "status.showuntrackedfiles",  # status gets the flag too
+    "lfs.repositoryformatversion"})
+# section -> variables allowed under any subsection (remote.<name>.url, branch.<name>.merge, ...)
+SAFE_SUBSECTION_CONFIG = {
+    "remote": frozenset({"url", "pushurl", "fetch", "tagopt", "prune", "promisor",
+                         "partialclonefilter", "gh-resolved"}),
+    "branch": frozenset({"remote", "merge", "rebase", "pushremote", "gh-merge-base",
+                         "vscode-merge-base"}),
+    "submodule": frozenset({"url", "active", "ignore"}),
+    "lfs": frozenset({"access"})}
 
 
 def git_env(network: bool = False) -> dict:
@@ -296,32 +325,93 @@ def git(path: Path, *args, timeout=60, network=False):
     return run(["git", *GIT_SAFE, "-C", str(path), *args], timeout=timeout, env=git_env(network))
 
 
-def runs_commands(key: str, value: str) -> bool:
-    """True when this config entry makes git execute a program."""
-    key = key.lower()
-    if key == "core.fsmonitor":
-        return value.strip().lower() not in BOOLEAN_WORDS
-    if key in RUNS_COMMANDS or key.startswith(RUNS_COMMANDS_PREFIX):
+def key_is_safe(key: str, value: str, in_submodule: bool = False) -> bool:
+    """True when this config entry is on the allowlist (see SAFE_CONFIG)."""
+    parts = key.split(".")
+    section, var = parts[0].lower(), parts[-1].lower()
+    if len(parts) < 2:
+        return False
+    if section == "core" and var == "fsmonitor":
+        return len(parts) == 2 and value in ("true", "false")
+    if in_submodule and key.lower() == "core.worktree":  # git itself writes it into every module
         return True
-    section, _, rest = key.partition(".")
-    return any(rest.endswith(sfx) for sfx in RUNS_COMMANDS_SECTION_SUFFIX.get(section, ()))
+    if len(parts) == 2:
+        return f"{section}.{var}" in SAFE_CONFIG
+    return var in SAFE_SUBSECTION_CONFIG.get(section, ())
+
+
+def config_offenders(entries, in_submodule: bool = False) -> list[str]:
+    """Names (never values) of the entries that are not on the allowlist, first seen first."""
+    bad: list[str] = []
+    for key, value in entries:
+        if not key_is_safe(key, value, in_submodule):
+            first, *middle, last = key.split(".") if "." in key else [key, key]
+            name = ".".join([first.lower(), *middle, last.lower()]) if "." in key else key
+            if name not in bad:
+                bad.append(name)
+    return bad
 
 
 def unsafe_config(path: Path) -> list[str] | None:
-    """Names of the checkout's own config keys that run commands (never their values); None when
-    the config cannot be read. Reading it executes nothing."""
+    """Names of the checkout's own config keys (local and worktree scope) that are not on the
+    allowlist, never their values; None when the config cannot be read. Reading it executes nothing."""
     rc, out = git(path, "config", "--list", "--show-scope", "--includes", "-z")
     if rc != 0:
         return None
     tokens = out.split("\0")
-    bad = []
+    entries = []
     for scope, entry in zip(tokens[0::2], tokens[1::2]):
-        if scope not in ("local", "worktree"):
+        if scope in ("local", "worktree"):
+            key, _, value = entry.partition("\n")
+            entries.append((key, value))
+    return config_offenders(entries)
+
+
+def git_common_dir(path: Path) -> Path | None:
+    rc, out = git(path, "rev-parse", "--git-common-dir")
+    return (path / out.strip()).resolve() if rc == 0 and out.strip() else None
+
+
+def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str | None]:
+    """(has submodules, first config key of any submodule's git dir outside the allowlist).
+
+    Reads `<git-common-dir>/modules/**/config` with `git config --file`, which executes nothing."""
+    modules = common / "modules" if common else None
+    present = (path / ".gitmodules").exists() or bool(modules and modules.is_dir())
+    if not (present and modules and modules.is_dir()):
+        return present, None
+    env = git_env()
+    env["GIT_CEILING_DIRECTORIES"] = str(Path(neutral_cwd()).parent)
+    for root, dirs, files in os.walk(modules, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d not in ("objects", "refs", "logs", "hooks", "lfs"))
+        cfg = Path(root) / "config"
+        if "config" not in files or cfg.is_symlink():
             continue
-        key, _, value = entry.partition("\n")
-        if runs_commands(key, value) and key.lower() not in bad:
-            bad.append(key.lower())
-    return bad
+        rc, out = run(["git", *GIT_SAFE, "config", "--file", str(cfg), "--list", "-z"], timeout=60,
+                      cwd=neutral_cwd(), env=env)
+        if rc != 0:
+            return present, "(unreadable)"
+        entries = [tuple(e.partition("\n")[::2]) for e in out.split("\0") if e]
+        bad = config_offenders(entries, in_submodule=True)
+        if bad:
+            return present, bad[0]
+    return present, None
+
+
+def stash_count(path: Path, common: Path | None) -> int:
+    """Stashes = lines of the stash reflog file; no log machinery (no gpg, no pager) is involved."""
+    if common:
+        try:
+            return len((common / "logs" / "refs" / "stash").read_bytes().splitlines())
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return 1  # unreadable reflog: report that something is there
+    rc, _ = git(path, "rev-parse", "--verify", "--quiet", "refs/stash")
+    if rc != 0:
+        return 0
+    rc, n = git(path, "stash", "list", "--format=%H")  # reftable: no reflog file; log.showSignature is off
+    return max(len(n.splitlines()), 1) if rc == 0 else 1
 
 
 _neutral_cwd: list[str] = []
@@ -377,8 +467,7 @@ def origin_branches(path: Path, remote: bool) -> dict[str, str] | None:
     return result
 
 
-def skipped_record(path: Path, keys: list[str] | None) -> dict:
-    reason = SKIPPED if keys else "skipped: git config unreadable"
+def skipped_record(path: Path, reason: str, keys: list[str] | None = None) -> dict:
     return {
         "path": str(path), "branch": "?", "modified": None, "untracked": None,
         "untracked_sample": [], "modified_sample": [], "upstream": None, "unpushed": None,
@@ -389,12 +478,26 @@ def skipped_record(path: Path, keys: list[str] | None) -> dict:
 
 def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     keys = unsafe_config(path)  # before any other git call: reading config runs nothing
-    if keys is None or keys:
-        return skipped_record(path, keys)
+    if keys is None:
+        return skipped_record(path, SKIP_UNREADABLE)
+    if "core.worktree" in keys:
+        return skipped_record(path, SKIP_WORKTREE, keys)
+    if keys:
+        return skipped_record(path, f"skipped: unrecognised config {keys[0]}", keys)
+    rc, top = git(path, "rev-parse", "--show-toplevel")
+    if rc != 0 or not top.strip():
+        return skipped_record(path, SKIP_NO_WORKTREE)
+    if Path(top.strip()).resolve() != path.resolve():
+        return skipped_record(path, SKIP_WORKTREE)
+    common = git_common_dir(path)
+    has_submodules, bad_key = submodule_config_check(path, common)
+    if bad_key:
+        return skipped_record(path, f"skipped: submodule config unrecognised {bad_key}", [bad_key])
     rc, branch = git(path, "rev-parse", "--abbrev-ref", "HEAD")
     branch = branch.strip() if rc == 0 else "?"
     detached = branch == "HEAD"
-    rc, status = git(path, "status", "--porcelain")
+    rc, status = git(path, "status", "--porcelain", "--ignore-submodules=all",
+                     "--untracked-files=normal")
     lines = status.splitlines() if rc == 0 else []
     untracked = [ln[3:] for ln in lines if ln.startswith("??")]
     modified = [ln[3:] for ln in lines if not ln.startswith("??")]
@@ -406,8 +509,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         unpushed = int(n) if rc == 0 and n.strip().isdigit() else None
     rc, n = git(path, "rev-list", "--count", "HEAD", "--not", "--remotes=origin")
     ahead_of_origin = int(n) if rc == 0 and n.strip().isdigit() else None
-    rc, n = git(path, "stash", "list")
-    stashes = len(n.splitlines()) if rc == 0 else 0
+    stashes = stash_count(path, common)
     rc, _ = git(path, "remote", "get-url", "origin")
     has_origin = rc == 0
     branches = origin_branches(path, remote) if has_origin else None
@@ -426,6 +528,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         if n is None and fetch:  # the tip's objects are not here: download them, write no refs
             git(path, "-c", "maintenance.auto=false", "-c", "gc.auto=0", "fetch", "--quiet",
                 "--no-auto-maintenance", "--no-write-fetch-head", "--no-tags", "--refmap=",
+                "--no-recurse-submodules", "--no-prune",
                 "origin", f"refs/heads/{branch}", timeout=120, network=True)
             n = ahead_of_tip()
         if n is None:
@@ -443,6 +546,8 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         flags.append("no origin remote")
     if lines:
         flags.append("dirty")
+    if has_submodules:
+        flags.append(SUBMODULES_FLAG)
     if stashes:
         flags.append("stash")
     primary = next((f for f in flags if f not in ("stash", "no origin remote")),

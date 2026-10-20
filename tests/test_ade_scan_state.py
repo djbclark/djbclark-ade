@@ -8,6 +8,8 @@ import time
 import types
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parent.parent / "bin" / "ade-scan-state"
 GIT_ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
@@ -233,6 +235,12 @@ def make_repo(path: Path, name: str = "a.txt") -> Path:
     return path
 
 
+def marker_script(path: Path, marker: Path) -> Path:
+    path.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+    path.chmod(0o755)
+    return path
+
+
 def test_config_that_runs_commands_is_skipped_and_never_run(tmp_path):
     mod = load()
     roots = tmp_path / "roots"
@@ -246,7 +254,7 @@ def test_config_that_runs_commands_is_skipped_and_never_run(tmp_path):
     res = {Path(c["path"]).name: c for c in mod.scan_git([roots], remote=True)}
     assert not m_fsm.exists() and not m_upl.exists()
     for name, key in (("fsm", "core.fsmonitor"), ("upl", "remote.origin.uploadpack")):
-        assert res[name]["verdict"] == "skipped: repo config runs commands"
+        assert res[name]["verdict"] == f"skipped: unrecognised config {key}"
         assert res[name]["config_keys"] == [key]
         assert res[name]["untracked"] is None
     assert res["ok"]["verdict"] != res["fsm"]["verdict"]
@@ -259,23 +267,47 @@ def test_config_that_runs_commands_is_skipped_and_never_run(tmp_path):
     assert "| - |" in mod.markdown({"checkouts": [res["fsm"]]})
 
 
-def test_runs_commands_keys(tmp_path):
+def test_config_allowlist_keys():
     mod = load()
-    for key, value in (("core.fsmonitor", "/x/hook"), ("core.sshCommand", "ssh -i k"),
-                       ("remote.origin.uploadpack", "x"), ("remote.o.receivepack", "x"),
-                       ("filter.lfs.clean", "x"), ("credential.helper", "!x"),
+    for key, value in (("core.fsmonitor", "/x/hook"), ("core.fsmonitor", "True"),
+                       ("core.sshCommand", "ssh -i k"), ("remote.origin.uploadpack", "x"),
+                       ("remote.o.receivepack", "x"), ("filter.lfs.clean", "x"),
+                       ("diff.lfs.textconv", "x"), ("credential.helper", "!x"),
                        ("core.hooksPath", "/h"), ("include.path", "../x"),
-                       ("includeIf.gitdir:/a/.path", "x"), ("remote.o.vcs", "x")):
-        assert mod.runs_commands(key, value), key
+                       ("includeIf.gitdir:/a/.path", "x"), ("remote.o.vcs", "x"),
+                       ("gpg.program", "x"), ("gpg.ssh.program", "x"), ("log.showSignature", "true"),
+                       ("alias.co", "checkout"), ("url.x.insteadOf", "y"), ("core.worktree", "/t"),
+                       ("fetch.recurseSubmodules", "yes"), ("merge.x.driver", "x"),
+                       ("extensions.partialclone", "origin"), ("branch.main.mergeoptions", "x")):
+        assert not mod.key_is_safe(key, value), key
     for key, value in (("core.fsmonitor", "false"), ("core.fsmonitor", "true"),
-                       ("remote.origin.url", "x"), ("user.name", "x"), ("core.bare", "false")):
-        assert not mod.runs_commands(key, value), key
-    repo = make_repo(tmp_path / "r")
-    git(repo, "config", "core.fsmonitor", "false")
-    git(repo, "config", "filter.x.clean", "cat")
-    assert mod.unsafe_config(repo) == ["filter.x.clean"]
-    git(repo, "config", "--unset", "filter.x.clean")
-    assert mod.unsafe_config(repo) == []
+                       ("remote.origin.url", "x"), ("remote.origin.gh-resolved", "base"),
+                       ("branch.feature.x.merge", "refs/heads/x"), ("user.name", "x"),
+                       ("core.bare", "false"), ("Core.FileMode", "true"),
+                       ("submodule.sub.url", "u"), ("submodule.active", "."),
+                       ("status.showUntrackedFiles", "no"), ("lfs.http://h/x.access", "basic")):
+        assert mod.key_is_safe(key, value), key
+    assert mod.key_is_safe("core.worktree", "../../../sub", in_submodule=True)
+    assert not mod.key_is_safe("alias.co", "checkout", in_submodule=True)
+
+
+def test_repo_with_only_safe_keys_is_scanned_and_an_alias_is_skipped(tmp_path):
+    mod = load()
+    roots = tmp_path / "roots"
+    safe = make_repo(roots / "safe")
+    alias = make_repo(roots / "alias")
+    for repo in (safe, alias):
+        git(repo, "config", "user.name", "t")
+        git(repo, "config", "core.fsmonitor", "false")
+        git(repo, "config", "status.showUntrackedFiles", "normal")
+        git(repo, "config", "branch.main.gh-merge-base", "main")
+    git(alias, "config", "alias.co", "checkout")
+    assert mod.unsafe_config(safe) == []
+    assert mod.unsafe_config(alias) == ["alias.co"]
+    res = {Path(c["path"]).name: c for c in mod.scan_git([roots], remote=False)}
+    assert res["safe"]["verdict"] == "orphan branch" and res["safe"]["untracked"] == 0
+    assert res["alias"]["verdict"] == "skipped: unrecognised config alias.co"
+    assert res["alias"]["config_keys"] == ["alias.co"]
 
 
 def test_config_included_from_a_file_is_caught(tmp_path):
@@ -285,8 +317,132 @@ def test_config_included_from_a_file_is_caught(tmp_path):
     extra.write_text("[core]\n\tsshCommand = touch /nonexistent/x\n")
     git(repo, "config", "include.path", str(extra))
     c = mod.scan_git([tmp_path / "roots"], remote=False)[0]
-    assert c["verdict"] == "skipped: repo config runs commands"
+    assert c["verdict"] == "skipped: unrecognised config include.path"
     assert "include.path" in c["config_keys"]
+
+
+def test_stash_count_runs_no_gpg_program(tmp_path):
+    """R2-1a: log.showSignature + gpg.program ran during `stash list` on a signed stash commit."""
+    mod = load()
+    repo = make_repo(tmp_path / "roots" / "stashy")
+    marker = tmp_path / "PWNED-gpg"
+    tree = git(repo, "rev-parse", "HEAD^{tree}").strip()
+    parent = git(repo, "rev-parse", "HEAD").strip()
+    commit = (f"tree {tree}\nparent {parent}\nauthor t <t@example.com> 1 +0000\n"
+              "committer t <t@example.com> 1 +0000\n"
+              "gpgsig -----BEGIN PGP SIGNATURE-----\n \n bogus\n -----END PGP SIGNATURE-----\n\nWIP\n")
+    p = subprocess.run(["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=repo,
+                       env=GIT_ENV, input=commit, capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    git(repo, "update-ref", "--create-reflog", "-m", "WIP", "refs/stash", p.stdout.strip())
+    git(repo, "config", "log.showSignature", "true")
+    git(repo, "config", "gpg.program", str(marker_script(tmp_path / "gpg.sh", marker)))
+    # the scan skips it, and the counting layer on its own runs no program either
+    c = mod.scan_git([tmp_path / "roots"], remote=False)[0]
+    assert c["verdict"].startswith("skipped: unrecognised config ")
+    assert c["config_keys"] and not marker.exists()
+    assert mod.stash_count(repo, mod.git_common_dir(repo)) == 1
+    assert not marker.exists()
+    # control: the plain command does run it (if this git does not, the test has no teeth here)
+    subprocess.run(["git", "stash", "list"], cwd=repo, env=GIT_ENV, capture_output=True)
+    if not marker.exists():
+        pytest.skip("this git does not run gpg.program for `stash list`; nothing to guard")
+
+
+def make_super_with_submodule(tmp_path: Path):
+    sub_origin = make_repo(tmp_path / "sub-origin", "f.txt")
+    roots = tmp_path / "roots"
+    sup = make_repo(roots / "super")
+    git(sup, "-c", "protocol.file.allow=always", "submodule", "add", str(sub_origin), "sub")
+    git(sup, "commit", "-m", "add submodule")
+    return roots, sup, sup / ".git" / "modules" / "sub"
+
+
+def test_submodule_filter_in_module_config_is_skipped_and_never_run(tmp_path):
+    """R2-1b: filter.* in .git/modules/sub/config ran during the superproject's `status`."""
+    mod = load()
+    roots, sup, moddir = make_super_with_submodule(tmp_path)
+    marker = tmp_path / "PWNED-subfilter"
+    # a clean checkout whose submodule config is only safe keys: scanned, never "clean and pushed"
+    c = mod.scan_git([roots], remote=False)[0]
+    assert mod.SUBMODULES_FLAG in c["flags"] and c["verdict"] != "clean and pushed"
+    git(moddir, "config", "filter.x.clean", str(marker_script(tmp_path / "clean.sh", marker)))
+    (sup / "sub" / ".gitattributes").write_text("f.txt filter=x\n")
+    (sup / "sub" / "f.txt").write_text("a\n")  # new mtime: git must re-hash through the filter
+    c = mod.scan_git([roots], remote=False)[0]
+    assert c["verdict"] == "skipped: submodule config unrecognised filter.x.clean"
+    assert not marker.exists()
+    # second layer: the status call itself ignores submodules
+    mod.git(sup, "status", "--porcelain", "--ignore-submodules=all", "--untracked-files=normal")
+    assert not marker.exists()
+    subprocess.run(["git", "status", "--porcelain"], cwd=sup, env=GIT_ENV, capture_output=True)
+    if not marker.exists():
+        pytest.skip("this git does not run the submodule's filter during status")
+
+
+def test_fetch_does_not_recurse_into_submodules(tmp_path, monkeypatch):
+    """R2-1c: fetch.recurseSubmodules=yes made --fetch run remote.origin.uploadpack of a submodule."""
+    mod = load()
+    origin = tmp_path / "origin.git"
+    git(tmp_path, "init", "--bare", "-b", "main", str(origin))
+    sub_origin = make_repo(tmp_path / "sub-origin", "f.txt")
+    roots = tmp_path / "roots"
+    roots.mkdir()
+    work, other = roots / "work", tmp_path / "other"
+    git(tmp_path, "clone", str(origin), str(work))
+    git(work, "checkout", "-b", "main")
+    git(work, "-c", "protocol.file.allow=always", "submodule", "add", str(sub_origin), "sub")
+    git(work, "commit", "-m", "first")
+    git(work, "push", "-u", "origin", "main")
+    git(tmp_path, "clone", str(origin), str(other))
+    (other / "o.txt").write_text("o\n")
+    git(other, "add", "o.txt")
+    git(other, "commit", "-m", "elsewhere")
+    git(other, "push", "origin", "main")
+    (work / "w.txt").write_text("w\n")
+    git(work, "add", "w.txt")
+    git(work, "commit", "-m", "local, unpushed")  # diverged: origin's tip must be fetched
+    marker = tmp_path / "PWNED-J"
+    git(work, "config", "fetch.recurseSubmodules", "yes")
+    git(work / ".git" / "modules" / "sub", "config", "remote.origin.uploadpack",
+        f"touch {marker}; git-upload-pack")
+    # 1. the allowlist keeps the scan away from this checkout altogether
+    c = mod.scan_git([roots], remote=True, fetch=True)[0]
+    assert c["verdict"] == "skipped: unrecognised config fetch.recursesubmodules"
+    assert not marker.exists()
+    # 2. with both guards bypassed, the fetch itself still does not recurse
+    monkeypatch.setattr(mod, "unsafe_config", lambda path: [])
+    monkeypatch.setattr(mod, "submodule_config_check", lambda path, common: (True, None))
+    mod._remote_cache.clear()
+    c = mod.scan_git([roots], remote=True, fetch=True)[0]
+    assert "origin tip not fetched" not in c["flags"] and not marker.exists()
+    # control: a recursing fetch would have run it
+    git(work, "update-ref", "-d", "refs/remotes/origin/main")
+    subprocess.run(["git", "fetch", "origin"], cwd=work, env=GIT_ENV, capture_output=True)
+    if not marker.exists():
+        pytest.skip("this git does not run the submodule's uploadpack on a recursing fetch")
+
+
+def test_status_ignores_untracked_config_and_worktree_redirect_is_skipped(tmp_path):
+    """R2-2: status.showUntrackedFiles=no hid files; core.worktree reported another tree."""
+    mod = load()
+    roots = tmp_path / "roots"
+    hid = make_repo(roots / "hid")
+    git(hid, "config", "status.showUntrackedFiles", "no")
+    (hid / "precious.txt").write_text("p\n")
+    redirected = make_repo(roots / "redir")
+    elsewhere = make_repo(tmp_path / "elsewhere")
+    git(redirected, "config", "core.worktree", str(elsewhere))
+    (redirected / "precious.txt").write_text("p\n")
+    res = {Path(c["path"]).name: c for c in mod.scan_git([roots], remote=False)}
+    assert res["hid"]["untracked"] == 1 and "dirty" in res["hid"]["flags"]
+    assert res["redir"]["verdict"] == "skipped: worktree redirected"
+    assert res["redir"]["untracked"] is None
+    # the toplevel check on its own: a scanned path that is not git's work tree is skipped
+    sub = hid / "nested"
+    sub.mkdir()
+    c = mod.scan_checkout(sub, remote=False)  # git discovers `hid` above it
+    assert c["verdict"] == "skipped: worktree redirected"
 
 
 def test_symlinks_out_of_a_root_are_not_followed(tmp_path):
@@ -439,3 +595,90 @@ def test_scan_doc_generator_renders_a_scan_json(tmp_path):
     text = out.read_text()
     assert text.startswith("# Phase 0 scan") and "| t\\|1 |" in text
     assert subprocess.run([str(SCRIPT.parent / "ade-scan-state-doc")], capture_output=True).returncode == 1
+
+
+def load_doc() -> types.ModuleType:
+    loader = importlib.machinery.SourceFileLoader("ade_scan_state_doc", str(SCRIPT.parent / "ade-scan-state-doc"))
+    spec = importlib.util.spec_from_loader("ade_scan_state_doc", loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def doc_cli(*args: Path | str) -> subprocess.CompletedProcess:
+    return subprocess.run([str(SCRIPT.parent / "ade-scan-state-doc"), *map(str, args)],
+                          capture_output=True, text=True)
+
+
+def test_scan_doc_generator_refuses_to_clobber(tmp_path):
+    scan = tmp_path / "scan.json"
+    scan.write_text(json.dumps({"scanned_at": "x", "bigteam": {"tasks": [], "loose_files": []},
+                                "checkouts": [], "summary": {
+                                    "bigteam": {"tasks": 0, "verdicts": {}, "total_bytes": 0,
+                                                "unique_bytes": 0, "scratch_bytes": 0},
+                                    "checkouts": {"count": 0, "verdicts": {}, "with_unpushed_work": 0,
+                                                  "with_untracked": 0, "with_stash": 0}}}))
+    before = scan.read_text()
+    assert doc_cli(scan, scan).returncode == 1  # OUT is the input
+    assert doc_cli(scan, tmp_path / "." / "scan.json").returncode == 1  # same file, other spelling
+    assert scan.read_text() == before
+    assert doc_cli(scan, tmp_path / "out.txt").returncode == 1  # not markdown
+    assert not (tmp_path / "out.txt").exists()
+    existing = tmp_path / "keep.md"
+    existing.write_text("keep me\n")
+    assert doc_cli(scan, existing).returncode == 1  # exists, no --force
+    assert existing.read_text() == "keep me\n"
+    p = doc_cli(scan, existing, "--force")
+    assert p.returncode == 0, p.stderr
+    assert existing.read_text().startswith("# Phase 0 scan")
+    assert doc_cli(scan, tmp_path / "new.md").returncode == 0
+    assert not [f for f in tmp_path.iterdir() if f.name.endswith(".tmp")]
+
+
+def test_scan_doc_generator_writes_atomically(tmp_path, monkeypatch):
+    mod = load_doc()
+    out = tmp_path / "out.md"
+    out.write_text("old content\n")
+
+    def boom(src, dst):
+        raise OSError("simulated failure at the move")
+
+    monkeypatch.setattr(mod.os, "replace", boom)
+    with pytest.raises(OSError):
+        mod.write_atomic(out, "new content\n")
+    assert out.read_text() == "old content\n"
+    assert [f.name for f in tmp_path.iterdir()] == ["out.md"]  # the temp file is gone
+    monkeypatch.undo()
+    mod.write_atomic(out, "new content\n")
+    assert out.read_text() == "new content\n"
+
+
+def test_scan_doc_generator_code_spans_survive_backticks():
+    mod = load_doc()
+    assert mod.code("git -C {} add", "/p/a") == "`git -C /p/a add`"
+    assert mod.code("{}", "we`ird") == "`` we`ird ``"
+    assert mod.code("{}", "a``b`c") == "``` a``b`c ```"
+    assert mod.code("<DEST>/{}/", "x|y") == "`<DEST>/x\\|y/`"
+    assert mod.esc("a`b") == "a\\`b"  # outside a code span the backtick is backslash-escaped
+    scan_text = {"scanned_at": "x",
+                 "bigteam": {"tasks": [{"task": "t`k", "bytes": 3_000_000, "newest_mtime": 0.0,
+                                        "claim": "open", "reports": [{"path": "r`eport.md", "bytes": 1,
+                                                                       "done": False}],
+                                        "open_job_records": [], "verdict": "unique",
+                                        "unique_bytes": 1,
+                                        "fills": [{"name": "c`h", "bytes": 10}]}],
+                             "loose_files": []},
+                 "checkouts": [{"path": "/p/c`o", "branch": "b`r", "modified": 0, "untracked": 1,
+                                "untracked_sample": ["u`n.txt"], "unpushed": 1, "ahead_of_origin": 1,
+                                "stashes": 0, "on_origin": False, "flags": ["orphan branch"],
+                                "verdict": "orphan branch"}],
+                 "summary": {"bigteam": {"tasks": 1, "verdicts": {"unique": 1}, "total_bytes": 3_000_000,
+                                         "unique_bytes": 1, "scratch_bytes": 0},
+                             "checkouts": {"count": 1, "verdicts": {"orphan branch": 1},
+                                           "with_unpushed_work": 1, "with_untracked": 1,
+                                           "with_stash": 0}}}
+    text = mod.render(scan_text)
+    for span in ("`` c`h ``", "`` r`eport.md ``", "`` u`n.txt ``", "`` b`r ``"):
+        assert span in text, span
+    assert "`` git -C /p/c`o push -u origin b`r `` or " in text
