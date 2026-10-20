@@ -24,7 +24,10 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    dispatch and have `check` mention `load_gate.error`; (b) resolving symlinks stores a Homebrew override as its
    versioned Cellar path, so a `brew upgrade` during the wait makes the runner start without the gate (store the
    unresolved absolute path, resolve at run time); (c) exit 0 is trusted over the JSON `status`, so a wrapper that
-   exits 0 while printing "hot" is admitted. Deferred by design from the same review: a machine-wide admission
+   exits 0 while printing "hot" is admitted; (d) the deferred deadline covers `load_wait` plus the 180 s subprocess
+   grace (abccaae) but not the older overload hold (up to 900 s at 4x cores or critical memory pressure), which
+   runs after the gate on every detached path, so in that rare case the waiter returns 124 while the runner
+   still holds. Deferred by design from the same review: a machine-wide admission
    token (N3) and recording `ACP_DISPATCH_LOAD_WATCH`/`ACP_DISPATCH_STATE` for the runner beyond the cap (N5/I1).
 4. **`cursor-cloud` place in `acp-dispatch`, not done in the first slice** (adversary APPROVE on 270a7f5,
    2026-10-20, shipped on condition that this entry exists): (a) no reboot auto-resume for cloud records: the
