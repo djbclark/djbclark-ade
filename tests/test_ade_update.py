@@ -1,8 +1,9 @@
 """bin/ade-update pulls, relinks, checks symlinks and prints the changelog delta (2026-10-20).
 
 Every test builds a real git repo pair in tmp_path: a bare `origin`, a `seed` clone that publishes
-commits, and the `machine` clone ade-update runs on. skill-everywhere is a fake on PATH that records
-its argv and answers from a JSON file, so no real TUI directory is touched. HOME is tmp_path/home, and
+commits, and the `machine` clone ade-update runs on. skill-everywhere is a fake beside the copy of
+ade-update the tests run (the trusted helper) that records its argv and answers from a JSON file, so no
+real TUI directory is touched. HOME is tmp_path/home, and
 SKILL_EVERYWHERE_ADE names the `machine` clone's skills/ so that clone is the canonical skills home (the
 only checkout whose skill links ade-update may change).
 """
@@ -11,6 +12,7 @@ import importlib.util
 import json
 import os
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -86,9 +88,15 @@ class Env:
         self.tmp = tmp
         self.origin, self.seed, self.machine = tmp / "origin.git", tmp / "seed", tmp / "machine"
         self.home, self.state = tmp / "home", tmp / "state" / "applied"
-        self.bin, self.se_state, self.se_log = tmp / "fakebin", tmp / "se-state.json", tmp / "se.log"
+        # ade-update runs from a copy in `trusted/bin`, where the fake skill-everywhere is its sibling (the trusted
+        # helper); `lone/bin` holds a copy with no sibling. The real bin/ is never run on these fixture repos.
+        self.trusted, self.lone = (tmp / "trusted").resolve(), (tmp / "lone").resolve()
+        self.bin, self.se_state, self.se_log = self.trusted / "bin", tmp / "se-state.json", tmp / "se.log"
         self.home.mkdir()
-        self.bin.mkdir()
+        self.bin.mkdir(parents=True)
+        (self.lone / "bin").mkdir(parents=True)
+        for d in (self.bin, self.lone / "bin"):
+            shutil.copy(SCRIPT, d / "ade-update")
         self.se_log.write_text("")
         self.se_state.write_text("{}")
         fake = self.bin / "skill-everywhere"
@@ -122,12 +130,12 @@ class Env:
     def calls(self):
         return [json.loads(line) for line in self.se_log.read_text().splitlines()]
 
-    def run(self, *flags, repo=None, state=None, extra_env=None):
+    def run(self, *flags, repo=None, state=None, extra_env=None, script=None):
         env = dict(os.environ, HOME=str(self.home), PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
                    FAKE_SE_STATE=str(self.se_state), FAKE_SE_LOG=str(self.se_log),
                    SKILL_EVERYWHERE_ADE=str(self.machine / "skills"))
         env.update(extra_env or {})
-        r = subprocess.run([sys.executable, str(SCRIPT), "--repo", str(repo or self.machine),
+        r = subprocess.run([sys.executable, str(script or self.bin / "ade-update"), "--repo", str(repo or self.machine),
                             "--state", str(state or self.state), *flags], capture_output=True, text=True, env=env)
         return r
 
@@ -502,7 +510,7 @@ def test_unwritable_state_file_is_exit_4_not_a_traceback(env):
     assert out["exit"] == 4 and out["error"].startswith("cannot write the state file")
 
 
-def test_repo_bin_skill_everywhere_is_preferred_over_path(env):
+def test_the_helper_is_the_sibling_of_the_running_ade_update(env):
     own = env.machine / "bin" / "skill-everywhere"
     own.parent.mkdir()
     own.write_text(FAKE_SKILL_EVERYWHERE.format(python=sys.executable).replace(
@@ -510,8 +518,16 @@ def test_repo_bin_skill_everywhere_is_preferred_over_path(env):
     own.chmod(own.stat().st_mode | stat.S_IXUSR)
     r = env.run("--check", "--json")
     assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads(r.stdout)["skills"]["script"] == str(env.bin / "skill-everywhere")
+    assert env.calls() == [["--check", "alpha"]]  # neither the canonical checkout's copy nor PATH's was used
+    # no sibling: the canonical checkout's own bin/ comes next, and it outranks PATH
+    r = env.run("--check", "--json", script=env.lone / "bin" / "ade-update")
     assert json.loads(r.stdout)["skills"]["script"] == str(own)
-    assert env.calls() == [["repo-copy", "--check", "alpha"]]  # the fake on PATH was not used
+    assert env.calls()[-1] == ["repo-copy", "--check", "alpha"]
+    # and PATH after that, canonical only
+    own.unlink()
+    r = env.run("--check", "--json", script=env.lone / "bin" / "ade-update")
+    assert json.loads(r.stdout)["skills"]["script"] == str(env.bin / "skill-everywhere")
 
 
 # --- Codex review of 5e2ab58 (2026-10-20) -------------------------------------------------------
@@ -532,12 +548,46 @@ def test_check_never_executes_a_non_canonical_checkouts_own_helper(env):
     out = json.loads(r.stdout)
     assert r.returncode == 0, r.stdout + r.stderr
     assert not marker.exists()
-    assert out["skills"]["script"] == str(env.bin / "skill-everywhere")  # the trusted one on PATH
+    assert out["skills"]["script"] == str(env.bin / "skill-everywhere")  # the sibling of the running ade-update
     assert env.calls() == [["--check", "alpha"]]
-    # the canonical checkout's own copy outranks PATH, and the planted one still never runs
-    canon = plant_helper(env.machine, FAKE_SKILL_EVERYWHERE.format(python=sys.executable))
+    # a copy planted in the canonical checkout does not displace the sibling, and the planted one still never runs
+    plant_helper(env.machine, FAKE_SKILL_EVERYWHERE.format(python=sys.executable))
     out = json.loads(env.run("--check", "--json", repo=other).stdout)
-    assert out["skills"]["script"] == str(canon) and not marker.exists()
+    assert out["skills"]["script"] == str(env.bin / "skill-everywhere") and not marker.exists()
+
+
+def test_skill_everywhere_ade_never_chooses_the_helper_that_runs(env):  # adversary R4-1
+    other = clone(env, "other")
+    marker = env.tmp / "pwned"
+    plant_helper(other, f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexit 0\n")
+    # the variable names the untrusted checkout's skills, and --repo is the (otherwise canonical) machine clone
+    r = env.run("--check", "--json", extra_env={"SKILL_EVERYWHERE_ADE": str(other / "skills")})
+    out = json.loads(r.stdout)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not marker.exists() and out["skills"]["link_mode"] == "report-only"
+    assert out["skills"]["script"] == str(env.bin / "skill-everywhere")
+    assert env.calls() == [["--check", "alpha"]]
+
+
+def test_a_path_entry_or_sibling_inside_a_non_canonical_checkout_is_never_run(env):  # adversary R4-2
+    other = clone(env, "other")
+    marker = env.tmp / "pwned"
+    plant_helper(other, f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexit 0\n")
+    lone = env.lone / "bin" / "ade-update"
+    # no sibling, no canonical helper, PATH names the untrusted checkout's bin/
+    path = f"{other / 'bin'}{os.pathsep}/usr/bin{os.pathsep}/bin"
+    r = env.run("--check", "--json", repo=other, extra_env={"PATH": path}, script=lone)
+    out = json.loads(r.stdout)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not marker.exists() and env.calls() == []
+    assert out["skills"]["script"] is None and out["skills"]["link_mode"] == "skipped"
+    assert "no skill-everywhere exists beside this ade-update outside it" in env.run(
+        "--check", repo=other, extra_env={"PATH": path}, script=lone).stdout
+    # an ade-update run from inside the untrusted checkout has its sibling there: not run either
+    shutil.copy(SCRIPT, other / "bin" / "ade-update")
+    r = env.run("--check", "--json", repo=other, script=other / "bin" / "ade-update")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not marker.exists() and json.loads(r.stdout)["skills"]["script"] is None
 
 
 def test_non_canonical_checkout_with_no_trusted_helper_skips_the_skill_step(env):
@@ -545,24 +595,26 @@ def test_non_canonical_checkout_with_no_trusted_helper_skips_the_skill_step(env)
     marker = env.tmp / "pwned"
     plant_helper(other, f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexit 0\n")
     bare = {"PATH": "/usr/bin:/bin"}
-    r = env.run("--check", repo=other, extra_env=bare)
+    lone = env.lone / "bin" / "ade-update"  # a copy with no sibling helper
+    note = "skill-everywhere: no trusted helper (none beside ade-update outside this checkout)"
+    r = env.run("--check", repo=other, extra_env=bare, script=lone)
     assert r.returncode == 0, r.stdout + r.stderr
     assert not marker.exists() and env.calls() == []
-    assert "no trusted skill-everywhere" in r.stdout
-    assert "skill-everywhere: no trusted helper (canonical checkout has none, none on PATH)" in r.stdout
-    out = json.loads(env.run("--check", "--json", repo=other, extra_env=bare).stdout)
+    assert "no skill-everywhere exists beside this ade-update" in r.stdout
+    assert note in r.stdout
+    out = json.loads(env.run("--check", "--json", repo=other, extra_env=bare, script=lone).stdout)
     assert out["problems"] == [] and out["skills"]["link_mode"] == "skipped" and out["skills"]["script"] is None
-    assert "skill-everywhere: no trusted helper (canonical checkout has none, none on PATH)" in out["notes"]
-    r = env.run(repo=other, extra_env=bare)  # apply: nothing unresolved, so the state is still recorded
+    assert note in out["notes"]
+    r = env.run(repo=other, extra_env=bare, script=lone)  # apply: nothing unresolved, so the state is still recorded
     assert r.returncode == 0 and env.state.read_text().strip() == env.first and not marker.exists()
     # the canonical checkout with no helper anywhere is still a problem (exit 10, no state)
     env.state.unlink()
-    r = env.run(extra_env=bare)
+    r = env.run(extra_env=bare, script=lone)
     assert r.returncode == 10 and "skill-everywhere not found" in r.stdout and not env.state.exists()
 
 
 def test_a_crashing_skill_everywhere_check_is_exit_4_and_records_no_state(env):
-    plant_helper(env.machine, "#!/bin/sh\necho '== alpha'\necho '  claude        linked'\n"
+    plant_helper(env.trusted, "#!/bin/sh\necho '== alpha'\necho '  claude        linked'\n"
                               "echo 'greadlink: command not found' >&2\nexit 127\n")
     r = env.run()
     assert r.returncode == 4, r.stdout + r.stderr
@@ -574,7 +626,7 @@ def test_a_crashing_skill_everywhere_check_is_exit_4_and_records_no_state(env):
 
 def test_a_skill_missing_from_the_check_output_is_exit_4(env):
     env.publish({"skills/beta/SKILL.md": "---\nname: beta\n---\n"})
-    plant_helper(env.machine, "#!/bin/sh\necho '== alpha'\necho '  claude        linked'\nexit 0\n")
+    plant_helper(env.trusted, "#!/bin/sh\necho '== alpha'\necho '  claude        linked'\nexit 0\n")
     r = env.run()
     assert r.returncode == 4, r.stdout + r.stderr
     assert "returned no result for: beta" in r.stdout
@@ -582,8 +634,49 @@ def test_a_skill_missing_from_the_check_output_is_exit_4(env):
 
 
 def test_the_scripts_own_warning_exit_is_not_a_crash(env):
-    plant_helper(env.machine, "#!/bin/sh\necho '== alpha'\necho '  claude        linked'\n"
+    plant_helper(env.trusted, "#!/bin/sh\necho '== alpha'\necho '  claude        linked'\n"
                               "echo 'warning: codex global instructions dangling: x -> y' >&2\nexit 1\n")
     r = env.run()
     assert r.returncode == 0, r.stdout + r.stderr
     assert env.state.read_text().strip() == env.first
+
+
+# --- adversary round 4 and Codex P1 on 67bed7e (2026-10-20) ---------------------------------------
+
+def test_a_header_without_rows_is_exit_4_even_with_the_warning_exit(env):  # adversary R4-3
+    warn = "echo 'warning: codex global instructions dangling: x -> y' >&2\n"
+    for tail in ("exit 1\n", "exit 0\n"):
+        plant_helper(env.trusted, "#!/bin/sh\n" + warn + "echo '== alpha'\n" + tail)
+        r = env.run()
+        assert r.returncode == 4, r.stdout + r.stderr
+        assert "returned no rows for: alpha" in r.stdout
+        assert not env.state.exists()
+    out = json.loads(env.run("--json").stdout)
+    assert out["exit"] == 4 and "no rows for: alpha" in out["error"]
+
+
+def test_a_failing_link_call_is_exit_4_and_records_no_state(env):  # Codex P1 on 67bed7e
+    env.skills({"alpha": [["claude", "missing"]]})
+    made = env.tmp / "made"
+    plant_helper(env.trusted, FAKE_SKILL_EVERYWHERE.format(python=sys.executable).replace(
+        "sys.exit(0)", f"""if not check:
+    open({str(made)!r}, "w").close()  # the link is made, then the Hermes nudge fails
+    sys.stderr.write("ghead: command not found\\n")
+    sys.exit(127)
+sys.exit(0)"""))
+    r = env.run()
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "failed (rc=127)" in r.stdout and "ghead: command not found" in r.stdout
+    assert "links may be partly made; rerun after fixing" in r.stdout
+    assert made.exists() and not env.state.exists()
+    env.skills({"alpha": [["claude", "missing"]]})  # the fake's link call rewrote its table
+    out = json.loads(env.run("--json").stdout)
+    assert out["exit"] == 4 and "rc=127" in out["error"]
+
+
+def test_pull_failure_code_ignores_text_the_remote_sends():  # adversary R4-4
+    mod = load_module()
+    assert mod.pull_failure_code("remote: fatal: Not possible to fast-forward, aborting.\n"
+                                 "fatal: unable to access 'https://x/r.git/': Could not resolve host: x") == 4
+    assert mod.pull_failure_code("remote: error: would be overwritten\nfatal: Authentication failed") == 4
+    assert mod.pull_failure_code("remote: hello\nfatal: Not possible to fast-forward, aborting.") == 3

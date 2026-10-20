@@ -154,11 +154,13 @@ ls -l ~/.claude/commands ~/.claude/agents ~/.claude/hooks | grep -c djbclark-ade
    only when `--repo` is the canonical skills home (`~/src/djbclark-ade`, or the parent of
    `$SKILL_EVERYWHERE_ADE`); any other checkout (a pasture, a second clone) gets a report-only skill
    step, since linking would repoint every TUI's live skills into it. A skill directory whose name is
-   not `[A-Za-z0-9][A-Za-z0-9._-]*` is skipped and reported. The `skill-everywhere` it runs is the
-   canonical checkout's own `bin/skill-everywhere`, else the one on `PATH`, else the step is skipped with a
-   note: a checkout given by `--repo` (a pasture, a second clone, an untrusted PR branch) never has its own
-   `bin/` executed, not even under `--check`. A `skill-everywhere --check` that crashes (nonzero exit, bar its
-   own `warning:` status) or leaves a skill out of its output is an error (exit 4), never a partial success.
+   not `[A-Za-z0-9][A-Za-z0-9._-]*` is skipped and reported. The `skill-everywhere` it runs is the one beside
+   the running `ade-update` (`$SKILL_EVERYWHERE_ADE` only says where the skills live, it never chooses code),
+   with the canonical checkout's `bin/` and then `PATH` as fallbacks in the canonical checkout only, else the
+   step is skipped with a note: a checkout given by `--repo` (a pasture, a second clone, an untrusted PR
+   branch) never has its own `bin/` executed, not even under `--check`. A `skill-everywhere --check` that crashes
+   (nonzero exit, bar its own `warning:` status) or leaves a skill without a header or without any TUI row, or
+   a link call that exits nonzero, is an error (exit 4), never a partial success.
 3. **Symlinks.** `CLAUDE.md` is a symlink to `AGENTS.md`, and every file in `claude/{commands,agents,
    hooks}` is linked from `~/.claude/`; a gap is reported with the `ln` command (not changed; outside the
    canonical checkout the rows are counted only).

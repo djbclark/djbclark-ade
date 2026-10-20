@@ -29,6 +29,9 @@ set -euo pipefail
 # BSD/GNU portability: Homebrew coreutils on the Mac, plain tools on Linux.
 _readlink() { if command -v greadlink >/dev/null 2>&1; then greadlink "$@"; else readlink "$@"; fi; }
 _realpath() { if command -v grealpath >/dev/null 2>&1; then grealpath "$@"; else realpath "$@"; fi; }
+_head() { if command -v ghead >/dev/null 2>&1; then ghead "$@"; else head "$@"; fi; }
+_grep() { if command -v ggrep >/dev/null 2>&1; then ggrep "$@"; else grep "$@"; fi; }
+_sed() { if command -v gsed >/dev/null 2>&1; then gsed "$@"; else sed "$@"; fi; }
 ade_root="${SKILL_EVERYWHERE_ADE:-$HOME/src/djbclark-ade/skills}"
 priv_root="${SKILL_EVERYWHERE_PRIVATE:-${OPS_ROOT:-$HOME/ops}/site-private/skills}"
 
@@ -57,7 +60,7 @@ omp|~/.omp/agent/skills
 
 mode=link
 case "${1:-}" in --check) mode=check; shift ;; --remove) mode=remove; shift ;; esac
-[[ $# -gt 0 ]] || { gsed -n '2,7p' "$0" >&2; exit 2; }
+[[ $# -gt 0 ]] || { _sed -n '2,7p' "$0" >&2; exit 2; }
 
 rc=0
 # Skill links can be healthy while Codex's shared instructions point at a
@@ -121,7 +124,7 @@ for name in "$@"; do
 done
 
 if command -v hermes >/dev/null \
-   && ! ggrep -qF skill-everywhere/skills ~/.hermes/config.yaml 2>/dev/null; then
+   && ! _grep -qF skill-everywhere/skills ~/.hermes/config.yaml 2>/dev/null; then
   echo "warning: hermes no longer lists ~/.local/share/skill-everywhere/skills in" \
        "skills.external_dirs; ask Hermes to re-add it" >&2
 fi
@@ -138,9 +141,9 @@ if [[ $mode == link ]] && command -v hermes >/dev/null; then
   # snippet under sh: `import os, sys` invoked ImageMagick's `import`. Never run it under a non-python.
   hpy="" hfile="$(command -v hermes)"
   for _ in 1 2 3; do
-    shebang="$(ghead -1 "$hfile")"; shebang="${shebang#\#!}"; shebang="${shebang%% *}"
+    shebang="$(_head -1 "$hfile")"; shebang="${shebang#\#!}"; shebang="${shebang%% *}"
     if [[ $(basename "$shebang") == python* && -x $shebang ]]; then hpy=$shebang; break; fi
-    next="$(ggrep -oE "exec +/[^ \"']+" "$hfile" | ghead -1 | gsed -E 's/^exec +//')"
+    next="$(_grep -oE "exec +/[^ \"']+" "$hfile" | _head -1 | _sed -E 's/^exec +//' || true)"
     if [[ $(basename "$next") == python* && -x $next ]]; then hpy=$next; break; fi
     [[ -n $next && -f $next ]] || break
     hfile=$next

@@ -52,6 +52,9 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `bin/skill-everywhere` runs on Linux: `greadlink`/`grealpath` fall back to `readlink`/`realpath` (#20).
+- `bin/skill-everywhere`: the Hermes plugin nudge falls back from `ghead`/`ggrep`/`gsed` to `head`/`grep`/`sed`
+  and no longer aborts the script when the Hermes wrapper has no `exec` line (#20).
 - `skill-everywhere`: the Hermes gateway nudge follows `hermes` wrappers to the real python; since `hermes`
   became a `/bin/sh` wrapper it ran the snippet under sh, where `import os, sys` was ImageMagick (2026-10-20).
 - `tests/conftest.py` pins `ROUTE_AGENT_OMP_READY=0`, so the route_agent suite passes on a host with
