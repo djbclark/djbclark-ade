@@ -66,7 +66,9 @@ the base URL's host unchanged (else HTTP 400), so a key never reaches a host the
 --open drops the bearer token, so local programs that speak the Firecrawl API
 (Hermes' firecrawl web backend) can use the router at a fixed --listen address.
 Every run without a token (--open, or serve only with no child command) refuses a
-non-loopback --listen address: the router holds the backend keys.
+non-loopback --listen address, and answers only Host headers naming the bound loopback
+address (a DNS-rebinding name gets 403): the router holds the backend keys. A tokened run
+compares the bearer credential with hmac.compare_digest.
 
 One log line per request on stderr: method, path, backend, status, seconds and
 the fallback reason. Keys are never logged.
@@ -77,6 +79,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import http.server
+import hmac
 import json
 import os
 import re
@@ -510,6 +513,9 @@ class Router:
         self.timeout = timeout
         self.token = token
         self.public_base = ""
+        # Host headers a tokenless run answers (set by serve() once the address is bound); anything
+        # else — a DNS-rebinding name — is refused before the request reaches a backend.
+        self.host_allowlist: set[str] = set()
         self.jobs: dict[str, str] = {}
         self.lock = threading.Lock()
         self.log = log
@@ -636,8 +642,17 @@ def make_handler(router: Router):
             pass
 
         def _serve(self):
-            if router.token and self.headers.get("Authorization") != f"Bearer {router.token}":
-                self._send(401, {"Content-Type": "application/json"}, b'{"success":false,"error":"unauthorized"}')
+            if router.token:
+                if not hmac.compare_digest(self.headers.get("Authorization") or "",
+                                            f"Bearer {router.token}"):
+                    self._send(401, {"Content-Type": "application/json"},
+                               b'{"success":false,"error":"unauthorized"}')
+                    return
+            elif (self.headers.get("Host") or "").strip().lower() not in router.host_allowlist:
+                # No token: a browser page reached by name (DNS rebinding) must not pass; only the
+                # loopback spellings of the bound port answer.
+                self._send(403, {"Content-Type": "application/json"},
+                           b'{"success":false,"error":"firecrawl-router: host not allowed"}')
                 return
             n = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(n) if n else None
@@ -696,6 +711,9 @@ def serve(router: Router, listen: str, require_loopback: bool = False) -> http.s
         print(f"firecrawl-router: refusing to serve without a token on {bound}", file=sys.stderr, flush=True)
         raise SystemExit(2)
     router.public_base = f"http://{srv.server_address[0]}:{srv.server_address[1]}"
+    bhost, bport = srv.server_address[0], srv.server_address[1]
+    router.host_allowlist = {f"{name}:{bport}" if ":" not in name else f"[{name}]:{bport}"
+                             for name in ("localhost", bhost, "127.0.0.1", "::1")}
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 

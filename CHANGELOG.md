@@ -105,6 +105,9 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Security
 
+- `firecrawl-router`: a tokenless run (`--open` or serve only) answers only Host headers naming the
+  bound loopback port (a DNS-rebinding name gets 403 before any backend), and the bearer credential
+  is compared with `hmac.compare_digest` (#16).
 - `firecrawl-router`: the serve-only form refuses a non-loopback `--listen` like `--open` does,
   and the address actually bound is checked before the first request is served (#14).
 - `cursor-cloud` and `firecrawl-router`: endpoint variables must be https or loopback, bearer

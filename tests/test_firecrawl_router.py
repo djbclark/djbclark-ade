@@ -136,6 +136,30 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(self.req("POST", "/v2/search", {"query": "q"}, token="")[:2], (200, "primary"))
         self.assertEqual(self.p.seen[-1][2], "Bearer pk")
 
+    def test_open_router_refuses_a_rebound_host_header(self):
+        # DNS rebinding: a page in a local browser reaches the port by name, not by 127.0.0.1
+        self.router.token = ""
+        self.p.routes[("POST", "/v2/search")] = (200, {"success": True, "data": {"web": [{"url": "a"}]}})
+        r = urllib.request.Request(self.router.public_base + "/v2/search",
+                                   data=json.dumps({"query": "q"}).encode(), method="POST",
+                                   headers={"Content-Type": "application/json", "Host": "rebind.example"})
+        try:
+            urllib.request.urlopen(r, timeout=10)
+            self.fail("request with a foreign Host header was served")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 403)
+        self.assertEqual(self.p.seen, [])  # refused before any backend, like a bad token
+
+    def test_open_router_answers_localhost_host_header(self):
+        self.router.token = ""
+        self.p.routes[("POST", "/v2/search")] = (200, {"success": True, "data": {"web": [{"url": "a"}]}})
+        port = self.srv.server_address[1]
+        r = urllib.request.Request(self.router.public_base + "/v2/search",
+                                   data=json.dumps({"query": "q"}).encode(), method="POST",
+                                   headers={"Content-Type": "application/json", "Host": f"localhost:{port}"})
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            self.assertEqual(resp.status, 200)
+
     def test_open_refuses_non_loopback_listen(self):
         with self.assertRaises(SystemExit):
             fr.main(["--listen", "0.0.0.0:18805", "--open"])
