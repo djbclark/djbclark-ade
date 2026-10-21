@@ -545,10 +545,24 @@ def test_run_closes_stdin_and_kills_the_process_group_on_timeout(tmp_path):
     rc, _ = mod.run(["sh", "-c", f"sleep 60 & echo $! > {pidfile}; wait"], timeout=1)
     assert rc == 124
     pid = int(pidfile.read_text())
-    for _ in range(50):
+
+    def terminated() -> bool:
+        # A reaped PID answers nothing; on Linux a killed grandchild no PID 1 will reap
+        # stays in state Z, where it can never run again (Codex pass 11 on PR 27).
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+        except OSError:
+            stat = None
+        if stat is not None:
+            return stat.rpartition(")")[2].split()[0] == "Z"
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
+            return True
+        return False
+
+    for _ in range(50):
+        if terminated():
             break
         time.sleep(0.1)
     else:
