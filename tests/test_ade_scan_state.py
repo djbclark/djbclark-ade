@@ -33,6 +33,11 @@ def git(cwd: Path, *args: str) -> str:
     return p.stdout
 
 
+def git_version() -> tuple[int, ...]:
+    out = subprocess.run(["git", "--version"], capture_output=True, text=True).stdout
+    return tuple(int(x) for x in re.findall(r"\d+", out)[:3])
+
+
 def make_bigteam(root: Path) -> None:
     done = root / "done-task"
     (done / "jobs").mkdir(parents=True)
@@ -1239,7 +1244,8 @@ def test_doc_generator_survives_skipped_and_incomplete_records():
         assert "git" not in row.split("| re-scan")[1].split("(no git command")[0]
         assert row.rstrip().endswith("| yes: counts unknown; re-scan or archive whole |")
         # Codex pass 26: a `.git` file's target directory and its common directory are archived too
-        assert f'{{ IFS= read -r l || [ -n "$l" ]; }} < {path_}/.git && case "$l" in "gitdir: "*) g=${{l#gitdir: }}' in row
+        assert (f'{{ IFS= read -r l || [ -n "$l" ]; }} < {path_}/.git && ! {{ IFS= read -r l1; IFS= read -r l2 || [ -n "$l2" ]; }} '
+                f'< {path_}/.git && case "$l" in "gitdir: "*) g=${{l#gitdir: }}') in row  # round 43: a second line is refused
         assert f"g={path_}/$g" in row and "gitdir capture FAILED" in row  # adversary round 32: git's gitfile rules, loud failure
         # round 35, Codex pass 30: git checks `refs` and `objects` in the COMMON directory; round 36: resolved and
         # checked before anything is archived
@@ -2240,7 +2246,8 @@ def test_a_reflog_only_commit_is_counted_and_packed(tmp_path):
         shutil.rmtree(tmp_path / "dest", ignore_errors=True)
         run = subprocess.run([shell, "-c", cmd], capture_output=True, text=True)
         assert run.returncode == 0, (shell, run.stderr)
-        assert "hint:" not in run.stderr, run.stderr  # round 38: `GIT_ADVICE=0` silences the grafts deprecation hint
+        if git_version() >= (2, 46):  # Codex pass 39: an older git ignores GIT_ADVICE and prints the grafts hint
+            assert "hint:" not in run.stderr, run.stderr  # round 38: `GIT_ADVICE=0` silences the grafts deprecation hint
         idx = list((tmp_path / "dest" / ck).glob("reflog-only-*.idx"))
         assert len(idx) == 1
         assert lost in git(work, "verify-pack", "-v", str(idx[0]))
@@ -2569,7 +2576,7 @@ def test_a_submodule_git_dir_read_elsewhere_is_skipped_not_trusted(tmp_path):
     bad = "[core]\n\tfsmonitor = /bin/true\n"
 
     def verdict():
-        return mod.scan_git([roots], remote=False)[0]["verdict"]
+        return next(c for c in mod.scan_git([roots], remote=False) if c["path"] == str(sup.resolve()))["verdict"]
 
     assert not verdict().startswith("skipped")
     # config.worktree: read once extensions.worktreeConfig (an allowlisted key) is set
@@ -2605,9 +2612,36 @@ def test_a_submodule_git_dir_read_elsewhere_is_skipped_not_trusted(tmp_path):
     assert verdict() == "skipped: submodule config unrecognised (gitdir unreadable)"
     gitfile.write_text(original)
     assert not verdict().startswith("skipped")
-    # a de-initialised submodule (no `.git` at all) runs nothing here: the plan's guard covers it
+    # adversary round 43 (MEDIUM): git reads the WHOLE gitfile after `gitdir: `, the scanner read its first line, so
+    # a second line (or a form feed, which `splitlines` also splits on) named a vetted dir to the scanner and another
+    # to git; a gitfile into a module dir's pruned `objects/` passed the `modules/` prefix test without a config read
+    gitfile.write_bytes(original.encode().rstrip(b"\n") + b"\n/../../../../../evil\n")
+    assert verdict() == "skipped: submodule config unrecognised (gitdir unreadable)"
+    gitfile.write_bytes(original.encode().rstrip(b"\n") + b"\x0c/x\n")
+    assert verdict().startswith("skipped: submodule config unrecognised (gitdir ")
+    gitfile.write_bytes(original.encode().rstrip(b"\n") + b"\r\n")  # a CRLF ending is what git accepts
+    assert not verdict().startswith("skipped")
+    (moddir / "objects" / "evil").mkdir()
+    gitfile.write_text("gitdir: ../.git/modules/sub/objects/evil\n")
+    assert verdict() == "skipped: submodule config unrecognised (gitdir outside modules)"
+    gitfile.write_text(original)
+    # a `.gitmodules` path that is not an index gitlink (the plan's listing reads `.gitmodules`): an ordinary nested
+    # repository there would get the plan's by-hand git commands without any vetting
+    gitmodules = (sup / ".gitmodules").read_text()
+    (sup / ".gitmodules").write_text(gitmodules + '[submodule "nested"]\n\tpath = nested\n\turl = ./nested\n')
+    (sup / "nested").mkdir()
+    git(sup / "nested", "init", "-q")
+    assert verdict() == "skipped: submodule config unrecognised (gitmodules path not a gitlink)"
+    shutil.rmtree(sup / "nested")
+    assert not verdict().startswith("skipped")  # listed, nothing there: the plan's guard refuses it
+    (sup / ".gitmodules").write_text(gitmodules)
+    # a de-initialised submodule (no `.git` at all, an empty directory) runs nothing here: the plan's guard covers it
     git(sup, "submodule", "deinit", "-f", "sub")
     assert not (sup / "sub" / ".git").exists() and not verdict().startswith("skipped")
+    # round 43 (LOW): files there with no `.git` would be in no capture; the checkout is skipped so the whole-directory
+    # archive keeps them
+    (sup / "sub" / "left-behind.txt").write_text("edited\n")
+    assert verdict() == "skipped: submodule config unrecognised (submodule has files but no .git)"
 
 
 def test_a_skip_worktree_path_with_a_non_utf8_name_is_counted(tmp_path):
@@ -2657,6 +2691,118 @@ def test_the_submodule_row_refuses_a_deinitialised_submodule_and_archives_its_gi
     names = tarfile.open(tmp_path / "dest" / "c" / "modules.tar").getnames()
     assert "modules/sub/HEAD" in names and f"modules/sub/objects/{sha[:2]}/{sha[2:]}" in names, names
     assert doc.MODULES_FMT.count("{}") == len(doc.modules_values("/p", "c"))
+
+
+def test_the_modified_row_packs_unmerged_index_blobs(tmp_path):
+    """Codex pass 39 on PR 27, P1: an unmerged entry's stage-2/3 blobs reachable from no ref were in no patch
+    (`Binary files differ`, `* Unmerged path`), the tar keeps the worktree file only, and the index copy names
+    objects the deleted checkout no longer has."""
+    import tarfile
+    doc = load_doc()
+    repo = make_repo(tmp_path / "r")
+
+    def blob(data: bytes) -> str:
+        p = subprocess.run(["git", "hash-object", "-w", "--stdin"], cwd=repo, env=GIT_ENV, input=data, capture_output=True)
+        assert p.returncode == 0, p.stderr
+        return p.stdout.decode().strip()
+
+    ours, theirs = blob(b"\x00ours\n"), blob(b"\x00theirs\n")
+    p = subprocess.run(["git", "update-index", "--index-info"], cwd=repo, env=GIT_ENV, capture_output=True,
+                       input=f"100644 {ours} 2\tb.bin\n100644 {theirs} 3\tb.bin\n".encode())
+    assert p.returncode == 0, p.stderr
+    (repo / "b.bin").write_bytes(b"\x00work\n")
+    assert git(repo, "ls-files", "-u").count("b.bin") == 2
+    assert ours not in git(repo, "rev-list", "--objects", "--all")  # reachable from no ref: only the pack keeps it
+    ck = doc.checkout_dir(str(repo))
+    prefix = "GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); GCP=$(command -v gcp || command -v cp); "
+    cmd = prefix + doc.modified_fmt().format(*map(doc.shquote, doc.modified_values(str(repo), ck))).replace("<DEST>", str(tmp_path / "dest"))
+    for shell in ("bash", "zsh"):
+        if shutil.which(shell) is None:
+            continue
+        shutil.rmtree(tmp_path / "dest", ignore_errors=True)
+        run = subprocess.run([shell, "-c", cmd], capture_output=True, text=True)
+        assert run.returncode == 0, (shell, run.stderr)
+        assert sorted((tmp_path / "dest" / ck / "unmerged.ids").read_text().split()) == sorted([ours, theirs])
+        idx = list((tmp_path / "dest" / ck).glob("unmerged-*.idx"))
+        assert len(idx) == 1, idx
+        packed = git(repo, "verify-pack", "-v", str(idx[0]))
+        assert ours in packed and theirs in packed
+    # no unmerged entry: an empty list, an empty pack, rc 0 (every dirty checkout runs this row)
+    git(repo, "reset", "-q", "--", "b.bin")
+    (repo / "b.bin").unlink()
+    shutil.rmtree(tmp_path / "dest", ignore_errors=True)
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    assert (tmp_path / "dest" / ck / "unmerged.ids").read_text() == ""
+    assert len(list((tmp_path / "dest" / ck).glob("unmerged-*.pack"))) == 1
+    assert doc.modified_fmt().count("{}") == len(doc.modified_values("/p", "c"))
+
+
+def test_a_gitfile_with_a_second_line_is_refused_by_the_gitdir_capture(tmp_path):
+    """Adversary round 43 on PR 27 (INFO, with MEDIUM 1.1): git takes the whole gitfile after `gitdir: `, the row's
+    `read` took its first line, so a crafted second line made the row archive a decoy directory."""
+    mod = load_doc()
+    main = make_repo(tmp_path / "main")
+    wt = tmp_path / "wt"
+    git(main, "worktree", "add", str(wt), "-b", "side")
+    ck = mod.checkout_dir(str(wt))
+    prefix = "GTAR=$(command -v gtar || command -v tar); "
+    cmd = prefix + mod.GITDIR_FMT.format(*map(mod.shquote, mod.gitdir_values(str(wt), ck))).replace("<DEST>", str(tmp_path / "dest"))
+    one_line = (wt / ".git").read_bytes()
+    (wt / ".git").write_bytes(one_line.rstrip(b"\n") + b"\n/../../../../decoy\n")
+    for shell in ("bash", "zsh", "sh"):
+        if shutil.which(shell) is None:
+            continue
+        shutil.rmtree(tmp_path / "dest", ignore_errors=True)
+        (tmp_path / "dest" / ck).mkdir(parents=True)
+        run = subprocess.run([shell, "-c", cmd], capture_output=True, text=True)
+        assert run.returncode != 0 and "gitdir capture FAILED" in run.stderr, (shell, run.stderr)
+        assert not list((tmp_path / "dest" / ck).iterdir())
+    (wt / ".git").write_bytes(one_line.rstrip(b"\n"))  # one line, no final newline: still accepted
+    shutil.rmtree(tmp_path / "dest", ignore_errors=True)
+    (tmp_path / "dest" / ck).mkdir(parents=True)
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    assert (tmp_path / "dest" / ck / "gitdir.tar").is_file()
+    assert mod.GITDIR_FMT.count("{}") == len(mod.gitdir_values("/p", "c"))
+
+
+def test_a_symlinked_git_entry_row_archives_the_links_target(tmp_path):
+    """Adversary round 43 on PR 27 (LOW): the `skipped: .git is a symlink` row's whole-directory archive kept the link
+    itself and GITDIR_FMT (`-f`) archived nothing, so a local commit behind the link was in no capture."""
+    import tarfile
+    doc = load_doc()
+    flag = "skipped: .git is a symlink"
+    rows = section_3_2(doc.render(doc_scan([doc_checkout("/p/l", flags=[flag], verdict=flag)]))).splitlines()
+    row = next(r for r in rows if r.startswith("| /p/l "))
+    assert "the `.git` symlink's target holds the history" in row
+    assert 'g=/p/l/.git && [ -f "$g/HEAD" ] && [ -d "$g/objects" ] && [ -d "$g/refs" ] && TAR_OPTIONS= "$GTAR" -C "$g" -cf <DEST>/checkouts/abs/p/l/gitdir.tar .' in row
+    assert "IFS= read" not in row
+    real = make_repo(tmp_path / "real")
+    gd = tmp_path / "gitdirs-r.git"
+    (real / ".git").rename(gd)
+    (real / ".git").symlink_to(gd)
+    ck = doc.checkout_dir(str(real))
+    prefix = "GTAR=$(command -v gtar || command -v tar); "
+    cmd = prefix + doc.SYMLINK_GITDIR_FMT.format(*map(doc.shquote, (str(real), f"{ck}/gitdir.tar"))).replace("<DEST>", str(tmp_path / "dest"))
+    for shell in ("bash", "zsh", "sh"):
+        if shutil.which(shell) is None:
+            continue
+        shutil.rmtree(tmp_path / "dest", ignore_errors=True)
+        (tmp_path / "dest" / ck).mkdir(parents=True)
+        run = subprocess.run([shell, "-c", cmd], capture_output=True, text=True)
+        assert run.returncode == 0, (shell, run.stderr)
+        names = set(tarfile.open(tmp_path / "dest" / ck / "gitdir.tar").getnames())
+        assert "./HEAD" in names and any(n.startswith("./objects/") for n in names), names
+    # a link to a file (a gitfile elsewhere) or to a plain directory is no git directory: loud, nothing archived
+    for target in (gd / "HEAD", tmp_path):
+        (real / ".git").unlink()
+        (real / ".git").symlink_to(target)
+        shutil.rmtree(tmp_path / "dest", ignore_errors=True)
+        (tmp_path / "dest" / ck).mkdir(parents=True)
+        run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+        assert run.returncode != 0 and "gitdir capture FAILED" in run.stderr, run.stderr
+        assert not list((tmp_path / "dest" / ck).iterdir())
 
 
 def test_every_archive_ignores_the_operators_tar_options(tmp_path):
@@ -2729,13 +2875,13 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
     assert "the scanner skips absorbed submodules" in row
     # adversary round 42: a de-initialised submodule is an empty directory; every command is gated on its `.git`,
     # and the module git dirs are archived
-    assert row.count("[ -e /p/sup/<sub>/.git ] && ") == 6
-    assert "[ -e /p/sup/<sub>/.git ] && git -C /p/sup/<sub> status --porcelain" in row
-    assert "[ -e /p/sup/<sub>/.git ] && git -C /p/sup/<sub> log --oneline" in row
-    assert "[ -e /p/sup/<sub>/.git ] && mkdir -p <DEST>/checkouts/abs/p/sup/<sub> && GIT_ADVICE=0" in row
-    assert "[ -e /p/sup/<sub>/.git ] && mkdir -p <DEST>/checkouts/abs/p/sup/<sub> && git -C /p/sup/<sub> diff" in row
-    assert "[ -e /p/sup/<sub>/.git ] && mkdir -p <DEST>/checkouts/abs/p/sup/<sub> && git -C /p/sup/<sub> ls-files -z -v" in row
-    assert "[ -e /p/sup/<sub>/.git ] && git -C /p/sup/<sub> ls-files -z --others" in row
+    assert row.count("{ [ -e /p/sup/<sub>/.git ] || { echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }; } && ") == 6
+    assert "{ [ -e /p/sup/<sub>/.git ] || { echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }; } && git -C /p/sup/<sub> status --porcelain" in row
+    assert "{ [ -e /p/sup/<sub>/.git ] || { echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }; } && git -C /p/sup/<sub> log --oneline" in row
+    assert "{ [ -e /p/sup/<sub>/.git ] || { echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }; } && mkdir -p <DEST>/checkouts/abs/p/sup/<sub> && GIT_ADVICE=0" in row
+    assert "{ [ -e /p/sup/<sub>/.git ] || { echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }; } && mkdir -p <DEST>/checkouts/abs/p/sup/<sub> && git -C /p/sup/<sub> diff" in row
+    assert "{ [ -e /p/sup/<sub>/.git ] || { echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }; } && mkdir -p <DEST>/checkouts/abs/p/sup/<sub> && git -C /p/sup/<sub> ls-files -z -v" in row
+    assert "{ [ -e /p/sup/<sub>/.git ] || { echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }; } && git -C /p/sup/<sub> ls-files -z --others" in row
     assert ("mkdir -p <DEST>/checkouts/abs/p/sup && d=$(git -C /p/sup rev-parse --git-common-dir) && TAR_OPTIONS= \"$GTAR\" "
             "-cf <DEST>/checkouts/abs/p/sup/modules.tar -C /p/sup -C \"$d\" modules") in row
     assert row.rstrip().endswith("| yes: inspect each submodule first |")
@@ -2776,6 +2922,10 @@ def test_capture_plan_keeps_staged_changes_and_every_stash():
             '--no-recursion --ignore-failed-read -T <DEST>/checkouts/abs/p/w/modified.list 2>> <DEST>/checkouts/abs/p/w/modified.err || '
             "{ cat <DEST>/checkouts/abs/p/w/modified.err >&2; echo 'modified capture FAILED' >&2; false; }; }") in row  # round 40: tar's own failure is printed
     assert "2> <DEST>/checkouts/abs/p/w/modified.err" in row  # round 36
+    # Codex pass 39: an unmerged entry's stage blobs may be in no ref; every object `ls-files -u` names is packed
+    assert "git -C /p/w ls-files -u > <DEST>/checkouts/abs/p/w/unmerged.list" in row
+    assert "<DEST>/checkouts/abs/p/w/unmerged.list > <DEST>/checkouts/abs/p/w/unmerged.ids" in row
+    assert "GIT_NO_LAZY_FETCH=1 git -C /p/w pack-objects <DEST>/checkouts/abs/p/w/unmerged < <DEST>/checkouts/abs/p/w/unmerged.ids" in row
     assert "{ ! grep -qv -e '^warning: ' -e ': Cannot stat: No such file or directory$' -e ': Cannot stat: Not a directory$' <DEST>/checkouts/abs/p/w/modified.err || " \
            "{ cat <DEST>/checkouts/abs/p/w/modified.err >&2; echo 'modified capture FAILED' >&2; false; }; }" in row  # round 37: loud, and a plain warning is no failure
     assert "--ignore-failed-read -T <DEST>/checkouts/abs/p/w/modified.list 2>> <DEST>/checkouts/abs/p/w/modified.err || { cat <DEST>/checkouts/abs/p/w/modified.err >&2; echo 'modified capture FAILED' >&2; false; }; } && { ! grep" in row  # Codex pass 34: tar's stderr too; round 40: its failure printed
@@ -2905,7 +3055,7 @@ def test_modified_capture_archives_an_unmerged_binary_file_and_ignores_textconv(
     git(repo, "config", "diff.const.textconv", "echo constant;true")
     (repo / ".gitattributes").write_text("*.bin diff=const\n")
     ck = mod.checkout_dir(str(repo))
-    prefix = "GTAR=$(command -v gtar || command -v tar); GCP=$(command -v gcp || command -v cp); "
+    prefix = "GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); GCP=$(command -v gcp || command -v cp); "
     cmd = prefix + mod.modified_fmt().format(*map(mod.shquote, mod.modified_values(str(repo), ck))).replace("<DEST>", str(tmp_path / "dest"))
     for shell in ("bash", "zsh"):
         if shutil.which(shell) is None:

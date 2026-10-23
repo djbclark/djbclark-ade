@@ -18,8 +18,12 @@ symlink is `skipped: .git is a symlink` (git would read a git directory elsewher
 applied to every submodule's git dir under `modules/` (`config` and `config.worktree`; `skipped: submodule
 config unrecognised <key>`): a config that is unreadable is `(unreadable)`, a symlink anywhere under
 `modules/` or at a submodule's `.git` is `(symlink)`, a module git dir with a `commondir` is `(commondir)`,
-and a submodule whose `.git` is a directory or points outside `modules/` is `(gitdir outside modules)`:
-nothing is trusted that git would read elsewhere.
+a submodule whose `.git` is a directory or a gitfile naming a git dir the walk did not vet (outside
+`modules/`, or in a pruned `objects/`) is `(gitdir outside modules)`, a gitfile that is not one line of
+`gitdir: <path>` is `(gitdir unreadable)`, a `.gitmodules` path that is not an index gitlink but has a `.git`
+is `(gitmodules path not a gitlink)`, and a submodule directory holding files but no `.git` is `(submodule
+has files but no .git)`: nothing is trusted that git would read elsewhere, and the plan runs git only at
+paths the scan vetted.
 Every later git call also turns fsmonitor, hooks and signature display off, drops every GIT_*
 variable from the environment, reads no global or system config, ignores submodules in `status`
 (so a checkout with submodules carries the flag `submodules not inspected`, never a bare
@@ -598,9 +602,15 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
     its config elsewhere ends the check with a reason instead (Codex passes 37 and 38, adversary round 42): a
     symlink anywhere under `modules/` (`os.walk` never descends into one, so its config would go unread) or at a
     submodule's `.git`, a `commondir` file (the module's config and objects are in another directory), and a
-    gitlink whose `.git` is a directory or a gitfile pointing outside `modules/` (`(gitdir outside modules)`:
-    that git dir is in no walk). A gitlink with no `.git` at all (de-initialised, never initialised) runs nothing
-    and is left to the plan's guard."""
+    submodule whose `.git` is a directory or a gitfile naming a git dir the walk did not vet (`(gitdir outside
+    modules)`: outside `modules/`, or inside a pruned `objects/`). The submodule paths checked are the index
+    gitlinks and the `.gitmodules` paths together, since the plan's own listing reads `.gitmodules` (a listed path
+    that is not a gitlink but has a `.git` is `(gitmodules path not a gitlink)`); the gitfile is parsed as git
+    parses it (the whole file after `gitdir: `, trailing line breaks dropped), and one git would read differently
+    from the plan's one-line parse (a second line, an embedded CR) is `(gitdir unreadable)` (adversary round 43).
+    A submodule with no `.git` at all (de-initialised, never initialised) is an empty directory the plan's guard
+    refuses; one holding files but no `.git` is `(submodule has files but no .git)`, so the whole-directory
+    archive keeps them."""
     modules = common / "modules" if common else None
     present = (path / ".gitmodules").exists() or bool(modules and modules.is_dir())
     if not present:
@@ -621,10 +631,12 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
         bad = config_offenders(entries, in_submodule=True)
         return bad[0] if bad else None
 
+    vetted: set[str] = set()  # realpath of every module git dir the walk vetted (its config read, or none to read)
     if modules and modules.is_dir():
         for root, dirs, files in os.walk(modules, followlinks=False):
             if "HEAD" in files or "config" in files:  # a module's git dir: skip its object store and logs
                 dirs[:] = sorted(d for d in dirs if d not in MODULE_INTERNAL_DIRS)
+                vetted.add(os.path.realpath(root))
             else:  # `modules/` itself or a dir that only groups nested modules: every name is a module
                 dirs[:] = sorted(dirs)
             if any((Path(root) / d).is_symlink() for d in dirs):
@@ -636,31 +648,52 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
                     bad = offender(Path(root) / name)
                     if bad:
                         return True, bad
-    # every gitlink's `.git` must be a gitfile that resolves under `modules/`, where the walk above read its config
+    # every submodule path (index gitlinks and `.gitmodules` paths, which the plan's own listing reads) must have no
+    # `.git` at all (an empty directory: the plan's guard refuses it) or a gitfile naming a git dir the walk vetted
     rc, out = git(path, "ls-files", "-z", "-s", errors="surrogateescape")
     if rc != 0:
         return True, "(unreadable)"
-    real_modules = os.path.realpath(modules) + os.sep if modules else None
-    for entry in out.split("\0"):
-        if not entry.startswith("160000 ") or "\t" not in entry:
-            continue
-        dotgit = path / entry.split("\t", 1)[1] / ".git"
+    gitlinks = {os.path.normpath(e.split("\t", 1)[1]) for e in out.split("\0") if e.startswith("160000 ") and "\t" in e}
+    listed: set[str] = set()
+    if (path / ".gitmodules").is_symlink():
+        return True, "(symlink)"
+    if (path / ".gitmodules").is_file():
+        rc, out = git(path, "config", "--file", ".gitmodules", "--get-regexp", "-z", r"^submodule\..*\.path$",
+                      errors="surrogateescape")
+        if rc == 0:
+            listed = {os.path.normpath(e.partition("\n")[2]) for e in out.split("\0") if "\n" in e}
+        elif rc != 1:  # 1: no such key
+            return True, "(unreadable)"
+    for sub in sorted(gitlinks | listed):
+        dotgit = path / sub / ".git"
         try:
             mode = os.lstat(dotgit).st_mode
         except (FileNotFoundError, NotADirectoryError):
+            try:  # no `.git`: de-initialised or never initialised, an empty directory; files there would be in no capture
+                if any(True for _ in os.scandir(path / sub)):
+                    return True, "(submodule has files but no .git)"
+            except OSError:
+                pass
             continue
         if stat.S_ISLNK(mode):
             return True, "(symlink)"
+        if sub not in gitlinks:
+            return True, "(gitmodules path not a gitlink)"
         if not stat.S_ISREG(mode):
             return True, "(gitdir outside modules)"
         try:
-            first = dotgit.read_text(errors="surrogateescape").splitlines()[0] if dotgit.stat().st_size else ""
-        except (OSError, IndexError):
+            raw = dotgit.read_bytes()
+        except OSError:
             return True, "(gitdir unreadable)"
-        if not first.startswith("gitdir: "):
+        # git's own gitfile reader: the whole file after `gitdir: `, trailing line breaks dropped. A path holding a
+        # line break is one git would use and the plan's one-line parse would not (round 43): refused
+        if not raw.startswith(b"gitdir: "):
             return True, "(gitdir unreadable)"
-        target = os.path.realpath(os.path.join(dotgit.parent, first[len("gitdir: "):].rstrip("\r")))
-        if not real_modules or not target.startswith(real_modules):
+        rel = raw[len(b"gitdir: "):].rstrip(b"\r\n")
+        if not rel or b"\n" in rel or b"\r" in rel:
+            return True, "(gitdir unreadable)"
+        target = os.path.realpath(os.path.join(os.fsencode(dotgit.parent), rel))
+        if os.fsdecode(target) not in vetted:
             return True, "(gitdir outside modules)"
     return True, None
 

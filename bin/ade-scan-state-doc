@@ -30,6 +30,7 @@ HOME = str(Path.home())
 ORIGIN_UNREACHABLE = "origin unreachable: local-only count unverified"  # ade-scan-state's flag text
 ORIGIN_CREDENTIAL = "origin url holds a credential: not queried"  # same: never queried, treated as unreachable
 SUBMODULES_FLAG = "submodules not inspected"  # same: no count above covers a submodule's content
+SKIP_GIT_SYMLINK = "skipped: .git is a symlink"  # same: the whole-directory archive keeps the link, not its target
 # One patch per stash entry, untracked files and binary content included (`git stash show --include-untracked`,
 # git 2.32+): `bundle create` takes ref names, not the reflog's commit ids, so a bundle of `stash@{n}` entries
 # cannot be made without writing refs into the checkout (adversary round 26 on PR 27). The entries are listed when
@@ -55,8 +56,11 @@ STASH_FMT = ("mkdir -p <DEST>/{} && ( l=$(git -C {} log -g --format=%gd refs/sta
 # the common directory, which is `$g` itself unless `commondir` names another; a linked worktree made before git
 # 2.44 has no `refs/` of its own), and nothing is archived before the common directory passed (round 36: a
 # directory holding only `HEAD`, a bad `commondir` and private files used to be archived before the failure);
-# every failure is loud. The parse follows git's gitfile reader (round 32).
+# every failure is loud. The parse follows git's gitfile reader (round 32); a gitfile with a second line is refused
+# outright, since git takes the whole file after `gitdir: ` and a first-line parse would archive another directory
+# (round 43)
 GITDIR_FMT = ("if [ -f {}/.git ]; then {{ {{ IFS= read -r l || [ -n \"$l\" ]; }} < {}/.git "
+              "&& ! {{ IFS= read -r l1; IFS= read -r l2 || [ -n \"$l2\" ]; }} < {}/.git "
               "&& case \"$l\" in \"gitdir: \"*) g=${{l#gitdir: }}; g=${{g%$'\\r'}} ;; *) false ;; esac "
               "&& [ -n \"$g\" ] && case \"$g\" in /*) ;; *) g={}/$g ;; esac "
               "&& [ -f \"$g/HEAD\" ] && c=$g && if [ -f \"$g/commondir\" ]; then {{ IFS= read -r c || [ -n \"$c\" ]; }} < \"$g/commondir\" "
@@ -67,7 +71,13 @@ GITDIR_FMT = ("if [ -f {}/.git ]; then {{ {{ IFS= read -r l || [ -n \"$l\" ]; }}
 
 
 def gitdir_values(raw_p, ck):
-    return (raw_p, raw_p, raw_p, f"{ck}/gitdir.tar", f"{ck}/commondir.tar")
+    return (raw_p, raw_p, raw_p, raw_p, f"{ck}/gitdir.tar", f"{ck}/commondir.tar")
+
+
+# a `.git` SYMLINK (`skipped: .git is a symlink`): chdir follows the link, so its target is archived behind the same
+# git-directory test; a link to a gitfile or to anything else fails loudly, archiving nothing (round 43)
+SYMLINK_GITDIR_FMT = ("g={}/.git && [ -f \"$g/HEAD\" ] && [ -d \"$g/objects\" ] && [ -d \"$g/refs\" ] "
+                      "&& TAR_OPTIONS= \"$GTAR\" -C \"$g\" -cf <DEST>/{} . || {{ echo 'gitdir capture FAILED' >&2; false; }}")
 
 
 def modified_fmt(sub=""):
@@ -87,7 +97,12 @@ def modified_fmt(sub=""):
     submodule row covers its content, and its ignored files must not be copied (round 36). tar's own failure (an
     unwritable archive path) prints its stderr and fails the row instead of hiding behind the later grep; a tracked
     path whose parent is now a file (`Cannot stat: Not a directory`) has nothing to keep, like a missing one; a
-    `TAR_OPTIONS` from the operator's environment must not change the archive (round 40)."""
+    `TAR_OPTIONS` from the operator's environment must not change the archive (round 40). An unmerged entry's stage
+    blobs (`ls-files -u`) may be reachable from no ref (a conflict against a commit since dropped, a `read-tree` or
+    `update-index` state): the patches print `Binary files differ` / `* Unmerged path` for them and the index copy
+    names objects the deleted checkout no longer has, so every object `ls-files -u` names is packed to
+    `unmerged-<hash>.pack` (`pack-objects` fails loudly on a missing object; no unmerged entry gives an empty
+    pack) (Codex pass 39)."""
     w, d = "git -C {}" + sub, "<DEST>/{}" + sub
     return (f"mkdir -p {d} && {w} {DIFF_OPTS} > {d}/modified.patch && {w} {DIFF_OPTS} --cached > {d}/staged.patch "
             f"&& {w} ls-files -z --modified > {d}/modified.list 2> {d}/modified.err "
@@ -95,11 +110,15 @@ def modified_fmt(sub=""):
             f"&& {{{{ TAR_OPTIONS= LC_ALL=C \"$GTAR\" -cf {d}/modified.tar -C {d} modified.list -C {{}}{sub} --null --no-recursion --ignore-failed-read -T {d}/modified.list 2>> {d}/modified.err "
             f"|| {{{{ cat {d}/modified.err >&2; echo 'modified capture FAILED' >&2; false; }}}}; }}}} "
             f"&& {{{{ ! grep -qv -e '^warning: ' -e ': Cannot stat: No such file or directory$' -e ': Cannot stat: Not a directory$' {d}/modified.err || {{{{ cat {d}/modified.err >&2; echo 'modified capture FAILED' >&2; false; }}}}; }}}} "
-            f"&& \"$GCP\" -- \"$({w} rev-parse --absolute-git-dir)/index\" {d}/index")
+            f"&& \"$GCP\" -- \"$({w} rev-parse --absolute-git-dir)/index\" {d}/index "
+            f"&& {w} ls-files -u > {d}/unmerged.list "
+            f"&& \"$GSED\" -n 's/^[0-7]* \\([0-9a-f]*\\) [1-3]\\t.*$/\\1/p' {d}/unmerged.list > {d}/unmerged.ids "
+            f"&& GIT_NO_LAZY_FETCH=1 {w} pack-objects {d}/unmerged < {d}/unmerged.ids")
 
 
 def modified_values(raw_p, ck):
-    return (ck, raw_p, ck, raw_p, ck, raw_p, ck, ck, raw_p, ck, ck, ck, ck, raw_p, ck, ck, ck, ck, ck, raw_p, ck)
+    return (ck, raw_p, ck, raw_p, ck, raw_p, ck, ck, raw_p, ck, ck, ck, ck, raw_p, ck, ck, ck, ck, ck, raw_p, ck,
+            raw_p, ck, ck, ck, raw_p, ck, ck)
 
 
 def stash_values(raw_p, ck):
@@ -149,9 +168,10 @@ def hidden_fmt(sub=""):
 
 # a de-initialised submodule is an empty directory whose git dir (`<common>/modules/<sub>`) keeps its commits: every
 # by-hand command run there acts on the SUPERPROJECT at rc 0 (adversary round 42), so each one in the submodule row
-# is gated on the gitlink's `.git` (the scanner has verified it is a gitfile under `modules/`), and the module git
-# dirs themselves are archived, which needs no worktree and runs nothing
-SUB_GUARD = "[ -e {}/<sub>/.git ] && "
+# is gated on the gitlink's `.git` (the scanner has verified it is a gitfile naming a vetted git dir), saying so when
+# it stops (round 43: a silent rc 1 reads as "nothing happened"), and the module git dirs themselves are archived,
+# which needs no worktree and runs nothing
+SUB_GUARD = "{{ [ -e {}/<sub>/.git ] || {{ echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }}; }} && "
 MODULES_FMT = ("mkdir -p <DEST>/{} && d=$(git -C {} rev-parse --git-common-dir) "
                "&& TAR_OPTIONS= \"$GTAR\" -cf <DEST>/{}/modules.tar -C {} -C \"$d\" modules")
 
@@ -553,11 +573,17 @@ def render(d):
             # `refs` in the COMMON directory, so a linked worktree's own directory (`HEAD` and `commondir` only,
             # before git 2.44) passes; a `.git` file naming `/` or a home directory must not make the paste copy
             # the disk (rounds 33 and 35, Codex pass 30). The command text is GITDIR_FMT, run live by the tests
-            gitdir = shcode(GITDIR_FMT, *gitdir_values(raw_p, ck))
+            if c["verdict"] == SKIP_GIT_SYMLINK:
+                # the whole-directory archive keeps the link itself, not the git directory it names, where the history
+                # is (round 43): that target is archived when it is a git directory, loudly refused otherwise
+                gitdir = ("the `.git` symlink's target holds the history (the scan read nothing there): archive it too: "
+                          + shcode(SYMLINK_GITDIR_FMT, raw_p, f"{ck}/gitdir.tar"))
+            else:
+                gitdir = ("when `.git` is a file the directory it points to and that one's common directory hold the "
+                          "history, archive them too: " + shcode(GITDIR_FMT, *gitdir_values(raw_p, ck)))
             w(f"| {p} | counts unknown ({esc(c['verdict'])}) | re-scan once the cause is fixed, or archive the whole "
               f"directory: {shcode('mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -cf <DEST>/{} -- {}', ck, parent or '/', f'{ck}/whole.tar', base)}"
-              " (no git command: the scan did not run one there either); when `.git` is a file the directory it "
-              f"points to and that one's common directory hold the history, archive them too: {gitdir}"
+              f" (no git command: the scan did not run one there either); {gitdir}"
               " | yes: counts unknown; re-scan or archive whole |")
             continue
         # every untracked path counts, a `graft/` directory included: nothing verifies that one is the reproducible
@@ -740,7 +766,7 @@ def render(d):
                        # the module git dirs hold a de-initialised or removed submodule's commits, which no command
                        # above can reach (adversary round 42)
                        + " and " + shcode(MODULES_FMT, *modules_values(raw_p, ck))
-                       + " before any cleanup (each command fails outside a real submodule checkout: a de-initialised "
+                       + " before any cleanup (each command fails, saying so, outside a real submodule checkout: a de-initialised "
                        "one is an empty directory whose commits live under the git dir's `modules/`, which the last "
                        "archive keeps; the scanner skips absorbed submodules: `core.worktree`)")
             need = need if need.startswith(("yes", "**yes")) else "yes: inspect each submodule first"
