@@ -72,6 +72,14 @@ Investigate (section 3) when any of these holds. Otherwise report the numbers in
 2. `status` shows a hot streak (`hot for N/300 s`), or `sample.log` has a `sustained load` line from the
    last hour.
 3. An incident has no `ack`, or `guard.jsonl` shows a trip or a `disabled` event from the last day.
+4. A `load-watch: compressor churn ~Nk pages/s for 3+ min (limit 60k); top: ...` line arrived (2026-10-23;
+   `status` shows `compressor churn` and the `churn` / `churn-watcher` cooldowns). The sample step reads the
+   `vm_stat` compressor delta each 20 s; it is sent when churn stays above the `admit` limit for 180 s
+   (`LW_CHURN_SUSTAIN_S`), to you at most hourly and to Hermes every 6 h. `admit` already holds new
+   `bg`/`acp-dispatch` work, so the churn is from running or bypass work: find the top memory users with
+   `ps -axo pid,rss,command -m | head` (not only the CPU list in the line), then section 3 as usual. The
+   alert opens no incident and kills nothing; the Standing exceptions below only change the advice (the line
+   says so when Grok, Chrome or WindowServer is in its top 3), never whether you investigate.
 
 ## 3. Investigate
 
