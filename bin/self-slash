@@ -138,7 +138,7 @@ if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
 fi
 [ "$dry" = 1 ] && { echo "self-slash: dry run, would send to $host $pane after ${delay}s: ${text:0:80}${then:+; then, once idle again: $then}"; exit 0; }
 mkdir -p "$(dirname "$log")"
-prompt_line="$(dirname "$(realpath "$0")")/../skills/session-finder/prompt_line.py"
+prompt_line="$(dirname "$(grealpath "$0")")/../skills/session-finder/prompt_line.py"
 lockdir="$HOME/.local/state/self-slash"; mkdir -p "$lockdir"
 lock="$lockdir/$(printf '%s' "$pane" | gtr -c 'A-Za-z0-9_.-' '_').pid"
 if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
@@ -201,7 +201,7 @@ send_text() {
     # PASEO_AGENT_ID unset so the daemon does not envelope the send as agent-to-agent
     # text; --behavior steer so a turn that began meanwhile is never torn down.
     out=$(env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD "$paseo_cli" send "$pane" --no-wait --behavior steer --json "$text" 2>&1) || { echo "$(gdate '+%F %T') $host $pane: paseo send failed: ${out:0:200}"; return 1; }
-    echo "$(gdate '+%F %T') $host $pane: paseo send: $(printf '%s' "$out" | gtr -s ' \n' ' ' | cut -c1-160)"
+    echo "$(gdate '+%F %T') $host $pane: paseo send: $(printf '%s' "$out" | gtr -s ' \n' ' ' | gcut -c1-160)"
     return 0
   elif [ "$host" = herdr ]; then
     herdr pane run "$pane" "$text" || return 1

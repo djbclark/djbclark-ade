@@ -35,7 +35,7 @@ section 6. No file on disk was modified by this slice (the only writes were this
 ## 2. Store table
 
 Sizes from `timeout 300 du -sh` unless a single file's `ls -la` is cited. "Newest" = newest
-session-bearing item found (`fd … -x stat -f '%m %N' | sort -rn | head -1`) or file mtime.
+session-bearing item found (`fd … -x stat -f '%m %N' | gsort -rn | ghead -1`) or file mtime.
 
 | Provider | Store (resolved path) | Format | Size | Newest item | Class | Readable export | Lossless backup | Native resume | Import | Remote |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -217,7 +217,7 @@ commits, and four DBs (`~/.zcode/v2/tasks-index.sqlite`, `~/.local/share/muse/se
 `timeout 300 du -sh` per store (plus `du -h -d 1` on `~/.local/state/bigteam`,
 `~/.gemini/antigravity-cli/*`, `~/.omp/*`, `~/.gemini/antigravity-acp/conversations`);
 `fd` (`-e jsonl`, `-g 'rollout-*.jsonl'`, `-g 'session-*.jsonl'`, `-g 'session_index*'`,
-`-g 'SESSION_LOG.md'`, `-d N`) with `-x stat -f '%m %N' | sort -rn | head` for counts/newest;
+`-g 'SESSION_LOG.md'`, `-d N`) with `-x stat -f '%m %N' | gsort -rn | ghead` for counts/newest;
 `file`-class checks via `od -An -tu1 -j18 -N2` (WAL header) where sqlite refused; `sqlite3 -readonly
 <db> ".tables"` / `"PRAGMA journal_mode;"` / `"PRAGMA user_version;"`, retried as
 `sqlite3 "file:<db>?immutable=1" ".tables"` for the four shm-less WAL dbs; `head -n1 <jsonl> | jq -r

@@ -15,7 +15,7 @@ test "${HERDR_ENV:-}" = 1 || { echo "not inside herdr" >&2; exit 1; }
 echo "== $pane -> ws=$ws tab=$tab topic=$base"
 "$S" wake "$pane" || { echo "WAKE FAILED $pane" >&2; exit 1; }
 st=
-for _ in $(seq 1 30); do
+for _ in $(gseq 1 30); do
   st=$(herdr agent get "$pane" 2>/dev/null | python3 -c 'import sys,json; a=json.load(sys.stdin)["result"]["agent"]; print(a.get("agent"),a["agent_status"])' 2>/dev/null)
   case "$st" in "claude idle"|"claude done") break;; esac
   sleep 2
