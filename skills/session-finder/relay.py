@@ -258,12 +258,14 @@ def screen(chan, lines=20):
 
 
 def draft(chan):
-    """Text typed but not sent in a Claude Code input box (its prompt line starts with ❯).
+    """Text typed but not sent in a Claude Code input box (its prompt line starts with ❯); None when the box is not
+    in the rows read (its ❯ row or bottom border scrolled out: unknown, which is not the same as empty).
 
     Read with ANSI codes where the channel has them: Claude Code's suggested next prompt (ghost text that
     anything typed replaces) and its hints are dim or grey, not a draft (prompt_line.py; 2026-10-16 a dim
     suggestion was refused as a draft)."""
-    return prompt_line.classify(box_read(chan)) or ""
+    p = box_parse(box_read(chan))
+    return None if p is None else p[0]
 
 
 def box_read(chan):
@@ -275,31 +277,55 @@ def box_read(chan):
         out = fleet.run("tmux", "capture-pane", "-p", "-e", "-t", target)[1]
     else:
         out = screen(chan, 14)
-    return "\n".join(out.splitlines()[-14:])
+    rows = [ln for ln in out.splitlines() if ln.strip()]    # tmux prints the blank rows under a short screen too
+    return "\n".join(rows[-14:])
 
 
-BORDER = set("─━═-╭╮╰╯┌┐└┘")
+BORDER = set("─━═╭╮╰╯┌┐└┘")
+
+
+def _plain(ln):
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", ln).strip().strip("│┃").strip()
+
+
+def _is_border(ln):
+    """A box rule is a long run of line-drawing characters; an operator's "---" or "--" is not one."""
+    t = _plain(ln)
+    return len(t) >= 10 and set(t) <= BORDER
+
+
+def box_parse(raw):
+    """(draft, rows below it) of the Claude Code input box in screen text RAW, or None when the box is not plainly
+    in it: no bottom rule, no ❯ row between the last two rules, or more than one (a ❯ the operator typed or pasted
+    inside the box). None means unknown, never empty: an Enter or typing decision must not act on it (adversary
+    round 7: a 12-row draft pushed its ❯ row out of the 14 rows read and the relay typed into it)."""
+    rows = raw.splitlines()
+    borders = [i for i, ln in enumerate(rows) if _is_border(ln)]
+    if not borders:
+        return None
+    bottom, top = borders[-1], (borders[-2] if len(borders) > 1 else -1)
+    marks = [i for i in range(top + 1, bottom) if "❯" in rows[i]]
+    if len(marks) != 1:
+        return None
+    return (prompt_line.classify(rows[marks[0]]) or "",
+            " ".join(t for t in (_plain(ln) for ln in rows[marks[0] + 1:bottom]) if t))
 
 
 def rows_below(chan):
     """The input box's rows under its ❯ line (a Shift+Enter line, a wrapped long text), as one string, up to the
-    box's bottom border. `draft` reads only the ❯ row, so words the operator added on a second row are invisible
-    to it; an Enter decision must see them."""
-    rows = box_read(chan).splitlines()
-    marks = [i for i, ln in enumerate(rows) if "❯" in ln]
-    out = []
-    for ln in rows[marks[-1] + 1:] if marks else []:
-        t = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", ln).strip().strip("│┃").strip()
-        if t and set(t) <= BORDER:
-            break
-        if t:
-            out.append(t)
-    return " ".join(out)
+    box's bottom border; None when the box is not plainly in view. `draft` reads only the ❯ row, so words the
+    operator added on a second row are invisible to it; an Enter decision must see them."""
+    p = box_parse(box_read(chan))
+    return None if p is None else p[1]
 
 
 def box_text(chan):
-    """What the input box holds: the ❯ row and the rows below it, whitespace-folded."""
-    return " ".join((draft(chan) + " " + rows_below(chan)).split())
+    """What the input box holds: the ❯ row and the rows below it, whitespace-folded; None when the box is not
+    plainly in view (unknown, not empty)."""
+    d, rb = draft(chan), rows_below(chan)
+    if d is None or rb is None:
+        return None
+    return " ".join((d + " " + rb).split())
 
 
 def press_enter(chan):
@@ -348,32 +374,37 @@ def type_line(chan, text):
     return press_enter(chan)
 
 
-def box_state(chan, text):
-    """(stuck, ours) from one read of the input box. STUCK: TEXT still sits unsent in a Claude Code input box, its
-    Enter did not land (loose: the first 30 characters agree, so arming is the safe direction). OURS: the box shows
-    our text, a piece of it or our collapsed paste, nothing more; only then may a relay press Enter on it."""
+def box_state(chan, text, pin="*"):
+    """(stuck, ours, box) from one read of the input box. STUCK: TEXT still sits unsent in a Claude Code input box,
+    its Enter did not land (loose: the first 30 characters agree, so arming is the safe direction). OURS: the box
+    shows our text, a piece of it or our collapsed paste (PIN: see `ours_paste`), nothing more; only then may a
+    relay press Enter on it. A box that is not in view is neither."""
     d = box_text(chan)
-    mine_ = bool(d) and (ours_paste(d, text) or holds(d, text))
-    return mine_ or (bool(d) and d[:30] == text[:30]), mine_
+    mine_ = bool(d) and (ours_paste(d, text, pin) or holds(d, text))
+    return mine_ or (bool(d) and d[:30] == text[:30]), mine_, d
 
 
-def stuck_in_box(chan, text):
-    return box_state(chan, text)[0]
+def stuck_in_box(chan, text, pin="*"):
+    return box_state(chan, text, pin)[0]
 
 
 PASTE_MIN = 800     # Claude Code collapses only a paste longer than this into a placeholder
 PASTE_RE = re.compile(r"\[Pasted text #\d+\]")
 
 
-def ours_paste(d, text):
-    """True when draft D is the collapsed "[Pasted text #N +M lines]" placeholder of a TEXT long enough to be
-    collapsed. A long burst typed by send-text collapses and never matches the text (2026-10-18); a placeholder
-    beside a short text is the operator's own paste, and a "+M lines" placeholder is a multi-line paste, which a
-    one-line relay text never is (2026-10-23)."""
-    return bool(PASTE_RE.fullmatch(" ".join(d.split()))) and len(" ".join((text or "").split())) > PASTE_MIN
+def ours_paste(d, text, pin="*"):
+    """True when draft D is the collapsed "[Pasted text #N]" placeholder of a TEXT long enough to be collapsed.
+    A long burst typed by send-text collapses and never matches the text (2026-10-18); a placeholder beside a
+    short text is the operator's own paste, and a "+M lines" placeholder is a multi-line paste, which a one-line
+    relay text never is (2026-10-23). PIN is which placeholder is ours: "*" any (the box was empty when we typed,
+    so the first one seen is ours), a string only that exact one, "" none (a later number is the operator's own
+    paste: adversary round 7)."""
+    dn = " ".join(d.split())
+    return bool(PASTE_RE.fullmatch(dn)) and len(" ".join((text or "").split())) > PASTE_MIN and pin in ("*", dn)
 
 
 UNSENT_TTL = 3600    # an hour: a leftover from days ago must not claim a draft
+UNSENT_KEEP = 86400  # an expired entry is still evidence of whose placeholder this is, for a day
 
 
 def _unsent():
@@ -386,7 +417,8 @@ def _unsent():
 def note_unsent(sid, text, draft="", mark=0):
     """Remember TEXT as left unsent in session SID's box, with the draft the box showed then and the transcript size
     before it was typed (None forgets it). Entries older than UNSENT_TTL are dropped by `leftover`."""
-    rows = _unsent()
+    rows = {k: v for k, v in _unsent().items()
+            if isinstance(v, dict) and time.time() - float(v.get("at") or 0) <= UNSENT_KEEP}
     if text is None:
         if rows.pop(sid, None) is None:
             return
@@ -431,12 +463,23 @@ def mine(d, entry):
     return bool(dn) and bool(entry) and (dn == entry.get("draft") or holds(dn, entry["text"]))
 
 
-def arm(s, chan, text, mark):
+def arm(s, chan, text, mark, pin="*"):
     """Record TEXT as sitting unsent in session S's box (Claude Code only). The draft is kept for `mine` only when
     it is our text or our collapsed paste, never whatever else the box shows."""
     if s["agent"] == "claude":
-        d = box_text(chan)
-        note_unsent(s["id"], text, d if holds(d, text) or ours_paste(d, text) else "", mark)
+        d = box_text(chan) or ""
+        note_unsent(s["id"], text, d if holds(d, text) or ours_paste(d, text, pin) else "", mark)
+
+
+def in_transcript(s, entry):
+    """True when the leftover ENTRY's whole text is already in session S's transcript after the entry's mark: it was
+    delivered, so a copy in the box now is the operator's (Up-arrow history, a rewind), not an unsent one."""
+    tx = Path(s["transcript"]) if s.get("transcript") else None
+    if not (tx and tx.is_file()) or entry.get("mark") is None:
+        return False
+    with tx.open("rb") as fh:
+        fh.seek(entry["mark"])
+        return json.dumps(entry["text"], ensure_ascii=False)[1:-1] in fh.read().decode("utf-8", "replace")
 
 
 def forget(sid, text):
@@ -627,17 +670,20 @@ def retry_leftover(c, chan, d, left):
     if d and not mine(d, left):
         return ("unverified", f"its input box holds someone else's draft ({fleet.clip(d, 60)!r}); an earlier copy of this "
                               "message may or may not have landed. Do not resend; check its pane")
+    if d and in_transcript(s, left):    # delivered already: the copy in the box is a recalled one, not ours to submit
+        note_unsent(s["id"], None)
+        return ("ok", f"{chan[0]} {chan[1]}", "delivered")
     pressed = bool(d)
     if d:
         press_enter(chan)
         for _ in range(10):
             time.sleep(1)
             d = box_text(chan)
-            if not d:
+            if d == "":
                 break
-    if d:
-        return ("unverified", f"your earlier copy of this message is still in its input box ({fleet.clip(d, 60)!r}). "
-                              "Do not resend; check its pane")
+    if d != "":
+        return ("unverified", f"your earlier copy of this message is still in its input box, or the box is out of view "
+                              f"({fleet.clip(d or '', 60)!r}). Do not resend; check its pane")
     tx = Path(s["transcript"]) if s.get("transcript") else None
     probe = json.dumps(text, ensure_ascii=False)[1:-1]
     deadline = time.time() + (c["a"].wait if pressed else 0)
@@ -669,15 +715,26 @@ def route_pane(c):
     d = box_text(chan) if s["agent"] == "claude" else ""
     left = leftover(s["id"])
     tx = Path(s["transcript"]) if s.get("transcript") else None
+    if d is None:    # its ❯ row or bottom border is outside the rows read: nothing may be typed or submitted blind
+        if left and " ".join(left["text"].split()) == text:
+            return ("unverified", "an earlier copy of this message may sit in its input box, which is out of view. "
+                                  "Do not resend; check its pane")
+        return ("skip", "cannot see its input box (its ❯ row or bottom border is outside the screen read)")
     if left and " ".join(left["text"].split()) == text:    # a retry of the message an earlier relay left unsent
         return retry_leftover(c, chan, d, left)
+    if d and left and in_transcript(s, left):    # that message was delivered: the box holds a recalled copy
+        note_unsent(s["id"], None)
+        left = None
     if d and mine(d, left):
         press_enter(chan)
         for _ in range(10):
             time.sleep(1)
             d = box_text(chan)
-            if not d:
+            if d == "":
                 break
+        if d is None:
+            return ("unverified", "pressed Enter on an earlier message of ours, then its input box went out of view. "
+                                  "Do not resend; check its pane")
         if not d:    # the entry stays: a retry of that text proves it from its mark, and the TTL expires it
             print(f"relay: [{s['id']}] submitted our earlier message left unsent in its box", file=sys.stderr)
     stale = _unsent().get(s["id"])    # an entry past its TTL is still evidence of whose paste placeholder this is
@@ -697,7 +754,7 @@ def route_pane(c):
         return ("skip", f"typing into {chan[0]} {chan[1]} failed")
     probe = json.dumps(text, ensure_ascii=False)[1:-1]    # the whole text: another line may share its first 40 characters
     seen, deadline = None, time.time() + a.wait
-    typed_at, retries, stuck = time.time(), 0, False
+    typed_at, retries, stuck, pin = time.time(), 0, False, "*"
     while time.time() < deadline:
         if tx and tx.is_file():
             with tx.open("rb") as fh:
@@ -705,7 +762,9 @@ def route_pane(c):
                 if probe in fh.read().decode("utf-8", "replace"):
                     seen = "delivered"
                     break
-        stuck, ours_now = box_state(chan, text) if s["agent"] == "claude" else (False, False)
+        stuck, ours_now, seen_box = box_state(chan, text, pin) if s["agent"] == "claude" else (False, False, "")
+        if pin == "*":    # the box was empty before we typed: the first placeholder seen is ours, a later number is not
+            pin = seen_box if ours_now and PASTE_RE.fullmatch(seen_box or "") else ""
         if ours_now and retries < ENTER_RETRIES and time.time() - typed_at >= RETRY_AFTER:
             press_enter(chan)
             typed_at, retries = time.time(), retries + 1
@@ -720,10 +779,10 @@ def route_pane(c):
                 break
         time.sleep(1)
     if s["agent"] == "claude":
-        if seen or not stuck_in_box(chan, text):
+        if seen or not stuck_in_box(chan, text, pin):
             forget(s["id"], text)
         else:
-            arm(s, chan, text, mark)
+            arm(s, chan, text, mark, pin)
     if seen:
         return ("ok", f"{chan[0]} {chan[1]}", seen)
     return ("unverified", f"text typed via {chan[0]} {chan[1]} but not seen in its transcript or pane within "

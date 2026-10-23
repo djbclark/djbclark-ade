@@ -25,6 +25,7 @@ SF = ROOT / "skills" / "session-finder"
 sys.path.insert(0, str(SF))
 
 import fleet  # noqa: E402  # pyright: ignore[reportMissingImports]
+import prompt_line  # noqa: E402  # pyright: ignore[reportMissingImports]
 
 _spec = importlib.util.spec_from_file_location("relay", SF / "relay.py")
 assert _spec and _spec.loader
@@ -35,6 +36,7 @@ relay.UNSENT = Path(tempfile.mkdtemp(prefix="relay-fallback-test-")) / "relay-un
 SID = "cccccccc-0000-4000-8000-000000000003"
 saved_type_line = relay.type_line
 real_rows_below = relay.rows_below
+real_draft = relay.draft
 
 
 def sess(**kw: Any) -> dict[str, Any]:
@@ -330,7 +332,7 @@ class TestFallback(Harness):
 
     def test_a_long_texts_own_collapsed_paste_is_still_recorded_and_submitted(self) -> None:
         long = "word " * 200
-        self.box_after(2, "[Pasted text #3]")
+        self.box_after(1, "[Pasted text #3]")    # the first read after typing: nothing was empty-then-pasted
         relay.screen = lambda chan, lines=20: ""
         self.run_text(sess(), long)
         self.assertEqual(relay.leftover("cccccccc")["draft"], "[Pasted text #3]")
@@ -855,6 +857,231 @@ class TestSocketPrimitives(unittest.TestCase):
                 p.unlink()
             (reg / "sessions").rmdir()
             reg.rmdir()
+
+
+RULE = "\u2500" * 40
+ESC = "\x1b["
+
+
+def box(*rows: str, above: tuple[str, ...] = (), footer: str = "  ? for shortcuts") -> str:
+    """A Claude Code input box as box_read returns it: top rule, rows, bottom rule, footer."""
+    return "\n".join([*above, RULE, *rows, RULE, footer])
+
+
+class TestRound7(Harness):
+    """Adversary round 7 (2026-10-23): an unseen or foreign box is never typed into or submitted."""
+
+    def armed(self, text: str = "hello there friend", mark: int = 0, draft: str = "") -> None:
+        relay.note_unsent("cccccccc", text, draft, mark)
+
+    def enters(self) -> list[str]:
+        relay.press_enter = lambda chan: self.calls.append("enter") or True
+        return self.calls
+
+    def screen_of(self, raw: str) -> None:
+        """Run the real box reading code on RAW instead of the mocked draft/rows_below."""
+        relay.draft = real_draft
+        relay.rows_below = real_rows_below
+        relay.box_read = lambda chan: raw
+
+    def setUp(self) -> None:
+        super().setUp()
+        saved = relay.box_read
+        self.addCleanup(lambda: setattr(relay, "box_read", saved))
+
+    def run_text(self, s: dict[str, Any], text: str, *argv: str) -> tuple[int, str, str]:
+        relay.fleet.sessions = lambda: [s]
+        out, err = io.StringIO(), io.StringIO()
+        old, sleep = sys.argv, relay.time.sleep
+        sys.argv = ["relay.py", s["name"], text, "--wait", "1", *argv]
+        relay.time.sleep = lambda n: None
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = relay.main()
+        finally:
+            sys.argv, relay.time.sleep = old, sleep
+        return rc, out.getvalue(), err.getvalue()
+
+    # 1. a box whose ❯ row is out of view is unknown, not empty
+    def test_a_tall_draft_whose_prompt_row_scrolled_out_is_unknown_and_nothing_is_typed(self) -> None:
+        self.screen_of("\n".join([f"  line {i}" for i in range(12)] + [RULE, "  \u23f5\u23f5 bypass permissions on"]))
+        self.assertIsNone(relay.box_text(None))
+        rc, _, err = self.run_text(sess(), "hello there friend")
+        self.assertEqual(self.calls, [])
+        self.assertNotEqual(rc, 0)
+        self.assertIn("cannot see its input box", err)
+
+    def test_no_bottom_rule_is_unknown(self) -> None:
+        self.screen_of("\u276f hello\n  ? for shortcuts")
+        self.assertIsNone(relay.box_text(None))
+
+    def test_an_unseen_box_blocks_a_retry_of_our_text_as_unverified_not_a_socket_fallback(self) -> None:
+        relay.claude_socket = lambda s: "/tmp/x.sock"
+        self.armed()
+        self.screen_of("  just text")
+        rc, _, err = self.run_text(sess(), "hello there friend")
+        self.assertEqual((rc, self.calls), (1, []))
+        self.assertIn("out of view", err)
+
+    def test_an_unseen_box_after_our_enter_is_not_taken_for_empty(self) -> None:
+        self.armed()
+        reads: list[int] = []    # box_text reads twice (the ❯ row, then the rows below it)
+
+        def shown(chan: Any) -> str:
+            reads.append(1)
+            return box("\u276f hello there friend") if len(reads) <= 2 else "  nothing here"
+        relay.box_read = shown
+        relay.draft, relay.rows_below = real_draft, real_rows_below
+        calls = self.enters()
+        rc, _, err = self.run_text(sess(), "another message")
+        self.assertEqual(rc, 1)
+        self.assertEqual(calls.count("enter"), 1)
+        self.assertNotIn("type", calls)
+        self.assertIn("out of view", err)
+
+    def test_blank_rows_under_a_short_screen_do_not_push_the_box_out_of_the_window(self) -> None:
+        relay.draft, relay.rows_below = real_draft, real_rows_below
+        kind = relay.fleet.run
+        relay.fleet.run = lambda *a, **k: (0, box("\u276f ") + "\n" * 30)
+        try:
+            self.assertEqual(relay.box_text(("tmux", "x")), "")
+        finally:
+            relay.fleet.run = kind
+
+    # 2. hints are dropped by style, not by their words, when the row carries style
+    def test_a_styled_row_that_starts_with_a_hint_word_is_the_operators_text(self) -> None:
+        self.assertEqual(prompt_line.classify(f"\u276f {ESC}39mTry \"make test\" again before you merge{ESC}0m"),
+                         'Try "make test" again before you merge')
+        self.assertEqual(prompt_line.classify(f"\u276f {ESC}2mTry \"make test\"{ESC}0m"), "")    # a dim hint
+        self.assertEqual(prompt_line.classify("\u276f Try \"make test\""), "")    # plain-text read: the words decide
+
+    # 3. one placeholder is ours: the one seen right after typing
+    def test_a_later_paste_placeholder_is_the_operators_not_ours(self) -> None:
+        long = "word " * 200
+        self.box_after(1, "[Pasted text #7]")
+        shown = iter(["", "", "[Pasted text #7]"])
+        relay.draft = lambda chan: next(shown, "[Pasted text #7]")
+        relay.screen = lambda chan, lines=20: ""
+        calls = self.enters()
+        rc, _, _ = self.run_text(sess(), long)
+        self.assertEqual(rc, 1)
+        self.assertNotIn("enter", calls)
+        self.assertEqual(relay.leftover("cccccccc")["draft"] if relay.leftover("cccccccc") else "", "")
+
+    def test_pin_accepts_only_the_exact_placeholder(self) -> None:
+        long = "x" * 900
+        self.assertTrue(relay.ours_paste("[Pasted text #3]", long))
+        self.assertTrue(relay.ours_paste("[Pasted text #3]", long, "[Pasted text #3]"))
+        self.assertFalse(relay.ours_paste("[Pasted text #4]", long, "[Pasted text #3]"))
+        self.assertFalse(relay.ours_paste("[Pasted text #3]", long, ""))
+
+    def box_after(self, n_empty: int, then: str) -> None:
+        reads: list[int] = []
+        relay.draft = lambda chan: "" if len(reads.append(1) or reads) <= n_empty else then
+
+    # 4. a delivered text that comes back into the box is not sent again
+    def test_a_recalled_copy_of_a_delivered_text_is_not_submitted_by_a_retry(self) -> None:
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        mark = tx.stat().st_size
+        self.armed(mark=mark, draft="hello there friend")
+        with tx.open("a") as fh:
+            fh.write(json.dumps({"text": "hello there friend"}) + "\n")
+        relay.draft = lambda chan: "hello there friend"    # Up-arrow history put it back in the box
+        calls = self.enters()
+        rc, out, _ = self.run_text(sess(transcript=str(tx)), "hello there friend")
+        self.assertEqual((rc, calls), (0, []))
+        self.assertIn("delivered", out)
+        self.assertIsNone(relay.leftover("cccccccc"))
+
+    def test_a_recalled_copy_is_not_submitted_before_another_message_either(self) -> None:
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        self.armed(mark=tx.stat().st_size, draft="hello there friend")
+        with tx.open("a") as fh:
+            fh.write(json.dumps({"text": "hello there friend"}) + "\n")
+        relay.draft = lambda chan: "hello there friend"
+        calls = self.enters()
+        rc, _, err = self.run_text(sess(transcript=str(tx)), "a different message")
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIn("input box holds a draft", err)
+        self.assertIsNone(relay.leftover("cccccccc"))
+
+    # 5. an operator's "---" is not the box's bottom rule
+    def test_a_markdown_rule_row_does_not_end_the_box(self) -> None:
+        self.screen_of(box("\u276f fleet-watch upstream: x merged", "  ---", "  wait, do not merge the revert yet"))
+        self.assertIn("wait, do not merge", relay.box_text(None))
+
+    def test_a_short_run_of_line_characters_is_not_a_rule_either(self) -> None:
+        self.screen_of(box("\u276f fleet-watch upstream: x merged", "  \u2500\u2500", "  wait, do not merge the revert yet"))
+        self.assertIn("wait, do not merge", relay.box_text(None))
+
+    # 6. a ❯ the operator typed inside the box hides nothing
+    def test_a_second_prompt_mark_inside_the_box_is_unknown(self) -> None:
+        self.screen_of(box("\u276f my own question about the deploy", "  \u276f fleet-watch upstream: x merged"))
+        self.assertIsNone(relay.box_text(None))
+
+    def test_past_prompts_above_the_box_do_not_count(self) -> None:
+        self.screen_of(box("\u276f typed", above=("\u276f an old question", "\u23fa an answer")))
+        self.assertEqual(relay.box_text(None), "typed")
+
+    # T1..T6 mutation gaps from report 7
+    def test_holds_floor_is_twelve_characters(self) -> None:
+        self.assertFalse(relay.mine("look", {"text": "look at the token", "draft": ""}))
+        self.assertFalse(relay.holds("look at the", "look at the token"))    # 11 characters
+        self.assertTrue(relay.holds("look at the t", "look at the token"))
+
+    def test_retry_refuses_a_draft_that_is_our_text_plus_the_operators_words(self) -> None:
+        text = "fleet-watch upstream: https://github.com/x/y/pull/3 merged"
+        self.armed(text)
+        relay.draft = lambda chan: text + " but first revert"
+        calls = self.enters()
+        rc, _, err = self.run_text(sess(), text)
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIn("someone else's draft", err)
+
+    def test_in_loop_enter_ignores_a_box_that_merely_starts_like_our_text(self) -> None:
+        text = "fleet-watch upstream: https://github.com/x/y/pull/3 merged"
+        shown = iter(["", text + " and my own words"])
+        relay.draft = lambda chan: next(shown, text + " and my own words")
+        relay.screen = lambda chan, lines=20: ""
+        calls = self.enters()
+        self.run_text(sess(), text)
+        self.assertNotIn("enter", calls)
+
+    def test_a_tail_counts_only_after_the_clipping_mark(self) -> None:
+        t = "fleet-watch upstream: https://github.com/x/y/pull/3 merged"
+        self.assertTrue(relay.holds("\u2026" + t[10:], t))
+        self.assertFalse(relay.holds(t[10:], t))
+
+    def test_an_expired_entry_for_other_text_does_not_block_an_unrelated_draft_message(self) -> None:
+        relay.claude_socket = lambda s: "/tmp/x.sock"
+        self.armed()
+        rows = json.loads(relay.UNSENT.read_text())
+        rows["cccccccc"]["at"] -= relay.UNSENT_TTL + 5
+        relay.UNSENT.write_text(json.dumps(rows))
+        relay.draft = lambda chan: "my own unrelated draft"
+        rc, _, _ = self.run_text(sess(), "hello there friend")
+        self.assertEqual((rc, self.calls), (0, ["socket"]))
+
+    def test_the_proof_is_the_whole_text_not_its_first_forty_characters(self) -> None:
+        text = "x" * 40 + " and then the real ending of this message"
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        self.armed(text, mark=tx.stat().st_size)
+        with tx.open("a") as fh:
+            fh.write(json.dumps({"text": "x" * 40 + " but a different line"}) + "\n")
+        rc, _, _ = self.run_text(sess(transcript=str(tx)), text)
+        self.assertEqual(rc, 1)
+        self.assertIsNotNone(relay.leftover("cccccccc"))
+
+    def test_entries_older_than_a_day_are_purged_on_the_next_write(self) -> None:
+        relay.note_unsent("old", "an old message", "", 0)
+        rows = json.loads(relay.UNSENT.read_text())
+        rows["old"]["at"] -= relay.UNSENT_KEEP + 5
+        relay.UNSENT.write_text(json.dumps(rows))
+        relay.note_unsent("new", "a new message", "", 0)
+        self.assertEqual(sorted(json.loads(relay.UNSENT.read_text())), ["new"])
 
 
 if __name__ == "__main__":
