@@ -258,7 +258,7 @@ one yourself). The fresh session resumes from the Tier 1 pointer Step 7 just wro
 run that command instead of this step, once; the rest of this section is for a session no governor has steered.
 
 **Successor on another model (Paseo only; djbclark, 2026-10-23: a Fable lead burned ~30% of a week's
-Claude quota, so lead sessions run on Opus 5.5 high, Sonnet 5.5 high when pipeline-driving).** Use this
+Claude quota, so lead sessions run on Opus 5.5 high, Sonnet 5.5 medium when pipeline-driving).** Use this
 form **instead of** `self-slash "/new"` when (a) this session's model is Fable (any `claude-fable-*`,
 `[1m]` suffix or not; check the model line in your own context, or `paseo agent inspect <your id>`
 shows `Model`), (b) `~/.local/state/ade/quota-guard.json` exists and its `level` is `tight` or `critical`
@@ -274,7 +274,7 @@ command below:
 ```
 
 Use `claude/claude-sonnet-5-5` when the guard says `tight`, or when the operator asked for Sonnet or for
-pipeline-driving. `--title` defaults to "<old name> → <model>"; `--mode` defaults to this agent's mode only
+pipeline-driving; for pipeline-driving pass `--thinking medium` (`[lead] pipeline_effort`, djbclark 2026-10-23). `--title` defaults to "<old name> → <model>"; `--mode` defaults to this agent's mode only
 for a successor on the SAME provider (an omp agent's `full` is not a claude mode: the first live run,
 2026-10-23, was refused), else `bypassPermissions` for claude and the provider's default otherwise. Run it
 **once** and end the turn, as above. After the turn it waits for this agent to be idle, starts a NEW
