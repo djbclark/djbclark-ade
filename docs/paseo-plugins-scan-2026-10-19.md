@@ -187,3 +187,28 @@ Issues filed 2026-10-19 (none existed): keefeere/paseo-continuity#2, panrafal/pa
 omercnet/paseo-plugins#361 (stable 3.0.0 pin; `main` and the npm `next` tag already allow
 0.12), Daaaaave/paseo-telegram#1. Drafts and URLs in `docs/upstream-issues.md`. Seven of the
 ten trial plugins run.
+
+## 7. Install log, 2026-10-23 (workspace navigation)
+
+Two navigation plugins, each from `git:` pinned with `--ref` to the commit an `adversary` read in
+full first (section 4 rule 2, option b; both `APPROVE`, Low findings only). The reopen-archived
+README's bare `saratscheff/paseo-reopen-archived` is a registry reference, not that repo, so
+install exactly as below. Daemon 0.12.0, CLI 0.13.0-beta.1.
+
+| Plugin | Source used | Result |
+|---|---|---|
+| paseo-sidebar-organizer | `git:pedrozimmermannsoares/paseo-sidebar-organizer --ref 709317f7acb7a963f2acb9c96b77545b62b3bca6` | running; first sweep labelled all 9 workspaces (Running, Idle, Blocked, Reply) |
+| reopen-archived | `git:saratscheff/paseo-reopen-archived --ref a53118dd6451fbc9b80800d4e478c4531978881d` | running; archived workspaces appear in ⌘K as "Reopen: …" |
+
+Both reach the daemon through `daemon.listen` in `~/.paseo/config.json` (127.0.0.1:7263): the
+desktop app strips `PASEO_LISTEN` from the daemon's environment, so that key is the one setting
+they need. If it is ever removed, sidebar-organizer falls back to 127.0.0.1:6767 and sends the
+local credential there. Sidebar-organizer unpins a workspace it labelled `You` after 3 idle days;
+set Release after inactivity to Never if hand pins must survive. Its own label names (Running,
+Waiting, Idle, Blocked, You, Reply) replace operator labels of the same name. `paseo plugin
+update` on either needs a fresh read of the new revision.
+
+Same day: `paseo daemon config set daemon.autoArchiveAfterMerge true` (applied live, no restart).
+The daemon archives only a Paseo-owned worktree that is clean, not ahead of origin, and whose PR
+it saw open and then merged (`auto-archive-on-merge/archive-if-safe.js` in the app bundle); local
+checkouts and cow pastures never qualify.
