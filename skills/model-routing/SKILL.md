@@ -84,6 +84,9 @@ skill's snapshot in the same turn.
   `excluded` key there); a snapshot-only Claude that is not blocked is still at least `watch`
   (`source: snapshot-only`, a live 429 or a note the snapshot predates), and a Fable pool aiuse
   dropped because the Fable cap is exhausted is read from the snapshot as 0% left (`watch`).
+  aiuse exit 3 (nothing usable) is `critical` whatever the snapshot shows, and a live `available`
+  row without `windows[]` is judged by its own `headroom_percent` / `binding_window` /
+  `usable_now` (never treated as dropped).
   Exit codes 0 / 1 / 2 / 3 for the levels, 10 when Claude appears nowhere, aiuse or the
   snapshot is malformed, aiuse could not be read, or another check holds the lock (state
   untouched), 64 for a bad

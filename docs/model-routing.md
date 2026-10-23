@@ -471,7 +471,9 @@ the payload's age, each judged pool's own age and the snapshot's age: a dead col
 `stale: true` / "(stale)": the level is at least `watch` with a "run `aiuse --live --json`"
 advice line, level pings are suppressed and one ping per stale episode says so. At `critical` the adversary
 line is qualified: omp only while `aiuse --available --json` still lists it (aiuse rate-gates
-omp when every Claude weekly window is exhausted). Exit codes 0 / 1 / 2 / 3 for the
+omp when every Claude weekly window is exhausted). aiuse exit 3 (nothing usable) is `critical`
+whatever the snapshot shows; a live `available` row without `windows[]` is judged by its own
+`headroom_percent` / `binding_window` / `usable_now`. Exit codes 0 / 1 / 2 / 3 for the
 levels, 10 when Claude appears nowhere, the data is malformed, aiuse could not be read or
 another check holds the lock, 64 for a bad
 `CLAUDE_QUOTA_GUARD_THRESHOLDS`, 69 for `--install` off macOS (launchd only; use a systemd

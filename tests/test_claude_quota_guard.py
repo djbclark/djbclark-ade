@@ -916,3 +916,71 @@ def test_hook_keeps_only_the_newest_200_sessions(rig):
     assert rig.hook("fresh").stdout == "[quota-guard watch] w\n"
     kept = json.loads(rig.nudges.read_text())
     assert len(kept) == 200 and "fresh" in kept and "s0" not in kept and "s249" in kept
+
+
+# -- fix 4 (Codex pass 2 on PR 29, 2026-10-23) --------------------------------------------------
+
+@pytest.mark.parametrize("stdout", ["nothing usable right now\n", {"available": []}, ""])
+def test_p1_aiuse_exit_3_is_critical_whatever_a_healthy_snapshot_shows(rig, stdout):
+    """Exit 3 is the live verdict that nothing is usable; the snapshot only fills the numbers."""
+    rig.set_aiuse(stdout, rc=3)
+    rig.set_alerts([], accounts=[snapshot_account(weekly=90, five=95)])
+    assert rig.guard().returncode == 3
+    st = rig.state_json()
+    assert st["level"] == "critical" and st["source"] == "snapshot"
+    assert st["weekly_left"] == 90 and st["weekly_resets_at"] == WEEK_RESET_N
+    assert "No new Claude work of any kind" in st["advice"]
+    assert "aiuse dropped Claude" not in st["advice"]
+    assert rig.pings() == [
+        f"djbclark-ade: Claude quota critical: weekly 90% left, resets {WEEK_PHRASE}; "
+        "Claude quota critical: no Fable or Opus Agent-tool sub-agents."]
+    assert rig.guard().returncode == 3 and len(rig.pings()) == 1
+
+
+def live_row(headroom=None, usable_now=True, binding="Claude Code weekly", **extra):
+    """The minimal `available` row: no windows[], only the live verdict fields."""
+    row = {"provider": "claude", "pool_family": "default", "usable_now": usable_now, "binding_window": binding}
+    if headroom is not None:
+        row["headroom_percent"] = headroom
+    return {"schema_version": "1.4", "available": [row], **extra}
+
+
+@pytest.mark.parametrize("payload, code, level", [
+    (live_row(50), 0, "ok"),
+    (live_row(20), 2, "tight"),
+    (live_row(35), 1, "watch"),
+    (live_row(10), 3, "critical"),
+    (live_row(80, usable_now=False), 3, "critical"),
+    (live_row(5, binding="Claude Code 5-hour"), 3, "critical"),
+    (live_row(20, binding="Claude Code 5-hour"), 0, "ok"),
+    (live_row(None, usable_now=True), 0, "ok"),
+])
+@pytest.mark.parametrize("with_snapshot", [False, True])
+def test_p2_a_live_row_without_windows_is_judged_by_its_own_fields(rig, payload, code, level, with_snapshot):
+    rig.set_aiuse(payload)
+    if with_snapshot:
+        rig.set_alerts([], accounts=[snapshot_account(weekly=95, five=77)])
+    r = rig.guard()
+    assert r.returncode == code, r.stderr          # never exit 10: the row is present
+    st = rig.state_json()
+    assert st["level"] == level and st["source"] == "available"
+    assert "aiuse dropped Claude" not in st["advice"]
+
+
+def test_p2_the_snapshot_only_fills_the_display_fields_of_a_windowless_live_row(rig):
+    rig.set_aiuse(live_row(20))
+    rig.set_alerts([], accounts=[snapshot_account(weekly=95, five=77, fable=60)])
+    assert rig.guard().returncode == 2                  # headroom 20 judges, not the snapshot's 95
+    st = rig.state_json()
+    assert st["weekly_left"] == 20 and st["five_hour_left"] == 77 and st["fable_left"] == 60
+    assert st["weekly_resets_at"] == WEEK_RESET_N and st["resets_at"] == WEEK_RESET_N
+    assert rig.pings() == [
+        f"djbclark-ade: Claude quota tight: weekly 20% left, resets {WEEK_PHRASE}; "
+        "Claude quota tight: no Fable or Opus Agent-tool sub-agents."]
+
+
+def test_p2_a_windowless_live_row_with_no_snapshot_has_unknown_fields_not_zeros(rig):
+    rig.set_aiuse(live_row(50))
+    assert rig.guard().returncode == 0
+    st = rig.state_json()
+    assert st["weekly_left"] == 50 and st["five_hour_left"] is None and st["resets_at"] is None
