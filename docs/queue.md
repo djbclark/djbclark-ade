@@ -38,6 +38,11 @@ merge** (both open 2026-10-23). Nothing is built.
    `jevlike` gates (`decide: yes|no|escalate`) at the sites `docs/jev.md` lists. Cheapest next step: item 1, then one
    `ci decide` per repo that already has a workflow. Blockers: PRs 27 and 31; the Hyades runner is shared (never fan out
    past its capacity); the `jevlike` key is only djbclark's; agents never post on `SIPB/*` (home rule 35).
+3. **Restated by djbclark, 2026-10-23** (a duplicate of item 2's kev/laya half, folded in here): "add using the
+   Jev-like hyades things we set up to djbclark-ade process", the two servers being Kev and Laya (`jevlike` skill;
+   source `~/src/jev-like-hyades`). Process sites to check against `docs/jev.md`'s list: `bin/jev`'s shadow sites
+   (`pick-seat`, `stuck-check`, `merge-gate`), and whether a kev/laya `merge_gate` can stand in for the paid plan in
+   "Buy a Jev plan before the factory's merge gate goes live (SF-Q10)" below.
 
 ## Orchestration rules from the load watcher (djbclark via load-watch agent 96a17744, 2026-10-23)
 
