@@ -4042,6 +4042,81 @@ def test_a_repository_below_an_untracked_directory_and_odd_names_are_found_and_a
     assert held.count("work.txt") >= 4 and "inner/work.txt" in held, held
 
 
+def test_an_unreadable_directory_under_an_untracked_one_makes_the_embedded_search_incomplete(tmp_path):
+    """Adversary round 57 on PR 27, MEDIUM: `status -unormal` stops at `outer/` and prints nothing, `ls-files --others`
+    warns `could not open directory` with rc 0; its stderr was discarded and the record read complete."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    deep = work / "outer" / "zz" / "deep"
+    (deep / "inner").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(deep / "inner")], check=True, env=GIT_ENV)
+    (work / "outer" / "a").mkdir()
+    (work / "outer" / "a" / "f").write_text("a\n")  # found first, so `status -unormal` stops there and prints nothing
+    deep.chmod(0)
+    try:
+        rec = mod.scan_checkout(work, remote=False)
+    finally:
+        deep.chmod(0o755)
+    assert rec["verdict"].startswith("scan incomplete: ls-files --others"), rec["verdict"]
+
+
+def test_embedded_repositories_keep_cr_names_every_one_of_many_and_pointer_gitdirs_are_not_archived_as_commits(tmp_path):
+    """Adversary round 57 on PR 27, LOW 2-4 and Codex pass 52 P2: a CR in a name was read back as a newline, only 50
+    embedded repositories were kept, and an archive of a directory whose `.git` is a gitfile holds no commits."""
+    mod = load()
+    doc = load_doc()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    (work / "u").mkdir()
+    cr = work / "u" / "c\rr"
+    cr.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(cr)], check=True, env=GIT_ENV)
+    for i in range(54):
+        d = work / "many" / f"r{i:03d}"
+        d.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(d)], check=True, env=GIT_ENV)
+    sep = work / "u" / "sep"
+    subprocess.run(["git", "init", "-q", "-b", "main", "--separate-git-dir", str(tmp_path / "sepgit"), str(sep)], check=True, env=GIT_ENV)
+    rec = mod.scan_checkout(work, remote=False)
+    assert len(rec["embedded_repos"]) == 56 and "u/c\rr/" in rec["embedded_repos"], len(rec["embedded_repos"])
+    assert rec["embedded_pointer_repos"] == ["u/sep/"], rec["embedded_pointer_repos"]
+    row = next(r for r in section_3_2(doc.render(doc_scan([rec]))).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
+    assert row.count("embedded-") == 55 and "r053" in row and "points elsewhere" in row, row.count("embedded-")
+
+
+def test_git_lfs_payloads_of_unpushed_commits_get_an_archive_row(tmp_path):
+    """Codex pass 52 on PR 27, P1: a bundle holds LFS pointers and the generated push runs with hooks off, so the
+    payloads under `<gitdir>/lfs/objects` were in no artifact."""
+    mod = load()
+    doc = load_doc()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    obj = work / ".git" / "lfs" / "objects" / "ab" / "cd"
+    obj.mkdir(parents=True)
+    (obj / "abcd0123").write_text("PAYLOAD\n")
+    rec = mod.scan_checkout(work, remote=False)
+    assert rec["lfs_gitdir"] == str(work / ".git") and rec["verdict"] == "clean and pushed", rec  # nothing unpushed: no row
+    commit_file(work, "unpushed.txt")
+    rec = mod.scan_checkout(work, remote=False)
+    row = next(r for r in section_3_2(doc.render(doc_scan([rec]))).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
+    assert "lfs.tar" in row, row
+    ck = doc.checkout_dir(rec["path"])
+    dest = tmp_path / "dest"
+    (dest / ck).mkdir(parents=True)
+    cmd = unescape_span(re.search(r"`(mkdir -p [^`]*lfs\.tar[^`]*)`", row).group(1))
+    run = subprocess.run(["bash", "-c", PLAN_PREFIX + cmd.replace("<DEST>", str(dest))], capture_output=True, text=True, env=GIT_ENV)
+    assert run.returncode == 0, run.stderr
+    held = subprocess.run(["tar", "-tf", str(dest / ck / "lfs.tar")], capture_output=True, text=True).stdout
+    assert "lfs/objects/ab/cd/abcd0123" in held, held
+
+
+def test_a_bracketed_or_password_scp_url_is_a_credential():
+    """Adversary round 57 on PR 27, LOW 5: ssh got `git:secret@host` in its argv for `[git:secret@host]:repo`."""
+    mod = load()
+    for url in ("[git:secret@host]:repo", "[git:secret@host:22]:repo"):
+        assert mod.url_holds_credential(url) is True, url
+    for url in ("git@host:repo", "git@[::1]:repo", "[::1]:repo", "host:path", "./a:b", "/x/y"):
+        assert mod.url_holds_credential(url) is False, url
+
+
 def test_a_global_push_rewrite_to_a_helper_gets_no_push_row(tmp_path, monkeypatch):
     """Codex pass 46 on PR 27, P1: the url checks ran with the global config switched off, but the printed push runs in
     the operator's shell, where `url.<base>.pushInsteadOf` can turn a clean url into a helper or credential url."""

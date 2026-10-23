@@ -767,6 +767,11 @@ def render(d):
                        + " (a tag origin has at another object is rejected by the push: bundle it, or decide to force)")
             need = need if need.startswith(("yes", "**yes")) else (
                 cred_need if no_push else "yes: pushing a tag publishes it; pick push or bundle")
+        if c.get("lfs_gitdir") and (head_ahead or local_n or zero_tags):
+            # a bundle holds LFS pointers only and the generated push runs with hooks off, so LFS's pre-push upload never
+            # runs: the payloads are in the git directory's `lfs/` (Codex pass 52 on PR 27, P1)
+            cmd.append("Git LFS payloads of the unpushed commits are in neither the bundle nor a hooks-off push; archive them: "
+                       + shcode("mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -cf <DEST>/{} lfs", ck, c["lfs_gitdir"], f"{ck}/lfs.tar"))
         if hidden:
             what.append(f"{hidden} tracked path(s) marked assume-unchanged or skip-worktree (`status` cannot see their edits)")
             cmd.append(shcode(HIDDEN_FMT, *hidden_values(raw_p, ck)))
@@ -816,8 +821,14 @@ def render(d):
             # the list names an embedded repository's directory, not its files, and the archive takes no directory's
             # contents (`--no-recursion`): its ignored files and git metadata stay out of the non-ignored capture. The
             # repository is its own checkout: scan it, or archive the directory whole (Codex pass 50 on PR 27, P2)
+            pointers = set(c.get("embedded_pointer_repos") or [])
             for i, e in enumerate(c.get("embedded_repos") or []):
                 name = e.rstrip("/")  # the real name (`ls-files -z`); `--no-unquote` keeps tar from reading it as a quoted one
+                if e in pointers:
+                    # its `.git` is a file or symlink: the directory archive holds the pointer, not the commits (round 57, LOW 4)
+                    cmd.append(f"embedded repository {code('{}', visible(e))}: its `.git` points elsewhere (a separate gitdir or a linked "
+                               "worktree), so archiving the directory keeps no commits; scan it as a checkout of its own")
+                    continue
                 cmd.append(f"embedded repository {code('{}', visible(e))}: archived as an empty entry above; its own state is not captured. "
                            "Scan it as a checkout of its own, or archive it whole (its ignored files and `.git` included): "
                            + shcode("mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} --no-unquote -cf <DEST>/{} -- {}",

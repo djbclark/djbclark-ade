@@ -269,14 +269,17 @@ def run(argv, timeout=120, cwd=None, env=None, stdin_text=None, errors="replace"
     stderr is discarded unless `err` is a list: the text is then appended to it (empty after a timeout)."""
     try:
         p = subprocess.Popen(argv, stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
-                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL if err is None else subprocess.PIPE, text=True, errors=errors,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL if err is None else subprocess.PIPE,
                              cwd=cwd, env=env, start_new_session=True)
     except OSError:
         return 124, ""
     try:
-        out, stderr_text = p.communicate(input=stdin_text, timeout=timeout)
+        # bytes both ways, decoded here: text mode turns a CR in a path into a newline (adversary round 57, LOW 2)
+        out_b, err_b = p.communicate(input=None if stdin_text is None else stdin_text.encode("utf-8", "surrogateescape"),
+                                     timeout=timeout)
+        out = out_b.decode("utf-8", errors)
         if err is not None:
-            err.append(stderr_text or "")
+            err.append((err_b or b"").decode("utf-8", "replace"))
     except subprocess.TimeoutExpired:
         try:
             os.killpg(p.pid, signal.SIGKILL)
@@ -860,15 +863,27 @@ def read_regular_file(path: Path, cap: int) -> bytes:
         os.close(fd)
 
 
-def embedded_repositories(path: Path) -> tuple[int, list[str]]:
-    """(rc, names): untracked repositories at any depth, the real names with their trailing `/`. `ls-files -z --others
-    --exclude-standard` lists a nested repository as `dir/`, the same list the untracked archive reads, so a repository
-    below an untracked directory is found too and no name needs unquoting (adversary round 56 on PR 27, MEDIUM and
-    LOW 3; `status` shows only the top untracked directory). Tar recurses into none of them (`--no-recursion`)."""
-    rc, out = git(path, "ls-files", "-z", "--others", "--exclude-standard", errors="surrogateescape")
+MAX_EMBEDDED = 1000  # past this the plan would be unreadable: the checkout is `scan incomplete`, not truncated
+
+
+def embedded_repositories(path: Path) -> tuple[int, list[str], list[str]]:
+    """(rc, names, pointers): untracked repositories at any depth, the real names with their trailing `/`, and the
+    subset whose `.git` is a file or symlink (a separate gitdir or a linked worktree: archiving the directory keeps no
+    commits). `ls-files -z --others --exclude-standard` lists a nested repository as `dir/`, the same list the
+    untracked archive reads, so a repository below an untracked directory is found too and no name needs unquoting
+    (adversary round 56 on PR 27, MEDIUM and LOW 3; `status` shows only the top untracked directory). Tar recurses
+    into none of them (`--no-recursion`). Any stderr line (an unreadable subdirectory is a warning with rc 0) makes
+    the list partial: rc 65 (round 57, MEDIUM)."""
+    ls_err: list[str] = []
+    rc, out = git(path, "ls-files", "-z", "--others", "--exclude-standard", errors="surrogateescape", err=ls_err)
+    if rc == 0 and any(ln.strip() for ln in "".join(ls_err).splitlines()):
+        rc = 65
     if rc != 0:
-        return rc, []
-    return 0, [n for n in out.split("\0") if n.endswith("/") and os.path.lexists(os.path.join(path, n.rstrip("/"), ".git"))]
+        return rc, [], []
+    names = [n for n in out.split("\0") if n.endswith("/") and os.path.lexists(os.path.join(path, n.rstrip("/"), ".git"))]
+    pointers = [n for n in names if os.path.islink(os.path.join(path, n.rstrip("/"), ".git"))
+                or not os.path.isdir(os.path.join(path, n.rstrip("/"), ".git"))]
+    return 0, names, pointers
 
 
 def stash_count(path: Path, common: Path | None) -> int | None:
@@ -1043,6 +1058,9 @@ def url_holds_credential(url: str) -> bool:
     if "://" not in url:
         # scp-like `[user@]host:path`: ssh gets the path verbatim, so a `?token=` in it reaches its argv like the
         # `ssh://` case (adversary round 31); a local path has no `:` before its first `/`
+        before_at = url.partition("@")[0]
+        if "@" in url and before_at.startswith("[") and ":" in before_at:
+            return True  # `[user:secret@host]:repo`: git takes the bracketed host whole and ssh's argv carries the secret (round 57, LOW 5)
         host, sep, path = url.partition(":")
         return bool(sep) and "/" not in host and ("?" in path or "#" in path)
     scheme = url.partition("://")[0].lower()
@@ -1286,10 +1304,22 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     untracked = [ln[3:] for ln in lines if ln.startswith("??")]
     modified = [ln[3:] for ln in lines if not ln.startswith("??")]
     embedded: list[str] = []
+    embedded_pointers: list[str] = []
     if untracked:
-        rc, embedded = embedded_repositories(path)
+        rc, embedded, embedded_pointers = embedded_repositories(path)
         if rc != 0:
-            return incomplete_record(path, "ls-files --others", rc)
+            return incomplete_record(path, "ls-files --others (a failed call, or git printed a warning: part of the worktree could not be read)", rc)
+        if len(embedded) > MAX_EMBEDDED:
+            return incomplete_record(path, f"embedded repositories ({len(embedded)} > {MAX_EMBEDDED})", 0)
+    # Git LFS payloads of unpushed commits sit in `<gitdir>/lfs/objects`: a bundle holds the pointers only and a push
+    # with hooks off (the generated one) never runs LFS's pre-push upload (Codex pass 52 on PR 27, P1)
+    lfs_gitdir = None
+    if common is not None:
+        try:
+            if os.path.isdir(common / "lfs" / "objects") and any(os.scandir(common / "lfs" / "objects")):
+                lfs_gitdir = str(common)
+        except OSError:
+            lfs_gitdir = str(common)  # unreadable: assume it holds payloads
     # a tracked path marked assume-unchanged (`ls-files -v` tag in lowercase) or skip-worktree (`S`) is invisible to
     # `status`, so its edits are in no count above: it is counted and captured on its own (Codex pass 32 on PR 27).
     # A skip-worktree path with no file is a sparse checkout's ordinary state (adversary round 38): nothing to
@@ -1571,7 +1601,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     return {
         "path": str(path), "branch": branch, "modified": len(modified), "untracked": len(untracked),
         "untracked_sample": untracked[:8], "modified_sample": modified[:8],
-        "embedded_repos": embedded[:50],
+        "embedded_repos": embedded, "embedded_pointer_repos": embedded_pointers, "lfs_gitdir": lfs_gitdir,
         "upstream": upstream, "unpushed": unpushed if upstream else "no upstream",
         "ahead_of_origin": ahead_of_origin, "stashes": stashes,
         "index_hidden": index_hidden, "reflog_only_commits": reflog_only,
