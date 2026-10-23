@@ -105,6 +105,16 @@ Verify against the processes themselves, not against memory or the brief's guess
    Hermes still gets every ping), but a stale watcher means nobody investigates.
 3. `/handoff` or `/loose` at the end: list the role, and any un-acked incident, as open.
 
+## Standing exceptions (djbclark, 2026-10-23)
+
+1. **Grok Bot and Chrome: warn only if out of line or if the machine is slow.** Their renderers and GPU
+   helpers routinely use 0.3-0.7 cores each (2026-10-23: Grok Bot renderer 50-70%, Chrome renderers 17-27%,
+   with `WindowServer` at 74% and swap 92%). Do not ping Hermes or ask djbclark to quit or reload them for
+   that alone. Warn only when (a) their use is well above that range (compare earlier `sample.log` top lines
+   and `ps`), or (b) load, memory pressure or CPU is visibly slowing the machine (stuck `U` processes, rising
+   pageouts with low free memory, agents timing out). Still investigate and `ack` as usual; the exception
+   only silences the "quit this app" advice.
+
 ## What this is not
 
 1. Not a scheduler. Never `/loop` or CronCreate a load check (`~/CLAUDE.md` item 13). The launchd job is
