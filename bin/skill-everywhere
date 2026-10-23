@@ -2,7 +2,7 @@
 # Make a shared skill visible to every agent TUI on this machine by
 # symlinking it into each TUI's user-level skills dir.
 #     skill-everywhere <name>...            link (idempotent, collapses chains)
-#     skill-everywhere --check <name>...    report per-TUI status, change nothing
+#     skill-everywhere --check <name>...    report per-TUI status, change nothing; ends with a "== end" line
 #     skill-everywhere --remove <name>...   remove links this script would make
 #     --dry-run (-n) with link or --remove: print the changes, make none
 #     SKILL_EVERYWHERE_ONLY=grokbot,claude limits the run to those targets
@@ -185,6 +185,8 @@ for name in "$@"; do
     esac
   done <<<"$targets"
 done
+# --check ends with a sentinel so a caller (bin/ade-update) can tell a complete report from one cut short by a crash
+if [[ $mode == check ]]; then echo "== end"; fi
 
 if wanted hermes && command -v hermes >/dev/null \
    && ! ggrep -qF skill-everywhere/skills ~/.hermes/config.yaml 2>/dev/null; then
@@ -206,7 +208,7 @@ if [[ $mode == link ]] && ((!dry)) && wanted hermes && command -v hermes >/dev/n
   for _ in 1 2 3; do
     shebang="$(ghead -1 "$hfile")"; shebang="${shebang#\#!}"; shebang="${shebang%% *}"
     if [[ $(basename "$shebang") == python* && -x $shebang ]]; then hpy=$shebang; break; fi
-    next="$(ggrep -oE "exec +/[^ \"']+" "$hfile" | ghead -1 | gsed -E 's/^exec +//')"
+    next="$(ggrep -oE "exec +/[^ \"']+" "$hfile" | ghead -1 | gsed -E 's/^exec +//' || true)"
     if [[ $(basename "$next") == python* && -x $next ]]; then hpy=$next; break; fi
     [[ -n $next && -f $next ]] || break
     hfile=$next

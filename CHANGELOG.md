@@ -11,6 +11,12 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- Added `bin/ade-update`, one command that keeps a machine current: it fast-forward pulls (refusing with exit 2 when a
+  path the pull would change or create has a local modification, an untracked or an ignored file, or a parent or
+  child path of one), relinks missing skills
+  (only in the canonical checkout; any other `--repo` is report-only), checks the `CLAUDE.md` and `~/.claude` symlinks,
+  and prints the changelog entries new since the revision it last recorded; `--check` reports only and exits 10 when
+  behind (2026-10-20, #20); `--check` also lists `claude/{commands,agents,hooks}` entries that upstream adds as "new upstream" links, and apply fast-forwards to the exact commit it checked instead of pulling again; a fast-forward that landed before a post-merge hook timed out is recorded as a `merge warning` problem (exit 10), and a non-canonical `--repo` without `--state` records under its own `~/.local/state/ade/applied-<12 hex>` instead of the shared record (#20).
 - `load-watch sample` also watches compressor churn: above the `admit` limit (60000 pages/s) for `LW_CHURN_SUSTAIN_S` (180 s) it sends one line with the top
   three commands to the load watcher (at most hourly, cooldown `churn-watcher`) and to Hermes (cooldown `churn`), adds the Grok Bot/Chrome standing exception
   when they lead, never signals anything; `status` lists both cooldowns; test hook `LW_FAKE_COMPRESSOR` (2026-10-23).
@@ -128,9 +134,16 @@ agent what changed and what is new. Entries end with the pull request number.
   `clarify` (Hermes) / `request_user_input` (Codex). Universal skills `/loose`,
   `/handoff`, `/baton`, `/steps` were already reachable from every installed TUI
   (`skill-everywhere --check` all green); the change wires the chain on OpenCode.
+- `bin/skill-everywhere --check` ends with a `== end` line, which `bin/ade-update` requires (a cut-short check
+  is exit 4, "skill check incomplete"); `bin/ade-update` warns on stderr when it runs from a path other than
+  the canonical checkout (#20).
 
 ### Fixed
 
+- `bin/ade-update` exits 10 naming a stuck link on the first apply instead of 4 with an empty error, and 4 (not 10) when the canonical checkout has no `skill-everywhere` helper at all (#20).
+- `bin/ade-update` reads the Grok Bot copy-target rows of `skill-everywhere --check` (`not installed (no <dir>)`, `copied (<path>)`, `missing (<path>)`, `stale copy (<path>)`) as ok or fixable, not stuck, and drops an inherited `SKILL_EVERYWHERE_ONLY` from the helper's environment, so a check never reports on a subset of targets (#20).
+- `bin/skill-everywhere`: the Hermes plugin nudge no longer aborts the script when the Hermes wrapper has no `exec`
+  line; its `g*` tools reach plain GNU ones through master's alias loop (#20).
 - `acp-dispatch` refuses `--perm read-only` or `--perm deny` (exit 2, before any record or preflight) for an agent
   whose `acp-run <agent> --info` `perm_modes` lacks that mode; before, acp-run's own refusal came after the
   record was written and surfaced as a no-report (an omp adversary round, 2026-10-23).
