@@ -1474,12 +1474,16 @@ def test_a_repo_without_origin_stays_an_orphan_but_a_failed_origin_lookup_is_sca
 
 def test_shquote_keeps_a_leading_tilde_outside_the_quotes():
     mod = load_doc()
-    assert mod.shquote("~/src/plain") == "~/src/plain"
-    assert mod.shquote("~/src/a b") == "~/'src/a b'"
-    assert mod.shquote("~/") == "~/"
+    home = mod.Home
+    assert mod.shquote(home("~/src/plain")) == "~/src/plain"
+    assert mod.shquote(home("~/src/a b")) == "~/'src/a b'"
+    assert mod.shquote(home("~/")) == "~/"
     assert mod.shquote("/abs/a b") == "'/abs/a b'"
     assert mod.shquote("x$(y)") == "'x$(y)'"
-    assert mod.shcode("git -C {} add", "~/src/a b") == "`git -C ~/'src/a b' add`"
+    assert mod.shcode("git -C {} add", home("~/src/a b")) == "`git -C ~/'src/a b' add`"
+    # Codex pass 56 on PR 27, P2: a plain string that starts with `~/` is a name, never the home directory
+    assert mod.shquote("~/report.md") == "'~/report.md'" and mod.shquote("~") == "'~'"
+    assert mod.shquote(home("~/a") + "/b c") == "~/'a/b c'" and mod.shquote(home("~/a/").rstrip("/")) == "~/a"
 
 
 def test_a_missing_git_root_is_a_usage_error_not_zero_checkouts(tmp_path):
@@ -1762,7 +1766,6 @@ def test_tilde_abbreviates_only_home_itself_or_a_path_below_it(monkeypatch):
     assert mod.tilde("/rootfs/x") == "/rootfs/x"
     assert mod.shquote(mod.tilde("/root")) == "~"
     assert mod.shcode("git -C {} status", mod.tilde("/root")) == "`git -C ~ status`"
-    assert mod.shquote("~") == "~"
 
 
 GOOD_BRANCH_NAMES = ["main", "feature/x", "a-b_c.d", "v1.2.3", "x@y", "@x", "a@", "HEAD", "-dash", "\u00e9t\u00e9",
@@ -2536,7 +2539,7 @@ def test_a_relative_bigteam_root_is_stored_absolute(tmp_path, monkeypatch):
 def test_a_newline_in_a_path_is_ansi_c_quoted_in_every_generated_command():
     """Codex pass 15, P2 (4325359354): `esc()` turned the newline `shlex.quote` kept into a space."""
     mod = load_doc()
-    assert mod.shquote("a\nb") == "$'a\\nb'" and mod.shquote("~/a\nb") == "~/$'a\\nb'"
+    assert mod.shquote("a\nb") == "$'a\\nb'" and mod.shquote(mod.Home("~/a\nb")) == "~/$'a\\nb'"
     assert mod.shquote("it's\r\t\\\x01") == "$'it\\'s\\r\\t\\\\\\x01'"
     assert mod.shquote("plain path") == "'plain path'"
     task = {"task": "t-nl", "verdict": "unique", "claim": "no CLAIM", "bytes": 1, "reports": [
@@ -4334,7 +4337,7 @@ def test_an_unborn_head_still_counts_every_other_ref_as_local_work(tmp_path):
 def test_a_non_utf8_checkout_path_is_quoted_as_its_bytes_and_the_document_is_written(tmp_path):
     """Codex pass 42 (P2): the scan JSON carries a non-UTF-8 name as a lone surrogate, which the markdown writer refused."""
     doc = load_doc()
-    assert doc.shquote("/p/\udcffx") == "$'/p/\\xffx'" and doc.shquote("~/\udc80") == "~/$'\\x80'"
+    assert doc.shquote("/p/\udcffx") == "$'/p/\\xffx'" and doc.shquote(doc.Home("~/\udc80")) == "~/$'\\x80'"
     rec = doc_checkout("/p/\udcffx")
     out = tmp_path / "out.md"
     doc.write_atomic(out, doc.render(doc_scan([rec])))
@@ -4446,3 +4449,37 @@ def test_render_accepts_a_scan_with_one_category_only():
     no_summary = doc_scan([])
     del no_summary["summary"]
     assert isinstance(doc.render(no_summary), str)
+
+
+def test_a_report_or_embedded_directory_named_tilde_is_quoted_not_expanded(tmp_path):
+    """Codex pass 56 on PR 27, P2: a relative report path `~/report.md` came out unquoted in the section 3.1 copy
+    command, so the shell copied `$HOME/report.md` instead of the report below the task directory."""
+    mod = load_doc()
+    task = {"task": "tt", "verdict": "unique", "claim": "no CLAIM", "bytes": 1, "reports": [
+        {"path": "~/report.md", "bytes": 1, "done": False}], "open_job_records": [], "fills": [],
+        "unique_bytes": 1, "referenced_in": [], "newest_mtime": 0}
+    other = doc_scan([], tasks=[task])
+    other["bigteam"]["root"] = str(tmp_path / "bt")
+    text = mod.render(other)
+    row = next(r for r in text.split("### 3.1")[1].split("### 3.2")[0].splitlines() if r.startswith("| tt "))
+    cmd = unescape_span(re.search(r"`(mkdir -p [^`]*)`", row).group(1))
+    assert "'~/report.md'" in cmd and " -- ~/report.md" not in cmd, cmd
+    (tmp_path / "bt" / "tt" / "~").mkdir(parents=True)
+    (tmp_path / "bt" / "tt" / "~" / "report.md").write_text("THE REPORT\n")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "report.md").write_text("UNRELATED HOME FILE\n")
+    dest = tmp_path / "dest"
+    run = subprocess.run(["bash", "-c", PLAN_PREFIX + cmd.replace("<DEST>", str(dest))], capture_output=True, text=True,
+                         env={**GIT_ENV, "HOME": str(home)})
+    assert run.returncode == 0, run.stderr
+    assert (dest / "bigteam" / "tt" / "~" / "report.md").read_text() == "THE REPORT\n"
+    # a task root below HOME keeps its abbreviation through the join
+    below = doc_scan([], tasks=[task])
+    below["bigteam"]["root"] = os.path.join(mod.HOME, ".local/state/bigteam")
+    row = next(r for r in mod.render(below).split("### 3.1")[1].split("### 3.2")[0].splitlines() if r.startswith("| tt "))
+    assert "(cd ~/.local/state/bigteam/tt && " in row, row
+    # an embedded directory named `~` below a checkout under HOME: the checkout path keeps its tilde, the name does not
+    co = doc_checkout(os.path.join(mod.HOME, "src", "emb"), embedded_repos=["~/"], embedded_pointer_repos=[])
+    row = next(r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith("| ~/src/emb "))
+    assert "-C ~/src/emb " in row and "-- '~'" in row and "-- ~ " not in row, row

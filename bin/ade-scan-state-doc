@@ -226,12 +226,23 @@ def reflog_values(raw_p, ck):
     return (ck, raw_p, ck, raw_p, ck, ck)
 
 
+class Home(str):
+    """A path the generator abbreviated with `~` (`tilde`): the only value `shquote` leaves a leading `~` unquoted for.
+    A relative value that merely starts with `~/` (a report or an embedded directory named `~`) is data, quoted
+    literally (Codex pass 56 on PR 27, P2). Joining another piece on keeps the mark."""
+    def __add__(self, other):
+        return Home(str.__add__(self, other))
+
+    def rstrip(self, chars=None):
+        return Home(str.rstrip(self, chars))
+
+
 def tilde(p):
-    """`~` for HOME itself, `~/rest` below it; never a substring match (`/tmp/root/x` with HOME `/root`)."""
+    """`~` for HOME itself, `~/rest` below it (a `Home`); never a substring match (`/tmp/root/x` with HOME `/root`)."""
     if p == HOME:
-        return "~"
+        return Home("~")
     if p.startswith(HOME + os.sep):
-        return "~" + p[len(HOME):]
+        return Home("~" + p[len(HOME):])
     return p
 
 
@@ -309,18 +320,19 @@ def shcode(fmt, *values):
 
 
 def shquote(v):
-    """`shlex.quote`, except that a leading `~/` (the generator's own home abbreviation, `tilde()`) stays
-    outside the quotes so the shell still expands it: `~/'a b'/c`, never `'~/a b/c'`; a bare `~` (the home
-    directory itself) stays unquoted too (adversary round 9, Codex pass 6). A value with a control character
+    """`shlex.quote`, except that a leading `~/` of a `Home` value (the generator's own home abbreviation,
+    `tilde()`) stays outside the quotes so the shell still expands it: `~/'a b'/c`, never `'~/a b/c'`; a bare
+    `~` (the home directory itself) stays unquoted too (adversary round 9, Codex pass 6). A plain string that
+    starts with `~/` is a literal name and is quoted whole (Codex pass 56 on PR 27, P2). A value with a control character
     (newline, carriage return, tab, ...) is ANSI-C quoted, `$'a\\nb'`, which bash and zsh accept: `shlex.quote`
     keeps a raw newline, a markdown table row cannot, and turning it into a space would paste a different path
     (Codex pass 15 on PR 27)."""
-    v = str(v)
-    if v == "~":
-        return "~"
-    if v.startswith("~/"):
-        return "~/" + _quote(v[2:]) if v[2:] else "~/"
-    return _quote(v)
+    if isinstance(v, Home):
+        if v == "~":
+            return "~"
+        if v.startswith("~/"):
+            return "~/" + _quote(str(v)[2:]) if v[2:] else "~/"
+    return _quote(str(v))
 
 
 _SURROGATE = re.compile("[\udc80-\udcff]")  # a byte that is not UTF-8, as `surrogateescape` carries it in the scan JSON
@@ -637,6 +649,8 @@ def render(d):
             # no counts (null): anything may be in there, so the row demands a re-scan or a whole-directory archive,
             # never "nothing to capture" (Codex pass 19 on PR 27); no git command runs in a checkout the scan refused
             parent, base = os.path.split(raw_p.rstrip("/"))
+            if isinstance(raw_p, Home) and parent:
+                parent = Home(parent)  # `os.path.split` returns plain strings: the parent is still home-abbreviated
             # a `.git` FILE (a linked worktree, an absorbed submodule) points at a git directory elsewhere, which holds
             # the refs, reflogs and perhaps the only copy of local commits; a linked worktree's objects are one step
             # further, in its `commondir`. The whole-directory archive alone misses both (Codex pass 26 on PR 27).
@@ -949,7 +963,13 @@ def render(d):
       "row above can still hold commits on another local branch, and a checkout on a detached HEAD or "
       "with an origin that did not answer was never checked against that. A fresh scan with the current "
       "tool counts them over HEAD and every local ref (notes and replace refs included) (`local_only_commits`, `local_only_branches`) "
-      "and reports any as `unpushed commits`; none of the rows above was re-checked this way.\n")
+      "and reports any as `unpushed commits`; none of the rows above was re-checked this way.")
+    w("10. `--remote` believes the refs origin advertises (`ls-remote`): an origin that names a ref for an object "
+      "it does not hold, or a hostile one that names a local-only commit, makes that commit count as pushed. The "
+      "origin is the operator's own server and nothing is deleted by this tool, but a `clean and pushed` verdict "
+      "from a `--remote` scan is evidence, not proof of possession: before removing the only checkout of work, "
+      "bundle it (the commands above) or fetch the branch from origin into a scratch clone (2026-10-23, "
+      "Codex pass 56 security review on PR 27).\n")
 
     # ---- 5 commands
     w("## 5. Commands run\n")
