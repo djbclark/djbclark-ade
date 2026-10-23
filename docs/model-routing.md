@@ -459,11 +459,19 @@ windows (weekly, 5-hour, Fable cap) and the snapshot's Claude `conserve` alerts,
 `~/.local/state/ade/quota-guard.json`, and sends one `hermes-ping` per level per reset
 period (the mark survives level drops; a new weekly reset clears it). `aiuse --available`
 drops every pool with `usable_now: false`, so an exhausted Claude is an absent row (exit 0):
-the guard then reads the newest snapshot's `accounts[]` / `excluded[]` and calls an exhausted
-or `usable_now: false` Claude `critical`. A weekly "projected to run out" alert counts as
+the guard then reads the payload's top-level `excluded[]` (an operator exclusion) or the newest
+snapshot's `accounts[]` (a snapshot has no `excluded` key) and calls an exhausted or
+`usable_now: false` Claude `critical`; a snapshot-only Claude that is not blocked is still at
+least `watch` (`source: snapshot-only`: a live 429 or a note the snapshot predates). The Fable
+pool is dropped the same way once the Fable cap is exhausted: the guard reads that window from
+the snapshot (0% left, `watch`). A weekly "projected to run out" alert counts as
 `tight` only for the weekly windows (never the Fable cap) and is ignored while that window
-is `pace_early` (early-week projections swing wildly). Exit codes 0 / 1 / 2 / 3 for the
-levels, 10 when Claude appears nowhere or aiuse could not be read, 64 for a bad
+is `pace_early` (early-week projections swing wildly). Data older than 3 hours (a dead
+collector) is reported `stale: true` / "(stale)" and never pinged. At `critical` the adversary
+line is qualified: omp only while `aiuse --available --json` still lists it (aiuse rate-gates
+omp when every Claude weekly window is exhausted). Exit codes 0 / 1 / 2 / 3 for the
+levels, 10 when Claude appears nowhere, the data is malformed, aiuse could not be read or
+another check holds the lock, 64 for a bad
 `CLAUDE_QUOTA_GUARD_THRESHOLDS`, 69 for `--install` off macOS (launchd only; use a systemd
 user timer or cron). The UserPromptSubmit hook `claude/hooks/quota_nudge.py` reads only the
 state file and prints its `advice` once per session and level.

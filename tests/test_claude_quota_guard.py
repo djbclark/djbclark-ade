@@ -4,6 +4,7 @@ Everything runs against fakes: a script standing in for aiuse (prints a fixture,
 snapshot directory, a fake hermes-ping that appends its argv to a file, a temp HOME. Nothing
 here reads the real aiuse cache, pings, or touches launchd.
 """
+import fcntl
 import importlib.machinery
 import importlib.util
 import json
@@ -39,7 +40,7 @@ def _window(label, left, resets_at, **extra):
 
 def aiuse_fixture(weekly=80.0, five=90.0, fable=97.0, week_reset=WEEK_RESET, with_claude=True,
                   weekly_kw=None, five_label="Claude Code 5-hour", weekly_label="Claude Code weekly",
-                  five_kw=None):
+                  five_kw=None, with_fable_pool=True, payload_extra=None):
     shared = [_window(five_label, five, FIVE_RESET, pool_family="default", quota_scope="shared",
                       **(five_kw or {})),
               _window(weekly_label, weekly, week_reset, pool_family="default", quota_scope="shared",
@@ -48,17 +49,21 @@ def aiuse_fixture(weekly=80.0, five=90.0, fable=97.0, week_reset=WEEK_RESET, wit
                       quota_scope="model_sublimit")
     rows = [{"provider": "codex", "windows": [_window("Codex 5-hour", 50, FIVE_RESET)]}]
     if with_claude:
-        rows += [{"provider": "claude", "pool_family": "default", "windows": shared},
-                 {"provider": "claude", "pool_family": "fable", "windows": shared + [fable_w]}]
-    return {"schema_version": "1.4", "available": rows}
+        rows += [{"provider": "claude", "pool_family": "default", "windows": shared}]
+        if with_fable_pool:
+            rows += [{"provider": "claude", "pool_family": "fable", "windows": shared + [fable_w]}]
+    return {"schema_version": "1.4", "available": rows, **(payload_extra or {})}
 
 
 def snapshot_account(weekly=80.0, five=90.0, usable_now=True, week_reset=WEEK_RESET, five_state="ok",
-                     weekly_state="ok", provider="claude"):
+                     weekly_state="ok", provider="claude", fable=None, fable_state="ok"):
     """A Claude `accounts[]` row the way a snapshot carries it (state per window, usable_now)."""
-    return {"provider": provider, "account": "djbclark@gmail.com", "usable_now": usable_now,
-            "windows": [_window("Claude Code 5-hour", five, FIVE_RESET, state=five_state),
-                        _window("Claude Code weekly", weekly, week_reset, state=weekly_state)]}
+    windows = [_window("Claude Code 5-hour", five, FIVE_RESET, state=five_state),
+               _window("Claude Code weekly", weekly, week_reset, state=weekly_state)]
+    if fable is not None:
+        windows.append(_window("Claude Code weekly \u2014 Fable", fable, week_reset, state=fable_state,
+                               pool_family="fable", quota_scope="model_sublimit"))
+    return {"provider": provider, "account": "djbclark@gmail.com", "usable_now": usable_now, "windows": windows}
 
 
 def alert(message, window_label="Claude Code weekly", provider="claude", kind="conserve"):
@@ -487,16 +492,17 @@ def test_blocked_claude_in_the_snapshot_is_critical(rig, account_kw):
     assert rig.guard().returncode == 3
 
 
-def test_a_claude_row_only_under_excluded_is_read_too(rig):
-    rig.set_aiuse(aiuse_fixture(with_claude=False))
-    rig.set_alerts([], excluded=[snapshot_account(weekly=0, usable_now=False, weekly_state="exhausted")])
+def test_a_claude_row_only_under_payload_excluded_is_read_too(rig):
+    rig.set_aiuse(aiuse_fixture(with_claude=False, payload_extra={
+        "excluded": [snapshot_account(weekly=0, usable_now=False, weekly_state="exhausted")]}))
     assert rig.guard().returncode == 3
 
 
-def test_a_healthy_claude_account_in_the_snapshot_is_judged_like_an_available_row(rig):
+def test_a_healthy_claude_account_in_the_snapshot_is_never_judged_ok_when_aiuse_dropped_it(rig):
     rig.set_aiuse(aiuse_fixture(with_claude=False))
     rig.set_alerts([], accounts=[snapshot_account(weekly=35)])
-    assert rig.guard().returncode == 1 and rig.state_json()["source"] == "snapshot"
+    assert rig.guard().returncode == 1 and rig.state_json()["source"] == "snapshot-only"
+
 
 
 def test_claude_nowhere_with_exit_0_is_unreadable_and_leaves_state_alone(rig):
@@ -590,7 +596,7 @@ def test_the_state_is_saved_before_the_ping_and_the_ping_recorded_after(rig):
     assert rig.state_json()["last_pinged_level"] == "tight"
 
 
-def test_a_killed_ping_does_not_leave_the_level_unrecorded_silently(rig):
+def test_a_failing_ping_is_retried_next_run(rig):
     """The ping fails after the first save: the mark stays unset and the next run retries."""
     rig.set_ping_failing()
     _run(rig, 25)
@@ -609,6 +615,151 @@ def test_two_checks_at_once_ping_once(rig):
     assert len(rig.pings()) == 1
 
 
+
+
+# -- fix 2 (adversary round 3, 2026-10-23) ----------------------------------------------------
+
+
+def test_n1_an_exhausted_fable_cap_dropped_from_available_is_read_from_the_snapshot(rig):
+    """aiuse drops the Fable pool once the cap is exhausted: only the default pool is listed."""
+    rig.set_aiuse(aiuse_fixture(weekly=80, with_fable_pool=False))
+    rig.set_alerts([], accounts=[snapshot_account(weekly=80, fable=0.4, fable_state="exhausted")])
+    assert rig.guard().returncode == 1
+    st = rig.state_json()
+    assert st["level"] == "watch" and st["fable_left"] == 0.0 and st["source"] == "available"
+
+
+@pytest.mark.parametrize("snap_fable, code", [(10, 1), (60, 0), (None, 0)])
+def test_n1_fable_from_the_snapshot_follows_the_normal_threshold(rig, snap_fable, code):
+    rig.set_aiuse(aiuse_fixture(weekly=80, with_fable_pool=False))
+    rig.set_alerts([], accounts=[snapshot_account(weekly=80, fable=snap_fable)])
+    assert rig.guard().returncode == code
+    assert rig.state_json()["fable_left"] == snap_fable
+
+
+def test_n2_excluded_is_read_from_the_payload_not_the_snapshot(rig):
+    rig.set_aiuse(aiuse_fixture(with_claude=False, payload_extra={"excluded": [snapshot_account(weekly=35)]}))
+    assert rig.guard().returncode == 1 and rig.state_json()["source"] == "excluded"
+    rig.set_aiuse(aiuse_fixture(with_claude=False, payload_extra={
+        "excluded": [snapshot_account(weekly=0, weekly_state="exhausted")]}))
+    assert rig.guard().returncode == 3
+    # the shape aiuse never writes (excluded inside a snapshot) is not read
+    rig.set_aiuse(aiuse_fixture(with_claude=False))
+    rig.set_alerts([], excluded=[snapshot_account(weekly=0, usable_now=False)])
+    assert rig.guard().returncode == 10
+
+
+def test_n3_claude_dropped_from_available_but_healthy_in_the_snapshot_is_at_least_watch(rig):
+    rig.set_aiuse(aiuse_fixture(with_claude=False))
+    rig.set_alerts([], accounts=[snapshot_account(weekly=95, five=90)])
+    assert rig.guard().returncode == 1
+    st = rig.state_json()
+    assert st["level"] == "watch" and st["source"] == "snapshot-only" and st["weekly_left"] == 95
+    assert st["advice"].splitlines()[-1].endswith(
+        "aiuse dropped Claude from --available: a live 429 or a note; re-check `aiuse --available --json`.")
+    assert rig.pings() == [
+        f"djbclark-ade: Claude quota watch: weekly 95% left, resets {WEEK_PHRASE}; "
+        "Claude quota watch: no Fable or Opus Agent-tool sub-agents."]
+
+
+def test_n3_data_older_than_3h_is_reported_stale_and_never_pinged(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=25))
+    rig.set_alerts([], age_s=4 * 3600)
+    r = rig.guard()
+    assert r.returncode == 2 and "tight (stale)" in r.stdout and "data 4h00m old" in r.stdout
+    st = rig.state_json()
+    assert st["stale"] is True and st["data_age_s"] == 4 * 3600 and st["level"] == "tight"
+    assert rig.pings() == []
+    rig.set_alerts([], age_s=120)                                  # the collector is back
+    r = rig.guard()
+    assert "(stale)" not in r.stdout and "data 2m old" in r.stdout
+    assert len(rig.pings()) == 1 and rig.state_json()["stale"] is False
+
+
+def test_n3_the_payload_age_counts_too_and_status_shows_it(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=25, payload_extra={"age_seconds": 3 * 3600 + 60}))
+    rig.set_alerts([], age_s=60)
+    assert rig.guard().returncode == 2 and rig.state_json()["stale"] is True and rig.pings() == []
+    s = rig.guard("status")
+    assert "tight (stale)" in s.stdout and "data 3h01m old" in s.stdout
+    rig.set_aiuse(aiuse_fixture(weekly=25, payload_extra={"age_seconds": 2 * 3600}))
+    assert rig.guard().returncode == 2 and rig.state_json()["stale"] is False and len(rig.pings()) == 1
+
+
+@pytest.mark.parametrize("payload, accounts", [
+    ({"available": 5}, None),
+    ({"available": "claude"}, None),
+    ({"available": [{"provider": "claude", "windows": 7}]}, None),
+    ({"available": [{"provider": "claude", "windows": [7, None, "x"]}]}, None),
+    ({"available": [5, None, "claude"], "excluded": 3}, None),
+    ({"available": []}, 5),
+    ({"available": []}, [7, None, {"provider": "claude", "windows": 4}]),
+])
+def test_n4_malformed_aiuse_or_snapshot_types_are_exit_10_with_one_stderr_line(rig, payload, accounts):
+    rig.set_aiuse(aiuse_fixture(weekly=25))
+    assert rig.guard().returncode == 2
+    before = rig.state.read_bytes()
+    rig.set_aiuse(payload)
+    for f in rig.snaps.glob("*.json"):
+        f.unlink()
+    (rig.snaps / "2026-10-23T115900.000000Z.json").write_text(json.dumps({"accounts": accounts, "alerts": 5}))
+    r = rig.guard()
+    assert r.returncode == 10, r.stderr
+    assert len(r.stderr.strip().splitlines()) == 1 and "Traceback" not in r.stderr
+    assert rig.state.read_bytes() == before
+
+
+def test_n4_an_unexpected_exception_in_the_decision_is_exit_10_state_untouched(rig, monkeypatch, capsys):
+    rig.set_aiuse(aiuse_fixture(weekly=25))
+    assert rig.guard().returncode == 2
+    before = rig.state.read_bytes()
+    mod = _load_guard_module(monkeypatch, rig)
+
+    def boom(*a, **k):
+        raise RuntimeError("surprise")
+    monkeypatch.setattr(mod, "decide", boom)
+    assert mod.main(["check"]) == 10
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1 and "RuntimeError" in err[0] and "surprise" in err[0]
+    assert rig.state.read_bytes() == before
+
+
+def test_n6_only_the_critical_advice_qualifies_the_omp_adversary_route(rig):
+    qualifier = ("only while `aiuse --available --json` still lists omp "
+                 "(it is rate-gated when every Claude weekly window is exhausted)")
+    rig.set_aiuse(aiuse_fixture(weekly=25))
+    rig.guard()
+    assert qualifier not in rig.state_json()["advice"]
+    rig.set_aiuse(aiuse_fixture(weekly=5))
+    rig.guard()
+    crit = rig.state_json()["advice"]
+    assert qualifier in crit
+    assert "acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high" in crit
+    assert "No new Claude work of any kind" in crit
+
+
+def test_a_ping_cut_off_by_a_kill_is_retried_next_run_at_least_once(rig):
+    rig._script(rig.ping, f'printf "%s\\n" "$1" >> {rig.ping_log}\nkill -9 $PPID\n')
+    rig.set_aiuse(aiuse_fixture(weekly=25))
+    assert rig.guard().returncode == -9                          # the guard itself died mid-ping
+    assert rig.state_json()["level"] == "tight" and rig.state_json()["last_pinged_level"] is None
+    rig.set_ping_ok()
+    assert rig.guard().returncode == 2
+    assert len(rig.pings()) == 2 and rig.state_json()["last_pinged_level"] == "tight"   # twice, never lost
+
+
+def test_a_lock_held_elsewhere_is_exit_10_after_a_bounded_wait(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=25))
+    assert rig.guard().returncode == 2
+    before = rig.state.read_bytes()
+    with open(rig.state.parent / "quota-guard.json.lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        t0 = time.monotonic()
+        r = rig.guard(CLAUDE_QUOTA_GUARD_THRESHOLDS=json.dumps({"lock_retries": 4, "lock_wait_s": 0.05}))
+        assert r.returncode == 10 and "another check holds the lock" in r.stderr
+        assert time.monotonic() - t0 < 10
+    assert rig.state.read_bytes() == before
+    assert rig.guard().returncode == 2                                # released: runs again
 
 
 # -- the hook ---------------------------------------------------------------

@@ -79,13 +79,19 @@ skill's snapshot in the same turn.
   window has `pace_early: true`, and a Fable-cap alert never counts); `critical` (weekly
   < 15%, 5-hour < 10%, an exhausted or `usable_now: false` Claude account, or aiuse exit 3
   with no Claude row). `aiuse --available` drops every pool with `usable_now: false`, so an
-  exhausted Claude is an absent row (exit 0): the guard then reads the newest snapshot's
-  `accounts[]` / `excluded[]`. Exit codes 0 / 1 / 2 / 3 for the levels, 10 when Claude
-  appears nowhere or aiuse could not be read (state untouched), 64 for a bad
+  exhausted Claude is an absent row (exit 0): the guard then reads the payload's top-level
+  `excluded[]` (an operator exclusion) or the newest snapshot's `accounts[]` (never an
+  `excluded` key there); a snapshot-only Claude that is not blocked is still at least `watch`
+  (`source: snapshot-only`, a live 429 or a note the snapshot predates), and a Fable pool aiuse
+  dropped because the Fable cap is exhausted is read from the snapshot as 0% left (`watch`).
+  Exit codes 0 / 1 / 2 / 3 for the levels, 10 when Claude appears nowhere, aiuse or the
+  snapshot is malformed, aiuse could not be read, or another check holds the lock (state
+  untouched), 64 for a bad
   `CLAUDE_QUOTA_GUARD_THRESHOLDS`, 69 for `--install` off macOS (launchd only; use a
   systemd user timer or cron). `status [--json]` prints the state without probing. One
   `hermes-ping` per level per reset period (the mark survives level drops; a new weekly
-  reset clears it). The UserPromptSubmit hook
+  reset clears it); data older than 3 hours (a dead collector) is reported `stale: true` /
+  "(stale)" and never pinged. The UserPromptSubmit hook
   `claude/hooks/quota_nudge.py` prints the level's `advice` once per session and level,
   from the state file only (silent when it is missing or over 2 hours old). A lead that
   sees `[quota-guard tight]` hands off and continues on Sonnet 5.5; at `critical` it

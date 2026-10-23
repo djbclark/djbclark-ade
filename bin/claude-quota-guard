@@ -26,10 +26,18 @@ sublimit):
   critical weekly left < 15, 5-hour left < 10, a Claude account with `usable_now: false` or an
            exhausted weekly / 5-hour window, or aiuse exit 3 with no Claude row
 `aiuse --available` drops every pool with `usable_now: false`, so an exhausted Claude is an
-absent row (exit 0): the windows then come from the newest snapshot's `accounts[]` / `excluded[]`.
-Exit 10 only when Claude appears nowhere. One `hermes-ping` per level per reset period (the
-mark survives level drops; a new weekly `resets_at` clears it). `check` holds a flock on
-<state>.lock, saves the state before it pings and records the ping afterwards.
+absent row (exit 0): the windows then come from the payload's top-level `excluded[]` (an
+operator exclusion) or the newest snapshot's `accounts[]`; a snapshot-only Claude is `critical`
+when blocked and at least `watch` otherwise (state `source` "snapshot-only": aiuse dropped it
+for a reason the snapshot predates). aiuse also drops the Fable pool when the Fable cap is
+exhausted: the Fable window is then read from the snapshot (exhausted = 0% left = `watch`).
+Exit 10 when Claude appears nowhere, on any malformed aiuse or snapshot data, or when another
+check holds <state>.lock for about 5 s. One `hermes-ping` per level per reset period (the mark
+survives level drops; a new weekly `resets_at` clears it). Data older than 3 h (the payload's
+`age_seconds` or the snapshot mtime: a dead collector) is reported with `stale: true`,
+"(stale)" in the human line, and never pinged. `check` holds a flock on <state>.lock, saves
+the state before it pings and records the ping afterwards (a ping cut off by a kill is retried
+next run: at least once).
 Thresholds live in THRESHOLDS; env CLAUDE_QUOTA_GUARD_THRESHOLDS (JSON) overrides keys.
 
 Env (tests): CLAUDE_QUOTA_GUARD_AIUSE (default ~/.local/bin/aiuse), _SNAPSHOTS (default
@@ -51,6 +59,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -68,6 +77,9 @@ THRESHOLDS = {
     "period_tolerance_s": 7200.0,  # two resets_at this close are the same reset period (clock jitter)
     "aiuse_timeout_s": 90.0,
     "ping_timeout_s": 30.0,
+    "stale_age_s": 10800.0,     # data older than this (dead collector): reported "(stale)", never pinged
+    "lock_retries": 10.0,       # non-blocking flock attempts ...
+    "lock_wait_s": 0.5,         # ... this far apart, then exit 10 "another check holds the lock"
 }
 
 LEVELS = ("ok", "watch", "tight", "critical")
@@ -87,7 +99,7 @@ _ADVERSARY = "`acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgmen
 _RUNNING_PROJECTED = re.compile(r"projected to run out.*before reset", re.I | re.S)
 
 
-def _advice(level: str, resets_at: str | None) -> str:
+def _advice(level: str, resets_at: str | None, source: str = "available") -> str:
     if level == "ok":
         return ""
     items = [
@@ -104,8 +116,15 @@ def _advice(level: str, resets_at: str | None) -> str:
         ]
     if level == "critical":
         items[0] = "Claude quota critical: no Fable or Opus Agent-tool sub-agents."
+        # aiuse rate-gates omp (it spends through the Claude account) while every Claude weekly
+        # window is exhausted: the main critical case.
+        items[1] = (f"Adversary rounds via {_ADVERSARY}, only while `aiuse --available --json` "
+                    "still lists omp (it is rate-gated when every Claude weekly window is exhausted).")
         items.append(f"No new Claude work of any kind until the reset at {resets_at or 'unknown'}; "
                      "finish the running turn, hand off, stop.")
+    if source == "snapshot-only":
+        items.append("aiuse dropped Claude from --available: a live 429 or a note; "
+                     "re-check `aiuse --available --json`.")
     return "\n".join(f"{i}. {t}" for i, t in enumerate(items, 1))
 
 
@@ -190,10 +209,12 @@ def read_aiuse() -> tuple[int, dict]:
 
 
 def _rows(container, key: str) -> list[dict]:
-    """Claude rows (dicts with provider == claude) under container[key]."""
-    if not isinstance(container, dict):
+    """Claude rows (dicts with provider == claude) under container[key]; anything that is not
+    a list of dicts is ignored, so malformed aiuse output cannot raise here."""
+    items = container.get(key) if isinstance(container, dict) else None
+    if not isinstance(items, list):
         return []
-    return [r for r in container.get(key) or [] if isinstance(r, dict) and r.get("provider") == "claude"]
+    return [r for r in items if isinstance(r, dict) and r.get("provider") == "claude"]
 
 
 def claude_windows(rows: list[dict]) -> list[dict]:
@@ -203,7 +224,8 @@ def claude_windows(rows: list[dict]) -> list[dict]:
     reaches the advice text, the state file or the hook's stdout (an unparsable value is None)."""
     out = []
     for row in rows:
-        for w in row.get("windows") or []:
+        windows = row.get("windows")
+        for w in windows if isinstance(windows, list) else []:
             if not isinstance(w, dict):
                 continue
             label = str(w.get("label") or w.get("window_label") or "")
@@ -223,7 +245,9 @@ def claude_windows(rows: list[dict]) -> list[dict]:
             else:
                 continue
             reset = _parse_ts(w.get("resets_at"))
-            out.append({"kind": kind, "label": label, "left": left,
+            out.append({"kind": kind, "label": label,
+                        # an exhausted Fable cap is 0% left whatever the rounded number says
+                        "left": 0.0 if kind == "fable" and w.get("state") == "exhausted" else left,
                         "resets_at": _iso(reset) if reset else None,
                         "pace": _num(w.get("pace_percent")),
                         "pace_early": w.get("pace_early") is True,
@@ -265,18 +289,33 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict) 
 
     Claude rows come from `aiuse --available`; that list drops every pool with
     `usable_now: false`, so an exhausted or frozen Claude is an ABSENT row (exit 0). Then the
-    rows come from the snapshot's `accounts[]` / `excluded[]`, and `usable_now: false` or an
-    exhausted weekly / 5-hour window is `critical`. Only when Claude appears nowhere: exit 3
-    means exhausted (critical), exit 0 means unreadable.
+    rows come from the payload's own top-level `excluded[]` (an operator exclusion; windows
+    judged by their numbers) or else the newest snapshot's `accounts[]` (`excluded` is never a
+    snapshot key). From the snapshot, `usable_now: false` or an exhausted weekly / 5-hour window
+    is `critical` (source `snapshot`); a healthy-looking row that aiuse nevertheless dropped is
+    at least `watch` (source `snapshot-only`: a live 429 or a note the snapshot predates). Only
+    when Claude appears nowhere: exit 3 means exhausted (critical), exit 0 means unreadable.
+
+    When `available` has Claude rows but no Fable window (aiuse drops the Fable pool once the
+    Fable cap is exhausted), the Fable window is taken from the snapshot; an exhausted Fable
+    counts as 0% left, so `watch`.
 
     A weekly "projected to run out ... before reset" alert is ignored altogether while the
     matching weekly window has `pace_early: true` (early in a window the projection swings
     wildly: 293 of 1,146 such alerts in 2026 snapshots fired at 60% or more left)."""
-    rows, source = _rows(data, "available"), "available"
-    windows = claude_windows(rows)
-    if not windows and snap is not None:
-        rows, source = _rows(snap, "accounts") + _rows(snap, "excluded"), "snapshot"
+    rows, judge_usable = _rows(data, "available"), True
+    windows, source = claude_windows(rows), "available"
+    snap_rows = _rows(snap, "accounts")
+    if not windows:
+        excluded = _rows(data, "excluded")        # an operator exclusion, top level of the payload
+        if claude_windows(excluded):
+            rows, judge_usable, source = excluded, False, "excluded"
+        elif claude_windows(snap_rows):
+            rows, source = snap_rows, "snapshot"
         windows = claude_windows(rows)
+    elif not any(w["kind"] == "fable" for w in windows):
+        # aiuse drops the Fable pool (not the default one) when the Fable cap is exhausted.
+        windows += [w for w in claude_windows(snap_rows) if w["kind"] == "fable"]
     weekly, five, fable = (_lowest(windows, k) for k in ("weekly", "five_hour", "fable"))
     level = "ok"
 
@@ -287,11 +326,17 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict) 
 
     if not windows:
         if rc != AIUSE_NOTHING_USABLE:
-            raise Unreadable("aiuse has no Claude window (not in `available`, the snapshot or `excluded`)")
+            raise Unreadable("aiuse has no Claude window (not in `available`, `excluded` or the snapshot)")
         raise_to("critical")  # aiuse found nothing usable and Claude is not among it: exhausted
-    if any(r.get("usable_now") is False for r in rows) or any(
-            w["exhausted"] for w in windows if w["kind"] in ("weekly", "five_hour")):
-        raise_to("critical")  # blocked: exhausted shared window, or a frozen measurement
+    blocked = (judge_usable and any(r.get("usable_now") is False for r in rows)) or any(
+        w["exhausted"] for w in windows if w["kind"] in ("weekly", "five_hour"))
+    if blocked:
+        raise_to("critical")  # exhausted shared window, or a frozen measurement
+    elif source == "snapshot":
+        # Claude is in the raw snapshot but aiuse dropped it from --available (a live 429 or a
+        # note the snapshot predates): the snapshot's numbers are not to be trusted to say `ok`.
+        raise_to("watch")
+        source = "snapshot-only"
     if weekly:
         if weekly["left"] < t["watch_weekly"]:
             raise_to("watch")
@@ -420,12 +465,22 @@ def plan_ping(prev: dict, st: dict, t: dict) -> str | None:
 
 
 @contextlib.contextmanager
-def _locked():
-    """Exclusive flock on <state>.lock (macOS and Linux): two checks never interleave."""
+def _locked(t: dict):
+    """Exclusive flock on <state>.lock (macOS and Linux): two checks never interleave.
+
+    Non-blocking with a bounded retry (lock_retries x lock_wait_s, about 10 x 0.5 s), so a lock
+    some other process holds open cannot wedge the launchd job: Unreadable (exit 10) instead."""
     p = state_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p.with_name(p.name + ".lock"), "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        for attempt in range(max(1, int(t["lock_retries"]))):
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                time.sleep(t["lock_wait_s"])
+        else:
+            raise Unreadable("another check holds the lock")
         try:
             yield
         finally:
@@ -434,25 +489,46 @@ def _locked():
 
 # -- subcommands -----------------------------------------------------------
 
+def _check_locked(t: dict) -> dict:
+    try:
+        rc, data = read_aiuse()
+        snap, snap_age = read_snapshot()
+        d = decide(rc, data, snap, snapshot_alerts(snap, snap_age, t), t)
+    except (Unreadable, ConfigError):
+        raise
+    except Exception as e:  # malformed aiuse or snapshot types must never read as `watch` (exit 1)
+        raise Unreadable(f"unexpected {type(e).__name__} reading aiuse or the snapshot: {e}")
+    ages = [a for a in (_num(data.get("age_seconds")), snap_age) if a is not None]
+    data_age = max(ages) if ages else None
+    st = dict(d)
+    st["advice"] = _advice(st["level"], st["resets_at"], st["source"])
+    st["checked_at"] = _iso(now())
+    st["snapshot_age_s"] = None if snap_age is None else round(snap_age)
+    st["data_age_s"] = None if data_age is None else round(data_age)
+    st["stale"] = data_age is not None and data_age > t["stale_age_s"]
+    due = plan_ping(load_state(), st, t)
+    if st["stale"]:
+        due = None  # numbers this old (dead collector) are reported, never announced
+    save_state(st)  # before the ping: the hook sees the new level at once
+    if due and ping(due, st, t):
+        st["last_pinged_level"], st["last_pinged_at"] = due, st["checked_at"]
+        save_state(st)  # a failed ping leaves the mark unset, so the next run retries; a ping cut
+    return st           # off by a kill is retried too (at least once, never silently lost)
+
+
 def cmd_check(args) -> int:
     t = thresholds()
-    with _locked():
-        try:
-            rc, data = read_aiuse()
-            snap, snap_age = read_snapshot()
-            d = decide(rc, data, snap, snapshot_alerts(snap, snap_age, t), t)
-        except Unreadable as e:
-            print(f"claude-quota-guard: {e}; state file left unchanged", file=sys.stderr)
-            return EX_UNREADABLE
-        st = dict(d)
-        st["advice"] = _advice(st["level"], st["resets_at"])
-        st["checked_at"] = _iso(now())
-        st["snapshot_age_s"] = None if snap_age is None else round(snap_age)
-        due = plan_ping(load_state(), st, t)
-        save_state(st)  # before the ping: a crash or kill during it cannot re-announce this level
-        if due and ping(due, st, t):
-            st["last_pinged_level"], st["last_pinged_at"] = due, st["checked_at"]
-            save_state(st)  # a failed ping leaves the mark alone, so the next run retries
+    try:
+        with _locked(t):
+            st = _check_locked(t)
+    except Unreadable as e:
+        print(f"claude-quota-guard: {e}; state file left unchanged", file=sys.stderr)
+        return EX_UNREADABLE
+    except ConfigError:
+        raise
+    except Exception as e:
+        print(f"claude-quota-guard: unexpected {type(e).__name__}: {e}", file=sys.stderr)
+        return EX_UNREADABLE
     if args.json:
         print(json.dumps(st, indent=2))
     else:
@@ -464,10 +540,23 @@ def _fmt(v) -> str:
     return "?" if v is None else f"{v:g}%"
 
 
+def _age_phrase(seconds) -> str:
+    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool):
+        return "age unknown"
+    s = int(seconds)
+    if s < 3600:
+        return f"{s // 60}m old"
+    if s < 86400:
+        return f"{s // 3600}h{s % 3600 // 60:02d}m old"
+    return f"{s // 86400}d{s % 86400 // 3600:02d}h old"
+
+
 def _human(st: dict) -> str:
-    return (f"claude-quota-guard: {st.get('level', '?')}: weekly {_fmt(st.get('weekly_left'))} left, "
+    stale = " (stale)" if st.get("stale") else ""
+    return (f"claude-quota-guard: {st.get('level', '?')}{stale}: weekly {_fmt(st.get('weekly_left'))} left, "
             f"5-hour {_fmt(st.get('five_hour_left'))}, fable {_fmt(st.get('fable_left'))}, "
-            f"resets {_reset_phrase(st.get('resets_at'))}, checked {st.get('checked_at', '?')}")
+            f"resets {_reset_phrase(st.get('resets_at'))}, data {_age_phrase(st.get('data_age_s'))}, "
+            f"checked {st.get('checked_at', '?')}")
 
 
 def cmd_status(args) -> int:
