@@ -178,10 +178,10 @@ def test_admit_never_busy_loops(tmp_path, monkeypatch):
 
 
 def test_admit_hot_on_compressor_churn_even_when_load_is_low(tmp_path):
-    r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_CHURN="45000")
+    r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_CHURN="90000")
     assert r.returncode == 75, r.stderr
     rec = json.loads(r.stdout)
-    assert rec["status"] == "hot" and rec["mem_churn_pages_s"] == 45000 and rec["max_mem_churn_pages_s"] == 20000
+    assert rec["status"] == "hot" and rec["mem_churn_pages_s"] == 90000 and rec["max_mem_churn_pages_s"] == 60000
 
 
 def test_admit_ok_when_churn_is_under_the_limit(tmp_path):
@@ -191,7 +191,7 @@ def test_admit_ok_when_churn_is_under_the_limit(tmp_path):
 
 
 def test_admit_max_mem_churn_override(tmp_path):
-    assert admit(tmp_path, "--wait", "0", "--max-mem-churn", "60000", load1=0.1, LW_FAKE_CHURN="45000").returncode == 0
+    assert admit(tmp_path, "--wait", "0", "--max-mem-churn", "120000", load1=0.1, LW_FAKE_CHURN="90000").returncode == 0
     assert admit(tmp_path, "--wait", "0", "--max-mem-churn", "0", load1=0.1).returncode == 2
 
 
@@ -201,5 +201,5 @@ def test_admit_faked_load_alone_reads_zero_churn(tmp_path):
 
 
 def test_admit_waits_out_a_churn_spike(tmp_path):
-    r = admit(tmp_path, "--wait", "20", load1=0.1, LW_FAKE_CHURN="45000,45000,1000")
+    r = admit(tmp_path, "--wait", "20", load1=0.1, LW_FAKE_CHURN="90000,90000,1000")
     assert r.returncode == 0, r.stderr
