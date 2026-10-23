@@ -34,6 +34,7 @@ relay.UNSENT = Path(tempfile.mkdtemp(prefix="relay-fallback-test-")) / "relay-un
 
 SID = "cccccccc-0000-4000-8000-000000000003"
 saved_type_line = relay.type_line
+real_rows_below = relay.rows_below
 
 
 def sess(**kw: Any) -> dict[str, Any]:
@@ -49,7 +50,7 @@ class Harness(unittest.TestCase):
         relay.UNSENT.unlink(missing_ok=True)
         self.tmp = Path(tempfile.mkdtemp(prefix="relay-fb-"))
         names = ["claude_socket", "socket_send", "type_line", "draft", "press_enter", "screen", "paseo_gate", "send_paseo",
-                 "paseo_run", "paseo_inspect", "keys_run", "RETRY_AFTER", "ENTER_DELAY"]
+                 "paseo_run", "paseo_inspect", "keys_run", "rows_below", "RETRY_AFTER", "ENTER_DELAY"]
         saved = {n: getattr(relay, n) for n in names}
         saved_fleet = {n: getattr(relay.fleet, n) for n in ("sessions", "dispatch_record")}
         self.addCleanup(lambda: [setattr(relay, n, v) for n, v in saved.items()])
@@ -58,6 +59,7 @@ class Harness(unittest.TestCase):
         relay.socket_send = lambda sock, sender, text: self.calls.append("socket") or True
         relay.type_line = lambda chan, text: self.calls.append("type") or True
         relay.draft = lambda chan: ""
+        relay.rows_below = lambda chan: ""
         relay.press_enter = lambda chan: True
         relay.screen = lambda chan, lines=20: "Press up to edit queued messages"
         relay.RETRY_AFTER = relay.ENTER_DELAY = 0
@@ -314,13 +316,13 @@ class TestFallback(Harness):
         relay.draft = lambda chan: "" if len(reads.append(1) or reads) <= n_empty else then
 
     def test_the_operators_paste_that_appears_late_is_never_recorded_as_ours_nor_submitted(self) -> None:
-        self.box_after(2, "[Pasted text #3 +12 lines]")    # pre-send read and the in-loop read are empty
+        self.box_after(2, "[Pasted text #3]")    # pre-send read and the in-loop read are empty
         relay.screen = lambda chan, lines=20: ""
         rc, _, _ = self.run_text(sess(), "hello there friend")
         self.assertEqual(rc, 1)
         self.assertIsNone(relay.leftover("cccccccc"))    # the placeholder beside a short text is not ours
         self.calls.clear()
-        relay.draft = lambda chan: "[Pasted text #3 +12 lines]"
+        relay.draft = lambda chan: "[Pasted text #3]"
         calls = self.enters()
         rc, _, err = self.run_text(sess(), "another message")
         self.assertEqual(rc, 1, err)
@@ -328,11 +330,11 @@ class TestFallback(Harness):
 
     def test_a_long_texts_own_collapsed_paste_is_still_recorded_and_submitted(self) -> None:
         long = "word " * 200
-        self.box_after(2, "[Pasted text #3 +12 lines]")
+        self.box_after(2, "[Pasted text #3]")
         relay.screen = lambda chan, lines=20: ""
         self.run_text(sess(), long)
-        self.assertEqual(relay.leftover("cccccccc")["draft"], "[Pasted text #3 +12 lines]")
-        relay.draft = lambda chan: "[Pasted text #3 +12 lines]"
+        self.assertEqual(relay.leftover("cccccccc")["draft"], "[Pasted text #3]")
+        relay.draft = lambda chan: "[Pasted text #3]"
         self.assertTrue(relay.mine(relay.draft(None), relay.leftover("cccccccc")))
 
     def test_our_text_with_the_operators_words_added_is_not_ours(self) -> None:
@@ -340,8 +342,117 @@ class TestFallback(Harness):
         relay.note_unsent("cccccccc", t, "", 0)
         e = relay.leftover("cccccccc")
         self.assertTrue(relay.mine(t, e))
-        self.assertTrue(relay.mine("\u2026" + t[10:], e))
+        self.assertTrue(relay.mine("\u2026" + t[10:], e))    # clipped tail
+        self.assertTrue(relay.mine(t[:25], e))    # visible beginning
         self.assertFalse(relay.mine(t + " but first revert the deploy, I am still writing", e))
+
+    def test_a_piece_from_the_middle_of_our_text_is_the_operators_own_draft(self) -> None:
+        t = "fleet-watch upstream: https://github.com/x/y/pull/3 merged"
+        relay.note_unsent("cccccccc", t, "", 0)
+        e = relay.leftover("cccccccc")
+        self.assertFalse(relay.mine("https://github.com/x/y/pull/3", e))
+        self.assertFalse(relay.holds("https://github.com/x/y/pull/3", t))
+        relay.draft = lambda chan: "https://github.com/x/y/pull/3"
+        calls = self.enters()
+        rc, _, _ = self.run_text(sess(), "a different message")
+        self.assertNotIn("enter", calls)
+        self.assertEqual(rc, 1)
+
+    def test_the_operators_url_does_not_stop_the_same_text_from_reaching_the_socket(self) -> None:
+        t = "fleet-watch upstream: https://github.com/x/y/pull/3 merged"
+        relay.claude_socket = lambda s: "/tmp/x.sock"
+        relay.draft = lambda chan: "https://github.com/x/y/pull/3"
+        rc, _, _ = self.run_text(sess(), t)
+        self.assertEqual((rc, self.calls), (0, ["socket"]))
+
+    def test_words_on_a_second_row_make_the_box_theirs(self) -> None:
+        relay.draft = lambda chan: "hello there friend"
+        relay.rows_below = lambda chan: "wait, first revert the deploy"
+        self.assertNotEqual(relay.box_text(None), "hello there friend")
+        self.armed(draft="hello there friend")
+        calls = self.enters()
+        rc, _, err = self.run_text(sess(), "hello there friend")
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIn("someone else's draft", err)
+        calls = self.enters()
+        rc, _, _ = self.run_text(sess(), "another message")
+        self.assertEqual((rc, calls), (1, []))
+
+    def test_a_wrapped_long_text_of_ours_is_still_ours(self) -> None:
+        text = "word " * 30
+        relay.note_unsent("cccccccc", text.strip(), "", 0)
+        relay.draft = lambda chan: "word " * 15
+        relay.rows_below = lambda chan: "word " * 15
+        self.assertTrue(relay.mine(relay.box_text(None), relay.leftover("cccccccc")))
+
+    def test_rows_below_stops_at_the_bottom_border(self) -> None:
+        screen = "\n".join(["\u2500" * 20, "\u276f hello", "  second row", "\u2500" * 20, "  ? for shortcuts"])
+        old = relay.box_read
+        relay.box_read = lambda chan: screen
+        saved = relay.rows_below
+        relay.rows_below = real_rows_below
+        try:
+            self.assertEqual(relay.rows_below(None), "second row")
+        finally:
+            relay.box_read = old
+            relay.rows_below = saved
+
+    def test_an_expired_entry_for_our_paste_placeholder_does_not_fall_back_to_the_socket(self) -> None:
+        relay.claude_socket = lambda s: "/tmp/x.sock"
+        long = "x" * 900
+        relay.note_unsent("cccccccc", long, "[Pasted text #3]", 0)
+        rows = json.loads(relay.UNSENT.read_text())
+        rows["cccccccc"]["at"] -= relay.UNSENT_TTL + 5
+        relay.UNSENT.write_text(json.dumps(rows))
+        relay.draft = lambda chan: "[Pasted text #3]"
+        rc, _, err = self.run_text(sess(), long)
+        self.assertEqual((rc, self.calls), (1, []))
+        self.assertIn("already sits in its input box", err)
+
+    def test_an_enter_that_emptied_the_box_keeps_the_entry_for_the_exact_retry(self) -> None:
+        self.armed()
+        reads = iter(["hello there friend", "", ""])
+        relay.draft = lambda chan: next(reads, "")
+        calls = self.enters()
+        saved = relay.time.sleep
+        relay.time.sleep = lambda s: None
+        try:
+            self.run_text(sess(), "another message")
+        finally:
+            relay.time.sleep = saved
+        self.assertIsNotNone(relay.leftover("cccccccc"))
+        self.calls.clear()
+        rc, _, _ = self.run_text(sess(), "hello there friend")
+        self.assertNotIn("type", self.calls)
+
+    def test_in_loop_enter_needs_our_text_alone_not_the_operators_words_after_it(self) -> None:
+        reads = iter(["", "hello there friend and my own words", "hello there friend and my own words"])
+        relay.draft = lambda chan: next(reads, "hello there friend and my own words")
+        relay.screen = lambda chan, lines=20: ""
+        calls = self.enters()
+        self.run_text(sess(), "hello there friend")
+        self.assertNotIn("enter", calls)
+
+    def test_arm_stores_no_draft_when_the_box_changed_since_it_was_seen_stuck(self) -> None:
+        reads = iter(["", "hello there friend", "hello there friend"])
+        relay.draft = lambda chan: next(reads, "hello there friend and my words")
+        relay.screen = lambda chan, lines=20: ""
+        self.run_text(sess(), "hello there friend")
+        e = relay.leftover("cccccccc")
+        self.assertEqual(e["draft"], "")
+
+    def test_enter_failed_arms_the_text(self) -> None:
+        def tl(chan: Any, text: str) -> bool:
+            tl.typed = True  # pyright: ignore[reportFunctionMemberAccess]
+            return False
+        relay.type_line = tl
+        relay.draft = lambda chan: ""
+        self.run_text(sess(), "hello there friend")
+        self.assertEqual(relay.leftover("cccccccc")["text"], "hello there friend")
+
+    def test_short_fragment_inside_the_text_is_not_ours(self) -> None:
+        relay.note_unsent("cccccccc", "look at the token", "", 0)
+        self.assertFalse(relay.mine("ok", relay.leftover("cccccccc")))
 
     def test_same_text_in_the_box_with_an_expired_entry_is_unverified_not_a_socket_fallback(self) -> None:
         relay.claude_socket = lambda s: "/tmp/x.sock"

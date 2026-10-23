@@ -141,6 +141,7 @@ class TestRelayRules(unittest.TestCase):
         relay.fleet.sessions = lambda: [sess(transcript=str(transcript) if transcript else None)]
         relay.type_line = lambda chan, text: True
         relay.draft = lambda chan: next(reads, "")
+        saved_rows, relay.rows_below = relay.rows_below, lambda chan: ""
         relay.press_enter = lambda chan: enters.append("enter") or True
         relay.screen = lambda chan, lines=20: scr
         relay.RETRY_AFTER = 0
@@ -150,6 +151,7 @@ class TestRelayRules(unittest.TestCase):
         finally:
             (relay.fleet.sessions, relay.type_line, relay.draft, relay.press_enter, relay.screen,
              relay.RETRY_AFTER, sys.argv) = saved
+            relay.rows_below = saved_rows
         return rc, enters
 
     def test_text_left_in_the_box_gets_another_enter(self) -> None:
@@ -166,18 +168,21 @@ class TestRelayRules(unittest.TestCase):
 
 class TestStuckInBox(unittest.TestCase):
     def check(self, box: str, text: str) -> bool:
-        orig = relay.draft
-        relay.draft = lambda chan: box
+        orig = relay.draft, relay.rows_below
+        relay.draft, relay.rows_below = (lambda chan: box), (lambda chan: "")
         try:
             return relay.stuck_in_box(("herdr", "w1:p1"), text)
         finally:
-            relay.draft = orig
+            relay.draft, relay.rows_below = orig
 
     def test_own_text_still_in_box(self) -> None:
         self.assertTrue(self.check("From the Paseo session: hello  there", "From the Paseo session: hello there"))
 
     def test_collapsed_paste_placeholder_is_ours(self) -> None:
-        self.assertTrue(self.check("[Pasted text #1 +3 lines]", "a long relayed message " * 40))
+        self.assertTrue(self.check("[Pasted text #1]", "a long relayed message " * 40))
+
+    def test_multi_line_paste_placeholder_is_never_ours(self) -> None:
+        self.assertFalse(self.check("[Pasted text #1 +3 lines]", "a long relayed message " * 40))
 
     def test_placeholder_beside_a_short_text_is_the_operators_own_paste(self) -> None:
         self.assertFalse(self.check("[Pasted text #1 +3 lines]", "hello"))

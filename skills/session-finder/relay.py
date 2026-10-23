@@ -263,6 +263,11 @@ def draft(chan):
     Read with ANSI codes where the channel has them: Claude Code's suggested next prompt (ghost text that
     anything typed replaces) and its hints are dim or grey, not a draft (prompt_line.py; 2026-10-16 a dim
     suggestion was refused as a draft)."""
+    return prompt_line.classify(box_read(chan)) or ""
+
+
+def box_read(chan):
+    """The last 14 rows of the pane (with ANSI codes where the channel has them)."""
     kind, target = chan
     if kind == "herdr":
         out = fleet.run(HERDR, "agent", "read", target, "--source", "visible", "--lines", "14", "--format", "ansi")[1]
@@ -270,7 +275,31 @@ def draft(chan):
         out = fleet.run("tmux", "capture-pane", "-p", "-e", "-t", target)[1]
     else:
         out = screen(chan, 14)
-    return prompt_line.classify("\n".join(out.splitlines()[-14:])) or ""
+    return "\n".join(out.splitlines()[-14:])
+
+
+BORDER = set("─━═-╭╮╰╯┌┐└┘")
+
+
+def rows_below(chan):
+    """The input box's rows under its ❯ line (a Shift+Enter line, a wrapped long text), as one string, up to the
+    box's bottom border. `draft` reads only the ❯ row, so words the operator added on a second row are invisible
+    to it; an Enter decision must see them."""
+    rows = box_read(chan).splitlines()
+    marks = [i for i, ln in enumerate(rows) if "❯" in ln]
+    out = []
+    for ln in rows[marks[-1] + 1:] if marks else []:
+        t = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", ln).strip().strip("│┃").strip()
+        if t and set(t) <= BORDER:
+            break
+        if t:
+            out.append(t)
+    return " ".join(out)
+
+
+def box_text(chan):
+    """What the input box holds: the ❯ row and the rows below it, whitespace-folded."""
+    return " ".join((draft(chan) + " " + rows_below(chan)).split())
 
 
 def press_enter(chan):
@@ -319,20 +348,28 @@ def type_line(chan, text):
     return press_enter(chan)
 
 
+def box_state(chan, text):
+    """(stuck, ours) from one read of the input box. STUCK: TEXT still sits unsent in a Claude Code input box, its
+    Enter did not land (loose: the first 30 characters agree, so arming is the safe direction). OURS: the box shows
+    our text, a piece of it or our collapsed paste, nothing more; only then may a relay press Enter on it."""
+    d = box_text(chan)
+    mine_ = bool(d) and (ours_paste(d, text) or holds(d, text))
+    return mine_ or (bool(d) and d[:30] == text[:30]), mine_
+
+
 def stuck_in_box(chan, text):
-    """True while TEXT still sits unsent in a Claude Code input box: its Enter did not land."""
-    d = " ".join(draft(chan).split())
-    return bool(d) and (d[:30] == text[:30] or ours_paste(d, text))
+    return box_state(chan, text)[0]
 
 
 PASTE_MIN = 800     # Claude Code collapses only a paste longer than this into a placeholder
-PASTE_RE = re.compile(r"\[Pasted text #\d+(?: \+\d+ lines)?\]")
+PASTE_RE = re.compile(r"\[Pasted text #\d+\]")
 
 
 def ours_paste(d, text):
     """True when draft D is the collapsed "[Pasted text #N +M lines]" placeholder of a TEXT long enough to be
     collapsed. A long burst typed by send-text collapses and never matches the text (2026-10-18); a placeholder
-    beside a short text is the operator's own paste (2026-10-23)."""
+    beside a short text is the operator's own paste, and a "+M lines" placeholder is a multi-line paste, which a
+    one-line relay text never is (2026-10-23)."""
     return bool(PASTE_RE.fullmatch(" ".join(d.split()))) and len(" ".join((text or "").split())) > PASTE_MIN
 
 
@@ -380,9 +417,11 @@ def ours(d, text):
 
 
 def holds(d, text):
-    """True when the box D shows TEXT or a piece of it and nothing more (a leading "…" is the TUI's clipping)."""
-    dn, tn = " ".join(d.split()).lstrip("…").strip(), " ".join((text or "").split())
-    return bool(dn) and bool(tn) and (dn == tn or (len(dn) >= 12 and dn in tn))
+    """True when the box D shows TEXT, its visible beginning, or (after the TUI's "…" clipping mark) its tail:
+    never a piece from the middle, which the operator can type on their own (a PR URL out of the text)."""
+    raw = " ".join(d.split())
+    dn, tn = raw.lstrip("…").strip(), " ".join((text or "").split())
+    return bool(dn) and bool(tn) and (dn == tn or (len(dn) >= 12 and (tn.startswith(dn) or (raw.startswith("…") and tn.endswith(dn)))))
 
 
 def mine(d, entry):
@@ -396,7 +435,7 @@ def arm(s, chan, text, mark):
     """Record TEXT as sitting unsent in session S's box (Claude Code only). The draft is kept for `mine` only when
     it is our text or our collapsed paste, never whatever else the box shows."""
     if s["agent"] == "claude":
-        d = draft(chan)
+        d = box_text(chan)
         note_unsent(s["id"], text, d if holds(d, text) or ours_paste(d, text) else "", mark)
 
 
@@ -460,11 +499,6 @@ def is_slash(text):
     slash-command parser, so strip the same and the zero-width characters first, and count the full-width slash too
     (adversary round 2)."""
     return text.lstrip(SLASH_STRIP).startswith(("/", "\uff0f"))
-
-
-def probe_of(text):
-    """The part of TEXT to look for in a transcript, which stores it JSON-escaped."""
-    return json.dumps(text[:40], ensure_ascii=False)[1:-1]
 
 
 def sender_name(listed):
@@ -559,7 +593,7 @@ def route_socket(c):
     if not (tx and tx.is_file()):
         return ("unverified", f"its socket took the text but the {s.get('status')} session has no transcript to confirm it. "
                               "Do not resend; check its pane")
-    probe = json.dumps('from-mode="bypass">\n' + xml_body(c["text"]), ensure_ascii=False)[1:-1]
+    probe = json.dumps('from-mode="bypass">\n' + xml_body(c["text"]) + "\n</cross-session-message>", ensure_ascii=False)[1:-1]
     deadline = time.time() + c["a"].wait
     while True:
         with tx.open("rb") as fh:
@@ -598,7 +632,7 @@ def retry_leftover(c, chan, d, left):
         press_enter(chan)
         for _ in range(10):
             time.sleep(1)
-            d = draft(chan)
+            d = box_text(chan)
             if not d:
                 break
     if d:
@@ -632,7 +666,7 @@ def route_pane(c):
         return ("skip", "text starting with '/' or '!' typed into a pane would run a built-in or a shell command "
                         "there; peers do not run another session's built-ins")
     chan = tuple(s["chan"])
-    d = draft(chan) if s["agent"] == "claude" else ""
+    d = box_text(chan) if s["agent"] == "claude" else ""
     left = leftover(s["id"])
     tx = Path(s["transcript"]) if s.get("transcript") else None
     if left and " ".join(left["text"].split()) == text:    # a retry of the message an earlier relay left unsent
@@ -641,13 +675,15 @@ def route_pane(c):
         press_enter(chan)
         for _ in range(10):
             time.sleep(1)
-            d = draft(chan)
+            d = box_text(chan)
             if not d:
                 break
-        if not d:
-            note_unsent(s["id"], None)
+        if not d:    # the entry stays: a retry of that text proves it from its mark, and the TTL expires it
             print(f"relay: [{s['id']}] submitted our earlier message left unsent in its box", file=sys.stderr)
-    if d and holds(d, text):    # our own text from an earlier relay whose entry expired or never existed
+    stale = _unsent().get(s["id"])    # an entry past its TTL is still evidence of whose paste placeholder this is
+    if d and (holds(d, text) or (isinstance(stale, dict) and " ".join(str(stale.get("text")).split()) == text
+                                 and stale.get("draft") and d == stale["draft"])):
+        # our own text from an earlier relay whose entry expired or never existed
         return ("unverified", "this very text already sits in its input box from an earlier relay. "
                               "Do not resend; check its pane")
     if d:
@@ -659,7 +695,7 @@ def route_pane(c):
             return ("unverified", f"text typed into {chan[0]} {chan[1]} (or not: the typing CLI did not finish) but its "
                                   "Enter failed; it may sit in the input box. Do not resend; check its pane")
         return ("skip", f"typing into {chan[0]} {chan[1]} failed")
-    probe = probe_of(text)
+    probe = json.dumps(text, ensure_ascii=False)[1:-1]    # the whole text: another line may share its first 40 characters
     seen, deadline = None, time.time() + a.wait
     typed_at, retries, stuck = time.time(), 0, False
     while time.time() < deadline:
@@ -669,8 +705,8 @@ def route_pane(c):
                 if probe in fh.read().decode("utf-8", "replace"):
                     seen = "delivered"
                     break
-        stuck = s["agent"] == "claude" and stuck_in_box(chan, text)
-        if stuck and retries < ENTER_RETRIES and time.time() - typed_at >= RETRY_AFTER:
+        stuck, ours_now = box_state(chan, text) if s["agent"] == "claude" else (False, False)
+        if ours_now and retries < ENTER_RETRIES and time.time() - typed_at >= RETRY_AFTER:
             press_enter(chan)
             typed_at, retries = time.time(), retries + 1
         scr = screen(chan, 30)
