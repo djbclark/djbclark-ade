@@ -94,8 +94,11 @@ MIN_RATE = 1e-3                        # %/h below this is rounding noise, not b
 EX_INTERNAL = 12                       # an uncaught error: never read as tight (1) or critical (2)
 EX_STALE, EX_FAILED = 10, 11
 SNAP_NAME = re.compile(r"^(\d{4})-(\d\d)-(\d\d)T(\d\d)(\d\d)(\d\d)(?:\.(\d+))?Z\.json$")
-FABLE_MODEL = re.compile(r"^claude-fable")
-PREMIUM_MODEL = re.compile(r"^claude-(opus|fable)")
+# fullmatch only: a model id with anything after the family name (a space, a sentence) is nobody the governor moves, records,
+# pings or restores (adversary round 3 F2)
+FABLE_MODEL = re.compile(r"claude-fable[a-z0-9.\[\]-]{0,60}")
+PREMIUM_MODEL = re.compile(r"claude-(opus|fable)[a-z0-9.\[\]-]{0,60}")
+AGENT_ID = re.compile(r"[0-9a-f-]{7,64}")
 
 
 # -- environment -------------------------------------------------------------------------------
@@ -422,7 +425,8 @@ def records(state: dict[str, Any], default_set: str = SONNET) -> dict[str, dict[
         out[str(key)] = {
             "original": orig if isinstance(orig, str) else None,
             "set": meta.get("set") or default_set,
-            "resets_at": meta.get("resets_at") or state.get("window_resets_at"),
+            "resets_at": next((r for r in (meta.get("resets_at"), state.get("window_resets_at"))
+                               if isinstance(r, str) and r), None),   # a str only: max() of mixed types crashed run (round 3 F1)
             "window": meta.get("window"),
         }
     return out
@@ -460,7 +464,7 @@ def list_agents() -> tuple[list[dict[str, Any]] | None, str]:
         return None, "paseo-set-model list: output is not JSON"
     if not isinstance(data, list):
         return None, "paseo-set-model list: output is not a JSON array"
-    return [a for a in data if isinstance(a, dict) and isinstance(a.get("id"), str)], ""
+    return [a for a in data if isinstance(a, dict) and isinstance(a.get("id"), str) and AGENT_ID.fullmatch(a["id"])], ""
 
 
 def claude_live(agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -468,9 +472,9 @@ def claude_live(agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def restore_target(original: str | None) -> str | None:
-    if not original or not PREMIUM_MODEL.match(original):   # only a model the governor itself could have recorded
+    if not original or not PREMIUM_MODEL.fullmatch(original):   # only a model the governor itself could have recorded
         return None
-    return OPUS if FABLE_MODEL.match(original) else original
+    return OPUS if FABLE_MODEL.fullmatch(original) else original
 
 
 def plan_moves(agents: list[dict[str, Any]], windows: dict[str, dict[str, Any]], level: str,
@@ -482,11 +486,11 @@ def plan_moves(agents: list[dict[str, Any]], windows: dict[str, dict[str, Any]],
     for a in live:
         model = a.get("model") or ""
         short = a["id"][:7]
-        if level != "ok" and PREMIUM_MODEL.match(model):
+        if level != "ok" and PREMIUM_MODEL.fullmatch(model):
             plan.append({"kind": "downshift", "id": a["id"], "short": short, "from": model, "to": SONNET,
                          "resets_at": iso(trig[1]["resets_at"]) if trig else None,
                          "window": short_label(trig[1]["label"]) if trig else None})
-        elif FABLE_MODEL.match(model):
+        elif FABLE_MODEL.fullmatch(model):
             plan.append({"kind": "fable", "id": a["id"], "short": short, "from": model, "to": OPUS})
     if level == "ok":
         by_id = {a["id"]: a for a in agents}
