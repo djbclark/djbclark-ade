@@ -1149,3 +1149,36 @@ works on the runner (run 239; `ghcr.io/cirruslabs/android-sdk:36` pulled in 47 s
    point at the new repo too (2026-10-14); the README there has a "What is not in this repository" section (local-timings.md, generated workflow,
    the general forgejo skill, pre-move history). The CI image's Dockerfile now pins the new repo's commit; rebuilt, digest
    `sha256:90a5de59e4a7efaa70b4de6af3221023151a2087cfb2689cecfe18a6a1cf602e`, run 242 passed. Nothing left.
+
+## `hermes` route in relay.py (asked via the load-watch session, 2026-10-23)
+
+Relayed by the load-watch session (ac1d55cc) as djbclark's ask: agents should be able to message the live Hermes
+gateway agent with `relay.py`. Verified research and design:
+`~/.local/state/bigteam/loadgate-followup-2026-10-23/hermesbidi-report.md` (Q4 is the design, under 150 lines).
+
+1. Route `hermes`, chosen for a `hermes-gw` fleet row with a `sid` (`fleet.py` `_hermes_gateway`); its only route, no
+   fallback to pane or socket. Send `hermes --resume <sid> -z <text>`, `stdin=DEVNULL`, timeout from `--wait` (at least
+   90 s); stdout is the reply. A timeout is `unverified` ("do not resend"), never a second route.
+2. ACP cannot load gateway sessions and `messages_send` is outbound-only: neither is a transport.
+3. **Verify the claim first** with a harmless test against a throwaway Hermes session (the report ran no tests); this
+   writes into a live transcript, so never against djbclark's Telegram session without his yes.
+4. Tests: plan() for a fake `hermes-gw` row is `["hermes"]`; missing sid is refused; argv is `--resume SID -z TEXT`
+   with stdin closed; timeout is exit 1; `--via hermes` on a non-Hermes session has no route.
+5. The Hermes-side skill (`peer-relay`: to message a peer run `relay.py <ident> "<text>"` by absolute path) is
+   Hermes-owned: ask djbclark, do not edit `~/.hermes` from here.
+
+## relay.py pane route: open lows after adversary round 9 (2026-10-23)
+
+Rounds 1-9 on the route ladder; round 9's four mediums are repaired in eda41d3. Still open (reports:
+`~/.local/state/bigteam/adhoc-2026-10-23/relay-ladder-adversary-report-9.md`, items 5, 6, 8, 10):
+
+1. A queue `enqueue` counts as "delivered"; if the operator pulls it back into the box (Up, Esc-interrupt: `remove`
+   with a reason other than `absorbed_mid_turn`, or `popAll`) the caller is told "delivered" while the text sits in the box.
+   Label an enqueue "queued" and treat a later pull-back as not delivered.
+2. A short common text ("continue", "yes", "1") the operator types himself within the hour counts as our delivery;
+   require the user line's timestamp near the entry's `at`.
+3. One unsent entry per session id: arming a second text overwrites the first (key by session id and folded text, or
+   refuse to type a new text while another unproven entry is younger than the TTL).
+4. No real `herdr agent read --format ansi` or `tmux capture-pane -e` capture of an idle Claude Code pane is committed
+   as a fixture; `box_parse` is proven on synthetic screens only (a statusline row of 10+ `─` below the box, or queued
+   messages drawn as `❯` rows under a rule, would make it skip for good).
