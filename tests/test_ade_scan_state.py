@@ -4483,3 +4483,44 @@ def test_a_report_or_embedded_directory_named_tilde_is_quoted_not_expanded(tmp_p
     co = doc_checkout(os.path.join(mod.HOME, "src", "emb"), embedded_repos=["~/"], embedded_pointer_repos=[])
     row = next(r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith("| ~/src/emb "))
     assert "-C ~/src/emb " in row and "-- '~'" in row and "-- ~ " not in row, row
+
+
+def test_home_destinations_and_a_checkout_at_home_expand_in_the_shell(tmp_path, monkeypatch):
+    """Adversary round 62 on PR 27: F1 the no-origin bundle row wrote `all.bundle` into a directory named `~` inside the
+    checkout (Codex pass 57 P1); F2 a checkout at HOME itself was archived as the literal `~`; F4 the split's parent
+    must stay home-abbreviated."""
+    mod = load_doc()
+    home = tmp_path / "home"
+    (home / "src").mkdir(parents=True)
+    monkeypatch.setattr(mod, "HOME", str(home))
+    repo = home / "src" / "one offs"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    commit_file(repo, "f.txt")
+    co = doc_checkout(str(repo), flags=["orphan branch", "no origin remote"], verdict="orphan branch", ahead_of_origin=1,
+                      local_only_commits=1)
+    row = next(r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith("| ~/src/one offs "))
+    cmd = unescape_span(re.search(r"`(mkdir -p [^`]*bundle create[^`]*)`", row).group(1))
+    assert "'~/ops" not in cmd, cmd
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    run = subprocess.run(["bash", "-c", PLAN_PREFIX + cmd.replace("<DEST>", str(dest))], capture_output=True, text=True,
+                         cwd=repo, env={**GIT_ENV, "HOME": str(home)})
+    assert run.returncode == 0, run.stderr
+    assert (home / "ops/site-private/bundles/home/src/one offs/all.bundle").is_file()
+    assert not (repo / "~").exists() and git(repo, "status", "--porcelain").strip() == ""
+    # a skipped checkout below HOME: the parent of the whole archive keeps its abbreviation
+    skipped = doc_checkout(str(repo), flags=["skipped: x"], verdict="skipped: x")
+    row = next(r for r in section_3_2(mod.render(doc_scan([skipped]))).splitlines() if r.startswith("| ~/src/one offs "))
+    assert "-C ~/src " in row and "'~/src'" not in row, row
+    # a checkout at HOME itself
+    git(home, "init", "-q", "-b", "main")
+    top = doc_checkout(str(home), flags=["skipped: x"], verdict="skipped: x")
+    row = next(r for r in section_3_2(mod.render(doc_scan([top]))).splitlines() if r.startswith("| ~ "))
+    whole = unescape_span(re.search(r"`(mkdir -p [^`]*whole\.tar[^`]*)`", row).group(1))
+    dest2 = tmp_path / "dest2"
+    dest2.mkdir()
+    run = subprocess.run(["bash", "-c", PLAN_PREFIX + whole.replace("<DEST>", str(dest2))], capture_output=True, text=True,
+                         env={**GIT_ENV, "HOME": str(home)})
+    assert run.returncode == 0, run.stderr
+    assert any(dest2.rglob("whole.tar"))

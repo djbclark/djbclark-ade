@@ -648,9 +648,10 @@ def render(d):
         if c["verdict"].startswith(("skipped", "scan incomplete")):
             # no counts (null): anything may be in there, so the row demands a re-scan or a whole-directory archive,
             # never "nothing to capture" (Codex pass 19 on PR 27); no git command runs in a checkout the scan refused
-            parent, base = os.path.split(raw_p.rstrip("/"))
-            if isinstance(raw_p, Home) and parent:
-                parent = Home(parent)  # `os.path.split` returns plain strings: the parent is still home-abbreviated
+            # split the absolute path, then abbreviate the parent: the checkout at HOME itself archives as
+            # `-C <dirname HOME> -- <basename HOME>`, not the literal `~` (adversary round 62, LOW 2)
+            parent, base = os.path.split(str(c["path"]).rstrip("/"))
+            parent = tilde(parent) if parent else parent
             # a `.git` FILE (a linked worktree, an absorbed submodule) points at a git directory elsewhere, which holds
             # the refs, reflogs and perhaps the only copy of local commits; a linked worktree's objects are one step
             # further, in its `commondir`. The whole-directory archive alone misses both (Codex pass 26 on PR 27).
@@ -714,8 +715,10 @@ def render(d):
         if "no origin remote" in c["flags"]:
             covered_by_bundle = True
             what.append(f"all {c['ahead_of_origin'] or c.get('local_only_commits') or 0} commits (no remote)")
-            bd = "~/ops/site-private/bundles/" + ck.removeprefix("checkouts/")
-            cmd.append(shcode("mkdir -p {} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create {} --all", bd, raw_p, f"{bd}/all.bundle")
+            # a `Home`, so the shell expands the `~`: a plain string would be quoted whole and the bundle written into a
+            # directory named `~` below the working directory, inside the checkout it preserves (adversary round 62 on PR 27)
+            bd = Home("~/ops/site-private/bundles/") + ck.removeprefix("checkouts/")
+            cmd.append(shcode("mkdir -p {} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create {} --all", bd, raw_p, bd + "/all.bundle")
                        + " or add a remote and `git push -u origin <branch>`")
             need = "**yes**: only copy; hosting or bundle destination"
         elif ("orphan branch" in c["flags"] or "unpushed commits" in c["flags"]) and head_ahead:
@@ -968,7 +971,8 @@ def render(d):
       "it does not hold, or a hostile one that names a local-only commit, makes that commit count as pushed. The "
       "origin is the operator's own server and nothing is deleted by this tool, but a `clean and pushed` verdict "
       "from a `--remote` scan is evidence, not proof of possession: before removing the only checkout of work, "
-      "bundle it (the commands above) or fetch the branch from origin into a scratch clone (2026-10-23, "
+      "bundle it (`git -C <checkout> bundle create <file> --all`; a `clean and pushed` checkout has no row above) or "
+      "fetch the branch from origin into a scratch clone and compare `git rev-parse` (2026-10-23, "
       "Codex pass 56 security review on PR 27).\n")
 
     # ---- 5 commands
