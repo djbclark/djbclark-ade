@@ -190,17 +190,35 @@ def name_time(name: str) -> datetime | None:
         return None
 
 
-def find_windows(node: Any, out: list[dict[str, Any]]) -> None:
-    """Every dict with a `label` and a used or remaining percentage, anywhere in the JSON."""
+def observed_at(node: dict[str, Any], snap_at: datetime | None) -> datetime | None:
+    """When an account's own reading was taken: its `collected_at`, or the snapshot's time minus its `age_seconds`,
+    whichever is older. A snapshot that holds a stalled collector's cached reading is fresh as a file and stale as a
+    reading (the same shape `claude-quota-guard._row_age` reads; Codex pass 6 on PR 31, P2)."""
+    cands = []
+    stamp = parse_ts(node.get("collected_at"))
+    if stamp is not None:
+        cands.append(stamp)
+    age = num(node.get("age_seconds"))
+    if age is not None and snap_at is not None and 0 <= age < 10 * 365 * 86400:
+        cands.append(snap_at - timedelta(seconds=age))
+    return min(cands) if cands else None
+
+
+def find_windows(node: Any, out: list[dict[str, Any]], obs: datetime | None = None,
+                 snap_at: datetime | None = None) -> None:
+    """Every dict with a `label` and a used or remaining percentage, anywhere in the JSON, with the time of the
+    nearest enclosing account's own reading under `_obs`."""
     if isinstance(node, dict):
+        own = observed_at(node, snap_at) if ("collected_at" in node or "age_seconds" in node) else None
+        obs = own or obs
         if isinstance(node.get("label"), str) and (
                 num(node.get("used_percent")) is not None or num(node.get("remaining_percent")) is not None):
-            out.append(node)
+            out.append({**node, "_obs": obs})
         for v in node.values():
-            find_windows(v, out)
+            find_windows(v, out, obs, snap_at)
     elif isinstance(node, list):
         for v in node:
-            find_windows(v, out)
+            find_windows(v, out, obs, snap_at)
 
 
 def kind_of(label: str) -> str | None:
@@ -218,8 +236,9 @@ def read_snapshot(path: Path, at: datetime) -> dict[str, Any] | None:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
+    stamp = parse_ts(data.get("collected_at")) if isinstance(data, dict) else None
     found: list[dict[str, Any]] = []
-    find_windows(data, found)
+    find_windows(data, found, None, stamp or at)
     windows: dict[str, dict[str, Any]] = {}
     for w in found:
         kind = kind_of(w["label"])
@@ -234,8 +253,7 @@ def read_snapshot(path: Path, at: datetime) -> dict[str, Any] | None:
         cur = windows.get(kind)
         if cur is None or used > cur["used"]:          # several accounts: the tightest one binds
             windows[kind] = {"label": w["label"], "used": used, "resets_at": resets,
-                             "window_minutes": num(w.get("window_minutes"))}
-    stamp = parse_ts(data.get("collected_at")) if isinstance(data, dict) else None
+                             "window_minutes": num(w.get("window_minutes")), "at": w.get("_obs") or stamp or at}
     return {"at": stamp or at, "windows": windows}
 
 
@@ -258,7 +276,9 @@ def load_snapshots(now: datetime, t: dict[str, float]) -> list[dict[str, Any]]:
         if snap is None or snap["at"] > now + timedelta(minutes=5):
             continue                           # round 1 LOW 5: a future-dated snapshot is not evidence
         if cutoff is None:
-            cutoff = snap["at"] - timedelta(minutes=t["rate_window_min"])
+            # history for a window the newest snapshot lacks (its last observation may be stale_min old) and the rate
+            # window before that observation (Codex pass 6 on PR 31, P2)
+            cutoff = min(snap["at"], now) - timedelta(minutes=t["rate_window_min"] + t["stale_min"])
         out.append(snap)
     return out
 
@@ -309,10 +329,10 @@ def compute(snaps: list[dict[str, Any]], now: datetime, t: dict[str, float]) -> 
     windows: dict[str, dict[str, Any]] = {}
     newest = snaps[0]
     for kind in [k for k, _ in KINDS] + [FABLE_KIND]:
-        hit = next(((s["windows"][kind], s["at"]) for s in snaps if kind in s["windows"]), None)
-        if hit is None:
+        seen = [(s["windows"][kind], s["windows"][kind].get("at", s["at"])) for s in snaps if kind in s["windows"]]
+        if not seen:
             continue
-        cur, cur_at = hit
+        cur, cur_at = max(seen, key=lambda p: p[1])      # the newest reading of this window, whichever file holds it
         resets = cur["resets_at"]
         if (resets - now).total_seconds() <= 0:
             continue                       # the data predates a reset that has happened: not evidence
@@ -324,9 +344,9 @@ def compute(snaps: list[dict[str, Any]], now: datetime, t: dict[str, float]) -> 
         obs = min(cur_at, now)             # a snapshot dated a few minutes ahead of the clock counts as now (adversary gov-9, LOW)
         hours = (resets - obs).total_seconds() / 3600
         tol = timedelta(minutes=t["reset_tolerance_min"])
-        samples = sorted((s["at"], s["windows"][kind]["used"]) for s in snaps
-                         if kind in s["windows"] and abs(s["windows"][kind]["resets_at"] - resets) <= tol
-                         and (cur_at - s["at"]).total_seconds() <= t["rate_window_min"] * 60)
+        samples = sorted({w.get("at", s["at"]): w["used"] for s in snaps for w in [s["windows"].get(kind)]
+                          if w is not None and abs(w["resets_at"] - resets) <= tol
+                          and 0 <= (cur_at - w.get("at", s["at"])).total_seconds() <= t["rate_window_min"] * 60}.items())
         rate = 0.0
         if len(samples) >= 2 and (samples[-1][0] - samples[0][0]).total_seconds() >= t["min_span_min"] * 60:
             rate = slope_per_hour([((a - samples[0][0]).total_seconds() / 3600, u) for a, u in samples])

@@ -52,14 +52,17 @@ def window(label: str, used: float, resets: datetime) -> dict:
 
 
 def write_snap(d: Path, at: datetime, five: tuple[float, datetime] | None = None,
-               weekly: tuple[float, datetime] | None = None, fable: tuple[float, datetime] | None = None) -> None:
+               weekly: tuple[float, datetime] | None = None, fable: tuple[float, datetime] | None = None,
+               account_at: datetime | None = None, age_seconds: float | None = None) -> None:
     wins = []
     for label, spec in ((FIVE, five), (WEEK, weekly), (FABLE, fable)):
         if spec:
             wins.append(window(label, *spec))
     body = {"schema_version": "1.4", "collected_at": at.isoformat(),
             "accounts": [{"provider": "antigravity", "windows": []},
-                         {"provider": "claude", "account": "x@example.com", "windows": wins}]}
+                         {"provider": "claude", "account": "x@example.com", "windows": wins,
+                          **({"collected_at": account_at.isoformat()} if account_at else {}),
+                          **({"age_seconds": age_seconds} if age_seconds is not None else {})}]}
     (d / snap_name(at)).write_text(json.dumps(body))
 
 
@@ -559,6 +562,33 @@ class TestNoAction(Base):
         self.assertEqual(r.returncode, 10, r.stdout + r.stderr)
         self.assertEqual(self.e.calls("setmodel"), [])
         self.assertEqual(self.e.calls("paseo"), [])
+
+    def test_a_fresh_snapshot_holding_a_stalled_claude_reading_exits_10(self):
+        """Codex pass 6 on PR 31, P2: the file is 5 minutes old, the Claude account's own reading 2 hours (by `collected_at`
+        in one snapshot, by `age_seconds` in the other)."""
+        wk = NOW + timedelta(days=6)
+        for kw in ({"account_at": NOW - timedelta(hours=2)}, {"age_seconds": 7200.0}):
+            with self.subTest(**kw):
+                for f in self.e.snaps.iterdir():
+                    f.unlink()
+                write_snap(self.e.snaps, NOW - timedelta(minutes=5), (95, self.e.resets), (12, wk), **kw)
+                self.e.set_agents([agent("aaaaaaa", "claude-opus-5-5")])
+                r = self.e.run("run")
+                self.assertEqual(r.returncode, 10, r.stdout + r.stderr)
+                self.assertEqual(self.e.calls("setmodel"), [])
+                self.assertEqual(self.e.calls("paseo"), [])
+
+    def test_the_rate_history_survives_a_newer_snapshot_without_claude_windows(self):
+        """Codex pass 6 on PR 31, P2: 40% (100 min ago) and 70% (40 min ago) are a 30 %/h burn; a snapshot 5 minutes old
+        with no Claude data must not drop the older sample and turn critical into ok."""
+        wk = NOW + timedelta(days=6)
+        write_snap(self.e.snaps, NOW - timedelta(minutes=100), (40, NOW + timedelta(hours=1, minutes=25)), (12, wk))
+        write_snap(self.e.snaps, NOW - timedelta(minutes=40), (70, NOW + timedelta(hours=1, minutes=25)), (12, wk))
+        with_claude = self.e.run("check")
+        write_snap(self.e.snaps, NOW - timedelta(minutes=5))
+        without = self.e.run("check")
+        self.assertIn(with_claude.returncode, (1, 2), with_claude.stdout + with_claude.stderr)
+        self.assertEqual(without.returncode, with_claude.returncode, without.stdout + without.stderr)
 
     def test_missing_or_unreadable_snapshots_exit_10(self):
         self.assertEqual(self.e.run("run").returncode, 10)
