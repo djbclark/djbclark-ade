@@ -30,7 +30,7 @@ pass=${ACP_DISPATCH_WAIT_PASS:-60}
 since=$pass
 was=0
 while :; do
-  if [ -e "$marker" ] || grep -Eq '"finished"[[:space:]]*:[[:space:]]*[-0-9]' "$record" 2>/dev/null; then
+  if [ -e "$marker" ] || ggrep -Eq '"finished"[[:space:]]*:[[:space:]]*[-0-9]' "$record" 2>/dev/null; then
     [ "$was" -eq 0 ] && since=$pass
     was=1
   else
