@@ -11,6 +11,9 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- `autorename` renames a Paseo-hosted session's workspace to the title in lower-case hyphen form plus `-pw`
+  (`paseo-skill-sync-overwrite-fix-pw`; `--auto` keeps a workspace already ending in `-pw`); herdr tab labels keep
+  `-t` (2026-10-23).
 - `bin/ade-backup-stores`: Phase 0 backups, a SQLite online-backup copy of every live agent session database, the
   per-session trees and file stores and the Hermes JSONL export (run against a scratch copy of the Hermes
   database), with a hashed `MANIFEST.json`, built in `<dest>.part/` and renamed when complete; `--dry-run`,
@@ -80,6 +83,9 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `acp-dispatch` refuses `--perm read-only` or `--perm deny` (exit 2, before any record or preflight) for an agent
+  whose `acp-run <agent> --info` `perm_modes` lacks that mode; before, acp-run's own refusal came after the
+  record was written and surfaced as a no-report (an omp adversary round, 2026-10-23).
 - Paseo's start-up skill sync no longer overwrites the six vendored `paseo*` skills in this repo through the
   `~/.claude/skills` and `~/.agents/skills` links: the daemon's skill selection is now `custom` with no skills;
   how it works and what to avoid in Paseo's settings are in docs/skill-everywhere.md section 3a (2026-10-23).
