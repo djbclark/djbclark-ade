@@ -60,6 +60,10 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
+- `steps` gains a Grok Bot branch: Prompt tool rule 5 and section 2d use Grok Bot's `SendToUser` question widget
+  (context in a text message first, one-line numbered labels, recommendation `primary`, destructive `danger`,
+  `allowCustom` for `stop`, a dismissal is a decline; no `/compact` or `self-slash` there). Other runtimes'
+  rules are unchanged (2026-10-23).
 - `acp-dispatch --detach`: a `waiter:` line above `rearm:` says to run the waiter in the background with a long tool timeout (Claude Code Bash: `timeout 7200000`); at the 30 min default a lead's harness killed it mid-slice. `rearm:` stays the last line (#28).
 - `acp-run` removes `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `ORCA_TERMINAL_HANDLE` from every agent's
   environment and sets `ACP_RUN_AGENT=1`; `self-slash --finish` and `--then /quit` on Paseo are

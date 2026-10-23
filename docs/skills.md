@@ -49,7 +49,7 @@ skill here, never through a TUI path.** `/helm-all`, `/session-finder-all`,
 | `baton` | Resumes a workspace from its Tier 1 pointer. | `/baton` or `/resume` at the start of a session. |
 | `loose` | Audits the session for loose ends, steps through them, then offers handoff and continue, finish and archive (`self-slash --finish`), or keep working. | `/loose`; "any loose ends?". |
 | `loadwatch` | Registers this session as the one load watcher with the launchd `load-watch` job (replacing and telling any previous one), tests the channel, and investigates when the load is abnormal. | `/loadwatch`; "watch the load", "why is the machine hot". |
-| `steps` | Walks open items one multiple-choice prompt at a time, recommendation first. | `/steps` (optionally item numbers or a topic); "walk me through it". |
+| `steps` | Walks open items one multiple-choice prompt at a time, recommendation first. On Grok Bot the prompt is a `SendToUser` question widget (section 2d, 2026-10-23). | `/steps` (optionally item numbers or a topic); "walk me through it". |
 | `teach` | Walks today's one or two install-or-use items (mods, skills, built-ins, installed plugins) from the rollout checklist, one prompt at a time, and ticks them off. | `/teach`, `/teach 5`, `/teach list`; the 04:14 Hermes ping. |
 | `session-finder` | Finds which session is or ever was on a topic, where it lives, and how to continue it. | `/session-finder`, `/session-finder-all` (adds ended sessions); "tell the agent doing X ...". |
 | `helm` | Answers every waiting session of every TUI from one window. | `/helm`, `/helm-all`, `/helm auto`; "what needs me". |
