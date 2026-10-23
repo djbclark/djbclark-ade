@@ -225,10 +225,13 @@ def test_state_carries_every_documented_field(rig):
 
 
 def test_stale_snapshot_alerts_are_ignored(rig):
+    """A 7 h-old snapshot's projected alert does not count (alert_max_age_s is 6 h): only the
+    stale-data rule is left, which gives watch, never the alert's tight."""
     rig.set_aiuse(aiuse_fixture(weekly=80))
     rig.set_alerts([alert(PROJECTED)], age_s=7 * 3600)
-    assert rig.guard().returncode == 0
-    assert rig.state_json()["snapshot_age_s"] == 7 * 3600
+    assert rig.guard().returncode == 1
+    st = rig.state_json()
+    assert st["snapshot_age_s"] == 7 * 3600 and st["level"] == "watch" and st["stale"] is True
 
 
 def test_missing_snapshot_dir_is_not_an_error(rig):
@@ -662,28 +665,108 @@ def test_n3_claude_dropped_from_available_but_healthy_in_the_snapshot_is_at_leas
         "Claude quota watch: no Fable or Opus Agent-tool sub-agents."]
 
 
-def test_n3_data_older_than_3h_is_reported_stale_and_never_pinged(rig):
+def stale_ping_text(age):
+    return f"djbclark-ade: Claude quota guard: aiuse data {age} old (collector down?)"
+
+
+def test_n3_data_older_than_3h_is_reported_stale_and_level_never_pinged(rig):
     rig.set_aiuse(aiuse_fixture(weekly=25))
     rig.set_alerts([], age_s=4 * 3600)
     r = rig.guard()
     assert r.returncode == 2 and "tight (stale)" in r.stdout and "data 4h00m old" in r.stdout
     st = rig.state_json()
     assert st["stale"] is True and st["data_age_s"] == 4 * 3600 and st["level"] == "tight"
-    assert rig.pings() == []
+    assert rig.pings() == [stale_ping_text("4h00m")]               # no level ping while stale
     rig.set_alerts([], age_s=120)                                  # the collector is back
     r = rig.guard()
     assert "(stale)" not in r.stdout and "data 2m old" in r.stdout
-    assert len(rig.pings()) == 1 and rig.state_json()["stale"] is False
+    assert len(rig.pings()) == 2 and "Claude quota tight: weekly 25% left" in rig.pings()[1]
+    assert rig.state_json()["stale"] is False
 
 
 def test_n3_the_payload_age_counts_too_and_status_shows_it(rig):
     rig.set_aiuse(aiuse_fixture(weekly=25, payload_extra={"age_seconds": 3 * 3600 + 60}))
     rig.set_alerts([], age_s=60)
-    assert rig.guard().returncode == 2 and rig.state_json()["stale"] is True and rig.pings() == []
+    assert rig.guard().returncode == 2 and rig.state_json()["stale"] is True
+    assert rig.pings() == [stale_ping_text("3h01m")]
     s = rig.guard("status")
     assert "tight (stale)" in s.stdout and "data 3h01m old" in s.stdout
     rig.set_aiuse(aiuse_fixture(weekly=25, payload_extra={"age_seconds": 2 * 3600}))
-    assert rig.guard().returncode == 2 and rig.state_json()["stale"] is False and len(rig.pings()) == 1
+    assert rig.guard().returncode == 2 and rig.state_json()["stale"] is False and len(rig.pings()) == 2
+
+
+def test_p1_a_four_hour_old_claude_pool_inside_a_fresh_payload_is_stale(rig):
+    fixture = aiuse_fixture(weekly=25, payload_extra={"age_seconds": 60})
+    for row in fixture["available"]:
+        if row["provider"] == "claude":
+            row["age_seconds"] = 4 * 3600
+    rig.set_aiuse(fixture)
+    rig.set_alerts([], age_s=60)
+    assert rig.guard().returncode == 2
+    st = rig.state_json()
+    assert st["stale"] is True and st["data_age_s"] == 4 * 3600
+    assert rig.pings() == [stale_ping_text("4h00m")]                # no level ping
+
+
+def test_p1_snapshot_rows_are_aged_by_collected_at(rig):
+    account = snapshot_account(weekly=35)
+    account["collected_at"] = (NOW - timedelta(hours=5)).isoformat()
+    rig.set_aiuse(aiuse_fixture(with_claude=False))
+    rig.set_alerts([], age_s=60, accounts=[account])
+    assert rig.guard().returncode == 1
+    st = rig.state_json()
+    assert st["source"] == "snapshot-only" and st["stale"] is True and st["data_age_s"] == 5 * 3600
+    assert rig.pings() == [stale_ping_text("5h00m")]
+
+
+def test_p1_decide_returns_the_rows_age_and_stays_pure(rig, monkeypatch):
+    mod = _load_guard_module(monkeypatch, rig)
+    fixture = aiuse_fixture(weekly=80)
+    fixture["available"][1]["age_seconds"] = 900
+    d = mod.decide(0, fixture, None, [], mod.thresholds(), NOW)
+    assert d["rows_age_s"] == 900 and d["level"] == "ok"
+    assert mod.decide(0, aiuse_fixture(weekly=80), None, [], mod.thresholds())["rows_age_s"] is None
+
+
+def test_p2_stale_at_ok_is_watch_with_a_recollect_line_and_one_ping_per_episode(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=90))
+    rig.set_alerts([], age_s=4 * 3600)
+    r = rig.guard()
+    assert r.returncode == 1 and "watch (stale)" in r.stdout
+    st = rig.state_json()
+    assert st["level"] == "watch" and st["stale"] is True
+    assert st["advice"].splitlines()[-1] == "4. aiuse data 4h00m old: collector down? run `aiuse --live --json`."
+    assert "[quota-guard watch] " in rig.hook().stdout               # the sessions hear about it too
+    assert rig.pings() == [stale_ping_text("4h00m")]
+    assert st["last_stale_pinged_at"] == "2026-10-23T12:00:00Z" and st["last_pinged_level"] is None
+    assert rig.guard().returncode == 1 and len(rig.pings()) == 1     # second stale run: silent
+    rig.set_alerts([], age_s=300)                                   # recovery clears the mark
+    assert rig.guard().returncode == 0
+    st = rig.state_json()
+    assert st["level"] == "ok" and st["stale"] is False and st["last_stale_pinged_at"] is None
+    assert len(rig.pings()) == 1 and st["advice"] == ""
+    rig.set_alerts([], age_s=5 * 3600)                              # a new stale episode pings again
+    assert rig.guard().returncode == 1
+    assert rig.pings() == [stale_ping_text("4h00m"), stale_ping_text("5h00m")]
+
+
+def test_p2_a_failed_stale_ping_is_retried(rig):
+    rig.set_ping_failing()
+    rig.set_aiuse(aiuse_fixture(weekly=90))
+    rig.set_alerts([], age_s=4 * 3600)
+    assert rig.guard().returncode == 1 and rig.state_json()["last_stale_pinged_at"] is None
+    rig.set_ping_ok()
+    assert rig.guard().returncode == 1
+    assert rig.pings() == [stale_ping_text("4h00m")] and rig.state_json()["last_stale_pinged_at"] is not None
+
+
+def test_p2_stale_above_watch_keeps_its_level_and_adds_the_line(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=5))
+    rig.set_alerts([], age_s=4 * 3600)
+    assert rig.guard().returncode == 3
+    st = rig.state_json()
+    assert st["level"] == "critical" and st["advice"].splitlines()[-1].startswith("7. aiuse data 4h00m old")
+    assert rig.pings() == [stale_ping_text("4h00m")]
 
 
 @pytest.mark.parametrize("payload, accounts", [

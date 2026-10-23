@@ -33,9 +33,13 @@ for a reason the snapshot predates). aiuse also drops the Fable pool when the Fa
 exhausted: the Fable window is then read from the snapshot (exhausted = 0% left = `watch`).
 Exit 10 when Claude appears nowhere, on any malformed aiuse or snapshot data, or when another
 check holds <state>.lock for about 5 s. One `hermes-ping` per level per reset period (the mark
-survives level drops; a new weekly `resets_at` clears it). Data older than 3 h (the payload's
-`age_seconds` or the snapshot mtime: a dead collector) is reported with `stale: true`,
-"(stale)" in the human line, and never pinged. `check` holds a flock on <state>.lock, saves
+survives level drops; a new weekly `resets_at` clears it). Data older than 3 h (the oldest of
+the payload's `age_seconds`, every judged row's own `age_seconds` / `collected_at`, and the
+snapshot mtime: a dead collector) sets `stale: true` ("(stale)" in the human line), raises the
+level to at least `watch` with the advice "aiuse data <age> old: collector down? run `aiuse
+--live --json`", suppresses level pings, and sends ONE ping per stale episode (mark
+`last_stale_pinged_at`, cleared when the data is fresh again). `check` holds a flock on
+<state>.lock, saves
 the state before it pings and records the ping afterwards (a ping cut off by a kill is retried
 next run: at least once).
 Thresholds live in THRESHOLDS; env CLAUDE_QUOTA_GUARD_THRESHOLDS (JSON) overrides keys.
@@ -99,7 +103,8 @@ _ADVERSARY = "`acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgmen
 _RUNNING_PROJECTED = re.compile(r"projected to run out.*before reset", re.I | re.S)
 
 
-def _advice(level: str, resets_at: str | None, source: str = "available") -> str:
+def _advice(level: str, resets_at: str | None, source: str = "available",
+            stale_age: float | None = None) -> str:
     if level == "ok":
         return ""
     items = [
@@ -125,6 +130,8 @@ def _advice(level: str, resets_at: str | None, source: str = "available") -> str
     if source == "snapshot-only":
         items.append("aiuse dropped Claude from --available: a live 429 or a note; "
                      "re-check `aiuse --available --json`.")
+    if stale_age is not None:
+        items.append(f"aiuse data {_age_short(stale_age)} old: collector down? run `aiuse --live --json`.")
     return "\n".join(f"{i}. {t}" for i, t in enumerate(items, 1))
 
 
@@ -284,7 +291,18 @@ def snapshot_alerts(snap: dict | None, age: float | None, t: dict) -> list[dict]
 
 # -- the decision ----------------------------------------------------------
 
-def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict) -> dict:
+def _row_age(row: dict, now_dt: datetime | None) -> float | None:
+    """How old a judged row's own reading is: its `age_seconds`, and `collected_at` against now."""
+    ages = [_num(row.get("age_seconds"))]
+    collected = _parse_ts(row.get("collected_at"))
+    if collected is not None and now_dt is not None:
+        ages.append(max(0.0, (now_dt - collected).total_seconds()))
+    ages = [a for a in ages if a is not None]
+    return max(ages) if ages else None
+
+
+def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
+           now_dt: datetime | None = None) -> dict:
     """Level plus the numbers behind it. Pure: no clock, no I/O.
 
     Claude rows come from `aiuse --available`; that list drops every pool with
@@ -362,6 +380,7 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict) 
 
     # Window the level answers to: the lowest remaining among weekly and 5-hour.
     candidates = [w for w in (weekly, five) if w]
+    rows_age = max((a for a in (_row_age(r, now_dt) for r in rows) if a is not None), default=None)
     binding = min(candidates, key=lambda w: w["left"]) if candidates else None
     resets_at = binding["resets_at"] if binding else None
     if not windows:
@@ -370,6 +389,7 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict) 
         weekly_left = weekly["left"] if weekly else None
         five_left = five["left"] if five else None
     return {
+        "rows_age_s": rows_age,
         "level": level,
         "weekly_left": weekly_left,
         "five_hour_left": five_left,
@@ -425,14 +445,8 @@ def _reset_phrase(resets_at) -> str:
     return d.astimezone().strftime("%a %H:%M %Z") if d else "unknown"
 
 
-def ping(level: str, st: dict, t: dict) -> bool:
+def send_ping(msg: str, t: dict) -> bool:
     exe = str(_path("CLAUDE_QUOTA_GUARD_PING", HOME / ".local/bin/hermes-ping"))
-    weekly = st["weekly_left"]
-    first = st["advice"].splitlines()[0] if st["advice"] else ""
-    first = re.sub(r"^\d+\.\s*", "", first)
-    msg = (f"djbclark-ade: Claude quota {level}: weekly "
-           f"{'?' if weekly is None else format(weekly, 'g')}% left, resets "
-           f"{_reset_phrase(st['weekly_resets_at'] or st['resets_at'])}; {first}")
     try:
         r = subprocess.run([exe, msg], capture_output=True, text=True, timeout=t["ping_timeout_s"],
                            check=False, stdin=subprocess.DEVNULL)
@@ -443,6 +457,15 @@ def ping(level: str, st: dict, t: dict) -> bool:
         print(f"claude-quota-guard: ping exited {r.returncode}: {r.stderr.strip()[:200]}", file=sys.stderr)
         return False
     return True
+
+
+def ping(level: str, st: dict, t: dict) -> bool:
+    weekly = st["weekly_left"]
+    first = st["advice"].splitlines()[0] if st["advice"] else ""
+    first = re.sub(r"^\d+\.\s*", "", first)
+    return send_ping(f"djbclark-ade: Claude quota {level}: weekly "
+                     f"{'?' if weekly is None else format(weekly, 'g')}% left, resets "
+                     f"{_reset_phrase(st['weekly_resets_at'] or st['resets_at'])}; {first}", t)
 
 
 def plan_ping(prev: dict, st: dict, t: dict) -> str | None:
@@ -493,27 +516,40 @@ def _check_locked(t: dict) -> dict:
     try:
         rc, data = read_aiuse()
         snap, snap_age = read_snapshot()
-        d = decide(rc, data, snap, snapshot_alerts(snap, snap_age, t), t)
+        d = decide(rc, data, snap, snapshot_alerts(snap, snap_age, t), t, now())
     except (Unreadable, ConfigError):
         raise
     except Exception as e:  # malformed aiuse or snapshot types must never read as `watch` (exit 1)
         raise Unreadable(f"unexpected {type(e).__name__} reading aiuse or the snapshot: {e}")
-    ages = [a for a in (_num(data.get("age_seconds")), snap_age) if a is not None]
-    data_age = max(ages) if ages else None
     st = dict(d)
-    st["advice"] = _advice(st["level"], st["resets_at"], st["source"])
+    # Data age: the oldest of the payload's top-level age, every judged row's own age (a Claude
+    # pool can be hours old inside a fresh snapshot: cswap stalls) and the snapshot file's mtime.
+    ages = [a for a in (_num(data.get("age_seconds")), st.pop("rows_age_s"), snap_age) if a is not None]
+    data_age = max(ages) if ages else None
     st["checked_at"] = _iso(now())
     st["snapshot_age_s"] = None if snap_age is None else round(snap_age)
     st["data_age_s"] = None if data_age is None else round(data_age)
     st["stale"] = data_age is not None and data_age > t["stale_age_s"]
-    due = plan_ping(load_state(), st, t)
+    stale_age = data_age if st["stale"] else None
+    if st["stale"] and _rank(st["level"]) < _rank("watch"):
+        st["level"] = "watch"  # a dead collector: frozen numbers can never climb, so never say ok
+    st["advice"] = _advice(st["level"], st["resets_at"], st["source"], stale_age)
+    prev = load_state()
+    due = plan_ping(prev, st, t)
     if st["stale"]:
-        due = None  # numbers this old (dead collector) are reported, never announced
-    save_state(st)  # before the ping: the hook sees the new level at once
+        due = None  # numbers this old (dead collector) are reported, never announced as a level
+    # One ping per stale episode: the mark is carried while stale and cleared when it ends.
+    stale_ping = st["stale"] and not prev.get("last_stale_pinged_at")
+    st["last_stale_pinged_at"] = prev.get("last_stale_pinged_at") if st["stale"] else None
+    save_state(st)  # before the pings: the hook sees the new level at once
     if due and ping(due, st, t):
         st["last_pinged_level"], st["last_pinged_at"] = due, st["checked_at"]
-        save_state(st)  # a failed ping leaves the mark unset, so the next run retries; a ping cut
-    return st           # off by a kill is retried too (at least once, never silently lost)
+        save_state(st)  # a failed ping leaves the mark unset, so the next run retries
+    if stale_ping and send_ping(f"djbclark-ade: Claude quota guard: aiuse data {_age_short(data_age)} old "
+                                "(collector down?)", t):
+        st["last_stale_pinged_at"] = st["checked_at"]
+        save_state(st)
+    return st  # a ping cut off by a kill is retried next run too: at least once, never silently lost
 
 
 def cmd_check(args) -> int:
@@ -540,15 +576,20 @@ def _fmt(v) -> str:
     return "?" if v is None else f"{v:g}%"
 
 
-def _age_phrase(seconds) -> str:
+def _age_short(seconds) -> str | None:
     if not isinstance(seconds, (int, float)) or isinstance(seconds, bool):
-        return "age unknown"
+        return None
     s = int(seconds)
     if s < 3600:
-        return f"{s // 60}m old"
+        return f"{s // 60}m"
     if s < 86400:
-        return f"{s // 3600}h{s % 3600 // 60:02d}m old"
-    return f"{s // 86400}d{s % 86400 // 3600:02d}h old"
+        return f"{s // 3600}h{s % 3600 // 60:02d}m"
+    return f"{s // 86400}d{s % 86400 // 3600:02d}h"
+
+
+def _age_phrase(seconds) -> str:
+    short = _age_short(seconds)
+    return "age unknown" if short is None else f"{short} old"
 
 
 def _human(st: dict) -> str:

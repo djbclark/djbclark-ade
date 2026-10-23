@@ -90,8 +90,10 @@ skill's snapshot in the same turn.
   `CLAUDE_QUOTA_GUARD_THRESHOLDS`, 69 for `--install` off macOS (launchd only; use a
   systemd user timer or cron). `status [--json]` prints the state without probing. One
   `hermes-ping` per level per reset period (the mark survives level drops; a new weekly
-  reset clears it); data older than 3 hours (a dead collector) is reported `stale: true` /
-  "(stale)" and never pinged. The UserPromptSubmit hook
+  reset clears it); data older than 3 hours (the oldest of the payload's age, each judged
+  pool's own age and the snapshot's: a dead collector) is `stale: true` / "(stale)", is
+  at least `watch` with a "run `aiuse --live --json`" line, suppresses level pings and sends
+  one ping per stale episode. The UserPromptSubmit hook
   `claude/hooks/quota_nudge.py` prints the level's `advice` once per session and level,
   from the state file only (silent when it is missing or over 2 hours old). A lead that
   sees `[quota-guard tight]` hands off and continues on Sonnet 5.5; at `critical` it
