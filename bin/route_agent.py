@@ -230,8 +230,16 @@ POLICY_PATH = resolve_policy_path()
 POLICY: dict[str, Any] = {}
 SERVICE_KEYS = {f.name for f in fields(Service)}
 _SERVICE_REQUIRED = ("name", "cli", "good_at", "billing")
-# The orchestrating session's own model, [lead] in the policy file (2026-10-23).
+# The orchestrating session's own model, [lead] in the policy file (2026-10-23).  LEAD_KEYS are
+# required; `pipeline_effort` (djbclark 2026-10-23: a pipeline-only lead runs Sonnet at medium) is
+# optional and defaults to LEAD_PIPELINE_EFFORT_DEFAULT so an older policy file still loads.
 LEAD_KEYS = ("model", "effort", "pipeline_model")
+LEAD_PIPELINE_EFFORT_DEFAULT = "high"
+# The effort levels a Claude lead can be set to: Paseo's CLAUDE_EFFORT_LEVELS (its `xhigh` list,
+# Paseo.app app.asar, 2026-10-23) and Claude Code's `/effort` / SDK `effort` type.  Not acp-run's
+# wider list (none, minimal, ultra, default): no Claude surface takes those.
+CLAUDE_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+LEAD_ALL_KEYS = LEAD_KEYS + ("pipeline_effort",)
 
 # Populated by apply_policy from the TOML; names and types match the former
 # module-level literals so every caller and test keeps working.
@@ -307,10 +315,20 @@ def load_policy(path: Path | str) -> dict[str, Any]:
         if section not in data or not isinstance(data[section], dict):
             raise ValueError(f"routing policy {path}: missing [{section}] table")
     lead = data.get("lead")
-    if lead is not None and (not isinstance(lead, dict)
-                             or not all(isinstance(lead.get(k), str) and lead[k] for k in LEAD_KEYS)):
-        raise ValueError(f"routing policy {path}: [lead] must be a table with non-empty string keys "
-                         + ", ".join(LEAD_KEYS))
+    if lead is not None:
+        if not isinstance(lead, dict):
+            raise ValueError(f"routing policy {path}: [lead] must be a table")
+        unknown = set(lead) - set(LEAD_ALL_KEYS)
+        if unknown:
+            raise ValueError(f"routing policy {path}: [lead] unknown key(s) {sorted(unknown)}")
+        if not all(isinstance(lead.get(k), str) and lead[k] for k in LEAD_KEYS):
+            raise ValueError(f"routing policy {path}: [lead] must be a table with non-empty string keys "
+                             + ", ".join(LEAD_KEYS))
+        lead.setdefault("pipeline_effort", LEAD_PIPELINE_EFFORT_DEFAULT)
+        for key in ("effort", "pipeline_effort"):
+            if lead[key] not in CLAUDE_EFFORT_LEVELS:
+                raise ValueError(f"routing policy {path}: [lead] {key} {lead[key]!r} must be one of "
+                                 + ", ".join(CLAUDE_EFFORT_LEVELS))
     return data
 
 
@@ -500,7 +518,10 @@ def policy_markdown() -> str:
                   "The session that dispatches slices runs on this, not on Fable "
                   "(Fable only through the `fable-deep` sub-agent or a `frontier` slice).", "",
                   "| key | value |", "|---|---|"]
-        lines += [f"| lead.{k} | {lead[k]} |" for k in LEAD_KEYS]
+        lines += [f"| lead.{k} | {lead[k]} |" for k in LEAD_ALL_KEYS]
+        lines += ["", f"pipeline lead: {lead['pipeline_model']} at {lead['pipeline_effort']}; "
+                      "high for judgment turns (`/effort high`, or the Paseo `--thinking` setting; "
+                      "back to the pipeline effort afterwards)."]
     return "\n".join(lines) + "\n"
 
 
