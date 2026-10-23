@@ -4060,7 +4060,9 @@ def test_an_unreadable_directory_under_an_untracked_one_makes_the_embedded_searc
         rec = mod.scan_checkout(work, remote=False)
     finally:
         deep.chmod(0o755)
-    assert rec["verdict"].startswith("scan incomplete: ls-files --others"), rec["verdict"]
+    # whichever git step meets the unreadable directory first says so (`ls-files --others` on git 2.4x on macOS, the
+    # `status` step on the Linux CI's git): the record must read incomplete, never complete
+    assert rec["verdict"].startswith(("scan incomplete: ls-files --others", "scan incomplete: status")), rec["verdict"]
 
 
 def test_embedded_repositories_keep_cr_names_every_one_of_many_and_pointer_gitdirs_are_not_archived_as_commits(tmp_path):
