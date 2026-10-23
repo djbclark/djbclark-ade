@@ -84,18 +84,22 @@ def modified_fmt(sub=""):
     `--ignore-failed-read` would otherwise turn them into rc 0 (adversary rounds 36 and 37: an ambiguous-refname
     warning is not a loss; Codex pass 34: an unreadable changed file vanished from the archive with rc 0); a listed
     directory (a submodule gitlink whose HEAD moved, a file replaced by a directory) is not recursed into: the
-    submodule row covers its content, and its ignored files must not be copied (round 36)."""
+    submodule row covers its content, and its ignored files must not be copied (round 36). tar's own failure (an
+    unwritable archive path) prints its stderr and fails the row instead of hiding behind the later grep; a tracked
+    path whose parent is now a file (`Cannot stat: Not a directory`) has nothing to keep, like a missing one; a
+    `TAR_OPTIONS` from the operator's environment must not change the archive (round 40)."""
     w, d = "git -C {}" + sub, "<DEST>/{}" + sub
     return (f"mkdir -p {d} && {w} {DIFF_OPTS} > {d}/modified.patch && {w} {DIFF_OPTS} --cached > {d}/staged.patch "
             f"&& {w} ls-files -z --modified > {d}/modified.list 2> {d}/modified.err "
             f"&& {w} diff --cached -z --name-only --diff-filter=d >> {d}/modified.list 2>> {d}/modified.err "
-            f"&& LC_ALL=C \"$GTAR\" -cf {d}/modified.tar -C {d} modified.list -C {{}}{sub} --null --no-recursion --ignore-failed-read -T {d}/modified.list 2>> {d}/modified.err "
-            f"&& {{{{ ! grep -qv -e '^warning: ' -e ': Cannot stat: No such file or directory$' {d}/modified.err || {{{{ cat {d}/modified.err >&2; echo 'modified capture FAILED' >&2; false; }}}}; }}}} "
+            f"&& {{{{ TAR_OPTIONS= LC_ALL=C \"$GTAR\" -cf {d}/modified.tar -C {d} modified.list -C {{}}{sub} --null --no-recursion --ignore-failed-read -T {d}/modified.list 2>> {d}/modified.err "
+            f"|| {{{{ cat {d}/modified.err >&2; echo 'modified capture FAILED' >&2; false; }}}}; }}}} "
+            f"&& {{{{ ! grep -qv -e '^warning: ' -e ': Cannot stat: No such file or directory$' -e ': Cannot stat: Not a directory$' {d}/modified.err || {{{{ cat {d}/modified.err >&2; echo 'modified capture FAILED' >&2; false; }}}}; }}}} "
             f"&& \"$GCP\" -- \"$({w} rev-parse --absolute-git-dir)/index\" {d}/index")
 
 
 def modified_values(raw_p, ck):
-    return (ck, raw_p, ck, raw_p, ck, raw_p, ck, ck, raw_p, ck, ck, ck, ck, raw_p, ck, ck, ck, ck, raw_p, ck)
+    return (ck, raw_p, ck, raw_p, ck, raw_p, ck, ck, raw_p, ck, ck, ck, ck, raw_p, ck, ck, ck, ck, ck, raw_p, ck)
 
 
 def stash_values(raw_p, ck):
@@ -111,17 +115,19 @@ def stash_values(raw_p, ck):
 # second manifest `hidden-children.list`) and archived without recursion, so an ignored file or a nested
 # repository's content is never copied (adversary round 39). tar's stderr goes to `hidden.err`: `--ignore-failed-read`
 # returns 0 with an unreadable file left out, so any line there but `Cannot stat: No such file or directory` (an
-# assume-unchanged or sparse path with no file: nothing to keep) fails the row loudly (Codex pass 34)
+# assume-unchanged or sparse path with no file: nothing to keep) or `Not a directory` (its parent is a file now) fails
+# the row loudly (Codex pass 34). The children step's stderr goes there too: `ls-files --others` skips an unreadable
+# subdirectory with a warning and rc 0, the same loss class (round 40); tar's own failure prints its stderr
 HIDDEN_FMT = ("mkdir -p <DEST>/{} && git -C {} ls-files -z -v > <DEST>/{}/hidden.raw "
               "&& \"$GSED\" -z -n 's/^[a-z] //p; t; s/^S //p' <DEST>/{}/hidden.raw > <DEST>/{}/hidden.list "
-              "&& < <DEST>/{}/hidden.list xargs -0 -r git --literal-pathspecs -C {} ls-files -z --others --exclude-standard -- > <DEST>/{}/hidden-children.list "
-              "&& LC_ALL=C \"$GTAR\" -cf <DEST>/{}/hidden.tar -C <DEST>/{} hidden.list hidden-children.list -C {} --null --no-recursion --ignore-failed-read "
-              "-T <DEST>/{}/hidden.list -T <DEST>/{}/hidden-children.list 2> <DEST>/{}/hidden.err "
-              "&& {{ ! grep -qv ': Cannot stat: No such file or directory$' <DEST>/{}/hidden.err || {{ cat <DEST>/{}/hidden.err >&2; echo 'hidden capture FAILED' >&2; false; }}; }}")
+              "&& < <DEST>/{}/hidden.list xargs -0 -r git --literal-pathspecs -C {} ls-files -z --others --exclude-standard -- > <DEST>/{}/hidden-children.list 2> <DEST>/{}/hidden.err "
+              "&& {{ TAR_OPTIONS= LC_ALL=C \"$GTAR\" -cf <DEST>/{}/hidden.tar -C <DEST>/{} hidden.list hidden-children.list -C {} --null --no-recursion --ignore-failed-read "
+              "-T <DEST>/{}/hidden.list -T <DEST>/{}/hidden-children.list 2>> <DEST>/{}/hidden.err || {{ cat <DEST>/{}/hidden.err >&2; echo 'hidden capture FAILED' >&2; false; }}; }} "
+              "&& {{ ! grep -qv -e ': Cannot stat: No such file or directory$' -e ': Cannot stat: Not a directory$' <DEST>/{}/hidden.err || {{ cat <DEST>/{}/hidden.err >&2; echo 'hidden capture FAILED' >&2; false; }}; }}")
 
 
 def hidden_values(raw_p, ck):
-    return (ck, raw_p, ck, ck, ck, ck, raw_p, ck, ck, ck, raw_p, ck, ck, ck, ck, ck)
+    return (ck, raw_p, ck, ck, ck, ck, raw_p, ck, ck, ck, ck, raw_p, ck, ck, ck, ck, ck, ck)
 
 
 # a commit reachable from a reflog alone (a reset, amend or rebase left it): no ref holds it, no bundle above
@@ -681,7 +687,9 @@ def render(d):
                 cmd.append(shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
                                   ck, raw_p, f"{ck}/local-only.bundle")
                            + " " + again)
-            need = need if need.startswith(("yes", "**yes")) else "yes: origin did not answer; bundle, or re-scan"
+            need = need if need.startswith(("yes", "**yes")) else (
+                "yes: origin not queried (its url holds a credential); bundle" if credential
+                else "yes: origin did not answer; bundle, or re-scan")
         if submodules:
             # the scan's status and local-only counts ignore submodules and discovery stops at the superproject: a
             # submodule's modified, untracked or unpushed work is in no count above (Codex pass 18 on PR 27)

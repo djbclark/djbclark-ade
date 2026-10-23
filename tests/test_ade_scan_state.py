@@ -2091,11 +2091,11 @@ def test_an_assume_unchanged_or_skip_worktree_edit_is_counted_and_archived(tmp_p
     assert "\"$GSED\" -z -n 's/^[a-z] //p; t; s/^S //p' <DEST>/checkouts/abs/p/h/hidden.raw > <DEST>/checkouts/abs/p/h/hidden.list" in row
     # round 39: children through git's ignore rules, no recursion; Codex pass 34: tar's stderr fails the row
     assert ("< <DEST>/checkouts/abs/p/h/hidden.list xargs -0 -r git --literal-pathspecs -C /p/h ls-files -z --others "
-            "--exclude-standard -- > <DEST>/checkouts/abs/p/h/hidden-children.list") in row
-    assert ("LC_ALL=C \"$GTAR\" -cf <DEST>/checkouts/abs/p/h/hidden.tar -C <DEST>/checkouts/abs/p/h hidden.list hidden-children.list -C /p/h "
+            "--exclude-standard -- > <DEST>/checkouts/abs/p/h/hidden-children.list 2> <DEST>/checkouts/abs/p/h/hidden.err") in row  # round 40
+    assert ("{ TAR_OPTIONS= LC_ALL=C \"$GTAR\" -cf <DEST>/checkouts/abs/p/h/hidden.tar -C <DEST>/checkouts/abs/p/h hidden.list hidden-children.list -C /p/h "
             "--null --no-recursion --ignore-failed-read -T <DEST>/checkouts/abs/p/h/hidden.list -T <DEST>/checkouts/abs/p/h/hidden-children.list "
-            "2> <DEST>/checkouts/abs/p/h/hidden.err") in row
-    assert ("{ ! grep -qv ': Cannot stat: No such file or directory$' <DEST>/checkouts/abs/p/h/hidden.err || "
+            "2>> <DEST>/checkouts/abs/p/h/hidden.err || { cat <DEST>/checkouts/abs/p/h/hidden.err >&2; echo 'hidden capture FAILED' >&2; false; }; }") in row
+    assert ("{ ! grep -qv -e ': Cannot stat: No such file or directory$' -e ': Cannot stat: Not a directory$' <DEST>/checkouts/abs/p/h/hidden.err || "
             "{ cat <DEST>/checkouts/abs/p/h/hidden.err >&2; echo 'hidden capture FAILED' >&2; false; }; }") in row
     assert doc.HIDDEN_FMT.count("{}") == len(doc.hidden_values("/p", "c"))
     ck = doc.checkout_dir(str(work))
@@ -2139,6 +2139,23 @@ def test_an_assume_unchanged_or_skip_worktree_edit_is_counted_and_archived(tmp_p
         finally:
             (work / "a.txt" / "child").chmod(0o644)
         assert run.returncode != 0 and "hidden capture FAILED" in run.stderr and "Permission denied" in run.stderr, run.stderr
+        # round 40: an unreadable subdirectory under the replaced path: `ls-files --others` skips it with a warning
+        # and rc 0, so the children step's stderr must fail the row, not vanish
+        (work / "a.txt" / "s").mkdir()
+        (work / "a.txt" / "s" / "deep").write_text("deep\n")
+        (work / "a.txt" / "s").chmod(0)
+        try:
+            run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+        finally:
+            (work / "a.txt" / "s").chmod(0o755)
+        assert run.returncode != 0 and "hidden capture FAILED" in run.stderr and "could not open directory" in run.stderr, run.stderr
+        shutil.rmtree(work / "a.txt" / "s")
+    # round 40: tar's own failure (an archive path it cannot write) is printed and fails the row
+    shutil.rmtree(tmp_path / "dest")
+    (tmp_path / "dest" / ck / "hidden.tar").mkdir(parents=True)
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode != 0 and "hidden capture FAILED" in run.stderr and "hidden.tar" in run.stderr, run.stderr
+    shutil.rmtree(tmp_path / "dest" / ck / "hidden.tar")
     # a hidden path with no file at all (sparse, or an assume-unchanged deletion) has no bytes to keep: no failure
     shutil.rmtree(work / "a.txt")
     run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
@@ -2572,12 +2589,13 @@ def test_capture_plan_keeps_staged_changes_and_every_stash():
            "git -C /p/w diff --no-ext-diff --no-textconv --no-color --binary --cached > <DEST>/checkouts/abs/p/w/staged.patch" in row
     # Codex pass 21: a plain diff drops a binary file's bytes; pass 30: a textconv filter replaces them, and an
     # unmerged entry's bytes are in no patch at all, so the changed files and the index are archived too
-    assert ('"$GTAR" -cf <DEST>/checkouts/abs/p/w/modified.tar -C <DEST>/checkouts/abs/p/w modified.list -C /p/w --null '
-            '--no-recursion --ignore-failed-read -T <DEST>/checkouts/abs/p/w/modified.list') in row
+    assert ('{ TAR_OPTIONS= LC_ALL=C "$GTAR" -cf <DEST>/checkouts/abs/p/w/modified.tar -C <DEST>/checkouts/abs/p/w modified.list -C /p/w --null '
+            '--no-recursion --ignore-failed-read -T <DEST>/checkouts/abs/p/w/modified.list 2>> <DEST>/checkouts/abs/p/w/modified.err || '
+            "{ cat <DEST>/checkouts/abs/p/w/modified.err >&2; echo 'modified capture FAILED' >&2; false; }; }") in row  # round 40: tar's own failure is printed
     assert "2> <DEST>/checkouts/abs/p/w/modified.err" in row  # round 36
-    assert "{ ! grep -qv -e '^warning: ' -e ': Cannot stat: No such file or directory$' <DEST>/checkouts/abs/p/w/modified.err || " \
+    assert "{ ! grep -qv -e '^warning: ' -e ': Cannot stat: No such file or directory$' -e ': Cannot stat: Not a directory$' <DEST>/checkouts/abs/p/w/modified.err || " \
            "{ cat <DEST>/checkouts/abs/p/w/modified.err >&2; echo 'modified capture FAILED' >&2; false; }; }" in row  # round 37: loud, and a plain warning is no failure
-    assert "--ignore-failed-read -T <DEST>/checkouts/abs/p/w/modified.list 2>> <DEST>/checkouts/abs/p/w/modified.err && { ! grep" in row  # Codex pass 34: tar's stderr too
+    assert "--ignore-failed-read -T <DEST>/checkouts/abs/p/w/modified.list 2>> <DEST>/checkouts/abs/p/w/modified.err || { cat <DEST>/checkouts/abs/p/w/modified.err >&2; echo 'modified capture FAILED' >&2; false; }; } && { ! grep" in row  # Codex pass 34: tar's stderr too; round 40: its failure printed
     assert mod.modified_fmt().count("{}") == len(mod.modified_values("/p", "c")) == mod.modified_fmt("/<sub>").count("{}")
     assert '"$GCP" -- "$(git -C /p/w rev-parse --absolute-git-dir)/index" <DEST>/checkouts/abs/p/w/index' in row
     assert "3 stashes" in row and "stash0.patch" not in row and "bundle create <DEST>/checkouts/abs/p/w/stashes" not in row
@@ -2757,6 +2775,21 @@ def test_modified_capture_archives_an_unmerged_binary_file_and_ignores_textconv(
     run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
     assert "warning:" in (tmp_path / "dest" / ck / "modified.err").read_text()
+    # round 40: a tracked path whose parent directory is now a file (`Cannot stat: Not a directory`) has nothing to
+    # keep, like a missing one: no failure
+    (repo / "e").mkdir()
+    (repo / "e" / "f.txt").write_text("tracked\n")
+    git(repo, "add", "e/f.txt")
+    shutil.rmtree(repo / "e")
+    (repo / "e").write_text("now a file\n")
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    assert "Not a directory" in (tmp_path / "dest" / ck / "modified.err").read_text()
+    # round 40: tar's own failure (an archive path it cannot write) is printed and fails the row
+    (tmp_path / "dest" / ck / "modified.tar").unlink()
+    (tmp_path / "dest" / ck / "modified.tar").mkdir()
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode != 0 and "modified capture FAILED" in run.stderr and "modified.tar" in run.stderr, run.stderr
 
 
 def test_a_cow_pasture_gets_its_own_patch_and_archive_rows():
