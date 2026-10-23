@@ -167,7 +167,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
-- `acp-run` named `env` instead of `crush-acp` for the crush wrapper, so a missing `crush-acp` skipped `ACP_RUN_BIN_WAIT` and exit 127 (and `--list` showed it `ok`); `acp-dispatch` kept the not-installed probe result per model, so every model of a missing agent paid the 90 s wait again, and now keeps it per agent; the detached `waiter:` hint always said `timeout 7200000`, and now says when the wait is longer than that 2 h maximum (or unlimited) and to re-arm the same line (Codex 4322594869, 4323297404, 4324164145; PR TBD).
+- `acp-run` named `env` instead of `crush-acp` for the crush wrapper, so a missing `crush-acp` skipped `ACP_RUN_BIN_WAIT` and exit 127 (and `--list` showed it `ok`); `acp-dispatch` kept the not-installed probe result per model, so every model of a missing agent paid the 90 s wait again, and now keeps it per agent; the detached `waiter:` hint always said `timeout 7200000`, and now says when the wait is longer than that 2 h maximum (or unlimited) and to re-arm the same line (Codex 4322594869, 4323297404, 4324164145) (#38).
 - `self-slash --finish --successor` after its first live run (2026-10-23): reads the agent id behind Paseo 0.13's
   `Using workspace <id>` line before the JSON (the successor started but this agent was not archived); copies the old
   agent's `--mode` only to the same provider (an omp `full` made `paseo run` refuse a claude successor), else
