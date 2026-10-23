@@ -21,13 +21,15 @@ config unrecognised <key>`): a config that is unreadable is `(unreadable)`, a sy
 a submodule whose `.git` is a directory or a gitfile naming a git dir the walk did not vet (outside
 `modules/`, or in a pruned `objects/`) is `(gitdir outside modules)`, a gitfile that is not one line of
 `gitdir: <path>` is `(gitdir unreadable)`, a `.gitmodules` path that is not an index gitlink but has a `.git`
-is `(gitmodules path not a gitlink)`, one that is absolute, empty or holds `..`, or whose `.gitmodules` entry holds a
-control character, is `(gitmodules path unusual)`,
+is `(gitmodules path not a gitlink)`, one that is absolute, empty or holds `..`, or whose `.gitmodules` entry
+or submodule path holds a control character, a space, a zero-width, joiner, filler, variation-selector, tag or bidi
+character, a non-UTF-8 byte or (a path) a quote, is `(gitmodules path unusual)`,
 a submodule path with a symlink component is `(symlink)`, a submodule directory holding files but no `.git` is
 `(submodule has files but no .git)`, and an entry of a module git dir that differs from `HEAD`, `config`,
 `config.worktree` or `commondir` only in letter case, or that the file system opens as one of those names, is
-`(unrecognised entry)`: nothing is trusted that git would read elsewhere, and the plan runs git only at paths the
-scan vetted.
+`(unrecognised entry)`: nothing is trusted that git would read elsewhere. The record carries `submodules_vetted`,
+the sorted paths of the checked-out submodules that passed every check, and the plan runs git only at those paths,
+each quoted in the command, never from a template or a listing of `.gitmodules`.
 Every later git call also turns fsmonitor, hooks and signature display off, drops every GIT_*
 variable from the environment, reads no global or system config, ignores submodules in `status`
 (so a checkout with submodules carries the flag `submodules not inspected`, never a bare
@@ -136,7 +138,7 @@ GIT_CONFIG_VALUE_0=<url> (git 2.31+): never in argv, where any process could rea
 asked (`origin unreachable`, one line on stderr). `--fetch` runs inside the checkout as `fetch origin`.
 Extra flag `submodules not inspected`: the checkout has submodules; `status` ignores their state, so
 the verdict says nothing about them (it is that flag, not `clean and pushed`, when nothing else applies)
-and the capture plan always lists the checkout with an instruction to scan each submodule as its own checkout.
+and the capture plan always lists the checkout, with one quoted command set per path in the record's `submodules_vetted`.
 Extra flag `origin tip not fetched`: the branch is on origin at a commit this checkout cannot
 compare with HEAD (add --fetch); `ahead_of_origin` then still counts those commits.
 Flag `origin tips not fetched: <n>` (--remote): n live origin tips whose objects are not here (the
@@ -172,6 +174,7 @@ import hashlib
 import shutil
 import signal
 import stat
+import unicodedata
 import subprocess
 import sys
 import tempfile
@@ -597,27 +600,44 @@ def git_common_dir(path: Path) -> Path | None:
     return (path / out.strip()).resolve() if rc == 0 and out.strip() else None
 
 
+# characters a terminal draws as nothing or as something else that the categories below do not name (adversary
+# round 46: U+00AD, U+034F, the Hangul fillers, U+180E, the variation selectors, the tag characters)
+INVISIBLE_RANGES = ((0x00A0, 0x00A0), (0x00AD, 0x00AD), (0x034F, 0x034F), (0x115F, 0x1160), (0x180E, 0x180E),
+                    (0x2060, 0x206F), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0), (0xFFF9, 0xFFFB),
+                    (0xE0000, 0xE007F), (0xE0100, 0xE01EF))
+INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Cn", "Zs", "Zl", "Zp")  # `Zs` holds the ASCII space too
+
+
 def unusual_char(c: str) -> bool:
     """A character that a terminal draws as something else, or not at all: a C0, DEL or C1 control, a Unicode line or
-    paragraph separator, a zero-width or bidi-control character, a BOM, or a non-UTF-8 byte (a lone surrogate)."""
+    paragraph separator, a zero-width, joiner, bidi-control, filler, variation-selector or tag character, a BOM, any
+    space (ASCII whitespace included), a private-use or unassigned code point, or a non-UTF-8 byte (a lone
+    surrogate). Defence in depth: the plan runs git only at vetted, quoted paths and shows no listing of
+    `.gitmodules`, so a spoofed display no longer reaches the human (round 47)."""
     o = ord(c)
     return (o < 32 or 127 <= o < 160 or 0x2028 <= o <= 0x2029 or 0x200B <= o <= 0x200F or 0x202A <= o <= 0x202E
-            or 0x2066 <= o <= 0x2069 or o == 0xFEFF or 0xD800 <= o <= 0xDFFF)
+            or 0x2066 <= o <= 0x2069 or o == 0xFEFF or 0xD800 <= o <= 0xDFFF
+            or any(lo <= o <= hi for lo, hi in INVISIBLE_RANGES) or unicodedata.category(c) in INVISIBLE_CATEGORIES)
 
 
-def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str | None]:
+def unusual_path(p: str) -> bool:
+    """A submodule path the plan will not name: an unusual character (a space and a non-UTF-8 byte included) or a
+    quote, which a quoted shell command and a markdown cell could still render in a way no one expects."""
+    return any(unusual_char(c) or c in "'\"" for c in p)
+
+def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str | None, list[str]]:
     """(has submodules, first config key of any submodule's git dir outside the allowlist, or a parenthesised
-    reason the git dir cannot be vetted).
+    reason the git dir cannot be vetted, the sorted submodule paths the scan vetted).
 
     Reads `<git-common-dir>/modules/**/config` and `config.worktree` with `git config --file`, which executes
-    nothing. The plan then tells the human to run git inside each submodule, so anything that would make git read
+    nothing. The plan then tells the human to run git inside each vetted submodule, so anything that would make git read
     its config elsewhere ends the check with a reason instead (Codex passes 37 and 38, adversary round 42): a
     symlink anywhere under `modules/` (`os.walk` never descends into one, so its config would go unread) or at a
     submodule's `.git`, a `commondir` file (the module's config and objects are in another directory), and a
     submodule whose `.git` is a directory or a gitfile naming a git dir the walk did not vet (`(gitdir outside
     modules)`: outside `modules/`, or inside a pruned `objects/`). The submodule paths checked are the index
-    gitlinks and the `.gitmodules` paths together, since the plan's own listing reads `.gitmodules` (a listed path
-    that is not a gitlink but has a `.git` is `(gitmodules path not a gitlink)`); the gitfile is parsed as git
+    gitlinks and the `.gitmodules` paths together (a listed path that is not a gitlink but has a `.git` is
+    `(gitmodules path not a gitlink)`); the gitfile is parsed as git
     parses it (the whole file after `gitdir: `, trailing line breaks dropped), and one git would read differently
     from the plan's one-line parse (a second line, an embedded CR, a NUL) is `(gitdir unreadable)` (adversary round 43,
     44). A `.gitmodules` path that is absolute, empty or holds `..` is `(gitmodules path unusual)` (the kernel follows
@@ -627,16 +647,22 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
     letter case (a case-insensitive file system opens it as that name, the exact-name walk never read it) is
     `(unrecognised entry)` (round 44); so is any name the file system itself opens as one of those (`lexists` of the
     exact name when the listing lacks it: APFS folds the `ﬁ` ligature and the Kelvin sign, which `str.lower` does not,
-    round 45). A `.gitmodules` entry whose key or value holds a control character is `(gitmodules path unusual)`: the
-    plan's own listing of `.gitmodules` prints keys and values raw, so a newline or an escape sequence in one would
-    show the human a path the scan never vetted (round 45).
+    round 45). A `.gitmodules` entry whose key or value holds an unusual character (`unusual_char`: a control, any
+    space, a zero-width, joiner, filler, variation-selector, tag or bidi character, a non-UTF-8 byte), and any
+    submodule path (gitlink or listed) that holds one or a quote, is `(gitmodules path unusual)`: the plan names
+    submodule paths itself, quoted, from the third result below, but a path no one can read or retype as it is
+    stays out of it (rounds 45 and 46, defence in depth since round 47).
+    The third result is the sorted list of vetted submodule paths (record key `submodules_vetted`): every path
+    of the gitlink and `.gitmodules` union that passed every check and has a `.git` gitfile naming a vetted git dir,
+    a real checked-out submodule, which is the only place the plan runs git. A de-initialised, empty directory
+    is not in it (nothing to capture there beyond the `modules/` archive).
     A submodule with no `.git` at all (de-initialised, never initialised) is an empty directory the plan's guard
     refuses; one holding files but no `.git` is `(submodule has files but no .git)`, so the whole-directory
     archive keeps them."""
     modules = common / "modules" if common else None
     present = (path / ".gitmodules").exists() or bool(modules and modules.is_dir())
     if not present:
-        return False, None
+        return False, None, []
     env = git_env()
     env["GIT_CEILING_DIRECTORIES"] = str(Path(neutral_cwd()).parent)
 
@@ -660,34 +686,34 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
             # a case-insensitive file system opens `CONFIG` as `config` and `Commondir` as `commondir`, names the
             # exact-name tests below never read (round 44): refuse any such entry
             if any(n.lower() == g.lower() and n != g for n in dirs + files for g in GIT_DIR_NAMES):
-                return True, "(unrecognised entry)"
+                return True, "(unrecognised entry)", []
             # and ask the file system itself: APFS folds more than `str.lower` does (`conﬁg` with the ligature, the
             # Kelvin sign), so a name absent from the listing that still opens is one git would read (round 45)
             if any(g not in files and g not in dirs and os.path.lexists(os.path.join(root, g)) for g in GIT_DIR_NAMES):
-                return True, "(unrecognised entry)"
+                return True, "(unrecognised entry)", []
             if "HEAD" in files or "config" in files:  # a module's git dir: skip its object store and logs
                 dirs[:] = sorted(d for d in dirs if d not in MODULE_INTERNAL_DIRS)
                 vetted.add(os.path.realpath(root))
             else:  # `modules/` itself or a dir that only groups nested modules: every name is a module
                 dirs[:] = sorted(dirs)
             if any((Path(root) / d).is_symlink() for d in dirs):
-                return True, "(symlink)"
+                return True, "(symlink)", []
             if "commondir" in files:
-                return True, "(commondir)"
+                return True, "(commondir)", []
             for name in ("config", "config.worktree"):
                 if name in files:
                     bad = offender(Path(root) / name)
                     if bad:
-                        return True, bad
+                        return True, bad, []
     # every submodule path (index gitlinks and `.gitmodules` paths, which the plan's own listing reads) must have no
     # `.git` at all (an empty directory: the plan's guard refuses it) or a gitfile naming a git dir the walk vetted
     rc, out = git(path, "ls-files", "-z", "-s", errors="surrogateescape")
     if rc != 0:
-        return True, "(unreadable)"
+        return True, "(unreadable)", []
     gitlinks = {os.path.normpath(e.split("\t", 1)[1]) for e in out.split("\0") if e.startswith("160000 ") and "\t" in e}
     listed: set[str] = set()
     if (path / ".gitmodules").is_symlink():
-        return True, "(symlink)"
+        return True, "(symlink)", []
     if (path / ".gitmodules").is_file():
         rc, out = git(path, "config", "--file", ".gitmodules", "--get-regexp", "-z", r"^submodule\..*\.path$",
                       errors="surrogateescape")
@@ -697,54 +723,58 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
             # the human a path the scan never vetted (round 45); a bidi override, a zero-width or line-separator
             # character or a non-UTF-8 byte (a lone surrogate here) can misdraw one the same way
             if any(unusual_char(c) for k, v in entries for c in k + v):
-                return True, "(gitmodules path unusual)"
+                return True, "(gitmodules path unusual)", []
             raw_listed = [v for _, v in entries]
             # `l/../nested` is `nested` to normpath and `a/b/../nested` to the kernel when `l` is a symlink (round 44):
             # a path that is absolute, empty or holds `..` is one the plan's listing would run git at unvetted
             if any(not p or os.path.isabs(p) or ".." in p.split("/") for p in raw_listed):
-                return True, "(gitmodules path unusual)"
+                return True, "(gitmodules path unusual)", []
             listed = {os.path.normpath(p) for p in raw_listed}
         elif rc != 1:  # 1: no such key
-            return True, "(unreadable)"
+            return True, "(unreadable)", []
+    if any(unusual_path(p) for p in gitlinks | listed):
+        return True, "(gitmodules path unusual)", []
+    subs: list[str] = []
     for sub in sorted(gitlinks | listed):
         # a symlink component (the gitlink's own entry, or a parent) sends `git -C <sup>/<sub>` to a repository the
         # walk never vetted (round 44): the resolved path must be the resolved superproject plus the entry
         if os.path.realpath(path / sub) != os.path.join(os.path.realpath(path), sub):
-            return True, "(symlink)"
+            return True, "(symlink)", []
         dotgit = path / sub / ".git"
         try:
             mode = os.lstat(dotgit).st_mode
         except (FileNotFoundError, NotADirectoryError):
             try:  # no `.git`: de-initialised or never initialised, an empty directory; files there would be in no capture
                 if any(True for _ in os.scandir(path / sub)):
-                    return True, "(submodule has files but no .git)"
+                    return True, "(submodule has files but no .git)", []
             except OSError:
                 pass
             continue
         if stat.S_ISLNK(mode):
-            return True, "(symlink)"
+            return True, "(symlink)", []
         if sub not in gitlinks:
-            return True, "(gitmodules path not a gitlink)"
+            return True, "(gitmodules path not a gitlink)", []
         if not stat.S_ISREG(mode):
-            return True, "(gitdir outside modules)"
+            return True, "(gitdir outside modules)", []
         try:
             raw = dotgit.read_bytes()
         except OSError:
-            return True, "(gitdir unreadable)"
+            return True, "(gitdir unreadable)", []
         # git's own gitfile reader: the whole file after `gitdir: `, trailing line breaks dropped. A path holding a
         # line break is one git would use and the plan's one-line parse would not (round 43): refused
         if not raw.startswith(b"gitdir: "):
-            return True, "(gitdir unreadable)"
+            return True, "(gitdir unreadable)", []
         rel = raw[len(b"gitdir: "):].rstrip(b"\r\n")
         if not rel or b"\n" in rel or b"\r" in rel or b"\0" in rel:  # a NUL once raised out of realpath (round 44)
-            return True, "(gitdir unreadable)"
+            return True, "(gitdir unreadable)", []
         try:
             target = os.path.realpath(os.path.join(os.fsencode(dotgit.parent), rel))
         except ValueError:
-            return True, "(gitdir unreadable)"
+            return True, "(gitdir unreadable)", []
         if os.fsdecode(target) not in vetted:
-            return True, "(gitdir outside modules)"
-    return True, None
+            return True, "(gitdir outside modules)", []
+        subs.append(sub)  # a real checked-out submodule: `.git` names a git dir the walk vetted
+    return True, None, subs
 
 
 def stash_count(path: Path, common: Path | None) -> int | None:
@@ -1029,7 +1059,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     if Path(top.strip()).resolve() != path.resolve():
         return skipped_record(path, SKIP_WORKTREE)
     common = git_common_dir(path)
-    has_submodules, bad_key = submodule_config_check(path, common)
+    has_submodules, bad_key, submodules_vetted = submodule_config_check(path, common)
     if bad_key:
         return skipped_record(path, f"skipped: submodule config unrecognised {bad_key}", [bad_key])
     rc, branch = git(path, "rev-parse", "--abbrev-ref", "HEAD")
@@ -1305,6 +1335,9 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         "upstream": upstream, "unpushed": unpushed if upstream else "no upstream",
         "ahead_of_origin": ahead_of_origin, "stashes": stashes,
         "index_hidden": index_hidden, "reflog_only_commits": reflog_only,
+        # the paths the plan may run git at: checked-out submodules the scan vetted (`submodule_config_check`); the
+        # doc renders one quoted command set per path, so nothing is ever typed or pasted into a template (round 47)
+        "submodules_vetted": submodules_vetted,
         "local_only_commits": local_only,
         # only a live `--remote` answer verifies anything: true when no live tip is missing, false when
         # one is or when `--remote` asked and origin did not answer (a failed query is unverified, not "not

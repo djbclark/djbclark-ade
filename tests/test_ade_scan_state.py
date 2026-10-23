@@ -470,7 +470,7 @@ def test_fetch_does_not_recurse_into_submodules(tmp_path, monkeypatch):
     assert not marker.exists()
     # 2. with both guards bypassed, the fetch itself still does not recurse
     monkeypatch.setattr(mod, "unsafe_config", lambda path: [])
-    monkeypatch.setattr(mod, "submodule_config_check", lambda path, common: (True, None))
+    monkeypatch.setattr(mod, "submodule_config_check", lambda path, common: (True, None, []))
     mod._remote_cache.clear()
     c = mod.scan_git([roots], remote=True, fetch=True)[0]
     assert "origin tip not fetched" not in c["flags"] and not marker.exists()
@@ -1197,6 +1197,37 @@ def doc_checkout(path, **kw):
 
 def section_3_2(text: str) -> str:
     return text.split("### 3.2")[1].split("## 4.")[0]
+
+
+def unescape_span(text: str) -> str:
+    """The shell text inside a markdown code span as `code()` wrote it (`&`, `<`, `>` and `|` in values escaped)."""
+    import html
+    return html.unescape(text).replace("\\|", "|")
+
+
+def unmark(span: str) -> str:
+    """The shell text of one whole code span, fence included."""
+    m = re.fullmatch(r"(`+) (.*) \1", span, re.S) or re.fullmatch(r"(`)(.*)\1", span, re.S)
+    assert m, span
+    return unescape_span(m.group(2))
+
+
+PLAN_PREFIX = ("GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); "
+               "GCP=$(command -v gcp || command -v cp); ")
+SHELLS = [s for s in ("bash", "zsh", "sh") if shutil.which(s)]
+
+
+def plan_commands(row: str) -> list[str]:
+    """The shell commands of a submodule row, in order, as a human would paste them: the code spans that open with the
+    submodule guard, plus the `modules/` archive (the row's other commands belong to the checkout itself)."""
+    spans = re.findall(r"(?<!`)(`+) (.+?) \1(?!`)|(?<!`)`([^`]+)`(?!`)", row)
+    cmds = [unescape_span(fenced or single) for _fence, fenced, single in spans]
+    return [c for c in cmds if c.startswith("{ [ -e ") or c.startswith("mkdir -p <DEST>/") and c.endswith(" modules")]
+
+
+def run_plan(shell: str, cmd: str, dest: Path, cwd: Path) -> subprocess.CompletedProcess:
+    return subprocess.run([shell, "-c", PLAN_PREFIX + cmd.replace("<DEST>", str(dest))], cwd=cwd,
+                          capture_output=True, text=True, env=GIT_ENV)
 
 
 def test_capture_plan_keeps_a_checkout_whose_only_unpushed_work_is_on_another_branch():
@@ -2723,15 +2754,20 @@ def test_the_submodule_row_refuses_a_deinitialised_submodule_and_archives_its_gi
     sha = git(sup / "sub", "rev-parse", "HEAD").strip()
     git(sup, "submodule", "deinit", "-f", "sub")
     assert not (sup / "sub" / ".git").exists() and (moddir / "HEAD").is_file()
-    prefix = "GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); "
+    prefix = PLAN_PREFIX
     dest = str(tmp_path / "dest")
     raw = str(sup)
-    for fmt, values in ((doc.SUB_GUARD + "git -C {}/<sub> status --porcelain", (raw, raw)),
-                        (doc.SUB_GUARD + doc.modified_fmt("/<sub>"), (raw, *doc.modified_values(raw, "c"))),
-                        (doc.SUB_GUARD + doc.hidden_fmt("/<sub>"), (raw, *doc.hidden_values(raw, "c")))):
-        cmd = prefix + fmt.format(*map(doc.shquote, values)).replace("<sub>", "sub").replace("<DEST>", dest)
+    # the scan itself no longer lists the de-initialised path: the row has no per-submodule command for it
+    rec = load().scan_checkout(sup, remote=False)
+    assert rec["submodules_vetted"] == [] and "submodules not inspected" in rec["flags"], rec
+    row = next(r for r in section_3_2(doc.render(doc_scan([rec]))).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
+    assert "no submodule is checked out" in row and "{ [ -e" not in row and "<sub>" not in row
+    # and a record that does list it (the submodule was removed after the scan) still fails each command, saying so
+    for span in doc.submodule_commands(raw, "c", "sub"):
+        cmd = prefix + unmark(span).replace("<DEST>", dest)
         run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
         assert run.returncode != 0 and run.stdout == "", (cmd, run.stdout, run.stderr)
+        assert "submodule sub: not a checked-out submodule (skipped)" in run.stderr, run.stderr
     assert not (tmp_path / "dest").exists()
     cmd = prefix + doc.MODULES_FMT.format(*map(doc.shquote, doc.modules_values(raw, "c"))).replace("<DEST>", dest)
     run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
@@ -2888,10 +2924,10 @@ def test_the_submodule_row_archives_an_index_hidden_edit(tmp_path):
     git(sub, "update-index", "--assume-unchanged", "a.txt")
     assert git(sub, "status", "--porcelain") == "" and git(sub, "ls-files", "--modified") == ""
     prefix = "GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); "
-    cmd = prefix + doc.hidden_fmt("/sub").format(*map(doc.shquote, doc.hidden_values(str(sup), "c"))).replace("<DEST>", str(tmp_path / "dest"))
+    cmd = prefix + unmark(doc.submodule_commands(str(sup), "c", "sub")[4]).replace("<DEST>", str(tmp_path / "dest"))
     run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
-    tar = tarfile.open(tmp_path / "dest" / "c" / "sub" / "hidden.tar")
+    tar = tarfile.open(tmp_path / "dest" / "c" / "submodules" / "sub" / "hidden.tar")
     assert "a.txt" in tar.getnames() and tar.extractfile("a.txt").read() == b"hidden edit\n", tar.getnames()
 
 
@@ -2900,39 +2936,43 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
     the plan listed nothing and discovery never reaches the submodule."""
     mod = load_doc()
     flag = "submodules not inspected"
-    quiet = doc_checkout("/p/sup", flags=[flag], verdict=flag)
+    quiet = doc_checkout("/p/sup", flags=[flag], verdict=flag, submodules_vetted=["sub"])
     dirty = doc_checkout("/p/both", flags=["dirty", flag], verdict="dirty", modified=1)
     text = mod.render(doc_scan([quiet, dirty, doc_checkout("/p/clean")]))
     rows = section_3_2(text).splitlines()
     row = next(r for r in rows if r.startswith("| /p/sup "))
     assert "submodules not inspected: their modified, untracked or unpushed content is in no count here" in row
-    assert "git -C /p/sup config --file .gitmodules --get-regexp" in row
-    assert "git -C /p/sup/<sub> status --porcelain" in row and "git -C /p/sup/<sub> log --oneline --branches --tags --not --remotes" in row
-    assert "git -C /p/sup/<sub> bundle create <DEST>/checkouts/abs/p/sup/<sub>/all.bundle --all" in row
+    # adversary rounds 43-46: no `<sub>` template and no `.gitmodules` listing for the human to read and paste back
+    assert "<sub>" not in row and "--get-regexp" not in row and "list them with" not in row
+    sp, d = "/p/sup/sub", "<DEST>/checkouts/abs/p/sup/submodules/sub"
+    guard = "{ [ -e /p/sup/sub/.git ] || { echo 'submodule sub: not a checked-out submodule (skipped)' >&2; false; }; } && "
+    assert f"git -C {sp} status --porcelain" in row and f"git -C {sp} log --oneline --branches --tags --not --remotes" in row
+    assert f"git -C {sp} bundle create {d}/all.bundle --all" in row
     # Codex pass 26: a bundle holds commits only; the dirty worktree needs the patches and the untracked archive
-    assert "git -C /p/sup/<sub> diff --no-ext-diff --no-textconv --no-color --binary > <DEST>/checkouts/abs/p/sup/<sub>/modified.patch" in row
-    assert "git -C /p/sup/<sub> diff --no-ext-diff --no-textconv --no-color --binary --cached > <DEST>/checkouts/abs/p/sup/<sub>/staged.patch" in row
-    assert "-C /p/sup/<sub> --null --no-recursion --ignore-failed-read -T <DEST>/checkouts/abs/p/sup/<sub>/modified.list" in row  # Codex pass 30
-    assert '"$(git -C /p/sup/<sub> rev-parse --absolute-git-dir)/index" <DEST>/checkouts/abs/p/sup/<sub>/index' in row
+    assert f"git -C {sp} diff --no-ext-diff --no-textconv --no-color --binary > {d}/modified.patch" in row
+    assert f"git -C {sp} diff --no-ext-diff --no-textconv --no-color --binary --cached > {d}/staged.patch" in row
+    assert f"-C {sp} --null --no-recursion --ignore-failed-read -T {d}/modified.list" in row  # Codex pass 30
+    assert f'"$(git -C {sp} rev-parse --absolute-git-dir)/index" {d}/index' in row
     # Codex pass 36: an assume-unchanged or skip-worktree edit inside the submodule needs the index-hidden archive too
-    assert "git -C /p/sup/<sub> ls-files -z -v > <DEST>/checkouts/abs/p/sup/<sub>/hidden.raw" in row
-    assert "-C /p/sup/<sub> --null --no-recursion --ignore-failed-read -T <DEST>/checkouts/abs/p/sup/<sub>/hidden.list" in row
-    assert mod.hidden_fmt("/<sub>").count("{}") == len(mod.hidden_values("/p", "c")) == mod.HIDDEN_FMT.count("{}")
-    assert ("git -C /p/sup/<sub> ls-files -z --others --exclude-standard > <DEST>/checkouts/abs/p/sup/<sub>/untracked.list "
-            "&& TAR_OPTIONS= \"$GTAR\" -C /p/sup/<sub> --null -T <DEST>/checkouts/abs/p/sup/<sub>/untracked.list -cf <DEST>/checkouts/abs/p/sup/<sub>/untracked.tar") in row
+    assert f"git -C {sp} ls-files -z -v > {d}/hidden.raw" in row
+    assert f"-C {sp} --null --no-recursion --ignore-failed-read -T {d}/hidden.list" in row
+    assert mod.modified_fmt().count("{}") == len(mod.modified_values("/p", "c"))
+    assert mod.HIDDEN_FMT.count("{}") == len(mod.hidden_values("/p", "c"))
+    assert (f"git -C {sp} ls-files -z --others --exclude-standard > {d}/untracked.list "
+            f"&& TAR_OPTIONS= \"$GTAR\" -C {sp} --null -T {d}/untracked.list -cf {d}/untracked.tar") in row
     assert "the scanner skips absorbed submodules" in row
     # adversary round 42: a de-initialised submodule is an empty directory; every command is gated on its `.git`,
     # and the module git dirs are archived
-    assert row.count("{ [ -e /p/sup/<sub>/.git ] || { echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }; } && ") == 6
-    assert "{ [ -e /p/sup/<sub>/.git ] || { echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }; } && git -C /p/sup/<sub> status --porcelain" in row
-    assert "{ [ -e /p/sup/<sub>/.git ] || { echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }; } && git -C /p/sup/<sub> log --oneline" in row
-    assert "{ [ -e /p/sup/<sub>/.git ] || { echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }; } && mkdir -p <DEST>/checkouts/abs/p/sup/<sub> && GIT_ADVICE=0" in row
-    assert "{ [ -e /p/sup/<sub>/.git ] || { echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }; } && mkdir -p <DEST>/checkouts/abs/p/sup/<sub> && git -C /p/sup/<sub> diff" in row
-    assert "{ [ -e /p/sup/<sub>/.git ] || { echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }; } && mkdir -p <DEST>/checkouts/abs/p/sup/<sub> && git -C /p/sup/<sub> ls-files -z -v" in row
-    assert "{ [ -e /p/sup/<sub>/.git ] || { echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }; } && git -C /p/sup/<sub> ls-files -z --others" in row
+    assert row.count(guard) == 6
+    assert guard + f"git -C {sp} status --porcelain" in row
+    assert guard + f"git -C {sp} log --oneline" in row
+    assert guard + f"mkdir -p {d} && GIT_ADVICE=0" in row
+    assert guard + f"mkdir -p {d} && git -C {sp} diff" in row
+    assert guard + f"mkdir -p {d} && git -C {sp} ls-files -z -v" in row
+    assert guard + f"mkdir -p {d} && git -C {sp} ls-files -z --others" in row
     assert ("mkdir -p <DEST>/checkouts/abs/p/sup && d=$(git -C /p/sup rev-parse --git-common-dir) && TAR_OPTIONS= \"$GTAR\" "
             "-cf <DEST>/checkouts/abs/p/sup/modules.tar -C /p/sup -C \"$d\" modules") in row
-    assert row.rstrip().endswith("| yes: inspect each submodule first |")
+    assert row.count("modules.tar") == 1  # once per superproject, not per submodule
     both = next(r for r in rows if r.startswith("| /p/both "))
     assert "1 modified tracked file(s)" in both and "submodules not inspected" in both
     assert both.rstrip().endswith("| yes: decide whether they are work |")
@@ -2940,13 +2980,13 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
     assert "A checkout flagged `submodules not inspected` is always listed too" in section_3_2(text)
     # adversary round 25 (MEDIUM): the by-hand commands went through code(), not shcode(); a path shaped like a
     # shell expansion ran when pasted
-    evil = doc_checkout("/p/sub$(touch PWNED_SUB)", flags=[flag], verdict=flag)
+    evil = doc_checkout("/p/sub$(touch PWNED_SUB)", flags=[flag], verdict=flag, submodules_vetted=["sub"])
     rows = section_3_2(mod.render(doc_scan([evil]))).splitlines()
     row = next(r for r in rows if r.startswith("| /p/sub"))
     plain = row.replace("\\$", "$").replace("\\(", "(").replace("\\)", ")")
-    assert "git -C '/p/sub$(touch PWNED_SUB)'/<sub> status --porcelain" in plain
-    assert "git -C '/p/sub$(touch PWNED_SUB)'/<sub> log --oneline" in plain
-    assert "git -C '/p/sub$(touch PWNED_SUB)'/<sub> bundle create" in plain
+    assert "git -C '/p/sub$(touch PWNED_SUB)/sub' status --porcelain" in plain
+    assert "git -C '/p/sub$(touch PWNED_SUB)/sub' log --oneline" in plain
+    assert "git -C '/p/sub$(touch PWNED_SUB)/sub' bundle create" in plain
     assert "-C /p/sub$(touch" not in plain
     # round 25 (LOW): a basename starting with `-` was read by tar as an option; `--` ends the options
     dash = doc_checkout("/p/-opt", flags=["scan incomplete: status rc=124"], verdict="scan incomplete: status rc=124",
@@ -2954,6 +2994,150 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
                         local_only_commits=None, on_origin=None)
     row = next(r for r in section_3_2(mod.render(doc_scan([dash]))).splitlines() if r.startswith("| /p/-opt "))
     assert "-cf <DEST>/checkouts/abs/p/-opt/whole.tar -- -opt" in row
+
+
+def test_the_submodule_row_renders_quoted_commands_for_each_vetted_path_only(tmp_path):
+    """Adversary rounds 43-46 on PR 27 (MEDIUM, four times): the row was a template (`<sub>`, unquoted) plus a listing of
+    `.gitmodules` for the human to read and paste back, so a subsection name with spaces spoofed the listing and a
+    value with `$(...)`, a backtick, `;` or a glob ran a command or reached an unvetted repository's
+    `core.fsmonitor`. The scan now records the vetted paths and the row names each one, quoted; every hostile entry
+    either refuses the checkout or leaves `sub` the only path with commands, and every command of the row runs in bash,
+    zsh and sh without a marker or a PWNED file."""
+    mod, doc = load(), load_doc()
+    roots, sup, moddir = make_super_with_submodule(tmp_path)
+    marker = tmp_path / "MARKER"
+    script = marker_script(tmp_path / "fsm.sh", marker)
+    for name in ("a/nested", "xnested"):
+        nested = make_repo(sup / name)
+        git(nested, "config", "core.fsmonitor", str(script))
+    (sup / ".gitignore").write_text("a/\nxnested/\n")
+    git(sup / "a" / "nested", "status", "--porcelain")
+    if not marker.exists():
+        pytest.skip("this git does not run core.fsmonitor on `status`; nothing to guard")
+    marker.unlink()
+    base = (sup / ".gitmodules").read_text()
+    hostile = {
+        "spaced key": '[submodule "x.path a/nested' + " " * 300 + 'submodule.y"]\n\tpath = zzz\n\turl = ./zzz\n',
+        "dollar": '[submodule "d"]\n\tpath = "$(touch PWNED-dollar)"\n\turl = ./d\n',
+        "backtick": '[submodule "b"]\n\tpath = "`touch PWNED-bt`"\n\turl = ./b\n',
+        "semicolon": '[submodule "s"]\n\tpath = "x;touch PWNED-semi"\n\turl = ./s\n',
+        "glob": '[submodule "g"]\n\tpath = "x*"\n\turl = ./g\n',
+        "word joiner": '[submodule "w"]\n\tpath = "a\u2060/nested"\n\turl = ./w\n',
+        "none": "",
+    }
+    rendered = []
+    for label, entry in hostile.items():
+        (sup / ".gitmodules").write_text(base + entry)
+        rec = next(c for c in mod.scan_git([roots], remote=False) if c["path"] == str(sup.resolve()))
+        if rec["verdict"].startswith("skipped"):
+            assert rec["verdict"] == "skipped: submodule config unrecognised (gitmodules path unusual)", (label, rec["verdict"])
+            continue
+        rendered.append(label)
+        assert rec["submodules_vetted"] == ["sub"], (label, rec["submodules_vetted"])
+        text = doc.render(doc_scan([rec]))
+        row = next(r for r in section_3_2(text).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
+        cmds = plan_commands(row)
+        assert len(cmds) == 7 and sum(c.startswith("{ [ -e ") for c in cmds) == 6, (label, cmds)
+        assert "<sub>" not in row and "--get-regexp" not in row
+        ck = doc.checkout_dir(rec["path"])
+        for shell in SHELLS:
+            dest = tmp_path / f"dest-{label.replace(' ', '-')}-{shell}"
+            for cmd in cmds:
+                run = run_plan(shell, cmd, dest, tmp_path)
+                assert run.returncode == 0, (shell, label, cmd, run.stderr)
+            for name in ("all.bundle", "modified.patch", "staged.patch", "hidden.tar", "untracked.tar"):
+                assert (dest / ck / "submodules" / "sub" / name).is_file(), (shell, label, name)
+            assert (dest / ck / "modules.tar").is_file()
+        assert not list(tmp_path.rglob("PWNED*")) and not marker.exists(), label
+    assert "none" in rendered and "spaced key" not in rendered and "word joiner" not in rendered
+
+
+def test_a_submodule_path_with_a_space_a_quote_or_an_invisible_character_skips_the_checkout(tmp_path):
+    """Round 46 on PR 27 (MEDIUM 1, LOW 3): a path git accepts but a person cannot read or retype as it is
+    (a space, either quote, a no-break space, a word joiner) is `(gitmodules path unusual)`, whether `.gitmodules`
+    lists it or only the index holds the gitlink."""
+    mod = load()
+    for i, name in enumerate(("my sub", "it's", 'say"hi', "a\u00a0b", "a\u2060b")):
+        base = tmp_path / f"c{i}"
+        origin = make_repo(base / "origin", "f.txt")
+        sup = make_repo(base / "roots" / "super")
+        p = subprocess.run(["git", "-c", "protocol.file.allow=always", "submodule", "add", str(origin), name],
+                           cwd=sup, env=GIT_ENV, capture_output=True, text=True)
+        assert p.returncode == 0, (name, p.stderr)
+        git(sup, "commit", "-m", "add submodule")
+        rec = mod.scan_checkout(sup, remote=False)
+        assert rec["verdict"] == "skipped: submodule config unrecognised (gitmodules path unusual)", (name, rec["verdict"])
+        assert rec.get("submodules_vetted") is None
+        # the index alone: a gitlink the `.gitmodules` file does not list
+        (sup / ".gitmodules").write_text('[submodule "other"]\n\tpath = other\n\turl = ./other\n')
+        assert mod.scan_checkout(sup, remote=False)["verdict"] == rec["verdict"], name
+
+
+def test_a_non_utf8_gitlink_path_is_refused_and_never_reaches_the_record(tmp_path):
+    """The index holds raw bytes: a path that is not UTF-8 decodes (surrogateescape) to a lone surrogate, which
+    `json.dump` cannot write as UTF-8; it is `(gitmodules path unusual)`, never a `submodules_vetted` entry."""
+    mod = load()
+    repo = make_repo(tmp_path / "roots" / "r")
+    sha = git(repo, "rev-parse", "HEAD").strip()
+    name = os.fsdecode(b"\xff-sub")
+    p = subprocess.run(["git", "update-index", "--add", "--cacheinfo", f"160000,{sha},{name}"], cwd=repo, env=GIT_ENV,
+                       capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    (repo / ".gitmodules").write_text('[submodule "x"]\n\tpath = x\n\turl = ./x\n')
+    rec = mod.scan_checkout(repo, remote=False)
+    assert rec["verdict"] == "skipped: submodule config unrecognised (gitmodules path unusual)", rec["verdict"]
+    assert rec.get("submodules_vetted") is None
+    json.dumps(rec, ensure_ascii=False).encode("utf-8")
+
+
+def test_unusual_char_covers_the_invisible_and_space_classes_of_round_46():
+    """Round 46 (LOW 3): word joiner, soft hyphen, CGJ, the Hangul fillers, variation selectors, tags, interlinear
+    annotation, any space, and the categories Cf, Co, Cn, Zs, Zl, Zp; ordinary text in any script stays."""
+    mod = load()
+    refused = [0x20, 0x09, 0x0A, 0xA0, 0xAD, 0x34F, 0x115F, 0x1160, 0x180E, 0x2002, 0x200D, 0x2028, 0x2029, *range(0x2060, 0x2070),
+               0x3164, *range(0xFE00, 0xFE10), 0xFFA0, 0xFFF9, 0xFFFA, 0xFFFB, 0xE000, 0x0378, 0xE0000, 0xE0020, 0xE007F,
+               0xE0100, 0xE01EF, 0xD800]
+    for o in refused:
+        assert mod.unusual_char(chr(o)), hex(o)
+    for ch in "aZ09-_./~é日한" + "\u0928\u093f":
+        assert not mod.unusual_char(ch), hex(ord(ch))
+    assert mod.unusual_path("a b") and mod.unusual_path("it's") and mod.unusual_path('a"b') and not mod.unusual_path("dir/sub-1.x")
+
+
+def test_a_vetted_path_with_shell_and_markdown_metacharacters_is_quoted_in_every_command(tmp_path):
+    """The path the record names is the only value the row carries; a real directory named like an injection runs
+    nothing and gets its own destination below `submodules/`."""
+    doc = load_doc()
+    weird = "w $(touch PWNED-q) 'x\"y;* a|b&c<d>`bt`"
+    sup = tmp_path / "sup"
+    nested = make_repo(sup / weird)
+    (nested / "u.txt").write_text("untracked\n")
+    cmds = [unmark(s) for s in doc.submodule_commands(str(sup), "c", weird)]
+    assert len(cmds) == 6 and all(c.startswith("{ [ -e ") for c in cmds)
+    for shell in SHELLS:
+        dest = tmp_path / f"dest-{shell}"
+        for cmd in cmds:
+            run = run_plan(shell, cmd, dest, tmp_path)
+            assert run.returncode == 0, (shell, cmd, run.stderr)
+        got = dest / "c" / "submodules" / weird
+        assert (got / "all.bundle").is_file() and (got / "hidden.tar").is_file(), (shell, list(dest.rglob("*")))
+    assert not list(tmp_path.rglob("PWNED*"))
+
+
+def test_a_record_without_submodules_vetted_renders_the_rescan_note_and_no_per_submodule_command():
+    """An older scan JSON has no list of vetted paths: the row names none and says to re-scan; an empty list from this
+    version says no submodule is checked out. Either way the `modules/` archive stays."""
+    doc = load_doc()
+    flag = "submodules not inspected"
+    archive = "d=$(git -C /p/sup rev-parse --git-common-dir)"
+    old = doc_checkout("/p/sup", flags=[flag], verdict=flag)
+    row = next(r for r in section_3_2(doc.render(doc_scan([old]))).splitlines() if r.startswith("| /p/sup "))
+    assert "re-scan with this version to get per-submodule commands" in row and archive in row
+    for gone in ("{ [ -e", "status --porcelain", "<sub>", "--get-regexp", "submodules/"):
+        assert gone not in row, gone
+    none = doc_checkout("/p/sup", flags=[flag], verdict=flag, submodules_vetted=[])
+    row = next(r for r in section_3_2(doc.render(doc_scan([none]))).splitlines() if r.startswith("| /p/sup "))
+    assert "no submodule is checked out" in row and archive in row and "{ [ -e" not in row and "re-scan with this" not in row
 
 
 def test_capture_plan_keeps_staged_changes_and_every_stash():
@@ -2977,7 +3161,7 @@ def test_capture_plan_keeps_staged_changes_and_every_stash():
     assert "{ ! grep -qv -e '^warning: ' -e ': Cannot stat: No such file or directory$' -e ': Cannot stat: Not a directory$' <DEST>/checkouts/abs/p/w/modified.err || " \
            "{ cat <DEST>/checkouts/abs/p/w/modified.err >&2; echo 'modified capture FAILED' >&2; false; }; }" in row  # round 37: loud, and a plain warning is no failure
     assert "--ignore-failed-read -T <DEST>/checkouts/abs/p/w/modified.list 2>> <DEST>/checkouts/abs/p/w/modified.err || { cat <DEST>/checkouts/abs/p/w/modified.err >&2; echo 'modified capture FAILED' >&2; false; }; } && { ! grep" in row  # Codex pass 34: tar's stderr too; round 40: its failure printed
-    assert mod.modified_fmt().count("{}") == len(mod.modified_values("/p", "c")) == mod.modified_fmt("/<sub>").count("{}")
+    assert mod.modified_fmt().count("{}") == len(mod.modified_values("/p", "c"))
     assert '"$GCP" -- "$(git -C /p/w rev-parse --absolute-git-dir)/index" <DEST>/checkouts/abs/p/w/index' in row
     assert "3 stashes" in row and "stash0.patch" not in row and "bundle create <DEST>/checkouts/abs/p/w/stashes" not in row
     assert "log -g --format=%gd refs/stash" in row and "stash show -p --no-ext-diff --no-textconv --no-color --binary --include-untracked" in row

@@ -80,8 +80,9 @@ SYMLINK_GITDIR_FMT = ("g={}/.git && [ -f \"$g/HEAD\" ] && [ -d \"$g/objects\" ] 
                       "&& TAR_OPTIONS= \"$GTAR\" -C \"$g\" -cf <DEST>/{} . || {{ echo 'gitdir capture FAILED' >&2; false; }}")
 
 
-def modified_fmt(sub=""):
-    """The modified-files capture for one checkout (`sub` is `/<sub>` on a submodule row): a worktree patch and an
+def modified_fmt():
+    """The modified-files capture for one checkout, or for one submodule (its path and its `<DEST>` directory are
+    the values): a worktree patch and an
     index patch (DIFF_OPTS), then an archive of every changed worktree file with its manifest, and a copy of the
     index file. An unmerged entry's bytes are in no patch (`git diff` prints `Binary files differ` or `* Unmerged
     path` for it), so the files themselves are archived too (Codex pass 30 on PR 27): `ls-files --modified` lists
@@ -103,11 +104,11 @@ def modified_fmt(sub=""):
     names objects the deleted checkout no longer has, so every object `ls-files -u` names is packed to
     `unmerged-<hash>.pack` (`pack-objects` fails loudly on a missing object; no unmerged entry gives an empty
     pack) (Codex pass 39)."""
-    w, d = "git -C {}" + sub, "<DEST>/{}" + sub
+    w, d = "git -C {}", "<DEST>/{}"
     return (f"mkdir -p {d} && {w} {DIFF_OPTS} > {d}/modified.patch && {w} {DIFF_OPTS} --cached > {d}/staged.patch "
             f"&& {w} ls-files -z --modified > {d}/modified.list 2> {d}/modified.err "
             f"&& {w} diff --cached -z --name-only --diff-filter=d >> {d}/modified.list 2>> {d}/modified.err "
-            f"&& {{{{ TAR_OPTIONS= LC_ALL=C \"$GTAR\" -cf {d}/modified.tar -C {d} modified.list -C {{}}{sub} --null --no-recursion --ignore-failed-read -T {d}/modified.list 2>> {d}/modified.err "
+            f"&& {{{{ TAR_OPTIONS= LC_ALL=C \"$GTAR\" -cf {d}/modified.tar -C {d} modified.list -C {{}} --null --no-recursion --ignore-failed-read -T {d}/modified.list 2>> {d}/modified.err "
             f"|| {{{{ cat {d}/modified.err >&2; echo 'modified capture FAILED' >&2; false; }}}}; }}}} "
             f"&& {{{{ ! grep -qv -e '^warning: ' -e ': Cannot stat: No such file or directory$' -e ': Cannot stat: Not a directory$' {d}/modified.err || {{{{ cat {d}/modified.err >&2; echo 'modified capture FAILED' >&2; false; }}}}; }}}} "
             f"&& \"$GCP\" -- \"$({w} rev-parse --absolute-git-dir)/index\" {d}/index "
@@ -159,25 +160,42 @@ def untracked_values(raw_p, ck):
     return (ck, raw_p, f"{ck}/untracked.list", raw_p, f"{ck}/untracked.list", f"{ck}/untracked.tar")
 
 
-def hidden_fmt(sub=""):
-    """HIDDEN_FMT for a path `sub` below the checkout (`/<sub>` in the submodule row, Codex pass 36: an
-    assume-unchanged or skip-worktree edit inside a submodule is in no status, diff or `ls-files` output, so the
-    bundle, patches and untracked archive all miss it); the same values as HIDDEN_FMT."""
-    return HIDDEN_FMT.replace("<DEST>/{}", "<DEST>/{}" + sub).replace("-C {} ", "-C {}" + sub + " ")
-
-
 # a de-initialised submodule is an empty directory whose git dir (`<common>/modules/<sub>`) keeps its commits: every
 # by-hand command run there acts on the SUPERPROJECT at rc 0 (adversary round 42), so each one in the submodule row
 # is gated on the gitlink's `.git` (the scanner has verified it is a gitfile naming a vetted git dir), saying so when
 # it stops (round 43: a silent rc 1 reads as "nothing happened"), and the module git dirs themselves are archived,
-# which needs no worktree and runs nothing
-SUB_GUARD = "{{ [ -e {}/<sub>/.git ] || {{ echo '<sub>: not a checked-out submodule (skipped)' >&2; false; }}; }} && "
+# which needs no worktree and runs nothing. Since round 47 the row holds one command set per path the scan vetted
+# (`submodules_vetted`), that path quoted in every command: the human substitutes and pastes nothing
+SUB_GUARD = "{{ [ -e {}/.git ] || {{ echo {} >&2; false; }}; }} && "  # values: the submodule's path, the message
 MODULES_FMT = ("mkdir -p <DEST>/{} && d=$(git -C {} rev-parse --git-common-dir) "
                "&& TAR_OPTIONS= \"$GTAR\" -cf <DEST>/{}/modules.tar -C {} -C \"$d\" modules")
 
 
 def modules_values(raw_p, ck):
     return (ck, raw_p, ck, raw_p)
+
+
+def submodule_commands(raw_p, ck, sub):
+    """The six guarded by-hand commands for one vetted submodule `sub` (a path below the checkout `raw_p`, as the
+    scanner recorded it in `submodules_vetted`), each a code span with every value quoted. The submodule's path
+    is the repository value, so each existing format runs unchanged against it; its artifacts go to
+    `<DEST>/<ck>/submodules/<sub>`, below a `submodules/` directory of their own so a submodule named like one of the
+    checkout's own artifacts (`modified.patch`) cannot collide with it, and two submodules never share one."""
+    sp, sd = os.path.join(raw_p, sub), f"{ck}/submodules/{sub}"
+    g = (sp, f"submodule {sub}: not a checked-out submodule (skipped)")  # never starts with `~/`, which shquote leaves open
+    return [
+        shcode(SUB_GUARD + "git -C {} status --porcelain", *g, sp),
+        shcode(SUB_GUARD + "git -C {} log --oneline --branches --tags --not --remotes", *g, sp),
+        shcode(SUB_GUARD + "mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{}/all.bundle --all",
+               *g, sd, sp, sd),
+        # a bundle holds committed objects only: the modified, staged and untracked files need the same patches and
+        # archive as an ordinary checkout (Codex pass 26 on PR 27)
+        shcode(SUB_GUARD + modified_fmt(), *g, *modified_values(sp, sd)),
+        # and the index-hidden archive: an assume-unchanged or skip-worktree edit in a submodule is in none of the
+        # above (Codex pass 36)
+        shcode(SUB_GUARD + HIDDEN_FMT, *g, *hidden_values(sp, sd)),
+        shcode(SUB_GUARD + UNTRACKED_FMT, *g, *untracked_values(sp, sd)),
+    ]
 
 
 # a commit reachable from a reflog alone (a reset, amend or rebase left it): no ref holds it, no bundle above
@@ -748,27 +766,29 @@ def render(d):
             # submodule's modified, untracked or unpushed work is in no count above (Codex pass 18 on PR 27)
             what.append("submodules not inspected: their modified, untracked or unpushed content is in no count here")
             # an absorbed submodule carries `core.worktree`, which this scanner refuses (`skipped: worktree redirected`,
-            # adversary round 24), so the inspection is by hand, inside each submodule
-            cmd.append("list them with " + shcode("git -C {} config --file .gitmodules --get-regexp '^submodule\\..*\\.path$'", raw_p)
-                       + ", then in each: " + shcode(SUB_GUARD + "git -C {}/<sub> status --porcelain", raw_p, raw_p) + ", "
-                       + shcode(SUB_GUARD + "git -C {}/<sub> log --oneline --branches --tags --not --remotes", raw_p, raw_p) + ", "
-                       + shcode(SUB_GUARD + "mkdir -p <DEST>/{}/<sub> && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {}/<sub> bundle create <DEST>/{}/<sub>/all.bundle --all",
-                                raw_p, ck, raw_p, ck)
-                       # a bundle holds committed objects only: the modified, staged and untracked files need the
-                       # same patches and archive as an ordinary checkout (Codex pass 26 on PR 27)
-                       + ", " + shcode(SUB_GUARD + modified_fmt("/<sub>"), raw_p, *modified_values(raw_p, ck))
-                       # and the index-hidden archive: an assume-unchanged or skip-worktree edit in a submodule is in
-                       # none of the above (Codex pass 36)
-                       + ", " + shcode(SUB_GUARD + hidden_fmt("/<sub>"), raw_p, *hidden_values(raw_p, ck))
-                       + ", " + shcode(SUB_GUARD + "git -C {}/<sub> ls-files -z --others --exclude-standard > <DEST>/{}/<sub>/untracked.list "
-                                       "&& TAR_OPTIONS= \"$GTAR\" -C {}/<sub> --null -T <DEST>/{}/<sub>/untracked.list -cf <DEST>/{}/<sub>/untracked.tar",
-                                       raw_p, raw_p, ck, raw_p, ck, ck)
-                       # the module git dirs hold a de-initialised or removed submodule's commits, which no command
-                       # above can reach (adversary round 42)
-                       + " and " + shcode(MODULES_FMT, *modules_values(raw_p, ck))
-                       + " before any cleanup (each command fails, saying so, outside a real submodule checkout: a de-initialised "
-                       "one is an empty directory whose commits live under the git dir's `modules/`, which the last "
-                       "archive keeps; the scanner skips absorbed submodules: `core.worktree`)")
+            # adversary round 24), so the inspection is by hand, inside each submodule. The paths are the ones the scan
+            # vetted (`submodules_vetted`), each quoted in its own commands: no template, no `.gitmodules` listing for
+            # the human to read and paste back (adversary rounds 43-46)
+            vetted = c.get("submodules_vetted")
+            modules = shcode(MODULES_FMT, *modules_values(raw_p, ck))
+            if not isinstance(vetted, list):
+                # a scan JSON from a version before `submodules_vetted`: there is no path the plan may name
+                cmd.append("this record lists no vetted submodule path (scanned by an older version): re-scan with this "
+                           "version to get per-submodule commands; until then archive every module git dir, which holds "
+                           "the commits of each submodule, with " + modules + " before any cleanup")
+            elif not [s for s in vetted if isinstance(s, str) and s]:
+                cmd.append("no submodule is checked out (each is de-initialised or never initialised): its commits live under "
+                           "the git dir's `modules/`, which this archive keeps: " + modules + " before any cleanup")
+            else:
+                sets = [f"{code('{}', visible(sub))}: " + ", ".join(submodule_commands(raw_p, ck, sub))
+                        for sub in vetted if isinstance(sub, str) and sub]
+                # the module git dirs hold a de-initialised or removed submodule's commits, which no command above can
+                # reach (adversary round 42)
+                cmd.append("in each checked-out submodule the scan vetted, the path is in the command: " + "; ".join(sets)
+                           + " and " + modules + " before any cleanup (each command fails, saying so, if its submodule is no "
+                           "longer a checkout; a de-initialised one is an empty directory whose commits live under the git "
+                           "dir's `modules/`, which the last archive keeps; the scanner skips absorbed submodules: "
+                           "`core.worktree`)")
             need = need if need.startswith(("yes", "**yes")) else "yes: inspect each submodule first"
         w(f"| {p} | {'; '.join(what)} | {'; '.join(cmd)} | {need} |")
     w("")
