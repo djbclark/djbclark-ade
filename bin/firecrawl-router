@@ -47,6 +47,11 @@ Environment:
   FIRECRAWL_API_KEY            fallback key; empty disables the fallback
   FIRECRAWL_ROUTER_FALLBACK    "off" disables the fallback
   FIRECRAWL_ROUTER_TIMEOUT     floor for the per-request timeout, seconds (default 120)
+  FIRECRAWL_ROUTER_SEARCH_TIMEOUT
+                               hard cap for /search (and /v2/search), seconds (default 35).
+                               SearXNG engine stalls on Hyades's shared egress used to hold
+                               the router for the full 120 s floor, which blew past Cursor's
+                               MCP idle limit (-32001) with commercial fallback off (2026-10-22).
   FIRECRAWL_ROUTER_LLM         "off" disables LLM-format handling (default on)
   FIRECRAWL_ROUTER_SIPB_KEY    SIPB LLMs key (MIT_SIPB_API_KEY); BASE default http://127.0.0.1:8890/api,
                                MODEL default qwen3.6:35b-a3b-q4_K_M (…_SIPB_BASE, …_SIPB_MODEL)
@@ -245,14 +250,22 @@ def fallback_reason(path: str, reply: Reply) -> str:
     return ""
 
 
-def request_timeout(body: bytes | None, floor: float) -> float:
+def request_timeout(body: bytes | None, floor: float, *, cap: float | None = None) -> float:
     try:
         ms = json.loads(body or b"{}").get("timeout")
     except (ValueError, AttributeError):
         ms = None
     if isinstance(ms, (int, float)) and ms > 0:
-        return max(floor, ms / 1000 + 30)
-    return floor
+        t = max(floor, ms / 1000 + 30)
+    else:
+        t = floor
+    if cap is not None:
+        t = min(t, cap)
+    return t
+
+
+def search_path(path: str) -> bool:
+    return path.split("?", 1)[0].rstrip("/").endswith("/search")
 
 
 # ---- LLM formats (query, json) -------------------------------------------------------------
@@ -501,13 +514,15 @@ def build_extractor(env) -> Extractor | None:
 
 class Router:
     def __init__(self, primary: Backend, fallback: Backend | None, timeout: float,
-                 token: str = "", log=sys.stderr, extractor: Extractor | None = None):
+                 token: str = "", log=sys.stderr, extractor: Extractor | None = None,
+                 search_timeout: float = 35.0):
         self.extractor = extractor
         if extractor:
             extractor.log = log
         self.primary = primary
         self.fallback = fallback
         self.timeout = timeout
+        self.search_timeout = search_timeout
         self.token = token
         self.public_base = ""
         self.jobs: dict[str, str] = {}
@@ -601,7 +616,10 @@ class Router:
 
     def _forward(self, method: str, path: str, headers: dict, body: bytes | None) -> tuple[Reply, str]:
         t0 = time.monotonic()
-        timeout = request_timeout(body, self.timeout)
+        # Cap /search: a hung SearXNG used to sit on FIRECRAWL_ROUTER_TIMEOUT (120 s) and
+        # trip Cursor MCP -32001 before the ladder could move on (commercial off, 2026-10-22).
+        cap = self.search_timeout if search_path(path) else None
+        timeout = request_timeout(body, self.timeout, cap=cap)
         owner = self.owner(path)
         if owner is not None:
             b = self.backend(owner)
@@ -680,7 +698,8 @@ def build_router(env, token: str) -> Router:
         fb_url = (env.get("FIRECRAWL_FALLBACK_URL") or "https://api.firecrawl.dev").rstrip("/")
         fallback = Backend("fallback", _check_base("FIRECRAWL_FALLBACK_URL", fb_url), fb_key)
     return Router(primary, fallback, float(env.get("FIRECRAWL_ROUTER_TIMEOUT") or 120), token,
-                  extractor=build_extractor(env))
+                  extractor=build_extractor(env),
+                  search_timeout=float(env.get("FIRECRAWL_ROUTER_SEARCH_TIMEOUT") or 35))
 
 
 def serve(router: Router, listen: str, require_loopback: bool = False) -> http.server.ThreadingHTTPServer:

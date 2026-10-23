@@ -226,6 +226,19 @@ class RouterTest(unittest.TestCase):
     def test_timeout_follows_request(self):
         self.assertEqual(fr.request_timeout(b'{"timeout": 200000}', 120), 230)
         self.assertEqual(fr.request_timeout(b'{"url": "u"}', 120), 120)
+        # /search hard-cap: body timeout must not inflate past the search cap (2026-10-22).
+        self.assertEqual(fr.request_timeout(b'{"timeout": 200000}', 120, cap=35), 35)
+        self.assertEqual(fr.request_timeout(b'{"query": "q"}', 120, cap=35), 35)
+        self.assertTrue(fr.search_path("/v2/search"))
+        self.assertTrue(fr.search_path("/v2/search?x=1"))
+        self.assertFalse(fr.search_path("/v2/scrape"))
+
+    def test_build_router_search_timeout(self):
+        r = fr.build_router({"FIRECRAWL_SELFHOST_URL": "https://a/"}, "")
+        self.assertEqual(r.search_timeout, 35.0)
+        r = fr.build_router({"FIRECRAWL_SELFHOST_URL": "https://a/",
+                             "FIRECRAWL_ROUTER_SEARCH_TIMEOUT": "20"}, "")
+        self.assertEqual(r.search_timeout, 20.0)
 
 
 class Backend2:
