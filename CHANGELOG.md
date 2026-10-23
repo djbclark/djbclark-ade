@@ -144,6 +144,11 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `self-slash --finish --successor` after its first live run (2026-10-23): reads the agent id behind Paseo 0.13's
+  `Using workspace <id>` line before the JSON (the successor started but this agent was not archived); copies the old
+  agent's `--mode` only to the same provider (an omp `full` made `paseo run` refuse a claude successor), else
+  `bypassPermissions` for claude and no `--mode` otherwise; new `--baton PATH` names the chain log for a lead whose chain
+  lists the repo as a side workspace (a bare `/baton` resumed another session's chain).
 - `bin/ade-update` exits 10 naming a stuck link on the first apply instead of 4 with an empty error, and 4 (not 10) when the canonical checkout has no `skill-everywhere` helper at all (#20).
 - `bin/ade-update` reads the Grok Bot copy-target rows of `skill-everywhere --check` (`not installed (no <dir>)`, `copied (<path>)`, `missing (<path>)`, `stale copy (<path>)`) as ok or fixable, not stuck, and drops an inherited `SKILL_EVERYWHERE_ONLY` from the helper's environment, so a check never reports on a subset of targets (#20).
 - `bin/skill-everywhere`: the Hermes plugin nudge no longer aborts the script when the Hermes wrapper has no `exec`
