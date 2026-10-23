@@ -849,6 +849,41 @@ class SelfSlashPaseoTests(unittest.TestCase):
             self.assertEqual([p.name for p in self.lockdir.glob("*err*")], [], extra)
         self.assertEqual([p for p in Path(self._tmp.name).rglob("tmp.*")], [])
 
+    # --- adversary round 3 (F1): no mode this agent did not have ---
+    OLD_BASE = '"Id": "test-agent", "Name": "Lead", "Status": "idle", "Cwd": "%s", "ParentAgentId": null'
+
+    def old_json(self, *extra: str) -> str:
+        return "{" + ", ".join([self.OLD_BASE % self.succ_env()["FAKE_CWD"], *extra]) + "}"
+
+    def test_f1_an_inspect_without_a_provider_or_a_mode_value_starts_nothing(self) -> None:
+        # P1 no Provider key, P2 Provider null, P3 no Mode key; P4 Mode null.  A plan agent must not
+        # get bypassPermissions (or "default") because its inspect lacked a field.
+        for extra, needle in ((['"Mode": "plan"'], "no Provider"),
+                              (['"Mode": "plan"', '"Provider": null'], "no Provider"),
+                              (['"Mode": "plan"', '"Provider": ""'], "no Provider"),
+                              (['"Provider": "claude"'], "no Mode value"),
+                              (['"Provider": "claude"', '"Mode": null'], "no Mode value")):
+            r = self.run_waiter(FAKE_OLD_JSON=self.old_json(*extra))
+            self.assertEqual(r.returncode, 11, f"{extra}: {r.stdout}{r.stderr}")
+            self.assertIn(needle, r.stdout)
+            self.assertIn("nothing was started", r.stdout)
+        self.assertEqual(self.calls_of("run "), [])
+        self.assertEqual(self.calls_of("agent archive"), [])
+
+    def test_f1_an_explicit_mode_needs_nothing_from_the_inspect(self) -> None:
+        r = self.run_waiter(FAKE_OLD_JSON=self.old_json(), SELF_SLASH_S_MODE="plan")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        run = self.argv_of("run")
+        self.assertEqual(run[run.index("--mode") + 1], "plan", run)
+
+    def test_f1_an_empty_mode_of_the_same_provider_passes_no_mode(self) -> None:
+        # "Mode": "" is a mode value (none set): the provider's own default, never a made-up "default"
+        r = self.run_waiter(FAKE_OLD_MODE="")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        run = self.argv_of("run")
+        self.assertNotIn("--mode", run)
+        self.assertNotIn("default", run)
+
     def test_l2_top_level_check_needs_the_parent_and_status_keys(self) -> None:
         for new_json, needle in (('{"Model": "claude-opus-5-5", "Status": "idle", "parentAgentId": "test-agent"}', "no ParentAgentId"),
                                  ('{"Model": "claude-opus-5-5", "ParentAgentId": null}', "no Status key"),

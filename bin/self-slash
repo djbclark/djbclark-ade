@@ -158,8 +158,10 @@ finish_flag=$finish
                   when it differs from the successor's and holds no other agent (--keep-workspace skips that); keep the
                   --title short, its first words show in the sidebar; a Paseo workspace name ends in -pw;
                   --baton PATH makes the first prompt \"/baton PATH\" so the successor resumes that chain log (an absolute
-                  path to an existing file, else exit 2); --mode defaults to this agent's mode for the same provider,
-                  bypassPermissions for a claude successor from another provider, else the provider's own default)
+                  path to an existing file, else exit 2); --mode defaults to this agent's mode for the same provider (an
+                  empty mode passes none), bypassPermissions for a claude successor from another provider, else the
+                  provider's own default; without --mode, an inspect of this agent that lacks a Provider or a Mode
+                  value exits 11 and starts nothing)
        exit codes: 2 usage, 3 no host, 4 draft in the input box, 5 no prompt, 6 session still working,
        7 refused (gap check or lifecycle already queued), 8 archive refused, 9 dispatched agent
        (ACP_RUN_AGENT=1): lifecycle actions and /compact run only in the top-level session,
@@ -557,9 +559,10 @@ successor_fail() { echo "$(gdate '+%F %T') $host $pane: successor: $(clean "$1")
 pcli() { env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD "$paseo_cli" "$@"; }
 # jfield JSON-TEXT KEY...: the first KEY present in the top-level JSON OBJECT (null prints an empty
 # line); exit 3 when the text is not an object or no key is present (a renamed key must not read
-# as null, L2; a list is never unwrapped, L1).
-jfield() {
-  printf '%s' "$1" | python3 -c '
+# as null, L2; a list is never unwrapped, L1).  jfield_nn is the same but a null value is also
+# exit 3 (the key is "present" only with a value).
+jfield_py() {
+  printf '%s' "$2" | python3 -c '
 import json, sys
 # Strict: the whole text is one JSON value.  `paseo run --json` prints "Using workspace <id>" on
 # stderr (console.error), which the caller keeps apart (adv-selfslash-1, L4).
@@ -569,13 +572,18 @@ except ValueError:
     sys.exit(3)
 if not isinstance(d, dict):
     sys.exit(3)
-for k in sys.argv[1:]:
+nonnull = sys.argv[1] == "1"
+for k in sys.argv[2:]:
     if k in d:
         v = d[k]
+        if v is None and nonnull:
+            sys.exit(3)
         print("" if v is None else v)
         sys.exit(0)
-sys.exit(3)' "${@:2}" 2>/dev/null
+sys.exit(3)' "$1" "${@:3}" 2>/dev/null
 }
+jfield() { local text="$1"; shift; jfield_py 0 "$text" "$@"; }
+jfield_nn() { local text="$1"; shift; jfield_py 1 "$text" "$@"; }
 # workspace_plan AGENT-CWD: from `paseo workspace ls --background --json` on stdin print one JSON
 # object: ws (where the successor goes), cwd (its --cwd: the target workspace's own row when
 # --workspace names one, else "" = this agent's), old_ws (this agent's workspace), proven (1 only
@@ -671,7 +679,7 @@ successor_paseo() {
   # Fail closed: defaults must never replace an unreadable old mode (a plan-mode agent would get a
   # bypassPermissions successor, adv-selfslash-2 L1).
   jfield "$info" Id Name Status >/dev/null || successor_fail "inspect of this agent printed no single JSON object (got: $(printf '%s' "$pcli_out${pcli_err:+ stderr: $pcli_err}" | gtr -s ' \n' ' ' | gcut -c1-160)); nothing was started"
-  old_name=$(jfield "$info" Name); old_mode=$(jfield "$info" Mode); old_cwd=$(jfield "$info" Cwd); old_provider=$(jfield "$info" Provider)
+  old_name=$(jfield "$info" Name); old_cwd=$(jfield "$info" Cwd)
   cwd="${PASEO_AGENT_CWD:-$old_cwd}"
   [ -n "$cwd" ] || successor_fail "this agent cwd is unknown"
   wsout=$(pcli workspace ls --background --json 2>&1) || successor_fail "workspace ls failed: $(printf '%s' "$wsout" | gtr -s ' \n' ' ' | gcut -c1-200)"
@@ -687,7 +695,13 @@ successor_paseo() {
   # agent runs yolo, home rule 16); any other provider gets its own default.
   mode="$s_mode"
   if [ -z "$mode" ]; then
-    if [ "${successor%%/*}" = "$old_provider" ]; then mode="${old_mode:-default}"
+    # No explicit --mode: the successor gets this agent's own mode or none.  A Provider or Mode this
+    # agent's inspect does not carry (key missing, null) is never replaced by a default (adv-selfslash-3 F1).
+    old_provider=$(jfield_nn "$info" Provider) && [ -n "$old_provider" ] || successor_fail "inspect of this agent has no Provider, so its mode cannot be passed on safely (--mode MODE names one); nothing was started"
+    old_mode=$(jfield_nn "$info" Mode) || successor_fail "inspect of this agent has no Mode value, so its mode cannot be passed on safely (--mode MODE names one); nothing was started"
+    # The same provider gets the old mode as it is: an empty one (no mode set) passes no --mode, the
+    # provider's own default, never a made-up mode name.
+    if [ "${successor%%/*}" = "$old_provider" ]; then mode="$old_mode"
     elif [ "${successor%%/*}" = claude ]; then mode=bypassPermissions
     fi
   fi
