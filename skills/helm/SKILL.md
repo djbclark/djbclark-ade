@@ -160,8 +160,9 @@ means new prompts from other sessions are missed.
 
 ## 5. Hermes and the phone
 
-1. **Hermes** (on Telegram: `/helm`, registered by Hermes's `skill-slash`
-   plugin since 2026-10-06; `/skill helm` also works). Same script. Per item, one `clarify`: the question starts with
+1. **Hermes** (on Telegram: `/helm` is native skill slash — it injects this
+   skill; call `clarify`. Do not register `/helm` in `skill-slash`; that
+   dumps this file and never draws buttons. `/skill helm` also works). Same script. Per item, one `clarify`: the question starts with
    `project · where — `, then the session's question; `choices` are its option
    labels (under about 60 characters each, first one is its recommendation).
    Then `$H check` and `$H answer --fp` as in 2.1(d, e); the first `choices` entry is

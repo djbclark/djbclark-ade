@@ -116,12 +116,13 @@ does not collide with a core command (including `/steps`) is native skill
 slash: the gateway injects `SKILL.md` and the agent runs. Do not also
 register that name in `~/.hermes/plugins/skill-slash`. A plugin handler
 return is a user reply, so it dumps the skill markdown and the agent never
-calls `clarify`. The plugin still registers `/helm`, `/helm-all`,
-`/session-finder-all`, `/baton`, and `/skill <name>` (those names are not
-native skill commands, or they must stay plugin-owned). Enable `skill-slash`
+calls `clarify`. Do not register `/helm`, `/baton`, or `/session-finder`
+there either: native skill slash already owns them. The plugin still
+registers `/helm-all`, `/session-finder-all`, and `/skill <name>` (those
+names are not native skill commands). Enable `skill-slash`
 in `plugins.enabled`. Since 2026-10-06 `skill-everywhere` auto-nudges the
 running gateway (`reload-plugins` control socket) so a plugin command like
-`/helm` dispatches immediately —
+`/helm-all` dispatches immediately —
 no manual gateway restart. The Telegram pull-up `/` menu is only republished
 at adapter (re)connect, so a just-added command may not autocomplete until the
 next restart, but typing it still works and `/commands` lists it. If you cannot
