@@ -147,6 +147,19 @@ def hidden_fmt(sub=""):
     return HIDDEN_FMT.replace("<DEST>/{}", "<DEST>/{}" + sub).replace("-C {} ", "-C {}" + sub + " ")
 
 
+# a de-initialised submodule is an empty directory whose git dir (`<common>/modules/<sub>`) keeps its commits: every
+# by-hand command run there acts on the SUPERPROJECT at rc 0 (adversary round 42), so each one in the submodule row
+# is gated on the gitlink's `.git` (the scanner has verified it is a gitfile under `modules/`), and the module git
+# dirs themselves are archived, which needs no worktree and runs nothing
+SUB_GUARD = "[ -e {}/<sub>/.git ] && "
+MODULES_FMT = ("mkdir -p <DEST>/{} && d=$(git -C {} rev-parse --git-common-dir) "
+               "&& TAR_OPTIONS= \"$GTAR\" -cf <DEST>/{}/modules.tar -C {} -C \"$d\" modules")
+
+
+def modules_values(raw_p, ck):
+    return (ck, raw_p, ck, raw_p)
+
+
 # a commit reachable from a reflog alone (a reset, amend or rebase left it): no ref holds it, no bundle above
 # carries it, and `git reflog` recovers it only until expiry (Codex pass 32 on PR 27). Its objects go into one
 # pack: `rev-list --objects` lists everything the reflogs reach that no ref does (a superset of the count: stash
@@ -711,20 +724,25 @@ def render(d):
             # an absorbed submodule carries `core.worktree`, which this scanner refuses (`skipped: worktree redirected`,
             # adversary round 24), so the inspection is by hand, inside each submodule
             cmd.append("list them with " + shcode("git -C {} config --file .gitmodules --get-regexp '^submodule\\..*\\.path$'", raw_p)
-                       + ", then in each: " + shcode("git -C {}/<sub> status --porcelain", raw_p) + ", "
-                       + shcode("git -C {}/<sub> log --oneline --branches --tags --not --remotes", raw_p) + ", "
-                       + shcode("mkdir -p <DEST>/{}/<sub> && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {}/<sub> bundle create <DEST>/{}/<sub>/all.bundle --all",
-                                ck, raw_p, ck)
+                       + ", then in each: " + shcode(SUB_GUARD + "git -C {}/<sub> status --porcelain", raw_p, raw_p) + ", "
+                       + shcode(SUB_GUARD + "git -C {}/<sub> log --oneline --branches --tags --not --remotes", raw_p, raw_p) + ", "
+                       + shcode(SUB_GUARD + "mkdir -p <DEST>/{}/<sub> && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {}/<sub> bundle create <DEST>/{}/<sub>/all.bundle --all",
+                                raw_p, ck, raw_p, ck)
                        # a bundle holds committed objects only: the modified, staged and untracked files need the
                        # same patches and archive as an ordinary checkout (Codex pass 26 on PR 27)
-                       + ", " + shcode(modified_fmt("/<sub>"), *modified_values(raw_p, ck))
+                       + ", " + shcode(SUB_GUARD + modified_fmt("/<sub>"), raw_p, *modified_values(raw_p, ck))
                        # and the index-hidden archive: an assume-unchanged or skip-worktree edit in a submodule is in
                        # none of the above (Codex pass 36)
-                       + ", " + shcode(hidden_fmt("/<sub>"), *hidden_values(raw_p, ck))
-                       + " and " + shcode("git -C {}/<sub> ls-files -z --others --exclude-standard > <DEST>/{}/<sub>/untracked.list "
-                                          "&& TAR_OPTIONS= \"$GTAR\" -C {}/<sub> --null -T <DEST>/{}/<sub>/untracked.list -cf <DEST>/{}/<sub>/untracked.tar",
-                                          raw_p, ck, raw_p, ck, ck)
-                       + " before any cleanup (the scanner skips absorbed submodules: `core.worktree`)")
+                       + ", " + shcode(SUB_GUARD + hidden_fmt("/<sub>"), raw_p, *hidden_values(raw_p, ck))
+                       + ", " + shcode(SUB_GUARD + "git -C {}/<sub> ls-files -z --others --exclude-standard > <DEST>/{}/<sub>/untracked.list "
+                                       "&& TAR_OPTIONS= \"$GTAR\" -C {}/<sub> --null -T <DEST>/{}/<sub>/untracked.list -cf <DEST>/{}/<sub>/untracked.tar",
+                                       raw_p, raw_p, ck, raw_p, ck, ck)
+                       # the module git dirs hold a de-initialised or removed submodule's commits, which no command
+                       # above can reach (adversary round 42)
+                       + " and " + shcode(MODULES_FMT, *modules_values(raw_p, ck))
+                       + " before any cleanup (each command fails outside a real submodule checkout: a de-initialised "
+                       "one is an empty directory whose commits live under the git dir's `modules/`, which the last "
+                       "archive keeps; the scanner skips absorbed submodules: `core.worktree`)")
             need = need if need.startswith(("yes", "**yes")) else "yes: inspect each submodule first"
         w(f"| {p} | {'; '.join(what)} | {'; '.join(cmd)} | {need} |")
     w("")

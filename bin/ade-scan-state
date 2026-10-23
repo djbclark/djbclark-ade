@@ -13,9 +13,13 @@ A checkout's own git config can name commands (core.fsmonitor, core.sshCommand, 
 filter.*, gpg.program with log.showSignature, credential.*, hooksPath, include.*, ...). The tool reads
 that config without running anything first and accepts only an allowlist of keys (SAFE_CONFIG below);
 a checkout with any other key is `skipped: unrecognised config <key>`, one with core.worktree or a
-work tree that is not the scanned dir is `skipped: worktree redirected`. The same allowlist is applied
-to every submodule's config under the git dir (`skipped: submodule config unrecognised <key>`; a config that
-is unreadable or a symlink is `(unreadable)` / `(symlink)`: nothing is trusted that git would read elsewhere).
+work tree that is not the scanned dir is `skipped: worktree redirected`, one whose `.git` entry is a
+symlink is `skipped: .git is a symlink` (git would read a git directory elsewhere). The same allowlist is
+applied to every submodule's git dir under `modules/` (`config` and `config.worktree`; `skipped: submodule
+config unrecognised <key>`): a config that is unreadable is `(unreadable)`, a symlink anywhere under
+`modules/` or at a submodule's `.git` is `(symlink)`, a module git dir with a `commondir` is `(commondir)`,
+and a submodule whose `.git` is a directory or points outside `modules/` is `(gitdir outside modules)`:
+nothing is trusted that git would read elsewhere.
 Every later git call also turns fsmonitor, hooks and signature display off, drops every GIT_*
 variable from the environment, reads no global or system config, ignores submodules in `status`
 (so a checkout with submodules carries the flag `submodules not inspected`, never a bare
@@ -178,6 +182,7 @@ SKIP_WORKTREE = "skipped: worktree redirected"
 SKIP_NO_WORKTREE = "skipped: no work tree"
 SUBMODULES_FLAG = "submodules not inspected"
 SKIP_HEAD_UNREADABLE = "skipped: HEAD unreadable"
+SKIP_GIT_SYMLINK = "skipped: .git is a symlink"
 MAX_TIPS = 2000  # ls-remote tips passed as `--not` arguments (argv size); extra tips only overcount
 MAX_BRANCH_COUNTS = 100  # `rev-list --count` calls for the per-branch report; the rest are only summed
 # Flags that qualify a verdict but never are one.
@@ -238,14 +243,15 @@ def git_env(network: bool = False) -> dict:
     return env
 
 
-def run(argv, timeout=120, cwd=None, env=None, stdin_text=None):
-    """argv list in, (rc, stdout); never raises on a missing tool or timeout.
+def run(argv, timeout=120, cwd=None, env=None, stdin_text=None, errors="replace"):
+    """argv list in, (rc, stdout); never raises on a missing tool or timeout. `errors` is the stdout decoding
+    (`surrogateescape` when a path in it is tested against the filesystem: `replace` would test a different name).
 
     stdin is /dev/null (or `stdin_text`, written whole) and the child leads its own process group, so a
     timeout kills git together with the ssh / git-remote-https children it started."""
     try:
         p = subprocess.Popen(argv, stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
-                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace",
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors=errors,
                              cwd=cwd, env=env, start_new_session=True)
     except OSError:
         return 124, ""
@@ -277,15 +283,21 @@ def du_bytes(path: Path) -> tuple[int, int | None]:
     return nbytes, (rc or None)
 
 
-def is_checkout(path: Path) -> bool:
-    """True when `path` holds a `.git` that is not a symlink. lstat is used instead of `Path.exists()`,
+def git_entry_mode(path: Path) -> int | None:
+    """lstat mode of `path/.git`, None when there is none. lstat is used instead of `Path.exists()`,
     which since Python 3.13 turns any OSError into False: only ENOENT/ENOTDIR mean "no .git here";
     any other error (EACCES on a directory that is listable but not searchable) is raised."""
     try:
-        mode = os.lstat(path / ".git").st_mode
+        return os.lstat(path / ".git").st_mode
     except (FileNotFoundError, NotADirectoryError):
-        return False
-    return not stat.S_ISLNK(mode)
+        return None
+
+
+def is_checkout(path: Path) -> bool:
+    """True when `path` holds a `.git` that is not a symlink (a symlinked one is a checkout the scan refuses:
+    discovery lists it and `scan_checkout` records SKIP_GIT_SYMLINK, Codex pass 38)."""
+    mode = git_entry_mode(path)
+    return mode is not None and not stat.S_ISLNK(mode)
 
 
 def errno_name(exc: OSError) -> str:
@@ -492,7 +504,10 @@ def find_checkouts(root: Path, failures: list[tuple[Path, str]] | None = None) -
 
     def rec(p: Path, depth: int):
         try:
-            checkout = is_checkout(p)
+            # a symlinked `.git` counts too: git would read a git directory elsewhere, so the directory is a checkout
+            # the scan refuses (`skipped: .git is a symlink`, with the whole-directory fallback), never an ordinary
+            # directory that leaves no record (Codex pass 38 on PR 27)
+            checkout = git_entry_mode(p) is not None
         except OSError as exc:  # .git cannot be inspected: a checkout in here may be missing
             fail(p, exc)
             return
@@ -520,8 +535,10 @@ def find_checkouts(root: Path, failures: list[tuple[Path, str]] | None = None) -
     return found
 
 
-def git(path: Path, *args, timeout=60, network=False, stdin_text=None):
+def git(path: Path, *args, timeout=60, network=False, stdin_text=None, errors="replace"):
     kw = {} if stdin_text is None else {"stdin_text": stdin_text}
+    if errors != "replace":  # the default stays implicit: tests substitute `run` with fakes that take no `errors`
+        kw["errors"] = errors
     return run(["git", *GIT_SAFE, "-C", str(path), *args], timeout=timeout, env=git_env(network), **kw)
 
 
@@ -573,36 +590,79 @@ def git_common_dir(path: Path) -> Path | None:
 
 
 def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str | None]:
-    """(has submodules, first config key of any submodule's git dir outside the allowlist).
+    """(has submodules, first config key of any submodule's git dir outside the allowlist, or a parenthesised
+    reason the git dir cannot be vetted).
 
-    Reads `<git-common-dir>/modules/**/config` with `git config --file`, which executes nothing."""
+    Reads `<git-common-dir>/modules/**/config` and `config.worktree` with `git config --file`, which executes
+    nothing. The plan then tells the human to run git inside each submodule, so anything that would make git read
+    its config elsewhere ends the check with a reason instead (Codex passes 37 and 38, adversary round 42): a
+    symlink anywhere under `modules/` (`os.walk` never descends into one, so its config would go unread) or at a
+    submodule's `.git`, a `commondir` file (the module's config and objects are in another directory), and a
+    gitlink whose `.git` is a directory or a gitfile pointing outside `modules/` (`(gitdir outside modules)`:
+    that git dir is in no walk). A gitlink with no `.git` at all (de-initialised, never initialised) runs nothing
+    and is left to the plan's guard."""
     modules = common / "modules" if common else None
     present = (path / ".gitmodules").exists() or bool(modules and modules.is_dir())
-    if not (present and modules and modules.is_dir()):
-        return present, None
+    if not present:
+        return False, None
     env = git_env()
     env["GIT_CEILING_DIRECTORIES"] = str(Path(neutral_cwd()).parent)
-    for root, dirs, files in os.walk(modules, followlinks=False):
-        if "HEAD" in files or "config" in files:  # a module's git dir: skip its object store and logs
-            dirs[:] = sorted(d for d in dirs if d not in MODULE_INTERNAL_DIRS)
-        else:  # `modules/` itself or a dir that only groups nested modules: every name is a module
-            dirs[:] = sorted(dirs)
-        cfg = Path(root) / "config"
+
+    def offender(cfg: Path) -> str | None:
         if cfg.is_symlink():
             # Codex pass 37: a symlinked config used to be skipped as safe, and the plan then told the human to run
             # git inside a submodule whose real config (the link's target) could set core.fsmonitor
-            return present, "(symlink)"
-        if "config" not in files:
-            continue
+            return "(symlink)"
         rc, out = run(["git", *GIT_SAFE, "config", "--file", str(cfg), "--list", "-z"], timeout=60,
                       cwd=neutral_cwd(), env=env)
         if rc != 0:
-            return present, "(unreadable)"
+            return "(unreadable)"
         entries = [tuple(e.partition("\n")[::2]) for e in out.split("\0") if e]
         bad = config_offenders(entries, in_submodule=True)
-        if bad:
-            return present, bad[0]
-    return present, None
+        return bad[0] if bad else None
+
+    if modules and modules.is_dir():
+        for root, dirs, files in os.walk(modules, followlinks=False):
+            if "HEAD" in files or "config" in files:  # a module's git dir: skip its object store and logs
+                dirs[:] = sorted(d for d in dirs if d not in MODULE_INTERNAL_DIRS)
+            else:  # `modules/` itself or a dir that only groups nested modules: every name is a module
+                dirs[:] = sorted(dirs)
+            if any((Path(root) / d).is_symlink() for d in dirs):
+                return True, "(symlink)"
+            if "commondir" in files:
+                return True, "(commondir)"
+            for name in ("config", "config.worktree"):
+                if name in files:
+                    bad = offender(Path(root) / name)
+                    if bad:
+                        return True, bad
+    # every gitlink's `.git` must be a gitfile that resolves under `modules/`, where the walk above read its config
+    rc, out = git(path, "ls-files", "-z", "-s", errors="surrogateescape")
+    if rc != 0:
+        return True, "(unreadable)"
+    real_modules = os.path.realpath(modules) + os.sep if modules else None
+    for entry in out.split("\0"):
+        if not entry.startswith("160000 ") or "\t" not in entry:
+            continue
+        dotgit = path / entry.split("\t", 1)[1] / ".git"
+        try:
+            mode = os.lstat(dotgit).st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        if stat.S_ISLNK(mode):
+            return True, "(symlink)"
+        if not stat.S_ISREG(mode):
+            return True, "(gitdir outside modules)"
+        try:
+            first = dotgit.read_text(errors="surrogateescape").splitlines()[0] if dotgit.stat().st_size else ""
+        except (OSError, IndexError):
+            return True, "(gitdir unreadable)"
+        if not first.startswith("gitdir: "):
+            return True, "(gitdir unreadable)"
+        target = os.path.realpath(os.path.join(dotgit.parent, first[len("gitdir: "):].rstrip("\r")))
+        if not real_modules or not target.startswith(real_modules):
+            return True, "(gitdir outside modules)"
+    return True, None
 
 
 def stash_count(path: Path, common: Path | None) -> int | None:
@@ -869,6 +929,8 @@ def local_only_count(path: Path, revs: list[str], tips: list[str],
 
 
 def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
+    if (path / ".git").is_symlink():  # before any git call: git would read the link's target, a git dir elsewhere
+        return skipped_record(path, SKIP_GIT_SYMLINK)
     keys = unsafe_config(path)  # before any other git call: reading config runs nothing
     if keys is None:
         return skipped_record(path, SKIP_UNREADABLE)
@@ -916,7 +978,9 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     # `status`, so its edits are in no count above: it is counted and captured on its own (Codex pass 32 on PR 27).
     # A skip-worktree path with no file is a sparse checkout's ordinary state (adversary round 38): nothing to
     # capture; an assume-unchanged path that is gone counts, since `status` hides that deletion too
-    rc, out = git(path, "ls-files", "-z", "-v")
+    # decoded with surrogateescape: a name that is not UTF-8 then round-trips to the same bytes in the `lexists`
+    # test below, where `replace` would test a different path and drop an existing entry (Codex pass 38)
+    rc, out = git(path, "ls-files", "-z", "-v", errors="surrogateescape")
     if rc != 0:
         return incomplete_record(path, "ls-files -v", rc)
     index_hidden = sum(1 for e in out.split("\0") if len(e) > 2 and e[1] == " "

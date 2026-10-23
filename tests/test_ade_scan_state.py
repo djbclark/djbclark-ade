@@ -508,7 +508,16 @@ def test_symlinks_out_of_a_root_are_not_followed(tmp_path):
     (roots / "gitlink").mkdir()
     (roots / "gitlink" / ".git").symlink_to(outside / ".git")
     found = [p.name for p in mod.find_checkouts(roots)]
-    assert found == ["real"]
+    # Codex pass 38 on PR 27, P1: the symlinked `.git` made `gitlink` an ordinary directory with no record at all;
+    # it is a checkout the scan refuses, with the whole-directory fallback (the link's target is never read)
+    assert found == ["gitlink", "real"]
+    c = mod.scan_checkout(roots / "gitlink", remote=False)
+    assert c["verdict"] == mod.SKIP_GIT_SYMLINK == "skipped: .git is a symlink" and c["modified"] is None, c
+    (roots / "gitlink" / ".git").unlink()
+    (roots / "gitlink" / ".git").symlink_to(outside / ".git" / "HEAD")  # a link to a file is no safer
+    assert mod.scan_checkout(roots / "gitlink", remote=False)["verdict"] == mod.SKIP_GIT_SYMLINK
+    recs = {c["path"]: c["verdict"] for c in mod.scan_git([roots], remote=False)}
+    assert recs[str((roots / "gitlink").resolve())] == mod.SKIP_GIT_SYMLINK
 
 
 def test_ambient_git_variables_are_ignored(tmp_path, monkeypatch):
@@ -646,11 +655,11 @@ def test_a_failed_or_timed_out_git_call_is_never_clean_and_pushed(tmp_path, monk
     real, seen = mod.run, {}
 
     def failing(word, rc):
-        def fake(argv, timeout=120, cwd=None, env=None):
+        def fake(argv, timeout=120, cwd=None, env=None, **kw):
             if word in argv:
                 seen[word] = timeout
                 return rc, ""
-            return real(argv, timeout=timeout, cwd=cwd, env=env)
+            return real(argv, timeout=timeout, cwd=cwd, env=env, **kw)
         return fake
 
     for word, rc, want in (("status", 124, "scan incomplete: status rc=124"),
@@ -1258,10 +1267,10 @@ def test_a_failed_reference_search_is_scan_incomplete_not_unique_or_scratch(tmp_
     real = mod.run
 
     def search_exits(rc):
-        def fake(argv, timeout=120, cwd=None, env=None):
+        def fake(argv, timeout=120, cwd=None, env=None, **kw):
             if argv[0] in ("rg", "grep"):
                 return rc, ""
-            return real(argv, timeout=timeout, cwd=cwd, env=env)
+            return real(argv, timeout=timeout, cwd=cwd, env=env, **kw)
         return fake
 
     for rc in (2, 124):
@@ -1416,8 +1425,8 @@ def test_a_repo_without_origin_stays_an_orphan_but_a_failed_origin_lookup_is_sca
     assert c["verdict"] == "orphan branch" and "no origin remote" in c["flags"]
     real = mod.run
     for rc in (124, 128, 1):
-        def fake(argv, timeout=120, cwd=None, env=None, rc=rc):
-            return (rc, "") if "get-url" in argv else real(argv, timeout=timeout, cwd=cwd, env=env)
+        def fake(argv, timeout=120, cwd=None, env=None, rc=rc, **kw):
+            return (rc, "") if "get-url" in argv else real(argv, timeout=timeout, cwd=cwd, env=env, **kw)
         monkeypatch.setattr(mod, "run", fake)
         c = scan_one(mod, roots)
         assert c["verdict"] == f"scan incomplete: remote get-url origin rc={rc}", c["verdict"]
@@ -1814,10 +1823,10 @@ def test_ls_remote_gets_the_url_through_the_environment_never_argv(tmp_path, mon
     roots, work, origin = make_pushed_checkout(tmp_path)
     real, calls = mod.run, []
 
-    def spy(argv, timeout=120, cwd=None, env=None, stdin_text=None):
+    def spy(argv, timeout=120, cwd=None, env=None, stdin_text=None, **kw):
         if "ls-remote" in argv:
             calls.append((list(argv), dict(env or {})))
-        return real(argv, timeout=timeout, cwd=cwd, env=env, stdin_text=stdin_text)
+        return real(argv, timeout=timeout, cwd=cwd, env=env, stdin_text=stdin_text, **kw)
     monkeypatch.setattr(mod, "run", spy)
     c = scan_one(mod, roots, remote=True)
     assert c["verdict"] == "clean and pushed" and c["local_only_verified"] is True, c["flags"]
@@ -1838,9 +1847,9 @@ def test_a_url_with_a_password_is_never_queried_and_never_leaks(tmp_path, monkey
     git(work, "config", "remote.origin.url", f"https://u:{secret}@127.0.0.1:9/x.git")
     real, seen = mod.run, []
 
-    def spy(argv, timeout=120, cwd=None, env=None, stdin_text=None):
+    def spy(argv, timeout=120, cwd=None, env=None, stdin_text=None, **kw):
         seen.append((list(argv), dict(env or {})))
-        return real(argv, timeout=timeout, cwd=cwd, env=env, stdin_text=stdin_text)
+        return real(argv, timeout=timeout, cwd=cwd, env=env, stdin_text=stdin_text, **kw)
     monkeypatch.setattr(mod, "run", spy)
     c = scan_one(mod, roots, remote=True, fetch=True)
     assert mod.ORIGIN_CREDENTIAL in c["flags"] and c["verdict"] == mod.ORIGIN_CREDENTIAL != "clean and pushed"
@@ -1918,11 +1927,11 @@ def test_an_old_git_is_never_given_the_url_in_argv(tmp_path, monkeypatch):
     roots, work, origin = make_pushed_checkout(tmp_path)
     real, asked = mod.run, []
 
-    def old_git(argv, timeout=120, cwd=None, env=None, stdin_text=None):
+    def old_git(argv, timeout=120, cwd=None, env=None, stdin_text=None, **kw):
         if argv[:2] == ["git", "--version"]:
             return 0, "git version 2.30.9\n"
         asked.append(argv)
-        return real(argv, timeout=timeout, cwd=cwd, env=env, stdin_text=stdin_text)
+        return real(argv, timeout=timeout, cwd=cwd, env=env, stdin_text=stdin_text, **kw)
     monkeypatch.setattr(mod, "run", old_git)
     c = scan_one(mod, roots, remote=True)
     assert mod.ORIGIN_UNREACHABLE in c["flags"] and c["local_only_verified"] is False
@@ -2551,6 +2560,105 @@ def test_a_symlinked_submodule_config_is_skipped_not_trusted(tmp_path):
     assert c["verdict"] == "skipped: submodule config unrecognised (symlink)", c
 
 
+def test_a_submodule_git_dir_read_elsewhere_is_skipped_not_trusted(tmp_path):
+    """Codex pass 38 on PR 27 (P1) and adversary round 42 (MEDIUM): the walk read `modules/<sub>/config` only, so a
+    symlinked module directory, a `config.worktree`, a `commondir` or a gitlink whose git dir is outside `modules/`
+    passed as safe and the plan told the human to run git where a planted core.fsmonitor would run."""
+    mod = load()
+    roots, sup, moddir = make_super_with_submodule(tmp_path)
+    bad = "[core]\n\tfsmonitor = /bin/true\n"
+
+    def verdict():
+        return mod.scan_git([roots], remote=False)[0]["verdict"]
+
+    assert not verdict().startswith("skipped")
+    # config.worktree: read once extensions.worktreeConfig (an allowlisted key) is set
+    git(moddir, "config", "extensions.worktreeConfig", "true")
+    (moddir / "config.worktree").write_text(bad)
+    assert verdict() == "skipped: submodule config unrecognised core.fsmonitor"
+    (moddir / "config.worktree").unlink()
+    git(moddir, "config", "--unset", "extensions.worktreeConfig")
+    # commondir: the module's config and objects live in another directory
+    (moddir / "commondir").write_text("../../../elsewhere\n")
+    assert verdict() == "skipped: submodule config unrecognised (commondir)"
+    (moddir / "commondir").unlink()
+    # a symlinked module directory: os.walk never descends into it
+    target = tmp_path / "elsewhere-module"
+    moddir.rename(target)
+    moddir.symlink_to(target)
+    assert verdict() == "skipped: submodule config unrecognised (symlink)"
+    moddir.unlink()
+    target.rename(moddir)
+    # a gitlink whose `.git` is a gitfile pointing outside modules/, a directory (an unabsorbed submodule), a symlink
+    gitfile = sup / "sub" / ".git"
+    original = gitfile.read_text()
+    gitfile.write_text(f"gitdir: {tmp_path / 'elsewhere-gitdir'}\n")
+    assert verdict() == "skipped: submodule config unrecognised (gitdir outside modules)"
+    gitfile.unlink()
+    gitfile.mkdir()
+    assert verdict() == "skipped: submodule config unrecognised (gitdir outside modules)"
+    gitfile.rmdir()
+    gitfile.symlink_to(moddir)
+    assert verdict() == "skipped: submodule config unrecognised (symlink)"
+    gitfile.unlink()
+    gitfile.write_text("not a gitfile\n")
+    assert verdict() == "skipped: submodule config unrecognised (gitdir unreadable)"
+    gitfile.write_text(original)
+    assert not verdict().startswith("skipped")
+    # a de-initialised submodule (no `.git` at all) runs nothing here: the plan's guard covers it
+    git(sup, "submodule", "deinit", "-f", "sub")
+    assert not (sup / "sub" / ".git").exists() and not verdict().startswith("skipped")
+
+
+def test_a_skip_worktree_path_with_a_non_utf8_name_is_counted(tmp_path):
+    """Codex pass 38 on PR 27, P1: git's output was decoded with replacement characters, so the existence test for
+    a skip-worktree entry whose name is not UTF-8 looked at a different path and dropped its edit."""
+    mod = load()
+    repo = make_repo(tmp_path / "r")
+    name = os.fsdecode(b"\xff-hidden.txt")
+    try:
+        (repo / name).write_text("committed\n")
+    except (OSError, UnicodeEncodeError):
+        pytest.skip("this filesystem refuses a non-UTF-8 file name")
+    git(repo, "add", "--", name)
+    git(repo, "commit", "-q", "-m", "non-utf8 name")
+    git(repo, "update-index", "--skip-worktree", "--", name)
+    (repo / name).write_text("hidden edit\n")
+    assert git(repo, "status", "--porcelain") == ""
+    c = mod.scan_checkout(repo, remote=False)
+    assert c["index_hidden"] == 1 and "index-hidden paths: 1" in c["flags"], c
+
+
+def test_the_submodule_row_refuses_a_deinitialised_submodule_and_archives_its_git_dir(tmp_path):
+    """Adversary round 42 on PR 27 (MEDIUM): with the submodule de-initialised (an empty directory) every command of
+    the row ran against the superproject at rc 0, and the module git dir's unpushed commits were in no capture."""
+    import tarfile
+    doc = load_doc()
+    roots, sup, moddir = make_super_with_submodule(tmp_path)
+    (sup / "sub" / "g.txt").write_text("unpushed\n")
+    git(sup / "sub", "add", "g.txt")
+    git(sup / "sub", "commit", "-q", "-m", "unpushed-sub-commit")
+    sha = git(sup / "sub", "rev-parse", "HEAD").strip()
+    git(sup, "submodule", "deinit", "-f", "sub")
+    assert not (sup / "sub" / ".git").exists() and (moddir / "HEAD").is_file()
+    prefix = "GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); "
+    dest = str(tmp_path / "dest")
+    raw = str(sup)
+    for fmt, values in ((doc.SUB_GUARD + "git -C {}/<sub> status --porcelain", (raw, raw)),
+                        (doc.SUB_GUARD + doc.modified_fmt("/<sub>"), (raw, *doc.modified_values(raw, "c"))),
+                        (doc.SUB_GUARD + doc.hidden_fmt("/<sub>"), (raw, *doc.hidden_values(raw, "c")))):
+        cmd = prefix + fmt.format(*map(doc.shquote, values)).replace("<sub>", "sub").replace("<DEST>", dest)
+        run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+        assert run.returncode != 0 and run.stdout == "", (cmd, run.stdout, run.stderr)
+    assert not (tmp_path / "dest").exists()
+    cmd = prefix + doc.MODULES_FMT.format(*map(doc.shquote, doc.modules_values(raw, "c"))).replace("<DEST>", dest)
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    names = tarfile.open(tmp_path / "dest" / "c" / "modules.tar").getnames()
+    assert "modules/sub/HEAD" in names and f"modules/sub/objects/{sha[:2]}/{sha[2:]}" in names, names
+    assert doc.MODULES_FMT.count("{}") == len(doc.modules_values("/p", "c"))
+
+
 def test_every_archive_ignores_the_operators_tar_options(tmp_path):
     """Codex pass 37 on PR 27, P1: with `TAR_OPTIONS=--exclude=*` in the environment GNU tar wrote an empty
     untracked archive and exited 0; every emitted tar now runs with `TAR_OPTIONS=` cleared."""
@@ -2619,6 +2727,17 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
     assert ("git -C /p/sup/<sub> ls-files -z --others --exclude-standard > <DEST>/checkouts/abs/p/sup/<sub>/untracked.list "
             "&& TAR_OPTIONS= \"$GTAR\" -C /p/sup/<sub> --null -T <DEST>/checkouts/abs/p/sup/<sub>/untracked.list -cf <DEST>/checkouts/abs/p/sup/<sub>/untracked.tar") in row
     assert "the scanner skips absorbed submodules" in row
+    # adversary round 42: a de-initialised submodule is an empty directory; every command is gated on its `.git`,
+    # and the module git dirs are archived
+    assert row.count("[ -e /p/sup/<sub>/.git ] && ") == 6
+    assert "[ -e /p/sup/<sub>/.git ] && git -C /p/sup/<sub> status --porcelain" in row
+    assert "[ -e /p/sup/<sub>/.git ] && git -C /p/sup/<sub> log --oneline" in row
+    assert "[ -e /p/sup/<sub>/.git ] && mkdir -p <DEST>/checkouts/abs/p/sup/<sub> && GIT_ADVICE=0" in row
+    assert "[ -e /p/sup/<sub>/.git ] && mkdir -p <DEST>/checkouts/abs/p/sup/<sub> && git -C /p/sup/<sub> diff" in row
+    assert "[ -e /p/sup/<sub>/.git ] && mkdir -p <DEST>/checkouts/abs/p/sup/<sub> && git -C /p/sup/<sub> ls-files -z -v" in row
+    assert "[ -e /p/sup/<sub>/.git ] && git -C /p/sup/<sub> ls-files -z --others" in row
+    assert ("mkdir -p <DEST>/checkouts/abs/p/sup && d=$(git -C /p/sup rev-parse --git-common-dir) && TAR_OPTIONS= \"$GTAR\" "
+            "-cf <DEST>/checkouts/abs/p/sup/modules.tar -C /p/sup -C \"$d\" modules") in row
     assert row.rstrip().endswith("| yes: inspect each submodule first |")
     both = next(r for r in rows if r.startswith("| /p/both "))
     assert "1 modified tracked file(s)" in both and "submodules not inspected" in both
