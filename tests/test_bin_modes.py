@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""Every extensionless bin/ tool with a shebang is tracked executable (100755) (2026-10-23): PR 32 replaced
-bin/claude-settings-env with a 100644 copy, its tests ran it through sys.executable and passed, and four review
-rounds missed it; Codex caught it. Modules with an extension (bin/skillopt_sources.py) are imported, not run."""
+"""Every tracked file with a shebang outside tests/ is executable (100755) (2026-10-23).
+
+PR 32 replaced bin/claude-settings-env with a 100644 copy. Its tests ran it through sys.executable and passed, four
+review rounds missed it, and Codex caught it. The same check found claude/hooks/context_size_nudge.py at 100644
+since 836b306 (2026-10-19): hook-deadline execs it directly, so it exited 127 and no context-size nudge ran for four
+days (fixed in d618809). Making a file executable never breaks a caller that runs it through an interpreter, so the
+rule has no exemptions."""
 from __future__ import annotations
 
 import shutil
@@ -12,25 +16,30 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
-class BinModesTest(unittest.TestCase):
-    def test_extensionless_bin_tools_are_tracked_executable(self) -> None:
+class ShebangModesTest(unittest.TestCase):
+    def test_tracked_files_with_a_shebang_are_executable(self) -> None:
         if shutil.which("git") is None or not (ROOT / ".git").exists():
             self.skipTest("not a git checkout")
         out = subprocess.run(
-            ["git", "-C", str(ROOT), "ls-files", "-s", "--", "bin"],
-            capture_output=True, text=True, check=True,
+            ["git", "-C", str(ROOT), "ls-files", "-s", "-z"],
+            capture_output=True, check=True,
         ).stdout
         bad: list[str] = []
-        for line in out.splitlines():
-            meta, path = line.split("\t", 1)
-            mode = meta.split()[0]
-            p = ROOT / path
-            if mode == "120000" or p.suffix or "/" in path[len("bin/"):]:
+        for rec in out.split(b"\0"):
+            if not rec:
                 continue
-            if p.is_file() and p.read_bytes()[:2] == b"#!" and mode != "100755":
-                bad.append(f"{path} is {mode}")
+            meta, raw = rec.split(b"\t", 1)
+            mode = meta.split()[0].decode()
+            path = raw.decode("utf-8", "surrogateescape")
+            if mode != "100644" or path.startswith("tests/") or "/tests/" in path:
+                continue
+            p = ROOT / path
+            if p.is_file() and not p.is_symlink():
+                with p.open("rb") as f:
+                    if f.read(2) == b"#!":
+                        bad.append(path)
         self.assertEqual(bad, [], "git update-index --chmod=+x these")
 
 
 if __name__ == "__main__":
-    unittest.main()
+    _ = unittest.main()
