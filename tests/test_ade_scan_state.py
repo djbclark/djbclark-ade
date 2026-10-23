@@ -3844,6 +3844,67 @@ def test_every_generated_push_runs_without_hooks():
     assert pushes and all("-c core.hooksPath=/dev/null" in p for p in pushes), pushes
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 directory")
+def test_an_unreadable_untracked_subtree_is_scan_incomplete_not_clean(tmp_path):
+    """Codex pass 49 on PR 27, P1: `git status` exits 0 with a `could not open directory` warning on stderr and the
+    unreadable files left out, so the checkout read `clean and pushed` with untracked work in it."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    secret = work / "a" / "b" / "secret"
+    secret.mkdir(parents=True)
+    (secret / "work.txt").write_text("ONLY-HERE\n")
+    secret.chmod(0)
+    try:
+        rec = mod.scan_checkout(work, remote=False)
+    finally:
+        secret.chmod(0o755)
+    assert rec["verdict"].startswith("scan incomplete: status"), rec["verdict"]
+    assert mod.scan_checkout(work, remote=False)["verdict"] != rec["verdict"]  # readable again: a real answer
+
+
+def test_url_is_local_path_follows_gits_own_classification():
+    mod = load()
+    for url in ("/srv/git/x.git", "../origin.git", "origin.git", "file:///srv/x.git", "./a:b", "C/x"):
+        assert mod.url_is_local_path(url), url
+    for url in ("https://h/x.git", "ssh://git@h/x.git", "git@host:x/y.git", "host:x", "ext::sh -c x", "git://h/x", "SSH://h/x", ""):
+        assert not mod.url_is_local_path(url), url
+
+
+def test_a_push_to_a_local_path_origin_gets_the_bundle_only_because_receive_hooks_would_run(tmp_path):
+    """Adversary round 54 on PR 27, MEDIUM: `-c core.hooksPath=/dev/null` does not reach the `receive-pack` git runs
+    locally for a path or `file://` origin, so that repository's hooks and `core.alternateRefsCommand` ran."""
+    mod = load()
+    doc = load_doc()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    for url in (str(origin), os.path.relpath(origin, work), f"file://{origin}"):
+        git(work, "config", "remote.origin.url", url)
+        commit_file(work, f"f-{abs(hash(url))}.txt")
+        rec = mod.scan_checkout(work, remote=False)
+        assert rec["origin_local_path"] is True and not rec["origin_credential"], (url, rec)
+        text = doc.render(doc_scan([rec]))
+        row = next(r for r in section_3_2(text).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
+        assert not re.search(r"git -C \S+ (?:-c \S+ )?push", row) and "bundle create" in row and "local path" in row, (url, row)
+    git(work, "config", "remote.origin.url", "https://127.0.0.1:9/x.git")
+    assert mod.scan_checkout(work, remote=False)["origin_local_path"] is False
+
+
+def test_a_ref_name_that_is_not_utf8_makes_the_checkout_scan_incomplete(tmp_path):
+    """Adversary round 54 on PR 27, LOW 2: two non-UTF-8 tag names collide on U+FFFD and hide an unpushed tag."""
+    mod = load()
+    work = tmp_path / "roots" / "w"
+    work.mkdir(parents=True)
+    p = subprocess.run(["git", "init", "-q", "-b", "main", "--ref-format=reftable", str(work)], capture_output=True, env=GIT_ENV)
+    if p.returncode != 0:
+        pytest.skip("this git cannot make a reftable repository, the only way to hold a non-UTF-8 ref on APFS")
+    (work / "a.txt").write_text("a\n")
+    git(work, "add", "a.txt")
+    git(work, "commit", "-q", "-m", "first")
+    q = subprocess.run(["git", "update-ref", os.fsdecode(b"refs/tags/t\xfe"), "HEAD"], cwd=work, capture_output=True, env=GIT_ENV)
+    assert q.returncode == 0, q.stderr
+    rec = mod.scan_checkout(work, remote=False)
+    assert rec["verdict"].startswith("scan incomplete: for-each-ref (a ref name is not valid UTF-8)"), rec["verdict"]
+
+
 def test_a_global_push_rewrite_to_a_helper_gets_no_push_row(tmp_path, monkeypatch):
     """Codex pass 46 on PR 27, P1: the url checks ran with the global config switched off, but the printed push runs in
     the operator's shell, where `url.<base>.pushInsteadOf` can turn a clean url into a helper or credential url."""

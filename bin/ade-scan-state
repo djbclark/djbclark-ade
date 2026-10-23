@@ -258,20 +258,24 @@ def git_env(network: bool = False) -> dict:
     return env
 
 
-def run(argv, timeout=120, cwd=None, env=None, stdin_text=None, errors="replace"):
+def run(argv, timeout=120, cwd=None, env=None, stdin_text=None, errors="replace", err=None):
     """argv list in, (rc, stdout); never raises on a missing tool or timeout. `errors` is the stdout decoding
     (`surrogateescape` when a path in it is tested against the filesystem: `replace` would test a different name).
 
     stdin is /dev/null (or `stdin_text`, written whole) and the child leads its own process group, so a
-    timeout kills git together with the ssh / git-remote-https children it started."""
+    timeout kills git together with the ssh / git-remote-https children it started.
+
+    stderr is discarded unless `err` is a list: the text is then appended to it (empty after a timeout)."""
     try:
         p = subprocess.Popen(argv, stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
-                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors=errors,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL if err is None else subprocess.PIPE, text=True, errors=errors,
                              cwd=cwd, env=env, start_new_session=True)
     except OSError:
         return 124, ""
     try:
-        out, _ = p.communicate(input=stdin_text, timeout=timeout)
+        out, stderr_text = p.communicate(input=stdin_text, timeout=timeout)
+        if err is not None:
+            err.append(stderr_text or "")
     except subprocess.TimeoutExpired:
         try:
             os.killpg(p.pid, signal.SIGKILL)
@@ -550,8 +554,10 @@ def find_checkouts(root: Path, failures: list[tuple[Path, str]] | None = None) -
     return found
 
 
-def git(path: Path, *args, timeout=60, network=False, stdin_text=None, errors="replace", operator_config=False):
+def git(path: Path, *args, timeout=60, network=False, stdin_text=None, errors="replace", operator_config=False, err=None):
     kw = {} if stdin_text is None else {"stdin_text": stdin_text}
+    if err is not None:
+        kw["err"] = err
     if errors != "replace":  # the default stays implicit: tests substitute `run` with fakes that take no `errors`
         kw["errors"] = errors
     env = git_env(network)
@@ -907,24 +913,53 @@ def queried_origin_url(path: Path) -> str | None:
     return url
 
 
-def push_urls_hold_credential(path: Path) -> bool:
-    """Whether any url `git push origin` may use holds a credential (Codex pass 41, P1): every `remote.origin.url`
-    and `remote.origin.pushurl` value (a push goes to the pushurls when set, else to every url) and every url git
-    resolves for a push after `url.<base>.insteadOf` / `pushInsteadOf` (`remote get-url --push --all`). A failed
-    read is unknown, which refuses the push (the safe direction). Never queried, never kept."""
+def push_url_values(path: Path) -> list[str] | None:
+    """Every url `git push origin` may use (Codex pass 41, P1): every `remote.origin.url` and `remote.origin.pushurl`
+    value (a push goes to the pushurls when set, else to every url) and every url git resolves for a push after
+    `url.<base>.insteadOf` / `pushInsteadOf` (`remote get-url --push --all`), the second time as the operator's own
+    config rewrites it (Codex pass 46, P1: the scan's sandbox ignores the global and system config, the push does
+    not). None when any read failed: unknown, which refuses the push (the safe direction)."""
+    urls: list[str] = []
     for key in ("remote.origin.url", "remote.origin.pushurl"):
         rc, out = git(path, "config", "-z", "--get-all", key)
         if rc not in (0, 1):  # 1: key unset
-            return True
-        if rc == 0 and any(url_withheld(u) for u in out.split("\0") if u):
-            return True
-    rc, out = git(path, "remote", "get-url", "--push", "--all", "origin")
-    if rc != 0 or any(url_withheld(u) for u in out.split("\n") if u):
+            return None
+        if rc == 0:
+            urls += [u for u in out.split("\0") if u]
+    for operator in (False, True):
+        rc, out = git(path, "remote", "get-url", "--push", "--all", "origin", operator_config=operator)
+        if rc != 0:
+            return None
+        urls += [u for u in out.split("\n") if u]
+    return urls
+
+
+def push_urls_hold_credential(path: Path) -> bool:
+    """Whether any url `git push origin` may use holds a credential or names a remote helper, or could not be read.
+    Never queried, never kept."""
+    urls = push_url_values(path)
+    return urls is None or any(url_withheld(u) for u in urls)
+
+
+def push_urls_run_local_receive(path: Path) -> bool:
+    """Whether a push would run `receive-pack` locally, in another repository on this machine (a path, a relative path
+    or `file://`): that repository's receive hooks and config-named programs (`core.alternateRefsCommand`) run, and
+    `-c core.hooksPath` does not reach them (adversary round 54 on PR 27, MEDIUM). The plan then offers the bundle only."""
+    urls = push_url_values(path)
+    return bool(urls) and any(url_is_local_path(u) for u in urls)
+
+
+def url_is_local_path(url: str) -> bool:
+    """git's own classification: `file://`, or no `<scheme>://`, no `<transport>::` and no `host:path` (a colon before
+    any slash) is a path on this machine."""
+    if url.startswith("file://"):
         return True
-    # and as the operator's own config rewrites it (Codex pass 46, P1): the scan's sandbox ignores the global and system
-    # config, the push does not
-    rc, out = git(path, "remote", "get-url", "--push", "--all", "origin", operator_config=True)
-    return rc != 0 or any(url_withheld(u) for u in out.split("\n") if u)
+    if re.match(r"[A-Za-z0-9][A-Za-z0-9+.-]*://", url) or re.match(r"[A-Za-z0-9+.-]+::", url):
+        return False
+    colon, slash = url.find(":"), url.find("/")
+    if colon > 0 and (slash == -1 or colon < slash):
+        return False  # scp-like `host:path`
+    return bool(url)
 
 
 _BAD_REF_CHARS = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
@@ -1187,6 +1222,14 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     has_submodules, bad_key, submodules_vetted = submodule_config_check(path, common)
     if bad_key:
         return skipped_record(path, f"skipped: submodule config unrecognised {bad_key}", [bad_key])
+    # a ref name that is not UTF-8 cannot round-trip through this tool's text (two such names collide on U+FFFD, and
+    # no generated command could name them): the checkout is unknown, and its whole-directory row captures it all
+    # (adversary round 54 on PR 27, LOW 2; Codex pass 48, P1)
+    rc, names = git(path, "for-each-ref", "--format=%(refname)", errors="surrogateescape")
+    if rc != 0:
+        return incomplete_record(path, "for-each-ref", rc)
+    if any(0xDC80 <= ord(ch) <= 0xDCFF for ch in names):
+        return incomplete_record(path, "for-each-ref (a ref name is not valid UTF-8)", rc)
     rc, branch = git(path, "rev-parse", "--abbrev-ref", "HEAD")
     unborn = False
     if rc != 0:
@@ -1204,10 +1247,16 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     branch = branch.strip()
     detached = branch == "HEAD"
     # A git call that fails or times out must never read as "nothing found" (adversary round 3, 1).
+    status_err: list[str] = []
     rc, status = git(path, "status", "--porcelain", "--ignore-submodules=all",
-                     "--untracked-files=normal", timeout=STATUS_TIMEOUT)
+                     "--untracked-files=normal", timeout=STATUS_TIMEOUT, err=status_err)
     if rc != 0:
         return incomplete_record(path, "status", rc)
+    if any(ln.startswith(("warning:", "error:", "fatal:")) for ln in "".join(status_err).splitlines()):  # not `hint:` (the graft-file notice)
+        # an unreadable untracked subtree ends `status` with rc 0, the files it could not list left out, and a
+        # `warning: could not open directory ...` on stderr: the traversal was partial, so no count of it is a count
+        # (Codex pass 49 on PR 27, P1)
+        return incomplete_record(path, "status (git printed a warning: part of the worktree could not be read)", rc)
     lines = status.splitlines()
     untracked = [ln[3:] for ln in lines if ln.startswith("??")]
     modified = [ln[3:] for ln in lines if not ln.startswith("??")]
@@ -1509,6 +1558,8 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         # whatever the mode: the capture plan must never print a push for such a url (adversary round 39: the
         # `not queried` flag is `--remote`-only, and a default scan still got push rows); the url itself is in no record
         "origin_credential": bool(credential),
+        # a push to a path or `file://` origin runs that repository's receive hooks: bundle only (adversary round 54)
+        "origin_local_path": bool(has_origin) and push_urls_run_local_receive(path),
         "on_origin": "unknown" if on_origin is None else on_origin,
         "flags": flags, "verdict": primary,
     }

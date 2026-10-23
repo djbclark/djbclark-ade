@@ -668,6 +668,13 @@ def render(d):
         # argv, the exposure the scanner itself avoids; the bundle alternative stands alone (Codex pass 33 on PR 27)
         cred_note = " (origin url holds a credential or names a remote helper: no push until it is removed from the url; bundle instead)"
         cred_need = "yes: bundle it; a push would hand the credential-bearing origin url to the transport"
+        # a push to a local path or `file://` origin runs that repository's receive hooks and config programs, which
+        # `-c core.hooksPath` does not reach: bundle only (adversary round 54 on PR 27, MEDIUM); not "unreachable"
+        local_origin = bool(c.get("origin_local_path")) and not credential
+        no_push = credential or local_origin
+        if local_origin:
+            cred_note = " (origin is a local path or file:// url: a push would run that repository's receive hooks and config programs: no push; bundle instead)"
+            cred_need = "yes: bundle it; a push to a local-path origin runs that repository's hooks"
         unreachable = credential or ORIGIN_UNREACHABLE in c["flags"]  # `local_only_verified` is false with it, whatever the counts
         submodules = SUBMODULES_FLAG in c["flags"]  # `status --ignore-submodules=all`: the counts see nothing in there
         tag_others = c.get("local_only_tags") or []
@@ -708,14 +715,14 @@ def render(d):
                     # a bundle of every ref can hold the commits (Codex pass 48 on PR 27, P1)
                     bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
                                     ck, raw_p, f"{ck}/all-refs.bundle")
-                    cmd.append(bundle + ODD_NAME_NOTE + (cred_note if credential else ""))
-                    need = cred_need if credential else "yes: bundle it; the branch name cannot be typed into a push"
+                    cmd.append(bundle + ODD_NAME_NOTE + (cred_note if no_push else ""))
+                    need = cred_need if no_push else "yes: bundle it; the branch name cannot be typed into a push"
                 else:
                     push = shcode("git -C {} -c core.hooksPath=/dev/null push -u origin refs/heads/{}:refs/heads/{}", raw_p, c["branch"], c["branch"])
                     bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} refs/heads/{}",
                                     ck, raw_p, f"{ck}/branch-{quote(c['branch'], safe='')}.bundle", c["branch"])
-                    cmd.append(bundle + cred_note if credential else push + " or " + bundle)
-                    need = cred_need if credential else "yes: pushing a branch publishes it; pick push or bundle"
+                    cmd.append(bundle + cred_note if no_push else push + " or " + bundle)
+                    need = cred_need if no_push else "yes: pushing a branch publishes it; pick push or bundle"
         if local_n and not covered_by_bundle:
             # commits on other local branches, tags (or a detached HEAD) that no origin ref holds, whatever HEAD's own state
             others = [b for b in (c.get("local_only_branches") or [])
@@ -738,14 +745,14 @@ def render(d):
                        for t in tag_others if ODD_NAME not in t["tag"]]
             bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
                             ck, raw_p, f"{ck}/local-only.bundle")
-            if credential:
+            if no_push:
                 cmd.append(bundle + cred_note)
             elif odd_names:
                 cmd.append(bundle + ODD_NAME_NOTE)  # one bundle holds every ref; no push can name the odd one
             else:
                 cmd.append(bundle if not lo_cmd else "; ".join(lo_cmd[:-1] + [lo_cmd[-1] + " or " + bundle]))
             need = need if need.startswith(("yes", "**yes")) else (
-                cred_need if credential else "yes: pushing a branch publishes it; pick push or bundle")
+                cred_need if no_push else "yes: pushing a branch publishes it; pick push or bundle")
         if zero_tags and not (local_n and not covered_by_bundle):
             # a local tag origin lacks on a commit origin has: no commit count sees the tag object and no branch
             # bundle holds it; its name, annotation and signature are lost with the checkout (Codex pass 31 on PR 27)
@@ -756,10 +763,10 @@ def render(d):
             # same object is up to date; one it has at another object is rejected, loudly
             bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} "
                             "bundle create <DEST>/{} --tags", ck, raw_p, f"{ck}/tags.bundle")
-            cmd.append(bundle + cred_note if credential else shcode("git -C {} -c core.hooksPath=/dev/null push origin --tags", raw_p) + " or " + bundle
+            cmd.append(bundle + cred_note if no_push else shcode("git -C {} -c core.hooksPath=/dev/null push origin --tags", raw_p) + " or " + bundle
                        + " (a tag origin has at another object is rejected by the push: bundle it, or decide to force)")
             need = need if need.startswith(("yes", "**yes")) else (
-                cred_need if credential else "yes: pushing a tag publishes it; pick push or bundle")
+                cred_need if no_push else "yes: pushing a tag publishes it; pick push or bundle")
         if hidden:
             what.append(f"{hidden} tracked path(s) marked assume-unchanged or skip-worktree (`status` cannot see their edits)")
             cmd.append(shcode(HIDDEN_FMT, *hidden_values(raw_p, ck)))
