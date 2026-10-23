@@ -167,7 +167,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
-- `bin/claude-quota-guard` aged the decision by every snapshot row with a Fable window instead of the one whose window `_lowest` picked (a fresh 10% reading beside a 5 h old 90% row sent a false collector-down ping), and ignored a summary-only Fable (or default) row whenever another row had `windows[]`; now only the supplying snapshot row ages the decision and every windowless row with a headroom or `usable_now` is judged beside the detailed rows (PR TBD).
+- `bin/claude-quota-guard` aged the decision by every snapshot row with a Fable window instead of the one whose window `_lowest` picked (a fresh 10% reading beside a 5 h old 90% row sent a false collector-down ping), and ignored a summary-only Fable (or default) row whenever another row had `windows[]`; now only the supplying snapshot row ages the decision and every windowless row with a headroom or `usable_now` is judged beside the detailed rows (#36).
 - `self-slash --finish --successor` after its first live run (2026-10-23): reads the agent id behind Paseo 0.13's
   `Using workspace <id>` line before the JSON (the successor started but this agent was not archived); copies the old
   agent's `--mode` only to the same provider (an omp `full` made `paseo run` refuse a claude successor), else
