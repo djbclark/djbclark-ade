@@ -1853,8 +1853,10 @@ class TestGovernorHold(unittest.TestCase):
         self.path.write_text(json.dumps(body))
 
     def test_without_state_claude_is_still_chosen_for_code(self):
-        # a missing state file holds nothing: claude stays in the roster for judgment
-        self.assertEqual(r.route("judgment", quota=self.QUOTA).service.name, "claude")
+        # a missing state file holds nothing: claude stays in the roster for judgment (omp, eligible since the quota
+        # guard's routing change, may rank first: claude is the choice or an alternative)
+        choice = r.route("judgment", quota=self.QUOTA)
+        self.assertIn("claude", {choice.service.name, *choice.alternatives})
         self.assertIsNone(r.governor_hold())
 
     def test_tight_and_critical_never_pick_claude_for_the_four_kinds(self):
