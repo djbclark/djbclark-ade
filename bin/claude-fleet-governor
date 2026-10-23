@@ -309,12 +309,36 @@ def compute(snaps: list[dict[str, Any]], now: datetime, t: dict[str, float]) -> 
         w["level"] = window_level(kind, w, now, t)
         windows[kind] = w
     level = max((w["level"] for k, w in windows.items() if k != FABLE_KIND), key=LEVELS.get, default="ok")
-    return {"windows": windows, "level": level, "snapshot_at": newest["at"]}
+    guard = guard_level(now)
+    if LEVELS[guard] > LEVELS[level]:  # the sensor (bin/claude-quota-guard) is stricter than this projection: it wins
+        level = guard
+    return {"windows": windows, "level": level, "snapshot_at": newest["at"], "guard": guard}
+
+
+def guard_level(now: datetime) -> str:
+    """The level `bin/claude-quota-guard` last wrote (CLAUDE_QUOTA_GUARD_STATE, default ~/.local/state/ade/
+    quota-guard.json), mapped to this tool's three: `watch` is `ok` here (it only restricts Fable and Opus
+    sub-agents, which the unconditional Fable move already covers). Missing, unreadable, older than 2 hours or
+    unknown: `ok` (the sensor is advisory; this tool's own projection still decides). The governor is the actor,
+    the guard the sensor (rework-2 lead, 2026-10-23)."""
+    path = Path(os.environ.get("CLAUDE_QUOTA_GUARD_STATE") or home() / ".local/state/ade/quota-guard.json")
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        at = parse_ts(d.get("checked_at"))
+        if at is None or (now - at).total_seconds() > 7200:
+            return "ok"
+        lvl = d.get("level")
+    except (OSError, ValueError, AttributeError):
+        return "ok"
+    return lvl if lvl in ("tight", "critical") else "ok"
 
 
 def trigger(windows: dict[str, dict[str, Any]], level: str) -> tuple[str, dict[str, Any]] | None:
-    """The window that sets `level`: the highest projection among those at that level."""
+    """The window that sets `level`: the highest projection among those at that level; when the quota guard
+    raised the level above every window's own, the window with the highest projection."""
     pool = [(k, w) for k, w in windows.items() if k != FABLE_KIND and w["level"] == level]
+    if not pool:
+        pool = [(k, w) for k, w in windows.items() if k != FABLE_KIND]
     return max(pool, key=lambda kw: kw[1]["projected_at_reset"], default=None) if pool else None
 
 
@@ -547,6 +571,8 @@ def render(res: dict[str, Any], plan: list[dict[str, Any]], now: datetime) -> st
         lines.append(f"{short_label(w['label'])}: {w['used']:.0f}% used, {w['left']:.0f}% left, "
                      f"{w['rate_per_hour']:.1f}%/h over {w['samples']} samples, projected {w['projected_at_reset']:.0f}% "
                      f"at reset {hhmm(w['resets_at'])}, {ex} -> {w['level']}")
+    if res.get("guard", "ok") != "ok":
+        lines.append(f"quota-guard level: {res['guard']}")
     lines.append(f"level: {res['level']}")
     lines.extend(f"  {describe_move(m)}" for m in plan)
     return "\n".join(lines)
@@ -597,7 +623,7 @@ def cmd_run(dry: bool) -> int:
     state.pop("stale_since", None)
     state.update({"level": level, "checked_at": iso(now), "snapshot_at": iso(res["snapshot_at"]),
                   "windows": {k: window_state(w) for k, w in res["windows"].items()},
-                  "errors": failed})
+                  "guard_level": res.get("guard", "ok"), "errors": failed})
     state.setdefault("downshifted", {})
     if changed:
         trig = trigger(res["windows"], level) or max(

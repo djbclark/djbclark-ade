@@ -44,3 +44,5 @@ if os.environ.get("ROUTE_AGENT_OMP_READY", "").strip().lower() not in ("0", "1")
 # would drop claude from every code/bulk/research/mechanical route and change the answer of unrelated tests.
 # Pinned to a missing file unconditionally; TestGovernorHold points it at a fixture per test.
 os.environ["CLAUDE_GOVERNOR_STATE"] = "/nonexistent/claude-governor-state.json"
+# the governor also reads the quota guard's state (bin/claude-quota-guard): a test never sees the real one
+os.environ["CLAUDE_QUOTA_GUARD_STATE"] = "/nonexistent/claude-quota-guard-state.json"

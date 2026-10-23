@@ -607,3 +607,24 @@ class TestStateAndInstall(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_the_quota_guard_level_raises_the_governor_level_and_is_ignored_when_stale_or_lower(tmp_path, monkeypatch):
+    """Rework-2 lead, 2026-10-23: the governor (actor) reads quota-guard.json (sensor) and takes the stricter level."""
+    spec = importlib.util.spec_from_loader("gov", importlib.machinery.SourceFileLoader("gov", str(GOV)))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    now = mod.parse_ts("2026-10-23T14:00:00Z")
+    guard = tmp_path / "quota-guard.json"
+    monkeypatch.setenv("CLAUDE_QUOTA_GUARD_STATE", str(guard))
+    assert mod.guard_level(now) == "ok"  # missing
+    guard.write_text('{"level": "critical", "checked_at": "2026-10-23T13:30:00Z"}')
+    assert mod.guard_level(now) == "critical"
+    guard.write_text('{"level": "tight", "checked_at": "2026-10-23T13:30:00Z"}')
+    assert mod.guard_level(now) == "tight"
+    guard.write_text('{"level": "watch", "checked_at": "2026-10-23T13:30:00Z"}')
+    assert mod.guard_level(now) == "ok"  # watch only restricts Fable/Opus sub-agents
+    guard.write_text('{"level": "critical", "checked_at": "2026-10-23T11:00:00Z"}')
+    assert mod.guard_level(now) == "ok"  # older than 2 hours
+    guard.write_text("not json")
+    assert mod.guard_level(now) == "ok"
