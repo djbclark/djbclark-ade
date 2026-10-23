@@ -2637,6 +2637,14 @@ def test_a_submodule_git_dir_read_elsewhere_is_skipped_not_trusted(tmp_path):
     assert verdict() == "skipped: submodule config unrecognised (unrecognised entry)"
     (moddir / "Commondir").unlink()
     assert not verdict().startswith("skipped")
+    # round 45 (MEDIUM 1): APFS folds the `ﬁ` ligature to `fi`, which `str.lower` does not, so `conﬁg` opened as
+    # `config`; the check now asks the file system for the exact name. A case-sensitive file system (Linux CI) does
+    # not open it, and git does not read it there either
+    (moddir / "config").rename(moddir / "con\ufb01g")
+    if (moddir / "config").exists():
+        assert verdict() == "skipped: submodule config unrecognised (unrecognised entry)"
+    (moddir / "con\ufb01g").rename(moddir / "config")
+    assert (moddir / "config").is_file() and not verdict().startswith("skipped")
     # round 44 (MEDIUM 1.1): a gitlink whose work-tree entry is a symlink: `git -C <sup>/sub` would run in a
     # repository the walk never vetted
     elsewhere = make_repo(tmp_path / "elsewhere")
@@ -2660,6 +2668,19 @@ def test_a_submodule_git_dir_read_elsewhere_is_skipped_not_trusted(tmp_path):
     for unusual in ("l/../nested", str(tmp_path / "abs"), ""):
         (sup / ".gitmodules").write_text(gitmodules + f'[submodule "x"]\n\tpath = {unusual}\n\turl = ./x\n')
         assert verdict() == "skipped: submodule config unrecognised (gitmodules path unusual)", unusual
+    (sup / ".gitmodules").write_text(gitmodules)
+    assert not verdict().startswith("skipped")
+    # round 45 (MEDIUM 2): the plan's listing of `.gitmodules` prints keys and values raw, so a value holding a newline
+    # (git config's `\n` escape in a quoted value) or a subsection holding ESC and CR shows the human a second path the
+    # scan never vetted
+    for entry in ('[submodule "x"]\n\tpath = "x\\nsubmodule.evil.path a/nested"\n\turl = ./x\n',
+                  '[submodule "a\x1b[2K\rsubmodule.evil"]\n\tpath = y\n\turl = ./y\n',
+                  '[submodule "z"]\n\tpath = y\u202e/detsen\n\turl = ./y\n',  # a bidi override redraws the path
+                  '[submodule "z"]\n\tpath = y\u200b\n\turl = ./y\n'):  # a zero-width space is invisible
+        (sup / ".gitmodules").write_text(gitmodules + entry)
+        assert verdict() == "skipped: submodule config unrecognised (gitmodules path unusual)", entry
+    (sup / ".gitmodules").write_bytes(gitmodules.encode() + b'[submodule "z"]\n\tpath = y\x85\n\turl = ./y\n')  # a C1 byte, not UTF-8
+    assert verdict() == "skipped: submodule config unrecognised (gitmodules path unusual)"
     (sup / ".gitmodules").write_text(gitmodules)
     assert not verdict().startswith("skipped")
     # a de-initialised submodule (no `.git` at all, an empty directory) runs nothing here: the plan's guard covers it
