@@ -198,7 +198,7 @@ install exactly as below. Daemon 0.12.0, CLI 0.13.0-beta.1.
 | Plugin | Source used | Result |
 |---|---|---|
 | paseo-sidebar-organizer | `git:pedrozimmermannsoares/paseo-sidebar-organizer --ref 709317f7acb7a963f2acb9c96b77545b62b3bca6` | running; first sweep labelled all 9 workspaces (Running, Idle, Blocked, Reply) |
-| reopen-archived | `git:saratscheff/paseo-reopen-archived --ref a53118dd6451fbc9b80800d4e478c4531978881d` | running; archived workspaces appear in ⌘K as "Reopen: …" |
+| reopen-archived | `git:saratscheff/paseo-reopen-archived --ref a53118dd6451fbc9b80800d4e478c4531978881d` | running (`paseo plugin ls`); the ⌘K "Reopen: …" items were not checked in the app |
 
 Both reach the daemon through `daemon.listen` in `~/.paseo/config.json` (127.0.0.1:7263): the
 desktop app strips `PASEO_LISTEN` from the daemon's environment, so that key is the one setting
@@ -212,3 +212,22 @@ Same day: `paseo daemon config set daemon.autoArchiveAfterMerge true` (applied l
 The daemon archives only a Paseo-owned worktree that is clean, not ahead of origin, and whose PR
 it saw open and then merged (`auto-archive-on-merge/archive-if-safe.js` in the app bundle); local
 checkouts and cow pastures never qualify.
+
+`config set` also listed seven plugin paths and `features.dictation`/`features.voiceMode` under
+`restartRequiredPaths`: assumed to mean the saved file differs from what the running daemon loaded,
+applied at its next restart. The role `paseo_desktop` (site-djbclark) owns only listen, hostnames,
+relay and webUi, so it neither sets nor resets `autoArchiveAfterMerge`.
+
+Navigation plugins considered the same day and not installed (registry, 358 entries):
+Workspace Navigator (yeyan00; host/project/workspace tree, search by branch, running-first sort;
+needs 0.11.4, management actions untested live), Workspace Spaces (hieppp; numbered Spaces;
+targets 0.8 to 0.9.0-beta.2 and drives private app DOM, so skipped on 0.12/0.13), Session triage
+and Agents Dash List (attention lists; overlap Herald and `/helm`; Agents Dash List failed to
+build in section 6), Display Switcher (status/project grouping toggle through the page),
+Sidebar Project Filter (the native Display menu already filters projects), Auto labels
+(provider/model labels). Native levers that need no plugin: Display → Group by Status, labels
+and the project filter, pins, ⌘K (ranks by match then recency since 0.12.0), background
+workspaces (`workspace create --background`). Upstream thread on large sidebars:
+getpaseo/paseo discussion 4487; merged for the next release: PR 7277 (empty ⌘K lists the five
+most recent workspaces) and PR 7635 (seven workspaces per project plus active ones, Show more,
+Sort → Last prompt).
