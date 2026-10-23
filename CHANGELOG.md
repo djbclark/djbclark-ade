@@ -11,6 +11,9 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- `skill-everywhere` gains a `grokbot` target: a rendered copy `ade-<name>/` in `~/agent-data/workflows/` on the
+  Grok Bot box (banner, `.skill-everywhere` marker, only marked dirs touched), plus `--dry-run`/`-n`,
+  `SKILL_EVERYWHERE_ONLY` and plain-GNU fallbacks so it runs on Linux (2026-10-23). (PR pending)
 - `autorename` renames a Paseo-hosted session's workspace to the title in lower-case hyphen form plus `-pw`
   (`paseo-skill-sync-overwrite-fix-pw`; `--auto` keeps a workspace already ending in `-pw`); herdr tab labels keep
   `-t` (2026-10-23).

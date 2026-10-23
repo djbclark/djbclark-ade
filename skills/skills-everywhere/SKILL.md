@@ -14,12 +14,24 @@ Links a skill into every agent TUI. Content lives in exactly one place —
 and every TUI gets a **direct symlink** to it; no hub, no chains (collapsed
 2026-10-14). Clients covered (the `targets` table in the script): Claude
 Code, Codex, omp (oh-my-pi, `~/.omp/agent/skills`), Copilot, Cursor,
-opencode, zcode, Grok, Qwen, Devin, Cline, Muse, Antigravity and Hermes:
+opencode, zcode, Grok, Qwen, Devin, Cline, Muse, Antigravity and Hermes,
+plus Grok Bot (`grokbot`, a rendered copy `ade-<name>` in
+`~/agent-data/workflows/` on its Linux box, 2026-10-23):
 
 ```sh
 ~/src/djbclark-ade/bin/skill-everywhere <skill-name>...
 ~/src/djbclark-ade/bin/skill-everywhere --check <skill-name>...
 ```
+
+Add `--dry-run` (`-n`) to print what link or `--remove` would change, and
+`SKILL_EVERYWHERE_ONLY=<bin>,...` to touch only those targets.
+
+**On the Grok Bot box** (`/home/box`), `/skills-everywhere` means: run
+`/home/box/agent-data/shared/skills-sync/sync.sh` (add `--dry-run` first),
+which pulls `origin/master` and mirrors the skills chosen for Grok Bot. To
+handle one skill by hand, use
+`SKILL_EVERYWHERE_ONLY=grokbot bin/skill-everywhere <name>`. Never write into
+an `ade-*` folder by hand; the next sync overwrites it.
 
 The requested skill must already exist under
 `~/src/djbclark-ade/skills/<skill-name>/SKILL.md` or the private tree.

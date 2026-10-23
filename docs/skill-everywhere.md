@@ -4,7 +4,8 @@ README for [`skill-everywhere`](../bin/skill-everywhere) (canonical script in
 this repository; compatibility command `~/ops/site-private/bin/skill-everywhere`). It makes a local skill available to
 every agent TUI on this machine (Claude Code, Codex, omp, Copilot, Cursor, opencode,
 zcode, Grok, Qwen, Devin, Cline, Muse, Antigravity and Hermes) by
-symlinking it into each one's skills dir, and this page says how to prove each
+symlinking it into each one's skills dir (Grok Bot, on its own Linux box, gets
+a rendered copy instead; see its row in section 2), and this page says how to prove each
 TUI actually loads it. Until 2026-10-08 this was the `skill-everywhere` skill;
 it was demoted to a README because it is needed only when adding a skill, and
 its description cost listing budget in every session of every TUI.
@@ -66,6 +67,7 @@ one of the two roots.
 | zcode (`zcode`) | already reads `~/.agents/skills`; an extra link listed it twice. **Loaded ≠ slash-invocable:** zcode's typed `/` surface resolves only built-ins, plugins and `~/.zcode/commands/*.md`; a user skill needs a command wrapper there (`skills: <name>` frontmatter auto-mounts it). Wrappers for the universal set (baton, resume, handoff, loose, steps, helm, helm-all, session-finder, session-finder-all, herdr-tidy, orca-tidy, skillopt-sleep, bigteam, autorename, hyades-docker) live in `~/src/djbclark-ade/zcode/commands/`, symlinked directly into `~/.zcode/commands/`; add one there when adding a slash-shaped skill. Until the TUI restarts it won't see new wrappers; in a running session the built-in `/skill <name>` reaches any loaded skill without one. |
 | Antigravity (`agy`) | `~/.gemini/antigravity-cli/skills` (agy CLI 1.2.16; links are followed). Verified with `/skills` in interactive agy. Headless `agy -p` answers never mention user skills, not even the installer's bailian ones, so check agy interactively. `~/.gemini/config/skills` and `~/.gemini/antigravity/skills` are not read by the CLI |
 | omp / oh-my-pi (`omp`) | `~/.omp/agent/skills` (native, highest skill priority; added 2026-10-13). omp also reads `~/.agents/skills`, but de-duplicates by `realpath`, so the second link does not list a skill twice. omp ignores `~/.claude/skills` unless `claude` is in its `enabledProviders`. Prove it with `omp -p --no-title "<step 3 prompt>"` from a scratch dir. |
+| Grok Bot (`grokbot`, no binary; present when `~/agent-data/workflows` exists) | **Copy, not link** (added 2026-10-23): Grok Bot runs on its own Linux box (`HOME=/home/box`) and reads `~/agent-data/workflows/<slug>/SKILL.md` as plain files, so no link into a Mac checkout could resolve. The script renders `ade-<name>/`: symlinks dereferenced, a "managed copy" banner after the front matter (Mac-only paths, Grok Bot's approval rules win), and a `.skill-everywhere` marker. Only a dir with that marker is updated or removed; `--check` reports `copied`, `stale copy`, `missing` or `not ours`. On the box run it with `SKILL_EVERYWHERE_ONLY=grokbot`, or the box's own claude, agy, cline and hermes get links too. The box's nightly driver is `/home/box/agent-data/shared/skills-sync/sync.sh` (fetches `origin/master`, picks which skills suit Grok Bot, keeps a manifest, runs this script). |
 
 `aiuse --json` providers with no TUI of their own (alibaba, deepseek,
 openrouter, litellm, opencode-zen, clinepass, grok) are API pools behind the
