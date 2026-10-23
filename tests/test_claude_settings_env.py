@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for bin/claude-settings-env (2026-10-16): sets GRAFT_NO_GITIGNORE in a settings
-file's env block idempotently, keeps other keys, key order, mode and a symlinked target."""
+"""Tests for bin/claude-settings-env (2026-10-16): enforces GRAFT_NO_GITIGNORE and (2026-10-23) adds the
+CLAUDE_CODE_SUBAGENT_MODEL default only when absent, idempotently, keeping other keys, key order, mode and a
+symlinked target."""
 from __future__ import annotations
 
 import json
