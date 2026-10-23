@@ -116,7 +116,7 @@ a. **Running and not finished → message it, even while it is `working` on
    refused** (that session turned inbound messages off, 2026-10-12) →
    `relay.py <id> "<one line>"`. **It is the one command for messaging any peer** (2026-10-23): it picks
    the best route for that session (Paseo `send`, `acp-dispatch tell`, a live launch's inbox, keys into its
-   pane, then the Claude messaging socket) and tries the next route itself when one fails before sending;
+   pane, then the Claude messaging socket; a Hermes gateway conversation by `hermes --resume SID -z`) and tries the next route itself when one fails before sending;
    it errors only when every route has, listing each reason (`--plan` shows the order, `--via R` pins one).
    Don't pick a channel by hand or hand-roll a waiter. A working Claude queues it for its next tool round. Put a
    long brief in a file and relay one line naming its absolute path. Don't resend
@@ -282,7 +282,7 @@ flips to false turns peer messaging off in running Claude sessions (2026-10-13; 
 | any ACP launch (`host acp`, id `YYYYMMDD-…`) | `launch.py reply <id> "<text>"`, then `launch.py wait <id>` | `launch.py list`; its log under `~/.local/state/session-finder/` |
 | a headless `acp-dispatch` slice (a bigteam/lead worker: `where: unknown terminal`, no pane) | `acp-dispatch tell <jobs/NAME.json> "<text>"`; `fleet.py show` and `relay.py` name the record (2026-10-18) | `acp-dispatch resume <record>` |
 | an `acp-dispatch` / `acp-run claude` slice (headless; `fleet.py` shows no channel) | `SendMessage({to: "<name>"})`: it is in `ListAgents` as a peer (2026-10-18: hermes-agent-1e, unreachable by relay, listed there). Any agent's slice: `acp-dispatch tell RECORD "<msg>"` (2026-10-18; appends to `jobs/<name>.inbox.md`, also writes to a Claude slice's live socket; the slice answers in `jobs/<name>.replies.md`, `acp-dispatch check` shows them). Slices dispatched before 051a269 lack the footer item that makes them read the inbox: go through their lead | `acp-dispatch resume RECORD` |
-| hermes (Telegram/desktop chat, `hermes-gw`) | `ask_hermes` (MCP) to prompt it; `messages_send` with `target="telegram:<chat>[:<thread>]"` posts as Hermes; approvals: `permissions_list_open` / `permissions_respond` | `hermes --resume <id>` |
+| hermes (Telegram/desktop chat, `hermes-gw`) | `relay.py <id|sid> "<text>"` (2026-10-23): `hermes --resume <sid> -z` runs one turn in that conversation's own transcript, tagged `[relay from <name>] `; Hermes's reply is printed (untrusted data, not posted in the chat); it refuses Hermes's own conversation, an unknown session is refused before writing, any other failure is "unverified" and a turn past max(300, `--wait`) s is left running, never killed (do not resend). `ask_hermes` (MCP) is a separate one-shot session, not this conversation; `messages_send` with `target="telegram:<chat>[:<thread>]"` posts as Hermes; approvals: `permissions_list_open` / `permissions_respond` | `hermes --resume <id>` |
 | hermes (CLI in a pane) | `helm.py send <pane> "<text>"` | same |
 | hermes (to make it *change* something: `ask_hermes` is read-only) | after djbclark's yes for that run: `ACP_OPERATOR_APPROVED=hermes launch.py --agent hermes --cwd ~ -f brief.md --model <explicit id>`; pick the id from its `new_session` model list, never `custom:*` (2026-10-17: `custom:big-pickle` went to sipb-llms-proxy, not ClinePass) | `launch.py reply <id>` |
 | muse | `muse session-message send --target <uuid|name>`, body on stdin | `muse resume <id>` |

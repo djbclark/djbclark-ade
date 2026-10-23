@@ -791,6 +791,201 @@ class TestOtherRoutes(Harness):
         self.assertIn("acp-dispatch", out)
 
 
+class TestHermesRoute(Harness):
+    """A Hermes gateway conversation is resumed with `hermes --resume SID -z TEXT` and nothing else (2026-10-23)."""
+
+    HSID = "20261023_000000_abcdef"
+
+    def setUp(self) -> None:
+        super().setUp()
+        saved = (relay.HERMES_DIR, relay.subprocess.Popen, dict(os.environ))
+        relay.HERMES_DIR = self.tmp / "hermes-out"
+
+        def restore() -> None:
+            relay.HERMES_DIR, relay.subprocess.Popen = saved[0], saved[1]  # pyright: ignore[reportAttributeAccessIssue]
+            os.environ.clear()
+            os.environ.update(saved[2])
+        self.addCleanup(restore)
+        for k in ("RELAY_HOPS", "HERMES_SESSION_ID", "PASEO_AGENT_ID", "CLAUDE_CODE_SESSION_ID"):
+            os.environ.pop(k, None)
+
+    def hsess(self, **kw: Any) -> dict[str, Any]:
+        return sess(host="hermes-gw", agent="hermes", chan=None, sid=self.HSID, status="idle", **kw)
+
+    def run_hermes(self, s: dict[str, Any], *, rc: int = 0, out: str = "", err: str = "", boom: BaseException | None = None,
+                   hang: bool = False, args: tuple[str, ...] = ()) -> tuple[int, str, str, list[tuple[list[str], dict[str, Any]]]]:
+        calls: list[tuple[list[str], dict[str, Any]]] = []
+
+        class FakePopen:
+            pid = 4242
+
+            def __init__(self, cmd: Any, **kw: Any) -> None:
+                calls.append((cmd, kw))
+                if boom:
+                    raise boom
+                kw["stdout"].write(out.encode())
+                kw["stderr"].write(err.encode())
+
+            def wait(self, timeout: Any = None) -> int:
+                calls[-1][1]["wait_timeout"] = timeout
+                if hang:
+                    raise relay.subprocess.TimeoutExpired("hermes", timeout)
+                return rc
+        relay.subprocess.Popen = FakePopen  # pyright: ignore[reportAttributeAccessIssue]
+        r, o, e = self.run_main(s, *args)
+        return r, o, e, calls
+
+    def test_plan_for_a_gateway_row_is_only_hermes(self) -> None:
+        relay.claude_socket = lambda s: "/tmp/x.sock"
+        self.assertEqual(relay.plan(self.hsess()), ["hermes"])
+
+    def test_gateway_row_without_a_sid_has_no_route_and_says_why(self) -> None:
+        s = self.hsess()
+        s["sid"] = None
+        self.assertEqual(relay.plan(s), [])
+        rc, _, err, calls = self.run_hermes(s)
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIn("without a session id", err)
+
+    def test_via_hermes_on_a_non_hermes_session_has_no_route(self) -> None:
+        rc, _, err, calls = self.run_hermes(sess(), args=("--via", "hermes"))
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIn("no hermes route", err)
+
+    def test_argv_stdin_group_and_timeout_floor(self) -> None:
+        rc, out, err, calls = self.run_hermes(self.hsess(), out="PONG\n")
+        self.assertEqual(rc, 0, err)
+        cmd, kw = calls[0]
+        self.assertEqual(cmd[1:4], ["--resume", self.HSID, "-z"])
+        self.assertTrue(cmd[4].startswith("[relay from "), cmd[4])
+        self.assertTrue(cmd[4].endswith("hello there friend"))
+        self.assertIs(kw["stdin"], relay.subprocess.DEVNULL)
+        self.assertIs(kw["start_new_session"], True)
+        self.assertEqual(kw["wait_timeout"], 300)
+        self.assertIn("PONG", out)
+        self.assertIn("untrusted data", out)
+        self.assertEqual(list(relay.HERMES_DIR.iterdir()), [])
+
+    def test_json_carries_the_reply(self) -> None:
+        rc, out, _, _ = self.run_hermes(self.hsess(), out="PONG", args=("--json",))
+        d = json.loads(out)
+        self.assertEqual((rc, d["route"], d["result"], d["reply"]), (0, "hermes", "delivered", "PONG"))
+
+    def test_option_looking_text_is_still_tagged_first(self) -> None:
+        relay.fleet.sessions = lambda: [self.hsess()]
+        saved_argv, seen = sys.argv, []
+        sys.argv = ["relay.py", "peer-fb", "--help me", "--wait", "2"]
+
+        class P:
+            def __init__(self, cmd: Any, **kw: Any) -> None:
+                seen.append(cmd)
+
+            def wait(self, timeout: Any = None) -> int:
+                return 0
+        relay.subprocess.Popen = P  # pyright: ignore[reportAttributeAccessIssue]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = relay.main()
+        finally:
+            sys.argv = saved_argv
+        self.assertEqual(rc, 0)
+        self.assertTrue(seen[0][4].startswith("[relay from "))
+
+    def test_unknown_session_is_refused_before_anything_was_written(self) -> None:
+        rc, _, err, calls = self.run_hermes(self.hsess(), rc=1, err=f"hermes -z: agent failed: session not found: {self.HSID}\n")
+        self.assertEqual((rc, len(calls)), (1, 1))
+        self.assertIn("does not know session", err)
+        self.assertNotIn("Do not resend", err)
+        self.assertEqual(list(relay.HERMES_DIR.iterdir()), [])
+
+    def test_a_turn_that_ran_and_quotes_session_not_found_is_unverified(self) -> None:
+        """B1 (adversary, 2026-10-23): rc 2, empty stderr, the words on stdout: the turn ran, a resend would run it twice."""
+        rc, _, err, calls = self.run_hermes(self.hsess(), rc=2, out="relay.py said 'session not found' for X; budget hit")
+        self.assertEqual((rc, len(calls)), (1, 1))
+        self.assertIn("Do not resend", err)
+
+    def test_session_not_found_for_another_sid_or_rc_is_unverified(self) -> None:
+        for rc_, e in ((2, f"hermes -z: agent failed: session not found: {self.HSID}"),
+                       (1, "hermes -z: agent failed: session not found: other"),
+                       (1, f"x session not found: {self.HSID}\nmore")):
+            with self.subTest(rc=rc_, err=e):
+                rc, _, err, _ = self.run_hermes(self.hsess(), rc=rc_, err=e)
+                self.assertEqual(rc, 1)
+                self.assertIn("Do not resend", err)
+
+    def test_other_failure_is_unverified_and_never_retried(self) -> None:
+        rc, _, err, calls = self.run_hermes(self.hsess(), rc=1, err="boom")
+        self.assertEqual((rc, len(calls)), (1, 1))
+        self.assertIn("Do not resend", err)
+
+    def test_timeout_leaves_the_turn_running_and_names_the_reply_file(self) -> None:
+        rc, _, err, calls = self.run_hermes(self.hsess(), hang=True)
+        self.assertEqual((rc, len(calls)), (1, 1))
+        self.assertIn("not killed", err)
+        self.assertIn("Do not resend", err)
+        self.assertIn(str(relay.HERMES_DIR), err)
+
+    def test_missing_cli_is_a_clean_not_sent(self) -> None:
+        rc, _, err, _ = self.run_hermes(self.hsess(), boom=FileNotFoundError("no hermes"))
+        self.assertEqual(rc, 1)
+        self.assertIn("hermes CLI not usable", err)
+        self.assertEqual(list(relay.HERMES_DIR.iterdir()), [])
+
+    def test_wait_longer_than_the_floor_sets_the_timeout(self) -> None:
+        _, _, _, calls = self.run_hermes(self.hsess(), out="ok", args=("--wait", "900"))
+        self.assertEqual(calls[0][1]["wait_timeout"], 900)
+
+    def test_wait_must_be_finite(self) -> None:
+        for bad in ("inf", "nan", "-1"):
+            with self.subTest(wait=bad):
+                rc, _, err, calls = self.run_hermes(self.hsess(), args=("--wait", bad))
+                self.assertEqual((rc, calls), (2, []))
+                self.assertIn("--wait", err)
+
+    def test_plan_flag_sends_nothing(self) -> None:
+        rc, out, _, calls = self.run_hermes(self.hsess(), args=("--plan",))
+        self.assertEqual((rc, out.strip(), calls), (0, "hermes", []))
+
+    def test_own_conversation_is_never_a_target(self) -> None:
+        """B2 (adversary, 2026-10-23): Hermes relaying into the gateway conversation it is running in."""
+        os.environ["HERMES_SESSION_ID"] = self.HSID
+        rc, _, err, calls = self.run_hermes(self.hsess())
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIn("that is this session", err)
+        os.environ["HERMES_SESSION_ID"] = "another"
+        rc, *_ = self.run_hermes(self.hsess(), out="ok")
+        self.assertEqual(rc, 0)
+
+    def test_child_env_drops_the_callers_identity_and_counts_hops(self) -> None:
+        os.environ.update({"CLAUDE_CODE_SESSION_ID": "caller", "PASEO_AGENT_ID": "p", "HERMES_SESSION_CHAT_ID": "9",
+                           "HERMES_CRON_X": "1", "KEEP_ME": "yes", "RELAY_HOPS": "1"})
+        _, _, _, calls = self.run_hermes(self.hsess(), out="ok")
+        env = calls[0][1]["env"]
+        for k in ("CLAUDE_CODE_SESSION_ID", "PASEO_AGENT_ID", "HERMES_SESSION_CHAT_ID", "HERMES_CRON_X"):
+            self.assertNotIn(k, env)
+        self.assertEqual((env["KEEP_ME"], env["RELAY_HOPS"]), ("yes", "2"))
+
+    def test_fourth_hop_is_refused(self) -> None:
+        os.environ["RELAY_HOPS"] = "3"
+        rc, _, err, calls = self.run_hermes(self.hsess())
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIn("hops", err)
+        os.environ["RELAY_HOPS"] = "junk"
+        rc, *_ = self.run_hermes(self.hsess())
+        self.assertEqual(rc, 1)
+
+    def test_reply_is_stripped_of_control_sequences(self) -> None:
+        _, out, _, _ = self.run_hermes(self.hsess(), out="a\x1b[31mred\x1b[0m \x1b]0;title\x07b\x00c\x9bd\x7fe\tf\nline2", args=("--json",))
+        self.assertEqual(json.loads(out)["reply"], "ared bcde\tf\nline2")
+
+    def test_long_reply_is_cut_and_its_file_kept(self) -> None:
+        _, out, _, _ = self.run_hermes(self.hsess(), out="x" * 5000, args=("--json",))
+        d = json.loads(out)
+        self.assertLess(len(d["reply"]), 4200)
+        self.assertIn("full reply", d["reply"])
+        self.assertEqual(len(Path(d["reply_file"]).read_text()), 5000)
+
+
 class TestKeysRun(unittest.TestCase):
     def test_absent_ok_failed_and_timeout(self) -> None:
         self.assertEqual(relay.keys_run("/nonexistent/typing-cli"), "absent")

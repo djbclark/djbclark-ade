@@ -1154,19 +1154,25 @@ works on the runner (run 239; `ghcr.io/cirruslabs/android-sdk:36` pulled in 47 s
 ## `hermes` route in relay.py (asked via the load-watch session, 2026-10-23)
 
 Relayed by the load-watch session (ac1d55cc) as djbclark's ask: agents should be able to message the live Hermes
-gateway agent with `relay.py`. Verified research and design:
-`~/.local/state/bigteam/loadgate-followup-2026-10-23/hermesbidi-report.md` (Q4 is the design, under 150 lines).
+gateway agent with `relay.py`. Design: `~/.local/state/bigteam/loadgate-followup-2026-10-23/hermesbidi-report.md` (Q4).
 
-1. Route `hermes`, chosen for a `hermes-gw` fleet row with a `sid` (`fleet.py` `_hermes_gateway`); its only route, no
-   fallback to pane or socket. Send `hermes --resume <sid> -z <text>`, `stdin=DEVNULL`, timeout from `--wait` (at least
-   90 s); stdout is the reply. A timeout is `unverified` ("do not resend"), never a second route.
-2. ACP cannot load gateway sessions and `messages_send` is outbound-only: neither is a transport.
-3. **Verify the claim first** with a harmless test against a throwaway Hermes session (the report ran no tests); this
-   writes into a live transcript, so never against djbclark's Telegram session without his yes.
-4. Tests: plan() for a fake `hermes-gw` row is `["hermes"]`; missing sid is refused; argv is `--resume SID -z TEXT`
-   with stdin closed; timeout is exit 1; `--via hermes` on a non-Hermes session has no route.
-5. The Hermes-side skill (`peer-relay`: to message a peer run `relay.py <ident> "<text>"` by absolute path) is
-   Hermes-owned: ask djbclark, do not edit `~/.hermes` from here.
+1. **Verified 2026-10-23** on a throwaway oneshot session (`~/.local/state/bigteam/relay-hermes-route/`):
+   `hermes --resume SID -z TEXT` with stdin closed replied from the earlier turn's context, grew the same session
+   from 2 to 4 messages and created no new one; an unknown sid exits 1 with "session not found" and creates nothing.
+   Not run against a real gateway (Telegram/Discord) session: that writes into a live transcript and needs djbclark's yes.
+2. **Built; adversary round 1 BLOCKed, repaired** (report `~/.local/state/bigteam/relay-hermes-route/adversary-report-1.md`):
+   route `hermes` in `skills/session-finder/relay.py` (`route_hermes`, the only route for a `hermes-gw` row with a `sid`;
+   no fallback), `TestHermesRoute` in `tests/test_relay_fallback.py`. B1 (a stdout "session not found" read as
+   nothing-sent) and B2 (own conversation not refused) fixed with tests, M1 (no kill; floor 300 s), M3 (scrubbed child
+   environment, hop limit, skill text), L2, L3, L5 fixed. A second adversary round on the repaired head is still owed.
+   Open by design: **M2** (a relay while the gateway is mid-turn: `fleet.py:608` fixes the row at `idle`, and the
+   gateway's cached agent may not see the relayed exchange until it reloads; "delivered" is documented as "ran on the
+   stored transcript") and **L4** (the exchange is invisible in the chat but is history for djbclark's next turn;
+   consider a one-line chat notice). L5e: `SessionResumeTooLargeError` on a long thread reports "unverified" with
+   nothing sent.
+3. **Drafted, Hermes-owned install:** `skills/peer-relay/SKILL.md` (Hermes runs `relay.py` by absolute path). Hermes
+   installs or links it into `~/.hermes/skills/` itself; nothing here writes `~/.hermes` (djbclark, 2026-10-23: "draft it
+   here, I hand it over").
 
 ## relay.py pane route: open lows after adversary round 9 (2026-10-23)
 
