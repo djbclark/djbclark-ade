@@ -103,7 +103,7 @@ and PR 30 (`self-slash --finish --successor`) shipped the recommendations; the p
 that the lead's transcript held 579 background-notification turns against 49 operator prompts, each re-reading
 a 150-200k context: the notification-per-turn multiplier, not the model, was the volume.
 
-1. **Effort as a lever** (Anthropic: "tuning effort is often a better lever than switching models"; Opus 5.5
+1. **DONE 2026-10-23** (`[lead] pipeline_effort = "medium"`, `route_agent.py` default/validation, `policy --md` line, SKILL.md item 12, tests; PR TBD). **Effort as a lever** (Anthropic: "tuning effort is often a better lever than switching models"; Opus 5.5
    defaults to medium): add to the routing policy that a pipeline-driving lead (PR loops, waiters, merges) runs
    Sonnet 5.5 at **medium**, high only for judgment turns; effort changes on 5.5/Fable 5.1 keep the prompt cache.
    One Sonnet `code` slice: `skills/model-routing/SKILL.md` item 12, `config/routing.toml` `[lead]`

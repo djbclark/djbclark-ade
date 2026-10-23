@@ -230,8 +230,14 @@ POLICY_PATH = resolve_policy_path()
 POLICY: dict[str, Any] = {}
 SERVICE_KEYS = {f.name for f in fields(Service)}
 _SERVICE_REQUIRED = ("name", "cli", "good_at", "billing")
-# The orchestrating session's own model, [lead] in the policy file (2026-10-23).
+# The orchestrating session's own model, [lead] in the policy file (2026-10-23).  LEAD_KEYS are
+# required; `pipeline_effort` (djbclark 2026-10-23: a pipeline-only lead runs Sonnet at medium) is
+# optional and defaults to LEAD_PIPELINE_EFFORT_DEFAULT so an older policy file still loads.
 LEAD_KEYS = ("model", "effort", "pipeline_model")
+LEAD_PIPELINE_EFFORT_DEFAULT = "high"
+# The levels `acp-run --effort` accepts (tools/acp-run/acp-run usage), minus its "default".
+EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+LEAD_ALL_KEYS = LEAD_KEYS + ("pipeline_effort",)
 
 # Populated by apply_policy from the TOML; names and types match the former
 # module-level literals so every caller and test keeps working.
@@ -307,10 +313,15 @@ def load_policy(path: Path | str) -> dict[str, Any]:
         if section not in data or not isinstance(data[section], dict):
             raise ValueError(f"routing policy {path}: missing [{section}] table")
     lead = data.get("lead")
-    if lead is not None and (not isinstance(lead, dict)
-                             or not all(isinstance(lead.get(k), str) and lead[k] for k in LEAD_KEYS)):
-        raise ValueError(f"routing policy {path}: [lead] must be a table with non-empty string keys "
-                         + ", ".join(LEAD_KEYS))
+    if lead is not None:
+        if (not isinstance(lead, dict)
+                or not all(isinstance(lead.get(k), str) and lead[k] for k in LEAD_KEYS)):
+            raise ValueError(f"routing policy {path}: [lead] must be a table with non-empty string keys "
+                             + ", ".join(LEAD_KEYS))
+        lead.setdefault("pipeline_effort", LEAD_PIPELINE_EFFORT_DEFAULT)
+        if lead["pipeline_effort"] not in EFFORT_LEVELS:
+            raise ValueError(f"routing policy {path}: [lead] pipeline_effort "
+                             f"{lead['pipeline_effort']!r} must be one of {', '.join(EFFORT_LEVELS)}")
     return data
 
 
@@ -500,7 +511,10 @@ def policy_markdown() -> str:
                   "The session that dispatches slices runs on this, not on Fable "
                   "(Fable only through the `fable-deep` sub-agent or a `frontier` slice).", "",
                   "| key | value |", "|---|---|"]
-        lines += [f"| lead.{k} | {lead[k]} |" for k in LEAD_KEYS]
+        lines += [f"| lead.{k} | {lead[k]} |" for k in LEAD_ALL_KEYS]
+        lines += ["", f"pipeline lead: {lead['pipeline_model']} at {lead['pipeline_effort']}; "
+                      "high for judgment turns (`/effort high`, or the Paseo `--thinking` setting; "
+                      "back to the pipeline effort afterwards)."]
     return "\n".join(lines) + "\n"
 
 
