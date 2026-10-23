@@ -167,7 +167,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
-- `bin/skill-everywhere`'s Grok Bot copy no longer dereferences a symlink that leaves the skill (an absolute link in a PR branch was `cp -rL`-copied into a temp dir by `ade-update --check`): a skill holding a link that is not to a regular file inside it is refused (`--check` row `unsafe source symlink`, stuck; link mode exit 1, nothing copied), and a non-canonical (report-only) `ade-update` run sets the new `SKILL_EVERYWHERE_NO_COPY=1` so the helper checks link targets only (2026-10-23, PR TBD).
+- `bin/skill-everywhere`'s Grok Bot copy no longer dereferences a symlink that leaves the skill (an absolute link in a PR branch was `cp -rL`-copied into a temp dir by `ade-update --check`): a skill holding a link that is not to a regular file inside it is refused (`--check` row `unsafe source symlink`, stuck; link mode exit 1, nothing copied), and a non-canonical (report-only) `ade-update` run sets the new `SKILL_EVERYWHERE_NO_COPY=1` so the helper checks link targets only (2026-10-23) (#37).
 
 - `self-slash --finish --successor` after its first live run (2026-10-23): reads the agent id behind Paseo 0.13's
   `Using workspace <id>` line before the JSON (the successor started but this agent was not archived); copies the old
