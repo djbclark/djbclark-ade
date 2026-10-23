@@ -21,9 +21,11 @@ config unrecognised <key>`): a config that is unreadable is `(unreadable)`, a sy
 a submodule whose `.git` is a directory or a gitfile naming a git dir the walk did not vet (outside
 `modules/`, or in a pruned `objects/`) is `(gitdir outside modules)`, a gitfile that is not one line of
 `gitdir: <path>` is `(gitdir unreadable)`, a `.gitmodules` path that is not an index gitlink but has a `.git`
-is `(gitmodules path not a gitlink)`, and a submodule directory holding files but no `.git` is `(submodule
-has files but no .git)`: nothing is trusted that git would read elsewhere, and the plan runs git only at
-paths the scan vetted.
+is `(gitmodules path not a gitlink)`, one that is absolute, empty or holds `..` is `(gitmodules path unusual)`,
+a submodule path with a symlink component is `(symlink)`, a submodule directory holding files but no `.git` is
+`(submodule has files but no .git)`, and an entry of a module git dir that differs from `HEAD`, `config`,
+`config.worktree` or `commondir` only in letter case is `(unrecognised entry)`: nothing is trusted that git
+would read elsewhere, and the plan runs git only at paths the scan vetted.
 Every later git call also turns fsmonitor, hooks and signature display off, drops every GIT_*
 variable from the environment, reads no global or system config, ignores submodules in `status`
 (so a checkout with submodules carries the flag `submodules not inspected`, never a bare
@@ -607,7 +609,13 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
     gitlinks and the `.gitmodules` paths together, since the plan's own listing reads `.gitmodules` (a listed path
     that is not a gitlink but has a `.git` is `(gitmodules path not a gitlink)`); the gitfile is parsed as git
     parses it (the whole file after `gitdir: `, trailing line breaks dropped), and one git would read differently
-    from the plan's one-line parse (a second line, an embedded CR) is `(gitdir unreadable)` (adversary round 43).
+    from the plan's one-line parse (a second line, an embedded CR, a NUL) is `(gitdir unreadable)` (adversary round 43,
+    44). A `.gitmodules` path that is absolute, empty or holds `..` is `(gitmodules path unusual)` (the kernel follows
+    a symlink before `..`, a lexical normpath does not), a submodule path whose resolved location is not the
+    superproject's resolved path plus the entry (a symlink component: `git -C` would run elsewhere) is `(symlink)`,
+    and an entry of a module git dir that differs from `HEAD`, `config`, `config.worktree` or `commondir` only in
+    letter case (a case-insensitive file system opens it as that name, the exact-name walk never read it) is
+    `(unrecognised entry)` (round 44).
     A submodule with no `.git` at all (de-initialised, never initialised) is an empty directory the plan's guard
     refuses; one holding files but no `.git` is `(submodule has files but no .git)`, so the whole-directory
     archive keeps them."""
@@ -631,9 +639,14 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
         bad = config_offenders(entries, in_submodule=True)
         return bad[0] if bad else None
 
+    GIT_DIR_NAMES = ("HEAD", "config", "config.worktree", "commondir")
     vetted: set[str] = set()  # realpath of every module git dir the walk vetted (its config read, or none to read)
     if modules and modules.is_dir():
         for root, dirs, files in os.walk(modules, followlinks=False):
+            # a case-insensitive file system opens `CONFIG` as `config` and `Commondir` as `commondir`, names the
+            # exact-name tests below never read (round 44): refuse any such entry
+            if any(n.lower() == g.lower() and n != g for n in dirs + files for g in GIT_DIR_NAMES):
+                return True, "(unrecognised entry)"
             if "HEAD" in files or "config" in files:  # a module's git dir: skip its object store and logs
                 dirs[:] = sorted(d for d in dirs if d not in MODULE_INTERNAL_DIRS)
                 vetted.add(os.path.realpath(root))
@@ -661,10 +674,19 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
         rc, out = git(path, "config", "--file", ".gitmodules", "--get-regexp", "-z", r"^submodule\..*\.path$",
                       errors="surrogateescape")
         if rc == 0:
-            listed = {os.path.normpath(e.partition("\n")[2]) for e in out.split("\0") if "\n" in e}
+            raw_listed = [e.partition("\n")[2] for e in out.split("\0") if "\n" in e]
+            # `l/../nested` is `nested` to normpath and `a/b/../nested` to the kernel when `l` is a symlink (round 44):
+            # a path that is absolute, empty or holds `..` is one the plan's listing would run git at unvetted
+            if any(not p or os.path.isabs(p) or ".." in p.split("/") for p in raw_listed):
+                return True, "(gitmodules path unusual)"
+            listed = {os.path.normpath(p) for p in raw_listed}
         elif rc != 1:  # 1: no such key
             return True, "(unreadable)"
     for sub in sorted(gitlinks | listed):
+        # a symlink component (the gitlink's own entry, or a parent) sends `git -C <sup>/<sub>` to a repository the
+        # walk never vetted (round 44): the resolved path must be the resolved superproject plus the entry
+        if os.path.realpath(path / sub) != os.path.join(os.path.realpath(path), sub):
+            return True, "(symlink)"
         dotgit = path / sub / ".git"
         try:
             mode = os.lstat(dotgit).st_mode
@@ -690,9 +712,12 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
         if not raw.startswith(b"gitdir: "):
             return True, "(gitdir unreadable)"
         rel = raw[len(b"gitdir: "):].rstrip(b"\r\n")
-        if not rel or b"\n" in rel or b"\r" in rel:
+        if not rel or b"\n" in rel or b"\r" in rel or b"\0" in rel:  # a NUL once raised out of realpath (round 44)
             return True, "(gitdir unreadable)"
-        target = os.path.realpath(os.path.join(os.fsencode(dotgit.parent), rel))
+        try:
+            target = os.path.realpath(os.path.join(os.fsencode(dotgit.parent), rel))
+        except ValueError:
+            return True, "(gitdir unreadable)"
         if os.fsdecode(target) not in vetted:
             return True, "(gitdir outside modules)"
     return True, None

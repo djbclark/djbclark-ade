@@ -2619,12 +2619,33 @@ def test_a_submodule_git_dir_read_elsewhere_is_skipped_not_trusted(tmp_path):
     assert verdict() == "skipped: submodule config unrecognised (gitdir unreadable)"
     gitfile.write_bytes(original.encode().rstrip(b"\n") + b"\x0c/x\n")
     assert verdict().startswith("skipped: submodule config unrecognised (gitdir ")
+    # round 44 (LOW): git stops at a NUL and uses the path before it; `realpath` once raised and aborted the scan
+    gitfile.write_bytes(b"gitdir: " + str(tmp_path / "evil").encode() + b"\0../.git/modules/sub\n")
+    assert verdict() == "skipped: submodule config unrecognised (gitdir unreadable)"
     gitfile.write_bytes(original.encode().rstrip(b"\n") + b"\r\n")  # a CRLF ending is what git accepts
     assert not verdict().startswith("skipped")
     (moddir / "objects" / "evil").mkdir()
     gitfile.write_text("gitdir: ../.git/modules/sub/objects/evil\n")
     assert verdict() == "skipped: submodule config unrecognised (gitdir outside modules)"
     gitfile.write_text(original)
+    # round 44 (MEDIUM 1.2, 1.3): a case-insensitive file system opens `CONFIG` as `config` and `Commondir` as
+    # `commondir`, names the exact-name walk never read
+    (moddir / "config").rename(moddir / "CONFIG")
+    assert verdict() == "skipped: submodule config unrecognised (unrecognised entry)"
+    (moddir / "CONFIG").rename(moddir / "config")
+    (moddir / "Commondir").write_text("../../evil\n")
+    assert verdict() == "skipped: submodule config unrecognised (unrecognised entry)"
+    (moddir / "Commondir").unlink()
+    assert not verdict().startswith("skipped")
+    # round 44 (MEDIUM 1.1): a gitlink whose work-tree entry is a symlink: `git -C <sup>/sub` would run in a
+    # repository the walk never vetted
+    elsewhere = make_repo(tmp_path / "elsewhere")
+    (sup / "sub").rename(tmp_path / "sub-aside")
+    (sup / "sub").symlink_to(elsewhere)
+    assert verdict() == "skipped: submodule config unrecognised (symlink)"
+    (sup / "sub").unlink()
+    (tmp_path / "sub-aside").rename(sup / "sub")
+    assert not verdict().startswith("skipped")
     # a `.gitmodules` path that is not an index gitlink (the plan's listing reads `.gitmodules`): an ordinary nested
     # repository there would get the plan's by-hand git commands without any vetting
     gitmodules = (sup / ".gitmodules").read_text()
@@ -2634,7 +2655,13 @@ def test_a_submodule_git_dir_read_elsewhere_is_skipped_not_trusted(tmp_path):
     assert verdict() == "skipped: submodule config unrecognised (gitmodules path not a gitlink)"
     shutil.rmtree(sup / "nested")
     assert not verdict().startswith("skipped")  # listed, nothing there: the plan's guard refuses it
+    # round 44 (MEDIUM 1.1): `l/../nested` is `nested` to normpath but `a/b/../nested` to the kernel when `l` is a
+    # symlink, so a listed path that holds `..`, is absolute or is empty is refused before any lookup
+    for unusual in ("l/../nested", str(tmp_path / "abs"), ""):
+        (sup / ".gitmodules").write_text(gitmodules + f'[submodule "x"]\n\tpath = {unusual}\n\turl = ./x\n')
+        assert verdict() == "skipped: submodule config unrecognised (gitmodules path unusual)", unusual
     (sup / ".gitmodules").write_text(gitmodules)
+    assert not verdict().startswith("skipped")
     # a de-initialised submodule (no `.git` at all, an empty directory) runs nothing here: the plan's guard covers it
     git(sup, "submodule", "deinit", "-f", "sub")
     assert not (sup / "sub" / ".git").exists() and not verdict().startswith("skipped")
