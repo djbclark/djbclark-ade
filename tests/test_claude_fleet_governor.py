@@ -770,3 +770,10 @@ def test_adversary_round_4_plan_moves_and_list_agents_enforce_the_id_shapes(monk
     monkeypatch.setattr(mod, "run_cmd", lambda argv, timeout=0: (0, json.dumps(shaped)))
     agents, err = mod.list_agents()
     assert err == "" and [a["id"] for a in agents] == [good["id"]]
+
+
+def test_adversary_round_5_an_overflowing_timestamp_is_no_time_not_a_crash_after_the_side_effects():
+    mod = _gov()
+    assert mod.parse_ts("0001-01-01T00:00:00+01:00") is None
+    assert mod.parse_ts("2026-10-23T15:00:00Z") == datetime(2026, 10, 23, 15, 0, tzinfo=UTC)
+    assert mod.parse_ts("9999-12-31T23:59:59-23:00") is None or mod.parse_ts("9999-12-31T23:59:59-23:00").year in (9999, 10000)

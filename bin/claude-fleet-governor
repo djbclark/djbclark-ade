@@ -151,7 +151,10 @@ def parse_ts(value: Any) -> datetime | None:
         dt = datetime.fromisoformat(value.strip())
     except ValueError:
         return None
-    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+    try:   # `0001-01-01T00:00:00+01:00` overflows the UTC conversion: a hostile value is no time, not a crash after a side effect
+        return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+    except OverflowError:
+        return None
 
 
 def iso(dt: datetime | None) -> str | None:

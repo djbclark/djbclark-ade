@@ -254,6 +254,9 @@ to this same agent and then exactly one `/baton` into the fresh session; on herd
 `/new` and then `/baton` (`self-slash` queues the `/baton` itself, `--then`, so never type or queue
 one yourself). The fresh session resumes from the Tier 1 pointer Step 7 just wrote.
 
+**A `claude-fleet-governor` steer names its own successor** (`--finish --successor omp/anthropic/claude-sonnet-5-5`):
+run that command instead of this step, once; the rest of this section is for a session no governor has steered.
+
 **Successor on another model (Paseo only; djbclark, 2026-10-23: a Fable lead burned ~30% of a week's
 Claude quota, so lead sessions run on Opus 5.5 high, Sonnet 5.5 high when pipeline-driving).** Use this
 form **instead of** `self-slash "/new"` when (a) this session's model is Fable (any `claude-fable-*`,
