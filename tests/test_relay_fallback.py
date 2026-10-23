@@ -1185,6 +1185,39 @@ class TestHermesRoute(Harness):
         self.assertEqual(len(Path(d["reply_file"]).read_text()), 5000)
 
 
+class TestHermesGatewayRows(unittest.TestCase):
+    """fleet._hermes_gateway keeps a conversation listed while its row is closed by a relayed turn (2026-10-23)."""
+
+    def setUp(self) -> None:
+        import sqlite3
+        import time as t
+        self.tmp = Path(tempfile.mkdtemp(prefix="relay-gw-"))
+        self.db = self.tmp / "state.db"
+        con = sqlite3.connect(self.db)
+        con.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, session_key TEXT, chat_id TEXT, thread_id TEXT, "
+                    "title TEXT, cwd TEXT, started_at REAL, last_activity_at REAL, last_activity_description TEXT, "
+                    "ended_at REAL, end_reason TEXT)")
+        now = t.time()
+        rows = [("open", "telegram", "k1", "1", "9", now - 100, None, None),
+                ("closed-by-relay", "telegram", "k2", "1", "8", now - 100, now - 5, "agent_close"),
+                ("reset-away", "telegram", "k3", "1", "7", now - 500, now - 400, "session_reset"),
+                ("old-closed", "telegram", "k4", "1", "6", now - 500, now - 400, "agent_close"),
+                ("new-closed", "telegram", "k4", "1", "6", now - 100, now - 5, "agent_close"),
+                ("cli-row", "cli", "k5", None, None, now - 100, None, None)]
+        for id_, src, key, chat, thread, started, ended, why in rows:
+            con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (id_, src, key, chat, thread, "", "", started, started, "", ended, why))
+        con.commit()
+        con.close()
+        self.saved = fleet.HERMES_DB
+        fleet.HERMES_DB = self.db
+        self.addCleanup(lambda: setattr(fleet, "HERMES_DB", self.saved))
+
+    def test_open_and_agent_closed_rows_are_listed_but_resets_and_superseded_rows_are_not(self) -> None:
+        got = sorted(r["sid"] for r in fleet._hermes_gateway())
+        self.assertEqual(got, ["closed-by-relay", "new-closed", "open"])
+
+
 class TestKeysRun(unittest.TestCase):
     def test_absent_ok_failed_and_timeout(self) -> None:
         self.assertEqual(relay.keys_run("/nonexistent/typing-cli"), "absent")

@@ -1182,9 +1182,12 @@ gateway agent with `relay.py`. Design: `~/.local/state/bigteam/loadgate-followup
    microsecond window before the handler), R3-L3 (RELAY_SENDER/RELAY_HOPS leak to everything a relayed turn starts),
    R3-L6b-e (prune race, lock files never pruned, no holder pid in the refusal), R3-L8e (`--json` timeout result has no
    `reply_file` field).
-3. **Drafted, Hermes-owned install:** `skills/peer-relay/SKILL.md` (Hermes runs `relay.py` by absolute path). Hermes
-   installs or links it into `~/.hermes/skills/` itself; nothing here writes `~/.hermes` (djbclark, 2026-10-23: "draft it
-   here, I hand it over").
+   **2026-10-23, load-watch report:** a relayed turn ends its row with `end_reason=agent_close`; the gateway treats that as
+   recoverable (`hermes_state_common._RECOVERABLE_END_REASONS`) and reopened the same session about five minutes later
+   (`~/.hermes/logs/gateway.log`: "reopened ended session 20261005_212354_16790ed2 ... keeping route"), so no context is lost
+   and the next Telegram message continues the same session. The bug was fleet.py hiding the row in that window; fixed
+   (`_hermes_gateway` lists `agent_close` rows not superseded by a newer row of the same session key).
+3. **Installed 2026-10-23 16:29** by Hermes itself on a relayed brief from the load-watch session (djbclark's ask): `~/.hermes/skills/peer-relay` is a symlink to `skills/peer-relay`. Hermes-to-peer direction is the load watcher's retest.
 
 ## relay.py pane route: open lows after adversary round 9 (2026-10-23)
 
