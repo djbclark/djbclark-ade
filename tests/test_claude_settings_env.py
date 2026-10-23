@@ -33,7 +33,7 @@ class ClaudeSettingsEnvTest(unittest.TestCase):
         self.assertEqual(run(self.settings, "--check").returncode, 1)
         self.assertEqual(run(self.settings).returncode, 0)
         data = json.loads(self.settings.read_text())
-        self.assertEqual(data["env"], {"A": "1", "GRAFT_NO_GITIGNORE": "1"})
+        self.assertEqual(data["env"], {"A": "1", "GRAFT_NO_GITIGNORE": "1", "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"})
         self.assertEqual(list(data), ["env", "model"])
         before = self.settings.read_text()
         self.assertEqual(run(self.settings, "--check").returncode, 0)
@@ -47,7 +47,8 @@ class ClaudeSettingsEnvTest(unittest.TestCase):
         self.assertEqual(json.loads(self.settings.read_text())["env"]["GRAFT_NO_GITIGNORE"], "1")
         self.settings.write_text("{}\n")
         self.assertEqual(run(self.settings).returncode, 0)
-        self.assertEqual(json.loads(self.settings.read_text()), {"env": {"GRAFT_NO_GITIGNORE": "1"}})
+        self.assertEqual(json.loads(self.settings.read_text()),
+                         {"env": {"GRAFT_NO_GITIGNORE": "1", "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"}})
 
     def test_symlink_is_kept(self) -> None:
         link = self.tmp / "link.json"

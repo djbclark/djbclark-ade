@@ -452,7 +452,9 @@ alert had said so since 06:02Z and nothing read it. The burn was Opus 5.5 (~53%:
 lead session itself). The rules (`skills/model-routing/SKILL.md`, *Routing policy* items 12
 and 13; `config/routing.toml` `[lead]`): a lead session runs on Opus 5.5 at high (Sonnet 5.5
 at high when it only drives a pipeline), never Fable; adversary rounds go to `acp-dispatch
-omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` first. The guard that
+omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` first; an unpinned
+Agent-tool sub-agent or teammate runs Sonnet (`CLAUDE_CODE_SUBAGENT_MODEL=sonnet`, kept in the
+live settings by `bin/claude-settings-env`, 2026-10-23), so pass `model: "opus"` for judgment. The guard that
 makes the numbers act: `bin/claude-quota-guard` (`check` every 15 minutes under launchd after
 `--install`, `status [--json]`) derives `ok` / `watch` / `tight` / `critical` from the Claude
 windows (weekly, 5-hour, Fable cap) and the snapshot's Claude `conserve` alerts, writes

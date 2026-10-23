@@ -7,7 +7,8 @@ already ignores it. The only off switch is the env var `GRAFT_NO_GITIGNORE=1`,
 and the build runs inside hook and MCP child processes that no wrapper on PATH
 sees. Claude Code applies the `env` block of settings.json to every child
 (hooks, stdio MCP servers, Bash tool), so that block is the one place that
-covers them all. settings.json is not tracked here, so this script sets it:
+covers them all. settings.json is not tracked here, so this script sets it.
+Since 2026-10-23 it also sets CLAUDE_CODE_SUBAGENT_MODEL=sonnet (see REQUIRED):
 
     claude-settings-env            # add any missing key, print what changed
     claude-settings-env --check    # exit 1 if a key is missing or different
@@ -28,6 +29,11 @@ REQUIRED = {
     # graft: never write graft/ into the repo's tracked .gitignore
     # (trailhq/Graft#582; honoured by `graft build`, workspace-cli, `--no-gitignore`).
     "GRAFT_NO_GITIGNORE": "1",
+    # Agent-tool sub-agents and teammates with no `model` default to Sonnet instead of
+    # inheriting an Opus or Fable lead's model (djbclark, 2026-10-23; docs/queue.md
+    # "Follow-ups from PRs 29 and 30" item 2). A definition's `model:` or a model passed in
+    # the call still wins (Claude Code 2.1.251+); Explore and Plan ignore it.
+    "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
 }
 
 
