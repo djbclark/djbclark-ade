@@ -4147,10 +4147,70 @@ def test_commits_only_a_custom_ref_holds_force_the_bundle_instead_of_a_branch_pu
     assert rec["local_only_commits"] == 2 and rec["local_only_other_refs"] == 1, rec
     row = next(r for r in section_3_2(doc.render(doc_scan([rec]))).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
     assert not re.search(r"git -C \S+ (?:-c \S+ )?push", row) and "bundle create" in row and "refs/custom" not in row.split("(some")[0], row
+    # the local-path origin is no_push on its own: pin the new branch with a pushable origin (adversary round 59, LOW 4)
+    open_rec = dict(rec, origin_local_path=False)
+    row = next(r for r in section_3_2(doc.render(doc_scan([open_rec]))).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
+    assert not re.search(r"git -C \S+ (?:-c \S+ )?push", row) and "outside refs/heads and refs/tags" in row, row
     # branches and tags alone keep the push alternative
     git(work, "update-ref", "-d", "refs/custom/save")
     rec = mod.scan_checkout(work, remote=False)
     assert rec["local_only_other_refs"] == 0, rec
+
+
+def test_branches_past_the_cap_force_the_bundle_and_a_symlinked_objects_dir_is_archived_through_the_link(tmp_path, monkeypatch):
+    """Adversary round 59 on PR 27, MEDIUM, LOW 2 and LOW 4: refs past MAX_BRANCH_COUNTS are in no itemised push; a
+    symlinked `lfs/objects` was archived as the link; `lfs.storage` was untested."""
+    mod = load()
+    doc = load_doc()
+    co = doc_checkout("/p/cap", flags=["unpushed commits"], verdict="unpushed commits", local_only_commits=3,
+                      local_only_branches=[{"branch": "a", "count": 1}, {"branch": "b", "count": 1}],
+                      local_only_branches_uncounted=2)
+    row = next(r for r in section_3_2(doc.render(doc_scan([co]))).splitlines() if r.startswith("| /p/cap "))
+    assert not re.search(r"git -C \S+ (?:-c \S+ )?push", row) and "bundle create" in row and "2 more branches or tags are not itemised" in row, row
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    ext = tmp_path / "ext-objects" / "ab" / "cd"
+    ext.mkdir(parents=True)
+    (ext / "abcd0123").write_text("PAYLOAD\n")
+    (work / ".git" / "lfs").mkdir()
+    (work / ".git" / "lfs" / "objects").symlink_to(tmp_path / "ext-objects")
+    commit_file(work, "unpushed.txt")
+    rec = mod.scan_checkout(work, remote=False)
+    row = next(r for r in section_3_2(doc.render(doc_scan([rec]))).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
+    ck = doc.checkout_dir(rec["path"])
+    dest = tmp_path / "dest"
+    (dest / ck).mkdir(parents=True)
+    cmd = unescape_span(re.search(r"`(mkdir -p [^`]*lfs\.tar[^`]*)`", row).group(1))
+    run = subprocess.run(["bash", "-c", PLAN_PREFIX + cmd.replace("<DEST>", str(dest))], capture_output=True, text=True, env=GIT_ENV)
+    assert run.returncode == 0, run.stderr
+    held = subprocess.run(["tar", "-tf", str(dest / ck / "lfs.tar")], capture_output=True, text=True).stdout
+    assert "abcd0123" in held, held
+    # `lfs.storage` from the operator's config: absolute, and relative to the git dir
+    store = tmp_path / "elsewhere"
+    (store / "objects" / "11").mkdir(parents=True)
+    (store / "objects" / "11" / "x").write_text("p\n")
+    (work / ".git" / "lfs" / "objects").unlink()
+    gcfg = tmp_path / "gitconfig"
+    gcfg.write_text(f"[lfs]\n\tstorage = {store}\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gcfg))
+    assert mod.scan_checkout(work, remote=False)["lfs_store"] == os.path.realpath(store)
+    gcfg.write_text("[lfs]\n\tstorage = ../rel-store\n")
+    (work / "rel-store" / "objects" / "22").mkdir(parents=True)
+    (work / "rel-store" / "objects" / "22" / "y").write_text("p\n")
+    assert mod.scan_checkout(work, remote=False)["lfs_store"] == os.path.realpath(work / "rel-store")
+
+
+def test_a_url_rewrite_key_never_reports_its_credential_and_a_scheme_less_scp_url_with_a_password_is_one(tmp_path):
+    """Codex pass 54 on PR 27, P1: `url.https://user:TOKEN@host/.insteadOf` put the token in `config_keys`, flags and
+    verdict; adversary round 59, INFO 5: `user:pw@host:path://x` was read as a scheme url."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    git(work, "config", "url.https://user:FAKE-TOKEN-1234@host/.insteadOf", "https://host/")
+    git(work, "config", "url.https://h/?token=FAKE-QUERY-5678.insteadOf", "https://q/")
+    rec = mod.scan_checkout(work, remote=False)
+    blob = json.dumps(rec)
+    assert "FAKE-TOKEN-1234" not in blob and "FAKE-QUERY-5678" not in blob and "<redacted>" in blob, blob
+    assert mod.url_holds_credential("user:pw@host:path://x") is True
+    assert mod.url_holds_credential("git@host:path://x") is False
 
 
 def test_a_global_push_rewrite_to_a_helper_gets_no_push_row(tmp_path, monkeypatch):

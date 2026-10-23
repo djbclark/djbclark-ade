@@ -598,6 +598,11 @@ def config_offenders(entries, in_submodule: bool = False) -> list[str]:
     for key, value in entries:
         if not key_is_safe(key, value, in_submodule):
             first, *middle, last = key.split(".") if "." in key else [key, key]
+            mid = ".".join(middle)
+            if re.search(r"[@?#]", mid):
+                # a url's userinfo or query is part of the KEY (`url.https://u:token@host/.insteadOf`): the name is reported,
+                # never the secret in it (Codex pass 54 on PR 27, P1)
+                middle = ["<redacted>"]
             name = ".".join([first.lower(), *middle, last.lower()]) if "." in key else key
             if name not in bad:
                 bad.append(name)
@@ -1056,6 +1061,8 @@ def url_holds_credential(url: str) -> bool:
     head, sep, rest = url.partition("::")
     if sep and head and re.fullmatch(r"[A-Za-z0-9+.-]+", head):
         return "@" in rest or "?" in rest or "#" in rest
+    if not re.match(r"[A-Za-z0-9+.-]+://", url) and "@" in url and ":" in url.partition("@")[0]:
+        return True  # git's `is_url` wants a scheme of these characters: `user:pw@host:path://x` is scp-like (round 59, INFO 5)
     if "://" not in url:
         # scp-like `[user@]host:path`: ssh gets the path verbatim, so a `?token=` in it reaches its argv like the
         # `ssh://` case (adversary round 31); a local path has no `:` before its first `/`

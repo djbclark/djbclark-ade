@@ -652,6 +652,8 @@ def render(d):
             w(f"| {p} | counts unknown ({esc(c['verdict'])}) | re-scan once the cause is fixed, or archive the whole "
               f"directory: {shcode('mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -cf <DEST>/{} -- {}', ck, parent or '/', f'{ck}/whole.tar', base)}"
               f" (no git command: the scan did not run one there either); {gitdir}"
+              " Git LFS payloads are in the store (`.git/lfs`, or the directory `lfs.storage` names): when that is a symlink or lives outside"
+              " these archives, archive it too with `tar -h`"
               " | yes: counts unknown; re-scan or archive whole |")
             continue
         # every untracked path counts, a `graft/` directory included: nothing verifies that one is the reproducible
@@ -750,12 +752,15 @@ def render(d):
             elif num(c.get("local_only_other_refs")):
                 # a commit only a ref outside refs/heads and refs/tags holds is in no push refspec (Codex pass 53, P1)
                 cmd.append(bundle + " (some local-only commits are on refs outside refs/heads and refs/tags, which a push of branches and tags leaves behind: bundle)")
+            elif more > 0:
+                # branches and tags past the scan's cap are in no itemised push (adversary round 59, MEDIUM)
+                cmd.append(bundle + f" ({more} more branches or tags are not itemised, so no push can name them all: bundle)")
             elif odd_names:
                 cmd.append(bundle + ODD_NAME_NOTE)  # one bundle holds every ref; no push can name the odd one
             else:
                 cmd.append(bundle if not lo_cmd else "; ".join(lo_cmd[:-1] + [lo_cmd[-1] + " or " + bundle]))
             need = need if need.startswith(("yes", "**yes")) else (
-                cred_need if no_push else "yes: bundle it; a push would leave commits on other refs behind" if num(c.get("local_only_other_refs"))
+                cred_need if no_push else "yes: bundle it; a push would leave commits on other refs behind" if (num(c.get("local_only_other_refs")) or more > 0)
                 else "yes: pushing a branch publishes it; pick push or bundle")
         if zero_tags and not (local_n and not covered_by_bundle):
             # a local tag origin lacks on a commit origin has: no commit count sees the tag object and no branch
@@ -776,7 +781,7 @@ def render(d):
             # off, so LFS's pre-push upload never runs: the payloads are in the store (Codex pass 52 on PR 27, P1; every
             # capture reason, not only unpushed commits: Codex pass 53 P1, adversary round 58 MEDIUM)
             cmd.append("Git LFS payloads (the pointers in any bundle, patch or pack are all those hold) are in the LFS store; archive it: "
-                       + shcode("mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -cf <DEST>/{} .", ck, c["lfs_store"], f"{ck}/lfs.tar"))
+                       + shcode("mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -hcf <DEST>/{} .", ck, c["lfs_store"], f"{ck}/lfs.tar"))
         if hidden:
             what.append(f"{hidden} tracked path(s) marked assume-unchanged or skip-worktree (`status` cannot see their edits)")
             cmd.append(shcode(HIDDEN_FMT, *hidden_values(raw_p, ck)))
