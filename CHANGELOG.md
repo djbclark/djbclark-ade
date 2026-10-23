@@ -12,6 +12,12 @@ agent what changed and what is new. Entries end with the pull request number.
 ### Added
 
 - Added `bin/claude-quota-guard` (`check`, `status`, `--install`), which turned the Claude weekly, 5-hour and Fable windows (read from the snapshot when `aiuse --available` drops an exhausted Claude or the exhausted Fable pool, and at least `watch` when aiuse dropped a Claude the snapshot still shows) and aiuse's Claude `conserve` alerts into a level (`ok`, `watch`, `tight`, `critical`; exit 0-3, 10 when Claude appears nowhere, the data is malformed, aiuse is unreadable or another check holds the lock, 64 for a bad thresholds env, 69 for `--install` off macOS), wrote `~/.local/state/ade/quota-guard.json` under a lock, pinged once per level per reset period, and treated data older than 3 hours (the oldest of the payload, each pool and the snapshot) as stale: at least `watch`, no level pings, one ping per stale episode; added the `claude/hooks/quota_nudge.py` UserPromptSubmit hook, which printed the level's advice once per session and level (#29).
+- `skill-everywhere` gains a `grokbot` target: a rendered copy `ade-<name>/` in `~/agent-data/workflows/` on the
+  Grok Bot box (banner, `.skill-everywhere` marker, only marked dirs touched), plus `--dry-run`/`-n`,
+  `SKILL_EVERYWHERE_ONLY` and plain-GNU fallbacks so it runs on Linux (2026-10-23). (PR pending)
+- `autorename` renames a Paseo-hosted session's workspace to the title in lower-case hyphen form plus `-pw`
+  (`paseo-skill-sync-overwrite-fix-pw`; `--auto` keeps a workspace already ending in `-pw`); herdr tab labels keep
+  `-t` (2026-10-23).
 - `bin/ade-backup-stores`: Phase 0 backups, a SQLite online-backup copy of every live agent session database, the
   per-session trees and file stores and the Hermes JSONL export (run against a scratch copy of the Hermes
   database), with a hashed `MANIFEST.json`, built in `<dest>.part/` and renamed when complete; `--dry-run`,
@@ -56,6 +62,14 @@ agent what changed and what is new. Entries end with the pull request number.
 ### Changed
 
 - Routing: moved lead / orchestrator sessions to Opus 5.5 at high (Sonnet 5.5 at high only to drive a pipeline), never Fable (`config/routing.toml` `[lead]`, printed by `route_agent.py policy --md`); sent adversary rounds first to `acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` (omp became eligible for `judgment`), and had the Agent-tool `adversary` take a `model: "sonnet"` override when the guard says `tight` or worse (#29).
+- `loose` gains an "On Grok Bot" section (G1-G7) with pointers from Rule 2, 3 and 4: box paths, GitHub reads via `gh`/
+  `GITHUB_TOKEN_DJBCLARK` or the connector, the box's own jobs instead of a Mac process list, a chat reply instead of
+  `hermes-ping`, no `handoff`/`self-slash`/`/compact` there; still walks the findings with `/steps`. Other runtimes'
+  rules are unchanged (2026-10-23).
+- `steps` gains a Grok Bot branch: Prompt tool rule 5 and section 2d use Grok Bot's `SendToUser` question widget
+  (context in a text message first, one-line numbered labels, recommendation `primary`, destructive `danger`,
+  `allowCustom` for `stop`, a dismissal is a decline; no `/compact` or `self-slash` there). Other runtimes'
+  rules are unchanged (2026-10-23).
 - `acp-dispatch --detach`: a `waiter:` line above `rearm:` says to run the waiter in the background with a long tool timeout (Claude Code Bash: `timeout 7200000`); at the 30 min default a lead's harness killed it mid-slice. `rearm:` stays the last line (#28).
 - `acp-run` removes `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `ORCA_TERMINAL_HANDLE` from every agent's
   environment and sets `ACP_RUN_AGENT=1`; `self-slash --finish` and `--then /quit` on Paseo are
@@ -82,6 +96,12 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `acp-dispatch` refuses `--perm read-only` or `--perm deny` (exit 2, before any record or preflight) for an agent
+  whose `acp-run <agent> --info` `perm_modes` lacks that mode; before, acp-run's own refusal came after the
+  record was written and surfaced as a no-report (an omp adversary round, 2026-10-23).
+- Paseo's start-up skill sync no longer overwrites the six vendored `paseo*` skills in this repo through the
+  `~/.claude/skills` and `~/.agents/skills` links: the daemon's skill selection is now `custom` with no skills;
+  how it works and what to avoid in Paseo's settings are in docs/skill-everywhere.md section 3a (2026-10-23).
 - `acp-run` classifies zcode's `token_login_failed` error code (inside its "Internal error" envelope) as `auth`, never retried, instead of `transient` (#26).
 - `diskfree` skill: the idle check for deleting a cache runs in the same command as the delete; a
   `target-shared` delete approved minutes earlier broke a live maturin build (2026-10-20).

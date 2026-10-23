@@ -1135,3 +1135,16 @@ getpaseo/paseo (#7145 and #6257 are open but about other packages' type imports)
 > **Request:** a release declaring Paseo 0.12.x support, or a note on whether 0.12 is expected to work.
 
 **Status:** filed 2026-10-19: https://github.com/Daaaaave/paseo-telegram/issues/1
+
+## 10. Paseo — the start-up skill sync writes through a symlinked skill directory (filed 2026-10-23)
+
+**Filed:** https://github.com/getpaseo/paseo/issues/7700 (searched first: nothing on this; #4823 and #5440 are
+about duplicate Codex entries and non-default homes).
+
+`orchestrationSkills.autoUpdate()` runs at every daemon start and syncs the six bundled skills into
+`~/.claude/skills/<n>` and `~/.agents/skills/<n>`. `assertManagedPathsStayInsideSkill` lstat-checks every segment
+below the skill dir but never the skill dir itself, so a symlinked skill dir is written through into the user's own
+checkout; `syncDirectoryFiles` also updates without comparing the on-disk hash with the manifest (deletes do).
+Reproduced with the shipped 0.13.0-beta.1 `syncSkills` in a throwaway directory. Our workaround is the skill
+selection in docs/skill-everywhere.md section 3a.
+

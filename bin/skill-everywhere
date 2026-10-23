@@ -4,6 +4,8 @@
 #     skill-everywhere <name>...            link (idempotent, collapses chains)
 #     skill-everywhere --check <name>...    report per-TUI status, change nothing
 #     skill-everywhere --remove <name>...   remove links this script would make
+#     --dry-run (-n) with link or --remove: print the changes, make none
+#     SKILL_EVERYWHERE_ONLY=grokbot,claude limits the run to those targets
 # Content lives in exactly one place (2026-10-14 chain collapse):
 #   ~/src/djbclark-ade/skills/<name>            public skills (default)
 #   ~/ops/site-private/skills/<name>            private skills (e.g. 1password)
@@ -26,11 +28,17 @@
 # 2026-10-03 (see skills/model-routing, "agy has a burst limit").
 export PATH="/opt/homebrew/bin:$PATH"
 set -euo pipefail
+# GNU tools carry a g prefix on the Mac (Homebrew). On GNU/Linux, e.g. the
+# Grok Bot box (2026-10-23), the plain names are already GNU: alias them.
+for t in sed readlink realpath grep head; do
+  command -v "g$t" >/dev/null || eval "g$t() { $t \"\$@\"; }"
+done
 ade_root="${SKILL_EVERYWHERE_ADE:-$HOME/src/djbclark-ade/skills}"
 priv_root="${SKILL_EVERYWHERE_PRIVATE:-${OPS_ROOT:-$HOME/ops}/site-private/skills}"
 
 # binary|skills dir to link into, or "via <dir>" when the TUI already reads a
-# dir we fill (a second link there would list the skill twice), or "x <why>".
+# dir we fill (a second link there would list the skill twice), or "x <why>",
+# or "copy <dir>" for a target that needs a rendered copy (see copy_target).
 # Verified 2026-10-03 by asking each TUI headlessly whether it saw 'steps'.
 # omp (oh-my-pi) added 2026-10-13: it also reads ~/.agents/skills, but dedups
 # by realpath, so its native dir lists each skill once and keeps working if
@@ -50,17 +58,76 @@ grok|~/.grok/skills
 muse|via ~/.claude/skills
 zcode|via ~/.agents/skills
 omp|~/.omp/agent/skills
+grokbot|copy ~/agent-data/workflows
 '
 
-mode=link
-case "${1:-}" in --check) mode=check; shift ;; --remove) mode=remove; shift ;; esac
-[[ $# -gt 0 ]] || { gsed -n '2,7p' "$0" >&2; exit 2; }
+mode=link dry=0
+while [[ ${1:-} == -* ]]; do
+  case $1 in
+    --check) mode=check ;; --remove) mode=remove ;; --dry-run|-n) dry=1 ;;
+    *) echo "error: unknown option $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+[[ $# -gt 0 ]] || { gsed -n '2,9p' "$0" >&2; exit 2; }
+only="${SKILL_EVERYWHERE_ONLY:-}"
+wanted() { [[ -z $only || ",$only," == *",$1,"* ]]; }
+# would <msg> | <cmd...>: print in dry-run mode, else run the command.
+act() { local msg=$1; shift; if ((dry)); then printf '  %-13s would %s\n' "$bin" "$msg"; else "$@"; fi; }
+
+# Grok Bot (target added 2026-10-23) reads <dir>/<slug>/SKILL.md as plain
+# files on its own Linux box, where no link into a Mac checkout can resolve.
+# It gets a rendered COPY: slug ade-<name> (keeps clear of Grok Bot's own
+# skills), symlinks dereferenced, a banner after the front matter, and a
+# .skill-everywhere marker. Only a dir holding that marker is ours to update
+# or remove. SKILL_EVERYWHERE_GROKBOT_NOTE adds one more banner paragraph.
+render_copy() {  # render_copy <src> <out>
+  cp -rL "$1" "$2"
+  rm -rf "$2/.git"; find "$2" -name __pycache__ -prune -exec rm -rf {} +
+  printf 'source=djbclark-ade/skills/%s\nmanaged-by=bin/skill-everywhere (grokbot target)\n' "$name" >"$2/.skill-everywhere"
+  BANNER="> **Managed copy, do not edit here.** Rendered by djbclark-ade \`bin/skill-everywhere\` from
+> [\`skills/$name\`](https://github.com/djbclark/djbclark-ade/tree/master/skills/$name); the next sync
+> overwrites local edits. Written for the agent TUIs on djbclark's Mac: \`~/src/<repo>\` is
+> \`/home/box/src/<repo>\` here when cloned, and Mac-only tools (launchd, herdr, Orca, Keychain,
+> \`hermes-ping\`) are absent. Grok Bot's own rules win: sending, posting, pushing or merging still
+> needs the operator's explicit approval.${SKILL_EVERYWHERE_GROKBOT_NOTE:+
+>
+> ${SKILL_EVERYWHERE_GROKBOT_NOTE}}" \
+  awk 'n < 2 && /^---[[:space:]]*$/ { n++; print; if (n == 2) print "\n" ENVIRON["BANNER"]; next } { print }' \
+    "$2/SKILL.md" >"$2/SKILL.md.new" && mv "$2/SKILL.md.new" "$2/SKILL.md"
+}
+copy_target() {  # copy_target <dir>; uses $bin $name $src $mode $dry
+  local dir=${1/#\~/$HOME} dest state tmp
+  if [[ ! -d $dir ]]; then printf '  %-13s not installed (no %s)\n' "$bin" "$dir"; return; fi
+  dest="$dir/ade-$name"
+  if [[ ! -e $dest ]]; then state=missing
+  elif [[ ! -f $dest/.skill-everywhere ]]; then state="real dir/file (not ours)"
+  elif [[ ! -f $src/SKILL.md ]]; then state="copy of a removed skill"
+  else
+    tmp=$(mktemp -d); render_copy "$src" "$tmp/x"
+    if diff -r "$tmp/x" "$dest" >/dev/null 2>&1; then state=copied; else state="stale copy"; fi
+    rm -rf "$tmp"
+  fi
+  case $mode in
+    check) printf '  %-13s %s (%s)\n' "$bin" "$state" "$dest" ;;
+    remove)
+      if [[ $state == missing || $state == real* ]]; then printf '  %-13s %s (left alone)\n' "$bin" "$state"
+      else act "remove $dest" rm -rf "$dest"; ((dry)) || printf '  %-13s removed %s\n' "$bin" "$dest"; fi ;;
+    link)
+      if [[ $state == copied ]]; then printf '  %-13s already copied\n' "$bin"
+      elif [[ $state == missing || $state == "stale copy" ]]; then
+        # Render beside the target under a dot name, then swap it in.
+        act "copy to $dest ($state)" eval 'rm -rf "$dir/.ade-$name.new" && render_copy "$src" "$dir/.ade-$name.new" && rm -rf "$dest" && mv "$dir/.ade-$name.new" "$dest"'
+        ((dry)) || printf '  %-13s copied (was %s)\n' "$bin" "$state"
+      else printf '  %-13s %s; left alone\n' "$bin" "$state"; rc=1; fi ;;
+  esac
+}
 
 rc=0
 # Skill links can be healthy while Codex's shared instructions point at a
 # retired home-agents.md location. Report that separately in read-only checks.
 codex_instructions="${CODEX_HOME:-$HOME/.codex}/AGENTS.md"
-if [[ $mode == check && -L $codex_instructions && ! -e $codex_instructions ]]; then
+if [[ $mode == check ]] && wanted codex && [[ -L $codex_instructions && ! -e $codex_instructions ]]; then
   printf 'warning: codex global instructions dangling: %s -> %s\n' \
     "$codex_instructions" "$(greadlink "$codex_instructions")" >&2
   rc=1
@@ -81,6 +148,8 @@ for name in "$@"; do
   echo "== $name"
   while IFS='|' read -r bin dir; do
     [[ -z $bin ]] && continue
+    wanted "$bin" || continue
+    if [[ $dir == copy\ * ]]; then copy_target "${dir#copy }"; continue; fi
     if ! command -v "$bin" >/dev/null; then printf '  %-13s not installed\n' "$bin"; continue; fi
     if [[ $dir == via* || $dir == x* ]]; then printf '  %-13s %s\n' "$bin" "${dir#x }"; continue; fi
     dir="${dir/#\~/$HOME}"; link="$dir/$name"
@@ -94,30 +163,30 @@ for name in "$@"; do
     case $mode in
       check) printf '  %-13s %s\n' "$bin" "$state" ;;
       remove)
-        if [[ $state == linked ]]; then rm "$link"; printf '  %-13s removed\n' "$bin"
+        if [[ $state == linked ]]; then act "remove $link" rm "$link"; ((dry)) || printf '  %-13s removed\n' "$bin"
         else printf '  %-13s %s (left alone)\n' "$bin" "$state"; fi ;;
       link)
         if [[ $state == missing ]]; then
-          mkdir -p "$dir"; ln -s "$src" "$link"; printf '  %-13s linked\n' "$bin"
+          act "link $link" eval 'mkdir -p "$dir" && ln -s "$src" "$link"'; ((dry)) || printf '  %-13s linked\n' "$bin"
         elif [[ $state == linked ]]; then printf '  %-13s already linked\n' "$bin"
         elif [[ $state == chained\ * ]]; then
           # ln -sfn (not ln+mv): macOS mv follows a symlink-to-dir
           # destination and moves the temp link INSIDE the target dir
           # instead of replacing the link.
-          ln -sfn "$src" "$link"
-          printf '  %-13s relinked direct (was %s)\n' "$bin" "$state"
+          act "relink $link direct" ln -sfn "$src" "$link"
+          ((dry)) || printf '  %-13s relinked direct (was %s)\n' "$bin" "$state"
         elif [[ $state == dangling\ * ]]; then
           # Nobody owns a link whose target is gone (2026-10-15: 36 links in
           # ~/.cline/skills still pointed at the pre-2026-10-09 site-private
           # path); replace it rather than preserve a dead pointer.
-          ln -sfn "$src" "$link"
-          printf '  %-13s relinked (was %s)\n' "$bin" "$state"
+          act "relink $link" ln -sfn "$src" "$link"
+          ((dry)) || printf '  %-13s relinked (was %s)\n' "$bin" "$state"
         else printf '  %-13s %s; left alone\n' "$bin" "$state"; rc=1; fi ;;
     esac
   done <<<"$targets"
 done
 
-if command -v hermes >/dev/null \
+if wanted hermes && command -v hermes >/dev/null \
    && ! ggrep -qF skill-everywhere/skills ~/.hermes/config.yaml 2>/dev/null; then
   echo "warning: hermes no longer lists ~/.local/share/skill-everywhere/skills in" \
        "skills.external_dirs; ask Hermes to re-add it" >&2
@@ -129,7 +198,7 @@ fi
 # until plugins reload; this makes it dispatch immediately instead of waiting
 # for a manual gateway restart from Terminal. Idempotent and cheap. Does nothing
 # when the gateway is not running or predates the verb.
-if [[ $mode == link ]] && command -v hermes >/dev/null; then
+if [[ $mode == link ]] && ((!dry)) && wanted hermes && command -v hermes >/dev/null; then
   # The interpreter: the shebang when it is a python, else the python a wrapper execs. `hermes` became a
   # /bin/sh wrapper around a /bin/sh closure launcher (2026-10-20), and taking its shebang ran this
   # snippet under sh: `import os, sys` invoked ImageMagick's `import`. Never run it under a non-python.

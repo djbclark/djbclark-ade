@@ -35,7 +35,7 @@ FAKE = textwrap.dedent("""\
       if [ "$x" = --info ]; then
         [ -n "$INFO_COUNT" ] && echo probe >> "$INFO_COUNT"
         [ -n "$FAKE_INFO_FAIL" ] && { echo "acp-run: agent down" >&2; exit 1; }
-        echo '{"agent": {"name": "fake"}, "config_options": [{"id": "model", "category": "model",'
+        echo "{\\"agent\\": {\\"name\\": \\"fake\\"}, \\"perm_modes\\": ${FAKE_PERM_MODES:-[\\"all\\", \\"deny\\", \\"read-only\\"]}, \\"config_options\\": [{\\"id\\": \\"model\\", \\"category\\": \\"model\\","
         echo ' "options": [{"value": "m1", "name": "Model One"}, {"value": "claude-fable-5-1[1m]", "name": "Fable"},'
         echo '            {"value": "claude-opus-5-5-high", "name": "Opus"}, {"value": "gemini-2.5-pro", "name": "Gemini"},'
         echo '            {"value": "gpt-oss-120b", "name": "GPT"}]}]}'
@@ -552,6 +552,26 @@ class TestModelCheck(Base):
         r = self.dispatch_model("whatever", "--no-model-check")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.probes(), 0)
+
+    def test_read_only_is_refused_for_an_agent_without_a_verified_mode(self):
+        # 2026-10-23: `--perm read-only` on omp was refused by acp-run only after the record and
+        # the preflight: a no-report in 2 s. The dispatch now reads acp-run's perm_modes first.
+        r = self.dispatch_model("m1", "--perm", "read-only", "--detach", "--no-wait",
+                                env={"FAKE_PERM_MODES": '["all", "deny"]'})
+        self.assertEqual(r.returncode, 2, (r.stdout, r.stderr))
+        self.assertIn("--perm read-only: codex has no verified read-only mode", r.stderr)
+        self.assertIn("use --perm all with a read-only brief", r.stderr)
+        self.assertFalse((self.out / "jobs" / "s1.json").exists())
+
+    def test_read_only_dispatches_when_the_agent_lists_it(self):
+        r = self.dispatch_model("m1", "--perm", "read-only")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.record()["perm"], "read-only")
+
+    def test_read_only_without_perm_modes_warns_and_dispatches(self):
+        r = self.dispatch_model("m1", "--perm", "read-only", env={"FAKE_PERM_MODES": "null"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("could not check --perm read-only", r.stderr)
 
 
 class TestFailureNote(Base):
