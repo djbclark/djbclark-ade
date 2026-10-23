@@ -537,7 +537,7 @@ def test_ambient_git_variables_are_ignored(tmp_path, monkeypatch):
     env = mod.git_env()
     assert {k for k in env if k.startswith("GIT_")} == {
         "GIT_TERMINAL_PROMPT", "GIT_OPTIONAL_LOCKS", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
-        "GIT_NO_LAZY_FETCH", "GIT_NO_REPLACE_OBJECTS", "GIT_GRAFT_FILE"}
+        "GIT_NO_LAZY_FETCH", "GIT_NO_REPLACE_OBJECTS", "GIT_GRAFT_FILE", "GIT_ADVICE"}
     assert env["GIT_CONFIG_GLOBAL"] == os.devnull
     c = mod.scan_git([roots], remote=False)[0]
     assert c["untracked"] == 1 and "dirty" in c["flags"]
@@ -3927,6 +3927,19 @@ def test_an_edited_tracked_file_in_a_readable_but_unsearchable_directory_is_not_
             (work / "sub").chmod(0o755)
         assert rec["verdict"].startswith("scan incomplete: status"), (oct(mode), rec["verdict"])
     assert mod.scan_checkout(work, remote=False)["verdict"] == "dirty"
+    # round 56 LOW 2: a directory named like git's own hint prefix must not hide the same fault
+    (work / "hint:d").mkdir()
+    (work / "hint:d" / "f.txt").write_text("tracked\n")
+    git(work, "add", "hint:d/f.txt")
+    git(work, "commit", "-q", "-m", "hint dir")
+    git(work, "push", "-q", "origin", "main")
+    (work / "hint:d" / "f.txt").write_text("LOCAL EDIT\n")
+    (work / "hint:d").chmod(0o644)
+    try:
+        rec = mod.scan_checkout(work, remote=False)
+    finally:
+        (work / "hint:d").chmod(0o755)
+    assert rec["verdict"].startswith("scan incomplete: status"), rec["verdict"]
 
 
 def test_a_ref_name_that_is_not_utf8_makes_the_checkout_scan_incomplete(tmp_path):
@@ -3994,12 +4007,39 @@ def test_an_untracked_embedded_repository_is_flagged_and_its_ignored_files_stay_
     assert "plain.txt" in names and "secret.env" not in names and "i.txt" not in names, names
 
 
-def test_porcelain_unquoting_gives_back_the_real_name():
+def test_a_repository_below_an_untracked_directory_and_odd_names_are_found_and_archived_whole(tmp_path):
+    """Adversary round 56 on PR 27, MEDIUM and LOW 3: `status` shows `outer/` only, so a repository below it was found
+    by nothing and the `--no-recursion` archive kept an empty entry; a name holding `"` was a C-quoted string."""
     mod = load()
-    assert mod.unquote_porcelain("inner/") == "inner/"
-    assert mod.unquote_porcelain('"a b\\"c/"') == 'a b"c/'
-    assert mod.unquote_porcelain('"caf\\303\\251/"') == "caf\u00e9/"
-    assert mod.unquote_porcelain('"t\\tab/"') == "t\tab/"
+    doc = load_doc()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    (work / "outer").mkdir()
+    (work / "outer" / "notes.txt").write_text("notes\n")
+    names = ["outer/inner", 'q"x', "-dash", "sp ace"]
+    for n in names:
+        d = work / n
+        d.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", "-b", "main", str(d)], check=True, env=GIT_ENV)
+        (d / "work.txt").write_text("committed work\n")
+        git(d, "add", "work.txt")
+        git(d, "commit", "-q", "-m", "inner work")
+    rec = mod.scan_checkout(work, remote=False)
+    assert sorted(rec["embedded_repos"]) == sorted(n + "/" for n in names), rec["embedded_repos"]
+    text = doc.render(doc_scan([rec]))
+    ck = doc.checkout_dir(rec["path"])
+    row = next(r for r in section_3_2(text).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
+    assert "embedded-3.tar" in row, row
+    dest = tmp_path / "dest"
+    (dest / ck).mkdir(parents=True)
+    plan = [unescape_span(m) for m in re.findall(r"`(mkdir -p [^`]*embedded-\d\.tar[^`]*)`", row)]
+    assert len(plan) == 4, plan
+    for shell in SHELLS:
+        for c in plan:
+            run = subprocess.run([shell, "-c", PLAN_PREFIX + c.replace("<DEST>", str(dest))], capture_output=True, text=True, env=GIT_ENV)
+            assert run.returncode == 0, (shell, c, run.stderr)
+    held = "".join(subprocess.run(["tar", "-tf", str(p)], capture_output=True, text=True).stdout
+                   for p in sorted((dest / ck).glob("embedded-*.tar")))
+    assert held.count("work.txt") >= 4 and "inner/work.txt" in held, held
 
 
 def test_a_global_push_rewrite_to_a_helper_gets_no_push_row(tmp_path, monkeypatch):

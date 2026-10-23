@@ -817,10 +817,10 @@ def render(d):
             # contents (`--no-recursion`): its ignored files and git metadata stay out of the non-ignored capture. The
             # repository is its own checkout: scan it, or archive the directory whole (Codex pass 50 on PR 27, P2)
             for i, e in enumerate(c.get("embedded_repos") or []):
-                name = e.strip('"').rstrip("/")
+                name = e.rstrip("/")  # the real name (`ls-files -z`); `--no-unquote` keeps tar from reading it as a quoted one
                 cmd.append(f"embedded repository {code('{}', visible(e))}: archived as an empty entry above; its own state is not captured. "
                            "Scan it as a checkout of its own, or archive it whole (its ignored files and `.git` included): "
-                           + shcode("mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -cf <DEST>/{} -- {}",
+                           + shcode("mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} --no-unquote -cf <DEST>/{} -- {}",
                                     ck, raw_p, f"{ck}/embedded-{i}.tar", name))
         if unreachable:
             # origin did not answer: the count trusted the local `refs/remotes/origin/*`, which a deleted or

@@ -214,7 +214,8 @@ MODULE_INTERNAL_DIRS = ("objects", "refs", "logs", "hooks", "lfs")  # pruned ins
 # Prefix of every git call: no index lock, and the config-named programs that run on any command off
 # (log.showSignature=false: `stash list` / `log` would run gpg.program on a signed commit otherwise).
 GIT_SAFE = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-            "-c", "protocol.ext.allow=never", "-c", "log.showSignature=false"]
+            "-c", "protocol.ext.allow=never", "-c", "log.showSignature=false",
+            "-c", "advice.graftFileDeprecated=false"]  # GIT_GRAFT_FILE below would print a `hint:` on every call
 # Allowlist of the checkout's own config (local and worktree scope), 2026-10-20 (adversary round 2,
 # R2-1: the deny list missed three paths in two rounds). Keys are lower-cased on section and variable,
 # the subsection is kept verbatim. Anything else, `core.worktree` included, makes the checkout skipped.
@@ -250,7 +251,7 @@ def git_env(network: bool = False) -> dict:
     # line does the same with no ref at all, so `--all` sees nothing (round 32); the counts read the real objects
     env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_CONFIG_GLOBAL": os.devnull, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
-                "GIT_GRAFT_FILE": os.devnull, "LC_ALL": "C"})
+                "GIT_GRAFT_FILE": os.devnull, "GIT_ADVICE": "0", "LC_ALL": "C"})
     if network:
         env.pop("SSH_ASKPASS", None)
         env.update({"GIT_SSH_COMMAND": "ssh -o BatchMode=yes",
@@ -859,41 +860,15 @@ def read_regular_file(path: Path, cap: int) -> bytes:
         os.close(fd)
 
 
-_C_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, '"': 34}
-
-
-def unquote_porcelain(name: str) -> str:
-    """git's C-style quoting of an odd path in `status --porcelain` (`"a b\\303\\251"`), undone to the real name
-    (surrogateescape for bytes that are not UTF-8); a name that is not quoted is returned as it is."""
-    if len(name) < 2 or name[0] != '"' or name[-1] != '"':
-        return name
-    body, out, i = name[1:-1], bytearray(), 0
-    while i < len(body):
-        ch = body[i]
-        if ch != "\\" or i + 1 >= len(body):
-            out += ch.encode("utf-8", "surrogateescape")
-            i += 1
-        elif body[i + 1] in _C_ESCAPES:
-            out.append(_C_ESCAPES[body[i + 1]])
-            i += 2
-        elif body[i + 1:i + 4].isdigit() and len(body[i + 1:i + 4]) == 3:
-            out.append(int(body[i + 1:i + 4], 8) & 0xFF)
-            i += 4
-        else:
-            out += b"\\"
-            i += 1
-    return bytes(out).decode("utf-8", "surrogateescape")
-
-
-def embedded_repositories(path: Path, untracked: list[str]) -> list[str]:
-    """Untracked directories that hold a `.git` of their own: `ls-files --others` names such a directory, not its files,
-    so an archive of that list would recurse into it, taking ignored files and git metadata along (Codex pass 50, P2)."""
-    found = []
-    for u in untracked:
-        name = unquote_porcelain(u)
-        if name.endswith("/") and os.path.lexists(os.path.join(path, name.rstrip("/"), ".git")):
-            found.append(u)
-    return found
+def embedded_repositories(path: Path) -> tuple[int, list[str]]:
+    """(rc, names): untracked repositories at any depth, the real names with their trailing `/`. `ls-files -z --others
+    --exclude-standard` lists a nested repository as `dir/`, the same list the untracked archive reads, so a repository
+    below an untracked directory is found too and no name needs unquoting (adversary round 56 on PR 27, MEDIUM and
+    LOW 3; `status` shows only the top untracked directory). Tar recurses into none of them (`--no-recursion`)."""
+    rc, out = git(path, "ls-files", "-z", "--others", "--exclude-standard", errors="surrogateescape")
+    if rc != 0:
+        return rc, []
+    return 0, [n for n in out.split("\0") if n.endswith("/") and os.path.lexists(os.path.join(path, n.rstrip("/"), ".git"))]
 
 
 def stash_count(path: Path, common: Path | None) -> int | None:
@@ -1289,9 +1264,10 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
                      "--untracked-files=normal", timeout=STATUS_TIMEOUT, err=status_err)
     if rc != 0:
         return incomplete_record(path, "status", rc)
-    # any line but `hint:` (the graft-file notice): git reports an unreadable tracked path with a bare `perror`, `<path>:
-    # Permission denied`, no prefix, and still exits 0 (adversary round 55 on PR 27, MEDIUM)
-    if any(ln.strip() and not ln.startswith("hint:") for ln in "".join(status_err).splitlines()):
+    # any line at all, the hint silenced at its source (`advice.graftFileDeprecated`, `GIT_ADVICE`): git reports an
+    # unreadable tracked path with a bare `perror`, `<path>: Permission denied`, no prefix, and still exits 0 (round 55
+    # MEDIUM), and a path named `hint:d` must not hide behind a prefix test (round 56 LOW 2)
+    if any(ln.strip() for ln in "".join(status_err).splitlines()):
         # an unreadable untracked subtree ends `status` with rc 0, the files it could not list left out, and a
         # `warning: could not open directory ...` on stderr: the traversal was partial, so no count of it is a count
         # (Codex pass 49 on PR 27, P1)
@@ -1309,7 +1285,11 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     lines = status.splitlines()
     untracked = [ln[3:] for ln in lines if ln.startswith("??")]
     modified = [ln[3:] for ln in lines if not ln.startswith("??")]
-    embedded = embedded_repositories(path, untracked)
+    embedded: list[str] = []
+    if untracked:
+        rc, embedded = embedded_repositories(path)
+        if rc != 0:
+            return incomplete_record(path, "ls-files --others", rc)
     # a tracked path marked assume-unchanged (`ls-files -v` tag in lowercase) or skip-worktree (`S`) is invisible to
     # `status`, so its edits are in no count above: it is counted and captured on its own (Codex pass 32 on PR 27).
     # A skip-worktree path with no file is a sparse checkout's ordinary state (adversary round 38): nothing to
