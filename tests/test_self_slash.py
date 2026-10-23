@@ -46,6 +46,7 @@ FAKE_PASEO = textwrap.dedent("""\
     case "$1 $2" in
       "agent inspect")
         if [ "$3" = new-agent-1 ]; then
+          [ -n "$FAKE_NEW_STDERR" ] && echo "$FAKE_NEW_STDERR" >&2
           if [ -n "$FAKE_NEW_JSON" ]; then echo "$FAKE_NEW_JSON"; else
           if [ -n "$FAKE_NEW_SEQ" ]; then
             n=$(cat "$FAKE_LOG.n" 2>/dev/null || echo 0); echo $((n+1)) > "$FAKE_LOG.n"
@@ -55,7 +56,11 @@ FAKE_PASEO = textwrap.dedent("""\
           parent=null; [ -n "$FAKE_NEW_PARENT" ] && parent="\\"$FAKE_NEW_PARENT\\""
           printf '{"Id": "new-agent-1", "Model": "%s", "Status": "%s", "ParentAgentId": %s}\\n' \\
             "${FAKE_NEW_MODEL-claude-opus-5-5}" "${FAKE_NEW_STATUS-idle}" "$parent"; fi
+        elif [ -n "$FAKE_OLD_JSON" ]; then
+          [ -n "$FAKE_OLD_STDERR" ] && echo "$FAKE_OLD_STDERR" >&2
+          printf '%s\\n' "$FAKE_OLD_JSON"
         else
+          [ -n "$FAKE_OLD_STDERR" ] && echo "$FAKE_OLD_STDERR" >&2
           printf '{"Id": "test-agent", "Name": "%s", "Status": "idle", "Mode": "%s", "Provider": "%s", "Cwd": "%s", "ParentAgentId": null}\\n' \\
             "${FAKE_NAME-Lead}" "${FAKE_OLD_MODE-bypassPermissions}" "${FAKE_OLD_PROVIDER-claude}" "$FAKE_CWD"
         fi;;
@@ -812,6 +817,37 @@ class SelfSlashPaseoTests(unittest.TestCase):
             self.assertEqual(r.returncode, 11, f"{run_json!r}: {r.stdout}{r.stderr}")
             self.assertIn("no single agent object", r.stdout)
         self.assertEqual(self.calls_of("agent archive"), [])
+
+    # --- adversary round 2 low findings ---
+    def test_l1_stderr_on_this_agents_inspect_keeps_the_old_mode(self) -> None:
+        # stderr text on `agent inspect` once emptied Name/Mode/Cwd/Provider and a plan-mode agent got a
+        # bypassPermissions successor (adv-selfslash-2, L1)
+        r = self.run_waiter(FAKE_OLD_MODE="plan", FAKE_OLD_STDERR="(node:1) ExperimentalWarning: x [y] {z}")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        run = self.argv_of("run")
+        self.assertEqual(run[run.index("--mode") + 1], "plan", run)
+
+    def test_l1_this_agents_inspect_that_is_not_one_object_fails_closed(self) -> None:
+        for old_json in ("not json", '[{"Mode": "plan"}]', "{}", '{"Id": "test-agent", "Mode": "plan"}\n{"Id": "x"}',
+                         "Using x\n" + '{"Id": "test-agent", "Mode": "plan"}'):
+            r = self.run_waiter(FAKE_OLD_JSON=old_json, FAKE_OLD_STDERR="warn")
+            self.assertEqual(r.returncode, 11, f"{old_json!r}: {r.stdout}{r.stderr}")
+            self.assertIn("inspect of this agent printed no single JSON object", r.stdout)
+            self.assertIn("nothing was started", r.stdout)
+        self.assertEqual(self.calls_of("run "), [])
+        self.assertEqual(self.calls_of("agent archive"), [])
+
+    def test_l1_stderr_on_the_successors_inspect_is_not_a_failure(self) -> None:
+        r = self.run_waiter(FAKE_NEW_STDERR="(node:1) [DEP0040] DeprecationWarning {x}")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("archived test-agent (successor new-agent-1)", r.stdout)
+
+    def test_l2_no_stderr_file_is_left_behind_by_any_paseo_call(self) -> None:
+        for extra in ({}, {"FAKE_RUN_FAIL": "1"}, {"FAKE_NEW_STDERR": "w"}, {"FAKE_OLD_STDERR": "w"},
+                      {"FAKE_OLD_JSON": "not json"}, {"FAKE_NEW_JSON": "not json"}):
+            _ = self.run_waiter(**extra)
+            self.assertEqual([p.name for p in self.lockdir.glob("*err*")], [], extra)
+        self.assertEqual([p for p in Path(self._tmp.name).rglob("tmp.*")], [])
 
     def test_l2_top_level_check_needs_the_parent_and_status_keys(self) -> None:
         for new_json, needle in (('{"Model": "claude-opus-5-5", "Status": "idle", "parentAgentId": "test-agent"}', "no ParentAgentId"),

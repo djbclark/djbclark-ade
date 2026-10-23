@@ -653,10 +653,24 @@ import os, sys
 a, b = os.path.realpath(sys.argv[1]), os.path.realpath(sys.argv[2])
 sys.exit(0 if b == a or b.startswith(a.rstrip("/") + "/") else 1)' "$1" "$2" 2>/dev/null
 }
+# pcli_split ARGS...: one paseo call, stdout alone in $pcli_out (the only text parsed as JSON),
+# stderr in $pcli_err (status lines, Node warnings; shown only in a failure message), rc in $pcli_rc.
+# stderr goes to one fixed file per pane under $lockdir, removed at once and overwritten by the next
+# call, so a signal can leave at most that one file, never an accumulating mktemp pile
+# (adv-selfslash-2 L2); a TERM/INT trap would need a second cleanup path for the same bound.
+pcli_split() {
+  local errf="$lockdir/$safe_pane.paseo-err"
+  pcli_out=$(pcli "$@" 2>"$errf"); pcli_rc=$?
+  pcli_err=$(cat "$errf" 2>/dev/null); rm -f "$errf"
+}
 successor_paseo() {
   pcli wait "$pane" --timeout "${SELF_SLASH_WAIT:-900}" --json >/dev/null 2>&1 \
     || { echo "$(gdate '+%F %T') $host $pane: finish: gave up after ${SELF_SLASH_WAIT:-900}s, agent still running; NOT archived"; exit 6; }
-  info=$(pcli agent inspect "$pane" --json 2>&1) || successor_fail "inspect of this agent failed: $(printf '%s' "$info" | gtr -s ' \n' ' ' | gcut -c1-200)"
+  pcli_split agent inspect "$pane" --json; info="$pcli_out"
+  [ "$pcli_rc" = 0 ] || successor_fail "inspect of this agent failed: $(printf '%s' "$pcli_out $pcli_err" | gtr -s ' \n' ' ' | gcut -c1-200)"
+  # Fail closed: defaults must never replace an unreadable old mode (a plan-mode agent would get a
+  # bypassPermissions successor, adv-selfslash-2 L1).
+  jfield "$info" Id Name Status >/dev/null || successor_fail "inspect of this agent printed no single JSON object (got: $(printf '%s' "$pcli_out${pcli_err:+ stderr: $pcli_err}" | gtr -s ' \n' ' ' | gcut -c1-160)); nothing was started"
   old_name=$(jfield "$info" Name); old_mode=$(jfield "$info" Mode); old_cwd=$(jfield "$info" Cwd); old_provider=$(jfield "$info" Provider)
   cwd="${PASEO_AGENT_CWD:-$old_cwd}"
   [ -n "$cwd" ] || successor_fail "this agent cwd is unknown"
@@ -689,12 +703,11 @@ successor_paseo() {
   # Empty on a bash older than 4.4 is "unbound" under set -u unless the expansion is guarded.
   mode_args=(); [ -z "$mode" ] || mode_args=(--mode "$mode")
   # JSON comes from stdout alone: Paseo prints its status lines ("Using workspace <id>") and any Node
-  # warning on stderr, kept apart in a temp file that only a failure message shows (adv-selfslash-1, L4).
-  errf=$(mktemp) || successor_fail "mktemp failed; nothing was started"
-  runout=$(pcli run "$first_prompt" --provider "$successor" --thinking "$s_thinking" ${mode_args[@]+"${mode_args[@]}"} --workspace "$ws" --cwd "$run_cwd" --title "$title" --no-wait --json 2>"$errf"); rc=$?
-  runerr=$(cat "$errf" 2>/dev/null); rm -f "$errf"
-  [ "$rc" = 0 ] || successor_fail "paseo run failed (rc=$rc): $(printf '%s' "$runout $runerr" | gtr -s ' \n' ' ' | gcut -c1-200)"
-  newid=$(jfield "$runout" agentId id Id) || successor_fail "paseo run printed no single agent object with an id: $(printf '%s' "$runout" | gtr -s ' \n' ' ' | gcut -c1-200)"
+  # warning on stderr, which pcli_split keeps apart; only a failure message shows it (adv-selfslash-1, L4).
+  pcli_split run "$first_prompt" --provider "$successor" --thinking "$s_thinking" ${mode_args[@]+"${mode_args[@]}"} --workspace "$ws" --cwd "$run_cwd" --title "$title" --no-wait --json
+  rc="$pcli_rc"; runout="$pcli_out"
+  [ "$rc" = 0 ] || successor_fail "paseo run failed (rc=$rc): $(printf '%s' "$pcli_out $pcli_err" | gtr -s ' \n' ' ' | gcut -c1-200)"
+  newid=$(jfield "$runout" agentId id Id) || successor_fail "paseo run printed no single agent object with an id: $(printf '%s' "$pcli_out${pcli_err:+ stderr: $pcli_err}" | gtr -s ' \n' ' ' | gcut -c1-200)"
   case "$newid" in ""|*[!A-Za-z0-9._:-]*) successor_fail "paseo run printed an unusable agent id";; esac
   if [ "$newid" = "$pane" ] || [ "$newid" = "${pane:0:7}" ] || [ "${newid:0:7}" = "${pane:0:7}" ]; then
     successor_fail "paseo run returned this agent own id ($newid), not a new agent"
@@ -703,21 +716,23 @@ successor_paseo() {
   # as upstream #5705's version gate, shows in the first seconds, L6).  Any bad look is final.
   end=$(( $(gdate +%s) + settle )); seen=0; nmodel=""; nstatus=""
   while :; do
-    if ninfo=$(pcli agent inspect "$newid" --json 2>&1); then
+    pcli_split agent inspect "$newid" --json; ninfo="$pcli_out"
+    nerr="$pcli_out${pcli_err:+ stderr: $pcli_err}"
+    if [ "$pcli_rc" = 0 ]; then
       seen=1
-      parent=$(jfield "$ninfo" ParentAgentId) || successor_fail "successor $newid: inspect has no ParentAgentId key, cannot tell it is top-level (left running)"
+      parent=$(jfield "$ninfo" ParentAgentId) || successor_fail "successor $newid: inspect has no ParentAgentId key, cannot tell it is top-level (got: $(printf '%s' "$nerr" | gtr -s ' \n' ' ' | gcut -c1-160); left running)"
       nstatus=$(jfield "$ninfo" Status) || successor_fail "successor $newid: inspect has no Status key (left running)"
       nmodel=$(jfield "$ninfo" Model) || nmodel=""
       [ -z "$parent" ] || successor_fail "successor $newid is a subagent (ParentAgentId $parent; left running)"
       case "$nstatus" in idle|running|initializing) ;; *) successor_fail "successor $newid is in status '$nstatus', not idle, running or initializing (left running)";; esac
       case "$nmodel" in ""|"-") ;; *) [ -z "$s_model" ] || [ "$nmodel" = "$s_model" ] || successor_fail "successor $newid runs model '$nmodel', not $s_model (left running)";; esac
     elif [ "$seen" = 1 ]; then
-      successor_fail "successor $newid answered inspect once and then failed: $(printf '%s' "$ninfo" | gtr -s ' \n' ' ' | gcut -c1-120) (left running)"
+      successor_fail "successor $newid answered inspect once and then failed: $(printf '%s' "$nerr" | gtr -s ' \n' ' ' | gcut -c1-120) (left running)"
     fi
     [ "$(gdate +%s)" -lt "$end" ] || break
     sleep 2
   done
-  [ "$seen" = 1 ] || successor_fail "successor $newid started but inspect never answered: $(printf '%s' "$ninfo" | gtr -s ' \n' ' ' | gcut -c1-200) (left running)"
+  [ "$seen" = 1 ] || successor_fail "successor $newid started but inspect never answered: $(printf '%s' "$nerr" | gtr -s ' \n' ' ' | gcut -c1-200) (left running)"
   [ -z "$s_model" ] || [ "$nmodel" = "$s_model" ] || successor_fail "successor $newid runs model '${nmodel:-?}', not $s_model (left running)"
   echo "$(gdate '+%F %T') $host $pane: successor: $newid is top-level on ${nmodel:-$successor} (status $nstatus)"
   out=$(pcli agent archive -- "$pane" 2>&1); rc=$?
