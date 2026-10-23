@@ -19,12 +19,14 @@ own set_agent_model_request (bin/paseo-set-model).
 Data: the newest aiuse snapshots (CLAUDE_GOVERNOR_SNAPSHOTS, default ~/.cache/aiuse/snapshots/).
 Windows are found by label prefix: "Claude Code 5-hour", "Claude Code weekly", and
 "Claude Code weekly — Fable" (the sublimit; reported, but it never sets the level, it is what the
-unconditional Fable -> Opus move below is about). Newest snapshot older than 45 min: exit 10, no action.
+unconditional Fable -> Opus move below is about). Newest snapshot older than 45 min: exit 10, no action. A window last observed more than 45 min ago (the newest
+snapshot lacks it, an older one has it) is no evidence either: with no fresh shared Claude window left, exit 10.
 
 Projection, per window: burn rate = least-squares slope (percent per hour; below MIN_RATE, 0.001, it is 0) over the
 snapshots of the last 90 min that share the newest window's resets_at (+-5 min), needing two samples at
-least 10 min apart. projected_at_reset = used + rate * hours_to_reset; exhaust_at = now +
-(100 - used) / rate when rate >= MIN_RATE and that is under a year away. Levels (thresholds: THRESHOLDS below, env CLAUDE_GOVERNOR_THRESHOLDS
+least 10 min apart. projected_at_reset = used + rate * hours_to_reset, counted from the newest observation of the
+window (never later than now); exhaust_at = that observation + (100 - used) / rate when rate >= MIN_RATE and that is under a
+year away. Levels (thresholds: THRESHOLDS below, env CLAUDE_GOVERNOR_THRESHOLDS
 JSON merges over them):
   ok        neither of the below
   tight     any window projected >= 90% at its reset, or 5-hour left < 25, or weekly left < 30
@@ -314,10 +316,13 @@ def compute(snaps: list[dict[str, Any]], now: datetime, t: dict[str, float]) -> 
         resets = cur["resets_at"]
         if (resets - now).total_seconds() <= 0:
             continue                       # the data predates a reset that has happened: not evidence
+        if (now - cur_at).total_seconds() > t["stale_min"] * 60:
+            continue                       # last observed long ago (a newer snapshot lacks the window): not evidence either (Codex pass 5 on PR 31, P2)
         # `used` was observed at `cur_at`, not at `now` (a snapshot is accepted up to stale_min old): project from the
         # observation, and fit the rate over the window that ends at the newest observation, so a quiet half hour between
         # hourly collections neither shifts the projection nor drops the supporting samples (Codex pass 4 on PR 31, P2 x2)
-        hours = (resets - cur_at).total_seconds() / 3600
+        obs = min(cur_at, now)             # a snapshot dated a few minutes ahead of the clock counts as now (adversary gov-9, LOW)
+        hours = (resets - obs).total_seconds() / 3600
         tol = timedelta(minutes=t["reset_tolerance_min"])
         samples = sorted((s["at"], s["windows"][kind]["used"]) for s in snaps
                          if kind in s["windows"] and abs(s["windows"][kind]["resets_at"] - resets) <= tol
@@ -328,7 +333,7 @@ def compute(snaps: list[dict[str, Any]], now: datetime, t: dict[str, float]) -> 
         used = cur["used"]
         w = {"label": cur["label"], "used": used, "left": max(0.0, 100.0 - used), "rate_per_hour": rate,
              "projected_at_reset": used + rate * hours, "resets_at": resets, "samples": len(samples),
-             "exhaust_at": exhaust_time(cur_at, used, rate)}
+             "exhaust_at": exhaust_time(obs, used, rate)}
         w["level"] = window_level(kind, w, now, t)
         windows[kind] = w
     level = max((w["level"] for k, w in windows.items() if k != FABLE_KIND), key=LEVELS.get, default="ok")
@@ -643,8 +648,8 @@ def cmd_run(dry: bool) -> int:
         return EX_STALE
     res = compute(snaps, now, t)
     if not any(k != FABLE_KIND for k in res["windows"]):
-        print("claude-fleet-governor: the newest snapshot has no live Claude 5-hour or weekly window; no action",
-              file=sys.stderr)
+        print("claude-fleet-governor: no Claude 5-hour or weekly window observed in the last "
+              f"{t['stale_min']:.0f} min (or its reset has passed); no action", file=sys.stderr)
         return EX_STALE
     level = res["level"]
     agents, err = list_agents()

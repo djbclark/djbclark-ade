@@ -550,6 +550,16 @@ class TestNoAction(Base):
         self.assertEqual(self.e.calls("ping"), [])
         self.assertFalse(self.e.state.exists())
 
+    def test_a_window_last_seen_long_ago_is_no_evidence_and_exits_10(self):
+        """Codex pass 5 on PR 31, P2: the newest snapshot carries no Claude window, the previous hour's does."""
+        write_snap(self.e.snaps, NOW - timedelta(minutes=60), (85, self.e.resets), (12, NOW + timedelta(days=6)))
+        write_snap(self.e.snaps, NOW - timedelta(minutes=5))              # fresh, but without any Claude window
+        self.e.set_agents([agent("aaaaaaa", "claude-opus-5-5")])
+        r = self.e.run("run")
+        self.assertEqual(r.returncode, 10, r.stdout + r.stderr)
+        self.assertEqual(self.e.calls("setmodel"), [])
+        self.assertEqual(self.e.calls("paseo"), [])
+
     def test_missing_or_unreadable_snapshots_exit_10(self):
         self.assertEqual(self.e.run("run").returncode, 10)
         (self.e.snaps / snap_name(NOW)).write_text("not json")
@@ -807,6 +817,33 @@ def test_codex_pass_4_the_rate_window_ends_at_the_newest_observation_not_at_now(
     for minute in (0, 35):
         out = mod.compute(snaps, d.replace(hour=13, minute=minute), mod.thresholds())
         assert out["level"] in ("tight", "critical") and out["windows"]["five_hour"]["rate_per_hour"] > 25, (minute, out["windows"])
+
+
+def test_codex_pass_5_a_window_not_seen_for_longer_than_stale_min_is_skipped(monkeypatch, tmp_path):
+    """P2: an hour-old reading of a window must not set the level or move agents."""
+    monkeypatch.setenv("CLAUDE_QUOTA_GUARD_STATE", str(tmp_path / "none.json"))
+    mod = _gov()
+    d = datetime(2026, 10, 23, tzinfo=UTC)
+    old = _two_snaps(mod, [(d.replace(hour=12), 90.0)], d.replace(hour=14))
+    fresh = [{"at": d.replace(hour=12, minute=55), "windows": {}}]
+    out = mod.compute(fresh + old, d.replace(hour=13), mod.thresholds())
+    assert out["windows"] == {} and out["level"] == "ok", out
+    out = mod.compute(fresh + old, d.replace(hour=12, minute=40), mod.thresholds())     # 40 min old: still evidence
+    assert "five_hour" in out["windows"], out
+
+
+def test_gov9_the_exhaustion_time_starts_at_the_observation_and_never_after_now(monkeypatch, tmp_path):
+    """Adversary gov-9 LOW: the anchor of `exhaust_at` was unpinned. 12:20 (20%) and 12:50 (50%) = 60 %/h: empty 50 min
+    after 12:50 (13:40), however late the check; a sample dated ahead of the clock counts as now."""
+    monkeypatch.setenv("CLAUDE_QUOTA_GUARD_STATE", str(tmp_path / "none.json"))
+    mod = _gov()
+    d = datetime(2026, 10, 23, tzinfo=UTC)
+    snaps = _two_snaps(mod, [(d.replace(hour=12, minute=50), 50.0), (d.replace(hour=12, minute=20), 20.0)], d.replace(hour=17))
+    out = mod.compute(snaps, d.replace(hour=13, minute=10), mod.thresholds())
+    assert out["windows"]["five_hour"]["exhaust_at"] == d.replace(hour=13, minute=40), out["windows"]
+    ahead = _two_snaps(mod, [(d.replace(hour=13, minute=3), 60.0), (d.replace(hour=12, minute=3), 30.0)], d.replace(hour=17))
+    out = mod.compute(ahead, d.replace(hour=13), mod.thresholds())                      # rate 30 %/h, 40 left
+    assert out["windows"]["five_hour"]["exhaust_at"] == d.replace(hour=13) + timedelta(minutes=80), out["windows"]
 
 
 def test_codex_pass_4_the_printed_bootstrap_line_quotes_a_destination_with_spaces(monkeypatch, tmp_path, capsys):
