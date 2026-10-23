@@ -104,6 +104,8 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
+- Made Agent-tool sub-agents default to Sonnet (`CLAUDE_CODE_SUBAGENT_MODEL=sonnet` in `agents/claude/settings.json.tmpl`), so an Opus or Fable lead no longer spawns Opus or Fable sub-agents by inheritance; a definition's `model:` (adversary `opus`, fable-deep `fable`) or a model passed in the call still wins (#TBD).
+
 - Routing: moved lead / orchestrator sessions to Opus 5.5 at high (Sonnet 5.5 at high only to drive a pipeline), never Fable (`config/routing.toml` `[lead]`, printed by `route_agent.py policy --md`); sent adversary rounds first to `acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` (omp became eligible for `judgment`), and had the Agent-tool `adversary` take a `model: "sonnet"` override when the guard says `tight` or worse (#29).
 - `self-slash`'s 30-minute gap check read any log line that merely contained `<host> <pane>: sent /compact`; it now matches only lines that start with the timestamp, and a value flag as the last argument is a usage error (exit 2) instead of an endless loop (#30).
 - `handoff` Step 9 runs `self-slash --finish --successor claude/claude-opus-5-5 --thinking high` (Sonnet 5.5 when the quota guard says `tight`) instead of `/new` on Paseo when the session runs on Fable, `~/.local/state/ade/quota-guard.json` says `tight` or `critical`, or the operator asks for a model change, and the context-size hook names that form in its boundary and ask messages; a quota guard only moves a session down from a model known to be above the target, an unknown or lower model gets plain `/new` (#30).
