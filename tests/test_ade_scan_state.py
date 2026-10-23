@@ -2089,7 +2089,15 @@ def test_an_assume_unchanged_or_skip_worktree_edit_is_counted_and_archived(tmp_p
                if r.startswith("| /p/h "))
     assert "1 tracked path(s) marked assume-unchanged or skip-worktree" in row
     assert "\"$GSED\" -z -n 's/^[a-z] //p; t; s/^S //p' <DEST>/checkouts/abs/p/h/hidden.raw > <DEST>/checkouts/abs/p/h/hidden.list" in row
-    assert "-C /p/h --null --ignore-failed-read -T <DEST>/checkouts/abs/p/h/hidden.list" in row and "no-recursion" not in row
+    # round 39: children through git's ignore rules, no recursion; Codex pass 34: tar's stderr fails the row
+    assert ("< <DEST>/checkouts/abs/p/h/hidden.list xargs -0 -r git --literal-pathspecs -C /p/h ls-files -z --others "
+            "--exclude-standard -- > <DEST>/checkouts/abs/p/h/hidden-children.list") in row
+    assert ("LC_ALL=C \"$GTAR\" -cf <DEST>/checkouts/abs/p/h/hidden.tar -C <DEST>/checkouts/abs/p/h hidden.list hidden-children.list -C /p/h "
+            "--null --no-recursion --ignore-failed-read -T <DEST>/checkouts/abs/p/h/hidden.list -T <DEST>/checkouts/abs/p/h/hidden-children.list "
+            "2> <DEST>/checkouts/abs/p/h/hidden.err") in row
+    assert ("{ ! grep -qv ': Cannot stat: No such file or directory$' <DEST>/checkouts/abs/p/h/hidden.err || "
+            "{ cat <DEST>/checkouts/abs/p/h/hidden.err >&2; echo 'hidden capture FAILED' >&2; false; }; }") in row
+    assert doc.HIDDEN_FMT.count("{}") == len(doc.hidden_values("/p", "c"))
     ck = doc.checkout_dir(str(work))
     prefix = "GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); "
     cmd = prefix + doc.HIDDEN_FMT.format(*map(doc.shquote, doc.hidden_values(str(work), ck))).replace("<DEST>", str(tmp_path / "dest"))
@@ -2100,7 +2108,8 @@ def test_an_assume_unchanged_or_skip_worktree_edit_is_counted_and_archived(tmp_p
         run = subprocess.run([shell, "-c", cmd], capture_output=True, text=True)
         assert run.returncode == 0, (shell, run.stderr)
         tar = tarfile.open(tmp_path / "dest" / ck / "hidden.tar")
-        assert set(tar.getnames()) == {"hidden.list", "a.txt"} and tar.extractfile("a.txt").read() == b"hidden edit\n"
+        assert set(tar.getnames()) == {"hidden.list", "hidden-children.list", "a.txt"}, tar.getnames()
+        assert tar.extractfile("a.txt").read() == b"hidden edit\n"
     # Codex pass 33: the hidden path replaced by a directory: `status` reports neither the deletion nor the children,
     # the untracked count is 0, and `--no-recursion` archived an empty `a.txt/` entry without `a.txt/child`
     (work / "a.txt").unlink()
@@ -2113,8 +2122,28 @@ def test_an_assume_unchanged_or_skip_worktree_edit_is_counted_and_archived(tmp_p
     run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
     tar = tarfile.open(tmp_path / "dest" / ck / "hidden.tar")
-    assert set(tar.getnames()) == {"hidden.list", "a.txt", "a.txt/child"}, tar.getnames()
+    assert set(tar.getnames()) == {"hidden.list", "hidden-children.list", "a.txt", "a.txt/child"}, tar.getnames()
     assert tar.extractfile("a.txt/child").read() == b"child\n"
+    # round 39: an ignored child, and an untracked file outside the hidden path, are not this row's business
+    (work / "a.txt" / "secret.env").write_text("ignored\n")
+    (work / "elsewhere.txt").write_text("untracked\n")
+    (work / ".git" / "info" / "exclude").write_text("secret.env\n")
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    assert set(tarfile.open(tmp_path / "dest" / ck / "hidden.tar").getnames()) == {"hidden.list", "hidden-children.list", "a.txt", "a.txt/child"}
+    # Codex pass 34: an unreadable hidden file must fail the row, not vanish from the archive with rc 0
+    if os.geteuid() != 0:
+        (work / "a.txt" / "child").chmod(0)
+        try:
+            run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+        finally:
+            (work / "a.txt" / "child").chmod(0o644)
+        assert run.returncode != 0 and "hidden capture FAILED" in run.stderr and "Permission denied" in run.stderr, run.stderr
+    # a hidden path with no file at all (sparse, or an assume-unchanged deletion) has no bytes to keep: no failure
+    shutil.rmtree(work / "a.txt")
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    assert set(tarfile.open(tmp_path / "dest" / ck / "hidden.tar").getnames()) == {"hidden.list", "hidden-children.list"}
 
 
 def test_an_absent_skip_worktree_path_is_a_sparse_checkout_not_hidden_work(tmp_path):
@@ -2147,7 +2176,7 @@ def test_an_absent_skip_worktree_path_is_a_sparse_checkout_not_hidden_work(tmp_p
     run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
     tar = tarfile.open(tmp_path / "dest" / ck / "hidden.tar")
-    assert set(tar.getnames()) == {"hidden.list", "S x"}, tar.getnames()
+    assert set(tar.getnames()) == {"hidden.list", "hidden-children.list", "S x"}, tar.getnames()
 
 
 def test_a_reflog_only_commit_is_counted_and_packed(tmp_path):
@@ -2312,6 +2341,31 @@ def test_capture_plan_never_pushes_to_a_credential_bearing_origin():
     text = section_3_2(mod.render(doc_scan([head, others, tags])))
     assert text.count("git -C /p/h push -u origin") == 1 and text.count("git -C /p/o push origin") == 2
     assert text.count("git -C /p/t push origin --tags") == 1 and "holds a credential" not in text
+
+
+def test_a_credential_bearing_origin_gets_no_push_row_without_remote(tmp_path):
+    """Adversary round 39 on PR 27: the `not queried` flag is `--remote`-only, so a default scan of a checkout
+    whose origin url holds a token still rendered `git push origin` rows; the record now carries
+    `origin_credential` in every mode and the plan keys its gate on it."""
+    mod, doc = load(), load_doc()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    commit_file(work, "ahead.txt")
+    git(work, "config", "remote.origin.url", "https://u:FAKE-SECRET@127.0.0.1:9/x.git")
+    c = scan_one(mod, roots)
+    assert c["origin_credential"] is True and mod.ORIGIN_CREDENTIAL not in c["flags"] and "unpushed commits" in c["flags"], c
+    text = section_3_2(doc.render(doc_scan([c])))
+    assert "push -u" not in text and "push origin" not in text and "FAKE-SECRET" not in text, text
+    assert "refs/heads/main` (origin url holds a credential: no push until it is removed from the url; bundle instead)" in text
+    # round 39 LOW: the untracked row's "commit and push" advice goes too
+    (work / "new.txt").write_text("n\n")
+    text = section_3_2(doc.render(doc_scan([scan_one(mod, roots)])))
+    assert "untracked.tar" in text and "commit and push" not in text and "push origin" not in text, text
+    # an older record without the field keeps its push row
+    c.pop("origin_credential")
+    assert "push -u origin refs/heads/main:refs/heads/main" in section_3_2(doc.render(doc_scan([c])))
+    # a plain url records False
+    git(work, "config", "remote.origin.url", "https://127.0.0.1:9/x.git")
+    assert scan_one(mod, roots)["origin_credential"] is False
 
 
 def test_stash_capture_command_keeps_each_entry_index_tree(tmp_path):
@@ -2521,8 +2575,9 @@ def test_capture_plan_keeps_staged_changes_and_every_stash():
     assert ('"$GTAR" -cf <DEST>/checkouts/abs/p/w/modified.tar -C <DEST>/checkouts/abs/p/w modified.list -C /p/w --null '
             '--no-recursion --ignore-failed-read -T <DEST>/checkouts/abs/p/w/modified.list') in row
     assert "2> <DEST>/checkouts/abs/p/w/modified.err" in row  # round 36
-    assert "{ ! grep -qv '^warning: ' <DEST>/checkouts/abs/p/w/modified.err || { cat <DEST>/checkouts/abs/p/w/modified.err >&2; " \
-           "echo 'modified capture FAILED' >&2; false; }; }" in row  # round 37: loud, and a plain warning is no failure
+    assert "{ ! grep -qv -e '^warning: ' -e ': Cannot stat: No such file or directory$' <DEST>/checkouts/abs/p/w/modified.err || " \
+           "{ cat <DEST>/checkouts/abs/p/w/modified.err >&2; echo 'modified capture FAILED' >&2; false; }; }" in row  # round 37: loud, and a plain warning is no failure
+    assert "--ignore-failed-read -T <DEST>/checkouts/abs/p/w/modified.list 2>> <DEST>/checkouts/abs/p/w/modified.err && { ! grep" in row  # Codex pass 34: tar's stderr too
     assert mod.modified_fmt().count("{}") == len(mod.modified_values("/p", "c")) == mod.modified_fmt("/<sub>").count("{}")
     assert '"$GCP" -- "$(git -C /p/w rev-parse --absolute-git-dir)/index" <DEST>/checkouts/abs/p/w/index' in row
     assert "3 stashes" in row and "stash0.patch" not in row and "bundle create <DEST>/checkouts/abs/p/w/stashes" not in row
@@ -2690,6 +2745,13 @@ def test_modified_capture_archives_an_unmerged_binary_file_and_ignores_textconv(
             (repo / "d").chmod(0o755)
         assert run.returncode != 0 and (tmp_path / "dest" / ck / "modified.err").stat().st_size > 0, run.stderr
         assert "modified capture FAILED" in run.stderr and "cannot lstat" in run.stderr  # round 37: says why
+        # Codex pass 34: an unreadable changed file: `--ignore-failed-read` gave rc 0 with the file left out
+        (repo / "b.bin").chmod(0)
+        try:
+            run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+        finally:
+            (repo / "b.bin").chmod(0o644)
+        assert run.returncode != 0 and "Permission denied" in run.stderr, run.stderr
     # round 37: a plain `warning:` line on stderr (an ambiguous ref name) is not a read error and must not fail the row
     git(repo, "update-ref", "refs/heads/HEAD", "HEAD")
     run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)

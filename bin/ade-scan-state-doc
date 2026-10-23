@@ -78,22 +78,24 @@ def modified_fmt(sub=""):
     every tracked path whose worktree differs from the index (unmerged ones included), `diff --cached --diff-filter=d`
     every staged path still present; a path deleted from the worktree has no bytes to keep (`--ignore-failed-read`),
     and the archive always holds `modified.list` so an all-deletions list never makes gtar refuse an empty archive.
-    Git's own read errors (`cannot lstat`: an unsearchable directory) go to `modified.err` and any line there that
-    is not a plain `warning:` fails the row, printing the file and a message, since `--ignore-failed-read` would
-    otherwise turn them into rc 0 (adversary rounds 36 and 37: an ambiguous-refname warning is not a loss); a listed
+    Git's and tar's own read errors (`cannot lstat`: an unsearchable directory; `Cannot open: Permission denied`) go
+    to `modified.err` and any line there that is not a plain `warning:` or tar's `Cannot stat: No such file or
+    directory` (a deleted path, `LC_ALL=C` keeps the wording) fails the row, printing the file and a message, since
+    `--ignore-failed-read` would otherwise turn them into rc 0 (adversary rounds 36 and 37: an ambiguous-refname
+    warning is not a loss; Codex pass 34: an unreadable changed file vanished from the archive with rc 0); a listed
     directory (a submodule gitlink whose HEAD moved, a file replaced by a directory) is not recursed into: the
     submodule row covers its content, and its ignored files must not be copied (round 36)."""
     w, d = "git -C {}" + sub, "<DEST>/{}" + sub
     return (f"mkdir -p {d} && {w} {DIFF_OPTS} > {d}/modified.patch && {w} {DIFF_OPTS} --cached > {d}/staged.patch "
             f"&& {w} ls-files -z --modified > {d}/modified.list 2> {d}/modified.err "
             f"&& {w} diff --cached -z --name-only --diff-filter=d >> {d}/modified.list 2>> {d}/modified.err "
-            f"&& {{{{ ! grep -qv '^warning: ' {d}/modified.err || {{{{ cat {d}/modified.err >&2; echo 'modified capture FAILED' >&2; false; }}}}; }}}} "
-            f"&& \"$GTAR\" -cf {d}/modified.tar -C {d} modified.list -C {{}}{sub} --null --no-recursion --ignore-failed-read -T {d}/modified.list "
+            f"&& LC_ALL=C \"$GTAR\" -cf {d}/modified.tar -C {d} modified.list -C {{}}{sub} --null --no-recursion --ignore-failed-read -T {d}/modified.list 2>> {d}/modified.err "
+            f"&& {{{{ ! grep -qv -e '^warning: ' -e ': Cannot stat: No such file or directory$' {d}/modified.err || {{{{ cat {d}/modified.err >&2; echo 'modified capture FAILED' >&2; false; }}}}; }}}} "
             f"&& \"$GCP\" -- \"$({w} rev-parse --absolute-git-dir)/index\" {d}/index")
 
 
 def modified_values(raw_p, ck):
-    return (ck, raw_p, ck, raw_p, ck, raw_p, ck, ck, raw_p, ck, ck, ck, ck, ck, ck, raw_p, ck, raw_p, ck)
+    return (ck, raw_p, ck, raw_p, ck, raw_p, ck, ck, raw_p, ck, ck, ck, ck, raw_p, ck, ck, ck, ck, raw_p, ck)
 
 
 def stash_values(raw_p, ck):
@@ -104,15 +106,22 @@ def stash_values(raw_p, ck):
 # nothing for it, so its edits are in no count and in no patch; the files themselves are archived with their
 # manifest (Codex pass 32 on PR 27). GNU sed's `-z` keeps the NUL-separated names whole, like the untracked archive;
 # `t` ends the script after the first substitution, or a path `S x` under tag `h` would print a second name `x`
-# (adversary round 38). The archive recurses: a hidden path replaced by a directory holds children `status` cannot
-# see either, so no other row has them (Codex pass 33)
+# (adversary round 38). A hidden path replaced by a directory holds children `status` cannot see (Codex pass 33):
+# they are listed through git's own ignore rules (`ls-files --others --exclude-standard` under each hidden path, a
+# second manifest `hidden-children.list`) and archived without recursion, so an ignored file or a nested
+# repository's content is never copied (adversary round 39). tar's stderr goes to `hidden.err`: `--ignore-failed-read`
+# returns 0 with an unreadable file left out, so any line there but `Cannot stat: No such file or directory` (an
+# assume-unchanged or sparse path with no file: nothing to keep) fails the row loudly (Codex pass 34)
 HIDDEN_FMT = ("mkdir -p <DEST>/{} && git -C {} ls-files -z -v > <DEST>/{}/hidden.raw "
               "&& \"$GSED\" -z -n 's/^[a-z] //p; t; s/^S //p' <DEST>/{}/hidden.raw > <DEST>/{}/hidden.list "
-              "&& \"$GTAR\" -cf <DEST>/{}/hidden.tar -C <DEST>/{} hidden.list -C {} --null --ignore-failed-read -T <DEST>/{}/hidden.list")
+              "&& < <DEST>/{}/hidden.list xargs -0 -r git --literal-pathspecs -C {} ls-files -z --others --exclude-standard -- > <DEST>/{}/hidden-children.list "
+              "&& LC_ALL=C \"$GTAR\" -cf <DEST>/{}/hidden.tar -C <DEST>/{} hidden.list hidden-children.list -C {} --null --no-recursion --ignore-failed-read "
+              "-T <DEST>/{}/hidden.list -T <DEST>/{}/hidden-children.list 2> <DEST>/{}/hidden.err "
+              "&& {{ ! grep -qv ': Cannot stat: No such file or directory$' <DEST>/{}/hidden.err || {{ cat <DEST>/{}/hidden.err >&2; echo 'hidden capture FAILED' >&2; false; }}; }}")
 
 
 def hidden_values(raw_p, ck):
-    return (ck, raw_p, ck, ck, ck, ck, ck, raw_p, ck)
+    return (ck, raw_p, ck, ck, ck, ck, raw_p, ck, ck, ck, raw_p, ck, ck, ck, ck, ck)
 
 
 # a commit reachable from a reflog alone (a reset, amend or rebase left it): no ref holds it, no bundle above
@@ -522,7 +531,9 @@ def render(d):
         modified, stashes, local_n = num(c["modified"]), num(c["stashes"]), num(c.get("local_only_commits"))
         head_ahead = next((v for v in (c["ahead_of_origin"], c["unpushed"])
                            if isinstance(v, int) and v > 0), 0)
-        credential = ORIGIN_CREDENTIAL in c["flags"]  # the url is in no record: only the flag says so
+        # the url is in no record: the flag (`--remote` only) or the field `origin_credential` (every mode, since
+        # adversary round 39; older records lack it) says so
+        credential = ORIGIN_CREDENTIAL in c["flags"] or bool(c.get("origin_credential"))
         # no push row for such an origin: `git push origin` hands the credential-bearing url to the transport helper's
         # argv, the exposure the scanner itself avoids; the bundle alternative stands alone (Codex pass 33 on PR 27)
         cred_note = " (origin url holds a credential: no push until it is removed from the url; bundle instead)"
@@ -654,8 +665,8 @@ def render(d):
                                 "&& \"$GTAR\" -C {} --null -T <DEST>/{} -cf <DEST>/{}",
                                 ck, raw_p, f"{ck}/untracked.list", raw_p, f"{ck}/untracked.list",
                                 f"{ck}/untracked.tar")
-                       + " or " + shcode("git -C {} add -A -- .", raw_p)
-                       + " on a branch, commit and push (stages the modified tracked files too)")
+                       + ("" if credential else " or " + shcode("git -C {} add -A -- .", raw_p)
+                          + " on a branch, commit and push (stages the modified tracked files too)"))
             need = need if need != "no" else "yes: decide whether they are work"
         if unreachable:
             # origin did not answer: the count trusted the local `refs/remotes/origin/*`, which a deleted or

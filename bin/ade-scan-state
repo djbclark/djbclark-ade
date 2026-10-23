@@ -1164,6 +1164,9 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         "local_only_tags": local_only_tags,
         "local_only_branches_uncounted": branches_uncounted,
         "has_origin": has_origin,
+        # whatever the mode: the capture plan must never print a push for such a url (adversary round 39: the
+        # `not queried` flag is `--remote`-only, and a default scan still got push rows); the url itself is in no record
+        "origin_credential": bool(credential),
         "on_origin": "unknown" if on_origin is None else on_origin,
         "flags": flags, "verdict": primary,
     }
