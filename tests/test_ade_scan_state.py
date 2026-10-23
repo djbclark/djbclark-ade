@@ -1967,6 +1967,9 @@ def test_a_remote_helper_url_is_withheld_whatever_it_holds():
     mod = load()
     for url, want in (("evil::PAYLOAD", True), ("ext::sh -c 'touch /tmp/x'", True), ("fd::3", True), ("https::https://host/x.git", True),
                       ("evil://host/x", True), ("EVIL://host/x", True), ("hg+ssh://host/x", True), ("s3://bucket/x", True),
+                      # round 50: git matches its own transports case-sensitively and lets a scheme start with a digit
+                      ("SSH://host/x", True), ("Git://host/x", True), ("FILE:///tmp/x", True), ("HTTPS://host/x", True),
+                      ("0day://host/x", True), ("Git+ssh://host/x", True),
                       ("https://host/x.git", False), ("http://host/x.git", False), ("ssh://git@host/x", False), ("git+ssh://git@host/x", False),
                       ("git://host/x", False), ("file:///tmp/o.git", False), ("ftp://host/x", False), ("git@host:x/y.git", False),
                       ("host:x/y.git", False), ("/tmp/some/origin.git", False), ("../relative/o.git", False), ("[::1]:x/y", False)):
@@ -3684,6 +3687,15 @@ def test_the_preamble_clears_every_git_variable_without_a_pipeline_and_survives_
         assert run.returncode == 0 and run.stderr == "", (shell, run.stderr)
         assert run.stdout == "unset|unset|unset|unset|/dev/null|1|kept|unset|unset|ok\n", (shell, run.stdout)
         assert not (tmp_path / "PWN").exists()
+        # round 50: an `IFS` holding `_` or a letter of a variable name must not split the name `unset` is given
+        run = subprocess.run([shell, "-c", "IFS=_G; " + doc.PLAN_PREAMBLE + probe.replace("test -n", "IFS=' '; test -n")],
+                             capture_output=True, text=True, env=env)
+        assert run.returncode == 0 and run.stdout.startswith("unset|unset|unset|unset|"), (shell, run.stdout, run.stderr)
+        # an `env` that fails is reported, and the fixed floor still clears the variables that matter most
+        run = subprocess.run([shutil.which(shell), "-c", doc.PLAN_PREAMBLE + '; printf "%s|" "${GIT_DIR-unset}" "${GIT_CONFIG_COUNT-unset}"'],
+                             capture_output=True, text=True,
+                             env={"PATH": "/nonexistent", "GIT_DIR": "/x", "GIT_CONFIG_COUNT": "1"})  # no BASH_ENV: it may define `env`
+        assert "env failed: GIT_* not cleared" in run.stderr and run.stdout == "unset|unset|", (shell, run.stdout, run.stderr)
 
 
 def test_a_non_utf8_checkout_path_is_quoted_as_its_bytes_and_the_document_is_written(tmp_path):

@@ -258,8 +258,10 @@ def human(n):
 # another repository's index and the tar that followed succeeded without the checkout's files (Codex pass 42)
 PLAN_PREAMBLE = ("GCP=$(command -v gcp || command -v cp); GTAR=$(command -v gtar || command -v tar); "
                  "GSED=$(command -v gsed || command -v sed); "
+                 "unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR "
+                 "GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT; "
                  "_E=$(env) || echo 'env failed: GIT_* not cleared' >&2; "
-                 "while IFS= read -r _L; do case ${_L%%=*} in GIT_*[!A-Za-z0-9_]*) ;; GIT_?*) case $_L in *=*) unset ${_L%%=*};; esac;; esac; done <<< \"$_E\"; "
+                 "while IFS= read -r _L; do case ${_L%%=*} in GIT_*[!A-Za-z0-9_]*) ;; GIT_?*) case $_L in *=*) unset \"${_L%%=*}\";; esac;; esac; done <<< \"$_E\"; "
                  "unset _E _L; "
                  "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1")
 
@@ -571,8 +573,8 @@ def render(d):
       "(coreutils and gnu-sed installed as `g*`) and on Linux (bare names; Codex pass 12 on PR 27): set "
       f"`{PLAN_PREAMBLE}` first, and `<DEST>` to an absolute path. The last two statements give every `git` the "
       "scanner's own environment: no `GIT_DIR`, `GIT_INDEX_FILE` or other ambient `GIT_*` variable, and no global or "
-      "system config, so a successful capture is of the checkout the scan read (Codex pass 42). Paste it into a shell you "
-      "close afterwards (`bash -l` or a subshell), not your working one; the push rows are the exception, they need your "
+      "system config, so a successful capture is of the checkout the scan read (Codex pass 42). Paste it into bash or zsh "
+      "(not sh or dash: the preamble uses `<<<`), in a shell you close afterwards (`bash -l` or a subshell), not your working one; the push rows are the exception, they need your "
       "own git credentials and config, so run them in a normal shell. Read this document in a rendered markdown view "
       "(GitHub, a viewer): the commands sit in table cells where a literal `|` is written `\\|`, and a plain-text editor "
       "shows that backslash.\n")

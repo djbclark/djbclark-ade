@@ -976,8 +976,10 @@ def url_names_remote_helper(url: str) -> bool:
     that program, so the scan neither queries it nor prints a push for it: the bundle is the way out."""
     if re.match(r"[A-Za-z0-9+.-]+::", url):
         return True
-    m = re.match(r"([A-Za-z][A-Za-z0-9+.-]*)://", url)
-    return bool(m) and m[1].lower() not in _TRUSTED_SCHEMES
+    # git's own transports match case-sensitively (`starts_with(url, "ssh://")`) and a scheme may start with a digit
+    # (`is_urlschemechar`): `SSH://`, `Git://`, `FILE:///` and `0day://` all reach `git-remote-<text before ':'>` (round 50)
+    m = re.match(r"([A-Za-z0-9][A-Za-z0-9+.-]*)://", url)
+    return bool(m) and m[1] not in _TRUSTED_SCHEMES
 
 
 def url_withheld(url: str) -> bool:
