@@ -1196,3 +1196,16 @@ so `claude-opus-5-5` fails with a 400 version gate: relevant to anyone downshift
 2. **The ade-side workaround** (`bin/self-slash --finish --successor`, handoff Step 9, the context hook, 24 tests):
    built in about 15 minutes of wall-clock agent time on 2026-10-23, research of the Paseo CLI source included. It exists only
    because the CLI lacks this command, and it still cannot keep the agent id, labels or subagent links.
+
+## 10. Paseo — the start-up skill sync writes through a symlinked skill directory (filed 2026-10-23)
+
+**Filed:** https://github.com/getpaseo/paseo/issues/7700 (searched first: nothing on this; #4823 and #5440 are
+about duplicate Codex entries and non-default homes).
+
+`orchestrationSkills.autoUpdate()` runs at every daemon start and syncs the six bundled skills into
+`~/.claude/skills/<n>` and `~/.agents/skills/<n>`. `assertManagedPathsStayInsideSkill` lstat-checks every segment
+below the skill dir but never the skill dir itself, so a symlinked skill dir is written through into the user's own
+checkout; `syncDirectoryFiles` also updates without comparing the on-disk hash with the manifest (deletes do).
+Reproduced with the shipped 0.13.0-beta.1 `syncSkills` in a throwaway directory. Our workaround is the skill
+selection in docs/skill-everywhere.md section 3a.
+

@@ -201,15 +201,8 @@ def slug_from_title(title: str, max_len: int = 21) -> str:
 
     max_len 21 keeps the label under the 24-character sidebar limit (workspace-layout.md).
     """
-    import re
-    words = [w for w in re.sub(r"[^a-z0-9]+", " ", title.lower()).split() if not re.fullmatch(r"[0-9.-]+", w)]
-    out = ""
-    for w in words:
-        cand = f"{out}-{w}" if out else w
-        if len(cand) > max_len:
-            break
-        out = cand
-    return (out or "session") + "-t"
+    from autorename import title_slug  # same directory
+    return (title_slug(title, max_len) or "session") + "-t"
 
 
 def label(text: str | None, from_title: bool, force: bool) -> int:

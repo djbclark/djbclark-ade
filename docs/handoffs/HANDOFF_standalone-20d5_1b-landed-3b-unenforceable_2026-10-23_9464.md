@@ -178,9 +178,18 @@ From the `/steps` walk of 2026-10-20, all honoured:
 
 ## Where We're Going
 
-1. **THE NEXT ACTION: put the 3b design choice to the operator**, because both
-   answers are defensible and the wrong one means rework. The finding as written
-   is not implementable (see *What We Tried* 1). The two forms:
+> **Update, 2026-10-23:** item 1 is done. The operator chose **1.2**
+> (escalation (c)): `source.sha256` is demoted to belt-and-braces and the tree
+> comparison is the release's binding. Landed as `sudo-main` **`04c70f0`**
+> (comments + `packaging/README.md`, no behaviour change, 118 tests pass). An
+> adversary pass on `04c70f0` was dispatched immediately after; its verdict is
+> item 2 and was not yet in hand when this note was written. Item 1 below is
+> kept for the reasoning, which is still the record of *why* 1.1 was not built.
+
+1. **~~THE NEXT ACTION~~ (decided, see the update above): put the 3b design
+   choice to the operator**, because both answers are defensible and the wrong
+   one means rework. The finding as written is not implementable (see *What We
+   Tried* 1). The two forms:
 
    1.1 **A separate workflow file** — `source-digest.yml`, triggered on the same
    tag, running no cargo and no brew, attesting only `source.sha256`. Its cert
@@ -238,9 +247,11 @@ git -C ~/src/sudo-secretspec log --oneline -3          # 0839caf, 9e1312e, 48b70
 git -C ~/src/sudo-secretspec status -sb                # clean, in sync
 
 # the tests (the ONLY interpreter that is right)
-cd ~/src/sudo-secretspec && ~/ops/site-private/bin/bg -- \
-  uv run --python 3.13 --with pytest python -m pytest tests/sudo_packaging/ -q \
+cd ~/src/sudo-secretspec && ~/ops/site-private/bin/bg \
+  uv run --python 3.13 --with pytest python -m pytest tests/sudo_packaging/test_release.py -q \
   > /tmp/t.log 2>&1; echo "rc=$?" > /tmp/t.rc; cat /tmp/t.rc   # expect rc=0, 118 passed
+# NO `--` after bg: it takes the command directly and refuses a lone `--` with
+# exit 2, which reads exactly like the tests failing.
 
 # the 3b evidence, if it needs re-checking
 python3 -I -c "import json;d=json.load(open('/tmp/sudo27/att28/att.json'));\

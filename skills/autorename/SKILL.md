@@ -202,6 +202,14 @@ is left alone. An automatic title is still nudged, so `--auto` can pin it and
 herdr placement can run. The hook runs under `python3.14` (the script needs
 3.10+).
 
+**Paseo** (2026-10-23). A session hosted by a Paseo agent (`$PASEO_AGENT_ID`) also gets its sidebar name set and
+its **workspace renamed** to the title in lower-case hyphen form plus `-pw` (`Paseo skill sync overwrite fix` ->
+`paseo-skill-sync-overwrite-fix-pw`; whole words, number-only words dropped, at most 40 characters before the
+suffix). The one naming rule across the environment: `-pw` Paseo workspace, `-t` herdr tab, `-p` herdr pane, always
+lower case with hyphens (`feedback_herdr_tab_pane_naming_convention`). The workspace id comes from the agent's record
+under `$PASEO_HOME/agents/`. A direct `/autorename` always renames the workspace; `--auto` keeps one that already ends
+in `-pw`. The reply line ends `(paseo name set) (paseo workspace <name>)`. Other workspaces are never touched.
+
 **The herdr tab label is a separate thing.** Neither `/rename` nor `autorename.py`
 touches the sidebar tab: it keeps its default number ("2") until something labels
 it (operator, 2026-10-09, after three renames changed nothing he could see). Inside

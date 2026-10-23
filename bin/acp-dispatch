@@ -348,7 +348,8 @@ Exit codes (dispatch and check):
          also `running`, `pending` and `resume-scheduled` (a quota stop whose in-place resume is
          scheduled: still running, wait for the rearm waiter)
     2    usage (missing --kind/--model, ineligible kind, frontier model without --kind frontier,
-         frontier --role exec without approval, --role advise with --perm deny (use read-only), bad name, report basename Claude Code would refuse, ...)
+         frontier --role exec without approval, --role advise with --perm deny (use read-only), --perm
+         read-only or deny for an agent whose `acp-run <agent> --info` perm_modes lacks it, bad name, report basename Claude Code would refuse, ...)
     3    delivery failure: the agent finished (or died) and there is no report, or its report
          ends in a NO-REPORT: line (acp-run failed before the agent wrote DONE) and no automatic
          resume is pending; for a quota stop the line carries the manual resume command
@@ -2048,6 +2049,32 @@ def check_model(acp_run: str, agent: str, model: str, cwd: str) -> str | None:
         return f"{agent} offers no model option (acp-run {agent} --info): drop --model"
     ok, why = match_model(values, model)
     return None if ok else f"no model '{model}' for {agent}{why}"
+
+
+def check_perm(acp_run: str, agent: str, perm: str, cwd: str) -> str | None:
+    """None when the agent takes `--perm {perm}` per `acp-run <agent> --info` (`perm_modes`), or
+    when the probe cannot run (then a warning); otherwise the usage error to die with. acp-run
+    itself refuses `--perm read-only` for an agent without a verified read-only mode (exit 2), but
+    that refusal came after the record was written and the preflight paid for: 2026-10-23, an
+    omp adversary round ended as no-report in 2 s."""
+    if perm not in ("read-only", "deny"):
+        return None
+    try:
+        r = subprocess.run([acp_run, agent, "--info", "-C", cwd], check=False, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL, timeout=INFO_TIMEOUT)
+        start = r.stdout.find("{")
+        info = json.loads(r.stdout[start:]) if r.returncode == 0 and start >= 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        info = None
+    modes = info.get("perm_modes") if isinstance(info, dict) else None
+    if not isinstance(modes, list):
+        print(f"acp-dispatch: warning: could not check --perm {perm} (acp-run {agent} --info lists no perm_modes);"
+              " dispatching anyway", file=sys.stderr)
+        return None
+    if perm in modes:
+        return None
+    return (f"--perm {perm}: {agent} has no verified {perm} mode (acp-run {agent} --info: {', '.join(map(str, modes))});"
+            " use --perm all with a read-only brief and a diff check")
 
 
 def check_options(acp_run: str, agent: str, model: str | None, effort: str | None, context: str | None,
@@ -3898,6 +3925,11 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     if ((effort or context) and not a.no_model_check and not a.dry_run
             and not any(x.startswith("--set") for x in a.acp_arg or [])):
         bad = check_options(acp_run, a.agent, a.model, effort, context, str(Path(a.dir).resolve()))
+        if bad:
+            die(bad)
+    if (a.perm in ("read-only", "deny") and not is_resume and not a.dry_run and not a.no_model_check
+            and a.agent not in MODEL_CHECK_SKIP):
+        bad = check_perm(acp_run, a.agent, a.perm, str(Path(a.dir).resolve()))
         if bad:
             die(bad)
     out = Path(a.out).expanduser().resolve() if a.out else STATE_ROOT / (a.task or f"adhoc-{date.today().isoformat()}")
