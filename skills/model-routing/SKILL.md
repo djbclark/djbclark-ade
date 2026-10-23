@@ -67,6 +67,48 @@ skill's snapshot in the same turn.
   `~/Library/Application Support/orca/profiles/local-default/orca-data.json`
   → `settings.agentDefaultArgs` / `disabledTuiAgents`. Nearly every TUI
   is configured inside Orca; macro-graph dispatch reaches any enabled one.
+- **`bin/claude-quota-guard`** (2026-10-23, the incident in *Routing policy* item 12) —
+  turns the Claude reading into a level a session acts on, instead of an alert nobody
+  reads. `check` (the default; launchd runs it every 15 minutes after
+  `claude-quota-guard --install`) reads `aiuse --available --json` plus the newest
+  snapshot's Claude `conserve` alerts and writes `~/.local/state/ade/quota-guard.json`
+  (`level`, `weekly_left`, `five_hour_left`, `fable_left`, `resets_at`, `pace`, `advice`,
+  `checked_at`, `last_pinged_level`). Levels: `ok`; `watch` (weekly < 40% left, Fable cap
+  < 15%, or any Claude `conserve` alert); `tight` (weekly < 30%, or a `conserve` alert on a
+  weekly window projecting exhaustion before reset; such an alert is ignored while that
+  window has `pace_early: true`, and a Fable-cap alert never counts); `critical` (weekly
+  < 15%, 5-hour < 10%, an exhausted or `usable_now: false` Claude account, or aiuse exit 3
+  with no Claude row). `aiuse --available` drops every pool with `usable_now: false`, so an
+  exhausted Claude is an absent row (exit 0): the guard then reads the payload's top-level
+  `excluded[]` (an operator exclusion) or the newest snapshot's `accounts[]` (never an
+  `excluded` key there); a snapshot-only Claude that is not blocked is still at least `watch`
+  (`source: snapshot-only`, a live 429 or a note the snapshot predates), and a Fable pool aiuse
+  dropped because the Fable cap is exhausted is read from the snapshot as 0% left (`watch`).
+  aiuse exit 3 (nothing usable) is `critical` whatever the snapshot shows, and a live `available`
+  row without `windows[]` (a `pool_family: "fable"` row is the Fable cap, never the shared weekly) is judged by its own `headroom_percent` / `binding_window` /
+  `usable_now` (never treated as dropped).
+  Exit codes 0 / 1 / 2 / 3 for the levels, 10 when Claude appears nowhere, any container
+  (`available`, `excluded`, `accounts`, `alerts`, `windows`) is present but not a list of
+  objects, the snapshot does not parse, aiuse could not be read, or another check holds the
+  lock. Exit 10 never writes a level: the level, advice and number fields stay as they were,
+  but a failed read (not a held lock) records `unreadable_since` / `last_unreadable_at` and, on the second failing
+  run in a row, sends one ping per episode (`last_unreadable_pinged_at`); the next good read
+  clears them. 64 for a bad
+  `CLAUDE_QUOTA_GUARD_THRESHOLDS`, 69 for `--install` off macOS (launchd only; use a
+  systemd user timer or cron). `status [--json]` prints the state without probing. One
+  `hermes-ping` per level per reset period (the mark survives level drops; a new weekly
+  reset clears it); data older than 3 hours (the oldest of the payload's age, each judged
+  pool's own age and the snapshot's: a dead collector) is `stale: true` / "(stale)", is
+  at least `watch` with a "run `aiuse --live --json`" line, suppresses level pings and sends
+  one ping per stale episode. The UserPromptSubmit hook
+  `claude/hooks/quota_nudge.py` prints the level's `advice` once per session and level,
+  from the state file only (silent when it is missing or over 2 hours old); separately it
+  prints `[quota-guard unreadable] aiuse unreadable since <when>` once per session while
+  the guard has pinged about an unreadable episode and failed again within 2 hours (a
+  one-off hiccup or a stopped guard prints nothing); its once-per-session memory is updated
+  under a flock. A lead that
+  sees `[quota-guard tight]` hands off and continues on Sonnet 5.5; at `critical` it
+  starts no new Claude work until the reset.
 
 ## Reading quota numbers (a misreading here already cost a dispatch round)
 
@@ -500,7 +542,7 @@ method that runs the waves.
    `route_agent.py calibrate`. The routing policy itself is unchanged.) So:
    1a. **Judgment** (review, design, adjudication) is `acp-dispatch claude
        --model opus --kind judgment --effort high`. It is not Fable and not
-       codex.
+       codex. (Adversary rounds take the omp route first: item 13.)
    1b. **`frontier`** is the only route to codex `gpt-6-astra` (`--kind
        frontier --effort high`) or Fable 5.1 (`--kind frontier --effort high`):
        one slice per pool per wave, for
@@ -667,6 +709,29 @@ method that runs the waves.
     then `self-slash "/new"`, which also sends `/baton` into the fresh session
     (2026-10-19). Never ask the operator to do either unless `self-slash`
     refuses (`effort-routing`, *What actually dominates cost*).
+12. **The lead / orchestrator session has a model rule too** (operator 2026-10-23;
+    `config/routing.toml` `[lead]`, printed by `route_agent.py policy --md`). The rules
+    above route dispatched slices; none covered the session that dispatches them.
+    Incident: on 2026-10-20 the Claude Code weekly window hit 100% at 17:07Z, 2.6 days
+    before its reset, and every orchestrating session stopped, which stopped every other
+    pool too. `aiuse` had carried a `conserve` alert for provider `claude` since 06:02Z
+    ("projected to run out ~1 day before reset (34% left)"); nothing read it, nothing
+    pinged and no session downshifted. The burn was Opus 5.5 (~53%: the `adversary`
+    Agent-tool sub-agent is `model: opus`, judgment slices, Orca workers) and Fable 5.1
+    (~30%: the lead session itself ran on Fable), mostly cache re-reads of 150-200k
+    contexts. So: **a lead runs on Opus 5.5 at high by default; on Sonnet 5.5 at high
+    when it only drives a pipeline (PR loops, waiters, merges); never on Fable.** Fable
+    is reached only through the `fable-deep` sub-agent or a `frontier` slice. Paseo
+    launch: `paseo run --provider claude/claude-opus-5-5 --thinking high --mode
+    bypassPermissions ...`; CLI: `claude --model opus` with effort `high` in settings.
+13. **Adversary rounds go to the omp route first** (operator 2026-10-23):
+    `acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high`
+    (API credits, a normal tier since 2026-10-19; omp is eligible for `judgment` in
+    `config/routing.toml`). The Agent-tool `adversary` stays `model: opus` for when omp
+    is unavailable; the caller passes the Agent tool's `model: "sonnet"` override
+    whenever `bin/claude-quota-guard` reports `tight` or worse (see *Probes*). Omp
+    spends through the same Claude account: while a shared Claude window is exhausted,
+    aiuse marks omp rate-gated and `--available` omits it.
 
 **Where the numbers live (2026-10-18).** The routing policy is data, and
 `config/routing.toml` is the source of truth: the kinds, each service's
