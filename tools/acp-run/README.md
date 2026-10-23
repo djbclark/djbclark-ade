@@ -437,6 +437,17 @@ exits 2: omp's configured default is `github-copilot/gpt-5.6-luna` and would spe
 reserve (`ACP_RUN_OMP_ANY_MODEL=1` overrides). Needs an enabled Anthropic login in omp
 (`omp login`); with an expired one the run ends `No API key found for anthropic` (2026-10-19).
 
+### goose
+
+`goose acp` (Homebrew `block-goose-cli` 1.55.0, added 2026-10-23), launched through
+`~/.local/bin/goose-scout` so it runs on AWS Bedrock Llama 4 Scout
+(`us.meta.llama4-scout-17b-instruct-v1:0`, us-east-1) with `BEDROCK_DISABLE_STREAMING=true`
+(Bedrock rejects tool use in ConverseStream for Scout) and `AWS_BEARER_TOKEN_BEDROCK` injected by
+sudo-secretspec. Session modes: `auto` (yolo, YOLO_SET and `GOOSE_MODE=auto` in the launch env),
+`approve`, `smart_approve`, `chat` (no tool calls; DENY_SET). Verified 2026-10-23: `Reply with just
+OK` -> OK, end_turn, 3.4 s; one shell call ran with no permission request (perm=0+/0-). goose
+reports Scout's context as 10m. Scout tends to repeat tool calls in goose; keep `--timeout` set.
+
 ### grok
 
 https://docs.x.ai/developers/grok-4-7 , https://docs.x.ai/developers/pricing — 1.0.52.

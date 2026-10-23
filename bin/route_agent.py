@@ -230,6 +230,8 @@ POLICY_PATH = resolve_policy_path()
 POLICY: dict[str, Any] = {}
 SERVICE_KEYS = {f.name for f in fields(Service)}
 _SERVICE_REQUIRED = ("name", "cli", "good_at", "billing")
+# The orchestrating session's own model, [lead] in the policy file (2026-10-23).
+LEAD_KEYS = ("model", "effort", "pipeline_model")
 
 # Populated by apply_policy from the TOML; names and types match the former
 # module-level literals so every caller and test keeps working.
@@ -304,6 +306,11 @@ def load_policy(path: Path | str) -> dict[str, Any]:
     for section in ("routing", "discovery", "dispatch", "hermes", "calibrate"):
         if section not in data or not isinstance(data[section], dict):
             raise ValueError(f"routing policy {path}: missing [{section}] table")
+    lead = data.get("lead")
+    if lead is not None and (not isinstance(lead, dict)
+                             or not all(isinstance(lead.get(k), str) and lead[k] for k in LEAD_KEYS)):
+        raise ValueError(f"routing policy {path}: [lead] must be a table with non-empty string keys "
+                         + ", ".join(LEAD_KEYS))
     return data
 
 
@@ -443,6 +450,7 @@ def policy_public() -> dict[str, Any]:
             "provider_name": dict(HERMES_PROVIDER_NAME),
         },
         "services": [svc_row(s) for s in SERVICES],
+        "lead": dict(POLICY["lead"]) if POLICY.get("lead") else None,
     }
 
 
@@ -486,6 +494,13 @@ def policy_markdown() -> str:
     lines.append(f"| routing.pace_penalty_above | {PACE_PENALTY_ABOVE} |")
     lines.append(f"| routing.pace_penalty | {PACE_PENALTY} |")
     lines.append(f"| routing.pace_penalty_judgment_factor | {PACE_PENALTY_JUDGMENT_FACTOR} |")
+    lead = POLICY.get("lead")
+    if lead:
+        lines += ["", "## Lead / orchestrator session", "",
+                  "The session that dispatches slices runs on this, not on Fable "
+                  "(Fable only through the `fable-deep` sub-agent or a `frontier` slice).", "",
+                  "| key | value |", "|---|---|"]
+        lines += [f"| lead.{k} | {lead[k]} |" for k in LEAD_KEYS]
     return "\n".join(lines) + "\n"
 
 

@@ -337,6 +337,13 @@ AGENTS = {
     # omp (oh-my-pi) native ACP server (`omp acp`, omp 18.12.2 verified 2026-10-19). Its Claude
     # API credits are a normal tier since 2026-10-19 (operator): no per-run approval.
     "omp": (["omp", "acp"], None),
+    # goose (Homebrew block-goose-cli 1.55.0, `goose acp`, 2026-10-23) through
+    # ~/.local/bin/goose-scout: Bedrock Llama 4 Scout (us.meta.llama4-scout-17b-instruct-v1:0,
+    # us-east-1), BEDROCK_DISABLE_STREAMING=true (Bedrock rejects tool use in
+    # ConverseStream for Scout), AWS_BEARER_TOKEN_BEDROCK injected by sudo-secretspec.
+    # GOOSE_MODE=auto is goose's yolo (no approval prompts); also in
+    # ~/.config/goose/config.yaml and the ~/.bashrc goose() function.
+    "goose": (["env", "GOOSE_MODE=auto", os.path.expanduser("~/.local/bin/goose-scout"), "acp"], None),
     # zcode has no ACP mode of its own; william0wang/zcode-acp (npm -g
     # zcode-acp-server) wraps `zcode app-server --stdio`. Model switches work when
     # the server gets ZCODE_BIN=<pkg>/vendor/zcode.cjs (zcode_bin(), set in run()); until
@@ -418,6 +425,7 @@ YOLO_SET = {
     "devin": {"mode": "bypass"},
     "agy": {"mode": "yolo"},
     "zcode": {"mode": "yolo"},  # zcode-acp-server 0.69: plan | build | edit | guarded | yolo
+    "goose": {"mode": "auto"},  # goose acp 1.55.0: auto | approve | smart_approve | chat
 }
 # Launch-command variants for agents whose ACP session has no auto-approve mode
 # but whose CLI takes a flag (audited 2026-10-03: cline --auto-approve true is
@@ -562,6 +570,7 @@ DENY_SET = {
     "claude": {"mode": "default"},
     "zcode": {"mode": "plan"},
     "agy": {"mode": "default"},
+    "goose": {"mode": "chat"},  # goose acp 1.55.0: "Chat only, no tool calls"
 }
 # cursor-agent acp decides permissions from ~/.cursor/cli-config.json
 # `approvalMode` ("unrestricted" here: the operator's yolo default) and the
