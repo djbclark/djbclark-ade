@@ -182,7 +182,10 @@ seconds (default 90, 0..600, junk is the default; then `bin_settle` up to 10 pol
 default 2, 0.05..30) for the binary first; preflight gives its probe that wait and settle on top of its own
 timeout, so a late binary is never a recorded outage, and the slice's waiter deadline (`wait_timeout`,
 unless `--wait-timeout` is given) grows by the same. A probe that finds the binary not installed is
-remembered for 120 s (`NOT_INSTALLED_TTL`): a wave of dispatches pays the wait once. A brief file that an
+remembered per agent, for any model of it, for 120 s (`NOT_INSTALLED_TTL`): a wave of dispatches pays the wait
+once. The `waiter:` line printed above a detached `rearm:` names `timeout 7200000` (Claude Code Bash's maximum)
+only when the record's `wait_timeout` fits in 2 h; a longer or unlimited wait says so and gives the re-arm rule
+(2026-10-23). A brief file that an
 earlier dispatch already footed (`-f NAME-brief.md` under a new `--name`) comes back to one contract only
 when the cut is provably generated (`read_brief`): the record's own stored prompt, or the last footer heading
 with nothing after the footer and notes but the time budget, where every footer item is a line of
@@ -1623,10 +1626,27 @@ def reap_install(uninstall: bool = False) -> int:
 # Printed just above every detached `rearm:` line (2026-10-20): a lead's harness kills a background
 # command at its default limit (Claude Code Bash: 30 min) unless told otherwise, and a waiter that dies
 # early looks like a finished one. `rearm:` stays the last line, so `tail -1` still finds it.
-REARM_HINT = ("waiter: run the rearm line below in the background with a long tool timeout "
-              "(Claude Code Bash: run_in_background, timeout 7200000); the 30 min default kills it "
-              "mid-slice (Agent-tool sub-agents: bounded foreground waits instead). A killed waiter is "
-              "re-armed with the same line, never re-dispatched.")
+# Claude Code Bash's background timeout tops out at 7200000 ms (2 h): a record whose wait_timeout is longer
+# than that (or 0, unlimited) cannot be covered by one waiter, so the hint says so and gives the re-arm rule
+# instead of a longer number the tool would refuse (Codex 4324164145).
+TOOL_TIMEOUT_MAX_S = 7200
+REARM_SUFFIX = ("(Agent-tool sub-agents: bounded foreground waits instead). A killed waiter is "
+                "re-armed with the same line, never re-dispatched.")
+
+
+def rearm_hint(rec: dict) -> str:
+    """The `waiter:` line for a detached record, from its wait_timeout (seconds, 0 = unlimited)."""
+    wait = rec["wait_timeout"]
+    if wait and wait <= TOOL_TIMEOUT_MAX_S:
+        return ("waiter: run the rearm line below in the background with a long tool timeout "
+                f"(Claude Code Bash: run_in_background, timeout {TOOL_TIMEOUT_MAX_S * 1000}); the 30 min "
+                f"default kills it mid-slice {REARM_SUFFIX}")
+    span = "unlimited" if not wait else f"up to {wait / 3600:.1f} h"
+    return (f"waiter: this wait is {span}, longer than the {TOOL_TIMEOUT_MAX_S * 1000} ms (2 h) maximum tool "
+            f"timeout: run the rearm line below in the background with timeout {TOOL_TIMEOUT_MAX_S * 1000} "
+            "(Claude Code Bash: run_in_background), and when it is killed or ends at 2 h before the slice "
+            "reports, re-arm with the same line until `acp-dispatch check` gives a verdict "
+            f"{REARM_SUFFIX}")
 
 
 def rearm_cmd(done: Path, record: Path | None = None, seconds: int = 1800) -> str:
@@ -2868,6 +2888,13 @@ def preflight_state(agent: str, model: str | None) -> Path:
     return PREFLIGHT_ROOT / f"{key}.json"
 
 
+def not_installed_state(agent: str) -> Path:
+    """The negative result of a probe that found the agent binary missing: one per agent, since acp-run
+    picks the executable from the agent alone (Codex 4323297404). A successful probe of any model of the
+    agent removes it."""
+    return PREFLIGHT_ROOT / (re.sub(r"[^A-Za-z0-9_.-]", "_", agent) + ".not-installed.json")
+
+
 def forget_preflight(agent: str, model: str | None) -> None:
     """A slice that died on quota or an outage voids the cached probe: the next dispatch re-probes."""
     try:
@@ -2913,15 +2940,21 @@ def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, s
     with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
+            cached = json.loads(not_installed_state(agent).read_text())
+            age = time.time() - float(cached.get("time", 0))
+            if cached.get("class") == "not-installed" and 0 <= age < NOT_INSTALLED_TTL:
+                # a wave to an agent that is not installed must not pay the binary wait once each (per
+                # model either: acp-run picks its executable from the agent alone), nor hold this flock
+                # that long; the slice's own acp-run still waits normally
+                return (False, f"{cached.get('detail', 'agent binary not installed')} (probe cached "
+                        f"{age:.0f}s ago; retry after {NOT_INSTALLED_TTL - age:.0f}s)", "not-installed", None)
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        try:
             cached = json.loads(state.read_text())
             age = time.time() - float(cached.get("time", 0))
             if cached.get("ok") and 0 <= age < PREFLIGHT_TTL:
                 return True, "cached", "ok", None
-            if cached.get("class") == "not-installed" and 0 <= age < NOT_INSTALLED_TTL:
-                # a wave to an agent that is not installed must not pay the binary wait once each, nor hold
-                # this flock that long; the slice's own acp-run still waits normally
-                return (False, f"{cached.get('detail', 'agent binary not installed')} (probe cached "
-                        f"{age:.0f}s ago; retry after {NOT_INSTALLED_TTL - age:.0f}s)", "not-installed", None)
         except (OSError, ValueError, TypeError, AttributeError):
             pass
         with tempfile.TemporaryDirectory(prefix="acp-dispatch-preflight-") as td:
@@ -2958,6 +2991,7 @@ def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, s
         ok = proc is not None and proc.returncode == 0 and preflight_reply_ok(proc.stdout)
         if ok:
             write_atomic(state, json.dumps({"ok": True, "time": time.time()}) + "\n")
+            not_installed_state(agent).unlink(missing_ok=True)     # a probe that ran proves the binary is there
             return True, "probe", "ok", None
         cls = cls or "preflight"
         reset = parse_reset_for_aiuse(combined, when, agent)
@@ -2969,7 +3003,8 @@ def preflight(acp_run: str, agent: str, model: str | None) -> tuple[bool, str, s
         if cls == "auth":
             detail = f"{auth_hint(agent)} | {detail}"
         elif cls == "not-installed":
-            write_atomic(state, json.dumps({"ok": False, "class": cls, "detail": detail, "time": time.time()}) + "\n")
+            write_atomic(not_installed_state(agent),
+                         json.dumps({"ok": False, "class": cls, "detail": detail, "time": time.time()}) + "\n")
         reset_text = reset[1] if reset else None
         return False, detail, cls, reset_text
 
@@ -4181,10 +4216,10 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         if r.returncode != 0:
             die(f"launchctl submit failed ({r.returncode}): {r.stderr.strip()}", 1)
         if a.no_wait:
-            print(f"detached\t{a.name}\t{report}\nrecord: {record}\n{REARM_HINT}\nrearm: {rec['rearm']}")
+            print(f"detached\t{a.name}\t{report}\nrecord: {record}\n{rearm_hint(rec)}\nrearm: {rec['rearm']}")
             return 0
         if wait_record(record) == 124:
-            print(f"timeout\t{a.name}\t{report}\nstill running under launchd\n{REARM_HINT}\nrearm: {rec['rearm']}")
+            print(f"timeout\t{a.name}\t{report}\nstill running under launchd\n{rearm_hint(rec)}\nrearm: {rec['rearm']}")
             return 124
         rec = json.loads(record.read_text())
         st, _, _, det = check_record(record)      # a pending auto-resume reads resume-scheduled
@@ -4742,10 +4777,10 @@ def dispatch_cloud(a: argparse.Namespace, previous: dict | None, kind: str | Non
         if err:
             die(f"could not start the detached poller: {err}", 1)
         if a.no_wait:
-            print(f"detached\t{a.name}\t{report}\nrecord: {record}\n{REARM_HINT}\nrearm: {rec['rearm']}")
+            print(f"detached\t{a.name}\t{report}\nrecord: {record}\n{rearm_hint(rec)}\nrearm: {rec['rearm']}")
             return 0
         if wait_record(record) == 124:
-            print(f"timeout\t{a.name}\t{report}\nstill running in the background\n{REARM_HINT}\nrearm: {rec['rearm']}")
+            print(f"timeout\t{a.name}\t{report}\nstill running in the background\n{rearm_hint(rec)}\nrearm: {rec['rearm']}")
             return 124
         rec = json.loads(record.read_text())
         st, _, _, det = check_record(record)
