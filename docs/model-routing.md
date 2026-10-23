@@ -456,10 +456,17 @@ omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` first. The 
 makes the numbers act: `bin/claude-quota-guard` (`check` every 15 minutes under launchd after
 `--install`, `status [--json]`) derives `ok` / `watch` / `tight` / `critical` from the Claude
 windows (weekly, 5-hour, Fable cap) and the snapshot's Claude `conserve` alerts, writes
-`~/.local/state/ade/quota-guard.json`, and sends one `hermes-ping` per upward crossing per
-reset period. Exit codes 0 / 1 / 2 / 3 for the levels, 10 when aiuse could not be read. The
-UserPromptSubmit hook `claude/hooks/quota_nudge.py` reads only that file and prints its
-`advice` once per session and level.
+`~/.local/state/ade/quota-guard.json`, and sends one `hermes-ping` per level per reset
+period (the mark survives level drops; a new weekly reset clears it). `aiuse --available`
+drops every pool with `usable_now: false`, so an exhausted Claude is an absent row (exit 0):
+the guard then reads the newest snapshot's `accounts[]` / `excluded[]` and calls an exhausted
+or `usable_now: false` Claude `critical`. A weekly "projected to run out" alert counts as
+`tight` only for the weekly windows (never the Fable cap) and is ignored while that window
+is `pace_early` (early-week projections swing wildly). Exit codes 0 / 1 / 2 / 3 for the
+levels, 10 when Claude appears nowhere or aiuse could not be read, 64 for a bad
+`CLAUDE_QUOTA_GUARD_THRESHOLDS`, 69 for `--install` off macOS (launchd only; use a systemd
+user timer or cron). The UserPromptSubmit hook `claude/hooks/quota_nudge.py` reads only the
+state file and prints its `advice` once per session and level.
 
 ## Formerly open questions — resolved by operator, 2026-08-23
 

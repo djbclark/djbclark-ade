@@ -14,12 +14,22 @@ UserPromptSubmit hook claude/hooks/quota_nudge.py, and pings once per upward cro
                                    `launchctl bootstrap` line; never runs launchctl itself
 
 Levels and exit codes: 0 ok, 1 watch, 2 tight, 3 critical, 10 aiuse could not be read (state
-file left untouched). The binding window is the lowest `remaining_percent` among the Claude
-rows' windows (weekly, 5-hour and Fable's sublimit):
+file left untouched), 64 bad CLAUDE_QUOTA_GUARD_THRESHOLDS, 69 `--install` off macOS (launchd
+only; run `check` every 15 min from a systemd user timer or cron instead). The binding window
+is the lowest `remaining_percent` among the Claude rows' windows (weekly, 5-hour and Fable's
+sublimit):
   watch    weekly left < 40, Fable sublimit left < 15, or any Claude `conserve` alert
-  tight    weekly left < 30, or a weekly `conserve` alert that says "projected to run out ...
-           before reset"
-  critical weekly left < 15, 5-hour left < 10, or aiuse exit 3 with no Claude row
+  tight    weekly left < 30, or a `conserve` alert on a weekly window that says "projected to
+           run out ... before reset" (matched against the weekly windows' own labels, so a
+           Fable-cap alert never counts; ignored altogether while that window has
+           `pace_early: true`, since early in a window the projection swings wildly)
+  critical weekly left < 15, 5-hour left < 10, a Claude account with `usable_now: false` or an
+           exhausted weekly / 5-hour window, or aiuse exit 3 with no Claude row
+`aiuse --available` drops every pool with `usable_now: false`, so an exhausted Claude is an
+absent row (exit 0): the windows then come from the newest snapshot's `accounts[]` / `excluded[]`.
+Exit 10 only when Claude appears nowhere. One `hermes-ping` per level per reset period (the
+mark survives level drops; a new weekly `resets_at` clears it). `check` holds a flock on
+<state>.lock, saves the state before it pings and records the ping afterwards.
 Thresholds live in THRESHOLDS; env CLAUDE_QUOTA_GUARD_THRESHOLDS (JSON) overrides keys.
 
 Env (tests): CLAUDE_QUOTA_GUARD_AIUSE (default ~/.local/bin/aiuse), _SNAPSHOTS (default
@@ -30,10 +40,14 @@ Env (tests): CLAUDE_QUOTA_GUARD_AIUSE (default ~/.local/bin/aiuse), _SNAPSHOTS (
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
+import math
 import os
 import plistlib
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -60,6 +74,7 @@ LEVELS = ("ok", "watch", "tight", "critical")
 EXIT_CODES = {"ok": 0, "watch": 1, "tight": 2, "critical": 3}
 EX_UNREADABLE = 10
 EX_CONFIG = 64  # bad CLAUDE_QUOTA_GUARD_THRESHOLDS: never 1-3, which mean watch/tight/critical
+EX_NO_LAUNCHD = 69  # --install off macOS (EX_UNAVAILABLE)
 AIUSE_NOTHING_USABLE = 3
 
 
@@ -115,7 +130,7 @@ def thresholds() -> dict:
         if not isinstance(over, dict):
             raise ConfigError("CLAUDE_QUOTA_GUARD_THRESHOLDS must be a JSON object")
         for k, v in over.items():
-            if k not in t or not isinstance(v, (int, float)) or isinstance(v, bool):
+            if k not in t or not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
                 raise ConfigError(f"unknown or non-numeric threshold {k!r}")
             t[k] = float(v)
     return t
@@ -143,7 +158,7 @@ def _iso(d: datetime) -> str:
 
 
 def _num(v) -> float | None:
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
 
 
 # -- reading aiuse ---------------------------------------------------------
@@ -174,12 +189,20 @@ def read_aiuse() -> tuple[int, dict]:
     return p.returncode, data
 
 
-def claude_windows(data: dict) -> list[dict]:
-    """Every window of every Claude row, tagged weekly / five_hour / fable."""
+def _rows(container, key: str) -> list[dict]:
+    """Claude rows (dicts with provider == claude) under container[key]."""
+    if not isinstance(container, dict):
+        return []
+    return [r for r in container.get(key) or [] if isinstance(r, dict) and r.get("provider") == "claude"]
+
+
+def claude_windows(rows: list[dict]) -> list[dict]:
+    """Every window of the given Claude rows, tagged weekly / five_hour / fable.
+
+    `resets_at` is normalised through _parse_ts here, so nothing aiuse printed in that field
+    reaches the advice text, the state file or the hook's stdout (an unparsable value is None)."""
     out = []
-    for row in data.get("available") or []:
-        if not isinstance(row, dict) or row.get("provider") != "claude":
-            continue
+    for row in rows:
         for w in row.get("windows") or []:
             if not isinstance(w, dict):
                 continue
@@ -199,8 +222,12 @@ def claude_windows(data: dict) -> list[dict]:
                 kind = "weekly"
             else:
                 continue
-            out.append({"kind": kind, "label": label, "left": left, "resets_at": w.get("resets_at"),
-                        "pace": _num(w.get("pace_percent"))})
+            reset = _parse_ts(w.get("resets_at"))
+            out.append({"kind": kind, "label": label, "left": left,
+                        "resets_at": _iso(reset) if reset else None,
+                        "pace": _num(w.get("pace_percent")),
+                        "pace_early": w.get("pace_early") is True,
+                        "exhausted": w.get("state") == "exhausted"})
     return out
 
 
@@ -209,10 +236,10 @@ def _lowest(windows: list[dict], kind: str) -> dict | None:
     return min(rows, key=lambda w: w["left"]) if rows else None
 
 
-# -- reading the snapshot alerts -------------------------------------------
+# -- reading the snapshot --------------------------------------------------
 
-def read_alerts(t: dict) -> tuple[list[dict], float | None]:
-    """Claude `conserve` alerts from the newest snapshot, and that snapshot's age in seconds."""
+def read_snapshot() -> tuple[dict | None, float | None]:
+    """The newest aiuse snapshot (parsed) and its age in seconds; (None, None) if unreadable."""
     d = _path("CLAUDE_QUOTA_GUARD_SNAPSHOTS", HOME / ".cache/aiuse/snapshots")
     try:
         files = [f for f in d.glob("*.json") if f.is_file()]
@@ -220,19 +247,36 @@ def read_alerts(t: dict) -> tuple[list[dict], float | None]:
         age = max(0.0, now().timestamp() - newest.stat().st_mtime)
         snap = json.loads(newest.read_text())
     except (OSError, ValueError):
-        return [], None
-    if age > t["alert_max_age_s"] or not isinstance(snap, dict):
-        return [], age
-    alerts = [a for a in (snap.get("alerts") or [])
-              if isinstance(a, dict) and a.get("provider") == "claude" and a.get("kind") == "conserve"]
-    return alerts, age
+        return None, None
+    return (snap if isinstance(snap, dict) else None), age
+
+
+def snapshot_alerts(snap: dict | None, age: float | None, t: dict) -> list[dict]:
+    """Claude `conserve` alerts of a snapshot no older than alert_max_age_s."""
+    if snap is None or age is None or age > t["alert_max_age_s"]:
+        return []
+    return [a for a in _rows(snap, "alerts") if a.get("kind") == "conserve"]
 
 
 # -- the decision ----------------------------------------------------------
 
-def decide(rc: int, data: dict, alerts: list[dict], t: dict) -> dict:
-    """Level plus the numbers behind it. Pure: no clock, no I/O."""
-    windows = claude_windows(data)
+def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict) -> dict:
+    """Level plus the numbers behind it. Pure: no clock, no I/O.
+
+    Claude rows come from `aiuse --available`; that list drops every pool with
+    `usable_now: false`, so an exhausted or frozen Claude is an ABSENT row (exit 0). Then the
+    rows come from the snapshot's `accounts[]` / `excluded[]`, and `usable_now: false` or an
+    exhausted weekly / 5-hour window is `critical`. Only when Claude appears nowhere: exit 3
+    means exhausted (critical), exit 0 means unreadable.
+
+    A weekly "projected to run out ... before reset" alert is ignored altogether while the
+    matching weekly window has `pace_early: true` (early in a window the projection swings
+    wildly: 293 of 1,146 such alerts in 2026 snapshots fired at 60% or more left)."""
+    rows, source = _rows(data, "available"), "available"
+    windows = claude_windows(rows)
+    if not windows and snap is not None:
+        rows, source = _rows(snap, "accounts") + _rows(snap, "excluded"), "snapshot"
+        windows = claude_windows(rows)
     weekly, five, fable = (_lowest(windows, k) for k in ("weekly", "five_hour", "fable"))
     level = "ok"
 
@@ -243,8 +287,11 @@ def decide(rc: int, data: dict, alerts: list[dict], t: dict) -> dict:
 
     if not windows:
         if rc != AIUSE_NOTHING_USABLE:
-            raise Unreadable("aiuse has no Claude window (row absent, exit 0)")
+            raise Unreadable("aiuse has no Claude window (not in `available`, the snapshot or `excluded`)")
         raise_to("critical")  # aiuse found nothing usable and Claude is not among it: exhausted
+    if any(r.get("usable_now") is False for r in rows) or any(
+            w["exhausted"] for w in windows if w["kind"] in ("weekly", "five_hour")):
+        raise_to("critical")  # blocked: exhausted shared window, or a frozen measurement
     if weekly:
         if weekly["left"] < t["watch_weekly"]:
             raise_to("watch")
@@ -256,10 +303,16 @@ def decide(rc: int, data: dict, alerts: list[dict], t: dict) -> dict:
         raise_to("critical")
     if fable and fable["left"] < t["watch_fable"]:
         raise_to("watch")
-    if alerts:
-        raise_to("watch")
+    weekly_labels = {w["label"].strip().lower(): [x for x in windows if x["kind"] == "weekly"
+                                                    and x["label"].strip().lower() == w["label"].strip().lower()]
+                     for w in windows if w["kind"] == "weekly"}
     for a in alerts:
-        if "weekly" in str(a.get("window_label") or "").lower() and _RUNNING_PROJECTED.search(str(a.get("message") or "")):
+        matched = weekly_labels.get(str(a.get("window_label") or "").strip().lower(), [])
+        projected = bool(matched) and bool(_RUNNING_PROJECTED.search(str(a.get("message") or "")))
+        if projected and all(w["pace_early"] for w in matched):
+            continue
+        raise_to("watch")
+        if projected:
             raise_to("tight")
 
     # Window the level answers to: the lowest remaining among weekly and 5-hour.
@@ -279,6 +332,7 @@ def decide(rc: int, data: dict, alerts: list[dict], t: dict) -> dict:
         "resets_at": resets_at,
         "weekly_resets_at": weekly["resets_at"] if weekly else None,
         "pace": (weekly or binding or {}).get("pace") if windows else None,
+        "source": source if windows else "none",
     }
 
 
@@ -346,44 +400,59 @@ def ping(level: str, st: dict, t: dict) -> bool:
     return True
 
 
-def apply_ping_policy(prev: dict, st: dict, t: dict) -> None:
-    """Fill last_pinged_level/at on `st`; ping on an upward crossing not yet announced this period.
+def plan_ping(prev: dict, st: dict, t: dict) -> str | None:
+    """Carry last_pinged_level/at from `prev` onto `st`; return the level to ping, or None.
 
-    A new reset period or a level below the last announced one clears the memory (to the new
-    level, so a later rise announces itself again but the drop itself is silent)."""
-    level = st["level"]
-    pinged = prev.get("last_pinged_level")
+    The mark is kept for the whole reset period, whatever the level does in between, so there
+    is one ping per level per period (an alert that flaps on and off cannot ping again). A new
+    `weekly_resets_at` (beyond period_tolerance_s) clears it. A ping is due when the level is
+    above `ok` and ranks higher than the mark."""
+    pinged = prev.get("last_pinged_level") if prev.get("last_pinged_level") in LEVELS else None
     at = prev.get("last_pinged_at")
     prev_period = prev.get("weekly_resets_at") or prev.get("resets_at")
     period = st["weekly_resets_at"] or st["resets_at"]
     if pinged and not _same_period(prev_period, period, t["period_tolerance_s"]):
         pinged = None
-    if _rank(pinged) > _rank(level):
-        pinged = level if level != "ok" else None
-    if level != "ok" and _rank(level) > _rank(pinged):
-        if ping(level, st, t):
-            pinged, at = level, st["checked_at"]
     st["last_pinged_level"] = pinged
     st["last_pinged_at"] = at if pinged else None
+    level = st["level"]
+    return level if level != "ok" and _rank(level) > _rank(pinged) else None
+
+
+@contextlib.contextmanager
+def _locked():
+    """Exclusive flock on <state>.lock (macOS and Linux): two checks never interleave."""
+    p = state_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p.with_name(p.name + ".lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 # -- subcommands -----------------------------------------------------------
 
 def cmd_check(args) -> int:
     t = thresholds()
-    try:
-        rc, data = read_aiuse()
-        alerts, snap_age = read_alerts(t)
-        d = decide(rc, data, alerts, t)
-    except Unreadable as e:
-        print(f"claude-quota-guard: {e}; state file left unchanged", file=sys.stderr)
-        return EX_UNREADABLE
-    st = dict(d)
-    st["advice"] = _advice(st["level"], st["resets_at"])
-    st["checked_at"] = _iso(now())
-    st["snapshot_age_s"] = None if snap_age is None else round(snap_age)
-    apply_ping_policy(load_state(), st, t)
-    save_state(st)
+    with _locked():
+        try:
+            rc, data = read_aiuse()
+            snap, snap_age = read_snapshot()
+            d = decide(rc, data, snap, snapshot_alerts(snap, snap_age, t), t)
+        except Unreadable as e:
+            print(f"claude-quota-guard: {e}; state file left unchanged", file=sys.stderr)
+            return EX_UNREADABLE
+        st = dict(d)
+        st["advice"] = _advice(st["level"], st["resets_at"])
+        st["checked_at"] = _iso(now())
+        st["snapshot_age_s"] = None if snap_age is None else round(snap_age)
+        due = plan_ping(load_state(), st, t)
+        save_state(st)  # before the ping: a crash or kill during it cannot re-announce this level
+        if due and ping(due, st, t):
+            st["last_pinged_level"], st["last_pinged_at"] = due, st["checked_at"]
+            save_state(st)  # a failed ping leaves the mark alone, so the next run retries
     if args.json:
         print(json.dumps(st, indent=2))
     else:
@@ -416,9 +485,13 @@ def cmd_status(args) -> int:
 
 
 def cmd_install(args) -> int:
+    script = Path(__file__).resolve()
+    if sys.platform != "darwin":
+        print(f"claude-quota-guard: launchd only; on Linux run `{shlex.quote(str(script))} check` every "
+              "15 min from a systemd user timer or cron", file=sys.stderr)
+        return EX_NO_LAUNCHD
     la = _path("CLAUDE_QUOTA_GUARD_LAUNCH_AGENTS", HOME / "Library/LaunchAgents")
     dest = la / f"{LABEL}.plist"
-    script = Path(__file__).resolve()
     log_dir = HOME / ".local/state/ade"
     log = log_dir / "claude-quota-guard.launchd.log"
     job = {
@@ -438,7 +511,9 @@ def cmd_install(args) -> int:
     tmp.write_bytes(plistlib.dumps(job))
     os.replace(tmp, dest)
     print(f"wrote {dest}")
-    print(f"launchctl bootout gui/{os.getuid()}/{LABEL} 2>/dev/null; launchctl bootstrap gui/{os.getuid()} {dest}")
+    uid = os.getuid()
+    print(shlex.join(["launchctl", "bootout", f"gui/{uid}/{LABEL}"]) + " 2>/dev/null; "
+          + shlex.join(["launchctl", "bootstrap", f"gui/{uid}", str(dest)]))
     return 0
 
 

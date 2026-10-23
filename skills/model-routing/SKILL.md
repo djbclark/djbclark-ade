@@ -74,11 +74,18 @@ skill's snapshot in the same turn.
   snapshot's Claude `conserve` alerts and writes `~/.local/state/ade/quota-guard.json`
   (`level`, `weekly_left`, `five_hour_left`, `fable_left`, `resets_at`, `pace`, `advice`,
   `checked_at`, `last_pinged_level`). Levels: `ok`; `watch` (weekly < 40% left, Fable cap
-  < 15%, or any Claude `conserve` alert); `tight` (weekly < 30%, or a weekly alert
-  projecting exhaustion before reset); `critical` (weekly < 15%, 5-hour < 10%, or aiuse
-  exit 3 with no Claude row). Exit codes 0 / 1 / 2 / 3 for those, 10 when aiuse could
-  not be read (state untouched). `status [--json]` prints the state without probing.
-  One `hermes-ping` per upward crossing per reset period. The UserPromptSubmit hook
+  < 15%, or any Claude `conserve` alert); `tight` (weekly < 30%, or a `conserve` alert on a
+  weekly window projecting exhaustion before reset; such an alert is ignored while that
+  window has `pace_early: true`, and a Fable-cap alert never counts); `critical` (weekly
+  < 15%, 5-hour < 10%, an exhausted or `usable_now: false` Claude account, or aiuse exit 3
+  with no Claude row). `aiuse --available` drops every pool with `usable_now: false`, so an
+  exhausted Claude is an absent row (exit 0): the guard then reads the newest snapshot's
+  `accounts[]` / `excluded[]`. Exit codes 0 / 1 / 2 / 3 for the levels, 10 when Claude
+  appears nowhere or aiuse could not be read (state untouched), 64 for a bad
+  `CLAUDE_QUOTA_GUARD_THRESHOLDS`, 69 for `--install` off macOS (launchd only; use a
+  systemd user timer or cron). `status [--json]` prints the state without probing. One
+  `hermes-ping` per level per reset period (the mark survives level drops; a new weekly
+  reset clears it). The UserPromptSubmit hook
   `claude/hooks/quota_nudge.py` prints the level's `advice` once per session and level,
   from the state file only (silent when it is missing or over 2 hours old). A lead that
   sees `[quota-guard tight]` hands off and continues on Sonnet 5.5; at `critical` it
