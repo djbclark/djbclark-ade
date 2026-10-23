@@ -16,6 +16,17 @@ agent what changed and what is new. Entries end with the pull request number.
   Decompressions, pages/s) exceeds the new `--max-mem-churn N` (default 60000, calibrated 2026-10-23 from 215
   samples: calm 11-22k, load >=25 median 80k; the first guess, 20000, was below the load<10 median of 34k), so `acp-dispatch` (which calls `admit`) holds new slices during a thrash that load alone does not show; `bg` (site-djbclark `bin/bg`, f370ad7) now also asks `admit` after its own load check and fails open if `load-watch` errors.
   The result and `--json` carry `mem_churn_pages_s`; no `vm_stat` (Linux) means the gate never blocks (2026-10-23).
+- `relay.py` picks the best route for the session (Paseo `send`, `acp-dispatch tell`, a live ACP launch's inbox, keys into
+  its pane, then the Claude messaging socket) and falls back to the next itself when one fails before sending; it errors
+  only when every route has, listing each reason. A send it cannot rule out (text typed but unseen, a `paseo send` that
+  may have reached the daemon, a socket frame written) never falls back, so nothing is delivered twice. New `--plan`
+  and `--via ROUTE`; `--idle S` now also waits for a working non-Claude pane TUI; the Paseo gate runs whatever `--via`
+  says. Text starting with `/` or `!` is no longer typed into a pane (only a socket frame carries it); a Claude with a
+  draft in its box now gets the message by socket instead of exit 1, and an idle one is checked in its transcript.
+  Text a pane relay left unsent is remembered for an hour with the draft it showed; a retry of the same text types
+  nothing (it submits our own leftover, never the operator's draft or paste) and proves delivery in the transcript or
+  reports it unverified ("do not resend"). Exit 1 means not sent or sent but unverified; read the message.
+  Home item 24 and `session-finder` say agents message peers only this way (2026-10-23).
 - `bin/self-slash --finish --successor PROVIDER/MODEL [--thinking ID] [--mode MODE] [--title TEXT]` (Paseo only; exit 2 on herdr and Orca): after the turn it starts a new top-level agent in the same workspace (`paseo run "/baton"`, default mode and `--thinking high` of the old agent), checks it is not a subagent and runs the model asked, then archives the old agent; any failure exits 11, archives nothing and leaves this session usable. The successor always lands in an existing workspace (`--workspace ID`, default this agent's; never `--new-workspace`, and in another workspace it runs in that workspace's own cwd) with a short title. The old workspace was archived after the old agent only when proven unneeded: one cwd match with no workspace above that cwd (never an override of another row or a tie-break), local isolation, no terminals, no other agent in it by workspace id or cwd, and a cwd that neither equals nor contains the successor's (`--keep-workspace` skips that). The successor is polled for up to 20 s and must have a new id, a null `ParentAgentId`, the model asked and status idle, running or initializing, else exit 11. A malformed `SELF_SLASH_SUCCESSOR_SETTLE` is refused before `paseo run`, an inspect that fails after a good look exits 11, and no aborted successor path can fall through to the bare archive (#30).
 - `skill-everywhere` gains a `grokbot` target: a rendered copy `ade-<name>/` in `~/agent-data/workflows/` on the
   Grok Bot box (banner, `.skill-everywhere` marker, only marked dirs touched), plus `--dry-run`/`-n`,

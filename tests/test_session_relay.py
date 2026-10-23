@@ -134,6 +134,7 @@ class TestRelayRules(unittest.TestCase):
     def run_main(self, drafts: list[str], scr: str, transcript: Path | None = None) -> tuple[int, list[str]]:
         """main() against one fake working Claude session; DRAFTS are successive input-box reads."""
         enters: list[str] = []
+        relay.UNSENT.unlink(missing_ok=True)    # an earlier test's leftover would make this a retry of it
         reads = iter(drafts)
         saved = (relay.fleet.sessions, relay.type_line, relay.draft, relay.press_enter, relay.screen,
                  relay.RETRY_AFTER, sys.argv)
@@ -178,6 +179,10 @@ class TestStuckInBox(unittest.TestCase):
     def test_collapsed_paste_placeholder_is_ours(self) -> None:
         self.assertTrue(self.check("[Pasted text #1 +3 lines]", "a long relayed message " * 40))
 
+    def test_placeholder_beside_a_short_text_is_the_operators_own_paste(self) -> None:
+        self.assertFalse(self.check("[Pasted text #1 +3 lines]", "hello"))
+        self.assertFalse(self.check("[Pasted text #1 +3 lines] and more", "a long relayed message " * 40))
+
     def test_empty_or_other_box_is_not_stuck(self) -> None:
         self.assertFalse(self.check("", "hello"))
         self.assertFalse(self.check("something else entirely", "hello"))
@@ -202,7 +207,8 @@ class TestOwnLeftover(unittest.TestCase):
             relay.UNSENT = relay.Path(d) / "u.json"
             try:
                 relay.note_unsent("abc", "hello")
-                self.assertEqual(relay._unsent(), {"abc": "hello"})
+                self.assertEqual(relay._unsent()["abc"]["text"], "hello")
+                self.assertEqual(relay.leftover("abc")["text"], "hello")
                 relay.note_unsent("abc", None)
                 self.assertEqual(relay._unsent(), {})
             finally:

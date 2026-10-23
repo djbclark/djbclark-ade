@@ -1,44 +1,58 @@
 #!/usr/bin/env python3
-"""relay — type a one-line message into a running agent's terminal, when SendMessage cannot reach it. No model.
+"""relay — message a running agent session by the best route for it, falling back before it fails. No model.
 
-    relay.py <id|name|sid|pane|paseo-agent-id> "<text>" [--wait S] [--idle S] [--json]
+    relay.py <id|name|sid|pane|paseo-agent-id> "<text>" [--wait S] [--idle S] [--via ROUTE] [--plan] [--json]
                                            (pane: a herdr pane id such as w34:p4; a Paseo agent id is the
                                            PASEO_AGENT_ID uuid, as `paseo ls -g` and where.py show it)
 
-The fallback for session-finder's rung 3a (2026-10-11): a workflow sub-agent's ListAgents often lists only
-its teammates, so `SendMessage({to: "<name>"})` to a running Claude TUI fails with "No agent named … is
-reachable" (q-shizuku relay). This types the text into the session's own pane instead (herdr `pane
-send-text` + `agent send-keys enter`, Orca `terminal send`, tmux `send-keys`), the same channel helm uses.
+The one way for an agent to message a peer (2026-10-23, djbclark: "automatically uses the best messaging option
+for any given situation, and tries to fall back itself before returning an error"). It picks the routes that fit
+the session, best first, and tries the next when one fails BEFORE sending anything (`--plan` prints the order):
 
-  * Claude Code queues text typed while it works ("Press up to edit queued messages") and takes it at its
-    next tool round, so a working Claude session is fine; an idle one gets it as its next prompt.
-  * Other TUIs: idle only (keys into a working codex/opencode/... are not reliably queued).
-  * A Paseo-hosted agent (where: `host=paseo agent=<id>`; Paseo's daemon spawns it, so it has no pane) is
-    reached with `paseo send --behavior steer -- <id> <text>`. The caller's own PASEO_AGENT_ID stays in
-    the child's environment, so Paseo labels the message `kind="agent-message"` with the sender: the
-    receiving agent sees a peer, never the operator's turn. A caller that is not a Paseo agent prefixes
-    the text with `[relay from <name>] ` (Paseo can label only an agent sender). Steer queues the text
-    for the next tool round on Claude; when a provider cannot steer, Paseo replaces the running turn.
-    Right before sending (and again after an `--idle` wait) `paseo agent inspect` must show the agent
-    unarchived, with no pending permission or question (helm or the Paseo UI answers those), idle or
-    running, with the id asked for. Text starting with `/` is refused (exit 2): peers do not run another
-    session's built-ins. `--idle S` (finite, > 0) waits up to S seconds for it to go idle first
-    (`paseo wait`); another TUI that is working is refused without it. Delivery is what the daemon
-    acknowledges ("accepted"), upgraded to "delivered" once a Claude transcript shows the text
-    (2026-10-20).
-  * Refused: this session; an ACP launch (`launch.py reply` is its channel); a finished session (`/handoff`
-    or `/quit`: start a /baton session instead); one blocked on a question or permission (`helm.py answer`);
-    one with no channel (Ghostty/iTerm/headless: say its `where:` line); and any input box that already
-    holds a draft (someone is typing there; Claude Code's dim/grey suggested prompt is not one: prompt_line.py).
-  * Verified, never assumed: a Claude session counts as delivered once the text shows up in its transcript
-    (a queued message is recorded as a queue-operation at once), else as queued once the pane shows it.
+  1. paseo     a Paseo-hosted agent (where: `host=paseo agent=<id>`; the only route for it): `paseo send
+               --behavior steer -- <id> <text>`. The caller's own PASEO_AGENT_ID stays in the child's
+               environment, so Paseo labels the message `kind="agent-message"` with the sender; a caller that is
+               not a Paseo agent prefixes the text with `[relay from <name>] `. Steer queues the text for the next
+               tool round on Claude; a provider that cannot steer has its running turn replaced. Before any send
+               `paseo agent inspect` must show the agent unarchived, with no pending permission or question, idle
+               or running, in the directory its process runs in; any refusal ends the run, whatever `--via` says.
+               Delivery is what the daemon acknowledges ("accepted"), upgraded to "delivered" once a Claude
+               transcript shows the text.
+  2. dispatch  a headless acp-dispatch slice (no pane): `acp-dispatch tell RECORD` (its inbox plus its live Claude).
+  3. launch    a live interactive ACP launch: its inbox (`launch.py reply`'s live path, under its turn lock). An
+               ended launch is never replied to here: that would start a new, full-price turn.
+  4. pane      keys into its pane (herdr `pane send-text` + `agent send-keys enter`, Orca `terminal send`, tmux
+               `send-keys`). Claude Code queues text typed while it works; other TUIs take it only when idle
+               (`--idle S` waits up to S seconds for that). Skipped while the input box holds a draft (Claude
+               Code's dim/grey suggested prompt is not one: prompt_line.py). Verified in the transcript.
+  5. socket    a Claude Code TUI with a live messaging socket (registry ~/.claude/sessions/<pid>.json, the pid
+               the fleet knows, a socket we own in a directory only we can write): one `cross-session-message`
+               frame, XML-escaped, queued for its next tool round. No keys, so it cannot collide with a draft or
+               sit in a dialog. It is the fallback when the pane cannot take the text, and the only route to a
+               Claude with no terminal. A working session is "accepted" at once (Claude Code logs the frame
+               only when it absorbs it at a tool round); any other status is verified in its transcript within
+               --wait, since a frame to an idle session is not proven to wake it, else "unverified".
+
+Text starting with `/` or `!` is never typed into a pane (a built-in or a shell command there); only a socket
+frame carries it, as a plain message. Never falls back (exit 1 with the reason, or 2): this session; a finished one (`/handoff` or `/quit`: start a
+/baton session instead); one blocked on a question or permission (`helm.py answer`); a Paseo agent Paseo cannot
+confirm; text starting with `/` to a Paseo agent (exit 2: peers do not run another session's built-ins; the pane
+route skips such text too, and a socket frame carries it as a plain message). Never
+falls back after a send it cannot rule out (exit 1, "unverified"): text typed into a pane but not seen or whose
+Enter failed, a `paseo send` that failed for any reason but a missing CLI, an `acp-dispatch tell` that timed out, an idle
+session whose socket frame never showed in its transcript. A second route there would deliver the message twice;
+a retry of text left in a box submits it and types nothing. A socket frame to a working session is final (exit 0,
+"accepted").
+
+  * Verified where it can be: typed text counts as delivered once it shows up in the transcript (a typed message
+    is recorded as a queue-operation at once), else as queued once the pane shows it.
   * Enter goes in ENTER_DELAY after the text, and again (up to ENTER_RETRIES times) while the text still
     sits in a Claude input box: sent in one burst it reads as a paste and does not submit (2026-10-18).
-  * One line: newlines are folded to spaces (an Enter would submit half the message). For a long brief,
-    write it to a file and relay one line that names the file's absolute path.
+  * One line: newlines are folded to spaces. For a long brief, write it to a file and relay one line that
+    names the file's absolute path.
 
-Exit: 0 delivered or queued (verified in the transcript or pane) or, for a Paseo agent, accepted (the daemon's
-acknowledgement, not a verified delivery); 1 refused or unverified; 2 usage.
+Exit: 0 delivered or queued (verified in the transcript or pane, or for paseo/dispatch/launch, or a socket frame to a working session, the route's
+acknowledgement; an idle session's socket frame is verified in its transcript); 1 not sent (every route failed, listed) or sent but unverified; 2 usage.
 """
 import argparse
 import json
@@ -46,9 +60,12 @@ import math
 import os
 import re
 import shutil
+import socket
+import stat
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -88,7 +105,9 @@ def paseo_run(*args, timeout=30):
         p = subprocess.run([cli, *args], capture_output=True, text=True, timeout=timeout, check=False,
                            stdin=subprocess.DEVNULL)
         return p.returncode, p.stdout, p.stderr
-    except (OSError, subprocess.TimeoutExpired) as e:
+    except subprocess.TimeoutExpired as e:
+        return 124, "", str(e)    # the CLI may have got its request to the daemon: not a provable non-send
+    except OSError as e:
         return 127, "", str(e)
 
 
@@ -193,9 +212,7 @@ def sender_tag(listed):
     if UUID.fullmatch(own) and not os.environ.get("ACP_RUN_AGENT") and hosted_by(own):
         return ""    # genuinely this agent: Paseo labels the message itself. An empty or junk value, an acp-run
                      # slice, or an inherited id with no Paseo-hosted ancestor (Codex, PR 25) gets the tag
-    me = next((x for x in listed if x.get("self")), None) or {}
-    name = me.get("name") or me.get("id") or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "")[:8] or "unknown"
-    return f"[relay from {fleet.clip(re.sub(r'[^A-Za-z0-9._ -]', '', name), 40) or 'unknown'}] "
+    return f"[relay from {sender_name(listed)}] "
 
 
 def send_paseo(s, text, wait):
@@ -208,6 +225,7 @@ def send_paseo(s, text, wait):
     tx = Path(s["transcript"]) if s.get("transcript") else None
     mark = tx.stat().st_size if tx and tx.is_file() else 0
     rc, out, err = paseo_run("send", "--no-wait", "--behavior", "steer", "--json", "--", agent, text)
+    s["send_rc"] = rc
     if rc != 0:
         print(f"relay: [{s['id']}] paseo send to {agent} failed (rc={rc}): {fleet.clip((err or out).strip(), 200)}",
               file=sys.stderr)
@@ -264,17 +282,38 @@ def press_enter(chan):
     return False
 
 
+def keys_run(*cmd, timeout=10):
+    """Run a typing CLI: 'ok'; 'absent' (it could not start, so nothing was typed); or 'failed' (it ran and
+    exited non-zero or timed out, so the text may have gone in: fleet.run folds a timeout into rc 127, the same
+    as a missing binary, which is why this does not use it)."""
+    try:
+        p = subprocess.run(list(cmd), capture_output=True, text=True, timeout=timeout, check=False,
+                           stdin=subprocess.DEVNULL)
+    except (FileNotFoundError, PermissionError):
+        return "absent"
+    except (OSError, subprocess.TimeoutExpired):
+        return "failed"
+    return "ok" if p.returncode == 0 else "failed"
+
+
 def type_line(chan, text):
+    """Type TEXT and Enter. False when either failed; `type_line.typed` says whether the text may have gone in
+    (then it can sit in the input box, and a second route would deliver it twice). Only a typing CLI that could
+    not start leaves it False."""
     kind, target = chan
+    type_line.typed = False
     if kind == "herdr":
-        if fleet.run(HERDR, "pane", "send-text", target, text)[0] != 0:
-            return False
+        step = keys_run(HERDR, "pane", "send-text", target, text)
     elif kind == "orca":
-        return fleet.run("orca", "terminal", "send", "--terminal", target, "--text", text, "--enter", timeout=20)[0] == 0
+        step = keys_run("orca", "terminal", "send", "--terminal", target, "--text", text, "--enter", timeout=20)
+        type_line.typed = step == "failed"
+        return step == "ok"
     elif kind == "tmux":
-        if fleet.run("tmux", "send-keys", "-t", target, "-l", text)[0] != 0:
-            return False
+        step = keys_run("tmux", "send-keys", "-t", target, "-l", text)
     else:
+        return False
+    type_line.typed = step != "absent"
+    if step != "ok":
         return False
     time.sleep(ENTER_DELAY)
     return press_enter(chan)
@@ -283,9 +322,21 @@ def type_line(chan, text):
 def stuck_in_box(chan, text):
     """True while TEXT still sits unsent in a Claude Code input box: its Enter did not land."""
     d = " ".join(draft(chan).split())
-    # A long burst can be collapsed into a "[Pasted text #N +M lines]" placeholder, which never matches
-    # the text itself; with no other draft possible right after our own typing, it is ours (2026-10-18).
-    return bool(d) and (d[:30] == text[:30] or d.startswith("[Pasted text"))
+    return bool(d) and (d[:30] == text[:30] or ours_paste(d, text))
+
+
+PASTE_MIN = 800     # Claude Code collapses only a paste longer than this into a placeholder
+PASTE_RE = re.compile(r"\[Pasted text #\d+(?: \+\d+ lines)?\]")
+
+
+def ours_paste(d, text):
+    """True when draft D is the collapsed "[Pasted text #N +M lines]" placeholder of a TEXT long enough to be
+    collapsed. A long burst typed by send-text collapses and never matches the text (2026-10-18); a placeholder
+    beside a short text is the operator's own paste (2026-10-23)."""
+    return bool(PASTE_RE.fullmatch(" ".join(d.split()))) and len(" ".join((text or "").split())) > PASTE_MIN
+
+
+UNSENT_TTL = 3600    # an hour: a leftover from days ago must not claim a draft
 
 
 def _unsent():
@@ -295,26 +346,65 @@ def _unsent():
         return {}
 
 
-def note_unsent(sid, text):
-    """Remember TEXT as left unsent in session SID's box (None forgets it)."""
+def note_unsent(sid, text, draft="", mark=0):
+    """Remember TEXT as left unsent in session SID's box, with the draft the box showed then and the transcript size
+    before it was typed (None forgets it). Entries older than UNSENT_TTL are dropped by `leftover`."""
     rows = _unsent()
     if text is None:
         if rows.pop(sid, None) is None:
             return
     else:
-        rows[sid] = text
+        rows[sid] = {"text": text, "draft": " ".join(draft.split()), "mark": mark, "at": time.time()}
     UNSENT.parent.mkdir(parents=True, exist_ok=True)
     tmp = UNSENT.with_suffix(".tmp")
     tmp.write_text(json.dumps(rows, ensure_ascii=False))
     tmp.replace(UNSENT)
 
 
+def leftover(sid):
+    """The unsent-message entry for session SID, or None (none, expired, or in the old bare-text format)."""
+    e = _unsent().get(sid)
+    if not isinstance(e, dict) or not e.get("text") or time.time() - float(e.get("at") or 0) > UNSENT_TTL:
+        return None
+    return e
+
+
 def ours(d, text):
-    """True when draft D is (the visible part of) TEXT, which this relay typed earlier."""
+    """True when draft D is (the visible part of) TEXT, which this relay typed earlier. A short draft that merely
+    occurs inside the text ("ok") and any collapsed paste are someone else's here; a collapsed paste of ours is
+    recognised by the exact draft recorded when the leftover was noted (`mine`)."""
     d, t = " ".join(d.split()), " ".join((text or "").split())
     if not d or not t:
         return False
-    return d[:30] == t[:30] or d[-30:] in t or d.startswith("[Pasted text")
+    return d[:30] == t[:30] or (len(d) >= 12 and t.startswith(d)) or (len(d) >= min(30, len(t)) and d[-30:] in t)
+
+
+def holds(d, text):
+    """True when the box D shows TEXT or a piece of it and nothing more (a leading "…" is the TUI's clipping)."""
+    dn, tn = " ".join(d.split()).lstrip("…").strip(), " ".join((text or "").split())
+    return bool(dn) and bool(tn) and (dn == tn or (len(dn) >= 12 and dn in tn))
+
+
+def mine(d, entry):
+    """True when draft D in the box is the leftover ENTRY's and nothing else: the exact draft recorded then, or
+    (part of) its text. Words the operator added after our text make it theirs."""
+    dn = " ".join(d.split())
+    return bool(dn) and bool(entry) and (dn == entry.get("draft") or holds(dn, entry["text"]))
+
+
+def arm(s, chan, text, mark):
+    """Record TEXT as sitting unsent in session S's box (Claude Code only). The draft is kept for `mine` only when
+    it is our text or our collapsed paste, never whatever else the box shows."""
+    if s["agent"] == "claude":
+        d = draft(chan)
+        note_unsent(s["id"], text, d if holds(d, text) or ours_paste(d, text) else "", mark)
+
+
+def forget(sid, text):
+    """Drop session SID's leftover entry when it is for TEXT (another text's entry is still owed its proof)."""
+    e = leftover(sid)
+    if e and " ".join(e["text"].split()) == " ".join(text.split()):
+        note_unsent(sid, None)
 
 
 def find(ident, ss):
@@ -324,94 +414,230 @@ def find(ident, ss):
     return hits
 
 
-def refusal(s):
-    """Why text must not be typed into session S, or None."""
+def hard_stop(s):
+    """Why session S must get no message by ANY route, or None. These never fall back: the next route would
+    deliver the same message into the same dialog, a finished conversation or this very session."""
     if s.get("self"):
         return "that is this session"
-    if s.get("host") == "acp":
-        return f"an ACP launch: use launch.py reply {s['id']} \"<text>\" (its inbox), never keys"
     if s.get("finished"):
         return (f"finished ({s['finished']}): never continue there; start a fresh session from its handoff "
                 "(session-finder rung 3b, launch.py --baton)")
     if s.get("host") == "paseo" and s.get("paseo_state") not in (None, "idle", "running"):
         return f"its Paseo agent is {s['paseo_state']}, not idle or running"
+    if s.get("status") == "blocked":
+        return "blocked on a question or permission prompt: a message would land in or behind that dialog (helm.py answer)"
+    return None
+
+
+def refusal(s):
+    """Why text must not be typed into session S's pane, or None."""
+    why = hard_stop(s)
+    if why:
+        return why
+    if s.get("host") == "acp":
+        return f"an ACP launch: use launch.py reply {s['id']} \"<text>\" (its inbox), never keys"
     if not s.get("chan"):
         rec = fleet.dispatch_record(s.get("sid"))
         if rec:
             return f"a headless acp-dispatch slice (no pane): acp-dispatch tell {rec} \"<text>\""
         return (f"no terminal channel ({s.get('where') or 'unknown terminal'}); tell the operator its where: line. "
                 "If it runs under Paseo (a PASEO_AGENT_ID it was handed, or `paseo ls -g`), pass that agent id as the ident")
-    st = s.get("status")
-    if st == "blocked":
-        return "blocked on a question or permission prompt: typed text would land in that dialog (helm.py answer)"
-    if s["agent"] != "claude" and st != "idle":
-        return f"a {s['agent']} TUI that is {st}: only idle ones take typed text reliably"
+    if s["agent"] != "claude" and s.get("status") != "idle":
+        return f"a {s['agent']} TUI that is {s.get('status')}: only idle ones take typed text reliably"
     return None
 
 
-def main():
-    ap = argparse.ArgumentParser(prog="relay.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("ident")
-    ap.add_argument("text")
-    ap.add_argument("--wait", type=float, default=20, help="seconds to verify delivery (default 20)")
-    ap.add_argument("--idle", type=float, metavar="S", help="Paseo agents: wait up to S seconds for it to go idle first")
-    ap.add_argument("--json", action="store_true")
-    a = ap.parse_args()
-    if a.idle is not None and not (math.isfinite(a.idle) and a.idle > 0):
-        print("relay: --idle must be a finite number of seconds > 0", file=sys.stderr)
-        return 2
-    text = " ".join(a.text.split())
-    if not text:
-        print("relay: empty text", file=sys.stderr)
-        return 2
-    listed = fleet.sessions()
-    hits = find(a.ident, listed)
-    if not hits and UUID.fullmatch(a.ident):
-        hits = [s for s in [paseo_session(a.ident)] if s]    # a PASEO_AGENT_ID fleet does not list
-    if len(hits) != 1:
-        print(f"relay: {'no' if not hits else len(hits)} session(s) match {a.ident!r} (fleet.py list shows ids and names)",
-              file=sys.stderr)
-        return 1
-    s = hits[0]
-    is_paseo = s.get("host") == "paseo" or (s.get("chan") or (None,))[0] == "paseo"
-    if is_paseo:
-        if text.lstrip(" \t\r\n\u00a0\u200b\u200c\u200d\u2060\ufeff").startswith(("/", "\uff0f")):
-            # Paseo trims the prompt (JS trim, which drops U+FEFF) before its slash-command parser: strip the same
-            # and the zero-width characters first, and refuse the full-width slash too (adversary round 2)
-            print(f"relay: [{s['id']}] not sent: text starting with '/' would run a built-in; peers do not run another "
-                  "session's built-ins", file=sys.stderr)
-            return 2
-        if not s.get("self"):
-            why = paseo_gate(s)
-            if not why and a.idle and s["status"] != "idle":
-                if not paseo_idle(s, a.idle):
-                    print(f"relay: [{s['id']}] not sent: its Paseo agent is still running after {a.idle:g}s", file=sys.stderr)
-                    return 1
-                why = paseo_gate(s)    # it can have been archived or asked a question while we waited
-            if why:
-                print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
-                return 1
+# ---- routes ---------------------------------------------------------------------------------------------
+# A route returns one of: ("ok", via, seen) delivered or queued; ("skip", why) nothing was sent, try the next
+# route; ("stop", why, rc) nothing was sent and no other route may be tried; ("unverified", out) the text was
+# sent but never seen, so a second route would risk a duplicate.
+
+SLASH_STRIP = " \t\r\n\u00a0\u200b\u200c\u200d\u2060\ufeff"
+
+
+def is_slash(text):
+    """True when TEXT would start a built-in command: Paseo trims the prompt (JS trim, which drops U+FEFF) before its
+    slash-command parser, so strip the same and the zero-width characters first, and count the full-width slash too
+    (adversary round 2)."""
+    return text.lstrip(SLASH_STRIP).startswith(("/", "\uff0f"))
+
+
+def probe_of(text):
+    """The part of TEXT to look for in a transcript, which stores it JSON-escaped."""
+    return json.dumps(text[:40], ensure_ascii=False)[1:-1]
+
+
+def sender_name(listed):
+    """Who is relaying: this session's name, else its id, as one safe label."""
+    me = next((x for x in listed if x.get("self")), None) or {}
+    name = me.get("name") or me.get("id") or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "")[:8] or "unknown"
+    return fleet.clip(re.sub(r"[^A-Za-z0-9._ -]", "", name), 40) or "unknown"
+
+
+def claude_socket(s):
+    """The messaging socket of the live Claude Code that runs session S, or None: the registry entry
+    (~/.claude/sessions/<pid>.json) for S's session id, its pid alive, and a socket this user owns."""
+    sid = s.get("sid")
+    if s.get("agent") != "claude" or not sid:
+        return None
+    for path in sorted((fleet.CLAUDE / "sessions").glob("*.json")):
+        try:
+            entry = json.loads(path.read_text())
+            pid = int(entry["pid"])
+            if entry.get("sessionId") != sid:
+                continue
+            if s.get("pid") and int(s["pid"]) != pid:
+                continue    # a second process holding the same session id
+            os.kill(pid, 0)
+            sock = entry.get("messagingSocketPath")
+            st = os.stat(sock) if sock else None
+            dst = os.stat(os.path.dirname(sock)) if sock else None
+        except PermissionError:
+            continue
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+        if (st and dst and stat.S_ISSOCK(st.st_mode) and st.st_uid == os.getuid() and dst.st_uid == os.getuid()
+                and not dst.st_mode & 0o022):    # ours, in a directory nobody else can write to
+            return sock
+    return None
+
+
+def xml_body(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def socket_send(sock, sender, text):
+    """One JSON line to a Claude Code messaging socket, then SHUT_WR (the frame acp-dispatch tell sends; the
+    protocol is undocumented, verified on this machine 2026-10-18 and 2026-10-23). False on any failure to
+    connect or write. The body is XML-escaped (& < >) so it cannot close or reopen the wrapper."""
+    body = xml_body(text)
+    wrap = (f'<cross-session-message from="relay.py" from-name="relay.py ({sender})" '
+            f'from-mode="bypass">\n{body}\n</cross-session-message>')
+    frame = {"msgV": 1, "msg_id": str(uuid.uuid4()), "type": "user",
+             "message": {"role": "user", "content": wrap}, "priority": "next", "from": "relay.py"}
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+            c.settimeout(10)
+            c.connect(str(sock))
+            c.sendall(json.dumps(frame).encode() + b"\n")
+            c.shutdown(socket.SHUT_WR)
+    except OSError:
+        return False
+    return True
+
+
+def route_paseo(c):
+    """The gate (main) has passed. `paseo send` that failed for a reason other than a missing CLI may still have
+    reached the daemon, so it ends the run rather than risk a second copy over another route."""
+    s = c["s"]
+    text = c["text_sent"] = sender_tag(c["listed"]) + c["text"]
+    seen = send_paseo(s, text, c["a"].wait)
+    if not seen:
+        if s.get("send_rc") == 127:
+            return ("skip", "no usable paseo CLI")
+        return ("unverified", f"`paseo send` failed (rc={s.get('send_rc')}); it may have reached the daemon, so no other "
+                              "route was tried")
+    return ("ok", f"paseo {s['chan'][1]}", seen)
+
+
+def route_socket(c):
+    """A frame the socket took is final: there is no second route after it. Claude Code logs it in the transcript
+    only when it absorbs it (the user-role content keeps the `<cross-session-message ...>` envelope; a working
+    session shows it as a `queued_command` attachment), so a WORKING session is "accepted" at once. Any other
+    status (idle, busy-background, unknown) is verified: the enveloped text must show up in the transcript within
+    --wait, else the run is "unverified" (exit 1, do not resend) rather than a success a caller would act on."""
+    s = c["s"]
+    sock = claude_socket(s)
+    if not sock:
+        return ("skip", "no live Claude messaging socket for it")
+    tx = Path(s["transcript"]) if s.get("transcript") else None
+    mark = tx.stat().st_size if tx and tx.is_file() else 0
+    if not socket_send(sock, sender_name(c["listed"]), c["text"]):
+        return ("skip", f"could not write to its messaging socket {sock}")
+    if s.get("status") == "working":
+        return ("ok", "claude socket", "accepted")
+    if not (tx and tx.is_file()):
+        return ("unverified", f"its socket took the text but the {s.get('status')} session has no transcript to confirm it. "
+                              "Do not resend; check its pane")
+    probe = json.dumps('from-mode="bypass">\n' + xml_body(c["text"]), ensure_ascii=False)[1:-1]
+    deadline = time.time() + c["a"].wait
+    while True:
+        with tx.open("rb") as fh:
+            fh.seek(mark)
+            if probe in fh.read().decode("utf-8", "replace"):
+                return ("ok", "claude socket", "delivered")
+        if time.time() >= deadline:
+            return ("unverified", f"its socket took the text but the {s.get('status')} session has not read it within "
+                                  f"{c['a'].wait:g}s (an idle session may not wake on a socket frame). Do not resend; check its pane")
+        time.sleep(1)
+
+
+def pane_idle(s, seconds):
+    """Wait up to SECONDS for pane TUI S to go idle, re-reading the fleet every few seconds; True when it is."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        time.sleep(min(3, max(0.1, deadline - time.time())))
+        now = next((x for x in fleet.sessions() if x["id"] == s["id"]), None)
+        if now and any(now.get(k) != s.get(k) for k in ("agent", "pid", "sid")):
+            return False    # another session now holds that pane: never type into it
+        if now and now.get("status") == "idle":
+            s["status"] = "idle"
+            return True
+    return False
+
+
+def retry_leftover(c, chan, d, left):
+    """A retry of the message an earlier relay left unsent: type nothing. Submit it if it is still in the box, then
+    prove it reached the transcript (searched from where it was typed, whole text) or report unverified."""
+    s, text = c["s"], c["text"]
+    if d and not mine(d, left):
+        return ("unverified", f"its input box holds someone else's draft ({fleet.clip(d, 60)!r}); an earlier copy of this "
+                              "message may or may not have landed. Do not resend; check its pane")
+    pressed = bool(d)
+    if d:
+        press_enter(chan)
+        for _ in range(10):
+            time.sleep(1)
+            d = draft(chan)
+            if not d:
+                break
+    if d:
+        return ("unverified", f"your earlier copy of this message is still in its input box ({fleet.clip(d, 60)!r}). "
+                              "Do not resend; check its pane")
+    tx = Path(s["transcript"]) if s.get("transcript") else None
+    probe = json.dumps(text, ensure_ascii=False)[1:-1]
+    deadline = time.time() + (c["a"].wait if pressed else 0)
+    while tx and tx.is_file() and left.get("mark") is not None:
+        with tx.open("rb") as fh:
+            fh.seek(left["mark"])
+            if probe in fh.read().decode("utf-8", "replace"):
+                note_unsent(s["id"], None)
+                return ("ok", f"{chan[0]} {chan[1]}", "delivered")
+        if time.time() >= deadline:
+            break
+        time.sleep(1)
+    return ("unverified", "an earlier copy of this message was typed and is no longer in its input box, but it is not in "
+                          "its transcript; do not resend, check its pane (a retry within the hour stays blocked)")
+
+
+def route_pane(c):
+    s, a, text = c["s"], c["a"], c["text"]
     why = refusal(s)
+    if why and a.idle and s.get("agent") != "claude" and s.get("status") == "working" and not s.get("host") == "acp":
+        if pane_idle(s, a.idle):
+            why = refusal(s)
     if why:
-        print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
-        return 1
+        return ("skip", why)
+    if is_slash(text) or text.lstrip(SLASH_STRIP).startswith("!"):
+        return ("skip", "text starting with '/' or '!' typed into a pane would run a built-in or a shell command "
+                        "there; peers do not run another session's built-ins")
     chan = tuple(s["chan"])
-    if chan[0] == "paseo":
-        text = sender_tag(listed) + text
-        seen = send_paseo(s, text, a.wait)
-        if not seen:
-            return 1
-        out = {"id": s["id"], "name": s["name"], "status": s["status"], "via": f"paseo {chan[1]}", "result": seen,
-               "text": text}
-        if a.json:
-            print(json.dumps(out, ensure_ascii=False))
-        else:
-            when = "now" if s["status"] == "idle" else "steered into its running turn"
-            print(f"relayed to [{s['id']}] {s['name']} via {out['via']}: {seen}; it takes the message {when}")
-        return 0
     d = draft(chan) if s["agent"] == "claude" else ""
-    left = _unsent().get(s["id"])
-    if d and ours(d, left):
+    left = leftover(s["id"])
+    tx = Path(s["transcript"]) if s.get("transcript") else None
+    if left and " ".join(left["text"].split()) == text:    # a retry of the message an earlier relay left unsent
+        return retry_leftover(c, chan, d, left)
+    if d and mine(d, left):
         press_enter(chan)
         for _ in range(10):
             time.sleep(1)
@@ -421,18 +647,21 @@ def main():
         if not d:
             note_unsent(s["id"], None)
             print(f"relay: [{s['id']}] submitted our earlier message left unsent in its box", file=sys.stderr)
+    if d and holds(d, text):    # our own text from an earlier relay whose entry expired or never existed
+        return ("unverified", "this very text already sits in its input box from an earlier relay. "
+                              "Do not resend; check its pane")
     if d:
-        print(f"relay: [{s['id']}] not sent: its input box holds a draft ({fleet.clip(d, 60)!r})", file=sys.stderr)
-        return 1
-    tx = Path(s["transcript"]) if s.get("transcript") else None
+        return ("skip", f"its input box holds a draft ({fleet.clip(d, 60)!r})")
     mark = tx.stat().st_size if tx and tx.is_file() else 0
     if not type_line(chan, text):
-        print(f"relay: [{s['id']}] typing into {chan[0]} {chan[1]} failed", file=sys.stderr)
-        return 1
-    # the transcript stores the text JSON-escaped; match on a prefix of it
-    probe = json.dumps(text[:40], ensure_ascii=False)[1:-1]
+        if getattr(type_line, "typed", False):    # the text may be in the box, only its Enter failed
+            arm(s, chan, text, mark)
+            return ("unverified", f"text typed into {chan[0]} {chan[1]} (or not: the typing CLI did not finish) but its "
+                                  "Enter failed; it may sit in the input box. Do not resend; check its pane")
+        return ("skip", f"typing into {chan[0]} {chan[1]} failed")
+    probe = probe_of(text)
     seen, deadline = None, time.time() + a.wait
-    typed_at, retries = time.time(), 0
+    typed_at, retries, stuck = time.time(), 0, False
     while time.time() < deadline:
         if tx and tx.is_file():
             with tx.open("rb") as fh:
@@ -454,19 +683,183 @@ def main():
             if not tx:
                 break
         time.sleep(1)
-    out = {"id": s["id"], "name": s["name"], "status": s["status"], "via": f"{chan[0]} {chan[1]}",
-           "result": seen or "unverified", "text": text}
     if s["agent"] == "claude":
-        note_unsent(s["id"], None if seen or not stuck_in_box(chan, text) else text)
-    if a.json:
-        print(json.dumps(out, ensure_ascii=False))
-    elif seen:
-        when = "now" if s["status"] == "idle" else "at its next tool round (it is working)"
-        print(f"relayed to [{s['id']}] {s['name']} via {out['via']}: {seen}; it takes the message {when}")
+        if seen or not stuck_in_box(chan, text):
+            forget(s["id"], text)
+        else:
+            arm(s, chan, text, mark)
+    if seen:
+        return ("ok", f"{chan[0]} {chan[1]}", seen)
+    return ("unverified", f"text typed via {chan[0]} {chan[1]} but not seen in its transcript or pane within "
+                          f"{a.wait:g}s; check: {s.get('focus') or s.get('where')}")
+
+
+def route_launch(c):
+    """A live interactive ACP launch takes the text in its inbox as the next prompt (what `launch.py reply` does
+    for one). An ended launch is not touched: its reply would start a new, full-price turn."""
+    s = c["s"]
+    d = s.get("launch") or {}
+    if not d.get("id"):
+        return ("skip", "not an ACP launch this tooling started")
+    if not d.get("interactive") or fleet.launch_state(d)[2] is not None:
+        return ("skip", f"launch {d['id']} has ended or is headless: `launch.py reply {d['id']} \"<text>\"` would start "
+                        "a new turn, which a relay does not do")
+    try:
+        import launch  # noqa: PLC0415
+    except ImportError as e:
+        return ("skip", f"launch.py not importable: {e}")
+    with launch.turn_lock():    # the check and the write are one step, as in `launch.py reply`
+        why = launch.reply_refusal(d["id"])
+        if why:
+            return ("skip", why)
+        if not launch.inbox_send(d, c["text"]):
+            return ("skip", f"inbox {d.get('inbox')} is gone")
+    return ("ok", f"launch inbox {d['id']}", "queued")
+
+
+def route_dispatch(c):
+    """`acp-dispatch tell RECORD`: the slice's inbox, plus its live Claude's socket. A finished slice refuses."""
+    s = c["s"]
+    rec = c.get("dispatch_rec") or fleet.dispatch_record(s.get("sid"))
+    cli = HERE.parent.parent / "bin" / "acp-dispatch"
+    if not rec or not cli.is_file():
+        return ("skip", "no open acp-dispatch record for it")
+    try:
+        p = subprocess.run([str(cli), "tell", "--from", f"relay {sender_name(c['listed'])}", "--", rec, c["text"]],
+                           capture_output=True, text=True, timeout=30, check=False, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return ("unverified", "acp-dispatch tell timed out; it may already have written the slice's inbox. Do not resend")
+    except OSError as e:
+        return ("skip", f"acp-dispatch tell failed: {e}")
+    if p.returncode != 0:
+        return ("skip", f"acp-dispatch tell refused: {fleet.clip((p.stderr or p.stdout).strip(), 160)}")
+    return ("ok", f"acp-dispatch {Path(rec).name}", "queued")
+
+
+ROUTES = {"paseo": route_paseo, "dispatch": route_dispatch, "launch": route_launch, "socket": route_socket,
+          "pane": route_pane}
+
+
+def plan(s):
+    """Route names for session S, best first: a Paseo-hosted agent by `paseo send` alone (labelled as a peer's
+    message); a headless acp-dispatch slice by `acp-dispatch tell`; a live ACP launch by its inbox; a Claude TUI
+    by keys into its pane, whose delivery is verified in the transcript, then by its messaging socket when the
+    pane cannot take the text (a typed draft, no terminal): a socket frame to a working session is only
+    acknowledged and to an idle one unproven to wake it, so it never goes first."""
+    if s.get("host") == "paseo" or (s.get("chan") or (None,))[0] == "paseo":
+        return ["paseo"]
+    if s.get("host") == "acp":
+        return ["launch"]
+    if fleet.dispatch_record(s.get("sid")) and not s.get("chan"):
+        return ["dispatch"]
+    names = ["pane"] if s.get("chan") else []
+    if claude_socket(s):
+        names.append("socket")
+    return names
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="relay.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("ident")
+    ap.add_argument("text")
+    ap.add_argument("--wait", type=float, default=20, help="seconds to verify delivery (default 20)")
+    ap.add_argument("--idle", type=float, metavar="S", help="a working Paseo agent or non-Claude pane TUI: wait up to S seconds for it to go idle first")
+    ap.add_argument("--via", choices=sorted(ROUTES), help="use only this route (default: the best, then fall back)")
+    ap.add_argument("--plan", action="store_true", help="print the routes in order and send nothing")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+    if a.idle is not None and not (math.isfinite(a.idle) and a.idle > 0):
+        print("relay: --idle must be a finite number of seconds > 0", file=sys.stderr)
+        return 2
+    text = " ".join(a.text.split())
+    if not text:
+        print("relay: empty text", file=sys.stderr)
+        return 2
+    listed = fleet.sessions()
+    hits = find(a.ident, listed)
+    if not hits and UUID.fullmatch(a.ident):
+        hits = [s for s in [paseo_session(a.ident)] if s]    # a PASEO_AGENT_ID fleet does not list
+    if len(hits) != 1:
+        print(f"relay: {'no' if not hits else len(hits)} session(s) match {a.ident!r} (fleet.py list shows ids and names)",
+              file=sys.stderr)
+        return 1
+    s = hits[0]
+    is_paseo = s.get("host") == "paseo" or (s.get("chan") or (None,))[0] == "paseo"
+    if is_paseo and is_slash(text):
+        print(f"relay: [{s['id']}] not sent: text starting with '/' would run a built-in; peers do not run another "
+              "session's built-ins", file=sys.stderr)
+        return 2
+    why = hard_stop(s)    # on the fleet's own snapshot, before the Paseo gate overwrites its status
+    if why:
+        print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
+        return 1
+    if is_paseo and not s.get("self") and not a.plan:
+        # The gate runs for every Paseo target whatever --via says, and each refusal ends the run: no other route
+        # may send to an agent Paseo cannot confirm, one that is archived or asking, or whose process mapping
+        # is untrusted (adversary, 2026-10-23)
+        why = paseo_gate(s)
+        if not why and a.idle and s["status"] != "idle":
+            if not paseo_idle(s, a.idle):
+                print(f"relay: [{s['id']}] not sent: its Paseo agent is still running after {a.idle:g}s", file=sys.stderr)
+                return 1
+            why = paseo_gate(s)    # it can have been archived or asked a question while we waited
+        if why:
+            print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
+            return 1
+    why = hard_stop(s)
+    if why:
+        print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
+        return 1
+    if is_paseo and s["agent"] != "claude" and s.get("status") != "idle":
+        print(f"relay: [{s['id']}] not sent: a {s['agent']} TUI that is {s.get('status')}: only idle ones take typed "
+              "text reliably (--idle S waits for it)", file=sys.stderr)
+        return 1
+    routes = [n for n in plan(s) if not a.via or n == a.via]
+    if a.plan:
+        print(" -> ".join(routes) or "(none)")
+        return 0
+    if not routes:
+        print(f"relay: [{s['id']}] not sent: " + (f"no {a.via} route for it" if a.via else refusal(s) or "no route"),
+              file=sys.stderr)
+        return 1
+    c = {"s": s, "a": a, "text": text, "listed": listed}
+    tried = []
+    for name in routes:
+        res = ROUTES[name](c)
+        if res[0] == "skip":
+            tried.append((name, res[1]))
+            continue
+        if res[0] == "stop":
+            print(f"relay: [{s['id']}] not sent: {res[1]}", file=sys.stderr)
+            return res[2]
+        out = {"id": s["id"], "name": s["name"], "status": s["status"], "route": name,
+               "result": res[2] if res[0] == "ok" else "unverified", "text": c.get("text_sent", text),
+               "fallbacks": [f"{n}: {w}" for n, w in tried]}
+        if res[0] == "ok":
+            out["via"] = res[1]
+        else:
+            out["reason"] = res[1]
+        if tried:
+            print(f"relay: [{s['id']}] fell back past " + "; ".join(f"{n} ({w})" for n, w in tried), file=sys.stderr)
+        if res[0] == "unverified":
+            if a.json:
+                print(json.dumps(out, ensure_ascii=False))
+            else:
+                print(f"relay: [{s['id']}] {res[1]}", file=sys.stderr)
+            return 1
+        if a.json:
+            print(json.dumps(out, ensure_ascii=False))
+        else:
+            when = ("now" if res[2] == "delivered" and name == "socket" else "queued for its next tool round"
+                    if name == "socket" else "now" if s["status"] == "idle" else "at its next tool round (it is working)")
+            print(f"relayed to [{s['id']}] {s['name']} via {res[1]}: {res[2]}; it takes the message {when}")
+        return 0
+    if len(tried) == 1:
+        print(f"relay: [{s['id']}] not sent: {tried[0][1]}", file=sys.stderr)
     else:
-        print(f"relay: [{s['id']}] text typed via {out['via']} but not seen in its transcript or pane within "
-              f"{a.wait:g}s; check: {s.get('focus') or s.get('where')}", file=sys.stderr)
-    return 0 if seen else 1
+        print(f"relay: [{s['id']}] not sent, all {len(tried)} routes failed: "
+              + "; ".join(f"{i}. {n}: {w}" for i, (n, w) in enumerate(tried, 1)), file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
