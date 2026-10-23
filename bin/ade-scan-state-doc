@@ -102,10 +102,13 @@ def stash_values(raw_p, ck):
 
 # a tracked path marked assume-unchanged (lowercase `ls-files -v` tag) or skip-worktree (`S`): `status` reports
 # nothing for it, so its edits are in no count and in no patch; the files themselves are archived with their
-# manifest (Codex pass 32 on PR 27). GNU sed's `-z` keeps the NUL-separated names whole, like the untracked archive
+# manifest (Codex pass 32 on PR 27). GNU sed's `-z` keeps the NUL-separated names whole, like the untracked archive;
+# `t` ends the script after the first substitution, or a path `S x` under tag `h` would print a second name `x`
+# (adversary round 38). The archive recurses: a hidden path replaced by a directory holds children `status` cannot
+# see either, so no other row has them (Codex pass 33)
 HIDDEN_FMT = ("mkdir -p <DEST>/{} && git -C {} ls-files -z -v > <DEST>/{}/hidden.raw "
-              "&& \"$GSED\" -z -n 's/^[a-z] //p; s/^S //p' <DEST>/{}/hidden.raw > <DEST>/{}/hidden.list "
-              "&& \"$GTAR\" -cf <DEST>/{}/hidden.tar -C <DEST>/{} hidden.list -C {} --null --no-recursion --ignore-failed-read -T <DEST>/{}/hidden.list")
+              "&& \"$GSED\" -z -n 's/^[a-z] //p; t; s/^S //p' <DEST>/{}/hidden.raw > <DEST>/{}/hidden.list "
+              "&& \"$GTAR\" -cf <DEST>/{}/hidden.tar -C <DEST>/{} hidden.list -C {} --null --ignore-failed-read -T <DEST>/{}/hidden.list")
 
 
 def hidden_values(raw_p, ck):
@@ -114,9 +117,12 @@ def hidden_values(raw_p, ck):
 
 # a commit reachable from a reflog alone (a reset, amend or rebase left it): no ref holds it, no bundle above
 # carries it, and `git reflog` recovers it only until expiry (Codex pass 32 on PR 27). Its objects go into one
-# pack: `rev-list --objects` lists everything the reflogs reach that no ref does, `pack-objects` packs that list
-REFLOG_FMT = ("mkdir -p <DEST>/{} && GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} rev-list --objects --reflog --not --all > <DEST>/{}/reflog-only.list "
-              "&& GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} pack-objects <DEST>/{}/reflog-only < <DEST>/{}/reflog-only.list")
+# pack: `rev-list --objects` lists everything the reflogs reach that no ref does (a superset of the count: stash
+# entries and origin's live tips included), `pack-objects` packs that list. A partial clone's missing promisor
+# objects are listed as nothing to keep, never fetched: the capture plan's rows never reach the network (round 38)
+REFLOG_FMT = ("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_NO_LAZY_FETCH=1 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} "
+              "rev-list --objects --missing=allow-promisor --reflog --not --all > <DEST>/{}/reflog-only.list "
+              "&& GIT_ADVICE=0 GIT_NO_LAZY_FETCH=1 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} pack-objects <DEST>/{}/reflog-only < <DEST>/{}/reflog-only.list")
 
 
 def reflog_values(raw_p, ck):
@@ -517,6 +523,10 @@ def render(d):
         head_ahead = next((v for v in (c["ahead_of_origin"], c["unpushed"])
                            if isinstance(v, int) and v > 0), 0)
         credential = ORIGIN_CREDENTIAL in c["flags"]  # the url is in no record: only the flag says so
+        # no push row for such an origin: `git push origin` hands the credential-bearing url to the transport helper's
+        # argv, the exposure the scanner itself avoids; the bundle alternative stands alone (Codex pass 33 on PR 27)
+        cred_note = " (origin url holds a credential: no push until it is removed from the url; bundle instead)"
+        cred_need = "yes: bundle it; a push would hand the credential-bearing origin url to the transport"
         unreachable = credential or ORIGIN_UNREACHABLE in c["flags"]  # `local_only_verified` is false with it, whatever the counts
         submodules = SUBMODULES_FLAG in c["flags"]  # `status --ignore-submodules=all`: the counts see nothing in there
         tag_others = c.get("local_only_tags") or []
@@ -552,10 +562,11 @@ def render(d):
                 # fully qualified refspecs: a branch named like an option (`--mirror`) must never reach git's option
                 # parser, and shell quoting does not stop that (Codex pass 7 on PR 27); the bundle's file name is the
                 # percent-encoded branch, so `a/b` and `a_b` stay distinct
-                cmd.append(shcode("git -C {} push -u origin refs/heads/{}:refs/heads/{}", raw_p, c["branch"], c["branch"])
-                           + " or " + shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} refs/heads/{}",
-                                             ck, raw_p, f"{ck}/branch-{quote(c['branch'], safe='')}.bundle", c["branch"]))
-                need = "yes: pushing a branch publishes it; pick push or bundle"
+                push = shcode("git -C {} push -u origin refs/heads/{}:refs/heads/{}", raw_p, c["branch"], c["branch"])
+                bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} refs/heads/{}",
+                                ck, raw_p, f"{ck}/branch-{quote(c['branch'], safe='')}.bundle", c["branch"])
+                cmd.append(bundle + cred_note if credential else push + " or " + bundle)
+                need = cred_need if credential else "yes: pushing a branch publishes it; pick push or bundle"
         if local_n and not covered_by_bundle:
             # commits on other local branches, tags (or a detached HEAD) that no origin ref holds, whatever HEAD's own state
             others = [b for b in (c.get("local_only_branches") or [])
@@ -575,10 +586,14 @@ def render(d):
             # a tag is pushed by its full ref name, like a branch: a tag named like an option never reaches git's parser
             lo_cmd += [shcode("git -C {} push origin refs/tags/{}:refs/tags/{}", raw_p, t["tag"], t["tag"])
                        for t in tag_others]
-            lo_cmd.append(shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
-                                 ck, raw_p, f"{ck}/local-only.bundle"))
-            cmd.append(" or ".join(lo_cmd) if len(lo_cmd) == 1 else "; ".join(lo_cmd[:-1]) + " or " + lo_cmd[-1])
-            need = need if need.startswith(("yes", "**yes")) else "yes: pushing a branch publishes it; pick push or bundle"
+            bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
+                            ck, raw_p, f"{ck}/local-only.bundle")
+            if credential:
+                cmd.append(bundle + cred_note)
+            else:
+                cmd.append(bundle if not lo_cmd else "; ".join(lo_cmd[:-1] + [lo_cmd[-1] + " or " + bundle]))
+            need = need if need.startswith(("yes", "**yes")) else (
+                cred_need if credential else "yes: pushing a branch publishes it; pick push or bundle")
         if zero_tags and not (local_n and not covered_by_bundle):
             # a local tag origin lacks on a commit origin has: no commit count sees the tag object and no branch
             # bundle holds it; its name, annotation and signature are lost with the checkout (Codex pass 31 on PR 27)
@@ -587,20 +602,27 @@ def render(d):
             what.append(f"{len(zero_tags)} local tag(s) origin lacks: {shown}" + (f" and {more} more" if more else ""))
             # every tag at once, bounded whatever their number (adversary round 37): one origin already has at the
             # same object is up to date; one it has at another object is rejected, loudly
-            cmd.append(shcode("git -C {} push origin --tags", raw_p)
-                       + " or " + shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} "
-                                         "bundle create <DEST>/{} --tags", ck, raw_p, f"{ck}/tags.bundle")
+            bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} "
+                            "bundle create <DEST>/{} --tags", ck, raw_p, f"{ck}/tags.bundle")
+            cmd.append(bundle + cred_note if credential else shcode("git -C {} push origin --tags", raw_p) + " or " + bundle
                        + " (a tag origin has at another object is rejected by the push: bundle it, or decide to force)")
-            need = need if need.startswith(("yes", "**yes")) else "yes: pushing a tag publishes it; pick push or bundle"
+            need = need if need.startswith(("yes", "**yes")) else (
+                cred_need if credential else "yes: pushing a tag publishes it; pick push or bundle")
         if hidden:
             what.append(f"{hidden} tracked path(s) marked assume-unchanged or skip-worktree (`status` cannot see their edits)")
             cmd.append(shcode(HIDDEN_FMT, *hidden_values(raw_p, ck)))
             need = need if need != "no" else "yes: decide whether their edits are work"
         if reflog:
-            what.append(f"{reflog} reflog-only commit(s) (left by a reset, amend or rebase; no ref holds them)")
+            # a routine amend, rebase or squash-merge leaves such entries too, for `gc.reflogExpireUnreachable` (30 days
+            # by default), so the count is a prompt to look, not proof of lost work (adversary round 38)
+            what.append(f"{reflog} reflog-only commit(s) (left by a reset, amend, rebase or squash-merge in the last ~30 days; "
+                        "no ref holds them)")
+            # the pack holds only what origin lacks, so it restores into a clone that has origin's history and this
+            # checkout's bundles; a ref must then hold each commit or the next `gc` prunes it again (round 38)
             cmd.append(shcode(REFLOG_FMT, *reflog_values(raw_p, ck))
-                       + " (restore by copying the `.pack` and `.idx` into `.git/objects/pack/`; "
-                       + shcode("git -C {} reflog", raw_p) + " then names the commits)")
+                       + " (restore into a clone, after this checkout's bundles, by copying the `.pack` and `.idx` into "
+                       "`.git/objects/pack/`, then `git update-ref refs/recovered/<sha> <sha>` for each commit line of "
+                       "`reflog-only.list`, the lines with no path)")
             need = need if need != "no" else "yes: decide whether they are work"
         if modified:
             what.append(f"{modified} modified tracked file(s)")

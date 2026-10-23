@@ -908,11 +908,14 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     untracked = [ln[3:] for ln in lines if ln.startswith("??")]
     modified = [ln[3:] for ln in lines if not ln.startswith("??")]
     # a tracked path marked assume-unchanged (`ls-files -v` tag in lowercase) or skip-worktree (`S`) is invisible to
-    # `status`, so its edits are in no count above: it is counted and captured on its own (Codex pass 32 on PR 27)
+    # `status`, so its edits are in no count above: it is counted and captured on its own (Codex pass 32 on PR 27).
+    # A skip-worktree path with no file is a sparse checkout's ordinary state (adversary round 38): nothing to
+    # capture; an assume-unchanged path that is gone counts, since `status` hides that deletion too
     rc, out = git(path, "ls-files", "-z", "-v")
     if rc != 0:
         return incomplete_record(path, "ls-files -v", rc)
-    index_hidden = sum(1 for e in out.split("\0") if len(e) > 2 and e[1] == " " and (e[0].islower() or e[0] == "S"))
+    index_hidden = sum(1 for e in out.split("\0") if len(e) > 2 and e[1] == " "
+                       and (e[0].islower() or (e[0] == "S" and os.path.lexists(os.path.join(path, e[2:])))))
     rc, up = git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     upstream = up.strip() if rc == 0 else None
     unpushed = None
@@ -1084,19 +1087,19 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         ahead_of_origin = n
     # a commit a reset, amend or rebase left behind is reachable from a reflog alone: no ref holds it, so no count
     # above sees it, yet `git reflog` recovers it until expiry (Codex pass 32 on PR 27). Stash entries have their
-    # own count and capture: every entry of the stash reflog is excluded with its ancestors
-    reflog_only: int | None = 0
-    if not unborn:
-        rc, stash_shas = git(path, "log", "-g", "--format=%H", "refs/stash") if stashes else (0, "")
-        if rc != 0:
-            return incomplete_record(path, "log -g refs/stash", rc)
-        argv = ["rev-list", "--count", "--reflog", "--not", "--all", *stash_shas.split()]
-        if live and tips:
-            argv += ["--ignore-missing", *tips]
-        rc, n = git(path, *argv)
-        if rc != 0 or not n.strip().isdigit():
-            return incomplete_record(path, "rev-list --count --reflog --not --all", rc)
-        reflog_only = int(n)
+    # own count and capture: every entry of the stash reflog is excluded with its ancestors. An unborn HEAD is
+    # counted too: a branch deleted after `switch --orphan` leaves its commits in the HEAD reflog alone, and the
+    # command is well defined in an empty repository (adversary round 38)
+    rc, stash_shas = git(path, "log", "-g", "--format=%H", "refs/stash") if stashes else (0, "")
+    if rc != 0:
+        return incomplete_record(path, "log -g refs/stash", rc)
+    argv = ["rev-list", "--count", "--reflog", "--not", "--all", *stash_shas.split()]
+    if live and tips:
+        argv += ["--ignore-missing", *tips]
+    rc, n = git(path, *argv)
+    if rc != 0 or not n.strip().isdigit():
+        return incomplete_record(path, "rev-list --count --reflog --not --all", rc)
+    reflog_only: int = int(n)
     flags = []
     if unpushed or (on_origin and (ahead_of_origin or 0) > 0):
         flags.append("unpushed commits")  # includes a branch on origin with no upstream set

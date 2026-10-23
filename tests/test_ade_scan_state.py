@@ -2088,8 +2088,8 @@ def test_an_assume_unchanged_or_skip_worktree_edit_is_counted_and_archived(tmp_p
                                                                         verdict="index-hidden paths: 1", index_hidden=1)]))).splitlines()
                if r.startswith("| /p/h "))
     assert "1 tracked path(s) marked assume-unchanged or skip-worktree" in row
-    assert "\"$GSED\" -z -n 's/^[a-z] //p; s/^S //p' <DEST>/checkouts/abs/p/h/hidden.raw > <DEST>/checkouts/abs/p/h/hidden.list" in row
-    assert "-C /p/h --null --no-recursion --ignore-failed-read -T <DEST>/checkouts/abs/p/h/hidden.list" in row
+    assert "\"$GSED\" -z -n 's/^[a-z] //p; t; s/^S //p' <DEST>/checkouts/abs/p/h/hidden.raw > <DEST>/checkouts/abs/p/h/hidden.list" in row
+    assert "-C /p/h --null --ignore-failed-read -T <DEST>/checkouts/abs/p/h/hidden.list" in row and "no-recursion" not in row
     ck = doc.checkout_dir(str(work))
     prefix = "GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); "
     cmd = prefix + doc.HIDDEN_FMT.format(*map(doc.shquote, doc.hidden_values(str(work), ck))).replace("<DEST>", str(tmp_path / "dest"))
@@ -2101,6 +2101,53 @@ def test_an_assume_unchanged_or_skip_worktree_edit_is_counted_and_archived(tmp_p
         assert run.returncode == 0, (shell, run.stderr)
         tar = tarfile.open(tmp_path / "dest" / ck / "hidden.tar")
         assert set(tar.getnames()) == {"hidden.list", "a.txt"} and tar.extractfile("a.txt").read() == b"hidden edit\n"
+    # Codex pass 33: the hidden path replaced by a directory: `status` reports neither the deletion nor the children,
+    # the untracked count is 0, and `--no-recursion` archived an empty `a.txt/` entry without `a.txt/child`
+    (work / "a.txt").unlink()
+    (work / "a.txt").mkdir()
+    (work / "a.txt" / "child").write_text("child\n")
+    assert git(work, "status", "--porcelain") == ""
+    c = scan_one(mod, roots)
+    assert c["index_hidden"] == 1 and c["untracked"] == 0, c
+    shutil.rmtree(tmp_path / "dest", ignore_errors=True)
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    tar = tarfile.open(tmp_path / "dest" / ck / "hidden.tar")
+    assert set(tar.getnames()) == {"hidden.list", "a.txt", "a.txt/child"}, tar.getnames()
+    assert tar.extractfile("a.txt/child").read() == b"child\n"
+
+
+def test_an_absent_skip_worktree_path_is_a_sparse_checkout_not_hidden_work(tmp_path):
+    """Adversary round 38 on PR 27: a cone sparse-checkout's out-of-cone files are skip-worktree entries with no
+    file, and every one was `index-hidden paths: <n>`; an assume-unchanged path that is gone still counts, and a
+    tracked `S x` marked assume-unchanged made the sed print a second name `x`, archiving an unrelated file."""
+    import tarfile
+    mod, doc = load(), load_doc()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    git(work, "update-index", "--skip-worktree", "a.txt")
+    (work / "a.txt").unlink()
+    assert git(work, "status", "--porcelain") == ""
+    c = scan_one(mod, roots)
+    assert c["index_hidden"] == 0 and c["verdict"] == "clean and pushed", c
+    git(work, "update-index", "--no-skip-worktree", "a.txt")
+    git(work, "checkout", "--", "a.txt")
+    git(work, "update-index", "--assume-unchanged", "a.txt")
+    (work / "a.txt").unlink()
+    assert scan_one(mod, roots)["index_hidden"] == 1
+    git(work, "update-index", "--no-assume-unchanged", "a.txt")
+    git(work, "checkout", "--", "a.txt")
+    (work / "S x").write_text("tracked\n")
+    git(work, "add", "S x")
+    git(work, "commit", "-q", "-m", "S x")
+    git(work, "update-index", "--assume-unchanged", "S x")
+    (work / "x").write_text("not hidden work\n")
+    ck = doc.checkout_dir(str(work))
+    prefix = "GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); "
+    cmd = prefix + doc.HIDDEN_FMT.format(*map(doc.shquote, doc.hidden_values(str(work), ck))).replace("<DEST>", str(tmp_path / "dest"))
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    tar = tarfile.open(tmp_path / "dest" / ck / "hidden.tar")
+    assert set(tar.getnames()) == {"hidden.list", "S x"}, tar.getnames()
 
 
 def test_a_reflog_only_commit_is_counted_and_packed(tmp_path):
@@ -2125,8 +2172,11 @@ def test_a_reflog_only_commit_is_counted_and_packed(tmp_path):
     row = next(r for r in section_3_2(doc.render(doc_scan([doc_checkout("/p/r", flags=["reflog-only commits: 3"],
                                                                         verdict="reflog-only commits: 3", reflog_only_commits=3)]))).splitlines()
                if r.startswith("| /p/r "))
-    assert "3 reflog-only commit(s)" in row and "rev-list --objects --reflog --not --all > <DEST>/checkouts/abs/p/r/reflog-only.list" in row
-    assert "git -C /p/r pack-objects <DEST>/checkouts/abs/p/r/reflog-only < <DEST>/checkouts/abs/p/r/reflog-only.list" in row
+    assert "3 reflog-only commit(s) (left by a reset, amend, rebase or squash-merge in the last ~30 days" in row
+    assert ("GIT_ADVICE=0 GIT_NO_LAZY_FETCH=1 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C /p/r rev-list --objects "
+            "--missing=allow-promisor --reflog --not --all > <DEST>/checkouts/abs/p/r/reflog-only.list") in row  # round 38
+    assert "GIT_NO_LAZY_FETCH=1 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C /p/r pack-objects <DEST>/checkouts/abs/p/r/reflog-only < <DEST>/checkouts/abs/p/r/reflog-only.list" in row
+    assert "then `git update-ref refs/recovered/<sha> <sha>` for each commit line of `reflog-only.list`" in row
     ck = doc.checkout_dir(str(work))
     cmd = doc.REFLOG_FMT.format(*map(doc.shquote, doc.reflog_values(str(work), ck))).replace("<DEST>", str(tmp_path / "dest"))
     for shell in ("bash", "zsh"):
@@ -2135,12 +2185,32 @@ def test_a_reflog_only_commit_is_counted_and_packed(tmp_path):
         shutil.rmtree(tmp_path / "dest", ignore_errors=True)
         run = subprocess.run([shell, "-c", cmd], capture_output=True, text=True)
         assert run.returncode == 0, (shell, run.stderr)
+        assert "hint:" not in run.stderr, run.stderr  # round 38: `GIT_ADVICE=0` silences the grafts deprecation hint
         idx = list((tmp_path / "dest" / ck).glob("reflog-only-*.idx"))
         assert len(idx) == 1
         assert lost in git(work, "verify-pack", "-v", str(idx[0]))
     # once the reflog has expired the commit is gone for good and the count says so
     git(work, "reflog", "expire", "--expire=now", "--all")
     assert scan_one(mod, roots)["reflog_only_commits"] == 0
+
+
+def test_a_reflog_only_commit_on_an_unborn_head_is_counted(tmp_path):
+    """Adversary round 38 on PR 27: commit X on `main`, never pushed, then `switch --orphan fresh` and
+    `branch -D main`: no local ref is left, `unborn` is true, and the reflog count was skipped under it, so the
+    checkout read `clean and pushed` while `git reflog` still recovered X."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    commit_file(work, "lost.txt")
+    lost = git(work, "rev-parse", "HEAD").strip()
+    git(work, "switch", "--orphan", "fresh")
+    git(work, "branch", "-D", "main")
+    assert git(work, "for-each-ref", "refs/heads", "refs/tags") == ""
+    for remote in (False, True):
+        mod._remote_cache.clear()
+        c = scan_one(mod, roots, remote=remote)
+        assert c["reflog_only_commits"] == 1 and "reflog-only commits: 1" in c["flags"], c
+        assert c["verdict"] != "clean and pushed", c
+    assert lost in git(work, "rev-list", "--reflog", "--not", "--all")
 
 
 def test_a_local_tag_of_a_pushed_commit_is_not_local_only(tmp_path):
@@ -2217,6 +2287,31 @@ def test_capture_plan_pushes_or_bundles_a_tag_object_on_a_pushed_commit():
                         local_only_branches=[{"branch": "side", "count": 2}], local_only_tags=[{"tag": "v0", "count": 0}])
     row = next(r for r in section_3_2(mod.render(doc_scan([both]))).splitlines() if r.startswith("| /p/b "))
     assert "tag `v0` (tag only)" in row and "refs/tags/v0:refs/tags/v0" in row and "tags.bundle" not in row
+
+
+def test_capture_plan_never_pushes_to_a_credential_bearing_origin():
+    """Codex pass 33 on PR 27: a checkout flagged `origin url holds a credential: not queried` still got a
+    `git push origin` command whenever a branch or tag was local-only; running it hands the credential-bearing url
+    to the transport helper's argv. Every push variant is replaced by its bundle alone."""
+    mod = load_doc()
+    cred = mod.ORIGIN_CREDENTIAL
+    head = doc_checkout("/p/h", flags=["unpushed commits", cred], verdict="unpushed commits", ahead_of_origin=2, unpushed=2)
+    others = doc_checkout("/p/o", flags=["unpushed commits", cred], verdict="unpushed commits", local_only_commits=3,
+                          local_only_branches=[{"branch": "side", "count": 3}], local_only_tags=[{"tag": "v1", "count": 0}])
+    tags = doc_checkout("/p/t", flags=["unpushed tags", cred], verdict="unpushed tags",
+                        local_only_tags=[{"tag": "release", "count": 0}])
+    text = section_3_2(mod.render(doc_scan([head, others, tags])))
+    assert "push -u" not in text and "push origin" not in text, text
+    for p, bundle in (("/p/h", "branch-main.bundle refs/heads/main"), ("/p/o", "local-only.bundle --all"), ("/p/t", "tags.bundle --tags")):
+        row = next(r for r in text.splitlines() if r.startswith(f"| {p} "))
+        assert f"git -C {p} bundle create <DEST>/checkouts/abs{p}/{bundle}` (origin url holds a credential: no push until it is removed from the url; bundle instead)" in row, row
+        assert "| yes: bundle it; a push would hand the credential-bearing origin url to the transport |" in row, row
+    # without the flag the same records keep their push-or-bundle rows
+    for co in (head, others, tags):
+        co["flags"].remove(cred)
+    text = section_3_2(mod.render(doc_scan([head, others, tags])))
+    assert text.count("git -C /p/h push -u origin") == 1 and text.count("git -C /p/o push origin") == 2
+    assert text.count("git -C /p/t push origin --tags") == 1 and "holds a credential" not in text
 
 
 def test_stash_capture_command_keeps_each_entry_index_tree(tmp_path):
