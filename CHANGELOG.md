@@ -62,6 +62,10 @@ agent what changed and what is new. Entries end with the pull request number.
   with a `float(None)` error (#13).
 - `self-slash` (herdr): a slash command left on the input line after the first Enter is Entered again, up to 3 times,
   for every TUI and not only cursor-agent; if it never leaves the line the waiter exits 8 and logs "NOT confirmed
+- `firecrawl-router`: tokenless serving answers only a `Host` header that names the bound
+  loopback server (DNS-rebinding allow-list), and the bearer compare is constant-time
+  (`hmac.compare_digest`) (2026-10-22).
+
   run" instead of "sent" (2026-10-20).
 
 ### Security

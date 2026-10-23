@@ -720,6 +720,52 @@ class RequestTargetTest(unittest.TestCase):
         self.assertEqual(origin.seen, [("/v2/scrape", "Bearer real-key"), ("/v2/crawl/abc?x=1", "Bearer real-key")])
 
 
+class HostAllowListTest(unittest.TestCase):
+    """Tokenless serving answers only a Host that names the bound loopback server (2026-10-22)."""
+
+    def raw(self, port, host, target="/v2/scrape"):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        try:
+            conn.putrequest("POST", target, skip_host=True)
+            conn.putheader("Host", host)
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Content-Length", "2")
+            conn.endheaders(b"{}")
+            resp = conn.getresponse()
+            resp.read()
+            return resp.status
+        finally:
+            conn.close()
+
+    def serve(self, base):
+        router = fr.Router(fr.Backend("primary", base, "real-key"), None, timeout=5, token="", log=io.StringIO())
+        srv = fr.serve(router, "127.0.0.1:0")
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return srv
+
+    def test_rebinding_host_names_are_refused(self):
+        origin = Redirector()
+        self.addCleanup(origin.close)
+        srv = self.serve(origin.base)
+        port = srv.server_address[1]
+        for host in ("evil.example", f"127.0.0.1.evil.example:{port}", f"evil.example:{port}",
+                     f"localhost.evil.example:{port}", "[::1]", "127.0.0.1:1"):
+            with self.subTest(host=host):
+                self.assertEqual(self.raw(port, host), 403)
+        self.assertEqual(origin.seen, [])
+
+    def test_the_bound_loopback_host_still_answers(self):
+        origin = Redirector()
+        self.addCleanup(origin.close)
+        srv = self.serve(origin.base)
+        port = srv.server_address[1]
+        for host in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            with self.subTest(host=host):
+                self.assertEqual(self.raw(port, host), 200)
+        self.assertEqual(len(origin.seen), 2)
+
+
 class ChildEnvTest(unittest.TestCase):
     def test_child_never_sees_the_router_keys(self):
         import os

@@ -80,6 +80,7 @@ the fallback reason. Keys are never logged.
 from __future__ import annotations
 
 import argparse
+import hmac
 import ipaddress
 import http.server
 import json
@@ -654,9 +655,23 @@ def make_handler(router: Router):
             pass
 
         def _serve(self):
-            if router.token and self.headers.get("Authorization") != f"Bearer {router.token}":
-                self._send(401, {"Content-Type": "application/json"}, b'{"success":false,"error":"unauthorized"}')
-                return
+            if router.token:
+                auth = self.headers.get("Authorization") or ""
+                if not hmac.compare_digest(auth, f"Bearer {router.token}"):
+                    self._send(401, {"Content-Type": "application/json"}, b'{"success":false,"error":"unauthorized"}')
+                    return
+            else:
+                # No token: a browser page could otherwise reach the router through the
+                # operator's own resolver (DNS rebinding). Accept only a Host that names
+                # this loopback server: loopback hostname and the bound port (2026-10-22).
+                host = (self.headers.get("Host") or "").strip()
+                name, sep, port = host.rpartition(":")
+                name = name.strip("[]") if sep else host
+                bound = str(self.server.server_address[1])
+                if name not in LOOPBACK_URL_HOSTS or port not in ((bound, "80") if bound == "80" else (bound,)):
+                    self._send(403, {"Content-Type": "application/json"},
+                               b'{"success":false,"error":"firecrawl-router: host not allowed"}')
+                    return
             n = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(n) if n else None
             if not self.path.startswith("/"):  # ".evil.example/x" appended to a base URL names another host
