@@ -1160,16 +1160,18 @@ gateway agent with `relay.py`. Design: `~/.local/state/bigteam/loadgate-followup
    `hermes --resume SID -z TEXT` with stdin closed replied from the earlier turn's context, grew the same session
    from 2 to 4 messages and created no new one; an unknown sid exits 1 with "session not found" and creates nothing.
    **Real gateway run 2026-10-23** (load-watch session relayed djbclark's yes): `relay.py hermes:16790ed2` (Telegram topic
-   inbox-ops) rc 0, `delivered`, reply `RELAY OK`, message count 79 -> 81, user row tagged `[relay from djbclark-ade-61]`,
-   0600 lock free afterwards; evidence in `~/.local/state/bigteam/relay-hermes-route/real/`.
+   inbox-ops) rc 0, `delivered`, reply `RELAY OK`, stored user row tagged `[relay from djbclark-ade-61]`,
+   0600 lock free afterwards (`message_count` is a per-run counter a `-z` turn rewrites, not the transcript size: the session
+   has 4102 message rows); evidence in `~/.local/state/bigteam/relay-hermes-route/real/`.
 2. **Built; adversary rounds 1 and 2 BLOCKed, repaired** (reports in `~/.local/state/bigteam/relay-hermes-route/`,
    `adversary-report-1.md`, `adversary-report-2.md`): route `hermes` in `skills/session-finder/relay.py`
    (`route_hermes`, the only route for a `hermes-gw` row with a `sid`; no fallback), `TestHermesRoute` in
    `tests/test_relay_fallback.py`. Round 1: exact not-found match, no self-relay, no kill, scrubbed env, reply as data.
    Round 2: started line before the wait and floor 100 s (a caller's own tool timeout), per-conversation flock, a
    nested relay tagged as Hermes, self-refusal by chat identity, `ACP_OPERATOR_APPROVED` scrubbed, 0600 reply files with
-   pruning, format characters stripped, hop claim narrowed to nested `hermes -z` turns. **A third adversary round on
-   the repaired head is owed before the push.**
+   pruning, format characters stripped, hop claim narrowed to nested `hermes -z` turns. Round 3 was APPROVE (below).
+   The later `fleet.py` agent_close fix (4572876) had no adversary round of its own: a read-only SQL change, covered by a
+   unit test and checked on the real database.
    Open by design: **R1-M2** (a relay while the gateway is mid-turn: `fleet.py` fixes the row at `idle`, and the
    gateway's cached agent may not see the relayed exchange until it reloads; "delivered" means "ran on the stored
    transcript"), **R1-L4** (the exchange is invisible in the chat but is history for djbclark's next turn; consider a
