@@ -13,6 +13,14 @@ agent what changed and what is new. Entries end with the pull request number.
 
 - `bin/claude-fleet-governor` (`check`, `run [--dry-run]`, `status [--json]`, `--install`): projects the Claude 5-hour and weekly aiuse windows to their resets and, at `tight` or `critical`, moves every live Paseo `claude` agent Opus/Fable → Sonnet 5.5 in place (Fable → Opus at any level), at critical steers running agents to hand off to omp API credits once per reset period, restores after the reset, and pings Hermes once per changing run; exit 0/1/2, 10 stale data, 11 a call failed, 12 internal error; state `~/.local/state/ade/fleet-governor.json`; launchd job via `--install` (2026-10-23, #31).
 - `bin/paseo-set-model` (`set <agent> <model> [--dry-run]`, `list --json`): switches a live Paseo agent's model in place through the daemon's own `set_agent_model_request`, which the Paseo CLI lacks (docs/upstream-issues.md section 17); exit 3 no such agent, 4 model not applied (2026-10-23, #31).
+- `bin/app-tamer-ab`: a 60 s sampler (load per core, compressor churn, swap, App Tamer's own CPU) with named phases and a per-phase `summary`, for the with/without App Tamer comparison (2026-10-23).
+
+- Added `bin/ade-update`, one command that keeps a machine current: it fast-forward pulls (refusing with exit 2 when a
+  path the pull would change or create has a local modification, an untracked or an ignored file, or a parent or
+  child path of one), relinks missing skills
+  (only in the canonical checkout; any other `--repo` is report-only), checks the `CLAUDE.md` and `~/.claude` symlinks,
+  and prints the changelog entries new since the revision it last recorded; `--check` reports only and exits 10 when
+  behind (2026-10-20, #20); `--check` also lists `claude/{commands,agents,hooks}` entries that upstream adds as "new upstream" links, and apply fast-forwards to the exact commit it checked instead of pulling again; a fast-forward that landed before a post-merge hook timed out is recorded as a `merge warning` problem (exit 10), and a non-canonical `--repo` without `--state` records under its own `~/.local/state/ade/applied-<12 hex>` instead of the shared record (#20).
 - `load-watch sample` also watches compressor churn: above the `admit` limit (60000 pages/s) for `LW_CHURN_SUSTAIN_S` (180 s) it sends one line with the top
   three commands to the load watcher (at most hourly, cooldown `churn-watcher`) and to Hermes (cooldown `churn`), adds the Grok Bot/Chrome standing exception
   when they lead, never signals anything; `status` lists both cooldowns; test hook `LW_FAKE_COMPRESSOR` (2026-10-23).
@@ -21,6 +29,8 @@ agent what changed and what is new. Entries end with the pull request number.
   Decompressions, pages/s) exceeds the new `--max-mem-churn N` (default 60000, calibrated 2026-10-23 from 215
   samples: calm 11-22k, load >=25 median 80k; the first guess, 20000, was below the load<10 median of 34k), so `acp-dispatch` (which calls `admit`) holds new slices during a thrash that load alone does not show; `bg` (site-djbclark `bin/bg`, f370ad7) now also asks `admit` after its own load check and fails open if `load-watch` errors.
   The result and `--json` carry `mem_churn_pages_s`; no `vm_stat` (Linux) means the gate never blocks (2026-10-23).
+- `relay.py` also reaches a Hermes gateway conversation (a `hermes-gw` row with a session id; route `hermes`, its only route): `hermes --resume <sid> -z` runs one turn on that conversation's stored transcript, text tagged `[relay from <name>] `, in its own process group. The child loses the caller's session, Paseo, ACP-approval and Hermes routing variables and gets `RELAY_HOPS` and `RELAY_SENDER` (a relay made inside the turn is tagged as Hermes; only nested `hermes -z` turns are counted, a fourth is refused). The reply goes to a 0600 file under `RELAY_HERMES_DIR` (pruned after 7 days) and is printed as untrusted data (control, format and escape characters stripped, 4000 characters, a closing marker). It is never sent to Hermes's own conversation (session id, session key, or the same platform, chat and thread), and not while an earlier relayed turn in that conversation still holds its lock. Only rc 1, an empty stdout and the single exact "session not found" (or "cannot resume session") stderr line count as not sent, every other failure is "unverified, do not resend"; a "turn started, do not resend" line is printed to stderr first, because the caller's own tool timeout can end `relay.py` before its verdict; a turn that outlives max(100, `--wait`) seconds from the start is left running (relay.py never kills it, but a caller's tool timeout that kills the whole process tree does: give the command at least max(100, `--wait`) + 50 s or run it in the background). `--wait` must now be finite and not negative; `RELAY_HERMES` overrides the `hermes` binary. Checked on a throwaway `oneshot` session and end to end on a real Telegram topic (delivered, tagged user row and reply in its stored transcript, lock free afterwards; 2026-10-23). New skill `peer-relay` teaches Hermes to run `relay.py` itself (drafted here; Hermes installs it).
+- `fleet.py` keeps a Hermes gateway conversation listed while its row is closed with `agent_close`, which every `hermes --resume -z` turn does until the gateway reopens it by session key a few minutes later (the log line `gateway.session: reopened ended session ...; keeping route`); a row replaced by a newer one for the same session key, or ended by a reset, stays hidden. Before, a second relay minutes after the first found no session (2026-10-23).
 - `relay.py` picks the best route for the session (Paseo `send`, `acp-dispatch tell`, a live ACP launch's inbox, keys into
   its pane, then the Claude messaging socket) and falls back to the next itself when one fails before sending; it errors
   only when every route has, listing each reason. A send it cannot rule out (text typed but unseen, a `paseo send` that
@@ -131,9 +141,16 @@ agent what changed and what is new. Entries end with the pull request number.
   `clarify` (Hermes) / `request_user_input` (Codex). Universal skills `/loose`,
   `/handoff`, `/baton`, `/steps` were already reachable from every installed TUI
   (`skill-everywhere --check` all green); the change wires the chain on OpenCode.
+- `bin/skill-everywhere --check` ends with a `== end` line, which `bin/ade-update` requires (a cut-short check
+  is exit 4, "skill check incomplete"); `bin/ade-update` warns on stderr when it runs from a path other than
+  the canonical checkout (#20).
 
 ### Fixed
 
+- `bin/ade-update` exits 10 naming a stuck link on the first apply instead of 4 with an empty error, and 4 (not 10) when the canonical checkout has no `skill-everywhere` helper at all (#20).
+- `bin/ade-update` reads the Grok Bot copy-target rows of `skill-everywhere --check` (`not installed (no <dir>)`, `copied (<path>)`, `missing (<path>)`, `stale copy (<path>)`) as ok or fixable, not stuck, and drops an inherited `SKILL_EVERYWHERE_ONLY` from the helper's environment, so a check never reports on a subset of targets (#20).
+- `bin/skill-everywhere`: the Hermes plugin nudge no longer aborts the script when the Hermes wrapper has no `exec`
+  line; its `g*` tools reach plain GNU ones through master's alias loop (#20).
 - `acp-dispatch` refuses `--perm read-only` or `--perm deny` (exit 2, before any record or preflight) for an agent
   whose `acp-run <agent> --info` `perm_modes` lacks that mode; before, acp-run's own refusal came after the
   record was written and surfaced as a no-report (an omp adversary round, 2026-10-23).

@@ -232,9 +232,10 @@ added." Done the same day: `CHANGELOG.md` (Keep a Changelog form, seeded from th
 since 2026-10-09), AGENTS.md code-review rule 10 (every PR adds its line), README "Update
 (this machine)" (the manual procedure today), proposal v2.4 (T8, 4.4 item 9, §9.4 Q26). Queued:
 
-1. **`bin/ade-update`, the interim one command** (one small PR, Sonnet `code` slice): `git -C
-   ~/src/djbclark-ade pull --ff-only` (stop and print `git status` on a dirty tree or a diverged
-   branch; never stash another agent's edits), then `bin/skill-everywhere --check` over every
+1. **Done 2026-10-20** (PR #20) **`bin/ade-update`, the interim one command** (one small PR, Sonnet `code` slice): fetch once,
+   check the upstream commit, and fast-forward `~/src/djbclark-ade` to exactly that checked SHA
+   (never a second `git pull` that could move past what was checked; stop and print `git status`
+   on a dirty tree or a diverged branch; never stash another agent's edits), then `bin/skill-everywhere --check` over every
    `skills/*` (relink what is missing), the `~/.claude/{commands,agents,hooks}` symlink check,
    and print the `CHANGELOG.md` entries between `~/.local/state/ade/applied` (written at the end)
    and the new head; `--check` only reports. A test with a temp repo. README's section then
@@ -1153,19 +1154,42 @@ works on the runner (run 239; `ghcr.io/cirruslabs/android-sdk:36` pulled in 47 s
 ## `hermes` route in relay.py (asked via the load-watch session, 2026-10-23)
 
 Relayed by the load-watch session (ac1d55cc) as djbclark's ask: agents should be able to message the live Hermes
-gateway agent with `relay.py`. Verified research and design:
-`~/.local/state/bigteam/loadgate-followup-2026-10-23/hermesbidi-report.md` (Q4 is the design, under 150 lines).
+gateway agent with `relay.py`. Design: `~/.local/state/bigteam/loadgate-followup-2026-10-23/hermesbidi-report.md` (Q4).
 
-1. Route `hermes`, chosen for a `hermes-gw` fleet row with a `sid` (`fleet.py` `_hermes_gateway`); its only route, no
-   fallback to pane or socket. Send `hermes --resume <sid> -z <text>`, `stdin=DEVNULL`, timeout from `--wait` (at least
-   90 s); stdout is the reply. A timeout is `unverified` ("do not resend"), never a second route.
-2. ACP cannot load gateway sessions and `messages_send` is outbound-only: neither is a transport.
-3. **Verify the claim first** with a harmless test against a throwaway Hermes session (the report ran no tests); this
-   writes into a live transcript, so never against djbclark's Telegram session without his yes.
-4. Tests: plan() for a fake `hermes-gw` row is `["hermes"]`; missing sid is refused; argv is `--resume SID -z TEXT`
-   with stdin closed; timeout is exit 1; `--via hermes` on a non-Hermes session has no route.
-5. The Hermes-side skill (`peer-relay`: to message a peer run `relay.py <ident> "<text>"` by absolute path) is
-   Hermes-owned: ask djbclark, do not edit `~/.hermes` from here.
+1. **Verified 2026-10-23** on a throwaway oneshot session (`~/.local/state/bigteam/relay-hermes-route/`):
+   `hermes --resume SID -z TEXT` with stdin closed replied from the earlier turn's context, grew the same session
+   from 2 to 4 messages and created no new one; an unknown sid exits 1 with "session not found" and creates nothing.
+   **Real gateway run 2026-10-23** (load-watch session relayed djbclark's yes): `relay.py hermes:16790ed2` (Telegram topic
+   inbox-ops) rc 0, `delivered`, reply `RELAY OK`, stored user row tagged `[relay from djbclark-ade-61]`,
+   0600 lock free afterwards (`message_count` is a per-run counter a `-z` turn rewrites, not the transcript size: the session
+   has 4102 message rows); evidence in `~/.local/state/bigteam/relay-hermes-route/real/`.
+2. **Built; adversary rounds 1 and 2 BLOCKed, repaired** (reports in `~/.local/state/bigteam/relay-hermes-route/`,
+   `adversary-report-1.md`, `adversary-report-2.md`): route `hermes` in `skills/session-finder/relay.py`
+   (`route_hermes`, the only route for a `hermes-gw` row with a `sid`; no fallback), `TestHermesRoute` in
+   `tests/test_relay_fallback.py`. Round 1: exact not-found match, no self-relay, no kill, scrubbed env, reply as data.
+   Round 2: started line before the wait and floor 100 s (a caller's own tool timeout), per-conversation flock, a
+   nested relay tagged as Hermes, self-refusal by chat identity, `ACP_OPERATOR_APPROVED` scrubbed, 0600 reply files with
+   pruning, format characters stripped, hop claim narrowed to nested `hermes -z` turns. Round 3 was APPROVE (below).
+   The later `fleet.py` agent_close fix (4572876) had no adversary round of its own: a read-only SQL change, covered by a
+   unit test and checked on the real database.
+   Open by design: **R1-M2** (a relay while the gateway is mid-turn: `fleet.py` fixes the row at `idle`, and the
+   gateway's cached agent may not see the relayed exchange until it reloads; "delivered" means "ran on the stored
+   transcript"), **R1-L4** (the exchange is invisible in the chat but is history for djbclark's next turn; consider a
+   one-line chat notice), **R1-L5e** (`SessionResumeTooLargeError` on a long thread reports "unverified" with nothing
+   sent), **R2-L6** (a profile Hermes with its own `HERMES_HOME` gets "not sent" for another profile's conversation;
+   documented). Hop counting across non-Hermes routes (R2-M3) is not enforced: documented as nested-`-z`-only.
+   **Round 3: APPROVE at a70d792** (`adversary-report-3.md`); its M1-M3 and L4/L5/L6a/L8 are repaired in the next commit
+   (claims made true about a caller's tree-kill, session-key self-refusal for desktop, real-process lock test, handler
+   test). Left open, low: R3-L1 (not-found forgery by a process that rewrites the `.err` within 50 ms), R3-L2 (signal in the
+   microsecond window before the handler), R3-L3 (RELAY_SENDER/RELAY_HOPS leak to everything a relayed turn starts),
+   R3-L6b-e (prune race, lock files never pruned, no holder pid in the refusal), R3-L8e (`--json` timeout result has no
+   `reply_file` field).
+   **2026-10-23, load-watch report:** a relayed turn ends its row with `end_reason=agent_close`; the gateway treats that as
+   recoverable (`hermes_state_common._RECOVERABLE_END_REASONS`) and reopened the same session about five minutes later
+   (`~/.hermes/logs/gateway.log`: "reopened ended session 20261005_212354_16790ed2 ... keeping route"), so no context is lost
+   and the next Telegram message continues the same session. The bug was fleet.py hiding the row in that window; fixed
+   (`_hermes_gateway` lists `agent_close` rows not superseded by a newer row of the same session key).
+3. **Installed 2026-10-23 16:29** by Hermes itself on a relayed brief from the load-watch session (djbclark's ask): `~/.hermes/skills/peer-relay` is a symlink to `skills/peer-relay`. Hermes-to-peer direction is the load watcher's retest.
 
 ## relay.py pane route: open lows after adversary round 9 (2026-10-23)
 
