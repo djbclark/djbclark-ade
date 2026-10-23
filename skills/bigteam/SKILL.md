@@ -754,6 +754,14 @@ finds itself and the loop never exits. On 2026-10-03 two such waiters ran for
 liveness use the PID (`kill -0 $pid`) or `wait`; for completion, wait on the
 report file or the `---<name> exit=` line.
 
+**Waiting on a PR: one `bin/pr-wait` per PR head, never three waiters, never re-arm a live one.** `bin/pr-wait PR
+[--head SHA] [--out PREFIX]` waits for the CI checks of that exact head and for Codex's `codex-review-state:v1` marker
+for it (`completed` and `failed` both terminal), then prints one line and writes `PREFIX-{checks,codex,findings,summary}.json`
+(2026-10-23; separate CI, Codex and adversary waiters were two thirds of one lead's notification turns). Exit 0 done, 1
+timeout, 3 Codex stuck, 4 a waiter for that head is already alive (the line names its pid and prefix: read its files, do
+not start another), 5 the head moved (wait on the new head), 6 timed out while `gh` failed. After a push, start one for
+the new head; a second for the same head is refused by itself.
+
 ### Jobs and records — work that must outlive the session
 
 What survives a session is a file, not a process. Every slice and every

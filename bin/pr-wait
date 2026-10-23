@@ -1,0 +1,535 @@
+#!/usr/bin/env -S python3 -I
+"""pr-wait: ONE waiter per PR head for CI and Codex's review.
+
+  pr-wait PR [--repo OWNER/NAME] [--head SHA] [--since ISO] [--out PREFIX] [--timeout S]
+             [--interval S] [--codex-stuck S] [--ci-grace S] [--no-codex] [--json]
+
+Why (2026-10-23): three waiters per head (CI, Codex, adversary) were two thirds of the
+notification turns of a 579-turn lead transcript, and the load watcher found eight duplicate
+waiters on 2026-10-20. This is the one aggregating waiter: it wakes the lead once, when
+  1. every CI check on the exact head SHA is finished (`check-runs` plus commit statuses of
+     that SHA through `gh api`, not the PR's current checks), and
+  2. Codex's review of that exact head is terminal (AGENTS.md code review rule 9): the comment
+     carrying `<!-- codex-pull-request-review-summary -->` holds `<!-- codex-review-state:v1
+     {...} -->`, edited in place; `code_review.commit_sha` must equal the head and
+     `code_review.status` be `completed` or `failed` (both terminal; a marker for another sha
+     never matches).
+Then it prints ONE line and writes, each atomically (temp file beside it, then os.replace):
+  PREFIX-checks.json   the normalized checks (name, kind, state, conclusion) of the head
+  PREFIX-codex.json    the state marker of the head (the newest marker seen when none matches; {} none)
+  PREFIX-findings.json Codex's inline findings created after the `@codex review` request
+                       (`null` when not collected: --no-codex, or the wait ended before Codex did)
+  PREFIX-summary.json  the one-line result as JSON
+PREFIX defaults to ~/.local/state/pr-wait/<owner>__<name>-pr<N>-<head12>. Output files are written on
+every end except exit 2 and 4 (nothing was waited for).
+
+Findings are the PR's inline comments (`pulls/N/comments`) that end in
+`<!-- codex-code-review-finding:v1 -->` and were created at or after the request time: --since
+ISO, else the newest issue comment containing `@codex review`, else the head commit's committer date
+(an auto-review on PR open has no request comment). Never a fixed clock. GitHub re-anchors
+`commit_id` of a finding on an unchanged line, so created_at, not commit_id, tells old from new.
+
+A `gh` failure is "unknown", never "done": it is retried on the next poll and reported in the summary
+(`errors`) when the wait ends. A PR that does not exist (HTTP 404) is a usage error.
+
+Codex stuck: no terminal marker for the head `--codex-stuck` seconds (default 2700) after the wait
+started (marker absent) or after the marker was first seen non-terminal (running) ends the wait with
+result `codex-stuck`, never a silent timeout. CI with no checks at all counts as pending for
+`--ci-grace` seconds (default 120) after the wait started, because a fresh push registers its check runs
+a little later; after that, zero checks is "no checks" and finished.
+
+Exit: 0 done (CI finished and Codex terminal, whatever each said: read the files),
+      1 timed out, 2 bad usage or no such PR, 3 Codex stuck, 4 another pr-wait for the same
+      repo + PR + head is alive (its pid and output prefix on stderr: never re-arm it),
+      5 the PR head moved (a new push; the new head is in the line and the summary),
+      6 timed out while `gh` was failing (the last poll did not get through).
+Duplicate guard: a lock file `lock-<repo>-<pr>-<head>` in $PR_WAIT_STATE_DIR (default
+~/.local/state/pr-wait) made with O_EXCL, holding the pid and the process start time (`ps -o lstart=`,
+the same on macOS and Linux); a dead pid, or a live pid whose start time differs (pid reuse), is stale
+and taken over under a short takeover guard.
+"""
+
+import argparse
+import atexit
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+DEFAULT_REPO = "djbclark/djbclark-ade"
+SUMMARY_MARK = "<!-- codex-pull-request-review-summary -->"
+STATE_RE = re.compile(r"codex-review-state:v1\s+")
+FINDING_MARK = "codex-code-review-finding:v1"
+REQUEST_MARK = "@codex review"
+TERMINAL = ("completed", "failed")
+PASS_CONCLUSIONS = ("success", "neutral", "skipped")
+GH_TIMEOUT = 120
+
+EXIT_DONE, EXIT_TIMEOUT, EXIT_USAGE, EXIT_STUCK, EXIT_DUP, EXIT_MOVED, EXIT_GH = 0, 1, 2, 3, 4, 5, 6
+
+
+class GhError(Exception):
+    def __init__(self, msg: str, not_found: bool = False) -> None:
+        super().__init__(msg)
+        self.not_found = not_found
+
+
+# ---- gh -------------------------------------------------------------------------------------------
+
+
+def gh(*args: str) -> str:
+    """Run `gh` with an argv list; any failure is a GhError, never an empty success."""
+    try:
+        p = subprocess.run(
+            ["gh", *args], check=False, capture_output=True, text=True, timeout=GH_TIMEOUT
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise GhError(f"gh {args[0]} {args[1] if len(args) > 1 else ''}: {e}") from e
+    if p.returncode != 0:
+        err = (p.stderr or p.stdout).strip().replace("\n", " ")[:300]
+        raise GhError(f"gh {' '.join(args[:2])}: rc={p.returncode} {err}", "HTTP 404" in err)
+    return p.stdout
+
+
+def parse_pages(text: str) -> list:
+    """`gh api --paginate` prints one JSON document PER PAGE, concatenated: decode them all."""
+    dec = json.JSONDecoder()
+    docs, i, n = [], 0, len(text)
+    while True:
+        while i < n and text[i].isspace():
+            i += 1
+        if i >= n:
+            return docs
+        try:
+            doc, i = dec.raw_decode(text, i)
+        except ValueError as e:
+            raise GhError(f"unparsable gh output at byte {i}: {e}") from e
+        docs.append(doc)
+
+
+def api_items(endpoint: str, key: str | None = None) -> list:
+    """All items of a paginated list endpoint; `key` names the array inside an object page."""
+    items: list = []
+    for doc in parse_pages(gh("api", "--paginate", endpoint)):
+        if key is not None:
+            part = doc.get(key) if isinstance(doc, dict) else None
+        else:
+            part = doc
+        if isinstance(part, list):
+            items.extend(part)
+        else:
+            raise GhError(f"{endpoint}: unexpected page shape {type(doc).__name__}")
+    return items
+
+
+def pr_head(repo: str, pr: int) -> str:
+    try:
+        doc = json.loads(gh("api", f"repos/{repo}/pulls/{pr}"))
+        sha = doc["head"]["sha"]
+    except (ValueError, KeyError, TypeError) as e:
+        raise GhError(f"pulls/{pr}: unexpected shape: {e}") from e
+    if not isinstance(sha, str) or not sha:
+        raise GhError(f"pulls/{pr}: no head sha")
+    return sha
+
+
+# ---- CI -------------------------------------------------------------------------------------------
+
+
+def fetch_checks(repo: str, sha: str) -> list[dict]:
+    runs = api_items(f"repos/{repo}/commits/{sha}/check-runs?per_page=100", "check_runs")
+    statuses = api_items(f"repos/{repo}/commits/{sha}/status?per_page=100", "statuses")
+    out = []
+    for r in runs:
+        done = r.get("status") == "completed"
+        out.append({"name": r.get("name"), "kind": "check-run", "state": "finished" if done else "pending",
+                    "conclusion": r.get("conclusion") if done else None})
+    for s in statuses:
+        st = s.get("state")
+        out.append({"name": s.get("context"), "kind": "status",
+                    "state": "pending" if st == "pending" else "finished",
+                    "conclusion": None if st == "pending" else st})
+    return out
+
+
+def ci_counts(checks: list[dict]) -> dict:
+    pending = sum(1 for c in checks if c["state"] == "pending")
+    passed = sum(1 for c in checks if c["state"] == "finished" and c["conclusion"] in PASS_CONCLUSIONS)
+    return {"total": len(checks), "pass": passed, "fail": len(checks) - pending - passed, "pending": pending}
+
+
+# ---- Codex ----------------------------------------------------------------------------------------
+
+
+def parse_state(body: str) -> dict | None:
+    m = STATE_RE.search(body)
+    if not m:
+        return None
+    try:
+        doc, _ = json.JSONDecoder().raw_decode(body, m.end())
+    except ValueError:
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def codex_state_for(comments: list[dict], head: str) -> tuple[dict | None, dict | None]:
+    """(marker whose code_review.commit_sha is head, newest marker of any head)."""
+    marked = []
+    for c in comments:
+        body = c.get("body") or ""
+        if SUMMARY_MARK in body:
+            st = parse_state(body)
+            if st is not None:
+                marked.append((c.get("updated_at") or c.get("created_at") or "", st))
+    marked.sort(key=lambda t: t[0])
+    newest = marked[-1][1] if marked else None
+    match = None
+    for _, st in marked:
+        cr = st.get("code_review")
+        if isinstance(cr, dict) and cr.get("commit_sha") == head:
+            match = st
+    return match, newest
+
+
+def code_review(state: dict | None) -> dict:
+    cr = (state or {}).get("code_review")
+    return cr if isinstance(cr, dict) else {}
+
+
+def parse_ts(s: str) -> datetime:
+    d = datetime.fromisoformat(s.strip().replace("Z", "+00:00"))
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def request_time(comments: list[dict]) -> str | None:
+    times = [c["created_at"] for c in comments if REQUEST_MARK in (c.get("body") or "") and c.get("created_at")]
+    return max(times, key=parse_ts) if times else None
+
+
+def head_commit_date(repo: str, sha: str) -> str:
+    try:
+        return json.loads(gh("api", f"repos/{repo}/commits/{sha}"))["commit"]["committer"]["date"]
+    except (ValueError, KeyError, TypeError) as e:
+        raise GhError(f"commits/{sha}: unexpected shape: {e}") from e
+
+
+def fetch_findings(repo: str, pr: int, since: str) -> list[dict]:
+    t0 = parse_ts(since)
+    rows = api_items(f"repos/{repo}/pulls/{pr}/comments?per_page=100")
+    out = []
+    for c in rows:
+        body = c.get("body") or ""
+        if FINDING_MARK in body and c.get("created_at") and parse_ts(c["created_at"]) >= t0:
+            out.append({"id": c.get("id"), "path": c.get("path"), "line": c.get("line") or c.get("original_line"),
+                        "created_at": c["created_at"], "body": body[:600]})
+    return out
+
+
+# ---- files ----------------------------------------------------------------------------------------
+
+
+def write_atomic(path: str, doc: object) -> None:
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(doc, f, indent=1)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+# ---- duplicate guard ------------------------------------------------------------------------------
+
+
+def proc_start(pid: int) -> str | None:
+    """Process start time as `ps -o lstart=` prints it (macOS and Linux); None when the pid is gone."""
+    try:
+        p = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], check=False, capture_output=True,
+                           text=True, timeout=10, env={"LC_ALL": "C", "PATH": os.environ.get("PATH", "")})
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    out = " ".join(p.stdout.split())
+    return out if p.returncode == 0 and out else None
+
+
+def lock_live(doc: object) -> bool:
+    if not isinstance(doc, dict) or not isinstance(doc.get("pid"), int) or not doc.get("start"):
+        return False
+    return proc_start(doc["pid"]) == doc["start"]
+
+
+def read_lock(path: Path) -> object:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def acquire_lock(path: Path, info: dict) -> dict | None:
+    """Create the lock with O_EXCL. Returns None when taken, else the live holder's lock doc."""
+    payload = json.dumps(info).encode()
+    guard = Path(f"{path}.takeover")
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            doc = read_lock(path)
+            if lock_live(doc):
+                return doc  # type: ignore[return-value]
+            # stale: take over under a guard so two takers cannot both unlink the other's new lock
+            try:
+                gfd = os.open(guard, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                try:
+                    if time.time() - guard.stat().st_mtime > 30:
+                        guard.unlink()  # a taker that died inside the guard
+                except OSError:
+                    pass
+                if time.monotonic() > deadline:
+                    return doc if isinstance(doc, dict) else {"pid": "?", "out": "?"}
+                time.sleep(0.05)
+                continue
+            try:
+                os.close(gfd)
+                if not lock_live(read_lock(path)):
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
+            finally:
+                try:
+                    guard.unlink()
+                except FileNotFoundError:
+                    pass
+            continue
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        return None
+
+
+def release_lock(path: Path, pid: int) -> None:
+    doc = read_lock(path)
+    if isinstance(doc, dict) and doc.get("pid") == pid:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+# ---- the wait -------------------------------------------------------------------------------------
+
+
+def number(s: str) -> float:
+    try:
+        v = float(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"needs a number of seconds, got '{s}'") from None
+    if v < 0:
+        raise argparse.ArgumentTypeError(f"must not be negative, got '{s}'")
+    return v
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:  # argparse exits 2 already; keep the usage text short
+        self.exit(EXIT_USAGE, f"pr-wait: {message}\n")
+
+
+def build_parser() -> Parser:
+    p = Parser(prog="pr-wait", description="ONE waiter per PR head: CI checks and Codex's review. "
+               "Exit: 0 done, 1 timeout, 2 usage/no such PR, 3 Codex stuck, 4 duplicate waiter alive, "
+               "5 head moved, 6 timeout while gh was failing.")
+    p.add_argument("pr", type=int, help="pull request number")
+    p.add_argument("--repo", default=DEFAULT_REPO, help=f"OWNER/NAME (default {DEFAULT_REPO})")
+    p.add_argument("--head", help="head SHA to wait on (default: the PR's current head)")
+    p.add_argument("--since", help="ISO time of the `@codex review` request (default: newest such issue comment)")
+    p.add_argument("--out", help="output prefix (default ~/.local/state/pr-wait/<repo>-pr<N>-<head12>)")
+    p.add_argument("--timeout", type=number, default=3600, help="seconds before giving up (default 3600)")
+    p.add_argument("--interval", type=number, default=30, help="seconds between polls (default 30)")
+    p.add_argument("--codex-stuck", type=number, default=2700, help="seconds before a non-terminal Codex "
+                   "review is reported stuck (default 2700)")
+    p.add_argument("--ci-grace", type=number, default=120, help="seconds a head with no checks yet counts as "
+                   "pending (default 120)")
+    p.add_argument("--no-codex", action="store_true", help="wait for CI only")
+    p.add_argument("--json", action="store_true", help="print the summary as one JSON line")
+    return p
+
+
+def state_dir() -> Path:
+    return Path(os.environ.get("PR_WAIT_STATE_DIR") or Path.home() / ".local/state/pr-wait")
+
+
+def main(argv: list[str]) -> int:
+    a = build_parser().parse_args(argv)
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", a.repo):
+        return usage(f"--repo must be OWNER/NAME, got '{a.repo}'")
+    if a.head is not None and not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", a.head):
+        return usage(f"--head must be a full commit SHA (40 hex), got '{a.head}'")
+    if a.since is not None:
+        try:
+            parse_ts(a.since)
+        except ValueError:
+            return usage(f"--since must be an ISO time, got '{a.since}'")
+    if a.pr < 1:
+        return usage("PR must be a positive number")
+
+    start = time.monotonic()
+    deadline = start + a.timeout
+    errors: list[str] = []
+
+    # resolve the head; a gh failure is retried, a missing PR is a usage error
+    head = a.head
+    if head is None:
+        while True:
+            try:
+                head = pr_head(a.repo, a.pr)
+                break
+            except GhError as e:
+                if e.not_found:
+                    return usage(f"no such PR: {a.repo}#{a.pr} ({e})")
+                errors = [str(e)]
+                if time.monotonic() >= deadline:
+                    print(f"PR {a.pr}: timeout, gh failed all along: {e}")
+                    return EXIT_GH
+                time.sleep(min(a.interval, max(0.0, deadline - time.monotonic())))
+    head = head.lower()
+
+    sd = state_dir()
+    sd.mkdir(parents=True, exist_ok=True)
+    slug = a.repo.replace("/", "__")
+    out = a.out or str(sd / f"{slug}-pr{a.pr}-{head[:12]}")
+    lock = sd / f"lock-{slug}-{a.pr}-{head}"
+    me = os.getpid()
+    my_start = proc_start(me)
+    if my_start is None:
+        return usage("cannot read this process's start time with `ps -o lstart=`")
+    held = acquire_lock(lock, {"pid": me, "start": my_start, "repo": a.repo, "pr": a.pr,
+                               "head": head, "out": out})
+    if held is not None:
+        print(f"pr-wait: already waiting on {a.repo}#{a.pr} at {head[:12]}: pid {held.get('pid')}, "
+              f"output prefix {held.get('out')} (read its files; never re-arm a live waiter)", file=sys.stderr)
+        return EXIT_DUP
+    atexit.register(release_lock, lock, me)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+
+    s = {"checks": None, "codex_match": None, "codex_newest": None, "findings": None,
+         "ci_done": False, "codex_done": a.no_codex, "since": None, "since_source": None,
+         "codex_clock": start, "running_seen": False}
+
+    def finish(result: str, code: int, new_head: str | None = None) -> int:
+        checks = s["checks"] or []
+        counts = ci_counts(checks)
+        cr = code_review(s["codex_match"])
+        newest_cr = code_review(s["codex_newest"])
+        if a.no_codex:
+            codex = {"status": "skipped"}
+        else:
+            codex = {"status": cr.get("status") or ("absent" if not newest_cr else "other-head"),
+                     "commit_sha": cr.get("commit_sha"), "newest_seen_commit_sha": newest_cr.get("commit_sha")}
+        ci_state = "done" if s["ci_done"] else "pending"
+        if s["ci_done"] and not checks:
+            ci_state = "no-checks"
+        summary = {"result": result, "exit": code, "repo": a.repo, "pr": a.pr, "head": head,
+                   "new_head": new_head, "ci": {"state": ci_state, **counts}, "codex": codex,
+                   "findings": None if s["findings"] is None else len(s["findings"]),
+                   "since": s["since"], "since_source": s["since_source"], "errors": errors[-3:],
+                   "elapsed_s": round(time.monotonic() - start, 1), "out": out}
+        write_atomic(f"{out}-checks.json", checks)
+        write_atomic(f"{out}-codex.json", None if a.no_codex else (s["codex_match"] or s["codex_newest"] or {}))
+        write_atomic(f"{out}-findings.json", s["findings"])
+        write_atomic(f"{out}-summary.json", summary)
+        if a.json:
+            print(json.dumps(summary, separators=(",", ":")))
+        else:
+            parts = [f"PR {a.pr} at {head[:12]}: {result}",
+                     f"CI {ci_state} ({counts['pass']} pass, {counts['fail']} fail, {counts['pending']} pending)"]
+            if not a.no_codex:
+                parts.append(f"codex {codex['status']}")
+            if s["findings"] is not None:
+                parts.append(f"findings since {s['since']}: {len(s['findings'])}")
+            if new_head:
+                parts.append(f"new head {new_head[:12]}")
+            if errors and code in (EXIT_TIMEOUT, EXIT_GH):
+                parts.append(f"last gh error: {errors[-1]}")
+            print("; ".join(parts))
+        return code
+
+    fails: list[str] = []  # gh failures of the current poll
+
+    def attempt(fn, *fargs):  # one gh-backed step: a failure is "unknown", retried on the next poll
+        try:
+            return fn(*fargs)
+        except GhError as e:
+            fails.append(str(e))
+            errors.append(str(e))
+            return None
+
+    issue_comments = f"repos/{a.repo}/issues/{a.pr}/comments?per_page=100"
+
+    def collect_findings() -> bool:
+        if a.no_codex:
+            return True
+        since, source = a.since, "--since"
+        if since is None:
+            comments = attempt(api_items, issue_comments)
+            if comments is None:
+                return False
+            since, source = request_time(comments), "request-comment"
+            if since is None:
+                since, source = attempt(head_commit_date, a.repo, head), "head-commit-date"
+                if since is None:
+                    return False
+        found = attempt(fetch_findings, a.repo, a.pr, since)
+        if found is None:
+            return False
+        s["findings"], s["since"], s["since_source"] = found, since, source
+        return True
+
+    while True:
+        fails.clear()
+        codex_polled = False
+        cur = attempt(pr_head, a.repo, a.pr)
+        if cur is not None and cur.lower() != head:
+            return finish("head-moved", EXIT_MOVED, cur)
+        if cur is not None:
+            if not s["ci_done"]:
+                checks = attempt(fetch_checks, a.repo, head)
+                if checks is not None:
+                    s["checks"] = checks
+                    if not any(c["state"] == "pending" for c in checks) and (
+                        checks or time.monotonic() - start >= a.ci_grace
+                    ):
+                        s["ci_done"] = True
+            if not s["codex_done"]:
+                comments = attempt(api_items, issue_comments)
+                if comments is not None:
+                    codex_polled = True
+                    match, newest = codex_state_for(comments, head)
+                    s["codex_match"], s["codex_newest"] = match, newest
+                    if code_review(match).get("status") in TERMINAL:
+                        s["codex_done"] = True
+                    elif match is not None and not s["running_seen"]:
+                        s["running_seen"] = True
+                        s["codex_clock"] = time.monotonic()
+            if s["ci_done"] and s["codex_done"] and collect_findings():
+                return finish("done", EXIT_DONE)
+
+        now = time.monotonic()
+        if codex_polled and not s["codex_done"] and now - s["codex_clock"] >= a.codex_stuck:
+            return finish("codex-stuck", EXIT_STUCK)
+        if now >= deadline:
+            return finish("timeout", EXIT_GH if fails else EXIT_TIMEOUT)
+        time.sleep(min(a.interval, max(0.0, deadline - now)))
+
+
+def usage(msg: str) -> int:
+    print(f"pr-wait: {msg}", file=sys.stderr)
+    return EXIT_USAGE
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
