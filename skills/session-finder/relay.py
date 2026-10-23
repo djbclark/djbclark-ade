@@ -285,7 +285,7 @@ BORDER = set("─━═╭╮╰╯┌┐└┘")
 
 
 def _plain(ln):
-    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", ln).strip().strip("│┃").strip()
+    return re.sub(r"\x1b\[[0-9;:?]*[A-Za-z]", "", ln).strip().strip("│┃").strip()
 
 
 def _is_border(ln):
@@ -296,19 +296,23 @@ def _is_border(ln):
 
 def box_parse(raw):
     """(draft, rows below it) of the Claude Code input box in screen text RAW, or None when the box is not plainly
-    in it: no bottom rule, no ❯ row between the last two rules, or more than one (a ❯ the operator typed or pasted
-    inside the box). None means unknown, never empty: an Enter or typing decision must not act on it (adversary
-    round 7: a 12-row draft pushed its ❯ row out of the 14 rows read and the relay typed into it)."""
+    in it. The box is the ONE rule row that is immediately followed by a ❯ row, with the bottom rule (the last rule
+    read) after it and no other rule or ❯ row between. Anything else is unknown, never empty: a rule or ❯ the
+    operator typed or pasted into a draft would otherwise pose as a smaller, empty box, and a prompt row that
+    scrolled out of the 14 rows read leaves nothing to find (adversary rounds 7 and 8)."""
     rows = raw.splitlines()
     borders = [i for i, ln in enumerate(rows) if _is_border(ln)]
     if not borders:
         return None
-    bottom, top = borders[-1], (borders[-2] if len(borders) > 1 else -1)
-    marks = [i for i in range(top + 1, bottom) if "❯" in rows[i]]
-    if len(marks) != 1:
+    bottom = borders[-1]
+    tops = [i for i in borders if i + 1 < len(rows) and "❯" in rows[i + 1]]
+    if len(tops) != 1 or tops[0] + 1 >= bottom:
         return None
-    return (prompt_line.classify(rows[marks[0]]) or "",
-            " ".join(t for t in (_plain(ln) for ln in rows[marks[0] + 1:bottom]) if t))
+    mark = tops[0] + 1
+    if any("❯" in ln or _is_border(ln) for ln in rows[mark + 1:bottom]):
+        return None
+    return (prompt_line.classify(rows[mark]) or "",
+            " ".join(t for t in (_plain(ln) for ln in rows[mark + 1:bottom]) if t))
 
 
 def rows_below(chan):
@@ -322,10 +326,8 @@ def rows_below(chan):
 def box_text(chan):
     """What the input box holds: the ❯ row and the rows below it, whitespace-folded; None when the box is not
     plainly in view (unknown, not empty)."""
-    d, rb = draft(chan), rows_below(chan)
-    if d is None or rb is None:
-        return None
-    return " ".join((d + " " + rb).split())
+    p = box_parse(box_read(chan))    # one read: the ❯ row and the rows under it must be the same screen
+    return None if p is None else " ".join((p[0] + " " + p[1]).split())
 
 
 def press_enter(chan):
@@ -389,6 +391,7 @@ def stuck_in_box(chan, text, pin="*"):
 
 
 PASTE_MIN = 800     # Claude Code collapses only a paste longer than this into a placeholder
+PIN_WINDOW = 6      # s after typing in which the first collapsed placeholder seen may still be ours
 PASTE_RE = re.compile(r"\[Pasted text #\d+\]")
 
 
@@ -471,15 +474,39 @@ def arm(s, chan, text, mark, pin="*"):
         note_unsent(s["id"], text, d if holds(d, text) or ours_paste(d, text, pin) else "", mark)
 
 
+def sent_in(tx, mark, text):
+    """True when the transcript file TX holds, after byte MARK, a user message (or a queued one) that IS TEXT, whole
+    and whitespace-folded. Never a substring: "continue" appears in any assistant line (adversary round 8)."""
+    want = " ".join((text or "").split())
+    if not (tx and Path(tx).is_file()) or mark is None or not want:
+        return False
+    with Path(tx).open("rb") as fh:
+        fh.seek(mark)
+        lines = fh.read().decode("utf-8", "replace").splitlines()
+    for ln in lines:
+        try:
+            o = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(o, dict):
+            continue
+        if o.get("type") == "queue-operation" and o.get("operation") == "enqueue":
+            got = [o.get("content")]
+        elif o.get("type") == "user":
+            c = (o.get("message") or {}).get("content")
+            got = [" ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+                   if isinstance(c, list) else c]
+        else:
+            continue
+        if any(isinstance(g, str) and " ".join(g.split()) == want for g in got):
+            return True
+    return False
+
+
 def in_transcript(s, entry):
     """True when the leftover ENTRY's whole text is already in session S's transcript after the entry's mark: it was
     delivered, so a copy in the box now is the operator's (Up-arrow history, a rewind), not an unsent one."""
-    tx = Path(s["transcript"]) if s.get("transcript") else None
-    if not (tx and tx.is_file()) or entry.get("mark") is None:
-        return False
-    with tx.open("rb") as fh:
-        fh.seek(entry["mark"])
-        return json.dumps(entry["text"], ensure_ascii=False)[1:-1] in fh.read().decode("utf-8", "replace")
+    return sent_in(s.get("transcript"), entry.get("mark"), entry.get("text"))
 
 
 def forget(sid, text):
@@ -685,14 +712,11 @@ def retry_leftover(c, chan, d, left):
         return ("unverified", f"your earlier copy of this message is still in its input box, or the box is out of view "
                               f"({fleet.clip(d or '', 60)!r}). Do not resend; check its pane")
     tx = Path(s["transcript"]) if s.get("transcript") else None
-    probe = json.dumps(text, ensure_ascii=False)[1:-1]
     deadline = time.time() + (c["a"].wait if pressed else 0)
     while tx and tx.is_file() and left.get("mark") is not None:
-        with tx.open("rb") as fh:
-            fh.seek(left["mark"])
-            if probe in fh.read().decode("utf-8", "replace"):
-                note_unsent(s["id"], None)
-                return ("ok", f"{chan[0]} {chan[1]}", "delivered")
+        if sent_in(tx, left["mark"], text):
+            note_unsent(s["id"], None)
+            return ("ok", f"{chan[0]} {chan[1]}", "delivered")
         if time.time() >= deadline:
             break
         time.sleep(1)
@@ -752,19 +776,18 @@ def route_pane(c):
             return ("unverified", f"text typed into {chan[0]} {chan[1]} (or not: the typing CLI did not finish) but its "
                                   "Enter failed; it may sit in the input box. Do not resend; check its pane")
         return ("skip", f"typing into {chan[0]} {chan[1]} failed")
-    probe = json.dumps(text, ensure_ascii=False)[1:-1]    # the whole text: another line may share its first 40 characters
-    seen, deadline = None, time.time() + a.wait
+    seen, deadline, t0 = None, time.time() + a.wait, time.time()
     typed_at, retries, stuck, pin = time.time(), 0, False, "*"
     while time.time() < deadline:
-        if tx and tx.is_file():
-            with tx.open("rb") as fh:
-                fh.seek(mark)
-                if probe in fh.read().decode("utf-8", "replace"):
-                    seen = "delivered"
-                    break
+        if sent_in(tx, mark, text):
+            seen = "delivered"
+            break
         stuck, ours_now, seen_box = box_state(chan, text, pin) if s["agent"] == "claude" else (False, False, "")
         if pin == "*":    # the box was empty before we typed: the first placeholder seen is ours, a later number is not
-            pin = seen_box if ours_now and PASTE_RE.fullmatch(seen_box or "") else ""
+            if ours_now and PASTE_RE.fullmatch(seen_box or ""):
+                pin = seen_box
+            elif seen_box or time.time() - t0 > PIN_WINDOW:    # a box with something else in it, or too late to be ours
+                pin = ""
         if ours_now and retries < ENTER_RETRIES and time.time() - typed_at >= RETRY_AFTER:
             press_enter(chan)
             typed_at, retries = time.time(), retries + 1
@@ -779,7 +802,7 @@ def route_pane(c):
                 break
         time.sleep(1)
     if s["agent"] == "claude":
-        if seen or not stuck_in_box(chan, text, pin):
+        if seen or box_text(chan) == "":    # forget only on proof: an unseen or foreign box may still hold our copy
             forget(s["id"], text)
         else:
             arm(s, chan, text, mark, pin)

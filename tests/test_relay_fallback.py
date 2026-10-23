@@ -37,6 +37,12 @@ SID = "cccccccc-0000-4000-8000-000000000003"
 saved_type_line = relay.type_line
 real_rows_below = relay.rows_below
 real_draft = relay.draft
+real_box_read = relay.box_read
+
+
+def user_line(text: str) -> str:
+    """A transcript line for a user message, the shape Claude Code writes."""
+    return json.dumps({"type": "user", "message": {"role": "user", "content": text}})
 
 
 def sess(**kw: Any) -> dict[str, Any]:
@@ -51,7 +57,7 @@ class Harness(unittest.TestCase):
         self.calls: list[str] = []
         relay.UNSENT.unlink(missing_ok=True)
         self.tmp = Path(tempfile.mkdtemp(prefix="relay-fb-"))
-        names = ["claude_socket", "socket_send", "type_line", "draft", "press_enter", "screen", "paseo_gate", "send_paseo",
+        names = ["box_read", "claude_socket", "socket_send", "type_line", "draft", "press_enter", "screen", "paseo_gate", "send_paseo",
                  "paseo_run", "paseo_inspect", "keys_run", "rows_below", "RETRY_AFTER", "ENTER_DELAY"]
         saved = {n: getattr(relay, n) for n in names}
         saved_fleet = {n: getattr(relay.fleet, n) for n in ("sessions", "dispatch_record")}
@@ -62,6 +68,14 @@ class Harness(unittest.TestCase):
         relay.type_line = lambda chan, text: self.calls.append("type") or True
         relay.draft = lambda chan: ""
         relay.rows_below = lambda chan: ""
+
+        def screen_from_hooks(chan: Any) -> str:
+            """The tests set relay.draft / relay.rows_below to say what the box holds; box_text reads one screen."""
+            d, rb = relay.draft(chan), relay.rows_below(chan)
+            if d is None or rb is None:
+                return "  nothing like an input box here"
+            return box("\u276f " + d, *([f"  {rb}"] if rb else []))
+        relay.box_read = screen_from_hooks
         relay.press_enter = lambda chan: True
         relay.screen = lambda chan, lines=20: "Press up to edit queued messages"
         relay.RETRY_AFTER = relay.ENTER_DELAY = 0
@@ -213,7 +227,7 @@ class TestFallback(Harness):
         reads = iter(["hello there friend", ""])
         relay.draft = lambda chan: next(reads, "")
         relay.press_enter = lambda chan: (self.calls.append("enter"), tx.open("a").write(
-            json.dumps({"text": "hello there friend"}) + "\n"))[-1] and True
+            user_line("hello there friend") + "\n"))[-1] and True
         rc, out, err = self.run_main(sess(transcript=str(tx)))
         self.assertEqual((rc, self.calls), (0, ["enter"]), err)
         self.assertIn("delivered", out)
@@ -228,7 +242,7 @@ class TestFallback(Harness):
 
     def test_an_earlier_identical_message_before_the_mark_is_not_proof(self) -> None:
         tx = self.tmp / "t.jsonl"
-        tx.write_text(json.dumps({"text": "hello there friend"}) + "\n")    # an older delivery of the same text
+        tx.write_text(user_line("hello there friend") + "\n")    # an older delivery of the same text
         self.armed(mark=tx.stat().st_size)
         rc, _, err = self.run_main(sess(transcript=str(tx)))
         self.assertEqual((rc, self.calls), (1, []))
@@ -322,7 +336,7 @@ class TestFallback(Harness):
         relay.screen = lambda chan, lines=20: ""
         rc, _, _ = self.run_text(sess(), "hello there friend")
         self.assertEqual(rc, 1)
-        self.assertIsNone(relay.leftover("cccccccc"))    # the placeholder beside a short text is not ours
+        self.assertEqual(relay.leftover("cccccccc")["draft"], "")    # armed (an unseen copy may sit there), but the placeholder beside a short text is not ours
         self.calls.clear()
         relay.draft = lambda chan: "[Pasted text #3]"
         calls = self.enters()
@@ -485,7 +499,7 @@ class TestFallback(Harness):
         tx.write_text("{}\n")
         self.armed(mark=tx.stat().st_size)
         with tx.open("a") as fh:
-            fh.write(json.dumps({"text": "hello there friend"}) + "\n")
+            fh.write(user_line("hello there friend") + "\n")
         rc, _, _ = self.run_main(sess(transcript=str(tx)))
         self.assertEqual(rc, 0)
         self.assertIsNone(relay.leftover("cccccccc"))
@@ -523,7 +537,7 @@ class TestFallback(Harness):
         tx.write_text("{}\n")
         relay.note_unsent("cccccccc", text, "", tx.stat().st_size)
         with tx.open("a") as fh:
-            fh.write(json.dumps({"text": text[:50] + " closed instead"}) + "\n")
+            fh.write(user_line(text[:50] + " closed instead") + "\n")
         rc, _, err = self.run_text(sess(transcript=str(tx)), text)
         self.assertEqual((rc, self.calls), (1, []))
         self.assertIn("not in its transcript", err)
@@ -541,7 +555,7 @@ class TestFallback(Harness):
         def bare(sock: str, sender: str, t: str) -> bool:
             self.calls.append("socket")
             with tx.open("a") as fh:
-                fh.write(json.dumps({"text": t}) + "\n")
+                fh.write(user_line(t) + "\n")
             return True
         relay.socket_send = bare
         rc, _, _ = self.run_text(sess(status="idle", chan=None, transcript=str(tx)), "hello there friend")
@@ -940,7 +954,7 @@ class TestRound7(Harness):
         self.assertIn("out of view", err)
 
     def test_blank_rows_under_a_short_screen_do_not_push_the_box_out_of_the_window(self) -> None:
-        relay.draft, relay.rows_below = real_draft, real_rows_below
+        relay.draft, relay.rows_below, relay.box_read = real_draft, real_rows_below, real_box_read
         kind = relay.fleet.run
         relay.fleet.run = lambda *a, **k: (0, box("\u276f ") + "\n" * 30)
         try:
@@ -958,7 +972,8 @@ class TestRound7(Harness):
     # 3. one placeholder is ours: the one seen right after typing
     def test_a_later_paste_placeholder_is_the_operators_not_ours(self) -> None:
         long = "word " * 200
-        self.box_after(1, "[Pasted text #7]")
+        relay.PIN_WINDOW = -1    # the placeholder comes after the window in which a first one could still be ours
+        self.addCleanup(setattr, relay, "PIN_WINDOW", 6)
         shown = iter(["", "", "[Pasted text #7]"])
         relay.draft = lambda chan: next(shown, "[Pasted text #7]")
         relay.screen = lambda chan, lines=20: ""
@@ -986,7 +1001,7 @@ class TestRound7(Harness):
         mark = tx.stat().st_size
         self.armed(mark=mark, draft="hello there friend")
         with tx.open("a") as fh:
-            fh.write(json.dumps({"text": "hello there friend"}) + "\n")
+            fh.write(user_line("hello there friend") + "\n")
         relay.draft = lambda chan: "hello there friend"    # Up-arrow history put it back in the box
         calls = self.enters()
         rc, out, _ = self.run_text(sess(transcript=str(tx)), "hello there friend")
@@ -999,7 +1014,7 @@ class TestRound7(Harness):
         tx.write_text("{}\n")
         self.armed(mark=tx.stat().st_size, draft="hello there friend")
         with tx.open("a") as fh:
-            fh.write(json.dumps({"text": "hello there friend"}) + "\n")
+            fh.write(user_line("hello there friend") + "\n")
         relay.draft = lambda chan: "hello there friend"
         calls = self.enters()
         rc, _, err = self.run_text(sess(transcript=str(tx)), "a different message")
@@ -1070,10 +1085,93 @@ class TestRound7(Harness):
         tx.write_text("{}\n")
         self.armed(text, mark=tx.stat().st_size)
         with tx.open("a") as fh:
-            fh.write(json.dumps({"text": "x" * 40 + " but a different line"}) + "\n")
+            fh.write(user_line("x" * 40 + " but a different line") + "\n")
         rc, _, _ = self.run_text(sess(transcript=str(tx)), text)
         self.assertEqual(rc, 1)
         self.assertIsNotNone(relay.leftover("cccccccc"))
+
+    # ---- round 8 (2026-10-23)
+    def test_a_rule_and_prompt_mark_inside_the_draft_do_not_make_a_smaller_empty_box(self) -> None:
+        self.screen_of(box("\u276f look at this screen, it hangs here:", "  " + "\u2500" * 30, "  \u276f "))
+        self.assertIsNone(relay.box_text(None))
+        rc, _, _ = self.run_text(sess(), "hello there friend")
+        self.assertEqual(self.calls, [])
+
+    def test_a_tall_draft_ending_in_the_prompt_glyph_with_the_real_prompt_row_scrolled_out_is_unknown(self) -> None:
+        self.screen_of("\n".join([f"  line {i}" for i in range(10)] + ["  and the glyph is \u276f", RULE, "  footer"]))
+        self.assertIsNone(relay.box_text(None))
+        self.run_text(sess(), "hello there friend")
+        self.assertEqual(self.calls, [])
+
+    def test_ten_dashes_and_nine_line_characters_are_not_rules(self) -> None:
+        for row in ("  " + "-" * 10, "  " + "\u2500" * 9):
+            self.screen_of(box("\u276f fleet-watch upstream: x merged", row, "  wait, do not merge the revert yet"))
+            self.assertIn("wait, do not merge", relay.box_text(None))
+
+    def test_box_text_reads_the_screen_once(self) -> None:
+        reads: list[int] = []
+        relay.box_read = lambda chan: reads.append(1) or box("\u276f hi")
+        self.assertEqual(relay.box_text(None), "hi")
+        self.assertEqual(len(reads), 1)
+
+    def test_an_unseen_box_after_typing_keeps_the_entry_so_a_retry_does_not_reach_the_socket(self) -> None:
+        relay.claude_socket = lambda s: "/tmp/x.sock"
+        reads: list[int] = []
+
+        def shown(chan: Any) -> str:
+            reads.append(1)
+            return box("\u276f ") if len(reads) <= 1 else "  nothing like a box"
+        relay.box_read = shown
+        relay.screen = lambda chan, lines=20: ""
+        rc, _, _ = self.run_text(sess(), "hello there friend")
+        self.assertEqual(rc, 1)
+        self.assertIsNotNone(relay.leftover("cccccccc"))
+        self.calls.clear()
+        rc, _, err = self.run_text(sess(), "hello there friend")
+        self.assertEqual((rc, self.calls), (1, []))
+        self.assertIn("out of view", err)
+
+    def test_our_placeholder_that_renders_after_an_empty_first_read_is_still_ours(self) -> None:
+        long = "word " * 200
+        self.box_after(2, "[Pasted text #1]")    # pre-send and first in-loop read empty, then our own placeholder
+        relay.screen = lambda chan, lines=20: ""
+        calls = self.enters()
+        self.run_text(sess(), long)
+        self.assertIn("enter", calls)
+
+    def test_a_late_second_placeholder_is_not_ours_after_the_pin(self) -> None:
+        long = "word " * 200
+        shown = iter(["", "[Pasted text #1]", "[Pasted text #2]"])
+        relay.draft = lambda chan: next(shown, "[Pasted text #2]")
+        relay.screen = lambda chan, lines=20: ""
+        relay.RETRY_AFTER = 99
+        calls = self.enters()
+        self.run_text(sess(), long)
+        self.assertNotIn("enter", calls)    # #1 is pinned and then replaced by #2: neither is submitted blind
+
+    def test_a_word_inside_an_assistant_line_is_not_a_delivery(self) -> None:
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        self.armed("continue", mark=tx.stat().st_size, draft="continue")
+        with tx.open("a") as fh:
+            fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant",
+                                                                  "content": "I'll continue with the tests now."}}) + "\n")
+        relay.draft = lambda chan: "continue"
+        calls = self.enters()
+        rc, _, _ = self.run_text(sess(transcript=str(tx)), "continue")
+        self.assertIn("enter", calls)    # still ours and unsent: submitted, not declared delivered
+
+    def test_a_queued_user_message_and_a_block_list_message_count_as_delivered(self) -> None:
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        with tx.open("a") as fh:
+            fh.write(json.dumps({"type": "queue-operation", "operation": "enqueue", "content": "go  ahead"}) + "\n")
+            fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": [
+                {"type": "text", "text": "second"}, {"type": "text", "text": "message"}]}}) + "\n")
+        self.assertTrue(relay.sent_in(str(tx), 0, "go ahead"))
+        self.assertTrue(relay.sent_in(str(tx), 0, "second message"))
+        self.assertFalse(relay.sent_in(str(tx), 0, "go"))
+        self.assertFalse(relay.sent_in(str(tx), tx.stat().st_size, "go ahead"))
 
     def test_entries_older_than_a_day_are_purged_on_the_next_write(self) -> None:
         relay.note_unsent("old", "an old message", "", 0)
