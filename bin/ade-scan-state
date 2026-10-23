@@ -875,7 +875,8 @@ def embedded_repositories(path: Path) -> tuple[int, list[str], list[str]]:
     into none of them (`--no-recursion`). Any stderr line (an unreadable subdirectory is a warning with rc 0) makes
     the list partial: rc 65 (round 57, MEDIUM)."""
     ls_err: list[str] = []
-    rc, out = git(path, "ls-files", "-z", "--others", "--exclude-standard", errors="surrogateescape", err=ls_err)
+    rc, out = git(path, "ls-files", "-z", "--others", "--exclude-standard", errors="surrogateescape", err=ls_err,
+                  timeout=STATUS_TIMEOUT)  # walks the whole untracked tree, as `status` does (round 58, INFO 6)
     if rc == 0 and any(ln.strip() for ln in "".join(ls_err).splitlines()):
         rc = 65
     if rc != 0:
@@ -1058,9 +1059,10 @@ def url_holds_credential(url: str) -> bool:
     if "://" not in url:
         # scp-like `[user@]host:path`: ssh gets the path verbatim, so a `?token=` in it reaches its argv like the
         # `ssh://` case (adversary round 31); a local path has no `:` before its first `/`
-        before_at = url.partition("@")[0]
-        if "@" in url and before_at.startswith("[") and ":" in before_at:
-            return True  # `[user:secret@host]:repo`: git takes the bracketed host whole and ssh's argv carries the secret (round 57, LOW 5)
+        if "@" in url and ":" in url.partition("@")[0]:
+            # `[user:secret@host]:repo`, `user:secret@[host]:repo`, `user:secret@host:repo`: ssh's argv carries the secret, as the
+            # host or as the path (rounds 57 and 58; `host:path@x` is refused too, the safe direction)
+            return True
         host, sep, path = url.partition(":")
         return bool(sep) and "/" not in host and ("?" in path or "#" in path)
     scheme = url.partition("://")[0].lower()
@@ -1313,13 +1315,18 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
             return incomplete_record(path, f"embedded repositories ({len(embedded)} > {MAX_EMBEDDED})", 0)
     # Git LFS payloads of unpushed commits sit in `<gitdir>/lfs/objects`: a bundle holds the pointers only and a push
     # with hooks off (the generated one) never runs LFS's pre-push upload (Codex pass 52 on PR 27, P1)
-    lfs_gitdir = None
+    # The store is resolved, not assumed: `lfs` may be a symlink (tar would keep the link only) and the operator's own
+    # config may relocate it with `lfs.storage` (a relative value is against the git dir); adversary round 58, LOW 3
+    lfs_store = None
     if common is not None:
+        rc_s, cfg_s = git(path, "config", "--get", "lfs.storage", operator_config=True)
+        base = Path(cfg_s.strip()) if rc_s == 0 and cfg_s.strip() else Path("lfs")
+        real = Path(os.path.realpath(base if base.is_absolute() else common / base))
         try:
-            if os.path.isdir(common / "lfs" / "objects") and any(os.scandir(common / "lfs" / "objects")):
-                lfs_gitdir = str(common)
+            if os.path.isdir(real / "objects") and any(os.scandir(real / "objects")):
+                lfs_store = str(real)
         except OSError:
-            lfs_gitdir = str(common)  # unreadable: assume it holds payloads
+            lfs_store = str(real)  # unreadable: assume it holds payloads
     # a tracked path marked assume-unchanged (`ls-files -v` tag in lowercase) or skip-worktree (`S`) is invisible to
     # `status`, so its edits are in no count above: it is counted and captured on its own (Codex pass 32 on PR 27).
     # A skip-worktree path with no file is a sparse checkout's ordinary state (adversary round 38): nothing to
@@ -1457,6 +1464,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     local_only: int | None = 0
     local_only_branches: list[dict] = []
     local_only_tags: list[dict] = []
+    other_ref_commits = 0  # local-only commits reachable only from refs outside refs/heads and refs/tags
     branches_uncounted = 0
     uncounted_tags: set[str] = set()
     if unborn:
@@ -1475,6 +1483,11 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         if local_only is None:
             return incomplete_record(path, "rev-list --count HEAD --all --not --remotes=origin", rc)
         if local_only:
+            # a push of branches and tags leaves behind a commit only a `refs/custom/*` ref holds (Codex pass 53, P1)
+            n_bt, rc = local_only_count(path, ["HEAD", "--branches", "--tags"], tips, live, has_origin)
+            if n_bt is None:
+                return incomplete_record(path, "rev-list --count HEAD --branches --tags --not --remotes=origin", rc)
+            other_ref_commits = max(local_only - n_bt, 0)
             if detached:
                 n, rc = local_only_count(path, ["HEAD"], tips, live, has_origin)
                 if n is None:
@@ -1601,7 +1614,8 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     return {
         "path": str(path), "branch": branch, "modified": len(modified), "untracked": len(untracked),
         "untracked_sample": untracked[:8], "modified_sample": modified[:8],
-        "embedded_repos": embedded, "embedded_pointer_repos": embedded_pointers, "lfs_gitdir": lfs_gitdir,
+        "local_only_other_refs": other_ref_commits,
+        "embedded_repos": embedded, "embedded_pointer_repos": embedded_pointers, "lfs_store": lfs_store,
         "upstream": upstream, "unpushed": unpushed if upstream else "no upstream",
         "ahead_of_origin": ahead_of_origin, "stashes": stashes,
         "index_hidden": index_hidden, "reflog_only_commits": reflog_only,

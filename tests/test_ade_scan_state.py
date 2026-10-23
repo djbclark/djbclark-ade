@@ -1931,7 +1931,7 @@ def test_url_holds_credential_reads_any_userinfo_or_query_on_a_non_ssh_scheme():
                       ("https://ghp_FAKE0000@github.com/o/r.git", True), ("http://x@host/x.git", True),
                       ("https://host/x.git?private_token=FAKE", True), ("https://host/x?a=b@c:d", True),
                       ("ssh://git@host/x", False), ("git+ssh://git@host/x", False),
-                      ("git@host:x/y.git", False), ("host:x/y.git", False), ("user:pw@host:x/y.git", False),
+                      ("git@host:x/y.git", False), ("host:x/y.git", False), ("user:pw@host:x/y.git", True),  # round 58: the secret is in ssh's argv as the path
                       ("https://host:8443/x.git", False), ("https://host/x.git#frag", True),  # Codex pass 27: a fragment reaches argv too
                       ("/tmp/some/origin.git", False), ("file:///tmp/o.git", False),
                       ("https://u:pw@[::1/x", True), ("https://u@[::1/x", True),
@@ -4093,7 +4093,7 @@ def test_git_lfs_payloads_of_unpushed_commits_get_an_archive_row(tmp_path):
     obj.mkdir(parents=True)
     (obj / "abcd0123").write_text("PAYLOAD\n")
     rec = mod.scan_checkout(work, remote=False)
-    assert rec["lfs_gitdir"] == str(work / ".git") and rec["verdict"] == "clean and pushed", rec  # nothing unpushed: no row
+    assert rec["lfs_store"] == str(work / ".git" / "lfs") and rec["verdict"] == "clean and pushed", rec  # nothing to capture: no row
     commit_file(work, "unpushed.txt")
     rec = mod.scan_checkout(work, remote=False)
     row = next(r for r in section_3_2(doc.render(doc_scan([rec]))).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
@@ -4105,16 +4105,52 @@ def test_git_lfs_payloads_of_unpushed_commits_get_an_archive_row(tmp_path):
     run = subprocess.run(["bash", "-c", PLAN_PREFIX + cmd.replace("<DEST>", str(dest))], capture_output=True, text=True, env=GIT_ENV)
     assert run.returncode == 0, run.stderr
     held = subprocess.run(["tar", "-tf", str(dest / ck / "lfs.tar")], capture_output=True, text=True).stdout
-    assert "lfs/objects/ab/cd/abcd0123" in held, held
+    assert "objects/ab/cd/abcd0123" in held, held
+    # every capture reason, not only unpushed commits: a stash holds pointers only (adversary round 58, MEDIUM)
+    git(work, "reset", "-q", "--hard", "origin/main")
+    (work / "a.txt").write_text("edited\n")
+    git(work, "stash", "push", "-q")
+    rec = mod.scan_checkout(work, remote=False)
+    assert rec["stashes"] == 1
+    row = next(r for r in section_3_2(doc.render(doc_scan([rec]))).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
+    assert "lfs.tar" in row, row
+    # a symlinked `lfs` is archived through the link (round 58 LOW 3): tar would keep the link only
+    real = tmp_path / "real-store"
+    shutil.move(str(work / ".git" / "lfs"), str(real))
+    (work / ".git" / "lfs").symlink_to(real)
+    rec = mod.scan_checkout(work, remote=False)
+    assert rec["lfs_store"] == os.path.realpath(real), rec["lfs_store"]
 
 
 def test_a_bracketed_or_password_scp_url_is_a_credential():
     """Adversary round 57 on PR 27, LOW 5: ssh got `git:secret@host` in its argv for `[git:secret@host]:repo`."""
     mod = load()
-    for url in ("[git:secret@host]:repo", "[git:secret@host:22]:repo"):
+    for url in ("[git:secret@host]:repo", "[git:secret@host:22]:repo", "user:pw@[host]:repo", "user:pw@host:repo"):
         assert mod.url_holds_credential(url) is True, url
     for url in ("git@host:repo", "git@[::1]:repo", "[::1]:repo", "host:path", "./a:b", "/x/y"):
         assert mod.url_holds_credential(url) is False, url
+
+
+def test_commits_only_a_custom_ref_holds_force_the_bundle_instead_of_a_branch_push(tmp_path):
+    """Codex pass 53 on PR 27, P1: `refs/custom/save` holds the child B of the unpushed `other` branch's commit A; the plan
+    offered a push of `other`, which leaves B behind."""
+    mod = load()
+    doc = load_doc()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    git(work, "checkout", "-q", "-b", "other")
+    commit_file(work, "a-commit.txt")
+    commit_file(work, "b-commit.txt")
+    git(work, "update-ref", "refs/custom/save", "HEAD")
+    git(work, "reset", "-q", "--hard", "HEAD~1")
+    git(work, "checkout", "-q", "main")
+    rec = mod.scan_checkout(work, remote=False)
+    assert rec["local_only_commits"] == 2 and rec["local_only_other_refs"] == 1, rec
+    row = next(r for r in section_3_2(doc.render(doc_scan([rec]))).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
+    assert not re.search(r"git -C \S+ (?:-c \S+ )?push", row) and "bundle create" in row and "refs/custom" not in row.split("(some")[0], row
+    # branches and tags alone keep the push alternative
+    git(work, "update-ref", "-d", "refs/custom/save")
+    rec = mod.scan_checkout(work, remote=False)
+    assert rec["local_only_other_refs"] == 0, rec
 
 
 def test_a_global_push_rewrite_to_a_helper_gets_no_push_row(tmp_path, monkeypatch):

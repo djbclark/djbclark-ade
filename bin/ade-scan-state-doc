@@ -747,12 +747,16 @@ def render(d):
                             ck, raw_p, f"{ck}/local-only.bundle")
             if no_push:
                 cmd.append(bundle + cred_note)
+            elif num(c.get("local_only_other_refs")):
+                # a commit only a ref outside refs/heads and refs/tags holds is in no push refspec (Codex pass 53, P1)
+                cmd.append(bundle + " (some local-only commits are on refs outside refs/heads and refs/tags, which a push of branches and tags leaves behind: bundle)")
             elif odd_names:
                 cmd.append(bundle + ODD_NAME_NOTE)  # one bundle holds every ref; no push can name the odd one
             else:
                 cmd.append(bundle if not lo_cmd else "; ".join(lo_cmd[:-1] + [lo_cmd[-1] + " or " + bundle]))
             need = need if need.startswith(("yes", "**yes")) else (
-                cred_need if no_push else "yes: pushing a branch publishes it; pick push or bundle")
+                cred_need if no_push else "yes: bundle it; a push would leave commits on other refs behind" if num(c.get("local_only_other_refs"))
+                else "yes: pushing a branch publishes it; pick push or bundle")
         if zero_tags and not (local_n and not covered_by_bundle):
             # a local tag origin lacks on a commit origin has: no commit count sees the tag object and no branch
             # bundle holds it; its name, annotation and signature are lost with the checkout (Codex pass 31 on PR 27)
@@ -767,11 +771,12 @@ def render(d):
                        + " (a tag origin has at another object is rejected by the push: bundle it, or decide to force)")
             need = need if need.startswith(("yes", "**yes")) else (
                 cred_need if no_push else "yes: pushing a tag publishes it; pick push or bundle")
-        if c.get("lfs_gitdir") and (head_ahead or local_n or zero_tags):
-            # a bundle holds LFS pointers only and the generated push runs with hooks off, so LFS's pre-push upload never
-            # runs: the payloads are in the git directory's `lfs/` (Codex pass 52 on PR 27, P1)
-            cmd.append("Git LFS payloads of the unpushed commits are in neither the bundle nor a hooks-off push; archive them: "
-                       + shcode("mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -cf <DEST>/{} lfs", ck, c["lfs_gitdir"], f"{ck}/lfs.tar"))
+        if c.get("lfs_store"):
+            # a bundle, a stash or reflog pack and a patch hold LFS pointers only and the generated push runs with hooks
+            # off, so LFS's pre-push upload never runs: the payloads are in the store (Codex pass 52 on PR 27, P1; every
+            # capture reason, not only unpushed commits: Codex pass 53 P1, adversary round 58 MEDIUM)
+            cmd.append("Git LFS payloads (the pointers in any bundle, patch or pack are all those hold) are in the LFS store; archive it: "
+                       + shcode("mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -cf <DEST>/{} .", ck, c["lfs_store"], f"{ck}/lfs.tar"))
         if hidden:
             what.append(f"{hidden} tracked path(s) marked assume-unchanged or skip-worktree (`status` cannot see their edits)")
             cmd.append(shcode(HIDDEN_FMT, *hidden_values(raw_p, ck)))
