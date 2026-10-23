@@ -1213,8 +1213,7 @@ def unmark(span: str) -> str:
     return unescape_span(m.group(2))
 
 
-PLAN_PREFIX = ("GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); "
-               "GCP=$(command -v gcp || command -v cp); ")
+PLAN_PREFIX = load_doc().PLAN_PREAMBLE + "; "
 SHELLS = [s for s in ("bash", "zsh", "sh") if shutil.which(s)]
 
 
@@ -3620,3 +3619,31 @@ def test_an_absolute_index_gitlink_or_a_symlinked_file_or_alternates_in_a_module
         assert verdict() == "skipped: submodule config unrecognised (gitmodules path unusual)"
     finally:
         mod.git = real_git
+
+
+def test_the_plan_runs_git_in_the_scanners_environment_not_the_operators(tmp_path):
+    """Codex pass 42 (P1): with `GIT_DIR` pointing at another repository, `git -C <checkout> ls-files` listed that
+    repository's files and the tar that followed succeeded without the checkout's only untracked file."""
+    doc = load_doc()
+    other = make_repo(tmp_path / "other", "o.txt")
+    work = make_repo(tmp_path / "work", "w.txt")
+    (work / "mine.txt").write_text("untracked in the checkout\n")
+    cmd = doc.shcode(doc.UNTRACKED_FMT, "ck", str(work), "ck/untracked.list", str(work), "ck/untracked.list", "ck/untracked.tar")
+    cmd = unescape_span(cmd.strip("` "))
+    for shell in SHELLS:
+        dest = tmp_path / f"dest-{shell}"
+        env = {**GIT_ENV, "GIT_DIR": str(other / ".git"), "GIT_INDEX_FILE": str(other / ".git" / "index")}
+        run = subprocess.run([shell, "-c", PLAN_PREFIX + cmd.replace("<DEST>", str(dest))], cwd=tmp_path,
+                             capture_output=True, text=True, env=env)
+        assert run.returncode == 0, (shell, run.stderr)
+        assert (dest / "ck" / "untracked.list").read_bytes() == b"mine.txt\0", (shell, (dest / "ck" / "untracked.list").read_bytes())
+
+
+def test_a_non_utf8_checkout_path_is_quoted_as_its_bytes_and_the_document_is_written(tmp_path):
+    """Codex pass 42 (P2): the scan JSON carries a non-UTF-8 name as a lone surrogate, which the markdown writer refused."""
+    doc = load_doc()
+    assert doc.shquote("/p/\udcffx") == "$'/p/\\xffx'" and doc.shquote("~/\udc80") == "~/$'\\x80'"
+    rec = doc_checkout("/p/\udcffx")
+    out = tmp_path / "out.md"
+    doc.write_atomic(out, doc.render(doc_scan([rec])))
+    assert out.read_text(encoding="utf-8")

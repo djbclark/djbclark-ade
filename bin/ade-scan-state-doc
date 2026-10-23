@@ -253,6 +253,14 @@ def human(n):
         v /= 1024
 
 
+# the shell state every plan command assumes: GNU tools by name, and the scanner's own git environment (it drops every
+# `GIT_*` variable and the global and system config, `git_env()`): with `GIT_DIR` set, `git -C <checkout> ls-files` read
+# another repository's index and the tar that followed succeeded without the checkout's files (Codex pass 42)
+PLAN_PREAMBLE = ("GCP=$(command -v gcp || command -v cp); GTAR=$(command -v gtar || command -v tar); "
+                 "GSED=$(command -v gsed || command -v sed); unset $(env | cut -d= -f1 | grep '^GIT_'); "
+                 "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1")
+
+
 def esc(value, in_code=False):
     """One markdown table cell: `|` escaped; outside a code span `<`, `>`, `&` are HTML-escaped and backticks
     backslash-escaped. Inside a code span (a pasted command) only `|` is escaped: CommonMark and GFM decode no entity in
@@ -300,11 +308,17 @@ def shquote(v):
     return _quote(v)
 
 
+_SURROGATE = re.compile("[\udc80-\udcff]")  # a byte that is not UTF-8, as `surrogateescape` carries it in the scan JSON
+
+
 def _quote(v):
-    if not _CTRL.search(v):
+    if not _CTRL.search(v) and not _SURROGATE.search(v):
         return shlex.quote(v)
     named = {"\n": "\\n", "\r": "\\r", "\t": "\\t", "\\": "\\\\", "'": "\\'"}
-    return "$'" + "".join(named.get(ch) or (f"\\x{ord(ch):02x}" if _CTRL.match(ch) else ch) for ch in v) + "'"
+    # a lone surrogate is the original byte (`\xff`): the command names the path as it is on disk, and the file stays
+    # valid UTF-8 (Codex pass 42 P2: the generator died with UnicodeEncodeError on a checkout named with byte 0xff)
+    return "$'" + "".join(named.get(ch) or (f"\\x{ord(ch) - 0xdc00:02x}" if _SURROGATE.match(ch)
+                                          else f"\\x{ord(ch):02x}" if _CTRL.match(ch) else ch) for ch in v) + "'"
 
 
 def code(fmt, *values):
@@ -344,7 +358,8 @@ def write_atomic(out, text):
     out = Path(out)
     fd, tmp = tempfile.mkstemp(dir=out.parent, prefix=f".{out.name}.", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as f:
+        # `backslashreplace`: a lone surrogate left in displayed text (a verdict, a cell) is written as `\udcff`, never an error
+        with os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace") as f:
             f.write(text)
         umask = os.umask(0)
         os.umask(umask)
@@ -548,8 +563,9 @@ def render(d):
     w("## 3. Capture (how each item would be preserved; none of this was run)\n")
     w("Every command below uses GNU `cp`, `tar` and `sed` through three variables, so the same row runs on this Mac "
       "(coreutils and gnu-sed installed as `g*`) and on Linux (bare names; Codex pass 12 on PR 27): set "
-      "`GCP=$(command -v gcp || command -v cp); GTAR=$(command -v gtar || command -v tar); "
-      "GSED=$(command -v gsed || command -v sed)` first, and `<DEST>` to an absolute path.\n")
+      f"`{PLAN_PREAMBLE}` first, and `<DEST>` to an absolute path. The last two statements give every `git` the "
+      "scanner's own environment: no `GIT_DIR`, `GIT_INDEX_FILE` or other ambient `GIT_*` variable, and no global or "
+      "system config, so a successful capture is of the checkout the scan read (Codex pass 42).\n")
     w("### 3.1 `unique` and `mixed` bigteam dirs\n")
     w("Proposed rule for all of them: copy the report files (not the dir) to one destination, "
       "`<DEST>/bigteam/<task>/`, keeping each file's path below the task dir. `<DEST>` is the one decision "
