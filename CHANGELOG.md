@@ -11,6 +11,8 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- `bin/app-tamer-ab`: a 60 s sampler (load per core, compressor churn, swap, App Tamer's own CPU) with named phases and a per-phase `summary`, for the with/without App Tamer comparison (2026-10-23).
+
 - Added `bin/ade-update`, one command that keeps a machine current: it fast-forward pulls (refusing with exit 2 when a
   path the pull would change or create has a local modification, an untracked or an ignored file, or a parent or
   child path of one), relinks missing skills
