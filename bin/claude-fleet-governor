@@ -90,6 +90,8 @@ HANDOFF_SUCCESSOR = "omp/anthropic/claude-sonnet-5-5"
 KINDS = (("five_hour", "Claude Code 5-hour"), ("weekly", "Claude Code weekly"))
 FABLE_KIND = "fable_weekly"
 LEVELS = {"ok": 0, "tight": 1, "critical": 2}
+MIN_RATE = 1e-3                        # %/h below this is rounding noise, not burn
+EX_INTERNAL = 12                       # an uncaught error: never read as tight (1) or critical (2)
 EX_STALE, EX_FAILED = 10, 11
 SNAP_NAME = re.compile(r"^(\d{4})-(\d\d)-(\d\d)T(\d\d)(\d\d)(\d\d)(?:\.(\d+))?Z\.json$")
 FABLE_MODEL = re.compile(r"^claude-fable")
@@ -162,7 +164,7 @@ def num(value: Any) -> float | None:
         f = float(value)
     except (TypeError, ValueError):
         return None
-    return None if math.isnan(f) else f
+    return f if math.isfinite(f) else None
 
 
 # -- snapshots ---------------------------------------------------------------------------------
@@ -219,6 +221,7 @@ def read_snapshot(path: Path, at: datetime) -> dict[str, Any] | None:
         resets = parse_ts(w.get("resets_at"))
         if kind is None or used is None or resets is None:
             continue
+        used = min(100.0, max(0.0, used))      # round 1 LOW 5: a value outside 0..100 is clamped, never trusted
         cur = windows.get(kind)
         if cur is None or used > cur["used"]:          # several accounts: the tightest one binds
             windows[kind] = {"label": w["label"], "used": used, "resets_at": resets,
@@ -243,8 +246,8 @@ def load_snapshots(now: datetime, t: dict[str, float]) -> list[dict[str, Any]]:
         if cutoff is not None and at < cutoff:
             break
         snap = read_snapshot(d / n, at)
-        if snap is None:
-            continue
+        if snap is None or snap["at"] > now + timedelta(minutes=5):
+            continue                           # round 1 LOW 5: a future-dated snapshot is not evidence
         if cutoff is None:
             cutoff = snap["at"] - timedelta(minutes=t["rate_window_min"])
         out.append(snap)
@@ -263,7 +266,16 @@ def slope_per_hour(points: list[tuple[float, float]]) -> float:
     den = sum((p[0] - mx) ** 2 for p in points)
     if den == 0:
         return 0.0
-    return max(0.0, sum((p[0] - mx) * (p[1] - my) for p in points) / den)
+    slope = sum((p[0] - mx) * (p[1] - my) for p in points) / den
+    return slope if slope >= MIN_RATE else 0.0   # float residue of flat data is no burn (round 1 MEDIUM)
+
+
+def exhaust_time(now: datetime, used: float, rate: float) -> datetime | None:
+    """When the window empties at `rate` %/h, or None when it never does within a year (no OverflowError)."""
+    if rate < MIN_RATE or used >= 100:
+        return None
+    hours = (100.0 - used) / rate
+    return now + timedelta(hours=hours) if hours <= 24 * 365 else None
 
 
 def window_level(kind: str, w: dict[str, Any], now: datetime, t: dict[str, float]) -> str:
@@ -305,7 +317,7 @@ def compute(snaps: list[dict[str, Any]], now: datetime, t: dict[str, float]) -> 
         used = cur["used"]
         w = {"label": cur["label"], "used": used, "left": max(0.0, 100.0 - used), "rate_per_hour": rate,
              "projected_at_reset": used + rate * hours, "resets_at": resets, "samples": len(samples),
-             "exhaust_at": now + timedelta(hours=(100.0 - used) / rate) if rate > 0 and used < 100 else None}
+             "exhaust_at": exhaust_time(now, used, rate)}
         w["level"] = window_level(kind, w, now, t)
         windows[kind] = w
     level = max((w["level"] for k, w in windows.items() if k != FABLE_KIND), key=LEVELS.get, default="ok")
@@ -325,7 +337,10 @@ def guard_level(now: datetime) -> str:
     try:
         d = json.loads(path.read_text(encoding="utf-8"))
         at = parse_ts(d.get("checked_at"))
-        if at is None or (now - at).total_seconds() > 7200:
+        if at is None or not 0 <= (now - at).total_seconds() <= 1800:  # two 15-minute guard runs; never future-dated
+            return "ok"
+        resets = parse_ts(d.get("resets_at"))
+        if resets is not None and resets <= now:   # the period it judged is over
             return "ok"
         lvl = d.get("level")
     except (OSError, ValueError, AttributeError):
@@ -342,8 +357,12 @@ def trigger(windows: dict[str, dict[str, Any]], level: str) -> tuple[str, dict[s
     return max(pool, key=lambda kw: kw[1]["projected_at_reset"], default=None) if pool else None
 
 
+SHORT_NAMES = {"five_hour": "5-hour", "weekly": "weekly", FABLE_KIND: "weekly Fable"}
+
+
 def short_label(label: str) -> str:
-    return label.removeprefix("Claude Code ").strip()
+    """A fixed name by window kind: the snapshot's label text never reaches a steer prompt or a ping (round 1 LOW 3)."""
+    return SHORT_NAMES.get(kind_of(label) or "", "window")
 
 
 def describe(w: dict[str, Any]) -> str:
@@ -441,7 +460,7 @@ def claude_live(agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def restore_target(original: str | None) -> str | None:
-    if not original:
+    if not original or not PREMIUM_MODEL.match(original):   # only a model the governor itself could have recorded
         return None
     return OPUS if FABLE_MODEL.match(original) else original
 
@@ -467,7 +486,8 @@ def plan_moves(agents: list[dict[str, Any]], windows: dict[str, dict[str, Any]],
             resets = parse_ts(rec["resets_at"])
             if resets is None or snap_at < resets:
                 continue                  # window not over, or the data predates its reset
-            match = next((a for i, a in by_id.items() if i.startswith(key)), None)
+            matches = [a for i, a in by_id.items() if i.startswith(key)] if re.fullmatch(r"[0-9a-f]{7}", key) else []
+            match = matches[0] if len(matches) == 1 else None   # exactly one agent, a full 7-hex key (round 1 LOW 4)
             target = restore_target(rec["original"])
             if match is None or match.get("archived") or match.get("provider") != "claude" or target is None:
                 plan.append({"kind": "forget", "short": key})
@@ -700,10 +720,18 @@ def main(argv: list[str]) -> int:
     if cmd == "status" and rest in ([], ["--json"]):
         return cmd_status(bool(rest))
     print("usage: claude-fleet-governor [check] | run [--dry-run] | status [--json] | --install\n"
-          "exit codes: 0 ok, 1 tight, 2 critical, 10 stale or unreadable data, 11 a set/send/list call failed",
+          "exit codes: 0 ok, 1 tight, 2 critical, 10 stale or unreadable data, 11 a set/send/list call failed, 12 internal error",
           file=sys.stderr)
     return 64
 
 
+def guarded_main(argv: list[str]) -> int:
+    try:
+        return main(argv)
+    except Exception as e:  # noqa: BLE001  a crash must not look like `tight` (exit 1): own code, loud
+        print(f"claude-fleet-governor: internal error {type(e).__name__}: {e}", file=sys.stderr)
+        return EX_INTERNAL
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(guarded_main(sys.argv[1:]))

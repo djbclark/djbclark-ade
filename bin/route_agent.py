@@ -1204,9 +1204,11 @@ def governor_hold(now: datetime | None = None) -> str | None:
     now = now or datetime.now(UTC)
     if not 0 <= (now - checked).total_seconds() <= GOVERNOR_FRESH:
         return None
-    wins = [w for w in (state.get("windows") or {}).values()
-            if isinstance(w, dict) and w.get("level") == level]
-    top = max(wins, key=lambda w: w.get("projected_at_reset") or 0, default=None)
+    windows = state.get("windows")
+    wins = [w for w in (windows.values() if isinstance(windows, dict) else ())
+            if isinstance(w, dict) and w.get("level") == level
+            and isinstance(w.get("projected_at_reset"), (int, float))]   # a corrupt state never stops routing (round 1 LOW 6)
+    top = max(wins, key=lambda w: w["projected_at_reset"], default=None)
     detail = ""
     if top:
         detail = (f" ({str(top.get('label', '')).removeprefix('Claude Code ')} {top.get('used')}% used, "
