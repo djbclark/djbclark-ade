@@ -1160,16 +1160,20 @@ gateway agent with `relay.py`. Design: `~/.local/state/bigteam/loadgate-followup
    `hermes --resume SID -z TEXT` with stdin closed replied from the earlier turn's context, grew the same session
    from 2 to 4 messages and created no new one; an unknown sid exits 1 with "session not found" and creates nothing.
    Not run against a real gateway (Telegram/Discord) session: that writes into a live transcript and needs djbclark's yes.
-2. **Built; adversary round 1 BLOCKed, repaired** (report `~/.local/state/bigteam/relay-hermes-route/adversary-report-1.md`):
-   route `hermes` in `skills/session-finder/relay.py` (`route_hermes`, the only route for a `hermes-gw` row with a `sid`;
-   no fallback), `TestHermesRoute` in `tests/test_relay_fallback.py`. B1 (a stdout "session not found" read as
-   nothing-sent) and B2 (own conversation not refused) fixed with tests, M1 (no kill; floor 300 s), M3 (scrubbed child
-   environment, hop limit, skill text), L2, L3, L5 fixed. A second adversary round on the repaired head is still owed.
-   Open by design: **M2** (a relay while the gateway is mid-turn: `fleet.py:608` fixes the row at `idle`, and the
-   gateway's cached agent may not see the relayed exchange until it reloads; "delivered" is documented as "ran on the
-   stored transcript") and **L4** (the exchange is invisible in the chat but is history for djbclark's next turn;
-   consider a one-line chat notice). L5e: `SessionResumeTooLargeError` on a long thread reports "unverified" with
-   nothing sent.
+2. **Built; adversary rounds 1 and 2 BLOCKed, repaired** (reports in `~/.local/state/bigteam/relay-hermes-route/`,
+   `adversary-report-1.md`, `adversary-report-2.md`): route `hermes` in `skills/session-finder/relay.py`
+   (`route_hermes`, the only route for a `hermes-gw` row with a `sid`; no fallback), `TestHermesRoute` in
+   `tests/test_relay_fallback.py`. Round 1: exact not-found match, no self-relay, no kill, scrubbed env, reply as data.
+   Round 2: started line before the wait and floor 100 s (a caller's own tool timeout), per-conversation flock, a
+   nested relay tagged as Hermes, self-refusal by chat identity, `ACP_OPERATOR_APPROVED` scrubbed, 0600 reply files with
+   pruning, format characters stripped, hop claim narrowed to nested `hermes -z` turns. **A third adversary round on
+   the repaired head is owed before the push.**
+   Open by design: **R1-M2** (a relay while the gateway is mid-turn: `fleet.py` fixes the row at `idle`, and the
+   gateway's cached agent may not see the relayed exchange until it reloads; "delivered" means "ran on the stored
+   transcript"), **R1-L4** (the exchange is invisible in the chat but is history for djbclark's next turn; consider a
+   one-line chat notice), **R1-L5e** (`SessionResumeTooLargeError` on a long thread reports "unverified" with nothing
+   sent), **R2-L6** (a profile Hermes with its own `HERMES_HOME` gets "not sent" for another profile's conversation;
+   documented). Hop counting across non-Hermes routes (R2-M3) is not enforced: documented as nested-`-z`-only.
 3. **Drafted, Hermes-owned install:** `skills/peer-relay/SKILL.md` (Hermes runs `relay.py` by absolute path). Hermes
    installs or links it into `~/.hermes/skills/` itself; nothing here writes `~/.hermes` (djbclark, 2026-10-23: "draft it
    here, I hand it over").

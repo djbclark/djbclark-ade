@@ -608,7 +608,7 @@ def _hermes_gateway():
         out.append(_rec(id=f"hermes:{r['id'][-8:]}", agent="hermes", host="hermes-gw", sid=r["id"], cwd=r["cwd"] or "",
                         title=(r["title"] or "").strip(), status="idle", where=f"Hermes {r['source']} · {target}",
                         reach=f"ask_hermes, or messages_send target={target} (MCP hermes)",
-                        focus=f"hermes --resume {r['id']}"))
+                        focus=f"hermes --resume {r['id']}", hermes_chat=(r["source"], r["chat_id"], r["thread_id"])))
     return out
 
 

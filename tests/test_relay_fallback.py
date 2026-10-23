@@ -806,7 +806,8 @@ class TestHermesRoute(Harness):
             os.environ.clear()
             os.environ.update(saved[2])
         self.addCleanup(restore)
-        for k in ("RELAY_HOPS", "HERMES_SESSION_ID", "PASEO_AGENT_ID", "CLAUDE_CODE_SESSION_ID"):
+        for k in ("RELAY_HOPS", "RELAY_SENDER", "HERMES_SESSION_ID", "HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID",
+                  "HERMES_SESSION_THREAD_ID", "PASEO_AGENT_ID", "CLAUDE_CODE_SESSION_ID", "ACP_OPERATOR_APPROVED"):
             os.environ.pop(k, None)
 
     def hsess(self, **kw: Any) -> dict[str, Any]:
@@ -861,10 +862,11 @@ class TestHermesRoute(Harness):
         self.assertTrue(cmd[4].endswith("hello there friend"))
         self.assertIs(kw["stdin"], relay.subprocess.DEVNULL)
         self.assertIs(kw["start_new_session"], True)
-        self.assertEqual(kw["wait_timeout"], 300)
+        self.assertEqual(kw["wait_timeout"], 100)
+        self.assertEqual(len(kw["pass_fds"]), 1)
         self.assertIn("PONG", out)
         self.assertIn("untrusted data", out)
-        self.assertEqual(list(relay.HERMES_DIR.iterdir()), [])
+        self.assertEqual(list(relay.HERMES_DIR.glob("*.out")) + list(relay.HERMES_DIR.glob("*.err")), [])
 
     def test_json_carries_the_reply(self) -> None:
         rc, out, _, _ = self.run_hermes(self.hsess(), out="PONG", args=("--json",))
@@ -877,6 +879,8 @@ class TestHermesRoute(Harness):
         sys.argv = ["relay.py", "peer-fb", "--help me", "--wait", "2"]
 
         class P:
+            pid = 1
+
             def __init__(self, cmd: Any, **kw: Any) -> None:
                 seen.append(cmd)
 
@@ -896,7 +900,7 @@ class TestHermesRoute(Harness):
         self.assertEqual((rc, len(calls)), (1, 1))
         self.assertIn("does not know session", err)
         self.assertNotIn("Do not resend", err)
-        self.assertEqual(list(relay.HERMES_DIR.iterdir()), [])
+        self.assertEqual(list(relay.HERMES_DIR.glob("*.out")) + list(relay.HERMES_DIR.glob("*.err")), [])
 
     def test_a_turn_that_ran_and_quotes_session_not_found_is_unverified(self) -> None:
         """B1 (adversary, 2026-10-23): rc 2, empty stderr, the words on stdout: the turn ran, a resend would run it twice."""
@@ -929,7 +933,7 @@ class TestHermesRoute(Harness):
         rc, _, err, _ = self.run_hermes(self.hsess(), boom=FileNotFoundError("no hermes"))
         self.assertEqual(rc, 1)
         self.assertIn("hermes CLI not usable", err)
-        self.assertEqual(list(relay.HERMES_DIR.iterdir()), [])
+        self.assertEqual(list(relay.HERMES_DIR.glob("*.out")) + list(relay.HERMES_DIR.glob("*.err")), [])
 
     def test_wait_longer_than_the_floor_sets_the_timeout(self) -> None:
         _, _, _, calls = self.run_hermes(self.hsess(), out="ok", args=("--wait", "900"))
@@ -958,21 +962,117 @@ class TestHermesRoute(Harness):
 
     def test_child_env_drops_the_callers_identity_and_counts_hops(self) -> None:
         os.environ.update({"CLAUDE_CODE_SESSION_ID": "caller", "PASEO_AGENT_ID": "p", "HERMES_SESSION_CHAT_ID": "9",
-                           "HERMES_CRON_X": "1", "KEEP_ME": "yes", "RELAY_HOPS": "1"})
+                           "HERMES_CRON_X": "1", "KEEP_ME": "yes", "RELAY_HOPS": "1", "ACP_OPERATOR_APPROVED": "fable-xhigh",
+                           "ACP_RUN_AGENT": "1", "PASEO_AGENT_CWD": "/x", "HERMES_UI_SESSION_ID": "u"})
         _, _, _, calls = self.run_hermes(self.hsess(), out="ok")
         env = calls[0][1]["env"]
-        for k in ("CLAUDE_CODE_SESSION_ID", "PASEO_AGENT_ID", "HERMES_SESSION_CHAT_ID", "HERMES_CRON_X"):
+        for k in ("CLAUDE_CODE_SESSION_ID", "PASEO_AGENT_ID", "HERMES_SESSION_CHAT_ID", "HERMES_CRON_X", "ACP_OPERATOR_APPROVED",
+                  "ACP_RUN_AGENT", "PASEO_AGENT_CWD", "HERMES_UI_SESSION_ID"):
             self.assertNotIn(k, env)
-        self.assertEqual((env["KEEP_ME"], env["RELAY_HOPS"]), ("yes", "2"))
+        self.assertEqual((env["KEEP_ME"], env["RELAY_HOPS"], env["RELAY_SENDER"]), ("yes", "2", "hermes 0_abcdef"))
 
     def test_fourth_hop_is_refused(self) -> None:
         os.environ["RELAY_HOPS"] = "3"
         rc, _, err, calls = self.run_hermes(self.hsess())
         self.assertEqual((rc, calls), (1, []))
-        self.assertIn("hops", err)
+        self.assertIn("nested hermes relays", err)
         os.environ["RELAY_HOPS"] = "junk"
         rc, *_ = self.run_hermes(self.hsess())
         self.assertEqual(rc, 1)
+
+    def test_started_line_is_printed_before_the_wait(self) -> None:
+        """B1 (adversary round 2): the caller's tool timeout can kill relay.py mid-wait; it must already have said do not resend."""
+        rc, _, err, calls = self.run_hermes(self.hsess(), hang=True)
+        self.assertIn("hermes turn started (pid 4242)", err)
+        self.assertLess(err.index("hermes turn started"), err.index("still running"))
+        self.assertIn("do not resend", err)
+        self.assertIn(str(relay.HERMES_DIR), err)
+
+    def test_signal_handlers_are_restored_after_the_wait(self) -> None:
+        import signal as sg
+        before = (sg.getsignal(sg.SIGTERM), sg.getsignal(sg.SIGHUP))
+        self.run_hermes(self.hsess(), out="ok")
+        self.assertEqual((sg.getsignal(sg.SIGTERM), sg.getsignal(sg.SIGHUP)), before)
+
+    def test_second_relay_while_a_turn_holds_the_lock_is_refused(self) -> None:
+        """M5 (adversary round 2): no second writer beside a turn that is still running."""
+        import fcntl
+        relay.HERMES_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(relay.HERMES_DIR / f"{self.HSID}.lock", os.O_WRONLY | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        rc, _, err, calls = self.run_hermes(self.hsess())
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIn("still running in that conversation", err)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        rc, *_ = self.run_hermes(self.hsess(), out="ok")
+        self.assertEqual(rc, 0)
+
+    def test_lock_is_free_after_a_finished_turn(self) -> None:
+        self.assertEqual(self.run_hermes(self.hsess(), out="ok")[0], 0)
+        self.assertEqual(self.run_hermes(self.hsess(), out="ok")[0], 0)
+
+    def test_not_found_needs_rc1_empty_stdout_and_one_exact_line(self) -> None:
+        line = f"hermes -z: agent failed: session not found: {self.HSID}"
+        ok = self.run_hermes(self.hsess(), rc=1, err=line + "\n")
+        self.assertNotIn("Do not resend", ok[2])
+        cannot = self.run_hermes(self.hsess(), rc=1, err=f"hermes -z: agent failed: cannot resume session {self.HSID}: unsafe\n")
+        self.assertNotIn("Do not resend", cannot[2])
+        for case in (dict(rc=1, err="noise " + line), dict(rc=1, err=line + " and more"), dict(rc=1, err="other\n" + line),
+                     dict(rc=1, err=line, out="the turn said something"), dict(rc=1, err=line + "\nexit")):
+            with self.subTest(case=case):
+                self.assertIn("Do not resend", self.run_hermes(self.hsess(), **case)[2])
+
+    def test_unverified_keeps_its_files_with_both_paths_named(self) -> None:
+        rc, _, err, _ = self.run_hermes(self.hsess(), rc=1, out="partial", err="boom")
+        self.assertIn(".out", err)
+        self.assertIn(".err", err)
+        self.assertEqual(len(list(relay.HERMES_DIR.glob("*.out"))), 1)
+
+    def test_files_are_private_and_old_ones_pruned(self) -> None:
+        relay.HERMES_DIR.mkdir(parents=True, exist_ok=True, mode=0o755)
+        os.chmod(relay.HERMES_DIR, 0o755)
+        old = relay.HERMES_DIR / "1-old.out"
+        old.write_text("x")
+        old.with_suffix(".err").write_text("x")
+        os.utime(old, (1, 1))
+        self.run_hermes(self.hsess(), rc=1, out="partial", err="boom")
+        self.assertEqual(os.stat(relay.HERMES_DIR).st_mode & 0o777, 0o700)
+        kept = next(relay.HERMES_DIR.glob("*abcdef.out"))
+        self.assertEqual(os.stat(kept).st_mode & 0o777, 0o600)
+        self.assertFalse(old.exists() or old.with_suffix(".err").exists())
+
+    def test_nested_relay_is_tagged_as_hermes_not_the_original_caller(self) -> None:
+        """M1 (adversary round 2): the caller is an ancestor of the Hermes turn, so fleet's `self` row is the caller."""
+        listed = [sess(self=True, name="original-caller")]
+        self.assertEqual(relay.sender_name(listed), "original-caller")
+        os.environ.update({"RELAY_HOPS": "1", "RELAY_SENDER": "hermes 0_abcdef"})
+        self.assertEqual(relay.sender_name(listed), "hermes 0_abcdef")
+
+    def test_delegated_subagent_cannot_target_its_parent_conversation(self) -> None:
+        """M2 (adversary round 2): a subagent has its own HERMES_SESSION_ID but the same platform, chat and thread."""
+        os.environ.update({"HERMES_SESSION_ID": "subagent-own", "HERMES_SESSION_PLATFORM": "telegram",
+                           "HERMES_SESSION_CHAT_ID": "42", "HERMES_SESSION_THREAD_ID": "7"})
+        mine = self.hsess(hermes_chat=("telegram", "42", "7"))
+        rc, _, err, calls = self.run_hermes(mine)
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIn("that is this session", err)
+        for other in (("telegram", "43", "7"), ("discord", "42", "7"), ("telegram", "42", None)):
+            with self.subTest(other=other):
+                self.assertEqual(self.run_hermes(self.hsess(hermes_chat=other), out="ok")[0], 0)
+
+    def test_reply_has_an_end_marker_and_drops_invisible_format_characters(self) -> None:
+        _, out, _, _ = self.run_hermes(self.hsess(), out="a\u202eb\u200bc\U000e0041d\u2028e")
+        self.assertIn("\nabcde\n--- end of reply ---", out)
+
+    def test_cut_reply_file_holds_the_cleaned_text(self) -> None:
+        _, out, _, _ = self.run_hermes(self.hsess(), out="\x1b[31m" + "x" * 5000, args=("--json",))
+        self.assertNotIn("\x1b", Path(json.loads(out)["reply_file"]).read_text())
+
+    def test_negative_hops_do_not_buy_extra_hops(self) -> None:
+        os.environ["RELAY_HOPS"] = "-5"
+        _, _, _, calls = self.run_hermes(self.hsess(), out="ok")
+        self.assertEqual(calls[0][1]["env"]["RELAY_HOPS"], "1")
 
     def test_reply_is_stripped_of_control_sequences(self) -> None:
         _, out, _, _ = self.run_hermes(self.hsess(), out="a\x1b[31mred\x1b[0m \x1b]0;title\x07b\x00c\x9bd\x7fe\tf\nline2", args=("--json",))
@@ -982,7 +1082,7 @@ class TestHermesRoute(Harness):
         _, out, _, _ = self.run_hermes(self.hsess(), out="x" * 5000, args=("--json",))
         d = json.loads(out)
         self.assertLess(len(d["reply"]), 4200)
-        self.assertIn("full reply", d["reply"])
+        self.assertIn("full cleaned reply", d["reply"])
         self.assertEqual(len(Path(d["reply_file"]).read_text()), 5000)
 
 
