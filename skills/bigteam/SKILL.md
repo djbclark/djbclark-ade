@@ -756,9 +756,14 @@ report file or the `---<name> exit=` line.
 
 **Waiting on a PR: one `bin/pr-wait` per PR head, never three waiters, never re-arm a live one.** `bin/pr-wait PR
 [--head SHA] [--out PREFIX]` waits for the CI checks of that exact head and for Codex's `codex-review-state:v1` marker
-for it (`completed` and `failed` both terminal), then prints one line and writes `PREFIX-{checks,codex,findings,summary}.json`
-(2026-10-23; separate CI, Codex and adversary waiters were two thirds of one lead's notification turns). Exit 0 done, 1
-timeout, 2 bad usage or no such PR, 3 Codex stuck, 4 a waiter for that head is already alive (the line names its pid and prefix: read its files, do
+for it (`completed` and `failed` both terminal), then prints one line and writes `PREFIX-{checks,codex,findings,open-findings,summary}.json`
+(2026-10-23; separate CI, Codex and adversary waiters were two thirds of one lead's notification turns). **Read
+`merge_ready` in the summary, not the exit code:** it is true only when every CI check passed, Codex completed on this
+head, no unresolved Codex review thread is left (an earlier head's finding stays open until its thread is resolved:
+PR 32, 2026-10-23, a P1 left open past two pushes while a head-only filter read 0) and the marker's
+`has_unresolved_findings` agrees with the threads (`findings-mismatch` otherwise; never read it as a clean 0).
+`PREFIX-open-findings.json` lists the open threads of any head, outdated or not. Exit 0 done, 1
+timeout, 2 bad usage, no such PR or the lock guard busy, 3 Codex stuck, 4 a waiter for that head is already alive (the line names its pid and prefix: read its files, do
 not start another), 5 the head moved (wait on the new head), 6 timed out while `gh` failed. After a push, start one for
 the new head; a second for the same head is refused by itself.
 

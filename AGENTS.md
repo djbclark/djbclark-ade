@@ -163,12 +163,22 @@ pull request here is expected to meet these; flag any it misses.
 8. **Docs move with the code**: a flag, exit code or subcommand added or
    changed appears in the tool's usage text and in the doc that lists it
    (`README.md` roster, `docs/*.md`, `skills/*/SKILL.md`).
-9. **Read Codex's result against the request, never against a guessed
+9. **Read Codex's result against the head and the open threads, never against a guessed
    clock**: the summary comment's `codex-review-state` names the `commit_sha`
-   it covers; the findings for that head are the inline comments created
-   after your `@codex review` comment for it (`gh api
-   repos/.../pulls/N/comments`, compare `created_at` with that comment's,
-   and read every one). GitHub re-anchors `commit_id` to the newest head when
+   it covers. The findings for that head are the Codex inline comments
+   (`gh api repos/.../pulls/N/comments`, author `chatgpt-codex-connector[bot]`,
+   ending in the finding mark) anchored to it (`original_commit_id`, or the
+   `commit_id` of their review in `pulls/N/reviews`), PLUS every unresolved Codex
+   review thread from an earlier head: a finding stays open until its thread is
+   resolved. GraphQL `reviewThreads.isResolved` is the authority, and the marker's
+   `has_unresolved_findings` must agree with it (a disagreement is chased, never
+   read as a clean "0"). Case (2026-10-23): on PR 32 Codex left a P1 on head
+   3c40470, two pushes followed without the fix, the marker for the new head said
+   `has_unresolved_findings: true`, and a head-only filter read "0" past the open
+   P1. Check with `bin/pr-wait` (`merge_ready`, `PREFIX-open-findings.json`).
+   Fixing a finding means fixing the code, then resolving its thread. Never select
+   by time: a "newest `@codex review` comment" window is moved by Codex's own
+   receipts, which quote it (PR 12, 2026-10-20). GitHub re-anchors `commit_id` to the newest head when
    the line is unchanged, so `commit_id` alone cannot tell old from new. A
    waiter that filtered by a hard-coded timestamp missed two findings on
    PR 10 (2026-10-20) and the PR merged past them. The state marker's exact

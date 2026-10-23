@@ -19,6 +19,7 @@ Then it prints ONE line and writes, each atomically (temp file beside it, then o
   PREFIX-codex.json    the state marker of the head (the newest marker seen when none matches; {} none)
   PREFIX-findings.json Codex's inline findings for the head
                        (`null` when not collected: --no-codex, or the wait ended before Codex did)
+  PREFIX-open-findings.json  every unresolved Codex review thread of any head (see Open findings)
   PREFIX-summary.json  the one-line result as JSON
 PREFIX defaults to ~/.local/state/pr-wait/<owner>__<name>-pr<N>-<head12>. Output files are written on
 every end except exit 2 and 4 (nothing was waited for).
@@ -29,13 +30,28 @@ Only the Codex app is believed: a state marker counts only from a comment whose 
 `chatgpt-codex-connector[bot]` (type Bot) and whose `performed_via_github_app.slug` is
 `chatgpt-codex-connector`; the repo is public, so anyone can post a comment holding the markers.
 
-Findings are the PR's inline comments (`pulls/N/comments`) that carry
+Findings for the head are the PR's inline comments (`pulls/N/comments`) that carry
 `<!-- codex-code-review-finding:v1 -->`, are authored by that bot, and belong to the head: their
 `original_commit_id` is the head, or their `pull_request_review_id` is a `pulls/N/reviews` entry whose
 `commit_id` is the head. No time window (2026-10-23, adversary round 1: Codex's own receipt comments
 quote `@codex review`, so a "newest request" moved past real findings; PR 12 on 2026-10-20). GitHub
 re-anchors `commit_id` of a finding on an unchanged line, but not these two. `--since ISO` is an optional
 extra lower bound on created_at.
+
+Open findings: a finding of an EARLIER head stays open until its review thread is resolved (PR 32,
+2026-10-23: Codex left a P1 on head 3c40470, two pushes followed, the marker for the new head said
+`has_unresolved_findings: true` and the head-only filter said 0). So the waiter also reads the PR's review
+threads (`gh api graphql`, `reviewThreads.isResolved`, the authority) and lists every unresolved Codex
+thread of any head, outdated or not, in PREFIX-open-findings.json (`null` when not collected). Fixing a
+finding means fixing the code, then resolving its thread.
+Summary fields: has_any_findings and has_unresolved_findings (from the marker), findings_for_head,
+open_findings (unresolved Codex threads, outdated or not) and open_findings_outdated (the outdated
+subset), findings_mismatch (list of reasons; the marker and the threads disagree: has_unresolved_findings
+true with no open thread, false with some, or has_any_findings true with no Codex finding comment at
+all; never print a clean 0 over one), merge_ready and merge_blockers. merge_ready is true only when: at
+least one CI check ran and all passed, Codex completed on this head, zero open Codex threads, no
+mismatch, and the marker states has_unresolved_findings as a boolean (otherwise `marker-unverified`).
+The exit code does not carry it: the caller reads merge_ready.
 
 A `gh` failure (or empty `gh` output) is "unknown", never "done": it is retried on the next poll and
 reported in the summary (`errors`) when the wait ends. A PR that does not exist (HTTP 404) is a usage error.
@@ -46,7 +62,7 @@ result `codex-stuck`, never a silent timeout. CI with no checks at all counts as
 `--ci-grace` seconds (default 120) after the wait started, because a fresh push registers its check runs
 a little later; after that, zero checks is "no checks" and finished.
 
-Exit: 0 done (CI finished and Codex terminal, whatever each said: read the files),
+Exit: 0 done (CI finished and Codex terminal, whatever each said: read the files and `merge_ready`),
       1 timed out, 2 bad usage, no such PR, or the lock takeover guard held by a live pid for 30 s,
       3 Codex stuck, 4 another pr-wait for the same
       repo + PR + head is alive (its pid and output prefix on stderr: never re-arm it),
@@ -77,6 +93,7 @@ STATE_RE = re.compile(r"codex-review-state:v1\s+")
 FINDING_MARK = "codex-code-review-finding:v1"
 CODEX_LOGIN = "chatgpt-codex-connector[bot]"
 CODEX_APP = "chatgpt-codex-connector"
+CODEX_GQL_LOGIN = "chatgpt-codex-connector"  # GraphQL author login: no [bot] suffix
 TERMINAL = ("completed", "failed")
 PASS_CONCLUSIONS = ("success", "neutral", "skipped")
 GH_TIMEOUT = 120
@@ -231,29 +248,136 @@ def parse_ts(s: str) -> datetime:
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
-def fetch_findings(repo: str, pr: int, head: str, since: str | None) -> list[dict]:
-    """Codex's inline findings for `head`, selected by head and author, never by a time window.
+THREADS_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){"
+    "pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor} "
+    "nodes{isResolved isOutdated comments(first:1){nodes{databaseId author{login} path originalCommit{oid}}}}}}}}"
+)
+
+
+def fetch_threads(repo: str, pr: int) -> list[dict]:
+    """Every review thread of the PR: its first comment's databaseId, author, path, original commit and
+    whether the thread is resolved / outdated. GraphQL `reviewThreads.isResolved` is the authority on
+    whether a finding is still open (PR 32, 2026-10-23: an earlier head's P1 stayed open past two pushes).
+    Owner and name go through `-f` (strings: `-F` would turn a digits-only name into an integer)."""
+    owner, name = repo.split("/", 1)
+    threads: list[dict] = []
+    cursor: str | None = None
+    seen: set[str] = set()
+    while True:
+        args = ["api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}", "-F", f"number={pr}",
+                "-f", f"query={THREADS_QUERY}"]
+        if cursor is not None:
+            args += ["-f", f"cursor={cursor}"]
+        try:
+            doc = json.loads(gh(*args))
+            rt = doc["data"]["repository"]["pullRequest"]["reviewThreads"]
+            nodes, info = rt["nodes"], rt["pageInfo"]
+        except (ValueError, KeyError, TypeError) as e:
+            raise GhError(f"graphql reviewThreads: unusable answer: {e}") from e
+        if doc.get("errors"):
+            raise GhError(f"graphql reviewThreads: errors: {str(doc['errors'])[:200]}")
+        for n in nodes:
+            first = ((n.get("comments") or {}).get("nodes") or [None])[0]
+            if not isinstance(first, dict):
+                continue
+            threads.append({"databaseId": first.get("databaseId"),
+                            "author": (first.get("author") or {}).get("login"),
+                            "path": first.get("path"),
+                            "original_commit_id": (first.get("originalCommit") or {}).get("oid"),
+                            "isResolved": bool(n.get("isResolved")), "isOutdated": bool(n.get("isOutdated"))})
+        if not info.get("hasNextPage"):
+            return threads
+        cursor = info.get("endCursor")
+        if not cursor or cursor in seen:
+            raise GhError("graphql reviewThreads: hasNextPage without a new endCursor")
+        seen.add(cursor)
+
+
+def fetch_review_state(repo: str, pr: int, head: str, since: str | None) -> dict:
+    """Codex's findings: `for_head` (selected by head and author, never by a time window) and `open`.
 
     A comment belongs to the head when its `original_commit_id` is the head or its review
     (`pull_request_review_id`) is a `pulls/N/reviews` entry whose `commit_id` is the head: GitHub
     re-anchors `commit_id` of a finding on an unchanged line, but not these two (PR 12, 2026-10-20).
-    A later Codex receipt or a quoted `@codex review` therefore cannot hide a finding."""
+    A later Codex receipt or a quoted `@codex review` therefore cannot hide a finding.
+
+    `open` is every unresolved Codex review thread of ANY head (outdated or not): a thread whose first
+    comment is a Codex finding (REST: Codex bot, finding mark) and whose GraphQL author is the Codex app.
+    `finding_comments` counts all Codex finding comments, for the marker cross-check."""
     t0 = parse_ts(since) if since else None
     reviews = api_items(f"repos/{repo}/pulls/{pr}/reviews?per_page=100")
     head_reviews = {r.get("id") for r in reviews if r.get("commit_id") == head}
-    out = []
-    for c in api_items(f"repos/{repo}/pulls/{pr}/comments?per_page=100"):
-        body = c.get("body") or ""
-        if FINDING_MARK not in body or not is_codex_user(c):
-            continue
+    findings = [c for c in api_items(f"repos/{repo}/pulls/{pr}/comments?per_page=100")
+                if FINDING_MARK in (c.get("body") or "") and is_codex_user(c)]
+    for_head = []
+    for c in findings:
         if c.get("original_commit_id") != head and c.get("pull_request_review_id") not in head_reviews:
             continue
         if t0 is not None and not (c.get("created_at") and parse_ts(c["created_at"]) >= t0):
             continue
-        out.append({"id": c.get("id"), "path": c.get("path"), "line": c.get("line") or c.get("original_line"),
-                    "created_at": c.get("created_at"), "original_commit_id": c.get("original_commit_id"),
-                    "body": body[:600]})
-    return out
+        for_head.append({"id": c.get("id"), "path": c.get("path"), "line": c.get("line") or c.get("original_line"),
+                         "created_at": c.get("created_at"), "original_commit_id": c.get("original_commit_id"),
+                         "body": (c.get("body") or "")[:600]})
+    by_id = {c.get("id"): c for c in findings}
+    open_threads = []
+    for t in fetch_threads(repo, pr):
+        c = by_id.get(t["databaseId"])
+        if t["author"] != CODEX_GQL_LOGIN or c is None or t["isResolved"]:
+            continue
+        body = (c.get("body") or "").strip()
+        open_threads.append({"id": t["databaseId"], "path": t["path"] or c.get("path"),
+                             "line": c.get("line") or c.get("original_line"),
+                             "original_commit_id": t["original_commit_id"] or c.get("original_commit_id"),
+                             "isOutdated": t["isOutdated"],
+                             "title": (body.splitlines() or [""])[0][:200]})
+    return {"for_head": for_head, "open": open_threads, "finding_comments": len(findings)}
+
+
+def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: dict, review: dict | None) -> dict:
+    """The findings and merge_ready fields of the summary.
+
+    Mismatch (the marker and the threads disagree, so never a clean "0"): the marker says
+    `has_unresolved_findings: true` and no open Codex thread was found, or `false` and some was; or
+    `has_any_findings: true` and no Codex finding comment exists at all. merge_ready needs: every CI check
+    passed (at least one), Codex completed on this head, zero open Codex threads (outdated or not), no
+    mismatch, and a marker that states has_unresolved_findings as a boolean."""
+    has_any = cr.get("has_any_findings")
+    has_unres = cr.get("has_unresolved_findings")
+    mismatch: list[str] = []
+    blockers: list[str] = []
+    for_head = open_n = outdated_n = None
+    if review is not None:
+        for_head, open_n = len(review["for_head"]), len(review["open"])
+        outdated_n = sum(1 for t in review["open"] if t["isOutdated"])
+        if has_unres is True and open_n == 0:
+            mismatch.append("marker has_unresolved_findings=true but no open Codex thread found")
+        if has_unres is False and open_n > 0:
+            mismatch.append(f"marker has_unresolved_findings=false but {open_n} open Codex thread(s) found")
+        if has_any is True and review["finding_comments"] == 0:
+            mismatch.append("marker has_any_findings=true but no Codex finding comment found")
+    if no_codex:
+        blockers.append("codex-skipped")
+    else:
+        if codex_status != "completed":
+            blockers.append(f"codex-{codex_status}")
+        if review is None:
+            blockers.append("findings-not-collected")
+        elif not isinstance(has_unres, bool):
+            blockers.append("marker-unverified")
+    if ci_state == "no-checks":
+        blockers.append("no-checks")
+    elif ci_state != "done":
+        blockers.append("ci-pending")
+    if counts["fail"]:
+        blockers.append("ci-failed")
+    if open_n:
+        blockers.append("open-findings")
+    if mismatch:
+        blockers.append("findings-mismatch")
+    return {"has_any_findings": has_any, "has_unresolved_findings": has_unres, "findings_for_head": for_head,
+            "open_findings": open_n, "open_findings_outdated": outdated_n, "findings_mismatch": mismatch,
+            "merge_ready": not blockers, "merge_blockers": blockers}
 
 
 # ---- files ----------------------------------------------------------------------------------------
@@ -355,12 +479,29 @@ def acquire_lock(path: Path, info: dict) -> dict | None:
             time.sleep(0.05)
             continue
         try:
-            if not lock_live(read_lock(path)):
-                path.unlink(missing_ok=True)
+            drop_if_stale(path)
         finally:
             gdoc = read_lock(guard)
             if isinstance(gdoc, dict) and gdoc.get("pid") == info["pid"]:
                 guard.unlink(missing_ok=True)
+
+
+def drop_if_stale(path: Path) -> None:
+    """Unlink the lock only if a file is there and is not a live waiter's.
+
+    Called inside the takeover guard. A lock that is MISSING must stay missing: another taker may have
+    just created a fresh one in the window between our stale read and this reread (adversary round 2, L1);
+    an existing but unparseable lock is stale (the writer never leaves one)."""
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        doc = None
+    if not lock_live(doc):
+        path.unlink(missing_ok=True)
 
 
 def release_lock(path: Path, pid: int) -> None:
@@ -455,7 +596,7 @@ def main(argv: list[str]) -> int:
     me = os.getpid()
     my_start = proc_start(me)
     if my_start is None:
-        return usage("cannot read this process's start time with `ps -o lstart=`")
+        return usage("cannot read this process's start time (/proc/<pid>/stat on Linux, `ps -o lstart=` elsewhere)")
     try:
         held = acquire_lock(lock, {"pid": me, "start": my_start, "repo": a.repo, "pr": a.pr,
                                    "head": head, "out": out})
@@ -469,7 +610,7 @@ def main(argv: list[str]) -> int:
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     Path(out).parent.mkdir(parents=True, exist_ok=True)
 
-    s = {"checks": None, "codex_match": None, "codex_newest": None, "findings": None,
+    s = {"checks": None, "codex_match": None, "codex_newest": None, "review": None,
          "ci_done": False, "codex_done": a.no_codex, "since": None, "since_source": None,
          "codex_clock": start, "running_seen": False}
 
@@ -486,14 +627,15 @@ def main(argv: list[str]) -> int:
         ci_state = "done" if s["ci_done"] else "pending"
         if s["ci_done"] and not checks:
             ci_state = "no-checks"
+        judged = assess(a.no_codex, ci_state, counts, codex["status"], cr, s["review"])
         summary = {"result": result, "exit": code, "repo": a.repo, "pr": a.pr, "head": head,
                    "new_head": new_head, "ci": {"state": ci_state, **counts}, "codex": codex,
-                   "findings": None if s["findings"] is None else len(s["findings"]),
-                   "since": s["since"], "since_source": s["since_source"], "errors": errors[-3:],
+                   **judged, "since": s["since"], "since_source": s["since_source"], "errors": errors[-3:],
                    "elapsed_s": round(time.monotonic() - start, 1), "out": out}
         write_atomic(f"{out}-checks.json", checks)
         write_atomic(f"{out}-codex.json", None if a.no_codex else (s["codex_match"] or s["codex_newest"] or {}))
-        write_atomic(f"{out}-findings.json", s["findings"])
+        write_atomic(f"{out}-findings.json", None if s["review"] is None else s["review"]["for_head"])
+        write_atomic(f"{out}-open-findings.json", None if s["review"] is None else s["review"]["open"])
         write_atomic(f"{out}-summary.json", summary)
         if a.json:
             print(json.dumps(summary, separators=(",", ":")))
@@ -502,9 +644,17 @@ def main(argv: list[str]) -> int:
                      f"CI {ci_state} ({counts['pass']} pass, {counts['fail']} fail, {counts['pending']} pending)"]
             if not a.no_codex:
                 parts.append(f"codex {codex['status']}")
-            if s["findings"] is not None:
-                parts.append(f"findings for the head: {len(s['findings'])}"
-                             + (f" (since {s['since']})" if s["since"] else ""))
+            if s["review"] is None:
+                parts.append("findings not collected")
+            else:
+                parts.append(f"findings for the head: {len(s['review']['for_head'])}"
+                             + (f" (since {s['since']})" if s["since"] else "")
+                             + f"; open Codex findings: {judged['open_findings']}"
+                             f" ({judged['open_findings_outdated']} outdated)")
+            if judged["findings_mismatch"]:
+                parts.append("FINDINGS-MISMATCH: " + " / ".join(judged["findings_mismatch"]))
+            parts.append("merge_ready: " + ("yes" if judged["merge_ready"]
+                                            else "no (" + ", ".join(judged["merge_blockers"]) + ")"))
             if new_head:
                 parts.append(f"new head {new_head[:12]}")
             if errors and code in (EXIT_TIMEOUT, EXIT_GH):
@@ -527,10 +677,10 @@ def main(argv: list[str]) -> int:
     def collect_findings() -> bool:
         if a.no_codex:
             return True
-        found = attempt(fetch_findings, a.repo, a.pr, head, a.since)
-        if found is None:
+        review = attempt(fetch_review_state, a.repo, a.pr, head, a.since)
+        if review is None:
             return False
-        s["findings"] = found
+        s["review"] = review
         if a.since:
             s["since"], s["since_source"] = a.since, "--since"
         return True
