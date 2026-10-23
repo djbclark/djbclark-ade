@@ -602,7 +602,7 @@ class TestStateAndInstall(Base):
         self.assertTrue(plist["ProgramArguments"][0].endswith("bin/claude-fleet-governor"))
         self.assertTrue(plist["StandardOutPath"].endswith(".local/state/ade/claude-fleet-governor.out.log"))
         self.assertTrue(plist["StandardErrorPath"].endswith(".local/state/ade/claude-fleet-governor.err.log"))
-        self.assertIn(f"launchctl bootstrap gui/{os.getuid()} {dest}", r.stdout)
+        self.assertIn(f"launchctl bootstrap gui/{os.getuid()} {dest}", r.stdout)  # a plain path needs no quotes
 
 
 if __name__ == "__main__":
@@ -777,3 +777,47 @@ def test_adversary_round_5_an_overflowing_timestamp_is_no_time_not_a_crash_after
     assert mod.parse_ts("0001-01-01T00:00:00+01:00") is None
     assert mod.parse_ts("2026-10-23T15:00:00Z") == datetime(2026, 10, 23, 15, 0, tzinfo=UTC)
     assert mod.parse_ts("9999-12-31T23:59:59-23:00") is None or mod.parse_ts("9999-12-31T23:59:59-23:00").year in (9999, 10000)
+
+
+def _two_snaps(mod, pairs, resets):
+    """Newest first: [(at, used)] -> snapshots with one five-hour window."""
+    return [{"at": at, "windows": {"five_hour": {"label": "Claude Code 5-hour", "used": used, "resets_at": resets,
+                                                  "window_minutes": 300.0}}} for at, used in pairs]
+
+
+def test_codex_pass_4_the_projection_starts_at_the_observation_not_at_now(monkeypatch, tmp_path):
+    """P2: samples 12:10 (30%) and 12:40 (50%) imply 40%/h; with a 13:50 reset a check at 13:00 must project from 12:40
+    (96.7%, tight), not from 13:00 (83.3%, ok)."""
+    monkeypatch.setenv("CLAUDE_QUOTA_GUARD_STATE", str(tmp_path / "none.json"))
+    mod = _gov()
+    d = datetime(2026, 10, 23, tzinfo=UTC)
+    snaps = _two_snaps(mod, [(d.replace(hour=12, minute=40), 50.0), (d.replace(hour=12, minute=10), 30.0)], d.replace(hour=13, minute=50))
+    out = mod.compute(snaps, d.replace(hour=13, minute=0), mod.thresholds())
+    w = out["windows"]["five_hour"]
+    assert abs(w["projected_at_reset"] - 96.67) < 0.1 and out["level"] == "tight", w
+
+
+def test_codex_pass_4_the_rate_window_ends_at_the_newest_observation_not_at_now(monkeypatch, tmp_path):
+    """P2: samples 12:00 (40%) and 13:00 (70%), reset 15:00: still tight or worse (never ok) at 13:35, when the 12:00 sample is 95 minutes
+    old by the wall clock but only 60 minutes before the newest observation."""
+    monkeypatch.setenv("CLAUDE_QUOTA_GUARD_STATE", str(tmp_path / "none.json"))
+    mod = _gov()
+    d = datetime(2026, 10, 23, tzinfo=UTC)
+    snaps = _two_snaps(mod, [(d.replace(hour=13), 70.0), (d.replace(hour=12), 40.0)], d.replace(hour=15))
+    for minute in (0, 35):
+        out = mod.compute(snaps, d.replace(hour=13, minute=minute), mod.thresholds())
+        assert out["level"] in ("tight", "critical") and out["windows"]["five_hour"]["rate_per_hour"] > 25, (minute, out["windows"])
+
+
+def test_codex_pass_4_the_printed_bootstrap_line_quotes_a_destination_with_spaces(monkeypatch, tmp_path, capsys):
+    """P1: a HOME or LaunchAgents directory with a space split the pasted command into two arguments."""
+    mod = _gov()
+    home = tmp_path / "my home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_GOVERNOR_LAUNCH_AGENTS", str(home / "Launch Agents"))
+    assert mod.cmd_install() == 0
+    line = next(ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("launchctl bootstrap"))
+    import shlex
+    argv = shlex.split(line)
+    assert argv[:3] == ["launchctl", "bootstrap", f"gui/{os.getuid()}"] and len(argv) == 4 and argv[3].endswith("Launch Agents/com.djbclark.claude-fleet-governor.plist"), argv

@@ -59,6 +59,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shlex
 import plistlib
 import re
 import shutil
@@ -306,24 +307,28 @@ def compute(snaps: list[dict[str, Any]], now: datetime, t: dict[str, float]) -> 
     windows: dict[str, dict[str, Any]] = {}
     newest = snaps[0]
     for kind in [k for k, _ in KINDS] + [FABLE_KIND]:
-        cur = next((s["windows"][kind] for s in snaps if kind in s["windows"]), None)
-        if cur is None:
+        hit = next(((s["windows"][kind], s["at"]) for s in snaps if kind in s["windows"]), None)
+        if hit is None:
             continue
+        cur, cur_at = hit
         resets = cur["resets_at"]
-        hours = (resets - now).total_seconds() / 3600
-        if hours <= 0:
+        if (resets - now).total_seconds() <= 0:
             continue                       # the data predates a reset that has happened: not evidence
+        # `used` was observed at `cur_at`, not at `now` (a snapshot is accepted up to stale_min old): project from the
+        # observation, and fit the rate over the window that ends at the newest observation, so a quiet half hour between
+        # hourly collections neither shifts the projection nor drops the supporting samples (Codex pass 4 on PR 31, P2 x2)
+        hours = (resets - cur_at).total_seconds() / 3600
         tol = timedelta(minutes=t["reset_tolerance_min"])
         samples = sorted((s["at"], s["windows"][kind]["used"]) for s in snaps
                          if kind in s["windows"] and abs(s["windows"][kind]["resets_at"] - resets) <= tol
-                         and (now - s["at"]).total_seconds() <= t["rate_window_min"] * 60)
+                         and (cur_at - s["at"]).total_seconds() <= t["rate_window_min"] * 60)
         rate = 0.0
         if len(samples) >= 2 and (samples[-1][0] - samples[0][0]).total_seconds() >= t["min_span_min"] * 60:
             rate = slope_per_hour([((a - samples[0][0]).total_seconds() / 3600, u) for a, u in samples])
         used = cur["used"]
         w = {"label": cur["label"], "used": used, "left": max(0.0, 100.0 - used), "rate_per_hour": rate,
              "projected_at_reset": used + rate * hours, "resets_at": resets, "samples": len(samples),
-             "exhaust_at": exhaust_time(now, used, rate)}
+             "exhaust_at": exhaust_time(cur_at, used, rate)}
         w["level"] = window_level(kind, w, now, t)
         windows[kind] = w
     level = max((w["level"] for k, w in windows.items() if k != FABLE_KIND), key=LEVELS.get, default="ok")
@@ -716,7 +721,7 @@ def cmd_install() -> int:
     tmp.write_bytes(plistlib.dumps(plist))
     os.replace(tmp, dest)
     print(f"wrote {dest}")
-    print(f"launchctl bootstrap gui/{os.getuid()} {dest}")
+    print(f"launchctl bootstrap gui/{os.getuid()} {shlex.quote(str(dest))}")  # HOME may hold a space or a metacharacter
     return 0
 
 
