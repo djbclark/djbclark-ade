@@ -3733,7 +3733,7 @@ def test_the_preamble_disables_lazy_fetch_and_warns_on_a_git_that_ignores_it(tmp
     doc = load_doc()
     assert "GIT_NO_LAZY_FETCH=1" in doc.PLAN_PREAMBLE
     for version, warned in (("2.30.0", True), ("2.44.9", True), ("2.45.0", False), ("2.50.1 (Apple Git-155)", False),
-                            ("3.0.1", False), ("2.5.0", True)):
+                            ("3.0.1", False), ("2.5.0", True), ("2.100.0", False), ("10.0.0", False), ("2.450.0", False)):
         fake = tmp_path / f"bin-{version.split()[0]}"
         fake.mkdir()
         (fake / "git").write_text(f"#!/bin/sh\necho 'git version {version}'\n")
@@ -3746,6 +3746,88 @@ def test_the_preamble_disables_lazy_fetch_and_warns_on_a_git_that_ignores_it(tmp
                                  env={"PATH": f"{fake}:/usr/bin:/bin", "GIT_NO_LAZY_FETCH": "0"})
             assert run.stdout == "1", (version, shell, run.stdout)
             assert ("older than 2.45" in run.stderr) is warned, (version, shell, run.stderr)
+
+
+def test_a_commit_only_the_stash_remembers_is_local_work(tmp_path):
+    """Adversary round 51 on PR 27, MEDIUM: a commit reachable only through the stash (the base an entry was made on, once
+    its branch is deleted) was excluded from every count with the stash itself, and no capture holds it."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    c = scan_one(mod, roots)
+    assert c["verdict"] == "clean and pushed"
+    git(work, "switch", "-c", "x")
+    (work / "secret.txt").write_text("ONLY-IN-B\n")
+    git(work, "add", "secret.txt")
+    git(work, "commit", "-m", "B")
+    (work / "a.txt").write_text("dirty\n")
+    git(work, "stash")
+    git(work, "switch", "main")
+    git(work, "branch", "-D", "x")
+    c = scan_one(mod, roots)
+    assert c["stashes"] == 1 and c["local_only_commits"] == 1 and c["verdict"] != "clean and pushed", c
+    # an ordinary stash on a pushed base stays what it was: no local-only commit
+    git(work, "stash", "drop")
+    (work / "a.txt").write_text("dirty again\n")
+    git(work, "stash")
+    c = scan_one(mod, roots)
+    assert c["stashes"] == 1 and c["local_only_commits"] == 0, c
+
+
+def test_a_global_push_rewrite_to_a_helper_gets_no_push_row(tmp_path, monkeypatch):
+    """Codex pass 46 on PR 27, P1: the url checks ran with the global config switched off, but the printed push runs in
+    the operator's shell, where `url.<base>.pushInsteadOf` can turn a clean url into a helper or credential url."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    commit_file(work, "ahead.txt")
+    git(work, "config", "remote.origin.url", "https://127.0.0.1:9/x.git")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    assert mod.push_urls_hold_credential(work) is False
+    (home / ".gitconfig").write_text('[url "evil::PAYLOAD-FAKE/"]\n\tpushInsteadOf = https://127.0.0.1:9/\n')
+    assert mod.push_urls_hold_credential(work) is True
+    (home / ".gitconfig").write_text('[url "https://u:FAKE-SECRET@127.0.0.1:9/"]\n\tpushInsteadOf = https://127.0.0.1:9/\n')
+    assert mod.push_urls_hold_credential(work) is True
+
+
+def test_a_stash_reflog_that_is_not_a_regular_file_is_incomplete_not_a_hang(tmp_path):
+    """Codex pass 46 on PR 27, P2: `.git/logs/refs/stash` as a symlink to a FIFO or `/dev/zero` blocked or filled memory."""
+    mod = load()
+    work = make_repo(tmp_path / "w", "w.txt")
+    log = work / ".git" / "logs" / "refs" / "stash"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(tmp_path / "fifo")
+    for target in (tmp_path / "fifo", Path("/dev/zero")):
+        log.unlink(missing_ok=True)
+        log.symlink_to(target)
+        assert mod.stash_count(work, work / ".git") is None, target
+    log.unlink()
+    log.write_text("0000 1111 a <a@b> 1 +0000\tWIP\n" * 3)
+    assert mod.stash_count(work, work / ".git") == 3
+    with pytest.raises(ValueError):
+        mod.read_regular_file(log, 10)
+
+
+def test_a_submodule_core_worktree_must_resolve_to_its_own_checkout(tmp_path):
+    """Cursor security review on PR 27, MEDIUM: any `core.worktree` was accepted in a module config, so the plan's
+    `git -C <checkout>/<sub>` read whatever directory that key named."""
+    mod = load()
+    sub_src = make_repo(tmp_path / "subsrc", "s.txt")
+    sup = make_repo(tmp_path / "roots" / "sup", "p.txt")
+    git(sup, "-c", "protocol.file.allow=always", "submodule", "add", str(sub_src), "sub")
+    git(sup, "commit", "-m", "add sub")
+    rec = mod.scan_checkout(sup, remote=False)
+    assert rec["submodules_vetted"] == ["sub"], rec
+    cfg = sup / ".git" / "modules" / "sub" / "config"
+    text = cfg.read_text()
+    assert "worktree = ../../../sub" in text
+    cfg.write_text(text.replace("worktree = ../../../sub", f"worktree = {tmp_path}"))
+    rec = mod.scan_checkout(sup, remote=False)
+    assert rec["verdict"] == "skipped: submodule config unrecognised (core.worktree outside)", rec["verdict"]
+    assert rec.get("submodules_vetted") is None, rec
+    cfg.write_text(text)
+    assert mod.scan_checkout(sup, remote=False)["submodules_vetted"] == ["sub"]
 
 
 def test_an_unborn_head_still_counts_every_other_ref_as_local_work(tmp_path):

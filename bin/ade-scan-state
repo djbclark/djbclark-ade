@@ -26,7 +26,8 @@ is `(gitmodules path not a gitlink)`, one (or an index gitlink) that is absolute
 or submodule path holds a control character, a space, a zero-width, joiner, filler, variation-selector, tag or bidi
 character, a non-UTF-8 byte or (a path) a quote, is `(gitmodules path unusual)`,
 a submodule path with a symlink component is `(symlink)`, a submodule directory holding files but no `.git` is
-`(submodule has files but no .git)`, and an entry of a module git dir that differs from `HEAD`, `config`,
+`(submodule has files but no .git)`, a module whose `core.worktree` does not resolve to the submodule's own checkout is
+`(core.worktree outside)`, and an entry of a module git dir that differs from `HEAD`, `config`,
 `config.worktree` or `commondir` only in letter case, or that the file system opens as one of those names, is
 `(unrecognised entry)`: nothing is trusted that git would read elsewhere. The record carries `submodules_vetted`,
 the sorted paths of the checked-out submodules that passed every check, and the plan runs git only at those paths,
@@ -549,11 +550,17 @@ def find_checkouts(root: Path, failures: list[tuple[Path, str]] | None = None) -
     return found
 
 
-def git(path: Path, *args, timeout=60, network=False, stdin_text=None, errors="replace"):
+def git(path: Path, *args, timeout=60, network=False, stdin_text=None, errors="replace", operator_config=False):
     kw = {} if stdin_text is None else {"stdin_text": stdin_text}
     if errors != "replace":  # the default stays implicit: tests substitute `run` with fakes that take no `errors`
         kw["errors"] = errors
-    return run(["git", *GIT_SAFE, "-C", str(path), *args], timeout=timeout, env=git_env(network), **kw)
+    env = git_env(network)
+    if operator_config:
+        # the push the plan prints runs in the operator's shell, where their global and system config (a
+        # `url.<base>.pushInsteadOf` among it) applies; only read-only config commands may ask for this (Codex pass 46)
+        env.pop("GIT_CONFIG_GLOBAL", None)
+        env.pop("GIT_CONFIG_NOSYSTEM", None)
+    return run(["git", *GIT_SAFE, "-C", str(path), *args], timeout=timeout, env=env, **kw)
 
 
 def key_is_safe(key: str, value: str, in_submodule: bool = False) -> bool:
@@ -685,6 +692,8 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
                     return True
         return False
 
+    worktrees: dict[str, list[str]] = {}  # module git dir (realpath) -> its `core.worktree` values (git writes one)
+
     def offender(cfg: Path) -> str | None:
         if cfg.is_symlink():
             # Codex pass 37: a symlinked config used to be skipped as safe, and the plan then told the human to run
@@ -695,6 +704,9 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
         if rc != 0:
             return "(unreadable)"
         entries = [tuple(e.partition("\n")[::2]) for e in out.split("\0") if e]
+        for key, value in entries:
+            if key.lower() == "core.worktree":  # accepted by the allowlist, judged below against the checkout
+                worktrees.setdefault(os.path.realpath(cfg.parent), []).append(value)
         bad = config_offenders(entries, in_submodule=True)
         return bad[0] if bad else None
 
@@ -808,8 +820,33 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
             return True, "(gitdir unreadable)", []
         if os.fsdecode(target) not in vetted:
             return True, "(gitdir outside modules)", []
+        # git honours `core.worktree`: the plan's `git -C <checkout>/<sub>` would read whatever directory it names unless
+        # it resolves to the submodule's own checkout (Cursor security review on PR 27, MEDIUM)
+        checkout = os.path.realpath(path / sub)
+        if any(os.path.realpath(os.path.join(os.fsdecode(target), v)) != checkout for v in worktrees.get(os.fsdecode(target), [])):
+            return True, "(core.worktree outside)", []
         subs.append(sub)  # a real checked-out submodule: `.git` names a git dir the walk vetted
     return True, None, subs
+
+
+MAX_STASH_LOG_BYTES = 64 * 1024 * 1024
+
+
+def read_regular_file(path: Path, cap: int) -> bytes:
+    """The bytes of a regular file of at most `cap` bytes. Never follows a symlink, never blocks on a FIFO and never
+    reads a device: ValueError for any of those (OSError when it cannot be opened)."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
+            raise ValueError("not a regular file within the cap")
+        with os.fdopen(os.dup(fd), "rb") as f:
+            data = f.read(cap + 1)
+        if len(data) > cap:
+            raise ValueError("not a regular file within the cap")
+        return data
+    finally:
+        os.close(fd)
 
 
 def stash_count(path: Path, common: Path | None) -> int | None:
@@ -818,10 +855,10 @@ def stash_count(path: Path, common: Path | None) -> int | None:
     incomplete rather than inventing a count (Codex pass 22 on PR 27)."""
     if common:
         try:
-            return len((common / "logs" / "refs" / "stash").read_bytes().splitlines())
+            return len(read_regular_file(common / "logs" / "refs" / "stash", MAX_STASH_LOG_BYTES).splitlines())
         except FileNotFoundError:
             pass
-        except OSError:
+        except (OSError, ValueError):  # a symlink, FIFO or device, or a file past the cap: not a count (Codex pass 46)
             return None
     rc, _ = git(path, "rev-parse", "--verify", "--quiet", "refs/stash")
     if rc == 1:  # `--verify --quiet`: 1 is "no such ref", git's documented answer; anything else is a failure
@@ -874,6 +911,11 @@ def push_urls_hold_credential(path: Path) -> bool:
         if rc == 0 and any(url_withheld(u) for u in out.split("\0") if u):
             return True
     rc, out = git(path, "remote", "get-url", "--push", "--all", "origin")
+    if rc != 0 or any(url_withheld(u) for u in out.split("\n") if u):
+        return True
+    # and as the operator's own config rewrites it (Codex pass 46, P1): the scan's sandbox ignores the global and system
+    # config, the push does not
+    rc, out = git(path, "remote", "get-url", "--push", "--all", "origin", operator_config=True)
     return rc != 0 or any(url_withheld(u) for u in out.split("\n") if u)
 
 
@@ -1274,6 +1316,15 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
                 tips_missing, _, rc = tip_state()
                 if tips_missing is None:
                     return incomplete_record(path, "cat-file --batch-check", rc)
+    # the stash itself is counted and captured on its own, but the commit an entry was made on (its first parent) is
+    # reachable from nothing else once its branch is deleted: it counts like any ref, against origin (adversary round
+    # 51 on PR 27, MEDIUM; the `--exclude=refs/stash` below leaves out the stash commits, not their ancestry)
+    bases: list[str] = []
+    if stashes:
+        rc, out = git(path, "log", "-g", "--format=%P", "refs/stash")
+        if rc != 0:
+            return incomplete_record(path, "log -g refs/stash", rc)
+        bases = [line.split()[0] for line in out.splitlines() if line.split()]
     local_only: int | None = 0
     local_only_branches: list[dict] = []
     local_only_tags: list[dict] = []
@@ -1282,7 +1333,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     if unborn:
         # HEAD names no commit, but another namespace (`refs/custom/*`, `refs/notes/*`) may still hold work: count every
         # local ref the same way, minus the unborn `HEAD` (Codex pass 45 on PR 27). The per-branch breakdown is empty
-        local_only, rc = local_only_count(path, ["--exclude=refs/remotes/*", "--exclude=refs/stash", "--all"],
+        local_only, rc = local_only_count(path, ["--exclude=refs/remotes/*", "--exclude=refs/stash", "--all", *bases],
                                           tips, live, has_origin)
         if local_only is None:
             return incomplete_record(path, "rev-list --count --all --not --remotes=origin", rc)
@@ -1290,7 +1341,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
         # every local ref, not only heads and tags: a commit reachable only from `refs/notes/*`, `refs/replace/*` or
         # any other namespace is local work too (Codex pass 25 on PR 27). Remote-tracking refs are no local work
         # and the stash is counted and captured on its own (`--exclude` binds to the `--all` that follows it)
-        local_only, rc = local_only_count(path, ["HEAD", "--exclude=refs/remotes/*", "--exclude=refs/stash", "--all"],
+        local_only, rc = local_only_count(path, ["HEAD", "--exclude=refs/remotes/*", "--exclude=refs/stash", "--all", *bases],
                                           tips, live, has_origin)
         if local_only is None:
             return incomplete_record(path, "rev-list --count HEAD --all --not --remotes=origin", rc)
@@ -1571,7 +1622,7 @@ def main(argv=None) -> int:
                     help="with --remote: `git fetch origin refs/heads/<branch>` (120 s limit) when the "
                          "origin tip's objects are missing locally, to compare it with HEAD; downloads "
                          "the branch's objects, writes no refs and no FETCH_HEAD. Nothing bounds how much "
-                         "origin sends (the 120 s limit bounds the time): use it on origins you trust")
+                         "origin sends (the 120 s limit bounds the time): use it on origins you trust (a fetch killed at the limit can leave an `objects/pack/tmp_pack_*` file)")
     ap.add_argument("--unique-max-bytes", type=int, default=5 * 1024 * 1024)
     ap.add_argument("--top", type=int, default=10, help="largest bigteam dirs to break down")
     fmt = ap.add_mutually_exclusive_group()

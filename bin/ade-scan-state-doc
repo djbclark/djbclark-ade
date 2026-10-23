@@ -269,7 +269,7 @@ PLAN_PREAMBLE = ("GCP=$(command -v gcp || command -v cp); GTAR=$(command -v gtar
                  "while IFS= read -r _L; do case ${_L%%=*} in GIT_*[!A-Za-z0-9_]*) ;; GIT_?*) case $_L in *=*) unset \"${_L%%=*}\";; esac;; esac; done <<< \"$_E\"; "
                  "unset _E _L; "
                  "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_NO_LAZY_FETCH=1; "
-                 "case $(git version 2>/dev/null) in \"git version \"[3-9].*|\"git version 2.\"4[5-9]*|\"git version 2.\"[5-9][0-9]*) ;; "
+                 "case $(git version 2>/dev/null) in \"git version \"[3-9].*|\"git version 2.\"4[5-9]*|\"git version 2.\"[5-9][0-9]*|\"git version 2.\"[1-9][0-9][0-9]*|\"git version \"[1-9][0-9]*.*) ;; "
                  "*) echo 'git older than 2.45 ignores GIT_NO_LAZY_FETCH: in a partial clone a capture may download from origin' >&2;; esac")
 
 
@@ -578,9 +578,11 @@ def render(d):
     w("## 3. Capture (how each item would be preserved; none of this was run)\n")
     w("Every command below uses GNU `cp`, `tar` and `sed` through three variables, so the same row runs on this Mac "
       "(coreutils and gnu-sed installed as `g*`) and on Linux (bare names; Codex pass 12 on PR 27): set "
-      f"`{PLAN_PREAMBLE}` first, and `<DEST>` to an absolute path. The last two statements give every `git` the "
-      "scanner's own environment: no `GIT_DIR`, `GIT_INDEX_FILE` or other ambient `GIT_*` variable, and no global or "
-      "system config, so a successful capture is of the checkout the scan read (Codex pass 42). Paste it into bash or zsh "
+      f"`{PLAN_PREAMBLE}` first, and `<DEST>` to an absolute path. The `unset`s, the loop and the `export` give every `git` the "
+      "scanner's own environment: no `GIT_DIR`, `GIT_INDEX_FILE` or other ambient `GIT_*` variable, no global or "
+      "system config, and `GIT_NO_LAZY_FETCH=1`, so a successful capture is of the checkout the scan read (Codex pass 42). "
+      "In a partial clone a bundle row then fails with `could not fetch ... from promisor remote` instead of downloading "
+      "from origin: archive the whole directory there, or unset the variable once contacting origin is acceptable. Paste it into bash or zsh "
       "(not sh or dash: the preamble uses `<<<`), in a shell you close afterwards (`bash -l` or a subshell), not your working one; the push rows are the exception, they need your "
       "own git credentials and config, so run them in a normal shell. Read this document in a rendered markdown view "
       "(GitHub, a viewer): the commands sit in table cells where a literal `|` is written `\\|`, and a plain-text editor "
@@ -679,7 +681,7 @@ def render(d):
         # command of its own, whatever repository it was (adversary round 30 on PR 27)
         if "no origin remote" in c["flags"]:
             covered_by_bundle = True
-            what.append(f"all {c['ahead_of_origin']} commits (no remote)")
+            what.append(f"all {c['ahead_of_origin'] or c.get('local_only_commits') or 0} commits (no remote)")
             bd = "~/ops/site-private/bundles/" + ck.removeprefix("checkouts/")
             cmd.append(shcode("mkdir -p {} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create {} --all", bd, raw_p, f"{bd}/all.bundle")
                        + " or add a remote and `git push -u origin <branch>`")
