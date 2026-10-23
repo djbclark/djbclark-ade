@@ -166,13 +166,20 @@ def untracked_values(raw_p, ck):
 # it stops (round 43: a silent rc 1 reads as "nothing happened"), and the module git dirs themselves are archived,
 # which needs no worktree and runs nothing. Since round 47 the row holds one command set per path the scan vetted
 # (`submodules_vetted`), that path quoted in every command: the human substitutes and pastes nothing
-SUB_GUARD = "{{ [ -e {}/.git ] || {{ echo {} >&2; false; }}; }} && "  # values: the submodule's path, the message
+# `printf '%s\n'`, never `echo`: zsh's builtin and macOS `/bin/sh` interpret backslash escapes in the path (round 47 LOW)
+SUB_GUARD = "{{ [ -e {}/.git ] || {{ printf '%s\\n' {} >&2; false; }}; }} && "  # values: the submodule's path, the message
 MODULES_FMT = ("mkdir -p <DEST>/{} && d=$(git -C {} rev-parse --git-common-dir) "
                "&& TAR_OPTIONS= \"$GTAR\" -cf <DEST>/{}/modules.tar -C {} -C \"$d\" modules")
 
 
 def modules_values(raw_p, ck):
     return (ck, raw_p, ck, raw_p)
+
+
+def vettable(sub):
+    """A record path the plan may name: a non-empty string below the checkout, never absolute or holding `..` (the scan
+    refuses those itself; this is defence in depth for a hand-edited record, round 47 LOW 3)."""
+    return isinstance(sub, str) and bool(sub) and not os.path.isabs(sub) and ".." not in sub.split("/")
 
 
 def submodule_commands(raw_p, ck, sub):
@@ -247,11 +254,15 @@ def human(n):
 
 
 def esc(value, in_code=False):
-    """One markdown table cell: `|` escaped, `<`, `>`, `&` HTML-escaped; backticks escaped outside
-    a code span (CommonMark ignores a backslash inside one, `code` fences instead); every control
-    character (a bare CR ends a line in CommonMark) shown as `visible()` text, never the raw byte."""
+    """One markdown table cell: `|` escaped; outside a code span `<`, `>`, `&` are HTML-escaped and backticks
+    backslash-escaped. Inside a code span (a pasted command) only `|` is escaped: CommonMark and GFM decode no entity in
+    a code span, so `&amp;` there would be shown, copied and run as five characters, and a submodule path `R&D` would
+    reach the guard as `R&amp;D`, a "not a checked-out submodule (skipped)" for a real checkout (adversary round 47,
+    MEDIUM); `code` fences with more backticks instead. Every control character (a bare CR ends a line in CommonMark)
+    is shown as `visible()` text, never the raw byte."""
     text = "-" if value is None else str(value)
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    if not in_code:
+        text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     text = text.replace("|", "\\|")
     if not in_code:
         text = text.replace("`", "\\`")
@@ -776,12 +787,14 @@ def render(d):
                 cmd.append("this record lists no vetted submodule path (scanned by an older version): re-scan with this "
                            "version to get per-submodule commands; until then archive every module git dir, which holds "
                            "the commits of each submodule, with " + modules + " before any cleanup")
-            elif not [s for s in vetted if isinstance(s, str) and s]:
+            elif not [s for s in vetted if vettable(s)]:
                 cmd.append("no submodule is checked out (each is de-initialised or never initialised): its commits live under "
                            "the git dir's `modules/`, which this archive keeps: " + modules + " before any cleanup")
             else:
                 sets = [f"{code('{}', visible(sub))}: " + ", ".join(submodule_commands(raw_p, ck, sub))
-                        for sub in vetted if isinstance(sub, str) and sub]
+                        for sub in vetted if vettable(sub)]
+                if any(isinstance(sub, str) and sub and not vettable(sub) for sub in vetted):
+                    sets.append("a path in `submodules_vetted` that is absolute or holds `..` was left out (a hand-edited record?)")
                 # the module git dirs hold a de-initialised or removed submodule's commits, which no command above can
                 # reach (adversary round 42)
                 cmd.append("in each checked-out submodule the scan vetted, the path is in the command: " + "; ".join(sets)

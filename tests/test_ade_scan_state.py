@@ -1200,9 +1200,10 @@ def section_3_2(text: str) -> str:
 
 
 def unescape_span(text: str) -> str:
-    """The shell text inside a markdown code span as `code()` wrote it (`&`, `<`, `>` and `|` in values escaped)."""
-    import html
-    return html.unescape(text).replace("\\|", "|")
+    """The shell text inside a markdown code span as a human pastes it: only the table cell's `\\|` is undone, because
+    CommonMark and GFM decode no entity in a code span (adversary round 47: `html.unescape` here modelled a paste nobody
+    can make)."""
+    return text.replace("\\|", "|")
 
 
 def unmark(span: str) -> str:
@@ -1646,12 +1647,14 @@ def test_a_verdict_naming_a_hostile_directory_is_escaped_in_every_doc_table(tmp_
                          capture_output=True, text=True)
     assert gen.returncode == 0, gen.stderr
     text = doc.read_text()
-    assert "<i>" not in text and "<b>" not in text
+    # a code span shows `<i>` as typed (CommonMark decodes nothing in one, round 47): only text outside spans must be inert
+    outside = re.sub(r"(`+).*?\1", "", text, flags=re.S)
+    assert "<i>" not in outside and "<b>" not in outside
     rows = [ln for ln in text.splitlines() if "scandir EACCES" in ln and ln.startswith("| ")]
     # the 1.1 top-children table and the 1.3 every-task table; 1.2 lists only unique/mixed dirs
     assert len(rows) == 2, rows
     for ln in rows:
-        assert "s\\|&lt;i&gt;x" in ln, ln
+        assert "`s\\|<i>x/`" in ln or "s\\|&lt;i&gt;x" in ln, ln
     cells = sorted(ln.replace("\\|", "").count("|") for ln in rows)
     assert cells == [6, 8], cells  # 5 and 7 columns: no extra cell from the name's `|`
 
@@ -2945,7 +2948,7 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
     # adversary rounds 43-46: no `<sub>` template and no `.gitmodules` listing for the human to read and paste back
     assert "<sub>" not in row and "--get-regexp" not in row and "list them with" not in row
     sp, d = "/p/sup/sub", "<DEST>/checkouts/abs/p/sup/submodules/sub"
-    guard = "{ [ -e /p/sup/sub/.git ] || { echo 'submodule sub: not a checked-out submodule (skipped)' >&2; false; }; } && "
+    guard = "{ [ -e /p/sup/sub/.git ] || { printf '%s\\n' 'submodule sub: not a checked-out submodule (skipped)' >&2; false; }; } && "
     assert f"git -C {sp} status --porcelain" in row and f"git -C {sp} log --oneline --branches --tags --not --remotes" in row
     assert f"git -C {sp} bundle create {d}/all.bundle --all" in row
     # Codex pass 26: a bundle holds commits only; the dirty worktree needs the patches and the untracked archive
@@ -3527,3 +3530,93 @@ def test_a_symlinked_modules_directory_or_a_symlink_inside_a_module_is_skipped(t
     modules.rename(outside_mod)
     modules.symlink_to(outside_mod)
     assert verdict() == want
+
+
+def test_a_submodule_path_with_an_ampersand_or_angle_brackets_is_captured_not_skipped(tmp_path):
+    """Adversary round 47 on PR 27 (MEDIUM): `esc(in_code=True)` wrote `&amp;`/`&lt;`/`&gt;` into the code span, which no
+    markdown view decodes, so a real checked-out submodule `R&D` reached its guard as `R&amp;D` and was reported "not a
+    checked-out submodule (skipped)" while its modified and untracked files went uncaptured."""
+    mod, doc = load(), load_doc()
+    roots, sup, moddir = make_super_with_submodule(tmp_path)
+    for name in ("R&D", "a<b>c"):
+        origin = make_repo(tmp_path / f"origin-{abs(hash(name))}", "f.txt")
+        git(sup, "-c", "protocol.file.allow=always", "submodule", "add", str(origin), name)
+    git(sup, "commit", "-m", "more submodules")
+    for name in ("R&D", "a<b>c"):
+        (sup / name / "f.txt").write_text("edited in " + name + "\n")
+        (sup / name / "u.txt").write_text("untracked in " + name + "\n")
+    rec = next(c for c in mod.scan_git([roots], remote=False) if c["path"] == str(sup.resolve()))
+    assert not rec["verdict"].startswith("skipped"), rec["verdict"]
+    assert {"R&D", "a<b>c", "sub"} <= set(rec["submodules_vetted"]), rec["submodules_vetted"]
+    text = doc.render(doc_scan([rec]))
+    row = next(r for r in section_3_2(text).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
+    assert "&amp;" not in row and "&lt;" not in row and "&gt;" not in row, row
+    ck = doc.checkout_dir(rec["path"])
+    for shell in SHELLS:
+        dest = tmp_path / f"dest-{shell}"
+        for cmd in plan_commands(row):
+            run = run_plan(shell, cmd, dest, tmp_path)
+            assert run.returncode == 0, (shell, cmd, run.stderr)
+        for name in ("R&D", "a<b>c"):
+            sd = dest / ck / "submodules" / name
+            assert "edited in" in (sd / "modified.patch").read_text(), (shell, name)
+            assert (sd / "untracked.tar").stat().st_size > 0, (shell, name)
+
+
+def test_the_submodule_guard_prints_a_path_with_backslashes_literally(tmp_path):
+    """Round 47 LOW 2: the guard's `echo` made zsh and macOS `/bin/sh` interpret `\\e`, `\\033` and `\\c` in the path
+    (a raw ESC, an OSC 52 clipboard write, a truncated message); `printf '%s\\n'` shows it as written."""
+    doc = load_doc()
+    sub = "x\\e[31mRED\\cHIDDEN"
+    cmds = doc.submodule_commands("/nonexistent/p", "ck", sub)
+    for shell in SHELLS:
+        run = subprocess.run([shell, "-c", unescape_span(cmds[0].strip("` "))], capture_output=True, text=True)
+        assert run.returncode != 0 and f"submodule {sub}: not a checked-out submodule (skipped)" in run.stderr, (shell, run.stderr)
+        assert "\x1b" not in run.stderr
+
+
+def test_a_hand_edited_record_with_an_absolute_or_dotdot_vetted_path_gets_no_commands_for_it(tmp_path):
+    """Round 47 LOW 3 (defence in depth): `os.path.join(raw_p, "/x")` discards the checkout."""
+    doc = load_doc()
+    assert doc.vettable("sub") and doc.vettable("a/b") and not doc.vettable("/evil") and not doc.vettable("../x")
+    assert not doc.vettable("a/../b") and not doc.vettable("") and not doc.vettable(None)
+
+
+def test_an_absolute_index_gitlink_or_a_symlinked_file_or_alternates_in_a_module_skips_the_checkout(tmp_path):
+    """Round 47 LOW 3 and 4: the gitlink rule matches the `.gitmodules` rule, and `modules.tar` (no dereference) must not
+    archive a link or a pointer where the refs or objects should be."""
+    mod = load()
+    roots, sup, moddir = make_super_with_submodule(tmp_path)
+
+    def verdict():
+        return next(c for c in mod.scan_git([roots], remote=False) if c["path"] == str(sup.resolve()))["verdict"]
+
+    assert not verdict().startswith("skipped")
+    packed = moddir / "packed-refs"
+    packed.write_text("")
+    outside = tmp_path / "outside-packed"
+    packed.rename(outside)
+    packed.symlink_to(outside)
+    assert verdict() == "skipped: submodule config unrecognised (symlink)"
+    packed.unlink()
+    outside.rename(packed)
+    packed.unlink()
+    assert not verdict().startswith("skipped")
+    alt = moddir / "objects" / "info" / "alternates"
+    alt.parent.mkdir(parents=True, exist_ok=True)
+    alt.write_text(str(tmp_path / "elsewhere") + "\n")
+    assert verdict() == "skipped: submodule config unrecognised (alternates)"
+    alt.write_text("")
+    assert not verdict().startswith("skipped")
+    real_git = mod.git
+
+    def fake(path, *args, **kw):
+        if args[:1] == ("ls-files",) and "-s" in args:
+            return 0, "160000 " + "a" * 40 + " 0\t/tmp/evil\0"
+        return real_git(path, *args, **kw)
+
+    mod.git = fake
+    try:
+        assert verdict() == "skipped: submodule config unrecognised (gitmodules path unusual)"
+    finally:
+        mod.git = real_git

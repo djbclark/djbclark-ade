@@ -17,11 +17,12 @@ work tree that is not the scanned dir is `skipped: worktree redirected`, one who
 symlink is `skipped: .git is a symlink` (git would read a git directory elsewhere). The same allowlist is
 applied to every submodule's git dir under `modules/` (`config` and `config.worktree`; `skipped: submodule
 config unrecognised <key>`): a config that is unreadable is `(unreadable)`, a symlink anywhere under
-`modules/` or at a submodule's `.git` is `(symlink)`, a module git dir with a `commondir` is `(commondir)`,
+`modules/` (a symlinked file in a module git dir included) or at a submodule's `.git` is `(symlink)`, a module git dir with a
+`commondir` is `(commondir)`, one with a nonempty `objects/info/alternates` is `(alternates)`,
 a submodule whose `.git` is a directory or a gitfile naming a git dir the walk did not vet (outside
 `modules/`, or in a pruned `objects/`) is `(gitdir outside modules)`, a gitfile that is not one line of
 `gitdir: <path>` is `(gitdir unreadable)`, a `.gitmodules` path that is not an index gitlink but has a `.git`
-is `(gitmodules path not a gitlink)`, one that is absolute, empty or holds `..`, or whose `.gitmodules` entry
+is `(gitmodules path not a gitlink)`, one (or an index gitlink) that is absolute, empty or holds `..`, or whose `.gitmodules` entry
 or submodule path holds a control character, a space, a zero-width, joiner, filler, variation-selector, tag or bidi
 character, a non-UTF-8 byte or (a path) a quote, is `(gitmodules path unusual)`,
 a submodule path with a symlink component is `(symlink)`, a submodule directory holding files but no `.git` is
@@ -708,11 +709,20 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
             if any(g not in files and g not in dirs and os.path.lexists(os.path.join(root, g)) for g in GIT_DIR_NAMES):
                 return True, "(unrecognised entry)", []
             # before the pruning below: a symlinked `objects` or `refs` would otherwise leave `dirs` unseen (Codex pass 41)
-            if any((Path(root) / d).is_symlink() for d in dirs):
+            # and a symlinked file: `modules.tar` (no dereference) would keep the link, not the refs or objects at its
+            # target (`packed-refs`, `reftable/tables.list`, `shallow`; round 47 LOW 4)
+            if any((Path(root) / d).is_symlink() for d in dirs + files):
                 return True, "(symlink)", []
             if "HEAD" in files or "config" in files:  # a module's git dir: skip its object store and logs
                 if internal_symlink(root):
                     return True, "(symlink)", []
+                # a nonempty `objects/info/alternates` keeps the module's objects in another directory that `modules.tar`
+                # does not archive (`git submodule update --reference` writes one, round 47 LOW 4)
+                try:
+                    if os.path.getsize(os.path.join(root, "objects", "info", "alternates")) > 0:
+                        return True, "(alternates)", []
+                except OSError:
+                    pass
                 dirs[:] = sorted(d for d in dirs if d not in MODULE_INTERNAL_DIRS)
                 vetted.add(os.path.realpath(root))
             else:  # `modules/` itself or a dir that only groups nested modules: every name is a module
@@ -751,6 +761,9 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
             listed = {os.path.normpath(p) for p in raw_listed}
         elif rc != 1:  # 1: no such key
             return True, "(unreadable)", []
+    # an absolute gitlink would make `os.path.join(path, sub)` discard the superproject, and `..` leaves it (round 47 LOW 3)
+    if any(not p or os.path.isabs(p) or ".." in p.split("/") for p in gitlinks):
+        return True, "(gitmodules path unusual)", []
     if any(unusual_path(p) for p in gitlinks | listed):
         return True, "(gitmodules path unusual)", []
     subs: list[str] = []
