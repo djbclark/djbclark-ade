@@ -108,7 +108,7 @@ and PR 30 (`self-slash --finish --successor`) shipped the recommendations; the p
 that the lead's transcript held 579 background-notification turns against 49 operator prompts, each re-reading
 a 150-200k context: the notification-per-turn multiplier, not the model, was the volume.
 
-1. **DONE 2026-10-23** (`[lead] pipeline_effort = "medium"`, `route_agent.py` default/validation, `policy --md` line, SKILL.md item 12, tests; PR TBD). **Effort as a lever** (Anthropic: "tuning effort is often a better lever than switching models"; Opus 5.5
+1. **DONE 2026-10-23** (`[lead] pipeline_effort = "medium"`, `route_agent.py` default/validation, `policy --md` line, SKILL.md item 12, tests; PR [33](https://github.com/djbclark/djbclark-ade/pull/33), merged d06d48c; open LOW from its adversary round 2: no test pins that `xhigh` and `max` are accepted). **Effort as a lever** (Anthropic: "tuning effort is often a better lever than switching models"; Opus 5.5
    defaults to medium): add to the routing policy that a pipeline-driving lead (PR loops, waiters, merges) runs
    Sonnet 5.5 at **medium**, high only for judgment turns; effort changes on 5.5/Fable 5.1 keep the prompt cache.
    One Sonnet `code` slice: `skills/model-routing/SKILL.md` item 12, `config/routing.toml` `[lead]`
@@ -139,6 +139,9 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    compares realpaths case-sensitively, so on APFS a case-variant sibling row can let an empty local workspace be
    archived. Also unverified live until the first real successor run: the `--json` row shapes of `workspace ls`,
    `terminal ls`, `ls` (every parse failure keeps the workspace) and `paseo run /baton` as a first prompt.
+   **Update 2026-10-23:** the first live successor run's three bugs are fixed on master in 184b14d; the two round-3
+   LOWs above still stand. PR [35](https://github.com/djbclark/djbclark-ade/pull/35) (open) carries 184b14d's review
+   LOWs and the bash 3.2 empty-array fix that the macOS CI job has failed on since 184b14d.
 6. **Paseo in-place model change**: `docs/upstream-issues.md` entry 17 drafts `paseo agent model <id> <model>`;
    on 2026-10-23 the rework-p lead switched every running Paseo Claude agent in place through the daemon's
    `set_agent_model_request` (`~/.local/state/ade/paseo-set-model.mjs`), which the entry should cite as the
@@ -151,6 +154,15 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    carries (found by the quota-guard slice; possibly lost in the 2026-10-20 graft restore): apply the template or
    add both UserPromptSubmit entries (`context_size_nudge.py`, `quota_nudge.py`) by hand, then
    `bin/claude-quota-guard --install` and the printed `launchctl bootstrap` line (operator items of PR 29).
+   **Update 2026-10-23:** the live settings do carry the registration; the hook failed because
+   `claude/hooks/context_size_nudge.py` had been 100644 since 836b306 (2026-10-19): `hook-deadline` exec'd it and
+   exited 127. d618809 restored +x on it and 11 other shebang scripts; it runs again (rc 0).
+8. **Unresolved Codex findings on merged PRs** (2026-10-23): head-only finding selection missed every finding Codex
+   left on an earlier head (PR 32 nearly merged past a P1 that way). A GraphQL `reviewThreads` survey found about 50
+   unresolved, not-outdated Codex threads on merged PRs 15-30. A read-only triage slice is checking each against
+   master (`~/.local/state/bigteam/rework2-codex-triage/codex-triage-report.md`); `bin/pr-wait` (PR
+   [34](https://github.com/djbclark/djbclark-ade/pull/34)) gains `merge_ready` and open earlier-head findings, and
+   AGENTS.md rule 9 is corrected in the same PR.
 
 ## Follow-ups from the 2026-10-20 reviews
 
