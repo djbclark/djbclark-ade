@@ -472,18 +472,21 @@ the payload's age, each judged pool's own age and the snapshot's age: a dead col
 advice line, level pings are suppressed and one ping per stale episode says so. At `critical` the adversary
 line is qualified: omp only while `aiuse --available --json` still lists it (aiuse rate-gates
 omp when every Claude weekly window is exhausted). aiuse exit 3 (nothing usable) is `critical`
-whatever the snapshot shows; a live `available` row without `windows[]` is judged by its own
+whatever the snapshot shows (even when aiuse printed non-object JSON beside it); a live
+`available` row without `windows[]` (a `pool_family: "fable"` row is the Fable cap, never the shared weekly) is judged by its own
 `headroom_percent` / `binding_window` / `usable_now`. Exit codes 0 / 1 / 2 / 3 for the
 levels, 10 when Claude appears nowhere, any container (`available`, `excluded`, `accounts`,
 `alerts`, `windows`) is present but not a list of objects, the snapshot does not parse, aiuse
 could not be read or another check holds the lock. Exit 10 never writes a level: the level,
 advice and number fields stay as they were, but a failed read (not a held lock) records
-`unreadable_since` and, on the second failing run in a row, sends one ping per episode
-(`last_unreadable_pinged_at`); the next good read clears both. 64 for a bad
+`unreadable_since` / `last_unreadable_at` and, on the second failing run in a row, sends one ping per episode
+(`last_unreadable_pinged_at`); the next good read clears them. 64 for a bad
 `CLAUDE_QUOTA_GUARD_THRESHOLDS`, 69 for `--install` off macOS (launchd only; use a systemd
 user timer or cron). The UserPromptSubmit hook `claude/hooks/quota_nudge.py` reads only the
 state file and prints its `advice` once per session and level, and `[quota-guard unreadable]`
-once per session while `unreadable_since` is over an hour old.
+once per session once the guard has pinged about an unreadable episode and failed again
+within 2 hours (a one-off hiccup or a stopped guard prints nothing); its once-per-session
+memory is updated under a flock.
 
 ## Formerly open questions — resolved by operator, 2026-08-23
 

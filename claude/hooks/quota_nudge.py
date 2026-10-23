@@ -10,10 +10,17 @@ when the level rises, and again after a drop followed by a rise.
 Silent when the state file is missing, unreadable, older than MAX_AGE_SECONDS (a stopped
 guard must not keep nagging) or at level `ok`.
 
-Separately, once per session while the state's `unreadable_since` is set and over an hour old
-(the guard has failed to read aiuse on every run since), it prints "[quota-guard unreadable]
-aiuse unreadable since <when>: check `aiuse --available --json`", whatever the level or age of
-the rest of the state.
+Separately, once per session it prints "[quota-guard unreadable] aiuse unreadable since <when>:
+check `aiuse --available --json`" while the guard reports a real, current unreadable episode:
+`last_unreadable_pinged_at` is set (the guard failed at least twice in a row and pinged) AND
+`last_unreadable_at` is within MAX_AGE_SECONDS (the guard is still running and still failing).
+A single hiccup, or a guard that stopped running, prints nothing. It does not depend on the
+age of the level part of the state.
+
+The once-per-session memory (~/.claude/state/quota-nudges.json) is read, updated and written
+under an exclusive flock on <file>.lock (non-blocking, LOCK_RETRIES x LOCK_WAIT_S), so two
+sessions' prompts never overwrite each other's acknowledgement; if the lock cannot be had the
+hook prints nothing and changes nothing.
 
 History: 2026-10-23, after the Claude weekly window ran out 2.6 days early on 2026-10-20
 with a `conserve` alert unread for 11 hours. docs/model-routing.md "Quota guard".
@@ -22,17 +29,21 @@ MUST always exit 0 and finish in well under 100 ms. Python 3 stdlib only.
 """
 # Every failure is swallowed on purpose: a hook error must never block a prompt.
 # ruff: noqa: BLE001, S110
+import contextlib
+import fcntl
 import json
 import os
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 LEVELS = ("ok", "watch", "tight", "critical")
 MAX_AGE_SECONDS = 2 * 3600
-UNREADABLE_AFTER_SECONDS = 3600   # an unreadable episode this old gets its own line
 MAX_SESSIONS = 200
+LOCK_RETRIES = 10
+LOCK_WAIT_S = 0.02
 
 
 def _state_file():
@@ -97,11 +108,43 @@ def _parse(text):
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
+@contextlib.contextmanager
+def _nudge_lock():
+    """Exclusive flock on <nudge file>.lock around the whole read-modify-write. Yields True when
+    held, False when it could not be had (bounded non-blocking retry, 0.2 s at most)."""
+    handle = None
+    try:
+        p = _nudge_file()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(p.with_name(p.name + ".lock"), "a")
+        for _ in range(LOCK_RETRIES):
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held = True
+                break
+            except BlockingIOError:
+                time.sleep(LOCK_WAIT_S)
+        else:
+            held = False
+    except Exception:
+        held = False
+    try:
+        yield held
+    finally:
+        try:
+            if handle is not None:
+                handle.close()  # closing the descriptor drops the flock
+        except Exception:
+            pass
+
+
 def _unreadable_nudge(raw, session_id, nudges):
-    """Print once per session while `unreadable_since` is set and over UNREADABLE_AFTER old (the
-    guard has failed to read aiuse for every run since); True when `nudges` changed."""
-    since = _parse(raw.get("unreadable_since")) if isinstance(raw, dict) and raw.get("unreadable_since") else None
-    if since is None or (_now() - since).total_seconds() <= UNREADABLE_AFTER_SECONDS:
+    """See the module docstring for the gate. True when `nudges` changed."""
+    if not isinstance(raw, dict) or not raw.get("last_unreadable_pinged_at"):
+        return False
+    since = _parse(raw.get("unreadable_since"))
+    last = _parse(raw.get("last_unreadable_at"))
+    if since is None or last is None or (_now() - last).total_seconds() > MAX_AGE_SECONDS:
         return False
     stamp = since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     key = f"{session_id}#unreadable"
@@ -146,13 +189,16 @@ def main():
     if not isinstance(state, dict):
         return
     session_id = str(data.get("session_id") or "unknown")
-    nudges = _load_nudges()
-    dirty = _unreadable_nudge(state, session_id, nudges)
-    st = _fresh_guard_state()
-    if st is not None:
-        dirty = _level_nudge(st, session_id, nudges) or dirty
-    if dirty:
-        _save_nudges(dict(list(nudges.items())[-MAX_SESSIONS:]))
+    with _nudge_lock() as held:
+        if not held:
+            return  # print nothing, change nothing: the next prompt tries again
+        nudges = _load_nudges()
+        dirty = _unreadable_nudge(state, session_id, nudges)
+        st = _fresh_guard_state()
+        if st is not None:
+            dirty = _level_nudge(st, session_id, nudges) or dirty
+        if dirty:
+            _save_nudges(dict(list(nudges.items())[-MAX_SESSIONS:]))
 
 
 if __name__ == "__main__":

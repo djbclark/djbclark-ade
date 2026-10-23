@@ -285,7 +285,8 @@ def test_unreadable_aiuse_exits_10_and_leaves_state_alone(rig, fixture, rc):
 def test_missing_aiuse_binary_exits_10(rig):
     r = rig.guard(CLAUDE_QUOTA_GUARD_AIUSE=str(rig.tmp / "no-such-aiuse"))
     assert r.returncode == 10
-    assert rig.state_json() == {"unreadable_since": "2026-10-23T12:00:00Z", "last_unreadable_pinged_at": None}
+    assert rig.state_json() == {"unreadable_since": "2026-10-23T12:00:00Z", "last_unreadable_pinged_at": None,
+                                "last_unreadable_at": "2026-10-23T12:00:00Z"}
 
 
 # -- pings ------------------------------------------------------------------
@@ -1094,7 +1095,7 @@ def test_q3_exit_3_stays_critical_when_the_snapshot_is_corrupt(rig):
 
 # -- fix 6 (adversary round 8, 2026-10-23) ------------------------------------------------------
 
-BOOKKEEPING = ("unreadable_since", "last_unreadable_pinged_at")
+BOOKKEEPING = ("unreadable_since", "last_unreadable_pinged_at", "last_unreadable_at")
 
 
 def core_bytes(raw):
@@ -1237,7 +1238,8 @@ def test_u1_the_first_ever_run_failing_writes_only_the_bookkeeping_and_status_sh
     _fail_aiuse(rig)
     assert rig.guard().returncode == 10
     st = rig.state_json()
-    assert st == {"unreadable_since": "2026-10-23T12:00:00Z", "last_unreadable_pinged_at": None}
+    assert st == {"unreadable_since": "2026-10-23T12:00:00Z", "last_unreadable_pinged_at": None,
+                  "last_unreadable_at": "2026-10-23T12:00:00Z"}
     s = rig.guard("status")
     assert s.returncode == 0 and "[aiuse unreadable since 2026-10-23T12:00:00Z]" in s.stdout
 
@@ -1251,40 +1253,79 @@ def test_u1_a_held_lock_records_no_episode(rig):
     assert r.returncode == 10 and rig.state.read_bytes() == before
 
 
-def _hook_state(rig, level="watch", checked_age=timedelta(minutes=5), since=None):
+def _hook_state(rig, level="watch", checked_age=timedelta(minutes=5), since=None, pinged=True,
+                last_age=timedelta(minutes=5)):
     rig.state.parent.mkdir(parents=True, exist_ok=True)
     st = {"level": level, "advice": "1. w.", "checked_at": (NOW - checked_age).isoformat()}
     if since is not None:
         st["unreadable_since"] = since.isoformat()
+        st["last_unreadable_at"] = (NOW - last_age).isoformat()
+        st["last_unreadable_pinged_at"] = (since + timedelta(minutes=15)).isoformat() if pinged else None
     rig.state.write_text(json.dumps(st))
 
 
 UNREADABLE_LINE = "[quota-guard unreadable] aiuse unreadable since {}: check `aiuse --available --json`\n"
 
 
-def test_u2_the_hook_prints_unreadable_once_per_session_after_an_hour(rig):
-    since = NOW - timedelta(hours=2)
-    _hook_state(rig, since=since)
+def test_u2_the_hook_prints_unreadable_once_per_session_once_the_guard_has_pinged(rig):
+    _hook_state(rig, since=NOW - timedelta(hours=2))
     out = rig.hook("s1").stdout
     assert out == UNREADABLE_LINE.format("2026-10-23T10:00:00Z") + "[quota-guard watch] 1. w.\n"
     assert rig.hook("s1").stdout == ""
     assert rig.hook("s2").stdout == out                                 # another session hears it once too
-    _hook_state(rig, since=NOW - timedelta(minutes=30) - timedelta(hours=3))  # a new episode
+    _hook_state(rig, since=NOW - timedelta(hours=3, minutes=30))        # a new episode
     assert rig.hook("s1").stdout == UNREADABLE_LINE.format("2026-10-23T08:30:00Z")
 
 
-def test_u2_the_hook_is_silent_while_the_episode_is_under_an_hour_or_absent(rig):
-    _hook_state(rig, since=NOW - timedelta(minutes=59))
-    assert rig.hook("s1").stdout == "[quota-guard watch] 1. w.\n"
-    _hook_state(rig, level="ok", since=None)
-    assert rig.hook("s9").stdout == ""
+def test_l4_a_single_hiccup_prints_nothing_however_long_ago_it_started(rig):
+    """One failing run sets unreadable_since but no ping mark: wall-clock since then is not enough."""
+    _hook_state(rig, since=NOW - timedelta(hours=5), pinged=False)
+    assert rig.hook("s1").stdout == "[quota-guard watch] 1. w.\n"      # only the level part
+
+
+def test_l4_a_stopped_guard_prints_nothing(rig):
+    """The guard pinged once and then stopped running: its last failing run is over 2 h old."""
+    old = timedelta(hours=9)                                            # the level part is old too
+    _hook_state(rig, checked_age=old, since=NOW - old, last_age=timedelta(hours=2, minutes=1))
+    assert rig.hook("s1").stdout == ""
+    _hook_state(rig, checked_age=old, since=NOW - old, last_age=timedelta(hours=1, minutes=59))
+    assert rig.hook("s1").stdout == UNREADABLE_LINE.format("2026-10-23T03:00:00Z")
 
 
 def test_u2_the_hook_reports_unreadable_even_when_the_level_state_is_old(rig):
     """The failing guard stops refreshing checked_at, so the level part goes silent after 2 h;
     the unreadable line is exactly what must still get through."""
-    _hook_state(rig, level="critical", checked_age=timedelta(hours=6), since=NOW - timedelta(hours=6))
+    _hook_state(rig, level="critical", checked_age=timedelta(hours=6), since=NOW - timedelta(hours=6),
+                last_age=timedelta(minutes=3))
     assert rig.hook().stdout == UNREADABLE_LINE.format("2026-10-23T06:00:00Z")
+
+
+def test_p3_two_concurrent_hook_runs_both_keep_their_acknowledgement(rig):
+    """A lost update made the second session hear the advice again. Hold the file's content back
+    from each reader a little so the old unlocked read-modify-write would race."""
+    _write_guard_state(rig, "watch", advice="w")
+    procs = [subprocess.Popen([sys.executable, str(HOOK)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              text=True, env=rig.env()) for _ in range(8)]
+    for i, p in enumerate(procs):
+        p.stdin.write(json.dumps({"session_id": f"c{i}"}))
+        p.stdin.close()
+    outs = [p.stdout.read() for p in procs]
+    for p in procs:
+        p.wait(timeout=30)
+    assert outs == ["[quota-guard watch] w\n"] * 8
+    assert set(json.loads(rig.nudges.read_text())) == {f"c{i}" for i in range(8)}
+    assert all(rig.hook(f"c{i}").stdout == "" for i in range(8))        # none is told twice
+
+
+def test_p3_a_lock_that_cannot_be_had_prints_nothing_and_changes_nothing(rig):
+    _write_guard_state(rig, "watch", advice="w")
+    rig.nudges.write_text(json.dumps({"other": "watch"}))
+    before = rig.nudges.read_bytes()
+    with open(str(rig.nudges) + ".lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        r = rig.hook("s1")
+    assert r.returncode == 0 and r.stdout == "" and rig.nudges.read_bytes() == before
+    assert rig.hook("s1").stdout == "[quota-guard watch] w\n"           # released: it speaks next time
 
 
 # -- fix 7 (Codex pass 4, inbox MSG 1) ----------------------------------------------------------
@@ -1310,3 +1351,86 @@ def test_r1_the_row_that_did_supply_the_fable_window_still_ages_it(rig):
     rig.set_aiuse(aiuse_fixture(weekly=80, with_fable_pool=False, payload_extra={"age_seconds": 60}))
     rig.set_alerts([], age_s=60, accounts=[fresh_other, stale_fable])
     assert rig.guard().returncode == 1 and rig.state_json()["stale"] is True
+
+
+# -- fix 8 (Codex pass 5 on PR 29, round 9) -----------------------------------------------------
+
+def fable_row(headroom, usable_now=True):
+    return {"provider": "claude", "pool_family": "fable", "usable_now": usable_now,
+            "binding_window": "Claude Code weekly \u2014 Fable", "headroom_percent": headroom}
+
+
+def default_row(headroom, binding="Claude Code weekly"):
+    return {"provider": "claude", "pool_family": "default", "usable_now": True,
+            "binding_window": binding, "headroom_percent": headroom}
+
+
+def test_c1_a_windowless_fable_row_is_the_fable_cap_not_the_shared_weekly(rig):
+    rig.set_aiuse({"available": [default_row(80), fable_row(2)]})
+    assert rig.guard().returncode == 1
+    st = rig.state_json()
+    assert st["level"] == "watch" and st["fable_left"] == 2 and st["weekly_left"] == 80
+    assert st["source"] == "available"
+
+
+def test_c1_a_windowless_fable_row_alone_is_watch_and_never_the_weekly(rig):
+    rig.set_aiuse({"available": [fable_row(2)]})
+    assert rig.guard().returncode == 1
+    st = rig.state_json()
+    assert st["fable_left"] == 2 and st["weekly_left"] is None
+
+
+@pytest.mark.parametrize("binding", ["Claude Code weekly", "Claude Code 5-hour"])
+def test_c1_a_windowless_default_row_at_2_percent_is_critical(rig, binding):
+    rig.set_aiuse({"available": [default_row(2, binding), fable_row(50)]})
+    assert rig.guard().returncode == 3
+    st = rig.state_json()
+    assert st["level"] == "critical" and st["fable_left"] == 50
+    assert st["weekly_left" if "weekly" in binding else "five_hour_left"] == 2
+
+
+def test_c1_a_windowless_fable_row_that_is_not_usable_is_still_critical(rig):
+    rig.set_aiuse({"available": [default_row(80), fable_row(2, usable_now=False)]})
+    assert rig.guard().returncode == 3
+
+
+@pytest.mark.parametrize("stdout", ["[]", '"nothing"', "5", "null", "[{\"provider\": \"claude\"}]"])
+def test_c2_exit_3_with_a_non_object_payload_is_critical_not_unreadable(rig, stdout):
+    rig.set_aiuse(stdout, rc=3)
+    assert rig.guard().returncode == 3
+    st = rig.state_json()
+    assert st["level"] == "critical" and st["source"] == "none"
+    assert "No new Claude work of any kind" in st["advice"] and len(rig.pings()) == 1
+    assert st["unreadable_since"] is None
+
+
+@pytest.mark.parametrize("stdout", ["[]", '"nothing"', "5"])
+def test_c2_a_non_object_payload_with_exit_0_stays_unreadable(rig, stdout):
+    rig.set_aiuse(stdout, rc=0)
+    r = rig.guard()
+    assert r.returncode == 10 and "not an object" in r.stderr
+
+
+def test_l5_a_stale_snapshot_row_whose_windows_were_not_used_does_not_age_a_windowless_live_row(rig):
+    """Live-only path: the snapshot's lowest window of each kind is what gets used (reset/pace
+    borrow, display fill, Fable). A 5-hour-old second account whose windows are all higher than
+    the fresh row's supplied nothing and must not make the reading stale."""
+    fresh = snapshot_account(weekly=95, five=77, fable=60)
+    old = snapshot_account(weekly=99, five=99)
+    old["age_seconds"] = 5 * 3600
+    rig.set_aiuse({"available": [default_row(70, "Claude Code weekly"), fable_row(60)]})
+    rig.set_alerts([], age_s=60, accounts=[fresh, old])
+    assert rig.guard().returncode in (0, 1)
+    st = rig.state_json()
+    assert st["stale"] is False and st["five_hour_left"] == 77
+
+
+def test_l5_the_row_that_did_supply_the_display_fill_still_ages_it(rig):
+    fresh_weekly_only = {"provider": "claude", "account": "second", "usable_now": True,
+                         "windows": [_window("Claude Code weekly", 90, WEEK_RESET, state="ok")]}
+    old_five = snapshot_account(weekly=99, five=77)
+    old_five["age_seconds"] = 5 * 3600
+    rig.set_aiuse({"available": [default_row(70, "Claude Code weekly")]})
+    rig.set_alerts([], age_s=60, accounts=[fresh_weekly_only, old_five])
+    rig.guard()
+    assert rig.state_json()["stale"] is True

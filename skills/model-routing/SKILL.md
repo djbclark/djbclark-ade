@@ -85,15 +85,15 @@ skill's snapshot in the same turn.
   (`source: snapshot-only`, a live 429 or a note the snapshot predates), and a Fable pool aiuse
   dropped because the Fable cap is exhausted is read from the snapshot as 0% left (`watch`).
   aiuse exit 3 (nothing usable) is `critical` whatever the snapshot shows, and a live `available`
-  row without `windows[]` is judged by its own `headroom_percent` / `binding_window` /
+  row without `windows[]` (a `pool_family: "fable"` row is the Fable cap, never the shared weekly) is judged by its own `headroom_percent` / `binding_window` /
   `usable_now` (never treated as dropped).
   Exit codes 0 / 1 / 2 / 3 for the levels, 10 when Claude appears nowhere, any container
   (`available`, `excluded`, `accounts`, `alerts`, `windows`) is present but not a list of
   objects, the snapshot does not parse, aiuse could not be read, or another check holds the
   lock. Exit 10 never writes a level: the level, advice and number fields stay as they were,
-  but a failed read (not a held lock) records `unreadable_since` and, on the second failing
+  but a failed read (not a held lock) records `unreadable_since` / `last_unreadable_at` and, on the second failing
   run in a row, sends one ping per episode (`last_unreadable_pinged_at`); the next good read
-  clears both. 64 for a bad
+  clears them. 64 for a bad
   `CLAUDE_QUOTA_GUARD_THRESHOLDS`, 69 for `--install` off macOS (launchd only; use a
   systemd user timer or cron). `status [--json]` prints the state without probing. One
   `hermes-ping` per level per reset period (the mark survives level drops; a new weekly
@@ -104,7 +104,9 @@ skill's snapshot in the same turn.
   `claude/hooks/quota_nudge.py` prints the level's `advice` once per session and level,
   from the state file only (silent when it is missing or over 2 hours old); separately it
   prints `[quota-guard unreadable] aiuse unreadable since <when>` once per session while
-  `unreadable_since` is set and over an hour old. A lead that
+  the guard has pinged about an unreadable episode and failed again within 2 hours (a
+  one-off hiccup or a stopped guard prints nothing); its once-per-session memory is updated
+  under a flock. A lead that
   sees `[quota-guard tight]` hands off and continues on Sonnet 5.5; at `critical` it
   starts no new Claude work until the reset.
 
