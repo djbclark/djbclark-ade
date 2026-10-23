@@ -45,7 +45,7 @@ fi
 echo "wait-file: waiting up to ${timeout}s for $path${match:+ to match /$match/}" >&2
 ready() {
   if [ -n "$match" ]; then
-    [ -f "$path" ] && grep -qE -- "$match" "$path"
+    [ -f "$path" ] && ggrep -qE -- "$match" "$path"
   elif [ -n "$nonempty" ]; then
     [ -s "$path" ]
   else
@@ -60,4 +60,4 @@ until ready; do
   fi
   sleep 2
 done
-tail -n 5 "$path"
+gtail -n 5 "$path"

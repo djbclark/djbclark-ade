@@ -22,5 +22,14 @@ For each request:
    verdict; say it explicitly.
 4. If any part of the review was declined to you or cut short, say so in the
    verdict rather than presenting it as complete.
+5. A probe of a tool that writes (a backup, export, sync, apply or install
+   command) runs only against a throwaway HOME or directory you created, and
+   through a guard script that refuses any other target (set HOME, the
+   destination and every path flag to your work dir; `set -u`; exit before the
+   command if HOME is the real one). Never the operator's real HOME, real
+   checkouts or live stores, even read-only, even with `--only`: on
+   2026-10-20 a round-18 probe of `bin/ade-backup-stores` ran for real against
+   the real HOME and touched 274 Cursor `-shm` files. A dry-run or check mode
+   the brief explicitly allows is the one exception, and the brief names it.
 
 Working rule: Start any command likely to take more than ~10-15 s (builds, test suites, long probes, waits) with run_in_background: true from the first call; wait on the completion notification, never poll, and kill any stray process you started.

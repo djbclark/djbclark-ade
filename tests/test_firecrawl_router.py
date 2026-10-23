@@ -226,6 +226,19 @@ class RouterTest(unittest.TestCase):
     def test_timeout_follows_request(self):
         self.assertEqual(fr.request_timeout(b'{"timeout": 200000}', 120), 230)
         self.assertEqual(fr.request_timeout(b'{"url": "u"}', 120), 120)
+        # /search hard-cap: body timeout must not inflate past the search cap (2026-10-22).
+        self.assertEqual(fr.request_timeout(b'{"timeout": 200000}', 120, cap=35), 35)
+        self.assertEqual(fr.request_timeout(b'{"query": "q"}', 120, cap=35), 35)
+        self.assertTrue(fr.search_path("/v2/search"))
+        self.assertTrue(fr.search_path("/v2/search?x=1"))
+        self.assertFalse(fr.search_path("/v2/scrape"))
+
+    def test_build_router_search_timeout(self):
+        r = fr.build_router({"FIRECRAWL_SELFHOST_URL": "https://a/"}, "")
+        self.assertEqual(r.search_timeout, 35.0)
+        r = fr.build_router({"FIRECRAWL_SELFHOST_URL": "https://a/",
+                             "FIRECRAWL_ROUTER_SEARCH_TIMEOUT": "20"}, "")
+        self.assertEqual(r.search_timeout, 20.0)
 
 
 class Backend2:
@@ -705,6 +718,52 @@ class RequestTargetTest(unittest.TestCase):
         self.assertEqual(self.raw(router, "/v2/scrape"), 200)
         self.assertEqual(self.raw(router, "/v2/crawl/abc?x=1", "GET"), 200)
         self.assertEqual(origin.seen, [("/v2/scrape", "Bearer real-key"), ("/v2/crawl/abc?x=1", "Bearer real-key")])
+
+
+class HostAllowListTest(unittest.TestCase):
+    """Tokenless serving answers only a Host that names the bound loopback server (2026-10-22)."""
+
+    def raw(self, port, host, target="/v2/scrape"):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        try:
+            conn.putrequest("POST", target, skip_host=True)
+            conn.putheader("Host", host)
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Content-Length", "2")
+            conn.endheaders(b"{}")
+            resp = conn.getresponse()
+            resp.read()
+            return resp.status
+        finally:
+            conn.close()
+
+    def serve(self, base):
+        router = fr.Router(fr.Backend("primary", base, "real-key"), None, timeout=5, token="", log=io.StringIO())
+        srv = fr.serve(router, "127.0.0.1:0")
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return srv
+
+    def test_rebinding_host_names_are_refused(self):
+        origin = Redirector()
+        self.addCleanup(origin.close)
+        srv = self.serve(origin.base)
+        port = srv.server_address[1]
+        for host in ("evil.example", f"127.0.0.1.evil.example:{port}", f"evil.example:{port}",
+                     f"localhost.evil.example:{port}", "[::1]", "127.0.0.1:1"):
+            with self.subTest(host=host):
+                self.assertEqual(self.raw(port, host), 403)
+        self.assertEqual(origin.seen, [])
+
+    def test_the_bound_loopback_host_still_answers(self):
+        origin = Redirector()
+        self.addCleanup(origin.close)
+        srv = self.serve(origin.base)
+        port = srv.server_address[1]
+        for host in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            with self.subTest(host=host):
+                self.assertEqual(self.raw(port, host), 200)
+        self.assertEqual(len(origin.seen), 2)
 
 
 class ChildEnvTest(unittest.TestCase):

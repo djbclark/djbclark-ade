@@ -38,6 +38,14 @@ HTTP_STATUSES = [
     ('{"code": 500, "message": "internal"}', "transient"),
     ("status 502 from the gateway", "transient"),
     ("503 Service Unavailable", "transient"),
+    # zcode, 2026-10-16..18: an auth wall inside an "Internal error" envelope was transient and retried
+    ('RequestError: Internal error {"details": "model_request_failed project_token_login_failed (Turn execution failed)"}', "auth"),
+    ("project_token_login_failed", "auth"),
+    # code names and prose that merely mention a login must not become auth (adversary, 2026-10-20)
+    ("All green; test_login_failed now passes", None),
+    ("Traceback: LoginFailedError raised in onLoginFailed", None),
+    ("token login ok", None),
+    ("login failed: connection timed out", "transient"),
 ]
 
 

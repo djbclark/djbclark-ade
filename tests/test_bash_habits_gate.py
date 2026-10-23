@@ -144,6 +144,21 @@ def test_gnu_only_option_on_a_bare_bsd_tool_is_denied(command):
     assert denied(command)
 
 
+@pytest.mark.parametrize("command", [
+    "grep -rl -i 'globalprotect\\|openconnect\\|gpclient' /Users/djbclark/src /Users/djbclark/ops",
+    "grep -r pat .",
+    "grep -R pat dir",
+    "grep -ril pat src",
+    "ggrep -r pat dir",
+    "/usr/bin/grep -rl pat ~/src",
+])
+def test_recursive_grep_is_denied(command):
+    out = run(command)
+    assert out["permissionDecision"] == "deny"
+    assert "rg -n -l" in out["permissionDecisionReason"]
+    assert "plocate" in out["permissionDecisionReason"]
+
+
 def test_gnu_deny_reason_names_the_g_tool():
     out = run('chmod --reference="$F" "$T"; mv -f "$T" "$F"')
     assert "gchmod" in out["permissionDecisionReason"] and "--reference" in out["permissionDecisionReason"]
@@ -171,7 +186,7 @@ def test_gnu_deny_reason_names_the_g_tool():
     "xargs -0 -n1 echo; xargs -r rm; xargs -P4 -I{} echo {}; xargs --null --max-args=1 echo",
     "find . -maxdepth 1 -name x -delete; find . -perm +111; find . -newermt 2020-01-01",
     "find . -exec grep --perl-regexp x {} +",                # after -exec it is not find's
-    "grep -E x f; grep -rn --include=a x .; grep --color=auto -i x f; grep -e P f",
+    "grep -E x f; grep --color=auto -i x f; grep -e P f; ps aux | grep ssh",
     "echo 'chmod --reference=a b' && echo \"cp --parents\"",     # quoted text
     "cat <<'EOF' > f\nchmod --reference=a b\nEOF",                # heredoc body
     "ls  # cp --parents a b",                                # comment

@@ -53,8 +53,8 @@ uptime
 ~/src/djbclark-ade/bin/load-watch admit --json      # per_core, plus streak and hot_for_s when sampling
 ~/src/djbclark-ade/bin/load-watch status            # hot window, top consumers, cooldowns
 ~/src/djbclark-ade/bin/load-watch incidents -n 5    # recent incidents and whether each was acked
-tail -n 5 ~/.local/state/load-watch/sample.log
-tail -n 10 ~/.local/state/load-watch/guard.jsonl
+gtail -n 5 ~/.local/state/load-watch/sample.log
+gtail -n 10 ~/.local/state/load-watch/guard.jsonl
 ```
 
 Investigate (section 3) when any of these holds. Otherwise report the numbers in one line and stop.
@@ -70,7 +70,7 @@ Investigate (section 3) when any of these holds. Otherwise report the numbers in
 
 Verify against the processes themselves, not against memory or the brief's guess (standing order 4).
 
-1. **Who uses the CPU:** `ps -axo pid,ppid,%cpu,state,command -r | head -20`. Map each heavy process to a
+1. **Who uses the CPU:** `ps -axo pid,ppid,%cpu,state,command -r | ghead -20`. Map each heavy process to a
    session: `~/src/djbclark-ade/skills/session-finder/fleet.py list`, and `fleet.py show <id>`.
 2. **Load without CPU:** processes in state `U` (stuck in disk or network wait, unkillable: the AFS case on
    2026-10-18), swap (`sysctl vm.swapusage`), and processes runnable at background priority (2026-10-18's

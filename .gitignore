@@ -8,3 +8,6 @@ __pycache__/
 # SkillOpt-Sleep staging, evidence and handoff rounds (bin/skillopt-night): local, sensitive.
 /.skillopt-sleep/
 /.skillopt-sleep-handoff/
+
+# Paseo's skill sync marker (it writes one beside each bundled skill it manages; see docs/skill-everywhere.md 3a).
+skills/*/.paseo-managed-files.json

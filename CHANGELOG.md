@@ -17,6 +17,17 @@ agent what changed and what is new. Entries end with the pull request number.
   (only in the canonical checkout; any other `--repo` is report-only), checks the `CLAUDE.md` and `~/.claude` symlinks,
   and prints the changelog entries new since the revision it last recorded; `--check` reports only and exits 10 when
   behind (2026-10-20, #20); `--check` also lists `claude/{commands,agents,hooks}` entries that upstream adds as "new upstream" links, and apply fast-forwards to the exact commit it checked instead of pulling again; a fast-forward that landed before a post-merge hook timed out is recorded as a `merge warning` problem (exit 10), and a non-canonical `--repo` without `--state` records under its own `~/.local/state/ade/applied-<12 hex>` instead of the shared record (#20).
+- `bin/ade-backup-stores`: Phase 0 backups, a SQLite online-backup copy of every live agent session database, the
+  per-session trees and file stores and the Hermes JSONL export (run against a scratch copy of the Hermes
+  database), with a hashed `MANIFEST.json`, built in `<dest>.part/` and renamed when complete; `--dry-run`,
+  `--only`, `--json`, `--check-schemas`, `--strict-stores`. A configured store that does not exist is
+  `"status": "missing"` in the manifest and on stderr (exit 0, so a partly provisioned machine still gets a
+  generation; `--strict-stores` exits 1) and a Cursor session whose required `meta.json` is symlinked,
+  excluded or gone during the copy is an error that marks its store `partial`. Credential file names and paths (inventory 5.5, plus `mcp-auth.json`),
+  the `credential-bak` vault and symlinks inside a store (a linked Cursor `store.db` or a database under a linked session directory included; each skip is printed on stderr and leaves the store `ok`) are not copied (a store root that is a symlink, as Codex's sessions are on this Mac, a per-session tree root that is one, or a configured SQLite path that is one, as Codex's databases are, is followed under one root-link rule when it resolves under `$HOME` to a non-credential path and recorded as `root_symlinks`; a dangling, outside-`$HOME` or credential-path link is an error), OpenCode's credential tables are scrubbed from its
+  database copy, and a schema guard fails the run on any other credential-looking table or column; session
+  transcripts are copied as they are and can hold pasted secrets. Refuses a destination that exists, holds
+  a source store or sits inside one, a configured store counting whether or not it exists; a source that turns into a symlink mid-copy is never followed, the Hermes export fallback obeys the root-link rule and a dry run survives a store pruned under it; Muse's `tui-history.jsonl` is backed up, the dry run skips an excluded-name database in a SQLite tree like the real copy (and lists `skipped`), and `--check-schemas --strict-stores` exits 1 on a missing database, tree root or file-store path and never opens a credential-named database (`E excluded`); Crush's `crush.json` (provider key and OAuth tokens) is not backed up; a sidecar, a single-file root or a SQLite source swapped for a symlink after its check is refused, never followed; a Cursor session with no `meta.json` is a `sidecar_missing` warning (db copied, store `ok`; an error only under `--strict-stores`), `--check-schemas` counts unopenable databases apart, the `crush-files` store backs up Crush's `projects.json` only, a store is walked by descriptor so a directory swapped for a symlink mid-copy is refused, a skipped optional sidecar is listed under `skipped`, and a store root reached through a symlinked parent directory gets the same root-link gate, and tree stores are opened through the anchored home descriptor too, the Hermes dry run reports a refused `state.db` link like the real run, and a failed per-session or bulk export leaves no partial file, and the dry run reports a missing `hermes` like the real run, and `--only hermes-export --check-schemas --strict-stores` checks the `state.db` source, a WAL-mode copy is made self-contained so the schema guard opens it under every SQLite build, and a symlinked directory in a tree glob is one `symlink` skip, never entered, a configured root of the wrong type (a directory where a single file belongs, or the reverse) and a subdirectory the dry run cannot list are store errors, not copied or silently skipped, and a non-regular Hermes `state.db` or any link above a glob's last component is refused or skipped without being followed, and the Hermes export reads `~/.hermes/config.yaml` anchored at $HOME, without blocking or following links and capped at 64 KiB, else uses the default limit with a warning, and a database or directory that vanishes or is unreadable between listing and `lstat` in a SQLite tree is an error (not silently omitted) while a dangling link at the last component stays a non-match, and `--json --check-schemas` prints one JSON document (the text lines go to stderr; exit status unchanged), `--check-schemas` validates a Cursor session's required sidecar like the copy (`sidecar_missing`, a failure only under `--strict-stores`; a linked one always), the dry run records an entry it cannot lstat like the copy, and a refused `config.yaml` or source leaks no descriptor (#24).
 - `session-finder/relay.py` reaches Paseo-hosted agents (`paseo send --behavior steer -- <id> <text>`, labelled as an agent message from the sender; takes a `PASEO_AGENT_ID` as the ident, `--idle S` waits for idle first; refuses archived agents, pending permissions and text starting with `/`) and `where.py` reports `host=paseo agent=<id>` for them, so the "no terminal channel (unknown terminal)" refusal no longer hits a Paseo agent (#25).
 - `agents/` templates for `~/.claude/settings.json`, `~/.codex/config.toml`, opencode's `opencode.json` and
   `~/.hermes/config.yaml` (secrets, home paths and host or account ids as placeholders, listed in
@@ -49,6 +60,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
+- `acp-dispatch --detach`: a `waiter:` line above `rearm:` says to run the waiter in the background with a long tool timeout (Claude Code Bash: `timeout 7200000`); at the 30 min default a lead's harness killed it mid-slice. `rearm:` stays the last line (#28).
 - `acp-run` removes `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `ORCA_TERMINAL_HANDLE` from every agent's
   environment and sets `ACP_RUN_AGENT=1`; `self-slash --finish` and `--then /quit` on Paseo are
   rejected with `--then`, and `paseo agent archive` gets `--` before the id (#19).
@@ -81,6 +93,10 @@ agent what changed and what is new. Entries end with the pull request number.
 - `bin/skill-everywhere` runs on Linux: `greadlink`/`grealpath` fall back to `readlink`/`realpath` (#20).
 - `bin/skill-everywhere`: the Hermes plugin nudge falls back from `ghead`/`ggrep`/`gsed` to `head`/`grep`/`sed`
   and no longer aborts the script when the Hermes wrapper has no `exec` line (#20).
+- Paseo's start-up skill sync no longer overwrites the six vendored `paseo*` skills in this repo through the
+  `~/.claude/skills` and `~/.agents/skills` links: the daemon's skill selection is now `custom` with no skills;
+  how it works and what to avoid in Paseo's settings are in docs/skill-everywhere.md section 3a (2026-10-23).
+- `acp-run` classifies zcode's `token_login_failed` error code (inside its "Internal error" envelope) as `auth`, never retried, instead of `transient` (#26).
 - `diskfree` skill: the idle check for deleting a cache runs in the same command as the delete; a
   `target-shared` delete approved minutes earlier broke a live maturin build (2026-10-20).
 - `load-watch` job guard: a slow crash loop (60 failed restarts in 2 h) now trips too; litellm restarted
@@ -89,12 +105,22 @@ agent what changed and what is new. Entries end with the pull request number.
   its 6 h cooldown (2026-10-20).
 - `skill-everywhere`: the Hermes gateway nudge follows `hermes` wrappers to the real python; since `hermes`
   became a `/bin/sh` wrapper it ran the snippet under sh, where `import os, sys` was ImageMagick (2026-10-20).
+- `acp-dispatch`: re-dispatching a footed brief cuts a footer only when each of its items is a line of the
+  footer template and its heading is the template's own, so a constraint a lead added to or edited in a
+  pasted footer or its heading is kept, in linear time; a `-f` file that is
+  only a footer is refused ("no task is left"); the preflight probe and the slice's waiter deadline allow for
+  acp-run's binary wait plus its settle polls (`bin_poll_seconds`); a probe that finds an agent not installed
+  is remembered for 120 s, and an `ok` entry dated in the future is not trusted; `check` gives an `auth` stop the login hint, not `--escalate` (#22).
 - `tests/conftest.py` pins `ROUTE_AGENT_OMP_READY=0`, so the route_agent suite passes on a host with
   an omp login as it does on CI; the omp-ready roster has its own tests (queue item 6) (#17).
 - `acp-dispatch`: an unmeasured (stale) quota window is skipped instead of crashing the dispatch
   with a `float(None)` error (#13).
 - `self-slash` (herdr): a slash command left on the input line after the first Enter is Entered again, up to 3 times,
   for every TUI and not only cursor-agent; if it never leaves the line the waiter exits 8 and logs "NOT confirmed
+- `firecrawl-router`: tokenless serving answers only a `Host` header that names the bound
+  loopback server (DNS-rebinding allow-list), and the bearer compare is constant-time
+  (`hmac.compare_digest`) (2026-10-22).
+
   run" instead of "sent" (2026-10-20).
 
 ### Security

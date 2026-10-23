@@ -645,15 +645,26 @@ class TestFailureNote(Base):
             self.assertEqual(r.returncode, want, (mode, r.stdout, r.stderr))
 
     def test_rearm_waiter_outlasts_the_slice_timeout(self):
-        # timeout + wrap-up grace (default 300) + 300
+        # timeout + wrap-up grace (default 300) + 300 + acp-run's wait for a missing agent binary before its
+        # own --timeout starts: ACP_RUN_BIN_WAIT (90) + bin_settle's up to 10 polls of ACP_RUN_BIN_POLL (2)
         self.dispatch("--timeout", "3600", name="long")
-        self.assertEqual(self.record("long")["wait_timeout"], 4200)
+        self.assertEqual(self.record("long")["wait_timeout"], 4200 + 110)
         self.dispatch("--timeout", "3600", "--wait-timeout", "5000", name="waited")
-        self.assertEqual(self.record("waited")["wait_timeout"], 5000)
+        self.assertEqual(self.record("waited")["wait_timeout"], 5000)       # an explicit value is the caller's
         self.dispatch(name="default")
-        self.assertEqual(self.record("default")["wait_timeout"], 3000)
+        self.assertEqual(self.record("default")["wait_timeout"], 3000 + 110)
         self.dispatch("--wrapup-grace", "0", name="nograce")
-        self.assertEqual(self.record("nograce")["wait_timeout"], 2700)
+        self.assertEqual(self.record("nograce")["wait_timeout"], 2700 + 110)
+
+    def test_rearm_waiter_covers_a_raised_binary_wait(self):
+        # adversary PR 18 follow-up E: an operator who raises ACP_RUN_BIN_WAIT toward 600 must not see the
+        # waiter give up before acp-run's own --timeout even starts
+        self.dispatch("--timeout", "3600", name="raised", env={"ACP_RUN_BIN_WAIT": "600", "ACP_RUN_BIN_POLL": "5"})
+        self.assertEqual(self.record("raised")["wait_timeout"], 4200 + 600 + 50)
+        self.dispatch("--timeout", "3600", name="off", env={"ACP_RUN_BIN_WAIT": "0"})
+        self.assertEqual(self.record("off")["wait_timeout"], 4200)           # no wait, no settle
+        self.dispatch("--timeout", "3600", name="junk", env={"ACP_RUN_BIN_WAIT": "inf", "ACP_RUN_BIN_POLL": "abc"})
+        self.assertEqual(self.record("junk")["wait_timeout"], 4200 + 110)    # acp-run's defaults
 
 
 class TestTimeBudget(Base):

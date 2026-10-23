@@ -78,7 +78,7 @@ else
   raw="$(cswap list 2>/dev/null | ggrep -v 'A newer version of claude-swap')" || exit 0
   [ -n "${raw//[[:space:]]/}" ] || exit 0
   mkdir -p "${cache%/*}"
-  tmp="$(mktemp "$cache.XXXXXX")" && printf '%s\n' "$raw" >"$tmp" && mv -f "$tmp" "$cache"
+  tmp="$(gmktemp "$cache.XXXXXX")" && printf '%s\n' "$raw" >"$tmp" && mv -f "$tmp" "$cache"
 fi
 
 python3 -c '

@@ -13,6 +13,9 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    INFO, non-blocking): (a) the tokenless loopback handler does not check the `Host` header, so a page in a
    local browser could reach it by DNS rebinding; add a `Host` allow-list (`127.0.0.1`, `localhost`, the bound
    port); (b) the bearer compare at the handler uses `!=`; use `hmac.compare_digest`. One small PR for both.
+   **Done 2026-10-22** (commit on master, bin/firecrawl-router + tests): the tokenless handler
+   refuses any `Host` that is not a loopback name with the bound port (403), and the bearer compare uses
+   `hmac.compare_digest`.
 2. **Claude API credits from the Admin API, not by hand** (djbclark, 2026-10-20): the Admin API has no balance
    endpoint, but `/v1/organizations/cost_report` gives spend; remaining promo = grant ($200, 2026-10-13, expires
    2026-11-08) minus cost since the grant. Plan: an `aiuse` collector behind `ANTHROPIC_ADMIN_KEY` in
@@ -136,6 +139,16 @@ first words name the task (the `baton` skill ignores the trailing text as a labe
 autorename cover the Paseo host; (3) a test with the fake `paseo` asserting the sent prompt starts with the
 label. Never rename or send to a live agent in tests.
 
+Also (djbclark, 2026-10-20, in the `/steps` session running as Paseo agent 6ebd939): he renamed that session's
+workspace to `djbclark-ade-rework-p` in the Paseo GUI, and another agent looking for it by that name could not find
+it; it saw the old name. Verified the same day: `paseo ls -g` lists the agent under its first-prompt NAME
+("I want to move my entire AI development environment to djbcl..."), the GUI workspace name appears nowhere in that
+listing, and `session-finder` (`fleet.py`) names a Paseo-hosted session from the agent record, so a GUI rename is
+invisible to every agent that looks sessions up by name. The slice above must (4) find where Paseo keeps a
+workspace's GUI name (the daemon API or its store under `~/.paseo`), have `session-finder` show both the workspace
+name and the agent name, and make its rename path (1) set the name the GUI shows, so a manual GUI rename and an
+agent rename are the same thing.
+
 ## `bin/load-watch` `send_to` has the relay's round-1 exposure (adversary on PR #25, 2026-10-20)
 
 `send_to` (bin/load-watch, around line 536) still scrubs `PASEO_AGENT_ID`/`PASEO_AGENT_CWD` and runs `paseo send
@@ -144,6 +157,29 @@ sends is unlabelled (arrives as the operator's turn) and a target or text starti
 is composed by load-watch, so lower risk, but fix before it ever sends untrusted text: call
 `skills/session-finder/relay.py` instead of its own `paseo send`, or copy relay.py's `--`, label and `paseo_gate`.
 One small Sonnet `code` slice with the fake `paseo`.
+
+## ADE-everywhere Phase 0, preserve and classify (djbclark, 2026-10-20; proposal section 8 item 1)
+
+1. **Backups: done 2026-10-20 (PR #24).** `bin/ade-backup-stores` takes the `.backup`-API copy of every live session
+   database, the per-session trees and file stores of inventory section 3, and the Hermes JSONL export, into
+   `~/.local/state/ade/backups/<UTC>/` with a `MANIFEST.json`. Nothing is deleted from any store. The first real
+   generation, `20261020T081802Z`, predates the credential scrub: it holds OpenCode's `credential` rows and 68 Cursor
+   `mcp-auth.json` files, so the operator scrubs or deletes it and takes a new one. Open: run it on a
+   schedule (no launchd job yet), and decide how long generations are kept; each is ~10 GB. A configured store that does not exist is `"status": "missing"` in the manifest and on
+   stderr, exit 0 (`--strict-stores`: exit 1); a Cursor session without any `meta.json` (14 of 101 on 2026-10-20) is
+   a `sidecar_missing` warning, store `ok`, an error only under `--strict-stores` (Codex review of PR #24, 2026-10-20;
+   relaxed on adversary round 13, since every real run would otherwise be `partial`); a `meta.json` that is a symlink,
+   excluded or gone during the copy is an error, store `partial`.
+   Adversary round 2 on PR #24 (LOW/INFO, queued): a trigger on a scrubbed OpenCode table could copy the
+   deleted values into another table on the copy (refuse or `DROP TRIGGER` on the copy, then count the scrubbed
+   values in the copy's bytes after `VACUUM`); the schema guard misses `authorization`, `cookie`, `jwt`,
+   `refresh`, `pwd`, `session_key`, `api-key` and exempts a table named `tokens` (apply the counter exemption to
+   numeric columns only); SQLite files inside file stores (copilot `session.db`, muse `cron.db`, grok
+   `session_search.sqlite`) get no guard at run time (route them through `backup_sqlite`); a killed run leaves an
+   unscrubbed `<stamp>.part` that nothing reports; `seal_and_hash` should open with `O_NOFOLLOW`; `hermes`
+   children should get `stdin=DEVNULL`. Operator: OpenCode's three API keys also sit in its transcript rows (317
+   occurrences in `part.data` and `session_message`), so every generation is secret-bearing; if one ever leaves
+   the Mac, rotate those keys.
 
 ## Keep every machine current, and a changelog (djbclark, 2026-10-20; proposal Q26, T8)
 
@@ -317,8 +353,18 @@ this repo on or after 2026-10-14 raises these three first, one `/steps` prompt e
          the fix, so there is no code change here. (Raised by `djbclark-ade-db`, which read the
          rows as 10-12/13; the dates above are the verified ones. The entry as first written
          read as a live fault and was not one.)
-      b. agy pools `antigravity/claude_gpt` (7 refusals) and `antigravity/gemini` (6) report
-         "not in `aiuse --available`".
+      b. agy pools `antigravity/claude_gpt` and `antigravity/gemini` report "not in `aiuse
+         --available`" (rows 2026-10-12 to 10-14; 7 and 6 of them inside the 10-14 window).
+         **Checked 2026-10-20: not a fault, the same class as (d).** `antigravity/claude_gpt`
+         really is exhausted -- Claude/GPT weekly 99% used, resets Sat Oct 24 2:18pm -- so the
+         refusal is correct, and `antigravity/gemini` is listed in `aiuse --available` today at
+         32% headroom, with `hidden_pools` and `excluded` both empty. The pool keys match the
+         ones `--available` emits, so the mechanism works and the rows record exhaustion, not a
+         lookup bug. One loose thread, not reproducible: at 10:46 today `--available` omitted
+         gemini while `aiuse --json` showed all three of its windows `ok`, and four minutes
+         later it listed it with the identical headroom figure; `apply_frozen_measurements` is
+         the plausible mechanism (a frozen measurement deliberately suppresses a pool). If the
+         night rows show agy skipped while gemini has headroom, look there first.
       c. zcode `project_token_login_failed` x4, classified `transient` so it retries into the
          same wall, plus one rc=124 after 914s with 41 tool calls.
       d. claude was refused 6 times at `headroom 4.0% <= floor 5.0%` — the floor working as

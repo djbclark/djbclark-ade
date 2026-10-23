@@ -122,6 +122,33 @@ to run `reload-plugins` the same way. Claude Code slash wrappers live in
 `~/src/djbclark-ade/claude/commands/` and are symlinked directly into
 `~/.claude/commands/`.
 
+## 3a. Paseo overwrites its six skills unless told not to (2026-10-23)
+
+Paseo's daemon syncs its bundled skills (`paseo`, `paseo-advisor`, `paseo-committee`, `paseo-handoff`,
+`paseo-help`, `paseo-plugin`) into `~/.claude/skills` and `~/.agents/skills` at **every start**
+(`orchestrationSkills.autoUpdate()`), overwriting whatever it finds. Those two paths are directory links into this
+repo, so the write landed here: our narrowed descriptions (`skills/paseo/UPSTREAM.md`) were replaced by upstream's,
+with a `.paseo-managed-files.json` beside each (markers dated 2026-10-19 12:16, the daemon start).
+
+**The fix is Paseo's own skill selection, not a different link layout.** `~/.paseo/config.json` carries
+`agents.skills.selection = {"mode": "custom", "skills": []}` (set 2026-10-23, applied with `paseo reload`; backup
+`~/.local/state/paseo-backups/config-2026-10-23-pre-skill-selection.json`). With nothing selected, the start-up
+sync only plans deletions and never applies them, so it writes nothing; with `{"mode": "all"}` (the default) it
+overwrites. Checked with the shipped `operations.js` against the real directories, not by a daemon restart (a restart
+would end this machine's Paseo agents).
+
+1. Paseo's settings screen now shows the six skills as drift ("to be removed"). Do not save the selection there and
+   never confirm the removal: it deletes our directory links (not the repo files). Re-link with
+   `skill-everywhere paseo paseo-advisor paseo-committee paseo-handoff paseo-help paseo-plugin`.
+2. A key set with `"skills"` at the top level of `config.json` is rejected by `paseo reload` (and would stop a
+   restart): the persisted path is `agents.skills.selection`.
+3. Re-vendoring a newer Paseo bundle is done by hand (`skills/paseo/UPSTREAM.md`).
+4. Tried and dropped: a real directory holding per-file symlinks makes Paseo's sync throw before writing (verified),
+   but Cursor's loader rejects a `SKILL.md` symlink that resolves outside its skills root (codex `gpt-6-astra`
+   review, 2026-10-23, verified in the installed Cursor source) and Cursor reads `~/.claude/skills` here; a settings
+   save also stages deletions before it reaches the guard.
+5. Upstream: [getpaseo/paseo#7700](https://github.com/getpaseo/paseo/issues/7700), `docs/upstream-issues.md` item 10.
+
 ## 4. When the table is wrong
 
 Fix [`skill-everywhere`](skill-everywhere) and the table above together, then re-run step 3

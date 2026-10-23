@@ -26,7 +26,7 @@ v2.1 is a coherent plan with the right shape (public kit + private companion, ch
 ### F4 — major — "chezmoi keeps the originals it replaced" is false
 **Claim** (T1, lines ~34–38; repeated in §4.3 bootstrap).
 **Verified**: twpayne/chezmoi discussion #4657 (maintainer): on a new machine `chezmoi apply` overwrites existing targets without warning; it only prompts/diffs for targets it previously wrote (https://github.com/twpayne/chezmoi/discussions/4657). `chezmoi apply` has no backup mode.
-**Recommended change**: `ade bootstrap` runs `chezmoi managed --path-style absolute | xargs tar …` (or `chezmoi archive` of the *current* `$HOME` targets) into `~/.local/state/ade/backup-<date>.tar` before the first `apply`, and the doc says so. Add to Phase 1 acceptance.
+**Recommended change**: `ade bootstrap` runs `chezmoi managed --path-style absolute | gxargs gtar …` (or `chezmoi archive` of the *current* `$HOME` targets) into `~/.local/state/ade/backup-<date>.tar` before the first `apply`, and the doc says so. Add to Phase 1 acceptance.
 
 ### F5 — major — The `--via paseo` route cannot express several things acp-run promises today
 **Claim** (§7.2 table line ~520 "`--via paseo`" row; §6.3 item 6; Q15/Q16).

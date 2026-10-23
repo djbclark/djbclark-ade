@@ -561,10 +561,15 @@ class TestCheckSignalHint(ReapBase):
         self.assertNotIn("no resumable session", out)
 
     def test_refused_and_auth_keep_their_own_hint(self):
-        for failure in ("NO-REPORT: refused (the model declined)", "NO-REPORT: auth (login expired)"):
-            out = self.checked(failure)
-            self.assertNotIn("resume in place", out, failure)
-            self.assertIn("escalate", out, failure)        # an ordinary class keeps the one-rung hint
+        out = self.checked("NO-REPORT: refused (the model declined)")
+        self.assertNotIn("resume in place", out)
+        self.assertIn("escalate", out)                      # an ordinary class keeps the one-rung hint
+        # a login the agent cannot refresh is not a tier problem: the login hint, never a climb
+        # (adversary PR 18 follow-up, finding I; the record's agent here is codex)
+        out = self.checked("NO-REPORT: auth (login expired)")
+        self.assertNotIn("resume in place", out)
+        self.assertNotIn("escalate", out)
+        self.assertIn("codex login", out)
 
     def test_a_quota_stop_with_a_signal_prints_the_resume_hint_once(self):
         out = self.checked("NO-REPORT: quota (codex, m1, retry at Oct 18th 9am)")

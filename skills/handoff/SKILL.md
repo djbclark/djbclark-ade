@@ -23,7 +23,10 @@ commit flow:
   committed DIRECTLY TO MASTER under site-private's own memory-data
   exception, pushed immediately (Step 6 below).
 - **Any other project**: output lives inside that project's own repo, at
-  `<repo-root>/docs/handoffs/`. Commit locally in that repo (Step 6 below)
+  `<repo-root>/docs/handoffs/` — unless the project's always-loaded
+  `AGENTS.md` names another directory and a push exception, which wins
+  (e.g. every CFEngine/libntech tree writes to
+  `~/src/cfengine-all/docs/handoffs/` and pushes there, 2026-10-20). Commit locally in that repo (Step 6 below)
   — do **not** push automatically. Pushing to a project you don't have an
   explicit standing exception for is a "visible to others" action per the
   general action-care policy; site-private's push-immediately rule is a

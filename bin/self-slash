@@ -252,7 +252,7 @@ if [ "$dry" = 1 ]; then
   exit 0
 fi
 mkdir -p "$(dirname "$log")" "$lockdir"
-prompt_line="$(dirname "$(realpath "$0")")/../skills/session-finder/prompt_line.py"
+prompt_line="$(dirname "$(grealpath "$0")")/../skills/session-finder/prompt_line.py"
 if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   after=""
   if [ -s "$lock" ] && waiter_alive "$(cat "$lock")"; then
@@ -340,7 +340,7 @@ send_text() {
     # PASEO_AGENT_ID unset so the daemon does not envelope the send as agent-to-agent
     # text; --behavior steer so a turn that began meanwhile is never torn down.
     out=$(env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD "$paseo_cli" send "$pane" --no-wait --behavior steer --json "$text" 2>&1) || { echo "$(gdate '+%F %T') $host $pane: paseo send failed: ${out:0:200}"; return 1; }
-    echo "$(gdate '+%F %T') $host $pane: paseo send: $(printf '%s' "$out" | gtr -s ' \n' ' ' | cut -c1-160)"
+    echo "$(gdate '+%F %T') $host $pane: paseo send: $(printf '%s' "$out" | gtr -s ' \n' ' ' | gcut -c1-160)"
     return 0
   elif [ "$host" = herdr ]; then
     herdr pane run "$pane" "$text" || return 1
@@ -442,7 +442,7 @@ finish_paseo() {
   if [ "$rc" = 0 ]; then
     echo "$(gdate '+%F %T') $host $pane: finish: archived $pane"; exit 0
   fi
-  echo "$(gdate '+%F %T') $host $pane: finish: archive refused (rc=$rc): $(printf '%s' "$out" | gtr -s ' \n' ' ' | cut -c1-200)"; exit 8
+  echo "$(gdate '+%F %T') $host $pane: finish: archive refused (rc=$rc): $(printf '%s' "$out" | gtr -s ' \n' ' ' | gcut -c1-200)"; exit 8
 }
 if [ "$finish" = 1 ] && [ "$host" = paseo ]; then finish_paseo; fi
 wait_idle

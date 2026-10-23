@@ -53,7 +53,7 @@ Invariants, in force for the whole run:
       and `bd list --status blocked` (helm and fleet-watch see neither).
    c. Todo notes: `status: open` in `~/ops/site-private/memory/todo/`. The file
       names hold spaces, so walk them with a `for f in …` loop, never
-      `$(grep -l …)`.
+      `$(ggrep -l …)`.
    d. Earlier runs' branches: per repo, `git fetch` then `git branch -r | rg
       claudehelm` and `git log --oneline origin/<default>..origin/claudehelm/<b>`;
       and `gh issue view <n> --comments` for every issue in the table (a
