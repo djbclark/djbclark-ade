@@ -22,7 +22,7 @@ python3 -I $S/session-history.py <keyword>...    # every session of every agent,
 python3 -I $S/fleet.py [list|show <id>|ended|conflicts --cwd DIR]   # the fleet itself
 python3 -I $S/launch.py --agent A --cwd DIR --model M [--baton] -p "..."   # start a session (ACP-first)
 python3 -I $S/launch.py wait <id> [--timeout S]  # block until THAT launch's turn ends
-python3 -I $S/relay.py <id|name> "<one line>"    # type into a running session's pane (SendMessage fallback)
+python3 -I $S/relay.py <id|name> "<one line>"    # message any running session: best route, falls back itself
 ```
 
 Sibling skills: `helm` (answer every waiting session from one window; `/helm-all`
@@ -114,8 +114,11 @@ a. **Running and not finished → message it, even while it is `working` on
    named … is reachable": a workflow sub-agent's `ListAgents` often lists only its
    teammates, 2026-10-11), **or a `[Cross-session delivery notice]` says it was
    refused** (that session turned inbound messages off, 2026-10-12) →
-   `relay.py <id> "<one line>"`, which types it into the
-   session's own pane; a working Claude queues it for its next tool round. Put a
+   `relay.py <id> "<one line>"`. **It is the one command for messaging any peer** (2026-10-23): it picks
+   the best route for that session (Paseo `send`, `acp-dispatch tell`, a live launch's inbox, keys into its
+   pane, then the Claude messaging socket) and tries the next route itself when one fails before sending;
+   it errors only when every route has, listing each reason (`--plan` shows the order, `--via R` pins one).
+   Don't pick a channel by hand or hand-roll a waiter. A working Claude queues it for its next tool round. Put a
    long brief in a file and relay one line naming its absolute path. Don't resend
    a refused message, and don't hand the operator a clipboard prompt to paste in
    its place: relay it.
@@ -275,7 +278,7 @@ flips to false turns peer messaging off in running Claude sessions (2026-10-13; 
 
 | Agent / host | Running session | Ended session |
 |---|---|---|
-| claude (TUI) | `SendMessage({to: "<name>"})`; read its latest prompt line first. Not in your `ListAgents`, no messaging socket (`fleet.py` then says so in `reach:`), or a delivery notice says SendMessage was refused → `relay.py <id> "<one line>"` (keys into its herdr/Orca/tmux pane; queued while it works; refused on a typed draft or an open question; a dim/grey suggested prompt is not a draft). A Paseo-hosted one (`where: host=paseo agent=<id>`, or you were handed a `PASEO_AGENT_ID`): `relay.py <sid|name|agent-id> "<text>"` runs `paseo send --behavior steer -- <id> <text>` with your own `PASEO_AGENT_ID` kept, so Paseo labels it an agent message from you (a caller that is not a Paseo agent gets a `[relay from <name>] ` prefix), never the operator's turn. It re-runs `paseo agent inspect` first and refuses an archived agent, a pending permission or question (helm answers it), a status other than idle/running, and text starting with `/`; `--idle S` (finite, > 0) waits for idle first; no draft check, there is no input box. Exit 0 means "accepted" (the daemon's acknowledgement), or "delivered" once a Claude transcript shows the text (2026-10-20). Finished (`/handoff`) → rung 3b, never SendMessage | `claude --resume <id>` (rung 3d) or `launch.py --baton` |
+| claude (TUI) | `SendMessage({to: "<name>"})`; read its latest prompt line first. Not in your `ListAgents`, no messaging socket (`fleet.py` then says so in `reach:`), or a delivery notice says SendMessage was refused → `relay.py <id> "<one line>"` (route ladder, best first, falls back by itself: keys into its herdr/Orca/tmux pane → Claude socket frame; queued while it works; the pane route is skipped on a typed draft, and an open question stops all routes; a dim/grey suggested prompt is not a draft). A Paseo-hosted one (`where: host=paseo agent=<id>`, or you were handed a `PASEO_AGENT_ID`): `relay.py <sid|name|agent-id> "<text>"` runs `paseo send --behavior steer -- <id> <text>` (its only route; any refusal from `paseo agent inspect` ends the run) with your own `PASEO_AGENT_ID` kept, so Paseo labels it an agent message from you (a caller that is not a Paseo agent gets a `[relay from <name>] ` prefix), never the operator's turn. It re-runs `paseo agent inspect` first and refuses an archived agent, a pending permission or question (helm answers it), a status other than idle/running, and text starting with `/`; `--idle S` (finite, > 0) waits for idle first; no draft check, there is no input box. Exit 0 means "accepted" (the daemon's acknowledgement), or "delivered" once a Claude transcript shows the text (2026-10-20). Finished (`/handoff`) → rung 3b, never SendMessage | `claude --resume <id>` (rung 3d) or `launch.py --baton` |
 | any ACP launch (`host acp`, id `YYYYMMDD-…`) | `launch.py reply <id> "<text>"`, then `launch.py wait <id>` | `launch.py list`; its log under `~/.local/state/session-finder/` |
 | a headless `acp-dispatch` slice (a bigteam/lead worker: `where: unknown terminal`, no pane) | `acp-dispatch tell <jobs/NAME.json> "<text>"`; `fleet.py show` and `relay.py` name the record (2026-10-18) | `acp-dispatch resume <record>` |
 | an `acp-dispatch` / `acp-run claude` slice (headless; `fleet.py` shows no channel) | `SendMessage({to: "<name>"})`: it is in `ListAgents` as a peer (2026-10-18: hermes-agent-1e, unreachable by relay, listed there). Any agent's slice: `acp-dispatch tell RECORD "<msg>"` (2026-10-18; appends to `jobs/<name>.inbox.md`, also writes to a Claude slice's live socket; the slice answers in `jobs/<name>.replies.md`, `acp-dispatch check` shows them). Slices dispatched before 051a269 lack the footer item that makes them read the inbox: go through their lead | `acp-dispatch resume RECORD` |

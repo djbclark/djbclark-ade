@@ -156,9 +156,18 @@ a fan-out needs from it:
    Context stays at the agent's default unless the slice reads a whole corpus
    or a long log (`--context 500k` / `1m`; bigger windows bill more on xAI,
    Cursor and Copilot).
-2. **`judgment` slices** (architecture, adjudication, the adversarial second
-   opinion of Step 6) go to `acp-dispatch claude --model opus --kind judgment
-   --effort high`.
+2. **`judgment` slices** (architecture, adjudication) go to `acp-dispatch claude
+   --model opus --kind judgment --effort high`. **Adversary rounds** (the
+   adversarial second opinion of Step 6) go first to the omp route, `acp-dispatch
+   omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` (Claude API
+   credits; operator 2026-10-23, after the Claude weekly window ran out 2.6 days
+   early on 2026-10-20). The Agent-tool `adversary` (`model: opus`) is the fallback
+   when omp is unavailable, and the lead passes the Agent tool's `model: "sonnet"`
+   override whenever `~/.local/state/ade/quota-guard.json` says `tight` or
+   `critical` (`bin/claude-quota-guard`; a `[quota-guard <level>]` line from the
+   UserPromptSubmit hook says the same). The lead session itself runs on Opus 5.5
+   high (Sonnet 5.5 high when it only drives a pipeline), never Fable
+   (`model-routing`, *Routing policy* item 12).
    **`frontier` slices** are the rare few that really need a frontier model
    (debugging that defeated real attempts, a security-relevant or concurrency
    fix's final review, a whole-corpus read): `acp-dispatch codex --model

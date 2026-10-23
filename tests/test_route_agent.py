@@ -980,6 +980,39 @@ class TestRoutingPolicyToml(unittest.TestCase):
         self.assertIn("frontier", out)
         self.assertIn("gpt-6-astra", out)
 
+    def test_policy_md_and_json_carry_the_lead_session_model(self):
+        """[lead] (2026-10-23): the session that dispatches runs on Opus 5.5 at high, Sonnet to drive a
+        pipeline, never Fable; `policy --md` and `--json` must say so."""
+        import io
+        import json
+        from contextlib import redirect_stdout
+        md, js = io.StringIO(), io.StringIO()
+        with redirect_stdout(md):
+            self.assertEqual(r.main(["policy", "--md"]), 0)
+        with redirect_stdout(js):
+            self.assertEqual(r.main(["policy"]), 0)
+        self.assertIn("## Lead / orchestrator session", md.getvalue())
+        self.assertIn("| lead.model | opus |", md.getvalue())
+        self.assertIn("| lead.effort | high |", md.getvalue())
+        self.assertIn("| lead.pipeline_model | sonnet |", md.getvalue())
+        self.assertEqual(json.loads(js.getvalue())["lead"],
+                         {"model": "opus", "effort": "high", "pipeline_model": "sonnet"})
+
+    def test_a_lead_table_missing_a_key_is_rejected_naming_the_file(self):
+        import tempfile
+        src = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        bad = src.replace('pipeline_model = "sonnet"\n', "")
+        self.assertNotEqual(src, bad)
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+            f.write(bad)
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                r.load_policy(f.name)
+            self.assertIn(f.name, str(ctx.exception))
+            self.assertIn("[lead]", str(ctx.exception))
+        finally:
+            Path(f.name).unlink(missing_ok=True)
+
 
 class TestQualityBand(unittest.TestCase):
     """[routing].quality_max_rank_gap (2026-10-18, plektra lead with djbclark's approval): quota
@@ -1121,9 +1154,19 @@ class TestOmpCreditsTier(unittest.TestCase):
             self.assertTrue(svc.eligible("code"))
             self.assertTrue(svc.eligible("bulk"))
             self.assertTrue(svc.eligible("api-only"))
-            self.assertFalse(svc.eligible("judgment"))
+            self.assertTrue(svc.eligible("judgment"))     # adversary rounds, 2026-10-23
             self.assertFalse(svc.eligible("frontier"))
             self.assertIn("omp", {s.name for s in r.discover(self.quota())})
+
+    def test_omp_takes_judgment_on_opus_when_claude_is_drained_and_never_frontier(self):
+        """Adversary rounds go to omp (2026-10-23): Opus 5.5 at high on the credits. With claude
+        drained it is the only judgment pool left; frontier never lands on omp."""
+        drained = self.quota(claude={"remaining": 0.0})
+        c = r.route("judgment", quota=drained)
+        self.assertEqual(c.service.name, "omp")
+        self.assertEqual(c.model, "anthropic/claude-opus-5-5 --effort high")
+        self.assertNotIn("omp", {s.name for s in r.SERVICES if s.eligible("frontier")})
+        self.assertEqual(r.route("judgment", quota=self.quota(omp={"remaining": 0.0})).service.name, "claude")
 
     def test_api_only_is_a_kind_and_only_omp_takes_it(self):
         self.assertIn("api-only", r.KINDS)
