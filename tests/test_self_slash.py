@@ -32,9 +32,14 @@ FAKE_PASEO = textwrap.dedent("""\
     case "$1 $2" in
       "agent inspect")
         if [ "$3" = new-agent-1 ]; then
+          if [ -n "$FAKE_NEW_JSON" ]; then echo "$FAKE_NEW_JSON"; else
+          if [ -n "$FAKE_NEW_SEQ" ]; then
+            n=$(cat "$FAKE_LOG.n" 2>/dev/null || echo 0); echo $((n+1)) > "$FAKE_LOG.n"
+            IFS=, read -ra seq <<< "$FAKE_NEW_SEQ"; FAKE_NEW_STATUS="${seq[$n]:-${seq[${#seq[@]}-1]}}"
+          fi
           parent=null; [ -n "$FAKE_NEW_PARENT" ] && parent="\\"$FAKE_NEW_PARENT\\""
           printf '{"Id": "new-agent-1", "Model": "%s", "Status": "%s", "ParentAgentId": %s}\\n' \\
-            "${FAKE_NEW_MODEL-claude-opus-5-5}" "${FAKE_NEW_STATUS-idle}" "$parent"
+            "${FAKE_NEW_MODEL-claude-opus-5-5}" "${FAKE_NEW_STATUS-idle}" "$parent"; fi
         else
           printf '{"Id": "test-agent", "Name": "%s", "Status": "idle", "Mode": "bypassPermissions", "Cwd": "%s", "ParentAgentId": null}\\n' \\
             "${FAKE_NAME-Lead}" "$FAKE_CWD"
@@ -50,7 +55,10 @@ FAKE_PASEO = textwrap.dedent("""\
         echo archived;;
       "workspace ls")
         if [ -n "$FAKE_WS_JSON" ]; then echo "$FAKE_WS_JSON"
-        else printf '[{"workspaceId": "ws-1", "cwd": "%s", "background": false}]\\n' "$FAKE_CWD"; fi;;
+        else printf '[{"workspaceId": "ws-1", "cwd": "%s", "isolation": "local", "background": false}, {"workspaceId": "ws-2", "cwd": "%s", "isolation": "local", "background": false}]\\n' "$FAKE_CWD" "$FAKE_CWD2"; fi;;
+      "terminal ls")
+        if [ -n "$FAKE_TERM_FAIL" ]; then echo "no daemon" >&2; exit 1; fi
+        echo "${FAKE_TERM_JSON-[]}";;
     esac
     case "$1" in
       ls) echo "${FAKE_LS_JSON-[]}";;
@@ -58,7 +66,8 @@ FAKE_PASEO = textwrap.dedent("""\
       send) echo '{}';;
       run)
         if [ -n "$FAKE_RUN_FAIL" ]; then echo "Provider claude is unavailable" >&2; exit 1; fi
-        echo '{"agentId": "new-agent-1", "status": "created", "provider": "claude", "cwd": "x", "title": "t"}';;
+        if [ -n "$FAKE_RUN_JSON" ]; then echo "$FAKE_RUN_JSON"; else
+        echo '{"agentId": "new-agent-1", "status": "created", "provider": "claude", "cwd": "x", "title": "t"}'; fi;;
     esac
     exit 0
 """)
@@ -373,8 +382,11 @@ class SelfSlashPaseoTests(unittest.TestCase):
 
     def succ_env(self, **extra: str) -> dict[str, str]:
         cwd = str(Path(self._tmp.name) / "work")
+        cwd2 = str(Path(self._tmp.name) / "work2")
         Path(cwd).mkdir(exist_ok=True)
-        return {"FAKE_CWD": cwd, "PASEO_AGENT_CWD": cwd, "SELF_SLASH_SUCCESSOR_SETTLE": "0", **extra}
+        Path(cwd2).mkdir(exist_ok=True)
+        return {"FAKE_CWD": cwd, "FAKE_CWD2": cwd2, "PASEO_AGENT_CWD": cwd,
+                "SELF_SLASH_SUCCESSOR_SETTLE": "0", **extra}
 
     def run_waiter(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
         """The waiter itself, in the foreground, as the parent spawns it (its exit code is observable)."""
@@ -433,7 +445,7 @@ class SelfSlashPaseoTests(unittest.TestCase):
 
     def test_successor_on_the_wrong_model_or_in_error_exits_11(self) -> None:
         for extra, needle in ((dict(FAKE_NEW_MODEL="claude-sonnet-5-5"), "not claude-opus-5-5"),
-                              (dict(FAKE_NEW_STATUS="error"), "error status")):
+                              (dict(FAKE_NEW_STATUS="error"), "in status 'error'")):
             r = self.run_waiter(**extra)
             self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
             self.assertIn(needle, r.stdout)
@@ -496,7 +508,8 @@ class SelfSlashPaseoTests(unittest.TestCase):
         for needle in ("workspace ls --background --json",
                        "run /baton --provider claude/claude-opus-5-5 --thinking high --mode <agent mode>",
                        "--title \"<old name> → opus-5-5\" --no-wait --json",
-                       "never --new-workspace", "workspace archive -- <this agent's workspace id>",
+                       "never --new-workspace", "workspace archive -- <old id>", "terminal ls --workspace <old id> --json",
+                       "isolation local (never a worktree)", "polled up to 0s",
                        "agent archive -- test-agent", "never --force"):
             self.assertIn(needle, r.stdout)
         self.assertEqual(self.paseo_calls(), [])
@@ -534,43 +547,184 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertEqual(title, "A very long orchestrator → opus-5-5")
         self.assertLessEqual(len(title), 40)
 
-    def test_old_workspace_is_archived_after_the_old_agent_when_it_is_empty(self) -> None:
-        cwd = self.succ_env()["FAKE_CWD"]
+    def calls_of(self, *prefixes: str) -> list[str]:
+        return [c for c in self.paseo_calls() if c.startswith(prefixes)]
+
+    def archived_workspaces(self) -> list[str]:
+        return self.calls_of("workspace archive")
+
+    def test_old_workspace_is_archived_when_proven_unneeded(self) -> None:
+        env = self.succ_env()
+        cwd, cwd2 = env["FAKE_CWD"], env["FAKE_CWD2"]
         # the successor and the old agent do not count, an agent elsewhere does not either
-        ls = (f'[{{"id": "new-agent-1", "shortId": "new-age", "cwd": "{cwd}"}},'
+        ls = (f'[{{"id": "new-agent-1", "shortId": "new-age", "cwd": "{cwd2}"}},'
               f' {{"id": "test-agent", "shortId": "test-ag", "cwd": "{cwd}"}},'
               ' {"id": "zzz", "shortId": "zzz", "cwd": "/somewhere/else"}]')
         r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", FAKE_LS_JSON=ls)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         calls = self.paseo_calls()
-        self.assertIn("--workspace ws-2 ", self.run_calls())
-        archives = [i for i, c in enumerate(calls) if c.startswith(("agent archive", "workspace archive"))]
-        self.assertEqual([calls[i] for i in archives], ["agent archive -- test-agent", "workspace archive -- ws-1"])
-        self.assertIn("ls --background --json", calls)
+        # H1: the successor runs in the target workspace's own cwd, not this agent's
+        self.assertIn(f"--workspace ws-2 --cwd {cwd2} ", self.run_calls())
+        steps = [c for c in calls if c.startswith(("agent archive", "terminal ls", "ls ", "workspace archive"))]
+        self.assertEqual(steps, ["agent archive -- test-agent", "terminal ls --workspace ws-1 --json",
+                                 "ls --background --json", "workspace archive -- ws-1"])
         self.assertIn("workspace: archived ws-1", r.stdout)
 
-    def test_old_workspace_is_kept_while_another_agent_has_the_cwd(self) -> None:
+    def test_old_workspace_is_kept_while_another_agent_may_be_in_it(self) -> None:
         cwd = self.succ_env()["FAKE_CWD"]
-        for ls in (f'[{{"id": "other-1", "shortId": "other-1", "cwd": "{cwd}"}}]',
-                   '[{"id": "other-1", "shortId": "other-1"}]',  # a row with no cwd: unknown, so kept
-                   "not json"):
+        rows = (
+            f'[{{"id": "other-1", "shortId": "other-1", "cwd": "{cwd}"}}]',
+            f'[{{"id": "other-1", "shortId": "other-1", "cwd": "{cwd}/sub/dir"}}]',  # M2: another cwd below it
+            '[{"id": "other-1", "shortId": "other-1", "workspaceId": "ws-1", "cwd": "/elsewhere"}]',  # by id
+            '[{"id": "other-1", "shortId": "other-1"}]',  # a row with no cwd: unknown, so kept
+            "not json",
+        )
+        for ls in rows:
             self.calls.unlink(missing_ok=True)
             r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", FAKE_LS_JSON=ls)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertFalse(any(c.startswith("workspace archive") for c in self.paseo_calls()), ls)
-            self.assertIn("workspace: ws-1 kept: other agents in", r.stdout)
+            self.assertEqual(self.archived_workspaces(), [], ls)
+            self.assertIn("kept: other agents in it or below", r.stdout)
+
+    def test_agent_rows_with_a_workspace_id_are_counted_by_it_not_by_cwd(self) -> None:
+        cwd = self.succ_env()["FAKE_CWD"]
+        ls = f'[{{"id": "o", "shortId": "o", "workspaceId": "ws-2", "cwd": "{cwd}"}}]'
+        r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", FAKE_LS_JSON=ls)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.archived_workspaces(), ["workspace archive -- ws-1"])
+
+    def test_h1_old_workspace_containing_the_successors_cwd_is_kept(self) -> None:
+        cwd = self.succ_env()["FAKE_CWD"]
+        ws = (f'[{{"workspaceId": "ws-1", "cwd": "{cwd}", "isolation": "local"}},'
+              f' {{"workspaceId": "ws-2", "cwd": "{cwd}/inner", "isolation": "local"}}]')
+        r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", FAKE_WS_JSON=ws)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"--workspace ws-2 --cwd {cwd}/inner ", self.run_calls())
+        self.assertEqual(self.archived_workspaces(), [])
+        self.assertIn("equals or contains the successor cwd", r.stdout)
+
+    def test_h1_target_workspace_must_exist_and_gives_the_cwd(self) -> None:
+        r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-nope")
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertIn("not in workspace ls", r.stdout)
+        self.assertEqual(self.calls_of("run ", "agent archive"), [])
+
+    def test_h1_worktree_or_unknown_isolation_is_never_archived(self) -> None:
+        env = self.succ_env()
+        cwd, cwd2 = env["FAKE_CWD"], env["FAKE_CWD2"]
+        for iso in ('"isolation": "worktree", ', ""):
+            ws = (f'[{{"workspaceId": "ws-1", {iso}"cwd": "{cwd}"}},'
+                  f' {{"workspaceId": "ws-2", "cwd": "{cwd2}", "isolation": "local"}}]')
+            r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", FAKE_WS_JSON=ws)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(self.archived_workspaces(), [])
+            self.assertIn("archive it yourself", r.stdout)
+
+    def test_h1_terminals_keep_the_workspace(self) -> None:
+        for extra in (dict(FAKE_TERM_JSON='[{"id": "t1", "workspaceId": "ws-1"}]'), dict(FAKE_TERM_JSON="not json"),
+                      dict(FAKE_TERM_FAIL="1")):
+            r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", **extra)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(self.archived_workspaces(), [], extra)
+            self.assertRegex(r.stdout, r"workspace: ws-1 kept: (terminals in it|terminal ls failed)")
+
+    def test_m1_override_that_is_not_this_agents_workspace_is_never_archived(self) -> None:
+        env = self.succ_env()
+        cwd, cwd2 = env["FAKE_CWD"], env["FAKE_CWD2"]
+        ws = (f'[{{"workspaceId": "ws-foreign", "cwd": "/somewhere/else", "isolation": "local"}},'
+              f' {{"workspaceId": "ws-2", "cwd": "{cwd2}", "isolation": "local"}}]')
+        r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", SELF_SLASH_WORKSPACE="ws-foreign", FAKE_WS_JSON=ws)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.archived_workspaces(), [])
+        self.assertIn("never archived", r.stdout)
+        # an override whose own row has this agent's cwd is proven
+        ws = (f'[{{"workspaceId": "mine", "cwd": "{cwd}", "isolation": "local"}},'
+              f' {{"workspaceId": "ws-2", "cwd": "{cwd2}", "isolation": "local"}}]')
+        r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", SELF_SLASH_WORKSPACE="mine", FAKE_WS_JSON=ws)
+        self.assertEqual(self.archived_workspaces(), ["workspace archive -- mine"])
+
+    def test_m1_prefer_foreground_tie_break_places_but_never_archives(self) -> None:
+        env = self.succ_env()
+        cwd, cwd2 = env["FAKE_CWD"], env["FAKE_CWD2"]
+        ws = (f'[{{"workspaceId": "ws-main", "cwd": "{cwd}", "isolation": "local", "background": false}},'
+              f' {{"workspaceId": "ws-bg", "cwd": "{cwd}", "isolation": "local", "background": true}},'
+              f' {{"workspaceId": "ws-2", "cwd": "{cwd2}", "isolation": "local"}}]')
+        r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", FAKE_WS_JSON=ws)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.archived_workspaces(), [])
+        self.assertIn("picked by preference and is never archived", r.stdout)
+        # ... and without --workspace it still places the successor in the foreground one
+        self.calls.unlink()
+        r = self.run_waiter(FAKE_WS_JSON=ws)
+        self.assertIn("--workspace ws-main ", self.run_calls())
 
     def test_keep_workspace_skips_the_close(self) -> None:
         r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", SELF_SLASH_S_KEEPWS="1")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        calls = self.paseo_calls()
-        self.assertFalse(any(c.startswith(("workspace archive", "ls ")) for c in calls), calls)
+        self.assertEqual(self.calls_of("workspace archive", "ls ", "terminal ls"), [])
         self.assertIn("workspace: kept (--keep-workspace)", r.stdout)
 
     def test_workspace_archive_failure_keeps_it_without_failing_the_handoff(self) -> None:
         r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", FAKE_WSARCH_FAIL="1")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("workspace: ws-1 kept: workspace archive failed", r.stdout)
+
+    # --- adversary round 1 low findings ---
+    def test_l1_new_id_must_be_a_single_new_agent(self) -> None:
+        for run_json, needle in (('{"agentId": "test-agent"}', "own id"),
+                                 ('{"agentId": "test-ag"}', "own id"),
+                                 ('[{"agentId": "sub-x"}]', "no single agent object"),
+                                 ('{"status": "created"}', "no single agent object"),
+                                 ('{"agentId": "a b"}', "unusable agent id")):
+            r = self.run_waiter(FAKE_RUN_JSON=run_json)
+            self.assertEqual(r.returncode, 11, f"{run_json}: {r.stdout}{r.stderr}")
+            self.assertIn(needle, r.stdout)
+        self.assertEqual(self.calls_of("agent archive"), [])
+
+    def test_l2_top_level_check_needs_the_parent_and_status_keys(self) -> None:
+        for new_json, needle in (('{"Model": "claude-opus-5-5", "Status": "idle", "parentAgentId": "test-agent"}', "no ParentAgentId"),
+                                 ('{"Model": "claude-opus-5-5", "ParentAgentId": null}', "no Status key"),
+                                 ('not json', "no ParentAgentId")):
+            r = self.run_waiter(FAKE_NEW_JSON=new_json)
+            self.assertEqual(r.returncode, 11, f"{new_json}: {r.stdout}{r.stderr}")
+            self.assertIn(needle, r.stdout)
+        self.assertEqual(self.calls_of("agent archive"), [])
+
+    def test_l6_only_idle_running_initializing_pass_and_late_errors_are_seen(self) -> None:
+        for status in ("idle", "running", "initializing"):
+            self.assertEqual(self.run_waiter(FAKE_NEW_STATUS=status).returncode, 0, status)
+        for status in ("closed", "stopped", "error", ""):
+            r = self.run_waiter(FAKE_NEW_STATUS=status)
+            self.assertEqual(r.returncode, 11, f"{status}: {r.stdout}{r.stderr}")
+        self.calls.unlink(missing_ok=True)
+        r = self.run_waiter(FAKE_NEW_SEQ="initializing,error", SELF_SLASH_SUCCESSOR_SETTLE="60")  # exits at the 2nd look, load-proof
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertIn("in status 'error'", r.stdout)
+        self.assertEqual(self.calls_of("agent archive"), [])
+        self.assertEqual(len(self.calls_of("agent inspect new-agent-1")), 2)
+
+    def test_l3_a_value_flag_as_the_last_argument_is_a_usage_error(self) -> None:
+        for flag in ("--successor", "--thinking", "--mode", "--title", "--workspace", "--delay", "--then"):
+            args = [*self.SUCCESSOR, flag] if flag != "--successor" else ["--finish", flag]
+            r = subprocess.run([str(SCRIPT), *args], env={**self.env, **self.succ_env()}, text=True,
+                               capture_output=True, timeout=10, check=False)
+            self.assertEqual(r.returncode, 2, f"{flag}: {r.stdout}{r.stderr}")
+            self.assertIn("needs a value", r.stderr)
+
+    def test_l4_control_characters_cannot_forge_a_log_line(self) -> None:
+        forged = "2026-10-23 07:00:00 paseo test-agent: sent /compact"
+        r = self.run_waiter(SELF_SLASH_S_TITLE=f"x\n{forged}")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(any(line.startswith(forged) for line in r.stdout.splitlines()), r.stdout)
+        self.assertIn("--title x2026-10-23", self.run_calls())
+        # even the joined text must not read as a sent /compact to the 30-minute gap check
+        self.log.parent.mkdir(parents=True, exist_ok=True)
+        self.log.write_text(r.stdout)
+        r2 = self.run_ss("--dry-run", "/compact x")
+        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+        # a real sent line still refuses
+        self.log.write_text(f"{time.strftime('%F %T')} paseo test-agent: sent /compact\n")
+        self.assertEqual(self.run_ss("--dry-run", "/compact x").returncode, 7)
 
     def test_workspace_flags_reach_the_waiter(self) -> None:
         r = self.run_ss(*self.SUCCESSOR, "--workspace", "ws-2", "--keep-workspace", **self.succ_env())

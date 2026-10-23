@@ -455,11 +455,16 @@ def test_other_models_keep_the_new_form(hook, tmp_path, monkeypatch):
     assert 'self-slash "/new" and queues /baton' in out
 
 
-@pytest.mark.parametrize("level, spec", [("tight", "claude-sonnet-5-5"), ("critical", "claude-opus-5-5")])
-def test_guard_level_picks_the_successor_even_on_a_non_fable_model(hook, tmp_path, monkeypatch, level, spec):
+@pytest.mark.parametrize("level, model, spec", [
+    ("tight", "claude-opus-5-5", "claude-sonnet-5-5"),
+    ("tight", nudge.FABLE_MODEL, "claude-sonnet-5-5"),
+    ("critical", nudge.FABLE_MODEL, "claude-opus-5-5"),
+    ("critical", "claude-haiku-4-5", "claude-opus-5-5"),
+])
+def test_guard_level_picks_the_successor_even_on_a_non_fable_model(hook, tmp_path, monkeypatch, level, model, spec):
     monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
     _guard(tmp_path, level)
-    out, _ = hook("s-guard-" + level, _model_transcript(tmp_path, "claude-opus-5-5", 46_000, nudge.BOUNDARY_TOTAL))
+    out, _ = hook("s-guard-" + level + model, _model_transcript(tmp_path, model, 46_000, nudge.BOUNDARY_TOTAL))
     assert f"--successor claude/{spec} --thinking high" in out
     assert f"the quota guard says {level}" in out
 
@@ -492,3 +497,23 @@ def test_sidechain_and_synthetic_records_do_not_decide_the_model(tmp_path):
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
     assert nudge._last_assistant_model(path) == "claude-opus-5-5"
     assert nudge._last_assistant_model(tmp_path / "missing.jsonl") is None
+
+
+@pytest.mark.parametrize("level, model", [
+    ("tight", "claude-sonnet-5-5"), ("tight", "claude-sonnet-5-5[1m]"),
+    ("critical", "claude-opus-5-5"), ("critical", "claude-opus-5-5[1m]"),
+    ("critical", "claude-sonnet-5-5"),
+])
+def test_a_session_already_on_the_target_gets_plain_new_not_a_same_model_successor(hook, tmp_path, monkeypatch, level, model):
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
+    _guard(tmp_path, level)
+    out, _ = hook("s-same-" + level + model, _model_transcript(tmp_path, model, 46_000, nudge.BOUNDARY_TOTAL))
+    assert "--successor" not in out
+    assert 'self-slash "/new" and queues /baton' in out
+    assert nudge._successor_target(model, level) is None
+
+
+@pytest.mark.parametrize("model", ["claude-fable-5-1[1m]", "claude-fable-5-2", "claude-fable-6"])
+def test_l5_any_fable_id_with_or_without_a_suffix_is_detected(model):
+    assert nudge._successor_target(model, "") == (nudge.SUCCESSOR_OPUS, "this session runs on Fable")
+    assert nudge._successor_target("claude-opus-5-5[1m]", "") is None

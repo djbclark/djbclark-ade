@@ -220,15 +220,24 @@ def _guard_level():
 def _successor_target(model, guard_level):
     """(provider/model spec, why) when this session should hand off to another model, else None.
 
-    Fable, or a quota guard saying tight/critical, means Opus 5.5; Sonnet 5.5 when the guard
-    says tight (the handoff skill's Step 9 uses the same rule)."""
-    if guard_level in ("tight", "critical"):
-        why = f"the quota guard says {guard_level}"
-    elif model == FABLE_MODEL:
-        why = "this session runs on Fable"
-    else:
-        return None
-    return (SUCCESSOR_SONNET if guard_level == "tight" else SUCCESSOR_OPUS), why
+    Fable (any claude-fable-* id, a "[1m]" style suffix ignored), or a quota guard saying
+    tight/critical, means Opus 5.5; Sonnet 5.5 when the guard says tight (the handoff skill's
+    Step 9 uses the same rule).  Never a same-model successor: a session already on the target
+    (Sonnet under tight, Opus under critical) gets None, i.e. a plain /new, and a critical guard
+    never moves a Sonnet session up to Opus (adversary 2026-10-23, observation 8)."""
+    base = (model or "").split("[", 1)[0]
+    fable = base.startswith("claude-fable")
+    if guard_level == "tight":
+        if base.startswith("claude-sonnet"):
+            return None
+        return SUCCESSOR_SONNET, "the quota guard says tight"
+    if guard_level == "critical":
+        if base.startswith(("claude-opus", "claude-sonnet")):
+            return None
+        return SUCCESSOR_OPUS, "the quota guard says critical"
+    if fable:
+        return SUCCESSOR_OPUS, "this session runs on Fable"
+    return None
 
 
 def _first_context_tokens(transcript_path):
