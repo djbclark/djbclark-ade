@@ -254,6 +254,54 @@ to this same agent and then exactly one `/baton` into the fresh session; on herd
 `/new` and then `/baton` (`self-slash` queues the `/baton` itself, `--then`, so never type or queue
 one yourself). The fresh session resumes from the Tier 1 pointer Step 7 just wrote.
 
+**Successor on another model (Paseo only; djbclark, 2026-10-23: a Fable lead burned ~30% of a week's
+Claude quota, so lead sessions run on Opus 5.5 high, Sonnet 5.5 high when pipeline-driving).** Use this
+form **instead of** `self-slash "/new"` when (a) this session's model is Fable (any `claude-fable-*`,
+`[1m]` suffix or not; check the model line in your own context, or `paseo agent inspect <your id>`
+shows `Model`), (b) `~/.local/state/ade/quota-guard.json` exists and its `level` is `tight` or `critical`
+(read it with `.get`; a missing or unreadable file means no), or (c) the operator asked for a model
+change. **Never a same-model or upward successor:** a guard moves a session only down, from a model
+known to be above the target (`tight`: Fable or Opus becomes Sonnet; `critical`: Fable becomes Opus).
+If the guard says `tight` and this session runs on Sonnet or Haiku, or `critical` and it runs on Opus,
+Sonnet or Haiku, or you cannot tell which model you run, run plain `self-slash "/new"` instead of the
+command below:
+
+```bash
+~/src/djbclark-ade/bin/self-slash --finish --successor claude/claude-opus-5-5 --thinking high
+```
+
+Use `claude/claude-sonnet-5-5` when the guard says `tight`, or when the operator asked for Sonnet or for
+pipeline-driving. `--mode` and `--title` default to this agent's mode and "<old name> → <model>". Run it
+**once** and end the turn, as above. After the turn it waits for this agent to be idle, starts a NEW
+top-level agent in the same workspace (`paseo run "/baton" ...`), checks that it is top-level and runs
+the model asked, and only then archives this agent (never `--force`). The successor's first prompt is
+`/baton`, so it resumes from the Tier 1 pointer Step 7 just wrote: Step 7 must be done first. **The
+pre-handoff transcript survives only in the handoff document and the archived agent's log** (Archived
+agents in the Paseo UI); put anything the operator must read there and in the hermes-ping. On
+herdr and Orca there is no successor form (exit 2): write the handoff, then tell the operator to
+relaunch `claude --model <m>` in the pane. The waiter runs detached, so you never see its exit
+code: if the successor does not start or is a subagent (exit 11) it archives nothing and logs
+`successor: ...` to `~/.local/state/self-slash.log`; this session just stays idle and usable (a
+successor that was created is left running, not stopped), so when the operator writes again, read the
+log first. "several workspaces share this cwd" needs `SELF_SLASH_WORKSPACE=<id>` (`paseo workspace ls`).
+The waiter polls the successor for up to 20 s and archives this agent only if it has a new id, is
+top-level, runs the model asked and is idle, running or initializing.
+
+**Workspaces (djbclark, 2026-10-23).** The successor is a top-level agent in an EXISTING workspace
+(`paseo run --workspace <id>`, this agent's by default, `--workspace ID` for another), never a new
+workspace or window (`--new-workspace`) unless the operator asks. Keep an explicit `--title` short: the
+sidebar shows only its first words (the default is the old name cut to 24 characters plus
+`opus-5-5`). A Paseo workspace name ends in `-pw` (herdr tabs end `-t`, panes `-p`); `self-slash`
+creates and renames none, so name any workspace you make by hand that way. After the old agent is
+archived, `self-slash` also archives its workspace, but only when that is PROVEN no longer needed
+(`paseo workspace archive` archives every agent in it, kills its terminals and deletes a Paseo-owned
+worktree): it must be a different workspace from the successor's, found by exactly one cwd match (an
+override or a tie-break may place the successor but is never archived), `local` isolation (never a
+worktree: archive that yourself), a cwd that neither equals nor contains the successor's, no terminals
+(`paseo terminal ls --workspace <id>`) and no other agent in it. Otherwise it keeps the workspace and
+logs why (the usual case is the same workspace: archiving it would take the successor along). With
+`--workspace ID` the successor runs in that workspace's own cwd. `--keep-workspace` skips the close.
+
 **Top-level session only.** A sub-agent (Agent tool, `/bigteam`, an `acp-dispatch` or `acp-run` slice)
 shares or inherits the parent's agent id, so a `/new` from it would clear the PARENT's session
 (2026-10-20; `acp-run` now scrubs the id and `self-slash` exits 9 when `ACP_RUN_AGENT=1`, but an

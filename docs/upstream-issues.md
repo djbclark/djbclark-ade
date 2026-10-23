@@ -1136,6 +1136,67 @@ getpaseo/paseo (#7145 and #6257 are open but about other packages' type imports)
 
 **Status:** filed 2026-10-19: https://github.com/Daaaaave/paseo-telegram/issues/1
 
+## 17. Paseo — CLI: change an existing agent's model (`paseo agent model <id> <provider/model>`) (draft, not filed, 2026-10-23)
+
+**Repo:** getpaseo/paseo, Paseo 0.12.0 (`/Applications/Paseo.app`, bundle read with `rg -a`; no live call made).
+
+### What happens
+
+The daemon can switch a running agent's model (issues #1735, #5279 and #4725 describe switching it mid-session
+from the UI), but no CLI command reaches it. The wiring is all there:
+
+1. WebSocket request `set_agent_model_request {agentId, modelId: string | null, requestId}`
+   (`SetAgentModelRequestMessageSchema`), answered by `set_agent_model_response`;
+2. the daemon client method `setAgentModel(agentId, modelId)`;
+3. `agentConfigSession.handleSetAgentModelRequest` calling `operations.setModel(agentId, modelId)`, which
+   calls the provider session's `setModel` (for Claude, the SDK control request `set_model`), then updates
+   `agent.config.model` and `runtimeInfo.model` and persists.
+
+The CLI has the same shape for mode and thinking and nothing for model: `paseo agent mode <id> [mode]` calls
+`client.setAgentMode`; `paseo agent update <id>` takes `--name`, `--thinking <id>` and `--label`, not `--model`;
+`paseo agent send --provider/--model` and `paseo schedule update --model` describe a *new-agent target*, not an
+existing agent. `paseo run` always creates a new agent.
+
+Use case (djbclark's ade, 2026-10-23): an orchestrating session on an expensive model (Fable) must downshift to
+Opus 5.5 high at a handoff boundary **without losing its session**: its Paseo agent id, name, labels,
+subagent links and timeline. Today the only CLI route is a new top-level agent plus an archive of the old
+one (`paseo run ... --workspace <id>` run with `PASEO_AGENT_ID` unset, then `paseo agent archive`), which
+drops the agent identity and its subagent children.
+
+### Request
+
+1. `paseo agent model <id> [model]` (and `--list`, like `agent mode --list`, from `paseo provider models <provider>`
+   filtered to the agent's provider), calling `client.setAgentModel`; `provider/model` accepted when the provider
+   equals the agent's (a cross-provider switch is refused with a clear error, as the daemon's `setModel` is per
+   session); or, smaller, `paseo agent update <id> --model <id>`, beside the existing `--thinking`.
+2. Related, same area: `paseo agent inspect` omits the workspace id (#7592), which `paseo run --workspace` needs from
+   inside an agent; and `paseo run` passes the calling agent's id to the daemon whenever `PASEO_AGENT_ID` is set,
+   even with `--workspace`, so the new agent is a subagent (the caller has to `env -u PASEO_AGENT_ID`).
+
+### Searched first
+
+`gh issue list --repo getpaseo/paseo --state all --limit 50 --search` for "model", "switch model", "change model" and
+"set model" (4 searches, 125 distinct issues, 2026-10-23), then "agent model", "cli model" and "paseo agent update":
+no issue asks for a CLI to change an existing agent's model. Related, none a duplicate: #5561 (a provider-side model
+switch is lost on reload: `config.model` stays at the creation-time value), #1735 and #5279 (thinking options and
+features stale after a mid-session model switch in the UI), #4725 (closed: resuming a Codex session keeps the
+previous model), #7053 and #7139 (an ACP agent stays on the provider default when the model cannot be applied),
+#7592 (inspect omits the workspace id), #5705 (daemon-spawned Claude agents run the SDK-bundled Claude Code 2.1.258,
+so `claude-opus-5-5` fails with a 400 version gate: relevant to anyone downshifting to Opus 5.5 through a new agent).
+
+### Effort estimates (2026-10-23)
+
+1. **`paseo agent model` in Paseo**: about 2 to 3 hours for someone who knows the repo, 4 to 6 for a first
+   contribution. A new `packages/cli/src/commands/agent/model.ts` is a copy of `mode.ts` (~70 lines: fetch the
+   agent, check the provider, `setAgentModel`, a result schema, the `--list` branch), a two-line registration in
+   `agent/index.ts`, a CLI test through the existing isolated-daemon harness (set the model, `inspect` shows it,
+   unknown model and cross-provider errors), and CLI docs. No daemon, protocol or UI change: the RPC exists. The
+   open question is whether `setModel` on a *running* turn should be refused or queued (the UI picker's current
+   behaviour decides it).
+2. **The ade-side workaround** (`bin/self-slash --finish --successor`, handoff Step 9, the context hook, 24 tests):
+   built in about 15 minutes of wall-clock agent time on 2026-10-23, research of the Paseo CLI source included. It exists only
+   because the CLI lacks this command, and it still cannot keep the agent id, labels or subagent links.
+
 ## 10. Paseo — the start-up skill sync writes through a symlinked skill directory (filed 2026-10-23)
 
 **Filed:** https://github.com/getpaseo/paseo/issues/7700 (searched first: nothing on this; #4823 and #5440 are
