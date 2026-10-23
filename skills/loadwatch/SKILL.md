@@ -42,9 +42,16 @@ Chain: `load-spike-monitor-t` (`/baton load-spike-monitor-t`). It is a side-work
 3. `test` exits 0 only when the channel reports the line was delivered or queued. If it exits 1, or the
    line never shows up, the watcher cannot be reached. Fix the channel (relay.py's refusal reasons, or
    `paseo ls`) before claiming the role. Never leave a watcher registered that cannot be reached.
-4. Record the role in the chain's Tier 1 log (`session-handoff` writer protocol, chain
-   `load-spike-monitor-t`, every workspace `"side": true`) with this session's ids, so the next session
-   knows who holds it.
+4. **Record the role in the chain's Tier 1 log in the same turn, unasked** (djbclark, 2026-10-23: "update the
+   skill to do that automatically"; never offer it as a question). Read
+   `~/.local/state/handoffs/chains/load-spike-monitor-t/SESSION_LOG.md` first (a write replaces Current State
+   and `workspaces` wholesale, so carry over any open blocker), then pipe a JSON payload to
+   `~/.claude/hooks/handoff-tools/.venv/bin/python ~/.claude/hooks/handoff-tools/session_log.py write
+   --state-root ~/.local/state/handoffs` (stdin from a file, `> out.log 2>&1; echo "rc=$?" > out.rc`). Payload:
+   chain `["load-spike-monitor-t"]`, `active_work` naming this session's ids and the replaced watcher,
+   `next_steps` with the `ack` and `watcher clear <target>` commands, and
+   `workspaces: [{"repo":"djbclark-ade","task":"main","dir":"/Users/djbclark/src/djbclark-ade","side":true}]`.
+   Update it again when the watcher is cleared or an incident is left open.
 
 ## 2. Is the load abnormal?
 
