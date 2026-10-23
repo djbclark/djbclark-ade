@@ -130,6 +130,13 @@ def hidden_values(raw_p, ck):
     return (ck, raw_p, ck, ck, ck, ck, raw_p, ck, ck, ck, ck, raw_p, ck, ck, ck, ck, ck, ck)
 
 
+def hidden_fmt(sub=""):
+    """HIDDEN_FMT for a path `sub` below the checkout (`/<sub>` in the submodule row, Codex pass 36: an
+    assume-unchanged or skip-worktree edit inside a submodule is in no status, diff or `ls-files` output, so the
+    bundle, patches and untracked archive all miss it); the same values as HIDDEN_FMT."""
+    return HIDDEN_FMT.replace("<DEST>/{}", "<DEST>/{}" + sub).replace("-C {} ", "-C {}" + sub + " ")
+
+
 # a commit reachable from a reflog alone (a reset, amend or rebase left it): no ref holds it, no bundle above
 # carries it, and `git reflog` recovers it only until expiry (Codex pass 32 on PR 27). Its objects go into one
 # pack: `rev-list --objects` lists everything the reflogs reach that no ref does (a superset of the count: stash
@@ -704,6 +711,9 @@ def render(d):
                        # a bundle holds committed objects only: the modified, staged and untracked files need the
                        # same patches and archive as an ordinary checkout (Codex pass 26 on PR 27)
                        + ", " + shcode(modified_fmt("/<sub>"), *modified_values(raw_p, ck))
+                       # and the index-hidden archive: an assume-unchanged or skip-worktree edit in a submodule is in
+                       # none of the above (Codex pass 36)
+                       + ", " + shcode(hidden_fmt("/<sub>"), *hidden_values(raw_p, ck))
                        + " and " + shcode("git -C {}/<sub> ls-files -z --others --exclude-standard > <DEST>/{}/<sub>/untracked.list "
                                           "&& \"$GTAR\" -C {}/<sub> --null -T <DEST>/{}/<sub>/untracked.list -cf <DEST>/{}/<sub>/untracked.tar",
                                           raw_p, ck, raw_p, ck, ck)

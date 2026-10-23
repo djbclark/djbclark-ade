@@ -2533,6 +2533,29 @@ def test_an_unreachable_origin_checkout_always_gets_a_capture_row_even_with_zero
     assert "A checkout flagged `origin unreachable` is always listed, whatever its counts" in section_3_2(text)
 
 
+def test_the_submodule_row_archives_an_index_hidden_edit(tmp_path):
+    """Codex pass 36 on PR 27, P1: inside a submodule an assume-unchanged edit is in no status, diff, `ls-files
+    --modified` or `--others` output, so the submodule row's bundle, patches and untracked archive all missed it."""
+    import tarfile
+    doc = load_doc()
+    sup = tmp_path / "sup"
+    sub = sup / "sub"
+    sub.mkdir(parents=True)
+    git(sub, "init", "-q")
+    (sub / "a.txt").write_text("committed\n")
+    git(sub, "add", "a.txt")
+    git(sub, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "one")
+    (sub / "a.txt").write_text("hidden edit\n")
+    git(sub, "update-index", "--assume-unchanged", "a.txt")
+    assert git(sub, "status", "--porcelain") == "" and git(sub, "ls-files", "--modified") == ""
+    prefix = "GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); "
+    cmd = prefix + doc.hidden_fmt("/sub").format(*map(doc.shquote, doc.hidden_values(str(sup), "c"))).replace("<DEST>", str(tmp_path / "dest"))
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    tar = tarfile.open(tmp_path / "dest" / "c" / "sub" / "hidden.tar")
+    assert "a.txt" in tar.getnames() and tar.extractfile("a.txt").read() == b"hidden edit\n", tar.getnames()
+
+
 def test_a_checkout_with_submodules_always_gets_a_capture_row():
     """Codex pass 18 on PR 27, P1: every count is 0 for a superproject whose only work is inside a submodule;
     the plan listed nothing and discovery never reaches the submodule."""
@@ -2552,6 +2575,10 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
     assert "git -C /p/sup/<sub> diff --no-ext-diff --no-textconv --no-color --binary --cached > <DEST>/checkouts/abs/p/sup/<sub>/staged.patch" in row
     assert "-C /p/sup/<sub> --null --no-recursion --ignore-failed-read -T <DEST>/checkouts/abs/p/sup/<sub>/modified.list" in row  # Codex pass 30
     assert '"$(git -C /p/sup/<sub> rev-parse --absolute-git-dir)/index" <DEST>/checkouts/abs/p/sup/<sub>/index' in row
+    # Codex pass 36: an assume-unchanged or skip-worktree edit inside the submodule needs the index-hidden archive too
+    assert "git -C /p/sup/<sub> ls-files -z -v > <DEST>/checkouts/abs/p/sup/<sub>/hidden.raw" in row
+    assert "-C /p/sup/<sub> --null --no-recursion --ignore-failed-read -T <DEST>/checkouts/abs/p/sup/<sub>/hidden.list" in row
+    assert mod.hidden_fmt("/<sub>").count("{}") == len(mod.hidden_values("/p", "c")) == mod.HIDDEN_FMT.count("{}")
     assert ("git -C /p/sup/<sub> ls-files -z --others --exclude-standard > <DEST>/checkouts/abs/p/sup/<sub>/untracked.list "
             "&& \"$GTAR\" -C /p/sup/<sub> --null -T <DEST>/checkouts/abs/p/sup/<sub>/untracked.list -cf <DEST>/checkouts/abs/p/sup/<sub>/untracked.tar") in row
     assert "the scanner skips absorbed submodules" in row
