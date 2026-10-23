@@ -339,11 +339,11 @@ AGENTS = {
     "omp": (["omp", "acp"], None),
     # goose (Homebrew block-goose-cli 1.55.0, `goose acp`, 2026-10-23) through
     # ~/.local/bin/goose-scout: Bedrock Llama 4 Scout (us.meta.llama4-scout-17b-instruct-v1:0,
-    # us-east-1), BEDROCK_DISABLE_STREAMING=true (Bedrock rejects tool use in
-    # ConverseStream for Scout), AWS_BEARER_TOKEN_BEDROCK injected by sudo-secretspec.
-    # GOOSE_MODE=auto is goose's yolo (no approval prompts); also in
-    # ~/.config/goose/config.yaml and the ~/.bashrc goose() function.
-    "goose": (["env", "GOOSE_MODE=auto", os.path.expanduser("~/.local/bin/goose-scout"), "acp"], None),
+    # us-east-1) via goose-scout's private LiteLLM proxy (127.0.0.1:4012), whose callbacks curb
+    # Scout's tool over-use (echo-as-reply, repeated identical calls). AWS_BEARER_TOKEN_BEDROCK
+    # is injected into the proxy by sudo-secretspec. Mode comes from YOLO_SET / DENY_SET (and
+    # GOOSE_MODE: auto in ~/.config/goose/config.yaml); no GOOSE_MODE in the launch env.
+    "goose": ([os.path.expanduser("~/.local/bin/goose-scout"), "acp"], None),
     # zcode has no ACP mode of its own; william0wang/zcode-acp (npm -g
     # zcode-acp-server) wraps `zcode app-server --stdio`. Model switches work when
     # the server gets ZCODE_BIN=<pkg>/vendor/zcode.cjs (zcode_bin(), set in run()); until
@@ -570,7 +570,7 @@ DENY_SET = {
     "claude": {"mode": "default"},
     "zcode": {"mode": "plan"},
     "agy": {"mode": "default"},
-    "goose": {"mode": "chat"},  # goose acp 1.55.0: "Chat only, no tool calls"
+    "goose": {"mode": "approve"},  # goose acp 1.55.0: "chat" still ran tools over ACP (2026-10-23); approve asks, acp-run denies
 }
 # cursor-agent acp decides permissions from ~/.cursor/cli-config.json
 # `approvalMode` ("unrestricted" here: the operator's yolo default) and the
