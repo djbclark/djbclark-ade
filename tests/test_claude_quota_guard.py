@@ -984,3 +984,108 @@ def test_p2_a_windowless_live_row_with_no_snapshot_has_unknown_fields_not_zeros(
     assert rig.guard().returncode == 0
     st = rig.state_json()
     assert st["weekly_left"] == 50 and st["five_hour_left"] is None and st["resets_at"] is None
+
+
+# -- fix 5 (Codex pass 3 on PR 29, 2026-10-23) --------------------------------------------------
+
+def _good_state(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=25))
+    assert rig.guard().returncode == 2
+    return rig.state.read_bytes()
+
+
+@pytest.mark.parametrize("bad_windows", ["oops", {"a": 1}, None, 5, ["x"], [1, {"label": "w"}]])
+@pytest.mark.parametrize("where", ["available", "excluded", "accounts"])
+def test_q1_a_present_but_malformed_windows_is_exit_10_state_untouched(rig, bad_windows, where):
+    before = _good_state(rig)
+    row = {"provider": "claude", "usable_now": True, "headroom_percent": 80, "windows": bad_windows}
+    if where == "available":
+        rig.set_aiuse({"available": [row]})
+    elif where == "excluded":
+        rig.set_aiuse(aiuse_fixture(payload_extra={"excluded": [row]}))
+    else:
+        rig.set_aiuse(aiuse_fixture())
+        rig.set_alerts([], accounts=[row])
+    r = rig.guard()
+    assert r.returncode == 10, r.stderr
+    assert "malformed `windows`" in r.stderr and len(r.stderr.strip().splitlines()) == 1
+    assert rig.state.read_bytes() == before
+
+
+@pytest.mark.parametrize("omitted", [True, False])
+def test_q1_an_omitted_or_empty_windows_key_is_still_the_windowless_summary(rig, omitted):
+    row = {"provider": "claude", "usable_now": True, "headroom_percent": 50}
+    if not omitted:
+        row["windows"] = []
+    rig.set_aiuse({"available": [row]})
+    assert rig.guard().returncode == 0 and rig.state_json()["source"] == "available"
+
+
+def _fable_snapshot_account(**stamp):
+    account = snapshot_account(weekly=80, fable=60)
+    account.update(stamp)
+    return account
+
+
+@pytest.mark.parametrize("stamp", [{"age_seconds": 5 * 3600},
+                                   {"collected_at": (NOW - timedelta(hours=5)).isoformat()}])
+def test_q2_the_supplemented_snapshot_fable_row_ages_the_decision(rig, stamp):
+    rig.set_aiuse(aiuse_fixture(weekly=80, with_fable_pool=False, payload_extra={"age_seconds": 60}))
+    rig.set_alerts([], age_s=60, accounts=[_fable_snapshot_account(**stamp)])   # fresh mtime
+    assert rig.guard().returncode == 1                                          # stale -> watch
+    st = rig.state_json()
+    assert st["stale"] is True and st["data_age_s"] == 5 * 3600 and st["fable_left"] == 60
+    assert rig.pings() == [stale_ping_text("5h00m")]
+
+
+def test_q2_a_snapshot_row_that_supplied_nothing_does_not_age_the_decision(rig):
+    """No Fable window in the snapshot account: nothing was taken from it, so its age is irrelevant."""
+    account = snapshot_account(weekly=80)
+    account["age_seconds"] = 5 * 3600
+    rig.set_aiuse(aiuse_fixture(weekly=80, with_fable_pool=False))
+    rig.set_alerts([], age_s=60, accounts=[account])
+    assert rig.guard().returncode == 0 and rig.state_json()["stale"] is False
+
+
+def test_q2_a_windowless_live_row_ages_with_the_snapshot_rows_it_displays(rig):
+    rig.set_aiuse(live_row(50))
+    rig.set_alerts([], age_s=60, accounts=[_fable_snapshot_account(age_seconds=5 * 3600)])
+    assert rig.guard().returncode == 1 and rig.state_json()["stale"] is True
+
+
+@pytest.mark.parametrize("content", ["{not json", "", "[1, 2]", '"text"', '{"accounts": [}'])
+def test_q3_a_snapshot_that_exists_but_does_not_parse_is_exit_10_state_untouched(rig, content):
+    before = _good_state(rig)
+    rig.set_alerts([])
+    (rig.snaps / "2026-10-23T115900.000000Z.json").write_text(content)
+    r = rig.guard()
+    assert r.returncode == 10, r.stderr
+    assert len(r.stderr.strip().splitlines()) == 1 and "2026-10-23T115900.000000Z.json" in r.stderr
+    assert rig.state.read_bytes() == before
+
+
+def test_q3_a_missing_directory_or_an_empty_one_is_still_no_snapshot(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=80))
+    assert rig.guard(CLAUDE_QUOTA_GUARD_SNAPSHOTS=str(rig.tmp / "nope")).returncode == 0
+    for f in rig.snaps.glob("*"):
+        f.unlink()
+    assert rig.guard().returncode == 0 and rig.state_json()["snapshot_age_s"] is None
+
+
+def test_q3_the_newest_snapshot_decides_an_older_corrupt_one_is_ignored(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=80))
+    old = rig.snaps / "2026-10-23T000000.000000Z.json"
+    old.write_text("{not json")
+    os.utime(old, (NOW.timestamp() - 7200, NOW.timestamp() - 7200))
+    rig.set_alerts([], age_s=60)
+    assert rig.guard().returncode == 0
+
+
+def test_q3_exit_3_stays_critical_when_the_snapshot_is_corrupt(rig):
+    """The live verdict does not need the snapshot, so a broken one must not turn it into exit 10."""
+    rig.set_aiuse("nothing usable\n", rc=3)
+    rig.set_alerts([])
+    (rig.snaps / "2026-10-23T115900.000000Z.json").write_text("{not json")
+    r = rig.guard()
+    assert r.returncode == 3 and "ignored: aiuse exit 3 is critical regardless" in r.stderr
+    assert rig.state_json()["level"] == "critical" and len(rig.pings()) == 1

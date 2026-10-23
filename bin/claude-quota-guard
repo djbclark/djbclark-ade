@@ -33,10 +33,13 @@ for a reason the snapshot predates). aiuse also drops the Fable pool when the Fa
 exhausted: the Fable window is then read from the snapshot (exhausted = 0% left = `watch`).
 A live `available` Claude row without `windows[]` is judged by its own `headroom_percent` /
 `binding_window` / `usable_now`. aiuse exit 3 is `critical` even when the snapshot looks healthy.
-Exit 10 when Claude appears nowhere, on any malformed aiuse or snapshot data, or when another
+Exit 10 when Claude appears nowhere, on any malformed aiuse or snapshot data (a present `windows`
+that is not a list of objects; a newest snapshot file that does not parse or is not an object; a
+missing snapshot directory or no files is "no snapshot"), or when another
 check holds <state>.lock for about 5 s. One `hermes-ping` per level per reset period (the mark
 survives level drops; a new weekly `resets_at` clears it). Data older than 3 h (the oldest of
-the payload's `age_seconds`, every judged row's own `age_seconds` / `collected_at`, and the
+the payload's `age_seconds`, every row that fed the decision (judged rows and any snapshot rows
+whose Fable or display windows were used) by `age_seconds` / `collected_at`, and the
 snapshot mtime: a dead collector) sets `stale: true` ("(stale)" in the human line), raises the
 level to at least `watch` with the advice "aiuse data <age> old: collector down? run `aiuse
 --live --json`", suppresses level pings, and sends ONE ping per stale episode (mark
@@ -272,16 +275,24 @@ def _lowest(windows: list[dict], kind: str) -> dict | None:
 # -- reading the snapshot --------------------------------------------------
 
 def read_snapshot() -> tuple[dict | None, float | None]:
-    """The newest aiuse snapshot (parsed) and its age in seconds; (None, None) if unreadable."""
+    """The newest aiuse snapshot (parsed) and its age in seconds. (None, None) when there is no
+    snapshot (no directory, no files); a newest file that cannot be read, is not JSON or is not an
+    object raises Unreadable naming it: a half-written or corrupt snapshot must not read as
+    "no alerts, no Fable fallback"."""
     d = _path("CLAUDE_QUOTA_GUARD_SNAPSHOTS", HOME / ".cache/aiuse/snapshots")
     try:
         files = [f for f in d.glob("*.json") if f.is_file()]
         newest = max(files, key=lambda f: f.stat().st_mtime)
+    except (OSError, ValueError):               # no directory / no files (max of nothing)
+        return None, None
+    try:
         age = max(0.0, now().timestamp() - newest.stat().st_mtime)
         snap = json.loads(newest.read_text())
-    except (OSError, ValueError):
-        return None, None
-    return (snap if isinstance(snap, dict) else None), age
+    except (OSError, ValueError) as e:
+        raise Unreadable(f"snapshot {newest.name} is unreadable or not JSON ({type(e).__name__})")
+    if not isinstance(snap, dict):
+        raise Unreadable(f"snapshot {newest.name} is not a JSON object")
+    return snap, age
 
 
 def snapshot_alerts(snap: dict | None, age: float | None, t: dict) -> list[dict]:
@@ -353,27 +364,37 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
     matching weekly window has `pace_early: true` (early in a window the projection swings
     wildly: 293 of 1,146 such alerts in 2026 snapshots fired at 60% or more left)."""
     rows, judge_usable = _rows(data, "available"), True
-    windows, source = claude_windows(rows), "available"
     snap_rows = _rows(snap, "accounts")
+    excluded_rows = _rows(data, "excluded")       # an operator exclusion, top level of the payload
+    # A present `windows` that is not a list of objects is malformed output (an omitted key is a
+    # valid windowless summary): fail closed rather than read it as "no windows".
+    for row in rows + excluded_rows + snap_rows:
+        shape = row.get("windows", [])
+        if not isinstance(shape, list) or not all(isinstance(w, dict) for w in shape):
+            raise Unreadable(f"malformed `windows` in a Claude row ({type(shape).__name__}): not a list of objects")
+    windows, source = claude_windows(rows), "available"
     display: list[dict] = []
+    fed: list[dict] = []     # snapshot rows whose windows were used besides the judged rows: they age too
     live_only = False
     if not windows and any(_has_summary(r) for r in rows):
         # A valid minimal live row: no windows[], but usable_now / headroom_percent / binding_window.
         live_only = True
         display = claude_windows(snap_rows)
+        fed = snap_rows if display else []
         windows = [w for w in (_summary_window(r, display) for r in rows) if w]
         if not any(w["kind"] == "fable" for w in windows):
             windows += [w for w in display if w["kind"] == "fable"]
     elif not windows:
-        excluded = _rows(data, "excluded")        # an operator exclusion, top level of the payload
-        if claude_windows(excluded):
-            rows, judge_usable, source = excluded, False, "excluded"
+        if claude_windows(excluded_rows):
+            rows, judge_usable, source = excluded_rows, False, "excluded"
         elif claude_windows(snap_rows):
             rows, source = snap_rows, "snapshot"
         windows = claude_windows(rows)
     elif not any(w["kind"] == "fable" for w in windows):
         # aiuse drops the Fable pool (not the default one) when the Fable cap is exhausted.
-        windows += [w for w in claude_windows(snap_rows) if w["kind"] == "fable"]
+        extra = [w for w in claude_windows(snap_rows) if w["kind"] == "fable"]
+        windows += extra
+        fed = snap_rows if extra else []
     weekly, five, fable = (_lowest(windows, k) for k in ("weekly", "five_hour", "fable"))
     level = "ok"
 
@@ -424,7 +445,7 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
 
     # Window the level answers to: the lowest remaining among weekly and 5-hour.
     candidates = [w for w in (weekly, five) if w]
-    rows_age = max((a for a in (_row_age(r, now_dt) for r in rows) if a is not None), default=None)
+    rows_age = max((a for a in (_row_age(r, now_dt) for r in rows + fed) if a is not None), default=None)
     binding = min(candidates, key=lambda w: w["left"]) if candidates else None
     resets_at = binding["resets_at"] if binding else None
     if not windows and not live_only:
@@ -567,7 +588,14 @@ def _locked(t: dict):
 def _check_locked(t: dict) -> dict:
     try:
         rc, data = read_aiuse()
-        snap, snap_age = read_snapshot()
+        try:
+            snap, snap_age = read_snapshot()
+        except Unreadable as e:
+            if rc != AIUSE_NOTHING_USABLE:
+                raise
+            # exit 3 is critical whatever the snapshot says, so a broken snapshot cannot change it
+            print(f"claude-quota-guard: {e}; ignored: aiuse exit 3 is critical regardless", file=sys.stderr)
+            snap, snap_age = None, None
         d = decide(rc, data, snap, snapshot_alerts(snap, snap_age, t), t, now())
     except (Unreadable, ConfigError):
         raise
