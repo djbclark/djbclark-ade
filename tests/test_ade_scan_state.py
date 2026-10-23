@@ -1214,7 +1214,8 @@ def unmark(span: str) -> str:
 
 
 PLAN_PREFIX = load_doc().PLAN_PREAMBLE + "; "
-SHELLS = [s for s in ("bash", "zsh", "sh") if shutil.which(s)]
+# the plan is pasted into bash or zsh: its preamble uses `<<<`, which dash (Ubuntu's `sh`) rejects (Codex pass 47 on PR 27, P1)
+SHELLS = [s for s in ("bash", "zsh") if shutil.which(s)]
 
 
 def plan_commands(row: str) -> list[str]:
@@ -2854,7 +2855,7 @@ def test_a_gitfile_with_a_second_line_is_refused_by_the_gitdir_capture(tmp_path)
     cmd = prefix + mod.GITDIR_FMT.format(*map(mod.shquote, mod.gitdir_values(str(wt), ck))).replace("<DEST>", str(tmp_path / "dest"))
     one_line = (wt / ".git").read_bytes()
     (wt / ".git").write_bytes(one_line.rstrip(b"\n") + b"\n/../../../../decoy\n")
-    for shell in ("bash", "zsh", "sh"):
+    for shell in ("bash", "zsh"):  # the preamble is bash/zsh (`<<<`)
         if shutil.which(shell) is None:
             continue
         shutil.rmtree(tmp_path / "dest", ignore_errors=True)
@@ -2891,7 +2892,7 @@ def test_a_symlinked_git_entry_row_archives_the_links_target(tmp_path):
     ck = doc.checkout_dir(str(real))
     prefix = PLAN_PREFIX
     cmd = prefix + doc.SYMLINK_GITDIR_FMT.format(*map(doc.shquote, (str(real), f"{ck}/gitdir.tar", f"{ck}/commondir.tar"))).replace("<DEST>", str(tmp_path / "dest"))
-    for shell in ("bash", "zsh", "sh"):
+    for shell in ("bash", "zsh"):  # the preamble is bash/zsh (`<<<`)
         if shutil.which(shell) is None:
             continue
         shutil.rmtree(tmp_path / "dest", ignore_errors=True)
@@ -3713,7 +3714,8 @@ def test_the_preamble_clears_every_git_variable_without_a_pipeline_and_survives_
             continue  # `<<<` is bash and zsh; the plan is pasted into one of those
         env = {**os.environ, "GIT_DIR": "/x", "GIT_INDEX_FILE": "/y", "GIT_CONFIG_COUNT": "1", "GIT_KEY_0": "k", "XYZ": hostile}
         run = subprocess.run([shell, "-c", doc.PLAN_PREAMBLE + probe], capture_output=True, text=True, env=env)
-        assert run.returncode == 0 and run.stderr == "", (shell, run.stderr)
+        # a git older than 2.45 makes the preamble warn, by design (Codex pass 47 on PR 27, P1: Ubuntu's git is 2.43)
+        assert run.returncode == 0 and (run.stderr == "" or (git_version() < (2, 45) and run.stderr.startswith("git older than 2.45"))), (shell, run.stderr)
         assert run.stdout == "unset|unset|unset|unset|/dev/null|1|kept|unset|unset|ok\n", (shell, run.stdout)
         assert not (tmp_path / "PWN").exists()
         # round 50: an `IFS` holding `_` or a letter of a variable name must not split the name `unset` is given
@@ -3771,6 +3773,48 @@ def test_a_commit_only_the_stash_remembers_is_local_work(tmp_path):
     git(work, "stash")
     c = scan_one(mod, roots)
     assert c["stashes"] == 1 and c["local_only_commits"] == 0, c
+
+
+def _stash_on_deleted_branch(work, name):
+    git(work, "switch", "-c", name)
+    (work / f"{name}.txt").write_text(f"ONLY-IN-{name}\n")
+    git(work, "add", f"{name}.txt")
+    git(work, "commit", "-m", name)
+    (work / "a.txt").write_text(f"dirty {name}\n")
+    git(work, "stash")
+    git(work, "switch", "main")
+    git(work, "branch", "-D", name)
+
+
+def test_the_base_of_an_older_stash_entry_is_counted_and_gets_the_reflog_pack(tmp_path):
+    """Adversary round 52 on PR 27, MEDIUM 1: stash@{1}'s base was counted local-only, but the plan's `--all` bundle
+    reaches only stash@{0}'s and no reflog pack row was emitted, so the row claimed work it did not capture."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    _stash_on_deleted_branch(work, "x")
+    _stash_on_deleted_branch(work, "y")
+    c = scan_one(mod, roots)
+    assert c["stashes"] == 2 and c["local_only_commits"] == 2 and c["verdict"] != "clean and pushed", c
+    assert c["reflog_only_commits"] == 1, c  # the older entry's base: no ref holds it, `--all` does not reach it
+    # an ordinary pair of stashes on a pushed base stays free of both counts
+    (tmp_path / "plain").mkdir()
+    roots, work, _ = make_pushed_checkout(tmp_path / "plain")
+    for n in (1, 2):
+        (work / "a.txt").write_text(f"dirty {n}\n")
+        git(work, "stash")
+    c = scan_one(mod, roots)
+    assert c["stashes"] == 2 and c["local_only_commits"] == 0 and c["reflog_only_commits"] == 0, c
+
+
+def test_a_stash_ref_with_an_expired_reflog_is_still_a_stash_with_its_base_counted(tmp_path):
+    """Adversary round 52 on PR 27, MEDIUM 2: `git reflog expire --expire=now --all` leaves `refs/stash` and a
+    zero-byte log; the count saw no entries, so no base, and the whole stash ancestry was excluded."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    _stash_on_deleted_branch(work, "x")
+    git(work, "reflog", "expire", "--expire=now", "--all")
+    c = scan_one(mod, roots)
+    assert c["stashes"] >= 1 and c["local_only_commits"] == 1 and c["verdict"] != "clean and pushed", c
 
 
 def test_a_global_push_rewrite_to_a_helper_gets_no_push_row(tmp_path, monkeypatch):

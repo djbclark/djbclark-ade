@@ -558,8 +558,12 @@ def git(path: Path, *args, timeout=60, network=False, stdin_text=None, errors="r
     if operator_config:
         # the push the plan prints runs in the operator's shell, where their global and system config (a
         # `url.<base>.pushInsteadOf` among it) applies; only read-only config commands may ask for this (Codex pass 46)
-        env.pop("GIT_CONFIG_GLOBAL", None)
-        env.pop("GIT_CONFIG_NOSYSTEM", None)
+        for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"):
+            env.pop(k, None)
+        # and the operator's own config variables, as their shell would have them (adversary round 52 on PR 27, LOW)
+        env.update({k: v for k, v in os.environ.items()
+                    if k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_PARAMETERS",
+                             "GIT_CONFIG_COUNT") or k.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))})
     return run(["git", *GIT_SAFE, "-C", str(path), *args], timeout=timeout, env=env, **kw)
 
 
@@ -823,7 +827,7 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
         # git honours `core.worktree`: the plan's `git -C <checkout>/<sub>` would read whatever directory it names unless
         # it resolves to the submodule's own checkout (Cursor security review on PR 27, MEDIUM)
         checkout = os.path.realpath(path / sub)
-        if any(os.path.realpath(os.path.join(os.fsdecode(target), v)) != checkout for v in worktrees.get(os.fsdecode(target), [])):
+        if any(os.path.realpath(os.path.join(os.fsdecode(target), v)) != checkout for v in worktrees.get(os.fsdecode(target), [])[-1:]):  # git uses the last
             return True, "(core.worktree outside)", []
         subs.append(sub)  # a real checked-out submodule: `.git` names a git dir the walk vetted
     return True, None, subs
@@ -855,7 +859,11 @@ def stash_count(path: Path, common: Path | None) -> int | None:
     incomplete rather than inventing a count (Codex pass 22 on PR 27)."""
     if common:
         try:
-            return len(read_regular_file(common / "logs" / "refs" / "stash", MAX_STASH_LOG_BYTES).splitlines())
+            lines = len(read_regular_file(common / "logs" / "refs" / "stash", MAX_STASH_LOG_BYTES).splitlines())
+            if lines:
+                return lines
+            # an empty reflog (`git reflog expire --expire=now --all` leaves the ref and a zero-byte log) beside a live
+            # `refs/stash` is still a stash: ask the ref (adversary round 52 on PR 27)
         except FileNotFoundError:
             pass
         except (OSError, ValueError):  # a symlink, FIFO or device, or a file past the cap: not a count (Codex pass 46)
@@ -1320,11 +1328,23 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     # reachable from nothing else once its branch is deleted: it counts like any ref, against origin (adversary round
     # 51 on PR 27, MEDIUM; the `--exclude=refs/stash` below leaves out the stash commits, not their ancestry)
     bases: list[str] = []
+    stash_commits: set[str] = set()  # each entry's commit, its index commit and its untracked-files commit: captured by the stash row
     if stashes:
-        rc, out = git(path, "log", "-g", "--format=%P", "refs/stash")
+        rc, out = git(path, "log", "-g", "--format=%H %P", "refs/stash")
         if rc != 0:
             return incomplete_record(path, "log -g refs/stash", rc)
-        bases = [line.split()[0] for line in out.splitlines() if line.split()]
+        for line in out.splitlines():
+            f = line.split()
+            if f:
+                stash_commits.update([f[0], *f[2:4]])
+                bases.extend(f[1:2])
+        # the tip's own base, whatever its reflog says: an expired or absent reflog leaves `refs/stash` with no entries
+        # (adversary round 52 on PR 27, MEDIUM; `rev-parse` exits 1 only for "no such revision")
+        rc, out = git(path, "rev-parse", "--verify", "--quiet", "refs/stash^1")
+        if rc not in (0, 1):
+            return incomplete_record(path, "rev-parse refs/stash^1", rc)
+        bases.extend(out.split())
+        bases = list(dict.fromkeys(bases))  # one rev once: a stash reflog near its cap would overflow argv (round 52 INFO 5)
     local_only: int | None = 0
     local_only_branches: list[dict] = []
     local_only_tags: list[dict] = []
@@ -1404,13 +1424,18 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     # own count and capture: every entry of the stash reflog is excluded with its ancestors. An unborn HEAD is
     # counted too: a branch deleted after `switch --orphan` leaves its commits in the HEAD reflog alone, and the
     # command is well defined in an empty repository (adversary round 38)
-    rc, stash_shas = git(path, "log", "-g", "--format=%H", "refs/stash") if stashes else (0, "")
-    if rc != 0:
-        return incomplete_record(path, "log -g refs/stash", rc)
-    argv = ["rev-list", "--count", "--reflog", "--not", "--all", *stash_shas.split()]
+    argv = ["rev-list", "--reflog", "--not", "--all"]
+    if not stash_commits:
+        argv.insert(1, "--count")
     if live and tips:
         argv += ["--ignore-missing", *tips]
     rc, n = git(path, *argv)
+    if stash_commits:
+        # list, then drop the stash entries' own commits: the stash row captures those, but the commit an older entry
+        # was made on lives in the reflog alone and `--all` in the local-only bundle does not reach it, so it counts
+        # here and gets the reflog pack (adversary round 52 on PR 27, MEDIUM 1)
+        if rc == 0:
+            n = str(len([h for h in n.split() if h not in stash_commits]))
     if rc != 0 or not n.strip().isdigit():
         return incomplete_record(path, "rev-list --count --reflog --not --all", rc)
     reflog_only: int = int(n)
