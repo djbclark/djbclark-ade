@@ -44,6 +44,7 @@ def _append(path, text):
 def hook(monkeypatch, tmp_path, capsys):
     """Run the hook once per call; returns (stdout, pings sent)."""
     monkeypatch.setattr(nudge, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(nudge, "QUOTA_GUARD_PATH", tmp_path / "quota-guard.json")  # absent unless a test writes it
     monkeypatch.delenv("HERDR_ENV", raising=False)
     monkeypatch.delenv("HERDR_PANE_ID", raising=False)
     monkeypatch.delenv("ORCA_TERMINAL_HANDLE", raising=False)
@@ -408,3 +409,130 @@ def test_stale_host_var_alone_means_no_self_slash(hook, tmp_path, monkeypatch, v
     out, _ = hook("s-stale-alone-" + var, _transcript(tmp_path, 46_000, 46_000 + nudge.ASK_GROWTH))
     assert "tell the operator /new is ready" in out
     assert "--finish" not in out
+
+
+# --- successor form (2026-10-23): a Fable session, or a tight quota guard, hands off to Opus/Sonnet ---
+
+def _model_transcript(tmp_path, model, *sizes, name="model-transcript.jsonl"):
+    path = tmp_path / name
+    lines = []
+    for s in sizes:
+        record = json.loads(_usage(s))
+        record["message"]["model"] = model
+        record["message"]["role"] = "assistant"
+        lines.append(json.dumps(record) + "\n")
+    path.write_text("".join(lines))
+    return path
+
+
+def _guard(tmp_path, level):
+    (tmp_path / "quota-guard.json").write_text(json.dumps({"level": level}))
+
+
+_OPUS_FORM = "self-slash --finish --successor claude/claude-opus-5-5 --thinking high"
+
+
+def test_fable_session_on_paseo_names_the_successor_form_in_both_messages(hook, tmp_path, monkeypatch):
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
+    path = _model_transcript(tmp_path, nudge.FABLE_MODEL, 46_000, nudge.BOUNDARY_TOTAL)
+    out, _ = hook("s-fable", path)
+    assert out.count(_OPUS_FORM) == 1 and "At the next task completion" in out  # the boundary message
+    assert 'self-slash "/new"' not in out
+    assert "this session runs on Fable" in out
+    _append(path, _model_transcript(tmp_path, nudge.FABLE_MODEL, 46_000 + nudge.ASK_GROWTH,
+                                    name="x.jsonl").read_text())
+    out, _ = hook("s-fable", path)
+    assert "Context is large" in out and _OPUS_FORM in out  # the ask message
+    assert "archived agent's log" in out
+    assert 'self-slash "/new"' not in out
+    assert "so do not run /new yourself as well" in out
+
+
+def test_other_models_keep_the_new_form(hook, tmp_path, monkeypatch):
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
+    out, _ = hook("s-opus", _model_transcript(tmp_path, "claude-opus-5-5", 46_000, nudge.BOUNDARY_TOTAL))
+    assert "--successor" not in out
+    assert 'self-slash "/new" and queues /baton' in out
+
+
+@pytest.mark.parametrize("level, model, spec", [
+    ("tight", "claude-opus-5-5", "claude-sonnet-5-5"),
+    ("tight", nudge.FABLE_MODEL, "claude-sonnet-5-5"),
+    ("critical", nudge.FABLE_MODEL, "claude-opus-5-5"),
+])
+def test_guard_level_picks_the_successor_even_on_a_non_fable_model(hook, tmp_path, monkeypatch, level, model, spec):
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
+    _guard(tmp_path, level)
+    out, _ = hook("s-guard-" + level + model, _model_transcript(tmp_path, model, 46_000, nudge.BOUNDARY_TOTAL))
+    assert f"--successor claude/{spec} --thinking high" in out
+    assert f"the quota guard says {level}" in out
+
+
+@pytest.mark.parametrize("content", [None, "not json", '{"level": 3}', '{"level": "ok"}', "[]"])
+def test_absent_or_unusable_guard_state_changes_nothing(hook, tmp_path, monkeypatch, content):
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
+    if content is not None:
+        (tmp_path / "quota-guard.json").write_text(content)
+    out, _ = hook("s-noguard", _model_transcript(tmp_path, "claude-opus-5-5", 46_000, nudge.BOUNDARY_TOTAL))
+    assert "--successor" not in out and 'self-slash "/new"' in out
+
+
+@pytest.mark.parametrize("var", ["HERDR_PANE_ID", "ORCA_TERMINAL_HANDLE"])
+def test_successor_is_not_offered_on_herdr_or_orca(hook, tmp_path, monkeypatch, var):
+    _host(monkeypatch, var)
+    out, _ = hook("s-fable-" + var, _model_transcript(tmp_path, nudge.FABLE_MODEL, 46_000, nudge.BOUNDARY_TOTAL))
+    assert "--successor claude" not in out
+    assert "relaunch `claude --model claude-opus-5-5`" in out
+    assert 'self-slash "/new"' in out
+
+
+def test_sidechain_and_synthetic_records_do_not_decide_the_model(tmp_path):
+    path = tmp_path / "t.jsonl"
+    rows = [
+        {"message": {"model": "claude-opus-5-5", "role": "assistant"}},
+        {"isSidechain": True, "message": {"model": nudge.FABLE_MODEL, "role": "assistant"}},
+        {"message": {"model": "<synthetic>", "role": "assistant"}},
+    ]
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert nudge._last_assistant_model(path) == "claude-opus-5-5"
+    assert nudge._last_assistant_model(tmp_path / "missing.jsonl") is None
+
+
+@pytest.mark.parametrize("level, model", [
+    ("tight", "claude-sonnet-5-5"), ("tight", "claude-sonnet-5-5[1m]"),
+    ("critical", "claude-opus-5-5"), ("critical", "claude-opus-5-5[1m]"),
+    ("critical", "claude-sonnet-5-5"),
+])
+def test_a_session_already_on_the_target_gets_plain_new_not_a_same_model_successor(hook, tmp_path, monkeypatch, level, model):
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
+    _guard(tmp_path, level)
+    out, _ = hook("s-same-" + level + model, _model_transcript(tmp_path, model, 46_000, nudge.BOUNDARY_TOTAL))
+    assert "--successor" not in out
+    assert 'self-slash "/new" and queues /baton' in out
+    assert nudge._successor_target(model, level) is None
+
+
+@pytest.mark.parametrize("model", ["claude-fable-5-1[1m]", "claude-fable-5-2", "claude-fable-6"])
+def test_l5_any_fable_id_with_or_without_a_suffix_is_detected(model):
+    assert nudge._successor_target(model, "") == (nudge.SUCCESSOR_OPUS, "this session runs on Fable")
+    assert nudge._successor_target("claude-opus-5-5[1m]", "") is None
+
+
+@pytest.mark.parametrize("level", ["tight", "critical"])
+@pytest.mark.parametrize("model", [None, "", "claude-haiku-4-5", "claude-haiku-4-5[1m]", "gpt-6"])
+def test_r2_l4_guard_never_moves_an_unknown_or_lower_model_up(level, model):
+    assert nudge._successor_target(model, level) is None
+
+
+def test_r2_l4_guard_moves_only_models_known_to_be_above_the_target():
+    assert nudge._successor_target("claude-opus-5-5", "tight") == (nudge.SUCCESSOR_SONNET, "the quota guard says tight")
+    assert nudge._successor_target("claude-fable-5-1[1m]", "tight")[0] == nudge.SUCCESSOR_SONNET
+    assert nudge._successor_target(nudge.FABLE_MODEL, "critical")[0] == nudge.SUCCESSOR_OPUS
+    assert nudge._successor_target("claude-opus-5-5", "critical") is None
+
+
+def test_r2_l4_unreadable_model_under_a_guard_hands_off_with_plain_new(hook, tmp_path, monkeypatch):
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
+    _guard(tmp_path, "critical")
+    out, _ = hook("s-nomodel", _transcript(tmp_path, 46_000, nudge.BOUNDARY_TOTAL))  # no assistant model
+    assert "--successor" not in out and 'self-slash "/new"' in out

@@ -9,7 +9,7 @@
     load-watch ci decide DIR ci "CI CMD"|local "why"|pending "note"
     load-watch ci-only list|add DIR "CMD"|rm DIR|check DIR   (older form of `ci`, kept for scripts)
     load-watch guard status|list|add LABEL [KEY=VALUE...] [--note N]|rm LABEL|reset LABEL
-    load-watch admit [--max-per-core N] [--wait SECONDS] [--json]
+    load-watch admit [--max-per-core N] [--max-mem-churn N] [--wait SECONDS] [--json]
                                             may new work START now? exit 0 yes, 75 still too hot, 2 usage
     load-watch watcher set [--paseo ID|--relay T] [--name N] [--chain C]|show [--json]|clear [T]|test [TEXT]
                                             the one session told about every spike (`loadwatch` skill)
@@ -66,8 +66,14 @@ launches a slice (`--load-wait`, `--no-load-gate`). It reads os.getloadavg()[0] 
 `--wait S` polls every 15 s for up to S seconds, prints one line per waited minute to stderr, and once the
 load drops below the threshold sleeps a random 5-30 s, never past --wait (so queued dispatchers do not all start together)
 and re-checks. `--json` prints one JSON object with the same fields. It only decides whether to START work:
-it never kills, throttles or signals anything. Test hooks (acp-dispatch scrubs them from the environment it
+it never kills, throttles or signals anything. Memory gate (operator 2026-10-23, "your recommended is fine"):
+`admit` also reads the compressor churn (macOS `vm_stat` Compressions + Decompressions over 0.5 s, pages/s) and
+is hot when it exceeds --max-mem-churn (default 60000, calibrated 2026-10-23 from 215 ten-second samples:
+calm tail 11-22k, load 10-25 p50 49k, load >=25 p50 80k and p90 108k pages/s; one session's data, so
+recalibrate with more; the first guess, 20000, sat below the load<10 median of 34k). Load and swap alone did not separate that spike from a calm hour. The result and the `--json`
+record carry `mem_churn_pages_s`; where `vm_stat` is unavailable (Linux) the gate never blocks. Test hooks (acp-dispatch scrubs them from the environment it
 gives admit): LW_FAKE_LOAD1 (a load, or a comma list read one per poll with the last value repeating),
+LW_FAKE_CHURN (the same for churn; with only LW_FAKE_LOAD1 set, churn reads 0),
 LW_ADMIT_POLL_S (15, floored at 1), LW_ADMIT_STAGGER_S ("5,30" min,max; 0 <= min <= max <= 60). A state.json
 that is not a dict with numeric `t` and `hot_since` counts as no state. Non-finite --wait or --max-per-core: exit 2.
 Exit: 0 ok, 1 nothing found (check, ack of an unknown id), 2 usage; `admit` also 75 (still too hot).
@@ -1110,6 +1116,13 @@ def cmd_ci_only(a):
 
 ADMIT_PER_CORE = 1.5  # the threshold ~/ops/site-private/bin/bg uses; LOAD_PER_CORE (2.0) is only the blame step
 ADMIT_FRESH_S = 120   # state.json older than this says nothing about the machine now
+# Memory gate (operator 2026-10-23): load alone cannot tell a busy host from a thrashing one (the 2026-10-23
+# spike was load 42-74 with kern.memorystatus_level 37% and swap 86-92%, the same swap a calm hour shows).
+# What it did show was compressor churn. Calibrated 2026-10-23 from 215 ten-second samples (10:20-10:52):
+# load<10 p50 34k, 10-25 p50 49k, >=25 p50 80k and p90 108k pages/s; the calm tail read 11-22k. 60000 sits above
+# calm and the mid-load median and below the thrash median. Still ONE session's data: recalibrate with more.
+ADMIT_CHURN_PAGES_S = 60000
+ADMIT_CHURN_WINDOW_S = 0.5
 EX_TEMPFAIL = 75
 
 
@@ -1119,6 +1132,37 @@ def _fake_loads():
     return [float(x) for x in raw.split(",") if x.strip()] if raw else []
 
 
+def _fake_churn():
+    """LW_FAKE_CHURN (tests): pages/s, or a comma list read one per poll with the last value repeating."""
+    raw = os.environ.get("LW_FAKE_CHURN", "").strip()
+    return [float(x) for x in raw.split(",") if x.strip()] if raw else []
+
+
+def _compressor_pages():
+    """Compressions + Decompressions from vm_stat (a macOS counter), or None where it is unavailable."""
+    try:
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
+        vals = {m.group(1): int(m.group(2)) for m in re.finditer(r"^(Compressions|Decompressions):\s+(\d+)", out, re.M)}
+        return vals["Compressions"] + vals["Decompressions"] if len(vals) == 2 else None
+    except (OSError, subprocess.TimeoutExpired, KeyError, ValueError):
+        return None
+
+
+def admit_churn(fake_load, fake_churn, polls):
+    """Compressor churn in pages/s now, or None when it cannot be read (then it never blocks). Tests that fake
+    the load get 0 unless they fake the churn too, so a busy host cannot change their answer."""
+    if fake_churn:
+        return fake_churn[min(polls, len(fake_churn) - 1)]
+    if fake_load:
+        return 0.0
+    a = _compressor_pages()
+    if a is None:
+        return None
+    time.sleep(ADMIT_CHURN_WINDOW_S)
+    b = _compressor_pages()
+    return None if b is None else max(0.0, (b - a) / ADMIT_CHURN_WINDOW_S)
+
+
 def admit_reading(fake, polls):
     """(load1, cores, per_core) now; `fake` is _fake_loads() and `polls` how many reads came before."""
     load1 = fake[min(polls, len(fake) - 1)] if fake else os.getloadavg()[0]
@@ -1126,10 +1170,18 @@ def admit_reading(fake, polls):
     return load1, cores, load1 / cores
 
 
-def admit_record(load1, cores, per_core, limit, waited):
+def admit_ok(per_core, limit, churn, churn_limit):
+    """Load per core within the limit and the compressor not thrashing (churn None: unreadable, never blocks)."""
+    return per_core <= limit and (churn is None or churn <= churn_limit)
+
+
+def admit_record(load1, cores, per_core, limit, waited, churn=None, churn_limit=ADMIT_CHURN_PAGES_S):
     """The admit result fields; adds the watcher's streak and hot_for_s when its state.json is fresh."""
-    rec = {"status": "ok" if per_core <= limit else "hot", "load1": round(load1, 2), "per_core": round(per_core, 2),
-           "cores": cores, "max_per_core": limit, "waited_s": int(waited)}
+    rec = {"status": "ok" if admit_ok(per_core, limit, churn, churn_limit) else "hot", "load1": round(load1, 2),
+           "per_core": round(per_core, 2), "cores": cores, "max_per_core": limit, "waited_s": int(waited)}
+    if churn is not None:
+        rec["mem_churn_pages_s"] = int(churn)
+        rec["max_mem_churn_pages_s"] = churn_limit
     rec.update(watcher_fields())
     return rec
 
@@ -1156,8 +1208,12 @@ def watcher_fields():
 
 def admit_line(rec):
     line = f"admit {rec['status']} load1={rec['load1']:g} per_core={rec['per_core']:.2f} cores={rec['cores']}"
+    if "mem_churn_pages_s" in rec:
+        line += f" mem_churn={rec['mem_churn_pages_s']}"
     if rec["status"] == "hot":
         line += f" max_per_core={rec['max_per_core']:g}"
+        if rec.get("mem_churn_pages_s", 0) > rec.get("max_mem_churn_pages_s", ADMIT_CHURN_PAGES_S):
+            line += f" max_mem_churn={rec['max_mem_churn_pages_s']:g}"
     if "hot_for_s" in rec:
         line += f" streak={rec['streak']} hot_for_s={rec['hot_for_s']}"
     if rec["waited_s"]:
@@ -1167,28 +1223,31 @@ def admit_line(rec):
 
 def cmd_admit(a):
     """May new work start now? Only ever decides; never kills, throttles or signals anything."""
-    if not (math.isfinite(a.wait) and math.isfinite(a.max_per_core)) or a.wait < 0 or a.max_per_core <= 0:
-        print("load-watch admit: --wait must be a finite number, 0 or more, and --max-per-core finite and above 0",
-              file=sys.stderr)
+    churn_limit = getattr(a, "max_mem_churn", ADMIT_CHURN_PAGES_S)
+    if (not (math.isfinite(a.wait) and math.isfinite(a.max_per_core) and math.isfinite(churn_limit))
+            or a.wait < 0 or a.max_per_core <= 0 or churn_limit <= 0):
+        print("load-watch admit: --wait must be a finite number, 0 or more, and --max-per-core and "
+              "--max-mem-churn finite and above 0", file=sys.stderr)
         return 2
     try:
         lo, hi = (float(x) for x in os.environ.get("LW_ADMIT_STAGGER_S", "5,30").split(","))
         poll = float(os.environ.get("LW_ADMIT_POLL_S", "15"))
-        fake = _fake_loads()
+        fake, fake_churn = _fake_loads(), _fake_churn()
         if not (math.isfinite(lo) and math.isfinite(hi) and math.isfinite(poll) and 0 <= lo <= hi <= 60
-                and all(math.isfinite(x) for x in fake)):
+                and all(math.isfinite(x) for x in fake + fake_churn)):
             raise ValueError("out of range")
     except ValueError:
-        print("load-watch admit: bad LW_FAKE_LOAD1, LW_ADMIT_POLL_S or LW_ADMIT_STAGGER_S (finite, stagger "
+        print("load-watch admit: bad LW_FAKE_LOAD1, LW_FAKE_CHURN, LW_ADMIT_POLL_S or LW_ADMIT_STAGGER_S (finite, stagger "
               "0 <= min <= max <= 60)", file=sys.stderr)
         return 2
     poll = max(1.0, poll)  # never a busy loop on a machine that is already hot
     start, polls, next_note = time.monotonic(), 0, 60.0
     while True:
         load1, cores, per_core = admit_reading(fake, polls)
+        churn = admit_churn(fake, fake_churn, polls)
         polls += 1
         waited = time.monotonic() - start
-        if per_core <= a.max_per_core and polls > 1:
+        if admit_ok(per_core, a.max_per_core, churn, churn_limit) and polls > 1:
             # the load fell while we waited: stagger so queued dispatchers do not all start in the same second,
             # then look again (someone else may have started in the meantime)
             # (never past the --wait budget: deferred records and rearm timeouts only budget that much)
@@ -1196,16 +1255,18 @@ def cmd_admit(a):
             if left > 0:
                 time.sleep(min(random.uniform(lo, hi), left))
             load1, cores, per_core = admit_reading(fake, polls)
+            churn = admit_churn(fake, fake_churn, polls)
             polls += 1
             waited = time.monotonic() - start
-        if per_core <= a.max_per_core or waited >= a.wait:
+        if admit_ok(per_core, a.max_per_core, churn, churn_limit) or waited >= a.wait:
             break
         if waited >= next_note:
-            print(f"load-watch admit: waiting, load1={load1:g} per_core={per_core:.2f} (limit {a.max_per_core:g}), "
-                  f"{int(waited)}s of {a.wait:g}s", file=sys.stderr)
+            print(f"load-watch admit: waiting, load1={load1:g} per_core={per_core:.2f} (limit {a.max_per_core:g})"
+                  + (f" mem_churn={churn:.0f} (limit {churn_limit:g})" if churn is not None else "")
+                  + f", {int(waited)}s of {a.wait:g}s", file=sys.stderr)
             next_note += 60.0
         time.sleep(max(0.0, min(poll, a.wait - waited)))
-    rec = admit_record(load1, cores, per_core, a.max_per_core, waited)
+    rec = admit_record(load1, cores, per_core, a.max_per_core, waited, churn, churn_limit)
     print(json.dumps(rec) if a.json else admit_line(rec))
     return 0 if rec["status"] == "ok" else EX_TEMPFAIL
 
@@ -1256,6 +1317,9 @@ def main():
     p = sub.add_parser("admit")
     p.add_argument("--max-per-core", type=float, default=ADMIT_PER_CORE, metavar="N",
                    help=f"admit when 1-minute load per core is at most N (default {ADMIT_PER_CORE:g})")
+    p.add_argument("--max-mem-churn", type=float, default=ADMIT_CHURN_PAGES_S, metavar="N",
+                   help=f"and compressor churn (pages compressed + decompressed per second) is at most N "
+                        f"(default {ADMIT_CHURN_PAGES_S:g}, calibrated 2026-10-23)")
     p.add_argument("--wait", type=float, default=0, metavar="SECONDS",
                    help="poll every 15 s for up to SECONDS before giving up with exit 75 (0: a pure check)")
     p.add_argument("--json", action="store_true")

@@ -867,15 +867,52 @@ def main() -> int:
 
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text(title + "\n", encoding="utf-8")
-    live += paseo_set_name(title)
+    live += paseo_set_name(title, auto=args.auto)
     print(f"renamed: {title}{live}")
     return 0
 
 
-def paseo_set_name(title: str) -> str:
+def title_slug(title: str, max_len: int) -> str:
+    """'ClaudeHelm night run 2026-10-09 + Collie 1.18.1' -> 'claudehelm-night-run': lower case, hyphens,
+    whole words only, number-only words dropped. Empty when nothing is left. The caller adds the suffix:
+    -t herdr tab, -p herdr pane, -pw Paseo workspace (djbclark, 2026-10-23)."""
+    import re
+    words = [w for w in re.sub(r"[^a-z0-9]+", " ", title.lower()).split() if not re.fullmatch(r"[0-9.-]+", w)]
+    out = ""
+    for w in words:
+        cand = f"{out}-{w}" if out else w
+        if len(cand) > max_len:
+            break
+        out = cand
+    return out
+
+
+PASEO_WORKSPACE_SLUG_MAX = 40
+
+
+def paseo_workspace_name(title: str) -> str:
+    """The Paseo workspace name for a session title: 'Paseo skill sync overwrite fix' ->
+    'paseo-skill-sync-overwrite-fix-pw'."""
+    return (title_slug(title, PASEO_WORKSPACE_SLUG_MAX) or "session") + "-pw"
+
+
+def paseo_workspace_id(agent: str) -> str | None:
+    """The workspace an agent lives in, from its record under $PASEO_HOME/agents/<cwd>/<id>.json
+    (`paseo agent inspect` does not print it, 2026-10-23)."""
+    home = Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo")
+    for rec in (home / "agents").glob(f"*/{agent}.json"):
+        try:
+            return json.loads(rec.read_text(encoding="utf-8")).get("workspaceId") or None
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def paseo_set_name(title: str, auto: bool = False) -> str:
     """A session hosted by a Paseo agent ($PASEO_AGENT_ID) also gets its sidebar name
-    set, through `paseo agent update --name` (2026-10-19). Never fatal: the
-    provider-side title above is the one every other reader uses."""
+    set, through `paseo agent update --name` (2026-10-19), and its workspace renamed to
+    `<slug>-pw` (2026-10-23). `--auto` keeps a workspace that already ends in -pw. Never
+    fatal: the provider-side title above is the one every other reader uses."""
     agent = os.environ.get("PASEO_AGENT_ID")
     if not agent:
         return ""
@@ -887,7 +924,21 @@ def paseo_set_name(title: str) -> str:
                            capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f" (paseo: {exc})"
-    return " (paseo name set)" if r.returncode == 0 else f" (paseo: rc {r.returncode})"
+    out = " (paseo name set)" if r.returncode == 0 else f" (paseo: rc {r.returncode})"
+    wks = paseo_workspace_id(agent)
+    if not wks:
+        return out + " (paseo workspace: not found)"
+    name = paseo_workspace_name(title)
+    try:
+        if auto:
+            ls = subprocess.run([cli, "workspace", "ls", "--json"], capture_output=True, text=True, timeout=20)
+            cur = next((w.get("name", "") for w in json.loads(ls.stdout) if w.get("workspaceId") == wks), "")
+            if cur.endswith("-pw"):
+                return out + f" (paseo workspace kept: {cur})"
+        r = subprocess.run([cli, "workspace", "rename", wks, name], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        return out + f" (paseo workspace: {exc})"
+    return out + (f" (paseo workspace {name})" if r.returncode == 0 else f" (paseo workspace: rc {r.returncode})")
 
 
 if __name__ == "__main__":
