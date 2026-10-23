@@ -58,7 +58,8 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
                conversation is refused (a per-session flock the child holds). A profile Hermes (HERMES_HOME) sees only its own sessions: "not sent" for another
                profile's. RELAY_HERMES overrides the `hermes` binary. ACP cannot load a gateway session and
                messages_send only posts outward, so neither is a route. Checked 2026-10-23 on a throwaway `oneshot`
-               session, not on a real gateway conversation.
+               session and end to end on a real Telegram topic (delivered; tagged user row and reply in its stored
+               transcript; 0600 lock free afterwards).
 
 Text starting with `/` or `!` is never typed into a pane (a built-in or a shell command there); only a socket
 frame carries it, as a plain message. Never falls back (exit 1 with the reason, or 2): this session; a finished one (`/handoff` or `/quit`: start a

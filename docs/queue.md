@@ -1159,7 +1159,9 @@ gateway agent with `relay.py`. Design: `~/.local/state/bigteam/loadgate-followup
 1. **Verified 2026-10-23** on a throwaway oneshot session (`~/.local/state/bigteam/relay-hermes-route/`):
    `hermes --resume SID -z TEXT` with stdin closed replied from the earlier turn's context, grew the same session
    from 2 to 4 messages and created no new one; an unknown sid exits 1 with "session not found" and creates nothing.
-   Not run against a real gateway (Telegram/Discord) session: that writes into a live transcript and needs djbclark's yes.
+   **Real gateway run 2026-10-23** (load-watch session relayed djbclark's yes): `relay.py hermes:16790ed2` (Telegram topic
+   inbox-ops) rc 0, `delivered`, reply `RELAY OK`, message count 79 -> 81, user row tagged `[relay from djbclark-ade-61]`,
+   0600 lock free afterwards; evidence in `~/.local/state/bigteam/relay-hermes-route/real/`.
 2. **Built; adversary rounds 1 and 2 BLOCKed, repaired** (reports in `~/.local/state/bigteam/relay-hermes-route/`,
    `adversary-report-1.md`, `adversary-report-2.md`): route `hermes` in `skills/session-finder/relay.py`
    (`route_hermes`, the only route for a `hermes-gw` row with a `sid`; no fallback), `TestHermesRoute` in
