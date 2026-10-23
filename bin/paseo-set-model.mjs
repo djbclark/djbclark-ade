@@ -41,7 +41,11 @@ if (flags.some((f) => f !== "--dry-run" || cmd !== "set") || (cmd === "set" && p
 }
 
 let client;
-try {
+let code = 1;
+
+// every exit goes through here: `process.exit` inside the work would skip the `finally` that closes the client and could
+// cut off a large `list` JSON still queued in the stdout pipe (Codex pass 1 on PR 31, P1)
+async function work() {
   const { connectToDaemon } = await load("utils/client.js");
   const { selectDaemonTarget } = await load("utils/daemon-target.js");
   client = await connectToDaemon({ target: selectDaemonTarget({}) });
@@ -49,11 +53,11 @@ try {
     const { fetchAllAgents } = await load("utils/agent-directory.js");
     const agents = await fetchAllAgents(client, { filter: { includeArchived: true, includeBackground: true } });
     console.log(JSON.stringify(agents.map(summary), null, 1));
-    process.exit(0);
+    return 0;
   }
   const [id, requested] = pos;
   const got = await client.fetchAgent({ agentId: id });
-  if (!got) { console.error(`no agent ${id}`); process.exit(3); }
+  if (!got) { console.error(`no agent ${id}`); return 3; }
   const a = got.agent;
   let model = requested;
   const slash = requested.indexOf("/");
@@ -62,20 +66,28 @@ try {
     if (prefix === a.provider) model = requested.slice(slash + 1);
     else if (PROVIDERS.has(prefix)) {
       console.error(`refusing ${requested}: agent ${a.id.slice(0, 7)} runs on provider ${a.provider}, setModel is per provider`);
-      process.exit(1);
+      return 1;
     }
   }
   const before = modelOf(a);
   console.log(`agent ${a.id.slice(0, 7)} provider=${a.provider} status=${a.status} model=${before}`);
-  if (flags.includes("--dry-run")) process.exit(0);
+  if (flags.includes("--dry-run")) return 0;
   await client.setAgentModel(a.id, model);
   const after = (await client.fetchAgent({ agentId: a.id })).agent;
   const now = modelOf(after);
   console.log(`set: ${before} -> ${now}`);
-  process.exit(now === model ? 0 : 4);
+  return now === model ? 0 : 4;
+}
+
+try {
+  code = await work();
 } catch (e) {
   console.error(`error: ${e?.message ?? e}`);
-  process.exit(1);
+  code = 1;
 } finally {
   if (client) await client.close().catch(() => {});
 }
+// let both pipes drain before the process ends: a large `list` JSON must reach the governor whole
+await new Promise((resolve) => process.stdout.write("", resolve));
+await new Promise((resolve) => process.stderr.write("", resolve));
+process.exit(code);

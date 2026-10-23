@@ -214,6 +214,23 @@ class TestNodeHalf(unittest.TestCase):
         asked = json.loads((self.daemon / "calls.log").read_text().splitlines()[0])["fetchAgents"]
         self.assertEqual(asked, {"filter": {"includeArchived": True, "includeBackground": True}})
 
+    def test_a_large_list_reaches_a_slow_reader_whole(self):
+        """Codex pass 1 on PR 31, P1: `process.exit(0)` right after `console.log` cut a `list` JSON bigger than the pipe
+        buffer short, so the governor's parse failed and every run exited 11. The reader here starts late."""
+        import time
+        many = [{"id": f"{i:07x}0-0000-0000-0000-000000000000", "title": "agent " + "x" * 80, "provider": "claude",
+                 "model": "claude-sonnet-5-5", "status": "idle", "archivedAt": None} for i in range(3000)]
+        (self.daemon / "agents.json").write_text(json.dumps(many))
+        env = {"PATH": os.environ.get("PATH", ""), "PASEO_SET_MODEL_HELPER": NODE,
+               "PASEO_SET_MODEL_CLI_DIST": str(self.dist), "FAKE_DAEMON": str(self.daemon)}
+        proc = subprocess.Popen([sys.executable, "-I", str(LAUNCHER), "list", "--json"], env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        time.sleep(1.5)  # the pipe is full and nobody reads: an early `process.exit` would drop the rest
+        out, err = proc.communicate(timeout=60)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertGreater(len(out), 300_000)
+        self.assertEqual(len(json.loads(out)), 3000)
+
 
 if __name__ == "__main__":
     unittest.main()
