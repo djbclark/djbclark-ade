@@ -11,6 +11,14 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- `bin/app-tamer-ab`: a 60 s sampler (load per core, compressor churn, swap, App Tamer's own CPU) with named phases and a per-phase `summary`, for the with/without App Tamer comparison (2026-10-23).
+
+- Added `bin/ade-update`, one command that keeps a machine current: it fast-forward pulls (refusing with exit 2 when a
+  path the pull would change or create has a local modification, an untracked or an ignored file, or a parent or
+  child path of one), relinks missing skills
+  (only in the canonical checkout; any other `--repo` is report-only), checks the `CLAUDE.md` and `~/.claude` symlinks,
+  and prints the changelog entries new since the revision it last recorded; `--check` reports only and exits 10 when
+  behind (2026-10-20, #20); `--check` also lists `claude/{commands,agents,hooks}` entries that upstream adds as "new upstream" links, and apply fast-forwards to the exact commit it checked instead of pulling again; a fast-forward that landed before a post-merge hook timed out is recorded as a `merge warning` problem (exit 10), and a non-canonical `--repo` without `--state` records under its own `~/.local/state/ade/applied-<12 hex>` instead of the shared record (#20).
 - `load-watch sample` also watches compressor churn: above the `admit` limit (60000 pages/s) for `LW_CHURN_SUSTAIN_S` (180 s) it sends one line with the top
   three commands to the load watcher (at most hourly, cooldown `churn-watcher`) and to Hermes (cooldown `churn`), adds the Grok Bot/Chrome standing exception
   when they lead, never signals anything; `status` lists both cooldowns; test hook `LW_FAKE_COMPRESSOR` (2026-10-23).
@@ -19,6 +27,8 @@ agent what changed and what is new. Entries end with the pull request number.
   Decompressions, pages/s) exceeds the new `--max-mem-churn N` (default 60000, calibrated 2026-10-23 from 215
   samples: calm 11-22k, load >=25 median 80k; the first guess, 20000, was below the load<10 median of 34k), so `acp-dispatch` (which calls `admit`) holds new slices during a thrash that load alone does not show; `bg` (site-djbclark `bin/bg`, f370ad7) now also asks `admit` after its own load check and fails open if `load-watch` errors.
   The result and `--json` carry `mem_churn_pages_s`; no `vm_stat` (Linux) means the gate never blocks (2026-10-23).
+- `relay.py` also reaches a Hermes gateway conversation (a `hermes-gw` row with a session id; route `hermes`, its only route): `hermes --resume <sid> -z` runs one turn on that conversation's stored transcript, text tagged `[relay from <name>] `, in its own process group. The child loses the caller's session, Paseo, ACP-approval and Hermes routing variables and gets `RELAY_HOPS` and `RELAY_SENDER` (a relay made inside the turn is tagged as Hermes; only nested `hermes -z` turns are counted, a fourth is refused). The reply goes to a 0600 file under `RELAY_HERMES_DIR` (pruned after 7 days) and is printed as untrusted data (control, format and escape characters stripped, 4000 characters, a closing marker). It is never sent to Hermes's own conversation (session id, session key, or the same platform, chat and thread), and not while an earlier relayed turn in that conversation still holds its lock. Only rc 1, an empty stdout and the single exact "session not found" (or "cannot resume session") stderr line count as not sent, every other failure is "unverified, do not resend"; a "turn started, do not resend" line is printed to stderr first, because the caller's own tool timeout can end `relay.py` before its verdict; a turn that outlives max(100, `--wait`) seconds from the start is left running (relay.py never kills it, but a caller's tool timeout that kills the whole process tree does: give the command at least max(100, `--wait`) + 50 s or run it in the background). `--wait` must now be finite and not negative; `RELAY_HERMES` overrides the `hermes` binary. Checked on a throwaway `oneshot` session and end to end on a real Telegram topic (delivered, tagged user row and reply in its stored transcript, lock free afterwards; 2026-10-23). New skill `peer-relay` teaches Hermes to run `relay.py` itself (drafted here; Hermes installs it).
+- `fleet.py` keeps a Hermes gateway conversation listed while its row is closed with `agent_close`, which every `hermes --resume -z` turn does until the gateway reopens it by session key a few minutes later (the log line `gateway.session: reopened ended session ...; keeping route`); a row replaced by a newer one for the same session key, or ended by a reset, stays hidden. Before, a second relay minutes after the first found no session (2026-10-23).
 - `relay.py` picks the best route for the session (Paseo `send`, `acp-dispatch tell`, a live ACP launch's inbox, keys into
   its pane, then the Claude messaging socket) and falls back to the next itself when one fails before sending; it errors
   only when every route has, listing each reason. A send it cannot rule out (text typed but unseen, a `paseo send` that
@@ -36,7 +46,10 @@ agent what changed and what is new. Entries end with the pull request number.
   never submitted again, a `---` row or a ❯ inside the box no longer hides rows, entries purge after a day.
   Round 8: the input box is the one rule row directly followed by a ❯ row (a rule or ❯ typed into a draft makes it
   unknown, not a smaller empty box), the box is read once, an unsent entry is forgotten only on proof, a delivery is
-  a whole user or queued message in the transcript (never a substring), the first placeholder within 6 s of typing is ours.
+  a whole user or queued message in the transcript (never a substring).
+  Round 9: a collapsed paste is recorded wrapped in `<pasted_content id=N>` (seen in real transcripts) and now counts as
+  delivered, the placeholder in the first read after typing is ours (no time window), a copy that returns after ours left
+  the box is a recall and is never submitted, hook-injected (`isMeta`) and compact-summary lines are not deliveries.
 - `bin/self-slash --finish --successor PROVIDER/MODEL [--thinking ID] [--mode MODE] [--title TEXT]` (Paseo only; exit 2 on herdr and Orca): after the turn it starts a new top-level agent in the same workspace (`paseo run "/baton"`, default mode and `--thinking high` of the old agent), checks it is not a subagent and runs the model asked, then archives the old agent; any failure exits 11, archives nothing and leaves this session usable. The successor always lands in an existing workspace (`--workspace ID`, default this agent's; never `--new-workspace`, and in another workspace it runs in that workspace's own cwd) with a short title. The old workspace was archived after the old agent only when proven unneeded: one cwd match with no workspace above that cwd (never an override of another row or a tie-break), local isolation, no terminals, no other agent in it by workspace id or cwd, and a cwd that neither equals nor contains the successor's (`--keep-workspace` skips that). The successor is polled for up to 20 s and must have a new id, a null `ParentAgentId`, the model asked and status idle, running or initializing, else exit 11. A malformed `SELF_SLASH_SUCCESSOR_SETTLE` is refused before `paseo run`, an inspect that fails after a good look exits 11, and no aborted successor path can fall through to the bare archive (#30).
 - `skill-everywhere` gains a `grokbot` target: a rendered copy `ade-<name>/` in `~/agent-data/workflows/` on the
   Grok Bot box (banner, `.skill-everywhere` marker, only marked dirs touched), plus `--dry-run`/`-n`,
@@ -143,9 +156,16 @@ agent what changed and what is new. Entries end with the pull request number.
   `clarify` (Hermes) / `request_user_input` (Codex). Universal skills `/loose`,
   `/handoff`, `/baton`, `/steps` were already reachable from every installed TUI
   (`skill-everywhere --check` all green); the change wires the chain on OpenCode.
+- `bin/skill-everywhere --check` ends with a `== end` line, which `bin/ade-update` requires (a cut-short check
+  is exit 4, "skill check incomplete"); `bin/ade-update` warns on stderr when it runs from a path other than
+  the canonical checkout (#20).
 
 ### Fixed
 
+- `bin/ade-update` exits 10 naming a stuck link on the first apply instead of 4 with an empty error, and 4 (not 10) when the canonical checkout has no `skill-everywhere` helper at all (#20).
+- `bin/ade-update` reads the Grok Bot copy-target rows of `skill-everywhere --check` (`not installed (no <dir>)`, `copied (<path>)`, `missing (<path>)`, `stale copy (<path>)`) as ok or fixable, not stuck, and drops an inherited `SKILL_EVERYWHERE_ONLY` from the helper's environment, so a check never reports on a subset of targets (#20).
+- `bin/skill-everywhere`: the Hermes plugin nudge no longer aborts the script when the Hermes wrapper has no `exec`
+  line; its `g*` tools reach plain GNU ones through master's alias loop (#20).
 - `acp-dispatch` refuses `--perm read-only` or `--perm deny` (exit 2, before any record or preflight) for an agent
   whose `acp-run <agent> --info` `perm_modes` lacks that mode; before, acp-run's own refusal came after the
   record was written and surfaced as a no-report (an omp adversary round, 2026-10-23).

@@ -13,6 +13,98 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    no origin branch (doc section 3.2). The 54.5 GiB `adhoc-2026-10-18/hm-promo-rehearsal/` is scratch; deleting
    it is a later cleanup decision.
 
+## Make full use of the podman, kev, laya and hyades-docker microVMs (djbclark, direct, 2026-10-23)
+
+djbclark, 2026-10-23: "At an appropriate point, make sure that we make full use of the podman, kev and laya
+/hyades-docker microvms in our ade and work." Queued; **start after PRs
+[27](https://github.com/djbclark/djbclark-ade/pull/27) and [31](https://github.com/djbclark/djbclark-ade/pull/31)
+merge** (both open 2026-10-23). Nothing is built.
+
+1. **Inventory first** (one read-only `scout` slice; the report goes into a new `docs/microvms.md`). What each gives
+   today, from the repo's own docs (2026-10-23, to verify): (a) **podman**: rootless podman is the engine of the
+   forgejo.mit.edu runner (`skills/forgejo-ci/SKILL.md`: one libkrun microVM per job, `capacity = 4`, stock labels
+   have git/node/python3/podman/go but no gcc, JDK or Android SDK) and the push path of `hyades-docker`'s
+   `hyades-registry`; whether this Mac runs podman as a local sandbox for untrusted code and tests is unchecked.
+   (b) **hyades-docker**: OCI images run as libkrun microVMs at `NAME.sipb.cloud` on SIPB Hyades (`docs/skills.md`;
+   `scripts/hyades` is the SSH console). (c) **kev and laya**: djbclark's two Jev-like System One microVMs
+   (Kev-0.8B at djbclark-kev.sipb.cloud, Laya at djbclark-laya.sipb.cloud), the yes/no/choice/score judges of the
+   `jevlike` skill (`JEVLIKE_API_KEY` in sudo-secretspec); `docs/jev.md` says `bin/jev` is still in shadow mode:
+   check whether kev and laya are what its sites would call. Record per resource: what it can run, limits (disk,
+   missing toolchains, the TSI loopback bug and its shim), cost or quota, who can reach it, key, restart behaviour.
+2. **Then route to them instead of the Mac**: heavy tests and builds (`forgejo-ci` as the CI lane; `load-watch ci
+   decide DIR ci "CI CMD"` records a repo as CI-first and `bg` reads it), adversary probes that run code (the 2026-10-20
+   round-18 probe that ran the backup tool against the real HOME is the case a disposable microVM prevents), and
+   `--perm deny` reviews of untrusted repos (see the crush and `acp-run --perm deny` entries below); kev and laya as
+   `jevlike` gates (`decide: yes|no|escalate`) at the sites `docs/jev.md` lists. Cheapest next step: item 1, then one
+   `ci decide` per repo that already has a workflow. Blockers: PRs 27 and 31; the Hyades runner is shared (never fan out
+   past its capacity); the `jevlike` key is only djbclark's; agents never post on `SIPB/*` (home rule 35).
+
+## Orchestration rules from the load watcher (djbclark via load-watch agent 96a17744, 2026-10-23)
+
+1. **Name a workspace by its human name AND its id.** Add to `docs/orchestration-practices.md` (and the brief template
+   in `skills/bigteam/SKILL.md`): wherever a brief, relay, report or message names a Paseo workspace, give the name the
+   GUI shows (the `-p`/`-pw` name, e.g. `paseo-workspace-navigation-plugins-pw`) and its id (`wks_5363dce7237adb53`);
+   for an agent give the agent id too. A GUI rename (see "Paseo workspace names after a handoff") makes a name alone
+   unreliable, an id alone unreadable. One small Sonnet doc slice.
+2. **Find an owner or peer session with `/session-finder`, never by messaging to guess; make `fleet.py` and `paseo ls`
+   print workspace name + id.** Today: `fleet.py show`, `session-find.py`, and the Paseo state file
+   `~/.paseo/agents/<cwd-slug>/<agent-id>.json` whose `workspaceId` maps to `paseo workspace ls`. Example: the
+   `relay.py` owner agent 24f5b849-6835-464d-925e-35e67f911657 is in `paseo-workspace-navigation-plugins-pw`
+   (`wks_5363dce7237adb53`). Better architecture: `fleet.py` joins `paseo workspace ls --json` so a Paseo row shows
+   workspace name + id and nobody reads the state file; that is step (4) of "Paseo workspace names after a handoff",
+   one slice, not two. `paseo ls` printing the workspace is Paseo's to change: draft it in `docs/upstream-issues.md`
+   if `fleet.py` cannot cover it. Reply by relay to 96a17744 when done.
+3. **Load-watch folded into planning.** In the tree 2026-10-23: `load-watch admit` has the compressor-churn gate
+   (`--max-mem-churn`, default 60000 pages/s, calibrated from 215 samples), `load-watch sample` warns on sustained
+   churn, `bg` asks `admit` (exit 75 = hold, fails open), `acp-dispatch` holds on exit 75, `skills/loadwatch/SKILL.md`
+   says so. **Not done**: the planning rules themselves in `docs/orchestration-practices.md` and every slice brief
+   (`skills/bigteam/SKILL.md`): check `load-watch admit --json` before a large fan-out; builds and tests only through
+   `bg` or CI, never `BG_LOAD_WAIT=0`; dispatch only through `acp-dispatch`; **one test run at a time, both Pythons
+   sequential, never parallel**; no new local pytest or dispatch while load per core >= 1.5 (`uptime`). Why: at
+   2026-10-23 13:54Z load was 42-62 on 8 cores with swap at 90% from three concurrent local pytest runs (two from the
+   fleet-governor slice on both Pythons at once, one from quota-guard) plus three omp dispatches; nothing was killed.
+   Each of these ships its CHANGELOG line with its own PR (review rule 10).
+4. **Push on completion, as code** (djbclark, via the load watcher). Every delegation made by `relay.py`,
+   `acp-dispatch` or `launch` records the requester's Paseo agent id; when a Paseo agent's turn ends (status leaves
+   `running`) a hook or the dispatch footer sends "done: <title>, status, report path" to the recorded requester through
+   `relay.py`; for dispatched slices `acp-dispatch`'s waiter is extended the same way. Why: three waiters per PR head were
+   two thirds of one lead's notification turns (first section below, item 3). Until it ships: a one-shot status waiter
+   script, never a recurring prompt (home rule 13). Open design points: where the requester id lives (a record field),
+   a requester that is itself a dispatched slice, the relay refusal gate for non-Claude hosts (relay item 10 below),
+   and that each push costs the requester one turn. Reply by relay to 96a17744 when scoped.
+
+## PR 31 (`claude-fleet-governor`) and the 2026-10-23 quota emergency
+
+PR [31](https://github.com/djbclark/djbclark-ade/pull/31), open 2026-10-23 at 8b8af99 (adversary gov-10 APPROVE).
+Why it exists: at 12:58Z the Claude 5-hour window was 70% used (~26%/h, projected out ~14:05Z against a reset at
+14:59:59Z); djbclark: "make sure we don't ever hit claude quota before a reset ... cover all workspaces and agent
+sessions". The six Paseo Claude agents were switched Opus to Sonnet 5.5 in place through the daemon's
+`set_agent_model_request` (`~/.local/state/ade/paseo-set-model.mjs`, now `bin/paseo-set-model.mjs` in the PR; originals
+in `~/.local/state/ade/fleet-governor.json`); 6ebd939 (the orchestrator) followed at 13:25Z.
+
+1. **Restore the seven downshifted agents after the reset** unless djbclark prefers Sonnet (Fable stays off): 955e2b2,
+   24f5b84, 6f79643, b735ee2, 607a30b, ae2549c to `claude-opus-5`; 6ebd939 to `claude-opus-5-5`, with
+   `paseo-set-model.mjs <id> <original>` from `fleet-governor.json` while the governor is not live; after PR 31 merges,
+   `--install` plus the printed `launchctl bootstrap` line, and its `plan_moves` does it. The reset was 14:59:59Z;
+   whether the restore ran is not recorded: read `fleet-governor.json` first.
+2. **Gate for Agent-tool sub-agents** (after PR 29, merged). A model change by daemon RPC never reaches them: on
+   2026-10-23 two Opus adversary sub-agents (5.1M and 3.0M cache-read tokens in 30 minutes) ran on Opus while their
+   parents were on Sonnet. Fix: the PreToolUse `Agent|Task` gate `claude/hooks/frontier_agent_gate.py` reads
+   `quota-guard.json` and at `watch` or worse returns `updatedInput.model = "sonnet"` for opus/fable sub-agents (or
+   denies with the omp command). Pairs with `CLAUDE_CODE_SUBAGENT_MODEL` (PR 29 and 30 follow-ups, item 2). One small PR.
+3. **Claude Code outside Paseo** (herdr or Orca panes, plain `claude`) is out of `setModel`'s reach. `ps` showed no such
+   `claude` on 2026-10-23 (every parent is the Paseo daemon), so today: type `/model sonnet` into an idle pane or launch
+   on Sonnet (`~/.claude/settings.json` `model` is already `sonnet`); the hook advice of PR 29 covers the rest.
+4. **PR 31 findings left open on purpose** (adversary gov-10 and rounds 4 and 8): (a) LOW: one shared window fresh and
+   the other stale (45-90 min): the level comes from partial evidence and `plan_moves` restores agents; treat a dropped
+   shared window as stale (episode state `stale`, one ping) or plan no restore. (b) LOW: the window-stale exit 10
+   writes no state and never pings (the newest-snapshot-stale path does). (c) LOW: the `hours = resets - cur_at` mutant
+   and the exact 45:00 stale boundary are unpinned by tests. (d) LOW: `load_snapshots` raises OverflowError on a
+   parseable year-1 `collected_at` (`claude-fleet-governor:258`) before any side effect (exit 12, nothing changed).
+   (e) INFO: `bin/paseo-set-model.mjs` `client.close()` can hang and turn a successful setModel into exit 13/124: race
+   it with a 3 s timer. (f) INFO: a record whose `resets_at` is None or unparseable is kept silently forever; model and
+   agent ids rejected by the fullmatch regexes fail silently; `set` from state reaches stdout/stderr only.
+
 ## Follow-ups from PRs 29 and 30 and the 2026-10-20 exhaustion post-mortem (2026-10-23)
 
 Context: on 2026-10-20 the Claude weekly window hit 100% 2.6 days early; the lead ran on Fable, the adversary on
@@ -34,6 +126,12 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    the request as JSON) to `bin/pr-wait` with a test and a line in `skills/bigteam/SKILL.md`: three waiters per head
    (CI, Codex, adversary) were two thirds of the notification turns. Never re-arm a waiter that is already
    running (the load watcher found eight duplicates on 2026-10-20).
+   Waiter lessons from PR 27 (2026-10-23, fold into `bin/pr-wait`): treat Codex's `code_review.status: failed` as
+   terminal, not only `completed` (pass 35 failed on Codex's side with no inline comment; re-request at the next head);
+   give a pass stuck in `running` a timeout that reports "stuck" (pass 40 sat over 60 minutes and the waiter timed out
+   silently); `gh api --jq` takes no `--arg` (the findings query failed with "accepts 1 arg(s), received 4"), so fetch
+   with `gh api ... --paginate > f.json`, then `jq -s --arg t ... f.json`; the adversary appends its own `## Round NN`
+   section to its report file, so the lead must not append a second copy (rounds 43 and 44 were deduplicated).
 4. **PR 29 queued findings** (hypothetical aiuse payload shapes; `bin/claude-quota-guard`): (a) a windowless live
    row bound by the 5-hour window leaves the snapshot's weekly unjudged (adversary round 7); (b) a detailed
    default row plus a summary-only Fable row: synthesize a window for every summary-only row (Codex pass 6);
@@ -51,6 +149,9 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    `set_agent_model_request` (`~/.local/state/ade/paseo-set-model.mjs`), which the entry should cite as the
    working RPC; the `claude-fleet-governor` branch (peer 6ebd939) builds the enforcing actor on top of the guard's
    state file.
+   **Update 2026-10-23:** the governor is now PR [31](https://github.com/djbclark/djbclark-ade/pull/31) (open); when it
+   merges, cite `bin/paseo-set-model.mjs` in entry 17 as the working RPC. Its restore, sub-agent gate and open findings
+   are in "PR 31 (`claude-fleet-governor`) and the 2026-10-23 quota emergency" above.
 7. **Live `~/.claude/settings.json` lacks the `context_size_nudge.py` registration** that `agents/claude/settings.json.tmpl`
    carries (found by the quota-guard slice; possibly lost in the 2026-10-20 graft restore): apply the template or
    add both UserPromptSubmit entries (`context_size_nudge.py`, `quota_nudge.py`) by hand, then
@@ -178,6 +279,13 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    `key`); `headers: - name: X / value: <key>` lists: the nearest key is `value`, so the parsed-scalar pass should
    use the sibling `name` (adversary round 6, R6-3). Operator items: the public templates publish Hermes's
    approvals, Claude's allowlist and Codex's trust list.
+10. **`session-finder/relay.py` Paseo channel, carried from PR [25](https://github.com/djbclark/djbclark-ade/pull/25)**
+    (Codex, 2026-10-20, non-blocking): (a) a Paseo agent absent from `fleet.sessions()` is stored with its provider id
+    literally, so a custom provider such as `my-claude` that `extends: "claude"` is refused by `refusal()` unless
+    `--idle` is given; resolve the custom id to its base through Paseo's provider config before the Claude check. (b) a
+    nested session launched from a Paseo agent's shell inherits `PASEO_AGENT_ID`, so the sender tag is omitted and the
+    recipient sees the outer agent as the sender; verify the caller is the hosted agent (the agent record's cwd and
+    pid) before dropping the tag.
 
 ## Paseo workspace names after a handoff (djbclark, 2026-10-20)
 
@@ -233,6 +341,112 @@ One small Sonnet `code` slice with the fake `paseo`.
    children should get `stdin=DEVNULL`. Operator: OpenCode's three API keys also sit in its transcript rows (317
    occurrences in `part.data` and `session_message`), so every generation is secret-bearing; if one ever leaves
    the Mac, rotate those keys.
+   **Carried 2026-10-23** from adversary rounds 4-22 and Codex passes 19-21 on PR #24 (merged as f9d388d; LOW/INFO, all
+   still open unless marked; the fixes made inside the PR are not repeated): (a) *Schedule and interpreter*: a
+   scheduled run passes `--strict-stores` and pins a modern interpreter (uv's or PATH python3 3.14), because under
+   /usr/bin/python3 (3.9.6, SQLite 3.54.0) a quiet WAL-mode source with no `-shm` beside it fails `ro_connect`
+   ("unable to open database file"); plus operator items: the launchd schedule, a retention for generations, and
+   whether a missing store on another machine is an error. (b) *Link and swap gates*: the root-link follow gate is wide
+   (a same-user relayout of a store root to `~/.ssh` or `~` would be copied; fix: per-store expected link targets,
+   HOME and secrets directories as errors); a symlinked PARENT of a store root (`~/.cursor` itself a link) is followed
+   without the HOME check; `O_NOFOLLOW` guards only the last component, so a session DIRECTORY swapped for a symlink
+   after the `under_symlink` check is followed by `ro_connect` and `copy_regular` alike (fix: open the resolved root
+   once and walk each component with `os.open(part, O_NOFOLLOW | O_DIRECTORY, dir_fd=...)`, taking the expected inode
+   from the final descriptor); `ro_connect` without a `base` still follows a parent link swapped in between
+   `is_linked` and the open (walk from HOME with `O_NOFOLLOW`, `base=excluder.real_home`); `?nofollow=1` in a SQLite
+   URI is ignored by Python's sqlite3 (checked on 3.53.1), so the fd identity check in `ro_connect` is the only guard,
+   with a swap-and-swap-back window of microseconds; single-file roots copy through `copy2(follow_symlinks=False)` after
+   the gate and keep a tiny FIFO race (route them through `copy_regular`); hard links pass the identity check and are
+   copied as content; `check_tree_sidecars` looks sidecars up by absolute path after the schema check, so a session
+   directory or ancestor replaced in between can pair the old database with a replacement tree's `meta.json` under
+   `--check-schemas --strict-stores` (exit 0; Codex pass 21 P2; look the sidecar up relative to the held session
+   directory descriptor as the copy does). (c) *Manifest reporting*: a root link to a FILE is listed in `root_symlinks`
+   like a tree; a refused root link is in the manifest but not on stderr; a followed Hermes link is not in
+   `root_symlinks`; `root_symlinks` also lists dangling targets, which appear under `missing` too; a tree root that
+   exists but is not a directory yields no databases silently. (d) *Exclusions and guards*: `~/.ssh` is not on the
+   exclusion list (nothing configured reads it today, but a future file store under `~` would copy keys; also add SSH
+   key names, `.netrc` and AWS `credentials`); `--check-schemas` only lstats file-store roots and never opens their
+   files, so a credential file added to a file store's glob is not caught; it opens excluded-name databases read-only
+   for their schema; Muse's `tui-history.jsonl` holds everything typed into that TUI (covered by the usage warning). (e)
+   *Dry run*: it never opens a database, so it cannot predict a schema-guard failure (an unexplained `api_key` column
+   gives dry-run rc 0 while the real run is rc 1): say so in the usage text and point to `--check-schemas`; it accepts
+   any nonempty `ADE_BACKUP_HERMES` without resolving it (`bin/ade-backup-stores:1816`, still `os.environ.get` on
+   2026-10-23), so a nonexistent or non-executable override gives `--dry-run --only hermes-export` rc 0 while the real
+   run fails with FileNotFoundError (Codex pass 21 P2; resolve with `shutil.which` / `os.access(X_OK)` and report an
+   error); `check_tree_sidecars` lstats by path, so a parent directory swapped for a link mid-run is passed through once
+   (reveals only a name and file type). (f) *Disclosure*: adversary round 18's probe ran the tool for real against the
+   real HOME (no content copied; 274 Cursor `store.db-shm` mtimes bumped; manifest deleted); the adversary definition
+   now forbids it (e9a77fe).
+2. **Scan: `bin/ade-scan-state` and `bin/ade-scan-state-doc`** (PR [27](https://github.com/djbclark/djbclark-ade/pull/27),
+   open 2026-10-23 at c4d9835; adversary round 61 APPROVE). A read-only scan of the bigteam task trees and the Orca
+   checkouts, and the generator of `docs/ade-everywhere-phase0-scan-2026-10-20.md`. About 60 adversary rounds and 54
+   Codex passes; every MEDIUM and P1 is fixed in the PR. Queued from them (LOW/INFO, 2026-10-20 to 2026-10-23; none
+   blocks the merge; fixed findings are not repeated, and those given without a fix commit may already be fixed, so
+   re-check against the code first). **Operator decision:** the committed snapshot is stale and its generator now
+   differs: section 3.1 names only 4 of a task's reports (`research-brain-emulation-agent-teams` has 22), the scan's
+   JSON was not kept (`phase0-scan-work/scan.json` holds the rendered markdown), and the doc predates the `graft/` and
+   bundle-prefix changes (its do-not-run note covers it). Re-rendering needs a fresh `bin/ade-scan-state` run (read-only
+   on the checkouts, no `--fetch`), then regenerate and commit. Sub-items: (a) *What counts as pushed*: stale
+   `refs/remotes/origin/*` refs can hide a commit origin has since dropped (a merged-and-deleted or force-pushed branch;
+   `--fetch` or `ls-remote` per repo would see it); a linked worktree outside the scanned roots is invisible from its
+   main checkout (`git worktree list` per repo); tags on branchless commits are not counted; a local-path origin reads
+   "pushed"; `_remote_cache` is keyed by (common dir, first origin url) without the `--remote` flag (no CLI path mixes
+   them today); `local_only_verified` can be true while `invalid_origin_refs` > 0 (optionally false then); history
+   reachable only through a nonempty `info/grafts` reads clean and pushed (flag it); a forged `objects/info/commit-graph`
+   (`-c core.commitGraph=false`); an origin that lies is by design (stated in the usage text). **`--fetch` writes
+   whatever origin sends into the checkout with no size bound** (Codex pass 45 P2, security): only the 120 s timeout
+   limits it; a real fix is a quarantine repository with disk accounting (or a size-limited object store); documented in
+   the help text, opt-in. (b) *Credentials*: an empty fragment counts as a credential on scp and transport forms but not
+   on `scheme://`; scp `user:pw@host:repo` is not flagged (ssh, never handed to a helper as argv; INFO); the `%`-rule
+   over-flags IPv6 zone ids (`[fe80::1%10]`) and local paths with `%3A` (safe direction, no change); `config_offenders`
+   still prints a secret placed in a url PATH segment of a subsection (`url.https://h/tok/SECRET/.insteadOf`,
+   `credential.https://h/SECRET.helper`, `includeIf.hasconfig:remote.*.url:https://h/SECRET/**.path`). (c) *Generated
+   commands*: a detached-HEAD row emits `push`/`bundle create refs/heads/HEAD`, which fail loudly (r13; emit `HEAD` for
+   the bundle and no push when the branch is `HEAD`); the 3.1 copy command (`cd <task dir> && gcp --parents -t <DEST>/...`)
+   needs an absolute `<DEST>`; bundle rows write to the fixed `~/ops/site-private/bundles/<rel>/all.bundle` (inside the
+   site-private repo) instead of `<DEST>`, so a reader following `<DEST>` elsewhere must rewrite it (decide whether
+   bundles belong there or in a non-repo vault); the "(branches not itemised)" label beside a HEAD row is misleading
+   though the `--all` bundle captures everything; the section-3 preamble could say the BSD fallbacks (`cp` without
+   `--parents`) need coreutils and gnu-tar; a literal `|` inside a fmt string (`||`) is not escaped by `code()`, so the
+   gitdir, modified and stash rows split their table cell in GFM (escape `|` in fmt text; tests comparing raw `||` would
+   need `\|\|`); a split index (`core.splitIndex`) needs `sharedindex.*` copied beside the index copy; the manifest
+   member `modified.list` collides with a tracked top-level `modified.list` on extraction (use a `.git-capture/` member
+   name via `--transform`); the children step's nonzero exit stops the chain silently (`|| { cat hidden.err >&2; false; }`);
+   `SYMLINK_GITDIR_FMT` on a link to a linked worktree's admin dir fails loudly without archiving the commondir (reuse
+   `GITDIR_FMT`'s step) and `GITDIR_FMT` refuses `gitdir: x\n\n`, which git accepts (loud, nothing lost); the gitdir span
+   archives any directory a `.git` file names (empty path, non-git or hostile target) with rc 0 (check `$g/HEAD` and
+   `$c/objects` first, and `[ -d "$g/refs" ]`); the submodule row's plain `git status` can run
+   `<common>/modules/<sub>/hooks/post-index-change` (same trust as the superproject's hooks; prefix its git calls with
+   `-c core.hooksPath=/dev/null -c core.fsmonitor=false`, or state in the docstring and `docs/threat-model.md` that hooks
+   are trusted like the human's own); a corrupt stash ref also gives rc 1 (reached only when the reflog file is missing);
+   a lone surrogate outside U+DC80..DCFF reaches `_quote` and prints as `\ud800` text (refuse it there); `gfm_cells` is
+   applied only to the real submodule checkout's rows (assert it on the counts-unknown, `.git`-symlink and push/bundle
+   rows too); display `esc(in_code=False)` writes a value's `\|` as `\\|`, which renders as `|` (display only). (d)
+   *Refinements of the reflog and hidden-path rows*: the reflog count
+   (`rev-list --count --reflog`) flags most active checkouts for ~30 days after an amend, squash-merge or force-fetch;
+   walk only `HEAD` and `refs/heads/*` reflogs including other worktrees, leave `refs/remotes/*` out, optionally drop
+   patch-id-equal commits; the index-hidden count could also require that the worktree file differs from the index blob
+   (`ls-files -s` against `hash-object --stdin-paths`) so sparse checkouts stop flagging; an assume-unchanged or
+   skip-worktree submodule gitlink is a hidden directory with a `.git` file and is reported as an embedded pointer
+   repository on top of the submodule handling; a checkout with untracked paths AND a repository found only under a
+   hidden path does not name the hidden one in the `what` cell (the command is in the row); the pointer-repo note is
+   inexact when the pointed-at gitdir is inside the checkout. (e) *Scanner reach and wording*: a repository nested under
+   a `SKIP_DIRS` name (`target/`, `node_modules/`) is not scanned and the help text does not list those names; only
+   top-level submodules are listed (no `--recursive`); a stash reflog that is a FIFO hangs the scan and one linked to
+   /dev/zero exhausts memory (needs write access to the checkout's `.git`); `scan_bigteam` lists the bigteam root with an
+   unguarded `os.scandir` (an unreadable root raises); `newest_mtime` and `du_bytes` ignore unreadable dirs (size and
+   mtime columns only); the "(reference search failed)" labels are narrow for a traversal-incomplete task; a symlinked
+   `.gitignore` or `.gitattributes` makes the scan `incomplete` without naming the file; a global absolute `lfs.storage`
+   store shared by several checkouts is archived once per checkout; very long hidden paths (~1 KB each, up to the 1000
+   cap) could hit E2BIG, which `run()` turns into rc 124 (`scan incomplete`, not partial); `render` raises on
+   `summary.bigteam.verdicts: null` and on `bigteam` without `tasks` (the scanner never writes either); a `config.worktree`
+   holding an outside `core.worktree` is refused even without `extensions.worktreeConfig`, a case variant of the
+   checkout name is refused (APFS), and a malformed operator global config makes every push row bundle-only
+   (conservative; none repaired). (f) *Prose that goes stale*: `bin/ade-scan-state-doc` section 2 hard-codes
+   "the 41 `unique`/`mixed` bigteam report sets" (line ~471), false on a git-only scan and after the numbers move (round
+   61 LOW; compute it from the data). (g) *Tests*: the `$GTAR` source-count guard in
+   `test_every_archive_ignores_the_operators_tar_options` is textual; optionally run the whole-directory and
+   submodule-untracked commands under `TAR_OPTIONS=--exclude=*` too.
 
 ## Keep every machine current, and a changelog (djbclark, 2026-10-20; proposal Q26, T8)
 
@@ -242,13 +456,26 @@ added." Done the same day: `CHANGELOG.md` (Keep a Changelog form, seeded from th
 since 2026-10-09), AGENTS.md code-review rule 10 (every PR adds its line), README "Update
 (this machine)" (the manual procedure today), proposal v2.4 (T8, 4.4 item 9, §9.4 Q26). Queued:
 
-1. **`bin/ade-update`, the interim one command** (one small PR, Sonnet `code` slice): `git -C
-   ~/src/djbclark-ade pull --ff-only` (stop and print `git status` on a dirty tree or a diverged
-   branch; never stash another agent's edits), then `bin/skill-everywhere --check` over every
+1. **Done 2026-10-20** (PR #20) **`bin/ade-update`, the interim one command** (one small PR, Sonnet `code` slice): fetch once,
+   check the upstream commit, and fast-forward `~/src/djbclark-ade` to exactly that checked SHA
+   (never a second `git pull` that could move past what was checked; stop and print `git status`
+   on a dirty tree or a diverged branch; never stash another agent's edits), then `bin/skill-everywhere --check` over every
    `skills/*` (relink what is missing), the `~/.claude/{commands,agents,hooks}` symlink check,
    and print the `CHANGELOG.md` entries between `~/.local/state/ade/applied` (written at the end)
    and the new head; `--check` only reports. A test with a temp repo. README's section then
    names it. It becomes `ade update` in Phase 1 (proposal 4.4 item 9).
+   **Carried 2026-10-23 from adversary rounds 10, 11, 17 and 18 on PR #20 (merged; LOW/INFO):** (a) `--check` misses a
+   case-only collision on a case-insensitive filesystem (apply stays safe: git refuses, exit 2): compare `casefold()`ed
+   paths when `core.ignorecase` is true. (b) `git status --ignored -uall` lists every file under every ignored tree (5k
+   entries here); use `--ignored=matching` if a huge `node_modules` ever matters. (c) an installed
+   `~/.local/bin/ade-update` must resolve into the canonical checkout: the tool warns on stderr when it runs from
+   elsewhere, but the Phase 1 installer or the daily timer (item 2) should verify it. (d) `run()` decodes git output as
+   strict UTF-8, so a non-UTF-8 upstream path crashes every mode with rc 1 (not in the documented exit set; fail-closed);
+   upstream entry names print raw in the text report (JSON is safe). (e) `helper_env` always drops
+   `SKILL_EVERYWHERE_ONLY`, but `docs/skill-everywhere.md:70` needs it on the Grok Bot box, where nothing runs
+   `ade-update`; the R15-2 test checks `helper_env` but not that `check_skills` and `link_skills` use it. Out of scope for
+   that PR, in `bin/skill-everywhere` on master: `render_copy` runs under `set -e` inside `&&`/`eval` (the errexit is
+   ignored there), and check mode leaks a `mktemp` file.
 2. **A daily `--check` timer** (launchd here, systemd user unit on Linux) that writes a
    "behind by N commits" line Hermes's dashboard and `ade doctor` can show; a `fleet-watch`
    notice when a machine is more than a week behind. After item 1.
@@ -1163,16 +1390,55 @@ works on the runner (run 239; `ghcr.io/cirruslabs/android-sdk:36` pulled in 47 s
 ## `hermes` route in relay.py (asked via the load-watch session, 2026-10-23)
 
 Relayed by the load-watch session (ac1d55cc) as djbclark's ask: agents should be able to message the live Hermes
-gateway agent with `relay.py`. Verified research and design:
-`~/.local/state/bigteam/loadgate-followup-2026-10-23/hermesbidi-report.md` (Q4 is the design, under 150 lines).
+gateway agent with `relay.py`. Design: `~/.local/state/bigteam/loadgate-followup-2026-10-23/hermesbidi-report.md` (Q4).
 
-1. Route `hermes`, chosen for a `hermes-gw` fleet row with a `sid` (`fleet.py` `_hermes_gateway`); its only route, no
-   fallback to pane or socket. Send `hermes --resume <sid> -z <text>`, `stdin=DEVNULL`, timeout from `--wait` (at least
-   90 s); stdout is the reply. A timeout is `unverified` ("do not resend"), never a second route.
-2. ACP cannot load gateway sessions and `messages_send` is outbound-only: neither is a transport.
-3. **Verify the claim first** with a harmless test against a throwaway Hermes session (the report ran no tests); this
-   writes into a live transcript, so never against djbclark's Telegram session without his yes.
-4. Tests: plan() for a fake `hermes-gw` row is `["hermes"]`; missing sid is refused; argv is `--resume SID -z TEXT`
-   with stdin closed; timeout is exit 1; `--via hermes` on a non-Hermes session has no route.
-5. The Hermes-side skill (`peer-relay`: to message a peer run `relay.py <ident> "<text>"` by absolute path) is
-   Hermes-owned: ask djbclark, do not edit `~/.hermes` from here.
+1. **Verified 2026-10-23** on a throwaway oneshot session (`~/.local/state/bigteam/relay-hermes-route/`):
+   `hermes --resume SID -z TEXT` with stdin closed replied from the earlier turn's context, grew the same session
+   from 2 to 4 messages and created no new one; an unknown sid exits 1 with "session not found" and creates nothing.
+   **Real gateway run 2026-10-23** (load-watch session relayed djbclark's yes): `relay.py hermes:16790ed2` (Telegram topic
+   inbox-ops) rc 0, `delivered`, reply `RELAY OK`, stored user row tagged `[relay from djbclark-ade-61]`,
+   0600 lock free afterwards (`message_count` is a per-run counter a `-z` turn rewrites, not the transcript size: the session
+   has 4102 message rows); evidence in `~/.local/state/bigteam/relay-hermes-route/real/`.
+2. **Built; adversary rounds 1 and 2 BLOCKed, repaired** (reports in `~/.local/state/bigteam/relay-hermes-route/`,
+   `adversary-report-1.md`, `adversary-report-2.md`): route `hermes` in `skills/session-finder/relay.py`
+   (`route_hermes`, the only route for a `hermes-gw` row with a `sid`; no fallback), `TestHermesRoute` in
+   `tests/test_relay_fallback.py`. Round 1: exact not-found match, no self-relay, no kill, scrubbed env, reply as data.
+   Round 2: started line before the wait and floor 100 s (a caller's own tool timeout), per-conversation flock, a
+   nested relay tagged as Hermes, self-refusal by chat identity, `ACP_OPERATOR_APPROVED` scrubbed, 0600 reply files with
+   pruning, format characters stripped, hop claim narrowed to nested `hermes -z` turns. Round 3 was APPROVE (below).
+   The later `fleet.py` agent_close fix (4572876) had no adversary round of its own: a read-only SQL change, covered by a
+   unit test and checked on the real database.
+   Open by design: **R1-M2** (a relay while the gateway is mid-turn: `fleet.py` fixes the row at `idle`, and the
+   gateway's cached agent may not see the relayed exchange until it reloads; "delivered" means "ran on the stored
+   transcript"), **R1-L4** (the exchange is invisible in the chat but is history for djbclark's next turn; consider a
+   one-line chat notice), **R1-L5e** (`SessionResumeTooLargeError` on a long thread reports "unverified" with nothing
+   sent), **R2-L6** (a profile Hermes with its own `HERMES_HOME` gets "not sent" for another profile's conversation;
+   documented). Hop counting across non-Hermes routes (R2-M3) is not enforced: documented as nested-`-z`-only.
+   **Round 3: APPROVE at a70d792** (`adversary-report-3.md`); its M1-M3 and L4/L5/L6a/L8 are repaired in the next commit
+   (claims made true about a caller's tree-kill, session-key self-refusal for desktop, real-process lock test, handler
+   test). Left open, low: R3-L1 (not-found forgery by a process that rewrites the `.err` within 50 ms), R3-L2 (signal in the
+   microsecond window before the handler), R3-L3 (RELAY_SENDER/RELAY_HOPS leak to everything a relayed turn starts),
+   R3-L6b-e (prune race, lock files never pruned, no holder pid in the refusal), R3-L8e (`--json` timeout result has no
+   `reply_file` field).
+   **2026-10-23, load-watch report:** a relayed turn ends its row with `end_reason=agent_close`; the gateway treats that as
+   recoverable (`hermes_state_common._RECOVERABLE_END_REASONS`) and reopened the same session about five minutes later
+   (`~/.hermes/logs/gateway.log`: "reopened ended session 20261005_212354_16790ed2 ... keeping route"), so no context is lost
+   and the next Telegram message continues the same session. The bug was fleet.py hiding the row in that window; fixed
+   (`_hermes_gateway` lists `agent_close` rows not superseded by a newer row of the same session key).
+3. **Installed 2026-10-23 16:29** by Hermes itself on a relayed brief from the load-watch session (djbclark's ask): `~/.hermes/skills/peer-relay` is a symlink to `skills/peer-relay`. Hermes-to-peer direction is the load watcher's retest.
+
+## relay.py pane route: open lows after adversary round 9 (2026-10-23)
+
+Rounds 1-9 on the route ladder; round 9's four mediums are repaired in eda41d3. Still open (reports:
+`~/.local/state/bigteam/adhoc-2026-10-23/relay-ladder-adversary-report-9.md`, items 5, 6, 8, 10):
+
+1. A queue `enqueue` counts as "delivered"; if the operator pulls it back into the box (Up, Esc-interrupt: `remove`
+   with a reason other than `absorbed_mid_turn`, or `popAll`) the caller is told "delivered" while the text sits in the box.
+   Label an enqueue "queued" and treat a later pull-back as not delivered.
+2. A short common text ("continue", "yes", "1") the operator types himself within the hour counts as our delivery;
+   require the user line's timestamp near the entry's `at`.
+3. One unsent entry per session id: arming a second text overwrites the first (key by session id and folded text, or
+   refuse to type a new text while another unproven entry is younger than the TTL).
+4. No real `herdr agent read --format ansi` or `tmux capture-pane -e` capture of an idle Claude Code pane is committed
+   as a fixture; `box_parse` is proven on synthetic screens only (a statusline row of 10+ `─` below the box, or queued
+   messages drawn as `❯` rows under a rule, would make it skip for good).
