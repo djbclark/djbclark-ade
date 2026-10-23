@@ -168,6 +168,10 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- Restored the executable bit on 12 tracked scripts with a shebang (d618809, 2026-10-23): `claude/hooks/context_size_nudge.py`
+  had been 100644 since 836b306 (2026-10-19), so under `hook-deadline` it exited 127 and no context-size nudge ran for
+  four days; `bin/claude-settings-env` had lost it on this branch. `tests/test_bin_modes.py` now fails on any tracked
+  file with a shebang outside `tests/` that is not 100755 (#32).
 - `self-slash --finish --successor` after its first live run (2026-10-23): reads the agent id behind Paseo 0.13's
   `Using workspace <id>` line before the JSON (the successor started but this agent was not archived); copies the old
   agent's `--mode` only to the same provider (an omp `full` made `paseo run` refuse a claude successor), else
