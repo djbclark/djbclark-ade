@@ -68,9 +68,9 @@ load drops below the threshold sleeps a random 5-30 s, never past --wait (so que
 and re-checks. `--json` prints one JSON object with the same fields. It only decides whether to START work:
 it never kills, throttles or signals anything. Memory gate (operator 2026-10-23, "your recommended is fine"):
 `admit` also reads the compressor churn (macOS `vm_stat` Compressions + Decompressions over 0.5 s, pages/s) and
-is hot when it exceeds --max-mem-churn (default 20000, PROVISIONAL: the 2026-10-23 spike, load 42-74 with 37%
-memory free and 86-92% swap, showed 35-45k pages/s; no calm baseline yet, so recalibrate from a quiet
-reading). Load and swap alone did not separate that spike from a calm hour. The result and the `--json`
+is hot when it exceeds --max-mem-churn (default 60000, calibrated 2026-10-23 from 215 ten-second samples:
+calm tail 11-22k, load 10-25 p50 49k, load >=25 p50 80k and p90 108k pages/s; one session's data, so
+recalibrate with more; the first guess, 20000, sat below the load<10 median of 34k). Load and swap alone did not separate that spike from a calm hour. The result and the `--json`
 record carry `mem_churn_pages_s`; where `vm_stat` is unavailable (Linux) the gate never blocks. Test hooks (acp-dispatch scrubs them from the environment it
 gives admit): LW_FAKE_LOAD1 (a load, or a comma list read one per poll with the last value repeating),
 LW_FAKE_CHURN (the same for churn; with only LW_FAKE_LOAD1 set, churn reads 0),
@@ -1118,9 +1118,10 @@ ADMIT_PER_CORE = 1.5  # the threshold ~/ops/site-private/bin/bg uses; LOAD_PER_C
 ADMIT_FRESH_S = 120   # state.json older than this says nothing about the machine now
 # Memory gate (operator 2026-10-23): load alone cannot tell a busy host from a thrashing one (the 2026-10-23
 # spike was load 42-74 with kern.memorystatus_level 37% and swap 86-92%, the same swap a calm hour shows).
-# What it did show was compressor churn: 35-45k pages/s compressed plus decompressed. PROVISIONAL default,
-# set from that one spike with no calm baseline yet: recalibrate once a quiet reading exists.
-ADMIT_CHURN_PAGES_S = 20000
+# What it did show was compressor churn. Calibrated 2026-10-23 from 215 ten-second samples (10:20-10:52):
+# load<10 p50 34k, 10-25 p50 49k, >=25 p50 80k and p90 108k pages/s; the calm tail read 11-22k. 60000 sits above
+# calm and the mid-load median and below the thrash median. Still ONE session's data: recalibrate with more.
+ADMIT_CHURN_PAGES_S = 60000
 ADMIT_CHURN_WINDOW_S = 0.5
 EX_TEMPFAIL = 75
 
@@ -1318,7 +1319,7 @@ def main():
                    help=f"admit when 1-minute load per core is at most N (default {ADMIT_PER_CORE:g})")
     p.add_argument("--max-mem-churn", type=float, default=ADMIT_CHURN_PAGES_S, metavar="N",
                    help=f"and compressor churn (pages compressed + decompressed per second) is at most N "
-                        f"(default {ADMIT_CHURN_PAGES_S:g}, provisional)")
+                        f"(default {ADMIT_CHURN_PAGES_S:g}, calibrated 2026-10-23)")
     p.add_argument("--wait", type=float, default=0, metavar="SECONDS",
                    help="poll every 15 s for up to SECONDS before giving up with exit 75 (0: a pure check)")
     p.add_argument("--json", action="store_true")
