@@ -11,6 +11,9 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- `autorename` renames a Paseo-hosted session's workspace to the title in lower-case hyphen form plus `-pw`
+  (`paseo-skill-sync-overwrite-fix-pw`; `--auto` keeps a workspace already ending in `-pw`); herdr tab labels keep
+  `-t` (2026-10-23).
 - `bin/ade-backup-stores`: Phase 0 backups, a SQLite online-backup copy of every live agent session database, the
   per-session trees and file stores and the Hermes JSONL export (run against a scratch copy of the Hermes
   database), with a hashed `MANIFEST.json`, built in `<dest>.part/` and renamed when complete; `--dry-run`,
