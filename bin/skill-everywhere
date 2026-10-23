@@ -195,9 +195,10 @@ if wanted hermes && command -v hermes >/dev/null \
 fi
 
 # After linking, nudge the running Hermes gateway to force plugin re-discovery
-# (#87770). A skill that also adds a Telegram slash command (e.g. /helm, /steps,
-# registered by ~/.hermes/plugins/skill-slash) does not reach the live gateway
-# until plugins reload; this makes it dispatch immediately instead of waiting
+# (#87770). A plugin slash command (e.g. /helm, registered by
+# ~/.hermes/plugins/skill-slash) does not reach the live gateway until plugins
+# reload. /steps is native skill slash — do not register it in that plugin.
+# The nudge makes a plugin command dispatch immediately instead of waiting
 # for a manual gateway restart from Terminal. Idempotent and cheap. Does nothing
 # when the gateway is not running or predates the verb.
 if [[ $mode == link ]] && ((!dry)) && wanted hermes && command -v hermes >/dev/null; then

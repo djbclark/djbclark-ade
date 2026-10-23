@@ -111,11 +111,17 @@ put: a usage limit, an expired login, or no provider configured. Report those
 TUIs as unverified, not as broken, and re-check once the account works.
 
 Hermes Telegram `/name` is a **slash command**, not a skill lookup. Linking
-via this tool puts the skill in `skills.external_dirs`; it does **not**
-register `/steps`. That lives in `~/.hermes/plugins/skill-slash` (`/steps`,
-`/helm`, `/helm-all`, `/session-finder-all`, `/baton`, `/skill <name>`). Enable `skill-slash` in `plugins.enabled`. Since 2026-10-06
-`skill-everywhere` auto-nudges the running gateway (`reload-plugins` control
-socket) so a plugin command like `/helm` or `/steps` dispatches immediately —
+via this tool puts the skill in `skills.external_dirs`. A skill whose name
+does not collide with a core command (including `/steps`) is native skill
+slash: the gateway injects `SKILL.md` and the agent runs. Do not also
+register that name in `~/.hermes/plugins/skill-slash`. A plugin handler
+return is a user reply, so it dumps the skill markdown and the agent never
+calls `clarify`. The plugin still registers `/helm`, `/helm-all`,
+`/session-finder-all`, `/baton`, and `/skill <name>` (those names are not
+native skill commands, or they must stay plugin-owned). Enable `skill-slash`
+in `plugins.enabled`. Since 2026-10-06 `skill-everywhere` auto-nudges the
+running gateway (`reload-plugins` control socket) so a plugin command like
+`/helm` dispatches immediately —
 no manual gateway restart. The Telegram pull-up `/` menu is only republished
 at adapter (re)connect, so a just-added command may not autocomplete until the
 next restart, but typing it still works and `/commands` lists it. If you cannot

@@ -12,7 +12,7 @@ description: >-
 # steps — one open item at a time, recommendation first
 
 Canonical copy: `~/src/djbclark-ade/skills/steps/` (git: `~/src/djbclark-ade`, github.com/djbclark/djbclark-ade); every TUI reaches it via a direct skill-everywhere link `~/src/djbclark-ade/skills/steps`.
-Hermes Telegram `/steps` needs plugin `skill-slash` (not just the skill file).
+Hermes Telegram `/steps` is native skill slash. It injects this skill; call `clarify` (section 2b) so Telegram shows one button per choice. Do not register a plugin command that returns this file — that dumps the markdown and never starts the walk.
 Claude Code: `site-private/claude/commands/steps.md` → `~/.claude/commands/`.
 Grok Bot: a rendered copy `ade-steps` in `/home/box/agent-data/workflows/` (skill-everywhere `grokbot`
 target, synced nightly by `/home/box/agent-data/shared/skills-sync/sync.sh`; 2026-10-23).
@@ -149,8 +149,11 @@ strings **are** the Telegram button labels.
 2. Pass 2–4 strings in `choices`. First string is the recommendation; Hermes
    marks it `(Recommended)` in CLI — do not write that label yourself.
 3. Keep each choice under ~60 characters, self-contained (he should not need
-   the message body to know what tapping the button does). Do not number
-   them. Put the consequence in the string (`Skip — leave pager as-is`).
+   the message body to know what tapping the button does). Section 2b
+   overrides shared rule 2a on Hermes: do not number the choice strings.
+   Hermes and Telegram number the buttons; a leading `1.` becomes a double
+   number and is not how he taps. Put the consequence in the string
+   (`Skip — leave pager as-is`).
 4. Artifacts go in the prose line before the call, not inside `choices`.
 5. One entry in `questions`. `multi_select` stays off.
 
