@@ -24,10 +24,24 @@ from typing import override
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = Path(os.environ.get("SELF_SLASH_SCRIPT", str(ROOT / "bin" / "self-slash")))
 
+
+def _bash3() -> str:
+    """/bin/bash when it is bash 3.x (macOS ships 3.2), else an empty string."""
+    try:
+        out = subprocess.run(["/bin/bash", "-c", "echo ${BASH_VERSINFO[0]}"], capture_output=True, text=True, check=False)
+    except OSError:
+        return ""
+    return "/bin/bash" if out.stdout.strip() == "3" else ""
+
+
+BASH3 = _bash3()
+
 FAKE_PASEO = textwrap.dedent("""\
     #!/bin/bash
     # fake paseo: record argv, answer the few calls self-slash makes
     echo "$*" >> "$FAKE_LOG"
+    # argv with clear boundaries: a marker line, then one argument per line (adv-selfslash-1, L5)
+    { echo "@@call@@"; printf '%s\\n' "$@"; } >> "$FAKE_LOG.argv"
     echo "$1 $2: PASEO_AGENT_ID=${PASEO_AGENT_ID-unset} PASEO_AGENT_CWD=${PASEO_AGENT_CWD-unset}" >> "$FAKE_LOG.env"
     case "$1 $2" in
       "agent inspect")
@@ -67,7 +81,10 @@ FAKE_PASEO = textwrap.dedent("""\
       send) echo '{}';;
       run)
         if [ -n "$FAKE_RUN_FAIL" ]; then echo "Provider claude is unavailable" >&2; exit 1; fi
-        if [ -n "$FAKE_RUN_JSON" ]; then echo "$FAKE_RUN_JSON"; else
+        # Paseo prints its status line (and any Node warning) on stderr, the JSON on stdout
+        echo "Using workspace ${FAKE_RUN_WS-ws-1}" >&2
+        [ -n "$FAKE_RUN_STDERR" ] && echo "$FAKE_RUN_STDERR" >&2
+        if [ -n "$FAKE_RUN_JSON" ]; then printf '%s\\n' "$FAKE_RUN_JSON"; else
         echo '{"agentId": "new-agent-1", "status": "created", "provider": "claude", "cwd": "x", "title": "t"}'; fi;;
     esac
     exit 0
@@ -121,6 +138,16 @@ class SelfSlashPaseoTests(unittest.TestCase):
 
     def paseo_calls(self) -> list[str]:
         return self.calls.read_text().splitlines() if self.calls.exists() else []
+
+    def argv_of(self, verb: str) -> list[str]:
+        """The exact argv (one element per argument) of the first paseo call whose first word is VERB."""
+        argv_log = Path(f"{self.calls}.argv")
+        blocks = argv_log.read_text().split("@@call@@\n")[1:] if argv_log.exists() else []
+        for block in blocks:
+            args = block.split("\n")[:-1]
+            if args and args[0] == verb:
+                return args
+        self.fail(f"no {verb} call in {blocks}")
 
     def log_text(self) -> str:
         return self.log.read_text() if self.log.exists() else ""
@@ -389,11 +416,13 @@ class SelfSlashPaseoTests(unittest.TestCase):
         return {"FAKE_CWD": cwd, "FAKE_CWD2": cwd2, "PASEO_AGENT_CWD": cwd,
                 "SELF_SLASH_SUCCESSOR_SETTLE": "0", **extra}
 
-    def run_waiter(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
-        """The waiter itself, in the foreground, as the parent spawns it (its exit code is observable)."""
+    def run_waiter(self, *args: str, interp: str = "", **extra: str) -> subprocess.CompletedProcess[str]:
+        """The waiter itself, in the foreground, as the parent spawns it (its exit code is observable).
+
+        INTERP, when given, is the interpreter to run the script with (default: its shebang)."""
         env = {**self.env, **self.succ_env(), "SELF_SLASH_CHILD": "1", "SELF_SLASH_FINISH": "1",
                "SELF_SLASH_SUCCESSOR": "claude/claude-opus-5-5", "SELF_SLASH_S_THINKING": "high", **extra}
-        return subprocess.run([str(SCRIPT), "--delay", "0", "/quit"], env=env, text=True,
+        return subprocess.run([*([interp] if interp else []), str(SCRIPT), "--delay", "0", "/quit"], env=env, text=True,
                               capture_output=True, timeout=60, check=False)
 
     def test_successor_starts_baton_then_archives_in_order(self) -> None:
@@ -432,11 +461,22 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertIn("--title Next lead --no-wait", run)
 
     # --- first live run, 2026-10-23: three failures in a row ---
-    def test_successor_reads_the_agent_id_behind_a_status_line(self) -> None:
-        # Paseo 0.13.0-beta.1 `run --json` prints "Using workspace <id>" before the object.
-        r = self.run_waiter(FAKE_RUN_JSON='Using workspace ws-1\n{"agentId": "new-agent-1", "status": "running"}')
+    def test_successor_reads_the_agent_id_from_stdout_beside_stderr_noise(self) -> None:
+        # Paseo 0.13.0-beta.1 `run --json` prints "Using workspace <id>" on stderr (console.error), the
+        # JSON on stdout; so does a Node warning with brackets, which broke the old merged parse (L4).
+        r = self.run_waiter(FAKE_RUN_JSON='{"agentId": "new-agent-1", "status": "running"}',
+                            FAKE_RUN_STDERR="(node:1) [DEP0040] DeprecationWarning: the punycode module is deprecated {x}")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("archived test-agent (successor new-agent-1)", r.stdout)
+
+    @unittest.skipUnless(BASH3, "/bin/bash is not bash 3.x")
+    def test_successor_to_a_non_claude_provider_works_on_bash_3(self) -> None:
+        # An empty mode_args array is "unbound variable" under set -u on bash < 4.4 (macOS /bin/bash
+        # is 3.2); the other tests run the script's `env bash` shebang (adv-selfslash-1, L2).
+        r = self.run_waiter(FAKE_OLD_PROVIDER="omp", FAKE_OLD_MODE="full", FAKE_NEW_MODEL="gpt-5.4",
+                            SELF_SLASH_SUCCESSOR="codex/gpt-5.4", interp=BASH3)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("--mode", self.argv_of("run"))
 
     def test_successor_from_another_provider_never_copies_its_mode(self) -> None:
         # An omp agent's mode "full" is not a claude mode: `paseo run` refused it (AGENT_CREATE_FAILED).
@@ -458,18 +498,48 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("--mode plan ", next(c for c in self.paseo_calls() if c.startswith("run ")))
 
+    def make_chain(self, name: str = "SESSION_LOG.md") -> str:
+        path = Path(self._tmp.name) / "chains" / "standalone-x" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _ = path.write_text("chain\n")
+        return str(path)
+
     def test_successor_baton_names_the_chain_log(self) -> None:
         # A lead whose chain lists the repo as a side workspace has no pointer at <repo>/main: a bare
         # /baton resumed another chain's work. --baton PATH gives the successor the chain explicitly.
-        chain = "/tmp/chains/standalone-x/SESSION_LOG.md"
+        chain = self.make_chain()
         _ = self.run_ss(*self.SUCCESSOR, "--baton", chain, **self.succ_env())
         self.wait_log("archived test-agent (successor new-agent-1)")
-        run = next(c for c in self.paseo_calls() if c.startswith("run "))
-        self.assertTrue(run.startswith(f"run /baton {chain} --provider "), run)
+        # ONE argument "/baton PATH" (the fake logs one argument per line): two would be a /baton with a
+        # stray argument for paseo run, not the chain (adv-selfslash-1, L5)
+        run = self.argv_of("run")
+        self.assertEqual(run[1], f"/baton {chain}", run)
+        self.assertEqual(run[2], "--provider", run)
+        self.assertEqual(run.count(chain), 0, run)
 
     def test_baton_flag_needs_successor(self) -> None:
         r = self.run_ss("--finish", "--baton", "/x")
         self.assertEqual(r.returncode, 2)
+
+    def test_l1_baton_must_be_an_absolute_printable_existing_file(self) -> None:
+        chain = self.make_chain()
+        forged = self.make_chain("a\n2026-10-23 18:00:00 FORGED test-agent: sent compact")
+        tabbed = self.make_chain("a\tb")
+        for bad, needle in (("SESSION_LOG.md", "absolute"),
+                            (str(Path(chain).parent / "missing.md"), "existing regular file"),
+                            (str(Path(chain).parent), "existing regular file"),
+                            (forged, "printable"),
+                            (tabbed, "printable")):
+            for run in (lambda b: self.run_ss(*self.SUCCESSOR, "--baton", b, **self.succ_env()),
+                        lambda b: self.run_waiter(SELF_SLASH_S_BATON=b)):
+                r = run(bad)
+                self.assertEqual(r.returncode, 2, f"{bad!r}: {r.stdout}{r.stderr}")
+                self.assertIn(needle, r.stderr)
+        self.assertEqual(self.paseo_calls(), [])
+        self.assertNotIn("FORGED", self.log_text())
+        r = self.run_waiter(SELF_SLASH_S_BATON=chain)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f'prompt "/baton {chain}"', r.stdout)
 
     def test_successor_run_failure_exits_11_and_archives_nothing(self) -> None:
         r = self.run_waiter(FAKE_RUN_FAIL="1")
@@ -477,6 +547,7 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertIn("successor: paseo run failed", r.stdout)
         self.assertIn("NOT archived", r.stdout)
         self.assertFalse(any(c.startswith("agent archive") for c in self.paseo_calls()))
+        self.assertIn("Provider claude is unavailable", r.stdout)  # stderr of paseo run, only in the failure
 
     def test_successor_that_is_a_subagent_exits_11_and_archives_nothing(self) -> None:
         r = self.run_waiter(FAKE_NEW_PARENT="test-agent")
@@ -556,6 +627,14 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertEqual(self.paseo_calls(), [])
         self.assertFalse(self.log.exists())
         self.assertFalse(self.lockdir.exists() and list(self.lockdir.iterdir()))
+
+    def test_successor_dry_run_prints_a_given_mode_once(self) -> None:
+        # `${s_mode:- ...}` expanded to the mode itself: "--mode planplan" (adv-selfslash-1, L3)
+        r = self.run_ss("--dry-run", *self.SUCCESSOR, "--mode", "plan", **self.succ_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--thinking high --mode plan --workspace <id>", r.stdout)
+        self.assertNotIn("planplan", r.stdout)
+        self.assertNotIn("<agent mode", r.stdout)
 
     def test_successor_takes_the_lifecycle_lock(self) -> None:
         self.lockdir.mkdir(parents=True)
@@ -720,6 +799,18 @@ class SelfSlashPaseoTests(unittest.TestCase):
             r = self.run_waiter(FAKE_RUN_JSON=run_json)
             self.assertEqual(r.returncode, 11, f"{run_json}: {r.stdout}{r.stderr}")
             self.assertIn(needle, r.stdout)
+        self.assertEqual(self.calls_of("agent archive"), [])
+
+    def test_l5_a_run_output_that_is_not_one_object_exits_11_and_archives_nothing(self) -> None:
+        # The two worst cases of adv-selfslash-1 plus the plain two-objects case: whatever stdout holds
+        # that is not exactly one JSON object must never pick an id, so nothing is archived.
+        for run_json in ('Using workspace ws-1\n{"agentId":"new-agent-1"}\n{"agentId":"victim"}',
+                         '[w]\n{"agentId":"new-agent-1"}',
+                         '{"agentId":"new-agent-1"}\n{"agentId":"victim"}',
+                         'Using workspace ws-1\n{"agentId":"new-agent-1"}'):
+            r = self.run_waiter(FAKE_RUN_JSON=run_json)
+            self.assertEqual(r.returncode, 11, f"{run_json!r}: {r.stdout}{r.stderr}")
+            self.assertIn("no single agent object", r.stdout)
         self.assertEqual(self.calls_of("agent archive"), [])
 
     def test_l2_top_level_check_needs_the_parent_and_status_keys(self) -> None:
