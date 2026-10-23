@@ -56,7 +56,9 @@ def operator_text(after: str) -> str:
         if txt.strip() and not (dim or grey or rev):
             plain.append(txt)
     text = "".join(plain).strip()
-    return "" if text.startswith(HINTS) else text
+    # Real hints are grey or dim and already dropped above; only a row that carried no style at all (a plain-text
+    # screen read) needs the string list. With styles, `Try "make test" first` in the default colour is the operator's.
+    return "" if text.startswith(HINTS) and "\x1b[" not in after else text
 
 
 def classify(screen: str, mark: str = "❯") -> str | None:
