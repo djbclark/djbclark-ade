@@ -235,8 +235,10 @@ _SERVICE_REQUIRED = ("name", "cli", "good_at", "billing")
 # optional and defaults to LEAD_PIPELINE_EFFORT_DEFAULT so an older policy file still loads.
 LEAD_KEYS = ("model", "effort", "pipeline_model")
 LEAD_PIPELINE_EFFORT_DEFAULT = "high"
-# The levels `acp-run --effort` accepts (tools/acp-run/acp-run usage), minus its "default".
-EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+# The effort levels a Claude lead can be set to: Paseo's CLAUDE_EFFORT_LEVELS (its `xhigh` list,
+# Paseo.app app.asar, 2026-10-23) and Claude Code's `/effort` / SDK `effort` type.  Not acp-run's
+# wider list (none, minimal, ultra, default): no Claude surface takes those.
+CLAUDE_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 LEAD_ALL_KEYS = LEAD_KEYS + ("pipeline_effort",)
 
 # Populated by apply_policy from the TOML; names and types match the former
@@ -314,14 +316,19 @@ def load_policy(path: Path | str) -> dict[str, Any]:
             raise ValueError(f"routing policy {path}: missing [{section}] table")
     lead = data.get("lead")
     if lead is not None:
-        if (not isinstance(lead, dict)
-                or not all(isinstance(lead.get(k), str) and lead[k] for k in LEAD_KEYS)):
+        if not isinstance(lead, dict):
+            raise ValueError(f"routing policy {path}: [lead] must be a table")
+        unknown = set(lead) - set(LEAD_ALL_KEYS)
+        if unknown:
+            raise ValueError(f"routing policy {path}: [lead] unknown key(s) {sorted(unknown)}")
+        if not all(isinstance(lead.get(k), str) and lead[k] for k in LEAD_KEYS):
             raise ValueError(f"routing policy {path}: [lead] must be a table with non-empty string keys "
                              + ", ".join(LEAD_KEYS))
         lead.setdefault("pipeline_effort", LEAD_PIPELINE_EFFORT_DEFAULT)
-        if lead["pipeline_effort"] not in EFFORT_LEVELS:
-            raise ValueError(f"routing policy {path}: [lead] pipeline_effort "
-                             f"{lead['pipeline_effort']!r} must be one of {', '.join(EFFORT_LEVELS)}")
+        for key in ("effort", "pipeline_effort"):
+            if lead[key] not in CLAUDE_EFFORT_LEVELS:
+                raise ValueError(f"routing policy {path}: [lead] {key} {lead[key]!r} must be one of "
+                                 + ", ".join(CLAUDE_EFFORT_LEVELS))
     return data
 
 

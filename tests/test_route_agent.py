@@ -1017,12 +1017,37 @@ class TestRoutingPolicyToml(unittest.TestCase):
         data = r.load_policy(self._lead_policy_variant(""))
         self.assertEqual(data["lead"]["pipeline_effort"], "high")
 
-    def test_a_bad_pipeline_effort_is_rejected_naming_the_file(self):
-        path = self._lead_policy_variant('pipeline_effort = "turbo"\n')
+    def test_a_pipeline_effort_a_claude_lead_cannot_take_is_rejected_naming_the_file(self):
+        """Strings outside Paseo's Claude levels (acp-run's `minimal`, `none`, `ultra`) and
+        non-strings (TOML integer, boolean) all fail at load, naming the file."""
+        for value in ('"turbo"', '"minimal"', '"none"', '"ultra"', '"Medium"', "3", "true"):
+            with self.subTest(value=value):
+                path = self._lead_policy_variant(f"pipeline_effort = {value}\n")
+                with self.assertRaises(ValueError) as ctx:
+                    r.load_policy(path)
+                self.assertIn(path, str(ctx.exception))
+                self.assertIn("pipeline_effort", str(ctx.exception))
+
+    def test_a_judgment_lead_effort_outside_the_claude_levels_is_rejected(self):
+        import tempfile
+        src = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        bad = src.replace('effort = "high"\npipeline_model', 'effort = "minimal"\npipeline_model')
+        self.assertNotEqual(src, bad)
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+            f.write(bad)
+        self.addCleanup(Path(f.name).unlink, missing_ok=True)
+        with self.assertRaises(ValueError) as ctx:
+            r.load_policy(f.name)
+        self.assertIn(f.name, str(ctx.exception))
+        self.assertIn("effort", str(ctx.exception))
+
+    def test_a_misspelt_lead_key_is_rejected_not_silently_defaulted(self):
+        """`pipline_effort = "medium"` must not load as the default high."""
+        path = self._lead_policy_variant('pipline_effort = "medium"\n')
         with self.assertRaises(ValueError) as ctx:
             r.load_policy(path)
         self.assertIn(path, str(ctx.exception))
-        self.assertIn("pipeline_effort", str(ctx.exception))
+        self.assertIn("pipline_effort", str(ctx.exception))
 
     def test_a_lead_table_missing_a_key_is_rejected_naming_the_file(self):
         import tempfile
