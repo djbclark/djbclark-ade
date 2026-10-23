@@ -28,7 +28,7 @@ from pathlib import Path
 
 HOME = str(Path.home())
 ORIGIN_UNREACHABLE = "origin unreachable: local-only count unverified"  # ade-scan-state's flag text
-ORIGIN_CREDENTIAL = "origin url holds a credential: not queried"  # same: never queried, treated as unreachable
+ORIGIN_CREDENTIAL = "origin url holds a credential or names a remote helper: not queried"  # same: never queried, treated as unreachable
 SUBMODULES_FLAG = "submodules not inspected"  # same: no count above covers a submodule's content
 SKIP_GIT_SYMLINK = "skipped: .git is a symlink"  # same: the whole-directory archive keeps the link, not its target
 # One patch per stash entry, untracked files and binary content included (`git stash show --include-untracked`,
@@ -257,7 +257,10 @@ def human(n):
 # `GIT_*` variable and the global and system config, `git_env()`): with `GIT_DIR` set, `git -C <checkout> ls-files` read
 # another repository's index and the tar that followed succeeded without the checkout's files (Codex pass 42)
 PLAN_PREAMBLE = ("GCP=$(command -v gcp || command -v cp); GTAR=$(command -v gtar || command -v tar); "
-                 "GSED=$(command -v gsed || command -v sed); unset GIT_DIR $(env | grep -E '^GIT_[A-Za-z0-9_]*=' | cut -d= -f1); "
+                 "GSED=$(command -v gsed || command -v sed); "
+                 "_E=$(env) || echo 'env failed: GIT_* not cleared' >&2; "
+                 "while IFS= read -r _L; do case ${_L%%=*} in GIT_*[!A-Za-z0-9_]*) ;; GIT_?*) case $_L in *=*) unset ${_L%%=*};; esac;; esac; done <<< \"$_E\"; "
+                 "unset _E _L; "
                  "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1")
 
 
@@ -534,8 +537,8 @@ def render(d):
       "`clean and pushed` (no local-only commit on any local branch); the *also* column lists the other "
       "flags (`detached`, `origin unknown`, `local-only commits: <branch> <n>, tag <tag> <n>`) and the primary "
       "flag `origin unreachable: local-only count unverified` (`--remote` got no answer from origin, so the "
-      "checkout is never `clean and pushed`) or `origin url holds a credential: not queried` (the url has a "
-      "password, or a username or query string on a non-ssh scheme, so it is never queried: the same, the url is in no record). "
+      "checkout is never `clean and pushed`) or `origin url holds a credential or names a remote helper: not queried` (the url has a "
+      "password, or a username or query string on a non-ssh scheme, or names a remote helper, so it is never queried: the same, the url is in no record). "
       "A checkout whose `status`, `rev-parse --abbrev-ref HEAD`, `for-each-ref`, `rev-list --count` or `remote get-url origin` call (only git's exit 2 `No such remote` means no origin) "
       "fails or times out is `scan incomplete: <call> rc=<n>` (`rc=124` is a timeout; `status` gets "
       "600 s, other calls 60 s) with null counts, and is never `clean and pushed`; a repository whose "
@@ -650,7 +653,7 @@ def render(d):
         credential = ORIGIN_CREDENTIAL in c["flags"] or bool(c.get("origin_credential"))
         # no push row for such an origin: `git push origin` hands the credential-bearing url to the transport helper's
         # argv, the exposure the scanner itself avoids; the bundle alternative stands alone (Codex pass 33 on PR 27)
-        cred_note = " (origin url holds a credential: no push until it is removed from the url; bundle instead)"
+        cred_note = " (origin url holds a credential or names a remote helper: no push until it is removed from the url; bundle instead)"
         cred_need = "yes: bundle it; a push would hand the credential-bearing origin url to the transport"
         unreachable = credential or ORIGIN_UNREACHABLE in c["flags"]  # `local_only_verified` is false with it, whatever the counts
         submodules = SUBMODULES_FLAG in c["flags"]  # `status --ignore-submodules=all`: the counts see nothing in there
@@ -782,9 +785,9 @@ def render(d):
         if unreachable:
             # origin did not answer: the count trusted the local `refs/remotes/origin/*`, which a deleted or
             # force-pushed branch leaves stale, so even a 0 hides commits (adversary round 21, 1)
-            what.append("local-only count unverified: origin url holds a credential, not queried" if credential
+            what.append("local-only count unverified: origin url holds a credential or names a remote helper, not queried" if credential
                         else "local-only count unverified: origin did not answer")
-            again = ("or remove the password from the origin url (ssh or a credential helper) and re-scan with "
+            again = ("or remove the password (or the remote helper) from the origin url (ssh or a credential helper) and re-scan with "
                      "`--remote`" if credential else "or re-scan with `--remote` once origin answers")
             if local_n and not covered_by_bundle:  # the local-only branch above already printed the bundle command
                 cmd.append(again)
@@ -793,7 +796,7 @@ def render(d):
                                   ck, raw_p, f"{ck}/local-only.bundle")
                            + " " + again)
             need = need if need.startswith(("yes", "**yes")) else (
-                "yes: origin not queried (its url holds a credential); bundle" if credential
+                "yes: origin not queried (its url holds a credential or names a remote helper); bundle" if credential
                 else "yes: origin did not answer; bundle, or re-scan")
         if submodules:
             # the scan's status and local-only counts ignore submodules and discovery stops at the superproject: a
@@ -814,7 +817,7 @@ def render(d):
                 cmd.append("no submodule is checked out (each is de-initialised or never initialised): its commits live under "
                            "the git dir's `modules/`, which this archive keeps: " + modules + " before any cleanup")
             else:
-                sets = [f"{code('{}', visible(sub))}: " + ", ".join(submodule_commands(raw_p, ck, sub))
+                sets = [f"{code('{}', shquote(sub))}: " + ", ".join(submodule_commands(raw_p, ck, sub))
                         for sub in vetted if vettable(sub)]
                 if any(isinstance(sub, str) and sub and not vettable(sub) for sub in vetted):
                     sets.append("a path in `submodules_vetted` that is absolute or holds `..` was left out (a hand-edited record?)")

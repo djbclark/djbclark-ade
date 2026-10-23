@@ -1961,6 +1961,19 @@ def test_url_holds_credential_reads_any_userinfo_or_query_on_a_non_ssh_scheme():
         assert mod.url_holds_credential(url) is want, url
 
 
+def test_a_remote_helper_url_is_withheld_whatever_it_holds():
+    """Codex pass 44 on PR 27, P1: `git push origin` on `evil::PAYLOAD` (or `evil://x`) runs `git-remote-evil` from PATH,
+    and `ext::` runs the command it is given: such a url is never queried and never gets a push row."""
+    mod = load()
+    for url, want in (("evil::PAYLOAD", True), ("ext::sh -c 'touch /tmp/x'", True), ("fd::3", True), ("https::https://host/x.git", True),
+                      ("evil://host/x", True), ("EVIL://host/x", True), ("hg+ssh://host/x", True), ("s3://bucket/x", True),
+                      ("https://host/x.git", False), ("http://host/x.git", False), ("ssh://git@host/x", False), ("git+ssh://git@host/x", False),
+                      ("git://host/x", False), ("file:///tmp/o.git", False), ("ftp://host/x", False), ("git@host:x/y.git", False),
+                      ("host:x/y.git", False), ("/tmp/some/origin.git", False), ("../relative/o.git", False), ("[::1]:x/y", False)):
+        assert mod.url_names_remote_helper(url) is want, url
+        assert mod.url_withheld(url) is (want or mod.url_holds_credential(url)), url
+
+
 def test_an_old_git_is_never_given_the_url_in_argv(tmp_path, monkeypatch):
     """Before git 2.31 GIT_CONFIG_COUNT is ignored: the query is refused, the checkout is unreachable."""
     mod = load()
@@ -2401,7 +2414,7 @@ def test_capture_plan_never_pushes_to_a_credential_bearing_origin():
     assert "push -u" not in text and "push origin" not in text, text
     for p, bundle in (("/p/h", "branch-main.bundle refs/heads/main"), ("/p/o", "local-only.bundle --all"), ("/p/t", "tags.bundle --tags")):
         row = next(r for r in text.splitlines() if r.startswith(f"| {p} "))
-        assert f"git -C {p} bundle create <DEST>/checkouts/abs{p}/{bundle}` (origin url holds a credential: no push until it is removed from the url; bundle instead)" in row, row
+        assert f"git -C {p} bundle create <DEST>/checkouts/abs{p}/{bundle}` (origin url holds a credential or names a remote helper: no push until it is removed from the url; bundle instead)" in row, row
         assert "| yes: bundle it; a push would hand the credential-bearing origin url to the transport |" in row, row
     # without the flag the same records keep their push-or-bundle rows
     for co in (head, others, tags):
@@ -2423,7 +2436,7 @@ def test_a_credential_bearing_origin_gets_no_push_row_without_remote(tmp_path):
     assert c["origin_credential"] is True and mod.ORIGIN_CREDENTIAL not in c["flags"] and "unpushed commits" in c["flags"], c
     text = section_3_2(doc.render(doc_scan([c])))
     assert "push -u" not in text and "push origin" not in text and "FAKE-SECRET" not in text, text
-    assert "refs/heads/main` (origin url holds a credential: no push until it is removed from the url; bundle instead)" in text
+    assert "refs/heads/main` (origin url holds a credential or names a remote helper: no push until it is removed from the url; bundle instead)" in text
     # round 39 LOW: the untracked row's "commit and push" advice goes too
     (work / "new.txt").write_text("n\n")
     text = section_3_2(doc.render(doc_scan([scan_one(mod, roots)])))
@@ -3493,6 +3506,14 @@ def test_a_credential_in_a_push_url_or_a_second_url_gets_no_push_row(tmp_path):
     git(work, "config", "--unset-all", "remote.origin.url")
     git(work, "config", "remote.origin.url", "https://127.0.0.1:9/x.git")
     assert scan_one(mod, roots)["origin_credential"] is False
+    # Codex pass 44: a remote-helper url (`evil::PAYLOAD`) is withheld like a credential: no push row, the bundle instead
+    git(work, "config", "remote.origin.url", "evil::PAYLOAD-FAKE")
+    c = scan_one(mod, roots)
+    assert c["origin_credential"] is True, c
+    text = section_3_2(doc.render(doc_scan([c])))
+    assert "push origin" not in text and "push -u" not in text and "PAYLOAD-FAKE" not in text and "bundle create" in text, text
+    git(work, "config", "remote.origin.url", "https://127.0.0.1:9/x.git")
+    assert scan_one(mod, roots)["origin_credential"] is False
     # a `url.<base>.pushInsteadOf` rewrite: the config allowlist refuses any `url.*` section, so the checkout is a
     # skipped record that never reaches a push row; `push_urls_hold_credential` still resolves it (defence in depth)
     git(work, "config", "url.https://u:FAKE-SECRET@127.0.0.1:9/.pushInsteadOf", "https://127.0.0.1:9/")
@@ -3645,6 +3666,26 @@ def test_the_plan_runs_git_in_the_scanners_environment_not_the_operators(tmp_pat
         assert (dest / "ck" / "untracked.list").read_bytes() == b"mine.txt\0", (shell, (dest / "ck" / "untracked.list").read_bytes())
 
 
+def test_the_preamble_clears_every_git_variable_without_a_pipeline_and_survives_hostile_values(tmp_path):
+    """Codex pass 44 on PR 27, P1: `unset $(env | grep | cut)` hid a failure of `env` behind a pipeline. The loop clears
+    each `GIT_*` name from `env` (a multi-line value cannot name anything but a plain variable), reports an `env` that fails,
+    and leaves PATH and the GNU tool names alone."""
+    doc = load_doc()
+    assert "|" not in doc.PLAN_PREAMBLE.replace("||", "") and "grep" not in doc.PLAN_PREAMBLE and "cut " not in doc.PLAN_PREAMBLE
+    probe = ('; printf "%s|" "${GIT_DIR-unset}" "${GIT_INDEX_FILE-unset}" "${GIT_CONFIG_COUNT-unset}" "${GIT_KEY_0-unset}" '
+             '"${GIT_CONFIG_GLOBAL-unset}" "${GIT_CONFIG_NOSYSTEM-unset}" "${XYZ+kept}" "${_E-unset}" "${_L-unset}"; '
+             'test -n "$GTAR" && command -v git >/dev/null && echo ok')
+    hostile = "v\nGIT_Q PATH\nGIT_A$(touch " + str(tmp_path / "PWN") + ")=x\nGIT_*=y\nGIT_Z=1"
+    for shell in SHELLS:
+        if shell == "sh":
+            continue  # `<<<` is bash and zsh; the plan is pasted into one of those
+        env = {**os.environ, "GIT_DIR": "/x", "GIT_INDEX_FILE": "/y", "GIT_CONFIG_COUNT": "1", "GIT_KEY_0": "k", "XYZ": hostile}
+        run = subprocess.run([shell, "-c", doc.PLAN_PREAMBLE + probe], capture_output=True, text=True, env=env)
+        assert run.returncode == 0 and run.stderr == "", (shell, run.stderr)
+        assert run.stdout == "unset|unset|unset|unset|/dev/null|1|kept|unset|unset|ok\n", (shell, run.stdout)
+        assert not (tmp_path / "PWN").exists()
+
+
 def test_a_non_utf8_checkout_path_is_quoted_as_its_bytes_and_the_document_is_written(tmp_path):
     """Codex pass 42 (P2): the scan JSON carries a non-UTF-8 name as a lone surrogate, which the markdown writer refused."""
     doc = load_doc()
@@ -3653,6 +3694,17 @@ def test_a_non_utf8_checkout_path_is_quoted_as_its_bytes_and_the_document_is_wri
     out = tmp_path / "out.md"
     doc.write_atomic(out, doc.render(doc_scan([rec])))
     assert out.read_text(encoding="utf-8")
+
+
+def test_a_submodule_label_in_the_command_cell_is_inert_when_pasted():
+    """Adversary round 49 on PR 27, LOW: the label before a submodule's commands was an unquoted code span of a repository
+    controlled path, so a paste (alone or after `cd`) ran `$(...)` in it. It is quoted like every command's path."""
+    doc = load_doc()
+    sub = "x$(touch${IFS}PWN)y"
+    flag = "submodules not inspected"
+    text = doc.render(doc_scan([doc_checkout("/p/sup", flags=[flag], verdict=flag, submodules_vetted=[sub])]))
+    row = next(r for r in section_3_2(text).splitlines() if r.startswith("| /p/sup ")).replace("\\|", "|")
+    assert "`'x$(touch${IFS}PWN)y'`: " in row and "`x$(touch" not in row, row
 
 
 def gfm_cells(row: str) -> list[str]:
