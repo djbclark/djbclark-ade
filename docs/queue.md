@@ -125,7 +125,7 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    **Done 2026-10-23** (`bin/pr-wait`, `tests/test_pr_wait.py`, `skills/bigteam/SKILL.md`): one waiter per repo + PR + head
    (CI checks of the exact head plus the Codex marker; `completed` and `failed` terminal; stuck bound `--codex-stuck`,
    default 45 min, exit 3; `gh` failures retried, exit 6 if still failing at the deadline; paginated output parsed as
-   concatenated pages; findings by `created_at` after the request comment), a lock refusing a duplicate (exit 4). Not done:
+   concatenated pages; findings by `original_commit_id` / review `commit_id` of the head and the Codex bot author, no time window; markers believed only from the Codex app), a lock refusing a duplicate (exit 4). Not done:
    the adversary-report round dedup lesson is a lead habit, not a waiter feature.
 4. **PR 29 queued findings** (hypothetical aiuse payload shapes; `bin/claude-quota-guard`): (a) a windowless live
    row bound by the 5-hour window leaves the snapshot's weekly unjudged (adversary round 7); (b) a detailed

@@ -1,5 +1,6 @@
 """bin/pr-wait: one waiter per PR head for CI and Codex's review, against a fake `gh` on PATH."""
 
+import importlib.util
 import json
 import os
 import signal
@@ -7,6 +8,7 @@ import stat
 import subprocess
 import sys
 import time
+from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 import pytest
@@ -17,6 +19,7 @@ PR = 7
 HEAD = "a" * 40
 OLD = "b" * 40
 NEW = "c" * 40
+CODEX_LOGIN = "chatgpt-codex-connector[bot]"
 
 # Serves canned output by endpoint. scenario.json: {"routes": {endpoint: [{"out": str, "rc": int, "err": str}, ...]}};
 # the Nth call to an endpoint gets the Nth entry, the last one repeats. Every argv is logged.
@@ -34,7 +37,9 @@ if ep not in routes:
     sys.stderr.write("fake gh: no route " + ep + "\n"); sys.exit(1)
 cf = os.path.join(d, "count-" + ep.replace("/", "_"))
 n = int(open(cf).read()) if os.path.exists(cf) else 0
-open(cf, "w").write(str(n + 1))
+with open(cf + ".tmp.%d" % os.getpid(), "w") as f:
+    f.write(str(n + 1))
+os.replace(cf + ".tmp.%d" % os.getpid(), cf)
 r = routes[ep][min(n, len(routes[ep]) - 1)]
 sys.stdout.write(r.get("out", ""))
 sys.stderr.write(r.get("err", ""))
@@ -58,19 +63,31 @@ def checks_page(*runs: dict) -> dict:
     return ok({"total_count": len(runs), "check_runs": list(runs)})
 
 
-def codex_comment(sha: str, status: str, updated: str = "2026-10-23T10:00:00Z") -> dict:
+BOT = {"login": CODEX_LOGIN, "type": "Bot"}
+BOT_APP = {"user": BOT, "performed_via_github_app": {"slug": "chatgpt-codex-connector"}}
+
+
+def codex_comment(sha: str, status: str, updated: str = "2026-10-23T10:00:00Z", **who: object) -> dict:
     state = {"code_review": {"commit_sha": sha, "status": status}, "security_review": {"status": "completed"}}
     body = ("<!-- codex-pull-request-review-summary -->\nCodex review\n"
             f"<!-- codex-review-state:v1 {json.dumps(state)} -->")
-    return {"body": body, "created_at": "2026-10-23T09:00:00Z", "updated_at": updated}
+    return {"body": body, "created_at": "2026-10-23T09:00:00Z", "updated_at": updated, **(who or BOT_APP)}
+
+
+def injected(sha: str, status: str, updated: str = "2026-10-23T12:00:00Z") -> dict:
+    """A marker comment posted by anyone else (the repo is public)."""
+    return codex_comment(sha, status, updated, user={"login": "mallory", "type": "User"},
+                         performed_via_github_app=None)
 
 
 def request(at: str) -> dict:
-    return {"body": "@codex review", "created_at": at, "updated_at": at}
+    return {"body": "@codex review", "created_at": at, "updated_at": at, "user": {"login": "djbclark", "type": "User"}}
 
 
-def finding(n: int, at: str) -> dict:
-    return {"id": n, "path": f"f{n}.py", "line": n, "created_at": at,
+def finding(n: int, at: str, original: str = HEAD, review: int | None = None, login: str = CODEX_LOGIN,
+            type_: str = "Bot") -> dict:
+    return {"id": n, "path": f"f{n}.py", "line": n, "created_at": at, "original_commit_id": original,
+            "pull_request_review_id": review, "user": {"login": login, "type": type_},
             "body": f"finding {n}\n<!-- codex-code-review-finding:v1 -->"}
 
 
@@ -101,8 +118,8 @@ class World:
         self.route(f"repos/{REPO}/commits/{HEAD}/status", ok({"state": "pending", "statuses": []}))
         self.route(f"repos/{REPO}/issues/{PR}/comments",
                    ok([request("2026-10-23T09:30:00Z"), codex_comment(HEAD, "completed")]))
+        self.route(f"repos/{REPO}/pulls/{PR}/reviews", ok([]))
         self.route(f"repos/{REPO}/pulls/{PR}/comments", ok([]))
-        self.route(f"repos/{REPO}/commits/{HEAD}", ok({"commit": {"committer": {"date": "2026-10-23T08:00:00Z"}}}))
 
     def argv(self, *extra: str) -> list[str]:
         return [sys.executable, "-I", str(PR_WAIT), str(PR), "--interval", "0.1", "--timeout", "15",
@@ -141,7 +158,7 @@ def test_ci_and_codex_both_complete(world: World) -> None:
     summary = world.file("summary")
     assert summary["result"] == "done" and summary["head"] == HEAD
     assert summary["ci"] == {"state": "done", "total": 2, "pass": 1, "fail": 1, "pending": 0}
-    assert summary["codex"]["status"] == "completed" and summary["since_source"] == "request-comment"
+    assert summary["codex"]["status"] == "completed" and summary["since_source"] is None
     assert world.file("codex")["code_review"]["commit_sha"] == HEAD
     assert {c["name"] for c in world.file("checks")} == {"test", "lint"}
     assert world.file("findings") == []
@@ -168,31 +185,39 @@ def test_codex_running_too_long_is_stuck(world: World) -> None:
     assert world.file("findings") is None  # not collected: Codex never finished
 
 
-def test_only_findings_after_the_request_count(world: World) -> None:
+def test_findings_are_selected_by_head_author_and_mark_not_by_time(world: World) -> None:
+    # PR 12 shape (2026-10-20): the finding for the head, then Codex's own receipt quoting `@codex review`
+    # after it, then a human reply quoting it: no later comment may hide the finding
     world.route(f"repos/{REPO}/issues/{PR}/comments",
-                ok([request("2026-10-23T08:30:00Z"), request("2026-10-23T09:30:00Z"),
-                    codex_comment(HEAD, "completed")]))
+                ok([request("2026-10-23T09:30:00Z"), codex_comment(HEAD, "completed"),
+                    {**request("2026-10-23T10:05:00Z"), **BOT_APP, "body": 'About Codex: Comment "@codex review".'},
+                    {**request("2026-10-23T11:00:00Z"), "user": {"login": "mallory", "type": "User"},
+                     "body": "> @codex review\nlgtm"}]))
+    world.route(f"repos/{REPO}/pulls/{PR}/reviews",
+                ok([{"id": 900, "commit_id": HEAD}, {"id": 800, "commit_id": OLD}]))
     world.route(f"repos/{REPO}/pulls/{PR}/comments",
-                ok([finding(1, "2026-10-23T09:00:00Z"),  # before the newest request: an earlier pass
-                    finding(2, "2026-10-23T09:45:00Z"),
-                    {"id": 3, "path": "x.py", "created_at": "2026-10-23T09:50:00Z", "body": "human comment"}]))
+                ok([finding(1, "2026-10-23T09:45:00Z"),  # original_commit_id is the head
+                    finding(2, "2026-10-23T09:46:00Z", original=OLD, review=900),  # review of the head
+                    finding(3, "2026-10-23T09:00:00Z", original=OLD, review=800),  # an earlier head's
+                    finding(4, "2026-10-23T09:47:00Z", login="mallory", type_="User"),  # not Codex
+                    {**finding(5, "2026-10-23T09:48:00Z"), "body": "a Codex reply, no mark"},
+                    {**finding(6, "2026-10-23T09:49:00Z"), "user": {"login": CODEX_LOGIN, "type": "User"}}]))
     r = world.run()
     assert r.returncode == 0, r.stderr
-    assert [f["id"] for f in world.file("findings")] == [2]
-    assert "findings since 2026-10-23T09:30:00Z: 1" in r.stdout
+    assert [f["id"] for f in world.file("findings")] == [1, 2]
+    assert "findings for the head: 2" in r.stdout
+    summary = world.file("summary")
+    assert summary["since"] is None and summary["since_source"] is None
 
 
-def test_since_flag_and_head_commit_date_fallback(world: World) -> None:
-    rows = ok([finding(1, "2026-10-23T09:00:00Z"), finding(2, "2026-10-23T09:45:00Z")])
-    world.route(f"repos/{REPO}/pulls/{PR}/comments", rows)
+def test_since_is_an_optional_extra_lower_bound(world: World) -> None:
+    world.route(f"repos/{REPO}/pulls/{PR}/comments",
+                ok([finding(1, "2026-10-23T09:00:00Z"), finding(2, "2026-10-23T09:45:00Z")]))
     assert world.run("--since", "2026-10-23T09:30:00+00:00").returncode == 0
     assert [f["id"] for f in world.file("findings")] == [2]
     assert world.file("summary")["since_source"] == "--since"
-    # no request comment and no --since: the head commit's committer date (08:00) bounds the window
-    world.route(f"repos/{REPO}/issues/{PR}/comments", ok([codex_comment(HEAD, "completed")]))
     assert world.run().returncode == 0
     assert [f["id"] for f in world.file("findings")] == [1, 2]
-    assert world.file("summary")["since_source"] == "head-commit-date"
 
 
 def test_two_page_paginated_responses(world: World) -> None:
@@ -301,10 +326,11 @@ def test_bad_usage(world: World) -> None:
     assert world.run("--repo", "nonsense").returncode == 2
 
 
-def ps_start(pid: int) -> str:
-    p = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], check=True, capture_output=True,
-                       text=True, env={"LC_ALL": "C", "PATH": os.environ["PATH"]})
-    return " ".join(p.stdout.split())
+def load_module():
+    ld = SourceFileLoader("pr_wait_mod", str(PR_WAIT))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("pr_wait_mod", ld))
+    ld.exec_module(mod)
+    return mod
 
 
 def test_second_waiter_for_the_same_head_is_refused(world: World) -> None:
@@ -340,7 +366,8 @@ def test_stale_lock_is_taken_over(world: World) -> None:
     assert r.returncode == 0, r.stdout + r.stderr
 
     # a live pid with its real start time is a live waiter
-    lock.write_text(json.dumps({"pid": os.getpid(), "start": ps_start(os.getpid()), "out": "/somewhere"}))
+    lock.write_text(json.dumps({"pid": os.getpid(), "start": load_module().proc_start(os.getpid()),
+                                "out": "/somewhere"}))
     r = world.run()
     assert r.returncode == 4 and f"pid {os.getpid()}" in r.stderr and "/somewhere" in r.stderr
     assert lock.exists(), "a refused waiter leaves the live holder's lock alone"
@@ -348,3 +375,121 @@ def test_stale_lock_is_taken_over(world: World) -> None:
     # an unreadable lock is stale too
     lock.write_text("not json")
     assert world.run().returncode == 0
+
+
+def test_orphan_takeover_guard_is_broken_by_liveness(tmp_path: Path) -> None:
+    pw = load_module()
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    lock = tmp_path / "lock-x"
+    lock.write_text(json.dumps({"pid": dead.pid, "start": "gone", "out": "o"}))
+    # a taker SIGKILLed inside the guard: a fresh orphan guard must not make the starter report a dead holder
+    Path(f"{lock}.takeover").write_text(json.dumps({"pid": dead.pid, "start": "gone"}))
+    me = {"pid": os.getpid(), "start": pw.proc_start(os.getpid()), "out": "mine"}
+    assert pw.acquire_lock(lock, me) is None
+    assert json.loads(lock.read_text())["out"] == "mine"
+    assert not Path(f"{lock}.takeover").exists()
+    # a live holder is reported, whatever stale guard lies around
+    Path(f"{lock}.takeover").write_text(json.dumps({"pid": dead.pid, "start": "gone"}))
+    other = {"pid": dead.pid, "start": "x", "out": "theirs"}
+    assert pw.acquire_lock(lock, other) == me
+
+
+RACER = r"""
+import os, sys, time
+import importlib.util
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+ld = SourceFileLoader("pw", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("pw", ld))
+ld.exec_module(m)
+lock, go, done = Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4])
+me = os.getpid()
+info = {"pid": me, "start": m.proc_start(me), "out": "o%d" % me}
+print("READY", flush=True)
+while not go.exists():
+    time.sleep(0.001)
+held = m.acquire_lock(lock, info)
+print("WON" if held is None else "HELD", flush=True)
+t = time.time()
+while not done.exists() and time.time() - t < 60:
+    time.sleep(0.05)
+"""
+
+
+@pytest.mark.parametrize("stale_first", [False, True])
+def test_simultaneous_starters_yield_exactly_one_holder(tmp_path: Path, stale_first: bool) -> None:
+    racer = tmp_path / "racer.py"
+    racer.write_text(RACER)
+    lock, go, done = tmp_path / "lock-x", tmp_path / "go", tmp_path / "done"
+    if stale_first:
+        lock.write_text(json.dumps({"pid": 999999999, "start": "gone", "out": "o"}))
+    procs = [subprocess.Popen([sys.executable, str(racer), str(PR_WAIT), str(lock), str(go), str(done)],
+                              stdout=subprocess.PIPE, text=True) for _ in range(8)]
+    try:
+        for p in procs:
+            assert p.stdout.readline().strip() == "READY"
+        go.touch()
+        answers = [p.stdout.readline().strip() for p in procs]
+    finally:
+        done.touch()
+        for p in procs:
+            p.wait(timeout=30)
+    assert sorted(answers) == ["HELD"] * 7 + ["WON"]
+
+
+def test_parse_proc_stat_starttime_with_parens_in_comm() -> None:
+    pw = load_module()
+    fields = ["S"] + ["1"] * 18 + ["424242"] + ["0"] * 5  # state, then fields 4..21, starttime = field 22
+    assert pw.parse_proc_stat("123 (a) b (c)) " + " ".join(fields)) == "proc:424242"
+    assert pw.parse_proc_stat("123 (short)") is None
+
+
+def test_marker_from_anyone_but_the_codex_app_is_not_believed(world: World) -> None:
+    # an injected `completed` marker must not end the wait while the real review still runs
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "running"), injected(HEAD, "completed")]))
+    r = world.run("--timeout", "1")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert world.file("summary")["codex"]["status"] == "running"
+    # the bot's login without the app is not the Codex app's summary comment either
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", user=BOT, performed_via_github_app=None)]))
+    r = world.run("--timeout", "1")
+    assert r.returncode == 1 and world.file("summary")["codex"]["status"] == "absent"
+    # a user named like the bot but of type User is not it
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", user={"login": CODEX_LOGIN, "type": "User"},
+                                  performed_via_github_app={"slug": "chatgpt-codex-connector"})]))
+    assert world.run("--timeout", "1").returncode == 1
+
+
+def test_fake_newer_running_marker_cannot_cause_codex_stuck(world: World) -> None:
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed"), injected(HEAD, "running")]))
+    r = world.run("--codex-stuck", "0.2")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert world.file("summary")["codex"]["status"] == "completed"
+    assert world.file("codex")["code_review"]["status"] == "completed"
+
+
+def test_empty_gh_output_is_unknown_not_no_checks(world: World) -> None:
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-runs", ok(""))
+    r = world.run("--timeout", "1", "--ci-grace", "0")
+    assert r.returncode == 6, r.stdout + r.stderr
+    assert "empty gh output" in r.stdout
+
+
+def test_a_check_registered_after_ci_finished_keeps_the_wait_open(world: World) -> None:
+    # poll 1: CI passes but Codex still runs; poll 2: Codex completes but a new check appeared; poll 3: both hold
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-runs",
+                checks_page(run_obj("test")),
+                checks_page(run_obj("test"), run_obj("late", "queued", None)),
+                checks_page(run_obj("test"), run_obj("late")))
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "running")]), ok([codex_comment(HEAD, "completed")]))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert world.calls(f"commits/{HEAD}/check-runs") == 3
+    assert {c["name"] for c in world.file("checks")} == {"test", "late"}
+    assert world.file("summary")["ci"]["pending"] == 0

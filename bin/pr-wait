@@ -17,20 +17,28 @@ waiters on 2026-10-20. This is the one aggregating waiter: it wakes the lead onc
 Then it prints ONE line and writes, each atomically (temp file beside it, then os.replace):
   PREFIX-checks.json   the normalized checks (name, kind, state, conclusion) of the head
   PREFIX-codex.json    the state marker of the head (the newest marker seen when none matches; {} none)
-  PREFIX-findings.json Codex's inline findings created after the `@codex review` request
+  PREFIX-findings.json Codex's inline findings for the head
                        (`null` when not collected: --no-codex, or the wait ended before Codex did)
   PREFIX-summary.json  the one-line result as JSON
 PREFIX defaults to ~/.local/state/pr-wait/<owner>__<name>-pr<N>-<head12>. Output files are written on
 every end except exit 2 and 4 (nothing was waited for).
+Both conditions are re-judged on every poll (a check suite registered late, a re-run, a re-requested
+review); it finishes only when both hold on the same poll.
 
-Findings are the PR's inline comments (`pulls/N/comments`) that end in
-`<!-- codex-code-review-finding:v1 -->` and were created at or after the request time: --since
-ISO, else the newest issue comment containing `@codex review`, else the head commit's committer date
-(an auto-review on PR open has no request comment). Never a fixed clock. GitHub re-anchors
-`commit_id` of a finding on an unchanged line, so created_at, not commit_id, tells old from new.
+Only the Codex app is believed: a state marker counts only from a comment whose author is
+`chatgpt-codex-connector[bot]` (type Bot) and whose `performed_via_github_app.slug` is
+`chatgpt-codex-connector`; the repo is public, so anyone can post a comment holding the markers.
 
-A `gh` failure is "unknown", never "done": it is retried on the next poll and reported in the summary
-(`errors`) when the wait ends. A PR that does not exist (HTTP 404) is a usage error.
+Findings are the PR's inline comments (`pulls/N/comments`) that carry
+`<!-- codex-code-review-finding:v1 -->`, are authored by that bot, and belong to the head: their
+`original_commit_id` is the head, or their `pull_request_review_id` is a `pulls/N/reviews` entry whose
+`commit_id` is the head. No time window (2026-10-23, adversary round 1: Codex's own receipt comments
+quote `@codex review`, so a "newest request" moved past real findings; PR 12 on 2026-10-20). GitHub
+re-anchors `commit_id` of a finding on an unchanged line, but not these two. `--since ISO` is an optional
+extra lower bound on created_at.
+
+A `gh` failure (or empty `gh` output) is "unknown", never "done": it is retried on the next poll and
+reported in the summary (`errors`) when the wait ends. A PR that does not exist (HTTP 404) is a usage error.
 
 Codex stuck: no terminal marker for the head `--codex-stuck` seconds (default 2700) after the wait
 started (marker absent) or after the marker was first seen non-terminal (running) ends the wait with
@@ -39,14 +47,16 @@ result `codex-stuck`, never a silent timeout. CI with no checks at all counts as
 a little later; after that, zero checks is "no checks" and finished.
 
 Exit: 0 done (CI finished and Codex terminal, whatever each said: read the files),
-      1 timed out, 2 bad usage or no such PR, 3 Codex stuck, 4 another pr-wait for the same
+      1 timed out, 2 bad usage, no such PR, or the lock takeover guard held by a live pid for 30 s,
+      3 Codex stuck, 4 another pr-wait for the same
       repo + PR + head is alive (its pid and output prefix on stderr: never re-arm it),
       5 the PR head moved (a new push; the new head is in the line and the summary),
       6 timed out while `gh` was failing (the last poll did not get through).
 Duplicate guard: a lock file `lock-<repo>-<pr>-<head>` in $PR_WAIT_STATE_DIR (default
-~/.local/state/pr-wait) made with O_EXCL, holding the pid and the process start time (`ps -o lstart=`,
-the same on macOS and Linux); a dead pid, or a live pid whose start time differs (pid reuse), is stale
-and taken over under a short takeover guard.
+~/.local/state/pr-wait), created atomically with its content (temp file, then os.link), holding the pid
+and a process start identity (Linux: /proc/<pid>/stat starttime, immune to wall-clock steps; macOS:
+`ps -o lstart=`); a dead pid, or a live pid whose identity differs (pid reuse), is stale and taken over
+under a takeover guard that holds its taker's pid and start and is broken by liveness.
 """
 
 import argparse
@@ -65,7 +75,8 @@ DEFAULT_REPO = "djbclark/djbclark-ade"
 SUMMARY_MARK = "<!-- codex-pull-request-review-summary -->"
 STATE_RE = re.compile(r"codex-review-state:v1\s+")
 FINDING_MARK = "codex-code-review-finding:v1"
-REQUEST_MARK = "@codex review"
+CODEX_LOGIN = "chatgpt-codex-connector[bot]"
+CODEX_APP = "chatgpt-codex-connector"
 TERMINAL = ("completed", "failed")
 PASS_CONCLUSIONS = ("success", "neutral", "skipped")
 GH_TIMEOUT = 120
@@ -115,7 +126,10 @@ def parse_pages(text: str) -> list:
 def api_items(endpoint: str, key: str | None = None) -> list:
     """All items of a paginated list endpoint; `key` names the array inside an object page."""
     items: list = []
-    for doc in parse_pages(gh("api", "--paginate", endpoint)):
+    docs = parse_pages(gh("api", "--paginate", endpoint))
+    if not docs:
+        raise GhError(f"{endpoint}: empty gh output")
+    for doc in docs:
         if key is not None:
             part = doc.get(key) if isinstance(doc, dict) else None
         else:
@@ -177,12 +191,23 @@ def parse_state(body: str) -> dict | None:
     return doc if isinstance(doc, dict) else None
 
 
+def is_codex_user(c: dict) -> bool:
+    """Authored by the Codex app's bot account; anyone can post a comment with Codex's markers."""
+    u = c.get("user")
+    return isinstance(u, dict) and u.get("login") == CODEX_LOGIN and u.get("type") == "Bot"
+
+
+def is_codex_app_comment(c: dict) -> bool:
+    app = c.get("performed_via_github_app")
+    return is_codex_user(c) and isinstance(app, dict) and app.get("slug") == CODEX_APP
+
+
 def codex_state_for(comments: list[dict], head: str) -> tuple[dict | None, dict | None]:
-    """(marker whose code_review.commit_sha is head, newest marker of any head)."""
+    """(marker whose code_review.commit_sha is head, newest marker of any head), Codex app comments only."""
     marked = []
     for c in comments:
         body = c.get("body") or ""
-        if SUMMARY_MARK in body:
+        if SUMMARY_MARK in body and is_codex_app_comment(c):
             st = parse_state(body)
             if st is not None:
                 marked.append((c.get("updated_at") or c.get("created_at") or "", st))
@@ -206,27 +231,28 @@ def parse_ts(s: str) -> datetime:
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
-def request_time(comments: list[dict]) -> str | None:
-    times = [c["created_at"] for c in comments if REQUEST_MARK in (c.get("body") or "") and c.get("created_at")]
-    return max(times, key=parse_ts) if times else None
+def fetch_findings(repo: str, pr: int, head: str, since: str | None) -> list[dict]:
+    """Codex's inline findings for `head`, selected by head and author, never by a time window.
 
-
-def head_commit_date(repo: str, sha: str) -> str:
-    try:
-        return json.loads(gh("api", f"repos/{repo}/commits/{sha}"))["commit"]["committer"]["date"]
-    except (ValueError, KeyError, TypeError) as e:
-        raise GhError(f"commits/{sha}: unexpected shape: {e}") from e
-
-
-def fetch_findings(repo: str, pr: int, since: str) -> list[dict]:
-    t0 = parse_ts(since)
-    rows = api_items(f"repos/{repo}/pulls/{pr}/comments?per_page=100")
+    A comment belongs to the head when its `original_commit_id` is the head or its review
+    (`pull_request_review_id`) is a `pulls/N/reviews` entry whose `commit_id` is the head: GitHub
+    re-anchors `commit_id` of a finding on an unchanged line, but not these two (PR 12, 2026-10-20).
+    A later Codex receipt or a quoted `@codex review` therefore cannot hide a finding."""
+    t0 = parse_ts(since) if since else None
+    reviews = api_items(f"repos/{repo}/pulls/{pr}/reviews?per_page=100")
+    head_reviews = {r.get("id") for r in reviews if r.get("commit_id") == head}
     out = []
-    for c in rows:
+    for c in api_items(f"repos/{repo}/pulls/{pr}/comments?per_page=100"):
         body = c.get("body") or ""
-        if FINDING_MARK in body and c.get("created_at") and parse_ts(c["created_at"]) >= t0:
-            out.append({"id": c.get("id"), "path": c.get("path"), "line": c.get("line") or c.get("original_line"),
-                        "created_at": c["created_at"], "body": body[:600]})
+        if FINDING_MARK not in body or not is_codex_user(c):
+            continue
+        if c.get("original_commit_id") != head and c.get("pull_request_review_id") not in head_reviews:
+            continue
+        if t0 is not None and not (c.get("created_at") and parse_ts(c["created_at"]) >= t0):
+            continue
+        out.append({"id": c.get("id"), "path": c.get("path"), "line": c.get("line") or c.get("original_line"),
+                    "created_at": c.get("created_at"), "original_commit_id": c.get("original_commit_id"),
+                    "body": body[:600]})
     return out
 
 
@@ -244,8 +270,26 @@ def write_atomic(path: str, doc: object) -> None:
 # ---- duplicate guard ------------------------------------------------------------------------------
 
 
+def parse_proc_stat(raw: str) -> str | None:
+    """starttime (field 22, jiffies since boot) of a /proc/<pid>/stat line; the comm field may hold ')'."""
+    try:
+        return "proc:" + raw.rsplit(")", 1)[1].split()[19]
+    except IndexError:
+        return None
+
+
 def proc_start(pid: int) -> str | None:
-    """Process start time as `ps -o lstart=` prints it (macOS and Linux); None when the pid is gone."""
+    """An identity for the process that survives pid reuse; None when the pid is gone.
+
+    Linux: /proc/<pid>/stat starttime (jiffies since boot, so a wall-clock step cannot change it).
+    Elsewhere (macOS has no /proc): `ps -o lstart=`, which is stored absolutely there."""
+    try:
+        return parse_proc_stat(Path(f"/proc/{pid}/stat").read_text())
+    except FileNotFoundError:
+        if Path("/proc/self/stat").exists():
+            return None  # Linux and the pid is gone
+    except OSError:
+        pass
     try:
         p = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], check=False, capture_output=True,
                            text=True, timeout=10, env={"LC_ALL": "C", "PATH": os.environ.get("PATH", "")})
@@ -268,56 +312,61 @@ def read_lock(path: Path) -> object:
         return None
 
 
+class LockBusy(Exception):
+    pass
+
+
+def create_exclusive(path: Path, doc: dict) -> bool:
+    """Create `path` already holding `doc`: write a temp file beside it, then os.link (EEXIST = held).
+
+    O_EXCL then write would leave an empty file a second starter could read as stale."""
+    tmp = Path(f"{path}.tmp.{os.getpid()}.{time.monotonic_ns()}")
+    tmp.write_text(json.dumps(doc))
+    try:
+        os.link(tmp, path)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def acquire_lock(path: Path, info: dict) -> dict | None:
-    """Create the lock with O_EXCL. Returns None when taken, else the live holder's lock doc."""
-    payload = json.dumps(info).encode()
+    """Take the lock. Returns None when taken, else the LIVE holder's lock doc.
+
+    A stale lock is taken over under a guard file (`<lock>.takeover`, holding the taker's pid and start,
+    broken by liveness, not age) so two takers cannot unlink each other's fresh lock. Residual window:
+    two breakers of one orphaned guard can race; the lock itself is still created atomically."""
     guard = Path(f"{path}.takeover")
-    deadline = time.monotonic() + 5
+    ginfo = {"pid": info["pid"], "start": info["start"]}
+    deadline = time.monotonic() + 30
     while True:
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            doc = read_lock(path)
-            if lock_live(doc):
-                return doc  # type: ignore[return-value]
-            # stale: take over under a guard so two takers cannot both unlink the other's new lock
-            try:
-                gfd = os.open(guard, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            except FileExistsError:
-                try:
-                    if time.time() - guard.stat().st_mtime > 30:
-                        guard.unlink()  # a taker that died inside the guard
-                except OSError:
-                    pass
-                if time.monotonic() > deadline:
-                    return doc if isinstance(doc, dict) else {"pid": "?", "out": "?"}
-                time.sleep(0.05)
+        if create_exclusive(path, info):
+            return None
+        doc = read_lock(path)
+        if lock_live(doc):
+            return doc  # type: ignore[return-value]
+        if not create_exclusive(guard, ginfo):
+            if not lock_live(read_lock(guard)):
+                guard.unlink(missing_ok=True)  # its taker died inside the guard
                 continue
-            try:
-                os.close(gfd)
-                if not lock_live(read_lock(path)):
-                    try:
-                        path.unlink()
-                    except FileNotFoundError:
-                        pass
-            finally:
-                try:
-                    guard.unlink()
-                except FileNotFoundError:
-                    pass
+            if time.monotonic() >= deadline:
+                raise LockBusy(f"the lock takeover guard {guard} is held by a live pid for 30 s")
+            time.sleep(0.05)
             continue
-        with os.fdopen(fd, "wb") as f:
-            f.write(payload)
-        return None
+        try:
+            if not lock_live(read_lock(path)):
+                path.unlink(missing_ok=True)
+        finally:
+            gdoc = read_lock(guard)
+            if isinstance(gdoc, dict) and gdoc.get("pid") == info["pid"]:
+                guard.unlink(missing_ok=True)
 
 
 def release_lock(path: Path, pid: int) -> None:
     doc = read_lock(path)
     if isinstance(doc, dict) and doc.get("pid") == pid:
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
+        path.unlink(missing_ok=True)
 
 
 # ---- the wait -------------------------------------------------------------------------------------
@@ -345,7 +394,8 @@ def build_parser() -> Parser:
     p.add_argument("pr", type=int, help="pull request number")
     p.add_argument("--repo", default=DEFAULT_REPO, help=f"OWNER/NAME (default {DEFAULT_REPO})")
     p.add_argument("--head", help="head SHA to wait on (default: the PR's current head)")
-    p.add_argument("--since", help="ISO time of the `@codex review` request (default: newest such issue comment)")
+    p.add_argument("--since", help="optional extra lower bound (ISO time) on a finding's created_at; findings "
+                   "are selected by head, not by time")
     p.add_argument("--out", help="output prefix (default ~/.local/state/pr-wait/<repo>-pr<N>-<head12>)")
     p.add_argument("--timeout", type=number, default=3600, help="seconds before giving up (default 3600)")
     p.add_argument("--interval", type=number, default=30, help="seconds between polls (default 30)")
@@ -406,8 +456,11 @@ def main(argv: list[str]) -> int:
     my_start = proc_start(me)
     if my_start is None:
         return usage("cannot read this process's start time with `ps -o lstart=`")
-    held = acquire_lock(lock, {"pid": me, "start": my_start, "repo": a.repo, "pr": a.pr,
-                               "head": head, "out": out})
+    try:
+        held = acquire_lock(lock, {"pid": me, "start": my_start, "repo": a.repo, "pr": a.pr,
+                                   "head": head, "out": out})
+    except LockBusy as e:
+        return usage(str(e))
     if held is not None:
         print(f"pr-wait: already waiting on {a.repo}#{a.pr} at {head[:12]}: pid {held.get('pid')}, "
               f"output prefix {held.get('out')} (read its files; never re-arm a live waiter)", file=sys.stderr)
@@ -450,7 +503,8 @@ def main(argv: list[str]) -> int:
             if not a.no_codex:
                 parts.append(f"codex {codex['status']}")
             if s["findings"] is not None:
-                parts.append(f"findings since {s['since']}: {len(s['findings'])}")
+                parts.append(f"findings for the head: {len(s['findings'])}"
+                             + (f" (since {s['since']})" if s["since"] else ""))
             if new_head:
                 parts.append(f"new head {new_head[:12]}")
             if errors and code in (EXIT_TIMEOUT, EXIT_GH):
@@ -473,48 +527,40 @@ def main(argv: list[str]) -> int:
     def collect_findings() -> bool:
         if a.no_codex:
             return True
-        since, source = a.since, "--since"
-        if since is None:
-            comments = attempt(api_items, issue_comments)
-            if comments is None:
-                return False
-            since, source = request_time(comments), "request-comment"
-            if since is None:
-                since, source = attempt(head_commit_date, a.repo, head), "head-commit-date"
-                if since is None:
-                    return False
-        found = attempt(fetch_findings, a.repo, a.pr, since)
+        found = attempt(fetch_findings, a.repo, a.pr, head, a.since)
         if found is None:
             return False
-        s["findings"], s["since"], s["since_source"] = found, since, source
+        s["findings"] = found
+        if a.since:
+            s["since"], s["since_source"] = a.since, "--since"
         return True
 
     while True:
         fails.clear()
         codex_polled = False
+        s["ci_done"], s["codex_done"] = False, a.no_codex  # both re-judged on every poll, never latched
         cur = attempt(pr_head, a.repo, a.pr)
         if cur is not None and cur.lower() != head:
             return finish("head-moved", EXIT_MOVED, cur)
         if cur is not None:
-            if not s["ci_done"]:
-                checks = attempt(fetch_checks, a.repo, head)
-                if checks is not None:
-                    s["checks"] = checks
-                    if not any(c["state"] == "pending" for c in checks) and (
-                        checks or time.monotonic() - start >= a.ci_grace
-                    ):
-                        s["ci_done"] = True
-            if not s["codex_done"]:
+            checks = attempt(fetch_checks, a.repo, head)
+            if checks is not None:
+                s["checks"] = checks
+                s["ci_done"] = not any(c["state"] == "pending" for c in checks) and bool(
+                    checks or time.monotonic() - start >= a.ci_grace
+                )
+            if not a.no_codex:
                 comments = attempt(api_items, issue_comments)
                 if comments is not None:
                     codex_polled = True
                     match, newest = codex_state_for(comments, head)
                     s["codex_match"], s["codex_newest"] = match, newest
                     if code_review(match).get("status") in TERMINAL:
-                        s["codex_done"] = True
+                        s["codex_done"], s["running_seen"] = True, False
                     elif match is not None and not s["running_seen"]:
                         s["running_seen"] = True
                         s["codex_clock"] = time.monotonic()
+            # finish only when both hold on this same poll
             if s["ci_done"] and s["codex_done"] and collect_findings():
                 return finish("done", EXIT_DONE)
 
