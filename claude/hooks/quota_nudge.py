@@ -10,6 +10,11 @@ when the level rises, and again after a drop followed by a rise.
 Silent when the state file is missing, unreadable, older than MAX_AGE_SECONDS (a stopped
 guard must not keep nagging) or at level `ok`.
 
+Separately, once per session while the state's `unreadable_since` is set and over an hour old
+(the guard has failed to read aiuse on every run since), it prints "[quota-guard unreadable]
+aiuse unreadable since <when>: check `aiuse --available --json`", whatever the level or age of
+the rest of the state.
+
 History: 2026-10-23, after the Claude weekly window ran out 2.6 days early on 2026-10-20
 with a `conserve` alert unread for 11 hours. docs/model-routing.md "Quota guard".
 
@@ -26,6 +31,7 @@ from pathlib import Path
 
 LEVELS = ("ok", "watch", "tight", "critical")
 MAX_AGE_SECONDS = 2 * 3600
+UNREADABLE_AFTER_SECONDS = 3600   # an unreadable episode this old gets its own line
 MAX_SESSIONS = 200
 
 
@@ -83,22 +89,35 @@ def _save_nudges(state):
         pass
 
 
-def main():
+def _parse(text):
     try:
-        raw = sys.stdin.read()
-        data = json.loads(raw) if raw.strip() else {}
+        d = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
     except Exception:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    st = _fresh_guard_state()
-    if st is None:
-        return
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def _unreadable_nudge(raw, session_id, nudges):
+    """Print once per session while `unreadable_since` is set and over UNREADABLE_AFTER old (the
+    guard has failed to read aiuse for every run since); True when `nudges` changed."""
+    since = _parse(raw.get("unreadable_since")) if isinstance(raw, dict) and raw.get("unreadable_since") else None
+    if since is None or (_now() - since).total_seconds() <= UNREADABLE_AFTER_SECONDS:
+        return False
+    stamp = since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    key = f"{session_id}#unreadable"
+    if nudges.get(key) == stamp:
+        return False
+    print(f"[quota-guard unreadable] aiuse unreadable since {stamp}: check `aiuse --available --json`",
+          flush=True)
+    nudges.pop(key, None)
+    nudges[key] = stamp
+    return True
+
+
+def _level_nudge(st, session_id, nudges):
     level = st.get("level")
     if level not in LEVELS:
-        return
-    session_id = str(data.get("session_id") or "unknown")
-    nudges = _load_nudges()
+        return False
     shown = nudges.get(session_id)
     shown = shown if shown in LEVELS else "ok"
     if level != "ok" and LEVELS.index(level) > LEVELS.index(shown):
@@ -108,6 +127,31 @@ def main():
     if shown != level:
         nudges.pop(session_id, None)
         nudges[session_id] = level  # a drop is remembered too, so a later rise speaks again
+        return True
+    return False
+
+
+def main():
+    try:
+        raw = sys.stdin.read()
+        data = json.loads(raw) if raw.strip() else {}
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    try:
+        state = json.loads(_state_file().read_text())
+    except Exception:
+        return
+    if not isinstance(state, dict):
+        return
+    session_id = str(data.get("session_id") or "unknown")
+    nudges = _load_nudges()
+    dirty = _unreadable_nudge(state, session_id, nudges)
+    st = _fresh_guard_state()
+    if st is not None:
+        dirty = _level_nudge(st, session_id, nudges) or dirty
+    if dirty:
         _save_nudges(dict(list(nudges.items())[-MAX_SESSIONS:]))
 
 

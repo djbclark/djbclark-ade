@@ -474,11 +474,16 @@ line is qualified: omp only while `aiuse --available --json` still lists it (aiu
 omp when every Claude weekly window is exhausted). aiuse exit 3 (nothing usable) is `critical`
 whatever the snapshot shows; a live `available` row without `windows[]` is judged by its own
 `headroom_percent` / `binding_window` / `usable_now`. Exit codes 0 / 1 / 2 / 3 for the
-levels, 10 when Claude appears nowhere, the data is malformed, aiuse could not be read or
-another check holds the lock, 64 for a bad
+levels, 10 when Claude appears nowhere, any container (`available`, `excluded`, `accounts`,
+`alerts`, `windows`) is present but not a list of objects, the snapshot does not parse, aiuse
+could not be read or another check holds the lock. Exit 10 never writes a level: the level,
+advice and number fields stay as they were, but a failed read (not a held lock) records
+`unreadable_since` and, on the second failing run in a row, sends one ping per episode
+(`last_unreadable_pinged_at`); the next good read clears both. 64 for a bad
 `CLAUDE_QUOTA_GUARD_THRESHOLDS`, 69 for `--install` off macOS (launchd only; use a systemd
 user timer or cron). The UserPromptSubmit hook `claude/hooks/quota_nudge.py` reads only the
-state file and prints its `advice` once per session and level.
+state file and prints its `advice` once per session and level, and `[quota-guard unreadable]`
+once per session while `unreadable_since` is over an hour old.
 
 ## Formerly open questions — resolved by operator, 2026-08-23
 

@@ -277,14 +277,15 @@ def test_unreadable_aiuse_exits_10_and_leaves_state_alone(rig, fixture, rc):
     rig.set_aiuse(fixture, rc=rc)
     r = rig.guard()
     assert r.returncode == 10
-    assert "state file left unchanged" in r.stderr
-    assert rig.state.read_bytes() == before
+    assert "level fields left unchanged" in r.stderr
+    assert core_bytes(rig.state.read_bytes()) == core_bytes(before)
     assert rig.pings() == []
 
 
 def test_missing_aiuse_binary_exits_10(rig):
     r = rig.guard(CLAUDE_QUOTA_GUARD_AIUSE=str(rig.tmp / "no-such-aiuse"))
-    assert r.returncode == 10 and not rig.state.exists()
+    assert r.returncode == 10
+    assert rig.state_json() == {"unreadable_since": "2026-10-23T12:00:00Z", "last_unreadable_pinged_at": None}
 
 
 # -- pings ------------------------------------------------------------------
@@ -401,7 +402,7 @@ def test_a_failed_replace_keeps_the_old_state_and_removes_the_temp(rig, monkeypa
     monkeypatch.setattr(mod.os, "replace", boom)
     with pytest.raises(OSError):
         mod.save_state({"level": "critical"})
-    assert rig.state.read_bytes() == before
+    assert core_bytes(rig.state.read_bytes()) == core_bytes(before)
     assert sorted(p.name for p in rig.state.parent.iterdir()) == ["quota-guard.json", "quota-guard.json.lock"]
 
 
@@ -515,8 +516,8 @@ def test_claude_nowhere_with_exit_0_is_unreadable_and_leaves_state_alone(rig):
     rig.set_aiuse(aiuse_fixture(with_claude=False))
     rig.set_alerts([], accounts=[snapshot_account(provider="codex", usable_now=False)])
     r = rig.guard()
-    assert r.returncode == 10 and "state file left unchanged" in r.stderr
-    assert rig.state.read_bytes() == before
+    assert r.returncode == 10 and "level fields left unchanged" in r.stderr
+    assert core_bytes(rig.state.read_bytes()) == core_bytes(before)
 
 
 # -- resets_at is normalised before it reaches the advice (L1) --------------------------------
@@ -789,7 +790,7 @@ def test_n4_malformed_aiuse_or_snapshot_types_are_exit_10_with_one_stderr_line(r
     r = rig.guard()
     assert r.returncode == 10, r.stderr
     assert len(r.stderr.strip().splitlines()) == 1 and "Traceback" not in r.stderr
-    assert rig.state.read_bytes() == before
+    assert core_bytes(rig.state.read_bytes()) == core_bytes(before)
 
 
 def test_n4_an_unexpected_exception_in_the_decision_is_exit_10_state_untouched(rig, monkeypatch, capsys):
@@ -804,7 +805,7 @@ def test_n4_an_unexpected_exception_in_the_decision_is_exit_10_state_untouched(r
     assert mod.main(["check"]) == 10
     err = capsys.readouterr().err.strip().splitlines()
     assert len(err) == 1 and "RuntimeError" in err[0] and "surprise" in err[0]
-    assert rig.state.read_bytes() == before
+    assert core_bytes(rig.state.read_bytes()) == core_bytes(before)
 
 
 def test_n6_only_the_critical_advice_qualifies_the_omp_adversary_route(rig):
@@ -841,7 +842,7 @@ def test_a_lock_held_elsewhere_is_exit_10_after_a_bounded_wait(rig):
         r = rig.guard(CLAUDE_QUOTA_GUARD_THRESHOLDS=json.dumps({"lock_retries": 4, "lock_wait_s": 0.05}))
         assert r.returncode == 10 and "another check holds the lock" in r.stderr
         assert time.monotonic() - t0 < 10
-    assert rig.state.read_bytes() == before
+    assert core_bytes(rig.state.read_bytes()) == core_bytes(before)
     assert rig.guard().returncode == 2                                # released: runs again
 
 
@@ -1009,7 +1010,7 @@ def test_q1_a_present_but_malformed_windows_is_exit_10_state_untouched(rig, bad_
     r = rig.guard()
     assert r.returncode == 10, r.stderr
     assert "malformed `windows`" in r.stderr and len(r.stderr.strip().splitlines()) == 1
-    assert rig.state.read_bytes() == before
+    assert core_bytes(rig.state.read_bytes()) == core_bytes(before)
 
 
 @pytest.mark.parametrize("omitted", [True, False])
@@ -1061,7 +1062,7 @@ def test_q3_a_snapshot_that_exists_but_does_not_parse_is_exit_10_state_untouched
     r = rig.guard()
     assert r.returncode == 10, r.stderr
     assert len(r.stderr.strip().splitlines()) == 1 and "2026-10-23T115900.000000Z.json" in r.stderr
-    assert rig.state.read_bytes() == before
+    assert core_bytes(rig.state.read_bytes()) == core_bytes(before)
 
 
 def test_q3_a_missing_directory_or_an_empty_one_is_still_no_snapshot(rig):
@@ -1089,3 +1090,198 @@ def test_q3_exit_3_stays_critical_when_the_snapshot_is_corrupt(rig):
     r = rig.guard()
     assert r.returncode == 3 and "ignored: aiuse exit 3 is critical regardless" in r.stderr
     assert rig.state_json()["level"] == "critical" and len(rig.pings()) == 1
+
+
+# -- fix 6 (adversary round 8, 2026-10-23) ------------------------------------------------------
+
+BOOKKEEPING = ("unreadable_since", "last_unreadable_pinged_at")
+
+
+def core_bytes(raw):
+    """The state minus the unreadable-episode bookkeeping: the level/advice/number fields."""
+    d = json.loads(raw)
+    return json.dumps({k: v for k, v in d.items() if k not in BOOKKEEPING}, sort_keys=True)
+
+
+def _write_snapshot(rig, obj, name="2026-10-23T115900.000000Z.json"):
+    for f in rig.snaps.glob("*.json"):
+        f.unlink()
+    p = rig.snaps / name
+    p.write_text(json.dumps(obj))
+    os.utime(p, (NOW.timestamp() - 60, NOW.timestamp() - 60))
+
+
+GOOD_SNAPSHOT = {"accounts": [snapshot_account(weekly=80, five=70, fable=5)],
+                 "alerts": [alert(PROJECTED)]}
+BAD_VALUES = ["garbage", {"a": 1}, None, 5, [7], [snapshot_account(), "x"]]
+
+
+def test_m1_the_probe_baseline_reads_the_fable_fallback_and_the_alert(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=80, five=70, with_fable_pool=False))
+    _write_snapshot(rig, GOOD_SNAPSHOT)
+    assert rig.guard().returncode == 2                    # the projected weekly alert -> tight
+    assert rig.state_json()["fable_left"] == 5
+
+
+@pytest.mark.parametrize("bad", BAD_VALUES)
+@pytest.mark.parametrize("keys", [("accounts",), ("alerts",), ("accounts", "alerts")])
+def test_m1_a_malformed_snapshot_container_is_exit_10_state_untouched(rig, bad, keys):
+    before = _good_state(rig)
+    rig.set_aiuse(aiuse_fixture(weekly=80, five=70, with_fable_pool=False))
+    _write_snapshot(rig, {**GOOD_SNAPSHOT, **{k: bad for k in keys}})
+    r = rig.guard()
+    assert r.returncode == 10, r.stderr
+    lines = r.stderr.strip().splitlines()
+    assert len(lines) == 1 and f"malformed `{keys[0]}`" in lines[0]
+    assert "snapshot 2026-10-23T115900.000000Z.json" in lines[0]
+    assert core_bytes(rig.state.read_bytes()) == core_bytes(before)
+
+
+@pytest.mark.parametrize("bad", ["x", {"a": 1}, None, 5, ["x"]])
+@pytest.mark.parametrize("key", ["available", "excluded"])
+def test_m1_a_malformed_payload_container_is_exit_10_state_untouched(rig, bad, key):
+    before = _good_state(rig)
+    rig.set_aiuse(aiuse_fixture(weekly=80, payload_extra={key: bad}))
+    _write_snapshot(rig, GOOD_SNAPSHOT)
+    r = rig.guard()
+    assert r.returncode == 10, r.stderr
+    assert f"malformed `{key}` in the aiuse payload" in r.stderr and len(r.stderr.strip().splitlines()) == 1
+    assert core_bytes(rig.state.read_bytes()) == core_bytes(before)
+
+
+@pytest.mark.parametrize("snapshot", [{"alerts": GOOD_SNAPSHOT["alerts"]}, {"accounts": GOOD_SNAPSHOT["accounts"]}, {}])
+def test_m1_omitted_keys_are_empty_not_malformed(rig, snapshot):
+    rig.set_aiuse(aiuse_fixture(weekly=80, five=70, with_fable_pool=False))
+    _write_snapshot(rig, snapshot)
+    assert rig.guard().returncode in (0, 1, 2)
+    st = rig.state_json()
+    assert st["unreadable_since"] is None
+    assert st["fable_left"] == (5 if "accounts" in snapshot else None)
+
+
+def test_m1_exit_3_stays_critical_when_a_snapshot_container_is_malformed(rig):
+    rig.set_aiuse("nothing usable\n", rc=3)
+    _write_snapshot(rig, {**GOOD_SNAPSHOT, "accounts": "garbage"})
+    r = rig.guard()
+    assert r.returncode == 3 and "ignored: aiuse exit 3 is critical regardless" in r.stderr
+
+
+def _fail_aiuse(rig):
+    rig.set_aiuse("not json at all", rc=0)
+
+
+def _later(rig, minutes):
+    rig.now = rig.now + timedelta(minutes=minutes)
+
+
+def test_u1_an_unreadable_episode_pings_once_and_leaves_the_level_fields_alone(rig):
+    before = _good_state(rig)
+    assert rig.pings() == [
+        f"djbclark-ade: Claude quota tight: weekly 25% left, resets {WEEK_PHRASE}; "
+        "Claude quota tight: no Fable or Opus Agent-tool sub-agents."]
+    _fail_aiuse(rig)
+    assert rig.guard().returncode == 10                              # run 1: noted, no ping
+    st = rig.state_json()
+    assert st["unreadable_since"] == "2026-10-23T12:00:00Z" and st["last_unreadable_pinged_at"] is None
+    assert len(rig.pings()) == 1 and core_bytes(rig.state.read_bytes()) == core_bytes(before)
+    _later(rig, 15)
+    assert rig.guard().returncode == 10                              # run 2: the one ping
+    ping_text = rig.pings()[1]
+    assert ping_text.startswith("djbclark-ade: Claude quota guard cannot read aiuse: ")
+    assert "printed invalid JSON" in ping_text
+    assert ping_text.endswith("(every run since 2026-10-23T12:00:00Z)")
+    st = rig.state_json()
+    assert st["unreadable_since"] == "2026-10-23T12:00:00Z"          # the episode start does not move
+    assert st["last_unreadable_pinged_at"] == "2026-10-23T12:15:00Z"
+    _later(rig, 15)
+    assert rig.guard().returncode == 10                              # run 3: silent
+    assert len(rig.pings()) == 2 and core_bytes(rig.state.read_bytes()) == core_bytes(before)
+
+
+def test_u1_a_good_run_clears_the_episode_and_a_new_one_pings_again(rig):
+    _good_state(rig)
+    _fail_aiuse(rig)
+    rig.guard()
+    _later(rig, 15)
+    rig.guard()
+    assert len(rig.pings()) == 2
+    _later(rig, 15)
+    rig.set_aiuse(aiuse_fixture(weekly=25))
+    assert rig.guard().returncode == 2
+    st = rig.state_json()
+    assert st["unreadable_since"] is None and st["last_unreadable_pinged_at"] is None
+    assert "[aiuse unreadable" not in rig.guard("status").stdout
+    _fail_aiuse(rig)
+    _later(rig, 15)
+    rig.guard()
+    _later(rig, 15)
+    rig.guard()
+    assert len(rig.pings()) == 3 and "(every run since 2026-10-23T12:45:00Z)" in rig.pings()[2]
+
+
+def test_u1_a_failed_unreadable_ping_is_retried_on_the_next_failing_run(rig):
+    _good_state(rig)
+    _fail_aiuse(rig)
+    rig.guard()
+    _later(rig, 15)
+    rig.set_ping_failing()
+    rig.guard()
+    assert rig.state_json()["last_unreadable_pinged_at"] is None
+    rig.set_ping_ok()
+    _later(rig, 15)
+    rig.guard()
+    assert len(rig.pings()) == 2 and rig.state_json()["last_unreadable_pinged_at"] is not None
+
+
+def test_u1_the_first_ever_run_failing_writes_only_the_bookkeeping_and_status_shows_it(rig):
+    _fail_aiuse(rig)
+    assert rig.guard().returncode == 10
+    st = rig.state_json()
+    assert st == {"unreadable_since": "2026-10-23T12:00:00Z", "last_unreadable_pinged_at": None}
+    s = rig.guard("status")
+    assert s.returncode == 0 and "[aiuse unreadable since 2026-10-23T12:00:00Z]" in s.stdout
+
+
+def test_u1_a_held_lock_records_no_episode(rig):
+    _good_state(rig)
+    before = rig.state.read_bytes()
+    with open(rig.state.parent / "quota-guard.json.lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        r = rig.guard(CLAUDE_QUOTA_GUARD_THRESHOLDS=json.dumps({"lock_retries": 2, "lock_wait_s": 0.05}))
+    assert r.returncode == 10 and rig.state.read_bytes() == before
+
+
+def _hook_state(rig, level="watch", checked_age=timedelta(minutes=5), since=None):
+    rig.state.parent.mkdir(parents=True, exist_ok=True)
+    st = {"level": level, "advice": "1. w.", "checked_at": (NOW - checked_age).isoformat()}
+    if since is not None:
+        st["unreadable_since"] = since.isoformat()
+    rig.state.write_text(json.dumps(st))
+
+
+UNREADABLE_LINE = "[quota-guard unreadable] aiuse unreadable since {}: check `aiuse --available --json`\n"
+
+
+def test_u2_the_hook_prints_unreadable_once_per_session_after_an_hour(rig):
+    since = NOW - timedelta(hours=2)
+    _hook_state(rig, since=since)
+    out = rig.hook("s1").stdout
+    assert out == UNREADABLE_LINE.format("2026-10-23T10:00:00Z") + "[quota-guard watch] 1. w.\n"
+    assert rig.hook("s1").stdout == ""
+    assert rig.hook("s2").stdout == out                                 # another session hears it once too
+    _hook_state(rig, since=NOW - timedelta(minutes=30) - timedelta(hours=3))  # a new episode
+    assert rig.hook("s1").stdout == UNREADABLE_LINE.format("2026-10-23T08:30:00Z")
+
+
+def test_u2_the_hook_is_silent_while_the_episode_is_under_an_hour_or_absent(rig):
+    _hook_state(rig, since=NOW - timedelta(minutes=59))
+    assert rig.hook("s1").stdout == "[quota-guard watch] 1. w.\n"
+    _hook_state(rig, level="ok", since=None)
+    assert rig.hook("s9").stdout == ""
+
+
+def test_u2_the_hook_reports_unreadable_even_when_the_level_state_is_old(rig):
+    """The failing guard stops refreshing checked_at, so the level part goes silent after 2 h;
+    the unreadable line is exactly what must still get through."""
+    _hook_state(rig, level="critical", checked_age=timedelta(hours=6), since=NOW - timedelta(hours=6))
+    assert rig.hook().stdout == UNREADABLE_LINE.format("2026-10-23T06:00:00Z")

@@ -13,8 +13,8 @@ UserPromptSubmit hook claude/hooks/quota_nudge.py, and pings once per upward cro
   claude-quota-guard --install     write the launchd job (every 15 min) and print the
                                    `launchctl bootstrap` line; never runs launchctl itself
 
-Levels and exit codes: 0 ok, 1 watch, 2 tight, 3 critical, 10 aiuse could not be read (state
-file left untouched), 64 bad CLAUDE_QUOTA_GUARD_THRESHOLDS, 69 `--install` off macOS (launchd
+Levels and exit codes: 0 ok, 1 watch, 2 tight, 3 critical, 10 aiuse could not be read (level
+fields left untouched; see below), 64 bad CLAUDE_QUOTA_GUARD_THRESHOLDS, 69 `--install` off macOS (launchd
 only; run `check` every 15 min from a systemd user timer or cron instead). The binding window
 is the lowest `remaining_percent` among the Claude rows' windows (weekly, 5-hour and Fable's
 sublimit):
@@ -33,10 +33,19 @@ for a reason the snapshot predates). aiuse also drops the Fable pool when the Fa
 exhausted: the Fable window is then read from the snapshot (exhausted = 0% left = `watch`).
 A live `available` Claude row without `windows[]` is judged by its own `headroom_percent` /
 `binding_window` / `usable_now`. aiuse exit 3 is `critical` even when the snapshot looks healthy.
-Exit 10 when Claude appears nowhere, on any malformed aiuse or snapshot data (a present `windows`
-that is not a list of objects; a newest snapshot file that does not parse or is not an object; a
-missing snapshot directory or no files is "no snapshot"), or when another
-check holds <state>.lock for about 5 s. One `hermes-ping` per level per reset period (the mark
+Exit 10 when Claude appears nowhere, on any malformed aiuse or snapshot data (a present
+`available` / `excluded` / `accounts` / `alerts` that is not a list of objects, or holds a
+non-object item; a present `windows` that is not a list of objects; a newest snapshot file that
+does not parse or is not an object; an omitted key is empty and a missing snapshot directory or
+no files is "no snapshot"), or when another
+check holds <state>.lock for about 5 s. What exit 10 does to the state: the level, advice and
+number fields are left exactly as they were (a failed read never writes a level), but a read
+that fails after the lock was taken records the episode in two bookkeeping fields,
+`unreadable_since` (first failing run) and `last_unreadable_pinged_at`; the second failing run
+in a row sends ONE ping "Claude quota guard cannot read aiuse: <reason> (every run since
+<unreadable_since>)" per episode, and the next good read clears both. (A held lock records
+nothing.) The hook prints "[quota-guard unreadable]" once per session while the episode is over
+1 h old. One `hermes-ping` per level per reset period (the mark
 survives level drops; a new weekly `resets_at` clears it). Data older than 3 h (the oldest of
 the payload's `age_seconds`, every row that fed the decision (judged rows and any snapshot rows
 whose Fable or display windows were used) by `age_seconds` / `collected_at`, and the
@@ -220,13 +229,19 @@ def read_aiuse() -> tuple[int, dict]:
     return p.returncode, data
 
 
-def _rows(container, key: str) -> list[dict]:
-    """Claude rows (dicts with provider == claude) under container[key]; anything that is not
-    a list of dicts is ignored, so malformed aiuse output cannot raise here."""
-    items = container.get(key) if isinstance(container, dict) else None
-    if not isinstance(items, list):
+def _rows(container, key: str, where: str = "the aiuse data") -> list[dict]:
+    """Claude rows (dicts with provider == claude) under container[key].
+
+    An omitted key (or a container that is not an object) is empty. A PRESENT value that is not a
+    list, or a list holding an item that is not an object, is malformed: Unreadable naming the key
+    and `where` (exit 10), so corrupt output can never read as "nothing there" (no alerts, no
+    Fable fallback, no Claude row) and then `ok`."""
+    if not isinstance(container, dict) or key not in container:
         return []
-    return [r for r in items if isinstance(r, dict) and r.get("provider") == "claude"]
+    items = container[key]
+    if not isinstance(items, list) or not all(isinstance(r, dict) for r in items):
+        raise Unreadable(f"malformed `{key}` in {where}: not a list of objects")
+    return [r for r in items if r.get("provider") == "claude"]
 
 
 def claude_windows(rows: list[dict]) -> list[dict]:
@@ -274,17 +289,17 @@ def _lowest(windows: list[dict], kind: str) -> dict | None:
 
 # -- reading the snapshot --------------------------------------------------
 
-def read_snapshot() -> tuple[dict | None, float | None]:
-    """The newest aiuse snapshot (parsed) and its age in seconds. (None, None) when there is no
-    snapshot (no directory, no files); a newest file that cannot be read, is not JSON or is not an
-    object raises Unreadable naming it: a half-written or corrupt snapshot must not read as
-    "no alerts, no Fable fallback"."""
+def read_snapshot() -> tuple[dict | None, float | None, str | None]:
+    """The newest aiuse snapshot (parsed), its age in seconds and its file name. (None, None, None)
+    when there is no snapshot (no directory, no files); a newest file that cannot be read, is not
+    JSON or is not an object raises Unreadable naming it: a half-written or corrupt snapshot must
+    not read as "no alerts, no Fable fallback"."""
     d = _path("CLAUDE_QUOTA_GUARD_SNAPSHOTS", HOME / ".cache/aiuse/snapshots")
     try:
         files = [f for f in d.glob("*.json") if f.is_file()]
         newest = max(files, key=lambda f: f.stat().st_mtime)
     except (OSError, ValueError):               # no directory / no files (max of nothing)
-        return None, None
+        return None, None, None
     try:
         age = max(0.0, now().timestamp() - newest.stat().st_mtime)
         snap = json.loads(newest.read_text())
@@ -292,14 +307,22 @@ def read_snapshot() -> tuple[dict | None, float | None]:
         raise Unreadable(f"snapshot {newest.name} is unreadable or not JSON ({type(e).__name__})")
     if not isinstance(snap, dict):
         raise Unreadable(f"snapshot {newest.name} is not a JSON object")
-    return snap, age
+    return snap, age, newest.name
+
+
+def validate_inputs(data: dict, snap: dict | None, snap_name: str | None) -> None:
+    """Raise Unreadable (naming key and file) for any container decide() reads that is malformed."""
+    for key in ("available", "excluded"):
+        _rows(data, key, "the aiuse payload")
+    for key in ("accounts", "alerts"):
+        _rows(snap, key, f"snapshot {snap_name}" if snap_name else "the snapshot")
 
 
 def snapshot_alerts(snap: dict | None, age: float | None, t: dict) -> list[dict]:
     """Claude `conserve` alerts of a snapshot no older than alert_max_age_s."""
     if snap is None or age is None or age > t["alert_max_age_s"]:
         return []
-    return [a for a in _rows(snap, "alerts") if a.get("kind") == "conserve"]
+    return [a for a in _rows(snap, "alerts", "the snapshot") if a.get("kind") == "conserve"]
 
 
 # -- the decision ----------------------------------------------------------
@@ -363,9 +386,9 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
     A weekly "projected to run out ... before reset" alert is ignored altogether while the
     matching weekly window has `pace_early: true` (early in a window the projection swings
     wildly: 293 of 1,146 such alerts in 2026 snapshots fired at 60% or more left)."""
-    rows, judge_usable = _rows(data, "available"), True
-    snap_rows = _rows(snap, "accounts")
-    excluded_rows = _rows(data, "excluded")       # an operator exclusion, top level of the payload
+    rows, judge_usable = _rows(data, "available", "the aiuse payload"), True
+    snap_rows = _rows(snap, "accounts", "the snapshot")
+    excluded_rows = _rows(data, "excluded", "the aiuse payload")  # an operator exclusion, payload top level
     # A present `windows` that is not a list of objects is malformed output (an omitted key is a
     # valid windowless summary): fail closed rather than read it as "no windows".
     for row in rows + excluded_rows + snap_rows:
@@ -588,20 +611,23 @@ def _locked(t: dict):
 def _check_locked(t: dict) -> dict:
     try:
         rc, data = read_aiuse()
+        snap, snap_age, snap_name = None, None, None
         try:
-            snap, snap_age = read_snapshot()
+            snap, snap_age, snap_name = read_snapshot()
+            validate_inputs(data, snap, snap_name)
         except Unreadable as e:
             if rc != AIUSE_NOTHING_USABLE:
                 raise
-            # exit 3 is critical whatever the snapshot says, so a broken snapshot cannot change it
+            # exit 3 is critical whatever the snapshot or payload says, so broken data cannot change it
             print(f"claude-quota-guard: {e}; ignored: aiuse exit 3 is critical regardless", file=sys.stderr)
-            snap, snap_age = None, None
+            data, snap, snap_age = {}, None, None
         d = decide(rc, data, snap, snapshot_alerts(snap, snap_age, t), t, now())
     except (Unreadable, ConfigError):
         raise
     except Exception as e:  # malformed aiuse or snapshot types must never read as `watch` (exit 1)
         raise Unreadable(f"unexpected {type(e).__name__} reading aiuse or the snapshot: {e}")
     st = dict(d)
+    st["unreadable_since"] = st["last_unreadable_pinged_at"] = None   # a good read ends the episode
     # Data age: the oldest of the payload's top-level age, every judged row's own age (a Claude
     # pool can be hours old inside a fresh snapshot: cswap stalls) and the snapshot file's mtime.
     ages = [a for a in (_num(data.get("age_seconds")), st.pop("rows_age_s"), snap_age) if a is not None]
@@ -632,13 +658,41 @@ def _check_locked(t: dict) -> dict:
     return st  # a ping cut off by a kill is retried next run too: at least once, never silently lost
 
 
+def _note_unreadable(err: Exception, t: dict) -> None:
+    """Record a failed read WITHOUT touching the level fields: only `unreadable_since` and
+    `last_unreadable_pinged_at` change. The first failing run sets `unreadable_since`; the next
+    one (still failing, so not a one-off) sends ONE ping for the episode. The next successful
+    read rebuilds the state and clears both."""
+    try:
+        prev = load_state()
+        since = _parse_ts(prev.get("unreadable_since"))
+        first = since is None
+        since_iso = _iso(since or now())
+        st = dict(prev)
+        st["unreadable_since"] = since_iso
+        st.setdefault("last_unreadable_pinged_at", None)
+        save_state(st)  # before the ping, like the level pings
+        if not first and not st.get("last_unreadable_pinged_at"):
+            reason = re.sub(r"[^\x20-\x7e]+", " ", str(err)).strip()[:160]
+            if send_ping(f"djbclark-ade: Claude quota guard cannot read aiuse: {reason} "
+                         f"(every run since {since_iso})", t):
+                st["last_unreadable_pinged_at"] = _iso(now())
+                save_state(st)
+    except OSError as e:
+        print(f"claude-quota-guard: could not record the unreadable episode: {e}", file=sys.stderr)
+
+
 def cmd_check(args) -> int:
     t = thresholds()
     try:
         with _locked(t):
-            st = _check_locked(t)
+            try:
+                st = _check_locked(t)
+            except Unreadable as e:
+                _note_unreadable(e, t)
+                raise
     except Unreadable as e:
-        print(f"claude-quota-guard: {e}; state file left unchanged", file=sys.stderr)
+        print(f"claude-quota-guard: {e}; level fields left unchanged", file=sys.stderr)
         return EX_UNREADABLE
     except ConfigError:
         raise
@@ -674,10 +728,12 @@ def _age_phrase(seconds) -> str:
 
 def _human(st: dict) -> str:
     stale = " (stale)" if st.get("stale") else ""
+    since = _parse_ts(st.get("unreadable_since"))
+    unreadable = f" [aiuse unreadable since {_iso(since)}]" if since else ""
     return (f"claude-quota-guard: {st.get('level', '?')}{stale}: weekly {_fmt(st.get('weekly_left'))} left, "
             f"5-hour {_fmt(st.get('five_hour_left'))}, fable {_fmt(st.get('fable_left'))}, "
             f"resets {_reset_phrase(st.get('resets_at'))}, data {_age_phrase(st.get('data_age_s'))}, "
-            f"checked {st.get('checked_at', '?')}")
+            f"checked {st.get('checked_at', '?')}{unreadable}")
 
 
 def cmd_status(args) -> int:
