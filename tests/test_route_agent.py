@@ -1892,6 +1892,15 @@ class TestGovernorHold(unittest.TestCase):
             with self.subTest(label), mock.patch.dict(os.environ, env):
                 self.assertEqual(r.route("judgment", quota=quota).service.name, "claude")
 
+    def test_judgment_does_not_force_an_ineligible_omp(self):
+        """Codex pass 7 on PR 31, P2: a retired omp, or one without the judgment capability, is not preferred just
+        because the governor holds Claude."""
+        self.state("tight")
+        original = r.Service.eligible
+        with mock.patch.object(r.Service, "eligible", lambda self, kind: self.name != "omp" and original(self, kind)):
+            choice = r.route("judgment", quota=self.QUOTA)
+        self.assertNotEqual(choice.service.name, "omp")
+
     def test_frontier_routes_as_before(self):
         before = r.route("frontier", quota=self.QUOTA).service.name
         self.state("critical")

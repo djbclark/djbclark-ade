@@ -230,8 +230,12 @@ def kind_of(label: str) -> str | None:
     return None
 
 
-def read_snapshot(path: Path, at: datetime) -> dict[str, Any] | None:
-    """{"at": datetime, "windows": {kind: {label, used, resets_at, window_minutes}}} or None."""
+def read_snapshot(path: Path, at: datetime, now: datetime, stale_min: float) -> dict[str, Any] | None:
+    """{"at": datetime, "windows": {kind: {label, used, resets_at, window_minutes, at}}} or None. Of several accounts the
+    tightest FRESH reading binds: a reading that is already more than `stale_min` old (against the file, and against
+    `now` where another account's is fresher) never wins the comparison only to be dropped as stale later, which would
+    hide a fresh account's tight reading (adversary gov-12 on PR 31, MEDIUM). An account's own time is clamped to the
+    file that holds it: a reading cannot be newer than its file (gov-12 LOW 2)."""
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -239,7 +243,8 @@ def read_snapshot(path: Path, at: datetime) -> dict[str, Any] | None:
     stamp = parse_ts(data.get("collected_at")) if isinstance(data, dict) else None
     found: list[dict[str, Any]] = []
     find_windows(data, found, None, stamp or at)
-    windows: dict[str, dict[str, Any]] = {}
+    file_at = stamp or at
+    cands: dict[str, list[dict[str, Any]]] = {}
     for w in found:
         kind = kind_of(w["label"])
         used = num(w.get("used_percent"))
@@ -250,11 +255,18 @@ def read_snapshot(path: Path, at: datetime) -> dict[str, Any] | None:
         if kind is None or used is None or resets is None:
             continue
         used = min(100.0, max(0.0, used))      # round 1 LOW 5: a value outside 0..100 is clamped, never trusted
-        cur = windows.get(kind)
-        if cur is None or used > cur["used"]:          # several accounts: the tightest one binds
-            windows[kind] = {"label": w["label"], "used": used, "resets_at": resets,
-                             "window_minutes": num(w.get("window_minutes")), "at": w.get("_obs") or stamp or at}
-    return {"at": stamp or at, "windows": windows}
+        cands.setdefault(kind, []).append({"label": w["label"], "used": used, "resets_at": resets,
+                                           "window_minutes": num(w.get("window_minutes")),
+                                           "at": min(w.get("_obs") or file_at, file_at)})
+    windows: dict[str, dict[str, Any]] = {}
+    ref = min(file_at, now)
+    for kind, lst in cands.items():
+        fresh = [c for c in lst if (ref - c["at"]).total_seconds() <= stale_min * 60]
+        if not fresh:
+            continue                           # every account's reading was already stale in its own file
+        live = [c for c in fresh if (now - c["at"]).total_seconds() <= stale_min * 60]
+        windows[kind] = max(live or fresh, key=lambda c: c["used"])    # several accounts: the tightest fresh one binds
+    return {"at": file_at, "windows": windows}
 
 
 def load_snapshots(now: datetime, t: dict[str, float]) -> list[dict[str, Any]]:
@@ -272,7 +284,7 @@ def load_snapshots(now: datetime, t: dict[str, float]) -> list[dict[str, Any]]:
             continue
         if cutoff is not None and at < cutoff:
             break
-        snap = read_snapshot(d / n, at)
+        snap = read_snapshot(d / n, at, now, t["stale_min"])
         if snap is None or snap["at"] > now + timedelta(minutes=5):
             continue                           # round 1 LOW 5: a future-dated snapshot is not evidence
         if cutoff is None:
@@ -344,9 +356,13 @@ def compute(snaps: list[dict[str, Any]], now: datetime, t: dict[str, float]) -> 
         obs = min(cur_at, now)             # a snapshot dated a few minutes ahead of the clock counts as now (adversary gov-9, LOW)
         hours = (resets - obs).total_seconds() / 3600
         tol = timedelta(minutes=t["reset_tolerance_min"])
-        samples = sorted({w.get("at", s["at"]): w["used"] for s in snaps for w in [s["windows"].get(kind)]
-                          if w is not None and abs(w["resets_at"] - resets) <= tol
-                          and 0 <= (cur_at - w.get("at", s["at"])).total_seconds() <= t["rate_window_min"] * 60}.items())
+        by_at: dict[datetime, float] = {}      # one sample per reading time, the newest file's value (gov-12 INFO 5)
+        for s in snaps:
+            w = s["windows"].get(kind)
+            if (w is not None and abs(w["resets_at"] - resets) <= tol
+                    and 0 <= (cur_at - w.get("at", s["at"])).total_seconds() <= t["rate_window_min"] * 60):
+                by_at.setdefault(w.get("at", s["at"]), w["used"])
+        samples = sorted(by_at.items())
         rate = 0.0
         if len(samples) >= 2 and (samples[-1][0] - samples[0][0]).total_seconds() >= t["min_span_min"] * 60:
             rate = slope_per_hour([((a - samples[0][0]).total_seconds() / 3600, u) for a, u in samples])

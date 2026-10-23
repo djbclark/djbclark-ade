@@ -1323,7 +1323,7 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         omp = next((s for s in services if s.name == "omp"), None)
         info = quota.get("omp") or {}
         remaining = info.get("remaining")
-        if (omp is not None and "omp" not in exclude and service_ready(omp)
+        if (omp is not None and "omp" not in exclude and omp.eligible(kind) and service_ready(omp)
                 and (remaining is None or remaining >= max(min_headroom, omp.reserve_floor))):
             return Choice(omp, remaining, 0.0, f"judgment: {omp.cli}; Claude API credits, off the "
                           f"subscription: {hold}", [], model=GOVERNOR_JUDGMENT_MODEL, kind=kind)

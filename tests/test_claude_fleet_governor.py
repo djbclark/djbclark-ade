@@ -53,7 +53,9 @@ def window(label: str, used: float, resets: datetime) -> dict:
 
 def write_snap(d: Path, at: datetime, five: tuple[float, datetime] | None = None,
                weekly: tuple[float, datetime] | None = None, fable: tuple[float, datetime] | None = None,
-               account_at: datetime | None = None, age_seconds: float | None = None) -> None:
+               account_at: datetime | None = None, age_seconds: float | None = None,
+               extra: list[tuple[tuple[float, datetime] | None, tuple[float, datetime] | None, datetime | None]] | None = None) -> None:
+    """`extra`: more Claude accounts in the same file, each (five, weekly, account_at)."""
     wins = []
     for label, spec in ((FIVE, five), (WEEK, weekly), (FABLE, fable)):
         if spec:
@@ -63,6 +65,10 @@ def write_snap(d: Path, at: datetime, five: tuple[float, datetime] | None = None
                          {"provider": "claude", "account": "x@example.com", "windows": wins,
                           **({"collected_at": account_at.isoformat()} if account_at else {}),
                           **({"age_seconds": age_seconds} if age_seconds is not None else {})}]}
+    for i, (f5, wk, acc_at) in enumerate(extra or []):
+        body["accounts"].append({"provider": "claude", "account": f"y{i}@example.com",
+                                 "windows": [window(label, *spec) for label, spec in ((FIVE, f5), (WEEK, wk)) if spec],
+                                 **({"collected_at": acc_at.isoformat()} if acc_at else {})})
     (d / snap_name(at)).write_text(json.dumps(body))
 
 
@@ -577,6 +583,64 @@ class TestNoAction(Base):
                 self.assertEqual(r.returncode, 10, r.stdout + r.stderr)
                 self.assertEqual(self.e.calls("setmodel"), [])
                 self.assertEqual(self.e.calls("paseo"), [])
+
+    def test_a_stalled_account_does_not_mask_a_fresh_accounts_tight_reading(self):
+        """Adversary gov-12 on PR 31, MEDIUM: account A's cached 97% (2 h old) beat account B's fresh 96% in the
+        tightest-binds pick and was then dropped as stale, so the level read ok."""
+        wk = NOW + timedelta(days=6)
+        write_snap(self.e.snaps, NOW - timedelta(minutes=2), (97, self.e.resets), (50, wk),
+                   account_at=NOW - timedelta(hours=2),
+                   extra=[((96, self.e.resets), (60, wk), None)])
+        self.e.set_agents([agent("aaaaaaa", "claude-opus-5-5")])
+        r = self.e.run("run")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("level: critical", r.stdout)
+        self.assertIn("downshift aaaaaaa", r.stdout)
+
+    def test_an_account_time_ahead_of_its_file_is_clamped_to_the_file(self):
+        """Adversary gov-12 on PR 31, LOW 2: a `collected_at` a day ahead of the clock, in a file an hour old, outranked
+        the newer file's 97% and never went stale."""
+        wk = NOW + timedelta(days=6)
+        write_snap(self.e.snaps, NOW - timedelta(minutes=60), (10, self.e.resets), (12, wk),
+                   account_at=NOW + timedelta(days=1))
+        write_snap(self.e.snaps, NOW - timedelta(minutes=2), (97, self.e.resets), (12, wk))
+        r = self.e.run("check")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("level: critical", r.stdout)
+
+    def test_the_newest_reading_wins_not_the_newest_file_and_a_cached_reading_is_one_sample(self):
+        """Adversary gov-12 on PR 31, LOW 3: (1) the newest file holds account A's cached 50% (observed 40 min ago), an older
+        file holds account B's 70% observed 30 min ago: B is the newest reading; (2) three files carrying the same cached
+        reading are one rate sample, not three."""
+        wk = NOW + timedelta(days=6)
+        resets = NOW + timedelta(hours=2)
+        write_snap(self.e.snaps, NOW - timedelta(minutes=30), (70, resets), (12, wk))        # B, observed at the file time
+        write_snap(self.e.snaps, NOW - timedelta(minutes=5), (50, resets), (12, wk), account_at=NOW - timedelta(minutes=40))
+        spec = importlib.util.spec_from_loader("gov", importlib.machinery.SourceFileLoader("gov", str(GOV)))
+        gov = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gov)
+        env = {"CLAUDE_GOVERNOR_SNAPSHOTS": str(self.e.snaps), "HOME": str(self.e.home),
+               "CLAUDE_QUOTA_GUARD_STATE": str(self.e.root / "none.json")}
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        t = gov.thresholds()
+        snaps = gov.load_snapshots(NOW, t)
+        res = gov.compute(snaps, NOW, t)
+        self.assertEqual(res["windows"]["five_hour"]["used"], 70.0)
+        for f in self.e.snaps.iterdir():
+            f.unlink()
+        # readings at 11:55 (30), 12:25 (40) and the cached 12:40 (50) repeated in three files
+        write_snap(self.e.snaps, NOW - timedelta(minutes=65), (30, resets), (12, wk))
+        write_snap(self.e.snaps, NOW - timedelta(minutes=35), (40, resets), (12, wk))
+        for m in (20, 10, 2):
+            write_snap(self.e.snaps, NOW - timedelta(minutes=m), (50, resets), (12, wk), account_at=NOW - timedelta(minutes=20))
+        snaps = gov.load_snapshots(NOW, t)
+        res = gov.compute(snaps, NOW, t)
+        pts = [((a - (NOW - timedelta(minutes=65))).total_seconds() / 3600, u)
+               for a, u in ((NOW - timedelta(minutes=65), 30.0), (NOW - timedelta(minutes=35), 40.0), (NOW - timedelta(minutes=20), 50.0))]
+        self.assertAlmostEqual(res["windows"]["five_hour"]["rate_per_hour"], gov.slope_per_hour(pts), places=6)
+        self.assertEqual(res["windows"]["five_hour"]["samples"], 3)
 
     def test_the_rate_history_survives_a_newer_snapshot_without_claude_windows(self):
         """Codex pass 6 on PR 31, P2: 40% (100 min ago) and 70% (40 min ago) are a 30 %/h burn; a snapshot 5 minutes old
