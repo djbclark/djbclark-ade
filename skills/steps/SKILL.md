@@ -2,10 +2,11 @@
 name: steps
 description: >-
   Step the operator through open items one at a time, each as its own
-  multiple-choice prompt (AskUserQuestion; clarify on Hermes) with the
-  recommended option first, acting on each answer before the next. Use for
-  /steps (optionally with item numbers or a topic), "step me through it", "one
-  at a time", "walk me through" a list of items or pending decisions.
+  multiple-choice prompt (AskUserQuestion; clarify on Hermes; a SendToUser
+  question widget on Grok Bot) with the recommended option first, acting on
+  each answer before the next. Use for /steps (optionally with item numbers or
+  a topic), "step me through it", "one at a time", "walk me through" a list of
+  items or pending decisions.
 ---
 
 # steps — one open item at a time, recommendation first
@@ -13,6 +14,8 @@ description: >-
 Canonical copy: `~/src/djbclark-ade/skills/steps/` (git: `~/src/djbclark-ade`, github.com/djbclark/djbclark-ade); every TUI reaches it via a direct skill-everywhere link `~/src/djbclark-ade/skills/steps`.
 Hermes Telegram `/steps` needs plugin `skill-slash` (not just the skill file).
 Claude Code: `site-private/claude/commands/steps.md` → `~/.claude/commands/`.
+Grok Bot: a rendered copy `ade-steps` in `/home/box/agent-data/workflows/` (skill-everywhere `grokbot`
+target, synced nightly by `/home/box/agent-data/shared/skills-sync/sync.sh`; 2026-10-23).
 
 He is choosing, not reading. Give him one decision per prompt, pre-ranked, and
 do what he picked before asking the next one. Same motive as
@@ -22,7 +25,8 @@ call**, so each answer can change the next question.
 
 Never dump the whole queue as numbered prose options for him to type back — the
 prompt tool is the walk. (A runtime without a native chooser uses the numbered
-one-at-a-time fallback in rule 4 of "Prompt tool" below, not a full-queue dump.)
+one-at-a-time fallback in rule 4 of "Prompt tool" below, not a full-queue dump.
+Grok Bot is not such a runtime: it has a question widget, rule 5.)
 
 ## Prompt tool (pick once per session)
 
@@ -51,7 +55,8 @@ Use the native chooser your runtime actually has. Do not invent a second UX.
    Keep unanswered decisions pending. A preselected option or elapsed time is
    not an answer. Honor the native tool's question schema and limits.
 4. **No native chooser (no `AskUserQuestion`/`question`/`clarify` tool in the
-   function list):** the walk falls back to a numbered text walk, still one
+   function list, and not Grok Bot, which has rule 5):** the walk falls back
+   to a numbered text walk, still one
    item per message, still recommendation first. Do NOT refuse with a one-line
    "I cannot prompt" and stop. Instead:
    1. Number the options `1.`–`n.` with the recommendation first (labelled),
@@ -67,10 +72,16 @@ Use the native chooser your runtime actually has. Do not invent a second UX.
       every turn.
    4. This fallback is for runtimes **without** a picker only. Any agent that
       HAS `AskUserQuestion` / `question` / `clarify` keeps using it (rules
-      1–3 above) and never drops to this text fallback.
+      1–3 above) and never drops to this text fallback; Grok Bot keeps its
+      widget (rule 5).
+5. **Grok Bot** (djbclark's cloud assistant on its own Linux box, 2026-10-23):
+   the question widget, `SendToUser` with type `"widget"`. It is a native
+   chooser, not the rule 4 fallback: one question per widget, the widget ends
+   the turn, and his pick comes back as his next message. Shape and limits in
+   section 2d.
 
 Do not call `AskUserQuestion` on Hermes (it is not a tool here). Do not call
-`clarify` on Claude Code.
+`clarify` on Claude Code. Grok Bot has neither; it uses the widget (2d).
 
 ## 1. Collect the items
 
@@ -157,6 +168,41 @@ so the position (`2/4`) goes at the start of `question`.
 4. The "Other (type answer)" line is added by the tool; he types `stop` there
    to end the walk.
 
+### 2d. Grok Bot widget (`SendToUser`, type `"widget"`)
+
+Grok Bot's chooser (2026-10-23): `SendToUser` with type `"widget"` and
+`widget: {prompt, options: [{label, value, style}], allowCustom, multiSelect, dismissOnMoveOn}`.
+The card has no header chip, no per-option description, no `helpText` and no
+`preview`, so each item is **two messages**:
+
+1. **A `SendToUser` text message first** with everything that is not the
+   decision: the position (`2/4`), what the item is, what it does, why a choice
+   is needed (rule 4), each option's consequence when a label cannot carry it,
+   links as markdown (rule 5) and text he must read (rule 6). Before the first
+   item, the queue list from section 1 goes here too.
+2. **Then the widget**, holding only the decision:
+   1. `prompt`: the short question, one line (`Investigate the last pager alert and fix it?`).
+   2. `options`: 2–4, same as rule 2 (the widget takes up to 6). One-line labels,
+      no descriptions. Each label starts with its number (rule 2a):
+      `1. Fix the pager (Recommended)`, `2. Skip — leave it as is`.
+   3. Recommended option first with `style: "primary"`; a destructive one
+      (delete, force-push, revert, close, cancel) gets `style: "danger"`.
+   4. `value`: a short stable id per option (`fix`, `skip`), so the reply that
+      comes back maps to one option without parsing the label.
+   5. `allowCustom: true`: that is the free-text "Other" of rule 3, where he
+      types `stop`. `multiSelect: false`. One question per widget, never two.
+3. **The widget ends the turn.** His pick (or typed text) arrives as his next
+   message. Act on it (section 3), then send the next item's text and widget.
+4. **A dismissed widget is a decline.** Record the item as skipped (or left
+   open) and move on; do not re-ask it in this walk.
+5. **Grok Bot's own rules still bind.** Small picked items are done before the
+   next question (section 3.1), but pushing, sending, posting and merging still
+   need his explicit OK: an option he picks counts only if its label names that
+   exact action (which commit to which branch, which message to whom).
+6. **Not on Grok Bot:** `/compact` and `self-slash` (section 3.5). Grok Bot has
+   no herdr, Orca or Paseo host and manages its own context; if he picks
+   `/compact`, say in one line that it does not apply there and go on.
+
 ## 3. Act, then move on
 
 1. **Do what he picked before you ask the next question**, if it is small and
@@ -175,7 +221,7 @@ so the position (`2/4`) goes at the start of `question`.
    Orca terminal or a Paseo agent queues it itself: note the remaining queue, run
    `~/src/djbclark-ade/bin/self-slash "/compact <focus: the open items>"`, and
    end the turn at once. Outside those three hosts, or if it refuses (a draft in
-   his input box), ask him to type it.
+   his input box), ask him to type it. Grok Bot: does not apply (2d.6).
 
 ## 4. Keep going until nothing is left
 

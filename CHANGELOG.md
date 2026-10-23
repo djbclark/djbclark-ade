@@ -11,6 +11,12 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- `skill-everywhere` gains a `grokbot` target: a rendered copy `ade-<name>/` in `~/agent-data/workflows/` on the
+  Grok Bot box (banner, `.skill-everywhere` marker, only marked dirs touched), plus `--dry-run`/`-n`,
+  `SKILL_EVERYWHERE_ONLY` and plain-GNU fallbacks so it runs on Linux (2026-10-23). (PR pending)
+- `autorename` renames a Paseo-hosted session's workspace to the title in lower-case hyphen form plus `-pw`
+  (`paseo-skill-sync-overwrite-fix-pw`; `--auto` keeps a workspace already ending in `-pw`); herdr tab labels keep
+  `-t` (2026-10-23).
 - `bin/ade-scan-state` and `docs/ade-everywhere-phase0-scan-2026-10-20.md`: Phase 0 scan of the bigteam
   task dirs (134, ~60 GiB, 41 with unreferenced reports) and 23 Orca / cow checkouts (7 with unpushed work,
   including `~/src/one-offs`, which has no remote); `--json`, with tests. It scans a checkout only
@@ -72,6 +78,14 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
+- `loose` gains an "On Grok Bot" section (G1-G7) with pointers from Rule 2, 3 and 4: box paths, GitHub reads via `gh`/
+  `GITHUB_TOKEN_DJBCLARK` or the connector, the box's own jobs instead of a Mac process list, a chat reply instead of
+  `hermes-ping`, no `handoff`/`self-slash`/`/compact` there; still walks the findings with `/steps`. Other runtimes'
+  rules are unchanged (2026-10-23).
+- `steps` gains a Grok Bot branch: Prompt tool rule 5 and section 2d use Grok Bot's `SendToUser` question widget
+  (context in a text message first, one-line numbered labels, recommendation `primary`, destructive `danger`,
+  `allowCustom` for `stop`, a dismissal is a decline; no `/compact` or `self-slash` there). Other runtimes'
+  rules are unchanged (2026-10-23).
 - `acp-dispatch --detach`: a `waiter:` line above `rearm:` says to run the waiter in the background with a long tool timeout (Claude Code Bash: `timeout 7200000`); at the 30 min default a lead's harness killed it mid-slice. `rearm:` stays the last line (#28).
 - `acp-run` removes `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `ORCA_TERMINAL_HANDLE` from every agent's
   environment and sets `ACP_RUN_AGENT=1`; `self-slash --finish` and `--then /quit` on Paseo are
@@ -98,6 +112,9 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `acp-dispatch` refuses `--perm read-only` or `--perm deny` (exit 2, before any record or preflight) for an agent
+  whose `acp-run <agent> --info` `perm_modes` lacks that mode; before, acp-run's own refusal came after the
+  record was written and surfaced as a no-report (an omp adversary round, 2026-10-23).
 - Paseo's start-up skill sync no longer overwrites the six vendored `paseo*` skills in this repo through the
   `~/.claude/skills` and `~/.agents/skills` links: the daemon's skill selection is now `custom` with no skills;
   how it works and what to avoid in Paseo's settings are in docs/skill-everywhere.md section 3a (2026-10-23).
