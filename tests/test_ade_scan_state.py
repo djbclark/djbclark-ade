@@ -1270,6 +1270,7 @@ def test_doc_generator_survives_skipped_and_incomplete_records():
     rows = section_3_2(text).splitlines()  # Codex pass 19, P1: no counts is not "nothing to capture"
     for path_, verdict in (("/p/skipped", "skipped: worktree redirected"), ("/p/broken", "scan incomplete: status rc=124")):
         row = next(r for r in rows if r.startswith(f"| {path_} "))
+        row = row.replace("\\|", "|")  # a rendered cell writes `\|` for a literal pipe (round 48)
         assert f"counts unknown ({verdict})" in row and "re-scan once the cause is fixed" in row
         assert f"TAR_OPTIONS= \"$GTAR\" -C /p -cf <DEST>/checkouts/abs{path_}/whole.tar -- {path_.rsplit('/', 1)[1]}" in row
         assert "git" not in row.split("| re-scan")[1].split("(no git command")[0]
@@ -2135,6 +2136,7 @@ def test_an_assume_unchanged_or_skip_worktree_edit_is_counted_and_archived(tmp_p
     row = next(r for r in section_3_2(doc.render(doc_scan([doc_checkout("/p/h", flags=["index-hidden paths: 1"],
                                                                         verdict="index-hidden paths: 1", index_hidden=1)]))).splitlines()
                if r.startswith("| /p/h "))
+    row = row.replace("\\|", "|")  # a rendered cell writes `\|` for a literal pipe (round 48)
     assert "1 tracked path(s) marked assume-unchanged or skip-worktree" in row
     assert "\"$GSED\" -z -n 's/^[a-z] //p; t; s/^S //p' <DEST>/checkouts/abs/p/h/hidden.raw > <DEST>/checkouts/abs/p/h/hidden.list" in row
     # round 39: children through git's ignore rules, no recursion; Codex pass 34: tar's stderr fails the row
@@ -2147,7 +2149,7 @@ def test_an_assume_unchanged_or_skip_worktree_edit_is_counted_and_archived(tmp_p
             "{ cat <DEST>/checkouts/abs/p/h/hidden.err >&2; echo 'hidden capture FAILED' >&2; false; }; }") in row
     assert doc.HIDDEN_FMT.count("{}") == len(doc.hidden_values("/p", "c"))
     ck = doc.checkout_dir(str(work))
-    prefix = "GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); "
+    prefix = PLAN_PREFIX
     cmd = prefix + doc.HIDDEN_FMT.format(*map(doc.shquote, doc.hidden_values(str(work), ck))).replace("<DEST>", str(tmp_path / "dest"))
     for shell in ("bash", "zsh"):
         if shutil.which(shell) is None:
@@ -2236,7 +2238,7 @@ def test_an_absent_skip_worktree_path_is_a_sparse_checkout_not_hidden_work(tmp_p
     git(work, "update-index", "--assume-unchanged", "S x")
     (work / "x").write_text("not hidden work\n")
     ck = doc.checkout_dir(str(work))
-    prefix = "GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); "
+    prefix = PLAN_PREFIX
     cmd = prefix + doc.HIDDEN_FMT.format(*map(doc.shquote, doc.hidden_values(str(work), ck))).replace("<DEST>", str(tmp_path / "dest"))
     run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
@@ -2800,7 +2802,7 @@ def test_the_modified_row_packs_unmerged_index_blobs(tmp_path):
     assert git(repo, "ls-files", "-u").count("b.bin") == 2
     assert ours not in git(repo, "rev-list", "--objects", "--all")  # reachable from no ref: only the pack keeps it
     ck = doc.checkout_dir(str(repo))
-    prefix = "GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); GCP=$(command -v gcp || command -v cp); "
+    prefix = PLAN_PREFIX
     cmd = prefix + doc.modified_fmt().format(*map(doc.shquote, doc.modified_values(str(repo), ck))).replace("<DEST>", str(tmp_path / "dest"))
     for shell in ("bash", "zsh"):
         if shutil.which(shell) is None:
@@ -2832,7 +2834,7 @@ def test_a_gitfile_with_a_second_line_is_refused_by_the_gitdir_capture(tmp_path)
     wt = tmp_path / "wt"
     git(main, "worktree", "add", str(wt), "-b", "side")
     ck = mod.checkout_dir(str(wt))
-    prefix = "GTAR=$(command -v gtar || command -v tar); "
+    prefix = PLAN_PREFIX
     cmd = prefix + mod.GITDIR_FMT.format(*map(mod.shquote, mod.gitdir_values(str(wt), ck))).replace("<DEST>", str(tmp_path / "dest"))
     one_line = (wt / ".git").read_bytes()
     (wt / ".git").write_bytes(one_line.rstrip(b"\n") + b"\n/../../../../decoy\n")
@@ -2869,7 +2871,7 @@ def test_a_symlinked_git_entry_row_archives_the_links_target(tmp_path):
     (real / ".git").rename(gd)
     (real / ".git").symlink_to(gd)
     ck = doc.checkout_dir(str(real))
-    prefix = "GTAR=$(command -v gtar || command -v tar); "
+    prefix = PLAN_PREFIX
     cmd = prefix + doc.SYMLINK_GITDIR_FMT.format(*map(doc.shquote, (str(real), f"{ck}/gitdir.tar"))).replace("<DEST>", str(tmp_path / "dest"))
     for shell in ("bash", "zsh", "sh"):
         if shutil.which(shell) is None:
@@ -2902,7 +2904,7 @@ def test_every_archive_ignores_the_operators_tar_options(tmp_path):
     repo.mkdir()
     git(repo, "init", "-q")
     (repo / "u.txt").write_text("untracked\n")
-    prefix = "GTAR=$(command -v gtar || command -v tar); "
+    prefix = PLAN_PREFIX
     cmd = prefix + doc.UNTRACKED_FMT.format(*map(doc.shquote, doc.untracked_values(str(repo), "c"))).replace("<DEST>", str(tmp_path / "dest"))
     run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, env={**os.environ, "TAR_OPTIONS": "--exclude=*"})
     assert run.returncode == 0, run.stderr
@@ -2925,7 +2927,7 @@ def test_the_submodule_row_archives_an_index_hidden_edit(tmp_path):
     (sub / "a.txt").write_text("hidden edit\n")
     git(sub, "update-index", "--assume-unchanged", "a.txt")
     assert git(sub, "status", "--porcelain") == "" and git(sub, "ls-files", "--modified") == ""
-    prefix = "GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); "
+    prefix = PLAN_PREFIX
     cmd = prefix + unmark(doc.submodule_commands(str(sup), "c", "sub")[4]).replace("<DEST>", str(tmp_path / "dest"))
     run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
@@ -2943,6 +2945,7 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
     text = mod.render(doc_scan([quiet, dirty, doc_checkout("/p/clean")]))
     rows = section_3_2(text).splitlines()
     row = next(r for r in rows if r.startswith("| /p/sup "))
+    row = row.replace("\\|", "|")  # a rendered cell writes `\|` for a literal pipe (round 48)
     assert "submodules not inspected: their modified, untracked or unpushed content is in no count here" in row
     # adversary rounds 43-46: no `<sub>` template and no `.gitmodules` listing for the human to read and paste back
     assert "<sub>" not in row and "--get-regexp" not in row and "list them with" not in row
@@ -2985,6 +2988,7 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
     evil = doc_checkout("/p/sub$(touch PWNED_SUB)", flags=[flag], verdict=flag, submodules_vetted=["sub"])
     rows = section_3_2(mod.render(doc_scan([evil]))).splitlines()
     row = next(r for r in rows if r.startswith("| /p/sub"))
+    row = row.replace("\\|", "|")  # a rendered cell writes `\|` for a literal pipe (round 48)
     plain = row.replace("\\$", "$").replace("\\(", "(").replace("\\)", ")")
     assert "git -C '/p/sub$(touch PWNED_SUB)/sub' status --porcelain" in plain
     assert "git -C '/p/sub$(touch PWNED_SUB)/sub' log --oneline" in plain
@@ -2995,6 +2999,7 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
                         modified=None, untracked=None, unpushed=None, ahead_of_origin=None, stashes=None,
                         local_only_commits=None, on_origin=None)
     row = next(r for r in section_3_2(mod.render(doc_scan([dash]))).splitlines() if r.startswith("| /p/-opt "))
+    row = row.replace("\\|", "|")  # a rendered cell writes `\|` for a literal pipe (round 48)
     assert "-cf <DEST>/checkouts/abs/p/-opt/whole.tar -- -opt" in row
 
 
@@ -3148,6 +3153,7 @@ def test_capture_plan_keeps_staged_changes_and_every_stash():
     mod = load_doc()
     co = doc_checkout("/p/w", flags=["dirty", "stash"], verdict="dirty", modified=2, stashes=3)
     row = next(r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith("| /p/w "))
+    row = row.replace("\\|", "|")  # a rendered cell writes `\|` for a literal pipe (round 48)
     assert "git -C /p/w diff --no-ext-diff --no-textconv --no-color --binary > <DEST>/checkouts/abs/p/w/modified.patch && " \
            "git -C /p/w diff --no-ext-diff --no-textconv --no-color --binary --cached > <DEST>/checkouts/abs/p/w/staged.patch" in row
     # Codex pass 21: a plain diff drops a binary file's bytes; pass 30: a textconv filter replaces them, and an
@@ -3230,7 +3236,7 @@ def test_gitdir_capture_archives_a_linked_worktree_without_its_own_refs(tmp_path
     assert not (admin / "refs").exists() and (admin / "commondir").is_file()
     assert git(wt, "status", "--porcelain") == ""  # git itself still accepts the worktree
     ck = mod.checkout_dir(str(wt))
-    prefix = "GTAR=$(command -v gtar || command -v tar); "
+    prefix = PLAN_PREFIX
     cmd = prefix + mod.GITDIR_FMT.format(*map(mod.shquote, mod.gitdir_values(str(wt), ck))).replace("<DEST>", str(tmp_path / "dest"))
     for shell in ("bash", "zsh"):
         if shutil.which(shell) is None:
@@ -3289,7 +3295,7 @@ def test_modified_capture_archives_an_unmerged_binary_file_and_ignores_textconv(
     git(repo, "config", "diff.const.textconv", "echo constant;true")
     (repo / ".gitattributes").write_text("*.bin diff=const\n")
     ck = mod.checkout_dir(str(repo))
-    prefix = "GTAR=$(command -v gtar || command -v tar); GSED=$(command -v gsed || command -v sed); GCP=$(command -v gcp || command -v cp); "
+    prefix = PLAN_PREFIX
     cmd = prefix + mod.modified_fmt().format(*map(mod.shquote, mod.modified_values(str(repo), ck))).replace("<DEST>", str(tmp_path / "dest"))
     for shell in ("bash", "zsh"):
         if shutil.which(shell) is None:
@@ -3647,3 +3653,33 @@ def test_a_non_utf8_checkout_path_is_quoted_as_its_bytes_and_the_document_is_wri
     out = tmp_path / "out.md"
     doc.write_atomic(out, doc.render(doc_scan([rec])))
     assert out.read_text(encoding="utf-8")
+
+
+def gfm_cells(row: str) -> list[str]:
+    """The cells of one table row as GitHub's renderer splits it: an unescaped `|` ends a cell, inside a code span too."""
+    cells = re.split(r"(?<!\\)\|", row.strip())
+    assert cells[0] == "" and cells[-1] == "", row
+    return [c.strip().replace("\\|", "|") for c in cells[1:-1]]
+
+
+def test_every_3_2_row_is_four_cells_in_a_gfm_view_with_every_command_in_the_command_cell(tmp_path):
+    """Adversary round 48 (MEDIUM): the formats' own `|` ended the command cell in a rendered view, dropping the
+    untracked archive, the stash capture, every submodule command and the needs-decision cell without an error."""
+    mod, doc = load(), load_doc()
+    roots, sup, moddir = make_super_with_submodule(tmp_path)
+    (sup / "a.txt").write_text("modified\n")
+    (sup / "new.txt").write_text("untracked\n")
+    git(sup, "stash", "push", "-m", "s", "a.txt")
+    (sup / "a.txt").write_text("modified again\n")
+    rec = next(c for c in mod.scan_git([roots], remote=False) if c["path"] == str(sup.resolve()))
+    text = doc.render(doc_scan([rec]))
+    rows = [r for r in section_3_2(text).splitlines() if r.startswith("| ") and not r.startswith("| checkout")]
+    assert rows
+    for row in rows:
+        cells = gfm_cells(row)
+        assert len(cells) == 4, (len(cells), row)
+        command = cells[2]
+        assert "untracked.tar" in command and "stash" in command and "modules.tar" in command, command
+        assert command.count("`") % 2 == 0 and cells[3].lstrip("*").startswith(("yes", "no")), cells
+        # the commands the tests run are exactly the spans of the command cell
+        assert len(plan_commands(row)) == 7, plan_commands(row)

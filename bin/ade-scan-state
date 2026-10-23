@@ -739,7 +739,11 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
     rc, out = git(path, "ls-files", "-z", "-s", errors="surrogateescape")
     if rc != 0:
         return True, "(unreadable)", []
-    gitlinks = {os.path.normpath(e.split("\t", 1)[1]) for e in out.split("\0") if e.startswith("160000 ") and "\t" in e}
+    raw_gitlinks = [e.split("\t", 1)[1] for e in out.split("\0") if e.startswith("160000 ") and "\t" in e]
+    # the raw entry: `normpath` would turn `x/../sub` into `sub` and `` into `.` before the check (round 48 INFO 6)
+    if any(not p or os.path.isabs(p) or ".." in p.split("/") for p in raw_gitlinks):
+        return True, "(gitmodules path unusual)", []
+    gitlinks = {os.path.normpath(p) for p in raw_gitlinks}
     listed: set[str] = set()
     if (path / ".gitmodules").is_symlink():
         return True, "(symlink)", []
@@ -761,9 +765,6 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
             listed = {os.path.normpath(p) for p in raw_listed}
         elif rc != 1:  # 1: no such key
             return True, "(unreadable)", []
-    # an absolute gitlink would make `os.path.join(path, sub)` discard the superproject, and `..` leaves it (round 47 LOW 3)
-    if any(not p or os.path.isabs(p) or ".." in p.split("/") for p in gitlinks):
-        return True, "(gitmodules path unusual)", []
     if any(unusual_path(p) for p in gitlinks | listed):
         return True, "(gitmodules path unusual)", []
     subs: list[str] = []

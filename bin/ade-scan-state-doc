@@ -257,7 +257,7 @@ def human(n):
 # `GIT_*` variable and the global and system config, `git_env()`): with `GIT_DIR` set, `git -C <checkout> ls-files` read
 # another repository's index and the tar that followed succeeded without the checkout's files (Codex pass 42)
 PLAN_PREAMBLE = ("GCP=$(command -v gcp || command -v cp); GTAR=$(command -v gtar || command -v tar); "
-                 "GSED=$(command -v gsed || command -v sed); unset $(env | cut -d= -f1 | grep '^GIT_'); "
+                 "GSED=$(command -v gsed || command -v sed); unset GIT_DIR $(env | grep -E '^GIT_[A-Za-z0-9_]*=' | cut -d= -f1); "
                  "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1")
 
 
@@ -283,7 +283,8 @@ _CTRL = re.compile(r"[\x00-\x1f\x7f]")
 def visible(v):
     """A value that is shown, never pasted, in a code span: control characters as backslash-n, -r, -t or -xNN text."""
     named = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
-    return _CTRL.sub(lambda m: named.get(m.group()) or f"\\x{ord(m.group()):02x}", str(v))
+    return _SURROGATE.sub(lambda m: f"\\x{ord(m.group()) - 0xdc00:02x}",   # the byte, as `_quote` writes it (round 48 INFO 7)
+                          _CTRL.sub(lambda m: named.get(m.group()) or f"\\x{ord(m.group()):02x}", str(v)))
 
 
 def shcode(fmt, *values):
@@ -328,7 +329,9 @@ def code(fmt, *values):
     for v in values:
         if _CTRL.search(str(v)):
             raise ValueError(f"control character in a code span value: {str(v)!r}")
-    text = fmt.format(*[esc(v, in_code=True) for v in values])
+    # a GFM table row ends a cell at every unescaped `|`, inside a code span too: the format's own pipes (`||`, `|`
+    # in a `while read` loop) are escaped like a value's, so the rendered cell is one cell (adversary round 48)
+    text = fmt.replace("|", "\\|").format(*[esc(v, in_code=True) for v in values])
     runs = re.findall(r"`+", text)
     if not runs:
         return f"`{text}`"
@@ -565,7 +568,11 @@ def render(d):
       "(coreutils and gnu-sed installed as `g*`) and on Linux (bare names; Codex pass 12 on PR 27): set "
       f"`{PLAN_PREAMBLE}` first, and `<DEST>` to an absolute path. The last two statements give every `git` the "
       "scanner's own environment: no `GIT_DIR`, `GIT_INDEX_FILE` or other ambient `GIT_*` variable, and no global or "
-      "system config, so a successful capture is of the checkout the scan read (Codex pass 42).\n")
+      "system config, so a successful capture is of the checkout the scan read (Codex pass 42). Paste it into a shell you "
+      "close afterwards (`bash -l` or a subshell), not your working one; the push rows are the exception, they need your "
+      "own git credentials and config, so run them in a normal shell. Read this document in a rendered markdown view "
+      "(GitHub, a viewer): the commands sit in table cells where a literal `|` is written `\\|`, and a plain-text editor "
+      "shows that backslash.\n")
     w("### 3.1 `unique` and `mixed` bigteam dirs\n")
     w("Proposed rule for all of them: copy the report files (not the dir) to one destination, "
       "`<DEST>/bigteam/<task>/`, keeping each file's path below the task dir. `<DEST>` is the one decision "
