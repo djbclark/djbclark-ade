@@ -37,6 +37,10 @@ agent what changed and what is new. Entries end with the pull request number.
 - `loadwatch` skill and `load-watch watcher set|show|clear|test`: one registered agent session (a Paseo
   agent by `paseo send`, else relay.py) also hears every load incident, unexplained sustained load and
   job-guard trip, and investigates; `set` replaces the old watcher and tells it (2026-10-20).
+- `cfenginewatch` skill (with `fleet-watch upstream --relay-to|--relay-test|--relay-off|--relay-status`, in
+  site-djbclark): one registered agent session hears every reviewer event on djbclark's upstream CFEngine
+  PRs and works it through `/bigteam`, prepare-and-stop; `--relay-to` replaces and tells the old watcher
+  (2026-10-23).
 - `docs/ade-everywhere-inventory-2026-10-20-stores.md`: Phase 0 slice 1, every installed agent
   session store classified (52 stores, backup plan per store, differences from proposal §6.1) (#16).
 - `CHANGELOG.md`, this file, and the rule that every pull request adds a line to it; README
