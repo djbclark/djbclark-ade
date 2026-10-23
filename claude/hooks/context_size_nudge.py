@@ -67,6 +67,13 @@ import sys
 from pathlib import Path
 
 STATE_PATH = Path.home() / ".claude" / "state" / "context-nudges.json"
+# Written by the quota guard (another slice, 2026-10-23); may not exist.  Only `level` is read.
+QUOTA_GUARD_PATH = Path.home() / ".local" / "state" / "ade" / "quota-guard.json"
+# djbclark, 2026-10-23: lead sessions run on Opus 5.5 high (Sonnet 5.5 when quota is tight),
+# not Fable (a Fable lead burned ~30% of a week's Claude quota).
+FABLE_MODEL = "claude-fable-5-1"
+SUCCESSOR_OPUS = "claude/claude-opus-5-5"
+SUCCESSOR_SONNET = "claude/claude-sonnet-5-5"
 
 # Compaction is not free (see History, 2026-10-10): only compact once the
 # context has grown enough above the post-compaction floor to pay it back.
@@ -161,6 +168,69 @@ def _last_context_tokens(transcript_path):
     return None
 
 
+def _last_assistant_model(transcript_path):
+    """The newest non-sidechain assistant record's `message.model`, or None.
+
+    The same tail windows as _last_context_tokens; synthetic records (model
+    "<synthetic>", e.g. an API-error stub) are skipped."""
+    try:
+        with Path(transcript_path).open("rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            tried = 0
+            for window in _TAIL_WINDOWS:
+                chunk_size = min(size, window)
+                if chunk_size <= tried:
+                    break
+                f.seek(size - chunk_size)
+                data = f.read(chunk_size)
+                tried = chunk_size
+                lines = data.split(b"\n")
+                if chunk_size < size:
+                    lines = lines[1:]
+                for line in reversed(lines):
+                    if b'"model"' not in line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(obj, dict) or obj.get("isSidechain"):
+                        continue
+                    message = obj.get("message")
+                    model = message.get("model") if isinstance(message, dict) else None
+                    if isinstance(model, str) and model and not model.startswith("<"):
+                        return model
+                if chunk_size >= size:
+                    break
+    except Exception:
+        return None
+    return None
+
+
+def _guard_level():
+    """`level` of the quota guard's state file ("" when absent or unreadable)."""
+    try:
+        data = json.loads(QUOTA_GUARD_PATH.read_text())
+        level = data.get("level") if isinstance(data, dict) else None
+    except Exception:
+        return ""
+    return level if isinstance(level, str) else ""
+
+
+def _successor_target(model, guard_level):
+    """(provider/model spec, why) when this session should hand off to another model, else None.
+
+    Fable, or a quota guard saying tight/critical, means Opus 5.5; Sonnet 5.5 when the guard
+    says tight (the handoff skill's Step 9 uses the same rule)."""
+    if guard_level in ("tight", "critical"):
+        why = f"the quota guard says {guard_level}"
+    elif model == FABLE_MODEL:
+        why = "this session runs on Fable"
+    else:
+        return None
+    return (SUCCESSOR_SONNET if guard_level == "tight" else SUCCESSOR_OPUS), why
+
+
 def _first_context_tokens(transcript_path):
     """The session's first usage block (its starting context), or None."""
     try:
@@ -251,10 +321,33 @@ def _paseo_finish_note():
             "yourself.")
 
 
-def _boundary_message(total):
+def _step9_text(successor):
+    """What the handoff's Step 9 runs: the successor form (Paseo only) or /new."""
+    if successor and _self_slash_host() == "paseo":
+        spec, why = successor
+        return (f"~/src/djbclark-ade/bin/self-slash --finish --successor {spec} --thinking high "
+                f"({why}: it starts a NEW agent on {spec.split('/', 1)[1]} that runs /baton, "
+                "then archives this one; the pre-handoff transcript survives only in the "
+                "handoff document and the archived agent's log)")
+    return "~/src/djbclark-ade/bin/self-slash \"/new\" ONCE and queues /baton into the fresh session"
+
+
+def _successor_note(successor):
+    """Where the successor form is unavailable (herdr, Orca, no host): relaunch by hand."""
+    if not successor or _self_slash_host() == "paseo":
+        return ""
+    spec, why = successor
+    return (f" Note: {why}; self-slash --successor needs Paseo, so after the handoff tell the "
+            f"operator to relaunch `claude --model {spec.split('/', 1)[1]}` in this pane.")
+
+
+def _boundary_message(total, successor=None):
     # self-slash refuses outside herdr, Orca and Paseo: there the operator types /new.
-    new = ("(its Step 9 runs ~/src/djbclark-ade/bin/self-slash \"/new\" and queues /baton)"
-           if _can_self_slash() else "and then tell the operator /new is ready")
+    if _can_self_slash():
+        new = (f"(its Step 9 runs {_step9_text(successor)})" if successor and _self_slash_host() == "paseo"
+               else "(its Step 9 runs ~/src/djbclark-ade/bin/self-slash \"/new\" and queues /baton)")
+    else:
+        new = "and then tell the operator /new is ready"
     return (
         f"Context is {total:,}. At the next task completion, if the following "
         f"work is not a direct continuation, run the `handoff` skill "
@@ -265,10 +358,11 @@ def _boundary_message(total):
            "top-level session does this; a sub-agent or dispatched slice treats a handoff "
            "as document-only." if _can_self_slash() else "")
         + _paseo_finish_note()
+        + _successor_note(successor)
     )
 
 
-def _ask_message(total, growth, repeat):
+def _ask_message(total, growth, repeat, successor=None):
     lead = "Context is still growing" if repeat else "Context is large"
     if _can_self_slash():
         # A herdr pane, Orca terminal or Paseo agent can queue its own /new or /compact
@@ -280,8 +374,8 @@ def _ask_message(total, growth, repeat):
             "mid-edit or with a sub-agent result unread), first choice when the "
             "current task is finished, same topic or not: run the `handoff` "
             "skill (it writes the Tier 2 document; its Step 9 runs "
-            "~/src/djbclark-ade/bin/self-slash \"/new\" ONCE and queues /baton into "
-            "the fresh session, so do not run /new yourself as well) and end the turn "
+            + _step9_text(successor)
+            + ", so do not run /new yourself as well) and end the turn "
             "(a fresh session re-writes ~46k). Only the top-level session does this; "
             "a sub-agent or dispatched slice treats a handoff as document-only. "
             "Only if the work must continue "
@@ -289,7 +383,7 @@ def _ask_message(total, growth, repeat):
             "\"/compact <focus>\" ONCE and end the turn. Only if self-slash "
             "refuses (a draft on the input line) ask the operator for /new or "
             "/compact."
-            + _paseo_finish_note() + " "
+            + _paseo_finish_note() + _successor_note(successor) + " "
             + _COST_NOTE
         )
     return (
@@ -306,6 +400,10 @@ def _ask_message(total, growth, repeat):
         "continue. "
         + _COST_NOTE
     )
+
+
+def _session_successor(transcript_path):
+    return _successor_target(_last_assistant_model(transcript_path), _guard_level())
 
 
 def _load_state():
@@ -394,13 +492,14 @@ def main():
         if level == 1:
             print(_early_message(total, growth), flush=True)
         else:
-            print(_ask_message(total, growth, repeat=fired >= 2), flush=True)
+            print(_ask_message(total, growth, repeat=fired >= 2,
+                               successor=_session_successor(transcript_path)), flush=True)
     session_state["level"] = level
 
     # Once per session id, not per compaction: a /new starts a new id.
     if total >= BOUNDARY_TOTAL and not session_state.get("boundary"):
         session_state["boundary"] = True
-        print(_boundary_message(total), flush=True)
+        print(_boundary_message(total, successor=_session_successor(transcript_path)), flush=True)
 
     if growth >= PAGE_GROWTH or total >= PAGE_TOTAL:
         if not session_state.get("paged"):

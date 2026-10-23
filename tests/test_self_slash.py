@@ -28,18 +28,33 @@ FAKE_PASEO = textwrap.dedent("""\
     #!/bin/bash
     # fake paseo: record argv, answer the few calls self-slash makes
     echo "$*" >> "$FAKE_LOG"
+    echo "$1 $2: PASEO_AGENT_ID=${PASEO_AGENT_ID-unset} PASEO_AGENT_CWD=${PASEO_AGENT_CWD-unset}" >> "$FAKE_LOG.env"
     case "$1 $2" in
-      "agent inspect") echo '{"Status": "idle"}';;
+      "agent inspect")
+        if [ "$3" = new-agent-1 ]; then
+          parent=null; [ -n "$FAKE_NEW_PARENT" ] && parent="\\"$FAKE_NEW_PARENT\\""
+          printf '{"Id": "new-agent-1", "Model": "%s", "Status": "%s", "ParentAgentId": %s}\\n' \\
+            "${FAKE_NEW_MODEL-claude-opus-5-5}" "${FAKE_NEW_STATUS-idle}" "$parent"
+        else
+          printf '{"Id": "test-agent", "Name": "%s", "Status": "idle", "Mode": "bypassPermissions", "Cwd": "%s", "ParentAgentId": null}\\n' \\
+            "${FAKE_NAME-Lead}" "$FAKE_CWD"
+        fi;;
       "agent archive")
         if [ -n "$FAKE_ARCHIVE_FAIL" ]; then
           echo "Agent is running. Use --force to archive a running agent (it will interrupt the active run), or stop it first with: paseo agent stop." >&2
           exit 1
         fi
         echo archived;;
+      "workspace ls")
+        if [ -n "$FAKE_WS_JSON" ]; then echo "$FAKE_WS_JSON"
+        else printf '[{"workspaceId": "ws-1", "cwd": "%s", "background": false}]\\n' "$FAKE_CWD"; fi;;
     esac
     case "$1" in
       wait) [ -n "$FAKE_WAIT_SLEEP" ] && sleep "$FAKE_WAIT_SLEEP"; echo '{}';;
       send) echo '{}';;
+      run)
+        if [ -n "$FAKE_RUN_FAIL" ]; then echo "Provider claude is unavailable" >&2; exit 1; fi
+        echo '{"agentId": "new-agent-1", "status": "created", "provider": "claude", "cwd": "x", "title": "t"}';;
     esac
     exit 0
 """)
@@ -348,6 +363,149 @@ class SelfSlashPaseoTests(unittest.TestCase):
         r = self.run_ss()
         self.assertEqual(r.returncode, 2)
         self.assertIn("--finish", r.stderr)
+
+    # --- --finish --successor (2026-10-23) ---
+    SUCCESSOR = ("--finish", "--successor", "claude/claude-opus-5-5")
+
+    def succ_env(self, **extra: str) -> dict[str, str]:
+        cwd = str(Path(self._tmp.name) / "work")
+        Path(cwd).mkdir(exist_ok=True)
+        return {"FAKE_CWD": cwd, "PASEO_AGENT_CWD": cwd, "SELF_SLASH_SUCCESSOR_SETTLE": "0", **extra}
+
+    def run_waiter(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        """The waiter itself, in the foreground, as the parent spawns it (its exit code is observable)."""
+        env = {**self.env, **self.succ_env(), "SELF_SLASH_CHILD": "1", "SELF_SLASH_FINISH": "1",
+               "SELF_SLASH_SUCCESSOR": "claude/claude-opus-5-5", "SELF_SLASH_S_THINKING": "high", **extra}
+        return subprocess.run([str(SCRIPT), "--delay", "0", "/quit"], env=env, text=True,
+                              capture_output=True, timeout=60, check=False)
+
+    def test_successor_starts_baton_then_archives_in_order(self) -> None:
+        r = self.run_ss(*self.SUCCESSOR, **self.succ_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.wait_log("archived test-agent (successor new-agent-1)")
+        calls = self.paseo_calls()
+        cwd = self.succ_env()["FAKE_CWD"]
+        steps = [c.split(" -- ")[0] if c.startswith("agent archive") else c for c in calls]
+        self.assertEqual(steps[0].split(" --timeout")[0], "wait test-agent")
+        self.assertEqual(steps[1:], [
+            "agent inspect test-agent --json",
+            "workspace ls --background --json",
+            f"run /baton --provider claude/claude-opus-5-5 --thinking high --mode bypassPermissions "
+            f"--workspace ws-1 --cwd {cwd} --title Lead → claude-opus-5-5 --no-wait --json",
+            "agent inspect new-agent-1 --json",
+            "agent archive",
+        ])
+        self.assertEqual([c for c in calls if c.startswith("agent archive")], ["agent archive -- test-agent"])
+        self.assertFalse(any("--force" in c for c in calls), calls)
+        self.wait_lock_gone()
+
+    def test_successor_calls_run_without_the_callers_agent_id(self) -> None:
+        # with PASEO_AGENT_ID set, `paseo run` hands the caller id to the daemon and the new
+        # agent becomes a subagent even with --workspace
+        _ = self.run_ss(*self.SUCCESSOR, **self.succ_env())
+        self.wait_log("archived test-agent (successor new-agent-1)")
+        envlog = Path(f"{self.calls}.env").read_text().splitlines()
+        self.assertTrue(envlog and all("PASEO_AGENT_ID=unset PASEO_AGENT_CWD=unset" in line for line in envlog), envlog)
+
+    def test_successor_flags_override_the_defaults(self) -> None:
+        _ = self.run_ss(*self.SUCCESSOR, "--thinking", "max", "--mode", "plan", "--title", "Next lead", **self.succ_env())
+        self.wait_log("archived test-agent (successor new-agent-1)")
+        run = next(c for c in self.paseo_calls() if c.startswith("run "))
+        self.assertIn("--thinking max --mode plan ", run)
+        self.assertIn("--title Next lead --no-wait", run)
+
+    def test_successor_run_failure_exits_11_and_archives_nothing(self) -> None:
+        r = self.run_waiter(FAKE_RUN_FAIL="1")
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertIn("successor: paseo run failed", r.stdout)
+        self.assertIn("NOT archived", r.stdout)
+        self.assertFalse(any(c.startswith("agent archive") for c in self.paseo_calls()))
+
+    def test_successor_that_is_a_subagent_exits_11_and_archives_nothing(self) -> None:
+        r = self.run_waiter(FAKE_NEW_PARENT="test-agent")
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertIn("is a subagent", r.stdout)
+        self.assertFalse(any(c.startswith("agent archive") for c in self.paseo_calls()))
+
+    def test_successor_on_the_wrong_model_or_in_error_exits_11(self) -> None:
+        for extra, needle in ((dict(FAKE_NEW_MODEL="claude-sonnet-5-5"), "not claude-opus-5-5"),
+                              (dict(FAKE_NEW_STATUS="error"), "error status")):
+            r = self.run_waiter(**extra)
+            self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+            self.assertIn(needle, r.stdout)
+        self.assertFalse(any(c.startswith("agent archive") for c in self.paseo_calls()))
+
+    def test_successor_needs_exactly_one_workspace_for_the_cwd(self) -> None:
+        cwd = self.succ_env()["FAKE_CWD"]
+        two = f'[{{"workspaceId": "a", "cwd": "{cwd}"}}, {{"workspaceId": "b", "cwd": "{cwd}"}}]'
+        r = self.run_waiter(FAKE_WS_JSON=two)
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertIn("several workspaces", r.stdout)
+        r = self.run_waiter(FAKE_WS_JSON="[]")
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertIn("no Paseo workspace", r.stdout)
+        r = self.run_waiter(FAKE_WS_JSON=two, SELF_SLASH_WORKSPACE="b")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("--workspace b ", next(c for c in self.paseo_calls() if c.startswith("run ")))
+        # the same cwd with one background and one visible workspace picks the visible one
+        both = f'[{{"workspaceId": "bg", "cwd": "{cwd}", "background": true}}, {{"workspaceId": "vis", "cwd": "{cwd}", "background": false}}]'
+        self.calls.unlink()
+        r = self.run_waiter(FAKE_WS_JSON=both)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("--workspace vis ", next(c for c in self.paseo_calls() if c.startswith("run ")))
+
+    def test_successor_archive_refusal_exits_8_and_leaves_the_successor(self) -> None:
+        r = self.run_waiter(FAKE_ARCHIVE_FAIL="1")
+        self.assertEqual(r.returncode, 8, r.stdout + r.stderr)
+        self.assertIn("successor new-agent-1 left running", r.stdout)
+
+    def test_successor_outside_paseo_exits_2(self) -> None:
+        fake_orca = Path(self.env["PATH"].split(":")[0]) / "orca"
+        _ = fake_orca.write_text("#!/bin/bash\nexit 0\n")
+        fake_orca.chmod(0o755)
+        for host_env in (dict(ORCA_TERMINAL_HANDLE="t1"), dict(HERDR_ENV="1", HERDR_PANE_ID="p1")):
+            r = self.run_ss(*self.SUCCESSOR, **host_env)
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("successor needs Paseo", r.stderr)
+            self.assertIn("claude --model", r.stderr)
+        self.assertEqual(self.paseo_calls(), [])
+
+    def test_successor_usage_errors(self) -> None:
+        for args, needle in ((["--successor", "claude/claude-opus-5-5", "/compact"], "needs --finish"),
+                             (["--finish", "--thinking", "high"], "only go with --successor"),
+                             (["--finish", "--successor", "claude/x y"], "plain ids"),
+                             (["--finish", "--successor", "/x"], "PROVIDER")):
+            r = self.run_ss(*args)
+            self.assertEqual(r.returncode, 2, f"{args}: {r.stdout}{r.stderr}")
+            self.assertIn(needle, r.stderr)
+        self.assertEqual(self.paseo_calls(), [])
+
+    def test_successor_dispatched_agent_is_refused(self) -> None:
+        for extra in ([], ["--dry-run"]):
+            r = self.run_ss(*extra, *self.SUCCESSOR, ACP_RUN_AGENT="1")
+            self.assertEqual(r.returncode, 9, r.stdout + r.stderr)
+        self.assertEqual(self.paseo_calls(), [])
+
+    def test_successor_dry_run_prints_the_commands_and_runs_nothing(self) -> None:
+        r = self.run_ss("--dry-run", *self.SUCCESSOR, **self.succ_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for needle in ("workspace ls --background --json",
+                       "run /baton --provider claude/claude-opus-5-5 --thinking high --mode <agent mode>",
+                       "--title \"<old name> → claude-opus-5-5\" --no-wait --json",
+                       "agent archive -- test-agent", "never --force"):
+            self.assertIn(needle, r.stdout)
+        self.assertEqual(self.paseo_calls(), [])
+        self.assertFalse(self.log.exists())
+        self.assertFalse(self.lockdir.exists() and list(self.lockdir.iterdir()))
+
+    def test_successor_takes_the_lifecycle_lock(self) -> None:
+        self.lockdir.mkdir(parents=True)
+        holder = subprocess.Popen(["sleep", "60"])
+        self.children.append(holder.pid)
+        self.lifecycle_lock().write_text(self.stamp(holder.pid))
+        r = self.run_ss(*self.SUCCESSOR, **self.succ_env())
+        self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
+        self.assertEqual(self.paseo_calls(), [])
 
 
 if __name__ == "__main__":
