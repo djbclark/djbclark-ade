@@ -93,7 +93,16 @@ Verify against the processes themselves, not against memory or the brief's guess
 3. **An agent's build or test:** it should have gone to CI. Read the incident brief
    (`~/.local/state/load-watch/briefs/<id>.md`). Make sure the blamed session got it (`relayed=True`);
    if not, relay it with `skills/session-finder/relay.py`, or `paseo send` for a Paseo agent. Check the
-   repo's CI decision with `load-watch ci check <repo>`.
+   repo's CI decision with `load-watch ci check <repo>`. A targeted test run in a `ci` repo stays on this Mac
+   only while the load gate lets it: held past `BG_OFFLOAD_AFTER` (60 s, 2026-10-23) `bg` runs it on CI through
+   the repo's tracked `scripts/bg-offload-run` or `scripts/github-ci-run` (`bin/bg-offload` in site-djbclark), so such a run
+   waiting an hour means: the repo has no tracked route (or is a linked worktree), `gh` or a GNU tool is missing, `BG_OFFLOAD=0`,
+   the tree has unpublished work (a modified tracked file, a commit or `ci/base` that the push target's `git ls-remote <remote>`
+   does not show, history rewritten by a graft file, a remote with a separate pushurl or several urls, or an unreachable remote),
+   a partial clone missing objects of HEAD's or `ci/base`'s tree that cannot be fetched, a named test path is missing or untracked,
+   or the runner failed after a push attempt (bg prints which): fix that, do not work around the gate. `bg-offload` publishes
+   nothing that is not already on the remote and has no opt-in (six review rounds, 2026-10-23), so the dev flow is: commit and
+   push, then `bg` offloads. Exits: 1 CI failed, 76 CI still running, 77 no verdict (`bg` header).
 4. **A launchd job:** `load-watch guard status`. A tripped job has already been booted out and cooled
    down. Find out why from its logs, never by re-enabling it blind. Check `site-private/memory/` before
    "repairing" a stopped or disabled service (`~/CLAUDE.md` item 18).

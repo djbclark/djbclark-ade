@@ -23,6 +23,28 @@ agent what changed and what is new. Entries end with the pull request number.
   three commands to the load watcher (at most hourly, cooldown `churn-watcher`) and to Hermes (cooldown `churn`), adds the Grok Bot/Chrome standing exception
   when they lead, never signals anything; `status` lists both cooldowns; test hook `LW_FAKE_COMPRESSOR` (2026-10-23).
 - Added `bin/claude-quota-guard` (`check`, `status`, `--install`), which turned the Claude weekly, 5-hour and Fable windows (read from the snapshot when `aiuse --available` drops an exhausted Claude or the exhausted Fable pool, and at least `watch` when aiuse dropped a Claude the snapshot still shows) and aiuse's Claude `conserve` alerts into a level (`ok`, `watch`, `tight`, `critical`; exit 0-3, 10 when Claude appears nowhere, the data is malformed, aiuse is unreadable or another check holds the lock, 64 for a bad thresholds env, 69 for `--install` off macOS), wrote `~/.local/state/ade/quota-guard.json` under a lock, pinged once per level per reset period, and treated data older than 3 hours (the oldest of the payload, each pool and the snapshot) as stale: at least `watch`, no level pings, one ping per stale episode; added the `claude/hooks/quota_nudge.py` UserPromptSubmit hook, which printed the level's advice once per session and level (#29).
+- `bg` (site-djbclark `bin/bg`, new helper `bin/bg-offload`) offloads a targeted test run to CI once the load gate has held it
+  `BG_OFFLOAD_AFTER` seconds (default 60) in a repo recorded `ci` (djbclark, 2026-10-23: a 2 s pytest file waited over an hour at
+  load 25-93). It runs the repo's tracked, executable `scripts/bg-offload-run` or `scripts/github-ci-run --no-wait REF` (an untracked script is never used) (the `pushed https://...`
+  or ShizukuTendCF's `branch: https://...` line is accepted), polls `gh run list -R OWNER/REPO` and exits with CI's verdict: 0 CI's
+  workflow passed on this tree (not "your named test passed"), 1 failed (failed-step log tail and
+  `~/.local/state/bg/offload/<run>.log`), 76 still running at `BG_OFFLOAD_WAIT` (2400 s), 77 no verdict (also when every run was
+  skipped); 3 and 75 are unchanged. It publishes nothing that is not already on the remote (djbclark, 2026-10-23, after six
+  review rounds): it offloads only when no tracked file is modified (working tree or index; untracked files do not block and are
+  never pushed) and every commit of HEAD is reachable from a ref the real push target advertises: the remote (`GITHUB_CI_REMOTE`
+  or origin) must have one fetch-and-push url, and `git ls-remote --refs <remote>` by name, resolved exactly as the runner's push
+  (60 s, no prompt; any failure refuses), is the proof, not the local remote-tracking refs, which go stale after a `set-url`, a
+  `pushurl` or a branch deleted by another clone. History is walked without replace refs (`GIT_NO_REPLACE_OBJECTS=1`, for the
+  runner's push too) and a graft file refuses. The `ci/base` the runner overlays must be on the remote too; in a partial clone
+  the objects of HEAD's tree and the overlaid `ci/base` tree are fetched first, and any that cannot be fetched refuses (so the
+  overlay is never silently skipped), and the runner's git
+  config is forced to `push.followTags=false` and `push.recurseSubmodules=no` (appended to `GIT_CONFIG_PARAMETERS`, which beats
+  config files and a caller's `GIT_CONFIG_*` env) so no local tag rides along. If any check fails it prints one line per reason and keeps waiting at
+  the gate as before: dirty or unpushed work is not offloaded, so commit and push, then bg offloads. There is no opt-in and no
+  scan. A missing GNU tool refuses (it never skips a check). A named test path that is missing, untracked, a directory with no
+  tracked file or outside the repo stops the offload. Killing bg stops an in-flight push. No route, no `gh`, a failing push or
+  `BG_OFFLOAD=0` keep the old waiting. No `load-watch` change: the runnable route is the script convention
+  (PR pending).
 - `load-watch admit` also gates on memory: it is hot when compressor churn (macOS `vm_stat` Compressions +
   Decompressions, pages/s) exceeds the new `--max-mem-churn N` (default 60000, calibrated 2026-10-23 from 215
   samples: calm 11-22k, load >=25 median 80k; the first guess, 20000, was below the load<10 median of 34k), so `acp-dispatch` (which calls `admit`) holds new slices during a thrash that load alone does not show; `bg` (site-djbclark `bin/bg`, f370ad7) now also asks `admit` after its own load check and fails open if `load-watch` errors.
@@ -146,6 +168,11 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `self-slash --finish --successor` after its first live run (2026-10-23): reads the agent id behind Paseo 0.13's
+  `Using workspace <id>` line before the JSON (the successor started but this agent was not archived); copies the old
+  agent's `--mode` only to the same provider (an omp `full` made `paseo run` refuse a claude successor), else
+  `bypassPermissions` for claude and no `--mode` otherwise; new `--baton PATH` names the chain log for a lead whose chain
+  lists the repo as a side workspace (a bare `/baton` resumed another session's chain).
 - `bin/ade-update` exits 10 naming a stuck link on the first apply instead of 4 with an empty error, and 4 (not 10) when the canonical checkout has no `skill-everywhere` helper at all (#20).
 - `bin/ade-update` reads the Grok Bot copy-target rows of `skill-everywhere --check` (`not installed (no <dir>)`, `copied (<path>)`, `missing (<path>)`, `stale copy (<path>)`) as ok or fixable, not stuck, and drops an inherited `SKILL_EVERYWHERE_ONLY` from the helper's environment, so a check never reports on a subset of targets (#20).
 - `bin/skill-everywhere`: the Hermes plugin nudge no longer aborts the script when the Hermes wrapper has no `exec`
