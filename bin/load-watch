@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """load-watch: find the agent behind a sustained load spike, tell it, and steer that work to CI (free GitHub runners; Forgejo/Hyades for MIT/SIPB work). No model.
 
-    load-watch sample [--dry-run] [-v]      one sample (launchd runs this every 20 s)
+    load-watch sample [--dry-run] [-v]      one sample (launchd runs this every 20 s); also watches compressor churn
     load-watch status                       streak, top consumers in the window, cooldowns
     load-watch incidents [-n N]             the incident ledger, newest last
     load-watch ack ID "what you did"        the agent's answer to a brief (recorded in the ledger)
@@ -48,6 +48,19 @@ explains, and every guard trip is also sent to it, so a session with a model inv
 (watcher.json): `set` replaces the last watcher and tells it so. A failed send is stamped `last_fail`, never
 fatal; the watcher is skipped for an incident only when it is the blamed session and the relay reached it.
 Unexplained sustained load reaches the watcher at most hourly (WATCHER_NOCPU_S), Hermes every LW_COOLDOWN_H.
+
+Compressor churn (2026-10-23, djbclark's memory-thrash follow-up): `admit` only refuses to START work while the
+compressor thrashes; running work and anything that skips `bg`/`acp-dispatch` stayed invisible. Each sample
+therefore reads macOS `vm_stat` Compressions + Decompressions once, takes the delta against the previous
+sample's counter (kept in state.json as churn_prev / churn_prev_t; no extra sleep, so the first sample, a
+counter that went backwards, a gap over MAX_GAP_S and a missing `vm_stat` give no reading) and keeps
+`churn_since` while pages/s stay above ADMIT_CHURN_PAGES_S (the admit limit). Held for LW_CHURN_SUSTAIN_S (180)
+seconds it sends one line, with the top 3 commands by cores, to the watcher at most hourly (cooldown
+`churn-watcher`, WATCHER_NOCPU_S) and to Hermes every LW_COOLDOWN_H (cooldown `churn`); `status` lists both.
+When a top command matches Grok|Chrome|WindowServer the line adds the loadwatch skill's standing exception;
+the alert itself is never suppressed. No incident row, nothing is signalled or killed; --dry-run prints and
+records nothing. Test hook: LW_FAKE_COMPRESSOR (a comma list of cumulative counters, one per read, the last
+repeating; set, it replaces vm_stat, `admit` ignores it).
 
 State: ~/.local/state/load-watch/ (state.json, incidents.jsonl, guard.jsonl, briefs/, sample.log, watcher.json).
 Registry: ~/.config/load-watch/ci-only.tsv (repo TAB mode TAB CI command or reason TAB date), read by `bg`
@@ -892,6 +905,102 @@ def cmd_guard(a):
     return 0
 
 
+CHURN_SUSTAIN_S = float(os.environ.get("LW_CHURN_SUSTAIN_S", "180"))  # seconds of churn above the admit limit
+CHURN_EXCEPTION_RE = re.compile(r"Grok|Chrome|WindowServer")
+_FAKE_COMPRESSOR_READS = [0]
+
+
+def churn_counter():
+    """Cumulative compressor pages (Compressions + Decompressions) now, or None when unreadable.
+    LW_FAKE_COMPRESSOR (tests): a comma list of counters, one per call, the last repeating; set, vm_stat is not read."""
+    raw = os.environ.get("LW_FAKE_COMPRESSOR", "").strip()
+    if not raw:
+        return _compressor_pages()
+    vals = [float(x) for x in raw.split(",") if x.strip()]
+    if not vals:
+        return None
+    i = min(_FAKE_COMPRESSOR_READS[0], len(vals) - 1)
+    _FAKE_COMPRESSOR_READS[0] += 1
+    return vals[i]
+
+
+def churn_read(st, t):
+    """One compressor-churn reading per sample: pages/s as the delta since the previous sample, or None (no
+    reading: first sample, counter went backwards, a gap over MAX_GAP_S, no vm_stat). Keeps st['churn_since']
+    while the churn is above ADMIT_CHURN_PAGES_S. State keys are read with .get, so an older state.json loads."""
+    c = churn_counter()
+    if c is None:  # no vm_stat: change nothing
+        return None
+    prev, prev_t = st.get("churn_prev"), st.get("churn_prev_t")
+    st["churn_prev"], st["churn_prev_t"] = c, t
+    ok = isinstance(prev, (int, float)) and isinstance(prev_t, (int, float))
+    if not ok or not 0 < t - prev_t < MAX_GAP_S or c < prev:
+        st["churn_since"] = None
+        st.pop("churn_pages_s", None)
+        return None
+    rate = (c - prev) / (t - prev_t)
+    st["churn_pages_s"] = round(rate)
+    if rate <= ADMIT_CHURN_PAGES_S:
+        st["churn_since"] = None
+    elif not st.get("churn_since"):
+        st["churn_since"] = t
+    return rate
+
+
+def churn_top(table, n=3):
+    """The n commands using the most cores in this ps table, same-named ones summed: [(label, cores, matches the
+    Grok/Chrome/WindowServer standing exception)]."""
+    by = {}
+    for _ppid, _uid, cores, cmd in table.values():
+        if ".app/" in cmd:  # a bundle's executable name has spaces ("Google Chrome Helper (Renderer)")
+            label = os.path.basename(cmd.split(" --")[0])
+        else:
+            label = " ".join(os.path.basename(w) for w in cmd.split()[:2])
+        label = label[:40] or "?"
+        row = by.setdefault(label, [0.0, False])
+        row[0] += cores
+        row[1] = row[1] or bool(CHURN_EXCEPTION_RE.search(cmd))
+    return [(k, v[0], v[1]) for k, v in sorted(by.items(), key=lambda kv: -kv[1][0])[:n] if v[0] > 0]
+
+
+def churn_alert(st, t, table, dry):
+    """Tell the watcher (hourly) and Hermes (every COOLDOWN_S) when churn has stayed above the admit limit for
+    CHURN_SUSTAIN_S. Reads and warns only: no incident row, nothing is signalled or killed."""
+    since = st.get("churn_since")
+    if not since or t - since < CHURN_SUSTAIN_S:
+        return
+    cd = st["cooldown"]
+    ping_due = "churn" not in cd
+    last = cd.get("churn-watcher")
+    watch_due = last is None or t - last >= WATCHER_NOCPU_S
+    if not (ping_due or watch_due):
+        return
+    top = churn_top(table)
+    body = (f"compressor churn ~{st.get('churn_pages_s', 0) / 1000:.0f}k pages/s for {CHURN_SUSTAIN_S / 60:g}+ min "
+            f"(limit {ADMIT_CHURN_PAGES_S / 1000:g}k); top: "
+            + (", ".join(f"{label} {cores:.1f} cores" for label, cores, _ in top) or "none") + ". "
+            "Admit already holds new bg/acp-dispatch work; this is running or bypass work.")
+    tail = "do not kill or SIGSTOP without djbclark."
+    if any(exc for _l, _c, exc in top):  # advice shape only: the alert is never suppressed
+        tail += (" Standing exception: Grok Bot/Chrome renderers routinely use 0.3-0.7 cores each, so do not ask "
+                 "djbclark to quit or reload them for routine load; only if far above that or agents time out.")
+    full = f"load-watch: {body} Investigate per the loadwatch skill; {tail}"
+    if dry:
+        print(full)
+        tell_watcher(f"{body} {tail[0].upper() + tail[1:]}", True)
+        return
+    log(f"compressor churn {st.get('churn_pages_s', 0)} pages/s since {stamp(since)}; top: {body.split('top: ')[1]}")
+    if ping_due:
+        if HERMES_PING.exists():
+            try:
+                subprocess.run([str(HERMES_PING), f"djbclark-ade: {full}"], capture_output=True, timeout=60)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                log(f"churn ping failed: {e!r}")
+        cd["churn"] = t
+    if watch_due and tell_watcher(f"{body} {tail[0].upper() + tail[1:]}", False) is not None:
+        cd["churn-watcher"] = t
+
+
 def cmd_sample(a):
     st = load_state()
     t = now()
@@ -900,6 +1009,10 @@ def cmd_sample(a):
     hot = load1 / ncpu >= LOAD_PER_CORE
     gap = t - st.get("t", 0)
     st["t"] = t
+    try:  # a churn problem must never stop load sampling
+        churn_read(st, t)
+    except Exception as e:  # noqa: BLE001
+        log(f"churn read error: {e!r}")
     # Time, not a sample count (2026-10-18: under a load-60 stall launchd ran us every 3-7 minutes, so 15
     # samples took 45+ min and one 7-min gap restarted the count). A gap over MAX_GAP_S is a sleep.
     if hot and (not st.get("hot_since") or gap >= MAX_GAP_S):
@@ -922,6 +1035,10 @@ def cmd_sample(a):
         st["streak"] = st.get("streak", 0) + 1
     st["load1"] = load1
     st["cooldown"] = {k: v for k, v in st.get("cooldown", {}).items() if t - v < COOLDOWN_S}
+    try:
+        churn_alert(st, t, table, a.dry_run)
+    except Exception as e:  # noqa: BLE001
+        log(f"churn alert error: {e!r}")
     if a.verbose:
         print(f"load {load1:.1f}/{ncpu} hot={hot} streak={st['streak']}")
     if hot and t - st["hot_since"] >= SUSTAIN_S:
@@ -1020,8 +1137,11 @@ def cmd_status(a):
           f"(threshold {LOAD_PER_CORE}/core, {MIN_CORES} cores per session, cooldown {COOLDOWN_S / 3600:g} h)")
     for pid, (secs, _, cmd) in sorted(use.items(), key=lambda kv: -kv[1][0])[:8]:
         print(f"  {secs / span if span else 0:5.2f} cores  pid {pid}  {cmd[:110]}")
+    if st.get("churn_pages_s") is not None:
+        print(f"  compressor churn {st['churn_pages_s'] / 1000:.0f}k pages/s (admit limit {ADMIT_CHURN_PAGES_S / 1000:g}k)"
+              + (f", above it for {now() - st['churn_since']:.0f}/{CHURN_SUSTAIN_S:.0f} s" if st.get("churn_since") else ""))
     for k, v in st.get("cooldown", {}).items():
-        print(f"  cooldown {k} until {stamp(v + (WATCHER_NOCPU_S if k == 'nocpu-watcher' else COOLDOWN_S))}")
+        print(f"  cooldown {k} until {stamp(v + (WATCHER_NOCPU_S if k in ('nocpu-watcher', 'churn-watcher') else COOLDOWN_S))}")
     return 0
 
 
