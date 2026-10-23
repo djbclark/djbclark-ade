@@ -1285,3 +1285,28 @@ def test_u2_the_hook_reports_unreadable_even_when_the_level_state_is_old(rig):
     the unreadable line is exactly what must still get through."""
     _hook_state(rig, level="critical", checked_age=timedelta(hours=6), since=NOW - timedelta(hours=6))
     assert rig.hook().stdout == UNREADABLE_LINE.format("2026-10-23T06:00:00Z")
+
+
+# -- fix 7 (Codex pass 4, inbox MSG 1) ----------------------------------------------------------
+
+def test_r1_a_stale_snapshot_row_that_supplied_nothing_does_not_age_a_fresh_reading(rig):
+    """Several Claude rows in the snapshot: only the one that supplied the Fable window ages the decision."""
+    fresh_fable = snapshot_account(weekly=80, fable=60)
+    stale_other = snapshot_account(weekly=80)
+    stale_other["age_seconds"] = 5 * 3600
+    stale_other["collected_at"] = (NOW - timedelta(hours=5)).isoformat()
+    rig.set_aiuse(aiuse_fixture(weekly=80, with_fable_pool=False, payload_extra={"age_seconds": 60}))
+    rig.set_alerts([], age_s=60, accounts=[stale_other, fresh_fable])
+    assert rig.guard().returncode == 0
+    st = rig.state_json()
+    assert st["level"] == "ok" and st["stale"] is False and st["fable_left"] == 60
+    assert rig.pings() == []
+
+
+def test_r1_the_row_that_did_supply_the_fable_window_still_ages_it(rig):
+    stale_fable = snapshot_account(weekly=80, fable=60)
+    stale_fable["age_seconds"] = 5 * 3600
+    fresh_other = snapshot_account(weekly=80)
+    rig.set_aiuse(aiuse_fixture(weekly=80, with_fable_pool=False, payload_extra={"age_seconds": 60}))
+    rig.set_alerts([], age_s=60, accounts=[fresh_other, stale_fable])
+    assert rig.guard().returncode == 1 and rig.state_json()["stale"] is True
