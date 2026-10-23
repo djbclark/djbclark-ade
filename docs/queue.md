@@ -1174,6 +1174,12 @@ gateway agent with `relay.py`. Design: `~/.local/state/bigteam/loadgate-followup
    one-line chat notice), **R1-L5e** (`SessionResumeTooLargeError` on a long thread reports "unverified" with nothing
    sent), **R2-L6** (a profile Hermes with its own `HERMES_HOME` gets "not sent" for another profile's conversation;
    documented). Hop counting across non-Hermes routes (R2-M3) is not enforced: documented as nested-`-z`-only.
+   **Round 3: APPROVE at a70d792** (`adversary-report-3.md`); its M1-M3 and L4/L5/L6a/L8 are repaired in the next commit
+   (claims made true about a caller's tree-kill, session-key self-refusal for desktop, real-process lock test, handler
+   test). Left open, low: R3-L1 (not-found forgery by a process that rewrites the `.err` within 50 ms), R3-L2 (signal in the
+   microsecond window before the handler), R3-L3 (RELAY_SENDER/RELAY_HOPS leak to everything a relayed turn starts),
+   R3-L6b-e (prune race, lock files never pruned, no holder pid in the refusal), R3-L8e (`--json` timeout result has no
+   `reply_file` field).
 3. **Drafted, Hermes-owned install:** `skills/peer-relay/SKILL.md` (Hermes runs `relay.py` by absolute path). Hermes
    installs or links it into `~/.hermes/skills/` itself; nothing here writes `~/.hermes` (djbclark, 2026-10-23: "draft it
    here, I hand it over").

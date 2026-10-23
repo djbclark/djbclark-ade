@@ -44,15 +44,18 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
                4000 characters (a cut reply's cleaned text is kept in the file, whose path is printed).
                "delivered" (exit 0) means the turn ran on the stored transcript: it is NOT posted in the chat, and a
                gateway agent that is mid-turn or cached may not see it until it reloads. It never targets Hermes's
-               own conversation (HERMES_SESSION_ID, or the same platform, chat and thread for a delegated subagent).
+               own conversation (HERMES_SESSION_ID, or the same session key, or platform, chat and thread, for a delegated
+               subagent).
                Only rc 1, an empty stdout and the single stderr line `hermes -z: agent failed: session not found:
                <sid>` (or `cannot resume session <sid>: ...`) mean nothing was written ("not sent"); every other
                failure is "unverified" (the turn may have started: do not resend). A "hermes turn started" line goes
                to stderr first, with the reply file, because the caller's own tool timeout (Claude Code 120 s,
-               Hermes 180 s) can end this process before its verdict: if you are cut off, the message WAS sent. A turn
-               still running after max(100, --wait) seconds is left running, never killed (the exit is "unverified"
-               and names the reply file); until it ends a second relay to that conversation is refused (a per-session
-               flock the child holds). A profile Hermes (HERMES_HOME) sees only its own sessions: "not sent" for another
+               Hermes 180 s) can end this process before its verdict: if you are cut off, the message WAS sent. Give the
+               command a timeout of at least max(100, --wait) + 50 seconds, or run it in the background: a tool timeout
+               that kills the whole process tree (Claude Code's and Hermes's both do) also kills the turn, mid-way.
+               relay.py itself never kills it: a turn still running after max(100, --wait) seconds from relay.py's start
+               is left running (the exit is "unverified" and names the reply file); until it ends a second relay to that
+               conversation is refused (a per-session flock the child holds). A profile Hermes (HERMES_HOME) sees only its own sessions: "not sent" for another
                profile's. RELAY_HERMES overrides the `hermes` binary. ACP cannot load a gateway session and
                messages_send only posts outward, so neither is a route. Checked 2026-10-23 on a throwaway `oneshot`
                session, not on a real gateway conversation.
@@ -114,6 +117,7 @@ HERMES_DIR = Path(os.environ.get("RELAY_HERMES_DIR", Path.home() / ".local/state
 HERMES_SCRUB = ("CLAUDE_CODE_SESSION_ID", "PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ACP_RUN_AGENT", "ACP_OPERATOR_APPROVED",
                "HERMES_UI_SESSION_ID")
 HERMES_SCRUB_PREFIXES = ("HERMES_SESSION_", "HERMES_CRON_")
+HIDDEN = "\u115f\u1160\u3164\uffa0\u2800"    # fillers and blanks that render as nothing
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.?")
 # Pause between the text and its Enter (2026-10-18): sent back to back, Claude Code reads the burst as a
 # paste and the Enter inside it does not submit, so the message sat in the input box until the operator
@@ -575,9 +579,12 @@ def find(ident, ss):
 
 def own_hermes_conversation(s):
     """True when gateway row S is the Hermes conversation this process runs in: its session id, or (a delegated
-    subagent has its own id) the same platform, chat and thread, which Hermes keeps in the environment."""
+    subagent has its own id) the same session key, or the same platform, chat and thread, which Hermes keeps in the
+    environment."""
     if s.get("sid") and s["sid"] == os.environ.get("HERMES_SESSION_ID"):
         return True
+    if s.get("hermes_key") and s["hermes_key"] == os.environ.get("HERMES_SESSION_KEY"):
+        return True    # a desktop conversation binds no chat id; a delegated child keeps the parent's session key
     src, chat, thread = (s.get("hermes_chat") or (None, None, None))
     env = os.environ
     return bool(chat and str(chat) == env.get("HERMES_SESSION_CHAT_ID") and src == env.get("HERMES_SESSION_PLATFORM")
@@ -938,7 +945,8 @@ def hermes_env(sid):
 def clean_reply(text):
     """Hermes's reply as plain data: escape sequences and control characters (C0 bar newline and tab, DEL, C1) removed."""
     return "".join(ch for ch in ANSI.sub("", text)
-                   if ch in "\n\t" or not (ch < " " or "\x7f" <= ch <= "\x9f" or unicodedata.category(ch) in ("Cf", "Zl", "Zp"))).strip()
+                   if ch in "\n\t" or not (ch < " " or "\x7f" <= ch <= "\x9f" or unicodedata.category(ch) in ("Cf", "Zl", "Zp")
+                                                                       or ch in HIDDEN or "\ufe00" <= ch <= "\ufe0f" or "\U000e0100" <= ch <= "\U000e01ef")).strip()
 
 
 def read_capped(path):
@@ -953,7 +961,7 @@ def hermes_private_file(path):
 
 def hermes_prune():
     cutoff = time.time() - HERMES_KEEP_S
-    for f in HERMES_DIR.glob("*.out"):
+    for f in HERMES_DIR.glob("[0-9]*-*.out"):
         try:
             if f.stat().st_mtime < cutoff:
                 f.unlink()
@@ -969,7 +977,7 @@ def route_hermes(c):
     a written user message, so it is "unverified" and no other route runs. A turn that outlives the wait is left
     running, not killed, and holds the session's lock so a second relay cannot write beside it; the started line is
     printed first because the caller's own tool timeout (Claude Code 120 s, Hermes 180 s) can end this process
-    before the verdict. The text always carries the `[relay from NAME] ` tag, which also keeps it from reading as an option."""
+    before the verdict, and a timeout that kills the process tree takes the turn with it. The text always carries the `[relay from NAME] ` tag, which also keeps it from reading as an option."""
     s = c["s"]
     if hermes_hops() >= HERMES_HOPS_MAX:
         return ("stop", f"{hermes_hops()} nested hermes relays already (RELAY_HOPS): not relaying into Hermes again", 1)
@@ -1000,12 +1008,13 @@ def route_hermes(c):
             f"WAS sent: do not resend. Reply file: {out_p}")
     print(note, file=sys.stderr, flush=True)
     def on_signal(n, f):
-        print(f"relay: [{s['id']}] stopped by a signal; the hermes turn is still running (pid {proc.pid}) and the message "
-              "WAS sent: do not resend", file=sys.stderr, flush=True)
+        print(f"relay: [{s['id']}] stopped by a signal; the message WAS sent: do not resend. The hermes turn (pid {proc.pid}) "
+              "keeps running unless the signal came from a tool timeout that kills the whole process tree", file=sys.stderr,
+              flush=True)
         os._exit(1)
     old = {sig: signal.signal(sig, on_signal) for sig in (signal.SIGTERM, signal.SIGHUP)}
     try:
-        rc = proc.wait(timeout=max(HERMES_MIN_WAIT, c["a"].wait))
+        rc = proc.wait(timeout=max(1.0, c["t0"] + max(HERMES_MIN_WAIT, c["a"].wait) - time.time()))
     except subprocess.TimeoutExpired:
         return ("unverified", f"`hermes --resume -z` is still running (pid {proc.pid}, left running, not killed); its raw "
                               f"reply will land in {out_p} (escape sequences are not stripped there). The text may already "
@@ -1028,7 +1037,7 @@ def route_hermes(c):
     reply = clean_reply(out)
     if len(reply) > HERMES_REPLY_CAP:
         out_p.write_text(reply)    # the kept file holds the cleaned text, never the raw
-        c["reply"] = reply[:HERMES_REPLY_CAP] + f"\n[cut at {HERMES_REPLY_CAP} characters; full cleaned reply: {out_p}]"
+        c["reply"] = reply[:HERMES_REPLY_CAP] + f"\n[cut at {HERMES_REPLY_CAP} characters; the cleaned first {HERMES_READ_CAP // 1024} KB of the reply: {out_p}]"
         c["reply_file"] = str(out_p)
         err_p.unlink(missing_ok=True)
     else:
@@ -1073,6 +1082,7 @@ def main():
     ap.add_argument("--plan", action="store_true", help="print the routes in order and send nothing")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
+    t0 = time.time()
     if a.idle is not None and not (math.isfinite(a.idle) and a.idle > 0):
         print("relay: --idle must be a finite number of seconds > 0", file=sys.stderr)
         return 2
@@ -1130,7 +1140,7 @@ def main():
         print(f"relay: [{s['id']}] not sent: " + (f"no {a.via} route for it" if a.via else refusal(s) or "no route"),
               file=sys.stderr)
         return 1
-    c = {"s": s, "a": a, "text": text, "listed": listed}
+    c = {"s": s, "a": a, "text": text, "listed": listed, "t0": t0}
     tried = []
     for name in routes:
         res = ROUTES[name](c)

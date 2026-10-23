@@ -596,7 +596,7 @@ def _hermes_gateway():
         db = sqlite3.connect(f"file:{HERMES_DB}?mode=ro", uri=True, timeout=5)
         db.row_factory = sqlite3.Row
         rows = db.execute(
-            "SELECT id, source, chat_id, thread_id, title, cwd, COALESCE(last_activity_at, started_at) last, "
+            "SELECT id, source, session_key, chat_id, thread_id, title, cwd, COALESCE(last_activity_at, started_at) last, "
             "last_activity_description FROM sessions WHERE ended_at IS NULL AND source NOT IN ('cli','oneshot') "
             "AND COALESCE(last_activity_at, started_at) > ? ORDER BY last DESC", (time.time() - HERMES_ACTIVE,)
         ).fetchall()
@@ -608,7 +608,8 @@ def _hermes_gateway():
         out.append(_rec(id=f"hermes:{r['id'][-8:]}", agent="hermes", host="hermes-gw", sid=r["id"], cwd=r["cwd"] or "",
                         title=(r["title"] or "").strip(), status="idle", where=f"Hermes {r['source']} · {target}",
                         reach=f"ask_hermes, or messages_send target={target} (MCP hermes)",
-                        focus=f"hermes --resume {r['id']}", hermes_chat=(r["source"], r["chat_id"], r["thread_id"])))
+                        focus=f"hermes --resume {r['id']}", hermes_chat=(r["source"], r["chat_id"], r["thread_id"]),
+                        hermes_key=r["session_key"] or ""))
     return out
 
 

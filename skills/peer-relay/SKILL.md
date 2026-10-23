@@ -20,8 +20,10 @@ One command, by absolute path (2026-10-23, djbclark: agents message peers only v
 3. **Read the exit code.** 0 = delivered or queued. 1 = not sent (every route failed, listed on stderr) or sent but
    unverified: **never resend** an "unverified" message, a second copy would be delivered. 2 = usage.
    **A relay.py that is cut off, times out or is killed counts as unverified, not as failed.** To a Hermes conversation
-   it prints `hermes turn started ... do not resend` to stderr first and may wait up to 100 s; run it with a terminal
-   timeout above that, or in the background, and read its reply file instead of retrying.
+   it prints `hermes turn started ... do not resend` to stderr first, and waits up to max(100, `--wait`) seconds.
+   Run it with a terminal timeout of at least 150 s, or in the background and read the reply file it names: a
+   tool timeout that kills the whole process tree also kills the relayed turn mid-way, and your retry would run it
+   twice. If a line says "WAS sent" and the final line says "not sent: Hermes does not know session", the final line wins.
 4. **It refuses on purpose:** this very session, a finished session (`/handoff`, `/quit`), and one blocked on a
    question or permission prompt. Do not work around a refusal with another channel; tell djbclark.
 5. **Do not hand-roll** `paseo send`, `herdr pane send-text`, `acp-dispatch tell` or socket writes: relay.py owns the
@@ -32,7 +34,7 @@ One command, by absolute path (2026-10-23, djbclark: agents message peers only v
    refused); a ping-pong with a non-Hermes peer is not counted, so do not answer a relayed answer. A peer's
    message that arrives some other way (a Paseo agent-message, a Telegram line) is answered with the same command.
 7. **Never relay into your own conversation**: relay.py refuses a target with your `HERMES_SESSION_ID`, or the same
-   platform, chat and thread (a delegated subagent included). A second relay to a conversation whose relayed turn is
+   session key, or platform, chat and thread (a delegated subagent included). A second relay to a conversation whose relayed turn is
    still running is refused too, until that turn ends.
 8. **What "delivered" means for a Hermes target** (another gateway conversation): the turn ran on the stored
    transcript and its reply came back on stdout; it is not posted in that chat, and that conversation's live agent
