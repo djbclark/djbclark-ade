@@ -284,16 +284,29 @@ def parse_skill_check(out):
 
 
 def classify(state):
-    """ok, fixable (link mode repairs it) or stuck (link mode leaves it alone)."""
-    if state in OK_LINK_STATES or state.startswith("via "):
+    """ok, fixable (link mode repairs it) or stuck (link mode leaves it alone).
+
+    The `grokbot` copy target (skill-everywhere, 2026-10-23) prints `<state> (<path>)`: the trailing path is
+    stripped first. `not installed` and `copied` are ok, `missing` and `stale copy` are fixable (link mode
+    re-renders them), `real dir/file (not ours)` and `copy of a removed skill` stay stuck (round 15)."""
+    state = re.sub(r" \(.*\)$", "", state)
+    if state in OK_LINK_STATES or state == "copied" or state.startswith(("via ", "not installed")):
         return "ok"
-    if state == "missing" or state.startswith(("dangling", "chained")):
+    if state in ("missing", "stale copy") or state.startswith(("dangling", "chained")):
         return "fixable"
     return "stuck"
 
 
-def check_skills(script, repo, names):
+def helper_env(repo):
+    """The helper's environment: an inherited SKILL_EVERYWHERE_ONLY would narrow the check to some targets and
+    still print a complete-looking report, which is read as "every link in place" (round 15, LOW)."""
     env = dict(os.environ, SKILL_EVERYWHERE_ADE=str(Path(repo) / "skills"))
+    env.pop("SKILL_EVERYWHERE_ONLY", None)
+    return env
+
+
+def check_skills(script, repo, names):
+    env = helper_env(repo)
     rc, out, err = run([script, "--check", *names], env=env, timeout=LINK_TIMEOUT)
     # exit 1 is the script's own "warning: ..." status (e.g. a dangling Codex AGENTS.md); anything else is a crash
     # (127 for a missing greadlink on Linux) and its partial output must not be taken for a complete result.
@@ -321,7 +334,7 @@ def check_skills(script, repo, names):
 
 
 def link_skills(script, repo, names):
-    env = dict(os.environ, SKILL_EVERYWHERE_ADE=str(Path(repo) / "skills"))
+    env = helper_env(repo)
     return run([script, *names], env=env, timeout=LINK_TIMEOUT)
 
 

@@ -901,6 +901,40 @@ def test_the_real_skill_everywhere_check_ends_with_the_sentinel(tmp_path):  # ad
     assert r.stdout.splitlines()[0] == "== alpha" and r.stdout.splitlines()[-1] == "== end"
 
 
+def test_the_grokbot_copy_target_rows_are_classified_not_stuck(tmp_path):  # adversary R15-1
+    """Master's grokbot target prints `not installed (no <dir>)`, `missing (<dest>)`, `copied (<dest>)`,
+    `stale copy (<dest>)`; every one used to fall through to stuck, so ade-update exited 10 on every run."""
+    mod = load_module()
+    assert mod.classify("not installed (no /home/x/agent-data/workflows)") == "ok"
+    assert mod.classify("copied (/h/ade-alpha)") == "ok"
+    assert mod.classify("missing (/h/ade-alpha)") == "fixable"
+    assert mod.classify("stale copy (/h/ade-alpha)") == "fixable"
+    assert mod.classify("real dir/file (not ours) (/h/ade-alpha)") == "stuck"
+    assert mod.classify("copy of a removed skill (/h/ade-alpha)") == "stuck"
+    assert mod.classify("linked") == "ok" and mod.classify("other link -> /x") == "stuck"
+    # and the REAL script's rows, with and without the grokbot directory, all classify as ok or fixable
+    src = tmp_path / "skills" / "alpha"
+    src.mkdir(parents=True)
+    (src / "SKILL.md").write_text("---\nname: alpha\n---\n")
+    home = tmp_path / "home"
+    home.mkdir()
+    for with_dir in (False, True):
+        if with_dir:
+            (home / "agent-data" / "workflows").mkdir(parents=True)
+        r = subprocess.run([str(REAL_SE), "--check", "alpha"], capture_output=True, text=True, cwd=tmp_path,
+                           env=dict(os.environ, HOME=str(home), SKILL_EVERYWHERE_ADE=str(tmp_path / "skills"),
+                                    CODEX_HOME=str(home / ".codex")))
+        rows = [row for row in mod.parse_skill_check(r.stdout) if row[1] == "grokbot"]
+        assert rows and all(mod.classify(state) in ("ok", "fixable") for _, _, state in rows), r.stdout
+
+
+def test_an_inherited_skill_everywhere_only_never_narrows_the_helper_run(tmp_path, monkeypatch):  # adversary R15-2
+    mod = load_module()
+    monkeypatch.setenv("SKILL_EVERYWHERE_ONLY", "claude")
+    env = mod.helper_env(tmp_path)
+    assert "SKILL_EVERYWHERE_ONLY" not in env and env["SKILL_EVERYWHERE_ADE"] == str(tmp_path / "skills")
+
+
 def test_a_copy_outside_the_canonical_checkout_warns_on_stderr(env):  # adversary R5-3
     for flags in (("--check",), ()):
         r = env.run(*flags, script=env.lone / "bin" / "ade-update")

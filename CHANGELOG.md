@@ -115,6 +115,7 @@ agent what changed and what is new. Entries end with the pull request number.
 ### Fixed
 
 - `bin/ade-update` exits 10 naming a stuck link on the first apply instead of 4 with an empty error, and 4 (not 10) when the canonical checkout has no `skill-everywhere` helper at all (#20).
+- `bin/ade-update` reads the Grok Bot copy-target rows of `skill-everywhere --check` (`not installed (no <dir>)`, `copied (<path>)`, `missing (<path>)`, `stale copy (<path>)`) as ok or fixable, not stuck, and drops an inherited `SKILL_EVERYWHERE_ONLY` from the helper's environment, so a check never reports on a subset of targets (#20).
 - `bin/skill-everywhere`: the Hermes plugin nudge no longer aborts the script when the Hermes wrapper has no `exec`
   line; its `g*` tools reach plain GNU ones through master's alias loop (#20).
 - `acp-dispatch` refuses `--perm read-only` or `--perm deny` (exit 2, before any record or preflight) for an agent
