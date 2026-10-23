@@ -143,7 +143,7 @@ idempotent and safe to run daily:
 git -C ~/src/djbclark-ade status --short        # another agent's edits? leave them; never stash
 git -C ~/src/djbclark-ade pull --ff-only         # a diverged branch stops here: resolve by hand
 for s in ~/src/djbclark-ade/skills/*/; do ~/src/djbclark-ade/bin/skill-everywhere --check "$(basename "$s")"; done
-ls -l ~/.claude/commands ~/.claude/agents ~/.claude/hooks | grep -c djbclark-ade   # symlinks still point here
+ls -l ~/.claude/commands ~/.claude/agents ~/.claude/hooks | ggrep -c djbclark-ade  # symlinks still point here
 ```
 
 Then read [CHANGELOG.md](CHANGELOG.md) from the entry after the commit you last applied:

@@ -98,6 +98,9 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- Paseo's start-up skill sync no longer overwrites the six vendored `paseo*` skills in this repo through the
+  `~/.claude/skills` and `~/.agents/skills` links: the daemon's skill selection is now `custom` with no skills;
+  how it works and what to avoid in Paseo's settings are in docs/skill-everywhere.md section 3a (2026-10-23).
 - `acp-run` classifies zcode's `token_login_failed` error code (inside its "Internal error" envelope) as `auth`, never retried, instead of `transient` (#26).
 - `diskfree` skill: the idle check for deleting a cache runs in the same command as the delete; a
   `target-shared` delete approved minutes earlier broke a live maturin build (2026-10-20).
@@ -119,6 +122,10 @@ agent what changed and what is new. Entries end with the pull request number.
   with a `float(None)` error (#13).
 - `self-slash` (herdr): a slash command left on the input line after the first Enter is Entered again, up to 3 times,
   for every TUI and not only cursor-agent; if it never leaves the line the waiter exits 8 and logs "NOT confirmed
+- `firecrawl-router`: tokenless serving answers only a `Host` header that names the bound
+  loopback server (DNS-rebinding allow-list), and the bearer compare is constant-time
+  (`hmac.compare_digest`) (2026-10-22).
+
   run" instead of "sent" (2026-10-20).
 
 ### Security

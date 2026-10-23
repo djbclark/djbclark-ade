@@ -23,6 +23,9 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    INFO, non-blocking): (a) the tokenless loopback handler does not check the `Host` header, so a page in a
    local browser could reach it by DNS rebinding; add a `Host` allow-list (`127.0.0.1`, `localhost`, the bound
    port); (b) the bearer compare at the handler uses `!=`; use `hmac.compare_digest`. One small PR for both.
+   **Done 2026-10-22** (commit on master, bin/firecrawl-router + tests): the tokenless handler
+   refuses any `Host` that is not a loopback name with the bound port (403), and the bearer compare uses
+   `hmac.compare_digest`.
 2. **Claude API credits from the Admin API, not by hand** (djbclark, 2026-10-20): the Admin API has no balance
    endpoint, but `/v1/organizations/cost_report` gives spend; remaining promo = grant ($200, 2026-10-13, expires
    2026-11-08) minus cost since the grant. Plan: an `aiuse` collector behind `ANTHROPIC_ADMIN_KEY` in

@@ -13,3 +13,8 @@ repo's `handoff` skill, `acp-run`/`dialogue` and orca-cli. Re-apply when updatin
 
 The `paseo` CLI reaches the local daemon from its config (port 7263 on every host here, not
 upstream's 6767); other hosts with `--host`. Setup on this fleet: site-djbclark `docs/paseo.md`.
+
+**Paseo overwrites these files at every daemon start** unless its skill selection is `custom` with no skills
+(`agents.skills.selection` in `~/.paseo/config.json`; docs/skill-everywhere.md section 3a, 2026-10-23). The bundle
+was last compared on 2026-10-23 (0.13.0-beta.1): `paseo` and `paseo-plugin` are ahead of this copy.
+

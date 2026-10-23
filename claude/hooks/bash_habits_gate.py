@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse (Bash): deny three shell mistakes that recur, and warn on a fourth (2026-10-18).
+"""PreToolUse (Bash): deny four shell mistakes that recur, and warn on a fifth (2026-10-18).
 
 1. Bare `sed` (deny). On this Mac it is BSD sed; GNU `gsed` is the rule (2026-10-15: a BSD
    `sed -i` broke an edit; home CLAUDE.md item 1). An explicit `/usr/bin/sed` is a deliberate
@@ -15,7 +15,13 @@
    touch, ln, wc, cut, tr, du, df, stat, date, readlink, realpath take no long option at all; ls,
    head, tail, xargs, grep and find have a short list); `--help`/`--version` and anything not
    probed pass. The reason names the g-prefixed tool (`gchmod`); `/bin/chmod` also passes.
-4. `sudo -n` without `-k` (warning only). A cached ticket (sudoers.d/10-timestamp-global makes
+4. A recursive grep (deny). On 2026-10-22 `/usr/bin/grep -rl` walked `~/src` and `~/ops`
+   for 38 minutes at one core while the machine was swapping. BSD `grep` and `ggrep` both
+   walk every file; content search is `rg -n -l PAT PATH` with a real scope (setup-modern-cli).
+   A filename uses `plocate -i NAME` when `/opt/homebrew/var/lib/plocate/plocate.db` is fresh
+   enough (nightly 03:30). `ggrep` stays for one file that needs a GNU flag. A pipe or a
+   single file with no `-r`/`-R` passes.
+5. `sudo -n` without `-k` (warning only). A cached ticket (sudoers.d/10-timestamp-global makes
    it machine-wide) lets `sudo -n` run anything, so it proves nothing about a NOPASSWD rule:
    on 2026-10-18 a "narrow rule" check passed for a command the rule never allowed.
    `sudo -k -n CMD` ignores the cache without clearing it (man sudo, -k with a command).
@@ -62,6 +68,29 @@ SHORT_BAD = {
 }
 # `xargs` options that take the next word, so it is not mistaken for the command.
 XARGS_ARG = frozenset({"-E", "-I", "-J", "-L", "-n", "-P", "-R", "-S", "-s"})
+# Recursive grep/ggrep (2026-10-22). A leading -H/-L/-P on find is unrelated and is left alone.
+TREE_GREP = frozenset({"grep", "ggrep", "egrep", "fgrep", "gegrep", "gfgrep"})
+TREE_GREP_REASON = (
+    "A recursive grep walks every file. Scope it, or use `rg -n -l PAT PATH` "
+    "(always a path; `~/src/djbclark-ade` skill setup-modern-cli). A filename uses "
+    "`plocate -i NAME` when `/opt/homebrew/var/lib/plocate/plocate.db` is fresh enough "
+    "(nightly 03:30; it does not search contents). `ggrep` is for one file that needs a "
+    "GNU flag. On 2026-10-22 `grep -rl` over `~/src` and `~/ops` ran 38 min at one core."
+)
+
+
+def tree_grep(tool: str, args: list[str]) -> bool:
+    """True when grep/ggrep is asked to walk a tree. A pipe or one file is not one."""
+    if os.path.basename(tool) not in TREE_GREP:
+        return False
+    for a in option_words(args):
+        if a in ("--recursive", "--dereference-recursive"):
+            return True
+        if len(a) > 1 and a.startswith("-") and not a.startswith("--") and re.search(r"[rR]", a[1:]):
+            return True
+    return False
+
+
 # find primaries BSD does not know (a leading -H/-L/-P is BSD's own and is left alone).
 FIND_BAD = frozenset({"-printf", "-fprint", "-fprint0", "-fprintf", "-fls", "-regextype",
                       "-xtype", "-executable", "-readable", "-writable", "-files0-from",
@@ -211,6 +240,8 @@ def check(cmd: str) -> tuple[str | None, str | None]:
                         "the Read tool or `gsed -n A,Bp`; a deliberate BSD call writes "
                         "`/usr/bin/sed`."), None
             tool, args = command_word(stage)
+            if tree_grep(tool, args):
+                return TREE_GREP_REASON, None
             flag = gnu_only(tool, args)
             if flag:
                 return gnu_reason(tool, flag, bool(re.search(r"\bxargs\b", stage))
