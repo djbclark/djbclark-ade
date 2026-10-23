@@ -1372,7 +1372,7 @@ def test_untracked_files_get_a_lossless_archive_command_not_a_bare_git_add():
     rows = section_3_2(mod.render(doc_scan([co]))).splitlines()
     row = next(r for r in rows if r.startswith("| /p/u dir ") or r.startswith("| /p/u\\ dir "))
     assert ("mkdir -p <DEST>/'checkouts/abs/p/u dir' && git -C '/p/u dir' ls-files -z --others --exclude-standard "
-            "> <DEST>/'checkouts/abs/p/u dir/untracked.list' && TAR_OPTIONS= \"$GTAR\" -C '/p/u dir' --null "
+            "> <DEST>/'checkouts/abs/p/u dir/untracked.list' && TAR_OPTIONS= \"$GTAR\" -C '/p/u dir' --null --no-recursion "
             "-T <DEST>/'checkouts/abs/p/u dir/untracked.list' -cf <DEST>/'checkouts/abs/p/u dir/untracked.tar'`") in row
     # Codex pass 9: no pipe, so ls-files' own status decides (`ls-files | gtar` exits 0 when ls-files fails)
     assert "|" not in row.replace("|", "", 5) and "\\|" not in row
@@ -3010,7 +3010,7 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
     assert mod.modified_fmt().count("{}") == len(mod.modified_values("/p", "c"))
     assert mod.HIDDEN_FMT.count("{}") == len(mod.hidden_values("/p", "c"))
     assert (f"git -C {sp} ls-files -z --others --exclude-standard > {d}/untracked.list "
-            f"&& TAR_OPTIONS= \"$GTAR\" -C {sp} --null -T {d}/untracked.list -cf {d}/untracked.tar") in row
+            f"&& TAR_OPTIONS= \"$GTAR\" -C {sp} --null --no-recursion -T {d}/untracked.list -cf {d}/untracked.tar") in row
     assert "the scanner skips absorbed submodules" in row
     # adversary round 42: a de-initialised submodule is an empty directory; every command is gated on its `.git`,
     # and the module git dirs are archived
@@ -3888,6 +3888,47 @@ def test_a_push_to_a_local_path_origin_gets_the_bundle_only_because_receive_hook
     assert mod.scan_checkout(work, remote=False)["origin_local_path"] is False
 
 
+def test_a_local_path_origin_gets_no_push_command_for_any_row_and_no_add_advice():
+    """Adversary round 55 on PR 27, LOW 2 and 3: the other-branches row, the zero-tag row and the untracked row each
+    must stay bundle-only for a local-path origin (a push, or `add -A ... commit and push`, runs its receive hooks)."""
+    mod = load_doc()
+    side = doc_checkout("/p/work", flags=["unpushed commits"], verdict="unpushed commits", local_only_commits=2,
+                        local_only_branches=[{"branch": "side", "count": 2}], origin_local_path=True)
+    tags = doc_checkout("/p/t", flags=["unpushed tags"], verdict="unpushed tags",
+                        local_only_tags=[{"tag": "release", "count": 0}], origin_local_path=True)
+    untr = doc_checkout("/p/u", flags=["untracked"], verdict="untracked", untracked=1, untracked_sample=["u.txt"],
+                        origin_local_path=True)
+    rows = section_3_2(mod.render(doc_scan([side, tags, untr]))).splitlines()
+    for p, want in (("/p/work", "refs/heads/side"), ("/p/t", "tag(s) origin lacks"), ("/p/u", "archive every untracked path")):
+        row = next(r for r in rows if r.startswith(f"| {p} "))
+        assert want in row.replace("local-only commits on `side`", "refs/heads/side"), row
+        assert not re.search(r"git -C \S+ (?:-c \S+ )?push", row) and "add -A" not in row, row
+        assert p == "/p/u" or "local path" in row, row  # the untracked row has no push to refuse
+    assert "bundle create" in next(r for r in rows if r.startswith("| /p/work "))
+    assert "bundle create" in next(r for r in rows if r.startswith("| /p/t "))
+
+
+def test_an_edited_tracked_file_in_a_readable_but_unsearchable_directory_is_not_clean(tmp_path):
+    """Adversary round 55 on PR 27, MEDIUM: `git status` reports a tracked path it cannot lstat with a bare
+    `<path>: Permission denied` (no `warning:` prefix), skips the file and exits 0."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    (work / "sub").mkdir()
+    (work / "sub" / "f.txt").write_text("tracked\n")
+    git(work, "add", "sub/f.txt")
+    git(work, "commit", "-q", "-m", "sub")
+    git(work, "push", "-q", "origin", "main")
+    (work / "sub" / "f.txt").write_text("LOCAL EDIT\n")
+    for mode in (0o644, 0o444):
+        (work / "sub").chmod(mode)
+        try:
+            rec = mod.scan_checkout(work, remote=False)
+        finally:
+            (work / "sub").chmod(0o755)
+        assert rec["verdict"].startswith("scan incomplete: status"), (oct(mode), rec["verdict"])
+    assert mod.scan_checkout(work, remote=False)["verdict"] == "dirty"
+
+
 def test_a_ref_name_that_is_not_utf8_makes_the_checkout_scan_incomplete(tmp_path):
     """Adversary round 54 on PR 27, LOW 2: two non-UTF-8 tag names collide on U+FFFD and hide an unpushed tag."""
     mod = load()
@@ -3903,6 +3944,62 @@ def test_a_ref_name_that_is_not_utf8_makes_the_checkout_scan_incomplete(tmp_path
     assert q.returncode == 0, q.stderr
     rec = mod.scan_checkout(work, remote=False)
     assert rec["verdict"].startswith("scan incomplete: for-each-ref (a ref name is not valid UTF-8)"), rec["verdict"]
+
+
+def test_an_embedded_repository_added_as_a_gitlink_without_gitmodules_is_not_clean(tmp_path):
+    """Codex pass 50 on PR 27, P1: no `.gitmodules` and no `modules/` directory returned before the index was read, so
+    work inside the gitlink's repository was in no count and no capture."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    inner = work / "inner"
+    inner.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(inner)], check=True, env=GIT_ENV)
+    (inner / "i.txt").write_text("i\n")
+    git(inner, "add", "i.txt")
+    git(inner, "commit", "-q", "-m", "i")
+    git(work, "add", "inner")
+    git(work, "commit", "-q", "-m", "gitlink")
+    git(work, "push", "-q", "origin", "main")
+    (inner / "ONLY-HERE.txt").write_text("work\n")
+    assert not (work / ".gitmodules").exists()
+    rec = mod.scan_checkout(work, remote=False)
+    assert rec["verdict"] != "clean and pushed" and rec["verdict"].startswith("skipped: submodule config unrecognised"), rec["verdict"]
+
+
+def test_an_untracked_embedded_repository_is_flagged_and_its_ignored_files_stay_out_of_the_archive(tmp_path):
+    """Codex pass 50 on PR 27, P2: `ls-files --others` names `inner/`, and tar recursed into it, ignored files and
+    `.git` included, into the non-ignored capture."""
+    mod = load()
+    doc = load_doc()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    inner = work / "inner"
+    inner.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(inner)], check=True, env=GIT_ENV)
+    (inner / ".gitignore").write_text("secret.env\n")
+    (inner / "secret.env").write_text("TOKEN-FAKE\n")
+    (inner / "i.txt").write_text("i\n")
+    (work / "plain.txt").write_text("plain\n")
+    rec = mod.scan_checkout(work, remote=False)
+    assert rec["embedded_repos"] == ["inner/"] and "embedded repositories: 1" in rec["flags"], rec
+    assert rec["verdict"] == "embedded repositories: 1", rec["verdict"]
+    text = doc.render(doc_scan([rec]))
+    row = next(r for r in section_3_2(text).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
+    assert "embedded repository" in row and "embedded-0.tar" in row, row
+    ck = doc.checkout_dir(rec["path"])
+    cmd = PLAN_PREFIX + doc.UNTRACKED_FMT.format(*map(doc.shquote, doc.untracked_values(rec["path"], ck))).replace("<DEST>", str(tmp_path / "dest"))
+    (tmp_path / "dest" / ck).mkdir(parents=True)
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    names = subprocess.run(["tar", "-tf", str(tmp_path / "dest" / ck / "untracked.tar")], capture_output=True, text=True).stdout
+    assert "plain.txt" in names and "secret.env" not in names and "i.txt" not in names, names
+
+
+def test_porcelain_unquoting_gives_back_the_real_name():
+    mod = load()
+    assert mod.unquote_porcelain("inner/") == "inner/"
+    assert mod.unquote_porcelain('"a b\\"c/"') == 'a b"c/'
+    assert mod.unquote_porcelain('"caf\\303\\251/"') == "caf\u00e9/"
+    assert mod.unquote_porcelain('"t\\tab/"') == "t\tab/"
 
 
 def test_a_global_push_rewrite_to_a_helper_gets_no_push_row(tmp_path, monkeypatch):

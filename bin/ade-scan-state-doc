@@ -158,7 +158,7 @@ def hidden_values(raw_p, ck):
 # Every emitted tar runs with `TAR_OPTIONS=` cleared: with `TAR_OPTIONS=--exclude=*` in the operator's environment
 # GNU tar wrote an empty archive and exited 0 (Codex pass 37; the modified and hidden rows had it since round 40)
 UNTRACKED_FMT = ("mkdir -p <DEST>/{} && git -C {} ls-files -z --others --exclude-standard > <DEST>/{} "
-                 "&& TAR_OPTIONS= \"$GTAR\" -C {} --null -T <DEST>/{} -cf <DEST>/{}")
+                 "&& TAR_OPTIONS= \"$GTAR\" -C {} --null --no-recursion -T <DEST>/{} -cf <DEST>/{}")
 
 
 def untracked_values(raw_p, ck):
@@ -810,9 +810,18 @@ def render(d):
             # a cow pasture of another one included: the name proves nothing about the content (Codex pass 24)
             cmd.append("archive every untracked path: "
                        + shcode(UNTRACKED_FMT, *untracked_values(raw_p, ck))
-                       + ("" if credential else " or " + shcode("git -C {} add -A -- .", raw_p)
+                       + ("" if no_push else " or " + shcode("git -C {} add -A -- .", raw_p)
                           + " on a branch, commit and push (stages the modified tracked files too)"))
             need = need if need != "no" else "yes: decide whether they are work"
+            # the list names an embedded repository's directory, not its files, and the archive takes no directory's
+            # contents (`--no-recursion`): its ignored files and git metadata stay out of the non-ignored capture. The
+            # repository is its own checkout: scan it, or archive the directory whole (Codex pass 50 on PR 27, P2)
+            for i, e in enumerate(c.get("embedded_repos") or []):
+                name = e.strip('"').rstrip("/")
+                cmd.append(f"embedded repository {code('{}', visible(e))}: archived as an empty entry above; its own state is not captured. "
+                           "Scan it as a checkout of its own, or archive it whole (its ignored files and `.git` included): "
+                           + shcode("mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -cf <DEST>/{} -- {}",
+                                    ck, raw_p, f"{ck}/embedded-{i}.tar", name))
         if unreachable:
             # origin did not answer: the count trusted the local `refs/remotes/origin/*`, which a deleted or
             # force-pushed branch leaves stale, so even a 0 hides commits (adversary round 21, 1)

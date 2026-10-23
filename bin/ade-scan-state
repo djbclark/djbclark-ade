@@ -859,6 +859,43 @@ def read_regular_file(path: Path, cap: int) -> bytes:
         os.close(fd)
 
 
+_C_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, '"': 34}
+
+
+def unquote_porcelain(name: str) -> str:
+    """git's C-style quoting of an odd path in `status --porcelain` (`"a b\\303\\251"`), undone to the real name
+    (surrogateescape for bytes that are not UTF-8); a name that is not quoted is returned as it is."""
+    if len(name) < 2 or name[0] != '"' or name[-1] != '"':
+        return name
+    body, out, i = name[1:-1], bytearray(), 0
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\" or i + 1 >= len(body):
+            out += ch.encode("utf-8", "surrogateescape")
+            i += 1
+        elif body[i + 1] in _C_ESCAPES:
+            out.append(_C_ESCAPES[body[i + 1]])
+            i += 2
+        elif body[i + 1:i + 4].isdigit() and len(body[i + 1:i + 4]) == 3:
+            out.append(int(body[i + 1:i + 4], 8) & 0xFF)
+            i += 4
+        else:
+            out += b"\\"
+            i += 1
+    return bytes(out).decode("utf-8", "surrogateescape")
+
+
+def embedded_repositories(path: Path, untracked: list[str]) -> list[str]:
+    """Untracked directories that hold a `.git` of their own: `ls-files --others` names such a directory, not its files,
+    so an archive of that list would recurse into it, taking ignored files and git metadata along (Codex pass 50, P2)."""
+    found = []
+    for u in untracked:
+        name = unquote_porcelain(u)
+        if name.endswith("/") and os.path.lexists(os.path.join(path, name.rstrip("/"), ".git")):
+            found.append(u)
+    return found
+
+
 def stash_count(path: Path, common: Path | None) -> int | None:
     """Stashes = lines of the stash reflog file; no log machinery (no gpg, no pager) is involved. None when
     the count could not be taken (an unreadable reflog, a failed `stash list`): the caller records the scan as
@@ -1252,14 +1289,27 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
                      "--untracked-files=normal", timeout=STATUS_TIMEOUT, err=status_err)
     if rc != 0:
         return incomplete_record(path, "status", rc)
-    if any(ln.startswith(("warning:", "error:", "fatal:")) for ln in "".join(status_err).splitlines()):  # not `hint:` (the graft-file notice)
+    # any line but `hint:` (the graft-file notice): git reports an unreadable tracked path with a bare `perror`, `<path>:
+    # Permission denied`, no prefix, and still exits 0 (adversary round 55 on PR 27, MEDIUM)
+    if any(ln.strip() and not ln.startswith("hint:") for ln in "".join(status_err).splitlines()):
         # an unreadable untracked subtree ends `status` with rc 0, the files it could not list left out, and a
         # `warning: could not open directory ...` on stderr: the traversal was partial, so no count of it is a count
         # (Codex pass 49 on PR 27, P1)
         return incomplete_record(path, "status (git printed a warning: part of the worktree could not be read)", rc)
+    if not has_submodules:
+        # an embedded repository added as a gitlink with no `.gitmodules` leaves neither that file nor `modules/`: the
+        # index is the only witness, and `status --ignore-submodules=all` never sees inside it (Codex pass 50, P1). Asked
+        # after `status` succeeded, so an unreadable index is still reported as `scan incomplete: status`
+        rc, out = git(path, "ls-files", "-z", "-s", errors="surrogateescape")
+        if rc != 0:
+            return incomplete_record(path, "ls-files -s", rc)
+        if any(e.startswith("160000 ") for e in out.split("\0")):
+            return skipped_record(path, "skipped: submodule config unrecognised (gitlink without .gitmodules)",
+                                  ["(gitlink without .gitmodules)"])
     lines = status.splitlines()
     untracked = [ln[3:] for ln in lines if ln.startswith("??")]
     modified = [ln[3:] for ln in lines if not ln.startswith("??")]
+    embedded = embedded_repositories(path, untracked)
     # a tracked path marked assume-unchanged (`ls-files -v` tag in lowercase) or skip-worktree (`S`) is invisible to
     # `status`, so its edits are in no count above: it is counted and captured on its own (Codex pass 32 on PR 27).
     # A skip-worktree path with no file is a sparse checkout's ordinary state (adversary round 38): nothing to
@@ -1515,6 +1565,8 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
                      + (f", +{len(zero_tags) - 5} more" if len(zero_tags) > 5 else ""))
     if index_hidden:
         flags.append(f"index-hidden paths: {index_hidden}")  # primary: `status` cannot see edits there
+    if embedded:
+        flags.append(f"embedded repositories: {len(embedded)}")  # primary: the untracked archive holds an empty entry for each
     if reflog_only:
         flags.append(f"reflog-only commits: {reflog_only}")  # primary: recoverable only until the reflog expires
     if credential and remote:
@@ -1539,6 +1591,7 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     return {
         "path": str(path), "branch": branch, "modified": len(modified), "untracked": len(untracked),
         "untracked_sample": untracked[:8], "modified_sample": modified[:8],
+        "embedded_repos": embedded[:50],
         "upstream": upstream, "unpushed": unpushed if upstream else "no upstream",
         "ahead_of_origin": ahead_of_origin, "stashes": stashes,
         "index_hidden": index_hidden, "reflog_only_commits": reflog_only,
