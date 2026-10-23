@@ -11,6 +11,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- `bin/claude-quota-guard` (`check`, `status`, `--install`) turns the Claude weekly, 5-hour and Fable windows and aiuse's Claude `conserve` alerts into a level (`ok`, `watch`, `tight`, `critical`; exit 0-3, 10 when aiuse is unreadable), writes `~/.local/state/ade/quota-guard.json`, and pings once per upward crossing; the `claude/hooks/quota_nudge.py` UserPromptSubmit hook prints the level's advice once per session and level (#TBD).
 - `bin/ade-backup-stores`: Phase 0 backups, a SQLite online-backup copy of every live agent session database, the
   per-session trees and file stores and the Hermes JSONL export (run against a scratch copy of the Hermes
   database), with a hashed `MANIFEST.json`, built in `<dest>.part/` and renamed when complete; `--dry-run`,
@@ -54,6 +55,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Changed
 
+- Routing: a lead / orchestrator session runs on Opus 5.5 at high (Sonnet 5.5 at high only to drive a pipeline), never Fable (`config/routing.toml` `[lead]`, printed by `route_agent.py policy --md`); adversary rounds go first to `acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` (omp is eligible for `judgment`), and the Agent-tool `adversary` takes a `model: "sonnet"` override when the guard says `tight` or worse (#TBD).
 - `acp-dispatch --detach`: a `waiter:` line above `rearm:` says to run the waiter in the background with a long tool timeout (Claude Code Bash: `timeout 7200000`); at the 30 min default a lead's harness killed it mid-slice. `rearm:` stays the last line (#28).
 - `acp-run` removes `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `ORCA_TERMINAL_HANDLE` from every agent's
   environment and sets `ACP_RUN_AGENT=1`; `self-slash --finish` and `--then /quit` on Paseo are

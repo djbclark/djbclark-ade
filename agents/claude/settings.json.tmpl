@@ -512,6 +512,11 @@
           },
           {
             "type": "command",
+            "command": "\"$HOME\"/ops/site-private/bin/hook-deadline 2 \"$HOME\"/src/djbclark-ade/claude/hooks/quota_nudge.py",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "GRAFT_NO_REFRESH=1 {{ .home }}/ops/site-djbclark/macos/graft-hook-timeout-fix/graft-hook-guard.sh node \"{{ .home }}/.claude/helpers/graft-hooks.cjs\" prompt",
             "timeout": 60
           }

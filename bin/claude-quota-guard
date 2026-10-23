@@ -1,0 +1,461 @@
+#!/usr/bin/env -S python3 -I
+"""claude-quota-guard: turn the Claude quota reading into a level that sessions act on.
+
+Why (2026-10-20): the Claude Code weekly window hit 100% at 17:07Z, 2.6 days before its
+reset, and every orchestrating session stopped. aiuse had carried a `conserve` alert for
+provider `claude` since 06:02Z ("projected to run out ~1 day before reset (34% left)"), but
+nothing read it, nothing pinged and no session downshifted. This guard reads aiuse's cache
+(no live probe), derives a level, writes ~/.local/state/ade/quota-guard.json for the
+UserPromptSubmit hook claude/hooks/quota_nudge.py, and pings once per upward crossing.
+
+  claude-quota-guard [check]       probe, write the state file, ping on a rise; exit code = level
+  claude-quota-guard status [--json]   print the state file, no probing
+  claude-quota-guard --install     write the launchd job (every 15 min) and print the
+                                   `launchctl bootstrap` line; never runs launchctl itself
+
+Levels and exit codes: 0 ok, 1 watch, 2 tight, 3 critical, 10 aiuse could not be read (state
+file left untouched). The binding window is the lowest `remaining_percent` among the Claude
+rows' windows (weekly, 5-hour and Fable's sublimit):
+  watch    weekly left < 40, Fable sublimit left < 15, or any Claude `conserve` alert
+  tight    weekly left < 30, or a weekly `conserve` alert that says "projected to run out ...
+           before reset"
+  critical weekly left < 15, 5-hour left < 10, or aiuse exit 3 with no Claude row
+Thresholds live in THRESHOLDS; env CLAUDE_QUOTA_GUARD_THRESHOLDS (JSON) overrides keys.
+
+Env (tests): CLAUDE_QUOTA_GUARD_AIUSE (default ~/.local/bin/aiuse), _SNAPSHOTS (default
+~/.cache/aiuse/snapshots), _STATE (default ~/.local/state/ade/quota-guard.json), _PING
+(default ~/.local/bin/hermes-ping), _LAUNCH_AGENTS (default ~/Library/LaunchAgents), _NOW
+(ISO time standing in for the clock).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import plistlib
+import re
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+HOME = Path.home()
+LABEL = "com.djbclark.claude-quota-guard"
+INTERVAL_SECONDS = 15 * 60  # aiuse's collector is hourly; the guard only reads its cache
+
+THRESHOLDS = {
+    "watch_weekly": 40.0,       # weekly left below this -> watch
+    "tight_weekly": 30.0,       # -> tight
+    "critical_weekly": 15.0,    # -> critical
+    "critical_five_hour": 10.0,  # 5-hour left below this -> critical
+    "watch_fable": 15.0,        # Fable sublimit left below this -> watch (advice already bans Fable)
+    "alert_max_age_s": 21600.0,  # ignore snapshot alerts older than this (aiuse's own rows are fresher)
+    "period_tolerance_s": 7200.0,  # two resets_at this close are the same reset period (clock jitter)
+    "aiuse_timeout_s": 90.0,
+    "ping_timeout_s": 30.0,
+}
+
+LEVELS = ("ok", "watch", "tight", "critical")
+EXIT_CODES = {"ok": 0, "watch": 1, "tight": 2, "critical": 3}
+EX_UNREADABLE = 10
+EX_CONFIG = 64  # bad CLAUDE_QUOTA_GUARD_THRESHOLDS: never 1-3, which mean watch/tight/critical
+AIUSE_NOTHING_USABLE = 3
+
+
+class ConfigError(Exception):
+    pass
+
+_SELF_SLASH = ("`~/src/djbclark-ade/bin/self-slash --finish --successor claude/claude-sonnet-5-5 "
+               "--thinking high`")
+_ADVERSARY = "`acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high`"
+_RUNNING_PROJECTED = re.compile(r"projected to run out.*before reset", re.I | re.S)
+
+
+def _advice(level: str, resets_at: str | None) -> str:
+    if level == "ok":
+        return ""
+    items = [
+        "Claude quota watch: no Fable or Opus Agent-tool sub-agents.",
+        f"Adversary rounds via {_ADVERSARY}.",
+        "Route code/bulk slices to other pools.",
+    ]
+    if level in ("tight", "critical"):
+        items[0] = "Claude quota tight: no Fable or Opus Agent-tool sub-agents."
+        items += [
+            f"A lead on Opus or Fable hands off now and continues on Sonnet 5.5 high: {_SELF_SLASH} "
+            "(Paseo; herdr/Orca: handoff then relaunch on Sonnet).",
+            "No `acp-dispatch claude` slices.",
+        ]
+    if level == "critical":
+        items[0] = "Claude quota critical: no Fable or Opus Agent-tool sub-agents."
+        items.append(f"No new Claude work of any kind until the reset at {resets_at or 'unknown'}; "
+                     "finish the running turn, hand off, stop.")
+    return "\n".join(f"{i}. {t}" for i, t in enumerate(items, 1))
+
+
+# -- paths and environment -------------------------------------------------
+
+def _path(env: str, default: Path) -> Path:
+    return Path(os.environ.get(env) or default).expanduser()
+
+
+def state_path() -> Path:
+    return _path("CLAUDE_QUOTA_GUARD_STATE", HOME / ".local/state/ade/quota-guard.json")
+
+
+def thresholds() -> dict:
+    t = dict(THRESHOLDS)
+    raw = os.environ.get("CLAUDE_QUOTA_GUARD_THRESHOLDS")
+    if raw:
+        try:
+            over = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ConfigError(f"CLAUDE_QUOTA_GUARD_THRESHOLDS is not JSON: {e}")
+        if not isinstance(over, dict):
+            raise ConfigError("CLAUDE_QUOTA_GUARD_THRESHOLDS must be a JSON object")
+        for k, v in over.items():
+            if k not in t or not isinstance(v, (int, float)) or isinstance(v, bool):
+                raise ConfigError(f"unknown or non-numeric threshold {k!r}")
+            t[k] = float(v)
+    return t
+
+
+def now() -> datetime:
+    raw = os.environ.get("CLAUDE_QUOTA_GUARD_NOW")
+    if raw:
+        return _parse_ts(raw) or datetime.now(timezone.utc)
+    return datetime.now(timezone.utc)
+
+
+def _parse_ts(text) -> datetime | None:
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        d = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def _iso(d: datetime) -> str:
+    return d.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _num(v) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+# -- reading aiuse ---------------------------------------------------------
+
+class Unreadable(Exception):
+    pass
+
+
+def read_aiuse() -> tuple[int, dict]:
+    """(exit code, parsed JSON) of `aiuse --available --json`. Raises Unreadable."""
+    exe = str(_path("CLAUDE_QUOTA_GUARD_AIUSE", HOME / ".local/bin/aiuse"))
+    try:
+        p = subprocess.run([exe, "--available", "--json"], capture_output=True, text=True,
+                           timeout=thresholds()["aiuse_timeout_s"], check=False, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Unreadable(f"could not run {exe}: {e}")
+    if p.returncode not in (0, AIUSE_NOTHING_USABLE):
+        raise Unreadable(f"{exe} exited {p.returncode}: {(p.stderr or p.stdout).strip()[:300]}")
+    try:
+        data = json.loads(p.stdout) if p.stdout.strip() else {}
+    except json.JSONDecodeError as e:
+        if p.returncode == AIUSE_NOTHING_USABLE:
+            data = {}  # exit 3 may print only prose; the exit code is the verdict
+        else:
+            raise Unreadable(f"{exe} printed invalid JSON: {e}")
+    if not isinstance(data, dict):
+        raise Unreadable(f"{exe} printed JSON that is not an object")
+    return p.returncode, data
+
+
+def claude_windows(data: dict) -> list[dict]:
+    """Every window of every Claude row, tagged weekly / five_hour / fable."""
+    out = []
+    for row in data.get("available") or []:
+        if not isinstance(row, dict) or row.get("provider") != "claude":
+            continue
+        for w in row.get("windows") or []:
+            if not isinstance(w, dict):
+                continue
+            label = str(w.get("label") or w.get("window_label") or "")
+            low = label.lower()
+            left = _num(w.get("remaining_percent"))
+            if left is None and _num(w.get("used_percent")) is not None:
+                left = 100.0 - _num(w.get("used_percent"))
+            if left is None:
+                continue
+            fable = "fable" in low or w.get("pool_family") == "fable" or w.get("quota_scope") == "model_sublimit"
+            if fable:
+                kind = "fable"
+            elif "5-hour" in low or "5 hour" in low or w.get("window_minutes") == 300:
+                kind = "five_hour"
+            elif "weekly" in low or w.get("window_minutes") == 10080:
+                kind = "weekly"
+            else:
+                continue
+            out.append({"kind": kind, "label": label, "left": left, "resets_at": w.get("resets_at"),
+                        "pace": _num(w.get("pace_percent"))})
+    return out
+
+
+def _lowest(windows: list[dict], kind: str) -> dict | None:
+    rows = [w for w in windows if w["kind"] == kind]
+    return min(rows, key=lambda w: w["left"]) if rows else None
+
+
+# -- reading the snapshot alerts -------------------------------------------
+
+def read_alerts(t: dict) -> tuple[list[dict], float | None]:
+    """Claude `conserve` alerts from the newest snapshot, and that snapshot's age in seconds."""
+    d = _path("CLAUDE_QUOTA_GUARD_SNAPSHOTS", HOME / ".cache/aiuse/snapshots")
+    try:
+        files = [f for f in d.glob("*.json") if f.is_file()]
+        newest = max(files, key=lambda f: f.stat().st_mtime)
+        age = max(0.0, now().timestamp() - newest.stat().st_mtime)
+        snap = json.loads(newest.read_text())
+    except (OSError, ValueError):
+        return [], None
+    if age > t["alert_max_age_s"] or not isinstance(snap, dict):
+        return [], age
+    alerts = [a for a in (snap.get("alerts") or [])
+              if isinstance(a, dict) and a.get("provider") == "claude" and a.get("kind") == "conserve"]
+    return alerts, age
+
+
+# -- the decision ----------------------------------------------------------
+
+def decide(rc: int, data: dict, alerts: list[dict], t: dict) -> dict:
+    """Level plus the numbers behind it. Pure: no clock, no I/O."""
+    windows = claude_windows(data)
+    weekly, five, fable = (_lowest(windows, k) for k in ("weekly", "five_hour", "fable"))
+    level = "ok"
+
+    def raise_to(new: str) -> None:
+        nonlocal level
+        if LEVELS.index(new) > LEVELS.index(level):
+            level = new
+
+    if not windows:
+        if rc != AIUSE_NOTHING_USABLE:
+            raise Unreadable("aiuse has no Claude window (row absent, exit 0)")
+        raise_to("critical")  # aiuse found nothing usable and Claude is not among it: exhausted
+    if weekly:
+        if weekly["left"] < t["watch_weekly"]:
+            raise_to("watch")
+        if weekly["left"] < t["tight_weekly"]:
+            raise_to("tight")
+        if weekly["left"] < t["critical_weekly"]:
+            raise_to("critical")
+    if five and five["left"] < t["critical_five_hour"]:
+        raise_to("critical")
+    if fable and fable["left"] < t["watch_fable"]:
+        raise_to("watch")
+    if alerts:
+        raise_to("watch")
+    for a in alerts:
+        if "weekly" in str(a.get("window_label") or "").lower() and _RUNNING_PROJECTED.search(str(a.get("message") or "")):
+            raise_to("tight")
+
+    # Window the level answers to: the lowest remaining among weekly and 5-hour.
+    candidates = [w for w in (weekly, five) if w]
+    binding = min(candidates, key=lambda w: w["left"]) if candidates else None
+    resets_at = binding["resets_at"] if binding else None
+    if not windows:
+        weekly_left = five_left = 0.0
+    else:
+        weekly_left = weekly["left"] if weekly else None
+        five_left = five["left"] if five else None
+    return {
+        "level": level,
+        "weekly_left": weekly_left,
+        "five_hour_left": five_left,
+        "fable_left": fable["left"] if fable else None,
+        "resets_at": resets_at,
+        "weekly_resets_at": weekly["resets_at"] if weekly else None,
+        "pace": (weekly or binding or {}).get("pace") if windows else None,
+    }
+
+
+# -- state file and ping ---------------------------------------------------
+
+def load_state() -> dict:
+    try:
+        d = json.loads(state_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def save_state(state: dict) -> None:
+    """Temp file beside the target, then os.replace: a reader never sees half a file."""
+    p = state_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=p.name + ".", suffix=".tmp", dir=p.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _same_period(a, b, tol: float) -> bool:
+    da, db = _parse_ts(a), _parse_ts(b)
+    if da is None or db is None:
+        return a == b
+    return abs((da - db).total_seconds()) <= tol
+
+
+def _rank(level) -> int:
+    return LEVELS.index(level) if level in LEVELS else 0
+
+
+def _reset_phrase(resets_at) -> str:
+    d = _parse_ts(resets_at)
+    return d.astimezone().strftime("%a %H:%M %Z") if d else "unknown"
+
+
+def ping(level: str, st: dict, t: dict) -> bool:
+    exe = str(_path("CLAUDE_QUOTA_GUARD_PING", HOME / ".local/bin/hermes-ping"))
+    weekly = st["weekly_left"]
+    first = st["advice"].splitlines()[0] if st["advice"] else ""
+    first = re.sub(r"^\d+\.\s*", "", first)
+    msg = (f"djbclark-ade: Claude quota {level}: weekly "
+           f"{'?' if weekly is None else format(weekly, 'g')}% left, resets "
+           f"{_reset_phrase(st['weekly_resets_at'] or st['resets_at'])}; {first}")
+    try:
+        r = subprocess.run([exe, msg], capture_output=True, text=True, timeout=t["ping_timeout_s"],
+                           check=False, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"claude-quota-guard: ping failed: {e}", file=sys.stderr)
+        return False
+    if r.returncode != 0:
+        print(f"claude-quota-guard: ping exited {r.returncode}: {r.stderr.strip()[:200]}", file=sys.stderr)
+        return False
+    return True
+
+
+def apply_ping_policy(prev: dict, st: dict, t: dict) -> None:
+    """Fill last_pinged_level/at on `st`; ping on an upward crossing not yet announced this period.
+
+    A new reset period or a level below the last announced one clears the memory (to the new
+    level, so a later rise announces itself again but the drop itself is silent)."""
+    level = st["level"]
+    pinged = prev.get("last_pinged_level")
+    at = prev.get("last_pinged_at")
+    prev_period = prev.get("weekly_resets_at") or prev.get("resets_at")
+    period = st["weekly_resets_at"] or st["resets_at"]
+    if pinged and not _same_period(prev_period, period, t["period_tolerance_s"]):
+        pinged = None
+    if _rank(pinged) > _rank(level):
+        pinged = level if level != "ok" else None
+    if level != "ok" and _rank(level) > _rank(pinged):
+        if ping(level, st, t):
+            pinged, at = level, st["checked_at"]
+    st["last_pinged_level"] = pinged
+    st["last_pinged_at"] = at if pinged else None
+
+
+# -- subcommands -----------------------------------------------------------
+
+def cmd_check(args) -> int:
+    t = thresholds()
+    try:
+        rc, data = read_aiuse()
+        alerts, snap_age = read_alerts(t)
+        d = decide(rc, data, alerts, t)
+    except Unreadable as e:
+        print(f"claude-quota-guard: {e}; state file left unchanged", file=sys.stderr)
+        return EX_UNREADABLE
+    st = dict(d)
+    st["advice"] = _advice(st["level"], st["resets_at"])
+    st["checked_at"] = _iso(now())
+    st["snapshot_age_s"] = None if snap_age is None else round(snap_age)
+    apply_ping_policy(load_state(), st, t)
+    save_state(st)
+    if args.json:
+        print(json.dumps(st, indent=2))
+    else:
+        print(_human(st))
+    return EXIT_CODES[st["level"]]
+
+
+def _fmt(v) -> str:
+    return "?" if v is None else f"{v:g}%"
+
+
+def _human(st: dict) -> str:
+    return (f"claude-quota-guard: {st.get('level', '?')}: weekly {_fmt(st.get('weekly_left'))} left, "
+            f"5-hour {_fmt(st.get('five_hour_left'))}, fable {_fmt(st.get('fable_left'))}, "
+            f"resets {_reset_phrase(st.get('resets_at'))}, checked {st.get('checked_at', '?')}")
+
+
+def cmd_status(args) -> int:
+    st = load_state()
+    if not st:
+        print(f"claude-quota-guard: no state at {state_path()}; run `claude-quota-guard check`", file=sys.stderr)
+        return EX_UNREADABLE
+    if args.json:
+        print(json.dumps(st, indent=2))
+    else:
+        print(_human(st))
+        if st.get("advice"):
+            print(st["advice"])
+    return 0
+
+
+def cmd_install(args) -> int:
+    la = _path("CLAUDE_QUOTA_GUARD_LAUNCH_AGENTS", HOME / "Library/LaunchAgents")
+    dest = la / f"{LABEL}.plist"
+    script = Path(__file__).resolve()
+    log_dir = HOME / ".local/state/ade"
+    log = log_dir / "claude-quota-guard.launchd.log"
+    job = {
+        "Label": LABEL,
+        "ProgramArguments": [str(script), "check"],
+        "EnvironmentVariables": {"PATH": f"{HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"},
+        "RunAtLoad": True,
+        "StartInterval": INTERVAL_SECONDS,
+        "ProcessType": "Background",
+        "LowPriorityIO": True,
+        "StandardOutPath": str(log),
+        "StandardErrorPath": str(log),
+    }
+    log_dir.mkdir(parents=True, exist_ok=True)  # launchd will not create the log's directory
+    la.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".plist.tmp")
+    tmp.write_bytes(plistlib.dumps(job))
+    os.replace(tmp, dest)
+    print(f"wrote {dest}")
+    print(f"launchctl bootout gui/{os.getuid()}/{LABEL} 2>/dev/null; launchctl bootstrap gui/{os.getuid()} {dest}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="claude-quota-guard", description=__doc__.split("\n\n")[0])
+    ap.add_argument("command", nargs="?", choices=("check", "status"), default="check")
+    ap.add_argument("--json", action="store_true", help="print the state as JSON")
+    ap.add_argument("--install", action="store_true", help="write the launchd job; print the bootstrap line")
+    args = ap.parse_args(argv)
+    try:
+        if args.install:
+            return cmd_install(args)
+        return cmd_status(args) if args.command == "status" else cmd_check(args)
+    except ConfigError as e:
+        print(f"claude-quota-guard: {e}", file=sys.stderr)
+        return EX_CONFIG
+
+
+if __name__ == "__main__":
+    sys.exit(main())

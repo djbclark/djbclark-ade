@@ -125,6 +125,16 @@ codex = 60.0
 claude = 8.0
 antigravity-claude = 15.0
 
+# The orchestrating (lead) session's own model (operator 2026-10-23; incident and rule in
+# skills/model-routing/SKILL.md "Lead / orchestrator sessions"). Everything above routes
+# dispatched slices; this is the session that dispatches them. `model` at `effort` by default,
+# `pipeline_model` when the session only drives a pipeline (PR loops, waiters, merges). Never
+# Fable: that is the `fable-deep` sub-agent or a `frontier` slice. Printed by `route_agent.py policy`.
+[lead]
+model = "opus"
+effort = "high"
+pipeline_model = "sonnet"
+
 [escalation]
 # Operator 2026-10-18: cheap first; a failed slice climbs one rung, never straight to frontier.
 ladder = ["mechanical", "bulk", "code", "judgment", "frontier"]
@@ -171,16 +181,22 @@ models = { judgment = "opus --effort high", frontier = "fable --effort high", co
 [[service]]
 name = "omp"
 cli = "omp (Claude API credits: acp-run omp --model anthropic/claude-sonnet-5-5)"
-good_at = { api-only = 1, code = 13, bulk = 35 }
+good_at = { api-only = 1, judgment = 2, code = 13, bulk = 35 }
 billing = "credits"
-note = "Claude Max monthly API credits (expiring grant); API-only work first, else code/bulk so the credits are spent before the reset"
+# Adversary rounds and other judgment slices (operator 2026-10-23): Opus 5.5 at high on the API credits
+# rather than on the shared Claude weekly window that ran out 2.6 days early on 2026-10-20. Rank 2 puts
+# it behind claude (1) in a plain `route`, ahead once claude is drained or an under-spent grant earns
+# the burn-first bonus; the bigteam adversary names it explicitly. judgment_tier makes it eligible for
+# judgment (frontier stays claude/codex: omp has no frontier row).
+judgment_tier = true
+note = "Claude Max monthly API credits (expiring grant); API-only work first, then judgment (adversary rounds), else code/bulk so the credits are spent before the reset"
 grant_days = 30
 # Skipped for acp-dispatch kinds while omp has no enabled Anthropic login (route_agent.py
 # omp_anthropic_ready: 2026-10-19 the OAuth refresh token had expired, `omp login` needed).
 ready_probe = "omp-anthropic"
 max_parallel = 2
 access = "cli-only"
-models = { api-only = "anthropic/claude-sonnet-5-5 --effort high", code = "anthropic/claude-sonnet-5-5 --effort high", bulk = "anthropic/claude-haiku-5-5 --effort low" }
+models = { api-only = "anthropic/claude-sonnet-5-5 --effort high", judgment = "anthropic/claude-opus-5-5 --effort high", code = "anthropic/claude-sonnet-5-5 --effort high", bulk = "anthropic/claude-haiku-5-5 --effort low" }
 
 [[service]]
 name = "codex"

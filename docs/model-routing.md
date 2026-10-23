@@ -444,6 +444,23 @@ penalty to a pool burning fast. `route_agent.py calibrate` reports done rates,
 and `bin/routing-recalibrate` (monthly, launchd) has Opus re-rank `good_at`
 from them.
 
+**Lead sessions, adversary rounds and the quota guard (2026-10-23).** On 2026-10-20 the
+Claude Code weekly window hit 100% at 17:07Z, 2.6 days before its reset, and every
+orchestrating session stopped, which stopped every other pool too; an `aiuse` `conserve`
+alert had said so since 06:02Z and nothing read it. The burn was Opus 5.5 (~53%: the
+`adversary` Agent-tool sub-agent, judgment slices, Orca workers) and Fable 5.1 (~30%: the
+lead session itself). The rules (`skills/model-routing/SKILL.md`, *Routing policy* items 12
+and 13; `config/routing.toml` `[lead]`): a lead session runs on Opus 5.5 at high (Sonnet 5.5
+at high when it only drives a pipeline), never Fable; adversary rounds go to `acp-dispatch
+omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` first. The guard that
+makes the numbers act: `bin/claude-quota-guard` (`check` every 15 minutes under launchd after
+`--install`, `status [--json]`) derives `ok` / `watch` / `tight` / `critical` from the Claude
+windows (weekly, 5-hour, Fable cap) and the snapshot's Claude `conserve` alerts, writes
+`~/.local/state/ade/quota-guard.json`, and sends one `hermes-ping` per upward crossing per
+reset period. Exit codes 0 / 1 / 2 / 3 for the levels, 10 when aiuse could not be read. The
+UserPromptSubmit hook `claude/hooks/quota_nudge.py` reads only that file and prints its
+`advice` once per session and level.
+
 ## Formerly open questions — resolved by operator, 2026-08-23
 
 - zai GLM lite is consumed by the `zcode` TUI.
