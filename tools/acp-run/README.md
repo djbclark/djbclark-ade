@@ -440,13 +440,20 @@ reserve (`ACP_RUN_OMP_ANY_MODEL=1` overrides). Needs an enabled Anthropic login 
 ### goose
 
 `goose acp` (Homebrew `block-goose-cli` 1.55.0, added 2026-10-23), launched through
-`~/.local/bin/goose-scout` so it runs on AWS Bedrock Llama 4 Scout
-(`us.meta.llama4-scout-17b-instruct-v1:0`, us-east-1) with `BEDROCK_DISABLE_STREAMING=true`
-(Bedrock rejects tool use in ConverseStream for Scout) and `AWS_BEARER_TOKEN_BEDROCK` injected by
-sudo-secretspec. Session modes: `auto` (yolo, YOLO_SET and `GOOSE_MODE=auto` in the launch env),
-`approve`, `smart_approve`, `chat` (no tool calls; DENY_SET). Verified 2026-10-23: `Reply with just
-OK` -> OK, end_turn, 3.4 s; one shell call ran with no permission request (perm=0+/0-). goose
-reports Scout's context as 10m. Scout tends to repeat tool calls in goose; keep `--timeout` set.
+`~/.local/bin/goose-scout`: AWS Bedrock Llama 4 Scout (`us.meta.llama4-scout-17b-instruct-v1:0`,
+us-east-1). Since 2026-10-23 goose-scout routes goose (provider `litellm`, non-streaming) through a
+private LiteLLM proxy on 127.0.0.1:4012 (`~/.config/goose-scout/`, started on demand under
+sudo-secretspec, which injects `AWS_BEARER_TOKEN_BEDROCK`). Its callbacks prepend a rules file to
+the system prompt, turn an `echo hi`-style shell reply into text, and stop a tool call that repeats
+one already run this turn (re-asking Scout without tools for the answer). Before the proxy, Scout
+answered "say hi" with five shell calls and repeated `ls /tmp | head -3` until timeout.
+`GOOSE_SCOUT_BACKEND=bedrock` restores the direct route.
+
+Session modes: `auto` (yolo, YOLO_SET), `approve`, `smart_approve`, `chat`. DENY_SET uses
+`approve`: `chat` set over ACP still ran the shell tool (tripwire, 2026-10-23); with `approve`
+goose asks and acp-run denies (perm=0+/1-). Verified 2026-10-23: `just say hi` -> text, tools=0;
+`Run the shell command: echo yolo-test` -> tools=1 perm=0+/0-. goose reports Scout's context as
+10m.
 
 ### grok
 
