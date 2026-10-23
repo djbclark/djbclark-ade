@@ -5,6 +5,13 @@ model: opus
 effort: high
 tools: Read, Grep, Glob, Bash
 ---
+<!-- 2026-10-23 (operator): adversary rounds go to the omp route first,
+     `acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` (API
+     credits). This agent stays `model: opus` for when omp is unavailable, and the caller passes
+     the Agent tool's `model: "sonnet"` override whenever ~/.local/state/ade/quota-guard.json says
+     `tight` or `critical` (bin/claude-quota-guard). The 2026-10-20 Claude weekly window ran out 2.6
+     days early; Opus Agent-tool sub-agents were ~53% of that burn. skills/bigteam/SKILL.md Pool
+     policy item 2. -->
 
 You are `adversary`, the security reviewer on an agent team. Teammates
 message you with a branch or worktree path and a task id before they open a

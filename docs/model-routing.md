@@ -455,6 +455,50 @@ penalty to a pool burning fast. `route_agent.py calibrate` reports done rates,
 and `bin/routing-recalibrate` (monthly, launchd) has Opus re-rank `good_at`
 from them.
 
+**Lead sessions, adversary rounds and the quota guard (2026-10-23).** On 2026-10-20 the
+Claude Code weekly window hit 100% at 17:07Z, 2.6 days before its reset, and every
+orchestrating session stopped, which stopped every other pool too; an `aiuse` `conserve`
+alert had said so since 06:02Z and nothing read it. The burn was Opus 5.5 (~53%: the
+`adversary` Agent-tool sub-agent, judgment slices, Orca workers) and Fable 5.1 (~30%: the
+lead session itself). The rules (`skills/model-routing/SKILL.md`, *Routing policy* items 12
+and 13; `config/routing.toml` `[lead]`): a lead session runs on Opus 5.5 at high (Sonnet 5.5
+at high when it only drives a pipeline), never Fable; adversary rounds go to `acp-dispatch
+omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` first. The guard that
+makes the numbers act: `bin/claude-quota-guard` (`check` every 15 minutes under launchd after
+`--install`, `status [--json]`) derives `ok` / `watch` / `tight` / `critical` from the Claude
+windows (weekly, 5-hour, Fable cap) and the snapshot's Claude `conserve` alerts, writes
+`~/.local/state/ade/quota-guard.json`, and sends one `hermes-ping` per level per reset
+period (the mark survives level drops; a new weekly reset clears it). `aiuse --available`
+drops every pool with `usable_now: false`, so an exhausted Claude is an absent row (exit 0):
+the guard then reads the payload's top-level `excluded[]` (an operator exclusion) or the newest
+snapshot's `accounts[]` (a snapshot has no `excluded` key) and calls an exhausted or
+`usable_now: false` Claude `critical`; a snapshot-only Claude that is not blocked is still at
+least `watch` (`source: snapshot-only`: a live 429 or a note the snapshot predates). The Fable
+pool is dropped the same way once the Fable cap is exhausted: the guard reads that window from
+the snapshot (0% left, `watch`). A weekly "projected to run out" alert counts as
+`tight` only for the weekly windows (never the Fable cap) and is ignored while that window
+is `pace_early` (early-week projections swing wildly). Data older than 3 hours (the oldest of
+the payload's age, each judged pool's own age and the snapshot's age: a dead collector) is
+`stale: true` / "(stale)": the level is at least `watch` with a "run `aiuse --live --json`"
+advice line, level pings are suppressed and one ping per stale episode says so. At `critical` the adversary
+line is qualified: omp only while `aiuse --available --json` still lists it (aiuse rate-gates
+omp when every Claude weekly window is exhausted). aiuse exit 3 (nothing usable) is `critical`
+whatever the snapshot shows (even when aiuse printed non-object JSON beside it); a live
+`available` row without `windows[]` (a `pool_family: "fable"` row is the Fable cap, never the shared weekly) is judged by its own
+`headroom_percent` / `binding_window` / `usable_now`. Exit codes 0 / 1 / 2 / 3 for the
+levels, 10 when Claude appears nowhere, any container (`available`, `excluded`, `accounts`,
+`alerts`, `windows`) is present but not a list of objects, the snapshot does not parse, aiuse
+could not be read or another check holds the lock. Exit 10 never writes a level: the level,
+advice and number fields stay as they were, but a failed read (not a held lock) records
+`unreadable_since` / `last_unreadable_at` and, on the second failing run in a row, sends one ping per episode
+(`last_unreadable_pinged_at`); the next good read clears them. 64 for a bad
+`CLAUDE_QUOTA_GUARD_THRESHOLDS`, 69 for `--install` off macOS (launchd only; use a systemd
+user timer or cron). The UserPromptSubmit hook `claude/hooks/quota_nudge.py` reads only the
+state file and prints its `advice` once per session and level, and `[quota-guard unreadable]`
+once per session once the guard has pinged about an unreadable episode and failed again
+within 2 hours (a one-off hiccup or a stopped guard prints nothing); its once-per-session
+memory is updated under a flock.
+
 ## Formerly open questions — resolved by operator, 2026-08-23
 
 - zai GLM lite is consumed by the `zcode` TUI.
