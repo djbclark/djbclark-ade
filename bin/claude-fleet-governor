@@ -1,0 +1,683 @@
+#!/usr/bin/env -S python3 -I
+"""claude-fleet-governor: keep every Claude session on this Mac from exhausting the Claude
+subscription before a reset.
+
+  claude-fleet-governor [check]      compute and print the level and the moves `run` would make;
+                                     changes nothing (no set, send, ping or state write)
+  claude-fleet-governor run [--dry-run]
+                                     compute, then act; --dry-run is `check`
+  claude-fleet-governor status [--json]
+                                     print the last state `run` wrote
+  claude-fleet-governor --install    write ~/Library/LaunchAgents/com.djbclark.claude-fleet-governor.plist
+                                     (run every 300 s) and print the launchctl line; never runs launchctl
+
+Why (2026-10-23): the Claude subscription feeds every session on the Mac; when its 5-hour or weekly
+window runs out all work stops although omp API credits, codex, zai and cursor have room. The
+claude-quota-guard hook only advises a session; this moves the sessions, through the Paseo daemon's
+own set_agent_model_request (bin/paseo-set-model).
+
+Data: the newest aiuse snapshots (CLAUDE_GOVERNOR_SNAPSHOTS, default ~/.cache/aiuse/snapshots/).
+Windows are found by label prefix: "Claude Code 5-hour", "Claude Code weekly", and
+"Claude Code weekly — Fable" (the sublimit; reported, but it never sets the level, it is what the
+unconditional Fable -> Opus move below is about). Newest snapshot older than 45 min: exit 10, no action.
+
+Projection, per window: burn rate = least-squares slope (percent per hour, floored at 0) over the
+snapshots of the last 90 min that share the newest window's resets_at (+-5 min), needing two samples at
+least 10 min apart. projected_at_reset = used + rate * hours_to_reset; exhaust_at = now +
+(100 - used) / rate when rate > 0. Levels (thresholds: THRESHOLDS below, env CLAUDE_GOVERNOR_THRESHOLDS
+JSON merges over them):
+  ok        neither of the below
+  tight     any window projected >= 90% at its reset, or 5-hour left < 25, or weekly left < 30
+  critical  projected exhaustion more than 10 min before the reset and within 45 min, or any window
+            left < 10
+
+Moves in `run` (each idempotent; every set is `paseo-set-model set`):
+  1. any level: a live provider-claude agent on a claude-fable-* model -> claude-opus-5-5
+  2. tight/critical: every live provider-claude agent on an Opus or Fable model -> claude-sonnet-5-5;
+     the original model is recorded under `downshifted` with the window's resets_at (first record wins)
+  3. critical: each running provider-claude agent without a parentAgentId is steered once per reset
+     period (`paseo send --no-wait --behavior steer`) to hand off to omp/anthropic/claude-sonnet-5-5
+  4. restore: when a recorded window has passed its resets_at (the newest snapshot is newer than it)
+     and the level is ok, an agent still on the model the governor set goes back to its original
+     (a Fable original goes to Opus, never Fable); an agent someone changed since is left alone
+  5. one hermes-ping per run that changed anything, none otherwise
+
+State (CLAUDE_GOVERNOR_STATE, default ~/.local/state/ade/fleet-governor.json) is written atomically:
+level, windows, checked_at, downshifted ({id7: original model}, the shape of the manual 2026-10-23
+file), downshift_info, steered, last_ping. bin/route_agent.py reads `level` while it is under 30 min old.
+
+Exit codes: 0 ok, 1 tight, 2 critical, 10 snapshot data stale or unreadable, 11 a set-model, send or
+list call failed (the others were still attempted).
+
+Env: CLAUDE_GOVERNOR_SNAPSHOTS, CLAUDE_GOVERNOR_STATE, CLAUDE_GOVERNOR_THRESHOLDS,
+CLAUDE_GOVERNOR_SET_MODEL (default: paseo-set-model beside this file), CLAUDE_GOVERNOR_PASEO (default:
+`paseo` on PATH), CLAUDE_GOVERNOR_PING (default ~/.local/bin/hermes-ping), CLAUDE_GOVERNOR_LAUNCH_AGENTS
+(default ~/Library/LaunchAgents), CLAUDE_GOVERNOR_NOW (ISO time; tests).
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+import plistlib
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+THRESHOLDS: dict[str, float] = {
+    "stale_min": 45,                      # newest snapshot older than this: exit 10
+    "rate_window_min": 90,                # snapshots this recent feed the burn rate
+    "reset_tolerance_min": 5,             # samples share the current window when resets_at is within this
+    "min_span_min": 10,                   # first to last sample must span at least this to give a rate
+    "tight_projected": 90.0,              # projected_at_reset at or above this: tight
+    "tight_left_five_hour": 25.0,         # 5-hour left below this: tight
+    "tight_left_weekly": 30.0,            # weekly left below this: tight
+    "critical_left": 10.0,                # any window left below this: critical
+    "critical_exhaust_before_reset_min": 10,   # exhaustion at least this long before the reset ...
+    "critical_exhaust_within_min": 45,          # ... and no further away than this: critical
+    "state_fresh_min": 30,                # route_agent trusts the level this long (documented here, read there)
+}
+LABEL = "com.djbclark.claude-fleet-governor"
+INTERVAL = 300
+OPUS = "claude-opus-5-5"
+SONNET = "claude-sonnet-5-5"
+HANDOFF_SUCCESSOR = "omp/anthropic/claude-sonnet-5-5"
+KINDS = (("five_hour", "Claude Code 5-hour"), ("weekly", "Claude Code weekly"))
+FABLE_KIND = "fable_weekly"
+LEVELS = {"ok": 0, "tight": 1, "critical": 2}
+EX_STALE, EX_FAILED = 10, 11
+SNAP_NAME = re.compile(r"^(\d{4})-(\d\d)-(\d\d)T(\d\d)(\d\d)(\d\d)(?:\.(\d+))?Z\.json$")
+FABLE_MODEL = re.compile(r"^claude-fable")
+PREMIUM_MODEL = re.compile(r"^claude-(opus|fable)")
+
+
+# -- environment -------------------------------------------------------------------------------
+
+def thresholds() -> dict[str, float]:
+    t = dict(THRESHOLDS)
+    raw = os.environ.get("CLAUDE_GOVERNOR_THRESHOLDS")
+    if raw:
+        for k, v in json.loads(raw).items():
+            t[k] = v
+    return t
+
+
+def now_utc() -> datetime:
+    return parse_ts(os.environ.get("CLAUDE_GOVERNOR_NOW")) or datetime.now(UTC)
+
+
+def home() -> Path:
+    return Path(os.environ.get("HOME") or Path.home())
+
+
+def state_path() -> Path:
+    return Path(os.environ.get("CLAUDE_GOVERNOR_STATE") or home() / ".local/state/ade/fleet-governor.json")
+
+
+def snapshots_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_GOVERNOR_SNAPSHOTS") or home() / ".cache/aiuse/snapshots")
+
+
+def script_path() -> Path:
+    return Path(os.path.realpath(__file__))
+
+
+def set_model_bin() -> str:
+    return os.environ.get("CLAUDE_GOVERNOR_SET_MODEL") or str(script_path().with_name("paseo-set-model"))
+
+
+def paseo_bin() -> str:
+    return os.environ.get("CLAUDE_GOVERNOR_PASEO") or shutil.which("paseo") or "paseo"
+
+
+def ping_bin() -> str:
+    return os.environ.get("CLAUDE_GOVERNOR_PING") or str(home() / ".local/bin/hermes-ping")
+
+
+def parse_ts(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+def iso(dt: datetime | None) -> str | None:
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None
+
+
+def hhmm(dt: datetime | None) -> str:
+    return dt.astimezone(UTC).strftime("%H:%MZ") if dt else "?"
+
+
+def num(value: Any) -> float | None:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(f) else f
+
+
+# -- snapshots ---------------------------------------------------------------------------------
+
+def name_time(name: str) -> datetime | None:
+    m = SNAP_NAME.match(name)
+    if not m:
+        return None
+    y, mo, d, h, mi, s, frac = m.groups()
+    micro = int((frac or "0")[:6].ljust(6, "0"))
+    try:
+        return datetime(int(y), int(mo), int(d), int(h), int(mi), int(s), micro, tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def find_windows(node: Any, out: list[dict[str, Any]]) -> None:
+    """Every dict with a `label` and a used or remaining percentage, anywhere in the JSON."""
+    if isinstance(node, dict):
+        if isinstance(node.get("label"), str) and (
+                num(node.get("used_percent")) is not None or num(node.get("remaining_percent")) is not None):
+            out.append(node)
+        for v in node.values():
+            find_windows(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            find_windows(v, out)
+
+
+def kind_of(label: str) -> str | None:
+    if label.startswith("Claude Code weekly") and "Fable" in label:
+        return FABLE_KIND
+    for kind, prefix in KINDS:
+        if label.startswith(prefix):
+            return kind
+    return None
+
+
+def read_snapshot(path: Path, at: datetime) -> dict[str, Any] | None:
+    """{"at": datetime, "windows": {kind: {label, used, resets_at, window_minutes}}} or None."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    found: list[dict[str, Any]] = []
+    find_windows(data, found)
+    windows: dict[str, dict[str, Any]] = {}
+    for w in found:
+        kind = kind_of(w["label"])
+        used = num(w.get("used_percent"))
+        if used is None:
+            left = num(w.get("remaining_percent"))
+            used = None if left is None else 100.0 - left
+        resets = parse_ts(w.get("resets_at"))
+        if kind is None or used is None or resets is None:
+            continue
+        cur = windows.get(kind)
+        if cur is None or used > cur["used"]:          # several accounts: the tightest one binds
+            windows[kind] = {"label": w["label"], "used": used, "resets_at": resets,
+                             "window_minutes": num(w.get("window_minutes"))}
+    stamp = parse_ts(data.get("collected_at")) if isinstance(data, dict) else None
+    return {"at": stamp or at, "windows": windows}
+
+
+def load_snapshots(now: datetime, t: dict[str, float]) -> list[dict[str, Any]]:
+    """Newest snapshot first, plus every older one inside the rate window. [] when none parses."""
+    d = snapshots_dir()
+    try:
+        names = sorted((n for n in os.listdir(d) if SNAP_NAME.match(n)), reverse=True)
+    except OSError:
+        return []
+    out: list[dict[str, Any]] = []
+    cutoff = None
+    for n in names:
+        at = name_time(n)
+        if at is None:
+            continue
+        if cutoff is not None and at < cutoff:
+            break
+        snap = read_snapshot(d / n, at)
+        if snap is None:
+            continue
+        if cutoff is None:
+            cutoff = snap["at"] - timedelta(minutes=t["rate_window_min"])
+        out.append(snap)
+    return out
+
+
+# -- projection --------------------------------------------------------------------------------
+
+def slope_per_hour(points: list[tuple[float, float]]) -> float:
+    """Least-squares slope of (hours, percent), floored at 0; 0 for fewer than two distinct times."""
+    n = len(points)
+    if n < 2:
+        return 0.0
+    mx = sum(p[0] for p in points) / n
+    my = sum(p[1] for p in points) / n
+    den = sum((p[0] - mx) ** 2 for p in points)
+    if den == 0:
+        return 0.0
+    return max(0.0, sum((p[0] - mx) * (p[1] - my) for p in points) / den)
+
+
+def window_level(kind: str, w: dict[str, Any], now: datetime, t: dict[str, float]) -> str:
+    left = w["left"]
+    crit = left < t["critical_left"]
+    ex = w["exhaust_at"]
+    if ex is not None:
+        to_exhaust = (ex - now).total_seconds() / 60
+        to_reset = (w["resets_at"] - ex).total_seconds() / 60
+        if to_reset > t["critical_exhaust_before_reset_min"] and to_exhaust <= t["critical_exhaust_within_min"]:
+            crit = True
+    if crit:
+        return "critical"
+    floor = t["tight_left_five_hour"] if kind == "five_hour" else t["tight_left_weekly"]
+    if w["projected_at_reset"] >= t["tight_projected"] or left < floor:
+        return "tight"
+    return "ok"
+
+
+def compute(snaps: list[dict[str, Any]], now: datetime, t: dict[str, float]) -> dict[str, Any]:
+    """Windows with rate/projection/level, and the overall level (the Fable window excluded)."""
+    windows: dict[str, dict[str, Any]] = {}
+    newest = snaps[0]
+    for kind in [k for k, _ in KINDS] + [FABLE_KIND]:
+        cur = next((s["windows"][kind] for s in snaps if kind in s["windows"]), None)
+        if cur is None:
+            continue
+        resets = cur["resets_at"]
+        hours = (resets - now).total_seconds() / 3600
+        if hours <= 0:
+            continue                       # the data predates a reset that has happened: not evidence
+        tol = timedelta(minutes=t["reset_tolerance_min"])
+        samples = sorted((s["at"], s["windows"][kind]["used"]) for s in snaps
+                         if kind in s["windows"] and abs(s["windows"][kind]["resets_at"] - resets) <= tol
+                         and (now - s["at"]).total_seconds() <= t["rate_window_min"] * 60)
+        rate = 0.0
+        if len(samples) >= 2 and (samples[-1][0] - samples[0][0]).total_seconds() >= t["min_span_min"] * 60:
+            rate = slope_per_hour([((a - samples[0][0]).total_seconds() / 3600, u) for a, u in samples])
+        used = cur["used"]
+        w = {"label": cur["label"], "used": used, "left": max(0.0, 100.0 - used), "rate_per_hour": rate,
+             "projected_at_reset": used + rate * hours, "resets_at": resets, "samples": len(samples),
+             "exhaust_at": now + timedelta(hours=(100.0 - used) / rate) if rate > 0 and used < 100 else None}
+        w["level"] = window_level(kind, w, now, t)
+        windows[kind] = w
+    level = max((w["level"] for k, w in windows.items() if k != FABLE_KIND), key=LEVELS.get, default="ok")
+    return {"windows": windows, "level": level, "snapshot_at": newest["at"]}
+
+
+def trigger(windows: dict[str, dict[str, Any]], level: str) -> tuple[str, dict[str, Any]] | None:
+    """The window that sets `level`: the highest projection among those at that level."""
+    pool = [(k, w) for k, w in windows.items() if k != FABLE_KIND and w["level"] == level]
+    return max(pool, key=lambda kw: kw[1]["projected_at_reset"], default=None) if pool else None
+
+
+def short_label(label: str) -> str:
+    return label.removeprefix("Claude Code ").strip()
+
+
+def describe(w: dict[str, Any]) -> str:
+    ex = w["exhaust_at"]
+    if ex is not None and ex < w["resets_at"]:
+        proj = f"projected out {hhmm(ex)}"
+    else:
+        proj = f"projected {w['projected_at_reset']:.0f}% at reset"
+    return f"{short_label(w['label'])} {w['used']:.0f}% used, {proj} (reset {hhmm(w['resets_at'])})"
+
+
+# -- state -------------------------------------------------------------------------------------
+
+def read_state(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_state(path: Path, state: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(state, fh, indent=1, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def records(state: dict[str, Any], default_set: str = SONNET) -> dict[str, dict[str, Any]]:
+    """{id7: {original, set, resets_at, window}} from `downshifted` (+ `downshift_info`), tolerating the
+    manual 2026-10-23 file (original model strings only, one top-level window_resets_at)."""
+    out: dict[str, dict[str, Any]] = {}
+    shifted = state.get("downshifted")
+    info = state.get("downshift_info")
+    if not isinstance(shifted, dict):
+        return out
+    if not isinstance(info, dict):
+        info = {}
+    for key, orig in shifted.items():
+        meta = info.get(key) if isinstance(info.get(key), dict) else {}
+        if isinstance(orig, dict):
+            orig = orig.get("original")
+        out[str(key)] = {
+            "original": orig if isinstance(orig, str) else None,
+            "set": meta.get("set") or default_set,
+            "resets_at": meta.get("resets_at") or state.get("window_resets_at"),
+            "window": meta.get("window"),
+        }
+    return out
+
+
+def window_state(w: dict[str, Any]) -> dict[str, Any]:
+    return {"label": w["label"], "used": round(w["used"], 2), "left": round(w["left"], 2),
+            "rate_per_hour": round(w["rate_per_hour"], 3),
+            "projected_at_reset": round(w["projected_at_reset"], 1), "exhaust_at": iso(w["exhaust_at"]),
+            "resets_at": iso(w["resets_at"]), "samples": w["samples"], "level": w["level"]}
+
+
+# -- agents and calls --------------------------------------------------------------------------
+
+def run_cmd(argv: list[str], timeout: int) -> tuple[int, str]:
+    """(rc, combined output); rc 127 when the program is missing, 124 on timeout. Argv list, no shell."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+    except FileNotFoundError as e:
+        return 127, str(e)
+    except subprocess.TimeoutExpired:
+        return 124, f"timed out after {timeout}s"
+    except OSError as e:
+        return 126, str(e)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def list_agents() -> tuple[list[dict[str, Any]] | None, str]:
+    rc, out = run_cmd([set_model_bin(), "list", "--json"], 120)
+    if rc != 0:
+        return None, f"paseo-set-model list failed rc={rc}: {out[-300:]}"
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return None, "paseo-set-model list: output is not JSON"
+    if not isinstance(data, list):
+        return None, "paseo-set-model list: output is not a JSON array"
+    return [a for a in data if isinstance(a, dict) and isinstance(a.get("id"), str)], ""
+
+
+def claude_live(agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [a for a in agents if a.get("provider") == "claude" and not a.get("archived")]
+
+
+def restore_target(original: str | None) -> str | None:
+    if not original:
+        return None
+    return OPUS if FABLE_MODEL.match(original) else original
+
+
+def plan_moves(agents: list[dict[str, Any]], windows: dict[str, dict[str, Any]], level: str,
+               state: dict[str, Any], now: datetime, snap_at: datetime, t: dict[str, float]) -> list[dict[str, Any]]:
+    """Every move `run` would make now, as dicts: kind, id (full), from, to, plus record data."""
+    live = claude_live(agents)
+    plan: list[dict[str, Any]] = []
+    trig = trigger(windows, level) if level != "ok" else None
+    for a in live:
+        model = a.get("model") or ""
+        short = a["id"][:7]
+        if level != "ok" and PREMIUM_MODEL.match(model):
+            plan.append({"kind": "downshift", "id": a["id"], "short": short, "from": model, "to": SONNET,
+                         "resets_at": iso(trig[1]["resets_at"]) if trig else None,
+                         "window": trig[1]["label"] if trig else None})
+        elif FABLE_MODEL.match(model):
+            plan.append({"kind": "fable", "id": a["id"], "short": short, "from": model, "to": OPUS})
+    if level == "ok":
+        by_id = {a["id"]: a for a in agents}
+        for key, rec in sorted(records(state).items()):
+            resets = parse_ts(rec["resets_at"])
+            if resets is None or snap_at < resets:
+                continue                  # window not over, or the data predates its reset
+            match = next((a for i, a in by_id.items() if i.startswith(key)), None)
+            target = restore_target(rec["original"])
+            if match is None or match.get("archived") or match.get("provider") != "claude" or target is None:
+                plan.append({"kind": "forget", "short": key})
+            elif (match.get("model") or "") == rec["set"]:
+                plan.append({"kind": "restore", "id": match["id"], "short": key, "from": rec["set"], "to": target})
+            else:
+                plan.append({"kind": "forget", "short": key, "note": "changed since; left alone"})
+    if level == "critical" and trig:
+        period = iso(trig[1]["resets_at"])
+        done = state.get("steered") if isinstance(state.get("steered"), dict) else {}
+        already = set(done.get(period) or [])
+        for a in live:
+            if a.get("status") == "running" and not a.get("parentAgentId") and a["id"][:7] not in already:
+                plan.append({"kind": "steer", "id": a["id"], "short": a["id"][:7], "period": period,
+                             "text": steer_text(trig[1])})
+    return plan
+
+
+def steer_text(w: dict[str, Any]) -> str:
+    ex = w["exhaust_at"]
+    when = (f"projected out {hhmm(ex)} before its {hhmm(w['resets_at'])} reset"
+            if ex is not None and ex < w["resets_at"]
+            else f"{w['left']:.0f}% left, its reset is {hhmm(w['resets_at'])}")
+    return (f"Claude subscription critical: {short_label(w['label'])} {w['used']:.0f}% used, {when}. "
+            "Finish the current step, write your Tier 1 handoff, then run "
+            f"~/src/djbclark-ade/bin/self-slash --finish --successor {HANDOFF_SUCCESSOR} --thinking high "
+            "(API credits, off the subscription).")
+
+
+def describe_move(m: dict[str, Any]) -> str:
+    k = m["kind"]
+    if k == "steer":
+        return f"steer {m['short']}"
+    if k == "forget":
+        return f"drop record {m['short']}" + (f" ({m['note']})" if m.get("note") else "")
+    verb = {"fable": "Fable->Opus", "downshift": "downshift", "restore": "restore"}[k]
+    return f"{verb} {m['short']} {m['from']} -> {m['to']}"
+
+
+def execute(plan: list[dict[str, Any]], state: dict[str, Any], now: datetime) -> tuple[list[str], list[str]]:
+    """Run the plan, updating `state` in place. Returns (what changed, failures); every move is tried."""
+    changed: list[str] = []
+    failed: list[str] = []
+    shifted = state.setdefault("downshifted", {})
+    info = state.setdefault("downshift_info", {})
+    steered = state.setdefault("steered", {})
+    for m in plan:
+        k = m["kind"]
+        if k == "forget":
+            shifted.pop(m["short"], None)
+            info.pop(m["short"], None)
+            continue
+        if k == "steer":
+            rc, out = run_cmd([paseo_bin(), "send", "--no-wait", "--behavior", "steer", "--", m["id"], m["text"]], 60)
+        else:
+            rc, out = run_cmd([set_model_bin(), "set", m["id"], m["to"]], 180)
+        if rc != 0:
+            failed.append(f"{describe_move(m)}: rc={rc} {out[-200:]}")
+            continue
+        if k == "steer":
+            steered.setdefault(m["period"], []).append(m["short"])
+            changed.append(f"steered {m['short']}")
+        elif k == "downshift":
+            shifted.setdefault(m["short"], m["from"])      # an earlier record for the agent wins
+            info.setdefault(m["short"], {"set": m["to"], "resets_at": m["resets_at"], "window": m["window"],
+                                         "at": iso(now)})
+            changed.append(f"{m['short']} {m['from']}->{m['to']}")
+        elif k == "fable":
+            changed.append(f"{m['short']} Fable->{m['to']}")
+        elif k == "restore":
+            shifted.pop(m["short"], None)
+            info.pop(m["short"], None)
+            changed.append(f"restored {m['short']} ->{m['to']}")
+    resets = [r["resets_at"] for r in records(state).values() if r["resets_at"]]
+    state["window_resets_at"] = max(resets) if resets else None
+    return changed, failed
+
+
+def prune_steered(state: dict[str, Any], now: datetime) -> None:
+    steered = state.get("steered")
+    if isinstance(steered, dict):
+        state["steered"] = {p: v for p, v in steered.items()
+                            if (parse_ts(p) or now) > now - timedelta(days=1)}
+
+
+def ping(text: str) -> tuple[bool, str]:
+    rc, out = run_cmd([ping_bin(), text], 60)
+    return rc == 0, out
+
+
+# -- commands ----------------------------------------------------------------------------------
+
+def render(res: dict[str, Any], plan: list[dict[str, Any]], now: datetime) -> str:
+    lines = [f"snapshot {iso(res['snapshot_at'])} (age {(now - res['snapshot_at']).total_seconds() / 60:.0f} min)"]
+    for kind in [k for k, _ in KINDS] + [FABLE_KIND]:
+        w = res["windows"].get(kind)
+        if w is None:
+            lines.append(f"{kind}: absent")
+            continue
+        ex = f"exhausts {hhmm(w['exhaust_at'])}" if w["exhaust_at"] else "no exhaustion projected"
+        lines.append(f"{short_label(w['label'])}: {w['used']:.0f}% used, {w['left']:.0f}% left, "
+                     f"{w['rate_per_hour']:.1f}%/h over {w['samples']} samples, projected {w['projected_at_reset']:.0f}% "
+                     f"at reset {hhmm(w['resets_at'])}, {ex} -> {w['level']}")
+    lines.append(f"level: {res['level']}")
+    lines.extend(f"  {describe_move(m)}" for m in plan)
+    return "\n".join(lines)
+
+
+def level_exit(level: str) -> int:
+    return LEVELS[level]
+
+
+def cmd_run(dry: bool) -> int:
+    """`check` and `run --dry-run` are dry=True (nothing is written or called but the read-only list)."""
+    t = thresholds()
+    now = now_utc()
+    path = state_path()
+    state = read_state(path)
+    snaps = load_snapshots(now, t)
+    if not snaps or (now - snaps[0]["at"]).total_seconds() > t["stale_min"] * 60:
+        age = f"{(now - snaps[0]['at']).total_seconds() / 60:.0f} min old" if snaps else "none readable"
+        print(f"claude-fleet-governor: no usable aiuse snapshot in {snapshots_dir()} (newest {age}); no action",
+              file=sys.stderr)
+        if not dry:
+            first = not state.get("stale_since")
+            state.update({"level": "stale", "checked_at": iso(now), "stale_since": state.get("stale_since") or iso(now)})
+            if first:
+                ok, _ = ping(f"djbclark-ade: Claude fleet governor has no fresh aiuse snapshot (newest {age}); no action")
+                state["last_ping"] = {"at": iso(now), "ok": ok, "kind": "stale"}
+            write_state(path, state)
+        return EX_STALE
+    res = compute(snaps, now, t)
+    if not any(k != FABLE_KIND for k in res["windows"]):
+        print("claude-fleet-governor: the newest snapshot has no live Claude 5-hour or weekly window; no action",
+              file=sys.stderr)
+        return EX_STALE
+    level = res["level"]
+    agents, err = list_agents()
+    failed: list[str] = []
+    if agents is None:
+        failed.append(err)
+    plan = plan_moves(agents or [], res["windows"], level, state, now, res["snapshot_at"], t) if agents is not None else []
+    print(render(res, plan, now))
+    if dry:
+        for f in failed:
+            print(f"claude-fleet-governor: {f}", file=sys.stderr)
+        return EX_FAILED if failed else level_exit(level)
+    changed, more = execute(plan, state, now)
+    failed += more
+    prune_steered(state, now)
+    state.pop("stale_since", None)
+    state.update({"level": level, "checked_at": iso(now), "snapshot_at": iso(res["snapshot_at"]),
+                  "windows": {k: window_state(w) for k, w in res["windows"].items()},
+                  "errors": failed})
+    state.setdefault("downshifted", {})
+    if changed:
+        trig = trigger(res["windows"], level) or max(
+            ((k, w) for k, w in res["windows"].items() if k != FABLE_KIND), key=lambda kw: kw[1]["used"])
+        text = f"djbclark-ade: Claude {describe(trig[1])}: {'; '.join(changed)}"
+        ok, out = ping(text)
+        state["last_ping"] = {"at": iso(now), "ok": ok, "text": text, "kind": "change"}
+        if not ok:
+            print(f"claude-fleet-governor: ping failed: {out[-200:]}", file=sys.stderr)
+        print("changed: " + "; ".join(changed))
+    write_state(path, state)
+    for f in failed:
+        print(f"claude-fleet-governor: FAILED {f}", file=sys.stderr)
+    return EX_FAILED if failed else level_exit(level)
+
+
+def cmd_status(as_json: bool) -> int:
+    state = read_state(state_path())
+    if not state:
+        print(f"claude-fleet-governor: no state at {state_path()}", file=sys.stderr)
+        return EX_STALE
+    if as_json:
+        print(json.dumps(state, indent=1, sort_keys=True))
+        return 0
+    print(f"level: {state.get('level', '?')}  checked_at: {state.get('checked_at', '?')}")
+    for kind, w in sorted((state.get("windows") or {}).items()):
+        print(f"  {kind}: {w.get('used')}% used, {w.get('rate_per_hour')}%/h, projected "
+              f"{w.get('projected_at_reset')}% at reset {w.get('resets_at')}, exhaust {w.get('exhaust_at')} -> {w.get('level')}")
+    for key, rec in sorted(records(state).items()):
+        print(f"  downshifted {key}: was {rec['original']}, set {rec['set']}, restore after {rec['resets_at']}")
+    for period, ids in sorted((state.get("steered") or {}).items()):
+        print(f"  steered for reset {period}: {', '.join(ids)}")
+    if state.get("last_ping"):
+        print(f"  last ping: {state['last_ping']}")
+    return 0
+
+
+def cmd_install() -> int:
+    dest = Path(os.environ.get("CLAUDE_GOVERNOR_LAUNCH_AGENTS") or home() / "Library/LaunchAgents") / f"{LABEL}.plist"
+    logs = home() / ".local/state/ade"
+    logs.mkdir(parents=True, exist_ok=True)
+    plist = {
+        "Label": LABEL,
+        "ProgramArguments": [str(script_path()), "run"],
+        "EnvironmentVariables": {"PATH": f"{home()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"},
+        "WorkingDirectory": str(script_path().parent.parent),
+        "RunAtLoad": True,
+        "StartInterval": INTERVAL,
+        "ProcessType": "Background",
+        "StandardOutPath": str(logs / "claude-fleet-governor.out.log"),
+        "StandardErrorPath": str(logs / "claude-fleet-governor.err.log"),
+    }
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".tmp")
+    tmp.write_bytes(plistlib.dumps(plist))
+    os.replace(tmp, dest)
+    print(f"wrote {dest}")
+    print(f"launchctl bootstrap gui/{os.getuid()} {dest}")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if argv and argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    if argv == ["--install"]:
+        return cmd_install()
+    cmd = argv[0] if argv else "check"
+    rest = argv[1:]
+    if cmd == "check" and not rest:
+        return cmd_run(True)
+    if cmd == "run" and rest in ([], ["--dry-run"]):
+        return cmd_run(bool(rest))
+    if cmd == "status" and rest in ([], ["--json"]):
+        return cmd_status(bool(rest))
+    print("usage: claude-fleet-governor [check] | run [--dry-run] | status [--json] | --install\n"
+          "exit codes: 0 ok, 1 tight, 2 critical, 10 stale or unreadable data, 11 a set/send/list call failed",
+          file=sys.stderr)
+    return 64
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
