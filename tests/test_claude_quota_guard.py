@@ -1434,3 +1434,64 @@ def test_l5_the_row_that_did_supply_the_display_fill_still_ages_it(rig):
     rig.set_alerts([], age_s=60, accounts=[fresh_weekly_only, old_five])
     rig.guard()
     assert rig.state_json()["stale"] is True
+
+
+# -- fix 9 (Codex 4361062518 and 4361062506 on PR 29) -------------------------------------------
+
+def _aged(account, seconds):
+    account["age_seconds"] = seconds
+    return account
+
+
+def test_s1_only_the_snapshot_row_that_supplied_the_lowest_fable_ages_a_detailed_live_row(rig, monkeypatch):
+    """Two snapshot rows carry a Fable window: `_lowest` picks the 10% one (10 s old). The 90% row
+    (5 h old) supplied nothing, so rows_age_s is 10, not 18000 (a false collector-down ping)."""
+    mod = _load_guard_module(monkeypatch, rig)
+    snap = {"accounts": [_aged(snapshot_account(weekly=80, fable=10), 10),
+                         _aged(snapshot_account(weekly=80, fable=90), 18000)]}
+    d = mod.decide(0, aiuse_fixture(weekly=80, with_fable_pool=False), snap, [], mod.thresholds(), NOW)
+    assert d["fable_left"] == 10 and d["level"] == "watch" and d["rows_age_s"] == 10
+
+
+def test_s1_only_the_snapshot_row_that_supplied_the_lowest_fable_ages_a_windowless_live_row(rig, monkeypatch):
+    mod = _load_guard_module(monkeypatch, rig)
+    snap = {"accounts": [_aged(snapshot_account(weekly=95, five=95, fable=10), 10),
+                         _aged(snapshot_account(weekly=95, five=95, fable=90), 18000)]}
+    d = mod.decide(0, {"available": [default_row(80)]}, snap, [], mod.thresholds(), NOW)
+    assert d["fable_left"] == 10 and d["rows_age_s"] == 10
+
+
+def test_s1_end_to_end_the_mixed_age_snapshot_is_not_stale(rig):
+    rig.set_aiuse(aiuse_fixture(weekly=80, with_fable_pool=False, payload_extra={"age_seconds": 60}))
+    rig.set_alerts([], age_s=60, accounts=[_aged(snapshot_account(weekly=80, fable=10), 10),
+                                           _aged(snapshot_account(weekly=80, fable=90), 18000)])
+    assert rig.guard().returncode == 1
+    st = rig.state_json()
+    assert st["level"] == "watch" and st["stale"] is False and st["fable_left"] == 10
+    assert len(rig.pings()) == 1 and "collector down" not in rig.pings()[0]
+
+
+def test_s2_a_summary_only_fable_row_beside_a_detailed_default_row_is_judged(rig, monkeypatch):
+    mod = _load_guard_module(monkeypatch, rig)
+    fixture = aiuse_fixture(weekly=80, with_fable_pool=False)
+    fixture["available"].append(fable_row(2))
+    d = mod.decide(0, fixture, {"accounts": []}, [], mod.thresholds(), NOW)
+    assert d["level"] == "watch" and d["fable_left"] == 2 and d["weekly_left"] == 80
+
+
+def test_s2_end_to_end_the_summary_only_fable_row_beside_a_detailed_row_is_watch(rig):
+    fixture = aiuse_fixture(weekly=80, with_fable_pool=False)
+    fixture["available"].append(fable_row(2))
+    rig.set_aiuse(fixture)
+    rig.set_alerts([], age_s=60, accounts=[])
+    assert rig.guard().returncode == 1
+    st = rig.state_json()
+    assert st["level"] == "watch" and st["fable_left"] == 2 and st["source"] == "available"
+
+
+def test_s2_a_summary_only_default_row_beside_a_detailed_one_is_judged_too(rig, monkeypatch):
+    mod = _load_guard_module(monkeypatch, rig)
+    fixture = aiuse_fixture(weekly=80, with_fable_pool=False)
+    fixture["available"].append(default_row(5, "Claude Code 5-hour"))
+    d = mod.decide(0, fixture, {"accounts": []}, [], mod.thresholds(), NOW)
+    assert d["level"] == "critical" and d["five_hour_left"] == 5

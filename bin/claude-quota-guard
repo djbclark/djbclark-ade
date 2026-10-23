@@ -32,7 +32,8 @@ when blocked and at least `watch` otherwise (state `source` "snapshot-only": aiu
 for a reason the snapshot predates). aiuse also drops the Fable pool when the Fable cap is
 exhausted: the Fable window is then read from the snapshot (exhausted = 0% left = `watch`).
 A live `available` Claude row without `windows[]` is judged by its own `headroom_percent` /
-`binding_window` / `usable_now`. aiuse exit 3 is `critical` even when the snapshot looks healthy.
+`binding_window` / `usable_now`, and counts beside rows that do have windows (a summary-only
+Fable row never hides). aiuse exit 3 is `critical` even when the snapshot looks healthy.
 Exit 10 when Claude appears nowhere, on any malformed aiuse or snapshot data (a present
 `available` / `excluded` / `accounts` / `alerts` that is not a list of objects, or holds a
 non-object item; a present `windows` that is not a list of objects; a newest snapshot file that
@@ -50,7 +51,7 @@ sent AND the guard failed again within the last 2 h (a stopped guard or a one-of
 nothing). One `hermes-ping` per level per reset period (the mark
 survives level drops; a new weekly `resets_at` clears it). Data older than 3 h (the oldest of
 the payload's `age_seconds`, every row that fed the decision (judged rows and any snapshot rows
-whose Fable or display windows were used) by `age_seconds` / `collected_at`, and the
+whose lowest Fable, borrowed or display windows were used) by `age_seconds` / `collected_at`, and the
 snapshot mtime: a dead collector) sets `stale: true` ("(stale)" in the human line), raises the
 level to at least `watch` with the advice "aiuse data <age> old: collector down? run `aiuse
 --live --json`", suppresses level pings, and sends ONE ping per stale episode (mark
@@ -392,7 +393,9 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
 
     When `available` has Claude rows but no Fable window (aiuse drops the Fable pool once the
     Fable cap is exhausted), the Fable window is taken from the snapshot; an exhausted Fable
-    counts as 0% left, so `watch`.
+    counts as 0% left, so `watch`. Only the snapshot row holding the lowest such window ages the
+    decision. A windowless live row (summary only) is judged by its headroom beside the detailed
+    rows, so a summary-only Fable row next to a detailed default row still counts.
 
     A weekly "projected to run out ... before reset" alert is ignored altogether while the
     matching weekly window has `pace_early: true` (early in a window the projection swings
@@ -409,18 +412,23 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
     windows, source = claude_windows(rows), "available"
     display: list[dict] = []
     fed: list[dict] = []     # snapshot rows whose windows were used besides the judged rows: they age too
-    live_only = False
-    if not windows and any(_has_summary(r) for r in rows):
-        # A valid minimal live row: no windows[], but usable_now / headroom_percent / binding_window.
-        live_only = True
+    # A live row that carries its own verdict (headroom / usable_now) but no recognised window is
+    # judged by that verdict, beside the detailed rows (a summary-only Fable row never hides).
+    summary_rows = [r for r in rows if _has_summary(r) and not claude_windows([r])]
+    live_only = not windows and bool(summary_rows)
+    if summary_rows:
         per_row = [(r, claude_windows([r])) for r in snap_rows]
         display = [w for _, ws in per_row for w in ws]
-        windows = [w for w in (_summary_window(r, display) for r in rows) if w]
+        windows += [w for w in (_summary_window(r, display) for r in summary_rows) if w]
+        used: set[int] = set()
         if not any(w["kind"] == "fable" for w in windows):
-            windows += [w for w in display if w["kind"] == "fable"]
-        # Only the snapshot windows that were really used age the decision: the Fable supplement,
-        # the borrowed reset/pace, and the display fill for a kind the live rows could not give.
-        used = {id(w) for w in windows if any(w is d for d in display)}
+            low = _lowest(display, "fable")
+            if low is not None:
+                windows.append(low)
+                used.add(id(low))
+        # Only the snapshot windows that were really used age the decision: the one Fable window
+        # `_lowest` picked, the borrowed reset/pace, and the display fill for a kind the live rows
+        # could not give.
         used |= {id(w["borrowed"]) for w in windows if w.get("borrowed") is not None}
         for kind in ("weekly", "five_hour"):
             if not any(w["kind"] == kind for w in windows):
@@ -435,10 +443,13 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
             rows, source = snap_rows, "snapshot"
         windows = claude_windows(rows)
     elif not any(w["kind"] == "fable" for w in windows):
-        # aiuse drops the Fable pool (not the default one) when the Fable cap is exhausted.
-        extra = [w for w in claude_windows(snap_rows) if w["kind"] == "fable"]
-        windows += extra
-        fed = [r for r in snap_rows if any(w["kind"] == "fable" for w in claude_windows([r]))]
+        # aiuse drops the Fable pool (not the default one) when the Fable cap is exhausted. Only the
+        # snapshot row holding the lowest Fable window (the one `_lowest` judges) ages the decision.
+        per_row = [(r, claude_windows([r])) for r in snap_rows]
+        low = _lowest([w for _, ws in per_row for w in ws], "fable")
+        if low is not None:
+            windows.append(low)
+            fed = [r for r, ws in per_row if any(w is low for w in ws)]
     weekly, five, fable = (_lowest(windows, k) for k in ("weekly", "five_hour", "fable"))
     level = "ok"
 

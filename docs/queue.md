@@ -128,12 +128,14 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    with `gh api ... --paginate > f.json`, then `jq -s --arg t ... f.json`; the adversary appends its own `## Round NN`
    section to its report file, so the lead must not append a second copy (rounds 43 and 44 were deduplicated).
 4. **PR 29 queued findings** (hypothetical aiuse payload shapes; `bin/claude-quota-guard`): (a) a windowless live
-   row bound by the 5-hour window leaves the snapshot's weekly unjudged (adversary round 7); (b) a detailed
+   row bound by the 5-hour window leaves the snapshot's weekly unjudged (adversary round 7); (b) **DONE 2026-10-23** (Codex 4361062506;
+   `decide` now builds a summary window for every windowless row beside the detailed ones, then the Fable supplement; tests `test_s2_*`) a detailed
    default row plus a summary-only Fable row: synthesize a window for every summary-only row (Codex pass 6);
-   (c) several snapshot accounts with Fable windows: age only the account `_lowest()` picked (Codex pass 6);
+   (c) **DONE 2026-10-23** (Codex 4361062518; only the snapshot row holding the `_lowest()` Fable window ages the decision, both paths; tests `test_s1_*`)
+   several snapshot accounts with Fable windows: age only the account `_lowest()` picked (Codex pass 6);
    (d) the `p3` concurrency test's 0.2 s lock budget can flake under load, and the hook's worst case is 0.2 s
    against the docstring's "well under 100 ms" (round 10); (e) the hook's unreadable line (round 9) and the
-   `live_only` `fed` rule were tightened in fix 8; re-check after (b).
+   `live_only` `fed` rule were tightened in fix 8; re-check after (b) (2026-10-23: (b) landed, `fed` covers both paths).
 5. **PR 30 queued findings** (`bin/self-slash`, adversary round 3): `SELF_SLASH_SUCCESSOR_SETTLE` accepts a leading
    zero (`08`/`09`, an octal arithmetic error after `paseo run`) and has no upper bound (cap 600); workspace proof
    compares realpaths case-sensitively, so on APFS a case-variant sibling row can let an empty local workspace be
