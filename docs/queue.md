@@ -3,6 +3,49 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Follow-ups from PRs 29 and 30 and the 2026-10-20 exhaustion post-mortem (2026-10-23)
+
+Context: on 2026-10-20 the Claude weekly window hit 100% 2.6 days early; the lead ran on Fable, the adversary on
+Opus, and nothing acted on aiuse's `conserve` alert. PR 29 (`bin/claude-quota-guard`, lead rule Opus 5.5 high)
+and PR 30 (`self-slash --finish --successor`) shipped the recommendations; the post-mortem's other finding was
+that the lead's transcript held 579 background-notification turns against 49 operator prompts, each re-reading
+a 150-200k context: the notification-per-turn multiplier, not the model, was the volume.
+
+1. **Effort as a lever** (Anthropic: "tuning effort is often a better lever than switching models"; Opus 5.5
+   defaults to medium): add to the routing policy that a pipeline-driving lead (PR loops, waiters, merges) runs
+   Sonnet 5.5 at **medium**, high only for judgment turns; effort changes on 5.5/Fable 5.1 keep the prompt cache.
+   One Sonnet `code` slice: `skills/model-routing/SKILL.md` item 12, `config/routing.toml` `[lead]`
+   `pipeline_effort`, `route_agent.py policy --md`, a test.
+2. **`CLAUDE_CODE_SUBAGENT_MODEL=sonnet`** in `~/.claude/settings.json` `env` (via `agents/claude/settings.json.tmpl`):
+   an Agent-tool sub-agent with no `model:` inherits the lead's model, so a Fable or Opus lead silently spawns
+   Fable or Opus sub-agents; `claude/agents/adversary.md` keeps its explicit `model: opus`. One small PR.
+3. **One aggregating waiter per PR**: promote `~/.local/state/bigteam/adhoc-2026-10-23/pr-wait.sh` (waits for CI
+   checks and Codex's `codex-review-state:v1` marker for the exact head, then lists the findings created after
+   the request as JSON) to `bin/pr-wait` with a test and a line in `skills/bigteam/SKILL.md`: three waiters per head
+   (CI, Codex, adversary) were two thirds of the notification turns. Never re-arm a waiter that is already
+   running (the load watcher found eight duplicates on 2026-10-20).
+4. **PR 29 queued findings** (hypothetical aiuse payload shapes; `bin/claude-quota-guard`): (a) a windowless live
+   row bound by the 5-hour window leaves the snapshot's weekly unjudged (adversary round 7); (b) a detailed
+   default row plus a summary-only Fable row: synthesize a window for every summary-only row (Codex pass 6);
+   (c) several snapshot accounts with Fable windows: age only the account `_lowest()` picked (Codex pass 6);
+   (d) the `p3` concurrency test's 0.2 s lock budget can flake under load, and the hook's worst case is 0.2 s
+   against the docstring's "well under 100 ms" (round 10); (e) the hook's unreadable line (round 9) and the
+   `live_only` `fed` rule were tightened in fix 8; re-check after (b).
+5. **PR 30 queued findings** (`bin/self-slash`, adversary round 3): `SELF_SLASH_SUCCESSOR_SETTLE` accepts a leading
+   zero (`08`/`09`, an octal arithmetic error after `paseo run`) and has no upper bound (cap 600); workspace proof
+   compares realpaths case-sensitively, so on APFS a case-variant sibling row can let an empty local workspace be
+   archived. Also unverified live until the first real successor run: the `--json` row shapes of `workspace ls`,
+   `terminal ls`, `ls` (every parse failure keeps the workspace) and `paseo run /baton` as a first prompt.
+6. **Paseo in-place model change**: `docs/upstream-issues.md` entry 17 drafts `paseo agent model <id> <model>`;
+   on 2026-10-23 the rework-p lead switched every running Paseo Claude agent in place through the daemon's
+   `set_agent_model_request` (`~/.local/state/ade/paseo-set-model.mjs`), which the entry should cite as the
+   working RPC; the `claude-fleet-governor` branch (peer 6ebd939) builds the enforcing actor on top of the guard's
+   state file.
+7. **Live `~/.claude/settings.json` lacks the `context_size_nudge.py` registration** that `agents/claude/settings.json.tmpl`
+   carries (found by the quota-guard slice; possibly lost in the 2026-10-20 graft restore): apply the template or
+   add both UserPromptSubmit entries (`context_size_nudge.py`, `quota_nudge.py`) by hand, then
+   `bin/claude-quota-guard --install` and the printed `launchctl bootstrap` line (operator items of PR 29).
+
 ## Follow-ups from the 2026-10-20 reviews
 
 1. **`bin/firecrawl-router` serve-only form binds any `--listen` with no token** (adversary, threat-model
