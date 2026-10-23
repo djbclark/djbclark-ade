@@ -14,7 +14,8 @@ filter.*, gpg.program with log.showSignature, credential.*, hooksPath, include.*
 that config without running anything first and accepts only an allowlist of keys (SAFE_CONFIG below);
 a checkout with any other key is `skipped: unrecognised config <key>`, one with core.worktree or a
 work tree that is not the scanned dir is `skipped: worktree redirected`. The same allowlist is applied
-to every submodule's config under the git dir (`skipped: submodule config unrecognised <key>`).
+to every submodule's config under the git dir (`skipped: submodule config unrecognised <key>`; a config that
+is unreadable or a symlink is `(unreadable)` / `(symlink)`: nothing is trusted that git would read elsewhere).
 Every later git call also turns fsmonitor, hooks and signature display off, drops every GIT_*
 variable from the environment, reads no global or system config, ignores submodules in `status`
 (so a checkout with submodules carries the flag `submodules not inspected`, never a bare
@@ -587,7 +588,11 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
         else:  # `modules/` itself or a dir that only groups nested modules: every name is a module
             dirs[:] = sorted(dirs)
         cfg = Path(root) / "config"
-        if "config" not in files or cfg.is_symlink():
+        if cfg.is_symlink():
+            # Codex pass 37: a symlinked config used to be skipped as safe, and the plan then told the human to run
+            # git inside a submodule whose real config (the link's target) could set core.fsmonitor
+            return present, "(symlink)"
+        if "config" not in files:
             continue
         rc, out = run(["git", *GIT_SAFE, "config", "--file", str(cfg), "--list", "-z"], timeout=60,
                       cwd=neutral_cwd(), env=env)

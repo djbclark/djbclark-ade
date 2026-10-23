@@ -1226,7 +1226,7 @@ def test_doc_generator_survives_skipped_and_incomplete_records():
     for path_, verdict in (("/p/skipped", "skipped: worktree redirected"), ("/p/broken", "scan incomplete: status rc=124")):
         row = next(r for r in rows if r.startswith(f"| {path_} "))
         assert f"counts unknown ({verdict})" in row and "re-scan once the cause is fixed" in row
-        assert f"\"$GTAR\" -C /p -cf <DEST>/checkouts/abs{path_}/whole.tar -- {path_.rsplit('/', 1)[1]}" in row
+        assert f"TAR_OPTIONS= \"$GTAR\" -C /p -cf <DEST>/checkouts/abs{path_}/whole.tar -- {path_.rsplit('/', 1)[1]}" in row
         assert "git" not in row.split("| re-scan")[1].split("(no git command")[0]
         assert row.rstrip().endswith("| yes: counts unknown; re-scan or archive whole |")
         # Codex pass 26: a `.git` file's target directory and its common directory are archived too
@@ -1235,8 +1235,8 @@ def test_doc_generator_survives_skipped_and_incomplete_records():
         # round 35, Codex pass 30: git checks `refs` and `objects` in the COMMON directory; round 36: resolved and
         # checked before anything is archived
         assert '[ -f "$g/HEAD" ] && c=$g && if [ -f "$g/commondir" ]; then { IFS= read -r c || [ -n "$c" ]; } < "$g/commondir"' in row
-        assert f'[ -d "$c/objects" ] && [ -d "$c/refs" ] && "$GTAR" -C "$g" -cf <DEST>/checkouts/abs{path_}/gitdir.tar .' in row
-        assert f'then "$GTAR" -C "$c" -cf <DEST>/checkouts/abs{path_}/commondir.tar .; fi' in row
+        assert f'[ -d "$c/objects" ] && [ -d "$c/refs" ] && TAR_OPTIONS= "$GTAR" -C "$g" -cf <DEST>/checkouts/abs{path_}/gitdir.tar .' in row
+        assert f'then TAR_OPTIONS= "$GTAR" -C "$c" -cf <DEST>/checkouts/abs{path_}/commondir.tar .; fi' in row
         assert '&& [ -n "$g" ] && case "$g" in /*)' in row and "$g/commondir" in row  # round 33: a git directory only
     assert "is listed with a whole-directory archive" in section_3_2(text)
     assert "t-incomplete" in text.split("### 1.3")[1].split("## 2.")[0]
@@ -1324,7 +1324,7 @@ def test_untracked_files_get_a_lossless_archive_command_not_a_bare_git_add():
     rows = section_3_2(mod.render(doc_scan([co]))).splitlines()
     row = next(r for r in rows if r.startswith("| /p/u dir ") or r.startswith("| /p/u\\ dir "))
     assert ("mkdir -p <DEST>/'checkouts/abs/p/u dir' && git -C '/p/u dir' ls-files -z --others --exclude-standard "
-            "> <DEST>/'checkouts/abs/p/u dir/untracked.list' && \"$GTAR\" -C '/p/u dir' --null "
+            "> <DEST>/'checkouts/abs/p/u dir/untracked.list' && TAR_OPTIONS= \"$GTAR\" -C '/p/u dir' --null "
             "-T <DEST>/'checkouts/abs/p/u dir/untracked.list' -cf <DEST>/'checkouts/abs/p/u dir/untracked.tar'`") in row
     # Codex pass 9: no pipe, so ls-files' own status decides (`ls-files | gtar` exits 0 when ls-files fails)
     assert "|" not in row.replace("|", "", 5) and "\\|" not in row
@@ -2533,6 +2533,43 @@ def test_an_unreachable_origin_checkout_always_gets_a_capture_row_even_with_zero
     assert "A checkout flagged `origin unreachable` is always listed, whatever its counts" in section_3_2(text)
 
 
+def test_a_symlinked_submodule_config_is_skipped_not_trusted(tmp_path):
+    """Codex pass 37 on PR 27, P1: `.git/modules/sub/config` as a symlink was skipped as safe, so the plan told the
+    human to run git inside a submodule whose real config (the link's target) set core.fsmonitor."""
+    mod = load()
+    roots, sup, moddir = make_super_with_submodule(tmp_path)
+    real = moddir / "config"
+    target = tmp_path / "elsewhere-config"
+    target.write_text(real.read_text() + "[core]\n\tfsmonitor = /bin/true\n")
+    real.unlink()
+    real.symlink_to(target)
+    c = mod.scan_git([roots], remote=False)[0]
+    assert c["verdict"] == "skipped: submodule config unrecognised (symlink)", c
+    real.unlink()
+    real.symlink_to(tmp_path)  # a link to a directory is no safer
+    c = mod.scan_git([roots], remote=False)[0]
+    assert c["verdict"] == "skipped: submodule config unrecognised (symlink)", c
+
+
+def test_every_archive_ignores_the_operators_tar_options(tmp_path):
+    """Codex pass 37 on PR 27, P1: with `TAR_OPTIONS=--exclude=*` in the environment GNU tar wrote an empty
+    untracked archive and exited 0; every emitted tar now runs with `TAR_OPTIONS=` cleared."""
+    import re, tarfile
+    doc = load_doc()
+    src = (Path(__file__).resolve().parent.parent / "bin" / "ade-scan-state-doc").read_text(encoding="utf-8")
+    assert src.count("$GTAR") == len(re.findall(r'TAR_OPTIONS= (?:LC_ALL=C )?\\"\$GTAR', src)), "a tar call without TAR_OPTIONS="
+    repo = tmp_path / "r"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    (repo / "u.txt").write_text("untracked\n")
+    prefix = "GTAR=$(command -v gtar || command -v tar); "
+    cmd = prefix + doc.UNTRACKED_FMT.format(*map(doc.shquote, doc.untracked_values(str(repo), "c"))).replace("<DEST>", str(tmp_path / "dest"))
+    run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, env={**os.environ, "TAR_OPTIONS": "--exclude=*"})
+    assert run.returncode == 0, run.stderr
+    assert tarfile.open(tmp_path / "dest" / "c" / "untracked.tar").getnames() == ["u.txt"]
+    assert doc.UNTRACKED_FMT.count("{}") == len(doc.untracked_values("/p", "c"))
+
+
 def test_the_submodule_row_archives_an_index_hidden_edit(tmp_path):
     """Codex pass 36 on PR 27, P1: inside a submodule an assume-unchanged edit is in no status, diff, `ls-files
     --modified` or `--others` output, so the submodule row's bundle, patches and untracked archive all missed it."""
@@ -2580,7 +2617,7 @@ def test_a_checkout_with_submodules_always_gets_a_capture_row():
     assert "-C /p/sup/<sub> --null --no-recursion --ignore-failed-read -T <DEST>/checkouts/abs/p/sup/<sub>/hidden.list" in row
     assert mod.hidden_fmt("/<sub>").count("{}") == len(mod.hidden_values("/p", "c")) == mod.HIDDEN_FMT.count("{}")
     assert ("git -C /p/sup/<sub> ls-files -z --others --exclude-standard > <DEST>/checkouts/abs/p/sup/<sub>/untracked.list "
-            "&& \"$GTAR\" -C /p/sup/<sub> --null -T <DEST>/checkouts/abs/p/sup/<sub>/untracked.list -cf <DEST>/checkouts/abs/p/sup/<sub>/untracked.tar") in row
+            "&& TAR_OPTIONS= \"$GTAR\" -C /p/sup/<sub> --null -T <DEST>/checkouts/abs/p/sup/<sub>/untracked.list -cf <DEST>/checkouts/abs/p/sup/<sub>/untracked.tar") in row
     assert "the scanner skips absorbed submodules" in row
     assert row.rstrip().endswith("| yes: inspect each submodule first |")
     both = next(r for r in rows if r.startswith("| /p/both "))
