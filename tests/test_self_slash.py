@@ -45,11 +45,15 @@ FAKE_PASEO = textwrap.dedent("""\
           exit 1
         fi
         echo archived;;
+      "workspace archive")
+        if [ -n "$FAKE_WSARCH_FAIL" ]; then echo "Workspace is busy" >&2; exit 1; fi
+        echo archived;;
       "workspace ls")
         if [ -n "$FAKE_WS_JSON" ]; then echo "$FAKE_WS_JSON"
         else printf '[{"workspaceId": "ws-1", "cwd": "%s", "background": false}]\\n' "$FAKE_CWD"; fi;;
     esac
     case "$1" in
+      ls) echo "${FAKE_LS_JSON-[]}";;
       wait) [ -n "$FAKE_WAIT_SLEEP" ] && sleep "$FAKE_WAIT_SLEEP"; echo '{}';;
       send) echo '{}';;
       run)
@@ -391,7 +395,7 @@ class SelfSlashPaseoTests(unittest.TestCase):
             "agent inspect test-agent --json",
             "workspace ls --background --json",
             f"run /baton --provider claude/claude-opus-5-5 --thinking high --mode bypassPermissions "
-            f"--workspace ws-1 --cwd {cwd} --title Lead → claude-opus-5-5 --no-wait --json",
+            f"--workspace ws-1 --cwd {cwd} --title Lead → opus-5-5 --no-wait --json",
             "agent inspect new-agent-1 --json",
             "agent archive",
         ])
@@ -491,7 +495,8 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         for needle in ("workspace ls --background --json",
                        "run /baton --provider claude/claude-opus-5-5 --thinking high --mode <agent mode>",
-                       "--title \"<old name> → claude-opus-5-5\" --no-wait --json",
+                       "--title \"<old name> → opus-5-5\" --no-wait --json",
+                       "never --new-workspace", "workspace archive -- <this agent's workspace id>",
                        "agent archive -- test-agent", "never --force"):
             self.assertIn(needle, r.stdout)
         self.assertEqual(self.paseo_calls(), [])
@@ -506,6 +511,76 @@ class SelfSlashPaseoTests(unittest.TestCase):
         r = self.run_ss(*self.SUCCESSOR, **self.succ_env())
         self.assertEqual(r.returncode, 7, r.stdout + r.stderr)
         self.assertEqual(self.paseo_calls(), [])
+
+    # --- workspace rules (lead steers 1 and 2, 2026-10-23) ---
+    def run_calls(self) -> str:
+        return next(c for c in self.paseo_calls() if c.startswith("run "))
+
+    def test_successor_never_creates_or_renames_a_workspace(self) -> None:
+        r = self.run_waiter()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = self.paseo_calls()
+        self.assertIn("--workspace ws-1 ", self.run_calls())
+        self.assertFalse(any("--new-workspace" in c or "--worktree" in c for c in calls), calls)
+        self.assertFalse(any(c.startswith(("workspace create", "workspace rename")) for c in calls), calls)
+        # the successor shares this agent's workspace: archiving it would take the successor along
+        self.assertFalse(any(c.startswith("workspace archive") for c in calls), calls)
+        self.assertIn("workspace: ws-1 kept: the successor lives in it", r.stdout)
+
+    def test_default_title_is_short(self) -> None:
+        r = self.run_waiter(FAKE_NAME="A very long orchestrator session name that goes on and on")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        title = self.run_calls().split(" --title ")[1].split(" --no-wait")[0]
+        self.assertEqual(title, "A very long orchestrator → opus-5-5")
+        self.assertLessEqual(len(title), 40)
+
+    def test_old_workspace_is_archived_after_the_old_agent_when_it_is_empty(self) -> None:
+        cwd = self.succ_env()["FAKE_CWD"]
+        # the successor and the old agent do not count, an agent elsewhere does not either
+        ls = (f'[{{"id": "new-agent-1", "shortId": "new-age", "cwd": "{cwd}"}},'
+              f' {{"id": "test-agent", "shortId": "test-ag", "cwd": "{cwd}"}},'
+              ' {"id": "zzz", "shortId": "zzz", "cwd": "/somewhere/else"}]')
+        r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", FAKE_LS_JSON=ls)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = self.paseo_calls()
+        self.assertIn("--workspace ws-2 ", self.run_calls())
+        archives = [i for i, c in enumerate(calls) if c.startswith(("agent archive", "workspace archive"))]
+        self.assertEqual([calls[i] for i in archives], ["agent archive -- test-agent", "workspace archive -- ws-1"])
+        self.assertIn("ls --background --json", calls)
+        self.assertIn("workspace: archived ws-1", r.stdout)
+
+    def test_old_workspace_is_kept_while_another_agent_has_the_cwd(self) -> None:
+        cwd = self.succ_env()["FAKE_CWD"]
+        for ls in (f'[{{"id": "other-1", "shortId": "other-1", "cwd": "{cwd}"}}]',
+                   '[{"id": "other-1", "shortId": "other-1"}]',  # a row with no cwd: unknown, so kept
+                   "not json"):
+            self.calls.unlink(missing_ok=True)
+            r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", FAKE_LS_JSON=ls)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertFalse(any(c.startswith("workspace archive") for c in self.paseo_calls()), ls)
+            self.assertIn("workspace: ws-1 kept: other agents in", r.stdout)
+
+    def test_keep_workspace_skips_the_close(self) -> None:
+        r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", SELF_SLASH_S_KEEPWS="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        calls = self.paseo_calls()
+        self.assertFalse(any(c.startswith(("workspace archive", "ls ")) for c in calls), calls)
+        self.assertIn("workspace: kept (--keep-workspace)", r.stdout)
+
+    def test_workspace_archive_failure_keeps_it_without_failing_the_handoff(self) -> None:
+        r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", FAKE_WSARCH_FAIL="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("workspace: ws-1 kept: workspace archive failed", r.stdout)
+
+    def test_workspace_flags_reach_the_waiter(self) -> None:
+        r = self.run_ss(*self.SUCCESSOR, "--workspace", "ws-2", "--keep-workspace", **self.succ_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.wait_log("workspace: kept (--keep-workspace)")
+        self.assertIn("--workspace ws-2 ", self.run_calls())
+        r = self.run_ss("--finish", "--keep-workspace")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        r = self.run_ss(*self.SUCCESSOR, "--workspace", "w s")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
 
 if __name__ == "__main__":

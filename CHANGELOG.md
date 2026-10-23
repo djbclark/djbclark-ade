@@ -11,7 +11,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
-- `bin/self-slash --finish --successor PROVIDER/MODEL [--thinking ID] [--mode MODE] [--title TEXT]` (Paseo only; exit 2 on herdr and Orca): after the turn it starts a new top-level agent in the same workspace (`paseo run "/baton"`, default mode and `--thinking high` of the old agent), checks it is not a subagent and runs the model asked, then archives the old agent; any failure exits 11, archives nothing and leaves this session usable (#TBD).
+- `bin/self-slash --finish --successor PROVIDER/MODEL [--thinking ID] [--mode MODE] [--title TEXT]` (Paseo only; exit 2 on herdr and Orca): after the turn it starts a new top-level agent in the same workspace (`paseo run "/baton"`, default mode and `--thinking high` of the old agent), checks it is not a subagent and runs the model asked, then archives the old agent; any failure exits 11, archives nothing and leaves this session usable. The successor always lands in an existing workspace (`--workspace ID`, default this agent's; never `--new-workspace`) with a short title, and the old workspace is archived after the old agent when it differs from the successor's and no other agent shares its cwd (`--keep-workspace` skips that) (#TBD).
 - `bin/ade-backup-stores`: Phase 0 backups, a SQLite online-backup copy of every live agent session database, the
   per-session trees and file stores and the Hermes JSONL export (run against a scratch copy of the Hermes
   database), with a hashed `MANIFEST.json`, built in `<dest>.part/` and renamed when complete; `--dry-run`,

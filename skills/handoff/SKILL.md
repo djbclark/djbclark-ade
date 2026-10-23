@@ -280,6 +280,17 @@ code: if the successor does not start or is a subagent (exit 11) it archives not
 successor that was created is left running, not stopped), so when the operator writes again, read the
 log first. "several workspaces use <cwd>" needs `SELF_SLASH_WORKSPACE=<id>` (`paseo workspace ls`).
 
+**Workspaces (djbclark, 2026-10-23).** The successor is a top-level agent in an EXISTING workspace
+(`paseo run --workspace <id>`, this agent's by default, `--workspace ID` for another), never a new
+workspace or window (`--new-workspace`) unless the operator asks. Keep an explicit `--title` short: the
+sidebar shows only its first words (the default is the old name cut to 24 characters plus
+`opus-5-5`). A Paseo workspace name ends in `-pw` (herdr tabs end `-t`, panes `-p`); `self-slash`
+creates and renames none, so name any workspace you make by hand that way. After the old agent is
+archived, `self-slash` also archives its workspace when that is a different workspace from the
+successor's and `paseo ls --background --json` shows no other agent with the same cwd; it keeps the
+workspace, with the reason in the log, otherwise (the usual case is the same workspace: archiving it
+would take the successor along). `--keep-workspace` skips the close.
+
 **Top-level session only.** A sub-agent (Agent tool, `/bigteam`, an `acp-dispatch` or `acp-run` slice)
 shares or inherits the parent's agent id, so a `/new` from it would clear the PARENT's session
 (2026-10-20; `acp-run` now scrubs the id and `self-slash` exits 9 when `ACP_RUN_AGENT=1`, but an

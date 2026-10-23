@@ -50,6 +50,14 @@
 # 2026-10-23).  Any failure in 2-4 exits 11 and archives nothing: this session stays usable and
 # a successor that was created is left running (logged, never stopped).  The first prompt is
 # /baton, so the Tier 1 pointer must be written first (handoff Step 7).  Not on herdr or Orca (exit 2).
+# Workspaces (djbclark, 2026-10-23): the successor always lands in an EXISTING workspace, `paseo run
+# --workspace <id>` (default this agent's, --workspace ID picks another), never --new-workspace and
+# never a new Paseo window; its --title is kept short (an old name cut to 24 chars plus the model
+# without "claude-"), as the sidebar shows only the first words.  A Paseo workspace name ends in -pw
+# (herdr tabs end -t, panes -p); self-slash creates and renames none.  After the old agent is archived
+# the old workspace is archived too (`paseo workspace archive`) when it is a different workspace
+# from the successor's and `paseo ls --background --json` shows no other agent with the same cwd;
+# every doubt keeps it, logged as "workspace: ... kept: <why>", and --keep-workspace skips it.
 #
 # Never in a sub-agent or a dispatched slice (2026-10-20): they inherit the parent's
 # PASEO_AGENT_ID, so a lifecycle action there would clear or archive the PARENT's agent.
@@ -107,7 +115,7 @@
 export PATH="/opt/homebrew/bin:$PATH"
 set -u
 delay=6; dry=0; then=""; then_set=0; finish=0
-successor=""; s_thinking=""; s_mode=""; s_title=""
+successor=""; s_thinking=""; s_mode=""; s_title=""; s_workspace=""; s_keepws=0
 while :; do case "${1:-}" in
   --delay) delay="$2"; shift 2;;
   --dry-run) dry=1; shift;;
@@ -118,6 +126,8 @@ while :; do case "${1:-}" in
   --thinking) s_thinking="${2:-}"; shift 2;;
   --mode) s_mode="${2:-}"; shift 2;;
   --title) s_title="${2:-}"; shift 2;;
+  --workspace) s_workspace="${2:-}"; shift 2;;
+  --keep-workspace) s_keepws=1; shift;;
   *) break;;
 esac; done
 text="${1:-}"
@@ -126,16 +136,20 @@ finish_flag=$finish
 [ -n "$text" ] || { echo "usage: self-slash [--delay S] [--dry-run] [--then \"/cmd\" | --no-then] \"/command args\"
        self-slash [--delay S] [--dry-run] --finish   (end the session; Paseo: archive this agent)
        self-slash [--delay S] [--dry-run] --finish --successor PROVIDER/MODEL [--thinking ID] [--mode MODE] [--title TEXT]
-                                                      (Paseo only: start /baton on another model, then archive this agent)
+                  [--workspace ID] [--keep-workspace]
+                  (Paseo only: start /baton on another model in an EXISTING workspace (--workspace <id>, default this
+                  agent's; never a new workspace or window), then archive this agent; the old workspace is archived too
+                  when it differs from the successor's and holds no other agent (--keep-workspace skips that); keep the
+                  --title short, its first words show in the sidebar; a Paseo workspace name ends in -pw)
        exit codes: 2 usage, 3 no host, 4 draft in the input box, 5 no prompt, 6 session still working,
        7 refused (gap check or lifecycle already queued), 8 archive refused, 9 dispatched agent
        (ACP_RUN_AGENT=1): lifecycle actions and /compact run only in the top-level session,
        11 successor not started or not top-level (nothing archived; this session stays usable)" >&2; exit 2; }
 if [ "$finish" = 1 ] && [ "$text" != /quit ]; then echo "self-slash: --finish takes no command (got: $text)" >&2; exit 2; fi
 if [ -n "$successor" ] && [ "$finish" != 1 ]; then echo "self-slash: --successor needs --finish (it replaces the bare archive)" >&2; exit 2; fi
-if [ -z "$successor" ] && { [ -n "$s_thinking" ] || [ -n "$s_mode" ] || [ -n "$s_title" ]; }; then echo "self-slash: --thinking, --mode and --title only go with --successor" >&2; exit 2; fi
+if [ -z "$successor" ] && { [ -n "$s_thinking" ] || [ -n "$s_mode" ] || [ -n "$s_title" ] || [ -n "$s_workspace" ] || [ "$s_keepws" = 1 ]; }; then echo "self-slash: --thinking, --mode, --title, --workspace and --keep-workspace only go with --successor" >&2; exit 2; fi
 case "$successor" in ""|[A-Za-z0-9]*) ;; *) echo "self-slash: --successor takes PROVIDER or PROVIDER/MODEL (got: $successor)" >&2; exit 2;; esac
-case "$successor$s_thinking$s_mode" in *[!A-Za-z0-9._/:-]*) echo "self-slash: --successor, --thinking and --mode take plain ids (letters, digits, . _ / : -)" >&2; exit 2;; esac
+case "$successor$s_thinking$s_mode$s_workspace" in *[!A-Za-z0-9._/:-]*) echo "self-slash: --successor, --thinking, --mode and --workspace take plain ids (letters, digits, . _ / : -)" >&2; exit 2;; esac
 # --finish ends the session, so a follow-up would be typed into whatever is left (a shell prompt).
 if [ "$finish" = 1 ] && [ -n "$then" ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then echo "self-slash: --finish takes no --then (got: $then)" >&2; exit 2; fi
 # Lifecycle actions end the session or throw its context away.
@@ -203,6 +217,7 @@ if [ "$finish" = 1 ] && [ -n "$then" ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; th
 if [ "${SELF_SLASH_CHILD:-}" = "1" ]; then finish="${SELF_SLASH_FINISH:-0}"; fi
 if [ "${SELF_SLASH_CHILD:-}" = "1" ]; then
   successor="${SELF_SLASH_SUCCESSOR:-}"; s_thinking="${SELF_SLASH_S_THINKING:-}"; s_mode="${SELF_SLASH_S_MODE:-}"; s_title="${SELF_SLASH_S_TITLE:-}"
+  s_workspace="${SELF_SLASH_S_WORKSPACE:-}"; s_keepws="${SELF_SLASH_S_KEEPWS:-0}"
 fi
 s_thinking="${s_thinking:-high}"
 if [ "$tui" = cursor ]; then marker="→"; else marker="❯"; fi
@@ -282,14 +297,21 @@ fi
 if [ "$dry" = 1 ]; then
   if [ "$finish" = 1 ] && [ "$host" = paseo ] && [ -n "$successor" ]; then
     s_model="${successor#*/}"; [ "$s_model" = "$successor" ] && s_model=""
-    if [ -n "$s_title" ]; then dry_title="$s_title"; else dry_title="<old name> → ${s_model:-$successor}"; fi
+    s_short="${s_model:-$successor}"; s_short="${s_short#claude-}"
+    if [ -n "$s_title" ]; then dry_title="$s_title"; else dry_title="<old name> → $s_short"; fi
     echo "self-slash: dry run, would wait ${delay}s, then (every call with PASEO_AGENT_ID and PASEO_AGENT_CWD unset):"
     echo "  $paseo_cli wait $pane --timeout ${SELF_SLASH_WAIT:-900} --json"
     echo "  $paseo_cli agent inspect $pane --json            (name, mode, cwd)"
     echo "  $paseo_cli workspace ls --background --json      (workspace id whose cwd is ${PASEO_AGENT_CWD:-<agent cwd>}${SELF_SLASH_WORKSPACE:+; SELF_SLASH_WORKSPACE=$SELF_SLASH_WORKSPACE wins})"
-    echo "  $paseo_cli run /baton --provider $successor --thinking $s_thinking --mode ${s_mode:-<agent mode>} --workspace <id> --cwd ${PASEO_AGENT_CWD:-<agent cwd>} --title \"$dry_title\" --no-wait --json"
+    echo "  $paseo_cli run /baton --provider $successor --thinking $s_thinking --mode ${s_mode:-<agent mode>} --workspace ${s_workspace:-<id>} --cwd ${PASEO_AGENT_CWD:-<agent cwd>} --title \"$dry_title\" --no-wait --json   (never --new-workspace)"
     echo "  $paseo_cli agent inspect <new id> --json         (needs ParentAgentId null,${s_model:+ model $s_model,} status not error; else exit 11, nothing archived)"
     echo "  $paseo_cli agent archive -- $pane                (never --force)"
+    if [ "$s_keepws" = 1 ]; then echo "  (--keep-workspace: the old workspace stays)"
+    else
+      echo "  then, only when the successor's workspace differs from this agent's and nothing else lives in it:"
+      echo "  $paseo_cli ls --background --json                (no other unarchived agent with cwd ${PASEO_AGENT_CWD:-<agent cwd>})"
+      echo "  $paseo_cli workspace archive -- <this agent's workspace id>"
+    fi
   elif [ "$finish" = 1 ] && [ "$host" = paseo ]; then
     echo "self-slash: dry run, would wait ${delay}s, wait for $pane to be idle, then archive it (paseo agent archive $pane, never --force)"
   else
@@ -334,6 +356,7 @@ if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
   fi
   SELF_SLASH_CHILD=1 SELF_SLASH_AFTER="$after" SELF_SLASH_THEN="$then" SELF_SLASH_FINISH="$finish" \
     SELF_SLASH_SUCCESSOR="$successor" SELF_SLASH_S_THINKING="$s_thinking" SELF_SLASH_S_MODE="$s_mode" SELF_SLASH_S_TITLE="$s_title" \
+    SELF_SLASH_S_WORKSPACE="$s_workspace" SELF_SLASH_S_KEEPWS="$s_keepws" \
     SELF_SLASH_TLOCK="$([ "$lifecycle" = 1 ] && echo "$tlock")" \
     nohup "$0" --delay "$delay" "$text" >>"$log" 2>&1 </dev/null &
   if [ "$lifecycle" = 1 ]; then
@@ -520,10 +543,10 @@ successor_paseo() {
   old_name=$(jfield "$info" Name); old_mode=$(jfield "$info" Mode); old_cwd=$(jfield "$info" Cwd)
   cwd="${PASEO_AGENT_CWD:-$old_cwd}"
   [ -n "$cwd" ] || successor_fail "this agent's cwd is unknown"
-  ws="${SELF_SLASH_WORKSPACE:-}"
-  if [ -z "$ws" ]; then
-    wsout=$(pcli workspace ls --background --json 2>&1) || successor_fail "workspace ls failed: $(printf '%s' "$wsout" | gtr -s ' \n' ' ' | gcut -c1-200)"
-    ws=$(printf '%s' "$wsout" | python3 -c '
+  old_ws="${SELF_SLASH_WORKSPACE:-}"; ws_note=""
+  if [ -z "$old_ws" ]; then
+    if wsout=$(pcli workspace ls --background --json 2>&1); then
+      old_ws=$(printf '%s' "$wsout" | python3 -c '
 import json, os, sys
 cwd = os.path.realpath(sys.argv[1])
 try:
@@ -539,15 +562,24 @@ if len(hit) == 1:
     print(hit[0].get("workspaceId") or "")
 elif len(hit) > 1:
     print("AMBIGUOUS")' "$cwd" 2>/dev/null)
-    case "$ws" in
-      "") successor_fail "no Paseo workspace found for $cwd (SELF_SLASH_WORKSPACE=<id> names one)";;
-      AMBIGUOUS) successor_fail "several workspaces use $cwd (SELF_SLASH_WORKSPACE=<id> picks one)";;
+    else
+      [ -n "$s_workspace" ] || successor_fail "workspace ls failed: $(printf '%s' "$wsout" | gtr -s ' \n' ' ' | gcut -c1-200)"
+      old_ws=""
+    fi
+    case "$old_ws" in
+      "") [ -n "$s_workspace" ] && ws_note="this agent's workspace could not be told" || successor_fail "no Paseo workspace found for $cwd (SELF_SLASH_WORKSPACE=<id> names one)";;
+      AMBIGUOUS) if [ -n "$s_workspace" ]; then ws_note="several workspaces use $cwd"; old_ws=""
+                 else successor_fail "several workspaces use $cwd (SELF_SLASH_WORKSPACE=<id> picks one)"; fi;;
     esac
   fi
+  ws="${s_workspace:-$old_ws}"
   s_model="${successor#*/}"; [ "$s_model" = "$successor" ] && s_model=""
   mode="${s_mode:-${old_mode:-default}}"
   [ "$old_name" != "-" ] || old_name=""
-  title="${s_title:-${old_name:-agent} → ${s_model:-$successor}}"
+  # A short title: its first words are all the sidebar shows.
+  short_name=$(printf '%s' "${old_name:-agent}" | python3 -c 'import sys; print(sys.stdin.read()[:24].rstrip())')
+  short_model="${s_model:-$successor}"; short_model="${short_model#claude-}"
+  title="${s_title:-$short_name → $short_model}"
   echo "$(gdate '+%F %T') $host $pane: successor: starting $successor (thinking $s_thinking, mode $mode, workspace $ws, cwd $cwd, title \"$title\")"
   runout=$(pcli run /baton --provider "$successor" --thinking "$s_thinking" --mode "$mode" --workspace "$ws" --cwd "$cwd" --title "$title" --no-wait --json 2>&1); rc=$?
   [ "$rc" = 0 ] || successor_fail "paseo run failed (rc=$rc): $(printf '%s' "$runout" | gtr -s ' \n' ' ' | gcut -c1-200)"
@@ -561,10 +593,47 @@ elif len(hit) > 1:
   [ "$nstatus" != error ] || successor_fail "successor $newid is in error status (left running)"
   echo "$(gdate '+%F %T') $host $pane: successor: $newid is top-level on ${nmodel:-$successor} (status ${nstatus:-?})"
   out=$(pcli agent archive -- "$pane" 2>&1); rc=$?
-  if [ "$rc" = 0 ]; then
-    echo "$(gdate '+%F %T') $host $pane: finish: archived $pane (successor $newid)"; exit 0
+  if [ "$rc" != 0 ]; then
+    echo "$(gdate '+%F %T') $host $pane: finish: archive refused (rc=$rc): $(printf '%s' "$out" | gtr -s ' \n' ' ' | gcut -c1-200); successor $newid left running"; exit 8
   fi
-  echo "$(gdate '+%F %T') $host $pane: finish: archive refused (rc=$rc): $(printf '%s' "$out" | gtr -s ' \n' ' ' | gcut -c1-200); successor $newid left running"; exit 8
+  echo "$(gdate '+%F %T') $host $pane: finish: archived $pane (successor $newid)"
+  close_old_workspace
+  exit 0
+}
+# After the old agent is archived: archive its workspace too, but only when it is not the
+# successor's workspace (archiving that would take the successor with it) and no other
+# unarchived agent has the same cwd (`paseo ls` prints cwd with $HOME as ~).  Every doubt keeps
+# the workspace: it is logged with the reason and never an error.
+close_old_workspace() {
+  wlog() { echo "$(gdate '+%F %T') $host $pane: workspace: $1"; }
+  if [ "$s_keepws" = 1 ]; then wlog "kept (--keep-workspace)"; return 0; fi
+  if [ -z "$old_ws" ]; then wlog "kept: ${ws_note:-the workspace of this agent is unknown}"; return 0; fi
+  if [ "$old_ws" = "$ws" ]; then wlog "$old_ws kept: the successor lives in it"; return 0; fi
+  lsout=$(pcli ls --background --json 2>&1) || { wlog "$old_ws kept: paseo ls failed: $(printf '%s' "$lsout" | gtr -s ' \n' ' ' | gcut -c1-120)"; return 0; }
+  others=$(printf '%s' "$lsout" | python3 -c '
+import json, os, sys
+cwd = os.path.realpath(sys.argv[1]); skip = set(sys.argv[2:])
+try:
+    rows = json.load(sys.stdin)
+except ValueError:
+    print("unparsable"); sys.exit(0)
+if isinstance(rows, dict):
+    rows = next((v for v in rows.values() if isinstance(v, list)), [])
+if not isinstance(rows, list):
+    print("unparsable"); sys.exit(0)
+names = []
+for r in rows:
+    if not isinstance(r, dict) or r.get("id") in skip or r.get("shortId") in skip:
+        continue
+    c = r.get("cwd")
+    if not isinstance(c, str) or os.path.realpath(os.path.expanduser(c)) == cwd:
+        names.append(str(r.get("shortId") or r.get("id") or "?"))
+print(" ".join(names))' "$cwd" "$pane" "${pane:0:7}" "$newid" "${newid:0:7}" 2>/dev/null) || others="unparsable"
+  if [ -n "$others" ]; then wlog "$old_ws kept: other agents in $cwd: ${others:0:80}"; return 0; fi
+  out=$(pcli workspace archive -- "$old_ws" 2>&1); rc=$?
+  if [ "$rc" = 0 ]; then wlog "archived $old_ws (no other agent in it; the successor is in $ws)"
+  else wlog "$old_ws kept: workspace archive failed (rc=$rc): $(printf '%s' "$out" | gtr -s ' \n' ' ' | gcut -c1-160)"; fi
+  return 0
 }
 if [ "$finish" = 1 ] && [ "$host" = paseo ] && [ -n "$successor" ]; then successor_paseo; fi
 if [ "$finish" = 1 ] && [ "$host" = paseo ]; then finish_paseo; fi
