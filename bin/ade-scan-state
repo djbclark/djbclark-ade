@@ -1279,6 +1279,13 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     local_only_tags: list[dict] = []
     branches_uncounted = 0
     uncounted_tags: set[str] = set()
+    if unborn:
+        # HEAD names no commit, but another namespace (`refs/custom/*`, `refs/notes/*`) may still hold work: count every
+        # local ref the same way, minus the unborn `HEAD` (Codex pass 45 on PR 27). The per-branch breakdown is empty
+        local_only, rc = local_only_count(path, ["--exclude=refs/remotes/*", "--exclude=refs/stash", "--all"],
+                                          tips, live, has_origin)
+        if local_only is None:
+            return incomplete_record(path, "rev-list --count --all --not --remotes=origin", rc)
     if not unborn:
         # every local ref, not only heads and tags: a commit reachable only from `refs/notes/*`, `refs/replace/*` or
         # any other namespace is local work too (Codex pass 25 on PR 27). Remote-tracking refs are no local work
@@ -1563,7 +1570,8 @@ def main(argv=None) -> int:
     ap.add_argument("--fetch", action="store_true",
                     help="with --remote: `git fetch origin refs/heads/<branch>` (120 s limit) when the "
                          "origin tip's objects are missing locally, to compare it with HEAD; downloads "
-                         "the branch's objects, writes no refs and no FETCH_HEAD")
+                         "the branch's objects, writes no refs and no FETCH_HEAD. Nothing bounds how much "
+                         "origin sends (the 120 s limit bounds the time): use it on origins you trust")
     ap.add_argument("--unique-max-bytes", type=int, default=5 * 1024 * 1024)
     ap.add_argument("--top", type=int, default=10, help="largest bigteam dirs to break down")
     fmt = ap.add_mutually_exclusive_group()

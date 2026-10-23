@@ -2880,15 +2880,17 @@ def test_a_symlinked_git_entry_row_archives_the_links_target(tmp_path):
     rows = section_3_2(doc.render(doc_scan([doc_checkout("/p/l", flags=[flag], verdict=flag)]))).splitlines()
     row = next(r for r in rows if r.startswith("| /p/l "))
     assert "the `.git` symlink's target holds the history" in row
-    assert 'g=/p/l/.git && [ -f "$g/HEAD" ] && [ -d "$g/objects" ] && [ -d "$g/refs" ] && TAR_OPTIONS= "$GTAR" -C "$g" -cf <DEST>/checkouts/abs/p/l/gitdir.tar .' in row
-    assert "IFS= read" not in row
+    assert ('g=/p/l/.git && [ -f "$g/HEAD" ] && c=$g && if [ -f "$g/commondir" ]; then { IFS= read -r c || [ -n "$c" ]; } < "$g/commondir" '
+            "&& c=${c%$'\\r'} && case \"$c\" in /*) ;; *) c=\"$g/$c\" ;; esac; fi "
+            '&& [ -d "$c/objects" ] && [ -d "$c/refs" ] && TAR_OPTIONS= "$GTAR" -C "$g" -cf <DEST>/checkouts/abs/p/l/gitdir.tar . '
+            '&& if [ -f "$g/commondir" ]; then TAR_OPTIONS= "$GTAR" -C "$c" -cf <DEST>/checkouts/abs/p/l/commondir.tar .; fi') in row.replace("\\|", "|")
     real = make_repo(tmp_path / "real")
     gd = tmp_path / "gitdirs-r.git"
     (real / ".git").rename(gd)
     (real / ".git").symlink_to(gd)
     ck = doc.checkout_dir(str(real))
     prefix = PLAN_PREFIX
-    cmd = prefix + doc.SYMLINK_GITDIR_FMT.format(*map(doc.shquote, (str(real), f"{ck}/gitdir.tar"))).replace("<DEST>", str(tmp_path / "dest"))
+    cmd = prefix + doc.SYMLINK_GITDIR_FMT.format(*map(doc.shquote, (str(real), f"{ck}/gitdir.tar", f"{ck}/commondir.tar"))).replace("<DEST>", str(tmp_path / "dest"))
     for shell in ("bash", "zsh", "sh"):
         if shutil.which(shell) is None:
             continue
@@ -2907,6 +2909,33 @@ def test_a_symlinked_git_entry_row_archives_the_links_target(tmp_path):
         run = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
         assert run.returncode != 0 and "gitdir capture FAILED" in run.stderr, run.stderr
         assert not list((tmp_path / "dest" / ck).iterdir())
+    # Codex pass 45: a link to a linked worktree's administration directory (`HEAD` and `commondir`, no objects or refs of its
+    # own) archives that directory and the common directory
+    main = make_repo(tmp_path / "main")
+    wt = tmp_path / "wt"
+    git(main, "worktree", "add", "-q", "--detach", str(wt))
+    admin = next((main / ".git" / "worktrees").iterdir())
+    (wt / ".git").unlink()
+    (wt / ".git").symlink_to(admin)
+    ck2 = doc.checkout_dir(str(wt))
+    cmd2 = prefix + doc.SYMLINK_GITDIR_FMT.format(*map(doc.shquote, (str(wt), f"{ck2}/gitdir.tar", f"{ck2}/commondir.tar"))).replace("<DEST>", str(tmp_path / "dest2"))
+    for shell in ("bash", "zsh"):
+        if shutil.which(shell) is None:
+            continue
+        shutil.rmtree(tmp_path / "dest2", ignore_errors=True)
+        (tmp_path / "dest2" / ck2).mkdir(parents=True)
+        run = subprocess.run([shell, "-c", cmd2], capture_output=True, text=True)
+        assert run.returncode == 0, (shell, run.stderr)
+        assert "./HEAD" in tarfile.open(tmp_path / "dest2" / ck2 / "gitdir.tar").getnames()
+        common = set(tarfile.open(tmp_path / "dest2" / ck2 / "commondir.tar").getnames())
+        assert any(n.startswith("./objects/") for n in common) and any(n.startswith("./refs") for n in common), common
+    # a commondir naming a directory that is no git directory archives nothing, loudly
+    (admin / "commondir").write_text(str(tmp_path) + "\n")
+    shutil.rmtree(tmp_path / "dest2", ignore_errors=True)
+    (tmp_path / "dest2" / ck2).mkdir(parents=True)
+    run = subprocess.run(["bash", "-c", cmd2], capture_output=True, text=True)
+    assert run.returncode != 0 and "gitdir capture FAILED" in run.stderr, run.stderr
+    assert not list((tmp_path / "dest2" / ck2).iterdir())
 
 
 def test_every_archive_ignores_the_operators_tar_options(tmp_path):
@@ -3674,7 +3703,7 @@ def test_the_preamble_clears_every_git_variable_without_a_pipeline_and_survives_
     each `GIT_*` name from `env` (a multi-line value cannot name anything but a plain variable), reports an `env` that fails,
     and leaves PATH and the GNU tool names alone."""
     doc = load_doc()
-    assert "|" not in doc.PLAN_PREAMBLE.replace("||", "") and "grep" not in doc.PLAN_PREAMBLE and "cut " not in doc.PLAN_PREAMBLE
+    assert " | " not in doc.PLAN_PREAMBLE and "grep" not in doc.PLAN_PREAMBLE and "cut " not in doc.PLAN_PREAMBLE
     probe = ('; printf "%s|" "${GIT_DIR-unset}" "${GIT_INDEX_FILE-unset}" "${GIT_CONFIG_COUNT-unset}" "${GIT_KEY_0-unset}" '
              '"${GIT_CONFIG_GLOBAL-unset}" "${GIT_CONFIG_NOSYSTEM-unset}" "${XYZ+kept}" "${_E-unset}" "${_L-unset}"; '
              'test -n "$GTAR" && command -v git >/dev/null && echo ok')
@@ -3696,6 +3725,42 @@ def test_the_preamble_clears_every_git_variable_without_a_pipeline_and_survives_
                              capture_output=True, text=True,
                              env={"PATH": "/nonexistent", "GIT_DIR": "/x", "GIT_CONFIG_COUNT": "1"})  # no BASH_ENV: it may define `env`
         assert "env failed: GIT_* not cleared" in run.stderr and run.stdout == "unset|unset|", (shell, run.stdout, run.stderr)
+
+
+def test_the_preamble_disables_lazy_fetch_and_warns_on_a_git_that_ignores_it(tmp_path):
+    """Codex pass 45 on PR 27, P1: in a partial clone `git bundle create --all` ran `git fetch origin` (a promisor
+    download), so even the bundle alternative for a credential-bearing or helper-backed origin could contact it."""
+    doc = load_doc()
+    assert "GIT_NO_LAZY_FETCH=1" in doc.PLAN_PREAMBLE
+    for version, warned in (("2.30.0", True), ("2.44.9", True), ("2.45.0", False), ("2.50.1 (Apple Git-155)", False),
+                            ("3.0.1", False), ("2.5.0", True)):
+        fake = tmp_path / f"bin-{version.split()[0]}"
+        fake.mkdir()
+        (fake / "git").write_text(f"#!/bin/sh\necho 'git version {version}'\n")
+        (fake / "git").chmod(0o755)
+        for shell in ("bash", "zsh"):
+            if shutil.which(shell) is None:
+                continue
+            run = subprocess.run([shutil.which(shell), "-c", doc.PLAN_PREAMBLE + '; printf "%s" "$GIT_NO_LAZY_FETCH"'],
+                                 capture_output=True, text=True,
+                                 env={"PATH": f"{fake}:/usr/bin:/bin", "GIT_NO_LAZY_FETCH": "0"})
+            assert run.stdout == "1", (version, shell, run.stdout)
+            assert ("older than 2.45" in run.stderr) is warned, (version, shell, run.stderr)
+
+
+def test_an_unborn_head_still_counts_every_other_ref_as_local_work(tmp_path):
+    """Codex pass 45 on PR 27, P1: HEAD on a new unborn branch with the old commit kept only at `refs/custom/save` was
+    `clean and pushed`: the aggregate count was skipped for an unborn HEAD, so section 3.2 emitted no bundle."""
+    mod = load()
+    roots = tmp_path / "roots"
+    work = make_repo(roots / "work", "w.txt")
+    git(work, "update-ref", "refs/custom/save", "HEAD")
+    branch = git(work, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    git(work, "symbolic-ref", "HEAD", "refs/heads/fresh")
+    git(work, "update-ref", "-d", f"refs/heads/{branch}")
+    assert git(work, "for-each-ref", "refs/heads", "refs/tags").strip() == ""  # unborn by the scanner's own test
+    c = scan_one(mod, roots)
+    assert c["local_only_commits"] and c["verdict"] != "clean and pushed", c
 
 
 def test_a_non_utf8_checkout_path_is_quoted_as_its_bytes_and_the_document_is_written(tmp_path):

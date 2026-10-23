@@ -76,8 +76,13 @@ def gitdir_values(raw_p, ck):
 
 # a `.git` SYMLINK (`skipped: .git is a symlink`): chdir follows the link, so its target is archived behind the same
 # git-directory test; a link to a gitfile or to anything else fails loudly, archiving nothing (round 43)
-SYMLINK_GITDIR_FMT = ("g={}/.git && [ -f \"$g/HEAD\" ] && [ -d \"$g/objects\" ] && [ -d \"$g/refs\" ] "
-                      "&& TAR_OPTIONS= \"$GTAR\" -C \"$g\" -cf <DEST>/{} . || {{ echo 'gitdir capture FAILED' >&2; false; }}")
+# (a link to a linked worktree's administration directory has `HEAD` and `commondir` but no `objects/` or `refs/` of its
+# own: the common directory is archived too, behind the same test as GITDIR_FMT; Codex pass 45)
+SYMLINK_GITDIR_FMT = ("g={}/.git && [ -f \"$g/HEAD\" ] && c=$g && if [ -f \"$g/commondir\" ]; then {{ IFS= read -r c || [ -n \"$c\" ]; }} < \"$g/commondir\" "
+                      "&& c=${{c%$'\\r'}} && case \"$c\" in /*) ;; *) c=\"$g/$c\" ;; esac; fi "
+                      "&& [ -d \"$c/objects\" ] && [ -d \"$c/refs\" ] && TAR_OPTIONS= \"$GTAR\" -C \"$g\" -cf <DEST>/{} . "
+                      "&& if [ -f \"$g/commondir\" ]; then TAR_OPTIONS= \"$GTAR\" -C \"$c\" -cf <DEST>/{} .; fi "
+                      "|| {{ echo 'gitdir capture FAILED' >&2; false; }}")
 
 
 def modified_fmt():
@@ -263,7 +268,9 @@ PLAN_PREAMBLE = ("GCP=$(command -v gcp || command -v cp); GTAR=$(command -v gtar
                  "_E=$(env) || echo 'env failed: GIT_* not cleared' >&2; "
                  "while IFS= read -r _L; do case ${_L%%=*} in GIT_*[!A-Za-z0-9_]*) ;; GIT_?*) case $_L in *=*) unset \"${_L%%=*}\";; esac;; esac; done <<< \"$_E\"; "
                  "unset _E _L; "
-                 "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1")
+                 "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_NO_LAZY_FETCH=1; "
+                 "case $(git version 2>/dev/null) in \"git version \"[3-9].*|\"git version 2.\"4[5-9]*|\"git version 2.\"[5-9][0-9]*) ;; "
+                 "*) echo 'git older than 2.45 ignores GIT_NO_LAZY_FETCH: in a partial clone a capture may download from origin' >&2;; esac")
 
 
 def esc(value, in_code=False):
@@ -634,7 +641,7 @@ def render(d):
                 # the whole-directory archive keeps the link itself, not the git directory it names, where the history
                 # is (round 43): that target is archived when it is a git directory, loudly refused otherwise
                 gitdir = ("the `.git` symlink's target holds the history (the scan read nothing there): archive it too: "
-                          + shcode(SYMLINK_GITDIR_FMT, raw_p, f"{ck}/gitdir.tar"))
+                          + shcode(SYMLINK_GITDIR_FMT, raw_p, f"{ck}/gitdir.tar", f"{ck}/commondir.tar"))
             else:
                 gitdir = ("when `.git` is a file the directory it points to and that one's common directory hold the "
                           "history, archive them too: " + shcode(GITDIR_FMT, *gitdir_values(raw_p, ck)))
