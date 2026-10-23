@@ -220,21 +220,22 @@ def _guard_level():
 def _successor_target(model, guard_level):
     """(provider/model spec, why) when this session should hand off to another model, else None.
 
-    Fable (any claude-fable-* id, a "[1m]" style suffix ignored), or a quota guard saying
-    tight/critical, means Opus 5.5; Sonnet 5.5 when the guard says tight (the handoff skill's
-    Step 9 uses the same rule).  Never a same-model successor: a session already on the target
-    (Sonnet under tight, Opus under critical) gets None, i.e. a plain /new, and a critical guard
-    never moves a Sonnet session up to Opus (adversary 2026-10-23, observation 8)."""
+    Fable (any claude-fable-* id, a "[1m]" style suffix ignored) means Opus 5.5.  A quota guard
+    saying tight or critical moves a session only DOWN, and only from a model known to be above the
+    target: tight (Sonnet 5.5) from Fable or Opus, critical (Opus 5.5) from Fable.  An unknown model
+    (None: the transcript tail had no assistant record), Haiku, or a session already on the target
+    or below gets None, i.e. a plain /new, never a same-model or upward successor (adversary
+    2026-10-23, observation 8 and round 2 L4; the handoff skill's Step 9 uses the same rule)."""
     base = (model or "").split("[", 1)[0]
     fable = base.startswith("claude-fable")
     if guard_level == "tight":
-        if base.startswith("claude-sonnet"):
-            return None
-        return SUCCESSOR_SONNET, "the quota guard says tight"
+        if fable or base.startswith("claude-opus"):
+            return SUCCESSOR_SONNET, "the quota guard says tight"
+        return None
     if guard_level == "critical":
-        if base.startswith(("claude-opus", "claude-sonnet")):
-            return None
-        return SUCCESSOR_OPUS, "the quota guard says critical"
+        if fable:
+            return SUCCESSOR_OPUS, "the quota guard says critical"
+        return None
     if fable:
         return SUCCESSOR_OPUS, "this session runs on Fable"
     return None

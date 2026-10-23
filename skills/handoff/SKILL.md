@@ -260,9 +260,11 @@ form **instead of** `self-slash "/new"` when (a) this session's model is Fable (
 `[1m]` suffix or not; check the model line in your own context, or `paseo agent inspect <your id>`
 shows `Model`), (b) `~/.local/state/ade/quota-guard.json` exists and its `level` is `tight` or `critical`
 (read it with `.get`; a missing or unreadable file means no), or (c) the operator asked for a model
-change. **Never a same-model successor:** if the guard says `tight` and this session already runs on
-Sonnet, or `critical` and it already runs on Opus or Sonnet (a critical guard never moves a Sonnet
-session up), run plain `self-slash "/new"` instead of the command below:
+change. **Never a same-model or upward successor:** a guard moves a session only down, from a model
+known to be above the target (`tight`: Fable or Opus becomes Sonnet; `critical`: Fable becomes Opus).
+If the guard says `tight` and this session runs on Sonnet or Haiku, or `critical` and it runs on Opus,
+Sonnet or Haiku, or you cannot tell which model you run, run plain `self-slash "/new"` instead of the
+command below:
 
 ```bash
 ~/src/djbclark-ade/bin/self-slash --finish --successor claude/claude-opus-5-5 --thinking high
@@ -281,7 +283,7 @@ relaunch `claude --model <m>` in the pane. The waiter runs detached, so you neve
 code: if the successor does not start or is a subagent (exit 11) it archives nothing and logs
 `successor: ...` to `~/.local/state/self-slash.log`; this session just stays idle and usable (a
 successor that was created is left running, not stopped), so when the operator writes again, read the
-log first. "several workspaces use <cwd>" needs `SELF_SLASH_WORKSPACE=<id>` (`paseo workspace ls`).
+log first. "several workspaces share this cwd" needs `SELF_SLASH_WORKSPACE=<id>` (`paseo workspace ls`).
 The waiter polls the successor for up to 20 s and archives this agent only if it has a new id, is
 top-level, runs the model asked and is idle, running or initializing.
 

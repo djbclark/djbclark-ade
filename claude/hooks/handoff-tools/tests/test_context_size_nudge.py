@@ -459,7 +459,6 @@ def test_other_models_keep_the_new_form(hook, tmp_path, monkeypatch):
     ("tight", "claude-opus-5-5", "claude-sonnet-5-5"),
     ("tight", nudge.FABLE_MODEL, "claude-sonnet-5-5"),
     ("critical", nudge.FABLE_MODEL, "claude-opus-5-5"),
-    ("critical", "claude-haiku-4-5", "claude-opus-5-5"),
 ])
 def test_guard_level_picks_the_successor_even_on_a_non_fable_model(hook, tmp_path, monkeypatch, level, model, spec):
     monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
@@ -517,3 +516,23 @@ def test_a_session_already_on_the_target_gets_plain_new_not_a_same_model_success
 def test_l5_any_fable_id_with_or_without_a_suffix_is_detected(model):
     assert nudge._successor_target(model, "") == (nudge.SUCCESSOR_OPUS, "this session runs on Fable")
     assert nudge._successor_target("claude-opus-5-5[1m]", "") is None
+
+
+@pytest.mark.parametrize("level", ["tight", "critical"])
+@pytest.mark.parametrize("model", [None, "", "claude-haiku-4-5", "claude-haiku-4-5[1m]", "gpt-6"])
+def test_r2_l4_guard_never_moves_an_unknown_or_lower_model_up(level, model):
+    assert nudge._successor_target(model, level) is None
+
+
+def test_r2_l4_guard_moves_only_models_known_to_be_above_the_target():
+    assert nudge._successor_target("claude-opus-5-5", "tight") == (nudge.SUCCESSOR_SONNET, "the quota guard says tight")
+    assert nudge._successor_target("claude-fable-5-1[1m]", "tight")[0] == nudge.SUCCESSOR_SONNET
+    assert nudge._successor_target(nudge.FABLE_MODEL, "critical")[0] == nudge.SUCCESSOR_OPUS
+    assert nudge._successor_target("claude-opus-5-5", "critical") is None
+
+
+def test_r2_l4_unreadable_model_under_a_guard_hands_off_with_plain_new(hook, tmp_path, monkeypatch):
+    monkeypatch.setenv("PASEO_AGENT_ID", "agent-1")
+    _guard(tmp_path, "critical")
+    out, _ = hook("s-nomodel", _transcript(tmp_path, 46_000, nudge.BOUNDARY_TOTAL))  # no assistant model
+    assert "--successor" not in out and 'self-slash "/new"' in out

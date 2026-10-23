@@ -155,7 +155,7 @@ finish_flag=$finish
        exit codes: 2 usage, 3 no host, 4 draft in the input box, 5 no prompt, 6 session still working,
        7 refused (gap check or lifecycle already queued), 8 archive refused, 9 dispatched agent
        (ACP_RUN_AGENT=1): lifecycle actions and /compact run only in the top-level session,
-       11 successor not started or not top-level (nothing archived; this session stays usable)" >&2; exit 2; }
+       11 successor not started, not top-level or not verified, or the successor path aborted (nothing archived; this session stays usable)" >&2; exit 2; }
 if [ "$finish" = 1 ] && [ "$text" != /quit ]; then echo "self-slash: --finish takes no command (got: $text)" >&2; exit 2; fi
 if [ -n "$successor" ] && [ "$finish" != 1 ]; then echo "self-slash: --successor needs --finish (it replaces the bare archive)" >&2; exit 2; fi
 if [ -z "$successor" ] && { [ -n "$s_thinking" ] || [ -n "$s_mode" ] || [ -n "$s_title" ] || [ -n "$s_workspace" ] || [ "$s_keepws" = 1 ]; }; then echo "self-slash: --thinking, --mode, --title, --workspace and --keep-workspace only go with --successor" >&2; exit 2; fi
@@ -588,16 +588,25 @@ def rp(r):
     c = r.get("cwd") if r else None
     return os.path.realpath(c) if isinstance(c, str) and c else None
 old = ""
+# Proof that a row is the workspace of THIS agent: exactly one row has the realpath cwd of this agent, and no
+# other row cwd is a proper ancestor of it (an agent may live in a subdirectory of its workspace,
+# so a workspace whose cwd is exactly that subdirectory could belong to another agent, adversary round 2 L3).
+hit = [r for r in rows if rp(r) == agent_cwd]
+ancestor = any(rp(r) and agent_cwd.startswith(rp(r).rstrip("/") + "/") for r in rows)
+unique = len(hit) == 1 and not ancestor
 if override:
     old = override
-    if rp(byid.get(old)) == agent_cwd:
+    if unique and hit[0]["workspaceId"] == override:
         out["proven"] = "1"
     else:
-        out["note"] = "SELF_SLASH_WORKSPACE " + override + " is not shown to be this agent workspace (its row has another cwd or none), so it is never archived"
+        out["note"] = "SELF_SLASH_WORKSPACE " + override + " is not proven to be this agent workspace (it is not the only row with this cwd, or a workspace above that cwd exists), so it is never archived"
 else:
-    hit = [r for r in rows if rp(r) == agent_cwd]
     if len(hit) == 1:
-        old = hit[0]["workspaceId"]; out["proven"] = "1"
+        old = hit[0]["workspaceId"]
+        if ancestor:
+            out["note"] = old + " has this cwd but a workspace above it exists, so this agent may live in that one; never archived"
+        else:
+            out["proven"] = "1"
     elif len(hit) > 1:
         fg = [r for r in hit if not r.get("background")]
         if len(fg) == 1:
@@ -649,6 +658,8 @@ successor_paseo() {
   short_name=$(printf '%s' "${old_name:-agent}" | python3 -c 'import sys; print(sys.stdin.read()[:24].rstrip())')
   short_model="${s_model:-$successor}"; short_model="${short_model#claude-}"
   title=$(clean "${s_title:-$short_name → $short_model}")
+  settle="${SELF_SLASH_SUCCESSOR_SETTLE-20}"
+  case "$settle" in ""|*[!0-9]*) successor_fail "SELF_SLASH_SUCCESSOR_SETTLE must be whole seconds (got: $settle); nothing was started";; esac
   echo "$(gdate '+%F %T') $host $pane: successor: starting $successor (thinking $s_thinking, mode $mode, workspace $ws, cwd $run_cwd, title \"$title\")"
   runout=$(pcli run /baton --provider "$successor" --thinking "$s_thinking" --mode "$mode" --workspace "$ws" --cwd "$run_cwd" --title "$title" --no-wait --json 2>&1); rc=$?
   [ "$rc" = 0 ] || successor_fail "paseo run failed (rc=$rc): $(printf '%s' "$runout" | gtr -s ' \n' ' ' | gcut -c1-200)"
@@ -659,7 +670,7 @@ successor_paseo() {
   fi
   # Poll the new agent for up to SELF_SLASH_SUCCESSOR_SETTLE seconds (default 20; a late error,
   # as upstream #5705's version gate, shows in the first seconds, L6).  Any bad look is final.
-  settle="${SELF_SLASH_SUCCESSOR_SETTLE:-20}"; end=$(( $(gdate +%s) + settle )); seen=0; nmodel=""; nstatus=""
+  end=$(( $(gdate +%s) + settle )); seen=0; nmodel=""; nstatus=""
   while :; do
     if ninfo=$(pcli agent inspect "$newid" --json 2>&1); then
       seen=1
@@ -669,6 +680,8 @@ successor_paseo() {
       [ -z "$parent" ] || successor_fail "successor $newid is a subagent (ParentAgentId $parent; left running)"
       case "$nstatus" in idle|running|initializing) ;; *) successor_fail "successor $newid is in status '$nstatus', not idle, running or initializing (left running)";; esac
       case "$nmodel" in ""|"-") ;; *) [ -z "$s_model" ] || [ "$nmodel" = "$s_model" ] || successor_fail "successor $newid runs model '$nmodel', not $s_model (left running)";; esac
+    elif [ "$seen" = 1 ]; then
+      successor_fail "successor $newid answered inspect once and then failed: $(printf '%s' "$ninfo" | gtr -s ' \n' ' ' | gcut -c1-120) (left running)"
     fi
     [ "$(gdate +%s)" -lt "$end" ] || break
     sleep 2
@@ -750,7 +763,12 @@ print(" ".join(names))' "$old_wcwd" "$old_ws" "$pane" "${pane:0:7}" "$newid" "${
   return 0
 }
 if [ "$finish" = 1 ] && [ "$host" = paseo ] && [ -n "$successor" ]; then successor_paseo; fi
-if [ "$finish" = 1 ] && [ "$host" = paseo ]; then finish_paseo; fi
+# Unreachable unless successor_paseo returned or aborted without exiting (a bash arithmetic error
+# once fell through to the bare archive, adversary round 2, L1): never archive unverified.
+if [ "$finish" = 1 ] && [ "$host" = paseo ] && [ -n "$successor" ]; then
+  echo "$(gdate '+%F %T') $host $pane: successor path aborted; NOT archived, this session stays usable"; exit 11
+fi
+if [ "$finish" = 1 ] && [ "$host" = paseo ] && [ -z "$successor" ]; then finish_paseo; fi
 wait_idle
 noprompt=0; sendfail=0; drafted=0; last_prompt=""; same=0
 while :; do

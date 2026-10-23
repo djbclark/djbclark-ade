@@ -36,6 +36,7 @@ FAKE_PASEO = textwrap.dedent("""\
           if [ -n "$FAKE_NEW_SEQ" ]; then
             n=$(cat "$FAKE_LOG.n" 2>/dev/null || echo 0); echo $((n+1)) > "$FAKE_LOG.n"
             IFS=, read -ra seq <<< "$FAKE_NEW_SEQ"; FAKE_NEW_STATUS="${seq[$n]:-${seq[${#seq[@]}-1]}}"
+            [ "$FAKE_NEW_STATUS" = FAIL ] && { echo "daemon connection lost" >&2; exit 1; }
           fi
           parent=null; [ -n "$FAKE_NEW_PARENT" ] && parent="\\"$FAKE_NEW_PARENT\\""
           printf '{"Id": "new-agent-1", "Model": "%s", "Status": "%s", "ParentAgentId": %s}\\n' \\
@@ -735,6 +736,64 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         r = self.run_ss(*self.SUCCESSOR, "--workspace", "w s")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    # --- adversary round 2 lows ---
+    def test_r2_l1_a_malformed_settle_is_refused_before_run_and_never_archives(self) -> None:
+        marker = Path(self._tmp.name) / "PWNED"
+        for value in ("20s", "", "1+1", "-5", f"PATH[$(touch {marker})]"):
+            self.calls.unlink(missing_ok=True)
+            r = self.run_waiter(SELF_SLASH_SUCCESSOR_SETTLE=value)
+            self.assertEqual(r.returncode, 11, f"{value!r}: {r.stdout}{r.stderr}")
+            self.assertIn("must be whole seconds", r.stdout)
+            self.assertEqual(self.calls_of("run ", "agent archive"), [], value)
+            self.assertFalse(marker.exists())
+        # a plain integer, 0 included, still works
+        self.assertEqual(self.run_waiter(SELF_SLASH_SUCCESSOR_SETTLE="0").returncode, 0)
+
+    def test_r2_l1_the_bare_archive_is_unreachable_with_a_successor(self) -> None:
+        # a --successor chain must never reach finish_paseo: the guard before it exits 11
+        text = SCRIPT.read_text()
+        self.assertIn('[ -z "$successor" ]; then finish_paseo; fi', text)
+        self.assertIn("successor path aborted; NOT archived", text)
+
+    def test_r2_l2_an_inspect_failing_after_a_good_look_is_exit_11(self) -> None:
+        r = self.run_waiter(FAKE_NEW_SEQ="idle,FAIL", SELF_SLASH_SUCCESSOR_SETTLE="60")
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertIn("answered inspect once and then failed", r.stdout)
+        self.assertEqual(self.calls_of("agent archive"), [])
+        self.assertEqual(len(self.calls_of("agent inspect new-agent-1")), 2)
+        # failing every time is still the old "never answered" exit 11
+        r = self.run_waiter(FAKE_NEW_SEQ="FAIL", SELF_SLASH_SUCCESSOR_SETTLE="0")
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+
+    def test_r2_l3_override_is_proven_only_as_the_single_row_with_this_cwd(self) -> None:
+        env = self.succ_env()
+        cwd, cwd2 = env["FAKE_CWD"], env["FAKE_CWD2"]
+        # shape 1: a sibling workspace with the same cwd named by the override
+        ws = (f'[{{"workspaceId": "mine", "cwd": "{cwd}", "isolation": "local"}},'
+              f' {{"workspaceId": "sibling", "cwd": "{cwd}", "isolation": "local"}},'
+              f' {{"workspaceId": "ws-2", "cwd": "{cwd2}", "isolation": "local"}}]')
+        for override in ("sibling", "mine"):
+            self.calls.unlink(missing_ok=True)
+            r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", SELF_SLASH_WORKSPACE=override, FAKE_WS_JSON=ws)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(self.archived_workspaces(), [], override)
+            self.assertIn("never archived", r.stdout)
+
+    def test_r2_l3_a_workspace_above_the_cwd_means_no_proof(self) -> None:
+        env = self.succ_env()
+        cwd, cwd2 = env["FAKE_CWD"], env["FAKE_CWD2"]
+        parent = str(Path(cwd).parent)
+        # shape 2: the agent lives in a subdirectory of workspace "top"; "sub" has exactly that cwd
+        ws = (f'[{{"workspaceId": "top", "cwd": "{parent}", "isolation": "local"}},'
+              f' {{"workspaceId": "sub", "cwd": "{cwd}", "isolation": "local"}},'
+              f' {{"workspaceId": "ws-2", "cwd": "{cwd2}", "isolation": "local"}}]')
+        for extra in ({}, {"SELF_SLASH_WORKSPACE": "sub"}):
+            self.calls.unlink(missing_ok=True)
+            r = self.run_waiter(SELF_SLASH_S_WORKSPACE="ws-2", FAKE_WS_JSON=ws, **extra)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(self.archived_workspaces(), [], extra)
+            self.assertRegex(r.stdout, r"workspace: sub kept: .*(above|never archived)")
 
 
 if __name__ == "__main__":
