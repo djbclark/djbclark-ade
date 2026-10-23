@@ -42,8 +42,8 @@ FAKE_PASEO = textwrap.dedent("""\
           printf '{"Id": "new-agent-1", "Model": "%s", "Status": "%s", "ParentAgentId": %s}\\n' \\
             "${FAKE_NEW_MODEL-claude-opus-5-5}" "${FAKE_NEW_STATUS-idle}" "$parent"; fi
         else
-          printf '{"Id": "test-agent", "Name": "%s", "Status": "idle", "Mode": "bypassPermissions", "Cwd": "%s", "ParentAgentId": null}\\n' \\
-            "${FAKE_NAME-Lead}" "$FAKE_CWD"
+          printf '{"Id": "test-agent", "Name": "%s", "Status": "idle", "Mode": "%s", "Provider": "%s", "Cwd": "%s", "ParentAgentId": null}\\n' \\
+            "${FAKE_NAME-Lead}" "${FAKE_OLD_MODE-bypassPermissions}" "${FAKE_OLD_PROVIDER-claude}" "$FAKE_CWD"
         fi;;
       "agent archive")
         if [ -n "$FAKE_ARCHIVE_FAIL" ]; then
@@ -431,6 +431,46 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertIn("--thinking max --mode plan ", run)
         self.assertIn("--title Next lead --no-wait", run)
 
+    # --- first live run, 2026-10-23: three failures in a row ---
+    def test_successor_reads_the_agent_id_behind_a_status_line(self) -> None:
+        # Paseo 0.13.0-beta.1 `run --json` prints "Using workspace <id>" before the object.
+        r = self.run_waiter(FAKE_RUN_JSON='Using workspace ws-1\n{"agentId": "new-agent-1", "status": "running"}')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("archived test-agent (successor new-agent-1)", r.stdout)
+
+    def test_successor_from_another_provider_never_copies_its_mode(self) -> None:
+        # An omp agent's mode "full" is not a claude mode: `paseo run` refused it (AGENT_CREATE_FAILED).
+        r = self.run_waiter(FAKE_OLD_PROVIDER="omp", FAKE_OLD_MODE="full")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        run = next(c for c in self.paseo_calls() if c.startswith("run "))
+        self.assertIn("--mode bypassPermissions ", run)
+        self.assertNotIn("full", run)
+
+    def test_successor_to_a_non_claude_provider_from_another_provider_passes_no_mode(self) -> None:
+        r = self.run_waiter(FAKE_OLD_PROVIDER="omp", FAKE_OLD_MODE="full", FAKE_NEW_MODEL="gpt-5.4",
+                            SELF_SLASH_SUCCESSOR="codex/gpt-5.4")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        run = next(c for c in self.paseo_calls() if c.startswith("run "))
+        self.assertNotIn("--mode", run)
+
+    def test_successor_same_provider_still_copies_the_mode(self) -> None:
+        r = self.run_waiter(FAKE_OLD_MODE="plan")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("--mode plan ", next(c for c in self.paseo_calls() if c.startswith("run ")))
+
+    def test_successor_baton_names_the_chain_log(self) -> None:
+        # A lead whose chain lists the repo as a side workspace has no pointer at <repo>/main: a bare
+        # /baton resumed another chain's work. --baton PATH gives the successor the chain explicitly.
+        chain = "/tmp/chains/standalone-x/SESSION_LOG.md"
+        _ = self.run_ss(*self.SUCCESSOR, "--baton", chain, **self.succ_env())
+        self.wait_log("archived test-agent (successor new-agent-1)")
+        run = next(c for c in self.paseo_calls() if c.startswith("run "))
+        self.assertTrue(run.startswith(f"run /baton {chain} --provider "), run)
+
+    def test_baton_flag_needs_successor(self) -> None:
+        r = self.run_ss("--finish", "--baton", "/x")
+        self.assertEqual(r.returncode, 2)
+
     def test_successor_run_failure_exits_11_and_archives_nothing(self) -> None:
         r = self.run_waiter(FAKE_RUN_FAIL="1")
         self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
@@ -507,7 +547,7 @@ class SelfSlashPaseoTests(unittest.TestCase):
         r = self.run_ss("--dry-run", *self.SUCCESSOR, **self.succ_env())
         self.assertEqual(r.returncode, 0, r.stderr)
         for needle in ("workspace ls --background --json",
-                       "run /baton --provider claude/claude-opus-5-5 --thinking high --mode <agent mode>",
+                       "run \"/baton\" --provider claude/claude-opus-5-5 --thinking high --mode <agent mode if the same provider; claude: bypassPermissions; else none>",
                        "--title \"<old name> → opus-5-5\" --no-wait --json",
                        "never --new-workspace", "workspace archive -- <old id>", "terminal ls --workspace <old id> --json",
                        "isolation local (never a worktree)", "polled up to 0s",

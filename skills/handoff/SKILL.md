@@ -274,11 +274,16 @@ command below:
 ```
 
 Use `claude/claude-sonnet-5-5` when the guard says `tight`, or when the operator asked for Sonnet or for
-pipeline-driving. `--mode` and `--title` default to this agent's mode and "<old name> → <model>". Run it
+pipeline-driving. `--title` defaults to "<old name> → <model>"; `--mode` defaults to this agent's mode only
+for a successor on the SAME provider (an omp agent's `full` is not a claude mode: the first live run,
+2026-10-23, was refused), else `bypassPermissions` for claude and the provider's default otherwise. Run it
 **once** and end the turn, as above. After the turn it waits for this agent to be idle, starts a NEW
 top-level agent in the same workspace (`paseo run "/baton" ...`), checks that it is top-level and runs
 the model asked, and only then archives this agent (never `--force`). The successor's first prompt is
-`/baton`, so it resumes from the Tier 1 pointer Step 7 just wrote: Step 7 must be done first. **The
+`/baton`, so it resumes from the Tier 1 pointer Step 7 just wrote: Step 7 must be done first. **When this
+chain lists the repo as a side workspace** (another chain owns `<repo>/<task>/SESSION_LOG.md`), a bare
+`/baton` resumes THAT chain (2026-10-23: the first successor picked up another session's work): pass
+`--baton ~/.local/state/handoffs/chains/<chain-key>/SESSION_LOG.md` so its first prompt names the chain. **The
 pre-handoff transcript survives only in the handoff document and the archived agent's log** (Archived
 agents in the Paseo UI); put anything the operator must read there and in the hermes-ping. On
 herdr and Orca there is no successor form (exit 2): write the handoff, then tell the operator to
