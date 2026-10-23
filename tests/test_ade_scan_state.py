@@ -3463,3 +3463,67 @@ def test_a_tag_on_a_tree_or_blob_is_not_an_unfetched_tip_but_an_absent_commit_st
     mod._remote_cache.clear()
     c = scan_one(mod, roots, remote=True, fetch=True)
     assert c["verdict"] == "clean and pushed" and c["flags"] == [] and c["local_only_verified"] is True, c["flags"]
+
+
+def test_a_credential_in_a_push_url_or_a_second_url_gets_no_push_row(tmp_path):
+    """Codex pass 41 on PR 27, P1: a clean fetch url with a token in `remote.origin.pushurl` (or in a second `url`,
+    or reached through `pushInsteadOf`) left `origin_credential` false, and the plan printed `git push origin`."""
+    mod, doc = load(), load_doc()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    commit_file(work, "ahead.txt")
+    assert scan_one(mod, roots)["origin_credential"] is False
+    git(work, "config", "remote.origin.pushurl", "https://127.0.0.1:9/clean.git")
+    assert scan_one(mod, roots)["origin_credential"] is False
+    git(work, "config", "--add", "remote.origin.pushurl", "https://u:FAKE-SECRET@127.0.0.1:9/x.git")
+    c = scan_one(mod, roots)
+    assert c["origin_credential"] is True, c
+    text = section_3_2(doc.render(doc_scan([c])))
+    assert "push origin" not in text and "push -u" not in text and "FAKE-SECRET" not in text, text
+    git(work, "config", "--unset-all", "remote.origin.pushurl")
+    git(work, "config", "--add", "remote.origin.url", "https://u:FAKE-SECRET@127.0.0.1:9/y.git")
+    assert scan_one(mod, roots)["origin_credential"] is True
+    git(work, "config", "--unset-all", "remote.origin.url")
+    git(work, "config", "remote.origin.url", "https://127.0.0.1:9/x.git")
+    assert scan_one(mod, roots)["origin_credential"] is False
+    # a `url.<base>.pushInsteadOf` rewrite: the config allowlist refuses any `url.*` section, so the checkout is a
+    # skipped record that never reaches a push row; `push_urls_hold_credential` still resolves it (defence in depth)
+    git(work, "config", "url.https://u:FAKE-SECRET@127.0.0.1:9/.pushInsteadOf", "https://127.0.0.1:9/")
+    assert mod.push_urls_hold_credential(work) is True
+    assert "origin_credential" not in scan_one(mod, roots)
+
+
+def test_a_symlinked_modules_directory_or_a_symlink_inside_a_module_is_skipped(tmp_path):
+    """Cursor security review and Codex pass 41 (P1) on PR 27: `.git/modules` itself as a symlink was followed, and a
+    symlinked `objects`, `refs` or anything below them was pruned before the symlink check, so `modules.tar`
+    archived a link instead of the commits at its target."""
+    mod = load()
+    roots, sup, moddir = make_super_with_submodule(tmp_path)
+
+    def verdict():
+        return next(c for c in mod.scan_git([roots], remote=False) if c["path"] == str(sup.resolve()))["verdict"]
+
+    assert not verdict().startswith("skipped")
+    want = "skipped: submodule config unrecognised (symlink)"
+    # a symlink below refs/ (the pruned tree)
+    outside_refs = tmp_path / "outside-heads"
+    (moddir / "refs" / "heads").rename(outside_refs)
+    (moddir / "refs" / "heads").symlink_to(outside_refs)
+    assert verdict() == want
+    (moddir / "refs" / "heads").unlink()
+    outside_refs.rename(moddir / "refs" / "heads")
+    assert not verdict().startswith("skipped")
+    # a symlinked objects directory itself
+    outside_obj = tmp_path / "outside-objects"
+    (moddir / "objects").rename(outside_obj)
+    (moddir / "objects").symlink_to(outside_obj)
+    assert verdict() == want
+    (moddir / "objects").unlink()
+    outside_obj.rename(moddir / "objects")
+    assert not verdict().startswith("skipped")
+    # `.git/modules` itself a symlink
+    modules = moddir.parent
+    assert modules.name == "modules"
+    outside_mod = tmp_path / "outside-modules"
+    modules.rename(outside_mod)
+    modules.symlink_to(outside_mod)
+    assert verdict() == want

@@ -665,6 +665,22 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
         return False, None, []
     env = git_env()
     env["GIT_CEILING_DIRECTORIES"] = str(Path(neutral_cwd()).parent)
+    # `Path.is_dir()` and `os.walk`'s start directory follow a symlink at `modules` itself (or at a parent of it), so
+    # configs under the target would be vetted and a gitfile naming `../.git/modules/sub` would match the outside
+    # directory (Cursor security review on PR 27, 2026-10-23): the resolved path must be the resolved common dir
+    # plus `modules`
+    if modules and (modules.is_symlink() or (modules.exists() and os.path.realpath(modules)
+                                              != os.path.join(os.path.realpath(common), "modules"))):
+        return True, "(symlink)", []
+
+    def internal_symlink(gitdir: str) -> bool:
+        """A symlink anywhere in a module git dir's pruned object store, refs, logs, hooks or lfs: `modules.tar`
+        (no dereference) would archive the link, not the commits at its target (Codex pass 41, P1)."""
+        for name in MODULE_INTERNAL_DIRS:
+            for r, ds, fs in os.walk(os.path.join(gitdir, name), followlinks=False):
+                if any(os.path.islink(os.path.join(r, x)) for x in ds + fs):
+                    return True
+        return False
 
     def offender(cfg: Path) -> str | None:
         if cfg.is_symlink():
@@ -691,13 +707,16 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
             # Kelvin sign), so a name absent from the listing that still opens is one git would read (round 45)
             if any(g not in files and g not in dirs and os.path.lexists(os.path.join(root, g)) for g in GIT_DIR_NAMES):
                 return True, "(unrecognised entry)", []
+            # before the pruning below: a symlinked `objects` or `refs` would otherwise leave `dirs` unseen (Codex pass 41)
+            if any((Path(root) / d).is_symlink() for d in dirs):
+                return True, "(symlink)", []
             if "HEAD" in files or "config" in files:  # a module's git dir: skip its object store and logs
+                if internal_symlink(root):
+                    return True, "(symlink)", []
                 dirs[:] = sorted(d for d in dirs if d not in MODULE_INTERNAL_DIRS)
                 vetted.add(os.path.realpath(root))
             else:  # `modules/` itself or a dir that only groups nested modules: every name is a module
                 dirs[:] = sorted(dirs)
-            if any((Path(root) / d).is_symlink() for d in dirs):
-                return True, "(symlink)", []
             if "commondir" in files:
                 return True, "(commondir)", []
             for name in ("config", "config.worktree"):
@@ -825,6 +844,21 @@ def queried_origin_url(path: Path) -> str | None:
     if not os.path.isabs(url) and (url.startswith(".") or ":" not in url):
         url = str((path / url).resolve())
     return url
+
+
+def push_urls_hold_credential(path: Path) -> bool:
+    """Whether any url `git push origin` may use holds a credential (Codex pass 41, P1): every `remote.origin.url`
+    and `remote.origin.pushurl` value (a push goes to the pushurls when set, else to every url) and every url git
+    resolves for a push after `url.<base>.insteadOf` / `pushInsteadOf` (`remote get-url --push --all`). A failed
+    read is unknown, which refuses the push (the safe direction). Never queried, never kept."""
+    for key in ("remote.origin.url", "remote.origin.pushurl"):
+        rc, out = git(path, "config", "-z", "--get-all", key)
+        if rc not in (0, 1):  # 1: key unset
+            return True
+        if rc == 0 and any(url_holds_credential(u) for u in out.split("\0") if u):
+            return True
+    rc, out = git(path, "remote", "get-url", "--push", "--all", "origin")
+    return rc != 0 or any(url_holds_credential(u) for u in out.split("\n") if u)
 
 
 _BAD_REF_CHARS = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
@@ -1002,7 +1036,10 @@ def origin_branches(path: Path, remote: bool) -> tuple[dict[str, str] | None, bo
                   else None)
         _remote_cache[key] = ((answer[0], True, answer[2], answer[1], False) if answer is not None
                               else (local_origin_refs(path), False, 0, {}, credential))
-    return _remote_cache[key]
+    cached = _remote_cache[key]
+    if not cached[4] and push_urls_hold_credential(path):  # worktree-scoped push urls: never part of the cache key
+        return (*cached[:4], True)
+    return cached
 
 
 def skipped_record(path: Path, reason: str, keys: list[str] | None = None) -> dict:
