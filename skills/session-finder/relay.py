@@ -391,7 +391,6 @@ def stuck_in_box(chan, text, pin="*"):
 
 
 PASTE_MIN = 800     # Claude Code collapses only a paste longer than this into a placeholder
-PIN_WINDOW = 6      # s after typing in which the first collapsed placeholder seen may still be ours
 PASTE_RE = re.compile(r"\[Pasted text #\d+\]")
 
 
@@ -474,9 +473,15 @@ def arm(s, chan, text, mark, pin="*"):
         note_unsent(s["id"], text, d if holds(d, text) or ours_paste(d, text, pin) else "", mark)
 
 
+PASTED_RE = re.compile(r'<pasted_content id="([^"]+)">\s*(.*?)\s*</pasted_content id="\1">', re.S)
+
+
 def sent_in(tx, mark, text):
     """True when the transcript file TX holds, after byte MARK, a user message (or a queued one) that IS TEXT, whole
-    and whitespace-folded. Never a substring: "continue" appears in any assistant line (adversary round 8)."""
+    and whitespace-folded. Never a substring: "continue" appears in any assistant line (adversary round 8). Claude
+    Code records a collapsed paste (a text over 800 characters) wrapped in `<pasted_content id="N">...</pasted_content
+    id="N">`, in the user line and in the enqueue alike (seen in real transcripts, round 9); hook-injected (isMeta)
+    and compact-summary lines are not messages anyone sent."""
     want = " ".join((text or "").split())
     if not (tx and Path(tx).is_file()) or mark is None or not want:
         return False
@@ -490,6 +495,8 @@ def sent_in(tx, mark, text):
             continue
         if not isinstance(o, dict):
             continue
+        if o.get("isMeta") or o.get("isCompactSummary"):
+            continue
         if o.get("type") == "queue-operation" and o.get("operation") == "enqueue":
             got = [o.get("content")]
         elif o.get("type") == "user":
@@ -498,8 +505,11 @@ def sent_in(tx, mark, text):
                    if isinstance(c, list) else c]
         else:
             continue
-        if any(isinstance(g, str) and " ".join(g.split()) == want for g in got):
-            return True
+        for g in got:
+            if isinstance(g, str):
+                m = PASTED_RE.fullmatch(g.strip())
+                if " ".join((m.group(2) if m else g).split()) == want:
+                    return True
     return False
 
 
@@ -776,19 +786,20 @@ def route_pane(c):
             return ("unverified", f"text typed into {chan[0]} {chan[1]} (or not: the typing CLI did not finish) but its "
                                   "Enter failed; it may sit in the input box. Do not resend; check its pane")
         return ("skip", f"typing into {chan[0]} {chan[1]} failed")
-    seen, deadline, t0 = None, time.time() + a.wait, time.time()
-    typed_at, retries, stuck, pin = time.time(), 0, False, "*"
+    seen, deadline = None, time.time() + a.wait
+    typed_at, retries, stuck, pin, was_ours, gone = time.time(), 0, False, "*", False, False
     while time.time() < deadline:
         if sent_in(tx, mark, text):
             seen = "delivered"
             break
         stuck, ours_now, seen_box = box_state(chan, text, pin) if s["agent"] == "claude" else (False, False, "")
-        if pin == "*":    # the box was empty before we typed: the first placeholder seen is ours, a later number is not
-            if ours_now and PASTE_RE.fullmatch(seen_box or ""):
-                pin = seen_box
-            elif seen_box or time.time() - t0 > PIN_WINDOW:    # a box with something else in it, or too late to be ours
-                pin = ""
-        if ours_now and retries < ENTER_RETRIES and time.time() - typed_at >= RETRY_AFTER:
+        if pin == "*":    # the box was empty before we typed: the placeholder in the FIRST read is ours, a later one is not
+            pin = seen_box if ours_now and PASTE_RE.fullmatch(seen_box or "") else ""
+        if ours_now:
+            was_ours = True
+        elif seen_box == "" and was_ours:
+            gone = True    # our copy left the box (submitted): a copy that shows up again is a recall, never ours to submit
+        if ours_now and not gone and retries < ENTER_RETRIES and time.time() - typed_at >= RETRY_AFTER:
             press_enter(chan)
             typed_at, retries = time.time(), retries + 1
         scr = screen(chan, 30)

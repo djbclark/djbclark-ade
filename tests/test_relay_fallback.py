@@ -972,8 +972,6 @@ class TestRound7(Harness):
     # 3. one placeholder is ours: the one seen right after typing
     def test_a_later_paste_placeholder_is_the_operators_not_ours(self) -> None:
         long = "word " * 200
-        relay.PIN_WINDOW = -1    # the placeholder comes after the window in which a first one could still be ours
-        self.addCleanup(setattr, relay, "PIN_WINDOW", 6)
         shown = iter(["", "", "[Pasted text #7]"])
         relay.draft = lambda chan: next(shown, "[Pasted text #7]")
         relay.screen = lambda chan, lines=20: ""
@@ -1131,13 +1129,54 @@ class TestRound7(Harness):
         self.assertEqual((rc, self.calls), (1, []))
         self.assertIn("out of view", err)
 
-    def test_our_placeholder_that_renders_after_an_empty_first_read_is_still_ours(self) -> None:
+    def test_a_placeholder_after_an_empty_first_read_is_not_ours_but_keeps_the_entry_armed(self) -> None:
         long = "word " * 200
-        self.box_after(2, "[Pasted text #1]")    # pre-send and first in-loop read empty, then our own placeholder
+        relay.claude_socket = lambda s: "/tmp/x.sock"
+        self.box_after(2, "[Pasted text #1]")    # pre-send and first in-loop read empty, then a placeholder
         relay.screen = lambda chan, lines=20: ""
         calls = self.enters()
+        rc, _, _ = self.run_text(sess(), long)
+        self.assertEqual(rc, 1)
+        self.assertNotIn("enter", calls)    # could be the operator's own paste: never submitted blind
+        self.assertIsNotNone(relay.leftover("cccccccc"))
+        self.calls.clear()
+        rc, _, _ = self.run_text(sess(), long)    # the retry must not reach the socket and duplicate
+        self.assertNotIn("socket", self.calls)
+
+    def test_a_copy_that_comes_back_after_ours_left_the_box_is_a_recall_and_is_not_submitted(self) -> None:
+        long = "word " * 200
+        shown = iter(["", "[Pasted text #1]", "", "[Pasted text #1]", "[Pasted text #1]"])
+        relay.draft = lambda chan: next(shown, "[Pasted text #1]")
+        relay.screen = lambda chan, lines=20: ""
+        relay.RETRY_AFTER = 0
+        calls = self.enters()
         self.run_text(sess(), long)
-        self.assertIn("enter", calls)
+        self.assertEqual(calls.count("enter"), 1)    # once while it sat there; none after it left and came back
+
+    def test_a_collapsed_paste_is_recorded_wrapped_and_that_counts_as_delivered(self) -> None:
+        long = "word " * 200
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        wrapped = '<pasted_content id="5811">\n' + long.strip() + '\n</pasted_content id="5811">'
+        with tx.open("a") as fh:
+            fh.write(json.dumps({"type": "queue-operation", "operation": "enqueue", "content": wrapped}) + "\n")
+        self.assertTrue(relay.sent_in(str(tx), 0, long))
+        self.assertFalse(relay.sent_in(str(tx), 0, long + "more"))
+        tx.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": wrapped}}) + "\n")
+        self.assertTrue(relay.sent_in(str(tx), 0, long))
+
+    def test_a_wrapper_whose_closing_id_differs_is_not_a_collapsed_paste(self) -> None:
+        tx = self.tmp / "t.jsonl"
+        tx.write_text(json.dumps({"type": "user", "message": {"role": "user", "content":
+                                  '<pasted_content id="1">\nhello there friend\n</pasted_content id="2">'}}) + "\n")
+        self.assertFalse(relay.sent_in(str(tx), 0, "hello there friend"))
+
+    def test_hook_injected_and_compact_summary_lines_are_not_deliveries(self) -> None:
+        tx = self.tmp / "t.jsonl"
+        tx.write_text(json.dumps({"type": "user", "isMeta": True, "message": {"role": "user", "content": "continue"}}) + "\n"
+                      + json.dumps({"type": "user", "isCompactSummary": True, "message": {"role": "user", "content": "go"}}) + "\n")
+        self.assertFalse(relay.sent_in(str(tx), 0, "continue"))
+        self.assertFalse(relay.sent_in(str(tx), 0, "go"))
 
     def test_a_late_second_placeholder_is_not_ours_after_the_pin(self) -> None:
         long = "word " * 200
