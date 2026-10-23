@@ -696,7 +696,7 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
                     return True
         return False
 
-    worktrees: dict[str, list[str]] = {}  # module git dir (realpath) -> its `core.worktree` values (git writes one)
+    worktrees: dict[str, list[str]] = {}  # module git dir (realpath) -> the last `core.worktree` of each of its config files
 
     def offender(cfg: Path) -> str | None:
         if cfg.is_symlink():
@@ -708,9 +708,9 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
         if rc != 0:
             return "(unreadable)"
         entries = [tuple(e.partition("\n")[::2]) for e in out.split("\0") if e]
-        for key, value in entries:
-            if key.lower() == "core.worktree":  # accepted by the allowlist, judged below against the checkout
-                worktrees.setdefault(os.path.realpath(cfg.parent), []).append(value)
+        values = [value for key, value in entries if key.lower() == "core.worktree"]
+        if values:  # accepted by the allowlist, judged below against the checkout: each file's last value (git's), whichever file git reads
+            worktrees.setdefault(os.path.realpath(cfg.parent), []).append(values[-1])
         bad = config_offenders(entries, in_submodule=True)
         return bad[0] if bad else None
 
@@ -827,7 +827,7 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
         # git honours `core.worktree`: the plan's `git -C <checkout>/<sub>` would read whatever directory it names unless
         # it resolves to the submodule's own checkout (Cursor security review on PR 27, MEDIUM)
         checkout = os.path.realpath(path / sub)
-        if any(os.path.realpath(os.path.join(os.fsdecode(target), v)) != checkout for v in worktrees.get(os.fsdecode(target), [])[-1:]):  # git uses the last
+        if any(os.path.realpath(os.path.join(os.fsdecode(target), v)) != checkout for v in worktrees.get(os.fsdecode(target), [])):
             return True, "(core.worktree outside)", []
         subs.append(sub)  # a real checked-out submodule: `.git` names a git dir the walk vetted
     return True, None, subs
@@ -1337,9 +1337,9 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
             f = line.split()
             if f:
                 stash_commits.update([f[0], *f[2:4]])
-                bases.extend(f[1:2])
         # the tip's own base, whatever its reflog says: an expired or absent reflog leaves `refs/stash` with no entries
-        # (adversary round 52 on PR 27, MEDIUM; `rev-parse` exits 1 only for "no such revision")
+        # (adversary round 52 on PR 27, MEDIUM; `rev-parse` exits 1 only for "no such revision"). An older entry's base is
+        # not added here: the reflog count below carries it, with the pack that holds it, so it is counted once (round 53)
         rc, out = git(path, "rev-parse", "--verify", "--quiet", "refs/stash^1")
         if rc not in (0, 1):
             return incomplete_record(path, "rev-parse refs/stash^1", rc)

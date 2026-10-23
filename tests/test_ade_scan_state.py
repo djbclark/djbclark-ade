@@ -1173,7 +1173,7 @@ def test_scan_doc_generator_code_spans_survive_backticks():
         assert span in text, span
     # a report path is an argument of the row's copy command now: shell-quoted, inside one double-backtick span
     assert "&& \"$GCP\" --parents -t <DEST>/bigteam/'t`k' -- 'r`eport.md') ``" in text
-    assert "`` git -C '/p/c`o' push -u origin refs/heads/'b`r':refs/heads/'b`r' `` or " in text  # shell-quoted since round 8
+    assert "`` git -C '/p/c`o' -c core.hooksPath=/dev/null push -u origin refs/heads/'b`r':refs/heads/'b`r' `` or " in text  # shell-quoted since round 8
 
 
 def doc_scan(checkouts, tasks=(), **summary):
@@ -1245,7 +1245,7 @@ def test_capture_plan_keeps_a_checkout_whose_only_unpushed_work_is_on_another_br
     rows = section_3_2(mod.render(doc_scan([side, many, clean]))).splitlines()
     row = next(r for r in rows if r.startswith("| /p/work "))
     assert "2 local-only commits on `side` (2)" in row
-    assert "`git -C /p/work push origin refs/heads/side:refs/heads/side`" in row
+    assert "`git -C /p/work -c core.hooksPath=/dev/null push origin refs/heads/side:refs/heads/side`" in row
     assert "commit(s) on `main`" not in row  # HEAD's own branch is pushed: no "0 commit(s)" row
     assert "and 3 more branches" in next(r for r in rows if r.startswith("| /p/many "))
     assert not [r for r in rows if r.startswith("| /p/clean ")]
@@ -1346,7 +1346,7 @@ def test_capture_plan_commands_shell_quote_paths_and_branch_names():
                         local_only_branches=[{"branch": "side$(touch${IFS}PWNED)", "count": 1}])
     rows = section_3_2(mod.render(doc_scan([evil]))).splitlines()
     row = next(r for r in rows if r.startswith("| /p/evil dir ") or r.startswith("| /p/evil\\ dir "))
-    assert "git -C '/p/evil dir' push origin refs/heads/'side$(touch${IFS}PWNED)':refs/heads/'side$(touch${IFS}PWNED)'" in row.replace("\\$", "$").replace("\\{", "{").replace("\\}", "}").replace("\\(", "(").replace("\\)", ")")
+    assert "git -C '/p/evil dir' -c core.hooksPath=/dev/null push origin refs/heads/'side$(touch${IFS}PWNED)':refs/heads/'side$(touch${IFS}PWNED)'" in row.replace("\\$", "$").replace("\\{", "{").replace("\\}", "}").replace("\\(", "(").replace("\\)", ")")
     assert "push origin side$(touch" not in row
 
 
@@ -2388,7 +2388,7 @@ def test_capture_plan_pushes_or_bundles_a_tag_object_on_a_pushed_commit():
     row = next(r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith("| /p/t "))
     assert "2 local tag(s) origin lacks: `release`, `--force`" in row
     # round 37: every tag in one push and one bundle, however many there are; no per-tag argv
-    assert "`git -C /p/t push origin --tags` or `mkdir" in row and "refs/tags/--force" not in row
+    assert "`git -C /p/t -c core.hooksPath=/dev/null push origin --tags` or `mkdir" in row and "refs/tags/--force" not in row
     assert "git -C /p/t bundle create <DEST>/checkouts/abs/p/t/tags.bundle --tags" in row
     assert "rejected by the push: bundle it, or decide to force" in row
     assert row.rstrip().endswith("| yes: pushing a tag publishes it; pick push or bundle |")
@@ -2424,8 +2424,8 @@ def test_capture_plan_never_pushes_to_a_credential_bearing_origin():
     for co in (head, others, tags):
         co["flags"].remove(cred)
     text = section_3_2(mod.render(doc_scan([head, others, tags])))
-    assert text.count("git -C /p/h push -u origin") == 1 and text.count("git -C /p/o push origin") == 2
-    assert text.count("git -C /p/t push origin --tags") == 1 and "holds a credential" not in text
+    assert text.count("git -C /p/h -c core.hooksPath=/dev/null push -u origin") == 1 and text.count("git -C /p/o -c core.hooksPath=/dev/null push origin") == 2
+    assert text.count("git -C /p/t -c core.hooksPath=/dev/null push origin --tags") == 1 and "holds a credential" not in text
 
 
 def test_a_credential_bearing_origin_gets_no_push_row_without_remote(tmp_path):
@@ -2549,7 +2549,7 @@ def test_a_newline_in_a_path_is_ansi_c_quoted_in_every_generated_command():
     assert "-- $'a\\nb-report.md')" in row and row.count("|") == 5
     rows = section_3_2(text).splitlines()
     row = next(r for r in rows if r.startswith("| /p/a\\nb "))  # esc: the newline is shown as text, never a space
-    assert "git -C $'/p/a\\nb' push origin refs/heads/side:refs/heads/side" in row
+    assert "git -C $'/p/a\\nb' -c core.hooksPath=/dev/null push origin refs/heads/side:refs/heads/side" in row
     assert not any(ln.startswith("b'") for ln in rows)  # no row was split at the newline
     with pytest.raises(ValueError):
         mod.code("{}", "a\nb")  # refused, never turned into a space
@@ -2571,7 +2571,7 @@ def test_capture_plan_pushes_a_local_only_tag_by_its_full_ref_name():
                       local_only_tags=[{"tag": "v1", "count": 1}, {"tag": "--force", "count": 1}])
     row = next(r for r in section_3_2(mod.render(doc_scan([co]))).splitlines() if r.startswith("| /p/tg "))
     assert "2 local-only commits on tag `v1` (1), tag `--force` (1)" in row
-    assert "git -C /p/tg push origin refs/tags/v1:refs/tags/v1" in row
+    assert "git -C /p/tg -c core.hooksPath=/dev/null push origin refs/tags/v1:refs/tags/v1" in row
     assert "push origin refs/tags/--force:refs/tags/--force" in row
 
 
@@ -3794,8 +3794,8 @@ def test_the_base_of_an_older_stash_entry_is_counted_and_gets_the_reflog_pack(tm
     _stash_on_deleted_branch(work, "x")
     _stash_on_deleted_branch(work, "y")
     c = scan_one(mod, roots)
-    assert c["stashes"] == 2 and c["local_only_commits"] == 2 and c["verdict"] != "clean and pushed", c
-    assert c["reflog_only_commits"] == 1, c  # the older entry's base: no ref holds it, `--all` does not reach it
+    assert c["stashes"] == 2 and c["local_only_commits"] == 1 and c["verdict"] != "clean and pushed", c
+    assert c["reflog_only_commits"] == 1, c  # counted once: the tip's base above, the older entry's here  # the older entry's base: no ref holds it, `--all` does not reach it
     # an ordinary pair of stashes on a pushed base stays free of both counts
     (tmp_path / "plain").mkdir()
     roots, work, _ = make_pushed_checkout(tmp_path / "plain")
@@ -3817,6 +3817,33 @@ def test_a_stash_ref_with_an_expired_reflog_is_still_a_stash_with_its_base_count
     assert c["stashes"] >= 1 and c["local_only_commits"] == 1 and c["verdict"] != "clean and pushed", c
 
 
+def test_a_branch_name_that_is_not_utf8_gets_one_bundle_of_every_ref_and_no_push():
+    """Codex pass 48 on PR 27, P1: the scanner decodes a non-UTF-8 ref name to U+FFFD, so `refs/heads/<name>` named no
+    ref and both alternatives failed; only `bundle create --all` can hold the commits."""
+    doc = load_doc()
+    odd = "b\ufffd"
+    head = doc_checkout("/p/o", branch=odd, unpushed=2, ahead_of_origin=2, flags=["unpushed commits"], verdict="unpushed commits")
+    other = doc_checkout("/p/q", local_only_commits=1, flags=["unpushed commits", "local-only commits: 1 in total"],
+                         verdict="unpushed commits", local_only_branches=[{"branch": odd, "count": 1}])
+    text = doc.render(doc_scan([head, other]))
+    rows = {r.split("|")[1].strip(): r for r in section_3_2(text).splitlines() if r.startswith("| ")}
+    for path in ("/p/o", "/p/q"):
+        row = next(r for p, r in rows.items() if p.endswith(path))
+        assert "refs/heads/" not in row and not re.search(r"git -C \S+ (?:-c \S+ )?push", row), row
+        assert "bundle create" in row and "--all" in row and "not valid UTF-8" in row, row
+
+
+def test_every_generated_push_runs_without_hooks():
+    """Codex pass 48 on PR 27, P1: a checkout's or the operator's `pre-push` hook ran during a preservation step."""
+    doc = load_doc()
+    c = doc_checkout("/p/t", branch="side", unpushed=1, ahead_of_origin=1, flags=["unpushed commits", "unpushed tags", "unpushed tag names: v1"],
+                     verdict="unpushed commits", local_only_commits=1, local_only_branches=[{"branch": "other", "count": 1}],
+                     local_only_tags=[{"tag": "v1", "count": 0}])
+    text = doc.render(doc_scan([c]))
+    pushes = re.findall(r"git -C \S+ (?:-c core\.hooksPath=/dev/null )?push", text)
+    assert pushes and all("-c core.hooksPath=/dev/null" in p for p in pushes), pushes
+
+
 def test_a_global_push_rewrite_to_a_helper_gets_no_push_row(tmp_path, monkeypatch):
     """Codex pass 46 on PR 27, P1: the url checks ran with the global config switched off, but the printed push runs in
     the operator's shell, where `url.<base>.pushInsteadOf` can turn a clean url into a helper or credential url."""
@@ -3833,6 +3860,29 @@ def test_a_global_push_rewrite_to_a_helper_gets_no_push_row(tmp_path, monkeypatc
     assert mod.push_urls_hold_credential(work) is True
     (home / ".gitconfig").write_text('[url "https://u:FAKE-SECRET@127.0.0.1:9/"]\n\tpushInsteadOf = https://127.0.0.1:9/\n')
     assert mod.push_urls_hold_credential(work) is True
+
+
+def test_only_the_operator_config_call_sees_the_operators_git_config_variables(tmp_path, monkeypatch):
+    """Adversary round 53 INFO 6 on PR 27: the push-URL call restores the operator's `GIT_CONFIG_*`; no other call may."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.pager=cat'")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "url.x.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "y")
+    seen = []
+    real = mod.run
+
+    def spy(argv, *a, **kw):
+        env = kw.get("env") or {}
+        seen.append((" ".join(argv), "GIT_CONFIG_PARAMETERS" in env, env.get("GIT_CONFIG_GLOBAL")))
+        return real(argv, *a, **kw)
+
+    monkeypatch.setattr(mod, "run", spy)
+    mod.push_urls_hold_credential(work)
+    carrying = [a for a, has, _ in seen if has]
+    assert len(carrying) == 1 and "get-url" in carrying[0] and carrying[0].count("--push") == 1, seen
+    assert all(g == os.devnull for a, has, g in seen if not has), seen
 
 
 def test_a_stash_reflog_that_is_not_a_regular_file_is_incomplete_not_a_hang(tmp_path):
@@ -3871,6 +3921,16 @@ def test_a_submodule_core_worktree_must_resolve_to_its_own_checkout(tmp_path):
     assert rec["verdict"] == "skipped: submodule config unrecognised (core.worktree outside)", rec["verdict"]
     assert rec.get("submodules_vetted") is None, rec
     cfg.write_text(text)
+    assert mod.scan_checkout(sup, remote=False)["submodules_vetted"] == ["sub"]
+    # adversary round 53, MEDIUM: `config.worktree` is ignored by git without `extensions.worktreeConfig`, so a correct
+    # value there cannot vouch for an outside one in `config`
+    (cfg.parent / "config.worktree").write_text("[core]\n\tworktree = ../../../sub\n")
+    cfg.write_text(text.replace("worktree = ../../../sub", f"worktree = {tmp_path}"))
+    rec = mod.scan_checkout(sup, remote=False)
+    assert rec["verdict"] == "skipped: submodule config unrecognised (core.worktree outside)", rec["verdict"]
+    # git's own duplicate-line rule (the last wins) is honoured: an outside line followed by the right one is fine
+    (cfg.parent / "config.worktree").unlink()
+    cfg.write_text(text.replace("worktree = ../../../sub", f"worktree = {tmp_path}\n\tworktree = ../../../sub"))
     assert mod.scan_checkout(sup, remote=False)["submodules_vetted"] == ["sub"]
 
 

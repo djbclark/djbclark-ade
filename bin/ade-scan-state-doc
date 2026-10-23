@@ -215,6 +215,8 @@ def submodule_commands(raw_p, ck, sub):
 # pack: `rev-list --objects` lists everything the reflogs reach that no ref does (a superset of the count: stash
 # entries and origin's live tips included), `pack-objects` packs that list. A partial clone's missing promisor
 # objects are listed as nothing to keep, never fetched: the capture plan's rows never reach the network (round 38)
+ODD_NAME = "\ufffd"  # what the scanner's lossy decoding leaves of a ref name that is not UTF-8
+ODD_NAME_NOTE = " (a branch or tag name is not valid UTF-8, so no push can name it: bundle every ref)"
 REFLOG_FMT = ("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_NO_LAZY_FETCH=1 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} "
               "rev-list --objects --missing=allow-promisor --reflog --not --all > <DEST>/{}/reflog-only.list "
               "&& GIT_ADVICE=0 GIT_NO_LAZY_FETCH=1 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} pack-objects <DEST>/{}/reflog-only < <DEST>/{}/reflog-only.list")
@@ -701,11 +703,19 @@ def render(d):
                 # fully qualified refspecs: a branch named like an option (`--mirror`) must never reach git's option
                 # parser, and shell quoting does not stop that (Codex pass 7 on PR 27); the bundle's file name is the
                 # percent-encoded branch, so `a/b` and `a_b` stay distinct
-                push = shcode("git -C {} push -u origin refs/heads/{}:refs/heads/{}", raw_p, c["branch"], c["branch"])
-                bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} refs/heads/{}",
-                                ck, raw_p, f"{ck}/branch-{quote(c['branch'], safe='')}.bundle", c["branch"])
-                cmd.append(bundle + cred_note if credential else push + " or " + bundle)
-                need = cred_need if credential else "yes: pushing a branch publishes it; pick push or bundle"
+                if ODD_NAME in c["branch"]:
+                    # the scanner decoded a name that is not UTF-8 to U+FFFD: `refs/heads/<that>` names no ref, so only
+                    # a bundle of every ref can hold the commits (Codex pass 48 on PR 27, P1)
+                    bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
+                                    ck, raw_p, f"{ck}/all-refs.bundle")
+                    cmd.append(bundle + ODD_NAME_NOTE + (cred_note if credential else ""))
+                    need = cred_need if credential else "yes: bundle it; the branch name cannot be typed into a push"
+                else:
+                    push = shcode("git -C {} -c core.hooksPath=/dev/null push -u origin refs/heads/{}:refs/heads/{}", raw_p, c["branch"], c["branch"])
+                    bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} refs/heads/{}",
+                                    ck, raw_p, f"{ck}/branch-{quote(c['branch'], safe='')}.bundle", c["branch"])
+                    cmd.append(bundle + cred_note if credential else push + " or " + bundle)
+                    need = cred_need if credential else "yes: pushing a branch publishes it; pick push or bundle"
         if local_n and not covered_by_bundle:
             # commits on other local branches, tags (or a detached HEAD) that no origin ref holds, whatever HEAD's own state
             others = [b for b in (c.get("local_only_branches") or [])
@@ -720,15 +730,18 @@ def render(d):
                              else f"{local_n} local-only commits on {names}") + tail)
             else:
                 what.append(f"{local_n} local-only commits (branches not itemised)" + tail)
-            lo_cmd = [shcode("git -C {} push origin refs/heads/{}:refs/heads/{}", raw_p, b["branch"], b["branch"])
-                      for b in others if b["branch"] != "HEAD"]
+            lo_cmd = [shcode("git -C {} -c core.hooksPath=/dev/null push origin refs/heads/{}:refs/heads/{}", raw_p, b["branch"], b["branch"])
+                      for b in others if b["branch"] != "HEAD" and ODD_NAME not in b["branch"]]
+            odd_names = any(ODD_NAME in b["branch"] for b in others) or any(ODD_NAME in t["tag"] for t in tag_others)
             # a tag is pushed by its full ref name, like a branch: a tag named like an option never reaches git's parser
-            lo_cmd += [shcode("git -C {} push origin refs/tags/{}:refs/tags/{}", raw_p, t["tag"], t["tag"])
-                       for t in tag_others]
+            lo_cmd += [shcode("git -C {} -c core.hooksPath=/dev/null push origin refs/tags/{}:refs/tags/{}", raw_p, t["tag"], t["tag"])
+                       for t in tag_others if ODD_NAME not in t["tag"]]
             bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
                             ck, raw_p, f"{ck}/local-only.bundle")
             if credential:
                 cmd.append(bundle + cred_note)
+            elif odd_names:
+                cmd.append(bundle + ODD_NAME_NOTE)  # one bundle holds every ref; no push can name the odd one
             else:
                 cmd.append(bundle if not lo_cmd else "; ".join(lo_cmd[:-1] + [lo_cmd[-1] + " or " + bundle]))
             need = need if need.startswith(("yes", "**yes")) else (
@@ -743,7 +756,7 @@ def render(d):
             # same object is up to date; one it has at another object is rejected, loudly
             bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} "
                             "bundle create <DEST>/{} --tags", ck, raw_p, f"{ck}/tags.bundle")
-            cmd.append(bundle + cred_note if credential else shcode("git -C {} push origin --tags", raw_p) + " or " + bundle
+            cmd.append(bundle + cred_note if credential else shcode("git -C {} -c core.hooksPath=/dev/null push origin --tags", raw_p) + " or " + bundle
                        + " (a tag origin has at another object is rejected by the push: bundle it, or decide to force)")
             need = need if need.startswith(("yes", "**yes")) else (
                 cred_need if credential else "yes: pushing a tag publishes it; pick push or bundle")
@@ -755,7 +768,7 @@ def render(d):
             # a routine amend, rebase or squash-merge leaves such entries too, for `gc.reflogExpireUnreachable` (30 days
             # by default), so the count is a prompt to look, not proof of lost work (adversary round 38)
             what.append(f"{reflog} reflog-only commit(s) (left by a reset, amend, rebase or squash-merge in the last ~30 days; "
-                        "no ref holds them)")
+                        "no ref holds them; an older stash entry's base counts here too)")
             # the pack holds only what origin lacks, so it restores into a clone that has origin's history and this
             # checkout's bundles; a ref must then hold each commit or the next `gc` prunes it again (round 38)
             cmd.append(shcode(REFLOG_FMT, *reflog_values(raw_p, ck))
