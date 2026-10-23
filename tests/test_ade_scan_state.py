@@ -4093,7 +4093,7 @@ def test_git_lfs_payloads_of_unpushed_commits_get_an_archive_row(tmp_path):
     obj.mkdir(parents=True)
     (obj / "abcd0123").write_text("PAYLOAD\n")
     rec = mod.scan_checkout(work, remote=False)
-    assert rec["lfs_store"] == str(work / ".git" / "lfs") and rec["verdict"] == "clean and pushed", rec  # nothing to capture: no row
+    assert rec["lfs_store"] == str(work / ".git" / "lfs" / "objects") and rec["verdict"] == "clean and pushed", rec  # nothing to capture: no row
     commit_file(work, "unpushed.txt")
     rec = mod.scan_checkout(work, remote=False)
     row = next(r for r in section_3_2(doc.render(doc_scan([rec]))).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
@@ -4105,7 +4105,19 @@ def test_git_lfs_payloads_of_unpushed_commits_get_an_archive_row(tmp_path):
     run = subprocess.run(["bash", "-c", PLAN_PREFIX + cmd.replace("<DEST>", str(dest))], capture_output=True, text=True, env=GIT_ENV)
     assert run.returncode == 0, run.stderr
     held = subprocess.run(["tar", "-tf", str(dest / ck / "lfs.tar")], capture_output=True, text=True).stdout
-    assert "objects/ab/cd/abcd0123" in held, held
+    assert "./ab/cd/abcd0123" in held, held  # the objects directory itself (round 60 LOW 1)
+    # a symlink inside the store is kept as a link, never followed (no `tar -h`): the target outside it stays out
+    outside = tmp_path / "outside-secret"
+    outside.write_text("NOT-PART-OF-THE-STORE\n")
+    (work / ".git" / "lfs" / "objects" / "ab" / "evil").symlink_to(outside)
+    shutil.rmtree(dest)
+    (dest / ck).mkdir(parents=True)
+    run = subprocess.run(["bash", "-c", PLAN_PREFIX + cmd.replace("<DEST>", str(dest))], capture_output=True, text=True, env=GIT_ENV)
+    assert run.returncode == 0, run.stderr
+    listing = subprocess.run(["tar", "-tvf", str(dest / ck / "lfs.tar")], capture_output=True, text=True).stdout
+    assert re.search(r"^l\S* .*\./ab/evil -> ", listing, re.M), listing
+    assert b"NOT-PART-OF-THE-STORE" not in (dest / ck / "lfs.tar").read_bytes()
+    (work / ".git" / "lfs" / "objects" / "ab" / "evil").unlink()
     # every capture reason, not only unpushed commits: a stash holds pointers only (adversary round 58, MEDIUM)
     git(work, "reset", "-q", "--hard", "origin/main")
     (work / "a.txt").write_text("edited\n")
@@ -4119,7 +4131,7 @@ def test_git_lfs_payloads_of_unpushed_commits_get_an_archive_row(tmp_path):
     shutil.move(str(work / ".git" / "lfs"), str(real))
     (work / ".git" / "lfs").symlink_to(real)
     rec = mod.scan_checkout(work, remote=False)
-    assert rec["lfs_store"] == os.path.realpath(real), rec["lfs_store"]
+    assert rec["lfs_store"] == os.path.realpath(real / "objects"), rec["lfs_store"]
 
 
 def test_a_bracketed_or_password_scp_url_is_a_credential():
@@ -4167,6 +4179,7 @@ def test_branches_past_the_cap_force_the_bundle_and_a_symlinked_objects_dir_is_a
                       local_only_branches_uncounted=2)
     row = next(r for r in section_3_2(doc.render(doc_scan([co]))).splitlines() if r.startswith("| /p/cap "))
     assert not re.search(r"git -C \S+ (?:-c \S+ )?push", row) and "bundle create" in row and "2 more branches or tags are not itemised" in row, row
+    assert row.rstrip().endswith("| yes: bundle it; a push would leave commits on other refs behind |"), row  # round 60, LOW 3
     roots, work, _ = make_pushed_checkout(tmp_path)
     ext = tmp_path / "ext-objects" / "ab" / "cd"
     ext.mkdir(parents=True)
@@ -4192,11 +4205,11 @@ def test_branches_past_the_cap_force_the_bundle_and_a_symlinked_objects_dir_is_a
     gcfg = tmp_path / "gitconfig"
     gcfg.write_text(f"[lfs]\n\tstorage = {store}\n")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gcfg))
-    assert mod.scan_checkout(work, remote=False)["lfs_store"] == os.path.realpath(store)
+    assert mod.scan_checkout(work, remote=False)["lfs_store"] == os.path.realpath(store / "objects")
     gcfg.write_text("[lfs]\n\tstorage = ../rel-store\n")
     (work / "rel-store" / "objects" / "22").mkdir(parents=True)
     (work / "rel-store" / "objects" / "22" / "y").write_text("p\n")
-    assert mod.scan_checkout(work, remote=False)["lfs_store"] == os.path.realpath(work / "rel-store")
+    assert mod.scan_checkout(work, remote=False)["lfs_store"] == os.path.realpath(work / "rel-store" / "objects")
 
 
 def test_a_url_rewrite_key_never_reports_its_credential_and_a_scheme_less_scp_url_with_a_password_is_one(tmp_path):
@@ -4367,3 +4380,69 @@ def test_every_3_2_row_is_four_cells_in_a_gfm_view_with_every_command_in_the_com
         assert command.count("`") % 2 == 0 and cells[3].lstrip("*").startswith(("yes", "no")), cells
         # the commands the tests run are exactly the spans of the command cell
         assert len(plan_commands(row)) == 7, plan_commands(row)
+
+
+def test_a_percent_encoded_subsection_never_reports_its_secret(tmp_path):
+    """Adversary round 60 on PR 27, LOW 2: `%3F`, `%23` and `%40` stand for `?`, `#` and `@` in a url, so the key's
+    subsection carried the token past the redaction."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    git(work, "config", "url.https://h/%3Ftoken=FAKE-PCT-1111.insteadOf", "https://a/")
+    git(work, "config", "url.https://u:FAKE-PCT-2222%40h/x.insteadOf", "https://b/")
+    git(work, "config", "url.https://h/%23FAKE-PCT-3333.insteadOf", "https://c/")
+    blob = json.dumps(mod.scan_checkout(work, remote=False))
+    for secret in ("FAKE-PCT-1111", "FAKE-PCT-2222", "FAKE-PCT-3333"):
+        assert secret not in blob, blob
+    assert "<redacted>" in blob
+
+
+@pytest.mark.parametrize("flag", ["--skip-worktree", "--assume-unchanged"])
+def test_a_repository_that_replaces_an_index_hidden_path_is_found(tmp_path, flag):
+    """Codex pass 55 on PR 27, P2: `status` and `ls-files --others` both show nothing for a directory that is a
+    repository itself, so one standing where a skip-worktree or assume-unchanged tracked file was went uncounted."""
+    mod = load()
+    doc = load_doc()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    git(work, "update-index", flag, "a.txt")
+    (work / "a.txt").unlink()
+    (work / "a.txt").mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(work / "a.txt")], check=True, env=GIT_ENV)
+    rec = mod.scan_checkout(work, remote=False)
+    assert rec["embedded_repos"] == ["a.txt/"] and rec["index_hidden"] == 1, rec
+    row = next(r for r in section_3_2(doc.render(doc_scan([rec]))).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
+    assert "embedded repository" in row and "a.txt/" in row and "embedded-0.tar" in row, row
+    # a pointer `.git` (a separate gitdir) is named as one
+    shutil.rmtree(work / "a.txt")
+    (work / "a.txt").mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", "--separate-git-dir", str(tmp_path / "sep"), str(work / "a.txt")],
+                   check=True, env=GIT_ENV)
+    rec = mod.scan_checkout(work, remote=False)
+    assert rec["embedded_repos"] == ["a.txt/"] and rec["embedded_pointer_repos"] == ["a.txt/"], rec
+    # a hidden path that is a plain file or an ordinary directory finds none
+    shutil.rmtree(work / "a.txt")
+    (work / "a.txt").mkdir()
+    (work / "a.txt" / "f").write_text("x\n")
+    assert mod.scan_checkout(work, remote=False)["embedded_repos"] == []
+
+
+def test_the_doc_lists_a_checkout_whose_only_finding_is_an_embedded_repository():
+    """Codex pass 55 on PR 27, P2: the row skip and the embedded loop both required untracked paths."""
+    doc = load_doc()
+    only = doc_checkout("/p/emb", embedded_repos=["x/"], embedded_pointer_repos=[])
+    row = next(r for r in section_3_2(doc.render(doc_scan([only]))).splitlines() if r.startswith("| /p/emb "))
+    assert "embedded repository" in row and "embedded-0.tar" in row and row.rstrip().endswith("| yes: decide whether they are work |"), row
+    assert "| /p/emb " not in section_3_2(doc.render(doc_scan([doc_checkout("/p/emb")])))  # an older record: no row
+
+
+def test_render_accepts_a_scan_with_one_category_only():
+    """Codex pass 55 on PR 27, P2: `render` read `d["bigteam"]`, `d["checkouts"]` and both summary entries."""
+    doc = load_doc()
+    git_only = doc_scan([doc_checkout("/p/g", modified=1, flags=["dirty"], verdict="dirty")])
+    del git_only["bigteam"], git_only["summary"]["bigteam"]
+    assert "/p/g" in doc.render(git_only)
+    bigteam_only = doc_scan([])
+    del bigteam_only["checkouts"], bigteam_only["summary"]["checkouts"]
+    assert isinstance(doc.render(bigteam_only), str)
+    no_summary = doc_scan([])
+    del no_summary["summary"]
+    assert isinstance(doc.render(no_summary), str)

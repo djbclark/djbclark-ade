@@ -391,7 +391,11 @@ def write_atomic(out, text):
 
 
 def render(d):
-    bt, cos, sm = d["bigteam"], d["checkouts"], d["summary"]
+    # a scan can hold one category only (`--git` without `--bigteam`, or the reverse): the missing one renders empty
+    # instead of raising KeyError (Codex pass 55 on PR 27, P2)
+    bt = d.get("bigteam") or {"root": None, "tasks": [], "loose_files": []}
+    cos = d.get("checkouts") or []
+    sm = d.get("summary") or {}
     # the scanned root (`--bigteam`), never a hard-coded default: the capture rows must read the tree that was
     # scanned (Codex pass 14 on PR 27); `.get` for a scan written before the key existed
     bt_root = tilde(bt.get("root") or os.path.join(HOME, ".local/state/bigteam"))
@@ -401,8 +405,10 @@ def render(d):
     scr = [t for t in tasks if t["verdict"] == "scratch"]
     open_jobs = sum(len(t["open_job_records"]) for t in tasks)
     tasks_open_jobs = sum(1 for t in tasks if t["open_job_records"])
-    bs = sm["bigteam"]
-    cs = sm["checkouts"]
+    bs = {"tasks": 0, "verdicts": {}, "total_bytes": 0, "unique_bytes": 0, "scratch_bytes": 0, "incomplete": 0,
+          **(sm.get("bigteam") or {})}
+    cs = {"count": 0, "verdicts": {}, "with_unpushed_work": 0, "with_local_only_commits": 0, "with_untracked": 0,
+          "with_stash": 0, "skipped": 0, "incomplete": 0, **(sm.get("checkouts") or {})}
     unpushed = [c for c in cos if "unpushed commits" in c["flags"] or "orphan branch" in c["flags"]]
     out = []
     w = out.append
@@ -493,8 +499,9 @@ def render(d):
       "current tool marks a task dir whose `rg`/`grep` search failed (exit above 1, or a timeout) "
       "`scan incomplete`, never `scratch`, `unique` or `mixed`; the run above read such a failure as "
       "\"no reference\".\n")
-    w(f"{bs['tasks']} dirs; {len(bt['loose_files'])} loose files at the root "
-      f"({', '.join(bt['loose_files'][:6])}{'...' if len(bt['loose_files']) > 6 else ''}).\n")
+    loose = bt.get("loose_files") or []
+    w(f"{bs['tasks']} dirs; {len(loose)} loose files at the root "
+      f"({', '.join(loose[:6])}{'...' if len(loose) > 6 else ''}).\n")
 
     w("### 1.1 The ten largest dirs and what fills them\n")
     w("| # | task | size | verdict | largest children |\n|---|---|---|---|---|")
@@ -653,7 +660,7 @@ def render(d):
               f"directory: {shcode('mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -cf <DEST>/{} -- {}', ck, parent or '/', f'{ck}/whole.tar', base)}"
               f" (no git command: the scan did not run one there either); {gitdir}"
               " Git LFS payloads are in the store (`.git/lfs`, or the directory `lfs.storage` names): when that is a symlink or lives outside"
-              " these archives, archive it too with `tar -h`"
+              " these archives, archive its `objects` directory too (resolve any symlink first: `realpath`)"
               " | yes: counts unknown; re-scan or archive whole |")
             continue
         # every untracked path counts, a `graft/` directory included: nothing verifies that one is the reproducible
@@ -683,7 +690,7 @@ def render(d):
         zero_tags = [t for t in tag_others if not num(t["count"])]  # tag objects on pushed commits (Codex pass 31)
         hidden, reflog = num(c.get("index_hidden")), num(c.get("reflog_only_commits"))  # Codex pass 32; older records lack both
         if (not unreachable and not submodules and not head_ahead and real_untr <= 0 and not stashes and not modified
-                and not local_n and not zero_tags and not hidden and not reflog):
+                and not local_n and not zero_tags and not hidden and not reflog and not c.get("embedded_repos")):
             continue
         what, cmd, need = [], [], "no"
         head_row = False
@@ -780,8 +787,10 @@ def render(d):
             # a bundle, a stash or reflog pack and a patch hold LFS pointers only and the generated push runs with hooks
             # off, so LFS's pre-push upload never runs: the payloads are in the store (Codex pass 52 on PR 27, P1; every
             # capture reason, not only unpushed commits: Codex pass 53 P1, adversary round 58 MEDIUM)
-            cmd.append("Git LFS payloads (the pointers in any bundle, patch or pack are all those hold) are in the LFS store; archive it: "
-                       + shcode("mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -hcf <DEST>/{} .", ck, c["lfs_store"], f"{ck}/lfs.tar"))
+            # `lfs_store` is the resolved `objects` directory (a symlink on the way is followed by the scan, one inside
+            # the store is kept as a link: no `tar -h`, adversary round 60, LOW 1); restore with `tar -C <objects> -xf`
+            cmd.append("Git LFS payloads (the pointers in any bundle, patch or pack are all those hold) are in the LFS store (its `objects` directory); archive it: "
+                       + shcode("mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -cf <DEST>/{} .", ck, c["lfs_store"], f"{ck}/lfs.tar"))
         if hidden:
             what.append(f"{hidden} tracked path(s) marked assume-unchanged or skip-worktree (`status` cannot see their edits)")
             cmd.append(shcode(HIDDEN_FMT, *hidden_values(raw_p, ck)))
@@ -828,21 +837,26 @@ def render(d):
                        + ("" if no_push else " or " + shcode("git -C {} add -A -- .", raw_p)
                           + " on a branch, commit and push (stages the modified tracked files too)"))
             need = need if need != "no" else "yes: decide whether they are work"
-            # the list names an embedded repository's directory, not its files, and the archive takes no directory's
-            # contents (`--no-recursion`): its ignored files and git metadata stay out of the non-ignored capture. The
-            # repository is its own checkout: scan it, or archive the directory whole (Codex pass 50 on PR 27, P2)
-            pointers = set(c.get("embedded_pointer_repos") or [])
-            for i, e in enumerate(c.get("embedded_repos") or []):
-                name = e.rstrip("/")  # the real name (`ls-files -z`); `--no-unquote` keeps tar from reading it as a quoted one
-                if e in pointers:
-                    # its `.git` is a file or symlink: the directory archive holds the pointer, not the commits (round 57, LOW 4)
-                    cmd.append(f"embedded repository {code('{}', visible(e))}: its `.git` points elsewhere (a separate gitdir or a linked "
-                               "worktree), so archiving the directory keeps no commits; scan it as a checkout of its own")
-                    continue
-                cmd.append(f"embedded repository {code('{}', visible(e))}: archived as an empty entry above; its own state is not captured. "
-                           "Scan it as a checkout of its own, or archive it whole (its ignored files and `.git` included): "
-                           + shcode("mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} --no-unquote -cf <DEST>/{} -- {}",
-                                    ck, raw_p, f"{ck}/embedded-{i}.tar", name))
+        embedded_list = c.get("embedded_repos") or []
+        if embedded_list and real_untr <= 0:
+            # found beneath an index-hidden path only: no untracked row above names it (Codex pass 55 on PR 27, P2)
+            what.append(f"{len(embedded_list)} embedded repositor{'y' if len(embedded_list) == 1 else 'ies'} below index-hidden paths")
+            need = need if need != "no" else "yes: decide whether they are work"
+        # the list names an embedded repository's directory, not its files, and the archive takes no directory's
+        # contents (`--no-recursion`): its ignored files and git metadata stay out of the non-ignored capture. The
+        # repository is its own checkout: scan it, or archive the directory whole (Codex pass 50 on PR 27, P2)
+        pointers = set(c.get("embedded_pointer_repos") or [])
+        for i, e in enumerate(c.get("embedded_repos") or []):
+            name = e.rstrip("/")  # the real name (`ls-files -z`); `--no-unquote` keeps tar from reading it as a quoted one
+            if e in pointers:
+                # its `.git` is a file or symlink: the directory archive holds the pointer, not the commits (round 57, LOW 4)
+                cmd.append(f"embedded repository {code('{}', visible(e))}: its `.git` points elsewhere (a separate gitdir or a linked "
+                           "worktree), so archiving the directory keeps no commits; scan it as a checkout of its own")
+                continue
+            cmd.append(f"embedded repository {code('{}', visible(e))}: archived as an empty entry in the archives above; its own state is not captured. "
+                       "Scan it as a checkout of its own, or archive it whole (its ignored files and `.git` included): "
+                       + shcode("mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} --no-unquote -cf <DEST>/{} -- {}",
+                                ck, raw_p, f"{ck}/embedded-{i}.tar", name))
         if unreachable:
             # origin did not answer: the count trusted the local `refs/remotes/origin/*`, which a deleted or
             # force-pushed branch leaves stale, so even a 0 hides commits (adversary round 21, 1)

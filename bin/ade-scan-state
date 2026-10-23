@@ -599,7 +599,7 @@ def config_offenders(entries, in_submodule: bool = False) -> list[str]:
         if not key_is_safe(key, value, in_submodule):
             first, *middle, last = key.split(".") if "." in key else [key, key]
             mid = ".".join(middle)
-            if re.search(r"[@?#]", mid):
+            if re.search(r"[@?#]|%(?:3[Ff]|23|40)", mid):
                 # a url's userinfo or query is part of the KEY (`url.https://u:token@host/.insteadOf`): the name is reported,
                 # never the secret in it (Codex pass 54 on PR 27, P1)
                 middle = ["<redacted>"]
@@ -871,16 +871,18 @@ def read_regular_file(path: Path, cap: int) -> bytes:
 MAX_EMBEDDED = 1000  # past this the plan would be unreadable: the checkout is `scan incomplete`, not truncated
 
 
-def embedded_repositories(path: Path) -> tuple[int, list[str], list[str]]:
+def embedded_repositories(path: Path, within: list[str] | None = None) -> tuple[int, list[str], list[str]]:
     """(rc, names, pointers): untracked repositories at any depth, the real names with their trailing `/`, and the
     subset whose `.git` is a file or symlink (a separate gitdir or a linked worktree: archiving the directory keeps no
     commits). `ls-files -z --others --exclude-standard` lists a nested repository as `dir/`, the same list the
     untracked archive reads, so a repository below an untracked directory is found too and no name needs unquoting
     (adversary round 56 on PR 27, MEDIUM and LOW 3; `status` shows only the top untracked directory). Tar recurses
     into none of them (`--no-recursion`). Any stderr line (an unreadable subdirectory is a warning with rc 0) makes
-    the list partial: rc 65 (round 57, MEDIUM)."""
+    the list partial: rc 65 (round 57, MEDIUM). `within` limits the walk to those paths (literal pathspecs): the
+    directories that replace an index-hidden tracked path (Codex pass 55 on PR 27)."""
     ls_err: list[str] = []
-    rc, out = git(path, "ls-files", "-z", "--others", "--exclude-standard", errors="surrogateescape", err=ls_err,
+    limit = ["--", *[":(literal)" + w for w in within]] if within else []
+    rc, out = git(path, "ls-files", "-z", "--others", "--exclude-standard", *limit, errors="surrogateescape", err=ls_err,
                   timeout=STATUS_TIMEOUT)  # walks the whole untracked tree, as `status` does (round 58, INFO 6)
     if rc == 0 and any(ln.strip() for ln in "".join(ls_err).splitlines()):
         rc = 65
@@ -1322,18 +1324,20 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
             return incomplete_record(path, f"embedded repositories ({len(embedded)} > {MAX_EMBEDDED})", 0)
     # Git LFS payloads of unpushed commits sit in `<gitdir>/lfs/objects`: a bundle holds the pointers only and a push
     # with hooks off (the generated one) never runs LFS's pre-push upload (Codex pass 52 on PR 27, P1)
-    # The store is resolved, not assumed: `lfs` may be a symlink (tar would keep the link only) and the operator's own
-    # config may relocate it with `lfs.storage` (a relative value is against the git dir); adversary round 58, LOW 3
+    # The store is resolved, not assumed: `lfs` or `lfs/objects` may be a symlink (tar would keep the link only) and the
+    # operator's own config may relocate it with `lfs.storage` (a relative value is against the git dir); adversary round
+    # 58, LOW 3. The recorded path is the resolved `objects` directory itself, archived without `tar -h`, which would
+    # follow every symlink inside the store too (adversary round 60, LOW 1)
     lfs_store = None
     if common is not None:
         rc_s, cfg_s = git(path, "config", "--get", "lfs.storage", operator_config=True)
         base = Path(cfg_s.strip()) if rc_s == 0 and cfg_s.strip() else Path("lfs")
-        real = Path(os.path.realpath(base if base.is_absolute() else common / base))
+        objects = Path(os.path.realpath((base if base.is_absolute() else common / base) / "objects"))
         try:
-            if os.path.isdir(real / "objects") and any(os.scandir(real / "objects")):
-                lfs_store = str(real)
+            if os.path.isdir(objects) and any(os.scandir(objects)):
+                lfs_store = str(objects)
         except OSError:
-            lfs_store = str(real)  # unreadable: assume it holds payloads
+            lfs_store = str(objects)  # unreadable: assume it holds payloads
     # a tracked path marked assume-unchanged (`ls-files -v` tag in lowercase) or skip-worktree (`S`) is invisible to
     # `status`, so its edits are in no count above: it is counted and captured on its own (Codex pass 32 on PR 27).
     # A skip-worktree path with no file is a sparse checkout's ordinary state (adversary round 38): nothing to
@@ -1343,8 +1347,30 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     rc, out = git(path, "ls-files", "-z", "-v", errors="surrogateescape")
     if rc != 0:
         return incomplete_record(path, "ls-files -v", rc)
-    index_hidden = sum(1 for e in out.split("\0") if len(e) > 2 and e[1] == " "
-                       and (e[0].islower() or (e[0] == "S" and os.path.lexists(os.path.join(path, e[2:])))))
+    hidden_paths = [e[2:] for e in out.split("\0") if len(e) > 2 and e[1] == " "
+                    and (e[0].islower() or (e[0] == "S" and os.path.lexists(os.path.join(path, e[2:]))))]
+    index_hidden = len(hidden_paths)
+    # a hidden tracked path replaced by a directory: `ls-files --others` lists nothing for a directory that is a
+    # repository itself (its `.git` makes it opaque), and `status` shows nothing there either, so the repository is
+    # looked for under each hidden directory on its own (Codex pass 55 on PR 27, P2)
+    hidden_dirs = [h for h in hidden_paths
+                   if os.path.isdir(os.path.join(path, h)) and not os.path.islink(os.path.join(path, h))]
+    if hidden_dirs:
+        if len(hidden_dirs) > MAX_EMBEDDED:
+            return incomplete_record(path, f"index-hidden directories ({len(hidden_dirs)} > {MAX_EMBEDDED})", 0)
+        rc, more_names, more_pointers = embedded_repositories(path, hidden_dirs)
+        if rc != 0:
+            return incomplete_record(path, "ls-files --others under index-hidden paths (a failed call, or git printed a warning)", rc)
+        for h in hidden_dirs:
+            dot_git = os.path.join(path, h, ".git")
+            if os.path.lexists(dot_git):
+                more_names.append(h + "/")
+                if os.path.islink(dot_git) or not os.path.isdir(dot_git):
+                    more_pointers.append(h + "/")
+        embedded = embedded + [n for n in dict.fromkeys(more_names) if n not in embedded]
+        embedded_pointers = embedded_pointers + [n for n in dict.fromkeys(more_pointers) if n not in embedded_pointers]
+        if len(embedded) > MAX_EMBEDDED:
+            return incomplete_record(path, f"embedded repositories ({len(embedded)} > {MAX_EMBEDDED})", 0)
     rc, up = git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     upstream = up.strip() if rc == 0 else None
     unpushed = None
