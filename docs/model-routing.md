@@ -378,7 +378,7 @@ projected ≥ 90% at its reset, 5-hour left < 25, weekly left < 30) and `critica
 reset and within 45 min, or any window left < 10). `run` moves live Paseo `claude` agents in place through
 `bin/paseo-set-model`: Fable → Opus always, Opus/Fable → Sonnet 5.5 at tight/critical (originals recorded, restored
 after the reset when the level is `ok` and the agent was not changed by hand), and at critical one handoff steer per
-running agent per reset period toward omp API credits. Exit 0/1/2, 10 stale data, 11 a call failed; state
+running agent per reset period toward omp API credits. Exit 0/1/2, 10 stale data, 11 a call failed, 12 internal error; state
 `~/.local/state/ade/fleet-governor.json`; launchd `com.djbclark.claude-fleet-governor` (300 s, `--install`).
 `route_agent.py` reads the state's `level` (under 30 min old): at tight/critical `code`, `bulk`, `research` and
 `mechanical` never go to claude, and `judgment` prefers omp `anthropic/claude-opus-5-5`.

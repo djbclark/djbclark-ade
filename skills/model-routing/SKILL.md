@@ -74,7 +74,7 @@ skill's snapshot in the same turn.
   handoff and `self-slash --finish --successor omp/anthropic/claude-sonnet-5-5` (API credits, off the subscription);
   after the recorded reset, with the level `ok`, an agent still on the governor's model goes back (Fable originals to
   Opus; a manual change wins); one `hermes-ping` per run that changed something. Exit codes 0 ok, 1 tight, 2 critical,
-  10 stale or unreadable data, 11 a call failed. State: `~/.local/state/ade/fleet-governor.json` (`level`, windows,
+  10 stale or unreadable data, 11 a call failed, 12 internal error. State: `~/.local/state/ade/fleet-governor.json` (`level`, windows,
   `downshifted`, `steered`, `last_ping`); `route_agent.py` reads `level` while under 30 min old and then routes no
   `code`/`bulk`/`research`/`mechanical` slice to claude and prefers omp Opus for `judgment`. launchd job
   `com.djbclark.claude-fleet-governor` (every 300 s): `bin/claude-fleet-governor --install`, then the printed

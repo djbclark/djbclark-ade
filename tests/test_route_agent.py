@@ -1824,7 +1824,7 @@ class TestGovernorHold(unittest.TestCase):
                     self.assertNotEqual(choice.service.name, "claude")
                     self.assertNotIn("claude", choice.alternatives)
                     self.assertIn(f"claude skipped: Claude subscription {level}", choice.why)
-                    self.assertIn("5-hour 70.0% used", choice.why)
+                    self.assertIn("5-hour 70% used", choice.why)
 
     def test_plan_never_dispatches_claude_while_held(self):
         self.state("critical")

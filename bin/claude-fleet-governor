@@ -21,10 +21,10 @@ Windows are found by label prefix: "Claude Code 5-hour", "Claude Code weekly", a
 "Claude Code weekly — Fable" (the sublimit; reported, but it never sets the level, it is what the
 unconditional Fable -> Opus move below is about). Newest snapshot older than 45 min: exit 10, no action.
 
-Projection, per window: burn rate = least-squares slope (percent per hour, floored at 0) over the
+Projection, per window: burn rate = least-squares slope (percent per hour; below MIN_RATE, 0.001, it is 0) over the
 snapshots of the last 90 min that share the newest window's resets_at (+-5 min), needing two samples at
 least 10 min apart. projected_at_reset = used + rate * hours_to_reset; exhaust_at = now +
-(100 - used) / rate when rate > 0. Levels (thresholds: THRESHOLDS below, env CLAUDE_GOVERNOR_THRESHOLDS
+(100 - used) / rate when rate >= MIN_RATE and that is under a year away. Levels (thresholds: THRESHOLDS below, env CLAUDE_GOVERNOR_THRESHOLDS
 JSON merges over them):
   ok        neither of the below
   tight     any window projected >= 90% at its reset, or 5-hour left < 25, or weekly left < 30
@@ -47,7 +47,7 @@ level, windows, checked_at, downshifted ({id7: original model}, the shape of the
 file), downshift_info, steered, last_ping. bin/route_agent.py reads `level` while it is under 30 min old.
 
 Exit codes: 0 ok, 1 tight, 2 critical, 10 snapshot data stale or unreadable, 11 a set-model, send or
-list call failed (the others were still attempted).
+list call failed (the others were still attempted), 12 an internal error (never 1 or 2: a crash is not a level).
 
 Env: CLAUDE_GOVERNOR_SNAPSHOTS, CLAUDE_GOVERNOR_STATE, CLAUDE_GOVERNOR_THRESHOLDS,
 CLAUDE_GOVERNOR_SET_MODEL (default: paseo-set-model beside this file), CLAUDE_GOVERNOR_PASEO (default:
@@ -330,8 +330,8 @@ def compute(snaps: list[dict[str, Any]], now: datetime, t: dict[str, float]) -> 
 def guard_level(now: datetime) -> str:
     """The level `bin/claude-quota-guard` last wrote (CLAUDE_QUOTA_GUARD_STATE, default ~/.local/state/ade/
     quota-guard.json), mapped to this tool's three: `watch` is `ok` here (it only restricts Fable and Opus
-    sub-agents, which the unconditional Fable move already covers). Missing, unreadable, older than 2 hours or
-    unknown: `ok` (the sensor is advisory; this tool's own projection still decides). The governor is the actor,
+    sub-agents, which the unconditional Fable move already covers). Missing, unreadable, older than 30 minutes,
+    future-dated, naming a `resets_at` that has passed, or unknown: `ok` (the sensor is advisory; this tool's own projection still decides). The governor is the actor,
     the guard the sensor (rework-2 lead, 2026-10-23)."""
     path = Path(os.environ.get("CLAUDE_QUOTA_GUARD_STATE") or home() / ".local/state/ade/quota-guard.json")
     try:
@@ -381,7 +381,15 @@ def read_state(path: Path) -> dict[str, Any]:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    # a hand-edited or corrupt state never crashes `run` after a side effect (round 2, LOW 1): keep only well-shaped parts
+    for key in ("downshifted", "downshift_info", "steered"):
+        if key in data and not isinstance(data[key], dict):
+            data.pop(key)
+    if isinstance(data.get("steered"), dict):
+        data["steered"] = {str(p): [str(i) for i in v] for p, v in data["steered"].items() if isinstance(v, list)}
+    return data
 
 
 def write_state(path: Path, state: dict[str, Any]) -> None:
@@ -421,7 +429,7 @@ def records(state: dict[str, Any], default_set: str = SONNET) -> dict[str, dict[
 
 
 def window_state(w: dict[str, Any]) -> dict[str, Any]:
-    return {"label": w["label"], "used": round(w["used"], 2), "left": round(w["left"], 2),
+    return {"label": short_label(w["label"]), "used": round(w["used"], 2), "left": round(w["left"], 2),
             "rate_per_hour": round(w["rate_per_hour"], 3),
             "projected_at_reset": round(w["projected_at_reset"], 1), "exhaust_at": iso(w["exhaust_at"]),
             "resets_at": iso(w["resets_at"]), "samples": w["samples"], "level": w["level"]}
@@ -477,7 +485,7 @@ def plan_moves(agents: list[dict[str, Any]], windows: dict[str, dict[str, Any]],
         if level != "ok" and PREMIUM_MODEL.match(model):
             plan.append({"kind": "downshift", "id": a["id"], "short": short, "from": model, "to": SONNET,
                          "resets_at": iso(trig[1]["resets_at"]) if trig else None,
-                         "window": trig[1]["label"] if trig else None})
+                         "window": short_label(trig[1]["label"]) if trig else None})
         elif FABLE_MODEL.match(model):
             plan.append({"kind": "fable", "id": a["id"], "short": short, "from": model, "to": OPUS})
     if level == "ok":

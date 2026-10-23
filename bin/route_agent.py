@@ -94,6 +94,7 @@ import glob
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import statistics
@@ -1205,14 +1206,18 @@ def governor_hold(now: datetime | None = None) -> str | None:
     if not 0 <= (now - checked).total_seconds() <= GOVERNOR_FRESH:
         return None
     windows = state.get("windows")
-    wins = [w for w in (windows.values() if isinstance(windows, dict) else ())
+    wins = [(k, w) for k, w in (windows.items() if isinstance(windows, dict) else ())
             if isinstance(w, dict) and w.get("level") == level
             and isinstance(w.get("projected_at_reset"), (int, float))]   # a corrupt state never stops routing (round 1 LOW 6)
-    top = max(wins, key=lambda w: w["projected_at_reset"], default=None)
+    top_kind, top = max(wins, key=lambda kw: kw[1]["projected_at_reset"], default=("", None))
     detail = ""
-    if top:
-        detail = (f" ({str(top.get('label', '')).removeprefix('Claude Code ')} {top.get('used')}% used, "
-                  f"projected {top.get('projected_at_reset')}% at reset {top.get('resets_at')})")
+    if top:  # fixed names and numbers only: nothing free-form from the state file reaches an agent-facing text
+        name = {"five_hour": "5-hour", "weekly": "weekly", "fable_weekly": "weekly Fable"}.get(top_kind, "window")
+        used, proj = top.get("used"), top.get("projected_at_reset")
+        at = str(top.get("resets_at"))
+        at = at if re.fullmatch(r"[0-9T:.+Z-]{10,40}", at) else "?"
+        detail = (f" ({name} {used:.0f}% used, projected {proj:.0f}% at reset {at})"
+                  if isinstance(used, (int, float)) and isinstance(proj, (int, float)) else "")
     return f"Claude subscription {level} per claude-fleet-governor{detail}"
 
 
