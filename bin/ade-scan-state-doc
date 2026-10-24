@@ -672,13 +672,16 @@ def render(d):
             else:
                 gitdir = ("when `.git` is a file the directory it points to and that one's common directory hold the "
                           "history, archive them too: " + shcode(GITDIR_FMT, *gitdir_values(raw_p, ck)))
-            # a module whose `objects/info/alternates` is not empty keeps commits in another object store that neither
-            # archive above holds (Codex thread 10 on PR 27): say so, and refuse the cleanup until they are bundled
+            # a module, or the checkout itself (the record then carries `alternates`, whatever the reason it was skipped:
+            # adversary round 64), whose `objects/info/alternates` is not empty keeps commits in another object store that
+            # neither archive above holds (Codex thread 10 on PR 27): say so, and refuse the cleanup until they are bundled.
+            # A bundle row needs none of this: `bundle create` reads through alternates. Older records lack the key
             alt_what, alt_warn, alt_need = "", "", ""
-            if c["verdict"] == SKIP_ALTERNATES:
+            if c["verdict"] == SKIP_ALTERNATES or isinstance(c.get("alternates"), list):
                 targets = [t for t in (c.get("alternates") or []) if isinstance(t, str)][:3]
                 names = ("; the first targets, as the alternates file writes them: " + ", ".join(shcode("{}", t) for t in targets)
-                         if targets else "; the store named in `<gitdir>/objects/info/alternates` of each module git directory")
+                         if targets else "; the store named in `<gitdir>/objects/info/alternates` of " + (
+                             "each module git directory" if c["verdict"] == SKIP_ALTERNATES else "the checkout's git directory"))
                 alt_what = " and the alternate object store"
                 alt_warn = (" **objects/info/alternates points outside this checkout; the store it names is NOT archived: do not "
                             "delete the checkout or that store until its commits are bundled**" + names + ".")
@@ -943,9 +946,9 @@ def render(d):
       "`GIT_GRAFT_FILE` provokes on every bundle; older gits ignore it). A `skipped` / `scan incomplete` checkout has "
       "no counts (its verdict is in the section 2 table) and is listed with a whole-directory archive: anything "
       "may be in there. A `skipped: submodule config unrecognised (nested submodule)` checkout has a submodule with "
-      "submodules of its own: an edit in the inner worktree is in no per-submodule artifact, so only the whole-directory "
+      "a `.gitmodules`, a gitlink or an untracked repository of its own: an edit or commit in the inner worktree is in no per-submodule artifact, so only the whole-directory "
       "archive holds it. One ending `(alternates)` has a module whose objects live in another store that no archive "
-      "here holds: its row says so and refuses a cleanup until those commits are bundled. A checkout flagged `origin unreachable` is "
+      "here holds, and any other `skipped` or `scan incomplete` row of a checkout whose own `objects/info/alternates` is not empty says the same: the row says so and refuses a cleanup until those commits are bundled. A checkout flagged `origin unreachable` is "
       "always listed, whatever its counts: its local-only count came from stale tracking refs and is "
       "unverified, so a 0 there is not `clean and pushed`. A checkout flagged `submodules not inspected` is "
       "always listed too: no count here covers a submodule's content.\n")

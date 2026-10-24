@@ -20,7 +20,8 @@ config unrecognised <key>`): a config that is unreadable is `(unreadable)`, a sy
 `modules/` (a symlinked file in a module git dir included) or at a submodule's `.git` is `(symlink)`, a module git dir with a
 `commondir` is `(commondir)`, one with a nonempty `objects/info/alternates` is `(alternates)` (the record then carries
 `alternates`, the first 3 targets read from those files, and the report warns that the store they name is archived
-nowhere),
+nowhere; any other `skipped` or `scan incomplete` record of a checkout whose own `objects/info/alternates` is not empty carries
+`alternates` too, read without running git, and gets the same warning),
 a submodule whose `.git` is a directory or a gitfile naming a git dir the walk did not vet (outside
 `modules/`, or in a pruned `objects/`) is `(gitdir outside modules)`, a gitfile that is not one line of
 `gitdir: <path>` is `(gitdir unreadable)`, a `.gitmodules` path that is not an index gitlink but has a `.git`
@@ -29,8 +30,8 @@ or submodule path holds a control character, a space, a zero-width, joiner, fill
 character, a non-UTF-8 byte or (a path) a quote, is `(gitmodules path unusual)`,
 a submodule path with a symlink component is `(symlink)`, a submodule directory holding files but no `.git` is
 `(submodule has files but no .git)`, a module whose `core.worktree` does not resolve to the submodule's own checkout is
-`(core.worktree outside)`, a submodule that has a `.gitmodules` or a gitlink of its own is `(nested submodule)` (an
-edit in the inner worktree is in no per-submodule artifact: the whole-directory archive is the way out), and an entry of a module git dir that differs from `HEAD`, `config`,
+`(core.worktree outside)`, a submodule that has a `.gitmodules`, a gitlink or an untracked repository of its own is `(nested submodule)` (an
+edit or commit in the inner worktree is in no per-submodule artifact: the whole-directory archive is the way out), and an entry of a module git dir that differs from `HEAD`, `config`,
 `config.worktree` or `commondir` only in letter case, or that the file system opens as one of those names, is
 `(unrecognised entry)`: nothing is trusted that git would read elsewhere. The record carries `submodules_vetted`,
 the sorted paths of the checked-out submodules that passed every check, and the plan runs git only at those paths,
@@ -723,6 +724,11 @@ MAX_ALTERNATES_SHOWN = 3
 ALTERNATES_KEY = "(alternates)"  # the `submodule config unrecognised` reason of a module with a nonempty objects/info/alternates
 
 
+def alternates_lines(data: bytes) -> list[str]:
+    """The entries of an `objects/info/alternates` file as git reads it: one per line, blank and `#` lines ignored."""
+    return [ln.decode("utf-8", "surrogateescape") for ln in data.split(b"\n") if ln and not ln.startswith(b"#")]
+
+
 def alternates_targets(common: Path | None) -> list[str]:
     """The first MAX_ALTERNATES_SHOWN entries (git's own reading: one per line, blank lines and `#` lines ignored) of
     the nonempty `objects/info/alternates` files under `<common>/modules`, in sorted git-dir order, as text (a byte that
@@ -737,12 +743,46 @@ def alternates_targets(common: Path | None) -> list[str]:
             data = read_regular_file(Path(root) / "objects" / "info" / "alternates", 64 * 1024)
         except (OSError, ValueError):
             continue
-        for line in data.split(b"\n"):
-            if line and not line.startswith(b"#"):
-                found.append(line.decode("utf-8", "surrogateescape"))
-                if len(found) == MAX_ALTERNATES_SHOWN:
-                    return found
+        found += alternates_lines(data)
+        if len(found) >= MAX_ALTERNATES_SHOWN:
+            return found[:MAX_ALTERNATES_SHOWN]
     return found
+
+
+def top_alternates(path: Path) -> list[str] | None:
+    """None when the checkout's own common git dir has no nonempty `objects/info/alternates`, else the first
+    MAX_ALTERNATES_SHOWN targets (empty: the file is nonempty but unreadable, too big or only comments). Runs no git: the
+    common dir is found by reading `.git` (a directory, or a one-line gitfile whose git dir may hold a `commondir`), so
+    it also works for a checkout the scan refused before it trusted any git call. A `.git` symlink is not followed
+    (`skipped: .git is a symlink` has the whole-directory row for it). A store such a checkout borrows from is archived
+    by neither `whole.tar` nor the git-dir archive (a `bundle create` reads through it, so a bundle row is not affected)."""
+    dotgit = path / ".git"
+    try:
+        mode = os.lstat(dotgit).st_mode
+        if stat.S_ISREG(mode):
+            raw = read_regular_file(dotgit, 64 * 1024)
+            rel = raw[len(b"gitdir: "):].rstrip(b"\r\n")
+            if not raw.startswith(b"gitdir: ") or not rel or b"\n" in rel or b"\0" in rel:
+                return None
+            gitdir = Path(os.fsdecode(os.path.realpath(os.path.join(os.fsencode(path), rel))))
+        elif stat.S_ISDIR(mode):
+            gitdir = dotgit
+        else:
+            return None
+        try:
+            link = read_regular_file(gitdir / "commondir", 64 * 1024).rstrip(b"\r\n")
+            common = Path(os.fsdecode(os.path.realpath(os.path.join(os.fsencode(gitdir), link)))) if link else gitdir
+        except FileNotFoundError:
+            common = gitdir
+        alternates = common / "objects" / "info" / "alternates"
+        if os.path.getsize(alternates) == 0:  # what the module check asks: a symlink is followed, as git does
+            return None
+    except (OSError, ValueError):
+        return None
+    try:
+        return alternates_lines(read_regular_file(alternates, 64 * 1024))[:MAX_ALTERNATES_SHOWN]
+    except (OSError, ValueError):
+        return []
 
 
 def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str | None, list[str]]:
@@ -935,17 +975,24 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
         checkout = os.path.realpath(path / sub)
         if any(os.path.realpath(os.path.join(os.fsdecode(target), v)) != checkout for v in worktrees.get(os.fsdecode(target), [])):
             return True, "(core.worktree outside)", []
-        # a submodule that has submodules of its own: the plan's per-submodule commands run with `--no-recursion` and its
+        # a submodule that has a repository of its own: the plan's per-submodule commands run with `--no-recursion` and its
         # git dir `modules.tar` keeps the inner modules, but an edit in the inner worktree is in no artifact. Its own
-        # `.gitmodules` (a file or a link: cheap, no git call) or any gitlink in its index (an embedded repository added
-        # with no `.gitmodules`, the case the top level handles the same way) skips the whole checkout, so the whole-directory
-        # archive row applies (Codex thread 9 on PR 27)
+        # `.gitmodules` (a file or a link: cheap, no git call), any gitlink in its index (an embedded repository added
+        # with no `.gitmodules`, the case the top level handles the same way) or an untracked repository (cloned there,
+        # never added: `embedded_repositories`, the walk the top level runs, which the per-submodule untracked archive
+        # keeps as a bare directory entry) skips the whole checkout, so the whole-directory archive row applies (Codex
+        # thread 9 on PR 27; adversary round 64, MEDIUM)
         if os.path.lexists(path / sub / ".gitmodules"):
             return True, "(nested submodule)", []
         rc, inner = git(path / sub, "ls-files", "-z", "-s", errors="surrogateescape")
         if rc != 0:
             return True, "(unreadable)", []
         if any(e.startswith("160000 ") for e in inner.split("\0")):
+            return True, "(nested submodule)", []
+        rc, nested, _ = embedded_repositories(path / sub)
+        if rc != 0:
+            return True, "(unreadable)", []
+        if nested:
             return True, "(nested submodule)", []
         subs.append(sub)  # a real checked-out submodule: `.git` names a git dir the walk vetted
     return True, None, subs
@@ -1347,6 +1394,19 @@ def local_only_count(path: Path, revs: list[str], tips: list[str],
 
 
 def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
+    """`scan_record` plus the alternates warning: a checkout whose own `objects/info/alternates` is not empty keeps
+    commits in a store that neither `whole.tar` nor the git-dir archive holds, so every `skipped` or `scan incomplete`
+    row (the ones that offer only those two) carries `alternates` (adversary round 64, LOW 3). A bundle row is not
+    affected: `bundle create` reads through alternates. Ordinary records are left alone."""
+    rec = scan_record(path, remote, fetch)
+    if rec["verdict"].startswith(("skipped", INCOMPLETE_PREFIX)):
+        shown = top_alternates(path)
+        if shown is not None:
+            rec["alternates"] = [*shown, *rec.get("alternates", [])][:MAX_ALTERNATES_SHOWN]
+    return rec
+
+
+def scan_record(path: Path, remote: bool, fetch: bool = False) -> dict:
     if (path / ".git").is_symlink():  # before any git call: git would read the link's target, a git dir elsewhere
         return skipped_record(path, SKIP_GIT_SYMLINK)
     keys = unsafe_config(path)  # before any other git call: reading config runs nothing

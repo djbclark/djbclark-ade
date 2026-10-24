@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import types
 from pathlib import Path
@@ -3797,9 +3798,37 @@ def test_a_submodule_with_a_gitlink_of_its_own_but_no_gitmodules_is_nested_and_a
     assert not (sub / ".gitmodules").exists()
     assert scan_super(mod, roots)["verdict"] == NESTED
     git(sub, "rm", "--cached", "-q", "-f", "embedded")
+    shutil.rmtree(sub / "embedded")  # no longer a gitlink, and a repository left there untracked is nested too (below)
     assert not scan_super(mod, roots)["verdict"].startswith("skipped")
     (sub / ".gitmodules").write_text("")  # a `.gitmodules` file of its own is enough, whatever it lists
     assert scan_super(mod, roots)["verdict"] == NESTED
+
+
+def test_an_untracked_repository_inside_a_submodule_is_nested_and_gets_the_whole_directory_archive(tmp_path, monkeypatch):
+    """Adversary round 64 on PR 27, MEDIUM: an inner repository that was simply cloned into a submodule's worktree has
+    no gitlink and no `.gitmodules`; the per-submodule untracked archive keeps it as a bare directory entry, so its
+    commits were in no artifact."""
+    mod, doc = load(), load_doc()
+    roots, sup, moddir = make_super_with_submodule(tmp_path)
+    sub = sup / "sub"
+    emb = make_repo(sub / "embedded", "e.txt")
+    (emb / "e2.txt").write_text("second\n")
+    git(emb, "add", "e2.txt")
+    git(emb, "commit", "-m", "local only work")
+    assert not (sub / ".gitmodules").exists() and "embedded" not in git(sub, "ls-files", "-s")  # never added
+    c = scan_super(mod, roots)
+    assert c["verdict"] == NESTED and not c.get("submodules_vetted"), c
+    row = skipped_row(doc, c)
+    assert "whole.tar" in row and f"counts unknown ({NESTED})" in row
+    # the walk failing (a timeout, an unreadable subdirectory) is `(unreadable)`, never a scanned submodule
+    real = mod.embedded_repositories
+    monkeypatch.setattr(mod, "embedded_repositories", lambda p, within=None: (124, [], []) if p.name == "sub" else real(p, within))
+    assert scan_super(mod, roots)["verdict"] == "skipped: submodule config unrecognised (unreadable)"
+    monkeypatch.setattr(mod, "embedded_repositories", real)
+    shutil.rmtree(emb)  # a plain submodule with only an ordinary untracked file is still scanned
+    (sub / "notes.txt").write_text("not a repository\n")
+    c = scan_super(mod, roots)
+    assert not c["verdict"].startswith("skipped") and c["submodules_vetted"] == ["sub"], c
 
 
 ALTERNATES = "skipped: submodule config unrecognised (alternates)"
@@ -3841,7 +3870,57 @@ def test_the_alternates_skip_names_its_store_and_refuses_a_cleanup_other_skips_d
         assert row.rstrip().endswith("| yes: counts unknown; re-scan or archive whole |"), verdict
 
 
-def fake_git_flooding_ls_remote(tmp_path: Path, monkeypatch, nbytes: int) -> Path:
+def test_every_skipped_or_incomplete_row_of_a_checkout_that_borrows_objects_warns_and_an_ordinary_one_does_not(tmp_path, monkeypatch):
+    """Adversary round 64 on PR 27, LOW 3: the warning was for a module's alternates only; a `clone --shared` checkout
+    skipped for any other reason offered `whole.tar` and the git-dir archive, neither of which holds the borrowed store."""
+    mod, doc = load(), load_doc()
+    origin = make_repo(tmp_path / "origin")
+    store = str((origin / ".git" / "objects").resolve())
+    roots = tmp_path / "roots"
+    roots.mkdir()
+    shared, plain = roots / "shared", roots / "plain"
+    git(tmp_path, "clone", "-q", "--shared", str(origin), str(shared))
+    git(tmp_path, "clone", "-q", str(origin), str(plain))
+    assert (shared / ".git" / "objects" / "info" / "alternates").read_text().strip() == store
+    ordinary = mod.scan_checkout(shared.resolve(), remote=False)  # borrowing alone skips nothing
+    assert not ordinary["verdict"].startswith("skipped") and "alternates" not in ordinary, ordinary["verdict"]
+    # skipped before the scan trusted any git call (an alias is an unrecognised config key)
+    git(shared, "config", "alias.co", "checkout")
+    git(plain, "config", "alias.co", "checkout")
+    rec = mod.scan_checkout(shared.resolve(), remote=False)
+    assert rec["verdict"] == "skipped: unrecognised config alias.co" and rec["alternates"] == [store]
+    row = skipped_row(doc, rec)
+    assert ALTERNATES_WARNING in row and store in row and "do not clean up" in row.split("| yes:")[1] and "whole.tar" in row
+    # the same checkout without borrowed objects: the same skip, no key, no warning
+    other = mod.scan_checkout(plain.resolve(), remote=False)
+    assert other["verdict"] == rec["verdict"] and "alternates" not in other
+    row = skipped_row(doc, other)
+    assert "NOT archived" not in row and "do not clean up" not in row
+    # a linked worktree reads its common directory's store (its `.git` is a file with a `commondir` behind it)
+    wt = tmp_path / "wt"
+    git(shared, "worktree", "add", "-q", "-b", "wt", str(wt))
+    assert mod.scan_checkout(wt.resolve(), remote=False)["alternates"] == [store]
+    # a skip after the scan trusted git: `scan incomplete` carries it too
+    git(shared, "config", "--unset", "alias.co")
+    monkeypatch.setattr(mod, "stash_count", lambda path, common: None)
+    rec = mod.scan_checkout(shared.resolve(), remote=False)
+    assert rec["verdict"].startswith("scan incomplete") and rec["alternates"] == [store], rec["verdict"]
+    assert ALTERNATES_WARNING in skipped_row(doc, rec)
+    monkeypatch.undo()
+    # a nonempty file holding only a comment: borrowed, targets unknown; the row names the file instead
+    (shared / ".git" / "objects" / "info" / "alternates").write_text("# nothing but a comment\n")
+    git(shared, "config", "alias.co", "checkout")
+    rec = mod.scan_checkout(shared.resolve(), remote=False)
+    assert rec["alternates"] == []
+    row = skipped_row(doc, rec)
+    assert ALTERNATES_WARNING in row and "`<gitdir>/objects/info/alternates` of the checkout's git directory" in row
+    # a record from an older scan has no key: it renders, with no warning
+    del rec["alternates"]
+    row = skipped_row(doc, rec)
+    assert "NOT archived" not in row and "do not clean up" not in row
+
+
+def fake_git_flooding_ls_remote(tmp_path: Path, monkeypatch, nbytes: int, sigpipe_proof: bool = False) -> Path:
     """A `git` ahead of the real one on PATH: `ls-remote` prints valid refs forever (`nbytes` 0) or `nbytes` bytes of them,
     everything else runs the real git. The pid of the writer goes to the returned file."""
     real = shutil.which("git")
@@ -3855,7 +3934,8 @@ def fake_git_flooding_ls_remote(tmp_path: Path, monkeypatch, nbytes: int) -> Pat
         'case " $* " in\n'
         '*" ls-remote "*)\n'
         '  line=$(printf \'%040d\\trefs/heads/flood\' 1)\n'
-        f'  if [ {nbytes} -eq 0 ]; then yes "$line" & else yes "$line" | head -c {nbytes} & fi\n'
+        + (f'  trap \'\' PIPE; ( while :; do echo "$line" 2>/dev/null; done ) &\n' if sigpipe_proof and not nbytes
+           else f'  if [ {nbytes} -eq 0 ]; then yes "$line" & else yes "$line" | head -c {nbytes} & fi\n') +
         f'  echo $! > "{pidfile}"; wait $!; exit 0;;\n'
         "esac\n"
         f'exec "{real}" "$@"\n')
@@ -3888,12 +3968,22 @@ def test_an_ls_remote_answer_past_the_byte_cap_is_killed_and_reads_as_origin_unr
 
 def test_run_with_max_bytes_kills_an_endless_writer_and_its_group_and_keeps_every_exact_fit(tmp_path, monkeypatch):
     mod = load()
-    pidfile = fake_git_flooding_ls_remote(tmp_path, monkeypatch, 0)  # prints without end
+    # the writer ignores SIGPIPE and keeps writing into a closed pipe, so only the group kill ends it (a `yes` would die
+    # of the SIGPIPE when `run` closes stdout, whether or not the kill happened: adversary round 64, LOW 2)
+    pidfile = fake_git_flooding_ls_remote(tmp_path, monkeypatch, 0, sigpipe_proof=True)  # prints without end
     env = dict(os.environ)
-    rc, out = mod.run(["git", "ls-remote"], timeout=30, env=env, max_bytes=100_000)
-    assert (rc, out) == (mod.RC_OUTPUT_CAP, "")
+    result: list = []
+    t = threading.Thread(target=lambda: result.append(mod.run(["git", "ls-remote"], timeout=30, env=env, max_bytes=100_000)),
+                         daemon=True)
+    t.start()
+    t.join(20)
     ypid = int(pidfile.read_text())
-    for _ in range(100):  # the `yes` child died with its parent's process group
+    if t.is_alive():  # without the group kill `run` waits for a child that never ends: free it, then fail
+        os.kill(ypid, 9)
+        t.join(10)
+        raise AssertionError("run() did not return: the endless writer was not killed")
+    assert result == [(mod.RC_OUTPUT_CAP, "")]
+    for _ in range(100):  # the writer died with its parent's process group
         try:
             os.kill(ypid, 0)
         except ProcessLookupError:
@@ -3905,7 +3995,9 @@ def test_run_with_max_bytes_kills_an_endless_writer_and_its_group_and_keeps_ever
     assert mod.run(["printf", "%s", "abcd"], max_bytes=4) == (0, "abcd")  # exactly the cap fits
     assert mod.run(["printf", "%s", "abcde"], max_bytes=4) == (mod.RC_OUTPUT_CAP, "")
     assert mod.run(["sh", "-c", "printf ab; exit 3"], max_bytes=4) == (3, "ab")  # the child's own rc survives
+    start = time.monotonic()
     assert mod.run(["sleep", "30"], timeout=0.3, max_bytes=4) == (124, "")  # and the time limit still applies
+    assert time.monotonic() - start < 5, "the timeout did not kill the child's group: run() waited for it"
 
 
 def test_the_plan_runs_git_in_the_scanners_environment_not_the_operators(tmp_path):
