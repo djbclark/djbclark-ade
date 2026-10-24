@@ -73,6 +73,13 @@ Each doc carries its own summary.
    tier stays retired until an operator top-up; the `agent_stats.py burn`
    alert (every 6h, 48h ahead) governs pool exhaustion: the blanket
    clinepass rule was **retired 2026-08-24**. Watch the alert, not the rule.
+8. **Upstream every local change to someone else's source** (operator,
+   2026-10-24). A fork, vendored copy or local patch: in the same session,
+   search the project's issues and PRs for a duplicate, tidy the change,
+   consult a `frontier` agent if it helps, then open the issue/PR, so an
+   upgrade never needs a merge. Nothing is version-pinned either: software
+   tracks its latest release. Detail and exceptions:
+   `site-private/memory/feedback_upstream_local_changes.md`.
 
 ## Machine context
 
