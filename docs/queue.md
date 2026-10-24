@@ -300,6 +300,18 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    default 45 min, exit 3; `gh` failures retried, exit 6 if still failing at the deadline; paginated output parsed as
    concatenated pages; findings by `original_commit_id` / review `commit_id` of the head and the Codex bot author, no time window; markers believed only from the Codex app), a lock refusing a duplicate (exit 4). Not done:
    the adversary-report round dedup lesson is a lead habit, not a waiter feature.
+   **Open LOW from PR 34's adversary (2026-10-24, head a15ecb7; D1 and D2 fixed in the PR, D3 and D4 left):**
+   D3 stale summary: `finish()` is the only writer, and the summary carries no run id or start time. Scenario: run A on head H
+   ends `merge_ready: true`; a re-requested Codex review or an unresolved thread makes run B start on H; a third agent gets exit 4
+   ("read its files"), reads `PREFIX-summary.json` at once and sees run A's `merge_ready: true`. A crash gives exit 1 plus the
+   previous summary. Fix: once the lock is held, write `PREFIX-summary.json` atomically as `{"result":"running","pid":...,
+   "started_at":...}` (or delete the old `PREFIX-*` files), put `pid` and `started_at` in the final summary too, and make the
+   exit-4 message say "wait for pid N to exit, then read". D4 macOS identity ([INFERENCE], not reproduced): the lock identity is
+   the text of `ps -o lstart=`, a local-time rendering, so the docstring's "stored absolutely" holds only for the kernel value.
+   Scenario: the Mac's automatic timezone changes while a waiter runs; a second `pr-wait` on the same head computes a different
+   lstart string for the live holder, `lock_live` returns False, it takes over, and two waiters run on one head. Fix: read
+   `pbi_start_tvsec`/`pbi_start_tvusec` through libproc `proc_pidinfo(PROC_PIDTBSDINFO)` (ctypes) or `sysctl kern.proc.pid.<pid>`;
+   or keep lstart, also store the epoch, and compare within +-1 s after parsing both in the same zone.
 4. **PR 29 queued findings** (hypothetical aiuse payload shapes; `bin/claude-quota-guard`): (a) a windowless live
    row bound by the 5-hour window leaves the snapshot's weekly unjudged (adversary round 7); (b) a detailed
    default row plus a summary-only Fable row: synthesize a window for every summary-only row (Codex pass 6);

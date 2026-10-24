@@ -824,3 +824,20 @@ def test_a_codex_finding_that_is_a_reply_in_a_human_thread_is_open(world: World)
     assert world.file("open-findings")[0]["id"] == 50
     # the query asks for the whole thread, not only its first comment
     assert "comments(first:100)" in next(x for x in graphql_calls(world)[0] if x.startswith("query="))
+
+
+def test_script_defers_annotations_so_stock_macos_python_3_9_can_load_it() -> None:
+    # `X | None` in a signature raises TypeError on Python < 3.10 unless annotations are deferred (adversary D1, PR 34).
+    import ast
+
+    tree = ast.parse(PR_WAIT.read_text())
+    assert any(isinstance(n, ast.ImportFrom) and n.module == "__future__"
+               and any(a.name == "annotations" for a in n.names) for n in tree.body)
+    stock = Path("/usr/bin/python3")
+    if not stock.exists():
+        return
+    version = subprocess.run([str(stock), "-c", "import sys; print(sys.version_info[1])"],
+                             capture_output=True, text=True).stdout.strip()
+    if version.isdigit() and int(version) < 10:
+        run = subprocess.run([str(stock), "-I", str(PR_WAIT), "--help"], capture_output=True, text=True)
+        assert run.returncode == 0, run.stderr

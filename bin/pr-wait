@@ -87,6 +87,8 @@ and a process start identity (Linux: /proc/<pid>/stat starttime, immune to wall-
 under a takeover guard that holds its taker's pid and start and is broken by liveness.
 """
 
+from __future__ import annotations
+
 import argparse
 import atexit
 import json
