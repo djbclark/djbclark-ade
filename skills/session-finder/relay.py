@@ -484,6 +484,7 @@ def ours_paste(d, text, pin="*"):
 
 UNSENT_TTL = 3600    # an hour: a leftover from days ago must not claim a draft
 UNSENT_KEEP = 86400  # an expired entry is still evidence of whose placeholder this is, for a day
+PANE_LOCK_ASKS = 5  # times route_pane asks for a busy pane lock while the holder's hash is unreadable (about 0.2 s each)
 
 
 def _unsent():
@@ -545,8 +546,9 @@ def pane_lock(sid, text=""):
 
 
 def pane_sending(sid, text):
-    """True when the relay that holds SID's pane lock is sending TEXT: the hash it wrote in the lock file. The holder
-    writes it right after taking the lock, so an empty file is read a few times before it counts as "another text"."""
+    """True when the relay that holds SID's pane lock is sending TEXT: the hash it wrote in the lock file; False when
+    it is sending another text. The holder writes the hash right after taking the lock, so an empty file is read a few
+    times; one still empty is None: the holder is releasing or has not written yet, so the caller asks the lock again."""
     want = text_tag(text)
     for _ in range(5):
         try:
@@ -560,7 +562,7 @@ def pane_sending(sid, text):
         if got:
             return got == want
         time.sleep(0.02)
-    return False
+    return None
 
 
 def _note(sid, text, draft, mark, typed, tx=None):
@@ -1068,14 +1070,20 @@ def route_pane(c):
     if is_slash(text) or text.lstrip(SLASH_STRIP).startswith("!"):
         return ("skip", "text starting with '/' or '!' typed into a pane would run a built-in or a shell command "
                         "there; peers do not run another session's built-ins")
-    with pane_lock(s["id"], text) as got:    # from the box read until the text is recorded: two relays never type into one box
-        if not got:
-            if pane_sending(s["id"], text):    # the holder is sending this very text: the socket would put it in a second time
-                return ("stop", "another relay is sending this very text into that pane right now (it holds the pane lock "
-                                f"beside {UNSENT.name}): not sending it a second time; check its pane, do not resend", 1)
-            return ("skip", "another relay is typing into that pane right now (it holds the pane lock beside "    # skip, not stop: the socket sends no keys, so the next route may still deliver
-                            f"{UNSENT.name}): not typing beside it; check its pane, then retry")
-        return pane_send(c)
+    for _ in range(PANE_LOCK_ASKS):
+        with pane_lock(s["id"], text) as got:    # from the box read until the text is recorded: two relays never type into one box
+            if got:
+                return pane_send(c)
+        sending = pane_sending(s["id"], text)
+        if sending is not None:
+            break    # the hash was readable: the holder is mid-send
+        # an empty hash: the holder is releasing (its entry is recorded, which pane_send's check sees under the lock) or
+        # is slow to write it; skipping now would let the socket route put a recorded text in a second time (L-D)
+    if sending:    # the holder is sending this very text: the socket would put it in a second time
+        return ("stop", "another relay is sending this very text into that pane right now (it holds the pane lock "
+                        f"beside {UNSENT.name}): not sending it a second time; check its pane, do not resend", 1)
+    return ("skip", "another relay is typing into that pane right now (it holds the pane lock beside "    # skip, not stop: the socket sends no keys, so the next route may still deliver
+                    f"{UNSENT.name}): not typing beside it; check its pane, then retry")
 
 
 def pulled_and_discarded(s, chan, left):
