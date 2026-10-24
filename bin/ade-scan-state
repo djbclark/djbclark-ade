@@ -43,7 +43,7 @@ or submodule path holds a control character, a space, a zero-width, joiner, fill
 character, a non-UTF-8 byte or (a path) a quote, is `(gitmodules path unusual)`,
 a submodule path with a symlink component is `(symlink)`, a submodule directory holding files but no `.git` is
 `(submodule has files but no .git)`, a module whose `core.worktree` does not resolve to the submodule's own checkout is
-`(core.worktree outside)`, a submodule that has a `.gitmodules`, a gitlink or an untracked repository of its own (one at a skip-worktree or assume-unchanged path included: `index_hidden_repositories`, the walk the top level runs) is `(nested submodule)` (an
+`(core.worktree outside)`, a submodule that has a `.gitmodules`, a gitlink or an untracked repository of its own (one at a skip-worktree or assume-unchanged path, or standing where an ordinary tracked file was and so reported by `status` only as a deletion, included: `index_hidden_repositories`, the walk the top level runs) is `(nested submodule)` (an
 edit or commit in the inner worktree is in no per-submodule artifact: the whole-directory archive is the way out), and an entry of a module git dir that differs from `HEAD`, `config`,
 `config.worktree` or `commondir` only in letter case, or that the file system opens as one of those names, is
 `(unrecognised entry)`: nothing is trusted that git would read elsewhere. The record carries `submodules_vetted`,
@@ -137,7 +137,7 @@ in `local_only_tags` with count 0 (at most 100; the rest add to `local_only_bran
 the counting budget is never listed as count 0) and flagged `unpushed tags` (a primary flag, counted in
 `with_unpushed_work`: the tag, its annotation and signature are unpushed work) with `unpushed tag names: <names>`.
 Extra flags `index-hidden paths: <n>` (record key `index_hidden`: tracked paths marked assume-unchanged or
-skip-worktree, whose edits `status` cannot see) and `reflog-only commits: <n>` (`reflog_only_commits`: commits a
+skip-worktree, whose edits `status` cannot see; a repository standing where an ordinary tracked file was, which `status` shows only as ` D <file>`, is an embedded repository, found by the same walk) and `reflog-only commits: <n>` (`reflog_only_commits`: commits a
 reset, amend or rebase left reachable from a reflog alone, stash entries excluded); both are primary flags.
 Extra flag `detached`: HEAD is detached and commits lie outside origin; `origin unknown`: the branch
 is not detached but origin's branch list could not be read at all (the verdict is `unpushed commits`,
@@ -1224,13 +1224,16 @@ def embedded_repositories(path: Path, within: list[str] | None = None) -> tuple[
 
 def index_hidden_repositories(path: Path) -> tuple[int, list[str], list[str], tuple[str, int] | None]:
     """(index-hidden paths counted, names, pointers, failure) of a checkout: the repositories at a tracked path that is
-    marked assume-unchanged (`ls-files -v` tag in lowercase) or skip-worktree (`S`) and is replaced by a directory. Those
-    are invisible to `status` and to `embedded_repositories(path)`: `ls-files --others` lists nothing for a directory that
-    is a repository itself (its `.git` makes it opaque), so the repository is looked for under each hidden directory on
-    its own, and the hidden directory itself counts when it has a `.git` (Codex pass 55 on PR 27, P2). A skip-worktree
-    path with no file is a sparse checkout's ordinary state (adversary round 38) and is not counted. Names and pointers
-    follow `embedded_repositories`. `failure` is None, or the (call, rc) that makes any answer unknown. One walk for the
-    top level and for every submodule (adversary round 65, MEDIUM)."""
+    marked assume-unchanged (`ls-files -v` tag in lowercase) or skip-worktree (`S`) and is replaced by a directory, and
+    those at an ordinary tracked path (not a gitlink) that `ls-files -m -d` reports because a directory now stands where
+    the file was (`status` shows only ` D a`). Those are invisible to `status` and to `embedded_repositories(path)`:
+    `ls-files --others` lists nothing for a directory that is a repository itself (its `.git` makes it opaque), so the
+    repository is looked for under each such directory on its own, and the directory itself counts when it has a `.git`
+    (Codex pass 55 on PR 27, P2; pass 66, P1 for the ordinary tracked file). A skip-worktree path with no file is a
+    sparse checkout's ordinary state (adversary round 38) and is not counted; a replaced ordinary path is a modified
+    row already, so the count is of hidden paths alone. Names and pointers follow `embedded_repositories`. `failure` is
+    None, or the (call, rc) that makes any answer unknown. One walk for the top level and for every submodule
+    (adversary round 65, MEDIUM)."""
     # decoded with surrogateescape: a name that is not UTF-8 then round-trips to the same bytes in the `lexists`
     # test below, where `replace` would test a different path and drop an existing entry (Codex pass 38)
     rc, out = git(path, "ls-files", "-z", "-v", errors="surrogateescape")
@@ -1238,7 +1241,13 @@ def index_hidden_repositories(path: Path) -> tuple[int, list[str], list[str], tu
         return 0, [], [], ("ls-files -v", rc)
     hidden_paths = [e[2:] for e in out.split("\0") if len(e) > 2 and e[1] == " "
                     and (e[0].islower() or (e[0] == "S" and os.path.lexists(os.path.join(path, e[2:]))))]
-    hidden_dirs = [h for h in hidden_paths
+    # a tracked file replaced by a directory is "deleted" (and a changed one "modified"): `-s` gives the mode, so a
+    # gitlink (a submodule, vetted elsewhere) is left out; `<mode> <object> <stage>\t<path>`, one line per reason
+    rc, out = git(path, "ls-files", "-z", "-s", "-m", "-d", errors="surrogateescape")
+    if rc != 0:
+        return len(hidden_paths), [], [], ("ls-files -m -d", rc)
+    changed_paths = [e.split("\t", 1)[1] for e in out.split("\0") if "\t" in e and not e.startswith("160000 ")]
+    hidden_dirs = [h for h in dict.fromkeys(hidden_paths + changed_paths)
                    if os.path.isdir(os.path.join(path, h)) and not os.path.islink(os.path.join(path, h))]
     if not hidden_dirs:
         return len(hidden_paths), [], [], None

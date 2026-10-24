@@ -887,8 +887,8 @@ def render(d):
             need = need if need != "no" else "yes: decide whether they are work"
         embedded_list = c.get("embedded_repos") or []
         if embedded_list and real_untr <= 0:
-            # found beneath an index-hidden path only: no untracked row above names it (Codex pass 55 on PR 27, P2)
-            what.append(f"{len(embedded_list)} embedded repositor{'y' if len(embedded_list) == 1 else 'ies'} below index-hidden paths")
+            # found beneath an index-hidden path, or a tracked file a directory replaced, only: no untracked row above names it (Codex pass 55 on PR 27, P2)
+            what.append(f"{len(embedded_list)} embedded repositor{'y' if len(embedded_list) == 1 else 'ies'} below index-hidden or replaced tracked paths")
             need = need if need != "no" else "yes: decide whether they are work"
         # the list names an embedded repository's directory, not its files, and the archive takes no directory's
         # contents (`--no-recursion`): its ignored files and git metadata stay out of the non-ignored capture. The
@@ -961,7 +961,7 @@ def render(d):
       "`GIT_GRAFT_FILE` provokes on every bundle; older gits ignore it). A `skipped` / `scan incomplete` checkout has "
       "no counts (its verdict is in the section 2 table) and is listed with a whole-directory archive: anything "
       "may be in there. A `skipped: submodule config unrecognised (nested submodule)` checkout has a submodule with "
-      "a `.gitmodules`, a gitlink, an untracked repository or a repository at a skip-worktree or assume-unchanged path of its own: an edit or commit in the inner worktree is in no per-submodule artifact, so only the whole-directory "
+      "a `.gitmodules`, a gitlink, an untracked repository or a repository at a skip-worktree or assume-unchanged path (or where an ordinary tracked file stood: `status` shows only its deletion) of its own: an edit or commit in the inner worktree is in no per-submodule artifact, so only the whole-directory "
       "archive holds it. One ending `(alternates)` has a module whose objects live in another store that no archive "
       "here holds, and any other `skipped` or `scan incomplete` row of a checkout whose own `objects/info/alternates` is not empty, whose `objects`, `refs`, `logs`, `packed-refs` or `shallow` is a symlink out (or holds a symlink inside `objects/`, `refs/` or `logs/`), or whose git dir does not point back to the checkout says the same: the row says so and refuses a cleanup until those commits are bundled. The git dir must point back to the checkout: `skipped: git dir redirected (commondir)` is a `.git` directory holding a `commondir` entry, and `skipped: git dir redirected (does not point back to this checkout)` is a `.git` gitfile whose git dir has no `gitdir` file naming this checkout's `.git` and no `core.worktree` naming this checkout (a linked worktree, `--separate-git-dir` and an absorbed submodule have one), or whose `commondir` names a common dir that does not hold it as `worktrees/<name>`, or that cannot be read; the scan ran no git there, since every call would act on that directory, and the row lists `git dir -> <target>` (and `commondir -> <target>`) as a store no archive holds. A checkout flagged `origin unreachable` is "
       "always listed, whatever its counts: its local-only count came from stale tracking refs and is "

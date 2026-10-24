@@ -5182,6 +5182,92 @@ def test_a_repository_that_replaces_an_index_hidden_path_is_found(tmp_path, flag
     assert mod.scan_checkout(work, remote=False)["embedded_repos"] == []
 
 
+def replace_with_repository(parent: Path, name: str) -> Path:
+    """A tracked file `name` deleted and a repository with a committed file in its place (no `git rm`: the index keeps it)."""
+    (parent / name).unlink()
+    d = parent / name
+    d.mkdir()
+    git(d, "init", "-q", "-b", "main")
+    (d / "only-work").write_text("local only\n")
+    git(d, "add", "only-work")
+    git(d, "commit", "-q", "-m", "inner work")
+    return d
+
+
+def test_a_repository_that_replaces_an_ordinary_tracked_file_is_found_and_archived_whole(tmp_path):
+    """Codex pass 66 on PR 27, P1: `status` shows only ` D a.txt` and `ls-files --others` lists nothing for a directory that
+    is a repository, so the scan said `modified: 1`, `untracked: 0`, no embedded repository, and the modified-files capture
+    kept an empty directory entry (`--no-recursion`): the repository's commits and files were in no artifact."""
+    mod, doc = load(), load_doc()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    replace_with_repository(work, "a.txt")
+    rec = mod.scan_checkout(work, remote=False)
+    assert rec["embedded_repos"] == ["a.txt/"] and rec["embedded_pointer_repos"] == [], rec
+    assert rec["modified"] == 1 and rec["index_hidden"] == 0, rec  # an ordinary path: no hidden-path count
+    row = next(r for r in section_3_2(doc.render(doc_scan([rec]))).splitlines() if r.startswith("| " + doc.tilde(rec["path"])))
+    assert "embedded repository" in row and "a.txt/" in row and "embedded-0.tar" in row, row
+    ck = doc.checkout_dir(rec["path"])
+    dest = tmp_path / "dest"
+    (dest / ck).mkdir(parents=True)
+    plan = [unescape_span(m) for m in re.findall(r"`(mkdir -p [^`]*embedded-\d\.tar[^`]*)`", row)]
+    assert len(plan) == 1, plan
+    run = subprocess.run(["bash", "-c", PLAN_PREFIX + plan[0].replace("<DEST>", str(dest))], capture_output=True, text=True, env=GIT_ENV)
+    assert run.returncode == 0, run.stderr
+    held = subprocess.run(["tar", "-tf", str(dest / ck / "embedded-0.tar")], capture_output=True, text=True).stdout
+    assert "a.txt/only-work" in held and "a.txt/.git/HEAD" in held, held
+    # a pointer `.git` (a separate gitdir) is named as one
+    shutil.rmtree(work / "a.txt")
+    (work / "a.txt").mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", "--separate-git-dir", str(tmp_path / "sep"), str(work / "a.txt")],
+                   check=True, env=GIT_ENV)
+    rec = mod.scan_checkout(work, remote=False)
+    assert rec["embedded_repos"] == ["a.txt/"] and rec["embedded_pointer_repos"] == ["a.txt/"], rec
+    # a plain deletion, a plain directory and a symlink to a repository are no embedded repository
+    shutil.rmtree(work / "a.txt")
+    assert mod.scan_checkout(work, remote=False)["embedded_repos"] == []
+    (work / "a.txt").mkdir()
+    (work / "a.txt" / "f").write_text("x\n")
+    assert mod.scan_checkout(work, remote=False)["embedded_repos"] == []
+    shutil.rmtree(work / "a.txt")
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    git(target, "init", "-q", "-b", "main")
+    (work / "a.txt").symlink_to(target, target_is_directory=True)
+    assert mod.scan_checkout(work, remote=False)["embedded_repos"] == []
+
+
+def test_a_repository_replacing_a_tracked_file_inside_a_submodule_is_nested_and_a_moved_gitlink_is_not(tmp_path):
+    """Codex pass 66 on PR 27, P1: the submodule check shares the walk, so a repository standing where an ordinary
+    tracked file of the submodule was no longer passes it; a submodule whose own HEAD moved (a modified gitlink, a directory
+    with a `.git`) is not read as an embedded repository of the super project."""
+    mod, doc = load(), load_doc()
+    roots, sup, moddir = make_super_with_submodule(tmp_path)
+    sub = sup / "sub"
+    (sub / "g.txt").write_text("g\n")
+    git(sub, "add", "g.txt")
+    git(sub, "commit", "-q", "-m", "move the submodule head")  # the super's gitlink is now modified
+    c = scan_super(mod, roots)
+    assert c["embedded_repos"] == [] and c["submodules_vetted"] == ["sub"], c
+    replace_with_repository(sub, "f.txt")
+    c = scan_super(mod, roots)
+    assert c["verdict"] == NESTED and not c.get("submodules_vetted"), c
+    row = skipped_row(doc, c)
+    whole = unescape_span(re.search(r"`(mkdir -p [^`]*whole\.tar[^`]*)`", row).group(1))
+    dest, home = tmp_path / "dest", tmp_path / "home"
+    dest.mkdir()
+    home.mkdir()
+    run = subprocess.run(["bash", "-c", PLAN_PREFIX + whole.replace("<DEST>", str(dest))], capture_output=True, text=True,
+                         env={**GIT_ENV, "HOME": str(home)})
+    assert run.returncode == 0, run.stderr
+    import tarfile
+    names = tarfile.open(next(dest.rglob("whole.tar"))).getnames()
+    assert any(n.endswith("sub/f.txt/only-work") for n in names), names
+    # a plain deletion of the tracked file leaves the submodule vetted
+    shutil.rmtree(sub / "f.txt")
+    c = scan_super(mod, roots)
+    assert not c["verdict"].startswith("skipped") and c["submodules_vetted"] == ["sub"], c
+
+
 def test_the_doc_lists_a_checkout_whose_only_finding_is_an_embedded_repository():
     """Codex pass 55 on PR 27, P2: the row skip and the embedded loop both required untracked paths."""
     doc = load_doc()
