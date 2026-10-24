@@ -1221,5 +1221,5 @@ selection in docs/skill-everywhere.md section 3a.
 Addendum 2026-10-24: the setting is per daemon home, while every daemon syncs into the one real `~/.agents/skills`
 and `~/.claude/skills`. A second daemon with another home (Paseo's own `scripts/dev-daemon.sh`, home
 `.dev/paseo-home`, no selection) rewrote the symlinked skills at 09:26:49 and 10:05:46 EDT. Suggest to upstream: the
-sync skips a skill dir that is a symlink, or dev homes default to no skill sync. Not yet posted on #7700.
+sync skips a skill dir that is a symlink, or dev homes default to no skill sync. Posted on #7700 2026-10-24: https://github.com/getpaseo/paseo/issues/7700#issuecomment-6386655547.
 
