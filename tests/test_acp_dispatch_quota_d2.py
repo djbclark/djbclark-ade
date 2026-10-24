@@ -26,6 +26,9 @@ from typing import override
 
 from test_acp_dispatch import SCRIPT, Base, run
 
+# agy's weekly cap, 6 days out; the fake's "Resets in" text and the stamp both derive from it
+FAR_RESET = timedelta(hours=148, minutes=22, seconds=36)
+
 EXTRA_MODES = textwrap.dedent("""\
       quota_far)  # agy's weekly cap as seen 2026-10-18: reset days out
               printf 'STATUS: working\\n' > "$report"
@@ -35,7 +38,7 @@ EXTRA_MODES = textwrap.dedent("""\
       quota_exit0_log)  # the real agy event (acp-resume-hardening, 2026-10-18): exit 0,
               # report partial, 429 only in the session log — acp-run's stderr names no quota
               printf 'STATUS: working\\n' > "$report"
-              printf '%s\\n' '{"kind":"update","data":{"content":"Agent run failed: Error 429, Message: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 148h22m36s., Status: RESOURCE_EXHAUSTED, Details: quotaResetTimeStamp:2026-10-24T18:18:05Z"}}' >> "$log"
+              printf '%s\\n' '{"kind":"update","data":{"content":"Agent run failed: Error 429, Message: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 148h22m36s., Status: RESOURCE_EXHAUSTED, Details: quotaResetTimeStamp:'"$QUOTA_RESET_STAMP"'"}}' >> "$log"
               echo "acp-run: agent=agy stop=end_turn secs=356.1 tools=38" >&2
               echo "written: $report"
               exit 0;;
@@ -349,9 +352,12 @@ class TestExit0Quota(QuotaBase):
     """Item 4: rc 0 no longer skips quota detection; items 6-7 ride the same path."""
 
     def test_agy_exit0_quota_in_log_is_a_quota_stop(self):
+        # the stamp is built from the real clock so the reset stays "6 days out" whenever this runs
+        stamp = (datetime.now(timezone.utc) + FAR_RESET).strftime("%Y-%m-%dT%H:%M:%SZ")
         r = self.dispatch_agent("agy", "claude-opus-5-5-high", "--kind", "code",
                                 mode="quota_exit0_log",
-                                env={"ACP_DISPATCH_AIUSE": str(self.fake_aiuse)})
+                                env={"ACP_DISPATCH_AIUSE": str(self.fake_aiuse),
+                                     "QUOTA_RESET_STAMP": stamp})
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         rec = self.record()
         self.assertTrue(rec["failure"].startswith("NO-REPORT: quota (agy, claude-opus-5-5-high, "
@@ -361,8 +367,8 @@ class TestExit0Quota(QuotaBase):
         self.assertEqual((ar["state"], ar.get("far_reset")), ("skipped", True))
         # aiuse was notified exactly as the non-zero path does (family: the claude_gpt pool)
         self.assertEqual(len(self.aiuse_notes()), 1, self.aiuse_notes())
-        self.assertIn("note-exhausted antigravity --family claude_gpt "
-                      "--resets-at 2026-10-24T18:18:05Z", self.aiuse_notes()[0])
+        self.assertIn(f"note-exhausted antigravity --family claude_gpt --resets-at {stamp}",
+                      self.aiuse_notes()[0])
         c = run(["check", str(self.record_path())], env=self.base_env())
         self.assertEqual(c.returncode, 3, c.stdout)
         self.assertIn("reroute now:", c.stdout)
