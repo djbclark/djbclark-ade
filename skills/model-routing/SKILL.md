@@ -740,6 +740,10 @@ method that runs the waves.
     whenever `bin/claude-quota-guard` reports `tight` or worse (see *Probes*). Omp
     spends through the same Claude account: while a shared Claude window is exhausted,
     aiuse marks omp rate-gated and `--available` omits it.
+    Since 2026-10-23 `CLAUDE_CODE_SUBAGENT_MODEL=sonnet` (settings `env`, set by running
+    `bin/claude-settings-env`; `--check` shows drift) makes every unpinned Agent-tool sub-agent and teammate
+    Sonnet: pass `model: "opus"` in the call for a judgment sub-agent; pinned
+    definitions keep theirs; the built-in Explore and Plan agents ignore it.
 
 **Where the numbers live (2026-10-18).** The routing policy is data, and
 `config/routing.toml` is the source of truth: the kinds, each service's

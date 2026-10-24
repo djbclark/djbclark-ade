@@ -113,7 +113,7 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    Sonnet 5.5 at **medium**, high only for judgment turns; effort changes on 5.5/Fable 5.1 keep the prompt cache.
    One Sonnet `code` slice: `skills/model-routing/SKILL.md` item 12, `config/routing.toml` `[lead]`
    `pipeline_effort`, `route_agent.py policy --md`, a test.
-2. **`CLAUDE_CODE_SUBAGENT_MODEL=sonnet`** in `~/.claude/settings.json` `env` (via `agents/claude/settings.json.tmpl`):
+2. **DONE 2026-10-23 (djbclark approved; `bin/claude-settings-env` DEFAULTS (add-only) plus the template line, applied live by running it):** **`CLAUDE_CODE_SUBAGENT_MODEL=sonnet`** in `~/.claude/settings.json` `env` (via `agents/claude/settings.json.tmpl`):
    an Agent-tool sub-agent with no `model:` inherits the lead's model, so a Fable or Opus lead silently spawns
    Fable or Opus sub-agents; `claude/agents/adversary.md` keeps its explicit `model: opus`. One small PR.
 3. **One aggregating waiter per PR**: promote `~/.local/state/bigteam/adhoc-2026-10-23/pr-wait.sh` (waits for CI
