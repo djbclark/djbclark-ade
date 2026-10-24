@@ -2404,6 +2404,28 @@ class TestRound7(Harness):
         rc, _, err = self.run_text(sess(), "hello there friend")
         self.assertEqual((rc, self.calls), (0, ["type"]), err)    # another text was in flight, the lock is free again: the pane route types
 
+    def test_a_holder_that_releases_while_its_hash_is_unreadable_is_asked_again_not_skipped_to_the_socket(self) -> None:
+        """L-D: the holder truncates the lock file before it closes it, so a relay that failed the lock and then read an
+        empty file used to "skip" to the socket, which put the holder's recorded text in a second time. It now asks for
+        the lock again and, once it is free, takes the pane route under it (pane_send's check sees the holder's entry)."""
+        relay.claude_socket = lambda s: "/tmp/x.sock"
+        real, asks = relay.pane_lock, []
+
+        @contextlib.contextmanager
+        def busy_once(sid: str, text: str = ""):    # the holder is releasing: the first ask finds it held, the file empty
+            asks.append(text)
+            if len(asks) == 1:
+                relay.pane_lock_path(sid).touch()    # the real holder's file exists: B's own open created it before its flock failed
+                yield False
+            else:
+                with real(sid, text) as got:
+                    yield got
+        relay.pane_lock = busy_once
+        self.addCleanup(lambda: setattr(relay, "pane_lock", real))
+        rc, _, err = self.run_text(sess(), "hello there friend")
+        self.assertEqual((rc, self.calls), (0, ["type"]), err)
+        self.assertEqual(len(asks), 2)
+
     def test_a_failed_replace_leaves_no_temp_file_behind(self) -> None:
         """P4: the unsent file is written through a temp file; one that cannot replace the real file is removed."""
         relay.note_unsent("keep", "an earlier message", "", 0)
