@@ -20,11 +20,12 @@ whole of Basic Memory):
   * wiki-links `[[Target]]`, `[[Target#heading]]`, `[[Target|alias]]`, outside fenced code
     blocks and outside single-backtick inline code. Double-backtick spans are not detected.
   * Markdown links `[text](path.md)` that resolve to a note in the store (relative to the
-    note's folder, then to the store root, then by stem); they count as relations. A
-    Markdown link that resolves to nothing is ignored, never reported as unresolved.
+    note's folder, then to the store root, then by stem unless the link climbs out of the
+    store with `..`); they count as relations. A Markdown link that resolves to nothing is
+    ignored, never reported as unresolved.
   * a target resolves by, in order: frontmatter `permalink`, the slugged `folder/stem`,
     the title (case-insensitive), the slugged stem. Slug = lowercase, `_` and spaces -> `-`.
-  * `- [ruling]` / `- [decision]` observation lines.
+  * `- [ruling]` / `- [decision]` observation lines, outside code like the links above.
 Not parsed: embeds, HTML comments, BM's own per-project permalink prefix, the SQLite index.
 Files over --max-bytes still get the size, observation and path checks, but their
 relations are not parsed: they are listed under `skipped` and are exempt from the orphan
@@ -33,7 +34,8 @@ count. At most 1 MiB (or --max-bytes, if larger) of any note is read.
 Files: only regular files that `lstat` confirms and whose realpath is under the store's
 realpath are read; symlinked notes, FIFOs, devices and the like are listed under `skipped`
 and never opened, so a link cannot pull outside text into a report and a FIFO cannot hang
-the run.
+the run. A directory that cannot be listed is named under `skipped` (path only); a store
+root that cannot be listed is exit 2.
 
 Checks (finding `check` ids):
   missing-type        filename-prefix note (reference_/feedback_/project_/user_) with no
@@ -100,7 +102,7 @@ PREFIX_TYPES = {
 
 # Every pattern below is linear-time: no class crosses a newline or `[` where it need not.
 WIKILINK_RE = re.compile(r"\[\[([^\]\n#|[]+)(?:#[^\]\n|[]*)?(?:\|[^\]\n[]*)?\]\]")
-MDLINK_RE = re.compile(r"\[[^\]\n[]*\]\(([^)\s#:]+\.md)(?:#[^)\s]*)?\)")
+MDLINK_RE = re.compile(r"\[[^\]\n[]*\]\(([^)\s#:\[\]()]+\.md)(?:#[^)\s\[\]()]*)?\)")
 OBSERVATION_RE = re.compile(r"^[ \t]*[-*][ \t]*\[(ruling|decision)\][ \t]*(.*)$", re.MULTILINE)
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
@@ -195,19 +197,24 @@ def is_archived(rel):
     return "archive" in rel.split(os.sep)[:-1]
 
 
+class StoreError(Exception):
+    """The store root itself cannot be listed: a run that read nothing must not look clean."""
+
+
 class Store:
     """Every readable markdown note in the store, read once, with the derived facts the
-    checks share (frontmatter, mtime, wiki-link and Markdown-link targets)."""
+    checks share (frontmatter, mtime, code-stripped text, wiki-link and Markdown-link targets)."""
 
     def __init__(self, root, max_bytes):
         self.root = root
-        self.notes = []  # {rel, path, text, fm, mtime, size, parsed, links, mdlinks}
+        self.notes = []  # {rel, path, text, clean, fm, mtime, size, parsed, links, mdlinks}
         self.skipped = []
         self._not_read = []
         cap = max(max_bytes, READ_FLOOR)
         real_root = os.path.realpath(root)
         flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
-        for dirpath, dirnames, filenames in os.walk(root):  # followlinks=False: no cycles
+        walk_errors = []
+        for dirpath, dirnames, filenames in os.walk(root, onerror=walk_errors.append):  # followlinks=False: no cycles
             dirnames.sort()
             for name in sorted(filenames):
                 if not name.endswith(".md"):
@@ -239,8 +246,8 @@ class Store:
                 text = data.decode("utf-8", errors="replace").lstrip("\ufeff")
                 parsed = st.st_size <= max_bytes
                 links, mdlinks = [], []
+                clean = strip_code(text)  # observations are scanned here even when not parsed
                 if parsed:
-                    clean = strip_code(text)
                     links = [(m.group(1).strip(), ln)
                              for ln, m in finditer_lines(WIKILINK_RE, clean)]
                     mdlinks = [(unquote(m.group(1)), ln)
@@ -251,6 +258,7 @@ class Store:
                     "rel": rel,
                     "path": path,
                     "text": text,
+                    "clean": clean,
                     "fm": parse_frontmatter(text),
                     "mtime": st.st_mtime,
                     "size": st.st_size,
@@ -258,6 +266,11 @@ class Store:
                     "links": links,
                     "mdlinks": mdlinks,
                 })
+        for err in walk_errors:
+            where = os.path.relpath(err.filename, root) if err.filename else "."
+            if where == ".":
+                raise StoreError("store is not readable: %s" % root)
+            self._not_read.append((where, "directory not readable"))
         for rel, why in self._not_read[:SKIP_LIST_CAP]:
             self.skipped.append("notes: %s: %s" % (why, rel))
         if len(self._not_read) > SKIP_LIST_CAP:
@@ -405,10 +418,13 @@ class Linter:
 
         def resolve_md(rel, target):
             posix = rel.replace(os.sep, "/")
-            for cand in (posixpath.normpath(posixpath.join(posixpath.dirname(posix), target)),
-                         posixpath.normpath(target.lstrip("/"))):
+            here = posixpath.normpath(posixpath.join(posixpath.dirname(posix), target))
+            for cand in (here, posixpath.normpath(target.lstrip("/"))):
                 if cand in by_path:
                     return by_path[cand]
+            # A link that climbs out of the store has no in-store target to guess at.
+            if here == ".." or here.startswith("../"):
+                return None
             return by_stem.get(slug(posixpath.splitext(posixpath.basename(target))[0]))
 
         resolved_out = {}   # rel -> set of rels it links to
@@ -462,7 +478,7 @@ class Linter:
             has_link = bool(n["links"] or n["mdlinks"])
             has_decision = False
             seen = {}
-            for line, m in finditer_lines(OBSERVATION_RE, n["text"]):
+            for line, m in finditer_lines(OBSERVATION_RE, n["clean"]):
                 kind, rest = m.group(1), m.group(2)
                 if kind == "ruling" and not DATE_RE.search(rest):
                     h = short_hash(" ".join(rest.split()).casefold())
@@ -584,7 +600,11 @@ def run_lint(argv):
         print("bm-lint: store is not a directory: %s" % root, file=sys.stderr)
         return 2
 
-    store = Store(root, args.max_bytes)
+    try:
+        store = Store(root, args.max_bytes)
+    except StoreError as e:
+        print("bm-lint: %s" % e, file=sys.stderr)
+        return 2
     linter = Linter(args)
     findings = linter.run(store)
     summary = {}

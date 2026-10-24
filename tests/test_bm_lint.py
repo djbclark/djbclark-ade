@@ -391,14 +391,19 @@ def test_odd_config_shapes_never_crash_with_exit_1(tmp_path):
 
 def test_hostile_notes_are_linear_time(tmp_path):
     write_note(tmp_path, "a.md", "[" * 20000 + "\n")
-    write_note(tmp_path, "b.md", "\n" * 40000 + "- [ruling] x\n")
+    write_note(tmp_path, "b.md", "\n" * 100000 + "x\n")  # the scan that failed on the old ^\s*
     write_note(tmp_path, "c.md", "[[a" * 5000 + "\n")
     write_note(tmp_path, "d.md", "[x" * 10000 + "\n")
+    write_note(tmp_path, "e.md", "[](" * 64000 + "\n")
+    write_note(tmp_path, "f.md", "[](a.md" * 28000 + "\n")
+    write_note(tmp_path, "g.md", "\n" * 40000 + "- [ruling] x\n")
     start = time.monotonic()
-    proc = run(tmp_path, "--max-bytes", "10000000", timeout=60)
+    proc = run(tmp_path, "--max-bytes", "10000000", timeout=120)
     elapsed = time.monotonic() - start
     assert proc.returncode in (0, 1), proc.stderr
-    assert elapsed < 2, elapsed
+    # Generous: the quadratic versions took 8-27 s per note, linear ones take well under 1 s,
+    # so 10 s still separates them without flaking on a loaded machine.
+    assert elapsed < 10, elapsed
     assert text_findings(proc, "ruling-undated")
 
 
@@ -452,3 +457,115 @@ def test_dead_subtree_spares_a_parent_with_a_fresh_child(tmp_path):
     write_note(tmp_path, "q/old.md", "see [[new]]\n", age_days=45)
     _proc, out = jrun(tmp_path)
     assert [f["path"] for f in of(out, "dead-subtree")] == ["q"]
+
+
+# --- last fixes before merge (Codex P2, adversary round 2 C1-C6, 2026-10-24) -------------
+
+def test_observations_in_a_code_fence_are_examples_not_findings(tmp_path):
+    write_note(tmp_path, "fenced.md",
+               "# doc\nsee [[fenced]]\n```\n- [decision] example choice\n- [ruling] example rule\n```\n")
+    write_note(tmp_path, "open.md", "# doc\n- [decision] real choice\n- [ruling] real rule\n")
+    write_note(tmp_path, "inline.md", "# doc\nsee `- [decision] x` and `- [ruling] y` as text\n")
+    _proc, out = jrun(tmp_path)
+    assert [f["path"] for f in of(out, "decision-unlinked")] == ["open.md"]
+    assert [f["path"] for f in of(out, "ruling-undated")] == ["open.md"]
+    assert "line 3" in of(out, "ruling-undated")[0]["detail"]  # line numbers stay true
+
+
+def test_ruling_after_a_fence_keeps_its_line_number(tmp_path):
+    write_note(tmp_path, "r.md", "```\n- [ruling] in fence\n```\n\n- [ruling] after\n")
+    _proc, out = jrun(tmp_path)
+    found = of(out, "ruling-undated")
+    assert len(found) == 1 and "line 5" in found[0]["detail"]
+
+
+def load_tool():
+    import importlib.util
+    from importlib.machinery import SourceFileLoader
+    loader = SourceFileLoader("bm_lint_under_test", str(TOOL))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(mod)
+    return mod
+
+
+def test_mdlink_re_stays_strict():
+    rx = load_tool().MDLINK_RE
+    assert rx.search("[t](sub/b.md#top)").group(1) == "sub/b.md"
+    assert rx.search("[t](../a.md)").group(1) == "../a.md"
+    assert rx.search("[t](https://x.example/c.md)") is None
+    assert rx.search("[t](a(b.md)") is None and rx.search("[t](a]b.md)") is None
+
+
+def test_unreadable_store_root_is_exit_2_not_clean(tmp_path):
+    if os.geteuid() == 0:
+        import pytest
+        pytest.skip("root reads everything")
+    store = tmp_path / "store"
+    write_note(store, "a.md", "see [[b]]\n")
+    os.chmod(store, 0o000)
+    try:
+        proc = run(store)
+    finally:
+        os.chmod(store, 0o755)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "not readable" in proc.stderr and "no findings" not in proc.stdout
+
+
+def test_unreadable_subdirectory_is_listed_under_skipped(tmp_path):
+    if os.geteuid() == 0:
+        import pytest
+        pytest.skip("root reads everything")
+    store = tmp_path / "store"
+    write_note(store, "a.md", "see [[b]]\n")
+    write_note(store, "locked/secret.md", "SECRETBODY see [[a]]\n")
+    os.chmod(store / "locked", 0o000)
+    try:
+        proc = run(store, "--json")
+    finally:
+        os.chmod(store / "locked", 0o755)
+    assert proc.returncode in (0, 1), proc.stdout + proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["notes"] == 1
+    assert any("directory not readable" in s and "locked" in s for s in out["skipped"]), out["skipped"]
+    assert "SECRETBODY" not in proc.stdout
+
+
+def test_markdown_link_out_of_the_store_gets_no_stem_fallback(tmp_path):
+    write_note(tmp_path, "README.md", "nothing\n")
+    write_note(tmp_path, "x/a.md", "see [elsewhere](../../elsewhere/README.md)\n")
+    _proc, out = jrun(tmp_path)
+    orphans = {f["path"]: f["detail"] for f in of(out, "orphan-notes")}
+    assert "." in orphans and "1 of 1" in orphans["."]  # README is not reached by the outside link
+    assert "x" in orphans
+
+
+def test_markdown_link_to_a_moved_note_still_falls_back_to_the_stem(tmp_path):
+    write_note(tmp_path, "a.md", "see [it](old/place/README.md)\n")
+    write_note(tmp_path, "new/README.md", "nothing\n")
+    _proc, out = jrun(tmp_path)
+    assert not of(out, "orphan-notes")  # in-store guess kept: only `..` escapes are refused
+
+
+def test_internal_error_is_exit_2_with_a_message(tmp_path, monkeypatch, capsys):
+    mod = load_tool()
+    write_note(tmp_path, "a.md", "see [[b]]\n")
+
+    def boom(self, store):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mod.Linter, "check_oversize", boom)
+    rc = mod.main([str(tmp_path), "--config", NO_CONFIG])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "internal error" in err and "RuntimeError" in err
+
+
+def test_readme_roster_documents_every_flag_and_exit_code():
+    import re
+    help_text = run(None, "--help").stdout
+    flags = set(re.findall(r"--[a-z][a-z-]+", help_text)) - {"--help"}
+    row = [ln for ln in (REPO / "README.md").read_text(encoding="utf-8").splitlines()
+           if ln.startswith("| [`bin/bm-lint`]")]
+    assert len(row) == 1, "README roster needs exactly one bin/bm-lint entry"
+    assert flags and all(f in row[0] for f in flags), sorted(f for f in flags if f not in row[0])
+    assert "Exit codes: 0 no findings, 1 findings, 2 error" in row[0]
