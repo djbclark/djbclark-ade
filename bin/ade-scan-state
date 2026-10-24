@@ -31,7 +31,7 @@ a top-level checkout whose git dir does not point back to it is skipped before a
 the checkout; every later call, `--fetch` among them, would act on the git directory git reads, outside the scanned tree).
 Layouts: a `.git` DIRECTORY holding a `commondir` entry is `skipped: git dir redirected (commondir)`; a `.git` gitfile
 naming a git dir G is accepted only if G points back, by a `gitdir` file naming `<checkout>/.git` (a linked worktree's
-admin dir) or by `core.worktree` in `G/config` naming the checkout (`--separate-git-dir`, an absorbed submodule), and a
+admin dir) or by `core.worktree` in `G/config` naming the checkout (an absorbed submodule writes one; `--separate-git-dir` writes neither back-pointer, so that layout is skipped), and a
 `commondir` in G must name a common dir C with G at `C/worktrees/<name>`; a gitfile naming another checkout's `.git` or a
 bare repository, a planted admin dir, or one that cannot be read or parsed is `skipped: git dir redirected (does not point
 back to this checkout)`, with `git dir -> G` (and `commondir -> C`) in `linked_stores`,
@@ -254,6 +254,7 @@ SAFE_CONFIG = frozenset({
     "core.sparsecheckoutcone", "core.untrackedcache", "core.fsmonitor",  # fsmonitor: true/false only
     "user.name", "user.email", "user.signingkey", "commit.gpgsign",  # a key id: executes nothing
     "extensions.worktreeconfig", "extensions.objectformat", "extensions.refstorage",
+    "extensions.relativeworktrees",  # `worktree.useRelativePaths`: linked worktrees' gitfile and `gitdir` hold relative paths
     "submodule.active", "pull.rebase", "pull.ff", "push.default", "push.autosetupremote",
     "merge.conflictstyle", "rerere.enabled", "status.showuntrackedfiles",  # status gets the flag too
     "lfs.repositoryformatversion"})
@@ -459,16 +460,21 @@ def newest_mtime(path: Path) -> float:
     return best
 
 
+MAX_TASK_FILE = 1024 * 1024  # a CLAIM or a job record is a few lines; past this it is not what bigteam wrote
+
+
 def claim_state(task: Path, failures: list[tuple[Path, str]] | None = None) -> str:
     claim = task / "CLAIM"
     try:
-        lines = [ln.strip() for ln in claim.read_text(errors="replace").splitlines() if ln.strip()]
+        # bounded and non-blocking: a FIFO (or a symlink to one) as CLAIM would hang `read_text` forever
+        text = read_regular_file(claim, MAX_TASK_FILE).decode("utf-8", errors="replace")
     except (FileNotFoundError, NotADirectoryError):
         return "no CLAIM"
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         if failures is not None:
-            failures.append((claim, errno_name(exc)))
+            failures.append((claim, errno_name(exc) if isinstance(exc, OSError) else "NOTREG"))
         return "no CLAIM"
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     return "DONE" if lines and lines[-1].startswith("DONE") else "open"
 
 
@@ -485,7 +491,7 @@ def open_job_records(task: Path, failures: list[tuple[Path, str]] | None = None)
     out = []
     for name in names:
         try:
-            data = json.loads((jobs / name).read_text(errors="replace"))
+            data = json.loads(read_regular_file(jobs / name, MAX_TASK_FILE).decode("utf-8", errors="replace"))
         except (OSError, ValueError):
             out.append(f"{name} (unreadable)")
             continue
@@ -828,7 +834,7 @@ def git_dir_foreign(path: Path) -> str | None:
       1. `.git` is a DIRECTORY: it holds no `commondir` entry of any kind (git writes none there; SKIP_COMMONDIR).
       2. `.git` is a gitfile naming a git dir G (relative to `path`): G must point back to `path`, by (a) a `gitdir` file
          naming `<path>/.git` (a linked worktree's admin dir), or (b) `core.worktree` in `G/config` naming `path` (what
-         `--separate-git-dir` and an absorbed submodule write). If G holds a `commondir` it must name a common dir C with G
+         an absorbed submodule writes; `--separate-git-dir` writes neither (a) nor (b), git 2.56, so it is skipped). If G holds a `commondir` it must name a common dir C with G
          at `C/worktrees/<name>` (the only place git makes an admin dir), whichever of (a) and (b) holds. A gitfile that
          names another checkout's `.git` or a bare repository, a planted admin dir, and a gitfile or target that cannot be
          read or parsed all fail (SKIP_GIT_DIR_FOREIGN). Nothing here runs git.
@@ -853,8 +859,10 @@ def git_dir_foreign(path: Path) -> str | None:
             if not os.path.samefile(gitdir, os.path.join(common, "worktrees", gitdir.name)):
                 return SKIP_GIT_DIR_FOREIGN
         if os.path.lexists(gitdir / "gitdir"):  # (a)
-            back = _read_text(gitdir / "gitdir").rstrip("\r\n")
-            if back and os.path.samefile(_joined(gitdir, back), dotgit):
+            back = _joined(gitdir, _read_text(gitdir / "gitdir").rstrip("\r\n")).rstrip("/")
+            # the DIRECTORY the back-pointer names, which cannot be hard-linked: `samefile` on the gitfile itself compares
+            # inodes, so a hard link of a real worktree's `.git` would pass (adversary round 67, LOW 1)
+            if os.path.basename(back) == ".git" and os.path.samefile(os.path.dirname(back), path):
                 return None
         if os.path.lexists(gitdir / "config"):  # (b)
             value = _config_worktree(_read_text(gitdir / "config"))
@@ -1225,8 +1233,8 @@ def embedded_repositories(path: Path, within: list[str] | None = None) -> tuple[
 def index_hidden_repositories(path: Path) -> tuple[int, list[str], list[str], tuple[str, int] | None]:
     """(index-hidden paths counted, names, pointers, failure) of a checkout: the repositories at a tracked path that is
     marked assume-unchanged (`ls-files -v` tag in lowercase) or skip-worktree (`S`) and is replaced by a directory, and
-    those at an ordinary tracked path (not a gitlink) that `ls-files -m -d` reports because a directory now stands where
-    the file was (`status` shows only ` D a`). Those are invisible to `status` and to `embedded_repositories(path)`:
+    those at an ordinary tracked path (not a gitlink) that `ls-files -m` reports because a directory now stands where
+    the file was (a type change: `-d` does not list it, `status` shows only ` D a`). Those are invisible to `status` and to `embedded_repositories(path)`:
     `ls-files --others` lists nothing for a directory that is a repository itself (its `.git` makes it opaque), so the
     repository is looked for under each such directory on its own, and the directory itself counts when it has a `.git`
     (Codex pass 55 on PR 27, P2; pass 66, P1 for the ordinary tracked file). A skip-worktree path with no file is a
@@ -1241,12 +1249,21 @@ def index_hidden_repositories(path: Path) -> tuple[int, list[str], list[str], tu
         return 0, [], [], ("ls-files -v", rc)
     hidden_paths = [e[2:] for e in out.split("\0") if len(e) > 2 and e[1] == " "
                     and (e[0].islower() or (e[0] == "S" and os.path.lexists(os.path.join(path, e[2:]))))]
-    # a tracked file replaced by a directory is "deleted" (and a changed one "modified"): `-s` gives the mode, so a
-    # gitlink (a submodule, vetted elsewhere) is left out; `<mode> <object> <stage>\t<path>`, one line per reason
-    rc, out = git(path, "ls-files", "-z", "-s", "-m", "-d", errors="surrogateescape")
+    # a tracked file replaced by a directory is "modified" (a type change; `-d` lists only a path that is gone). `-s`
+    # would list every index entry and `-m` would then hash every stat-dirty one, so the gitlinks (submodules, vetted
+    # elsewhere) come from a separate plain listing and only when a changed path is a directory. The content check of
+    # `-m` gets `status`'s time bound (a checkout whose stat data is stale hashes every file; round 67, LOW 3)
+    rc, out = git(path, "ls-files", "-z", "-m", "-d", errors="surrogateescape", timeout=STATUS_TIMEOUT)
     if rc != 0:
         return len(hidden_paths), [], [], ("ls-files -m -d", rc)
-    changed_paths = [e.split("\t", 1)[1] for e in out.split("\0") if "\t" in e and not e.startswith("160000 ")]
+    changed_paths = [e for e in dict.fromkeys(out.split("\0"))
+                     if e and os.path.isdir(os.path.join(path, e)) and not os.path.islink(os.path.join(path, e))]
+    if changed_paths:
+        rc, staged = git(path, "ls-files", "-z", "-s", errors="surrogateescape")  # `<mode> <object> <stage>\t<path>`
+        if rc != 0:
+            return len(hidden_paths), [], [], ("ls-files -s", rc)
+        gitlinks = {e.split("\t", 1)[1] for e in staged.split("\0") if e.startswith("160000 ") and "\t" in e}
+        changed_paths = [p for p in changed_paths if p not in gitlinks]
     hidden_dirs = [h for h in dict.fromkeys(hidden_paths + changed_paths)
                    if os.path.isdir(os.path.join(path, h)) and not os.path.islink(os.path.join(path, h))]
     if not hidden_dirs:
@@ -1263,6 +1280,33 @@ def index_hidden_repositories(path: Path) -> tuple[int, list[str], list[str], tu
             if os.path.islink(dot_git) or not os.path.isdir(dot_git):
                 pointers.append(h + "/")
     return len(hidden_paths), list(dict.fromkeys(names)), list(dict.fromkeys(pointers)), None
+
+
+def merge_repositories(path: Path, names: list[str], pointers: list[str], more_names: list[str],
+                       more_pointers: list[str]) -> tuple[list[str], list[str]]:
+    """`names` and `pointers` plus the ones of `more_*` that are not already there, a directory counted once whatever its
+    spelling: two names that `os.path.samefile` calls one directory (a case-insensitive file system) keep the first, and a
+    pointer to the dropped spelling is a pointer to the kept one."""
+    out = list(names)
+    alias: dict[str, str] = {}
+    for n in more_names:
+        if n in out:
+            continue
+        same = next((k for k in out if _same_directory(path, k, n)), None)
+        if same is None:
+            out.append(n)
+        else:
+            alias[n] = same
+    ptr = list(pointers)
+    ptr += [p for p in dict.fromkeys(alias.get(p, p) for p in more_pointers) if p not in ptr]
+    return out, ptr
+
+
+def _same_directory(path: Path, a: str, b: str) -> bool:
+    try:
+        return os.path.samefile(os.path.join(path, a.rstrip("/")), os.path.join(path, b.rstrip("/")))
+    except OSError:
+        return False
 
 
 def stash_count(path: Path, common: Path | None) -> int | None:
@@ -1617,8 +1661,10 @@ def local_only_count(path: Path, revs: list[str], tips: list[str],
 def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     """`scan_record` plus the store warnings: a checkout whose own `objects/info/alternates` is not empty keeps commits in
     a store that neither `whole.tar` nor the git-dir archive holds, so every `skipped` or `scan incomplete` row (the ones
-    that offer only those two) carries `alternates` (adversary round 64, LOW 3); one whose `objects`, `refs` or
-    `packed-refs` is a symlink out, or whose `.git` directory holds a `commondir`, carries `linked_stores` (round 65, LOW 2).
+    that offer only those two) carries `alternates` (adversary round 64, LOW 3); one whose `objects`, `refs`, `logs`,
+    `packed-refs` or `shallow` is a symlink out (or holds a symlink anywhere inside `objects/`, `refs/` or `logs/`), whose
+    `.git` directory holds a `commondir`, or whose `.git` gitfile names a git dir that does not point back, carries
+    `linked_stores` (round 65, LOW 2; round 67, INFO 3).
     A bundle row is not affected: `bundle create` reads through both. Ordinary records are left alone."""
     rec = scan_record(path, remote, fetch)
     if rec["verdict"].startswith(("skipped", INCOMPLETE_PREFIX)):
@@ -1741,8 +1787,9 @@ def scan_record(path: Path, remote: bool, fetch: bool = False) -> dict:
     index_hidden, more_names, more_pointers, failure = index_hidden_repositories(path)
     if failure:
         return incomplete_record(path, *failure)
-    embedded = embedded + [n for n in more_names if n not in embedded]
-    embedded_pointers = embedded_pointers + [n for n in more_pointers if n not in embedded_pointers]
+    # the same directory under two spellings (a case-insensitive APFS: untracked `C` and the replaced tracked `c`) is one
+    # row, not two that archive it twice (adversary round 67, INFO 2)
+    embedded, embedded_pointers = merge_repositories(path, embedded, embedded_pointers, more_names, more_pointers)
     if len(embedded) > MAX_EMBEDDED:
         return incomplete_record(path, f"embedded repositories ({len(embedded)} > {MAX_EMBEDDED})", 0)
     rc, up = git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
@@ -2053,6 +2100,9 @@ def scan_record(path: Path, remote: bool, fetch: bool = False) -> dict:
         "local_only_tags": local_only_tags,
         "local_only_branches_uncounted": branches_uncounted,
         "has_origin": has_origin,
+        # a `<common>/shallow` file: `bundle create` drops it, so a bundle of this checkout cannot be cloned until the
+        # file is put back (the doc's no-origin row keeps it beside the bundle; Codex 4367121323, P2)
+        "shallow": common is not None and os.path.lexists(common / "shallow"),
         # whatever the mode: the capture plan must never print a push for such a url (adversary round 39: the
         # `not queried` flag is `--remote`-only, and a default scan still got push rows); the url itself is in no record
         "origin_credential": bool(credential),
