@@ -1181,35 +1181,43 @@ def route_dispatch(c):
     return ("ok", f"acp-dispatch {Path(rec).name}", "queued")
 
 
-def nearest_agent(table, pid):
-    """The agent label (fleet.PROC_AGENTS) of the nearest process at or above PID in TABLE (pid -> (ppid, command), as
-    `fleet.proc_table` reads it), or None when none of them is a known agent."""
+def turn_is_above(table, pid, boundary):
+    """True when walking up from PID in TABLE (pid -> (ppid, command), as `fleet.proc_table` reads it) reaches BOUNDARY (the
+    relay that started the Hermes turn) or the top of the tree before it passes an agent other than Hermes. The Hermes
+    process itself is not told from its command line (`python3 -I -c import os, ...`), so the boundary is explicit."""
     for _ in range(40):
+        if pid == boundary or pid <= 1:
+            return True
         ppid, cmd = table.get(pid, (0, ""))
-        names = [os.path.basename(p) for p in cmd.split()[:2]]
-        agent = next((fleet.PROC_AGENTS[n] for n in names if n in fleet.PROC_AGENTS), None)
-        if agent or ppid <= 1:
-            return agent
+        agent = next((fleet.PROC_AGENTS[n] for n in (os.path.basename(p) for p in cmd.split()[:2]) if n in fleet.PROC_AGENTS), None)
+        if agent:
+            return agent == "hermes"
         pid = ppid
-    return None
+    return True
 
 
 def hermes_hops():
-    """Hermes turns nested above this process (RELAY_HOPS, set for a relayed `hermes -z` turn). Anything a turn starts
-    inherits the variable, so a Claude, Codex or other agent session started inside the turn would count it too: it
-    counts only unless the nearest agent process above this one is another agent than Hermes (R3-L3)."""
+    """Hermes turns nested above this process (RELAY_HOPS, set for a relayed `hermes -z` turn together with RELAY_HOP_PARENT,
+    the pid of the relay that started it). Anything a turn starts inherits both, so a Claude, Codex or other agent session
+    started inside the turn would count it too: it counts only when the walk up from this process reaches that relay, or the
+    top of the tree (the relay already exited), before another agent (R3-L3). Without a valid RELAY_HOP_PARENT it counts."""
     try:
         n = max(0, int(os.environ.get("RELAY_HOPS", "0")))
     except ValueError:
         return HERMES_HOPS_MAX
-    if n and nearest_agent(fleet.proc_table(), os.getppid()) not in (None, "hermes"):
+    if not n:
         return 0
-    return n
+    try:
+        boundary = int(os.environ["RELAY_HOP_PARENT"])
+    except (KeyError, ValueError):
+        return n
+    return n if turn_is_above(fleet.proc_table(), os.getppid(), boundary) else 0
 
 
 def hermes_env(sid):
     env = {k: v for k, v in os.environ.items() if k not in HERMES_SCRUB and not k.startswith(HERMES_SCRUB_PREFIXES)}
     env["RELAY_HOPS"] = str(hermes_hops() + 1)
+    env["RELAY_HOP_PARENT"] = str(os.getpid())
     env["RELAY_SENDER"] = f"hermes {sid[-8:]}"
     return env
 

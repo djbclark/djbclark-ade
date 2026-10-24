@@ -43,7 +43,6 @@ saved_type_line = relay.type_line
 real_rows_below = relay.rows_below
 real_draft = relay.draft
 real_box_read = relay.box_read
-real_nearest_agent = relay.nearest_agent
 
 
 def stamp(offset: float = 0.0) -> str:
@@ -963,11 +962,11 @@ class TestHermesRoute(Harness):
             os.environ.clear()
             os.environ.update(saved[2])
         self.addCleanup(restore)
-        for target, stub in ((relay, ("nearest_agent", lambda table, pid: None)), (relay.fleet, ("proc_table", lambda: {}))):
+        for target, stub in ((relay.fleet, ("proc_table", lambda: {})),):
             patch = mock.patch.object(target, *stub)    # hermetic: the runner's process tree is not under test, and `ps` must not hit the fake Popen
             patch.start()
             self.addCleanup(patch.stop)
-        for k in ("RELAY_HOPS", "RELAY_SENDER", "HERMES_SESSION_ID", "HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID",
+        for k in ("RELAY_HOPS", "RELAY_HOP_PARENT", "RELAY_SENDER", "HERMES_SESSION_ID", "HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID",
                   "HERMES_SESSION_THREAD_ID", "HERMES_SESSION_KEY", "PASEO_AGENT_ID", "CLAUDE_CODE_SESSION_ID", "ACP_OPERATOR_APPROVED"):
             os.environ.pop(k, None)
 
@@ -1360,24 +1359,48 @@ class TestHermesRoute(Harness):
             with self.subTest(case=case):
                 self.assertIn("Do not resend", self.run_hermes(self.hsess(), **case)[2])
 
-    def test_nearest_agent_reads_the_process_tree(self) -> None:
-        table = {10: (5, "/bin/zsh -l"), 5: (4, "claude --resume abc"), 4: (1, "python3 /x/bin/hermes -z hi")}
-        self.assertEqual(real_nearest_agent(table, 10), "claude")
-        self.assertEqual(real_nearest_agent({10: (5, "sh -c x"), 5: (1, "python3 /x/bin/hermes -z hi")}, 10), "hermes")
-        self.assertIsNone(real_nearest_agent({10: (5, "sh"), 5: (1, "launchd")}, 10))
+    REAL_SHAPE = {100: (1, "claude --resume abc"), 101: (100, "/bin/zsh -l"), 102: (101, "/opt/py/bin/python3 /x/relay.py hermes hi"),
+                  103: (102, "/Users/u/.hermes/tools/python-3.14/bin/python3 -I -c import os, re, sys"), 104: (103, "/bin/sh -c relay"),
+                  105: (104, "/opt/py/bin/python3 /x/relay.py claude yo")}    # the process shape of `hermes -z` run by relay.py, 2026-10-24
+
+    def hops_with(self, table: dict[int, tuple[int, str]], parent: int, ppid: int, **env: str) -> int:
+        os.environ.update({"RELAY_HOPS": "2", "RELAY_HOP_PARENT": str(parent), **env})
+        with mock.patch.object(relay.fleet, "proc_table", lambda: table), mock.patch.object(relay.os, "getppid", lambda: ppid):
+            return relay.hermes_hops()
+
+    def test_a_relay_inside_a_real_hermes_turn_counts_the_hops_and_is_tagged_hermes(self) -> None:
+        """R3-L3 (adversary H1): Hermes is `python3 -I -c ...`, so the walk must stop at the relay that started the turn, not
+        run on to the original caller's claude above it."""
+        self.assertEqual(self.hops_with(self.REAL_SHAPE, 102, 104), 2)
+        os.environ["RELAY_SENDER"] = "hermes 0_abcdef"
+        with mock.patch.object(relay.fleet, "proc_table", lambda: self.REAL_SHAPE), mock.patch.object(relay.os, "getppid", lambda: 104):
+            self.assertEqual(relay.sender_name([sess(self=True, name="the caller")]), "hermes 0_abcdef")
+
+    def test_the_outer_relay_having_exited_still_counts(self) -> None:
+        table = {k: v for k, v in self.REAL_SHAPE.items() if k != 102}
+        table[103] = (1, table[103][1])    # Hermes reparented to launchd
+        self.assertEqual(self.hops_with(table, 102, 104), 2)
+        self.assertEqual(self.hops_with({}, 102, 104), 2)    # an unreadable tree fails closed
 
     def test_a_session_started_inside_a_relayed_turn_ignores_the_hop_and_sender_markers(self) -> None:
-        """R3-L3: a Claude session a turn starts inherits RELAY_HOPS and RELAY_SENDER but is not a nested hermes turn."""
-        os.environ.update({"RELAY_HOPS": "3", "RELAY_SENDER": "hermes 0_abcdef"})
-        with mock.patch.object(relay.fleet, "proc_table", lambda: {}), mock.patch.object(relay, "nearest_agent", lambda t, p: "claude"):
-            self.assertEqual(relay.hermes_hops(), 0)
+        """R3-L3: a Claude session a turn starts inherits the markers but is not a nested hermes turn."""
+        table = {**self.REAL_SHAPE, 110: (104, "claude --resume def"), 111: (110, "/bin/bash -c x")}
+        os.environ["RELAY_SENDER"] = "hermes 0_abcdef"
+        self.assertEqual(self.hops_with(table, 102, 111), 0)
+        with mock.patch.object(relay.fleet, "proc_table", lambda: table), mock.patch.object(relay.os, "getppid", lambda: 111):
             self.assertEqual(relay.sender_name([sess(self=True, name="mine")]), "mine")
             _, _, _, calls = self.run_hermes(self.hsess(), out="ok")
-            self.assertEqual(calls[0][1]["env"]["RELAY_HOPS"], "1")
-        for agent in ("hermes", None):    # a Hermes ancestor, or an unrecognised tree: still counted
-            with mock.patch.object(relay.fleet, "proc_table", lambda: {}), mock.patch.object(relay, "nearest_agent", lambda t, p, a=agent: a):
-                self.assertEqual(relay.hermes_hops(), 3, agent)
-                self.assertEqual(relay.sender_name([sess(self=True, name="mine")]), "hermes 0_abcdef", agent)
+            self.assertEqual((calls[0][1]["env"]["RELAY_HOPS"], calls[0][1]["env"]["RELAY_HOP_PARENT"]), ("1", str(os.getpid())))
+        table[110] = (104, "python3 /x/bin/hermes -z hi")    # a named Hermes above the boundary still counts
+        self.assertEqual(self.hops_with(table, 102, 111), 2)
+
+    def test_a_missing_or_bad_hop_parent_counts(self) -> None:
+        os.environ.update({"RELAY_HOPS": "2"})
+        os.environ.pop("RELAY_HOP_PARENT", None)
+        with mock.patch.object(relay.fleet, "proc_table", lambda: {**self.REAL_SHAPE, 110: (104, "claude")}), mock.patch.object(relay.os, "getppid", lambda: 110):
+            self.assertEqual(relay.hermes_hops(), 2)
+            os.environ["RELAY_HOP_PARENT"] = "junk"
+            self.assertEqual(relay.hermes_hops(), 2)
 
     def test_a_prune_that_loses_the_race_for_an_out_file_still_removes_its_err(self) -> None:
         """R3-L6b: the other prune unlinks the .out first; the loser must not skip the .err sibling."""
