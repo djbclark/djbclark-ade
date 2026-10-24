@@ -192,6 +192,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `self-slash` on a herdr pane running omp (2026-10-24): `--finish` sent to this session polled the screen 9 times for a `❯` that omp never draws and gave up with nothing sent, while the caller was told "queued". `prompt_line.py` now reads omp's input row (the box's last row, `╰─ `, minus its ` ─╯` border and the `⇧⇥ to change thinking effort` hint); `wait_idle` takes omp's busy state from the terminal title's braille spinner, because herdr has no omp detector and reports "idle" mid-turn; a herdr agent the script cannot read (not claude, cursor or omp) now draws a warning at queue time. Smoke-tested on a second omp pane: queued mid-turn, waited for the turn to end, sent `/quit`, omp exited.
 - `self-slash --finish --successor` after its first live run (2026-10-23): reads the agent id behind Paseo 0.13's
   `Using workspace <id>` line before the JSON (the successor started but this agent was not archived); copies the old
   agent's `--mode` only to the same provider (an omp `full` made `paseo run` refuse a claude successor), else

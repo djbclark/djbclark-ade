@@ -233,7 +233,13 @@ if [ "${SELF_SLASH_CHILD:-}" = "1" ]; then
   s_workspace="${SELF_SLASH_S_WORKSPACE:-}"; s_keepws="${SELF_SLASH_S_KEEPWS:-0}"; s_baton="${SELF_SLASH_S_BATON:-}"
 fi
 s_thinking="${s_thinking:-high}"
-if [ "$tui" = cursor ]; then marker="→"; else marker="❯"; fi
+# herdr names the TUI in the pane's `agent` field.  Prompt detection knows Claude Code (❯), cursor-agent (→) and omp
+# (the input box's last row, `╰─ `, 2026-10-24: omp's row has no ❯, so --finish sent to an omp pane polled 9 times
+# and gave up).  Another TUI cannot be read, so say so now: the waiter would only log "gave up" after ~50 s.
+case "$tui" in cursor) marker="→";; omp) marker="╰─ ";; *) marker="❯";; esac
+if [ "$host" = herdr ] && [ -n "$tui" ] && [ "$tui" != claude ] && [ "$tui" != cursor ] && [ "$tui" != omp ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
+  echo "self-slash: warning: herdr reports agent '$tui' for $pane; prompt detection only knows claude, cursor and omp, so the waiter will probably give up (exit 5, see $HOME/.local/state/self-slash.log)" >&2
+fi
 # herdr and Orca both send a long argument as a bracketed paste and Claude Code then
 # treats it as pasted content, not a command (seen 2026-10-09 with ~900 chars): keep it short.
 if [ "$host" != paseo ] && [ "${#text}" -gt "${SELF_SLASH_MAX:-300}" ]; then
@@ -504,6 +510,22 @@ wait_idle() {
     return 0
   fi
   [ "$host" = herdr ] || return 0
+  if [ "$tui" = omp ]; then
+    # herdr has no state detector for omp (`herdr agent explain`: default_known_agent_idle_fallback), so
+    # its status is "idle" mid-turn too and the check below never waits.  omp's own signal is the terminal
+    # title: "π ⠙ <session title>" (a braille spinner) while a turn runs, "π > <dir>" when it is idle
+    # (seen 2026-10-24).  A /quit sent mid-turn would run at once and cut the turn off.
+    waited=0; said=0
+    while :; do
+      title=$(herdr pane get "$pane" 2>/dev/null | python3 -c '
+import json, sys
+print(json.load(sys.stdin).get("result", {}).get("pane", {}).get("terminal_title_stripped", ""))' 2>/dev/null)
+      case "$title" in "π "[⠀-⣿]*) ;; *) return 0;; esac
+      [ "$said" = 1 ] || { echo "$(gdate '+%F %T') $host $pane: omp turn running (title spinner), waiting for idle before sending"; said=1; }
+      [ "$waited" -lt "${SELF_SLASH_WAIT:-900}" ] || { echo "$(gdate '+%F %T') $host $pane: gave up after ${waited}s, omp still running; NOT sent: ${text:0:80}"; exit 6; }
+      sleep 5; waited=$((waited+5))
+    done
+  fi
   waited=0; said=0
   while :; do
     st=$(herdr pane list 2>/dev/null | python3 -c '
