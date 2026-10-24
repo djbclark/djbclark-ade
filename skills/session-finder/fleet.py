@@ -17,7 +17,8 @@ Sources, merged by pane and session id: herdr `agent list` (any agent kind), the
 registry (~/.claude/sessions), a process scan for TUIs running outside herdr, Hermes gateway
 sessions active in the last day (~/.hermes/state.db, read-only), the sessions launch.py
 started over ACP (~/.local/state/session-finder/launches.jsonl), every other non-archived Paseo agent
-(`paseo ls -g --background --json`, any provider; rows are matched on the Paseo agent id), plus herdr panes whose TUI herdr
+(`paseo ls -g --background --json`, any provider; rows are matched on the Paseo agent id; a running one with a pending
+permission or question card is `blocked`, from one `paseo permit ls --json`), plus herdr panes whose TUI herdr
 did not detect (`pane process-info`). Each record says how to reach the session (`reach`), whether
 it already finished with /handoff or /quit (`finished`), and whether an idle-looking session still
 has work in flight (`busy`: live child processes that are not its MCP/LSP servers -> status
@@ -35,6 +36,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -85,6 +87,10 @@ REG_STATUS = {"busy": "working", "shell": "working", "waiting": "blocked", "idle
 # running turn and starts the sent text as a new one (agent-manager steerOrReplaceActiveTurn: "replaced"). Plugin
 # providers (antigravity, muse, hoplite) steer only when they negotiate "prompt.steer": unknown, so not listed.
 PASEO_STEER_PROVIDERS = frozenset({"claude", "codex", "omp", "opencode", "pi"})
+# Of those, the ones relay.py steers into a WORKING agent without `--steer`: peers relay to working Claude agents all
+# the time. Each of the others (codex: a review turn, a server without turn/steer; omp: a steer error) can decline a
+# steer where relay cannot see it, and Paseo then replaces the running turn: they need `--steer` (adversary, 2026-10-23).
+PASEO_STEER_DEFAULT = frozenset({"claude"})
 PASEO_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 PASEO_LS_TIMEOUT = 20
 PASEO_STATUS = {"running": "working", "idle": "idle"}
@@ -497,14 +503,14 @@ def _other_herdr(agents, used):
     return out
 
 
-def _paseo_ls(*flags):
-    """Parsed `paseo ls -g --json FLAGS` (the CLI is $PASEO_CLI, else PATH): a list, or None when there is no
-    CLI, it failed or timed out, or it printed anything but a JSON list. argv list, stdin closed, nothing cached."""
+def _paseo_json(*args):
+    """Parsed JSON of `paseo ARGS` (the CLI is $PASEO_CLI, else PATH): a list, or None when there is no CLI, it
+    failed or timed out, or it printed anything but a JSON list. argv list, stdin closed, nothing cached."""
     cli = os.environ.get("PASEO_CLI") or shutil.which("paseo")
     if not cli or not os.access(cli, os.X_OK):
         return None
     try:
-        p = subprocess.run([cli, "ls", "-g", "--json", *flags], capture_output=True, text=True,
+        p = subprocess.run([cli, *args], capture_output=True, text=True,
                            timeout=PASEO_LS_TIMEOUT, check=False, stdin=subprocess.DEVNULL)
         data = json.loads(p.stdout) if p.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired, ValueError):
@@ -512,12 +518,51 @@ def _paseo_ls(*flags):
     return data if isinstance(data, list) else None
 
 
+def _paseo_ls(*flags):
+    """Parsed `paseo ls -g --json FLAGS`: a list of agents, or None (see `_paseo_json`)."""
+    return _paseo_json("ls", "-g", "--json", *flags)
+
+
+HIDDEN = "\u115f\u1160\u3164\uffa0\u2800"    # fillers and blanks that render as nothing
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.?")
+PASEO_REQ = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}")    # alphanumeric first: an id of `--all` or `-h` would be read as an option
+
+
+def clean_text(text):
+    """Text from another agent or process as plain data: escape sequences, control characters (C0 bar newline and tab, DEL,
+    C1), Unicode format characters (bidi overrides and isolates, zero-width), blank fillers and variation selectors removed."""
+    return "".join(ch for ch in ANSI.sub("", text)
+                   if ch in "\n\t" or not (ch < " " or "\x7f" <= ch <= "\x9f" or unicodedata.category(ch) in ("Cf", "Zl", "Zp")
+                                           or ch in HIDDEN or "\ufe00" <= ch <= "\ufe0f" or "\U000e0100" <= ch <= "\U000e01ef")).strip()
+
+
+def _paseo_waiting():
+    """{Paseo agent id: [{"id": request id or None, "text": "TOOL: description"}, ...]} for every agent with a pending
+    permission or question card, one entry per card in the order `paseo permit ls --json` lists them (`paseo ls` carries
+    no pending-permission field). The request id is what `paseo permit allow|deny AGENT -- ID` takes (without one, allow
+    approves every card of the agent); an id that is not a plain token (alphanumeric first) is None. Empty when the call fails: a row is then
+    listed as it was before, `running`. The text is the agent's own, control characters stripped."""
+    out = {}
+    for d in _paseo_json("permit", "ls", "--json") or []:
+        pid = d.get("agentId") if isinstance(d, dict) else None
+        if isinstance(pid, str):
+            rid = d.get("id")
+            out.setdefault(pid, []).append({
+                "id": rid if isinstance(rid, str) and PASEO_REQ.fullmatch(rid) else None,
+                "text": " ".join(clean_text(f"{d.get('name') or 'permission'}: {d.get('description') or ''}").split())[:300]})
+    return out
+
+
 def paseo_reach(sid, provider, archived=False):
     if archived:
         return "archived Paseo agent: relay.py refuses it (a send would unarchive it); unarchive it in Paseo first"
     base = f'relay.py {sid} "<text>" (`paseo send` into its Paseo agent; '
-    if provider in PASEO_STEER_PROVIDERS:
+    if provider in PASEO_STEER_DEFAULT:
         return base + "queued at its next tool round if it is working, unless Paseo replaces the turn, e.g. while it compacts)"
+    if provider in PASEO_STEER_PROVIDERS:
+        return base + ("queued at its next tool round if it is working and the provider takes the steer; if it declines "
+                       "(a Codex review turn, a steer error) Paseo replaces the turn, so a send while it works needs "
+                       "--steer; --idle S waits for idle instead)")
     return base + f"a {provider} agent cannot steer, so a send while it works would replace its turn: refused, --idle S waits for idle)"
 
 
@@ -562,6 +607,13 @@ def _paseo_rows(have, anc, include_archived=False):
                         paseo_state="archived" if archived else raw, archived=archived, ended=archived,
                         self=(pid == me or pid in hosting), where=f"host=paseo agent={pid}",
                         reach=paseo_reach(pid[:8], prov, archived)))
+    if any(s["paseo_state"] == "running" for s in out):    # only a running agent can wait on a card
+        waiting = _paseo_waiting()
+        for s in out:
+            if s["paseo_state"] == "running" and s["paseo"] in waiting:
+                cards = waiting[s["paseo"]]
+                s.update(status="blocked", paseo_cards=cards,
+                         paseo_pending=cards[0]["text"] if len(cards) == 1 else f"{len(cards)} cards, the first: {cards[0]['text']}")
     return out
 
 
