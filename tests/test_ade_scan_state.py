@@ -5473,7 +5473,21 @@ def test_a_shallow_checkout_with_an_origin_says_its_bundle_restores_only_into_a_
     c = scan_one(mod, home / "src")
     assert c["shallow"] is True and "no origin remote" not in c["flags"], c
     row = next(r for r in section_3_2(doc.render(doc_scan([c]))).splitlines() if r.startswith("| ~/src/sh "))
-    assert "bundle create" in row and "clone of origin" in row, row
+    assert "bundle create" in row and "git clone --bare <origin> R" in row, row
+    # follow the printed recipe for real: the local commit must be in the restored clone (adversary round 1 on PR 47)
+    bundle_cmd = unescape_span(re.search(r"`(mkdir -p [^`]*bundle create[^`]*)`", row).group(1))
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    env = {**GIT_ENV, "HOME": str(home)}
+    run = subprocess.run(["bash", "-c", PLAN_PREFIX + bundle_cmd.replace("<DEST>", str(dest))], capture_output=True, text=True,
+                         cwd=tmp_path, env=env)
+    assert run.returncode == 0, run.stderr
+    bundle = next(dest.rglob("*.bundle"))
+    spec = re.search(r"fetch <bundle> '([^']*)'", row).group(1)
+    git(tmp_path, "clone", "-q", "--bare", f"file://{upstream}", "R")
+    git(tmp_path / "R", "fetch", "-q", str(bundle), spec)
+    sha = git(co, "rev-parse", "HEAD").strip()
+    assert subprocess.run(["git", "-C", str(tmp_path / "R"), "cat-file", "-e", sha], env=GIT_ENV).returncode == 0
 
 
 def test_the_replaced_file_check_asks_for_modified_paths_only_and_never_lists_the_whole_index_with_a_content_check(tmp_path, monkeypatch):
