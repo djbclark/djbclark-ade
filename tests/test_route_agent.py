@@ -8,9 +8,12 @@ would starve Hindsight and hermes of inference.
 from __future__ import annotations
 
 import contextlib
+import io
+import json
 import os
 import shlex
 import sys
+import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1870,3 +1873,119 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         path = self.write("huge.json", body)
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
         self.assertIsNone(quota["codex"]["remaining"])
+
+
+class TestGovernorHold(unittest.TestCase):
+    """2026-10-23: bin/claude-fleet-governor writes `level`; while it says tight or critical (and is under
+    30 min old) the Claude subscription is an exhausted pool for code/bulk/research/mechanical, and
+    judgment prefers omp's API credits. `plan --kind code` had printed `claude 30% left` while the
+    5-hour window was projected to run out before its reset."""
+
+    QUOTA: ClassVar[dict[str, Any]] = {**IDLE, "claude": {"remaining": 30.0}, "omp": {"remaining": 90.0}}
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "fleet-governor.json"
+        patcher = mock.patch.dict(os.environ, {"CLAUDE_GOVERNOR_STATE": str(self.path),
+                                               "ROUTE_AGENT_OMP_READY": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # no `acp-run --list` subprocess per route(): the curated roster is enough here
+        patcher = mock.patch.object(r, "acp_list_output", return_value="")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def state(self, level, age_min=5, **over):
+        body = {"level": level, "checked_at": (datetime.now(UTC) - timedelta(minutes=age_min)).isoformat(),
+                "windows": {"five_hour": {"label": "Claude Code 5-hour", "used": 70.0, "level": level,
+                                          "projected_at_reset": 116.0, "resets_at": "2026-10-23T14:59:59Z"}}}
+        body.update(over)
+        self.path.write_text(json.dumps(body))
+
+    def test_without_state_claude_is_still_chosen_for_code(self):
+        # a missing state file holds nothing: claude stays in the roster for judgment (omp, eligible since the quota
+        # guard's routing change, may rank first: claude is the choice or an alternative)
+        choice = r.route("judgment", quota=self.QUOTA)
+        self.assertIn("claude", {choice.service.name, *choice.alternatives})
+        self.assertIsNone(r.governor_hold())
+
+    def test_tight_and_critical_never_pick_claude_for_the_four_kinds(self):
+        for level in ("tight", "critical"):
+            self.state(level)
+            for kind in ("code", "bulk", "research", "mechanical"):
+                with self.subTest(level=level, kind=kind):
+                    choice = r.route(kind, quota=self.QUOTA)
+                    self.assertIsNotNone(choice)
+                    self.assertNotEqual(choice.service.name, "claude")
+                    self.assertNotIn("claude", choice.alternatives)
+                    self.assertIn(f"claude skipped: Claude subscription {level}", choice.why)
+                    self.assertIn("5-hour 70% used", choice.why)
+
+    def test_plan_never_dispatches_claude_while_held(self):
+        self.state("critical")
+        rows = r.plan(["code", "code", "research", "bulk", "mechanical"], quota=self.QUOTA)
+        self.assertTrue(all(c is not None and c.service.name != "claude" for _, c in rows))
+        self.assertFalse(any(c.dispatch.startswith("acp-dispatch claude") for _, c in rows))
+
+    def test_judgment_prefers_omp_opus_on_api_credits(self):
+        self.state("tight")
+        choice = r.route("judgment", quota=self.QUOTA)
+        self.assertEqual(choice.service.name, "omp")
+        self.assertEqual(choice.model, "anthropic/claude-opus-5-5 --effort high")
+        self.assertEqual(choice.dispatch, "acp-dispatch omp --model anthropic/claude-opus-5-5 --effort high --kind judgment")
+        self.assertIn("off the subscription", choice.why)
+
+    def test_judgment_falls_back_to_claude_when_omp_cannot_take_it(self):
+        self.state("tight")
+        for label, quota, env in (("omp not logged in", self.QUOTA, {"ROUTE_AGENT_OMP_READY": "0"}),
+                                  ("omp credits spent", {**self.QUOTA, "omp": {"remaining": 3.0}}, {})):
+            with self.subTest(label), mock.patch.dict(os.environ, env):
+                self.assertEqual(r.route("judgment", quota=quota).service.name, "claude")
+
+    def test_judgment_does_not_force_an_ineligible_omp(self):
+        """Codex pass 7 on PR 31, P2: a retired omp, or one without the judgment capability, is not preferred just
+        because the governor holds Claude."""
+        self.state("tight")
+        original = r.Service.eligible
+        with mock.patch.object(r.Service, "eligible", lambda self, kind: self.name != "omp" and original(self, kind)):
+            choice = r.route("judgment", quota=self.QUOTA)
+        self.assertNotEqual(choice.service.name, "omp")
+
+    def test_frontier_routes_as_before(self):
+        before = r.route("frontier", quota=self.QUOTA).service.name
+        self.state("critical")
+        self.assertEqual(r.route("frontier", quota=self.QUOTA).service.name, before)
+
+    def test_ok_stale_and_unreadable_state_hold_nothing(self):
+        self.state("ok")
+        self.assertIsNone(r.governor_hold())
+        self.state("critical", age_min=31)
+        self.assertIsNone(r.governor_hold())
+        self.state("stale")
+        self.assertIsNone(r.governor_hold())
+        self.path.write_text("{not json")
+        self.assertIsNone(r.governor_hold())
+        self.path.write_text(json.dumps({"level": "tight"}))           # no checked_at: not fresh
+        self.assertIsNone(r.governor_hold())
+
+    def test_the_leads_manual_state_file_holds_nothing(self):
+        self.path.write_text(json.dumps({"note": "manual", "window_resets_at": "2026-10-23T14:59:59Z",
+                                         "downshifted": {"955e2b2": "claude-opus-5-5"}}))
+        self.assertIsNone(r.governor_hold())
+
+    def test_unrouted_reason_names_the_hold(self):
+        self.state("critical")
+        everything_else_full = {name: {"remaining": 0.0} for name in IDLE}
+        self.assertIn("Claude subscription critical", r.unrouted_why("code", everything_else_full))
+
+    def test_cli_plan_prints_the_reason(self):
+        self.state("critical")
+        out = io.StringIO()
+        err = io.StringIO()
+        with (contextlib.redirect_stdout(out), contextlib.redirect_stderr(err),
+              mock.patch.object(r, "load_snapshot", return_value=(self.QUOTA, 60.0))):
+            self.assertEqual(r.main(["plan", "--kinds", "code,judgment"]), 0)
+        self.assertNotIn("acp-dispatch claude", out.getvalue())
+        self.assertIn("Claude subscription critical", err.getvalue())
+        self.assertIn("acp-dispatch omp --model anthropic/claude-opus-5-5", out.getvalue())

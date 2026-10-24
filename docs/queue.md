@@ -17,9 +17,28 @@ when they ship (into the relevant doc) or when they're dropped (say why).
 
 djbclark, 2026-10-23: "Add another item to appropriate phrase: Look into making better use of basic memory, I do not
 think we are using it that much/makeing the best use of it, but I could be wrong. Do web searches etc." Status
-2026-10-23: **research and design slice running** (`design-basicmemory`, Opus 5.5 high via omp, web research,
+2026-10-23: **research done; djbclark accepted all eight recommendations 2026-10-23; Q1 (the security upgrade) is DONE,
+the rest is queued until the Claude quota resets** (`design-basicmemory`, Opus 5.5 high via omp, web research,
 read-only; brief `~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-basicmemory.md`, report
-`~/.local/state/bigteam/adhoc-2026-10-23/design-basicmemory-report.md`). It measures the store (note counts, growth,
+`~/.local/state/bigteam/adhoc-2026-10-23/design-basicmemory-report.md`). Verdict, last 30 days: djbclark is right about
+the tool and wrong about the store. 680 notes in `main`, and 301 of 3,074 Claude sessions (9.8%) touch the store as
+files, but only 32 sessions (1.0%) made any Basic Memory MCP call (46 calls: `search_notes` 23, `write_note` 15,
+`build_context` and `schema_*` 0, `recent_activity` 1), Codex made none, there are zero `decision` notes, and Hermes's
+provider has been off since about 2026-10-03. **Q1 done 2026-10-23 (~9:20 PM):** GHSA-4gfv-c2mm-mvj2 (High, 7.7: no
+Host/Origin check on the HTTP transports, so DNS rebinding from any web page) affected our v0.23.2 streamable-http
+server; upgraded with `uv tool upgrade basic-memory` to v0.24.1 after an index backup in
+`~/.basic-memory/backup-2026-10-23/`, restarted `com.djbclark.basic-memory-mcp`, verified a foreign `Host` gets 421
+and a foreign `Origin` gets 403 while a loopback request is served; sessions reconnect with `/mcp`. Rulings Q2-Q8: 2.
+shadow our own `claude/hooks/bm_recall.py` (titles only, 400 tokens at most) against `bm hook session-start` for a
+week, keep the cheaper one that passes the recall evaluation, never both live; 3. move the 193 per-project auto-memory
+files into `site-private/memory/projects/<slug>/` with symlinks back (a dir already symlinked into its repo keeps being
+its own project); 4. re-enable Hermes's Basic Memory provider with `capture_per_turn: false`; 5. remove the 8 empty
+`~/agent-memory/*` projects, archive (not delete) the 3 dead `basic-memory/` subtrees; 6. handoffs older than 30 days go
+to `handoffs/archive/`; 7. backfill `type:` on the 321 prefixed root notes by one reversible script commit; 8. a
+`ruling` only for something djbclark said (quoted, dated), agents' own choices are `decision` notes with a relation to
+the handoff or PR. Build: the report's W2-W8 (drift fixes, `bin/bm-lint`, `bm_recall.py` in shadow mode, handoff
+observations and relations, type backfill and schemas, recall evaluation harness, Q3/Q4 config), Sonnet 5.5 workers.
+Phase placement: R2 now, the M1 track beside Phase 1, R7/R9 with proposal 6.4 / Phase 5. The report measures the store (note counts, growth,
 relations, orphans) and real agent use (MCP tool calls per day from the transcripts), compares with the per-project
 auto-memory files, `docs/handoffs/`, `session-finder` and Hermes memory, surveys what works elsewhere, and recommends
 capture and recall hooks, note schemas and consolidation, plus the phase it belongs in
@@ -30,9 +49,20 @@ capture and recall hooks, note schemas and consolidation, plus the phase it belo
 
 djbclark, 2026-10-23: "Also add to appropriate phase if we haven't yet, we should probably be making heavier use of
 hermes worktrees and cow pastures, to avoid agents stepping on each other's toes. Do web searches and consult a
-strong model on this as well." Status 2026-10-23: **design slice running** (`design-isolation`, Opus 5.5 high via
-omp, web research, read-only; brief `~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-isolation.md`,
-report `~/.local/state/bigteam/adhoc-2026-10-23/design-isolation-report.md`). It decides which phase of
+strong model on this as well." Status 2026-10-23: **design done, all seven recommendations accepted by djbclark
+2026-10-23, build queued until the Claude quota resets** (report
+`~/.local/state/bigteam/adhoc-2026-10-23/design-isolation-report.md`, Opus 5.5 high via omp with web research; brief
+`~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-isolation.md`). Rulings: 1. Hermes stays never a
+target (`hermes -w` is not used; its design is borrowed). 2. No agent edits in the primary `~/src/<repo>` (integration
+and fast-forward only; the lead's doc commits move to its own pasture). 3. `~/ops` may get a linked worktree outside
+`~/ops` when two agents must write one ops repo, guard-enforced (`stash` and autostash refused in `~/ops`). 4.
+`acp-dispatch --workspace auto` is the default for `--kind code`, `shared` opt-in. 5. The git guard covers
+acp-run-launched agents plus a Claude hook first; `~/.local/bin/git` only after a week with no false refusals. 6. The
+placement is a queue gate **I0 (workspace isolation)** ahead of Phase 1's first parallel fan-out, with Phase F section
+4 and proposal 9.4 consuming its adapter. 7. The reaper removes clean, merged and released pastures without asking;
+dirty or unpushed ones only ping. The build is the report's slices W1-W8 (claim library and guard `ade-git-guard`,
+`cow-pasture` claims and reaper, `acp-dispatch --workspace`, acp-run PATH, Claude hook, gate test, docs, home rules),
+Sonnet 5.5 `code` workers, adversary on W1 and W3 at minimum. The report decided which phase of
 [`docs/ade-everywhere-proposal.md`](ade-everywhere-proposal.md) section 8 this belongs in (or a step before Phase 0),
 what "Hermes worktrees" is (Hermes is never a routing target: whether its worktree mode as a user feature needs a
 ruling), when an agent gets a pasture, worktree or the shared checkout, claim files, and guards in `bin/cow-pasture` /
@@ -49,9 +79,19 @@ tab. Also make autorename work with paseo tabs, and just like workspaces we need
 to find them even if the user changes them in the UI after the autorename etc. This history system should also apply
 to herdr panes, tabs, and workspaces, our sqlite database might be a good place to do this, but again consult with a
 strong model on this problem, and ask me any questions that come up when this feature implementation surfaces."
-Status 2026-10-23: **design slice running** (`design-tabs`, Opus 5.5 high via omp, read-only; brief
-`~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-tabs.md`, report
-`~/.local/state/bigteam/adhoc-2026-10-23/design-tabs-report.md`). Nothing is built.
+Status 2026-10-23: **design done, all ten recommendations accepted by djbclark 2026-10-23, build queued until the
+Claude quota resets** (report `~/.local/state/bigteam/adhoc-2026-10-23/design-tabs-report.md`, Opus 5.5 high via omp;
+brief `~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-tabs.md`). Rulings: 1. The Paseo agent name is
+the short tab name (`adv-r3-pr31-pt`); the sentence title stays in the provider session and the `-pw` workspace name.
+2. Workers and adversary rounds are sub-agent tabs in the lead's workspace. 3. The store is a new
+`~/.local/state/ade/names.sqlite` (not session-finder's index). 4. An unexplained rename counts as `user`, so `--auto`
+never touches it. 5. A launchd job `com.djbclark.ade-names` (60 s Paseo poll, 5 min herdr reconcile) plus a herdr
+plugin, plist in this repo. 6. `-p` is retired for Paseo workspaces (`-pw` only). 7. Closing a top-level Paseo agent tab
+archives the agent; a Paseo mode for `herdr-tidy` is a later slice. 8. Names are kept forever, with `ade-names forget`.
+9. Autorename stays in-session; the poller only observes. 10. The rule lives in the autorename skill,
+`workspace-layout.md` and the repo AGENTS.md row, no home item. The build is the report's slices 1-8 (docs, `paseo_tab_name`
+and the `--auto` agent-name guard, `bin/ade-names`, herdr plugin and launchd, consumers, session-finder, backup entry,
+upstream issue draft), Sonnet 5.5 workers; slice 8 and 1 may go first and slice 2 alone fixes the `--auto` overwrite bug.
 
 1. **Tab usage convention**: what lives in a tab, one agent per tab or not, how the skills create, reuse and close tabs.
 2. **Naming rule**: lowercase, hyphenated, ending `-pt`, about 17 visible characters including the suffix; goes into
