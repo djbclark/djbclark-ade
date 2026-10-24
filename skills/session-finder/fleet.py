@@ -525,7 +525,7 @@ def _paseo_ls(*flags):
 
 HIDDEN = "\u115f\u1160\u3164\uffa0\u2800"    # fillers and blanks that render as nothing
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.?")
-PASEO_REQ = re.compile(r"[A-Za-z0-9._:-]{1,80}")
+PASEO_REQ = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,79}")    # alphanumeric first: an id of `--all` or `-h` would be read as an option
 
 
 def clean_text(text):
@@ -539,8 +539,8 @@ def clean_text(text):
 def _paseo_waiting():
     """{Paseo agent id: [{"id": request id or None, "text": "TOOL: description"}, ...]} for every agent with a pending
     permission or question card, one entry per card in the order `paseo permit ls --json` lists them (`paseo ls` carries
-    no pending-permission field). The request id is what `paseo permit allow|deny AGENT ID` takes (without one, allow
-    approves every card of the agent); an id that is not a plain token is None. Empty when the call fails: a row is then
+    no pending-permission field). The request id is what `paseo permit allow|deny AGENT -- ID` takes (without one, allow
+    approves every card of the agent); an id that is not a plain token (alphanumeric first) is None. Empty when the call fails: a row is then
     listed as it was before, `running`. The text is the agent's own, control characters stripped."""
     out = {}
     for d in _paseo_json("permit", "ls", "--json") or []:

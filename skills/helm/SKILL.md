@@ -188,7 +188,7 @@ means new prompts from other sessions are missed.
    their full final text (`reply`/`done`). A Paseo agent with no Claude transcript (cline, omp, codex, ...) is `remote`
    (listed, not answered here); while it waits on a permission or question card (2026-10-23: `fleet.py` reads
    `paseo permit ls --json`) it is an open `permission` item listing every card with its own
-   `paseo permit allow|deny <agent> <request id>` (never without the request id: `allow` alone approves ALL the agent's
+   `paseo permit allow|deny <agent> -- <request id>` (never without the request id: `allow` alone approves ALL the agent's
    pending cards, `deny` alone fails), or the Paseo UI; a new card re-opens a skipped item. helm has no terminal there, and `keys` refuses it.
 3. A Claude session outside herdr, Orca and tmux can be listed but not
    answered: use `SendMessage`, or his `focus`.

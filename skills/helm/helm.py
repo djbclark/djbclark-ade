@@ -294,14 +294,14 @@ def heading(it):
 
 
 def paseo_answers(it, shown=8):
-    """Answer lines for a Paseo item: `paseo permit allow|deny AGENT REQUEST_ID` per card, never without the request id (allow
+    """Answer lines for a Paseo item: `paseo permit allow|deny AGENT -- REQUEST_ID` per card (`--` ends option parsing in Paseo's CLI, commander 12), never without the request id (allow
     without one approves every card of the agent, deny without one fails). Up to SHOWN cards, then a pointer to `paseo permit ls`."""
     cards, agent = it.get("cards") or [], it.get("paseo_agent")
     out = []
     for n, c in enumerate(cards[:shown], 1):
         if len(cards) > 1:
             out.append(f"  card {n}: {c.get('text', '')}")
-        out.append("    " + (f"`paseo permit allow {agent} {c['id']}` | `paseo permit deny {agent} {c['id']}`" if agent and c.get("id")
+        out.append("    " + (f"`paseo permit allow {agent} -- {c['id']}` | `paseo permit deny {agent} -- {c['id']}`" if agent and c.get("id")
                              else "no usable request id: answer it in the Paseo UI"))
     if len(cards) > shown:
         out.append(f"  and {len(cards) - shown} more cards: `paseo permit ls`")
@@ -614,7 +614,7 @@ def cmd_keys(a, state):
         sys.exit(f"helm: {it['id']} is {it['kind']}, not waiting on a prompt; nothing sent")
     if it.get("paseo"):
         sys.exit(f"helm: {it['id']} is a Paseo agent: no terminal to press keys in; answer in the Paseo UI or per card with "
-                 f"`paseo permit allow|deny <agent> <request id>` (`paseo permit ls`)")
+                 f"`paseo permit allow|deny <agent> -- <request id>` (`paseo permit ls`)")
     if not s.get("chan"):
         sys.exit(f"helm: no channel to {it['id']}")
     send_keys(s, *a.key)

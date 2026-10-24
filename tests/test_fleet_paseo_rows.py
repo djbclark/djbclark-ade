@@ -286,7 +286,7 @@ def test_relay_refuses_a_paseo_agent_with_a_pending_card_and_names_the_paseo_ui(
     paseo.permits.write_text(json.dumps([card(OMP)]))
     r = next(r for r in rows() if r["paseo"] == OMP)
     why = relay.hard_stop(r)
-    assert why and "Paseo UI" in why and "helm.py" not in why and "allow|deny <agent> <request id>" in why
+    assert why and "Paseo UI" in why and "helm.py" not in why and "allow|deny <agent> -- <request id>" in why
 
 
 def test_every_pending_card_is_kept_with_its_request_id_and_helm_prints_a_command_per_card(paseo):
@@ -298,9 +298,9 @@ def test_every_pending_card_is_kept_with_its_request_id_and_helm_prints_a_comman
     assert r["paseo_pending"] == "2 cards, the first: Bash: echo safe"
     text = helm.render(helm.classify(r, {}))
     for req in ("req-a", "req-b"):
-        assert f"`paseo permit allow {OMP} {req}`" in text and f"`paseo permit deny {OMP} {req}`" in text
+        assert f"`paseo permit allow {OMP} -- {req}`" in text and f"`paseo permit deny {OMP} -- {req}`" in text
     assert "Bash: rm -rf ~" in text
-    assert re.findall(rf"paseo permit (?:allow|deny)(?! {OMP} req-)", text) == []    # never a command without its request id
+    assert re.findall(rf"paseo permit (?:allow|deny)(?! {OMP} -- req-)", text) == []    # never a command without its request id
 
 
 def test_a_new_card_reopens_a_skipped_paseo_item(paseo):
@@ -317,7 +317,7 @@ def test_a_new_card_reopens_a_skipped_paseo_item(paseo):
 def test_helm_lists_up_to_eight_cards_and_points_at_paseo_permit_ls_for_the_rest(paseo):
     paseo.permits.write_text(json.dumps([card(OMP, "Bash", f"cmd {n}", f"req-{n}") for n in range(10)]))
     text = helm.render(helm.classify(next(r for r in rows() if r["paseo"] == OMP), {}))
-    assert f"paseo permit allow {OMP} req-7`" in text and "req-8" not in text
+    assert f"paseo permit allow {OMP} -- req-7`" in text and "req-8" not in text
     assert "and 2 more cards: `paseo permit ls`" in text
 
 
@@ -327,6 +327,22 @@ def test_a_request_id_that_is_not_a_plain_token_gets_no_command(paseo):
     assert r["paseo_cards"][0]["id"] is None
     text = helm.render(helm.classify(r, {}))
     assert "paseo permit allow" not in text and "Paseo UI" in text
+
+
+@pytest.mark.parametrize("rid", ["--all", "-h", "-", "-x", "--input", ".hidden", ":x", "a" * 81])
+def test_a_request_id_the_paseo_cli_would_read_as_an_option_gets_no_command(paseo, rid):
+    """L-A (adversary 2): `permit allow AGENT --all` approves every card; an id must start alphanumeric and be at most 80 characters."""
+    paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo", rid)]))
+    r = next(r for r in rows() if r["paseo"] == OMP)
+    assert r["paseo_cards"][0]["id"] is None
+    text = helm.render(helm.classify(r, {}))
+    assert "paseo permit allow" not in text and "Paseo UI" in text
+
+
+def test_the_printed_command_ends_option_parsing_before_the_request_id(paseo):
+    paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo", "0-ok.id:1")]))
+    text = helm.render(helm.classify(next(r for r in rows() if r["paseo"] == OMP), {}))
+    assert f"`paseo permit allow {OMP} -- 0-ok.id:1`" in text
 
 
 def test_a_paseo_agent_with_no_claude_row_is_not_found_by_its_workspace_title(paseo):
