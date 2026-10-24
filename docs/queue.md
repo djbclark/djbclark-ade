@@ -1705,7 +1705,7 @@ OPEN (adversary fix text kept; not implemented, 2026-10-24):
    flock fails). If such a pid comes before any other agent, the relay is inside a relayed turn. The hop count is the number of such ancestors, and the sender is
    `hermes <sid[-8:]>` with the sid taken from the lock file name. This also removes the forgery residual of L-C (a process inside the turn can unset `RELAY_HOPS`
    or set `RELAY_HOP_PARENT` to a pid outside its ancestry; the L-C fix only stops a forged *name*). The `RELAY_HOPS` env markers can then become a cross-check or go.
-2. **L-D, the pane lock's hash can be missed while the holder releases (LOW).** `_flock` truncates the file in `finally` before `os.close` and `pane_sending` reads it
+2. **L-D, the pane lock's hash can be missed while the holder releases (LOW). FIXED 2026-10-24 (PR_N):** `pane_sending` returns None for an empty file after its retries and `route_pane` asks for the lock again (`PANE_LOCK_ASKS`, 5 times) before it skips; test `test_a_holder_that_releases_while_its_hash_is_unreadable_is_asked_again_not_skipped_to_the_socket`, mutant checked. Original finding: `_flock` truncates the file in `finally` before `os.close` and `pane_sending` reads it
    five times over 100 ms. If B's non-blocking flock fails while A holds the lock, and A then truncates and closes, B reads an empty file, `pane_sending` returns False,
    B returns "skip" and goes to `route_socket`, which has no check for an unproven entry: A's text, already typed and recorded, arrives twice. The same happens if A
    has not written its hash within 100 ms of taking the lock (a loaded machine). Fix: when `pane_sending` sees an empty file after its retries, try the pane lock once
