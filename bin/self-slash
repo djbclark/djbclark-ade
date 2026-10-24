@@ -560,7 +560,8 @@ pcli() { env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD "$paseo_cli" "$@"; }
 # jfield JSON-TEXT KEY...: the first KEY present in the top-level JSON OBJECT (null prints an empty
 # line); exit 3 when the text is not an object or no key is present (a renamed key must not read
 # as null, L2; a list is never unwrapped, L1).  jfield_nn is the same but a null value is also
-# exit 3 (the key is "present" only with a value).
+# exit 3, and so is any value that is not a string (an object, a number, a bool): the key is
+# "present" only with a string value (adv-selfslash-4 F1).
 jfield_py() {
   printf '%s' "$2" | python3 -c '
 import json, sys
@@ -576,7 +577,7 @@ nonnull = sys.argv[1] == "1"
 for k in sys.argv[2:]:
     if k in d:
         v = d[k]
-        if v is None and nonnull:
+        if nonnull and not isinstance(v, str):
             sys.exit(3)
         print("" if v is None else v)
         sys.exit(0)
@@ -699,6 +700,11 @@ successor_paseo() {
     # agent's inspect does not carry (key missing, null) is never replaced by a default (adv-selfslash-3 F1).
     old_provider=$(jfield_nn "$info" Provider) && [ -n "$old_provider" ] || successor_fail "inspect of this agent has no Provider, so its mode cannot be passed on safely (--mode MODE names one); nothing was started"
     old_mode=$(jfield_nn "$info" Mode) || successor_fail "inspect of this agent has no Mode value, so its mode cannot be passed on safely (--mode MODE names one); nothing was started"
+    # Only a plain lower-case provider id and a plain mode name are believed: "Claude", " claude" or
+    # a mode with spaces would otherwise read as another provider and take the bypassPermissions
+    # branch (adv-selfslash-4 F1).
+    case "$old_provider" in *[!a-z0-9_-]*) successor_fail "inspect of this agent gives Provider '$old_provider', not a plain provider id, so its mode cannot be passed on safely (--mode MODE names one); nothing was started";; esac
+    case "$old_mode" in *[!A-Za-z0-9_-]*) successor_fail "inspect of this agent gives Mode '$old_mode', not a plain mode name, so its mode cannot be passed on safely (--mode MODE names one); nothing was started";; esac
     # The same provider gets the old mode as it is: an empty one (no mode set) passes no --mode, the
     # provider's own default, never a made-up mode name.
     if [ "${successor%%/*}" = "$old_provider" ]; then mode="$old_mode"

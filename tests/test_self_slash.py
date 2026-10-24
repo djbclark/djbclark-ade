@@ -862,7 +862,14 @@ class SelfSlashPaseoTests(unittest.TestCase):
                               (['"Mode": "plan"', '"Provider": null'], "no Provider"),
                               (['"Mode": "plan"', '"Provider": ""'], "no Provider"),
                               (['"Provider": "claude"'], "no Mode value"),
-                              (['"Provider": "claude"', '"Mode": null'], "no Mode value")):
+                              (['"Provider": "claude"', '"Mode": null'], "no Mode value"),
+                              # adv-selfslash-4 F1: present but not a plain string id
+                              (['"Mode": "plan"', '"Provider": {"id": "claude"}'], "no Provider"),
+                              (['"Mode": "plan"', '"Provider": "Claude"'], "not a plain provider id"),
+                              (['"Mode": "plan"', '"Provider": " claude"'], "not a plain provider id"),
+                              (['"Provider": "claude"', '"Mode": {"id": "plan"}'], "no Mode value"),
+                              (['"Provider": "claude"', '"Mode": false'], "no Mode value"),
+                              (['"Provider": "claude"', '"Mode": "plan mode"'], "not a plain mode name")):
             r = self.run_waiter(FAKE_OLD_JSON=self.old_json(*extra))
             self.assertEqual(r.returncode, 11, f"{extra}: {r.stdout}{r.stderr}")
             self.assertIn(needle, r.stdout)
