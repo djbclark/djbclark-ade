@@ -72,6 +72,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -896,22 +897,152 @@ def paseo_workspace_name(title: str) -> str:
     return (title_slug(title, PASEO_WORKSPACE_SLUG_MAX) or "session") + "-pw"
 
 
-def paseo_workspace_id(agent: str) -> str | None:
-    """The workspace an agent lives in, from its record under $PASEO_HOME/agents/<cwd>/<id>.json
-    (`paseo agent inspect` does not print it, 2026-10-23)."""
+TAB_SUFFIX = "-pt"
+TAB_MAX = 17                          # visible length incl. the suffix (djbclark, 2026-10-23)
+TAB_BASE_MAX = TAB_MAX - len(TAB_SUFFIX)
+_TAB_PHRASES = {
+    ("load", "watcher"): "loadwatch", ("session", "finder"): "sfind", ("herdr", "tidy"): "tidy",
+    ("djbclark", "ade"): "ade", ("pull", "request"): "pr",
+}
+_TAB_PAIRS = {"pr": "pr", "round": "r", "issue": "i", "phase": "p"}   # 'pr 31' -> 'pr31', 'round 3' -> 'r3'
+_TAB_STOPWORDS = frozenset("a an and the of for to in on with from via by at is it this that my our into".split())
+_TAB_WORDS = {
+    "adversary": "adv", "review": "rev", "rework": "rwk", "fallback": "fb", "upstream": "up", "workspace": "ws",
+    "navigation": "nav", "plugin": "plug", "plugins": "plug", "coordinator": "coord", "implementation": "impl",
+    "documentation": "docs", "config": "cfg", "configuration": "cfg", "backup": "bkp", "backups": "bkp",
+    "migration": "mig", "security": "sec", "cfengine": "cfe", "lifecycle": "life", "overwrite": "ovw",
+    "autorename": "arn", "orchestration": "orch", "watcher": "watch", "handoff": "hoff", "terminal": "term",
+    "shell": "sh", "repository": "repo",
+}
+_TAB_IDENT = re.compile(r"(?:pr|r|i|p)[0-9]+")
+
+
+def _tab_tokens(text: str) -> list[str]:
+    """Steps 1-3 of the tab shortener: lower-case words, phrase table, identifier pairs joined."""
+    raw = re.sub(r"[^a-z0-9]+", " ", text.lower()).split()
+    phrased: list[str] = []
+    i = 0
+    while i < len(raw):
+        pair = tuple(raw[i:i + 2])
+        if pair in _TAB_PHRASES:
+            phrased.append(_TAB_PHRASES[pair])
+            i += 2
+        else:
+            phrased.append(raw[i])
+            i += 1
+    out: list[str] = []
+    i = 0
+    while i < len(phrased):
+        w = phrased[i]
+        nxt = phrased[i + 1] if i + 1 < len(phrased) else ""
+        if w in _TAB_PAIRS and nxt.isdigit():
+            out.append(_TAB_PAIRS[w] + nxt)
+            i += 2
+            continue
+        m = re.fullmatch(r"phase([0-9]+)", w)         # 'phase0' -> 'p0'
+        out.append(f"p{m.group(1)}" if m else w)
+        i += 1
+    return out
+
+
+def paseo_tab_name(title: str, context: Iterable[str] = (), taken: Iterable[str] = ()) -> str:
+    """The Paseo tab name for a session title: '<name>-pt', at most TAB_MAX (17) characters including the suffix,
+    lower case, hyphenated (design-tabs 2.2, 2026-10-24). A Paseo agent tab's name IS the agent's name.
+    `context` = words of the workspace's project/title, never repeated in the tab; `taken` = the names of the
+    workspace's other live agents and terminals (with or without '-pt'): a clash gets '-2', '-3', ...
+    Pure and deterministic."""
+    toks = _tab_tokens(title)
+    skip = {t for c in context for t in _tab_tokens(c)}
+    words = [_TAB_WORDS.get(t, t) for t in toks if t not in _TAB_STOPWORDS and not t.isdigit() and t not in skip]
+    # Two identifier tokens first (so 'pr12' survives), then the rest in title order, skipping what does not fit.
+    idents = [i for i, w in enumerate(words) if _TAB_IDENT.fullmatch(w)][:2]
+    chosen: list[int] = []
+    length = 0
+    for i in idents + [i for i in range(len(words)) if i not in idents]:
+        new = length + 1 + len(words[i]) if chosen else len(words[i])
+        if new <= TAB_BASE_MAX:
+            chosen.append(i)
+            length = new
+    base = "-".join(words[i] for i in sorted(chosen))
+    if not base:
+        base = (words or [t for t in toks if not t.isdigit()] or ["tab"])[0][:TAB_BASE_MAX]
+    used = {t.lower().removesuffix(TAB_SUFFIX) for t in taken}
+    name, n = base, 1
+    while name in used:
+        n += 1
+        name = base[:TAB_BASE_MAX - len(str(n)) - 1].rstrip("-") + f"-{n}"
+    return name + TAB_SUFFIX
+
+
+def paseo_agent_record(agent: str) -> dict:
+    """An agent's record under $PASEO_HOME/agents/<cwd>/<id>.json ({} when absent or unreadable)."""
     home = Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo")
     for rec in (home / "agents").glob(f"*/{agent}.json"):
         try:
-            return json.loads(rec.read_text(encoding="utf-8")).get("workspaceId") or None
+            data = json.loads(rec.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-    return None
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def paseo_workspace_id(agent: str) -> str | None:
+    """The workspace an agent lives in, from its record (`paseo agent inspect` does not print it, 2026-10-23)."""
+    return paseo_agent_record(agent).get("workspaceId") or None
+
+
+def _paseo_json(path: Path) -> list:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def paseo_tab_context(wks: str) -> list[str]:
+    """The workspace's title and its project's displayName: words a tab name never repeats."""
+    home = Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo") / "projects"
+    wk = next((w for w in _paseo_json(home / "workspaces.json")
+               if isinstance(w, dict) and w.get("workspaceId") == wks), {})
+    prj = next((p for p in _paseo_json(home / "projects.json")
+                if isinstance(p, dict) and p.get("projectId") == wk.get("projectId")), {})
+    title = str(wk.get("title") or "")
+    if title.endswith("-pw"):
+        title = title[:-len("-pw")]
+    return [title, str(prj.get("displayName") or "")]
+
+
+def paseo_tab_taken(agent: str, wks: str, cli: str) -> list[str]:
+    """Names of the workspace's other live agents (records, archived ones skipped) and its terminals
+    (`paseo terminal ls`, best effort: its JSON shape is unverified, so a failure only means fewer names)."""
+    home = Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo")
+    names: list[str] = []
+    for rec in sorted((home / "agents").glob("*/*.json")):
+        try:
+            data = json.loads(rec.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if (isinstance(data, dict) and data.get("workspaceId") == wks and data.get("id") != agent
+                and not data.get("archivedAt") and data.get("title")):
+            names.append(str(data["title"]))
+    try:
+        r = subprocess.run([cli, "terminal", "ls", "--workspace", wks, "--json"],
+                           capture_output=True, text=True, timeout=20)
+        rows = json.loads(r.stdout) if r.returncode == 0 else []
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        rows = []
+    names += [str(t.get(k)) for t in rows if isinstance(t, dict) for k in ("name", "title") if t.get(k)]
+    return names
 
 
 def paseo_set_name(title: str, auto: bool = False) -> str:
-    """A session hosted by a Paseo agent ($PASEO_AGENT_ID) also gets its sidebar name
-    set, through `paseo agent update --name` (2026-10-19), and its workspace renamed to
-    `<slug>-pw` (2026-10-23). `--auto` keeps a workspace that already ends in -pw. Never
+    """A session hosted by a Paseo agent ($PASEO_AGENT_ID) also gets its tab name set, through
+    `paseo agent update --name` (2026-10-19): for an agent the tab name IS the agent name, so it is
+    `paseo_tab_name(...)`, `<topic>-pt` (design-tabs, 2026-10-24); the sentence title stays the provider session's.
+    Its workspace is renamed to `<slug>-pw` (2026-10-23). `--auto` never replaces an agent name that already
+    ends in -pt, nor a workspace that ends in -pw (a name the operator or an earlier run set); this suffix test is
+    the fallback while no name store exists, and can still replace a UI rename that lacks the suffix. Never
     fatal: the provider-side title above is the one every other reader uses."""
     agent = os.environ.get("PASEO_AGENT_ID")
     if not agent:
@@ -919,13 +1050,19 @@ def paseo_set_name(title: str, auto: bool = False) -> str:
     cli = os.environ.get("PASEO_CLI") or shutil.which("paseo")
     if not cli:
         return " (paseo: no CLI, name not set)"
-    try:
-        r = subprocess.run([cli, "agent", "update", agent, "--name", title, "--json"],
-                           capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return f" (paseo: {exc})"
-    out = " (paseo name set)" if r.returncode == 0 else f" (paseo: rc {r.returncode})"
     wks = paseo_workspace_id(agent)
+    cur = str(paseo_agent_record(agent).get("title") or "")
+    if auto and cur.endswith(TAB_SUFFIX):
+        out = f" (paseo tab kept: {cur}) (names store unavailable)"
+    else:
+        tab = paseo_tab_name(title, paseo_tab_context(wks) if wks else [],
+                             paseo_tab_taken(agent, wks, cli) if wks else [])
+        try:
+            r = subprocess.run([cli, "agent", "update", agent, "--name", tab, "--json"],
+                               capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f" (paseo: {exc})"
+        out = f" (paseo tab {tab})" if r.returncode == 0 else f" (paseo: rc {r.returncode})"
     if not wks:
         return out + " (paseo workspace: not found)"
     name = paseo_workspace_name(title)
