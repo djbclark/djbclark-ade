@@ -2415,6 +2415,7 @@ class TestRound7(Harness):
         def busy_once(sid: str, text: str = ""):    # the holder is releasing: the first ask finds it held, the file empty
             asks.append(text)
             if len(asks) == 1:
+                relay.pane_lock_path(sid).touch()    # the real holder's file exists: B's own open created it before its flock failed
                 yield False
             else:
                 with real(sid, text) as got:
