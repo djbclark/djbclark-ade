@@ -13,23 +13,6 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    no origin branch (doc section 3.2). The 54.5 GiB `adhoc-2026-10-18/hm-promo-rehearsal/` is scratch; deleting
    it is a later cleanup decision.
 
-## ade-scan-state follow-up after PR 27 (rounds 65-67 LOW/INFO and Codex P2, 2026-10-24)
-
-PR 27 merged at an APPROVE with LOW only (djbclark, 2026-10-23: "merge now, follow-up PR"). One small follow-up PR with
-its own adversary round, from `adhoc-2026-10-23/adv-scan-67-report.md` and Codex finding 4365722733: 1. **P2**: a
-bigteam task's `CLAIM` that is a FIFO (or a symlink to one) blocks `read_text()` forever and `open_job_records()` has the
-same problem; use the bounded non-blocking `read_regular_file()` already used for stash reflogs and classify an
-unreadable one. 1b. **P2 (Codex 4367121323)**: a shallow checkout with no origin gets an `all.bundle` row, but the bundle drops `.git/shallow` and cloning it fails (`Could not read <parent>`); keep `.git/shallow` with the bundle or say the bundle cannot be cloned. 2. LOW 1: `git_dir_foreign` accepts a hard-linked gitfile (`os.path.samefile` compares inodes); compare
-resolved paths too. 3. LOW 2: four texts claim `--separate-git-dir` has a back-pointer (module docstring, the
-`git_dir_foreign` docstring, the doc tool's user-facing row at ~966) while the code and tests correctly skip it; fix the
-wording. 4. LOW 3: `ls-files -z -s -m -d` lists every index entry and adds a content-check pass under the 60 s budget;
-use `-m -d` with a separate gitlink filter, and add the test that fails when `-m` is dropped. 5. INFO: the FOREIGN row's
-"NOT archived" over-warns for git-dir entries the gitfile command does archive; dedupe the replaced-tracked-file and
-untracked directories by `samefile` (case-insensitive APFS double count); `scan_checkout`'s docstring lists only some
-store members; allowlist `extensions.relativeworktrees` (a `worktree.useRelativePaths` repo is skipped today); threat-model
-item 8 should say `--fetch` also writes through a symlinked `objects`. Round 61-63 LOWs and INFOs queued earlier stay in
-`queue-followups.md`.
-
 ## Make better use of Basic Memory (djbclark, direct, 2026-10-23)
 
 djbclark, 2026-10-23: "Add another item to appropriate phrase: Look into making better use of basic memory, I do not
