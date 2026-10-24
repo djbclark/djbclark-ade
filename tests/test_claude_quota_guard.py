@@ -1551,3 +1551,33 @@ def test_f2_a_tie_at_the_lowest_fable_goes_to_the_fresher_snapshot_row(rig, monk
     windowless = mod.decide(0, {"available": [default_row(80)]}, snap, [], mod.thresholds(), NOW)
     assert detailed["fable_left"] == windowless["fable_left"] == 10
     assert detailed["rows_age_s"] == 10 and windowless["rows_age_s"] == 10
+
+
+# -- fix 11 (adversary round 2 on PR 36: F1 borrowed twin that filled nothing) ------------------
+
+def _five_hour_summary_row(age):
+    return {"provider": "claude", "pool_family": "default", "usable_now": True, "age_seconds": age,
+            "binding_window": "Claude Code 5-hour", "headroom_percent": 40}
+
+
+def _idle_five_hour_snapshot_account():
+    """The idle shape (229 of 300 real snapshots): a 5-hour window at 95% with no reset time."""
+    return {"provider": "claude", "account": "djbclark@gmail.com", "usable_now": True, "age_seconds": 18000,
+            "windows": [_window("Claude Code 5-hour", 95, None, state="ok", pace_percent=None)]}
+
+
+@pytest.mark.parametrize("live_only", [True, False])
+def test_adv2_a_borrowed_twin_with_no_reset_or_pace_does_not_age(rig, monkeypatch, live_only):
+    """The summary row's 5-hour window finds a snapshot twin, but the twin has neither a reset time nor
+    a pace to lend, so no reported value comes from that 5 h old row: rows_age_s is 10, not 18000
+    (a false collector-down ping). With a detailed row beside it, the weekly stays the live 80%."""
+    mod = _load_guard_module(monkeypatch, rig)
+    detailed = {"provider": "claude", "pool_family": "default", "age_seconds": 10,
+                "windows": [_window("Claude Code weekly", 80, "2026-10-28T12:00:00Z", pool_family="default",
+                                    quota_scope="shared")]}
+    live = [_five_hour_summary_row(10)] if live_only else [detailed, _five_hour_summary_row(10)]
+    d = mod.decide(0, {"available": live}, {"accounts": [_idle_five_hour_snapshot_account()]}, [],
+                   mod.thresholds(), NOW)
+    assert d["five_hour_left"] == 40 and d["resets_at"] is None
+    assert d["weekly_left"] == (None if live_only else 80) and (d["pace"] is None) == live_only
+    assert d["rows_age_s"] == 10

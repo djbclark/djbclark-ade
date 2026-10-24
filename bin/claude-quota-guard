@@ -501,9 +501,12 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
                                              five or _lowest(fill, "five_hour"),
                                              fable or _lowest(fill, "fable"))
     # Only a snapshot row that supplies a value this result reports ages the decision: the window
-    # behind a shown number, or the twin a shown reset/pace was borrowed from.
+    # behind a shown number, or the twin a shown reset/pace was borrowed from, and only when that
+    # twin filled the field (a twin with no reset and no pace supplied nothing).
     used = {id(w) for w in (shown_weekly, shown_five, shown_fable) if w}
-    used |= {id(w["borrowed"]) for w in (shown_weekly, binding) if w and w.get("borrowed") is not None}
+    pace_src = weekly or binding or shown_weekly
+    used |= {id(w["borrowed"]) for w, field in ((shown_weekly, "resets_at"), (binding, "resets_at"), (pace_src, "pace"))
+             if w and w.get("borrowed") is not None and w["borrowed"][field] is not None}
     fed = [r for r, ws in snap_per_row if any(id(w) in used for w in ws)]
     rows_age = max((a for a in (_row_age(r, now_dt) for r in rows + fed) if a is not None), default=None)
     if not windows and not live_only:
