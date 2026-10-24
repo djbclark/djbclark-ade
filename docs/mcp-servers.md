@@ -29,11 +29,12 @@ The Hyades backend has no `/v2/search/developer`, so the stock `firecrawl_develo
 with status code 404" (and `firecrawl_search` with `categories: ["developer"]` an empty list). With the commercial index
 off, `bin/firecrawl-router` answers both itself from the GitHub search API (issues, merged pull requests, READMEs, docs,
 code files of **public** repositories only) in Firecrawl's response shape, with `source: "github"`; there is no reranker
-and no non-GitHub documentation site. Token: `GITHUB_TOKEN` through `sudo-secretspec get`, held in memory and read again
-at most once a minute while none is held (a failed read, or a 401); it is a
-classic PAT that reads private repositories too, so the router adds `is:public` and drops private code hits; that is
-best effort until a fine-grained public-read token is stored under its own secretspec name
-(`FIRECRAWL_ROUTER_GITHUB_SECRET`; `docs/threat-model.md` item 10 names the residual). Limits: GitHub's 30 searches a minute (10
+and no non-GitHub documentation site. Token (since 2026-10-24): `FIRECRAWL_GITHUB_PUBLIC_TOKEN`, a fine-grained
+public-repositories-read-only GitHub token, selected by `FIRECRAWL_ROUTER_GITHUB_SECRET` in the `shared_mcp` role and read
+through `sudo-secretspec get`, held in memory and read again at most once a minute while none is held (a failed read, or a
+401). The router's own default is still `GITHUB_TOKEN` (a classic PAT that reads private repositories), so it also adds
+`is:public` and drops private code hits as a second layer (`docs/threat-model.md` item 10). The token is needed only on
+the Mac: the Hyades microVMs run Firecrawl itself, not the router. Limits: GitHub's 30 searches a minute (10
 for code search); a closed bucket is reported in `coverage` and `warning`, all closed is HTTP 429 with `Retry-After`.
 Knobs and rules: the router's header and `skills/firecrawl/SKILL.md` ("Tools"). Considered and not built: Exa and
 Parallel as extra sources (two more keys and a merge step on a path that already answers; add one if GitHub proves too
