@@ -76,7 +76,8 @@ Environment:
                                Claude Code's 300 s MCP idle limit with room for the scrape itself)
   FIRECRAWL_ROUTER_DEVELOPER   "off" disables the GitHub-backed developer search (default on)
   FIRECRAWL_ROUTER_GITHUB_KEY  GitHub token; empty (the default) reads the secretspec name below with
-                               `sudo-secretspec get` once per process (re-read at most once a minute after a 401);
+                               `sudo-secretspec get` once and holds it in memory (read again at most once a minute
+                               while it holds none: a failed read, or a 401 dropped it);
                                no token at all: unauthenticated (10 req/min, no code search).
   FIRECRAWL_ROUTER_GITHUB_SECRET  that secretspec name (default GITHUB_TOKEN)
                                BASE default https://api.github.com (…_GITHUB_BASE)
@@ -291,11 +292,11 @@ def search_path(path: str) -> bool:
 
 
 def dev_route(method: str, path: str, body: bytes | None) -> str:
-    """"direct" for GET|POST .../search/developer; "category" for POST .../search with categories ["developer"]."""
+    """"direct" for GET|POST /v2/search/developer; "category" for POST /v2/search with categories ["developer"]."""
     route = path.split("?", 1)[0].rstrip("/")
-    if method in ("GET", "POST") and route.endswith("/search/developer"):
+    if method in ("GET", "POST") and route == "/v2/search/developer":
         return "direct"
-    if method == "POST" and route.endswith("/search"):
+    if method == "POST" and route == "/v2/search":
         try:
             doc = json.loads(body or b"{}")
         except ValueError:
@@ -352,6 +353,15 @@ def _dev_list(v) -> list[str]:
     return [p.strip() for x in vals for p in str(x).split(",") if p.strip()]
 
 
+def _dev_int(v, default: int) -> int | None:
+    """An absent value is the default; an int (never a bool or float) or a short digit string is itself; else None."""
+    if v is None:
+        return default
+    if type(v) is int:
+        return v
+    return int(v) if isinstance(v, str) and v.isdigit() and len(v) <= 6 else None
+
+
 def parse_dev_request(method: str, path: str, body: bytes | None) -> tuple[dict | None, str]:
     """(params, "") or (None, why the request is refused with HTTP 400)."""
     if method == "GET":
@@ -370,12 +380,8 @@ def parse_dev_request(method: str, path: str, body: bytes | None) -> tuple[dict 
     query = raw.get("query")
     if not isinstance(query, str) or not dev_terms(query):
         return None, "query must be a string with at least one searchable word"
-    try:
-        if isinstance(raw.get("k"), bool) or isinstance(raw.get("passages"), bool):
-            raise ValueError
-        k = int(raw.get("k", 10))
-        passages = int(raw.get("passages", 1))
-    except (TypeError, ValueError):
+    k, passages = _dev_int(raw.get("k"), 10), _dev_int(raw.get("passages"), 1)
+    if k is None or passages is None:
         return None, "k and passages must be integers"
     if not 1 <= k <= 100 or not 1 <= passages <= 5:
         return None, "k must be 1-100 and passages 1-5"
@@ -450,7 +456,7 @@ class DevSearch:
                 self._token = value
                 return value
 
-    def _gh(self, endpoint: str, q: str, per_page: int, deadline: float) -> GHReply:
+    def _gh(self, endpoint: str, q: str, per_page: int, deadline: float, token: str) -> GHReply:
         bucket = "code_search" if endpoint == "code" else "search"
         with self._lock:
             wait = self._closed.get(bucket, 0.0) - time.monotonic()
@@ -463,7 +469,6 @@ class DevSearch:
             f"{self.base}/search/{endpoint}?" + urllib.parse.urlencode({"q": q, "per_page": per_page}),
             headers={"Accept": "application/vnd.github.text-match+json", "User-Agent": "firecrawl-router",
                      "X-GitHub-Api-Version": "2022-11-28"})
-        token = self.token()
         if token:
             req.add_unredirected_header("Authorization", f"Bearer {token}")
         try:
@@ -495,16 +500,21 @@ class DevSearch:
             return GHReply(status, error="not JSON")
         return GHReply(status, doc if isinstance(doc, dict) else None)
 
-    def _query(self, endpoint: str, terms: list[str], scope: str, p: dict, per_page: int, deadline: float) -> GHReply:
+    def _query(self, endpoint: str, terms: list[str], scope: str, p: dict, per_page: int, deadline: float,
+               token: str) -> GHReply:
         extra = " ".join([scope] + [f"repo:{r}" for r in p["repos"]] + ([f"language:{p['language']}"] if p["language"] else []))
         reply = None
         for i, attempt in enumerate((terms, dev_loosen(terms))):
-            if not attempt or (i and deadline - time.monotonic() < 3):
+            # a scoped search never retries: whether a guessed repo (private ones included) holds all the terms must not
+            # show in how many calls or how long the answer took
+            if not attempt or (i and (p["repos"] or deadline - time.monotonic() < 3)):
                 break
             room = DEV_MAX_Q - len(extra) - 1
             while len(" ".join(attempt)) > room and len(attempt) > 1:
                 attempt = attempt[:-1]
-            r = self._gh(endpoint, f"{' '.join(attempt)[:room]} {extra}".strip(), per_page, deadline)
+            r = self._gh(endpoint, f"{' '.join(attempt)[:room]} {extra}".strip(), per_page, deadline, token)
+            if r.status == 422 and p["repos"]:  # GitHub says 422 for a repo that does not exist (or the token cannot see)
+                r = GHReply(200, {"items": []})
             if reply is None or r.status == 200:  # a failed retry never replaces an empty 200
                 reply = r
             if r.status != 200 or (r.doc or {}).get("items"):
@@ -513,17 +523,21 @@ class DevSearch:
 
     def search(self, p: dict) -> tuple[int, dict, str]:
         """(HTTP status, Firecrawl-shaped document, one-line note for the log)."""
+        busy = (429, {"success": False, "source": "github", "retryAfter": 5,
+                      "error": "GitHub developer search is busy; retry in 5s"}, "busy")
         deadline = time.monotonic() + self.budget
-        if not self._slots.acquire(timeout=self.budget):
-            return 429, {"success": False, "source": "github", "retryAfter": 5,
-                         "error": "GitHub developer search is busy; retry in 5s"}, "busy"
+        if not self._slots.acquire(timeout=min(5.0, self.budget)):
+            return busy
         try:
+            if deadline - time.monotonic() < self.budget * 0.25:  # a slot that came too late to finish a search
+                return busy
             return self._search(p, deadline)
         finally:
             self._slots.release()
 
     def _search(self, p: dict, deadline: float) -> tuple[int, dict, str]:
-        authed = bool(self.token())  # resolved here, once, so the parallel calls below share one secretspec read
+        token = self.token()  # resolved here, once: the parallel calls below share it (and one secretspec read)
+        authed = bool(token)
         wanted = set(p["types"] or (*DEV_TYPES, DEV_CODE))
         terms = dev_terms(p["query"])
         per_page = min(100, max(5, p["k"]))
@@ -534,31 +548,34 @@ class DevSearch:
             jobs["pull_request"] = ("issues", "is:pr is:merged is:public")
         if wanted & {"readme", "doc", DEV_CODE}:
             jobs[DEV_CODE] = ("code", "filename:README.md" if wanted & {"readme", "doc", DEV_CODE} == {"readme"} else "")
-        replies: dict[str, GHReply] = {}
+        shared: dict[str, GHReply] = {}
 
         def run(name: str) -> None:
             endpoint, scope = jobs[name]
             try:
-                replies[name] = self._query(endpoint, terms, scope, p, per_page, deadline)
+                shared[name] = self._query(endpoint, terms, scope, p, per_page, deadline, token)
             except Exception as e:  # noqa: BLE001 - one failed rung, never a crashed request
-                replies[name] = GHReply(0, error=type(e).__name__)
+                shared[name] = GHReply(0, error=type(e).__name__)
 
         threads = [threading.Thread(target=run, args=(n,), daemon=True) for n in jobs]
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=max(0.1, deadline - time.monotonic() + 1))
-        for name in jobs:
-            replies.setdefault(name, GHReply(0, error="deadline"))
+        replies = {name: shared.get(name) or GHReply(0, error="deadline") for name in jobs}  # a snapshot: a late thread cannot change it
+
+        kept = dict.fromkeys(jobs, 0)
 
         buckets: dict[str, list[dict]] = {t: [] for t in DEV_ORDER}
-        for name, reply in list(replies.items()):
+        for name, reply in replies.items():
             for item in (reply.doc or {}).get("items") or []:
-                if not isinstance(item, dict):
-                    continue
-                r = self._shape(name, item, p["passages"])
+                try:
+                    r = self._shape(name, item, p["passages"]) if isinstance(item, dict) else None
+                except Exception:  # noqa: BLE001 - an upstream item of an unexpected shape is skipped
+                    r = None
                 if r and r["type"] in wanted:
                     buckets[r["type"]].append(r)
+                    kept[name] += 1
         results: list[dict] = []
         seen: set[str] = set()
         while len(results) < p["k"] and any(buckets.values()):
@@ -580,8 +597,7 @@ class DevSearch:
                     "doc": state({DEV_CODE}) if "doc" in wanted else "skipped"}
         if DEV_CODE in wanted:
             coverage[DEV_CODE] = state({DEV_CODE})
-        note = " ".join(f"{n}={len((replies[n].doc or {}).get('items') or []) if replies[n].status == 200 else replies[n].error}"
-                        for n in jobs)
+        note = " ".join(f"{n}={kept[n] if replies[n].status == 200 else replies[n].error}" for n in jobs)
         failed = [n for n in jobs if replies[n].status != 200]
         if len(failed) == len(jobs):
             wait = max((replies[n].limited_for for n in failed), default=0.0)
@@ -977,9 +993,10 @@ class Router:
             params, why = parse_dev_request(method, path, body)
         else:  # POST /v2/search with categories ["developer"]: `limit` is the result count
             doc = json.loads(body)
-            params, why = parse_dev_request("POST", path, json.dumps(
-                {"query": doc.get("query"), "k": doc.get("limit", 5)}).encode())
-            why = why.replace("k must", "limit must").replace("k and passages", "limit")
+            limit = _dev_int(doc.get("limit"), 5)
+            params, why = None, "limit must be an integer 1-100"
+            if limit is not None and 1 <= limit <= 100:
+                params, why = parse_dev_request("POST", path, json.dumps({"query": doc.get("query"), "k": limit}).encode())
         if params is None:
             status, out, note = 400, {"success": False, "error": f"firecrawl-router: {why}"}, why
         else:

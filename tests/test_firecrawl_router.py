@@ -1078,6 +1078,41 @@ class DeveloperSearchTest(unittest.TestCase):
         self.assertEqual((status, headers["Retry-After"], doc["success"]), (429, "5", False))
         self.assertEqual(self.gh.calls, [])
 
+    def test_numbers_must_be_integers_not_infinity_floats_or_null_limits(self):
+        self.start(self.normal)
+        for bad in ({"k": float("inf")}, {"k": 5.9}, {"passages": float("inf")}, {"k": [3]}):
+            status, _, _ = self.call("POST", "/v2/search/developer", {"query": "state", **bad})
+            self.assertEqual(status, 400, bad)
+        status, _, _ = self.call("GET", "/v2/search/developer?query=state&k=3")  # a query string carries digits
+        self.assertEqual(status, 200)
+        status, _, _ = self.call("POST", "/v2/search", {"query": "state", "categories": ["developer"], "limit": None})
+        self.assertEqual(status, 200)
+        status, _, err = self.call("POST", "/v2/search", {"query": "state", "categories": ["developer"], "limit": 500})
+        self.assertEqual((status, err["error"]), (400, "firecrawl-router: limit must be an integer 1-100"))
+
+    def test_an_upstream_item_of_the_wrong_shape_is_skipped_not_fatal(self):
+        bad = {**gh_file("o/lib", "docs/a.md", "x"), "repository": "o/lib"}
+        self.start(lambda e, q: (200, {}, {"items": [bad, gh_file("o/lib", "docs/ok.md", "fine")] if e == "code" else []}))
+        status, _, doc = self.call("GET", "/v2/search/developer?query=state")
+        self.assertEqual((status, [r["id"] for r in doc["results"]]), (200, ["doc:o/lib:docs/ok.md"]))
+
+    def test_only_the_v2_routes_are_taken_over(self):
+        self.start(self.normal)
+        for path in ("/v1/search/developer?query=state", "/v3/search/developer?query=state"):
+            status, _, _ = self.call("GET", path)
+            self.assertEqual(status, 404)
+        self.assertEqual(self.gh.calls, [])
+        self.assertEqual(len(self.p.seen), 2)
+
+    def test_a_scoped_search_cannot_tell_a_missing_repo_from_an_empty_one(self):
+        # GitHub answers 422 for a repo that does not exist (or that the token cannot see) and 200 with no items for an
+        # existing one: both must look the same, and a scoped search never makes a second (fewer-terms) call
+        self.start(lambda e, q: (422, {}, {"message": "Validation Failed"}))
+        status, _, doc = self.call("POST", "/v2/search/developer",
+                                   {"query": "alpha beta gamma delta", "repos": ["ghost/repo"]})
+        self.assertEqual((status, doc["results"], doc["coverage"]["issue"], "warning" in doc), (200, [], "ok", False))
+        self.assertEqual(len(self.gh.calls), 3)
+
     def test_no_token_runs_unauthenticated_and_says_so(self):
         self.start(self.normal, token="", secretspec="/nonexistent/sudo-secretspec")
         status, _, doc = self.call("GET", "/v2/search/developer?query=state")
