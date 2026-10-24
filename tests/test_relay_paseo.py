@@ -33,6 +33,7 @@ assert _spec and _spec.loader
 relay = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(relay)
 relay.UNSENT = Path(tempfile.mkdtemp(prefix="relay-paseo-test-")) / "relay-unsent.json"
+relay.DEFER_DIR = Path(tempfile.mkdtemp(prefix="relay-paseo-defer-")) / "relay" / "deferred"
 
 AGENT = "aaaaaaaa-0000-4000-8000-000000000001"
 SID = "bbbbbbbb-0000-4000-8000-000000000002"
@@ -377,7 +378,7 @@ class RelayPaseo(unittest.TestCase):
 
     def test_working_non_steering_agent_needs_idle_and_then_waits_first(self) -> None:
         os.environ.update(FAKE_PROVIDER="cline", FAKE_STATUS="running")
-        rc, _out, err = self.main([], AGENT, "ping")
+        rc, _out, err = self.main([], AGENT, "ping", "--no-defer")
         self.assertEqual(rc, 1)
         self.assertIn("cannot steer", err)
         self.assertFalse(self.sends())

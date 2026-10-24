@@ -3,6 +3,14 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## relay.py deferred send and Paseo sender label (2026-10-24, branch `feat/relay-deferred-send`, PR pending)
+
+Built, not merged: a busy target no longer loses the text (`relay.py` exit 3, 0600 record under `~/.local/state/relay/deferred/`,
+detached `--deliver`, `--pending`, `--cancel`, `--sweep`) and `sender_name` reads `PASEO_AGENT_ID`. Open: (1) no launchd job re-arms
+queued records after a reboot yet; they wait for the next `relay.py` run (its opportunistic sweep) or `relay.py --sweep`, by the
+brief; (2) each deliverer polls every 5 s, so a long queue costs one `paseo agent inspect` per record per 5 s; (3) a
+Claude-pane target is never deferred (it queues natively).
+
 ## tuios support: do it LAST (djbclark, direct, 2026-10-24)
 
 djbclark, 2026-10-24: "Queue for very end, although we can consider it a little now to make room for it any work between

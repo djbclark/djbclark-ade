@@ -96,11 +96,18 @@ adds the archived agents as `ended` rows (`relay.py` never sends to one). No `pa
 (20 s): no Paseo rows, as before. `relay.py` takes a hex **prefix of 6 or more characters** of a Paseo agent id
 (`paseo ls`'s 7-character short id works); exactly one agent must match, else it refuses and lists the candidates.
 A working agent whose provider cannot steer (cline and every other ACP provider, which Paseo would interrupt and replace
-the running turn of) is refused with that reason: `--idle S` waits for it to go idle. claude, codex, omp, opencode and pi
+the running turn of) is **queued, not refused** (2026-10-24): `relay.py` writes a 0600 record under
+`~/.local/state/relay/deferred/`, starts a detached deliverer and exits **3** (`queued: <id> ...`; `"state":"queued"` with
+`--json`); the deliverer sends the text, prefixed `[queued Nm ago] `, through the same gates when the agent goes idle, and
+tells the sender (one `relay: your message to <target> was failed|expired: <reason>` notice) if it cannot. `--idle S` still
+blocks for idle and wins, `--no-defer` restores the refusal (exit 1), `--defer-for S` sets the life (default 6 h, at most
+24 h); `relay.py --pending [--json]` lists, `--cancel ID` withdraws, `--sweep` re-arms records whose deliverer died (it also
+runs at the start of every relay). A non-Claude pane TUI that is working is deferred the same way. Archived, permission-blocked,
+wrong-directory and no-route refusals are never deferred. claude, codex, omp, opencode and pi
 can steer (`fleet.PASEO_STEER_PROVIDERS`, read from the Paseo daemon bundle 2026-10-23), but Paseo replaces the running
 turn of even these when the provider declines the steer at that moment (while Claude or Codex compacts, a Codex review
 turn, an omp steer error), which relay cannot see beforehand: only **claude** is steered into a working agent by default;
-a working codex, omp, opencode or pi agent is refused unless `--steer` (or `--idle S`). A Paseo agent with no Claude
+a working codex, omp, opencode or pi agent is queued unless `--steer` (or `--idle S`). A Paseo agent with no Claude
 registry row is found by its id, Paseo id or hex prefix, never by its workspace title (titles come from its first
 prompt). A running one with a pending permission or question card shows as `blocked` (one `paseo permit ls --json`),
 `relay.py` refuses it, and helm lists it as a `permission` item with every card and its own
