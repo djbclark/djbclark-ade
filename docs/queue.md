@@ -7,9 +7,28 @@ when they ship (into the relevant doc) or when they're dropped (say why).
 
 djbclark, 2026-10-23: "Add another item to appropriate phrase: Look into making better use of basic memory, I do not
 think we are using it that much/makeing the best use of it, but I could be wrong. Do web searches etc." Status
-2026-10-23: **research and design slice running** (`design-basicmemory`, Opus 5.5 high via omp, web research,
+2026-10-23: **research done; djbclark accepted all eight recommendations 2026-10-23; Q1 (the security upgrade) is DONE,
+the rest is queued until the Claude quota resets** (`design-basicmemory`, Opus 5.5 high via omp, web research,
 read-only; brief `~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-basicmemory.md`, report
-`~/.local/state/bigteam/adhoc-2026-10-23/design-basicmemory-report.md`). It measures the store (note counts, growth,
+`~/.local/state/bigteam/adhoc-2026-10-23/design-basicmemory-report.md`). Verdict, last 30 days: djbclark is right about
+the tool and wrong about the store. 680 notes in `main`, and 301 of 3,074 Claude sessions (9.8%) touch the store as
+files, but only 32 sessions (1.0%) made any Basic Memory MCP call (46 calls: `search_notes` 23, `write_note` 15,
+`build_context` and `schema_*` 0, `recent_activity` 1), Codex made none, there are zero `decision` notes, and Hermes's
+provider has been off since about 2026-10-03. **Q1 done 2026-10-23 (~9:20 PM):** GHSA-4gfv-c2mm-mvj2 (High, 7.7: no
+Host/Origin check on the HTTP transports, so DNS rebinding from any web page) affected our v0.23.2 streamable-http
+server; upgraded with `uv tool upgrade basic-memory` to v0.24.1 after an index backup in
+`~/.basic-memory/backup-2026-10-23/`, restarted `com.djbclark.basic-memory-mcp`, verified a foreign `Host` gets 421
+and a foreign `Origin` gets 403 while a loopback request is served; sessions reconnect with `/mcp`. Rulings Q2-Q8: 2.
+shadow our own `claude/hooks/bm_recall.py` (titles only, 400 tokens at most) against `bm hook session-start` for a
+week, keep the cheaper one that passes the recall evaluation, never both live; 3. move the 193 per-project auto-memory
+files into `site-private/memory/projects/<slug>/` with symlinks back (a dir already symlinked into its repo keeps being
+its own project); 4. re-enable Hermes's Basic Memory provider with `capture_per_turn: false`; 5. remove the 8 empty
+`~/agent-memory/*` projects, archive (not delete) the 3 dead `basic-memory/` subtrees; 6. handoffs older than 30 days go
+to `handoffs/archive/`; 7. backfill `type:` on the 321 prefixed root notes by one reversible script commit; 8. a
+`ruling` only for something djbclark said (quoted, dated), agents' own choices are `decision` notes with a relation to
+the handoff or PR. Build: the report's W2-W8 (drift fixes, `bin/bm-lint`, `bm_recall.py` in shadow mode, handoff
+observations and relations, type backfill and schemas, recall evaluation harness, Q3/Q4 config), Sonnet 5.5 workers.
+Phase placement: R2 now, the M1 track beside Phase 1, R7/R9 with proposal 6.4 / Phase 5. The report measures the store (note counts, growth,
 relations, orphans) and real agent use (MCP tool calls per day from the transcripts), compares with the per-project
 auto-memory files, `docs/handoffs/`, `session-finder` and Hermes memory, surveys what works elsewhere, and recommends
 capture and recall hooks, note schemas and consolidation, plus the phase it belongs in

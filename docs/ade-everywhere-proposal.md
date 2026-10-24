@@ -708,6 +708,9 @@ then prove a thin slice end to end, then widen, and only then retire or delete.
    **I0, workspace isolation (queue gate, decided 2026-10-23, [queue](queue.md))**, before Phase 1's first parallel
    fan-out: claims, the git guard and `acp-dispatch --workspace auto` so concurrent agents stop resetting each other's
    pastures; Phase F section 4 consumes its adapter.
+   **M1, memory use (track beside Phase 1, decided 2026-10-23, [queue](queue.md))**: recall hook in shadow mode, lint,
+   handoff observations and relations, type backfill and a recall evaluation; the Basic Memory security upgrade is done
+   (v0.24.1); moving the per-project auto-memory files and Hermes's provider go with section 6.4 / Phase 5.
 2. **Phase 1, thin vertical slice (1 to 2 weeks).** The chezmoi source state under `home/`
    for Claude Code and Codex only: companion data through `stat`-guarded templates, the
    `modify_` merges under the ownership table, `ade snapshot` and `ade restore`;
