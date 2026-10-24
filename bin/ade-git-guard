@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# ade-git-guard — a `git` front door that refuses destructive git in a workspace another agent owns.
+#
+# Installed as libexec/agent-bin/git (a relative symlink to ../../bin/ade-git-guard). acp-run prepends that
+# directory to the PATH of every agent it launches (slice W4), so codex, opencode, omp, agy, crush, zcode
+# and claude slices all reach git through here; the operator's shell, Orca and IDEs never do.
+# Design: design-isolation-report.md 3.4-3.5 (2026-10-24); rules and claim schema: bin/ade_claims.py.
+#
+#   git ARGS...                           (the shim) run the real git, or refuse with exit 77
+#   ade-git-guard git-ARGS...             the same, called by name
+#   ade-git-guard --check CMD [--cwd DIR] decide every `git` call in a shell command string (Claude hook);
+#                                         exit 0 allow, 77 refuse
+#   ade-git-guard --real-git              print the git this guard would run
+#   ade-git-guard --help
+#
+# Order of work, cheapest first (one bash exec and no Python for the common call):
+#   1. Not an agent process (neither ACP_RUN_AGENT=1 nor ADE_CLAIM_ID set): exec the real git untouched.
+#   2. Inside a git hook (GIT_INDEX_FILE set) or pre-commit (PRE_COMMIT set): exec the real git untouched.
+#   3. A subcommand that only reads (status diff log show fetch ...), after -C/-c/--git-dir=...: exec.
+#   4. Everything else: `python3 -S ade_claims.py guard -- ARGS`, which looks up the workspace claim
+#      (`.git/ade-claim` -> ~/.local/state/ade/claims/<id>.json). Exit 0 -> exec the real git;
+#      exit 77 -> the refusal text (owner, claim id, safe alternative) is on stderr, one line is in
+#      ~/.local/state/ade/guard.log, and git never runs.
+# A broken guard (no python3, a crash) fails OPEN with a warning on stderr: a guard bug must not stop all git.
+#
+# Exit codes: 77 refused (EX_NOPERM); every other code is the real git's. --check: 0 / 77 / 2 usage.
+# Environment: ADE_CLAIM_ID (the caller's claim id, exported by acp-dispatch), ACP_RUN_AGENT, ADE_STATE_DIR
+# (default ~/.local/state/ade; claims/ and guard.log live there), ADE_REAL_GIT (skip the PATH search),
+# ADE_PYTHON (default python3), ACP_OPERATOR_APPROVED=git-guard (allow and log one call).
+set -u
+
+self="$0"
+real=""
+if [ -n "${ADE_REAL_GIT:-}" ] && [ -x "$ADE_REAL_GIT" ] && ! [ "$ADE_REAL_GIT" -ef "$self" ]; then
+  real="$ADE_REAL_GIT"
+else
+  set -f
+  IFS=:
+  for d in $PATH; do
+    if [ -n "$d" ] && [ -x "$d/git" ] && ! [ "$d/git" -ef "$self" ]; then
+      real="$d/git"
+      break
+    fi
+  done
+  unset IFS
+  set +f
+  if [ -z "$real" ]; then
+    for c in /usr/bin/git /opt/homebrew/bin/git /usr/local/bin/git; do
+      if [ -x "$c" ] && ! [ "$c" -ef "$self" ]; then real="$c"; break; fi
+    done
+  fi
+fi
+if [ -z "$real" ]; then
+  echo "ade-git-guard: no real git found on PATH" >&2
+  exit 127
+fi
+
+# python library next to this script, through the shim's symlink
+lib_path() {
+  local src="$self" t
+  case "$src" in */*) ;; *) src="./$src" ;; esac
+  while [ -L "$src" ]; do
+    t=$(readlink "$src")
+    case "$t" in /*) src="$t" ;; *) src="${src%/*}/$t" ;; esac
+  done
+  printf '%s/ade_claims.py' "${src%/*}"
+}
+
+run_python() {
+  local py lib
+  py="${ADE_PYTHON:-python3}"
+  lib=$(lib_path)
+  command -v "$py" > /dev/null 2>&1 && [ -f "$lib" ] || return 126
+  ADE_REAL_GIT="$real" "$py" -S "$lib" "$@"
+}
+
+if [ "${self##*/}" = "ade-git-guard" ]; then
+  case "${1:-}" in
+    -h | --help | "")
+      usage=$(
+        while IFS= read -r line; do
+          case "$line" in "#!"*) continue ;; "#"*) printf '%s\n' "${line#\# }" ;; *) break ;; esac
+        done < "$self"
+      )
+      printf '%s\n' "$usage"
+      exit 0
+      ;;
+    --real-git)
+      printf '%s\n' "$real"
+      exit 0
+      ;;
+    --check)
+      [ $# -ge 2 ] || { echo "usage: ade-git-guard --check CMD [--cwd DIR]" >&2; exit 2; }
+      run_python check "${@:2}"
+      rc=$?
+      case "$rc" in 0 | 77 | 2) exit "$rc" ;; *) echo "ade-git-guard: --check failed (rc=$rc); allowing" >&2; exit 0 ;; esac
+      ;;
+  esac
+fi
+
+# 1-2: not an agent, or inside a git hook
+if { [ -z "${ADE_CLAIM_ID:-}" ] && { [ -z "${ACP_RUN_AGENT:-}" ] || [ "${ACP_RUN_AGENT}" = 0 ]; }; } \
+  || [ -n "${GIT_INDEX_FILE:-}" ] || [ -n "${PRE_COMMIT:-}" ]; then
+  exec "$real" "$@"
+fi
+
+# 3: first non-option word (skipping -C DIR, -c K=V and the value-less global flags) is a read-only subcommand
+args=("$@")
+n=${#args[@]}
+i=0
+sub=""
+while [ "$i" -lt "$n" ]; do
+  a="${args[$i]}"
+  case "$a" in
+    -C | -c) i=$((i + 2)) ;;
+    --no-pager | -p | --paginate | --no-optional-locks | --no-replace-objects | --literal-pathspecs) i=$((i + 1)) ;;
+    --git-dir=* | --work-tree=*) i=$((i + 1)) ;;
+    -*) break ;;
+    *) sub="$a"; break ;;
+  esac
+done
+case "$sub" in
+  status | diff | log | show | ls-files | ls-tree | rev-parse | cat-file | blame | grep | fetch | ls-remote | describe \
+    | merge-base | version | help | rev-list | show-ref | for-each-ref | shortlog | diff-tree | diff-index | diff-files \
+    | name-rev | check-ignore | check-attr | var | whatchanged | cherry | count-objects | show-branch)
+    exec "$real" "$@"
+    ;;
+esac
+
+# 4: the rules
+run_python guard -- "$@"
+rc=$?
+case "$rc" in
+  0) exec "$real" "$@" ;;
+  77) exit 77 ;;
+  *)
+    echo "ade-git-guard: guard unavailable or failed (rc=$rc); running git unguarded" >&2
+    exec "$real" "$@"
+    ;;
+esac
