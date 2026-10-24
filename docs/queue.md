@@ -3,6 +3,10 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Resurface at the end of the queue: firecrawl developer search (djbclark, direct, 2026-10-24)
+
+djbclark, 2026-10-24: add a note to `skills/firecrawl/SKILL.md` that `firecrawl_developer_search` 404s (done, "Tools" section), hand another agent a prompt to fix the underlying problem (on the clipboard, 2026-10-24), and "resurface this at end of queue to see if we need to revert/update the note". **At the end of the queue:** 1. call `firecrawl_developer_search` once; 2. if it works, delete the SKILL.md paragraph and the router-log mention; if it still 404s, keep the note and say who has the fix; 3. check `docs/mcp-servers.md` for the same claim.
+
 ## tuios support: do it LAST (djbclark, direct, 2026-10-24)
 
 djbclark, 2026-10-24: "Queue for very end, although we can consider it a little now to make room for it any work between
