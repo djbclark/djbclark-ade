@@ -530,6 +530,78 @@ def test_unreadable_subdirectory_is_listed_under_skipped(tmp_path):
     assert "SECRETBODY" not in proc.stdout
 
 
+def _need_nonroot():
+    if os.geteuid() == 0:
+        import pytest
+        pytest.skip("root reads everything")
+
+
+def test_unreadable_note_is_listed_under_skipped_not_dropped(tmp_path):
+    _need_nonroot()
+    store = tmp_path / "store"
+    write_note(store, "a.md", "see [[nope]]\n")
+    secret = write_note(store, "locked.md", "SECRETBODY see [[a]]\n")
+    os.chmod(secret, 0o000)
+    try:
+        proc = run(store, "--json")
+    finally:
+        os.chmod(secret, 0o644)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["notes"] == 1
+    assert any("not readable" in s and "locked.md" in s for s in out["skipped"]), out["skipped"]
+    assert "SECRETBODY" not in proc.stdout and "denied" not in proc.stdout.lower()
+    assert of(out, "unresolved-relation")  # the readable note's findings still come out
+
+
+def test_store_root_without_search_permission_is_exit_2_not_clean(tmp_path):
+    _need_nonroot()
+    store = tmp_path / "store"
+    write_note(store, "a.md", "x\n")
+    write_note(store, "sub/b.md", "y\n")
+    os.chmod(store, 0o444)
+    try:
+        proc = run(store)
+    finally:
+        os.chmod(store, 0o755)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "no findings" not in proc.stdout
+    assert str(store) in proc.stderr
+
+
+def test_unlistable_subdirectory_with_a_readable_sibling_is_skipped(tmp_path):
+    _need_nonroot()
+    store = tmp_path / "store"
+    write_note(store, "a.md", "x\n")
+    write_note(store, "sub/b.md", "y\n")
+    os.chmod(store / "sub", 0o444)
+    try:
+        proc = run(store, "--json")
+    finally:
+        os.chmod(store / "sub", 0o755)
+    out = json.loads(proc.stdout)
+    assert out["notes"] == 1
+    # listable but not searchable: the directory itself lists, its note cannot be opened
+    assert any("sub" in s and "not readable" in s for s in out["skipped"]), out["skipped"]
+
+
+def test_note_deleted_between_walk_and_read_stays_silent(tmp_path, monkeypatch):
+    write_note(tmp_path, "a.md", "x\n")
+    write_note(tmp_path, "gone.md", "y\n")
+    tool = load_tool()
+    real_open = os.open
+
+    def vanishing_open(path, *a, **kw):
+        if str(path).endswith("gone.md"):
+            raise FileNotFoundError(2, "No such file", str(path))
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr(tool.os, "open", vanishing_open)
+    store = tool.Store(str(tmp_path), 51200)
+    assert [n["rel"] for n in store.notes] == ["a.md"]
+    assert store.skipped == []
+
+
 def test_markdown_link_out_of_the_store_gets_no_stem_fallback(tmp_path):
     write_note(tmp_path, "README.md", "nothing\n")
     write_note(tmp_path, "x/a.md", "see [elsewhere](../../elsewhere/README.md)\n")

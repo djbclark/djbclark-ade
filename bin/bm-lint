@@ -34,8 +34,10 @@ count. At most 1 MiB (or --max-bytes, if larger) of any note is read.
 Files: only regular files that `lstat` confirms and whose realpath is under the store's
 realpath are read; symlinked notes, FIFOs, devices and the like are listed under `skipped`
 and never opened, so a link cannot pull outside text into a report and a FIFO cannot hang
-the run. A directory that cannot be listed is named under `skipped` (path only); a store
-root that cannot be listed is exit 2.
+the run. A note that exists but cannot be read ("not readable") and a directory that cannot
+be listed are named under `skipped` (path only, never errno text or content); a note that
+vanishes mid-lint is ignored. A store root that cannot be listed, or a run that read no note
+at all while some were skipped, is exit 2, never "ok, no findings".
 
 Checks (finding `check` ids):
   missing-type        filename-prefix note (reference_/feedback_/project_/user_) with no
@@ -198,7 +200,7 @@ def is_archived(rel):
 
 
 class StoreError(Exception):
-    """The store root itself cannot be listed: a run that read nothing must not look clean."""
+    """The store root cannot be listed, or nothing was read: such a run must not look clean."""
 
 
 class Store:
@@ -241,8 +243,13 @@ class Store:
                             self._not_read.append((rel, "not a regular file"))
                             continue
                         data = f.read(cap)
-                except OSError:
+                except FileNotFoundError:
                     continue  # a note that vanishes mid-lint is not a finding
+                except OSError:
+                    # EACCES/EPERM/ELOOP/EISDIR...: the note exists but was not read, so say
+                    # so (path only, never errno text); it must never look like a clean note.
+                    self._not_read.append((rel, "not readable"))
+                    continue
                 text = data.decode("utf-8", errors="replace").lstrip("\ufeff")
                 parsed = st.st_size <= max_bytes
                 links, mdlinks = [], []
@@ -271,6 +278,8 @@ class Store:
             if where == ".":
                 raise StoreError("store is not readable: %s" % root)
             self._not_read.append((where, "directory not readable"))
+        if not self.notes and self._not_read:
+            raise StoreError("store has no readable notes: %s" % root)
         for rel, why in self._not_read[:SKIP_LIST_CAP]:
             self.skipped.append("notes: %s: %s" % (why, rel))
         if len(self._not_read) > SKIP_LIST_CAP:
@@ -345,10 +354,15 @@ class Linter:
                 continue
             ppath = os.path.expanduser(ppath)
             count = 0
-            for dirpath, _dirnames, filenames in os.walk(ppath):
+            unreadable = []
+            for dirpath, _dirnames, filenames in os.walk(ppath, onerror=unreadable.append):
                 count += sum(1 for fn in filenames if fn.endswith(".md"))
                 if count:
                     break
+            if not count and any(not isinstance(e, FileNotFoundError) for e in unreadable):
+                # an unlistable directory is not proof of an empty project
+                self.skipped.append("empty-project: project %s not fully readable" % name)
+                continue
             if not count:
                 self.add("empty-project", name, name,
                          "project %s (%s) has no markdown notes" % (name, ppath))
