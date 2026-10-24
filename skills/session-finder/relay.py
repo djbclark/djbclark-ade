@@ -685,6 +685,8 @@ def tx_state(tx, mark, text, window=None):
             got = [o.get("content")]
         elif kind == "user":
             c = (o.get("message") or {}).get("content")
+            if handed and isinstance(c, list) and not any(isinstance(b, dict) and b.get("type") == "text" for b in c):
+                continue    # a tool result is not a prompt: real transcripts put one between a dequeue and the prompt it handed over
             got = [" ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
                    if isinstance(c, list) else c]
         elif isinstance(o.get("attachment"), dict):    # a prompt absorbed mid-turn is an attachment, counted only right after a dequeue

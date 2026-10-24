@@ -2308,6 +2308,22 @@ class TestRound7(Harness):
         tx = self.tx_with(self.q("enqueue"), {"attachment": {"type": "queued_command", "prompt": "go ahead"}})
         self.assertEqual(relay.tx_state(str(tx), 0, "go ahead"), "queued")    # an attachment counts only right after a dequeue
 
+    def test_a_tool_result_between_a_dequeue_and_the_queued_command_it_handed_over_is_not_a_prompt(self) -> None:
+        """P2 (adversary L5): a tool_result-only user line is no prompt anyone handed over. (Real transcripts, 2026-10-24: a
+        dequeue is followed by a tool_result line before its prompt's user line in 15 of ~5000 cases, which `tx_state` already
+        counted; no queued_command attachment followed a dequeue in them, so this ordering is the safe reading, not a seen one.)"""
+        result = {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}}
+        ours = {"attachment": {"type": "queued_command", "prompt": "go ahead"}}
+        tx = self.tx_with(self.q("enqueue"), self.q("dequeue", None), result, ours)
+        self.assertEqual(relay.tx_state(str(tx), 0, "go ahead"), "delivered")
+        his = {"attachment": {"type": "queued_command", "prompt": "his earlier prompt"}}
+        tx = self.tx_with(self.q("enqueue", "his earlier prompt"), self.q("enqueue"), self.q("dequeue", None), result, his, ours)
+        self.assertEqual(relay.tx_state(str(tx), 0, "go ahead"), "queued")    # the tool result does not hide whose prompt it was
+        text_too = {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+                                                                                 {"type": "text", "text": "his earlier prompt"}]}}
+        tx = self.tx_with(self.q("enqueue", "his earlier prompt"), self.q("enqueue"), self.q("dequeue", None), text_too, ours)
+        self.assertEqual(relay.tx_state(str(tx), 0, "go ahead"), "queued")    # a line with a text block is a prompt
+
     def test_a_pulled_entry_stays_when_a_copy_was_submitted_by_hand_after_the_window(self) -> None:
         """P1: a short text, no draft seen, pulled back and then submitted by the operator after the stamp window:
         the windowed state still reads "pulled", but a copy was delivered, so another text's relay must not drop
