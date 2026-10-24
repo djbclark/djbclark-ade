@@ -127,7 +127,7 @@ with:
 
 Durable machine facts belong in the curated layer, not a handoff: an
 operator-verified fact goes to `docs/` or the relevant skill; model-mined
-leads land in `~/basic-memory/mined/` via `bin/mine_sessions.py`. A
+leads used to land in `~/basic-memory/mined/` via `~/ops/site-djbclark/bin/mine_sessions.py`. That folder is gone (checked 2026-10-24) and nothing writes to it, so the lead has no home yet. A
 handoff that carries them becomes a second canon that nobody updates.
 
 ## Step 4 — Write the file
@@ -156,11 +156,27 @@ the ops-djbclark suite or `<repo-root>/docs/handoffs/` otherwise (slug:
     ## Where We Are
     ## What We Tried            <- failed approaches, chronological, with why
     ## Key Decisions            <- chosen AND rejected
+    ## Decisions               <- indexed observations, one per line (syntax below)
+    ## Relations                <- indexed relations, one per line (syntax below)
     ## Evidence & Data          <- real numbers, file paths
     ## Operator Feedback
     ## Where We're Going        <- ordered; item 1 is THE next action
     ## Detached jobs            <- one entry per open job record, or "none"
     ## Quick Start              <- exact commands for the next session
+
+`## Decisions` and `## Relations` are indexed by Basic Memory: handoffs written
+to `~/ops/site-private/memory/handoffs/` become observations and relations. Use
+exactly this syntax (checked 2026-10-24 against Basic Memory's observation and
+relation format):
+- `- [decision] <choice>; rejected: <alternative>; because <reason>`
+- `- [ruling] <what djbclark said, quoted> (djbclark, YYYY-MM-DD)`
+- `- part_of [[<repo>]]`
+- `- continues [[<previous handoff title>]]`
+- `- decided_in [[<PR or handoff title>]]`
+
+A `[ruling]` is only for something djbclark said, quoted and dated, never for
+your own choice. An agent's own design choice is a `[decision]` with a
+`decided_in` relation to the handoff or PR that made it.
 
 Each `## Detached jobs` entry gives: the job file (`.../jobs/<name>.json`), the
 report path, the `.done` path (and whether it exists now), the exact `rearm`
@@ -184,6 +200,7 @@ next `/baton` re-arms from these entries.
       (or the section says "none"), and nothing in the doc assumes a
       `run_in_background` task or waiter survives the session
 - [ ] Parent linkage (ids, or explicit none)
+- [ ] `## Decisions` and `## Relations` use the indexed syntax; every `[ruling]` is quoted and dated
 - [ ] Redaction: no credentials, tokens, .env values, key material,
       anywhere in the doc
 
