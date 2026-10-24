@@ -1513,15 +1513,19 @@ gateway agent with `relay.py`. Design: `~/.local/state/bigteam/loadgate-followup
    Open by design: **R1-M2** (a relay while the gateway is mid-turn: `fleet.py` fixes the row at `idle`, and the
    gateway's cached agent may not see the relayed exchange until it reloads; "delivered" means "ran on the stored
    transcript"), **R1-L4** (the exchange is invisible in the chat but is history for djbclark's next turn; consider a
-   one-line chat notice), **R1-L5e** (`SessionResumeTooLargeError` on a long thread reports "unverified" with nothing
-   sent), **R2-L6** (a profile Hermes with its own `HERMES_HOME` gets "not sent" for another profile's conversation;
+   one-line chat notice), **R2-L6** (a profile Hermes with its own `HERMES_HOME` gets "not sent" for another profile's conversation;
    documented). Hop counting across non-Hermes routes (R2-M3) is not enforced: documented as nested-`-z`-only.
    **Round 3: APPROVE at a70d792** (`adversary-report-3.md`); its M1-M3 and L4/L5/L6a/L8 are repaired in the next commit
    (claims made true about a caller's tree-kill, session-key self-refusal for desktop, real-process lock test, handler
-   test). Left open, low: R3-L1 (not-found forgery by a process that rewrites the `.err` within 50 ms), R3-L2 (signal in the
-   microsecond window before the handler), R3-L3 (RELAY_SENDER/RELAY_HOPS leak to everything a relayed turn starts),
-   R3-L6b-e (prune race, lock files never pruned, no holder pid in the refusal), R3-L8e (`--json` timeout result has no
-   `reply_file` field).
+   test). Left open by design, low: R3-L1 (not-found forgery by a process that rewrites the `.err` within 50 ms), R3-L2 (signal in the
+   microsecond window before the handler). FIXED e494801 (2026-10-23, each with a test a mutant fails): R1-L5e (`This session is too long to
+   reload safely` with rc 1, empty stdout and that single line is "not sent: that Hermes thread is too large to reload", from
+   `assert_resume_safe` running before any write in `hermes_cli/oneshot.py`); R3-L3 (RELAY_HOPS and RELAY_SENDER are ignored when the
+   nearest agent ancestor, read from `ps`, is another agent than Hermes; an unrecognised tree still counts them, so loop protection
+   fails closed); R3-L6b (a prune that loses the race still removes the `.err`), R3-L6c (lock files idle 7 days are pruned if unheld; the
+   lock is re-opened when its inode is no longer the path), R3-L6d (the child's pid is written into the lock file and named in the refusal),
+   R3-L6e (a sid too long for a file name, or a symlinked lock, is a clean "not sent"); R3-L8e (`reply_file` in the `--json` result of a
+   timed-out or failed turn).
    **2026-10-23, load-watch report:** a relayed turn ends its row with `end_reason=agent_close`; the gateway treats that as
    recoverable (`hermes_state_common._RECOVERABLE_END_REASONS`) and reopened the same session about five minutes later
    (`~/.hermes/logs/gateway.log`: "reopened ended session 20261005_212354_16790ed2 ... keeping route"), so no context is lost
@@ -1554,18 +1558,22 @@ Round 1 (2026-10-23) BLOCKed this: the stamp window decided a press (a recalled 
 twice), commit 4572876 listed closed keyless subagent/desktop children as live Hermes conversations, and the unsent file had no
 lock. Repaired the same day (the stamp only claims success; `end_reason='agent_close' AND session_key IS NOT NULL AND source <>
 'subagent'`; `flock` on the unsent file and per pane); round 2 APPROVED (reports `~/.local/state/bigteam/relay-pane-lows/
-adversary-report.md`, `adversary-report-2.md`). Open lows from round 2: (P1) `pulled_and_discarded` drops a pulled entry on the
-windowed state, so a retyped text could double-deliver; (P2) a `dequeue` is credited to our text even when it handed the agent a
-different queued prompt (a wrong "delivered" report, never a resend); (P3) the non-blocking pane lock returns "stop", which
-also cancels the socket fallback that used to deliver; (P4) two guarded lines have no test (removing a failed temp file; the
-final transcript check after the wait loop); (P5, pre-existing) a herdr pane's entry outlives a transcript change.
+adversary-report.md`, `adversary-report-2.md`). Lows from round 2, all FIXED d2e3e27 (2026-10-23, each with a test a mutant fails): (P1)
+`pulled_and_discarded` now decides on the unwindowed state (a copy submitted by hand after the window keeps the entry); (P2) a `dequeue` credits our
+text only when the next user line or `queued_command` attachment IS our text, else ours stays queued; (P3) a held pane lock returns "skip", so the
+socket route may still deliver; (P4) tests for the failed temp-file removal and the final transcript look; (P5) an entry records its transcript file,
+and one whose pane now has another transcript is never pressed, retyped or proven ("unverified", `MOVED_WHY`).
 
 ## Paseo agents in fleet.py and relay.py: lows after adversary review (2026-10-23)
 
 `fleet.py` lists every non-archived Paseo agent of any provider; `relay.py` takes a hex id prefix of 6+ characters; a working agent whose
 provider cannot steer (cline and every other ACP provider) is refused. Adversary APPROVE (report
-`~/.local/state/bigteam/paseo-listing/adversary-report.md`). Open lows: (L1) three guards no test pins: helm keeping a Claude-on-Paseo
-agent in the attention queue, the 20 s `paseo ls` timeout, the exit-code check and the `--all` wiring; (L2) helm never shows a
-non-Claude Paseo agent that waits on a permission card; (L3) Paseo workspace titles join exact-name matching in `find()`; (L4) a send to
-a working claude/codex/omp agent is replaced, not queued, when the provider declines the steer (compaction): docs reworded 2026-10-23,
-no code guard. The workspace-name ledger (rework lead, brief `~/.local/state/bigteam/workspace-name-ledger/brief.md`) builds on this.
+`~/.local/state/bigteam/paseo-listing/adversary-report.md`). Lows, all repaired 2026-10-23 on `fix/queued-lows-2026-10-23`, each with a test a
+mutant fails: (L1) FIXED 543bbcc: tests for helm keeping a Claude-on-Paseo agent in the attention queue, the 20 s `paseo ls` timeout, the
+exit-code check and the `--all` wiring; (L2) FIXED 543bbcc: `fleet.py` reads one `paseo permit ls --json` and marks a running agent with
+a pending card `blocked` (`paseo_pending`); helm shows a `permission` item pointing at the Paseo UI / `paseo permit allow|deny` (never keys), relay refuses it;
+(L3) FIXED 543bbcc, decided: a Paseo agent with no Claude registry row never matches by name (workspace title) in `find()`, only by id, Paseo id or hex
+prefix; (L4) FIXED 543bbcc, decided: no pre-send detection exists (`inspect` and `agent logs` carry no compaction or review-turn state; checked in the
+Paseo 0.13 CLI source), so the guard is a refusal: a working codex, omp, opencode or pi agent needs `--steer`, claude stays steered by default (the accepted
+residual). Say if omp should be steered by default again: one constant, `fleet.PASEO_STEER_DEFAULT`. The workspace-name ledger (rework lead, brief
+`~/.local/state/bigteam/workspace-name-ledger/brief.md`) builds on this; it must not rely on matching a sid-less Paseo row by title.

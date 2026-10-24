@@ -185,7 +185,10 @@ means new prompts from other sessions are missed.
 2. Non-Claude TUIs (Cursor, Codex, …) give state and a screen excerpt only;
    Hermes chats (`remote`) are listed for context and reached through the
    hermes MCP server (section 5), not keys. Sessions started over ACP give
-   their full final text (`reply`/`done`).
+   their full final text (`reply`/`done`). A Paseo agent with no Claude transcript (cline, omp, codex, ...) is `remote`
+   (listed, not answered here); while it waits on a permission or question card (2026-10-23: `fleet.py` reads
+   `paseo permit ls --json`) it is an open `permission` item that points at the Paseo UI or
+   `paseo permit allow|deny <id>`: helm has no terminal there, and `keys` refuses it.
 3. A Claude session outside herdr, Orca and tmux can be listed but not
    answered: use `SendMessage`, or his `focus`.
 4. Sessions come from `session-finder/fleet.py` (2026-10-08): herdr, the Claude

@@ -96,10 +96,15 @@ adds the archived agents as `ended` rows (`relay.py` never sends to one). No `pa
 (20 s): no Paseo rows, as before. `relay.py` takes a hex **prefix of 6 or more characters** of a Paseo agent id
 (`paseo ls`'s 7-character short id works); exactly one agent must match, else it refuses and lists the candidates.
 A working agent whose provider cannot steer (cline and every other ACP provider, which Paseo would interrupt and replace
-the running turn of) is refused with that reason: `--idle S` waits for it to go idle; claude, codex, omp, opencode and pi
-queue the text for their next tool round (`fleet.PASEO_STEER_PROVIDERS`, read from the Paseo daemon bundle 2026-10-23),
-except that Paseo replaces the running turn of even these when the provider declines the steer at that moment (for example
-while Claude or Codex is compacting): a send to a working agent is queued, not guaranteed queued.
+the running turn of) is refused with that reason: `--idle S` waits for it to go idle. claude, codex, omp, opencode and pi
+can steer (`fleet.PASEO_STEER_PROVIDERS`, read from the Paseo daemon bundle 2026-10-23), but Paseo replaces the running
+turn of even these when the provider declines the steer at that moment (while Claude or Codex compacts, a Codex review
+turn, an omp steer error), which relay cannot see beforehand: only **claude** is steered into a working agent by default;
+a working codex, omp, opencode or pi agent is refused unless `--steer` (or `--idle S`). A Paseo agent with no Claude
+registry row is found by its id, Paseo id or hex prefix, never by its workspace title (titles come from its first
+prompt). A running one with a pending permission or question card shows as `blocked` (one `paseo permit ls --json`),
+`relay.py` refuses it, and helm lists it as a `permission` item pointing at the Paseo UI or `paseo permit allow|deny`
+(helm presses no keys there).
 
 **Give three things:** the session name, its title, and the `where:` line with the
 `focus:` command. `one-offs-91 "CCC slow performance" — herdr ws shells#6 · tab
