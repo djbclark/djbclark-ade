@@ -3,6 +3,28 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Paseo tabs: how to use them, a `-pt` naming rule, autorename for tabs, and a rename-history store (djbclark, direct, 2026-10-23)
+
+djbclark, 2026-10-23: "I just realized paseo has tabs. Put in the appropriate place and ask a strong model to consider
+how we should use tabs. Add a naming convention for paseo tabs that the titles are all lower case and hyphenated and
+end in -pt (paseo tab) and the names should be short as only around 17 characters are visible even if it is the only
+tab. Also make autorename work with paseo tabs, and just like workspaces we need to track the names of tab to be able
+to find them even if the user changes them in the UI after the autorename etc. This history system should also apply
+to herdr panes, tabs, and workspaces, our sqlite database might be a good place to do this, but again consult with a
+strong model on this problem, and ask me any questions that come up when this feature implementation surfaces."
+Status 2026-10-23: **design slice running** (`design-tabs`, Opus 5.5 high via omp, read-only; brief
+`~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-tabs.md`, report
+`~/.local/state/bigteam/adhoc-2026-10-23/design-tabs-report.md`). Nothing is built.
+
+1. **Tab usage convention**: what lives in a tab, one agent per tab or not, how the skills create, reuse and close tabs.
+2. **Naming rule**: lowercase, hyphenated, ending `-pt`, about 17 visible characters including the suffix; goes into
+   the `autorename` suffix table (`-t` herdr tab, `-p` herdr pane, `-pw` Paseo workspace) and `workspace-layout.md`.
+3. **`autorename` for Paseo tabs**, never overwriting a name the user set.
+4. **Name-history store** for herdr workspaces/tabs/panes and Paseo workspaces/tabs: every name seen or set, who set it,
+   when and the stable id, so a lookup by any historical name or id finds the object and its session after a UI
+   rename; SQLite is the candidate, the design slice decides where and how it is observed.
+5. **Questions for djbclark** come out of the design report (its section 6): relay them as they surface.
+
 ## Make full use of the podman, kev, laya and hyades-docker microVMs (djbclark, direct, 2026-10-23)
 
 djbclark, 2026-10-23: "At an appropriate point, make sure that we make full use of the podman, kev and laya
