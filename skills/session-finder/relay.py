@@ -1125,6 +1125,10 @@ def pane_send(c):
             note_unsent(s["id"], None)
         elif stt == "pulled" and pulled_and_discarded(s, chan, left):
             note_unsent(s["id"], None)    # he pulled it back and emptied the box: not ours any more
+        elif moved:    # its transcript is gone from this pane: nothing will ever prove it, only its expiry frees the pane for other text
+            return ("skip", f"an earlier message of ours to this session ({fleet.clip(left['text'], 50)!r}) was typed into a "
+                            "transcript that is not its current one (/clear, a resumed or replaced session): its delivery cannot "
+                            "be proven, so it holds other text back until it expires (up to an hour). Check its pane")
         else:    # typing now could make its retry type the first text again (a duplicate): the retry must ask first
             return ("skip", f"an earlier message of ours to this session is not yet proven delivered "
                             f"({fleet.clip(left['text'], 50)!r}); wait up to an hour, or check its pane")

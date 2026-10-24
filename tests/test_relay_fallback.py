@@ -2397,6 +2397,21 @@ class TestRound7(Harness):
         rc, _, _ = self.run_text(sess(transcript=str(old)), "hello there friend")    # same file: the retry submits as before
         self.assertEqual(calls, ["enter"])
 
+    def test_another_text_blocked_by_a_moved_entry_is_told_the_entry_can_never_be_proven(self) -> None:
+        """P5 (adversary L4): waiting does not prove an entry whose transcript is gone; only its expiry frees the pane."""
+        old, new = self.tmp / "old.jsonl", self.tmp / "new.jsonl"
+        old.write_text("{}\n")
+        new.write_text("{}\n")
+        relay.note_unsent("cccccccc", "hello there friend", "", 0, time.time(), str(old))
+        calls = self.enters()
+        rc, _, err = self.run_text(sess(transcript=str(new)), "a different message")
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIn("not its current one", err)
+        self.assertNotIn("not yet proven", err)
+        self.assertIsNotNone(relay.leftover("cccccccc"))
+        rc, _, err = self.run_text(sess(transcript=str(old)), "a different message")    # not moved: the old reason
+        self.assertIn("not yet proven", err)
+
     def test_arming_records_the_transcript_the_mark_belongs_to(self) -> None:
         relay.arm(sess(transcript="/some/where/t.jsonl"), ("herdr", "w9:p9"), "hello there friend", 5)
         self.assertEqual(relay.leftover("cccccccc")["tx"], "/some/where/t.jsonl")
