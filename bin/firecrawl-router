@@ -45,6 +45,11 @@ general search (30/min) bucket until its reset; all buckets closed is a 429 with
 failure a 502. `types` (issue, pull_request, readme, doc), `repos`, `language`, `k` and `passages` are honoured;
 `sources`, `skills`, `license`, `topic`, `min_stars`, `max_stars`, `archived` and `fork` are a 400. With a
 commercial fallback configured the request goes to the primary and the fallback as before.
+PUBLIC REPOSITORIES ONLY: the GITHUB_TOKEN behind it is a classic PAT that can read private repositories and this
+listener has no caller authentication, so issue and PR queries carry `is:public` and a code hit is dropped unless
+GitHub reports its repository as not private. A fine-grained read-only public-repository token under its own
+secretspec name (FIRECRAWL_ROUTER_GITHUB_SECRET) removes the dependence on those two filters. At most two searches
+run at once, all inside FIRECRAWL_ROUTER_SEARCH_TIMEOUT.
 
 Async jobs (crawl, batch scrape, extract) stay on the backend that created
 them: the router remembers job id -> backend and rewrites absolute `url`/`next`
@@ -70,8 +75,10 @@ Environment:
   FIRECRAWL_ROUTER_LLM_DEADLINE seconds to spend on one scrape's extraction (default 240: under
                                Claude Code's 300 s MCP idle limit with room for the scrape itself)
   FIRECRAWL_ROUTER_DEVELOPER   "off" disables the GitHub-backed developer search (default on)
-  FIRECRAWL_ROUTER_GITHUB_KEY  GitHub token; empty (the default) reads GITHUB_TOKEN with `sudo-secretspec get`
-                               once per process; neither: unauthenticated (10 req/min, no code search).
+  FIRECRAWL_ROUTER_GITHUB_KEY  GitHub token; empty (the default) reads the secretspec name below with
+                               `sudo-secretspec get` once per process (re-read at most once a minute after a 401);
+                               no token at all: unauthenticated (10 req/min, no code search).
+  FIRECRAWL_ROUTER_GITHUB_SECRET  that secretspec name (default GITHUB_TOKEN)
                                BASE default https://api.github.com (…_GITHUB_BASE)
 
 The five base URLs above (SELFHOST, FALLBACK, SIPB, LITELLM, GITHUB) must each be https:// or loopback http
@@ -309,18 +316,22 @@ DEV_ORDER = ("readme", "doc", "pull_request", "issue", DEV_CODE)  # round-robin 
 DEV_DOC_EXTS = {"md", "mdx", "markdown", "rst", "adoc", "txt"}
 DEV_STOPWORDS = frozenset("a an and are as at be but by can could do does for from how i if in into is it its my "
                           "of on or so that the this to was we what when where which who why with would you your".split())
-DEV_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-DEV_LANG_RE = re.compile(r"^[A-Za-z0-9_+#.-]+$")
-DEV_TERM_RE = re.compile(r"[A-Za-z0-9_.+#/-]+")  # no ":" so a query can never smuggle in a GitHub qualifier
+DEV_REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+DEV_LANG_RE = re.compile(r"[A-Za-z0-9_+#.-]{1,30}")
+DEV_TERM_RE = re.compile(r"[\w.+#/-]+")  # no ":", quote or space: a query can never smuggle in a GitHub qualifier
 DEV_MAX_TERMS = 8
+DEV_MAX_TERM_CHARS = 64
+DEV_MAX_Q = 256        # GitHub refuses a longer q with 422
+DEV_MAX_REPO_CHARS = 120
 DEV_PASSAGE_CHARS = 700
+DEV_SLOTS = 2          # searches in flight at once: each is up to three GitHub calls on one token
 SECRETSPEC = "/usr/local/bin/sudo-secretspec"
 
 
 def dev_terms(query: str) -> list[str]:
     out: list[str] = []
     for t in DEV_TERM_RE.findall(query):
-        t = t.strip(".-/")
+        t = t.strip(".-/")[:DEV_MAX_TERM_CHARS]
         if len(t) < 2 or t.lower() in DEV_STOPWORDS or t in ("AND", "OR", "NOT") or t in out:
             continue
         out.append(t)
@@ -353,12 +364,15 @@ def parse_dev_request(method: str, path: str, body: bytes | None) -> tuple[dict 
         if not isinstance(raw, dict):
             return None, "the body must be a JSON object"
     for name in DEV_UNSUPPORTED:
-        if raw.get(name) not in (None, "", [], False):
+        v = raw.get(name)
+        if v is not None and v != "" and v != [] and v is not False:
             return None, f"{name} is not supported by the GitHub-backed developer search"
     query = raw.get("query")
     if not isinstance(query, str) or not dev_terms(query):
         return None, "query must be a string with at least one searchable word"
     try:
+        if isinstance(raw.get("k"), bool) or isinstance(raw.get("passages"), bool):
+            raise ValueError
         k = int(raw.get("k", 10))
         passages = int(raw.get("passages", 1))
     except (TypeError, ValueError):
@@ -369,14 +383,14 @@ def parse_dev_request(method: str, path: str, body: bytes | None) -> tuple[dict 
     if types and not set(types) <= set(DEV_TYPES):
         return None, f"types must be among {', '.join(DEV_TYPES)}"
     repos = _dev_list(raw.get("repos"))
-    if not all(DEV_REPO_RE.match(r) for r in repos):
+    if not all(DEV_REPO_RE.fullmatch(r) for r in repos):
         return None, "repos must be owner/name slugs"
+    if len(" ".join(f"repo:{r}" for r in repos)) > DEV_MAX_REPO_CHARS:
+        return None, f"repos is too long: the repo: qualifiers may take {DEV_MAX_REPO_CHARS} characters of GitHub's {DEV_MAX_Q}"
     language = raw.get("language")
-    if language is not None and not (isinstance(language, str) and DEV_LANG_RE.match(language)):
+    if language is not None and not (isinstance(language, str) and DEV_LANG_RE.fullmatch(language)):
         return None, "language must be a plain language name"
-    if repos and types and not set(types) & {"issue", "pull_request", "readme"}:
-        return None, "repos cannot match any requested type; add repository types or drop repos"
-    return {"query": query, "k": k, "passages": passages, "types": types, "repos": repos[:20],
+    return {"query": query, "k": k, "passages": passages, "types": types, "repos": repos,
             "language": language}, ""
 
 
@@ -401,37 +415,50 @@ class GHReply:
 class DevSearch:
     """Ranked developer results (issues, merged PRs, READMEs, docs, code) from the GitHub search API.
 
-    Three calls per search at most (issues, merged PRs, code), each retried once with fewer terms when it
-    finds nothing. GitHub keeps separate per-minute buckets for code search (10) and the rest (30), so each
-    response's X-RateLimit-* and Retry-After headers close a bucket until its reset instead of being retried.
+    Public repositories only: issue and PR queries carry `is:public`, and a code hit counts only when GitHub says
+    its repository is not private (the token behind it can read private repositories, and the router listener
+    has no caller authentication). Three calls per search at most (issues, merged PRs, code), each retried once
+    with fewer terms when it finds nothing, all inside one deadline. GitHub keeps separate per-minute buckets for
+    code search (10) and the rest (30), so each response's X-RateLimit-* and Retry-After headers close a bucket
+    until its reset instead of being retried.
     """
 
     def __init__(self, base: str, token: str = "", secret: str = "GITHUB_TOKEN", timeout: float = 15.0,
-                 secretspec: str = SECRETSPEC):
-        self.base, self.timeout = base.rstrip("/"), timeout
-        self._token, self._secret, self._secretspec = token, secret, secretspec
-        self._token_failed_at = 0.0
+                 secretspec: str = SECRETSPEC, budget: float = 35.0):
+        self.base, self.timeout, self.budget = base.rstrip("/"), timeout, budget
+        self._token, self._static = token, bool(token)
+        self._secret, self._secretspec = secret, secretspec
+        self._last_read = 0.0
         self._closed: dict[str, float] = {}  # bucket -> monotonic time it reopens
         self._lock = threading.Lock()
+        self._read_lock = threading.Lock()   # one secretspec read at a time; later callers see its result
+        self._slots = threading.BoundedSemaphore(DEV_SLOTS)
 
     def token(self) -> str:
         with self._lock:
-            if self._token or time.monotonic() - self._token_failed_at < 60:
+            if self._token or self._static:
                 return self._token
-        value = read_secret(self._secret, self._secretspec)  # outside the lock: it spawns a process
-        with self._lock:
-            if value:
+        with self._read_lock:
+            with self._lock:
+                if self._token:
+                    return self._token
+                if self._last_read and time.monotonic() - self._last_read < 60:
+                    return ""
+            value = read_secret(self._secret, self._secretspec)
+            with self._lock:
+                self._last_read = time.monotonic()
                 self._token = value
-            else:
-                self._token_failed_at = time.monotonic()
-            return self._token
+                return value
 
-    def _gh(self, endpoint: str, q: str, per_page: int) -> GHReply:
+    def _gh(self, endpoint: str, q: str, per_page: int, deadline: float) -> GHReply:
         bucket = "code_search" if endpoint == "code" else "search"
         with self._lock:
             wait = self._closed.get(bucket, 0.0) - time.monotonic()
         if wait > 0:
             return GHReply(0, limited_for=wait, error=f"{bucket} rate limit, {wait:.0f}s left")
+        timeout = min(self.timeout, deadline - time.monotonic())
+        if timeout < 0.5:
+            return GHReply(0, error="deadline")
         req = urllib.request.Request(
             f"{self.base}/search/{endpoint}?" + urllib.parse.urlencode({"q": q, "per_page": per_page}),
             headers={"Accept": "application/vnd.github.text-match+json", "User-Agent": "firecrawl-router",
@@ -440,7 +467,7 @@ class DevSearch:
         if token:
             req.add_unredirected_header("Authorization", f"Bearer {token}")
         try:
-            with _open(req, self.timeout) as r:
+            with _open(req, timeout) as r:
                 status, hdrs, raw = r.status, {k.lower(): v for k, v in r.headers.items()}, r.read()
         except urllib.error.HTTPError as e:
             status, hdrs, raw = e.code, {k.lower(): v for k, v in (e.headers or {}).items()}, e.read() or b""
@@ -456,6 +483,10 @@ class DevSearch:
                 wait = 60.0
             with self._lock:
                 self._closed[bucket] = time.monotonic() + wait
+        if status == 401 and token:
+            with self._lock:  # revoked or rotated: drop it so the next search re-reads (at most once a minute)
+                if not self._static and self._token == token:
+                    self._token = ""
         if status != 200:
             return GHReply(status, limited_for=wait if limited else 0.0, error=f"HTTP {status}")
         try:
@@ -464,28 +495,43 @@ class DevSearch:
             return GHReply(status, error="not JSON")
         return GHReply(status, doc if isinstance(doc, dict) else None)
 
-    def _query(self, endpoint: str, terms: list[str], scope: str, p: dict, per_page: int) -> GHReply:
-        extra = [f"repo:{r}" for r in p["repos"]] + ([f"language:{p['language']}"] if p["language"] else [])
-        reply = GHReply(0, error="no terms")
-        for attempt in (terms, dev_loosen(terms)):
-            if not attempt:
+    def _query(self, endpoint: str, terms: list[str], scope: str, p: dict, per_page: int, deadline: float) -> GHReply:
+        extra = " ".join([scope] + [f"repo:{r}" for r in p["repos"]] + ([f"language:{p['language']}"] if p["language"] else []))
+        reply = None
+        for i, attempt in enumerate((terms, dev_loosen(terms))):
+            if not attempt or (i and deadline - time.monotonic() < 3):
                 break
-            reply = self._gh(endpoint, " ".join(attempt + [x for x in (scope, *extra) if x]), per_page)
-            if reply.status != 200 or (reply.doc or {}).get("items"):
+            room = DEV_MAX_Q - len(extra) - 1
+            while len(" ".join(attempt)) > room and len(attempt) > 1:
+                attempt = attempt[:-1]
+            r = self._gh(endpoint, f"{' '.join(attempt)[:room]} {extra}".strip(), per_page, deadline)
+            if reply is None or r.status == 200:  # a failed retry never replaces an empty 200
+                reply = r
+            if r.status != 200 or (r.doc or {}).get("items"):
                 break
-        return reply
+        return reply or GHReply(0, error="no terms")
 
     def search(self, p: dict) -> tuple[int, dict, str]:
         """(HTTP status, Firecrawl-shaped document, one-line note for the log)."""
+        deadline = time.monotonic() + self.budget
+        if not self._slots.acquire(timeout=self.budget):
+            return 429, {"success": False, "source": "github", "retryAfter": 5,
+                         "error": "GitHub developer search is busy; retry in 5s"}, "busy"
+        try:
+            return self._search(p, deadline)
+        finally:
+            self._slots.release()
+
+    def _search(self, p: dict, deadline: float) -> tuple[int, dict, str]:
         authed = bool(self.token())  # resolved here, once, so the parallel calls below share one secretspec read
         wanted = set(p["types"] or (*DEV_TYPES, DEV_CODE))
         terms = dev_terms(p["query"])
         per_page = min(100, max(5, p["k"]))
         jobs: dict[str, tuple[str, str]] = {}
         if "issue" in wanted:
-            jobs["issue"] = ("issues", "is:issue")
+            jobs["issue"] = ("issues", "is:issue is:public")
         if "pull_request" in wanted:
-            jobs["pull_request"] = ("issues", "is:pr is:merged")
+            jobs["pull_request"] = ("issues", "is:pr is:merged is:public")
         if wanted & {"readme", "doc", DEV_CODE}:
             jobs[DEV_CODE] = ("code", "filename:README.md" if wanted & {"readme", "doc", DEV_CODE} == {"readme"} else "")
         replies: dict[str, GHReply] = {}
@@ -493,7 +539,7 @@ class DevSearch:
         def run(name: str) -> None:
             endpoint, scope = jobs[name]
             try:
-                replies[name] = self._query(endpoint, terms, scope, p, per_page)
+                replies[name] = self._query(endpoint, terms, scope, p, per_page, deadline)
             except Exception as e:  # noqa: BLE001 - one failed rung, never a crashed request
                 replies[name] = GHReply(0, error=type(e).__name__)
 
@@ -501,11 +547,15 @@ class DevSearch:
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            t.join(timeout=max(0.1, deadline - time.monotonic() + 1))
+        for name in jobs:
+            replies.setdefault(name, GHReply(0, error="deadline"))
 
         buckets: dict[str, list[dict]] = {t: [] for t in DEV_ORDER}
-        for name, reply in replies.items():
+        for name, reply in list(replies.items()):
             for item in (reply.doc or {}).get("items") or []:
+                if not isinstance(item, dict):
+                    continue
                 r = self._shape(name, item, p["passages"])
                 if r and r["type"] in wanted:
                     buckets[r["type"]].append(r)
@@ -553,9 +603,11 @@ class DevSearch:
         url = item.get("html_url")
         if not isinstance(url, str):
             return None
+        if job == DEV_CODE and (item.get("repository") or {}).get("private") is not False:
+            return None  # the token reads private repositories; only a repository GitHub calls public is returned
         want_prop = None if job == DEV_CODE else "body"  # an issue's title fragment only repeats its title
-        frags = [m.get("fragment") for m in item.get("text_matches") or []
-                 if isinstance(m.get("fragment"), str) and m["fragment"].strip()
+        frags = [m.get("fragment") for m in item.get("text_matches") or [] if isinstance(m, dict)
+                 and isinstance(m.get("fragment"), str) and m["fragment"].strip()
                  and (want_prop is None or m.get("property") == want_prop)]
         if job == DEV_CODE:
             repo = (item.get("repository") or {}).get("full_name") or "?"
@@ -564,7 +616,7 @@ class DevSearch:
             stem, dot, ext = name.rpartition(".")
             if not dot:
                 stem, ext = name, ""
-            if stem.startswith("readme"):
+            if stem == "readme" or stem.startswith("readme."):
                 typ, rid = "readme", f"readme:{repo}" + (f":{path}" if "/" in path else "")
             elif ext in DEV_DOC_EXTS or path.lower().startswith(("docs/", "doc/")):
                 typ, rid = "doc", f"doc:{repo}:{path}"
@@ -927,13 +979,18 @@ class Router:
             doc = json.loads(body)
             params, why = parse_dev_request("POST", path, json.dumps(
                 {"query": doc.get("query"), "k": doc.get("limit", 5)}).encode())
+            why = why.replace("k must", "limit must").replace("k and passages", "limit")
         if params is None:
             status, out, note = 400, {"success": False, "error": f"firecrawl-router: {why}"}, why
         else:
             status, out, note = self.dev.search(params)
             if kind == "category" and status == 200:
+                ignored = [k for k in ("scrapeOptions", "sources", "tbs", "location", "country")
+                           if doc.get(k) not in (None, "", [], {})]
+                warnings = ([out["warning"]] if "warning" in out else []) + (
+                    [f"ignored for the developer category: {', '.join(ignored)}"] if ignored else [])
                 out = {"success": True, "source": "github", "data": {"web": dev_web_results(out)}, "creditsUsed": 0,
-                       **({"warning": out["warning"]} if "warning" in out else {})}
+                       **({"warning": "; ".join(warnings)} if warnings else {})}
         reply = Reply(status, {"Content-Type": "application/json"}, json.dumps(out).encode())
         if status == 429 and "retryAfter" in out:
             reply.headers["Retry-After"] = str(out["retryAfter"])
@@ -1070,8 +1127,12 @@ def build_router(env, token: str) -> Router:
     dev = None
     if env.get("FIRECRAWL_ROUTER_DEVELOPER", "").lower() != "off":
         gh_base = (env.get("FIRECRAWL_ROUTER_GITHUB_BASE") or "https://api.github.com").rstrip("/")
-        dev = DevSearch(_check_base("FIRECRAWL_ROUTER_GITHUB_BASE", gh_base),
-                        token=env.get("FIRECRAWL_ROUTER_GITHUB_KEY", ""), timeout=min(15.0, search_timeout))
+        secret = env.get("FIRECRAWL_ROUTER_GITHUB_SECRET") or "GITHUB_TOKEN"
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", secret):
+            sys.exit("firecrawl-router: FIRECRAWL_ROUTER_GITHUB_SECRET must be an upper-case sudo-secretspec name")
+        dev = DevSearch(_check_base("FIRECRAWL_ROUTER_GITHUB_BASE", gh_base), secret=secret,
+                        token=env.get("FIRECRAWL_ROUTER_GITHUB_KEY", ""), timeout=min(15.0, search_timeout),
+                        budget=search_timeout)
     return Router(primary, fallback, float(env.get("FIRECRAWL_ROUTER_TIMEOUT") or 120), token,
                   extractor=build_extractor(env), search_timeout=search_timeout, dev=dev)
 

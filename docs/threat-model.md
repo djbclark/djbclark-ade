@@ -104,9 +104,14 @@ What an attacker would want, in order of damage:
    refuses text starting with `/`, an archived agent, and one with a pending permission or question.
 10. **`bin/firecrawl-router`**: an HTTP listener, loopback by default (see the intro); any process that can
     reach it can call it. Since 2026-10-24 a call to `/v2/search/developer` also spends the machine's
-    `GITHUB_TOKEN` search quota against api.github.com (the token is read once per process with `sudo-secretspec
-    get`, held in memory, sent only to the https or loopback `FIRECRAWL_ROUTER_GITHUB_BASE` and never logged or
-    handed to the MCP child), so a local caller can use up that quota but cannot read the token.
+    `GITHUB_TOKEN` against api.github.com (the token is read once per process with `sudo-secretspec get`, held in
+    memory, sent only to the https or loopback `FIRECRAWL_ROUTER_GITHUB_BASE` and never logged or handed to the MCP
+    child). That token is a classic PAT with `repo` scope (adversary round 1, 2026-10-24), so a caller of the
+    unauthenticated listener (`:18805 --open`) could otherwise read private repositories through it. The router
+    therefore returns public repositories only: `is:public` on issue and PR queries, and a code hit only when GitHub
+    reports `repository.private` as false. A local caller can still use up the search quota and learn which public
+    results exist, and the two filters are the whole defence until a fine-grained public-read token is stored under
+    its own secretspec name (`FIRECRAWL_ROUTER_GITHUB_SECRET`).
 11. **Hermes to Claude delegation** (`delegate_task`, `claude-sub`; `docs/mcp-servers.md`): a message Hermes
     acts on can become a headless agent run.
 12. **`bin/ade-update`** (2026-10-20): after its fast-forward pull it runs the `skill-everywhere` beside the running

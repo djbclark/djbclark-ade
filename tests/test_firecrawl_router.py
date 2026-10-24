@@ -830,9 +830,10 @@ def gh_issue(repo, n, title, body="", state="closed", pr=False):
     return item
 
 
-def gh_file(repo, path, fragment):
+def gh_file(repo, path, fragment, private=False):
     return {"html_url": f"https://github.com/{repo}/blob/abc/{path}", "path": path, "name": path.rsplit("/", 1)[-1],
-            "repository": {"full_name": repo}, "text_matches": [{"property": "content", "fragment": fragment}]}
+            "repository": {"full_name": repo, "private": private},
+            "text_matches": [{"property": "content", "fragment": fragment}]}
 
 
 class DeveloperSearchTest(unittest.TestCase):
@@ -911,7 +912,8 @@ class DeveloperSearchTest(unittest.TestCase):
         self.start(lambda e, q: (200, {}, {"items": [] if "beta" in q else [gh_issue("o/lib", 1, "hit")]}))
         status, _, doc = self.call("POST", "/v2/search/developer", {"query": "alpha beta gamma delta", "types": ["issue"]})
         self.assertEqual(status, 200)
-        self.assertEqual([q for _, q, _ in self.gh.calls], ["alpha beta gamma delta is:issue", "alpha gamma is:issue"])
+        self.assertEqual([q for _, q, _ in self.gh.calls],
+                         ["alpha beta gamma delta is:issue is:public", "alpha gamma is:issue is:public"])
         self.assertEqual([r["id"] for r in doc["results"]], ["issue:o/lib#1"])
 
     def test_closed_code_bucket_degrades_then_stays_closed_until_reset(self):
@@ -981,6 +983,100 @@ class DeveloperSearchTest(unittest.TestCase):
             self.assertEqual(counter.read_text().count("x"), 1)
         self.assertEqual({c[2] for c in self.gh.calls}, {"Bearer ghp-from-vault"})
         self.assertNotIn("ghp-from-vault", self.log.getvalue() + json.dumps(doc))
+
+    def test_private_repositories_never_come_back(self):
+        # the token is a classic PAT that reads private repositories: issue queries say is:public, and a code hit
+        # counts only when GitHub reports its repository as not private (a missing flag is not public)
+        def handler(endpoint, q):
+            if endpoint == "code":
+                leaked = gh_file("me/secret", "notes.md", "private text", private=True)
+                unknown = {**gh_file("me/unknown", "notes.md", "unknown"), "repository": {"full_name": "me/unknown"}}
+                return 200, {}, {"items": [leaked, unknown, gh_file("o/lib", "docs/a.md", "public text")]}
+            return self.normal(endpoint, q)
+        self.start(handler)
+        _, _, doc = self.call("GET", "/v2/search/developer?query=state")
+        self.assertNotIn("me/", json.dumps(doc))
+        self.assertIn("doc:o/lib:docs/a.md", [r["id"] for r in doc["results"]])
+        for path, q, _ in self.gh.calls:
+            if path.endswith("/issues"):
+                self.assertIn("is:public", q)
+
+    def test_an_empty_answer_at_the_rate_limit_is_still_a_200(self):
+        # the last request of the minute returns 0 hits and closes the bucket, so the fewer-terms retry is refused:
+        # that is "nothing found", not "rate limited"
+        self.start(lambda e, q: (200, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(int(time.time()) + 50)},
+                                 {"items": []}))
+        status, _, doc = self.call("GET", "/v2/search/developer?query=alpha+beta+gamma+delta")
+        self.assertEqual((status, doc["results"]), (200, []))
+
+    def test_non_ascii_terms_survive_and_oversized_queries_fit_githubs_limit(self):
+        self.start(self.normal)
+        self.call("POST", "/v2/search/developer", {"query": "naïve café 東京エラー", "types": ["issue"]})
+        self.assertEqual(self.gh.calls[0][1], "naïve café 東京エラー is:issue is:public")
+        self.gh.calls.clear()
+        self.call("POST", "/v2/search/developer", {"query": " ".join(["w" * 200] * 8), "repos": ["a/" + "b" * 30] * 3})
+        self.assertTrue(self.gh.calls)
+        self.assertTrue(all(len(q) <= 256 for _, q, _ in self.gh.calls))
+        status, _, err = self.call("POST", "/v2/search/developer", {"query": "x1", "repos": ["a/" + "b" * 30] * 6})
+        self.assertEqual(status, 400)
+        self.assertIn("repos is too long", err["error"])
+
+    def test_malformed_upstream_items_are_skipped(self):
+        self.start(lambda e, q: (200, {}, {"items": ["oops", None, {"html_url": "https://github.com/o/r/issues/1", "title": "ok",
+                                                                    "number": 1, "repository_url": "https://api.github.com/repos/o/r",
+                                                                    "text_matches": ["x", None]}]}))
+        status, _, doc = self.call("POST", "/v2/search/developer", {"query": "state", "types": ["issue"]})
+        self.assertEqual((status, [r["id"] for r in doc["results"]]), (200, ["issue:o/r#1"]))
+
+    def test_readme_and_doc_classification(self):
+        files = [gh_file("o/lib", "README.md", "a"), gh_file("o/lib", "pkg/README", "b"), gh_file("o/lib", "readme_parser.py", "c"),
+                 gh_file("o/lib", "docs/guide.rst", "d"), gh_file("o/lib", "src/x.go", "e")]
+        self.start(lambda e, q: (200, {}, {"items": files if e == "code" else []}))
+        _, _, doc = self.call("GET", "/v2/search/developer?query=state&k=10")
+        self.assertEqual({r["id"]: r["type"] for r in doc["results"]},
+                         {"readme:o/lib": "readme", "readme:o/lib:pkg/README": "readme", "code:o/lib:readme_parser.py": "code",
+                          "doc:o/lib:docs/guide.rst": "doc", "code:o/lib:src/x.go": "code"})
+
+    def test_repos_scope_applies_to_docs_and_bad_numbers_are_refused(self):
+        self.start(self.normal)
+        status, _, _ = self.call("POST", "/v2/search/developer", {"query": "state", "types": ["doc"], "repos": ["o/lib"]})
+        self.assertEqual(status, 200)
+        self.assertIn("repo:o/lib", self.gh.calls[0][1])
+        for bad in ({"k": True}, {"k": 0}, {"k": 101}, {"passages": 6}, {"min_stars": 0}, {"fork": 0}):
+            status, _, _ = self.call("POST", "/v2/search/developer", {"query": "state", **bad})
+            self.assertEqual(status, 400, bad)
+        status, _, err = self.call("POST", "/v2/search", {"query": "state", "categories": ["developer"], "limit": 0})
+        self.assertEqual(status, 400)
+        self.assertIn("limit must", err["error"])
+
+    def test_category_search_names_the_fields_it_ignores(self):
+        self.start(self.normal)
+        _, _, doc = self.call("POST", "/v2/search", {"query": "state", "categories": ["developer"],
+                                                      "scrapeOptions": {"formats": ["markdown"]}, "tbs": "qdr:d"})
+        self.assertIn("scrapeOptions, tbs", doc["warning"])
+
+    def test_a_rejected_token_is_dropped_and_not_re_read_inside_a_minute(self):
+        import stat
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            counter, script = Path(d) / "count", Path(d) / "sudo-secretspec"
+            script.write_text(f"#!/bin/sh\necho x >> {counter}\nprintf 'revoked\\n'\n")
+            script.chmod(script.stat().st_mode | stat.S_IXUSR)
+            self.start(lambda e, q: (401, {}, {"message": "Bad credentials"}), secretspec=str(script))
+            self.call("GET", "/v2/search/developer?query=state")
+            self.call("GET", "/v2/search/developer?query=state")
+            self.assertEqual(counter.read_text().count("x"), 1)  # the second search ran unauthenticated, no new read
+        self.assertIn(None, {c[2] for c in self.gh.calls})
+
+    def test_a_busy_router_answers_429_instead_of_queueing_forever(self):
+        self.start(self.normal)
+        self.router.dev.budget = 0.3
+        for _ in range(fr.DEV_SLOTS):
+            self.assertTrue(self.router.dev._slots.acquire(timeout=1))
+        self.addCleanup(lambda: [self.router.dev._slots.release() for _ in range(fr.DEV_SLOTS)])
+        status, headers, doc = self.call("GET", "/v2/search/developer?query=state")
+        self.assertEqual((status, headers["Retry-After"], doc["success"]), (429, "5", False))
+        self.assertEqual(self.gh.calls, [])
 
     def test_no_token_runs_unauthenticated_and_says_so(self):
         self.start(self.normal, token="", secretspec="/nonexistent/sudo-secretspec")

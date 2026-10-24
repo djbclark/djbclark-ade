@@ -28,8 +28,10 @@ why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
 The Hyades backend has no `/v2/search/developer`, so the stock `firecrawl_developer_search` tool returned "Request failed
 with status code 404" (and `firecrawl_search` with `categories: ["developer"]` an empty list). With the commercial index
 off, `bin/firecrawl-router` answers both itself from the GitHub search API (issues, merged pull requests, READMEs, docs,
-code files) in Firecrawl's response shape, with `source: "github"`; there is no reranker and no non-GitHub documentation
-site. Token: `GITHUB_TOKEN` through `sudo-secretspec get`, once per process. Limits: GitHub's 30 searches a minute (10
+code files of **public** repositories only) in Firecrawl's response shape, with `source: "github"`; there is no reranker
+and no non-GitHub documentation site. Token: `GITHUB_TOKEN` through `sudo-secretspec get`, once per process; it is a
+classic PAT that reads private repositories too, so the router adds `is:public` and drops private code hits
+(`docs/threat-model.md` item 10). Limits: GitHub's 30 searches a minute (10
 for code search); a closed bucket is reported in `coverage` and `warning`, all closed is HTTP 429 with `Retry-After`.
 Knobs and rules: the router's header and `skills/firecrawl/SKILL.md` ("Tools"). Considered and not built: Exa and
 Parallel as extra sources (two more keys and a merge step on a path that already answers; add one if GitHub proves too
