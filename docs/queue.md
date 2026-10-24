@@ -3,6 +3,37 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## tuios support: do it LAST (djbclark, direct, 2026-10-24)
+
+djbclark, 2026-10-24: "Queue for very end, although we can consider it a little now to make room for it any work between
+now and then: Add support for tuios (new herdr-like thing that looks cool). paseo is our first-class interface; herdr is
+secondary, and tuios for the moment is tertiary, so ask before you do anything for it that would cost a lot of tokens. Do
+web searches about it and make heavy use of web searches during all of your work in general."
+
+1. **Tier and rule.** Paseo first-class, herdr secondary, tuios tertiary (for now). **Ask djbclark before any tuios step
+   that costs many tokens** (a research slice, an adapter, a skill, an `acp-run`/`herdr-tidy`/`session-finder` port); a
+   web search or a README read is cheap and needs no ask. It runs after everything else in this file.
+2. **What it is (web, 2026-10-24).** [github.com/Gaurav-Gosain/tuios](https://github.com/Gaurav-Gosain/tuios), docs at
+   [tuios.dev/docs](https://tuios.dev/docs): a Go (Bubble Tea v2) terminal multiplexer and window manager, vim-style modal
+   interface, BSP tiling, up to 9 workspaces, kitty graphics, a daemon that keeps sessions alive. Install: `brew install
+   tuios` (or `go install github.com/Gaurav-Gosain/tuios/cmd/tuios@latest`, or the install script; `tuios update`).
+3. **Why it matters here: it is built for coding agents.** Per its README: agent state per pane (working, waiting, done,
+   errored) and an **Inbox** of everything waiting on you across sessions and machines (approvals, questions, mail, errors);
+   `tuios ask-human`, `tuios send-agent-message`; `tuios fan` (one prompt to several agents, mixed harnesses, each in its own
+   git worktree), `tuios start-agent`; **pane grants** (`read`, `write`, `fan`, `respond`, `admin`); an **MCP server**
+   (`tuios mcp`, read-only by default); a **tmux shim** (`tuios tmux-shim`, for tools that drive tmux, such as Claude Code
+   agent teams); `tuios --skill` (the guide an agent in a pane reads); a JSON verb protocol for driving the daemon; **hosts**
+   (`tuios hosts add`, ssh, Tailscale) and remote sessions (`tuios attach --host`); resume of each agent conversation after a
+   daemon restart; Program Status Protocol (OSC 7501) and shell hooks on window, session and agent events.
+4. **Likely shape of the work (not started; each needs the ask in item 1):** 1. a read-only research slice (Opus 5.5 high via
+   omp, web research plus the repo's `docs/AGENT_STATE.md` and `AGENTS.md`) on how tuios maps onto what `helm`, `herdr-tidy`,
+   `autorename`, `session-finder`, `relay.py` and `herdr-sleeper` do for herdr, and what overlaps Paseo's own host and
+   Subagents features (see "Paseo connected hosts"); 2. the security view (pane grants vs our `--perm` and yolo policy, the
+   tmux shim, `tuios mcp`) in `docs/threat-model.md`; 3. a tertiary-tier port, smallest useful first (naming rule next to
+   `-pt`/`-pw`, then session discovery, then Inbox into `helm`), only if the research says it earns its keep.
+5. **Standing order from the same message: use web searches heavily in all work**, not only here (memory
+   `feedback_heavy_web_search`).
+
 ## ade-scan-state follow-up 2 after PR 39 (adversary round 70, 2026-10-24)
 
 PR 39 was approved at head 14c7347 (no BLOCK or MEDIUM). Left for one small later PR (`adhoc-2026-10-24/adv-scan-70-report.md`): 1. **LOW**: a shallow checkout WITH an origin still gets `HEAD.bundle`, `branch-<b>.bundle`, `all-refs.bundle` and `local-only.bundle` rows (`bin/ade-scan-state-doc` ~779-822) that cannot be cloned alone (`git clone` rc 128); read `c.get("shallow")` in those rows too and either copy `shallow` beside the bundle or say "restore by fetching into a clone of origin; keep origin". 2. INFO: the no-origin restore recipe leaves the bare repo's HEAD at `init.defaultBranch` (a clone warns `remote HEAD refers to nonexistent ref`); `git init --bare -b <branch>`. 3. INFO: `GITDIR_FMT` exits 0 having archived nothing when `.git` is no longer a file at paste time, so the new "refuses loudly" sentence overstates; make the command fail or reword. 4. INFO: the PR's CHANGELOG line bundles about eight changes in one line where rule 10 says one per change; split if a reviewer asks. 5. INFO: `merge_repositories` keeps the first spelling (unreachable for a symlink today).
