@@ -42,8 +42,7 @@ PR 39 was approved at head 14c7347 (no BLOCK or MEDIUM). Left for one small late
 
 djbclark, 2026-10-24: "Add to appropriate point in our queue, we should make full use of this new feature (before doing
 this we'll need to run out the queue / quiesse here so we can install the latest paseo version that supports this and
-then restart paseo)". The feature is from the changelog of the newest Paseo release, **not yet installed** (installed
-2026-10-24: `paseo --version` 0.13.0-beta.1). Changelog text: "Connect your daemon to another machine, then ask an agent
+then restart paseo)". The feature is from the changelog of Paseo **v0.13.0-beta.2** ([release notes](https://newreleases.io/project/github/getpaseo/paseo/release/v0.13.0-beta.2); docs `docs/connected-hosts.md` in the repo), **not yet installed**. Status 2026-10-24 (about 10:00 AM EDT): another session restarted the daemon 0.12.0 -> 0.13.0-beta.1 (09:57-09:58 AM) on djbclark's instruction, so the quiesce in item 1 is done for that restart, but beta.1 lacks connected hosts: one more upgrade to beta.2 or later is needed. Changelog text: "Connect your daemon to another machine, then ask an agent
 to delegate work there": `paseo host add 192.168.1.20:6767 --label studio`, `paseo host add 'ssh://me@build-box' --label
 build-box`, `paseo host add 'relay://...' --label laptop`; "Added connected hosts, so agents can create, prompt and
 monitor agents on other machines and see them in the Subagents track (#7370, #7593)".
