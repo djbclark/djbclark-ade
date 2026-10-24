@@ -69,8 +69,18 @@ read.
    actual `git rev-parse HEAD` in its `dir`. Any mismatch (or dirty-state
    drift) demotes the file from briefing to lead for that workspace —
    verify its claims against the repo before trusting them.
-   `session_log.py read` does this mechanically and returns a per-workspace
-   verdict.
+   The helper does this mechanically and returns a per-workspace verdict —
+   it is `claude/hooks/handoff-tools/session_log.py` in this skill's own
+   repo (`~/.claude/hooks/handoff-tools` symlinks to it), **not** on `PATH`
+   and **not** in `bin/`, and `read` needs `--state-root` as well as `--dir`:
+
+       ~/.claude/hooks/handoff-tools/.venv/bin/python \
+         ~/.claude/hooks/handoff-tools/session_log.py read \
+         --state-root ~/.local/state/handoffs \
+         --dir ~/.local/state/handoffs/<repo>/<task>
+
+   It prints `stale: true` per workspace alongside `actual_head`, so the
+   verdict is a field to read, not a sentence to interpret.
 4. **Check the memory layers the log cannot see** (added 2026-08-23). A
    `SESSION_LOG.md` only knows what *its own* session wrote. Decisions
    made in other sessions, or after that log was last touched, live
