@@ -5398,3 +5398,41 @@ def test_home_destinations_and_a_checkout_at_home_expand_in_the_shell(tmp_path, 
                          env={**GIT_ENV, "HOME": str(home)})
     assert run.returncode == 0, run.stderr
     assert any(dest2.rglob("whole.tar"))
+
+
+def test_a_shallow_checkout_with_no_origin_keeps_its_shallow_file_beside_the_bundle(tmp_path, monkeypatch):
+    """Codex finding 4367121323 (P2): `git bundle create --all` drops `.git/shallow`, so `git clone all.bundle` of a
+    shallow checkout with no origin fails (`Could not read <parent>`). The row keeps the file next to the bundle and the
+    restore recipe it names rebuilds the history."""
+    mod, doc = load(), load_doc()
+    home = tmp_path / "home"
+    (home / "src").mkdir(parents=True)
+    monkeypatch.setattr(doc, "HOME", str(home))
+    upstream = make_repo(tmp_path / "up")
+    commit_file(upstream, "b.txt")
+    commit_file(upstream, "c.txt")
+    git(tmp_path, "clone", "-q", "--depth", "1", f"file://{upstream}", str(home / "src" / "sh"))
+    git(home / "src" / "sh", "remote", "remove", "origin")
+    c = scan_one(mod, home / "src")
+    assert c["shallow"] is True and "no origin remote" in c["flags"], c
+    row = next(r for r in section_3_2(doc.render(doc_scan([c]))).splitlines() if r.startswith("| ~/src/sh "))
+    assert "shallow checkout" in row, row
+    cmds = [unescape_span(m) for m in re.findall(r"`((?:mkdir -p [^`]*bundle create|\"\$GCP\")[^`]*)`", row)]
+    assert len(cmds) == 2, cmds
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    env = {**GIT_ENV, "HOME": str(home)}
+    for cmd in cmds:
+        run = subprocess.run(["bash", "-c", PLAN_PREFIX + cmd.replace("<DEST>", str(dest))], capture_output=True, text=True,
+                             cwd=tmp_path, env=env)
+        assert run.returncode == 0, (cmd, run.stderr)
+    bundles = home / "ops/site-private/bundles/home/src/sh"
+    assert (bundles / "all.bundle").is_file() and (bundles / "all.bundle.shallow").is_file(), list(home.rglob("*.bundle*"))
+    assert subprocess.run(["git", "clone", "-q", str(bundles / "all.bundle"), str(tmp_path / "plain")], env=GIT_ENV,
+                          capture_output=True).returncode != 0  # the premise: the bundle alone cannot be cloned
+    git(tmp_path, "init", "-q", "--bare", "restored")
+    shutil.copy(bundles / "all.bundle.shallow", tmp_path / "restored" / "shallow")
+    git(tmp_path / "restored", "fetch", "-q", str(bundles / "all.bundle"), "refs/*:refs/*")
+    assert git(tmp_path / "restored", "log", "--format=%s", "main").split() == ["c.txt"]
+    full = make_repo(tmp_path / "full")  # a checkout that is not shallow gets no extra command
+    assert scan_one(mod, full)["shallow"] is False

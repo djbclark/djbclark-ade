@@ -749,8 +749,14 @@ def render(d):
             # a `Home`, so the shell expands the `~`: a plain string would be quoted whole and the bundle written into a
             # directory named `~` below the working directory, inside the checkout it preserves (adversary round 62 on PR 27)
             bd = Home("~/ops/site-private/bundles/") + ck.removeprefix("checkouts/")
-            cmd.append(shcode("mkdir -p {} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create {} --all", bd, raw_p, bd + "/all.bundle")
-                       + " or add a remote and `git push -u origin <branch>`")
+            bundle_cmd = shcode("mkdir -p {} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create {} --all", bd, raw_p, bd + "/all.bundle")
+            if c.get("shallow"):
+                # `bundle create` drops `<common>/shallow`, so the parents of the boundary commits are in no file and
+                # `git clone all.bundle` fails (`Could not read <parent>`): keep the file beside it and say how to restore
+                # (probed 2026-10-24: `git init --bare`, the file copied in as `shallow`, `git fetch all.bundle 'refs/*:refs/*'`)
+                bundle_cmd += (" and " + shcode("\"$GCP\" -- \"$(git -C {} rev-parse --path-format=absolute --git-path shallow)\" {}", raw_p, bd + "/all.bundle.shallow")
+                               + " (shallow checkout: `git clone` of the bundle alone fails; restore with `git init --bare R`, copy `all.bundle.shallow` to `R/shallow`, then `git -C R fetch <bundle> 'refs/*:refs/*'`)")
+            cmd.append(bundle_cmd + " or add a remote and `git push -u origin <branch>`")
             need = "**yes**: only copy; hosting or bundle destination"
         elif ("orphan branch" in c["flags"] or "unpushed commits" in c["flags"]) and head_ahead:
             head_row = True

@@ -2058,6 +2058,9 @@ def scan_record(path: Path, remote: bool, fetch: bool = False) -> dict:
         "local_only_tags": local_only_tags,
         "local_only_branches_uncounted": branches_uncounted,
         "has_origin": has_origin,
+        # a `<common>/shallow` file: `bundle create` drops it, so a bundle of this checkout cannot be cloned until the
+        # file is put back (the doc's no-origin row keeps it beside the bundle; Codex 4367121323, P2)
+        "shallow": common is not None and os.path.lexists(common / "shallow"),
         # whatever the mode: the capture plan must never print a push for such a url (adversary round 39: the
         # `not queried` flag is `--remote`-only, and a default scan still got push rows); the url itself is in no record
         "origin_credential": bool(credential),
