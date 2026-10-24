@@ -1302,21 +1302,26 @@ def hermes_lock_path(sid):
 
 def hermes_lock(sid):
     """The open, exclusively locked 0600 lock file of conversation SID (the turn's child inherits it), or None when a
-    relayed turn holds it. A prune can unlink the file between the open and the lock: then what was locked is no
-    longer the path, so the open is repeated."""
+    relayed turn holds it. A prune can unlink the file between the open and the lock, and it holds that file's lock
+    while it does: so whether the lock was taken or refused, a file that is no longer the path was not the conversation's
+    lock, and the open is repeated."""
     path = hermes_lock_path(sid)
     for _ in range(5):
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            taken = True
         except OSError:
+            taken = False
+        try:
+            current = os.stat(path).st_ino == os.fstat(fd).st_ino
+        except OSError:
+            current = False
+        if current:
+            if taken:
+                return fd
             os.close(fd)
             return None
-        try:
-            if os.stat(path).st_ino == os.fstat(fd).st_ino:
-                return fd
-        except OSError:
-            pass
         os.close(fd)
     return None
 

@@ -1449,6 +1449,31 @@ class TestHermesRoute(Harness):
         self.assertEqual(rc, 0)
         self.assertEqual(lock_path.read_text().strip(), "4242")    # the pid went into the file at the path
 
+    def test_a_refused_lock_on_an_inode_a_prune_just_unlinked_is_retried_not_reported_as_a_running_turn(self) -> None:
+        """R3-L6c (adversary L3): the prune holds the old inode's flock until it has unlinked it; the open that lost that race
+        saw a refused flock, but nobody's turn runs."""
+        real, lock_path = relay.fcntl.flock, relay.HERMES_DIR / f"{self.HSID}.lock"
+        pruner: list[int] = []
+
+        def flock(fd: int, op: int) -> None:
+            if not pruner:
+                pruner.append(os.open(lock_path, os.O_WRONLY))
+                real(pruner[0], relay.fcntl.LOCK_EX | relay.fcntl.LOCK_NB)    # the prune's own lock on the stale inode
+                lock_path.unlink()
+            return real(fd, op)
+        self.addCleanup(lambda: [os.close(p) for p in pruner])
+        with mock.patch.object(relay.fcntl, "flock", flock):
+            rc, _, err, calls = self.run_hermes(self.hsess(), out="ok")
+        self.assertEqual((rc, len(calls)), (0, 1), err)
+        self.assertNotIn("still running", err)
+
+    def test_a_refused_lock_on_the_current_file_is_still_a_running_turn(self) -> None:
+        relay.HERMES_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        holder = relay.hermes_lock(self.HSID)
+        assert holder is not None
+        self.addCleanup(os.close, holder)
+        self.assertIsNone(relay.hermes_lock(self.HSID))
+
     def test_the_refusal_names_the_pid_of_the_turn_that_holds_the_lock(self) -> None:
         """R3-L6d."""
         import fcntl
