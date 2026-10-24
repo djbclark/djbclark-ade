@@ -279,6 +279,7 @@ def test_helm_shows_a_blocked_paseo_agent_as_an_open_permission_item_it_cannot_p
     assert "AskUserQuestion: 1. yes / 2. no" in text and "paseo permit" in text and "helm.py keys" not in text
     with pytest.raises(SystemExit) as e:
         helm.cmd_keys(type("A", (), {"id": it["id"], "key": ["1"]}), {})
+    assert "allow|deny <agent> -- <request id>" in str(e.value)    # the same `--` the card text carries: an id read as an option is "approve every card"
 
 
 def test_relay_refuses_a_paseo_agent_with_a_pending_card_and_names_the_paseo_ui(paseo):
