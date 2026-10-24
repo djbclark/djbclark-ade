@@ -296,12 +296,34 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    with `gh api ... --paginate > f.json`, then `jq -s --arg t ... f.json`; the adversary appends its own `## Round NN`
    section to its report file, so the lead must not append a second copy (rounds 43 and 44 were deduplicated).
 4. **PR 29 queued findings** (hypothetical aiuse payload shapes; `bin/claude-quota-guard`): (a) a windowless live
-   row bound by the 5-hour window leaves the snapshot's weekly unjudged (adversary round 7); (b) a detailed
+   row bound by the 5-hour window leaves the snapshot's weekly unjudged (adversary round 7); (b) **DONE 2026-10-23** (Codex 4361062506;
+   `decide` now builds a summary window for every windowless row beside the detailed ones, then the Fable supplement; tests `test_s2_*`) a detailed
    default row plus a summary-only Fable row: synthesize a window for every summary-only row (Codex pass 6);
-   (c) several snapshot accounts with Fable windows: age only the account `_lowest()` picked (Codex pass 6);
+   (c) **DONE 2026-10-23** (Codex 4361062518; only the snapshot row holding the `_lowest()` Fable window ages the decision, both paths; tests `test_s1_*`)
+   several snapshot accounts with Fable windows: age only the account `_lowest()` picked (Codex pass 6);
    (d) the `p3` concurrency test's 0.2 s lock budget can flake under load, and the hook's worst case is 0.2 s
    against the docstring's "well under 100 ms" (round 10); (e) the hook's unreadable line (round 9) and the
-   `live_only` `fed` rule were tightened in fix 8; re-check after (b).
+   `live_only` `fed` rule were tightened in fix 8; re-check after (b) (2026-10-23: (b) landed, `fed` covers both paths).
+   (f) **PR 36 adversary round 3, queued 2026-10-24** (LOW, hypothetical shapes; head e10c705): (f1) a summary row's
+   reset and pace come only from the snapshot, never from the live detailed twin beside it
+   (`bin/claude-quota-guard:427-428`, `display = snap_windows` is the only twin source passed to `_summary_window`).
+   Input: a detailed default row (age 10, weekly 80% reset 2026-10-28, 5-hour 90%), a summary row
+   (`headroom_percent` 50, `binding_window` "Claude Code weekly", age 10, no `available_at`), and a snapshot account at
+   age 18000 holding weekly 70% reset 2026-10-28: `rows_age_s` is 18000 (stale, watch, collector-down ping) although a
+   10 s old row has the same reset; with no snapshot and aiuse rc 3 `weekly_resets_at` and `resets_at` are None
+   (the advice loses its reset phrase), which the pre-PR mixed shape reported. Suggested fix:
+   `_summary_window(r, claude_windows(rows) or display)`, or try the live detailed twin first and fall back to the
+   snapshot, so only a snapshot twin that was really needed ages the decision. (f2) a summary-only Fable row's
+   `headroom_percent` is in shared-weekly units in aiuse 3.10.0 (`analysis/selfdescribe.py:827-854`:
+   `effective_headroom(binding)`, scaled by `max_share_of_parent_percent`, `headroom_basis: "shared_weekly"`; live
+   2026-10-24 20:03Z: row headroom 40.0 while the Fable window shows `remaining_percent` 80.0, share 50), but
+   `_summary_window` (:360-361) relabels any `pool_family: "fable"` row's headroom as the Fable cap's remaining.
+   Input: a detailed default row plus a summary-only Fable row with headroom 12.5 and basis shared_weekly (real Fable
+   cap 25% left): `fable_left` 12.5, level `watch`; the true value is above `watch_fable` 15, so `ok`; a Fable row
+   bound by the shared weekly (headroom 20) gives `fable_left` 20 while the real cap is 80. Errors are on the cautious
+   side and real aiuse sends `windows[]` today; the live-only path had this before the PR. Suggested fix: when
+   `headroom_basis == "shared_weekly"` or `binding_window` is not the Fable label, classify by `binding_window` and do
+   not force the Fable label (or document in the docstring that the summary Fable value is in shared-weekly units).
 5. **PR 30 queued findings** (`bin/self-slash`, adversary round 3): `SELF_SLASH_SUCCESSOR_SETTLE` accepts a leading
    zero (`08`/`09`, an octal arithmetic error after `paseo run`) and has no upper bound (cap 600); workspace proof
    compares realpaths case-sensitively, so on APFS a case-variant sibling row can let an empty local workspace be
@@ -1705,12 +1727,14 @@ OPEN (adversary fix text kept; not implemented, 2026-10-24):
    flock fails). If such a pid comes before any other agent, the relay is inside a relayed turn. The hop count is the number of such ancestors, and the sender is
    `hermes <sid[-8:]>` with the sid taken from the lock file name. This also removes the forgery residual of L-C (a process inside the turn can unset `RELAY_HOPS`
    or set `RELAY_HOP_PARENT` to a pid outside its ancestry; the L-C fix only stops a forged *name*). The `RELAY_HOPS` env markers can then become a cross-check or go.
-2. **L-D, the pane lock's hash can be missed while the holder releases (LOW).** `_flock` truncates the file in `finally` before `os.close` and `pane_sending` reads it
+2. **L-D, the pane lock's hash can be missed while the holder releases (LOW). FIXED 2026-10-24 (#49):** `pane_sending` returns None for an empty file after its retries and `route_pane` asks for the lock again (`PANE_LOCK_ASKS`, 5 times) before it skips; test `test_a_holder_that_releases_while_its_hash_is_unreadable_is_asked_again_not_skipped_to_the_socket`, mutant checked. Original finding: `_flock` truncates the file in `finally` before `os.close` and `pane_sending` reads it
    five times over 100 ms. If B's non-blocking flock fails while A holds the lock, and A then truncates and closes, B reads an empty file, `pane_sending` returns False,
    B returns "skip" and goes to `route_socket`, which has no check for an unproven entry: A's text, already typed and recorded, arrives twice. The same happens if A
    has not written its hash within 100 ms of taking the lock (a loaded machine). Fix: when `pane_sending` sees an empty file after its retries, try the pane lock once
    more (blocking briefly or polling). If the lock is now free, take the normal path under it, where `pane_send`'s P5 check sees A's entry; do not skip to the socket.
    (B's "stop ... do not resend" while A's own routes all fail tells B's caller not to resend something A's caller was told was not sent: acceptable, the same text.)
 3. **L-F, the CHANGELOG lines for the queued lows carry no PR number** (code-review rule 10): fixed 2026-10-24, the lines end with PR 40.
-4. Accepted residual (L-A, related): `permit allow` picks the first card whose `id === reqId || id.startsWith(reqId)` in list order, so a request id that is a proper
+4. Accepted residual (L-D, adversary B2, 2026-10-24): a holder that proved delivery (`forget`) or a non-claude pane leaves no entry, so a relay of the same text that wins the
+   lock inside the release window types it a second time (before L-D a non-claude pane ended "not sent" there). It is what a relay arriving just after the holder does anyway.
+5. Accepted residual (L-A, related): `permit allow` picks the first card whose `id === reqId || id.startsWith(reqId)` in list order, so a request id that is a proper
    prefix of an earlier card's id would answer that other card; with UUID or `permission-<uuid>` ids it cannot happen.
