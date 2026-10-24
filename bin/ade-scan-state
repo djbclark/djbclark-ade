@@ -858,8 +858,10 @@ def git_dir_foreign(path: Path) -> str | None:
             if not os.path.samefile(gitdir, os.path.join(common, "worktrees", gitdir.name)):
                 return SKIP_GIT_DIR_FOREIGN
         if os.path.lexists(gitdir / "gitdir"):  # (a)
-            back = _read_text(gitdir / "gitdir").rstrip("\r\n")
-            if back and os.path.samefile(_joined(gitdir, back), dotgit):
+            back = _joined(gitdir, _read_text(gitdir / "gitdir").rstrip("\r\n")).rstrip("/")
+            # the DIRECTORY the back-pointer names, which cannot be hard-linked: `samefile` on the gitfile itself compares
+            # inodes, so a hard link of a real worktree's `.git` would pass (adversary round 67, LOW 1)
+            if os.path.basename(back) == ".git" and os.path.samefile(os.path.dirname(back), path):
                 return None
         if os.path.lexists(gitdir / "config"):  # (b)
             value = _config_worktree(_read_text(gitdir / "config"))

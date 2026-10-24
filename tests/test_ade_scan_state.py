@@ -4297,6 +4297,23 @@ def test_a_git_dir_that_points_back_to_the_checkout_stays_scanned_and_a_stale_ba
         assert mod.git_dir_foreign(sep.resolve()) == mod.SKIP_GIT_DIR_FOREIGN
 
 
+def test_a_hard_linked_gitfile_does_not_point_back_to_the_checkout_it_sits_in(tmp_path):
+    """Adversary round 67 on PR 27, LOW 1: `evil/.git` hard-linked to a linked worktree's gitfile has the worktree's inode,
+    so `samefile(<the gitdir file's target>, evil/.git)` held and every git call, `--fetch` included, ran in the
+    victim's store. The back-pointer's directory is compared instead."""
+    mod = load()
+    _, work, _ = make_pushed_checkout(tmp_path)
+    wt = tmp_path / "wt"
+    git(work, "worktree", "add", "-q", "-b", "wt", str(wt))
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    os.link(wt / ".git", evil / ".git")
+    assert os.path.samefile(wt / ".git", evil / ".git")
+    assert mod.git_dir_foreign(wt.resolve()) is None  # the real worktree is untouched
+    assert mod.git_dir_foreign(evil.resolve()) == mod.SKIP_GIT_DIR_FOREIGN
+    assert mod.scan_checkout(evil.resolve(), remote=False)["verdict"] == mod.SKIP_GIT_DIR_FOREIGN
+
+
 def test_a_symlink_anywhere_inside_objects_refs_or_logs_is_listed_on_a_skipped_row_and_a_failed_walk_warns(tmp_path, monkeypatch):
     """Adversary round 66 on PR 27, LOW 1: only the top-level `objects`, `refs` and `packed-refs` were checked, so a moved
     and linked `objects/pack`, `refs/heads` or `logs` (the stash reflog) was archived as a link with nothing said."""
