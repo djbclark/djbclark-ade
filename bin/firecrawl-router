@@ -363,13 +363,18 @@ def _dev_int(v, default: int) -> int | None:
     return int(v) if isinstance(v, str) and v.isascii() and v.isdigit() and len(v) <= 6 else None
 
 
-def dev_public_hits(endpoint: str, doc: dict | None) -> int:
-    """Items a caller could be shown: a code hit counts only in a repository GitHub reports as not private
-    (issue queries carry is:public), so whether the loosened retry runs never depends on private content."""
-    items = [i for i in (doc or {}).get("items") or [] if isinstance(i, dict)]
-    if endpoint != "code":
-        return len(items)
-    return sum(1 for i in items if isinstance(i.get("repository"), dict) and i["repository"].get("private") is False)
+def dev_found(job: str, doc: dict | None, wanted: set) -> int:
+    """Hits a caller could be shown for this job: the ones `_shape` keeps (a code hit only in a repository GitHub reports as
+    not private) and whose kind was asked for. The fewer-terms retry runs when this is 0, so it never depends on private
+    content (round 3) nor on public files of a kind the caller did not request (round 4)."""
+    n = 0
+    for item in (doc or {}).get("items") or []:
+        try:
+            r = DevSearch._shape(job, item, 1) if isinstance(item, dict) else None
+        except Exception:  # noqa: BLE001 - an item of an unexpected shape is no hit
+            r = None
+        n += bool(r and r["type"] in wanted)
+    return n
 
 
 def parse_dev_request(method: str, path: str, body: bytes | None) -> tuple[dict | None, str]:
@@ -512,8 +517,8 @@ class DevSearch:
             return GHReply(status, error="not JSON")
         return GHReply(status, doc if isinstance(doc, dict) else None)
 
-    def _query(self, endpoint: str, terms: list[str], scope: str, p: dict, per_page: int, deadline: float,
-               token: str) -> GHReply:
+    def _query(self, job: str, endpoint: str, terms: list[str], scope: str, p: dict, per_page: int, deadline: float,
+               token: str, wanted: set) -> GHReply:
         extra = " ".join([scope] + [f"repo:{r}" for r in p["repos"]] + ([f"language:{p['language']}"] if p["language"] else []))
         reply = None
         for i, attempt in enumerate((terms, dev_loosen(terms))):
@@ -533,7 +538,7 @@ class DevSearch:
                 r = GHReply(200, {"items": []})
             if reply is None or r.status == 200:  # a failed retry never replaces an empty 200
                 reply = r
-            if r.status != 200 or dev_public_hits(endpoint, r.doc):  # private-only hits count as nothing found
+            if r.status != 200 or dev_found(job, r.doc, wanted):  # private-only or unrequested-kind hits count as nothing found
                 break
         return reply or GHReply(0, error="no terms")
 
@@ -569,7 +574,7 @@ class DevSearch:
         def run(name: str) -> None:
             endpoint, scope = jobs[name]
             try:
-                shared[name] = self._query(endpoint, terms, scope, p, per_page, deadline, token)
+                shared[name] = self._query(name, endpoint, terms, scope, p, per_page, deadline, token, wanted)
             except Exception as e:  # noqa: BLE001 - one failed rung, never a crashed request
                 shared[name] = GHReply(0, error=type(e).__name__)
 

@@ -1094,6 +1094,19 @@ class DeveloperSearchTest(unittest.TestCase):
         self.assertEqual([r["id"] for r in doc["results"]], ["doc:o/lib:docs/pub.md"])
         self.assertEqual(sum(1 for p, _, _ in self.gh.calls if p.endswith("/code")), 2)
 
+    def test_hits_of_an_unrequested_kind_do_not_block_the_fewer_terms_retry(self):
+        # types=["doc"]: a first page of public source files finds nothing the caller asked for, so the retry must run
+        def handler(endpoint, q):
+            if endpoint != "code":
+                return 200, {}, {"items": []}
+            if "beta" in q:
+                return 200, {}, {"items": [gh_file("o/lib", "src/x.go", "code only")]}
+            return 200, {}, {"items": [gh_file("o/lib", "docs/guide.md", "the doc")]}
+        self.start(handler)
+        _, _, doc = self.call("POST", "/v2/search/developer", {"query": "alpha beta gamma delta", "types": ["doc"]})
+        self.assertEqual([r["id"] for r in doc["results"]], ["doc:o/lib:docs/guide.md"])
+        self.assertEqual(sum(1 for p, _, _ in self.gh.calls if p.endswith("/code")), 2)
+
     def test_a_list_of_repos_is_refused(self):
         self.start(self.normal)
         status, _, err = self.call("POST", "/v2/search/developer", {"query": "state", "repos": ["o/lib", "o/other"]})
