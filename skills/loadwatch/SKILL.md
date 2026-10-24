@@ -56,7 +56,9 @@ Chain: `load-spike-monitor-t` (`/baton load-spike-monitor-t`). It is a side-work
    but kills your process and drops the turn in flight** (2026-10-23, read from the daemon source; app quit and
    app updates leave this machine's daemon alone). You come back idle, and the next `paseo send` (the next
    incident) resumes you, so there is nothing to re-register. Keep state on disk and re-derive it on every
-   wake. A line sent while the daemon is down is lost (`send_to` makes one attempt; Hermes still gets the
+   wake. A line sent while the daemon is down is lost unless the gap is short (`send_to` retries a
+   `paseo send` that fails naming DAEMON_UNREACHABLE, CONNECTION_LOST, NOT_READY or DAEMON_NOT_RUNNING twice, 5 s apart,
+   inside 30 s, 2026-10-23; the relay channel and other failures get one attempt; Hermes still gets the
    ping), so after any restart you see, read `load-watch incidents -n 5` for what you missed. Never run
    `paseo restart` yourself while other agents are working.
 

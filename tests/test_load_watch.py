@@ -1,6 +1,7 @@
 """bin/load-watch: the ci-only registry `bg` reads, the sample window, and incident acks. No launchd, no relay."""
 import importlib.machinery
 import importlib.util
+import itertools
 import json
 import os
 import subprocess
@@ -378,9 +379,88 @@ def test_watcher_set_replaces_and_tells_the_old_one(tmp_path):
     r = run_env(tmp_path, {"PASEO_AGENT_ID": "new", "PASEO_CLI": str(cli)}, "watcher", "set", "--name", "B")
     assert r.returncode == 0 and "replaced paseo old" in r.stdout and "told the old watcher" in r.stdout
     sent = [json.loads(ln) for ln in log.read_text().splitlines()]
-    assert len(sent) == 1 and sent[0][:6] == ["send", "old", "--no-wait", "--behavior", "steer", sent[0][5]]
-    assert "no longer the load watcher" in sent[0][5] and "B took over" in sent[0][5]
+    assert len(sent) == 1 and sent[0][:6] == ["send", "old", "--no-wait", "--json", "--behavior", "steer"]
+    assert "no longer the load watcher" in sent[0][-1] and "B took over" in sent[0][-1]
     assert json.loads((tmp_path / "state" / "watcher.json").read_text())["target"] == "new"
+
+
+def fake_send(monkeypatch, lw, results):
+    """Fake subprocess.run and time.sleep for send_to: `results` is a list of (rc, stdout), the last one repeats.
+    Returns (argvs, pauses)."""
+    argvs, pauses = [], []
+
+    def run(argv, **kw):
+        argvs.append(argv)
+        rc, out = results[min(len(argvs), len(results)) - 1]
+        return subprocess.CompletedProcess(argv, rc, out, "")
+
+    monkeypatch.setattr(lw.subprocess, "run", run)
+    monkeypatch.setattr(lw.time, "sleep", lambda s: pauses.append(s))
+    return argvs, pauses
+
+
+PASEO_W = {"channel": "paseo", "target": "agent-a", "paseo_cli": "paseo-fake"}
+UNREACHABLE = '{"error": {"code": "DAEMON_UNREACHABLE", "message": "Cannot connect to daemon"}}'
+
+
+def test_send_to_first_attempt_succeeds_without_retry(monkeypatch):
+    lw = load_module()
+    argvs, pauses = fake_send(monkeypatch, lw, [(0, "{}")])
+    assert lw.send_to(PASEO_W, "hi") is True
+    assert len(argvs) == 1 and not pauses
+    assert argvs[0][:6] == ["paseo-fake", "send", "agent-a", "--no-wait", "--json", "--behavior"]
+
+
+def test_send_to_retries_a_restart_code_then_succeeds(monkeypatch):
+    lw = load_module()
+    for code in ("DAEMON_UNREACHABLE", "CONNECTION_LOST", "NOT_READY"):
+        out = '{"error": {"code": "%s"}}' % code
+        argvs, pauses = fake_send(monkeypatch, lw, [(1, out), (0, "{}")])
+        assert lw.send_to(PASEO_W, "hi") is True
+        assert len(argvs) == 2 and pauses == [lw.SEND_RETRY_PAUSE_S]
+
+
+def test_send_to_gives_up_after_two_retries(monkeypatch):
+    lw = load_module()
+    argvs, pauses = fake_send(monkeypatch, lw, [(1, UNREACHABLE)])
+    assert lw.send_to(PASEO_W, "hi") is False
+    assert len(argvs) == 1 + lw.SEND_RETRIES == 3 and len(pauses) == 2
+    assert lw.SEND_RETRIES * lw.SEND_RETRY_PAUSE_S < lw.SEND_RETRY_BUDGET_S <= 30
+
+
+def test_send_to_does_not_retry_other_failures(monkeypatch):
+    lw = load_module()
+    argvs, pauses = fake_send(monkeypatch, lw, [(1, '{"error": {"code": "SEND_FAILED", "message": "Agent not found"}}')])
+    assert lw.send_to(PASEO_W, "hi") is False
+    assert len(argvs) == 1 and not pauses
+
+
+def test_send_to_retry_stays_inside_the_budget(monkeypatch):
+    lw = load_module()
+    argvs, pauses = fake_send(monkeypatch, lw, [(1, UNREACHABLE)])
+    clock = itertools.chain([0.0], itertools.repeat(28.0))  # the first attempt took 28 s: no pause fits in 30 s
+    monkeypatch.setattr(lw.time, "monotonic", lambda: next(clock))
+    assert lw.send_to(PASEO_W, "hi") is False
+    assert len(argvs) == 1 and not pauses
+
+
+def test_send_to_timeout_and_oserror_do_not_escape(monkeypatch):
+    lw = load_module()
+    pauses = []
+    monkeypatch.setattr(lw.time, "sleep", lambda s: pauses.append(s))
+    for exc in (subprocess.TimeoutExpired("paseo", 60), OSError("gone")):
+        def run(argv, exc=exc, **kw):
+            raise exc
+        monkeypatch.setattr(lw.subprocess, "run", run)
+        assert lw.send_to(PASEO_W, "hi") is False
+    assert not pauses
+
+
+def test_send_to_relay_channel_is_one_attempt_even_on_a_restart_code(monkeypatch):
+    lw = load_module()
+    argvs, pauses = fake_send(monkeypatch, lw, [(1, UNREACHABLE), (0, "")])
+    assert lw.send_to({"channel": "relay", "target": "t"}, "hi") is False
+    assert len(argvs) == 1 and not pauses and "relay.py" in argvs[0][1] and "--json" not in argvs[0]
 
 
 def test_watcher_set_needs_a_session(tmp_path):

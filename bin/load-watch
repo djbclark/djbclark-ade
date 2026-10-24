@@ -46,7 +46,8 @@ Load watcher (djbclark, 2026-10-20): `watcher set` registers one agent session (
 a Paseo agent by `paseo send`, anything else by relay.py). Every incident, every sustained load no agent
 explains, and every guard trip is also sent to it, so a session with a model investigates. One record
 (watcher.json): `set` replaces the last watcher and tells it so. A failed send is stamped `last_fail`, never
-fatal; the watcher is skipped for an incident only when it is the blamed session and the relay reached it.
+fatal (2026-10-23: a Paseo send that fails naming DAEMON_UNREACHABLE, CONNECTION_LOST, NOT_READY or DAEMON_NOT_RUNNING,
+a daemon restart, is retried twice, 5 s apart, inside 30 s; any other failure and the relay channel get one attempt); the watcher is skipped for an incident only when it is the blamed session and the relay reached it.
 Unexplained sustained load reaches the watcher at most hourly (WATCHER_NOCPU_S), Hermes every LW_COOLDOWN_H.
 
 Compressor churn (2026-10-23, djbclark's memory-thrash follow-up): `admit` only refuses to START work while the
@@ -553,9 +554,30 @@ def save_watcher(w):
     tmp.replace(STATE_DIR / "watcher.json")
 
 
+# A Paseo daemon restart makes `paseo send` fail for a few seconds with a coded error (2026-10-23, probed with
+# `--json` against a closed port and an empty home). The plain-text error does NOT print the code, so the argv
+# asks for --json. DAEMON_NOT_RUNNING is what a local home reports in the restart gap (added beside the three
+# the brief named).
+SEND_TRANSIENT = ("DAEMON_UNREACHABLE", "CONNECTION_LOST", "NOT_READY", "DAEMON_NOT_RUNNING")
+SEND_RETRIES = 2          # retries after the first attempt, paseo channel only
+SEND_RETRY_PAUSE_S = 5.0
+# send_to runs inside the 20 s launchd sample (launchd never overlaps a StartInterval job, so a long call only
+# delays the next sample). A retry starts only while the whole call stays inside this budget; the first attempt
+# keeps its old 60 s timeout, so the worst case is max(60 s, ~SEND_RETRY_BUDGET_S).
+SEND_RETRY_BUDGET_S = 30.0
+
+
+def send_transient(r):
+    """True when a failed `paseo send` names a daemon-restart code in its output."""
+    out = f"{r.stdout or ''}\n{r.stderr or ''}"
+    return any(code in out for code in SEND_TRANSIENT)
+
+
 def send_to(w, text):
     """One line into the watcher's session: `paseo send` for a Paseo agent (relay.py cannot reach one: no pane),
-    else relay.py. True only when the channel says it delivered or queued it."""
+    else relay.py. True only when the channel says it delivered or queued it. The paseo channel retries up to
+    SEND_RETRIES times, SEND_RETRY_PAUSE_S apart and inside SEND_RETRY_BUDGET_S, but only when the failure names
+    a SEND_TRANSIENT code (the daemon is restarting); relay.py gets one attempt."""
     if w["channel"] == "paseo":
         cli = w.get("paseo_cli") or "paseo"
         # PASEO_AGENT_ID unset so the daemon does not wrap it as agent-to-agent text; steer so a running turn
@@ -563,14 +585,26 @@ def send_to(w, text):
         env = {k: v for k, v in os.environ.items() if k not in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD")}
         if w.get("paseo_home"):
             env["PASEO_HOME"] = w["paseo_home"]
-        argv = [cli, "send", w["target"], "--no-wait", "--behavior", "steer", text]
+        argv = [cli, "send", w["target"], "--no-wait", "--json", "--behavior", "steer", text]
+        retries = SEND_RETRIES
     else:
         env, argv = None, [sys.executable, str(SF / "relay.py"), w["target"], text]
-    try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=env)
-        return r.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+        retries = 0
+    started = time.monotonic()
+    for attempt in range(retries + 1):
+        try:
+            left = 60 if attempt == 0 else min(60.0, SEND_RETRY_BUDGET_S - (time.monotonic() - started))
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=max(left, 1.0), env=env)
+            if r.returncode == 0:
+                return True
+            transient = send_transient(r)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        if not transient or attempt >= retries \
+                or time.monotonic() - started + SEND_RETRY_PAUSE_S >= SEND_RETRY_BUDGET_S:
+            return False
+        time.sleep(SEND_RETRY_PAUSE_S)
+    return False
 
 
 def tell_watcher(text, dry, skip=()):
