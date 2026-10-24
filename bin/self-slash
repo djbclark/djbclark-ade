@@ -110,9 +110,10 @@
 # puts its text on the input line, which reads as a draft, and the command is refused
 # unsent after 900 s (2026-10-18: a /reload-plugins meant to unload agent-radar never
 # ran, and the session kept its scans for 2 h). Check the log before saying it ran.
-# herdr: after the send, Enter is pressed again (up to 3 times) while the command is still
-# on the input line; if it never leaves the line the waiter exits 8 and logs "NOT confirmed
-# run" rather than typing it a second time (2026-10-20).
+# herdr and Orca: after the send, Enter is pressed again (up to 3 times) while the command is
+# still on the input line; if it never leaves the line the waiter exits 8 and logs "NOT confirmed
+# run" rather than typing it a second time (2026-10-20; Orca branch added 2026-10-24, the bare
+# `orca terminal send --enter` form not yet seen live).
 # Runs detached (nohup) so it survives the Bash tool returning; the log
 # is ~/.local/state/self-slash.log.  First verified 2026-10-09 (ClaudeHelm, herdr);
 # Orca backend verified 2026-10-09.
@@ -448,7 +449,19 @@ send_text() {
     esac
     return 0
   else
-    orca terminal send --terminal "$pane" --text "$text" --enter --wait-submit 10 --json
+    orca terminal send --terminal "$pane" --text "$text" --enter --wait-submit 10 --json || return 1
+    # Same check as herdr: the receipt says the text was accepted, not that it ran, and the
+    # command can stay on the input line. Press Enter again while it is still there; never retype.
+    for _ in 1 2 3; do
+      sleep 2
+      case "$(classify_prompt)" in "$text"*) orca terminal send --terminal "$pane" --enter --json >/dev/null 2>&1 || true ;; *) return 0 ;; esac
+    done
+    sleep 2
+    case "$(classify_prompt)" in "$text"*)
+      echo "$(gdate '+%F %T') $host $pane: $text is still on the input line after 3 Enters; NOT confirmed run, left for the operator"
+      exit 8;;
+    esac
+    return 0
   fi
 }
 

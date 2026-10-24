@@ -5,6 +5,12 @@ filed** — kept here because the write-ups carry evidence and measurements the
 issue text summarises:
 
 - #1 → [NanoNets/Graft#185](https://github.com/NanoNets/Graft/issues/185)
+  (**fixed upstream, verified 2026-10-24**: installed 0.25.0 and `origin/main`
+  both render `graft · 0 nodes / 0 edges · ✓ synced` for a built-but-empty
+  docs-only repo — `resolveStats` in `src/claude/statusline.ts` falls back to
+  `wiring.json`, and "not built" shows only when the artifact is missing.
+  Checked in a `fix/statusline-empty-built` worktree; no edits needed, nothing
+  merged back.)
 - #2 → [vectorize-io/hindsight#3735](https://github.com/vectorize-io/hindsight/issues/3735)
   (the package `@vectorize-io/hindsight-coding-agents` lives in the
   `vectorize-io/hindsight` repo)
