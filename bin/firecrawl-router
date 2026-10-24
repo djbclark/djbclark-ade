@@ -45,12 +45,12 @@ general search (30/min) bucket until its reset; all buckets closed is a 429 with
 failure a 502. `types` (issue, pull_request, readme, doc), `repos` (ONE owner/name slug), `language`, `k` and `passages` are honoured;
 `sources`, `skills`, `license`, `topic`, `min_stars`, `max_stars`, `archived` and `fork` are a 400. With a
 commercial fallback configured the request goes to the primary and the fallback as before.
-PUBLIC REPOSITORIES, BEST EFFORT: the GITHUB_TOKEN behind it is a classic PAT that can read private repositories and
-this listener has no caller authentication, so issue and PR queries carry `is:public`, a code hit is dropped unless
-GitHub reports its repository as not private, and code search always asks for GitHub's 100-item page. That leaves a
-narrow oracle (docs/threat-model.md item 10); a fine-grained read-only public-repository token under its own
-secretspec name (FIRECRAWL_ROUTER_GITHUB_SECRET) closes it. At most two searches run at once, all inside
-FIRECRAWL_ROUTER_SEARCH_TIMEOUT.
+PUBLIC REPOSITORIES: issue and PR queries carry `is:public`, a code hit is dropped unless GitHub reports its
+repository as not private, and code search always asks for GitHub's 100-item page, because the default token
+(GITHUB_TOKEN) is a classic PAT that can read private repositories and this listener has no caller authentication.
+That leaves a narrow oracle (docs/threat-model.md item 10) which a fine-grained read-only public-repository token
+under its own secretspec name closes: the shared_mcp role sets FIRECRAWL_ROUTER_GITHUB_SECRET to it (2026-10-24).
+At most two searches run at once, all inside FIRECRAWL_ROUTER_SEARCH_TIMEOUT.
 
 Async jobs (crawl, batch scrape, extract) stay on the backend that created
 them: the router remembers job id -> backend and rewrites absolute `url`/`next`
