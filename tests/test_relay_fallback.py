@@ -729,11 +729,39 @@ class TestHardStops(Harness):
         self.assertEqual((rc, self.calls), (1, []))
         self.assertIn("blocked", err)
 
-    def test_working_non_claude_paseo_agent_needs_idle(self) -> None:
+    def test_working_paseo_agent_that_cannot_steer_is_refused_and_nothing_is_sent(self) -> None:
+        # Paseo interrupts and replaces the running turn of a provider without steer (cline, any ACP one): never do that
         relay.paseo_gate = lambda s: None
-        rc, _, err = self.run_main(pasess(agent="codex", status="working"))
-        self.assertEqual(rc, 1)
-        self.assertIn("only idle ones", err)
+        for agent in ("cline", "grok", "antigravity", "paseo", ""):
+            rc, _, err = self.run_main(pasess(agent=agent, status="working"))
+            self.assertEqual((rc, self.calls), (1, []), agent)
+            self.assertIn("cannot steer", err, agent)
+            self.assertIn("interrupt and replace its running turn", err, agent)
+
+    def test_working_paseo_agent_that_can_steer_is_sent_with_steer(self) -> None:
+        relay.paseo_gate = lambda s: None
+        sent: list[str] = []
+        relay.send_paseo = lambda s, text, wait: sent.append(s["agent"]) or "accepted"
+        for agent in ("claude", "codex", "omp", "opencode", "pi"):
+            rc, _, err = self.run_main(pasess(agent=agent, status="working"))
+            self.assertEqual(rc, 0, (agent, err))
+        self.assertEqual(sent, ["claude", "codex", "omp", "opencode", "pi"])
+
+    def test_idle_paseo_agent_of_any_provider_is_sent(self) -> None:
+        relay.paseo_gate = lambda s: None
+        sent: list[str] = []
+        relay.send_paseo = lambda s, text, wait: sent.append(s["agent"]) or "accepted"
+        for agent in ("cline", "grok"):
+            rc, _, err = self.run_main(pasess(agent=agent, status="idle"))
+            self.assertEqual(rc, 0, (agent, err))
+        self.assertEqual(sent, ["cline", "grok"])
+
+    def test_plan_of_a_working_cline_agent_gives_the_reason_not_a_typed_text_message(self) -> None:
+        rc, out, err = self.run_main(pasess(agent="cline", status="working"), "--plan")
+        self.assertEqual((rc, out), (1, ""))
+        self.assertIn("cannot steer", err)
+        self.assertNotIn("typed text", err)
+        self.assertNotIn("TUI", err)
 
     def test_plan_flag_does_not_inspect_or_wait_on_a_paseo_agent(self) -> None:
         rc, out, _ = self.run_main(pasess(), "--plan", "--idle", "30")
@@ -748,6 +776,75 @@ class TestHardStops(Harness):
         rc, _, err = self.run_main(pasess(status="idle"))
         self.assertEqual(rc, 1)
         self.assertIn("no usable paseo CLI", err)
+
+
+class TestPaseoIdPrefix(Harness):
+    """relay.py <hex prefix of a Paseo agent id> (2026-10-23: `relay.py a452eef` said "no session(s) match")."""
+    A = "a452eefe-1128-4932-9c52-3c18b83a0c49"
+    B = "a452eefe-9999-4932-9c52-3c18b83a0c50"
+
+    def row(self, agent_id: str, /, **kw: Any) -> dict[str, Any]:
+        return fleet._rec(**{"id": agent_id[:8], "agent": "cline", "name": "dann", "host": "paseo", "status": "idle",
+                             "chan": ("paseo", agent_id), "paseo": agent_id, "paseo_state": "idle", **kw})
+
+    def run_ident(self, rows: list[dict[str, Any]], ident: str, *argv: str) -> tuple[int, str, str]:
+        relay.fleet.sessions = lambda: rows
+        relay.paseo_gate = lambda s: None
+        relay.send_paseo = lambda s, text, wait: self.calls.append("send " + s["chan"][1]) or "accepted"
+        out, err = io.StringIO(), io.StringIO()
+        old = sys.argv
+        sys.argv = ["relay.py", ident, "hello there friend", "--wait", "2", *argv]
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = relay.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_seven_and_six_character_prefixes_and_the_full_id_resolve_the_agent(self) -> None:
+        for ident in (self.A[:7], self.A[:6], self.A[:13], self.A):
+            self.calls.clear()
+            rc, _, err = self.run_ident([self.row(self.A), self.row("bbbbbbbb" + self.A[8:])], ident)
+            self.assertEqual((rc, self.calls), (0, ["send " + self.A]), (ident, err))
+
+    def test_five_characters_or_a_non_hex_ident_match_nothing(self) -> None:
+        for ident in (self.A[:5], "a452eZ", "ZZZZZZ"):
+            rc, _, err = self.run_ident([self.row(self.A)], ident)
+            self.assertEqual((rc, self.calls), (1, []), ident)
+            self.assertIn("no session(s) match", err)
+
+    def test_a_shared_prefix_is_refused_and_the_candidates_are_listed(self) -> None:
+        rc, _, err = self.run_ident([self.row(self.A), self.row(self.B, name="other")], self.A[:8][:7])
+        self.assertEqual((rc, self.calls), (1, []))
+        self.assertIn("2 sessions match", err)
+        self.assertIn(self.A, err)
+        self.assertIn(self.B, err)
+
+    def test_a_prefix_of_a_session_id_and_of_another_paseo_id_is_an_ambiguity(self) -> None:
+        claude = fleet._rec(id="cccccccc", agent="claude", name="c", sid="a452eefe-0000-4000-8000-000000000000", status="idle")
+        rc, _, err = self.run_ident([claude, self.row(self.A)], "a452eefe-")
+        self.assertEqual((rc, self.calls), (1, []))
+        self.assertIn("2 sessions match", err)
+
+    def test_a_row_reached_by_its_session_id_prefix_and_its_paseo_id_prefix_counts_once(self) -> None:
+        both = self.row(self.A, sid=self.A, agent="claude")
+        rc, _, err = self.run_ident([both], self.A[:9])
+        self.assertEqual((rc, self.calls), (0, ["send " + self.A]), err)
+
+    def test_find_is_total_on_odd_input(self) -> None:
+        rows = [self.row(self.A), self.row(self.B, paseo=None, chan=None), fleet._rec(id="x", name="y", paseo=7)]
+        for ident in ("", "-", "--help", "%%%%%%", "a" * 300, "a452ee\x00", "\n", "a452ee-", "-a452ee", "A452EEFE"):
+            self.assertIsInstance(relay.find(ident, rows), list, ident)
+        self.assertEqual(relay.find("", rows), [])
+
+    def test_a_prefix_cannot_reach_a_row_by_a_route_the_exact_id_is_refused_on(self) -> None:
+        # the gates that stop a send to a full id stop it by prefix: self, archived/ended, a non-idle state, a slash text
+        for kw in ({"self": True}, {"paseo_state": "archived", "status": "ended"}, {"paseo_state": "error", "status": "error"}):
+            rc, _, err = self.run_ident([self.row(self.A, **kw)], self.A[:7])
+            self.assertEqual((rc, self.calls), (1, []), kw)
+            self.assertIn("not sent", err)
+        rc, _, err = self.run_ident([self.row(self.A)], self.A[:7], "--via", "pane")
+        self.assertEqual((rc, self.calls), (1, []), err)    # --via cannot pick a route Paseo rows do not have
 
 
 class TestOtherRoutes(Harness):

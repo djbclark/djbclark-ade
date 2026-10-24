@@ -13,7 +13,9 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
                --behavior steer -- <id> <text>`. The caller's own PASEO_AGENT_ID stays in the child's
                environment, so Paseo labels the message `kind="agent-message"` with the sender; a caller that is
                not a Paseo agent prefixes the text with `[relay from <name>] `. Steer queues the text for the next
-               tool round on Claude; a provider that cannot steer has its running turn replaced. Before any send
+               tool round on Claude, Codex, omp, opencode and pi (fleet.PASEO_STEER_PROVIDERS). Any other provider
+               (cline, grok, ...) cannot steer: Paseo would interrupt and replace its running turn, so a send to one
+               that is working is refused (`--idle S` waits for idle). Before any send
                `paseo agent inspect` must show the agent unarchived, with no pending permission or question, idle
                or running, in the directory its process runs in; any refusal ends the run, whatever `--via` says.
                Delivery is what the daemon acknowledges ("accepted"), upgraded to "delivered" once a Claude
@@ -283,7 +285,7 @@ def sender_tag(listed):
 def send_paseo(s, text, wait):
     """Send TEXT to Paseo agent S: 'delivered' (seen in its Claude transcript), 'accepted' (the daemon took
     it; not a verified delivery) or None (send failed; the reason is printed). --behavior steer queues the text
-    for the next tool round on Claude; a provider that cannot steer has its running turn replaced by
+    for the next tool round on a steer-capable provider; one that cannot steer has its running turn replaced by
     Paseo, so the caller already refused anything that starts a built-in. --no-wait so this returns at once
     (the transcript poll below is the verification); `--` keeps TEXT, whatever it starts with, out of the options."""
     agent = s["chan"][1]
@@ -696,10 +698,32 @@ def forget(sid, text):
             _note(sid, None, "", 0, None)
 
 
+def paseo_steer_refusal(s):
+    """Why a send to Paseo agent S must wait for it to go idle, or None. `paseo send --behavior steer` queues the text
+    only for a provider that can steer (fleet.PASEO_STEER_PROVIDERS); for any other (a cline agent, any ACP one)
+    Paseo interrupts the running turn and starts the text as a new one (steerOrReplaceActiveTurn "replaced",
+    read from the daemon bundle 2026-10-23), which would destroy the work in flight."""
+    prov = (s.get("agent") or "").lower()
+    if s.get("status") == "idle" or prov in fleet.PASEO_STEER_PROVIDERS:
+        return None
+    return (f"its {prov or 'unknown'} Paseo agent is {s.get('status')} and that provider cannot steer: a send would "
+            "interrupt and replace its running turn (--idle S waits for it to go idle)")
+
+
+HEX_PREFIX = re.compile(r"[0-9a-f][0-9a-f-]{5,35}")    # a Paseo agent id prefix: 6 or more characters of a uuid
+
+
 def find(ident, ss):
+    """Sessions IDENT names: exactly (id, name, session id, pane, Paseo agent id), else by prefix: a session id
+    of 8 or more characters, or a hex prefix of 6 or more characters of a Paseo agent id. The prefix kinds are
+    pooled and a row counts once, so two agents sharing a prefix are an ambiguity (the caller refuses it)."""
     hits = [s for s in ss if ident in (s["id"], s["name"], s.get("sid"), s.get("pane"), s.get("paseo"))]
-    if not hits and len(ident) >= 8:
+    if hits:
+        return hits
+    if len(ident) >= 8:
         hits = [s for s in ss if (s.get("sid") or "").startswith(ident)]
+    if HEX_PREFIX.fullmatch(ident):
+        hits += [s for s in ss if all(s is not h for h in hits) and isinstance(s.get("paseo"), str) and s["paseo"].startswith(ident)]
     return hits
 
 
@@ -1279,8 +1303,13 @@ def main():
     if not hits and UUID.fullmatch(a.ident):
         hits = [s for s in [paseo_session(a.ident)] if s]    # a PASEO_AGENT_ID fleet does not list
     if len(hits) != 1:
-        print(f"relay: {'no' if not hits else len(hits)} session(s) match {a.ident!r} (fleet.py list shows ids and names)",
-              file=sys.stderr)
+        if len(hits) > 1:
+            print(f"relay: {len(hits)} sessions match {a.ident!r}; give a longer id or the name. Candidates:", file=sys.stderr)
+            for h in hits[:12]:
+                print(f"  [{h['id']}] {h['agent']} {h['name'] or '-'} {h['status']} {fleet.short(h['cwd'])}"
+                      + (f"  paseo {h['paseo']}" if h.get("paseo") else ""), file=sys.stderr)
+        else:
+            print(f"relay: no session(s) match {a.ident!r} (fleet.py list shows ids and names)", file=sys.stderr)
         return 1
     s = hits[0]
     is_paseo = s.get("host") == "paseo" or (s.get("chan") or (None,))[0] == "paseo"
@@ -1309,9 +1338,9 @@ def main():
     if why:
         print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
         return 1
-    if is_paseo and s["agent"] != "claude" and s.get("status") != "idle":
-        print(f"relay: [{s['id']}] not sent: a {s['agent']} TUI that is {s.get('status')}: only idle ones take typed "
-              "text reliably (--idle S waits for it)", file=sys.stderr)
+    why = is_paseo and paseo_steer_refusal(s)
+    if why:
+        print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
         return 1
     routes = [n for n in plan(s) if not a.via or n == a.via]
     if a.plan:

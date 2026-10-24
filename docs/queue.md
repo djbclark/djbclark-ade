@@ -13,6 +13,55 @@ when they ship (into the relevant doc) or when they're dropped (say why).
    no origin branch (doc section 3.2). The 54.5 GiB `adhoc-2026-10-18/hm-promo-rehearsal/` is scratch; deleting
    it is a later cleanup decision.
 
+## Make better use of Basic Memory (djbclark, direct, 2026-10-23)
+
+djbclark, 2026-10-23: "Add another item to appropriate phrase: Look into making better use of basic memory, I do not
+think we are using it that much/makeing the best use of it, but I could be wrong. Do web searches etc." Status
+2026-10-23: **research and design slice running** (`design-basicmemory`, Opus 5.5 high via omp, web research,
+read-only; brief `~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-basicmemory.md`, report
+`~/.local/state/bigteam/adhoc-2026-10-23/design-basicmemory-report.md`). It measures the store (note counts, growth,
+relations, orphans) and real agent use (MCP tool calls per day from the transcripts), compares with the per-project
+auto-memory files, `docs/handoffs/`, `session-finder` and Hermes memory, surveys what works elsewhere, and recommends
+capture and recall hooks, note schemas and consolidation, plus the phase it belongs in
+([`docs/ade-everywhere-proposal.md`](ade-everywhere-proposal.md) section 8; levels in
+[`docs/ai-memory-landscape.md`](ai-memory-landscape.md)). Nothing is built.
+
+## Heavier use of Hermes worktrees and cow pastures so agents stop stepping on each other (djbclark, direct, 2026-10-23)
+
+djbclark, 2026-10-23: "Also add to appropriate phase if we haven't yet, we should probably be making heavier use of
+hermes worktrees and cow pastures, to avoid agents stepping on each other's toes. Do web searches and consult a
+strong model on this as well." Status 2026-10-23: **design slice running** (`design-isolation`, Opus 5.5 high via
+omp, web research, read-only; brief `~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-isolation.md`,
+report `~/.local/state/bigteam/adhoc-2026-10-23/design-isolation-report.md`). It decides which phase of
+[`docs/ade-everywhere-proposal.md`](ade-everywhere-proposal.md) section 8 this belongs in (or a step before Phase 0),
+what "Hermes worktrees" is (Hermes is never a routing target: whether its worktree mode as a user feature needs a
+ruling), when an agent gets a pasture, worktree or the shared checkout, claim files, and guards in `bin/cow-pasture` /
+`acp-dispatch` against `reset --hard`, `checkout --` and `stash` in a pasture the agent did not create. Motivating
+incident (2026-10-23): a `git reset --hard origin/...` ran inside the phase0-scan pasture and wiped uncommitted edits.
+Nothing is built; the phase placement is added here and to the proposal once the report lands.
+
+## Paseo tabs: how to use them, a `-pt` naming rule, autorename for tabs, and a rename-history store (djbclark, direct, 2026-10-23)
+
+djbclark, 2026-10-23: "I just realized paseo has tabs. Put in the appropriate place and ask a strong model to consider
+how we should use tabs. Add a naming convention for paseo tabs that the titles are all lower case and hyphenated and
+end in -pt (paseo tab) and the names should be short as only around 17 characters are visible even if it is the only
+tab. Also make autorename work with paseo tabs, and just like workspaces we need to track the names of tab to be able
+to find them even if the user changes them in the UI after the autorename etc. This history system should also apply
+to herdr panes, tabs, and workspaces, our sqlite database might be a good place to do this, but again consult with a
+strong model on this problem, and ask me any questions that come up when this feature implementation surfaces."
+Status 2026-10-23: **design slice running** (`design-tabs`, Opus 5.5 high via omp, read-only; brief
+`~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-tabs.md`, report
+`~/.local/state/bigteam/adhoc-2026-10-23/design-tabs-report.md`). Nothing is built.
+
+1. **Tab usage convention**: what lives in a tab, one agent per tab or not, how the skills create, reuse and close tabs.
+2. **Naming rule**: lowercase, hyphenated, ending `-pt`, about 17 visible characters including the suffix; goes into
+   the `autorename` suffix table (`-t` herdr tab, `-p` herdr pane, `-pw` Paseo workspace) and `workspace-layout.md`.
+3. **`autorename` for Paseo tabs**, never overwriting a name the user set.
+4. **Name-history store** for herdr workspaces/tabs/panes and Paseo workspaces/tabs: every name seen or set, who set it,
+   when and the stable id, so a lookup by any historical name or id finds the object and its session after a UI
+   rename; SQLite is the candidate, the design slice decides where and how it is observed.
+5. **Questions for djbclark** come out of the design report (its section 6): relay them as they surface.
+
 ## Make full use of the podman, kev, laya and hyades-docker microVMs (djbclark, direct, 2026-10-23)
 
 djbclark, 2026-10-23: "At an appropriate point, make sure that we make full use of the podman, kev and laya
@@ -173,6 +222,12 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    master (`~/.local/state/bigteam/rework2-codex-triage/codex-triage-report.md`); `bin/pr-wait` (PR
    [34](https://github.com/djbclark/djbclark-ade/pull/34)) gains `merge_ready` and open earlier-head findings, and
    AGENTS.md rule 9 is corrected in the same PR.
+9. **Accepted LOWs and declined findings from the 2026-10-23 rework-2 PRs** (residual, one small PR each when picked up):
+   1. PR 38 adversary round 1 LOWs (acp-dispatch rearm hint): L1 "up to 2.0 h" rounds down for waits of 7201-7379 s (round up); L2 compare wait_timeout with TOOL_TIMEOUT_MAX_S minus two 60 s passes so boundary waits get the re-arm text; L3 usage header (bin/acp-dispatch:186-188) should say the hint always names timeout 7200000 and adds the re-arm rule for long or unlimited waits. Report: ~/.local/state/bigteam/rework2-codex-triage/adv-codex-fix-c-1-report.md
+   2. PR 37 adversary round 1 LOWs (skill-everywhere): in-tree link amplification in canonical mode; check-vs-cp TOCTOU via an outside path component; the inherited SKILL_EVERYWHERE_NO_COPY drop in ade-update:313 is untested. Report: ~/.local/state/bigteam/rework2-codex-triage/adv-codex-fix-b-1-report.md
+   3. PR 32 adversary round 6 LOW: tests/test_bin_modes.py docstring and CHANGELOG say "outside tests/", while the code exempts any tests/ directory at any depth.
+   4. PR 33 adversary round 2 LOW: no test pins that `xhigh` and `max` are accepted as [lead] effort values.
+   5. Declined from the 2026-10-23 Codex triage (threads left open): PR 25 4323896253 (relay.py Claude-derived custom provider ids; refuses safely) and PR 22 4323297397 (acp-dispatch footer slot wildcard; the stripping also cleans a copied footer, which helped on 2026-10-23).
 
 ## Follow-ups from the 2026-10-20 reviews
 
@@ -1474,3 +1529,13 @@ windowed state, so a retyped text could double-deliver; (P2) a `dequeue` is cred
 different queued prompt (a wrong "delivered" report, never a resend); (P3) the non-blocking pane lock returns "stop", which
 also cancels the socket fallback that used to deliver; (P4) two guarded lines have no test (removing a failed temp file; the
 final transcript check after the wait loop); (P5, pre-existing) a herdr pane's entry outlives a transcript change.
+
+## Paseo agents in fleet.py and relay.py: lows after adversary review (2026-10-23)
+
+`fleet.py` lists every non-archived Paseo agent of any provider; `relay.py` takes a hex id prefix of 6+ characters; a working agent whose
+provider cannot steer (cline and every other ACP provider) is refused. Adversary APPROVE (report
+`~/.local/state/bigteam/paseo-listing/adversary-report.md`). Open lows: (L1) three guards no test pins: helm keeping a Claude-on-Paseo
+agent in the attention queue, the 20 s `paseo ls` timeout, the exit-code check and the `--all` wiring; (L2) helm never shows a
+non-Claude Paseo agent that waits on a permission card; (L3) Paseo workspace titles join exact-name matching in `find()`; (L4) a send to
+a working claude/codex/omp agent is replaced, not queued, when the provider declines the steer (compaction): docs reworded 2026-10-23,
+no code guard. The workspace-name ledger (rework lead, brief `~/.local/state/bigteam/workspace-name-ledger/brief.md`) builds on this.
