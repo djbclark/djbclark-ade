@@ -311,7 +311,7 @@ tampered state file can do is still a finding (section 6 item 6).
    checkout** (2026-10-23, Cursor security review and adversary round 66 on PR 27): before any git call, a top-level
    `.git` DIRECTORY holding a `commondir` entry is `skipped: git dir redirected (commondir)`, and a `.git` gitfile is
    scanned only if the git dir it names points back, by a `gitdir` file naming `<checkout>/.git` (a linked worktree's
-   admin dir) or by `core.worktree` in its `config` naming the checkout (`--separate-git-dir`, an absorbed submodule),
+   admin dir) or by `core.worktree` in its `config` naming the checkout (an absorbed submodule; `--separate-git-dir` writes neither, so that layout is skipped, 2026-10-24),
    and a `commondir` in it names a common dir that holds it as `worktrees/<name>`. A gitfile naming another checkout's
    `.git` or a bare repository, a planted admin dir, or one that cannot be read or parsed is `skipped: git dir
    redirected (does not point back to this checkout)`, so no later call, `--fetch` included, can write objects into a

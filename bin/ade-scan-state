@@ -31,7 +31,7 @@ a top-level checkout whose git dir does not point back to it is skipped before a
 the checkout; every later call, `--fetch` among them, would act on the git directory git reads, outside the scanned tree).
 Layouts: a `.git` DIRECTORY holding a `commondir` entry is `skipped: git dir redirected (commondir)`; a `.git` gitfile
 naming a git dir G is accepted only if G points back, by a `gitdir` file naming `<checkout>/.git` (a linked worktree's
-admin dir) or by `core.worktree` in `G/config` naming the checkout (`--separate-git-dir`, an absorbed submodule), and a
+admin dir) or by `core.worktree` in `G/config` naming the checkout (an absorbed submodule writes one; `--separate-git-dir` writes neither back-pointer, so that layout is skipped), and a
 `commondir` in G must name a common dir C with G at `C/worktrees/<name>`; a gitfile naming another checkout's `.git` or a
 bare repository, a planted admin dir, or one that cannot be read or parsed is `skipped: git dir redirected (does not point
 back to this checkout)`, with `git dir -> G` (and `commondir -> C`) in `linked_stores`,
@@ -833,7 +833,7 @@ def git_dir_foreign(path: Path) -> str | None:
       1. `.git` is a DIRECTORY: it holds no `commondir` entry of any kind (git writes none there; SKIP_COMMONDIR).
       2. `.git` is a gitfile naming a git dir G (relative to `path`): G must point back to `path`, by (a) a `gitdir` file
          naming `<path>/.git` (a linked worktree's admin dir), or (b) `core.worktree` in `G/config` naming `path` (what
-         `--separate-git-dir` and an absorbed submodule write). If G holds a `commondir` it must name a common dir C with G
+         an absorbed submodule writes; `--separate-git-dir` writes neither (a) nor (b), git 2.56, so it is skipped). If G holds a `commondir` it must name a common dir C with G
          at `C/worktrees/<name>` (the only place git makes an admin dir), whichever of (a) and (b) holds. A gitfile that
          names another checkout's `.git` or a bare repository, a planted admin dir, and a gitfile or target that cannot be
          read or parsed all fail (SKIP_GIT_DIR_FOREIGN). Nothing here runs git.
