@@ -494,6 +494,13 @@ and `sipb/deepseek-r1:{8b,14b,32b}` (MIT-hosted); paid —
 via LiteLLM :4000 (ClinePass, a reserve pool), and the `deepseek`
 prepaid account. Check `aiuse` for what is left in each. z.ai serves GLM, not DeepSeek.
 
+For the **main loop** (the agent's own substrate, not a dispatched slice), run
+`bin/route_agent.py substrate` at session start: it prints the Flash-primary chain
+(opencode-go ↔ cline, same model, provider failover) with the real rolling-window headroom, and
+`--apply <agent>` does a within-provider switch. A cross-provider move is refused — a live
+cross-provider model switch is what broke the ◈ Dann tab on 2026-10-23; failover is a session-start
+choice, never a live switch.
+
 Rules that fall out of this:
 
 - Exit 0 is not success. Append `echo "<tool> exit=$?"` to each output

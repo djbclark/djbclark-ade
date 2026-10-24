@@ -431,6 +431,16 @@ is composed by load-watch, so lower risk, but fix before it ever sends untrusted
 `skills/session-finder/relay.py` instead of its own `paseo send`, or copy relay.py's `--`, label and `paseo_gate`.
 One small Sonnet `code` slice with the fake `paseo`.
 
+**Update 2026-10-23:** the `--` half is done (`86b288b`: argv is `send --no-wait --json --behavior steer -- <target> <text>`;
+the same commit added a bounded retry on the daemon-restart codes, `9f9cae8`). Still open: the label and the archived/permission
+gate above. Adversary APPROVE on both commits (reports `~/.local/state/agent-reports/14564811-383c-4575-9cf7-2b4ba5845f6d/`);
+open lows on `86b288b`: (R1) a retry that dies by timeout never sets the give-up flag, so later sends in a long Paseo outage
+can each pay up to about 30 s again; (R2) one stray warning line on stderr makes the JSON parse fail and silently turns the retry
+off (parse the last JSON line, or each line); (R3, pre-existing) `subprocess.run(text=True)` can raise `UnicodeDecodeError`
+outside the `except`, aborting the sample (use `errors="replace"`); (R4) the usage text says "the rest of that process make one
+attempt each"; (R5) a comment at the argv saying every option must precede `--` (an option placed after it silently becomes
+text and the send goes to the default daemon). No test covers R1.
+
 ## ADE-everywhere Phase 0, preserve and classify (djbclark, 2026-10-20; proposal section 8 item 1)
 
 1. **Backups: done 2026-10-20 (PR #24).** `bin/ade-backup-stores` takes the `.backup`-API copy of every live session

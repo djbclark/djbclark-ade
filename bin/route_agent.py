@@ -1533,6 +1533,134 @@ def apply_hermes_chain(chain: list[dict[str, str]]) -> str:
     return str(backup)
 
 
+# The main-loop ("Dann") substrate chain: Flash-primary, provider failover.
+# Primary and fallback serve the SAME model (deepseek-v4.1-flash), so a provider
+# failover does not change the model — which is what makes it safe against
+# Paseo's per-provider constraint: `set_agent_model` refuses a provider other
+# than the agent's, so a cross-provider move is a NEW session, never a live
+# switch (that is what killed the ◈ Dann tab on 2026-10-23). Escalation to
+# deepseek-v4-pro is a within-`opencode` switch and IS live-safe.
+# Source of truth: spec/composite-individual/deepseek-cost-routing.md.
+DANN_SUBSTRATE: tuple[tuple[str, str, str], ...] = (
+    ("opencode-go", "opencode", "opencode-go/deepseek-v4.1-flash"),
+    ("clinepass", "cline", "cline-pass/deepseek-v4.1-flash"),
+)
+DANN_ESCALATION: tuple[str, str, str] = (
+    "opencode-go", "opencode", "opencode-go/deepseek-v4-pro",
+)
+# A measured pool below this much headroom is "tight": still in the chain, but
+# an unmeasured pool is not preferred over it.
+SUBSTRATE_MIN_HEADROOM = 10.0
+
+
+def _substrate_pool_state(pool: str, quota: dict[str, Any] | None,
+                          accounts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Real rolling-window headroom for a substrate pool.
+
+    `load_snapshot`'s quota dict is `--available`-filtered. A pool whose *monthly*
+    budget window is exhausted (opencode-go: 0.6% monthly) reads 0% even while its
+    5-hour/weekly rate windows are wide open and it is usable right now. The picker
+    reads the raw account rows and takes the tightest non-exhausted, non-monthly
+    window as "can I start a session now", reporting the monthly budget separately.
+    """
+    for a in accounts:
+        if a.get("provider") != pool:
+            continue
+        wins = a.get("windows") or []
+
+        def rem(w: dict[str, Any]) -> float | None:
+            return w.get("remaining_percent")
+
+        def is_month(w: dict[str, Any]) -> bool:
+            return "month" in ((w.get("label") or "").lower())
+
+        non_month = [w for w in wins if not is_month(w)]
+        rolling = [rem(w) for w in non_month
+                   if w.get("state") != "exhausted" and rem(w) is not None]
+        monthly = next((rem(w) for w in wins if is_month(w)), None)
+        if rolling:
+            remaining: float | None = min(rolling)
+        elif non_month:
+            remaining = 0.0        # rolling windows exist but none has headroom
+        else:
+            remaining = None       # no rolling windows at all -> unmeasured
+        return {"remaining": remaining, "monthly": monthly}
+    # not in the raw snapshot (clinepass is operator-disabled from collection):
+    # fall back to the filtered quota dict, else unknown.
+    return {"remaining": (quota or {}).get(pool, {}).get("remaining"), "monthly": None}
+
+
+def substrate_chain(quota: dict[str, Any] | None = None,
+                    accounts: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Order the main-loop substrates: healthy-measured first, unmeasured lifeline last.
+
+    Both Flash entries serve deepseek-v4.1-flash, so a provider failover keeps
+    the model constant. `remaining` is None for a pool aiuse does not measure
+    (clinepass is operator-disabled from collection); such a pool sorts last but
+    is never dropped — it is the reserved lifeline, and it is the fallback when
+    the measured pool is tight.
+    """
+    quota = quota or {}
+    accounts = accounts or []
+    states = {p: _substrate_pool_state(p, quota, accounts) for p, _, _ in DANN_SUBSTRATE}
+
+    def key(item: tuple[str, str, str]) -> tuple[int, float]:
+        rem = states[item[0]]["remaining"]
+        if rem is None:
+            return (1, 0.0)                       # unmeasured lifeline: after healthy, before tight
+        if rem >= SUBSTRATE_MIN_HEADROOM:
+            return (0, -rem)                      # healthy -> first, most headroom wins
+        if rem > 0:
+            return (2, -rem)                      # tight -> yield to the lifeline
+        return (3, 0.0)                           # exhausted -> last
+
+    chain: list[dict[str, Any]] = []
+    for i, (pool, provider, model) in enumerate(sorted(DANN_SUBSTRATE, key=key)):
+        chain.append({
+            "role": "primary" if i == 0 else "fallback",
+            "pool": pool, "provider": provider, "model": model,
+            "remaining": states[pool]["remaining"], "monthly": states[pool]["monthly"],
+        })
+    pool, provider, model = DANN_ESCALATION
+    st = _substrate_pool_state(pool, quota, accounts)
+    chain.append({
+        "role": "escalate", "pool": pool, "provider": provider, "model": model,
+        "remaining": st["remaining"], "monthly": st["monthly"],
+    })
+    return chain
+
+
+def apply_substrate(agent: str, chain: list[dict[str, Any]]) -> str:
+    """Apply the chain's primary to `agent` IF it is a within-provider move.
+
+    `paseo-set-model` talks to the daemon's own `set_agent_model` RPC, which
+    only sets a model *within* the agent's provider. So a cross-provider move is
+    refused here with the start-a-new-session instruction rather than attempted
+    (attempting it is what breaks the session).
+    """
+    helper = Path(__file__).resolve().parent / "paseo-set-model"
+    proc = subprocess.run([str(helper), "list", "--json"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        return f"cannot list agents (rc={proc.returncode}): {proc.stderr.strip()[:200]}"
+    try:
+        agents = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return "cannot parse paseo-set-model list output"
+    match = [a for a in agents if str(a.get("id", "")).startswith(agent)]
+    if not match:
+        return f"no such agent: {agent}"
+    cur = match[0]
+    primary = chain[0]
+    if cur.get("provider") != primary["provider"]:
+        return (f"cross-provider: {agent} is {cur.get('provider')}/{cur.get('model')}; "
+                f"start a NEW session on {primary['provider']}/{primary['model']} "
+                f"(set_agent_model cannot switch providers)")
+    proc = subprocess.run([str(helper), "set", agent, primary["model"]],
+                          capture_output=True, text=True)
+    return (proc.stdout.strip() or proc.stderr.strip()
+            or f"set rc={proc.returncode} ({primary['model']})")
+
+
 JEV = Path(__file__).resolve().parent / "jev"
 
 # Dispatch state root (same default as acp-dispatch). Overridable for tests.
@@ -1927,6 +2055,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("services", help="every service discovered right now")
     hc = sub.add_parser("hermes-chain", help="generate Hermes's provider chain")
     hc.add_argument("--apply", action="store_true", help="write it to config.yaml")
+    sb = sub.add_parser(
+        "substrate",
+        help="main-loop substrate chain (Dann: Flash-primary, cline↔opencode-go failover)",
+    )
+    sb.add_argument("--json", action="store_true")
+    sb.add_argument("--apply", metavar="AGENT", default=None,
+                    help="apply the primary to this Paseo agent (within-provider only)")
     pol = sub.add_parser("policy", help="print the effective routing policy")
     pol.add_argument("--md", action="store_true",
                      help="markdown tables (services × kinds, gates, caps)")
@@ -2051,6 +2186,26 @@ def main(argv: list[str] | None = None) -> int:
               + ", ".join(f"{s.name}[{s.access}]" for s in excluded))
         if args.apply:
             print("\n  backup:", apply_hermes_chain(chain))
+        return 0
+
+    if args.command == "substrate":
+        chain = substrate_chain(quota, _read_snapshot_file()[0])
+        if args.json:
+            print(json.dumps({"snapshot_age_s": age, "chain": chain}, indent=2))
+        else:
+            for e in chain:
+                rem = e["remaining"]
+                remtxt = "unmeasured" if rem is None else f"{rem:.0f}% left"
+                mon = e.get("monthly")
+                montxt = "" if mon is None else f"  (monthly {mon:.0f}%)"
+                print(f"  {e['role']:9} {e['provider']}/{e['model']:34} {remtxt}{montxt}")
+            print("\n  primary→fallback is a PROVIDER failover at session start, not a live")
+            print("  switch: Paseo binds one provider per session (set_agent_model refuses a")
+            print("  cross-provider change), so a new session starts on the other provider")
+            print(f"  with the SAME model. escalate ({DANN_ESCALATION[2]}) is a within-opencode")
+            print("  switch and is safe live.")
+        if args.apply:
+            print("\n  apply:", apply_substrate(args.apply, chain))
         return 0
 
     if args.command == "policy":
