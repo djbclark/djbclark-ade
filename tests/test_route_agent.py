@@ -8,9 +8,12 @@ would starve Hindsight and hermes of inference.
 from __future__ import annotations
 
 import contextlib
+import io
+import json
 import os
 import shlex
 import sys
+import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -981,8 +984,8 @@ class TestRoutingPolicyToml(unittest.TestCase):
         self.assertIn("gpt-6-astra", out)
 
     def test_policy_md_and_json_carry_the_lead_session_model(self):
-        """[lead] (2026-10-23): the session that dispatches runs on Opus 5.5 at high, Sonnet to drive a
-        pipeline, never Fable; `policy --md` and `--json` must say so."""
+        """[lead] (2026-10-23): the session that dispatches runs on Opus 5.5 at high, Sonnet at
+        medium to drive a pipeline, never Fable; `policy --md` and `--json` must say so."""
         import io
         import json
         from contextlib import redirect_stdout
@@ -995,8 +998,59 @@ class TestRoutingPolicyToml(unittest.TestCase):
         self.assertIn("| lead.model | opus |", md.getvalue())
         self.assertIn("| lead.effort | high |", md.getvalue())
         self.assertIn("| lead.pipeline_model | sonnet |", md.getvalue())
+        self.assertIn("| lead.pipeline_effort | medium |", md.getvalue())
+        self.assertIn("pipeline lead: sonnet at medium; high for judgment turns", md.getvalue())
         self.assertEqual(json.loads(js.getvalue())["lead"],
-                         {"model": "opus", "effort": "high", "pipeline_model": "sonnet"})
+                         {"model": "opus", "effort": "high", "pipeline_model": "sonnet",
+                          "pipeline_effort": "medium"})
+
+    def _lead_policy_variant(self, replacement):
+        """Write routing.toml with the pipeline_effort line replaced; return the temp path."""
+        import tempfile
+        src = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        bad = src.replace('pipeline_effort = "medium"\n', replacement)
+        self.assertNotEqual(src, bad)
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+            f.write(bad)
+        self.addCleanup(Path(f.name).unlink, missing_ok=True)
+        return f.name
+
+    def test_a_lead_table_without_pipeline_effort_defaults_to_high(self):
+        """Older policy files predate pipeline_effort and must still load, at high."""
+        data = r.load_policy(self._lead_policy_variant(""))
+        self.assertEqual(data["lead"]["pipeline_effort"], "high")
+
+    def test_a_pipeline_effort_a_claude_lead_cannot_take_is_rejected_naming_the_file(self):
+        """Strings outside Paseo's Claude levels (acp-run's `minimal`, `none`, `ultra`) and
+        non-strings (TOML integer, boolean) all fail at load, naming the file."""
+        for value in ('"turbo"', '"minimal"', '"none"', '"ultra"', '"Medium"', "3", "true"):
+            with self.subTest(value=value):
+                path = self._lead_policy_variant(f"pipeline_effort = {value}\n")
+                with self.assertRaises(ValueError) as ctx:
+                    r.load_policy(path)
+                self.assertIn(path, str(ctx.exception))
+                self.assertIn("pipeline_effort", str(ctx.exception))
+
+    def test_a_judgment_lead_effort_outside_the_claude_levels_is_rejected(self):
+        import tempfile
+        src = (Path(__file__).resolve().parent.parent / "config" / "routing.toml").read_text()
+        bad = src.replace('effort = "high"\npipeline_model', 'effort = "minimal"\npipeline_model')
+        self.assertNotEqual(src, bad)
+        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+            f.write(bad)
+        self.addCleanup(Path(f.name).unlink, missing_ok=True)
+        with self.assertRaises(ValueError) as ctx:
+            r.load_policy(f.name)
+        self.assertIn(f.name, str(ctx.exception))
+        self.assertIn("effort", str(ctx.exception))
+
+    def test_a_misspelt_lead_key_is_rejected_not_silently_defaulted(self):
+        """`pipline_effort = "medium"` must not load as the default high."""
+        path = self._lead_policy_variant('pipline_effort = "medium"\n')
+        with self.assertRaises(ValueError) as ctx:
+            r.load_policy(path)
+        self.assertIn(path, str(ctx.exception))
+        self.assertIn("pipline_effort", str(ctx.exception))
 
     def test_a_lead_table_missing_a_key_is_rejected_naming_the_file(self):
         import tempfile
@@ -1819,3 +1873,172 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         path = self.write("huge.json", body)
         quota, _, _ = self.load({"ROUTE_AGENT_AIUSE_JSON": str(path)})
         self.assertIsNone(quota["codex"]["remaining"])
+
+
+class TestGovernorHold(unittest.TestCase):
+    """2026-10-23: bin/claude-fleet-governor writes `level`; while it says tight or critical (and is under
+    30 min old) the Claude subscription is an exhausted pool for code/bulk/research/mechanical, and
+    judgment prefers omp's API credits. `plan --kind code` had printed `claude 30% left` while the
+    5-hour window was projected to run out before its reset."""
+
+    QUOTA: ClassVar[dict[str, Any]] = {**IDLE, "claude": {"remaining": 30.0}, "omp": {"remaining": 90.0}}
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "fleet-governor.json"
+        patcher = mock.patch.dict(os.environ, {"CLAUDE_GOVERNOR_STATE": str(self.path),
+                                               "ROUTE_AGENT_OMP_READY": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # no `acp-run --list` subprocess per route(): the curated roster is enough here
+        patcher = mock.patch.object(r, "acp_list_output", return_value="")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def state(self, level, age_min=5, **over):
+        body = {"level": level, "checked_at": (datetime.now(UTC) - timedelta(minutes=age_min)).isoformat(),
+                "windows": {"five_hour": {"label": "Claude Code 5-hour", "used": 70.0, "level": level,
+                                          "projected_at_reset": 116.0, "resets_at": "2026-10-23T14:59:59Z"}}}
+        body.update(over)
+        self.path.write_text(json.dumps(body))
+
+    def test_without_state_claude_is_still_chosen_for_code(self):
+        # a missing state file holds nothing: claude stays in the roster for judgment (omp, eligible since the quota
+        # guard's routing change, may rank first: claude is the choice or an alternative)
+        choice = r.route("judgment", quota=self.QUOTA)
+        self.assertIn("claude", {choice.service.name, *choice.alternatives})
+        self.assertIsNone(r.governor_hold())
+
+    def test_tight_and_critical_never_pick_claude_for_the_four_kinds(self):
+        for level in ("tight", "critical"):
+            self.state(level)
+            for kind in ("code", "bulk", "research", "mechanical"):
+                with self.subTest(level=level, kind=kind):
+                    choice = r.route(kind, quota=self.QUOTA)
+                    self.assertIsNotNone(choice)
+                    self.assertNotEqual(choice.service.name, "claude")
+                    self.assertNotIn("claude", choice.alternatives)
+                    self.assertIn(f"claude skipped: Claude subscription {level}", choice.why)
+                    self.assertIn("5-hour 70% used", choice.why)
+
+    def test_plan_never_dispatches_claude_while_held(self):
+        self.state("critical")
+        rows = r.plan(["code", "code", "research", "bulk", "mechanical"], quota=self.QUOTA)
+        self.assertTrue(all(c is not None and c.service.name != "claude" for _, c in rows))
+        self.assertFalse(any(c.dispatch.startswith("acp-dispatch claude") for _, c in rows))
+
+    def test_judgment_prefers_omp_opus_on_api_credits(self):
+        self.state("tight")
+        choice = r.route("judgment", quota=self.QUOTA)
+        self.assertEqual(choice.service.name, "omp")
+        self.assertEqual(choice.model, "anthropic/claude-opus-5-5 --effort high")
+        self.assertEqual(choice.dispatch, "acp-dispatch omp --model anthropic/claude-opus-5-5 --effort high --kind judgment")
+        self.assertIn("off the subscription", choice.why)
+
+    def test_judgment_falls_back_to_claude_when_omp_cannot_take_it(self):
+        self.state("tight")
+        for label, quota, env in (("omp not logged in", self.QUOTA, {"ROUTE_AGENT_OMP_READY": "0"}),
+                                  ("omp credits spent", {**self.QUOTA, "omp": {"remaining": 3.0}}, {})):
+            with self.subTest(label), mock.patch.dict(os.environ, env):
+                self.assertEqual(r.route("judgment", quota=quota).service.name, "claude")
+
+    def test_judgment_does_not_force_an_ineligible_omp(self):
+        """Codex pass 7 on PR 31, P2: a retired omp, or one without the judgment capability, is not preferred just
+        because the governor holds Claude."""
+        self.state("tight")
+        original = r.Service.eligible
+        with mock.patch.object(r.Service, "eligible", lambda self, kind: self.name != "omp" and original(self, kind)):
+            choice = r.route("judgment", quota=self.QUOTA)
+        self.assertNotEqual(choice.service.name, "omp")
+
+    def test_frontier_routes_as_before(self):
+        before = r.route("frontier", quota=self.QUOTA).service.name
+        self.state("critical")
+        self.assertEqual(r.route("frontier", quota=self.QUOTA).service.name, before)
+
+    def test_ok_stale_and_unreadable_state_hold_nothing(self):
+        self.state("ok")
+        self.assertIsNone(r.governor_hold())
+        self.state("critical", age_min=31)
+        self.assertIsNone(r.governor_hold())
+        self.state("stale")
+        self.assertIsNone(r.governor_hold())
+        self.path.write_text("{not json")
+        self.assertIsNone(r.governor_hold())
+        self.path.write_text(json.dumps({"level": "tight"}))           # no checked_at: not fresh
+        self.assertIsNone(r.governor_hold())
+
+    def test_the_leads_manual_state_file_holds_nothing(self):
+        self.path.write_text(json.dumps({"note": "manual", "window_resets_at": "2026-10-23T14:59:59Z",
+                                         "downshifted": {"955e2b2": "claude-opus-5-5"}}))
+        self.assertIsNone(r.governor_hold())
+
+    def test_unrouted_reason_names_the_hold(self):
+        self.state("critical")
+        everything_else_full = {name: {"remaining": 0.0} for name in IDLE}
+        self.assertIn("Claude subscription critical", r.unrouted_why("code", everything_else_full))
+
+    def test_cli_plan_prints_the_reason(self):
+        self.state("critical")
+        out = io.StringIO()
+        err = io.StringIO()
+        with (contextlib.redirect_stdout(out), contextlib.redirect_stderr(err),
+              mock.patch.object(r, "load_snapshot", return_value=(self.QUOTA, 60.0))):
+            self.assertEqual(r.main(["plan", "--kinds", "code,judgment"]), 0)
+        self.assertNotIn("acp-dispatch claude", out.getvalue())
+        self.assertIn("Claude subscription critical", err.getvalue())
+        self.assertIn("acp-dispatch omp --model anthropic/claude-opus-5-5", out.getvalue())
+
+
+class TestSubstrateChain(unittest.TestCase):
+    """Main-loop substrate picker: Flash-primary, cline↔opencode-go failover.
+
+    The rule under test is the 2026-10-23 accident: a live cross-provider model
+    switch broke the ◈ Dann tab. The chain keeps the model constant across a
+    provider failover and ranks healthy -> lifeline -> tight -> exhausted.
+    """
+
+    @staticmethod
+    def _opencode(windows: list[tuple[str, float, str]]) -> list[dict[str, Any]]:
+        return [{"provider": "opencode-go",
+                 "windows": [{"label": label, "remaining_percent": rem, "state": state}
+                             for (label, rem, state) in windows]}]
+
+    HEALTHY = [("OpenCode Go 5-hour", 98.0, "ok"),
+               ("OpenCode Go weekly", 96.0, "ok"),
+               ("OpenCode Go monthly", 0.6, "exhausted")]
+
+    def test_healthy_opencode_go_is_primary_with_cline_fallback(self):
+        chain = r.substrate_chain({}, self._opencode(self.HEALTHY))
+        self.assertEqual(chain[0]["role"], "primary")
+        self.assertEqual(chain[0]["provider"], "opencode")
+        self.assertEqual(chain[0]["model"], "opencode-go/deepseek-v4.1-flash")
+        self.assertEqual(chain[1]["provider"], "cline")   # unmeasured lifeline
+        self.assertEqual(chain[2]["role"], "escalate")
+        self.assertEqual(chain[2]["model"], "opencode-go/deepseek-v4-pro")
+
+    def test_monthly_budget_does_not_bind_rolling_headroom(self):
+        chain = r.substrate_chain({}, self._opencode(self.HEALTHY))
+        self.assertAlmostEqual(chain[0]["remaining"], 96.0)   # min(5h, week), not the monthly
+        self.assertAlmostEqual(chain[0]["monthly"], 0.6)
+        self.assertEqual(chain[0]["role"], "primary")
+
+    def test_tight_opencode_go_yields_to_the_unmeasured_lifeline(self):
+        chain = r.substrate_chain({}, self._opencode([
+            ("OpenCode Go 5-hour", 4.0, "ok"), ("OpenCode Go weekly", 5.0, "ok")]))
+        self.assertEqual(chain[0]["provider"], "cline")
+        self.assertEqual(chain[1]["provider"], "opencode")
+
+    def test_exhausted_opencode_go_falls_to_the_lifeline(self):
+        chain = r.substrate_chain({}, self._opencode([
+            ("OpenCode Go 5-hour", 0.0, "exhausted"),
+            ("OpenCode Go weekly", 0.0, "exhausted")]))
+        self.assertEqual(chain[0]["provider"], "cline")
+        self.assertEqual(chain[1]["provider"], "opencode")
+
+    def test_unmeasured_quota_still_returns_the_full_chain(self):
+        chain = r.substrate_chain({}, [])
+        self.assertEqual([e["role"] for e in chain], ["primary", "fallback", "escalate"])
+        # no data: original order preserved, so opencode-go stays primary
+        self.assertEqual(chain[0]["provider"], "opencode")

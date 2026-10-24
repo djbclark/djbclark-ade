@@ -74,7 +74,7 @@ suggest_better_delta = 3
 # hermes is the operator's own assistant. omp was gated behind a per-run operator approval
 # 2026-10-15..19; the gate is lifted (operator 2026-10-19, see the omp [[service]] below),
 # so omp is a curated service now and discovery never needs to guess its profile.
-# clinepass: Hermes's lifeline, never a slice target
+# clinepass: reserved as the lifeline/substrate of BOTH Hermes and Dann (operator 2026-10-23) — never a slice target.
 never_route = ["hermes", "clinepass"]
 # cline (operator 2026-10-17): the TUI is uninstalled; gated so a reinstall does not put it back
 # into discovery by accident (ALIASES folds it into clinepass, which NEVER_ROUTE covers).
@@ -128,12 +128,15 @@ antigravity-claude = 15.0
 # The orchestrating (lead) session's own model (operator 2026-10-23; incident and rule in
 # skills/model-routing/SKILL.md "Lead / orchestrator sessions"). Everything above routes
 # dispatched slices; this is the session that dispatches them. `model` at `effort` by default,
-# `pipeline_model` when the session only drives a pipeline (PR loops, waiters, merges). Never
+# `pipeline_model` at `pipeline_effort` when the session only drives a pipeline (PR loops, waiters,
+# merges; djbclark 2026-10-23: Sonnet 5.5 at medium, high only for judgment turns; effort changes on
+# 5.5 keep the prompt cache). `pipeline_effort` is optional (default high). Never
 # Fable: that is the `fable-deep` sub-agent or a `frontier` slice. Printed by `route_agent.py policy`.
 [lead]
 model = "opus"
 effort = "high"
 pipeline_model = "sonnet"
+pipeline_effort = "medium"
 
 [escalation]
 # Operator 2026-10-18: cheap first; a failed slice climbs one rung, never straight to frontier.

@@ -103,7 +103,23 @@ What an attacker would want, in order of damage:
    Paseo agent prefixes `[relay from <name>] `), so a receiving agent sees a peer, not the operator (advisory: Paseo does not verify the sender id, see 4.1); relay.py
    refuses text starting with `/`, an archived agent, and one with a pending permission or question.
 10. **`bin/firecrawl-router`**: an HTTP listener, loopback by default (see the intro); any process that can
-    reach it can call it.
+    reach it can call it. Since 2026-10-24 a call to `/v2/search/developer` also spends the machine's
+    `GITHUB_TOKEN` against api.github.com (the token is read with `sudo-secretspec get`, held in memory and read again
+    at most once a minute while none is held, sent only to the https or loopback `FIRECRAWL_ROUTER_GITHUB_BASE` and
+    never logged or handed to the MCP child). That token is a classic PAT with `repo` scope (adversary round 1,
+    2026-10-24), so a caller of the unauthenticated listener (`:18805 --open`) could otherwise read private
+    repositories through it. The router therefore returns public repositories only: `is:public` on issue and PR
+    queries, and a code hit only when GitHub reports `repository.private` as false. A local caller can still use up
+    the search quota and learn which public results exist. Residual (adversary rounds 2 to 4): a `repos` value naming a
+    private repository the token can read answers like an empty public one (a nonexistent repo's 422 is turned into
+    the same empty 200, a scoped search never retries, and `repos` takes one slug because with a list a missing member
+    fails the whole query), and the fewer-terms retry is decided on public hits only. **Not closed:** code search ranks
+    across every repository the classic PAT reads and the private hits are dropped after GitHub cuts its page, so
+    when 100 private files outrank every public match of a query (the router always asks for 100), the answer is
+    empty where a public-only token would have found something: a caller who plants a public file can read that as
+    one bit about private code per call (10 a minute). The only real fix is a fine-grained public-repositories-read
+    token stored under its own secretspec name and selected with `FIRECRAWL_ROUTER_GITHUB_SECRET`; until djbclark
+    mints one the filters above are best effort.
 11. **Hermes to Claude delegation** (`delegate_task`, `claude-sub`; `docs/mcp-servers.md`): a message Hermes
     acts on can become a headless agent run.
 12. **`bin/ade-update`** (2026-10-20): after its fast-forward pull it runs the `skill-everywhere` beside the running
@@ -302,6 +318,26 @@ tampered state file can do is still a finding (section 6 item 6).
 7. **Docs carry dated snapshots**; a mismatch between a doc and the code is a doc bug to fix in the same
    PR. But when a PR removes or weakens a control this doc names (for example `autoCreatePR: False`,
    `shlex.quote` in a runner script, the `sudo-secretspec run` re-exec), treat it as a security finding first.
+8. **`ade-scan-state --remote` trusts the origin's advertised refs** (2026-10-23, Codex pass 56 on PR 27): a hostile
+   origin that names a local-only commit makes it count as pushed. Origins are the operator's own; the scan deletes
+   nothing, and the generated report says (limit 10) that `clean and pushed` is not proof of possession. The size
+   of the advertisement is bounded too (2026-10-23): `ls-remote` is read in chunks, and more than 16 MiB (`LS_REMOTE_MAX_BYTES`)
+   kills it and reads as an origin that did not answer (`origin unreachable`), so a hostile origin cannot grow the
+   scan's memory without limit; `--fetch` still has only the 120 s time bound. **The git dir must point back to the
+   checkout** (2026-10-23, Cursor security review and adversary round 66 on PR 27): before any git call, a top-level
+   `.git` DIRECTORY holding a `commondir` entry is `skipped: git dir redirected (commondir)`, and a `.git` gitfile is
+   scanned only if the git dir it names points back, by a `gitdir` file naming `<checkout>/.git` (a linked worktree's
+   admin dir) or by `core.worktree` in its `config` naming the checkout (an absorbed submodule; `--separate-git-dir` writes neither, so that layout is skipped, 2026-10-24),
+   and a `commondir` in it names a common dir that holds it as `worktrees/<name>`. A gitfile naming another checkout's
+   `.git` or a bare repository, a planted admin dir, or one that cannot be read or parsed is `skipped: git dir
+   redirected (does not point back to this checkout)`, so no later call, `--fetch` included, can write objects into a
+   git directory elsewhere; the row lists `git dir -> <target>` and `commondir -> <target>`, which its git-dir
+   command archives (2026-10-24: the row used to call them archived nowhere). A hard-linked gitfile does not pass: the
+   back-pointer's directory is compared, not the file's inode (2026-10-24). What it does not cover: a git dir of the
+   checkout's own whose `objects` is a symlink into another store (round 66, LOW 1 warns about those in a skipped row,
+   and a plain scan reads through the link as git does; `--fetch` also writes objects through it, adversary round 67,
+   INFO 5, 2026-10-24), and an
+   `objects/info/alternates` file (borrowed stores are only read by `fetch`, and warned about on a skipped row).
 
 ## 6. What a reviewer should check on a PR
 

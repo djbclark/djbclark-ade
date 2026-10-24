@@ -10,11 +10,11 @@ Source: `~/.hermes/config.yaml`. An unpinned session walks this when the primary
 
 | Hop | Vendor | Model | Effort | Thinking |
 |---|---|---|---|---|
-| a1. Primary | cline2 | `big-pickle` | medium (global) | not set |
+| a1. Primary | xai-oauth | `grok-4.7` | medium (global) | not set |
 | a2. Fallback 1 | cline2 | `cline2-pass/deepseek-v4-flash` | not set | not set |
-| a3. Fallback 2 | openai-codex | `gpt-5.5` | not set | not set |
+| a3. Fallback 2 | xai-oauth | `grok-4.7` | not set | not set |
 
-a4. `grok-sub` / `xai-oauth` is absent from this list. A comment in that file says it was removed on 2026-10-06. That comment is stale relative to cron and session pins, which do use xAI.
+a4. Re-checked 2026-10-23 against `~/.hermes/config.yaml`: fallback 1 was `litellm-local` / `gemini-free-lite` until that day and moved to `cline2` deepseek-v4-flash (the gemini-free pool failed too often for side work; operator). A comment in the file says `xai-oauth` was removed from the chain on 2026-10-06; that comment is stale, since a3 is `xai-oauth`.
 
 ## b. This class of session pins
 

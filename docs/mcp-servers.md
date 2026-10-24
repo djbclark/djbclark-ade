@@ -20,7 +20,24 @@ why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
 | `ghost-os` | stdio: `/opt/homebrew/bin/ghost mcp` | user | macOS UI automation via accessibility tree + vision. **Blocked in Claude Code since 2026-10-10** (`deniedMcpServers`) |
 | `hindsight` | stdio: `node ~/.hindsight/coding-agents/dist/mcp-server.js` | user | Per-repo Hindsight coding-agent memory (the 🧠 banner) |
 | `hindsight-shared` | HTTP: `http://127.0.0.1:8888/mcp/hermes-shared/` | user | Shared Hindsight bank (`hermes-shared` in the URL is the bank name) |
+| `firecrawl` | HTTP: `http://127.0.0.1:18804/mcp` (LaunchAgent `com.djbclark.firecrawl-mcp`) | all agent TUIs | Scrape, search, crawl, map on self-hosted Firecrawl (SIPB Hyades) through `firecrawl-router`; `skills/firecrawl/SKILL.md`. `firecrawl_developer_search` is answered by the router from the GitHub search API (2026-10-24), see below |
 | claude.ai Gmail / Google Calendar / Google Drive | HTTPS (Google-hosted) | claude.ai account | Remote connectors managed on claude.ai, not in local config |
+
+## Firecrawl developer search (2026-10-24)
+
+The Hyades backend has no `/v2/search/developer`, so the stock `firecrawl_developer_search` tool returned "Request failed
+with status code 404" (and `firecrawl_search` with `categories: ["developer"]` an empty list). With the commercial index
+off, `bin/firecrawl-router` answers both itself from the GitHub search API (issues, merged pull requests, READMEs, docs,
+code files of **public** repositories only) in Firecrawl's response shape, with `source: "github"`; there is no reranker
+and no non-GitHub documentation site. Token: `GITHUB_TOKEN` through `sudo-secretspec get`, held in memory and read again
+at most once a minute while none is held (a failed read, or a 401); it is a
+classic PAT that reads private repositories too, so the router adds `is:public` and drops private code hits; that is
+best effort until a fine-grained public-read token is stored under its own secretspec name
+(`FIRECRAWL_ROUTER_GITHUB_SECRET`; `docs/threat-model.md` item 10 names the residual). Limits: GitHub's 30 searches a minute (10
+for code search); a closed bucket is reported in `coverage` and `warning`, all closed is HTTP 429 with `Retry-After`.
+Knobs and rules: the router's header and `skills/firecrawl/SKILL.md` ("Tools"). Considered and not built: Exa and
+Parallel as extra sources (two more keys and a merge step on a path that already answers; add one if GitHub proves too
+thin); Firecrawl's keyless hosted developer index (it is the commercial API, off by djbclark's ruling of 2026-10-18).
 
 ## Hermes (added 2026-08-23)
 

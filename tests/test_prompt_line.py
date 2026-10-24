@@ -35,6 +35,17 @@ class PromptLineTest(unittest.TestCase):
         self.assertEqual(prompt_line.classify("❯ Press up to edit queued messages"), "")
         self.assertIsNone(prompt_line.classify("no prompt here"))
 
+    def test_omp_input_row(self) -> None:
+        # Rows captured from `herdr agent read --format ansi` on 2026-10-24: omp has no ❯; its input is the box's last
+        # row. The `⇧⇥ to change thinking effort` hint and the ` ─╯` border are not the operator's text.
+        edge, text, hint = f"{E}0m{E}38;2;0;180;255m", f"{E}0m{E}38;2;229;229;231m", f"{E}0m{E}3m{E}38;2;107;114;128m"
+        empty = f"{edge}╰─ {text}{' ' * 40}{edge}⇧⇥{text} {hint}to change thinking effort{edge} ─╯{E}0m"
+        draft = f"{edge}╰─ {text}hello draft{' ' * 40}{edge} ─╯{E}0m"
+        box_bottom = f"{edge}╰{'─' * 60}╯{E}0m"  # a tool box's closing row has no space after ╰─
+        self.assertEqual(prompt_line.classify(f"{box_bottom}\n{empty}", prompt_line.OMP_MARK), "")
+        self.assertEqual(prompt_line.classify(f"{box_bottom}\n{draft}", prompt_line.OMP_MARK), "hello draft")
+        self.assertIsNone(prompt_line.classify(box_bottom, prompt_line.OMP_MARK))
+
 
 if __name__ == "__main__":
     unittest.main()
