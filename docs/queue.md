@@ -1689,6 +1689,6 @@ OPEN (adversary fix text kept; not implemented, 2026-10-24):
    has not written its hash within 100 ms of taking the lock (a loaded machine). Fix: when `pane_sending` sees an empty file after its retries, try the pane lock once
    more (blocking briefly or polling). If the lock is now free, take the normal path under it, where `pane_send`'s P5 check sees A's entry; do not skip to the socket.
    (B's "stop ... do not resend" while A's own routes all fail tells B's caller not to resend something A's caller was told was not sent: acceptable, the same text.)
-3. **L-F, the CHANGELOG lines for the queued lows carry no PR number** (code-review rule 10): add it when the PR is opened.
+3. **L-F, the CHANGELOG lines for the queued lows carry no PR number** (code-review rule 10): fixed 2026-10-24, the lines end with PR 40.
 4. Accepted residual (L-A, related): `permit allow` picks the first card whose `id === reqId || id.startsWith(reqId)` in list order, so a request id that is a proper
    prefix of an earlier card's id would answer that other card; with UUID or `permission-<uuid>` ids it cannot happen.
