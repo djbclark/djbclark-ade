@@ -71,13 +71,19 @@ relative to the cwd after every -C:
      safety options are forced after every caller option, `--no-dry-run`/`--no-porcelain` or any abbreviation is
      refused, and the group is killed on timeout. The dry run still contacts the remote (transport, credential
      helper and ssh command run; pre-push hooks do not). A destination that cannot be resolved is refused while
-     another agent holds an active claim. A claim matches a URL by normalised origin (scheme default ports and
+     another agent holds an active claim: the dry run timed out or exited other than 0/1, printed no `To` line, or
+     its output is incomplete (no closing `Done`, a malformed ref line). A claim matches a URL by normalised origin (scheme default ports and
      ssh.github.com:443 are verified aliases; any other host/port spelling is a different repository).
   5. The TARGET counts, not only the cwd: `worktree remove|move|prune` (selectors resolved against git's
      registered worktree list, unique-suffix form included), `branch -d|-D|-m|-f`, `update-ref` (named ref; with
      --stdin refused while another agent holds a claim in the repository) and an output file (its own symlink
-     resolved first) are checked against the claim of the workspace they hit; the git dir, GIT_WORK_TREE/
-     --work-tree and core.worktree select workspaces too; `worktree remove --force` needs ownership of the target.
+     resolved first) are checked against the claim of the workspace they hit; the git dir and work tree the call
+     lands on are asked of git itself (`rev-parse --absolute-git-dir --show-toplevel` under the call's own -C, -c,
+     --git-dir, --work-tree and environment: GIT_WORK_TREE, core.worktree and their quoting are git's to read; only
+     what git reads is honored, so core.worktree from `-c` or an include is ignored exactly as git ignores it);
+     when git cannot answer at all (timeout), the typed values are used and a call that changes anything is refused
+     while another agent holds a claim (rule workspace-unresolved); `worktree remove --force` needs ownership of
+     the target.
   6. In my own claimed workspace everything else is allowed.
 Refusal = exit 77 (EX_NOPERM), a message naming the owner and the safe alternative (control characters escaped),
 one JSON line in `<state>/guard.log` (flag NAMES from an allowlist only; an option's value is never logged).
@@ -89,9 +95,14 @@ checkout -- .` stash dance is git's, not the agent's. A guard crash fails OPEN (
 `check CMD` reads a shell command string. Supported syntax: newlines, `;` `&&` `||` `|` `|&` `&`, `( )` subshell
 scope (a `cd`/`pushd` inside `( )` does not leak; one in a pipeline or a background job does not take effect;
 `popd` pops the `pushd` stack; `{ }` groups share the shell, so a cd inside leaks as in bash), `$(...)` and backticks
-(analysed at the directory in force), double/single quotes, `$'...'` (decoded), `$"..."`, heredocs (`<<`, `<<-`)
-and here-strings (`<<<`) with their consumer: a body fed to `bash`/`sh`/`zsh`/`source`/`.` is analysed as shell
-code, an unquoted body's `$(...)`/backticks are analysed, a quoted body for anything else is data;
+(analysed at the directory in force; so is one inside `${X:-$(...)}`), double/single quotes, `$'...'` (decoded
+like bash; a bad escape such as `\\x`, `\\u`, `\\xZ` stays literal), `$"..."`, heredocs (`<<`, `<<-`) and here-strings
+(`<<<`). The heredoc delimiter is the word after `<<` with shell quote removal applied exactly (`E"OF"`, `E\\OF`,
+`'E OF'`); one that cannot be read exactly (`$'..'`, a backtick, no word) or a heredoc with no terminating line is
+refused when the command mentions git, never swallowed as data. The consumer is judged: a body or here-string in a
+segment with `bash`/`sh`/`zsh`... anywhere (`env -u X bash`, `sudo -u me sh`, `nice -n 5 zsh`) or `source`/`.` as
+the command is analysed as shell code, an unquoted body's `$(...)`/backticks are analysed, a quoted body for
+anything else is data;
 `bash -lc '...'`, `eval`, `watch`, env/sudo/nice/timeout/xargs wrappers (`{}` of xargs counts as unexpanded),
 inline GIT_DIR=/GIT_WORK_TREE=/GIT_CONFIG_*=, `cd X &&` (a cd to a directory that does not exist, without a
 `mkdir` in the command, is an unknown directory). It FAILS CLOSED (exit 77, "spell it out") for: a git call whose
@@ -1265,81 +1276,113 @@ def push_preflight_argv(call: GitCall) -> list[str]:
     return [*_globals(call), "push", *PUSH_SAFETY, *args[:cut], *PUSH_SAFETY, *args[cut:]]
 
 
+def _porcelain_destinations(out: str) -> Optional[tuple[list[str], list[str]]]:
+    """(destination branch names, URLs) of a COMPLETE `push --porcelain` output, or None. Complete = every remote
+    block is `To <url>`, ref lines (`<flag>\t<src>:<dst>\t<summary>`, one per mapped ref, rejected ones included)
+    and git's closing `Done`; a line outside a block, a tab-separated line that is not a ref line, a block that never
+    closed or no block at all means some ref may be missing from what was read (prose inside a block, such as
+    `Would set upstream of ...` for -u, names no ref and is skipped)."""
+    urls: list[str] = []
+    dests: list[str] = []
+    open_block, closed = False, 0
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("To "):
+            if open_block:
+                return None
+            urls.append(line[3:].strip())
+            open_block = True
+            continue
+        if line == "Done":
+            if not open_block:
+                return None
+            open_block = False
+            closed += 1
+            continue
+        if open_block and "\t" not in line:
+            continue                      # prose git prints inside a block (`Would set upstream of ...`): no ref
+        parts = line.split("\t")
+        if not open_block or len(parts) < 3 or parts[0] not in (" ", "+", "-", "*", "=", "!") or ":" not in parts[1]:
+            return None
+        dst = parts[1].split(":", 1)[1]
+        if dst.startswith("refs/heads/"):
+            dests.append(dst[len("refs/heads/"):])
+    if open_block or not closed:
+        return None
+    return dests, urls
+
+
 def push_destinations(call: GitCall) -> tuple[Optional[list[str]], list[str]]:
     """(destination branch names, effective push URLs) of a `git push` call, both from git's own
     `push --dry-run --porcelain` under the call's own config (every -c, repeats and order kept; url.<base>.insteadOf,
     pushurl, pushDefault, branch.<n>.pushRemote, push.default, `@`, `heads/x`, wildcard and --mirror/--all/deletion
-    refspecs all resolved by git). (None, urls) when git could not resolve it (no remote, unreachable, timeout):
-    the caller decides what that means; nothing is guessed from the command line. Contacts the remote like any
-    push (its transport, credential helper and ssh command run; pre-push hooks do not)."""
+    refspecs all resolved by git). (None, []) = UNRESOLVED: the dry run did not finish (a timeout, rc 124, or any
+    status other than 0 and 1: no remote, no such repository, usage error), printed no `To` line, or its output is
+    not complete (no closing `Done`, a malformed ref line), so a mapped ref may be missing from what was read.
+    Status 1 is git's answer for "some ref would be rejected" (non-fast-forward): its porcelain lists EVERY mapped
+    ref, the rejected ones with `!`, so a complete listing is read; a partial one is not. The caller decides what
+    unresolved means; nothing is guessed from the command line. Contacts the remote like any push (its transport,
+    credential helper and ssh command run; pre-push hooks do not)."""
     rc, out = _run_git(push_preflight_argv(call), timeout=20, env_extra=call.env)
-    urls: list[str] = []
-    dests: list[str] = []
-    for line in out.splitlines():
-        if line.startswith("To "):
-            urls.append(line[3:].strip())
-            continue
-        parts = line.split("\t")
-        if len(parts) >= 3 and len(parts[0]) == 1 and ":" in parts[1]:
-            dst = parts[1].split(":", 1)[1]
-            if dst.startswith("refs/heads/"):
-                dests.append(dst[len("refs/heads/"):])
-    return (dests if urls else None), urls
+    parsed = _porcelain_destinations(out) if rc in (0, 1) else None
+    if parsed is None:
+        return None, []
+    return parsed[0], parsed[1]
 
 
 # --------------------------------------------------------------------------------------------
 # guard: decisions
 # --------------------------------------------------------------------------------------------
 
-def _core_worktree(gitdir: Path) -> Optional[str]:
-    """`core.worktree` as written in the repository's config file (relative paths are relative to the git dir)."""
-    cfgs = [gitdir / "config"]
-    with contextlib.suppress(OSError):
-        cfgs.append((gitdir / _slurp(gitdir / "commondir").strip()) / "config")
-    for cfg in cfgs:
-        try:
-            text = _slurp(cfg)
-        except OSError:
-            continue
-        section = ""
-        found: Optional[str] = None
-        for line in text.splitlines():
-            s = line.strip()
-            m = re.match(r"^\[\s*([A-Za-z0-9.-]+)", s)
-            if m:
-                section = m.group(1).lower()
-            elif section == "core":
-                m = re.match(r"^worktree\s*=\s*(.*)$", s, re.I)
-                if m:
-                    found = m.group(1).strip().strip('"')
-        if found:
-            return found
-    return None
+def _git_says(call: GitCall) -> tuple[str, Optional[str], Optional[str]]:
+    """Where git itself says the call lands, under the call's own ordered `-C`/`-c`/--git-dir/--work-tree and
+    config-file environment (`rev-parse --absolute-git-dir --show-toplevel`: core.worktree with comments, escapes,
+    includes and relative paths, GIT_WORK_TREE after any chain of -C are all git's to read, never ours):
+    ("ok", gitdir, toplevel); ("bare", gitdir, None) a repository with no work tree; ("none", None, None) git finds
+    no repository; ("unknown", None, None) git could not answer (timeout, cannot start, output not understood)."""
+    rc, out = _call_git(call, "rev-parse", "--absolute-git-dir", "--show-toplevel")
+    lines = out.splitlines()
+    if rc == 0 and len(lines) == 2 and all(os.path.isabs(x) for x in lines):
+        return "ok", lines[0], lines[1]
+    if rc == 128 and len(lines) == 1 and os.path.isabs(lines[0]):
+        return "bare", lines[0], None
+    if rc == 128 and not lines:
+        return "none", None, None
+    return "unknown", None, None
 
 
-def call_workspaces(call: GitCall) -> list[Optional[Workspace]]:
-    """Every workspace the call can change, from git's own rules over the ORDERED argv, config and env: the git dir
-    (--git-dir, else GIT_DIR, else the one found from the final cwd) and the work tree (--work-tree, else
-    GIT_WORK_TREE, else `core.worktree` (-c or the repository's config, relative to the git dir), else the cwd when
-    a git dir was named explicitly, else the discovered root). Relative --git-dir/--work-tree/GIT_* are relative to
-    the cwd once all `-C` are applied. [None] when git would not find a repository at all."""
-    gd_path = call.gitdir_path()
-    gd_ws = workspace_for_gitdir(gd_path, call.cwd) if gd_path else find_workspace(call.cwd)
-    wt_path = call.worktree_path()
-    if wt_path is None:
-        core = call.cfg("core.worktree")
-        if core is None and gd_ws is not None:
-            core = _core_worktree(gd_ws.gitdir)
-        if core and gd_ws is not None:
-            wt_path = os.path.join(str(gd_ws.gitdir), core)
-        elif gd_path:
-            wt_path = call.cwd
+def call_workspaces(call: GitCall) -> tuple[list[Optional[Workspace]], bool]:
+    """(every workspace the call can change, unresolved). git is asked (`_git_says`): the work tree it names with
+    its git dir first, then the workspace of the directory the files live in and of the repository that owns the
+    refs (they differ under GIT_WORK_TREE / core.worktree / --git-dir). Only when git cannot answer or finds no
+    repository are the TYPED values used (--git-dir/GIT_DIR, --work-tree/GIT_WORK_TREE, `-c core.worktree`, the cwd
+    when a git dir was named, else the one discovered from the cwd), relative to the cwd after every -C; `unresolved`
+    is then true only when git could not answer at all, and the caller refuses what changes anything while another
+    agent holds a claim. [None] when no repository exists."""
+    status, gd, top = _git_says(call)
+    cands: list[Optional[Workspace]] = []
+    if status == "ok" and gd and top:
+        cands = [Workspace(Path(top), Path(gd), (Path(gd) / "commondir").exists()), find_workspace(top),
+                 workspace_for_gitdir(gd, top)]
+    elif status == "bare" and gd:
+        cands = [workspace_for_gitdir(gd, call.cwd)]
+    else:
+        gd_path = call.gitdir_path()
+        gd_ws = workspace_for_gitdir(gd_path, call.cwd) if gd_path else find_workspace(call.cwd)
+        wt_path = call.worktree_path()
+        if wt_path is None:
+            core = call.cfg("core.worktree")
+            if core:
+                wt_path = os.path.join(str(gd_ws.gitdir) if gd_ws is not None else call.cwd, core)
+            elif gd_path:
+                wt_path = call.cwd
+        cands = [find_workspace(wt_path) if wt_path else None, gd_ws]
     out: list[Workspace] = []
-    wt_ws = find_workspace(wt_path) if wt_path else None
-    for w in (wt_ws, gd_ws):
+    for w in cands:
         if w is not None and not any(_same_path(w.root, x.root) and _same_path(w.gitdir, x.gitdir) for x in out):
             out.append(w)
-    return list(out) if out else [None]
+    return (list(out) if out else [None]), status == "unknown"
 
 
 def _foreign(claim: dict[str, Any], rule: str, alt: str) -> Decision:
@@ -1501,8 +1544,9 @@ def _push_decision(call: GitCall, ident: Optional[str]) -> Optional[Decision]:
             return None
         return Decision(False, "push-destination-unresolved",
                         "git's own `push --dry-run` could not resolve where this push goes (remote unreachable or "
-                        "unconfigured, or it timed out) and another agent holds an active claim, so a claimed branch "
-                        "cannot be ruled out; fix the remote or name a refspec that resolves", "",
+                        "unconfigured, it timed out, exited non-zero, or its output did not cover every ref) and "
+                        "another agent holds an active claim, so a claimed branch cannot be ruled out; fix the "
+                        "remote or name a refspec that resolves", "",
                         "nobody; destination unknown")
     for nm in dict.fromkeys(dests):
         for c in claims_for_branch(nm, urls):
@@ -1525,7 +1569,7 @@ def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, assume_agen
         return ALLOW
     ident = caller_ident(env)
     approved = {x.strip() for x in env.get("ACP_OPERATOR_APPROVED", "").split(",") if x.strip()}
-    wss = call_workspaces(call)
+    wss, unresolved = call_workspaces(call)
     sub = call.sub
     bang = ""
     if sub and sub not in READONLY and sub not in KNOWN_WRITE:
@@ -1553,6 +1597,12 @@ def evaluate(call: GitCall, env: Optional[dict[str, str]] = None, *, assume_agen
         deny = _ws_decision(call, ws, ident, bang)
         if deny is not None:
             break
+    if deny is None and unresolved and not is_readonly(call):
+        other = next((c for c in list_claims("active") if not is_mine(c, ident)), None)
+        if other is not None:      # git could not say where this lands: the target cannot be ruled out
+            deny = _foreign(other, "workspace-unresolved",
+                            "git could not say which repository and work tree this call changes (it timed out or "
+                            "gave no answer) while another agent holds a claim; retry, or run it read-only")
     if deny is None:
         deny = _target_decision(call, wss, ident)
     if deny is None and sub == "push":
@@ -1681,7 +1731,8 @@ _WRAPPERS = {"command", "builtin", "exec", "time", "nohup", "sudo", "doas", "env
 _SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish", "ash"}
 _ENV_ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
 _DYN = re.compile(r"\$[A-Za-z_{(@*#?!0-9]|`")
-_HEREDOC = re.compile(r"<<(-?)[ \t]*(?:'([^']*)'|\"([^\"]*)\"|(\\)?([A-Za-z0-9_.-]+))")
+_HD_END = " \t\r\n;&|()<>"                      # ends a heredoc delimiter word
+_WRAP_VALUE = re.compile(r"^[0-9][0-9.]*[smhd]?$")   # `timeout 5s`, `nice -n 5`: a wrapper's number
 _MENTIONS_GIT = re.compile(r"(?<![A-Za-z0-9_-])git(?![A-Za-z0-9_])")
 _INLINE_GIT_ENV = re.compile(r"^(GIT_DIR|GIT_WORK_TREE|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_KEY_\d+|"
                              r"GIT_CONFIG_VALUE_\d+|GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_CONFIG_NOSYSTEM|GIT_CONFIG)$")
@@ -1715,8 +1766,57 @@ class Seg:
     herestrings: list[str] = dataclasses.field(default_factory=list)
 
 
-def _skip_heredoc_body(s: str, i: int, delim: str, strip: bool) -> tuple[str, int]:
-    """(body, index after the delimiter line) of the heredoc whose body starts at s[i]."""
+def _read_heredoc_op(s: str, j: int) -> tuple[str, bool, bool, int]:
+    """The heredoc operator at s[j:] (`<<`, never `<<<`): (delimiter, strip, quoted, index after the word). The
+    delimiter is the WORD after the operator with shell quote removal applied exactly as written (`E"OF"`, `E\\OF`,
+    `'E OF'`, `"E"'O'F` all read as EOF / E OF), so the body ends where the shell ends it. `quoted` is true when
+    any part is quoted or escaped (the body is then literal). ValueError when the word cannot be read exactly: none
+    follows, an unterminated quote, `$'..'`, `$".."` or a backtick in it."""
+    n = len(s)
+    k = j + 2
+    strip = k < n and s[k] == "-"
+    k += strip
+    while k < n and s[k] in " \t":
+        k += 1
+    start, out, quoted = k, [], False
+    while k < n and s[k] not in _HD_END:
+        c = s[k]
+        if c == "\\":
+            if k + 1 >= n or s[k + 1] == "\n":
+                raise ValueError("heredoc delimiter ends in a backslash")
+            out.append(s[k + 1])
+            quoted = True
+            k += 2
+        elif c == "'":
+            e = s.find("'", k + 1)
+            if e < 0:
+                raise ValueError("unterminated quote in a heredoc delimiter")
+            out.append(s[k + 1:e])
+            quoted = True
+            k = e + 1
+        elif c == '"':
+            e = k + 1
+            while e < n and s[e] != '"':
+                if s[e] == "\\" and e + 1 < n and s[e + 1] in '$`"\\':
+                    e += 1
+                out.append(s[e])
+                e += 1
+            if e >= n:
+                raise ValueError("unterminated quote in a heredoc delimiter")
+            quoted = True
+            k = e + 1
+        elif c == "`" or (c == "$" and s[k + 1:k + 2] in ("'", '"')):
+            raise ValueError("heredoc delimiter the guard cannot read exactly ($'..', $\"..\" or a backtick)")
+        else:
+            out.append(c)
+            k += 1
+    if k == start:
+        raise ValueError("heredoc operator without a delimiter word")
+    return "".join(out), strip, quoted, k
+
+
+def _skip_heredoc_body(s: str, i: int, delim: str, strip: bool) -> tuple[str, int, bool]:
+    """(body, index after the delimiter line, delimiter found) of the heredoc whose body starts at s[i]."""
     n = len(s)
     lines: list[str] = []
     while i < n:
@@ -1724,14 +1824,36 @@ def _skip_heredoc_body(s: str, i: int, delim: str, strip: bool) -> tuple[str, in
         line = s[i:n if j < 0 else j]
         i = n if j < 0 else j + 1
         if (line.lstrip("\t") if strip else line) == delim:
-            break
+            return "\n".join(lines), i, True
         lines.append(line)
-    return "\n".join(lines), i
+    return "\n".join(lines), i, False
+
+
+def _skip_dquote(s: str, j: int) -> int:
+    """Index after the double-quoted string that opens at s[j] (len(s) when unterminated); `$(...)` and backticks
+    inside it nest, so a quote inside a substitution inside a string does not end the string."""
+    n = len(s)
+    j += 1
+    while j < n:
+        c = s[j]
+        if c == "\\":
+            j += 2
+        elif c == '"':
+            return j + 1
+        elif c == "$" and s.startswith("$(", j):
+            j = _match_paren(s, j + 1) + 1
+        elif c == "`":
+            k = s.find("`", j + 1)
+            j = n if k < 0 else k + 1
+        else:
+            j += 1
+    return n
 
 
 def _match_paren(s: str, i: int) -> int:
     """Index of the `)` closing the `(` at s[i], skipping quoted text, comments and heredoc bodies (an apostrophe
-    in a `$(cat <<'EOF' ... EOF)` commit message is not a quote); len(s) when unclosed."""
+    in a `$(cat <<'EOF' ... EOF)` commit message is not a quote); len(s) when unclosed. A heredoc operator the
+    guard cannot read exactly raises ValueError."""
     depth, j, n = 0, i, len(s)
     pending: list[tuple[str, bool]] = []
     while j < n:
@@ -1744,26 +1866,27 @@ def _match_paren(s: str, i: int) -> int:
             j = n if k < 0 else k + 1
             continue
         if c == '"':
-            j += 1
-            while j < n and s[j] != '"':
-                j += 2 if s[j] == "\\" else 1
-            j += 1
+            j = _skip_dquote(s, j)
+            continue
+        if c == "`":
+            k = s.find("`", j + 1)
+            j = n if k < 0 else k + 1
             continue
         if c == "#" and (j == 0 or s[j - 1] in " \t\n;&|("):
             k = s.find("\n", j)
             j = n if k < 0 else k
             continue
-        if c == "<" and s.startswith("<<", j) and not s.startswith("<<<", j):
-            m = _HEREDOC.match(s, j)
-            if m:
-                pending.append((m.group(2) if m.group(2) is not None else m.group(3) if m.group(3) is not None
-                                else m.group(5), bool(m.group(1))))
-                j = m.end()
-                continue
+        if c == "<" and s.startswith("<<<", j):
+            j += 3
+            continue
+        if c == "<" and s.startswith("<<", j):
+            delim, strip, _, j = _read_heredoc_op(s, j)
+            pending.append((delim, strip))
+            continue
         if c == "\n" and pending:
             j += 1
             for delim, strip in pending:
-                _, j = _skip_heredoc_body(s, j, delim, strip)
+                _, j, _ = _skip_heredoc_body(s, j, delim, strip)
             pending.clear()
             continue
         if c == "(":
@@ -1774,6 +1897,39 @@ def _match_paren(s: str, i: int) -> int:
                 return j
         j += 1
     return n
+
+
+def _match_brace(s: str, i: int) -> int:
+    """Index of the `}` closing the `{` of a `${` at s[i] (quotes, `$(...)` and nested `${` skipped). ValueError
+    when unclosed."""
+    depth, j, n = 0, i, len(s)
+    while j < n:
+        c = s[j]
+        if c == "\\":
+            j += 2
+            continue
+        if c == "'":
+            k = s.find("'", j + 1)
+            j = n if k < 0 else k + 1
+            continue
+        if c == '"':
+            j = _skip_dquote(s, j)
+            continue
+        if c == "`":
+            k = s.find("`", j + 1)
+            j = n if k < 0 else k + 1
+            continue
+        if c == "$" and s.startswith("$(", j):
+            j = _match_paren(s, j + 1) + 1
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    raise ValueError("unterminated ${...}")
 
 
 def _body_subs(body: str) -> list[str]:
@@ -1803,15 +1959,21 @@ _ANSI_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": 
 
 
 def _ansi_c(s: str) -> str:
-    """Decode the inside of a bash `$'...'` word (`\\x67it`, `\\147it`, `\\n`) to the text the shell builds."""
+    """Decode the inside of a bash `$'...'` word (`\\x67it`, `\\147it`, `\\n`, `\\u00e9`, `\\cA`) to the text the shell
+    builds. A bad escape stays literal, as in bash: `\\x` or `\\u` with no hex digit, `\\xZ`, an unknown `\\q`."""
     def one(m: "re.Match[str]") -> str:
         g = m.group(1)
-        if g[0] in "xu":
-            return chr(int(g[1:], 16))
-        if g[0] in "01234567":
-            return chr(int(g, 8) & 0xFF)
+        try:
+            if g[0] in "xuU" and len(g) > 1:
+                return chr(int(g[1:], 16))
+            if g[0] in "01234567":
+                return chr(int(g, 8) & 0xFF)
+            if g[0] == "c" and len(g) == 2:
+                return chr(ord(g[1]) & 0x1F)
+        except (ValueError, OverflowError):
+            pass
         return _ANSI_SIMPLE.get(g, "\\" + g)
-    return re.sub(r"\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|[0-7]{1,3}|.)", one, s, flags=re.S)
+    return re.sub(r"\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[0-7]{1,3}|c.|.)", one, s, flags=re.S)
 
 
 def lex_shell(cmd: str) -> list["Seg | str"]:
@@ -1919,8 +2081,9 @@ def lex_shell(cmd: str) -> list["Seg | str"]:
             state["in"] = state["dyn"] = True
             i = j + 1
         elif c == "$" and cmd[i + 1:i + 2] == "{":
-            j = cmd.find("}", i + 2)
-            j = n - 1 if j < 0 else j
+            j = _match_brace(cmd, i + 1)                # a substitution inside ${X:-$(...)} runs too
+            for body in _body_subs(cmd[i + 2:j]):
+                add_sub(body)
             buf.append(cmd[i:j + 1])
             state["in"] = state["dyn"] = True
             i = j + 1
@@ -1939,7 +2102,9 @@ def lex_shell(cmd: str) -> list["Seg | str"]:
             i += 1
             while pending:                       # the bodies of the heredocs opened on this line
                 hd = pending.pop(0)
-                hd.body, i = _skip_heredoc_body(cmd, i, hd.delim, hd.strip)
+                hd.body, i, done = _skip_heredoc_body(cmd, i, hd.delim, hd.strip)
+                if not done:
+                    raise ValueError(f"heredoc <<{hd.delim} has no terminating line")
         elif c == "#" and not state["in"]:
             j = cmd.find("\n", i)
             i = n if j < 0 else j
@@ -1970,19 +2135,12 @@ def lex_shell(cmd: str) -> list["Seg | str"]:
             holder["here"] = True
             i += 3
         elif c == "<" and cmd.startswith("<<", i):
-            m = _HEREDOC.match(cmd, i)
-            if m:
-                end_word()
-                quoted = m.group(2) is not None or m.group(3) is not None or bool(m.group(4))
-                delim = m.group(2) if m.group(2) is not None else m.group(3) if m.group(3) is not None else m.group(5)
-                hd = Heredoc(delim, bool(m.group(1)), quoted)
-                seg().heredocs.append(hd)
-                pending.append(hd)
-                i = m.end()
-            else:
-                buf.append(c)
-                state["in"] = True
-                i += 1
+            delim, strip, quoted, end = _read_heredoc_op(cmd, i)
+            end_word()
+            hd = Heredoc(delim, strip, quoted)
+            seg().heredocs.append(hd)
+            pending.append(hd)
+            i = end
         else:
             if c == "$" and _DYN.match(cmd[i:i + 2]):
                 state["dyn"] = True
@@ -2048,6 +2206,30 @@ def _stdin_shell(seg: Seg, head: int) -> bool:
     return True
 
 
+def _wrapped_head(texts: list[str], k: int) -> bool:
+    """texts[k] can be the command a run of wrappers ends in: `env -u X bash`, `nice -n 5 sh`, `sudo -u me git`,
+    `timeout 5s git`, `env A=1 git`, `/usr/bin/env git`. A wrapper's option may take a value, so the word after one
+    counts as that value AND as a candidate command (fail closed: `env -u X $G` is a computed name)."""
+    j = 0
+    while j < k and _ENV_ASSIGN.match(texts[j]):
+        j += 1
+    if j == k:
+        return True
+    if _basename(texts[j]) not in _WRAPPERS:
+        return False
+    after_opt = False
+    for t in texts[j + 1:k]:
+        if _basename(t) in _WRAPPERS or _ENV_ASSIGN.match(t) or _WRAP_VALUE.match(t):
+            after_opt = False
+        elif t.startswith("-"):
+            after_opt = True
+        elif after_opt:
+            after_opt = False
+        else:
+            return False
+    return True
+
+
 def shell_git_calls(cmd: str, cwd: Optional[str], _depth: int = 0) -> tuple[list[ShellCall], list[str]]:
     """(git calls found in a shell command, problems that call for a fail-closed answer). See the module
     docstring for what is followed. `cwd` None means the directory is not known."""
@@ -2057,7 +2239,7 @@ def shell_git_calls(cmd: str, cwd: Optional[str], _depth: int = 0) -> tuple[list
         return [], ([f"shell code nested deeper than {MAX_SHELL_DEPTH} levels; spell the git command out"] if mentions else [])
     try:
         items = lex_shell(cmd)
-    except ValueError as e:
+    except (ValueError, RecursionError) as e:          # RecursionError: `"$("` nested past the interpreter's limit
         return [], ([f"cannot parse the command ({e}); spell it out"] if mentions else [])
     out: list[ShellCall] = []
     cur: Optional[str] = cwd
@@ -2091,7 +2273,13 @@ def shell_git_calls(cmd: str, cwd: Optional[str], _depth: int = 0) -> tuple[list
             rec(body, cur)
         for hd in seg.heredocs:
             if not hd.quoted:
-                for body in _body_subs(hd.body):
+                try:
+                    bodies = _body_subs(hd.body)
+                except (ValueError, RecursionError) as e:   # a heredoc inside the body that cannot be read exactly
+                    bodies = []
+                    if mentions:
+                        problems.append(f"cannot parse a heredoc body ({e}); spell it out")
+                for body in bodies:
                     rec(body, cur)
         head = 0
         while head < len(words) and (_ENV_ASSIGN.match(texts[head]) or texts[head] in _WRAPPERS):
@@ -2116,21 +2304,30 @@ def shell_git_calls(cmd: str, cwd: Optional[str], _depth: int = 0) -> tuple[list
                         if not os.path.isdir(cur) and "mkdir" not in cmd:
                             cur = None                  # a cd that fails leaves the shell where it was: unknown
             continue
-        if hbase in _SHELLS or hbase in ("source", "."):
+        wrapped = [k for k in range(len(words)) if _wrapped_head(texts, k)]   # words that can BE the command
+        shell_k = [k for k in wrapped if _basename(texts[k]) in _SHELLS or _basename(texts[k]) in ("source", ".")]
+        if shell_k or any(_basename(t) in _SHELLS for t in texts):
+            # a shell anywhere in the segment (`env -u X bash`, `sudo -u me sh`, `nice -n 5 zsh`, `xargs sh`) may read
+            # the heredoc / here-string as its script; judged as code (a body of plain text finds no git call)
             body_code = [hd.body for hd in seg.heredocs] + list(seg.herestrings)
             for code in body_code:
-                rec(code, cur)                          # heredoc / here-string text IS the script
-            if hbase in _SHELLS and not body_code and _stdin_shell(seg, head) and seg.sep_before in ("|", "|&"):
+                rec(code, cur)
+            k0 = next((k for k in shell_k if _basename(texts[k]) in _SHELLS), None)
+            if k0 is not None and not body_code and _stdin_shell(seg, k0) and seg.sep_before in ("|", "|&"):
                 if _MENTIONS_GIT.search("\n".join(pipeline[:-1])):
                     problems.append("text that mentions git is piped into a shell; spell the git command out")
-            if any(w.text in ("<", "/dev/stdin") or w.text.startswith("/dev/fd/") for w in words) and mentions \
-                    and not body_code:
+            if shell_k and any(w.text in ("<", "/dev/stdin") or w.text.startswith("/dev/fd/") for w in words) \
+                    and mentions and not body_code:
                 problems.append("a shell or `source` reads a process substitution or stdin; spell the git command out")
-        hw = words[head] if head < len(words) else None
-        if hw is not None and ((hw.dyn and mentions) or (hw.glob and not hw.dyn)) and _could_be_git(hw):
-            problems.append("the command name is computed (a variable or substitution in a command that mentions git, "
-                            "or a glob / brace pattern that can match `git`); spell the git command out")
-        placeholder = any(t in ("xargs", "parallel") for t in texts[:head])
+        for k in wrapped:
+            hw = words[k]
+            if _ENV_ASSIGN.match(hw.text) or hw.text in _WRAPPERS:
+                continue
+            if ((hw.dyn and mentions) or (hw.glob and not hw.dyn)) and _could_be_git(hw):
+                problems.append("the command name is computed (a variable or substitution in a command that mentions "
+                                "git, or a glob / brace pattern that can match `git`); spell the git command out")
+                break
+        placeholder = any(t in ("xargs", "parallel") for t in texts)
         for idx, w in enumerate(words):
             base = _basename(w.text)
             if base in _SHELLS:
@@ -2153,8 +2350,9 @@ def shell_git_calls(cmd: str, cwd: Optional[str], _depth: int = 0) -> tuple[list
                 m = _ENV_ASSIGN.match(t)
                 if m and _INLINE_GIT_ENV.match(m.group(1)):
                     inline[m.group(1)] = m.group(2)
-            headlike = all(_ENV_ASSIGN.match(t) or t in _WRAPPERS or t.startswith("-") or t.isdigit() or t == "{}"
-                           or _basename(t) in ("env",) for t in texts[:idx])
+            headlike = _wrapped_head(texts, idx) or all(
+                _ENV_ASSIGN.match(t) or t in _WRAPPERS or t.startswith("-") or t.isdigit() or t == "{}"
+                or _basename(t) in ("env",) for t in texts[:idx])
             rest = words[idx + 1:]
             if placeholder:
                 rest = [Word(x.text, x.dyn or "{}" in x.text, x.glob) for x in rest]

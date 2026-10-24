@@ -1226,7 +1226,6 @@ def test_effective_worktree_follows_git_dir_env_core_worktree_and_c_chains(tmp_p
         (["-C", str(a), "--git-dir", "../b/.git", "checkout", "-f"], b, {}),                  # worktree = cwd = a
         (["-C", str(a), "--git-dir=../b/.git", "reset", "--hard"], b, {}),
         (["-C", str(a), "checkout", "-f"], b, {"GIT_DIR": "../b/.git"}),
-        (["-c", f"core.worktree={a}", "checkout", "-f"], b, {}),
         (["-C", str(tmp_path), "--work-tree", "a", "checkout", "-f"], b, {}),
     ]
     for args, cwd, extra in cases:
@@ -1516,3 +1515,345 @@ def test_poisoned_head_and_pointer_bytes_do_not_raise(tmp_path, state):
     assert ade_claims.read_pointer(ws) is None
     (repo / ".git" / "HEAD").write_bytes(b"ref: refs/heads/\xff\n")
     assert isinstance(ade_claims._head_branch(ws.gitdir), str)
+
+
+# ============================================================================================
+# R3 repair (adversary BLOCK at 552fe27, 2026-10-24): git decides the target, the lexer reads what bash reads
+# ============================================================================================
+
+@pytest.fixture
+def git_env(state, monkeypatch):
+    """The helper gits the guard spawns (rev-parse, push dry run) read os.environ: keep it clean and hermetic."""
+    for k in list(os.environ):
+        if k.startswith(("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX", "GIT_COMMON", "GIT_CONFIG", "GIT_NAMESPACE")):
+            monkeypatch.delenv(k)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    return state
+
+
+def decide(state_dir, who, argv, cwd, **extra):
+    env = base_env(state_dir, who, **extra)
+    return ade_claims.evaluate(ade_claims.parse_git_argv(argv, str(cwd), env), env, assume_agent=True)
+
+
+# --- R3-B1: core.worktree and friends are read by git, never by a parser of ours --------------------------------
+
+@pytest.mark.parametrize("dirname,cfg,inc,hits", [
+    ("a", '[core]\n\tworktree = "{t}" # owner target\n', None, True),
+    ("a", "[core]\n\tworktree = {t} ; owner target\n", None, True),
+    ("a", '[core]\n\tworktree = "{t}"   ; c\n\tbare = false\n', None, True),
+    ("a", "[core]\n\tWorkTree = {t}\n", None, True),
+    ("a", "[core]\n\tworktree = /nonexistent/zz\n\tworktree = {t}\n", None, True),
+    ("a", "[core]\n\tworktree = ../../a\n", None, True),                                  # relative to the git dir
+    # git reads core.worktree from the repository's own config FILE without following include.path (2.56, checked
+    # with `git rev-parse --show-toplevel`): the call lands in b, so it must NOT be refused for a's claim
+    ("a", "[include]\n\tpath = inc.cfg\n", "[core]\n\tworktree = {t}\n", False),
+    ("a", "[include]\n\tpath = inc.cfg\n", '[core]\n\tworktree = "{t}" # note\n', False),
+    ("we ird # x;y", '[core]\n\tworktree = "{t}" # a # b\n', None, True),                 # `#` and `;` inside the quotes
+    ("we\\ird", '[core]\n\tworktree = "{te}" # escaped backslash\n', None, True),         # `\\` is one backslash
+    ("we\"ird", '[core]\n\tworktree = "{te}"\n', None, True),                             # `\"` is a quote
+], ids=["quoted-comment", "semicolon-comment", "quoted-spaces-comment", "mixed-case-key", "last-wins",
+        "relative", "include", "include-comment", "hash-in-quotes", "backslash", "dquote"])
+def test_core_worktree_is_read_by_git_in_every_spelling(tmp_path, state, git_env, dirname, cfg, inc, hits):
+    tgt = mk_repo(tmp_path, state, dirname)
+    claim(tgt, "A")
+    dirty(tgt)
+    b = mk_repo(tmp_path, state, "b")
+    claim(b, "B", branch="b")
+    esc = lambda p: str(p).replace("\\", "\\\\").replace('"', '\\"')   # noqa: E731
+    cfgfile = b / ".git" / "config"
+    cfgfile.write_text(cfgfile.read_text() + cfg.format(t=tgt, te=esc(tgt)))
+    if inc:
+        (b / ".git" / "inc.cfg").write_text(inc.format(t=tgt, te=esc(tgt)))
+    top = plain(state, ["rev-parse", "--show-toplevel"], b).strip()
+    assert os.path.samefile(top, tgt) == hits, top                  # git's own answer is the oracle
+    d = decide(state, "B", ["reset", "--hard"], b)
+    c = check(state, "git reset --hard", b)
+    if hits:
+        assert not d.allowed and d.rule == "foreign-claim" and d.claim_id == "A", d
+        assert c.returncode == 77 and "[foreign-claim]" in c.stderr and untouched(tgt)
+    else:
+        assert d.allowed and c.returncode == 0                      # b is B's own: nothing of A's is hit
+
+
+def test_git_work_tree_and_dash_c_chains_follow_what_git_resolves(tmp_path, state, git_env):
+    a, b = two_claimed(tmp_path, state)
+    (tmp_path / "x").mkdir()
+    cases = [
+        (["-C", "b", "checkout", "-f"], tmp_path, {"GIT_WORK_TREE": "../a"}),                        # relative AFTER -C
+        (["-C", "x", "-C", "../b", "--work-tree", "../a", "checkout", "-f"], tmp_path, {}),
+        (["-C", "x", "-C", "../b", "--work-tree=../a", "reset", "--hard"], tmp_path, {}),
+        (["-C", str(tmp_path), "-C", "b", "checkout", "-f"], tmp_path, {"GIT_WORK_TREE": str(a)}),
+        (["-C", "b", "--work-tree", "../a", "checkout", "-f"], tmp_path, {}),
+        (["-C", "x", "--git-dir", "../b/.git", "--work-tree", "../a", "checkout", "-f"], tmp_path, {}),
+    ]
+    for args, cwd, extra in cases:
+        probe = [x for x in args if x not in ("checkout", "-f", "reset", "--hard")]
+        top = run(state, [*probe, "rev-parse", "--show-toplevel"], cwd, **extra)
+        assert top.returncode == 0 and os.path.samefile(top.stdout.strip(), a), (args, top.stderr, top.stdout)
+        r = run(state, args, cwd, who="B", **extra)
+        assert r.returncode == 77 and untouched(a), (args, extra, r.stderr)
+
+
+@pytest.mark.parametrize("where,args,env", [
+    ("b", [], {}),
+    ("b/sub", [], {}),
+    ("b/.git", [], {}),
+    ("c", [], {}),
+    ("c/sub", [], {}),
+    ("W", [], {}),
+    ("tmp", ["-C", "a"], {}),
+    ("tmp", ["-C", "a", "-C", "../b"], {}),
+    ("tmp", ["-C", "c"], {}),
+    ("tmp", ["--git-dir", "b/.git"], {}),
+    ("tmp", ["--git-dir=c/.git"], {}),
+    ("tmp", ["--git-dir", "b/.git", "--work-tree", "a"], {}),
+    ("tmp", ["-C", "b", "--work-tree", "../a"], {}),
+    ("a", ["--git-dir", "../b/.git"], {}),
+    ("a", ["-c", "core.worktree=../c"], {}),
+    ("b", [], {"GIT_WORK_TREE": "../a"}),
+    ("tmp", ["-C", "b"], {"GIT_WORK_TREE": "../a"}),
+    ("tmp", [], {"GIT_DIR": "b/.git", "GIT_WORK_TREE": "a"}),
+    ("a", [], {"GIT_DIR": "../b/.git"}),
+    ("tmp", ["-C", "a"], {"GIT_DIR": "../c/.git"}),
+    ("tmp", ["--git-dir", "bare.git"], {}),
+    ("bare.git", [], {}),
+], ids=lambda x: x if isinstance(x, str) else " ".join(f"{k}={v}" for k, v in x.items()) if isinstance(x, dict) else " ".join(x))
+def test_workspace_parity_with_git_rev_parse(tmp_path, state, git_env, where, args, env):
+    """What the guard decides a call lands on is what `git rev-parse` says for the same globals and environment."""
+    a, b = two_claimed(tmp_path, state)
+    (b / "sub").mkdir()
+    c = mk_repo(tmp_path, state, "c")
+    (c / "sub").mkdir()
+    cfgfile = c / ".git" / "config"
+    cfgfile.write_text(cfgfile.read_text() + f'[core]\n\tworktree = "{a}" # points at a\n')
+    plain(state, ["worktree", "add", "-q", "-b", "wb", str(tmp_path / "W")], a)
+    plain(state, ["init", "-q", "--bare", str(tmp_path / "bare.git")], tmp_path)
+    cwd = tmp_path if where == "tmp" else tmp_path / where
+    real = run(state, [*args, "rev-parse", "--absolute-git-dir", "--show-toplevel"], cwd, **env)
+    full = base_env(state, "B", **env)
+    call = ade_claims.parse_git_argv([*args, "status"], str(cwd), full)
+    wss, unresolved = ade_claims.call_workspaces(call)
+    assert unresolved is False
+    lines = real.stdout.splitlines()
+    if real.returncode == 0:
+        assert wss[0] is not None, (args, env, real.stderr)
+        assert os.path.samefile(wss[0].gitdir, lines[0]) and os.path.samefile(wss[0].root, lines[1]), (lines, wss[0])
+    elif lines:   # a repository without a work tree (bare): the git dir is still the one git names
+        assert any(w is not None and os.path.samefile(w.gitdir, lines[0]) for w in wss), (lines, wss)
+
+
+@pytest.mark.parametrize("rc,out", [(124, ""), (127, ""), (0, "garbage\n"), (0, "/only/one/line\n"), (3, "/x\n/y\n")])
+def test_an_unanswered_workspace_question_is_refusable_while_another_agent_holds_a_claim(tmp_path, state, git_env,
+                                                                                         monkeypatch, rc, out):
+    a, b = two_claimed(tmp_path, state)
+    real_run = ade_claims._run_git
+    monkeypatch.setattr(ade_claims, "_run_git", lambda argv, *x, **k: (rc, out) if "--absolute-git-dir" in argv
+                        else real_run(argv, *x, **k))
+    d = decide(state, "B", ["reset", "--hard"], b)
+    assert not d.allowed and d.rule == "workspace-unresolved" and d.claim_id == "A"
+    assert decide(state, "B", ["status"], b).allowed                   # read-only stays allowed
+    ade_claims.set_state("A", "released")
+    assert decide(state, "B", ["reset", "--hard"], b).allowed     # only B's own claim is left: nothing foreign
+
+
+def test_git_that_finds_no_repository_is_an_answer_not_a_failure(tmp_path, state, git_env):
+    a, b = two_claimed(tmp_path, state)
+    (tmp_path / "empty").mkdir()
+    call = ade_claims.parse_git_argv(["init"], str(tmp_path / "empty"), base_env(state, "B"))
+    wss, unresolved = ade_claims.call_workspaces(call)
+    assert wss == [None] and unresolved is False
+    assert decide(state, "B", ["init"], tmp_path / "empty").allowed
+
+
+# --- R3-MEDIUM: a push dry run that did not finish or does not cover every ref is unresolved --------------------
+
+def _fake_push(monkeypatch, rc, out):
+    real_run = ade_claims._run_git
+    monkeypatch.setattr(ade_claims, "_run_git", lambda argv, *x, **k: (rc, out) if "push" in argv
+                        else real_run(argv, *x, **k))
+
+
+COMPLETE = "To /somewhere.git\n*\trefs/heads/mine:refs/heads/mine\t[new branch]\nDone\n"
+
+
+@pytest.mark.parametrize("rc,out", [
+    (0, "To /somewhere.git\n*\trefs/heads/mine:refs/heads/mine\t[new branch]\n"),                    # no closing Done
+    (0, "To /somewhere.git\n*\trefs/heads/mine:refs/heads/mine\t[new branch]\n*\tgarbage\nDone\n"),    # stray line
+    (0, "*\trefs/heads/mine:refs/heads/mine\t[new branch]\nDone\n"),                                  # no `To` line
+    (0, ""),
+    (124, COMPLETE),                                                                                   # timeout
+    (1, "To /somewhere.git\n!\trefs/heads/mine:refs/heads/mine\t[rejected] (non-fast-forward)\n"),   # rc 1, partial
+    (128, COMPLETE),
+    (0, "To /somewhere.git\nTo /other.git\n*\trefs/heads/mine:refs/heads/mine\t[x]\nDone\n"),         # block never closed
+], ids=["no-done", "stray-line", "no-to", "empty", "rc124", "rc1-partial", "rc128", "unclosed-block"])
+def test_a_partial_or_failed_push_dry_run_is_unresolved(tmp_path, state, git_env, monkeypatch, rc, out):
+    a, b = two_claimed(tmp_path, state)
+    _fake_push(monkeypatch, rc, out)
+    d = decide(state, "B", ["push", "origin", "HEAD"], b)
+    assert not d.allowed and d.rule == "push-destination-unresolved", (rc, out, d)
+    ade_claims.set_state("A", "released")
+    assert decide(state, "B", ["push", "origin", "HEAD"], b).allowed        # nothing foreign to protect
+
+
+def test_a_complete_push_dry_run_is_still_judged_by_its_refs(tmp_path, state, git_env, monkeypatch):
+    a, b = two_claimed(tmp_path, state)
+    _fake_push(monkeypatch, 0, COMPLETE.replace("Done", "Would set upstream of 'mine' to 'mine' of 'origin'\nDone"))
+    assert decide(state, "B", ["push", "-u", "origin", "HEAD"], b).allowed         # prose inside a block is no ref
+    _fake_push(monkeypatch, 0, COMPLETE)
+    assert decide(state, "B", ["push", "origin", "HEAD"], b).allowed
+    rejected = "To /somewhere.git\n!\trefs/heads/mine:refs/heads/mine\t[rejected] (non-fast-forward)\nDone\n"
+    _fake_push(monkeypatch, 1, rejected)            # git's rc 1 for a rejected ref: its complete listing is read
+    assert decide(state, "B", ["push", "origin", "HEAD"], b).allowed
+    _fake_push(monkeypatch, 1, rejected.replace("mine", "main"))
+    assert decide(state, "B", ["push", "origin", "HEAD"], b).rule == "push-foreign-branch"
+    _fake_push(monkeypatch, 0, COMPLETE + "To /second.git\n+\trefs/heads/main:refs/heads/main\t[forced update]\nDone\n")
+    d = decide(state, "B", ["push", "origin", "HEAD"], b)
+    assert not d.allowed and d.rule == "push-foreign-branch" and d.claim_id == "A"     # branch main is A's
+
+
+# --- R3-B2: --check reads what bash reads, or refuses --------------------------------------------------------------
+
+@pytest.mark.parametrize("tpl", [
+    "env -u UNSET_ME bash <<'EOF'\ngit reset --hard\nEOF",
+    "env VAR=1 sh <<EOF\ngit reset --hard\nEOF",
+    "env -i -u X VAR=1 zsh <<'EOF'\ngit reset --hard\nEOF",
+    "command bash <<'EOF'\ngit reset --hard\nEOF",
+    "exec bash <<'EOF'\ngit reset --hard\nEOF",
+    "nohup bash <<'EOF'\ngit reset --hard\nEOF",
+    "nice -n 5 bash <<'EOF'\ngit reset --hard\nEOF",
+    "time bash <<'EOF'\ngit reset --hard\nEOF",
+    "sudo -u me bash <<'EOF'\ngit reset --hard\nEOF",
+    "timeout 5 bash <<'EOF'\ngit reset --hard\nEOF",
+    "/usr/bin/env -u X bash <<'EOF'\ngit reset --hard\nEOF",
+    "xargs sh <<'EOF'\ngit reset --hard\nEOF",
+    "env -u X bash <<< 'git reset --hard'",
+    "nice -n 5 sh <<< 'git reset --hard'",
+    "<<'EOF' env -u X bash\ngit reset --hard\nEOF",
+    "env -u X source /dev/stdin <<'EOF'\ngit reset --hard\nEOF",
+    "echo ${UNSET_ME:-$(git reset --hard)}",
+    "echo ${UNSET_ME:+$(git reset --hard)}",
+    "echo ${UNSET_ME:=$(git reset --hard)}",
+    "echo ${UNSET_ME:?$(git reset --hard)}",
+    "echo ${UNSET_ME:-${OTHER:-$(git reset --hard)}}",
+    "echo ${UNSET_ME:-`git reset --hard`}",
+    "echo \"${UNSET_ME:-$(git reset --hard)}\"",
+    "echo ${UNSET_ME/x/$(git reset --hard)}",
+    "cat <<E\"OF\"\ndata\nEOF\ngit reset --hard",
+    "cat <<E'O'F\ndata\nEOF\ngit reset --hard",
+    "cat <<E\\OF\ndata\nEOF\ngit reset --hard",
+    "cat <<\"E OF\"\ndata\nE OF\ngit reset --hard",
+    "cat <<-EOF\n\tdata\n\tEOF\ngit reset --hard",
+    "cat <<- 'EOF'\n\tdata\n\tEOF\ngit reset --hard",
+    "cat <<'EOF' >/dev/null\ndata\nEOF\ngit reset --hard",
+    "cat <<$'EOF'\ndata\nEOF\ngit reset --hard",              # a delimiter the lexer cannot read: refused
+    "cat <<`echo EOF`\ndata\nEOF\ngit reset --hard",
+    "cat <<EOF\ngit reset --hard",                              # no terminating line: nothing may be swallowed
+    "(( x = 1<<2 ))\ngit reset --hard",
+    "cat <<\ngit reset --hard",
+    "cat <<< foo; git reset --hard",
+    "echo $(cat <<< foo\ngit reset --hard)",
+    "G=git; env -u X $G reset --hard",
+    "git commit -m \"$(echo \")\"; git reset --hard)\"",
+], ids=lambda c: c.replace("\n", "⏎")[:46])
+def test_check_refuses_or_judges_every_heredoc_consumer_and_expansion(tmp_path, state, tpl):
+    a, b = two_claimed(tmp_path, state)
+    r = check(state, tpl, a)
+    assert r.returncode == 77, (tpl, r.stderr)
+    assert untouched(a)
+
+
+@pytest.mark.parametrize("tpl", [
+    "cat <<'EOF'\ngit reset --hard\nEOF",
+    "cat <<E\"OF\"\ngit reset --hard\nEOF\ngit status",
+    "cat <<E'O'F\ngit reset --hard\nEOF\ngit status",
+    "cat <<E\\OF\ngit reset --hard\nEOF\ngit status",
+    "cat <<\"E OF\"\ngit reset --hard\nE OF\ngit status",
+    "cat <<-'EOF'\n\tgit reset --hard\n\tEOF\ngit status",
+    "git log -1 --format=%B <<'EOF'\nnote: git reset --hard is only text\nEOF",
+    "env -u X bash <<'EOF'\ngit status\nEOF",
+    "env VAR=1 sh <<EOF\necho hi\nEOF",
+    "bash <<EOF\necho hi\nEOF",
+    "nice -n 5 bash <<< 'echo git'",
+    "echo ${UNSET_ME:-$(date)}",
+    "echo ${UNSET_ME:-plain} ${OTHER:+x}",
+    "echo \"${UNSET_ME:-$(date)}\"",
+    "echo $((1<<2))",
+    "echo $(cat <<< foo)\ngit status",
+    "env -u X git status",
+    "timeout 5s git log -1",
+], ids=lambda c: c.replace("\n", "⏎")[:46])
+def test_check_keeps_literal_data_and_exactly_read_siblings_allowed(tmp_path, state, tpl):
+    a, b = two_claimed(tmp_path, state)
+    r = check(state, tpl, a)
+    assert r.returncode == 0, (tpl, r.stderr)
+
+
+def test_check_sees_an_alias_behind_wrappers_and_their_option_values(tmp_path, state):
+    a, b = two_claimed(tmp_path, state)
+    plain(state, ["config", "alias.zz", "reset --hard"], a)
+    for cmd in ("env -u X git zz", "nice -n 5 git zz", "sudo -u me git zz", "env VAR=1 -u X git zz"):
+        assert check(state, cmd, a).returncode == 77, cmd
+    assert untouched(a)
+
+
+@pytest.mark.parametrize("text,delim,quoted", [
+    ("<<EOF", "EOF", False), ("<< EOF", "EOF", False), ("<<-EOF", "EOF", False), ("<<'EOF'", "EOF", True),
+    ("<<\"EOF\"", "EOF", True), ("<<\\EOF", "EOF", True), ("<<E\"OF\"", "EOF", True), ("<<E'O'F", "EOF", True),
+    ("<<E\\OF", "EOF", True), ("<<'E OF'", "E OF", True), ("<<\"E OF\"", "E OF", True), ("<<-'E.F-1'", "E.F-1", True),
+    ("<<$X", "$X", False), ("<<EOF;", "EOF", False), ("<<EOF)", "EOF", False), ("<<E\"\\\"\"F", "E\"F", True),
+])
+def test_heredoc_delimiters_are_read_the_way_bash_removes_quotes(text, delim, quoted):
+    d, strip, q, end = ade_claims._read_heredoc_op(text, 0)
+    assert (d, q) == (delim, quoted) and strip == text.startswith("<<-")
+
+
+@pytest.mark.parametrize("text", ["<<", "<<\n", "<< ", "<<'EOF", "<<\"EOF", "<<$'EOF'", "<<$\"EOF\"", "<<`x`", "<<\\"])
+def test_a_heredoc_delimiter_that_cannot_be_read_exactly_raises(text):
+    with pytest.raises(ValueError):
+        ade_claims._read_heredoc_op(text, 0)
+
+
+# --- R3-B3: an owner's own commit is never refused for its quoting ------------------------------------------------------
+
+OWNER_COMMITS = [
+    "git commit --allow-empty -m \"$(cat <<E'OF'\nfix: don't break\nEOF\n)\"",
+    "git commit --allow-empty -m \"$(cat <<\"EOF\"\nfix: don't break\nEOF\n)\"",
+    "git commit --allow-empty -m \"$(cat <<-'EOF'\n\tfix: don't break\n\tEOF\n)\"",
+    "git commit --allow-empty -m \"$(cat <<\\EOF\nfix: don't break\nEOF\n)\"",
+    "git commit --allow-empty -m \"$(cat <<'EOF'\nsay \"hi\" and don't (really) ) end\nEOF\n)\"",
+    "git commit --allow-empty -m \"$(cat <<E\"OF\"\nit's ) here\nEOF\n)\"",
+    "git commit --allow-empty -m \"$(cat <<E\\OF\n\"unbalanced and 'unbalanced\nEOF\n)\"",
+    "git commit --allow-empty -m \"$(cat <<'E OF'\nbody ) 'x\nE OF\n)\"",
+    "git commit --allow-empty -F- <<E'OF'\ndon't \"quote\" )\nEOF",
+    "git commit --allow-empty -m $'it\\'s \\x \\u \\xZ \\U \\c'",
+    "git commit --allow-empty -m $'\\x'",
+    "git commit --allow-empty -m $'\\u' -m $'\\xZ' -m $'\\U110000'",
+    "git commit --allow-empty -m $'\\x4' -m $'\\u12' -m $'ok \\x41 \\u00e9 \\101'",
+]
+
+
+@pytest.mark.parametrize("cmd", OWNER_COMMITS, ids=lambda c: c.replace("\n", "⏎")[:50])
+def test_an_owners_commit_is_not_refused_for_its_quoting_but_a_foreigner_is_refused_as_a_foreigner(tmp_path, state, cmd):
+    a, b = two_claimed(tmp_path, state)
+    r = check(state, cmd, a, who="A")
+    assert r.returncode == 0, (cmd, r.stderr)
+    r = check(state, cmd, a, who="B")        # same shape, another agent's workspace: parsed, then refused as foreign
+    assert r.returncode == 77 and "[foreign-claim]" in r.stderr and "unclassifiable" not in r.stderr, (cmd, r.stderr)
+
+
+@pytest.mark.parametrize("raw,want", [
+    ("\\x", "\\x"), ("\\u", "\\u"), ("\\U", "\\U"), ("\\xZ", "\\xZ"), ("\\x4Z", "\x04Z"), ("\\x41", "A"),
+    ("\\u00e9", "é"), ("\\U0001F600", "\U0001F600"), ("\\U110000", "\\U110000"), ("\\101", "A"), ("\\q", "\\q"),
+    ("\\c", "\\c"), ("\\cA", "\x01"), ("a\\nb", "a\nb"), ("\\x67it", "git"), ("tail\\", "tail\\"),
+])
+def test_ansi_c_quoting_decodes_like_bash_and_keeps_a_bad_escape_literal(raw, want):
+    assert ade_claims._ansi_c(raw) == want
+
+
+def test_quote_nesting_past_the_interpreters_recursion_limit_is_refused_not_a_crash(tmp_path, state):
+    a, b = two_claimed(tmp_path, state)       # a crash of --check would fail OPEN (the guard allows on rc 1)
+    for nest in ('echo git "$(' * 700, 'echo git ${a:-' * 700, 'echo git "${a:-$(' * 400):
+        r = check(state, nest, a)
+        assert r.returncode == 77 and "unguarded" not in r.stderr and "failed" not in r.stderr, (nest[:20], r.stderr)
