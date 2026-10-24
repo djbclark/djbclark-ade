@@ -26,7 +26,8 @@ from typing import override
 
 from test_acp_dispatch import SCRIPT, Base, run
 
-# agy's weekly cap, 6 days out; the fake's "Resets in" text and the stamp both derive from it
+# agy's weekly cap, 6 days out; the stamp derives from it, the fake's "Resets in" text is the same
+# duration as a literal (change both together)
 FAR_RESET = timedelta(hours=148, minutes=22, seconds=36)
 
 EXTRA_MODES = textwrap.dedent("""\
