@@ -1495,3 +1495,59 @@ def test_s2_a_summary_only_default_row_beside_a_detailed_one_is_judged_too(rig, 
     fixture["available"].append(default_row(5, "Claude Code 5-hour"))
     d = mod.decide(0, fixture, {"accounts": []}, [], mod.thresholds(), NOW)
     assert d["level"] == "critical" and d["five_hour_left"] == 5
+
+
+# -- fix 10 (adversary round 1 on PR 36: F1 unshown display fill, F2 tie at the lowest Fable) ------
+
+def _weekly_only_row(age):
+    return {"provider": "claude", "pool_family": "default", "age_seconds": age,
+            "windows": [_window("Claude Code weekly", 80, WEEK_RESET, pool_family="default",
+                                quota_scope="shared")]}
+
+
+def _stale_five_hour_only_account():
+    return {"provider": "claude", "account": "djbclark@gmail.com", "usable_now": True, "age_seconds": 18000,
+            "windows": [_window("Claude Code 5-hour", 77, FIVE_RESET, state="ok")]}
+
+
+MIXED_SECOND_ROWS = [pytest.param({"provider": "claude", "usable_now": True}, id="bare-usable-now"),
+                     pytest.param(fable_row(50), id="summary-fable")]
+
+
+@pytest.mark.parametrize("second", MIXED_SECOND_ROWS)
+def test_f1_an_unshown_snapshot_display_fill_does_not_age_a_mixed_shape(rig, monkeypatch, second):
+    """A detailed live row with only a weekly window plus a windowless row: the snapshot's 5-hour
+    window (18000 s old) would only be a display fill, which a mixed shape never shows, so it supplies
+    nothing and must not age the decision."""
+    mod = _load_guard_module(monkeypatch, rig)
+    data = {"available": [_weekly_only_row(10), second]}
+    d = mod.decide(0, data, {"accounts": [_stale_five_hour_only_account()]}, [], mod.thresholds(), NOW)
+    assert d["rows_age_s"] == 10 and d["five_hour_left"] is None
+
+
+@pytest.mark.parametrize("second", MIXED_SECOND_ROWS)
+def test_f1_end_to_end_the_mixed_shape_is_not_stale(rig, second):
+    rig.set_aiuse({"available": [_weekly_only_row(10), second]})
+    rig.set_alerts([], age_s=60, accounts=[_stale_five_hour_only_account()])
+    assert rig.guard().returncode == 0
+    st = rig.state_json()
+    assert st["level"] == "ok" and st["stale"] is False and st["five_hour_left"] is None
+    assert rig.pings() == []
+
+
+def test_f1_a_windowless_only_payload_still_ages_by_the_display_fill_it_shows(rig, monkeypatch):
+    mod = _load_guard_module(monkeypatch, rig)
+    d = mod.decide(0, {"available": [default_row(70)]}, {"accounts": [_stale_five_hour_only_account()]},
+                   [], mod.thresholds(), NOW)
+    assert d["five_hour_left"] == 77 and d["rows_age_s"] == 18000
+
+
+@pytest.mark.parametrize("stale_first", [True, False])
+def test_f2_a_tie_at_the_lowest_fable_goes_to_the_fresher_snapshot_row(rig, monkeypatch, stale_first):
+    mod = _load_guard_module(monkeypatch, rig)
+    pair = [_aged(snapshot_account(weekly=80, fable=10), 18000), _aged(snapshot_account(weekly=80, fable=10), 10)]
+    snap = {"accounts": pair if stale_first else pair[::-1]}
+    detailed = mod.decide(0, aiuse_fixture(weekly=80, with_fable_pool=False), snap, [], mod.thresholds(), NOW)
+    windowless = mod.decide(0, {"available": [default_row(80)]}, snap, [], mod.thresholds(), NOW)
+    assert detailed["fable_left"] == windowless["fable_left"] == 10
+    assert detailed["rows_age_s"] == 10 and windowless["rows_age_s"] == 10

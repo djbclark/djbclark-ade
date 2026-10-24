@@ -395,7 +395,10 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
     Fable cap is exhausted), the Fable window is taken from the snapshot; an exhausted Fable
     counts as 0% left, so `watch`. Only the snapshot row holding the lowest such window ages the
     decision. A windowless live row (summary only) is judged by its headroom beside the detailed
-    rows, so a summary-only Fable row next to a detailed default row still counts.
+    rows, so a summary-only Fable row next to a detailed default row still counts. Ageing follows
+    what is reported: a snapshot row ages the decision only when a value this result judges or shows
+    comes from it (the display fill counts for a live-only payload alone); a tie at the lowest Fable
+    value goes to the fresher snapshot row.
 
     A weekly "projected to run out ... before reset" alert is ignored altogether while the
     matching weekly window has `pace_early: true` (early in a window the projection swings
@@ -411,31 +414,22 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
             raise Unreadable(f"malformed `windows` in a Claude row ({type(shape).__name__}): not a list of objects")
     windows, source = claude_windows(rows), "available"
     display: list[dict] = []
-    fed: list[dict] = []     # snapshot rows whose windows were used besides the judged rows: they age too
+    # The snapshot's Claude rows, freshest first, so a tie at the lowest value (`_lowest` keeps the
+    # first) goes to the fresher row: a stale twin must not age a reading a fresh row also gives.
+    snap_per_row = sorted(((r, claude_windows([r])) for r in snap_rows),
+                          key=lambda p: _row_age(p[0], now_dt) or 0.0)
+    snap_windows = [w for _, ws in snap_per_row for w in ws]
     # A live row that carries its own verdict (headroom / usable_now) but no recognised window is
     # judged by that verdict, beside the detailed rows (a summary-only Fable row never hides).
     summary_rows = [r for r in rows if _has_summary(r) and not claude_windows([r])]
     live_only = not windows and bool(summary_rows)
     if summary_rows:
-        per_row = [(r, claude_windows([r])) for r in snap_rows]
-        display = [w for _, ws in per_row for w in ws]
+        display = snap_windows
         windows += [w for w in (_summary_window(r, display) for r in summary_rows) if w]
-        used: set[int] = set()
         if not any(w["kind"] == "fable" for w in windows):
             low = _lowest(display, "fable")
             if low is not None:
                 windows.append(low)
-                used.add(id(low))
-        # Only the snapshot windows that were really used age the decision: the one Fable window
-        # `_lowest` picked, the borrowed reset/pace, and the display fill for a kind the live rows
-        # could not give.
-        used |= {id(w["borrowed"]) for w in windows if w.get("borrowed") is not None}
-        for kind in ("weekly", "five_hour"):
-            if not any(w["kind"] == kind for w in windows):
-                low = _lowest(display, kind)
-                if low is not None:
-                    used.add(id(low))
-        fed = [r for r, ws in per_row if any(id(w) in used for w in ws)]
     elif not windows:
         if claude_windows(excluded_rows):
             rows, judge_usable, source = excluded_rows, False, "excluded"
@@ -443,13 +437,10 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
             rows, source = snap_rows, "snapshot"
         windows = claude_windows(rows)
     elif not any(w["kind"] == "fable" for w in windows):
-        # aiuse drops the Fable pool (not the default one) when the Fable cap is exhausted. Only the
-        # snapshot row holding the lowest Fable window (the one `_lowest` judges) ages the decision.
-        per_row = [(r, claude_windows([r])) for r in snap_rows]
-        low = _lowest([w for _, ws in per_row for w in ws], "fable")
+        # aiuse drops the Fable pool (not the default one) when the Fable cap is exhausted.
+        low = _lowest(snap_windows, "fable")
         if low is not None:
             windows.append(low)
-            fed = [r for r, ws in per_row if any(w is low for w in ws)]
     weekly, five, fable = (_lowest(windows, k) for k in ("weekly", "five_hour", "fable"))
     level = "ok"
 
@@ -500,19 +491,26 @@ def decide(rc: int, data: dict, snap: dict | None, alerts: list[dict], t: dict,
 
     # Window the level answers to: the lowest remaining among weekly and 5-hour.
     candidates = [w for w in (weekly, five) if w]
-    rows_age = max((a for a in (_row_age(r, now_dt) for r in rows + fed) if a is not None), default=None)
     binding = min(candidates, key=lambda w: w["left"]) if candidates else None
     resets_at = binding["resets_at"] if binding else None
+    # A live row without windows[] is judged by its headroom; the snapshot's windows only fill
+    # the fields it cannot give (display, never the level), and only for a live-only payload: with
+    # detailed rows the fill is neither shown nor allowed to age the decision.
+    fill = display if live_only else []
+    shown_weekly, shown_five, shown_fable = (weekly or _lowest(fill, "weekly"),
+                                             five or _lowest(fill, "five_hour"),
+                                             fable or _lowest(fill, "fable"))
+    # Only a snapshot row that supplies a value this result reports ages the decision: the window
+    # behind a shown number, or the twin a shown reset/pace was borrowed from.
+    used = {id(w) for w in (shown_weekly, shown_five, shown_fable) if w}
+    used |= {id(w["borrowed"]) for w in (shown_weekly, binding) if w and w.get("borrowed") is not None}
+    fed = [r for r, ws in snap_per_row if any(id(w) in used for w in ws)]
+    rows_age = max((a for a in (_row_age(r, now_dt) for r in rows + fed) if a is not None), default=None)
     if not windows and not live_only:
         weekly_left = five_left = 0.0
     else:
         weekly_left = weekly["left"] if weekly else None
         five_left = five["left"] if five else None
-    # A live row without windows[] is judged by its headroom; the snapshot's windows only fill
-    # the fields it cannot give (display, never the level).
-    shown_weekly, shown_five, shown_fable = (weekly or _lowest(display, "weekly"),
-                                             five or _lowest(display, "five_hour"),
-                                             fable or _lowest(display, "fable"))
     if live_only:
         weekly_left = shown_weekly["left"] if shown_weekly else None
         five_left = shown_five["left"] if shown_five else None
