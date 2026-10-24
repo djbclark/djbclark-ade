@@ -875,11 +875,13 @@ def is_slash(text):
     return text.lstrip(SLASH_STRIP).startswith(("/", "\uff0f"))
 
 
+HERMES_SENDER = re.compile(r"hermes [A-Za-z0-9_-]{1,8}")    # what `hermes_env` sets: "hermes " and the last 8 characters of the session id
+
+
 def sender_name(listed):
     """Who is relaying: this session's name, else its id, as one safe label."""
-    if hermes_hops() and os.environ.get("RELAY_SENDER"):
-        name = os.environ["RELAY_SENDER"]    # a relay made inside a relayed Hermes turn: Hermes, not the original caller
-        return fleet.clip(re.sub(r"[^A-Za-z0-9._ -]", "", name), 40) or "unknown"
+    if hermes_hops() and HERMES_SENDER.fullmatch(os.environ.get("RELAY_SENDER", "")):
+        return os.environ["RELAY_SENDER"]    # a relay made inside a relayed Hermes turn: Hermes, not the original caller; any other name is a forgery
     me = next((x for x in listed if x.get("self")), None) or {}
     name = me.get("name") or me.get("id") or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "")[:8] or "unknown"
     return fleet.clip(re.sub(r"[^A-Za-z0-9._ -]", "", name), 40) or "unknown"
