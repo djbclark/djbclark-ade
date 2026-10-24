@@ -60,10 +60,12 @@ Each doc carries its own summary.
    the thing itself: exit codes and structured output over string matching,
    config files over filenames, `gh pr view` over memory. When wrong, say so
    plainly and correct the record in the same breath.
-5. **Number every set of options, hierarchically and uniquely.** Choices,
-   next steps and findings get numbers; with more than one list in a reply,
-   **never restart at 1**: `1.1`, `1.2`, … then `2.1`, `2.2`, …. Keep labels
-   stable within a conversation.
+5. **Label every heading and item uniquely, so it can be referred to by a
+   short typed designation.** Each top-level heading in a reply gets a
+   letter (`A.`, `B.`, …); its items are `A1`, `A2`, …, sub-items `A1a`.
+   A reply with no headings uses `1.`, `2.`; question-card options are
+   numbered too. Each item is labelled once; keep labels stable within a
+   conversation (operator, 2026-10-24).
 6. **Flag best-practice deviations** and propose the improvement, but don't
    relitigate decisions the operator made knowingly.
 7. **Routing discipline**: route per `skills/model-routing/SKILL.md`
@@ -71,6 +73,13 @@ Each doc carries its own summary.
    tier stays retired until an operator top-up; the `agent_stats.py burn`
    alert (every 6h, 48h ahead) governs pool exhaustion: the blanket
    clinepass rule was **retired 2026-08-24**. Watch the alert, not the rule.
+8. **Upstream every local change to someone else's source** (operator,
+   2026-10-24). A fork, vendored copy or local patch: in the same session,
+   search the project's issues and PRs for a duplicate, tidy the change,
+   consult a `frontier` agent if it helps, then open the issue/PR, so an
+   upgrade never needs a merge. Nothing is version-pinned either: software
+   tracks its latest release. Detail and exceptions:
+   `site-private/memory/feedback_upstream_local_changes.md`.
 
 ## Machine context
 

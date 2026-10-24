@@ -61,12 +61,23 @@ def operator_text(after: str) -> str:
     return "" if text.startswith(HINTS) and "\x1b[" not in after else text
 
 
+OMP_MARK = "╰─ "
+
+
+def omp_after(after: str) -> str:
+    """omp draws its input as the box's last row: `╰─ TEXT … ⇧⇥ to change thinking effort ─╯`. The right border and,
+    when the line is empty, the `⇧⇥` hint are in plain-looking colours, so cut them before the style walk."""
+    after = after.split("⇧⇥", 1)[0]
+    return re.sub(r"\s*─╯(?:\x1b\[[0-9;]*m)*\s*$", "", after)
+
+
 def classify(screen: str, mark: str = "❯") -> str | None:
     """None when no line holds `mark`, else the operator text after the last one ("" = empty)."""
     lines = [ln for ln in screen.splitlines() if mark in ln]
     if not lines:
         return None
-    return operator_text(lines[-1].split(mark, 1)[1])
+    after = lines[-1].split(mark, 1)[1]
+    return operator_text(omp_after(after) if mark == OMP_MARK else after)
 
 
 if __name__ == "__main__":

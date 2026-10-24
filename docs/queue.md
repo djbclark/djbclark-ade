@@ -3,6 +3,174 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## tuios support: do it LAST (djbclark, direct, 2026-10-24)
+
+djbclark, 2026-10-24: "Queue for very end, although we can consider it a little now to make room for it any work between
+now and then: Add support for tuios (new herdr-like thing that looks cool). paseo is our first-class interface; herdr is
+secondary, and tuios for the moment is tertiary, so ask before you do anything for it that would cost a lot of tokens. Do
+web searches about it and make heavy use of web searches during all of your work in general."
+
+1. **Tier and rule.** Paseo first-class, herdr secondary, tuios tertiary (for now). **Ask djbclark before any tuios step
+   that costs many tokens** (a research slice, an adapter, a skill, an `acp-run`/`herdr-tidy`/`session-finder` port); a
+   web search or a README read is cheap and needs no ask. It runs after everything else in this file.
+2. **What it is (web, 2026-10-24).** [github.com/Gaurav-Gosain/tuios](https://github.com/Gaurav-Gosain/tuios), docs at
+   [tuios.dev/docs](https://tuios.dev/docs): a Go (Bubble Tea v2) terminal multiplexer and window manager, vim-style modal
+   interface, BSP tiling, up to 9 workspaces, kitty graphics, a daemon that keeps sessions alive. Install: `brew install
+   tuios` (or `go install github.com/Gaurav-Gosain/tuios/cmd/tuios@latest`, or the install script; `tuios update`).
+3. **Why it matters here: it is built for coding agents.** Per its README: agent state per pane (working, waiting, done,
+   errored) and an **Inbox** of everything waiting on you across sessions and machines (approvals, questions, mail, errors);
+   `tuios ask-human`, `tuios send-agent-message`; `tuios fan` (one prompt to several agents, mixed harnesses, each in its own
+   git worktree), `tuios start-agent`; **pane grants** (`read`, `write`, `fan`, `respond`, `admin`); an **MCP server**
+   (`tuios mcp`, read-only by default); a **tmux shim** (`tuios tmux-shim`, for tools that drive tmux, such as Claude Code
+   agent teams); `tuios --skill` (the guide an agent in a pane reads); a JSON verb protocol for driving the daemon; **hosts**
+   (`tuios hosts add`, ssh, Tailscale) and remote sessions (`tuios attach --host`); resume of each agent conversation after a
+   daemon restart; Program Status Protocol (OSC 7501) and shell hooks on window, session and agent events.
+4. **Likely shape of the work (not started; each needs the ask in item 1):** 1. a read-only research slice (Opus 5.5 high via
+   omp, web research plus the repo's `docs/AGENT_STATE.md` and `AGENTS.md`) on how tuios maps onto what `helm`, `herdr-tidy`,
+   `autorename`, `session-finder`, `relay.py` and `herdr-sleeper` do for herdr, and what overlaps Paseo's own host and
+   Subagents features (see "Paseo connected hosts"); 2. the security view (pane grants vs our `--perm` and yolo policy, the
+   tmux shim, `tuios mcp`) in `docs/threat-model.md`; 3. a tertiary-tier port, smallest useful first (naming rule next to
+   `-pt`/`-pw`, then session discovery, then Inbox into `helm`), only if the research says it earns its keep.
+5. **Standing order from the same message: use web searches heavily in all work**, not only here (memory
+   `feedback_heavy_web_search`).
+
+## ade-scan-state follow-up 2 after PR 39 (adversary round 70, 2026-10-24)
+
+PR 39 was approved at head 14c7347 (no BLOCK or MEDIUM). Left for one small later PR (`adhoc-2026-10-24/adv-scan-70-report.md`): 1. **LOW**: a shallow checkout WITH an origin still gets `HEAD.bundle`, `branch-<b>.bundle`, `all-refs.bundle` and `local-only.bundle` rows (`bin/ade-scan-state-doc` ~779-822) that cannot be cloned alone (`git clone` rc 128); read `c.get("shallow")` in those rows too and either copy `shallow` beside the bundle or say "restore by fetching into a clone of origin; keep origin". 2. INFO: the no-origin restore recipe leaves the bare repo's HEAD at `init.defaultBranch` (a clone warns `remote HEAD refers to nonexistent ref`); `git init --bare -b <branch>`. 3. INFO: `GITDIR_FMT` exits 0 having archived nothing when `.git` is no longer a file at paste time, so the new "refuses loudly" sentence overstates; make the command fail or reword. 4. INFO: the PR's CHANGELOG line bundles about eight changes in one line where rule 10 says one per change; split if a reviewer asks. 5. INFO: `merge_repositories` keeps the first spelling (unreachable for a symlink today).
+
+## Consider: drop the brew Paseo and run our fork instead (djbclark, direct, 2026-10-24): ASK FIRST, it is disruptive
+
+djbclark, 2026-10-24: "At appropriate point, consider if we want to remove the paseo brew install and instead just use our fork (make sure the CLI tools are on the PATH and the GUI App gets replaced and all the daemons/launchd is updated with new locations etc). Ask me before doing this work as it will be disruptive."
+
+1. **Today (verified 2026-10-24):** brew cask `paseo` 0.13.0 (`/opt/homebrew/Caskroom/paseo/0.13.0`, installed 11:15 AM) puts `/Applications/Paseo.app` (bundle `sh.paseo.desktop`); `/opt/homebrew/bin/paseo` and `~/.local/bin/paseo` are both symlinks to `/Applications/Paseo.app/Contents/Resources/bin/paseo`; launchd has `com.djbclark.paseo-desktop` (`~/Library/LaunchAgents`, opens `/Applications/Paseo.app`) and a `paseo-upgrade` label whose plist I did not find under `~/Library/LaunchAgents`, `~/ops/site-djbclark/roles` or `bin/` (locate it first). The fork is `~/src/paseo` ([djbclark/paseo](https://github.com/djbclark/paseo), upstream [getpaseo/paseo](https://github.com/getpaseo/paseo)), currently on branch `feat/workspace-identity-accent`, 4 commits ahead of `upstream/main`; packages: app, cli, client, desktop, protocol, relay, server, plugin.
+2. **Decide first (research, cheap):** why we want the fork (our patches: workspace identity accent, tab colors, lifecycle), what we lose (brew's automatic upgrades and the signed, notarized upstream build; an unsigned fork build needs a Gatekeeper decision), and how the fork would track upstream releases (a rebase cadence, a CI build on GitHub runners per item 37, never a heavy build on the Mac). Web-search the desktop packaging (`packages/desktop`, electron-builder or similar) and whether upstream publishes build instructions.
+3. **If djbclark says go (ask separately, naming what it interrupts: every Paseo agent, this window included):** 1. build the fork's desktop app and CLI; 2. `brew uninstall --cask paseo` only after the fork build runs; 3. put the fork's `paseo` on PATH at `~/.local/bin/paseo` (and remove the `/opt/homebrew/bin` symlink or point it at the fork) so every client (`acp-run`, `relay.py`, `fleet.py`, the load watcher) finds it; 4. replace `/Applications/Paseo.app` with the fork app and update `com.djbclark.paseo-desktop` and `paseo-upgrade` (through the Ansible role in site-djbclark, never a live plist edit, rule 18); 5. grep djbclark-ade, site-djbclark and site-private for the old paths (`/Applications/Paseo.app`, `/opt/homebrew/Caskroom/paseo`); 6. restart the daemon once, verify `paseo --version`, `paseo ls`, the connected-hosts round trip and the skill-sync guard (memory `project_paseo_skill_sync_writes_through_symlinks`).
+4. **Order:** after the connected-hosts upgrade is verified on stock 0.13.0 (so a regression can be told apart from the fork), before tuios. Not started; blocked on djbclark's go.
+
+## Paseo connected hosts: make full use of them, after we quiesce and upgrade Paseo (djbclark, direct, 2026-10-24)
+
+djbclark, 2026-10-24: "Add to appropriate point in our queue, we should make full use of this new feature (before doing
+this we'll need to run out the queue / quiesse here so we can install the latest paseo version that supports this and
+then restart paseo)". The feature is from the changelog of Paseo **v0.13.0-beta.2**, shipped in stable **0.13.0** (2026-10-24; [beta.2 notes](https://newreleases.io/project/github/getpaseo/paseo/release/v0.13.0-beta.2), [releases](https://github.com/getpaseo/paseo/releases); docs `docs/connected-hosts.md` in the repo). **Installed by 11:15 AM EDT 2026-10-24** (brew cask 0.13.0, `Paseo.app` and `paseo --version` both 0.13.0); whether the running daemon is on 0.13.0 is unverified (it was restarted onto beta.1 at 9:57 AM), and a restart needs djbclark's separate yes (memory `feedback_ask_before_restarting_paseo_daemon`). Status 2026-10-24 (about 10:00 AM EDT): another session restarted the daemon 0.12.0 -> 0.13.0-beta.1 (09:57-09:58 AM) on djbclark's instruction, so the quiesce in item 1 is done for that restart; beta.1 lacks connected hosts, so item 1 now reduces to: verify the daemon version, ask, restart onto 0.13.0, then item 2. Changelog text: "Connect your daemon to another machine, then ask an agent
+to delegate work there": `paseo host add 192.168.1.20:6767 --label studio`, `paseo host add 'ssh://me@build-box' --label
+build-box`, `paseo host add 'relay://...' --label laptop`; "Added connected hosts, so agents can create, prompt and
+monitor agents on other machines and see them in the Subagents track (#7370, #7593)".
+
+1. **Order (djbclark's): run the queue out first, quiesce, then upgrade.** Let running slices and adversary rounds
+   finish (rule: never throw away paid-for work), land open PRs, write the handoffs, then install the newest Paseo and
+   restart the daemon (a restart keeps agent identity and drops the in-flight turn, see the Paseo-restart memory), then
+   verify with `paseo --version` and one `paseo host add` round trip. Re-check the skill-sync guard
+   (`agents.skills.selection` in `~/.paseo/config.json`): a daemon start overwrote the vendored paseo skills once
+   (2026-10-23).
+2. **Then design the use, one slice, read-only research first** (Opus 5.5 high via omp; web research on the release
+   notes and PRs 7370 and 7593): which machines to connect (the NixOS boxes get and vps-primary, the Hermes host, Hyades
+   microVMs over `ssh://`, a relay for the laptop), what the security boundary is (a connected host means an agent here
+   can prompt agents there: threat-model entry, `--perm`/yolo policy per host, secrets only via `sudo-secretspec`), how
+   delegation relates to `acp-dispatch`, `acp-run` and Orca (a host becomes one more route in `route_agent.py plan`, never
+   an all-vendor fan-out), and how names stay `human name + id` across hosts.
+3. **Build after djbclark rules on the design**: host roster doc, `docs/mcp-servers.md`/README entries, a `paseo host`
+   health line in the fleet watcher, and the `-pt`/`-pw` naming rule extended to remote agents (see "Paseo tabs").
+4. Not started; blocked on item 1 (quiesce) and on the Paseo release being installed.
+
+## Phase 0 scan of bigteam and the Orca checkouts (proposal §8 item 1, djbclark 2026-10-20)
+
+1. **Scan, capture list and tool: done 2026-10-20 (PR #27).** `bin/ade-scan-state` and
+   `docs/ade-everywhere-phase0-scan-2026-10-20.md` list the unique bigteam reports, dirty trees, untracked
+   files and unpushed commits. Nothing was copied, pushed or deleted. Open, each needs djbclark: (a) where the
+   41 unreferenced bigteam report sets are copied (one destination); (b) `~/src/one-offs` (37 commits, no
+   remote) and its Orca worktree `Hermes`: host it or bundle it; (c) push or bundle the branches with commits on
+   no origin branch (doc section 3.2). The 54.5 GiB `adhoc-2026-10-18/hm-promo-rehearsal/` is scratch; deleting
+   it is a later cleanup decision.
+
+## Make better use of Basic Memory (djbclark, direct, 2026-10-23)
+
+djbclark, 2026-10-23: "Add another item to appropriate phrase: Look into making better use of basic memory, I do not
+think we are using it that much/makeing the best use of it, but I could be wrong. Do web searches etc." Status
+2026-10-23: **research done; djbclark accepted all eight recommendations 2026-10-23; Q1 (the security upgrade) is DONE,
+the rest is queued until the Claude quota resets** (`design-basicmemory`, Opus 5.5 high via omp, web research,
+read-only; brief `~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-basicmemory.md`, report
+`~/.local/state/bigteam/adhoc-2026-10-23/design-basicmemory-report.md`). Verdict, last 30 days: djbclark is right about
+the tool and wrong about the store. 680 notes in `main`, and 301 of 3,074 Claude sessions (9.8%) touch the store as
+files, but only 32 sessions (1.0%) made any Basic Memory MCP call (46 calls: `search_notes` 23, `write_note` 15,
+`build_context` and `schema_*` 0, `recent_activity` 1), Codex made none, there are zero `decision` notes, and Hermes's
+provider has been off since about 2026-10-03. **Q1 done 2026-10-23 (~9:20 PM):** GHSA-4gfv-c2mm-mvj2 (High, 7.7: no
+Host/Origin check on the HTTP transports, so DNS rebinding from any web page) affected our v0.23.2 streamable-http
+server; upgraded with `uv tool upgrade basic-memory` to v0.24.1 after an index backup in
+`~/.basic-memory/backup-2026-10-23/`, restarted `com.djbclark.basic-memory-mcp`, verified a foreign `Host` gets 421
+and a foreign `Origin` gets 403 while a loopback request is served; sessions reconnect with `/mcp`. Rulings Q2-Q8: 2.
+shadow our own `claude/hooks/bm_recall.py` (titles only, 400 tokens at most) against `bm hook session-start` for a
+week, keep the cheaper one that passes the recall evaluation, never both live; 3. move the 193 per-project auto-memory
+files into `site-private/memory/projects/<slug>/` with symlinks back (a dir already symlinked into its repo keeps being
+its own project); 4. re-enable Hermes's Basic Memory provider with `capture_per_turn: false`; 5. remove the 8 empty
+`~/agent-memory/*` projects, archive (not delete) the 3 dead `basic-memory/` subtrees; 6. handoffs older than 30 days go
+to `handoffs/archive/`; 7. backfill `type:` on the 321 prefixed root notes by one reversible script commit; 8. a
+`ruling` only for something djbclark said (quoted, dated), agents' own choices are `decision` notes with a relation to
+the handoff or PR. Build: the report's W2-W8 (drift fixes, `bin/bm-lint`, `bm_recall.py` in shadow mode, handoff
+observations and relations, type backfill and schemas, recall evaluation harness, Q3/Q4 config), Sonnet 5.5 workers.
+Phase placement: R2 now, the M1 track beside Phase 1, R7/R9 with proposal 6.4 / Phase 5. The report measures the store (note counts, growth,
+relations, orphans) and real agent use (MCP tool calls per day from the transcripts), compares with the per-project
+auto-memory files, `docs/handoffs/`, `session-finder` and Hermes memory, surveys what works elsewhere, and recommends
+capture and recall hooks, note schemas and consolidation, plus the phase it belongs in
+([`docs/ade-everywhere-proposal.md`](ade-everywhere-proposal.md) section 8; levels in
+[`docs/ai-memory-landscape.md`](ai-memory-landscape.md)). Nothing is built.
+
+## Heavier use of Hermes worktrees and cow pastures so agents stop stepping on each other (djbclark, direct, 2026-10-23)
+
+djbclark, 2026-10-23: "Also add to appropriate phase if we haven't yet, we should probably be making heavier use of
+hermes worktrees and cow pastures, to avoid agents stepping on each other's toes. Do web searches and consult a
+strong model on this as well." Status 2026-10-23: **design done, all seven recommendations accepted by djbclark
+2026-10-23, build queued until the Claude quota resets** (report
+`~/.local/state/bigteam/adhoc-2026-10-23/design-isolation-report.md`, Opus 5.5 high via omp with web research; brief
+`~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-isolation.md`). Rulings: 1. Hermes stays never a
+target (`hermes -w` is not used; its design is borrowed). 2. No agent edits in the primary `~/src/<repo>` (integration
+and fast-forward only; the lead's doc commits move to its own pasture). 3. `~/ops` may get a linked worktree outside
+`~/ops` when two agents must write one ops repo, guard-enforced (`stash` and autostash refused in `~/ops`). 4.
+`acp-dispatch --workspace auto` is the default for `--kind code`, `shared` opt-in. 5. The git guard covers
+acp-run-launched agents plus a Claude hook first; `~/.local/bin/git` only after a week with no false refusals. 6. The
+placement is a queue gate **I0 (workspace isolation)** ahead of Phase 1's first parallel fan-out, with Phase F section
+4 and proposal 9.4 consuming its adapter. 7. The reaper removes clean, merged and released pastures without asking;
+dirty or unpushed ones only ping. The build is the report's slices W1-W8 (claim library and guard `ade-git-guard`,
+`cow-pasture` claims and reaper, `acp-dispatch --workspace`, acp-run PATH, Claude hook, gate test, docs, home rules),
+Sonnet 5.5 `code` workers, adversary on W1 and W3 at minimum. The report decided which phase of
+[`docs/ade-everywhere-proposal.md`](ade-everywhere-proposal.md) section 8 this belongs in (or a step before Phase 0),
+what "Hermes worktrees" is (Hermes is never a routing target: whether its worktree mode as a user feature needs a
+ruling), when an agent gets a pasture, worktree or the shared checkout, claim files, and guards in `bin/cow-pasture` /
+`acp-dispatch` against `reset --hard`, `checkout --` and `stash` in a pasture the agent did not create. Motivating
+incident (2026-10-23): a `git reset --hard origin/...` ran inside the phase0-scan pasture and wiped uncommitted edits.
+Nothing is built; the phase placement is added here and to the proposal once the report lands.
+
+## Paseo tabs: how to use them, a `-pt` naming rule, autorename for tabs, and a rename-history store (djbclark, direct, 2026-10-23)
+
+djbclark, 2026-10-23: "I just realized paseo has tabs. Put in the appropriate place and ask a strong model to consider
+how we should use tabs. Add a naming convention for paseo tabs that the titles are all lower case and hyphenated and
+end in -pt (paseo tab) and the names should be short as only around 17 characters are visible even if it is the only
+tab. Also make autorename work with paseo tabs, and just like workspaces we need to track the names of tab to be able
+to find them even if the user changes them in the UI after the autorename etc. This history system should also apply
+to herdr panes, tabs, and workspaces, our sqlite database might be a good place to do this, but again consult with a
+strong model on this problem, and ask me any questions that come up when this feature implementation surfaces."
+Status 2026-10-23: **design done, all ten recommendations accepted by djbclark 2026-10-23, build queued until the
+Claude quota resets** (report `~/.local/state/bigteam/adhoc-2026-10-23/design-tabs-report.md`, Opus 5.5 high via omp;
+brief `~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-tabs.md`). Rulings: 1. The Paseo agent name is
+the short tab name (`adv-r3-pr31-pt`); the sentence title stays in the provider session and the `-pw` workspace name.
+2. Workers and adversary rounds are sub-agent tabs in the lead's workspace. 3. The store is a new
+`~/.local/state/ade/names.sqlite` (not session-finder's index). 4. An unexplained rename counts as `user`, so `--auto`
+never touches it. 5. A launchd job `com.djbclark.ade-names` (60 s Paseo poll, 5 min herdr reconcile) plus a herdr
+plugin, plist in this repo. 6. `-p` is retired for Paseo workspaces (`-pw` only). 7. Closing a top-level Paseo agent tab
+archives the agent; a Paseo mode for `herdr-tidy` is a later slice. 8. Names are kept forever, with `ade-names forget`.
+9. Autorename stays in-session; the poller only observes. 10. The rule lives in the autorename skill,
+`workspace-layout.md` and the repo AGENTS.md row, no home item. The build is the report's slices 1-8 (docs, `paseo_tab_name`
+and the `--auto` agent-name guard, `bin/ade-names`, herdr plugin and launchd, consumers, session-finder, backup entry,
+upstream issue draft), Sonnet 5.5 workers; slice 8 and 1 may go first and slice 2 alone fixes the `--auto` overwrite bug.
+
+1. **Tab usage convention**: what lives in a tab, one agent per tab or not, how the skills create, reuse and close tabs.
+2. **Naming rule**: lowercase, hyphenated, ending `-pt`, about 17 visible characters including the suffix; goes into
+   the `autorename` suffix table (`-t` herdr tab, `-p` herdr pane, `-pw` Paseo workspace) and `workspace-layout.md`.
+3. **`autorename` for Paseo tabs**, never overwriting a name the user set.
+4. **Name-history store** for herdr workspaces/tabs/panes and Paseo workspaces/tabs: every name seen or set, who set it,
+   when and the stable id, so a lookup by any historical name or id finds the object and its session after a UI
+   rename; SQLite is the candidate, the design slice decides where and how it is observed.
+5. **Questions for djbclark** come out of the design report (its section 6): relay them as they surface.
+
 ## Make full use of the podman, kev, laya and hyades-docker microVMs (djbclark, direct, 2026-10-23)
 
 djbclark, 2026-10-23: "At an appropriate point, make sure that we make full use of the podman, kev and laya
@@ -165,6 +333,12 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    master (`~/.local/state/bigteam/rework2-codex-triage/codex-triage-report.md`); `bin/pr-wait` (PR
    [34](https://github.com/djbclark/djbclark-ade/pull/34)) gains `merge_ready` and open earlier-head findings, and
    AGENTS.md rule 9 is corrected in the same PR.
+9. **Accepted LOWs and declined findings from the 2026-10-23 rework-2 PRs** (residual, one small PR each when picked up):
+   1. PR 38 adversary round 1 LOWs (acp-dispatch rearm hint): L1 "up to 2.0 h" rounds down for waits of 7201-7379 s (round up); L2 compare wait_timeout with TOOL_TIMEOUT_MAX_S minus two 60 s passes so boundary waits get the re-arm text; L3 usage header (bin/acp-dispatch:186-188) should say the hint always names timeout 7200000 and adds the re-arm rule for long or unlimited waits. Report: ~/.local/state/bigteam/rework2-codex-triage/adv-codex-fix-c-1-report.md
+   2. PR 37 adversary round 1 LOWs (skill-everywhere): in-tree link amplification in canonical mode; check-vs-cp TOCTOU via an outside path component; the inherited SKILL_EVERYWHERE_NO_COPY drop in ade-update:313 is untested. Report: ~/.local/state/bigteam/rework2-codex-triage/adv-codex-fix-b-1-report.md
+   3. PR 32 adversary round 6 LOW: tests/test_bin_modes.py docstring and CHANGELOG say "outside tests/", while the code exempts any tests/ directory at any depth.
+   4. PR 33 adversary round 2 LOW: no test pins that `xhigh` and `max` are accepted as [lead] effort values.
+   5. Declined from the 2026-10-23 Codex triage (threads left open): PR 25 4323896253 (relay.py Claude-derived custom provider ids; refuses safely) and PR 22 4323297397 (acp-dispatch footer slot wildcard; the stripping also cleans a copied footer, which helped on 2026-10-23).
 
 ## Follow-ups from the 2026-10-20 reviews
 
@@ -327,6 +501,16 @@ sends is unlabelled (arrives as the operator's turn) and a target or text starti
 is composed by load-watch, so lower risk, but fix before it ever sends untrusted text: call
 `skills/session-finder/relay.py` instead of its own `paseo send`, or copy relay.py's `--`, label and `paseo_gate`.
 One small Sonnet `code` slice with the fake `paseo`.
+
+**Update 2026-10-23:** the `--` half is done (`86b288b`: argv is `send --no-wait --json --behavior steer -- <target> <text>`;
+the same commit added a bounded retry on the daemon-restart codes, `9f9cae8`). Still open: the label and the archived/permission
+gate above. Adversary APPROVE on both commits (reports `~/.local/state/agent-reports/14564811-383c-4575-9cf7-2b4ba5845f6d/`);
+open lows on `86b288b`: (R1) a retry that dies by timeout never sets the give-up flag, so later sends in a long Paseo outage
+can each pay up to about 30 s again; (R2) one stray warning line on stderr makes the JSON parse fail and silently turns the retry
+off (parse the last JSON line, or each line); (R3, pre-existing) `subprocess.run(text=True)` can raise `UnicodeDecodeError`
+outside the `except`, aborting the sample (use `errors="replace"`); (R4) the usage text says "the rest of that process make one
+attempt each"; (R5) a comment at the argv saying every option must precede `--` (an option placed after it silently becomes
+text and the send goes to the default daemon). No test covers R1.
 
 ## ADE-everywhere Phase 0, preserve and classify (djbclark, 2026-10-20; proposal section 8 item 1)
 
@@ -1420,15 +1604,19 @@ gateway agent with `relay.py`. Design: `~/.local/state/bigteam/loadgate-followup
    Open by design: **R1-M2** (a relay while the gateway is mid-turn: `fleet.py` fixes the row at `idle`, and the
    gateway's cached agent may not see the relayed exchange until it reloads; "delivered" means "ran on the stored
    transcript"), **R1-L4** (the exchange is invisible in the chat but is history for djbclark's next turn; consider a
-   one-line chat notice), **R1-L5e** (`SessionResumeTooLargeError` on a long thread reports "unverified" with nothing
-   sent), **R2-L6** (a profile Hermes with its own `HERMES_HOME` gets "not sent" for another profile's conversation;
+   one-line chat notice), **R2-L6** (a profile Hermes with its own `HERMES_HOME` gets "not sent" for another profile's conversation;
    documented). Hop counting across non-Hermes routes (R2-M3) is not enforced: documented as nested-`-z`-only.
    **Round 3: APPROVE at a70d792** (`adversary-report-3.md`); its M1-M3 and L4/L5/L6a/L8 are repaired in the next commit
    (claims made true about a caller's tree-kill, session-key self-refusal for desktop, real-process lock test, handler
-   test). Left open, low: R3-L1 (not-found forgery by a process that rewrites the `.err` within 50 ms), R3-L2 (signal in the
-   microsecond window before the handler), R3-L3 (RELAY_SENDER/RELAY_HOPS leak to everything a relayed turn starts),
-   R3-L6b-e (prune race, lock files never pruned, no holder pid in the refusal), R3-L8e (`--json` timeout result has no
-   `reply_file` field).
+   test). Left open by design, low: R3-L1 (not-found forgery by a process that rewrites the `.err` within 50 ms), R3-L2 (signal in the
+   microsecond window before the handler). FIXED e494801 (2026-10-23, each with a test a mutant fails): R1-L5e (`This session is too long to
+   reload safely` with rc 1, empty stdout and that single line is "not sent: that Hermes thread is too large to reload", from
+   `assert_resume_safe` running before any write in `hermes_cli/oneshot.py`); R3-L3 (RELAY_HOPS and RELAY_SENDER are ignored when the
+   nearest agent ancestor, read from `ps`, is another agent than Hermes (superseded 2026-10-24: ignored when another agent sits between the relay and `RELAY_HOP_PARENT`); an unrecognised tree still counts them, so loop protection
+   fails closed: NOT TRUE for the real Hermes process, see the 2026-10-24 repair below); R3-L6b (a prune that loses the race still removes the `.err`), R3-L6c (lock files idle 7 days are pruned if unheld; the
+   lock is re-opened when its inode is no longer the path), R3-L6d (the child's pid is written into the lock file and named in the refusal),
+   R3-L6e (a sid too long for a file name, or a symlinked lock, is a clean "not sent"); R3-L8e (`reply_file` in the `--json` result of a
+   timed-out or failed turn).
    **2026-10-23, load-watch report:** a relayed turn ends its row with `end_reason=agent_close`; the gateway treats that as
    recoverable (`hermes_state_common._RECOVERABLE_END_REASONS`) and reopened the same session about five minutes later
    (`~/.hermes/logs/gateway.log`: "reopened ended session 20261005_212354_16790ed2 ... keeping route"), so no context is lost
@@ -1436,18 +1624,95 @@ gateway agent with `relay.py`. Design: `~/.local/state/bigteam/loadgate-followup
    (`_hermes_gateway` lists `agent_close` rows not superseded by a newer row of the same session key).
 3. **Installed 2026-10-23 16:29** by Hermes itself on a relayed brief from the load-watch session (djbclark's ask): `~/.hermes/skills/peer-relay` is a symlink to `skills/peer-relay`. Hermes-to-peer direction is the load watcher's retest.
 
-## relay.py pane route: open lows after adversary round 9 (2026-10-23)
+## relay.py pane route: lows after adversary round 9 (2026-10-23)
 
-Rounds 1-9 on the route ladder; round 9's four mediums are repaired in eda41d3. Still open (reports:
-`~/.local/state/bigteam/adhoc-2026-10-23/relay-ladder-adversary-report-9.md`, items 5, 6, 8, 10):
+Rounds 1-9 on the route ladder; round 9's four mediums are repaired in eda41d3. Its lows (reports:
+`~/.local/state/bigteam/adhoc-2026-10-23/relay-ladder-adversary-report-9.md`, items 5, 6, 8, 10), working tree of
+2026-10-23, awaiting the lead's review and a round-10 adversary pass:
 
-1. A queue `enqueue` counts as "delivered"; if the operator pulls it back into the box (Up, Esc-interrupt: `remove`
-   with a reason other than `absorbed_mid_turn`, or `popAll`) the caller is told "delivered" while the text sits in the box.
-   Label an enqueue "queued" and treat a later pull-back as not delivered.
-2. A short common text ("continue", "yes", "1") the operator types himself within the hour counts as our delivery;
-   require the user line's timestamp near the entry's `at`.
-3. One unsent entry per session id: arming a second text overwrites the first (key by session id and folded text, or
-   refuse to type a new text while another unproven entry is younger than the TTL).
-4. No real `herdr agent read --format ansi` or `tmux capture-pane -e` capture of an idle Claude Code pane is committed
-   as a fixture; `box_parse` is proven on synthetic screens only (a statusline row of 10+ `─` below the box, or queued
-   messages drawn as `❯` rows under a rule, would make it skip for good).
+1. DONE 2026-10-23: an enqueue is "queued" (exit 0), never "delivered"; an enqueue followed by a `remove` for any reason
+   but `absorbed_mid_turn`/`delivered_to_agent` (the two reasons real transcripts carry), or by a `popAll`, is "pulled":
+   unverified, never submitted for the operator, its retry types nothing (`tx_state`, `PULLED_WHY`).
+2. DONE 2026-10-23: an entry whose recorded draft is "" (we never saw our copy) is proven only by a user or enqueue line
+   stamped between its typing time (new `typed` field; old entries: `at` - 30 s) and `at` + 10 s (`proof_window`); a
+   retry that pressed Enter itself accepts a line stamped after that press.
+3. DONE 2026-10-23: chose the simpler repair, not keying: while an earlier text's entry is unproven and younger than
+   the TTL, a different text is skipped (not typed), so the earlier text's retry cannot type it twice. Cost: that
+   session takes no other text by pane for up to an hour after an unproven send (the socket route still can).
+4. OPEN (skipped 2026-10-23, no suitable live pane): no real `herdr agent read --format ansi` or `tmux capture-pane -e`
+   capture of an idle Claude Code pane is committed as a fixture; `box_parse` is proven on synthetic screens only (a
+   statusline row of 10+ `─` below the box, or queued messages drawn as `❯` rows under a rule, would make it skip for
+   good). Needs a Claude Code TUI running in a herdr or tmux pane; capture read-only, scrub, commit under
+   `tests/fixtures/`, add a `box_parse` test.
+
+Round 1 (2026-10-23) BLOCKed this: the stamp window decided a press (a recalled copy of a delivered text could be submitted
+twice), commit 4572876 listed closed keyless subagent/desktop children as live Hermes conversations, and the unsent file had no
+lock. Repaired the same day (the stamp only claims success; `end_reason='agent_close' AND session_key IS NOT NULL AND source <>
+'subagent'`; `flock` on the unsent file and per pane); round 2 APPROVED (reports `~/.local/state/bigteam/relay-pane-lows/
+adversary-report.md`, `adversary-report-2.md`). Lows from round 2, all FIXED d2e3e27 (2026-10-23, each with a test a mutant fails): (P1)
+`pulled_and_discarded` now decides on the unwindowed state (a copy submitted by hand after the window keeps the entry); (P2) a `dequeue` credits our
+text only when the next user line or `queued_command` attachment IS our text, else ours stays queued; (P3) a held pane lock returns "skip", so the
+socket route may still deliver; (P4) tests for the failed temp-file removal and the final transcript look; (P5) an entry records its transcript file,
+and one whose pane now has another transcript is never pressed, retyped or proven ("unverified", `MOVED_WHY`).
+
+## Paseo agents in fleet.py and relay.py: lows after adversary review (2026-10-23)
+
+`fleet.py` lists every non-archived Paseo agent of any provider; `relay.py` takes a hex id prefix of 6+ characters; a working agent whose
+provider cannot steer (cline and every other ACP provider) is refused. Adversary APPROVE (report
+`~/.local/state/bigteam/paseo-listing/adversary-report.md`). Lows, all repaired 2026-10-23 on `fix/queued-lows-2026-10-23`, each with a test a
+mutant fails: (L1) FIXED 543bbcc: tests for helm keeping a Claude-on-Paseo agent in the attention queue, the 20 s `paseo ls` timeout, the
+exit-code check and the `--all` wiring; (L2) FIXED 543bbcc: `fleet.py` reads one `paseo permit ls --json` and marks a running agent with
+a pending card `blocked` (`paseo_pending`); helm shows a `permission` item pointing at the Paseo UI / `paseo permit allow|deny` (never keys), relay refuses it;
+(L3) FIXED 543bbcc, decided: a Paseo agent with no Claude registry row never matches by name (workspace title) in `find()`, only by id, Paseo id or hex
+prefix; (L4) FIXED 543bbcc, decided: no pre-send detection exists (`inspect` and `agent logs` carry no compaction or review-turn state; checked in the
+Paseo 0.13 CLI source), so the guard is a refusal: a working codex, omp, opencode or pi agent needs `--steer`, claude stays steered by default (the accepted
+residual). Say if omp should be steered by default again: one constant, `fleet.PASEO_STEER_DEFAULT`. The workspace-name ledger (rework lead, brief
+`~/.local/state/bigteam/workspace-name-ledger/brief.md`) builds on this; it must not rely on matching a sid-less Paseo row by title.
+
+## Queued lows branch: adversary BLOCK and repair (2026-10-24)
+
+Adversary BLOCK on `fix/queued-lows-2026-10-23` at 91d3d72 (`~/.local/state/bigteam/queued-lows-2026-10-23/adversary-report.md`): H1, M1, L1-L6.
+Repaired the same day, each with a test a mutant fails (`queued-lows-repair-1-report.md` in that folder lists the commits and mutants):
+(H1) R3-L3 walked the `ps` tree looking for a process NAMED hermes, but the real one is `python3 -I -c import os, ...`, so a relay Hermes made
+inside a relayed turn reached the original caller's claude: wrong sender tag, no hop count. Now `hermes_env` sets `RELAY_HOP_PARENT` (the starting relay's pid)
+and `hermes_hops` counts when the walk up from `getppid()` reaches that pid (or pid <= 1) before another agent, else ignores the markers; no or a bad
+`RELAY_HOP_PARENT` counts (fails closed). (M1) a Paseo agent with several pending cards showed only the first, and `paseo permit allow AGENT` without a request id
+approves ALL of them (`deny` without one fails): cards keep their request ids, helm prints `allow|deny AGENT REQUEST_ID` per card (8 shown, then `paseo permit ls`),
+the fingerprint covers every id. (L1) `fleet.clean_text` (moved from `relay.clean_reply`) also cleans card text. (L2) the pane lock file holds a hash of the text in
+flight: the same text stops, a different one skips to the socket. (L3) a refused Hermes lock flock on a replaced inode is retried. (L4) a moved P5 entry blocking another text
+says so. (L5) a tool_result-only user line no longer ends the wait for the prompt a `dequeue` handed over; the real ordering with a `queued_command` attachment is not in the
+operator's transcripts (checked 2026-10-24: no attachment follows a dequeue in ~5000 of them), so this is the safe reading, pinned by a test only. (L6) docs. Open from this round: none (round 2, below, found M-A and L-A to L-F).
+
+## Queued lows branch: adversary round 2, APPROVE at 98f3d61 (2026-10-24)
+
+Report: `~/.local/state/bigteam/queued-lows-2026-10-23/adversary-queued-lows-2-report.md` (M-A, L-A to L-F; no regression from the repair).
+FIXED on the branch, each with a test a mutant fails (`queued-lows-repair-2-report.md` lists commits and mutants): (L-A) a Paseo request id must start with a letter
+or digit (`--all` and `-h` matched the old pattern, and commander reads `allow AGENT --all` as the option: approve every card); helm prints
+`paseo permit allow|deny <agent> -- <request id>` (checked 2026-10-24 against the commander 12.1.0 inside Paseo.app: `--` ends option parsing). (L-B) the `relay.py`
+usage text states the real rule (the markers are ignored when another agent sits between the relay and `RELAY_HOP_PARENT`, the pid of the relay that started the turn).
+(L-C) `RELAY_SENDER` is accepted only as `hermes [A-Za-z0-9_-]{1,8}`. (L-E) the dequeue scan skips a user line only when every block is a `tool_result` (superseded by round 3 LOW-2 below).
+Scope (M-A, docs only): the hop count and the `hermes ...` tag cover relays Hermes starts through its terminal tool and background processes (both keep `RELAY_*`).
+A relay started from Hermes's `execute_code` sandbox is NOT covered: `~/.hermes/hermes-agent/tools/code_execution_env.py:25-26,75-86` (`_scrub_child_env`) keeps only
+PATH, HOME, USER, LANG, LC_, TERM, TMP*, SHELL, LOGNAME, XDG_, PYTHONPATH, VIRTUAL_ENV, CONDA and a short HERMES_ allowlist, so the inner relay sees no `RELAY_HOPS`,
+`hermes_hops()` is 0, `sender_name` takes the `self` row (the caller's own Claude session: fleet marks it `self` through the ancestor pid or the inherited `HERDR_PANE_ID`),
+and the nested turn starts again at `RELAY_HOPS=1`. The chain is still bounded by the per-conversation Hermes locks; the label is accidental, not a security boundary.
+Adversary round 3, APPROVE at a062b41 (`adversary-queued-lows-3-report.md`, 2026-10-24): LOW-1 to LOW-3 FIXED on the branch, each with a test a mutant fails: (LOW-1) the `--` in helm's `cmd_keys`
+refusal for a Paseo item is pinned (d4cc9e3); (LOW-2) the dequeue scan skips a user line with a `tool_result` block and no text block, so an AskUserQuestion answer with a pasted image is skipped again
+and an image-only or document-only prompt still counts as someone else's (e3049ff); (LOW-3) CHANGELOG shows `paseo permit allow|deny <agent> -- <request id>` on the 2026-10-23 line (f059b7b; this file's round-1 record stays as history).
+
+OPEN (adversary fix text kept; not implemented, 2026-10-24):
+
+1. **M-A, env-free detection of a relayed turn (MEDIUM).** `relay.py` already writes the Hermes child's pid into the conversation's lock file (`route_hermes`).
+   The inner relay walks its ancestors and, for each one, checks whether it is the pid recorded in a lock file under `HERMES_DIR` that is currently held (a non-blocking
+   flock fails). If such a pid comes before any other agent, the relay is inside a relayed turn. The hop count is the number of such ancestors, and the sender is
+   `hermes <sid[-8:]>` with the sid taken from the lock file name. This also removes the forgery residual of L-C (a process inside the turn can unset `RELAY_HOPS`
+   or set `RELAY_HOP_PARENT` to a pid outside its ancestry; the L-C fix only stops a forged *name*). The `RELAY_HOPS` env markers can then become a cross-check or go.
+2. **L-D, the pane lock's hash can be missed while the holder releases (LOW).** `_flock` truncates the file in `finally` before `os.close` and `pane_sending` reads it
+   five times over 100 ms. If B's non-blocking flock fails while A holds the lock, and A then truncates and closes, B reads an empty file, `pane_sending` returns False,
+   B returns "skip" and goes to `route_socket`, which has no check for an unproven entry: A's text, already typed and recorded, arrives twice. The same happens if A
+   has not written its hash within 100 ms of taking the lock (a loaded machine). Fix: when `pane_sending` sees an empty file after its retries, try the pane lock once
+   more (blocking briefly or polling). If the lock is now free, take the normal path under it, where `pane_send`'s P5 check sees A's entry; do not skip to the socket.
+   (B's "stop ... do not resend" while A's own routes all fail tells B's caller not to resend something A's caller was told was not sent: acceptable, the same text.)
+3. **L-F, the CHANGELOG lines for the queued lows carry no PR number** (code-review rule 10): fixed 2026-10-24, the lines end with PR 40.
+4. Accepted residual (L-A, related): `permit allow` picks the first card whose `id === reqId || id.startsWith(reqId)` in list order, so a request id that is a proper
+   prefix of an earlier card's id would answer that other card; with UUID or `permission-<uuid>` ids it cannot happen.
