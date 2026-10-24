@@ -31,7 +31,7 @@ Only the Codex app is believed: a state marker counts only from a comment whose 
 `chatgpt-codex-connector`; the repo is public, so anyone can post a comment holding the markers.
 
 Findings for the head are the PR's inline comments (`pulls/N/comments`) that carry
-`<!-- codex-code-review-finding:v1 -->`, are authored by that bot, and belong to the head: their
+a finding mark (`<!-- codex-code-review-finding:v1 -->` or `<!-- codex-security-review-finding:v1 -->`), are authored by that bot, and belong to the head: their
 `original_commit_id` is the head, or their `pull_request_review_id` is a `pulls/N/reviews` entry whose
 `commit_id` is the head. No time window (2026-10-23, adversary round 1: Codex's own receipt comments
 quote `@codex review`, so a "newest request" moved past real findings; PR 12 on 2026-10-20). GitHub
@@ -42,16 +42,28 @@ Open findings: a finding of an EARLIER head stays open until its review thread i
 2026-10-23: Codex left a P1 on head 3c40470, two pushes followed, the marker for the new head said
 `has_unresolved_findings: true` and the head-only filter said 0). So the waiter also reads the PR's review
 threads (`gh api graphql`, `reviewThreads.isResolved`, the authority) and lists every unresolved Codex
-thread of any head, outdated or not, in PREFIX-open-findings.json (`null` when not collected). Fixing a
-finding means fixing the code, then resolving its thread.
-Summary fields: has_any_findings and has_unresolved_findings (from the marker), findings_for_head,
-open_findings (unresolved Codex threads, outdated or not) and open_findings_outdated (the outdated
-subset), findings_mismatch (list of reasons; the marker and the threads disagree: has_unresolved_findings
-true with no open thread, false with some, or has_any_findings true with no Codex finding comment at
-all; never print a clean 0 over one), merge_ready and merge_blockers. merge_ready is true only when: at
-least one CI check ran and all passed, Codex completed on this head, zero open Codex threads, no
-mismatch, and the marker states has_unresolved_findings as a boolean (otherwise `marker-unverified`).
-The exit code does not carry it: the caller reads merge_ready.
+thread of any head, outdated or not, in PREFIX-open-findings.json (`null` when not collected); a thread
+counts when ANY of its comments (up to 100) is a Codex finding. Fixing a finding means fixing the code,
+then resolving its thread.
+Two Codex reviews, treated alike: code findings carry `<!-- codex-code-review-finding:v1 -->` and the
+marker's `code_review`; security findings carry `<!-- codex-security-review-finding:v1 -->` and the
+marker's `security_review` (PR 20 thread 4361214081 is an open one). Every finding and open thread has a
+`kind` (`code` or `security`). The wait ends only when `security_review` is terminal too, if the marker
+carries one. A marker WITHOUT `security_review` is not blocked on it (nothing to verify; the open threads
+of both kinds still gate) and the summary says `security_status: absent`.
+Summary fields: has_any_findings and has_unresolved_findings (marker `code_review`) with security_ twins,
+security_status, findings_for_head (and _by_kind), open_findings (unresolved Codex threads, outdated or
+not; open_findings_by_kind) and open_findings_outdated (the outdated subset), findings_mismatch (list of
+reasons; per kind the marker and the threads disagree: has_unresolved_findings true with no open thread of
+that kind, false with some, or has_any_findings true with no Codex finding comment of that kind; never
+print a clean 0 over one), merge_ready and merge_blockers. merge_ready is true only when: at least one CI
+check succeeded and none failed or is pending (skipped and neutral count as passed beside a success,
+never alone), Codex's code review completed on this head, the security review too when the marker carries
+it, zero open Codex threads of either kind, no mismatch, and the marker states has_unresolved_findings as
+a boolean for each review it carries. merge_blockers lists why not: codex-<status>, security-<status>
+(security-failed, security-running, security-other-head), findings-not-collected, marker-unverified,
+security-marker-unverified, no-checks, ci-pending, ci-failed, ci-none-succeeded, open-findings,
+findings-mismatch, codex-skipped. The exit code does not carry it: the caller reads merge_ready.
 
 A `gh` failure (or empty `gh` output) is "unknown", never "done": it is retried on the next poll and
 reported in the summary (`errors`) when the wait ends. A PR that does not exist (HTTP 404) is a usage error.
@@ -90,7 +102,8 @@ from pathlib import Path
 DEFAULT_REPO = "djbclark/djbclark-ade"
 SUMMARY_MARK = "<!-- codex-pull-request-review-summary -->"
 STATE_RE = re.compile(r"codex-review-state:v1\s+")
-FINDING_MARK = "codex-code-review-finding:v1"
+FINDING_MARKS = (("codex-code-review-finding:v1", "code"), ("codex-security-review-finding:v1", "security"))
+KINDS = ("code", "security")
 CODEX_LOGIN = "chatgpt-codex-connector[bot]"
 CODEX_APP = "chatgpt-codex-connector"
 CODEX_GQL_LOGIN = "chatgpt-codex-connector"  # GraphQL author login: no [bot] suffix
@@ -191,7 +204,9 @@ def fetch_checks(repo: str, sha: str) -> list[dict]:
 def ci_counts(checks: list[dict]) -> dict:
     pending = sum(1 for c in checks if c["state"] == "pending")
     passed = sum(1 for c in checks if c["state"] == "finished" and c["conclusion"] in PASS_CONCLUSIONS)
-    return {"total": len(checks), "pass": passed, "fail": len(checks) - pending - passed, "pending": pending}
+    succeeded = sum(1 for c in checks if c["state"] == "finished" and c["conclusion"] == "success")
+    return {"total": len(checks), "pass": passed, "success": succeeded,
+            "fail": len(checks) - pending - passed, "pending": pending}
 
 
 # ---- Codex ----------------------------------------------------------------------------------------
@@ -243,6 +258,21 @@ def code_review(state: dict | None) -> dict:
     return cr if isinstance(cr, dict) else {}
 
 
+def security_review(state: dict | None) -> dict | None:
+    """The marker's `security_review` object, or None when the marker carries none."""
+    sr = (state or {}).get("security_review")
+    return sr if isinstance(sr, dict) else None
+
+
+def review_terminal(state: dict | None, head: str) -> bool:
+    """Codex is done with the head: the code review is terminal, and so is the security review when the
+    marker carries one (a security finding is posted by that review, after or beside the code one)."""
+    if code_review(state).get("status") not in TERMINAL:
+        return False
+    sr = security_review(state)
+    return sr is None or (sr.get("status") in TERMINAL and sr.get("commit_sha") in (None, head))
+
+
 def parse_ts(s: str) -> datetime:
     d = datetime.fromisoformat(s.strip().replace("Z", "+00:00"))
     return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
@@ -251,15 +281,22 @@ def parse_ts(s: str) -> datetime:
 THREADS_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){"
     "pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor} "
-    "nodes{isResolved isOutdated comments(first:1){nodes{databaseId author{login} path originalCommit{oid}}}}}}}}"
+    "nodes{isResolved isOutdated comments(first:100){nodes{databaseId author{login} path originalCommit{oid}}}}}}}}"
 )
 
 
+def finding_kind(body: str) -> str | None:
+    for mark, kind in FINDING_MARKS:
+        if mark in body:
+            return kind
+    return None
+
+
 def fetch_threads(repo: str, pr: int) -> list[dict]:
-    """Every review thread of the PR: its first comment's databaseId, author, path, original commit and
-    whether the thread is resolved / outdated. GraphQL `reviewThreads.isResolved` is the authority on
-    whether a finding is still open (PR 32, 2026-10-23: an earlier head's P1 stayed open past two pushes).
-    Owner and name go through `-f` (strings: `-F` would turn a digits-only name into an integer)."""
+    """Every review thread of the PR: all its comments (databaseId, author, path, original commit; up to
+    100 per thread) and whether the thread is resolved / outdated. GraphQL `reviewThreads.isResolved` is the
+    authority on whether a finding is still open (PR 32, 2026-10-23: an earlier head's P1 stayed open past
+    two pushes). Owner and name go through `-f` (strings: `-F` would turn a digits-only name into an integer)."""
     owner, name = repo.split("/", 1)
     threads: list[dict] = []
     cursor: str | None = None
@@ -278,14 +315,11 @@ def fetch_threads(repo: str, pr: int) -> list[dict]:
         if doc.get("errors"):
             raise GhError(f"graphql reviewThreads: errors: {str(doc['errors'])[:200]}")
         for n in nodes:
-            first = ((n.get("comments") or {}).get("nodes") or [None])[0]
-            if not isinstance(first, dict):
-                continue
-            threads.append({"databaseId": first.get("databaseId"),
-                            "author": (first.get("author") or {}).get("login"),
-                            "path": first.get("path"),
-                            "original_commit_id": (first.get("originalCommit") or {}).get("oid"),
-                            "isResolved": bool(n.get("isResolved")), "isOutdated": bool(n.get("isOutdated"))})
+            comments = [{"databaseId": c.get("databaseId"), "author": (c.get("author") or {}).get("login"),
+                         "path": c.get("path"), "original_commit_id": (c.get("originalCommit") or {}).get("oid")}
+                        for c in ((n.get("comments") or {}).get("nodes") or []) if isinstance(c, dict)]
+            threads.append({"comments": comments, "isResolved": bool(n.get("isResolved")),
+                            "isOutdated": bool(n.get("isOutdated"))})
         if not info.get("hasNextPage"):
             return threads
         cursor = info.get("endCursor")
@@ -295,89 +329,131 @@ def fetch_threads(repo: str, pr: int) -> list[dict]:
 
 
 def fetch_review_state(repo: str, pr: int, head: str, since: str | None) -> dict:
-    """Codex's findings: `for_head` (selected by head and author, never by a time window) and `open`.
+    """Codex's findings, code and security alike: `for_head` (selected by head and author, never by a time
+    window) and `open`, each entry tagged `kind` (`code` or `security`, by its mark).
 
     A comment belongs to the head when its `original_commit_id` is the head or its review
     (`pull_request_review_id`) is a `pulls/N/reviews` entry whose `commit_id` is the head: GitHub
     re-anchors `commit_id` of a finding on an unchanged line, but not these two (PR 12, 2026-10-20).
     A later Codex receipt or a quoted `@codex review` therefore cannot hide a finding.
 
-    `open` is every unresolved Codex review thread of ANY head (outdated or not): a thread whose first
-    comment is a Codex finding (REST: Codex bot, finding mark) and whose GraphQL author is the Codex app.
-    `finding_comments` counts all Codex finding comments, for the marker cross-check."""
+    `open` is every unresolved Codex review thread of ANY head (outdated or not) in which ANY comment is a
+    Codex finding (REST: Codex bot, a finding mark; GraphQL: author the Codex app, same databaseId).
+    `finding_comments` counts all Codex finding comments per kind, for the marker cross-check."""
     t0 = parse_ts(since) if since else None
     reviews = api_items(f"repos/{repo}/pulls/{pr}/reviews?per_page=100")
     head_reviews = {r.get("id") for r in reviews if r.get("commit_id") == head}
-    findings = [c for c in api_items(f"repos/{repo}/pulls/{pr}/comments?per_page=100")
-                if FINDING_MARK in (c.get("body") or "") and is_codex_user(c)]
+    findings = {}
+    for c in api_items(f"repos/{repo}/pulls/{pr}/comments?per_page=100"):
+        kind = finding_kind(c.get("body") or "")
+        if kind and is_codex_user(c):
+            findings[c.get("id")] = (kind, c)
     for_head = []
-    for c in findings:
+    for kind, c in findings.values():
         if c.get("original_commit_id") != head and c.get("pull_request_review_id") not in head_reviews:
             continue
         if t0 is not None and not (c.get("created_at") and parse_ts(c["created_at"]) >= t0):
             continue
-        for_head.append({"id": c.get("id"), "path": c.get("path"), "line": c.get("line") or c.get("original_line"),
+        for_head.append({"id": c.get("id"), "kind": kind, "path": c.get("path"),
+                         "line": c.get("line") or c.get("original_line"),
                          "created_at": c.get("created_at"), "original_commit_id": c.get("original_commit_id"),
                          "body": (c.get("body") or "")[:600]})
-    by_id = {c.get("id"): c for c in findings}
     open_threads = []
     for t in fetch_threads(repo, pr):
-        c = by_id.get(t["databaseId"])
-        if t["author"] != CODEX_GQL_LOGIN or c is None or t["isResolved"]:
+        if t["isResolved"]:
             continue
+        hit = next((x for x in t["comments"] if x["author"] == CODEX_GQL_LOGIN and x["databaseId"] in findings), None)
+        if hit is None:
+            continue
+        kind, c = findings[hit["databaseId"]]
         body = (c.get("body") or "").strip()
-        open_threads.append({"id": t["databaseId"], "path": t["path"] or c.get("path"),
+        open_threads.append({"id": hit["databaseId"], "kind": kind, "path": hit["path"] or c.get("path"),
                              "line": c.get("line") or c.get("original_line"),
-                             "original_commit_id": t["original_commit_id"] or c.get("original_commit_id"),
+                             "original_commit_id": hit["original_commit_id"] or c.get("original_commit_id"),
                              "isOutdated": t["isOutdated"],
                              "title": (body.splitlines() or [""])[0][:200]})
-    return {"for_head": for_head, "open": open_threads, "finding_comments": len(findings)}
+    return {"for_head": for_head, "open": open_threads,
+            "finding_comments": {k: sum(1 for kind, _ in findings.values() if kind == k) for k in KINDS}}
 
 
-def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: dict, review: dict | None) -> dict:
+def assess(no_codex: bool, ci_state: str, counts: dict, codex_status: str, cr: dict, sr: dict | None,
+           head: str, review: dict | None) -> dict:
     """The findings and merge_ready fields of the summary.
 
-    Mismatch (the marker and the threads disagree, so never a clean "0"): the marker says
-    `has_unresolved_findings: true` and no open Codex thread was found, or `false` and some was; or
-    `has_any_findings: true` and no Codex finding comment exists at all. merge_ready needs: every CI check
-    passed (at least one), Codex completed on this head, zero open Codex threads (outdated or not), no
-    mismatch, and a marker that states has_unresolved_findings as a boolean."""
-    has_any = cr.get("has_any_findings")
-    has_unres = cr.get("has_unresolved_findings")
+    Both Codex reviews are judged the same way: the code review (`code_review`, mark
+    `codex-code-review-finding:v1`) and the security review (`security_review`, mark
+    `codex-security-review-finding:v1`). Mismatch (the marker and the threads disagree, so never a clean "0"),
+    per kind: the marker says `has_unresolved_findings: true` and no open Codex thread of that kind was
+    found, or `false` and some was; or `has_any_findings: true` and no Codex finding comment of that kind
+    exists at all. merge_ready needs: at least one CI check that really succeeded, none failing or pending
+    (skipped and neutral checks count as passed beside it, never alone); Codex's code review completed on
+    this head; its security review completed on this head too WHEN the marker carries `security_review`
+    (a marker without one is not blocked on it: the open threads of both kinds still gate, and the summary
+    says `security_status: absent`); zero open Codex threads of either kind (outdated or not); no mismatch;
+    and a marker that states has_unresolved_findings as a boolean for each review it carries.
+    merge_blockers names why not: `codex-<status>` (code review not completed on the head), `security-<status>`
+    (`security-failed`, `security-running`, `security-other-head`), `findings-not-collected`,
+    `marker-unverified`, `security-marker-unverified`, `no-checks`, `ci-pending`, `ci-failed`,
+    `ci-none-succeeded`, `open-findings`, `findings-mismatch`, `codex-skipped`."""
     mismatch: list[str] = []
     blockers: list[str] = []
     for_head = open_n = outdated_n = None
+    by_kind_open: dict | None = None
+    by_kind_head: dict | None = None
+    reviews = [("code", cr)]
+    if sr is not None:
+        reviews.append(("security", sr))
     if review is not None:
         for_head, open_n = len(review["for_head"]), len(review["open"])
         outdated_n = sum(1 for t in review["open"] if t["isOutdated"])
-        if has_unres is True and open_n == 0:
-            mismatch.append("marker has_unresolved_findings=true but no open Codex thread found")
-        if has_unres is False and open_n > 0:
-            mismatch.append(f"marker has_unresolved_findings=false but {open_n} open Codex thread(s) found")
-        if has_any is True and review["finding_comments"] == 0:
-            mismatch.append("marker has_any_findings=true but no Codex finding comment found")
+        by_kind_open = {k: sum(1 for t in review["open"] if t["kind"] == k) for k in KINDS}
+        by_kind_head = {k: sum(1 for t in review["for_head"] if t["kind"] == k) for k in KINDS}
+        for kind, r in reviews:
+            has_any, has_unres = r.get("has_any_findings"), r.get("has_unresolved_findings")
+            if has_unres is True and by_kind_open[kind] == 0:
+                mismatch.append(f"{kind}: marker has_unresolved_findings=true but no open Codex thread found")
+            if has_unres is False and by_kind_open[kind] > 0:
+                mismatch.append(f"{kind}: marker has_unresolved_findings=false but "
+                                f"{by_kind_open[kind]} open Codex thread(s) found")
+            if has_any is True and review["finding_comments"][kind] == 0:
+                mismatch.append(f"{kind}: marker has_any_findings=true but no Codex finding comment found")
     if no_codex:
         blockers.append("codex-skipped")
     else:
         if codex_status != "completed":
             blockers.append(f"codex-{codex_status}")
+        if sr is not None:
+            sstatus = sr.get("status") or "unknown"
+            if sr.get("commit_sha") not in (None, head):
+                blockers.append("security-other-head")
+            elif sstatus != "completed":
+                blockers.append(f"security-{sstatus}")
         if review is None:
             blockers.append("findings-not-collected")
-        elif not isinstance(has_unres, bool):
-            blockers.append("marker-unverified")
+        else:
+            if not isinstance(cr.get("has_unresolved_findings"), bool):
+                blockers.append("marker-unverified")
+            if sr is not None and not isinstance(sr.get("has_unresolved_findings"), bool):
+                blockers.append("security-marker-unverified")
     if ci_state == "no-checks":
         blockers.append("no-checks")
     elif ci_state != "done":
         blockers.append("ci-pending")
     if counts["fail"]:
         blockers.append("ci-failed")
+    elif ci_state == "done" and counts["total"] and not counts["success"]:
+        blockers.append("ci-none-succeeded")
     if open_n:
         blockers.append("open-findings")
     if mismatch:
         blockers.append("findings-mismatch")
-    return {"has_any_findings": has_any, "has_unresolved_findings": has_unres, "findings_for_head": for_head,
-            "open_findings": open_n, "open_findings_outdated": outdated_n, "findings_mismatch": mismatch,
-            "merge_ready": not blockers, "merge_blockers": blockers}
+    return {"has_any_findings": cr.get("has_any_findings"), "has_unresolved_findings": cr.get("has_unresolved_findings"),
+            "security_status": "absent" if sr is None else (sr.get("status") or "unknown"),
+            "security_has_any_findings": None if sr is None else sr.get("has_any_findings"),
+            "security_has_unresolved_findings": None if sr is None else sr.get("has_unresolved_findings"),
+            "findings_for_head": for_head, "findings_for_head_by_kind": by_kind_head,
+            "open_findings": open_n, "open_findings_by_kind": by_kind_open, "open_findings_outdated": outdated_n,
+            "findings_mismatch": mismatch, "merge_ready": not blockers, "merge_blockers": blockers}
 
 
 # ---- files ----------------------------------------------------------------------------------------
@@ -627,7 +703,8 @@ def main(argv: list[str]) -> int:
         ci_state = "done" if s["ci_done"] else "pending"
         if s["ci_done"] and not checks:
             ci_state = "no-checks"
-        judged = assess(a.no_codex, ci_state, counts, codex["status"], cr, s["review"])
+        judged = assess(a.no_codex, ci_state, counts, codex["status"], cr, security_review(s["codex_match"]),
+                        head, s["review"])
         summary = {"result": result, "exit": code, "repo": a.repo, "pr": a.pr, "head": head,
                    "new_head": new_head, "ci": {"state": ci_state, **counts}, "codex": codex,
                    **judged, "since": s["since"], "since_source": s["since_source"], "errors": errors[-3:],
@@ -643,14 +720,16 @@ def main(argv: list[str]) -> int:
             parts = [f"PR {a.pr} at {head[:12]}: {result}",
                      f"CI {ci_state} ({counts['pass']} pass, {counts['fail']} fail, {counts['pending']} pending)"]
             if not a.no_codex:
-                parts.append(f"codex {codex['status']}")
+                parts.append(f"codex {codex['status']} (security {judged['security_status']})")
             if s["review"] is None:
                 parts.append("findings not collected")
             else:
                 parts.append(f"findings for the head: {len(s['review']['for_head'])}"
                              + (f" (since {s['since']})" if s["since"] else "")
                              + f"; open Codex findings: {judged['open_findings']}"
-                             f" ({judged['open_findings_outdated']} outdated)")
+                             f" ({judged['open_findings_by_kind']['code']} code, "
+                             f"{judged['open_findings_by_kind']['security']} security; "
+                             f"{judged['open_findings_outdated']} outdated)")
             if judged["findings_mismatch"]:
                 parts.append("FINDINGS-MISMATCH: " + " / ".join(judged["findings_mismatch"]))
             parts.append("merge_ready: " + ("yes" if judged["merge_ready"]
@@ -705,7 +784,7 @@ def main(argv: list[str]) -> int:
                     codex_polled = True
                     match, newest = codex_state_for(comments, head)
                     s["codex_match"], s["codex_newest"] = match, newest
-                    if code_review(match).get("status") in TERMINAL:
+                    if review_terminal(match, head):
                         s["codex_done"], s["running_seen"] = True, False
                     elif match is not None and not s["running_seen"]:
                         s["running_seen"] = True

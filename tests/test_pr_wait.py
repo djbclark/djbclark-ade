@@ -67,14 +67,28 @@ BOT = {"login": CODEX_LOGIN, "type": "Bot"}
 BOT_APP = {"user": BOT, "performed_via_github_app": {"slug": "chatgpt-codex-connector"}}
 
 
+def sec_review(unresolved: bool | None = False, any_findings: bool | None = False, status: str = "completed",
+               sha: str = HEAD) -> dict:
+    sr: dict = {"commit_sha": sha, "status": status}
+    if unresolved is not None:
+        sr["has_unresolved_findings"] = unresolved
+    if any_findings is not None:
+        sr["has_any_findings"] = any_findings
+    return sr
+
+
 def codex_comment(sha: str, status: str, updated: str = "2026-10-23T10:00:00Z", unresolved: bool | None = False,
-                  any_findings: bool | None = False, **who: object) -> dict:
+                  any_findings: bool | None = False, security: dict | None = ..., **who: object) -> dict:  # type: ignore[assignment]
     cr: dict = {"commit_sha": sha, "status": status}
     if unresolved is not None:
         cr["has_unresolved_findings"] = unresolved
     if any_findings is not None:
         cr["has_any_findings"] = any_findings
-    state = {"code_review": cr, "security_review": {"status": "completed"}}
+    state: dict = {"code_review": cr}
+    if security is ...:
+        security = sec_review(sha=sha)
+    if security is not None:
+        state["security_review"] = security
     body = ("<!-- codex-pull-request-review-summary -->\nCodex review\n"
             f"<!-- codex-review-state:v1 {json.dumps(state)} -->")
     return {"body": body, "created_at": "2026-10-23T09:00:00Z", "updated_at": updated, **(who or BOT_APP)}
@@ -164,7 +178,7 @@ def test_ci_and_codex_both_complete(world: World) -> None:
     assert world.calls(f"commits/{HEAD}/check-runs") == 2
     summary = world.file("summary")
     assert summary["result"] == "done" and summary["head"] == HEAD
-    assert summary["ci"] == {"state": "done", "total": 2, "pass": 1, "fail": 1, "pending": 0}
+    assert summary["ci"] == {"state": "done", "total": 2, "pass": 1, "success": 1, "fail": 1, "pending": 0}
     assert summary["merge_ready"] is False and summary["merge_blockers"] == ["ci-failed"]
     assert summary["codex"]["status"] == "completed" and summary["since_source"] is None
     assert world.file("codex")["code_review"]["commit_sha"] == HEAD
@@ -550,7 +564,9 @@ def test_unresolved_earlier_head_finding_blocks_merge_ready(world: World) -> Non
     (opened,) = world.file("open-findings")
     assert opened["id"] == 50 and opened["original_commit_id"] == OLD and opened["isOutdated"] is False
     assert opened["title"].startswith("finding 50") and opened["path"] == "f.py"
-    assert "open Codex findings: 1 (0 outdated)" in r.stdout and "merge_ready: no (open-findings)" in r.stdout
+    assert "open Codex findings: 1 (1 code, 0 security; 0 outdated)" in r.stdout
+    assert "merge_ready: no (open-findings)" in r.stdout
+    assert opened["kind"] == "code"
 
 
 def test_resolved_earlier_head_finding_does_not_block(world: World) -> None:
@@ -572,7 +588,7 @@ def test_outdated_unresolved_finding_is_listed_and_still_blocks(world: World) ->
     assert summary["open_findings"] == 1 and summary["open_findings_outdated"] == 1
     assert summary["merge_ready"] is False and "open-findings" in summary["merge_blockers"]
     assert world.file("open-findings")[0]["isOutdated"] is True
-    assert "open Codex findings: 1 (1 outdated)" in r.stdout
+    assert "open Codex findings: 1 (1 code, 0 security; 1 outdated)" in r.stdout
 
 
 def test_marker_and_threads_disagreeing_is_a_mismatch_never_a_clean_zero(world: World) -> None:
@@ -684,3 +700,127 @@ def test_the_lock_appears_with_its_content_in_one_step(tmp_path: Path, monkeypat
     assert seen == [(False, json.dumps({"pid": 1}))], "the lock path is absent before, complete from the link on"
     assert json.loads(lock.read_text()) == {"pid": 1}
     assert pw.create_exclusive(lock, {"pid": 2}) is False and json.loads(lock.read_text()) == {"pid": 1}
+
+
+def sec_finding(n: int = 60, **kw: object) -> dict:
+    """A Codex SECURITY finding: its own mark, no code mark (PR 20 thread 4361214081)."""
+    return {**old_finding(n), "body": f"security finding {n}\n<!-- codex-security-review-finding:v1 -->", **kw}
+
+
+def test_open_security_thread_blocks_merge_ready_and_is_tagged_security(world: World) -> None:
+    # PR 20 shape: the code marker is clean (false), the security marker says unresolved, the thread is a security one
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", security=sec_review(unresolved=True, any_findings=True))]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([sec_finding(60)]))
+    world.route("graphql", gql(thread(60)))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    summary = world.file("summary")
+    assert summary["open_findings"] == 1 and summary["open_findings_by_kind"] == {"code": 0, "security": 1}
+    assert summary["findings_mismatch"] == [] and summary["security_has_unresolved_findings"] is True
+    assert summary["merge_ready"] is False and summary["merge_blockers"] == ["open-findings"]
+    (opened,) = world.file("open-findings")
+    assert opened["id"] == 60 and opened["kind"] == "security" and opened["title"].startswith("security finding 60")
+    assert "1 security" in r.stdout and "(security completed)" in r.stdout
+
+
+def test_security_head_findings_are_listed_with_their_kind(world: World) -> None:
+    world.route(f"repos/{REPO}/pulls/{PR}/comments",
+                ok([finding(1, "2026-10-23T09:45:00Z"), sec_finding(2, original_commit_id=HEAD)]))
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", unresolved=True, any_findings=True,
+                                  security=sec_review(unresolved=True, any_findings=True))]))
+    world.route("graphql", gql(thread(1), thread(2)))
+    assert world.run().returncode == 0
+    assert {f["id"]: f["kind"] for f in world.file("findings")} == {1: "code", 2: "security"}
+    summary = world.file("summary")
+    assert summary["findings_for_head_by_kind"] == {"code": 1, "security": 1}
+    assert summary["open_findings_by_kind"] == {"code": 1, "security": 1} and summary["findings_mismatch"] == []
+
+
+def test_security_marker_mismatch_both_ways(world: World) -> None:
+    # security marker says unresolved, no security thread (a code thread must not satisfy it)
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", unresolved=True, any_findings=True,
+                                  security=sec_review(unresolved=True, any_findings=False))]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([old_finding(50)]))
+    world.route("graphql", gql(thread(50)))
+    world.run()
+    mm = world.file("summary")["findings_mismatch"]
+    assert len(mm) == 1 and mm[0].startswith("security:") and "has_unresolved_findings=true" in mm[0]
+    # security marker says nothing unresolved, a security thread is open
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", security=sec_review(unresolved=False))]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([sec_finding(60)]))
+    world.route("graphql", gql(thread(60)))
+    world.run()
+    mm = world.file("summary")["findings_mismatch"]
+    assert any(m.startswith("security:") and "false but 1 open" in m for m in mm)
+    assert "findings-mismatch" in world.file("summary")["merge_blockers"]
+
+
+def test_security_review_must_be_terminal_to_end_the_wait_and_completed_to_be_merge_ready(world: World) -> None:
+    # code completed but the security review still running: not done yet (a security finding may still land)
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", security=sec_review(status="running"))]),
+                ok([codex_comment(HEAD, "completed", security=sec_review(status="completed"))]))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert world.calls(f"issues/{PR}/comments") == 2 and world.file("summary")["merge_ready"] is True
+    # security failed is terminal but not merge-ready
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", security=sec_review(status="failed"))]))
+    assert world.run().returncode == 0
+    assert world.file("summary")["merge_blockers"] == ["security-failed"]
+    # security marker for another head: never done on it, and stuck rather than a false done
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", security=sec_review(sha=OLD))]))
+    assert world.run("--codex-stuck", "0.3").returncode == 3
+    # security marker without a boolean flag
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", security=sec_review(unresolved=None, any_findings=None))]))
+    assert world.run().returncode == 0
+    assert world.file("summary")["merge_blockers"] == ["security-marker-unverified"]
+
+
+def test_a_marker_without_security_review_does_not_block_on_it(world: World) -> None:
+    world.route(f"repos/{REPO}/issues/{PR}/comments", ok([codex_comment(HEAD, "completed", security=None)]))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    summary = world.file("summary")
+    assert summary["security_status"] == "absent" and summary["merge_ready"] is True
+    # ...but a security thread still gates
+    world.route(f"repos/{REPO}/issues/{PR}/comments", ok([codex_comment(HEAD, "completed", security=None)]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([sec_finding(60)]))
+    world.route("graphql", gql(thread(60)))
+    world.run()
+    assert world.file("summary")["merge_blockers"] == ["open-findings"]
+
+
+def test_all_skipped_or_all_neutral_ci_is_not_merge_ready(world: World) -> None:
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-runs",
+                checks_page(run_obj("a", conclusion="skipped"), run_obj("b", conclusion="neutral")))
+    assert world.run().returncode == 0
+    summary = world.file("summary")
+    assert summary["ci"]["pass"] == 2 and summary["ci"]["success"] == 0 and summary["ci"]["fail"] == 0
+    assert summary["merge_ready"] is False and summary["merge_blockers"] == ["ci-none-succeeded"]
+    # beside one real success, skipped and neutral are fine
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-runs",
+                checks_page(run_obj("a", conclusion="skipped"), run_obj("b", conclusion="neutral"), run_obj("c")))
+    assert world.run().returncode == 0
+    assert world.file("summary")["merge_ready"] is True and world.file("summary")["ci"]["success"] == 1
+
+
+def test_a_codex_finding_that_is_a_reply_in_a_human_thread_is_open(world: World) -> None:
+    world.route(f"repos/{REPO}/issues/{PR}/comments",
+                ok([codex_comment(HEAD, "completed", unresolved=True, any_findings=True)]))
+    world.route(f"repos/{REPO}/pulls/{PR}/comments", ok([old_finding(50)]))
+    human_first = thread(7, author="djbclark")
+    human_first["comments"]["nodes"].append(thread(50)["comments"]["nodes"][0])
+    world.route("graphql", gql(human_first))
+    assert world.run().returncode == 0
+    summary = world.file("summary")
+    assert summary["open_findings"] == 1 and summary["merge_blockers"] == ["open-findings"]
+    assert world.file("open-findings")[0]["id"] == 50
+    # the query asks for the whole thread, not only its first comment
+    assert "comments(first:100)" in next(x for x in graphql_calls(world)[0] if x.startswith("query="))

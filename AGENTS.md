@@ -165,17 +165,19 @@ pull request here is expected to meet these; flag any it misses.
    (`README.md` roster, `docs/*.md`, `skills/*/SKILL.md`).
 9. **Read Codex's result against the head and the open threads, never against a guessed
    clock**: the summary comment's `codex-review-state` names the `commit_sha`
-   it covers. The findings for that head are the Codex inline comments
+   it covers (for `code_review` and for `security_review`, each read the same way). The findings for that head
+   are the Codex inline comments
    (`gh api repos/.../pulls/N/comments`, author `chatgpt-codex-connector[bot]`,
-   ending in the finding mark) anchored to it (`original_commit_id`, or the
+   ending in a finding mark: `codex-code-review-finding:v1` or `codex-security-review-finding:v1`) anchored to it (`original_commit_id`, or the
    `commit_id` of their review in `pulls/N/reviews`), PLUS every unresolved Codex
-   review thread from an earlier head: a finding stays open until its thread is
+   review thread from an earlier head, security threads included: a finding stays open until its thread is
    resolved. GraphQL `reviewThreads.isResolved` is the authority, and the marker's
-   `has_unresolved_findings` must agree with it (a disagreement is chased, never
+   `has_unresolved_findings` (per review) must agree with it (a disagreement is chased, never
    read as a clean "0"). Case (2026-10-23): on PR 32 Codex left a P1 on head
    3c40470, two pushes followed without the fix, the marker for the new head said
    `has_unresolved_findings: true`, and a head-only filter read "0" past the open
-   P1. Check with `bin/pr-wait` (`merge_ready`, `PREFIX-open-findings.json`).
+   P1. Check with `bin/pr-wait`: `merge_ready` (false with the reasons in `merge_blockers`) and
+   `PREFIX-open-findings.json`.
    Fixing a finding means fixing the code, then resolving its thread. Never select
    by time: a "newest `@codex review` comment" window is moved by Codex's own
    receipts, which quote it (PR 12, 2026-10-20). GitHub re-anchors `commit_id` to the newest head when
