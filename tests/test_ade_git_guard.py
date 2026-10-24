@@ -553,3 +553,512 @@ def test_cli_new_show_find_list_set_state(tmp_path, state):
     assert call("find").returncode == 1                       # released: not active
     assert json.loads(call("list", "--state", "released", "--json").stdout)[0]["state"] == "released"
     assert call("new", "--id", "../x", "--path", str(repo), "--branch", "b", "--base-sha", "a").returncode == 2
+
+
+# ============================================================================================
+# repair round (adversary BLOCK at 1695488, 2026-10-24): one regression per finding
+# ============================================================================================
+
+def untouched(repo):
+    return (repo / "f").read_text().endswith("uncommitted\n") and (repo / "u.txt").exists()
+
+
+def setup_linked(tmp_path, state, claim_branch="wtb"):
+    """Primary P (unclaimed) and a linked worktree W claimed by A with an uncommitted edit."""
+    repo = mk_repo(tmp_path, state, "P")
+    wt = tmp_path / "W"
+    plain(state, ["worktree", "add", "-q", "-b", "wtb", str(wt)], repo)
+    claim(wt, "A", branch=claim_branch)
+    dirty(wt)
+    return repo, wt
+
+
+# --- BLOCK-1: every discard spelling in a shared checkout ---------------------------------
+
+@pytest.mark.parametrize("cmd", [
+    ["checkout", "f"], ["checkout", "HEAD", "f"], ["checkout", "./"], ["checkout", "main", "g"], ["checkout", "-p"],
+    ["checkout", "--ours", "f"], ["checkout", ":/"], ["checkout", "*"],
+    ["rm", "-f", "f"], ["rm", "--force", "f"], ["add", "-u"], ["add", "--update"], ["add", "-u", "."],
+    ["clean"], ["clean", "-d"], ["-c", "clean.requireForce=false", "clean"], ["clean", "-fdx"], ["clean", "-q"],
+    ["reset", "--keep"], ["switch", "-f", "main"], ["-c", "merge.autoStash=true", "merge", "main"],
+], ids=lambda c: " ".join(c))
+def test_shared_checkout_discard_spellings_are_refused(tmp_path, state, cmd):
+    repo = mk_repo(tmp_path, state)
+    dirty(repo)
+    r = run(state, cmd, repo, who="B")
+    assert r.returncode == 77, r.stderr
+    assert untouched(repo)
+
+
+@pytest.mark.parametrize("cmd", [
+    ["clean", "-n"], ["clean", "-dn"], ["clean", "--dry-run"], ["rm", "--cached", "g"], ["rm", "-n", "g"], ["add", "-u", "g"],
+    ["checkout", "main"], ["checkout", "-b", "feat2"], ["checkout", "-"], ["switch", "main"],
+], ids=lambda c: " ".join(c))
+def test_shared_checkout_non_destructive_spellings_stay_allowed(tmp_path, state, cmd):
+    repo = mk_repo(tmp_path, state)
+    (repo / "f").write_text("base\nedit\n")
+    r = run(state, cmd, repo, who="B")
+    assert r.returncode != 77 and "REFUSED" not in r.stderr, r.stderr
+
+
+def test_a_repo_config_autostash_is_read_too(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    plain(state, ["config", "rebase.autoStash", "true"], repo)
+    dirty(repo)
+    assert run(state, ["pull", "--rebase"], repo, who="B").returncode == 77
+    assert untouched(repo)
+
+
+# --- BLOCK-2: abbreviated long options ----------------------------------------------------
+
+@pytest.mark.parametrize("cmd", [
+    ["reset", "--har"], ["reset", "--h"], ["reset", "--kee"], ["reset", "--mer"], ["checkout", "--forc", "main"],
+    ["switch", "--disc", "main"], ["switch", "--forc", "main"], ["commit", "--al", "-m", "x"], ["add", "--al"],
+    ["add", "--upd"], ["pull", "--autos"], ["merge", "--autos", "main"], ["rebase", "--autost", "main"],
+    ["rm", "--forc", "f"], ["restore", "--work", "f"], ["restore", "f"],
+], ids=lambda c: " ".join(c))
+def test_abbreviated_long_options_count_as_the_option_they_prefix(tmp_path, state, cmd):
+    repo = mk_repo(tmp_path, state)
+    dirty(repo)
+    r = run(state, cmd, repo, who="B")
+    assert r.returncode == 77, r.stderr
+    assert untouched(repo)
+
+
+@pytest.mark.parametrize("cmd", [["restore", "--stag", "f"], ["restore", "--staged", "f"], ["clean", "--dry", "-d"],
+                                 ["rm", "--cache", "g"], ["pull", "--no-autos", "--ff-only"]],
+                         ids=lambda c: " ".join(c))
+def test_abbreviated_safe_options_are_not_falsely_refused(tmp_path, state, cmd):
+    repo = mk_repo(tmp_path, state)
+    (repo / "f").write_text("base\nedit\n")
+    plain(state, ["add", "f"], repo)
+    r = run(state, cmd, repo, who="B")
+    assert r.returncode != 77 and "REFUSED" not in r.stderr, r.stderr
+
+
+def test_abbreviated_write_options_are_refused_in_a_foreign_workspace(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    for cmd in (["branch", "--set-up=origin/x", "main"], ["branch", "--del", "x"], ["tag", "--del", "x"],
+                ["config", "--unset-a", "user.name"]):
+        assert run(state, cmd, repo, who="B").returncode == 77, cmd
+
+
+@pytest.mark.parametrize("flag", ["--all", "--al", "--mirror", "--mir", "--branches", "--br"])
+def test_push_all_and_mirror_spellings_cover_claimed_branches(tmp_path, state, flag):
+    bare = tmp_path / "origin.git"
+    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
+    owner = mk_repo(tmp_path, state, "owner")
+    plain(state, ["remote", "add", "origin", str(bare)], owner)
+    plain(state, ["checkout", "-q", "-b", "feat"], owner)
+    claim(owner, "A", branch="feat", origin=str(bare))
+    primary = mk_repo(tmp_path, state, "primary")
+    plain(state, ["remote", "add", "origin", str(bare)], primary)
+    plain(state, ["branch", "feat"], primary)
+    r = run(state, ["push", flag, "origin"], primary, who="B")
+    assert r.returncode == 77, r.stderr
+    assert plain(state, ["--git-dir", str(bare), "branch", "--list"], tmp_path).strip() == ""
+
+
+# --- BLOCK-3: the target's workspace, not the cwd's -----------------------------------------
+
+@pytest.mark.parametrize("cmd", [
+    ["worktree", "remove", "--force", "{wt}"], ["worktree", "remove", "{wt}"], ["worktree", "move", "{wt}", "{wt}2"],
+    ["worktree", "remove", "-f", "-f", "{wt}"], ["worktree", "remove", "--forc", "{wt}"],
+    ["branch", "-D", "wtb"], ["branch", "-m", "wtb", "gone"], ["branch", "-f", "wtb", "HEAD"], ["branch", "--delete", "--force", "wtb"],
+    ["update-ref", "-d", "refs/heads/wtb"], ["update-ref", "refs/heads/wtb", "HEAD"],
+], ids=lambda c: " ".join(c))
+@pytest.mark.parametrize("claim_branch", ["wtb", "some-other-name"])
+def test_target_workspace_claim_protects_a_worktree_and_its_branch(tmp_path, state, cmd, claim_branch):
+    repo, wt = setup_linked(tmp_path, state, claim_branch)
+    r = run(state, [c.format(wt=wt) for c in cmd], repo, who="B")
+    assert r.returncode == 77, r.stderr
+    assert wt.is_dir() and (wt / "f").read_text().endswith("uncommitted\n") and (wt / "u.txt").exists()
+    assert "wtb" in plain(state, ["branch", "--list"], repo)
+
+
+def test_worktree_prune_is_refused_for_a_claimed_stale_entry(tmp_path, state):
+    import shutil
+    repo, wt = setup_linked(tmp_path, state)
+    shutil.rmtree(wt)
+    assert run(state, ["worktree", "prune"], repo, who="B").returncode == 77
+    assert (repo / ".git" / "worktrees" / "W").is_dir()
+    assert run(state, ["worktree", "prune"], repo, who="A").returncode == 0
+
+
+def test_worktree_remove_by_its_owner_and_force_on_unclaimed(tmp_path, state):
+    repo, wt = setup_linked(tmp_path, state)
+    assert run(state, ["worktree", "remove", "--force", str(wt)], repo, who="A").returncode == 0
+    assert not wt.exists()
+    other = tmp_path / "W2"
+    plain(state, ["worktree", "add", "-q", "-b", "w2", str(other)], repo)
+    (other / "f").write_text("dirty\n")
+    assert run(state, ["worktree", "remove", "--force", str(other)], repo, who="B").returncode == 77
+    assert (other / "f").read_text() == "dirty\n"
+    assert run(state, ["worktree", "remove", str(other)], repo, who="B").returncode != 77   # git itself refuses dirty
+
+
+# --- BLOCK-4: --check ------------------------------------------------------------------------
+
+@pytest.mark.parametrize("cmd", [
+    "echo hi\ngit reset --hard",
+    "true\n\n  git reset --hard\necho done",
+    "echo `git reset --hard`",
+    'echo "$(git reset --hard)"',
+    "echo $(git reset --hard)",
+    'echo "a $(echo `git reset --hard`) b"',
+    "env -i git reset --hard",
+    "env -i FOO=1 git reset --hard",
+    "timeout 5 git reset --hard",
+    "xargs git reset --hard",
+    "sudo -u nobody git reset --hard",
+    "nice -n 5 git reset --hard",
+    "watch -n1 git reset --hard",
+    "watch 'git reset --hard'",
+    'bash -lc "git reset --hard"',
+    "sh -ec 'git reset --hard'",
+    "zsh -c 'cd . && git reset --hard'",
+    "eval git reset --hard",
+    "eval 'git reset --hard'",
+    "if true; then git reset --hard; fi",
+    "(git reset --hard)",
+    "{ git reset --hard; }",
+    "true && /opt/homebrew/bin/git reset --hard",
+    "git status\ngit stash",
+    "git status # comment\ngit clean -fd",
+    "git commit -m 'msg\nwith a second line'\ngit reset --hard",
+], ids=lambda c: c.replace("\n", "⏎")[:40])
+def test_check_sees_git_after_line_one_and_inside_wrappers(tmp_path, state, cmd):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    r = check(state, cmd, repo)
+    assert r.returncode == 77, (cmd, r.stderr)
+    assert check(state, cmd, repo, who="A").returncode == 0
+
+
+@pytest.mark.parametrize("cmd", [
+    "git $CMD", "git ${SUB} --hard", 'git "$X"', "D=/tmp/x; git -C $D reset --hard", 'git -C "$D" reset --hard',
+    'cd "$D" && git reset --hard', "cd $D; git reset --hard", "cd ~someone && git reset --hard", "cd - && git reset --hard",
+    "cd $(mktemp -d) && git reset --hard", "git reset --hard 'unterminated", 'git "reset --hard',
+    "GIT_DIR=$X git reset --hard", "GIT_WORK_TREE=$(pwd)/x git checkout -f",
+], ids=lambda c: c[:40])
+def test_check_fails_closed_on_what_it_cannot_read(tmp_path, state, cmd):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "B", branch="b")   # B's own workspace: a plain `git reset --hard` there is fine
+    assert check(state, "git reset --hard", repo).returncode == 0
+    r = check(state, cmd, repo)
+    assert r.returncode == 77, (cmd, r.stderr)
+    assert "spell" in r.stderr
+
+
+@pytest.mark.parametrize("cmd", [
+    "git commit -m \"git reset --hard\"", "echo 'git reset --hard' | cat", "which git", "command -v git", "git --version",
+    "echo git status", "brew install git", "git commit -F- <<'EOF'\nfix: git reset --hard is refused\nEOF",
+    'git commit -m "$(cat <<\'EOF\'\nfix\n\ngit reset --hard\nEOF\n)"', "cd /tmp && git --version",
+    'cd "$D" && git status', "git status && git diff | head", "grep -rn git README.md", "ls git-docs",
+], ids=lambda c: c.replace("\n", "⏎")[:40])
+def test_check_does_not_refuse_text_that_merely_mentions_git(tmp_path, state, cmd):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "B", branch="b")
+    r = check(state, cmd, repo)
+    assert r.returncode == 0, (cmd, r.stderr)
+
+
+def test_check_inline_work_tree_and_git_dir_select_the_other_workspace(tmp_path, state):
+    a = mk_repo(tmp_path, state, "a")
+    b = mk_repo(tmp_path, state, "b")
+    claim(a, "A")
+    claim(b, "B", branch="b")
+    dirty(a)
+    for cmd in (f"GIT_WORK_TREE={a} git checkout -f", f"env GIT_WORK_TREE={a} git reset --hard",
+                f"GIT_DIR={a}/.git git reset --hard", f"git --work-tree={a} checkout -f"):
+        r = check(state, cmd, b)
+        assert r.returncode == 77, (cmd, r.stderr)
+    assert untouched(a)
+
+
+# --- MEDIUM-1: aliases and config -------------------------------------------------------------
+
+def test_aliases_given_with_dash_c_or_config_env_are_resolved(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    dirty(repo)
+    for args in (["-c", "alias.zz=reset --hard", "zz"], ["-calias.zz=reset --hard", "zz"],
+                 ["-c", "alias.zz=!git reset --hard", "zz"], ["-c", "alias.zz=!echo hi", "zz"]):
+        assert run(state, args, repo, who="B").returncode == 77, args
+    r = run(state, ["--config-env=alias.zz=ZZ", "zz"], repo, who="B", ZZ="reset --hard")
+    assert r.returncode == 77
+    r = run(state, ["--config-env", "alias.zz=ZZ", "zz"], repo, who="B", ZZ="clean -fd")
+    assert r.returncode == 77
+    assert untouched(repo)
+
+
+def test_a_repo_bang_alias_is_refused_in_a_shared_checkout_but_not_in_ones_own(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    plain(state, ["config", "alias.yy", "!git checkout -- ."], repo)
+    dirty(repo)
+    assert run(state, ["yy"], repo, who="B").returncode == 77
+    assert untouched(repo)
+    claim(repo, "B", branch="b")
+    assert run(state, ["-c", "alias.hi=!echo hi", "hi"], repo, who="B").returncode == 0
+
+
+def test_alias_to_push_or_stash_hits_the_push_and_linked_rules(tmp_path, state):
+    bare = tmp_path / "origin.git"
+    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
+    owner = mk_repo(tmp_path, state, "owner")
+    plain(state, ["remote", "add", "origin", str(bare)], owner)
+    plain(state, ["checkout", "-q", "-b", "feat"], owner)
+    claim(owner, "A", branch="feat", origin=str(bare))
+    primary = mk_repo(tmp_path, state, "primary")
+    plain(state, ["remote", "add", "origin", str(bare)], primary)
+    plain(state, ["branch", "feat"], primary)
+    r = run(state, ["-c", "alias.pp=push", "pp", "origin", "feat"], primary, who="B")
+    assert r.returncode == 77 and "feat" in r.stderr
+    repo, wt = setup_linked(tmp_path, state)
+    assert run(state, ["-c", "alias.ss=stash", "ss"], wt, who="A").returncode == 77
+
+
+@pytest.mark.parametrize("cmd", [["rebase", "-x", "true", "main"], ["rebase", "--exec", "true", "main"],
+                                 ["rebase", "--exe=true", "main"], ["rebase", "-xtrue", "main"]],
+                         ids=lambda c: " ".join(c))
+def test_rebase_exec_is_refused_in_shared_and_linked_checkouts(tmp_path, state, cmd):
+    repo = mk_repo(tmp_path, state)
+    assert run(state, cmd, repo, who="B").returncode == 77
+    wt = tmp_path / "L"
+    plain(state, ["worktree", "add", "-q", "-b", "lb", str(wt)], repo)
+    claim(wt, "A", branch="lb")
+    assert run(state, cmd, wt, who="A").returncode == 77
+
+
+def test_header_says_seatbelt_and_names_what_git_spawns():
+    text = GUARD.read_text()
+    assert "NOT A SANDBOX" in text and "git itself spawns" in text.lower().replace("everything ", "")
+    assert "NOT A SANDBOX" in ade_claims.__doc__
+
+
+# --- MEDIUM-2: push destinations that come from config ---------------------------------------------
+
+def push_setup(tmp_path, state):
+    bare = tmp_path / "origin.git"
+    plain(state, ["init", "-q", "--bare", "-b", "main", str(bare)], tmp_path)
+    owner = mk_repo(tmp_path, state, "owner")
+    plain(state, ["remote", "add", "origin", str(bare)], owner)
+    plain(state, ["checkout", "-q", "-b", "feat"], owner)
+    claim(owner, "A", branch="feat", origin=str(bare))
+    assert run(state, ["push", "-q", "origin", "feat"], owner, who="A").returncode == 0
+    primary = tmp_path / "primary"
+    plain(state, ["clone", "-q", str(bare), str(primary)], tmp_path)
+    plain(state, ["checkout", "-q", "-b", "mine"], primary)
+    (primary / "x").write_text("x\n")
+    plain(state, ["add", "x"], primary)
+    plain(state, ["commit", "-qm", "mine"], primary)
+    sha = plain(state, ["--git-dir", str(bare), "rev-parse", "feat"], tmp_path).strip()
+    return bare, primary, sha
+
+
+def test_push_destination_from_remote_push_config_is_checked(tmp_path, state):
+    bare, primary, sha = push_setup(tmp_path, state)
+    r = run(state, ["-c", "remote.origin.push=HEAD:refs/heads/feat", "push", "origin"], primary, who="B")
+    assert r.returncode == 77 and "feat" in r.stderr
+    plain(state, ["config", "remote.origin.push", "HEAD:refs/heads/feat"], primary)
+    assert run(state, ["push"], primary, who="B").returncode == 77
+    assert plain(state, ["--git-dir", str(bare), "rev-parse", "feat"], tmp_path).strip() == sha
+
+
+def test_push_destination_from_upstream_and_push_default_is_checked(tmp_path, state):
+    bare, primary, sha = push_setup(tmp_path, state)
+    plain(state, ["branch", "-u", "origin/feat"], primary)
+    r = run(state, ["-c", "push.default=upstream", "push"], primary, who="B")
+    assert r.returncode == 77 and "feat" in r.stderr
+    assert plain(state, ["--git-dir", str(bare), "rev-parse", "feat"], tmp_path).strip() == sha
+
+
+def test_bare_push_to_an_unclaimed_branch_still_works_and_an_unresolvable_one_is_refused(tmp_path, state):
+    bare, primary, sha = push_setup(tmp_path, state)
+    assert run(state, ["push", "-q", "-u", "origin", "mine"], primary, who="B").returncode == 0
+    (primary / "y").write_text("y\n")
+    plain(state, ["add", "y"], primary)
+    plain(state, ["commit", "-qm", "y"], primary)
+    assert run(state, ["push", "-q"], primary, who="B").returncode == 0           # upstream mine: resolvable
+    lone = mk_repo(tmp_path, state, "lone")                                       # no remote at all
+    r = run(state, ["push"], lone, who="B")
+    assert r.returncode == 77 and "unresolved" in r.stderr and "refspec" in r.stderr
+
+
+# --- MEDIUM-3: GIT_WORK_TREE ------------------------------------------------------------------
+
+def test_git_work_tree_selects_the_workspace_that_gets_written(tmp_path, state):
+    a = mk_repo(tmp_path, state, "a")
+    b = mk_repo(tmp_path, state, "b")
+    claim(a, "A")
+    claim(b, "B", branch="b")
+    dirty(a)
+    for args, extra in ((["checkout", "-f"], {"GIT_WORK_TREE": str(a)}), (["reset", "--hard"], {"GIT_WORK_TREE": str(a)}),
+                        (["--work-tree", str(a), "checkout", "-f"], {}), (["--work-tree=" + str(a), "clean", "-fd"], {}),
+                        (["commit", "--allow-empty", "-m", "x"], {"GIT_WORK_TREE": str(a)})):
+        r = run(state, args, b, who="B", **extra)
+        assert r.returncode == 77, (args, r.stderr)
+    assert untouched(a)
+    assert run(state, ["checkout", "-f"], b, who="B").returncode == 0           # B's own tree is fine
+
+
+# --- MEDIUM-4: case-insensitive paths ----------------------------------------------------------
+
+def test_a_differently_cased_path_still_finds_the_claim(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    swapped = Path(str(repo.resolve()).swapcase())
+    if not swapped.exists() or not os.path.samefile(swapped, repo):
+        pytest.skip("case-sensitive filesystem")
+    assert ade_claims._same_path(str(swapped), repo)
+    r = run(state, ["-C", str(swapped), "commit", "--allow-empty", "-m", "x"], tmp_path, who="B")
+    assert r.returncode == 77, r.stderr
+    assert ade_claims.find_claim(ade_claims.find_workspace(swapped))["id"] == "A"
+
+
+def test_same_path_uses_the_file_not_the_spelling(tmp_path):
+    (tmp_path / "d").mkdir()
+    os.symlink(tmp_path / "d", tmp_path / "link")
+    assert ade_claims._same_path(str(tmp_path / "link"), tmp_path / "d")
+    assert not ade_claims._same_path(str(tmp_path / "d"), tmp_path)
+    assert ade_claims._same_path(str(tmp_path / "gone"), tmp_path / "gone")      # nonexistent: same spelling
+    assert not ade_claims._same_path("", tmp_path)
+
+
+# --- MEDIUM-5: `new` never overwrites -------------------------------------------------------------
+
+def test_new_refuses_an_existing_id_and_another_owners_path(tmp_path, state):
+    a = mk_repo(tmp_path, state, "a")
+    b = mk_repo(tmp_path, state, "b")
+    cli = [sys.executable, str(ROOT / "bin" / "ade_claims.py")]
+    env = base_env(state)
+
+    def new(cid, path, owner):
+        return subprocess.run([*cli, "new", "--id", cid, "--path", str(path), "--branch", "x", "--base-sha", "s",
+                               "--owner-record", owner], env=env, capture_output=True, text=True, timeout=60)
+
+    assert new("A", a, "A").returncode == 0
+    before = (state / "claims" / "A.json").read_text()
+    r = new("A", b, "A")
+    assert r.returncode == 3 and "already exists" in r.stderr
+    assert (state / "claims" / "A.json").read_text() == before
+    assert not (b / ".git" / "ade-claim").exists()
+    r = new("B", a, "B")
+    assert r.returncode == 4 and "already claimed" in r.stderr
+    assert not (state / "claims" / "B.json").exists()
+    assert (a / ".git" / "ade-claim").read_text().strip() == "A"
+    assert new("A2", a, "A").returncode == 0      # the same owner may re-claim its own workspace
+    assert new("B", b, "B").returncode == 0
+
+
+def test_create_claim_is_exclusive_under_concurrency(tmp_path, state):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def make(i):
+        c = ade_claims.make_claim(id="same", path=tmp_path / f"p{i}", branch="b", base_sha="s", owner_record=f"o{i}")
+        try:
+            ade_claims.create_claim(c)
+            return "ok"
+        except ade_claims.ClaimExists:
+            return "exists"
+
+    with ThreadPoolExecutor(8) as ex:
+        got = list(ex.map(make, range(16)))
+    assert got.count("ok") == 1 and got.count("exists") == 15
+    assert [p.name for p in (state / "claims").iterdir() if p.name != ".lock"] == ["same.json"]
+
+
+def test_a_released_claim_does_not_block_a_new_claim_on_the_path(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    ade_claims.set_state("A", "released")
+    ade_claims.create_claim(ade_claims.make_claim(id="B", path=repo, branch="b", base_sha="s", owner_record="B"))
+
+
+# --- MEDIUM-6: "read-only" commands that write ----------------------------------------------------------
+
+@pytest.mark.parametrize("cmd", [
+    ["log", "-0", "--output=f"], ["log", "-0", "--output", "f"], ["diff", "--output=f"], ["show", "--output=f", "HEAD"],
+    ["log", "-0", "--out=f"], ["log", "-0", "--outp=f"], ["format-patch", "-1", "-o", "f"], ["format-patch", "-1", "-of"],
+    ["format-patch", "-1", "--output-directory=f"], ["format-patch", "-1", "--output-d", "f"],
+    ["archive", "-o", "f", "HEAD"], ["archive", "--output=f", "HEAD"], ["grep", "-Oless", "base"],
+    ["grep", "--open-files-in-pager=less", "base"],
+], ids=lambda c: " ".join(c))
+def test_output_writing_options_are_not_read_only_in_a_foreign_workspace(tmp_path, state, cmd):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    dirty(repo)
+    r = run(state, cmd, repo, who="B")
+    assert r.returncode == 77, r.stderr
+    assert untouched(repo)
+
+
+def test_output_into_another_claims_tree_is_refused_from_ones_own(tmp_path, state):
+    a = mk_repo(tmp_path, state, "a")
+    b = mk_repo(tmp_path, state, "b")
+    claim(a, "A")
+    claim(b, "B", branch="b")
+    dirty(a)
+    r = run(state, ["log", "-0", f"--output={a / 'f'}"], b, who="B")
+    assert r.returncode == 77 and untouched(a)
+    assert run(state, ["log", "-0", f"--output={b / 'out.txt'}"], b, who="B").returncode == 0
+    assert (b / "out.txt").exists()
+
+
+@pytest.mark.parametrize("cmd", [["ls-files", "-o"], ["grep", "-o", "base"], ["log", "--oneline", "-1"],
+                                 ["diff", "--output-indicator-new=+"], ["log", "-1", "--format=%s"], ["ls-files", "--others"]],
+                         ids=lambda c: " ".join(c))
+def test_look_alike_read_options_stay_allowed_in_a_foreign_workspace(tmp_path, state, cmd):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    r = run(state, cmd, repo, who="B")
+    assert r.returncode != 77 and "REFUSED" not in r.stderr, r.stderr
+
+
+def test_plain_reads_still_never_start_python(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    for cmd in (["log", "--oneline", "-1"], ["diff", "--stat"], ["status", "-sb"], ["show", "--format=%s", "HEAD"]):
+        r = run(state, cmd, repo, who="B", ADE_PYTHON="/nonexistent/python3")
+        assert r.returncode == 0 and r.stderr == "", (cmd, r.stderr)
+    r = run(state, ["log", "-0", "--output=f"], repo, who="B", ADE_PYTHON="/nonexistent/python3")
+    assert "unguarded" in r.stderr          # it went to the rules (which fail open here), not the fast path
+
+
+# --- LOW items fixed on the way ---------------------------------------------------------------------------------
+
+def test_guard_log_holds_option_names_never_values(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    r = run(state, ["commit", "-mTOKEN-attached-xyz", "--author=Secret Name <s@x>", "--allow-empty"], repo, who="B")
+    assert r.returncode == 77
+    r = run(state, ["commit", "-m", "-token abc", "--", "-secretfile"], repo, who="B")
+    assert r.returncode == 77
+    text = (Path(state) / "guard.log").read_text()
+    for leak in ("TOKEN", "Secret", "token abc", "secretfile"):
+        assert leak not in text
+    assert guard_log(state)[0]["flags"] == ["-m", "--author", "--allow-empty"]
+
+
+def test_a_hostile_claim_file_does_not_blind_the_guard(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    (state / "claims" / "zz.json").write_text("[" * 200000)
+    (state / "claims" / "zy.json").write_text('{"id": "zy", "path": 5, "allow": 3, "owner": []}')
+    dirty(repo)
+    assert ade_claims.read_claim("zz") is None
+    assert run(state, ["reset", "--hard"], repo, who="B").returncode == 77
+    assert untouched(repo)
+
+
+def test_a_poisoned_pythonpath_does_not_switch_the_guard_off(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    (evil / "json.py").write_text("raise SystemExit(0)\n")
+    (evil / "re.py").write_text("raise SystemExit(0)\n")
+    dirty(repo)
+    r = run(state, ["reset", "--hard"], repo, who="B", PYTHONPATH=str(evil))
+    assert r.returncode == 77
+    assert untouched(repo)

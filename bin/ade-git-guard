@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # ade-git-guard — a `git` front door that refuses destructive git in a workspace another agent owns.
 #
+# SEATBELT, NOT A SANDBOX (design 5.7): it stops accidental or careless git, not a determined agent. Out of reach by
+# design: an absolute path to the real git, unsetting ACP_RUN_AGENT/ADE_CLAIM_ID, another agent's ADE_CLAIM_ID,
+# editing the claim registry, and EVERYTHING GIT ITSELF SPAWNS (hooks, `bisect run`, `submodule foreach`, pagers,
+# core.fsmonitor, diff.external, core.sshCommand, `fetch --upload-pack`, any `git` a `!` alias runs): git puts its own
+# exec-path first on its children's PATH, so they reach the real git, not this shim.
+#
 # Installed as libexec/agent-bin/git (a relative symlink to ../../bin/ade-git-guard). acp-run prepends that
 # directory to the PATH of every agent it launches (slice W4), so codex, opencode, omp, agy, crush, zcode
 # and claude slices all reach git through here; the operator's shell, Orca and IDEs never do.
@@ -9,15 +15,16 @@
 #   git ARGS...                           (the shim) run the real git, or refuse with exit 77
 #   ade-git-guard git-ARGS...             the same, called by name
 #   ade-git-guard --check CMD [--cwd DIR] decide every `git` call in a shell command string (Claude hook);
-#                                         exit 0 allow, 77 refuse
+#                                         exit 0 allow, 77 refuse (also when a call cannot be classified)
 #   ade-git-guard --real-git              print the git this guard would run
 #   ade-git-guard --help
 #
 # Order of work, cheapest first (one bash exec and no Python for the common call):
 #   1. Not an agent process (neither ACP_RUN_AGENT=1 nor ADE_CLAIM_ID set): exec the real git untouched.
 #   2. Inside a git hook (GIT_INDEX_FILE set) or pre-commit (PRE_COMMIT set): exec the real git untouched.
-#   3. A subcommand that only reads (status diff log show fetch ...), after -C/-c/--git-dir=...: exec.
-#   4. Everything else: `python3 -S ade_claims.py guard -- ARGS`, which looks up the workspace claim
+#   3. A subcommand that does not change the repository (status diff log show fetch ...), after -C/-c/--git-dir=...,
+#      and none of whose arguments can name an output file (--output*, -o, -O, --open-files-in-pager): exec.
+#   4. Everything else: `python3 -I -S ade_claims.py guard -- ARGS`, which looks up the workspace claim
 #      (`.git/ade-claim` -> ~/.local/state/ade/claims/<id>.json). Exit 0 -> exec the real git;
 #      exit 77 -> the refusal text (owner, claim id, safe alternative) is on stderr, one line is in
 #      ~/.local/state/ade/guard.log, and git never runs.
@@ -66,12 +73,13 @@ lib_path() {
   printf '%s/ade_claims.py' "${src%/*}"
 }
 
+# -I: isolated (no PYTHON* variables, no user site, no script dir on sys.path), -S: no site import (faster)
 run_python() {
   local py lib
   py="${ADE_PYTHON:-python3}"
   lib=$(lib_path)
   command -v "$py" > /dev/null 2>&1 && [ -f "$lib" ] || return 126
-  ADE_REAL_GIT="$real" "$py" -S "$lib" "$@"
+  ADE_REAL_GIT="$real" "$py" -I -S "$lib" "$@"
 }
 
 if [ "${self##*/}" = "ade-git-guard" ]; then
@@ -104,7 +112,7 @@ if { [ -z "${ADE_CLAIM_ID:-}" ] && { [ -z "${ACP_RUN_AGENT:-}" ] || [ "${ACP_RUN
   exec "$real" "$@"
 fi
 
-# 3: first non-option word (skipping -C DIR, -c K=V and the value-less global flags) is a read-only subcommand
+# 3: first non-option word (skipping -C DIR, -c K=V and the value-less global flags) is a non-changing subcommand
 args=("$@")
 n=${#args[@]}
 i=0
@@ -119,11 +127,18 @@ while [ "$i" -lt "$n" ]; do
     *) sub="$a"; break ;;
   esac
 done
+# an argument that can name an output file (git log --output=f truncates f) goes to the rules
+slow=0
+for a in "$@"; do
+  case "$a" in
+    --ou* | --op* | -o | -o?* | -O | -O?*) slow=1; break ;;
+  esac
+done
 case "$sub" in
   status | diff | log | show | ls-files | ls-tree | rev-parse | cat-file | blame | grep | fetch | ls-remote | describe \
     | merge-base | version | help | rev-list | show-ref | for-each-ref | shortlog | diff-tree | diff-index | diff-files \
     | name-rev | check-ignore | check-attr | var | whatchanged | cherry | count-objects | show-branch)
-    exec "$real" "$@"
+    if [ "$slow" = 0 ]; then exec "$real" "$@"; fi
     ;;
 esac
 
