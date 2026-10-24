@@ -9,7 +9,7 @@ PR 27 merged at an APPROVE with LOW only (djbclark, 2026-10-23: "merge now, foll
 its own adversary round, from `adhoc-2026-10-23/adv-scan-67-report.md` and Codex finding 4365722733: 1. **P2**: a
 bigteam task's `CLAIM` that is a FIFO (or a symlink to one) blocks `read_text()` forever and `open_job_records()` has the
 same problem; use the bounded non-blocking `read_regular_file()` already used for stash reflogs and classify an
-unreadable one. 2. LOW 1: `git_dir_foreign` accepts a hard-linked gitfile (`os.path.samefile` compares inodes); compare
+unreadable one. 1b. **P2 (Codex 4367121323)**: a shallow checkout with no origin gets an `all.bundle` row, but the bundle drops `.git/shallow` and cloning it fails (`Could not read <parent>`); keep `.git/shallow` with the bundle or say the bundle cannot be cloned. 2. LOW 1: `git_dir_foreign` accepts a hard-linked gitfile (`os.path.samefile` compares inodes); compare
 resolved paths too. 3. LOW 2: four texts claim `--separate-git-dir` has a back-pointer (module docstring, the
 `git_dir_foreign` docstring, the doc tool's user-facing row at ~966) while the code and tests correctly skip it; fix the
 wording. 4. LOW 3: `ls-files -z -s -m -d` lists every index entry and adds a content-check pass under the 60 s budget;
