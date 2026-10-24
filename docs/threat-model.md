@@ -103,25 +103,15 @@ What an attacker would want, in order of damage:
    Paseo agent prefixes `[relay from <name>] `), so a receiving agent sees a peer, not the operator (advisory: Paseo does not verify the sender id, see 4.1); relay.py
    refuses text starting with `/`, an archived agent, and one with a pending permission or question.
 10. **`bin/firecrawl-router`**: an HTTP listener, loopback by default (see the intro); any process that can
-    reach it can call it. Since 2026-10-24 a call to `/v2/search/developer` also spends the machine's
-    `GITHUB_TOKEN` against api.github.com (the token is read with `sudo-secretspec get`, held in memory and read again
-    at most once a minute while none is held, sent only to the https or loopback `FIRECRAWL_ROUTER_GITHUB_BASE` and
-    never logged or handed to the MCP child). That token is a classic PAT with `repo` scope (adversary round 1,
-    2026-10-24), so a caller of the unauthenticated listener (`:18805 --open`) could otherwise read private
-    repositories through it. The router therefore returns public repositories only: `is:public` on issue and PR
-    queries, and a code hit only when GitHub reports `repository.private` as false. A local caller can still use up
-    the search quota and learn which public results exist. Residual (adversary rounds 2 to 4): a `repos` value naming a
-    private repository the token can read answers like an empty public one (a nonexistent repo's 422 is turned into
-    the same empty 200, a scoped search never retries, and `repos` takes one slug because with a list a missing member
-    fails the whole query), and the fewer-terms retry is decided on public hits only. **Closed on 2026-10-24 (the
-    residual below applied to the classic PAT):** code search ranks across every repository the token reads and the
-    private hits are dropped after GitHub cuts its page, so with a classic PAT 100 private files that outrank every
-    public match of a query would empty the answer, one bit about private code per call (10 a minute) for a caller who
-    plants a public file. The `shared_mcp` role now sets `FIRECRAWL_ROUTER_GITHUB_SECRET=FIRECRAWL_GITHUB_PUBLIC_TOKEN`,
-    a fine-grained public-repositories-read-only token (probed 2026-10-24: `/user` 200, a private repo 404, code search
-    on it 0 results, issue search on it 422), so no private repository is reachable through it at all. The filters stay
-    as a second layer, and the router's default name is still `GITHUB_TOKEN`: a machine without the role setting falls
-    back to the classic PAT and the residual returns. The token expires; renew it before then.
+    reach it can call it. From 2026-10-24 until the cutover (PRs 41, 43, 45) it also spent a GitHub token on
+    `/v2/search/developer`; that code and token are gone from the Mac: developer search is answered on Hyades
+    (firecrawl-hyades `docs/developer-search.md`). What it left behind there: the token (fine-grained,
+    public-repositories-read-only, probed 2026-10-24: a private repo answers 404) sits in the `djbclark-fc-searxng`
+    microVM's envs, readable by SIPB's Hyades admins and by anything that can run in that microVM or read
+    `hyades getconf`; being public-read-only, the worst it grants is search quota. The earlier classic-PAT residual
+    (private-code inference through page crowd-out and retry, adversary rounds 2 to 4) cannot arise with that token.
+    Anyone who can reach the Hyades gate with its bearer token can spend the shared GitHub quota; a per-caller budget is
+    not built and is required before the service is opened to the SIPB community.
 11. **Hermes to Claude delegation** (`delegate_task`, `claude-sub`; `docs/mcp-servers.md`): a message Hermes
     acts on can become a headless agent run.
 12. **`bin/ade-update`** (2026-10-20): after its fast-forward pull it runs the `skill-everywhere` beside the running
