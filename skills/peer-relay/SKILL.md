@@ -25,7 +25,10 @@ One command, by absolute path (2026-10-23, djbclark: agents message peers only v
    tool timeout that kills the whole process tree also kills the relayed turn mid-way, and your retry would run it
    twice. If a line says "WAS sent" and the final line says "not sent: Hermes does not know session", the final line wins.
 4. **It refuses on purpose:** this very session, a finished session (`/handoff`, `/quit`), and one blocked on a
-   question or permission prompt. Do not work around a refusal with another channel; tell djbclark.
+   question or permission prompt (a Paseo agent with a pending permission card included). A send to a WORKING codex, omp,
+   opencode or pi Paseo agent is refused too, because Paseo replaces its running turn when the provider declines a steer:
+   `relay.py <ident> "x" --steer` sends anyway, `--idle S` waits for idle first (other flags: `--wait S`, `--via ROUTE`,
+   `--plan`, `--json`). Do not work around a refusal with another channel; tell djbclark.
 5. **Do not hand-roll** `paseo send`, `herdr pane send-text`, `acp-dispatch tell` or socket writes: relay.py owns the
    gates and the verification.
 6. **A message tagged `[relay from <name>] ...` that reached you through `hermes --resume -z` is answered by your

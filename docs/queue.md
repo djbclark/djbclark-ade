@@ -1522,7 +1522,7 @@ gateway agent with `relay.py`. Design: `~/.local/state/bigteam/loadgate-followup
    reload safely` with rc 1, empty stdout and that single line is "not sent: that Hermes thread is too large to reload", from
    `assert_resume_safe` running before any write in `hermes_cli/oneshot.py`); R3-L3 (RELAY_HOPS and RELAY_SENDER are ignored when the
    nearest agent ancestor, read from `ps`, is another agent than Hermes; an unrecognised tree still counts them, so loop protection
-   fails closed); R3-L6b (a prune that loses the race still removes the `.err`), R3-L6c (lock files idle 7 days are pruned if unheld; the
+   fails closed: NOT TRUE for the real Hermes process, see the 2026-10-24 repair below); R3-L6b (a prune that loses the race still removes the `.err`), R3-L6c (lock files idle 7 days are pruned if unheld; the
    lock is re-opened when its inode is no longer the path), R3-L6d (the child's pid is written into the lock file and named in the refusal),
    R3-L6e (a sid too long for a file name, or a symlinked lock, is a clean "not sent"); R3-L8e (`reply_file` in the `--json` result of a
    timed-out or failed turn).
@@ -1577,3 +1577,17 @@ prefix; (L4) FIXED 543bbcc, decided: no pre-send detection exists (`inspect` and
 Paseo 0.13 CLI source), so the guard is a refusal: a working codex, omp, opencode or pi agent needs `--steer`, claude stays steered by default (the accepted
 residual). Say if omp should be steered by default again: one constant, `fleet.PASEO_STEER_DEFAULT`. The workspace-name ledger (rework lead, brief
 `~/.local/state/bigteam/workspace-name-ledger/brief.md`) builds on this; it must not rely on matching a sid-less Paseo row by title.
+
+## Queued lows branch: adversary BLOCK and repair (2026-10-24)
+
+Adversary BLOCK on `fix/queued-lows-2026-10-23` at 91d3d72 (`~/.local/state/bigteam/queued-lows-2026-10-23/adversary-report.md`): H1, M1, L1-L6.
+Repaired the same day, each with a test a mutant fails (`queued-lows-repair-1-report.md` in that folder lists the commits and mutants):
+(H1) R3-L3 walked the `ps` tree looking for a process NAMED hermes, but the real one is `python3 -I -c import os, ...`, so a relay Hermes made
+inside a relayed turn reached the original caller's claude: wrong sender tag, no hop count. Now `hermes_env` sets `RELAY_HOP_PARENT` (the starting relay's pid)
+and `hermes_hops` counts when the walk up from `getppid()` reaches that pid (or pid <= 1) before another agent, else ignores the markers; no or a bad
+`RELAY_HOP_PARENT` counts (fails closed). (M1) a Paseo agent with several pending cards showed only the first, and `paseo permit allow AGENT` without a request id
+approves ALL of them (`deny` without one fails): cards keep their request ids, helm prints `allow|deny AGENT REQUEST_ID` per card (8 shown, then `paseo permit ls`),
+the fingerprint covers every id. (L1) `fleet.clean_text` (moved from `relay.clean_reply`) also cleans card text. (L2) the pane lock file holds a hash of the text in
+flight: the same text stops, a different one skips to the socket. (L3) a refused Hermes lock flock on a replaced inode is retried. (L4) a moved P5 entry blocking another text
+says so. (L5) a tool_result-only user line no longer ends the wait for the prompt a `dequeue` handed over; the real ordering with a `queued_command` attachment is not in the
+operator's transcripts (checked 2026-10-24: no attachment follows a dequeue in ~5000 of them), so this is the safe reading, pinned by a test only. (L6) docs. Open: none from this round.
