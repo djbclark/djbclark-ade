@@ -5458,6 +5458,24 @@ def test_a_shallow_checkout_with_no_origin_keeps_its_shallow_file_beside_the_bun
     assert scan_one(mod, full)["shallow"] is False
 
 
+def test_a_shallow_checkout_with_an_origin_says_its_bundle_restores_only_into_a_clone_of_origin(tmp_path, monkeypatch):
+    """Adversary round 70 on PR 39, LOW: a shallow checkout WITH an origin still gets a branch bundle that `git clone`
+    cannot restore alone (rc 128); the row says to fetch it into a clone of origin."""
+    mod, doc = load(), load_doc()
+    home = tmp_path / "home"
+    (home / "src").mkdir(parents=True)
+    monkeypatch.setattr(doc, "HOME", str(home))
+    upstream = make_repo(tmp_path / "up")
+    commit_file(upstream, "b.txt")
+    co = home / "src" / "sh"
+    git(tmp_path, "clone", "-q", "--depth", "1", f"file://{upstream}", str(co))
+    commit_file(co, "local.txt")
+    c = scan_one(mod, home / "src")
+    assert c["shallow"] is True and "no origin remote" not in c["flags"], c
+    row = next(r for r in section_3_2(doc.render(doc_scan([c]))).splitlines() if r.startswith("| ~/src/sh "))
+    assert "bundle create" in row and "clone of origin" in row, row
+
+
 def test_the_replaced_file_check_asks_for_modified_paths_only_and_never_lists_the_whole_index_with_a_content_check(tmp_path, monkeypatch):
     """Adversary round 67 on PR 27, LOW 3: `ls-files -z -s -m -d` listed every index entry and hashed every stat-dirty
     one, under the 60 s default. A file replaced by a directory is a type change that only `-m` reports (`-d` lists a

@@ -754,6 +754,10 @@ def render(d):
         what, cmd, need = [], [], "no"
         head_row = False
         covered_by_bundle = False
+        # a shallow checkout's bundle holds no boundary parents, so `git clone` of it alone fails (rc 128): it restores only
+        # by fetching into a clone of origin (adversary round 70 on PR 39, LOW)
+        shallow_note = (" (shallow checkout: the bundle cannot be cloned alone; restore by fetching it into a clone of origin, "
+                        "`git -C R fetch <bundle> 'refs/*:refs/*'`, so keep origin)") if c.get("shallow") else ""
         # no rule keyed on a path name: a checkout called `one-offs/Hermes` used to get "see `~/src/one-offs`" and no
         # command of its own, whatever repository it was (adversary round 30 on PR 27)
         if "no origin remote" in c["flags"]:
@@ -780,6 +784,7 @@ def render(d):
                                   ck, raw_p, f"{ck}/HEAD.bundle")
                            + " (detached HEAD: bundle, or create a branch first: "
                            + shcode("git -C {} switch -c <name>", raw_p) + ")")
+                cmd[-1] += shallow_note
                 need = "yes: HEAD names no branch; bundle it, or name a branch first"
             else:
                 what.append(f"{head_ahead} commit(s) on {code('{}', c['branch'])}")
@@ -791,13 +796,13 @@ def render(d):
                     # a bundle of every ref can hold the commits (Codex pass 48 on PR 27, P1)
                     bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
                                     ck, raw_p, f"{ck}/all-refs.bundle")
-                    cmd.append(bundle + ODD_NAME_NOTE + (cred_note if no_push else ""))
+                    cmd.append(bundle + ODD_NAME_NOTE + (cred_note if no_push else "") + shallow_note)
                     need = cred_need if no_push else "yes: bundle it; the branch name cannot be typed into a push"
                 else:
                     push = shcode("git -C {} -c core.hooksPath=/dev/null push -u origin refs/heads/{}:refs/heads/{}", raw_p, c["branch"], c["branch"])
                     bundle = shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} refs/heads/{}",
                                     ck, raw_p, f"{ck}/branch-{quote(c['branch'], safe='')}.bundle", c["branch"])
-                    cmd.append(bundle + cred_note if no_push else push + " or " + bundle)
+                    cmd.append((bundle + cred_note if no_push else push + " or " + bundle) + shallow_note)
                     need = cred_need if no_push else "yes: pushing a branch publishes it; pick push or bundle"
         if local_n and not covered_by_bundle:
             # commits on other local branches, tags (or a detached HEAD) that no origin ref holds, whatever HEAD's own state
@@ -833,6 +838,8 @@ def render(d):
                 cmd.append(bundle + ODD_NAME_NOTE)  # one bundle holds every ref; no push can name the odd one
             else:
                 cmd.append(bundle if not lo_cmd else "; ".join(lo_cmd[:-1] + [lo_cmd[-1] + " or " + bundle]))
+            if c.get("shallow"):
+                cmd[-1] += shallow_note
             need = need if need.startswith(("yes", "**yes")) else (
                 cred_need if no_push else "yes: bundle it; a push would leave commits on other refs behind" if (num(c.get("local_only_other_refs")) or more > 0)
                 else "yes: pushing a branch publishes it; pick push or bundle")
@@ -848,6 +855,8 @@ def render(d):
                             "bundle create <DEST>/{} --tags", ck, raw_p, f"{ck}/tags.bundle")
             cmd.append(bundle + cred_note if no_push else shcode("git -C {} -c core.hooksPath=/dev/null push origin --tags", raw_p) + " or " + bundle
                        + " (a tag origin has at another object is rejected by the push: bundle it, or decide to force)")
+            if c.get("shallow"):
+                cmd[-1] += shallow_note
             need = need if need.startswith(("yes", "**yes")) else (
                 cred_need if no_push else "yes: pushing a tag publishes it; pick push or bundle")
         if c.get("lfs_store"):
