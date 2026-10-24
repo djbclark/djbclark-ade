@@ -705,6 +705,9 @@ then prove a thin slice end to end, then widen, and only then retire or delete.
    files and unpushed commits and capture them; track the four untracked config files as
    templates. Fixing the five broken rules links waits for the adoption snapshot (4.4);
    classification and backups do not. Nothing is deleted.
+   **I0, workspace isolation (queue gate, decided 2026-10-23, [queue](queue.md))**, before Phase 1's first parallel
+   fan-out: claims, the git guard and `acp-dispatch --workspace auto` so concurrent agents stop resetting each other's
+   pastures; Phase F section 4 consumes its adapter.
 2. **Phase 1, thin vertical slice (1 to 2 weeks).** The chezmoi source state under `home/`
    for Claude Code and Codex only: companion data through `stat`-guarded templates, the
    `modify_` merges under the ownership table, `ade snapshot` and `ade restore`;

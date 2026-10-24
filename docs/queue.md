@@ -20,9 +20,20 @@ capture and recall hooks, note schemas and consolidation, plus the phase it belo
 
 djbclark, 2026-10-23: "Also add to appropriate phase if we haven't yet, we should probably be making heavier use of
 hermes worktrees and cow pastures, to avoid agents stepping on each other's toes. Do web searches and consult a
-strong model on this as well." Status 2026-10-23: **design slice running** (`design-isolation`, Opus 5.5 high via
-omp, web research, read-only; brief `~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-isolation.md`,
-report `~/.local/state/bigteam/adhoc-2026-10-23/design-isolation-report.md`). It decides which phase of
+strong model on this as well." Status 2026-10-23: **design done, all seven recommendations accepted by djbclark
+2026-10-23, build queued until the Claude quota resets** (report
+`~/.local/state/bigteam/adhoc-2026-10-23/design-isolation-report.md`, Opus 5.5 high via omp with web research; brief
+`~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-isolation.md`). Rulings: 1. Hermes stays never a
+target (`hermes -w` is not used; its design is borrowed). 2. No agent edits in the primary `~/src/<repo>` (integration
+and fast-forward only; the lead's doc commits move to its own pasture). 3. `~/ops` may get a linked worktree outside
+`~/ops` when two agents must write one ops repo, guard-enforced (`stash` and autostash refused in `~/ops`). 4.
+`acp-dispatch --workspace auto` is the default for `--kind code`, `shared` opt-in. 5. The git guard covers
+acp-run-launched agents plus a Claude hook first; `~/.local/bin/git` only after a week with no false refusals. 6. The
+placement is a queue gate **I0 (workspace isolation)** ahead of Phase 1's first parallel fan-out, with Phase F section
+4 and proposal 9.4 consuming its adapter. 7. The reaper removes clean, merged and released pastures without asking;
+dirty or unpushed ones only ping. The build is the report's slices W1-W8 (claim library and guard `ade-git-guard`,
+`cow-pasture` claims and reaper, `acp-dispatch --workspace`, acp-run PATH, Claude hook, gate test, docs, home rules),
+Sonnet 5.5 `code` workers, adversary on W1 and W3 at minimum. The report decided which phase of
 [`docs/ade-everywhere-proposal.md`](ade-everywhere-proposal.md) section 8 this belongs in (or a step before Phase 0),
 what "Hermes worktrees" is (Hermes is never a routing target: whether its worktree mode as a user feature needs a
 ruling), when an agent gets a pasture, worktree or the shared checkout, claim files, and guards in `bin/cow-pasture` /
@@ -39,9 +50,19 @@ tab. Also make autorename work with paseo tabs, and just like workspaces we need
 to find them even if the user changes them in the UI after the autorename etc. This history system should also apply
 to herdr panes, tabs, and workspaces, our sqlite database might be a good place to do this, but again consult with a
 strong model on this problem, and ask me any questions that come up when this feature implementation surfaces."
-Status 2026-10-23: **design slice running** (`design-tabs`, Opus 5.5 high via omp, read-only; brief
-`~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-tabs.md`, report
-`~/.local/state/bigteam/adhoc-2026-10-23/design-tabs-report.md`). Nothing is built.
+Status 2026-10-23: **design done, all ten recommendations accepted by djbclark 2026-10-23, build queued until the
+Claude quota resets** (report `~/.local/state/bigteam/adhoc-2026-10-23/design-tabs-report.md`, Opus 5.5 high via omp;
+brief `~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-tabs.md`). Rulings: 1. The Paseo agent name is
+the short tab name (`adv-r3-pr31-pt`); the sentence title stays in the provider session and the `-pw` workspace name.
+2. Workers and adversary rounds are sub-agent tabs in the lead's workspace. 3. The store is a new
+`~/.local/state/ade/names.sqlite` (not session-finder's index). 4. An unexplained rename counts as `user`, so `--auto`
+never touches it. 5. A launchd job `com.djbclark.ade-names` (60 s Paseo poll, 5 min herdr reconcile) plus a herdr
+plugin, plist in this repo. 6. `-p` is retired for Paseo workspaces (`-pw` only). 7. Closing a top-level Paseo agent tab
+archives the agent; a Paseo mode for `herdr-tidy` is a later slice. 8. Names are kept forever, with `ade-names forget`.
+9. Autorename stays in-session; the poller only observes. 10. The rule lives in the autorename skill,
+`workspace-layout.md` and the repo AGENTS.md row, no home item. The build is the report's slices 1-8 (docs, `paseo_tab_name`
+and the `--auto` agent-name guard, `bin/ade-names`, herdr plugin and launchd, consumers, session-finder, backup entry,
+upstream issue draft), Sonnet 5.5 workers; slice 8 and 1 may go first and slice 2 alone fixes the `--auto` overwrite bug.
 
 1. **Tab usage convention**: what lives in a tab, one agent per tab or not, how the skills create, reuse and close tabs.
 2. **Naming rule**: lowercase, hyphenated, ending `-pt`, about 17 visible characters including the suffix; goes into
