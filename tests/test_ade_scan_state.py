@@ -5458,6 +5458,69 @@ def test_a_shallow_checkout_with_no_origin_keeps_its_shallow_file_beside_the_bun
     assert scan_one(mod, full)["shallow"] is False
 
 
+def _shallow_case(tmp_path, monkeypatch, case):
+    """A shallow clone of a 2-commit upstream (`origin`) in `~/src/sh`, shaped for one row of section 3.2; returns
+    (row, home, upstream, sha_to_restore, expected {bundle file: spec})."""
+    mod, doc = load(), load_doc()
+    home = tmp_path / "home"
+    (home / "src").mkdir(parents=True)
+    monkeypatch.setattr(doc, "HOME", str(home))
+    upstream = make_repo(tmp_path / "up")
+    commit_file(upstream, "b.txt")
+    co = home / "src" / "sh"
+    git(tmp_path, "clone", "-q", "--depth", "1", f"file://{upstream}", str(co))
+    kw = {}
+    all_refs = "+refs/*:refs/bundle/*"
+    if case == "branch":
+        commit_file(co, "local.txt")
+        want = {"branch-main.bundle": all_refs, "local-only.bundle": all_refs}
+    elif case == "detached":
+        git(co, "checkout", "-q", "--detach")
+        commit_file(co, "local.txt")
+        want = {"HEAD.bundle": "+HEAD:refs/bundle/HEAD"}
+    elif case == "tags":
+        git(co, "tag", "-a", "-m", "t", "vloc", "HEAD")
+        want = {"tags.bundle": all_refs}
+    else:  # unreachable, no local-only commit: only the "origin did not answer" row can carry the bundle command
+        want = {"local-only.bundle": all_refs}
+    c = scan_one(mod, home / "src", **kw)
+    if case == "unreachable":  # whether a scan reaches a file:// origin varies; set the flag on the record by hand
+        c["flags"] = [*c["flags"], doc.ORIGIN_UNREACHABLE]
+    if case == "tags":  # a tag object on a pushed commit is counted only by a reachable origin: set the record by hand
+        c.update(local_only_tags=[{"tag": "vloc", "count": 0}], verdict="unpushed tags", flags=[*c["flags"], "unpushed tags"])
+    assert c["shallow"] is True and "no origin remote" not in c["flags"], c
+    sha = git(co, "rev-parse", "refs/tags/vloc^{commit}" if case == "tags" else "HEAD").strip()
+    commit_file(upstream, "later.txt")  # origin moves on before the restore: a non-forced update would be rejected
+    row = next(r for r in section_3_2(doc.render(doc_scan([c]))).splitlines() if r.startswith("| ~/src/sh "))
+    return row, home, upstream, sha, want
+
+
+@pytest.mark.parametrize("case", ["branch", "detached", "tags", "unreachable"])
+def test_a_shallow_checkout_with_an_origin_gives_every_bundle_row_a_restore_that_works(tmp_path, monkeypatch, case):
+    """Adversary rounds 1-2 on PR 47: each bundle row of a shallow checkout WITH an origin carries its own restore note
+    (`git clone --bare <origin> R`, then a fetch whose refspec matches what that bundle holds), and following the printed
+    recipe against an origin that has moved on brings the local commit back under `refs/bundle/`."""
+    row, home, upstream, sha, want = _shallow_case(tmp_path, monkeypatch, case)
+    assert "`git clone --bare <origin> R`" in row, row
+    env = {**GIT_ENV, "HOME": str(home)}
+    for bundle_file, spec in want.items():
+        # the command that writes this bundle, and the note that follows it before the next bundle command
+        m = re.search(r"`(mkdir -p [^`]*bundle create <DEST>/\S*?" + re.escape(bundle_file) + r"[^`]*)`((?:(?!bundle create).)*)", row)
+        assert m, (bundle_file, row)
+        note_spec = re.search(r"fetch <bundle> '([^']*)'", m.group(2))
+        assert note_spec and note_spec.group(1) == spec, (bundle_file, m.group(2))
+        dest = tmp_path / f"dest-{bundle_file}"
+        dest.mkdir()
+        run = subprocess.run(["bash", "-c", PLAN_PREFIX + unescape_span(m.group(1)).replace("<DEST>", str(dest))],
+                             capture_output=True, text=True, cwd=tmp_path, env=env)
+        assert run.returncode == 0, (bundle_file, run.stderr)
+        bundle = next(dest.rglob(bundle_file))
+        r = tmp_path / f"R-{bundle_file}"
+        git(tmp_path, "clone", "-q", "--bare", f"file://{upstream}", str(r))
+        git(r, "fetch", "-q", str(bundle), note_spec.group(1))
+        assert git(r, "for-each-ref", "--contains", sha, "refs/bundle").strip(), (bundle_file, "restored no ref holding", sha)
+
+
 def test_the_replaced_file_check_asks_for_modified_paths_only_and_never_lists_the_whole_index_with_a_content_check(tmp_path, monkeypatch):
     """Adversary round 67 on PR 27, LOW 3: `ls-files -z -s -m -d` listed every index entry and hashed every stat-dirty
     one, under the 60 s default. A file replaced by a directory is a type change that only `-m` reports (`-d` lists a
