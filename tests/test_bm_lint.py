@@ -4,11 +4,13 @@ Every test builds its own small FIXTURE store under tmp_path: no real notes, no 
 no basic-memory binary, no SQLite index (bm-lint reads only the files). The default
 --config is always overridden so the real ~/.basic-memory/config.json is never read.
 """
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import time
+from datetime import date, timedelta
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -26,7 +28,7 @@ def write_note(store, rel, content, age_days=0.0):
     return p
 
 
-def run(store=None, *flags, env_extra=None, use_env_store=False):
+def run(store=None, *flags, env_extra=None, use_env_store=False, timeout=120):
     env = {k: v for k, v in os.environ.items() if not k.startswith("BM_LINT_")}
     if env_extra:
         env.update(env_extra)
@@ -36,7 +38,7 @@ def run(store=None, *flags, env_extra=None, use_env_store=False):
     argv += list(flags)
     if not any(f.startswith("--config") for f in flags):
         argv += ["--config", NO_CONFIG]
-    return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=120)
+    return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout)
 
 
 def text_findings(proc, check):
@@ -111,7 +113,8 @@ def test_orphans_by_folder_and_unresolved_relations(tmp_path):
     orphans = text_findings(proc, "orphan-notes")
     assert len(orphans) == 1 and "proj" in orphans[0] and "2 of 4" in orphans[0]
     unresolved = text_findings(proc, "unresolved-relation")
-    assert len(unresolved) == 1 and "[[Nowhere]]" in unresolved[0]
+    assert len(unresolved) == 1 and "x3.md" in unresolved[0] and "line 2" in unresolved[0]
+    assert "Nowhere" not in proc.stdout  # the link target is note text, never copied
 
 
 def test_duplicate_titles_case_insensitive(tmp_path):
@@ -132,17 +135,20 @@ def test_q8_ruling_and_decision_observations(tmp_path):
     write_note(tmp_path, "d2.md", "# D2\n- [decision] chose bash\nno link anywhere\n")
     proc = run(tmp_path)
     undated = text_findings(proc, "ruling-undated")
-    assert len(undated) == 1 and "never bare sed" in undated[0]
+    assert len(undated) == 1 and "r2.md" in undated[0] and "line 2" in undated[0]
+    assert "never bare sed" not in proc.stdout  # findings never copy note text (M3)
     unlinked = text_findings(proc, "decision-unlinked")
     assert len(unlinked) == 1 and "d2.md" in unlinked[0]  # once per note, not per line
 
 
 def test_status_active_needs_recent_verification(tmp_path):
+    fresh = (date.today() - timedelta(days=5)).isoformat()
+    stale = (date.today() - timedelta(days=200)).isoformat()
     write_note(tmp_path, "noverify.md", "---\nstatus: active\n---\n# nv\nsee [[v]]\n")
     write_note(tmp_path, "v.md", "# v\nsee [[nv]]\n")
-    write_note(tmp_path, "fresh.md", "---\nstatus: active\nverified: 2026-10-20\n---\n# f\nsee [[nv]]\n")
-    write_note(tmp_path, "stale.md", "---\nstatus: active\nverified: 2026-01-01\n---\n# s\nsee [[nv]]\n")
-    write_note(tmp_path, "done.md", "---\nstatus: done\nverified: 2026-01-01\n---\n# d\nsee [[nv]]\n")
+    write_note(tmp_path, "fresh.md", "---\nstatus: active\nverified: %s\n---\n# f\nsee [[nv]]\n" % fresh)
+    write_note(tmp_path, "stale.md", "---\nstatus: active\nverified: %s\n---\n# s\nsee [[nv]]\n" % stale)
+    write_note(tmp_path, "done.md", "---\nstatus: done\nverified: %s\n---\n# d\nsee [[nv]]\n" % stale)
     proc = run(tmp_path)
     lines = text_findings(proc, "status-unverified")
     assert len(lines) == 2
@@ -167,7 +173,8 @@ def test_dead_path_references(tmp_path):
     write_note(tmp_path, "ok.md", "# o\nfine ~/real/dir/f.md\n")
     proc = run(tmp_path, env_extra={"HOME": str(home)})
     lines = text_findings(proc, "dead-path")
-    assert len(lines) == 1 and "gone.md" in lines[0] and "~/gone/xyz/file.md" in lines[0]
+    assert len(lines) == 1 and "gone.md" in lines[0] and "first at line 2" in lines[0]
+    assert "~/gone" not in proc.stdout  # the reference text is note content, never copied
 
 
 def test_json_shape_and_exit_codes(tmp_path):
@@ -221,3 +228,227 @@ def test_never_writes_to_the_store(tmp_path):
         for p in tmp_path.rglob("*")
     }
     assert before == after  # read-only means byte-identical, timestamps included
+
+
+# --- repair round (adversary BLOCK on 4d5a19e, 2026-10-24) -------------------------------
+
+def jrun(store, *flags, **kw):
+    proc = run(store, "--json", *flags, **kw)
+    assert proc.returncode in (0, 1), proc.stdout + proc.stderr
+    return proc, json.loads(proc.stdout)
+
+
+def of(out, check):
+    return [f for f in out["findings"] if f["check"] == check]
+
+
+def test_title_is_frontmatter_else_stem_never_the_h1(tmp_path):
+    write_note(tmp_path, "a/one.md", "# Shared Heading\nsee [[two]]\n")
+    write_note(tmp_path, "b/two.md", "# Shared Heading\nsee [[one]]\n")
+    _proc, out = jrun(tmp_path)
+    assert not of(out, "duplicate-title")  # same H1, different stems: not a duplicate
+
+
+def test_same_stem_in_two_folders_is_a_duplicate_title(tmp_path):
+    write_note(tmp_path, "a/notes.md", "# A\nsee [[other]]\n")
+    write_note(tmp_path, "b/Notes.md", "# B\nsee [[other]]\n")
+    write_note(tmp_path, "other.md", "# O\nsee [[notes]]\n")
+    _proc, out = jrun(tmp_path)
+    dups = of(out, "duplicate-title")
+    assert len(dups) == 1 and "a/notes.md" in dups[0]["detail"] and "b/Notes.md" in dups[0]["detail"]
+
+
+def test_link_resolves_by_stem_for_a_note_in_a_subfolder(tmp_path):
+    write_note(tmp_path, "deep/er/note_one.md", "# Not The Stem\nsee [[hub]]\n")
+    write_note(tmp_path, "hub.md", "# Hub\n[[note_one]] [[note-one]] [[Note One]] [[NOTE_ONE|alias]] [[note_one#frag]]\n")
+    _proc, out = jrun(tmp_path)
+    assert not of(out, "unresolved-relation")
+    assert not of(out, "orphan-notes")
+
+
+def test_link_resolves_by_frontmatter_permalink(tmp_path):
+    write_note(tmp_path, "x/y.md", "---\npermalink: custom/place\n---\nsee [[hub]]\n")
+    write_note(tmp_path, "hub.md", "# Hub\nsee [[custom/place]]\n")
+    _proc, out = jrun(tmp_path)
+    assert not of(out, "unresolved-relation")
+
+
+def test_link_resolves_by_slugged_folder_and_stem(tmp_path):
+    write_note(tmp_path, "My Proj/My_Note.md", "see [[hub]]\n")
+    write_note(tmp_path, "hub.md", "see [[my-proj/my-note]]\n")
+    _proc, out = jrun(tmp_path)
+    assert not of(out, "unresolved-relation")
+
+
+def test_link_resolves_by_frontmatter_title(tmp_path):
+    write_note(tmp_path, "zzz.md", "---\ntitle: Pretty Name\n---\nsee [[hub]]\n")
+    write_note(tmp_path, "hub.md", "see [[pretty name]]\n")
+    _proc, out = jrun(tmp_path)
+    assert not of(out, "unresolved-relation")
+
+
+def test_links_in_code_are_not_relations(tmp_path):
+    write_note(tmp_path, "a.md", "see [[b]]\n```\n[[GhostFence]]\n```\n"
+                                 "and `[[GhostInline]]` then [[GhostReal]] here\n")
+    write_note(tmp_path, "b.md", "see [[a]]\n")
+    _proc, out = jrun(tmp_path)
+    un = of(out, "unresolved-relation")
+    assert len(un) == 1 and "line 5" in un[0]["detail"]  # the one outside code, line kept true
+
+
+def test_markdown_links_count_as_relations(tmp_path):
+    write_note(tmp_path, "a.md", "read [the other](sub/b.md#top) and [web](https://x.example/c.md)\n")
+    write_note(tmp_path, "sub/b.md", "back to [a](../a.md)\n")
+    write_note(tmp_path, "lone.md", "nothing\n")
+    proc, out = jrun(tmp_path)
+    orphans = of(out, "orphan-notes")
+    assert len(orphans) == 1 and orphans[0]["path"] == "." and "1 of 2" in orphans[0]["detail"]
+    assert not of(out, "unresolved-relation")
+
+
+def test_repeated_unresolved_target_is_one_finding_and_keys_are_unique(tmp_path):
+    write_note(tmp_path, "a.md", "[[Ghost]] again [[Ghost]] and [[Ghost]]\n[[Other]]\n")
+    write_note(tmp_path, "b.md", "[[Ghost]] [[a]]\n")
+    write_note(tmp_path, "r.md", "- [ruling] same words\n- [ruling] same words\n- [ruling] other\n")
+    _proc, out = jrun(tmp_path)
+    un = of(out, "unresolved-relation")
+    assert len(un) == 3
+    assert any("3 occurrences" in f["detail"] and f["path"] == "a.md" for f in un)
+    keys = [f["key"] for f in out["findings"]]
+    assert len(keys) == len(set(keys))
+
+
+def test_ruling_key_survives_an_edit_above_it(tmp_path):
+    p = write_note(tmp_path, "r.md", "# R\n- [ruling] never bare sed\n")
+    _proc, before = jrun(tmp_path)
+    keys = [f["key"] for f in of(before, "ruling-undated")]
+    assert len(keys) == 1
+    p.write_text("# R\nnew intro line\nanother\n- [ruling] never bare sed\n", encoding="utf-8")
+    _proc, after = jrun(tmp_path)
+    assert [f["key"] for f in of(after, "ruling-undated")] == keys
+    assert "line 4" in of(after, "ruling-undated")[0]["detail"]
+
+
+def test_symlinked_note_is_not_read_and_a_fifo_does_not_hang(tmp_path):
+    store = tmp_path / "store"
+    write_note(store, "a.md", "see [[b]]\n")
+    write_note(store, "b.md", "see [[a]]\n")
+    outside = write_note(tmp_path, "outside.md", "- [ruling] OUTSIDECANARY said so\n[[OUTSIDELINK]]\n")
+    os.symlink(outside, store / "leak.md")
+    proc, out = jrun(store)
+    assert proc.returncode == 0, proc.stdout
+    assert "CANARY" not in proc.stdout and "OUTSIDELINK" not in proc.stdout
+    assert out["notes"] == 2
+    assert any("symlink" in s and "leak.md" in s for s in out["skipped"])
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(store / "pipe.md")
+        proc = run(store, "--json", timeout=30)  # old code blocks in open(): TimeoutExpired
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert any("pipe.md" in s and "not a regular file" in s
+                   for s in json.loads(proc.stdout)["skipped"])
+
+
+def test_no_note_text_in_findings(tmp_path):
+    home = tmp_path / "fakehome"
+    home.mkdir()
+    write_note(tmp_path, "rr.md", "- [ruling] RULINGCANARY text\n")
+    write_note(tmp_path, "ll.md", "see [[LINKCANARY]]\n")
+    write_note(tmp_path, "vv.md", "---\nstatus: active\nverified: VERIFYCANARY\n---\n")
+    write_note(tmp_path, "t1.md", "---\ntitle: TITLECANARY\n---\nx\n")
+    write_note(tmp_path, "t2.md", "---\ntitle: titlecanary\n---\nx\n")
+    write_note(tmp_path, "pp.md", "dead ~/PATHCANARY/zz/yy here\n")
+    for flags in (["--json"], []):
+        proc = run(tmp_path, *flags, env_extra={"HOME": str(home)})
+        assert proc.returncode == 1
+        blob = (proc.stdout + proc.stderr).upper()
+        for canary in ("RULINGCANARY", "LINKCANARY", "VERIFYCANARY", "TITLECANARY", "PATHCANARY"):
+            assert canary not in blob, canary
+    _proc, out = jrun(tmp_path, env_extra={"HOME": str(home)})
+    for check in ("ruling-undated", "unresolved-relation", "status-unverified",
+                  "duplicate-title", "dead-path"):
+        assert of(out, check), check  # the canaries really did trigger each finding
+
+
+def test_bad_env_default_is_a_usage_error(tmp_path):
+    write_note(tmp_path, "a.md", "see [[b]]\n")
+    write_note(tmp_path, "b.md", "see [[a]]\n")
+    proc = run(tmp_path, env_extra={"BM_LINT_MAX_BYTES": "50KB"})
+    assert proc.returncode == 2
+    assert "Traceback" not in proc.stderr and "--max-bytes" in proc.stderr
+
+
+def test_odd_config_shapes_never_crash_with_exit_1(tmp_path):
+    write_note(tmp_path, "a.md", "see [[b]]\n")
+    write_note(tmp_path, "b.md", "see [[a]]\n")
+    for body in ('{"projects": ["a", "b"]}', '{"projects": {"a": 5, "b": {"path": 7}, "c": null}}',
+                 '[1, 2]', '{"projects": 3}'):
+        cfg = tmp_path / "config.json"
+        cfg.write_text(body, encoding="utf-8")
+        proc = run(tmp_path, "--config", str(cfg))
+        assert "Traceback" not in proc.stderr, body
+        assert proc.returncode in (0, 2), (body, proc.stdout, proc.stderr)
+
+
+def test_hostile_notes_are_linear_time(tmp_path):
+    write_note(tmp_path, "a.md", "[" * 20000 + "\n")
+    write_note(tmp_path, "b.md", "\n" * 40000 + "- [ruling] x\n")
+    write_note(tmp_path, "c.md", "[[a" * 5000 + "\n")
+    write_note(tmp_path, "d.md", "[x" * 10000 + "\n")
+    start = time.monotonic()
+    proc = run(tmp_path, "--max-bytes", "10000000", timeout=60)
+    elapsed = time.monotonic() - start
+    assert proc.returncode in (0, 1), proc.stderr
+    assert elapsed < 2, elapsed
+    assert text_findings(proc, "ruling-undated")
+
+
+def test_oversize_note_skips_relations_and_is_not_an_orphan(tmp_path):
+    write_note(tmp_path, "big.md", "# big\n" + "x" * 60000)
+    write_note(tmp_path, "a.md", "see [[b]]\n")
+    write_note(tmp_path, "b.md", "see [[a]]\n")
+    _proc, out = jrun(tmp_path)
+    assert not of(out, "orphan-notes")
+    assert any("relations not parsed" in s and "big.md" in s for s in out["skipped"])
+
+
+def test_dead_path_skips_globs_templates_and_spaced_paths(tmp_path):
+    home = tmp_path / "fakehome"
+    (home / "Library" / "Application Support").mkdir(parents=True)
+    (home / "real" / "dir").mkdir(parents=True)
+    store = tmp_path / "store"
+    for rel, line in {
+        "glob.md": "~/src/foo-*/x",
+        "brace.md": "~/src/proj-{a,b}/x",
+        "tmpl.md": "~/src/<name>/x and ~/src/$VAR/x",
+        "space.md": "~/Library/Application Support/x",
+        "okdir.md": "the dir ~/real/dir/ and (~/real/dir) and `~/real/dir`.",
+    }.items():
+        write_note(store, rel, "# n\nsee [[b]] %s\n" % line)
+    write_note(store, "b.md", "see [[glob]]\n")
+    write_note(store, "dead.md", "gone ~/gone/a/b/ and ~/gone/c/d. ok\nsee [[b]]\n")
+    proc, out = jrun(store, env_extra={"HOME": str(home)})
+    assert [f["path"] for f in of(out, "dead-path")] == ["dead.md"]
+    assert "2 of 2" in of(out, "dead-path")[0]["detail"]
+
+
+def test_leading_bom_does_not_hide_frontmatter(tmp_path):
+    write_note(tmp_path, "feedback_bom.md", "\ufeff---\ntype: ruling\n---\n# x\nsee [[b]]\n")
+    write_note(tmp_path, "b.md", "see [[feedback_bom]]\n")
+    _proc, out = jrun(tmp_path)
+    assert not of(out, "missing-type")
+
+
+def test_unterminated_frontmatter_counts_as_none(tmp_path):
+    write_note(tmp_path, "feedback_open.md", "---\ntype: ruling\nbody text\nstatus: active\nsee [[b]]\n")
+    write_note(tmp_path, "b.md", "see [[feedback_open]]\n")
+    _proc, out = jrun(tmp_path)
+    assert [f["path"] for f in of(out, "missing-type")] == ["feedback_open.md"]
+    assert not of(out, "status-unverified")
+
+
+def test_dead_subtree_spares_a_parent_with_a_fresh_child(tmp_path):
+    write_note(tmp_path, "p/old.md", "see [[new]]\n", age_days=45)
+    write_note(tmp_path, "p/child/new.md", "see [[old]]\n")
+    write_note(tmp_path, "q/old.md", "see [[new]]\n", age_days=45)
+    _proc, out = jrun(tmp_path)
+    assert [f["path"] for f in of(out, "dead-subtree")] == ["q"]
