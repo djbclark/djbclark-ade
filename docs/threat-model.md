@@ -103,7 +103,10 @@ What an attacker would want, in order of damage:
    Paseo agent prefixes `[relay from <name>] `), so a receiving agent sees a peer, not the operator (advisory: Paseo does not verify the sender id, see 4.1); relay.py
    refuses text starting with `/`, an archived agent, and one with a pending permission or question.
 10. **`bin/firecrawl-router`**: an HTTP listener, loopback by default (see the intro); any process that can
-    reach it can call it.
+    reach it can call it. Since 2026-10-24 a call to `/v2/search/developer` also spends the machine's
+    `GITHUB_TOKEN` search quota against api.github.com (the token is read once per process with `sudo-secretspec
+    get`, held in memory, sent only to the https or loopback `FIRECRAWL_ROUTER_GITHUB_BASE` and never logged or
+    handed to the MCP child), so a local caller can use up that quota but cannot read the token.
 11. **Hermes to Claude delegation** (`delegate_task`, `claude-sub`; `docs/mcp-servers.md`): a message Hermes
     acts on can become a headless agent run.
 12. **`bin/ade-update`** (2026-10-20): after its fast-forward pull it runs the `skill-everywhere` beside the running
