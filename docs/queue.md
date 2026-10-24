@@ -1599,12 +1599,15 @@ FIXED on the branch, each with a test a mutant fails (`queued-lows-repair-2-repo
 or digit (`--all` and `-h` matched the old pattern, and commander reads `allow AGENT --all` as the option: approve every card); helm prints
 `paseo permit allow|deny <agent> -- <request id>` (checked 2026-10-24 against the commander 12.1.0 inside Paseo.app: `--` ends option parsing). (L-B) the `relay.py`
 usage text states the real rule (the markers are ignored when another agent sits between the relay and `RELAY_HOP_PARENT`, the pid of the relay that started the turn).
-(L-C) `RELAY_SENDER` is accepted only as `hermes [A-Za-z0-9_-]{1,8}`. (L-E) the dequeue scan skips a user line only when every block is a `tool_result`.
+(L-C) `RELAY_SENDER` is accepted only as `hermes [A-Za-z0-9_-]{1,8}`. (L-E) the dequeue scan skips a user line only when every block is a `tool_result` (superseded by round 3 LOW-2 below).
 Scope (M-A, docs only): the hop count and the `hermes ...` tag cover relays Hermes starts through its terminal tool and background processes (both keep `RELAY_*`).
 A relay started from Hermes's `execute_code` sandbox is NOT covered: `~/.hermes/hermes-agent/tools/code_execution_env.py:25-26,75-86` (`_scrub_child_env`) keeps only
 PATH, HOME, USER, LANG, LC_, TERM, TMP*, SHELL, LOGNAME, XDG_, PYTHONPATH, VIRTUAL_ENV, CONDA and a short HERMES_ allowlist, so the inner relay sees no `RELAY_HOPS`,
 `hermes_hops()` is 0, `sender_name` takes the `self` row (the caller's own Claude session: fleet marks it `self` through the ancestor pid or the inherited `HERDR_PANE_ID`),
 and the nested turn starts again at `RELAY_HOPS=1`. The chain is still bounded by the per-conversation Hermes locks; the label is accidental, not a security boundary.
+Adversary round 3, APPROVE at a062b41 (`adversary-queued-lows-3-report.md`, 2026-10-24): LOW-1 to LOW-3 FIXED on the branch, each with a test a mutant fails: (LOW-1) the `--` in helm's `cmd_keys`
+refusal for a Paseo item is pinned (d4cc9e3); (LOW-2) the dequeue scan skips a user line with a `tool_result` block and no text block, so an AskUserQuestion answer with a pasted image is skipped again
+and an image-only or document-only prompt still counts as someone else's (e3049ff); (LOW-3) CHANGELOG shows `paseo permit allow|deny <agent> -- <request id>` on the 2026-10-23 line (f059b7b; this file's round-1 record stays as history).
 
 OPEN (adversary fix text kept; not implemented, 2026-10-24):
 
