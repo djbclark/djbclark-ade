@@ -64,7 +64,8 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
                text prefixed `[relay from <name>] `, stdin closed, in its own process group. The child gets the
                caller's environment without its session, Paseo, ACP-approval and Hermes routing variables, plus
                RELAY_HOPS and RELAY_SENDER (a relay made inside that turn is tagged as Hermes, not as the original
-               caller; only nested `hermes -z` turns are counted, a fourth is refused). Hermes's reply goes to a
+               caller; only nested `hermes -z` turns are counted, a fourth is refused; both variables are ignored by a
+               process whose nearest agent ancestor is another agent, such as a Claude session started in the turn). Hermes's reply goes to a
                0600 file under RELAY_HERMES_DIR (default ~/.local/state/session-finder/relay-hermes, pruned after 7
                days) and is printed here as untrusted data: control, format and escape characters stripped, at most
                4000 characters (a cut reply's cleaned text is kept in the file, whose path is printed).
@@ -73,15 +74,17 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
                own conversation (HERMES_SESSION_ID, or the same session key, or platform, chat and thread, for a delegated
                subagent).
                Only rc 1, an empty stdout and the single stderr line `hermes -z: agent failed: session not found:
-               <sid>` (or `cannot resume session <sid>: ...`) mean nothing was written ("not sent"); every other
+               <sid>` (or `cannot resume session <sid>: ...`, or `This session is too long to reload safely (N
+               messages; limit L).`, reported as a thread too large to reload) mean nothing was written ("not sent"); every other
                failure is "unverified" (the turn may have started: do not resend). A "hermes turn started" line goes
                to stderr first, with the reply file, because the caller's own tool timeout (Claude Code 120 s,
                Hermes 180 s) can end this process before its verdict: if you are cut off, the message WAS sent. Give the
                command a timeout of at least max(100, --wait) + 50 seconds, or run it in the background: a tool timeout
                that kills the whole process tree (Claude Code's and Hermes's both do) also kills the turn, mid-way.
                relay.py itself never kills it: a turn still running after max(100, --wait) seconds from relay.py's start
-               is left running (the exit is "unverified" and names the reply file); until it ends a second relay to that
-               conversation is refused (a per-session flock the child holds). A profile Hermes (HERMES_HOME) sees only its own sessions: "not sent" for another
+               is left running (the exit is "unverified" and names the reply file, also as `reply_file` in --json); until
+               it ends a second relay to that conversation is refused, naming the turn's pid (a per-session flock the
+               child holds; lock files idle for 7 days are pruned). A profile Hermes (HERMES_HOME) sees only its own sessions: "not sent" for another
                profile's. RELAY_HERMES overrides the `hermes` binary. ACP cannot load a gateway session and
                messages_send only posts outward, so neither is a route. Checked 2026-10-23 on a throwaway `oneshot`
                session and end to end on a real Telegram topic (delivered; tagged user row and reply in its stored
@@ -1178,11 +1181,30 @@ def route_dispatch(c):
     return ("ok", f"acp-dispatch {Path(rec).name}", "queued")
 
 
+def nearest_agent(table, pid):
+    """The agent label (fleet.PROC_AGENTS) of the nearest process at or above PID in TABLE (pid -> (ppid, command), as
+    `fleet.proc_table` reads it), or None when none of them is a known agent."""
+    for _ in range(40):
+        ppid, cmd = table.get(pid, (0, ""))
+        names = [os.path.basename(p) for p in cmd.split()[:2]]
+        agent = next((fleet.PROC_AGENTS[n] for n in names if n in fleet.PROC_AGENTS), None)
+        if agent or ppid <= 1:
+            return agent
+        pid = ppid
+    return None
+
+
 def hermes_hops():
+    """Hermes turns nested above this process (RELAY_HOPS, set for a relayed `hermes -z` turn). Anything a turn starts
+    inherits the variable, so a Claude, Codex or other agent session started inside the turn would count it too: it
+    counts only unless the nearest agent process above this one is another agent than Hermes (R3-L3)."""
     try:
-        return max(0, int(os.environ.get("RELAY_HOPS", "0")))
+        n = max(0, int(os.environ.get("RELAY_HOPS", "0")))
     except ValueError:
         return HERMES_HOPS_MAX
+    if n and nearest_agent(fleet.proc_table(), os.getppid()) not in (None, "hermes"):
+        return 0
+    return n
 
 
 def hermes_env(sid):
@@ -1214,10 +1236,55 @@ def hermes_prune():
     for f in HERMES_DIR.glob("[0-9]*-*.out"):
         try:
             if f.stat().st_mtime < cutoff:
-                f.unlink()
+                f.unlink(missing_ok=True)    # a concurrent prune may have taken it first: its .err still goes
                 f.with_suffix(".err").unlink(missing_ok=True)
         except OSError:
             pass
+    for f in HERMES_DIR.glob("*.lock"):    # a lock untouched for the keep time that nobody holds (a held one fails the flock)
+        try:
+            if f.stat().st_mtime < cutoff:
+                fd = os.open(f, os.O_WRONLY | os.O_NOFOLLOW)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    f.unlink(missing_ok=True)    # still locked: `hermes_lock` re-checks the inode of what it locked
+                finally:
+                    os.close(fd)
+        except OSError:
+            pass
+
+
+def hermes_lock_path(sid):
+    return HERMES_DIR / f"{re.sub(r'[^A-Za-z0-9_-]', '_', sid)}.lock"
+
+
+def hermes_lock(sid):
+    """The open, exclusively locked 0600 lock file of conversation SID (the turn's child inherits it), or None when a
+    relayed turn holds it. A prune can unlink the file between the open and the lock: then what was locked is no
+    longer the path, so the open is repeated."""
+    path = hermes_lock_path(sid)
+    for _ in range(5):
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return None
+        try:
+            if os.stat(path).st_ino == os.fstat(fd).st_ino:
+                return fd
+        except OSError:
+            pass
+        os.close(fd)
+    return None
+
+
+def hermes_holder(sid):
+    """"pid N, " for the turn that holds the lock of conversation SID (it writes its pid there), else ""."""
+    try:
+        pid = hermes_lock_path(sid).read_text().strip()
+    except OSError:
+        return ""
+    return f"pid {pid}, " if pid.isdigit() else ""
 
 
 def route_hermes(c):
@@ -1236,12 +1303,14 @@ def route_hermes(c):
     os.chmod(HERMES_DIR, 0o700)
     hermes_prune()
     sid8 = s["sid"][-8:]
-    lock = os.open(HERMES_DIR / f"{re.sub(r'[^A-Za-z0-9_-]', '_', s['sid'])}.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return ("stop", f"a relayed turn is still running in that conversation (lock {HERMES_DIR}): not writing beside it", 1)
+        lock = hermes_lock(s["sid"])
+    except OSError as e:    # a sid too long for a file name, a symlinked lock path
+        return ("stop", f"cannot open the lock of that conversation ({e}): nothing was sent", 1)
+    if lock is None:
+        return ("stop", f"a relayed turn is still running in that conversation ({hermes_holder(s['sid'])}lock {HERMES_DIR}): "
+                        "not writing beside it", 1)
+    try:
         base = HERMES_DIR / f"{time.time_ns()}-{sid8}"
         out_p, err_p = base.with_suffix(".out"), base.with_suffix(".err")
         try:
@@ -1252,6 +1321,11 @@ def route_hermes(c):
             out_p.unlink(missing_ok=True)
             err_p.unlink(missing_ok=True)
             return ("skip", f"hermes CLI not usable: {e}")
+        try:
+            os.ftruncate(lock, 0)
+            os.pwrite(lock, f"{proc.pid}\n".encode(), 0)    # who holds the lock, for the next relay's refusal
+        except OSError:
+            pass
     finally:
         os.close(lock)    # the child holds its own copy of the locked file: the lock lasts as long as its turn
     note = (f"relay: [{s['id']}] hermes turn started (pid {proc.pid}). If this command is cut off or times out, the message "
@@ -1266,6 +1340,7 @@ def route_hermes(c):
     try:
         rc = proc.wait(timeout=max(1.0, c["t0"] + max(HERMES_MIN_WAIT, c["a"].wait) - time.time()))
     except subprocess.TimeoutExpired:
+        c["reply_file"] = str(out_p)
         return ("unverified", f"`hermes --resume -z` is still running (pid {proc.pid}, left running, not killed); its raw "
                               f"reply will land in {out_p} (escape sequences are not stripped there). The text may already "
                               "be in the conversation. Do not resend")
@@ -1280,7 +1355,15 @@ def route_hermes(c):
         out_p.unlink(missing_ok=True)
         err_p.unlink(missing_ok=True)
         return ("skip", f"Hermes does not know session {s['sid']}: {fleet.clip(clean_reply(err), 160)}")
+    big = re.fullmatch(r"hermes -z: agent failed: This session is too long to reload safely \((\d+) messages; limit (\d+)\)\.[^\n]*",
+                       clean_reply(err)) if rc == 1 and not out.strip() else None
+    if big:    # assert_resume_safe runs before the turn writes anything (hermes_cli/oneshot.py _load_resume_target)
+        out_p.unlink(missing_ok=True)
+        err_p.unlink(missing_ok=True)
+        return ("skip", f"that Hermes thread is too large to reload ({big[1]} messages; limit {big[2]}): Hermes refused it before "
+                        "writing anything; start a fresh chat, or `hermes config set sessions.max_resume_messages 0`")
     if rc != 0:
+        c["reply_file"] = str(out_p)
         return ("unverified", f"`hermes --resume -z` failed (rc={rc}: {fleet.clip(clean_reply(err).splitlines()[-1] if err.strip() else '', 160)}); "
                               f"the turn may have started, so no other route was tried. Output kept in {out_p} and {err_p} "
                               "(raw). Do not resend")
@@ -1414,6 +1497,8 @@ def main():
             out["via"] = res[1]
         else:
             out["reason"] = res[1]
+        if res[0] == "unverified" and "reply_file" in c:    # a timed-out or failed turn: where its reply lands or was kept
+            out["reply_file"] = c["reply_file"]
         if tried:
             print(f"relay: [{s['id']}] fell back past " + "; ".join(f"{n} ({w})" for n, w in tried), file=sys.stderr)
         if res[0] == "unverified":

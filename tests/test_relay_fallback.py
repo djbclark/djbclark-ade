@@ -43,6 +43,7 @@ saved_type_line = relay.type_line
 real_rows_below = relay.rows_below
 real_draft = relay.draft
 real_box_read = relay.box_read
+real_nearest_agent = relay.nearest_agent
 
 
 def stamp(offset: float = 0.0) -> str:
@@ -962,6 +963,10 @@ class TestHermesRoute(Harness):
             os.environ.clear()
             os.environ.update(saved[2])
         self.addCleanup(restore)
+        for target, stub in ((relay, ("nearest_agent", lambda table, pid: None)), (relay.fleet, ("proc_table", lambda: {}))):
+            patch = mock.patch.object(target, *stub)    # hermetic: the runner's process tree is not under test, and `ps` must not hit the fake Popen
+            patch.start()
+            self.addCleanup(patch.stop)
         for k in ("RELAY_HOPS", "RELAY_SENDER", "HERMES_SESSION_ID", "HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID",
                   "HERMES_SESSION_THREAD_ID", "HERMES_SESSION_KEY", "PASEO_AGENT_ID", "CLAUDE_CODE_SESSION_ID", "ACP_OPERATOR_APPROVED"):
             os.environ.pop(k, None)
@@ -1338,6 +1343,118 @@ class TestHermesRoute(Harness):
         self.assertLess(len(d["reply"]), 4200)
         self.assertIn("cleaned first 64 KB", d["reply"])
         self.assertEqual(len(Path(d["reply_file"]).read_text()), 5000)
+
+    # ---- the queued lows of 2026-10-23 (relay-hermes-route adversary rounds 1 and 3) ----
+
+    def test_a_thread_too_large_to_reload_is_not_sent_and_says_why(self) -> None:
+        """R1-L5e: Hermes refuses it before anything is written; the caller is told, and a resend is not warned off."""
+        line = ("hermes -z: agent failed: This session is too long to reload safely (20001 messages; limit 20000). "
+                "Start a fresh chat and keep a copy with the dashboard Sessions page's Export action.")
+        rc, _, err, calls = self.run_hermes(self.hsess(), rc=1, err=line + "\n")
+        self.assertEqual((rc, len(calls)), (1, 1))
+        self.assertIn("not sent: that Hermes thread is too large to reload (20001 messages; limit 20000)", err)
+        self.assertNotIn("Do not resend", err)
+        self.assertEqual(list(relay.HERMES_DIR.glob("*.out")) + list(relay.HERMES_DIR.glob("*.err")), [])
+        for case in (dict(rc=2, err=line), dict(rc=1, err=line, out="the turn said something"), dict(rc=1, err="x " + line),
+                     dict(rc=1, err=line + "\nmore")):    # a turn that ran is never taken for a refusal
+            with self.subTest(case=case):
+                self.assertIn("Do not resend", self.run_hermes(self.hsess(), **case)[2])
+
+    def test_nearest_agent_reads_the_process_tree(self) -> None:
+        table = {10: (5, "/bin/zsh -l"), 5: (4, "claude --resume abc"), 4: (1, "python3 /x/bin/hermes -z hi")}
+        self.assertEqual(real_nearest_agent(table, 10), "claude")
+        self.assertEqual(real_nearest_agent({10: (5, "sh -c x"), 5: (1, "python3 /x/bin/hermes -z hi")}, 10), "hermes")
+        self.assertIsNone(real_nearest_agent({10: (5, "sh"), 5: (1, "launchd")}, 10))
+
+    def test_a_session_started_inside_a_relayed_turn_ignores_the_hop_and_sender_markers(self) -> None:
+        """R3-L3: a Claude session a turn starts inherits RELAY_HOPS and RELAY_SENDER but is not a nested hermes turn."""
+        os.environ.update({"RELAY_HOPS": "3", "RELAY_SENDER": "hermes 0_abcdef"})
+        with mock.patch.object(relay.fleet, "proc_table", lambda: {}), mock.patch.object(relay, "nearest_agent", lambda t, p: "claude"):
+            self.assertEqual(relay.hermes_hops(), 0)
+            self.assertEqual(relay.sender_name([sess(self=True, name="mine")]), "mine")
+            _, _, _, calls = self.run_hermes(self.hsess(), out="ok")
+            self.assertEqual(calls[0][1]["env"]["RELAY_HOPS"], "1")
+        for agent in ("hermes", None):    # a Hermes ancestor, or an unrecognised tree: still counted
+            with mock.patch.object(relay.fleet, "proc_table", lambda: {}), mock.patch.object(relay, "nearest_agent", lambda t, p, a=agent: a):
+                self.assertEqual(relay.hermes_hops(), 3, agent)
+                self.assertEqual(relay.sender_name([sess(self=True, name="mine")]), "hermes 0_abcdef", agent)
+
+    def test_a_prune_that_loses_the_race_for_an_out_file_still_removes_its_err(self) -> None:
+        """R3-L6b: the other prune unlinks the .out first; the loser must not skip the .err sibling."""
+        relay.HERMES_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        old = relay.HERMES_DIR / "1-old.out"
+        old.write_text("x")
+        old.with_suffix(".err").write_text("x")
+        os.utime(old, (1, 1))
+        real = relay.Path.unlink
+
+        def racy(self: Path, missing_ok: bool = False) -> None:
+            if self == old:
+                real(self)    # the other prune got there first
+            real(self, missing_ok=missing_ok)
+        with mock.patch.object(relay.Path, "unlink", racy):
+            relay.hermes_prune()
+        self.assertFalse(old.with_suffix(".err").exists())
+
+    def test_stale_unheld_lock_files_are_pruned_and_a_held_one_is_not(self) -> None:
+        """R3-L6c: one lock file per conversation used to pile up for ever."""
+        import fcntl
+        relay.HERMES_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        stale, held, fresh = (relay.HERMES_DIR / n for n in ("old_one.lock", "held_one.lock", "new_one.lock"))
+        for p in (stale, held, fresh):
+            p.write_text("")
+        os.utime(stale, (1, 1))
+        os.utime(held, (1, 1))
+        fd = os.open(held, os.O_WRONLY)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.run_hermes(self.hsess(), out="ok")
+        self.assertEqual((stale.exists(), held.exists(), fresh.exists()), (False, True, True))
+
+    def test_a_lock_pruned_between_its_open_and_its_flock_is_reopened(self) -> None:
+        """R3-L6c: a flock on an unlinked inode excludes nobody; the path must be the file that was locked."""
+        real, lock_path = relay.fcntl.flock, relay.HERMES_DIR / f"{self.HSID}.lock"
+        first: list[int] = []
+
+        def flock(fd: int, op: int) -> None:
+            if not first:
+                first.append(1)
+                lock_path.unlink()    # a prune won the race
+            return real(fd, op)
+        with mock.patch.object(relay.fcntl, "flock", flock):
+            rc, *_ = self.run_hermes(self.hsess(), out="ok")
+        self.assertEqual(rc, 0)
+        self.assertEqual(lock_path.read_text().strip(), "4242")    # the pid went into the file at the path
+
+    def test_the_refusal_names_the_pid_of_the_turn_that_holds_the_lock(self) -> None:
+        """R3-L6d."""
+        import fcntl
+        self.run_hermes(self.hsess(), out="ok")
+        lock_path = relay.HERMES_DIR / f"{self.HSID}.lock"
+        self.assertEqual(lock_path.read_text(), "4242\n")    # written by the relay that started the turn
+        fd = os.open(lock_path, os.O_WRONLY)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        rc, _, err, calls = self.run_hermes(self.hsess())
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIn("pid 4242", err)
+
+    def test_an_unusable_lock_path_is_a_clean_not_sent(self) -> None:
+        """R3-L6e: a sid too long for a file name raised a traceback."""
+        s = self.hsess()
+        s["sid"] = "x" * 300
+        rc, _, err, calls = self.run_hermes(s)
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIn("cannot open the lock", err)
+
+    def test_the_json_result_of_a_timed_out_or_failed_turn_carries_the_reply_file(self) -> None:
+        """R3-L8e: the path was only inside the `reason` text."""
+        _, out, _, _ = self.run_hermes(self.hsess(), hang=True, args=("--json",))
+        d = json.loads(out)
+        self.assertEqual(d["result"], "unverified")
+        self.assertTrue(d["reply_file"].endswith(".out") and Path(d["reply_file"]).is_file())
+        _, out, _, _ = self.run_hermes(self.hsess(), rc=1, out="partial", err="boom", args=("--json",))
+        self.assertTrue(json.loads(out)["reply_file"].endswith(".out"))
 
 
 class TestHermesGatewayRows(unittest.TestCase):
