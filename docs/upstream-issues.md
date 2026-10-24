@@ -5,6 +5,12 @@ filed** — kept here because the write-ups carry evidence and measurements the
 issue text summarises:
 
 - #1 → [NanoNets/Graft#185](https://github.com/NanoNets/Graft/issues/185)
+  (**fixed upstream, verified 2026-10-24**: installed 0.25.0 and `origin/main`
+  both render `graft · 0 nodes / 0 edges · ✓ synced` for a built-but-empty
+  docs-only repo — `resolveStats` in `src/claude/statusline.ts` falls back to
+  `wiring.json`, and "not built" shows only when the artifact is missing.
+  Checked in a `fix/statusline-empty-built` worktree; no edits needed, nothing
+  merged back.)
 - #2 → [vectorize-io/hindsight#3735](https://github.com/vectorize-io/hindsight/issues/3735)
   (the package `@vectorize-io/hindsight-coding-agents` lives in the
   `vectorize-io/hindsight` repo)
@@ -1173,6 +1179,10 @@ drops the agent identity and its subagent children.
    inside an agent; and `paseo run` passes the calling agent's id to the daemon whenever `PASEO_AGENT_ID` is set,
    even with `--workspace`, so the new agent is a subagent (the caller has to `env -u PASEO_AGENT_ID`).
 
+**ade-side workaround (2026-10-23):** `bin/paseo-set-model` (`set <agent> <model>`, `list --json`) calls the daemon's
+`set_agent_model_request` through the bundled CLI's own client, run in Paseo's Electron node; it keeps the agent id and is
+what `bin/claude-fleet-governor` uses to move live agents between models.
+
 ### Searched first
 
 `gh issue list --repo getpaseo/paseo --state all --limit 50 --search` for "model", "switch model", "change model" and
@@ -1208,4 +1218,9 @@ below the skill dir but never the skill dir itself, so a symlinked skill dir is 
 checkout; `syncDirectoryFiles` also updates without comparing the on-disk hash with the manifest (deletes do).
 Reproduced with the shipped 0.13.0-beta.1 `syncSkills` in a throwaway directory. Our workaround is the skill
 selection in docs/skill-everywhere.md section 3a.
+Addendum 2026-10-24: the setting is per daemon home, while every daemon syncs into the one real `~/.agents/skills`
+and `~/.claude/skills`. A second daemon with another home (Paseo's own `scripts/dev-daemon.sh`, home
+`.dev/paseo-home`, no selection) rewrote the symlinked skills at 09:26:49 and 10:05:46 EDT. Suggest to upstream: the
+sync skips a skill dir that is a symlink, or dev homes default to no skill sync. Posted on #7700 2026-10-24: https://github.com/getpaseo/paseo/issues/7700#issuecomment-6386655547.
+Draft PR opened 2026-10-24 (refs #7700, not closes): https://github.com/getpaseo/paseo/pull/7817, branch `fix/dev-home-skill-selection` on the fork, one commit b2836f723 (`scripts/dev-home.sh` seeds the skill selection in dev homes, new `scripts/dev-home.test.mjs`: 3 of 4 tests fail on upstream main, all pass on the fix). macOS arm64 only; the end-to-end dev-daemon run is still owed as a PR comment while djbclark's hold on extra Paseo processes lasts. Mark ready only on djbclark's yes.
 

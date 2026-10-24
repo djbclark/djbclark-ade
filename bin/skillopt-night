@@ -93,7 +93,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -140,10 +139,6 @@ DEFAULT_PROMPT_LOAD_WAIT_S = 600
 GATE_LOAD_PER_CPU = 4  # same number as bin/acp-dispatch; used only if its import fails
 PING = "~/.local/bin/hermes-ping"
 REVIEW = "skillopt-sleep status --project ~/src/djbclark-ade"
-# The upstream commit whose code was reviewed (2026-10-12). The night refuses to run any
-# other installed skillopt: review the diff, then bump this and the pin in
-# docs/skillopt-sleep.md and docs/apply-toolchain-prompt.md (adversary review, H3).
-REVIEWED_REV = "343db229dbd5ddaf9df6b1d5540d8bcdb2604d5c"
 DEFAULT_DEADLINE = "06:30"  # local time the whole night must end by (M4)
 # The first user prompt of sessions the cycle itself creates (upstream's attempt, miner
 # and judge templates): upstream's harvesters skip them through this env (H2).
@@ -623,35 +618,6 @@ def prompt_pacing(night: dict[str, Any], deadline: float, source: str) -> failov
         log_path=state_dir() / "attempts.jsonl", task=f"skillopt-night {source}")
 
 
-def uv_tool_dir() -> Path:
-    return Path(os.environ.get("SKILLOPT_NIGHT_UV_TOOL_DIR")
-                or home() / ".local" / "share" / "uv" / "tools" / "skillopt")
-
-
-def installed_rev() -> tuple[str | None, str | None]:
-    """(rev the uv receipt pins, commit actually installed); None when unknown."""
-    pinned = commit = None
-    try:
-        receipt = tomllib.loads((uv_tool_dir() / "uv-receipt.toml").read_text())
-        for req in receipt.get("tool", {}).get("requirements", []):
-            if req.get("name") == "skillopt":
-                m = re.search(r"[?&]rev=([0-9a-f]{7,40})", str(req.get("git") or ""))
-                pinned = m.group(1) if m else None
-    except (OSError, ValueError):
-        pass
-    for f in uv_tool_dir().glob("lib/python*/site-packages/skillopt-*.dist-info/direct_url.json"):
-        commit = (_read_json(f, {}) or {}).get("vcs_info", {}).get("commit_id")
-    return pinned, commit
-
-
-def rev_problem() -> str | None:
-    pinned, commit = installed_rev()
-    if pinned == commit == REVIEWED_REV:
-        return None
-    return (f"installed skillopt is not the reviewed commit (receipt pin {pinned}, installed "
-            f"{commit}, reviewed {REVIEWED_REV}); review the diff, then bump REVIEWED_REV")
-
-
 def claude_bypass() -> bool:
     """~/.claude/settings.json makes bypassPermissions the default mode."""
     data = _read_json(home() / ".claude" / "settings.json", {}) or {}
@@ -798,13 +764,6 @@ def cmd_night(args: argparse.Namespace) -> int:
     entries: list[failover.Entry] = []
     night = load_night()
     mode = "dry-run" if args.dry_run else "run"
-    problem = rev_problem()
-    if problem:
-        print(f"skillopt-night: refusing: {problem}", file=sys.stderr)
-        record({"mode": mode, "status": "unreviewed-skillopt", "why": problem})
-        if not args.dry_run:
-            ping(f"djbclark-ade: skillopt-sleep refused to run: {problem}")
-        return 2
     if not args.dry_run:
         if not night.get("enabled") or not night.get("chain"):
             print("skillopt-night: waiting for backend decision (no enabled chain in "

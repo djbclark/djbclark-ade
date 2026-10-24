@@ -157,6 +157,13 @@ would end this machine's Paseo agents).
    review, 2026-10-23, verified in the installed Cursor source) and Cursor reads `~/.claude/skills` here; a settings
    save also stages deletions before it reaches the guard.
 5. Upstream: [getpaseo/paseo#7700](https://github.com/getpaseo/paseo/issues/7700), `docs/upstream-issues.md` item 10.
+6. **Every Paseo daemon with its own home needs the same setting** (found 2026-10-24). The selection lives in each
+   home's `config.json`, but every daemon syncs into the one real `~/.agents/skills` and `~/.claude/skills`. The Paseo
+   dev daemon (`scripts/dev-daemon.sh` in `~/src/paseo`, home `.dev/paseo-home`, no selection, so mode `all`) rewrote
+   the five vendored skills at 09:26:49 and 10:05:46 EDT on 2026-10-24, after the main daemon had been restarted onto
+   0.13.0-beta.1 (09:57) with the setting in place. The main daemon was never the second writer; the 09:57 restart was
+   not needed. Seed `agents.skills.selection = {"mode":"custom","skills":[]}` in every dev or test home before
+   starting its daemon.
 
 ## 4. When the table is wrong
 

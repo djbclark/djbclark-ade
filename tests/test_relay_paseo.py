@@ -375,11 +375,12 @@ class RelayPaseo(unittest.TestCase):
         rc, _out, err = self.main([s], SID, "ping", "--wait", "1")
         self.assertEqual(rc, 0, err)
 
-    def test_working_non_claude_agent_needs_idle_and_then_waits_first(self) -> None:
-        os.environ.update(FAKE_PROVIDER="codex", FAKE_STATUS="running")
+    def test_working_non_steering_agent_needs_idle_and_then_waits_first(self) -> None:
+        os.environ.update(FAKE_PROVIDER="cline", FAKE_STATUS="running")
         rc, _out, err = self.main([], AGENT, "ping")
         self.assertEqual(rc, 1)
-        self.assertIn("only idle ones", err)
+        self.assertIn("cannot steer", err)
+        self.assertFalse(self.sends())
         self.log.unlink(missing_ok=True)
         self.idle_after_wait()
         rc, _out, err = self.main([], AGENT, "ping", "--idle", "5", "--wait", "1")
@@ -388,7 +389,7 @@ class RelayPaseo(unittest.TestCase):
         self.assertIn(f"wait --timeout 5 --json -- {AGENT}", self.calls())
 
     def test_idle_timeout_sends_nothing(self) -> None:
-        os.environ.update(FAKE_PROVIDER="codex", FAKE_STATUS="running", FAKE_WAIT_RC="124")
+        os.environ.update(FAKE_PROVIDER="cline", FAKE_STATUS="running", FAKE_WAIT_RC="124")
         rc, _out, err = self.main([], AGENT, "ping", "--idle", "5")
         self.assertEqual(rc, 1)
         self.assertIn("still running", err)

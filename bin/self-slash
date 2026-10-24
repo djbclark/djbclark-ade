@@ -110,9 +110,10 @@
 # puts its text on the input line, which reads as a draft, and the command is refused
 # unsent after 900 s (2026-10-18: a /reload-plugins meant to unload agent-radar never
 # ran, and the session kept its scans for 2 h). Check the log before saying it ran.
-# herdr: after the send, Enter is pressed again (up to 3 times) while the command is still
-# on the input line; if it never leaves the line the waiter exits 8 and logs "NOT confirmed
-# run" rather than typing it a second time (2026-10-20).
+# herdr and Orca: after the send, Enter is pressed again (up to 3 times) while the command is
+# still on the input line; if it never leaves the line the waiter exits 8 and logs "NOT confirmed
+# run" rather than typing it a second time (2026-10-20; Orca branch added 2026-10-24, the bare
+# `orca terminal send --enter` form not yet seen live).
 # Runs detached (nohup) so it survives the Bash tool returning; the log
 # is ~/.local/state/self-slash.log.  First verified 2026-10-09 (ClaudeHelm, herdr);
 # Orca backend verified 2026-10-09.
@@ -123,8 +124,15 @@
 # /rename; /quit left its menu row open, cursor-agent 2026.10.01).
 export PATH="/opt/homebrew/bin:$PATH"
 set -u
+# An inherited BASHOPTS=nocasematch (bash >= 4.1 applies it at startup) would make every `case`
+# guard below case-blind, so "Claude" would pass the plain-id check (adversary pr35 round 2, L1).
+shopt -u nocasematch
 delay=6; dry=0; then=""; then_set=0; finish=0
 successor=""; s_thinking=""; s_mode=""; s_title=""; s_workspace=""; s_keepws=0; s_baton=""
+# Text that came from paseo, an operator flag or an agent name goes through `clean` before it is
+# logged or used as a title: a newline in it could forge a "sent /compact" log line that
+# gap_check reads (adversary 2026-10-23, L4).  Defined early: --baton is checked at parse time.
+clean() { printf '%s' "$1" | python3 -c 'import sys; print("".join(c for c in sys.stdin.read() if c.isprintable()))' 2>/dev/null; }
 # A value flag as the last argument made `shift 2` fail and this loop spin (adversary L3).
 need2() { [ "$#" -ge 2 ] || { echo "self-slash: $1 needs a value (usage: see self-slash with no arguments)" >&2; exit 2; }; }
 while :; do case "${1:-}" in
@@ -152,7 +160,12 @@ finish_flag=$finish
                   (Paseo only: start /baton on another model in an EXISTING workspace (--workspace <id>, default this
                   agent's; never a new workspace or window), then archive this agent; the old workspace is archived too
                   when it differs from the successor's and holds no other agent (--keep-workspace skips that); keep the
-                  --title short, its first words show in the sidebar; a Paseo workspace name ends in -pw)
+                  --title short, its first words show in the sidebar; a Paseo workspace name ends in -pw;
+                  --baton PATH makes the first prompt \"/baton PATH\" so the successor resumes that chain log (an absolute
+                  path to an existing file, else exit 2); --mode defaults to this agent's mode for the same provider (an
+                  empty mode passes none), bypassPermissions for a claude successor from another provider, else the
+                  provider's own default; without --mode, an inspect of this agent that lacks a Provider or a Mode
+                  value exits 11 and starts nothing)
        exit codes: 2 usage, 3 no host, 4 draft in the input box, 5 no prompt, 6 session still working,
        7 refused (gap check or lifecycle already queued), 8 archive refused, 9 dispatched agent
        (ACP_RUN_AGENT=1): lifecycle actions and /compact run only in the top-level session,
@@ -160,8 +173,12 @@ finish_flag=$finish
 if [ "$finish" = 1 ] && [ "$text" != /quit ]; then echo "self-slash: --finish takes no command (got: $text)" >&2; exit 2; fi
 if [ -n "$successor" ] && [ "$finish" != 1 ]; then echo "self-slash: --successor needs --finish (it replaces the bare archive)" >&2; exit 2; fi
 if [ -z "$successor" ] && { [ -n "$s_thinking" ] || [ -n "$s_mode" ] || [ -n "$s_title" ] || [ -n "$s_workspace" ] || [ "$s_keepws" = 1 ] || [ -n "$s_baton" ]; }; then echo "self-slash: --thinking, --mode, --title, --workspace, --keep-workspace and --baton only go with --successor" >&2; exit 2; fi
-case "$successor" in ""|[A-Za-z0-9]*) ;; *) echo "self-slash: --successor takes PROVIDER or PROVIDER/MODEL (got: $successor)" >&2; exit 2;; esac
-case "$successor$s_thinking$s_mode$s_workspace" in *[!A-Za-z0-9._/:-]*) echo "self-slash: --successor, --thinking, --mode and --workspace take plain ids (letters, digits, . _ / : -)" >&2; exit 2;; esac
+# Plain-id character sets spelled out: bash 3.2 matches a bracket range ([a-z]) by locale
+# collation, so under en_US.UTF-8 it also takes upper-case and accented letters (adversary
+# pr35 B1, 2026-10-24).  Patterns below use these, never a range.
+lc=abcdefghijklmnopqrstuvwxyz; uc=ABCDEFGHIJKLMNOPQRSTUVWXYZ; dg=0123456789
+case "$successor" in ""|["$uc$lc$dg"]*) ;; *) echo "self-slash: --successor takes PROVIDER or PROVIDER/MODEL (got: $successor)" >&2; exit 2;; esac
+case "$successor$s_thinking$s_mode$s_workspace" in *[!"$uc$lc$dg"._/:-]*) echo "self-slash: --successor, --thinking, --mode and --workspace take plain ids (letters, digits, . _ / : -)" >&2; exit 2;; esac
 # --finish ends the session, so a follow-up would be typed into whatever is left (a shell prompt).
 if [ "$finish" = 1 ] && [ -n "$then" ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then echo "self-slash: --finish takes no --then (got: $then)" >&2; exit 2; fi
 # Lifecycle actions end the session or throw its context away.
@@ -231,8 +248,23 @@ if [ "${SELF_SLASH_CHILD:-}" = "1" ]; then
   successor="${SELF_SLASH_SUCCESSOR:-}"; s_thinking="${SELF_SLASH_S_THINKING:-}"; s_mode="${SELF_SLASH_S_MODE:-}"; s_title="${SELF_SLASH_S_TITLE:-}"
   s_workspace="${SELF_SLASH_S_WORKSPACE:-}"; s_keepws="${SELF_SLASH_S_KEEPWS:-0}"; s_baton="${SELF_SLASH_S_BATON:-}"
 fi
+# --baton goes into the successor's first prompt and the log: an absolute path to an existing
+# regular file of printable characters only (a relative path would resolve in the successor's cwd, a
+# newline could forge a log line; adversary adv-selfslash-1, L1).  The waiter child re-checks the
+# value it got through the environment.
+if [ -n "$s_baton" ]; then
+  case "$s_baton" in /*) ;; *) echo "self-slash: --baton takes an absolute path (got: $(clean "$s_baton"))" >&2; exit 2;; esac
+  [ "$(clean "$s_baton")" = "$s_baton" ] || { echo "self-slash: --baton takes printable characters only (no newline or control character): $(clean "$s_baton")" >&2; exit 2; }
+  [ -f "$s_baton" ] || { echo "self-slash: --baton is not an existing regular file: $s_baton" >&2; exit 2; }
+fi
 s_thinking="${s_thinking:-high}"
-if [ "$tui" = cursor ]; then marker="→"; else marker="❯"; fi
+# herdr names the TUI in the pane's `agent` field.  Prompt detection knows Claude Code (❯), cursor-agent (→) and omp
+# (the input box's last row, `╰─ `, 2026-10-24: omp's row has no ❯, so --finish sent to an omp pane polled 9 times
+# and gave up).  Another TUI cannot be read, so say so now: the waiter would only log "gave up" after ~50 s.
+case "$tui" in cursor) marker="→";; omp) marker="╰─ ";; *) marker="❯";; esac
+if [ "$host" = herdr ] && [ -n "$tui" ] && [ "$tui" != claude ] && [ "$tui" != cursor ] && [ "$tui" != omp ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
+  echo "self-slash: warning: herdr reports agent '$tui' for $pane; prompt detection only knows claude, cursor and omp, so the waiter will probably give up (exit 5, see $HOME/.local/state/self-slash.log)" >&2
+fi
 # herdr and Orca both send a long argument as a bracketed paste and Claude Code then
 # treats it as pasted content, not a command (seen 2026-10-09 with ~900 chars): keep it short.
 if [ "$host" != paseo ] && [ "${#text}" -gt "${SELF_SLASH_MAX:-300}" ]; then
@@ -317,7 +349,8 @@ if [ "$dry" = 1 ]; then
     echo "  $paseo_cli agent inspect $pane --json            (name, mode, cwd)"
     echo "  $paseo_cli workspace ls --background --json      (this agent's workspace: exactly one row with cwd ${PASEO_AGENT_CWD:-<agent cwd>}${SELF_SLASH_WORKSPACE:+; SELF_SLASH_WORKSPACE=$SELF_SLASH_WORKSPACE only places the successor}${s_workspace:+; --workspace $s_workspace: its own row gives the successor cwd})"
     if [ -n "$s_workspace" ]; then dry_cwd="<cwd of that workspace>"; else dry_cwd="${PASEO_AGENT_CWD:-<agent cwd>}"; fi
-    echo "  $paseo_cli run \"/baton${s_baton:+ $s_baton}\" --provider $successor --thinking $s_thinking${s_mode:+ --mode $s_mode}${s_mode:- --mode <agent mode if the same provider; claude: bypassPermissions; else none>} --workspace ${s_workspace:-<id>} --cwd $dry_cwd --title \"$dry_title\" --no-wait --json   (never --new-workspace)"
+    if [ -n "$s_mode" ]; then dry_mode=" --mode $s_mode"; else dry_mode=" --mode <agent mode if the same provider; claude: bypassPermissions; else none>"; fi
+    echo "  $paseo_cli run \"/baton${s_baton:+ $s_baton}\" --provider $successor --thinking $s_thinking$dry_mode --workspace ${s_workspace:-<id>} --cwd $dry_cwd --title \"$dry_title\" --no-wait --json   (never --new-workspace)"
     echo "  $paseo_cli agent inspect <new id> --json         (polled up to ${SELF_SLASH_SUCCESSOR_SETTLE:-20}s; needs a new id, ParentAgentId null,${s_model:+ model $s_model,} status idle|running|initializing; else exit 11, nothing archived)"
     echo "  $paseo_cli agent archive -- $pane                (never --force)"
     if [ "$s_keepws" = 1 ]; then echo "  (--keep-workspace: the old workspace stays)"
@@ -448,7 +481,19 @@ send_text() {
     esac
     return 0
   else
-    orca terminal send --terminal "$pane" --text "$text" --enter --wait-submit 10 --json
+    orca terminal send --terminal "$pane" --text "$text" --enter --wait-submit 10 --json || return 1
+    # Same check as herdr: the receipt says the text was accepted, not that it ran, and the
+    # command can stay on the input line. Press Enter again while it is still there; never retype.
+    for _ in 1 2 3; do
+      sleep 2
+      case "$(classify_prompt)" in "$text"*) orca terminal send --terminal "$pane" --enter --json >/dev/null 2>&1 || true ;; *) return 0 ;; esac
+    done
+    sleep 2
+    case "$(classify_prompt)" in "$text"*)
+      echo "$(gdate '+%F %T') $host $pane: $text is still on the input line after 3 Enters; NOT confirmed run, left for the operator"
+      exit 8;;
+    esac
+    return 0
   fi
 }
 
@@ -491,6 +536,22 @@ wait_idle() {
     return 0
   fi
   [ "$host" = herdr ] || return 0
+  if [ "$tui" = omp ]; then
+    # herdr has no state detector for omp (`herdr agent explain`: default_known_agent_idle_fallback), so
+    # its status is "idle" mid-turn too and the check below never waits.  omp's own signal is the terminal
+    # title: "π ⠙ <session title>" (a braille spinner) while a turn runs, "π > <dir>" when it is idle
+    # (seen 2026-10-24).  A /quit sent mid-turn would run at once and cut the turn off.
+    waited=0; said=0
+    while :; do
+      title=$(herdr pane get "$pane" 2>/dev/null | python3 -c '
+import json, sys
+print(json.load(sys.stdin).get("result", {}).get("pane", {}).get("terminal_title_stripped", ""))' 2>/dev/null)
+      case "$title" in "π "[⠀-⣿]*) ;; *) return 0;; esac
+      [ "$said" = 1 ] || { echo "$(gdate '+%F %T') $host $pane: omp turn running (title spinner), waiting for idle before sending"; said=1; }
+      [ "$waited" -lt "${SELF_SLASH_WAIT:-900}" ] || { echo "$(gdate '+%F %T') $host $pane: gave up after ${waited}s, omp still running; NOT sent: ${text:0:80}"; exit 6; }
+      sleep 5; waited=$((waited+5))
+    done
+  fi
   waited=0; said=0
   while :; do
     st=$(herdr pane list 2>/dev/null | python3 -c '
@@ -536,35 +597,36 @@ finish_paseo() {
 # would otherwise create a subagent).  Failures before the archive exit 11 and leave this
 # agent as it is.  The workspace id is looked up by cwd because `paseo agent inspect` does not
 # print it on 0.12.0 (upstream getpaseo/paseo#7592).
-# Text that came from paseo, an operator flag or an agent name goes through `clean` before it is
-# logged or used as a title: a newline in it could forge a "sent /compact" log line that
-# gap_check reads (adversary 2026-10-23, L4).
-clean() { printf '%s' "$1" | python3 -c 'import sys; print("".join(c for c in sys.stdin.read() if c.isprintable()))' 2>/dev/null; }
 successor_fail() { echo "$(gdate '+%F %T') $host $pane: successor: $(clean "$1"); NOT archived, this session stays usable"; exit 11; }
 pcli() { env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD "$paseo_cli" "$@"; }
 # jfield JSON-TEXT KEY...: the first KEY present in the top-level JSON OBJECT (null prints an empty
 # line); exit 3 when the text is not an object or no key is present (a renamed key must not read
-# as null, L2; a list is never unwrapped, L1).
-jfield() {
-  printf '%s' "$1" | python3 -c '
+# as null, L2; a list is never unwrapped, L1).  jfield_nn is the same but a null value is also
+# exit 3, and so is any value that is not a string (an object, a number, a bool): the key is
+# "present" only with a string value (adv-selfslash-4 F1).
+jfield_py() {
+  printf '%s' "$2" | python3 -c '
 import json, sys
-text = sys.stdin.read()
-# Paseo 0.13.0-beta.1 `run --json` prints "Using workspace <id>" before the object (2026-10-23, the
-# first live successor run): the JSON starts at the first "{" or "[".
-starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
+# Strict: the whole text is one JSON value.  `paseo run --json` prints "Using workspace <id>" on
+# stderr (console.error), which the caller keeps apart (adv-selfslash-1, L4).
 try:
-    d = json.loads(text[min(starts):]) if starts else None
+    d = json.loads(sys.stdin.read())
 except ValueError:
     sys.exit(3)
 if not isinstance(d, dict):
     sys.exit(3)
-for k in sys.argv[1:]:
+nonnull = sys.argv[1] == "1"
+for k in sys.argv[2:]:
     if k in d:
         v = d[k]
+        if nonnull and not isinstance(v, str):
+            sys.exit(3)
         print("" if v is None else v)
         sys.exit(0)
-sys.exit(3)' "${@:2}" 2>/dev/null
+sys.exit(3)' "$1" "${@:3}" 2>/dev/null
 }
+jfield() { local text="$1"; shift; jfield_py 0 "$text" "$@"; }
+jfield_nn() { local text="$1"; shift; jfield_py 1 "$text" "$@"; }
 # workspace_plan AGENT-CWD: from `paseo workspace ls --background --json` on stdin print one JSON
 # object: ws (where the successor goes), cwd (its --cwd: the target workspace's own row when
 # --workspace names one, else "" = this agent's), old_ws (this agent's workspace), proven (1 only
@@ -642,11 +704,25 @@ import os, sys
 a, b = os.path.realpath(sys.argv[1]), os.path.realpath(sys.argv[2])
 sys.exit(0 if b == a or b.startswith(a.rstrip("/") + "/") else 1)' "$1" "$2" 2>/dev/null
 }
+# pcli_split ARGS...: one paseo call, stdout alone in $pcli_out (the only text parsed as JSON),
+# stderr in $pcli_err (status lines, Node warnings; shown only in a failure message), rc in $pcli_rc.
+# stderr goes to one fixed file per pane under $lockdir, removed at once and overwritten by the next
+# call, so a signal can leave at most that one file, never an accumulating mktemp pile
+# (adv-selfslash-2 L2); a TERM/INT trap would need a second cleanup path for the same bound.
+pcli_split() {
+  local errf="$lockdir/$safe_pane.paseo-err"
+  pcli_out=$(pcli "$@" 2>"$errf"); pcli_rc=$?
+  pcli_err=$(cat "$errf" 2>/dev/null); rm -f "$errf"
+}
 successor_paseo() {
   pcli wait "$pane" --timeout "${SELF_SLASH_WAIT:-900}" --json >/dev/null 2>&1 \
     || { echo "$(gdate '+%F %T') $host $pane: finish: gave up after ${SELF_SLASH_WAIT:-900}s, agent still running; NOT archived"; exit 6; }
-  info=$(pcli agent inspect "$pane" --json 2>&1) || successor_fail "inspect of this agent failed: $(printf '%s' "$info" | gtr -s ' \n' ' ' | gcut -c1-200)"
-  old_name=$(jfield "$info" Name); old_mode=$(jfield "$info" Mode); old_cwd=$(jfield "$info" Cwd); old_provider=$(jfield "$info" Provider)
+  pcli_split agent inspect "$pane" --json; info="$pcli_out"
+  [ "$pcli_rc" = 0 ] || successor_fail "inspect of this agent failed: $(printf '%s' "$pcli_out $pcli_err" | gtr -s ' \n' ' ' | gcut -c1-200)"
+  # Fail closed: defaults must never replace an unreadable old mode (a plan-mode agent would get a
+  # bypassPermissions successor, adv-selfslash-2 L1).
+  jfield "$info" Id Name Status >/dev/null || successor_fail "inspect of this agent printed no single JSON object (got: $(printf '%s' "$pcli_out${pcli_err:+ stderr: $pcli_err}" | gtr -s ' \n' ' ' | gcut -c1-160)); nothing was started"
+  old_name=$(jfield "$info" Name); old_cwd=$(jfield "$info" Cwd)
   cwd="${PASEO_AGENT_CWD:-$old_cwd}"
   [ -n "$cwd" ] || successor_fail "this agent cwd is unknown"
   wsout=$(pcli workspace ls --background --json 2>&1) || successor_fail "workspace ls failed: $(printf '%s' "$wsout" | gtr -s ' \n' ' ' | gcut -c1-200)"
@@ -662,7 +738,18 @@ successor_paseo() {
   # agent runs yolo, home rule 16); any other provider gets its own default.
   mode="$s_mode"
   if [ -z "$mode" ]; then
-    if [ "${successor%%/*}" = "$old_provider" ]; then mode="${old_mode:-default}"
+    # No explicit --mode: the successor gets this agent's own mode or none.  A Provider or Mode this
+    # agent's inspect does not carry (key missing, null) is never replaced by a default (adv-selfslash-3 F1).
+    old_provider=$(jfield_nn "$info" Provider) && [ -n "$old_provider" ] || successor_fail "inspect of this agent has no Provider, so its mode cannot be passed on safely (--mode MODE names one); nothing was started"
+    old_mode=$(jfield_nn "$info" Mode) || successor_fail "inspect of this agent has no Mode value, so its mode cannot be passed on safely (--mode MODE names one); nothing was started"
+    # Only a plain lower-case provider id and a plain mode name are believed: "Claude", " claude" or
+    # a mode with spaces would otherwise read as another provider and take the bypassPermissions
+    # branch (adv-selfslash-4 F1).
+    case "$old_provider" in *[!"$lc$dg"_-]*) successor_fail "inspect of this agent gives Provider '$old_provider', not a plain provider id, so its mode cannot be passed on safely (--mode MODE names one); nothing was started";; esac
+    case "$old_mode" in *[!"$uc$lc$dg"_-]*) successor_fail "inspect of this agent gives Mode '$old_mode', not a plain mode name, so its mode cannot be passed on safely (--mode MODE names one); nothing was started";; esac
+    # The same provider gets the old mode as it is: an empty one (no mode set) passes no --mode, the
+    # provider's own default, never a made-up mode name.
+    if [ "${successor%%/*}" = "$old_provider" ]; then mode="$old_mode"
     elif [ "${successor%%/*}" = claude ]; then mode=bypassPermissions
     fi
   fi
@@ -674,12 +761,16 @@ successor_paseo() {
   title=$(clean "${s_title:-$short_name → $short_model}")
   settle="${SELF_SLASH_SUCCESSOR_SETTLE-20}"
   case "$settle" in ""|*[!0-9]*) successor_fail "SELF_SLASH_SUCCESSOR_SETTLE must be whole seconds (got: $settle); nothing was started";; esac
-  echo "$(gdate '+%F %T') $host $pane: successor: starting $successor (thinking $s_thinking, mode ${mode:-<provider default>}, workspace $ws, cwd $run_cwd, title \"$title\", prompt \"$first_prompt\")"
+  echo "$(gdate '+%F %T') $host $pane: successor: starting $successor (thinking $s_thinking, mode ${mode:-<provider default>}, workspace $(clean "$ws"), cwd $(clean "$run_cwd"), title \"$title\", prompt \"$(clean "$first_prompt")\")"
+  # Empty on a bash older than 4.4 is "unbound" under set -u unless the expansion is guarded.
   mode_args=(); [ -z "$mode" ] || mode_args=(--mode "$mode")
-  runout=$(pcli run "$first_prompt" --provider "$successor" --thinking "$s_thinking" "${mode_args[@]}" --workspace "$ws" --cwd "$run_cwd" --title "$title" --no-wait --json 2>&1); rc=$?
-  [ "$rc" = 0 ] || successor_fail "paseo run failed (rc=$rc): $(printf '%s' "$runout" | gtr -s ' \n' ' ' | gcut -c1-200)"
-  newid=$(jfield "$runout" agentId id Id) || successor_fail "paseo run printed no single agent object with an id: $(printf '%s' "$runout" | gtr -s ' \n' ' ' | gcut -c1-200)"
-  case "$newid" in ""|*[!A-Za-z0-9._:-]*) successor_fail "paseo run printed an unusable agent id";; esac
+  # JSON comes from stdout alone: Paseo prints its status lines ("Using workspace <id>") and any Node
+  # warning on stderr, which pcli_split keeps apart; only a failure message shows it (adv-selfslash-1, L4).
+  pcli_split run "$first_prompt" --provider "$successor" --thinking "$s_thinking" ${mode_args[@]+"${mode_args[@]}"} --workspace "$ws" --cwd "$run_cwd" --title "$title" --no-wait --json
+  rc="$pcli_rc"; runout="$pcli_out"
+  [ "$rc" = 0 ] || successor_fail "paseo run failed (rc=$rc): $(printf '%s' "$pcli_out $pcli_err" | gtr -s ' \n' ' ' | gcut -c1-200)"
+  newid=$(jfield "$runout" agentId id Id) || successor_fail "paseo run printed no single agent object with an id: $(printf '%s' "$pcli_out${pcli_err:+ stderr: $pcli_err}" | gtr -s ' \n' ' ' | gcut -c1-200)"
+  case "$newid" in ""|*[!"$uc$lc$dg"._:-]*) successor_fail "paseo run printed an unusable agent id";; esac
   if [ "$newid" = "$pane" ] || [ "$newid" = "${pane:0:7}" ] || [ "${newid:0:7}" = "${pane:0:7}" ]; then
     successor_fail "paseo run returned this agent own id ($newid), not a new agent"
   fi
@@ -687,23 +778,25 @@ successor_paseo() {
   # as upstream #5705's version gate, shows in the first seconds, L6).  Any bad look is final.
   end=$(( $(gdate +%s) + settle )); seen=0; nmodel=""; nstatus=""
   while :; do
-    if ninfo=$(pcli agent inspect "$newid" --json 2>&1); then
+    pcli_split agent inspect "$newid" --json; ninfo="$pcli_out"
+    nerr="$pcli_out${pcli_err:+ stderr: $pcli_err}"
+    if [ "$pcli_rc" = 0 ]; then
       seen=1
-      parent=$(jfield "$ninfo" ParentAgentId) || successor_fail "successor $newid: inspect has no ParentAgentId key, cannot tell it is top-level (left running)"
+      parent=$(jfield "$ninfo" ParentAgentId) || successor_fail "successor $newid: inspect has no ParentAgentId key, cannot tell it is top-level (got: $(printf '%s' "$nerr" | gtr -s ' \n' ' ' | gcut -c1-160); left running)"
       nstatus=$(jfield "$ninfo" Status) || successor_fail "successor $newid: inspect has no Status key (left running)"
       nmodel=$(jfield "$ninfo" Model) || nmodel=""
       [ -z "$parent" ] || successor_fail "successor $newid is a subagent (ParentAgentId $parent; left running)"
       case "$nstatus" in idle|running|initializing) ;; *) successor_fail "successor $newid is in status '$nstatus', not idle, running or initializing (left running)";; esac
       case "$nmodel" in ""|"-") ;; *) [ -z "$s_model" ] || [ "$nmodel" = "$s_model" ] || successor_fail "successor $newid runs model '$nmodel', not $s_model (left running)";; esac
     elif [ "$seen" = 1 ]; then
-      successor_fail "successor $newid answered inspect once and then failed: $(printf '%s' "$ninfo" | gtr -s ' \n' ' ' | gcut -c1-120) (left running)"
+      successor_fail "successor $newid answered inspect once and then failed: $(printf '%s' "$nerr" | gtr -s ' \n' ' ' | gcut -c1-120) (left running)"
     fi
     [ "$(gdate +%s)" -lt "$end" ] || break
     sleep 2
   done
-  [ "$seen" = 1 ] || successor_fail "successor $newid started but inspect never answered: $(printf '%s' "$ninfo" | gtr -s ' \n' ' ' | gcut -c1-200) (left running)"
+  [ "$seen" = 1 ] || successor_fail "successor $newid started but inspect never answered: $(printf '%s' "$nerr" | gtr -s ' \n' ' ' | gcut -c1-200) (left running)"
   [ -z "$s_model" ] || [ "$nmodel" = "$s_model" ] || successor_fail "successor $newid runs model '${nmodel:-?}', not $s_model (left running)"
-  echo "$(gdate '+%F %T') $host $pane: successor: $newid is top-level on ${nmodel:-$successor} (status $nstatus)"
+  echo "$(gdate '+%F %T') $host $pane: successor: $newid is top-level on $(clean "${nmodel:-$successor}") (status $(clean "$nstatus"))"
   out=$(pcli agent archive -- "$pane" 2>&1); rc=$?
   if [ "$rc" != 0 ]; then
     echo "$(gdate '+%F %T') $host $pane: finish: archive refused (rc=$rc): $(printf '%s' "$out" | gtr -s ' \n' ' ' | gcut -c1-200); successor $newid left running"; exit 8
