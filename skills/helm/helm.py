@@ -142,7 +142,8 @@ def classify(s, st):
                       exit=(la.get("result") or {}).get("exit"))
         else:
             it.update(kind="working", fp="")
-    elif s.get("host") == "hermes-gw":    # a Hermes chat: not a terminal, nothing to relay by keys
+    elif s.get("host") == "hermes-gw" or (s.get("host") == "paseo" and not s.get("sid")):
+        # a Hermes chat, or a Paseo agent with no Claude transcript (fleet.py lists them all): not a terminal, nothing to relay by keys
         it.update(kind="remote", fp="")
     elif s.get("finished") and s["status"] != "working":
         it.update(kind="finished", fp="finished:" + str(s.get("sid") or s["id"]))

@@ -3,6 +3,19 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Make better use of Basic Memory (djbclark, direct, 2026-10-23)
+
+djbclark, 2026-10-23: "Add another item to appropriate phrase: Look into making better use of basic memory, I do not
+think we are using it that much/makeing the best use of it, but I could be wrong. Do web searches etc." Status
+2026-10-23: **research and design slice running** (`design-basicmemory`, Opus 5.5 high via omp, web research,
+read-only; brief `~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-basicmemory.md`, report
+`~/.local/state/bigteam/adhoc-2026-10-23/design-basicmemory-report.md`). It measures the store (note counts, growth,
+relations, orphans) and real agent use (MCP tool calls per day from the transcripts), compares with the per-project
+auto-memory files, `docs/handoffs/`, `session-finder` and Hermes memory, surveys what works elsewhere, and recommends
+capture and recall hooks, note schemas and consolidation, plus the phase it belongs in
+([`docs/ade-everywhere-proposal.md`](ade-everywhere-proposal.md) section 8; levels in
+[`docs/ai-memory-landscape.md`](ai-memory-landscape.md)). Nothing is built.
+
 ## Heavier use of Hermes worktrees and cow pastures so agents stop stepping on each other (djbclark, direct, 2026-10-23)
 
 djbclark, 2026-10-23: "Also add to appropriate phase if we haven't yet, we should probably be making heavier use of
@@ -1506,3 +1519,13 @@ windowed state, so a retyped text could double-deliver; (P2) a `dequeue` is cred
 different queued prompt (a wrong "delivered" report, never a resend); (P3) the non-blocking pane lock returns "stop", which
 also cancels the socket fallback that used to deliver; (P4) two guarded lines have no test (removing a failed temp file; the
 final transcript check after the wait loop); (P5, pre-existing) a herdr pane's entry outlives a transcript change.
+
+## Paseo agents in fleet.py and relay.py: lows after adversary review (2026-10-23)
+
+`fleet.py` lists every non-archived Paseo agent of any provider; `relay.py` takes a hex id prefix of 6+ characters; a working agent whose
+provider cannot steer (cline and every other ACP provider) is refused. Adversary APPROVE (report
+`~/.local/state/bigteam/paseo-listing/adversary-report.md`). Open lows: (L1) three guards no test pins: helm keeping a Claude-on-Paseo
+agent in the attention queue, the 20 s `paseo ls` timeout, the exit-code check and the `--all` wiring; (L2) helm never shows a
+non-Claude Paseo agent that waits on a permission card; (L3) Paseo workspace titles join exact-name matching in `find()`; (L4) a send to
+a working claude/codex/omp agent is replaced, not queued, when the provider declines the steer (compaction): docs reworded 2026-10-23,
+no code guard. The workspace-name ledger (rework lead, brief `~/.local/state/bigteam/workspace-name-ledger/brief.md`) builds on this.
