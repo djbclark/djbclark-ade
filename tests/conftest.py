@@ -40,3 +40,9 @@ os.environ.setdefault("ROUTE_AGENT_AIUSE", "off")
 # check; adversary 2026-10-20). Any other value, "" included, would send the probe to the real login.
 if os.environ.get("ROUTE_AGENT_OMP_READY", "").strip().lower() not in ("0", "1"):
     os.environ["ROUTE_AGENT_OMP_READY"] = "0"
+# route_agent.governor_hold() reads the fleet governor's state (2026-10-23): a real tight/critical level on the host
+# would drop claude from every code/bulk/research/mechanical route and change the answer of unrelated tests.
+# Pinned to a missing file unconditionally; TestGovernorHold points it at a fixture per test.
+os.environ["CLAUDE_GOVERNOR_STATE"] = "/nonexistent/claude-governor-state.json"
+# the governor also reads the quota guard's state (bin/claude-quota-guard): a test never sees the real one
+os.environ["CLAUDE_QUOTA_GUARD_STATE"] = "/nonexistent/claude-quota-guard-state.json"

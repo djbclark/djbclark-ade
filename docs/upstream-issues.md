@@ -1173,6 +1173,10 @@ drops the agent identity and its subagent children.
    inside an agent; and `paseo run` passes the calling agent's id to the daemon whenever `PASEO_AGENT_ID` is set,
    even with `--workspace`, so the new agent is a subagent (the caller has to `env -u PASEO_AGENT_ID`).
 
+**ade-side workaround (2026-10-23):** `bin/paseo-set-model` (`set <agent> <model>`, `list --json`) calls the daemon's
+`set_agent_model_request` through the bundled CLI's own client, run in Paseo's Electron node; it keeps the agent id and is
+what `bin/claude-fleet-governor` uses to move live agents between models.
+
 ### Searched first
 
 `gh issue list --repo getpaseo/paseo --state all --limit 50 --search` for "model", "switch model", "change model" and

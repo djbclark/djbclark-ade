@@ -94,6 +94,7 @@ import glob
 import json
 import math
 import os
+import re
 import shlex
 import shutil
 import statistics
@@ -1211,6 +1212,51 @@ def discover(quota: dict[str, Any] | None = None) -> list[Service]:
 
 # -- routing --------------------------------------------------------------
 
+# The fleet governor (bin/claude-fleet-governor) writes `level` here every 5 minutes. While it says
+# tight or critical and is fresh, the Claude subscription is treated as an exhausted pool for the
+# kinds below (2026-10-23: `plan --kind code` printed `claude 30% left` with the 5-hour window
+# projected to run out before its reset).
+GOVERNOR_STATE = Path.home() / ".local" / "state" / "ade" / "fleet-governor.json"   # CLAUDE_GOVERNOR_STATE overrides
+GOVERNOR_FRESH = 30 * 60
+GOVERNOR_HOLD_KINDS = frozenset({"code", "bulk", "research", "mechanical"})
+GOVERNOR_JUDGMENT_MODEL = "anthropic/claude-opus-5-5 --effort high"
+
+
+def governor_hold(now: datetime | None = None) -> str | None:
+    """Why the Claude subscription is off limits right now, or None.
+
+    Reads CLAUDE_GOVERNOR_STATE (re-read per call: a tiny file); tight/critical and `checked_at`
+    under 30 minutes old counts. Missing, unreadable, older or `ok`/`stale` state holds nothing."""
+    path = Path(os.environ.get("CLAUDE_GOVERNOR_STATE") or GOVERNOR_STATE)
+    try:
+        state = json.loads(path.read_text())
+        level = state.get("level")
+        checked = datetime.fromisoformat(str(state.get("checked_at")).replace("Z", "+00:00"))
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+    if level not in ("tight", "critical"):
+        return None
+    if checked.tzinfo is None:
+        checked = checked.replace(tzinfo=UTC)
+    now = now or datetime.now(UTC)
+    if not 0 <= (now - checked).total_seconds() <= GOVERNOR_FRESH:
+        return None
+    windows = state.get("windows")
+    wins = [(k, w) for k, w in (windows.items() if isinstance(windows, dict) else ())
+            if isinstance(w, dict) and w.get("level") == level
+            and isinstance(w.get("projected_at_reset"), (int, float))]   # a corrupt state never stops routing (round 1 LOW 6)
+    top_kind, top = max(wins, key=lambda kw: kw[1]["projected_at_reset"], default=("", None))
+    detail = ""
+    if top:  # fixed names and numbers only: nothing free-form from the state file reaches an agent-facing text
+        name = {"five_hour": "5-hour", "weekly": "weekly", "fable_weekly": "weekly Fable"}.get(top_kind, "window")
+        used, proj = top.get("used"), top.get("projected_at_reset")
+        at = str(top.get("resets_at"))
+        at = at if re.fullmatch(r"[0-9T:.+Z-]{10,40}", at) else "?"
+        detail = (f" ({name} {used:.0f}% used, projected {proj:.0f}% at reset {at})"
+                  if isinstance(used, (int, float)) and isinstance(proj, (int, float)) else "")
+    return f"Claude subscription {level} per claude-fleet-governor{detail}"
+
+
 @dataclass
 class Choice:
     service: Service
@@ -1265,12 +1311,16 @@ def unrouted_why(kind: str, quota: dict[str, Any] | None = None,
                  exclude: frozenset[str] | set[str] = frozenset()) -> str:
     """Why route() found nothing for `kind`, for plan's queued line."""
     gap = QUALITY_MAX_RANK_GAP.get(kind)
+    hold = governor_hold() if kind in GOVERNOR_HOLD_KINDS else None
+    if hold:
+        exclude = frozenset(exclude) | {"claude"}
     best = quality_best(kind, list(discover(quota or {})), exclude)
+    note = f" ({hold})" if hold else ""
     if gap is None or best is None:
-        return "no pool has room: keep queued"
+        return "no pool has room: keep queued" + note
     return (f"no pool within {gap} rank steps of the best for {kind} ({best.name} "
             f"r{best.rank_for(kind)}) has room; weaker pools are not used for {kind} "
-            f"([routing].quality_max_rank_gap): keep queued until a reset")
+            f"([routing].quality_max_rank_gap): keep queued until a reset" + note)
 
 
 def route(kind: str, *, quota: dict[str, Any] | None = None,
@@ -1288,6 +1338,19 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
         raise ValueError(f"kind must be one of {KINDS}")
     quota = {} if quota is None else quota
     services = list(discover(quota))
+    hold = governor_hold()
+    held = hold is not None and (kind in GOVERNOR_HOLD_KINDS or kind == "judgment")
+    if hold and kind == "judgment":
+        omp = next((s for s in services if s.name == "omp"), None)
+        info = quota.get("omp") or {}
+        remaining = info.get("remaining")
+        if (omp is not None and "omp" not in exclude and omp.eligible(kind) and service_ready(omp)
+                and (remaining is None or remaining >= max(min_headroom, omp.reserve_floor))):
+            return Choice(omp, remaining, 0.0, f"judgment: {omp.cli}; Claude API credits, off the "
+                          f"subscription: {hold}", [], model=GOVERNOR_JUDGMENT_MODEL, kind=kind)
+        held = False                        # omp cannot take it: Opus judgment may still use claude
+    if held:
+        exclude = frozenset(exclude) | {"claude"}
     best = quality_best(kind, services, exclude)
     gap = QUALITY_MAX_RANK_GAP.get(kind)
 
@@ -1369,6 +1432,8 @@ def route(kind: str, *, quota: dict[str, Any] | None = None,
                    "check the window first")
     if best.note:
         why.append(best.note)
+    if held:
+        why.append(f"claude skipped: {hold}")
     return Choice(best, remaining, best_score, "; ".join(why),
                   [s.name for _, s, _, _ in scored[1:4]],
                   model=suggest_model(best, kind, quota.get(best.name) or {}),
@@ -1907,6 +1972,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({
                 "snapshot_age_s": age, "stale": stale,
                 "quota_source": quota_source_info(),
+                "governor_hold": governor_hold(),
                 "slices": [{"kind": k, "service": c.service.name if c else None,
                             "cli": c.service.cli if c else None,
                             "agent": c.service.acp_agent if c else None,
@@ -1920,6 +1986,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"WARNING: {QuotaSource.fallback_reason}; quota below is from the "
                       "snapshot file and misses aiuse's credits override and Admin API "
                       "readings", file=sys.stderr)
+            hold = governor_hold()
+            if hold:
+                print(f"NOTE: {hold}: claude is not routed for code, bulk, research or mechanical "
+                      "slices; judgment prefers omp (Claude API credits)", file=sys.stderr)
             if stale:
                 print("WARNING: quota snapshot "
                       + ("empty" if not quota else f"{(age or 0) / 60:.0f} min old")
@@ -2017,6 +2087,7 @@ def main(argv: list[str] | None = None) -> int:
             "dispatch": choice.dispatch,
             "remaining_percent": choice.remaining, "why": choice.why,
             "alternatives": choice.alternatives,
+            "governor_hold": governor_hold(),
             "snapshot_age_seconds": None if age is None else round(age),
             "quota_source": quota_source_info(),
         }, indent=2))
