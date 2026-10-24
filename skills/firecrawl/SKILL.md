@@ -46,7 +46,8 @@ TUI links it through `skill-everywhere`; edit only here.
    unreachable/timeout, (b) 404 (routes not in self-hosted: agent, monitor,
    ...), (c) 5xx, (d) a bot-walled scrape (page status 202/403/405/429/503, or a
    short page whose text is one of the named challenges), or (e) an empty map or
-   search. Never the other way: a commercial 429 or 402 never sends work back.
+   search. Never the other way: a commercial 429 or 402 never sends work back. With no commercial key it answers
+   `/v2/search/developer` itself from GitHub (section "Tools").
    Crawl jobs stay on the backend that started them (job id → backend map;
    absolute `url`/`next` links in responses are rewritten to point back at the
    router). The response header `X-Firecrawl-Backend` names the backend used;
@@ -81,6 +82,22 @@ Self-hosted exposes `firecrawl_scrape`, `firecrawl_search`, `firecrawl_map`,
 batch and deep-research variants. The cloud-only tools (`firecrawl_agent*`,
 `firecrawl_monitor_*`, `firecrawl_research_*`, `firecrawl_interact*`) are
 listed in self-hosted too but route to commercial via the router when called.
+
+`firecrawl_developer_search` (and `firecrawl_search` with `categories: ["developer"]`) is answered by
+`firecrawl-router` from the **GitHub search API** (2026-10-24), because Hyades has no `/v2/search/developer` and the
+commercial index is off. Results are issues, merged pull requests, READMEs, docs and code files of **public**
+repositories (the token can read private ones, so the router filters them out, best effort: `docs/threat-model.md`
+item 10), merged round-robin
+in Firecrawl's shape with `source: "github"` and a per-kind `coverage`; there is no reranking and no non-GitHub
+documentation site. GitHub ANDs every word, so write a few distinctive terms (a name, an error string), not a
+sentence; a search that finds nothing is retried once with fewer terms (never when `repos` scopes it). The token is
+`GITHUB_TOKEN`, held in memory from one `sudo-secretspec get` (read again at most once a minute while none is held);
+limits are GitHub's (30 searches/min, 10 for code search): a closed bucket
+shows as `coverage: "unavailable"` plus a `warning`, all closed as HTTP 429 with `Retry-After`. Only `query`, `k` and
+`types`/`repos` (one `owner/name`)/`language`/`passages` over REST are honoured; the other developer filters are a 400.
+`FIRECRAWL_ROUTER_DEVELOPER=off` turns it off; `FIRECRAWL_ROUTER_GITHUB_SECRET` names a different secretspec token
+(a fine-grained public-read one is the planned hardening). With a commercial key configured the request goes to
+Hyades and then the commercial index, as before.
 
 ## Search order
 

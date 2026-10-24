@@ -20,11 +20,11 @@ The model calls go through a failover chain built on
 
 Guards in `bin/skillopt-night` (most added after the 2026-10-12 adversary review):
 
-1. **Reviewed code only.** The night refuses (exit 2, one Hermes line) unless the
-   uv receipt's pinned rev and the installed commit both equal `REVIEWED_REV`.
-   Since 2026-10-13 this matters more, not less: under `perm: all` (section 4)
-   the engine's prompts drive agents that can run tools, so an unreviewed
-   upstream engine stays refused.
+1. **Tracks upstream main (since 2026-10-24).** The reviewed-commit gate
+   (`REVIEWED_REV`, refusing any other installed commit) is gone: djbclark chose
+   current over reviewed, accepting that unreviewed upstream code drives the
+   night's agents under `perm: all`. The nightly `brew-fast-upgrade` runs
+   `uv tool upgrade --all`, which moves skillopt to the newest main commit.
 2. **Chain policy.** A chain naming a denied or non-allowlisted route, a forbidden
    `extra_args` flag, a non-allow-listed `env` key or a `perm` other than `deny`
    or `all` is refused whole.
@@ -60,7 +60,7 @@ which call each model once. A `perm: all` entry has no canary, so plain
 
 | Path | What |
 |---|---|
-| `~/.local/bin/skillopt-sleep` | The CLI. `uv tool install "skillopt @ git+https://github.com/microsoft/SkillOpt"`, upstream main at **343db229dbd5ddaf9df6b1d5540d8bcdb2604d5c** (2026-10-12; PyPI 0.2.0 lacks multi-skill fan-out, OpenAI-compatible endpoints, the OpenCode/Cursor/Copilot/Pi sources and the handoff backend). Installed pinned: `uv tool install "skillopt @ git+https://github.com/microsoft/SkillOpt@343db229dbd5ddaf9df6b1d5540d8bcdb2604d5c"`. **Never `uv tool upgrade` it**: review the upstream diff, then bump the pin here, in `REVIEWED_REV` (bin/skillopt-night) and in docs/apply-toolchain-prompt.md; the night refuses any other commit. |
+| `~/.local/bin/skillopt-sleep` | The CLI. `uv tool install "skillopt @ git+https://github.com/microsoft/SkillOpt"`: upstream main, unpinned (2026-10-24; PyPI 0.2.0 lacks multi-skill fan-out, OpenAI-compatible endpoints, the OpenCode/Cursor/Copilot/Pi sources and the handoff backend). The nightly `brew-fast-upgrade` (`uv tool upgrade --all`) keeps it on the newest commit. |
 | `~/.skillopt-sleep/config.json` | SkillOpt's config (copy: [`skillopt-sleep-config.example.json`](skillopt-sleep-config.example.json)). Its `backend: "mock"` only affects hand-run commands; the runner passes `--backend handoff`. |
 | `~/.skillopt-sleep/night.json` | The runner's own config: the chain, allowlist, sizing (copy: [`skillopt-sleep-night.example.json`](skillopt-sleep-night.example.json)). A separate file because SkillOpt's config is upstream's namespace. |
 | `~/.skillopt-sleep/state.json` | Upstream state: night counter, harvest checkpoint, slow memory, history. |

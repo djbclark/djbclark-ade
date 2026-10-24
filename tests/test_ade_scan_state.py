@@ -1630,6 +1630,40 @@ def test_a_task_dir_that_cannot_be_searched_is_scan_incomplete_not_a_crash(tmp_p
     assert by["t-ok"]["verdict"] == "scratch"
 
 
+def test_a_fifo_as_claim_or_job_record_is_unreadable_not_a_hang(tmp_path):
+    """Codex finding 4365722733 (P2): `read_text()` on a bigteam task's `CLAIM` that is a FIFO, or a symlink to one, blocks
+    forever (no writer); so did a FIFO `jobs/*.json`. Both reads are bounded and non-blocking now."""
+    mod = load()
+    root, refs = tmp_path / "bigteam", tmp_path / "refs"
+    refs.mkdir()
+    os.mkfifo(tmp_path / "elsewhere")
+    fifos = [tmp_path / "elsewhere"]
+    plain = root / "t-fifo"
+    plain.mkdir(parents=True)
+    os.mkfifo(plain / "CLAIM")
+    linked = root / "t-link"
+    linked.mkdir()
+    (linked / "CLAIM").symlink_to(tmp_path / "elsewhere")
+    jobs = root / "t-jobs"
+    (jobs / "jobs").mkdir(parents=True)
+    os.mkfifo(jobs / "jobs" / "x.json")
+    fifos += [plain / "CLAIM", jobs / "jobs" / "x.json"]
+    result: list = []
+    t = threading.Thread(target=lambda: result.append(mod.scan_bigteam(root, [refs], [], 1_000_000, 10)), daemon=True)
+    t.start()
+    t.join(20)
+    if t.is_alive():  # the old code sits in open(): release it with a writer, then fail
+        for f in fifos:
+            os.close(os.open(f, os.O_RDWR))
+        t.join(10)
+        raise AssertionError("scan_bigteam blocked on a FIFO")
+    by = {x["task"]: x for x in result[0]["tasks"]}
+    for name in ("t-fifo", "t-link"):
+        assert by[name]["claim"] == "no CLAIM" and by[name]["verdict"].startswith(mod.INCOMPLETE_PREFIX), by[name]
+        assert by[name]["verdict"].endswith("CLAIM"), by[name]["verdict"]
+    assert by["t-jobs"]["open_job_records"] == ["x.json (unreadable)"], by["t-jobs"]
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 directory")
 def test_a_verdict_naming_a_hostile_directory_is_escaped_in_every_doc_table(tmp_path, capsys):
     """Adversary round 11, 3: the verdict now carries a directory name from the disk."""
@@ -4185,7 +4219,10 @@ def test_a_gitfile_whose_git_dir_does_not_point_back_is_skipped_before_any_git_c
         assert not log.exists(), (checkout.name, log.read_text())  # not one git call, `fetch` least of all
         assert rec.get("linked_stores") == linked, (checkout.name, rec.get("linked_stores"))
         if linked:
-            assert "is NOT archived" in skipped_row(doc, rec), checkout.name
+            # the gitfile's git dir and common dir are archived by the row's own git-dir command (adversary round 67, INFO 1)
+            row = skipped_row(doc, rec)
+            assert "is NOT archived" not in row and "the git-dir command above archives it" in row, (checkout.name, row)
+            assert "do not clean up before the git-dir archive command has run" in row and "gitdir.tar" in row, checkout.name
     for store in stores:
         assert sorted(str(p) for p in (store / "objects").rglob("*")) == before[store], store
     # control: the same `--fetch` scan of the real store downloads origin's tip (so the guard above is what stopped it)
@@ -4261,6 +4298,23 @@ def test_a_git_dir_that_points_back_to_the_checkout_stays_scanned_and_a_stale_ba
         # and a `commondir` in a git dir that names the checkout back is still refused unless it sits under `worktrees/`
         (gd / "commondir").write_text(f"{(work / '.git').resolve()}\n")
         assert mod.git_dir_foreign(sep.resolve()) == mod.SKIP_GIT_DIR_FOREIGN
+
+
+def test_a_hard_linked_gitfile_does_not_point_back_to_the_checkout_it_sits_in(tmp_path):
+    """Adversary round 67 on PR 27, LOW 1: `evil/.git` hard-linked to a linked worktree's gitfile has the worktree's inode,
+    so `samefile(<the gitdir file's target>, evil/.git)` held and every git call, `--fetch` included, ran in the
+    victim's store. The back-pointer's directory is compared instead."""
+    mod = load()
+    _, work, _ = make_pushed_checkout(tmp_path)
+    wt = tmp_path / "wt"
+    git(work, "worktree", "add", "-q", "-b", "wt", str(wt))
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    os.link(wt / ".git", evil / ".git")
+    assert os.path.samefile(wt / ".git", evil / ".git")
+    assert mod.git_dir_foreign(wt.resolve()) is None  # the real worktree is untouched
+    assert mod.git_dir_foreign(evil.resolve()) == mod.SKIP_GIT_DIR_FOREIGN
+    assert mod.scan_checkout(evil.resolve(), remote=False)["verdict"] == mod.SKIP_GIT_DIR_FOREIGN
 
 
 def test_a_symlink_anywhere_inside_objects_refs_or_logs_is_listed_on_a_skipped_row_and_a_failed_walk_warns(tmp_path, monkeypatch):
@@ -5364,3 +5418,102 @@ def test_home_destinations_and_a_checkout_at_home_expand_in_the_shell(tmp_path, 
                          env={**GIT_ENV, "HOME": str(home)})
     assert run.returncode == 0, run.stderr
     assert any(dest2.rglob("whole.tar"))
+
+
+def test_a_shallow_checkout_with_no_origin_keeps_its_shallow_file_beside_the_bundle(tmp_path, monkeypatch):
+    """Codex finding 4367121323 (P2): `git bundle create --all` drops `.git/shallow`, so `git clone all.bundle` of a
+    shallow checkout with no origin fails (`Could not read <parent>`). The row keeps the file next to the bundle and the
+    restore recipe it names rebuilds the history."""
+    mod, doc = load(), load_doc()
+    home = tmp_path / "home"
+    (home / "src").mkdir(parents=True)
+    monkeypatch.setattr(doc, "HOME", str(home))
+    upstream = make_repo(tmp_path / "up")
+    commit_file(upstream, "b.txt")
+    commit_file(upstream, "c.txt")
+    git(tmp_path, "clone", "-q", "--depth", "1", f"file://{upstream}", str(home / "src" / "sh"))
+    git(home / "src" / "sh", "remote", "remove", "origin")
+    c = scan_one(mod, home / "src")
+    assert c["shallow"] is True and "no origin remote" in c["flags"], c
+    row = next(r for r in section_3_2(doc.render(doc_scan([c]))).splitlines() if r.startswith("| ~/src/sh "))
+    assert "shallow checkout" in row, row
+    cmds = [unescape_span(m) for m in re.findall(r"`((?:mkdir -p [^`]*bundle create|\"\$GCP\")[^`]*)`", row)]
+    assert len(cmds) == 2, cmds
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    env = {**GIT_ENV, "HOME": str(home)}
+    for cmd in cmds:
+        run = subprocess.run(["bash", "-c", PLAN_PREFIX + cmd.replace("<DEST>", str(dest))], capture_output=True, text=True,
+                             cwd=tmp_path, env=env)
+        assert run.returncode == 0, (cmd, run.stderr)
+    bundles = home / "ops/site-private/bundles/home/src/sh"
+    assert (bundles / "all.bundle").is_file() and (bundles / "all.bundle.shallow").is_file(), list(home.rglob("*.bundle*"))
+    assert subprocess.run(["git", "clone", "-q", str(bundles / "all.bundle"), str(tmp_path / "plain")], env=GIT_ENV,
+                          capture_output=True).returncode != 0  # the premise: the bundle alone cannot be cloned
+    git(tmp_path, "init", "-q", "--bare", "restored")
+    shutil.copy(bundles / "all.bundle.shallow", tmp_path / "restored" / "shallow")
+    git(tmp_path / "restored", "fetch", "-q", str(bundles / "all.bundle"), "refs/*:refs/*")
+    assert git(tmp_path / "restored", "log", "--format=%s", "main").split() == ["c.txt"]
+    full = make_repo(tmp_path / "full")  # a checkout that is not shallow gets no extra command
+    assert scan_one(mod, full)["shallow"] is False
+
+
+def test_the_replaced_file_check_asks_for_modified_paths_only_and_never_lists_the_whole_index_with_a_content_check(tmp_path, monkeypatch):
+    """Adversary round 67 on PR 27, LOW 3: `ls-files -z -s -m -d` listed every index entry and hashed every stat-dirty
+    one, under the 60 s default. A file replaced by a directory is a type change that only `-m` reports (`-d` lists a
+    path that is gone), so dropping `-m` loses the repository standing there, and the plain `-s` listing is asked only when
+    such a directory exists, for the gitlinks to leave out."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    calls: list[tuple] = []
+    real_git = mod.git
+
+    def spy(p, *a, **kw):
+        calls.append((a, kw.get("timeout")))
+        return real_git(p, *a, **kw)
+
+    monkeypatch.setattr(mod, "git", spy)
+    mod.index_hidden_repositories(work)
+    changed = [(a, t) for a, t in calls if a[:2] == ("ls-files", "-z") and "-m" in a]
+    assert changed and all("-s" not in a and "-d" in a and t == mod.STATUS_TIMEOUT for a, t in changed), calls
+    assert not any(a[:3] == ("ls-files", "-z", "-s") for a, _ in calls), calls  # nothing is replaced: no listing at all
+    replace_with_repository(work, "a.txt")
+    calls.clear()
+    assert mod.scan_checkout(work, remote=False)["embedded_repos"] == ["a.txt/"]  # found through `-m` alone
+    # the dropped `-m`: the same walk, `-d` only, no longer sees the repository
+    monkeypatch.setattr(mod, "git", lambda p, *a, **kw: real_git(p, *[x for x in a if x != "-m"], **kw))
+    assert mod.scan_checkout(work, remote=False)["embedded_repos"] == []
+
+
+def test_one_directory_under_two_spellings_is_one_embedded_repository_not_two(tmp_path):
+    """Adversary round 67 on PR 27, INFO 2: on a case-insensitive file system a tracked `a.txt` replaced by a repository
+    named `A.TXT` is listed twice (untracked `A.TXT/`, the tracked path `a.txt/`), so two rows archived one directory."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    # the helper itself, on any file system: a symlink stands for the second spelling
+    (work / "dir").mkdir()
+    (work / "alias").symlink_to(work / "dir", target_is_directory=True)
+    assert mod.merge_repositories(work, ["dir/"], ["dir/"], ["alias/", "e/"], ["alias/", "e/"]) == (["dir/", "e/"], ["dir/", "e/"])
+    assert mod.merge_repositories(work, [], [], ["dir/", "alias/"], ["alias/"]) == (["dir/"], ["dir/"])
+    assert mod.merge_repositories(work, ["x/"], [], ["x/"], []) == (["x/"], [])  # the same spelling is a plain duplicate
+    replace_with_repository(work, "a.txt")
+    (work / "a.txt").rename(work / "A.TXT")
+    if not (work / "a.txt").exists():
+        return  # a case-sensitive file system: the two spellings are two directories, and only one exists
+    rec = mod.scan_checkout(work, remote=False)
+    assert len(rec["embedded_repos"]) == 1 and "embedded repositories: 1" in rec["flags"], rec
+
+
+@pytest.mark.skipif(git_version() < (2, 48), reason="worktree.useRelativePaths needs git 2.48")
+def test_a_repository_with_relative_worktrees_is_scanned_not_skipped_for_its_extension(tmp_path):
+    """Adversary round 67 on PR 27, INFO 4: `git worktree add --relative-paths` (or `worktree.useRelativePaths=true`) writes
+    `extensions.relativeWorktrees` into the main config, which made the main checkout and every linked worktree
+    `skipped: unrecognised config extensions.relativeworktrees`."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    wt = tmp_path / "wt"
+    git(work, "worktree", "add", "-q", "--relative-paths", "-b", "wt", str(wt))
+    assert "relativeworktrees" in (work / ".git" / "config").read_text().lower()
+    for checkout in (work, wt):
+        rec = mod.scan_checkout(checkout.resolve(), remote=False)
+        assert not rec["verdict"].startswith("skipped"), (checkout.name, rec["verdict"])

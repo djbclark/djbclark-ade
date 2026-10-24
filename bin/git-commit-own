@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# git-commit-own — commit only your own paths, without pre-commit's whole-tree stash.
+#
+#   git-commit-own "<message>" <path>...
+#
+# Why (djbclark, 2026-10-24): a plain `git commit` runs pre-commit, which stashes EVERY
+# unstaged change in the worktree for the 30-60 s of the hook run and restores it afterwards.
+# Other agents editing the same repo meanwhile see their edits vanish, then conflict on the
+# restore (~/ops/stayturgid, three agents, the same afternoon). `pre-commit run --files` runs
+# the same hooks on named files without stashing anything, so this runs that on your paths and
+# then commits them with --no-verify. A hook that rewrites a file (formatter) fails the first
+# run; the second run checks the rewritten file, and the commit picks it up.
+#
+# Paths may be files or directories; deletions are committed too. For a file another agent
+# also edits, stage your hunks with `git apply --cached` first and pass --staged: the hooks
+# then run on the staged file names and the commit takes the index only (no pathspec).
+set -euo pipefail
+
+usage() { echo "usage: git-commit-own \"<message>\" <path>...   |   git-commit-own --staged \"<message>\"" >&2; exit 2; }
+
+staged=0
+if [ "${1:-}" = "--staged" ]; then staged=1; shift; fi
+[ "$#" -ge 1 ] || usage
+msg="$1"; shift
+[ -n "$msg" ] || usage
+if [ "$staged" -eq 1 ]; then
+  [ "$#" -eq 0 ] || usage
+else
+  [ "$#" -ge 1 ] || usage
+fi
+
+root="$(git rev-parse --show-toplevel)"
+
+# Existing changed or new files under the given paths (or the index, with --staged).
+if [ "$staged" -eq 1 ]; then
+  mapfile -t changed < <(git diff --cached --name-only --diff-filter=d)
+else
+  mapfile -t changed < <({ git diff --name-only --diff-filter=d HEAD -- "$@"; git ls-files --full-name -o --exclude-standard -- "$@"; } | sort -u)
+fi
+
+if [ "${#changed[@]}" -gt 0 ] && [ -f "$root/.pre-commit-config.yaml" ] && command -v pre-commit >/dev/null 2>&1; then
+  (cd "$root" && { pre-commit run --files "${changed[@]}" || pre-commit run --files "${changed[@]}"; })
+fi
+
+if [ "$staged" -eq 1 ]; then
+  git commit --no-verify -m "$msg"
+else
+  # Untracked files need adding before a pathspec commit can take them.
+  [ "$(git ls-files -o --exclude-standard -- "$@" | wc -l)" -eq 0 ] || git ls-files -o --exclude-standard -z -- "$@" | xargs -0 git add --
+  git commit --no-verify -m "$msg" -- "$@"
+fi

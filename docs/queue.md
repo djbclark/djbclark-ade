@@ -3,16 +3,55 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## tuios support: do it LAST (djbclark, direct, 2026-10-24)
+
+djbclark, 2026-10-24: "Queue for very end, although we can consider it a little now to make room for it any work between
+now and then: Add support for tuios (new herdr-like thing that looks cool). paseo is our first-class interface; herdr is
+secondary, and tuios for the moment is tertiary, so ask before you do anything for it that would cost a lot of tokens. Do
+web searches about it and make heavy use of web searches during all of your work in general."
+
+1. **Tier and rule.** Paseo first-class, herdr secondary, tuios tertiary (for now). **Ask djbclark before any tuios step
+   that costs many tokens** (a research slice, an adapter, a skill, an `acp-run`/`herdr-tidy`/`session-finder` port); a
+   web search or a README read is cheap and needs no ask. It runs after everything else in this file.
+2. **What it is (web, 2026-10-24).** [github.com/Gaurav-Gosain/tuios](https://github.com/Gaurav-Gosain/tuios), docs at
+   [tuios.dev/docs](https://tuios.dev/docs): a Go (Bubble Tea v2) terminal multiplexer and window manager, vim-style modal
+   interface, BSP tiling, up to 9 workspaces, kitty graphics, a daemon that keeps sessions alive. Install: `brew install
+   tuios` (or `go install github.com/Gaurav-Gosain/tuios/cmd/tuios@latest`, or the install script; `tuios update`).
+3. **Why it matters here: it is built for coding agents.** Per its README: agent state per pane (working, waiting, done,
+   errored) and an **Inbox** of everything waiting on you across sessions and machines (approvals, questions, mail, errors);
+   `tuios ask-human`, `tuios send-agent-message`; `tuios fan` (one prompt to several agents, mixed harnesses, each in its own
+   git worktree), `tuios start-agent`; **pane grants** (`read`, `write`, `fan`, `respond`, `admin`); an **MCP server**
+   (`tuios mcp`, read-only by default); a **tmux shim** (`tuios tmux-shim`, for tools that drive tmux, such as Claude Code
+   agent teams); `tuios --skill` (the guide an agent in a pane reads); a JSON verb protocol for driving the daemon; **hosts**
+   (`tuios hosts add`, ssh, Tailscale) and remote sessions (`tuios attach --host`); resume of each agent conversation after a
+   daemon restart; Program Status Protocol (OSC 7501) and shell hooks on window, session and agent events.
+4. **Likely shape of the work (not started; each needs the ask in item 1):** 1. a read-only research slice (Opus 5.5 high via
+   omp, web research plus the repo's `docs/AGENT_STATE.md` and `AGENTS.md`) on how tuios maps onto what `helm`, `herdr-tidy`,
+   `autorename`, `session-finder`, `relay.py` and `herdr-sleeper` do for herdr, and what overlaps Paseo's own host and
+   Subagents features (see "Paseo connected hosts"); 2. the security view (pane grants vs our `--perm` and yolo policy, the
+   tmux shim, `tuios mcp`) in `docs/threat-model.md`; 3. a tertiary-tier port, smallest useful first (naming rule next to
+   `-pt`/`-pw`, then session discovery, then Inbox into `helm`), only if the research says it earns its keep.
+5. **Standing order from the same message: use web searches heavily in all work**, not only here (memory
+   `feedback_heavy_web_search`).
+
 ## ade-scan-state follow-up 2 after PR 39 (adversary round 70, 2026-10-24)
 
 PR 39 was approved at head 14c7347 (no BLOCK or MEDIUM). Left for one small later PR (`adhoc-2026-10-24/adv-scan-70-report.md`): 1. **LOW**: a shallow checkout WITH an origin still gets `HEAD.bundle`, `branch-<b>.bundle`, `all-refs.bundle` and `local-only.bundle` rows (`bin/ade-scan-state-doc` ~779-822) that cannot be cloned alone (`git clone` rc 128); read `c.get("shallow")` in those rows too and either copy `shallow` beside the bundle or say "restore by fetching into a clone of origin; keep origin". 2. INFO: the no-origin restore recipe leaves the bare repo's HEAD at `init.defaultBranch` (a clone warns `remote HEAD refers to nonexistent ref`); `git init --bare -b <branch>`. 3. INFO: `GITDIR_FMT` exits 0 having archived nothing when `.git` is no longer a file at paste time, so the new "refuses loudly" sentence overstates; make the command fail or reword. 4. INFO: the PR's CHANGELOG line bundles about eight changes in one line where rule 10 says one per change; split if a reviewer asks. 5. INFO: `merge_repositories` keeps the first spelling (unreachable for a symlink today).
+
+## Consider: drop the brew Paseo and run our fork instead (djbclark, direct, 2026-10-24): ASK FIRST, it is disruptive
+
+djbclark, 2026-10-24: "At appropriate point, consider if we want to remove the paseo brew install and instead just use our fork (make sure the CLI tools are on the PATH and the GUI App gets replaced and all the daemons/launchd is updated with new locations etc). Ask me before doing this work as it will be disruptive."
+
+1. **Today (verified 2026-10-24):** brew cask `paseo` 0.13.0 (`/opt/homebrew/Caskroom/paseo/0.13.0`, installed 11:15 AM) puts `/Applications/Paseo.app` (bundle `sh.paseo.desktop`); `/opt/homebrew/bin/paseo` and `~/.local/bin/paseo` are both symlinks to `/Applications/Paseo.app/Contents/Resources/bin/paseo`; launchd has `com.djbclark.paseo-desktop` (`~/Library/LaunchAgents`, opens `/Applications/Paseo.app`) and a `paseo-upgrade` label whose plist I did not find under `~/Library/LaunchAgents`, `~/ops/site-djbclark/roles` or `bin/` (locate it first). The fork is `~/src/paseo` ([djbclark/paseo](https://github.com/djbclark/paseo), upstream [getpaseo/paseo](https://github.com/getpaseo/paseo)), currently on branch `feat/workspace-identity-accent`, 4 commits ahead of `upstream/main`; packages: app, cli, client, desktop, protocol, relay, server, plugin.
+2. **Decide first (research, cheap):** why we want the fork (our patches: workspace identity accent, tab colors, lifecycle), what we lose (brew's automatic upgrades and the signed, notarized upstream build; an unsigned fork build needs a Gatekeeper decision), and how the fork would track upstream releases (a rebase cadence, a CI build on GitHub runners per item 37, never a heavy build on the Mac). Web-search the desktop packaging (`packages/desktop`, electron-builder or similar) and whether upstream publishes build instructions.
+3. **If djbclark says go (ask separately, naming what it interrupts: every Paseo agent, this window included):** 1. build the fork's desktop app and CLI; 2. `brew uninstall --cask paseo` only after the fork build runs; 3. put the fork's `paseo` on PATH at `~/.local/bin/paseo` (and remove the `/opt/homebrew/bin` symlink or point it at the fork) so every client (`acp-run`, `relay.py`, `fleet.py`, the load watcher) finds it; 4. replace `/Applications/Paseo.app` with the fork app and update `com.djbclark.paseo-desktop` and `paseo-upgrade` (through the Ansible role in site-djbclark, never a live plist edit, rule 18); 5. grep djbclark-ade, site-djbclark and site-private for the old paths (`/Applications/Paseo.app`, `/opt/homebrew/Caskroom/paseo`); 6. restart the daemon once, verify `paseo --version`, `paseo ls`, the connected-hosts round trip and the skill-sync guard (memory `project_paseo_skill_sync_writes_through_symlinks`).
+4. **Order:** after the connected-hosts upgrade is verified on stock 0.13.0 (so a regression can be told apart from the fork), before tuios. Not started; blocked on djbclark's go.
 
 ## Paseo connected hosts: make full use of them, after we quiesce and upgrade Paseo (djbclark, direct, 2026-10-24)
 
 djbclark, 2026-10-24: "Add to appropriate point in our queue, we should make full use of this new feature (before doing
 this we'll need to run out the queue / quiesse here so we can install the latest paseo version that supports this and
-then restart paseo)". The feature is from the changelog of the newest Paseo release, **not yet installed** (installed
-2026-10-24: `paseo --version` 0.13.0-beta.1). Changelog text: "Connect your daemon to another machine, then ask an agent
+then restart paseo)". The feature is from the changelog of Paseo **v0.13.0-beta.2**, shipped in stable **0.13.0** (2026-10-24; [beta.2 notes](https://newreleases.io/project/github/getpaseo/paseo/release/v0.13.0-beta.2), [releases](https://github.com/getpaseo/paseo/releases); docs `docs/connected-hosts.md` in the repo). **Installed by 11:15 AM EDT 2026-10-24** (brew cask 0.13.0, `Paseo.app` and `paseo --version` both 0.13.0); whether the running daemon is on 0.13.0 is unverified (it was restarted onto beta.1 at 9:57 AM), and a restart needs djbclark's separate yes (memory `feedback_ask_before_restarting_paseo_daemon`). Status 2026-10-24 (about 10:00 AM EDT): another session restarted the daemon 0.12.0 -> 0.13.0-beta.1 (09:57-09:58 AM) on djbclark's instruction, so the quiesce in item 1 is done for that restart; beta.1 lacks connected hosts, so item 1 now reduces to: verify the daemon version, ask, restart onto 0.13.0, then item 2. Changelog text: "Connect your daemon to another machine, then ask an agent
 to delegate work there": `paseo host add 192.168.1.20:6767 --label studio`, `paseo host add 'ssh://me@build-box' --label
 build-box`, `paseo host add 'relay://...' --label laptop`; "Added connected hosts, so agents can create, prompt and
 monitor agents on other machines and see them in the Subagents track (#7370, #7593)".
@@ -42,23 +81,6 @@ monitor agents on other machines and see them in the Subagents track (#7370, #75
    remote) and its Orca worktree `Hermes`: host it or bundle it; (c) push or bundle the branches with commits on
    no origin branch (doc section 3.2). The 54.5 GiB `adhoc-2026-10-18/hm-promo-rehearsal/` is scratch; deleting
    it is a later cleanup decision.
-
-## ade-scan-state follow-up after PR 27 (rounds 65-67 LOW/INFO and Codex P2, 2026-10-24)
-
-PR 27 merged at an APPROVE with LOW only (djbclark, 2026-10-23: "merge now, follow-up PR"). One small follow-up PR with
-its own adversary round, from `adhoc-2026-10-23/adv-scan-67-report.md` and Codex finding 4365722733: 1. **P2**: a
-bigteam task's `CLAIM` that is a FIFO (or a symlink to one) blocks `read_text()` forever and `open_job_records()` has the
-same problem; use the bounded non-blocking `read_regular_file()` already used for stash reflogs and classify an
-unreadable one. 1b. **P2 (Codex 4367121323)**: a shallow checkout with no origin gets an `all.bundle` row, but the bundle drops `.git/shallow` and cloning it fails (`Could not read <parent>`); keep `.git/shallow` with the bundle or say the bundle cannot be cloned. 2. LOW 1: `git_dir_foreign` accepts a hard-linked gitfile (`os.path.samefile` compares inodes); compare
-resolved paths too. 3. LOW 2: four texts claim `--separate-git-dir` has a back-pointer (module docstring, the
-`git_dir_foreign` docstring, the doc tool's user-facing row at ~966) while the code and tests correctly skip it; fix the
-wording. 4. LOW 3: `ls-files -z -s -m -d` lists every index entry and adds a content-check pass under the 60 s budget;
-use `-m -d` with a separate gitlink filter, and add the test that fails when `-m` is dropped. 5. INFO: the FOREIGN row's
-"NOT archived" over-warns for git-dir entries the gitfile command does archive; dedupe the replaced-tracked-file and
-untracked directories by `samefile` (case-insensitive APFS double count); `scan_checkout`'s docstring lists only some
-store members; allowlist `extensions.relativeworktrees` (a `worktree.useRelativePaths` repo is skipped today); threat-model
-item 8 should say `--fetch` also writes through a symlinked `objects`. Round 61-63 LOWs and INFOs queued earlier stay in
-`queue-followups.md`.
 
 ## Make better use of Basic Memory (djbclark, direct, 2026-10-23)
 
