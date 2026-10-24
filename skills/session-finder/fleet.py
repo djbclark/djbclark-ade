@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """fleet — every running agent session on this machine, any TUI, no model.
 
-    fleet.py [--all] [--json]        running sessions (--all: sleeper and plain shell panes too)
+    fleet.py [--all] [--json]        running sessions (--all: sleeper and plain shell panes, archived Paseo agents too)
     fleet.py ended [--days N] [--json]
                                      ended sessions that still hold open items: a handoff whose
                                      next steps nobody picked up, a last reply that asked a question,
@@ -15,8 +15,9 @@
 
 Sources, merged by pane and session id: herdr `agent list` (any agent kind), the Claude Code
 registry (~/.claude/sessions), a process scan for TUIs running outside herdr, Hermes gateway
-sessions active in the last day (~/.hermes/state.db, read-only), and the sessions launch.py
-started over ACP (~/.local/state/session-finder/launches.jsonl), plus herdr panes whose TUI herdr
+sessions active in the last day (~/.hermes/state.db, read-only), the sessions launch.py
+started over ACP (~/.local/state/session-finder/launches.jsonl), every other non-archived Paseo agent
+(`paseo ls -g --background --json`, any provider; rows are matched on the Paseo agent id), plus herdr panes whose TUI herdr
 did not detect (`pane process-info`). Each record says how to reach the session (`reach`), whether
 it already finished with /handoff or /quit (`finished`), and whether an idle-looking session still
 has work in flight (`busy`: live child processes that are not its MCP/LSP servers -> status
@@ -77,6 +78,16 @@ REPLAY_VALUE = {"--model", "--permission-mode", "--add-dir", "--effort"}
 TAIL = 600_000          # bytes read from the end of a Claude transcript
 HERMES_ACTIVE = 24 * 3600
 REG_STATUS = {"busy": "working", "shell": "working", "waiting": "blocked", "idle": "idle"}
+# Paseo providers whose agent can take a message into a RUNNING turn (`paseo send --behavior steer` queues it).
+# Read from the Paseo 0.x daemon bundle on 2026-10-23: ClaudeAgentSession, CodexAppServerAgentSession, OmpAgentSession,
+# OpenCodeAgentSession and PiRpcAgentSession implement steerActiveTurn. Every provider that `extends: acp` in
+# ~/.paseo/config.json (cline, grok, copilot, ...) runs ACPAgentSession, which has none: Paseo then INTERRUPTS the
+# running turn and starts the sent text as a new one (agent-manager steerOrReplaceActiveTurn: "replaced"). Plugin
+# providers (antigravity, muse, hoplite) steer only when they negotiate "prompt.steer": unknown, so not listed.
+PASEO_STEER_PROVIDERS = frozenset({"claude", "codex", "omp", "opencode", "pi"})
+PASEO_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+PASEO_LS_TIMEOUT = 20
+PASEO_STATUS = {"running": "working", "idle": "idle"}
 # binary name -> agent label, for TUIs running outside herdr (herdr panes are taken from herdr itself)
 PROC_AGENTS = {"claude": "claude", "codex": "codex", "cursor-agent": "cursor", "opencode": "opencode",
                "zcode": "zcode", "copilot": "copilot", "qwen": "qwen", "agy": "agy",
@@ -486,6 +497,74 @@ def _other_herdr(agents, used):
     return out
 
 
+def _paseo_ls(*flags):
+    """Parsed `paseo ls -g --json FLAGS` (the CLI is $PASEO_CLI, else PATH): a list, or None when there is no
+    CLI, it failed or timed out, or it printed anything but a JSON list. argv list, stdin closed, nothing cached."""
+    cli = os.environ.get("PASEO_CLI") or shutil.which("paseo")
+    if not cli or not os.access(cli, os.X_OK):
+        return None
+    try:
+        p = subprocess.run([cli, "ls", "-g", "--json", *flags], capture_output=True, text=True,
+                           timeout=PASEO_LS_TIMEOUT, check=False, stdin=subprocess.DEVNULL)
+        data = json.loads(p.stdout) if p.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    return data if isinstance(data, list) else None
+
+
+def paseo_reach(sid, provider, archived=False):
+    if archived:
+        return "archived Paseo agent: relay.py refuses it (a send would unarchive it); unarchive it in Paseo first"
+    base = f'relay.py {sid} "<text>" (`paseo send` into its Paseo agent; '
+    if provider in PASEO_STEER_PROVIDERS:
+        return base + "queued at its next tool round if it is working, unless Paseo replaces the turn, e.g. while it compacts)"
+    return base + f"a {provider} agent cannot steer, so a send while it works would replace its turn: refused, --idle S waits for idle)"
+
+
+def _paseo_hosting(anc):
+    """Paseo agent ids hosting this process or one of its ancestors (parent titled Paseo Daemon, id in its env)."""
+    if not _where:
+        return set()
+    return {a for a in (_where.paseo_agent(p, _where.env_of(p)) for p in anc) if a}
+
+
+def _paseo_rows(have, anc, include_archived=False):
+    """A row for every non-archived Paseo agent of any provider whose id is not in HAVE (the Paseo ids other rows
+    already stand for; matched on the agent id, never on the directory), from `paseo ls -g --background --json`.
+    INCLUDE_ARCHIVED adds the archived ones (`paseo ls -g -a`, minus the live list) as status `ended`.
+    No CLI or a failed call: no rows, exactly as before this source existed. Ids are checked against the uuid
+    pattern before they can reach an argv or a chan; the provider label is the part before the first `/`."""
+    live = _paseo_ls("--background")
+    if live is None:
+        return []
+    everything = (_paseo_ls("-a") or []) if include_archived else []
+    live_ids = {d.get("id") for d in live if isinstance(d, dict)}
+    todo = [(d, False) for d in live] + [(d, True) for d in everything
+                                         if isinstance(d, dict) and d.get("id") not in live_ids]
+    me, hosting, out, seen = os.environ.get("PASEO_AGENT_ID"), None, [], set(have)
+    for d, archived in todo:
+        pid = d.get("id") if isinstance(d, dict) else None
+        if not isinstance(pid, str) or not PASEO_ID.fullmatch(pid) or pid in seen:
+            continue
+        seen.add(pid)
+        raw = str(d.get("status") or "unknown").lower()
+        prov = str(d.get("provider") or "").split("/", 1)[0].lower()
+        if not re.fullmatch(r"[a-z0-9_.-]{1,40}", prov):
+            prov = "paseo"
+        cwd = str(d.get("cwd") or "")
+        if cwd == "~" or cwd.startswith("~/"):
+            cwd = HOME + cwd[1:]
+        if hosting is None:
+            hosting = _paseo_hosting(anc)
+        name = clip(str(d.get("name") or ""), 80)
+        out.append(_rec(id=pid[:8], agent=prov, host="paseo", sid=None, name=name, cwd=cwd,
+                        status="ended" if archived else PASEO_STATUS.get(raw, raw), chan=("paseo", pid), paseo=pid,
+                        paseo_state="archived" if archived else raw, archived=archived, ended=archived,
+                        self=(pid == me or pid in hosting), where=f"host=paseo agent={pid}",
+                        reach=paseo_reach(pid[:8], prov, archived)))
+    return out
+
+
 def pane_procs(pane):
     """Foreground processes of a herdr pane (`pane process-info`): [{pid, name, argv, cwd}], shell pid.
     None when herdr could not read them (unknown is not empty)."""
@@ -761,9 +840,10 @@ def _launched(used_panes):
     return out
 
 
-def sessions(include_shell=False, include_marked=True):
+def sessions(include_shell=False, include_marked=True, include_archived=False):
     """Every running session. include_marked=False leaves out launches started with `launch.py --mark`
-    (test/trial launches their starter drives; helm should ignore them, hcom trial 6g)."""
+    (test/trial launches their starter drives; helm should ignore them, hcom trial 6g). include_archived adds
+    the archived Paseo agents as `ended` rows (fleet.py --all)."""
     anc = ancestors()
     agents = herdr_json("agent", "list").get("agents") or []
     panes = herdr_json("pane", "list").get("panes") or []
@@ -780,6 +860,8 @@ def sessions(include_shell=False, include_marked=True):
     known_pids = {s["pid"] for s in out if s.get("pid")}
     out += _proc_scan(known_pids, used | {a["pane_id"] for a in panes}, anc)
     out += _hermes_gateway()
+    have = {s["paseo"] for s in out if s.get("paseo")} | {s["chan"][1] for s in out if (s.get("chan") or ("",))[0] == "paseo"}
+    out += _paseo_rows(have, anc, include_archived)
     if include_shell:
         out += shells
     if not include_marked:
@@ -1226,7 +1308,7 @@ def main():
         items = ended_open(a.days)
         print(json.dumps(items, ensure_ascii=False) if a.json else "\n\n".join(render_ended(it) for it in items))
         return 0 if items else 1
-    ss = sessions(include_shell=a.all or a.cmd == "show")
+    ss = sessions(include_shell=a.all or a.cmd == "show", include_archived=a.all)
     warn = messaging_warning()
     if warn:
         print(warn, file=sys.stderr)

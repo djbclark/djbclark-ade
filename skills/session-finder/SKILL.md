@@ -88,6 +88,19 @@ the Paseo daemon spawned has no terminal: `where.py` says `host=paseo agent=<PAS
 `paseo_agent`; recognised by that variable plus the daemon as its direct parent, 2026-10-20).
 The finders call it and cache the result an hour (`locations` table in the history DB).
 
+`fleet.py` lists **every** non-archived Paseo agent of any provider (claude, cline, omp, codex, ...), not only Claude
+Code TUIs (2026-10-23; before, a cline agent that `paseo ls` showed was missing from `fleet.py list` and looked offline):
+a row with `agent` = the provider, `host` = `paseo`, `id` = the first 8 hex of the agent id, `chan` = `("paseo", <full
+id>)`, from `paseo ls -g --background --json`, deduplicated on the Paseo agent id (never the directory). `fleet.py --all`
+adds the archived agents as `ended` rows (`relay.py` never sends to one). No `paseo` CLI, or a failed or slow call
+(20 s): no Paseo rows, as before. `relay.py` takes a hex **prefix of 6 or more characters** of a Paseo agent id
+(`paseo ls`'s 7-character short id works); exactly one agent must match, else it refuses and lists the candidates.
+A working agent whose provider cannot steer (cline and every other ACP provider, which Paseo would interrupt and replace
+the running turn of) is refused with that reason: `--idle S` waits for it to go idle; claude, codex, omp, opencode and pi
+queue the text for their next tool round (`fleet.PASEO_STEER_PROVIDERS`, read from the Paseo daemon bundle 2026-10-23),
+except that Paseo replaces the running turn of even these when the provider declines the steer at that moment (for example
+while Claude or Codex is compacting): a send to a working agent is queued, not guaranteed queued.
+
 **Give three things:** the session name, its title, and the `where:` line with the
 `focus:` command. `one-offs-91 "CCC slow performance" — herdr ws shells#6 · tab
 11#78 · pane claude (focus: herdr tab focus w27:t2E)`.

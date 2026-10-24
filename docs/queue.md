@@ -1506,3 +1506,13 @@ windowed state, so a retyped text could double-deliver; (P2) a `dequeue` is cred
 different queued prompt (a wrong "delivered" report, never a resend); (P3) the non-blocking pane lock returns "stop", which
 also cancels the socket fallback that used to deliver; (P4) two guarded lines have no test (removing a failed temp file; the
 final transcript check after the wait loop); (P5, pre-existing) a herdr pane's entry outlives a transcript change.
+
+## Paseo agents in fleet.py and relay.py: lows after adversary review (2026-10-23)
+
+`fleet.py` lists every non-archived Paseo agent of any provider; `relay.py` takes a hex id prefix of 6+ characters; a working agent whose
+provider cannot steer (cline and every other ACP provider) is refused. Adversary APPROVE (report
+`~/.local/state/bigteam/paseo-listing/adversary-report.md`). Open lows: (L1) three guards no test pins: helm keeping a Claude-on-Paseo
+agent in the attention queue, the 20 s `paseo ls` timeout, the exit-code check and the `--all` wiring; (L2) helm never shows a
+non-Claude Paseo agent that waits on a permission card; (L3) Paseo workspace titles join exact-name matching in `find()`; (L4) a send to
+a working claude/codex/omp agent is replaced, not queued, when the provider declines the steer (compaction): docs reworded 2026-10-23,
+no code guard. The workspace-name ledger (rework lead, brief `~/.local/state/bigteam/workspace-name-ledger/brief.md`) builds on this.
