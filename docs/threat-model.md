@@ -302,6 +302,23 @@ tampered state file can do is still a finding (section 6 item 6).
 7. **Docs carry dated snapshots**; a mismatch between a doc and the code is a doc bug to fix in the same
    PR. But when a PR removes or weakens a control this doc names (for example `autoCreatePR: False`,
    `shlex.quote` in a runner script, the `sudo-secretspec run` re-exec), treat it as a security finding first.
+8. **`ade-scan-state --remote` trusts the origin's advertised refs** (2026-10-23, Codex pass 56 on PR 27): a hostile
+   origin that names a local-only commit makes it count as pushed. Origins are the operator's own; the scan deletes
+   nothing, and the generated report says (limit 10) that `clean and pushed` is not proof of possession. The size
+   of the advertisement is bounded too (2026-10-23): `ls-remote` is read in chunks, and more than 16 MiB (`LS_REMOTE_MAX_BYTES`)
+   kills it and reads as an origin that did not answer (`origin unreachable`), so a hostile origin cannot grow the
+   scan's memory without limit; `--fetch` still has only the 120 s time bound. **The git dir must point back to the
+   checkout** (2026-10-23, Cursor security review and adversary round 66 on PR 27): before any git call, a top-level
+   `.git` DIRECTORY holding a `commondir` entry is `skipped: git dir redirected (commondir)`, and a `.git` gitfile is
+   scanned only if the git dir it names points back, by a `gitdir` file naming `<checkout>/.git` (a linked worktree's
+   admin dir) or by `core.worktree` in its `config` naming the checkout (`--separate-git-dir`, an absorbed submodule),
+   and a `commondir` in it names a common dir that holds it as `worktrees/<name>`. A gitfile naming another checkout's
+   `.git` or a bare repository, a planted admin dir, or one that cannot be read or parsed is `skipped: git dir
+   redirected (does not point back to this checkout)`, so no later call, `--fetch` included, can write objects into a
+   git directory elsewhere; the row lists `git dir -> <target>` and `commondir -> <target>` as stores no archive
+   holds. What it does not cover: a git dir of the checkout's own whose `objects` is a symlink into another store
+   (round 66, LOW 1 warns about those in a skipped row, and a plain scan reads through the link as git does), and an
+   `objects/info/alternates` file (borrowed stores are only read by `fetch`, and warned about on a skipped row).
 
 ## 6. What a reviewer should check on a PR
 
