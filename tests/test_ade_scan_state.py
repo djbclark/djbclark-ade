@@ -4231,6 +4231,45 @@ def test_a_gitfile_whose_git_dir_does_not_point_back_is_skipped_before_any_git_c
     assert not real_rec["verdict"].startswith("skipped") and "fetch" in log.read_text(), real_rec["verdict"]
 
 
+def test_the_git_dir_command_for_a_gitfile_outside_the_checkout_fails_when_dot_git_is_no_longer_a_file(tmp_path):
+    """Adversary round 70 on PR 39, INFO 3: the row's sentence said the git-dir command refuses loudly, but with `.git`
+    no longer a file at paste time it took the `if [ -f .git ]` else and exited 0 having archived nothing. A row whose
+    scan saw a gitfile naming a git directory outside the checkout carries the variant that fails there."""
+    mod, doc = load(), load_doc()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    victim = (work / ".git").resolve()
+    decoy = roots / "outside"
+    decoy.mkdir()
+    (decoy / ".git").write_text(f"gitdir: {victim}\n")
+    rec = mod.scan_checkout(decoy.resolve(), remote=False)
+    assert rec["verdict"] == mod.SKIP_GIT_DIR_FOREIGN and rec["linked_stores"] == [f"git dir -> {victim}"]
+    ck = doc.checkout_dir(str(decoy))
+    wanted = doc.shcode(doc.GITDIR_REQUIRED_FMT, *doc.gitdir_required_values(str(decoy), ck))
+    row = skipped_row(doc, rec)
+    assert wanted.replace("\\|", "|") in row  # the row pastes the failing variant
+    # a checkout the scan saw nothing outside of keeps the plain command (`.git` a directory there is a legitimate no-op)
+    assert doc.GITDIR_REQUIRED_FMT.count("{}") == len(doc.gitdir_required_values("/p", "c"))
+    cmd = PLAN_PREFIX + doc.GITDIR_REQUIRED_FMT.format(*map(doc.shquote, doc.gitdir_required_values(str(decoy), ck))).replace("<DEST>", str(tmp_path / "dest"))
+    for shell in ("bash", "zsh"):
+        if shutil.which(shell) is None:
+            continue
+        shutil.rmtree(tmp_path / "dest", ignore_errors=True)
+        (tmp_path / "dest" / ck).mkdir(parents=True)
+        run = subprocess.run([shell, "-c", cmd], capture_output=True, text=True)
+        assert run.returncode == 0, (shell, run.stderr)  # the gitfile is intact: archived as before
+        assert (tmp_path / "dest" / ck / "gitdir.tar").is_file()
+        (decoy / ".git").rename(decoy / ".git.moved")  # `.git` gone at paste time
+        shutil.rmtree(tmp_path / "dest", ignore_errors=True)
+        (tmp_path / "dest" / ck).mkdir(parents=True)
+        run = subprocess.run([shell, "-c", cmd], capture_output=True, text=True)
+        assert run.returncode != 0 and "gitdir capture FAILED: .git is not a file" in run.stderr, (shell, run.returncode, run.stderr)
+        assert not list((tmp_path / "dest" / ck).iterdir())
+        (decoy / ".git.moved").rename(decoy / ".git")
+    # the plain command stays a silent no-op there: `.git` is a directory in an ordinary checkout
+    plain = PLAN_PREFIX + doc.GITDIR_FMT.format(*map(doc.shquote, doc.gitdir_values(str(work), ck))).replace("<DEST>", str(tmp_path / "dest"))
+    assert subprocess.run(["bash", "-c", plain], capture_output=True, text=True).returncode == 0
+
+
 def test_a_git_dir_that_points_back_to_the_checkout_stays_scanned_and_a_stale_back_pointer_does_not(tmp_path):
     """Adversary round 66 on PR 27: the layouts git itself builds must not be skipped for the redirect check: a main
     checkout, `git worktree add`, an absorbed submodule (`core.worktree` in the module's config) and any git dir whose

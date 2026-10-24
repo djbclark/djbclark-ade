@@ -78,6 +78,16 @@ def gitdir_values(raw_p, ck):
     return (raw_p, raw_p, raw_p, raw_p, f"{ck}/gitdir.tar", f"{ck}/commondir.tar")
 
 
+# the same command for a checkout the scan recorded with a gitfile that points outside it: there the paste's whole job is
+# this archive, so a `.git` that is no longer a file (replaced, or the paste run in another directory) fails loudly
+# instead of exiting 0 with nothing archived (adversary round 70 on PR 39, INFO 3)
+GITDIR_REQUIRED_FMT = "[ -f {}/.git ] || {{ echo 'gitdir capture FAILED: .git is not a file' >&2; false; }} && " + GITDIR_FMT
+
+
+def gitdir_required_values(raw_p, ck):
+    return (raw_p,) + gitdir_values(raw_p, ck)
+
+
 # a `.git` SYMLINK (`skipped: .git is a symlink`): chdir follows the link, so its target is archived behind the same
 # git-directory test; a link to a gitfile or to anything else fails loudly, archiving nothing (round 43)
 # (a link to a linked worktree's administration directory has `HEAD` and `commondir` but no `objects/` or `refs/` of its
@@ -673,8 +683,13 @@ def render(d):
                 gitdir = ("the `.git` symlink's target holds the history (the scan read nothing there): archive it too: "
                           + shcode(SYMLINK_GITDIR_FMT, raw_p, f"{ck}/gitdir.tar", f"{ck}/commondir.tar"))
             else:
+                # the scan saw a gitfile whose git directory is outside the checkout: the command must fail, not skip, when
+                # `.git` is no longer a file at paste time (GITDIR_REQUIRED_FMT)
+                outside = any(isinstance(t, str) and t.startswith("git dir -> ") for t in (c.get("linked_stores") or [])[:4])
                 gitdir = ("when `.git` is a file the directory it points to and that one's common directory hold the "
-                          "history, archive them too: " + shcode(GITDIR_FMT, *gitdir_values(raw_p, ck)))
+                          "history, archive them too: "
+                          + (shcode(GITDIR_REQUIRED_FMT, *gitdir_required_values(raw_p, ck)) if outside
+                             else shcode(GITDIR_FMT, *gitdir_values(raw_p, ck))))
             # a module, or the checkout itself (the record then carries `alternates`, whatever the reason it was skipped:
             # adversary round 64), whose `objects/info/alternates` is not empty keeps commits in another object store that
             # neither archive above holds (Codex thread 10 on PR 27): say so, and refuse the cleanup until they are bundled.
@@ -703,7 +718,7 @@ def render(d):
             if covered:
                 alt_what += " and a git directory outside the checkout"
                 alt_warn += (" **the checkout's git directory is outside it (the gitfile does not point back to the checkout): the git-dir command "
-                             "above archives it and its common directory when each is a git directory (and refuses loudly when not): run it "
+                             "above archives it and its common directory when each is a git directory (and refuses loudly when not, and when `.git` is no longer a file): run it "
                              "before any cleanup**; the links, as `<member> -> <target>`: "
                              + ", ".join(shcode("{}", t) for t in covered) + ".")
                 alt_need += "; **do not clean up before the git-dir archive command has run**"
