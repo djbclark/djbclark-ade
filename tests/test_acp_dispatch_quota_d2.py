@@ -26,6 +26,11 @@ from typing import override
 
 from test_acp_dispatch import SCRIPT, Base, run
 
+# The fake agy's reset, 148h22m36s from the moment the tests load. A literal date rots: the fixture used to name
+# 2026-10-24T18:18:05Z (six days after it was written) and from that morning on the reset was inside
+# auto_resume_max_wait_hours, so dispatch scheduled a resume (exit 1) where the test expects a far reset (exit 3).
+FAR_RESET = (datetime.now(timezone.utc) + timedelta(hours=148, minutes=22, seconds=36)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 EXTRA_MODES = textwrap.dedent("""\
       quota_far)  # agy's weekly cap as seen 2026-10-18: reset days out
               printf 'STATUS: working\\n' > "$report"
@@ -35,7 +40,7 @@ EXTRA_MODES = textwrap.dedent("""\
       quota_exit0_log)  # the real agy event (acp-resume-hardening, 2026-10-18): exit 0,
               # report partial, 429 only in the session log — acp-run's stderr names no quota
               printf 'STATUS: working\\n' > "$report"
-              printf '%s\\n' '{"kind":"update","data":{"content":"Agent run failed: Error 429, Message: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 148h22m36s., Status: RESOURCE_EXHAUSTED, Details: quotaResetTimeStamp:2026-10-24T18:18:05Z"}}' >> "$log"
+              printf '%s\\n' '{"kind":"update","data":{"content":"Agent run failed: Error 429, Message: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 148h22m36s., Status: RESOURCE_EXHAUSTED, Details: quotaResetTimeStamp:@@FAR_RESET@@"}}' >> "$log"
               echo "acp-run: agent=agy stop=end_turn secs=356.1 tools=38" >&2
               echo "written: $report"
               exit 0;;
@@ -64,7 +69,7 @@ def make_fake(base_fake: str) -> str:
         'echo "ok agy /usr/local/bin/agy"; echo "ok claude /usr/local/bin/claude"; exit 0; fi\n'
         'for x in "$@"; do', 1)
     # the dedented FAKE indents case labels 2 spaces; anchor on the bare label
-    return out.replace("echoargs)", EXTRA_MODES.rstrip("\n") + "\n  echoargs)", 1)
+    return out.replace("echoargs)", EXTRA_MODES.replace("@@FAR_RESET@@", FAR_RESET).rstrip("\n") + "\n  echoargs)", 1)
 
 
 FAKE_SUDO = """#!/bin/bash
@@ -362,7 +367,7 @@ class TestExit0Quota(QuotaBase):
         # aiuse was notified exactly as the non-zero path does (family: the claude_gpt pool)
         self.assertEqual(len(self.aiuse_notes()), 1, self.aiuse_notes())
         self.assertIn("note-exhausted antigravity --family claude_gpt "
-                      "--resets-at 2026-10-24T18:18:05Z", self.aiuse_notes()[0])
+                      f"--resets-at {FAR_RESET}", self.aiuse_notes()[0])
         c = run(["check", str(self.record_path())], env=self.base_env())
         self.assertEqual(c.returncode, 3, c.stdout)
         self.assertIn("reroute now:", c.stdout)
