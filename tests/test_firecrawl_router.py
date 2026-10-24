@@ -10,6 +10,7 @@ import time
 import unittest
 import unittest.mock
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -772,7 +773,7 @@ class ChildEnvTest(unittest.TestCase):
         import tempfile
         from unittest import mock
         secrets_ = {"FIRECRAWL_SELFHOST_API_KEY": "gate-secret", "FIRECRAWL_ROUTER_SIPB_KEY": "sipb-secret",
-                    "FIRECRAWL_ROUTER_LITELLM_KEY": "litellm-secret"}
+                    "FIRECRAWL_ROUTER_LITELLM_KEY": "litellm-secret", "FIRECRAWL_ROUTER_GITHUB_KEY": "github-secret"}
         env = {"FIRECRAWL_SELFHOST_URL": "http://127.0.0.1:9", "PATH": os.environ.get("PATH", ""), **secrets_}
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / "env.json"
@@ -786,6 +787,382 @@ class ChildEnvTest(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(child))
         self.assertTrue(child["FIRECRAWL_API_URL"].startswith("http://127.0.0.1:"))
         self.assertGreater(len(child["FIRECRAWL_API_KEY"]), 20)  # the per-process router token
+
+
+class GitHubFake:
+    """A canned GitHub search API: handler(endpoint, q) -> (status, headers, doc); every call is recorded."""
+
+    def __init__(self, handler):
+        self.calls = []
+        self.pages = []  # per_page of each call, parallel to calls
+        gh = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                url = urllib.parse.urlsplit(self.path)
+                q = urllib.parse.parse_qs(url.query)["q"][0]
+                gh.calls.append((url.path, q, self.headers.get("Authorization")))
+                gh.pages.append(urllib.parse.parse_qs(url.query)["per_page"][0])
+                status, headers, doc = handler(url.path.rsplit("/", 1)[-1], q)
+                body = json.dumps(doc).encode()
+                self.send_response(status)
+                for k, v in {"Content-Type": "application/json", **headers}.items():
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
+
+    def close(self):
+        self.srv.shutdown()
+
+
+def gh_issue(repo, n, title, body="", state="closed", pr=False):
+    item = {"html_url": f"https://github.com/{repo}/{'pull' if pr else 'issues'}/{n}", "title": title, "number": n,
+            "repository_url": f"https://api.github.com/repos/{repo}", "state": state, "body": body,
+            "updated_at": "2026-10-20T00:00:00Z"}
+    if pr:
+        item["pull_request"] = {"merged_at": "2026-10-20T00:00:00Z"}
+    return item
+
+
+def gh_file(repo, path, fragment, private=False):
+    return {"html_url": f"https://github.com/{repo}/blob/abc/{path}", "path": path, "name": path.rsplit("/", 1)[-1],
+            "repository": {"full_name": repo, "private": private},
+            "text_matches": [{"property": "content", "fragment": fragment}]}
+
+
+class DeveloperSearchTest(unittest.TestCase):
+    """/v2/search/developer and categories ["developer"], answered from GitHub when there is no commercial fallback."""
+
+    def start(self, handler, fallback=False, token="ghp-test-token", secretspec=None):
+        self.gh, self.p, self.f = GitHubFake(handler), Fake(), Fake()
+        kw = {"token": token} if secretspec is None else {"secretspec": secretspec}
+        dev = fr.DevSearch(self.gh.base, timeout=5, **kw)
+        self.log = io.StringIO()
+        self.router = fr.Router(fr.Backend("primary", self.p.base, "pk"),
+                                fr.Backend("fallback", self.f.base, "fk") if fallback else None,
+                                timeout=5, token="", log=self.log, dev=dev)
+        self.srv = fr.serve(self.router, "127.0.0.1:0")
+        self.addCleanup(lambda: (self.srv.shutdown(), self.gh.close(), self.p.close(), self.f.close()))
+
+    def call(self, method, path, body=None):
+        data = json.dumps(body).encode() if body is not None else None
+        r = urllib.request.Request(self.router.public_base + path, data=data, method=method,
+                                   headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(r, timeout=10) as resp:
+                return resp.status, resp.headers, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers, json.loads(e.read())
+
+    @staticmethod
+    def normal(endpoint, q):
+        if endpoint == "code":
+            return 200, {}, {"items": [gh_file("o/lib", "README.md", "# lib"), gh_file("o/lib", "docs/state.md", "state doc"),
+                                       gh_file("o/lib", "src/proto.go", "func Proto() {}")]}
+        if "is:pr" in q:
+            return 200, {}, {"items": [gh_issue("o/lib", 7, "Fix state", "the fix", pr=True)]}
+        return 200, {}, {"items": [gh_issue("o/lib", 3, "State bug", "it breaks", state="open")]}
+
+    def test_ranked_results_in_firecrawl_shape(self):
+        self.start(self.normal)
+        status, headers, doc = self.call("GET", "/v2/search/developer?query=how+do+I+fix+state+protocol&k=10")
+        self.assertEqual((status, headers["X-Firecrawl-Backend"]), (200, "github"))
+        self.assertEqual(doc["source"], "github")
+        # round-robin across kinds in a fixed order, one result of each kind first
+        self.assertEqual([r["id"] for r in doc["results"]],
+                         ["readme:o/lib", "doc:o/lib:docs/state.md", "pull_request:o/lib#7",
+                          "issue:o/lib#3", "code:o/lib:src/proto.go"])
+        pr = doc["results"][2]
+        self.assertEqual((pr["type"], pr["title"]), ("pull_request", "Fix state"))
+        self.assertIn("merged", pr["passages"][0]["text"])
+        self.assertEqual(doc["coverage"], {"issue": "ok", "pull_request": "ok", "readme": "ok", "doc": "ok", "code": "ok"})
+        self.assertEqual(self.p.seen, [])  # the primary never saw it
+        queries = {c[0].rsplit("/", 1)[-1] + ("-pr" if "is:pr" in c[1] else ""): c[1] for c in self.gh.calls}
+        self.assertIn("is:pr is:merged", queries["issues-pr"])
+        self.assertIn("is:issue", queries["issues"])
+        self.assertEqual(queries["code"], "fix state protocol")  # stopwords dropped
+        self.assertEqual({c[2] for c in self.gh.calls}, {"Bearer ghp-test-token"})
+
+    def test_k_caps_results_and_unsupported_filters_are_refused(self):
+        self.start(self.normal)
+        _, _, doc = self.call("GET", "/v2/search/developer?query=state&k=2")
+        self.assertEqual(len(doc["results"]), 2)
+        status, _, err = self.call("GET", "/v2/search/developer?query=state&license=MIT")
+        self.assertEqual(status, 400)
+        self.assertIn("license", err["error"])
+        status, _, _ = self.call("POST", "/v2/search/developer", {"query": "state", "types": ["issue"], "repos": ["no-slash"]})
+        self.assertEqual(status, 400)
+
+    def test_a_query_cannot_smuggle_in_a_github_qualifier(self):
+        self.start(self.normal)
+        self.call("POST", "/v2/search/developer", {"query": "repo:victim/private user:x OR is:pr secret"})
+        for _, q, _ in self.gh.calls:
+            self.assertNotIn("repo:victim", q)
+            self.assertNotIn("user:", q)
+            self.assertNotIn(" OR ", q)
+
+    def test_zero_hits_retry_once_with_fewer_terms(self):
+        # GitHub ANDs every term: a four-word question finds nothing until half the terms are dropped
+        self.start(lambda e, q: (200, {}, {"items": [] if "beta" in q else [gh_issue("o/lib", 1, "hit")]}))
+        status, _, doc = self.call("POST", "/v2/search/developer", {"query": "alpha beta gamma delta", "types": ["issue"]})
+        self.assertEqual(status, 200)
+        self.assertEqual([q for _, q, _ in self.gh.calls],
+                         ["alpha beta gamma delta is:issue is:public", "alpha gamma is:issue is:public"])
+        self.assertEqual([r["id"] for r in doc["results"]], ["issue:o/lib#1"])
+
+    def test_closed_code_bucket_degrades_then_stays_closed_until_reset(self):
+        def handler(endpoint, q):
+            if endpoint == "code":
+                return 403, {"Retry-After": "60", "X-RateLimit-Remaining": "0"}, {"message": "API rate limit exceeded"}
+            return self.normal(endpoint, q)
+        self.start(handler)
+        status, _, doc = self.call("GET", "/v2/search/developer?query=state")
+        self.assertEqual(status, 200)
+        self.assertEqual({r["type"] for r in doc["results"]}, {"issue", "pull_request"})
+        self.assertEqual((doc["coverage"]["doc"], doc["coverage"]["issue"]), ("unavailable", "ok"))
+        self.assertIn("code:", doc["warning"])
+        before = sum(1 for p, _, _ in self.gh.calls if p.endswith("/code"))
+        self.call("GET", "/v2/search/developer?query=state")
+        self.assertEqual(sum(1 for p, _, _ in self.gh.calls if p.endswith("/code")), before)  # no second call into a closed bucket
+
+    def test_everything_rate_limited_is_a_429_with_retry_after(self):
+        self.start(lambda e, q: (403, {"Retry-After": "42"}, {"message": "secondary rate limit"}))
+        status, headers, doc = self.call("GET", "/v2/search/developer?query=state")
+        self.assertEqual(status, 429)
+        self.assertEqual(headers["Retry-After"], "42")
+        self.assertFalse(doc["success"])
+
+    def test_failures_without_a_rate_limit_are_a_502(self):
+        self.start(lambda e, q: (401, {}, {"message": "Bad credentials"}))
+        status, _, doc = self.call("GET", "/v2/search/developer?query=state")
+        self.assertEqual(status, 502)
+        self.assertIn("HTTP 401", doc["error"])
+
+    def test_search_category_returns_web_results(self):
+        self.start(self.normal)
+        status, _, doc = self.call("POST", "/v2/search", {"query": "state", "categories": ["developer"], "limit": 2})
+        self.assertEqual(status, 200)
+        web = doc["data"]["web"]
+        self.assertEqual([w["position"] for w in web], [1, 2])
+        self.assertEqual({w["category"] for w in web}, {"developer"})
+        self.assertTrue(all(w["url"].startswith("https://github.com/") for w in web))
+
+    def test_other_searches_still_go_to_the_primary(self):
+        self.start(self.normal)
+        self.p.routes[("POST", "/v2/search")] = (200, {"success": True, "data": {"web": [{"url": "https://x"}]}})
+        for body in ({"query": "q"}, {"query": "q", "categories": ["research"]}, {"query": "q", "categories": ["developer", "gov"]}):
+            self.call("POST", "/v2/search", body)
+        self.assertEqual(len(self.p.seen), 3)
+        self.assertEqual(self.gh.calls, [])
+
+    def test_a_commercial_fallback_keeps_its_own_index(self):
+        self.start(self.normal, fallback=True)
+        self.f.routes[("GET", "/v2/search/developer")] = (200, {"success": True, "results": [{"id": "issue:a/b#1"}]})
+        status, headers, doc = self.call("GET", "/v2/search/developer?query=state")
+        self.assertEqual((status, headers["X-Firecrawl-Backend"], doc["results"][0]["id"]), (200, "fallback", "issue:a/b#1"))
+        self.assertEqual(self.gh.calls, [])
+
+    def test_token_comes_from_secretspec_once_and_never_reaches_a_log_or_reply(self):
+        import os
+        import stat
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            counter, script = Path(d) / "count", Path(d) / "sudo-secretspec"
+            script.write_text(f"#!/bin/sh\necho x >> {counter}\n"
+                              f'[ "$1 $2" = "get GITHUB_TOKEN" ] && printf "%s\\n" ghp-from-vault\n')
+            script.chmod(script.stat().st_mode | stat.S_IXUSR)
+            self.start(self.normal, secretspec=str(script))
+            _, _, doc = self.call("GET", "/v2/search/developer?query=state")
+            self.call("GET", "/v2/search/developer?query=state+again")
+            self.assertEqual(counter.read_text().count("x"), 1)
+        self.assertEqual({c[2] for c in self.gh.calls}, {"Bearer ghp-from-vault"})
+        self.assertNotIn("ghp-from-vault", self.log.getvalue() + json.dumps(doc))
+
+    def test_private_repositories_never_come_back(self):
+        # the token is a classic PAT that reads private repositories: issue queries say is:public, and a code hit
+        # counts only when GitHub reports its repository as not private (a missing flag is not public)
+        def handler(endpoint, q):
+            if endpoint == "code":
+                leaked = gh_file("me/secret", "notes.md", "private text", private=True)
+                unknown = {**gh_file("me/unknown", "notes.md", "unknown"), "repository": {"full_name": "me/unknown"}}
+                return 200, {}, {"items": [leaked, unknown, gh_file("o/lib", "docs/a.md", "public text")]}
+            return self.normal(endpoint, q)
+        self.start(handler)
+        _, _, doc = self.call("GET", "/v2/search/developer?query=state")
+        self.assertNotIn("me/", json.dumps(doc))
+        self.assertIn("doc:o/lib:docs/a.md", [r["id"] for r in doc["results"]])
+        for path, q, _ in self.gh.calls:
+            if path.endswith("/issues"):
+                self.assertIn("is:public", q)
+
+    def test_an_empty_answer_at_the_rate_limit_is_still_a_200(self):
+        # the last request of the minute returns 0 hits and closes the bucket, so the fewer-terms retry is refused:
+        # that is "nothing found", not "rate limited"
+        self.start(lambda e, q: (200, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(int(time.time()) + 50)},
+                                 {"items": []}))
+        status, _, doc = self.call("GET", "/v2/search/developer?query=alpha+beta+gamma+delta")
+        self.assertEqual((status, doc["results"]), (200, []))
+
+    def test_non_ascii_terms_survive_and_oversized_queries_fit_githubs_limit(self):
+        self.start(self.normal)
+        self.call("POST", "/v2/search/developer", {"query": "naïve café 東京エラー", "types": ["issue"]})
+        self.assertEqual(self.gh.calls[0][1], "naïve café 東京エラー is:issue is:public")
+        self.gh.calls.clear()
+        self.call("POST", "/v2/search/developer", {"query": " ".join(["w" * 200] * 8), "repos": ["a/" + "b" * 30]})
+        self.assertTrue(self.gh.calls)
+        self.assertTrue(all(len(q) <= 256 for _, q, _ in self.gh.calls))
+        status, _, err = self.call("POST", "/v2/search/developer", {"query": "x1", "repos": ["a" * 39 + "/" + "b" * 100]})
+        self.assertEqual(status, 400)
+        self.assertIn("repos is too long", err["error"])
+
+    def test_malformed_upstream_items_are_skipped(self):
+        self.start(lambda e, q: (200, {}, {"items": ["oops", None, {"html_url": "https://github.com/o/r/issues/1", "title": "ok",
+                                                                    "number": 1, "repository_url": "https://api.github.com/repos/o/r",
+                                                                    "text_matches": ["x", None]}]}))
+        status, _, doc = self.call("POST", "/v2/search/developer", {"query": "state", "types": ["issue"]})
+        self.assertEqual((status, [r["id"] for r in doc["results"]]), (200, ["issue:o/r#1"]))
+
+    def test_readme_and_doc_classification(self):
+        files = [gh_file("o/lib", "README.md", "a"), gh_file("o/lib", "pkg/README", "b"), gh_file("o/lib", "readme_parser.py", "c"),
+                 gh_file("o/lib", "docs/guide.rst", "d"), gh_file("o/lib", "src/x.go", "e")]
+        self.start(lambda e, q: (200, {}, {"items": files if e == "code" else []}))
+        _, _, doc = self.call("GET", "/v2/search/developer?query=state&k=10")
+        self.assertEqual({r["id"]: r["type"] for r in doc["results"]},
+                         {"readme:o/lib": "readme", "readme:o/lib:pkg/README": "readme", "code:o/lib:readme_parser.py": "code",
+                          "doc:o/lib:docs/guide.rst": "doc", "code:o/lib:src/x.go": "code"})
+
+    def test_repos_scope_applies_to_docs_and_bad_numbers_are_refused(self):
+        self.start(self.normal)
+        status, _, _ = self.call("POST", "/v2/search/developer", {"query": "state", "types": ["doc"], "repos": ["o/lib"]})
+        self.assertEqual(status, 200)
+        self.assertIn("repo:o/lib", self.gh.calls[0][1])
+        for bad in ({"k": True}, {"k": 0}, {"k": 101}, {"passages": 6}, {"min_stars": 0}, {"fork": 0}):
+            status, _, _ = self.call("POST", "/v2/search/developer", {"query": "state", **bad})
+            self.assertEqual(status, 400, bad)
+        status, _, err = self.call("POST", "/v2/search", {"query": "state", "categories": ["developer"], "limit": 0})
+        self.assertEqual(status, 400)
+        self.assertIn("limit must", err["error"])
+
+    def test_category_search_names_the_fields_it_ignores(self):
+        self.start(self.normal)
+        _, _, doc = self.call("POST", "/v2/search", {"query": "state", "categories": ["developer"],
+                                                      "scrapeOptions": {"formats": ["markdown"]}, "tbs": "qdr:d"})
+        self.assertIn("scrapeOptions, tbs", doc["warning"])
+
+    def test_a_rejected_token_is_dropped_and_not_re_read_inside_a_minute(self):
+        import stat
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            counter, script = Path(d) / "count", Path(d) / "sudo-secretspec"
+            script.write_text(f"#!/bin/sh\necho x >> {counter}\nprintf 'revoked\\n'\n")
+            script.chmod(script.stat().st_mode | stat.S_IXUSR)
+            self.start(lambda e, q: (401, {}, {"message": "Bad credentials"}), secretspec=str(script))
+            self.call("GET", "/v2/search/developer?query=state")
+            self.call("GET", "/v2/search/developer?query=state")
+            self.assertEqual(counter.read_text().count("x"), 1)  # the second search ran unauthenticated, no new read
+        self.assertIn(None, {c[2] for c in self.gh.calls})
+
+    def test_a_busy_router_answers_429_instead_of_queueing_forever(self):
+        self.start(self.normal)
+        self.router.dev.budget = 0.3
+        for _ in range(fr.DEV_SLOTS):
+            self.assertTrue(self.router.dev._slots.acquire(timeout=1))
+        self.addCleanup(lambda: [self.router.dev._slots.release() for _ in range(fr.DEV_SLOTS)])
+        status, headers, doc = self.call("GET", "/v2/search/developer?query=state")
+        self.assertEqual((status, headers["Retry-After"], doc["success"]), (429, "5", False))
+        self.assertEqual(self.gh.calls, [])
+
+    def test_private_only_hits_count_as_nothing_found(self):
+        # whether the fewer-terms retry runs must not depend on private code: a private-only first page retries exactly
+        # like an empty one, so an empty answer cannot mean "a private repository holds all the terms"
+        def handler(endpoint, q):
+            if endpoint != "code":
+                return 200, {}, {"items": []}
+            if "beta" in q:
+                return 200, {}, {"items": [gh_file("me/secret", "a.md", "private", private=True)]}
+            return 200, {}, {"items": [gh_file("o/lib", "docs/pub.md", "public")]}
+        self.start(handler)
+        _, _, doc = self.call("GET", "/v2/search/developer?query=alpha+beta+gamma+delta")
+        self.assertEqual([r["id"] for r in doc["results"]], ["doc:o/lib:docs/pub.md"])
+        self.assertEqual(sum(1 for p, _, _ in self.gh.calls if p.endswith("/code")), 2)
+
+    def test_hits_of_an_unrequested_kind_do_not_block_the_fewer_terms_retry(self):
+        # types=["doc"]: a first page of public source files finds nothing the caller asked for, so the retry must run
+        def handler(endpoint, q):
+            if endpoint != "code":
+                return 200, {}, {"items": []}
+            if "beta" in q:
+                return 200, {}, {"items": [gh_file("o/lib", "src/x.go", "code only")]}
+            return 200, {}, {"items": [gh_file("o/lib", "docs/guide.md", "the doc")]}
+        self.start(handler)
+        _, _, doc = self.call("POST", "/v2/search/developer", {"query": "alpha beta gamma delta", "types": ["doc"]})
+        self.assertEqual([r["id"] for r in doc["results"]], ["doc:o/lib:docs/guide.md"])
+        self.assertEqual(sum(1 for p, _, _ in self.gh.calls if p.endswith("/code")), 2)
+
+    def test_a_list_of_repos_is_refused(self):
+        self.start(self.normal)
+        status, _, err = self.call("POST", "/v2/search/developer", {"query": "state", "repos": ["o/lib", "o/other"]})
+        self.assertEqual((status, err["error"]), (400, "firecrawl-router: repos takes one owner/name slug"))
+        self.assertEqual(self.gh.calls, [])
+
+    def test_code_search_always_asks_for_the_biggest_page(self):
+        # private hits are dropped after GitHub cuts its page, so the page must be large enough that private files cannot
+        # crowd every public one off it
+        self.start(lambda e, q: (200, {}, {"items": [gh_file("me/secret", "a.md", "x", private=True)] if e == "code" else []}))
+        self.call("GET", "/v2/search/developer?query=alpha+beta+gamma+delta&k=1")  # private-only: the retry runs too
+        code_pages = [n for (p, _, _), n in zip(self.gh.calls, self.gh.pages) if p.endswith("/code")]
+        issue_pages = {n for (p, _, _), n in zip(self.gh.calls, self.gh.pages) if p.endswith("/issues")}
+        self.assertEqual((code_pages, issue_pages), (["100", "100"], {"5"}))
+
+    def test_numbers_must_be_integers_not_infinity_floats_or_null_limits(self):
+        self.start(self.normal)
+        for bad in ({"k": float("inf")}, {"k": 5.9}, {"passages": float("inf")}, {"k": [3]}, {"k": "²"}, {"k": "٣"}):
+            status, _, _ = self.call("POST", "/v2/search/developer", {"query": "state", **bad})
+            self.assertEqual(status, 400, bad)
+        status, _, _ = self.call("GET", "/v2/search/developer?query=state&k=3")  # a query string carries digits
+        self.assertEqual(status, 200)
+        status, _, _ = self.call("POST", "/v2/search", {"query": "state", "categories": ["developer"], "limit": None})
+        self.assertEqual(status, 200)
+        status, _, err = self.call("POST", "/v2/search", {"query": "state", "categories": ["developer"], "limit": 500})
+        self.assertEqual((status, err["error"]), (400, "firecrawl-router: limit must be an integer 1-100"))
+
+    def test_an_upstream_item_of_the_wrong_shape_is_skipped_not_fatal(self):
+        bad = {**gh_file("o/lib", "docs/a.md", "x"), "repository": "o/lib"}
+        self.start(lambda e, q: (200, {}, {"items": [bad, gh_file("o/lib", "docs/ok.md", "fine")] if e == "code" else []}))
+        status, _, doc = self.call("GET", "/v2/search/developer?query=state")
+        self.assertEqual((status, [r["id"] for r in doc["results"]]), (200, ["doc:o/lib:docs/ok.md"]))
+
+    def test_only_the_v2_routes_are_taken_over(self):
+        self.start(self.normal)
+        for path in ("/v1/search/developer?query=state", "/v3/search/developer?query=state"):
+            status, _, _ = self.call("GET", path)
+            self.assertEqual(status, 404)
+        self.assertEqual(self.gh.calls, [])
+        self.assertEqual(len(self.p.seen), 2)
+
+    def test_a_scoped_search_cannot_tell_a_missing_repo_from_an_empty_one(self):
+        # GitHub answers 422 for a repo that does not exist (or that the token cannot see) and 200 with no items for an
+        # existing one: both must look the same, and a scoped search never makes a second (fewer-terms) call
+        self.start(lambda e, q: (422, {}, {"message": "Validation Failed"}))
+        status, _, doc = self.call("POST", "/v2/search/developer",
+                                   {"query": "alpha beta gamma delta", "repos": ["ghost/repo"]})
+        self.assertEqual((status, doc["results"], doc["coverage"]["issue"], "warning" in doc), (200, [], "ok", False))
+        self.assertEqual(len(self.gh.calls), 3)
+
+    def test_no_token_runs_unauthenticated_and_says_so(self):
+        self.start(self.normal, token="", secretspec="/nonexistent/sudo-secretspec")
+        status, _, doc = self.call("GET", "/v2/search/developer?query=state")
+        self.assertEqual(status, 200)
+        self.assertEqual({c[2] for c in self.gh.calls}, {None})
+        self.assertIn("no GitHub token", doc["warning"])
 
 
 if __name__ == "__main__":

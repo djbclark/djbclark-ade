@@ -564,9 +564,9 @@ uv tool install --python 3.14 crawl4ai
 crawl4ai-setup
 
 # SkillOpt-Sleep (nightly skill learning from every agent's transcripts, §1.3
-# "SkillOpt-Sleep"); machine-wide, pinned to the upstream main commit verified
-# 2026-10-12 (PyPI 0.2.0 lacks the handoff backend and multi-skill fan-out):
-uv tool install "skillopt @ git+https://github.com/microsoft/SkillOpt@343db229dbd5ddaf9df6b1d5540d8bcdb2604d5c"
+# "SkillOpt-Sleep"); machine-wide, upstream main, unpinned (2026-10-24; PyPI 0.2.0
+# lacks the handoff backend and multi-skill fan-out):
+uv tool install "skillopt @ git+https://github.com/microsoft/SkillOpt"
 
 # Graft (agent context graph); confirm the package name against the upstream README first (§1.3):
 npm install -g @nanonets/graft
@@ -740,7 +740,7 @@ adopt`. Guide: `djbclark-ade/docs/skillopt-sleep.md`.
 
 | Step | Command | What it does |
 |---|---|---|
-| CLI | `uv tool install "skillopt @ git+https://github.com/microsoft/SkillOpt@343db229dbd5ddaf9df6b1d5540d8bcdb2604d5c"` (§1.2) | `skillopt-sleep` (`run`, `dry-run`, `harvest`, `status`, `adopt`). Never use its `schedule` (crontab) or `--auto-adopt`, and never `uv tool upgrade` it: `skillopt-night` refuses any commit but its `REVIEWED_REV`; to move, review the upstream diff, then bump the pin in all three places |
+| CLI | `uv tool install "skillopt @ git+https://github.com/microsoft/SkillOpt"` (§1.2) | `skillopt-sleep` (`run`, `dry-run`, `harvest`, `status`, `adopt`). Never use its `schedule` (crontab) or `--auto-adopt`. It tracks upstream main; `uv tool upgrade` (the nightly `brew-fast-upgrade` runs it) moves it to the newest commit |
 | Source adapters | `~/src/djbclark-ade/bin/skillopt_sources.py` (runs under the skillopt tool's Python) | SessionDigest JSON for zcode, agy and crush stores, and the same filters for the native sources: path exclusions, the cycle's own sessions dropped, extra redaction |
 | Skills | `~/src/djbclark-ade/bin/skill-everywhere skillopt-sleep skillopt-sleep-learned` (links each TUI directly at `~/src/djbclark-ade/skills/<name>`) | `/skillopt-sleep` (review last night, free mock `--dry-run`, per-skill adoption, the backend chain) in every TUI; `skillopt-sleep-learned` is the catch-all skill the cycle proposes edits to |
 | Nightly job | `~/src/djbclark-ade/bin/skillopt-night install` (copies `launchd/com.djbclark.skillopt-sleep.plist` to `~/Library/LaunchAgents/` and bootstraps it; `uninstall` reverses) | 03:30 nightly run over every transcript source; inert until `~/.skillopt-sleep/night.json` has `"enabled": true`. Check the chain first with `skillopt-night chain-check` |
