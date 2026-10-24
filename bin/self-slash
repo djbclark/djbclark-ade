@@ -170,8 +170,12 @@ finish_flag=$finish
 if [ "$finish" = 1 ] && [ "$text" != /quit ]; then echo "self-slash: --finish takes no command (got: $text)" >&2; exit 2; fi
 if [ -n "$successor" ] && [ "$finish" != 1 ]; then echo "self-slash: --successor needs --finish (it replaces the bare archive)" >&2; exit 2; fi
 if [ -z "$successor" ] && { [ -n "$s_thinking" ] || [ -n "$s_mode" ] || [ -n "$s_title" ] || [ -n "$s_workspace" ] || [ "$s_keepws" = 1 ] || [ -n "$s_baton" ]; }; then echo "self-slash: --thinking, --mode, --title, --workspace, --keep-workspace and --baton only go with --successor" >&2; exit 2; fi
-case "$successor" in ""|[A-Za-z0-9]*) ;; *) echo "self-slash: --successor takes PROVIDER or PROVIDER/MODEL (got: $successor)" >&2; exit 2;; esac
-case "$successor$s_thinking$s_mode$s_workspace" in *[!A-Za-z0-9._/:-]*) echo "self-slash: --successor, --thinking, --mode and --workspace take plain ids (letters, digits, . _ / : -)" >&2; exit 2;; esac
+# Plain-id character sets spelled out: bash 3.2 matches a bracket range ([a-z]) by locale
+# collation, so under en_US.UTF-8 it also takes upper-case and accented letters (adversary
+# pr35 B1, 2026-10-24).  Patterns below use these, never a range.
+lc=abcdefghijklmnopqrstuvwxyz; uc=ABCDEFGHIJKLMNOPQRSTUVWXYZ; dg=0123456789
+case "$successor" in ""|["$uc$lc$dg"]*) ;; *) echo "self-slash: --successor takes PROVIDER or PROVIDER/MODEL (got: $successor)" >&2; exit 2;; esac
+case "$successor$s_thinking$s_mode$s_workspace" in *[!"$uc$lc$dg"._/:-]*) echo "self-slash: --successor, --thinking, --mode and --workspace take plain ids (letters, digits, . _ / : -)" >&2; exit 2;; esac
 # --finish ends the session, so a follow-up would be typed into whatever is left (a shell prompt).
 if [ "$finish" = 1 ] && [ -n "$then" ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then echo "self-slash: --finish takes no --then (got: $then)" >&2; exit 2; fi
 # Lifecycle actions end the session or throw its context away.
@@ -738,8 +742,8 @@ successor_paseo() {
     # Only a plain lower-case provider id and a plain mode name are believed: "Claude", " claude" or
     # a mode with spaces would otherwise read as another provider and take the bypassPermissions
     # branch (adv-selfslash-4 F1).
-    case "$old_provider" in *[!a-z0-9_-]*) successor_fail "inspect of this agent gives Provider '$old_provider', not a plain provider id, so its mode cannot be passed on safely (--mode MODE names one); nothing was started";; esac
-    case "$old_mode" in *[!A-Za-z0-9_-]*) successor_fail "inspect of this agent gives Mode '$old_mode', not a plain mode name, so its mode cannot be passed on safely (--mode MODE names one); nothing was started";; esac
+    case "$old_provider" in *[!"$lc$dg"_-]*) successor_fail "inspect of this agent gives Provider '$old_provider', not a plain provider id, so its mode cannot be passed on safely (--mode MODE names one); nothing was started";; esac
+    case "$old_mode" in *[!"$uc$lc$dg"_-]*) successor_fail "inspect of this agent gives Mode '$old_mode', not a plain mode name, so its mode cannot be passed on safely (--mode MODE names one); nothing was started";; esac
     # The same provider gets the old mode as it is: an empty one (no mode set) passes no --mode, the
     # provider's own default, never a made-up mode name.
     if [ "${successor%%/*}" = "$old_provider" ]; then mode="$old_mode"
@@ -754,7 +758,7 @@ successor_paseo() {
   title=$(clean "${s_title:-$short_name → $short_model}")
   settle="${SELF_SLASH_SUCCESSOR_SETTLE-20}"
   case "$settle" in ""|*[!0-9]*) successor_fail "SELF_SLASH_SUCCESSOR_SETTLE must be whole seconds (got: $settle); nothing was started";; esac
-  echo "$(gdate '+%F %T') $host $pane: successor: starting $successor (thinking $s_thinking, mode ${mode:-<provider default>}, workspace $ws, cwd $run_cwd, title \"$title\", prompt \"$(clean "$first_prompt")\")"
+  echo "$(gdate '+%F %T') $host $pane: successor: starting $successor (thinking $s_thinking, mode ${mode:-<provider default>}, workspace $(clean "$ws"), cwd $(clean "$run_cwd"), title \"$title\", prompt \"$(clean "$first_prompt")\")"
   # Empty on a bash older than 4.4 is "unbound" under set -u unless the expansion is guarded.
   mode_args=(); [ -z "$mode" ] || mode_args=(--mode "$mode")
   # JSON comes from stdout alone: Paseo prints its status lines ("Using workspace <id>") and any Node
@@ -763,7 +767,7 @@ successor_paseo() {
   rc="$pcli_rc"; runout="$pcli_out"
   [ "$rc" = 0 ] || successor_fail "paseo run failed (rc=$rc): $(printf '%s' "$pcli_out $pcli_err" | gtr -s ' \n' ' ' | gcut -c1-200)"
   newid=$(jfield "$runout" agentId id Id) || successor_fail "paseo run printed no single agent object with an id: $(printf '%s' "$pcli_out${pcli_err:+ stderr: $pcli_err}" | gtr -s ' \n' ' ' | gcut -c1-200)"
-  case "$newid" in ""|*[!A-Za-z0-9._:-]*) successor_fail "paseo run printed an unusable agent id";; esac
+  case "$newid" in ""|*[!"$uc$lc$dg"._:-]*) successor_fail "paseo run printed an unusable agent id";; esac
   if [ "$newid" = "$pane" ] || [ "$newid" = "${pane:0:7}" ] || [ "${newid:0:7}" = "${pane:0:7}" ]; then
     successor_fail "paseo run returned this agent own id ($newid), not a new agent"
   fi
@@ -789,7 +793,7 @@ successor_paseo() {
   done
   [ "$seen" = 1 ] || successor_fail "successor $newid started but inspect never answered: $(printf '%s' "$nerr" | gtr -s ' \n' ' ' | gcut -c1-200) (left running)"
   [ -z "$s_model" ] || [ "$nmodel" = "$s_model" ] || successor_fail "successor $newid runs model '${nmodel:-?}', not $s_model (left running)"
-  echo "$(gdate '+%F %T') $host $pane: successor: $newid is top-level on ${nmodel:-$successor} (status $nstatus)"
+  echo "$(gdate '+%F %T') $host $pane: successor: $newid is top-level on $(clean "${nmodel:-$successor}") (status $(clean "$nstatus"))"
   out=$(pcli agent archive -- "$pane" 2>&1); rc=$?
   if [ "$rc" != 0 ]; then
     echo "$(gdate '+%F %T') $host $pane: finish: archive refused (rc=$rc): $(printf '%s' "$out" | gtr -s ' \n' ' ' | gcut -c1-200); successor $newid left running"; exit 8

@@ -877,6 +877,18 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertEqual(self.calls_of("run "), [])
         self.assertEqual(self.calls_of("agent archive"), [])
 
+    @unittest.skipUnless(BASH3, "/bin/bash is not bash 3.x")
+    def test_f1_plain_id_guards_hold_on_bash_3_in_a_utf8_locale(self) -> None:
+        # bash 3.2 matches a bracket range ([a-z]) by locale collation: under en_US.UTF-8 it took
+        # "Claude", so a plan agent got a bypassPermissions claude successor (adversary pr35 B1).
+        for provider in ("Claude", "cLAUDE", "é"):
+            r = self.run_waiter(FAKE_OLD_JSON=self.old_json('"Mode": "plan"', f'"Provider": "{provider}"'),
+                                LC_ALL="en_US.UTF-8", interp=BASH3)
+            self.assertEqual(r.returncode, 11, f"{provider}: {r.stdout}{r.stderr}")
+            self.assertIn("not a plain provider id", r.stdout)
+        self.assertEqual(self.calls_of("run "), [])
+        self.assertEqual(self.calls_of("agent archive"), [])
+
     def test_f1_an_explicit_mode_needs_nothing_from_the_inspect(self) -> None:
         r = self.run_waiter(FAKE_OLD_JSON=self.old_json(), SELF_SLASH_S_MODE="plan")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
