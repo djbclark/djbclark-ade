@@ -24,7 +24,24 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
   4. pane      keys into its pane (herdr `pane send-text` + `agent send-keys enter`, Orca `terminal send`, tmux
                `send-keys`). Claude Code queues text typed while it works; other TUIs take it only when idle
                (`--idle S` waits up to S seconds for that). Skipped while the input box holds a draft (Claude
-               Code's dim/grey suggested prompt is not one: prompt_line.py). Verified in the transcript.
+               Code's dim/grey suggested prompt is not one: prompt_line.py). Verified in the transcript: a user
+               line that IS the text is "delivered"; a queue `enqueue` of it is only "queued" (exit 0, but the
+               operator can still pull it back; a `dequeue` after it, or a `remove` for absorbed_mid_turn or
+               delivered_to_agent, ends the queue as delivered, and a `remove` with no reason leaves it queued), and an
+               enqueue followed by a `remove` with another stated reason, or by a `popAll`, is "pulled back": not
+               delivered, reported unverified, never submitted for the operator, a retry types nothing. One unproven
+               text per session: while an earlier text of ours is not yet proven (younger than an hour), a DIFFERENT
+               text is skipped, not typed, so the earlier one's retry cannot type it twice (an entry pulled back whose
+               box then reads empty twice, a second apart, with no copy submitted, was discarded by the operator and is
+               dropped). Two relays never type into one pane together: a per-session flock is held from the box read
+               until the text is recorded, and a second relay is refused ("stop"); the unsent-entries file is
+               updated under its own flock, through a unique temp file. A retry's proof for a SHORT text (30
+               characters or fewer: `continue`, `yes`, `1`) whose copy we never saw in the box must be stamped from 2 s
+               before our typing to 10 s after the end of the --wait loop that followed it (so up to about
+               --wait + 12 s after the typing; the default --wait is 20 s): the operator's own equal text later does
+               not count. A stamp only CLAIMS success: whether a leftover copy in the box is submitted is decided on
+               the transcript without any window, so a recalled copy of a text delivered at any time is never
+               submitted again. Longer texts and entries without a recorded `typed` time have no window.
   5. socket    a Claude Code TUI with a live messaging socket (registry ~/.claude/sessions/<pid>.json, the pid
                the fleet knows, a socket we own in a directory only we can write): one `cross-session-message`
                frame, XML-escaped, queued for its next tool round. No keys, so it cannot collide with a draft or
@@ -72,8 +89,8 @@ session whose socket frame never showed in its transcript. A second route there 
 a retry of text left in a box submits it and types nothing. A socket frame to a working session is final (exit 0,
 "accepted").
 
-  * Verified where it can be: typed text counts as delivered once it shows up in the transcript (a typed message
-    is recorded as a queue-operation at once), else as queued once the pane shows it.
+  * Verified where it can be: typed text counts as delivered once a user line in the transcript holds it, as queued
+    once a queue-operation enqueue (recorded at once, while the session works) or the pane shows it.
   * Enter goes in ENTER_DELAY after the text, and again (up to ENTER_RETRIES times) while the text still
     sits in a Claude input box: sent in one burst it reads as a paste and does not submit (2026-10-18).
   * One line: newlines are folded to spaces. For a long brief, write it to a file and relay one line that
@@ -83,6 +100,8 @@ Exit: 0 delivered or queued (verified in the transcript or pane, or for paseo/di
 acknowledgement; an idle session's socket frame is verified in its transcript; for hermes, the turn ran on the stored transcript); 1 not sent (every route failed, listed) or sent but unverified; 2 usage.
 """
 import argparse
+import contextlib
+import datetime
 import fcntl
 import json
 import math
@@ -94,6 +113,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 import uuid
@@ -461,20 +481,61 @@ def _unsent():
         return {}
 
 
-def note_unsent(sid, text, draft="", mark=0):
-    """Remember TEXT as left unsent in session SID's box, with the draft the box showed then and the transcript size
-    before it was typed (None forgets it). Entries older than UNSENT_TTL are dropped by `leftover`."""
+@contextlib.contextmanager
+def _flock(path, wait=True):
+    """Hold an exclusive flock on the 0600 file PATH for the block, yielding True. With WAIT false it never blocks:
+    it yields False, and holds nothing, when another process holds the lock. Closing the descriptor releases it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except OSError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(fd)
+
+
+def _unsent_lock():
+    """The lock every read-modify-write of the unsent-entries file holds (a sibling file, never the data file: it
+    is replaced)."""
+    return _flock(UNSENT.with_name(UNSENT.name + ".lock"))
+
+
+def pane_lock(sid):
+    """Non-blocking per-session lock a relay holds from reading a pane's box until its text is recorded: yields
+    False when another relay is typing into that pane."""
+    return _flock(UNSENT.with_name("relay-pane-" + re.sub(r"[^A-Za-z0-9_-]", "_", sid) + ".lock"), wait=False)
+
+
+def _note(sid, text, draft, mark, typed):
     rows = {k: v for k, v in _unsent().items()
             if isinstance(v, dict) and time.time() - float(v.get("at") or 0) <= UNSENT_KEEP}
     if text is None:
         if rows.pop(sid, None) is None:
             return
     else:
-        rows[sid] = {"text": text, "draft": " ".join(draft.split()), "mark": mark, "at": time.time()}
+        rows[sid] = {"text": text, "draft": " ".join(draft.split()), "mark": mark, "at": time.time(), "typed": typed}
     UNSENT.parent.mkdir(parents=True, exist_ok=True)
-    tmp = UNSENT.with_suffix(".tmp")
-    tmp.write_text(json.dumps(rows, ensure_ascii=False))
-    tmp.replace(UNSENT)
+    fd, tmp = tempfile.mkstemp(dir=UNSENT.parent, prefix=UNSENT.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(rows, ensure_ascii=False))
+        os.replace(tmp, UNSENT)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def note_unsent(sid, text, draft="", mark=0, typed=None):
+    """Remember TEXT as left unsent in session SID's box, with the draft the box showed then, the transcript size
+    before it was typed and when (TYPED; None forgets the entry). Entries older than UNSENT_TTL are dropped by
+    `leftover`. One entry per session: `route_pane` types no other text while it is unproven. The whole
+    read-modify-write holds the file lock, so two relays never lose each other's entry."""
+    with _unsent_lock():
+        _note(sid, text, draft, mark, typed)
 
 
 def leftover(sid):
@@ -510,65 +571,129 @@ def mine(d, entry):
     return bool(dn) and bool(entry) and (dn == entry.get("draft") or holds(dn, entry["text"]))
 
 
-def arm(s, chan, text, mark, pin="*"):
+def arm(s, chan, text, mark, pin="*", typed=None):
     """Record TEXT as sitting unsent in session S's box (Claude Code only). The draft is kept for `mine` only when
     it is our text or our collapsed paste, never whatever else the box shows."""
     if s["agent"] == "claude":
         d = box_text(chan) or ""
-        note_unsent(s["id"], text, d if holds(d, text) or ours_paste(d, text, pin) else "", mark)
+        note_unsent(s["id"], text, d if holds(d, text) or ours_paste(d, text, pin) else "", mark, typed)
 
 
 PASTED_RE = re.compile(r'<pasted_content id="([^"]+)">\s*(.*?)\s*</pasted_content id="\1">', re.S)
 
 
-def sent_in(tx, mark, text):
-    """True when the transcript file TX holds, after byte MARK, a user message (or a queued one) that IS TEXT, whole
-    and whitespace-folded. Never a substring: "continue" appears in any assistant line (adversary round 8). Claude
-    Code records a collapsed paste (a text over 800 characters) wrapped in `<pasted_content id="N">...</pasted_content
-    id="N">`, in the user line and in the enqueue alike (seen in real transcripts, round 9); hook-injected (isMeta)
-    and compact-summary lines are not messages anyone sent."""
+DELIVERY_REASONS = ("absorbed_mid_turn", "delivered_to_agent")    # a queue `remove` with these reasons is a delivery (real transcripts, 2026-10-23)
+GRACE = 10    # seconds after the entry was noted that a proving line may still be stamped (an Enter that landed late)
+LEAD = 2      # seconds of clock slack before the text was typed
+SHORT_TEXT = 30    # characters: only a text this short (`continue`, `yes`, `1`) is one the operator may type himself, so only it gets a stamp window
+
+
+def _ts(o):
+    """Epoch seconds of a transcript line's ISO `timestamp` (UTC, "...Z"), or None."""
+    v = o.get("timestamp")
+    try:
+        return datetime.datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp() if isinstance(v, str) else None
+    except ValueError:
+        return None
+
+
+def tx_state(tx, mark, text, window=None):
+    """What the transcript file TX holds, after byte MARK, about TEXT (whole, whitespace-folded; never a substring:
+    "continue" appears in any assistant line, adversary round 8): "delivered" (a user message that IS the text, or a
+    queued copy a turn absorbed), "queued" (an enqueue nothing has pulled back: it sits in Claude Code's queue, which
+    is not delivery), "pulled" (queued, then pulled back into the input box: a `remove` for another reason, or a
+    popAll; unproven, and the box now holds our text) or None. Claude Code records a collapsed paste (a text over 800
+    characters) wrapped in `<pasted_content id="N">...</pasted_content id="N">`, in the user line and in the enqueue
+    alike; hook-injected (isMeta) and compact-summary lines are not messages anyone sent. WINDOW=(lo, hi) epoch
+    seconds: only a user or enqueue line stamped inside it counts (a short common text the operator typed himself
+    is not our delivery; a line with no stamp cannot be placed, so it does not count)."""
     want = " ".join((text or "").split())
     if not (tx and Path(tx).is_file()) or mark is None or not want:
-        return False
+        return None
     with Path(tx).open("rb") as fh:
         fh.seek(mark)
         lines = fh.read().decode("utf-8", "replace").splitlines()
+    state = None
     for ln in lines:
         try:
             o = json.loads(ln)
         except ValueError:
             continue
-        if not isinstance(o, dict):
+        if not isinstance(o, dict) or o.get("isMeta") or o.get("isCompactSummary"):
             continue
-        if o.get("isMeta") or o.get("isCompactSummary"):
+        kind, op = o.get("type"), o.get("operation")
+        if kind == "queue-operation" and op == "popAll":    # its content (if any) is not trusted: every queued item left
+            state = "pulled" if state == "queued" else state
             continue
-        if o.get("type") == "queue-operation" and o.get("operation") == "enqueue":
+        if kind == "queue-operation" and op == "dequeue":    # the queue handed its front item to the agent (no content is recorded): ours, if queued, can no longer be pulled back
+            if state == "queued":
+                return "delivered"
+            continue
+        if kind == "queue-operation" and op in ("enqueue", "remove"):
             got = [o.get("content")]
-        elif o.get("type") == "user":
+        elif kind == "user":
             c = (o.get("message") or {}).get("content")
             got = [" ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
                    if isinstance(c, list) else c]
         else:
             continue
-        for g in got:
-            if isinstance(g, str):
-                m = PASTED_RE.fullmatch(g.strip())
-                if " ".join((m.group(2) if m else g).split()) == want:
-                    return True
-    return False
+        if not any(isinstance(g, str) and " ".join((m.group(2) if (m := PASTED_RE.fullmatch(g.strip())) else g).split()) == want
+                   for g in got):
+            continue
+        if op == "remove":
+            if state == "queued":
+                reason = o.get("reason")
+                if reason in DELIVERY_REASONS:
+                    return "delivered"
+                if reason:    # an explicit other reason: pulled back. No reason at all is unknown, not a pull-back: every reasonless remove in real transcripts was followed by a delivery
+                    state = "pulled"
+            continue
+        if window is not None:
+            ts = _ts(o)
+            if ts is None or not window[0] <= ts <= window[1]:
+                continue
+        if op == "enqueue":
+            state = "queued"
+        else:
+            return "delivered"
+    return state
 
 
-def in_transcript(s, entry):
-    """True when the leftover ENTRY's whole text is already in session S's transcript after the entry's mark: it was
-    delivered, so a copy in the box now is the operator's (Up-arrow history, a rewind), not an unsent one."""
-    return sent_in(s.get("transcript"), entry.get("mark"), entry.get("text"))
+def sent_in(tx, mark, text, window=None):
+    """"delivered" or "queued" (both true) when the transcript shows TEXT reached the session, else False
+    (`tx_state` says why not: pulled back, or absent)."""
+    st = tx_state(tx, mark, text, window)
+    return st if st in ("delivered", "queued") else False
+
+
+def proof_window(e, since=None):
+    """The (lo, hi) times a transcript line must carry to CLAIM the leftover ENTRY E delivered, or None. Only an entry
+    whose recorded draft is "" and whose text is short needs one: we never saw our copy, so an equal short text the
+    operator typed himself (`continue`, `yes`, `1`) within the hour would pose as ours. Never a reason to press
+    Enter: that is decided without a window (`entry_state(..., windowed=False)`). SINCE: this retry pressed Enter at
+    that time, so a line stamped from then on counts, whenever it lands. An entry without `typed` (an older note)
+    has no window."""
+    if e.get("draft") or len(" ".join(str(e.get("text") or "").split())) > SHORT_TEXT:
+        return None
+    if since is not None:
+        return (since - LEAD, math.inf)
+    if not e.get("typed"):
+        return None
+    return (float(e["typed"]) - LEAD, float(e.get("at") or 0) + GRACE)
+
+
+def entry_state(s, entry, since=None, windowed=True):
+    """`tx_state` of the leftover ENTRY's whole text in session S's transcript after the entry's mark. WINDOWED
+    false: any copy counts wherever it is stamped (what may stand between us and an Enter)."""
+    return tx_state(s.get("transcript"), entry.get("mark"), entry.get("text"), proof_window(entry, since) if windowed else None)
 
 
 def forget(sid, text):
     """Drop session SID's leftover entry when it is for TEXT (another text's entry is still owed its proof)."""
-    e = leftover(sid)
-    if e and " ".join(e["text"].split()) == " ".join(text.split()):
-        note_unsent(sid, None)
+    with _unsent_lock():
+        e = leftover(sid)
+        if e and " ".join(e["text"].split()) == " ".join(text.split()):
+            _note(sid, None, "", 0, None)
 
 
 def find(ident, ss):
@@ -764,18 +889,32 @@ def pane_idle(s, seconds):
     return False
 
 
+PULLED_WHY = ("your earlier copy of this message was queued, then pulled back out of the queue (Up or Esc in its pane) "
+              "and is not delivered. Do not resend and do not submit it for the operator; check its pane")
+RECALLED_WHY = ("the transcript already holds a copy of this message that is not shown to be the one we typed, so the copy "
+                "in its input box may be a recalled one: not submitted, nothing typed. Do not resend; check its pane")
+
+
 def retry_leftover(c, chan, d, left):
     """A retry of the message an earlier relay left unsent: type nothing. Submit it if it is still in the box, then
-    prove it reached the transcript (searched from where it was typed, whole text) or report unverified."""
+    prove it reached the transcript (searched from where it was typed, whole text) or report unverified. The stamp
+    window only claims success; whether to press Enter is decided on the transcript without it."""
     s, text = c["s"], c["text"]
     if d and not mine(d, left):
         return ("unverified", f"its input box holds someone else's draft ({fleet.clip(d, 60)!r}); an earlier copy of this "
                               "message may or may not have landed. Do not resend; check its pane")
-    if d and in_transcript(s, left):    # delivered already: the copy in the box is a recalled one, not ours to submit
-        note_unsent(s["id"], None)
-        return ("ok", f"{chan[0]} {chan[1]}", "delivered")
-    pressed = bool(d)
+    st = entry_state(s, left)
+    if st == "pulled":    # queued, then taken back into the box (or out of it) by the operator: not delivered, not ours to submit
+        return ("unverified", PULLED_WHY)
+    raw = entry_state(s, left, windowed=False) if d else None
+    if raw:    # a copy of this text reached, or was queued for, the session: the copy in the box is a recalled one, not ours to submit
+        if st in ("delivered", "queued"):
+            note_unsent(s["id"], None)
+            return ("ok", f"{chan[0]} {chan[1]}", st)
+        return ("unverified", PULLED_WHY if raw == "pulled" else RECALLED_WHY)
+    pressed, since = bool(d), None
     if d:
+        since = time.time()
         press_enter(chan)
         for _ in range(10):
             time.sleep(1)
@@ -787,10 +926,14 @@ def retry_leftover(c, chan, d, left):
                               f"({fleet.clip(d or '', 60)!r}). Do not resend; check its pane")
     tx = Path(s["transcript"]) if s.get("transcript") else None
     deadline = time.time() + (c["a"].wait if pressed else 0)
+    win = proof_window(left, since)
     while tx and tx.is_file() and left.get("mark") is not None:
-        if sent_in(tx, left["mark"], text):
+        st = tx_state(tx, left["mark"], text, win)
+        if st in ("delivered", "queued"):
             note_unsent(s["id"], None)
-            return ("ok", f"{chan[0]} {chan[1]}", "delivered")
+            return ("ok", f"{chan[0]} {chan[1]}", st)
+        if st == "pulled":
+            return ("unverified", PULLED_WHY)
         if time.time() >= deadline:
             break
         time.sleep(1)
@@ -809,6 +952,22 @@ def route_pane(c):
     if is_slash(text) or text.lstrip(SLASH_STRIP).startswith("!"):
         return ("skip", "text starting with '/' or '!' typed into a pane would run a built-in or a shell command "
                         "there; peers do not run another session's built-ins")
+    with pane_lock(s["id"]) as got:    # from the box read until the text is recorded: two relays never type into one box
+        if not got:
+            return ("stop", "another relay is typing into that pane right now (it holds the pane lock beside "
+                            f"{UNSENT.name}): not typing beside it; check its pane, then retry", 1)
+        return pane_send(c)
+
+
+def pulled_and_discarded(s, chan, left):
+    """True when the pulled-back entry LEFT was discarded by the operator: its box reads empty a second after it did
+    already, and no copy of the text has been submitted since."""
+    time.sleep(1)
+    return box_text(chan) == "" and entry_state(s, left) == "pulled"
+
+
+def pane_send(c):
+    s, a, text = c["s"], c["a"], c["text"]
     chan = tuple(s["chan"])
     d = box_text(chan) if s["agent"] == "claude" else ""
     left = leftover(s["id"])
@@ -820,10 +979,13 @@ def route_pane(c):
         return ("skip", "cannot see its input box (its ❯ row or bottom border is outside the screen read)")
     if left and " ".join(left["text"].split()) == text:    # a retry of the message an earlier relay left unsent
         return retry_leftover(c, chan, d, left)
-    if d and left and in_transcript(s, left):    # that message was delivered: the box holds a recalled copy
+    raw = entry_state(s, left, windowed=False) if d and left else None    # any copy of that text in the transcript: never press on one
+    if raw in ("delivered", "queued") and entry_state(s, left) in ("delivered", "queued"):    # that message reached the session: the box holds a recalled copy
         note_unsent(s["id"], None)
-        left = None
-    if d and mine(d, left):
+        left, raw = None, None
+    pressed_at = None
+    if d and mine(d, left) and raw is None:    # a copy the operator pulled back out of the queue, or a recalled one, is not ours to submit
+        pressed_at = time.time()
         press_enter(chan)
         for _ in range(10):
             time.sleep(1)
@@ -843,19 +1005,33 @@ def route_pane(c):
                               "Do not resend; check its pane")
     if d:
         return ("skip", f"its input box holds a draft ({fleet.clip(d, 60)!r})")
+    if left and " ".join(left["text"].split()) != text:    # one entry per session: a second text would overwrite the first's
+        stt = entry_state(s, left, pressed_at)    # PRESSED_AT: the Enter we just pressed on its copy counts from then on
+        if stt in ("delivered", "queued"):
+            note_unsent(s["id"], None)
+        elif stt == "pulled" and pulled_and_discarded(s, chan, left):
+            note_unsent(s["id"], None)    # he pulled it back and emptied the box: not ours any more
+        else:    # typing now could make its retry type the first text again (a duplicate): the retry must ask first
+            return ("skip", f"an earlier message of ours to this session is not yet proven delivered "
+                            f"({fleet.clip(left['text'], 50)!r}); wait up to an hour, or check its pane")
     mark = tx.stat().st_size if tx and tx.is_file() else 0
+    typed_at = time.time()
     if not type_line(chan, text):
         if getattr(type_line, "typed", False):    # the text may be in the box, only its Enter failed
-            arm(s, chan, text, mark)
+            arm(s, chan, text, mark, typed=typed_at)
             return ("unverified", f"text typed into {chan[0]} {chan[1]} (or not: the typing CLI did not finish) but its "
                                   "Enter failed; it may sit in the input box. Do not resend; check its pane")
         return ("skip", f"typing into {chan[0]} {chan[1]} failed")
     seen, deadline = None, time.time() + a.wait
-    typed_at, retries, stuck, pin, was_ours, gone = time.time(), 0, False, "*", False, False
+    sent_at, retries, stuck, pin, was_ours, gone, pulled = time.time(), 0, False, "*", False, False, False
     while time.time() < deadline:
-        if sent_in(tx, mark, text):
-            seen = "delivered"
+        st = tx_state(tx, mark, text)
+        if st in ("delivered", "queued"):    # queued is not delivered: the operator can still pull it back
+            seen = st
             break
+        if st == "pulled":    # taken back into the box: never ours to submit again
+            pulled = gone = True
+            seen = None
         stuck, ours_now, seen_box = box_state(chan, text, pin) if s["agent"] == "claude" else (False, False, "")
         if pin == "*":    # the box was empty before we typed: the placeholder in the FIRST read is ours, a later one is not
             pin = seen_box if ours_now and PASTE_RE.fullmatch(seen_box or "") else ""
@@ -863,24 +1039,28 @@ def route_pane(c):
             was_ours = True
         elif seen_box == "" and was_ours:
             gone = True    # our copy left the box (submitted): a copy that shows up again is a recall, never ours to submit
-        if ours_now and not gone and retries < ENTER_RETRIES and time.time() - typed_at >= RETRY_AFTER:
+        if ours_now and not gone and retries < ENTER_RETRIES and time.time() - sent_at >= RETRY_AFTER:
             press_enter(chan)
-            typed_at, retries = time.time(), retries + 1
+            sent_at, retries = time.time(), retries + 1
         scr = screen(chan, 30)
         # Claude Code's queue hint (not while our text is still in its input box: the hint may be for an
         # earlier message); for other TUIs the text on a line that is not the input prompt
         # (still on the ❯ line means Enter did not land)
-        if (not stuck and "queued messages" in scr) or (s["agent"] != "claude" and any(
-                text[:30] in ln and not ln.lstrip().startswith(("❯", ">")) for ln in scr.splitlines())):
+        if not pulled and ((not stuck and "queued messages" in scr) or (s["agent"] != "claude" and any(
+                text[:30] in ln and not ln.lstrip().startswith(("❯", ">")) for ln in scr.splitlines()))):
             seen = seen or "queued"
             if not tx:
                 break
         time.sleep(1)
+    if not seen:
+        st = tx_state(tx, mark, text)    # one last look: the Enter may have landed in the final second
+        seen = st if st in ("delivered", "queued") else None
+        pulled = pulled or st == "pulled"
     if s["agent"] == "claude":
-        if seen or box_text(chan) == "":    # forget only on proof: an unseen or foreign box may still hold our copy
+        if seen or (box_text(chan) == "" and not pulled):    # forget only on proof: an unseen or foreign box may still hold our copy
             forget(s["id"], text)
         else:
-            arm(s, chan, text, mark, pin)
+            arm(s, chan, text, mark, pin, typed_at)
     if seen:
         return ("ok", f"{chan[0]} {chan[1]}", seen)
     return ("unverified", f"text typed via {chan[0]} {chan[1]} but not seen in its transcript or pane within "
