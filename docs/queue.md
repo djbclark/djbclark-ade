@@ -3,6 +3,32 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Paseo connected hosts: make full use of them, after we quiesce and upgrade Paseo (djbclark, direct, 2026-10-24)
+
+djbclark, 2026-10-24: "Add to appropriate point in our queue, we should make full use of this new feature (before doing
+this we'll need to run out the queue / quiesse here so we can install the latest paseo version that supports this and
+then restart paseo)". The feature is from the changelog of the newest Paseo release, **not yet installed** (installed
+2026-10-24: `paseo --version` 0.13.0-beta.1). Changelog text: "Connect your daemon to another machine, then ask an agent
+to delegate work there": `paseo host add 192.168.1.20:6767 --label studio`, `paseo host add 'ssh://me@build-box' --label
+build-box`, `paseo host add 'relay://...' --label laptop`; "Added connected hosts, so agents can create, prompt and
+monitor agents on other machines and see them in the Subagents track (#7370, #7593)".
+
+1. **Order (djbclark's): run the queue out first, quiesce, then upgrade.** Let running slices and adversary rounds
+   finish (rule: never throw away paid-for work), land open PRs, write the handoffs, then install the newest Paseo and
+   restart the daemon (a restart keeps agent identity and drops the in-flight turn, see the Paseo-restart memory), then
+   verify with `paseo --version` and one `paseo host add` round trip. Re-check the skill-sync guard
+   (`agents.skills.selection` in `~/.paseo/config.json`): a daemon start overwrote the vendored paseo skills once
+   (2026-10-23).
+2. **Then design the use, one slice, read-only research first** (Opus 5.5 high via omp; web research on the release
+   notes and PRs 7370 and 7593): which machines to connect (the NixOS boxes get and vps-primary, the Hermes host, Hyades
+   microVMs over `ssh://`, a relay for the laptop), what the security boundary is (a connected host means an agent here
+   can prompt agents there: threat-model entry, `--perm`/yolo policy per host, secrets only via `sudo-secretspec`), how
+   delegation relates to `acp-dispatch`, `acp-run` and Orca (a host becomes one more route in `route_agent.py plan`, never
+   an all-vendor fan-out), and how names stay `human name + id` across hosts.
+3. **Build after djbclark rules on the design**: host roster doc, `docs/mcp-servers.md`/README entries, a `paseo host`
+   health line in the fleet watcher, and the `-pt`/`-pw` naming rule extended to remote agents (see "Paseo tabs").
+4. Not started; blocked on item 1 (quiesce) and on the Paseo release being installed.
+
 ## Phase 0 scan of bigteam and the Orca checkouts (proposal §8 item 1, djbclark 2026-10-20)
 
 1. **Scan, capture list and tool: done 2026-10-20 (PR #27).** `bin/ade-scan-state` and
