@@ -1752,6 +1752,6 @@ OPEN (adversary fix text kept; not implemented, 2026-10-24):
    (B's "stop ... do not resend" while A's own routes all fail tells B's caller not to resend something A's caller was told was not sent: acceptable, the same text.)
 3. **L-F, the CHANGELOG lines for the queued lows carry no PR number** (code-review rule 10): fixed 2026-10-24, the lines end with PR 40.
 4. Accepted residual (L-D, adversary B2, 2026-10-24): a holder that proved delivery (`forget`) or a non-claude pane leaves no entry, so a relay of the same text that wins the
-   lock inside the release window types it a second time (before L-D a non-claude pane ended "not sent" there). It is what a relay arriving just after the holder does anyway.
+   lock inside the release window types it a second time (before L-D a non-claude pane, or a claude pane with no socket, ended "not sent" there). It is what a relay arriving just after the holder does anyway.
 5. Accepted residual (L-A, related): `permit allow` picks the first card whose `id === reqId || id.startsWith(reqId)` in list order, so a request id that is a proper
    prefix of an earlier card's id would answer that other card; with UUID or `permission-<uuid>` ids it cannot happen.
