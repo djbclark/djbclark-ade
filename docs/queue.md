@@ -163,6 +163,12 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    master (`~/.local/state/bigteam/rework2-codex-triage/codex-triage-report.md`); `bin/pr-wait` (PR
    [34](https://github.com/djbclark/djbclark-ade/pull/34)) gains `merge_ready` and open earlier-head findings, and
    AGENTS.md rule 9 is corrected in the same PR.
+9. **Accepted LOWs and declined findings from the 2026-10-23 rework-2 PRs** (residual, one small PR each when picked up):
+   1. PR 38 adversary round 1 LOWs (acp-dispatch rearm hint): L1 "up to 2.0 h" rounds down for waits of 7201-7379 s (round up); L2 compare wait_timeout with TOOL_TIMEOUT_MAX_S minus two 60 s passes so boundary waits get the re-arm text; L3 usage header (bin/acp-dispatch:186-188) should say the hint always names timeout 7200000 and adds the re-arm rule for long or unlimited waits. Report: ~/.local/state/bigteam/rework2-codex-triage/adv-codex-fix-c-1-report.md
+   2. PR 37 adversary round 1 LOWs (skill-everywhere): in-tree link amplification in canonical mode; check-vs-cp TOCTOU via an outside path component; the inherited SKILL_EVERYWHERE_NO_COPY drop in ade-update:313 is untested. Report: ~/.local/state/bigteam/rework2-codex-triage/adv-codex-fix-b-1-report.md
+   3. PR 32 adversary round 6 LOW: tests/test_bin_modes.py docstring and CHANGELOG say "outside tests/", while the code exempts any tests/ directory at any depth.
+   4. PR 33 adversary round 2 LOW: no test pins that `xhigh` and `max` are accepted as [lead] effort values.
+   5. Declined from the 2026-10-23 Codex triage (threads left open): PR 25 4323896253 (relay.py Claude-derived custom provider ids; refuses safely) and PR 22 4323297397 (acp-dispatch footer slot wildcard; the stripping also cleans a copied footer, which helped on 2026-10-23).
 
 ## Follow-ups from the 2026-10-20 reviews
 
