@@ -950,9 +950,13 @@ def paseo_tab_name(title: str, context: Iterable[str] = (), taken: Iterable[str]
     lower case, hyphenated (design-tabs 2.2, 2026-10-24). A Paseo agent tab's name IS the agent's name.
     `context` = words of the workspace's project/title, never repeated in the tab; `taken` = the names of the
     workspace's other live agents and terminals (with or without '-pt'): a clash gets '-2', '-3', ...
+    A context entry that is this title's own workspace slug (what `paseo_set_name` names the workspace from the
+    same title) is ignored, so a re-run gives the same name instead of dropping the topic's own words.
     Pure and deterministic."""
     toks = _tab_tokens(title)
-    skip = {t for c in context for t in _tab_tokens(c)}
+    own = paseo_workspace_name(title).removesuffix("-pw")
+    skip = {t for c in context if re.sub(r"[^a-z0-9]+", "-", c.lower()).strip("-").removesuffix("-pw") != own
+            for t in _tab_tokens(c)}
     words = [_TAB_WORDS.get(t, t) for t in toks if t not in _TAB_STOPWORDS and not t.isdigit() and t not in skip]
     # Two identifier tokens first (so 'pr12' survives), then the rest in title order, skipping what does not fit.
     idents = [i for i, w in enumerate(words) if _TAB_IDENT.fullmatch(w)][:2]
@@ -975,7 +979,10 @@ def paseo_tab_name(title: str, context: Iterable[str] = (), taken: Iterable[str]
 
 
 def paseo_agent_record(agent: str) -> dict:
-    """An agent's record under $PASEO_HOME/agents/<cwd>/<id>.json ({} when absent or unreadable)."""
+    """An agent's record under $PASEO_HOME/agents/<cwd>/<id>.json ({} when absent, unreadable or when `agent`
+    is not a plain id: it is globbed, so `*` or `../x` must not reach the pattern)."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", agent):
+        return {}
     home = Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo")
     for rec in (home / "agents").glob(f"*/{agent}.json"):
         try:
@@ -1063,6 +1070,8 @@ def paseo_set_name(title: str, auto: bool = False) -> str:
         except (OSError, subprocess.TimeoutExpired) as exc:
             return f" (paseo: {exc})"
         out = f" (paseo tab {tab})" if r.returncode == 0 else f" (paseo: rc {r.returncode})"
+        if auto:
+            out += " (names store unavailable)"
     if not wks:
         return out + " (paseo workspace: not found)"
     name = paseo_workspace_name(title)

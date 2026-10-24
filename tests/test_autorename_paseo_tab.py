@@ -49,6 +49,15 @@ def test_worked_table(title: str, context: list[str], expected: str) -> None:
     assert ar.paseo_tab_name(title, context, []) == expected
 
 
+@pytest.mark.parametrize(("title", "context", "expected"), TABLE, ids=[str(i + 1) for i in range(len(TABLE))])
+def test_own_workspace_name_is_not_context(title: str, context: list[str], expected: str) -> None:
+    # `paseo_set_name` names the workspace from this same title; a re-run must not drop the title's own words
+    own = ar.paseo_workspace_name(title)[:-3]
+    assert ar.paseo_tab_name(title, [own]) == ar.paseo_tab_name(title, [])
+    assert ar.paseo_tab_name(title, [own + "-pw"]) == ar.paseo_tab_name(title, [])
+    assert ar.paseo_tab_name(title, context + [own]) == expected
+
+
 def test_collisions_use_taken_and_keep_the_limit() -> None:
     assert ar.paseo_tab_name("Adversary round 3 on PR 31", [], ["adv-r3-pr31"]) == "adv-r3-pr31-2-pt"
     assert ar.paseo_tab_name("Load watcher", [], ["loadwatch", "loadwatch-2"]) == "loadwatch-3-pt"
@@ -99,7 +108,8 @@ def test_pure_and_does_not_consume_inputs() -> None:
 
 # --- paseo_set_name: the --auto agent-name guard ------------------------------------------------------
 
-def setup_paseo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, current: str, extra: bool = False) -> Path:
+def setup_paseo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, current: str, extra: bool = False,
+                terminals: str = "[]", ws_title: str = "plektra-pw") -> Path:
     home = tmp_path / "home"
     agents = home / "agents" / "Users-x-src-y"
     agents.mkdir(parents=True)
@@ -111,7 +121,7 @@ def setup_paseo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, current: str, e
         (agents / "elsewhere.json").write_text(json.dumps({"id": "e", "workspaceId": "wks_2", "title": "x"}))
     (home / "projects").mkdir()
     (home / "projects" / "workspaces.json").write_text(json.dumps(
-        [{"workspaceId": "wks_1", "projectId": "prj_1", "title": "plektra-pw"}]))
+        [{"workspaceId": "wks_1", "projectId": "prj_1", "title": ws_title}]))
     (home / "projects" / "projects.json").write_text(json.dumps([{"projectId": "prj_1", "displayName": "plektra-djbclark"}]))
     log = tmp_path / "calls.log"
     cli = tmp_path / "paseo"
@@ -120,6 +130,8 @@ def setup_paseo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, current: str, e
         f'echo "$@" >> {log}\n'
         'if [ "$1 $2" = "workspace ls" ]; then\n'
         '  echo \'[{"workspaceId": "wks_1", "name": "old-work-pw"}]\'\n'
+        'elif [ "$1 $2" = "terminal ls" ]; then\n'
+        f"  echo '{terminals}'\n"
         "fi\n")
     cli.chmod(0o755)
     monkeypatch.setenv("PASEO_HOME", str(home))
@@ -148,6 +160,8 @@ def test_auto_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, auto: bool,
     else:
         assert ups == []
         assert "paseo tab kept: loadwatch-pt" in out and "names store unavailable" in out
+    if renamed:
+        assert ("names store unavailable" in out) is auto   # --auto replaces without a store to explain the name
 
 
 def test_tab_name_avoids_live_agents_of_the_same_workspace_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,6 +169,34 @@ def test_tab_name_avoids_live_agents_of_the_same_workspace_only(tmp_path: Path, 
     ar.paseo_set_name("Load watcher")
     # 'loadwatch' is held by the live sibling; the archived 'loadwatch-2' and the other workspace's agent do not count
     assert agent_updates(log) == ["agent update abc --name loadwatch-2-pt --json"]
+
+
+def test_own_current_name_is_not_a_collision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    log = setup_paseo(tmp_path, monkeypatch, "queue-scan-pt")
+    ar.paseo_set_name("Plektra queue scan", auto=False)
+    assert agent_updates(log) == ["agent update abc --name queue-scan-pt --json"]    # same name again, no '-2'
+
+
+def test_terminal_names_count_as_taken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    log = setup_paseo(tmp_path, monkeypatch, "", terminals='[{"name": "queue-scan-pt"}]')
+    ar.paseo_set_name("Plektra queue scan")
+    assert "terminal ls --workspace wks_1 --json" in log.read_text()
+    assert agent_updates(log) == ["agent update abc --name queue-scan-2-pt --json"]
+
+
+def test_rerun_with_workspace_named_from_the_same_title_gives_the_same_tab_name(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    log = setup_paseo(tmp_path, monkeypatch, "", ws_title="paseo-skill-sync-overwrite-fix-pw")
+    ar.paseo_set_name("Paseo skill sync overwrite fix")
+    assert agent_updates(log) == ["agent update abc --name paseo-skill-pt --json"]
+
+
+@pytest.mark.parametrize("agent", ["*", "../abc", "a/b", "", "abc\n", "a b"])
+def test_agent_id_must_be_a_plain_id_before_globbing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent: str) -> None:
+    setup_paseo(tmp_path, monkeypatch, "kept")
+    assert ar.paseo_agent_record("abc")["title"] == "kept"
+    assert ar.paseo_agent_record(agent) == {}      # '*' would otherwise match abc.json
+    assert ar.paseo_workspace_id(agent) is None
 
 
 def test_tab_name_without_a_workspace_record_still_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
