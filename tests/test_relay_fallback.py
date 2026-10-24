@@ -1266,7 +1266,7 @@ class TestHermesRoute(Harness):
         self.assertTrue(theirs.exists())
 
     def test_invisible_smuggling_characters_are_dropped(self) -> None:
-        self.assertEqual(relay.clean_reply("a\ufe0fb\U000e0105c\u3164d\u2800e\u115f"), "abcde")
+        self.assertEqual(fleet.clean_text("a\ufe0fb\U000e0105c\u3164d\u2800e\u115f"), "abcde")
 
     def test_a_real_child_holds_the_lock_until_its_turn_ends(self) -> None:
         """M3 (adversary round 3): the fake Popen forks nothing, so only a real process proves the lock survives the parent's close."""

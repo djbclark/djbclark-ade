@@ -36,6 +36,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -522,8 +523,17 @@ def _paseo_ls(*flags):
     return _paseo_json("ls", "-g", "--json", *flags)
 
 
-CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+HIDDEN = "\u115f\u1160\u3164\uffa0\u2800"    # fillers and blanks that render as nothing
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.?")
 PASEO_REQ = re.compile(r"[A-Za-z0-9._:-]{1,80}")
+
+
+def clean_text(text):
+    """Text from another agent or process as plain data: escape sequences, control characters (C0 bar newline and tab, DEL,
+    C1), Unicode format characters (bidi overrides and isolates, zero-width), blank fillers and variation selectors removed."""
+    return "".join(ch for ch in ANSI.sub("", text)
+                   if ch in "\n\t" or not (ch < " " or "\x7f" <= ch <= "\x9f" or unicodedata.category(ch) in ("Cf", "Zl", "Zp")
+                                           or ch in HIDDEN or "\ufe00" <= ch <= "\ufe0f" or "\U000e0100" <= ch <= "\U000e01ef")).strip()
 
 
 def _paseo_waiting():
@@ -539,7 +549,7 @@ def _paseo_waiting():
             rid = d.get("id")
             out.setdefault(pid, []).append({
                 "id": rid if isinstance(rid, str) and PASEO_REQ.fullmatch(rid) else None,
-                "text": " ".join(CTRL.sub(" ", f"{d.get('name') or 'permission'}: {d.get('description') or ''}").split())[:300]})
+                "text": " ".join(clean_text(f"{d.get('name') or 'permission'}: {d.get('description') or ''}").split())[:300]})
     return out
 
 

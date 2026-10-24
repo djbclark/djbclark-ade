@@ -10,6 +10,7 @@ import json
 import re
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -249,7 +250,15 @@ def test_a_running_agent_with_a_pending_card_is_blocked_and_the_others_are_not(p
 
 def test_the_card_text_is_the_agents_own_so_control_characters_are_stripped(paseo):
     paseo.permits.write_text(json.dumps([card(OMP, "bash", "rm -rf /tmp/x\x1b[31m\n\x07ok")]))
-    assert fleet._paseo_waiting() == {OMP: [{"id": "permission-1", "text": "bash: rm -rf /tmp/x [31m ok"}]}
+    assert fleet._paseo_waiting() == {OMP: [{"id": "permission-1", "text": "bash: rm -rf /tmp/x ok"}]}
+
+
+def test_the_card_text_loses_bidi_overrides_and_zero_width_characters_too(paseo):
+    """L1 (adversary): a card is printed where the operator decides allow or deny; U+202E and friends reorder or hide text."""
+    paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo safe \u202e\u2066 txt.exe \u200b\u2069\u3164\ufe0f done")]))
+    text = fleet._paseo_waiting()[OMP][0]["text"]
+    assert text == "Bash: echo safe txt.exe done"
+    assert not any(unicodedata.category(ch) == "Cf" for ch in text)
 
 
 def test_a_failed_card_listing_leaves_the_rows_as_they_were(paseo, monkeypatch):

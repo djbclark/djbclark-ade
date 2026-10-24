@@ -127,7 +127,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import unicodedata
 import uuid
 from pathlib import Path
 
@@ -150,8 +149,6 @@ HERMES_DIR = Path(os.environ.get("RELAY_HERMES_DIR", Path.home() / ".local/state
 HERMES_SCRUB = ("CLAUDE_CODE_SESSION_ID", "PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ACP_RUN_AGENT", "ACP_OPERATOR_APPROVED",
                "HERMES_UI_SESSION_ID")
 HERMES_SCRUB_PREFIXES = ("HERMES_SESSION_", "HERMES_CRON_")
-HIDDEN = "\u115f\u1160\u3164\uffa0\u2800"    # fillers and blanks that render as nothing
-ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.?")
 # Pause between the text and its Enter (2026-10-18): sent back to back, Claude Code reads the burst as a
 # paste and the Enter inside it does not submit, so the message sat in the input box until the operator
 # pressed Enter by hand. ENTER_RETRIES more Enters go in when the text is still in the box after RETRY_AFTER s.
@@ -1222,13 +1219,6 @@ def hermes_env(sid):
     return env
 
 
-def clean_reply(text):
-    """Hermes's reply as plain data: escape sequences and control characters (C0 bar newline and tab, DEL, C1) removed."""
-    return "".join(ch for ch in ANSI.sub("", text)
-                   if ch in "\n\t" or not (ch < " " or "\x7f" <= ch <= "\x9f" or unicodedata.category(ch) in ("Cf", "Zl", "Zp")
-                                                                       or ch in HIDDEN or "\ufe00" <= ch <= "\ufe0f" or "\U000e0100" <= ch <= "\U000e01ef")).strip()
-
-
 def read_capped(path):
     with path.open("rb") as fh:
         return fh.read(HERMES_READ_CAP).decode("utf-8", "replace")
@@ -1359,12 +1349,12 @@ def route_hermes(c):
     out = read_capped(out_p)
     sid = re.escape(s["sid"])
     if (rc == 1 and not out.strip() and re.fullmatch(
-            rf"hermes -z: agent failed: (?:session not found: {sid}|cannot resume session {sid}: [^\n]*)", clean_reply(err))):
+            rf"hermes -z: agent failed: (?:session not found: {sid}|cannot resume session {sid}: [^\n]*)", fleet.clean_text(err))):
         out_p.unlink(missing_ok=True)
         err_p.unlink(missing_ok=True)
-        return ("skip", f"Hermes does not know session {s['sid']}: {fleet.clip(clean_reply(err), 160)}")
+        return ("skip", f"Hermes does not know session {s['sid']}: {fleet.clip(fleet.clean_text(err), 160)}")
     big = re.fullmatch(r"hermes -z: agent failed: This session is too long to reload safely \((\d+) messages; limit (\d+)\)\.[^\n]*",
-                       clean_reply(err)) if rc == 1 and not out.strip() else None
+                       fleet.clean_text(err)) if rc == 1 and not out.strip() else None
     if big:    # assert_resume_safe runs before the turn writes anything (hermes_cli/oneshot.py _load_resume_target)
         out_p.unlink(missing_ok=True)
         err_p.unlink(missing_ok=True)
@@ -1372,10 +1362,10 @@ def route_hermes(c):
                         "writing anything; start a fresh chat, or `hermes config set sessions.max_resume_messages 0`")
     if rc != 0:
         c["reply_file"] = str(out_p)
-        return ("unverified", f"`hermes --resume -z` failed (rc={rc}: {fleet.clip(clean_reply(err).splitlines()[-1] if err.strip() else '', 160)}); "
+        return ("unverified", f"`hermes --resume -z` failed (rc={rc}: {fleet.clip(fleet.clean_text(err).splitlines()[-1] if err.strip() else '', 160)}); "
                               f"the turn may have started, so no other route was tried. Output kept in {out_p} and {err_p} "
                               "(raw). Do not resend")
-    reply = clean_reply(out)
+    reply = fleet.clean_text(out)
     if len(reply) > HERMES_REPLY_CAP:
         out_p.write_text(reply)    # the kept file holds the cleaned text, never the raw
         c["reply"] = reply[:HERMES_REPLY_CAP] + f"\n[cut at {HERMES_REPLY_CAP} characters; the cleaned first {HERMES_READ_CAP // 1024} KB of the reply: {out_p}]"
