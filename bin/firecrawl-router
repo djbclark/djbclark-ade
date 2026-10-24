@@ -45,11 +45,12 @@ general search (30/min) bucket until its reset; all buckets closed is a 429 with
 failure a 502. `types` (issue, pull_request, readme, doc), `repos` (ONE owner/name slug), `language`, `k` and `passages` are honoured;
 `sources`, `skills`, `license`, `topic`, `min_stars`, `max_stars`, `archived` and `fork` are a 400. With a
 commercial fallback configured the request goes to the primary and the fallback as before.
-PUBLIC REPOSITORIES ONLY: the GITHUB_TOKEN behind it is a classic PAT that can read private repositories and this
-listener has no caller authentication, so issue and PR queries carry `is:public` and a code hit is dropped unless
-GitHub reports its repository as not private. A fine-grained read-only public-repository token under its own
-secretspec name (FIRECRAWL_ROUTER_GITHUB_SECRET) removes the dependence on those two filters. At most two searches
-run at once, all inside FIRECRAWL_ROUTER_SEARCH_TIMEOUT.
+PUBLIC REPOSITORIES, BEST EFFORT: the GITHUB_TOKEN behind it is a classic PAT that can read private repositories and
+this listener has no caller authentication, so issue and PR queries carry `is:public`, a code hit is dropped unless
+GitHub reports its repository as not private, and code search always asks for GitHub's 100-item page. That leaves a
+narrow oracle (docs/threat-model.md item 10); a fine-grained read-only public-repository token under its own
+secretspec name (FIRECRAWL_ROUTER_GITHUB_SECRET) closes it. At most two searches run at once, all inside
+FIRECRAWL_ROUTER_SEARCH_TIMEOUT.
 
 Async jobs (crawl, batch scrape, extract) stay on the backend that created
 them: the router remembers job id -> backend and rewrites absolute `url`/`next`
@@ -523,7 +524,11 @@ class DevSearch:
             room = DEV_MAX_Q - len(extra) - 1
             while len(" ".join(attempt)) > room and len(attempt) > 1:
                 attempt = attempt[:-1]
-            r = self._gh(endpoint, f"{' '.join(attempt)[:room]} {extra}".strip(), per_page, deadline, token)
+            # code search ranks across every repository the token reads and private hits are dropped afterwards, so a
+            # short page could hold nothing else: always take GitHub's maximum page, which raises the number of private
+            # files it takes to push every public hit off it from 5 to 100
+            r = self._gh(endpoint, f"{' '.join(attempt)[:room]} {extra}".strip(), 100 if endpoint == "code" else per_page,
+                         deadline, token)
             if r.status == 422 and p["repos"]:  # GitHub says 422 for a repo that does not exist (or the token cannot see)
                 r = GHReply(200, {"items": []})
             if reply is None or r.status == 200:  # a failed retry never replaces an empty 200

@@ -31,8 +31,9 @@ off, `bin/firecrawl-router` answers both itself from the GitHub search API (issu
 code files of **public** repositories only) in Firecrawl's response shape, with `source: "github"`; there is no reranker
 and no non-GitHub documentation site. Token: `GITHUB_TOKEN` through `sudo-secretspec get`, held in memory and read again
 at most once a minute while none is held (a failed read, or a 401); it is a
-classic PAT that reads private repositories too, so the router adds `is:public` and drops private code hits
-(`docs/threat-model.md` item 10). Limits: GitHub's 30 searches a minute (10
+classic PAT that reads private repositories too, so the router adds `is:public` and drops private code hits; that is
+best effort until a fine-grained public-read token is stored under its own secretspec name
+(`FIRECRAWL_ROUTER_GITHUB_SECRET`; `docs/threat-model.md` item 10 names the residual). Limits: GitHub's 30 searches a minute (10
 for code search); a closed bucket is reported in `coverage` and `warning`, all closed is HTTP 429 with `Retry-After`.
 Knobs and rules: the router's header and `skills/firecrawl/SKILL.md` ("Tools"). Considered and not built: Exa and
 Parallel as extra sources (two more keys and a merge step on a path that already answers; add one if GitHub proves too

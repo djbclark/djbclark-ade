@@ -794,6 +794,7 @@ class GitHubFake:
 
     def __init__(self, handler):
         self.calls = []
+        self.pages = []  # per_page of each call, parallel to calls
         gh = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -804,6 +805,7 @@ class GitHubFake:
                 url = urllib.parse.urlsplit(self.path)
                 q = urllib.parse.parse_qs(url.query)["q"][0]
                 gh.calls.append((url.path, q, self.headers.get("Authorization")))
+                gh.pages.append(urllib.parse.parse_qs(url.query)["per_page"][0])
                 status, headers, doc = handler(url.path.rsplit("/", 1)[-1], q)
                 body = json.dumps(doc).encode()
                 self.send_response(status)
@@ -1097,6 +1099,14 @@ class DeveloperSearchTest(unittest.TestCase):
         status, _, err = self.call("POST", "/v2/search/developer", {"query": "state", "repos": ["o/lib", "o/other"]})
         self.assertEqual((status, err["error"]), (400, "firecrawl-router: repos takes one owner/name slug"))
         self.assertEqual(self.gh.calls, [])
+
+    def test_code_search_always_asks_for_the_biggest_page(self):
+        # private hits are dropped after GitHub cuts its page, so the page must be large enough that private files cannot
+        # crowd every public one off it
+        self.start(self.normal)
+        self.call("GET", "/v2/search/developer?query=state&k=1")
+        pages = {p.rsplit("/", 1)[-1]: n for (p, _, _), n in zip(self.gh.calls, self.gh.pages)}
+        self.assertEqual(pages, {"code": "100", "issues": "5"})
 
     def test_numbers_must_be_integers_not_infinity_floats_or_null_limits(self):
         self.start(self.normal)
