@@ -1590,4 +1590,35 @@ approves ALL of them (`deny` without one fails): cards keep their request ids, h
 the fingerprint covers every id. (L1) `fleet.clean_text` (moved from `relay.clean_reply`) also cleans card text. (L2) the pane lock file holds a hash of the text in
 flight: the same text stops, a different one skips to the socket. (L3) a refused Hermes lock flock on a replaced inode is retried. (L4) a moved P5 entry blocking another text
 says so. (L5) a tool_result-only user line no longer ends the wait for the prompt a `dequeue` handed over; the real ordering with a `queued_command` attachment is not in the
-operator's transcripts (checked 2026-10-24: no attachment follows a dequeue in ~5000 of them), so this is the safe reading, pinned by a test only. (L6) docs. Open: none from this round.
+operator's transcripts (checked 2026-10-24: no attachment follows a dequeue in ~5000 of them), so this is the safe reading, pinned by a test only. (L6) docs. Open from this round: none (round 2, below, found M-A and L-A to L-F).
+
+## Queued lows branch: adversary round 2, APPROVE at 98f3d61 (2026-10-24)
+
+Report: `~/.local/state/bigteam/queued-lows-2026-10-23/adversary-queued-lows-2-report.md` (M-A, L-A to L-F; no regression from the repair).
+FIXED on the branch, each with a test a mutant fails (`queued-lows-repair-2-report.md` lists commits and mutants): (L-A) a Paseo request id must start with a letter
+or digit (`--all` and `-h` matched the old pattern, and commander reads `allow AGENT --all` as the option: approve every card); helm prints
+`paseo permit allow|deny <agent> -- <request id>` (checked 2026-10-24 against the commander 12.1.0 inside Paseo.app: `--` ends option parsing). (L-B) the `relay.py`
+usage text states the real rule (the markers are ignored when another agent sits between the relay and `RELAY_HOP_PARENT`, the pid of the relay that started the turn).
+(L-C) `RELAY_SENDER` is accepted only as `hermes [A-Za-z0-9_-]{1,8}`. (L-E) the dequeue scan skips a user line only when every block is a `tool_result`.
+Scope (M-A, docs only): the hop count and the `hermes ...` tag cover relays Hermes starts through its terminal tool and background processes (both keep `RELAY_*`).
+A relay started from Hermes's `execute_code` sandbox is NOT covered: `~/.hermes/hermes-agent/tools/code_execution_env.py:25-26,75-86` (`_scrub_child_env`) keeps only
+PATH, HOME, USER, LANG, LC_, TERM, TMP*, SHELL, LOGNAME, XDG_, PYTHONPATH, VIRTUAL_ENV, CONDA and a short HERMES_ allowlist, so the inner relay sees no `RELAY_HOPS`,
+`hermes_hops()` is 0, `sender_name` takes the `self` row (the caller's own Claude session: fleet marks it `self` through the ancestor pid or the inherited `HERDR_PANE_ID`),
+and the nested turn starts again at `RELAY_HOPS=1`. The chain is still bounded by the per-conversation Hermes locks; the label is accidental, not a security boundary.
+
+OPEN (adversary fix text kept; not implemented, 2026-10-24):
+
+1. **M-A, env-free detection of a relayed turn (MEDIUM).** `relay.py` already writes the Hermes child's pid into the conversation's lock file (`route_hermes`).
+   The inner relay walks its ancestors and, for each one, checks whether it is the pid recorded in a lock file under `HERMES_DIR` that is currently held (a non-blocking
+   flock fails). If such a pid comes before any other agent, the relay is inside a relayed turn. The hop count is the number of such ancestors, and the sender is
+   `hermes <sid[-8:]>` with the sid taken from the lock file name. This also removes the forgery residual of L-C (a process inside the turn can unset `RELAY_HOPS`
+   or set `RELAY_HOP_PARENT` to a pid outside its ancestry; the L-C fix only stops a forged *name*). The `RELAY_HOPS` env markers can then become a cross-check or go.
+2. **L-D, the pane lock's hash can be missed while the holder releases (LOW).** `_flock` truncates the file in `finally` before `os.close` and `pane_sending` reads it
+   five times over 100 ms. If B's non-blocking flock fails while A holds the lock, and A then truncates and closes, B reads an empty file, `pane_sending` returns False,
+   B returns "skip" and goes to `route_socket`, which has no check for an unproven entry: A's text, already typed and recorded, arrives twice. The same happens if A
+   has not written its hash within 100 ms of taking the lock (a loaded machine). Fix: when `pane_sending` sees an empty file after its retries, try the pane lock once
+   more (blocking briefly or polling). If the lock is now free, take the normal path under it, where `pane_send`'s P5 check sees A's entry; do not skip to the socket.
+   (B's "stop ... do not resend" while A's own routes all fail tells B's caller not to resend something A's caller was told was not sent: acceptable, the same text.)
+3. **L-F, the CHANGELOG lines for the queued lows carry no PR number** (code-review rule 10): add it when the PR is opened.
+4. Accepted residual (L-A, related): `permit allow` picks the first card whose `id === reqId || id.startsWith(reqId)` in list order, so a request id that is a proper
+   prefix of an earlier card's id would answer that other card; with UUID or `permission-<uuid>` ids it cannot happen.
