@@ -459,16 +459,21 @@ def newest_mtime(path: Path) -> float:
     return best
 
 
+MAX_TASK_FILE = 1024 * 1024  # a CLAIM or a job record is a few lines; past this it is not what bigteam wrote
+
+
 def claim_state(task: Path, failures: list[tuple[Path, str]] | None = None) -> str:
     claim = task / "CLAIM"
     try:
-        lines = [ln.strip() for ln in claim.read_text(errors="replace").splitlines() if ln.strip()]
+        # bounded and non-blocking: a FIFO (or a symlink to one) as CLAIM would hang `read_text` forever
+        text = read_regular_file(claim, MAX_TASK_FILE).decode("utf-8", errors="replace")
     except (FileNotFoundError, NotADirectoryError):
         return "no CLAIM"
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         if failures is not None:
-            failures.append((claim, errno_name(exc)))
+            failures.append((claim, errno_name(exc) if isinstance(exc, OSError) else "NOTREG"))
         return "no CLAIM"
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     return "DONE" if lines and lines[-1].startswith("DONE") else "open"
 
 
@@ -485,7 +490,7 @@ def open_job_records(task: Path, failures: list[tuple[Path, str]] | None = None)
     out = []
     for name in names:
         try:
-            data = json.loads((jobs / name).read_text(errors="replace"))
+            data = json.loads(read_regular_file(jobs / name, MAX_TASK_FILE).decode("utf-8", errors="replace"))
         except (OSError, ValueError):
             out.append(f"{name} (unreadable)")
             continue

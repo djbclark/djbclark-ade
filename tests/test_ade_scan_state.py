@@ -1630,6 +1630,40 @@ def test_a_task_dir_that_cannot_be_searched_is_scan_incomplete_not_a_crash(tmp_p
     assert by["t-ok"]["verdict"] == "scratch"
 
 
+def test_a_fifo_as_claim_or_job_record_is_unreadable_not_a_hang(tmp_path):
+    """Codex finding 4365722733 (P2): `read_text()` on a bigteam task's `CLAIM` that is a FIFO, or a symlink to one, blocks
+    forever (no writer); so did a FIFO `jobs/*.json`. Both reads are bounded and non-blocking now."""
+    mod = load()
+    root, refs = tmp_path / "bigteam", tmp_path / "refs"
+    refs.mkdir()
+    os.mkfifo(tmp_path / "elsewhere")
+    fifos = [tmp_path / "elsewhere"]
+    plain = root / "t-fifo"
+    plain.mkdir(parents=True)
+    os.mkfifo(plain / "CLAIM")
+    linked = root / "t-link"
+    linked.mkdir()
+    (linked / "CLAIM").symlink_to(tmp_path / "elsewhere")
+    jobs = root / "t-jobs"
+    (jobs / "jobs").mkdir(parents=True)
+    os.mkfifo(jobs / "jobs" / "x.json")
+    fifos += [plain / "CLAIM", jobs / "jobs" / "x.json"]
+    result: list = []
+    t = threading.Thread(target=lambda: result.append(mod.scan_bigteam(root, [refs], [], 1_000_000, 10)), daemon=True)
+    t.start()
+    t.join(20)
+    if t.is_alive():  # the old code sits in open(): release it with a writer, then fail
+        for f in fifos:
+            os.close(os.open(f, os.O_RDWR))
+        t.join(10)
+        raise AssertionError("scan_bigteam blocked on a FIFO")
+    by = {x["task"]: x for x in result[0]["tasks"]}
+    for name in ("t-fifo", "t-link"):
+        assert by[name]["claim"] == "no CLAIM" and by[name]["verdict"].startswith(mod.INCOMPLETE_PREFIX), by[name]
+        assert by[name]["verdict"].endswith("CLAIM"), by[name]["verdict"]
+    assert by["t-jobs"]["open_job_records"] == ["x.json (unreadable)"], by["t-jobs"]
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 directory")
 def test_a_verdict_naming_a_hostile_directory_is_escaped_in_every_doc_table(tmp_path, capsys):
     """Adversary round 11, 3: the verdict now carries a directory name from the disk."""
