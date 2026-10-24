@@ -22,6 +22,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SF = ROOT / "skills" / "session-finder"
@@ -1977,7 +1978,8 @@ class TestRound7(Harness):
         """Findings 4 and 5, from real Claude Code transcripts."""
         tx = self.tx_with(self.q("enqueue"), self.q("remove"))
         self.assertEqual(relay.tx_state(str(tx), 0, "go ahead"), "queued")
-        tx = self.tx_with(self.q("enqueue"), self.q("dequeue", None), self.q("popAll", None))    # an unrelated pull-back later
+        tx = self.tx_with(self.q("enqueue"), self.q("dequeue", None), {"type": "user", "message": {"role": "user", "content": "go ahead"}},
+                          self.q("popAll", None))    # the dequeue handed over ours; an unrelated pull-back later
         self.assertEqual(relay.tx_state(str(tx), 0, "go ahead"), "delivered")
         tx = self.tx_with(self.q("dequeue", None))
         self.assertIsNone(relay.tx_state(str(tx), 0, "go ahead"))
@@ -2065,8 +2067,7 @@ class TestRound7(Harness):
         second = relay.route_pane({**c, "text": "another message"})    # a different text to the same pane, meanwhile
         release.set()
         t.join(10)
-        self.assertEqual(second[0], "stop")
-        self.assertEqual(second[2], 1)
+        self.assertEqual(second[0], "skip")    # the socket may still deliver: only the pane's typing is excluded
         self.assertIn("another relay is typing", second[1])
         self.assertEqual(self.calls, ["type"])
         self.assertEqual(first[0][0], "unverified")
@@ -2097,6 +2098,97 @@ class TestRound7(Harness):
         relay.UNSENT.write_text(json.dumps(rows))
         relay.note_unsent("new", "a new message", "", 0)
         self.assertEqual(sorted(json.loads(relay.UNSENT.read_text())), ["new"])
+
+    # ---- the queued lows of 2026-10-23 (relay-pane-lows adversary round 2) ----
+
+    def test_a_dequeue_that_handed_the_agent_another_prompt_does_not_deliver_ours(self) -> None:
+        """P2: real transcripts carry no content on a dequeue; ours stayed queued while his earlier prompt ran."""
+        other = {"type": "user", "message": {"role": "user", "content": "his earlier prompt"}}
+        tx = self.tx_with(self.q("enqueue", "his earlier prompt"), self.q("enqueue"), self.q("dequeue", None), other)
+        self.assertEqual(relay.tx_state(str(tx), 0, "go ahead"), "queued")
+        tx = self.tx_with(self.q("enqueue"), self.q("dequeue", None), other, self.q("popAll", None))    # then he pulls ours back
+        self.assertEqual(relay.tx_state(str(tx), 0, "go ahead"), "pulled")
+        for ours in ({"type": "user", "message": {"role": "user", "content": "go ahead"}},
+                     {"attachment": {"type": "queued_command", "prompt": "go ahead"}}):
+            tx = self.tx_with(self.q("enqueue"), self.q("dequeue", None), ours)
+            self.assertEqual(relay.tx_state(str(tx), 0, "go ahead"), "delivered", ours)
+        tx = self.tx_with(self.q("enqueue"), {"attachment": {"type": "queued_command", "prompt": "go ahead"}})
+        self.assertEqual(relay.tx_state(str(tx), 0, "go ahead"), "queued")    # an attachment counts only right after a dequeue
+
+    def test_a_pulled_entry_stays_when_a_copy_was_submitted_by_hand_after_the_window(self) -> None:
+        """P1: a short text, no draft seen, pulled back and then submitted by the operator after the stamp window:
+        the windowed state still reads "pulled", but a copy was delivered, so another text's relay must not drop
+        the entry (its retry would type the text a second time)."""
+        late = {"type": "user", "timestamp": stamp(300), "message": {"role": "user", "content": "go on"}}
+        tx = self.tx_with(self.q("enqueue", "go on"), self.q("popAll", None))
+        with tx.open("a") as fh:
+            fh.write(json.dumps(late) + "\n")
+        relay.note_unsent("cccccccc", "go on", "", 0, time.time() - 1, str(tx))
+        self.assertEqual(relay.entry_state(sess(transcript=str(tx)), relay.leftover("cccccccc")), "pulled")
+        rc, _, err = self.run_text(sess(transcript=str(tx)), "a different message")
+        self.assertEqual((rc, self.calls), (1, []))
+        self.assertIsNotNone(relay.leftover("cccccccc"))
+        self.assertIn("not yet proven", err)
+
+    def test_a_held_pane_lock_still_lets_the_socket_deliver(self) -> None:
+        """P3: the lock excludes only a second typist; the socket sends no keys."""
+        relay.claude_socket = lambda s: "/tmp/x.sock"
+        with relay.pane_lock("cccccccc") as got:
+            self.assertTrue(got)
+            rc, out, err = self.run_text(sess(), "hello there friend")
+        self.assertEqual((rc, self.calls), (0, ["socket"]), err)
+        with relay.pane_lock("cccccccc") as got:    # no socket: nothing may type beside the first relay
+            self.assertTrue(got)
+            relay.claude_socket = lambda s: None
+            self.calls.clear()
+            rc, _, err = self.run_text(sess(), "hello there friend")
+        self.assertEqual((rc, self.calls), (1, []))
+        self.assertIn("another relay is typing", err)
+
+    def test_a_failed_replace_leaves_no_temp_file_behind(self) -> None:
+        """P4: the unsent file is written through a temp file; one that cannot replace the real file is removed."""
+        relay.note_unsent("keep", "an earlier message", "", 0)
+        with mock.patch.object(relay.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                relay.note_unsent("cccccccc", "hello there friend", "", 0)
+        self.assertEqual([p.name for p in relay.UNSENT.parent.glob("*.tmp")], [])
+        self.assertEqual(sorted(json.loads(relay.UNSENT.read_text())), ["keep"])
+
+    def test_a_line_that_lands_after_the_last_poll_is_found_by_the_final_look(self) -> None:
+        """P4: with no time left in --wait the loop never reads the transcript; the final check still does."""
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+
+        def typed(chan: Any, text: str) -> bool:
+            self.calls.append("type")
+            with tx.open("a") as fh:
+                fh.write(user_line(text) + "\n")
+            return True
+        relay.type_line = typed
+        rc, out, err = self.run_text(sess(transcript=str(tx)), "hello there friend", "--wait", "0")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("delivered", out)
+        self.assertIsNone(relay.leftover("cccccccc"))
+
+    def test_an_entry_whose_transcript_is_another_file_is_never_pressed_nor_proven(self) -> None:
+        """P5: a herdr pane id outlives /clear; the mark is a byte offset into the old transcript file."""
+        old, new = self.tmp / "old.jsonl", self.tmp / "new.jsonl"
+        old.write_text("{}\n")
+        new.write_text("{}\n" + user_line("hello there friend") + "\n")    # the new file holds an unrelated equal line
+        relay.note_unsent("cccccccc", "hello there friend", "hello there friend", 0, time.time(), str(old))
+        relay.draft = lambda chan: "hello there friend"
+        calls = self.enters()
+        for text in ("hello there friend", "a different message"):    # its retry, then another text's relay
+            rc, _, err = self.run_text(sess(transcript=str(new)), text)
+            self.assertEqual((rc, calls), (1, []), text)
+        self.assertIn("not the one", self.run_text(sess(transcript=str(new)), "hello there friend")[2])
+        self.assertIsNotNone(relay.leftover("cccccccc"))
+        rc, _, _ = self.run_text(sess(transcript=str(old)), "hello there friend")    # same file: the retry submits as before
+        self.assertEqual(calls, ["enter"])
+
+    def test_arming_records_the_transcript_the_mark_belongs_to(self) -> None:
+        relay.arm(sess(transcript="/some/where/t.jsonl"), ("herdr", "w9:p9"), "hello there friend", 5)
+        self.assertEqual(relay.leftover("cccccccc")["tx"], "/some/where/t.jsonl")
 
 
 if __name__ == "__main__":
