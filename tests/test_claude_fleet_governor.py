@@ -611,7 +611,8 @@ class TestNoAction(Base):
     def test_the_newest_reading_wins_not_the_newest_file_and_a_cached_reading_is_one_sample(self):
         """Adversary gov-12 on PR 31, LOW 3: (1) the newest file holds account A's cached 50% (observed 40 min ago), an older
         file holds account B's 70% observed 30 min ago: B is the newest reading; (2) three files carrying the same cached
-        reading are one rate sample, not three."""
+        reading are one rate sample, not three. (Both halves already held at 1584ff5 and at 7789940, so this pins existing
+        behaviour; it is not a repair test.) The two files hold one account, x@example.com, as write_snap writes them."""
         wk = NOW + timedelta(days=6)
         resets = NOW + timedelta(hours=2)
         write_snap(self.e.snaps, NOW - timedelta(minutes=30), (70, resets), (12, wk))        # B, observed at the file time
@@ -884,9 +885,10 @@ def test_adversary_round_5_an_overflowing_timestamp_is_no_time_not_a_crash_after
 
 
 def _two_snaps(mod, pairs, resets):
-    """Newest first: [(at, used)] -> snapshots with one five-hour window."""
-    return [{"at": at, "windows": {"five_hour": {"label": "Claude Code 5-hour", "used": used, "resets_at": resets,
-                                                  "window_minutes": 300.0}}} for at, used in pairs]
+    """Newest first: [(at, used)] -> snapshots with one account's five-hour reading each (`read_snapshot`'s shape)."""
+    return [{"at": at, "windows": {"five_hour": [{"account": "claude:x", "label": "Claude Code 5-hour", "used": used,
+                                                  "resets_at": resets, "window_minutes": 300.0, "at": at}]}}
+            for at, used in pairs]
 
 
 def test_codex_pass_4_the_projection_starts_at_the_observation_not_at_now(monkeypatch, tmp_path):
@@ -952,3 +954,172 @@ def test_codex_pass_4_the_printed_bootstrap_line_quotes_a_destination_with_space
     import shlex
     argv = shlex.split(line)
     assert argv[:3] == ["launchctl", "bootstrap", f"gui/{os.getuid()}"] and len(argv) == 4 and argv[3].endswith("Launch Agents/com.djbclark.claude-fleet-governor.plist"), argv
+
+
+# -- per-account binding (adversary gov-13 on PR 31, MEDIUM: rounds 9-13 were variants of one root cause, a pick of ONE
+# account per file that switched accounts as they stalled or recovered, and a rate fitted across those picks) ------------
+
+R5 = NOW + timedelta(hours=3)
+RW = NOW + timedelta(days=6)
+
+
+def _acct(name: str | None, five: tuple[float, datetime] | None, weekly: tuple[float, datetime] | None = None,
+          at: datetime | None = None, **extra) -> dict:
+    node = {"provider": "claude", "windows": [window(label, *spec) for label, spec in ((FIVE, five), (WEEK, weekly)) if spec]}
+    if name:
+        node["account"] = name
+    if at:
+        node["collected_at"] = at.isoformat()
+    return {**node, **extra}
+
+
+def _account_compute(tmp_path, monkeypatch, files, now: datetime = NOW):
+    """files: [(file time, [account nodes])] -> (module, loaded snapshots, compute result) with the sandbox env patched,
+    so the machine's own snapshots, HOME and quota-guard state are never read."""
+    d = tmp_path / "snaps"
+    d.mkdir()
+    for at, accounts in files:
+        (d / snap_name(at)).write_text(json.dumps({"collected_at": at.isoformat(), "accounts": accounts}))
+    monkeypatch.setenv("CLAUDE_GOVERNOR_SNAPSHOTS", str(d))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_QUOTA_GUARD_STATE", str(tmp_path / "no-guard.json"))
+    mod = _gov()
+    t = mod.thresholds()
+    snaps = mod.load_snapshots(now, t)
+    return mod, snaps, mod.compute(snaps, now, t)
+
+
+def _ago(minutes: float) -> datetime:
+    return NOW - timedelta(minutes=minutes)
+
+
+MINS = (60, 50, 40, 30, 20, 10, 1)
+
+
+def test_gov13_p1_a_stalled_accounts_cached_reading_does_not_hide_a_fresh_accounts_burn(tmp_path, monkeypatch):
+    """A has been stalled since now-60 at 90%; B burns 45 -> 65% over the hour (20 %/h) and resets with A. The old per-file
+    pick fell back to A's cached 90 in the files where neither was fresh and fitted one slope across both accounts: ok."""
+    b = lambda m: 45 + (60 - m) / 3
+    _, _, res = _account_compute(tmp_path, monkeypatch, [
+        (_ago(m), [_acct("a", (90, R5), (10, RW), at=_ago(60)), _acct("b", (b(m), R5), (10, RW))]) for m in MINS])
+    w = res["windows"]["five_hour"]
+    assert w["level"] == "tight" and res["level"] == "tight" and w.get("account") == "claude:b", w
+    assert abs(w["rate_per_hour"] - 20.0) < 1e-6 and w["samples"] == 7 and w["projected_at_reset"] > 120, w
+
+
+def test_gov13_p2_a_recovering_account_does_not_invent_a_burn(tmp_path, monkeypatch):
+    """A's collector was stalled (a cached 70% from now-150) and recovered at now-1 with the same flat 70%; B is a flat
+    30%. The old pick took B's 30 in the older files and A's 70 in the newest: a 25 %/h burn that never existed."""
+    _, _, res = _account_compute(tmp_path, monkeypatch, [
+        (_ago(m), [_acct("a", (70, R5), (10, RW), at=_ago(1 if m == 1 else 150)), _acct("b", (30, R5), (10, RW))]) for m in MINS])
+    w = res["windows"]["five_hour"]
+    assert w["used"] == 70 and w["rate_per_hour"] == 0 and w["level"] == "ok" and w.get("account") == "claude:a", w
+    assert res["level"] == "ok"
+
+
+def test_gov13_p3_an_account_missing_from_the_newest_file_still_counts_while_its_reading_is_fresh(tmp_path, monkeypatch):
+    """A 85% and B 40% at now-5; the file at now-1 holds only B. A's 85% (left 15, tight) is 5 minutes old: still evidence."""
+    _, _, res = _account_compute(tmp_path, monkeypatch, [
+        (_ago(5), [_acct("a", (85, R5), (10, RW)), _acct("b", (40, R5), (10, RW))]),
+        (_ago(1), [_acct("b", (40, R5), (10, RW))])])
+    w = res["windows"]["five_hour"]
+    assert w["used"] == 85 and res["level"] == "tight" and w.get("account") == "claude:a", w
+
+
+def test_gov13_p4_the_account_with_the_worse_projection_binds_not_the_one_with_the_higher_used(tmp_path, monkeypatch):
+    """A: flat 70% that resets in 20 min (ok). B: 45 -> 60% in 30 min (30 %/h), resets in 3 h: projected 150, tight."""
+    ra = NOW + timedelta(minutes=20)
+    bb = lambda m: 60 - m / 2
+    _, _, res = _account_compute(tmp_path, monkeypatch, [
+        (_ago(m), [_acct("a", (70, ra), (10, RW)), _acct("b", (bb(m), R5), (10, RW))]) for m in (30, 20, 10, 1)])
+    w = res["windows"]["five_hour"]
+    assert w["level"] == "tight" and w["projected_at_reset"] > 140 and w.get("account") == "claude:b", w
+    assert res["level"] == "tight"
+
+
+def test_gov13_p5_an_account_fresh_against_its_file_but_stale_against_now_is_left_out(tmp_path, monkeypatch):
+    """The file is 10 min old; A was read 50 min ago (40 min before its file: fresh there, 50 min old now) at 97%; B is fresh
+    at 96%. A takes no part, B alone decides: critical. Without the per-account freshness test A's 97 is dropped late
+    (the round-12 MEDIUM) or the 5-hour window disappears."""
+    _, _, res = _account_compute(tmp_path, monkeypatch, [
+        (_ago(10), [_acct("a", (97, R5), (50, RW), at=_ago(50)), _acct("b", (96, R5), (60, RW))])])
+    w = res["windows"]["five_hour"]
+    assert w["used"] == 96 and res["level"] == "critical" and w.get("account") == "claude:b", w
+    assert res["windows"]["weekly"]["used"] == 60, res["windows"]["weekly"]
+
+
+def test_gov13_among_accounts_at_the_same_level_the_higher_projection_binds_then_the_higher_used(tmp_path, monkeypatch):
+    _, _, res = _account_compute(tmp_path, monkeypatch, [
+        (_ago(1), [_acct("a", (40, R5), (10, RW)), _acct("b", (55, R5), (10, RW)), _acct("c", (55, R5), (10, RW))])])
+    w = res["windows"]["five_hour"]
+    assert w["used"] == 55 and w["level"] == "ok" and w.get("account") == "claude:b", w     # equal: the first in file order
+
+
+def test_gov13_m5_two_files_with_the_same_reading_time_give_one_sample_the_newest_files_value(tmp_path, monkeypatch):
+    """Two files carry the account's reading time now-40 with different values (30 in the older file, 50 in the newer); the
+    latest reading is 60 at now-2. The sample at now-40 is the newer file's 50, so the rate is (60-50) per 38 min."""
+    mod, _, res = _account_compute(tmp_path, monkeypatch, [
+        (_ago(20), [_acct("a", (30, R5), (10, RW), at=_ago(40))]),
+        (_ago(10), [_acct("a", (50, R5), (10, RW), at=_ago(40))]),
+        (_ago(2), [_acct("a", (60, R5), (10, RW))])])
+    w = res["windows"]["five_hour"]
+    assert w["samples"] == 2 and abs(w["rate_per_hour"] - mod.slope_per_hour([(0.0, 50.0), (38 / 60, 60.0)])) < 1e-6, w
+
+
+def test_gov13_m5_the_current_reading_of_a_tied_time_is_the_newest_files_value(tmp_path, monkeypatch):
+    _, _, res = _account_compute(tmp_path, monkeypatch, [
+        (_ago(20), [_acct("a", (30, R5), (10, RW), at=_ago(25))]),
+        (_ago(10), [_acct("a", (50, R5), (10, RW), at=_ago(25))])])
+    assert res["windows"]["five_hour"]["used"] == 50 and res["windows"]["five_hour"]["samples"] == 1
+
+
+def test_gov13_m6_a_reading_exactly_stale_min_old_is_evidence_one_second_more_is_not(tmp_path, monkeypatch):
+    """Against its own file (`read_snapshot`, `now` far later so only the file's age decides) and against now (`compute`)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_QUOTA_GUARD_STATE", str(tmp_path / "no-guard.json"))
+    mod = _gov()
+    stale = timedelta(minutes=45)
+    file_at = NOW
+    for extra, kept in ((timedelta(0), True), (timedelta(seconds=1), False)):
+        f = tmp_path / f"f{int(extra.total_seconds())}.json"
+        f.write_text(json.dumps({"collected_at": file_at.isoformat(),
+                                 "accounts": [_acct("a", (50, R5), (10, RW), at=file_at - stale - extra)]}))
+        snap = mod.read_snapshot(f, file_at, file_at + timedelta(hours=3), 45)    # now far later: only the file's age decides
+        assert ("five_hour" in snap["windows"]) is kept, (extra, snap)
+        assert ("weekly" in snap["windows"]) is kept, (extra, snap)
+    t = mod.thresholds()
+    reading = lambda ago: {"at": NOW - ago, "windows": {"five_hour": [{
+        "account": "claude:a", "label": FIVE, "used": 50.0, "resets_at": R5, "window_minutes": 300.0, "at": NOW - ago}]}}
+    assert "five_hour" in mod.compute([reading(stale)], NOW, t)["windows"]
+    assert "five_hour" not in mod.compute([reading(stale + timedelta(seconds=1))], NOW, t)["windows"]
+
+
+def test_gov13_aiuses_mirror_under_snapshot_accounts_is_the_same_account_not_a_second(tmp_path, monkeypatch):
+    """The real aiuse file lists its accounts twice (`accounts` and `snapshot.accounts`). Named or not, the mirror is one
+    reading per window; two different unnamed accounts stay two."""
+    mod = _gov()
+    named = _acct("x@example.com", (50, R5), (10, RW), age_seconds=30.0)
+    unnamed = _acct(None, (50, R5), (10, RW))
+    other = _acct(None, (80, R5), (10, RW))
+    cases = {"named": ([named], 1, "claude:x@example.com"), "unnamed": ([unnamed], 1, "claude@accounts.0"),
+             "two unnamed": ([unnamed, other], 2, None)}
+    for name, (accounts, count, key) in cases.items():
+        f = tmp_path / f"{name.replace(' ', '_')}.json"
+        f.write_text(json.dumps({"collected_at": NOW.isoformat(), "accounts": accounts, "snapshot": {"accounts": accounts}}))
+        snap = mod.read_snapshot(f, NOW, NOW, 45)
+        readings = snap["windows"]["five_hour"]
+        assert len(readings) == count, (name, readings)
+        if key:
+            assert readings[0]["account"] == key, (name, readings)
+    assert {r["account"] for r in snap["windows"]["five_hour"]} == {"claude@accounts.0", "claude@accounts.1"}
+
+
+class TestPerAccountEndToEnd(Base):
+    def test_a_stalled_account_next_to_a_fresh_burning_one_is_tight_through_check(self):
+        """gov-13 P1 through the real script: one account stalled at 90% since now-60, the other burning 20 %/h."""
+        for m in MINS:
+            write_snap(self.e.snaps, _ago(m), (90, R5), (10, RW), account_at=_ago(60),
+                       extra=[((45 + (60 - m) / 3, R5), (10, RW), None)])
+        r = self.e.run("check")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("level: tight", r.stdout)

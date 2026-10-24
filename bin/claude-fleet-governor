@@ -19,15 +19,19 @@ own set_agent_model_request (bin/paseo-set-model).
 Data: the newest aiuse snapshots (CLAUDE_GOVERNOR_SNAPSHOTS, default ~/.cache/aiuse/snapshots/).
 Windows are found by label prefix: "Claude Code 5-hour", "Claude Code weekly", and
 "Claude Code weekly — Fable" (the sublimit; reported, but it never sets the level, it is what the
-unconditional Fable -> Opus move below is about). Newest snapshot older than 45 min: exit 10, no action. A window last observed more than 45 min ago (the newest
-snapshot lacks it, an older one has it) is no evidence either: with no fresh shared Claude window left, exit 10.
+unconditional Fable -> Opus move below is about). Newest snapshot older than 45 min: exit 10, no action. Each Claude
+account (aiuse's `account` name, else its place in the JSON; aiuse's `snapshot.accounts` mirror is not a second one) is
+judged on its own: an account whose last reading of a window is more than 45 min old (by its own time, not the file's,
+and wherever that reading sits: an account the newest file omits, or holds only a cached reading of, is judged on
+what it last had) takes no part; with no account's window fresh, exit 10.
 
-Projection, per window: burn rate = least-squares slope (percent per hour; below MIN_RATE, 0.001, it is 0) over the
-snapshots of the last 90 min that share the newest window's resets_at (+-5 min), needing two samples at
-least 10 min apart. projected_at_reset = used + rate * hours_to_reset, counted from the newest observation of the
-window (never later than now); exhaust_at = that observation + (100 - used) / rate when rate >= MIN_RATE and that is under a
-year away. Levels (thresholds: THRESHOLDS below, env CLAUDE_GOVERNOR_THRESHOLDS
-JSON merges over them):
+Projection, per account and window: burn rate = least-squares slope (percent per hour; below MIN_RATE, 0.001, it is 0)
+over that account's own readings of the last 90 min that share its newest reading's resets_at (+-5 min), needing two
+samples at least 10 min apart (one sample per reading time; the newest file's value). projected_at_reset = used + rate *
+hours_to_reset, counted from the account's newest observation of the window (never later than now); exhaust_at = that
+observation + (100 - used) / rate when rate >= MIN_RATE and that is under a year away. Several accounts: the window is
+the account at the worst level, then the highest projection at reset, then the highest `used`. Levels (thresholds:
+THRESHOLDS below, env CLAUDE_GOVERNOR_THRESHOLDS JSON merges over them):
   ok        neither of the below
   tight     any window projected >= 90% at its reset, or 5-hour left < 25, or weekly left < 30
   critical  projected exhaustion more than 10 min before the reset and within 45 min, or any window
@@ -204,21 +208,35 @@ def observed_at(node: dict[str, Any], snap_at: datetime | None) -> datetime | No
     return min(cands) if cands else None
 
 
+def account_key(node: dict[str, Any], path: str) -> str:
+    """Who a reading belongs to: provider + the account's own `account` name when it has one, else provider + the JSON
+    path of the account node. aiuse also mirrors its account list under `snapshot.accounts`; that prefix is dropped
+    from a path key so the mirror is the same account, not a second one."""
+    provider = node.get("provider") if isinstance(node.get("provider"), str) else ""
+    name = node.get("account")
+    if isinstance(name, str) and name.strip():
+        return f"{provider}:{name.strip()}"
+    return f"{provider}@{path.removeprefix('snapshot.')}"
+
+
 def find_windows(node: Any, out: list[dict[str, Any]], obs: datetime | None = None,
-                 snap_at: datetime | None = None) -> None:
+                 snap_at: datetime | None = None, path: str = "", acct: str | None = None) -> None:
     """Every dict with a `label` and a used or remaining percentage, anywhere in the JSON, with the time of the
-    nearest enclosing account's own reading under `_obs`."""
+    nearest enclosing account's own reading under `_obs` and that account's key under `_acct` (the nearest enclosing
+    dict with a `provider` or an `account`; a window with none is its own account, keyed by its path)."""
     if isinstance(node, dict):
         own = observed_at(node, snap_at) if ("collected_at" in node or "age_seconds" in node) else None
         obs = own or obs
+        if "provider" in node or "account" in node:
+            acct = account_key(node, path)
         if isinstance(node.get("label"), str) and (
                 num(node.get("used_percent")) is not None or num(node.get("remaining_percent")) is not None):
-            out.append({**node, "_obs": obs})
-        for v in node.values():
-            find_windows(v, out, obs, snap_at)
+            out.append({**node, "_obs": obs, "_acct": acct or f"@{path.removeprefix('snapshot.')}"})
+        for k, v in node.items():
+            find_windows(v, out, obs, snap_at, f"{path}.{k}" if path else str(k), acct)
     elif isinstance(node, list):
-        for v in node:
-            find_windows(v, out, obs, snap_at)
+        for i, v in enumerate(node):
+            find_windows(v, out, obs, snap_at, f"{path}.{i}" if path else str(i), acct)
 
 
 def kind_of(label: str) -> str | None:
@@ -231,11 +249,14 @@ def kind_of(label: str) -> str | None:
 
 
 def read_snapshot(path: Path, at: datetime, now: datetime, stale_min: float) -> dict[str, Any] | None:
-    """{"at": datetime, "windows": {kind: {label, used, resets_at, window_minutes, at}}} or None. Of several accounts the
-    tightest FRESH reading binds: a reading that is already more than `stale_min` old (against the file, and against
-    `now` where another account's is fresher) never wins the comparison only to be dropped as stale later, which would
-    hide a fresh account's tight reading (adversary gov-12 on PR 31, MEDIUM). An account's own time is clamped to the
-    file that holds it: a reading cannot be newer than its file (gov-12 LOW 2)."""
+    """{"at": datetime, "windows": {kind: [reading, ...]}} or None, a reading being {account, label, used, resets_at,
+    window_minutes, at}: EVERY account's reading of the kind, none picked (the pick per file is what mixed accounts
+    across files in adversary gov-9 to gov-13; `compute` binds per account). `account` is `account_key`. Within one
+    file an account's window (its key and label) is one reading: the mirror aiuse writes under `snapshot.accounts`
+    collapses into it, and of two different readings the newer, then the higher, wins. A reading's `at` is its
+    account's own time (`collected_at`, or the file time minus `age_seconds`), clamped to the file that holds it: a
+    reading cannot be newer than its file (gov-12 LOW 2). A reading already more than `stale_min` old against its own
+    file (`min(file time, now)`) is dropped here; freshness against `now` is `compute`'s call, account by account."""
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -244,7 +265,8 @@ def read_snapshot(path: Path, at: datetime, now: datetime, stale_min: float) -> 
     found: list[dict[str, Any]] = []
     find_windows(data, found, None, stamp or at)
     file_at = stamp or at
-    cands: dict[str, list[dict[str, Any]]] = {}
+    ref = min(file_at, now)
+    one: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
     for w in found:
         kind = kind_of(w["label"])
         used = num(w.get("used_percent"))
@@ -255,17 +277,16 @@ def read_snapshot(path: Path, at: datetime, now: datetime, stale_min: float) -> 
         if kind is None or used is None or resets is None:
             continue
         used = min(100.0, max(0.0, used))      # round 1 LOW 5: a value outside 0..100 is clamped, never trusted
-        cands.setdefault(kind, []).append({"label": w["label"], "used": used, "resets_at": resets,
-                                           "window_minutes": num(w.get("window_minutes")),
-                                           "at": min(w.get("_obs") or file_at, file_at)})
-    windows: dict[str, dict[str, Any]] = {}
-    ref = min(file_at, now)
-    for kind, lst in cands.items():
-        fresh = [c for c in lst if (ref - c["at"]).total_seconds() <= stale_min * 60]
-        if not fresh:
-            continue                           # every account's reading was already stale in its own file
-        live = [c for c in fresh if (now - c["at"]).total_seconds() <= stale_min * 60]
-        windows[kind] = max(live or fresh, key=lambda c: c["used"])    # several accounts: the tightest fresh one binds
+        r = {"account": w["_acct"], "label": w["label"], "used": used, "resets_at": resets,
+             "window_minutes": num(w.get("window_minutes")), "at": min(w.get("_obs") or file_at, file_at)}
+        if (ref - r["at"]).total_seconds() > stale_min * 60:
+            continue                           # already stale in its own file
+        key = (r["account"], r["label"])
+        if key not in one or (r["at"], r["used"]) > (one[key][1]["at"], one[key][1]["used"]):
+            one[key] = (kind, r)
+    windows: dict[str, list[dict[str, Any]]] = {}
+    for kind, r in one.values():
+        windows.setdefault(kind, []).append(r)
     return {"at": file_at, "windows": windows}
 
 
@@ -336,42 +357,59 @@ def window_level(kind: str, w: dict[str, Any], now: datetime, t: dict[str, float
     return "ok"
 
 
+def project_account(kind: str, readings: list[dict[str, Any]], now: datetime, t: dict[str, float]) -> dict[str, Any] | None:
+    """One account's window: `readings` is that account's own readings of one window label, newest file first. Its
+    newest reading that is no more than stale_min old and whose reset has not passed is the current one (equal times:
+    the newest file's value); None when there is none. The rate is fitted over this account's own samples only."""
+    eligible = [r for r in readings
+                if (r["resets_at"] - now).total_seconds() > 0       # the data predates a reset that has happened: no evidence
+                and (now - r["at"]).total_seconds() <= t["stale_min"] * 60]   # last observed long ago: no evidence either
+    if not eligible:
+        return None
+    cur = max(eligible, key=lambda r: r["at"])     # max keeps the first of equal times: the newest file
+    cur_at, resets = cur["at"], cur["resets_at"]
+    # `used` was observed at `cur_at`, not at `now` (a reading is accepted up to stale_min old): project from the
+    # observation, and fit the rate over the window that ends at the newest observation, so a quiet half hour between
+    # hourly collections neither shifts the projection nor drops the supporting samples (Codex pass 4 on PR 31, P2 x2)
+    obs = min(cur_at, now)                 # a reading dated a few minutes ahead of the clock counts as now (adversary gov-9, LOW)
+    hours = (resets - obs).total_seconds() / 3600
+    tol = timedelta(minutes=t["reset_tolerance_min"])
+    by_at: dict[datetime, float] = {}      # one sample per reading time, the newest file's value (gov-12 INFO 5)
+    for r in readings:
+        if abs(r["resets_at"] - resets) <= tol and 0 <= (cur_at - r["at"]).total_seconds() <= t["rate_window_min"] * 60:
+            by_at.setdefault(r["at"], r["used"])
+    samples = sorted(by_at.items())
+    rate = 0.0
+    if len(samples) >= 2 and (samples[-1][0] - samples[0][0]).total_seconds() >= t["min_span_min"] * 60:
+        rate = slope_per_hour([((a - samples[0][0]).total_seconds() / 3600, u) for a, u in samples])
+    used = cur["used"]
+    w = {"label": cur["label"], "account": cur["account"], "used": used, "left": max(0.0, 100.0 - used),
+         "rate_per_hour": rate, "projected_at_reset": used + rate * hours, "resets_at": resets, "samples": len(samples),
+         "exhaust_at": exhaust_time(obs, used, rate)}
+    w["level"] = window_level(kind, w, now, t)
+    return w
+
+
 def compute(snaps: list[dict[str, Any]], now: datetime, t: dict[str, float]) -> dict[str, Any]:
-    """Windows with rate/projection/level, and the overall level (the Fable window excluded)."""
+    """Windows with rate/projection/level, and the overall level (the Fable window excluded). Per window kind, every
+    account (and window label) is judged on its own readings alone (`project_account`: its newest fresh reading, its own
+    rate fit) and the one in the worst state is the window: highest level, then highest projection at reset, then
+    highest `used`. An account with no fresh reading takes no part; with none fresh there is no window."""
     windows: dict[str, dict[str, Any]] = {}
     newest = snaps[0]
     for kind in [k for k, _ in KINDS] + [FABLE_KIND]:
-        seen = [(s["windows"][kind], s["windows"][kind].get("at", s["at"])) for s in snaps if kind in s["windows"]]
-        if not seen:
-            continue
-        cur, cur_at = max(seen, key=lambda p: p[1])      # the newest reading of this window, whichever file holds it
-        resets = cur["resets_at"]
-        if (resets - now).total_seconds() <= 0:
-            continue                       # the data predates a reset that has happened: not evidence
-        if (now - cur_at).total_seconds() > t["stale_min"] * 60:
-            continue                       # last observed long ago (a newer snapshot lacks the window): not evidence either (Codex pass 5 on PR 31, P2)
-        # `used` was observed at `cur_at`, not at `now` (a snapshot is accepted up to stale_min old): project from the
-        # observation, and fit the rate over the window that ends at the newest observation, so a quiet half hour between
-        # hourly collections neither shifts the projection nor drops the supporting samples (Codex pass 4 on PR 31, P2 x2)
-        obs = min(cur_at, now)             # a snapshot dated a few minutes ahead of the clock counts as now (adversary gov-9, LOW)
-        hours = (resets - obs).total_seconds() / 3600
-        tol = timedelta(minutes=t["reset_tolerance_min"])
-        by_at: dict[datetime, float] = {}      # one sample per reading time, the newest file's value (gov-12 INFO 5)
-        for s in snaps:
-            w = s["windows"].get(kind)
-            if (w is not None and abs(w["resets_at"] - resets) <= tol
-                    and 0 <= (cur_at - w.get("at", s["at"])).total_seconds() <= t["rate_window_min"] * 60):
-                by_at.setdefault(w.get("at", s["at"]), w["used"])
-        samples = sorted(by_at.items())
-        rate = 0.0
-        if len(samples) >= 2 and (samples[-1][0] - samples[0][0]).total_seconds() >= t["min_span_min"] * 60:
-            rate = slope_per_hour([((a - samples[0][0]).total_seconds() / 3600, u) for a, u in samples])
-        used = cur["used"]
-        w = {"label": cur["label"], "used": used, "left": max(0.0, 100.0 - used), "rate_per_hour": rate,
-             "projected_at_reset": used + rate * hours, "resets_at": resets, "samples": len(samples),
-             "exhaust_at": exhaust_time(obs, used, rate)}
-        w["level"] = window_level(kind, w, now, t)
-        windows[kind] = w
+        by_account: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for s in snaps:                                  # newest file first
+            for r in s["windows"].get(kind, ()):
+                by_account.setdefault((r["account"], r["label"]), []).append(r)
+        best = None
+        for readings in by_account.values():
+            w = project_account(kind, readings, now, t)
+            if w is not None and (best is None or (LEVELS[w["level"]], w["projected_at_reset"], w["used"])
+                                  > (LEVELS[best["level"]], best["projected_at_reset"], best["used"])):
+                best = w
+        if best is not None:
+            windows[kind] = best
     level = max((w["level"] for k, w in windows.items() if k != FABLE_KIND), key=LEVELS.get, default="ok")
     guard = guard_level(now)
     if LEVELS[guard] > LEVELS[level]:  # the sensor (bin/claude-quota-guard) is stricter than this projection: it wins
