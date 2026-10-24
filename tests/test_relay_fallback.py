@@ -2313,6 +2313,24 @@ class TestRound7(Harness):
         self.assertEqual((rc, self.calls), (1, []))
         self.assertIn("another relay is typing", err)
 
+    def test_the_same_text_is_not_sent_twice_while_the_first_relay_holds_the_pane_lock(self) -> None:
+        """P3 (adversary L2): the first relay records its entry only at the end, so a second relay of the same text must
+        not reach the socket meanwhile; a different text still may."""
+        relay.claude_socket = lambda s: "/tmp/x.sock"
+        with relay.pane_lock("cccccccc", "hello  there\nfriend") as got:
+            self.assertTrue(got)
+            rc, _, err = self.run_text(sess(), "hello there friend")
+            self.assertEqual((rc, self.calls), (1, []))
+            self.assertIn("sending this very text", err)
+            rc, _, err = self.run_text(sess(), "a different message")
+            self.assertEqual((rc, self.calls), (0, ["socket"]), err)
+        self.assertEqual(relay.pane_lock_path("cccccccc").read_text(), "")    # released: nothing is in flight
+        self.calls.clear()
+        with relay.pane_lock("cccccccc", "an unrelated text") as got:
+            self.assertTrue(got)
+        rc, _, err = self.run_text(sess(), "hello there friend")
+        self.assertEqual((rc, self.calls), (0, ["type"]), err)    # another text was in flight, the lock is free again: the pane route types
+
     def test_a_failed_replace_leaves_no_temp_file_behind(self) -> None:
         """P4: the unsent file is written through a temp file; one that cannot replace the real file is removed."""
         relay.note_unsent("keep", "an earlier message", "", 0)

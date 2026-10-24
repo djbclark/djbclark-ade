@@ -115,6 +115,7 @@ import argparse
 import contextlib
 import datetime
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -491,19 +492,33 @@ def _unsent():
 
 
 @contextlib.contextmanager
-def _flock(path, wait=True):
+def _flock(path, wait=True, tag=None):
     """Hold an exclusive flock on the 0600 file PATH for the block, yielding True. With WAIT false it never blocks:
-    it yields False, and holds nothing, when another process holds the lock. Closing the descriptor releases it."""
+    it yields False, and holds nothing, when another process holds the lock. Closing the descriptor releases it.
+    TAG (a string) is written into the file while the lock is held and emptied before it is released."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    held = False
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except OSError:
             yield False
             return
+        held = True
+        if tag:
+            try:
+                os.ftruncate(fd, 0)
+                os.pwrite(fd, tag.encode(), 0)
+            except OSError:
+                pass
         yield True
     finally:
+        if held and tag:
+            try:
+                os.ftruncate(fd, 0)
+            except OSError:
+                pass
         os.close(fd)
 
 
@@ -513,10 +528,37 @@ def _unsent_lock():
     return _flock(UNSENT.with_name(UNSENT.name + ".lock"))
 
 
-def pane_lock(sid):
+def pane_lock_path(sid):
+    return UNSENT.with_name("relay-pane-" + re.sub(r"[^A-Za-z0-9_-]", "_", sid) + ".lock")
+
+
+def text_tag(text):
+    return hashlib.sha256(" ".join(text.split()).encode()).hexdigest()[:32]
+
+
+def pane_lock(sid, text=""):
     """Non-blocking per-session lock a relay holds from reading a pane's box until its text is recorded: yields
-    False when another relay is typing into that pane."""
-    return _flock(UNSENT.with_name("relay-pane-" + re.sub(r"[^A-Za-z0-9_-]", "_", sid) + ".lock"), wait=False)
+    False when another relay is typing into that pane. While held, the lock file carries a hash of TEXT (`pane_sending`)."""
+    return _flock(pane_lock_path(sid), wait=False, tag=text_tag(text) if text else None)
+
+
+def pane_sending(sid, text):
+    """True when the relay that holds SID's pane lock is sending TEXT: the hash it wrote in the lock file. The holder
+    writes it right after taking the lock, so an empty file is read a few times before it counts as "another text"."""
+    want = text_tag(text)
+    for _ in range(5):
+        try:
+            fd = os.open(pane_lock_path(sid), os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                got = os.read(fd, 64).decode("ascii", "replace")
+            finally:
+                os.close(fd)
+        except OSError:
+            return False
+        if got:
+            return got == want
+        time.sleep(0.02)
+    return False
 
 
 def _note(sid, text, draft, mark, typed, tx=None):
@@ -1019,9 +1061,12 @@ def route_pane(c):
     if is_slash(text) or text.lstrip(SLASH_STRIP).startswith("!"):
         return ("skip", "text starting with '/' or '!' typed into a pane would run a built-in or a shell command "
                         "there; peers do not run another session's built-ins")
-    with pane_lock(s["id"]) as got:    # from the box read until the text is recorded: two relays never type into one box
-        if not got:    # skip, not stop: the socket sends no keys, so the next route may still deliver
-            return ("skip", "another relay is typing into that pane right now (it holds the pane lock beside "
+    with pane_lock(s["id"], text) as got:    # from the box read until the text is recorded: two relays never type into one box
+        if not got:
+            if pane_sending(s["id"], text):    # the holder is sending this very text: the socket would put it in a second time
+                return ("stop", "another relay is sending this very text into that pane right now (it holds the pane lock "
+                                f"beside {UNSENT.name}): not sending it a second time; check its pane, do not resend", 1)
+            return ("skip", "another relay is typing into that pane right now (it holds the pane lock beside "    # skip, not stop: the socket sends no keys, so the next route may still deliver
                             f"{UNSENT.name}): not typing beside it; check its pane, then retry")
         return pane_send(c)
 
