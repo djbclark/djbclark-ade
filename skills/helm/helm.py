@@ -145,9 +145,10 @@ def classify(s, st):
     elif s.get("host") == "paseo" and not s.get("sid") and s["status"] == "blocked":
         # a Paseo agent with no Claude transcript waiting on a permission or question card (fleet.py reads `paseo permit ls`):
         # no terminal for helm to read or press keys in, so the item only points at the Paseo UI
-        pend = s.get("paseo_pending") or ""
-        it.update(kind="permission", fp="paseo:" + hashlib.sha1(pend.encode()).hexdigest()[:12], tool="paseo", detail=pend,
-                  paseo=True, reachable=False)
+        pend, cards = s.get("paseo_pending") or "", s.get("paseo_cards") or []
+        fp = "\n".join(f"{c.get('id')}\0{c.get('text')}" for c in cards) or pend    # every request id: a new card re-opens the item
+        it.update(kind="permission", fp="paseo:" + hashlib.sha1(fp.encode()).hexdigest()[:12], tool="paseo", detail=pend,
+                  paseo=True, reachable=False, cards=cards, paseo_agent=s.get("paseo"))
     elif s.get("host") == "hermes-gw" or (s.get("host") == "paseo" and not s.get("sid")):
         # a Hermes chat, or a Paseo agent with no Claude transcript (fleet.py lists them all): not a terminal, nothing to relay by keys
         it.update(kind="remote", fp="")
@@ -292,6 +293,23 @@ def heading(it):
     return f"[{it['id']}] {it['project']} — {' · '.join(bits)}  ({who}){unlock_tag}"
 
 
+def paseo_answers(it, shown=8):
+    """Answer lines for a Paseo item: `paseo permit allow|deny AGENT REQUEST_ID` per card, never without the request id (allow
+    without one approves every card of the agent, deny without one fails). Up to SHOWN cards, then a pointer to `paseo permit ls`."""
+    cards, agent = it.get("cards") or [], it.get("paseo_agent")
+    out = []
+    for n, c in enumerate(cards[:shown], 1):
+        if len(cards) > 1:
+            out.append(f"  card {n}: {c.get('text', '')}")
+        out.append("    " + (f"`paseo permit allow {agent} {c['id']}` | `paseo permit deny {agent} {c['id']}`" if agent and c.get("id")
+                             else "no usable request id: answer it in the Paseo UI"))
+    if len(cards) > shown:
+        out.append(f"  and {len(cards) - shown} more cards: `paseo permit ls`")
+    if not cards:
+        out.append("    no request id known: answer it in the Paseo UI")
+    return out + ["  or answer in the Paseo UI (helm has no terminal to press keys in)"]
+
+
 def render(it, full=False):
     out = [heading(it)]
     k = it["kind"]
@@ -340,8 +358,10 @@ def render(it, full=False):
                else "no channel: answer in the pane")
         out.append(f"  answer: {how}")
     elif k == "permission" and it.get("paseo"):
-        out.append(f"  PASEO AGENT WAITS ON A CARD: {it.get('detail', '')}")
-        out.append(f"  answer: in the Paseo UI, or `paseo permit allow|deny {it['id']}` (helm has no terminal to press keys in)")
+        cards = it.get("cards") or []
+        out.append(f"  PASEO AGENT WAITS ON {len(cards)} CARDS, each answered on its own:" if len(cards) > 1 else
+                   f"  PASEO AGENT WAITS ON A CARD: {it.get('detail', '')}")
+        out += paseo_answers(it)
     elif k in ("plan", "permission", "blocked"):
         label = {"plan": "PLAN APPROVAL", "permission": f"PERMISSION ({it.get('tool')})", "blocked": "BLOCKED"}[k]
         out.append(f"  {label}: {it.get('detail', 'waiting on a prompt helm cannot parse')}")
@@ -593,7 +613,8 @@ def cmd_keys(a, state):
     if it["kind"] not in ("question", "plan", "permission", "blocked"):
         sys.exit(f"helm: {it['id']} is {it['kind']}, not waiting on a prompt; nothing sent")
     if it.get("paseo"):
-        sys.exit(f"helm: {it['id']} is a Paseo agent: no terminal to press keys in; answer in the Paseo UI or `paseo permit allow|deny {it['id']}`")
+        sys.exit(f"helm: {it['id']} is a Paseo agent: no terminal to press keys in; answer in the Paseo UI or per card with "
+                 f"`paseo permit allow|deny <agent> <request id>` (`paseo permit ls`)")
     if not s.get("chan"):
         sys.exit(f"helm: no channel to {it['id']}")
     send_keys(s, *a.key)

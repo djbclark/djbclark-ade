@@ -523,17 +523,23 @@ def _paseo_ls(*flags):
 
 
 CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+PASEO_REQ = re.compile(r"[A-Za-z0-9._:-]{1,80}")
 
 
 def _paseo_waiting():
-    """{Paseo agent id: "TOOL: description"} for every agent with a pending permission or question card, from one
-    `paseo permit ls --json` (`paseo ls` carries no pending-permission field). Empty when the call fails: a row is
-    then listed as it was before, `running`. The text is the agent's own, control characters stripped."""
+    """{Paseo agent id: [{"id": request id or None, "text": "TOOL: description"}, ...]} for every agent with a pending
+    permission or question card, one entry per card in the order `paseo permit ls --json` lists them (`paseo ls` carries
+    no pending-permission field). The request id is what `paseo permit allow|deny AGENT ID` takes (without one, allow
+    approves every card of the agent); an id that is not a plain token is None. Empty when the call fails: a row is then
+    listed as it was before, `running`. The text is the agent's own, control characters stripped."""
     out = {}
     for d in _paseo_json("permit", "ls", "--json") or []:
         pid = d.get("agentId") if isinstance(d, dict) else None
-        if isinstance(pid, str) and pid not in out:
-            out[pid] = " ".join(CTRL.sub(" ", f"{d.get('name') or 'permission'}: {d.get('description') or ''}").split())[:300]
+        if isinstance(pid, str):
+            rid = d.get("id")
+            out.setdefault(pid, []).append({
+                "id": rid if isinstance(rid, str) and PASEO_REQ.fullmatch(rid) else None,
+                "text": " ".join(CTRL.sub(" ", f"{d.get('name') or 'permission'}: {d.get('description') or ''}").split())[:300]})
     return out
 
 
@@ -595,7 +601,9 @@ def _paseo_rows(have, anc, include_archived=False):
         waiting = _paseo_waiting()
         for s in out:
             if s["paseo_state"] == "running" and s["paseo"] in waiting:
-                s.update(status="blocked", paseo_pending=waiting[s["paseo"]])
+                cards = waiting[s["paseo"]]
+                s.update(status="blocked", paseo_cards=cards,
+                         paseo_pending=cards[0]["text"] if len(cards) == 1 else f"{len(cards)} cards, the first: {cards[0]['text']}")
     return out
 
 

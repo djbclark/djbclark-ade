@@ -7,6 +7,7 @@ plainly fake.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -185,8 +186,8 @@ def test_helm_keeps_a_listed_paseo_agent_out_of_the_attention_queue(paseo):
 
 # ---- the queued lows of 2026-10-23 (paseo-listing adversary) ----
 
-def card(agent_id: str, name: str = "AskUserQuestion", description: str = "1. yes / 2. no") -> dict[str, str]:
-    return {"id": "permission-1", "agentId": agent_id, "agentShortId": agent_id[:7], "name": name, "description": description}
+def card(agent_id: str, name: str = "AskUserQuestion", description: str = "1. yes / 2. no", req: str = "permission-1") -> dict[str, str]:
+    return {"id": req, "agentId": agent_id, "agentShortId": agent_id[:7], "name": name, "description": description}
 
 
 def test_helm_keeps_a_claude_on_paseo_agent_in_the_attention_queue(monkeypatch):
@@ -248,7 +249,7 @@ def test_a_running_agent_with_a_pending_card_is_blocked_and_the_others_are_not(p
 
 def test_the_card_text_is_the_agents_own_so_control_characters_are_stripped(paseo):
     paseo.permits.write_text(json.dumps([card(OMP, "bash", "rm -rf /tmp/x\x1b[31m\n\x07ok")]))
-    assert fleet._paseo_waiting() == {OMP: "bash: rm -rf /tmp/x [31m ok"}
+    assert fleet._paseo_waiting() == {OMP: [{"id": "permission-1", "text": "bash: rm -rf /tmp/x [31m ok"}]}
 
 
 def test_a_failed_card_listing_leaves_the_rows_as_they_were(paseo, monkeypatch):
@@ -276,7 +277,47 @@ def test_relay_refuses_a_paseo_agent_with_a_pending_card_and_names_the_paseo_ui(
     paseo.permits.write_text(json.dumps([card(OMP)]))
     r = next(r for r in rows() if r["paseo"] == OMP)
     why = relay.hard_stop(r)
-    assert why and "Paseo UI" in why and "helm.py" not in why
+    assert why and "Paseo UI" in why and "helm.py" not in why and "allow|deny <agent> <request id>" in why
+
+
+def test_every_pending_card_is_kept_with_its_request_id_and_helm_prints_a_command_per_card(paseo):
+    """M1 (adversary): `paseo permit allow AGENT` with no request id approves ALL cards and `deny` without one fails."""
+    paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo safe", "req-a"), card(CLINE, "x", "y", "other"),
+                                         card(OMP, "Bash", "rm -rf ~", "req-b")]))
+    r = next(r for r in rows() if r["paseo"] == OMP)
+    assert [c["id"] for c in r["paseo_cards"]] == ["req-a", "req-b"]
+    assert r["paseo_pending"] == "2 cards, the first: Bash: echo safe"
+    text = helm.render(helm.classify(r, {}))
+    for req in ("req-a", "req-b"):
+        assert f"`paseo permit allow {OMP} {req}`" in text and f"`paseo permit deny {OMP} {req}`" in text
+    assert "Bash: rm -rf ~" in text
+    assert re.findall(rf"paseo permit (?:allow|deny)(?! {OMP} req-)", text) == []    # never a command without its request id
+
+
+def test_a_new_card_reopens_a_skipped_paseo_item(paseo):
+    paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo safe", "req-a")]))
+    one = helm.classify(next(r for r in rows() if r["paseo"] == OMP), {})
+    paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo safe", "req-a"), card(OMP, "Bash", "rm -rf ~", "req-b")]))
+    two = helm.classify(next(r for r in rows() if r["paseo"] == OMP), {})
+    assert one["fp"] != two["fp"]
+    assert helm.classify(next(r for r in rows() if r["paseo"] == OMP), {})["fp"] == two["fp"]    # stable while nothing changes
+    paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo safe", "req-a"), card(OMP, "Bash", "rm -rf ~", "req-c")]))
+    assert helm.classify(next(r for r in rows() if r["paseo"] == OMP), {})["fp"] not in (one["fp"], two["fp"])    # same texts as `two`, new request id
+
+
+def test_helm_lists_up_to_eight_cards_and_points_at_paseo_permit_ls_for_the_rest(paseo):
+    paseo.permits.write_text(json.dumps([card(OMP, "Bash", f"cmd {n}", f"req-{n}") for n in range(10)]))
+    text = helm.render(helm.classify(next(r for r in rows() if r["paseo"] == OMP), {}))
+    assert f"paseo permit allow {OMP} req-7`" in text and "req-8" not in text
+    assert "and 2 more cards: `paseo permit ls`" in text
+
+
+def test_a_request_id_that_is_not_a_plain_token_gets_no_command(paseo):
+    paseo.permits.write_text(json.dumps([card(OMP, "Bash", "echo", "x; rm -rf ~")]))
+    r = next(r for r in rows() if r["paseo"] == OMP)
+    assert r["paseo_cards"][0]["id"] is None
+    text = helm.render(helm.classify(r, {}))
+    assert "paseo permit allow" not in text and "Paseo UI" in text
 
 
 def test_a_paseo_agent_with_no_claude_row_is_not_found_by_its_workspace_title(paseo):

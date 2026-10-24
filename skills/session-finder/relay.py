@@ -793,7 +793,7 @@ def hard_stop(s):
         return f"its Paseo agent is {s['paseo_state']}, not idle or running"
     if s.get("status") == "blocked":
         return ("blocked on a permission or question card: a message would answer or replace it (the Paseo UI, or "
-                "`paseo permit allow|deny`, answers it)" if s.get("host") == "paseo" else
+                "`paseo permit allow|deny <agent> <request id>`, one card at a time, answers it)" if s.get("host") == "paseo" else
                 "blocked on a question or permission prompt: a message would land in or behind that dialog (helm.py answer)")
     return None
 

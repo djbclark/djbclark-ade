@@ -103,8 +103,8 @@ turn, an omp steer error), which relay cannot see beforehand: only **claude** is
 a working codex, omp, opencode or pi agent is refused unless `--steer` (or `--idle S`). A Paseo agent with no Claude
 registry row is found by its id, Paseo id or hex prefix, never by its workspace title (titles come from its first
 prompt). A running one with a pending permission or question card shows as `blocked` (one `paseo permit ls --json`),
-`relay.py` refuses it, and helm lists it as a `permission` item pointing at the Paseo UI or `paseo permit allow|deny`
-(helm presses no keys there).
+`relay.py` refuses it, and helm lists it as a `permission` item with every card and its own
+`paseo permit allow|deny <agent> <request id>` (never without the id: `allow` alone approves all the agent's cards), or the Paseo UI (helm presses no keys there).
 
 **Give three things:** the session name, its title, and the `where:` line with the
 `focus:` command. `one-offs-91 "CCC slow performance" — herdr ws shells#6 · tab
