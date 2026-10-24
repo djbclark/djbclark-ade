@@ -1232,8 +1232,8 @@ def embedded_repositories(path: Path, within: list[str] | None = None) -> tuple[
 def index_hidden_repositories(path: Path) -> tuple[int, list[str], list[str], tuple[str, int] | None]:
     """(index-hidden paths counted, names, pointers, failure) of a checkout: the repositories at a tracked path that is
     marked assume-unchanged (`ls-files -v` tag in lowercase) or skip-worktree (`S`) and is replaced by a directory, and
-    those at an ordinary tracked path (not a gitlink) that `ls-files -m -d` reports because a directory now stands where
-    the file was (`status` shows only ` D a`). Those are invisible to `status` and to `embedded_repositories(path)`:
+    those at an ordinary tracked path (not a gitlink) that `ls-files -m` reports because a directory now stands where
+    the file was (a type change: `-d` does not list it, `status` shows only ` D a`). Those are invisible to `status` and to `embedded_repositories(path)`:
     `ls-files --others` lists nothing for a directory that is a repository itself (its `.git` makes it opaque), so the
     repository is looked for under each such directory on its own, and the directory itself counts when it has a `.git`
     (Codex pass 55 on PR 27, P2; pass 66, P1 for the ordinary tracked file). A skip-worktree path with no file is a
@@ -1248,12 +1248,21 @@ def index_hidden_repositories(path: Path) -> tuple[int, list[str], list[str], tu
         return 0, [], [], ("ls-files -v", rc)
     hidden_paths = [e[2:] for e in out.split("\0") if len(e) > 2 and e[1] == " "
                     and (e[0].islower() or (e[0] == "S" and os.path.lexists(os.path.join(path, e[2:]))))]
-    # a tracked file replaced by a directory is "deleted" (and a changed one "modified"): `-s` gives the mode, so a
-    # gitlink (a submodule, vetted elsewhere) is left out; `<mode> <object> <stage>\t<path>`, one line per reason
-    rc, out = git(path, "ls-files", "-z", "-s", "-m", "-d", errors="surrogateescape")
+    # a tracked file replaced by a directory is "modified" (a type change; `-d` lists only a path that is gone). `-s`
+    # would list every index entry and `-m` would then hash every stat-dirty one, so the gitlinks (submodules, vetted
+    # elsewhere) come from a separate plain listing and only when a changed path is a directory. The content check of
+    # `-m` gets `status`'s time bound (a checkout whose stat data is stale hashes every file; round 67, LOW 3)
+    rc, out = git(path, "ls-files", "-z", "-m", "-d", errors="surrogateescape", timeout=STATUS_TIMEOUT)
     if rc != 0:
         return len(hidden_paths), [], [], ("ls-files -m -d", rc)
-    changed_paths = [e.split("\t", 1)[1] for e in out.split("\0") if "\t" in e and not e.startswith("160000 ")]
+    changed_paths = [e for e in dict.fromkeys(out.split("\0"))
+                     if e and os.path.isdir(os.path.join(path, e)) and not os.path.islink(os.path.join(path, e))]
+    if changed_paths:
+        rc, staged = git(path, "ls-files", "-z", "-s", errors="surrogateescape")  # `<mode> <object> <stage>\t<path>`
+        if rc != 0:
+            return len(hidden_paths), [], [], ("ls-files -s", rc)
+        gitlinks = {e.split("\t", 1)[1] for e in staged.split("\0") if e.startswith("160000 ") and "\t" in e}
+        changed_paths = [p for p in changed_paths if p not in gitlinks]
     hidden_dirs = [h for h in dict.fromkeys(hidden_paths + changed_paths)
                    if os.path.isdir(os.path.join(path, h)) and not os.path.islink(os.path.join(path, h))]
     if not hidden_dirs:

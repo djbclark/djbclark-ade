@@ -5453,3 +5453,30 @@ def test_a_shallow_checkout_with_no_origin_keeps_its_shallow_file_beside_the_bun
     assert git(tmp_path / "restored", "log", "--format=%s", "main").split() == ["c.txt"]
     full = make_repo(tmp_path / "full")  # a checkout that is not shallow gets no extra command
     assert scan_one(mod, full)["shallow"] is False
+
+
+def test_the_replaced_file_check_asks_for_modified_paths_only_and_never_lists_the_whole_index_with_a_content_check(tmp_path, monkeypatch):
+    """Adversary round 67 on PR 27, LOW 3: `ls-files -z -s -m -d` listed every index entry and hashed every stat-dirty
+    one, under the 60 s default. A file replaced by a directory is a type change that only `-m` reports (`-d` lists a
+    path that is gone), so dropping `-m` loses the repository standing there, and the plain `-s` listing is asked only when
+    such a directory exists, for the gitlinks to leave out."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    calls: list[tuple] = []
+    real_git = mod.git
+
+    def spy(p, *a, **kw):
+        calls.append((a, kw.get("timeout")))
+        return real_git(p, *a, **kw)
+
+    monkeypatch.setattr(mod, "git", spy)
+    mod.index_hidden_repositories(work)
+    changed = [(a, t) for a, t in calls if a[:2] == ("ls-files", "-z") and "-m" in a]
+    assert changed and all("-s" not in a and "-d" in a and t == mod.STATUS_TIMEOUT for a, t in changed), calls
+    assert not any(a[:3] == ("ls-files", "-z", "-s") for a, _ in calls), calls  # nothing is replaced: no listing at all
+    replace_with_repository(work, "a.txt")
+    calls.clear()
+    assert mod.scan_checkout(work, remote=False)["embedded_repos"] == ["a.txt/"]  # found through `-m` alone
+    # the dropped `-m`: the same walk, `-d` only, no longer sees the repository
+    monkeypatch.setattr(mod, "git", lambda p, *a, **kw: real_git(p, *[x for x in a if x != "-m"], **kw))
+    assert mod.scan_checkout(work, remote=False)["embedded_repos"] == []
