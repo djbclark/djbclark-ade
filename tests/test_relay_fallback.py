@@ -2334,6 +2334,24 @@ class TestRound7(Harness):
         tx = self.tx_with(self.q("enqueue", "his earlier prompt"), self.q("enqueue"), self.q("dequeue", None), text_too, ours)
         self.assertEqual(relay.tx_state(str(tx), 0, "go ahead"), "queued")    # a line with a text block is a prompt
 
+    def test_an_image_only_prompt_after_a_dequeue_is_someone_elses_prompt_not_a_tool_result(self) -> None:
+        """L-E (adversary 2): only a line whose blocks are ALL tool_results is skipped. An image-only or document-only prompt is the one the
+        dequeue handed over, so a later equal short text outside our stamp window (typed by the operator) is not our delivery."""
+        def line(*blocks: dict[str, Any], offset: float = 0.0) -> dict[str, Any]:
+            return {"type": "user", "timestamp": stamp(offset), "message": {"role": "user", "content": list(blocks)}}
+        image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+        doc = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "AAAA"}}
+        result = {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+        window = (time.time() - 5, time.time() + 5)
+        late = {"type": "user", "timestamp": stamp(300), "message": {"role": "user", "content": "go on"}}
+        for other in (line(image), line(doc), line(image, doc), line(image, result)):
+            tx = self.tx_with(self.q("enqueue", "go on"), self.q("dequeue", None), other, late)
+            self.assertEqual(relay.tx_state(str(tx), 0, "go on", window), "queued", other)
+        tx = self.tx_with(self.q("enqueue", "go on"), self.q("dequeue", None), line(result, result), late)
+        self.assertEqual(relay.tx_state(str(tx), 0, "go on", window), "delivered")    # all tool results: still no prompt, the handed copy is the next line
+        tx = self.tx_with(self.q("enqueue", "go on"), self.q("dequeue", None), line(), late)    # an empty list is no tool result either
+        self.assertEqual(relay.tx_state(str(tx), 0, "go on", window), "queued")
+
     def test_a_pulled_entry_stays_when_a_copy_was_submitted_by_hand_after_the_window(self) -> None:
         """P1: a short text, no draft seen, pulled back and then submitted by the operator after the stamp window:
         the windowed state still reads "pulled", but a copy was delivered, so another text's relay must not drop
