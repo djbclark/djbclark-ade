@@ -1103,10 +1103,11 @@ class DeveloperSearchTest(unittest.TestCase):
     def test_code_search_always_asks_for_the_biggest_page(self):
         # private hits are dropped after GitHub cuts its page, so the page must be large enough that private files cannot
         # crowd every public one off it
-        self.start(self.normal)
-        self.call("GET", "/v2/search/developer?query=state&k=1")
-        pages = {p.rsplit("/", 1)[-1]: n for (p, _, _), n in zip(self.gh.calls, self.gh.pages)}
-        self.assertEqual(pages, {"code": "100", "issues": "5"})
+        self.start(lambda e, q: (200, {}, {"items": [gh_file("me/secret", "a.md", "x", private=True)] if e == "code" else []}))
+        self.call("GET", "/v2/search/developer?query=alpha+beta+gamma+delta&k=1")  # private-only: the retry runs too
+        code_pages = [n for (p, _, _), n in zip(self.gh.calls, self.gh.pages) if p.endswith("/code")]
+        issue_pages = {n for (p, _, _), n in zip(self.gh.calls, self.gh.pages) if p.endswith("/issues")}
+        self.assertEqual((code_pages, issue_pages), (["100", "100"], {"5"}))
 
     def test_numbers_must_be_integers_not_infinity_floats_or_null_limits(self):
         self.start(self.normal)
