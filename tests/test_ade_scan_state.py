@@ -4219,7 +4219,10 @@ def test_a_gitfile_whose_git_dir_does_not_point_back_is_skipped_before_any_git_c
         assert not log.exists(), (checkout.name, log.read_text())  # not one git call, `fetch` least of all
         assert rec.get("linked_stores") == linked, (checkout.name, rec.get("linked_stores"))
         if linked:
-            assert "is NOT archived" in skipped_row(doc, rec), checkout.name
+            # the gitfile's git dir and common dir are archived by the row's own git-dir command (adversary round 67, INFO 1)
+            row = skipped_row(doc, rec)
+            assert "is NOT archived" not in row and "the git-dir command above archives it" in row, (checkout.name, row)
+            assert "do not clean up before the git-dir archive command has run" in row and "gitdir.tar" in row, checkout.name
     for store in stores:
         assert sorted(str(p) for p in (store / "objects").rglob("*")) == before[store], store
     # control: the same `--fetch` scan of the real store downloads origin's tip (so the guard above is what stopped it)
@@ -5480,3 +5483,37 @@ def test_the_replaced_file_check_asks_for_modified_paths_only_and_never_lists_th
     # the dropped `-m`: the same walk, `-d` only, no longer sees the repository
     monkeypatch.setattr(mod, "git", lambda p, *a, **kw: real_git(p, *[x for x in a if x != "-m"], **kw))
     assert mod.scan_checkout(work, remote=False)["embedded_repos"] == []
+
+
+def test_one_directory_under_two_spellings_is_one_embedded_repository_not_two(tmp_path):
+    """Adversary round 67 on PR 27, INFO 2: on a case-insensitive file system a tracked `a.txt` replaced by a repository
+    named `A.TXT` is listed twice (untracked `A.TXT/`, the tracked path `a.txt/`), so two rows archived one directory."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    # the helper itself, on any file system: a symlink stands for the second spelling
+    (work / "dir").mkdir()
+    (work / "alias").symlink_to(work / "dir", target_is_directory=True)
+    assert mod.merge_repositories(work, ["dir/"], ["dir/"], ["alias/", "e/"], ["alias/", "e/"]) == (["dir/", "e/"], ["dir/", "e/"])
+    assert mod.merge_repositories(work, [], [], ["dir/", "alias/"], ["alias/"]) == (["dir/"], ["dir/"])
+    assert mod.merge_repositories(work, ["x/"], [], ["x/"], []) == (["x/"], [])  # the same spelling is a plain duplicate
+    replace_with_repository(work, "a.txt")
+    (work / "a.txt").rename(work / "A.TXT")
+    if not (work / "a.txt").exists():
+        return  # a case-sensitive file system: the two spellings are two directories, and only one exists
+    rec = mod.scan_checkout(work, remote=False)
+    assert len(rec["embedded_repos"]) == 1 and "embedded repositories: 1" in rec["flags"], rec
+
+
+@pytest.mark.skipif(git_version() < (2, 48), reason="worktree.useRelativePaths needs git 2.48")
+def test_a_repository_with_relative_worktrees_is_scanned_not_skipped_for_its_extension(tmp_path):
+    """Adversary round 67 on PR 27, INFO 4: `git worktree add --relative-paths` (or `worktree.useRelativePaths=true`) writes
+    `extensions.relativeWorktrees` into the main config, which made the main checkout and every linked worktree
+    `skipped: unrecognised config extensions.relativeworktrees`."""
+    mod = load()
+    roots, work, _ = make_pushed_checkout(tmp_path)
+    wt = tmp_path / "wt"
+    git(work, "worktree", "add", "-q", "--relative-paths", "-b", "wt", str(wt))
+    assert "relativeworktrees" in (work / ".git" / "config").read_text().lower()
+    for checkout in (work, wt):
+        rec = mod.scan_checkout(checkout.resolve(), remote=False)
+        assert not rec["verdict"].startswith("skipped"), (checkout.name, rec["verdict"])

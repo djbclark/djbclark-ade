@@ -694,10 +694,23 @@ def render(d):
             # `commondir` in a `.git` directory, a gitfile naming another checkout's or a planted git dir): both archives keep the link, not the store at its target
             # (adversary round 65, LOW 2). The record key is absent from older scans
             linked = [t for t in (c.get("linked_stores") or []) if isinstance(t, str)][:4]
+            # a `.git` gitfile that does not point back is recorded as `git dir -> G` (and `commondir -> C`): the git-dir
+            # command of this very row archives both, so only the other entries (a symlinked member, a `commondir` in a `.git`
+            # DIRECTORY, which that command does not read) are stores no archive holds (adversary round 67, INFO 1)
+            by_gitfile = any(t.startswith("git dir -> ") for t in linked)
+            covered = [t for t in linked if by_gitfile and t.startswith(("git dir -> ", "commondir -> "))]
+            linked = [t for t in linked if t not in covered]
+            if covered:
+                alt_what += " and a git directory outside the checkout"
+                alt_warn += (" **the checkout's git directory is outside it (the gitfile does not point back to the checkout): the git-dir command "
+                             "above archives it and its common directory when each is a git directory (and refuses loudly when not): run it "
+                             "before any cleanup**; the links, as `<member> -> <target>`: "
+                             + ", ".join(shcode("{}", t) for t in covered) + ".")
+                alt_need += "; **do not clean up before the git-dir archive command has run**"
             if linked:
                 alt_what += " and the linked object store"
                 alt_warn += (" **the git directory keeps its objects or refs in a store outside this checkout (a symlinked `objects`, "
-                             "`refs`, `logs`, `packed-refs` or `shallow`, a symlink inside `objects/`, `refs/` or `logs/`, or a git dir that does not point back to the checkout); the store the link names is NOT archived, only the link: do "
+                             "`refs`, `logs`, `packed-refs` or `shallow`, a symlink inside `objects/`, `refs/` or `logs/`, or a `commondir` in a `.git` directory); the store the link names is NOT archived, only the link: do "
                              "not delete the checkout or that store until its commits are bundled**; the links, as `<member> -> <target>`: "
                              + ", ".join(shcode("{}", t) for t in linked) + ".")
                 alt_need += "; **do not clean up: the linked object store is in no archive**"
@@ -969,7 +982,7 @@ def render(d):
       "may be in there. A `skipped: submodule config unrecognised (nested submodule)` checkout has a submodule with "
       "a `.gitmodules`, a gitlink, an untracked repository or a repository at a skip-worktree or assume-unchanged path (or where an ordinary tracked file stood: `status` shows only its deletion) of its own: an edit or commit in the inner worktree is in no per-submodule artifact, so only the whole-directory "
       "archive holds it. One ending `(alternates)` has a module whose objects live in another store that no archive "
-      "here holds, and any other `skipped` or `scan incomplete` row of a checkout whose own `objects/info/alternates` is not empty, whose `objects`, `refs`, `logs`, `packed-refs` or `shallow` is a symlink out (or holds a symlink inside `objects/`, `refs/` or `logs/`), or whose git dir does not point back to the checkout says the same: the row says so and refuses a cleanup until those commits are bundled. The git dir must point back to the checkout: `skipped: git dir redirected (commondir)` is a `.git` directory holding a `commondir` entry, and `skipped: git dir redirected (does not point back to this checkout)` is a `.git` gitfile whose git dir has no `gitdir` file naming this checkout's `.git` and no `core.worktree` naming this checkout (a linked worktree and an absorbed submodule have one; `--separate-git-dir` writes neither, so a checkout made with it is skipped here although git reads it fine), or whose `commondir` names a common dir that does not hold it as `worktrees/<name>`, or that cannot be read; the scan ran no git there, since every call would act on that directory, and the row lists `git dir -> <target>` (and `commondir -> <target>`) as a store no archive holds. A checkout flagged `origin unreachable` is "
+      "here holds, and any other `skipped` or `scan incomplete` row of a checkout whose own `objects/info/alternates` is not empty, whose `objects`, `refs`, `logs`, `packed-refs` or `shallow` is a symlink out (or holds a symlink inside `objects/`, `refs/` or `logs/`), or whose git dir does not point back to the checkout says the same: the row says so and refuses a cleanup until those commits are bundled. The git dir must point back to the checkout: `skipped: git dir redirected (commondir)` is a `.git` directory holding a `commondir` entry, and `skipped: git dir redirected (does not point back to this checkout)` is a `.git` gitfile whose git dir has no `gitdir` file naming this checkout's `.git` and no `core.worktree` naming this checkout (a linked worktree and an absorbed submodule have one; `--separate-git-dir` writes neither, so a checkout made with it is skipped here although git reads it fine), or whose `commondir` names a common dir that does not hold it as `worktrees/<name>`, or that cannot be read; the scan ran no git there, since every call would act on that directory, and the row lists `git dir -> <target>` (and `commondir -> <target>`), which its git-dir command archives (a symlinked member of the store, or a `commondir` in a `.git` directory, is a store no archive holds, and the row says so). A checkout flagged `origin unreachable` is "
       "always listed, whatever its counts: its local-only count came from stale tracking refs and is "
       "unverified, so a 0 there is not `clean and pushed`. A checkout flagged `submodules not inspected` is "
       "always listed too: no count here covers a submodule's content.\n")

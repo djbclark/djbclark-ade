@@ -254,6 +254,7 @@ SAFE_CONFIG = frozenset({
     "core.sparsecheckoutcone", "core.untrackedcache", "core.fsmonitor",  # fsmonitor: true/false only
     "user.name", "user.email", "user.signingkey", "commit.gpgsign",  # a key id: executes nothing
     "extensions.worktreeconfig", "extensions.objectformat", "extensions.refstorage",
+    "extensions.relativeworktrees",  # `worktree.useRelativePaths`: linked worktrees' gitfile and `gitdir` hold relative paths
     "submodule.active", "pull.rebase", "pull.ff", "push.default", "push.autosetupremote",
     "merge.conflictstyle", "rerere.enabled", "status.showuntrackedfiles",  # status gets the flag too
     "lfs.repositoryformatversion"})
@@ -1281,6 +1282,33 @@ def index_hidden_repositories(path: Path) -> tuple[int, list[str], list[str], tu
     return len(hidden_paths), list(dict.fromkeys(names)), list(dict.fromkeys(pointers)), None
 
 
+def merge_repositories(path: Path, names: list[str], pointers: list[str], more_names: list[str],
+                       more_pointers: list[str]) -> tuple[list[str], list[str]]:
+    """`names` and `pointers` plus the ones of `more_*` that are not already there, a directory counted once whatever its
+    spelling: two names that `os.path.samefile` calls one directory (a case-insensitive file system) keep the first, and a
+    pointer to the dropped spelling is a pointer to the kept one."""
+    out = list(names)
+    alias: dict[str, str] = {}
+    for n in more_names:
+        if n in out:
+            continue
+        same = next((k for k in out if _same_directory(path, k, n)), None)
+        if same is None:
+            out.append(n)
+        else:
+            alias[n] = same
+    ptr = list(pointers)
+    ptr += [p for p in dict.fromkeys(alias.get(p, p) for p in more_pointers) if p not in ptr]
+    return out, ptr
+
+
+def _same_directory(path: Path, a: str, b: str) -> bool:
+    try:
+        return os.path.samefile(os.path.join(path, a.rstrip("/")), os.path.join(path, b.rstrip("/")))
+    except OSError:
+        return False
+
+
 def stash_count(path: Path, common: Path | None) -> int | None:
     """Stashes = lines of the stash reflog file; no log machinery (no gpg, no pager) is involved. None when
     the count could not be taken (an unreadable reflog, a failed `stash list`): the caller records the scan as
@@ -1633,8 +1661,10 @@ def local_only_count(path: Path, revs: list[str], tips: list[str],
 def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     """`scan_record` plus the store warnings: a checkout whose own `objects/info/alternates` is not empty keeps commits in
     a store that neither `whole.tar` nor the git-dir archive holds, so every `skipped` or `scan incomplete` row (the ones
-    that offer only those two) carries `alternates` (adversary round 64, LOW 3); one whose `objects`, `refs` or
-    `packed-refs` is a symlink out, or whose `.git` directory holds a `commondir`, carries `linked_stores` (round 65, LOW 2).
+    that offer only those two) carries `alternates` (adversary round 64, LOW 3); one whose `objects`, `refs`, `logs`,
+    `packed-refs` or `shallow` is a symlink out (or holds a symlink anywhere inside `objects/`, `refs/` or `logs/`), whose
+    `.git` directory holds a `commondir`, or whose `.git` gitfile names a git dir that does not point back, carries
+    `linked_stores` (round 65, LOW 2; round 67, INFO 3).
     A bundle row is not affected: `bundle create` reads through both. Ordinary records are left alone."""
     rec = scan_record(path, remote, fetch)
     if rec["verdict"].startswith(("skipped", INCOMPLETE_PREFIX)):
@@ -1757,8 +1787,9 @@ def scan_record(path: Path, remote: bool, fetch: bool = False) -> dict:
     index_hidden, more_names, more_pointers, failure = index_hidden_repositories(path)
     if failure:
         return incomplete_record(path, *failure)
-    embedded = embedded + [n for n in more_names if n not in embedded]
-    embedded_pointers = embedded_pointers + [n for n in more_pointers if n not in embedded_pointers]
+    # the same directory under two spellings (a case-insensitive APFS: untracked `C` and the replaced tracked `c`) is one
+    # row, not two that archive it twice (adversary round 67, INFO 2)
+    embedded, embedded_pointers = merge_repositories(path, embedded, embedded_pointers, more_names, more_pointers)
     if len(embedded) > MAX_EMBEDDED:
         return incomplete_record(path, f"embedded repositories ({len(embedded)} > {MAX_EMBEDDED})", 0)
     rc, up = git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")

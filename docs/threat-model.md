@@ -315,9 +315,12 @@ tampered state file can do is still a finding (section 6 item 6).
    and a `commondir` in it names a common dir that holds it as `worktrees/<name>`. A gitfile naming another checkout's
    `.git` or a bare repository, a planted admin dir, or one that cannot be read or parsed is `skipped: git dir
    redirected (does not point back to this checkout)`, so no later call, `--fetch` included, can write objects into a
-   git directory elsewhere; the row lists `git dir -> <target>` and `commondir -> <target>` as stores no archive
-   holds. What it does not cover: a git dir of the checkout's own whose `objects` is a symlink into another store
-   (round 66, LOW 1 warns about those in a skipped row, and a plain scan reads through the link as git does), and an
+   git directory elsewhere; the row lists `git dir -> <target>` and `commondir -> <target>`, which its git-dir
+   command archives (2026-10-24: the row used to call them archived nowhere). A hard-linked gitfile does not pass: the
+   back-pointer's directory is compared, not the file's inode (2026-10-24). What it does not cover: a git dir of the
+   checkout's own whose `objects` is a symlink into another store (round 66, LOW 1 warns about those in a skipped row,
+   and a plain scan reads through the link as git does; `--fetch` also writes objects through it, adversary round 67,
+   INFO 5, 2026-10-24), and an
    `objects/info/alternates` file (borrowed stores are only read by `fetch`, and warned about on a skipped row).
 
 ## 6. What a reviewer should check on a PR
