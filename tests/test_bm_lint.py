@@ -641,3 +641,79 @@ def test_readme_roster_documents_every_flag_and_exit_code():
     assert len(row) == 1, "README roster needs exactly one bin/bm-lint entry"
     assert flags and all(f in row[0] for f in flags), sorted(f for f in flags if f not in row[0])
     assert "Exit codes: 0 no findings, 1 findings, 2 error" in row[0]
+
+
+# --- round 5: Codex P2 on PR 55 and symlinked directories (2026-10-24) -------------------
+
+def test_decision_with_an_http_pr_link_has_provenance(tmp_path):
+    write_note(tmp_path, "d.md", "# D\n- [decision] Use SQLite; see [PR](https://github.com/o/r/pull/55)\n")
+    write_note(tmp_path, "i.md", "# I\n- [decision] pick x [issue](https://forgejo.example/o/r/issues/7 \"t\")\n")
+    write_note(tmp_path, "c.md", "# C\n- [decision] pick y [c](https://github.com/o/r/commit/0f677c5)\n")
+    write_note(tmp_path, "m.md", "# M\n- [decision] pick z [mr](https://gitlab.example/g/p/-/merge_requests/3)\n")
+    write_note(tmp_path, "none.md", "# N\n- [decision] no link of any kind\n")
+    write_note(tmp_path, "plain.md", "# P\n- [decision] a non-provenance [site](https://example.com/about)\n")
+    write_note(tmp_path, "fence.md", "# F\n- [decision] x\n```\n[PR](https://github.com/o/r/pull/55)\n```\n")
+    _proc, out = jrun(tmp_path)
+    assert sorted(f["path"] for f in of(out, "decision-unlinked")) == [
+        "fence.md", "none.md", "plain.md"]
+
+
+def test_http_link_is_not_an_in_store_relation(tmp_path):
+    write_note(tmp_path, "a.md", "# A\nsee [PR](https://github.com/o/r/pull/55)\n")
+    write_note(tmp_path, "b.md", "# B\nsee [x](https://example.com/y.md) and [[Real]]\n")
+    write_note(tmp_path, "Real.md", "# Real\nsee [[B]]\n")
+    _proc, out = jrun(tmp_path)
+    orphan = of(out, "orphan-notes")
+    assert len(orphan) == 1 and "1 of 3 notes" in orphan[0]["detail"]  # a.md stays an orphan
+    assert not of(out, "unresolved-relation")  # an http link is never an unresolved wiki-link
+
+
+def test_provenance_link_re_is_http_only_and_strict():
+    mod = load_tool()
+    assert mod.EXTLINK_RE.search("[PR](https://github.com/o/r/pull/55)").group(1) == \
+        "https://github.com/o/r/pull/55"
+    assert mod.EXTLINK_RE.search("[t](ftp://h/pull/5)") is None
+    assert mod.EXTLINK_RE.search("[t](sub/pull/5)") is None
+
+
+def test_symlinked_directory_is_skipped_never_followed(tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    write_note(elsewhere, "n.md", "# n\n- [ruling] DIRCANARY undated\n[[DIRLINK]]\n")
+    for shape in ("sub", "y.md"):
+        store = tmp_path / ("store-" + shape)
+        store.mkdir()
+        os.symlink(elsewhere, store / shape)
+        proc = run(store, "--json")
+        assert proc.returncode == 2, proc.stdout + proc.stderr  # nothing read, something skipped
+        assert "no readable notes" in proc.stderr
+        assert "DIRCANARY" not in proc.stdout + proc.stderr
+
+
+def test_symlinked_directory_beside_a_clean_note_is_listed(tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    write_note(elsewhere, "n.md", "# n\n- [ruling] DIRCANARY undated\n[[DIRLINK]]\n")
+    store = tmp_path / "store"
+    write_note(store, "sub/a.md", "see [[b]]\n")
+    write_note(store, "sub/b.md", "see [[a]]\n")
+    os.symlink(elsewhere, store / "ln")
+    os.symlink(elsewhere, store / "sub" / "y.md")
+    proc, out = jrun(store)
+    assert proc.returncode == 0, proc.stdout
+    assert out["notes"] == 2 and "DIRCANARY" not in proc.stdout and "DIRLINK" not in proc.stdout
+    assert "notes: symlink: ln" in out["skipped"]
+    assert "notes: symlink: " + os.path.join("sub", "y.md") in out["skipped"]
+
+
+def test_project_with_only_a_symlinked_directory_is_not_called_empty(tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    write_note(elsewhere, "n.md", "# n\n")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    os.symlink(elsewhere, proj / "ln")
+    write_note(tmp_path / "store", "a.md", "see [[a2]]\n")
+    write_note(tmp_path / "store", "a2.md", "see [[a]]\n")
+    cfg = tmp_path / "cfg.json"
+    cfg.write_text(json.dumps({"projects": {"p": {"path": str(proj)}}}), encoding="utf-8")
+    proc, out = jrun(tmp_path / "store", "--config", str(cfg))
+    assert not of(out, "empty-project")
+    assert any("project p not fully readable" in s for s in out["skipped"])

@@ -26,6 +26,11 @@ whole of Basic Memory):
   * a target resolves by, in order: frontmatter `permalink`, the slugged `folder/stem`,
     the title (case-insensitive), the slugged stem. Slug = lowercase, `_` and spaces -> `-`.
   * `- [ruling]` / `- [decision]` observation lines, outside code like the links above.
+  * provenance links `[text](https://host/org/repo/pull/55)`: an http(s) Markdown link whose
+    path has a `pull`/`pulls`/`issues`/`commit`/`commits`/`merge_requests` segment followed by
+    an id. It satisfies decision-unlinked ONLY; it is not an in-store relation, so it never
+    rescues an orphan note and never resolves or adds an unresolved-relation. Links in code do
+    not count.
 Not parsed: embeds, HTML comments, BM's own per-project permalink prefix, the SQLite index.
 Files over --max-bytes still get the size, observation and path checks, but their
 relations are not parsed: they are listed under `skipped` and are exempt from the orphan
@@ -34,10 +39,11 @@ count. At most 1 MiB (or --max-bytes, if larger) of any note is read.
 Files: only regular files that `lstat` confirms and whose realpath is under the store's
 realpath are read; symlinked notes, FIFOs, devices and the like are listed under `skipped`
 and never opened, so a link cannot pull outside text into a report and a FIFO cannot hang
-the run. A note that exists but cannot be read ("not readable") and a directory that cannot
-be listed are named under `skipped` (path only, never errno text or content); a note that
-vanishes mid-lint is ignored. A store root that cannot be listed, or a run that read no note
-at all while some were skipped, is exit 2, never "ok, no findings".
+the run. A symlinked directory (`sub -> /elsewhere`, or `y.md -> /dir`) is listed the same way
+(`symlink: <rel>`) and never followed. A note that exists but cannot be read ("not readable")
+and a directory that cannot be listed are named under `skipped` (path only, never errno text
+or content); a note that vanishes mid-lint is ignored. A store root that cannot be listed, or
+a run that read no note at all while some were skipped, is exit 2, never "ok, no findings".
 
 Checks (finding `check` ids):
   missing-type        filename-prefix note (reference_/feedback_/project_/user_) with no
@@ -87,7 +93,7 @@ import re
 import stat
 import sys
 import time
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 DEFAULT_STORE = "~/ops/site-private/memory"
 DEFAULT_CONFIG = "~/.basic-memory/config.json"
@@ -105,6 +111,13 @@ PREFIX_TYPES = {
 # Every pattern below is linear-time: no class crosses a newline or `[` where it need not.
 WIKILINK_RE = re.compile(r"\[\[([^\]\n#|[]+)(?:#[^\]\n|[]*)?(?:\|[^\]\n[]*)?\]\]")
 MDLINK_RE = re.compile(r"\[[^\]\n[]*\]\(([^)\s#:\[\]()]+\.md)(?:#[^)\s\[\]()]*)?\)")
+# `[text](https://host/org/repo/pull/55)`: an external Markdown link, matched only to decide
+# whether a [decision] cites its provenance (Q8). It is never a relation to a note in the store.
+EXTLINK_RE = re.compile(r"\[[^\]\n[]*\]\(<?(https?://[^)\s\[\]()<>]+)>?(?:[ \t]+\"[^\"\n)]*\")?\)",
+                        re.IGNORECASE)
+# Provenance = a PR, issue, merge request or commit page: GitHub/Forgejo `pull`/`pulls`/
+# `issues`/`commit`, GitLab `merge_requests`, with something after the segment.
+PROVENANCE_PATH_RE = re.compile(r"/(?:pulls?|issues|merge_requests|commits?)/[^/]+", re.IGNORECASE)
 OBSERVATION_RE = re.compile(r"^[ \t]*[-*][ \t]*\[(ruling|decision)\][ \t]*(.*)$", re.MULTILINE)
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
@@ -205,11 +218,12 @@ class StoreError(Exception):
 
 class Store:
     """Every readable markdown note in the store, read once, with the derived facts the
-    checks share (frontmatter, mtime, code-stripped text, wiki-link and Markdown-link targets)."""
+    checks share (frontmatter, mtime, code-stripped text, wiki-link and Markdown-link targets,
+    and whether a PR/issue/commit URL link cites provenance)."""
 
     def __init__(self, root, max_bytes):
         self.root = root
-        self.notes = []  # {rel, path, text, clean, fm, mtime, size, parsed, links, mdlinks}
+        self.notes = []  # {rel, path, text, clean, fm, mtime, size, parsed, links, mdlinks, cites}
         self.skipped = []
         self._not_read = []
         cap = max(max_bytes, READ_FLOOR)
@@ -218,6 +232,14 @@ class Store:
         walk_errors = []
         for dirpath, dirnames, filenames in os.walk(root, onerror=walk_errors.append):  # followlinks=False: no cycles
             dirnames.sort()
+            # A symlinked directory is never followed and never read: say so, path only.
+            # os.walk lists it in `dirnames` (a `y.md -> /dir` too), so a loop over filenames
+            # alone would drop it silently.
+            for d in list(dirnames):
+                if os.path.islink(os.path.join(dirpath, d)):
+                    self._not_read.append((os.path.relpath(os.path.join(dirpath, d), root),
+                                           "symlink"))
+                    dirnames.remove(d)
             for name in sorted(filenames):
                 if not name.endswith(".md"):
                     continue
@@ -252,13 +274,15 @@ class Store:
                     continue
                 text = data.decode("utf-8", errors="replace").lstrip("\ufeff")
                 parsed = st.st_size <= max_bytes
-                links, mdlinks = [], []
+                links, mdlinks, cites = [], [], False
                 clean = strip_code(text)  # observations are scanned here even when not parsed
                 if parsed:
                     links = [(m.group(1).strip(), ln)
                              for ln, m in finditer_lines(WIKILINK_RE, clean)]
                     mdlinks = [(unquote(m.group(1)), ln)
                                for ln, m in finditer_lines(MDLINK_RE, clean)]
+                    cites = any(PROVENANCE_PATH_RE.search(urlsplit(m.group(1)).path)
+                                for m in EXTLINK_RE.finditer(clean))
                 else:
                     self._not_read.append((rel, "relations not parsed, over --max-bytes"))
                 self.notes.append({
@@ -272,6 +296,7 @@ class Store:
                     "parsed": parsed,
                     "links": links,
                     "mdlinks": mdlinks,
+                    "cites": cites,
                 })
         for err in walk_errors:
             where = os.path.relpath(err.filename, root) if err.filename else "."
@@ -355,12 +380,15 @@ class Linter:
             ppath = os.path.expanduser(ppath)
             count = 0
             unreadable = []
-            for dirpath, _dirnames, filenames in os.walk(ppath, onerror=unreadable.append):
+            linked = False
+            for dirpath, dirnames, filenames in os.walk(ppath, onerror=unreadable.append):
+                linked = linked or any(os.path.islink(os.path.join(dirpath, d)) for d in dirnames)
                 count += sum(1 for fn in filenames if fn.endswith(".md"))
                 if count:
                     break
-            if not count and any(not isinstance(e, FileNotFoundError) for e in unreadable):
-                # an unlistable directory is not proof of an empty project
+            if not count and (linked or any(not isinstance(e, FileNotFoundError) for e in unreadable)):
+                # an unlistable directory, or a symlinked one we never follow, is not proof of
+                # an empty project
                 self.skipped.append("empty-project: project %s not fully readable" % name)
                 continue
             if not count:
@@ -489,7 +517,7 @@ class Linter:
         # Q8: a ruling is the operator's own words, quoted and dated; an agent's design
         # choice is a decision and must point at the handoff or PR that made it.
         for n in store.notes:
-            has_link = bool(n["links"] or n["mdlinks"])
+            has_link = bool(n["links"] or n["mdlinks"] or n["cites"])
             has_decision = False
             seen = {}
             for line, m in finditer_lines(OBSERVATION_RE, n["clean"]):
@@ -574,7 +602,8 @@ def build_parser():
         description="Read-only hygiene lint for a Basic Memory store "
                     "(design-basicmemory W3/R6). Never writes to the store.",
         epilog="Exit status: 0 no findings, 1 findings, 2 error (including a bad "
-               "BM_LINT_* value). --json output is local-only: it names note paths.")
+               "BM_LINT_* value, an unlistable store root, or a run that read no note while "
+               "some were skipped). --json output is local-only: it names note paths.")
     ap.add_argument("store", nargs="?", default=os.environ.get("BM_LINT_STORE", DEFAULT_STORE),
                     help="store directory to lint (default: $BM_LINT_STORE else %s)" % DEFAULT_STORE)
     ap.add_argument("--json", action="store_true",
