@@ -304,7 +304,10 @@ tampered state file can do is still a finding (section 6 item 6).
    `shlex.quote` in a runner script, the `sudo-secretspec run` re-exec), treat it as a security finding first.
 8. **`ade-scan-state --remote` trusts the origin's advertised refs** (2026-10-23, Codex pass 56 on PR 27): a hostile
    origin that names a local-only commit makes it count as pushed. Origins are the operator's own; the scan deletes
-   nothing, and the generated report says (limit 10) that `clean and pushed` is not proof of possession.
+   nothing, and the generated report says (limit 10) that `clean and pushed` is not proof of possession. The size
+   of the advertisement is bounded too (2026-10-23): `ls-remote` is read in chunks, and more than 16 MiB (`LS_REMOTE_MAX_BYTES`)
+   kills it and reads as an origin that did not answer (`origin unreachable`), so a hostile origin cannot grow the
+   scan's memory without limit; `--fetch` still has only the 120 s time bound.
 
 ## 6. What a reviewer should check on a PR
 

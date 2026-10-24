@@ -18,7 +18,9 @@ symlink is `skipped: .git is a symlink` (git would read a git directory elsewher
 applied to every submodule's git dir under `modules/` (`config` and `config.worktree`; `skipped: submodule
 config unrecognised <key>`): a config that is unreadable is `(unreadable)`, a symlink anywhere under
 `modules/` (a symlinked file in a module git dir included) or at a submodule's `.git` is `(symlink)`, a module git dir with a
-`commondir` is `(commondir)`, one with a nonempty `objects/info/alternates` is `(alternates)`,
+`commondir` is `(commondir)`, one with a nonempty `objects/info/alternates` is `(alternates)` (the record then carries
+`alternates`, the first 3 targets read from those files, and the report warns that the store they name is archived
+nowhere),
 a submodule whose `.git` is a directory or a gitfile naming a git dir the walk did not vet (outside
 `modules/`, or in a pruned `objects/`) is `(gitdir outside modules)`, a gitfile that is not one line of
 `gitdir: <path>` is `(gitdir unreadable)`, a `.gitmodules` path that is not an index gitlink but has a `.git`
@@ -27,7 +29,8 @@ or submodule path holds a control character, a space, a zero-width, joiner, fill
 character, a non-UTF-8 byte or (a path) a quote, is `(gitmodules path unusual)`,
 a submodule path with a symlink component is `(symlink)`, a submodule directory holding files but no `.git` is
 `(submodule has files but no .git)`, a module whose `core.worktree` does not resolve to the submodule's own checkout is
-`(core.worktree outside)`, and an entry of a module git dir that differs from `HEAD`, `config`,
+`(core.worktree outside)`, a submodule that has a `.gitmodules` or a gitlink of its own is `(nested submodule)` (an
+edit in the inner worktree is in no per-submodule artifact: the whole-directory archive is the way out), and an entry of a module git dir that differs from `HEAD`, `config`,
 `config.worktree` or `commondir` only in letter case, or that the file system opens as one of those names, is
 `(unrecognised entry)`: nothing is trusted that git would read elsewhere. The record carries `submodules_vetted`,
 the sorted paths of the checked-out submodules that passed every check, and the plan runs git only at those paths,
@@ -163,6 +166,10 @@ branch and carries the extra flag `no origin remote`. `stash`, `no origin remote
 The primary verdict is the first that applies in that order; `flags` lists every one. A skipped
 checkout has no counts (null) and `config_keys` names the offending keys, never their values. `--markdown`
 cells show every control character (newline, a bare CR, tab, ...) as backslash text, never the raw byte.
+Limits of what is read (2026-10-23): `git ls-remote` output is read in chunks up to LS_REMOTE_MAX_BYTES (16 MiB); a
+longer advertisement kills the process and reads as an origin that did not answer (`origin unreachable`), never as the
+refs seen so far. A `rev-list --count HEAD --not --remotes=origin <tip>` that fails for any reason except git
+naming the tip object missing is `scan incomplete: rev-list ... rc=<n>`, never `origin tip not fetched`.
 
 Exit codes: 0 scan completed; 2 usage error. Pass --json for machine-readable output.
 """
@@ -176,6 +183,7 @@ import re
 import atexit
 import hashlib
 import shutil
+import selectors
 import signal
 import stat
 import unicodedata
@@ -199,6 +207,7 @@ SUBMODULES_FLAG = "submodules not inspected"
 SKIP_HEAD_UNREADABLE = "skipped: HEAD unreadable"
 SKIP_GIT_SYMLINK = "skipped: .git is a symlink"
 MAX_TIPS = 2000  # ls-remote tips passed as `--not` arguments (argv size); extra tips only overcount
+LS_REMOTE_MAX_BYTES = 16 * 1024 * 1024  # what `ls-remote` may print before the answer is refused (a few hundred thousand refs)
 MAX_BRANCH_COUNTS = 100  # `rev-list --count` calls for the per-branch report; the rest are only summed
 # Flags that qualify a verdict but never are one.
 INFO_FLAGS = ("stash", "no origin remote", "detached", "origin unknown")
@@ -259,20 +268,75 @@ def git_env(network: bool = False) -> dict:
     return env
 
 
-def run(argv, timeout=120, cwd=None, env=None, stdin_text=None, errors="replace", err=None):
+RC_OUTPUT_CAP = 75  # `run(max_bytes=...)`: the child printed more than the cap, was killed, and nothing it printed is kept
+
+
+def read_capped(p: subprocess.Popen, timeout: float, max_bytes: int) -> tuple[bytes | None, int | None]:
+    """(stdout, None) when the child closed stdout within `timeout` seconds and `max_bytes`; else (None, rc) where rc is
+    124 (time) or RC_OUTPUT_CAP (size). Reads in chunks and checks each before keeping it, so never more than `max_bytes`
+    is held; the caller kills the child on a None."""
+    deadline = time.monotonic() + timeout
+    chunks: list[bytes] = []
+    held = 0
+    fd = p.stdout.fileno()
+    with selectors.DefaultSelector() as sel:
+        sel.register(fd, selectors.EVENT_READ)
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None, 124
+            if not sel.select(left):
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                return b"".join(chunks), None
+            if held + len(chunk) > max_bytes:
+                return None, RC_OUTPUT_CAP
+            chunks.append(chunk)
+            held += len(chunk)
+
+
+def run(argv, timeout=120, cwd=None, env=None, stdin_text=None, errors="replace", err=None, max_bytes=None):
     """argv list in, (rc, stdout); never raises on a missing tool or timeout. `errors` is the stdout decoding
     (`surrogateescape` when a path in it is tested against the filesystem: `replace` would test a different name).
 
     stdin is /dev/null (or `stdin_text`, written whole) and the child leads its own process group, so a
     timeout kills git together with the ssh / git-remote-https children it started.
 
-    stderr is discarded unless `err` is a list: the text is then appended to it (empty after a timeout)."""
+    stderr is discarded unless `err` is a list: the text is then appended to it (empty after a timeout).
+
+    `max_bytes` (not with `stdin_text` or `err`) bounds what is read from a child whose output size the caller does not
+    control (an origin's ref advertisement): past it the process group is killed and the result is (RC_OUTPUT_CAP, "")."""
+    capped = max_bytes is not None
+    if capped and (stdin_text is not None or err is not None):
+        raise ValueError("max_bytes is for a child with no stdin text and no stderr capture")
     try:
         p = subprocess.Popen(argv, stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL if err is None else subprocess.PIPE,
                              cwd=cwd, env=env, start_new_session=True)
     except OSError:
         return 124, ""
+    if capped:
+        out_b, bad_rc = read_capped(p, timeout, max_bytes)
+        if out_b is None:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            p.stdout.close()
+            p.wait()
+            return bad_rc, ""
+        p.stdout.close()
+        try:
+            p.wait(timeout=5)  # stdout is closed: the child is exiting
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            p.wait()
+            return 124, ""
+        return p.returncode, out_b.decode("utf-8", errors)
     try:
         # bytes both ways, decoded here: text mode turns a CR in a path into a newline (adversary round 57, LOW 2)
         out_b, err_b = p.communicate(input=None if stdin_text is None else stdin_text.encode("utf-8", "surrogateescape"),
@@ -654,6 +718,33 @@ def unusual_path(p: str) -> bool:
     quote, which a quoted shell command and a markdown cell could still render in a way no one expects."""
     return any(unusual_char(c) or c in "'\"" for c in p)
 
+
+MAX_ALTERNATES_SHOWN = 3
+ALTERNATES_KEY = "(alternates)"  # the `submodule config unrecognised` reason of a module with a nonempty objects/info/alternates
+
+
+def alternates_targets(common: Path | None) -> list[str]:
+    """The first MAX_ALTERNATES_SHOWN entries (git's own reading: one per line, blank lines and `#` lines ignored) of
+    the nonempty `objects/info/alternates` files under `<common>/modules`, in sorted git-dir order, as text (a byte that
+    is not UTF-8 stays a lone surrogate, as in every path of the record). Nothing is followed: a symlink or a file that
+    is not a small regular file is skipped, so the list may be shorter than the files hold; empty means unknown."""
+    found: list[str] = []
+    if common is None:
+        return found
+    for root, dirs, _ in os.walk(common / "modules", followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d not in MODULE_INTERNAL_DIRS)
+        try:
+            data = read_regular_file(Path(root) / "objects" / "info" / "alternates", 64 * 1024)
+        except (OSError, ValueError):
+            continue
+        for line in data.split(b"\n"):
+            if line and not line.startswith(b"#"):
+                found.append(line.decode("utf-8", "surrogateescape"))
+                if len(found) == MAX_ALTERNATES_SHOWN:
+                    return found
+    return found
+
+
 def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str | None, list[str]]:
     """(has submodules, first config key of any submodule's git dir outside the allowlist, or a parenthesised
     reason the git dir cannot be vetted, the sorted submodule paths the scan vetted).
@@ -753,7 +844,7 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
                 # does not archive (`git submodule update --reference` writes one, round 47 LOW 4)
                 try:
                     if os.path.getsize(os.path.join(root, "objects", "info", "alternates")) > 0:
-                        return True, "(alternates)", []
+                        return True, ALTERNATES_KEY, []
                 except OSError:
                     pass
                 dirs[:] = sorted(d for d in dirs if d not in MODULE_INTERNAL_DIRS)
@@ -844,6 +935,18 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
         checkout = os.path.realpath(path / sub)
         if any(os.path.realpath(os.path.join(os.fsdecode(target), v)) != checkout for v in worktrees.get(os.fsdecode(target), [])):
             return True, "(core.worktree outside)", []
+        # a submodule that has submodules of its own: the plan's per-submodule commands run with `--no-recursion` and its
+        # git dir `modules.tar` keeps the inner modules, but an edit in the inner worktree is in no artifact. Its own
+        # `.gitmodules` (a file or a link: cheap, no git call) or any gitlink in its index (an embedded repository added
+        # with no `.gitmodules`, the case the top level handles the same way) skips the whole checkout, so the whole-directory
+        # archive row applies (Codex thread 9 on PR 27)
+        if os.path.lexists(path / sub / ".gitmodules"):
+            return True, "(nested submodule)", []
+        rc, inner = git(path / sub, "ls-files", "-z", "-s", errors="surrogateescape")
+        if rc != 0:
+            return True, "(unreadable)", []
+        if any(e.startswith("160000 ") for e in inner.split("\0")):
+            return True, "(nested submodule)", []
         subs.append(sub)  # a real checked-out submodule: `.git` names a git dir the walk vetted
     return True, None, subs
 
@@ -1118,12 +1221,14 @@ def ls_remote_refs(url: str) -> tuple[dict[str, str], dict[str, tuple[str, str]]
     as invalid), None when `ls-remote` failed. The effective oid of a tag is its peeled commit (`^{}` entry)
     when it is annotated, else the oid itself. An entry is dropped when its name fails `valid_branch_name`
     (the same rule for tags), its oid is not 40 or 64 lowercase hex digits or is all zeros, the line is not
-    `<oid> TAB refs/heads/<name>` or `refs/tags/<name>`, or it is a peeled entry with no tag line."""
+    `<oid> TAB refs/heads/<name>` or `refs/tags/<name>`, or it is a peeled entry with no tag line. More than
+    LS_REMOTE_MAX_BYTES of output is not an answer either: the process is killed and the result is None (`origin
+    unreachable`), never the first part of an advertisement read as all of it."""
     env = git_env(network=True)
     # the temp dir's parent is a ceiling: git must not discover a repository above the neutral dir
     env["GIT_CEILING_DIRECTORIES"] = str(Path(neutral_cwd()).parent)
     rc, out = run(["git", *GIT_SAFE, "ls-remote", "--heads", "--tags", "--", "origin"], timeout=120,
-                  cwd=neutral_cwd(), env=origin_url_env(env, url))
+                  cwd=neutral_cwd(), env=origin_url_env(env, url), max_bytes=LS_REMOTE_MAX_BYTES)
     if rc != 0:
         return None
     heads: dict[str, str] = {}
@@ -1262,7 +1367,10 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     common = git_common_dir(path)
     has_submodules, bad_key, submodules_vetted = submodule_config_check(path, common)
     if bad_key:
-        return skipped_record(path, f"skipped: submodule config unrecognised {bad_key}", [bad_key])
+        rec = skipped_record(path, f"skipped: submodule config unrecognised {bad_key}", [bad_key])
+        if bad_key == ALTERNATES_KEY:  # the doc says where the store that is in no archive is
+            rec["alternates"] = alternates_targets(common)
+        return rec
     # a ref name that is not UTF-8 cannot round-trip through this tool's text (two such names collide on U+FFFD, and
     # no generated command could name them): the checkout is unknown, and its whole-directory row captures it all
     # (adversary round 54 on PR 27, LOW 2; Codex pass 48, P1)
@@ -1409,17 +1517,31 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
     tip_unverified = False
     if tip and ahead_of_origin:
         # count again against the real origin tip: HEAD may already be inside it
-        def ahead_of_tip():
-            rc, n = git(path, "rev-list", "--count", "HEAD", "--not", "--remotes=origin", tip)
-            return int(n) if rc == 0 and n.strip().isdigit() else None
-        n = ahead_of_tip()
+        def ahead_of_tip() -> tuple[int | None, int | None]:
+            """(count, None); (None, None) when git says the tip object is not here (the one failure that means
+            `origin tip not fetched`); (None, rc) for any other failure (a timeout is 124, a damaged repository 128)."""
+            tip_err: list[str] = []
+            rc, n = git(path, "rev-list", "--count", "HEAD", "--not", "--remotes=origin", tip, err=tip_err)
+            if rc == 0 and n.strip().isdigit():
+                return int(n), None
+            # the tip is a vetted object id, `LC_ALL=C` is set: git's own whole-line messages for an object it lacks
+            missing = {f"fatal: bad object {tip}", f"fatal: not a valid object name {tip}",
+                       f"fatal: ambiguous argument '{tip}': unknown revision or path not in the working tree."}
+            if rc == 128 and any(ln in missing for ln in "".join(tip_err).splitlines()):
+                return None, None
+            return None, rc or 65
+        n, bad_rc = ahead_of_tip()
+        if bad_rc is not None:
+            return incomplete_record(path, "rev-list --count HEAD --not --remotes=origin <tip>", bad_rc)
         if n is None and fetch:  # the tip's objects are not here: download them, write no refs
             if not credential:  # `fetch` hands the configured url to its transport helper: not with a password
                 git(path, "-c", "maintenance.auto=false", "-c", "gc.auto=0", "fetch", "--quiet",
                     "--no-auto-maintenance", "--no-write-fetch-head", "--no-tags", "--refmap=",
                     "--no-recurse-submodules", "--no-prune", "--",
                     "origin", f"refs/heads/{branch}", timeout=120, network=True)
-            n = ahead_of_tip()
+            n, bad_rc = ahead_of_tip()
+            if bad_rc is not None:
+                return incomplete_record(path, "rev-list --count HEAD --not --remotes=origin <tip>", bad_rc)
         if n is None:
             tip_unverified = True  # origin has a tip we cannot compare with HEAD
         else:
@@ -1801,7 +1923,8 @@ def main(argv=None) -> int:
                          "treated like `origin unreachable`); "
                          "its live tips, not the local refs/remotes/origin/* (stale after a "
                          "branch is deleted there), then decide what is pushed; an origin that does not "
-                         "answer makes the checkout `origin unreachable`, never clean and pushed; origin's "
+                         "answer, or answers with more than 16 MiB of refs (killed at that size, no part of it "
+                         "used), makes the checkout `origin unreachable`, never clean and pushed; origin's "
                          "answer is trusted as given: a lying origin can hide any local commit by naming "
                          "it as a branch, tag or peeled tip")
     ap.add_argument("--fetch", action="store_true",

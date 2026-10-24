@@ -3684,6 +3684,230 @@ def test_an_absolute_index_gitlink_or_a_symlinked_file_or_alternates_in_a_module
         mod.git = real_git
 
 
+def diverged_checkout(tmp_path: Path):
+    """(roots, tip): a pushed checkout with one more local commit, origin's tip (another clone's commit) not in it."""
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    other = tmp_path / "other"
+    git(tmp_path, "clone", str(origin), str(other))
+    commit_file(other, "o.txt")
+    git(other, "push", "origin", "main")
+    commit_file(work, "w.txt")
+    return roots, git(other, "rev-parse", "HEAD").strip()
+
+
+REV_LIST_TIP = "rev-list --count HEAD --not --remotes=origin <tip>"
+
+
+def test_only_a_missing_tip_object_reads_as_origin_tip_not_fetched_any_other_failed_rev_list_is_incomplete(tmp_path):
+    """Codex thread 7 on PR 27: a timed-out (124) or damaged-repository (128) second `rev-list --count HEAD --not
+    --remotes=origin <tip>` read as `origin tip not fetched`; git's own "bad object <tip>" is the only honest reading."""
+    mod = load()
+    roots, tip = diverged_checkout(tmp_path)
+    real_git = mod.git
+    calls = []
+
+    def scan(fail_on, rc, stderr, fetch=False):
+        calls.clear()
+
+        def fake(path, *args, **kw):
+            if len(args) == 6 and args[:5] == ("rev-list", "--count", "HEAD", "--not", "--remotes=origin"):
+                calls.append(args[5])
+                if len(calls) in fail_on:
+                    if "err" in kw:
+                        kw["err"].append(stderr)
+                    return rc, ""
+            return real_git(path, *args, **kw)
+        mod.git = fake
+        mod._remote_cache.clear()
+        try:
+            return scan_one(mod, roots, remote=True, fetch=fetch)
+        finally:
+            mod.git = real_git
+
+    c = scan(set(), 0, "")  # the honest case: the tip's objects are not here
+    assert c["verdict"] == "unpushed commits" and "origin tip not fetched" in c["flags"] and calls == [tip]
+    for rc, stderr in ((124, ""), (128, "fatal: unable to read tree\n"), (128, "fatal: bad object " + "1" * 40 + "\n"),
+                       (1, f"fatal: bad object {tip}\n"), (0, "")):  # another object, another rc, a count that is no number
+        c = scan({1}, rc, stderr)
+        assert c["verdict"] == f"scan incomplete: {REV_LIST_TIP} rc={rc or 65}", (rc, c["verdict"])
+        assert c["flags"] == [c["verdict"]] and c["ahead_of_origin"] is None and "origin tip not fetched" not in c["flags"]
+    for stderr in (f"fatal: bad object {tip}\n", f"fatal: not a valid object name {tip}\n",
+                   f"fatal: ambiguous argument '{tip}': unknown revision or path not in the working tree.\nUse '--'\n"):
+        c = scan({1}, 128, stderr)  # git says the object is missing: the honest reading again
+        assert c["verdict"] == "unpushed commits" and "origin tip not fetched" in c["flags"], (stderr, c["verdict"])
+    # --fetch: the second call is the one that fails (the real fetch ran in between)
+    c = scan({2}, 124, "", fetch=True)
+    assert len(calls) == 2 and c["verdict"] == f"scan incomplete: {REV_LIST_TIP} rc=124", c["verdict"]
+    c = scan(set(), 0, "", fetch=True)  # the earlier fetch left the tip here: one call, a real count, nothing failed
+    assert len(calls) == 1 and c["verdict"] == "unpushed commits" and "origin tip not fetched" not in c["flags"]
+    assert c["ahead_of_origin"] == 1
+
+
+def scan_super(mod, roots: Path, **kw) -> dict:
+    """The record of `roots/super` alone: a checked-out submodule is a checkout of its own (`skipped: worktree redirected`)."""
+    want = str((roots / "super").resolve())
+    return next(c for c in mod.scan_git([roots], **{"remote": False, **kw}) if c["path"] == want)
+
+
+def make_nested_submodules(tmp_path: Path):
+    """(roots, super, mid worktree, inner worktree): super -> mid -> inner, every level checked out."""
+    inner_origin = make_repo(tmp_path / "inner-origin", "i.txt")
+    mid_origin = make_repo(tmp_path / "mid-origin", "m.txt")
+    allow = ("-c", "protocol.file.allow=always")
+    git(mid_origin, *allow, "submodule", "add", str(inner_origin), "inner")
+    git(mid_origin, "commit", "-m", "add inner")
+    roots = tmp_path / "roots"
+    sup = make_repo(roots / "super")
+    git(sup, *allow, "submodule", "add", str(mid_origin), "mid")
+    git(sup, *allow, "submodule", "update", "--init", "--recursive")
+    git(sup, "commit", "-m", "add mid")
+    return roots, sup, sup / "mid", sup / "mid" / "inner"
+
+
+NESTED = "skipped: submodule config unrecognised (nested submodule)"
+
+
+def test_a_submodule_with_submodules_of_its_own_skips_the_checkout_and_gets_the_whole_directory_archive(tmp_path):
+    """Codex thread 9 on PR 27: `submodules_vetted` held only the outer path, so an edit inside the inner submodule's
+    worktree was in no artifact (the per-submodule commands run with `--no-recursion`)."""
+    mod = load()
+    roots, sup, mid, inner = make_nested_submodules(tmp_path)
+    (inner / "i.txt").write_text("edited in the inner submodule\n")
+    (inner / "untracked-in-inner.txt").write_text("new\n")
+    c = scan_super(mod, roots)
+    assert c["verdict"] == NESTED and c["flags"] == [NESTED] and c["config_keys"] == ["(nested submodule)"], c
+    assert not c.get("submodules_vetted") and c["modified"] is None
+    # the rendered row archives the whole directory, which holds the inner worktree, and the git directory
+    doc = load_doc()
+    row = next(r for r in section_3_2(doc.render(doc_scan([c]))).splitlines() if r.startswith(f"| {doc.tilde(c['path'])} "))
+    assert "whole.tar" in row and f"counts unknown ({NESTED})" in row.replace("\\|", "|") and "gitdir.tar" in row
+    # a clean nested tree is skipped too: the rule is the structure, not the dirt
+    (inner / "i.txt").write_text("i.txt\n")
+    (inner / "untracked-in-inner.txt").unlink()
+    assert scan_super(mod, roots)["verdict"] == NESTED
+
+
+def test_a_submodule_with_a_gitlink_of_its_own_but_no_gitmodules_is_nested_and_a_plain_one_is_not(tmp_path):
+    mod = load()
+    roots, sup, moddir = make_super_with_submodule(tmp_path)
+    assert not scan_super(mod, roots)["verdict"].startswith("skipped")  # a submodule with nothing inside it is scanned
+    sub = sup / "sub"
+    make_repo(sub / "embedded", "e.txt")
+    git(sub, "add", "embedded")  # a gitlink in the submodule's index, no `.gitmodules` anywhere
+    assert not (sub / ".gitmodules").exists()
+    assert scan_super(mod, roots)["verdict"] == NESTED
+    git(sub, "rm", "--cached", "-q", "-f", "embedded")
+    assert not scan_super(mod, roots)["verdict"].startswith("skipped")
+    (sub / ".gitmodules").write_text("")  # a `.gitmodules` file of its own is enough, whatever it lists
+    assert scan_super(mod, roots)["verdict"] == NESTED
+
+
+ALTERNATES = "skipped: submodule config unrecognised (alternates)"
+ALTERNATES_WARNING = ("objects/info/alternates points outside this checkout; the store it names is NOT archived: do not "
+                      "delete the checkout or that store until its commits are bundled")
+
+
+def skipped_row(doc, c) -> str:
+    row = next(r for r in section_3_2(doc.render(doc_scan([c]))).splitlines() if r.startswith(f"| {doc.tilde(c['path'])} "))
+    return row.replace("\\|", "|")
+
+
+def test_the_alternates_skip_names_its_store_and_refuses_a_cleanup_other_skips_do_not(tmp_path):
+    """Codex thread 10 on PR 27: the skipped row archived the worktree and git directories and said nothing about the
+    object store `objects/info/alternates` names, which no archive holds."""
+    mod, doc = load(), load_doc()
+    roots, sup, moddir = make_super_with_submodule(tmp_path)
+    alt = moddir / "objects" / "info" / "alternates"
+    alt.parent.mkdir(parents=True, exist_ok=True)
+    alt.write_text("# a comment\n\n/stores/one\n/stores/with space $(x)\n/stores/three\n/stores/four\n")
+    c = scan_super(mod, roots)
+    assert c["verdict"] == ALTERNATES
+    assert c["alternates"] == ["/stores/one", "/stores/with space $(x)", "/stores/three"]  # the first three, comments and blanks gone
+    row = skipped_row(doc, c)
+    assert ALTERNATES_WARNING in row and "do not clean up" in row.split("| yes:")[1]
+    assert "/stores/one" in row and "'/stores/with space $(x)'" in row and "/stores/three" in row and "/stores/four" not in row
+    assert "and the alternate object store" in row and "whole.tar" in row  # the generic archives are still there
+    # a record from an older scan (no targets): the same warning, naming the file instead
+    del c["alternates"]
+    row = skipped_row(doc, c)
+    assert ALTERNATES_WARNING in row and "`<gitdir>/objects/info/alternates`" in row
+    # no other skipped or incomplete reason carries it
+    for verdict in (NESTED, "skipped: submodule config unrecognised (symlink)", mod.SKIP_WORKTREE, mod.SKIP_GIT_SYMLINK,
+                    "scan incomplete: status rc=124"):
+        other = dict(c, verdict=verdict, flags=[verdict])
+        row = skipped_row(doc, other)
+        assert "NOT archived" not in row and "alternate object store" not in row and "objects/info/alternates" not in row
+        assert "do not clean up" not in row, verdict
+        assert row.rstrip().endswith("| yes: counts unknown; re-scan or archive whole |"), verdict
+
+
+def fake_git_flooding_ls_remote(tmp_path: Path, monkeypatch, nbytes: int) -> Path:
+    """A `git` ahead of the real one on PATH: `ls-remote` prints valid refs forever (`nbytes` 0) or `nbytes` bytes of them,
+    everything else runs the real git. The pid of the writer goes to the returned file."""
+    real = shutil.which("git")
+    assert real
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    pidfile = tmp_path / "writer.pid"
+    script = fakebin / "git"
+    script.write_text(
+        "#!/bin/sh\n"
+        'case " $* " in\n'
+        '*" ls-remote "*)\n'
+        '  line=$(printf \'%040d\\trefs/heads/flood\' 1)\n'
+        f'  if [ {nbytes} -eq 0 ]; then yes "$line" & else yes "$line" | head -c {nbytes} & fi\n'
+        f'  echo $! > "{pidfile}"; wait $!; exit 0;;\n'
+        "esac\n"
+        f'exec "{real}" "$@"\n')
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fakebin}{os.pathsep}{os.environ['PATH']}")
+    return pidfile
+
+
+def test_an_ls_remote_answer_past_the_byte_cap_is_killed_and_reads_as_origin_unreachable(tmp_path, monkeypatch):
+    """Codex thread 11 on PR 27: `run` buffered all of `ls-remote`'s stdout and every valid ref was kept; an origin that
+    advertises without end could not be bounded. The prefix of an advertisement is never read as the whole answer."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    assert scan_one(mod, roots, remote=True)["verdict"] == "clean and pushed"  # the real ls-remote, under the cap
+    monkeypatch.setattr(mod, "LS_REMOTE_MAX_BYTES", 1024 * 1024, raising=False)
+    fake_git_flooding_ls_remote(tmp_path, monkeypatch, 2 * 1024 * 1024)  # 2 MiB of valid refs, finite
+    mod._remote_cache.clear()
+    assert mod.ls_remote_refs(str(origin)) is None
+    mod._remote_cache.clear()
+    c = scan_one(mod, roots, remote=True)
+    assert mod.ORIGIN_UNREACHABLE in c["flags"] and c["verdict"] != "clean and pushed", c["flags"]
+    assert c["local_only_verified"] is False
+    # the same fake under the cap is an answer: the cap is a size, not a ban
+    (tmp_path / "small").mkdir()
+    fake_git_flooding_ls_remote(tmp_path / "small", monkeypatch, 58 * 70)  # 70 whole lines of 58 bytes
+    mod._remote_cache.clear()
+    heads, tags, invalid = mod.ls_remote_refs(str(origin))
+    assert heads == {"flood": "0" * 39 + "1"} and tags == {} and invalid == 0
+
+
+def test_run_with_max_bytes_kills_an_endless_writer_and_its_group_and_keeps_every_exact_fit(tmp_path, monkeypatch):
+    mod = load()
+    pidfile = fake_git_flooding_ls_remote(tmp_path, monkeypatch, 0)  # prints without end
+    env = dict(os.environ)
+    rc, out = mod.run(["git", "ls-remote"], timeout=30, env=env, max_bytes=100_000)
+    assert (rc, out) == (mod.RC_OUTPUT_CAP, "")
+    ypid = int(pidfile.read_text())
+    for _ in range(100):  # the `yes` child died with its parent's process group
+        try:
+            os.kill(ypid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(ypid, 9)
+        raise AssertionError("the writer survived the cap")
+    assert mod.run(["printf", "%s", "abcd"], max_bytes=4) == (0, "abcd")  # exactly the cap fits
+    assert mod.run(["printf", "%s", "abcde"], max_bytes=4) == (mod.RC_OUTPUT_CAP, "")
+    assert mod.run(["sh", "-c", "printf ab; exit 3"], max_bytes=4) == (3, "ab")  # the child's own rc survives
+    assert mod.run(["sleep", "30"], timeout=0.3, max_bytes=4) == (124, "")  # and the time limit still applies
+
+
 def test_the_plan_runs_git_in_the_scanners_environment_not_the_operators(tmp_path):
     """Codex pass 42 (P1): with `GIT_DIR` pointing at another repository, `git -C <checkout> ls-files` listed that
     repository's files and the tar that followed succeeded without the checkout's only untracked file."""

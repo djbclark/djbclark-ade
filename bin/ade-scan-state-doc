@@ -31,6 +31,7 @@ ORIGIN_UNREACHABLE = "origin unreachable: local-only count unverified"  # ade-sc
 ORIGIN_CREDENTIAL = "origin url holds a credential or names a remote helper: not queried"  # same: never queried, treated as unreachable
 SUBMODULES_FLAG = "submodules not inspected"  # same: no count above covers a submodule's content
 SKIP_GIT_SYMLINK = "skipped: .git is a symlink"  # same: the whole-directory archive keeps the link, not its target
+SKIP_ALTERNATES = "skipped: submodule config unrecognised (alternates)"  # same: a module's objects live in a store no archive holds
 # One patch per stash entry, untracked files and binary content included (`git stash show --include-untracked`,
 # git 2.32+): `bundle create` takes ref names, not the reflog's commit ids, so a bundle of `stash@{n}` entries
 # cannot be made without writing refs into the checkout (adversary round 26 on PR 27). The entries are listed when
@@ -569,7 +570,7 @@ def render(d):
       "flag `origin unreachable: local-only count unverified` (`--remote` got no answer from origin, so the "
       "checkout is never `clean and pushed`) or `origin url holds a credential or names a remote helper: not queried` (the url has a "
       "password, or a username or query string on a non-ssh scheme, or names a remote helper, so it is never queried: the same, the url is in no record). "
-      "A checkout whose `status`, `rev-parse --abbrev-ref HEAD`, `for-each-ref`, `rev-list --count` or `remote get-url origin` call (only git's exit 2 `No such remote` means no origin) "
+      "A checkout whose `status`, `rev-parse --abbrev-ref HEAD`, `for-each-ref`, `rev-list --count` (the one against origin's tip too, unless git says the tip object is missing: that stays `origin tip not fetched`) or `remote get-url origin` call (only git's exit 2 `No such remote` means no origin) "
       "fails or times out is `scan incomplete: <call> rc=<n>` (`rc=124` is a timeout; `status` gets "
       "600 s, other calls 60 s) with null counts, and is never `clean and pushed`; a repository whose "
       "`.git/HEAD` git cannot read is `skipped: HEAD unreadable`, and one whose HEAD names no ref while "
@@ -671,12 +672,24 @@ def render(d):
             else:
                 gitdir = ("when `.git` is a file the directory it points to and that one's common directory hold the "
                           "history, archive them too: " + shcode(GITDIR_FMT, *gitdir_values(raw_p, ck)))
-            w(f"| {p} | counts unknown ({esc(c['verdict'])}) | re-scan once the cause is fixed, or archive the whole "
+            # a module whose `objects/info/alternates` is not empty keeps commits in another object store that neither
+            # archive above holds (Codex thread 10 on PR 27): say so, and refuse the cleanup until they are bundled
+            alt_what, alt_warn, alt_need = "", "", ""
+            if c["verdict"] == SKIP_ALTERNATES:
+                targets = [t for t in (c.get("alternates") or []) if isinstance(t, str)][:3]
+                names = ("; the first targets, as the alternates file writes them: " + ", ".join(shcode("{}", t) for t in targets)
+                         if targets else "; the store named in `<gitdir>/objects/info/alternates` of each module git directory")
+                alt_what = " and the alternate object store"
+                alt_warn = (" **objects/info/alternates points outside this checkout; the store it names is NOT archived: do not "
+                            "delete the checkout or that store until its commits are bundled**" + names + ".")
+                alt_need = "; **do not clean up: the alternate object store is in no archive**"
+            w(f"| {p} | counts unknown{alt_what} ({esc(c['verdict'])}) | re-scan once the cause is fixed, or archive the whole "
               f"directory: {shcode('mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -cf <DEST>/{} -- {}', ck, parent or '/', f'{ck}/whole.tar', base)}"
               f" (no git command: the scan did not run one there either); {gitdir}"
               " Git LFS payloads are in the store (`.git/lfs`, or the directory `lfs.storage` names): when that is a symlink or lives outside"
               " these archives, archive its `objects` directory too (resolve any symlink first: `realpath`)"
-              " | yes: counts unknown; re-scan or archive whole |")
+              f"{alt_warn}"
+              f" | yes: counts unknown; re-scan or archive whole{alt_need} |")
             continue
         # every untracked path counts, a `graft/` directory included: nothing verifies that one is the reproducible
         # graft index rather than work under an ordinary name (Codex pass 28 on PR 27)
@@ -929,7 +942,10 @@ def render(d):
       "real objects out of the bundle (`GIT_ADVICE=0`, git 2.46+, silences the grafts-deprecation hint that "
       "`GIT_GRAFT_FILE` provokes on every bundle; older gits ignore it). A `skipped` / `scan incomplete` checkout has "
       "no counts (its verdict is in the section 2 table) and is listed with a whole-directory archive: anything "
-      "may be in there. A checkout flagged `origin unreachable` is "
+      "may be in there. A `skipped: submodule config unrecognised (nested submodule)` checkout has a submodule with "
+      "submodules of its own: an edit in the inner worktree is in no per-submodule artifact, so only the whole-directory "
+      "archive holds it. One ending `(alternates)` has a module whose objects live in another store that no archive "
+      "here holds: its row says so and refuses a cleanup until those commits are bundled. A checkout flagged `origin unreachable` is "
       "always listed, whatever its counts: its local-only count came from stale tracking refs and is "
       "unverified, so a 0 there is not `clean and pushed`. A checkout flagged `submodules not inspected` is "
       "always listed too: no count here covers a submodule's content.\n")
@@ -947,7 +963,8 @@ def render(d):
     w("4. `ls-remote` needs the remote to answer; a checkout whose origin refused would show "
       "`on origin: unknown` in the run's tool. None did in this run. The current tool falls back to the "
       "local `refs/remotes/origin/*` for the count and makes the checkout `origin unreachable: local-only "
-      "count unverified`, never `clean and pushed`.")
+      "count unverified`, never `clean and pushed`; an advertisement of more than 16 MiB is killed and read the same way, "
+      "never as the part of it that arrived.")
     w("5. A pasture that was clean when created can become dirty or ahead later; this is a snapshot "
       f"at {d['scanned_at']}.")
     w("6. The scan ran with the first version of the tool, which did not look at a checkout's own config "
