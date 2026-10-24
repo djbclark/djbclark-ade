@@ -756,8 +756,13 @@ def render(d):
         covered_by_bundle = False
         # a shallow checkout's bundle holds no boundary parents, so `git clone` of it alone fails (rc 128): it restores only
         # by fetching into a clone of origin (adversary round 70 on PR 39, LOW)
-        shallow_note = (" (shallow checkout: the bundle cannot be cloned alone; restore by fetching it into a clone of origin, "
-                        "`git -C R fetch <bundle> 'refs/*:refs/*'`, so keep origin)") if c.get("shallow") else ""
+        # `git clone --bare` then a forced fetch into `refs/bundle/*`: a plain clone refuses to fetch into its checked-out
+        # branch, and an origin that moved on rejects a non-forced update (adversary round 1 on PR 47, MEDIUM 2); a
+        # `HEAD.bundle` holds only the ref `HEAD`, which `refs/*` does not match (MEDIUM 1)
+        def _shallow_note(spec):
+            return (" (shallow checkout: the bundle cannot be cloned alone; restore with `git clone --bare <origin> R`, then "
+                    f"`git -C R fetch <bundle> '{spec}'`, so keep origin)") if c.get("shallow") else ""
+        shallow_note = _shallow_note("+refs/*:refs/bundle/*")
         # no rule keyed on a path name: a checkout called `one-offs/Hermes` used to get "see `~/src/one-offs`" and no
         # command of its own, whatever repository it was (adversary round 30 on PR 27)
         if "no origin remote" in c["flags"]:
@@ -784,7 +789,7 @@ def render(d):
                                   ck, raw_p, f"{ck}/HEAD.bundle")
                            + " (detached HEAD: bundle, or create a branch first: "
                            + shcode("git -C {} switch -c <name>", raw_p) + ")")
-                cmd[-1] += shallow_note
+                cmd[-1] += _shallow_note("+HEAD:refs/bundle/HEAD")
                 need = "yes: HEAD names no branch; bundle it, or name a branch first"
             else:
                 what.append(f"{head_ahead} commit(s) on {code('{}', c['branch'])}")
@@ -945,7 +950,7 @@ def render(d):
             else:
                 cmd.append(shcode("mkdir -p <DEST>/{} && GIT_ADVICE=0 GIT_GRAFT_FILE=/dev/null GIT_NO_REPLACE_OBJECTS=1 git -C {} bundle create <DEST>/{} --all",
                                   ck, raw_p, f"{ck}/local-only.bundle")
-                           + " " + again)
+                           + shallow_note + " " + again)
             need = need if need.startswith(("yes", "**yes")) else (
                 "yes: origin not queried (its url holds a credential or names a remote helper); bundle" if credential
                 else "yes: origin did not answer; bundle, or re-scan")
