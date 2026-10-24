@@ -16,18 +16,25 @@ a checkout with any other key is `skipped: unrecognised config <key>`, one with 
 work tree that is not the scanned dir is `skipped: worktree redirected`, one whose `.git` entry is a
 symlink is `skipped: .git is a symlink` (git would read a git directory elsewhere). The same allowlist is
 applied to every submodule's git dir under `modules/` (`config` and `config.worktree`; `skipped: submodule
-config unrecognised <key>`): a config that is unreadable is `(unreadable)`, a symlink anywhere under
+config unrecognised <key>`): a config that is unreadable is `(unreadable)`, a per-submodule git call that failed or timed out, or more than 1000 index-hidden directories, is `(unreadable, timed out or too large)`, a symlink anywhere under
 `modules/` (a symlinked file in a module git dir included) or at a submodule's `.git` is `(symlink)`, a module git dir with a
 `commondir` is `(commondir)`, one with a nonempty `objects/info/alternates` is `(alternates)` (the record then carries
 `alternates`, the first 3 targets read from those files, and the report warns that the store they name is archived
 nowhere; any other `skipped` or `scan incomplete` record of a checkout whose own `objects/info/alternates` is not empty carries
-`alternates` too, read without running git, and gets the same warning; so does one whose own `objects`, `refs` or `packed-refs`
-is a symlink to a store outside the checkout, or whose `.git` directory holds a `commondir`: the record then carries
+`alternates` too, read without running git, and gets the same warning; so does one whose own `objects`, `refs`, `logs`,
+`packed-refs` or `shallow` is a symlink to a store outside the checkout, or has a symlink anywhere inside `objects/`, `refs/`
+or `logs/` (a bounded walk: 200000 entries, 4 links shown; past the bound or on an error only the generic warning stands), or
+whose git dir does not point back to the checkout (see below): the record then carries
 `linked_stores`, each `<member> -> <target>`, since `whole.tar` and the git-dir archive keep the link, not the store, and an
 error reading any of those files leaves `alternates` empty, which is the same warning without the targets),
-a top-level checkout whose `.git` DIRECTORY holds a `commondir` file (a linked worktree's `.git` is a gitfile, so it is
-not affected) is `skipped: git dir redirected (commondir)` before any git call: every later call, `--fetch` among
-them, would act on the git directory the file names, outside the scanned tree,
+a top-level checkout whose git dir does not point back to it is skipped before any git call (the git dir must point back to
+the checkout; every later call, `--fetch` among them, would act on the git directory git reads, outside the scanned tree).
+Layouts: a `.git` DIRECTORY holding a `commondir` entry is `skipped: git dir redirected (commondir)`; a `.git` gitfile
+naming a git dir G is accepted only if G points back, by a `gitdir` file naming `<checkout>/.git` (a linked worktree's
+admin dir) or by `core.worktree` in `G/config` naming the checkout (`--separate-git-dir`, an absorbed submodule), and a
+`commondir` in G must name a common dir C with G at `C/worktrees/<name>`; a gitfile naming another checkout's `.git` or a
+bare repository, a planted admin dir, or one that cannot be read or parsed is `skipped: git dir redirected (does not point
+back to this checkout)`, with `git dir -> G` (and `commondir -> C`) in `linked_stores`,
 a submodule whose `.git` is a directory or a gitfile naming a git dir the walk did not vet (outside
 `modules/`, or in a pruned `objects/`) is `(gitdir outside modules)`, a gitfile that is not one line of
 `gitdir: <path>` is `(gitdir unreadable)`, a `.gitmodules` path that is not an index gitlink but has a `.git`
@@ -213,7 +220,9 @@ SKIP_NO_WORKTREE = "skipped: no work tree"
 SUBMODULES_FLAG = "submodules not inspected"
 SKIP_HEAD_UNREADABLE = "skipped: HEAD unreadable"
 SKIP_GIT_SYMLINK = "skipped: .git is a symlink"
-SKIP_COMMONDIR = "skipped: git dir redirected (commondir)"
+SKIP_COMMONDIR = "skipped: git dir redirected (commondir)"  # a `.git` DIRECTORY holding a `commondir` entry
+SKIP_GIT_DIR_FOREIGN = "skipped: git dir redirected (does not point back to this checkout)"  # any other git dir that leads away
+SUBMODULE_CHECK_FAILED = "(unreadable, timed out or too large)"  # a git call of the submodule check that failed, ran out of time or listed too many
 MAX_TIPS = 2000  # ls-remote tips passed as `--not` arguments (argv size); extra tips only overcount
 LS_REMOTE_MAX_BYTES = 16 * 1024 * 1024  # what `ls-remote` may print before the answer is refused (a few hundred thousand refs)
 MAX_BRANCH_COUNTS = 100  # `rev-list --count` calls for the per-branch report; the rest are only summed
@@ -756,33 +765,159 @@ def alternates_targets(common: Path | None) -> list[str]:
     return found
 
 
-LINKED_STORE_MEMBERS = ("objects", "refs", "packed-refs")  # a symlink at any of these keeps the history at the link's target
+LINKED_STORE_MEMBERS = ("objects", "refs", "logs", "packed-refs", "shallow")  # a symlink at any of these keeps the history at the link's target
+LINKED_STORE_TREES = ("objects", "refs", "logs")  # ... or anywhere inside these three (`objects/pack`, `refs/heads`, a reflog)
+MAX_STORE_WALK = 200000  # entries `top_stores` visits under those trees before it gives up (the generic warning)
+MAX_STORE_LINKS = 4  # deep links it records (the renderer shows 4 as well)
+MAX_GIT_FILE = 64 * 1024
 
 
-def git_dir_redirected(path: Path) -> bool:
-    """True when `<path>/.git` is a directory holding a `commondir` entry (any kind, a FIFO or a dangling link included):
-    git then reads the objects, refs and config of the git directory it names, wherever that is (Cursor security review
-    on PR 27, MEDIUM). A linked worktree's `.git` is a gitfile, never a directory, so it is not affected."""
+def _config_worktree(text: str) -> str | None:
+    """The last `core.worktree` value of a config file read as text (no git call), or None when there is none. ValueError for
+    anything this small reader does not take for plain git syntax (a continued line, an escape, an unbalanced quote), so a
+    config git might read differently never passes as pointing back."""
+    section, found = "", None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.endswith("\\"):
+            raise ValueError("continued line")
+        if line.startswith("["):
+            end = line.find("]")
+            if end < 0:
+                raise ValueError("section header")
+            head = line[1:end].strip()
+            section = head.lower() if '"' not in head and "." not in head else "?"
+            line = line[end + 1:].strip()
+        if section != "core" or not line or line[0] in "#;":
+            continue
+        key, eq, value = line.partition("=")
+        if key.strip().lower() != "worktree":
+            continue
+        if not eq:
+            raise ValueError("valueless worktree")
+        value = value.strip()
+        if value.startswith('"'):
+            end = value.find('"', 1)
+            rest = value[end + 1:].strip() if end > 0 else "?"
+            if end < 0 or (rest and rest[0] not in "#;"):
+                raise ValueError("quoted value")
+            value = value[1:end]
+        else:
+            for mark in "#;":
+                value = value.split(mark, 1)[0]
+            value = value.strip()
+        if "\\" in value or '"' in value or not value:
+            raise ValueError("escape")
+        found = value
+    return found
+
+
+def _read_text(path: Path) -> str:
+    return read_regular_file(path, MAX_GIT_FILE).decode("utf-8")
+
+
+def _joined(base: Path | str, rel: str) -> str:
+    return os.path.join(os.fspath(base), rel)
+
+
+def git_dir_foreign(path: Path) -> str | None:
+    """The skip text when the git directory `<path>/.git` leads to does not point back to this checkout, else None. Run before
+    the first git call, since every later call, `--fetch` (it writes objects) among them, acts on the git directory git
+    reads, which a planted entry can move into another checkout's store (Cursor security review and adversary round 66 on
+    PR 27). One principle, every layout:
+      1. `.git` is a DIRECTORY: it holds no `commondir` entry of any kind (git writes none there; SKIP_COMMONDIR).
+      2. `.git` is a gitfile naming a git dir G (relative to `path`): G must point back to `path`, by (a) a `gitdir` file
+         naming `<path>/.git` (a linked worktree's admin dir), or (b) `core.worktree` in `G/config` naming `path` (what
+         `--separate-git-dir` and an absorbed submodule write). If G holds a `commondir` it must name a common dir C with G
+         at `C/worktrees/<name>` (the only place git makes an admin dir), whichever of (a) and (b) holds. A gitfile that
+         names another checkout's `.git` or a bare repository, a planted admin dir, and a gitfile or target that cannot be
+         read or parsed all fail (SKIP_GIT_DIR_FOREIGN). Nothing here runs git.
+    A `.git` that is absent or a symlink is the caller's concern (the symlink is skipped before this); the toplevel check
+    judges the absent one."""
+    dotgit = path / ".git"
     try:
-        if not stat.S_ISDIR(os.lstat(path / ".git").st_mode):
-            return False
+        mode = os.lstat(dotgit).st_mode
     except OSError:
-        return False
-    return os.path.lexists(path / ".git" / "commondir")
+        return None
+    if stat.S_ISDIR(mode):
+        return SKIP_COMMONDIR if os.path.lexists(dotgit / "commondir") else None
+    if not stat.S_ISREG(mode):
+        return None
+    try:
+        gitdir = _gitfile_target(path)
+        if gitdir is None:
+            return SKIP_GIT_DIR_FOREIGN
+        if os.path.lexists(gitdir / "commondir"):
+            link = read_regular_file(gitdir / "commondir", MAX_GIT_FILE).rstrip(b"\r\n")
+            common = os.fsdecode(os.path.realpath(os.path.join(os.fsencode(gitdir), link)))
+            if not os.path.samefile(gitdir, os.path.join(common, "worktrees", gitdir.name)):
+                return SKIP_GIT_DIR_FOREIGN
+        if os.path.lexists(gitdir / "gitdir"):  # (a)
+            back = _read_text(gitdir / "gitdir").rstrip("\r\n")
+            if back and os.path.samefile(_joined(gitdir, back), dotgit):
+                return None
+        if os.path.lexists(gitdir / "config"):  # (b)
+            value = _config_worktree(_read_text(gitdir / "config"))
+            if value is not None and os.path.samefile(_joined(gitdir, value), path):
+                return None
+    except (OSError, ValueError):  # unreadable, a FIFO, not UTF-8, a path git would not use, a target that is gone
+        pass
+    return SKIP_GIT_DIR_FOREIGN
+
+
+def _gitfile_target(path: Path) -> Path | None:
+    """The resolved git directory a top-level `.git` gitfile names, or None when git would not take the file for one
+    (OSError and ValueError propagate for an unreadable file)."""
+    raw = read_regular_file(path / ".git", MAX_GIT_FILE)
+    rel = raw[len(b"gitdir: "):].rstrip(b"\r\n")
+    if not raw.startswith(b"gitdir: ") or not rel or b"\n" in rel or b"\0" in rel:
+        return None
+    return Path(os.fsdecode(os.path.realpath(os.path.join(os.fsencode(path), rel))))
+
+
+def _linked_in_trees(common: Path) -> list[str]:
+    """`<relative path> -> <resolved target>` of every symlink at or inside `objects`, `refs`, `logs`, plus `packed-refs`
+    and `shallow`, of the common dir (at most MAX_STORE_LINKS; `whole.tar` and the git-dir archive keep a link, not what it
+    names). ValueError past MAX_STORE_WALK entries, OSError for an unreadable directory: the caller keeps the generic
+    warning (adversary round 66, LOW 1)."""
+    def fail(err: OSError) -> None:
+        raise err
+
+    found: list[str] = []
+    visited = 0
+    for member in LINKED_STORE_MEMBERS:
+        top = common / member
+        if os.path.islink(top):
+            found.append(f"{member} -> {os.path.realpath(top)}")
+        elif member in LINKED_STORE_TREES and os.path.isdir(top):
+            for root, dirs, files in os.walk(top, followlinks=False, onerror=fail):
+                dirs.sort()
+                files.sort()
+                visited += len(dirs) + len(files)
+                if visited > MAX_STORE_WALK:
+                    raise ValueError("too many entries")
+                for name in dirs + files:
+                    entry = os.path.join(root, name)
+                    if os.path.islink(entry):
+                        found.append(f"{os.path.relpath(entry, common)} -> {os.path.realpath(entry)}")
+        if len(found) >= MAX_STORE_LINKS:
+            return found[:MAX_STORE_LINKS]
+    return found
 
 
 def top_stores(path: Path) -> tuple[list[str] | None, list[str]]:
     """(alternates, linked_stores) of the checkout's own common git dir. `alternates`: None when it has no nonempty
     `objects/info/alternates`, else the first MAX_ALTERNATES_SHOWN targets (empty: the file is nonempty but unreadable, too
     big or only comments, or ANY error reading what leads to it was raised after `.git` was found: the generic warning
-    stands, never silence; adversary round 65, INFO 1). `linked_stores`: `<member> -> <resolved target>` for each of
-    `objects`, `refs` and `packed-refs` of the common dir that is a symlink (git-new-workdir, objects moved to another
-    disk: `whole.tar` and the git-dir archive keep the link only), plus `commondir -> <dir>` for a `.git` directory whose
-    `commondir` names another git dir (adversary round 65, LOW 2). Runs no git: the common dir is found by reading `.git`
-    (a directory, or a one-line gitfile whose git dir may hold a `commondir`), so it also works for a checkout the scan
-    refused before it trusted any git call. A `.git` symlink is not followed (`skipped: .git is a symlink` has the
-    whole-directory row for it). A store such a checkout borrows from is archived by neither `whole.tar` nor the git-dir
-    archive (a `bundle create` reads through it, so a bundle row is not affected)."""
+    stands, never silence; adversary round 65, INFO 1). `linked_stores`, each `<what> -> <resolved target>`: for a git dir
+    that does not point back to the checkout (`git_dir_foreign`), `git dir` (a gitfile's target) and `commondir`; for the
+    common dir, any symlink at or inside `objects`, `refs` and `logs` or at `packed-refs` or `shallow` (git-new-workdir,
+    objects moved to another disk: `whole.tar` and the git-dir archive keep the link only; round 65 LOW 2, round 66 LOW 1,
+    at most MAX_STORE_LINKS of the last kind). Runs no git: the common dir is found by reading `.git` (a directory, or a
+    one-line gitfile whose git dir may hold a `commondir`), so it also works for a checkout the scan refused before it
+    trusted any git call. A `.git` symlink is not followed (`skipped: .git is a symlink` has the whole-directory row for
+    it). A store such a checkout borrows from is archived by neither `whole.tar` nor the git-dir archive (a `bundle create`
+    reads through it, so a bundle row is not affected)."""
     dotgit = path / ".git"
     try:
         mode = os.lstat(dotgit).st_mode
@@ -790,33 +925,32 @@ def top_stores(path: Path) -> tuple[list[str] | None, list[str]]:
         return None, []  # no `.git` entry at all: nothing was found
     linked: list[str] = []
     try:
+        foreign = git_dir_foreign(path) is not None
         if stat.S_ISREG(mode):
-            raw = read_regular_file(dotgit, 64 * 1024)
-            rel = raw[len(b"gitdir: "):].rstrip(b"\r\n")
-            if not raw.startswith(b"gitdir: ") or not rel or b"\n" in rel or b"\0" in rel:
+            gitdir = _gitfile_target(path)
+            if gitdir is None:
                 return None, []  # git does not take this for a repository either
-            gitdir = Path(os.fsdecode(os.path.realpath(os.path.join(os.fsencode(path), rel))))
+            if foreign:
+                linked.append(f"git dir -> {gitdir}")
         elif stat.S_ISDIR(mode):
             gitdir = dotgit
         else:
             return None, []
         try:
-            link = read_regular_file(gitdir / "commondir", 64 * 1024).rstrip(b"\r\n")
+            link = read_regular_file(gitdir / "commondir", MAX_GIT_FILE).rstrip(b"\r\n")
             common = Path(os.fsdecode(os.path.realpath(os.path.join(os.fsencode(gitdir), link)))) if link else gitdir
-            if stat.S_ISDIR(mode) and common != Path(os.path.realpath(gitdir)):
+            if foreign and common != Path(os.path.realpath(gitdir)):
                 linked.append(f"commondir -> {common}")
         except FileNotFoundError:
             common = gitdir
-        for member in LINKED_STORE_MEMBERS:
-            if os.path.islink(common / member):
-                linked.append(f"{member} -> {os.path.realpath(common / member)}")
+        linked.extend(_linked_in_trees(common))
         alternates = common / "objects" / "info" / "alternates"
         try:
             if os.path.getsize(alternates) == 0:  # what the module check asks: a symlink is followed, as git does
                 return None, linked
         except (FileNotFoundError, NotADirectoryError):
             return None, linked
-        return alternates_lines(read_regular_file(alternates, 64 * 1024))[:MAX_ALTERNATES_SHOWN], linked
+        return alternates_lines(read_regular_file(alternates, MAX_GIT_FILE))[:MAX_ALTERNATES_SHOWN], linked
     except (OSError, ValueError):
         return [], linked
 
@@ -1022,12 +1156,12 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
             return True, "(nested submodule)", []
         rc, inner = git(path / sub, "ls-files", "-z", "-s", errors="surrogateescape")
         if rc != 0:
-            return True, "(unreadable)", []
+            return True, SUBMODULE_CHECK_FAILED, []  # a timeout is rc 124
         if any(e.startswith("160000 ") for e in inner.split("\0")):
             return True, "(nested submodule)", []
         rc, nested, _ = embedded_repositories(path / sub)
         if rc != 0:
-            return True, "(unreadable or timed out)", []  # a timeout of the walk is rc 124
+            return True, SUBMODULE_CHECK_FAILED, []  # a timeout of the walk is rc 124
         if nested:
             return True, "(nested submodule)", []
         # a repository at a skip-worktree or assume-unchanged path: `ls-files --others` lists nothing for a directory that
@@ -1035,7 +1169,7 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
         # MEDIUM; Codex pass 65, P1)
         _, hidden_names, _, failure = index_hidden_repositories(path / sub)
         if failure:
-            return True, "(unreadable or timed out)", []
+            return True, SUBMODULE_CHECK_FAILED, []  # a timeout, a failed call, or more than MAX_EMBEDDED hidden directories
         if hidden_names:
             return True, "(nested submodule)", []
         subs.append(sub)  # a real checked-out submodule: `.git` names a git dir the walk vetted
@@ -1490,8 +1624,9 @@ def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
 def scan_record(path: Path, remote: bool, fetch: bool = False) -> dict:
     if (path / ".git").is_symlink():  # before any git call: git would read the link's target, a git dir elsewhere
         return skipped_record(path, SKIP_GIT_SYMLINK)
-    if git_dir_redirected(path):  # likewise: a `commondir` makes every call, `fetch` included, act on the git dir it names
-        return skipped_record(path, SKIP_COMMONDIR)
+    foreign = git_dir_foreign(path)  # likewise: a git dir that does not point back to this checkout makes every call,
+    if foreign:  # `fetch` included, act on a git dir elsewhere
+        return skipped_record(path, foreign)
     keys = unsafe_config(path)  # before any other git call: reading config runs nothing
     if keys is None:
         return skipped_record(path, SKIP_UNREADABLE)

@@ -3823,8 +3823,14 @@ def test_an_untracked_repository_inside_a_submodule_is_nested_and_gets_the_whole
     # the walk failing (a timeout, an unreadable subdirectory) is never a scanned submodule; a timeout says so (round 65, INFO 3)
     real = mod.embedded_repositories
     monkeypatch.setattr(mod, "embedded_repositories", lambda p, within=None: (124, [], []) if p.name == "sub" else real(p, within))
-    assert scan_super(mod, roots)["verdict"] == "skipped: submodule config unrecognised (unreadable or timed out)"
+    assert scan_super(mod, roots)["verdict"] == f"skipped: submodule config unrecognised {mod.SUBMODULE_CHECK_FAILED}" == (
+        "skipped: submodule config unrecognised (unreadable, timed out or too large)")
     monkeypatch.setattr(mod, "embedded_repositories", real)
+    # round 66, INFO 1: the `ls-files -z -s` of the submodule failing (a timeout is rc 124) has the same one label
+    real_git = mod.git
+    monkeypatch.setattr(mod, "git", lambda p, *a, **kw: (124, "") if p.name == "sub" and a[:3] == ("ls-files", "-z", "-s") else real_git(p, *a, **kw))
+    assert scan_super(mod, roots)["verdict"] == "skipped: submodule config unrecognised (unreadable, timed out or too large)"
+    monkeypatch.setattr(mod, "git", real_git)
     shutil.rmtree(emb)  # a plain submodule with only an ordinary untracked file is still scanned
     (sub / "notes.txt").write_text("not a repository\n")
     c = scan_super(mod, roots)
@@ -3869,7 +3875,11 @@ def test_a_repository_at_an_index_hidden_path_inside_a_submodule_is_nested_and_g
         real = mod.index_hidden_repositories
         monkeypatch.setattr(mod, "index_hidden_repositories",
                             lambda p: (0, [], [], ("ls-files --others under index-hidden paths", 124)) if p.name == "sub" else real(p))
-        assert scan_super(mod, roots)["verdict"] == "skipped: submodule config unrecognised (unreadable or timed out)"
+        assert scan_super(mod, roots)["verdict"] == "skipped: submodule config unrecognised (unreadable, timed out or too large)"
+        monkeypatch.undo()
+        # more hidden directories than MAX_EMBEDDED is a failure of the walk (rc 0), with the same label
+        monkeypatch.setattr(mod, "MAX_EMBEDDED", 0)
+        assert scan_super(mod, roots)["verdict"] == "skipped: submodule config unrecognised (unreadable, timed out or too large)"
         monkeypatch.undo()
         # a hidden path that is a plain directory finds nothing: the submodule stays vetted
         shutil.rmtree(inner)
@@ -4098,6 +4108,215 @@ def test_a_git_dir_with_a_commondir_file_is_skipped_before_any_git_call_and_a_li
     # and an empty `commondir` file in a `.git` directory is still a redirect attempt: refused too
     (decoy / ".git" / "commondir").write_text("")
     assert mod.scan_checkout(decoy.resolve(), remote=False)["verdict"] == mod.SKIP_COMMONDIR
+
+
+def counting_git(tmp_path: Path, monkeypatch) -> Path:
+    """Put a `git` first on PATH that logs each call's arguments, then runs the real one. The log file does not exist while
+    no call was made."""
+    real = shutil.which("git")
+    fakebin, log = tmp_path / "fakebin", tmp_path / "git.log"
+    fakebin.mkdir()
+    (fakebin / "git").write_text(f'#!/bin/sh\necho "$*" >> "{log}"\nexec "{real}" "$@"\n')
+    (fakebin / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fakebin}{os.pathsep}{os.environ['PATH']}")
+    return log
+
+
+def test_a_gitfile_whose_git_dir_does_not_point_back_is_skipped_before_any_git_call_and_fetch_writes_nothing(tmp_path, monkeypatch):
+    """Adversary round 66 on PR 27, MEDIUM: the commondir repair closed the `.git` directory form only. A gitfile naming
+    another checkout's `.git` (or a planted admin dir holding a `commondir`) made every later git call, `--fetch`
+    (it writes objects) among them, act on that store, and came back as an ordinary row under the decoy's path. The git
+    dir must point back to the checkout."""
+    mod, doc = load(), load_doc()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    other = tmp_path / "other"
+    git(tmp_path, "clone", str(origin), str(other))
+    commit_file(other, "o.txt")
+    git(other, "push", "origin", "main")  # origin's tip: its objects are not in `work`, so a --fetch would download them
+    commit_file(work, "w.txt")  # diverged and unpushed: the tip must be compared
+    victim = (work / ".git").resolve()
+    wt = tmp_path / "wt"
+    git(work, "worktree", "add", "-q", "-b", "wt", str(wt))
+    wt_admin = Path(git(wt, "rev-parse", "--absolute-git-dir").strip()).resolve()
+    bare = tmp_path / "bare.git"
+    git(tmp_path, "init", "--bare", "-q", "-b", "main", str(bare))
+    stores = [victim, bare.resolve()]
+    before = {s: sorted(str(p) for p in (s / "objects").rglob("*")) for s in stores}
+    log = counting_git(tmp_path, monkeypatch)
+
+    def decoy(name: str, text: str | None = None) -> Path:
+        d = roots / name
+        d.mkdir()
+        if text is not None:
+            (d / ".git").write_text(text)
+        return d
+
+    def planted(name: str, config: bool) -> tuple[Path, Path]:
+        """The decoy with its own admin dir: `HEAD`, `commondir` naming the victim, and a back-pointer that is right
+        (`gitdir`, or `core.worktree` in `config`) - the Cursor layout with one more hop."""
+        d = decoy(name, "gitdir: .admin\n")
+        admin = d / ".admin"
+        admin.mkdir()
+        (admin / "HEAD").write_text("ref: refs/heads/main\n")
+        (admin / "commondir").write_text(f"{victim}\n")
+        if config:
+            (admin / "config").write_text(f"[core]\n\tworktree = {d}\n")
+        else:
+            (admin / "gitdir").write_text(f"{d / '.git'}\n")
+        return d, admin.resolve()
+
+    cases = []  # (checkout, linked_stores wanted: None when the record carries none)
+    cases.append((decoy("direct", f"gitdir: {victim}\n"), [f"git dir -> {victim}"]))
+    cases.append((decoy("relative", "gitdir: ../work/.git\n"), [f"git dir -> {victim}"]))
+    cases.append((decoy("bare", f"gitdir: {bare}\n"), [f"git dir -> {bare.resolve()}"]))
+    nowhere = tmp_path.resolve() / "nowhere"  # a target that does not exist
+    cases.append((decoy("gone", f"gitdir: {nowhere}\n"), [f"git dir -> {nowhere}"]))
+    cases.append((decoy("another-worktree", f"gitdir: {wt_admin}\n"), [f"git dir -> {wt_admin}", f"commondir -> {victim}"]))
+    d, admin = planted("planted-admin", config=False)
+    cases.append((d, [f"git dir -> {admin}", f"commondir -> {victim}"]))
+    d, admin = planted("planted-config", config=True)
+    cases.append((d, [f"git dir -> {admin}", f"commondir -> {victim}"]))
+    cases.append((decoy("garbage", "not a gitfile\n"), None))
+    for checkout, linked in cases:
+        mod._remote_cache.clear()
+        rec = mod.scan_checkout(checkout.resolve(), remote=True, fetch=True)
+        assert rec["verdict"] == mod.SKIP_GIT_DIR_FOREIGN == "skipped: git dir redirected (does not point back to this checkout)", \
+            (checkout.name, rec["verdict"])
+        assert not log.exists(), (checkout.name, log.read_text())  # not one git call, `fetch` least of all
+        assert rec.get("linked_stores") == linked, (checkout.name, rec.get("linked_stores"))
+        if linked:
+            assert "is NOT archived" in skipped_row(doc, rec), checkout.name
+    for store in stores:
+        assert sorted(str(p) for p in (store / "objects").rglob("*")) == before[store], store
+    # control: the same `--fetch` scan of the real store downloads origin's tip (so the guard above is what stopped it)
+    mod._remote_cache.clear()
+    real_rec = mod.scan_checkout(work.resolve(), remote=True, fetch=True)
+    assert not real_rec["verdict"].startswith("skipped") and "fetch" in log.read_text(), real_rec["verdict"]
+
+
+def test_a_git_dir_that_points_back_to_the_checkout_stays_scanned_and_a_stale_back_pointer_does_not(tmp_path):
+    """Adversary round 66 on PR 27: the layouts git itself builds must not be skipped for the redirect check: a main
+    checkout, `git worktree add`, an absorbed submodule (`core.worktree` in the module's config) and any git dir whose
+    `core.worktree` names the checkout. git writes NO back-pointer for `clone --separate-git-dir` or `init
+    --separate-git-dir` (git 2.56: neither `gitdir` nor `core.worktree`), so nothing tells such a gitfile from a decoy
+    naming another checkout's store: those are skipped, with the whole-directory row."""
+    mod = load()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    # a main checkout and a linked worktree
+    assert mod.git_dir_foreign(work) is None and not mod.scan_checkout(work.resolve(), remote=False)["verdict"].startswith("skipped")
+    wt = tmp_path / "wt"
+    git(work, "worktree", "add", "-q", "-b", "wt", str(wt))
+    assert mod.git_dir_foreign(wt.resolve()) is None
+    c = mod.scan_checkout(wt.resolve(), remote=False)
+    assert not c["verdict"].startswith("skipped") and "linked_stores" not in c, c["verdict"]
+    # moved without `git worktree repair`: the admin dir's `gitdir` still names the old place, so it no longer points back
+    moved = tmp_path / "wt-moved"
+    wt.rename(moved)
+    assert mod.git_dir_foreign(moved.resolve()) == mod.SKIP_GIT_DIR_FOREIGN
+    git(work, "worktree", "repair", str(moved))
+    assert mod.git_dir_foreign(moved.resolve()) is None
+    # an absorbed submodule, made by `submodule add` and by `absorbgitdirs`: `core.worktree` in the module's config
+    sroots, sup, moddir = make_super_with_submodule(tmp_path / "s")
+    emb_origin = make_repo(tmp_path / "emb-origin")
+    git(sup, "clone", "-q", str(emb_origin), "emb")
+    git(sup, "config", "-f", ".gitmodules", "submodule.emb.path", "emb")
+    git(sup, "config", "-f", ".gitmodules", "submodule.emb.url", str(emb_origin))
+    git(sup, "add", ".gitmodules", "emb")
+    git(sup, "-c", "protocol.file.allow=always", "submodule", "absorbgitdirs")
+    assert (sup / "emb" / ".git").is_file() and "worktree" in (sup / ".git" / "modules" / "emb" / "config").read_text()
+    for sub in (sup / "sub", sup / "emb"):
+        assert mod.git_dir_foreign(sub) is None, sub
+        assert mod.scan_checkout(sub.resolve(), remote=False)["verdict"] == mod.SKIP_WORKTREE, sub  # git's own core.worktree: as before
+    # the submodule's gitfile naming ANOTHER module's git dir does not point back
+    (sup / "emb" / ".git").write_text(f"gitdir: {moddir}\n")
+    assert mod.git_dir_foreign(sup / "emb") == mod.SKIP_GIT_DIR_FOREIGN
+    # `--separate-git-dir`: no back-pointer exists
+    for how in ("clone", "init"):
+        sep, gd = tmp_path / f"sep-{how}", tmp_path / f"gd-{how}"
+        if how == "clone":
+            git(tmp_path, "clone", "-q", f"--separate-git-dir={gd}", str(origin), str(sep))
+        else:
+            make_repo(sep)
+            git(sep, "init", "-q", f"--separate-git-dir={gd}")
+        assert (sep / ".git").is_file() and gd.is_dir()
+        assert mod.git_dir_foreign(sep.resolve()) == mod.SKIP_GIT_DIR_FOREIGN, how
+        assert mod.scan_checkout(sep.resolve(), remote=False)["verdict"] == mod.SKIP_GIT_DIR_FOREIGN, how
+        # a `core.worktree` naming the checkout is the back-pointer (older git, `git config`): the last value of `core`
+        base = (gd / "config").read_text()
+        elsewhere = tmp_path / "elsewhere"
+        for text, want in ((f'[core]\n\tworktree = "{sep}" # back\n', None),
+                           (f"[CORE]\n\tWorkTree = {sep}\n", None),
+                           (f"[core] worktree = {sep}\n", None),
+                           (f"[core]\n\tworktree = {elsewhere}\n\tworktree = {sep}\n", None),
+                           (f"[core]\n\tworktree = {sep}\n\tworktree = {elsewhere}\n", mod.SKIP_GIT_DIR_FOREIGN),
+                           (f'[core "x"]\n\tworktree = {sep}\n', mod.SKIP_GIT_DIR_FOREIGN),
+                           (f"[remote]\n\tworktree = {sep}\n", mod.SKIP_GIT_DIR_FOREIGN),
+                           (f"[core]\n\tworktree = {elsewhere}\n", mod.SKIP_GIT_DIR_FOREIGN),
+                           (f"[core]\n\tworktree = {sep}\\\n", mod.SKIP_GIT_DIR_FOREIGN),
+                           ("[core]\n\tworktree =\n", mod.SKIP_GIT_DIR_FOREIGN)):
+            (gd / "config").write_text(base + text)
+            assert mod.git_dir_foreign(sep.resolve()) == want, (how, text)
+        (gd / "config").write_text(base + f"[core]\n\tworktree = {sep}\n")
+        assert mod.scan_checkout(sep.resolve(), remote=False)["verdict"] == mod.SKIP_WORKTREE
+        # and a `commondir` in a git dir that names the checkout back is still refused unless it sits under `worktrees/`
+        (gd / "commondir").write_text(f"{(work / '.git').resolve()}\n")
+        assert mod.git_dir_foreign(sep.resolve()) == mod.SKIP_GIT_DIR_FOREIGN
+
+
+def test_a_symlink_anywhere_inside_objects_refs_or_logs_is_listed_on_a_skipped_row_and_a_failed_walk_warns(tmp_path, monkeypatch):
+    """Adversary round 66 on PR 27, LOW 1: only the top-level `objects`, `refs` and `packed-refs` were checked, so a moved
+    and linked `objects/pack`, `refs/heads` or `logs` (the stash reflog) was archived as a link with nothing said."""
+    mod, doc = load(), load_doc()
+    origin = make_repo(tmp_path / "origin")
+    roots = tmp_path / "roots"
+    roots.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    for member in ("objects/pack", "refs/heads", "logs", "logs/refs", "shallow"):
+        co = roots / member.replace("/", "_")
+        git(tmp_path, "clone", "-q", str(origin), str(co))
+        moved = outside / member.replace("/", "_")
+        if member == "shallow":
+            (co / ".git" / "shallow").write_text("")
+        os.rename(co / ".git" / member, moved)
+        os.symlink(moved, co / ".git" / member)
+        if member != "shallow":  # git itself reads through the link; an empty `shallow` file is read as no shallow commits
+            ordinary = mod.scan_checkout(co.resolve(), remote=False)
+            assert not ordinary["verdict"].startswith("skipped") and "linked_stores" not in ordinary, (member, ordinary["verdict"])
+        git(co, "config", "alias.co", "checkout")  # now skipped before any git call
+        rec = mod.scan_checkout(co.resolve(), remote=False)
+        assert rec["verdict"] == "skipped: unrecognised config alias.co", member
+        assert rec["linked_stores"] == [f"{member} -> {os.path.realpath(moved)}"], (member, rec.get("linked_stores"))
+        row = skipped_row(doc, rec)
+        assert "is NOT archived" in row and f"{member} -> {os.path.realpath(moved)}" in row, row
+    # at most 4 are recorded, in name order, and a plain skipped checkout carries none
+    many = roots / "many"
+    git(tmp_path, "clone", "-q", str(origin), str(many))
+    for i in range(6):
+        os.symlink(outside, many / ".git" / "refs" / "tags" / f"t{i}")
+    git(many, "config", "alias.co", "checkout")
+    rec = mod.scan_checkout(many.resolve(), remote=False)
+    assert rec["linked_stores"] == [f"refs/tags/t{i} -> {os.path.realpath(outside)}" for i in range(4)], rec.get("linked_stores")
+    plain = roots / "plain"
+    git(tmp_path, "clone", "-q", str(origin), str(plain))
+    git(plain, "config", "alias.co", "checkout")
+    assert "linked_stores" not in mod.scan_checkout(plain.resolve(), remote=False)
+    # more entries than the walk may visit: the generic warning, never silence
+    monkeypatch.setattr(mod, "MAX_STORE_WALK", 3)
+    rec = mod.scan_checkout(plain.resolve(), remote=False)
+    assert rec["alternates"] == [], rec
+    assert ALTERNATES_WARNING in skipped_row(doc, rec)
+    monkeypatch.undo()
+    # an unreadable directory inside the trees: the same
+    if os.geteuid() != 0:
+        heads = plain / ".git" / "refs" / "heads"
+        os.chmod(heads, 0)
+        try:
+            rec = mod.scan_checkout(plain.resolve(), remote=False)
+            assert rec["alternates"] == [], rec
+            assert ALTERNATES_WARNING in skipped_row(doc, rec)
+        finally:
+            os.chmod(heads, 0o755)
 
 
 def test_a_stash_whose_reflog_expired_is_captured_from_refs_stash_by_the_generated_row(tmp_path):
