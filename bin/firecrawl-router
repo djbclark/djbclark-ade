@@ -42,7 +42,7 @@ answers both itself from the GitHub search API: issues, merged pull requests, RE
 merged round-robin into Firecrawl's response shape plus `source: "github"`, a per-kind `coverage` and a
 `warning` when a kind could not be searched. GitHub's rate-limit headers close the code-search (10/min) or
 general search (30/min) bucket until its reset; all buckets closed is a 429 with Retry-After, any other total
-failure a 502. `types` (issue, pull_request, readme, doc), `repos`, `language`, `k` and `passages` are honoured;
+failure a 502. `types` (issue, pull_request, readme, doc), `repos` (ONE owner/name slug), `language`, `k` and `passages` are honoured;
 `sources`, `skills`, `license`, `topic`, `min_stars`, `max_stars`, `archived` and `fork` are a 400. With a
 commercial fallback configured the request goes to the primary and the fallback as before.
 PUBLIC REPOSITORIES ONLY: the GITHUB_TOKEN behind it is a classic PAT that can read private repositories and this
@@ -359,7 +359,16 @@ def _dev_int(v, default: int) -> int | None:
         return default
     if type(v) is int:
         return v
-    return int(v) if isinstance(v, str) and v.isdigit() and len(v) <= 6 else None
+    return int(v) if isinstance(v, str) and v.isascii() and v.isdigit() and len(v) <= 6 else None
+
+
+def dev_public_hits(endpoint: str, doc: dict | None) -> int:
+    """Items a caller could be shown: a code hit counts only in a repository GitHub reports as not private
+    (issue queries carry is:public), so whether the loosened retry runs never depends on private content."""
+    items = [i for i in (doc or {}).get("items") or [] if isinstance(i, dict)]
+    if endpoint != "code":
+        return len(items)
+    return sum(1 for i in items if isinstance(i.get("repository"), dict) and i["repository"].get("private") is False)
 
 
 def parse_dev_request(method: str, path: str, body: bytes | None) -> tuple[dict | None, str]:
@@ -389,6 +398,8 @@ def parse_dev_request(method: str, path: str, body: bytes | None) -> tuple[dict 
     if types and not set(types) <= set(DEV_TYPES):
         return None, f"types must be among {', '.join(DEV_TYPES)}"
     repos = _dev_list(raw.get("repos"))
+    if len(repos) > 1:  # with a list, a missing repo fails the whole query: that would show whether a private one exists
+        return None, "repos takes one owner/name slug"
     if not all(DEV_REPO_RE.fullmatch(r) for r in repos):
         return None, "repos must be owner/name slugs"
     if len(" ".join(f"repo:{r}" for r in repos)) > DEV_MAX_REPO_CHARS:
@@ -517,7 +528,7 @@ class DevSearch:
                 r = GHReply(200, {"items": []})
             if reply is None or r.status == 200:  # a failed retry never replaces an empty 200
                 reply = r
-            if r.status != 200 or (r.doc or {}).get("items"):
+            if r.status != 200 or dev_public_hits(endpoint, r.doc):  # private-only hits count as nothing found
                 break
         return reply or GHReply(0, error="no terms")
 

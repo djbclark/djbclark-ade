@@ -110,10 +110,11 @@ What an attacker would want, in order of damage:
     2026-10-24), so a caller of the unauthenticated listener (`:18805 --open`) could otherwise read private
     repositories through it. The router therefore returns public repositories only: `is:public` on issue and PR
     queries, and a code hit only when GitHub reports `repository.private` as false. A local caller can still use up
-    the search quota and learn which public results exist. Residual (adversary round 2): a `repos` value naming a
+    the search quota and learn which public results exist. Residual (adversary rounds 2 and 3): a `repos` value naming a
     private repository the token can read answers like an empty public one (a nonexistent repo's 422 is turned into
-    the same empty 200 and a scoped search never retries), so existence and content are not distinguishable by
-    status or call count, only by GitHub-side timing. These filters are the whole defence until a fine-grained
+    the same empty 200, a scoped search never retries, and `repos` takes one slug because with a list a missing member
+    fails the whole query), and the fewer-terms retry is decided on public hits only, so existence and content are not
+    distinguishable by status, call count or emptiness, only by GitHub-side timing. These filters are the whole defence until a fine-grained
     public-read token is stored under its own secretspec name (`FIRECRAWL_ROUTER_GITHUB_SECRET`).
 11. **Hermes to Claude delegation** (`delegate_task`, `claude-sub`; `docs/mcp-servers.md`): a message Hermes
     acts on can become a headless agent run.

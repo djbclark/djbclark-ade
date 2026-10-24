@@ -1014,10 +1014,10 @@ class DeveloperSearchTest(unittest.TestCase):
         self.call("POST", "/v2/search/developer", {"query": "naïve café 東京エラー", "types": ["issue"]})
         self.assertEqual(self.gh.calls[0][1], "naïve café 東京エラー is:issue is:public")
         self.gh.calls.clear()
-        self.call("POST", "/v2/search/developer", {"query": " ".join(["w" * 200] * 8), "repos": ["a/" + "b" * 30] * 3})
+        self.call("POST", "/v2/search/developer", {"query": " ".join(["w" * 200] * 8), "repos": ["a/" + "b" * 30]})
         self.assertTrue(self.gh.calls)
         self.assertTrue(all(len(q) <= 256 for _, q, _ in self.gh.calls))
-        status, _, err = self.call("POST", "/v2/search/developer", {"query": "x1", "repos": ["a/" + "b" * 30] * 6})
+        status, _, err = self.call("POST", "/v2/search/developer", {"query": "x1", "repos": ["a" * 39 + "/" + "b" * 100]})
         self.assertEqual(status, 400)
         self.assertIn("repos is too long", err["error"])
 
@@ -1078,9 +1078,29 @@ class DeveloperSearchTest(unittest.TestCase):
         self.assertEqual((status, headers["Retry-After"], doc["success"]), (429, "5", False))
         self.assertEqual(self.gh.calls, [])
 
+    def test_private_only_hits_count_as_nothing_found(self):
+        # whether the fewer-terms retry runs must not depend on private code: a private-only first page retries exactly
+        # like an empty one, so an empty answer cannot mean "a private repository holds all the terms"
+        def handler(endpoint, q):
+            if endpoint != "code":
+                return 200, {}, {"items": []}
+            if "beta" in q:
+                return 200, {}, {"items": [gh_file("me/secret", "a.md", "private", private=True)]}
+            return 200, {}, {"items": [gh_file("o/lib", "docs/pub.md", "public")]}
+        self.start(handler)
+        _, _, doc = self.call("GET", "/v2/search/developer?query=alpha+beta+gamma+delta")
+        self.assertEqual([r["id"] for r in doc["results"]], ["doc:o/lib:docs/pub.md"])
+        self.assertEqual(sum(1 for p, _, _ in self.gh.calls if p.endswith("/code")), 2)
+
+    def test_a_list_of_repos_is_refused(self):
+        self.start(self.normal)
+        status, _, err = self.call("POST", "/v2/search/developer", {"query": "state", "repos": ["o/lib", "o/other"]})
+        self.assertEqual((status, err["error"]), (400, "firecrawl-router: repos takes one owner/name slug"))
+        self.assertEqual(self.gh.calls, [])
+
     def test_numbers_must_be_integers_not_infinity_floats_or_null_limits(self):
         self.start(self.normal)
-        for bad in ({"k": float("inf")}, {"k": 5.9}, {"passages": float("inf")}, {"k": [3]}):
+        for bad in ({"k": float("inf")}, {"k": 5.9}, {"passages": float("inf")}, {"k": [3]}, {"k": "²"}, {"k": "٣"}):
             status, _, _ = self.call("POST", "/v2/search/developer", {"query": "state", **bad})
             self.assertEqual(status, 400, bad)
         status, _, _ = self.call("GET", "/v2/search/developer?query=state&k=3")  # a query string carries digits
