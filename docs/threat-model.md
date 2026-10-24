@@ -113,13 +113,15 @@ What an attacker would want, in order of damage:
     the search quota and learn which public results exist. Residual (adversary rounds 2 to 4): a `repos` value naming a
     private repository the token can read answers like an empty public one (a nonexistent repo's 422 is turned into
     the same empty 200, a scoped search never retries, and `repos` takes one slug because with a list a missing member
-    fails the whole query), and the fewer-terms retry is decided on public hits only. **Not closed:** code search ranks
-    across every repository the classic PAT reads and the private hits are dropped after GitHub cuts its page, so
-    when 100 private files outrank every public match of a query (the router always asks for 100), the answer is
-    empty where a public-only token would have found something: a caller who plants a public file can read that as
-    one bit about private code per call (10 a minute). The only real fix is a fine-grained public-repositories-read
-    token stored under its own secretspec name and selected with `FIRECRAWL_ROUTER_GITHUB_SECRET`; until djbclark
-    mints one the filters above are best effort.
+    fails the whole query), and the fewer-terms retry is decided on public hits only. **Closed on 2026-10-24 (the
+    residual below applied to the classic PAT):** code search ranks across every repository the token reads and the
+    private hits are dropped after GitHub cuts its page, so with a classic PAT 100 private files that outrank every
+    public match of a query would empty the answer, one bit about private code per call (10 a minute) for a caller who
+    plants a public file. The `shared_mcp` role now sets `FIRECRAWL_ROUTER_GITHUB_SECRET=FIRECRAWL_GITHUB_PUBLIC_TOKEN`,
+    a fine-grained public-repositories-read-only token (probed 2026-10-24: `/user` 200, a private repo 404, code search
+    on it 0 results, issue search on it 422), so no private repository is reachable through it at all. The filters stay
+    as a second layer, and the router's default name is still `GITHUB_TOKEN`: a machine without the role setting falls
+    back to the classic PAT and the residual returns. The token expires; renew it before then.
 11. **Hermes to Claude delegation** (`delegate_task`, `claude-sub`; `docs/mcp-servers.md`): a message Hermes
     acts on can become a headless agent run.
 12. **`bin/ade-update`** (2026-10-20): after its fast-forward pull it runs the `skill-everywhere` beside the running
