@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+"""bm-lint — read-only hygiene lint for a Basic Memory store (design-basicmemory W3 / R6, 2026-10-24).
+
+Reports the drift and hygiene problems measured in design-basicmemory-report.md sections
+1.2-1.4 and recommended in section 3 (R6), so the weekly report can name them and a person
+or agent can fix them. It NEVER writes to the store (or anywhere else): every file is opened
+read-only and every check is a stat or a read.
+
+Sources: the store's markdown files are the one truth. Relations, orphans and unresolved
+targets are computed by parsing the same wiki-link syntax Basic Memory itself indexes
+(`[[Title]]`, `[[folder/permalink]]`, `- verb [[Target]]`), so no database is opened and no
+basic-memory binary is needed (a deliberate change from R6's "read the SQLite index": the
+index schema changes across 0.23 -> 0.24 and a live server holds a lock on it; the file
+syntax is the stable contract). The project list for the empty-projects check comes from
+Basic Memory's config.json, when present.
+
+Checks (finding `check` ids):
+  missing-type        filename-prefix note (reference_/feedback_/project_/user_) with no
+                      `type:` frontmatter (R5's backfill mapping names the expected type)
+  empty-project       project in the config with zero markdown notes (1.2: eight today)
+  dead-subtree        directory whose newest note is older than --dead-days (1.2:
+                      basic-memory/{mined,curated,hermes}); archive/ dirs are exempt
+  stale-handoff       note under handoffs/ (outside handoffs/archive/) older than
+                      --handoff-days (R6 retention: archive after 30 days)
+  orphan-notes        notes with no inbound and no outbound wiki-link relation, reported
+                      one finding per folder (1.2: 372/666, 56%); archive/ dirs are exempt
+  duplicate-title     same title (case-insensitive) on more than one note (1.2: three today)
+  unresolved-relation wiki-link target that matches no note by title or permalink (1.2: 67)
+  ruling-undated      `[ruling]` observation without a YYYY-MM-DD date on its line (Q8: a
+                      ruling is something the operator said, quoted and dated)
+  decision-unlinked   `[decision]` observation in a note with no wiki-link at all (Q8: an
+                      agent's design choice needs a relation to the handoff or PR that
+                      made it)
+  status-unverified   `status: active` note whose `verified:` date is missing or older than
+                      --verify-days (R6)
+  oversize-note       note larger than --max-bytes (R6: 50 KB; largest today 404,846 bytes)
+  dead-path           absolute path reference (`~/...`) that no longer exists (R6: 208
+                      notes today); globs and brace patterns are skipped, not guessed at
+
+Output: plain text (one `[check] path — detail` line per finding, a summary line first);
+--json emits {"store","generated_at","notes","skipped","findings","summary"} with one
+stable `key` per finding (check + ':' + path or name), the unit fleet-watch diffs to notice
+only NEW findings.
+
+Exit status: 0 no findings, 1 findings, 2 error (unreadable store, bad arguments).
+"""
+import argparse
+import datetime
+import json
+import os
+import re
+import sys
+import time
+
+DEFAULT_STORE = "~/ops/site-private/memory"
+DEFAULT_CONFIG = "~/.basic-memory/config.json"
+
+# R5's backfill mapping: filename prefix -> the type the note should carry.
+PREFIX_TYPES = {
+    "feedback_": "ruling",
+    "reference_": "reference",
+    "project_": "project",
+    "user_": "user",
+}
+
+WIKILINK_RE = re.compile(r"\[\[([^\]#|]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
+OBSERVATION_RE = re.compile(r"^\s*[-*]\s*\[(ruling|decision)\]\s*(.*)$", re.MULTILINE)
+DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# Absolute path references, the design's stale.py shape: `~/` or the literal $HOME path,
+# followed by at least one directory component. Globs and brace templates are skipped by
+# the character class; the tail is expanduser'd and stat'd, so it works on Linux and macOS.
+DEAD_PATH_RE = re.compile(
+    r"(?<![\w/.])(?:~/|%s/)([A-Za-z0-9._\-]+(?:/[A-Za-z0-9._\-]+)+)"
+    % re.escape(os.path.expanduser("~").rstrip("/") or "/"))
+
+
+def parse_frontmatter(text):
+    """Return the top `key: value` pairs of a note's YAML frontmatter (the flat subset
+    bm-lint needs: type, title, status, verified). Notes with no frontmatter give {}."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    fm = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        m = re.match(r"^([A-Za-z_][\w-]*)\s*:\s*(.*)$", line)
+        if m:
+            fm[m.group(1)] = m.group(2).strip().strip("\"'")
+    return fm
+
+
+def note_title(rel, text, fm):
+    """A note's title the way Basic Memory derives it: frontmatter `title:`, else the
+    first H1 heading, else the filename stem."""
+    t = fm.get("title")
+    if t:
+        return t
+    for line in text.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return os.path.splitext(os.path.basename(rel))[0]
+
+
+def is_archived(rel):
+    """Path under an archive/ directory (handoffs/archive/, archive/): kept on purpose,
+    so the hygiene checks that would nag it forever (orphans, dead subtrees, stale
+    handoffs) skip it."""
+    return "archive" in rel.split(os.sep)[:-1]
+
+
+class Store:
+    """Every markdown note in the store, read once, with the derived facts the checks
+    share (frontmatter, mtime, wiki-link targets)."""
+
+    def __init__(self, root):
+        self.root = root
+        self.notes = []  # {rel, path, text, fm, mtime, size, links: [target,...]}
+        for dirpath, dirnames, filenames in os.walk(root):  # followlinks=False: no cycles
+            dirnames.sort()
+            for name in sorted(filenames):
+                if not name.endswith(".md"):
+                    continue
+                path = os.path.join(dirpath, name)
+                rel = os.path.relpath(path, root)
+                try:
+                    st = os.stat(path)
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        text = f.read()
+                except OSError:
+                    continue  # a note that vanishes mid-lint is not a finding
+                self.notes.append({
+                    "rel": rel,
+                    "path": path,
+                    "text": text,
+                    "fm": parse_frontmatter(text),
+                    "mtime": st.st_mtime,
+                    "size": st.st_size,
+                    "links": [t.strip() for t in WIKILINK_RE.findall(text)],
+                })
+
+
+class Linter:
+    def __init__(self, args):
+        self.args = args
+        self.now = time.time()
+        self.findings = []
+        self.skipped = []
+
+    def add(self, check, ident, path, detail):
+        self.findings.append({
+            "check": check,
+            "key": "%s:%s" % (check, ident),
+            "path": path,
+            "detail": detail,
+        })
+
+    def run(self, store):
+        for check in (
+            self.check_missing_type,
+            self.check_empty_projects,
+            self.check_dead_subtrees,
+            self.check_stale_handoffs,
+            self.check_relations,  # orphans, duplicates, unresolved, Q8 share one pass
+            self.check_status_unverified,
+            self.check_oversize,
+            self.check_dead_paths,
+        ):
+            check(store)
+        self.findings.sort(key=lambda f: (f["check"], f["key"]))
+        return self.findings
+
+    # --- checks ---------------------------------------------------------------------------
+
+    def check_missing_type(self, store):
+        for n in store.notes:
+            for prefix, ntype in PREFIX_TYPES.items():
+                if os.path.basename(n["rel"]).startswith(prefix):
+                    if not n["fm"].get("type"):
+                        self.add("missing-type", n["rel"], n["rel"],
+                                 "prefixed note has no type: frontmatter (expected: %s, "
+                                 "prefix %s)" % (ntype, prefix))
+                    break
+
+    def check_empty_projects(self, store):
+        cfg_path = os.path.expanduser(self.args.config)
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except (OSError, ValueError):
+            self.skipped.append(
+                "empty-project: no readable config at %s (pass --config)" % self.args.config)
+            return
+        for name, spec in sorted((cfg.get("projects") or {}).items()):
+            ppath = os.path.expanduser((spec or {}).get("path", "") or "")
+            if not ppath:
+                continue
+            count = 0
+            for dirpath, _dirnames, filenames in os.walk(ppath):
+                count += sum(1 for fn in filenames if fn.endswith(".md"))
+                if count:
+                    break
+            if not count:
+                self.add("empty-project", name, name,
+                         "project %s (%s) has no markdown notes" % (name, ppath))
+
+    def check_dead_subtrees(self, store):
+        limit = self.args.dead_days * 86400
+        newest = {}
+        for n in store.notes:
+            d = os.path.dirname(n["rel"])
+            # handoffs/ is exempt: its files speak for themselves through stale-handoff,
+            # so an all-stale handoffs/ dir is not named twice.
+            if d and not is_archived(n["rel"]) and d.split(os.sep)[0] != "handoffs":
+                newest[d] = max(newest.get(d, 0), n["mtime"])
+        for d in sorted(newest):
+            age_days = int((self.now - newest[d]) // 86400)
+            if self.now - newest[d] > limit:
+                self.add("dead-subtree", d, d,
+                         "no note newer than %d days (newest %d days old); archive it" % (
+                             self.args.dead_days, age_days))
+
+    def check_stale_handoffs(self, store):
+        limit = self.args.handoff_days * 86400
+        for n in store.notes:
+            parts = n["rel"].split(os.sep)
+            if parts[0] != "handoffs" or is_archived(n["rel"]):
+                continue
+            if self.now - n["mtime"] > limit:
+                self.add("stale-handoff", n["rel"], n["rel"],
+                         "handoff %d days old, past the %d-day retention window; move it "
+                         "to handoffs/archive/" % (
+                             int((self.now - n["mtime"]) // 86400), self.args.handoff_days))
+
+    def check_relations(self, store):
+        # Title and permalink maps, the two spellings a [[target]] may use.
+        by_title = {}
+        by_permalink = {}
+        for n in store.notes:
+            by_permalink.setdefault(os.path.splitext(n["rel"])[0], n)
+            by_title.setdefault(note_title(n["rel"], n["text"], n["fm"]).casefold(), n)
+        resolved_out = {}   # rel -> set of rels it links to
+        inbound = {}        # rel -> count of inbound resolved links
+        titles = {}         # casefolded title -> [rel, ...]
+        for n in store.notes:
+            rel = n["rel"]
+            titles.setdefault(note_title(rel, n["text"], n["fm"]).casefold(), []).append(rel)
+            out = set()
+            for target in n["links"]:
+                t = target.strip()
+                m = by_permalink.get(os.path.splitext(t)[0]) or by_title.get(t.casefold())
+                if m is not None and m["rel"] != rel:
+                    out.add(m["rel"])
+                elif m is None:
+                    self.add("unresolved-relation", "%s|%s" % (rel, target), rel,
+                             "wiki-link [[%s]] matches no note by title or permalink" % target)
+            resolved_out[rel] = out
+            for dst in out:
+                inbound[dst] = inbound.get(dst, 0) + 1
+
+        orphan_by_folder = {}
+        folder_total = {}
+        for n in store.notes:
+            rel = n["rel"]
+            folder = os.path.dirname(rel) or "."
+            folder_total[folder] = folder_total.get(folder, 0) + 1
+            if is_archived(rel):
+                continue
+            if not resolved_out.get(rel) and not inbound.get(rel):
+                orphan_by_folder[folder] = orphan_by_folder.get(folder, 0) + 1
+        for folder in sorted(orphan_by_folder):
+            self.add("orphan-notes", folder, folder,
+                     "%d of %d notes have no relation, in or out" % (
+                         orphan_by_folder[folder], folder_total[folder]))
+
+        for title, rels in sorted(titles.items()):
+            if len(rels) > 1:
+                self.add("duplicate-title", title, rels[0],
+                         "title shared by %d notes: %s" % (len(rels), ", ".join(sorted(rels))))
+
+        # Q8: a ruling is the operator's own words, quoted and dated; an agent's design
+        # choice is a decision and must point at the handoff or PR that made it.
+        for n in store.notes:
+            has_link = bool(n["links"])
+            has_decision = False
+            for m in OBSERVATION_RE.finditer(n["text"]):
+                kind, rest = m.group(1), m.group(2)
+                if kind == "ruling" and not DATE_RE.search(rest):
+                    self.add("ruling-undated", "%s|%d" % (n["rel"], m.start()), n["rel"],
+                             "[ruling] observation with no date on its line (a ruling is "
+                             "quoted and dated, Q8): %s" % rest[:60])
+                elif kind == "decision":
+                    has_decision = True
+            if has_decision and not has_link:
+                self.add("decision-unlinked", n["rel"], n["rel"],
+                         "[decision] observation but no relation to the handoff or PR "
+                         "that made it (Q8)")
+
+    def check_status_unverified(self, store):
+        limit = self.args.verify_days * 86400
+        for n in store.notes:
+            if n["fm"].get("status", "").lower() != "active":
+                continue
+            verified = n["fm"].get("verified")
+            if not verified:
+                self.add("status-unverified", n["rel"], n["rel"],
+                         "status: active but no verified: date")
+                continue
+            try:
+                when = datetime.datetime.strptime(verified[:10], "%Y-%m-%d").timestamp()
+            except ValueError:
+                self.add("status-unverified", n["rel"], n["rel"],
+                         "status: active but verified: is not a date: %r" % verified[:20])
+                continue
+            if self.now - when > limit:
+                self.add("status-unverified", n["rel"], n["rel"],
+                         "status: active but last verified %d days ago (over %d)" % (
+                             int((self.now - when) // 86400), self.args.verify_days))
+
+    def check_oversize(self, store):
+        for n in store.notes:
+            if n["size"] > self.args.max_bytes:
+                self.add("oversize-note", n["rel"], n["rel"],
+                         "%d bytes (over the %d-byte limit); split it" % (
+                             n["size"], self.args.max_bytes))
+
+    def check_dead_paths(self, store):
+        home = os.path.expanduser("~")
+        for n in store.notes:
+            missing = []
+            refs = 0
+            for m in DEAD_PATH_RE.finditer(n["text"]):
+                tail = m.group(1).rstrip(".,):;`'\"")
+                p = os.path.join(home, tail)
+                if any(c in p for c in "*{<"):
+                    continue  # a glob or template, not a path to stat
+                refs += 1
+                if not os.path.exists(p):
+                    missing.append(tail)
+            if missing:
+                self.add("dead-path", n["rel"], n["rel"],
+                         "%d of %d ~/ path references no longer exist (e.g. ~/%s)" % (
+                             len(missing), refs, missing[0]))
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog="bm-lint",
+        description="Read-only hygiene lint for a Basic Memory store "
+                    "(design-basicmemory W3/R6). Never writes to the store.",
+        epilog="Exit status: 0 no findings, 1 findings, 2 error.")
+    ap.add_argument("store", nargs="?", default=os.environ.get("BM_LINT_STORE", DEFAULT_STORE),
+                    help="store directory to lint (default: $BM_LINT_STORE else %s)" % DEFAULT_STORE)
+    ap.add_argument("--json", action="store_true",
+                    help="emit one JSON object (store, generated_at, notes, skipped, "
+                         "findings with stable keys, summary counts) instead of text")
+    ap.add_argument("--config", default=os.environ.get("BM_LINT_CONFIG", DEFAULT_CONFIG),
+                    help="Basic Memory config.json for the empty-project check "
+                         "(default: $BM_LINT_CONFIG else %s); unreadable = check skipped" % DEFAULT_CONFIG)
+    ap.add_argument("--handoff-days", type=int,
+                    default=int(os.environ.get("BM_LINT_HANDOFF_DAYS", "30")),
+                    metavar="N", help="handoffs older than N days belong in handoffs/archive/ "
+                    "(default: 30)")
+    ap.add_argument("--dead-days", type=int,
+                    default=int(os.environ.get("BM_LINT_DEAD_DAYS", "30")),
+                    metavar="N", help="a directory whose newest note is older than N days is a "
+                    "dead subtree (default: 30; archive/ dirs and handoffs/ exempt — its "
+                    "files are checked one by one by --handoff-days)")
+    ap.add_argument("--verify-days", type=int,
+                    default=int(os.environ.get("BM_LINT_VERIFY_DAYS", "90")),
+                    metavar="N", help="status: active notes must be verified within N days "
+                    "(default: 90)")
+    ap.add_argument("--max-bytes", type=int,
+                    default=int(os.environ.get("BM_LINT_MAX_BYTES", "51200")),
+                    metavar="N", help="notes over N bytes are oversize (default: 51200, 50 KB)")
+    args = ap.parse_args(argv)
+
+    root = os.path.expanduser(args.store)
+    if not os.path.isdir(root):
+        print("bm-lint: store is not a directory: %s" % root, file=sys.stderr)
+        return 2
+
+    store = Store(root)
+    linter = Linter(args)
+    findings = linter.run(store)
+    summary = {}
+    for f in findings:
+        summary[f["check"]] = summary.get(f["check"], 0) + 1
+
+    if args.json:
+        print(json.dumps({
+            "tool": "bm-lint",
+            "store": root,
+            "generated_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "notes": len(store.notes),
+            "skipped": linter.skipped,
+            "findings": findings,
+            "summary": summary,
+        }, indent=2))
+        return 1 if findings else 0
+
+    stamp = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    if not findings:
+        print("bm-lint: ok, no findings (store: %s, %d notes, %s)" % (root, len(store.notes), stamp))
+    else:
+        print("bm-lint: %d finding(s) across %d check(s) (store: %s, %d notes, %s)" % (
+            len(findings), len(summary), root, len(store.notes), stamp))
+    for s in linter.skipped:
+        print("  skipped: %s" % s)
+    for f in findings:
+        print("  [%s] %s — %s" % (f["check"], f["path"], f["detail"]))
+    return 1 if findings else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
