@@ -124,6 +124,9 @@
 # /rename; /quit left its menu row open, cursor-agent 2026.10.01).
 export PATH="/opt/homebrew/bin:$PATH"
 set -u
+# An inherited BASHOPTS=nocasematch (bash >= 4.1 applies it at startup) would make every `case`
+# guard below case-blind, so "Claude" would pass the plain-id check (adversary pr35 round 2, L1).
+shopt -u nocasematch
 delay=6; dry=0; then=""; then_set=0; finish=0
 successor=""; s_thinking=""; s_mode=""; s_title=""; s_workspace=""; s_keepws=0; s_baton=""
 # Text that came from paseo, an operator flag or an agent name goes through `clean` before it is

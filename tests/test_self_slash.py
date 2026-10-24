@@ -889,6 +889,15 @@ class SelfSlashPaseoTests(unittest.TestCase):
         self.assertEqual(self.calls_of("run "), [])
         self.assertEqual(self.calls_of("agent archive"), [])
 
+    def test_f1_plain_id_guard_holds_with_an_inherited_nocasematch(self) -> None:
+        # bash >= 4.1 applies an exported BASHOPTS at startup: nocasematch made the Provider guard
+        # case-blind, so "Claude" took the bypassPermissions branch (adversary pr35 round 2, L1).
+        r = self.run_waiter(FAKE_OLD_JSON=self.old_json('"Mode": "plan"', '"Provider": "Claude"'),
+                            BASHOPTS="nocasematch")
+        self.assertEqual(r.returncode, 11, r.stdout + r.stderr)
+        self.assertIn("not a plain provider id", r.stdout)
+        self.assertEqual(self.calls_of("run "), [])
+
     def test_f1_an_explicit_mode_needs_nothing_from_the_inspect(self) -> None:
         r = self.run_waiter(FAKE_OLD_JSON=self.old_json(), SELF_SLASH_S_MODE="plan")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
