@@ -1224,3 +1224,35 @@ and `~/.claude/skills`. A second daemon with another home (Paseo's own `scripts/
 sync skips a skill dir that is a symlink, or dev homes default to no skill sync. Posted on #7700 2026-10-24: https://github.com/getpaseo/paseo/issues/7700#issuecomment-6386655547.
 Draft PR opened 2026-10-24 (refs #7700, not closes): https://github.com/getpaseo/paseo/pull/7817, branch `fix/dev-home-skill-selection` on the fork, one commit b2836f723 (`scripts/dev-home.sh` seeds the skill selection in dev homes, new `scripts/dev-home.test.mjs`: 3 of 4 tests fail on upstream main, all pass on the fix). macOS arm64 only; the end-to-end dev-daemon run was posted as a PR comment and the PR was marked ready for review on djbclark's instruction (2026-10-24, reported by the workspace-colors session).
 
+
+## 18. Paseo — CLI: rename a terminal tab, stream UI renames, and inspect's workspace id (draft, not filed, 2026-10-24)
+
+**Repo:** getpaseo/paseo. Checked against the local app bundle `/Applications/Paseo.app` with `rg -a` (no live daemon call; app version not read here, item 17 cites 0.12.0).
+
+### What happens
+
+1. A terminal tab cannot be renamed from the CLI. `paseo terminal create --name` sets the name at creation only. The app bundle already contains the daemon RPC: `terminal.rename.request` and `terminal.rename.response` appear in `Contents/Resources/app.asar` and in the web bundle, so only the CLI route is missing.
+2. A tool cannot observe a UI rename without polling. The bundle's client handles `agent_update`, `workspace_update` and `terminals_changed` messages; no CLI command streams them.
+3. `paseo agent inspect --json` omits the workspace id. This is already #7592 (see item 17); it is listed here only because the same tool needs it.
+
+### Request
+
+1. `paseo terminal rename <id> <title>`, calling `terminal.rename.request`.
+2. An event stream command, `paseo events --json`, printing `agent_update`, `workspace_update` and `terminals_changed` as JSON lines, so a tool can see UI renames without polling.
+3. `paseo agent inspect --json` prints `workspaceId` (#7592).
+
+### Why it matters here
+
+The ade autorename design (2026-10-24, `skills/autorename`, design section 3.7) names Paseo agent tabs `<name>-pt`, and terminal tabs only at creation. A later UI rename of a terminal tab can then neither be set back nor seen by the tool.
+
+### Searched first (2026-10-24)
+
+`gh issue list --repo getpaseo/paseo --state all --search` for "terminal rename" and "events stream workspace": no issue titled as a CLI terminal rename or an event stream. Related, not duplicates: #4521 (closed: terminal tab labels fall back to "Terminal") and #7592 (inspect omits the workspace id; item 17).
+
+### Unverified
+
+Whether a `paseo events` command already exists in the CLI: the name comes from the ade design (2026-10-24), and this draft did not run the CLI to check. The `terminal.rename.request` RPC was seen only in the app bundle, not exercised.
+
+### Ask
+
+djbclark decides whether to file. Suggested split: the terminal rename and the event stream as separate issues; the inspect workspace id as a comment on #7592.

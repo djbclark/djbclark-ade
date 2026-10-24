@@ -205,8 +205,13 @@ herdr placement can run. The hook runs under `python3.14` (the script needs
 **Paseo** (2026-10-23). A session hosted by a Paseo agent (`$PASEO_AGENT_ID`) also gets its sidebar name set and
 its **workspace renamed** to the title in lower-case hyphen form plus `-pw` (`Paseo skill sync overwrite fix` ->
 `paseo-skill-sync-overwrite-fix-pw`; whole words, number-only words dropped, at most 40 characters before the
-suffix). The one naming rule across the environment: `-pw` Paseo workspace, `-t` herdr tab, `-p` herdr pane, always
-lower case with hyphens (`feedback_herdr_tab_pane_naming_convention`). The workspace id comes from the agent's record
+suffix). The one naming rule across the environment, always lower case with hyphens: `-pw` Paseo workspace (at most 40
+characters before the suffix), `-pt` Paseo tab (at most 17 characters **including** `-pt`: Paseo shows about 17 even for
+a lone tab), `-t` herdr tab, `-p` herdr pane (under 24), the agent in a herdr pane bare `<topic>`
+(`feedback_herdr_tab_pane_naming_convention`). A Paseo agent tab's name **is** the agent's name (`paseo agent update
+--name`), so the agent is named `<topic>-pt`; `paseo_tab_name()` in `autorename.py` is the shortener. Check suffixes
+longest first: `x-pt` also ends in `-t`. The sentence title stays the provider session's title and the `-pw` workspace
+name. An unexplained rename counts as `user`, so `--auto` never touches it (2026-10-24). The workspace id comes from the agent's record
 under `$PASEO_HOME/agents/`. A direct `/autorename` always renames the workspace; `--auto` keeps one that already ends
 in `-pw`. The reply line ends `(paseo name set) (paseo workspace <name>)`. Other workspaces are never touched.
 
