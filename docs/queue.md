@@ -3,6 +3,20 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Heavier use of Hermes worktrees and cow pastures so agents stop stepping on each other (djbclark, direct, 2026-10-23)
+
+djbclark, 2026-10-23: "Also add to appropriate phase if we haven't yet, we should probably be making heavier use of
+hermes worktrees and cow pastures, to avoid agents stepping on each other's toes. Do web searches and consult a
+strong model on this as well." Status 2026-10-23: **design slice running** (`design-isolation`, Opus 5.5 high via
+omp, web research, read-only; brief `~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-isolation.md`,
+report `~/.local/state/bigteam/adhoc-2026-10-23/design-isolation-report.md`). It decides which phase of
+[`docs/ade-everywhere-proposal.md`](ade-everywhere-proposal.md) section 8 this belongs in (or a step before Phase 0),
+what "Hermes worktrees" is (Hermes is never a routing target: whether its worktree mode as a user feature needs a
+ruling), when an agent gets a pasture, worktree or the shared checkout, claim files, and guards in `bin/cow-pasture` /
+`acp-dispatch` against `reset --hard`, `checkout --` and `stash` in a pasture the agent did not create. Motivating
+incident (2026-10-23): a `git reset --hard origin/...` ran inside the phase0-scan pasture and wiped uncommitted edits.
+Nothing is built; the phase placement is added here and to the proposal once the report lands.
+
 ## Paseo tabs: how to use them, a `-pt` naming rule, autorename for tabs, and a rename-history store (djbclark, direct, 2026-10-23)
 
 djbclark, 2026-10-23: "I just realized paseo has tabs. Put in the appropriate place and ask a strong model to consider
