@@ -1989,3 +1989,56 @@ class TestGovernorHold(unittest.TestCase):
         self.assertNotIn("acp-dispatch claude", out.getvalue())
         self.assertIn("Claude subscription critical", err.getvalue())
         self.assertIn("acp-dispatch omp --model anthropic/claude-opus-5-5", out.getvalue())
+
+
+class TestSubstrateChain(unittest.TestCase):
+    """Main-loop substrate picker: Flash-primary, cline↔opencode-go failover.
+
+    The rule under test is the 2026-10-23 accident: a live cross-provider model
+    switch broke the ◈ Dann tab. The chain keeps the model constant across a
+    provider failover and ranks healthy -> lifeline -> tight -> exhausted.
+    """
+
+    @staticmethod
+    def _opencode(windows: list[tuple[str, float, str]]) -> list[dict[str, Any]]:
+        return [{"provider": "opencode-go",
+                 "windows": [{"label": label, "remaining_percent": rem, "state": state}
+                             for (label, rem, state) in windows]}]
+
+    HEALTHY = [("OpenCode Go 5-hour", 98.0, "ok"),
+               ("OpenCode Go weekly", 96.0, "ok"),
+               ("OpenCode Go monthly", 0.6, "exhausted")]
+
+    def test_healthy_opencode_go_is_primary_with_cline_fallback(self):
+        chain = r.substrate_chain({}, self._opencode(self.HEALTHY))
+        self.assertEqual(chain[0]["role"], "primary")
+        self.assertEqual(chain[0]["provider"], "opencode")
+        self.assertEqual(chain[0]["model"], "opencode-go/deepseek-v4.1-flash")
+        self.assertEqual(chain[1]["provider"], "cline")   # unmeasured lifeline
+        self.assertEqual(chain[2]["role"], "escalate")
+        self.assertEqual(chain[2]["model"], "opencode-go/deepseek-v4-pro")
+
+    def test_monthly_budget_does_not_bind_rolling_headroom(self):
+        chain = r.substrate_chain({}, self._opencode(self.HEALTHY))
+        self.assertAlmostEqual(chain[0]["remaining"], 96.0)   # min(5h, week), not the monthly
+        self.assertAlmostEqual(chain[0]["monthly"], 0.6)
+        self.assertEqual(chain[0]["role"], "primary")
+
+    def test_tight_opencode_go_yields_to_the_unmeasured_lifeline(self):
+        chain = r.substrate_chain({}, self._opencode([
+            ("OpenCode Go 5-hour", 4.0, "ok"), ("OpenCode Go weekly", 5.0, "ok")]))
+        self.assertEqual(chain[0]["provider"], "cline")
+        self.assertEqual(chain[1]["provider"], "opencode")
+
+    def test_exhausted_opencode_go_falls_to_the_lifeline(self):
+        chain = r.substrate_chain({}, self._opencode([
+            ("OpenCode Go 5-hour", 0.0, "exhausted"),
+            ("OpenCode Go weekly", 0.0, "exhausted")]))
+        self.assertEqual(chain[0]["provider"], "cline")
+        self.assertEqual(chain[1]["provider"], "opencode")
+
+    def test_unmeasured_quota_still_returns_the_full_chain(self):
+        chain = r.substrate_chain({}, [])
+        self.assertEqual([e["role"] for e in chain], ["primary", "fallback", "escalate"])
+        # no data: original order preserved, so opencode-go stays primary
+        self.assertEqual(chain[0]["provider"], "opencode")

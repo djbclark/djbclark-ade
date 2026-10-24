@@ -3,6 +3,63 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## ade-scan-state follow-up 2 after PR 39 (adversary round 70, 2026-10-24)
+
+PR 39 was approved at head 14c7347 (no BLOCK or MEDIUM). Left for one small later PR (`adhoc-2026-10-24/adv-scan-70-report.md`): 1. **LOW**: a shallow checkout WITH an origin still gets `HEAD.bundle`, `branch-<b>.bundle`, `all-refs.bundle` and `local-only.bundle` rows (`bin/ade-scan-state-doc` ~779-822) that cannot be cloned alone (`git clone` rc 128); read `c.get("shallow")` in those rows too and either copy `shallow` beside the bundle or say "restore by fetching into a clone of origin; keep origin". 2. INFO: the no-origin restore recipe leaves the bare repo's HEAD at `init.defaultBranch` (a clone warns `remote HEAD refers to nonexistent ref`); `git init --bare -b <branch>`. 3. INFO: `GITDIR_FMT` exits 0 having archived nothing when `.git` is no longer a file at paste time, so the new "refuses loudly" sentence overstates; make the command fail or reword. 4. INFO: the PR's CHANGELOG line bundles about eight changes in one line where rule 10 says one per change; split if a reviewer asks. 5. INFO: `merge_repositories` keeps the first spelling (unreachable for a symlink today).
+
+## Paseo connected hosts: make full use of them, after we quiesce and upgrade Paseo (djbclark, direct, 2026-10-24)
+
+djbclark, 2026-10-24: "Add to appropriate point in our queue, we should make full use of this new feature (before doing
+this we'll need to run out the queue / quiesse here so we can install the latest paseo version that supports this and
+then restart paseo)". The feature is from the changelog of the newest Paseo release, **not yet installed** (installed
+2026-10-24: `paseo --version` 0.13.0-beta.1). Changelog text: "Connect your daemon to another machine, then ask an agent
+to delegate work there": `paseo host add 192.168.1.20:6767 --label studio`, `paseo host add 'ssh://me@build-box' --label
+build-box`, `paseo host add 'relay://...' --label laptop`; "Added connected hosts, so agents can create, prompt and
+monitor agents on other machines and see them in the Subagents track (#7370, #7593)".
+
+1. **Order (djbclark's): run the queue out first, quiesce, then upgrade.** Let running slices and adversary rounds
+   finish (rule: never throw away paid-for work), land open PRs, write the handoffs, then install the newest Paseo and
+   restart the daemon (a restart keeps agent identity and drops the in-flight turn, see the Paseo-restart memory), then
+   verify with `paseo --version` and one `paseo host add` round trip. Re-check the skill-sync guard
+   (`agents.skills.selection` in `~/.paseo/config.json`): a daemon start overwrote the vendored paseo skills once
+   (2026-10-23).
+2. **Then design the use, one slice, read-only research first** (Opus 5.5 high via omp; web research on the release
+   notes and PRs 7370 and 7593): which machines to connect (the NixOS boxes get and vps-primary, the Hermes host, Hyades
+   microVMs over `ssh://`, a relay for the laptop), what the security boundary is (a connected host means an agent here
+   can prompt agents there: threat-model entry, `--perm`/yolo policy per host, secrets only via `sudo-secretspec`), how
+   delegation relates to `acp-dispatch`, `acp-run` and Orca (a host becomes one more route in `route_agent.py plan`, never
+   an all-vendor fan-out), and how names stay `human name + id` across hosts.
+3. **Build after djbclark rules on the design**: host roster doc, `docs/mcp-servers.md`/README entries, a `paseo host`
+   health line in the fleet watcher, and the `-pt`/`-pw` naming rule extended to remote agents (see "Paseo tabs").
+4. Not started; blocked on item 1 (quiesce) and on the Paseo release being installed.
+
+## Phase 0 scan of bigteam and the Orca checkouts (proposal §8 item 1, djbclark 2026-10-20)
+
+1. **Scan, capture list and tool: done 2026-10-20 (PR #27).** `bin/ade-scan-state` and
+   `docs/ade-everywhere-phase0-scan-2026-10-20.md` list the unique bigteam reports, dirty trees, untracked
+   files and unpushed commits. Nothing was copied, pushed or deleted. Open, each needs djbclark: (a) where the
+   41 unreferenced bigteam report sets are copied (one destination); (b) `~/src/one-offs` (37 commits, no
+   remote) and its Orca worktree `Hermes`: host it or bundle it; (c) push or bundle the branches with commits on
+   no origin branch (doc section 3.2). The 54.5 GiB `adhoc-2026-10-18/hm-promo-rehearsal/` is scratch; deleting
+   it is a later cleanup decision.
+
+## ade-scan-state follow-up after PR 27 (rounds 65-67 LOW/INFO and Codex P2, 2026-10-24)
+
+PR 27 merged at an APPROVE with LOW only (djbclark, 2026-10-23: "merge now, follow-up PR"). One small follow-up PR with
+its own adversary round, from `adhoc-2026-10-23/adv-scan-67-report.md` and Codex finding 4365722733: 1. **P2**: a
+bigteam task's `CLAIM` that is a FIFO (or a symlink to one) blocks `read_text()` forever and `open_job_records()` has the
+same problem; use the bounded non-blocking `read_regular_file()` already used for stash reflogs and classify an
+unreadable one. 1b. **P2 (Codex 4367121323)**: a shallow checkout with no origin gets an `all.bundle` row, but the bundle drops `.git/shallow` and cloning it fails (`Could not read <parent>`); keep `.git/shallow` with the bundle or say the bundle cannot be cloned. 2. LOW 1: `git_dir_foreign` accepts a hard-linked gitfile (`os.path.samefile` compares inodes); compare
+resolved paths too. 3. LOW 2: four texts claim `--separate-git-dir` has a back-pointer (module docstring, the
+`git_dir_foreign` docstring, the doc tool's user-facing row at ~966) while the code and tests correctly skip it; fix the
+wording. 4. LOW 3: `ls-files -z -s -m -d` lists every index entry and adds a content-check pass under the 60 s budget;
+use `-m -d` with a separate gitlink filter, and add the test that fails when `-m` is dropped. 5. INFO: the FOREIGN row's
+"NOT archived" over-warns for git-dir entries the gitfile command does archive; dedupe the replaced-tracked-file and
+untracked directories by `samefile` (case-insensitive APFS double count); `scan_checkout`'s docstring lists only some
+store members; allowlist `extensions.relativeworktrees` (a `worktree.useRelativePaths` repo is skipped today); threat-model
+item 8 should say `--fetch` also writes through a symlinked `objects`. Round 61-63 LOWs and INFOs queued earlier stay in
+`queue-followups.md`.
+
 ## Make better use of Basic Memory (djbclark, direct, 2026-10-23)
 
 djbclark, 2026-10-23: "Add another item to appropriate phrase: Look into making better use of basic memory, I do not
@@ -420,6 +477,16 @@ sends is unlabelled (arrives as the operator's turn) and a target or text starti
 is composed by load-watch, so lower risk, but fix before it ever sends untrusted text: call
 `skills/session-finder/relay.py` instead of its own `paseo send`, or copy relay.py's `--`, label and `paseo_gate`.
 One small Sonnet `code` slice with the fake `paseo`.
+
+**Update 2026-10-23:** the `--` half is done (`86b288b`: argv is `send --no-wait --json --behavior steer -- <target> <text>`;
+the same commit added a bounded retry on the daemon-restart codes, `9f9cae8`). Still open: the label and the archived/permission
+gate above. Adversary APPROVE on both commits (reports `~/.local/state/agent-reports/14564811-383c-4575-9cf7-2b4ba5845f6d/`);
+open lows on `86b288b`: (R1) a retry that dies by timeout never sets the give-up flag, so later sends in a long Paseo outage
+can each pay up to about 30 s again; (R2) one stray warning line on stderr makes the JSON parse fail and silently turns the retry
+off (parse the last JSON line, or each line); (R3, pre-existing) `subprocess.run(text=True)` can raise `UnicodeDecodeError`
+outside the `except`, aborting the sample (use `errors="replace"`); (R4) the usage text says "the rest of that process make one
+attempt each"; (R5) a comment at the argv saying every option must precede `--` (an option placed after it silently becomes
+text and the send goes to the default daemon). No test covers R1.
 
 ## ADE-everywhere Phase 0, preserve and classify (djbclark, 2026-10-20; proposal section 8 item 1)
 

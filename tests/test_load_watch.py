@@ -379,50 +379,72 @@ def test_watcher_set_replaces_and_tells_the_old_one(tmp_path):
     r = run_env(tmp_path, {"PASEO_AGENT_ID": "new", "PASEO_CLI": str(cli)}, "watcher", "set", "--name", "B")
     assert r.returncode == 0 and "replaced paseo old" in r.stdout and "told the old watcher" in r.stdout
     sent = [json.loads(ln) for ln in log.read_text().splitlines()]
-    assert len(sent) == 1 and sent[0][:6] == ["send", "old", "--no-wait", "--json", "--behavior", "steer"]
+    assert len(sent) == 1 and sent[0][:7] == ["send", "--no-wait", "--json", "--behavior", "steer", "--", "old"]
     assert "no longer the load watcher" in sent[0][-1] and "B took over" in sent[0][-1]
     assert json.loads((tmp_path / "state" / "watcher.json").read_text())["target"] == "new"
 
 
-def fake_send(monkeypatch, lw, results):
-    """Fake subprocess.run and time.sleep for send_to: `results` is a list of (rc, stdout), the last one repeats.
-    Returns (argvs, pauses)."""
-    argvs, pauses = [], []
+def fake_send(monkeypatch, lw, results, clock=None):
+    """Fake subprocess.run and time.sleep for send_to: `results` is a list of (rc, stderr) (or (rc, stderr, stdout)),
+    the last one repeats; `paseo send --json` writes its error to stderr. Returns (argvs, pauses, timeouts)."""
+    argvs, pauses, timeouts = [], [], []
 
     def run(argv, **kw):
         argvs.append(argv)
-        rc, out = results[min(len(argvs), len(results)) - 1]
-        return subprocess.CompletedProcess(argv, rc, out, "")
+        timeouts.append(kw.get("timeout"))
+        res = results[min(len(argvs), len(results)) - 1]
+        return subprocess.CompletedProcess(argv, res[0], res[2] if len(res) > 2 else "", res[1])
 
     monkeypatch.setattr(lw.subprocess, "run", run)
     monkeypatch.setattr(lw.time, "sleep", lambda s: pauses.append(s))
-    return argvs, pauses
+    if clock is not None:
+        monkeypatch.setattr(lw.time, "monotonic", clock)
+    return argvs, pauses, timeouts
+
+
+def err(code, message="x"):
+    return json.dumps({"error": {"code": code, "message": message}})
 
 
 PASEO_W = {"channel": "paseo", "target": "agent-a", "paseo_cli": "paseo-fake"}
-UNREACHABLE = '{"error": {"code": "DAEMON_UNREACHABLE", "message": "Cannot connect to daemon"}}'
+UNREACHABLE = err("DAEMON_UNREACHABLE", "Cannot connect to daemon")
 
 
 def test_send_to_first_attempt_succeeds_without_retry(monkeypatch):
     lw = load_module()
-    argvs, pauses = fake_send(monkeypatch, lw, [(0, "{}")])
+    argvs, pauses, timeouts = fake_send(monkeypatch, lw, [(0, "")])
     assert lw.send_to(PASEO_W, "hi") is True
-    assert len(argvs) == 1 and not pauses
-    assert argvs[0][:6] == ["paseo-fake", "send", "agent-a", "--no-wait", "--json", "--behavior"]
+    assert len(argvs) == 1 and not pauses and timeouts == [60]
+    assert argvs[0] == ["paseo-fake", "send", "--no-wait", "--json", "--behavior", "steer", "--", "agent-a", "hi"]
 
 
-def test_send_to_retries_a_restart_code_then_succeeds(monkeypatch):
+def test_send_to_text_starting_with_a_dash_stays_after_the_separator(monkeypatch):
     lw = load_module()
-    for code in ("DAEMON_UNREACHABLE", "CONNECTION_LOST", "NOT_READY"):
-        out = '{"error": {"code": "%s"}}' % code
-        argvs, pauses = fake_send(monkeypatch, lw, [(1, out), (0, "{}")])
-        assert lw.send_to(PASEO_W, "hi") is True
-        assert len(argvs) == 2 and pauses == [lw.SEND_RETRY_PAUSE_S]
+    argvs, _, _ = fake_send(monkeypatch, lw, [(0, "")])
+    assert lw.send_to(PASEO_W, "--prompt-file=/x") is True
+    argv = argvs[0]
+    assert argv.index("--") < argv.index("agent-a") < argv.index("--prompt-file=/x") == len(argv) - 1
+
+
+def test_send_to_retries_each_real_restart_code_then_succeeds(monkeypatch):
+    lw = load_module()
+    assert set(lw.SEND_TRANSIENT) == {"DAEMON_UNREACHABLE", "DAEMON_CONNECTION_LOST", "DAEMON_NOT_READY",
+                                      "DAEMON_NOT_RUNNING"}
+    for code in ("DAEMON_UNREACHABLE", "DAEMON_CONNECTION_LOST", "DAEMON_NOT_READY", "DAEMON_NOT_RUNNING"):
+        argvs, pauses, _ = fake_send(monkeypatch, lw, [(1, err(code)), (0, "")])
+        assert lw.send_to(PASEO_W, "hi") is True, code
+        assert len(argvs) == 2 and pauses == [lw.SEND_RETRY_PAUSE_S], code
+
+
+def test_send_to_reads_the_code_from_stdout_too(monkeypatch):
+    lw = load_module()
+    argvs, pauses, _ = fake_send(monkeypatch, lw, [(1, "", err("DAEMON_NOT_RUNNING")), (0, "")])
+    assert lw.send_to(PASEO_W, "hi") is True and len(argvs) == 2 and len(pauses) == 1
 
 
 def test_send_to_gives_up_after_two_retries(monkeypatch):
     lw = load_module()
-    argvs, pauses = fake_send(monkeypatch, lw, [(1, UNREACHABLE)])
+    argvs, pauses, _ = fake_send(monkeypatch, lw, [(1, UNREACHABLE)])
     assert lw.send_to(PASEO_W, "hi") is False
     assert len(argvs) == 1 + lw.SEND_RETRIES == 3 and len(pauses) == 2
     assert lw.SEND_RETRIES * lw.SEND_RETRY_PAUSE_S < lw.SEND_RETRY_BUDGET_S <= 30
@@ -430,18 +452,115 @@ def test_send_to_gives_up_after_two_retries(monkeypatch):
 
 def test_send_to_does_not_retry_other_failures(monkeypatch):
     lw = load_module()
-    argvs, pauses = fake_send(monkeypatch, lw, [(1, '{"error": {"code": "SEND_FAILED", "message": "Agent not found"}}')])
+    argvs, pauses, _ = fake_send(monkeypatch, lw, [(1, err("SEND_FAILED", "Agent not found"))])
     assert lw.send_to(PASEO_W, "hi") is False
     assert len(argvs) == 1 and not pauses
+
+
+def test_send_transient_is_an_exact_code_match():
+    lw = load_module()
+    run = lambda err_, out="": subprocess.CompletedProcess([], 1, out, err_)  # noqa: E731
+    # the four real codes, on stderr or stdout
+    for code in lw.SEND_TRANSIENT:
+        assert lw.send_transient(run(err(code))) and lw.send_transient(run("", err(code)))
+    # another code that merely contains the text of a real one
+    for code in ("AGENT_NOT_READY", "PROVIDER_NOT_READY", "DAEMON_NOT_READY_YET", "XDAEMON_NOT_RUNNING", "CONNECTION_LOST",
+                 "NOT_READY", "SEND_FAILED"):
+        assert not lw.send_transient(run(err(code))), code
+    # the text inside prose, in the message, in details or in an unrelated field
+    assert not lw.send_transient(run(err("SEND_FAILED", "Failed to send: DAEMON_NOT_READY DAEMON_UNREACHABLE")))
+    assert not lw.send_transient(run(json.dumps({"error": {"code": "SEND_FAILED", "details": "DAEMON_NOT_RUNNING"}})))
+    assert not lw.send_transient(run("Error: DAEMON_NOT_RUNNING: Cannot connect to daemon"))
+    # non-JSON, empty, None and wrongly shaped output
+    for bad in ("", "not json DAEMON_UNREACHABLE", "[1, 2]", '"DAEMON_UNREACHABLE"', "null", "42",
+                '{"error": "DAEMON_UNREACHABLE"}', '{"error": {"code": ["DAEMON_UNREACHABLE"]}}', '{"error": null}'):
+        assert not lw.send_transient(run(bad)), bad
+        assert not lw.send_transient(run("", bad)), bad
+    assert not lw.send_transient(subprocess.CompletedProcess([], 1, None, None))
+
+
+def test_send_to_a_code_named_only_in_prose_is_not_retried(monkeypatch):
+    lw = load_module()
+    for e in (err("AGENT_NOT_READY"), "DAEMON_NOT_READY: still starting", err("SEND_FAILED", "DAEMON_UNREACHABLE")):
+        argvs, pauses, _ = fake_send(monkeypatch, lw, [(1, e)])
+        assert lw.send_to(PASEO_W, "hi") is False
+        assert len(argvs) == 1 and not pauses, e
+    assert lw._paseo_down is False
+
+
+def test_send_to_timeouts_stay_inside_the_budget(monkeypatch):
+    lw = load_module()
+    now = [0.0]
+    pauses_seen = []
+
+    def clock():
+        return now[0]
+
+    argvs, pauses, timeouts = fake_send(monkeypatch, lw, [(1, UNREACHABLE)], clock=clock)
+    monkeypatch.setattr(lw.time, "sleep", lambda s: (pauses_seen.append(s), now.__setitem__(0, now[0] + s + 7.0)))
+    assert lw.send_to(PASEO_W, "hi") is False
+    assert timeouts[0] == 60
+    assert len(timeouts) >= 2
+    for t in timeouts[1:]:
+        assert 1.0 <= t <= lw.SEND_RETRY_BUDGET_S - lw.SEND_RETRY_PAUSE_S, timeouts
+    # each pause here advances the clock 12 s: the retries start at 12 s and 24 s, so their timeouts are 18 and 6
+    assert timeouts == [60, lw.SEND_RETRY_BUDGET_S - 12.0, lw.SEND_RETRY_BUDGET_S - 24.0]
+
+
+def test_send_to_retry_timeout_never_drops_below_one_second(monkeypatch):
+    lw = load_module()
+    clock = itertools.chain([0.0, 24.5], itertools.repeat(29.5))  # start, check before the pause, then 0.5 s of budget left
+    argvs, pauses, timeouts = fake_send(monkeypatch, lw, [(1, UNREACHABLE)], clock=lambda: next(clock))
+    assert lw.send_to(PASEO_W, "hi") is False
+    assert timeouts == [60, 1.0] and len(pauses) == 1
 
 
 def test_send_to_retry_stays_inside_the_budget(monkeypatch):
     lw = load_module()
-    argvs, pauses = fake_send(monkeypatch, lw, [(1, UNREACHABLE)])
     clock = itertools.chain([0.0], itertools.repeat(28.0))  # the first attempt took 28 s: no pause fits in 30 s
-    monkeypatch.setattr(lw.time, "monotonic", lambda: next(clock))
+    argvs, pauses, _ = fake_send(monkeypatch, lw, [(1, UNREACHABLE)], clock=lambda: next(clock))
     assert lw.send_to(PASEO_W, "hi") is False
     assert len(argvs) == 1 and not pauses
+
+
+def test_send_to_after_giving_up_later_sends_make_one_attempt(monkeypatch):
+    lw = load_module()
+    argvs, pauses, _ = fake_send(monkeypatch, lw, [(1, UNREACHABLE)])
+    assert lw._paseo_down is False
+    assert lw.send_to(PASEO_W, "a") is False
+    assert len(argvs) == 3 and len(pauses) == 2 and lw._paseo_down is True
+    for n in (4, 5):
+        assert lw.send_to(PASEO_W, "b") is False
+        assert len(argvs) == n and len(pauses) == 2   # one attempt each, no pause
+    # a success proves the daemon is back: retries return
+    argvs2, pauses2, _ = fake_send(monkeypatch, lw, [(0, "")])
+    assert lw.send_to(PASEO_W, "c") is True and lw._paseo_down is False
+    argvs3, pauses3, _ = fake_send(monkeypatch, lw, [(1, UNREACHABLE), (0, "")])
+    assert lw.send_to(PASEO_W, "d") is True and len(argvs3) == 2 and len(pauses3) == 1
+
+
+def test_send_to_running_out_of_budget_on_a_restart_code_also_gives_up_for_the_process(monkeypatch):
+    lw = load_module()
+    clock = itertools.chain([0.0], itertools.repeat(28.0))
+    argvs, pauses, _ = fake_send(monkeypatch, lw, [(1, UNREACHABLE)], clock=lambda: next(clock))
+    assert lw.send_to(PASEO_W, "a") is False and lw._paseo_down is True
+    assert len(argvs) == 1 and not pauses
+
+
+def test_send_to_a_non_restart_failure_does_not_set_the_process_flag(monkeypatch):
+    lw = load_module()
+    fake_send(monkeypatch, lw, [(1, err("SEND_FAILED", "Agent not found"))])
+    assert lw.send_to(PASEO_W, "a") is False and lw._paseo_down is False
+
+
+def test_send_to_relay_channel_never_sets_or_reads_the_process_flag(monkeypatch):
+    lw = load_module()
+    argvs, pauses, _ = fake_send(monkeypatch, lw, [(1, UNREACHABLE)])
+    assert lw.send_to({"channel": "relay", "target": "t"}, "hi") is False
+    assert lw._paseo_down is False
+    lw._paseo_down = True
+    fake_send(monkeypatch, lw, [(0, "")])
+    assert lw.send_to({"channel": "relay", "target": "t"}, "hi") is True and lw._paseo_down is True
 
 
 def test_send_to_timeout_and_oserror_do_not_escape(monkeypatch):
@@ -458,9 +577,10 @@ def test_send_to_timeout_and_oserror_do_not_escape(monkeypatch):
 
 def test_send_to_relay_channel_is_one_attempt_even_on_a_restart_code(monkeypatch):
     lw = load_module()
-    argvs, pauses = fake_send(monkeypatch, lw, [(1, UNREACHABLE), (0, "")])
+    argvs, pauses, _ = fake_send(monkeypatch, lw, [(1, UNREACHABLE), (0, "")])
     assert lw.send_to({"channel": "relay", "target": "t"}, "hi") is False
     assert len(argvs) == 1 and not pauses and "relay.py" in argvs[0][1] and "--json" not in argvs[0]
+    assert argvs[0][2:] == ["t", "hi"] and "--" not in argvs[0]
 
 
 def test_watcher_set_needs_a_session(tmp_path):
