@@ -273,7 +273,9 @@ def test_guard_help_documents_exit_77():
     ["checkout", "."], ["checkout", "-f", "main"], ["restore", "f"], ["restore", "--staged", "--worktree", "f"],
     ["switch", "--discard-changes", "main"], ["clean", "-fdx"], ["clean", "-f"], ["commit", "-a", "-m", "x"],
     ["commit", "-am", "x"], ["add", "-A"], ["add", "--all"], ["add", "."], ["pull", "--autostash"],
-    ["rebase", "--autostash", "main"], ["-c", "rebase.autoStash=true", "pull"], ["merge", "--autostash", "main"],
+    ["rebase", "--autostash", "main"], ["-c", "rebase.autoStash=true", "pull", "--rebase"],
+    ["-c", "merge.autoStash=true", "pull"], ["-c", "pull.rebase=true", "-c", "rebase.autoStash=true", "pull"],
+    ["merge", "--autostash", "main"],
 ], ids=lambda c: " ".join(c))
 def test_agent_destructive_git_is_refused_in_a_shared_checkout(tmp_path, state, cmd):
     repo = mk_repo(tmp_path, state)
@@ -1062,3 +1064,455 @@ def test_a_poisoned_pythonpath_does_not_switch_the_guard_off(tmp_path, state):
     r = run(state, ["reset", "--hard"], repo, who="B", PYTHONPATH=str(evil))
     assert r.returncode == 77
     assert untouched(repo)
+
+
+# ============================================================================================
+# repair round 2 (adversary BLOCK at 858cf6d, 2026-10-24): one regression per finding
+# ============================================================================================
+
+def remote_sha(state_dir, bare, branch="feat"):
+    return plain(state_dir, ["--git-dir", str(bare), "rev-parse", branch], bare.parent).strip()
+
+
+def two_claimed(tmp_path, state):
+    """a (claimed by A, with uncommitted work) and b (claimed by B, the caller)."""
+    a = mk_repo(tmp_path, state, "a")
+    b = mk_repo(tmp_path, state, "b")
+    claim(a, "A")
+    claim(b, "B", branch="b")
+    dirty(a)
+    return a, b
+
+
+# --- R2-B1: the push preflight can never perform the push -------------------------------------
+
+@pytest.mark.parametrize("args", [
+    ["-c", "remote.origin.push=+HEAD:refs/heads/feat", "push", "--no-dry-run", "origin"],
+    ["-c", "remote.origin.push=+HEAD:refs/heads/feat", "push", "--no-dry", "origin"],
+    ["-c", "remote.origin.push=+HEAD:refs/heads/feat", "push", "--no-d", "origin"],
+    ["-c", "remote.origin.push=+HEAD:refs/heads/feat", "push", "--no-porcelain", "origin"],
+    ["-c", "remote.origin.push=+HEAD:refs/heads/feat", "push", "--no-por", "origin"],
+    ["-c", "remote.origin.push=+HEAD:refs/heads/feat", "push", "origin", "--no-dry-run"],
+    ["push", "--no-dry-run", "origin", "HEAD:feat"],
+], ids=lambda a: " ".join(a[2:] if a[0] == "-c" else a))
+def test_push_preflight_can_never_perform_the_push(tmp_path, state, args):
+    bare, primary, sha = push_setup(tmp_path, state)
+    r = run(state, args, primary, who="B")
+    assert r.returncode == 77, r.stderr
+    assert remote_sha(state, bare) == sha          # the claimed branch did not move, not even once
+
+
+def test_check_of_a_push_that_cancels_the_dry_run_pushes_nothing(tmp_path, state):
+    bare, primary, sha = push_setup(tmp_path, state)
+    for cmd in ("git -c remote.origin.push=+HEAD:refs/heads/feat push --no-dry-run origin",
+                "git -c remote.origin.push=+HEAD:refs/heads/feat push origin"):
+        assert check(state, cmd, primary).returncode == 77
+        assert remote_sha(state, bare) == sha
+    assert check(state, "git push origin HEAD:scratch-b", primary).returncode == 0   # asked, not executed
+    assert plain(state, ["--git-dir", str(bare), "branch", "--list", "scratch-b"], tmp_path) == ""
+
+
+def test_push_preflight_runs_no_pre_push_hook(tmp_path, state):
+    bare, primary, sha = push_setup(tmp_path, state)
+    marker = tmp_path / "hook.log"
+    hook = primary / ".git" / "hooks" / "pre-push"
+    hook.write_text(f"#!/bin/sh\necho ran >> '{marker}'\nexit 0\n")
+    hook.chmod(0o755)
+    r = run(state, ["-c", "remote.origin.push=HEAD:refs/heads/feat", "push", "origin"], primary, who="B")
+    assert r.returncode == 77 and not marker.exists()
+    assert run(state, ["push", "-q", "origin", "HEAD:scratch-b"], primary, who="B").returncode == 0
+    assert marker.read_text().count("ran") == 1     # the real push only, never the guard's own dry run
+
+
+def test_run_git_kills_the_whole_process_group_on_timeout(tmp_path, monkeypatch):
+    import time
+    fake = tmp_path / "git"
+    pidfile = tmp_path / "pid"
+    fake.write_text(f"#!/bin/sh\nsleep 300 &\necho $! > '{pidfile}'\nwait\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("ADE_REAL_GIT", str(fake))
+    rc, _ = ade_claims._run_git(["push"], timeout=1)
+    assert rc == 124
+    pid = int(pidfile.read_text())
+    try:
+        for _ in range(60):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("a grandchild of the timed-out git is still running")
+    finally:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+
+
+def test_an_unresolvable_push_is_refused_only_while_someone_else_holds_a_claim(tmp_path, state):
+    bare, primary, sha = push_setup(tmp_path, state)
+    r = run(state, ["push", "nowhere", "HEAD:feat"], primary, who="B")
+    assert r.returncode == 77 and "unresolved" in r.stderr
+    ade_claims.set_state("A", "released")
+    r = run(state, ["push", "nowhere", "HEAD:feat"], primary, who="B")
+    assert "REFUSED" not in r.stderr          # nothing is claimed: git's own failure follows
+
+
+# --- R2-B5: destinations and URLs come from git, under the call's own ordered config -------------------------
+
+@pytest.mark.parametrize("args", [
+    ["push", "-f", "origin", "HEAD:heads/feat"],
+    ["push", "-f", "origin", "mine:heads/feat"],
+    ["-c", "remote.origin.push=+HEAD:refs/heads/feat", "-c", "remote.origin.push=+HEAD:refs/heads/mine", "push", "origin"],
+    ["push", "--mirror", "origin"],
+    ["push", "origin", "--delete", "feat"],
+    ["push", "origin", ":feat"],
+], ids=lambda a: " ".join(a)[:60])
+def test_push_destinations_come_from_git_not_from_the_command_line(tmp_path, state, args):
+    bare, primary, sha = push_setup(tmp_path, state)
+    r = run(state, args, primary, who="B")
+    assert r.returncode == 77, r.stderr
+    assert remote_sha(state, bare) == sha
+
+
+def test_push_of_at_sign_resolves_to_the_checked_out_claimed_branch(tmp_path, state):
+    bare, primary, sha = push_setup(tmp_path, state)
+    plain(state, ["checkout", "-q", "feat"], primary)
+    (primary / "z").write_text("z\n")
+    plain(state, ["add", "z"], primary)
+    plain(state, ["commit", "-qm", "z"], primary)
+    assert run(state, ["push", "origin", "@"], primary, who="B").returncode == 77
+    assert remote_sha(state, bare) == sha
+
+
+def test_wildcard_refspec_is_judged_by_the_remote_names_it_maps_to(tmp_path, state):
+    bare, primary, sha = push_setup(tmp_path, state)
+    ade_claims.write_claim(ade_claims.make_claim(id="C", path=tmp_path / "cw", branch="foreign/mine", base_sha="s",
+                                                 repo_origin=str(bare), owner_record="C"))
+    r = run(state, ["push", "origin", "refs/heads/*:refs/heads/foreign/*"], primary, who="B")
+    assert r.returncode == 77, r.stderr
+    assert plain(state, ["--git-dir", str(bare), "branch", "--list", "foreign/*"], tmp_path) == ""
+
+
+def test_push_url_comes_from_the_calls_own_config(tmp_path, state):
+    bare, primary, sha = push_setup(tmp_path, state)
+    other = tmp_path / "other.git"
+    plain(state, ["init", "-q", "--bare", "-b", "main", str(other)], tmp_path)
+    plain(state, ["remote", "set-url", "origin", str(other)], primary)      # the repo's own url is an unrelated repo
+    r = run(state, ["-c", f"remote.origin.pushurl={bare}", "push", "origin", "HEAD:feat"], primary, who="B")
+    assert r.returncode == 77 and remote_sha(state, bare) == sha
+    plain(state, ["remote", "set-url", "origin", "zz:origin"], primary)
+    r = run(state, ["-c", f"url.{bare}.insteadOf=zz:origin", "push", "origin", "HEAD:feat"], primary, who="B")
+    assert r.returncode == 77 and remote_sha(state, bare) == sha
+    plain(state, ["remote", "set-url", "origin", str(other)], primary)
+    assert run(state, ["push", "-q", "origin", "HEAD:feat"], primary, who="B").returncode == 0   # unrelated repo
+
+
+def test_normalize_origin_knows_verified_aliases_only():
+    n = ade_claims.normalize_origin
+    assert n("https://github.com:443/a/b.git") == n("git@github.com:a/b.git") == "github.com/a/b"
+    assert n("ssh://git@ssh.github.com:443/a/b.git") == "github.com/a/b"
+    assert n("https://github.com:8443/a/b") != n("https://github.com/a/b")
+    assert n("ssh://git@example.org:2222/a/b") != n("ssh://git@example.org/a/b")
+
+
+# --- R2-B2: the workspace git really writes ------------------------------------------------------
+
+def test_effective_worktree_follows_git_dir_env_core_worktree_and_c_chains(tmp_path, state):
+    a, b = two_claimed(tmp_path, state)
+    cases = [
+        (["-C", str(a), "reset", "--hard"], b, {"GIT_DIR": ".git"}),                          # .git is relative to a
+        (["-C", str(a), "--git-dir", "../b/.git", "checkout", "-f"], b, {}),                  # worktree = cwd = a
+        (["-C", str(a), "--git-dir=../b/.git", "reset", "--hard"], b, {}),
+        (["-C", str(a), "checkout", "-f"], b, {"GIT_DIR": "../b/.git"}),
+        (["-c", f"core.worktree={a}", "checkout", "-f"], b, {}),
+        (["-C", str(tmp_path), "--work-tree", "a", "checkout", "-f"], b, {}),
+    ]
+    for args, cwd, extra in cases:
+        r = run(state, args, cwd, who="B", **extra)
+        assert r.returncode == 77, (args, extra, r.stderr)
+        assert untouched(a)
+    plain(state, ["config", "core.worktree", str(a)], b)       # b's own config points at a's files
+    r = run(state, ["checkout", "-f"], b, who="B")
+    assert r.returncode == 77 and untouched(a), r.stderr
+
+
+def test_output_file_symlinks_are_resolved_before_their_parent(tmp_path, state):
+    a, b = two_claimed(tmp_path, state)
+    os.symlink(a / "f", b / "link")
+    os.symlink(a / "newfile", b / "dangling")
+    os.symlink(a, b / "dirlink")
+    for args in (["log", "-0", "--output=link"], ["log", "-0", "--output=dangling"], ["log", "-0", "--output=dirlink/f"],
+                 ["log", "-0", "--output=dirlink/newfile"], ["format-patch", "-1", "-o", "dirlink"]):
+        r = run(state, args, b, who="B")
+        assert r.returncode == 77, (args, r.stderr)
+    assert untouched(a) and not (a / "newfile").exists()
+    assert run(state, ["log", "-0", "--output=ok.txt"], b, who="B").returncode == 0
+
+
+def test_output_over_a_dirty_file_of_a_shared_checkout_is_refused(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    dirty(repo)
+    for args in (["diff", "--output=f"], ["log", "-0", "--output=u.txt"], ["diff", "--output", "f"]):
+        r = run(state, args, repo, who="B")
+        assert r.returncode == 77 and "dirty" in r.stderr, (args, r.stderr)
+    assert untouched(repo)
+    assert run(state, ["diff", "--output=new.patch"], repo, who="B").returncode == 0
+
+
+def test_absolute_dash_c_is_honored_when_the_cwd_is_gone(tmp_path, state, monkeypatch):
+    a, b = two_claimed(tmp_path, state)
+
+    def gone():
+        raise FileNotFoundError("cwd removed")
+
+    monkeypatch.setattr(os, "getcwd", gone)
+    assert ade_claims.guard_argv(["-C", str(a), "reset", "--hard"], base_env(state, "B")) == 77
+    assert untouched(a)
+
+
+# --- R2-B4: option state in order, pathspec files, aliases ----------------------------------------
+
+@pytest.mark.parametrize("cmd", [
+    ["restore", "--staged", "--no-staged", "f"], ["restore", "--staged", "--no-stag", "f"],
+    ["restore", "-S", "--no-staged", "f"],
+    ["rm", "-f", "--cached", "--no-cached", "f"], ["rm", "--force", "--cached", "--no-cach", "f"],
+    ["rm", "-f", "-n", "--no-dry-run", "f"],
+    ["clean", "-f", "--dry-run", "--no-dry-run"], ["clean", "-fn", "--no-dry"], ["clean", "-i"], ["clean", "-fi"],
+    ["checkout", "--pathspec-from-file=list"], ["checkout", "--pathspec-from-file", "list"],
+    ["checkout", "HEAD", "--pathspec-f=list"],
+], ids=lambda c: " ".join(c))
+def test_option_state_is_evaluated_in_order_in_a_shared_checkout(tmp_path, state, cmd):
+    repo = mk_repo(tmp_path, state)
+    dirty(repo)
+    (repo / "list").write_text("f\n")
+    r = run(state, cmd, repo, who="B")
+    assert r.returncode == 77, r.stderr
+    assert untouched(repo)
+
+
+@pytest.mark.parametrize("cmd", [
+    ["restore", "--no-staged", "--staged", "f"], ["rm", "--cached", "--no-cached", "--cached", "g"],
+    ["clean", "-n", "--no-dry-run", "-n"], ["clean", "-nfd", "--dry-run"],
+], ids=lambda c: " ".join(c))
+def test_a_later_safe_option_restores_the_safe_state(tmp_path, state, cmd):
+    repo = mk_repo(tmp_path, state)
+    (repo / "f").write_text("base\nedit\n")
+    r = run(state, cmd, repo, who="B")
+    assert r.returncode != 77 and "REFUSED" not in r.stderr, r.stderr
+
+
+def test_alias_resolution_uses_the_calls_config_and_fails_closed(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    dirty(repo)
+    for k, v in (("a1", "a2"), ("a2", "a3"), ("a3", "a4"), ("a4", "reset --hard")):      # four links
+        plain(state, ["config", f"alias.{k}", v], repo)
+    assert run(state, ["a1"], repo, who="B").returncode == 77
+    for i in range(12):                                                                   # deeper than the limit
+        plain(state, ["config", f"alias.d{i}", f"d{i + 1}" if i < 11 else "status"], repo)
+    r = run(state, ["d0"], repo, who="B")
+    assert r.returncode == 77 and "alias chain" in r.stderr
+    plain(state, ["config", "alias.l1", "l2"], repo)
+    plain(state, ["config", "alias.l2", "l1"], repo)
+    assert run(state, ["l1"], repo, who="B").returncode == 77
+    inc = tmp_path / "inc.cfg"
+    inc.write_text("[alias]\n\tzz = reset --hard\n")
+    assert run(state, ["-c", f"include.path={inc}", "zz"], repo, who="B").returncode == 77
+    r = check(state, "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.zz GIT_CONFIG_VALUE_0='reset --hard' git zz", repo)
+    assert r.returncode == 77
+    inline_cfg = tmp_path / "evil.cfg"
+    inline_cfg.write_text("[alias]\n\tqq = reset --hard\n")
+    assert check(state, f"GIT_CONFIG_GLOBAL={inline_cfg} git qq", repo).returncode == 77
+    assert untouched(repo)
+
+
+# --- R2-B3: what --check cannot judge is refused; scope is tracked ---------------------------------
+
+@pytest.mark.parametrize("tpl", [
+    "cat <<< x\ngit reset --hard",
+    "bash <<'EOF'\ngit reset --hard\nEOF",
+    "sh <<EOF\ngit reset --hard\nEOF",
+    "cat <<EOF\n$(git reset --hard)\nEOF",
+    "bash <<< 'git reset --hard'",
+    "echo 'git reset --hard' | bash",
+    "printf 'git reset --hard\\n' | sh -s",
+    "source /dev/stdin <<'EOF'\ngit reset --hard\nEOF",
+    "(cd {b}) && git reset --hard",
+    "pushd {b} > /dev/null; popd > /dev/null; git reset --hard",
+    "cd {b} | cat; git reset --hard",
+    "cd {b} & git reset --hard",
+    "G=git; $G reset --hard",
+    "$(which git) reset --hard",
+    "$'\\x67it' reset --hard",
+    "g{{i,}}t reset --hard",
+    "/usr/bin/g?t reset --hard",
+    "echo reset | xargs -I{{}} git {{}} --hard",
+], ids=lambda c: c.replace("\n", "⏎")[:44])
+def test_check_refuses_what_the_lexer_cannot_judge_or_would_misscope(tmp_path, state, tpl):
+    a, b = two_claimed(tmp_path, state)
+    r = check(state, tpl.format(b=b), a)
+    assert r.returncode == 77, (tpl, r.stderr)
+    assert untouched(a)
+
+
+@pytest.mark.parametrize("tpl,where", [
+    ("echo '$G reset --hard'", "b"),
+    ("cat <<'EOF'\ngit reset --hard\nEOF", "b"),
+    ("git commit -F- <<EOF\nnote: git reset --hard is only text\nEOF", "b"),
+    ("bash <<EOF\necho hi\nEOF", "b"),
+    ("cat <<EOF\n$(date)\nEOF", "b"),
+    ("$(pwd)/run.sh git", "b"),
+    ("ls *.md; echo git", "b"),
+    ("{{ cd {b}; }} && git reset --hard", "a"),
+    ("( cd {b} && git reset --hard )", "a"),
+    ("cd {b} && git reset --hard", "a"),
+    ("git commit --allow-empty -m \"$(cat <<'EOF'\nfix: don't break hooks\n\nbody \"quoted\" text\nEOF\n)\"", "b"),
+], ids=lambda c: c.replace("\n", "⏎")[:44] if isinstance(c, str) else c)
+def test_check_keeps_literal_data_and_correct_scopes_allowed(tmp_path, state, tpl, where):
+    a, b = two_claimed(tmp_path, state)
+    r = check(state, tpl.format(b=b), {"a": a, "b": b}[where])
+    assert r.returncode == 0, (tpl, r.stderr)
+
+
+def test_check_refuses_when_nesting_exhausts_the_recursion_limit(tmp_path, state):
+    a, b = two_claimed(tmp_path, state)
+    deep = lambda n, leaf: "echo $(" * n + leaf + ")" * n   # noqa: E731
+    assert check(state, deep(12, "git reset --hard"), a).returncode == 77
+    assert check(state, deep(3, "git reset --hard"), a).returncode == 77        # still read, and judged
+    assert check(state, deep(12, "echo hi"), a).returncode == 0                 # nothing to judge
+
+
+def test_match_paren_skips_heredoc_bodies():
+    s = "$(cat <<'EOF'\ndon't \"break\"\nEOF\n) tail"
+    assert ade_claims._match_paren(s, 1) == s.index("\n)") + 1
+
+
+# --- R2-M1..M4 -------------------------------------------------------------------------------
+
+def test_worktree_selector_is_resolved_against_the_registered_list(tmp_path, state):
+    repo, wt = setup_linked(tmp_path, state)
+    r = run(state, ["worktree", "move", "W", str(tmp_path / "W2")], repo, who="B")     # `W` is a unique suffix of W
+    assert r.returncode == 77 and wt.exists() and not (tmp_path / "W2").exists(), r.stderr
+    assert run(state, ["worktree", "remove", "W"], repo, who="B").returncode == 77
+    assert untouched(wt)
+
+
+def test_ref_transactions_and_forced_fetch_cannot_move_a_claimed_branch(tmp_path, state):
+    repo, wt = setup_linked(tmp_path, state)
+    head = plain(state, ["rev-parse", "wtb"], repo).strip()
+    main = plain(state, ["rev-parse", "main"], repo).strip()
+    r = subprocess.run([str(SHIM), "update-ref", "--stdin"], cwd=repo, env=base_env(state, "B"), capture_output=True,
+                       text=True, input=f"update refs/heads/wtb {main}\n", timeout=60)
+    assert r.returncode == 77, r.stderr
+    for args in (["fetch", "--update-head-ok", ".", "+main:wtb"], ["fetch", "-u", ".", "+main:refs/heads/wtb"],
+                 ["fetch", ".", "+main:wtb"], ["-c", "remote.origin.fetch=+refs/heads/*:refs/heads/*", "fetch", "origin"]):
+        r = run(state, args, repo, who="B")
+        assert r.returncode == 77, (args, r.stderr)
+    assert plain(state, ["rev-parse", "wtb"], repo).strip() == head
+    r = run(state, ["fetch", "."], repo, who="B")
+    assert r.returncode != 77 and "REFUSED" not in r.stderr
+
+
+def test_symbolic_ref_delete_and_updating_fetch_are_not_read_only():
+    ro = lambda argv: ade_claims.is_readonly(ade_claims.parse_git_argv(argv, "/tmp", {}))   # noqa: E731
+    assert not ro(["symbolic-ref", "--delete", "HEAD"]) and not ro(["symbolic-ref", "--del", "refs/x"])
+    assert ro(["symbolic-ref", "HEAD"]) and ro(["symbolic-ref", "--short", "HEAD"])
+    assert not ro(["fetch", "-u"]) and not ro(["fetch", "--update-head-ok"]) and not ro(["fetch", "origin", "+a:b"])
+    assert not ro(["fetch", "--refm=x", "origin"])
+    assert ro(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"]) and ro(["fetch", "--all"]) and ro(["fetch", "origin", "main"])
+
+
+def test_plain_fetch_stays_on_the_fast_path_and_a_refspec_fetch_does_not(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    no_python = {"ADE_PYTHON": "/nonexistent/python3"}
+    assert "unguarded" not in run(state, ["fetch"], repo, who="B", **no_python).stderr
+    for args in (["fetch", "origin", "+main:wbr"], ["fetch", "--update-head-ok"], ["fetch", "-qu"]):
+        assert "unguarded" in run(state, args, repo, who="B", **no_python).stderr, args
+
+
+def test_a_stale_pointer_does_not_hide_a_newer_active_claim(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    ade_claims.set_state("A", "released")
+    ade_claims.create_claim(ade_claims.make_claim(id="A2", path=repo, branch="b", base_sha="s", owner_record="X"))
+    ws = ade_claims.find_workspace(repo)
+    assert ade_claims.read_pointer(ws) == "A"                    # the pointer still names the released record
+    assert ade_claims.find_claim(ws)["id"] == "A2"
+    dirty(repo)
+    assert run(state, ["reset", "--hard"], repo, who="B").returncode == 77 and untouched(repo)
+
+
+def test_reclaim_releases_the_old_record_and_reactivation_rechecks_the_path(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    mk = lambda cid, owner: ade_claims.make_claim(id=cid, path=repo, branch="b", base_sha="s", owner_record=owner)   # noqa: E731
+    ade_claims.create_claim(mk("A", "o"), pointer_for=repo)
+    ade_claims.create_claim(mk("A2", "o"), pointer_for=repo)
+    assert [c["id"] for c in ade_claims.list_claims("active")] == ["A2"]
+    assert [c["id"] for c in ade_claims.list_claims("released")] == ["A"]
+    assert ade_claims.read_pointer(ade_claims.find_workspace(repo)) == "A2"
+    ade_claims.set_state("A", "active")                          # same owner: the newer record is released instead
+    assert [c["id"] for c in ade_claims.list_claims("active")] == ["A"]
+    ade_claims.set_state("A", "released")
+    ade_claims.create_claim(mk("B", "other"))
+    with pytest.raises(ade_claims.PathClaimed):
+        ade_claims.set_state("A", "active")
+    cli = [sys.executable, str(ROOT / "bin" / "ade_claims.py")]
+    r = subprocess.run([*cli, "set-state", "A", "active"], env=base_env(state), capture_output=True, text=True, timeout=60)
+    assert r.returncode == 4
+
+
+@pytest.mark.parametrize("cmd", [
+    ["-c", "merge.autoStash=true", "merge", "--no-autostash", "main"], ["-c", "rebase.autoStash=true", "merge", "main"],
+    ["-c", "merge.autoStash=true", "rebase", "main"], ["-c", "rebase.autoStash=true", "pull", "--no-rebase"],
+    ["-c", "merge.autoStash=true", "pull", "--rebase"], ["-c", "rebase.autoStash=true", "pull", "--rebase", "--no-autostash"],
+], ids=lambda c: " ".join(c))
+def test_autostash_follows_the_final_option_and_the_config_of_what_runs(tmp_path, state, cmd):
+    repo = mk_repo(tmp_path, state)
+    (repo / "f").write_text("base\nedit\n")
+    r = run(state, cmd, repo, who="B")
+    assert r.returncode != 77 and "REFUSED" not in r.stderr, r.stderr
+
+
+# --- R2-L1..L3 ---------------------------------------------------------------------------------
+
+def test_log_flags_never_hold_an_option_value(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    assert run(state, ["commit", "-m", "--secret-FAKE-credential", "--allow-empty"], repo, who="B").returncode == 77
+    assert run(state, ["commit", "--message", "--other-secret-xyz", "--author=N <x@y>"], repo, who="B").returncode == 77
+    text = (Path(state) / "guard.log").read_text()
+    assert "secret" not in text.lower() and "FAKE" not in text
+    assert [r["flags"] for r in guard_log(state)] == [["-m", "--allow-empty"], ["--message", "--author"]]
+
+
+def test_refusal_text_escapes_terminal_control_characters(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A", agent="ev\x1b[31mil")
+    r = run(state, ["evil\nFORGED-LINE\x1b[2J"], repo, who="B")
+    assert r.returncode == 77 and "\x1b" not in r.stderr and "\nFORGED-LINE" not in r.stderr
+    r = run(state, ["reset", "--hard"], repo, who="B")
+    assert r.returncode == 77 and "\x1b" not in r.stderr and "ev\\x1b[31mil" in r.stderr
+
+
+def test_hostile_json_types_neither_crash_nor_blind_the_guard(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    dirty(repo)
+    (state / "claims").mkdir(parents=True)
+    (state / "claims" / "bad.json").write_text(json.dumps(
+        {"id": [], "path": str(repo), "state": "active", "owner": {"agent": 7, "model": None, "record": 5},
+         "allow": [1, {}], "created_at": 3, "branch": ["x"], "repo_origin": 9}))
+    c = ade_claims.read_claim("bad")
+    assert c["id"] == "bad" and c["owner"]["agent"] == "" and c["allow"] == [] and c["branch"] == ""
+    r = run(state, ["reset", "--hard"], repo, who="B")
+    assert r.returncode == 77 and "unguarded" not in r.stderr and untouched(repo)
+
+
+def test_poisoned_head_and_pointer_bytes_do_not_raise(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    ws = ade_claims.find_workspace(repo)
+    (repo / ".git" / "ade-claim").write_bytes(b"\xff\xfe\n")
+    assert ade_claims.read_pointer(ws) is None
+    (repo / ".git" / "HEAD").write_bytes(b"ref: refs/heads/\xff\n")
+    assert isinstance(ade_claims._head_branch(ws.gitdir), str)
