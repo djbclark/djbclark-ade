@@ -3,6 +3,19 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## Make better use of Basic Memory (djbclark, direct, 2026-10-23)
+
+djbclark, 2026-10-23: "Add another item to appropriate phrase: Look into making better use of basic memory, I do not
+think we are using it that much/makeing the best use of it, but I could be wrong. Do web searches etc." Status
+2026-10-23: **research and design slice running** (`design-basicmemory`, Opus 5.5 high via omp, web research,
+read-only; brief `~/.local/state/bigteam/ade-2026-10-20-phase0-queue/brief-design-basicmemory.md`, report
+`~/.local/state/bigteam/adhoc-2026-10-23/design-basicmemory-report.md`). It measures the store (note counts, growth,
+relations, orphans) and real agent use (MCP tool calls per day from the transcripts), compares with the per-project
+auto-memory files, `docs/handoffs/`, `session-finder` and Hermes memory, surveys what works elsewhere, and recommends
+capture and recall hooks, note schemas and consolidation, plus the phase it belongs in
+([`docs/ade-everywhere-proposal.md`](ade-everywhere-proposal.md) section 8; levels in
+[`docs/ai-memory-landscape.md`](ai-memory-landscape.md)). Nothing is built.
+
 ## Heavier use of Hermes worktrees and cow pastures so agents stop stepping on each other (djbclark, direct, 2026-10-23)
 
 djbclark, 2026-10-23: "Also add to appropriate phase if we haven't yet, we should probably be making heavier use of
