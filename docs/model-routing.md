@@ -372,6 +372,17 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
 
 ## Routing policy (2026-10-15; the one copy is `skills/model-routing/SKILL.md`)
 
+**Claude fleet governor (2026-10-23).** `bin/claude-fleet-governor` projects the Claude 5-hour and weekly windows to
+their resets from the aiuse snapshots and keeps the subscription from running out first. Levels: `tight` (a window
+projected ≥ 90% at its reset, 5-hour left < 25, weekly left < 30) and `critical` (exhaustion more than 10 min before the
+reset and within 45 min, or any window left < 10). `run` moves live Paseo `claude` agents in place through
+`bin/paseo-set-model`: Fable → Opus always, Opus/Fable → Sonnet 5.5 at tight/critical (originals recorded, restored
+after the reset when the level is `ok` and the agent was not changed by hand), and at critical one handoff steer per
+running agent per reset period toward omp API credits. Exit 0/1/2, 10 stale data, 11 a call failed, 12 internal error; state
+`~/.local/state/ade/fleet-governor.json`; launchd `com.djbclark.claude-fleet-governor` (300 s, `--install`).
+`route_agent.py` reads the state's `level` (under 30 min old): at tight/critical `code`, `bulk`, `research` and
+`mechanical` never go to claude, and `judgment` prefers omp `anthropic/claude-opus-5-5`.
+
 1. **Frontier models only for what really needs them (2026-10-18):** judgment
    is `acp-dispatch claude --model opus --kind judgment --effort high`; the
    `frontier` kind, one slice per pool per wave, reaches codex `gpt-6-astra`
@@ -451,7 +462,7 @@ alert had said so since 06:02Z and nothing read it. The burn was Opus 5.5 (~53%:
 `adversary` Agent-tool sub-agent, judgment slices, Orca workers) and Fable 5.1 (~30%: the
 lead session itself). The rules (`skills/model-routing/SKILL.md`, *Routing policy* items 12
 and 13; `config/routing.toml` `[lead]`): a lead session runs on Opus 5.5 at high (Sonnet 5.5
-at high when it only drives a pipeline), never Fable; adversary rounds go to `acp-dispatch
+at medium when it only drives a pipeline, high only for a judgment turn; djbclark 2026-10-23), never Fable; adversary rounds go to `acp-dispatch
 omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` first. The guard that
 makes the numbers act: `bin/claude-quota-guard` (`check` every 15 minutes under launchd after
 `--install`, `status [--json]`) derives `ok` / `watch` / `tight` / `critical` from the Claude

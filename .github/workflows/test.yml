@@ -16,10 +16,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v10.3.2
 
       # The repo's scripts and the tests' fake agents call the g-prefixed GNU tools
       # (gwc, ghead, gdate, ggrep, gsed, gawk, ...); the runner has the BSD ones only.
@@ -35,10 +35,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v10.3.2
 
       # On Linux the GNU tools are native under their plain names, but the repo's scripts
       # and the tests' fake agents call the g-prefixed names the Mac needs. Make one

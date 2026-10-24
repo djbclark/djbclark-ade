@@ -49,6 +49,14 @@ Work the list; each line is a command, not a memory.
    collected. An agent that looks finished with nothing delivered means *not yet
    delivered* — re-task it to write a file; never reconstruct what it would have
    said. Grok Bot: G3.
+   **Planned work never dispatched.** If the session produced a plan — numbered
+   slices, a step list, an agreed "next wave" — enumerate every item and prove
+   each ran: an artifact exists, a commit exists, or a dispatch log/report
+   exists. A plan item with no artifact is a loose end, not a deferral. Plans
+   rot silently because the plan text stays in context while execution stops
+   early; count plan items against artifacts, never from memory of "we did the
+   important ones" (2026-10-24: a 7-slice migration plan had run 4, and an audit
+   that walked only the session's own threads reported nothing missing).
 4. **Claims you made but did not verify.** Scan your own replies for assertions
    stated flatly. Anything you inferred rather than observed either gets checked
    now or gets downgraded to "assumed" in the audit.

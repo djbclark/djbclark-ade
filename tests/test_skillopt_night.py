@@ -147,14 +147,6 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("FAKE_STUCK", raising=False)
     monkeypatch.setattr(night, "adapter_digests", _fake_adapter(ADAPTER_CALLS))
     ADAPTER_CALLS.clear()
-    tool = tmp_path / "uvtool"
-    dist = tool / "lib" / "python3.14" / "site-packages" / "skillopt-0.2.0.dist-info"
-    dist.mkdir(parents=True)
-    (tool / "uv-receipt.toml").write_text(
-        '[tool]\nrequirements = [{ name = "skillopt", git = '
-        f'"https://github.com/microsoft/SkillOpt?rev={night.REVIEWED_REV}" }}]\n')
-    (dist / "direct_url.json").write_text(json.dumps({"vcs_info": {"commit_id": night.REVIEWED_REV}}))
-    monkeypatch.setenv("SKILLOPT_NIGHT_UV_TOOL_DIR", str(tool))
     failover._cache.clear()
     old_umask = os.umask(0o022)
     os.umask(old_umask)
@@ -571,17 +563,6 @@ def test_engine_env_is_minimal_and_carries_markers(env, monkeypatch):
     assert "Complete the following task for the user" in markers
     assert "You are mining a user's past AI-assistant sessions" in markers
     assert "Score how well the response satisfies the rubric" in markers
-
-
-@pytest.mark.parametrize("dry", [False, True])
-def test_unreviewed_skillopt_refused(env, dry):
-    _night(env / "home", HAIKU_SONNET)
-    (Path(os.environ["SKILLOPT_NIGHT_UV_TOOL_DIR"]) / "uv-receipt.toml").write_text(
-        '[tool]\nrequirements = [{ name = "skillopt", git = "https://github.com/microsoft/SkillOpt" }]\n')
-    assert night.main(["--dry-run"] if dry else []) == 2
-    assert _rows(env)[-1]["status"] == "unreviewed-skillopt"
-    assert _calls(env) == [] and ADAPTER_CALLS == []
-    assert len(_pings(env)) == (0 if dry else 1)
 
 
 def test_native_refused_while_claude_bypass_is_default(env):

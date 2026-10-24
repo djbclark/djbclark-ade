@@ -166,7 +166,7 @@ a fan-out needs from it:
    override whenever `~/.local/state/ade/quota-guard.json` says `tight` or
    `critical` (`bin/claude-quota-guard`; a `[quota-guard <level>]` line from the
    UserPromptSubmit hook says the same). The lead session itself runs on Opus 5.5
-   high (Sonnet 5.5 high when it only drives a pipeline), never Fable
+   high (Sonnet 5.5 at medium when it only drives a pipeline, high only for a judgment turn; `[lead] pipeline_effort`), never Fable
    (`model-routing`, *Routing policy* item 12).
    **`frontier` slices** are the rare few that really need a frontier model
    (debugging that defeated real attempts, a security-relevant or concurrency
@@ -417,6 +417,10 @@ Prefer one shared checkout with strict file ownership over a worktree per agent:
 disjoint files in one tree need no merge, and merging five branches costs more
 than it saves at this granularity. Reach for `cow-workspaces` or
 `git worktree` only when slices genuinely must touch the same file.
+When a slice must stay off the live checkout, create the worktree or pasture
+yourself and pass *it* as `-C`; never `-C` the live tree with a brief that says
+"work in a worktree" (2026-10-23: the slice's first relative-path edit landed in
+the live `~/src/djbclark-ade` and had to be moved back by hand).
 
 **Size the run to the work** (Anthropic's research-system heuristic, 2026):
 one slice for a lookup or a single-area change, 2-4 for a comparison or a

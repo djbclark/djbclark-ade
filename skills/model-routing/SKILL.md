@@ -60,6 +60,25 @@ skill's snapshot in the same turn.
   its reset (advisory, expires, shown as `source: agent-reported`).
   `~/ops/site-private/bin/aiuse-pools` is a thin wrapper around `--available`.
 - `cswap list` — Claude accounts + 5h/weekly/Fable windows.
+- **`bin/claude-fleet-governor`** (2026-10-23) — keeps every Claude session on this Mac from exhausting the Claude
+  subscription before a reset (2026-10-20 the weekly window ran out 2.6 days early; 2026-10-23 the 5-hour window was
+  projected out 55 min before its reset). It reads the newest aiuse snapshots (`~/.cache/aiuse/snapshots/`; older than
+  45 min: exit 10, no action), takes each Claude window's burn rate (least-squares slope over the last 90 min of
+  snapshots sharing the current `resets_at`) and projects `used + rate × hours_to_reset` and the exhaustion time.
+  Levels: `tight` = any window projected ≥ 90% at its reset, or 5-hour left < 25, or weekly left < 30; `critical` =
+  exhaustion more than 10 min before the reset and within 45 min, or any window left < 10 (the Fable sublimit window is
+  reported, never sets the level). `run` moves live Paseo agents of provider `claude` in place through
+  `bin/paseo-set-model` (the daemon's own `set_agent_model_request`; the Paseo CLI has no such command): Fable → Opus at
+  any level (lead sessions never run Fable); Opus/Fable → Sonnet 5.5 at tight/critical, the original recorded; at
+  critical also one steer per running agent per reset period (`paseo send --no-wait --behavior steer`) to write its
+  handoff and `self-slash --finish --successor omp/anthropic/claude-sonnet-5-5` (API credits, off the subscription);
+  after the recorded reset, with the level `ok`, an agent still on the governor's model goes back (Fable originals to
+  Opus; a manual change wins); one `hermes-ping` per run that changed something. Exit codes 0 ok, 1 tight, 2 critical,
+  10 stale or unreadable data, 11 a call failed, 12 internal error. State: `~/.local/state/ade/fleet-governor.json` (`level`, windows,
+  `downshifted`, `steered`, `last_ping`); `route_agent.py` reads `level` while under 30 min old and then routes no
+  `code`/`bulk`/`research`/`mechanical` slice to claude and prefers omp Opus for `judgment`. launchd job
+  `com.djbclark.claude-fleet-governor` (every 300 s): `bin/claude-fleet-governor --install`, then the printed
+  `launchctl bootstrap` line. `check` (the default) changes nothing.
 - `codex login status`; `opencode models`; `bl quota list`;
   `curl -s localhost:4000/v1/models` (LiteLLM/ClinePass);
   `agy --version`; `devin --version`; `copilot --version`.
@@ -475,6 +494,13 @@ and `sipb/deepseek-r1:{8b,14b,32b}` (MIT-hosted); paid —
 via LiteLLM :4000 (ClinePass, a reserve pool), and the `deepseek`
 prepaid account. Check `aiuse` for what is left in each. z.ai serves GLM, not DeepSeek.
 
+For the **main loop** (the agent's own substrate, not a dispatched slice), run
+`bin/route_agent.py substrate` at session start: it prints the Flash-primary chain
+(opencode-go ↔ cline, same model, provider failover) with the real rolling-window headroom, and
+`--apply <agent>` does a within-provider switch. A cross-provider move is refused — a live
+cross-provider model switch is what broke the ◈ Dann tab on 2026-10-23; failover is a session-start
+choice, never a live switch.
+
 Rules that fall out of this:
 
 - Exit 0 is not success. Append `echo "<tool> exit=$?"` to each output
@@ -719,11 +745,19 @@ method that runs the waves.
     pinged and no session downshifted. The burn was Opus 5.5 (~53%: the `adversary`
     Agent-tool sub-agent is `model: opus`, judgment slices, Orca workers) and Fable 5.1
     (~30%: the lead session itself ran on Fable), mostly cache re-reads of 150-200k
-    contexts. So: **a lead runs on Opus 5.5 at high by default; on Sonnet 5.5 at high
-    when it only drives a pipeline (PR loops, waiters, merges); never on Fable.** Fable
+    contexts. So: **a lead that does judgment work runs on Opus 5.5 at high; a lead that
+    only drives a pipeline (PR loops, waiters, merges) runs on Sonnet 5.5 at medium
+    (`pipeline_effort` in `[lead]`), and goes to high only for a judgment turn; never on
+    Fable** (approved by djbclark 2026-10-23). Raise the effort for the turn with
+    `/effort high` (Claude Code) or the Paseo thinking setting, and drop back to medium
+    after; an effort change keeps the prompt cache (Anthropic: "tuning effort is often a
+    better lever than switching models"). Fable
     is reached only through the `fable-deep` sub-agent or a `frontier` slice. Paseo
-    launch: `paseo run --provider claude/claude-opus-5-5 --thinking high --mode
-    bypassPermissions ...`; CLI: `claude --model opus` with effort `high` in settings.
+    launch, judgment lead: `paseo run --provider claude/claude-opus-5-5 --thinking high
+    --mode bypassPermissions ...`; pipeline lead: `paseo run --provider
+    claude/claude-sonnet-5-5 --thinking medium --mode bypassPermissions ...`; CLI:
+    `claude --model opus` with effort `high` in settings (`claude --model sonnet` with
+    `medium` for a pipeline lead).
 13. **Adversary rounds go to the omp route first** (operator 2026-10-23):
     `acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high`
     (API credits, a normal tier since 2026-10-19; omp is eligible for `judgment` in

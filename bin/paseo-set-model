@@ -1,0 +1,76 @@
+#!/usr/bin/env -S python3 -I
+"""paseo-set-model: switch a live Paseo agent's model in place, or list the daemon's agents.
+
+  paseo-set-model set <agent> <model> [--dry-run]
+  paseo-set-model list --json
+
+`set` sends the daemon's own set_agent_model_request (the RPC the Paseo UI's model picker uses;
+the `paseo` CLI has no command for it, docs/upstream-issues.md section 17): same agent id, same
+session, also mid-turn. <agent> is a full id or a unique prefix. <model> is `model-id` or
+`provider/model-id`; a provider other than the agent's is refused (the daemon sets models per
+provider). After the call the agent is fetched again and its model compared.
+
+`list --json` prints a JSON array, one object per agent the daemon knows, archived included:
+id, name, provider, model, status, archived, and parentAgentId when present.
+
+Exit codes: 0 set and verified (or listed), 1 other error, 2 usage, 3 no such agent,
+4 the re-fetch shows another model.
+
+The work runs in Paseo's bundled Electron node through bin/paseo-set-model.mjs (argv list, no
+shell). Env: PASEO_SET_MODEL_HELPER (default: the Paseo Helper binary in /Applications/Paseo.app),
+PASEO_SET_MODEL_CLI_DIST (default: the bundled @getpaseo/cli dist directory inside its app.asar).
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+APP = "/Applications/Paseo.app/Contents"
+DEFAULT_HELPER = f"{APP}/Frameworks/Paseo Helper.app/Contents/MacOS/Paseo Helper"
+DEFAULT_CLI_DIST = f"{APP}/Resources/app.asar/node_modules/@getpaseo/cli/dist"
+MJS = Path(os.path.realpath(__file__)).with_name("paseo-set-model.mjs")
+
+USAGE = (__doc__ or "").split("\n\n")[1].strip("\n") + "\n\nexit codes: 0 ok, 1 error, 2 usage, 3 no such agent, 4 model not applied\n"
+
+
+def usage() -> int:
+    print(USAGE, file=sys.stderr)
+    return 2
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ("-h", "--help"):
+        if argv:
+            print(__doc__)
+            return 0
+        return usage()
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "set":
+        flags = [a for a in rest if a.startswith("--")]
+        pos = [a for a in rest if not a.startswith("--")]
+        if len(pos) != 2 or any(f != "--dry-run" for f in flags):
+            return usage()
+        args = ["set", *pos, *flags]
+    elif cmd == "list":
+        if rest != ["--json"]:
+            return usage()
+        args = ["list"]
+    else:
+        return usage()
+    helper = os.environ.get("PASEO_SET_MODEL_HELPER") or DEFAULT_HELPER
+    env = dict(os.environ)
+    env["ELECTRON_RUN_AS_NODE"] = "1"
+    env["PASEO_NODE_ENV"] = "production"
+    env["PASEO_SET_MODEL_CLI_DIST"] = os.environ.get("PASEO_SET_MODEL_CLI_DIST") or DEFAULT_CLI_DIST
+    try:
+        # Argv list, inherited stdio: the helper's own lines and exit status are the answer.
+        return subprocess.run([helper, "--disable-warning=DEP0040", str(MJS), *args], env=env, check=False).returncode
+    except OSError as e:
+        print(f"paseo-set-model: cannot run {helper}: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
