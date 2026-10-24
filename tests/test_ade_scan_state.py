@@ -3820,15 +3820,63 @@ def test_an_untracked_repository_inside_a_submodule_is_nested_and_gets_the_whole
     assert c["verdict"] == NESTED and not c.get("submodules_vetted"), c
     row = skipped_row(doc, c)
     assert "whole.tar" in row and f"counts unknown ({NESTED})" in row
-    # the walk failing (a timeout, an unreadable subdirectory) is `(unreadable)`, never a scanned submodule
+    # the walk failing (a timeout, an unreadable subdirectory) is never a scanned submodule; a timeout says so (round 65, INFO 3)
     real = mod.embedded_repositories
     monkeypatch.setattr(mod, "embedded_repositories", lambda p, within=None: (124, [], []) if p.name == "sub" else real(p, within))
-    assert scan_super(mod, roots)["verdict"] == "skipped: submodule config unrecognised (unreadable)"
+    assert scan_super(mod, roots)["verdict"] == "skipped: submodule config unrecognised (unreadable or timed out)"
     monkeypatch.setattr(mod, "embedded_repositories", real)
     shutil.rmtree(emb)  # a plain submodule with only an ordinary untracked file is still scanned
     (sub / "notes.txt").write_text("not a repository\n")
     c = scan_super(mod, roots)
     assert not c["verdict"].startswith("skipped") and c["submodules_vetted"] == ["sub"], c
+
+
+def test_a_repository_at_an_index_hidden_path_inside_a_submodule_is_nested_and_gets_the_whole_directory_archive(tmp_path, monkeypatch):
+    """Adversary round 65 on PR 27, MEDIUM, and Codex pass 65, P1: `ls-files --others` lists nothing for a directory that
+    replaces a skip-worktree or assume-unchanged tracked path, so the nested check passed a submodule whose inner
+    repository (a local-only commit) was in no artifact. The top level already walks those directories; the submodule gets
+    the same walk."""
+    mod, doc = load(), load_doc()
+    for flag in ("--skip-worktree", "--assume-unchanged"):
+        base = tmp_path / flag.strip("-")
+        roots, sup, moddir = make_super_with_submodule(base)
+        sub = sup / "sub"
+        git(sub, "update-index", flag, "f.txt")
+        (sub / "f.txt").unlink()
+        inner = sub / "f.txt"  # a directory that took the hidden file's place, holding a repository of its own
+        inner.mkdir()
+        git(inner, "init", "-b", "main")
+        (inner / "precious.txt").write_text("local only\n")
+        git(inner, "add", "precious.txt")
+        git(inner, "commit", "-m", "precious local-only commit")
+        assert mod.embedded_repositories(sub) == (0, [], [])  # the premise: the plain walk is blind to it
+        c = scan_super(mod, roots)
+        assert c["verdict"] == NESTED and not c.get("submodules_vetted"), (flag, c)
+        row = skipped_row(doc, c)
+        assert "whole.tar" in row and f"counts unknown ({NESTED})" in row
+        whole = unescape_span(re.search(r"`(mkdir -p [^`]*whole\.tar[^`]*)`", row).group(1))
+        dest, home = tmp_path / ("dest" + flag.strip("-")), tmp_path / ("home" + flag.strip("-"))
+        dest.mkdir()
+        home.mkdir()
+        run = subprocess.run(["bash", "-c", PLAN_PREFIX + whole.replace("<DEST>", str(dest))], capture_output=True, text=True,
+                             env={**GIT_ENV, "HOME": str(home)})
+        assert run.returncode == 0, run.stderr
+        import tarfile
+        names = tarfile.open(next(dest.rglob("whole.tar"))).getnames()
+        assert any(n.endswith("sub/f.txt/precious.txt") for n in names), names  # the inner commit's worktree and `.git` are in it
+        assert any("sub/f.txt/.git/" in n for n in names), names
+        # the walk failing is not a scanned submodule either
+        real = mod.index_hidden_repositories
+        monkeypatch.setattr(mod, "index_hidden_repositories",
+                            lambda p: (0, [], [], ("ls-files --others under index-hidden paths", 124)) if p.name == "sub" else real(p))
+        assert scan_super(mod, roots)["verdict"] == "skipped: submodule config unrecognised (unreadable or timed out)"
+        monkeypatch.undo()
+        # a hidden path that is a plain directory finds nothing: the submodule stays vetted
+        shutil.rmtree(inner)
+        inner.mkdir()
+        (inner / "plain.txt").write_text("x\n")
+        c = scan_super(mod, roots)
+        assert not c["verdict"].startswith("skipped") and c["submodules_vetted"] == ["sub"], (flag, c)
 
 
 ALTERNATES = "skipped: submodule config unrecognised (alternates)"
@@ -3918,6 +3966,175 @@ def test_every_skipped_or_incomplete_row_of_a_checkout_that_borrows_objects_warn
     del rec["alternates"]
     row = skipped_row(doc, rec)
     assert "NOT archived" not in row and "do not clean up" not in row
+
+
+def test_a_skipped_checkouts_row_warns_about_a_store_its_git_dir_links_to_outside_the_checkout(tmp_path):
+    """Adversary round 65 on PR 27, LOW 2: a checkout whose `.git/objects` (git-new-workdir, objects moved to another disk),
+    `refs` or `packed-refs` is a symlink out is archived by `whole.tar` and the git-dir archive as the link alone, and the
+    skipped row said nothing, where a borrowed (alternates) store gets a warning."""
+    mod, doc = load(), load_doc()
+    origin = make_repo(tmp_path / "origin")
+    roots = tmp_path / "roots"
+    roots.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    for member in ("objects", "refs", "packed-refs"):
+        co = roots / member
+        git(tmp_path, "clone", "-q", str(origin), str(co))
+        commit_file(co, "local.txt")  # a local-only commit: the history lives in the store the link names
+        git(co, "pack-refs", "--all")
+        moved = outside / f"{member}-moved"
+        os.rename(co / ".git" / member, moved)
+        os.symlink(moved, co / ".git" / member)
+        ordinary = mod.scan_checkout(co.resolve(), remote=False)  # a link alone skips nothing, and a bundle reads through it
+        assert not ordinary["verdict"].startswith("skipped") and "linked_stores" not in ordinary, (member, ordinary["verdict"])
+        git(co, "config", "alias.co", "checkout")  # now skipped before any git call
+        rec = mod.scan_checkout(co.resolve(), remote=False)
+        assert rec["verdict"] == "skipped: unrecognised config alias.co", member
+        assert rec["linked_stores"] == [f"{member} -> {os.path.realpath(moved)}"], (member, rec.get("linked_stores"))
+        assert "alternates" not in rec
+        row = skipped_row(doc, rec)
+        assert "is NOT archived" in row and "do not clean up" in row.split("| yes:")[1] and "whole.tar" in row, row
+        assert f"{member} -> {os.path.realpath(moved)}" in row and "objects/info/alternates" not in row, row
+    # a skip after the scan trusted git: `scan incomplete` carries it too
+    plain = roots / "plain"
+    git(tmp_path, "clone", "-q", str(origin), str(plain))
+    other = mod.scan_checkout(plain.resolve(), remote=False)
+    assert "linked_stores" not in other and not other["verdict"].startswith("skipped")
+    git(plain, "config", "alias.co", "checkout")
+    other = mod.scan_checkout(plain.resolve(), remote=False)
+    assert other["verdict"].startswith("skipped") and "linked_stores" not in other
+    assert "NOT archived" not in skipped_row(doc, other)
+    # a record from an older scan has no key: it renders with no warning
+    del rec["linked_stores"]
+    assert "NOT archived" not in skipped_row(doc, rec)
+
+
+def test_an_error_reading_a_skipped_checkouts_git_dir_leaves_the_generic_alternates_warning_not_silence(tmp_path):
+    """Adversary round 65 on PR 27, INFO 1: an unreadable `objects/info`, an unreadable gitfile or a FIFO `commondir` made
+    the warning code read nothing and stay quiet, where the conservative reading (tar fails loudly, but only later) is the
+    generic warning that names the file."""
+    mod, doc = load(), load_doc()
+    origin = make_repo(tmp_path / "origin")
+    roots = tmp_path / "roots"
+    roots.mkdir()
+
+    def warns(rec) -> None:
+        assert rec["alternates"] == [], rec
+        row = skipped_row(doc, rec)
+        assert ALTERNATES_WARNING in row and "`<gitdir>/objects/info/alternates` of the checkout's git directory" in row, row
+
+    fifo = roots / "fifo"
+    git(tmp_path, "clone", "-q", str(origin), str(fifo))
+    os.mkfifo(fifo / ".git" / "commondir")
+    rec = mod.scan_checkout(fifo.resolve(), remote=False)
+    assert rec["verdict"] == mod.SKIP_COMMONDIR, rec["verdict"]
+    warns(rec)
+    if os.geteuid() == 0:
+        return  # root reads a mode 0 file: the permission cases below cannot be made
+    info = roots / "noinfo"
+    git(tmp_path, "clone", "-q", str(origin), str(info))
+    git(info, "config", "alias.co", "checkout")
+    os.chmod(info / ".git" / "objects" / "info", 0)
+    try:
+        rec = mod.scan_checkout(info.resolve(), remote=False)
+        assert rec["verdict"] == "skipped: unrecognised config alias.co", rec["verdict"]
+        warns(rec)
+    finally:
+        os.chmod(info / ".git" / "objects" / "info", 0o755)
+    work = tmp_path / "wt"
+    git(info, "worktree", "add", "-q", "-b", "wt", str(work))
+    os.chmod(work / ".git", 0)
+    try:
+        rec = mod.scan_checkout(work.resolve(), remote=False)
+        assert rec["verdict"].startswith("skipped"), rec["verdict"]
+        warns(rec)
+    finally:
+        os.chmod(work / ".git", 0o644)
+
+
+def test_a_git_dir_with_a_commondir_file_is_skipped_before_any_git_call_and_a_linked_worktree_is_not(tmp_path, monkeypatch):
+    """Cursor security review on PR 27, MEDIUM: `.git/commondir` in a `.git` DIRECTORY names another git directory, and
+    every later `git -C` call, `--fetch` among them (it writes objects), then acted on that store. A linked worktree's
+    `.git` is a gitfile, so it is not this case."""
+    mod, doc = load(), load_doc()
+    roots, work, origin = make_pushed_checkout(tmp_path)  # `work`: the store the planted file will name
+    other = tmp_path / "other"
+    git(tmp_path, "clone", str(origin), str(other))
+    commit_file(other, "o.txt")
+    git(other, "push", "origin", "main")  # origin's tip: its objects are not in `work`, so a --fetch would download them
+    commit_file(work, "w.txt")  # diverged and unpushed: the tip must be compared
+    victim = (work / ".git").resolve()
+    decoy = roots / "decoy"
+    decoy.mkdir()
+    git(decoy, "init", "-b", "main")
+    (decoy / ".git" / "commondir").write_text(str(victim) + "\n")
+    objects_before = sorted(str(p) for p in (victim / "objects").rglob("*"))
+    # a fake `git` that logs every call before running the real one
+    real = shutil.which("git")
+    fakebin, log = tmp_path / "fakebin", tmp_path / "git.log"
+    fakebin.mkdir()
+    (fakebin / "git").write_text(f'#!/bin/sh\necho "$*" >> "{log}"\nexec "{real}" "$@"\n')
+    (fakebin / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fakebin}{os.pathsep}{os.environ['PATH']}")
+    mod._remote_cache.clear()
+    rec = mod.scan_checkout(decoy.resolve(), remote=True, fetch=True)
+    assert rec["verdict"] == mod.SKIP_COMMONDIR == "skipped: git dir redirected (commondir)", rec["verdict"]
+    assert not log.exists(), log.read_text()  # not one git call, `fetch` least of all
+    assert sorted(str(p) for p in (victim / "objects").rglob("*")) == objects_before
+    assert rec["linked_stores"] == [f"commondir -> {victim}"]  # the row says the named store is archived nowhere
+    assert "is NOT archived" in skipped_row(doc, rec)
+    # control: the same `--fetch` scan of the real store downloads origin's tip (so the guard above is what stopped it)
+    mod._remote_cache.clear()
+    real_rec = mod.scan_checkout(work.resolve(), remote=True, fetch=True)
+    assert not real_rec["verdict"].startswith("skipped") and "fetch" in log.read_text(), real_rec["verdict"]
+    # a linked worktree: `.git` is a file, its admin dir holds a `commondir`, and it is scanned as before
+    monkeypatch.undo()
+    wt = tmp_path / "wt"
+    git(work, "worktree", "add", "-q", "-b", "wt", str(wt))
+    assert (wt / ".git").is_file() and (work / ".git" / "worktrees").is_dir()
+    c = mod.scan_checkout(wt.resolve(), remote=False)
+    assert not c["verdict"].startswith("skipped") and "linked_stores" not in c, c["verdict"]
+    # and an empty `commondir` file in a `.git` directory is still a redirect attempt: refused too
+    (decoy / ".git" / "commondir").write_text("")
+    assert mod.scan_checkout(decoy.resolve(), remote=False)["verdict"] == mod.SKIP_COMMONDIR
+
+
+def test_a_stash_whose_reflog_expired_is_captured_from_refs_stash_by_the_generated_row(tmp_path):
+    """Codex pass 65 on PR 27, P2: after `git reflog expire --expire=now --all` `refs/stash` survives with a zero-byte log;
+    the scan counts a stash, and the row's capture command enumerated the reflog only, failed its nonempty-list guard
+    with rc 1 and saved nothing."""
+    mod, doc = load(), load_doc()
+    roots, work, origin = make_pushed_checkout(tmp_path)
+    (work / "a.txt").write_text("stashed edit\n")
+    (work / "new.bin").write_bytes(b"\x00\x01untracked\n")
+    git(work, "stash", "push", "-u", "-m", "kept")
+    git(work, "reflog", "expire", "--expire=now", "--all")
+    assert git(work, "log", "-g", "--format=%gd", "refs/stash") == ""  # the premise: a ref, no entries
+    c = scan_one(mod, roots)
+    assert c["stashes"] == 1 and "stash" in c["flags"], c  # the checkout is listed for its stash alone
+    row = next(r for r in section_3_2(doc.render(doc_scan([c]))).splitlines() if r.startswith("| " + doc.tilde(c["path"])))
+    assert "1 stash" in row
+    spans = re.findall(r"(?<!`)(`+) (.+?) \1(?!`)|(?<!`)`([^`]+)`(?!`)", row)
+    cmd = next(unescape_span(fenced or single) for _f, fenced, single in spans if "log -g --format=%gd refs/stash" in (fenced or single))
+    home = tmp_path / "home"
+    dest = tmp_path / "dest"
+    home.mkdir()
+    dest.mkdir()
+    for shell in SHELLS:
+        run = subprocess.run([shell, "-c", PLAN_PREFIX + cmd.replace("<DEST>", str(dest))], capture_output=True, text=True,
+                             env={**GIT_ENV, "HOME": str(home)})
+        assert run.returncode == 0, (shell, run.stderr)
+        patch = next(dest.rglob("stash.patch")).read_text()
+        assert "stashed edit" in patch and "new.bin" in patch and "GIT binary patch" in patch, (shell, patch)  # the commit's content, untracked file too
+        assert next(dest.rglob("stash-index.patch")).is_file()
+        shutil.rmtree(dest)
+        dest.mkdir()
+    # no stash left at all (`refs/stash` gone): the command still fails loudly, with nothing saved
+    git(work, "stash", "clear")
+    for shell in SHELLS:
+        assert subprocess.run([shell, "-c", PLAN_PREFIX + cmd.replace("<DEST>", str(dest))], capture_output=True,
+                              env={**GIT_ENV, "HOME": str(home)}).returncode != 0
 
 
 def fake_git_flooding_ls_remote(tmp_path: Path, monkeypatch, nbytes: int, sigpipe_proof: bool = False) -> Path:

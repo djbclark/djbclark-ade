@@ -40,13 +40,16 @@ SKIP_ALTERNATES = "skipped: submodule config unrecognised (alternates)"  # same:
 # <path>, <ck>. `${r//[^0-9]/}` (bash and zsh) turns `stash@{3}` into the file name `stash3.patch`. The entries are
 # listed into a variable first, `&&`-guarded: `for r in $(false)` is an empty loop that exits 0, which would read as
 # "every stash saved" (Codex pass 23 on PR 27); an empty list is a failure too, since this row exists only when the
-# scan saw a stash. `$(printf '%s\n' "$l")`, not a bare `$l`: zsh does not word-split a parameter expansion, it
+# scan saw a stash, EXCEPT that an empty reflog beside a live `refs/stash` (`git reflog expire --expire=now --all`) is a
+# stash `stash_count` counts: the loop then runs once over `refs/stash` itself (files `stash.patch` and
+# `stash-index.patch`, no digits to keep), and a missing ref still fails inside it (Codex pass 65 on PR 27, P2).
+# `$(printf '%s\n' "$l")`, not a bare `$l`: zsh does not word-split a parameter expansion, it
 # does split a command substitution.
 # `--no-ext-diff --no-textconv --no-color`: a configured external diff driver, textconv filter or `color.ui=always`
 # would replace the bytes a patch is meant to keep (an attribute-selected textconv turned a changed binary file
 # into an empty patch; Codex pass 30 on PR 27); `--binary` keeps a binary file's content (pass 21)
 DIFF_OPTS = "diff --no-ext-diff --no-textconv --no-color --binary"
-STASH_FMT = ("mkdir -p <DEST>/{} && ( l=$(git -C {} log -g --format=%gd refs/stash) && [ -n \"$l\" ] && for r in $(printf '%s\\n' \"$l\"); do "
+STASH_FMT = ("mkdir -p <DEST>/{} && ( l=$(git -C {} log -g --format=%gd refs/stash) && {{ [ -n \"$l\" ] || l=refs/stash; }} && for r in $(printf '%s\\n' \"$l\"); do "
              "git -C {} stash show -p --no-ext-diff --no-textconv --no-color --binary --include-untracked \"$r\" > <DEST>/{}/stash${{r//[^0-9]/}}.patch "
              "&& git -C {} diff --no-ext-diff --no-textconv --no-color --binary \"$r^1\" \"$r^2\" > <DEST>/{}/stash${{r//[^0-9]/}}-index.patch || exit 1; done )")
 # `stash show -p` is base against the stashed worktree; an entry whose index held another version (`git add`, then
@@ -686,6 +689,17 @@ def render(d):
                 alt_warn = (" **objects/info/alternates points outside this checkout; the store it names is NOT archived: do not "
                             "delete the checkout or that store until its commits are bundled**" + names + ".")
                 alt_need = "; **do not clean up: the alternate object store is in no archive**"
+            # a git directory whose `objects`, `refs` or `packed-refs` is a symlink out (git-new-workdir), or a `.git` directory
+            # whose `commondir` names another git directory: both archives keep the link, not the store at its target
+            # (adversary round 65, LOW 2). The record key is absent from older scans
+            linked = [t for t in (c.get("linked_stores") or []) if isinstance(t, str)][:4]
+            if linked:
+                alt_what += " and the linked object store"
+                alt_warn += (" **the git directory keeps its objects or refs in a store outside this checkout (a symlinked `objects`, "
+                             "`refs` or `packed-refs`, or a `commondir` file); the store the link names is NOT archived, only the link: do "
+                             "not delete the checkout or that store until its commits are bundled**; the links, as `<member> -> <target>`: "
+                             + ", ".join(shcode("{}", t) for t in linked) + ".")
+                alt_need += "; **do not clean up: the linked object store is in no archive**"
             w(f"| {p} | counts unknown{alt_what} ({esc(c['verdict'])}) | re-scan once the cause is fixed, or archive the whole "
               f"directory: {shcode('mkdir -p <DEST>/{} && TAR_OPTIONS= \"$GTAR\" -C {} -cf <DEST>/{} -- {}', ck, parent or '/', f'{ck}/whole.tar', base)}"
               f" (no git command: the scan did not run one there either); {gitdir}"
@@ -854,7 +868,7 @@ def render(d):
             what.append(f"{stashes} stash" + ("es" if stashes > 1 else ""))
             # every stash entry, not stash@{0} alone, each with its untracked files (Codex pass 20, adversary round 26)
             cmd.append(shcode(STASH_FMT, *stash_values(raw_p, ck))
-                       + " (a worktree patch and an index patch per entry; restore with "
+                       + " (a worktree patch and an index patch per entry, `stash.patch` and `stash-index.patch` for `refs/stash` alone when its reflog expired; restore with "
                        + code("git apply --allow-empty --cached <index patch> && git apply --allow-empty <patch>") + ")")
 # `--allow-empty` (git 2.35+): a plain `git stash` of unstaged edits has an index equal to the base, so its index patch
 # is empty and a bare `git apply` of it exits 128, skipping the worktree patch behind the `&&` (adversary round 37)
@@ -946,9 +960,9 @@ def render(d):
       "`GIT_GRAFT_FILE` provokes on every bundle; older gits ignore it). A `skipped` / `scan incomplete` checkout has "
       "no counts (its verdict is in the section 2 table) and is listed with a whole-directory archive: anything "
       "may be in there. A `skipped: submodule config unrecognised (nested submodule)` checkout has a submodule with "
-      "a `.gitmodules`, a gitlink or an untracked repository of its own: an edit or commit in the inner worktree is in no per-submodule artifact, so only the whole-directory "
+      "a `.gitmodules`, a gitlink, an untracked repository or a repository at a skip-worktree or assume-unchanged path of its own: an edit or commit in the inner worktree is in no per-submodule artifact, so only the whole-directory "
       "archive holds it. One ending `(alternates)` has a module whose objects live in another store that no archive "
-      "here holds, and any other `skipped` or `scan incomplete` row of a checkout whose own `objects/info/alternates` is not empty says the same: the row says so and refuses a cleanup until those commits are bundled. A checkout flagged `origin unreachable` is "
+      "here holds, and any other `skipped` or `scan incomplete` row of a checkout whose own `objects/info/alternates` is not empty, whose `objects`, `refs` or `packed-refs` is a symlink out, or whose `.git` directory holds a `commondir` says the same: the row says so and refuses a cleanup until those commits are bundled. `skipped: git dir redirected (commondir)` is a `.git` directory whose `commondir` file names another git directory: the scan ran no git there, since every call would act on that directory. A checkout flagged `origin unreachable` is "
       "always listed, whatever its counts: its local-only count came from stale tracking refs and is "
       "unverified, so a 0 there is not `clean and pushed`. A checkout flagged `submodules not inspected` is "
       "always listed too: no count here covers a submodule's content.\n")

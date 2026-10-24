@@ -21,7 +21,13 @@ config unrecognised <key>`): a config that is unreadable is `(unreadable)`, a sy
 `commondir` is `(commondir)`, one with a nonempty `objects/info/alternates` is `(alternates)` (the record then carries
 `alternates`, the first 3 targets read from those files, and the report warns that the store they name is archived
 nowhere; any other `skipped` or `scan incomplete` record of a checkout whose own `objects/info/alternates` is not empty carries
-`alternates` too, read without running git, and gets the same warning),
+`alternates` too, read without running git, and gets the same warning; so does one whose own `objects`, `refs` or `packed-refs`
+is a symlink to a store outside the checkout, or whose `.git` directory holds a `commondir`: the record then carries
+`linked_stores`, each `<member> -> <target>`, since `whole.tar` and the git-dir archive keep the link, not the store, and an
+error reading any of those files leaves `alternates` empty, which is the same warning without the targets),
+a top-level checkout whose `.git` DIRECTORY holds a `commondir` file (a linked worktree's `.git` is a gitfile, so it is
+not affected) is `skipped: git dir redirected (commondir)` before any git call: every later call, `--fetch` among
+them, would act on the git directory the file names, outside the scanned tree,
 a submodule whose `.git` is a directory or a gitfile naming a git dir the walk did not vet (outside
 `modules/`, or in a pruned `objects/`) is `(gitdir outside modules)`, a gitfile that is not one line of
 `gitdir: <path>` is `(gitdir unreadable)`, a `.gitmodules` path that is not an index gitlink but has a `.git`
@@ -30,7 +36,7 @@ or submodule path holds a control character, a space, a zero-width, joiner, fill
 character, a non-UTF-8 byte or (a path) a quote, is `(gitmodules path unusual)`,
 a submodule path with a symlink component is `(symlink)`, a submodule directory holding files but no `.git` is
 `(submodule has files but no .git)`, a module whose `core.worktree` does not resolve to the submodule's own checkout is
-`(core.worktree outside)`, a submodule that has a `.gitmodules`, a gitlink or an untracked repository of its own is `(nested submodule)` (an
+`(core.worktree outside)`, a submodule that has a `.gitmodules`, a gitlink or an untracked repository of its own (one at a skip-worktree or assume-unchanged path included: `index_hidden_repositories`, the walk the top level runs) is `(nested submodule)` (an
 edit or commit in the inner worktree is in no per-submodule artifact: the whole-directory archive is the way out), and an entry of a module git dir that differs from `HEAD`, `config`,
 `config.worktree` or `commondir` only in letter case, or that the file system opens as one of those names, is
 `(unrecognised entry)`: nothing is trusted that git would read elsewhere. The record carries `submodules_vetted`,
@@ -207,6 +213,7 @@ SKIP_NO_WORKTREE = "skipped: no work tree"
 SUBMODULES_FLAG = "submodules not inspected"
 SKIP_HEAD_UNREADABLE = "skipped: HEAD unreadable"
 SKIP_GIT_SYMLINK = "skipped: .git is a symlink"
+SKIP_COMMONDIR = "skipped: git dir redirected (commondir)"
 MAX_TIPS = 2000  # ls-remote tips passed as `--not` arguments (argv size); extra tips only overcount
 LS_REMOTE_MAX_BYTES = 16 * 1024 * 1024  # what `ls-remote` may print before the answer is refused (a few hundred thousand refs)
 MAX_BRANCH_COUNTS = 100  # `rev-list --count` calls for the per-branch report; the rest are only summed
@@ -749,40 +756,69 @@ def alternates_targets(common: Path | None) -> list[str]:
     return found
 
 
-def top_alternates(path: Path) -> list[str] | None:
-    """None when the checkout's own common git dir has no nonempty `objects/info/alternates`, else the first
-    MAX_ALTERNATES_SHOWN targets (empty: the file is nonempty but unreadable, too big or only comments). Runs no git: the
-    common dir is found by reading `.git` (a directory, or a one-line gitfile whose git dir may hold a `commondir`), so
-    it also works for a checkout the scan refused before it trusted any git call. A `.git` symlink is not followed
-    (`skipped: .git is a symlink` has the whole-directory row for it). A store such a checkout borrows from is archived
-    by neither `whole.tar` nor the git-dir archive (a `bundle create` reads through it, so a bundle row is not affected)."""
+LINKED_STORE_MEMBERS = ("objects", "refs", "packed-refs")  # a symlink at any of these keeps the history at the link's target
+
+
+def git_dir_redirected(path: Path) -> bool:
+    """True when `<path>/.git` is a directory holding a `commondir` entry (any kind, a FIFO or a dangling link included):
+    git then reads the objects, refs and config of the git directory it names, wherever that is (Cursor security review
+    on PR 27, MEDIUM). A linked worktree's `.git` is a gitfile, never a directory, so it is not affected."""
+    try:
+        if not stat.S_ISDIR(os.lstat(path / ".git").st_mode):
+            return False
+    except OSError:
+        return False
+    return os.path.lexists(path / ".git" / "commondir")
+
+
+def top_stores(path: Path) -> tuple[list[str] | None, list[str]]:
+    """(alternates, linked_stores) of the checkout's own common git dir. `alternates`: None when it has no nonempty
+    `objects/info/alternates`, else the first MAX_ALTERNATES_SHOWN targets (empty: the file is nonempty but unreadable, too
+    big or only comments, or ANY error reading what leads to it was raised after `.git` was found: the generic warning
+    stands, never silence; adversary round 65, INFO 1). `linked_stores`: `<member> -> <resolved target>` for each of
+    `objects`, `refs` and `packed-refs` of the common dir that is a symlink (git-new-workdir, objects moved to another
+    disk: `whole.tar` and the git-dir archive keep the link only), plus `commondir -> <dir>` for a `.git` directory whose
+    `commondir` names another git dir (adversary round 65, LOW 2). Runs no git: the common dir is found by reading `.git`
+    (a directory, or a one-line gitfile whose git dir may hold a `commondir`), so it also works for a checkout the scan
+    refused before it trusted any git call. A `.git` symlink is not followed (`skipped: .git is a symlink` has the
+    whole-directory row for it). A store such a checkout borrows from is archived by neither `whole.tar` nor the git-dir
+    archive (a `bundle create` reads through it, so a bundle row is not affected)."""
     dotgit = path / ".git"
     try:
         mode = os.lstat(dotgit).st_mode
+    except OSError:
+        return None, []  # no `.git` entry at all: nothing was found
+    linked: list[str] = []
+    try:
         if stat.S_ISREG(mode):
             raw = read_regular_file(dotgit, 64 * 1024)
             rel = raw[len(b"gitdir: "):].rstrip(b"\r\n")
             if not raw.startswith(b"gitdir: ") or not rel or b"\n" in rel or b"\0" in rel:
-                return None
+                return None, []  # git does not take this for a repository either
             gitdir = Path(os.fsdecode(os.path.realpath(os.path.join(os.fsencode(path), rel))))
         elif stat.S_ISDIR(mode):
             gitdir = dotgit
         else:
-            return None
+            return None, []
         try:
             link = read_regular_file(gitdir / "commondir", 64 * 1024).rstrip(b"\r\n")
             common = Path(os.fsdecode(os.path.realpath(os.path.join(os.fsencode(gitdir), link)))) if link else gitdir
+            if stat.S_ISDIR(mode) and common != Path(os.path.realpath(gitdir)):
+                linked.append(f"commondir -> {common}")
         except FileNotFoundError:
             common = gitdir
+        for member in LINKED_STORE_MEMBERS:
+            if os.path.islink(common / member):
+                linked.append(f"{member} -> {os.path.realpath(common / member)}")
         alternates = common / "objects" / "info" / "alternates"
-        if os.path.getsize(alternates) == 0:  # what the module check asks: a symlink is followed, as git does
-            return None
+        try:
+            if os.path.getsize(alternates) == 0:  # what the module check asks: a symlink is followed, as git does
+                return None, linked
+        except (FileNotFoundError, NotADirectoryError):
+            return None, linked
+        return alternates_lines(read_regular_file(alternates, 64 * 1024))[:MAX_ALTERNATES_SHOWN], linked
     except (OSError, ValueError):
-        return None
-    try:
-        return alternates_lines(read_regular_file(alternates, 64 * 1024))[:MAX_ALTERNATES_SHOWN]
-    except (OSError, ValueError):
-        return []
+        return [], linked
 
 
 def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str | None, list[str]]:
@@ -991,8 +1027,16 @@ def submodule_config_check(path: Path, common: Path | None) -> tuple[bool, str |
             return True, "(nested submodule)", []
         rc, nested, _ = embedded_repositories(path / sub)
         if rc != 0:
-            return True, "(unreadable)", []
+            return True, "(unreadable or timed out)", []  # a timeout of the walk is rc 124
         if nested:
+            return True, "(nested submodule)", []
+        # a repository at a skip-worktree or assume-unchanged path: `ls-files --others` lists nothing for a directory that
+        # replaces one, so the walk above never saw it (the top level walks those directories itself; adversary round 65,
+        # MEDIUM; Codex pass 65, P1)
+        _, hidden_names, _, failure = index_hidden_repositories(path / sub)
+        if failure:
+            return True, "(unreadable or timed out)", []
+        if hidden_names:
             return True, "(nested submodule)", []
         subs.append(sub)  # a real checked-out submodule: `.git` names a git dir the walk vetted
     return True, None, subs
@@ -1042,6 +1086,40 @@ def embedded_repositories(path: Path, within: list[str] | None = None) -> tuple[
     pointers = [n for n in names if os.path.islink(os.path.join(path, n.rstrip("/"), ".git"))
                 or not os.path.isdir(os.path.join(path, n.rstrip("/"), ".git"))]
     return 0, names, pointers
+
+
+def index_hidden_repositories(path: Path) -> tuple[int, list[str], list[str], tuple[str, int] | None]:
+    """(index-hidden paths counted, names, pointers, failure) of a checkout: the repositories at a tracked path that is
+    marked assume-unchanged (`ls-files -v` tag in lowercase) or skip-worktree (`S`) and is replaced by a directory. Those
+    are invisible to `status` and to `embedded_repositories(path)`: `ls-files --others` lists nothing for a directory that
+    is a repository itself (its `.git` makes it opaque), so the repository is looked for under each hidden directory on
+    its own, and the hidden directory itself counts when it has a `.git` (Codex pass 55 on PR 27, P2). A skip-worktree
+    path with no file is a sparse checkout's ordinary state (adversary round 38) and is not counted. Names and pointers
+    follow `embedded_repositories`. `failure` is None, or the (call, rc) that makes any answer unknown. One walk for the
+    top level and for every submodule (adversary round 65, MEDIUM)."""
+    # decoded with surrogateescape: a name that is not UTF-8 then round-trips to the same bytes in the `lexists`
+    # test below, where `replace` would test a different path and drop an existing entry (Codex pass 38)
+    rc, out = git(path, "ls-files", "-z", "-v", errors="surrogateescape")
+    if rc != 0:
+        return 0, [], [], ("ls-files -v", rc)
+    hidden_paths = [e[2:] for e in out.split("\0") if len(e) > 2 and e[1] == " "
+                    and (e[0].islower() or (e[0] == "S" and os.path.lexists(os.path.join(path, e[2:]))))]
+    hidden_dirs = [h for h in hidden_paths
+                   if os.path.isdir(os.path.join(path, h)) and not os.path.islink(os.path.join(path, h))]
+    if not hidden_dirs:
+        return len(hidden_paths), [], [], None
+    if len(hidden_dirs) > MAX_EMBEDDED:
+        return len(hidden_paths), [], [], (f"index-hidden directories ({len(hidden_dirs)} > {MAX_EMBEDDED})", 0)
+    rc, names, pointers = embedded_repositories(path, hidden_dirs)
+    if rc != 0:
+        return len(hidden_paths), [], [], ("ls-files --others under index-hidden paths (a failed call, or git printed a warning)", rc)
+    for h in hidden_dirs:
+        dot_git = os.path.join(path, h, ".git")
+        if os.path.lexists(dot_git):
+            names.append(h + "/")
+            if os.path.islink(dot_git) or not os.path.isdir(dot_git):
+                pointers.append(h + "/")
+    return len(hidden_paths), list(dict.fromkeys(names)), list(dict.fromkeys(pointers)), None
 
 
 def stash_count(path: Path, common: Path | None) -> int | None:
@@ -1394,21 +1472,26 @@ def local_only_count(path: Path, revs: list[str], tips: list[str],
 
 
 def scan_checkout(path: Path, remote: bool, fetch: bool = False) -> dict:
-    """`scan_record` plus the alternates warning: a checkout whose own `objects/info/alternates` is not empty keeps
-    commits in a store that neither `whole.tar` nor the git-dir archive holds, so every `skipped` or `scan incomplete`
-    row (the ones that offer only those two) carries `alternates` (adversary round 64, LOW 3). A bundle row is not
-    affected: `bundle create` reads through alternates. Ordinary records are left alone."""
+    """`scan_record` plus the store warnings: a checkout whose own `objects/info/alternates` is not empty keeps commits in
+    a store that neither `whole.tar` nor the git-dir archive holds, so every `skipped` or `scan incomplete` row (the ones
+    that offer only those two) carries `alternates` (adversary round 64, LOW 3); one whose `objects`, `refs` or
+    `packed-refs` is a symlink out, or whose `.git` directory holds a `commondir`, carries `linked_stores` (round 65, LOW 2).
+    A bundle row is not affected: `bundle create` reads through both. Ordinary records are left alone."""
     rec = scan_record(path, remote, fetch)
     if rec["verdict"].startswith(("skipped", INCOMPLETE_PREFIX)):
-        shown = top_alternates(path)
+        shown, linked = top_stores(path)
         if shown is not None:
             rec["alternates"] = [*shown, *rec.get("alternates", [])][:MAX_ALTERNATES_SHOWN]
+        if linked:
+            rec["linked_stores"] = linked
     return rec
 
 
 def scan_record(path: Path, remote: bool, fetch: bool = False) -> dict:
     if (path / ".git").is_symlink():  # before any git call: git would read the link's target, a git dir elsewhere
         return skipped_record(path, SKIP_GIT_SYMLINK)
+    if git_dir_redirected(path):  # likewise: a `commondir` makes every call, `fetch` included, act on the git dir it names
+        return skipped_record(path, SKIP_COMMONDIR)
     keys = unsafe_config(path)  # before any other git call: reading config runs nothing
     if keys is None:
         return skipped_record(path, SKIP_UNREADABLE)
@@ -1509,36 +1592,15 @@ def scan_record(path: Path, remote: bool, fetch: bool = False) -> dict:
     # a tracked path marked assume-unchanged (`ls-files -v` tag in lowercase) or skip-worktree (`S`) is invisible to
     # `status`, so its edits are in no count above: it is counted and captured on its own (Codex pass 32 on PR 27).
     # A skip-worktree path with no file is a sparse checkout's ordinary state (adversary round 38): nothing to
-    # capture; an assume-unchanged path that is gone counts, since `status` hides that deletion too
-    # decoded with surrogateescape: a name that is not UTF-8 then round-trips to the same bytes in the `lexists`
-    # test below, where `replace` would test a different path and drop an existing entry (Codex pass 38)
-    rc, out = git(path, "ls-files", "-z", "-v", errors="surrogateescape")
-    if rc != 0:
-        return incomplete_record(path, "ls-files -v", rc)
-    hidden_paths = [e[2:] for e in out.split("\0") if len(e) > 2 and e[1] == " "
-                    and (e[0].islower() or (e[0] == "S" and os.path.lexists(os.path.join(path, e[2:]))))]
-    index_hidden = len(hidden_paths)
-    # a hidden tracked path replaced by a directory: `ls-files --others` lists nothing for a directory that is a
-    # repository itself (its `.git` makes it opaque), and `status` shows nothing there either, so the repository is
-    # looked for under each hidden directory on its own (Codex pass 55 on PR 27, P2)
-    hidden_dirs = [h for h in hidden_paths
-                   if os.path.isdir(os.path.join(path, h)) and not os.path.islink(os.path.join(path, h))]
-    if hidden_dirs:
-        if len(hidden_dirs) > MAX_EMBEDDED:
-            return incomplete_record(path, f"index-hidden directories ({len(hidden_dirs)} > {MAX_EMBEDDED})", 0)
-        rc, more_names, more_pointers = embedded_repositories(path, hidden_dirs)
-        if rc != 0:
-            return incomplete_record(path, "ls-files --others under index-hidden paths (a failed call, or git printed a warning)", rc)
-        for h in hidden_dirs:
-            dot_git = os.path.join(path, h, ".git")
-            if os.path.lexists(dot_git):
-                more_names.append(h + "/")
-                if os.path.islink(dot_git) or not os.path.isdir(dot_git):
-                    more_pointers.append(h + "/")
-        embedded = embedded + [n for n in dict.fromkeys(more_names) if n not in embedded]
-        embedded_pointers = embedded_pointers + [n for n in dict.fromkeys(more_pointers) if n not in embedded_pointers]
-        if len(embedded) > MAX_EMBEDDED:
-            return incomplete_record(path, f"embedded repositories ({len(embedded)} > {MAX_EMBEDDED})", 0)
+    # capture; an assume-unchanged path that is gone counts, since `status` hides that deletion too. A hidden path
+    # replaced by a repository is looked for by `index_hidden_repositories`, the same walk each submodule gets
+    index_hidden, more_names, more_pointers, failure = index_hidden_repositories(path)
+    if failure:
+        return incomplete_record(path, *failure)
+    embedded = embedded + [n for n in more_names if n not in embedded]
+    embedded_pointers = embedded_pointers + [n for n in more_pointers if n not in embedded_pointers]
+    if len(embedded) > MAX_EMBEDDED:
+        return incomplete_record(path, f"embedded repositories ({len(embedded)} > {MAX_EMBEDDED})", 0)
     rc, up = git(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     upstream = up.strip() if rc == 0 else None
     unpushed = None

@@ -307,7 +307,10 @@ tampered state file can do is still a finding (section 6 item 6).
    nothing, and the generated report says (limit 10) that `clean and pushed` is not proof of possession. The size
    of the advertisement is bounded too (2026-10-23): `ls-remote` is read in chunks, and more than 16 MiB (`LS_REMOTE_MAX_BYTES`)
    kills it and reads as an origin that did not answer (`origin unreachable`), so a hostile origin cannot grow the
-   scan's memory without limit; `--fetch` still has only the 120 s time bound.
+   scan's memory without limit; `--fetch` still has only the 120 s time bound. A top-level `.git` directory that holds a
+   `commondir` file is `skipped: git dir redirected (commondir)` before any git call (2026-10-23, Cursor security review on
+   PR 27), so no later call, `--fetch` included, can write objects into the git directory it names; a linked worktree's
+   `.git` is a gitfile and is scanned as before.
 
 ## 6. What a reviewer should check on a PR
 
