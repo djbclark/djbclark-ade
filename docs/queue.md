@@ -1521,7 +1521,7 @@ gateway agent with `relay.py`. Design: `~/.local/state/bigteam/loadgate-followup
    microsecond window before the handler). FIXED e494801 (2026-10-23, each with a test a mutant fails): R1-L5e (`This session is too long to
    reload safely` with rc 1, empty stdout and that single line is "not sent: that Hermes thread is too large to reload", from
    `assert_resume_safe` running before any write in `hermes_cli/oneshot.py`); R3-L3 (RELAY_HOPS and RELAY_SENDER are ignored when the
-   nearest agent ancestor, read from `ps`, is another agent than Hermes; an unrecognised tree still counts them, so loop protection
+   nearest agent ancestor, read from `ps`, is another agent than Hermes (superseded 2026-10-24: ignored when another agent sits between the relay and `RELAY_HOP_PARENT`); an unrecognised tree still counts them, so loop protection
    fails closed: NOT TRUE for the real Hermes process, see the 2026-10-24 repair below); R3-L6b (a prune that loses the race still removes the `.err`), R3-L6c (lock files idle 7 days are pruned if unheld; the
    lock is re-opened when its inode is no longer the path), R3-L6d (the child's pid is written into the lock file and named in the refusal),
    R3-L6e (a sid too long for a file name, or a symlinked lock, is a clean "not sent"); R3-L8e (`reply_file` in the `--json` result of a

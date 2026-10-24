@@ -64,8 +64,9 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
                text prefixed `[relay from <name>] `, stdin closed, in its own process group. The child gets the
                caller's environment without its session, Paseo, ACP-approval and Hermes routing variables, plus
                RELAY_HOPS and RELAY_SENDER (a relay made inside that turn is tagged as Hermes, not as the original
-               caller; only nested `hermes -z` turns are counted, a fourth is refused; both variables are ignored by a
-               process whose nearest agent ancestor is another agent, such as a Claude session started in the turn). Hermes's reply goes to a
+               caller; only nested `hermes -z` turns are counted, a fourth is refused; both variables are ignored when
+               another agent sits between the relay and RELAY_HOP_PARENT, the pid of the relay that started the turn, such as a
+               Claude session started in the turn). Hermes's reply goes to a
                0600 file under RELAY_HERMES_DIR (default ~/.local/state/session-finder/relay-hermes, pruned after 7
                days) and is printed here as untrusted data: control, format and escape characters stripped, at most
                4000 characters (a cut reply's cleaned text is kept in the file, whose path is printed).
