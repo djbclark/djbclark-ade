@@ -1705,12 +1705,14 @@ OPEN (adversary fix text kept; not implemented, 2026-10-24):
    flock fails). If such a pid comes before any other agent, the relay is inside a relayed turn. The hop count is the number of such ancestors, and the sender is
    `hermes <sid[-8:]>` with the sid taken from the lock file name. This also removes the forgery residual of L-C (a process inside the turn can unset `RELAY_HOPS`
    or set `RELAY_HOP_PARENT` to a pid outside its ancestry; the L-C fix only stops a forged *name*). The `RELAY_HOPS` env markers can then become a cross-check or go.
-2. **L-D, the pane lock's hash can be missed while the holder releases (LOW).** `_flock` truncates the file in `finally` before `os.close` and `pane_sending` reads it
+2. **L-D, the pane lock's hash can be missed while the holder releases (LOW). FIXED 2026-10-24 (#49):** `pane_sending` returns None for an empty file after its retries and `route_pane` asks for the lock again (`PANE_LOCK_ASKS`, 5 times) before it skips; test `test_a_holder_that_releases_while_its_hash_is_unreadable_is_asked_again_not_skipped_to_the_socket`, mutant checked. Original finding: `_flock` truncates the file in `finally` before `os.close` and `pane_sending` reads it
    five times over 100 ms. If B's non-blocking flock fails while A holds the lock, and A then truncates and closes, B reads an empty file, `pane_sending` returns False,
    B returns "skip" and goes to `route_socket`, which has no check for an unproven entry: A's text, already typed and recorded, arrives twice. The same happens if A
    has not written its hash within 100 ms of taking the lock (a loaded machine). Fix: when `pane_sending` sees an empty file after its retries, try the pane lock once
    more (blocking briefly or polling). If the lock is now free, take the normal path under it, where `pane_send`'s P5 check sees A's entry; do not skip to the socket.
    (B's "stop ... do not resend" while A's own routes all fail tells B's caller not to resend something A's caller was told was not sent: acceptable, the same text.)
 3. **L-F, the CHANGELOG lines for the queued lows carry no PR number** (code-review rule 10): fixed 2026-10-24, the lines end with PR 40.
-4. Accepted residual (L-A, related): `permit allow` picks the first card whose `id === reqId || id.startsWith(reqId)` in list order, so a request id that is a proper
+4. Accepted residual (L-D, adversary B2, 2026-10-24): a holder that proved delivery (`forget`) or a non-claude pane leaves no entry, so a relay of the same text that wins the
+   lock inside the release window types it a second time (before L-D a non-claude pane ended "not sent" there). It is what a relay arriving just after the holder does anyway.
+5. Accepted residual (L-A, related): `permit allow` picks the first card whose `id === reqId || id.startsWith(reqId)` in list order, so a request id that is a proper
    prefix of an earlier card's id would answer that other card; with UUID or `permission-<uuid>` ids it cannot happen.
