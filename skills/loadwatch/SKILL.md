@@ -57,9 +57,12 @@ Chain: `load-spike-monitor-t` (`/baton load-spike-monitor-t`). It is a side-work
    app updates leave this machine's daemon alone). You come back idle, and the next `paseo send` (the next
    incident) resumes you, so there is nothing to re-register. Keep state on disk and re-derive it on every
    wake. A line sent while the daemon is down is lost unless the gap is short (`send_to` retries a
-   `paseo send` that fails naming DAEMON_UNREACHABLE, CONNECTION_LOST, NOT_READY or DAEMON_NOT_RUNNING twice, 5 s apart,
-   inside 30 s, 2026-10-23; the relay channel and other failures get one attempt; Hermes still gets the
-   ping), so after any restart you see, read `load-watch incidents -n 5` for what you missed. Never run
+   `paseo send` whose `--json` error code is exactly DAEMON_UNREACHABLE, DAEMON_CONNECTION_LOST, DAEMON_NOT_READY or
+   DAEMON_NOT_RUNNING twice, 5 s apart, inside 30 s, 2026-10-23; once one send has given up, the other sends of
+   that sample make one attempt each; the relay channel and other failures get one attempt; Hermes still gets the
+   ping), so after any restart you see, read `load-watch incidents -n 5` for what you missed. A retry after
+   DAEMON_CONNECTION_LOST (or a retry killed by its timeout) can deliver the line twice, and a timed-out retry can
+   leave `last_fail` stamped though the line arrived: investigate idempotently from `incidents.jsonl`. Never run
    `paseo restart` yourself while other agents are working.
 
 ## 2. Is the load abnormal?
