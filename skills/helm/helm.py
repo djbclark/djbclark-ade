@@ -142,6 +142,12 @@ def classify(s, st):
                       exit=(la.get("result") or {}).get("exit"))
         else:
             it.update(kind="working", fp="")
+    elif s.get("host") == "paseo" and not s.get("sid") and s["status"] == "blocked":
+        # a Paseo agent with no Claude transcript waiting on a permission or question card (fleet.py reads `paseo permit ls`):
+        # no terminal for helm to read or press keys in, so the item only points at the Paseo UI
+        pend = s.get("paseo_pending") or ""
+        it.update(kind="permission", fp="paseo:" + hashlib.sha1(pend.encode()).hexdigest()[:12], tool="paseo", detail=pend,
+                  paseo=True, reachable=False)
     elif s.get("host") == "hermes-gw" or (s.get("host") == "paseo" and not s.get("sid")):
         # a Hermes chat, or a Paseo agent with no Claude transcript (fleet.py lists them all): not a terminal, nothing to relay by keys
         it.update(kind="remote", fp="")
@@ -333,6 +339,9 @@ def render(it, full=False):
         how = (f"helm.py answer {it['id']} --fp {it['fp']} <n> | --text \"...\"" if it["reachable"]
                else "no channel: answer in the pane")
         out.append(f"  answer: {how}")
+    elif k == "permission" and it.get("paseo"):
+        out.append(f"  PASEO AGENT WAITS ON A CARD: {it.get('detail', '')}")
+        out.append(f"  answer: in the Paseo UI, or `paseo permit allow|deny {it['id']}` (helm has no terminal to press keys in)")
     elif k in ("plan", "permission", "blocked"):
         label = {"plan": "PLAN APPROVAL", "permission": f"PERMISSION ({it.get('tool')})", "blocked": "BLOCKED"}[k]
         out.append(f"  {label}: {it.get('detail', 'waiting on a prompt helm cannot parse')}")
@@ -583,6 +592,8 @@ def cmd_keys(a, state):
     s, it = find(a.id, state)
     if it["kind"] not in ("question", "plan", "permission", "blocked"):
         sys.exit(f"helm: {it['id']} is {it['kind']}, not waiting on a prompt; nothing sent")
+    if it.get("paseo"):
+        sys.exit(f"helm: {it['id']} is a Paseo agent: no terminal to press keys in; answer in the Paseo UI or `paseo permit allow|deny {it['id']}`")
     if not s.get("chan"):
         sys.exit(f"helm: no channel to {it['id']}")
     send_keys(s, *a.key)

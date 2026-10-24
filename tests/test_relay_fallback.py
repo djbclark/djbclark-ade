@@ -739,14 +739,42 @@ class TestHardStops(Harness):
             self.assertIn("cannot steer", err, agent)
             self.assertIn("interrupt and replace its running turn", err, agent)
 
-    def test_working_paseo_agent_that_can_steer_is_sent_with_steer(self) -> None:
+    def test_working_paseo_claude_agent_is_sent_with_steer(self) -> None:
         relay.paseo_gate = lambda s: None
         sent: list[str] = []
         relay.send_paseo = lambda s, text, wait: sent.append(s["agent"]) or "accepted"
-        for agent in ("claude", "codex", "omp", "opencode", "pi"):
+        rc, _, err = self.run_main(pasess(agent="claude", status="working"))
+        self.assertEqual((rc, sent), (0, ["claude"]), err)
+
+    def test_working_codex_omp_opencode_pi_agent_needs_steer_because_the_provider_can_decline_it(self) -> None:
+        """L4: Paseo replaces the running turn when the provider declines a steer (a review turn, an error); relay
+        cannot see that beforehand, so only an explicit --steer sends to a working agent of those providers."""
+        relay.paseo_gate = lambda s: None
+        sent: list[str] = []
+        relay.send_paseo = lambda s, text, wait: sent.append(s["agent"]) or "accepted"
+        for agent in ("codex", "omp", "opencode", "pi"):
             rc, _, err = self.run_main(pasess(agent=agent, status="working"))
+            self.assertEqual(rc, 1, agent)
+            self.assertIn("replaces a running turn", err, agent)
+            self.assertIn("--steer", err, agent)
+        self.assertEqual(sent, [])
+        for agent in ("codex", "omp", "opencode", "pi"):
+            rc, _, err = self.run_main(pasess(agent=agent, status="working"), "--steer")
             self.assertEqual(rc, 0, (agent, err))
-        self.assertEqual(sent, ["claude", "codex", "omp", "opencode", "pi"])
+        self.assertEqual(sent, ["codex", "omp", "opencode", "pi"])
+
+    def test_steer_does_not_make_a_provider_without_steer_safe(self) -> None:
+        relay.paseo_gate = lambda s: None
+        relay.send_paseo = lambda s, text, wait: self.calls.append("send") or "accepted"
+        rc, _, err = self.run_main(pasess(agent="cline", status="working"), "--steer")
+        self.assertEqual((rc, self.calls), (1, []))
+        self.assertIn("cannot steer", err)
+
+    def test_idle_codex_agent_needs_no_steer_flag(self) -> None:
+        relay.paseo_gate = lambda s: None
+        relay.send_paseo = lambda s, text, wait: self.calls.append("send") or "accepted"
+        rc, _, err = self.run_main(pasess(agent="codex", status="idle"))
+        self.assertEqual((rc, self.calls), (0, ["send"]), err)
 
     def test_idle_paseo_agent_of_any_provider_is_sent(self) -> None:
         relay.paseo_gate = lambda s: None

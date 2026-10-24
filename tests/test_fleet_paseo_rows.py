@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -28,7 +29,8 @@ FAKE = """#!/bin/bash
 echo "$*" >> "$FAKE_LOG"
 [ -n "$FAKE_SLEEP" ] && exec sleep "$FAKE_SLEEP"
 [ -n "$FAKE_RC" ] && exit "$FAKE_RC"
-case " $* " in *" -a "*) cat "$FAKE_ALL" ;; *) cat "$FAKE_LIVE" ;; esac
+case " $* " in *" permit "*) cat "$FAKE_PERMITS" ;; *" -a "*) cat "$FAKE_ALL" ;; *) cat "$FAKE_LIVE" ;; esac
+exit "${FAKE_RC_AFTER:-0}"
 """
 
 
@@ -49,17 +51,19 @@ def paseo(tmp_path, monkeypatch):
     cli.write_text(FAKE)
     cli.chmod(0o755)
     log = tmp_path / "log"
-    live, everything = tmp_path / "live.json", tmp_path / "all.json"
+    live, everything, permits = tmp_path / "live.json", tmp_path / "all.json", tmp_path / "permits.json"
     live.write_text(json.dumps(LIVE))
     everything.write_text(json.dumps(LIVE + ARCHIVED))
-    for k in ("FAKE_SLEEP", "FAKE_RC", "PASEO_AGENT_ID"):
+    permits.write_text("[]")
+    for k in ("FAKE_SLEEP", "FAKE_RC", "FAKE_RC_AFTER", "PASEO_AGENT_ID"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("PASEO_CLI", str(cli))
     monkeypatch.setenv("FAKE_LOG", str(log))
     monkeypatch.setenv("FAKE_LIVE", str(live))
     monkeypatch.setenv("FAKE_ALL", str(everything))
+    monkeypatch.setenv("FAKE_PERMITS", str(permits))
     monkeypatch.setattr(fleet, "_paseo_hosting", lambda anc: set())    # hermetic: the runner's ancestry is not under test
-    return type("P", (), {"log": log, "live": live, "all": everything})
+    return type("P", (), {"log": log, "live": live, "all": everything, "permits": permits})
 
 
 def rows(have=(), archived=False):
@@ -78,7 +82,7 @@ def test_every_provider_is_listed_as_a_paseo_row(paseo):
 
 def test_argv_is_a_list_with_global_background_json(paseo):
     rows()
-    assert paseo.log.read_text().splitlines() == ["ls -g --json --background"]
+    assert paseo.log.read_text().splitlines() == ["ls -g --json --background", "permit ls --json"]
 
 
 def test_archived_agents_only_with_the_all_mode_and_marked_ended(paseo):
@@ -177,3 +181,109 @@ def test_helm_keeps_a_listed_paseo_agent_out_of_the_attention_queue(paseo):
     assert r["status"] == "idle" and not r["sid"]
     it = helm.classify(r, {})
     assert (it["kind"], it["open"]) == ("remote", False)
+
+
+# ---- the queued lows of 2026-10-23 (paseo-listing adversary) ----
+
+def card(agent_id: str, name: str = "AskUserQuestion", description: str = "1. yes / 2. no") -> dict[str, str]:
+    return {"id": "permission-1", "agentId": agent_id, "agentShortId": agent_id[:7], "name": name, "description": description}
+
+
+def test_helm_keeps_a_claude_on_paseo_agent_in_the_attention_queue(monkeypatch):
+    """L1: a Claude agent Paseo hosts has a transcript (a sid): its question reaches helm like any Claude TUI's."""
+    s = fleet._rec(id="deadbeef", agent="claude", host="paseo", chan=("paseo", CLAUDE), paseo=CLAUDE, sid="s" * 36,
+                   status="blocked", cwd="/x/y")
+    ask = {"questions": [{"question": "Which?", "options": [{"label": "a"}, {"label": "b"}]}]}
+    monkeypatch.setattr(helm, "transcript", lambda sid: Path("t.jsonl"))
+    monkeypatch.setattr(helm, "parse", lambda p: {"last_text": "", "pending": [("toolu_1", "AskUserQuestion", ask)]})
+    it = helm.classify(s, {})
+    assert (it["kind"], it["open"]) == ("question", True)
+
+
+def test_a_slow_cli_is_cut_off_at_the_timeout_even_when_it_would_list_agents(paseo, monkeypatch, tmp_path):
+    """L1: a hung daemon must not stall every fleet.sessions() call: the call is killed, not waited for."""
+    slow = tmp_path / "slow"
+    slow.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(5)\nprint(open({str(paseo.live)!r}).read())\n")
+    slow.chmod(0o755)
+    monkeypatch.setenv("PASEO_CLI", str(slow))
+    monkeypatch.setattr(fleet, "PASEO_LS_TIMEOUT", 0.3)
+    t0 = time.time()
+    assert rows() == []
+    assert time.time() - t0 < 3
+
+
+def test_a_cli_that_prints_a_list_and_exits_nonzero_lists_nothing(paseo, monkeypatch):
+    """L1: the exit code decides, not what reached stdout."""
+    monkeypatch.setenv("FAKE_RC_AFTER", "3")
+    assert rows() == []
+
+
+def test_fleet_all_adds_the_archived_agents_and_the_plain_listing_does_not(paseo, monkeypatch, capsys):
+    """L1: `fleet.py --all` is what puts archived Paseo agents in the listing (as `ended`)."""
+    for name in ("_launched", "_other_herdr", "_proc_scan", "_hermes_gateway", "_claude_sessions"):
+        monkeypatch.setattr(fleet, name, lambda *a, **k: [])
+    monkeypatch.setattr(fleet, "_pane_only", lambda *a: ([], []))
+    monkeypatch.setattr(fleet, "herdr_json", lambda *a: {})
+    monkeypatch.setattr(fleet, "ancestors", lambda: set())
+    monkeypatch.setattr(fleet, "proc_table", lambda: {})
+    monkeypatch.setattr(fleet, "messaging_warning", lambda *a, **k: None)
+    listed = {}
+    for argv in (["fleet.py", "--json"], ["fleet.py", "--all", "--json"]):
+        monkeypatch.setattr(sys, "argv", argv)
+        assert fleet.main() == 0
+        listed[len(argv)] = {s["paseo"]: s["status"] for s in json.loads(capsys.readouterr().out)}
+    assert OLD not in listed[2] and listed[3][OLD] == "ended"
+
+
+def test_a_running_agent_with_a_pending_card_is_blocked_and_the_others_are_not(paseo):
+    """L2: `paseo ls` has no pending-permission field; one `paseo permit ls` names the agents with a card."""
+    paseo.permits.write_text(json.dumps([card(OMP), card(CLINE, "bash", "rm -rf /tmp/x\x1b[31m")]))
+    got = {r["paseo"]: r for r in rows()}
+    assert (got[OMP]["status"], got[OMP]["paseo_state"]) == ("blocked", "running")
+    assert got[OMP]["paseo_pending"] == "AskUserQuestion: 1. yes / 2. no"
+    assert got[CLINE]["status"] == "idle"    # idle agents are not asked about
+    assert got[CLAUDE]["status"] == "working" and "paseo_pending" not in got[CLAUDE]
+    assert "permit ls --json" in paseo.log.read_text().splitlines()
+
+
+def test_the_card_text_is_the_agents_own_so_control_characters_are_stripped(paseo):
+    paseo.permits.write_text(json.dumps([card(OMP, "bash", "rm -rf /tmp/x\x1b[31m\n\x07ok")]))
+    assert fleet._paseo_waiting() == {OMP: "bash: rm -rf /tmp/x [31m ok"}
+
+
+def test_a_failed_card_listing_leaves_the_rows_as_they_were(paseo, monkeypatch):
+    paseo.permits.write_text("garbage")
+    assert {r["paseo"]: r["status"] for r in rows()} == {CLINE: "idle", CLAUDE: "working", OMP: "working"}
+    paseo.live.write_text(json.dumps([agent(CLINE, "cline")]))    # nothing running: no card listing is asked for
+    paseo.log.write_text("")
+    rows()
+    assert paseo.log.read_text().splitlines() == ["ls -g --json --background"]
+
+
+def test_helm_shows_a_blocked_paseo_agent_as_an_open_permission_item_it_cannot_press_keys_for(paseo):
+    paseo.permits.write_text(json.dumps([card(OMP)]))
+    r = next(r for r in rows() if r["paseo"] == OMP)
+    it = helm.classify(r, {})
+    assert (it["kind"], it["open"], it["reachable"]) == ("permission", True, False)
+    text = helm.render(it)
+    assert "AskUserQuestion: 1. yes / 2. no" in text and "paseo permit" in text and "helm.py keys" not in text
+    with pytest.raises(SystemExit) as e:
+        helm.cmd_keys(type("A", (), {"id": it["id"], "key": ["1"]}), {})
+
+
+def test_relay_refuses_a_paseo_agent_with_a_pending_card_and_names_the_paseo_ui(paseo):
+    import relay  # noqa: PLC0415
+    paseo.permits.write_text(json.dumps([card(OMP)]))
+    r = next(r for r in rows() if r["paseo"] == OMP)
+    why = relay.hard_stop(r)
+    assert why and "Paseo UI" in why and "helm.py" not in why
+
+
+def test_a_paseo_agent_with_no_claude_row_is_not_found_by_its_workspace_title(paseo):
+    """L3: titles come from the first prompt ("/baton", "say hi"); an id or a Paseo id names the agent, a title does not."""
+    import relay  # noqa: PLC0415
+    ss = rows() + [fleet._rec(id="cafe0001", agent="claude", name="Dann", sid="s" * 36)]    # a registry session called Dann too
+    assert [s["id"] for s in relay.find("Dann", ss)] == ["cafe0001"]
+    assert [s["paseo"] for s in relay.find(CLINE, ss)] == [CLINE] and [s["paseo"] for s in relay.find(OMP[:8], ss)] == [OMP]
+    on_paseo = fleet._rec(id="cafe0002", agent="claude", name="peer-1", sid="t" * 36, host="paseo", paseo=CLAUDE)
+    assert relay.find("peer-1", [on_paseo]) == [on_paseo]    # a Claude agent Paseo hosts keeps its session name

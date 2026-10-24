@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """relay — message a running agent session by the best route for it, falling back before it fails. No model.
 
-    relay.py <id|name|sid|pane|paseo-agent-id> "<text>" [--wait S] [--idle S] [--via ROUTE] [--plan] [--json]
+    relay.py <id|name|sid|pane|paseo-agent-id> "<text>" [--wait S] [--idle S] [--steer] [--via ROUTE] [--plan] [--json]
                                            (pane: a herdr pane id such as w34:p4; a Paseo agent id is the
                                            PASEO_AGENT_ID uuid, as `paseo ls -g` and where.py show it)
 
@@ -13,9 +13,12 @@ the session, best first, and tries the next when one fails BEFORE sending anythi
                --behavior steer -- <id> <text>`. The caller's own PASEO_AGENT_ID stays in the child's
                environment, so Paseo labels the message `kind="agent-message"` with the sender; a caller that is
                not a Paseo agent prefixes the text with `[relay from <name>] `. Steer queues the text for the next
-               tool round on Claude, Codex, omp, opencode and pi (fleet.PASEO_STEER_PROVIDERS). Any other provider
-               (cline, grok, ...) cannot steer: Paseo would interrupt and replace its running turn, so a send to one
-               that is working is refused (`--idle S` waits for idle). Before any send
+               tool round on Claude, Codex, omp, opencode and pi (fleet.PASEO_STEER_PROVIDERS) unless the provider
+               declines the steer (compaction, a Codex review turn, an omp steer error): Paseo then replaces the running
+               turn. A send to a WORKING agent is therefore refused for any provider but claude unless `--steer` (a
+               cline, grok or other ACP agent cannot steer at all, so `--steer` does not apply: `--idle S` waits for
+               idle). A Paseo agent with no Claude registry row is found by its id, its Paseo id or a hex prefix of 6+
+               characters, never by its workspace title. Before any send
                `paseo agent inspect` must show the agent unarchived, with no pending permission or question, idle
                or running, in the directory its process runs in; any refusal ends the run, whatever `--via` says.
                Delivery is what the daemon acknowledges ("accepted"), upgraded to "delivered" once a Claude
@@ -722,14 +725,21 @@ def forget(sid, text):
             _note(sid, None, "", 0, None)
 
 
-def paseo_steer_refusal(s):
+def paseo_steer_refusal(s, steer=False):
     """Why a send to Paseo agent S must wait for it to go idle, or None. `paseo send --behavior steer` queues the text
     only for a provider that can steer (fleet.PASEO_STEER_PROVIDERS); for any other (a cline agent, any ACP one)
     Paseo interrupts the running turn and starts the text as a new one (steerOrReplaceActiveTurn "replaced",
-    read from the daemon bundle 2026-10-23), which would destroy the work in flight."""
+    read from the daemon bundle 2026-10-23), which would destroy the work in flight. A steer provider can decline
+    too (a Codex review turn, a server without turn/steer, an omp steer error) where this relay cannot see it, and
+    Paseo then replaces the turn the same way: only claude (fleet.PASEO_STEER_DEFAULT) is steered into a working agent
+    without STEER (`--steer`)."""
     prov = (s.get("agent") or "").lower()
-    if s.get("status") == "idle" or prov in fleet.PASEO_STEER_PROVIDERS:
+    if s.get("status") == "idle" or prov in fleet.PASEO_STEER_DEFAULT or (steer and prov in fleet.PASEO_STEER_PROVIDERS):
         return None
+    if prov in fleet.PASEO_STEER_PROVIDERS:
+        return (f"its {prov} Paseo agent is {s.get('status')}: Paseo replaces a running turn when {prov} declines a steer "
+                "(a review turn, a steer error), which this relay cannot see beforehand (--idle S waits for it to go idle; "
+                "--steer sends anyway)")
     return (f"its {prov or 'unknown'} Paseo agent is {s.get('status')} and that provider cannot steer: a send would "
             "interrupt and replace its running turn (--idle S waits for it to go idle)")
 
@@ -740,8 +750,11 @@ HEX_PREFIX = re.compile(r"[0-9a-f][0-9a-f-]{5,35}")    # a Paseo agent id prefix
 def find(ident, ss):
     """Sessions IDENT names: exactly (id, name, session id, pane, Paseo agent id), else by prefix: a session id
     of 8 or more characters, or a hex prefix of 6 or more characters of a Paseo agent id. The prefix kinds are
-    pooled and a row counts once, so two agents sharing a prefix are an ambiguity (the caller refuses it)."""
-    hits = [s for s in ss if ident in (s["id"], s["name"], s.get("sid"), s.get("pane"), s.get("paseo"))]
+    pooled and a row counts once, so two agents sharing a prefix are an ambiguity (the caller refuses it). The
+    name of a Paseo agent with no Claude registry row is its workspace title, generated from its first prompt
+    ("/baton", "say hi"): it never matches by name, only by id or Paseo id (adversary, 2026-10-23)."""
+    hits = [s for s in ss if ident in (s["id"], None if s.get("host") == "paseo" and not s.get("sid") else s["name"],
+                                       s.get("sid"), s.get("pane"), s.get("paseo"))]
     if hits:
         return hits
     if len(ident) >= 8:
@@ -776,7 +789,9 @@ def hard_stop(s):
     if s.get("host") == "paseo" and s.get("paseo_state") not in (None, "idle", "running"):
         return f"its Paseo agent is {s['paseo_state']}, not idle or running"
     if s.get("status") == "blocked":
-        return "blocked on a question or permission prompt: a message would land in or behind that dialog (helm.py answer)"
+        return ("blocked on a permission or question card: a message would answer or replace it (the Paseo UI, or "
+                "`paseo permit allow|deny`, answers it)" if s.get("host") == "paseo" else
+                "blocked on a question or permission prompt: a message would land in or behind that dialog (helm.py answer)")
     return None
 
 
@@ -1313,6 +1328,8 @@ def main():
     ap.add_argument("text")
     ap.add_argument("--wait", type=float, default=20, help="seconds to verify delivery (default 20; a hermes turn gets max(100, S))")
     ap.add_argument("--idle", type=float, metavar="S", help="a working Paseo agent or non-Claude pane TUI: wait up to S seconds for it to go idle first")
+    ap.add_argument("--steer", action="store_true", help="send to a WORKING codex, omp, opencode or pi Paseo agent as a steer anyway: "
+                    "Paseo replaces its running turn when the provider declines the steer (a review turn, an error); claude needs no flag")
     ap.add_argument("--via", choices=sorted(ROUTES), help="use only this route (default: the best, then fall back)")
     ap.add_argument("--plan", action="store_true", help="print the routes in order and send nothing")
     ap.add_argument("--json", action="store_true")
@@ -1368,7 +1385,7 @@ def main():
     if why:
         print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
         return 1
-    why = is_paseo and paseo_steer_refusal(s)
+    why = is_paseo and paseo_steer_refusal(s, a.steer)
     if why:
         print(f"relay: [{s['id']}] not sent: {why}", file=sys.stderr)
         return 1
