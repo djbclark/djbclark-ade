@@ -52,6 +52,13 @@ Chain: `load-spike-monitor-t` (`/baton load-spike-monitor-t`). It is a side-work
    `next_steps` with the `ack` and `watcher clear <target>` commands, and
    `workspaces: [{"repo":"djbclark-ade","task":"main","dir":"/Users/djbclark/src/djbclark-ade","side":true}]`.
    Update it again when the watcher is cleared or an incident is left open.
+5. **On Paseo, a daemon restart (`paseo restart`, `daemon stop`, a crash) keeps your agent id and provider session
+   but kills your process and drops the turn in flight** (2026-10-23, read from the daemon source; app quit and
+   app updates leave this machine's daemon alone). You come back idle, and the next `paseo send` (the next
+   incident) resumes you, so there is nothing to re-register. Keep state on disk and re-derive it on every
+   wake. A line sent while the daemon is down is lost (`send_to` makes one attempt; Hermes still gets the
+   ping), so after any restart you see, read `load-watch incidents -n 5` for what you missed. Never run
+   `paseo restart` yourself while other agents are working.
 
 ## 2. Is the load abnormal?
 
@@ -134,6 +141,8 @@ Verify against the processes themselves, not against memory or the brief's guess
 
 ## What this is not
 
-1. Not a scheduler. Never `/loop` or CronCreate a load check (`~/CLAUDE.md` item 13). The launchd job is
-   the periodic part, and this session reacts to what it sends.
+1. Not a scheduler. Never `/loop` or CronCreate a load check: it is a poll whose firings mostly find nothing
+   (`~/CLAUDE.md` item 13). The launchd job is the periodic part, and this session reacts to what it sends. For
+   the same reason there is no heartbeat to wake you after a Paseo restart (item 13's "recurring wake nothing
+   else can do" does not apply: the next incident's `paseo send` already resumes you).
 2. Not a licence to fix the load by stopping work. See section 3 item 5.
