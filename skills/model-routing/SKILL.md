@@ -719,11 +719,19 @@ method that runs the waves.
     pinged and no session downshifted. The burn was Opus 5.5 (~53%: the `adversary`
     Agent-tool sub-agent is `model: opus`, judgment slices, Orca workers) and Fable 5.1
     (~30%: the lead session itself ran on Fable), mostly cache re-reads of 150-200k
-    contexts. So: **a lead runs on Opus 5.5 at high by default; on Sonnet 5.5 at high
-    when it only drives a pipeline (PR loops, waiters, merges); never on Fable.** Fable
+    contexts. So: **a lead that does judgment work runs on Opus 5.5 at high; a lead that
+    only drives a pipeline (PR loops, waiters, merges) runs on Sonnet 5.5 at medium
+    (`pipeline_effort` in `[lead]`), and goes to high only for a judgment turn; never on
+    Fable** (approved by djbclark 2026-10-23). Raise the effort for the turn with
+    `/effort high` (Claude Code) or the Paseo thinking setting, and drop back to medium
+    after; an effort change keeps the prompt cache (Anthropic: "tuning effort is often a
+    better lever than switching models"). Fable
     is reached only through the `fable-deep` sub-agent or a `frontier` slice. Paseo
-    launch: `paseo run --provider claude/claude-opus-5-5 --thinking high --mode
-    bypassPermissions ...`; CLI: `claude --model opus` with effort `high` in settings.
+    launch, judgment lead: `paseo run --provider claude/claude-opus-5-5 --thinking high
+    --mode bypassPermissions ...`; pipeline lead: `paseo run --provider
+    claude/claude-sonnet-5-5 --thinking medium --mode bypassPermissions ...`; CLI:
+    `claude --model opus` with effort `high` in settings (`claude --model sonnet` with
+    `medium` for a pipeline lead).
 13. **Adversary rounds go to the omp route first** (operator 2026-10-23):
     `acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment --effort high`
     (API credits, a normal tier since 2026-10-19; omp is eligible for `judgment` in

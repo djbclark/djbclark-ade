@@ -7,7 +7,9 @@ pane, never seen) end the run. Every id here is plainly fake.
 """
 from __future__ import annotations
 
+import argparse
 import contextlib
+import datetime
 import importlib.util
 import io
 import json
@@ -16,6 +18,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -41,9 +44,15 @@ real_draft = relay.draft
 real_box_read = relay.box_read
 
 
-def user_line(text: str) -> str:
+def stamp(offset: float = 0.0) -> str:
+    """A transcript timestamp as Claude Code writes it (UTC, milliseconds, Z), OFFSET seconds from now."""
+    t = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=offset)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.") + f"{t.microsecond // 1000:03d}Z"
+
+
+def user_line(text: str, offset: float = 0.0) -> str:
     """A transcript line for a user message, the shape Claude Code writes."""
-    return json.dumps({"type": "user", "message": {"role": "user", "content": text}})
+    return json.dumps({"type": "user", "timestamp": stamp(offset), "message": {"role": "user", "content": text}})
 
 
 def sess(**kw: Any) -> dict[str, Any]:
@@ -505,11 +514,31 @@ class TestFallback(Harness):
         self.assertEqual(rc, 0)
         self.assertIsNone(relay.leftover("cccccccc"))
 
-    def test_a_different_text_sent_fine_leaves_another_texts_entry_alone(self) -> None:
+    def test_a_different_text_is_not_typed_while_an_earlier_one_is_unproven(self) -> None:
+        """Round 9 item 8 (2026-10-23): one entry per session, so a second text would overwrite the first's and its
+        retry would type it again. The second text is skipped; the first's entry and retry are untouched."""
         relay.note_unsent("cccccccc", "an earlier different message", "", 0)
+        rc, _, err = self.run_main(sess())
+        self.assertEqual((rc, self.calls), (1, []))
+        self.assertIn("not yet proven delivered", err)
+        self.assertEqual(relay.leftover("cccccccc")["text"], "an earlier different message")
+
+    def test_a_different_text_is_typed_once_the_earlier_one_is_proven(self) -> None:
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        relay.note_unsent("cccccccc", "an earlier different message", "", tx.stat().st_size)
+        with tx.open("a") as fh:
+            fh.write(user_line("an earlier different message") + "\n")
+        rc, _, err = self.run_main(sess(transcript=str(tx)))
+        self.assertEqual((rc, self.calls), (0, ["type"]), err)
+        self.assertIsNone(relay.leftover("cccccccc"))    # proven and forgotten: nothing left to overwrite
+
+    def test_an_entry_in_the_old_format_without_typed_still_loads_and_is_refused_against(self) -> None:
+        relay.UNSENT.parent.mkdir(parents=True, exist_ok=True)
+        relay.UNSENT.write_text(json.dumps({"cccccccc": {"text": "old format", "draft": "", "mark": 0, "at": time.time()}}))
+        self.assertEqual(relay.leftover("cccccccc")["text"], "old format")
         rc, _, _ = self.run_main(sess())
-        self.assertEqual((rc, self.calls), (0, ["type"]))
-        self.assertIsNotNone(relay.leftover("cccccccc"))
+        self.assertEqual((rc, self.calls), (1, []))
 
     def test_a_run_that_leaves_our_text_in_the_box_arms_it_with_the_presend_mark_and_a_retry_types_nothing(self) -> None:
         tx = self.tmp / "t.jsonl"
@@ -1196,17 +1225,21 @@ class TestHermesGatewayRows(unittest.TestCase):
         con = sqlite3.connect(self.db)
         con.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, session_key TEXT, chat_id TEXT, thread_id TEXT, "
                     "title TEXT, cwd TEXT, started_at REAL, last_activity_at REAL, last_activity_description TEXT, "
-                    "ended_at REAL, end_reason TEXT)")
+                    "ended_at REAL, end_reason TEXT, parent_session_id TEXT)")
         now = t.time()
         rows = [("open", "telegram", "k1", "1", "9", now - 100, None, None),
                 ("closed-by-relay", "telegram", "k2", "1", "8", now - 100, now - 5, "agent_close"),
                 ("reset-away", "telegram", "k3", "1", "7", now - 500, now - 400, "session_reset"),
                 ("old-closed", "telegram", "k4", "1", "6", now - 500, now - 400, "agent_close"),
                 ("new-closed", "telegram", "k4", "1", "6", now - 100, now - 5, "agent_close"),
-                ("cli-row", "cli", "k5", None, None, now - 100, None, None)]
+                ("cli-row", "cli", "k5", None, None, now - 100, None, None),
+                ("closed-subagent", "subagent", None, None, None, now - 100, now - 5, "agent_close"),
+                ("closed-desktop-child", "desktop", None, None, None, now - 100, now - 5, "agent_close"),
+                ("closed-subagent-keyed", "subagent", "k6", None, None, now - 100, now - 5, "agent_close")]
         for id_, src, key, chat, thread, started, ended, why in rows:
-            con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
                         (id_, src, key, chat, thread, "", "", started, started, "", ended, why))
+        con.execute("UPDATE sessions SET parent_session_id = 'an-earlier-session' WHERE id = 'closed-by-relay'")    # the live Telegram one has a parent
         con.commit()
         con.close()
         self.saved = fleet.HERMES_DB
@@ -1215,7 +1248,7 @@ class TestHermesGatewayRows(unittest.TestCase):
 
     def test_open_and_agent_closed_rows_are_listed_but_resets_and_superseded_rows_are_not(self) -> None:
         got = sorted(r["sid"] for r in fleet._hermes_gateway())
-        self.assertEqual(got, ["closed-by-relay", "new-closed", "open"])
+        self.assertEqual(got, ["closed-by-relay", "new-closed", "open"])    # no NULL-key subagent or desktop child, no keyed subagent
 
 
 class TestKeysRun(unittest.TestCase):
@@ -1638,6 +1671,327 @@ class TestRound7(Harness):
         self.assertTrue(relay.sent_in(str(tx), 0, "second message"))
         self.assertFalse(relay.sent_in(str(tx), 0, "go"))
         self.assertFalse(relay.sent_in(str(tx), tx.stat().st_size, "go ahead"))
+
+    # ---- adversary round 9, LOW items 5, 6 and 8 (2026-10-23) ----
+
+    def tx_with(self, *rows: dict[str, Any]) -> Path:
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        with tx.open("a") as fh:
+            for r in rows:
+                fh.write(json.dumps({"timestamp": stamp(), **r}) + "\n")
+        return tx
+
+    @staticmethod
+    def q(op: str, content: str | None = "go ahead", **kw: Any) -> dict[str, Any]:
+        return {"type": "queue-operation", "operation": op, **({} if content is None else {"content": content}), **kw}
+
+    def test_an_enqueue_is_queued_a_user_line_is_delivered(self) -> None:
+        tx = self.tx_with(self.q("enqueue"))
+        self.assertEqual(relay.sent_in(str(tx), 0, "go ahead"), "queued")
+        tx = self.tx_with(self.q("enqueue"), {"type": "user", "message": {"role": "user", "content": "go ahead"}})
+        self.assertEqual(relay.sent_in(str(tx), 0, "go ahead"), "delivered")
+
+    def test_an_enqueue_pulled_back_is_not_delivered(self) -> None:
+        for pull in (self.q("remove", reason="user_edit"), self.q("popAll", None), self.q("popAll")):
+            tx = self.tx_with(self.q("enqueue"), pull)
+            self.assertFalse(relay.sent_in(str(tx), 0, "go ahead"), pull)
+            self.assertEqual(relay.tx_state(str(tx), 0, "go ahead"), "pulled", pull)
+
+    def test_an_absorbed_or_delivered_remove_is_a_delivery_and_another_texts_remove_pulls_nothing(self) -> None:
+        for reason in ("absorbed_mid_turn", "delivered_to_agent"):
+            tx = self.tx_with(self.q("enqueue"), self.q("remove", reason=reason))
+            self.assertEqual(relay.sent_in(str(tx), 0, "go ahead"), "delivered", reason)
+        tx = self.tx_with(self.q("enqueue"), self.q("remove", "something else", reason="user_edit"))
+        self.assertEqual(relay.sent_in(str(tx), 0, "go ahead"), "queued")
+        tx = self.tx_with(self.q("enqueue"), self.q("popAll", None), self.q("enqueue"))    # pulled, then queued again by hand
+        self.assertEqual(relay.sent_in(str(tx), 0, "go ahead"), "queued")
+
+    def test_a_queued_run_is_reported_queued_not_delivered(self) -> None:
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+
+        def typed(chan: Any, text: str) -> bool:
+            self.calls.append("type")
+            with tx.open("a") as fh:
+                fh.write(json.dumps({"timestamp": stamp(), **self.q("enqueue", text)}) + "\n")
+            return True
+        relay.type_line = typed
+        rc, out, err = self.run_text(sess(transcript=str(tx)), "hello there friend")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("queued", out)
+        self.assertNotIn("delivered", out)
+
+    def test_a_queued_copy_pulled_back_into_the_box_is_unverified_never_submitted_and_its_retry_types_nothing(self) -> None:
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        box_now = {"d": ""}
+
+        def typed(chan: Any, text: str) -> bool:
+            self.calls.append("type")
+            with tx.open("a") as fh:
+                for r in (self.q("enqueue", text), self.q("popAll", text)):
+                    fh.write(json.dumps({"timestamp": stamp(), **r}) + "\n")
+            box_now["d"] = text    # the operator pressed Up: our text is back in his box
+            return True
+        relay.type_line = typed
+        relay.draft = lambda chan: box_now["d"]
+        calls = self.enters()
+        rc, out, err = self.run_text(sess(transcript=str(tx)), "hello there friend")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(calls, ["type"])    # no Enter on the operator's pulled-back text
+        self.assertIsNotNone(relay.leftover("cccccccc"))    # armed: a retry must not type a second copy
+        calls.clear()
+        rc, _, err = self.run_text(sess(transcript=str(tx)), "hello there friend")
+        self.assertEqual((rc, calls), (1, []))    # still in the box: not submitted, nothing typed
+        self.assertIn("pulled back", err)
+        box_now["d"] = ""    # he cleared the box: still nothing is typed for him
+        rc, _, err = self.run_text(sess(transcript=str(tx)), "hello there friend")
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIn("pulled back", err)
+
+    def test_a_pulled_back_copy_of_an_earlier_text_is_not_submitted_by_another_texts_relay(self) -> None:
+        tx = self.tx_with(self.q("enqueue", "an earlier message"), self.q("popAll", None))
+        self.armed("an earlier message", mark=0, draft="an earlier message")
+        relay.draft = lambda chan: "an earlier message"
+        calls = self.enters()
+        rc, _, _ = self.run_text(sess(transcript=str(tx)), "a different message")
+        self.assertNotIn("enter", calls)
+        self.assertNotIn("type", calls)
+
+    def armed_ago(self, text: str, ago: float, draft: str = "", mark: int = 0, typed_ago: float | None = None) -> None:
+        """An entry noted AGO seconds ago, typed TYPED_AGO seconds ago (None: an old-format entry without `typed`)."""
+        relay.note_unsent("cccccccc", text, draft, mark)
+        rows = json.loads(relay.UNSENT.read_text())
+        rows["cccccccc"]["at"] = time.time() - ago
+        if typed_ago is None:
+            rows["cccccccc"].pop("typed", None)
+        else:
+            rows["cccccccc"]["typed"] = time.time() - typed_ago
+        relay.UNSENT.write_text(json.dumps(rows))
+
+    def test_an_equal_short_text_the_operator_typed_later_is_not_our_delivery(self) -> None:
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        self.armed_ago("continue", ago=600, typed_ago=620, mark=tx.stat().st_size)    # we never saw our copy (draft "")
+        with tx.open("a") as fh:
+            fh.write(user_line("continue") + "\n")    # his own, stamped now: ten minutes after ours
+        rc, _, err = self.run_text(sess(transcript=str(tx)), "continue")
+        self.assertEqual((rc, self.calls), (1, []))
+        self.assertIn("not in its transcript", err)
+        self.assertIsNotNone(relay.leftover("cccccccc"))
+
+    def test_the_same_text_stamped_at_our_typing_is_our_delivery_and_a_line_without_a_stamp_is_not(self) -> None:
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        self.armed_ago("continue", ago=600, typed_ago=620, mark=tx.stat().st_size)
+        with tx.open("a") as fh:
+            fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "continue"}}) + "\n")    # no stamp
+        rc, _, _ = self.run_text(sess(transcript=str(tx)), "continue")
+        self.assertEqual(rc, 1)
+        with tx.open("a") as fh:
+            fh.write(user_line("continue", offset=-612) + "\n")    # inside [typed, at + grace]
+        rc, _, err = self.run_text(sess(transcript=str(tx)), "continue")
+        self.assertEqual((rc, self.calls), (0, []), err)
+        self.assertIsNone(relay.leftover("cccccccc"))
+
+    def test_the_stamp_guard_is_for_entries_whose_copy_we_never_saw(self) -> None:
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        self.armed_ago("continue", ago=600, typed_ago=620, draft="continue", mark=tx.stat().st_size)    # we saw it in the box
+        with tx.open("a") as fh:
+            fh.write(user_line("continue") + "\n")
+        relay.draft = lambda chan: ""
+        rc, _, _ = self.run_text(sess(transcript=str(tx)), "continue")
+        self.assertEqual(rc, 0)
+
+    def test_an_old_format_entry_without_typed_has_no_window(self) -> None:
+        """Adversary finding 7: a window guessed from `at` would exclude the real delivery after a long --wait."""
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        self.armed_ago("continue", ago=600, mark=tx.stat().st_size)    # no `typed`
+        with tx.open("a") as fh:
+            fh.write(user_line("continue", offset=-560) + "\n")    # stamped 40 s after the note: past any guessed [at - 32, at + 10]
+        rc, _, _ = self.run_text(sess(transcript=str(tx)), "continue")
+        self.assertEqual(rc, 0)
+
+    # ---- adversary round 10 repair (2026-10-23): findings 1 to 6 ----
+
+    LONG = "please look at the failing relay test and tell me which line of the pane route is wrong"
+
+    def recalled(self, text: str) -> Path:
+        """An entry for TEXT whose copy we never saw (draft ""), noted 300 s ago, whose delivery line is stamped now (late),
+        with a copy of TEXT back in the box (the operator pressed Up)."""
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        self.armed_ago(text, ago=300, typed_ago=330, draft="", mark=tx.stat().st_size)
+        with tx.open("a") as fh:
+            fh.write(user_line(text) + "\n")
+        relay.draft = lambda chan: text
+        return tx
+
+    def test_a_recalled_copy_of_a_long_text_delivered_late_is_not_submitted_by_its_retry(self) -> None:
+        self.assertGreater(len(self.LONG), relay.SHORT_TEXT)
+        tx = self.recalled(self.LONG)
+        calls = self.enters()
+        rc, _, err = self.run_text(sess(transcript=str(tx)), self.LONG)
+        self.assertEqual((rc, calls), (0, []), err)    # a long text has no window: the late line proves it and nothing is pressed
+        self.assertIsNone(relay.leftover("cccccccc"))
+
+    def test_a_recalled_copy_of_a_short_text_outside_the_stamp_window_is_not_submitted_by_its_retry(self) -> None:
+        tx = self.recalled("continue")
+        calls = self.enters()
+        rc, _, err = self.run_text(sess(transcript=str(tx)), "continue")
+        self.assertEqual((rc, calls), (1, []))    # the stamp cannot claim it, and must not authorise a press either
+        self.assertIn("recalled", err)
+        self.assertIsNotNone(relay.leftover("cccccccc"))
+
+    def test_another_texts_relay_does_not_submit_a_recalled_long_copy(self) -> None:
+        tx = self.recalled(self.LONG)
+        calls = self.enters()
+        rc, _, _ = self.run_text(sess(transcript=str(tx)), "a different message")
+        self.assertEqual((rc, calls), (1, []))    # no Enter and nothing typed into the operator's recalled draft
+
+    def test_another_texts_relay_does_not_submit_a_recalled_short_copy_outside_the_window(self) -> None:
+        tx = self.recalled("continue")
+        calls = self.enters()
+        rc, _, _ = self.run_text(sess(transcript=str(tx)), "a different message")
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIsNotNone(relay.leftover("cccccccc"))    # not proven by the stamp, so still owed its proof
+
+    def test_the_check_after_our_own_enter_counts_from_the_press(self) -> None:
+        """Finding 6: Enter on our own earlier copy delivers it; the one-entry check must see that delivery."""
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        self.armed_ago("continue", ago=600, typed_ago=620, draft="", mark=tx.stat().st_size)
+        relay.draft = lambda chan: "continue"
+
+        def enter(chan: Any) -> bool:
+            self.calls.append("enter")
+            relay.draft = lambda chan: ""
+            with tx.open("a") as fh:
+                fh.write(user_line("continue") + "\n")    # stamped at the press, far outside [typed, at + grace]
+            return True
+        relay.press_enter = enter
+        self.run_text(sess(transcript=str(tx)), "another message")
+        self.assertEqual(self.calls, ["enter", "type"])
+
+    def test_a_remove_with_no_reason_is_unknown_not_pulled_and_a_dequeue_delivers(self) -> None:
+        """Findings 4 and 5, from real Claude Code transcripts."""
+        tx = self.tx_with(self.q("enqueue"), self.q("remove"))
+        self.assertEqual(relay.tx_state(str(tx), 0, "go ahead"), "queued")
+        tx = self.tx_with(self.q("enqueue"), self.q("dequeue", None), self.q("popAll", None))    # an unrelated pull-back later
+        self.assertEqual(relay.tx_state(str(tx), 0, "go ahead"), "delivered")
+        tx = self.tx_with(self.q("dequeue", None))
+        self.assertIsNone(relay.tx_state(str(tx), 0, "go ahead"))
+
+    def test_a_pulled_entry_is_dropped_for_another_text_once_the_box_reads_empty_and_stays_so(self) -> None:
+        tx = self.tx_with(self.q("enqueue", "an earlier message"), self.q("popAll", None))
+        self.armed("an earlier message", mark=0)
+        rc, _, _ = self.run_text(sess(transcript=str(tx)), "a different message")
+        self.assertEqual(self.calls, ["type"])    # he discarded the pulled-back copy: the pane is free again
+
+    def test_a_pulled_entry_is_kept_when_a_copy_reappears_in_the_box(self) -> None:
+        tx = self.tx_with(self.q("enqueue", "an earlier message"), self.q("popAll", None))
+        self.armed("an earlier message", mark=0)
+        reads = iter(["", "an earlier message"])
+        real = relay.box_text
+        relay.box_text = lambda chan: next(reads, "an earlier message")
+        self.addCleanup(lambda: setattr(relay, "box_text", real))
+        rc, _, err = self.run_text(sess(transcript=str(tx)), "a different message")
+        self.assertEqual((rc, self.calls), (1, []))
+        self.assertIn("check its pane", err)
+        self.assertIsNotNone(relay.leftover("cccccccc"))
+
+    def test_a_pulled_back_text_whose_box_then_reads_empty_stays_armed(self) -> None:
+        """Finding 8: the box reading empty at the end of the run does not make a pulled-back text forgettable."""
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+
+        def typed(chan: Any, text: str) -> bool:
+            self.calls.append("type")
+            with tx.open("a") as fh:
+                for r in (self.q("enqueue", text), self.q("popAll", None)):
+                    fh.write(json.dumps({"timestamp": stamp(), **r}) + "\n")
+            return True    # the operator pulled it back and cleared the box at once: it reads empty
+        relay.type_line = typed
+        rc, _, _ = self.run_text(sess(transcript=str(tx)), "hello there friend")
+        self.assertEqual(rc, 1)
+        self.assertIsNotNone(relay.leftover("cccccccc"))
+        self.calls.clear()
+        rc, _, err = self.run_text(sess(transcript=str(tx)), "hello there friend")
+        self.assertEqual((rc, self.calls), (1, []))    # the retry retypes nothing for a text he deleted
+        self.assertIn("pulled back", err)
+
+    # ---- finding 3: locks ----
+
+    def test_two_writers_of_the_unsent_file_keep_both_entries(self) -> None:
+        real = relay._unsent
+
+        def slow() -> Any:
+            rows = real()
+            time.sleep(0.03)    # widens the read-modify-write window so an unlocked pair interleaves every time
+            return rows
+        relay._unsent = slow
+        self.addCleanup(lambda: setattr(relay, "_unsent", real))
+        errors: list[BaseException] = []
+
+        def write(i: int) -> None:
+            try:
+                relay.note_unsent(f"s{i}", f"text {i}", "", 0)
+            except BaseException as e:    # a shared temp name made the second replace raise
+                errors.append(e)
+        threads = [threading.Thread(target=write, args=(i,)) for i in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(json.loads(relay.UNSENT.read_text())), [f"s{i}" for i in range(6)])
+        self.assertEqual([p.name for p in relay.UNSENT.parent.glob("*.tmp")], [])
+
+    def test_two_relays_to_one_pane_do_not_both_type(self) -> None:
+        s = sess()
+        c = {"s": s, "a": argparse.Namespace(wait=0, idle=None), "text": "hello there friend"}
+        inside, release = threading.Event(), threading.Event()
+
+        def slow_type(chan: Any, text: str) -> bool:
+            self.calls.append("type")
+            inside.set()
+            release.wait(10)
+            return True
+        relay.type_line = slow_type
+        first: list[Any] = []
+        t = threading.Thread(target=lambda: first.append(relay.route_pane(c)))
+        t.start()
+        self.assertTrue(inside.wait(10))
+        second = relay.route_pane({**c, "text": "another message"})    # a different text to the same pane, meanwhile
+        release.set()
+        t.join(10)
+        self.assertEqual(second[0], "stop")
+        self.assertEqual(second[2], 1)
+        self.assertIn("another relay is typing", second[1])
+        self.assertEqual(self.calls, ["type"])
+        self.assertEqual(first[0][0], "unverified")
+        relay.type_line = lambda chan, text: self.calls.append("type") or True
+        self.assertEqual(relay.route_pane({**c, "text": "another message"})[0], "unverified")    # the lock is free again
+        self.assertEqual(self.calls, ["type", "type"])
+
+    def test_a_retry_that_pressed_enter_accepts_a_line_stamped_after_its_own_press(self) -> None:
+        tx = self.tmp / "t.jsonl"
+        tx.write_text("{}\n")
+        self.armed_ago("continue", ago=600, typed_ago=620, draft="", mark=tx.stat().st_size)
+        relay.draft = lambda chan: "continue"    # our copy is in the box (an unseen-then-seen copy): the retry submits it
+
+        def enter(chan: Any) -> bool:
+            self.calls.append("enter")
+            relay.draft = lambda chan: ""
+            with tx.open("a") as fh:
+                fh.write(user_line("continue") + "\n")
+            return True
+        relay.press_enter = enter
+        rc, _, err = self.run_text(sess(transcript=str(tx)), "continue")
+        self.assertEqual((rc, self.calls), (0, ["enter"]), err)
 
     def test_entries_older_than_a_day_are_purged_on_the_next_write(self) -> None:
         relay.note_unsent("old", "an old message", "", 0)

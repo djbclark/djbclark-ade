@@ -451,7 +451,7 @@ alert had said so since 06:02Z and nothing read it. The burn was Opus 5.5 (~53%:
 `adversary` Agent-tool sub-agent, judgment slices, Orca workers) and Fable 5.1 (~30%: the
 lead session itself). The rules (`skills/model-routing/SKILL.md`, *Routing policy* items 12
 and 13; `config/routing.toml` `[lead]`): a lead session runs on Opus 5.5 at high (Sonnet 5.5
-at high when it only drives a pipeline), never Fable; adversary rounds go to `acp-dispatch
+at medium when it only drives a pipeline, high only for a judgment turn; djbclark 2026-10-23), never Fable; adversary rounds go to `acp-dispatch
 omp --model anthropic/claude-opus-5-5 --kind judgment --effort high` first; an unpinned
 Agent-tool sub-agent or teammate runs Sonnet (`CLAUDE_CODE_SUBAGENT_MODEL=sonnet`, set in the
 live settings by running `bin/claude-settings-env`, whose `--check` shows drift, 2026-10-23), so pass `model: "opus"` for judgment. The guard that

@@ -598,11 +598,15 @@ def _hermes_gateway():
         # A `hermes --resume -z` turn (relay.py's hermes route) ends its row with `agent_close`, and the gateway
         # reopens it by session_key a few minutes later (gateway.session: "reopened ended session ...; keeping route",
         # 2026-10-23). Hermes counts agent_close as recoverable, so such a row is still the live conversation unless
-        # a newer row for the same session_key replaced it (a /new or reset).
+        # a newer row for the same session_key replaced it (a /new or reset). Only a keyed, non-subagent row can be
+        # reopened: every finished delegated child (source subagent, and desktop children) ends with agent_close and a
+        # NULL session_key, and is not a conversation to message (adversary, 2026-10-23). Not filtered on
+        # parent_session_id: the live Telegram conversation has a parent.
         rows = db.execute(
             "SELECT s.id, s.source, s.session_key, s.chat_id, s.thread_id, s.title, s.cwd, "
             "COALESCE(s.last_activity_at, s.started_at) last, s.last_activity_description FROM sessions s "
-            "WHERE (s.ended_at IS NULL OR s.end_reason = 'agent_close') AND s.source NOT IN ('cli','oneshot') "
+            "WHERE (s.ended_at IS NULL OR (s.end_reason = 'agent_close' AND s.session_key IS NOT NULL "
+            "AND s.source <> 'subagent')) AND s.source NOT IN ('cli','oneshot') "
             "AND COALESCE(s.last_activity_at, s.started_at) > ? "
             "AND NOT EXISTS (SELECT 1 FROM sessions n WHERE n.session_key = s.session_key AND n.started_at > s.started_at "
             "AND n.source NOT IN ('cli','oneshot')) ORDER BY last DESC", (time.time() - HERMES_ACTIVE,)

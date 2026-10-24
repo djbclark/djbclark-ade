@@ -108,7 +108,7 @@ and PR 30 (`self-slash --finish --successor`) shipped the recommendations; the p
 that the lead's transcript held 579 background-notification turns against 49 operator prompts, each re-reading
 a 150-200k context: the notification-per-turn multiplier, not the model, was the volume.
 
-1. **Effort as a lever** (Anthropic: "tuning effort is often a better lever than switching models"; Opus 5.5
+1. **DONE 2026-10-23** (`[lead] pipeline_effort = "medium"`, `route_agent.py` default/validation, `policy --md` line, SKILL.md item 12, tests; PR [33](https://github.com/djbclark/djbclark-ade/pull/33), merged d06d48c; open LOW from its adversary round 2: no test pins that `xhigh` and `max` are accepted). **Effort as a lever** (Anthropic: "tuning effort is often a better lever than switching models"; Opus 5.5
    defaults to medium): add to the routing policy that a pipeline-driving lead (PR loops, waiters, merges) runs
    Sonnet 5.5 at **medium**, high only for judgment turns; effort changes on 5.5/Fable 5.1 keep the prompt cache.
    One Sonnet `code` slice: `skills/model-routing/SKILL.md` item 12, `config/routing.toml` `[lead]`
@@ -139,6 +139,9 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    compares realpaths case-sensitively, so on APFS a case-variant sibling row can let an empty local workspace be
    archived. Also unverified live until the first real successor run: the `--json` row shapes of `workspace ls`,
    `terminal ls`, `ls` (every parse failure keeps the workspace) and `paseo run /baton` as a first prompt.
+   **Update 2026-10-23:** the first live successor run's three bugs are fixed on master in 184b14d; the two round-3
+   LOWs above still stand. PR [35](https://github.com/djbclark/djbclark-ade/pull/35) (open) carries 184b14d's review
+   LOWs and the bash 3.2 empty-array fix that the macOS CI job has failed on since 184b14d.
 6. **Paseo in-place model change**: `docs/upstream-issues.md` entry 17 drafts `paseo agent model <id> <model>`;
    on 2026-10-23 the rework-p lead switched every running Paseo Claude agent in place through the daemon's
    `set_agent_model_request` (`~/.local/state/ade/paseo-set-model.mjs`), which the entry should cite as the
@@ -151,6 +154,15 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    carries (found by the quota-guard slice; possibly lost in the 2026-10-20 graft restore): apply the template or
    add both UserPromptSubmit entries (`context_size_nudge.py`, `quota_nudge.py`) by hand, then
    `bin/claude-quota-guard --install` and the printed `launchctl bootstrap` line (operator items of PR 29).
+   **Update 2026-10-23:** the live settings do carry the registration; the hook failed because
+   `claude/hooks/context_size_nudge.py` had been 100644 since 836b306 (2026-10-19): `hook-deadline` exec'd it and
+   exited 127. d618809 restored +x on it and 11 other shebang scripts; it runs again (rc 0).
+8. **Unresolved Codex findings on merged PRs** (2026-10-23): head-only finding selection missed every finding Codex
+   left on an earlier head (PR 32 nearly merged past a P1 that way). A GraphQL `reviewThreads` survey found about 50
+   unresolved, not-outdated Codex threads on merged PRs 15-30. A read-only triage slice is checking each against
+   master (`~/.local/state/bigteam/rework2-codex-triage/codex-triage-report.md`); `bin/pr-wait` (PR
+   [34](https://github.com/djbclark/djbclark-ade/pull/34)) gains `merge_ready` and open earlier-head findings, and
+   AGENTS.md rule 9 is corrected in the same PR.
 
 ## Follow-ups from the 2026-10-20 reviews
 
@@ -1422,18 +1434,33 @@ gateway agent with `relay.py`. Design: `~/.local/state/bigteam/loadgate-followup
    (`_hermes_gateway` lists `agent_close` rows not superseded by a newer row of the same session key).
 3. **Installed 2026-10-23 16:29** by Hermes itself on a relayed brief from the load-watch session (djbclark's ask): `~/.hermes/skills/peer-relay` is a symlink to `skills/peer-relay`. Hermes-to-peer direction is the load watcher's retest.
 
-## relay.py pane route: open lows after adversary round 9 (2026-10-23)
+## relay.py pane route: lows after adversary round 9 (2026-10-23)
 
-Rounds 1-9 on the route ladder; round 9's four mediums are repaired in eda41d3. Still open (reports:
-`~/.local/state/bigteam/adhoc-2026-10-23/relay-ladder-adversary-report-9.md`, items 5, 6, 8, 10):
+Rounds 1-9 on the route ladder; round 9's four mediums are repaired in eda41d3. Its lows (reports:
+`~/.local/state/bigteam/adhoc-2026-10-23/relay-ladder-adversary-report-9.md`, items 5, 6, 8, 10), working tree of
+2026-10-23, awaiting the lead's review and a round-10 adversary pass:
 
-1. A queue `enqueue` counts as "delivered"; if the operator pulls it back into the box (Up, Esc-interrupt: `remove`
-   with a reason other than `absorbed_mid_turn`, or `popAll`) the caller is told "delivered" while the text sits in the box.
-   Label an enqueue "queued" and treat a later pull-back as not delivered.
-2. A short common text ("continue", "yes", "1") the operator types himself within the hour counts as our delivery;
-   require the user line's timestamp near the entry's `at`.
-3. One unsent entry per session id: arming a second text overwrites the first (key by session id and folded text, or
-   refuse to type a new text while another unproven entry is younger than the TTL).
-4. No real `herdr agent read --format ansi` or `tmux capture-pane -e` capture of an idle Claude Code pane is committed
-   as a fixture; `box_parse` is proven on synthetic screens only (a statusline row of 10+ `─` below the box, or queued
-   messages drawn as `❯` rows under a rule, would make it skip for good).
+1. DONE 2026-10-23: an enqueue is "queued" (exit 0), never "delivered"; an enqueue followed by a `remove` for any reason
+   but `absorbed_mid_turn`/`delivered_to_agent` (the two reasons real transcripts carry), or by a `popAll`, is "pulled":
+   unverified, never submitted for the operator, its retry types nothing (`tx_state`, `PULLED_WHY`).
+2. DONE 2026-10-23: an entry whose recorded draft is "" (we never saw our copy) is proven only by a user or enqueue line
+   stamped between its typing time (new `typed` field; old entries: `at` - 30 s) and `at` + 10 s (`proof_window`); a
+   retry that pressed Enter itself accepts a line stamped after that press.
+3. DONE 2026-10-23: chose the simpler repair, not keying: while an earlier text's entry is unproven and younger than
+   the TTL, a different text is skipped (not typed), so the earlier text's retry cannot type it twice. Cost: that
+   session takes no other text by pane for up to an hour after an unproven send (the socket route still can).
+4. OPEN (skipped 2026-10-23, no suitable live pane): no real `herdr agent read --format ansi` or `tmux capture-pane -e`
+   capture of an idle Claude Code pane is committed as a fixture; `box_parse` is proven on synthetic screens only (a
+   statusline row of 10+ `─` below the box, or queued messages drawn as `❯` rows under a rule, would make it skip for
+   good). Needs a Claude Code TUI running in a herdr or tmux pane; capture read-only, scrub, commit under
+   `tests/fixtures/`, add a `box_parse` test.
+
+Round 1 (2026-10-23) BLOCKed this: the stamp window decided a press (a recalled copy of a delivered text could be submitted
+twice), commit 4572876 listed closed keyless subagent/desktop children as live Hermes conversations, and the unsent file had no
+lock. Repaired the same day (the stamp only claims success; `end_reason='agent_close' AND session_key IS NOT NULL AND source <>
+'subagent'`; `flock` on the unsent file and per pane); round 2 APPROVED (reports `~/.local/state/bigteam/relay-pane-lows/
+adversary-report.md`, `adversary-report-2.md`). Open lows from round 2: (P1) `pulled_and_discarded` drops a pulled entry on the
+windowed state, so a retyped text could double-deliver; (P2) a `dequeue` is credited to our text even when it handed the agent a
+different queued prompt (a wrong "delivered" report, never a resend); (P3) the non-blocking pane lock returns "stop", which
+also cancels the socket fallback that used to deliver; (P4) two guarded lines have no test (removing a failed temp file; the
+final transcript check after the wait loop); (P5, pre-existing) a herdr pane's entry outlives a transcript change.

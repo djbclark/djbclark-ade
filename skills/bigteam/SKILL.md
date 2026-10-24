@@ -166,7 +166,7 @@ a fan-out needs from it:
    override whenever `~/.local/state/ade/quota-guard.json` says `tight` or
    `critical` (`bin/claude-quota-guard`; a `[quota-guard <level>]` line from the
    UserPromptSubmit hook says the same). The lead session itself runs on Opus 5.5
-   high (Sonnet 5.5 high when it only drives a pipeline), never Fable
+   high (Sonnet 5.5 at medium when it only drives a pipeline, high only for a judgment turn; `[lead] pipeline_effort`), never Fable
    (`model-routing`, *Routing policy* item 12).
    **`frontier` slices** are the rare few that really need a frontier model
    (debugging that defeated real attempts, a security-relevant or concurrency
