@@ -99,6 +99,7 @@ their old paths are symlinks into this checkout).
 | [`paseowatch`](skills/paseowatch/SKILL.md) | Make this session the one Paseo-contribution watcher (`fleet-watch upstream --profile paseo --relay-to`): maintainer replies on djbclark's PRs, issues and Discussions in getpaseo/paseo and zcode-acp are relayed here and worked via `/bigteam`, prepare-and-stop; no worker fallback. |
 | [`peer-relay`](skills/peer-relay/SKILL.md) | Hermes messages a peer agent session by running `session-finder/relay.py` (best route, falls back itself; never resend an unverified one; a send from an identifiable caller to a busy agent is queued, `queued: <id>`, exit 0; an anonymous caller gets exit 1). |
 | [`steps`](skills/steps/SKILL.md) | Walk open items one multiple-choice prompt at a time, recommendation first. |
+| [`create-hook`](skills/create-hook/SKILL.md) | Native Codex hooks: `hooks.json` paths, PascalCase events, trust review, allow/deny JSON, timeouts, append-only merge and uninstall; Codex 0.164.0 snapshot (2026-10-25), Codex only. |
 | [`research`](skills/research/SKILL.md) | Evidence-grounded research: verbatim-quote claim log, counter-evidence pass, `research_check.py` verifies quotes and citations. |
 | [`dialogue`](skills/dialogue/SKILL.md) | Multi-model dialogue that produces one artifact with a final-word model; `dialogue.py` runs pinned routes, checks footers and gates the final word. |
 | [`book-to-kb`](skills/book-to-kb/SKILL.md) | Add a book to the local `~/kb` knowledge base so any session can query it cheaply. |
