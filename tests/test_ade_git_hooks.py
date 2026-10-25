@@ -772,3 +772,34 @@ def test_r11_f2_an_origin_question_that_fails_only_for_the_hook_does_not_switch_
     assert _wt_cb(world, wt) != ok(world.state, ["rev-parse", "main"], wt)
     r = shim(world.state, ["branch", "-f", "cb", "main"], wt, who="Z")              # the owner may still write its own branch
     assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize("n", range(1, 9))                  # the exec path's length mod 8 decides the kernel's padding
+@pytest.mark.parametrize("argv0", ["", "x"])
+def test_r11_f3_proc_args_returns_the_exact_argv_whatever_the_first_word_is_and_the_exec_paths_length(tmp_path, argv0, n):
+    link = tmp_path / ("s" * n)
+    link.symlink_to(shutil.which("sleep"))
+    p = subprocess.Popen([argv0, "30"], executable=str(link))
+    try:
+        got = None
+        for _ in range(100):
+            got = ade_claims._proc_args(p.pid)
+            if got is not None and got[1] == [argv0, "30"]:
+                break
+            time.sleep(0.05)
+        assert got is not None and got[1] == [argv0, "30"], got
+    finally:
+        p.kill()
+        p.wait()
+
+
+def _forged_pack_refs(w, argv_tail, **extra):
+    (w.repo / "pack-refs").mkdir(exist_ok=True)
+    return subprocess.run(argv_tail, executable=REAL_GIT, cwd=w.repo, env=env_for(w.state, "B", **extra), capture_output=True,
+                          text=True, timeout=120)
+
+
+def test_r11_f3_an_empty_argv0_does_not_shift_the_parse_into_a_pack_refs_exemption(world):
+    r = _forged_pack_refs(world, ["", "-C", "pack-refs", "branch", "-f", "cb", "main"])
+    assert refused(r), (r.returncode, r.stderr)
+    assert world.cb() != world.main()

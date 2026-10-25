@@ -1734,7 +1734,14 @@ def _proc_args(pid: int) -> Optional[tuple[str, list[str]]]:
         data = buf.raw[:size.value]
         argc = int.from_bytes(data[:4], sys.byteorder)
         exe_b, _, rest = data[4:].partition(b"\0")
-        parts = rest.lstrip(b"\0").split(b"\0")[:argc]
+        # the kernel pads the exec path to a multiple of 8 bytes (measured on arm64, 2026-10-25: pad = -(len+1) mod 8 NULs
+        # beyond its terminator); every NUL beyond that is the terminator of an EMPTY leading argument, which an `lstrip`
+        # alone would eat (the argv would shift by one word and its first environment string would join it)
+        padded = len(rest) - len(rest.lstrip(b"\0"))
+        empty = padded - (-(len(exe_b) + 1)) % 8
+        if empty < 0:
+            return None                                # a layout this parse does not know: no answer, no exemption
+        parts = ([b""] * empty + rest.lstrip(b"\0").split(b"\0"))[:argc]
         return exe_b.decode("utf-8", "replace"), [x.decode("utf-8", "replace") for x in parts]
     except (OSError, ValueError, AttributeError):
         return None
@@ -1744,8 +1751,10 @@ def _parent_is_pack_refs(env: dict[str, str]) -> bool:
     """Whether the git process that runs this hook is `git pack-refs` (which `gc` and `maintenance` spawn). pack-refs
     reports every ref it packs as `0 new` and every loose ref it prunes as `old 0`, but changes no value: measured
     2026-10-25, git 2.56. The stub exports the git process's pid in ADE_HOOK_GIT_PID. The process must be an executable
-    named `git` (its real path, not its argv[0]) whose argv, parsed word by word, names `pack-refs`; a forged argv[0]
-    ("git pack-refs") is skipped by the parse and exempts nothing. Same-uid residual: a program named `git` that sets a
+    named `git` (its real path, not its argv[0]) whose argv, parsed word by word, names `pack-refs`, and whose argv[0] is
+    non-empty and also named `git` (round 11: an EMPTY argv[0] used to shift the macOS parse by one word, see `_proc_args`; a
+    shifted argv would otherwise name `git` itself); a forged argv[0] ("git pack-refs") is skipped by the parse and exempts
+    nothing. Same-uid residual: a program named `git` that sets a
     pack-refs argv, then runs the hook, or one that sets ADE_HOOK_GIT_PID itself, is believed (docs/git-guard.md)."""
     pid = env.get("ADE_HOOK_GIT_PID", "")
     if not pid.isdigit():
@@ -1754,7 +1763,8 @@ def _parent_is_pack_refs(env: dict[str, str]) -> bool:
     if got is None:
         return False
     exe, argv = got
-    return os.path.basename(exe) == "git" and len(argv) > 1 and parse_git_argv(argv[1:], os.sep, {}).sub == "pack-refs"
+    return (os.path.basename(exe) == "git" and len(argv) > 1 and bool(argv[0]) and os.path.basename(argv[0]) == "git"
+            and parse_git_argv(argv[1:], os.sep, {}).sub == "pack-refs")
 
 
 def _hook_refusal(rule: str, d: Decision, via: str, what: str, env: dict[str, str], cwd: str, extra: dict[str, Any]) -> int:
