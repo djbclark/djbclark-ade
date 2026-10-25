@@ -198,6 +198,7 @@ agent what changed and what is new. Entries end with the pull request number.
 ### Fixed
 
 - `bin/skill-everywhere`'s Grok Bot copy no longer dereferences a symlink that leaves the skill (an absolute link in a PR branch was `cp -rL`-copied into a temp dir by `ade-update --check`): a skill holding a link that is not to a regular file inside it is refused (`--check` row `unsafe source symlink`, stuck; link mode exit 1, nothing copied), and a non-canonical (report-only) `ade-update` run sets the new `SKILL_EVERYWHERE_NO_COPY=1` so the helper checks link targets only (2026-10-23) (#37).
+- `acp-run` named `env` instead of `crush-acp` for the crush wrapper, so a missing `crush-acp` skipped `ACP_RUN_BIN_WAIT` and exit 127 (and `--list` showed it `ok`); `acp-dispatch` kept the not-installed probe result per model, so every model of a missing agent paid the 90 s wait again, and now keeps it per agent; the detached `waiter:` hint always said `timeout 7200000`, and now says when the wait is longer than that 2 h maximum (or unlimited) and to re-arm the same line (Codex 4322594869, 4323297404, 4324164145) (#38).
 - Restored the executable bit on 12 tracked scripts with a shebang (d618809, 2026-10-23): `claude/hooks/context_size_nudge.py`
   had been 100644 since 836b306 (2026-10-19), so under `hook-deadline` it exited 127 and no context-size nudge ran for
   four days; `bin/claude-settings-env` had lost it on this branch. `tests/test_bin_modes.py` now fails on any tracked
