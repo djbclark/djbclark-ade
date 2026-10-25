@@ -835,6 +835,17 @@ Round 8 (head 684c585) BLOCKed on N1 (parallel multi-remote fetch hides the dry 
    on the remote before the real fetch is updated unjudged. Adding `--verbose` to the safety options would list `=` lines to judge.
 2. **N7, low**: the dry run forces `--no-recurse-submodules`, so a `--recurse-submodules` fetch inside a submodule repository is never judged; it matters only for a claim held in the submodule's own repository.
 
+## Verified peer messaging (djbclark, 2026-10-25; part of the big ADE queue)
+
+djbclark, 2026-10-25: always verify the other agent got the message, or we may sit on a one-way receive-only link; "make sure that always happens as part of the big djbclark-ade queue". Case: the
+herdr successor `29a5535c` sent a contract proposal; the reply was written only in prose, then relayed (`relay.py` status: `queued`, the target was inside a long command): not yet proven. Standing order 10 in AGENTS.md
+states the rule. Build items, each one Sonnet `code` slice with a test:
+1. **`relay.py --ack`**: after a send that is not `delivered`, keep watching (transcript or inbox of the target, bounded by `--wait`) and print `delivered`, `unverified` or `not delivered` as the exit status
+   (today `queued` exits 0 like a delivery); add `--expect-ack ID` that waits for a reply message naming the sender.
+2. **First-contact ack**: the first relay to a session this sender has never messaged appends "reply `ack <sender id>` through relay.py"; `fleet.py` records which peers have ever acked, so a one-way link shows as such.
+3. **Inbound relays**: a relayed message that asks a question is answered by a relay to its sender (the footer names the route); a reply written only in the receiver's prose is flagged by the `session-finder` skill text and by a Stop-hook nudge when a turn began with `[relay from ...]` and ended with no `relay.py` call.
+4. **Home instruction file (Opus only)**: item 24 (3) of `~/.claude/CLAUDE.md` gains one clause pointing at standing order 10; dispatched `acp-dispatch omp --model anthropic/claude-opus-5-5 --kind judgment` on 2026-10-25.
+
 ## Software factory, Phase F (decided 2026-10-19)
 
 Proposal §8 item 9 and §9.3. Starts after Phase 1's first PR. First slices: `bin/factory` F1

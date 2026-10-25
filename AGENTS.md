@@ -87,6 +87,14 @@ Each doc carries its own summary.
    push there, and `git worktree remove` it after the merge. In the shared checkout only fast-forward `master` and commit your own hunks to it with
    `git-commit-own`; if it is on a branch you do not own, say so to that branch's owner through `relay.py`, do not switch it away.
 
+10. **A message to another agent is not sent until it is sent through `session-finder/relay.py`, and not delivered until you have verified it** (operator, 2026-10-25:
+   "we always need to verify that the other agent got our message otherwise we may be on a broken one-way receive-only link"; the same day an agreement was written
+   only in a reply to the sender and never relayed back). Writing an answer in your own turn does not reach a peer; a relayed message from a peer is answered by `relay.py`
+   to that peer, not in prose. Read relay's status word: `delivered` is proof, `queued`, `accepted` or `unverified` is not. After a non-`delivered` status
+   check the target's transcript or inbox for the text (`--wait S` blocks for it), ask for a named ack (`ack <your agent id>`), and re-send or switch route
+   (`--via`) when none arrives. The first message to a new peer always asks for an ack, to prove the return path. A peer you cannot reach is reported to the operator,
+   never assumed read. Checklist for the queue: `docs/queue.md`, "Verified peer messaging".
+
 ## Machine context
 
 - **`acp-run --list` is the agent registry** (since 2026-10-08):
