@@ -229,6 +229,8 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- Codex automatic tab naming reads Herdr’s `result.pane` response and keeps missing titles absent instead of turning JSON null into `none-t` (2026-10-25).
+
 - Clarified dispatch waits: finish downloads before reading dependent artifacts, and use the documented load-watch precheck instead of starting the governor daemon (2026-10-25; direct integration).
 
 - Fixed unsafe OpenCode RTK automatic rewriting by disabling both entrypoints, safely migrating the exact former managed copy, refusing unsafe canonical sources and flagging unknown V2 copies (#68).
