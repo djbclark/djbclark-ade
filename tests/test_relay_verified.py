@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import sys
 import time
 import unittest
@@ -545,6 +546,69 @@ class TestFirstContact(Base):
 
     def test_no_ledger_means_no_link_line(self) -> None:
         self.assertNotIn("link", fleet.annotate_links([dict(self.target), dict(self.me)])[0])
+
+
+class TestCodexSenderRollout(Base):
+    """Codex P1, PR 74: fleet's herdr row of a Codex session carries its session id but no transcript, so a Codex sender could never
+    send a question or --needs-reply: the rollout is resolved by the exact session id before the expectation is required."""
+
+    CODEX_SID = "eeeeeeee-0000-4000-8000-000000000005"
+
+    def setUp(self) -> None:
+        super().setUp()
+        home = self.tmp / "codex-home"
+        self.rollout = home / "sessions" / "2026" / "10" / "25" / f"rollout-2026-10-25T00-00-00-{self.CODEX_SID}.jsonl"
+        self.rollout.parent.mkdir(parents=True)
+        self.rollout.write_text("{}\n")
+        saved = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(home)
+        self.addCleanup(lambda: os.environ.pop("CODEX_HOME", None) if saved is None else os.environ.__setitem__("CODEX_HOME", saved))
+        self.herdr_calls: list[tuple[str, ...]] = []
+        saved_herdr = fleet.herdr_json
+        fleet.herdr_json = lambda *a: self.herdr_calls.append(a) or {}    # never the real herdr
+        self.addCleanup(setattr, fleet, "herdr_json", saved_herdr)
+
+    def codex_me(self, **kw: Any) -> dict[str, Any]:
+        me = sess(id="w1:p9", name="cx-sender", agent="codex", sid=self.CODEX_SID, chan=("herdr", "w1:p9"), status="working", transcript=None, **kw)
+        me["self"] = True    # what fleet._other_herdr builds: the session id, no transcript
+        return me
+
+    def test_a_codex_sender_can_send_a_question_and_the_expectation_records_its_rollout(self) -> None:
+        rc, out, err = self.go("is the build green?", "--expect-ack", "cx1", rows=[self.codex_me()])
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(relay.expect_read("cx1")["tx"], str(self.rollout))
+        self.assertEqual(next(iter(json.loads(fleet.LINKS_FILE.read_text())["links"].values()))["tx"], str(self.rollout))
+        self.assertEqual(self.herdr_calls, [])    # the session id was known: no herdr call
+
+    def test_a_codex_sender_can_send_needs_reply(self) -> None:
+        rc, out, err = self.go("please merge the PR", "--needs-reply", "--expect-ack", "cx2", rows=[self.codex_me()])
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(relay.expect_read("cx2")["tx"], str(self.rollout))
+
+    def test_the_expectation_watches_the_rollout_from_where_it_was_at_the_send(self) -> None:
+        self.rollout.write_text("{}\n" * 5)
+        self.assertEqual(self.go("is the build green?", "--expect-ack", "cx3", rows=[self.codex_me()])[0], 0)
+        self.assertEqual(relay.expect_read("cx3")["mark"], self.rollout.stat().st_size)
+
+    def test_a_codex_sender_whose_rollout_cannot_be_found_is_still_refused(self) -> None:
+        self.rollout.unlink()
+        rc, _, err = self.go("is the build green?", "--expect-ack", "cx4", rows=[self.codex_me()])
+        self.assertEqual((rc, self.calls), (2, []), err)
+        self.assertIn("transcript", err)
+        self.assertIsNone(relay.expect_read("cx4"))
+
+    def test_a_codex_sender_with_two_rollouts_for_its_id_is_refused_not_guessed(self) -> None:
+        twin = self.rollout.parent / f"rollout-2026-10-25T01-00-00-{self.CODEX_SID}.jsonl"
+        twin.write_text("{}\n")
+        rc, _, err = self.go("is the build green?", "--expect-ack", "cx5", rows=[self.codex_me()])
+        self.assertEqual((rc, self.calls), (2, []), err)
+
+    def test_another_agent_without_a_transcript_is_still_refused_even_when_a_rollout_has_its_id(self) -> None:
+        me = self.codex_me()
+        me["agent"] = "claude"
+        rc, _, err = self.go("is the build green?", "--expect-ack", "cx6", rows=[me])
+        self.assertEqual((rc, self.calls), (2, []), err)
+        self.assertIn("transcript", err)
 
 
 if __name__ == "__main__":

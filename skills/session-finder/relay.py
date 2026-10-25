@@ -2872,6 +2872,9 @@ def _main(argv=None, sweep=True):
         with contextlib.suppress(Exception):    # cheap and best effort: never in the way of a relay
             sweep_all()
     if not a.plan:
+        if me is not None and not me.get("transcript"):    # fleet's herdr row of a Codex session has its id but no transcript: find its rollout by that exact id (Codex P1, PR 74); any other agent is left as it is
+            with contextlib.suppress(Exception):
+                pane_transcript(me)
         if (a.needs_reply or (me is not None and asks_for_reply(text) and not a.fyi)) and not a.expect_ack:
             print("relay: not sent: this message asks for a reply or action, so it needs --expect-ack ID (a record `--sweep` resolves when "
                   "the peer answers `ack ID`; `--pending` lists it). A `?` that is no question: --fyi", file=sys.stderr)
