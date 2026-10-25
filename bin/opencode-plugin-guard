@@ -44,6 +44,15 @@ has_v2() {
 
 sha() { python3 -c 'import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()[:12])' "$1"; }
 
+# Our former managed V2 shim is unsafe even when supplied as canonical input.
+is_known_unsafe_rtk() {
+  python3 - "$1" <<'PYHASH'
+import hashlib, pathlib, sys
+known = "8e46510ecdc95d4268838e435d33752d179675a6005b8de2483c7355b5d7da44"
+sys.exit(0 if hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() == known else 1)
+PYHASH
+}
+
 # upstream_or_drift <name> <live> <canonical> — v2 present but not our bytes.
 upstream_or_drift() {
   local name="$1" live="$2" canonical="$3"
@@ -73,16 +82,21 @@ handle() {
     log "  $name: no canonical copy at $canonical — skipping"
     return
   fi
+  if [ "$name" = rtk ] && is_known_unsafe_rtk "$canonical"; then
+    log "  rtk: canonical $canonical is the known unsafe shim; refresh it; no write"
+    rc=1
+    return
+  fi
+  if [ -L "$file" ] && [ ! -e "$file" ]; then
+    log "  $name: dangling or cyclic plugin symlink preserved; review its target; no write"
+    rc=1
+    return
+  fi
   local unsafe_rtk=0
-  if [ "$name" = rtk ] && [ -f "$file" ]; then
+  if [ "$name" = rtk ] && [ -f "$file" ] && is_known_unsafe_rtk "$file"; then
     # Only our exact former managed copy is automatically migrated. Preserve
     # custom/upstream code for review; pending requests never prove it safe.
-    if python3 - "$file" <<'PYHASH'
-import hashlib, pathlib, sys
-known = "8e46510ecdc95d4268838e435d33752d179675a6005b8de2483c7355b5d7da44"
-sys.exit(0 if hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() == known else 1)
-PYHASH
-    then unsafe_rtk=1; fi
+    unsafe_rtk=1
   fi
   if [ "$unsafe_rtk" = 1 ]; then
     log "  rtk: known unsafe automatic rewrite shim; migrate to disabled entrypoints"

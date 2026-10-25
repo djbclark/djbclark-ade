@@ -137,3 +137,35 @@ def test_migration_replaces_real_target_and_preserves_symlink(guard, tmp_path):
     assert p.returncode == 1, p.stdout + p.stderr
     assert live.is_symlink()
     assert target.read_bytes() == SAFE.read_bytes()
+
+
+@pytest.mark.parametrize("old", [None, "v1", "unsafe"])
+def test_unsafe_canonical_copy_is_refused_without_writing(guard, old):
+    plugins, run = guard
+    canonical = plugins.parents[2].parent / "canonical/rtk.ts"
+    assert canonical.exists()
+    shutil.copyfile(UNSAFE, canonical)
+    live = plugins / "rtk.ts"
+    if old == "v1":
+        live.write_text("export const plugin = async () => ({})\n")
+    elif old == "unsafe":
+        shutil.copyfile(UNSAFE, live)
+    before = live.read_bytes() if live.exists() else None
+    for args in [("--check",), ()]:
+        p = run(*args)
+        assert p.returncode == 1, p.stdout + p.stderr
+        assert "canonical" in p.stdout and "known unsafe shim" in p.stdout
+        assert "restored" not in p.stdout
+        assert (live.read_bytes() if live.exists() else None) == before
+
+
+def test_dangling_symlink_is_preserved_without_creating_destination(guard, tmp_path):
+    plugins, run = guard
+    target = tmp_path / "missing-parent/target.ts"
+    live = plugins / "rtk.ts"
+    live.symlink_to(target)
+    p = run()
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert "dangling or cyclic" in p.stdout
+    assert live.is_symlink()
+    assert not target.parent.exists()
