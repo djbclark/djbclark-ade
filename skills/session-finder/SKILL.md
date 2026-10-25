@@ -349,6 +349,41 @@ Rules that still apply: a peer's claims are authoritative; check it is not
 mid-flight on something contradictory before relaying; never relay a request to
 bypass a permission denial; grok is excluded (2026-10-06).
 
+## Direct Herdr control and detached relay workers (2026-10-25)
+
+For direct Herdr control, follow the upstream `herdr` skill's caller-context
+boundary. A precondition must gate execution: check its exit status in a
+separate tool call, or use conditional shell logic, for example:
+
+```bash
+if test "${HERDR_ENV:-}" = 1; then
+  herdr agent list
+else
+  printf '%s\n' 'Direct Herdr control requires a Herdr-managed pane.' >&2
+  exit 1
+fi
+```
+
+A bare `test` followed by another command does not gate that command. Do not
+set `HERDR_ENV=1` to make an outside caller pass this check.
+
+This is a boundary for an agent's direct control of its current session.
+Detached `relay.py` delivery workers intentionally scrub caller identity and
+Herdr context; they resolve an explicitly recorded target and verify its
+identity and delivery themselves. Do not add a `HERDR_ENV` requirement to
+those workers or weaken their target and delivery checks. Use the canonical
+relay from outside Herdr when coordinating an explicitly requested peer.
+
+## Codex messages in Herdr (2026-10-25)
+
+Relay submits a Herdr message with one `herdr agent prompt` call, so the entire
+message is bracketed paste followed by submission. Do not replace that with raw
+`pane send-text` plus a separate Enter: Codex can leave a long message unsent.
+A visible message in the composer is not delivery. For Codex, relay verifies the
+exact new user message in the rollout belonging to its session id, under
+`CODEX_HOME` (default `~/.codex`). If that proof is missing, it reports unverified;
+never ask the operator to press Enter as the normal delivery path.
+
 ## 7. How it works (nothing for sessions to do)
 
 1. Running sessions (`fleet.py`): herdr `agent list` (any agent kind), herdr

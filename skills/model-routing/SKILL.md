@@ -770,6 +770,10 @@ method that runs the waves.
    workflows `agent(..., {model, effort})`; Orca `worker-start --agent <TUI>
    --model --effort`; the per-CLI headless forms only where no ACP route exists
    (muse) or as a fallback.
+   For dispatch report paths use `--out DIR --name NAME` (writes
+   `DIR/NAME-report.md`); `--report PATH` belongs only to `acp-dispatch footer`,
+   not to the dispatch command.
+
 10. Model names get renamed and retired: a name from an old plan or roster is a
     hint. Check `acp-run <agent> --info` before committing to an id.
 11. **Context hygiene is part of cost.** Claude Code compacts a session by
