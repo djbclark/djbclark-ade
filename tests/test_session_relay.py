@@ -117,6 +117,34 @@ class TestRelayRules(unittest.TestCase):
         self.assertEqual([s["id"] for s in relay.find("ffff0000-99", ss)], ["ffff0000"])
         self.assertEqual(relay.find("nope", ss), [])
 
+    def test_find_by_herdr_pane_reaches_a_launch_row_and_prefers_the_unfinished_one(self) -> None:
+        # a launch row has its pane only in chan; a reused pane lists the finished first launch too (2026-10-25)
+        launch1 = sess(id="2026-a", name="baton", sid="2026-a", host="acp", chan=("herdr", "w2N:p14"), finished="done")
+        launch2 = sess(id="2026-b", name="baton", sid="2026-b", host="acp", chan=("herdr", "w2N:p14"))
+        tui = sess(id="tui00001", name="tui", pane="w2N:p9", chan=("herdr", "w2N:p9"))
+        ss = [launch1, launch2, tui]
+        self.assertEqual([s["id"] for s in relay.find("w2N:p14", ss)], ["2026-b"])
+        self.assertEqual([s["id"] for s in relay.find("w2N:p9", ss)], ["tui00001"])
+        self.assertEqual([s["id"] for s in relay.find("2026-a", ss)], ["2026-a"])    # an exact id still finds a finished one
+        self.assertEqual([s["id"] for s in relay.find("w2N:p14", [launch1])], ["2026-a"])    # nothing else: still reported
+
+    def test_find_by_herdr_agent_name_goes_through_herdr(self) -> None:
+        ss = [sess(id="2026-b", chan=("herdr", "w2N:p14")), sess(id="other", name="x", chan=("herdr", "w2N:p9"))]
+        calls: list[tuple[str, ...]] = []
+
+        def fake_herdr_json(*args: str) -> dict[str, Any]:
+            calls.append(args)
+            return {"agent": {"pane_id": "w2N:p14"}} if args == ("agent", "get", "sf-succ-1") else {}
+
+        real = relay.fleet.herdr_json
+        relay.fleet.herdr_json = fake_herdr_json
+        try:
+            self.assertEqual([s["id"] for s in relay.find_herdr_agent("sf-succ-1", ss)], ["2026-b"])
+            self.assertEqual(relay.find_herdr_agent("no-such-agent", ss), [])
+        finally:
+            relay.fleet.herdr_json = real
+        self.assertEqual(calls[0], ("agent", "get", "sf-succ-1"))
+
     def test_type_line_through_herdr_is_send_text_then_enter(self) -> None:
         with tempfile.TemporaryDirectory() as t:
             calls = Path(t) / "calls"

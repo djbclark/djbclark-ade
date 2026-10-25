@@ -409,6 +409,18 @@ run. Put the whole report, in the shape the delivery contract describes, in your
 instead: an `acp-run` final message is not cut at 4,000 characters, and acp-dispatch saves it to
 the report path and marks it done for you. This overrides items 1, 2 and 7 of the delivery contract.
 """
+# codex has no Read/Grep/Glob tools: its read-only sandbox runs shell commands without asking and refuses
+# writes, and the Read/Grep/Glob wording above made codex reviews stop with BLOCKED (2026-10-25).
+CODEX_READONLY_NOTE = """
+**This run is read-only (`--perm read-only`).** Your only tool is a shell in a read-only sandbox: read
+with `rg`, `cat`, `ls` and `git diff`, `git log` and `git show`, and run shell commands freely (the sandbox
+runs them without asking). You cannot change anything: you have no way to write `{report}` or create its
+`.done` marker, so do not try, and a write attempt stops the run. Put the whole report, in the shape the
+delivery contract describes, in your final message instead: an `acp-run` final message is not cut at
+4,000 characters, and acp-dispatch saves it to the report path and marks it done for you. This overrides
+items 1, 2 and 7 of the delivery contract.
+"""
+READONLY_NOTES = {"codex": CODEX_READONLY_NOTE}
 ADVISOR_NOTE = """
 ## Advisor role
 
@@ -1107,7 +1119,7 @@ def generated_tail_re() -> re.Pattern:
     budget_text = ("There is no time limit for this slice. Write the report as soon as the work is verified.\n"
                    "|" + _template_re(BUDGET_TEXT.split("\n\n", 1)[1], minutes=r"\S+",
                                       wrapup="(?:" + _template_re(WRAPUP_BUDGET, grace=r"\d+") + ")?"))
-    notes = "|".join(_template_re(n) for n in (DENY_NOTE, READONLY_NOTE))
+    notes = "|".join(_template_re(n) for n in (DENY_NOTE, READONLY_NOTE, CODEX_READONLY_NOTE))
     return re.compile(
         rf"\n*{footer_heading_re()}\n\n{footer_items_re()}"
         rf"(?:{notes})?"
@@ -4125,7 +4137,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     # --perm deny refuses every permission request, the report's Write included, so the footer's
     # "write the report" cannot be followed (2026-10-11: an agy review was refused that Write and
     # had to be recovered from its final message). Tell the agent the final message is the report.
-    deny_note = {"deny": DENY_NOTE, "read-only": READONLY_NOTE}.get(perm, "").format(report=agent_report)
+    deny_note = {"deny": DENY_NOTE, "read-only": READONLY_NOTES.get(a.agent, READONLY_NOTE)}.get(perm, "").format(
+        report=agent_report)
     advisor_note = ("\n" + ADVISOR_NOTE.strip() + "\n") if role == "advise" else ""
     checkpoint_note = CHECKPOINT_TEXT.format(report=agent_report) if checkpoint else ""
     # Advisor section sits after the prompt and before the footer (operator 2026-10-18). The inbox

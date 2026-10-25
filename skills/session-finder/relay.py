@@ -862,16 +862,34 @@ def paseo_steer_refusal(s, steer=False):
 HEX_PREFIX = re.compile(r"[0-9a-f][0-9a-f-]{5,35}")    # a Paseo agent id prefix: 6 or more characters of a uuid
 
 
+def pane_of(s):
+    """The herdr pane a session lives in: the herdr-detected rows carry `pane`, a launch row only its channel."""
+    ch = s.get("chan") or (None, None)
+    return s.get("pane") or (ch[1] if ch[0] == "herdr" else None)
+
+
+def find_herdr_agent(ident, ss):
+    """Sessions in the pane of the herdr agent named IDENT (`herdr agent start NAME`; herdr resolves the name, its
+    agent list does not show it), so a name given to a TUI started by launch.py or self-slash reaches it."""
+    pane = (fleet.herdr_json("agent", "get", ident).get("agent") or {}).get("pane_id")
+    return live_first([s for s in ss if pane and pane_of(s) == pane])
+
+
+def live_first(hits):
+    """A pane reused by a second launch lists the first, finished one too: an unfinished row wins."""
+    return [s for s in hits if not s.get("finished")] or hits
+
+
 def find(ident, ss):
-    """Sessions IDENT names: exactly (id, name, session id, pane, Paseo agent id), else by prefix: a session id
+    """Sessions IDENT names: exactly (id, name, session id, herdr pane, Paseo agent id), else by prefix: a session id
     of 8 or more characters, or a hex prefix of 6 or more characters of a Paseo agent id. The prefix kinds are
     pooled and a row counts once, so two agents sharing a prefix are an ambiguity (the caller refuses it). The
     name of a Paseo agent with no Claude registry row is its workspace title, generated from its first prompt
     ("/baton", "say hi"): it never matches by name, only by id or Paseo id (adversary, 2026-10-23)."""
     hits = [s for s in ss if ident in (s["id"], None if s.get("host") == "paseo" and not s.get("sid") else s["name"],
-                                       s.get("sid"), s.get("pane"), s.get("paseo"))]
+                                       s.get("sid"), pane_of(s), s.get("paseo"))]
     if hits:
-        return hits
+        return live_first(hits) if all(pane_of(s) == ident for s in hits) else hits
     if len(ident) >= 8:
         hits = [s for s in ss if (s.get("sid") or "").startswith(ident)]
     if HEX_PREFIX.fullmatch(ident):
@@ -2253,6 +2271,8 @@ def main(argv=None, sweep=True):
             sweep_all()
     listed = fleet.sessions()
     hits = find(a.ident, listed)
+    if not hits and not UUID.fullmatch(a.ident):
+        hits = find_herdr_agent(a.ident, listed)
     if not hits and UUID.fullmatch(a.ident):
         hits = [s for s in [paseo_session(a.ident)] if s]    # a PASEO_AGENT_ID fleet does not list
     if len(hits) != 1:

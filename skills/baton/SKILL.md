@@ -22,6 +22,12 @@ has nothing to resume (no open work, `latest_handoff` already finished), say
 so and offer the `loose` Rule 4 choices (handoff and continue, finish and
 archive, keep working); never write another handoff automatically.
 
+A `/baton` can arrive three ways: typed by the operator, queued by `self-slash "/new"` (the same agent, fresh
+context), or as the first prompt of a successor another session started (`self-slash --finish --successor` on
+Paseo or herdr, `launch.py start --baton`). Treat all three alike. Since 2026-10-25 a successor the operator will
+talk to is a real TUI (an `acp-run` pane has no readable transcript); a session that does turn out to be an
+`acp-run` client (`ACP_RUN_AGENT=1`) cannot use `self-slash` (exit 9), so it ends with a document-only handoff.
+
 This is a thin entry point, not a separate protocol. Follow the
 `session-handoff` skill's **Reader protocol** section exactly (read
 `SESSION_LOG.md` if present, check sidecars newer than `updated_at`, run

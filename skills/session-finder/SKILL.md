@@ -178,7 +178,14 @@ b. **Running but finished** (`finished: /handoff` or `/quit`: its last prompt wa
    name one; `fleet.py ended` lists them) and hands the new session the canonical
    log path, so it never falls into the "which chain?" prompt. `--pane` reuses the
    finished session's pane after sending it `/exit` (refused if a draft is in its
-   input box); a pane that is gone falls back to a new tab.
+   input box); a pane that is gone falls back to a new tab. `--model` for an acp-run claude is checked before any tab opens
+   (`claude-sonnet-5-5` is mapped to the `claude-sonnet-5` that `acp-run claude` takes; an unknown id exits 2,
+   2026-10-25). **On herdr, `--baton` with claude or codex starts a real TUI, not an acp-run session**
+   (djbclark, 2026-10-25: an ACP pane shows only "⚙ Terminal" lines, nothing a human can read or steer):
+   `herdr agent start NAME --kind K --pane P -- <yolo, model, effort>` then `herdr agent prompt` with the brief,
+   `--effort E` allowed, `--acp` keeps acp-run, `--tui` forces a TUI without `--baton`. A TUI session can take
+   `/new`, `/compact` and another handoff; an acp-run one cannot (`self-slash` exits 9). `--no-interactive`
+   (a dispatched slice) is never a TUI. A session handing ITSELF off uses `self-slash` (handoff Step 9), not this.
 c. **Ended, with a handoff chain for its directory** → the same `launch.py --baton`.
 d. **Ended, no handoff, and the task needs that exact context** (a debugging state
    only that conversation holds) → resume it, but only when the transcript is small:
