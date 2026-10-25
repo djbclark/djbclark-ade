@@ -41,6 +41,7 @@ class Rig:
         monkeypatch.setattr(helm, "screen", lambda s, lines=30, width=160: self.read(s, lines, width) or "")
         monkeypatch.setattr(helm, "screen_read", self.read)
         monkeypatch.setattr(helm, "submit", lambda s, text: self.sent.append(text) or True)
+        monkeypatch.setattr(helm, "submit_attested", lambda s, text: (self.sent.append(text) or True, None))
 
     def read(self, s: dict[str, Any], lines: int = 30, width: int = 160) -> str | None:
         """What successive reads return: rows, or None for a failed read (the last entry repeats)."""
@@ -211,3 +212,114 @@ def test_show_hashes_and_displays_one_capture(monkeypatch: pytest.MonkeyPatch, t
     assert "| row 7" not in out and "| row 8" in out    # the last 22 rows of that one capture
     assert f"screen-fp: {helm.fp_of(rig.s, chr(10).join(a_rows))}" in out
     assert f"screen-fp: {helm.fp_of(rig.s, chr(10).join(b_rows))}" not in out
+
+
+# ---- the exact herdr argv: an undetected pane has no herdr AGENT entry (agent_not_found), so only `herdr pane ...` verbs reach it ----
+
+
+class Argv:
+    """Replaces helm.run: records every argv. READS are the successive `read` outputs (rc 0); FAIL maps a verb pair to its exit status."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, s: dict[str, Any], kind: str = "unknown") -> None:
+        self.s, self.calls, self.reads, self.fail = s, [], [list(READY)], {}
+        monkeypatch.setattr(helm, "STATE_DIR", tmp_path / "state")
+        monkeypatch.setattr(helm, "STATE", tmp_path / "state" / "state.json")
+        monkeypatch.setattr(helm, "find", lambda ident, state: (self.s, item(self.s, kind)))
+        monkeypatch.setattr(helm, "run", self.run)
+        monkeypatch.setattr(helm.time, "sleep", lambda secs: None)
+        monkeypatch.setattr(helm, "HERDR", "herdr")
+
+    def run(self, *cmd: str, timeout: int = 10) -> tuple[int, str]:
+        self.calls.append(list(cmd))
+        verb = " ".join(cmd[1:3])
+        if cmd[2] == "read":
+            n = sum(1 for c in self.calls if c[2] == "read") - 1
+            return self.fail.get(verb, 0), "\n".join(self.reads[min(n, len(self.reads) - 1)])
+        return self.fail.get(verb, 0), ""
+
+    def verbs(self) -> list[str]:
+        return [" ".join(c[1:3]) for c in self.calls]
+
+    def fp(self) -> str | None:
+        return helm.screen_fp(self.s)
+
+    def send(self, fp: str | None, text: str = "please say ok") -> None:
+        helm.cmd_send(argparse.Namespace(id=self.s["id"], prompt=text, screen_fp=fp), {})
+
+
+def test_an_undetected_row_is_read_with_pane_read_and_a_detected_one_with_agent_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    rig = Argv(monkeypatch, tmp_path, row())
+    assert rig.fp() is not None
+    assert rig.calls == [["herdr", "pane", "read", "w1:p1", "--source", "visible", "--lines", "200"]]
+    rig = Argv(monkeypatch, tmp_path, row(undetected=False, status="idle", agent="codex"), kind="idle")
+    helm.screen(rig.s, 30)
+    assert rig.calls == [["herdr", "agent", "read", "w1:p1", "--source", "visible", "--lines", "30"]]
+
+
+def test_an_attested_send_reads_twice_then_types_and_presses_enter_with_pane_verbs_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    rig = Argv(monkeypatch, tmp_path, row())
+    fp = rig.fp()
+    rig.calls.clear()
+    rig.send(fp)
+    assert rig.verbs() == ["pane read", "pane read", "pane send-text", "pane send-keys"]    # both fingerprint checks come first
+    assert rig.calls[2] == ["herdr", "pane", "send-text", "w1:p1", "please say ok"]
+    assert rig.calls[3] == ["herdr", "pane", "send-keys", "w1:p1", "enter"]
+    assert not any(c[1] == "agent" for c in rig.calls)
+
+
+def test_a_changed_screen_types_nothing_and_presses_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    rig = Argv(monkeypatch, tmp_path, row())
+    fp = rig.fp()
+    rig.calls.clear()
+    rig.reads = [[*READY, "Approve this command? [y/N]"]]
+    with pytest.raises(SystemExit):
+        rig.send(fp)
+    assert rig.verbs() == ["pane read"]
+    rig.calls.clear()
+    rig.reads = [READY, [*READY, "Approve this command? [y/N]"]]    # the last look before the submit differs
+    with pytest.raises(SystemExit):
+        rig.send(fp)
+    assert rig.verbs() == ["pane read", "pane read"]
+
+
+@pytest.mark.parametrize("status", [1, 127])
+def test_failed_or_timed_out_typing_stops_before_enter_and_says_unverified(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: int) -> None:
+    rig = Argv(monkeypatch, tmp_path, row())
+    fp = rig.fp()
+    rig.calls.clear()
+    rig.fail["pane send-text"] = status
+    with pytest.raises(SystemExit) as e:
+        rig.send(fp)
+    assert rig.verbs() == ["pane read", "pane read", "pane send-text"]    # no Enter, no second try, no agent verb
+    msg = str(e.value)
+    assert "unverified" in msg and "Do not resend" in msg and "NOT pressed" in msg
+
+
+def test_a_failed_enter_after_typing_is_unverified_and_not_retried(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    rig = Argv(monkeypatch, tmp_path, row())
+    fp = rig.fp()
+    rig.calls.clear()
+    rig.fail["pane send-keys"] = 1
+    with pytest.raises(SystemExit) as e:
+        rig.send(fp)
+    assert rig.verbs() == ["pane read", "pane read", "pane send-text", "pane send-keys"]
+    assert "typed" in str(e.value) and "Enter failed" in str(e.value) and "Do not resend" in str(e.value)
+
+
+def test_newlines_fold_and_other_control_characters_refuse_before_typing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    rig = Argv(monkeypatch, tmp_path, row())
+    fp = rig.fp()
+    rig.calls.clear()
+    rig.send(fp, "line one\nline two\t end")
+    assert rig.calls[2][-1] == "line one line two end"    # a raw newline would have submitted early
+    rig.calls.clear()
+    with pytest.raises(SystemExit) as e:
+        rig.send(fp, "esc \x1b[31m here")
+    assert rig.verbs() == ["pane read", "pane read"]
+    assert "control characters" in str(e.value)
+
+
+def test_a_detected_idle_session_still_submits_with_agent_prompt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    rig = Argv(monkeypatch, tmp_path, row(undetected=False, status="idle", agent="codex"), kind="idle")
+    rig.send(None)
+    assert rig.calls == [["herdr", "agent", "prompt", "w1:p1", "please say ok"]]

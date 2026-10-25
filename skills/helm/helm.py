@@ -23,6 +23,10 @@
                                         only as a ticking timer is not seen), read again just before the submit; an unreadable screen
                                         never matches. Refused for any other kind of session, the audit, an unreadable or changed screen,
                                         and another pane or process. It reports a submit, not a read: confirm with `show` or a named ack.
+                                        Herdr has no agent entry for such a TUI (`agent read` and `agent prompt` fail agent_not_found), so
+                                        helm reads with `herdr pane read` and types with `pane send-text` then `pane send-keys enter`, only
+                                        after the second fingerprint check; a failed typing never presses Enter, is never retried and reads
+                                        "unverified, do not resend". Newlines and tabs in the text fold to spaces; other control characters refuse.
     helm.py audit <id>                  send /loose and remember that this session was audited
     helm.py skip <id>                   hide this item until the session changes
     helm.py keys <id> <key>...          raw keys, for a prompt helm cannot parse (read `show` first)
@@ -73,7 +77,7 @@ def _capture(s, lines):
     """(exit status, raw output) of reading session S's pane through its channel; (None, "") when it has none."""
     kind, target = s.get("chan") or (None, None)
     if kind == "herdr":
-        return run(HERDR, "agent", "read", target, "--source", "visible", "--lines", str(lines))
+        return run(HERDR, "pane" if pane_api(s) else "agent", "read", target, "--source", "visible", "--lines", str(lines))
     if kind == "orca":
         return run("orca", "terminal", "read", "--terminal", target)
     if kind == "tmux":
@@ -126,6 +130,35 @@ def submit(s, text):
     if kind == "orca":
         return run("orca", "terminal", "send", "--terminal", target, "--text", text, "--enter", timeout=20)[0] == 0
     return send_text(s, text) and send_keys(s, "enter")
+
+
+ENTER_DELAY = 0.5    # between the text and its Enter, as relay.py: a burst can be read as one paste
+
+
+def pane_api(s):
+    """True for a herdr pane whose TUI herdr does not detect (fleet's `undetected` row). Herdr has no AGENT entry for it, so every
+    `herdr agent ...` call fails with agent_not_found (2026-10-25, a native Hermes TUI: `agent read` rc 1, `pane read` fine); only the
+    `herdr pane ...` verbs reach it. A detected agent keeps the agent verbs."""
+    return bool(s.get("undetected")) and (s.get("chan") or ("",))[0] == "herdr"
+
+
+def submit_attested(s, text):
+    """(True, None) once TEXT was typed into the undetected pane S and Enter pressed, else (False, why). Only for a row `attested_unknown`
+    accepted, after its last fingerprint check; `herdr pane send-text` then `herdr pane send-keys ... enter`, never an agent verb. A failed or
+    timed-out typing is uncertain (part of the text may be in the input box): Enter is NOT pressed, nothing is retried and no other route is
+    tried. Newlines and tabs fold to spaces (a newline would submit early); any other control character refuses before anything is typed."""
+    text = " ".join(text.split())
+    if not text or any(ord(c) < 32 or ord(c) == 127 for c in text):
+        return False, "nothing sent: the text is empty or holds control characters"
+    target = s["chan"][1]
+    if run(HERDR, "pane", "send-text", target, text, timeout=20)[0] != 0:
+        return False, (f"unverified: typing into {s['id']} failed or timed out, so part of the text may sit in its input box; Enter was "
+                       f"NOT pressed. Do not resend; check `helm.py show {s['id']}`")
+    time.sleep(ENTER_DELAY)
+    if run(HERDR, "pane", "send-keys", target, "enter", timeout=20)[0] != 0:
+        return False, (f"unverified: the text was typed into {s['id']} but Enter failed or timed out; it may sit in its input box. "
+                       f"Do not resend; check `helm.py show {s['id']}`")
+    return True, None
 
 
 FP_LINES, FP_WIDTH = 200, 400    # what `screen_fp` reads: every visible row, and past the 160 columns the other reads clip to
@@ -678,7 +711,12 @@ def cmd_send(a, state):
     text = audit_text(s) if a.prompt is None else a.prompt
     if fp is not None and screen_fp(s) != fp:    # the last look before the keys; an unreadable screen (None) never equals a fingerprint
         sys.exit(f"helm: the screen of {it['id']} changed or could not be read just before the submit; nothing sent")
-    if not submit(s, text):
+    if fp is not None:    # attested, undetected: herdr has no agent entry for it, so the pane verbs; no fallback, no resend
+        ok, why = submit_attested(s, text)
+        if not ok:
+            sys.exit(f"helm: {why}")
+        text = " ".join(text.split())
+    elif not submit(s, text):
         sys.exit(f"helm: could not submit to {it['id']}")
     if a.prompt is None:
         st = state[s["id"]]
