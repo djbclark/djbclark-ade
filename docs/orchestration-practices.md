@@ -127,6 +127,15 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
    are an early warning, not a replacement.¹
 3. A check hook on task completion (lint plus tests before a task counts as
    done) catches what a worker forgot.³
+4. **Reuse CI and its watcher (2026-10-25).** Before manually dispatching a
+   workflow, check its triggers and existing runs for this branch and head.
+   When opening a PR will trigger the required checks, finish the pre-PR
+   review and use that automatic run rather than dispatching the same suite
+   first. Keep one watcher for the chosen run; record its PID and run ID so a
+   successor can reuse it. If an older watcher is redundant, stop that local
+   watcher only; cancelling an already running workflow requires the
+   operator's approval. Repeat tests only for changed code, failures or an
+   unresolved validation concern.
 
 ## 7. Measure, or the savings are a guess
 
