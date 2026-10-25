@@ -857,3 +857,55 @@ def test_r11_f4_a_plain_clone_and_init_still_work(world, tmp_path, args):
     r = shim(world.state, args, tmp_path, who="B")
     assert r.returncode == 0, r.stderr
     assert (tmp_path / "d").is_dir()
+
+
+def _acp_env(tmp_path, command=None):
+    """The environment acp-run gives every agent: two GIT_CONFIG_COUNT pairs (tools/acp-run/acp-run, git_identity_guard),
+    with HOME in a temp dir that holds a harmless guard script at acp-run's fixed path."""
+    home = tmp_path / "acphome"
+    guard = home / ".cache" / "acp-run" / "git-identity-guard.sh"
+    guard.parent.mkdir(parents=True)
+    guard.write_text("#!/bin/bash\nexit 0\n")
+    guard.chmod(0o755)
+    return str(guard), {"HOME": str(home),
+                        **_count_env([("hook.acp-run-identity.event", "reference-transaction"),
+                                      ("hook.acp-run-identity.command", command or str(guard))])}
+
+
+def test_r11_f6_the_two_config_pairs_acp_run_puts_in_every_agents_environment_are_allowed(world, tmp_path):
+    _, extra = _acp_env(tmp_path)
+    r = shim(world.state, ["branch", "x1"], world.repo, who="B", **extra)
+    assert r.returncode == 0, r.stderr
+    assert git(world.state, ["rev-parse", "--verify", "x1"], world.repo).returncode == 0
+    r = shim(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B", **extra)
+    assert refused(r), r.stderr                                  # the claimed branch is still guarded beside them
+    assert world.cb() != world.main()
+
+
+def test_r11_f6_the_exemption_is_those_two_pairs_from_the_environment_and_nothing_else(world, tmp_path):
+    guard, extra = _acp_env(tmp_path)
+    other = tmp_path / "other.sh"
+    other.write_text("#!/bin/bash\nexit 0\n")
+    cases = {
+        "another command value": {**extra, "GIT_CONFIG_VALUE_1": str(other)},
+        "the event pair through -c": None,
+        "the command pair through GIT_CONFIG_PARAMETERS": {"GIT_CONFIG_PARAMETERS": f"'hook.acp-run-identity.command={guard}'"},
+        "a third pair": {**extra, "GIT_CONFIG_COUNT": "3", "GIT_CONFIG_KEY_2": "hook.evil.event",
+                         "GIT_CONFIG_VALUE_2": "reference-transaction"},
+        "another event value": _count_env([("hook.acp-run-identity.event", "pre-push")]),
+    }
+    for name, env in cases.items():
+        if env is None:
+            r = shim(world.state, ["-c", "hook.acp-run-identity.event=reference-transaction", "branch", "x1"], world.repo,
+                     who="B")
+        else:
+            r = shim(world.state, ["branch", "x1"], world.repo, who="B", **env)
+        assert r.returncode == 77 and "hook-config" in r.stderr, (name, r.returncode, r.stderr)
+    r = shim(world.state, ["-c", "hook.acp-run-identity.event=reference-transaction", "branch", "x1"], world.repo, who="B",
+             **extra)
+    assert r.returncode == 77 and "hook-config" in r.stderr, ("a -c copy beside the env pair", r.returncode, r.stderr)
+
+
+def test_r11_f7_a_hook_or_include_key_in_the_257th_env_pair_is_refused_by_the_per_key_rule(world):
+    _held(world, shim(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B",
+                      **_pairs(257, ("include.path", "/dev/null"))))

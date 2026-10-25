@@ -743,8 +743,8 @@ class GitCall:
 _CONFIG_FILE_ENV = ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG")
 
 
-def _env_config(env: dict[str, str]) -> list[tuple[str, str]]:
-    """Config git reads from the environment: GIT_CONFIG_COUNT/KEY_n/VALUE_n, then GIT_CONFIG_PARAMETERS."""
+def _env_count_config(env: dict[str, str]) -> list[tuple[str, str]]:
+    """Config git reads from GIT_CONFIG_COUNT/KEY_n/VALUE_n."""
     out: list[tuple[str, str]] = []
     try:
         count = int(env.get("GIT_CONFIG_COUNT", "0") or 0)
@@ -754,6 +754,12 @@ def _env_config(env: dict[str, str]) -> list[tuple[str, str]]:
         k = env.get(f"GIT_CONFIG_KEY_{n}")
         if k:
             out.append((_ckey(k), env.get(f"GIT_CONFIG_VALUE_{n}", "")))
+    return out
+
+
+def _env_config(env: dict[str, str]) -> list[tuple[str, str]]:
+    """Config git reads from the environment: GIT_CONFIG_COUNT/KEY_n/VALUE_n, then GIT_CONFIG_PARAMETERS."""
+    out = _env_count_config(env)
     params = env.get("GIT_CONFIG_PARAMETERS", "")
     if params:
         try:
@@ -1486,6 +1492,39 @@ def _template_decision(call: GitCall, env: dict[str, str], alt: str) -> Optional
     return None
 
 
+# The two config pairs acp-run appends to every agent's environment (GIT_CONFIG_COUNT/KEY_n/VALUE_n; tools/acp-run/acp-run,
+# git_identity_guard): a `reference-transaction` config hook that refuses an agent's branch update with the wrong git identity.
+# A config hook only ADDS a hook (measured 2026-10-25, git 2.56: `hook.<name>.enabled=false` does not stop the hooks
+# directory's hook), so these two cannot switch the ref guard off. Exempt exactly this (key, value) shape, from the
+# environment's COUNT pairs only: never `-c`, `--config-env` or GIT_CONFIG_PARAMETERS, and no other `hook.*` key.
+ACP_RUN_IDENTITY_EVENT = ("hook.acp-run-identity.event", "reference-transaction")
+ACP_RUN_IDENTITY_COMMAND_KEY = "hook.acp-run-identity.command"
+
+
+def _acp_run_guard_path() -> str:
+    return os.path.realpath(str(Path.home() / ".cache/acp-run/git-identity-guard.sh"))
+
+
+def _acp_run_pair(k: str, v: str) -> bool:
+    return (k, v) == ACP_RUN_IDENTITY_EVENT or (k == ACP_RUN_IDENTITY_COMMAND_KEY and os.path.realpath(v) == _acp_run_guard_path())
+
+
+def _unexempted_config(call: GitCall, env: dict[str, str]) -> list[tuple[str, str]]:
+    """`call.config` minus the acp-run pairs that came from the environment's COUNT pairs: each such pair is spent once, so a
+    second copy of it (from `-c`, GIT_CONFIG_PARAMETERS or more COUNT pairs than the env holds) stays judged."""
+    budget: dict[tuple[str, str], int] = {}
+    for k, v in _env_count_config(env):
+        if _acp_run_pair(k, v):
+            budget[(k, v)] = budget.get((k, v), 0) + 1
+    out: list[tuple[str, str]] = []
+    for k, v in call.config:
+        if budget.get((k, v), 0) > 0:
+            budget[(k, v)] -= 1
+        else:
+            out.append((k, v))
+    return out
+
+
 def _redirect_decision(call: GitCall, env: dict[str, str]) -> Optional[Decision]:
     """Rule (ii): the call, its environment or a `git config` write would disable, move or extend the hooks. git answers
     for `core.hooksPath` (any value, empty included) in the scopes a call or its environment controls: command (-c,
@@ -1493,7 +1532,7 @@ def _redirect_decision(call: GitCall, env: dict[str, str]) -> Optional[Decision]
     repository's own (local/worktree) hooksPath is a choice of the repository, not of the call: not refused (the hooks do not
     run there; `install` says so, exit 78). When git cannot answer, the call is refused with that reason (fail closed)."""
     alt = "the ref guard lives in git hooks; nothing may redirect or switch them off. Ask the operator"
-    for k, _ in call.config:
+    for k, _ in _unexempted_config(call, env):
         if _hook_key(k):
             return _closed("hook-config", f"`{_esc(k)}` set on the command line or in the environment: {alt}")
     state, scoped = _config_scopes(call, env)
