@@ -644,7 +644,9 @@ def build_parser():
                     "(design-basicmemory W3/R6). Never writes to the store.",
         epilog="Exit status: 0 no findings, 1 findings, 2 error (including a bad "
                "BM_LINT_* value, an unlistable store root, or a run that read no note while "
-               "some were skipped). --json output is local-only: it names note paths.")
+               "some were skipped). A note that cannot be parsed is listed under skipped and the rest "
+               "of the run goes on; an internal error prints the exception class only. --json output "
+               "is local-only: it names note paths.")
     ap.add_argument("store", nargs="?", default=os.environ.get("BM_LINT_STORE", DEFAULT_STORE),
                     help="store directory to lint (default: $BM_LINT_STORE else %s)" % DEFAULT_STORE)
     ap.add_argument("--json", action="store_true",
