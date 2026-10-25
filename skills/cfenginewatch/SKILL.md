@@ -3,7 +3,7 @@ name: cfenginewatch
 description: >-
   Make this agent session the one CFEngine upstream watcher: register it with
   fleet-watch's upstream-PR watcher (`fleet-watch upstream --relay-to`) so every
-  reviewer comment, review, merge or close on djbclark's upstream issues and PRs
+  reviewer comment, review, merge or close on djbclark's upstream issues, PRs and Discussions
   (cfengine/core, libntech) is relayed here within 5 minutes and worked at once
   through /bigteam, replacing any previous watcher. Use for /cfenginewatch,
   "watch the cfengine PRs", "you take the upstream events", "move the cfengine
