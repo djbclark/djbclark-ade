@@ -1,0 +1,799 @@
+#!/usr/bin/env python3
+"""watch: idempotent launcher that keeps one watcher agent per domain (the engine behind `/watch`).
+
+  watch status [--json]
+  watch up [DOMAIN...] [--dry-run] [--force] [--probe] [--exclude SVC[,SVC]] [--json]
+  watch down DOMAIN [--dry-run]
+
+A domain is a role one agent session holds: the CFEngine upstream-PR watcher, the Paseo-contribution
+watcher, the load watcher, ... Each has a skill that registers the calling session (`/cfenginewatch`,
+`/paseowatch`, `/loadwatch`). `watch up` makes sure each role has a live, reachable holder and starts a Paseo
+agent that runs the skill when it does not. No model runs here: the table is config/watch.toml (WATCH_REGISTRY
+overrides), the decisions are deterministic and each is printed with its reason and appended to
+~/.local/state/watch/watch.log (WATCH_STATE overrides).
+
+status   read-only: per domain who holds the role, whether the holder is reachable, and the plan `up` would
+         launch (provider, model, thinking, context, why). Starts nothing, sends nothing.
+up       per domain, in this order:
+           1. a live holder is never replaced (that would throw away work in flight); `--force` replaces it
+              by starting a new watcher, whose own registration tells the old one
+           2. a holder that is gone or unreachable, or no holder at all, gets one new watcher
+           3. a launch in progress or an agent started earlier and still registering counts as claimed:
+              ~/.local/state/watch/<domain>.json plus a per-domain flock, so two concurrent `up` runs
+              never double-start, and a record whose agent no longer exists is dropped
+           4. registration is verified: the domain's own status command must show the NEW agent as holder and
+              its channel test must pass within register_timeout_s; otherwise `not registered: <reason>`,
+              exit 1, the agent is left running for inspection
+         `--dry-run` prints the same decisions with no side effects; `--probe` also sends the channel test
+         line to a live Paseo holder (default: a holder that Paseo lists as alive counts, because the test line
+         costs the holder a model turn each tick)
+down     drops the role through the domain's off_cmd (which clears only if the agent we started still holds
+         it) and archives that agent; an agent `watch` did not start is never touched
+
+Model choice (printed with every plan): `route_agent.py plan --kinds K --json` for the domain's kind (K =
+kind_idle when the domain had no events in the window, else kind), mapped to a Paseo provider that `paseo
+provider ls` reports available; effort from recent complexity (events in the window, pending events, brief
+sizes, route_agent calibrate outcomes for the kind), never above route_agent's own effort and never above
+high; a `<model>[1m]` variant only when the domain's briefs need more than ~120k tokens. No eligible route:
+the domain is not launched and the reason printed. Never Fable (refused even if routed).
+
+Exit: 0 all domains watched or launched and registered (or claimed by a concurrent run); 1 a launch did not
+register or errored; 2 usage; 3 a domain has no eligible route.
+Env: WATCH_REGISTRY, WATCH_STATE, WATCH_PASEO, WATCH_NEW_SEAT, WATCH_ROUTE_AGENT, WATCH_FLEET_WATCH,
+WATCH_LOAD_WATCH (tool paths; the tests point them at stubs).
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+import tomllib
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+HERE = Path(os.path.realpath(__file__)).parent
+ROOT = HERE.parent
+HOME = Path(os.environ.get("HOME", str(Path.home())))
+STATE = Path(os.environ.get("WATCH_STATE") or HOME / ".local/state/watch")
+FW_STATE = Path(os.environ.get("WATCH_FLEET_STATE") or HOME / ".local/state/fleet-watch")
+LW_STATE = Path(os.environ.get("WATCH_LOAD_STATE") or HOME / ".local/state/load-watch")
+HANDOFFS = Path(os.environ.get("WATCH_HANDOFFS") or HOME / ".local/state/handoffs/chains")
+REGISTRY = Path(os.environ.get("WATCH_REGISTRY") or ROOT / "config" / "watch.toml")
+
+PASEO = os.environ.get("WATCH_PASEO") or "paseo"
+NEW_SEAT = os.environ.get("WATCH_NEW_SEAT") or str(HERE / "paseo-new-seat")
+ROUTE_AGENT = os.environ.get("WATCH_ROUTE_AGENT") or str(HERE / "route_agent.py")
+FLEET_WATCH = os.environ.get("WATCH_FLEET_WATCH") or str(HOME / "ops/site-private/bin/fleet-watch")
+LOAD_WATCH = os.environ.get("WATCH_LOAD_WATCH") or str(HERE / "load-watch")
+
+EFFORTS = ["minimal", "low", "medium", "high"]   # ceiling is high on purpose: watchers coordinate, /bigteam slices code
+DEAD_STATUS = {"error", "closed", "archived"}
+UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+CTX_BIG_TOKENS = 120_000
+LAUNCH_STALE_S = 600       # a `launching` record with a dead pid older than this is dropped regardless
+
+
+def now_s() -> str:
+    return datetime.now().strftime("%F %T")
+
+
+# ---------------------------------------------------------------------------------------------- plumbing
+def run(argv: list[str], timeout: float = 60, env_drop: tuple[str, ...] = ("PASEO_AGENT_ID", "PASEO_AGENT_CWD")
+        ) -> tuple[int, str, str]:
+    """argv list, never a shell. rc 127 = cannot run, 124 = timeout. PASEO_AGENT_ID is dropped so a run from
+    inside a Paseo agent never makes the new agent that agent's subagent."""
+    env = {k: v for k, v in os.environ.items() if k not in env_drop}
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
+        return p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired as e:
+        return 124, (e.stdout or b"").decode() if isinstance(e.stdout, bytes) else (e.stdout or ""), "timeout"
+    except OSError as e:
+        return 127, "", str(e)
+
+
+def sub(argv: list[str], agent: str = "") -> list[str]:
+    m = {"{fleet_watch}": FLEET_WATCH, "{load_watch}": LOAD_WATCH, "{agent}": agent}
+    out = []
+    for a in argv:
+        for k, v in m.items():
+            a = a.replace(k, v)
+        out.append(os.path.expanduser(a))
+    return out
+
+
+def load_registry() -> tuple[dict, dict]:
+    with open(REGISTRY, "rb") as f:
+        d = tomllib.load(f)
+    defaults = {"window_days": 14, "register_timeout_s": 300, "poll_s": 5, **d.get("defaults", {})}
+    return defaults, d.get("domain", {})
+
+
+def log(domain: str, msg: str, dry: bool = False) -> None:
+    line = f"{now_s()} {domain}: {msg}"
+    print(("[dry-run] " if dry else "") + f"{domain}: {msg}")
+    if dry:
+        return
+    STATE.mkdir(parents=True, exist_ok=True)
+    with open(STATE / "watch.log", "a") as f:
+        f.write(line + "\n")
+
+
+def pid_alive(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+# --------------------------------------------------------------------------------------------- paseo view
+class Paseo:
+    """Cached reads of the daemon: agents (global, non-archived), workspaces, providers, models."""
+
+    def __init__(self) -> None:
+        self._agents: list[dict] | None = None
+        self._agents_ok = False
+        self._providers: dict[str, str] | None = None
+        self._models: dict[str, list[dict]] = {}
+
+    def agents(self, refresh: bool = False) -> list[dict] | None:
+        """None when the daemon cannot be asked (liveness unknown, never 'gone')."""
+        if self._agents is None or refresh:
+            rc, out, _ = run([PASEO, "agent", "ls", "-g", "--json"], 30)
+            try:
+                d = json.loads(out) if rc == 0 else None
+            except ValueError:
+                d = None
+            self._agents = [a for a in d if isinstance(a, dict)] if isinstance(d, list) else None
+        return self._agents
+
+    def agent(self, ident: str) -> dict | None:
+        for a in self.agents() or []:
+            if ident and (a.get("id") == ident or (len(ident) >= 7 and str(a.get("id", "")).startswith(ident))):
+                return a
+        return None
+
+    def providers(self) -> dict[str, str]:
+        if self._providers is None:
+            rc, out, _ = run([PASEO, "provider", "ls", "--json"], 30)
+            try:
+                self._providers = {p["provider"]: p.get("status", "") for p in json.loads(out)} if rc == 0 else {}
+            except (ValueError, KeyError, TypeError):
+                self._providers = {}
+        return self._providers
+
+    def models(self, provider: str) -> list[dict]:
+        if provider not in self._models:
+            rc, out, _ = run([PASEO, "provider", "models", provider, "--json"], 60)
+            try:
+                self._models[provider] = json.loads(out) if rc == 0 else []
+            except ValueError:
+                self._models[provider] = []
+        return self._models[provider]
+
+    def workspace_for(self, domain: str, cwd: str, create: bool) -> tuple[str | None, str]:
+        title = f"watch-{domain}"
+        rc, out, err = run([PASEO, "workspace", "ls", "--background", "--json"], 30)
+        try:
+            rows = json.loads(out) if rc == 0 else []
+        except ValueError:
+            rows = []
+        for w in rows:
+            if w.get("name") == title and os.path.realpath(os.path.expanduser(w.get("cwd", ""))) == os.path.realpath(cwd):
+                return w.get("workspaceId"), "reused"
+        if not create:
+            return None, "would create"
+        rc, out, err = run([PASEO, "workspace", "create", "--isolation", "local", "--path", cwd, "--title", title, "--json"], 60)
+        try:
+            w = json.loads(out)
+            wid = w.get("workspaceId") if isinstance(w, dict) else (w[0].get("workspaceId") if w else None)
+        except (ValueError, IndexError, AttributeError):
+            wid = None
+        return (wid, "created") if wid else (None, f"workspace create failed rc={rc}: {(err or out).strip()[:200]}")
+
+
+# ----------------------------------------------------------------------------------------- holder queries
+class Holder:
+    def __init__(self, target: str, name: str, since: str, raw: str) -> None:
+        self.target, self.name, self.since, self.raw = target, name, since, raw
+
+    def d(self) -> dict:
+        return {"target": self.target, "name": self.name, "since": self.since}
+
+
+def query_holder(row: dict) -> tuple[Holder | None, str]:
+    """(holder or None, note). note is non-empty when the answer is an error rather than 'nobody'."""
+    rc, out, err = run(sub(row["holder_cmd"]), 30)
+    if rc == 127 or rc == 124:
+        return None, f"holder command failed: {err.strip()[:120]}"
+    if rc != 0:
+        return None, ""   # exit 1 = nobody holds the role
+    parse = row.get("holder_parse", "")
+    if parse == "fleet-watch-relay":
+        m = re.match(r"^relay to (\S+) \((.*), set (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\)\s*$", out.strip().splitlines()[0] if out.strip() else "")
+        if not m:
+            return None, f"unparsable holder line: {out.strip()[:120]}"
+        return Holder(m.group(1), m.group(2), m.group(3), out.strip()), ""
+    if parse == "load-watch-json":
+        try:
+            d = json.loads(out)
+            return Holder(str(d["target"]), str(d.get("name") or ""), str(d.get("since") or ""), out.strip()), ""
+        except (ValueError, KeyError, TypeError):
+            return None, f"unparsable holder json: {out.strip()[:120]}"
+    return None, f"unknown holder_parse {parse!r}"
+
+
+def holder_alive(row: dict, h: Holder, pv: Paseo, probe: bool, send: bool = True) -> tuple[bool | None, str]:
+    """(alive, why). alive is None only when `send` is False and the answer needs a channel test line."""
+    ags = pv.agents()
+    if ags is not None and UUID.match(h.target):
+        a = pv.agent(h.target)
+        if a is None:
+            return False, f"Paseo agent {h.target[:8]} is not in `paseo ls`"
+        if str(a.get("status")) in DEAD_STATUS:
+            return False, f"Paseo agent {h.target[:8]} is {a.get('status')}"
+        if not probe:
+            return True, f"Paseo agent {h.target[:8]} is {a.get('status')}"
+    if not send:
+        return None, "needs a channel test line (a read-only run sends none; `watch up --probe` does)"
+    rc, out, err = run(sub(row["test_cmd"], h.target), 60)
+    return rc == 0, (f"channel test ok: {out.strip()[:80]}" if rc == 0 else f"channel test failed rc={rc}: {(err or out).strip()[:120]}")
+
+
+# ------------------------------------------------------------------------------------------ state record
+def rec_path(domain: str) -> Path:
+    return STATE / f"{domain}.json"
+
+
+def load_rec(domain: str) -> dict | None:
+    try:
+        d = json.loads(rec_path(domain).read_text())
+        return d if isinstance(d, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def save_rec(domain: str, rec: dict) -> None:
+    STATE.mkdir(parents=True, exist_ok=True)
+    tmp = rec_path(domain).with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(rec, indent=1, sort_keys=True) + "\n")
+    os.replace(tmp, rec_path(domain))
+
+
+def drop_rec(domain: str) -> None:
+    rec_path(domain).unlink(missing_ok=True)
+
+
+def live_rec(domain: str, pv: Paseo) -> tuple[dict | None, str]:
+    """The record if what it names still exists; a record that does not is dropped (never trusted)."""
+    rec = load_rec(domain)
+    if not rec:
+        return None, ""
+    aid = rec.get("agent_id")
+    if aid:
+        ags = pv.agents()
+        if ags is not None and (pv.agent(aid) is None or str(pv.agent(aid).get("status")) in DEAD_STATUS):
+            drop_rec(domain)
+            return None, f"dropped stale record: agent {aid[:8]} no longer exists"
+        return rec, ""
+    # launching, no agent yet: claimed only while the launcher process is alive
+    if pid_alive(rec.get("pid")) and time.time() - float(rec.get("started_epoch", 0)) < LAUNCH_STALE_S:
+        return rec, ""
+    drop_rec(domain)
+    return None, "dropped stale record: launcher pid gone before an agent was created"
+
+
+# ------------------------------------------------------------------------------------ complexity signals
+def read_json(p: Path):
+    try:
+        return json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def file_stats(paths, since: float) -> tuple[int, int, int]:
+    n = total = biggest = 0
+    for p in paths:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        if st.st_mtime >= since:
+            n += 1
+            total += st.st_size
+            biggest = max(biggest, st.st_size)
+    return n, total, biggest
+
+
+def signals(row: dict, window_days: float) -> dict:
+    sig = row.get("signals", {})
+    since = time.time() - window_days * 86400
+    out = {"events": 0, "pending": 0, "brief_max": 0, "brief_total": 0, "chain_bytes": 0}
+    if sig.get("kind") == "fleet-watch":
+        base = sig.get("base", "")
+        cutoff = (datetime.now() - timedelta(days=window_days)).strftime("%F %T")
+        try:
+            for ln in open(FW_STATE / "fleet-watch.log", errors="replace"):
+                if ln[:19] >= cutoff and f" {base}: relay {base}-" in ln:
+                    out["events"] += 1
+        except OSError:
+            pass
+        st = read_json(FW_STATE / f"{base}.json") or {}
+        out["pending"] = len(st.get("pending", [])) if isinstance(st, dict) else 0
+        # threads touched in the window count as events too (a profile with no watcher relays nothing)
+        tcut = (datetime.now(UTC) - timedelta(days=window_days)).strftime("%FT%TZ")
+        if isinstance(st, dict):
+            touched = sum(1 for v in (st.get("threads") or {}).values() if isinstance(v, dict) and str(v.get("updated_at", "")) >= tcut)
+            out["events"] = max(out["events"], touched)
+        n, tot, big = file_stats(FW_STATE.glob(f"{base}-*-relay.md"), since)
+        out["brief_total"], out["brief_max"] = tot, big
+    elif sig.get("kind") == "load-watch":
+        try:
+            for ln in open(LW_STATE / "incidents.jsonl", errors="replace"):
+                try:
+                    t = json.loads(ln).get("t", "")
+                except ValueError:
+                    continue
+                if t >= (datetime.now() - timedelta(days=window_days)).strftime("%FT%T"):
+                    out["events"] += 1
+        except OSError:
+            pass
+        n, tot, big = file_stats((LW_STATE / "briefs").glob("*"), since)
+        out["brief_total"], out["brief_max"] = tot, big
+    try:
+        out["chain_bytes"] = (HANDOFFS / row.get("chain", "-") / "SESSION_LOG.md").stat().st_size
+    except OSError:
+        pass
+    return out
+
+
+def calibrate_fail_rate(kind: str) -> tuple[int, float | None]:
+    rc, out, _ = run([sys.executable, ROUTE_AGENT, "calibrate", "--json", "--since", "30"], 60)
+    try:
+        groups = json.loads(out).get("groups", []) if rc == 0 else []
+    except ValueError:
+        return 0, None
+    n = done = 0
+    for g in groups:
+        if g.get("kind") == kind:
+            n += int(g.get("n", 0))
+            done += int(g.get("done", 0))
+    return n, (100.0 * (n - done) / n if n else None)
+
+
+def complexity(sig: dict, kind: str) -> tuple[str, str, list[str]]:
+    """(level, effort, reasons). Small and explicit; every rule that fired is printed with the plan.
+      idle  : no events in the window and none pending      -> kind_idle, medium  (idle watchers cost nothing,
+                                                               events cost money: the cheapest adequate tier)
+      busy  : > 5 events, or any pending, or a brief > 20 KB,
+              or this kind failed >= 25% of >= 3 recent dispatches -> kind, high
+      normal: otherwise                                      -> kind, medium"""
+    why = [f"events={sig['events']} pending={sig['pending']} brief_max={sig['brief_max']}B chain={sig['chain_bytes']}B"]
+    n, fail = calibrate_fail_rate(kind)
+    if fail is not None:
+        why.append(f"calibrate {kind}: n={n} fail={fail:.0f}%")
+    if sig["events"] > 5 or sig["pending"] > 0 or sig["brief_max"] > 20_000 or (n >= 3 and fail is not None and fail >= 25):
+        return "busy", "high", why + ["busy: high effort on the best eligible tier for the kind"]
+    if sig["events"] == 0:
+        return "idle", "medium", why + ["idle: cheapest eligible tier (kind_idle), medium effort"]
+    return "normal", "medium", why + ["normal: kind tier, medium effort"]
+
+
+# ------------------------------------------------------------------------------------------- model choice
+class NoRoute(Exception):
+    pass
+
+
+_route_cache: dict = {}
+
+
+def route_slice(kind: str, exclude: tuple[str, ...]) -> dict:
+    key = (kind, exclude)
+    if key not in _route_cache:
+        argv = [sys.executable, ROUTE_AGENT, "plan", "--kinds", kind, "--json"]
+        if exclude:
+            argv += ["--exclude", ",".join(exclude)]
+        rc, out, err = run(argv, 90)
+        try:
+            d = json.loads(out)
+            _route_cache[key] = d
+        except ValueError:
+            raise NoRoute(f"route_agent plan failed rc={rc}: {(err or out).strip()[:200]}")
+    d = _route_cache[key]
+    sl = (d.get("slices") or [{}])[0]
+    return {**sl, "_quota_source": (d.get("quota_source") or {}).get("source"), "_hold": d.get("governor_hold"),
+            "_stale": d.get("stale")}
+
+
+def split_model(s: str) -> tuple[str, str | None]:
+    """'anthropic/x --effort high' -> ('anthropic/x', 'high'); '' or '<id from: ...>' -> ('', None)."""
+    s = (s or "").strip()
+    if not s or s.startswith("<"):
+        return "", None
+    toks = shlex.split(s)
+    eff = toks[toks.index("--effort") + 1] if "--effort" in toks and toks.index("--effort") + 1 < len(toks) else None
+    return toks[0], eff
+
+
+def choose_plan(domain: str, row: dict, dflt: dict, pv: Paseo, exclude: list[str]) -> dict:
+    """The launch plan, or raises NoRoute with the reason. Never falls back to a pool route_agent excluded."""
+    sig = signals(row, dflt["window_days"])
+    ov = row.get("route_override")
+    kind_base = row.get("kind", "code")
+    level, effort, why = complexity(sig, kind_base) if not ov else ("override", "medium", ["route_override in registry"])
+    kind = row.get("kind_idle", kind_base) if level == "idle" else kind_base
+    plan = {"domain": domain, "level": level, "kind": kind, "signals": sig, "why": why}
+    if ov:
+        plan.update(provider=ov["provider"], model=ov.get("model", ""), thinking=ov.get("thinking", ""), service="override",
+                    context="standard", route_why="route_override")
+        return plan
+    excl = list(exclude)
+    for _ in range(8):
+        sl = route_slice(kind, tuple(excl))
+        svc = sl.get("service")
+        if not svc:
+            raise NoRoute(f"route_agent: no eligible route for kind {kind}: {sl.get('why')}")
+        provider = sl.get("agent") or sl.get("cli", "").split()[0]
+        model, plan_eff = split_model(sl.get("model", ""))
+        if "fable" in model.lower():
+            raise NoRoute(f"route_agent routed Fable ({model}) for kind {kind}: refused (policy: almost never)")
+        if pv.providers().get(provider) != "available":
+            excl.append(svc)
+            plan.setdefault("skipped", []).append(f"{svc}: Paseo provider {provider!r} is {pv.providers().get(provider, 'unknown')}")
+            continue
+        ms = pv.models(provider)
+        ids = {m.get("id"): m for m in ms}
+        if model and ids and model not in ids:
+            excl.append(svc)
+            plan.setdefault("skipped", []).append(f"{svc}: Paseo {provider} does not offer model {model}")
+            continue
+        # effort: heuristic, capped by route_agent's own effort and by the model's thinking options
+        want = effort
+        if plan_eff in EFFORTS and EFFORTS.index(plan_eff) < EFFORTS.index(want):
+            want = plan_eff
+        thinking = ""
+        opts = (ids.get(model) or {}).get("thinkingOptionIds") or []
+        if opts:
+            cands = [e for e in reversed(EFFORTS[: EFFORTS.index(want) + 1]) if e in opts]
+            thinking = cands[0] if cands else ""
+        # context: fit the domain's briefs with headroom; the 1M variant only when it really is needed
+        need = int((sig["chain_bytes"] + sig["brief_max"] + 60_000) / 3.5) + 40_000
+        ctx = "standard"
+        if need > CTX_BIG_TOKENS:
+            big = f"{model}[1m]"
+            if big in ids:
+                model, ctx = big, "1m"
+            else:
+                plan.setdefault("skipped", []).append(f"needs ~{need // 1000}k tokens but no [1m] variant of {model}")
+        plan.update(provider=provider, model=model, thinking=thinking, service=svc, context=ctx, need_tokens=need,
+                    route_why=str(sl.get("why", ""))[:300], quota_source=sl.get("_quota_source"), governor_hold=sl.get("_hold"),
+                    remaining=sl.get("remaining"))
+        return plan
+    raise NoRoute(f"no Paseo-launchable route for kind {kind} after skipping {excl}")
+
+
+def plan_line(p: dict) -> str:
+    m = p.get("model") or "provider default model"
+    return (f"{p['provider']} / {m} / thinking {p.get('thinking') or 'default'} / context {p.get('context')} "
+            f"[service {p.get('service')}, kind {p['kind']}, level {p['level']}]")
+
+
+# ---------------------------------------------------------------------------------------------- launching
+def prompt_for(domain: str, row: dict) -> str:
+    if row.get("prompt"):
+        return row["prompt"]
+    skill = row["skill"]
+    skill_md = ROOT / "skills" / skill.lstrip("/") / "SKILL.md"
+    return (f"{skill}\n\nYou were started by `watch up` as the {domain} watcher, in an unattended Paseo session. "
+            f"Do section 1 of {skill_md} now (if `{skill}` is not a command in this harness, read that file and follow "
+            f"it): register yourself as the watcher (target: your own $PASEO_AGENT_ID; name it \"watch {domain}\"), run "
+            f"the channel test, record the role in the Tier 1 log of chain {row.get('chain', '-')}, then stop and wait. "
+            f"Events arrive as messages. Never /loop or CronCreate.")
+
+
+def stop_agent(pv: Paseo, aid: str) -> tuple[bool, str]:
+    run([PASEO, "agent", "stop", aid], 60)
+    rc, out, err = run([PASEO, "agent", "archive", aid], 60)
+    if rc != 0:
+        rc, out, err = run([PASEO, "agent", "archive", "--force", aid], 60)
+    pv.agents(refresh=True)
+    gone = pv.agents() is not None and pv.agent(aid) is None
+    return gone, "archived" if gone else f"still listed after stop+archive: {(err or out).strip()[:120]}"
+
+
+def wait_registered(domain: str, row: dict, aid: str, dflt: dict) -> tuple[bool, str]:
+    deadline = time.time() + float(dflt["register_timeout_s"])
+    reason = "no holder yet"
+    while True:
+        h, note = query_holder(row)
+        if h is None:
+            reason = note or "role still unheld"
+        elif not (h.target == aid or aid.startswith(h.target) or h.target.startswith(aid)):
+            reason = f"role held by {h.target[:8]} ({h.name}), not the new agent {aid[:8]}"
+        else:
+            rc, out, err = run(sub(row["test_cmd"], h.target), 60)
+            if rc == 0:
+                return True, f"holder {h.target[:8]} ({h.name}); channel test ok"
+            reason = f"registered but the channel test failed rc={rc}: {(err or out).strip()[:120]}"
+        if time.time() >= deadline:
+            return False, reason
+        time.sleep(float(dflt["poll_s"]))
+
+
+def launch(domain: str, row: dict, dflt: dict, pv: Paseo, plan: dict, replaces: Holder | None) -> tuple[int, str]:
+    cwd = os.path.expanduser(row["cwd"])
+    if not Path(cwd).is_dir():
+        return 1, f"not launched: cwd {cwd} does not exist"
+    wid, how = pv.workspace_for(domain, cwd, create=True)
+    if not wid:
+        return 1, f"not launched: {how}"
+    save_rec(domain, {"domain": domain, "state": "launching", "pid": os.getpid(), "started_at": now_s(),
+                      "started_epoch": time.time(), "workspace_id": wid, "plan": plan_line(plan)})
+    argv = [NEW_SEAT, "--title", f"watch {domain}", "--provider", plan["provider"], "--model", plan.get("model", ""),
+            "--cwd", cwd, "--workspace", wid, "--label", f"watch={domain}", "--prompt", prompt_for(domain, row), "--json"]
+    if plan.get("thinking"):
+        argv += ["--thinking", plan["thinking"]]
+    rc, out, err = run(argv, 120)
+    aid = ""
+    for ln in reversed(out.strip().splitlines()):
+        try:
+            aid = str(json.loads(ln).get("id") or "")
+            break
+        except ValueError:
+            continue
+    if not aid:
+        drop_rec(domain)
+        return 1, f"not launched: paseo-new-seat rc={rc}: {(err or out).strip()[:200]}"
+    note = " (auto_accept NOT verified: the agent may wait on a permission prompt)" if rc == 4 else ""
+    rec = load_rec(domain) or {}
+    rec.update(agent_id=aid, state="starting", workspace=how, auto_accept_verified=(rc == 0))
+    save_rec(domain, rec)
+    log(domain, f"started agent {aid[:8]} in workspace {wid} ({how}): {plan_line(plan)}{note}")
+    ok, why = wait_registered(domain, row, aid, dflt)
+    rec = load_rec(domain) or rec
+    if ok:
+        rec.update(state="registered", registered_at=now_s())
+        save_rec(domain, rec)
+        if replaces:
+            log(domain, f"replaced holder {replaces.target[:8]} ({replaces.name}); it was told by the new registration")
+        return 0, f"registered: {why}"
+    rec.update(state="unregistered", reason=why, checked_at=now_s())
+    save_rec(domain, rec)
+    return 1, f"not registered: {why}; agent {aid[:8]} left running for inspection"
+
+
+# ----------------------------------------------------------------------------------------------- commands
+def domains_from(args, reg: dict) -> list[str]:
+    names = getattr(args, "domains", None) or list(reg)
+    bad = [n for n in names if n not in reg]
+    if bad:
+        print(f"watch: unknown domain(s) {bad}; known: {sorted(reg)}", file=sys.stderr)
+        raise SystemExit(2)
+    return names
+
+
+def decide(domain: str, row: dict, pv: Paseo, probe: bool, send: bool = True) -> dict:
+    """Read-only facts: holder, reachability, record. Everything `up` and `status` need to decide."""
+    h, note = query_holder(row)
+    d = {"domain": domain, "holder": h.d() if h else None, "holder_error": note, "alive": None, "alive_why": "", "record": None, "note": ""}
+    if h:
+        d["alive"], d["alive_why"] = holder_alive(row, h, pv, probe, send)
+    rec = load_rec(domain)
+    if rec and rec.get("agent_id"):
+        a = pv.agent(rec["agent_id"]) if pv.agents() is not None else {}
+        d["record"] = {k: rec.get(k) for k in ("agent_id", "state", "started_at", "registered_at", "reason")}
+        d["record"]["exists"] = bool(a) and str(a.get("status")) not in DEAD_STATUS if pv.agents() is not None else None
+    elif rec:
+        d["record"] = {"state": rec.get("state"), "pid": rec.get("pid"), "started_at": rec.get("started_at"),
+                       "exists": pid_alive(rec.get("pid"))}
+    d["_holder"] = h
+    return d
+
+
+def cmd_status(args) -> int:
+    dflt, reg = load_registry()
+    pv = Paseo()
+    rows = []
+    for dom in domains_from(args, reg):
+        row = reg[dom]
+        d = decide(dom, row, pv, probe=False, send=False)
+        d.pop("_holder")
+        would = None
+        if row.get("needs_model", True) and not (d["holder"] and d["alive"] is not False):
+            try:
+                p = choose_plan(dom, row, dflt, pv, [])
+                would = {"plan": plan_line(p), "why": p["why"], "skipped": p.get("skipped", []), "route_why": p.get("route_why"),
+                         "quota_source": p.get("quota_source"), "governor_hold": p.get("governor_hold")}
+            except NoRoute as e:
+                would = {"plan": None, "no_route": str(e)}
+        d["would_launch"] = would
+        rows.append(d)
+    if args.json:
+        print(json.dumps(rows, indent=1))
+        return 0
+    for d in rows:
+        h = d["holder"]
+        who = f"{h['name'] or '-'} ({h['target'][:8]}, since {h['since']})" if h else "nobody"
+        reach = ("n/a" if not h else f"unknown ({d['alive_why']})") if d["alive"] is None else (
+            f"yes ({d['alive_why']})" if d["alive"] else f"NO: {d['alive_why']}")
+        print(f"{d['domain']:10} holder: {who}; reachable: {reach}")
+        if d["holder_error"]:
+            print(f"{'':10} holder query error: {d['holder_error']}")
+        if d["record"]:
+            print(f"{'':10} watch record: {d['record']}")
+        w = d["would_launch"]
+        if w:
+            print(f"{'':10} would launch: {w.get('plan') or 'NOTHING (' + w['no_route'] + ')'}")
+            for x in w.get("why", []) + w.get("skipped", []):
+                print(f"{'':12}- {x}")
+    return 0
+
+
+def lock_domain(domain: str):
+    STATE.mkdir(parents=True, exist_ok=True)
+    f = open(STATE / f"{domain}.lock", "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return None
+    return f
+
+
+def up_one(domain: str, row: dict, dflt: dict, pv: Paseo, args) -> int:
+    dry = args.dry_run
+    if not row.get("needs_model", True):
+        h, note = query_holder(row)
+        if h:
+            log(domain, f"already held by {h.name or h.target} (no model needed)", dry)
+            return 0
+        if not row.get("start_cmd"):
+            log(domain, "no holder and the row has no start_cmd", dry)
+            return 1
+        if dry:
+            log(domain, f"would run {row['start_cmd']}", dry)
+            return 0
+        rc, out, err = run(sub(row["start_cmd"]), 120)
+        log(domain, f"ran start_cmd rc={rc}")
+        return 0 if rc == 0 else 1
+    lock = None
+    if not dry:
+        lock = lock_domain(domain)
+        if lock is None:
+            log(domain, "claimed: another `watch up` is launching this domain right now; not starting a second", dry)
+            return 0
+    try:
+        rec, note = live_rec(domain, pv) if not dry else (load_rec(domain), "")
+        if note:
+            log(domain, note, dry)
+        h, hnote = query_holder(row)
+        if hnote:
+            log(domain, f"holder query error: {hnote}", dry)
+        replaces = None
+        if h:
+            alive, why = holder_alive(row, h, pv, args.probe, send=not dry)
+            if alive is None:   # dry-run: a channel test line would be needed; assume it passes, say so
+                alive = True
+            if alive and not args.force:
+                log(domain, f"already watched by {h.name or h.target} ({h.target[:8]}, since {h.since}): {why}", dry)
+                return 0
+            if alive and args.force:
+                replaces = h
+                log(domain, f"--force: replacing live holder {h.name or h.target} ({h.target[:8]}): {why}", dry)
+            else:
+                log(domain, f"holder {h.name or h.target} ({h.target[:8]}) is unreachable ({why}): starting a replacement", dry)
+        elif hnote:
+            log(domain, "cannot tell who holds the role: not launching blind", dry)
+            return 1
+        if rec and not args.force and rec.get("agent_id"):
+            age = time.time() - float(rec.get("started_epoch", 0))
+            if rec.get("state") == "unregistered" or age > float(dflt["register_timeout_s"]) * 2:
+                log(domain, f"claimed: agent {rec['agent_id'][:8]} was started at {rec.get('started_at')} and never registered "
+                            f"({rec.get('reason') or 'no reason recorded'}); not starting another, inspect it or use --force", dry)
+                return 1
+            log(domain, f"claimed: agent {rec['agent_id'][:8]} started at {rec.get('started_at')} is still registering", dry)
+            return 0
+        if rec and not rec.get("agent_id") and not args.force:
+            log(domain, f"claimed: a launch by pid {rec.get('pid')} (since {rec.get('started_at')}) is in progress", dry)
+            return 0
+        try:
+            plan = choose_plan(domain, row, dflt, pv, [x for a in args.exclude for x in a.split(",") if x])
+        except NoRoute as e:
+            log(domain, f"not launched: {e}", dry)
+            return 3
+        for x in plan["why"] + plan.get("skipped", []):
+            log(domain, f"  - {x}", dry)
+        if plan.get("governor_hold"):
+            log(domain, f"  - {plan['governor_hold']}", dry)
+        if dry:
+            ws, how = pv.workspace_for(domain, os.path.expanduser(row["cwd"]), create=False)
+            log(domain, f"would launch: {plan_line(plan)}; workspace watch-{domain} ({how}); first prompt {row['skill']}", dry)
+            return 0
+        rc, msg = launch(domain, row, dflt, pv, plan, replaces)
+        log(domain, msg)
+        if rc == 0 and args.force and rec and rec.get("agent_id") and pv.agent(rec["agent_id"]):
+            ok, w = stop_agent(pv, rec["agent_id"])
+            log(domain, f"stopped our previous agent {rec['agent_id'][:8]}: {w}")
+        return rc
+    finally:
+        if lock:
+            lock.close()
+
+
+def cmd_up(args) -> int:
+    dflt, reg = load_registry()
+    pv = Paseo()
+    worst = 0
+    for dom in domains_from(args, reg):
+        rc = up_one(dom, reg[dom], dflt, pv, args)
+        worst = rc if rc and (worst == 0 or rc == 1) else worst
+    return worst
+
+
+def cmd_down(args) -> int:
+    dflt, reg = load_registry()
+    pv = Paseo()
+    dom = args.domain
+    if dom not in reg:
+        print(f"watch: unknown domain {dom!r}; known: {sorted(reg)}", file=sys.stderr)
+        return 2
+    row, dry = reg[dom], args.dry_run
+    rec = load_rec(dom)
+    h, _ = query_holder(row)
+    if not rec or not rec.get("agent_id"):
+        log(dom, f"no agent started by watch is recorded; leaving the role alone (holder: {h.name if h else 'nobody'})", dry)
+        return 0
+    aid = rec["agent_id"]
+    if dry:
+        log(dom, f"would run off_cmd for {aid[:8]} and archive that agent", dry)
+        return 0
+    rc, out, err = run(sub(row["off_cmd"], aid), 60)
+    log(dom, f"off_cmd rc={rc}: {(out or err).strip()[:120]} (clears the role only if {aid[:8]} still holds it)")
+    if pv.agents() is not None and pv.agent(aid) is None:
+        log(dom, f"agent {aid[:8]} is already gone")
+        ok = True
+    else:
+        ok, w = stop_agent(pv, aid)
+        log(dom, f"agent {aid[:8]}: {w}")
+    if ok:
+        drop_rec(dom)
+    return 0 if ok else 1
+
+
+def main(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="watch", add_help=False)
+    sp = p.add_subparsers(dest="cmd")
+    s = sp.add_parser("status")
+    s.add_argument("domains", nargs="*")
+    s.add_argument("--json", action="store_true")
+    u = sp.add_parser("up")
+    u.add_argument("domains", nargs="*")
+    u.add_argument("--dry-run", action="store_true")
+    u.add_argument("--force", action="store_true")
+    u.add_argument("--probe", action="store_true")
+    u.add_argument("--exclude", action="append", default=[])
+    d = sp.add_parser("down")
+    d.add_argument("domain")
+    d.add_argument("--dry-run", action="store_true")
+    for x in (p,):
+        x.add_argument("-h", "--help", action="store_true")
+    try:
+        a = p.parse_args(argv)
+    except SystemExit:
+        print((__doc__ or "").split("Model choice")[0], file=sys.stderr)
+        return 2
+    if a.help or not a.cmd:
+        print(__doc__)
+        return 0 if a.help else 2
+    return {"status": cmd_status, "up": cmd_up, "down": cmd_down}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

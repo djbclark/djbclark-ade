@@ -77,7 +77,7 @@ SUCCESSOR_SONNET = "claude/claude-sonnet-5-5"
 
 # Compaction is not free (see History, 2026-10-10): only compact once the
 # context has grown enough above the post-compaction floor to pay it back.
-EARLY_GROWTH = 40_000   # level 1: start delegating
+EARLY_GROWTH = 32_000   # 2026-10-25: delegate earlier; this alone never compacts
 ASK_GROWTH = 200_000    # level 2: compact / ask the operator
 ASK_TOTAL = 300_000     # level 2 regardless of floor
 # ~/.claude/settings.json "autoCompactWindow" (set 2026-10-15, 300k since
@@ -87,7 +87,7 @@ ASK_TOTAL = 300_000     # level 2 regardless of floor
 # "Autocompact buffer" /context shows (~33k): ~267k.
 AUTO_COMPACT_WINDOW = 300_000
 AUTO_COMPACT_BUFFER = 33_000
-BOUNDARY_TOTAL = 150_000  # once per session: handoff + /new beats /compact
+BOUNDARY_TOTAL = 120_000  # 2026-10-25: earlier handoff at completed task boundaries
 REPEAT_EVERY = 100_000  # level 3, 4, ...: again per this much more
 PAGE_GROWTH = 300_000   # Hermes ping (once per climb), whichever comes first
 PAGE_TOTAL = 400_000
@@ -268,9 +268,10 @@ def _level(total, growth):
 
 
 _COST_NOTE = (
-    "A compaction is not free: it re-writes ~72k tokens at the 1-hour cache's "
-    "2x rate plus a summariser call and leaves ~104k behind, so it pays back only "
-    "after dozens of further requests on the same work."
+    "For the measured Claude sessions, compaction re-wrote ~72k tokens at the 1-hour cache's "
+    "2x rate plus a summariser call and left ~104k behind, so it paid back only "
+    "after dozens of further requests on the same work. Those are Claude measurements, "
+    "not thresholds or prices for OpenCode Go; use its native context guard."
 )
 
 
@@ -280,7 +281,9 @@ def _early_message(total, growth):
         "session started or last compacted). From now on, send discrete, "
         "separable work through /bigteam (Agent sub-agents for small lookups) "
         "so its tokens stay out of this session, and don't read large files or "
-        "logs inline. Do not compact yet: cached context is cheap to re-read. "
+        "logs inline. Do not compact yet solely for this early warning. "
+        "Cached input is billed on every request; its price and allowance debit "
+        "depend on the provider and model. "
         + _COST_NOTE
     )
 

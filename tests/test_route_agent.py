@@ -2116,7 +2116,7 @@ class TestSubstrateChain(unittest.TestCase):
 
     HEALTHY = [("OpenCode Go 5-hour", 98.0, "ok"),
                ("OpenCode Go weekly", 96.0, "ok"),
-               ("OpenCode Go monthly", 0.6, "exhausted")]
+               ("OpenCode Go monthly", 55.0, "ok")]
 
     def test_healthy_opencode_go_is_primary_with_cline_fallback(self):
         chain = r.substrate_chain({}, self._opencode(self.HEALTHY))
@@ -2124,14 +2124,19 @@ class TestSubstrateChain(unittest.TestCase):
         self.assertEqual(chain[0]["provider"], "opencode")
         self.assertEqual(chain[0]["model"], "opencode-go/deepseek-v4.1-flash")
         self.assertEqual(chain[1]["provider"], "cline")   # unmeasured lifeline
-        self.assertEqual(chain[2]["role"], "escalate")
-        self.assertEqual(chain[2]["model"], "opencode-go/deepseek-v4-pro")
+        self.assertEqual(len(chain), 2)
+        self.assertNotIn("opencode-go/deepseek-v4-pro", [entry["model"] for entry in chain])
 
-    def test_monthly_budget_does_not_bind_rolling_headroom(self):
+    def test_monthly_budget_binds_even_with_open_rate_windows(self):
         chain = r.substrate_chain({}, self._opencode(self.HEALTHY))
-        self.assertAlmostEqual(chain[0]["remaining"], 96.0)   # min(5h, week), not the monthly
-        self.assertAlmostEqual(chain[0]["monthly"], 0.6)
-        self.assertEqual(chain[0]["role"], "primary")
+        self.assertAlmostEqual(chain[0]["remaining"], 55.0)
+        spent = r.substrate_chain({}, self._opencode([
+            ("OpenCode Go 5-hour", 98.0, "ok"),
+            ("OpenCode Go weekly", 96.0, "ok"),
+            ("OpenCode Go monthly", 0.6, "exhausted")]))
+        self.assertEqual(spent[0]["provider"], "cline")
+        self.assertEqual(spent[1]["remaining"], 0.0)
+        self.assertEqual(spent[1]["monthly"], 0.6)
 
     def test_tight_opencode_go_yields_to_the_unmeasured_lifeline(self):
         chain = r.substrate_chain({}, self._opencode([
@@ -2148,6 +2153,6 @@ class TestSubstrateChain(unittest.TestCase):
 
     def test_unmeasured_quota_still_returns_the_full_chain(self):
         chain = r.substrate_chain({}, [])
-        self.assertEqual([e["role"] for e in chain], ["primary", "fallback", "escalate"])
+        self.assertEqual([e["role"] for e in chain], ["primary", "fallback"])
         # no data: original order preserved, so opencode-go stays primary
         self.assertEqual(chain[0]["provider"], "opencode")

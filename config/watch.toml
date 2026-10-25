@@ -1,0 +1,64 @@
+# Registry for bin/watch (`/watch`): one row per watcher domain. Adding a domain is one row.
+# Override the whole file with WATCH_REGISTRY=<path> (tests, throwaway end-to-end runs).
+#
+# Row keys
+#   skill          slash command the launched agent gets as its first prompt (its SKILL.md is
+#                  skills/<skill minus "/">/SKILL.md, named in the prompt as a fallback)
+#   cwd            directory of the domain's Paseo workspace (workspace title: watch-<domain>)
+#   chain          Tier 1 handoff chain the skill records the role in (its SESSION_LOG.md size is a
+#                  complexity/context signal)
+#   kind           route_agent.py task kind for a busy or normal domain; kind_idle for a quiet one
+#   needs_model    false: no agent session, `start_cmd` is run when nobody holds the role
+#   holder_cmd     argv that says who holds the role; exit 1 = nobody
+#   holder_parse   fleet-watch-relay (`relay to T (NAME, set TS)`) | load-watch-json ({target,name,since})
+#   test_cmd       argv, exit 0 only when the channel reached the holder (sends one line to it)
+#   off_cmd        argv that drops the role only if {agent} still holds it
+#   signals        where the domain's recent events are counted: {kind = "fleet-watch", base = ".."}
+#                  or {kind = "load-watch"}
+#   route_override optional {provider, model, thinking}: skip route_agent (throwaway rows only)
+#   prompt         optional first prompt replacing the generated one (throwaway rows only)
+# Placeholders in argv: {fleet_watch}, {load_watch}, {agent}.
+
+[defaults]
+window_days = 14          # how far back "recent events" looks
+register_timeout_s = 300  # how long `up` waits for the new agent to show as holder + channel test
+poll_s = 5
+
+[domain.cfengine]
+skill = "/cfenginewatch"
+cwd = "~/src/cfengine-all"
+chain = "standalone-3fd9"
+kind = "code"
+kind_idle = "bulk"
+needs_model = true
+holder_cmd = ["{fleet_watch}", "upstream", "--relay-status"]
+holder_parse = "fleet-watch-relay"
+test_cmd = ["{fleet_watch}", "upstream", "--relay-test"]
+off_cmd = ["{fleet_watch}", "upstream", "--relay-off", "{agent}"]
+signals = { kind = "fleet-watch", base = "upstream-pr" }
+
+[domain.paseo]
+skill = "/paseowatch"
+cwd = "~/src/paseo"
+chain = "paseo-workspace-accent"
+kind = "code"
+kind_idle = "bulk"
+needs_model = true
+holder_cmd = ["{fleet_watch}", "upstream", "--profile", "paseo", "--relay-status"]
+holder_parse = "fleet-watch-relay"
+test_cmd = ["{fleet_watch}", "upstream", "--profile", "paseo", "--relay-test"]
+off_cmd = ["{fleet_watch}", "upstream", "--profile", "paseo", "--relay-off", "{agent}"]
+signals = { kind = "fleet-watch", base = "upstream-paseo" }
+
+[domain.load]
+skill = "/loadwatch"
+cwd = "~/src/djbclark-ade"
+chain = "load-spike-monitor-t"
+kind = "code"
+kind_idle = "bulk"
+needs_model = true
+holder_cmd = ["{load_watch}", "watcher", "show", "--json"]
+holder_parse = "load-watch-json"
+test_cmd = ["{load_watch}", "watcher", "test"]
+off_cmd = ["{load_watch}", "watcher", "clear", "{agent}"]
+signals = { kind = "load-watch" }

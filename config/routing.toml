@@ -317,10 +317,10 @@ agent = "opencode"
 name = "opencode-go"
 cli = "opencode (go tier)"
 good_at = { bulk = 2, mechanical = 1, code = 18 }
-billing = "free"
-note = "kimi/minimax/qwen/glm catalogs"
+billing = "subscription"
+note = "Go Plus shares one monthly allowance; costly models require bounded read-only advice (config/go-model-policy.json)"
 agent = "opencode"
-models = { bulk = "opencode-go/kimi-k3 --effort low", mechanical = "opencode-go/glm-5.3 --effort low", code = "opencode-go/glm-5.3 --effort high" }
+models = { bulk = "opencode-go/minimax-m3", mechanical = "opencode-go/gpt-6-luna --effort low", code = "opencode-go/deepseek-v4.1-flash" }
 
 [[service]]
 name = "zai"

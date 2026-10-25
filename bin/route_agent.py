@@ -509,6 +509,7 @@ def policy_public() -> dict[str, Any]:
             "provider_name": dict(HERMES_PROVIDER_NAME),
         },
         "services": [svc_row(s) for s in SERVICES],
+        "opencode_go": json.loads((Path(__file__).resolve().parents[1] / "config/go-model-policy.json").read_text()),
         "lead": dict(POLICY["lead"]) if POLICY.get("lead") else None,
     }
 
@@ -1332,6 +1333,10 @@ def suggest_model(svc: Service, kind: str, info: dict[str, Any]) -> str:
     claude's frontier slot is Fable 5.1 while the Fable sublimit (at most 50%
     of the shared weekly) has room, else Opus at the same effort."""
     model = svc.models.get(kind, "")
+    if svc.name == "opencode-go" and model:
+        from go_model_policy import classification
+        if classification(model.split()[0]) != "routine":
+            raise ValueError("routine Go routing requires a classified routine model")
     if svc.name == "claude" and kind == "frontier":
         fable = (info.get("sublimits") or {}).get("fable")
         if fable is not None and fable < FABLE_MIN_LEFT:
@@ -1581,16 +1586,14 @@ def apply_hermes_chain(chain: list[dict[str, str]]) -> str:
 # failover does not change the model — which is what makes it safe against
 # Paseo's per-provider constraint: `set_agent_model` refuses a provider other
 # than the agent's, so a cross-provider move is a NEW session, never a live
-# switch (that is what killed the ◈ Dann tab on 2026-10-23). Escalation to
-# deepseek-v4-pro is a within-`opencode` switch and IS live-safe.
+# switch (that is what killed the ◈ Dann tab on 2026-10-23). A within-provider
+# switch is lifecycle-safe but must also pass the model cost policy.
 # Source of truth: spec/composite-individual/deepseek-cost-routing.md.
 DANN_SUBSTRATE: tuple[tuple[str, str, str], ...] = (
     ("opencode-go", "opencode", "opencode-go/deepseek-v4.1-flash"),
     ("clinepass", "cline", "cline-pass/deepseek-v4.1-flash"),
 )
-DANN_ESCALATION: tuple[str, str, str] = (
-    "opencode-go", "opencode", "opencode-go/deepseek-v4-pro",
-)
+# Costly Go models are explicit bounded advisors, never main-loop escalations.
 # A measured pool below this much headroom is "tight": still in the chain, but
 # an unmeasured pool is not preferred over it.
 SUBSTRATE_MIN_HEADROOM = 10.0
@@ -1598,13 +1601,10 @@ SUBSTRATE_MIN_HEADROOM = 10.0
 
 def _substrate_pool_state(pool: str, quota: dict[str, Any] | None,
                           accounts: list[dict[str, Any]]) -> dict[str, Any]:
-    """Real rolling-window headroom for a substrate pool.
+    """Binding allowance across all measured windows, including monthly.
 
-    `load_snapshot`'s quota dict is `--available`-filtered. A pool whose *monthly*
-    budget window is exhausted (opencode-go: 0.6% monthly) reads 0% even while its
-    5-hour/weekly rate windows are wide open and it is usable right now. The picker
-    reads the raw account rows and takes the tightest non-exhausted, non-monthly
-    window as "can I start a session now", reporting the monthly budget separately.
+    Wide-open rate windows do not replenish an exhausted monthly budget. Keep
+    monthly headroom visible, but never skip it to promote a spent Go pool.
     """
     for a in accounts:
         if a.get("provider") != pool:
@@ -1617,16 +1617,12 @@ def _substrate_pool_state(pool: str, quota: dict[str, Any] | None,
         def is_month(w: dict[str, Any]) -> bool:
             return "month" in ((w.get("label") or "").lower())
 
-        non_month = [w for w in wins if not is_month(w)]
-        rolling = [rem(w) for w in non_month
-                   if w.get("state") != "exhausted" and rem(w) is not None]
+        measured = [rem(w) for w in wins if rem(w) is not None]
         monthly = next((rem(w) for w in wins if is_month(w)), None)
-        if rolling:
-            remaining: float | None = min(rolling)
-        elif non_month:
-            remaining = 0.0        # rolling windows exist but none has headroom
+        if a.get("usable_now") is False or any(w.get("state") == "exhausted" for w in wins):
+            remaining: float | None = 0.0
         else:
-            remaining = None       # no rolling windows at all -> unmeasured
+            remaining = min(measured) if measured else None
         return {"remaining": remaining, "monthly": monthly}
     # not in the raw snapshot (clinepass is operator-disabled from collection):
     # fall back to the filtered quota dict, else unknown.
@@ -1664,12 +1660,6 @@ def substrate_chain(quota: dict[str, Any] | None = None,
             "pool": pool, "provider": provider, "model": model,
             "remaining": states[pool]["remaining"], "monthly": states[pool]["monthly"],
         })
-    pool, provider, model = DANN_ESCALATION
-    st = _substrate_pool_state(pool, quota, accounts)
-    chain.append({
-        "role": "escalate", "pool": pool, "provider": provider, "model": model,
-        "remaining": st["remaining"], "monthly": st["monthly"],
-    })
     return chain
 
 
