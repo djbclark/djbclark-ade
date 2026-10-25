@@ -87,5 +87,5 @@ def test_set_name_renames_the_workspace(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setenv("PASEO_CLI", str(cli))
     ar.paseo_set_name("Paseo skill sync overwrite fix", auto=auto)
     calls = log.read_text()
-    assert "agent update abc --name Paseo skill sync overwrite fix --json" in calls
+    assert "agent update abc --name paseo-skill-pt --json" in calls
     assert ("workspace rename wks_1 paseo-skill-sync-overwrite-fix-pw" in calls) is renamed

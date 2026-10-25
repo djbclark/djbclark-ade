@@ -205,10 +205,21 @@ herdr placement can run. The hook runs under `python3.14` (the script needs
 **Paseo** (2026-10-23). A session hosted by a Paseo agent (`$PASEO_AGENT_ID`) also gets its sidebar name set and
 its **workspace renamed** to the title in lower-case hyphen form plus `-pw` (`Paseo skill sync overwrite fix` ->
 `paseo-skill-sync-overwrite-fix-pw`; whole words, number-only words dropped, at most 40 characters before the
-suffix). The one naming rule across the environment: `-pw` Paseo workspace, `-t` herdr tab, `-p` herdr pane, always
-lower case with hyphens (`feedback_herdr_tab_pane_naming_convention`). The workspace id comes from the agent's record
-under `$PASEO_HOME/agents/`. A direct `/autorename` always renames the workspace; `--auto` keeps one that already ends
-in `-pw`. The reply line ends `(paseo name set) (paseo workspace <name>)`. Other workspaces are never touched.
+suffix). The one naming rule across the environment, always lower case with hyphens: `-pw` Paseo workspace (at most 40
+characters before the suffix), `-pt` Paseo tab (at most 17 characters **including** `-pt`: Paseo shows about 17 even for
+a lone tab), `-t` herdr tab, `-p` herdr pane (under 24), the agent in a herdr pane bare `<topic>`
+(`feedback_herdr_tab_pane_naming_convention`). A Paseo agent tab's name **is** the agent's name (`paseo agent update
+--name`), so the agent is named `<topic>-pt`; `paseo_tab_name()` in `autorename.py` is the shortener. It drops the words
+of the project name and, when `--auto` keeps an existing `-pw` workspace, of that workspace's title (never of the `-pw`
+name it sets from this same title, so a re-run gives the same tab), abbreviates, and adds `-2`, `-3` ... on a clash with another live agent or terminal of the workspace. Check
+suffixes longest first: `x-pt` also ends in `-t`. The sentence title stays the provider session's title and the `-pw`
+workspace name. The workspace id comes from the agent's record
+under `$PASEO_HOME/agents/`. A direct `/autorename` always renames the agent and the workspace. `--auto` is guarded: it
+keeps an agent name that already ends in `-pt` and a workspace that ends in `-pw` (a name the operator or an earlier run
+set); a name without the suffix is still replaced, because no names store exists yet to explain a rename. The reply line
+ends `(paseo tab <name>)` (`(paseo tab kept: <name>)` when guarded) and `(paseo workspace <name>)` (`(paseo workspace
+kept: <name>)` when guarded), replacing the old `(paseo name set)`; under `--auto` a tab part also carries `(names store
+unavailable)`. Other workspaces are never touched.
 
 **The herdr tab label is a separate thing.** Neither `/rename` nor `autorename.py`
 touches the sidebar tab: it keeps its default number ("2") until something labels

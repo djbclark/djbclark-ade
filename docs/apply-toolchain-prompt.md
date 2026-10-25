@@ -499,6 +499,17 @@ preserve legacy `notify` and unrelated hooks. This guide is Codex-specific: do
 not substitute Cursor hook paths or camelCase events. Re-check the official
 Codex documentation for the installed version before applying its snapshot.
 
+If OpenCode is installed, also install the native Go context guard (added
+2026-10-25, PR 64): link
+`~/src/djbclark-ade/opencode-plugins/go-context` to
+`~/.config/opencode/plugins/ade-go-context` with the Python snippet in its
+[README](../opencode-plugins/go-context/README.md), preserving any existing
+entry and refusing to replace one that differs. Confirm with the read-only
+status RPC on the real server and location. Never restart a server or
+interrupt another session to activate it. It bounds spend on OpenCode Go
+models and adds the `ade_compact` tool; see
+[context hygiene](context-hygiene.md).
+
 Install **everything in this section, even for languages and formats the repo
 does not use yet**, so the tools are ready when they are needed. Check first
 (`<tool> --version`) and skip anything already installed at a suitable version.
