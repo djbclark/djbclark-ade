@@ -197,6 +197,20 @@ belongs to a different key set. Neither is a network fault.
 
 ## Gotchas
 
+**0. A `POST` probe is a mutation, not a question.** This generalises to every API, not just OVH.
+Asking "does this endpoint exist?" with a POST *runs it*. On 2026-10-25 a sweep of `POST
+/vps/{s}/<candidate>` expecting 404s hit a real `/reboot` and rebooted the box. **Discover with `GET`.
+If you must test a POST-only path, do not sweep candidates — look it up in the console or the
+provider's endpoint list.** Everything below is a specific instance of this.
+
+Three levels of gate, and they are deliberately separate so one broad yes cannot reach the next:
+
+| level | examples | why |
+|---|---|---|
+| read (default) | `GET /vps`, `serviceInfos`, `/ips` | asks a question |
+| `--allow-write` | `getConsoleUrl`, config changes | changes *our* access, not the box |
+| `--allow-destructive` | `reboot`, `reinstall`, `rescue`, `delete`, `snapshot` | acts on the machine or the service |
+
 1. **Rights are immutable.** Plan the scope before creating; a fix is a new key.
 2. **`*` is not `/*` for a path, and `*` does not include the parent path.** Add both rows.
 3. **Region-locked.** Keys made on one region's page fail on another with "Authentication failed".
@@ -209,4 +223,52 @@ belongs to a different key set. Neither is a network fault.
 7. **`/me/api/application`** lists keys, `/me/api/application/{id}` inspects one, and
    `DELETE /me/api/application/{id}` revokes it — but revoking needs rights on `/me/api/*`, so a
    token created without it cannot revoke itself. `*` covers it.
+
+## Glitches actually hit, and what to do instead (all 2026-10-25, one session)
+
+Kept because this work repeats: these cost real time and each one looks like something else.
+
+1. **A wrong `OVH_ENDPOINT` produces `403 This application key is invalid`, which reads like a rights
+   failure.** It is not — rights failures are `NOT_GRANTED_CALL`. The credential was a **US**
+   credential (`ovh-us`, account accepted 200) on a service named `…vps.ovh.ca`, and the endpoint
+   value was `ovh-ca`. **Test the region before believing any 403:** `scripts/ovh-region-check.py`
+   probes all three with `/me` (read-only) and names the one that works. `scripts/ovh-api.py` now
+   does this automatically on an auth failure.
+   **Also note:** the *service name* tells you nothing about the API region — `.ovh.ca` on a US
+   account is normal. The resource's IAM URN does tell you: `urn:v1:us:resource:…`.
+2. **A `POST` probe is a mutation, not a question.** Probing whether `/vps/{s}/reboot` exists with
+   `POST … --allow-write` expected a 404 ("no such path") and instead got `202` plus a queued
+   reboot — **the box rebooted.** A discovery sweep must never be able to act. `ovh-api.py` now
+   refuses reboot/reinstall/rescue/delete/snapshot/console paths unless `--allow-destructive` is
+   passed *separately* from `--allow-write`, so one broad yes cannot reach them. **Use `GET` to
+   discover; never sweep `POST` across candidate paths.**
+3. **The first SSH user on an OVH VPS is not `root`.** It is the OS's default user (`debian` for
+   Debian, `ubuntu`, `rocky`, …) with a temporary password delivered by a **secure link in the
+   delivery email**, and the first login forces a password change. `root` login is disabled. So a
+   fresh OVH VPS is unreachable by key until someone with console/email access adds one.
+4. **The KVM console has an API endpoint:** `POST /vps/{serviceName}/getConsoleUrl` returns the
+   console URL (the docs list it; the console UI path is VPS → General information → `...` → KVM).
+   That is the way in when there is no key and no password — so **do not reinstall just to get
+   access.**
+5. **`GET /vps/{s}/snapshot` returning 404 does NOT mean "no backup".** It is the *manual* snapshot
+   slot, empty by default. The automatic one is a different resource: `GET /vps/{s}/automatedBackup`
+   → `{state, rotation, schedule}`. Check the right endpoint before reporting a backup gap.
+6. **`serviceInfos.expiration` is the billing period, not a countdown to loss.** A monthly plan shows
+   a date ~30 days out with `renew.automatic: true`. Do not raise it as a risk; check
+   `renewalType`/`renew.period` first.
+7. **A 404 on `GET /vps/{s}/<sub>` does not prove the sub-resource is absent** — it may be POST-only
+   (e.g. `/reboot` 404s on GET and exists on POST). The `option` list (`GET /vps/{s}/option`) and the
+   console are the honest sources. And per (2), never resolve this ambiguity with a POST probe.
+9. **A forced password change needs a PTY, and `expect`'s `-re "assword:"` matches the wrong prompt.**
+   OVH's first login forces a password change; a non-interactive SSH fails with *"Password change
+   required but no TTY available"*, so use `ssh -tt` under `expect`. **Order the expect patterns
+   most-specific-first**, because a bare `assword:` also matches **"Current password:"** — my first
+   attempt fed the *new* password as the *current* one and got `passwd: Authentication token
+   manipulation error`. Correct order: `Retype new password` → `New password` → `Current password` →
+   `'s password:`.
+10. **A password change on a remote box is a two-step operation.** The change closes the session, so
+   installing a key must be a *second* login with the new password. Do the change first, verify the
+   new password works, then install the key — and keep both values in 600 files, never argv.
+
+
 

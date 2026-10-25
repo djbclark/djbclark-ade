@@ -31,16 +31,27 @@ with open(os.path.join(d, "calls.log"), "a") as f:
     f.write(json.dumps(args) + "\n")
 if args[:1] != ["api"]:
     sys.stderr.write("fake gh: only `api` is served\n"); sys.exit(1)
-ep = next(a for a in args[1:] if not a.startswith("-")).split("?")[0]
+skip = False
+method, ep = "GET", None
+for a in args[1:]:
+    if skip:
+        method, skip = a, False
+    elif a == "-X":
+        skip = True
+    elif not a.startswith("-") and ep is None:
+        ep = a.split("?")[0]
 routes = json.load(open(os.path.join(d, "scenario.json")))["routes"]
-if ep not in routes:
-    sys.stderr.write("fake gh: no route " + ep + "\n"); sys.exit(1)
-cf = os.path.join(d, "count-" + ep.replace("/", "_"))
+key = ep if method == "GET" else method + " " + ep
+if key not in routes:
+    sys.stderr.write("fake gh: no route " + key + "\n"); sys.exit(1)
+cf = os.path.join(d, "count-" + key.replace("/", "_").replace(" ", "_"))
 n = int(open(cf).read()) if os.path.exists(cf) else 0
 with open(cf + ".tmp.%d" % os.getpid(), "w") as f:
     f.write(str(n + 1))
 os.replace(cf + ".tmp.%d" % os.getpid(), cf)
-r = routes[ep][min(n, len(routes[ep]) - 1)]
+r = routes[key][min(n, len(routes[key]) - 1)]
+import time
+time.sleep(r.get("sleep", 0))
 sys.stdout.write(r.get("out", ""))
 sys.stderr.write(r.get("err", ""))
 sys.exit(r.get("rc", 0))
@@ -104,6 +115,31 @@ def request(at: str) -> dict:
     return {"body": "@codex review", "created_at": at, "updated_at": at, "user": {"login": "djbclark", "type": "User"}}
 
 
+# Issue-timeline items (REST `issues/N/timeline`). A `committed` item carries its commit's OWN author/committer
+# date (GitHub orders it by that date) and is never a push time; only server stamps are: a check suite's
+# `created_at` and a `head_ref_force_pushed` / `commented` item's `created_at`.
+PUSH = "2026-10-24T10:00:00Z"  # the head's first check suite (the server-stamped push)
+BEFORE = "2026-10-24T09:30:00Z"  # a request made before the head was pushed
+AFTER = "2026-10-24T10:05:00Z"  # a request made after it
+
+
+def committed(sha: str, date: str = "2026-10-24T09:00:00Z") -> dict:
+    return {"event": "committed", "sha": sha, "author": {"date": date}, "committer": {"date": date}}
+
+
+def forced(sha: str, at: str = PUSH) -> dict:
+    return {"event": "head_ref_force_pushed", "commit_id": sha, "created_at": at}
+
+
+def commented(body: str = "@codex review", login: str = "djbclark", at: str = AFTER, cid: int | None = None) -> dict:
+    item = {"event": "commented", "body": body, "created_at": at, "user": {"login": login, "type": "User"}}
+    return item if cid is None else {**item, "id": cid}
+
+
+def suites(*created: str) -> dict:
+    return ok({"total_count": len(created), "check_suites": [{"id": i, "created_at": t} for i, t in enumerate(created)]})
+
+
 def finding(n: int, at: str, original: str = HEAD, review: int | None = None, login: str = CODEX_LOGIN,
             type_: str = "Bot") -> dict:
     return {"id": n, "path": f"f{n}.py", "line": n, "created_at": at, "original_commit_id": original,
@@ -141,6 +177,11 @@ class World:
         self.route(f"repos/{REPO}/pulls/{PR}/reviews", ok([]))
         self.route(f"repos/{REPO}/pulls/{PR}/comments", ok([]))
         self.route("graphql", gql())
+        # the head was pushed (its check suite), then a request: so a missing marker alone never makes pr-wait post
+        self.route(f"repos/{REPO}/commits/{HEAD}/check-suites", suites(PUSH))
+        self.route(f"repos/{REPO}/issues/{PR}/timeline", ok([committed(HEAD), commented()]))
+        self.route("user", ok({"login": "djbclark"}))
+        self.route(f"POST repos/{REPO}/issues/{PR}/comments", ok({"id": 999, "body": "@codex review"}))
 
     def argv(self, *extra: str) -> list[str]:
         return [sys.executable, "-I", str(PR_WAIT), str(PR), "--interval", "0.1", "--timeout", "15",
@@ -156,6 +197,14 @@ class World:
     def calls(self, ep: str) -> int:
         cf = self.dir / ("count-" + f"repos/{REPO}/{ep}".replace("/", "_"))
         return int(cf.read_text()) if cf.exists() else 0
+
+    def posts(self) -> int:
+        cf = self.dir / f"count-POST_repos_{REPO}/issues/{PR}/comments".replace("/", "_")
+        return int(cf.read_text()) if cf.exists() else 0
+
+    def post_argvs(self) -> list[list[str]]:
+        lines = (self.dir / "calls.log").read_text().splitlines()
+        return [a for a in map(json.loads, lines) if "POST" in a]
 
 
 @pytest.fixture
@@ -841,3 +890,494 @@ def test_script_defers_annotations_so_stock_macos_python_3_9_can_load_it() -> No
     if version.isdigit() and int(version) < 10:
         run = subprocess.run([str(stock), "-I", str(PR_WAIT), "--help"], capture_output=True, text=True)
         assert run.returncode == 0, run.stderr
+
+
+# ---- requesting the Codex review (2026-10-24) --------------------------------------------------------
+
+COMMENTS = f"repos/{REPO}/issues/{PR}/comments"
+TIMELINE = f"repos/{REPO}/issues/{PR}/timeline"
+POST_ARGV = ["api", "-X", "POST", COMMENTS, "-f", "body=@codex review"]
+NOMARK = ok([])
+
+
+def test_posts_one_request_when_the_head_has_no_marker_and_none_was_requested(world: World) -> None:
+    world.route(TIMELINE, ok([committed(OLD), committed(HEAD)]))
+    world.route(COMMENTS, NOMARK, NOMARK, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert world.posts() == 1, "one post, however many polls found no marker afterwards"
+    assert world.post_argvs() == [POST_ARGV]  # an argv list; the body goes through -f
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 1 and "posted @codex review (comment 999)" in summary["codex_request_note"]
+    assert "@codex review requested 1x" in r.stdout
+    state = json.loads(next(world.state.glob("request-*.json")).read_text())
+    assert state["own"] == 1 and state["ids"] == [999] and isinstance(state["last_at"], float)
+
+
+@pytest.mark.parametrize("status", ["running", "completed", "failed"])
+def test_no_post_when_a_marker_for_the_head_exists_whatever_its_status(world: World, status: str) -> None:
+    world.route(TIMELINE, ok([committed(HEAD)]))  # nobody has asked: only the marker keeps pr-wait quiet
+    world.route(COMMENTS, ok([codex_comment(HEAD, status)]))
+    r = world.run("--codex-stuck", "0.5", "--timeout", "5")
+    assert r.returncode == (3 if status == "running" else 0), r.stdout + r.stderr
+    assert world.posts() == 0 and world.calls("issues/7/timeline") == 0
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 0 and "no request needed" in summary["codex_request_note"]
+
+
+@pytest.mark.parametrize("flag", ["--no-codex", "--no-request"])
+def test_no_post_with_no_codex_or_no_request(world: World, flag: str) -> None:
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(COMMENTS, NOMARK)
+    r = world.run(flag, "--codex-stuck", "0.5", "--timeout", "5")
+    assert r.returncode == (0 if flag == "--no-codex" else 3), r.stdout + r.stderr
+    assert world.posts() == 0 and world.calls("issues/7/timeline") == 0
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 0
+    if flag == "--no-request":
+        assert "disabled" in summary["codex_request_note"]
+
+
+@pytest.mark.parametrize("author,pr_author,me", [
+    ("djbclark", None, "djbclark"),  # the authenticated gh user
+    ("alice", "alice", "ci-bot"),  # the PR author
+    ("djbclark", None, "ci-bot"),  # the repo owner (the OWNER of --repo)
+])
+def test_no_post_when_a_request_exists_since_the_push(world: World, author: str, pr_author: str | None,
+                                                      me: str) -> None:
+    world.route(f"repos/{REPO}/pulls/{PR}", ok({"head": {"sha": HEAD}, "user": {"login": pr_author}}))
+    world.route("user", ok({"login": me}))
+    world.route(TIMELINE, ok([committed(HEAD), commented("@codex review\n", author)]))  # a stripped body counts
+    world.route(COMMENTS, NOMARK)
+    r = world.run("--codex-stuck", "0.5", "--timeout", "5")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert world.posts() == 0
+    assert "already exists (1)" in world.file("summary")["codex_request_note"]
+
+
+# (timeline, check-suite stamps, posts expected). A `committed` item's own date is irrelevant: only the server's
+# check-suite / force-push stamps date the push, and a request counts only when it is LATER than that push.
+@pytest.mark.parametrize("timeline,stamps,posts", [
+    # A1: committed locally at 09:00, asked for the PREVIOUS head at 09:30, pushed (suite) at 10:00: GitHub
+    # places the commit by its own date, i.e. before the request, but the request is not for this head
+    ([committed(OLD), committed(HEAD, "2026-10-24T09:00:00Z"), commented(at=BEFORE)], [PUSH], 1),
+    ([committed(HEAD, "2001-01-01T00:00:00Z"), commented(at=BEFORE)], [PUSH], 1),  # a far-past commit date
+    ([commented(at=AFTER), committed(HEAD, "2099-01-01T00:00:00Z")], [PUSH], 0),  # a future commit date, placed after it
+    ([committed(HEAD), commented(at=AFTER)], [PUSH], 0),  # asked after the push
+    ([committed(HEAD), commented(at=AFTER)], ["2026-10-24T10:20:00Z", PUSH], 0),  # the EARLIEST suite is the push
+    ([committed(HEAD), commented(at=AFTER), forced(HEAD, "2026-10-24T10:10:00Z")], [PUSH], 1),  # force-push later
+    ([committed(HEAD), commented(at="2026-10-24T10:15:00Z"), forced(HEAD, "2026-10-24T10:10:00Z")], [PUSH], 0),
+    ([committed(HEAD), commented(at="2026-10-24T09:30:00Z"), forced(HEAD, "2026-10-24T09:00:00Z")], [PUSH], 1),
+    ([commented(at=AFTER), forced(OLD, "2026-10-24T11:00:00Z")], [PUSH], 0),  # another sha's force-push
+], ids=["A1-commit-before-request-pushed-after", "far-past-commit-date", "future-commit-date", "asked-after-push",
+        "earliest-suite", "force-push-stamp-later-than-suite", "asked-after-force-push",
+        "suite-later-than-force-push", "force-push-of-another-sha"])
+def test_a_request_counts_only_when_later_than_the_server_stamped_push(world: World, timeline: list[dict],
+                                                                      stamps: list[str], posts: int) -> None:
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-suites", suites(*stamps))
+    world.route(TIMELINE, ok(timeline))
+    world.route(COMMENTS, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    assert world.run().returncode == 0
+    assert world.posts() == posts
+
+
+def test_with_no_server_push_stamp_it_leans_toward_posting_capped_at_two(world: World) -> None:
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-suites", ok({"total_count": 0, "check_suites": []}))
+    world.route(TIMELINE, ok([committed(HEAD), commented()]))  # undatable: not counted
+    world.route(COMMENTS, NOMARK, ok([codex_comment(HEAD, "running")]))
+    r = world.run("--rerequest-after", "1", "--codex-stuck", "3", "--timeout", "20")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert world.posts() == 2, "posted, re-requested once, never a third"
+    assert world.file("summary")["codex_requested"] == 2
+
+
+def test_a_post_that_errored_but_landed_is_recorded_as_ours_so_the_re_request_is_not_lost(world: World) -> None:
+    world.route(TIMELINE, ok([committed(HEAD)]), ok([committed(HEAD), commented()]))  # the request shows up later
+    world.route(f"POST {COMMENTS}", fail("gh: timeout after the server accepted it"), ok({"id": 1000}))
+    world.route(COMMENTS, NOMARK, NOMARK, ok([codex_comment(HEAD, "running")]))
+    r = world.run("--rerequest-after", "1", "--codex-stuck", "4", "--timeout", "20")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert world.posts() == 2, "the errored first POST, then the one re-request"
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 2 and "errored but landed" in summary["codex_request_note"]
+
+
+def test_codex_receipts_and_quotes_of_the_phrase_are_not_requests(world: World) -> None:
+    # AGENTS.md rule 9 (PR 12, PR 10): Codex's own comments quote `@codex review`
+    world.route(TIMELINE, ok([committed(HEAD),
+                              commented("@codex review", CODEX_LOGIN),
+                              commented('About Codex: Comment "@codex review".', CODEX_LOGIN),
+                              commented("> @codex review\nlgtm"),  # a quote by the right author
+                              commented("@codex review please"),
+                              commented("@codex review", "mallory")]))  # exact body, wrong author
+    world.route(COMMENTS, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    assert world.run().returncode == 0
+    assert world.posts() == 1
+
+
+@pytest.mark.parametrize("what", ["check-suites-fail", "timeline-fails", "user-fails"])
+def test_undecidable_means_no_post_and_says_so(world: World, what: str) -> None:
+    if what == "check-suites-fail":
+        world.route(f"repos/{REPO}/commits/{HEAD}/check-suites", fail("gh: HTTP 502 Bad Gateway"))
+    elif what == "timeline-fails":
+        world.route(TIMELINE, fail("gh: HTTP 502 Bad Gateway"))
+    else:
+        world.route("user", fail("gh: HTTP 401"))
+    world.route(COMMENTS, NOMARK)
+    r = world.run("--codex-stuck", "0.5", "--timeout", "5")
+    assert r.returncode == 3, r.stdout + r.stderr  # a failed decision never turns into exit 6
+    assert world.posts() == 0
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 0 and "undecidable, nothing posted" in summary["codex_request_note"]
+
+
+def test_a_failed_check_suites_call_is_retried_and_decides_on_a_later_poll(world: World) -> None:
+    suites_ep = f"repos/{REPO}/commits/{HEAD}/check-suites"
+    world.route(suites_ep, fail("gh: HTTP 502"), fail("gh: HTTP 502"), suites(PUSH))
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(COMMENTS, NOMARK, NOMARK, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert world.calls(f"commits/{HEAD}/check-suites") == 3
+    assert world.posts() == 1 and world.file("summary")["codex_requested"] == 1
+
+
+def test_a_failed_post_is_not_recorded_and_is_rechecked_before_the_next(world: World) -> None:
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(f"POST {COMMENTS}", fail("gh: HTTP 500"), ok({"id": 1000}))
+    world.route(COMMENTS, NOMARK, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    assert world.run().returncode == 0
+    assert world.posts() == 2 and world.file("summary")["codex_requested"] == 1
+    assert world.calls("issues/7/timeline") == 2  # the timeline was read again before the second attempt
+
+
+def test_a_review_stuck_running_is_requested_once_more_never_a_third_time(world: World) -> None:
+    world.route(TIMELINE, ok([committed(HEAD)]))  # a lagging timeline never shows pr-wait's own comments
+    world.route(COMMENTS, NOMARK, ok([codex_comment(HEAD, "running")]))
+    r = world.run("--rerequest-after", "1", "--codex-stuck", "3", "--timeout", "20")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert world.posts() == 2, "the first request, one re-request after the Running window, never a third"
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 2
+    note = summary["codex_request_note"]
+    assert "posted @codex review" in note and "re-requested" in note and "openai/codex#55890" in note
+
+
+def test_no_re_request_before_the_running_window_ends(world: World) -> None:
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(COMMENTS, NOMARK, ok([codex_comment(HEAD, "running")]))
+    r = world.run("--rerequest-after", "600", "--codex-stuck", "1.5", "--timeout", "20")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert world.posts() == 1
+    assert "openai/codex#55890" in world.file("summary")["codex_request_note"]
+
+
+def test_a_human_request_beside_pr_waits_own_blocks_the_re_request(world: World) -> None:
+    # two requests since the push already (one is pr-wait's): never a third
+    world.route(TIMELINE, ok([committed(HEAD)]), ok([committed(HEAD), commented(), commented()]))
+    world.route(COMMENTS, NOMARK, ok([codex_comment(HEAD, "running")]))
+    r = world.run("--rerequest-after", "0.5", "--codex-stuck", "2", "--timeout", "20")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert world.posts() == 1
+
+
+def test_a_second_run_on_the_same_head_does_not_post_again(world: World) -> None:
+    # the timeline lags (never shows pr-wait's own comment): only the persisted state can stop a second post
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(COMMENTS, NOMARK)
+    assert world.run("--codex-stuck", "0.5", "--timeout", "5").returncode == 3
+    assert world.posts() == 1
+    r = world.run("--codex-stuck", "0.5", "--timeout", "5")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert world.posts() == 1
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 1 and "earlier run" in summary["codex_request_note"]
+
+
+def test_requests_per_head_are_capped_at_two_across_runs(world: World) -> None:
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(COMMENTS, NOMARK)
+    assert world.run("--codex-stuck", "0.5", "--timeout", "5").returncode == 3  # request 1
+    world.route(COMMENTS, ok([codex_comment(HEAD, "running")]))
+    for _ in range(2):  # request 2, then none
+        assert world.run("--rerequest-after", "0", "--codex-stuck", "0.5", "--timeout", "5").returncode == 3
+    assert world.posts() == 2
+    assert world.file("summary")["codex_requested"] == 2
+    # another head starts afresh
+    assert json.loads(next(world.state.glob(f"request-*-{HEAD}.json")).read_text())["own"] == 2
+
+
+def test_push_time_and_request_counting_use_server_stamps_as_datetimes() -> None:
+    pw = load_module()
+    allowed = {"djbclark"}
+    at = lambda s: pw.parse_ts(s)  # noqa: E731
+    ps = pw.push_stamp
+    assert ps([{"created_at": "2026-10-24T10:20:00Z"}, {"created_at": PUSH}], [], HEAD) == at(PUSH)  # the EARLIEST suite
+    assert ps([], [], HEAD) is None  # no server stamp at all
+    assert ps([{"created_at": PUSH}], [forced(HEAD, "2026-10-24T10:10:00Z"), forced(HEAD, "2026-10-24T10:07:00Z")],
+              HEAD) == at("2026-10-24T10:10:00Z")  # a force-push: the LATEST stamp wins over the suite
+    assert ps([{"created_at": PUSH}], [forced(HEAD, "2026-10-24T09:00:00Z")], HEAD) == at(PUSH)  # later of the two
+    assert ps([{"created_at": PUSH}], [forced(OLD, "2026-10-24T11:00:00Z"), committed(HEAD, "2099-01-01T00:00:00Z")],
+              HEAD) == at(PUSH)  # another sha's force-push and a commit's own date are not push stamps
+    assert ps([{"created_at": "junk"}, "x", {}], ["y", {"event": "head_ref_force_pushed"}], HEAD) is None
+    f, pushed = pw.requests_since_push, at(PUSH)
+    tl = [commented(), commented("@codex review", "DJBCLARK"), commented(at=BEFORE), commented(at=PUSH)]
+    assert f(tl, allowed, pushed) == 2  # login case is not significant; before the push and AT it do not count
+    # datetimes, not strings: 12:00+02:00 is 10:00Z (not after the push) though its text sorts after "10:00:00Z"
+    assert f([commented(at="2026-10-24T12:00:00+02:00")], allowed, pushed) == 0
+    assert f([commented(at="2026-10-24T12:06:00+02:00")], allowed, pushed) == 1
+    assert f([{"event": "reviewed", "body": "@codex review", "created_at": AFTER, "user": {"login": "djbclark"}},
+              "junk", {"event": "commented", "body": None, "created_at": AFTER},
+              {**commented(), "created_at": None}, {**commented(), "created_at": "soon"}], allowed, pushed) == 0
+    assert f([commented()], allowed, None) == 0  # no push stamp: nothing can be dated, the caller leans to posting
+
+
+def test_request_state_fields_are_read_with_get_clamped_and_finite(tmp_path: Path) -> None:
+    pw = load_module()
+    p = tmp_path / "request-x.json"
+    blank = {"own": 0, "attempts": 0, "last_at": None, "attempt_at": None, "ids": [], "adopted_ids": []}
+    assert pw.load_request_state(p) == blank  # missing file
+    for text in ["not json", "[]", "{}", '{"own": "1"}', '{"own": true}', '{"own": -4}', '{"own": NaN}']:
+        p.write_text(text)
+        assert pw.load_request_state(p)["own"] == 0, text
+    p.write_text('{"own": 7}')
+    assert pw.load_request_state(p)["own"] == 2  # clamped to MAX_REQUESTS, never reset below it
+    p.write_text('{"own": 1}')  # an older record without the later fields
+    assert pw.load_request_state(p) == {**blank, "own": 1, "attempts": 1}
+    p.write_text('{"own": 2, "last_at": 5, "attempt_at": 6.5, "ids": [1, 2], "adopted_ids": [1, 2]}')
+    assert pw.load_request_state(p) == {"own": 2, "attempts": 2, "last_at": 5.0, "attempt_at": 6.5, "ids": [1, 2],
+                                        "adopted_ids": [1, 2]}
+    # adopted_ids: plain ints only (no bool, string, float), at most MAX_IDS, the newest kept; not a list is none
+    p.write_text(json.dumps({"adopted_ids": [True, "5", 1.5, None, *range(20, 40)]}))
+    assert pw.load_request_state(p)["adopted_ids"] == list(range(40 - pw.MAX_IDS, 40))
+    for text in ['{"adopted_ids": 7}', '{"adopted_ids": "x"}', '{"adopted_ids": {"1": 2}}']:
+        p.write_text(text)
+        assert pw.load_request_state(p)["adopted_ids"] == [], text
+    for bad in ["NaN", "Infinity", "-Infinity", "1e999", "true", '"7"']:  # a hostile time must not fire a re-request
+        p.write_text('{"own": 1, "last_at": %s, "attempt_at": %s}' % (bad, bad))
+        st = pw.load_request_state(p)
+        assert st["last_at"] is None and st["attempt_at"] is None and st["own"] == 1, bad
+    # the POST-attempt count: garbage is none, a huge one is the cap, and it never reads below `own`
+    for text in ['{"attempts": "1"}', '{"attempts": true}', '{"attempts": -4}', '{"attempts": NaN}', '{"attempts": 1.5}']:
+        p.write_text(text)
+        assert pw.load_request_state(p)["attempts"] == 0, text
+    for text, want in [('{"attempts": 1}', 1), ('{"attempts": 99}', 2), ('{"attempts": 1e999}', 0),
+                       ('{"own": 2}', 2), ('{"own": 1, "attempts": 0}', 1), ('{"own": 1, "attempts": 2}', 2)]:
+        p.write_text(text)
+        assert pw.load_request_state(p)["attempts"] == want, text
+
+
+def test_repo_slug_case_does_not_split_the_request_state(world: World) -> None:
+    up = REPO.upper()
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(COMMENTS, NOMARK, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    routes, world.routes = dict(world.routes), {}
+    for ep, responses in routes.items():
+        world.route(ep.replace(REPO, up), *responses)
+    r = world.run("--repo", up)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert world.file("summary")["codex_requested"] == 1
+    assert [p.name for p in world.state.glob("request-*")] == [f"request-{REPO.replace('/', '__')}-{PR}-{HEAD}.json"]
+
+
+def test_waiters_for_the_same_repo_in_another_case_share_one_lock(world: World) -> None:
+    # APFS is case-insensitive, so the lock's NAME is asserted, not just the refusal (Linux would differ)
+    first = subprocess.Popen(world.argv("--repo", REPO.upper(), "--head", HEAD, "--timeout", "60"), env=world.env,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)  # gh fails: it just waits
+    try:
+        deadline = time.monotonic() + 15
+        while not list(world.state.glob("lock-*")) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert [p.name for p in world.state.glob("lock-*")] == [f"lock-{REPO.replace('/', '__')}-{PR}-{HEAD}"]
+        second = world.run("--repo", REPO, "--head", HEAD, "--out", str(world.out) + "-second")
+        assert second.returncode == 4, second.stdout + second.stderr
+    finally:
+        first.send_signal(signal.SIGTERM)
+        first.wait(timeout=10)
+
+
+def test_a_state_write_failure_after_the_post_is_a_warning_not_a_crash(world: World) -> None:
+    world.state.mkdir(parents=True)
+    (world.state / f"request-{REPO.replace('/', '__')}-{PR}-{HEAD}.json").mkdir()  # os.replace onto it fails
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(COMMENTS, NOMARK, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr  # never 1 (the timeout code), and the summary is written
+    assert world.posts() == 1, "the in-memory count still stops a second post in this run"
+    note = world.file("summary")["codex_request_note"]
+    assert "posted @codex review" in note and "could not write request-" in note
+    assert not list(world.state.glob("*.tmp.*")), "a failed replace leaves no temp file"
+
+
+# ---- POST attempts, errored POSTs and clock skew (PR 58 round 2, Codex P2) ----------------------------
+
+
+def iso(offset: float = 0.0) -> str:
+    """A server-style timestamp `offset` seconds from the real clock (attempt times are real wall-clock times)."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + offset))
+
+
+def no_push_stamp(world: World) -> None:
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-suites", ok({"total_count": 0, "check_suites": []}))
+
+
+def request_state(world: World) -> dict:
+    return json.loads(next(world.state.glob(f"request-*-{HEAD}.json")).read_text())
+
+
+def test_no_stamp_repo_an_errored_post_that_landed_is_adopted_and_not_posted_twice(world: World) -> None:
+    # a repo with no check suites: requests_since_push() is always 0, so only the attempt time can recognise it
+    no_push_stamp(world)
+    world.route(TIMELINE, ok([committed(HEAD)]), ok([committed(HEAD), commented(at=iso(0))]))
+    world.route(f"POST {COMMENTS}", fail("gh: timeout after the server accepted it"), ok({"id": 1000}))
+    world.route(COMMENTS, NOMARK, NOMARK, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert world.posts() == 1, "the errored POST landed: the next poll adopts it instead of posting again"
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 1 and "errored but landed" in summary["codex_request_note"]
+    state = request_state(world)
+    assert state["own"] == 1 and state["attempts"] == 1 and state["attempt_at"] is None
+
+
+def test_a_clock_running_ahead_of_the_server_still_adopts_the_landed_post(world: World) -> None:
+    # the local clock is 100 s ahead: the server stamped the comment 100 s BEFORE the attempt time, inside the 120 s
+    no_push_stamp(world)
+    world.route(TIMELINE, ok([committed(HEAD)]), ok([committed(HEAD), commented(at=iso(-100))]))
+    world.route(f"POST {COMMENTS}", fail("gh: timeout"), ok({"id": 1000}))
+    world.route(COMMENTS, NOMARK, NOMARK, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    assert world.run().returncode == 0
+    assert world.posts() == 1 and world.file("summary")["codex_requested"] == 1
+
+
+def test_a_request_older_than_the_attempt_less_the_skew_is_not_adopted(world: World) -> None:
+    no_push_stamp(world)
+    world.route(TIMELINE, ok([committed(HEAD)]), ok([committed(HEAD), commented(at=iso(-300))]))  # an old human one
+    world.route(f"POST {COMMENTS}", fail("gh: timeout"), ok({"id": 1000}))
+    world.route(COMMENTS, NOMARK, NOMARK, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    assert world.run().returncode == 0
+    assert world.posts() == 2, "the old comment is not the errored POST's: the retry is sent"
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 1 and "errored but landed" not in summary["codex_request_note"]
+
+
+def test_an_errored_post_that_never_lands_is_tried_at_most_twice_across_runs(world: World) -> None:
+    no_push_stamp(world)
+    world.route(TIMELINE, ok([committed(HEAD)]))  # the POSTs never show up
+    world.route(f"POST {COMMENTS}", fail("gh: timeout"))
+    world.route(COMMENTS, NOMARK)
+    assert world.run("--codex-stuck", "1.5", "--timeout", "20").returncode == 3
+    assert world.posts() == 2, "two attempts in one run, however many polls followed"
+    assert request_state(world)["attempts"] == 2
+    assert world.run("--codex-stuck", "1", "--timeout", "20").returncode == 3  # a restart reads the saved count
+    assert world.posts() == 2
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 0 and "POST attempts already" in summary["codex_request_note"]
+
+
+def test_the_attempt_is_on_record_before_the_post_is_sent(world: World) -> None:
+    # a POST that hangs and is killed (a gh timeout, a crash) leaves the attempt counted in the state file
+    no_push_stamp(world)
+    world.route(TIMELINE, ok([committed(HEAD)]))
+    world.route(f"POST {COMMENTS}", {"out": json.dumps({"id": 1}), "sleep": 8})
+    world.route(COMMENTS, NOMARK)
+    proc = subprocess.Popen(world.argv(), env=world.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 15
+        while not list(world.state.glob("request-*.json")) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+    state = request_state(world)
+    assert state["attempts"] == 1 and state["own"] == 0 and isinstance(state["attempt_at"], float)
+
+
+def test_a_pending_attempt_alone_triggers_adoption_and_keeps_the_attempt_time_as_last_at(world: World) -> None:
+    # own is 0 and a marker already exists (so `first()` is false and no re-request is due): only `pending` looks
+    no_push_stamp(world)
+    t = time.time() - 10
+    world.state.mkdir(parents=True)
+    (world.state / f"request-{REPO.replace('/', '__')}-{PR}-{HEAD}.json").write_text(
+        json.dumps({"own": 0, "attempts": 1, "last_at": None, "attempt_at": t, "ids": []}))
+    world.route(TIMELINE, ok([committed(HEAD), commented(at=iso(-5))]))
+    world.route(COMMENTS, ok([codex_comment(HEAD, "running")]))  # a terminal marker would end the step early
+    assert world.run("--codex-stuck", "1", "--timeout", "20").returncode == 3
+    assert world.posts() == 0
+    state = request_state(world)
+    assert state["own"] == 1 and state["last_at"] == t and state["attempt_at"] is None and state["attempts"] == 1
+    assert world.file("summary")["codex_requested"] == 1
+
+
+# ---- adoption never counts the previous head's request, never twice, never a person's later one (PR 58 round 3) ----
+
+
+def test_with_a_push_stamp_a_request_for_the_previous_head_inside_the_skew_is_never_adopted(world: World) -> None:
+    # head pushed 60 s ago; a request made 90 s ago was for the previous head (before the push, inside the 120 s
+    # skew window of the errored POST). It is not ours: the retry for the new head must still be sent.
+    world.route(f"repos/{REPO}/commits/{HEAD}/check-suites", suites(iso(-60)))
+    world.route(TIMELINE, ok([committed(HEAD), commented(at=iso(-90), cid=77)]))
+    world.route(f"POST {COMMENTS}", fail("gh: timeout"), ok({"id": 1000}))
+    world.route(COMMENTS, NOMARK, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    r = world.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert world.posts() == 2, "the old head's request was adopted as ours, so nothing was posted for the new head"
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 1 and "errored but landed" not in summary["codex_request_note"]
+    assert request_state(world)["adopted_ids"] == [1000]
+
+
+def test_a_skipped_re_request_after_an_errored_post_says_so(world: World) -> None:
+    no_push_stamp(world)
+    world.route(TIMELINE, ok([committed(HEAD)]))  # the errored POST never lands
+    world.route(f"POST {COMMENTS}", fail("gh: timeout"), ok({"id": 1000}))
+    world.route(COMMENTS, NOMARK, NOMARK, ok([codex_comment(HEAD, "running")]))
+    r = world.run("--rerequest-after", "0.5", "--codex-stuck", "3", "--timeout", "20")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert world.posts() == 2
+    note = world.file("summary")["codex_request_note"]
+    assert "re-request skipped: 2 POST attempts already (one errored)" in note
+
+
+def test_the_first_request_is_not_adopted_a_second_time_by_the_re_request_attempt(world: World) -> None:
+    # --rerequest-after below the 120 s skew: the first request lies inside the re-request attempt's window
+    no_push_stamp(world)
+    world.route(TIMELINE, ok([committed(HEAD)]), ok([committed(HEAD), commented(at=iso(0), cid=999)]))
+    world.route(f"POST {COMMENTS}", ok({"id": 999}), fail("gh: timeout"))
+    world.route(COMMENTS, NOMARK, ok([codex_comment(HEAD, "running")]))
+    r = world.run("--rerequest-after", "0.5", "--codex-stuck", "3", "--timeout", "20")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert world.posts() == 2
+    state = request_state(world)
+    assert state["own"] == 1 and state["adopted_ids"] == [999] and state["attempt_at"] is not None
+    assert world.file("summary")["codex_requested"] == 1
+
+
+@pytest.mark.parametrize("stamped", [False, True], ids=["no-stamp", "push-stamp"])
+def test_a_persons_request_made_after_the_attempts_were_spent_is_not_adopted(world: World, stamped: bool) -> None:
+    if stamped:
+        world.route(f"repos/{REPO}/commits/{HEAD}/check-suites", suites(iso(-3600)))
+    else:
+        no_push_stamp(world)
+    human = commented(at=iso(400), cid=5)  # far later than any POST of ours could have been created
+    world.route(TIMELINE, ok([committed(HEAD)]), ok([committed(HEAD)]), ok([committed(HEAD), human]))
+    world.route(f"POST {COMMENTS}", fail("gh: timeout"))
+    world.route(COMMENTS, NOMARK)
+    r = world.run("--codex-stuck", "1.5", "--timeout", "20")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert world.posts() == 2
+    summary = world.file("summary")
+    assert summary["codex_requested"] == 0 and "errored but landed" not in summary["codex_request_note"]
+    state = request_state(world)
+    assert state["own"] == 0 and state["adopted_ids"] == [] and state["attempt_at"] is not None
+
+
+def test_an_adopted_comment_id_is_saved_in_the_state_file(world: World) -> None:
+    no_push_stamp(world)
+    world.route(TIMELINE, ok([committed(HEAD)]), ok([committed(HEAD), commented(at=iso(0), cid=42)]))
+    world.route(f"POST {COMMENTS}", fail("gh: timeout"))
+    world.route(COMMENTS, NOMARK, NOMARK, ok([codex_comment(HEAD, "completed")]))
+    assert world.run().returncode == 0
+    assert world.posts() == 1
+    state = request_state(world)
+    assert state["own"] == 1 and state["adopted_ids"] == [42]

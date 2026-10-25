@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# post-checkout guard for ~/ops/* deploy checkouts.
+#
+# Deploy checkouts must stay on master (see CLAUDE.md's "Where work happens"
+# policy — dev work belongs in ~/src/ops-worktrees task worktrees, never here).
+# Nothing previously stopped a stray `git checkout -b` from leaving a deploy
+# checkout stuck on a feature branch, silently blocking later deploy/release
+# operations until a human (or an agent) noticed and fixed it by hand — this
+# happened for real on 2026-08-01 (site-djbclark stuck on a merged
+# issue-152-termux-pkg-jobber branch, blocking a release deploy).
+#
+# git has no pre-checkout hook, so this reacts immediately after the fact:
+# auto-heal (checkout back to master, pull, prune the stale branch) ONLY when
+# it's provably safe — clean tree AND the branch's PR is already merged.
+# Anything else (dirty tree, or a branch with real unmerged content) is left
+# alone and loudly flagged — never silently discarded.
+#
+# Source of truth: djbclark-ade bin/ops-post-checkout-guard (tests/test_ops_post_checkout_guard.py).
+# Install: cp this file to .git/hooks/post-checkout in a deploy checkout and
+# chmod +x it (atomically: temp file beside, then mv -f). Args per git's post-checkout hook contract: $1=old HEAD,
+# $2=new HEAD, $3=1 if a branch checkout (0 if just a file-level checkout).
+
+set -euo pipefail
+
+is_branch_checkout="${3:-0}"
+if [[ "$is_branch_checkout" != "1" ]]; then
+  exit 0
+fi
+
+# A linked worktree shares this hook (hooks live in the common git dir) but is not the deploy
+# checkout: `git worktree add -b X` runs it inside the NEW worktree, which printed "deploy
+# checkout is now on 'X'" although the deploy checkout never moved (seen three times on
+# 2026-10-25), and with a merged PR it would have tried to heal the wrong tree. Only the main
+# working tree is guarded.
+git_dir="$(git rev-parse --path-format=absolute --absolute-git-dir 2>/dev/null || echo "")"
+common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "")"
+if [[ -n "$git_dir" && "$git_dir" != "$common_dir" ]]; then
+  exit 0
+fi
+
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+if [[ -z "$branch" || "$branch" == "master" || "$branch" == "HEAD" ]]; then
+  exit 0
+fi
+
+echo "⚠️  post-checkout-guard: deploy checkout is now on '$branch', not master." >&2
+
+if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+  echo "⚠️  post-checkout-guard: working tree is DIRTY — refusing to auto-heal." >&2
+  echo "    A human needs to look at this before it's safe to touch. Leaving as-is." >&2
+  exit 0
+fi
+
+git fetch origin master -q 2>/dev/null || true
+
+merged="no"
+remote_url="$(git config --get remote.origin.url 2>/dev/null || echo "")"
+repo_slug="$(basename -s .git "$remote_url" 2>/dev/null || echo "")"
+owner_slug="$(basename "$(dirname "$remote_url")" 2>/dev/null || echo "")"
+if [[ -n "$repo_slug" && -n "$owner_slug" ]] && command -v gh >/dev/null 2>&1; then
+  pr_state="$(gh pr list --repo "${owner_slug}/${repo_slug}" --head "$branch" --state merged --json number --jq 'length' 2>/dev/null || echo "0")"
+  if [[ "$pr_state" != "0" ]]; then
+    merged="yes"
+  fi
+fi
+
+if [[ "$merged" == "yes" ]]; then
+  echo "✅ post-checkout-guard: '$branch' has a merged PR and the tree is clean — auto-healing to master." >&2
+  git checkout master -q
+  git pull -q origin master
+  git branch -D "$branch" >/dev/null 2>&1 || true
+  echo "✅ post-checkout-guard: back on master ($(git log --oneline -1))." >&2
+else
+  echo "⚠️  post-checkout-guard: could not confirm '$branch' is merged — leaving it checked out." >&2
+  echo "    If this branch's work is done, merge its PR (or check it out from a" >&2
+  echo "    task worktree instead) — this checkout should not be doing dev work." >&2
+fi
