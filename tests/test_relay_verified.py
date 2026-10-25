@@ -293,6 +293,43 @@ class TestExpectationClosedOnlyByItsTarget(Base):
         self.assertIn("1 resolved", self.swept())
 
 
+class TestExpectReservation(Base):
+    """Adversary r1 A6 (2026-10-25): --expect-ack ID is claimed before the send, so two senders of one ID cannot both send."""
+
+    def test_while_the_first_relay_is_typing_the_id_is_already_taken(self) -> None:
+        taken: list[bool] = []
+        self.on_typed = lambda text: (taken.append(relay.expect_reserve("q1", "dddddddd")), self.write_delivered(text))[-1]
+        self.assertEqual(self.go("is the build green?", "--expect-ack", "q1")[0], 0)
+        self.assertEqual(taken, [False])
+
+    def test_a_reserved_id_refuses_a_second_send_before_anything_is_typed(self) -> None:
+        self.assertTrue(relay.expect_reserve("q1", "dddddddd"))
+        rc, _, err = self.go("is the build green?", "--expect-ack", "q1")
+        self.assertEqual((rc, self.calls), (2, []), err)
+        self.assertIn("already open", err)
+
+    def test_a_reservation_whose_relay_died_frees_the_id_after_its_ttl(self) -> None:
+        self.assertTrue(relay.expect_reserve("q1", "dddddddd"))
+        path = relay.expect_dir() / "q1.json"
+        rec = json.loads(path.read_text())
+        rec["created"] -= relay.EXPECT_RESERVE_TTL + 5
+        path.write_text(json.dumps(rec))
+        self.assertEqual(self.go("is the build green?", "--expect-ack", "q1")[0], 0)
+
+    def test_a_relay_that_sends_nothing_gives_the_id_back(self) -> None:
+        rc, _, _ = self.go("is the build green?", "--expect-ack", "q1", to="nobody-here")
+        self.assertEqual(rc, 1)
+        self.assertIsNone(relay.expect_read("q1"))
+        self.assertEqual(self.go("is the build green?", "--expect-ack", "q1")[0], 0)
+
+    def test_the_send_turns_it_into_the_open_expectation_and_a_reservation_is_not_listed(self) -> None:
+        self.assertEqual(self.go("is the build green?", "--expect-ack", "q1")[0], 0)
+        self.assertEqual((relay.expect_read("q1") or {}).get("state"), "open")
+        self.assertTrue(relay.expect_reserve("q2", "dddddddd"))
+        rows = [r for r in json.loads(self.run_cli("--pending", "--json")[1]) if r.get("kind") == "expect"]
+        self.assertEqual([r["id"] for r in rows], ["q1"])
+
+
 class TestFirstContact(Base):
     def test_the_first_message_to_a_peer_asks_for_an_ack_and_the_second_does_not(self) -> None:
         self.assertEqual(self.go("PR 61 is merged")[0], 0)

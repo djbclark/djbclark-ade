@@ -1110,7 +1110,7 @@ def sender_name(listed):
     without it every watcher arrived as `[relay from unknown]`), else "unknown".
 
     The declared label is consulted LAST, so a real session identity always wins and a job cannot
-    impersonate a live session; it is sanitized through safe_label like every other path.
+    outrank a live session; it is sanitized through safe_label like every other path.
     """
     if SENDER_OVERRIDE[0]:
         label = safe_label(SENDER_OVERRIDE[0], LABEL_MAX, composed=True)
@@ -1145,9 +1145,12 @@ def env_sender_label() -> str:
     `sender_name` could only ever return "unknown" and its messages arrived as
     `[relay from unknown]` — an anonymous line into a session that cannot tell which of the
     watchers spoke (load-watch, fleet-watch and rumination-watch all looked identical).
-    Set by the job's own plist, which is the same trust position as the job itself.
+    Set by the job's own plist, which is the same trust position as the job itself. Never a Hermes label (`hermes xxxx`, the shape
+    only a relayed Hermes turn or a Hermes-started relay sends: adversary r1 A7, 2026-10-25), and sanitized through safe_label,
+    so it carries no `:`, `(` or `)`: a declared label cannot spell a live session's `KIND ID (DIR)` header.
     """
-    return safe_label((os.environ.get("RELAY_SENDER_NAME") or "").strip())
+    label = safe_label((os.environ.get("RELAY_SENDER_NAME") or "").strip())
+    return "unknown" if HERMES_SENDER.fullmatch(label) else label
 
 
 def claude_socket(s):
@@ -2493,6 +2496,15 @@ def atomic_json(path, obj):
         raise
 
 
+def _num(value, default=0.0):
+    """VALUE as a finite float, else DEFAULT: a record is plain JSON a hand edit can break (adversary r1 A10)."""
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return default
+    return x if math.isfinite(x) else default
+
+
 def expect_dir():
     return DEFER_DIR / "expect"
 
@@ -2516,6 +2528,32 @@ def expect_all():
 def expect_write(rec):
     with _flock(defer_dir() / ".expect.lock"):
         atomic_json(expect_dir() / f"{rec['id']}.json", rec)
+
+
+EXPECT_RESERVE_TTL = 600    # a reservation whose relay died before it sent or released it frees its ID after this many seconds
+
+
+def expect_reserve(eid, sender):
+    """Claim --expect-ack ID before the send (adversary r1 A6, 2026-10-25): under the expectation lock, False when ID is open or freshly
+    reserved by another relay, else a `reserved` record takes it (an acked, stale or reserved-then-abandoned ID is free). Check and claim are
+    one step, so two concurrent senders of one ID cannot both send. `note_links_and_expect` turns it into the `open` record; a relay that
+    sends nothing calls `expect_release`."""
+    now = time.time()
+    with _flock(defer_dir() / ".expect.lock"):
+        old = expect_read(eid)
+        if old and (old.get("state") == "open" or (old.get("state") == "reserved" and now - _num(old.get("created"), now) < EXPECT_RESERVE_TTL)):
+            return False
+        atomic_json(expect_dir() / f"{eid}.json", {"id": eid, "state": "reserved", "sender": sender, "created": now})
+    return True
+
+
+def expect_release(eid, sender):
+    """Drop the reservation of ID made by SENDER, when it is still a reservation (the relay sent nothing)."""
+    with _flock(defer_dir() / ".expect.lock"):
+        old = expect_read(eid)
+        if old and old.get("state") == "reserved" and old.get("sender") == sender:
+            with contextlib.suppress(OSError):
+                (expect_dir() / f"{eid}.json").unlink()
 
 
 def user_texts(tx, mark):
@@ -2644,14 +2682,19 @@ def expect_view(now=None):
     return [{"kind": "expect", "id": r["id"], "state": r.get("state"), "sender": r.get("sender_label") or r.get("sender"), "target": r.get("target"),
              "age_s": int(now - float(r.get("created") or now)), "within_s": int(float(r.get("within") or EXPECT_WITHIN)),
              "overdue": r.get("state") == "open" and now - float(r.get("created") or now) > float(r.get("within") or EXPECT_WITHIN)}
-            for r in expect_all()]
+            for r in expect_all() if r.get("state") != "reserved"]
 
 
 def main(argv=None, sweep=True):
     """One relay run. A send that may have reached its target (CTX["sent"]) is recorded afterwards: the link sender -> target and
     the --expect-ack expectation. A failure of that bookkeeping never changes the exit code."""
     CTX.clear()
-    rc = _main(argv, sweep)
+    try:
+        rc = _main(argv, sweep)
+    finally:
+        if CTX.get("reserved") and not CTX.get("sent"):
+            with contextlib.suppress(Exception):    # nothing went out: the ID is free again
+                expect_release(*CTX["reserved"])
     if CTX.get("sent") and CTX.get("s") is not None:
         try:
             note_links_and_expect()
@@ -2752,10 +2795,10 @@ def _main(argv=None, sweep=True):
                 print("relay: not sent: --expect-ack needs this session's own transcript to watch for the reply, and none is known "
                       "(a script with no session cannot be answered)", file=sys.stderr)
                 return 2
-            old = expect_read(a.expect_ack)
-            if old and old.get("state") == "open":
+            if not expect_reserve(a.expect_ack, me["id"]):
                 print(f"relay: not sent: an expectation {a.expect_ack!r} is already open (relay.py --pending); pick another ID", file=sys.stderr)
                 return 2
+            CTX["reserved"] = (a.expect_ack, me["id"])
         tx_me = Path(me["transcript"]) if me and me.get("transcript") else None
         CTX.update(me=me, expect=a.expect_ack, within=a.ack_within,
                    mark=tx_me.stat().st_size if tx_me and tx_me.is_file() else 0)
