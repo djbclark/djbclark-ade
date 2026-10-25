@@ -3,6 +3,32 @@
 Work the operator has explicitly queued. Newest first. Items leave this file
 when they ship (into the relevant doc) or when they're dropped (say why).
 
+## relay.py deferred send and Paseo sender label (2026-10-24, branch `feat/relay-deferred-send`, PR #57)
+
+Built, repair round 2 (2026-10-24) after a second adversary BLOCK, not merged: a busy target no longer loses the text (`relay.py`
+prints `queued: <id>` and exits 0 for a caller it can identify; 0600 record under `~/.local/state/relay/deferred/`, detached
+`--deliver` with its own clean environment, `--pending`, `--cancel`, `--sweep`) and `sender_name` reads `PASEO_AGENT_ID`.
+`load-watch` passes `--no-defer` for incident briefs (a queued brief arrives after the spike; only `watcher test` may queue).
+A caller with no identifiable sender (fleet-watch's `upr_relay`, load-watch, cron scripts) gets exit 1 "deferring needs an
+identifiable sender" on a busy target, which is the behaviour before this branch: fleet-watch's `upr_dispatch` reads rc 1 as a
+refused relay and falls back to a worker (checked 2026-10-24). **site-private follow-up** (not edited here): `upr_relay` could pass `--idle S`. Open:
+(1) no launchd job re-arms queued records after a reboot yet; they wait for the next `relay.py` run (its opportunistic sweep)
+or `relay.py --sweep`, by the brief; (2) a Claude-pane target is never deferred (it queues natively); (3) one deliverer
+process per queued record (at most 100), only the head of a target's queue polls it; (4) `--cancel` has no sender check
+(same-uid operator surface); (5) `PASEO_AGENT_ID` can be forged by a same-user process, as `HERDR_PANE_ID` can; (6) the
+bounds can be starved by a same-user process that mints sender keys (100 in all; never silent: exit 1 "deferred queue
+full"), one sender can fill one target's 20, and a deliverer stuck in a send holds its own record's owed notice until a later
+sweep; (7) a Paseo daemon error is tolerated for only 3 looks, 5 s apart (about 10-15 s): raise `DEFER_ERRORS` or space
+the looks if a longer restart must be survived; (8) at QUEUE time a herdr pane row with no session id, transcript or pid is not deferred (exit 1 with the `--idle S` hint)
+when `pane process-info` fails, or when no foreground process, or more than one, is named like the agent (the herdr label
+or a binary `fleet.PROC_AGENTS` maps to it; with one foreground process in all, that one is taken); at POLL time the stored
+pid only has to be among the pane's foreground pids (tool and MCP children come and go), and a pane herdr cannot read
+counts as an error that fails the message only after 3 in a row (about 10-15 s, as in (7)); (9) two records left by an earlier test run sit in
+`~/.local/state/relay/deferred/` (`20261024-194844-fe1631`, `20261024-194854-57fcc1`) and are pruned by a sweep a week after
+they went final; the test suite now points `RELAY_DEFER_DIR` at a temp directory (`tests/conftest.py`) and
+`tests/test_zz_relay_real_state_untouched.py` fails if a freshly loaded relay would point at the real directory.
+Round 4 residuals (APPROVE f3873a2, 2026-10-24; all LOW/NIT, each ends in a notice and loses nothing): (C1) a pane/agent restarted onto the SAME session id gets a new pid, so a queued message fails "target changed" (the token stores `pid` beside `sid`; fix: check the pid only when `sid` and `transcript` are both empty; `/clear` gives a new sid and failing is arguably right); (C2) a `_pane_only` row (zcode, muse) takes fleet's `_tui_of` pid, the first match in descending pid order, which can be a same-named child that exits: a spurious "target changed" (fix: judge herdr rows by membership, or have `_tui_of` refuse several hits); (C3) a sid-less pane whose TUI has a same-named foreground child (npm/npx wrapper plus native binary, `codex exec` in the TUI's pgrp) has two name hits, so the queue is refused with exit 1 "Retry with --idle S" (not observed live; herdr's process-info carries no ppid for a tie-break); (C4) `deliverer_env` passes `RELAY_DEFER_DIR`/`RELAY_UNSENT`/`RELAY_HERMES_DIR` unresolved, so a relative operator value would point elsewhere after `chdir("/")` (fix: `.resolve()`); (C5) a deferred Hermes turn starts with cwd `/`, informational.
+
 ## tuios support: do it LAST (djbclark, direct, 2026-10-24)
 
 djbclark, 2026-10-24: "Queue for very end, although we can consider it a little now to make room for it any work between
