@@ -242,6 +242,8 @@ session; in that case skip it silently. Add its one-line result to the report.
 
 ## Step 9 — Clear and continue
 
+**Context and provider check (2026-10-25).** Follow [context hygiene](../../docs/context-hygiene.md): start a handoff at a completed task boundary rather than carrying unrelated work into a large context. Cached reads still consume the provider allowance. If `ADE_OPENCODE_SESSION_ID` is set, this is the native OpenCode path: persist the owned checkpoint and use `self-slash "/compact"` when continuing. Do not send `/new`, `/clear` or `/reset` into a presumed parent; native reset needs a supported, acknowledged successor/baton path. Until that path is verified, this step is document-only for a native reset, and compaction is the automatic continuation mechanism.
+
 Last action, after Step 8 (djbclark, 2026-10-20: "handoffs [should] immediately clear context and
 then start a baton and continue running without human intervention"). Run
 
@@ -361,3 +363,11 @@ gap or lock clears, which does both).
 the operator says "doc only" or otherwise asks for the document without a restart, or when you are a
 sub-agent or a dispatched slice (above). `loose` Rule 4 option 1 wants this step to run: it does not
 make a handoff document-only. Say in the report that Step 9 was skipped and why.
+
+OpenCode V2 Go sessions use the native `ade_compact` tool for manual compaction.
+The plugin never rewrites shell commands. A supported host controller may pass
+an explicit validated session and directory to `self-slash "/compact"`.
+These paths compact only the verified current session; they do not implement a
+new-session/baton successor.
+See `docs/context-hygiene.md`. Write the checkpoint first and require the normal
+host identity/acknowledgment checks for a lifecycle cycle.
