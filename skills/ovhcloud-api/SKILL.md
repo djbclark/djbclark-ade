@@ -252,18 +252,31 @@ Check it with one command. **Ask Nix rather than parsing** — it needs no regex
 declaration form:
 
 ```bash
+# Checks the WORKING TREE (uncommitted tracked edits included), so it is the right check to run
+# BEFORE committing - and NOT proof that the pushed ref is sound.
 nix flake metadata --json --no-update-lock-file ./nixos >/dev/null
+
+# After pushing, check the ref the host actually builds. This is the authoritative one.
+nix flake metadata --json --no-update-lock-file \
+  'github:OWNER/REPO/<deploy-branch>?dir=nixos' >/dev/null
+
 # exit 0 = the lock matches flake.nix
 # non-zero, "requires lock file changes but they're not allowed due to
 # '--no-update-lock-file'" = the lock is stale or missing an input
 ```
 
-If you need the *names* (e.g. to report which input is missing) without Nix, parse carefully — a
-naive `^\s*inputs\.([A-Za-z0-9_-]+)\s*=` **misses the dotted form** `inputs.nixpkgs.url = "…";`
-(which is exactly how `nixpkgs` is declared in `site-djbclark`'s own flake, so that regex silently
-skips it), and it misses the `inputs = { foo.url = …; };` attrset form. Also compare against the
-**root** inputs, not every node in the lock: `set(lock["nodes"])` includes transitive nodes and the
-`root` entry itself, so a transitive node of the same name can mask a missing root input.
+**The local form is a false-pass hazard** (verified on vps-primary, 2026-10-25): `./nixos` inside a git
+checkout resolves to `git+file:` over the **tracked working tree**, uncommitted edits included. So you
+can regenerate the lock, see exit 0, then push only `flake.nix` — and the host still fails. The
+`github:` form is what catches that, and it is the one that matters for a host that builds from git.
+
+If you need the *names* (e.g. to report which input is missing) without Nix, parse carefully — the
+fallback below handles **only top-level `inputs.<name>…` lines**, so it misses the
+`inputs = { foo.url = …; };` attrset form and can be confused by a nested `inputs.bar.url = …` at the
+start of a line inside another input's block. **The Nix command above is authoritative; the fallback is
+for naming what is missing.** It also compares against the **root** inputs, not every node in the lock:
+`set(lock["nodes"])` includes transitive nodes and the `root` entry itself, so a transitive node of the
+same name can mask a missing root input.
 
 ```bash
 python3 - <<'EOF'
@@ -292,10 +305,13 @@ systemctl is-failed nixos-upgrade      # 'failed' after a failure, 'inactive' af
 systemctl show nixos-upgrade -p Result # Result=exit-code vs Result=success
 ```
 
-What *is* easy to miss is that **`is-active` alone is not the check**: it prints `inactive` after a
-*successful* run and `failed` after a failed one, so reading only `is-active` and seeing a non-active
-state tells you nothing on its own. Compare `nixos-version --configuration-revision` against the
-deploy branch head as the authoritative check — it catches a stale host however the state got there.
+What *is* easy to miss is that **`is-active`'s exit code is non-zero in both cases** (verified on the
+host: exit 3 after a success and after a failure), so an `if systemctl is-active …` script cannot tell
+them apart — the *printed word* differs (`inactive` vs `failed`) but the *status* does not. Use
+`is-failed` (exit 0 only when failed) or `show -p Result` to distinguish them. Note the `failed` state
+only reflects the **latest** run: it clears on the next timer run or a `reset-failed`. That is why the
+authoritative check is comparing `nixos-version --configuration-revision` against the deploy branch
+head — it catches a stale host however the state got there.
 
 
 
