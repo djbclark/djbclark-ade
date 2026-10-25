@@ -197,6 +197,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Fixed
 
+- `acp-run` named `env` instead of `crush-acp` for the crush wrapper, so a missing `crush-acp` skipped `ACP_RUN_BIN_WAIT` and exit 127 (and `--list` showed it `ok`); `acp-dispatch` kept the not-installed probe result per model, so every model of a missing agent paid the 90 s wait again, and now keeps it per agent; the detached `waiter:` hint always said `timeout 7200000`, and now says when the wait is longer than that 2 h maximum (or unlimited) and to re-arm the same line (Codex 4322594869, 4323297404, 4324164145) (#38).
 - Restored the executable bit on 12 tracked scripts with a shebang (d618809, 2026-10-23): `claude/hooks/context_size_nudge.py`
   had been 100644 since 836b306 (2026-10-19), so under `hook-deadline` it exited 127 and no context-size nudge ran for
   four days; `bin/claude-settings-env` had lost it on this branch. `tests/test_bin_modes.py` now fails on any tracked

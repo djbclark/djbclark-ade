@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -102,6 +103,53 @@ class TestWaitOnce(WaiterBase):
         os.utime(rec["report"], (time.time() - 7200,) * 2)
         again = self.run_acp(["wait", "--once", str(self.record_path())], env=env)
         self.assertEqual(again.stderr.count("checkpoint stale"), 1, again.stderr)
+
+
+class TestRearmHintMatchesTheWait(WaiterBase):
+    """Codex 4324164145 (PR 28): the hint always said `timeout 7200000`, so a slice whose waiter runs past 2 h
+    (--wait-timeout over 7200, a --timeout that gives more, or --timeout 0 = unlimited) lost its waiter at 2 h.
+    7200000 ms is Claude Code Bash's maximum background timeout; no hint may name more than that."""
+
+    def hint(self, *extra: str) -> str:
+        r = self.dispatch("--detach", "--no-wait", *extra, mode="slow", name=f"h{len(extra)}")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.rec_name = f"h{len(extra)}"
+        lines = r.stdout.strip().splitlines()
+        self.assertTrue(lines[-1].startswith("rearm: "), r.stdout)
+        self.assertTrue(lines[-2].startswith("waiter: "), r.stdout)
+        return lines[-2]
+
+    def assert_within_the_maximum(self, hint: str) -> None:
+        for n in re.findall(r"timeout (\d+)", hint):
+            self.assertLessEqual(int(n), 7200000, hint)
+
+    def test_a_wait_that_fits_in_two_hours_keeps_the_maximum_tool_timeout(self):
+        for extra in ((), ("--wait-timeout", "7200")):
+            hint = self.hint(*extra)
+            self.assertIn("timeout 7200000", hint)
+            self.assertNotIn("longer than", hint)
+            self.assertLessEqual(self.record(self.rec_name)["wait_timeout"], 7200)
+            self.assert_within_the_maximum(hint)
+
+    def test_a_wait_past_two_hours_says_so_and_gives_the_rearm_rule(self):
+        hint = self.hint("--wait-timeout", "7201")
+        self.assertEqual(self.record(self.rec_name)["wait_timeout"], 7201)
+        self.assertIn("longer than", hint)
+        self.assertIn("re-arm", hint)
+        self.assert_within_the_maximum(hint)
+
+    def test_a_timeout_that_pushes_the_wait_past_two_hours(self):
+        hint = self.hint("--timeout", "9000")
+        self.assertGreater(self.record(self.rec_name)["wait_timeout"], 7200)
+        self.assertIn("longer than", hint)
+        self.assert_within_the_maximum(hint)
+
+    def test_an_unlimited_wait_says_so_and_gives_the_rearm_rule(self):
+        hint = self.hint("--timeout", "0")
+        self.assertEqual(self.record(self.rec_name)["wait_timeout"], 0)
+        self.assertIn("unlimited", hint)
+        self.assertIn("re-arm", hint)
+        self.assert_within_the_maximum(hint)
 
 
 class TestRearmLine(WaiterBase):

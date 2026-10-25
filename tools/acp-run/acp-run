@@ -520,6 +520,17 @@ def bin_wait_settings() -> tuple[float, float]:
             env_seconds("ACP_RUN_BIN_POLL", BIN_POLL, 0.05, 30.0))
 
 
+def agent_executable(cmd: list[str]) -> str:
+    """The program a launch command really runs: an `env NAME=VAL ... PROGRAM` wrapper (crush) is
+    skipped, since `env` is always on PATH and would hide a missing agent binary (Codex 4322594869)."""
+    if os.path.basename(cmd[0]) != "env":
+        return cmd[0]
+    for tok in cmd[1:]:
+        if "=" not in tok:
+            return tok
+    return cmd[0]
+
+
 def bin_settle(found: str, poll: float) -> None:
     """A binary that just appeared may still be relinking (an npm package shows its bin symlink
     before its files are all extracted): wait one more poll and, if its real path or mtime moved
@@ -4614,7 +4625,8 @@ def main():
         ap.error(f"--perm deny: {DENY_UNSUPPORTED[a.agent]}")
     if a.list:
         for n, (c, auth) in AGENTS.items():
-            ok = "ok " if shutil.which(c[0]) else "-- "
+            exe = agent_executable(c)
+            ok = "ok " if shutil.which(exe) else "-- "
             print(f"{ok}{n:9} {' '.join(c)}" + (f"  (auth {auth})" if auth else ""))
         return 0
     if a.agent in OPERATOR_GATED and a.agent not in operator_approved():
@@ -4681,19 +4693,20 @@ def main():
         else:
             ap.error("give a prompt with -p, -f or stdin")
     cmd = YOLO_CMD.get(a.agent, AGENTS[a.agent][0])
-    if not shutil.which(cmd[0]):
+    exe = agent_executable(cmd)
+    if not shutil.which(exe):
         wait, poll = bin_wait_settings()
         if wait > 0:
-            print(f"acp-run: {cmd[0]} not found on PATH; waiting up to {wait:g} s in case an upgrade "
+            print(f"acp-run: {exe} not found on PATH; waiting up to {wait:g} s in case an upgrade "
                   f"is relinking it (ACP_RUN_BIN_WAIT=0 disables)", file=sys.stderr)
             deadline = time.monotonic() + wait
-            while not shutil.which(cmd[0]) and time.monotonic() < deadline:
+            while not shutil.which(exe) and time.monotonic() < deadline:
                 time.sleep(min(poll, max(0.0, deadline - time.monotonic())))
-            found = shutil.which(cmd[0])
+            found = shutil.which(exe)
             if found:
                 bin_settle(found, poll)
-        if not shutil.which(cmd[0]):
-            print(f"acp-run: {cmd[0]} not installed", file=sys.stderr)
+        if not shutil.which(exe):
+            print(f"acp-run: {exe} not installed", file=sys.stderr)
             sys.exit(EXIT_NOT_INSTALLED)
     if a.max_load is not None and not a.info:
         why = load_guard(a.max_load, a.load_wait)
