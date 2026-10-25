@@ -837,4 +837,8 @@ def test_config_with_a_nul_path_or_deep_nesting_does_not_crash(tmp_path):
     deep = tmp_path / "deep.json"
     deep.write_text("[" * 100000 + "]" * 100000, encoding="utf-8")
     proc, out = jrun(tmp_path / "store", "--config", str(deep))
-    assert any("no readable config" in s for s in out["skipped"])
+    # Whether json raises RecursionError (older/other builds: "no readable config") or parses
+    # the nested list (CI's macOS Python 3.14: "has no `projects` object") varies by Python;
+    # what matters is that the run does not crash and the empty-project check says so.
+    assert proc.returncode != 2
+    assert any("no readable config" in s or "no `projects` object" in s for s in out["skipped"])
