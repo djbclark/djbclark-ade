@@ -14,7 +14,7 @@ from typing import Any
 import test_relay_fallback as fb  # noqa: E402  # pyright: ignore[reportMissingImports]
 
 relay, sess = fb.relay, fb.sess
-CHECKED = ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "RELAY_SENDER_NAME", "RELAY_SENDER", "ancestor", "fleet")
+CHECKED = ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "HERMES_SESSION_ID", "RELAY_SENDER_NAME", "RELAY_SENDER", "ancestor", "fleet")
 
 
 class TestRefusal(fb.Harness):
@@ -57,9 +57,9 @@ class TestRefusal(fb.Harness):
         self.assertEqual(rc, relay.NO_SENDER_EXIT)
         doc: dict[str, Any] = json.loads(out)
         self.assertEqual((doc["sent"], doc["error"], doc["exit"]), (False, "no_sender", 4))
-        for name in CHECKED[:4]:
+        for name in CHECKED[:5]:
             self.assertIn(name, doc["reason"])
-        self.assertEqual(doc["checked_env"], ["PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "RELAY_SENDER_NAME"])
+        self.assertEqual(doc["checked_env"], ["PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "HERMES_SESSION_ID", "RELAY_SENDER_NAME"])
 
     def test_ack_does_not_turn_the_refusal_into_another_code(self) -> None:
         rc, _, _ = self.run_main(sess(status="idle"), "--ack")
@@ -106,6 +106,37 @@ class TestRefusal(fb.Harness):
         rc, _, _ = self.run_main(sess(status="idle"))
         self.assertEqual(rc, relay.NO_SENDER_EXIT)
         self.assert_nothing_happened()
+
+
+class TestHermesStartedRelay(fb.Harness):
+    """Adversary r1 A3 (2026-10-25): a relay Hermes starts itself (terminal tool, background process) has only HERMES_SESSION_ID."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        os.environ.pop("RELAY_SENDER_NAME", None)
+        os.environ.pop("HERMES_SESSION_ID", None)
+        self.senders: list[str] = []
+        relay.claude_socket = lambda s: "/tmp/sock"
+        relay.socket_send = lambda sock, sender, text: self.senders.append(sender) or True
+
+    def send(self) -> int:
+        rc, _, err = self.run_main(sess(status="working", chan=None, transcript=None))
+        return rc if rc == 0 else self.fail(err)
+
+    def test_it_sends_as_hermes_with_the_last_eight_characters_of_its_session_id(self) -> None:
+        os.environ["HERMES_SESSION_ID"] = "20261023_000000_abcdef12"
+        self.assertEqual((self.send(), self.senders), (0, ["hermes abcdef12"]))
+
+    def test_a_live_session_identity_outranks_it(self) -> None:
+        os.environ["HERMES_SESSION_ID"] = "20261023_000000_abcdef12"
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "12345678-aaaa-4000-8000-000000000001"
+        self.send()
+        self.assertTrue(self.senders[0].startswith("claude 12345678"), self.senders)
+
+    def test_an_id_that_makes_no_label_is_still_refused(self) -> None:
+        os.environ["HERMES_SESSION_ID"] = "not a label!!"
+        rc, _, _ = self.run_main(sess(status="working", chan=None, transcript=None))
+        self.assertEqual((rc, self.senders), (relay.NO_SENDER_EXIT, []))
 
 
 if __name__ == "__main__":

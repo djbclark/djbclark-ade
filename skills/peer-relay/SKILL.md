@@ -24,7 +24,10 @@ One command, by absolute path (2026-10-23, djbclark: agents message peers only v
    session row: Hermes itself, a script) is never queued for: it gets exit 1 "deferring needs an identifiable sender", so
    retry later or use `--idle S`. 1 = not sent (every route failed, listed on
    stderr; also "deferred queue full") or sent but
-   unverified: **never resend** an "unverified" message, a second copy would be delivered. 2 = usage.
+   unverified: **never resend** an "unverified" message, a second copy would be delivered. 2 = usage. 3 = only with `--ack`: sent but not proven
+   to have landed (never resend). 4 = **not sent: relay cannot tell who is sending** (nothing was sent or queued): a relay you start from your own terminal
+   tool or a background process is named `hermes <last 8 characters of your HERMES_SESSION_ID>` and sends; one from a process with no `HERMES_SESSION_ID`
+   (a cron script, `execute_code`) exits 4 with the list of what was checked: re-run it as `RELAY_SENDER_NAME=<short label> python3 -I ... relay.py <ident> "<text>"`.
    **A relay.py that is cut off, times out or is killed counts as unverified, not as failed.** To a Hermes conversation
    it prints `hermes turn started ... do not resend` to stderr first, and waits up to max(100, `--wait`) seconds.
    Run it with a terminal timeout of at least 150 s, or in the background and read the reply file it names: a

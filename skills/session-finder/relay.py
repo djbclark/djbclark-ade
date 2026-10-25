@@ -189,7 +189,8 @@ THE SENDER HEADER (2026-10-25): a relayed text (not a Paseo agent's own message,
 `[relay from KIND ID aka NAME (DIR)]` for a named session: KIND the agent (codex, claude, ...), ID what `relay.py ID "..."` takes (a herdr pane
 id such as w2F:p45, a session id prefix, a Paseo agent id), DIR the directory it runs in (its worktree's name). The sender comes from the
 sending PROCESS: fleet's `self` row (HERDR_PANE_ID, else the pane an ancestor process runs in), PASEO_AGENT_ID (else the agent the Paseo
-daemon hosts above it), CLAUDE_CODE_SESSION_ID, a label declared in RELAY_SENDER_NAME. A Codex tool shell keeps none of these variables
+daemon hosts above it), CLAUDE_CODE_SESSION_ID, `hermes SID8` (a relay Hermes starts itself: the last 8 characters of its HERMES_SESSION_ID), a label
+declared in RELAY_SENDER_NAME. A Codex tool shell keeps none of these variables
 (this machine's `shell_environment_policy inherit = "core"`), which is why the `codex` process above it is read. Only when nothing resolves
 the relay REFUSES to send (exit 4, nothing sent, queued or recorded) and names what was checked; the caller re-runs with RELAY_SENDER_NAME=<label> (a job
 or script with no session) or from inside a session. No text is ever sent under `[relay from unknown]`. `--plan` needs no sender.
@@ -1073,7 +1074,7 @@ def sender_label(me):
     return " ".join(p for p in parts if p) + (f" ({where_})" if where_ else "")
 
 
-SENDER_ENV = ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "RELAY_SENDER_NAME")
+SENDER_ENV = ("PASEO_AGENT_ID", "HERDR_PANE_ID", "CLAUDE_CODE_SESSION_ID", "HERMES_SESSION_ID", "RELAY_SENDER_NAME")
 NO_SENDER_EXIT = 4    # `not sent: the sender cannot be resolved` (2026-10-25): 0, 1, 2 and (with --ack) 3 were taken
 
 
@@ -1105,7 +1106,7 @@ def sender_name(listed):
     as for RELAY_SENDER), this session's fleet `self` row (a herdr pane found in this process's environment or an
     ancestor's), the fleet row of the Paseo agent this process runs in (`own_paseo_id`: PASEO_AGENT_ID or the agent hosting an
     ancestor; a Cline, Codex or omp agent under Paseo has no Claude registry row, so no `self` row), that agent's full id,
-    this Claude session's id prefix, a label declared in RELAY_SENDER_NAME (a launchd job has no session identity at all, so
+    this Claude session's id prefix, `hermes SID8` for a relay Hermes started (HERMES_SESSION_ID), a label declared in RELAY_SENDER_NAME (a launchd job has no session identity at all, so
     without it every watcher arrived as `[relay from unknown]`), else "unknown".
 
     The declared label is consulted LAST, so a real session identity always wins and a job cannot
@@ -1125,7 +1126,16 @@ def sender_name(listed):
         me = {"id": sid, "agent": "claude"} if sid else {}
     if me:
         return sender_label(me)
-    return env_sender_label()
+    return hermes_native() or env_sender_label()
+
+
+def hermes_native():
+    """`hermes SID8` for a relay Hermes itself started (its terminal tool or a background process: no fleet row, no pane, no Paseo agent, only
+    the HERMES_SESSION_ID the gateway exports), else "". Adversary r1 A3 (2026-10-25): such a relay had no sender and exited 4. The same label
+    shape a relayed Hermes turn sends (HERMES_SENDER), consulted after every session identity, so a stray HERMES_SESSION_ID cannot outrank
+    a live session. A label of this shape in RELAY_SENDER_NAME is refused (`env_sender_label`)."""
+    label = f"hermes {(os.environ.get('HERMES_SESSION_ID') or '').strip()[-8:]}"
+    return label if HERMES_SENDER.fullmatch(label) else ""
 
 
 def env_sender_label() -> str:

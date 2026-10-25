@@ -371,7 +371,7 @@ only where the message asks a question or requests action. An FYI that provably 
 4. **Inbound**: a message tagged `[relay from KIND ID (DIR)]` (`KIND ID aka NAME (DIR)` for a named session; or `[queued Nm ago] [relay from ...]`, or a Paseo
    agent message) that **asks a question or requests action is answered by `relay.py <ID> "<answer>"`** (ID is the second word: a herdr pane id such as w2F:p45, a session
    id prefix, a Paseo agent id), never only in your own prose: your prose does not reach it. The sender is read from the sending process (2026-10-25): fleet's `self`
-   row, `HERDR_PANE_ID` or the pane an ancestor runs in, `PASEO_AGENT_ID` or the Paseo agent above it, `CLAUDE_CODE_SESSION_ID`, `RELAY_SENDER_NAME`. A Codex tool shell
+   row, `HERDR_PANE_ID` or the pane an ancestor runs in, `PASEO_AGENT_ID` or the Paseo agent above it, `CLAUDE_CODE_SESSION_ID`, `HERMES_SESSION_ID` (a relay Hermes starts itself is `hermes SID8`), `RELAY_SENDER_NAME`. A Codex tool shell
    has none of these variables (`shell_environment_policy inherit = "core"`), so relay reads the `codex` process above it. **A relay whose sender resolves to none of these
    is refused, never sent (2026-10-25)**: exit 4, nothing sent, queued or recorded (`--json`: `{"sent": false, "error": "no_sender", "reason": ...}`), the message names every
    variable and ancestor source checked; **re-run it with `RELAY_SENDER_NAME=<label> relay.py ...`** (a launchd job, script or Hermes turn with no session) or from inside a
