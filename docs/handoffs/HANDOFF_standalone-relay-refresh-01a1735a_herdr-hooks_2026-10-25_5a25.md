@@ -8,7 +8,7 @@ repo: djbclark-ade
 workspace: /Users/djbclark/src/one-offs
 branch: master
 head_sha: 1d7bded
-created_at: 2026-10-25T10:25:00-04:00
+created_at: 2026-10-25T10:29:47-04:00
 writer: codex
 ---
 
@@ -28,6 +28,8 @@ Its exact main [Tests run](https://github.com/djbclark/djbclark-ade/actions/runs
 completed successfully on both Linux and macOS. The notifier was retargeted to
 that run, completed, and sent its one completion notification. No workflows
 were cancelled or rerun.
+Linux: 3,700 passed, 13 skipped; macOS: 3,703 passed, 10 skipped. Both jobs
+reported 1,320 passing subtests and zero failures.
 
 Herdr's installed binary was atomically upgraded from
 `0.9.1-preview.2026-09-21-0ff0f27e2226` to the newest published preview,
@@ -52,13 +54,23 @@ establish a fix for the reported timeouts, so stable was retained. A running
 older TUI still uses `0.163.0`; the separate ACP dependency reports `0.160.1`.
 No Codex process was restarted, signalled, or upgraded in place.
 
-This execution context exposes no Herdr, Orca or Paseo caller identity.
-`test "${HERDR_ENV:-}" = 1` returned 1 in a separately checked tool call.
-Do not fabricate that identity or directly control a focused pane from here.
-The live Herdr server has not been transitioned. Its current version still
-needs a permitted host-side status receipt; process liveness alone is not a
-version check. Codex's installed managed hook is v8, whereas the preview bundles
-v10. Other installed integration version gaps are recorded privately.
+Codex's `shell_environment_policy.inherit = "core"` strips Herdr context from
+tool subprocesses. The initial shell check therefore returned 1 even though
+this TUI is inside Herdr. This session's own Codex and owning shell process
+environments agreed on `w2Q:p3`, tab `w2Q:t3`, workspace `w2Q`; process ancestry
+proved both belonged to Herdr. Passing only that verified context explicitly
+made `agent get` confirm this exact session ID, with cwd still `one-offs`.
+Never recover identity from the focused pane or another process.
+
+`herdr server live-handoff` succeeded. The running server now reports
+`0.9.4-preview.2026-10-14-fbd2ae23927f`, endpoint compatibility, no restart needed
+and no stale server binary. Every pre-existing Codex process retained its PID
+and start time. No Codex TUI was restarted. Codex's installed managed hook
+remains v8, whereas the preview bundles v10. Their shell assets differ only in
+the version comment; the executable hook body is identical. The installer
+migration defect below must be addressed at its owner rather than by editing
+generated config.
+Other installed integration version gaps are recorded privately.
 
 ## What We Tried
 
@@ -75,10 +87,18 @@ v10. Other installed integration version gaps are recorded privately.
 3. Historical transcript and SQLite log recovery did not identify the commands
    responsible for the reported 10-second and 8-second failures. Do not attribute
    them from deadline values or duplicate registrations alone.
-4. Short isolated installer and startup probes were submitted through the full
-   `bg` wrapper after `load-watch ci decide ... local REASON` accepted the work.
-   The wrapper initially held for load/memory churn. Read the probe result before
-   claiming installer idempotence or a hook root cause.
+4. Isolated installer and startup probes ran through the full `bg` wrapper after
+   `load-watch ci decide ... local REASON` accepted the work. Two installer runs
+   were byte-idempotent but retained two equivalent managed registrations: one
+   unquoted and one single-quoted. The first exploratory fixture accidentally
+   contained two unquoted copies and exposed the same preservation mechanism;
+   the corrected fixture matched the live two-variant configuration.
+5. All ten timing probes returned 0. Herdr v8 no-op probes took 0.028–0.140 s;
+   v10 took 0.026–0.033 s. An isolated fresh-session socket received exactly one
+   report from each hook: v8 in 0.096 s, v10 in 0.056 s. Moshi completed in
+   0.134 s and the Graft/Trail startup hook in 0.132 s. Neither historical
+   deadline failure reproduced. These are hook-level startup probes, not a new
+   paid model turn or an end-to-end fresh-TUI acceptance claim.
 
 ## Key Decisions
 
@@ -121,10 +141,13 @@ Staged paths: `.forgejo/workflows/ci.yml`, `scripts/forgejo-ci-run`, and
 `scripts/herdr-sleeper/{README.md,herdr-sleeper,test_herdr_sleeper.py}`.
 No promotion, push, compilation or server restart was performed.
 
-Session edits: this handoff and
-`/Users/djbclark/src/djbclark-ade/skills/session-finder/SKILL.md`.
-Other dirty ADE paths (`CHANGELOG.md`, `README.md`, `docs/skills.md`,
-`skills/paseowatch/`) predate this session and are not ours.
+Session edits: this handoff and `skills/session-finder/SKILL.md`.
+The first unit was committed/pushed as `9e2d470` under the then-applicable
+shared-master rule. After the operator replaced that rule, the remaining
+uncommitted guidance was migrated, hunk-for-hunk, to the exclusively owned
+`/Users/djbclark/src/djbclark-ade-relay-refresh-wt`, branch
+`docs/relay-refresh-01a1735a`, recorded base `b26f543`. Subsequent edits and
+commits happen only there. Shared checkout edits by other sessions are not ours.
 
 ## Operator Feedback
 
@@ -136,16 +159,29 @@ delivery proof, version pins, and stealing another session's Tier 1 pointer.
 
 ## Where We're Going
 
-1. Read `hook-probes.json` in the private evidence root and the saved probe log;
-   if the job is still waiting, retain that job rather than launching a duplicate.
-2. Attribute any reproduced failures to actual commands and measured timings.
-   If historical failures remain unidentifiable, say so separately from current
-   probe results and recommend the smallest instrumented fresh-TUI reproduction.
+1. After the queued clear/baton, verify the continuation in
+   `/Users/djbclark/.local/state/self-slash.log` and confirm it still occupies
+   `w2Q:p3`, cwd `/Users/djbclark/src/one-offs`, on the same model. The owning
+   Codex PID before clearing was 1679; `/new` should create a new thread in
+   that same TUI process. Check the actual fresh-session startup for hook
+   failures as well as the targeted baton submission. Report the
+   results without clearing again or repeating completed probes.
+2. The narrow repair recommendation is in Herdr's installer: recognize the
+   exact safe unquoted legacy hook command and remove all equivalent owned
+   registrations while preserving unrelated hooks. `hook_command_variants`
+   currently enumerates only canonical/legacy quoted variants. Both preview
+   and current upstream retain that code. Duplicate search terms were
+   `repo:herdrdev/herdr codex hook duplicate` and `integration unquoted`;
+   the nearest existing report is [Kimi duplicate hook migration](https://github.com/herdrdev/herdr/issues/5157).
+   Do not call this the timeout cause. Historical 10s/8s command attribution
+   still requires an instrumented actual fresh-TUI reproduction with per-hook
+   start/finish records; no timeout increase is justified by the current probes.
 3. Coordinate with the owner before promoting the isolated Herdr merge. No live
    session was found with `/Users/djbclark/src/herdr` as its workspace.
-4. From a genuine Herdr caller, obtain the running server version, compare it
-   with the installed preview, and transition only with verified compatible
-   handoff or a proven safe idle boundary. Check integration version separately.
+4. Report the remaining managed-integration metadata gap (v8 installed, v10
+   bundled; identical executable shell bodies). Migration repair belongs to
+   the installer/source owner. Do not increase deadlines or treat the old
+   version comment as a demonstrated runtime failure.
 5. Use this chain's exact path for continuation:
    `/Users/djbclark/.local/state/handoffs/chains/standalone-relay-refresh-01a1735a/SESSION_LOG.md`.
    Queue only one baton through `self-slash` if it supports the actual host;
@@ -158,9 +194,10 @@ The CI notifier at `/tmp/relay-codex-submit-proof/notify-ci.py` completed;
 `ci-main-notified` and `ci-main.json` in the evidence root prove the successful
 notification and exact run. Its record is `ci-main-notifier.json`.
 
-The isolated probe is running through `bg` in an exec session; it is not a
-durable detached job. Its script is `probe-hooks.py`, result `hook-probes.json`.
-Do not assume that an exec waiter survives a context clear.
+The isolated probe completed. Its script is `probe-hooks.py`, result
+`hook-probes.json`. No probe or CI waiter remains to re-arm. The final
+same-session lifecycle waiter is owned by `self-slash`; verify its log after
+continuation, never queue a second baton.
 
 ## Quick Start
 
