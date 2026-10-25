@@ -27,7 +27,7 @@ const has = (name) => argv.includes(name);
 
 if (argv.length === 0 || has("--help") || has("-h")) {
   console.error("usage: paseo-new-seat.mjs create --title T --provider P --model M --cwd D "
-    + "[--prompt TEXT] [--workspace ID] [--auto-accept] [--dry-run]");
+    + "[--prompt TEXT] [--workspace ID] [--thinking ID] [--label k=v]... [--json] [--auto-accept] [--dry-run]");
   process.exit(argv.length ? 0 : 2);
 }
 if (argv[0] !== "create") {
@@ -44,6 +44,16 @@ const workspaceId = opt("--workspace");
 const allowNewWorkspace = has("--allow-new-workspace");
 const autoAccept = has("--auto-accept");
 const dryRun = has("--dry-run");
+const thinking = opt("--thinking");
+const wantJson = has("--json");
+// --label k=v, repeatable (bin/watch tags the agents it starts with watch=<domain>)
+const labels = {};
+argv.forEach((a, i) => {
+  if (a !== "--label") return;
+  const kv = argv[i + 1] ?? "";
+  const eq = kv.indexOf("=");
+  if (eq > 0) labels[kv.slice(0, eq)] = kv.slice(eq + 1);
+});
 
 if (!title || !provider || !cwd) {
   console.error("create needs --title, --provider and --cwd");
@@ -70,7 +80,7 @@ const config = {
 
 if (dryRun) {
   console.log(JSON.stringify({ title, provider, cwd, workspaceId: workspaceId ?? null,
-    prompt: prompt ?? null, config }, null, 1));
+    prompt: prompt ?? null, config, thinkingOptionId: thinking ?? null, labels }, null, 1));
   process.exit(0);
 }
 
@@ -83,13 +93,18 @@ async function work() {
   const created = await client.createAgent({
     provider, cwd, title, config,
     ...(workspaceId ? { workspaceId } : {}),
+    ...(thinking ? { thinkingOptionId: thinking } : {}),
+    ...(Object.keys(labels).length ? { labels } : {}),
     ...(prompt ? { initialPrompt: prompt } : {}),
   });
   const id = created?.id ?? created?.agent?.id;
   if (!id) { console.error("created, but the daemon returned no agent id"); return 1; }
-  console.log(`created ${id.slice(0, 8)} title=${title}`);
+  if (!wantJson) console.log(`created ${id.slice(0, 8)} title=${title}`);
 
-  if (!autoAccept) return 0;
+  if (!autoAccept) {
+    if (wantJson) console.log(JSON.stringify({ id, shortId: id.slice(0, 8), autoAccept: null }));
+    return 0;
+  }
 
   // Verify the shield from the agent's own state file, which is what the UI icon reflects.
   const slug = String(cwd).replace(/\//g, "-").replace(/^-/, "");
@@ -106,7 +121,8 @@ async function work() {
     await new Promise((r) => setTimeout(r, 250));
     on = readFeature();
   }
-  console.log(on === true ? "auto_accept: on (verified)"
+  if (wantJson) console.log(JSON.stringify({ id, shortId: id.slice(0, 8), autoAccept: on === true }));
+  else console.log(on === true ? "auto_accept: on (verified)"
     : "auto_accept: NOT verified - the shield may be grey; run paseo-set-model autoaccept " + id.slice(0, 8));
   return on === true ? 0 : 4;
 }
