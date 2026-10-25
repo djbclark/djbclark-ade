@@ -742,7 +742,7 @@ def _env_config(env: dict[str, str]) -> list[tuple[str, str]]:
         count = int(env.get("GIT_CONFIG_COUNT", "0") or 0)
     except ValueError:
         count = 0
-    for n in range(max(0, min(count, 256))):
+    for n in range(max(0, min(count, len(env)))):      # every KEY_n is a variable of `env`: len(env) bounds the pairs exactly
         k = env.get(f"GIT_CONFIG_KEY_{n}")
         if k:
             out.append((_ckey(k), env.get(f"GIT_CONFIG_VALUE_{n}", "")))
@@ -1391,17 +1391,21 @@ def _hook_key(key: str) -> bool:
     return k == "core.hookspath" or k.startswith(("hook.", "include.", "includeif."))
 
 
-_HOOK_LINE = re.compile(r"^\s*(hookspath\s*=|\[\s*(hook|include|includeif)[\s.\"\]])", re.I | re.M)
-
-
-def _config_file_defines_hooks(path: str) -> bool:
-    """A config file named by GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM that sets hooksPath or has a [hook]/[include]/
-    [includeIf] section. Any such file, whatever its other content, is refused; an unreadable one is not."""
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return bool(_HOOK_LINE.search(f.read(1 << 20)))
-    except OSError:
-        return False
+def _hooks_path_scopes(call: GitCall, env: dict[str, str]) -> tuple[str, list[tuple[str, str]]]:
+    """Ask git whether `core.hooksPath` is set, under the call's own -c / --git-dir / -C and the CALLER's environment
+    (HOME, XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL/SYSTEM/COUNT/KEY_n/PARAMETERS, includes: git reads them, never us):
+    `git config --null --show-scope --get-all core.hooksPath` exits 0 when it is set, even to an empty value, 1 when it is
+    not (measured 2026-10-25, git 2.56). ("set", [(scope, value)...]), ("unset", []), or ("unknown", []) when git did not
+    answer 0/1 (timeout, cannot start, a broken config file)."""
+    extra = {k: v for k, v in env.items() if k in ("HOME", "XDG_CONFIG_HOME") or k.startswith("GIT_CONFIG")}
+    rc, out = _run_git([*_globals(call), "config", "--null", "--show-scope", "--get-all", "core.hooksPath"], 5,
+                       {**call.env, **extra})
+    if rc == 1:
+        return "unset", []
+    if rc != 0:
+        return "unknown", []
+    f = out.split("\0")
+    return "set", [(f[i], f[i + 1]) for i in range(0, len(f) - 1, 2)]
 
 
 def _closed(rule: str, alt: str) -> Decision:
@@ -1409,15 +1413,22 @@ def _closed(rule: str, alt: str) -> Decision:
 
 
 def _redirect_decision(call: GitCall, env: dict[str, str]) -> Optional[Decision]:
-    """Rule (ii): the call, its environment or a `git config` write would disable, move or extend the hooks."""
+    """Rule (ii): the call, its environment or a `git config` write would disable, move or extend the hooks. git answers
+    for `core.hooksPath` (any value, empty included) in the scopes a call or its environment controls: command (-c,
+    GIT_CONFIG_COUNT/PARAMETERS), global, system (HOME, XDG_CONFIG_HOME, GIT_CONFIG_GLOBAL/SYSTEM, includes). A
+    repository's own (local/worktree) hooksPath is a choice of the repository, not of the call: not refused (the hooks do not
+    run there; `install` says so, exit 78). When git cannot answer, the call is refused with that reason (fail closed)."""
     alt = "the ref guard lives in git hooks; nothing may redirect or switch them off. Ask the operator"
     for k, _ in call.config:
         if _hook_key(k):
             return _closed("hook-config", f"`{_esc(k)}` set on the command line or in the environment: {alt}")
-    for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG"):
-        v = env.get(name, "")
-        if v and _config_file_defines_hooks(v):
-            return _closed("hook-config", f"{name} names a config file that sets hooksPath, a [hook] or an [include]: {alt}")
+    state, scoped = _hooks_path_scopes(call, env)
+    if state == "unknown":
+        return _closed("hook-config-unknown", "git did not say whether core.hooksPath is set (it timed out, could not run, or "
+                                              f"a config file is broken); the call is refused rather than guessed: {alt}")
+    for scope, value in scoped:
+        if scope not in ("local", "worktree"):
+            return _closed("hook-config", f"core.hooksPath is set ({scope} config, value `{_esc(value)}`): {alt}")
     if call.sub == "config":
         s = scan(call.args, value_short="f", value_long={"file", "blob", "type", "default"}, danger={"edit"})
         if s.shorts & {"e"} or "edit" in s.longs:

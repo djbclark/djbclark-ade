@@ -7,6 +7,8 @@ Agent A/Z/B = `ACP_RUN_AGENT=1 ADE_CLAIM_ID=<id>`; a human shell has neither. Ag
 import json
 import os
 import random
+import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -58,7 +60,7 @@ def env_for(state_dir, who=None, **extra):
         env["ADE_CLAIM_ID"] = who
         env["ACP_RUN_AGENT"] = "1"
     env.update(extra)
-    return env
+    return {k: v for k, v in env.items() if v is not None}      # an extra of None unsets the variable
 
 
 def git(state_dir, args, cwd, who=None, stdin=None, **extra):
@@ -563,3 +565,50 @@ def test_hooks_and_stubs_parse_under_bash_3_2(tmp_path):
         stub = tmp_path / f"stub-{name}"
         stub.write_text(ade_claims._stub_text(name))
         assert subprocess.run(["/bin/bash", "-n", str(stub)], capture_output=True).returncode == 0
+
+
+# --------------------------------------------------------------------------------------------
+# round 10 (2026-10-25): git answers config questions; the stub fails open at the bash layer; exact parent identity
+# --------------------------------------------------------------------------------------------
+
+def shim(state_dir, args, cwd, who=None, **extra):
+    """`git ARGS` through the guard's shim (the real git underneath, found through ADE_REAL_GIT)."""
+    return subprocess.run([str(SHIM), *args], cwd=cwd, env=env_for(state_dir, who, **extra), capture_output=True, text=True,
+                          timeout=120)
+
+
+def _pairs(n, last=("core.hooksPath", "/dev/null")):
+    """GIT_CONFIG_COUNT=n with n-1 harmless pairs and `last` as pair n-1 (the 257th for n=257)."""
+    env = {"GIT_CONFIG_COUNT": str(n)}
+    for i in range(n - 1):
+        env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = f"ade.k{i}", "1"
+    env[f"GIT_CONFIG_KEY_{n - 1}"], env[f"GIT_CONFIG_VALUE_{n - 1}"] = last
+    return env
+
+
+def _held(w, r):
+    assert r.returncode == 77 and "hook-config" in r.stderr, (r.returncode, r.stderr)
+    assert w.cb() != w.main()
+
+
+def test_r10_f1_hook_disabling_config_past_257_env_pairs_is_refused_not_truncated(world):
+    _held(world, shim(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B", **_pairs(257)))
+    r = shim(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B", **_pairs(257, ("ade.last", "1")))
+    assert r.returncode != 77, r.stderr              # the same 257 pairs without hooksPath: the shim has no quarrel (the hook does)
+
+
+def test_r10_f1_hooks_path_beyond_one_mib_of_global_config_is_refused_not_truncated(world, tmp_path):
+    cfg = tmp_path / "big.cfg"
+    cfg.write_text("# " + "x" * ((1 << 20) + 10) + "\n[core]\n\thooksPath = /dev/null\n")
+    _held(world, shim(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B", GIT_CONFIG_GLOBAL=str(cfg)))
+
+
+def test_r10_f1_a_config_git_cannot_read_is_refused_with_the_reason(world, tmp_path):
+    cfg = tmp_path / "broken.cfg"
+    cfg.write_text("[core\n\thooksPath = /dev/null\n")
+    r = shim(world.state, ["branch", "-f", "cb", "main"], world.repo, who="B", GIT_CONFIG_GLOBAL=str(cfg))
+    assert r.returncode == 77 and "hook-config-unknown" in r.stderr and "did not say" in r.stderr, r.stderr
+    assert world.cb() != world.main()
+
+
+@pytest.mark.parametrize("how", ["home", "xdg", "empty-value"])

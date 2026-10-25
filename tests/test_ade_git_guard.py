@@ -1363,15 +1363,21 @@ def test_hook_keys_in_the_environment_are_refused(tmp_path, state, env):
 
 
 @pytest.mark.parametrize("body,bad", [("[core]\n\thooksPath = /tmp/x\n", True), ("[core]\n\tHOOKSPATH=/tmp/x\n", True),
-                                      ("[hook \"a\"]\n\tcommand = true\n", True), ("[include]\n\tpath = /tmp/x\n", True),
-                                      ("[includeIf \"gitdir:/\"]\n\tpath = /tmp/x\n", True),
+                                      ("[core]\n\thooksPath =\n", True), ("[core]\n\thooksPath\n", True),
+                                      ("[include]\n\tpath = {inc}\n", True),
+                                      ("[includeIf \"gitdir:/\"]\n\tpath = {inc}\n", True),
+                                      # git answers: keys that cannot move the hooks directory are not refused here
+                                      ("[hook \"a\"]\n\tcommand = true\n", False), ("[include]\n\tpath = /nonexistent/x\n", False),
                                       ("[user]\n\tname = x\n[alias]\n\tx = status\n", False)])
 @pytest.mark.parametrize("var", ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"])
-def test_a_config_file_named_by_the_environment_that_would_define_hooks_is_refused(tmp_path, state, body, bad, var):
+def test_a_config_file_named_by_the_environment_that_sets_hooks_path_is_refused(tmp_path, state, body, bad, var):
+    """git itself says whether core.hooksPath is set (includes followed, an empty value counted); no text parsing."""
     repo = mk_repo(tmp_path, state)
     cfg = tmp_path / "cfg"
-    cfg.write_text(body)
-    r = run(state, ["branch", "nb"], repo, who="B", **{var: str(cfg)})
+    inc = tmp_path / "inc.cfg"
+    inc.write_text("[core]\n\thooksPath = /tmp/x\n")
+    cfg.write_text(body.replace("{inc}", str(inc)))
+    r = run(state, ["branch", "nb"], repo, who="B", GIT_CONFIG_NOSYSTEM="0", **{var: str(cfg)})
     assert refused77(r) == bad, r.stderr
 
 
