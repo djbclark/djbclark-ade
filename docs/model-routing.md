@@ -326,12 +326,12 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
   one (2026-10-18): its 5-hour window holds about one hard slice.
   **Everyday kinds too, while its quota is plentiful (operator 2026-10-25:
   "if we have lots of codex quota and it is the best of available options we
-  can use it for non-frontier")**: `code` on `gpt-6.1-sol --effort medium`,
-  `bulk` and `mechanical` on `gpt-6-luna --effort low`, only while the
+  can use it for non-frontier")**: `judgment` on `gpt-6.1-sol --effort high`,
+  `code` on `gpt-6.1-sol --effort medium`, `bulk` and `mechanical` on `gpt-6-luna --effort low`, only while the
   tightest codex window (5-hour and weekly) has at least
   `[routing].plenty_min` (50%) left; below it, or with no fresh reading,
-  codex is frontier-only again. It competes on the normal ranking (code r15,
-  mechanical r12, bulk r20), one slice per wave; astra never takes an
+  codex is frontier-only again. It competes on the normal ranking (judgment r3,
+  behind claude and omp; code r15, mechanical r12, bulk r20), one slice per wave; astra never takes an
   everyday kind. (2026-10-19: the account is now the $100
   plan, `prolite`; the 5-hour note predates the upgrade, so re-calibrate with
   `route_agent.py calibrate` before relying on "one hard slice".)

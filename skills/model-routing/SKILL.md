@@ -585,13 +585,13 @@ method that runs the waves.
        issues" and "a second opinion would be nice" are not reasons. Codex's
        **everyday** models are not frontier (operator 2026-10-25: "if we have
        lots of codex quota and it is the best of available options we can use
-       it for non-frontier"): `code` on `gpt-6.1-sol --effort medium`, `bulk`
+       it for non-frontier"): `judgment` on `gpt-6.1-sol --effort high`, `code` on `gpt-6.1-sol --effort medium`, `bulk`
        and `mechanical` on `gpt-6-luna --effort low`, eligible only while the
        tightest codex window (5-hour and weekly) has at least
        `[routing].plenty_min` (50%) left; below that, or with no fresh reading,
        codex is frontier-only again and `acp-dispatch` refuses the kind
        (exit 2, naming the headroom). Inside the gate it competes on the
-       router's normal ranking (code r15, mechanical r12, bulk r20), one slice
+       router's normal ranking (judgment r3, behind claude and omp; code r15, mechanical r12, bulk r20), one slice
        per wave; astra never takes an everyday kind.
    1c. **In-flight slices reserve quota, per service** (2026-10-18; it replaced
        the codex-only "one slice in flight" cap). Each running slice reserves

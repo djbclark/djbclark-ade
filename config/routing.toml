@@ -216,9 +216,9 @@ models = { api-only = "anthropic/claude-sonnet-5-5 --effort high", judgment = "a
 [[service]]
 name = "codex"
 cli = "codex (gpt-6-astra for frontier; gpt-6.1-sol / gpt-6-luna for everyday kinds while quota is plentiful)"
-good_at = { frontier = 1, mechanical = 12, code = 15, bulk = 20 }
+good_at = { frontier = 1, judgment = 3, mechanical = 12, code = 15, bulk = 20 }
 billing = "subscription"
-note = "frontier: only a slice that really needs astra to look it over; code/bulk/mechanical on gpt-6.1-sol / gpt-6-luna only while every codex window has >= [routing].plenty_min left (operator 2026-10-25); one at a time"
+note = "frontier: only a slice that really needs astra to look it over; judgment/code/bulk/mechanical on gpt-6.1-sol / gpt-6-luna only while every codex window has >= [routing].plenty_min left (operator 2026-10-25); one at a time"
 judgment_tier = true
 max_parallel = 1
 # Tolerated rather than committed: OpenAI neither permits nor
@@ -234,8 +234,10 @@ access = "cli-only"
 # only while the pool's tightest window holds at least [routing].plenty_min percent; below it
 # (or with no fresh reading) codex is frontier-only again. They rank like any other pool
 # (code 15: behind agy's Claude pool, claude, omp and Cursor Auto, ahead of zai and
-# opencode-go; mechanical 12, bulk 20: behind the free pools). astra stays frontier-only
-# (`[dispatch].frontier_models`), and no research/judgment/github row: conservative.
+# opencode-go; mechanical 12, bulk 20: behind the free pools). judgment too (operator 2026-10-25:
+# a Codex adversary round was refused; rank 3 behind claude 1 and omp 2, so it is eligible, not
+# preferred, on gpt-6.1-sol at high). astra stays frontier-only (`[dispatch].frontier_models`),
+# and no research/github row: conservative.
 # Models: code on gpt-6.1-sol, the "latest workhorse model for coding and everyday work"
 # (acp-run codex --info, 2026-10-25), at medium; bulk and mechanical on gpt-6-luna, "fast and
 # affordable ... for easier tasks", at low. No cheaper tier is adequate for code (luna is for
@@ -244,8 +246,8 @@ access = "cli-only"
 # also reserves in-flight estimates per service. max_parallel = 1 keeps one codex slice per wave.
 # 2026-10-19: the plan changed to the $100 plan (aiuse "prolite"); max_parallel = 1
 # and the in-flight rule await re-calibration from `route_agent.py calibrate`.
-plenty_kinds = ["code", "bulk", "mechanical"]
-models = { frontier = "gpt-6-astra --effort high", code = "gpt-6.1-sol --effort medium", bulk = "gpt-6-luna --effort low", mechanical = "gpt-6-luna --effort low" }
+plenty_kinds = ["judgment", "code", "bulk", "mechanical"]
+models = { frontier = "gpt-6-astra --effort high", judgment = "gpt-6.1-sol --effort high", code = "gpt-6.1-sol --effort medium", bulk = "gpt-6-luna --effort low", mechanical = "gpt-6-luna --effort low" }
 
 # agy's second pool: Claude Opus/Sonnet 5.5 and GPT via the same Google AI
 # Pro subscription, a separate 5h/weekly window from Gemini. Operator

@@ -75,12 +75,16 @@ class TestStandingRules(unittest.TestCase):
         self.assertTrue(c.service.judgment_tier)
         self.assertEqual(c.service.name, "claude")
 
-    def test_judgment_never_reaches_codex_even_when_claude_is_tight(self):
-        # antigravity at 100% must not win judgment work, and since 2026-10-18
-        # codex is reached only through the explicit frontier kind.
+    def test_judgment_reaches_codex_only_when_claude_is_tight_and_codex_is_plentiful(self):
+        # antigravity at 100% must not win judgment work. Since 2026-10-25 codex's judgment
+        # row (rank 3, gpt-6.1-sol at high) is eligible while its quota is plentiful, but it
+        # ranks behind claude, so it only wins once claude is out of room.
         q = dict(IDLE, antigravity={"remaining": 100.0}, claude={"remaining": 20.0})
         self.assertEqual(r.route("judgment", quota=q).service.name, "claude")
         q = dict(IDLE, claude={"remaining": 5.0})
+        c = r.route("judgment", quota=q)
+        self.assertEqual((c.service.name, c.model), ("codex", "gpt-6.1-sol --effort high"))
+        q = dict(IDLE, claude={"remaining": 5.0}, codex={"remaining": r.PLENTY_MIN - 1})
         self.assertIsNone(r.route("judgment", quota=q))
 
 
@@ -617,13 +621,13 @@ class TestFrontierConservative2026_10_18(unittest.TestCase):
     window; codex only for work that really needs astra, Fable xhigh almost never."""
 
     def test_codex_takes_only_frontier_and_the_plentiful_everyday_kinds(self):
-        """2026-10-25 widened this: code, bulk and mechanical only while plentiful (see
+        """2026-10-25 widened this: judgment, code, bulk and mechanical only while plentiful (see
         TestCodexEverydayKinds); every other kind stays off codex at any headroom."""
         q = {s.name: {"remaining": 0.0} for s in r.SERVICES}
         q["codex"] = {"remaining": 100.0}
         for kind in r.KINDS:
             c = r.route(kind, quota=q)
-            if kind not in ("frontier", "code", "bulk", "mechanical"):
+            if kind not in ("frontier", "judgment", "code", "bulk", "mechanical"):
                 self.assertNotEqual(c.service.name if c else None, "codex", kind)
 
     def test_a_wave_puts_at_most_one_frontier_slice_on_each_pool(self):
@@ -713,10 +717,11 @@ class TestRoutingPolicyToml(unittest.TestCase):
         "codex": {
             "cli": ("codex (gpt-6-astra for frontier; gpt-6.1-sol / gpt-6-luna for everyday kinds "
                     "while quota is plentiful)"),
-            "good_at": {"frontier": 1, "mechanical": 12, "code": 15, "bulk": 20},
+            "good_at": {"frontier": 1, "judgment": 3, "mechanical": 12, "code": 15, "bulk": 20},
             "billing": "subscription",
             "judgment_tier": True,
-            "models": {"frontier": "gpt-6-astra --effort high", "code": "gpt-6.1-sol --effort medium",
+            "models": {"frontier": "gpt-6-astra --effort high", "judgment": "gpt-6.1-sol --effort high",
+                       "code": "gpt-6.1-sol --effort medium",
                        "bulk": "gpt-6-luna --effort low", "mechanical": "gpt-6-luna --effort low"},
             "pool": None, "max_parallel": 1, "agent": "", "burn_first": False,
         },
@@ -1142,7 +1147,7 @@ class TestCodexEverydayKinds(unittest.TestCase):
     options we can use it for non-frontier". Everyday kinds are gated on [routing].plenty_min of
     the binding headroom; astra stays frontier-only; ranking is the normal one."""
 
-    EVERYDAY = ("code", "bulk", "mechanical")
+    EVERYDAY = ("judgment", "code", "bulk", "mechanical")
 
     def codex(self):
         return r.BY_NAME["codex"]
@@ -1154,7 +1159,7 @@ class TestCodexEverydayKinds(unittest.TestCase):
         q = {"codex": {"remaining": 100.0}}
         for kind in self.EVERYDAY:
             self.assertTrue(self.codex().eligible(kind, q), kind)
-        for kind in ("research", "judgment", "github", "api-only", "realtime-web"):
+        for kind in ("research", "github", "api-only", "realtime-web"):
             self.assertFalse(self.codex().eligible(kind, q), kind)
         self.assertTrue(self.codex().eligible("frontier", q))
 
@@ -1209,7 +1214,7 @@ class TestCodexEverydayKinds(unittest.TestCase):
         pub = r.policy_public()
         self.assertEqual(pub["routing"]["plenty_min"], 50.0)
         row = next(s for s in pub["services"] if s["name"] == "codex")
-        self.assertEqual(sorted(row["plenty_kinds"]), ["bulk", "code", "mechanical"])
+        self.assertEqual(sorted(row["plenty_kinds"]), ["bulk", "code", "judgment", "mechanical"])
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             self.assertEqual(r.main(["policy", "--md"]), 0)

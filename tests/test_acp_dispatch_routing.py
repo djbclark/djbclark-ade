@@ -119,6 +119,21 @@ class TestCodexEverydayGate(RoutingDispatch):
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("no fresh reading", r.stderr)
 
+    def test_judgment_is_eligible_with_plenty_and_refused_below_it(self):
+        """Operator 2026-10-25: a Codex adversary round was refused as not eligible for judgment."""
+        ok = self.code("gpt-6.1-sol", 90.0, kind="judgment")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertEqual(self.record()["kind"], "judgment")
+        low = self.code("gpt-6.1-sol", 40.0, kind="judgment")
+        self.assertEqual(low.returncode, 2, low.stderr)
+        self.assertIn("codex is not eligible for --kind judgment", low.stderr)
+        self.assertIn("40% left", low.stderr)
+
+    def test_judgment_runs_the_everyday_model_never_astra(self):
+        r = self.code("gpt-6-astra", 100.0, kind="judgment")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("frontier model", r.stderr)
+
     def test_astra_stays_frontier_only_however_plentiful_the_quota(self):
         r = self.code("gpt-6-astra", 100.0)
         self.assertEqual(r.returncode, 2, r.stderr)

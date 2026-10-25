@@ -60,7 +60,7 @@ preferences, because they encode consequences a score cannot see:
   needs them (operator 2026-10-18: a wave of four astra slices emptied
   codex's 5-hour window and every one stopped; Fable at xhigh should almost
   never run). Everyday work goes to the other pools, and ALSO to codex's
-  everyday models (gpt-6.1-sol for code, gpt-6-luna for bulk and mechanical;
+  everyday models (gpt-6.1-sol for judgment and code, gpt-6-luna for bulk and mechanical;
   never astra) while its quota is plentiful (operator 2026-10-25: "if we have
   lots of codex quota and it is the best of available options we can use it for
   non-frontier"): a service's `plenty_kinds` are eligible only while its binding
