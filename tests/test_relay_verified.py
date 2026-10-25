@@ -493,6 +493,17 @@ class TestLinkBelongsToTheSession(Base):
         self.assertEqual(self.go("PR 62 is merged")[0], 0)
         self.assertIn("first contact from bbbbbbbb", self.sent_texts[1])
 
+    def test_an_answer_from_the_old_occupant_does_not_mark_the_new_occupants_link_acked(self) -> None:
+        """Adversary r2 A5 (2026-10-25): the expectation was opened to the old occupant; the pane now holds another session whose link is not acked."""
+        self.assertEqual(self.go("are you there?", "--expect-ack", "q1")[0], 0)
+        self.target = sess(transcript=str(self.tx), status="idle", sid=self.OTHER_SID)
+        self.assertEqual(self.go("PR 63 is merged")[0], 0)    # a first contact rewrites the link
+        self.append(self.me_tx, {"type": "user", "message": {"role": "user", "content": "[relay from claude cccccccc (x)] ack q1"}})
+        self.assertIn("1 resolved", self.run_cli("--sweep")[1])    # the question itself WAS answered
+        self.assertEqual(relay.expect_read("q1")["state"], "acked")
+        link = json.loads(fleet.LINKS_FILE.read_text())["links"]["bbbbbbbb>cccccccc"]
+        self.assertEqual(link["target_sid"], self.OTHER_SID)
+        self.assertIsNone(link.get("acked"))
 
 
 class TestFirstContact(Base):

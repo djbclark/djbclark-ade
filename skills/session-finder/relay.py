@@ -2718,7 +2718,7 @@ def ack_sweep():
             expect_write({**r, "state": "acked", "acked": now})
             with links_lock():    # an answer to a question proves the return path as well as an `ack <id>` does
                 data = fleet.links_read()
-                ln = data["links"].get(fleet.link_key(r.get("sender"), t.get("id")))
+                ln = fleet.link_get(data["links"], {"id": r.get("sender")}, {"id": t.get("id"), "sid": t.get("sid")})    # not a new occupant's link (adversary r2 A5)
                 if isinstance(ln, dict) and not ln.get("acked"):
                     ln["acked"] = now
                     atomic_json(fleet.LINKS_FILE, data)
