@@ -39,6 +39,7 @@ Each doc carries its own summary.
 | [docs/mcp-servers.md](docs/mcp-servers.md) | MCP server roster (`claude mcp list`) |
 | [.claude/workflows/graph-audit.js](.claude/workflows/graph-audit.js) | runnable micro-graph example, `/graph-audit` |
 | [skills/](skills/), [docs/skills.md](docs/skills.md) | canonical copy of every hand-written skill: **edit and add skills here**, never via a TUI path; wrappers in [claude/commands/](claude/commands/) |
+| [skills/autorename/workspace-layout.md](skills/autorename/workspace-layout.md) | naming: -pw/-pt Paseo, -t/-p herdr; tab use |
 | [tools/acp-run/](tools/acp-run/README.md) | the ACP client every launcher uses (`~/.local/bin/acp-run`) |
 | [bin/fleet-watch](bin/fleet-watch) | launchd fleet change notices to Hermes |
 | [vendor/README.md](vendor/README.md) | what this repo references that lives elsewhere |
@@ -82,11 +83,22 @@ Each doc carries its own summary.
    tracks its latest release. Detail and exceptions:
    `site-private/memory/feedback_upstream_local_changes.md`.
 
-9. **Start every branch in its own worktree, never in the shared checkout.** `~/src/djbclark-ade` is used by many sessions at once and may sit on
-   another session's branch: `git checkout -b` there inherits that branch's commits, and a commit there lands on someone else's work (2026-10-24: three
-   sessions collided; an L-D branch carried two foreign commits until rebased). Use `git worktree add -b NAME ~/src/djbclark-ade-NAME-wt origin/master`, work and
-   push there, and `git worktree remove` it after the merge. In the shared checkout only fast-forward `master` and commit your own hunks to it with
-   `git-commit-own`; if it is on a branch you do not own, say so to that branch's owner through `relay.py`, do not switch it away.
+9. **All development happens in an exclusively claimed task workspace, never in a shared checkout** (operator, 2026-10-25, after the frontier consult in `docs/queue.md`
+   "An absolute ... worktree commandment"; it makes ruling 2 of the 2026-10-23 isolation design absolute). Every source edit, stage, commit, build, test and one-line docs
+   or queue change, in every repo, happens in a linked worktree (`git worktree add -b NAME ~/src/djbclark-ade-NAME-wt origin/master`, push there, `git worktree remove` it
+   after the merge) or an independent cow pasture (`skills/cow-workspaces`), created from a recorded base. `~/src/<repo>` is a reference and integration checkout: it
+   may sit on another session's branch or carry its uncommitted edits (2026-10-24: three sessions collided; an L-D branch carried two foreign commits; 2026-10-25: an
+   unrelated session's edit sat in this checkout's tree), so nothing is edited or committed there. **One writer at a time per workspace**: a build slice, its repair slice and
+   the adversary share it in turn, and only after the previous writer's processes have exited (a reviewer that runs tests is a writer). **Before dispatching a slice into a
+   workspace, run `git status` and `git log -3` and stop on an unresolved merge or rebase or a dirty tree you do not own** (2026-10-25: a slice was dispatched into a worktree
+   mid-merge; chaining the merge and the dispatch with `;` hid the conflict). **Exceptions, all named**: (a) read-only inspection; (b) a designated promoter's serialized,
+   clean, approved `git merge --ff-only` of a primary checkout or `~/ops` master to a published revision (no commit made there); (c) installs, runtime-health and
+   non-repository maintenance under a claim on the real target (edit dotfiles and installed tools in their source repo workspace, then install by the normal path).
+   No exception because a change is small. **Transitional, `~/ops` only**: until the ops-promotion pilot in the queue entry passes, the `~/ops` plain-`master`
+   practice of `~/CLAUDE.md` item 21 stands (deployments read that checkout); every other repo follows this rule now. Enforcement is staged (queue entry): the launcher
+   claims the workspace and refuses a launch into an unresolved merge, then `ade-git-guard` refuses `add` and `commit` in shared checkouts, then CHANGELOG fragments end
+   the shared-file conflicts; until those land this is the rule, not a guard. Another session's uncommitted edits in a shared checkout are migrated by their owner
+   (through `relay.py`), never stashed or reset by you.
 
 10. **A message to another agent is not sent until it is sent through `session-finder/relay.py`, and not delivered until you have verified it** (operator, 2026-10-25:
    "we always need to verify that the other agent got our message otherwise we may be on a broken one-way receive-only link"; the same day an agreement was written

@@ -430,6 +430,39 @@ symlinking the skill directory into `.claude/skills/<name>/`:
 | `forgejo` | offer | Canonical skill: https://forgejo.mit.edu/djbclark/sipb-agent-skills (`skills/forgejo` here is a compatibility symlink). Uses a Forgejo instance (default `forgejo.mit.edu`) with the token held in `sudo-secretspec` as `DJBCLARK_<HOST>_TOKEN`: `scripts/setup-token` declares the secret (optional), opens the token page and verifies it; `forgejo-api` makes one `/api/v1` call (mutations need `--yes`); `tea-forgejo` runs `tea` with the secret on its env login. Needs `fj` and `tea` from §1.2, and a token only the user can create in the browser, so offer it only where the user works with a Forgejo server. The default host `forgejo.mit.edu` (and the SIPB runner below) need an MIT account (Athena/Touchstone login), so skip those for a user without one. For the SIPB `ubuntu` CI runner it also records the `LD_PRELOAD` loopback shim (port 0 and `shutdown()`) Gradle needs there (libkrun#818) and the per-job resource limits (16 vCPU, 62.8 GiB, virtiofs disk with a 32 GiB tmpfs). |
 | `jevlike` | offer | Canonical skill: https://forgejo.mit.edu/djbclark/sipb-agent-skills (`skills/jevlike`; `skills/jevlike` here is a compatibility symlink). Uses djbclark's two live Jev-like System One microVMs (Kev-0.8B at djbclark-kev.sipb.cloud, Laya at djbclark-laya.sipb.cloud) as cheap probabilistic judges: its `scripts/jevlike ask noul|choice|score` helper reruns itself under `sudo-secretspec run` with `JEVLIKE_API_KEY`, retries restarts with backoff, and returns `decide: yes|no|escalate` (act only at p>=0.9 or p<=0.1). Needs a key only the user holds, so offer it only where the user has access to those servers. Added 2026-10-20 |
 
+**For OpenCode Go users: native context guard** (added 2026-10-25).
+Install the reviewed `opencode-plugins/go-context/` directory from
+[djbclark-ade](https://github.com/djbclark/djbclark-ade), following its
+[installation and activation guide](https://github.com/djbclark/djbclark-ade/blob/master/opencode-plugins/go-context/README.md).
+This is a native V2 plugin, not a Claude skill. Preserve every existing plugin
+entry; create `~/.config/opencode/plugins/ade-go-context` as a symlink to the
+reviewed ADE directory only when absent. Accept an existing link only when its
+resolved target matches; preserve a directory or different link for review.
+Keep `config/go-model-policy.json` alongside the plugin in the ADE checkout.
+
+Verify loading on a fresh location with the read-only status RPC (substitute an
+actual absolute directory; `--standalone` keeps the probe independent of a busy
+server):
+
+```sh
+opencode api --standalone post '/api/rpc/ade.go-context/status?location[directory]=/absolute/fresh/project' --data '{"input":{"sessionID":"ses_probe"}}'
+```
+
+Require `output.ready: true`; `known: false` is expected for this nonexistent
+probe session. This checks loading with zero inference or compaction calls. A
+cold plugin listing is insufficient evidence. Existing locations can retain
+loaded code: do not restart a busy server or interrupt another agent to activate
+it. Check status on the actual server/location before relying on protection.
+
+The guard nudges and compacts earlier for Go, with cooldown and native
+confirmation; thresholds are conservative local starting points, not a vendor
+promise. The separate ACP model gate reserves costly Go models for bounded
+read-only advice. Native UI model selection is outside that gate; never use it
+to bypass the policy. Leave speculative background compaction and balance
+overage disabled. Automatic RTK shell rewriting is disabled for permission
+safety; use explicit `rtk <command>` calls. Do not enable a pre-permission shell
+rewrite hook as part of setup.
+
 **From Matt Pocock's skills marketplace** (public):
 
 ```text
@@ -490,6 +523,14 @@ after each whether to keep it. Record the final set in `AGENTS.md` (§8 item
 ---
 
 ## 1. Tool inventory
+
+Native Codex hooks use the shared [`create-hook`](../skills/create-hook/SKILL.md)
+guide (verified against Codex 0.164.0 on 2026-10-25). Link it through
+`~/src/djbclark-ade/bin/skill-everywhere create-hook` when distributing the catalog.
+Use `.codex/hooks.json`, PascalCase events and the native `/hooks` trust review;
+preserve legacy `notify` and unrelated hooks. This guide is Codex-specific: do
+not substitute Cursor hook paths or camelCase events. Re-check the official
+Codex documentation for the installed version before applying its snapshot.
 
 Install **everything in this section, even for languages and formats the repo
 does not use yet**, so the tools are ready when they are needed. Check first
