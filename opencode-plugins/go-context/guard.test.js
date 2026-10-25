@@ -1,6 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import plugin, { createGuard, loadPolicy } from "./index.js";
 
 async function fixture() {
@@ -8,7 +7,6 @@ async function fixture() {
   const calls = [], saved = new Map(), models = new Map();
   const ctx = {
     location: { directory: "/repo" },
-    permission: { list: async () => [] },
     storage: { get: async (key) => saved.get(key), set: async (key, value) => saved.set(key, structuredClone(value)) },
     session: {
       get: async ({ sessionID }) => ({ data: { id: sessionID, model: models.get(sessionID) } }),
@@ -122,18 +120,6 @@ test("uncertain requests and unusable storage never cause blind retries", async 
   await g.step(150000); assert.equal(g.calls.length, 0);
 });
 
-test("tool environment scope is per native tool call and never global or inferred", async () => {
-  const f = await fixture(); await f.context(); await f.context("ses_two");
-  const before = process.env.ADE_OPENCODE_SESSION_ID;
-  const one = { tool: "bash", sessionID: "ses_one", input: { command: "pwd" } };
-  const two = { tool: "shell", sessionID: "ses_two", input: { command: "pwd" } };
-  await f.guard.onTool(one); await f.guard.onTool(two);
-  assert.match(one.input.command, /'ses_one'/); assert.match(two.input.command, /'ses_two'/);
-  const js = { tool: "execute", sessionID: "ses_one", input: { code: "return 1" } };
-  await f.guard.onTool(js); assert.equal(js.input.code, "return 1");
-  assert.equal(process.env.ADE_OPENCODE_SESSION_ID, before);
-});
-
 test("native V2 adapter registers real hooks and a session-scoped compact tool", async () => {
   const f = await fixture(); const hooks = [], tools = [];
   f.ctx.session.hook = async (name, callback) => { hooks.push([name, callback]); return { dispose() {} }; };
@@ -143,7 +129,7 @@ test("native V2 adapter registers real hooks and a session-scoped compact tool",
   let rpc;
   f.ctx.rpc = { register: async (definition, handlers) => { rpc = { definition, handlers }; return { dispose() {} }; } };
   const cleanup = await plugin.setup(f.ctx);
-  assert.deepEqual(hooks.map(([name]) => name), ["context", "execute.before"]);
+  assert.deepEqual(hooks.map(([name]) => name), ["context"], "shell commands must never be rewritten before native permission matching");
   assert.equal(tools[0].name, "ade_compact");
   f.models.set("ses_one", { id: "deepseek-v4.1-flash", providerID: "opencode-go" });
   assert.match((await tools[0].execute({}, { sessionID: "ses_one" })).content, /accepted/);
@@ -194,46 +180,52 @@ test("manual calls share automatic cooldown and ineffective-baseline protection"
 });
 
 
-test("native directory scope is literal shell data, including quotes and substitutions", async () => {
-  const f = await fixture(); await f.context();
-  f.ctx.location.directory = "/repo's dir $(false)\nline";
-  const event = { tool: "shell", sessionID: "ses_one", input: { command: "printf '%s' \"$ADE_OPENCODE_DIRECTORY\"" } };
-  await f.guard.onTool(event);
-  const result = spawnSync("/bin/sh", ["-c", event.input.command], { encoding: "utf8" });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, f.ctx.location.directory);
+// Native permission APIs expose requests, not effective rules. Never hook or rewrite shell input.
+test("empty and pending permission lists cannot enable a shell rewrite", async () => {
+  for (const requests of [[], [{ id: "per_pending", permission: "shell", patterns: ["git push*"] }]]) {
+    const f = await fixture();
+    let lookups = 0;
+    f.ctx.permission = { list: async () => { lookups++; return requests; } };
+    f.ctx.session.hook = async () => ({ dispose() {} });
+    f.ctx.tool = { hook: () => assert.fail("no execute.before shell hook"), transform: async () => ({ dispose() {} }) };
+    f.ctx.rpc = { register: async () => ({ dispose() {} }) };
+    f.ctx.event = { async *subscribe() {} };
+    const cleanup = await plugin.setup(f.ctx);
+    assert.equal(typeof f.guard.onTool, "undefined");
+    assert.equal(lookups, 0, "permission request APIs cannot authorize a shell rewrite");
+    await cleanup();
+  }
 });
 
-// A prefix before native permission matching must not evade the original resource.
-for (const rules of [
-  [{ action: "shell", resource: "git push*", effect: "deny" }],
-  { rules: [{ action: "shell", resource: "git push*", effect: "ask" }] },
-  [{ action: "*", resource: "*", effect: "deny" }],
-  [{ action: "read", resource: "*", effect: "ask" }],
-  null, {}, [null], [{}], [{ effect: "unknown" }], { rules: [], error: "unavailable" },
-]) {
-  test(`native restricted or unreadable rules preserve shell permission resource: ${JSON.stringify(rules)}`, async () => {
-    const f = await fixture(); await f.context();
-    f.ctx.permission.list = async () => rules;
-    const command = "git push origin master";
-    const event = { tool: "shell", sessionID: "ses_one", input: { command } };
-    await f.guard.onTool(event);
-    assert.equal(event.input.command, command);
-    assert.ok(event.input.command.startsWith("git push"), "native git push* rules still match");
-    assert.equal(await f.guard.manual("ses_one"), true, "native compaction remains available");
+for (const change of ["context", "selection", "provider-roundtrip", "manual"]) {
+  test(`model switch via ${change} preserves pending, cooldown and ineffective-compaction blocks`, async () => {
+    const f = await fixture(); await f.context(); await f.step(150000);
+    const model = { providerID: "opencode-go", id: "gpt-6-luna" };
+    const switchModel = async () => {
+      f.models.set("ses_one", model);
+      if (change === "selection") {
+        f.advance(1);
+        await f.guard.onEvent({ type: "session.model.selected", created: f.time, data: { sessionID: "ses_one", model } });
+      } else if (change === "provider-roundtrip") {
+        await f.context("ses_one", "anthropic", "claude-sonnet");
+        await f.context("ses_one", model.providerID, model.id);
+      } else if (change === "manual") {
+        assert.equal(await f.guard.manual("ses_one"), false);
+      } else await f.context("ses_one", model.providerID, model.id);
+    };
+    await switchModel();
+    assert.equal(f.guard.status("ses_one").pending, true);
+    assert.equal(await f.guard.manual("ses_one"), false);
+    await f.step(200000); assert.equal(f.calls.length, 1, "switch cannot duplicate an accepted request");
+    await f.end();
+    assert.equal(await f.guard.manual("ses_one"), false, "cooldown persists after completion");
+    await f.step(195000); // A poor reduction must still be compared with the pre-switch input.
+    assert.equal(f.guard.status("ses_one").blocked, true);
+    f.advance(300000);
+    await f.context("ses_one", "opencode-go", "deepseek-v4.1-flash");
+    assert.equal(await f.guard.manual("ses_one"), false, "switch cannot clear an ineffective-compaction block");
+    await f.step(220000); assert.equal(f.calls.length, 1);
+    const reloaded = await createGuard(f.ctx, f.policy, () => f.time);
+    assert.equal(await reloaded.manual("ses_one"), false, "protection persists after reload");
   });
 }
-
-test("shell scope fails closed on permission API errors or absence and refreshes rules per call", async () => {
-  const f = await fixture(); await f.context();
-  const event = () => ({ tool: "shell", sessionID: "ses_one", input: { command: "git push origin master" } });
-  const first = event();
-  f.ctx.permission.list = async () => ({ rules: [{ effect: "allow", action: "shell", resource: "*" }] });
-  await f.guard.onTool(first); assert.match(first.input.command, /^export ADE_OPENCODE_DIRECTORY=/);
-  f.ctx.permission.list = async () => [{ effect: "deny", action: "shell", resource: "git push*" }];
-  const second = event(); await f.guard.onTool(second); assert.equal(second.input.command, "git push origin master");
-  f.ctx.permission.list = async () => { throw new Error("unavailable"); };
-  const third = event(); await f.guard.onTool(third); assert.equal(third.input.command, "git push origin master");
-  delete f.ctx.permission;
-  const fourth = event(); await f.guard.onTool(fourth); assert.equal(fourth.input.command, "git push origin master");
-});

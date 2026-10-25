@@ -18,7 +18,10 @@ once per tier. A five-minute cooldown, persisted pending requests and native
 compaction, less than 10% reduction or a still-over-hard-limit baseline stops
 automatic retries. Unreadable state/event streams disable automatic writes;
 uncertain writes wait for native confirmation. No global environment or last-seen
-session guesses are used.
+session guesses are used. Model and provider changes preserve session-level
+pending, cooldown, failure and ineffective-compaction state; only model
+measurements are reset. Non-Go periods disable automatic writes without
+erasing the conversation's admission history.
 
 ## Install and activate
 
@@ -54,12 +57,11 @@ server or interrupt another session to activate a cost guard. Installation and
 native loading are separate evidence from offline guard tests.
 
 The custom `ade_compact` tool uses the current native tool context's session ID.
-For a native `bash`/`shell` command the hook also injects a tool-local
-`ADE_OPENCODE_SESSION_ID` and `ADE_OPENCODE_DIRECTORY`, letting `self-slash "/compact"` validate and compact
-that session through the plugin RPC. Shell scope injection re-reads effective
-native permissions for every call and leaves the command unchanged if any rule
-is restrictive or unreadable, or the permission API is unavailable. This preserves
-native command permission matching; use `ade_compact` when shell scope is unavailable.
+The plugin never rewrites shell commands or registers an `execute.before` hook:
+native command permission matching must see the original command. Permission
+request lists are not effective rulesets. Use `ade_compact` for manual native
+compaction; supported host controllers can pass an explicit validated session
+and directory to the RPC helper without changing a shell permission resource.
 Automatic, tool and RPC calls share one
 admission check; an absent plugin fails closed. JavaScript/codemode tools use `ade_compact`; their source is never
 rewritten. ACP launches scrub inherited native scope before creating the child.
@@ -97,3 +99,8 @@ arbitrary Python script as a targeted test.
 For admission diagnostics, use the structured `load-watch` fields (`load1`,
 `per_core`, `cores`); the raw load average printed by a `bg` hold is not itself
 a per-core reading.
+
+On 2026-10-25, a second native OpenCode 2.1.4 read-only probe used the actual
+`acp-run` sanitizer's temporary `OPENCODE_CONFIG_DIR`, with project config
+disabled and only the trusted guard symlink retained. Native auto-discovery
+returned `ready: true`, `known: false`; no inference or compaction was requested.

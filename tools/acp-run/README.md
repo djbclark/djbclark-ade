@@ -691,34 +691,56 @@ install -m 755 tools/acp-run/acp-run ~/.local/bin/acp-run
 acp-run --list
 ```
 
-**OpenCode Go models need the Go cost policy bundle** (added 2026-10-25). The
-policy stays in one place, `bin/go_model_policy.py` + `config/go-model-policy.json`;
-acp-run loads it only when a requested or applied model is `opencode-go/…`, from
-exactly two locations and never from `sys.path`, the cwd or the script's own
-directory: (1) the checkout the script runs from (`tools/acp-run/acp-run` with
-`../../bin` and `../../config`: running or symlinking it in place just works), else
-(2) the installed bundle `~/.local/share/acp-run/go-policy/` with this layout:
+**OpenCode Go models need the Go policy bundle** (added 2026-10-25; guard added
+2026-10-25). The policy stays in one place, `bin/go_model_policy.py` +
+`config/go-model-policy.json`, and the context guard in one place,
+`opencode-plugins/go-context/`. acp-run loads them only when a requested or
+applied model is `opencode-go/…`, from exactly two roots and never from
+`sys.path`, the cwd, the script's own directory or the user's OpenCode config:
+(1) the checkout the script runs from (`tools/acp-run/acp-run` with `../../bin`,
+`../../config` and `../../opencode-plugins`: running or symlinking it in place
+just works), else (2) the installed bundle `~/.local/share/acp-run/go-policy/`:
 
 ```text
 ~/.local/share/acp-run/go-policy/bin/go_model_policy.py
 ~/.local/share/acp-run/go-policy/config/go-model-policy.json
+~/.local/share/acp-run/go-policy/opencode-plugins/go-context/index.js
+~/.local/share/acp-run/go-policy/opencode-plugins/go-context/package.json
 ```
 
 ```sh
 d=~/.local/share/acp-run/go-policy
-install -d "$d/bin" "$d/config"
+install -d "$d/bin" "$d/config" "$d/opencode-plugins/go-context"
 install -m 644 bin/go_model_policy.py "$d/bin/"
 install -m 644 config/go-model-policy.json "$d/config/"
+install -m 644 opencode-plugins/go-context/index.js opencode-plugins/go-context/package.json "$d/opencode-plugins/go-context/"
 ```
 
-Re-run those three lines whenever the model classification changes (the copy is a
-snapshot; to track the checkout instead, `ln -sf` only `bin/go_model_policy.py`
-into `$d/bin/`: the helper resolves its JSON from the link's target). Without the bundle, non-Go prompts
-run as before, and a Go prompt is refused before any agent starts (exit 2 at
-launch, exit 1 if the applied model turns out to be Go), with a message naming the
-paths tried. A missing, unparsable or invalid policy never falls back to a
-permissive default. If a checkout helper exists but cannot load its policy,
-the run is refused rather than falling back to an installed snapshot.
+Re-run those lines whenever the classification or the guard changes (the copy is
+a snapshot). To track the checkout instead, make `bin`, `config` and
+`opencode-plugins` in `$d` symlinks to the checkout's directories: the guard reads
+`<its real dir>/../../config/go-model-policy.json`, and acp-run refuses a Go launch
+whose guard would read a different policy file than the helper enforces.
+
+Why the guard is part of the bundle: a Go launch with `--perm read-only` or
+deny, or with `--strip-user-config`, replaces OpenCode's global config with a
+per-run 0700 directory (no user plugins, MCP, project config; see above). That
+directory gets exactly one plugin, `plugins/ade-go-context`, a symlink to the
+trusted guard of the root above, so the cost guard survives sanitizing while every
+other plugin stays excluded (a user plugin of the same name is not copied). If the
+guard is absent, incomplete or paired with another policy file, the Go launch is
+refused (exit 2 before any agent starts; exit 1 if it is only noticed later),
+never run unguarded. Non-Go launches never read the guard. A Go launch that is not
+sanitized (`--perm all` without `--strip-user-config`, `--interactive`,
+`--keep-user-config`) runs on the user's own OpenCode config, where the guard is
+whatever the user linked (`opencode-plugins/go-context/README.md`).
+
+Without the bundle, non-Go prompts run as before, and a Go prompt is refused
+before any agent starts (exit 2 at launch, exit 1 if the applied model turns out
+to be Go), with a message naming the paths tried. A missing, unparsable or invalid
+policy never falls back to a permissive default. If a checkout helper exists but
+cannot load its policy, the run is refused rather than falling back to an installed
+snapshot.
 
 The agent table reflects the machine it was written on (for example Cline is
 pinned to the `cline-pass` provider, and `agy` runs Google's first-party ACP

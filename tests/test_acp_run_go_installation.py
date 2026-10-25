@@ -36,7 +36,15 @@ FAKE = textwrap.dedent("""\
     MODEL = {"id": "model", "name": "Model", "category": "model", "type": "select",
              "currentValue": "sipb/test", "options": [{"value": v, "name": v} for v in VALUES]}
     out = Path(os.environ["FAKE_OUT"])
-    seen = {"started": True, "prompts": 0, "sets": []}
+    cfg = os.environ.get("OPENCODE_CONFIG_DIR")
+    plug = Path(cfg or "/nonexistent") / "plugins"
+    seen = {"started": True, "prompts": 0, "sets": [],
+            "config_dir": cfg, "project_off": os.environ.get("OPENCODE_DISABLE_PROJECT_CONFIG"),
+            "plugins": sorted(e.name for e in plug.iterdir()) if plug.is_dir() else None,
+            "plugin_real": {e.name: str(e.resolve()) for e in plug.iterdir()} if plug.is_dir() else {},
+            "plugin_files": {e.name: sorted(x.name for x in e.iterdir()) for e in plug.iterdir() if e.is_dir()}
+                            if plug.is_dir() else {},
+            "cfg_json": json.loads(Path(cfg, "opencode.json").read_text()) if cfg and Path(cfg, "opencode.json").exists() else None}
     out.write_text(json.dumps(seen))
 
     def send(o):
@@ -124,7 +132,20 @@ class GoInstallBase(unittest.TestCase):
         (d / "config").mkdir()
         shutil.copy(ROOT / "bin" / "go_model_policy.py", d / "bin")
         shutil.copy(ROOT / "config" / "go-model-policy.json", d / "config")
+        shutil.copytree(ROOT / "opencode-plugins" / "go-context", d / "opencode-plugins" / "go-context",
+                        ignore=shutil.ignore_patterns("node_modules", "*.test.js"))
         return d
+
+    def write_user_config(self, home: Path) -> None:
+        """A user OpenCode config with an untrusted plugin, a look-alike guard and MCP."""
+        oc = home / ".config" / "opencode"
+        (oc / "plugins" / "evil").mkdir(parents=True)
+        (oc / "plugins" / "evil" / "index.js").write_text("export default {}\n")
+        (oc / "plugins" / "ade-go-context").mkdir()
+        (oc / "plugins" / "ade-go-context" / "index.js").write_text("// look-alike, not trusted\n")
+        (oc / "opencode.json").write_text(json.dumps({
+            "provider": {"sipb": {"options": {"baseURL": "http://localhost:1"}}},
+            "plugin": ["opencode-evil@1.0"], "mcp": {"srv": {"type": "local", "command": ["true"]}}}))
 
     def run_acp(self, script: Path, home: Path, model: str, *args: str,
                 switch_to: str | None = None) -> dict:
@@ -248,6 +269,113 @@ class TestInstalledBundle(GoInstallBase):
         self.assert_refused_early(r, 2, "Go cost policy is not installed")
         ok = self.run_acp(self.script, self.home, "sipb/test")
         self.assertEqual(ok["rc"], 0, "non-Go stays independent of the policy: " + ok["stderr"])
+
+
+class TestSanitizedGuardRetention(GoInstallBase):
+    """P2 (PR 64): the sanitized read-only/--strip-user-config config keeps the trusted guard, nothing else."""
+
+    def setUp(self) -> None:
+        self.home = self.new_home()
+        self.write_user_config(self.home)
+        self.script = self.standalone_copy(self.home)
+        self.bundle = self.install_bundle(self.home)
+
+    def guard_dir(self) -> str:
+        return str((self.bundle / "opencode-plugins" / "go-context").resolve())
+
+    def test_advisory_run_keeps_only_the_trusted_guard_from_the_bundle(self):
+        r = self.run_acp(self.script, self.home, "opencode-go/kimi-k3", *ADVISORY)
+        self.assertEqual(r["rc"], 0, r["stderr"])
+        s = r["seen"]
+        self.assertIn("acp-run-opencode-deny-", s["config_dir"], "the sanitized config is in use")
+        self.assertEqual(s["plugins"], ["ade-go-context"], "no user plugin, no look-alike")
+        self.assertEqual(s["plugin_real"]["ade-go-context"], self.guard_dir(), "the bundle's guard, not the user's")
+        self.assertIn("index.js", s["plugin_files"]["ade-go-context"])
+        self.assertEqual(s["project_off"], "1", "project plugins stay off")
+        self.assertNotIn("plugin", s["cfg_json"], "no plugin entry from the user's config")
+        self.assertNotIn("mcp", s["cfg_json"])
+        self.assertIn("provider", s["cfg_json"], "provider selection is still kept")
+
+    def test_strip_user_config_on_a_routine_go_run_also_keeps_the_guard(self):
+        r = self.run_acp(self.script, self.home, "opencode-go/gpt-6-luna", "--strip-user-config")
+        self.assertEqual(r["rc"], 0, r["stderr"])
+        self.assertEqual(r["seen"]["plugins"], ["ade-go-context"])
+        self.assertIn("acp-run-opencode-strip-", r["seen"]["config_dir"])
+
+    def test_non_go_sanitized_run_stays_pluginless_and_needs_no_bundle(self):
+        for bundle in (True, False):
+            home = self.new_home()
+            self.write_user_config(home)
+            script = self.standalone_copy(home)
+            if bundle:
+                self.install_bundle(home)
+            for extra in (["--perm", "read-only"], ["--strip-user-config"]):
+                with self.subTest(bundle=bundle, extra=extra):
+                    r = self.run_acp(script, home, "sipb/test", *extra)
+                    self.assertEqual(r["rc"], 0, r["stderr"])
+                    self.assertIsNone(r["seen"]["plugins"], "no plugins dir at all for a non-Go model")
+                    self.assertIsNone(r["seen"]["cfg_json"].get("plugin"))
+
+    def test_unsanitized_routine_go_run_needs_no_guard_file(self):
+        shutil.rmtree(self.bundle / "opencode-plugins")
+        r = self.run_acp(self.script, self.home, "opencode-go/gpt-6-luna")
+        self.assertEqual(r["rc"], 0, r["stderr"])
+        self.assertIsNone(r["seen"]["config_dir"], "perm all without strip keeps the user's own config")
+
+    def test_missing_or_incomplete_guard_fails_closed_before_launch(self):
+        base = self.bundle / "opencode-plugins" / "go-context"
+        runs = [("opencode-go/kimi-k3", ADVISORY), ("opencode-go/gpt-6-luna", ["--perm", "read-only"]),
+                ("opencode-go/gpt-6-luna", ["--strip-user-config"])]
+        for broken in ("absent", "no-index", "no-package"):
+            if broken == "absent":
+                shutil.rmtree(self.bundle / "opencode-plugins")
+            elif broken == "no-index":
+                (self.bundle / "opencode-plugins").mkdir(exist_ok=True)
+                base.mkdir(exist_ok=True)
+                (base / "package.json").write_text("{}")
+            else:
+                (base / "index.js").write_text("")
+                (base / "package.json").unlink()
+            for model, extra in runs:
+                with self.subTest(broken=broken, model=model, extra=extra):
+                    r = self.run_acp(self.script, self.home, model, *extra)
+                    self.assert_refused_early(r, 2, "trusted Go context guard")
+                    self.assertFalse(r["seen"]["started"])
+                    self.assertIn(str(self.bundle), r["stderr"], "names the install location")
+
+    def test_guard_paired_with_a_different_policy_file_is_refused(self):
+        shutil.rmtree(self.bundle / "bin")
+        (self.bundle / "bin").symlink_to(ROOT / "bin")  # the helper now enforces ROOT/config, the guard reads the bundle's
+        r = self.run_acp(self.script, self.home, "opencode-go/kimi-k3", *ADVISORY)
+        self.assert_refused_early(r, 2, "not the policy acp-run enforces")
+
+    def test_a_bundle_of_links_to_the_checkout_tracks_it(self):
+        home = self.new_home()
+        script = self.standalone_copy(home)
+        d = home / BUNDLE_REL
+        d.mkdir(parents=True)
+        for name in ("bin", "config", "opencode-plugins"):
+            (d / name).symlink_to(ROOT / name)
+        r = self.run_acp(script, home, "opencode-go/kimi-k3", *ADVISORY)
+        self.assertEqual(r["rc"], 0, r["stderr"])
+        self.assertEqual(r["seen"]["plugin_real"]["ade-go-context"],
+                         str((ROOT / "opencode-plugins" / "go-context").resolve()))
+
+    def test_checkout_layout_uses_that_trees_guard(self):
+        home = self.new_home()
+        self.write_user_config(home)
+        tree = home / "checkout"
+        (tree / "tools/acp-run").mkdir(parents=True)
+        for rel in ("bin", "config"):
+            shutil.copytree(ROOT / rel, tree / rel, ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(ROOT / "opencode-plugins" / "go-context", tree / "opencode-plugins" / "go-context",
+                        ignore=shutil.ignore_patterns("node_modules", "*.test.js"))
+        shutil.copy(SCRIPT, tree / "tools/acp-run/acp-run")
+        r = self.run_acp(tree / "tools/acp-run/acp-run", home, "opencode-go/kimi-k3", *ADVISORY)
+        self.assertEqual(r["rc"], 0, r["stderr"])
+        self.assertEqual(r["seen"]["plugins"], ["ade-go-context"])
+        self.assertEqual(r["seen"]["plugin_real"]["ade-go-context"],
+                         str((tree / "opencode-plugins" / "go-context").resolve()))
 
 
 class TestCheckoutLayout(GoInstallBase):

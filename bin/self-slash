@@ -84,8 +84,8 @@
 # marker of its own (checked 2026-10-20), so the skills (handoff Step 9, loose Rule 4,
 # docs/dispatch-footer.md) also say a sub-agent treats a handoff as document-only.
 #
-# Native OpenCode Go (2026-10-25): a tool-scoped ADE_OPENCODE_SESSION_ID from the
-# context plugin selects the native /compact API before host lookup. It queues
+# Native OpenCode Go (2026-10-25): an explicit ADE_OPENCODE_SESSION_ID and native
+# directory from a supported host controller select /compact before host lookup. It queues
 # that exact session at a safe point; no parent UI or extra inference probe.
 # Native /new, /clear, /reset and /compact focus are refused until a durable
 # owned handoff and supported successor/baton route can be verified.

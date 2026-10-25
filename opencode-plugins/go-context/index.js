@@ -40,7 +40,7 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
   const remember = (sid, model) => {
     if (!SID.test(sid) || model?.providerID !== "opencode-go") return null;
     let state = states.get(sid);
-    if (!state || state.model !== model.id) {
+    if (!state) {
       if (!states.has(sid) && states.size >= MAX_SESSIONS) {
         const victim = [...states].find(([, value]) => !value.pending);
         if (!victim) return null;
@@ -49,7 +49,15 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
       state = { model: model.id, baseline: null, total: null, sampleAt: 0,
         attemptAt: 0, pending: false, blocked: false, failures: 0, notice: "" };
       states.set(sid, state);
+    } else if (state.model !== model.id || state.active === false) {
+      // Model measurements may change; admission belongs to the conversation.
+      // Preserve pending, cooldown, completion evidence and retry blocks.
+      state.model = model.id;
+      state.baseline = null;
+      state.total = null;
+      state.notice = "";
     }
+    state.active = true;
     return state;
   };
   const profile = (state) => policy.routine_models.includes(state.model)
@@ -63,8 +71,7 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
       const response = await ctx.session.get({ sessionID: sid }, { signal: AbortSignal.timeout(10000) });
       const current = response?.data ?? response;
       if (current?.id !== sid || current.model?.providerID !== "opencode-go" || current.model.id !== state.model) {
-        states.delete(sid);
-        await save().catch(() => {});
+        // A model switch must not discard session-level admission protection.
         return false;
       }
     } catch {
@@ -92,8 +99,10 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
 
   async function onContext(event) {
     if (event.model?.providerID !== "opencode-go") {
-      states.delete(event.sessionID);
+      const prior = states.get(event.sessionID);
+      if (prior) prior.active = false;
       if (event.tools) delete event.tools.ade_compact;
+      await save().catch(() => {});
       return;
     }
     const state = remember(event.sessionID, event.model);
@@ -118,8 +127,9 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
     const state = states.get(sid);
     const stamp = event.created;
     if (typeof stamp !== "number" || !Number.isFinite(stamp) || now() - stamp > 120000 || stamp > now() + 60000) return;
-    if (event.type === "session.model.selected" && event.data.model?.id !== state.model) {
-      states.delete(sid);
+    if (event.type === "session.model.selected") {
+      if (event.data.model?.providerID === "opencode-go") remember(sid, event.data.model);
+      else state.active = false; // Unknown or non-Go selection: no automatic writes.
       await save().catch(() => {});
       return;
     }
@@ -143,7 +153,7 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
     }
     // usage.updated is a lifetime accumulator; title/summary usage is auxiliary.
     // Only a fresh primary step completion measures the active input context.
-    if (event.type !== "session.step.ended" || stamp <= (state.sampleAt ?? 0)) return;
+    if (state.active === false || event.type !== "session.step.ended" || stamp <= (state.sampleAt ?? 0)) return;
     const total = inputTokens(event.data.tokens);
     if (total === null || total === 0) return;
     state.sampleAt = stamp;
@@ -161,26 +171,6 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
     await save().catch(() => {});
   }
 
-  async function onTool(event) {
-    if (!SID.test(event.sessionID ?? "") || !states.has(event.sessionID)) return;
-    if (!["bash", "shell"].includes(event.tool) || !event.input || typeof event.input.command !== "string") return;
-    // execute.before precedes native permission matching. A prefix can hide an
-    // original deny/ask resource, so rewrite only when effective rules are
-    // known and explicitly allow. Re-read for every call: rules can change.
-    try {
-      if (typeof ctx.permission?.list !== "function") return;
-      const result = await ctx.permission.list();
-      if (result?.error != null) return;
-      const rules = Array.isArray(result) ? result : Array.isArray(result?.rules) ? result.rules : null;
-      if (!rules || rules.some((rule) => !rule || typeof rule.effect !== "string" || rule.effect.toLowerCase() !== "allow")) return;
-    } catch { return; }
-    // Each hook owns this input. Never mutate process.env or infer from cwd.
-    const directory = ctx.location?.directory;
-    if (typeof directory !== "string" || !directory.startsWith("/")) return;
-    const quoted = "'" + directory.replaceAll("'", "'\\''") + "'";
-    event.input.command = `export ADE_OPENCODE_DIRECTORY=${quoted}; export ADE_OPENCODE_SESSION_ID='${event.sessionID}';\n${event.input.command}`;
-  }
-
   async function manual(sid) {
     if (!SID.test(sid ?? "")) return false;
     let response;
@@ -195,7 +185,7 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
   const status = (sid) => ({ ready: storageReadable && streamAvailable,
     known: states.has(sid), pending: states.get(sid)?.pending ?? false,
     blocked: states.get(sid)?.blocked ?? false, attemptAt: states.get(sid)?.attemptAt ?? 0 });
-  return { onContext, onEvent, onTool, manual, status, streamStopped: () => { streamAvailable = false; } };
+  return { onContext, onEvent, manual, status, streamStopped: () => { streamAvailable = false; } };
 }
 
 export default {
@@ -214,7 +204,6 @@ export default {
       }, { compact: async ({ sessionID }) => ({ accepted: await guard.manual(sessionID) }),
            status: async ({ sessionID }) => guard.status(sessionID) }),
       await ctx.session.hook("context", guard.onContext),
-      await ctx.tool.hook("execute.before", guard.onTool),
       await ctx.tool.transform((editor) => editor.add({
         name: "ade_compact", description: "Queue safe native compaction for this OpenCode Go session; acceptance is not completion.",
         input: { type: "object", properties: {}, additionalProperties: false },

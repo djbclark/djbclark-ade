@@ -43,12 +43,16 @@ These are local initial policy values, not vendor recommendations. Use current i
 lifetime token totals and output totals do not measure current context.
 
 The plugin adds the `ade_compact` tool, scoped by the native tool context. Use
-it from JavaScript/codemode; the hook never rewrites JavaScript. It supplies
-`ADE_OPENCODE_SESSION_ID` only for the current native `bash`/`shell` tool call. With that scope, `bin/self-slash "/compact"` calls the plugin's native RPC in
-its exact location. The RPC and `ade_compact` use the **same** provider/session
+it for manual native compaction. The plugin never rewrites shell or JavaScript
+source before permission matching. A supported host controller may explicitly
+supply a validated `ADE_OPENCODE_SESSION_ID` and `ADE_OPENCODE_DIRECTORY` for
+`bin/self-slash "/compact"` to call the same guarded RPC in its exact location.
+The RPC and `ade_compact` use the **same** provider/session
 verification, durable pending state, cooldown and ineffective-baseline block as
 automatic compaction. No separate shell cooldown or direct compact endpoint is
 used. ACP launches scrub both inherited session ID and native directory.
+Model/provider switches preserve session-level pending, cooldown and retry
+blocks; changing models cannot admit another summary charge.
 Acceptance is not completion; native compaction events confirm completion.
 An uncertain write is persisted and never blindly retried; a failed lookup is
 only a read failure, eligible for retry after the cooldown. `--dry-run` makes

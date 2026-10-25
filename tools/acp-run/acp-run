@@ -993,7 +993,7 @@ def _private_write(path, text):
         f.write(text)
 
 
-def opencode_deny_config(env, tag="deny"):
+def opencode_deny_config(env, tag="deny", guard=None):
     """A per-run OPENCODE_CONFIG_DIR for --perm deny: one opencode.json holding only
     OPENCODE_KEEP_KEYS from the user's global config (and OPENCODE_CONFIG, if set),
     deep-merged in that order as opencode does. opencode v2 (checked 2.0.27, from the
@@ -1004,7 +1004,10 @@ def opencode_deny_config(env, tag="deny"):
     env as {env:...} references instead of the file; relative {file:x} references are
     made absolute (the copy no longer sits next to them). Raises ValueError, before
     creating anything, when a source file cannot be read or parsed: a partial copy
-    would silently lose the provider or model. Returns (temp dir, log info, extra env);
+    would silently lose the provider or model. guard, a resolved go_guard_dir(), is the one plugin
+    kept: it is linked as plugins/ade-go-context in the temp dir (OpenCode's global plugin discovery,
+    README of opencode-plugins/go-context) and nothing else is copied there, so every other user plugin
+    stays excluded. Returns (temp dir, log info, extra env);
     the caller removes the dir. env is the child's env."""
     src = Path(env.get("OPENCODE_CONFIG_DIR") or Path(
         env.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode").expanduser()
@@ -1057,12 +1060,16 @@ def opencode_deny_config(env, tag="deny"):
     d = Path(tempfile.mkdtemp(prefix=f"{DENY_DIR_PREFIX}opencode-{tag}-{os.getpid()}-"))
     try:
         _private_write(d / "opencode.json", json.dumps(kept, indent=1))
+        if guard is not None:
+            (d / "plugins").mkdir(mode=0o700)
+            (d / "plugins" / GO_GUARD_NAME).symlink_to(guard, target_is_directory=True)
     except BaseException:
         shutil.rmtree(d, ignore_errors=True)
         raise
     info = {"agent": "opencode", "action": "stripped", "source": str(src),
             "kept_keys": sorted(kept), "dropped_keys": sorted(dropped),
             "mcp_servers": sorted(mcp), "plugins": plugins, "project_config": "off",
+            "trusted_plugins": [GO_GUARD_NAME] if guard is not None else [],
             "secrets_via_env": len(extra_env), "secrets_in_file": on_disk,
             "env": ["OPENCODE_CONFIG_DIR", "OPENCODE_DISABLE_PROJECT_CONFIG",
                     "OPENCODE_CONFIG_PROJECT_DISABLE", "-OPENCODE_CONFIG"]
@@ -1498,7 +1505,7 @@ def strip_user_config(a, env, deny_dir):
                        "skills": "off", "hooks": "off", "permission": "user's",
                        "env": ["ZCODE_CLI_SETTINGS_FILE"]}
         if a.agent == "opencode":
-            d, info, extra = opencode_deny_config(env, tag)
+            d, info, extra = opencode_deny_config(env, tag, go_guard_dir() if is_go_model(getattr(a, "model", None)) else None)
             env.update(extra)  # literal provider secrets, referenced as {env:...} in d
             env["OPENCODE_CONFIG_DIR"] = str(d)
             # opencode reads OPENCODE_CONFIG_PROJECT_DISABLE ?? OPENCODE_DISABLE_PROJECT_CONFIG
@@ -1518,6 +1525,9 @@ def strip_user_config(a, env, deny_dir):
         else:
             d, info = agy_deny_home(tag)
     except (OSError, ValueError) as e:
+        if a.agent == "opencode" and is_go_model(getattr(a, "model", None)):
+            # a Go run must not fall back to the user's unsanitized config: its trusted guard could not be placed
+            raise ConfigError(f"could not build opencode's sanitized config with the trusted Go context guard: {e}") from None
         print(f"acp-run: could not strip {a.agent}'s plugins and MCP servers; keeping them: {e}",
               file=sys.stderr)
         kept = {"agent": a.agent, "action": "kept", "why": f"error: {e}"[:300]}
@@ -2267,6 +2277,8 @@ class ConfigError(Exception):
 GO_PROVIDER_PREFIX = "opencode-go/"
 GO_POLICY_BUNDLE = Path.home() / ".local/share/acp-run/go-policy"
 _GO_POLICY = None
+_GO_ROOT = None
+GO_GUARD_NAME = "ade-go-context"  # the plugin's directory name under <config dir>/plugins/
 
 
 def is_go_model(model):
@@ -2282,7 +2294,7 @@ def load_go_policy():
     (tools/acp-run/acp-run -> ../../bin, ../../config), (2) the installed bundle
     ~/.local/share/acp-run/go-policy/{bin,config}/ (README "Install"). Missing or unreadable policy
     raises ConfigError, so a Go prompt never runs unchecked."""
-    global _GO_POLICY
+    global _GO_POLICY, _GO_ROOT
     if _GO_POLICY is not None:
         return _GO_POLICY
     import importlib.util
@@ -2309,13 +2321,42 @@ def load_go_policy():
             # A present checkout policy is authoritative. Never mask its failure
             # with an older, potentially more permissive installed snapshot.
             break
-        _GO_POLICY = mod
+        _GO_POLICY, _GO_ROOT = mod, root
         return mod
     raise ConfigError(
         "the Go cost policy is not installed, so OpenCode Go models are refused (non-Go models are unaffected). "
-        f"Install the bundle (bin/go_model_policy.py and config/go-model-policy.json from djbclark-ade) under "
-        f"{GO_POLICY_BUNDLE}/bin and {GO_POLICY_BUNDLE}/config, or run acp-run from the checkout "
+        f"Install the bundle (bin/go_model_policy.py, config/go-model-policy.json and opencode-plugins/go-context/ "
+        f"from djbclark-ade) under {GO_POLICY_BUNDLE}, or run acp-run from the checkout "
         f"(tools/acp-run/README.md, Install). Tried: " + "; ".join(problems))
+
+
+def go_guard_dir():
+    """The trusted ade.go-context plugin directory for a sanitized OpenCode Go launch.
+
+    The guard is taken only from the root the Go policy was loaded from (the checkout or the installed
+    bundle: opencode-plugins/go-context/ beside bin/ and config/), never from the user's OpenCode config,
+    its plugins dir, the project or the cwd. The plugin resolves its policy as
+    <its real dir>/../../config/go-model-policy.json, which must be the very file the helper enforces, so
+    the guard and acp-run can never read different policies. Raises ConfigError when the guard is absent,
+    incomplete or paired with another policy file: a Go launch then fails closed instead of running
+    without its context guard."""
+    mod = load_go_policy()
+    src = _GO_ROOT / "opencode-plugins" / "go-context"
+    try:
+        real = src.resolve(strict=True)
+        missing = [n for n in ("index.js", "package.json") if not (real / n).is_file()]
+        paired = (real.parents[1] / "config" / "go-model-policy.json").resolve() == Path(mod.POLICY_PATH).resolve()
+    except (OSError, RuntimeError, IndexError) as e:
+        raise ConfigError(f"the trusted Go context guard is unavailable ({src}: {e}); Go models are refused "
+                          f"without it. Install opencode-plugins/go-context/ into {GO_POLICY_BUNDLE} "
+                          "(tools/acp-run/README.md, Install)") from None
+    if missing or not paired:
+        raise ConfigError(
+            "the trusted Go context guard is unusable, so Go models are refused: "
+            + (f"{real} lacks {', '.join(missing)}" if missing else
+               f"{real}/../../config/go-model-policy.json is not the policy acp-run enforces")
+            + f"; reinstall the bundle under {GO_POLICY_BUNDLE} (tools/acp-run/README.md, Install)")
+    return real
 
 
 def usage_exit(msg):
@@ -4788,6 +4829,11 @@ def main():
                                     perm=a.perm, context=a.context)
             if why:
                 ap.error(why)
+            if (a.perm in RESTRICTED_PERMS or strip_requested(a)) and not a.interactive and not keep_user_config(a):
+                try:  # this launch gets a sanitized config: its only plugin is the trusted guard, which must exist
+                    go_guard_dir()
+                except ConfigError as e:
+                    ap.error(str(e))
             if any(str(value).split("=", 1)[0].lower() in ("model", "modelid", "model_id", "provider", "providerid") for value in a.set):
                 ap.error("Go model selection must use --model, not --set")
             if a.go_advisory and a.interactive:

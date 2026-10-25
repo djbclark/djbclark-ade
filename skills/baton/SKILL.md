@@ -95,9 +95,10 @@ that loads this skill, next to its own built-in `/resume` session picker).
 Do not duplicate the reader protocol's steps here — if they ever change,
 they change in exactly one place (`session-handoff`'s SKILL.md), not two.
 
-OpenCode V2 Go sessions use the native `ade_compact` tool for manual compaction
-from codemode/JavaScript. A tool-scoped `ADE_OPENCODE_SESSION_ID` also supports
-`self-slash "/compact"` from native shell calls. These paths compact only the
-verified current session; they do not implement a new-session/baton successor.
+OpenCode V2 Go sessions use the native `ade_compact` tool for manual compaction.
+The plugin never rewrites shell commands. A supported host controller may pass
+an explicit validated session and directory to `self-slash "/compact"`.
+These paths compact only the verified current session; they do not implement a
+new-session/baton successor.
 See `docs/context-hygiene.md`. Write the checkpoint first and require the normal
 host identity/acknowledgment checks for a lifecycle cycle.
