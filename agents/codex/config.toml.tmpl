@@ -360,20 +360,22 @@ url = "http://127.0.0.1:6806/mcp"
 # Tool subprocess environment (2026-10-25). Was `inherit = "core"`, which also strips the Herdr pane identity, so
 # Herdr-aware tools could not find their own pane. inherit = "all" plus a legacy `include_only` allowlist gives the
 # same core set as before (HOME LANG LC_ALL LC_CTYPE LOGNAME PATH SHELL TEMP TMP TMPDIR USER, Codex 0.164.0 on
-# macOS), plus exactly the four variables Herdr sets in a pane. Rules (tests/test_codex_shell_env_policy.py):
+# macOS), plus exactly six variables Herdr puts in the Codex process: the four owner ids and two routing paths. Rules (tests/test_codex_shell_env_policy.py):
 #   1. include_only is applied AFTER [shell_environment_policy.set]: every `set` key must be listed here, or it is
 #      silently dropped.
 #   2. Legacy `include_only`, not `filters`: Codex 0.163.0 ignores `filters` and would pass the whole environment.
-#   3. No wildcards, no HERDR_* glob, no fixed ids: ids come from the process Codex was started in; outside Herdr
-#      they stay absent. A Herdr pane shell showed only these four HERDR_* variables (2026-10-25), so
-#      HERDR_BIN_PATH and HERDR_SOCKET_PATH stay out.
-#   4. acp-run (SCRUB_ENV) and relay.py deliverers (deliverer_env allowlist) drop the caller's Herdr ids first.
+#   3. No wildcards, no HERDR_* glob, no fixed values: they come from the process Codex was started in; outside Herdr
+#      they stay absent. Owner ids: HERDR_ENV HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID. Routing (service, not
+#      identity; both seen in a live Codex process 2026-10-25): HERDR_SOCKET_PATH HERDR_BIN_PATH. Any other HERDR_*
+#      (HERDR_SESSION, HERDR_ACTIVE_*, plugin variables) stays out.
+#   4. acp-run (SCRUB_ENV) drops the four owner ids before it starts an agent; relay.py deliverers (deliverer_env
+#      allowlist) keep no owner id. Routing paths are not owner identity and may pass on where those keep them.
 [shell_environment_policy]
 inherit = "all"
 ignore_default_excludes = false
 include_only = [
   "HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "SHELL", "TEMP", "TMP", "TMPDIR", "USER",
-  "HERDR_ENV", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID",
+  "HERDR_ENV", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID", "HERDR_SOCKET_PATH", "HERDR_BIN_PATH",
   "NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S", "BASH_ENV", "ENABLE_PROMPT_CACHING_1H",
   "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "MCP_TIMEOUT", "CLAUDE_CODE_HARBOR_KITE", "GRAFT_NO_GITIGNORE",
 ]

@@ -18,9 +18,12 @@ these with the companion's data, as a `modify_` merge and never a symlink, becau
 
 `[shell_environment_policy]` in `codex/config.toml.tmpl` decides which variables a Codex tool command gets. It is
 `inherit = "all"` plus an exact legacy `include_only` allowlist: the variables `inherit = "core"` gave (`HOME LANG
-LC_ALL LC_CTYPE LOGNAME PATH SHELL TEMP TMP TMPDIR USER`, read back from Codex 0.164.0 on macOS), the four Herdr pane
-variables (`HERDR_ENV HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID`) and the `set` keys. Outside Herdr none of the
-four exists, so none appears; no id is written into the file. `tests/test_codex_shell_env_policy.py` pins it,
+LC_ALL LC_CTYPE LOGNAME PATH SHELL TEMP TMP TMPDIR USER`, read back from Codex 0.164.0 on macOS), the four Herdr
+owner ids (`HERDR_ENV HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID`), the two routing paths seen in a live Codex process
+on 2026-10-25 (`HERDR_SOCKET_PATH HERDR_BIN_PATH`, service locations, not identity) and the `set` keys. Any other
+`HERDR_*` (`HERDR_SESSION`, `HERDR_ACTIVE_*`, plugin variables) stays out. Outside Herdr none of the six exists, so none
+appears; no value is written into the file. `acp-run` drops the four owner ids from the agents it starts; the relay
+deliverer keeps no owner id. `tests/test_codex_shell_env_policy.py` pins it,
 including a read-back through the installed `codex app-server` (no model call).
 
 1. `include_only` runs after `set` (probed 2026-10-25, Codex 0.160.1, 0.163.0, 0.164.0): add a `set` key and its

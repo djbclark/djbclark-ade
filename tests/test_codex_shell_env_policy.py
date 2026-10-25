@@ -4,7 +4,7 @@
 `inherit = "core"` stripped the Herdr pane identity from every tool Codex ran, so a Herdr-aware tool could not
 find its own pane (HERDR_ENV, HERDR_WORKSPACE_ID, HERDR_TAB_ID, HERDR_PANE_ID were set in the Codex process and
 its parent shell, absent in the tool). The template now says `inherit = "all"` plus a legacy `include_only`
-allowlist: the old core set, the four Herdr ids and the explicit `set` keys, and nothing else.
+allowlist: the old core set, the six Herdr names (four owner ids, two routing paths) and the explicit `set` keys, and nothing else.
 
 Three layers:
 
@@ -40,7 +40,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "agents" / "codex" / "config.toml.tmpl"
 
 CORE = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "SHELL", "TEMP", "TMP", "TMPDIR", "USER")
-HERDR = ("HERDR_ENV", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID")
+OWNER = ("HERDR_ENV", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID")  # who this pane is
+ROUTING = ("HERDR_SOCKET_PATH", "HERDR_BIN_PATH")  # which Herdr to talk to: service paths, not identity
+HERDR = OWNER + ROUTING  # the six names the allowlist admits (live Codex process, 2026-10-25)
 SET_KEYS = {
     "NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S": "DIGESTS",
     "BASH_ENV": "HOME/.bashrc",
@@ -50,10 +52,10 @@ SET_KEYS = {
     "CLAUDE_CODE_HARBOR_KITE": "1",
     "GRAFT_NO_GITIGNORE": "1",
 }
-IN_HERDR = {"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w9", "HERDR_TAB_ID": "w9:t7", "HERDR_PANE_ID": "w9:p7"}
-# Not in a pane's environment (2026-10-25) and so never wanted in a tool's: routing to a server, a plugin, a session.
-HERDR_NEIGHBOURS = {"HERDR_BIN_PATH": "/bin/herdr", "HERDR_SOCKET_PATH": "/tmp/h.sock", "HERDR_SESSION": "other",
-                    "HERDR_ACTIVE_PANE_ID": "w1:p1"}
+IN_HERDR = {"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w9", "HERDR_TAB_ID": "w9:t7", "HERDR_PANE_ID": "w9:p7",
+            "HERDR_SOCKET_PATH": "/tmp/herdr-test.sock", "HERDR_BIN_PATH": "/tmp/herdr-test-bin"}
+# Other HERDR_* names: a named session, plugin popup context, the active-pane hints. Never wanted in a tool's environment.
+HERDR_NEIGHBOURS = {"HERDR_SESSION": "other", "HERDR_ACTIVE_PANE_ID": "w1:p1", "HERDR_PLUGIN_ID": "p", "HERDR_FUTURE_THING": "x"}
 SYNTHETIC_SECRETS = {"ZZ_SYNTHETIC_SECRET": "s3", "OPENAI_API_KEY": "k1", "GITHUB_TOKEN": "t1", "AWS_SESSION": "a1",
                      "DB_PASSWORD": "p1", "SSH_AUTH_SOCK": "/tmp/agent.sock", "ANTHROPIC_AUTH": "x1", "TERM": "xterm"}
 
@@ -93,7 +95,7 @@ class Policy(unittest.TestCase):
         for k in self.p["set"]:
             self.assertIn(k.upper(), allowed, k)
 
-    def test_the_allowlist_is_core_plus_the_four_herdr_ids_plus_set_keys_and_nothing_else(self) -> None:
+    def test_the_allowlist_is_core_plus_the_six_herdr_names_plus_set_keys_and_nothing_else(self) -> None:
         names = self.p["include_only"]
         self.assertEqual(len(names), len(set(names)), "duplicate entry")
         self.assertEqual(set(names), set(CORE) | set(HERDR) | set(self.p["set"]))
@@ -226,18 +228,19 @@ class InstalledCodex(unittest.TestCase):
         got = tool_env(self.new_toml, base_env(self.home))
         self.assertEqual([k for k in got if k.startswith("HERDR_")], [])
 
-    def test_only_the_four_ids_pass_and_no_secret_does(self) -> None:
+    def test_only_the_six_exact_names_pass_and_no_secret_does(self) -> None:
         env = {**base_env(self.home), **IN_HERDR, **HERDR_NEIGHBOURS}
         got = tool_env(self.new_toml, env)
-        self.assertEqual(sorted(k for k in got if k.startswith("HERDR_")), sorted(HERDR))
+        self.assertEqual({k: v for k, v in got.items() if k.startswith("HERDR_")}, IN_HERDR)  # six names, values untouched
         for k in SYNTHETIC_SECRETS:
             self.assertNotIn(k, got, k)
 
     def test_core_and_explicit_set_are_exactly_what_inherit_core_gave(self) -> None:
         # Same host environment under the old and the new policy: outside Herdr the tool sees the same thing; inside,
-        # the same plus the four ids. Catches a core variable this Codex has and the allowlist forgot.
+        # the same plus the six names. Catches a core variable this Codex has and the allowlist forgot.
         rich = {**base_env(self.home), "COLORTERM": "truecolor", "XDG_STATE_HOME": "/x", "LC_MESSAGES": "C",
-                "TZ": "UTC", "EDITOR": "vi", "HTTPS_PROXY": "http://p", "USERNAME": "tester", "NO_COLOR": "1"}
+                "TZ": "UTC", "EDITOR": "vi", "HTTPS_PROXY": "http://p", "USERNAME": "tester", "NO_COLOR": "1",
+                **HERDR_NEIGHBOURS}  # old policy strips these; the allowlist must too
         before = noise(tool_env(self.old_toml, rich))
         after = noise(tool_env(self.new_toml, rich))
         self.assertEqual(after, before)
@@ -265,7 +268,8 @@ def load(name: str, path: pathlib.Path):
 @unittest.skipUnless(CODEX and sys.platform in ("darwin", "linux"), "no installed codex")
 class DetachedChildren(unittest.TestCase):
     """Layer 3: a Codex started by acp-run or by a relay deliverer gets no Herdr id in its tools, though the policy
-    now passes the four ids on."""
+    now passes the six names on. Owner identity (the four ids) must never arrive; the routing paths (HERDR_SOCKET_PATH,
+    HERDR_BIN_PATH) are service locations and may, where acp-run or the relay deliverer keep them."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -281,30 +285,32 @@ class DetachedChildren(unittest.TestCase):
     def caller_env(self) -> dict[str, str]:
         return {**base_env(self.home), **IN_HERDR, "PASEO_AGENT_ID": "a1", "ORCA_TERMINAL_HANDLE": "t1"}
 
-    def test_acp_run_drops_the_callers_herdr_ids_before_the_agent_starts(self) -> None:
+    def test_acp_run_drops_the_callers_owner_ids_before_the_agent_starts(self) -> None:
         try:
             mod = load("acp_run_under_test", ROOT / "tools" / "acp-run" / "acp-run")
         except ImportError as e:
             self.skipTest(f"acp-run needs its ACP SDK: {e}")
         scrubbed = {k: v for k, v in self.caller_env().items() if k not in mod.SCRUB_ENV}
-        self.assertEqual([k for k in scrubbed if k.startswith("HERDR_")], [])
+        self.assertEqual([k for k in scrubbed if k in OWNER], [])
         got = tool_env(self.toml, scrubbed)
-        self.assertEqual([k for k in got if k.startswith("HERDR_")], [])
+        self.assertEqual([k for k in got if k in OWNER], [])
+        self.assertLessEqual({k for k in got if k.startswith("HERDR_")}, set(ROUTING))  # nothing but service paths
         self.assertNotIn("PASEO_AGENT_ID", got)
 
-    def test_a_relay_deliverer_has_no_herdr_id_in_its_tools(self) -> None:
+    def test_a_relay_deliverer_has_no_owner_id_in_its_tools(self) -> None:
         spec = importlib.util.spec_from_file_location("relay_under_test", ROOT / "skills" / "session-finder" / "relay.py")
         relay = importlib.util.module_from_spec(spec)
         sys.modules["relay_under_test"] = relay
         spec.loader.exec_module(relay)
         with mock.patch.dict(os.environ, {**self.caller_env(), **HERDR_NEIGHBOURS}, clear=True):
             env = relay.deliverer_env()
-        self.assertEqual([k for k in env if k.startswith("HERDR_") and k != "HERDR_BIN_PATH"], [])
+        self.assertEqual([k for k in env if k.startswith("HERDR_") and k != "HERDR_BIN_PATH"], [])  # the deliverer's own, deliberate keep
         got = tool_env(self.toml, {**env, "HOME": self.home})
-        self.assertEqual([k for k in got if k.startswith("HERDR_")], [])
+        self.assertEqual([k for k in got if k in OWNER], [])
+        self.assertLessEqual({k for k in got if k.startswith("HERDR_")}, {"HERDR_BIN_PATH"})
 
     def test_the_unscrubbed_caller_environment_would_leak_the_ids(self) -> None:
-        # Why the scrub matters now: without it the same Codex hands all four ids to its tools.
+        # Why the scrub matters now: without it the same Codex hands all six names to its tools.
         got = tool_env(self.toml, self.caller_env())
         self.assertEqual(sorted(k for k in got if k.startswith("HERDR_")), sorted(HERDR))
 
