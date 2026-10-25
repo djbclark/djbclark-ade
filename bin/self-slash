@@ -302,12 +302,12 @@ if [ -n "$s_baton" ]; then
   [ -f "$s_baton" ] || { echo "self-slash: --baton is not an existing regular file: $s_baton" >&2; exit 2; }
 fi
 s_thinking="${s_thinking:-high}"
-# herdr names the TUI in the pane's `agent` field.  Prompt detection knows Claude Code (❯), cursor-agent (→) and omp
+# herdr names the TUI in the pane's `agent` field. Prompt detection knows Codex (›), Claude Code (❯), cursor-agent (→) and omp
 # (the input box's last row, `╰─ `, 2026-10-24: omp's row has no ❯, so --finish sent to an omp pane polled 9 times
 # and gave up).  Another TUI cannot be read, so say so now: the waiter would only log "gave up" after ~50 s.
-case "$tui" in cursor) marker="→";; omp) marker="╰─ ";; *) marker="❯";; esac
-if [ "$host" = herdr ] && [ -n "$tui" ] && [ "$tui" != claude ] && [ "$tui" != cursor ] && [ "$tui" != omp ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
-  echo "self-slash: warning: herdr reports agent '$tui' for $pane; prompt detection only knows claude, cursor and omp, so the waiter will probably give up (exit 5, see $HOME/.local/state/self-slash.log)" >&2
+case "$tui" in cursor) marker="→";; omp) marker="╰─ ";; codex) marker="›";; *) marker="❯";; esac
+if [ "$host" = herdr ] && [ -n "$tui" ] && [ "$tui" != claude ] && [ "$tui" != cursor ] && [ "$tui" != omp ] && [ "$tui" != codex ] && [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
+  echo "self-slash: warning: herdr reports agent '$tui' for $pane; prompt detection only knows claude, cursor, omp and codex, so the waiter will probably give up (exit 5, see $HOME/.local/state/self-slash.log)" >&2
 fi
 # herdr and Orca both send a long argument as a bracketed paste and Claude Code then
 # treats it as pasted content, not a command (seen 2026-10-09 with ~900 chars): keep it short.
@@ -450,13 +450,22 @@ if [ "${SELF_SLASH_CHILD:-}" != "1" ]; then
       echo "self-slash: another lifecycle action won the lock for $host $pane (pid $(lock_pid "$tlock")); not queuing." >&2; exit 7
     fi
   fi
-  SELF_SLASH_CHILD=1 SELF_SLASH_AFTER="$after" SELF_SLASH_THEN="$then" SELF_SLASH_FINISH="$finish" \
+  # A tool executor may clean up its process group after the parent exits.
+  # Detach before Popen returns; nohup alone does not create a new session.
+  child=$(SELF_SLASH_CHILD=1 SELF_SLASH_AFTER="$after" SELF_SLASH_THEN="$then" SELF_SLASH_FINISH="$finish" \
     SELF_SLASH_SUCCESSOR="$successor" SELF_SLASH_S_THINKING="$s_thinking" SELF_SLASH_S_MODE="$s_mode" SELF_SLASH_S_TITLE="$s_title" \
     SELF_SLASH_S_WORKSPACE="$s_workspace" SELF_SLASH_S_KEEPWS="$s_keepws" SELF_SLASH_S_BATON="$s_baton" \
     SELF_SLASH_TLOCK="$([ "$lifecycle" = 1 ] && echo "$tlock")" \
-    nohup "$0" --delay "$delay" "$text" >>"$log" 2>&1 </dev/null &
+    python3 - "$0" "$delay" "$text" "$log" <<'PY'
+import subprocess, sys
+with open(sys.argv[4], "ab") as log:
+    child = subprocess.Popen([sys.argv[1], "--delay", sys.argv[2], sys.argv[3]],
+                             stdin=subprocess.DEVNULL, stdout=log,
+                             stderr=subprocess.STDOUT, start_new_session=True)
+print(child.pid)
+PY
+  ) || { [ "$lifecycle" != 1 ] || [ "$(lock_pid "$tlock")" != "$$" ] || rm -f "$tlock"; echo "self-slash: could not detach waiter" >&2; exit 1; }
   if [ "$lifecycle" = 1 ]; then
-    child=$!
     # Replace the placeholder only while it is still ours; if not, the child must not run.
     if [ "$(lock_pid "$tlock")" = "$$" ]; then lock_stamp "$child" > "$tlock.$$" && mv -f "$tlock.$$" "$tlock"
     else kill "$child" 2>/dev/null; echo "self-slash: the lifecycle lock for $host $pane changed hands; not queuing." >&2; exit 7; fi
@@ -509,7 +518,14 @@ send_text() {
     echo "$(gdate '+%F %T') $host $pane: paseo send: $(printf '%s' "$out" | gtr -s ' \n' ' ' | gcut -c1-160)"
     return 0
   elif [ "$host" = herdr ]; then
-    herdr pane run "$pane" "$text" || return 1
+    if [ "$tui" = codex ]; then
+      if ! herdr agent prompt "$pane" "$text"; then
+        echo "$(gdate '+%F %T') $host $pane: Codex submission failed or is unverified; NOT retried"
+        exit 8
+      fi
+    else
+      herdr pane run "$pane" "$text" || return 1
+    fi
     # The first Enter after a slash command can only accept the autocomplete row, and the
     # command stays on the input line unrun (Claude Code too: /reload-plugins was logged
     # "sent" on 2026-10-18 and never ran). So for every TUI, press Enter again while the
@@ -605,6 +621,14 @@ import json, sys
 pane = sys.argv[1]
 for p in json.load(sys.stdin).get("result", {}).get("panes", []):
     if p.get("pane_id") == pane: print(p.get("agent_status", "")); break' "$pane" 2>/dev/null)
+    if [ "$tui" = codex ]; then
+      # A Codex composer remains visible mid-turn. Unknown/blocked state is
+      # never permission to submit a lifecycle command or answer a dialog.
+      case "$st" in idle|done) return 0;; esac
+      [ "$said" = 1 ] || { echo "$(gdate '+%F %T') $host $pane: codex status ${st:-unknown}, waiting for idle before sending"; said=1; }
+      [ "$waited" -lt "${SELF_SLASH_WAIT:-900}" ] || { echo "$(gdate '+%F %T') $host $pane: codex did not become idle; NOT sent: ${text:0:80}"; exit 6; }
+      sleep 5; waited=$((waited+5)); continue
+    fi
     [ "$st" = working ] || return 0
     # herdr says "working" whenever Claude Code's title glyph is busy, which it
     # also is while only a BACKGROUND sub-agent runs and the main turn is over

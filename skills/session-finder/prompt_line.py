@@ -73,6 +73,29 @@ def omp_after(after: str) -> str:
 
 def classify(screen: str, mark: str = "❯") -> str | None:
     """None when no line holds `mark`, else the operator text after the last one ("" = empty)."""
+    if mark == "›":
+        # Codex's shaded composer can contain a leading empty line followed
+        # by a real multiline draft. Only inspect rows in that same background;
+        # transcript quotes and the model/status footer are not composer text.
+        rows = screen.splitlines()
+        sgr = re.compile(r"\x1b\[[0-9;]*m")
+        backgrounds = re.compile(r"(?:\[|;)48;(?:2;\d+;\d+;\d+|5;\d+)")
+        candidates = [i for i, line in enumerate(rows)
+                      if re.match(r"^\s*›(?:\s|$)", sgr.sub("", line))]
+        if not candidates:
+            return None
+        i = candidates[-1]
+        prefix, after = rows[i].split(mark, 1)
+        colors = backgrounds.findall(prefix)
+        if not colors:
+            return None  # no styled composer boundary: fail closed
+        color = colors[-1].lstrip("[;")
+        text = [operator_text(after)]
+        for row in rows[i + 1:]:
+            if not any(c.lstrip("[;") == color for c in backgrounds.findall(row)):
+                break
+            text.append(operator_text(row))
+        return "\n".join(part for part in text if part).strip()
     lines = [ln for ln in screen.splitlines() if mark in ln]
     if not lines:
         return None

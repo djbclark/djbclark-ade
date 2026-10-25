@@ -384,6 +384,14 @@ relay from outside Herdr when coordinating an explicitly requested peer.
 
 ## Codex messages in Herdr (2026-10-25)
 
+`self-slash` also supports Codex's shaded `›` composer. It preserves multiline
+drafts, waits for Herdr to report `idle` or `done`, and submits through the
+atomic agent surface. Its detached waiter starts a new process session so a
+tool executor's process-group cleanup cannot take it down. An ambiguous Codex
+submission failure ends the waiter without a resend. A queued lifecycle is
+not proof it ran: check `self-slash.log` and the new thread before reporting
+automatic continuation.
+
 Relay submits a Herdr message with one `herdr agent prompt` call, so the entire
 message is bracketed paste followed by submission. Do not replace that with raw
 `pane send-text` plus a separate Enter: Codex can leave a long message unsent.
