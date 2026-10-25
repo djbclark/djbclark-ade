@@ -34,9 +34,15 @@ web searches about it and make heavy use of web searches during all of your work
 5. **Standing order from the same message: use web searches heavily in all work**, not only here (memory
    `feedback_heavy_web_search`).
 
+## ade-scan-state follow-up 3 after PR 47 (adversary round 3, 2026-10-24)
+
+PR 47 merged (6234a18) at adversary APPROVE; djbclark chose to queue these LOWs rather than fix them (report: `~/.local/state/bigteam/adhoc-2026-10-24/adv-shallow-47-r3-report.md`). 1. **LOW**: `tests/test_ade_scan_state.py` asserts `git clone --bare` once per row, not inside each note (a row with two notes passes if one says a plain clone); assert it in each note's span. 2. **LOW**: the shallow note on the odd-name `all-refs.bundle` row (`bin/ade-scan-state-doc`, the `ODD_NAME_NOTE` branch) has no test; set `c["branch"] = "b\ufffd"` on the real record in the branch case and expect `all-refs.bundle` with `+refs/*:refs/bundle/*`. 3. **LOW**: the comment above `_shallow_note` and the test's "a non-forced update would be rejected" overstate: into `refs/bundle/*` a non-forced fetch also succeeds on a fresh bare clone; reword to "a fetch into `refs/heads/*` would be rejected". 4. INFO: the CHANGELOG line says "now say" for "every bundle row" (should be "says") and omits the odd-name row.
+
 ## ade-scan-state follow-up 2 after PR 39 (adversary round 70, 2026-10-24)
 
-PR 39 was approved at head 14c7347 (no BLOCK or MEDIUM). Left for one small later PR (`adhoc-2026-10-24/adv-scan-70-report.md`): 1. **LOW**: a shallow checkout WITH an origin still gets `HEAD.bundle`, `branch-<b>.bundle`, `all-refs.bundle` and `local-only.bundle` rows (`bin/ade-scan-state-doc` ~779-822) that cannot be cloned alone (`git clone` rc 128); read `c.get("shallow")` in those rows too and either copy `shallow` beside the bundle or say "restore by fetching into a clone of origin; keep origin". 2. INFO: the no-origin restore recipe leaves the bare repo's HEAD at `init.defaultBranch` (a clone warns `remote HEAD refers to nonexistent ref`); `git init --bare -b <branch>`. 3. INFO: `GITDIR_FMT` exits 0 having archived nothing when `.git` is no longer a file at paste time, so the new "refuses loudly" sentence overstates; make the command fail or reword. 4. INFO: the PR's CHANGELOG line bundles about eight changes in one line where rule 10 says one per change; split if a reviewer asks. 5. INFO: `merge_repositories` keeps the first spelling (unreachable for a symlink today).
+PR 39 was approved at head 14c7347 (no BLOCK or MEDIUM). Left for one small later PR (`adhoc-2026-10-24/adv-scan-70-report.md`): 1. **DONE in PR 47 (2026-10-24)**: a shallow checkout WITH an origin still gets `HEAD.bundle`, `branch-<b>.bundle`, `all-refs.bundle` and `local-only.bundle` rows (`bin/ade-scan-state-doc` ~779-822) that cannot be cloned alone (`git clone` rc 128); read `c.get("shallow")` in those rows too and either copy `shallow` beside the bundle or say "restore by fetching into a clone of origin; keep origin". 2. INFO: the no-origin restore recipe leaves the bare repo's HEAD at `init.defaultBranch` (a clone warns `remote HEAD refers to nonexistent ref`); `git init --bare -b <branch>`. 3. **DONE in the follow-up 2b PR (2026-10-24)**: a row whose scan saw a gitfile naming a git directory outside the checkout pastes `GITDIR_REQUIRED_FMT`, which fails (nonzero, `gitdir capture FAILED: .git is not a file` on stderr) when `.git` is no longer a file; the plain `GITDIR_FMT` stays a silent no-op for an ordinary `.git` directory. 4. **DONE in the same PR**: the PR 39 CHANGELOG line is split into eight, one per change. 5. **LEFT, by design (2026-10-24)**: `merge_repositories` keeps the first spelling, which its docstring says and `test_one_directory_under_two_spellings_is_one_embedded_repository_not_two` pins; a symlink spelling is unreachable today (adversary round 70), so no test can show a `realpath` preference without inventing an input; the only reachable case is the case-insensitive pair, where either spelling is the same directory.
+
+Open LOWs from the PR 54 adversary round (APPROVE at 8b0ecfd, merged 9d8f896, 2026-10-24): a. **LOW**: the new test for `GITDIR_REQUIRED_FMT` (`tests/test_ade_scan_state.py` ~4250) only compares placeholder counts, so nothing pins the selector at `bin/ade-scan-state-doc:688`; mutating `outside = any(` to `outside = True or any(` survives and makes a skipped ordinary checkout paste the failing command; add a case for a skipped `.git`-directory row asserting it keeps `GITDIR_FMT`. b. **LOW**: the split CHANGELOG line for `--separate-git-dir` names only `bin/ade-scan-state-doc`, but PR 39 made that change mainly in `bin/ade-scan-state` (docstrings) and `docs/threat-model.md:322`; widen the file list. c. **INFO**: a skipped linked worktree whose gitfile points back (skipped for alternates, a time-out) still gets the plain `GITDIR_FMT`, so a missing `.git` at paste time exits 0 having archived nothing (the gap item 3 closed only for the foreign case); by design in the PR body, revisit if it bites. Open LOW from the PR 36 re-review (APPROVE at bb51608, merged 9443145, 2026-10-24): d. **LOW**: no test pins the opposite direction of the borrowed-twin fix in `bin/claude-quota-guard` (~:507-509): a stale twin that supplied a reported `resets_at`, `weekly_resets_at` or `pace` must still age the decision; mutating the `(shown_weekly, resets_at)` pair away survives (225 passed); add one test per pair.
 
 ## Consider: drop the brew Paseo and run our fork instead (djbclark, direct, 2026-10-24): ASK FIRST, it is disruptive
 
@@ -295,13 +301,52 @@ a 150-200k context: the notification-per-turn multiplier, not the model, was the
    silently); `gh api --jq` takes no `--arg` (the findings query failed with "accepts 1 arg(s), received 4"), so fetch
    with `gh api ... --paginate > f.json`, then `jq -s --arg t ... f.json`; the adversary appends its own `## Round NN`
    section to its report file, so the lead must not append a second copy (rounds 43 and 44 were deduplicated).
+   **Done 2026-10-23** (`bin/pr-wait`, `tests/test_pr_wait.py`, `skills/bigteam/SKILL.md`): one waiter per repo + PR + head
+   (CI checks of the exact head plus the Codex marker; `completed` and `failed` terminal; stuck bound `--codex-stuck`,
+   default 45 min, exit 3; `gh` failures retried, exit 6 if still failing at the deadline; paginated output parsed as
+   concatenated pages; findings by `original_commit_id` / review `commit_id` of the head and the Codex bot author, no time window; markers believed only from the Codex app), a lock refusing a duplicate (exit 4). Not done:
+   the adversary-report round dedup lesson is a lead habit, not a waiter feature.
+   **Open LOW from PR 34's adversary (2026-10-24, head a15ecb7; D1 and D2 fixed in the PR, D3 and D4 left):**
+   D3 stale summary: `finish()` is the only writer, and the summary carries no run id or start time. Scenario: run A on head H
+   ends `merge_ready: true`; a re-requested Codex review or an unresolved thread makes run B start on H; a third agent gets exit 4
+   ("read its files"), reads `PREFIX-summary.json` at once and sees run A's `merge_ready: true`. A crash gives exit 1 plus the
+   previous summary. Fix: once the lock is held, write `PREFIX-summary.json` atomically as `{"result":"running","pid":...,
+   "started_at":...}` (or delete the old `PREFIX-*` files), put `pid` and `started_at` in the final summary too, and make the
+   exit-4 message say "wait for pid N to exit, then read". D4 macOS identity ([INFERENCE], not reproduced): the lock identity is
+   the text of `ps -o lstart=`, a local-time rendering, so the docstring's "stored absolutely" holds only for the kernel value.
+   Scenario: the Mac's automatic timezone changes while a waiter runs; a second `pr-wait` on the same head computes a different
+   lstart string for the live holder, `lock_live` returns False, it takes over, and two waiters run on one head. Fix: read
+   `pbi_start_tvsec`/`pbi_start_tvusec` through libproc `proc_pidinfo(PROC_PIDTBSDINFO)` (ctypes) or `sysctl kern.proc.pid.<pid>`;
+   or keep lstart, also store the epoch, and compare within +-1 s after parsing both in the same zone.
 4. **PR 29 queued findings** (hypothetical aiuse payload shapes; `bin/claude-quota-guard`): (a) a windowless live
-   row bound by the 5-hour window leaves the snapshot's weekly unjudged (adversary round 7); (b) a detailed
+   row bound by the 5-hour window leaves the snapshot's weekly unjudged (adversary round 7); (b) **DONE 2026-10-23** (Codex 4361062506;
+   `decide` now builds a summary window for every windowless row beside the detailed ones, then the Fable supplement; tests `test_s2_*`) a detailed
    default row plus a summary-only Fable row: synthesize a window for every summary-only row (Codex pass 6);
-   (c) several snapshot accounts with Fable windows: age only the account `_lowest()` picked (Codex pass 6);
+   (c) **DONE 2026-10-23** (Codex 4361062518; only the snapshot row holding the `_lowest()` Fable window ages the decision, both paths; tests `test_s1_*`)
+   several snapshot accounts with Fable windows: age only the account `_lowest()` picked (Codex pass 6);
    (d) the `p3` concurrency test's 0.2 s lock budget can flake under load, and the hook's worst case is 0.2 s
    against the docstring's "well under 100 ms" (round 10); (e) the hook's unreadable line (round 9) and the
-   `live_only` `fed` rule were tightened in fix 8; re-check after (b).
+   `live_only` `fed` rule were tightened in fix 8; re-check after (b) (2026-10-23: (b) landed, `fed` covers both paths).
+   (f) **PR 36 adversary round 3, queued 2026-10-24** (LOW, hypothetical shapes; head e10c705): (f1) a summary row's
+   reset and pace come only from the snapshot, never from the live detailed twin beside it
+   (`bin/claude-quota-guard:427-428`, `display = snap_windows` is the only twin source passed to `_summary_window`).
+   Input: a detailed default row (age 10, weekly 80% reset 2026-10-28, 5-hour 90%), a summary row
+   (`headroom_percent` 50, `binding_window` "Claude Code weekly", age 10, no `available_at`), and a snapshot account at
+   age 18000 holding weekly 70% reset 2026-10-28: `rows_age_s` is 18000 (stale, watch, collector-down ping) although a
+   10 s old row has the same reset; with no snapshot and aiuse rc 3 `weekly_resets_at` and `resets_at` are None
+   (the advice loses its reset phrase), which the pre-PR mixed shape reported. Suggested fix:
+   `_summary_window(r, claude_windows(rows) or display)`, or try the live detailed twin first and fall back to the
+   snapshot, so only a snapshot twin that was really needed ages the decision. (f2) a summary-only Fable row's
+   `headroom_percent` is in shared-weekly units in aiuse 3.10.0 (`analysis/selfdescribe.py:827-854`:
+   `effective_headroom(binding)`, scaled by `max_share_of_parent_percent`, `headroom_basis: "shared_weekly"`; live
+   2026-10-24 20:03Z: row headroom 40.0 while the Fable window shows `remaining_percent` 80.0, share 50), but
+   `_summary_window` (:360-361) relabels any `pool_family: "fable"` row's headroom as the Fable cap's remaining.
+   Input: a detailed default row plus a summary-only Fable row with headroom 12.5 and basis shared_weekly (real Fable
+   cap 25% left): `fable_left` 12.5, level `watch`; the true value is above `watch_fable` 15, so `ok`; a Fable row
+   bound by the shared weekly (headroom 20) gives `fable_left` 20 while the real cap is 80. Errors are on the cautious
+   side and real aiuse sends `windows[]` today; the live-only path had this before the PR. Suggested fix: when
+   `headroom_basis == "shared_weekly"` or `binding_window` is not the Fable label, classify by `binding_window` and do
+   not force the Fable label (or document in the docstring that the summary Fable value is in shared-weekly units).
 5. **PR 30 queued findings** (`bin/self-slash`, adversary round 3): `SELF_SLASH_SUCCESSOR_SETTLE` accepts a leading
    zero (`08`/`09`, an octal arithmetic error after `paseo run`) and has no upper bound (cap 600); workspace proof
    compares realpaths case-sensitively, so on APFS a case-variant sibling row can let an empty local workspace be
@@ -1705,12 +1750,14 @@ OPEN (adversary fix text kept; not implemented, 2026-10-24):
    flock fails). If such a pid comes before any other agent, the relay is inside a relayed turn. The hop count is the number of such ancestors, and the sender is
    `hermes <sid[-8:]>` with the sid taken from the lock file name. This also removes the forgery residual of L-C (a process inside the turn can unset `RELAY_HOPS`
    or set `RELAY_HOP_PARENT` to a pid outside its ancestry; the L-C fix only stops a forged *name*). The `RELAY_HOPS` env markers can then become a cross-check or go.
-2. **L-D, the pane lock's hash can be missed while the holder releases (LOW).** `_flock` truncates the file in `finally` before `os.close` and `pane_sending` reads it
+2. **L-D, the pane lock's hash can be missed while the holder releases (LOW). FIXED 2026-10-24 (#49):** `pane_sending` returns None for an empty file after its retries and `route_pane` asks for the lock again (`PANE_LOCK_ASKS`, 5 times) before it skips; test `test_a_holder_that_releases_while_its_hash_is_unreadable_is_asked_again_not_skipped_to_the_socket`, mutant checked. Original finding: `_flock` truncates the file in `finally` before `os.close` and `pane_sending` reads it
    five times over 100 ms. If B's non-blocking flock fails while A holds the lock, and A then truncates and closes, B reads an empty file, `pane_sending` returns False,
    B returns "skip" and goes to `route_socket`, which has no check for an unproven entry: A's text, already typed and recorded, arrives twice. The same happens if A
    has not written its hash within 100 ms of taking the lock (a loaded machine). Fix: when `pane_sending` sees an empty file after its retries, try the pane lock once
    more (blocking briefly or polling). If the lock is now free, take the normal path under it, where `pane_send`'s P5 check sees A's entry; do not skip to the socket.
    (B's "stop ... do not resend" while A's own routes all fail tells B's caller not to resend something A's caller was told was not sent: acceptable, the same text.)
 3. **L-F, the CHANGELOG lines for the queued lows carry no PR number** (code-review rule 10): fixed 2026-10-24, the lines end with PR 40.
-4. Accepted residual (L-A, related): `permit allow` picks the first card whose `id === reqId || id.startsWith(reqId)` in list order, so a request id that is a proper
+4. Accepted residual (L-D, adversary B2, 2026-10-24): a holder that proved delivery (`forget`) or a non-claude pane leaves no entry, so a relay of the same text that wins the
+   lock inside the release window types it a second time (before L-D a non-claude pane, or a claude pane with no socket, ended "not sent" there). It is what a relay arriving just after the holder does anyway.
+5. Accepted residual (L-A, related): `permit allow` picks the first card whose `id === reqId || id.startsWith(reqId)` in list order, so a request id that is a proper
    prefix of an earlier card's id would answer that other card; with UUID or `permission-<uuid>` ids it cannot happen.
