@@ -509,6 +509,25 @@ class WherePaseo(unittest.TestCase):
         self.assertEqual(env["PASEO_AGENT_ID"], AGENT)
         self.assertEqual(env["HERDR_ENV"], "1")
 
+    def ps_env(self, argv: str, eww: str) -> dict[str, str]:
+        def run(*cmd: str) -> str:
+            return eww if cmd[:2] == ("ps", "eww") else argv if cmd[:2] == ("ps", "-ww") else ""
+        saved = where.run
+        where.run = run
+        try:
+            return where.env_of(999999999)    # no /proc entry: the ps path
+        finally:
+            where.run = saved
+
+    def test_every_key_is_read_only_from_the_env_part_of_ps_eww(self) -> None:
+        """Adversary r1 A5 (2026-10-25): a prompt in argv that quotes HERDR_PANE_ID=w5:p3 names no pane of that process."""
+        argv = "/bin/codex exec HERDR_PANE_ID=w5:p3 TMUX=/tmp/fake,1,0"
+        self.assertEqual(self.ps_env(argv, f"{argv} PATH=/bin"), {})
+        self.assertEqual(self.ps_env(argv, f"{argv} HERDR_PANE_ID=w1:p1 HERDR_PANE_ID=w9:p9"), {"HERDR_PANE_ID": "w1:p1"})
+
+    def test_no_key_is_read_when_the_argv_cannot_be_separated(self) -> None:
+        self.assertEqual(self.ps_env("totally different", "/bin/x HERDR_PANE_ID=w5:p3 HERDR_ENV=1"), {})
+
     def test_paseo_agent_id_is_dropped_when_the_argv_cannot_be_separated(self) -> None:
         def run(*cmd: str) -> str:
             return "totally different" if cmd[:2] == ("ps", "-ww") else f"/bin/x HERDR_ENV=1 PASEO_AGENT_ID={AGENT}"
