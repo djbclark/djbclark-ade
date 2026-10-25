@@ -2264,6 +2264,60 @@ class ConfigError(Exception):
     """A requested model, effort or context was not applied (failure class config, exit 1)."""
 
 
+GO_PROVIDER_PREFIX = "opencode-go/"
+GO_POLICY_BUNDLE = Path.home() / ".local/share/acp-run/go-policy"
+_GO_POLICY = None
+
+
+def is_go_model(model):
+    """True for an OpenCode Go model ID. Same boundary as go_model_policy.classification(), so a
+    standalone copy of this script can tell a non-Go run apart without loading the policy."""
+    return isinstance(model, str) and model.lower().startswith(GO_PROVIDER_PREFIX)
+
+
+def load_go_policy():
+    """Load the Go cost policy (bin/go_model_policy.py + config/go-model-policy.json), only when a Go
+    model is requested or applied; non-Go runs never need it. Looked up in exactly two places, never
+    on sys.path, in the cwd or beside the script: (1) the djbclark-ade checkout this script lives in
+    (tools/acp-run/acp-run -> ../../bin, ../../config), (2) the installed bundle
+    ~/.local/share/acp-run/go-policy/{bin,config}/ (README "Install"). Missing or unreadable policy
+    raises ConfigError, so a Go prompt never runs unchecked."""
+    global _GO_POLICY
+    if _GO_POLICY is not None:
+        return _GO_POLICY
+    import importlib.util
+    here = Path(__file__).resolve()
+    roots = []
+    if here.parent.name == "acp-run" and here.parent.parent.name == "tools":
+        roots.append(here.parents[2])
+    roots.append(GO_POLICY_BUNDLE)
+    problems = []
+    for root in roots:
+        helper = root / "bin" / "go_model_policy.py"
+        if not helper.is_file():
+            problems.append(f"{helper}: not found")
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("acp_run_go_model_policy", helper)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            mod.policy()
+            if not (callable(getattr(mod, "classification", None)) and callable(getattr(mod, "refusal", None))):
+                raise ValueError("no classification()/refusal()")
+        except Exception as e:
+            problems.append(f"{helper}: {type(e).__name__}: {e}")
+            # A present checkout policy is authoritative. Never mask its failure
+            # with an older, potentially more permissive installed snapshot.
+            break
+        _GO_POLICY = mod
+        return mod
+    raise ConfigError(
+        "the Go cost policy is not installed, so OpenCode Go models are refused (non-Go models are unaffected). "
+        f"Install the bundle (bin/go_model_policy.py and config/go-model-policy.json from djbclark-ade) under "
+        f"{GO_POLICY_BUNDLE}/bin and {GO_POLICY_BUNDLE}/config, or run acp-run from the checkout "
+        f"(tools/acp-run/README.md, Install). Tried: " + "; ".join(problems))
+
+
 def usage_exit(msg):
     """A request the agent or model cannot satisfy: say why on stderr and exit 2, before any prompt."""
     print(f"acp-run: {msg}", file=sys.stderr)
@@ -4246,10 +4300,11 @@ async def run(a, log, err, log_path):
                 resolved = applied.get("model")
                 if not resolved or resolved != a.model or "model" in applied.get("unverified", []):
                     raise ConfigError("OpenCode requires an exact applied provider/model ID; aliases or unverified resumed models are refused")
-                from go_model_policy import refusal
-                why = refusal(resolved, advisory=getattr(a, "go_advisory", False), timeout=a.timeout, perm=a.perm, context=a.context)
-                if why:
-                    raise ConfigError(why)
+                if is_go_model(resolved):
+                    why = load_go_policy().refusal(resolved, advisory=getattr(a, "go_advisory", False),
+                                                   timeout=a.timeout, perm=a.perm, context=a.context)
+                    if why:
+                        raise ConfigError(why)
             if applied:
                 client.rec("applied", applied)
             if a.interactive:
@@ -4722,18 +4777,22 @@ def main():
     if a.agent == "opencode" and not a.info:
         if not a.model or "/" not in a.model:
             ap.error("opencode prompt runs require --model provider/model so the Go cost policy can be checked")
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "bin"))
-        import go_model_policy
-        why = go_model_policy.refusal(a.model, advisory=a.go_advisory, timeout=a.timeout,
-                                      perm=a.perm, context=a.context)
-        if why:
-            ap.error(why)
-        if go_model_policy.classification(a.model) is not None:
+        if a.model != a.model.strip():
+            ap.error("opencode --model must not have leading or trailing whitespace")
+        if is_go_model(a.model):
+            try:
+                go_policy = load_go_policy()
+            except ConfigError as e:
+                ap.error(str(e))
+            why = go_policy.refusal(a.model, advisory=a.go_advisory, timeout=a.timeout,
+                                    perm=a.perm, context=a.context)
+            if why:
+                ap.error(why)
             if any(str(value).split("=", 1)[0].lower() in ("model", "modelid", "model_id", "provider", "providerid") for value in a.set):
                 ap.error("Go model selection must use --model, not --set")
             if a.go_advisory and a.interactive:
                 ap.error("Go advisory runs are single-turn; --interactive is refused")
-            if go_model_policy.classification(a.model) == "advisory":
+            if go_policy.classification(a.model) == "advisory":
                 if a.verify is not None or a.prompt_retries:
                     ap.error("Go advisory use cannot run --verify or prompt retries")
                 a.wrapup_grace = 0

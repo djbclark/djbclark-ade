@@ -56,7 +56,11 @@ native loading are separate evidence from offline guard tests.
 The custom `ade_compact` tool uses the current native tool context's session ID.
 For a native `bash`/`shell` command the hook also injects a tool-local
 `ADE_OPENCODE_SESSION_ID` and `ADE_OPENCODE_DIRECTORY`, letting `self-slash "/compact"` validate and compact
-that session through the plugin RPC. Automatic, tool and RPC calls share one
+that session through the plugin RPC. Shell scope injection re-reads effective
+native permissions for every call and leaves the command unchanged if any rule
+is restrictive or unreadable, or the permission API is unavailable. This preserves
+native command permission matching; use `ade_compact` when shell scope is unavailable.
+Automatic, tool and RPC calls share one
 admission check; an absent plugin fails closed. JavaScript/codemode tools use `ade_compact`; their source is never
 rewritten. ACP launches scrub inherited native scope before creating the child.
 `/new`, `/clear`, `/reset` and Claude-style compact focus text are refused by the
@@ -89,3 +93,7 @@ plugin auto-discovery in a fresh isolated HOME and returned `ready: true`,
 That probe made zero inference or compaction calls. Run local native probes as
 targeted pytest tests through `bg`; a CI-first repository does not admit an
 arbitrary Python script as a targeted test.
+
+For admission diagnostics, use the structured `load-watch` fields (`load1`,
+`per_core`, `cores`); the raw load average printed by a `bg` hold is not itself
+a per-core reading.

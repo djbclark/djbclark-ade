@@ -8,6 +8,7 @@ async function fixture() {
   const calls = [], saved = new Map(), models = new Map();
   const ctx = {
     location: { directory: "/repo" },
+    permission: { list: async () => [] },
     storage: { get: async (key) => saved.get(key), set: async (key, value) => saved.set(key, structuredClone(value)) },
     session: {
       get: async ({ sessionID }) => ({ data: { id: sessionID, model: models.get(sessionID) } }),
@@ -126,10 +127,10 @@ test("tool environment scope is per native tool call and never global or inferre
   const before = process.env.ADE_OPENCODE_SESSION_ID;
   const one = { tool: "bash", sessionID: "ses_one", input: { command: "pwd" } };
   const two = { tool: "shell", sessionID: "ses_two", input: { command: "pwd" } };
-  f.guard.onTool(one); f.guard.onTool(two);
+  await f.guard.onTool(one); await f.guard.onTool(two);
   assert.match(one.input.command, /'ses_one'/); assert.match(two.input.command, /'ses_two'/);
   const js = { tool: "execute", sessionID: "ses_one", input: { code: "return 1" } };
-  f.guard.onTool(js); assert.equal(js.input.code, "return 1");
+  await f.guard.onTool(js); assert.equal(js.input.code, "return 1");
   assert.equal(process.env.ADE_OPENCODE_SESSION_ID, before);
 });
 
@@ -197,8 +198,42 @@ test("native directory scope is literal shell data, including quotes and substit
   const f = await fixture(); await f.context();
   f.ctx.location.directory = "/repo's dir $(false)\nline";
   const event = { tool: "shell", sessionID: "ses_one", input: { command: "printf '%s' \"$ADE_OPENCODE_DIRECTORY\"" } };
-  f.guard.onTool(event);
+  await f.guard.onTool(event);
   const result = spawnSync("/bin/sh", ["-c", event.input.command], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, f.ctx.location.directory);
+});
+
+// A prefix before native permission matching must not evade the original resource.
+for (const rules of [
+  [{ action: "shell", resource: "git push*", effect: "deny" }],
+  { rules: [{ action: "shell", resource: "git push*", effect: "ask" }] },
+  [{ action: "*", resource: "*", effect: "deny" }],
+  [{ action: "read", resource: "*", effect: "ask" }],
+  null, {}, [null], [{}], [{ effect: "unknown" }], { rules: [], error: "unavailable" },
+]) {
+  test(`native restricted or unreadable rules preserve shell permission resource: ${JSON.stringify(rules)}`, async () => {
+    const f = await fixture(); await f.context();
+    f.ctx.permission.list = async () => rules;
+    const command = "git push origin master";
+    const event = { tool: "shell", sessionID: "ses_one", input: { command } };
+    await f.guard.onTool(event);
+    assert.equal(event.input.command, command);
+    assert.ok(event.input.command.startsWith("git push"), "native git push* rules still match");
+    assert.equal(await f.guard.manual("ses_one"), true, "native compaction remains available");
+  });
+}
+
+test("shell scope fails closed on permission API errors or absence and refreshes rules per call", async () => {
+  const f = await fixture(); await f.context();
+  const event = () => ({ tool: "shell", sessionID: "ses_one", input: { command: "git push origin master" } });
+  const first = event();
+  f.ctx.permission.list = async () => ({ rules: [{ effect: "allow", action: "shell", resource: "*" }] });
+  await f.guard.onTool(first); assert.match(first.input.command, /^export ADE_OPENCODE_DIRECTORY=/);
+  f.ctx.permission.list = async () => [{ effect: "deny", action: "shell", resource: "git push*" }];
+  const second = event(); await f.guard.onTool(second); assert.equal(second.input.command, "git push origin master");
+  f.ctx.permission.list = async () => { throw new Error("unavailable"); };
+  const third = event(); await f.guard.onTool(third); assert.equal(third.input.command, "git push origin master");
+  delete f.ctx.permission;
+  const fourth = event(); await f.guard.onTool(fourth); assert.equal(fourth.input.command, "git push origin master");
 });

@@ -678,8 +678,10 @@ Run `acp-run --help` for every flag.
 
 Needs [uv](https://docs.astral.sh/uv/) and the agents' own CLIs/adapters.
 
-It is a single self-contained script (a `uv run --script` header pulls its
-dependencies). On this machine it lives in djbclark-ade at `tools/acp-run/acp-run`
+The script itself is self-contained (a `uv run --script` header pulls its
+dependencies): a copy on your PATH runs every agent and every non-Go model
+with no other file. On this machine it lives in djbclark-ade
+at `tools/acp-run/acp-run`
 and is reached as `~/.local/bin/acp-run` → `~/ops/site-private/bin/acp-run` →
 `~/ops/site-djbclark/tools/acp-run` → here. Elsewhere, copy the script onto
 your PATH:
@@ -688,6 +690,35 @@ your PATH:
 install -m 755 tools/acp-run/acp-run ~/.local/bin/acp-run
 acp-run --list
 ```
+
+**OpenCode Go models need the Go cost policy bundle** (added 2026-10-25). The
+policy stays in one place, `bin/go_model_policy.py` + `config/go-model-policy.json`;
+acp-run loads it only when a requested or applied model is `opencode-go/…`, from
+exactly two locations and never from `sys.path`, the cwd or the script's own
+directory: (1) the checkout the script runs from (`tools/acp-run/acp-run` with
+`../../bin` and `../../config`: running or symlinking it in place just works), else
+(2) the installed bundle `~/.local/share/acp-run/go-policy/` with this layout:
+
+```text
+~/.local/share/acp-run/go-policy/bin/go_model_policy.py
+~/.local/share/acp-run/go-policy/config/go-model-policy.json
+```
+
+```sh
+d=~/.local/share/acp-run/go-policy
+install -d "$d/bin" "$d/config"
+install -m 644 bin/go_model_policy.py "$d/bin/"
+install -m 644 config/go-model-policy.json "$d/config/"
+```
+
+Re-run those three lines whenever the model classification changes (the copy is a
+snapshot; to track the checkout instead, `ln -sf` only `bin/go_model_policy.py`
+into `$d/bin/`: the helper resolves its JSON from the link's target). Without the bundle, non-Go prompts
+run as before, and a Go prompt is refused before any agent starts (exit 2 at
+launch, exit 1 if the applied model turns out to be Go), with a message naming the
+paths tried. A missing, unparsable or invalid policy never falls back to a
+permissive default. If a checkout helper exists but cannot load its policy,
+the run is refused rather than falling back to an installed snapshot.
 
 The agent table reflects the machine it was written on (for example Cline is
 pinned to the `cline-pass` provider, and `agy` runs Google's first-party ACP
@@ -767,7 +798,7 @@ OpenCode prompt runs require `--model provider/model`; an unqualified or omitted
 model could resolve to Go without a cost check. Before prompting, the applied
 model must exactly match that qualified ID, with verified read-back; fuzzy
 aliases and unverified resumed selection are refused. Routine models are listed in
-`config/go-model-policy.json`. Costly Go models require `--go-advisory --perm
+`config/go-model-policy.json` (a standalone copy needs the bundle, see Install). Costly Go models require `--go-advisory --perm
 read-only --timeout 600` (a positive timeout no greater than 600). They refuse
 interactive mode, prompt retries and `--verify`; wrap-up grace is disabled.
 Go model selection through `--set model=...` is refused. Unknown Go models fail

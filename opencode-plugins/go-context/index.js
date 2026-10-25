@@ -161,9 +161,19 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
     await save().catch(() => {});
   }
 
-  function onTool(event) {
+  async function onTool(event) {
     if (!SID.test(event.sessionID ?? "") || !states.has(event.sessionID)) return;
     if (!["bash", "shell"].includes(event.tool) || !event.input || typeof event.input.command !== "string") return;
+    // execute.before precedes native permission matching. A prefix can hide an
+    // original deny/ask resource, so rewrite only when effective rules are
+    // known and explicitly allow. Re-read for every call: rules can change.
+    try {
+      if (typeof ctx.permission?.list !== "function") return;
+      const result = await ctx.permission.list();
+      if (result?.error != null) return;
+      const rules = Array.isArray(result) ? result : Array.isArray(result?.rules) ? result.rules : null;
+      if (!rules || rules.some((rule) => !rule || typeof rule.effect !== "string" || rule.effect.toLowerCase() !== "allow")) return;
+    } catch { return; }
     // Each hook owns this input. Never mutate process.env or infer from cwd.
     const directory = ctx.location?.directory;
     if (typeof directory !== "string" || !directory.startsWith("/")) return;
