@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""paseo-new-seat — create a Paseo seat with auto_accept ON from the first tool call.
+
+WHY THIS EXISTS (2026-10-25)
+----------------------------
+djbclark: "If possible you should always open other agents that are part of you with the paseo 'Auto
+accept permission prompts' enabled." Doing that with `paseo agent run` and then setting the feature is
+*not* enough, and the reason is in Paseo's own source:
+
+    function resolveACPCreateConfig(input) {
+        const isUnattendedCreate = input.unattended || input.parent?.isUnattended === true;
+        const featureValues = isUnattendedCreate && input.featureValues?.["auto_accept"] === undefined
+            ? { ...input.featureValues, ["auto_accept"]: true }
+            : input.featureValues;
+
+`auto_accept` is defaulted to true **only for an "unattended" create**, and `paseo agent run` has no
+`--unattended` flag — so every seat created that way is an *interactive* create with the feature
+undefined: a grey shield and a prompt on the first tool call.
+
+That window is real and it is not cosmetic. On 2026-10-25 a seat was created with a prompt that told it
+to read its brief immediately; it hit a permission prompt **before** the feature could be set
+afterwards, and the operator had to answer it by hand. Setting the flag after creation cannot fix a
+prompt that already fired.
+
+So the create must carry the feature. `createAgent` accepts a `config` object that is passed through to
+the provider, and `featureValues.auto_accept` is what `isACPAutoAcceptEnabled` reads:
+
+    function isACPAutoAcceptEnabled(config) {
+        return config.featureValues?.["auto_accept"] === true;
+    }
+
+This script uses the daemon's own client (the same path `paseo-set-model` uses) to create the agent with
+that config, then verifies the shield from the agent's state file.
+
+USAGE
+  paseo-new-seat --title "Dann Chat 3" --prompt "..." [--provider cline] [--model M]
+                 [--cwd DIR] [--workspace ID] [--no-auto-accept] [--dry-run]
+
+Exit: 0 created and verified; 1 error; 2 usage; 4 created but the shield did not come up green.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+APP = "/Applications/Paseo.app/Contents"
+DEFAULT_HELPER = f"{APP}/Frameworks/Paseo Helper.app/Contents/MacOS/Paseo Helper"
+DEFAULT_CLI_DIST = f"{APP}/Resources/app.asar/node_modules/@getpaseo/cli/dist"
+MJS = Path(os.path.realpath(__file__)).with_name("paseo-new-seat.mjs")
+
+USAGE = (__doc__ or "").split("USAGE")[-1].strip("\n") + "\n"
+
+
+def usage() -> int:
+    print(USAGE, file=sys.stderr)
+    return 2
+
+
+def main(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="paseo-new-seat", add_help=False)
+    p.add_argument("--title", required=True)
+    p.add_argument("--prompt", default="")
+    p.add_argument("--provider", default="cline")
+    p.add_argument("--model", default="cline-pass/deepseek-v4.1-flash")
+    p.add_argument("--cwd", default=os.path.expanduser("~/src/techno-euphora"))
+    p.add_argument("--workspace", default="")
+    p.add_argument("--no-auto-accept", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("-h", "--help", action="store_true")
+    try:
+        a = p.parse_args(argv)
+    except SystemExit:
+        return usage()
+    if a.help:
+        print(__doc__)
+        return 0
+
+    args = ["create", "--title", a.title, "--provider", a.provider, "--model", a.model,
+            "--cwd", a.cwd]
+    if a.prompt:
+        args += ["--prompt", a.prompt]
+    if a.workspace:
+        args += ["--workspace", a.workspace]
+    if not a.no_auto_accept:
+        args += ["--auto-accept"]
+    if a.dry_run:
+        args += ["--dry-run"]
+
+    helper = os.environ.get("PASEO_NEW_SEAT_HELPER") or DEFAULT_HELPER
+    env = dict(os.environ)
+    env["ELECTRON_RUN_AS_NODE"] = "1"
+    env["PASEO_NODE_ENV"] = "production"
+    env["PASEO_NEW_SEAT_CLI_DIST"] = os.environ.get("PASEO_NEW_SEAT_CLI_DIST") or DEFAULT_CLI_DIST
+    try:
+        return subprocess.run([helper, "--disable-warning=DEP0040", str(MJS), *args],
+                              env=env, check=False).returncode
+    except OSError as e:
+        print(f"paseo-new-seat: cannot run {helper}: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
