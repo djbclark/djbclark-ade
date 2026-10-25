@@ -29,7 +29,9 @@ LAUNCH = ROOT / "skills" / "session-finder" / "launch.py"
 DISPATCH = ROOT / "bin" / "acp-dispatch"
 
 FAKE_ACP = """#!/bin/bash
-# fake acp-run: supports --interactive and --session-id
+# fake acp-run: supports --info, --interactive and --session-id
+# Model validation is a read-only handshake: it must not write a turn log or read stdin.
+for arg in "$@"; do [ "$arg" = "--info" ] && exit 0; done
 log=""
 while [ $# -gt 0 ]; do case "$1" in --log) log=$2; shift;; esac; shift; done
 echo '{"t": 1, "kind": "initialize", "data": {"agentCapabilities": {"loadSession": true}}}' >> "$log"
