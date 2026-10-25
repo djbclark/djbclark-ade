@@ -57,11 +57,11 @@ the agent running, exits 1, and the next `up` reports it as claimed instead of s
 whose agent no longer exists is dropped, never trusted. Concurrent runs: a per-domain `flock`; the loser
 prints `claimed`. State: `~/.local/state/watch/` (`<domain>.json`, `watch.log`).
 
-## Optional: run it from launchd (NOT installed; item 13 allows a script, never a model loop)
+## launchd tick (installed 2026-10-25 on this Mac; item 13 allows a script, never a model loop)
 
 `watch up` is cheap when everything is watched (one read per domain, no model, no message). A login plus
-15-minute tick would also restart a watcher after a crash or a reboot. Template, saved as
-`~/Library/LaunchAgents/com.djbclark.watch.plist` only by the operator:
+15-minute tick also restarts a watcher after a crash or a reboot. The job is installed from this
+template as `~/Library/LaunchAgents/com.djbclark.watch.plist`; its first tick exited 0 and launched nothing:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -82,7 +82,7 @@ prints `claimed`. State: `~/.local/state/watch/` (`<domain>.json`, `watch.log`).
 </plist>
 ```
 
-Install (after `mkdir -p ~/.local/state/watch`): `cp <that file> ~/Library/LaunchAgents/com.djbclark.watch.plist &&
+To reinstall elsewhere (after `mkdir -p ~/.local/state/watch`): `cp <that file> ~/Library/LaunchAgents/com.djbclark.watch.plist &&
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.djbclark.watch.plist`; remove with
 `launchctl bootout gui/$(id -u)/com.djbclark.watch`. launchd never overlaps a `StartInterval` job, and the
 per-domain lock covers a manual run racing a tick.
