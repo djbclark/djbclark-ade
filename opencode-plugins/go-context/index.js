@@ -56,31 +56,34 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
     ? policy.routine_context : policy.advisory_context;
 
   async function request(sid, state) {
-    if (!storageReadable || state.pending || (state.attemptAt && now() - state.attemptAt < policy.compact_cooldown_seconds * 1000)) return false;
-    state.pending = true;
-    state.attemptAt = now();
-    state.before = state.total;
+    const cooling = () => state.attemptAt && now() - state.attemptAt < policy.compact_cooldown_seconds * 1000;
+    if (!storageReadable || state.pending || state.blocked || cooling()) return false;
+    // A failed read cannot be an uncertain write. Retry it after the cooldown.
     try {
-      // Persist before a write: a timeout might still have queued compaction.
-      await save();
-    } catch {
-      state.pending = false;
-      state.blocked = true;
-      return false;
-    }
-    try {
-      const response = await ctx.session.get({ sessionID: sid });
+      const response = await ctx.session.get({ sessionID: sid }, { signal: AbortSignal.timeout(10000) });
       const current = response?.data ?? response;
       if (current?.id !== sid || current.model?.providerID !== "opencode-go" || current.model.id !== state.model) {
         states.delete(sid);
         await save().catch(() => {});
         return false;
       }
-      await ctx.session.compact({ sessionID: sid }, { signal: AbortSignal.timeout(10000) });
-      return true; // Accepted, not completed: only compaction.ended resets the floor.
     } catch {
-      // Do not retry an uncertain write automatically. A later native event can
-      // still confirm it; a human/manual request may retry after the cooldown.
+      state.attemptAt = now();
+      await save().catch(() => {});
+      return false;
+    }
+    // Another caller may have completed its lookup while this one awaited it.
+    if (state.pending || state.blocked || cooling()) return false;
+    state.pending = true;
+    state.attemptAt = now();
+    state.before = state.total;
+    try { await save(); }
+    catch { state.pending = false; state.blocked = true; return false; }
+    try {
+      await ctx.session.compact({ sessionID: sid }, { signal: AbortSignal.timeout(10000) });
+      return true; // Acceptance only. Native completion releases pending state.
+    } catch {
+      // An uncertain write requires native completion evidence, never a blind retry.
       state.blocked = true;
       await save().catch(() => {});
       return false;
@@ -162,7 +165,10 @@ export async function createGuard(ctx, policy = loadPolicy(), now = Date.now) {
     if (!SID.test(event.sessionID ?? "") || !states.has(event.sessionID)) return;
     if (!["bash", "shell"].includes(event.tool) || !event.input || typeof event.input.command !== "string") return;
     // Each hook owns this input. Never mutate process.env or infer from cwd.
-    event.input.command = `export ADE_OPENCODE_SESSION_ID='${event.sessionID}';\n${event.input.command}`;
+    const directory = ctx.location?.directory;
+    if (typeof directory !== "string" || !directory.startsWith("/")) return;
+    const quoted = "'" + directory.replaceAll("'", "'\\''") + "'";
+    event.input.command = `export ADE_OPENCODE_DIRECTORY=${quoted}; export ADE_OPENCODE_SESSION_ID='${event.sessionID}';\n${event.input.command}`;
   }
 
   async function manual(sid) {
@@ -182,6 +188,12 @@ export default {
   async setup(ctx) {
     const guard = await createGuard(ctx);
     const registrations = [
+      await ctx.rpc.register({
+        id: "ade.go-context", events: {}, methods: { compact: {
+          input: { type: "object", properties: { sessionID: { type: "string", pattern: "^ses_[A-Za-z0-9]+$" } }, required: ["sessionID"], additionalProperties: false },
+          output: { type: "object", properties: { accepted: { type: "boolean" } }, required: ["accepted"], additionalProperties: false },
+        } },
+      }, { compact: async ({ sessionID }) => ({ accepted: await guard.manual(sessionID) }) }),
       await ctx.session.hook("context", guard.onContext),
       await ctx.tool.hook("execute.before", guard.onTool),
       await ctx.tool.transform((editor) => editor.add({

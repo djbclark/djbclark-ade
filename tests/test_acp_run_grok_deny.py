@@ -152,7 +152,7 @@ PROBE = textwrap.dedent("""\
         old = dict(os.environ)
         os.environ.update({"HERDR_PANE_ID": "w1:p1", "HERDR_ENV": "1", "HERDR_TAB_ID": "w1:t1",
                            "PASEO_AGENT_ID": "agent-1", "PASEO_AGENT_CWD": "/x", "ORCA_TERMINAL_HANDLE": "term-1",
-                           "ADE_OPENCODE_SESSION_ID": "ses_parent",
+                           "ADE_OPENCODE_SESSION_ID": "ses_parent", "ADE_OPENCODE_DIRECTORY": "/parent",
                            **(extra_env or {})})
         try:
             with tempfile.TemporaryDirectory() as d:
@@ -175,7 +175,7 @@ PROBE = textwrap.dedent("""\
                 # Only the names the scrub is about: a Paseo-hosted test run also carries PASEO_CLI and
                 # PASEO_HOME, which acp-run rightly leaves alone (adversary round 2, 2026-10-20).
                 "host_vars": sorted(k for k in ("PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ORCA_TERMINAL_HANDLE",
-                                                "ADE_OPENCODE_SESSION_ID", "ACP_RUN_AGENT") if k in env),
+                                                "ADE_OPENCODE_SESSION_ID", "ADE_OPENCODE_DIRECTORY", "ACP_RUN_AGENT") if k in env),
                 "grok_home": env.get("GROK_HOME"), "zcode_bin": env.get("ZCODE_BIN"),
                 "user_config": [r["data"] for r in rows if r["kind"] == "user_config"]}
 
@@ -383,7 +383,7 @@ class TestGrokDenyAndScrub(unittest.TestCase):
 
     def test_herdr_pane_vars_never_reach_the_agent(self):
         self.assertEqual(self.r["scrub"], ["HERDR_PANE_ID", "HERDR_ENV", "PASEO_AGENT_ID", "PASEO_AGENT_CWD",
-                                           "ORCA_TERMINAL_HANDLE", "ADE_OPENCODE_SESSION_ID"])
+                                           "ORCA_TERMINAL_HANDLE", "ADE_OPENCODE_SESSION_ID", "ADE_OPENCODE_DIRECTORY"])
         for name in ("spawn_grok_deny", "spawn_grok_all", "spawn_codex", "spawn_zcode"):
             with self.subTest(name=name):
                 self.assertNotIn("HERDR_PANE_ID", self.r[name]["herdr"])

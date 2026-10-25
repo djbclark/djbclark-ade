@@ -46,8 +46,9 @@ native loading are separate evidence from offline guard tests.
 
 The custom `ade_compact` tool uses the current native tool context's session ID.
 For a native `bash`/`shell` command the hook also injects a tool-local
-`ADE_OPENCODE_SESSION_ID`, letting `self-slash "/compact"` validate and compact
-that session. JavaScript/codemode tools use `ade_compact`; their source is never
+`ADE_OPENCODE_SESSION_ID` and `ADE_OPENCODE_DIRECTORY`, letting `self-slash "/compact"` validate and compact
+that session through the plugin RPC. Automatic, tool and RPC calls share one
+admission check; an absent plugin fails closed. JavaScript/codemode tools use `ade_compact`; their source is never
 rewritten. ACP launches scrub inherited native scope before creating the child.
 `/new`, `/clear`, `/reset` and Claude-style compact focus text are refused by the
 native path. At a finished-task boundary, write an owned durable handoff; cycle

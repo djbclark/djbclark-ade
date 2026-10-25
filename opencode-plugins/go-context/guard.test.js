@@ -138,11 +138,15 @@ test("native V2 adapter registers real hooks and a session-scoped compact tool",
   f.ctx.tool = { hook: async (name, callback) => { hooks.push([name, callback]); return { dispose() {} }; },
     transform: async (callback) => { callback({ add: (tool) => tools.push(tool) }); return { dispose() {} }; } };
   f.ctx.event = { async *subscribe() {} };
+  let rpc;
+  f.ctx.rpc = { register: async (definition, handlers) => { rpc = { definition, handlers }; return { dispose() {} }; } };
   const cleanup = await plugin.setup(f.ctx);
   assert.deepEqual(hooks.map(([name]) => name), ["context", "execute.before"]);
   assert.equal(tools[0].name, "ade_compact");
   f.models.set("ses_one", { id: "deepseek-v4.1-flash", providerID: "opencode-go" });
   assert.match((await tools[0].execute({}, { sessionID: "ses_one" })).content, /accepted/);
+  assert.deepEqual(await rpc.handlers.compact({ sessionID: "ses_one" }), { accepted: false }, "RPC and tool share pending admission");
+  assert.equal(f.calls.length, 1);
   await cleanup();
 });
 
@@ -160,4 +164,24 @@ test("unreadable prior state and stopped event streams fail closed", async () =>
   g.guard.streamStopped(); await g.step(150000);
   assert.equal(g.calls.length, 0);
   assert.match((await g.context()).system[0].text, /unconfirmed/);
+});
+
+
+test("a failed lookup never becomes an uncertain write or permanent pending state", async () => {
+  const f = await fixture(); await f.context();
+  const original = f.ctx.session.get;
+  f.ctx.session.get = async () => { throw new Error("temporary read failure"); };
+  await f.step(150000);
+  assert.equal(f.calls.length, 0);
+  f.ctx.session.get = original;
+  f.advance(300000); await f.step(160000);
+  assert.equal(f.calls.length, 1);
+});
+
+test("manual calls share automatic cooldown and ineffective-baseline protection", async () => {
+  const f = await fixture(); await f.context(); await f.step(150000); await f.end();
+  assert.equal(await f.guard.manual("ses_one"), false);
+  await f.step(145000); f.advance(300000);
+  assert.equal(await f.guard.manual("ses_one"), false);
+  assert.equal(f.calls.length, 1);
 });

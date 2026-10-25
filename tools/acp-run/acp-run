@@ -482,7 +482,7 @@ HANDSHAKE_TIMEOUT_DEFAULT = 40
 # Removed from the agent's environment on every run (see run()): the caller's herdr pane,
 # Paseo agent and Orca terminal (2026-10-20: a dispatched slice that inherited
 # PASEO_AGENT_ID could /clear or archive the CALLER's agent through self-slash).
-SCRUB_ENV = ("HERDR_PANE_ID", "HERDR_ENV", "PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ORCA_TERMINAL_HANDLE", "ADE_OPENCODE_SESSION_ID")
+SCRUB_ENV = ("HERDR_PANE_ID", "HERDR_ENV", "PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ORCA_TERMINAL_HANDLE", "ADE_OPENCODE_SESSION_ID", "ADE_OPENCODE_DIRECTORY")
 # Set to "1" in every launched agent's environment; bin/self-slash refuses lifecycle actions
 # (/new, /clear, /reset, /compact, /quit, --finish) when it sees it.  Not "ACP_RUN": that
 # name already holds the acp-run path for skills/session-finder/launch.py.
@@ -4240,6 +4240,16 @@ async def run(a, log, err, log_path):
                     usage_exit("--effort/--context: the resumed session offers no config options")
             await apply_config(a, conn, sess, init, client, sets, applied,
                                per_run_data=bool(deny_dir or os.environ.get("ACP_RUN_CRUSH_DATA")))
+            if a.agent == "opencode":
+                # Validate identity after ACP's fuzzy resolver and on resume, before
+                # the first prompt. An alias is not an exact provider/model ID.
+                resolved = applied.get("model")
+                if not resolved or resolved != a.model or "model" in applied.get("unverified", []):
+                    raise ConfigError("OpenCode requires an exact applied provider/model ID; aliases or unverified resumed models are refused")
+                from go_model_policy import refusal
+                why = refusal(resolved, advisory=getattr(a, "go_advisory", False), timeout=a.timeout, perm=a.perm, context=a.context)
+                if why:
+                    raise ConfigError(why)
             if applied:
                 client.rec("applied", applied)
             if a.interactive:

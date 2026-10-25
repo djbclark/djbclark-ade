@@ -95,7 +95,8 @@ def test_bounded_advisor_dry_run_is_allowed_without_inference(tmp_path):
                              "--task", "cost-policy-test", "-p", "offline dry run", "--dry-run",
                              "--no-model-check", "--kind", "judgment", "--role", "advise",
                              "--perm", "read-only", "--timeout", "600",
-                             "--out", str(tmp_path / "jobs")], capture_output=True, text=True,
+                             "--out", str(tmp_path / "jobs"),
+                             "--acp-run", str(ROOT / "tools/acp-run/acp-run")], capture_output=True, text=True,
                             timeout=20, check=False,
                             env={**os.environ, "HOME": str(tmp_path)})
     assert result.returncode == 0, result.stderr

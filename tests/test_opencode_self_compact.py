@@ -20,30 +20,24 @@ loader.exec_module(compact)
 def setup(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("ADE_OPENCODE_SESSION_ID", "ses_abc123")
+    monkeypatch.setenv("ADE_OPENCODE_DIRECTORY", "/repo with spaces")
     calls = []
-
-    def api(*args):
-        calls.append(args)
-        return subprocess.CompletedProcess(args, 0, json.dumps({"data": {
-            "id": "ses_abc123", "model": {"providerID": "opencode-go"},
-        }}) if args[0] == "get" else "", "")
-
-    monkeypatch.setattr(compact, "api", api)
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"output": {"accepted": True}}), "")
+    monkeypatch.setattr(compact, "invoke", run)
     return calls, tmp_path
 
 
-def test_own_acp_session_uses_native_api_and_deduplicates(setup, monkeypatch):
-    calls, home = setup
+def test_own_acp_session_uses_single_plugin_guard_not_a_direct_compact(setup, monkeypatch):
     monkeypatch.setenv("ACP_RUN_AGENT", "1")
     monkeypatch.setenv("PASEO_AGENT_ID", "parent-must-not-be-used")
     assert compact.main([]) == 0
-    assert calls == [("get", "/api/session/ses_abc123"),
-                     ("post", "/api/session/ses_abc123/compact", "--data", "{}")]
-    assert compact.main([]) == 7
-    assert len(calls) == 2
-    state = home / ".local/state/self-slash/opencode_ses_abc123.compact.json"
-    assert json.loads(state.read_text())["outcome"] == "accepted"
-    assert state.stat().st_mode & 0o777 == 0o600
+    call = setup[0][0]
+    assert call[:3] == ["opencode", "api", "post"]
+    assert call[3] == "/api/rpc/ade.go-context/compact?location%5Bdirectory%5D=%2Frepo+with+spaces"
+    assert json.loads(call[5]) == {"input": {"sessionID": "ses_abc123"}}
+    assert len(setup[0]) == 1
 
 
 @pytest.mark.parametrize("scope", ["", "ses_../other", "ses_abc\n", "other"])
@@ -53,72 +47,33 @@ def test_invalid_scope_never_calls_api(setup, monkeypatch, scope):
     assert setup[0] == []
 
 
+@pytest.mark.parametrize("directory", ["", "relative/path"])
+def test_directory_must_also_be_tool_scoped(setup, monkeypatch, directory):
+    monkeypatch.setenv("ADE_OPENCODE_DIRECTORY", directory)
+    assert compact.main([]) == 2
+    assert setup[0] == []
+
+
 def test_dry_run_makes_no_api_call_or_state_write(setup):
-    calls, home = setup
     assert compact.main(["--dry-run"]) == 0
-    assert calls == []
-    assert not (home / ".local/state/self-slash").exists()
+    assert setup[0] == []
+    assert not (setup[1] / ".local/state/self-slash").exists()
 
 
-@pytest.mark.parametrize("info", [
-    {"id": "ses_other", "model": {"providerID": "opencode-go"}},
-    {"id": "ses_abc123", "model": {"providerID": "opencode"}},
-    {"id": "ses_abc123"},
-])
-def test_identity_or_provider_mismatch_never_posts(setup, monkeypatch, info):
+@pytest.mark.parametrize("body", [{"output": {"accepted": False}}, {}, {"output": {}}, {"output": {"accepted": 1}}])
+def test_only_guard_acceptance_counts_as_success(setup, monkeypatch, body):
+    monkeypatch.setattr(compact, "invoke", lambda *a, **kw: subprocess.CompletedProcess(a, 0, json.dumps(body), ""))
+    assert compact.main([]) == 7
+
+
+def test_unavailable_or_uncertain_guard_is_not_retried_in_the_helper(setup, monkeypatch):
     calls = []
-
-    def api(*args):
+    def run(*args, **kwargs):
         calls.append(args)
-        return subprocess.CompletedProcess(args, 0, json.dumps({"data": info}), "")
-
-    monkeypatch.setattr(compact, "api", api)
-    assert compact.main([]) in (2, 11)
-    assert len(calls) == 1 and calls[0][0] == "get"
-
-
-def test_uncertain_write_is_not_retried(setup, monkeypatch):
-    original = compact.api
-
-    def api(*args):
-        if args[0] == "post":
-            raise subprocess.TimeoutExpired("opencode", 15)
-        return original(*args)
-
-    monkeypatch.setattr(compact, "api", api)
+        raise subprocess.TimeoutExpired("opencode", 20)
+    monkeypatch.setattr(compact, "invoke", run)
     assert compact.main([]) == 11
-    assert compact.main([]) == 7
-
-
-@pytest.mark.parametrize("previous", [{}, [], {"attempted_at": True}, {"attempted_at": float("nan")}])
-def test_corrupt_state_does_not_allow_a_duplicate(setup, previous):
-    calls, home = setup
-    state = home / ".local/state/self-slash/opencode_ses_abc123.compact.json"
-    state.parent.mkdir(parents=True)
-    state.write_text(json.dumps(previous))
-    assert compact.main([]) == 7
-    assert calls == []
-
-
-def test_failed_write_keeps_uncertain_state_and_cooldown(setup, monkeypatch):
-    original = compact.api
-
-    def api(*args):
-        if args[0] == "post":
-            return subprocess.CompletedProcess(args, 1, "", "rejected")
-        return original(*args)
-
-    monkeypatch.setattr(compact, "api", api)
-    assert compact.main([]) == 11
-    assert compact.main([]) == 7
-
-
-def test_elapsed_cooldown_allows_another_request(setup, monkeypatch):
-    monkeypatch.setattr(compact.time, "time", lambda: 1000)
-    assert compact.main([]) == 0
-    monkeypatch.setattr(compact.time, "time", lambda: 1300)
-    assert compact.main([]) == 0
-    assert len(setup[0]) == 4
+    assert len(calls) == 1
 
 
 def test_self_slash_routes_before_parent_host_or_acp_guard(setup):

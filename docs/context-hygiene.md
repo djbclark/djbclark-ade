@@ -44,14 +44,16 @@ lifetime token totals and output totals do not measure current context.
 
 The plugin adds the `ade_compact` tool, scoped by the native tool context. Use
 it from JavaScript/codemode; the hook never rewrites JavaScript. It supplies
-`ADE_OPENCODE_SESSION_ID` only for the current native `bash`/`shell` tool call. With that scope, `bin/self-slash "/compact"` verifies
-the exact session and Go provider through the native API, then queues compaction.
-It can compact an ACP slice's own session without targeting its parent. ACP
-launches scrub any inherited native session ID before starting the child. The
-command reports acceptance, not completion; use native compaction events for
-completion evidence. A repeated manual request within five minutes is refused,
-and an uncertain write is recorded before the request so a timeout is not
-blindly retried. `--dry-run` makes no API calls.
+`ADE_OPENCODE_SESSION_ID` only for the current native `bash`/`shell` tool call. With that scope, `bin/self-slash "/compact"` calls the plugin's native RPC in
+its exact location. The RPC and `ade_compact` use the **same** provider/session
+verification, durable pending state, cooldown and ineffective-baseline block as
+automatic compaction. No separate shell cooldown or direct compact endpoint is
+used. ACP launches scrub both inherited session ID and native directory.
+Acceptance is not completion; native compaction events confirm completion.
+An uncertain write is persisted and never blindly retried; a failed lookup is
+only a read failure, eligible for retry after the cooldown. `--dry-run` makes
+no API calls. If the plugin is unavailable, the helper refuses rather than
+falling back to an unguarded compact POST.
 
 Native compaction does not accept the Claude `/compact <focus>` syntax here.
 Save the focus in the checkpoint first. `/new`, `/clear` and `/reset` through
