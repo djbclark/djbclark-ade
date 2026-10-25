@@ -1037,6 +1037,13 @@ def is_slash(text):
 
 
 HERMES_SENDER = re.compile(r"hermes [A-Za-z0-9_-]{1,8}")    # what `hermes_env` sets: "hermes " and the last 8 characters of the session id
+HERMES_LOOKALIKE = re.compile(r"hermes [A-Za-z0-9_-]+", re.I)    # what a reader takes for a Hermes header in any case or length (adversary r2 A4, 2026-10-25)
+
+
+def hermes_forged(label, hops):
+    """True for a label that looks like a Hermes header but is not one this process may send: any case or tail length of `hermes xxxx`, unless it is
+    exactly the shape HERMES_SENDER describes and the relay runs inside a relayed Hermes turn (hops)."""
+    return bool(HERMES_LOOKALIKE.fullmatch(label)) and not (HERMES_SENDER.fullmatch(label) and hops)
 
 
 LABEL_MAX = 160   # a composed sender label: KIND (16) ID (40) aka NAME (40) (DIR (48)), each part clipped first
@@ -1126,7 +1133,7 @@ def sender_name(listed):
     """
     if SENDER_OVERRIDE[0]:
         label = safe_label(SENDER_OVERRIDE[0], LABEL_MAX, composed=True)
-        return "unknown" if HERMES_SENDER.fullmatch(label) and not hermes_hops() else label
+        return "unknown" if hermes_forged(label, hermes_hops()) else label
     if hermes_hops() and HERMES_SENDER.fullmatch(os.environ.get("RELAY_SENDER", "")):
         return os.environ["RELAY_SENDER"]    # a relay made inside a relayed Hermes turn: Hermes, not the original caller; any other name is a forgery
     me = next((x for x in listed if x.get("self")), None) or {}
@@ -1157,12 +1164,12 @@ def env_sender_label() -> str:
     `sender_name` could only ever return "unknown" and its messages arrived as
     `[relay from unknown]` — an anonymous line into a session that cannot tell which of the
     watchers spoke (load-watch, fleet-watch and rumination-watch all looked identical).
-    Set by the job's own plist, which is the same trust position as the job itself. Never a Hermes label (`hermes xxxx`, the shape
-    only a relayed Hermes turn or a Hermes-started relay sends: adversary r1 A7, 2026-10-25), and sanitized through safe_label,
-    so it carries no `:`, `(` or `)`: a declared label cannot spell a live session's `KIND ID (DIR)` header.
+    Set by the job's own plist, which is the same trust position as the job itself. Never a Hermes label (a first word `hermes` in any case, the shape
+    only a relayed Hermes turn or a Hermes-started relay sends: adversary r1 A7, r2 A4, 2026-10-25), and sanitized through safe_label,
+    so it carries no `:`, `(` or `)`: a declared label cannot spell a herdr pane's `KIND ID (DIR)` header (a session-id prefix or Paseo uuid has none of those characters, so a same-uid process can still spell one: adversary r2 A3c, queued).
     """
     label = safe_label((os.environ.get("RELAY_SENDER_NAME") or "").strip())
-    return "unknown" if HERMES_SENDER.fullmatch(label) else label
+    return "unknown" if label.split(" ", 1)[0].lower() == "hermes" else label    # no declared label starts with the word hermes
 
 
 def claude_socket(s):
@@ -1934,7 +1941,7 @@ def label_ok(label, hops):
     """True for a stored sender label this process could itself have produced: only the characters sender_name allows, and
     a `hermes xxxx` label only on a record that carries hops (the Hermes forgery rule; a record is plain JSON)."""
     return (isinstance(label, str) and LABEL_OK.fullmatch(label) is not None
-            and not (HERMES_SENDER.fullmatch(label) and not hops))
+            and not hermes_forged(label, hops))
 
 
 def defer_log(rec, state, why=""):
@@ -2328,7 +2335,7 @@ def defer_send(s, a, text, listed, why):
         ident = sender_paseo or me.get("id") or ""
         hops = hermes_hops()
         label = sender_name(listed)
-        if HERMES_SENDER.fullmatch(label) and not hops:
+        if hermes_forged(label, hops):
             label = "unknown"    # a session merely NAMED like a Hermes relay is not one: the deliverer would refuse the label (and now refuses `unknown` too: exit 4)
         if not ident:
             print(f"relay: [{s['id']}] not sent: that session is busy and cannot take it now; deferring needs an identifiable sender "

@@ -100,6 +100,22 @@ class TestRefusal(fb.Harness):
                 self.assertEqual(rc, relay.NO_SENDER_EXIT)
                 self.assert_nothing_happened()
 
+    def test_a_hermes_lookalike_in_another_case_or_length_is_refused_too(self) -> None:
+        """Adversary r2 A4 (2026-10-25): a reader cannot tell `Hermes abcd1234` or a nine-character tail from a Hermes header."""
+        for label in ("Hermes abcd1234", "HERMES abcd1234", "hermes abcd12345", "hermes", "Hermes abcd1234 x"):
+            with self.subTest(label=label):
+                os.environ["RELAY_SENDER_NAME"] = label
+                self.assertEqual(relay.sender_name([]), "unknown")
+                rc, _, _ = self.run_main(sess(status="idle"))
+                self.assertEqual(rc, relay.NO_SENDER_EXIT)
+                self.assert_nothing_happened()
+
+    def test_only_the_exact_hermes_shape_inside_a_relayed_hermes_turn_is_a_stored_label(self) -> None:
+        for label, hops, ok in (("hermes abcd1234", 1, True), ("hermes abcd1234", 0, False), ("Hermes abcd1234", 1, False),
+                                ("hermes abcd12345", 1, False), ("claude w1p1 aka main x", 0, True)):
+            with self.subTest(label=label, hops=hops):
+                self.assertEqual(relay.label_ok(label, hops), ok)
+
     def test_a_refused_send_touches_no_queued_record_the_sweep_would_have_acted_on(self) -> None:
         """Adversary r1 A8 (2026-10-25): the refusal comes BEFORE the opportunistic sweep, so a relay that is not sent changes nothing."""
         rid = "20261024-120001-aaaaaa"
