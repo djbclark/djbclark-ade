@@ -140,7 +140,10 @@ class RelayPaseo(unittest.TestCase):
         me = fleet._rec(id="cccccccc", agent="claude", name="the caller", sid="cccccccc-0000-4000-8000-000000000003", self=True)
         rc, _out, err = self.main([sess(), me], SID, "ping", "--wait", "1")
         self.assertEqual(rc, 0, err)
-        self.assertEqual(self.sends(), [f"send --no-wait --behavior steer --json -- {AGENT} [relay from the caller] ping"])
+        sends = self.sends()
+        self.assertEqual(len(sends), 1)
+        self.assertTrue(sends[0].startswith(f"send --no-wait --behavior steer --json -- {AGENT} [relay from the caller] ping"), sends)
+        self.assertIn("reply `ack cccccccc` through relay.py", sends[0])    # first contact asks for the ack
         self.assertEqual([e for e in self.envs() if e.startswith("send ")], ["send NOID"])
 
     def test_the_sender_tag_falls_back_to_the_session_id_prefix(self) -> None:

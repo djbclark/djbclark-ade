@@ -1251,6 +1251,42 @@ def ago(ts):
     return f"{sec // 86400}d" if sec >= 86400 else (f"{sec // 3600}h{sec % 3600 // 60:02d}m" if sec >= 3600 else f"{sec // 60}m")
 
 
+# Who has messaged whom, and who ever answered (2026-10-25, queue.md "Verified peer messaging"): relay.py writes
+# the ledger (under its own flock, atomically); fleet only reads it, so a one-way link shows in `fleet.py list`.
+LINKS_FILE = Path(os.environ.get("RELAY_LINKS_FILE") or Path.home() / ".local/state/relay/links.json")
+
+
+def link_key(sender, target):
+    return f"{sender}>{target}"
+
+
+def links_read():
+    """The link ledger as {"links": {"<sender>><target>": {sent, first_sent, last_sent, acked, ...}}}; empty when missing or unreadable.
+    Every field is read with .get: an older record may lack a newer one."""
+    try:
+        d = json.loads(LINKS_FILE.read_text())
+    except (OSError, ValueError):
+        d = None
+    if not isinstance(d, dict) or not isinstance(d.get("links"), dict):
+        return {"links": {}}
+    return d
+
+
+def annotate_links(ss):
+    """Set `link` on every row THIS session (the `self` row) has messaged: {"sent": N, "acked": epoch|None}. A link whose peer
+    never answered with `ack <our id>` is one-way: sent, never proven read."""
+    me = next((s for s in ss if s.get("self")), None)
+    if not me:
+        return ss
+    links = links_read()["links"]
+    for s in ss:
+        ln = links.get(link_key(me["id"], s["id"]))
+        if isinstance(ln, dict):
+            s["link"] = {"sent": int(ln.get("sent") or 0), "acked": ln.get("acked") or None}
+    return ss
+
+
+
 def render(s):
     who = s["agent"] + (f" {s['name']}" if s["name"] else "")
     head = f"[{s['id']}] {who}  {s['status']}  {short(s['cwd'])}"
@@ -1267,6 +1303,10 @@ def render(s):
         lines.append(f"    title: {s['title']}")
     if s["where"]:
         lines.append(f"    where: {s['where']}" + (f"   focus: {s['focus']}" if s["focus"] else ""))
+    if s.get("link"):
+        ln = s["link"]
+        lines.append(f"    link: acked {ago(ln['acked'])} ago" if ln.get("acked") else
+                     f"    link: ONE-WAY, we sent {ln.get('sent', 0)} message(s) and it never answered `ack <our id>` through relay.py: delivered at best, never proven read")
     lines.append(f"    reach: {s['reach']}")
     if s.get("launch") and s["launch"].get("final"):
         lines.append(f"    last: {clip(s['launch']['final'], 200)}")
@@ -1363,6 +1403,7 @@ def main():
         return 0 if items else 1
     ss = sessions(include_shell=a.all or a.cmd == "show", include_archived=a.all)
     warn = messaging_warning()
+    annotate_links(ss)
     if warn:
         print(warn, file=sys.stderr)
     if a.cmd == "show":

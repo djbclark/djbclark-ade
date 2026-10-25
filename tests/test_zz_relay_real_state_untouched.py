@@ -23,3 +23,10 @@ def test_a_freshly_loaded_relay_never_points_at_the_real_queue() -> None:
     spec.loader.exec_module(relay)
     real = conftest.REAL_RELAY_DIR.resolve()
     assert real not in (relay.DEFER_DIR.resolve(), *relay.DEFER_DIR.resolve().parents)
+
+
+def test_the_links_ledger_never_points_at_the_real_state() -> None:
+    sys.path.insert(0, str(SF))
+    import fleet  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+    real = conftest.REAL_RELAY_DIR.resolve()
+    assert real not in (fleet.LINKS_FILE.resolve(), *fleet.LINKS_FILE.resolve().parents)

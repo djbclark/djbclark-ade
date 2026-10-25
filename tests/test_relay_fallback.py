@@ -2628,6 +2628,12 @@ class TestDeferredSend(Harness):
         self.carol = sess(id="ffffffff", name="carol", agent="cline", host="paseo", paseo=CAROL, chan=("paseo", CAROL), status="idle")
         self.rows = [self.target, self.other, self.sender, self.carol]
         relay.fleet.sessions = lambda: [dict(r, self=self.is_self(r)) for r in self.rows]
+        # these tests are about deferral, not first contact: every pair already has a link, so no ack request rides on the text
+        saved_links = relay.fleet.LINKS_FILE
+        relay.fleet.LINKS_FILE = self.tmp / "links.json"
+        self.addCleanup(setattr, relay.fleet, "LINKS_FILE", saved_links)
+        relay.fleet.LINKS_FILE.write_text(json.dumps({"links": {relay.fleet.link_key(a["id"], b["id"]): {"sent": 1, "acked": None}
+                                                                 for a in self.rows for b in self.rows}}))
 
         def inspect(agent: str) -> dict[str, Any]:
             self.inspects.append(agent)
@@ -2719,7 +2725,8 @@ class TestDeferredSend(Harness):
         self.assertEqual(rc, 0, err)    # queued is accepted: a caller that reads exit 0 as "sent" keeps working
         rec = relay.rec_all()[0]
         self.assertTrue(out.startswith(f"queued: {rec['id']} "), out)
-        self.assertEqual((rec["state"], rec["text"], rec["target"]["paseo"], self.sent, self.spawned), ("queued", "hello there friend", AGENT, [], [rec["id"]]))
+        self.assertEqual((rec["state"], rec["target"]["paseo"], self.sent, self.spawned), ("queued", AGENT, [], [rec["id"]]))
+        self.assertTrue(rec["text"].startswith("hello there friend"), rec["text"])    # an identified sender's first message also carries the first-contact ack request
         self.assertEqual((rec["sender"], rec["sender_paseo"], rec["sender_ident"]), ("alice", SENDER, SENDER))
         self.assertEqual(oct(relay.rec_path(rec["id"]).stat().st_mode & 0o777), "0o600")
         self.assertEqual(oct(relay.DEFER_DIR.stat().st_mode & 0o777), "0o700")
