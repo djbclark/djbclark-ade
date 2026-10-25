@@ -11,6 +11,7 @@ agent what changed and what is new. Entries end with the pull request number.
 
 ### Added
 
+- Added a load-watch notice when one Google Chrome process uses 0.9+ cores for 5 minutes (`LW_CHROME_CORES`, `LW_CHROME_SUSTAIN_S`): warns the watcher hourly per process and never kills (2026-10-25).
 - Added `bin/herdr-server-run` and `config/launchd/dev.herdr.server.plist`: the herdr LaunchAgent wrapper that turns "server is already running" after a handoff into a clean exit, so launchd no longer loops (2026-10-25; not yet applied to the live plist).
 - `watch` skill and `bin/watch` (`status`, `up [--dry-run] [--force] [--probe]`, `down`; table `config/watch.toml`): starts one watcher agent per domain (CFEngine PRs, Paseo contributions, load) in its own Paseo workspace, only when nobody live holds the role, with model, effort and context from `route_agent.py plan` and recent event load, per-domain lock and state record, registration verified (exit 1 `not registered`, 3 no eligible route); `paseo-new-seat` gained `--thinking`, `--label` and `--json` (2026-10-25).
 - `paseowatch` skill and `fleet-watch upstream --profile <name>` (site-djbclark; profiles `cfengine`, the unchanged default, and `paseo`): the upstream watcher now runs once per profile with its own state, relay target and ping prefix, reads Discussion threads through GraphQL, and the scheduled tick runs every profile; the `paseo` profile has no worker fallback (a Hermes ping only) (2026-10-25).

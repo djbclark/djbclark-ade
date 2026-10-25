@@ -86,6 +86,9 @@ it never kills, throttles or signals anything. Memory gate (operator 2026-10-23,
 is hot when it exceeds --max-mem-churn (default 60000, calibrated 2026-10-23 from 215 ten-second samples:
 calm tail 11-22k, load 10-25 p50 49k, load >=25 p50 80k and p90 108k pages/s; one session's data, so
 recalibrate with more; the first guess, 20000, sat below the load<10 median of 34k). Load and swap alone did not separate that spike from a calm hour.
+Runaway Chrome (operator 2026-10-25): the sample step tells the watcher (never kills) when one Google Chrome process
+(not "Chrome for Testing") has used LW_CHROME_CORES (0.9) or more for LW_CHROME_SUSTAIN_S (300), once an hour per pid, with its kind, the
+URL on its command line when it has one, and the Task Manager (Shift+Esc) advice.
 Calm boost (operator 2026-10-25): while churn is known and at most --boost-max-churn (default 25000, just above the calm tail)
 the per-core limit is --boost-per-core (default 2.0; 0 turns it off) instead of --max-per-core, even when a caller such as `bg`
 passes 1.5; at higher churn, or when churn cannot be read, the base limit holds. The result and `--json` `max_per_core` are the
@@ -1067,6 +1070,42 @@ def churn_alert(st, t, table, dry):
         cd["churn-watcher"] = t
 
 
+CHROME_CORES = float(os.environ.get("LW_CHROME_CORES", "0.9"))
+CHROME_SUSTAIN_S = float(os.environ.get("LW_CHROME_SUSTAIN_S", "300"))
+CHROME_RE = re.compile(r"/Google Chrome\.app/Contents/")  # not "Google Chrome for Testing" (an agent's puppeteer)
+
+
+def chrome_kind(cmd):
+    m = re.search(r"--type=(\S+)", cmd)
+    return {"renderer": "tab renderer", "gpu-process": "GPU process"}.get(m.group(1), m.group(1)) if m else "browser (main) process"
+
+
+def chrome_alert(st, t, table, dry):
+    """Tell the watcher (hourly per process) when one Chrome process has used CHROME_CORES or more for
+    CHROME_SUSTAIN_S (2026-10-25: the main process sat at 97% for 11 min on one page). Warns only: no incident,
+    nothing is signalled or killed; the advice is the Task Manager (Shift+Esc), a human step."""
+    hot = {pid: (c, cmd) for pid, (_pp, _uid, c, cmd) in table.items() if c >= CHROME_CORES and CHROME_RE.search(cmd)}
+    since = {k: v for k, v in st.get("chrome_hot", {}).items() if k in {str(p) for p in hot}}  # str pids (json)
+    for pid in hot:
+        since.setdefault(str(pid), t)
+    st["chrome_hot"] = since
+    cd = st["cooldown"]
+    for pid, (cores, cmd) in hot.items():
+        key = f"chrome:{pid}"
+        if t - since[str(pid)] < CHROME_SUSTAIN_S or key in cd and t - cd[key] < WATCHER_NOCPU_S:
+            continue
+        url = re.search(r"(https?://\S+)", cmd)
+        body = (f"Chrome {chrome_kind(cmd)} pid {pid} has used ~{cores:.1f} cores for {(t - since[str(pid)]) / 60:.0f}+ min"
+                + (f" (opened {url.group(1)[:80]})" if url else "") + ". Tell djbclark: Chrome Task Manager (Shift+Esc), "
+                "sort by CPU, End process on the busy tab, then reload it. Do not kill it yourself.")
+        if dry:
+            print(f"load-watch: {body}")
+            continue
+        if tell_watcher(body, False) is not None:
+            cd[key] = t
+            log(body)
+
+
 def cmd_sample(a):
     st = load_state()
     t = now()
@@ -1105,6 +1144,10 @@ def cmd_sample(a):
         churn_alert(st, t, table, a.dry_run)
     except Exception as e:  # noqa: BLE001
         log(f"churn alert error: {e!r}")
+    try:
+        chrome_alert(st, t, table, a.dry_run)
+    except Exception as e:  # noqa: BLE001
+        log(f"chrome alert error: {e!r}")
     if a.verbose:
         print(f"load {load1:.1f}/{ncpu} hot={hot} streak={st['streak']}")
     if hot and t - st["hot_since"] >= SUSTAIN_S:
