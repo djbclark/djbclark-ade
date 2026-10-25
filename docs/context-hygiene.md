@@ -36,14 +36,18 @@ must not be presented as OpenCode Go prices or compaction thresholds.
 
 Use OpenCode V2's own compaction API at a safe point, including for an ACP
 session. Do not type Claude slash commands into a presumed parent terminal.
-The Go context plugin and its installation instructions describe the tighter
-provider-specific thresholds. Use current input plus cached reads/writes;
+The [native Go context plugin](../opencode-plugins/go-context/README.md) warns
+at 64k and compacts at 96k plus 32k growth (hard trigger 128k) for routine models;
+costly models warn at 32k, compact at 64k plus growth and hard-trigger at 96k.
+These are local initial policy values, not vendor recommendations. Use current input plus cached reads/writes;
 lifetime token totals and output totals do not measure current context.
 
-The plugin supplies `ADE_OPENCODE_SESSION_ID` only in the environment for the
-current shell tool call. With that scope, `bin/self-slash "/compact"` verifies
+The plugin adds the `ade_compact` tool, scoped by the native tool context. Use
+it from JavaScript/codemode; the hook never rewrites JavaScript. It supplies
+`ADE_OPENCODE_SESSION_ID` only for the current native `bash`/`shell` tool call. With that scope, `bin/self-slash "/compact"` verifies
 the exact session and Go provider through the native API, then queues compaction.
-It can compact an ACP slice's own session without targeting its parent. The
+It can compact an ACP slice's own session without targeting its parent. ACP
+launches scrub any inherited native session ID before starting the child. The
 command reports acceptance, not completion; use native compaction events for
 completion evidence. A repeated manual request within five minutes is refused,
 and an uncertain write is recorded before the request so a timeout is not

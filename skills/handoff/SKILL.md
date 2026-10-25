@@ -363,3 +363,10 @@ gap or lock clears, which does both).
 the operator says "doc only" or otherwise asks for the document without a restart, or when you are a
 sub-agent or a dispatched slice (above). `loose` Rule 4 option 1 wants this step to run: it does not
 make a handoff document-only. Say in the report that Step 9 was skipped and why.
+
+OpenCode V2 Go sessions use the native `ade_compact` tool for manual compaction
+from codemode/JavaScript. A tool-scoped `ADE_OPENCODE_SESSION_ID` also supports
+`self-slash "/compact"` from native shell calls. These paths compact only the
+verified current session; they do not implement a new-session/baton successor.
+See `docs/context-hygiene.md`. Write the checkpoint first and require the normal
+host identity/acknowledgment checks for a lifecycle cycle.

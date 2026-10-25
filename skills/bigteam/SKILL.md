@@ -188,7 +188,8 @@ a fan-out needs from it:
    --effort high` for code, `claude-sonnet-5-5` for volume), Cursor Auto
    (`cursor --model default`), zai (`zcode --model GLM-5.3 --effort high`;
    `GLM-5.3-Flash --effort low` for bulk), opencode-go (`opencode --model
-   opencode-go/glm-5.3`), agy Gemini (`agy --model gemini-3.8-flash --effort
+   opencode-go/deepseek-v4.1-flash`; MiniMax M3 for bulk, Luna for mechanical work;
+   costly Go models are bounded advisors per `model-routing`), agy Gemini (`agy --model gemini-3.8-flash --effort
    medium`) for bulk and big-context reads, crush (`sipb-llms:qwen3.6:35b-a3b-q4_K_M`,
    free) for light bulk. Claude's own Sonnet/Haiku only as small Agent-tool
    sub-agents (they bill the orchestrator's pool).
@@ -1003,3 +1004,5 @@ orchestrator compacts earlier at a wave boundary with `self-slash "/compact
 asking.
 
 **Provider-specific context controls (2026-10-25).** Read [context hygiene](../../docs/context-hygiene.md) before a long Go slice. Cached input still debits the shared monthly allowance; neither the model context capacity nor a small uncached input count is a cost budget. OpenCode V2 uses native safe-point compaction and current input plus cache tokens. At a completed task, write the owned handoff and Tier 1 checkpoint before a supported fresh-session/baton cycle; a dispatched slice never clears its parent.
+
+**Bound source inspection before printing (2026-10-25).** Generated SDK declarations can repeat schemas over megabytes. Select a known symbol and cap its byte span before iterating or printing; use at most 2,000 characters per excerpt. A missing end delimiter is a failed lookup, never permission to print the rest of a file. Save bulky evidence privately and return only the fields needed for the decision.

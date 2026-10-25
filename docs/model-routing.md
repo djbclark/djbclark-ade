@@ -140,7 +140,7 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 | `grok` | `grok` (v1.0.5; ralph-tui-grok-plugin exists) | SuperGrok | monthly sub | usage limit |
 | `zai` | `zcode` TUI (Z.ai's own, v0.16.9; `zcode -p`; GLM-5.3 / GLM-5.3-Flash × low/high/max; not in Orca's roster or herdr's agent kinds) | lite | monthly sub | 5h + weekly |
 | `clinepass` | Cline TUI (Orca agent `cline`) + LiteLLM proxy `localhost:4000` (`clinepass-deepseek`, `clinepass-minimax-m3`, `clinepass-kimi-k3`) consumed by Hindsight + hermes | Cline API key | subscription windows | 5h + weekly + monthly |
-| `opencode-go` | `opencode` bundled free tier (`opencode-go/*`: kimi-k3, minimax-m3, qwen3.x, mimo, ox-alpha-free…); `opencode-ralph-tui` wrapper | go (free) | free | 5h + weekly + monthly |
+| `opencode-go` | `opencode` Go Plus (`opencode-go/*`); routine MiniMax M3, DeepSeek V4.1 Flash, GPT-6 Luna | $40/month | subscription shared allowance | 5h + weekly + monthly |
 | `opencode-zen` | `opencode` provider `opencode` (`opencode/*`: claude, gpt, gemini, deepseek, glm catalogs) via gated `opencode-ralph-tui-zen` | prepaid | **prepaid balance** | balance |
 | `openrouter` | gated `opencode-ralph-tui-openrouter` | prepaid | **prepaid balance** | balance |
 | `deepseek` | gated `opencode-ralph-tui-deepseek` | prepaid | **prepaid balance** | balance |
@@ -150,7 +150,7 @@ where quota is going to waste. Mapping, verified 2026-08-23:
 | (not in aiuse) | `opencode` provider `sipb` — MIT SIPB-hosted models (ollama-style: qwen3-coder:30b, deepseek-r1:32b, gemma…). **For agent/coding use, only `qwen3.6:35b-a3b-q4_K_M` runs tasks reliably** — deepseek-r1:32b fabricates success, qwq:32b truncates every agent-sized stream, exaone-deep:32b/gemma3:27b return the over-long `null`; see forgejo.mit.edu/djbclark/sipb-llms `report/REPORT.md` §3.1 | MIT affiliation | free | none |
 
 Monthly-subscription pools: claude, codex, antigravity, copilot, cursor,
-grok, zai, clinepass (window-shaped), devin. Free: opencode-go, sipb.
+grok, zai, clinepass (window-shaped), devin, opencode-go. Free: sipb.
 Prepaid real money: opencode-zen, openrouter, deepseek — all three
 **effectively empty on 2026-08-23** (Zen -$0.04, DeepSeek $0.00,
 OpenRouter $1.13), and gated anyway by the wrapper scripts, which require
@@ -370,9 +370,10 @@ Exact ids, levels and sizes: `tools/acp-run/README.md`, section "Per-agent choic
   unrelated to acp-run. Detail is the levers section above and
   `tools/acp-run/README.md`. Headless `zcode -p` stays as the fallback and
   runs GLM-5.3 at max.
-- **opencode-go free models** (kimi-k3, minimax-m3, qwen3.x) — zero-cost
-  experimental fan-out and ralph-tui default via the ungated wrapper;
-  burn freely.
+- **OpenCode Go Plus** — shared paid subscription allowance. Routine Flash,
+  MiniMax and Luna models only for execution; costly models require bounded
+  read-only advice. See `config/go-model-policy.json` and the cost guard in
+  `skills/model-routing/SKILL.md` (2026-10-25).
 - **sipb (MIT)** — free, no-cost, non-Big-Tech option for light tasks and
   experiments where a 30B-class local model suffices.
 - **ClinePass via LiteLLM** — reserved plumbing for Hindsight/hermes;
@@ -521,3 +522,22 @@ memory is updated under a flock.
 - Bailian is awaiting ID verification, expected live ~2026-08-26.
 - Prepaid tier retired until an explicit top-up.
 - MIT Claude account is gone forever; removed from cswap 2026-08-23.
+
+## OpenCode Go cost policy — 2026-10-25
+
+The October audit found real work plus expensive-model and large-context burn;
+Go is not free. Routing now chooses MiniMax M3 / GPT-6 Luna / DeepSeek V4.1 Flash
+for bulk / mechanical / code. Grok 4.7, Kimi K3/K2.7 Code, GLM 5.3 and DeepSeek
+V4 Pro are bounded advisors; the complete reviewed classification is
+`config/go-model-policy.json`. No costly main-loop escalation is emitted by
+`route_agent.py substrate`. `acp-dispatch` and direct `acp-run` refuse costly
+execution, unclassified Go models, and advisory runs without read-only scope
+and a positive deadline of at most 600 seconds. Dispatch advice also needs
+`--role advise --kind judgment|research|frontier`; direct ACP needs
+`--go-advisory`. Raw native UI/model selection bypasses the ACP gate, so this
+is a local orchestration policy, not a provider billing cap.
+
+Use a short self-contained brief; OpenCode ACP does not expose a smaller context
+window. The Go plugin warns/compacts well before model capacity, counts cached
+input and stops compaction loops. See [context hygiene](context-hygiene.md).
+Historic free-tier snapshots above do not authorize free fan-out today.

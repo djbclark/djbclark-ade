@@ -482,7 +482,7 @@ HANDSHAKE_TIMEOUT_DEFAULT = 40
 # Removed from the agent's environment on every run (see run()): the caller's herdr pane,
 # Paseo agent and Orca terminal (2026-10-20: a dispatched slice that inherited
 # PASEO_AGENT_ID could /clear or archive the CALLER's agent through self-slash).
-SCRUB_ENV = ("HERDR_PANE_ID", "HERDR_ENV", "PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ORCA_TERMINAL_HANDLE")
+SCRUB_ENV = ("HERDR_PANE_ID", "HERDR_ENV", "PASEO_AGENT_ID", "PASEO_AGENT_CWD", "ORCA_TERMINAL_HANDLE", "ADE_OPENCODE_SESSION_ID")
 # Set to "1" in every launched agent's environment; bin/self-slash refuses lifecycle actions
 # (/new, /clear, /reset, /compact, /quit, --finish) when it sees it.  Not "ACP_RUN": that
 # name already holds the acp-run path for skills/session-finder/launch.py.
@@ -4663,6 +4663,8 @@ def main():
         help="reopen this ACP session (session/load or session/resume) instead"
         " of starting a new one",
     )
+    ap.add_argument("--go-advisory", action="store_true",
+                    help="explicit bounded read-only OpenCode Go advice; requires --perm read-only and --timeout <=600")
     a = ap.parse_args()
     bad = [k for k in a.tripwire_exempt_kinds.split(',') if k and k not in TRIPWIRE_EXEMPTABLE]
     if bad:
@@ -4707,6 +4709,25 @@ def main():
         ap.error("--inbox and --show-thinking need --interactive")
     if a.all_models and not a.info:
         ap.error("--all-models needs --info")
+    if a.agent == "opencode" and not a.info:
+        if not a.model or "/" not in a.model:
+            ap.error("opencode prompt runs require --model provider/model so the Go cost policy can be checked")
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "bin"))
+        import go_model_policy
+        why = go_model_policy.refusal(a.model, advisory=a.go_advisory, timeout=a.timeout,
+                                      perm=a.perm, context=a.context)
+        if why:
+            ap.error(why)
+        if go_model_policy.classification(a.model) is not None:
+            if any(str(value).split("=", 1)[0].lower() in ("model", "modelid", "model_id", "provider", "providerid") for value in a.set):
+                ap.error("Go model selection must use --model, not --set")
+            if a.go_advisory and a.interactive:
+                ap.error("Go advisory runs are single-turn; --interactive is refused")
+            if go_model_policy.classification(a.model) == "advisory":
+                if a.verify is not None or a.prompt_retries:
+                    ap.error("Go advisory use cannot run --verify or prompt retries")
+                a.wrapup_grace = 0
+                a.wrapup = None
     check_static(a)
     if a.prompt_retries < 0:
         ap.error("--prompt-retries must be 0 or more")
