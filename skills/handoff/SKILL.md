@@ -127,7 +127,7 @@ with:
 
 Durable machine facts belong in the curated layer, not a handoff: an
 operator-verified fact goes to `docs/` or the relevant skill; model-mined
-leads used to land in `~/basic-memory/mined/` via `~/ops/site-djbclark/bin/mine_sessions.py`. That folder is gone (checked 2026-10-24) and nothing writes to it, so the lead has no home yet. A
+leads used to land in `~/basic-memory/mined/` via `~/ops/site-djbclark/bin/mine_sessions.py`. That folder was moved to `~/ops/site-private/memory/basic-memory/mined/` (frozen since 2026-08-24, to be archived per queue ruling 5); nothing writes to it now, so the lead has no home yet. A
 handoff that carries them becomes a second canon that nobody updates.
 
 ## Step 4 — Write the file
@@ -155,8 +155,8 @@ the ops-djbclark suite or `<repo-root>/docs/handoffs/` otherwise (slug:
     ## The Goal
     ## Where We Are
     ## What We Tried            <- failed approaches, chronological, with why
-    ## Key Decisions            <- chosen AND rejected
-    ## Decisions               <- indexed observations, one per line (syntax below)
+    ## Key Decisions            <- chosen AND rejected, as prose
+    ## Decisions               <- the same decisions in indexed form, one per line (syntax below)
     ## Relations                <- indexed relations, one per line (syntax below)
     ## Evidence & Data          <- real numbers, file paths
     ## Operator Feedback
@@ -170,13 +170,17 @@ exactly this syntax (checked 2026-10-24 against Basic Memory's observation and
 relation format):
 - `- [decision] <choice>; rejected: <alternative>; because <reason>`
 - `- [ruling] <what djbclark said, quoted> (djbclark, YYYY-MM-DD)`
-- `- part_of [[<repo>]]`
-- `- continues [[<previous handoff title>]]`
-- `- decided_in [[<PR or handoff title>]]`
+- `- continues [[<previous handoff's file stem, HANDOFF_..._<id>>]]` (a handoff resolves by its file stem,
+  never by its `# Handoff — <title>` heading)
+- `- decided_in [[<file stem of the handoff that made the decision>]]`; a PR is no note, so give it as a Markdown
+  link inside the observation: `- [decision] <choice>; rejected: <alternative>; because <reason>
+  ([PR N](https://github.com/OWNER/REPO/pull/N))`
+- no `part_of [[<repo>]]`: no repo notes exist in the store, so it would never resolve (create the repo note first
+  if you want that relation)
 
 A `[ruling]` is only for something djbclark said, quoted and dated, never for
 your own choice. An agent's own design choice is a `[decision]` with a
-`decided_in` relation to the handoff or PR that made it.
+`decided_in` relation to the handoff that made it, or a PR link as above.
 
 Each `## Detached jobs` entry gives: the job file (`.../jobs/<name>.json`), the
 report path, the `.done` path (and whether it exists now), the exact `rearm`
