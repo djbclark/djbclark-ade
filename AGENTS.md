@@ -27,6 +27,7 @@ Each doc carries its own summary.
 | [docs/orca-integration.md](docs/orca-integration.md) | macro-graph commands, live-run lessons; `orca skills get orchestration` is authoritative |
 | [docs/queue.md](docs/queue.md) | queued work and blockers: check it before proposing new work |
 | [docs/threat-model.md](docs/threat-model.md) | threat model (2026-10-20): assets, actors, entry points, ranked threats; read by Codex's security review |
+| [docs/git-guard.md](docs/git-guard.md) | `bin/ade-git-guard` and the claim registry (2026-10-24): commands, exit codes 0/2/77, claim lifecycle, refusal rules, override, integration status |
 | [docs/ai-memory-landscape.md](docs/ai-memory-landscape.md) | the six levels of AI memory and their status |
 | [docs/coding-factory.md](docs/coding-factory.md) | unattended issue→PR→auto-merge (2026-09-21) |
 | [docs/agent-sleep.md](docs/agent-sleep.md) | idle-agent sleep; run `bin/herdr-sleeper list` before calling a pane dead |

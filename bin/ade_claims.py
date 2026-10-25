@@ -52,8 +52,9 @@ staged), long options match by any unique prefix, config is the call's own order
 relative to the cwd after every -C:
   1. A workspace with an ACTIVE claim that is not mine: git is read-only (READONLY set plus the read forms of
      branch/config/worktree/remote/tag/stash/reflog/submodule/symbolic-ref/fetch). A "read-only" command that
-     writes a file (`--output`, format-patch -o, archive -o, grep -O) or a local branch (`fetch --update-head-ok`,
-     `fetch . +a:b`, `symbolic-ref -d|--delete`) is not read-only there.
+     writes a file (`--output` also of `stash show|list`, format-patch -o, archive -o, grep -O) or a local branch
+     (`fetch --update-head-ok`, `fetch . +a:b`, a fetch whose configured `remote.<name>.fetch` or `--stdin` writes
+     a local branch, `symbolic-ref -d|--delete`) is not read-only there.
   2. A workspace with no active claim (shared or primary checkout): refuse stash (except list/show),
      reset --hard|--merge|--keep, checkout -f|-p|--pathspec-from-file|--|<path>|<2+ args>, restore unless
      --staged is in force and --worktree is not, switch -f|--discard-changes, clean unless -n (also -i), rm -f
@@ -61,8 +62,8 @@ relative to the cwd after every -C:
      rebase|merge with autostash in force (--autostash/--no-autostash, else rebase.autoStash for a rebase or a
      pull that rebases, merge.autoStash for a merge or a pull that merges), rebase -x, `!` aliases and an
      alias chain deeper than MAX_ALIAS_DEPTH. An output file over a dirty (modified or untracked) file of a
-     shared checkout is refused. Not covered (plumbing and wildcard staging stay the operator's call):
-     checkout-index, read-tree, mv -f, `add '*'`.
+     shared checkout is refused. Not covered (plumbing, object-store maintenance and wildcard staging stay the operator's call):
+     checkout-index, update-index, read-tree, fast-import, gc/prune/repack, tag -f|-d, notes, replace, mv -f, `add '*'`.
   3. A linked worktree, even its own claimed owner's: stash, rebase -x and `!` aliases are refused (refs/stash
      is shared with the other worktrees); everything else the owner does there is allowed.
   4. push: refused when a destination branch has an active claim that is not mine (any workspace). Destinations
@@ -75,9 +76,15 @@ relative to the cwd after every -C:
      its output is incomplete (no closing `Done`, a malformed ref line). A claim matches a URL by normalised origin (scheme default ports and
      ssh.github.com:443 are verified aliases; any other host/port spelling is a different repository).
   5. The TARGET counts, not only the cwd: `worktree remove|move|prune` (selectors resolved against git's
-     registered worktree list, unique-suffix form included), `branch -d|-D|-m|-f`, `update-ref` (named ref; with
-     --stdin refused while another agent holds a claim in the repository) and an output file (its own symlink
-     resolved first) are checked against the claim of the workspace they hit; the git dir and work tree the call
+     registered worktree list, unique-suffix form included), `branch -d|-D|-m|-M|-f` (every name) and `-c|-C|--copy`
+     (the destination), `checkout -B`, `switch -C|--force-create`, `worktree add -B` (the branch they reset),
+     `update-ref` (named ref; with --stdin refused while another agent holds a claim in the repository), `fetch`/
+     `pull`/`remote update` (destinations of the command line's refspecs AND of the remote's configured
+     `remote.<name>.fetch`, asked of git under the call's own options; `--stdin`, `--refmap`, `-u` or a git that
+     cannot answer count as any local branch, refused while another agent holds a claim in the repository) and an
+     output file (`--output`, `stash show|list --output`, `bundle create FILE`, `fast-export|fast-import
+     --export-marks`, `config --file` when it writes; its own symlink resolved first) are checked against the claim
+     of the workspace they hit; the git dir and work tree the call
      lands on are asked of git itself (`rev-parse --absolute-git-dir --show-toplevel` under the call's own -C, -c,
      --git-dir, --work-tree and environment: GIT_WORK_TREE, core.worktree and their quoting are git's to read; only
      what git reads is honored, so core.worktree from `-c` or an include is ignored exactly as git ignores it);
@@ -904,17 +911,29 @@ D_WRITE_BRANCH = {"delete", "move", "copy", "set-upstream-to", "unset-upstream",
 
 def output_targets(call: GitCall) -> Optional[list[str]]:
     """None when the call writes no file of its own choosing; else the file/dir paths it writes (may be
-    empty when the path cannot be read from the arguments). `git log --output=f` truncates f."""
+    empty when the path cannot be read from the arguments). `git log --output=f` truncates f. Besides the
+    diff/log family: `stash show|list` (they forward diff/log options), `bundle create FILE`,
+    `fast-export|fast-import --export-marks=F` and a `config` that writes with `--file F`."""
     sub, args = call.sub, call.args
     short = ""
     if sub in ("diff", "log", "show", "whatchanged", "diff-tree", "diff-index", "diff-files", "range-diff", "shortlog"):
         long_name = "output"
+    elif sub == "stash" and args and args[0] in ("show", "list"):
+        long_name, args = "output", args[1:]
     elif sub == "format-patch":
         long_name, short = "output-directory", "o"
     elif sub == "archive":
         long_name, short = "output", "o"
     elif sub == "grep":
         long_name, short = "open-files-in-pager", "O"
+    elif sub in ("fast-export", "fast-import"):
+        long_name = "export-marks"
+    elif sub == "config" and not is_readonly(call):
+        long_name, short = "file", "f"
+    elif sub == "bundle" and args and args[0] == "create":
+        s = scan(args[1:], value_long={"version"})
+        first = (s.pos + s.after)[:1]
+        return [first[0]] if first and first[0] != "-" else []
     else:
         return None
     found: Optional[list[str]] = None
@@ -943,22 +962,82 @@ def output_targets(call: GitCall) -> Optional[list[str]]:
 
 
 _FETCH_SAFE_DST = ("refs/remotes/", "refs/tags/")
+_FETCH_VALUE_LONG = {"depth", "deepen", "shallow-since", "shallow-exclude", "upload-pack", "server-option",
+                     "negotiation-tip", "refmap", "jobs", "filter", "submodule-prefix", "recurse-submodules-default",
+                     "set-upstream"}
+
+
+def _config_lines(call: GitCall, *argv: str) -> Optional[list[str]]:
+    """`git config ARGV` under the call's own options and config: its lines, [] when the key is unset (exit 1),
+    None when git could not answer (fail closed)."""
+    rc, out = _call_git(call, "config", *argv)
+    if rc == 0:
+        return [x for x in out.splitlines() if x]
+    return [] if rc == 1 else None
+
+
+def _fetch_remotes(call: GitCall, names: list[str], every: bool) -> Optional[list[str]]:
+    """The remotes a fetch-like call reads mappings from: all of them (`--all`, `remote update`), else the named
+    ones (a `remotes.<group>` is expanded), else branch.<current>.remote, else origin, as `git fetch` picks."""
+    if every:
+        rc, out = _call_git(call, "remote")
+        return out.split() if rc == 0 else None
+    if not names:
+        rc, head = _call_git(call, "symbolic-ref", "-q", "--short", "HEAD")
+        cur = _config_lines(call, "--get", f"branch.{head.strip()}.remote") if rc == 0 and head.strip() else []
+        if cur is None:
+            return None
+        return [cur[-1] if cur else "origin"]
+    out: list[str] = []
+    for nm in names:
+        grp = _config_lines(call, "--get-all", f"remotes.{nm}")
+        if grp is None:
+            return None
+        out += [m for line in grp for m in line.split()] if grp else [nm]
+    return out
 
 
 def fetch_local_dsts(call: GitCall) -> Optional[list[str]]:
-    """The destinations a `fetch` writes outside refs/remotes/ and refs/tags/ (`origin +main:wbr` -> `wbr`,
-    `. +x:refs/heads/y` -> `refs/heads/y`; a `-c remote.<n>.fetch` mapping counts), or None when the call may
-    update ANY local branch (`--update-head-ok`/-u also lets it overwrite the checked-out branch, `--refmap`).
-    [] means it only updates remote-tracking refs and tags."""
-    s = scan(call.args, value_short="oj", value_long={"depth", "deepen", "shallow-since", "shallow-exclude", "upload-pack",
-                                                     "server-option", "negotiation-tip", "refmap", "jobs", "filter",
-                                                     "submodule-prefix", "recurse-submodules-default", "set-upstream"},
-             danger={"update-head-ok", "refmap"})
-    if s.shorts & {"u"} or s.longs & {"update-head-ok", "refmap"}:
+    """The destinations a `fetch` (or `pull`, or `remote update`) writes outside refs/remotes/ and refs/tags/
+    (`origin +main:wbr` -> `wbr`, `. +x:refs/heads/y` -> `refs/heads/y`), counting the mappings git itself will
+    apply: the command line's refspecs AND the remote's configured `remote.<name>.fetch` (a plain `fetch origin`
+    applies them, and so does `fetch origin main`, opportunistically), read from git under the call's own -C/-c/
+    --git-dir/environment. None when the call may update ANY local branch or cannot be read: `--update-head-ok`/-u,
+    `--refmap`, `--stdin` (refspecs on stdin are not inspected), or git could not answer. [] means it only updates
+    remote-tracking refs and tags. The answer is cached on the call."""
+    if "_fetch_dsts" not in call.__dict__:
+        call.__dict__["_fetch_dsts"] = _fetch_local_dsts(call)
+    return call.__dict__["_fetch_dsts"]
+
+
+def fetch_reads_stdin(call: GitCall) -> bool:
+    """Whether a `fetch` takes its refspecs from stdin (`--stdin`, or any abbreviation that may stand for it)."""
+    if call.sub != "fetch":
+        return False
+    return bool(scan(call.args, value_short="oj", value_long=_FETCH_VALUE_LONG, danger={"stdin"}).longs & {"stdin"})
+
+
+def _fetch_local_dsts(call: GitCall) -> Optional[list[str]]:
+    sub, args = call.sub, call.args
+    if sub == "remote":
+        args = args[1:]                                  # `remote update [-p] [group|remote...]`
+    pull = sub == "pull"
+    s = scan(args, value_short="ojsX" if pull else "oj", value_long=_FETCH_VALUE_LONG | ({"strategy", "strategy-option"} if pull else set()),
+             danger={"update-head-ok", "refmap", "stdin"}, table={"all", "multiple"})
+    if s.shorts & {"u"} or s.longs & {"update-head-ok", "refmap", "stdin"}:
         return None
     pos = s.pos + s.after
-    specs = [] if s.longs & {"all", "multiple"} else pos[1:]
-    specs += [v for k, v in call.config if k.startswith("remote.") and k.endswith(".fetch")]
+    every = sub == "remote" and not pos or bool(s.longs & {"all"})
+    multiple = sub == "remote" or bool(s.longs & {"multiple"})
+    remotes = _fetch_remotes(call, pos if multiple else pos[:1], every)
+    if remotes is None:
+        return None
+    specs = [] if multiple else pos[1:]
+    for r in remotes:
+        conf = _config_lines(call, "--get-all", f"remote.{r}.fetch")
+        if conf is None:
+            return None
+        specs += conf
     out: list[str] = []
     for p in specs:
         if ":" in p:
@@ -1013,7 +1092,7 @@ def is_readonly(call: GitCall) -> bool:
             return False
         return not s.pos or bool(s.shorts & set("ln") or s.longs & ls)
     if sub == "stash":
-        return bool(args) and args[0] in ("list", "show")
+        return bool(args) and args[0] in ("list", "show") and output_targets(call) is None
     if sub == "reflog":
         return not args or args[0] not in ("expire", "delete")
     if sub == "submodule":
@@ -1462,6 +1541,36 @@ def _output_decision(call: GitCall, out: str, ident: Optional[str]) -> Optional[
     return None
 
 
+def _opt_values(args: Sequence[str], shorts: str = "", longs: Iterable[str] = ()) -> list[str]:
+    """The values given to the short options in `shorts` (`-B x`, `-Bx`, inside a cluster) and to the long options
+    in `longs` (`--name=x`, `--name x`, any unique-or-not prefix: fail closed), up to a bare `--`."""
+    out: list[str] = []
+    i, n = 0, len(args)
+    while i < n:
+        a = args[i]
+        if a == "--":
+            break
+        if a.startswith("--"):
+            name, eq, v = a[2:].partition("=")
+            if name and any(x.startswith(name) for x in longs):
+                if eq:
+                    out.append(v)
+                elif i + 1 < n:
+                    out.append(args[i + 1])
+                    i += 1
+        elif a.startswith("-") and len(a) > 1:
+            for j, ch in enumerate(a[1:], 1):
+                if ch in shorts:
+                    if a[j + 1:]:
+                        out.append(a[j + 1:])
+                    elif i + 1 < n:
+                        out.append(args[i + 1])
+                        i += 1
+                    break
+        i += 1
+    return out
+
+
 def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optional[str]) -> Optional[Decision]:
     """Rule 5: the claim of what the call HITS, not of where it runs."""
     sub, args = call.sub, call.args
@@ -1488,7 +1597,11 @@ def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optio
     if sub == "branch":
         s = scan(args, value_long={"contains", "no-contains", "merged", "no-merged", "points-at", "format", "sort",
                                    "abbrev"}, danger=D_WRITE_BRANCH)
-        if s.shorts & set("dDmMf") or s.longs & {"delete", "move", "force"}:
+        if s.shorts & set("dDmM") or s.longs & {"delete", "move"}:
+            names = [p for p in s.pos]                    # the old name goes away and the new one is overwritten
+        elif s.shorts & set("cC") or s.longs & {"copy"}:
+            names = s.pos[-1:]                            # a copy only writes its destination (`-c SRC DST`, `-c DST`)
+        elif s.shorts & {"f"} or s.longs & {"force"}:
             names = [p for p in s.pos]
     elif sub == "update-ref":
         s = scan(args, value_short="m", value_long={"stdin"}, danger={"stdin"})
@@ -1500,14 +1613,21 @@ def _target_decision(call: GitCall, wss: list[Optional[Workspace]], ident: Optio
                                 "a ref transaction on stdin cannot be inspected, and another agent's branch is claimed")
         elif s.pos and s.pos[0].startswith("refs/heads/"):
             names = [s.pos[0][len("refs/heads/"):]]
-    elif sub == "fetch":
+    elif sub in ("checkout", "switch"):
+        names = _opt_values(args, "B" if sub == "checkout" else "C", ("force-create",) if sub == "switch" else ())
+    elif sub == "worktree" and args and args[0] == "add":
+        names = _opt_values(args[1:], "B")
+    elif sub in ("fetch", "pull") or (sub == "remote" and args[:1] == ["update"]):
         dsts = fetch_local_dsts(call)
+        stdin = fetch_reads_stdin(call)
         if dsts is None or any("*" in d for d in dsts):
             c = _foreign_claim_in_repo(ws0, ident)       # may update any local branch: judged as a whole
             if c is not None:
-                return _foreign(c, "fetch into local branches with claims in this repository",
+                what = "fetch --stdin" if stdin else call.display().removeprefix("git ")
+                return _foreign(c, f"{what} into local branches with claims in this repository",
                                 "plain `git fetch <remote>` updates only remote-tracking refs; never force a fetch "
-                                "into a local branch while another agent holds a claim here")
+                                "into a local branch (a refspec on the command line, in remote.<name>.fetch or on stdin) "
+                                "while another agent holds a claim here")
         names = [d[len("refs/heads/"):] if d.startswith("refs/heads/") else d for d in dsts or [] if "*" not in d]
     if names and ws0 is not None:
         origin = _git_out(ws0.root, "config", "--get", "remote.origin.url")

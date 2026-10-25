@@ -1413,22 +1413,14 @@ def test_ref_transactions_and_forced_fetch_cannot_move_a_claimed_branch(tmp_path
     assert r.returncode != 77 and "REFUSED" not in r.stderr
 
 
-def test_symbolic_ref_delete_and_updating_fetch_are_not_read_only():
-    ro = lambda argv: ade_claims.is_readonly(ade_claims.parse_git_argv(argv, "/tmp", {}))   # noqa: E731
+def test_symbolic_ref_delete_and_updating_fetch_are_not_read_only(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    ro = lambda argv: ade_claims.is_readonly(ade_claims.parse_git_argv(argv, str(repo), {}))   # noqa: E731
     assert not ro(["symbolic-ref", "--delete", "HEAD"]) and not ro(["symbolic-ref", "--del", "refs/x"])
     assert ro(["symbolic-ref", "HEAD"]) and ro(["symbolic-ref", "--short", "HEAD"])
     assert not ro(["fetch", "-u"]) and not ro(["fetch", "--update-head-ok"]) and not ro(["fetch", "origin", "+a:b"])
-    assert not ro(["fetch", "--refm=x", "origin"])
+    assert not ro(["fetch", "--refm=x", "origin"]) and not ro(["fetch", "--stdin", "origin"])
     assert ro(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"]) and ro(["fetch", "--all"]) and ro(["fetch", "origin", "main"])
-
-
-def test_plain_fetch_stays_on_the_fast_path_and_a_refspec_fetch_does_not(tmp_path, state):
-    repo = mk_repo(tmp_path, state)
-    claim(repo, "A")
-    no_python = {"ADE_PYTHON": "/nonexistent/python3"}
-    assert "unguarded" not in run(state, ["fetch"], repo, who="B", **no_python).stderr
-    for args in (["fetch", "origin", "+main:wbr"], ["fetch", "--update-head-ok"], ["fetch", "-qu"]):
-        assert "unguarded" in run(state, args, repo, who="B", **no_python).stderr, args
 
 
 def test_a_stale_pointer_does_not_hide_a_newer_active_claim(tmp_path, state):
@@ -1857,3 +1849,183 @@ def test_quote_nesting_past_the_interpreters_recursion_limit_is_refused_not_a_cr
     for nest in ('echo git "$(' * 700, 'echo git ${a:-' * 700, 'echo git "${a:-$(' * 400):
         r = check(state, nest, a)
         assert r.returncode == 77 and "unguarded" not in r.stderr and "failed" not in r.stderr, (nest[:20], r.stderr)
+
+
+# ============================================================================================
+# repair round 4 (PR 59: bash 3.2 CI, Codex P1 x3): one regression per finding and per sibling
+# ============================================================================================
+
+@pytest.mark.skipif(not Path("/bin/bash").exists(), reason="no /bin/bash")
+def test_shim_parses_under_the_system_bash():
+    """macOS CI runs /bin/bash 3.2: a `case` pattern's `)` inside `$( )` is a syntax error there."""
+    r = subprocess.run(["/bin/bash", "-n", str(SHIM)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    h = subprocess.run(["/bin/bash", str(GUARD), "--help"], capture_output=True, text=True, timeout=30)
+    assert h.returncode == 0 and "ade-git-guard --check CMD" in h.stdout and "#!" not in h.stdout
+
+
+def map_origin(state, repo, mapping):
+    plain(state, ["remote", "add", "origin", str(repo)], repo)
+    plain(state, ["config", "--replace-all", "remote.origin.fetch", mapping], repo)
+
+
+@pytest.mark.parametrize("cmd", [
+    ["fetch", "origin"], ["fetch"], ["fetch", "origin", "main"], ["fetch", "--all"], ["fetch", "--multiple", "origin"],
+    ["pull", "origin"], ["pull", "-s", "ours", "origin"], ["remote", "update"], ["remote", "update", "origin"],
+    ["-C", "{P}", "fetch", "origin"],
+], ids=lambda c: " ".join(c))
+def test_a_configured_fetch_mapping_into_a_claimed_branch_is_refused(tmp_path, state, cmd):
+    repo, wt = setup_linked(tmp_path, state)
+    map_origin(state, repo, "+refs/heads/main:refs/heads/wtb")
+    head = plain(state, ["rev-parse", "wtb"], repo).strip()
+    plain(state, ["commit", "-q", "--allow-empty", "-m", "moves main"], repo)
+    r = run(state, [c.format(P=repo) for c in cmd], repo if "{P}" not in " ".join(cmd) else tmp_path, who="B")
+    assert r.returncode == 77, r.stderr
+    assert plain(state, ["rev-parse", "wtb"], repo).strip() == head and untouched(wt)
+
+
+def test_fetch_stdin_refspecs_cannot_be_inspected_so_they_are_refused_beside_a_claim(tmp_path, state):
+    repo, wt = setup_linked(tmp_path, state)
+    plain(state, ["remote", "add", "origin", str(repo)], repo)
+    plain(state, ["commit", "-q", "--allow-empty", "-m", "moves main"], repo)
+    head = plain(state, ["rev-parse", "wtb"], repo).strip()
+    for flag in ("--stdin", "--std"):
+        r = subprocess.run([str(SHIM), "fetch", flag, "origin"], cwd=repo, env=base_env(state, "B"), capture_output=True,
+                           text=True, input="+refs/heads/main:refs/heads/wtb\n", timeout=60)
+        assert r.returncode == 77 and "--stdin" in r.stderr, (flag, r.stderr)
+    assert plain(state, ["rev-parse", "wtb"], repo).strip() == head
+
+
+def test_fetch_stays_allowed_for_the_owner_a_human_and_a_harmless_mapping(tmp_path, state):
+    repo, wt = setup_linked(tmp_path, state)
+    map_origin(state, repo, "+refs/heads/main:refs/heads/wtb")
+    ok = lambda r: r.returncode != 77 and "REFUSED" not in r.stderr   # noqa: E731
+    assert ok(run(state, ["fetch", "origin"], repo))                       # a human shell
+    assert ok(run(state, ["fetch", "origin"], wt, who="A"))                # the owner, in its own workspace
+    plain(state, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], repo)
+    r = run(state, ["fetch", "origin"], repo, who="B")                     # remote-tracking refs only
+    assert r.returncode == 0 and "REFUSED" not in r.stderr, r.stderr
+    claim(repo, "C", branch="main")                                        # foreign claim of the checkout itself
+    assert ok(run(state, ["fetch", "origin"], repo, who="B"))              # still a read there
+    plain(state, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/main:refs/heads/wtb"], repo)
+    assert run(state, ["fetch", "origin"], repo, who="B").returncode == 77  # but not once the mapping writes a branch
+
+
+def test_every_plain_fetch_goes_through_the_rules_not_the_fast_path(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    no_python = {"ADE_PYTHON": "/nonexistent/python3"}
+    for args in (["fetch"], ["fetch", "origin"], ["fetch", "origin", "+main:wbr"], ["fetch", "-qu"]):
+        assert "unguarded" in run(state, args, repo, who="B", **no_python).stderr, args
+
+
+@pytest.mark.parametrize("cmd", [
+    ["branch", "-C", "main", "wtb"], ["branch", "-c", "-f", "main", "wtb"], ["branch", "--copy", "--force", "main", "wtb"],
+    ["branch", "--cop", "-f", "main", "wtb"], ["branch", "-C", "wtb"], ["branch", "-fc", "main", "wtb"],
+    ["branch", "--copy", "-f", "main", "wtb"],
+], ids=lambda c: " ".join(c))
+def test_branch_copy_cannot_overwrite_a_claimed_branch(tmp_path, state, cmd):
+    repo, wt = setup_linked(tmp_path, state)
+    plain(state, ["commit", "-q", "--allow-empty", "-m", "moves main"], repo)
+    head = plain(state, ["rev-parse", "wtb"], repo).strip()
+    r = run(state, cmd, repo, who="B")
+    assert r.returncode == 77, r.stderr
+    assert plain(state, ["rev-parse", "wtb"], repo).strip() == head
+
+
+def test_branch_copy_stays_allowed_for_the_owner_and_for_a_new_destination(tmp_path, state):
+    repo, wt = setup_linked(tmp_path, state)
+    ok = lambda r: r.returncode != 77 and "REFUSED" not in r.stderr   # noqa: E731
+    assert run(state, ["branch", "-c", "wtb", "copy1"], repo, who="B").returncode == 0   # SOURCE claimed: only a read of it
+    assert run(state, ["branch", "--copy", "--force", "wtb", "copy2"], repo, who="B").returncode == 0
+    assert ok(run(state, ["branch", "-C", "main", "wtb"], repo, who="A"))        # its own branch (git itself refuses: checked out)
+    assert run(state, ["branch", "-c", "wtb", "copy3"], wt, who="A").returncode == 0
+    assert ok(run(state, ["branch", "-C", "main", "wtb"], repo))                 # a human
+    assert "copy1" in plain(state, ["branch", "--list"], repo)
+
+
+@pytest.mark.parametrize("cmd", [
+    ["stash", "show", "-p", "--output=OUT"], ["stash", "show", "--output", "OUT"], ["stash", "show", "--out=OUT"],
+    ["stash", "list", "--output=OUT"], ["stash", "show", "-p", "stash@{0}", "--outp=OUT"],
+], ids=lambda c: " ".join(c))
+def test_stash_show_and_list_output_options_write_a_file(tmp_path, state, cmd):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    dirty(repo)
+    plain(state, ["stash", "push", "-q", "-u"], repo)
+    (repo / "f").write_text("precious\n")
+    argv = [c.replace("OUT", "f") for c in cmd]
+    r = run(state, argv, repo, who="B")                                     # foreign claim: not read-only any more
+    assert r.returncode == 77 and (repo / "f").read_text() == "precious\n", r.stderr
+    outside = tmp_path / "outside.txt"                                      # not read-only there, whatever the target
+    r = run(state, [c.replace("OUT", str(outside)) for c in cmd], repo, who="B")
+    assert r.returncode == 77 and not outside.exists(), r.stderr
+    b = mk_repo(tmp_path, state, "b")
+    claim(b, "B", branch="b")
+    r = run(state, [c.replace("OUT", str(repo / "f")) for c in cmd], b, who="B")   # into another claim's tree
+    assert r.returncode == 77 and (repo / "f").read_text() == "precious\n", r.stderr
+
+
+def test_stash_show_without_an_output_option_stays_read_only_and_the_owner_may_write_beside_itself(tmp_path, state):
+    repo = mk_repo(tmp_path, state)
+    claim(repo, "A")
+    dirty(repo)
+    plain(state, ["stash", "push", "-q", "-u"], repo)
+    for argv in (["stash", "show", "-p"], ["stash", "list"], ["stash", "show", "--stat", "--only-untracked"]):
+        r = run(state, argv, repo, who="B")
+        assert r.returncode != 77 and "REFUSED" not in r.stderr, (argv, r.stderr)
+    assert run(state, ["stash", "show", "-p", "--output=out.patch"], repo, who="A").returncode == 0
+    assert (repo / "out.patch").read_text().startswith("diff --git")
+
+
+def two_repos(tmp_path, state):
+    a = mk_repo(tmp_path, state, "a")
+    b = mk_repo(tmp_path, state, "b")
+    claim(a, "A")
+    claim(b, "B", branch="b")
+    return a, b
+
+
+@pytest.mark.parametrize("cmd", [
+    ["bundle", "create", "{a}/x.bundle", "main"], ["bundle", "create", "--progress", "{a}/x.bundle", "main"],
+    ["fast-export", "--export-marks={a}/marks", "main"], ["fast-export", "--export-marks", "{a}/marks", "main"],
+    ["config", "--file", "{a}/cfg", "k.v", "x"], ["config", "-f", "{a}/cfg", "k.v", "x"], ["config", "--fil={a}/cfg", "k.v", "x"],
+], ids=lambda c: " ".join(c))
+def test_file_writers_into_another_claims_tree_are_refused_and_own_tree_allowed(tmp_path, state, cmd):
+    a, b = two_repos(tmp_path, state)
+    r = run(state, [c.format(a=a) for c in cmd], b, who="B")
+    assert r.returncode == 77, r.stderr
+    assert not (a / "x.bundle").exists() and not (a / "marks").exists() and not (a / "cfg").exists()
+    r = run(state, [c.format(a=b) for c in cmd], b, who="B")
+    assert r.returncode == 0 and "REFUSED" not in r.stderr, r.stderr
+
+
+def test_config_file_reads_stay_allowed_beside_another_claim(tmp_path, state):
+    a, b = two_repos(tmp_path, state)
+    r = run(state, ["config", "--file", str(a / ".git" / "config"), "--get", "core.bare"], b, who="B")
+    assert r.returncode == 0 and r.stdout.strip() == "false", r.stderr
+
+
+@pytest.mark.parametrize("cmd", [
+    ["worktree", "add", "-B", "wtb", "{W3}"], ["worktree", "add", "-Bwtb", "{W3}"], ["worktree", "add", "--detach", "-B", "wtb", "{W3}"],
+    ["checkout", "-B", "wtb"], ["checkout", "-B", "wtb", "main"], ["checkout", "-Bwtb"],
+    ["switch", "-C", "wtb"], ["switch", "-Cwtb", "main"], ["switch", "--force-create", "wtb"], ["switch", "--force-create=wtb"],
+    ["switch", "--force-c", "wtb", "main"],
+], ids=lambda c: " ".join(c))
+def test_reset_by_creation_cannot_overwrite_a_claimed_branch(tmp_path, state, cmd):
+    repo, wt = setup_linked(tmp_path, state)
+    plain(state, ["commit", "-q", "--allow-empty", "-m", "moves main"], repo)
+    head = plain(state, ["rev-parse", "wtb"], repo).strip()
+    r = run(state, [c.format(W3=tmp_path / "W3") for c in cmd], repo, who="B")
+    assert r.returncode == 77, r.stderr
+    assert plain(state, ["rev-parse", "wtb"], repo).strip() == head and not (tmp_path / "W3").exists()
+
+
+def test_creating_or_resetting_ones_own_or_a_new_branch_stays_allowed(tmp_path, state):
+    repo, wt = setup_linked(tmp_path, state)
+    for argv in (["switch", "-C", "newb"], ["checkout", "-B", "newb2"], ["worktree", "add", "-B", "newb3", str(tmp_path / "W4")]):
+        r = run(state, argv, repo, who="B")
+        assert r.returncode == 0 and "REFUSED" not in r.stderr, (argv, r.stderr)
+    r = run(state, ["switch", "-C", "wtb"], repo, who="A")      # the owner resets its own: git refuses (checked out in W)
+    assert r.returncode != 77 and "REFUSED" not in r.stderr
+    assert run(state, ["switch", "-C", "wtb"], repo).returncode != 77   # a human shell

@@ -26,8 +26,8 @@
 #   2. Inside a git hook (GIT_INDEX_FILE set) or pre-commit (PRE_COMMIT set): exec the real git untouched.
 #   3. A subcommand that does not change the repository (status diff log show ls-files ...), after -C/-c/--git-dir=...,
 #      and none of whose arguments can name an output file (--output*, -o, -O, --open-files-in-pager): exec.
-#      `fetch` is read-only only when no argument can update a local branch (a `:` refspec, -u/--update-head-ok,
-#      --refmap); otherwise it goes to the rules like any other write.
+#      `fetch` is never fast-pathed: the refspecs it applies come from the repository's remote.<name>.fetch (and from
+#      --stdin), so the rules resolve them through git itself; it is read-only there only when none can update a local branch.
 #   4. Everything else: `python3 -I -S ade_claims.py guard -- ARGS`, which looks up the workspace claim
 #      (`.git/ade-claim` -> ~/.local/state/ade/claims/<id>.json). Exit 0 -> exec the real git;
 #      exit 77 -> the refusal text (owner, claim id, safe alternative) is on stderr, one line is in
@@ -86,15 +86,18 @@ run_python() {
   ADE_REAL_GIT="$real" "$py" -I -S "$lib" "$@"
 }
 
+# the leading comment block as usage text; a function, because bash 3.2 cannot parse a `case` pattern's `)` inside `$( )`
+print_usage() {
+  local line
+  while IFS= read -r line; do
+    case "$line" in "#!"*) continue ;; "#"*) printf '%s\n' "${line#\# }" ;; *) break ;; esac
+  done < "$self"
+}
+
 if [ "${self##*/}" = "ade-git-guard" ]; then
   case "${1:-}" in
     -h | --help | "")
-      usage=$(
-        while IFS= read -r line; do
-          case "$line" in "#!"*) continue ;; "#"*) printf '%s\n' "${line#\# }" ;; *) break ;; esac
-        done < "$self"
-      )
-      printf '%s\n' "$usage"
+      print_usage
       exit 0
       ;;
     --real-git)
@@ -139,14 +142,6 @@ for a in "$@"; do
   esac
 done
 case "$sub" in
-  fetch)
-    for a in "$@"; do
-      case "$a" in
-        *:* | -u* | --u* | --refm* | -[!-]*u*) slow=1; break ;;
-      esac
-    done
-    if [ "$slow" = 0 ]; then exec "$real" "$@"; fi
-    ;;
   status | diff | log | show | ls-files | ls-tree | rev-parse | cat-file | blame | grep | ls-remote | describe \
     | merge-base | version | help | rev-list | show-ref | for-each-ref | shortlog | diff-tree | diff-index | diff-files \
     | name-rev | check-ignore | check-attr | var | whatchanged | cherry | count-objects | show-branch)
