@@ -976,6 +976,39 @@ def refuse_kind(service: str | None, kind: str, quota: dict | None = None) -> No
         f"(or run route_agent.py plan --kinds {kind})")
 
 
+def kind_service(agent: str, service: str | None) -> Any:
+    """The routing profile that decides eligibility for agent/service, or None: the service by
+    name, else the agent's alias (qwen→alibaba) for an agent with no aiuse pool."""
+    router = route_module()
+    svc = router.BY_NAME.get(service) if service else None
+    if svc is None:
+        svc = router.BY_NAME.get(router.ALIASES.get(agent, agent))
+    return svc
+
+
+def plenty_gated(agent: str, service: str | None, kind: str | None) -> Any:
+    """The profile when `kind` is one of its `plenty_kinds` (gated on the pool's headroom), else None."""
+    svc = kind_service(agent, service) if kind else None
+    return svc if svc is not None and kind in svc.plenty_kinds else None
+
+
+def plenty_gate_refusal(rec: dict) -> str | None:
+    """Why the plenty gate no longer admits this record's slice, judged by the pool reading NOW
+    (after load admission, 2026-10-25), else None. Only a record dispatch marked `plenty_gate`
+    is checked, so a route-override dispatch and an older record launch as before."""
+    if not rec.get("plenty_gate"):
+        return None
+    kind = rec.get("kind")
+    svc = plenty_gated(rec.get("agent") or "", rec.get("service"), kind)
+    if svc is None:
+        return None
+    _, reading = pool_reading(rec.get("agent") or "", rec.get("model"))
+    if svc.eligible(kind, {svc.name: reading}):
+        return None
+    return (f"{svc.name} is not eligible for --kind {kind} after the load wait"
+            f"{plenty_why(route_module(), svc, kind, reading)}")
+
+
 def escalation_next(kind: str | None) -> str | None:
     """The next kind up the cheap-first ladder (operator decision 1.4, 2026-10-18): ONE rung,
     never straight to the top; `research` jumps to `judgment`. [escalation] in
@@ -3643,9 +3676,10 @@ def runner_load_gate(record: Path) -> int | None:
     had to return at once). None when the agent may start; LOAD_GATE_EXIT after finalizing the record as
     unavailable/load (finalize leaves such a record alone) when the machine stayed too hot. After admission it
     re-checks the in-flight cap recorded at dispatch (runner_inflight_recheck; pending runners count as in flight,
-    see inflight_records): a full cap finalizes it as unavailable/inflight, exit 5, nothing started. The record
-    stays load_gate_pending until execute_record writes the pid. Only the quota snapshot taken at dispatch can
-    be stale."""
+    see inflight_records): a full cap finalizes it as unavailable/inflight, exit 5, nothing started. It then
+    re-reads the pool for a `plenty_gate` record (plenty_gate_refusal): a pool no longer plentiful finalizes
+    it as unavailable/headroom, exit 5. The record stays load_gate_pending until execute_record writes the
+    pid. Other quota checks (minimum headroom, fit) use the snapshot taken at dispatch."""
     rec = json.loads(record.read_text())
     if not rec.get("load_gate_pending"):
         return None
@@ -3658,6 +3692,13 @@ def runner_load_gate(record: Path) -> int | None:
             print(f"acp-dispatch: {rec.get('name')}: {full}", file=sys.stderr)
             update_record(record, load_gate=info, load_gate_pending=False, status="unavailable",
                           unavailable_class="inflight", detail=full, exit=UNAVAILABLE_EXIT,
+                          finished=time.time(), pid=None)
+            return UNAVAILABLE_EXIT
+        stale = plenty_gate_refusal(rec)
+        if stale:
+            print(f"acp-dispatch: {rec.get('name')}: {stale}", file=sys.stderr)
+            update_record(record, load_gate=info, load_gate_pending=False, status="unavailable",
+                          unavailable_class="headroom", detail=stale, exit=UNAVAILABLE_EXIT,
                           finished=time.time(), pid=None)
             return UNAVAILABLE_EXIT
         # load_gate_pending stays true until execute_record writes the pid: wait_for_capacity can hold up to 900 s
@@ -3971,11 +4012,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
             die(f"model {a.model!r} is a frontier model; use --kind frontier "
                 f"(route-override does not skip this)")
         router = route_module()
-        svc = router.BY_NAME.get(service) if service else None
-        if svc is None:
-            # Unknown map: fall back through the alias map to a curated profile (qwen→alibaba).
-            canon = router.ALIASES.get(a.agent, a.agent)
-            svc = router.BY_NAME.get(canon)
+        svc = kind_service(a.agent, service)
         if svc is not None:
             quota = router.load_snapshot()[0] if kind in svc.plenty_kinds else None
             if not svc.eligible(kind, quota) and "route-override" not in approved:
@@ -4063,6 +4100,14 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
                 return unavailable_record(out, a, why, "load", None, estimate, previous,
                                           exit_code=LOAD_GATE_EXIT, extra={"load_gate": gate_info})
     remaining, reading = pool_reading(a.agent, a.model)
+    # The plenty gate was judged above on a reading taken BEFORE the load wait, which may have lasted
+    # up to --load-wait; judge it again on this one (adversary 7802361, A1). A detached --no-wait
+    # runner repeats it after its own wait (plenty_gate_refusal). route-override and a resume skip it,
+    # as they skip the first check.
+    gated = (None if previous is not None or "route-override" in approved
+             else plenty_gated(a.agent, service, kind))
+    if gated is not None and not gated.eligible(kind, {gated.name: reading}):
+        refuse_kind(service or gated.name, kind, {**route_module().load_snapshot()[0], gated.name: reading})
     windows = (reading or {}).get("windows") or {}
     if previous is not None:
         # A resume carries its prior per-window estimate so it still reserves for others.
@@ -4222,6 +4267,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
     }
     if previous and previous.get("advisor_edited"):
         rec["advisor_edited"] = True
+    if gated is not None:
+        rec["plenty_gate"] = True
     if gate_deferred:
         # the launchd runner has none of this process's environment or load_policy(): hand it the resolved values
         rec["load_gate_pending"], rec["load_gate_wait"] = True, gate_wait

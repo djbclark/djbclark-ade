@@ -180,6 +180,56 @@ class TestLoadGateBeforeQuotaChecks(LoadGate):
         self.assertEqual(r.returncode, 75, r.stderr + r.stdout)
         self.assertIn("class=load", r.stdout)
 
+    def judgment(self, *extra: str, env: dict[str, str]):
+        return self.dispatch_agent("codex", "gpt-6.1-sol", "--kind", "judgment", "--effort", "high",
+                                   "--no-model-check", "--no-preflight", *extra, env=env)
+
+    def drains_to_40(self) -> dict[str, str]:
+        """A fresh 90% snapshot that the fake load-watch rewrites to 40% while it admits."""
+        env = self.snap_codex(90.0)
+        low = json.dumps({"collected_at": "2099-01-01T00:00:00+00:00", "snapshot": {"accounts": [
+            {"provider": "codex", "windows": [{"label": "5h", "remaining_percent": 40.0}]}]}})
+        return {**env, "FAKE_LW_WRITE": env["AIUSE_SNAPSHOT"], "FAKE_LW_BODY": low}
+
+    def test_the_plenty_gate_is_judged_on_the_reading_after_the_wait(self):
+        """Adversary 7802361, A1: judgment passed the 50% gate on 90%, the wait drained it to 40%, and
+        only the minimum-headroom and fit checks saw the new reading: the slice launched."""
+        r = self.judgment("--min-headroom", "0", env=self.gate_env(0, OK, **self.drains_to_40()))
+        self.assertEqual(r.returncode, 2, r.stderr + r.stdout)
+        self.assertIn("codex is not eligible for --kind judgment", r.stderr)
+        self.assertIn("now: 40% left", r.stderr)
+        self.assertFalse((self.out / "jobs" / "s1.json").exists())      # nothing launched, no record
+        self.assertFalse((self.out / "s1-report.md").exists())
+
+    def test_route_override_still_skips_the_gate_after_the_wait(self):
+        r = self.judgment("--min-headroom", "0", env={
+            **self.gate_env(0, OK, **self.drains_to_40()), "ACP_OPERATOR_APPROVED": "route-override"})
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertEqual(self.record()["kind"], "judgment")
+
+    def test_the_detached_runner_rechecks_the_plenty_gate_after_its_own_wait(self):
+        env = self.snap_codex(90.0)
+        d = self.judgment("--detach", "--no-wait", env=self.gate_env(0, OK, **env))
+        self.assertEqual(d.returncode, 0, d.stderr + d.stdout)
+        self.assertTrue(self.record()["plenty_gate"])
+        path = str(self.out / "jobs" / "s1.json")
+        r = run(["execute", path], env={**self.base_env(), **self.gate_env(0, OK, **self.drains_to_40())})
+        self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+        rec = self.record()
+        self.assertEqual((rec["status"], rec["unavailable_class"], rec["exit"]), ("unavailable", "headroom", 5))
+        self.assertIn("now: 40% left", rec["detail"])
+        self.assertFalse(rec["load_gate_pending"])
+        self.assertFalse((self.out / "s1-report.md").exists())          # no agent started
+
+    def test_a_route_override_runner_does_not_recheck(self):
+        d = self.judgment("--detach", "--no-wait", env={
+            **self.gate_env(0, OK, **self.snap_codex(90.0)), "ACP_OPERATOR_APPROVED": "route-override"})
+        self.assertEqual(d.returncode, 0, d.stderr + d.stdout)
+        self.assertNotIn("plenty_gate", self.record())
+        r = run(["execute", str(self.out / "jobs" / "s1.json")],
+                env={**self.base_env(), **self.gate_env(0, OK, **self.drains_to_40())})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
 
 class TestLoadGateCheck(LoadGate):
     def test_check_says_retry_later_and_never_exclude(self):
