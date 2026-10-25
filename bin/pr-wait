@@ -72,25 +72,33 @@ reviews on PR open and draft-to-ready, NOT on a push: a pushed head needs a comm
 head and NO request since the head was pushed, pr-wait posts ONE comment `@codex review` (`gh api -X POST
 repos/R/issues/N/comments -f body=...`, an argv list). It never posts when a marker for the head exists
 (any status), with `--no-codex`, or with `--no-request`.
-"A request since the push" is decided by POSITION, never by a clock or a Codex receipt: the PR's issue
-timeline (`gh api --paginate repos/R/issues/N/timeline`) is in GitHub's own order. The push is the LAST
-timeline item that names the head: its `committed` event (`sha`) or a `head_ref_force_pushed` event
-(`commit_id`). `pushedDate` (GraphQL) is null in practice (checked on PR 55, 2026-10-24) and a commit's
-committed/authored date is set by its author, so no date is compared. A request is a LATER `commented` item
-whose body, stripped, is exactly `@codex review` and whose author is the PR author, the repo owner (the
-OWNER of --repo) or the authenticated `gh` user (`gh api user`). Codex's own receipts and anyone else's
-quotes of the phrase never count (AGENTS.md rule 9: PR 12 and PR 10). If that cannot be decided (the head
-is not in the timeline, a gh call fails, the author is unknown) nothing is posted and
-`codex_request_note` says so; a failed gh call is retried on the next poll, which re-reads the timeline
-before any post. At most TWO requests per head: if the marker for the head is still non-terminal
-(`running`) `--rerequest-after` seconds (default 600) after pr-wait's own request, it re-requests ONCE
-more (only when the timeline shows fewer than two requests); then `codex_request_note` points to
-openai/codex#55890 (a manual request sometimes stays "Running") and the usual `--codex-stuck` bound ends
-the wait. The delay is pr-wait's own wall clock (a wait, not an ordering decision). The count of pr-wait's
-own requests and the time of the last one persist in `request-<repo>-<pr>-<head>.json` in
-$PR_WAIT_STATE_DIR (written atomically, read with `.get`): a second pr-wait on the same head, started after
-the first exited, never posts again past that count. The summary gains `codex_requested` (0, 1 or 2: the
-requests pr-wait posted for the head, all runs) and `codex_request_note`.
+"A request since the push" is decided by SERVER-STAMPED times, never by a commit's own date and never by
+timeline position (adversary round 1, 2026-10-24: GitHub places a `committed` timeline item by the commit's
+own, author-controlled date, so a commit made before a request but pushed after it sits BEFORE that request
+and the request, made for the previous head, would count for the new one). The push time of the head is the
+EARLIEST `created_at` of its check suites (`gh api --paginate repos/R/commits/H/check-suites`; GitHub makes
+the suite when the push arrives); for a force-push also the `created_at` of the LATEST `head_ref_force_pushed`
+item of the PR timeline (`gh api --paginate repos/R/issues/N/timeline`) whose `commit_id` is the head; the
+LATEST of the stamps that exist. `pushedDate` (GraphQL) is null in practice (checked on PR 55, 2026-10-24).
+A request is a `commented` timeline item whose body, stripped, is exactly `@codex review`, whose author is
+the PR author, the repo owner (the OWNER of --repo) or the authenticated `gh` user (`gh api user`), and
+whose server `created_at` is LATER than the push time (parsed UTC datetimes, never strings). Codex's own
+receipts and anyone else's quotes of the phrase never count (AGENTS.md rule 9: PR 12 and PR 10). With NO
+server push stamp (no CI app on the repo) no request can be dated: it leans toward posting (zero counted);
+the cap of two per head and the own-request state file bound the duplicates. If a gh call fails (check
+suites, timeline, user) the case is undecidable: nothing is posted, `codex_request_note` says so, and the
+next poll retries (re-reading both before any post). At most TWO requests per head: if the marker for the
+head is still non-terminal (`running`) `--rerequest-after` seconds (default 600) after pr-wait's own request,
+it re-requests ONCE more (only when the timeline shows fewer than two requests); then `codex_request_note`
+points to openai/codex#55890 (a manual request sometimes stays "Running") and the usual `--codex-stuck`
+bound ends the wait. The delay is pr-wait's own wall clock (a wait, not an ordering decision). The count of
+pr-wait's own requests, the time of the last one and a pending attempt (a POST that errored, which may still
+have landed: when the timeline later shows a request, it is recorded as pr-wait's own so its re-request is
+not lost) persist in `request-<repo>-<pr>-<head>.json` in $PR_WAIT_STATE_DIR (repo lower-cased; written
+atomically, read with `.get`, `own` clamped to 0..2, a non-finite time dropped): a second pr-wait on the same
+head, started after the first exited, never posts again past that count. A state write that fails is a
+warning in `codex_request_note`, never a crash. The summary gains `codex_requested` (0, 1 or 2: the requests
+pr-wait posted for the head, all runs) and `codex_request_note`.
 
 A `gh` failure (or empty `gh` output) is "unknown", never "done": it is retried on the next poll and
 reported in the summary (`errors`) when the wait ends. A PR that does not exist (HTTP 404) is a usage error.
@@ -119,6 +127,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import json
+import math
 import os
 import re
 import signal
@@ -495,54 +504,86 @@ def write_atomic(path: str, doc: object) -> None:
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w") as f:
         json.dump(doc, f, indent=1)
-        f.write("\n")
-    os.replace(tmp, path)
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 # ---- requesting the Codex review ------------------------------------------------------------------
 
 
-def requests_since_push(timeline: list[dict], head: str, allowed: set[str]) -> tuple[int | None, str]:
-    """(number of `@codex review` requests after the head was pushed, reason); None = cannot decide.
+def stamp(s: object) -> datetime | None:
+    """A server timestamp as an aware UTC datetime; None when absent or unparsable."""
+    if not isinstance(s, str):
+        return None
+    try:
+        return parse_ts(s)
+    except ValueError:
+        return None
 
-    Decided by position in the issue timeline, GitHub's own order, never by a date: the push is the LAST item
-    naming the head (a `committed` event's `sha`, or a `head_ref_force_pushed` event's `commit_id`); a request
-    is a later `commented` item whose stripped body is exactly REQUEST_BODY and whose author is in `allowed`
-    (lower-case logins). Codex's receipts and other people's quotes of the phrase are never in `allowed`."""
-    pushed = None
-    for i, e in enumerate(timeline):
-        if not isinstance(e, dict):
-            continue
-        sha = e.get("sha") if e.get("event") == "committed" else (
-            e.get("commit_id") if e.get("event") == "head_ref_force_pushed" else None)
-        if isinstance(sha, str) and sha.lower() == head:
-            pushed = i
+
+def push_stamp(suites: list, timeline: list, head: str) -> datetime | None:
+    """When the head was pushed, from SERVER stamps only: the earliest `created_at` of its check suites, and for a
+    force-push the `created_at` of the latest `head_ref_force_pushed` item naming the head; the LATEST of the
+    stamps that exist. None = no server stamp at all. A commit's own date and its timeline position are never
+    used: GitHub places a `committed` item by the commit's author-controlled date."""
+    suite_at = [t for t in (stamp(x.get("created_at")) for x in suites if isinstance(x, dict)) if t]
+    forced_at = [t for t in (stamp(e.get("created_at")) for e in timeline
+                             if isinstance(e, dict) and e.get("event") == "head_ref_force_pushed"
+                             and isinstance(e.get("commit_id"), str) and e["commit_id"].lower() == head) if t]
+    stamps = ([min(suite_at)] if suite_at else []) + ([max(forced_at)] if forced_at else [])
+    return max(stamps) if stamps else None
+
+
+def requests_since_push(timeline: list[dict], allowed: set[str], pushed: datetime | None) -> int:
+    """Number of `@codex review` requests posted after the head was pushed (`pushed` from push_stamp).
+
+    A request is a `commented` item whose stripped body is exactly REQUEST_BODY, whose author is in `allowed`
+    (lower-case logins) and whose server `created_at` is later than `pushed` (datetimes, not strings). Codex's
+    receipts and other people's quotes of the phrase are never in `allowed`. `pushed` None (no server stamp)
+    counts none: the caller leans toward posting, and the cap of two per head bounds the duplicates. A comment
+    without a parsable `created_at` cannot be shown to follow the push and is not counted."""
     if pushed is None:
-        return None, f"the head {head[:12]} is not in the PR timeline"
+        return 0
     n = 0
-    for e in timeline[pushed + 1:]:
+    for e in timeline:
         if not isinstance(e, dict) or e.get("event") != "commented":
             continue
         who = e.get("user") or e.get("actor")
         login = who.get("login") if isinstance(who, dict) else None
-        if (isinstance(login, str) and login.lower() in allowed
+        at = stamp(e.get("created_at"))
+        if (isinstance(login, str) and login.lower() in allowed and at is not None and at > pushed
                 and isinstance(e.get("body"), str) and e["body"].strip() == REQUEST_BODY):
             n += 1
-    return n, ""
+    return n
+
+
+def finite(x: object) -> float | None:
+    """`x` as a finite float, else None (JSON accepts NaN and Infinity; bool is not a number here)."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return None
+    try:
+        v = float(x)
+    except OverflowError:
+        return None
+    return v if math.isfinite(v) else None
 
 
 def load_request_state(path: Path) -> dict:
-    """pr-wait's own requests for one head: {"own": 0..MAX_REQUESTS, "last_at": epoch seconds or None, "ids": [...]}.
-    Every field is read with `.get`; an unreadable file counts as none (the timeline still guards a first post)."""
+    """pr-wait's own requests for one head: {"own": 0..MAX_REQUESTS, "last_at": epoch seconds or None,
+    "attempt_at": epoch seconds of a POST that may not have been recorded, or None, "ids": [...]}.
+    Every field is read with `.get`; `own` is clamped to 0..MAX_REQUESTS and a non-finite time is dropped; an
+    unreadable file counts as none (the timeline still guards a first post)."""
     try:
         doc = json.loads(path.read_text())
     except (OSError, ValueError):
         doc = None
     doc = doc if isinstance(doc, dict) else {}
-    own, last = doc.get("own"), doc.get("last_at")
-    ids = doc.get("ids")
-    return {"own": own if isinstance(own, int) and not isinstance(own, bool) and 0 <= own <= MAX_REQUESTS else 0,
-            "last_at": float(last) if isinstance(last, (int, float)) and not isinstance(last, bool) else None,
+    own, ids = doc.get("own"), doc.get("ids")
+    return {"own": max(0, min(own, MAX_REQUESTS)) if isinstance(own, int) and not isinstance(own, bool) else 0,
+            "last_at": finite(doc.get("last_at")), "attempt_at": finite(doc.get("attempt_at")),
             "ids": ids if isinstance(ids, list) else []}
 
 
@@ -769,7 +810,7 @@ def main(argv: list[str]) -> int:
 
     sd = state_dir()
     sd.mkdir(parents=True, exist_ok=True)
-    slug = a.repo.replace("/", "__")
+    slug = a.repo.replace("/", "__").lower()  # GitHub slugs are case-insensitive: one lock and state per repo
     out = a.out or str(sd / f"{slug}-pr{a.pr}-{head[:12]}")
     lock = sd / f"lock-{slug}-{a.pr}-{head}"
     me = os.getpid()
@@ -791,7 +832,7 @@ def main(argv: list[str]) -> int:
 
     s = {"checks": None, "codex_match": None, "codex_newest": None, "review": None,
          "ci_done": False, "codex_done": a.no_codex, "since": None, "since_source": None,
-         "codex_clock": start, "running_seen": False, "posted": [], "state_note": ""}
+         "codex_clock": start, "running_seen": False, "posted": [], "state_note": "", "warnings": []}
     rq_path = sd / f"request-{slug}-{a.pr}-{head}.json"
     rq = load_request_state(rq_path)  # pr-wait's own requests for this head, across runs
     rq_ctx: dict = {"exists": False, "allowed": None}
@@ -802,6 +843,7 @@ def main(argv: list[str]) -> int:
             parts.append(f"{rq['own']} request(s) were posted by an earlier run")
         if s["state_note"]:
             parts.append(s["state_note"])
+        parts.extend(s["warnings"])
         if (not a.no_codex and rq["own"] and match is not None and not review_terminal(match, head)
                 and result != "done"):
             parts.append(f"Codex stayed {code_review(match).get('status') or 'non-terminal'} after {rq['own']} "
@@ -898,14 +940,34 @@ def main(argv: list[str]) -> int:
             rq_ctx["allowed"] = names
         return rq_ctx["allowed"]
 
+    def save_rq() -> None:
+        try:
+            write_atomic(str(rq_path), rq)
+        except OSError as e:  # a warning, never a crash: the process would exit 1, the timeout code
+            msg = f"could not write {rq_path.name} ({e}): a later run may not know of these requests"
+            if msg not in s["warnings"]:
+                s["warnings"].append(msg)
+
     def post_one(what: str) -> None:
+        rq["attempt_at"] = time.time()
+        save_rq()  # a POST that errors (a gh timeout) may still have landed: the attempt is on record first
         doc = post_request(a.repo, a.pr)
         rq["own"] += 1
         rq["last_at"] = time.time()
+        rq["attempt_at"] = None
         rq["ids"].append(doc.get("id"))
-        write_atomic(str(rq_path), rq)
+        save_rq()
         s["posted"].append(f"{what} (comment {doc.get('id')})")
         s["state_note"] = ""
+
+    def count_requests() -> tuple[int | None, str]:
+        """(requests since the push, ""), or (None, why) when a gh call failed: undecidable, retried next poll."""
+        try:
+            suites = api_items(f"repos/{a.repo}/commits/{head}/check-suites?per_page=100", "check_suites")
+            timeline = api_items(f"repos/{a.repo}/issues/{a.pr}/timeline?per_page=100")
+            return requests_since_push(timeline, allowed_authors(), push_stamp(suites, timeline, head)), ""
+        except GhError as e:
+            return None, str(e)
 
     def request_step(match: dict | None) -> None:
         """Post `@codex review` when the head has no marker and no request since its push, and once more when
@@ -918,32 +980,44 @@ def main(argv: list[str]) -> int:
         if match is not None and review_terminal(match, head):
             s["state_note"] = "no request needed: the marker for the head is terminal" if not rq["own"] else ""
             return
+
+        def first() -> bool:
+            return match is None and not rq["own"] and not rq_ctx["exists"]
+
+        def due() -> bool:
+            return (match is not None and rq["own"] == 1 and rq["last_at"] is not None
+                    and time.time() - rq["last_at"] >= a.rerequest_after)
+
+        pending = rq["attempt_at"] is not None  # an earlier POST errored: it may have landed
+        if not (first() or due() or pending):
+            if match is not None and not rq["own"]:
+                s["state_note"] = "no request needed: a marker for the head exists"
+            return
+        n, why = count_requests()
+        if n is None:
+            s["state_note"] = f"undecidable, nothing posted (retried on the next poll): {why}"
+            return
+        if pending and n > rq["own"]:  # the errored POST landed: it is ours, so its re-request is not lost
+            rq["own"] += 1
+            rq["last_at"], rq["attempt_at"] = rq["attempt_at"], None
+            save_rq()
+            s["posted"].append("recorded the request whose POST errored but landed (found in the timeline)")
+            s["state_note"] = ""
         if match is None:
             if rq["own"] or rq_ctx["exists"]:
                 return
+            if n >= 1:
+                rq_ctx["exists"] = True
+                s["state_note"] = f"a request since the push already exists ({n}): none posted"
+                return
             again = False
         else:
-            if rq["own"] != 1 or rq["last_at"] is None or time.time() - rq["last_at"] < a.rerequest_after:
-                if not rq["own"]:
-                    s["state_note"] = "no request needed: a marker for the head exists"
+            if not due():
+                return
+            if max(n, rq["own"]) >= MAX_REQUESTS:
+                s["state_note"] = f"{n} requests since the push already: no third one"
                 return
             again = True
-        try:
-            timeline = api_items(f"repos/{a.repo}/issues/{a.pr}/timeline?per_page=100")
-            n, why = requests_since_push(timeline, head, allowed_authors())
-        except GhError as e:
-            s["state_note"] = f"undecidable, nothing posted (retried on the next poll): {e}"
-            return
-        if n is None:
-            s["state_note"] = f"undecidable, nothing posted: {why}"
-            return
-        if not again and n >= 1:
-            rq_ctx["exists"] = True
-            s["state_note"] = f"a request since the push already exists ({n}): none posted"
-            return
-        if again and max(n, rq["own"]) >= MAX_REQUESTS:
-            s["state_note"] = f"{n} requests since the push already: no third one"
-            return
         try:
             post_one("re-requested after the review stayed running" if again else "posted @codex review")
         except GhError as e:
