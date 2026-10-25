@@ -33,7 +33,7 @@ including a read-back through the installed `codex app-server` (no model call).
 3. The live file is a regular file Codex also writes and it holds credentials (MCP headers, tokens): **never `rg`,
    `grep -C`, `cat` or diff it, or print any context around the policy; use the helper's dry run.**
    `bin/codex-env-policy-apply TEMPLATE TARGET` prints a diff of the policy span only (the two `shell_environment_policy`
-   tables and the comment block above them, old against new; every `set` value, operator comment and unknown key hidden;
+   tables and the comment block above them, old against new; only the template's own lines and `inherit`/`ignore_default_excludes` literals print, every other value, comment and continuation is hidden;
    no line of any neighbouring table); `--write` applies it and does nothing if already applied. It replaces that span
    byte-for-byte, checks that every other table and the `set` values are unchanged, keeps a private (0600, O_EXCL)
    `.bak-UTC-TIME-env-policy` copy, writes a temp file beside the target and `os.replace`s it on the realpath, and

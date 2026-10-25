@@ -457,6 +457,41 @@ trusted_hash = "abc"
                 self.assertNotIn("Traceback", r.stderr)
                 self.assertNotIn("SECRETDIGEST-0123", r.stdout + r.stderr)
 
+    def test_operator_text_in_the_root_policy_table_never_prints(self) -> None:
+        # 2026-10-25 adversary r2 (C2): a root key's value, a trailing comment and a comment inside include_only printed.
+        live = self.LIVE.format(home="/h").replace('inherit = "core"\n', """inherit = "core"  # SECRET-TRAILING-8
+exclude = ["SECRET-EXCL-7"]
+include_only = [
+  "HOME",  # SECRET-OPCOMMENT-6
+  "PATH",
+  "SECRET-ENTRY-9",
+]
+ignore_default_excludes = true
+""", 1).replace('[mcp_servers.below.http_headers]', '[shell_environment_policy.extra]\ninherit = "SECRET-SUBINHERIT-5"\n\n[mcp_servers.below.http_headers]')
+        secrets = ("SECRET-TRAILING-8", "SECRET-EXCL-7", "SECRET-OPCOMMENT-6", "SECRET-ENTRY-9", "SECRET-SUBINHERIT-5",
+                   "SECRET-ABOVE-1", "SECRET-COMMENT-3", "SECRET-BELOW-2", "SECRETDIGEST-0123")
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d, "config.toml")
+            t.write_text(live.replace("/h/.bashrc", d + "/.bashrc"))
+            for flags in ((), ("--write",)):
+                r = self.run_apply(t, *flags)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                for secret in secrets:
+                    self.assertNotIn(secret, r.stdout + r.stderr, secret)
+                self.assertIn('inherit = "core"', r.stdout)  # the fixed literal still prints, without its comment
+                self.assertIn("exclude = <hidden>", r.stdout)
+
+    def test_a_subtable_key_named_inherit_is_hidden_even_when_the_header_is_the_templates(self) -> None:
+        # 2026-10-25 adversary r2 (C1): the template's own `.set` header used to switch hiding off for what followed.
+        mod = self.apply_module()
+        header = "[shell_environment_policy.set]"
+        public = {"[shell_environment_policy]", header, 'ENABLE_PROMPT_CACHING_1H = "1"', 'inherit = "core"'}
+        view = mod.safe_view("[shell_environment_policy]\n" + header + '\ninherit = "SECRET-SUB-5"\nENABLE_PROMPT_CACHING_1H = "1"\n'
+                             '[shell_environment_policy.extra]\nignore_default_excludes = true  # SECRET-C\n', public)
+        self.assertNotIn("SECRET", view)
+        self.assertEqual(view.split("\n")[1:4], [header, "inherit = <hidden>", "ENABLE_PROMPT_CACHING_1H = <hidden>"])
+        self.assertIn("[<table hidden>]\nignore_default_excludes = <hidden>", view)
+
     # ---- the two changed-file refusals, driven deterministically through the module --------------------------------
 
     def apply_module(self):
