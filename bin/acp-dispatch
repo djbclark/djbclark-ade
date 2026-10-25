@@ -706,18 +706,28 @@ def approved_tokens() -> set[str]:
     return {x.strip() for x in os.environ.get("ACP_OPERATOR_APPROVED", "").split(",") if x.strip()}
 
 
-def _same_workload(row: dict, kind: str | None, effort: str | None) -> bool:
+def _same_workload(row: dict, kind: str | None, effort: str | None, strict: bool = False) -> bool:
     """Does a history row measure the same workload (kind and effort) as the request?  A field the
     row does not carry (a pre-change record, read with .get) cannot contradict the request and
     stays comparable; a recorded kind or effort that differs is a different workload: a medium-effort
-    `code` slice says nothing about a high-effort `judgment` one (adversary 7802361, A3)."""
-    return all(have is None or have == want
-               for have, want in ((row.get("kind"), kind), (row.get("effort"), effort)))
+    `code` slice says nothing about a high-effort `judgment` one (adversary 7802361, A3).  `strict`
+    (a request whose kind has its own estimate floor, `codex:judgment`) also drops a row whose kind
+    or effort is unknown: three legacy rows must not release a floor that exists because no
+    comparable slice was ever measured (adversary bcdd223, A1)."""
+    pairs = ((row.get("kind"), kind), (row.get("effort"), effort))
+    if strict:
+        return all(have == want for have, want in pairs)
+    return all(have is None or have == want for have, want in pairs)
+
+
+def kind_floor_applies(service: str | None, kind: str | None) -> bool:
+    """Is there an estimate floor for exactly this service's kind (`SERVICE:KIND`, kind not frontier)?"""
+    return bool(kind) and kind != "frontier" and f"{service or ''}:{kind}" in ESTIMATE_FLOOR
 
 
 def _history_rows(paths: list[Path], agent: str, model: str | None, *,
-                  skip_placeholders: bool, kind: str | None = None, effort: str | None = None
-                  ) -> list[tuple[float, dict]]:
+                  skip_placeholders: bool, kind: str | None = None, effort: str | None = None,
+                  strict: bool = False) -> list[tuple[float, dict]]:
     """(mtime, row) for measured records matching agent×model×kind×effort, newest first."""
     rows: list[tuple[float, dict]] = []
     for path in paths:
@@ -727,7 +737,7 @@ def _history_rows(paths: list[Path], agent: str, model: str | None, *,
         except (OSError, ValueError, TypeError):
             continue
         if (row.get("agent") != agent or row.get("model") != model
-                or not _same_workload(row, kind, effort)):
+                or not _same_workload(row, kind, effort, strict)):
             continue
         if skip_placeholders and str(row.get("model") or "") in PLACEHOLDER_MODELS:
             continue
@@ -745,15 +755,16 @@ def session_finder_state() -> Path:
 
 
 def measured_history(out: Path, agent: str, model: str | None, kind: str | None = None,
-                     effort: str | None = None) -> tuple[list[dict], str]:
+                     effort: str | None = None, strict: bool = False) -> tuple[list[dict], str]:
     """Measured job rows for estimates: task (≥3) else machine-wide (20) else task remainder."""
     task_paths = list((out / "jobs").glob("*.json")) if (out / "jobs").is_dir() else []
-    task = _history_rows(task_paths, agent, model, skip_placeholders=False, kind=kind, effort=effort)
+    task = _history_rows(task_paths, agent, model, skip_placeholders=False, kind=kind, effort=effort,
+                          strict=strict)
     if len(task) >= 3:
         return [r for _, r in task], f"history ({len(task)} slices, task)"
     machine = _history_rows(
         record_paths([str(STATE_ROOT), str(session_finder_state())]), agent, model,
-        skip_placeholders=True, kind=kind, effort=effort)[:20]
+        skip_placeholders=True, kind=kind, effort=effort, strict=strict)[:20]
     if machine:
         return [r for _, r in machine], f"history ({len(machine)} slices, machine)"
     if task:
@@ -766,7 +777,7 @@ def estimate_pct(out: Path, agent: str, model: str | None, prompt: str,
                  effort: str | None = None) -> tuple[float, str]:
     if explicit is not None:
         return explicit, "explicit"
-    rows, source = measured_history(out, agent, model, kind, effort)
+    rows, source = measured_history(out, agent, model, kind, effort, kind_floor_applies(service, kind))
     values = [float(r["measured_usage_pct"]) for r in rows
               if r.get("measured_usage_pct") is not None]
     # `SERVICE:frontier` floors a [dispatch].frontier_models slice and wins over `SERVICE:KIND`,
@@ -793,7 +804,7 @@ def estimate_pct(out: Path, agent: str, model: str | None, prompt: str,
 
 
 def estimate_windows(out: Path, agent: str, model: str | None, kind: str | None = None,
-                     effort: str | None = None) -> dict[str, float]:
+                     effort: str | None = None, service: str | None = None) -> dict[str, float]:
     """Median measured drop per quota window (label -> percent).
 
     Prefers this task's history (≥3 slices); else the most recent 20 machine-wide
@@ -802,7 +813,7 @@ def estimate_windows(out: Path, agent: str, model: str | None, kind: str | None 
     5h-after (2026-10-13: certpin4 recorded 70%, so the next codex slice was refused
     against 69% weekly left although it needed ~15% of the week).
     """
-    rows, _ = measured_history(out, agent, model, kind, effort)
+    rows, _ = measured_history(out, agent, model, kind, effort, kind_floor_applies(service, kind))
     seen: dict[str, list[float]] = {}
     for row in rows:
         try:
@@ -4133,7 +4144,7 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
         per_window = {}
     else:
         per_window = {
-            k: v for k, v in estimate_windows(out, a.agent, a.model, kind, est_effort).items()
+            k: v for k, v in estimate_windows(out, a.agent, a.model, kind, est_effort, service).items()
             if windows.get(k) is not None}
     # In-flight reservation by service (2026-10-18). A resume is never refused by it (reserved
     # is zeroed when previous is set); its own estimate still counts as in flight for others.
