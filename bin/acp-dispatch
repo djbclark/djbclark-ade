@@ -745,7 +745,12 @@ def estimate_pct(out: Path, agent: str, model: str | None, prompt: str,
     rows, source = measured_history(out, agent, model)
     values = [float(r["measured_usage_pct"]) for r in rows
               if r.get("measured_usage_pct") is not None]
-    floor = ESTIMATE_FLOOR.get(service or "", 0.0)
+    # `SERVICE:frontier` floors a [dispatch].frontier_models slice and wins over `SERVICE`, which
+    # floors every other slice (codex's everyday models are not astra, 2026-10-25).
+    name = service or ""
+    floor = ESTIMATE_FLOOR.get(name, 0.0)
+    if is_frontier_model(model):
+        floor = ESTIMATE_FLOOR.get(f"{name}:frontier", floor)
     if values:
         values.sort()
         est = values[len(values) // 2]
@@ -927,11 +932,19 @@ def advisor_tree_snap(repo: Path) -> dict | None:
 def refuse_kind(service: str | None, kind: str) -> NoReturn:
     router = route_module()
     disabled = router.operator_disabled()
-    eligible = sorted(s.name for s in router.discover()
-                      if s.eligible(kind) and s.name not in disabled)
+    quota, _ = router.load_snapshot()
+    eligible = sorted(s.name for s in router.discover(quota)
+                      if s.eligible(kind, quota) and s.name not in disabled)
     who = ", ".join(eligible) if eligible else "(none)"
     label = service or "(unknown service)"
-    die(f"{label} is not eligible for --kind {kind}; eligible: {who}; "
+    svc = router.BY_NAME.get(service) if service else None
+    why = ""
+    if svc is not None and kind in svc.plenty_kinds:
+        left = (quota.get(svc.name) or {}).get("remaining")
+        now = "no fresh reading" if left is None else f"{left:.0f}% left on its tightest window"
+        why = (f" ({svc.name} takes --kind {kind} only while every window has at least "
+               f"{router.PLENTY_MIN:g}% left, [routing].plenty_min; now: {now})")
+    die(f"{label} is not eligible for --kind {kind}{why}; eligible: {who}; "
         f"override with ACP_OPERATOR_APPROVED=route-override "
         f"(or run route_agent.py plan --kinds {kind})")
 
@@ -3931,7 +3944,8 @@ def dispatch(a: argparse.Namespace, previous: dict | None = None) -> int:
             canon = router.ALIASES.get(a.agent, a.agent)
             svc = router.BY_NAME.get(canon)
         if svc is not None:
-            if not svc.eligible(kind) and "route-override" not in approved:
+            quota = router.load_snapshot()[0] if kind in svc.plenty_kinds else None
+            if not svc.eligible(kind, quota) and "route-override" not in approved:
                 refuse_kind(service or svc.name, kind)
         else:
             # Unknown agent/model: only [routing].default_profile kinds.
