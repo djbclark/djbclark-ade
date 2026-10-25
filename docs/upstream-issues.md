@@ -1225,7 +1225,7 @@ sync skips a skill dir that is a symlink, or dev homes default to no skill sync.
 Draft PR opened 2026-10-24 (refs #7700, not closes): https://github.com/getpaseo/paseo/pull/7817, branch `fix/dev-home-skill-selection` on the fork, one commit b2836f723 (`scripts/dev-home.sh` seeds the skill selection in dev homes, new `scripts/dev-home.test.mjs`: 3 of 4 tests fail on upstream main, all pass on the fix). macOS arm64 only; the end-to-end dev-daemon run was posted as a PR comment and the PR was marked ready for review on djbclark's instruction (2026-10-24, reported by the workspace-colors session).
 
 
-## 18. zcode-acp — `ZCODE_DISALLOWED_TOOLS` / `--disallowed-tools` never reaches the backend session (draft, not filed, 2026-10-24)
+## 18. zcode-acp — `ZCODE_DISALLOWED_TOOLS` / `--disallowed-tools` never reaches the backend session (filed 2026-10-25: https://github.com/william0wang/zcode-acp/issues/340)
 
 Repo: william0wang/zcode-acp (npm `zcode-acp-server`), wrapping `zcode app-server --stdio` (zcode-app-cli
 `vendor/zcode.cjs`). `backendArgs()` (`dist/backend/resolve.js`) passes the merged `ZCODE_DISALLOWED_TOOLS` and the
@@ -1239,4 +1239,4 @@ CronCreate/List/Update/Delete, and ran `ls` through Bash without a permission re
 through). Also `permission.disallowedTools` in the CLI settings file is only a permission rule, not a registry
 removal. Suggest: send `toolDenylist` (and `toolAllowlist`) from the env in `session/create` and `session/resume`.
 Our workaround: `tools/acp-run/zcode-denylist-shim.cjs`, a stdio shim started as `ZCODE_BIN` that adds both fields.
-Not yet duplicate-searched against the upstream issue tracker.
+Duplicate-searched 2026-10-25: no existing report; #192 (closed) is the related `Cron*` default that relies on the same flag.
